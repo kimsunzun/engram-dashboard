@@ -1,9 +1,9 @@
 :root {
-  /* UI 셸(탭·패널 헤더·트리) 전용 — 터미널/코드 폰트와 의도적으로 다르다. 목록·라벨이 모노스페이스면
-     "터미널 출력"처럼 읽히고 한글 자간이 벌어진다(사용자 결정 2026-08-23, Orca 대조).
-     ★이 스택은 전부 Windows 내장이라 실제로 적용된다★ — 옛 'JetBrains Mono'는 이 PC에 미설치라
-     일반 monospace 대체로 그려지고 있었다(canvas 폭 실측). 라틴 = Segoe UI, 한글 = Malgun Gothic
-     자동 폴백(Windows 기본 동작 그대로). */
+  /* For the UI shell (tabs · panel headers · tree) only — intentionally different from the terminal/code font. If lists and labels were monospace
+     they would read like "terminal output" and Hangul letter-spacing would loosen (user decision 2026-08-23, compared with Orca).
+     ★Every font in this stack is built into Windows so it actually applies★ — the old 'JetBrains Mono' is not installed on this PC so
+     it was being drawn with the generic monospace fallback (measured canvas width). Latin = Segoe UI, Hangul = Malgun Gothic
+     automatic fallback (Windows default behavior as is). */
   --font-ui:           'Segoe UI Variable Text', 'Segoe UI', 'Malgun Gothic', system-ui, sans-serif;
   --font-terminal:     'Cascadia Code', monospace;
   --font-code:         'Fira Code', monospace;

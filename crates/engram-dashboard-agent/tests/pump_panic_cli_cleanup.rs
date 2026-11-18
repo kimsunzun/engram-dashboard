@@ -1,24 +1,24 @@
-//! 가둔 펌프 패닉 뒤 CLI 정리 — 펌프 종류마다(PTY · stdio · codex 리더) 운영 manager 로 띄운 에이전트의 가둔 펌프
-//! 안에서 panic 을 내고, 명시 종료 없이 기존 정리 경로(`finish` → `Failed` → reaper 가 세션을 뺀다 → 마지막 `Arc`
-//! drop → 통로 drop → 무리 주인 drop → Job `KILL_ON_JOB_CLOSE`)만으로 CLI 프로세스 트리 전체가 — 뿌리 `cmd /c` 만이
-//! 아니라 그 아래 CLI 와 CLI 가 띄운 손자까지 — 시한 안에 사라지는지 잰다.
+//! CLI cleanup after a contained pump panic — per pump kind (PTY · stdio · codex reader), raise a panic inside the contained pump of an agent
+//! launched with the operating manager and measure whether the existing cleanup path alone (`finish` → `Failed` → reaper removes the
+//! session → last `Arc` drop → link drop → group owner drop → Job `KILL_ON_JOB_CLOSE`), with no explicit termination, makes the whole CLI
+//! tree (root `cmd /c`, the CLI, the CLI's grandchild) disappear within the deadline.
 //!
-//! 입구는 `AgentManager::spawn_agent(Fresh)` 다. 활성화 입구의 판정 창(`early_activation_verdict` ·
-//! `link_activation_verdict`) 안에서 난 panic 과 codex 핸드셰이크 도중에 난 panic 은 재지 않는다.
+//! Entry = `AgentManager::spawn_agent(Fresh)`. Panics inside the activation entry's decision window (`early_activation_verdict` ·
+//! `link_activation_verdict`) and during the codex handshake are not measured.
 //!
-//! ★시험은 판정이 끝날 때까지 아무것도 끄지 않는다★ — kill · shutdown 을 부르지 않고, 정리(`Cleanup`)는 판정 뒤
-//! drop 에서만 돈다. 시험이 끈 것이 통과의 근거가 되면 이 시험은 아무것도 안 잰다.
+//! ★The test turns nothing off until the decision is over★ — no kill · shutdown call; `Cleanup` runs only in the drop after the decision.
+//! Otherwise something the test turned off could be the ground for passing.
 //!
-//! 가짜 CLI 는 PowerShell 스크립트다 — 실 claude · codex 를 띄우지 않는다.
+//! The fake CLI is a PowerShell script (no real claude · codex).
 //!
-//! Windows 전용: 재는 끝 고리(Job)와 트리를 보는 수단(`engram_dashboard_platform::process`)이 Windows 에만 있다. 다른
-//! OS 에서는 무리 주인이 무동작이라 CLI 가 남을 가능성이 높다(미측정 — TRD S21-panic-policy §7 「받는 잔여」) — 아래
-//! `#[ignore]` 표지가 그 공백을 드러낸다.
+//! Windows only: the measured end link (Job) and the tree-viewing means (`engram_dashboard_platform::process`) exist only there. Elsewhere
+//! the group owner is a no-op and the CLI likely remains (not measured — TRD S21-panic-policy §7 「accepted residue」); the `#[ignore]`
+//!   marker exposes that gap.
 // ADR-0292
 
 #[cfg(not(windows))]
 #[test]
-#[ignore = "무리(Job)가 없는 OS — 가둔 펌프 패닉 뒤 CLI 를 끝낼 고리가 무동작이라 잴 것이 없다(미측정 잔여 = TRD S21-panic-policy §7)"]
+#[ignore = "an OS without a group (Job) — the link that would end the CLI after a contained pump panic is a no-op, so there is nothing to measure (unmeasured residue = TRD S21-panic-policy §7)"]
 fn the_cli_tree_cleanup_after_a_contained_pump_panic_is_unmeasured_off_windows() {}
 
 #[cfg(windows)]
@@ -47,38 +47,34 @@ mod on_windows {
     };
     use engram_dashboard_platform::testing::is_ping;
 
-    /// panic 에서 트리가 다 사라질 때까지의 상한 — 명시 kill 경로가 펌프 합류에 주는 예산(`AgentManager::kill_agent`
-    /// 의 `session.kill(5 s)` · ADR-0001)과 같다. 결정 A 는 「기존 정리 경로로 끝난다」는 주장이라 그 경로의 기존
-    /// 예산을 잣대로 쓴다 — 이 측정에 맞춰 고른 값이 아니다(ADR-0038). 사슬에 폴링 걸음은 없다(reaper 는 채널 수신).
+    /// Bound from the panic until the whole tree is gone — the budget the explicit kill path gives the pump join (`AgentManager::kill_agent`'s
+    /// `session.kill(5 s)` · ADR-0001). Decision A claims 「it ends through the existing cleanup path」, so that path's budget is the
+    /// yardstick, not a value fitted to this measurement (ADR-0038). The chain has no polling step.
     const BOUND: Duration = Duration::from_secs(5);
 
-    /// 실험이 서지 않은 것(가짜가 못 떴다 · panic 이 안 났다)을 가르는 시한이고, 상한을 넘긴 트리를 계속 지켜보는
-    /// 시한이다 — 측정 상한이 아니다. PowerShell 기동 시간은 재지 않았다.
+    /// Deadline telling apart an experiment that did not stand (the fake failed to launch · no panic) and for watching an overrun tree — not a
+    /// measurement bound. PowerShell startup time was not measured.
     const SETUP: Duration = Duration::from_secs(30);
 
-    /// 잰 시간의 눈금.
     const POLL: Duration = Duration::from_millis(10);
 
-    /// 시험 폴더 지우기를 다시 하는 시한(`Scratch` drop) — 판정과 무관한 정리 몫이고 재지 않은 값이다.
+    /// The deadline for retrying the test folder deletion (`Scratch` drop) — a cleanup job unrelated to the decision, and an unmeasured value.
     const DELETE_RETRY: Duration = Duration::from_secs(5);
 
-    const PANIC_MARK: &str = "U4: 가둔 펌프 안의 구독자 panic";
+    const PANIC_MARK: &str = "U4: subscriber panic inside the contained pump";
 
-    /// 가짜 CLI. 손자(긴 `ping`)를 먼저 띄우고 자기와 손자의 신원(PID · 시작시각)을 표식 파일로 알린 뒤, codex 면
-    /// 핸드셰이크 두 요청에 답하고, 한 줄을 200 ms 마다 끝없이 낸다 — 끝없이인 것은 구독 · 무장이 언제 서든 그 뒤에
-    /// 펌프가 emit 하게 하려는 것이다.
-    /// ★stdout 은 raw 바이트로 쓴다★ — `Write-Output` 의 인코딩 · BOM 이 첫 줄을 JSON 이 아니게 만들 수 있다(같은
-    /// 사유 = `backend/codex/mod.rs` 의 가짜 app-server).
-    /// ★표식은 손자를 띄운 **뒤** 이름 바꾸기로 쓴다★ — 시험이 표식을 읽는 순간 손자가 이미 있고 내용이 다 차 있다.
-    /// 표식을 못 남기면 손자를 끄고 끝난다 — 아무도 그 신원을 모르는 채 CLI 가 죽으면 뿌리에서 찍어도 닿지 않아 손자가
-    /// 한 시간 남는다.
-    /// ★시작시각은 각자 쥔 손잡이로 읽는다★(자기 = 현재 프로세스 · 손자 = 띄우며 받은 `Process`) — 그래서 표식의 신원은
-    /// 그 PID 가 나중에 남에게 넘어가도 이 프로세스들의 것이다. `StartTime` 은 생성 FILETIME 을 지역 시각으로 바꾼
-    /// 값이고 `ToFileTimeUtc` 가 되돌린다(눈금 100 ns 로 같다). 일광 절약이 겹치는 한 시간에는 어긋날 수 있다 — 그때는
-    /// 시험의 대조 단언이 빨개지고, 정리는 어긋난 신원을 끄지 않는다(시작시각이 달라서).
-    /// ★손자는 제 (숨긴) 콘솔로 띄우고 파이프를 물리지 않는다★ — PTY 콘솔이 닫히거나 파이프가 끊겨서 죽을 길을 없앤다.
-    /// 그래서 손자가 사라진 것은 무리(Job) 닫기 말고는 설명되지 않는다(아래 대조군이 잰다). `Send` 가 쓰기 실패를 삼키는
-    /// 것은 펌프가 읽기를 멈춘 뒤 CLI 가 제풀에 죽지 않게 하려는 것이다.
+    /// The fake CLI. It launches a grandchild (a long `ping`), announces its own and the grandchild's identity (PID · start time) in a
+    /// marker file, answers the two handshake requests if codex, then emits one line every 200 ms forever (so the pump emits after any
+    ///   subscription · arming).
+    /// ★stdout is raw bytes★ — `Write-Output` encoding · BOM can make the first line not JSON (as the fake app-server in
+    ///   `backend/codex/mod.rs`).
+    /// ★The marker is written by a rename **after** launching the grandchild★ — when the test reads it, the content is complete. If the marker
+    /// cannot be left, it turns off the grandchild and ends (an unknown-identity grandchild would live for an hour).
+    /// ★Start times come from each process's own handle★, so the marker identity stays theirs after PID reuse. `StartTime` is the creation
+    /// FILETIME in local time and `ToFileTimeUtc` converts back (same 100 ns tick); in the DST-overlap hour it can be off — the
+    /// cross-check assertion goes red and cleanup skips the mismatched identity.
+    /// ★The grandchild has its own hidden console and no pipes★ — so its disappearance is explained only by closing the group (Job) (the control
+    /// group below measures this). `Send` swallows write failures so the CLI does not die on its own after the pump stops reading.
     const FAKE_CLI_PS1: &str = r#"
 param([string]$Mode)
 $ErrorActionPreference = 'Stop'
@@ -138,8 +134,8 @@ while ($true) {
             }
         }
 
-        /// 그 통로의 decoder 가 이벤트로 옮기는 줄 — 옮기지 않는 줄로는 펌프가 emit 하지 않는다(claude decoder 는 JSON
-        /// 아닌 줄을, codex 리더는 알림 아닌 줄을 버린다).
+        /// A line link's decoder turns into an event — other lines make no pump emit (claude decoder drops non-JSON, codex reader drops
+        ///   non-notifications).
         fn tick(self) -> &'static str {
             match self {
                 Pump::Pty => "tick",
@@ -152,7 +148,7 @@ while ($true) {
             }
         }
 
-        /// claude · codex 는 backend 가 `cmd.exe /c claude|codex` 로 이름을 고정하므로 심(shim)이 그 이름이어야 한다.
+        /// claude · codex: the backend fixes the name as `cmd.exe /c claude|codex`, so the shim must have that name.
         fn shim(self) -> &'static str {
             match self {
                 Pump::Pty => "cli.cmd",
@@ -162,9 +158,9 @@ while ($true) {
         }
 
         fn profile(self, cli_dir: &Path) -> AgentProfile {
-            // ★자식 PATH 와 작업 폴더가 가짜만 든 폴더다★ — cmd 는 `claude` · `codex` 를 그 둘에서만 찾으므로 실 CLI 에
-            //   닿을 길이 없다(같은 막기 = `manager.rs` 시험의 `claude_profile_that_cannot_launch`). PTY 는 심을 절대
-            //   경로로 부르는 셸 에이전트라 PATH 를 건드리지 않는다 — 비우면 portable-pty 가 `cmd.exe` 부터 못 찾는다.
+            // ★The child's PATH and working folder hold only the fakes★ — cmd finds `claude` · `codex` only there, so the real CLI is
+            //   unreachable (as `claude_profile_that_cannot_launch` in the `manager.rs` tests). PTY calls the shim by absolute path, so
+            //   PATH stays untouched — emptied, portable-pty cannot find `cmd.exe`.
             let only_fakes = vec![("PATH".to_string(), cli_dir.to_string_lossy().into_owned())];
             let (command, env) = match self {
                 Pump::Pty => (
@@ -202,7 +198,6 @@ while ($true) {
         }
     }
 
-    /// 시험 하나의 폴더 — `cli` 는 가짜 셋(심 · 스크립트 · 표식)만 든다(그 폴더가 자식의 PATH 다).
     struct Scratch {
         root: PathBuf,
         cli: PathBuf,
@@ -218,13 +213,13 @@ while ($true) {
             ));
             let cli = root.join("cli");
             let store = root.join("store");
-            std::fs::create_dir_all(&cli).expect("가짜 폴더");
-            std::fs::create_dir_all(&store).expect("저장 폴더");
+            std::fs::create_dir_all(&cli).expect("fake folder");
+            std::fs::create_dir_all(&store).expect("store folder");
             std::fs::write(
                 cli.join("fake_cli.ps1"),
                 FAKE_CLI_PS1.replace("TICK_PLACEHOLDER", pump.tick()),
             )
-            .expect("가짜 스크립트");
+            .expect("fake script");
             std::fs::write(
                 cli.join(pump.shim()),
                 format!(
@@ -232,14 +227,13 @@ while ($true) {
                     pump.tag()
                 ),
             )
-            .expect("심");
+            .expect("shim");
             Self { root, cli, store }
         }
     }
 
     impl Drop for Scratch {
-        /// 막 끝난 프로세스가 작업 폴더를 아직 쥐고 있으면 지우기가 실패한다(실측 — 한 번 `cli` 폴더가 남았다) — 잠깐
-        /// 다시 한다.
+        /// A just-ended process may still hold the working folder and fail deletion (measured once) — retry briefly.
         fn drop(&mut self) {
             wait_until(DELETE_RETRY, || {
                 std::fs::remove_dir_all(&self.root).is_ok() || !self.root.exists()
@@ -264,7 +258,7 @@ while ($true) {
                 .collect()
         }
 
-        /// panic 뒤의 목록 통지 중 그 에이전트가 빠진 것 — reaper 가 세션을 뺀 뒤에 내는 통지다(`ReaperDeps::reap_one`).
+        /// The list notification sent after the reaper removed the session (`ReaperDeps::reap_one`).
         fn dropped_from_list_since(&self, id: AgentId, since: Instant) -> bool {
             self.lists
                 .lock()
@@ -286,8 +280,8 @@ while ($true) {
         }
     }
 
-    /// 무장된 뒤 **표시 안에서** 처음 받은 프레임에서 panic 한다. 무장 전 · 표시 밖(구독 때 replay 를 넘기는 시험
-    /// 스레드, 표시를 끈 자리)에서는 받기만 한다 — 그래서 panic 은 트리를 찍은 뒤에, 펌프의 `contain` 안에서만 난다.
+    /// Panics on the first frame received **inside the mark** after arming. Before arming · outside the mark (the test thread replaying at
+    /// subscription) it only receives — so the panic comes after the tree was captured, and only inside the pump's `contain`.
     struct PanicOnArm {
         id: SinkId,
         armed: AtomicBool,
@@ -326,11 +320,11 @@ while ($true) {
         }
     }
 
-    /// 판정 뒤(또는 실험이 도중에 넘어졌을 때) 이 시험이 띄운 것만 거둔다. ★drop 에서만 돈다★ — 측정 동안 돌면 통과의
-    /// 근거를 시험이 만든다.
-    /// ★PID 만 들고는 끄지 않는다★ — 산 세션은 명시 kill(무리째), 쥔 뿌리는 그 아래를 찍어 끈 뒤 그 손잡이로 끄고,
-    /// 신원은 `terminate_if_same` 이 시작시각을 같은 손잡이로 확인한 뒤에만 끈다. 신원을 못 읽은 것은 끄지 않고 남긴
-    /// 사실을 적는다.
+    /// After the decision (or a mid-way fall) this withdraws only what this test launched. ★Runs only in drop★ — during the measurement it
+    /// would make the ground for passing.
+    /// ★Nothing is turned off by PID alone★ — a live session by explicit kill; a held root by capturing what is below it, then through its
+    /// handle; an identity only after `terminate_if_same` confirmed the start time via the same handle. Unreadable identities are left and
+    ///   the fact is written down.
     struct Cleanup<'a> {
         session: Option<(&'a AgentManager, AgentId)>,
         pipe_root: Option<std::process::Child>,
@@ -377,9 +371,9 @@ while ($true) {
         }
     }
 
-    /// 쥔 뿌리 손잡이가 그 PID 를 붙들고 있는 동안 읽은 시작시각으로 그 아래를 찍어 하나씩 끈다 — 표식이 오기 전에
-    /// 넘어졌으면 명단이 비어 있고, 뿌리만 끄면 CLI 와 손자가 남는다. 손잡이가 뿌리 PID 를 붙드므로 뿌리가 끝난 뒤에도
-    /// 그 PID 를 부모로 단 자식은 진짜 그 뿌리의 자식이다.
+    /// Captures what is below by the start time read while the held root handle pins that PID, then turns them off one by one — if the
+    /// marker never arrived the list is empty and the root alone would leave the CLI and grandchild. The pin makes a child naming that PID
+    ///   as parent really its child.
     fn end_tree_under(root_pid: u32) {
         if let Some(root_start) = process_creation_time(root_pid) {
             for p in subtree(root_pid, root_start) {
@@ -390,17 +384,17 @@ while ($true) {
 
     fn end(p: &ProcessIdentity) {
         if matches!(process_start(p.pid), ProcessStart::Unknown) {
-            eprintln!("[U4 정리] PID {} 의 신원을 못 읽어 끄지 않고 남긴다", p.pid);
+            eprintln!("[U4 cleanup] could not read the identity of PID {}, so it is left without being turned off", p.pid);
         } else if let Err(e) = terminate_if_same(p.pid, p.start_time) {
             eprintln!(
-                "[U4 정리] PID {} 를 확인하지 못해 끄지 않고 남긴다: {e}",
+                "[U4 cleanup] could not confirm PID {}, so it is left without being turned off: {e}",
                 p.pid
             );
         }
     }
 
-    /// 뿌리(이 시험 프로세스가 띄운 `cmd.exe`) 아래 신원을 **찍은 순간**의 목록 — 그 뒤 태어난 후손은 들지 않는다(가짜는
-    /// 손자 하나를 띄운 뒤 더 띄우지 않는다).
+    /// The identities below the root (the `cmd.exe` this test launched) at **capture time** — later-born descendants are not included (the
+    ///   fake launches one grandchild only).
     struct Tree {
         root: ProcessIdentity,
         cli: ProcessIdentity,
@@ -411,28 +405,28 @@ while ($true) {
     impl Tree {
         fn role(&self, p: &ProcessIdentity) -> &'static str {
             if *p == self.root {
-                "뿌리 cmd"
+                "root cmd"
             } else if *p == self.cli {
                 "CLI powershell"
             } else if *p == self.grandchild {
-                "손자 ping"
+                "grandchild ping"
             } else {
-                "그 밖의 후손"
+                "other descendant"
             }
         }
     }
 
     fn read_identities(path: &Path) -> (ProcessIdentity, ProcessIdentity) {
-        let text = std::fs::read_to_string(path).expect("표식 읽기");
+        let text = std::fs::read_to_string(path).expect("read marker");
         let fields: Vec<u64> = text
             .split_whitespace()
             .filter_map(|s| s.parse().ok())
             .collect();
         let [cli_pid, cli_start, grandchild_pid, grandchild_start] = fields[..] else {
-            panic!("표식은 `<CLI PID> <시작시각> <손자 PID> <시작시각>` 여야: {text:?}");
+            panic!("the marker must be `<CLI PID> <start time> <grandchild PID> <start time>`: {text:?}");
         };
         let identity = |pid: u64, start_time: u64| ProcessIdentity {
-            pid: u32::try_from(pid).expect("PID 는 u32"),
+            pid: u32::try_from(pid).expect("PID is u32"),
             start_time,
         };
         (
@@ -441,34 +435,34 @@ while ($true) {
         )
     }
 
-    /// 표식으로 CLI 의 트리를 찾아 찍는다. 표식의 신원(가짜가 자기 손잡이로 읽은 PID · 시작시각)은 **넘어질 수 있는
-    /// 다른 무엇보다 먼저** `cleanup` 에 올린다 — 확인에서 넘어져도 손자까지 거두게.
+    /// Finds and captures the CLI's tree via the marker. Its identities go into `cleanup` **before anything else that can fall over**, so
+    /// the grandchild is withdrawn even if the check falls.
     fn observe_tree(cli_dir: &Path, cleanup: &mut Cleanup) -> Tree {
         let marker = cli_dir.join("cli.pid");
         assert!(
             wait_until(SETUP, || marker.exists()),
-            "가짜 CLI 가 {SETUP:?} 안에 표식을 안 남겼다 — powershell 이 못 떴거나 심을 못 찾았다(실험 불성립)"
+            "the fake CLI left no marker within {SETUP:?} — powershell failed to launch or could not find the shim (experiment did not stand)"
         );
         let (reported_cli, reported_grandchild) = read_identities(&marker);
         cleanup.hold(reported_cli);
         cleanup.hold(reported_grandchild);
         let (cli, grandchild) = (reported_cli.pid, reported_grandchild.pid);
 
-        let table = process_parent_table().expect("프로세스 표");
+        let table = process_parent_table().expect("process table");
         let parent_of = |pid: u32| table.iter().find(|(p, _)| *p == pid).map(|(_, pp)| *pp);
-        let root = parent_of(cli).expect("CLI 의 부모");
+        let root = parent_of(cli).expect("parent of the CLI");
         assert_eq!(
             parent_of(root),
             Some(std::process::id()),
-            "뿌리는 이 시험 프로세스가 띄운 것이어야 한다(manager 가 프로세스 안에서 띄운다)"
+            "the root must be one this test process launched (the manager launches it inside the process)"
         );
         assert_eq!(
             parent_of(grandchild),
             Some(cli),
-            "손자는 CLI 의 자식이어야 한다"
+            "the grandchild must be a child of the CLI"
         );
-        assert!(is_ping(grandchild), "손자가 ping 이 아니다");
-        let root_start = process_creation_time(root).expect("뿌리 시작시각");
+        assert!(is_ping(grandchild), "the grandchild is not ping");
+        let root_start = process_creation_time(root).expect("root start time");
         let all = subtree(root, root_start);
         for p in &all {
             cleanup.hold(*p);
@@ -476,8 +470,8 @@ while ($true) {
         for reported in [reported_cli, reported_grandchild] {
             assert!(
                 all.contains(&reported),
-                "가짜가 알린 신원 {reported:?} 가 뿌리 트리에 그대로 없다 — 시작시각 척도가 어긋났거나 그 PID 가 다른 \
-                 프로세스다: {all:?}"
+                "the identity {reported:?} the fake announced is not in the root tree as is — the start-time scale is off or that PID is another \
+                 process: {all:?}"
             );
         }
         Tree {
@@ -488,8 +482,8 @@ while ($true) {
         }
     }
 
-    /// 그 신원의 프로세스가 아직 돈다. 끝났어도 누가 핸들을 쥐면 객체가 남으므로(`ProcessStart` doc) 시작시각 대조에
-    /// 더해 종료 여부를 본다. 못 읽으면(`Unknown`) 돈다고 본다 — 거짓 통과보다 거짓 실패 쪽.
+    /// That identity's process is still running. An ended process's object remains while someone holds a handle (`ProcessStart` doc), so
+    /// besides the start-time cross-check it checks exit. Unreadable (`Unknown`) counts as running — a false failure rather than a false pass.
     fn running(p: &ProcessIdentity) -> bool {
         match process_start(p.pid) {
             ProcessStart::Known(start) if start == p.start_time => pid_alive(p.pid),
@@ -523,18 +517,18 @@ while ($true) {
             .spawn_agent(&profile, SpawnMode::Fresh)
             .expect("spawn")
             .into_started()
-            .expect("이 호출이 띄웠다");
+            .expect("this call launched it");
 
         let trigger = Arc::new(PanicOnArm::new());
-        manager.subscribe(id, trigger.clone()).expect("구독");
+        manager.subscribe(id, trigger.clone()).expect("subscribe");
 
         let tree = observe_tree(&scratch.cli, &mut cleanup);
         trigger.armed.store(true, Ordering::SeqCst);
         assert!(
             wait_until(SETUP, || trigger.panicked_at().is_some()),
-            "무장 뒤 {SETUP:?} 안에 가둔 펌프가 emit 하지 않았다(실험 불성립)"
+            "the contained pump did not emit within {SETUP:?} after arming (experiment did not stand)"
         );
-        let panicked_at = trigger.panicked_at().expect("방금 봤다");
+        let panicked_at = trigger.panicked_at().expect("just saw it");
 
         let mut gone_after: Vec<Option<Duration>> = vec![None; tree.all.len()];
         let mut dropped_after = None;
@@ -566,7 +560,7 @@ while ($true) {
             .map(|(p, gone)| format!("{} {gone:?}", tree.role(p)))
             .collect();
         eprintln!(
-            "[U4 {}] panic → 목록에서 빠짐 {dropped_after:?} · 트리 전부 사라짐 {tree_gone_after:?}(상한 {BOUND:?}) · {each:?}",
+            "[U4 {}] panic → dropped from the list {dropped_after:?} · whole tree gone {tree_gone_after:?} (bound {BOUND:?}) · {each:?}",
             pump.tag()
         );
 
@@ -575,7 +569,7 @@ while ($true) {
             !statuses
                 .iter()
                 .any(|s| matches!(s, AgentStatus::Exiting | AgentStatus::Killed)),
-            "명시 종료 경로를 탔다 — 이 시험은 그 길을 재지 않는다: {statuses:?}"
+            "took the explicit termination path — this test does not measure that path: {statuses:?}"
         );
         match statuses
             .iter()
@@ -587,16 +581,18 @@ while ($true) {
                 assert!(message.starts_with("pump panicked: "), "{message}");
                 assert!(message.contains(PANIC_MARK), "{message}");
             }
-            other => panic!("가둔 펌프 panic 은 끝 상태 Failed 한 번이어야: {other:?}"),
+            other => panic!(
+                "a contained pump panic must be the end state Failed exactly once: {other:?}"
+            ),
         }
 
         assert!(
             dropped_after.is_some(),
-            "panic 뒤 {SETUP:?} 안에 reaper 가 세션을 빼지 않았다"
+            "the reaper did not remove the session within {SETUP:?} after the panic"
         );
         assert!(
             !manager.list_agents().iter().any(|a| a.id == id),
-            "세션이 명부에 남았다"
+            "the session remained in the registry"
         );
 
         let survivors: Vec<String> = tree
@@ -607,14 +603,14 @@ while ($true) {
             .map(|(p, gone)| {
                 let when = match gone {
                     Some(d) => format!("{d:?}"),
-                    None => format!("{SETUP:?} 안에 안 사라짐"),
+                    None => format!("not gone within {SETUP:?}"),
                 };
-                format!("{} (PID {}) — 사라진 때 {when}", tree.role(p), p.pid)
+                format!("{} (PID {}) — gone at {when}", tree.role(p), p.pid)
             })
             .collect();
         assert!(
             survivors.is_empty(),
-            "결정 A 불성립 — 가둔 펌프 panic 뒤 {BOUND:?} 에 CLI 트리가 남았다(사용자 결정 거리 · B 로 넘어가지 말 것): {survivors:#?}"
+            "decision A did not hold — after a contained pump panic the CLI tree remained at {BOUND:?} (a matter for the user to decide · do not move on to B): {survivors:#?}"
         );
     }
 
@@ -633,11 +629,11 @@ while ($true) {
         a_contained_pump_panic_ends_the_whole_cli_tree(Pump::Codex);
     }
 
-    // ── 대조군: 무리(Job) 없이는 손자가 상한을 넘겨 산다 ──
+    // ── Control group: without a group (Job), the grandchild lives past the bound ──
     //
-    // 가둔 panic 경로가 무리보다 먼저 · 함께 놓는 것(출력 읽기 끝 · stdin · 뿌리 · PTY 콘솔)을 무리 없이 다 놓아도 가짜의
-    // 손자는 상한 동안 산다 — 그래서 위 시험에서 손자가 상한 안에 사라진 것은 무리 닫기 말고는 설명되지 않는다.
-    // 가짜가 바뀌어 손자가 제풀에 죽게 되면 여기가 빨개진다.
+    // Releasing everything else the contained panic path releases (output read end · stdin · root · PTY console) without a group still
+    // leaves the grandchild alive for the bound — so in the test above its disappearance is explained only by closing the group. Goes red
+    //   if the fake's grandchild dies on its own.
 
     fn assert_the_grandchild_outlives_the_bound(tree: &Tree) {
         std::thread::sleep(BOUND);
@@ -647,22 +643,22 @@ while ($true) {
             .filter(|p| running(p))
             .map(|p| tree.role(p))
             .collect();
-        eprintln!("[U4 대조군] 무리 없이 {BOUND:?} 뒤 산 것: {alive:?}");
+        eprintln!("[U4 control group] alive after {BOUND:?} without a group: {alive:?}");
         assert!(
             running(&tree.grandchild),
-            "무리 없이도 손자가 {BOUND:?} 안에 죽었다 — 위 시험의 손자 소멸이 무리 닫기의 증거가 못 된다"
+            "the grandchild died within {BOUND:?} even without a group — the grandchild's disappearance in the test above is no evidence of closing the group"
         );
     }
 
-    /// 가짜가 표식을 못 남기는 갈래 — 표식 자리를 미리 막아 이름 바꾸기를 실패시킨다. 가짜는 실패로 끝나고 손자를 함께
-    /// 끈다. 그 갈래에 닿았다는 증거는 이름 바꾸기 앞에서 쓴 `cli.pid.tmp` 이고, 손자는 거기 적힌 신원으로 잰다 —
-    /// powershell 이 그 전에 넘어지면 손자가 아예 없어 「남은 손자 없음」이 헛통과한다.
+    /// The branch where the fake cannot leave the marker — its place is blocked in advance so the rename fails; the fake ends in failure
+    /// and turns off the grandchild. Evidence of reaching the branch = `cli.pid.tmp` written before the rename; the grandchild is measured
+    /// by that identity (had powershell fallen earlier there would be no grandchild and 「no grandchild left」 would pass falsely).
     #[test]
     fn a_fake_cli_that_cannot_write_its_marker_ends_its_grandchild() {
         use std::process::{Command, Stdio};
 
         let scratch = Scratch::new(Pump::Pty);
-        std::fs::write(scratch.cli.join("cli.pid"), "").expect("표식 자리 막기");
+        std::fs::write(scratch.cli.join("cli.pid"), "").expect("block the marker's place");
         let mut cleanup = Cleanup::new(None);
         let powershell = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
             .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
@@ -680,38 +676,40 @@ while ($true) {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
         engram_dashboard_platform::spawn::hide_console_window(&mut cmd);
-        let cli = cleanup.pipe_root.insert(cmd.spawn().expect("가짜 띄우기"));
+        let cli = cleanup
+            .pipe_root
+            .insert(cmd.spawn().expect("launch the fake"));
         let pid = cli.id();
-        let start = process_creation_time(pid).expect("가짜 시작시각");
+        let start = process_creation_time(pid).expect("fake start time");
 
         assert!(
             wait_until(SETUP, || matches!(cli.try_wait(), Ok(Some(_)))),
-            "표식을 못 남긴 가짜가 {SETUP:?} 안에 끝나지 않았다"
+            "the fake that could not leave the marker did not end within {SETUP:?}"
         );
-        let status = cli.wait().expect("종료 상태");
+        let status = cli.wait().expect("exit status");
         assert!(
             !status.success(),
-            "표식을 못 남겼는데 성공으로 끝났다: {status:?}"
+            "it could not leave the marker yet ended in success: {status:?}"
         );
         let written = scratch.cli.join("cli.pid.tmp");
         assert!(
             written.exists(),
-            "가짜가 이름 바꾸기 실패에 닿기 전에 끝났다(실험 불성립)"
+            "the fake ended before reaching the rename failure (experiment did not stand)"
         );
         let (reported_cli, grandchild) = read_identities(&written);
         cleanup.hold(grandchild);
-        // 척도가 어긋나면 손자의 시작시각도 어긋나 산 손자가 「사라졌다」로 읽힌다.
+        // If the scale is off, the grandchild's start time is off too, and a live grandchild reads as 「gone」.
         assert_eq!(
             reported_cli,
             ProcessIdentity {
                 pid,
                 start_time: start
             },
-            "가짜가 적은 자기 신원이 실제와 다르다 — 시작시각 척도가 어긋났다"
+            "the identity the fake wrote for itself differs from the real one — the start-time scale is off"
         );
         assert!(
             wait_until(SETUP, || !running(&grandchild)),
-            "표식을 못 남긴 가짜의 손자가 남았다: {grandchild:?}"
+            "the grandchild of the fake that could not leave the marker remained: {grandchild:?}"
         );
     }
 
@@ -729,10 +727,10 @@ while ($true) {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         engram_dashboard_platform::spawn::hide_console_window(&mut cmd);
-        cleanup.pipe_root = Some(cmd.spawn().expect("뿌리 띄우기"));
+        cleanup.pipe_root = Some(cmd.spawn().expect("launch the root"));
         let tree = observe_tree(&scratch.cli, &mut cleanup);
 
-        let root = cleanup.pipe_root.as_mut().expect("방금 쥐었다");
+        let root = cleanup.pipe_root.as_mut().expect("just held it");
         drop(root.stdout.take());
         drop(root.stdin.take());
         drop(root.stderr.take());
@@ -760,9 +758,9 @@ while ($true) {
         cmd.arg("/c");
         cmd.arg(scratch.cli.join(Pump::Pty.shim()));
         cmd.cwd(&scratch.cli);
-        cleanup.pty_root = Some(pair.slave.spawn_command(cmd).expect("뿌리 띄우기"));
+        cleanup.pty_root = Some(pair.slave.spawn_command(cmd).expect("launch the root"));
         drop(pair.slave);
-        let reader = pair.master.try_clone_reader().expect("읽기 끝");
+        let reader = pair.master.try_clone_reader().expect("read end");
         let tree = observe_tree(&scratch.cli, &mut cleanup);
 
         drop(reader);

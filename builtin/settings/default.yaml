@@ -1,6 +1,6 @@
 kind: settings
 version: 1
-description: 자동 업데이트 끄기 · Engram 메시지·제어 통로 허용
+description: Turn off auto-update · allow the Engram message and control channel
 claude:
   env:
     DISABLE_AUTOUPDATER: "1"

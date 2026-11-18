@@ -309,7 +309,7 @@ mod tests {
         kit
     }
 
-    /// Two skills · two extra skill roots · a folder entry · two raw settings (「기본」 first) · the instructions file.
+    /// Two skills · two extra skill roots · a folder entry · two raw settings (「Default」 first) · the instructions file.
     fn real_kit() -> LaunchKit {
         let mut kit = empty_real_kit();
         kit.instructions_file = Some(instructions_path());

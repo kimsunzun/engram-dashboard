@@ -1,14 +1,11 @@
-//! ADR-0086 스텝 2 통합 테스트 — 듀얼 입구 A→B 메시지 전송(eg_send MCP 툴 + /control/send HTTP 라우트).
+//! ADR-0086 step 2 integration test — dual-entrance A→B message send (the eg_send MCP tool + the /control/send HTTP route).
 //!
-//! ★relay 관측 방식(honest note)★: 산 json 에이전트를 실제 스폰하고 write_input 이 send_input 성공 직후
-//!   **동기**로 내는 입력 에코를 OutputSink 로 잡는다. 이 에코는 claude 왕복 이전에 발행되므로 claude
-//!   응답 지연·인증과 무관하게 결정적이다.
+//! The relay is observed with a live json agent really spawned: the input echo that write_input emits synchronously right after send_input succeeds is caught with an
+//! OutputSink. It is published before the claude round trip, so it is deterministic regardless of claude latency or authentication.
 //!
-//! ★실 claude 축은 CI 에서 돌지 않는다★(`ci.yml` 의 `--skip` 목록 — 러너에 claude 가 없다). 그래서 로컬에서는
-//!   관측 실패를 통과가 아니라 **실패**로 낸다 — 통과로 넘기면 이 축을 확인하는 곳이 아무 데도 남지 않는다
-//!   (사용자 결정 2026-10-02 · T-46). 예외 = `c1_park_then_spawn_auto_delivers` 는 `#[ignore]`(사유 = 그 속성).
-//!   ★claude 부재는 `require_claude` 가 잡지 못한다★ — 스폰은 성공하고 프로세스가 뒤늦게 죽으므로 그때는
-//!   뒤의 단언이 실패한다.
+//! The real-claude axis does not run in CI (the `--skip` list of `ci.yml` — no claude on the runner), so locally an observation failure is a failure, not a pass: passing it
+//! through would leave nowhere that checks this axis (user decision 2026-10-02 · T-46). Exception: `c1_park_then_spawn_auto_delivers` is `#[ignore]` (reason = that attribute).
+//! `require_claude` cannot catch claude's absence — the spawn succeeds and the process dies later, so the assertions after it fail.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,15 +35,11 @@ impl StatusSink for NoopSink {
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
 }
 
-/// ★중계 수거기를 **프로세스 수명에** 묶는 자리★
+/// Where the relay collector is tied to the process lifetime.
 ///
-/// 떨어뜨리면 수거기가 나가는 길에 자리 표를 비우고 **닫아**(`CommandDeliveries::drain`) 그 서버의 그 뒤
-/// 중계가 전부 「종료 중」으로 반려된다 — 그런데 `wire()` 안에서 지역 변수로 묶으면 함수를 빠져나오는
-/// 순간 그 일이 일어난다(이 파일이 오랫동안 그 상태였고, 여기 테스트가 자리 표를 안 거치는 것만 불러
-/// 초록이었다).
-/// ★반환 튜플에 축을 하나 더 얹지 않는 이유★: 이 하네스는 호출부가 20곳이 넘고, 그 축은 어느 테스트도
-/// 읽지 않는다. 그리고 이 하네스가 세우는 것들은 이미 **테스트 종료 = 프로세스 종료로 회수**하는 규율을
-/// 쓴다(아래 flush worker 핸들 detach 와 같은 자리). 그래서 여기 모아 두고 프로세스 끝까지 산다.
+/// If dropped, the collector empties and closes the slot table on its way out (`CommandDeliveries::drain`), and every later relay on that server is refused as "shutting down" — tied as a local inside `wire()` that
+/// happens the moment the function returns (this file was in that state for a long time; tests were green because they call only paths that skip the slot table).
+/// No extra axis in the return tuple: this harness has over 20 call sites and none reads it, and it already reclaims at test end = process end (as the flush worker handle detach below).
 static RELAY_SWEEPERS: Mutex<Vec<engram_dashboard_daemon::command_delivery::BusSweeper>> =
     Mutex::new(Vec::new());
 
@@ -73,17 +66,16 @@ impl OutputSink for EventCapture {
     }
 }
 
-/// ★건너뛰지 않고 실패한다★: cargo 는 test 의 stdout 을 삼켜 skip 해도 통과 요약엔 "ok" 만 남는다 —
-///   로컬이 이 축의 유일한 검증 자리라(모듈 머리말) 조용한 skip 은 미검증을 초록으로 감춘다.
-///   잡는 것은 「에이전트가 목록에 안 오름」뿐이다 — claude 부재 자체는 못 가린다(모듈 머리말).
+/// Fails rather than skipping: cargo swallows stdout, so a skip leaves only "ok" and hides the unverified as green; local is the only place that verifies this axis (module header).
+/// It catches only "the agent is not on the list" — claude's absence itself cannot be told apart.
 fn require_claude(test: &str) -> ! {
     panic!(
-        "[{test}]: claude(stream-json) 에이전트가 목록에 오르지 않음(claude 부재·인증 실패 가능) — \
-         이 축은 CI 에서 돌지 않으므로 로컬에서 실패로 낸다."
+        "[{test}]: the claude (stream-json) agent is not on the list (claude may be absent or authentication failed) — \
+         this axis does not run in CI, so it is reported as a failure locally."
     );
 }
 
-/// 운영 `run()` 의 조립 순서를 미러한 배선.
+/// Wiring that mirrors the assembly order of production `run()`.
 async fn wire(
     tag: &str,
 ) -> (
@@ -98,8 +90,7 @@ async fn wire(
     let registry = Arc::new(ControlRegistry::new());
     let slot = Arc::new(ManagerSlot::new());
     let messaging_slot = Arc::new(MessagingSlot::new());
-    // ★수거기를 들고 있어야 한다★ — 지역 변수로 묶으면 이 함수를 나가는 순간 자리 표가 닫힌다
-    //   ([`hold_for_the_process`] 가 그 사유와 이 형태를 고른 근거를 적는다).
+    // The collector must be held — as a local the slot table closes the moment this function returns ([`hold_for_the_process`]).
     let (relay_bus, relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     hold_for_the_process(relay_sweeper);
@@ -107,7 +98,7 @@ async fn wire(
         registry.clone(),
         slot.clone(),
         messaging_slot.clone(),
-        // 이 파일은 제어 동사를 부르지 않는다 — 명령 표를 비우면 그 라우트만 503 이 된다.
+        // This file calls no control verb — emptying the command table makes only that route 503.
         Arc::new(CommandTableSlot::new()),
         relay_bus,
     )
@@ -120,7 +111,7 @@ async fn wire(
         registry.clone(),
         url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
-        None, // send_exe: relay 테스트는 CLI 경로 불요(직접 HTTP/MCP 호출).
+        None, // send_exe: the relay tests need no CLI path (direct HTTP/MCP calls).
     ));
 
     let (flush_tx, flush_rx) =
@@ -168,8 +159,7 @@ async fn wire(
         .with_flush_trigger(idle_notifier),
     );
     messaging_slot.set(messaging.clone());
-    // 이 하네스는 worker 핸들을 detach 한다(테스트 종료 = 프로세스 종료로 회수 — 운영 종료 경로는
-    //   lib.rs 가 belt 로 내린다).
+    // This harness detaches the worker handle (reclaimed at test end = process end; production shutdown is brought down by lib.rs with a belt).
     drop(engram_dashboard_daemon::messaging_host::spawn_flush_worker(
         flush_rx,
         engram_dashboard_daemon::messaging_host::FlushWiring {
@@ -220,9 +210,7 @@ async fn spawn_json_agent(
         vec![],
         false,
     );
-    // ADR-0101 (WYSIWYA): 라우팅/로스터가 쓰는 canonical name = display_name ?? cwd basename 이다
-    //   (profile.name 은 더 이상 주소축 아님). 테스트가 이 `name` 으로 지목하므로 display_name 에 심어
-    //   "보이는 이름 = 주소" 를 성립시킨다(cwd="." 의 basename 은 "." 이라 name 으로 매치 불가).
+    // ADR-0101 (WYSIWYA): the canonical name used by routing/roster is display_name ?? cwd basename. The test targets by `name`, so it is planted in display_name to make "visible name = address" hold (the basename of cwd="." is ".").
     profile.display_name = Some(name.to_string());
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
@@ -245,14 +233,13 @@ async fn spawn_json_agent(
         settled.is_ok(),
         "[{name}] the appearance flush for the spawned agent did not return within 5s"
     );
-    // registry 에 발급 토큰 조회 API 가 없어 provision 이 이 (id, epoch) 에 발급한 토큰을 못 꺼낸다 —
-    //   발신자용 토큰을 따로 issue 해 심는다(발신자 신원만 맞으면 relay 는 동일).
+    // The registry has no API to look up an issued token, so the token provision issued for this (id, epoch) cannot be taken out — a sender token is issued separately and planted (relay is the same as long as the sender identity matches).
     let token = format!("sender-tok-{}", info.id);
     registry.issue(info.id, info.epoch, token.clone(), true);
     Some((info, token))
 }
 
-// ── /control/send: 인증 ────────────────────────────────────────────────────────────
+// ── /control/send: auth ────────────────────────────────────────────────────────────
 #[tokio::test]
 async fn control_send_missing_token_is_401() {
     let (_m, _r, base, data_dir, handle, _messaging, _busy) = wire("auth-missing").await;
@@ -260,7 +247,7 @@ async fn control_send_missing_token_is_401() {
     assert_eq!(
         status,
         reqwest::StatusCode::UNAUTHORIZED,
-        "무토큰 /control/send → 401"
+        "no token /control/send → 401"
     );
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
@@ -273,13 +260,13 @@ async fn control_send_wrong_token_is_401() {
     assert_eq!(
         status,
         reqwest::StatusCode::UNAUTHORIZED,
-        "모르는 토큰 /control/send → 401"
+        "unknown token /control/send → 401"
     );
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── /control/send: 교정 에러(수신자 없음·그룹·대용량) — 유효 토큰 필요 ────────────────────────
+// ── /control/send: corrective errors (no recipient · group · oversize) — a valid token is needed ────────────────────────
 #[tokio::test]
 async fn control_send_corrective_errors() {
     let (_m, registry, base, data_dir, handle, _messaging, _busy) = wire("corrective").await;
@@ -287,47 +274,48 @@ async fn control_send_corrective_errors() {
     registry.issue(sender, 0, "valid-sender".to_string(), true);
 
     let (status, body) = post_send(&base, Some("valid-sender"), "nobody", "hi").await;
-    assert_eq!(status, reqwest::StatusCode::OK, "접수도 200 + JSON");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "acceptance is also 200 + JSON"
+    );
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert!(
         v.get("status").is_none(),
-        "성공 응답엔 최상위 status 없음(spec §6): {body}"
+        "a success response has no top-level status (spec §6): {body}"
     );
     assert_eq!(
         v["results"][0]["status"], "failed",
-        "★ADR-0111 결정 1★ 없는 수신자는 **입구 반려 = 수신자별 실패 행**(옛 부재 파킹 폐지): {body}"
+        "★ADR-0111 decision 1★ a nonexistent recipient is an **entrance refusal = a per-recipient failure row** (the old absent-parking is abolished): {body}"
     );
     assert!(
         v["results"][0]["hint"].is_string(),
-        "실패 행엔 code + hint 필수(spec §6)"
+        "a failure row must carry code + hint (spec §6)"
     );
     assert_eq!(v["results"][0]["code"], "RECIPIENT_NOT_FOUND", "{body}");
 
-    // ★`@`주소 오류 = **주소 공간 오류 → 발송 단위 전체 반려**(ADR-0114 결정 3)★. 사용자 정의 그룹이
-    //   제거됐으므로(ADR-0111 결정 4) `@all` 외의 `@이름`은 전부 `GROUP_NOT_FOUND` 다 — 이름 부재(행 실패)와
-    //   **다른 층위**다: 발신자가 주소를 고쳐 다시 보내야 한다.
+    // An `@` address error = an address-space error → the whole send unit is refused (ADR-0114 decision 3). User-defined groups were removed (ADR-0111 decision 4), so every `@name` other than `@all` is `GROUP_NOT_FOUND` — a different layer from a missing name (a row failure): the sender must fix the address and resend.
     let (_s, body) = post_send(&base, Some("valid-sender"), "@team", "hi").await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["code"], "GROUP_NOT_FOUND", "미등록 @ 주소: {body}");
+    assert_eq!(
+        v["code"], "GROUP_NOT_FOUND",
+        "an unregistered @ address: {body}"
+    );
 
     let big = "x".repeat(64 * 1024 + 1);
     let (_s, body) = post_send(&base, Some("valid-sender"), "nobody", &big).await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["code"], "BODY_TOO_LARGE", "대용량 body: {body}");
+    assert_eq!(v["code"], "BODY_TOO_LARGE", "an oversize body: {body}");
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── /control/send: shell 산 세션은 **수신자가 아니다**(사용자 결정 2026-08-17) ─────────────────────────
-// ★왜★: 셸에 도착한 봉투는 읽히는 게 아니라 **명령으로 실행된다**. 본문은 LLM 자유 텍스트라 `&`·`|`·`;` 가
-//   섞이면 그 뒤가 별도 명령으로 파싱된다. 그래서 제출 바이트를 빼는 완화가 아니라 명단에서 통째로 뺀다.
-// ★ADR-0116 결정 1 로의 회귀가 아니다★: 그건 "턴 신호가 없으니 배달할 수 없다" 를 기각한 것이고(터미널
-//   claude 는 지금도 그대로 받는다), 이건 **입력이 무엇으로 해석되는가** 라는 다른 축이다. 그 결정이 지키던
-//   축(capability ≠ 멤버십)의 봉인은 `roster_includes_a_terminal_agent_without_a_turn_signal_no_claude`.
-// ★게이트 생략은 여기서 검증되지 않는다(뮤테이션 실측 — 착각 금지)★: 방어선은 전부 커널에 있다
-//   (`messaging/src/service.rs`): busy 반쪽 = `a_live_agent_without_a_turn_signal_is_injected_with_no_gate` ·
-//   큐 백로그 반쪽 = `inject_failure_parks_pending_without_a_turn_signal`.
+// ── /control/send: a live shell session is not a recipient (user decision 2026-08-17) ─────────────────────────
+// An envelope reaching a shell is run as a command, not read; the body is LLM free text, so `&`, `|` or `;` would parse as a separate command. So it is removed from the list wholesale instead of dropping the submit bytes.
+// Not a regression to ADR-0116 decision 1 (that rejected "cannot deliver because there is no turn signal"; a terminal claude still receives): this is the "what the input is interpreted as" axis. The seal of the capability ≠ membership axis is
+//   `roster_includes_a_terminal_agent_without_a_turn_signal_no_claude`.
+// Omitting the gate is not verified here (mutation-measured): all defenses are in the kernel (`messaging/src/service.rs`) — busy half = `a_live_agent_without_a_turn_signal_is_injected_with_no_gate`, queue backlog half = `inject_failure_parks_pending_without_a_turn_signal`.
 #[tokio::test]
 async fn control_send_shell_recipient_is_not_a_mail_recipient() {
     let (manager, registry, base, data_dir, handle, messaging, _busy) =
@@ -350,7 +338,7 @@ async fn control_send_shell_recipient_is_not_a_mail_recipient() {
         .spawn_agent(&profile, SpawnMode::Fresh)
         .expect("shell spawn")
         .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        .expect("this call really launches (not a duplicate request)");
     assert!(wait_until(Duration::from_secs(3), || manager
         .list_agents()
         .iter()
@@ -360,16 +348,16 @@ async fn control_send_shell_recipient_is_not_a_mail_recipient() {
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         v["results"][0]["status"], "failed",
-        "산 셸이어도 편지의 수신자는 아니다: {body}"
+        "even a live shell is not a recipient of the letter: {body}"
     );
     assert_eq!(
         v["results"][0]["code"], "RECIPIENT_NOT_FOUND",
-        "명단에 없는 이름과 같은 결말 — 발신자는 주소를 고쳐 다시 보내면 된다: {body}"
+        "the same outcome as a name not on the list — the sender fixes the address and sends again: {body}"
     );
     assert_eq!(
         messaging.parked_total_for_test(),
         0,
-        "파킹도 되면 안 된다(깨어날 일 없는 이름 앞에 편지가 쌓인다): {body}"
+        "it must not be parked either (letters would pile up for a name that never wakes): {body}"
     );
 
     manager.kill_agent(info.id).ok();
@@ -378,10 +366,8 @@ async fn control_send_shell_recipient_is_not_a_mail_recipient() {
     handle.shutdown().await;
 }
 
-// ── 로스터 술어 봉인: terminal 상태 세션은 **맵에 남아 있어도** 로스터에서 빠진다 — ADR-0116 결정 1 ──────
-// ★왜 필요한가(뮤테이션 실측 — 리뷰 fix D9-a)★: `messaging_host::is_live` 의 상태 조건을 지워도 데몬 412
-//   테스트가 전부 초록이었다. 4차 개정으로 그 조건이 **유일한 멤버십 게이트**가 됐으므로(capability 는 타이밍
-//   축으로 내려갔다) 실물 어댑터 레벨에서 봉인한다.
+// ── roster predicate seal: a terminal-state session leaves the roster even if it stays in the map — ADR-0116 decision 1 ──────
+// Needed (mutation-measured, review fix D9-a): deleting the status condition of `messaging_host::is_live` left all 412 daemon tests green. With the 4th amendment that condition is the only membership gate (capability moved to the timing axis), so it is sealed at the real adapter level.
 #[tokio::test]
 async fn roster_excludes_a_terminal_session_still_in_the_map() {
     use engram_dashboard_messaging::service::DeliveryPort;
@@ -392,7 +378,7 @@ async fn roster_excludes_a_terminal_session_still_in_the_map() {
 
     assert!(
         manager.list_agents().iter().any(|a| a.id == dead),
-        "주입 세션은 맵에 남아 있어야(이 테스트의 전제)"
+        "the injected session must stay in the map (the premise of this test)"
     );
     assert!(
         !matches!(
@@ -400,25 +386,25 @@ async fn roster_excludes_a_terminal_session_still_in_the_map() {
                 .list_agents()
                 .into_iter()
                 .find(|a| a.id == dead)
-                .expect("맵에 있다")
+                .expect("it is in the map")
                 .status,
             AgentStatus::Running | AgentStatus::Exiting
         ),
-        "상태는 terminal 이어야(이 테스트의 전제)"
+        "the state must be terminal (the premise of this test)"
     );
 
     assert!(
         !port.live_agents().iter().any(|a| a.id == dead),
-        "★D9-a★ terminal 세션이 로스터에 섞였다(상태 술어가 지워졌다)"
+        "★D9-a★ a terminal session got mixed into the roster (the status predicate was deleted)"
     );
     let sources = port.addressing_sources();
     assert!(
         !sources.roster.iter().any(|a| a.id == dead),
-        "입구 판정 소스도 같은 술어여야: {sources:?}"
+        "the entry-decision source must use the same predicate: {sources:?}"
     );
     assert!(
         !port.is_agent_live(dead),
-        "삭제 정리 게이트도 같은 술어여야(시체를 산 것으로 보면 정리가 영원히 안 돈다)"
+        "the delete-cleanup gate must use the same predicate too (if a corpse is seen as live the cleanup never runs)"
     );
     let rows = messaging
         .handle_send(
@@ -433,18 +419,18 @@ async fn roster_excludes_a_terminal_session_still_in_the_map() {
             engram_dashboard_messaging::envelope::Entrance::Cli,
             &engram_dashboard_messaging::service::SendMeta::default(),
         )
-        .expect("행 응답");
+        .expect("row response");
     assert_eq!(
         rows[0].code,
         Some(engram_dashboard_messaging::service::FailCode::RecipientNotFound),
-        "시체는 수신자가 아니다: {rows:?}"
+        "a corpse is not a recipient: {rows:?}"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── relay happy path: json 에이전트에 보내면 래핑된 라인이 stdin 입력 에코로 관측된다 ────────────────
+// ── relay happy path: sending to a json agent shows the wrapped line as a stdin input echo ────────────────
 #[tokio::test]
 async fn control_send_relays_wrapped_line_to_json_agent() {
     let (manager, registry, base, data_dir, handle, messaging, _busy) = wire("relay").await;
@@ -467,15 +453,18 @@ async fn control_send_relays_wrapped_line_to_json_agent() {
     let (status, body) = post_send(&base, Some("relay-sender"), "bee", "ping-body-XYZ").await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body).expect("json ACK");
-    assert_eq!(v["results"][0]["status"], "delivered", "배달 성공: {body}");
-    assert_eq!(v["results"][0]["to"], "bee", "해석된 수신자 이름 동봉");
-    assert!(v["id"].is_string(), "msg-id 동봉");
+    assert_eq!(
+        v["results"][0]["status"], "delivered",
+        "delivery succeeded: {body}"
+    );
+    assert_eq!(
+        v["results"][0]["to"], "bee",
+        "the resolved recipient name is attached"
+    );
+    assert!(v["id"].is_string(), "msg-id is attached");
 
-    // ★정확 일치 단언(느슨한 substring 금지 — 리뷰 지적)★: 관측 sink 가 잡는 `j` 는 유저 에코 이벤트의
-    //   **전체 JSON**(`{"type":"text","text":"<봉투>","uuid":"X"}`)이라 봉투는 그 안 `text` 필드 값으로
-    //   박혀 있다. 예전엔 raw 라인에 substring `contains` 를 썼는데, 그러면 `</message>` 뒤에 잘림·오염이
-    //   덧붙어도 통과했다(트레일링 corruption 미탐). 그래서 `j` 를 JSON 파싱해 `text` 필드를 뽑아 기대 봉투
-    //   문자열과 **정확(==) 비교**한다 — 프레이밍(uuid 등)은 필드 밖이라 무관하고 봉투 자체의 온전성만 본다.
+    // Exact-match assertion (no loose substring — review finding): the `j` the observation sink catches is the whole JSON of the user echo (`{"type":"text","text":"<envelope>","uuid":"X"}`). A substring `contains` let truncation or corruption appended after `</message>` pass, so `j` is parsed, the `text` field extracted and compared
+    //   exactly with the expected envelope — framing is outside the field, only the envelope's own integrity is looked at.
     let sender_display = &sender.to_string()[..8];
     let expected_envelope = obs_seam::expected_default_envelope(sender_display, "ping-body-XYZ");
     let observed = wait_until(Duration::from_secs(3), || {
@@ -488,7 +477,7 @@ async fn control_send_relays_wrapped_line_to_json_agent() {
     });
     assert!(
         observed,
-        "relay 가 래핑된 라인을 B stdin 에 주입(입력 에코의 text 필드 = 기대 봉투 정확 일치): expect={:?} seen={:?}",
+        "the relay injected the wrapped line into B's stdin (the text field of the input echo = an exact match of the expected envelope): expect={:?} seen={:?}",
         expected_envelope,
         seen.lock().unwrap()
     );
@@ -499,16 +488,11 @@ async fn control_send_relays_wrapped_line_to_json_agent() {
     handle.shutdown().await;
 }
 
-// ── 폐기된 발신자여도 메시지는 배달된다(생존은 게이트 아님·기록용 관측만) — handle_send 직접 호출로 격리 ──
-// ★사용자 결정 2026-07-19★: 메시지 유효성은 **작성 시점 인증**(입구 auth)으로 이미 성립한다. 발신자가
-//   그 뒤 죽거나 회전돼도(토큰 revoke) 메시지는 무효가 되지 않는다 — "결과 보내고 종료"(유언 패턴)는
-//   멀티에이전트 핵심 패턴이고 미래 메일박스 커밋 시맨틱과도 정합한다. is_identity_live 는 배달을 막지
-//   않고 forensic 로그만 남긴다.
-// ★왜 HTTP 가 아니라 handle_send 직접인가★: HTTP 경로는 미들웨어(bearer_auth)가 토큰을 먼저 validate 하므로
-//   revoke 하면 401 로 먼저 막혀 commit-point 에 못 닿는다(revoke 와 send 사이 mid-flight 주입은 단일
-//   동기 요청에서 결정적으로 못 만든다). 그래서 공통 핸들러를 직접 부른다: 발신자 신원을 산 상태로
-//   만들었다가 **relay 직전에 revoke** 한 뒤 handle_send 호출 → 배달됨 관측. 도달 가능 수신자가 필요하므로
-//   json claude 스폰에 의존(claude 부재면 실패).
+// ── a message is delivered even from a discarded sender (liveness is not a gate · a record-only observation) — isolated by calling handle_send directly ──
+// User decision 2026-07-19: a message's validity holds by authentication at composition time (entrance auth); a later death or rotation (token revoked) does not invalidate it — "send the result and exit" (last-words) is a core multi-agent pattern and consistent with future mailbox commit semantics.
+//   is_identity_live does not block delivery and only leaves a forensic log.
+// handle_send directly, not HTTP: the middleware (bearer_auth) validates first and blocks a revoke with 401 before the commit point, and a mid-flight injection between revoke and send cannot be made deterministic in one synchronous request. So: make the sender
+//   live, revoke just before the relay, call handle_send → observe delivered. A reachable recipient needs a json claude spawn (fails if claude is absent).
 #[tokio::test]
 async fn control_send_revoked_sender_still_delivers_observation() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -549,14 +533,15 @@ async fn control_send_revoked_sender_still_delivers_observation() {
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "폐기 발신자여도 배달됨(생존은 게이트 아님, 사용자 결정): {v}"
+        "delivered even from a discarded sender (liveness is not a gate, user decision): {v}"
     );
-    assert_eq!(v["results"][0]["to"], "target-b", "해석된 수신자 이름 동봉");
-    assert!(v["id"].is_string(), "msg-id 동봉");
+    assert_eq!(
+        v["results"][0]["to"], "target-b",
+        "the resolved recipient name is attached"
+    );
+    assert!(v["id"].is_string(), "msg-id is attached");
 
-    // ★앵커 단언(느슨한 substring 금지)★: `j` = 유저 에코 전체 JSON(`{"type":"text","text":"<봉투>",…}`)
-    //   이라 봉투 안 `"` 는 JSON 인코딩으로 `\"` 다 — `"text":"<message from=\"발신자\">` 로 봉투 **시작에
-    //   발신자를 핀**한다(발신자를 덧댄 잘못된 렌더는 이 앵커를 통과 못 한다).
+    // Anchor assertion (no loose substring): `j` is the whole JSON of the user echo, so a `"` inside the envelope is `\"` — `"text":"<message from=\"sender\">` pins the sender at the envelope start (a render padding the sender fails).
     let sender_display = &sender.to_string()[..8];
     let anchored_envelope =
         format!(r#""text":"<message from=\"{sender_display}\">revoked-but-DELIVERED</message>"#);
@@ -568,7 +553,7 @@ async fn control_send_revoked_sender_still_delivers_observation() {
     });
     assert!(
         delivered,
-        "폐기 발신자여도 래핑 라인이 B stdin 에 주입돼야(배달됨): {:?}",
+        "the wrapped line must be injected into B's stdin even from a discarded sender (delivered): {:?}",
         seen.lock().unwrap()
     );
 
@@ -578,10 +563,8 @@ async fn control_send_revoked_sender_still_delivers_observation() {
     handle.shutdown().await;
 }
 
-// ── ADR-0088 Stage 0: 배달-경계 관측 레코드 — in-proc 싱크로 회수(detached 로그 스크레이핑 없이) ──
-// ★왜 in-proc observer 인가★: 운영 데몬은 detached 로 돌아 로그 스크레이핑이 do-not(ADR-0088 HARD
-//   CONSTRAINT). registry 에 DeliveryObserver 를 설치하고 handle_send 를 직접 부르면(공통 핸들러 격리)
-//   레코드를 로그 없이 직접 단언할 수 있다.
+// ── ADR-0088 Stage 0: delivery-boundary observation record — retrieved by an in-proc sink (no detached log scraping) ──
+// The production daemon runs detached, so log scraping is a do-not (ADR-0088 HARD CONSTRAINT); a DeliveryObserver installed on the registry with handle_send called directly asserts the record without logs.
 struct DeliveryCapture {
     seen: Arc<Mutex<Vec<engram_dashboard_messaging::envelope::DeliveryObservation>>>,
 }
@@ -591,11 +574,8 @@ impl engram_dashboard_messaging::envelope::DeliveryObserver for DeliveryCapture 
     }
 }
 
-// ── ADR-0088(FIX-3/FIX-4): claude 바이너리 없이 배달-경계 관측을 구동하는 세션 seam ──────────────
-// ★왜 seam 인가★: 위 e2e 테스트는 산 claude 스폰이 필요해(claude 부재 머신에선 실패) 배달 관측의
-//   core 단언이 바이너리 유무에 매인다(FIX-4). 여기 helper 는 `AgentManager::insert_test_session` 으로
-//   **structured=true 캐리어를 흉내 내되 write 성공/실패를 우리가 정하는** 세션을 맵에 직접 꽂는다 —
-//   claude 없이 handle_send 의 성공/실패 두 갈래를 모두 실측한다.
+// ── ADR-0088 (FIX-3/FIX-4): a session seam that drives delivery-boundary observation without the claude binary ──────────────
+// The e2e tests above need a live claude spawn, tying the core assertion to the binary (FIX-4). `AgentManager::insert_test_session` plants a session that imitates a structured=true carrier where we decide whether write succeeds or fails, measuring both handle_send branches without claude.
 mod obs_seam {
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, Mutex};
@@ -616,8 +596,7 @@ mod obs_seam {
         fn agent_list_updated(&self, _a: Vec<engram_dashboard_agent::types::AgentInfo>) {}
     }
 
-    /// `structured`: 이 캐리어가 구조화 출력(= 턴 신호)을 내는가. **기본은 true(json claude 대역)**이고,
-    ///   false 는 터미널 claude 대역 — 그 부류가 명단에 남는지가 ADR-0116 결정 1·7 의 회귀 축이다.
+    /// `structured`: does this carrier emit structured output (= a turn signal). Default true (a json claude stand-in); false is a terminal claude stand-in — whether that class stays on the list is the regression axis of ADR-0116 decisions 1·7.
     struct SeamTransport {
         fail: bool,
         structured: bool,
@@ -688,8 +667,7 @@ mod obs_seam {
         insert_seam_recipient_named(manager, fail, id, &name)
     }
 
-    /// ★왜 실 종료로는 못 만드나★: 실제 종료는 reaper 가 세션을 맵에서 **곧바로 제거**한다. 그래서
-    ///   "list_agents 엔 있는데 상태는 terminal" 이라는 상태를 실 세션으로 재현할 수 없다.
+    /// Not made by a real termination: the reaper removes the session from the map at once, so "in list_agents yet status terminal" cannot be reproduced with a real session.
     pub fn insert_terminal_seam_recipient(manager: &Arc<AgentManager>, name: &str) -> AgentId {
         let id = AgentId::new_v4();
         let core = Arc::new(OutputCore::new(
@@ -698,8 +676,7 @@ mod obs_seam {
             Arc::new(NoopStatus),
             TurnWiring::detached(),
         ));
-        // ★종점 전이(pump 단독 소유 — ADR-0005)를 직접 부른다★: 이 세션엔 pump 가 없어 finalize 경쟁자가
-        //   없다. 결과 = 맵에 남은 채 상태만 terminal(Killed).
+        // Calls the terminal transition (pump's sole ownership — ADR-0005) directly: this session has no pump, so no finalize competitor. Result = it stays in the map with only the status terminal (Killed).
         core.finish(engram_dashboard_agent::types::TerminalReason::Killed);
         let session = Arc::new(AgentSession::new(
             id,
@@ -722,16 +699,14 @@ mod obs_seam {
         id
     }
 
-    /// ★동명 다수 시나리오용(D 리뷰 B1)★ — AgentId 와 **보이는 이름을 따로** 지정한다. 두 세션에 같은
-    /// 이름을 주면 로스터에 동명 두 명이 뜨고, 그때 발신자는 exact AgentId 로만 한쪽을 지목할 수 있다.
+    /// For the many-same-names scenario (D review B1) — specifies the AgentId and the visible name separately; two sessions with one name show two same-name roster entries, and the sender can point at one only by the exact AgentId.
     pub fn insert_seam_recipient_named(
         manager: &Arc<AgentManager>,
         fail: bool,
         id: AgentId,
         name: &str,
     ) -> (AgentId, Arc<Mutex<Vec<Vec<u8>>>>) {
-        // 관측 배선 없는 core — 대부분의 테스트는 idle 게이트를 타지 않아야 한다(주입이 만드는 유저 에코가
-        //   그 수신자를 turn-중으로 만들면 다음 발송이 파킹돼 그 테스트들의 전제가 바뀐다).
+        // A core with no observation wiring — most tests must not ride the idle gate (the injection's user echo would turn the recipient mid-turn and park the next send).
         let core = Arc::new(OutputCore::new(
             id,
             0,
@@ -750,11 +725,8 @@ mod obs_seam {
         (agent, captured)
     }
 
-    /// 수신자의 **캐리어 종류를 지정**하는 판 — 터미널 claude 대역(`Raw` + 턴 신호 없음)과 json claude
-    /// 대역(`ClaudeStreamJson` + 턴 신호 있음)을 한 테스트에서 대조하려고 둔다(다른 헬퍼는 json 고정).
-    ///
-    /// ★두 축을 encoder 하나로 묶는 이유★: 실물에서도 같이 움직인다 — 터미널 claude 는 Raw 입력에
-    ///   구조화 출력이 없고, json claude 는 그 반대다. 따로 받으면 실재하지 않는 조합을 만들 수 있다.
+    /// Specifies the recipient's carrier kind — contrasts a terminal claude stand-in (`Raw` + no turn signal) with a json claude stand-in (`ClaudeStreamJson` + a turn signal) in one test (other helpers are fixed to json).
+    /// The two axes are tied in one encoder because they move together in reality; taking them separately could create a nonexistent combination.
     pub fn insert_seam_recipient_with_encoder(
         manager: &Arc<AgentManager>,
         encoder: InputEncoder,
@@ -779,7 +751,7 @@ mod obs_seam {
     ) -> (AgentId, Arc<Mutex<Vec<Vec<u8>>>>, Arc<OutputCore>) {
         let id = AgentId::new_v4();
         let name = id.to_string()[..8].to_string();
-        // 운영 spawn 과 같은 dispatch 로 분류자를 뽑는다 — seam 세션은 json 모드 claude 캐리어를 흉내낸다.
+        // Pull the classifier via the same dispatch as production spawn — the seam session imitates a json-mode claude carrier.
         let core = manager.wired_test_core(
             id,
             0,
@@ -812,10 +784,7 @@ mod obs_seam {
     ) -> (AgentId, Arc<Mutex<Vec<Vec<u8>>>>, Arc<OutputCore>) {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let core_out = core.clone();
-        // ADR-0101 (WYSIWYA): canonical name = display_name ?? basename(session.cwd) 이고 seam 세션엔
-        //   프로필(=display_name)이 없다. 그래서 cwd 의 basename 이 곧 이 세션의 addressable name 이 된다.
-        //   테스트는 fallback_name(id)=id[:8] 로 지목하므로, cwd basename 을 id[:8] 로 맞춰 "보이는 이름
-        //   = 주소" 를 성립시킨다(옛 cwd="." 는 basename="." 이라 지목 불가·동명 충돌).
+        // ADR-0101 (WYSIWYA): canonical name = display_name ?? basename(session.cwd), and a seam session has no profile, so the cwd basename is its addressable name. The test targets by fallback_name(id)=id[:8], so the cwd basename is matched to id[:8] (the old cwd="." had basename "." — untargetable, same-name collisions).
         let cwd = std::path::PathBuf::from(format!("seam-root/{name}"));
         let session = Arc::new(AgentSession::new(
             id,
@@ -826,8 +795,7 @@ mod obs_seam {
             Arc::new(AtomicU8::new(0)),
             backend_caps(),
             encoder,
-            // seam 수신자는 claude 대역이라 우편 자격 true — 셸 축은 실 spawn 테스트가 덮는다
-            //   (`messaging_host::tests::a_live_shell_is_excluded_from_the_mail_roster_but_still_counts_as_live`).
+            // The seam recipient is a claude stand-in so mail eligibility is true — the shell axis is covered by the real spawn test (`messaging_host::tests::a_live_shell_is_excluded_from_the_mail_roster_but_still_counts_as_live`).
             true,
             core,
             Box::new(SeamTransport {
@@ -852,16 +820,14 @@ mod obs_seam {
         id.to_string()[..8].to_string()
     }
 
-    /// ★기대 봉투 재구성(ADR-0103 — 운영 기본 = xml)★: 데몬이 기본 포맷으로 감싸는 봉투를 테스트가
-    ///   바이트-정확 회계하려고 재구성한다. 기본 = plain `<message from="{sender}">{body}</message>`
-    ///   (속성 없음 — 현 스코프 increment A). ★주의★: 이 헬퍼는 XML 이스케이프를 하지 않으므로 sender/body
-    ///   에 `<`/`>`/`&`/`"` 가 없는 테스트 픽스처에서만 데몬 렌더와 바이트 일치한다(현 호출부 전부 해당).
+    /// Rebuilding the expected envelope (ADR-0103 — production default = xml): the test rebuilds the daemon's default-format envelope to account byte-exactly — plain `<message from="{sender}">{body}</message>` (no attributes — current-scope increment A).
+    /// This helper does no XML escaping, so it matches only fixtures whose sender/body have no `<`/`>`/`&`/`"` (all current call sites).
     pub fn expected_default_envelope(sender: &str, body: &str) -> String {
         format!("<message from=\"{sender}\">{body}</message>")
     }
 }
 
-// ── ADR-0088(FIX-4): 배달 관측 core 단언을 claude 없이 — seam 수신자에 성공 relay ──────────────
+// ── ADR-0088 (FIX-4): the delivery-observation core assertions without claude — a successful relay to a seam recipient ──────────────
 #[tokio::test]
 async fn control_send_delivery_observation_via_seam_no_claude() {
     use engram_dashboard_agent::backend::InputEncoder;
@@ -884,7 +850,7 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
         epoch: 0,
     };
 
-    let body = "안녕-msg-α"; // 한글 2자(6B) + "-msg-"(5B) + α(2B) = 13B.
+    let body = "안녕-msg-α"; // two Hangul chars (6B) + "-msg-"(5B) + α(2B) = 13B. hangul-ok
     let cmd = ControlCommand {
         from,
         to: vec![to_name.clone()],
@@ -895,20 +861,28 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "seam 성공 배달 ACK: {v}"
+        "seam successful delivery ACK: {v}"
     );
-    let ack_id = v["id"].as_str().expect("msg-id 동봉").to_string();
+    let ack_id = v["id"].as_str().expect("msg-id is attached").to_string();
 
     let obs = {
         let g = seen.lock().unwrap();
-        assert_eq!(g.len(), 1, "성공 relay 1건 → 관측 레코드 1건: {:?}", *g);
+        assert_eq!(
+            g.len(),
+            1,
+            "1 successful relay → 1 observation record: {:?}",
+            *g
+        );
         g[0].clone()
     };
 
-    assert_eq!(obs.msg_id, ack_id, "레코드 msg_id = ACK id(상관 축 1)");
+    assert_eq!(
+        obs.msg_id, ack_id,
+        "record msg_id = ACK id (correlation axis 1)"
+    );
     assert!(
         obs.msg_uuid.is_some(),
-        "성공 배달은 msg_uuid 를 담아야(상관 축 2)"
+        "a successful delivery must carry msg_uuid (correlation axis 2)"
     );
 
     let sender_name = obs_seam::fallback_name(sender);
@@ -916,32 +890,36 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
     let expected_bytes = expected_wrapped.len();
     assert_eq!(
         obs.bytes_requested, expected_bytes,
-        "요청 바이트 = 봉투의 정확한 UTF-8 바이트 수(멀티바이트 관통): got={} expect={} wrapped={:?}",
+        "request bytes = the exact UTF-8 byte count of the envelope (crossing multibyte): got={} expect={} wrapped={:?}",
         obs.bytes_requested, expected_bytes, expected_wrapped
     );
     assert_eq!(
         obs.bytes_written,
         Some(obs.bytes_requested),
-        "by-construction 복사(bytes_written = 요청) — short-write 탐지 아님"
+        "by-construction copy (bytes_written = request) — not short-write detection"
     );
-    assert!(obs.error.is_none(), "성공 배달은 error None");
+    assert!(obs.error.is_none(), "a successful delivery has error None");
     assert!(obs.is_delivered(), "is_delivered() = true");
-    assert_eq!(obs.to_id, b_id, "레코드 수신자 AgentId");
-    assert_eq!(obs.to_name, to_name, "레코드 수신자 이름(fallback)");
-    assert_eq!(obs.from, from.into(), "레코드 발신자 신원(토큰 파생)");
+    assert_eq!(obs.to_id, b_id, "the record's recipient AgentId");
+    assert_eq!(
+        obs.to_name, to_name,
+        "the record's recipient name (fallback)"
+    );
+    assert_eq!(
+        obs.from,
+        from.into(),
+        "the record's sender identity (token-derived)"
+    );
 
-    // ★계층 관통(exact bytes)★: 세션이 실제 받은 write 바이트 = encoder(봉투, msg_uuid). XML 봉투의 `"` 는
-    //   stream-json JSON 인코딩에서 `\"` 로 이스케이프되므로 raw 봉투 문자열 substring 비교는 성립하지
-    //   않는다 — 그래서 encoder 로 기대 라인을 재구성해 바이트-정확 일치를 단언한다(멀티바이트 본체 온전성
-    //   + handoff 잘림/오염 탐지).
+    // Layer-crossing (exact bytes): the bytes the session received through write = encoder(envelope, msg_uuid). An XML envelope's `"` is escaped to `\"` in the stream-json encoding, so a raw envelope-string substring comparison fails — the expected line is rebuilt with the encoder and asserted byte-exactly (multibyte integrity + handoff truncation/corruption).
     let written = obs_seam::last_written(&captured);
-    let msg_uuid = obs.msg_uuid.expect("성공 배달 msg_uuid");
+    let msg_uuid = obs.msg_uuid.expect("a successful delivery msg_uuid");
     let expected_line =
         InputEncoder::ClaudeStreamJson.encode(expected_wrapped.as_bytes(), msg_uuid);
     assert_eq!(
         written,
         expected_line,
-        "세션이 받은 stream-json 라인이 기대 encoded 봉투와 바이트-정확 일치해야: {}",
+        "the stream-json line the session received must match the expected encoded envelope byte-exactly: {}",
         String::from_utf8_lossy(&written)
     );
 
@@ -950,12 +928,9 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
     handle.shutdown().await;
 }
 
-// ── ADR-0116 결정 1·7 봉인: 턴 신호 없는 터미널 에이전트도 **명단에 남는다** ─────────────────────────
-// ★막는 회귀★: 어댑터 산출 함수에 `.filter(|a| a.capabilities.output.structured)` 를 되살리면 **터미널
-//   claude 전원이 조용히 편지를 못 받는다**(파킹 계기조차 없어 24h TTL 로 만료). 그 부류는 실 claude
-//   바이너리 없이는 spawn 할 수 없어, 세션 주입 seam 으로 같은 모양(Raw 입력 + 구조화 출력 없음)을 만든다.
-// ★셸 제외(`reads_messages`)와 다른 축이다★: 이건 capability 축, 그건 "입력이 무엇으로 해석되는가" 축.
-//   한 함수에 두 필터가 있으므로 **둘 다** 회귀 커버가 필요하다(셸 축 = messaging_host 실 spawn 테스트).
+// ── ADR-0116 decisions 1·7 seal: a terminal agent without a turn signal stays on the list ─────────────────────────
+// Blocked regression: reviving `.filter(|a| a.capabilities.output.structured)` in the adapter's output function makes every terminal claude silently unable to receive letters (no parking trigger either; expiry by the 24h TTL). That class cannot be spawned without a real claude binary, so the same shape (Raw input + no structured output) is made through the session injection seam.
+// A different axis from the shell exclusion (`reads_messages`): capability vs "what the input is interpreted as" — one function has two filters, so both need coverage (the shell axis = the messaging_host real spawn test).
 #[tokio::test]
 async fn roster_includes_a_terminal_agent_without_a_turn_signal_no_claude() {
     use engram_dashboard_agent::backend::InputEncoder;
@@ -972,15 +947,15 @@ async fn roster_includes_a_terminal_agent_without_a_turn_signal_no_claude() {
         .live_agents()
         .into_iter()
         .find(|a| a.id == id)
-        .expect("턴 신호가 없어도 배달 명단에 있어야(capability 는 멤버십 축이 아니다)");
+        .expect("it must be on the delivery list even without a turn signal (capability is not a membership axis)");
     assert!(
         !entry.turn_signal,
-        "그 사실은 turn_signal=false 로만 나타난다(= 게이트 없이 즉시 주입 대상): {entry:?}"
+        "that fact shows up only as turn_signal=false (= an immediate-injection target with no gate): {entry:?}"
     );
     let sources = port.addressing_sources();
     assert!(
         sources.roster.iter().any(|a| a.id == id && !a.turn_signal),
-        "입구 판정 소스도 같은 술어여야(한쪽만 걸러도 그 부류가 통째로 막힌다): {sources:?}"
+        "the entry-decision source must use the same predicate (filtering one side only blocks that class wholesale): {sources:?}"
     );
 
     manager.kill_agent(id).ok();
@@ -988,13 +963,9 @@ async fn roster_includes_a_terminal_agent_without_a_turn_signal_no_claude() {
     handle.shutdown().await;
 }
 
-// ── 터미널(TUI) 수신자에게는 제출(CR)이 **별도 write** 로 한 번 더 나간다 ───────────────────────────
-// ★결함 재발 방지 축 = write 경계★: 봉투 바이트는 예전에도 PTY 에 도착했지만 claude TUI 가 그걸 입력창에
-//   담아 둔 채 턴을 시작하지 않았다(실측 2026-08-17 — `본문+CR` 한 write 는 제출 안 됨, 두 write 는 제출됨).
-//   그래서 "바이트가 갔나" 가 아니라 **"write 가 두 번 갈렸나"** 를 단언한다.
-// ★수신자를 하나씩 따로 보내는 이유★: 수신자가 둘이면 봉투에 `to` 속성이 붙어 기대 문자열을 재구성하기
-//   어렵다. 하나씩이면 양쪽 다 **바이트 정확 일치**로 못 박을 수 있고, 그래야 "무엇이든 추가되면 걸리는"
-//   단언이 된다(약한 포함 검사와 달리).
+// ── to a terminal (TUI) recipient the submit (CR) goes out as a separate write once more ───────────────────────────
+// Defect recurrence axis = the write boundary: the envelope bytes reached the PTY before, but the claude TUI kept them in its input box without starting a turn (measured 2026-08-17 — one write of `body+CR` is not submitted, two writes are), so it asserts "were the writes split in two", not "did the bytes go".
+// Recipients are sent one at a time: with two a `to` attribute is attached and the expected string is hard to rebuild; one at a time both can be pinned by a byte-exact match, catching anything added.
 #[tokio::test]
 async fn control_send_adds_a_separate_submit_write_only_for_terminal_recipients_no_claude() {
     use engram_dashboard_agent::backend::InputEncoder;
@@ -1043,22 +1014,21 @@ async fn control_send_adds_a_separate_submit_write_only_for_terminal_recipients_
     assert_eq!(
         obs_seam::all_written(&term_captured),
         vec![envelope.as_bytes().to_vec(), b"\r".to_vec()],
-        "터미널 수신자 = 봉투 그대로 1회 + 제출(CR) 단독 1회, **분리된 두 write**"
+        "terminal recipient = the envelope as is once + the submit (CR) alone once, **two separate writes**"
     );
 
-    // json 쪽은 그 배달의 msg_uuid 로 기대 라인을 재구성해 바이트 정확 일치를 본다 — 제출 write 가 새거나
-    // 봉투에 문자가 덧붙으면 여기서 깨진다(종전 동작 봉인).
+    // For json, rebuild the expected line from that delivery's msg_uuid and check a byte-exact match — a leaked submit write or appended characters break here.
     let json_uuid = seen
         .lock()
         .unwrap()
         .iter()
         .find(|o| o.to_id == json_id)
         .and_then(|o| o.msg_uuid)
-        .expect("json 배달의 관측 레코드 + msg_uuid");
+        .expect("the observation record + msg_uuid of the json delivery");
     assert_eq!(
         obs_seam::all_written(&json_captured),
         vec![InputEncoder::ClaudeStreamJson.encode(envelope.as_bytes(), json_uuid)],
-        "json 수신자는 종전 그대로 인코더 산출물 1회뿐이어야(종단 \\n 이 이미 제출)"
+        "a json recipient must get exactly one encoder output as before (the trailing \\n already submits)"
     );
 
     manager.kill_agent(term_id).ok();
@@ -1067,10 +1037,8 @@ async fn control_send_adds_a_separate_submit_write_only_for_terminal_recipients_
     handle.shutdown().await;
 }
 
-// ── ADR-0088 확장(리뷰 F1/F2): DeliveryObservation.in_reply_to — 구조화 메타에서만 파생 ───────────
-// ★reply_to 가 오픈된 request 를 안 가리켜도 무방★: 엄격 매칭은 장부 계약을 닫을 때만 쓰이고(NoMatch =
-//   정상 경로 — service.rs `close_reply_contract` 주석), 메시지 자체는 그대로 배달된다. 그래서 여기선
-//   장부에 request 를 미리 열지 않고 임의 id 로 reply_to 를 실어도 관측 축만 독립적으로 확인할 수 있다.
+// ── ADR-0088 extension (review F1/F2): DeliveryObservation.in_reply_to — derived only from structured meta ───────────
+// reply_to need not point at an open request: strict matching is used only when closing the ledger contract (NoMatch is the normal path — `close_reply_contract` in service.rs) and the message is delivered as is, so the observation axis is checked independently with an arbitrary id.
 #[tokio::test]
 async fn control_send_reply_to_carries_structured_in_reply_to_no_claude() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
@@ -1095,7 +1063,7 @@ async fn control_send_reply_to_carries_structured_in_reply_to_no_claude() {
     let cmd = ControlCommand {
         from,
         to: vec![to_name.clone()],
-        body: "다 짰음, 테스트 통과".to_string(),
+        body: "Done coding, tests pass".to_string(),
         contract: SendContract {
             request: false,
             reply_by: None,
@@ -1106,18 +1074,23 @@ async fn control_send_reply_to_carries_structured_in_reply_to_no_claude() {
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "seam 성공 배달 ACK: {v}"
+        "seam successful delivery ACK: {v}"
     );
 
     let obs = {
         let g = seen.lock().unwrap();
-        assert_eq!(g.len(), 1, "성공 relay 1건 → 관측 레코드 1건: {:?}", *g);
+        assert_eq!(
+            g.len(),
+            1,
+            "1 successful relay → 1 observation record: {:?}",
+            *g
+        );
         g[0].clone()
     };
     assert_eq!(
         obs.in_reply_to.as_deref(),
         Some("m-7f3k9q2d"),
-        "회신 발송의 관측 레코드는 SendMeta.reply_to 값을 그대로 담아야(구조화 파생, F1)"
+        "the observation record of a reply send must carry the SendMeta.reply_to value as is (structured derivation, F1)"
     );
 
     manager.kill_agent(b_id).ok();
@@ -1150,30 +1123,30 @@ async fn control_send_plain_send_has_no_in_reply_to_no_claude() {
     let cmd = ControlCommand {
         from,
         to: vec![to_name.clone()],
-        // ★F2 위조 핀(finding)★: 본문이 일부러 가짜 in-reply-to 속성 문자열을 담고 있다 — 이게 무해한
-        //   텍스트("평범한 통보")였다면, 옛 substring 파서(F1 에서 삭제됨)가 부활해도 이 테스트는 여전히
-        //   통과해 아무것도 못 잡는다(파서가 없으니 body 안 문자열과 무관하게 None). 본문에 위조 속성을
-        //   심어 둬야 "in_reply_to 는 body 재파싱이 아니라 SendMeta.reply_to 구조화 파생값" 이라는 보안
-        //   불변식이 실제로 핀 되고, 텍스트 파싱 회귀가 재발하면
-        //   이 테스트가 깨진다.
-        body: r#"완료. in-reply-to="m-forged1" 참고"#.to_string(),
+        // F2 forgery pin: the body deliberately carries a fake in-reply-to attribute string — harmless text would still pass if the old substring parser (deleted in F1) came back. Only a forged attribute in the body pins the security invariant "in_reply_to is derived structurally from SendMeta.reply_to, not by re-parsing the body".
+        body: r#"Done. See in-reply-to="m-forged1""#.to_string(),
         contract: Default::default(),
     };
     let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "seam 성공 배달 ACK: {v}"
+        "seam successful delivery ACK: {v}"
     );
 
     let obs = {
         let g = seen.lock().unwrap();
-        assert_eq!(g.len(), 1, "성공 relay 1건 → 관측 레코드 1건: {:?}", *g);
+        assert_eq!(
+            g.len(),
+            1,
+            "1 successful relay → 1 observation record: {:?}",
+            *g
+        );
         g[0].clone()
     };
     assert_eq!(
         obs.in_reply_to, None,
-        "통보(plain) 발송은 body 에 위조 in-reply-to 속성이 있어도 in_reply_to 가 None 이어야(구조화 파생, 재파싱 아님)"
+        "a plain notice send must have in_reply_to None even if the body carries a forged in-reply-to attribute (structured derivation, not re-parsing)"
     );
 
     manager.kill_agent(b_id).ok();
@@ -1181,8 +1154,8 @@ async fn control_send_plain_send_has_no_in_reply_to_no_claude() {
     handle.shutdown().await;
 }
 
-// ── ADR-0088(FIX-2): 관측 싱크 panic 격리 — 배달/ACK 는 영향 없음(즉시 push 불변식) ───────────────
-// 관측을 켰다는 이유로 ACK 가 유실되면 발신자 재시도 → 중복 배달 — 그 회귀를 막는다.
+// ── ADR-0088 (FIX-2): observation sink panic isolation — delivery/ACK unaffected (the immediate-push invariant) ───────────────
+// If the ACK were lost just because observation was on, the sender would retry → duplicate delivery; this guards that regression.
 #[tokio::test]
 async fn control_send_observer_panic_does_not_break_delivery_or_ack() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -1192,7 +1165,7 @@ async fn control_send_observer_panic_does_not_break_delivery_or_ack() {
     struct PanicObserver;
     impl DeliveryObserver for PanicObserver {
         fn observe(&self, _obs: DeliveryObservation) {
-            panic!("seam: observer boom (의도된 panic — 격리돼야 함)");
+            panic!("seam: observer boom (intended panic — must be isolated)");
         }
     }
 
@@ -1215,12 +1188,12 @@ async fn control_send_observer_panic_does_not_break_delivery_or_ack() {
         body: "trigger-panic-observer".to_string(),
         contract: Default::default(),
     };
-    // panic 이 record_delivery 에서 격리되지 않으면 여기서 unwind 로 테스트가 죽는다.
+    // If the panic is not isolated in record_delivery, the test dies here by unwinding.
     let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "observer panic 이 있어도 배달/ACK 는 정상(Enqueued)이어야: {v}"
+        "even with an observer panic, delivery/ACK must be normal (Enqueued): {v}"
     );
 
     manager.kill_agent(b_id).ok();
@@ -1228,7 +1201,7 @@ async fn control_send_observer_panic_does_not_break_delivery_or_ack() {
     handle.shutdown().await;
 }
 
-// ── ADR-0088(FIX-3): relay write 실패 → 관측 레코드가 실패를 성공으로 삼키지 않는다 ────────────────
+// ── ADR-0088 (FIX-3): relay write failure → the observation record does not swallow the failure as a success ────────────────
 #[tokio::test]
 async fn control_send_delivery_failure_observation_records_error_not_success() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -1237,7 +1210,7 @@ async fn control_send_delivery_failure_observation_records_error_not_success() {
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("obs-fail").await;
 
-    // ★fail=true★: relay write 를 Err 로 만들어 handle_send 의 Err 갈래를 강제한다.
+    // ★fail=true★: makes the relay write an Err to force the Err branch of handle_send.
     let (b_id, _captured) = obs_seam::insert_seam_recipient(&manager, true);
     let to_name = obs_seam::fallback_name(b_id);
 
@@ -1262,30 +1235,42 @@ async fn control_send_delivery_failure_observation_records_error_not_success() {
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "pending",
-        "write 실패는 파킹(pending)으로 전환(반려 아님, spec §5): {v}"
+        "a write failure switches to parking (pending), not a refusal (spec §5): {v}"
     );
 
     let obs = {
         let g = seen.lock().unwrap();
-        assert_eq!(g.len(), 1, "실패 relay 1건 → 관측 레코드 1건: {:?}", *g);
+        assert_eq!(
+            g.len(),
+            1,
+            "1 failed relay → 1 observation record: {:?}",
+            *g
+        );
         g[0].clone()
     };
 
     assert!(
         obs.error.is_some(),
-        "실패 배달은 error=Some 이어야(성공으로 삼키지 않음): {obs:?}"
+        "a failed delivery must be error=Some (not swallowed as a success): {obs:?}"
     );
-    assert_eq!(obs.bytes_written, None, "실패면 bytes_written=None");
-    assert_eq!(obs.msg_uuid, None, "실패면 msg_uuid=None(write 안 됨)");
-    assert!(!obs.is_delivered(), "실패는 is_delivered()==false");
+    assert_eq!(obs.bytes_written, None, "on failure bytes_written=None");
+    assert_eq!(
+        obs.msg_uuid, None,
+        "on failure msg_uuid=None (no write happened)"
+    );
+    assert!(!obs.is_delivered(), "a failure is is_delivered()==false");
     assert!(
         obs.bytes_requested > body.len(),
-        "실패 레코드도 요청 바이트(봉투 크기)는 실려야: req={} body={}",
+        "a failure record must also carry the request bytes (envelope size): req={} body={}",
         obs.bytes_requested,
         body.len()
     );
-    assert_eq!(obs.to_id, b_id, "실패 레코드 수신자 AgentId");
-    assert_eq!(obs.from, from.into(), "실패 레코드 발신자 신원");
+    assert_eq!(obs.to_id, b_id, "the failure record's recipient AgentId");
+    assert_eq!(
+        obs.from,
+        from.into(),
+        "the failure record's sender identity"
+    );
 
     manager.kill_agent(b_id).ok();
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -1316,7 +1301,7 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
         epoch: 0,
     };
 
-    let body = "observe-me-안녕-α"; // ASCII 11자 + 한글2자(6B) + '-'(1B) + α(2B).
+    let body = "observe-me-안녕-α"; // 11 ASCII chars + 2 Hangul chars (6B) + '-'(1B) + α(2B). hangul-ok
     let cmd = ControlCommand {
         from,
         to: vec!["obs-target".to_string()],
@@ -1325,42 +1310,57 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
     };
     let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     let v = result.to_json();
-    assert_eq!(v["results"][0]["status"], "delivered", "배달 성공 ACK: {v}");
-    let ack_id = v["id"].as_str().expect("msg-id 동봉").to_string();
+    assert_eq!(
+        v["results"][0]["status"], "delivered",
+        "delivery success ACK: {v}"
+    );
+    let ack_id = v["id"].as_str().expect("msg-id is attached").to_string();
 
     let obs = {
         let g = seen.lock().unwrap();
-        assert_eq!(g.len(), 1, "성공 relay 1건 → 관측 레코드 1건: {:?}", *g);
+        assert_eq!(
+            g.len(),
+            1,
+            "1 successful relay → 1 observation record: {:?}",
+            *g
+        );
         g[0].clone()
     };
 
     assert_eq!(
         obs.msg_id, ack_id,
-        "레코드 msg_id 는 ACK id 와 같아야(상관 축 1)"
+        "the record msg_id must equal the ACK id (correlation axis 1)"
     );
     assert!(
         obs.msg_uuid.is_some(),
-        "성공 배달은 correlated msg_uuid 를 담아야(상관 축 2)"
+        "a successful delivery must carry the correlated msg_uuid (correlation axis 2)"
     );
     let sender_name = sender.to_string()[..8].to_string();
     let expected_wrapped = obs_seam::expected_default_envelope(&sender_name, body);
     assert_eq!(
         obs.bytes_requested,
         expected_wrapped.len(),
-        "요청 바이트 = 봉투의 정확 UTF-8 바이트 수(멀티바이트 관통): got={} wrapped={:?}",
+        "request bytes = the exact UTF-8 byte count of the envelope (crossing multibyte): got={} wrapped={:?}",
         obs.bytes_requested,
         expected_wrapped
     );
     assert_eq!(
         obs.bytes_written,
         Some(obs.bytes_requested),
-        "by-construction 복사(bytes_written = 요청) — short-write 탐지 아님"
+        "by-construction copy (bytes_written = request) — not short-write detection"
     );
-    assert!(obs.error.is_none(), "성공 배달은 error None");
-    assert!(obs.is_delivered(), "is_delivered() = true(전송 완결)");
-    assert_eq!(obs.to_id, b_info.id, "레코드 수신자 AgentId");
-    assert_eq!(obs.to_name, "obs-target", "레코드 수신자 이름");
-    assert_eq!(obs.from, from.into(), "레코드 발신자 신원(토큰 파생)");
+    assert!(obs.error.is_none(), "a successful delivery has error None");
+    assert!(
+        obs.is_delivered(),
+        "is_delivered() = true (transfer complete)"
+    );
+    assert_eq!(obs.to_id, b_info.id, "the record's recipient AgentId");
+    assert_eq!(obs.to_name, "obs-target", "the record's recipient name");
+    assert_eq!(
+        obs.from,
+        from.into(),
+        "the record's sender identity (token-derived)"
+    );
 
     manager.kill_agent(b_info.id).ok();
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
@@ -1369,22 +1369,16 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
-// ADR-0088 Stage 1 — 배달 정확성 오라클 (결정적·seam 기반, 실 claude 불요)
+// ADR-0088 Stage 1 — delivery correctness oracle (deterministic · seam-based, no real claude needed)
 // ═══════════════════════════════════════════════════════════════════════════════════════════
-// seam 관측 범위 = handle_send → registry → submit_stdin_observed → session.submit_input_observed
-//   (봉투 조립·encoder) → SeamTransport.send_input **까지**. 그 아래 물리 계층(운영
-//   `StdioTransport::send_input` 의 `stdin.lock()` + `write_all`/`flush`)은 이 seam 이 **우회**한다 —
-//   SeamTransport 는 이미 완결된 Vec 을 받아 `push` 로 원자 캡처하므로.
-// 운영 동작이 오라클을 위반하면 테스트를 약화하지 않고 실패로 남겨 FINDING 으로 보고한다(마스킹 금지).
+// Seam observation scope = handle_send → registry → submit_stdin_observed → session.submit_input_observed (envelope assembly · encoder) → SeamTransport.send_input inclusive. The physical layer below (production `StdioTransport::send_input`'s
+//   `stdin.lock()` + `write_all`/`flush`) is bypassed — SeamTransport receives a complete Vec and captures it atomically with `push`.
+// If production behavior violates the oracle, the test is not weakened but left failing and reported as a FINDING (no masking).
 
-/// ── ADR-0088 Stage 1-오라클 1: 동시 **입구** exact-once + N 개 distinct 본체 무결 배달(seam handoff) ──
-/// ★증명하지 않는다(커버리지 공백)★:
-///   (1) **물리 OS-pipe 바이트 무인터리브** — 그 직렬화는 이 seam 이 우회하는 `stdin.lock()` 계층
-///       소관이라, 그 응용계층 직렬화를 지우는 회귀는 여기서 **안 잡힌다**. ▶ agent 크레이트
-///       `tests/stdio_physical_pipe.rs` :: `physical_pipe_concurrent_sends_no_interleave` 가 커버한다.
-///   (2) **encoder 내부 정확성** — actual·expected 가 같은 encoder 를 쓰므로 encoder 자체 결함(예:
-///       wrap_user_turn 이 개행을 빠뜨림)은 양쪽을 똑같이 오염시켜 여기선 안 걸린다. ▶ `backend/claude/` 의
-///       golden unit test `wrap_user_turn_exact_line_and_newline_terminated` 가 커버한다.
+/// ── ADR-0088 Stage 1 oracle 1: concurrent entrance exact-once + N distinct bodies delivered intact (seam handoff) ──
+/// Does not prove (coverage gaps):
+///   (1) no interleaving of physical OS-pipe bytes — that serialization is the `stdin.lock()` layer this seam bypasses, so erasing it is not caught here. ▶ `physical_pipe_concurrent_sends_no_interleave` in the agent crate's `tests/stdio_physical_pipe.rs`.
+///   (2) correctness inside the encoder — actual and expected use the same encoder, so an encoder defect (e.g. wrap_user_turn dropping the newline) pollutes both. ▶ golden unit test `wrap_user_turn_exact_line_and_newline_terminated` in `backend/claude/`.
 #[tokio::test]
 async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     use engram_dashboard_agent::backend::InputEncoder;
@@ -1396,14 +1390,14 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("stage1-concurrency").await;
 
-    // 하나의 seam 수신자(fail=false → 성공 경로).
+    // One seam recipient (fail=false → the success path).
     let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, false);
     let to_name = obs_seam::fallback_name(b_id);
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
-    // 모든 스레드가 같은 신원으로 보낸다 — 수신자 1개에 몰아치는 게 요점.
+    // All threads send with the same identity — piling onto 1 recipient is the point.
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "stage1-conc-sender".to_string(), true);
     let from = BoundIdentity {
@@ -1412,13 +1406,10 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     };
 
     const N: usize = 100;
-    // 마커에 특수문자가 없어야 JSON escape 를 피해 봉투 문자열이 캡처 라인에 부분열로 그대로 들어간다.
-    //   idx zero-pad 는 부분열 오검(1 ⊂ 10) 방지.
+    // The markers must have no special characters so the envelope string enters the captured line as a subsequence without JSON escape; the idx zero-pad prevents false subsequence matches (1 ⊂ 10).
     let markers: Vec<String> = (0..N).map(|i| format!("BODY-{i:04}")).collect();
 
-    // ★Barrier(입구 정렬)★: N 스레드를 handle_send **진입 직전**에 모아 "초반 스레드가 후반 스레드 spawn
-    //   전에 끝나 race window 가 안 열리는" 문제를 없앤다. ★한계★: 진입 정렬만 보장할 뿐 handle_send
-    //   **내부의 실행 겹침**까지는 강제하지 못한다(단일코어/스케줄러가 여전히 직렬화 가능).
+    // Barrier (entrance alignment): gathers the N threads just before handle_send so early threads cannot finish before late ones spawn. Limit: it aligns entry only and cannot force overlap inside handle_send (a single core/scheduler can still serialize it).
     let barrier = Arc::new(Barrier::new(N));
 
     let mut handles = Vec::with_capacity(N);
@@ -1429,7 +1420,7 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
         let to = to_name.clone();
         let body = marker.clone();
         let barrier = barrier.clone();
-        // handle_send 는 sync(&Arc<..>) — OS 스레드로 near-simultaneous 발화(tokio task 아님, 병렬성 확보).
+        // handle_send is sync(&Arc<..>) — fired near-simultaneously from OS threads (not tokio tasks, for real parallelism).
         handles.push(std::thread::spawn(move || {
             barrier.wait();
             let cmd = ControlCommand {
@@ -1442,16 +1433,14 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
             let v = result.to_json();
             assert!(
                 v.get("results").is_some(),
-                "동시 발화도 각기 접수(results): {v}"
+                "concurrent firing is also each accepted (results): {v}"
             );
             v["id"].as_str().expect("msg-id").to_string()
         }));
     }
     let ack_ids: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-    // ★전원 `delivered` 를 단언으로 승격시키지 말 것★: 겹친 드레인에서 물러난 발신은 `pending` 으로
-    //   답하고(ADR-0125), 그 편지는 이긴 쪽 배치나 되울린 도어벨로 뒤늦게 나간다. 그래서 단언 축은
-    //   차수와 무관하게 유실·중복 없음 + 봉투 바이트 무결이다.
+    // Do not promote "all `delivered`" to an assertion: a send that stepped back in an overlapping drain answers `pending` (ADR-0125) and goes out later via the winner's batch or a re-rung doorbell. The axis is no loss or duplication regardless of order + envelope byte integrity.
     for _ in 0..600 {
         if seen.lock().unwrap().len() >= N && messaging.parked_len(b_id) == 0 {
             break;
@@ -1463,24 +1452,24 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     assert_eq!(
         obs_records.len(),
         N,
-        "동시 N 발화 → 관측 레코드 정확히 N건(동시 입구 유실/중복 없음)"
+        "N concurrent firings → exactly N observation records (no loss/duplication at the concurrent entrance)"
     );
     let distinct_obs: std::collections::HashSet<&String> =
         obs_records.iter().map(|o| &o.msg_id).collect();
     assert_eq!(
         distinct_obs.len(),
         N,
-        "관측 msg_id 전부 distinct(중복 배달 없음)"
+        "all observed msg_ids distinct (no duplicate delivery)"
     );
     let distinct_ack: std::collections::HashSet<&String> = ack_ids.iter().collect();
-    assert_eq!(distinct_ack.len(), N, "ACK id 전부 distinct");
+    assert_eq!(distinct_ack.len(), N, "all ACK ids distinct");
 
     let sender_name = obs_seam::fallback_name(sender);
     let writes = obs_seam::all_written(&captured);
     assert_eq!(
         writes.len(),
         N,
-        "캡처된 write 수 == N(각 send_input 이 완결 봉투 1개 — 잘림/합병 없음)"
+        "captured write count == N (each send_input is 1 complete envelope — no truncation/merging)"
     );
     let by_uuid: std::collections::HashMap<
         uuid::Uuid,
@@ -1492,55 +1481,52 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     assert_eq!(
         by_uuid.len(),
         N,
-        "성공 레코드마다 고유 msg_uuid(상관 키 충돌 없음)"
+        "a unique msg_uuid per success record (no correlation-key collision)"
     );
 
     let mut matched_uuids: std::collections::HashSet<uuid::Uuid> = std::collections::HashSet::new();
     let mut received_bodies: Vec<String> = Vec::with_capacity(N);
     for (i, w) in writes.iter().enumerate() {
         let s = std::str::from_utf8(w)
-            .unwrap_or_else(|e| panic!("write[{i}] 가 온전한 UTF-8 이 아님: {e}"));
+            .unwrap_or_else(|e| panic!("write[{i}] is not intact UTF-8: {e}"));
         let line_json: serde_json::Value = serde_json::from_str(s.trim_end()).unwrap_or_else(|e| {
-            panic!("write[{i}] 가 온전한 stream-json 라인이 아님(합병/잘림 의심): {e} in {s:?}")
+            panic!("write[{i}] is not an intact stream-json line (merge/truncation suspected): {e} in {s:?}")
         });
         let line_uuid: uuid::Uuid = line_json["uuid"]
             .as_str()
             .and_then(|u| u.parse().ok())
-            .unwrap_or_else(|| panic!("write[{i}] 에 top-level uuid 없음: {s:?}"));
+            .unwrap_or_else(|| panic!("write[{i}] has no top-level uuid: {s:?}"));
         let obs = by_uuid.get(&line_uuid).unwrap_or_else(|| {
-            panic!("write[{i}] 의 msg_uuid={line_uuid} 에 대응하는 관측 레코드 없음(유령 write)")
+            panic!("write[{i}]'s msg_uuid={line_uuid} has no corresponding observation record (a ghost write)")
         });
         assert!(
             matched_uuids.insert(line_uuid),
-            "write[{i}] 의 msg_uuid={line_uuid} 가 두 번 캡처됨(중복 write)"
+            "write[{i}]'s msg_uuid={line_uuid} was captured twice (a duplicate write)"
         );
         let hits: Vec<&String> = markers.iter().filter(|m| s.contains(m.as_str())).collect();
         assert_eq!(
             hits.len(),
             1,
-            "write[{i}] 는 봉투 마커 정확히 1개만 담아야(seam 레벨 무합병) — 관측: {hits:?}"
+            "write[{i}] must carry exactly 1 envelope marker (no merging at the seam level) — observed: {hits:?}"
         );
         let body = hits[0];
         received_bodies.push(body.clone());
-        // ★정확-바이트 재구성★: 같은 encoder·같은 msg_uuid 로 만든 이 라인이 곧 session 이
-        //   send_input 에 넘긴 바이트다 — 그래서 exact-eq 가 handoff 오라클로 성립한다.
+        // Exact-byte reconstruction: this line made with the same encoder and msg_uuid is the bytes the session passed to send_input — exact-eq holds as a handoff oracle.
         let wrapped = obs_seam::expected_default_envelope(&sender_name, body);
         let expected_line = InputEncoder::ClaudeStreamJson.encode(wrapped.as_bytes(), line_uuid);
         assert_eq!(
             w, &expected_line,
-            "write[{i}] 가 기대 encoded 봉투와 바이트-정확 일치해야(session→transport handoff 잘림/오염/합병 탐지 — encoder 내부 정확성 아님): body={body} msg_id={}",
+            "write[{i}] must match the expected encoded envelope byte-exactly (detects session→transport handoff truncation/corruption/merging — not encoder-internal correctness): body={body} msg_id={}",
             obs.msg_id
         );
     }
     assert_eq!(
         matched_uuids.len(),
         N,
-        "N 개 msg_uuid 전부 정확히 1 write 로 배달(exact-once, 다중집합 등식)"
+        "all N msg_uuids delivered by exactly 1 write (exact-once, multiset equality)"
     );
 
-    // ★치환 버그 차단(FIX-1)★: 위 exact-bytes 재구성은 body 를 그 write 자신에서 뽑아 검사하므로
-    //   "모든 메시지 → 같은 body" 치환 버그를 자기일관적으로 통과시킨다(각 write 가 BODY-0000 을 담고
-    //   BODY-0000 으로 재구성 → 통과). 발신 마커 집합과의 직접 대조가 그 구멍을 막는다.
+    // Blocks a substitution bug (FIX-1): the exact-bytes reconstruction extracts the body from the write itself, so "every message → the same body" would pass self-consistently (each write carries BODY-0000, reconstructed as BODY-0000). A direct comparison with the set of sent markers closes the hole.
     {
         let mut sent_sorted: Vec<String> = markers.clone();
         sent_sorted.sort();
@@ -1548,14 +1534,14 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
         assert_eq!(
             distinct_sent.len(),
             N,
-            "테스트 전제: 발신 마커는 전부 distinct"
+            "test premise: all sent markers are distinct"
         );
         let mut received_sorted = received_bodies.clone();
         received_sorted.sort();
         assert_eq!(
             received_sorted, sent_sorted,
-            "수신 본체 다중집합이 발신된 N 개 distinct 본체와 정확히 일치해야(각 1회 — 무유실·무중복·무치환). \
-             치환 버그(모든 메시지 → 같은 body)면 이 등식이 깨진다(한 body 가 N 번, 나머지 0번). \
+            "the received body multiset must exactly match the N distinct bodies sent (each once — no loss, duplication or substitution). \
+             With a substitution bug (every message → the same body) this equality breaks (one body N times, the rest 0 times). \
              sent={sent_sorted:?} received={received_sorted:?}"
         );
     }
@@ -1565,9 +1551,8 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     handle.shutdown().await;
 }
 
-/// ── ADR-0088 Stage 1-오라클 2: 본체 크기 경계(MAX_BODY_BYTES = 64 KiB), 바이트 vs char ──────────
-/// ★캡처 write 를 직접 대조하는 이유(FIX-2)★: `bytes_requested` 는 encoding **이전** 봉투 복사값이라
-///   session→transport handoff 에서의 truncation·오염을 못 잡는다.
+/// ── ADR-0088 Stage 1 oracle 2: body size boundary (MAX_BODY_BYTES = 64 KiB), bytes vs chars ──────────
+/// The captured write is compared directly (FIX-2): `bytes_requested` is the envelope copy value before encoding and cannot catch truncation or corruption at the session→transport handoff.
 #[tokio::test]
 async fn stage1_body_size_boundary_bytes_not_chars() {
     use engram_dashboard_agent::backend::InputEncoder;
@@ -1575,7 +1560,7 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
     use engram_dashboard_daemon::control::registry::BoundIdentity;
     use engram_dashboard_messaging::envelope::Entrance;
 
-    const MAX: usize = 64 * 1024; // = MAX_BODY_BYTES(ingress 상수 — 여기 미러; 값 드리프트 시 아래가 잡는다).
+    const MAX: usize = 64 * 1024; // = MAX_BODY_BYTES (an ingress constant — mirrored here; if the value drifts the assertions below catch it).
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("stage1-boundary").await;
@@ -1587,7 +1572,7 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         epoch: 0,
     };
 
-    // 매 케이스마다 fresh seam 수신자 + fresh observer 를 심어 상태 누적을 피한다.
+    // Each case plants a fresh seam recipient + a fresh observer to avoid state accumulation.
     async fn send_once(
         manager: &Arc<AgentManager>,
         registry: &Arc<ControlRegistry>,
@@ -1598,8 +1583,8 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         serde_json::Value,
         Option<engram_dashboard_messaging::envelope::DeliveryObservation>,
         Vec<u8>,
-        usize,   // 봉투(wrap_message) 의 기대 바이트 길이
-        Vec<u8>, // 기대 encoded stream-json 라인(성공 시 재구성, 실패 시 빈 Vec)
+        usize,   // the expected byte length of the envelope (wrap_message)
+        Vec<u8>, // the expected encoded stream-json line (rebuilt on success, an empty Vec on failure)
         AgentId,
     ) {
         let (b_id, captured) = obs_seam::insert_seam_recipient(manager, false);
@@ -1617,7 +1602,7 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         let v = result.to_json();
         let obs = seen.lock().unwrap().first().cloned();
         let written = obs_seam::last_written(&captured);
-        // ★MAX 게이트는 body 기준★: 64 KiB 는 body 길이라 게이트를 통과하고, 봉투 wrapper 는 그 위에 얹힌다.
+        // The MAX gate is based on the body: 64 KiB is the body length so it passes the gate, and the envelope wrapper rides on top.
         let sender_name = obs_seam::fallback_name(from.agent_id);
         let expected_env_bytes = obs_seam::expected_default_envelope(&sender_name, &body).len();
         let expected_line = match obs.as_ref().and_then(|o| o.msg_uuid) {
@@ -1630,47 +1615,47 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         (v, obs, written, expected_env_bytes, expected_line, b_id)
     }
 
-    // ── (1) 정확히 64 KiB(경계 포함) → 배달됨 ──────────────────────────────────────────────
+    // ── (1) exactly 64 KiB (boundary included) → delivered ──────────────────────────────────────────────
     let body_eq = "x".repeat(MAX);
-    assert_eq!(body_eq.len(), MAX, "테스트 전제: 정확히 64 KiB");
+    assert_eq!(body_eq.len(), MAX, "test premise: exactly 64 KiB");
     let (v, obs, written, env_bytes, expected_line, b_id) =
         send_once(&manager, &registry, &messaging, from, body_eq.clone()).await;
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "정확히 64 KiB 는 배달돼야(≤ 상한): {v}"
+        "exactly 64 KiB must be delivered (≤ the cap): {v}"
     );
-    let obs = obs.expect("성공 배달은 관측 레코드");
+    let obs = obs.expect("a successful delivery has an observation record");
     assert_eq!(
         obs.bytes_requested, env_bytes,
-        "요청 바이트 = 봉투의 정확 바이트 길이"
+        "request bytes = the exact byte length of the envelope"
     );
-    assert!(obs.is_delivered(), "정확히 64 KiB 는 is_delivered()");
+    assert!(obs.is_delivered(), "exactly 64 KiB is is_delivered()");
     assert_eq!(
         written, expected_line,
-        "seam 캡처가 64 KiB 봉투의 정확 encoded 바이트여야(session→transport handoff 잘림/오염 탐지)"
+        "the seam capture must be the exact encoded bytes of the 64 KiB envelope (detects session→transport handoff truncation/corruption)"
     );
     manager.kill_agent(b_id).ok();
 
-    // ── (2) 64 KiB − 1 → 배달됨 ───────────────────────────────────────────────────────────
+    // ── (2) 64 KiB − 1 → delivered ───────────────────────────────────────────────────────────
     let body_lt = "x".repeat(MAX - 1);
     let (v, obs, written, env_bytes, expected_line, b_id) =
         send_once(&manager, &registry, &messaging, from, body_lt).await;
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "64 KiB−1 은 배달돼야: {v}"
+        "64 KiB−1 must be delivered: {v}"
     );
     assert_eq!(
-        obs.expect("관측").bytes_requested,
+        obs.expect("observation").bytes_requested,
         env_bytes,
-        "64 KiB−1: 요청 바이트 = 봉투 정확 길이"
+        "64 KiB−1: request bytes = the exact envelope length"
     );
     assert_eq!(
         written, expected_line,
-        "64 KiB−1: 캡처 write 가 기대 encoded 봉투와 바이트-정확 일치(잘림 탐지)"
+        "64 KiB−1: the captured write matches the expected encoded envelope byte-exactly (detects truncation)"
     );
     manager.kill_agent(b_id).ok();
 
-    // ── (3) 64 KiB + 1 → BODY_TOO_LARGE, write 시도 없음(캡처 0) ────────────────────────────
+    // ── (3) 64 KiB + 1 → BODY_TOO_LARGE, no write attempt (capture 0) ────────────────────────────
     let body_gt = "x".repeat(MAX + 1);
     let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, false);
     let to_name = obs_seam::fallback_name(b_id);
@@ -1689,30 +1674,33 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         },
     );
     let v = result.to_json();
-    assert_eq!(v["status"], "error", "64 KiB+1 은 거부: {v}");
-    assert_eq!(v["code"], "BODY_TOO_LARGE", "초과는 BODY_TOO_LARGE: {v}");
+    assert_eq!(v["status"], "error", "64 KiB+1 is refused: {v}");
+    assert_eq!(
+        v["code"], "BODY_TOO_LARGE",
+        "exceeding is BODY_TOO_LARGE: {v}"
+    );
     assert!(
         obs_seam::all_written(&captured).is_empty(),
-        "상한 초과는 write 시도 자체가 없어야(캡처 0 — 바이트가 수신자에 안 닿음)"
+        "exceeding the cap must not even attempt a write (capture 0 — the bytes never reach the recipient)"
     );
     assert!(
         seen.lock().unwrap().is_empty(),
-        "상한 초과는 배달 관측 레코드도 없어야(relay 미진입)"
+        "exceeding the cap must leave no delivery observation record either (the relay is not entered)"
     );
     manager.kill_agent(b_id).ok();
 
-    // ── (4) 멀티바이트: char 수 < 64Ki 이나 바이트 > 64Ki → BODY_TOO_LARGE(상한=바이트 증명) ──────
-    // '가'(U+AC00) = UTF-8 3바이트. (MAX/3 + 1) char → char 수는 ~21846(≪ 64Ki 문자)인데 바이트는 > MAX.
+    // ── (4) multibyte: char count < 64Ki but bytes > 64Ki → BODY_TOO_LARGE (proves the cap is bytes) ──────
+    // '가' (U+AC00) = 3 bytes in UTF-8. (MAX/3 + 1) chars → the char count is ~21846 (≪ 64Ki chars) but the bytes are > MAX. // hangul-ok
     let char_count = MAX / 3 + 1;
-    let body_mb_over = "가".repeat(char_count);
+    let body_mb_over = "가".repeat(char_count); // hangul-ok
     assert!(
         body_mb_over.chars().count() < MAX,
-        "멀티바이트 전제: char 수({}) 는 64Ki 미만",
+        "multibyte premise: the char count ({}) is under 64Ki",
         body_mb_over.chars().count()
     );
     assert!(
         body_mb_over.len() > MAX,
-        "멀티바이트 전제: 바이트 수({}) 는 64Ki 초과",
+        "multibyte premise: the byte count ({}) is over 64Ki",
         body_mb_over.len()
     );
     let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, false);
@@ -1732,36 +1720,36 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
     let v = result.to_json();
     assert_eq!(
         v["code"], "BODY_TOO_LARGE",
-        "멀티바이트 본체도 상한은 char 가 아니라 **바이트** 로 잰다(char<64Ki 인데 거부돼야): {v}"
+        "a multibyte body's cap is also measured in **bytes**, not chars (it must be refused though chars<64Ki): {v}"
     );
     assert!(
         obs_seam::all_written(&captured).is_empty(),
-        "멀티바이트 초과도 write 시도 없음"
+        "a multibyte excess also makes no write attempt"
     );
     manager.kill_agent(b_id).ok();
 
-    // ── (5) 멀티바이트 straddle: char 수는 그대로인데 바이트가 경계 바로 아래 → 배달됨(경계의 바이트성 확인) ──
-    let char_count_ok = MAX / 3; // floor → 바이트 = char_count_ok*3 ≤ MAX
-    let body_mb_ok = "가".repeat(char_count_ok);
+    // ── (5) multibyte straddle: the char count is the same but the bytes are just under the boundary → delivered (confirms the boundary is in bytes) ──
+    let char_count_ok = MAX / 3; // floor → bytes = char_count_ok*3 ≤ MAX
+    let body_mb_ok = "가".repeat(char_count_ok); // hangul-ok
     assert!(
         body_mb_ok.len() <= MAX,
-        "straddle 전제: 바이트({}) ≤ 64Ki",
+        "straddle premise: bytes ({}) ≤ 64Ki",
         body_mb_ok.len()
     );
     let (v, obs, written, env_bytes, expected_line, b_id) =
         send_once(&manager, &registry, &messaging, from, body_mb_ok).await;
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "바이트 ≤ 64Ki 인 멀티바이트 본체는 배달돼야(경계는 바이트로 판정): {v}"
+        "a multibyte body with bytes ≤ 64Ki must be delivered (the boundary is judged in bytes): {v}"
     );
     assert_eq!(
-        obs.expect("관측").bytes_requested,
+        obs.expect("observation").bytes_requested,
         env_bytes,
-        "멀티바이트 straddle: 요청 바이트 = 봉투 정확 UTF-8 길이(char 수 아님)"
+        "multibyte straddle: request bytes = the exact UTF-8 length of the envelope (not the char count)"
     );
     assert_eq!(
         written, expected_line,
-        "멀티바이트 straddle: 캡처 write 가 기대 encoded 봉투와 바이트-정확 일치(handoff 무결)"
+        "multibyte straddle: the captured write matches the expected encoded envelope byte-exactly (handoff intact)"
     );
     manager.kill_agent(b_id).ok();
 
@@ -1769,7 +1757,7 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
     handle.shutdown().await;
 }
 
-/// ── ADR-0088 Stage 1-오라클 3(a) → ADR-0111 갱신: 수신자 부재 → **실패 행** + 배달 관측 없음 ──────────
+/// ── ADR-0088 Stage 1 oracle 3(a) → ADR-0111 update: recipient absent → **a failure row** + no delivery observation ──────────
 #[tokio::test]
 async fn stage1_lifecycle_recipient_absent_is_a_failed_row_with_no_observation() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -1804,23 +1792,20 @@ async fn stage1_lifecycle_recipient_absent_is_a_failed_row_with_no_observation()
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "failed",
-        "★ADR-0111 결정 1★ 부재 수신자는 실패 행: {v}"
+        "★ADR-0111 decision 1★ an absent recipient is a failure row: {v}"
     );
     assert!(
         seen.lock().unwrap().is_empty(),
-        "파킹은 주입 안 하므로 배달 관측 레코드 없음(유령 배달 없음)"
+        "parking does not inject so there is no delivery observation record (no phantom delivery)"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── S18 메시징 v1 수용 시나리오(spec §7): **busy 파킹 → 턴 종료 → 자동 배달**(실 claude) ──────────────
-// ★multi_thread 런타임이 필요한 이유★: 아래 `wait_until` 은 std::thread::sleep 로 블록하는 **동기**
-//   폴링이라, current-thread 런타임에선 이 test task 가 스레드를 붙잡고 도는 동안 flush worker task 가
-//   폴링될 틈이 없어 flush 가 진행되지 않는다. (`wait_until` 을 async 폴링으로 바꾸면 default 런타임도
-//   가능하나 이 헬퍼는 다수 동기 테스트가 공유하므로 런타임 flavor 로만 격리한다.)
-#[ignore = "입력을 주지 않아 busy 창이 오지 않아 핵심 단언이 매번 건너뛰어진다 — 맡아 둔 우편 배달 축은 c2_busy_recipient_parks_then_batch_flushes_on_turn_end 가 결정적으로 덮는다(2026-10-02 · T-46)"]
+// ── S18 messaging v1 acceptance scenario (spec §7): busy parking → turn end → automatic delivery (real claude) ──────────────
+// multi_thread runtime: `wait_until` is synchronous polling with std::thread::sleep, so on a current-thread runtime the spinning test task leaves the flush worker no gap to be polled. (Async polling would work on the default runtime, but this helper is shared by many sync tests, so it is isolated by runtime flavor.)
+#[ignore = "no input is given so the busy window never comes and the core assertion is skipped every time — the held-mail delivery axis is deterministically covered by c2_busy_recipient_parks_then_batch_flushes_on_turn_end (2026-10-02 · T-46)"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_park_then_spawn_auto_delivers() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -1839,11 +1824,8 @@ async fn c1_park_then_spawn_auto_delivers() {
         epoch: 0,
     };
 
-    // ── 1) 실 에이전트를 먼저 띄운다 ────────────────────────────────────────────────────
-    // ★ADR-0111 결정 1 로 setup 이 바뀌었다★: 옛 판은 "아직 안 뜬 이름으로 보내 파킹 → 나중에 스폰" 이었고,
-    //   부재가 **입구 반려(실패 행)** 가 되며 그 진입로가 없어졌다. 이 테스트가 지키는 건 부재가 아니라
-    //   **"파킹된 메일이 flush 계기에 자동으로 배달된다"** 는 배선이라, 파킹 사유만 남은 유일한 경로
-    //   (busy = 턴 진행 중)로 바꿨다 — 관측 대상(idle diff → flush 워커 → 주입 → 관측)은 그대로다.
+    // ── 1) launch a real agent first ────────────────────────────────────────────────────
+    // Setup changed with ADR-0111 decision 1: absence became an entrance refusal (a failure row), so the old "send to an unlaunched name to park, spawn later" path is gone. This test guards the wiring "parked mail is delivered automatically at the flush trigger", so it uses the only remaining parking reason (busy = a turn in progress); the observed target (idle diff → flush worker → injection → observation) is unchanged.
     // ★Uncovered axis, stated honestly (review C1)★: that switch left **delivery of parked mail on roster appearance**
     //   uncovered on the integration path. The appearance wiring itself (`MessagingFlushSink` sees `agent_list_updated` →
     //   Appear → flush lane → `flush_for(id)` returns) is exercised end to end by `spawn_json_agent`'s wait, but only on the
@@ -1857,14 +1839,14 @@ async fn c1_park_then_spawn_auto_delivers() {
         require_claude("c1_park_then_spawn_auto_delivers");
     };
 
-    // ── 2) 그 에이전트가 **턴 진행 중**(프라이밍 응답)일 때를 잡는다 ──────────────────────────
+    // ── 2) catch the moment that agent is **mid-turn** (the priming response) ──────────────────────────
     let saw_busy = wait_until(Duration::from_secs(20), || {
         busy.is_busy(info.id, info.epoch)
     });
     if !saw_busy {
         eprintln!(
-            "SKIP c1_park_then_spawn_auto_delivers: 스폰 직후 busy 창을 관측하지 못함(실 claude 타이밍) — \
-             busy 파킹→flush 축은 c2_busy_recipient_parks_then_batch_flushes_on_turn_end 가 결정적으로 커버"
+            "SKIP c1_park_then_spawn_auto_delivers: could not observe the busy window right after spawn (real claude timing) — \
+             the busy parking→flush axis is deterministically covered by c2_busy_recipient_parks_then_batch_flushes_on_turn_end"
         );
         manager.kill_agent(info.id).ok();
         let _ = std::fs::remove_dir_all(&data_dir);
@@ -1872,7 +1854,7 @@ async fn c1_park_then_spawn_auto_delivers() {
         return;
     }
 
-    // ── 3) 턴 중 발송 → 파킹(pending). 주입이 없으므로 배달 관측도 없다 ─────────────────────
+    // ── 3) a send mid-turn → parking (pending). There is no injection so there is no delivery observation either ─────────────────────
     let result = handle_send(
         &manager,
         &registry,
@@ -1888,14 +1870,14 @@ async fn c1_park_then_spawn_auto_delivers() {
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "pending",
-        "턴 진행 중 도착은 파킹(spec §5 분기 3): {v}"
+        "arriving mid-turn is parked (spec §5 branch 3): {v}"
     );
     assert!(
         seen.lock().unwrap().is_empty(),
-        "파킹 시점엔 배달 관측 없음(주입 안 함)"
+        "no delivery observation at parking time (no injection)"
     );
 
-    // ── 4) 턴이 끝나면 idle 트리거 → flush 레인 → 자동 배달 ─────────────────────────────────
+    // ── 4) when the turn ends the idle trigger → flush lane → automatic delivery ─────────────────────────────────
     let delivered = wait_until(Duration::from_secs(30), || {
         seen.lock().unwrap().iter().any(
             |o: &engram_dashboard_messaging::envelope::DeliveryObservation| {
@@ -1905,7 +1887,7 @@ async fn c1_park_then_spawn_auto_delivers() {
     });
     assert!(
         delivered,
-        "턴 종료(idle 전이) 시 파킹분이 자동 배달돼야(flush → inject → 관측): {:?}",
+        "at turn end (idle transition) the parked item must be delivered automatically (flush → inject → observe): {:?}",
         seen.lock().unwrap()
     );
 
@@ -1915,12 +1897,10 @@ async fn c1_park_then_spawn_auto_delivers() {
     handle.shutdown().await;
 }
 
-// ── S18 메시징 v1 C2 수용 시나리오(spec §7 "배치 검증 강화"): busy 중 도착 → 미주입 → 턴 종료 시 일괄 flush ──
-// ★무엇을 증명하나★: idle 게이트 배선 **전 구간**이 실제로 이어져 있음 — core.emit(분류) → 턴 관측 표 →
-//   MessagingService 게이트(파킹) → IdleNotifier → flush 채널 → flush worker → flush_for_agent → 주입.
-// ★왜 claude 없이 결정적인가★: 턴 이벤트를 수신자 core 에 **직접** emit 하므로 실 claude 턴의 타이밍
-//   (응답 지연·인증)에 의존하지 않는다.
-// ★multi_thread 런타임★: c1 테스트와 같은 사유(동기 폴링이 현재 스레드를 붙잡으면 worker 가 못 돈다).
+// ── S18 messaging v1 C2 acceptance scenario (spec §7 "stronger batch verification"): arrive while busy → not injected → batch flush at turn end ──
+// Proves the whole idle gate span is connected: core.emit (classification) → turn observation table → MessagingService gate (parking) → IdleNotifier → flush channel → flush worker → flush_for_agent → injection.
+// Deterministic without claude: turn events are emitted directly into the recipient core, independent of a real claude turn's timing.
+// multi_thread runtime: as the c1 test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -1943,10 +1923,10 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
     let (b_id, captured, core) = obs_seam::insert_observed_seam_recipient(&manager, false);
     let to_name = obs_seam::fallback_name(b_id);
 
-    // core.emit 은 운영에서 pump 가 쓰는 것과 **같은 진입점**이다 — 그래서 위 전 구간이 그대로 탄다.
+    // core.emit is the same entry point production's pump uses, so the whole span rides as is.
     let feed = |ev: OutputEvent| core.emit(ev);
 
-    // ── 1) 턴 시작 관측(어시스턴트 델타) → busy ────────────────────────────────────────
+    // ── 1) turn start observation (assistant delta) → busy ────────────────────────────────────
     feed(OutputEvent::TextDelta {
         text: "thinking...".to_string(),
         turn_id: None,
@@ -1954,10 +1934,10 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
     });
     assert!(
         busy.is_busy(b_id, 0),
-        "턴 이벤트 관측 후 게이트가 busy 로 보여야(emit → 코어 표 → 게이트 배선)"
+        "after observing a turn event the gate must show busy (emit → core table → gate wiring)"
     );
 
-    // ── 2) 턴 중 2건 발송 → 둘 다 pending(주입 0) ───────────────────────────────────────
+    // ── 2) 2 sends mid-turn → both pending (injection 0) ───────────────────────────────────────
     let mut ids = Vec::new();
     for body in ["first", "second"] {
         let v = handle_send(
@@ -1975,31 +1955,27 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
         .to_json();
         assert_eq!(
             v["results"][0]["status"], "pending",
-            "턴 진행 중 도착은 파킹(pending) — CLI stdin 선주입 금지(ADR-0104): {v}"
+            "arriving mid-turn is parked (pending) — no pre-injection into the CLI stdin (ADR-0104): {v}"
         );
         ids.push(v["id"].as_str().expect("msg id").to_string());
     }
     assert!(
         obs_seam::all_written(&captured).is_empty(),
-        "턴 중에는 수신자 stdin 에 아무것도 쓰지 않는다"
+        "nothing is written to the recipient stdin mid-turn"
     );
     assert!(
         seen.lock().unwrap().is_empty(),
-        "주입이 없으므로 배달 관측도 없다(유령 delivered 금지)"
+        "there is no injection so there is no delivery observation either (no phantom delivered)"
     );
-    assert_eq!(messaging.parked_len(b_id), 2, "2건이 메일박스에 대기");
+    assert_eq!(messaging.parked_len(b_id), 2, "2 items wait in the mailbox");
     for id in &ids {
         assert_eq!(messaging.ledger_statuses(id), vec![DeliveryStatus::Pending]);
     }
 
-    // ── 3) 턴 종료(MessageDone) → idle 트리거 → 일괄 flush ─────────────────────────────
-    // ★한가 단언은 수신자 stdin 을 붙든 채 한다(flaky 회귀 — CI 2026-10-06)★: MessageDone 의 도어벨이 다른
-    //   스레드에서 flush 를 띄우고, 그 첫 주입의 입력 시점 유저 에코(`Structured`)를 claude 분류기가 진행으로
-    //   세어 수신자는 곧바로 다시 턴 중이 된다 — 의도된 동작이다(주입 = 새 턴 · `drain_queue` 의 mid-batch
-    //   재검사 금지 문단). 그래서 도어벨 뒤에 한가를 묻는 것은 flush 와의 경주이고, 그 한가는 기다려서 볼
-    //   수 있는 상태도 아니다(다음 MessageDone 이나 턴 상한 fail-open 전에는 되돌아오지 않는다).
-    //   seam 의 기록 락을 쥐면 flush 는 `send_input` 에서 선다 — 세션은 에코를 `send_input` 성공 **뒤에**
-    //   내므로(`AgentSession::write_now`) 이 구간의 바쁨 판정은 MessageDone 하나만 반영한다.
+    // ── 3) turn end (MessageDone) → idle trigger → batch flush ─────────────────────────────
+    // The idle assertion is made while holding the recipient stdin (flaky regression — CI 2026-10-06): the MessageDone doorbell launches the flush on another thread, and the claude classifier counts that first injection's input-time user echo (`Structured`) as progress, so the recipient is
+    //   mid-turn again at once — intended (injection = a new turn; the `drain_queue` mid-batch re-check prohibition). Asking idle after the doorbell races the flush, and that idle cannot be waited for (it does not return until the next MessageDone or the turn-cap fail-open).
+    //   Holding the seam's record lock makes the flush stand at `send_input` — the session emits the echo after `send_input` succeeds (`AgentSession::write_now`), so the busy decision here reflects only the MessageDone.
     {
         let _stdin = captured.lock().unwrap();
         feed(OutputEvent::MessageDone {
@@ -2014,28 +1990,32 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
     let written = obs_seam::all_written(&captured);
     assert!(
         flushed,
-        "턴 종료 시 파킹분이 **한 배치로** 주입돼야(idle 게이트 flush): 실제 {}건",
+        "at turn end the parked items must be injected **as one batch** (idle gate flush): actual {} items",
         written.len()
     );
     let first = String::from_utf8_lossy(&written[0]).to_string();
     let second = String::from_utf8_lossy(&written[1]).to_string();
     assert!(
         first.contains("first") && !first.contains("second"),
-        "배치 첫 주입 = 가장 오래된 메시지(개별 봉투): {first}"
+        "the first batch injection = the oldest message (an individual envelope): {first}"
     );
     assert!(
         second.contains("second"),
-        "배치 둘째 주입 = 그 다음 메시지: {second}"
+        "the second batch injection = the next message: {second}"
     );
-    // 장부는 실제 주입 시점에만 delivered(ADR-0104).
+    // The ledger becomes delivered only at the actual injection moment (ADR-0104).
     for id in &ids {
         assert_eq!(
             messaging.ledger_statuses(id),
             vec![DeliveryStatus::Delivered],
-            "flush 주입 후 pending→delivered 전이"
+            "pending→delivered transition after the flush injection"
         );
     }
-    assert_eq!(messaging.parked_len(b_id), 0, "flush 후 큐 비움");
+    assert_eq!(
+        messaging.parked_len(b_id),
+        0,
+        "the queue is emptied after the flush"
+    );
     assert_eq!(
         seen.lock()
             .unwrap()
@@ -2043,18 +2023,15 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
             .filter(|o| o.to_name == to_name && o.is_delivered())
             .count(),
         2,
-        "배달 관측 2건(배치 각 항목)"
+        "2 delivery observations (each item of the batch)"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── C2 리뷰 fix 1: 재개 transcript 로 busy 를 부트스트랩하지 않는다 ──────────────────────────────
-// ★무엇을 막는 회귀인가(치명)★: resume 스폰은 transcript 를 링에 seed 하는데(core ADR-0079
-//   seed-before-pump), 그 transcript 가 **턴 중간에 끊긴** 것이면 진행 신호로 끝나고 종료 신호가 없다.
-//   그걸 관측으로 먹이면 (id, epoch) 가 "턴 중" 으로 찍히는데 그 턴의 종료는 **영원히 오지 않는다** → 그
-//   수신자 앞 모든 발송이 TTL 까지 파킹된다(깨울 수 없는 false-busy = 배달 정지).
+// ── C2 review fix 1: do not bootstrap busy from a resumed transcript ──────────────────────────────
+// Blocked regression (critical): a resume spawn seeds the transcript into the ring (core ADR-0079 seed-before-pump); a transcript cut mid-turn ends with a progress signal and no end signal, and feeding it as an observation marks (id, epoch) mid-turn with an end that never comes — every send to it parks until the TTL (a false-busy that cannot wake = delivery stops).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_a_resumed_transcript_never_bootstraps_busy() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -2073,7 +2050,7 @@ async fn c2_a_resumed_transcript_never_bootstraps_busy() {
     let (b_id, captured, core) = obs_seam::insert_observed_seam_recipient(&manager, false);
     let to_name = obs_seam::fallback_name(b_id);
 
-    // seed 픽스처 = 죽은 incarnation 의 transcript("턴 중간에서 끝난 과거" — 진행 신호만, 종료 신호 없음).
+    // The seed fixture = the transcript of a dead incarnation ("a past that ended mid-turn" — only a progress signal, no end signal).
     core.seed(vec![OutputEvent::TextDelta {
         text: "past mid-turn".to_string(),
         turn_id: None,
@@ -2082,7 +2059,7 @@ async fn c2_a_resumed_transcript_never_bootstraps_busy() {
 
     assert!(
         !busy.is_busy(b_id, 0),
-        "재개 transcript 로 busy 를 부트스트랩하면 그 busy 는 깨울 수 없다(TTL 까지 배달 정지)"
+        "if busy were bootstrapped from a resumed transcript that busy could not be woken (delivery stops until the TTL)"
     );
 
     let written_before = obs_seam::all_written(&captured).len();
@@ -2101,28 +2078,26 @@ async fn c2_a_resumed_transcript_never_bootstraps_busy() {
     .to_json();
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "부트스트랩이 없으니 즉시 배달: {v}"
+        "with no bootstrap it is delivered immediately: {v}"
     );
-    assert_eq!(messaging.parked_len(b_id), 0, "파킹 0");
+    assert_eq!(messaging.parked_len(b_id), 0, "parking 0");
 
     assert!(
         obs_seam::all_written(&captured).len() > written_before,
-        "주입이 실제로 일어났어야(전제)"
+        "the injection must have actually happened (premise)"
     );
     assert!(
         busy.is_busy(b_id, 0),
-        "라이브 emit 은 관측된다 — seed 배제가 '아무것도 안 본다' 가 아님을 못 박는다"
+        "a live emit is observed — pins that excluding the seed does not mean 'sees nothing'"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── C2: 턴 중에 죽은 수신자가 유령 busy 를 남기지 않는다(데몬 전 구간, claude 불요) ─────────────────
-// ★왜 데몬 레벨인가★: 단위 테스트는 코어 안에서만 보므로, 어댑터·게이트(매니저 표 → ManagerTurnFacts
-//   → BusyPolicy)가 코어와 **같은 표**를 보는지는 여기서만 잡힌다.
-// ★막는 회귀★: 턴 중에 죽은 화신의 "턴 중" 이 남으면 ① 그 이름 앞 파킹이 영영 안 풀리고 ② 상한 sweep 이
-//   죽은 에이전트에게 60초마다 도어벨을 울린다(프로세스 수명 내내).
+// ── C2: a recipient that died mid-turn leaves no phantom busy (the whole daemon span, no claude needed) ─────────────────
+// Daemon level because unit tests see only the core: whether the adapter and gate (manager table → ManagerTurnFacts → BusyPolicy) see the same table as the core is caught only here.
+// Blocked regression: if the "mid-turn" of an incarnation that died mid-turn remains, (1) parking to that name is never released and (2) the cap sweep rings the doorbell to the dead agent every 60 seconds for the whole process lifetime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_a_recipient_that_dies_mid_turn_leaves_no_busy_ghost() {
     use engram_dashboard_agent::types::TerminalReason;
@@ -2135,23 +2110,26 @@ async fn c2_a_recipient_that_dies_mid_turn_leaves_no_busy_ghost() {
         turn_id: None,
         message_id: None,
     });
-    assert!(busy.is_busy(b_id, 0), "전제: 게이트가 턴 중으로 본다");
+    assert!(
+        busy.is_busy(b_id, 0),
+        "premise: the gate sees it as mid-turn"
+    );
 
-    // 턴 종료 신호 없는 비정상 종료 = 상한 sweep 이 원래 다루던 그 모양.
+    // An abnormal exit with no turn-end signal = exactly the shape the cap sweep originally handled.
     core.finish(TerminalReason::Killed);
     assert!(
         !busy.is_busy(b_id, 0),
-        "종료한 화신은 게이트에서 즉시 사라져야(상한 30분을 기다리지 않는다)"
+        "a terminated incarnation must vanish from the gate immediately (without waiting for the 30-minute cap)"
     );
 
-    // 막혀 있던 주입 스레드가 뒤늦게 입력 에코를 낸다 = 유령 되살리기 시도(같은 epoch).
+    // The injection thread that was blocked emits the input echo late = a phantom revive attempt (same epoch).
     core.emit(OutputEvent::Structured {
         kind: "user".to_string(),
         json: "{}".to_string(),
     });
     assert!(
         !busy.is_busy(b_id, 0),
-        "종료 후 지각 에코가 유령 busy 를 되살리면 안 된다"
+        "a late echo after termination must not revive the phantom busy"
     );
     assert!(
         manager
@@ -2159,18 +2137,16 @@ async fn c2_a_recipient_that_dies_mid_turn_leaves_no_busy_ghost() {
             .in_turn_snapshot()
             .iter()
             .all(|(id, _, _)| *id != b_id),
-        "상한 sweep 이 훑는 목록에도 남지 않아야(죽은 에이전트 도어벨 반복 방지)"
+        "it must not remain in the list the cap sweep scans either (prevents repeated doorbells to a dead agent)"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── C2 실경로 축(claude-gated): 실 claude 턴 중 발송이 파킹되는지 ────────────────────────────────
-// ★이 축이 더하는 것★: busy 관측이 **실 claude decoder** 가 만든 이벤트로 일어난다(합성 emit 아님) —
-//   "capability 프록시(structured = 턴 이벤트 있음)" 가 실제로 성립하는지의 실측이다.
-// ★단언이 비대칭인 이유★: "턴 중 발송 → pending" 은 hard assert 다. 반면 **턴 종료 후 배달**은 claude 가
-//   실제로 `result` 라인을 내야 하지만(인증·네트워크·모델 지연) 90s 안에 안 오면 실패로 낸다(모듈 머리말).
+// ── C2 real-path axis (claude-gated): is a send during a real claude turn parked ────────────────────────────────
+// Adds: busy observation from events produced by the real claude decoder (not a synthetic emit) — measures whether the "capability proxy (structured = turn events exist)" really holds.
+// Asymmetric assertions: "a send mid-turn → pending" is a hard assert; delivery after the turn ends needs claude to emit a `result` line (authentication · network · model latency) and is reported as a failure if it does not arrive within 90s (module header).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -2194,13 +2170,11 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
         require_claude("c2_live_mid_turn_send_parks_and_delivers_after_turn_end");
     };
 
-    // 입력 전 claude 는 조용하다 — system/init 은 decoder 가 흘린다.
-    //   ★이 단언 하나로는 위약★: "게이트가 아예 없어서 통과" 와 구별되지 않는다. 관측 배선이 살아
-    //   있다는 증거는 첫 주입 뒤의 `is_busy` hard assert 가 진다.
+    // Before input claude is quiet — system/init is passed by the decoder. This assertion alone is weak (indistinguishable from "no gate at all"); the evidence that the observation wiring is alive is the `is_busy` hard assert after the first injection.
     assert!(
         wait_until(Duration::from_secs(5), || !busy
             .is_busy(info.id, info.epoch)),
-        "입력 전 수신자는 idle 로 관측돼야(턴 이벤트 없음)"
+        "before input the recipient must be observed as idle (no turn events)"
     );
 
     let v1 = handle_send(
@@ -2218,11 +2192,11 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     .to_json();
     assert_eq!(
         v1["results"][0]["status"], "delivered",
-        "idle 수신자에게는 즉시 주입: {v1}"
+        "an immediate injection to an idle recipient: {v1}"
     );
     assert!(
         busy.is_busy(info.id, info.epoch),
-        "주입 = 턴 시작 — 입력-시점 유저 에코(Structured)가 실 emit 경로로 표에 들어가야"
+        "injection = turn start — the input-time user echo (Structured) must enter the table through the real emit path"
     );
 
     let v2 = handle_send(
@@ -2240,10 +2214,14 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     .to_json();
     assert_eq!(
         v2["results"][0]["status"], "pending",
-        "실 claude 턴 진행 중 도착은 파킹: {v2}"
+        "arriving during a real claude turn is parked: {v2}"
     );
     let msg2 = v2["id"].as_str().expect("msg id").to_string();
-    assert_eq!(messaging.parked_len(info.id), 1, "턴 중 도착분이 대기");
+    assert_eq!(
+        messaging.parked_len(info.id),
+        1,
+        "the item that arrived mid-turn waits"
+    );
 
     let delivered = wait_until(Duration::from_secs(90), || {
         seen.lock().unwrap().iter().any(
@@ -2254,11 +2232,15 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     });
     assert!(
         delivered,
-        "[c2_live] 턴 종료(result) 후 파킹 배달이 90s 내 관측되지 않음(parked={}) — \
-         턴 이벤트 관측/idle flush 회귀 또는 실 claude 응답 지연",
+        "[c2_live] a parked delivery was not observed within 90s after the turn ended (result) (parked={}) — \
+         a turn-event observation/idle flush regression or real claude response latency",
         messaging.parked_len(info.id)
     );
-    assert_eq!(messaging.parked_len(info.id), 0, "턴 종료 flush 로 큐 비움");
+    assert_eq!(
+        messaging.parked_len(info.id),
+        0,
+        "the queue is emptied by the turn-end flush"
+    );
 
     manager.kill_agent(info.id).ok();
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
@@ -2266,11 +2248,8 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     handle.shutdown().await;
 }
 
-/// ── ADR-0088 Stage 1-오라클 4(write 실패): 실패 **관측 형태** — 단일 실패 레코드(부분/중복 관측 없음) ──
-/// ★증명하지 않는다(커버리지 공백)★: **실제 OS write 가 prefix 를 쓴 뒤 Err 를 내는 부분 배달** — 이 seam
-///   은 send_input 이 push **전에** 통째로 Err 를 반환하므로(원자 all-or-nothing 모사) "prefix 만 쓰이고
-///   실패" 상황 자체가 발생하지 않는다. ▶ agent 크레이트 `tests/stdio_physical_pipe.rs` ::
-///   `physical_pipe_partial_write_then_err_surfaces_as_err` 가 커버한다.
+/// ── ADR-0088 Stage 1 oracle 4 (write failure): the failure observation shape — a single failure record (no partial/duplicate observation) ──
+/// Does not prove (coverage gaps): partial delivery where a real OS write emits an Err after writing a prefix — in this seam send_input returns an Err wholesale before the push (atomic all-or-nothing), so "only a prefix written, then fails" never arises. ▶ `physical_pipe_partial_write_then_err_surfaces_as_err` in the agent crate's `tests/stdio_physical_pipe.rs`.
 #[tokio::test]
 async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -2280,7 +2259,7 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("stage1-write-err").await;
 
-    // fail=true → 로스터에 든 산 수신자이나 send_input 이 Err.
+    // fail=true → a live recipient on the roster but send_input is an Err.
     let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, true);
     let to_name = obs_seam::fallback_name(b_id);
 
@@ -2309,31 +2288,31 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "pending",
-        "write 실패는 파킹(pending): {v}"
+        "a write failure is parking (pending): {v}"
     );
 
     let g = seen.lock().unwrap();
     assert_eq!(
         g.len(),
         1,
-        "실패도 관측 레코드 정확히 1건(부분/중복 없음): {:?}",
+        "a failure also gives exactly 1 observation record (no partial/duplicate): {:?}",
         *g
     );
     let obs = &g[0];
-    assert!(obs.error.is_some(), "실패 = error Some");
+    assert!(obs.error.is_some(), "failure = error Some");
     assert_eq!(
         obs.bytes_written, None,
-        "실패 = bytes_written None(성공 필드 누출 없음)"
+        "failure = bytes_written None (no success field leaks)"
     );
-    assert_eq!(obs.msg_uuid, None, "실패 = msg_uuid None");
+    assert_eq!(obs.msg_uuid, None, "failure = msg_uuid None");
     assert_eq!(
         obs.to_epoch, None,
-        "실패 = to_epoch None(완결 write 없음 → attest 할 착지 incarnation 없음, 성공 필드 누출 없음)"
+        "failure = to_epoch None (no complete write → no landed incarnation to attest, no success field leaks)"
     );
-    assert!(!obs.is_delivered(), "실패 = !is_delivered()");
+    assert!(!obs.is_delivered(), "failure = !is_delivered()");
     assert!(
         obs_seam::all_written(&captured).is_empty(),
-        "write 실패면 수신자에 바이트가 꽂히지 않아야(캡처 0)"
+        "on a write failure no bytes must be stuck into the recipient (capture 0)"
     );
 
     drop(g);
@@ -2342,8 +2321,8 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
     handle.shutdown().await;
 }
 
-/// ── ADR-0088 Stage 1-오라클 5(epoch): **순차** incarnation 교체 시맨틱 — 현재 incarnation 에 배달 ──────
-/// ★설계 의도★: 메일은 논리 에이전트(안정 주소)를 향하므로 epoch pinning 을 **하지 않는다**(ADR-0086 §F5).
+/// ── ADR-0088 Stage 1 oracle 5 (epoch): sequential incarnation replacement semantics — delivered to the current incarnation ──────
+/// Design intent: mail is addressed to the logical agent (a stable address), so no epoch pinning (ADR-0086 §F5).
 #[tokio::test]
 async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     use engram_dashboard_agent::backend::InputEncoder;
@@ -2359,8 +2338,7 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     use engram_dashboard_messaging::envelope::Entrance;
     use std::sync::atomic::AtomicU8;
 
-    // 로컬 seam transport — obs_seam 의 것과 동형이나 여기선 epoch 별로 **다른 캡처 버퍼**를 심어야
-    //   incarnation 을 구분하므로 인라인으로 둔다(같은 AgentId, 다른 버퍼).
+    // Local seam transport — as obs_seam's, but different capture buffers per epoch are needed to tell incarnations apart, so it is inline (same AgentId, different buffer).
     struct NoopStatus;
     impl StatusSink for NoopStatus {
         fn status_changed(&self, _id: CoreAgentId, _s: AgentStatus, _e: u32) {}
@@ -2458,8 +2436,7 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     let to_name = obs_seam::fallback_name(id);
 
     let old_buf = insert_epoch(&manager, id, 0);
-    // 같은 AgentId 로 교체 주입 = 재시작(새 화신 표식) 모사 — `insert_test_session` 은 같은 id 를 덮으므로
-    //   맵엔 이제 B(표식 1)만 남는다. 두 값의 대소에는 뜻이 없다(표식은 난수 — `AgentProfile::epoch`).
+    // Replacement injection with the same AgentId = a restart (new incarnation marker) — `insert_test_session` overwrites the same id, so only B (marker 1) remains. The order of the two marker values has no meaning (random — `AgentProfile::epoch`).
     let new_buf = insert_epoch(&manager, id, 1);
 
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2487,36 +2464,39 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "교체된 현재 incarnation 으로 배달돼야(유실 없음, ADR-0086 §F5): {v}"
+        "must be delivered to the replaced current incarnation (no loss, ADR-0086 §F5): {v}"
     );
 
     let g = seen.lock().unwrap();
     assert_eq!(
         g.len(),
         1,
-        "논리 메시지 1건 → 관측 레코드 1건(wrong-epoch 이중배달 없음): {:?}",
+        "1 logical message → 1 observation record (no wrong-epoch double delivery): {:?}",
         *g
     );
-    assert_eq!(g[0].to_id, id, "레코드 수신자 = 그 안정 AgentId");
+    assert_eq!(
+        g[0].to_id, id,
+        "the record's recipient = that stable AgentId"
+    );
     assert_eq!(
         g[0].to_epoch,
         Some(1),
-        "레코드 to_epoch = 착지한 현재 incarnation(epoch 1) — 직접 단언"
+        "the record's to_epoch = the landed current incarnation (epoch 1) — a direct assertion"
     );
     drop(g);
 
     assert_eq!(
         new_buf.lock().unwrap().len(),
         1,
-        "현재 incarnation(epoch 1) 이 바이트를 받아야"
+        "the current incarnation (epoch 1) must receive the bytes"
     );
     assert!(
         old_buf.lock().unwrap().is_empty(),
-        "교체된 구 incarnation(epoch 0) 은 바이트를 받지 않아야(wrong-epoch 배달 없음)"
+        "the replaced old incarnation (epoch 0) must not receive bytes (no wrong-epoch delivery)"
     );
     assert!(
         String::from_utf8_lossy(&new_buf.lock().unwrap()[0]).contains("to-current-incarnation"),
-        "현재 incarnation 버퍼에 봉투 본체가 온전히 담겨야"
+        "the envelope body must be fully contained in the current incarnation buffer"
     );
 
     manager.kill_agent(id).ok();
@@ -2524,24 +2504,12 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     handle.shutdown().await;
 }
 
-/// ── ADR-0088 Stage 1-오라클(mid-flight epoch race): **결정적** resolve↔write 경쟁 재현 ──────────────
-/// ★증명한다★: handle_send 가 수신자를 해석(list_agents 스냅샷)한 **직후**, 수신자 주입 **직전**에
-///   같은 AgentId 가 새 표식의 incarnation 으로 교체되면(재시작 모사), write 는 resolve 가 본
-///   구 incarnation(표식 0)이 아니라 **write 해석 시점의** incarnation(표식 1)에 착지한다. (엄밀히는
-///   get_session 이후 한 번 더 동시 교체가 끼면 그 사이 "직전"이 된 incarnation 에 바이트가 갈 수도 있다 —
-///   그래도 to_epoch 는 실제 착지 incarnation 을 정확히 담으므로 record-self-sufficiency 는 유지된다.) 이 race 는 순차 교체
-///   (오라클 5)가 아니라 resolve↔write **사이**의 진짜 경쟁이다 — 프로덕션 yield-seam
-///   (ControlRegistry::set_mid_send_hook, feature=test-harness)이 write 직전에 hook 을 발화해 그 갭에
-///   결정적으로 개입한다(스케줄러 타이밍 의존 없음). ★ADR-0086 §F5 = design-accepted★: 메일은 논리
-///   에이전트(안정 주소)를 향하므로 새 incarnation 착지가 **올바른** 동작이다 — 유실 없음, 현재
-///   incarnation 배달. 그 F5 설계 의도를 레코드의 `to_epoch == Some(1)` 로 **직접 입증**한다
-///   (record-self-sufficient).
+/// ── ADR-0088 Stage 1 oracle (mid-flight epoch race): reproducing the deterministic resolve↔write race ──────────────
+/// Proves: if right after handle_send resolves the recipient (a list_agents snapshot) and right before injecting, the same AgentId is replaced by an incarnation with a new marker (a restart), the write lands on the incarnation (marker 1) at write-resolution time, not the old one (marker 0) resolve saw.
+/// (Strictly, one more concurrent replacement after get_session may land bytes on the incarnation that became current in between — to_epoch still carries the incarnation actually landed on, so record-self-sufficiency holds.) This is a true race between resolve↔write, not a sequential replacement (oracle 5): the production yield-seam
+/// (ControlRegistry::set_mid_send_hook, feature=test-harness) fires a hook right before the write and intervenes deterministically. ADR-0086 §F5 = design-accepted: landing on the new incarnation is correct (no loss); proven directly by the record's `to_epoch == Some(1)`.
 ///
-/// ★증명하지 않는다(정직 범위)★: 실 StdioTransport/실 claude 는 개입하지 않는다(seam 레벨 — EpochSeam 이
-///   write 를 캡처만). 여기서 주입한 그 한 지점(write 직전) 외의 다른 스케줄링 race(예: reachability↔write
-///   사이, 물리 OS-pipe 인터리브)는 다루지 않는다. 이 테스트가 잡는 것은 **resolve 스냅샷과 실제 write
-///   착지 incarnation 이 어긋날 수 있고, 그때 write 가 current 로 가며 레코드가 그 사실을 자기충족적으로
-///   담는다**는 계약이다.
+/// Does not prove: the real StdioTransport/real claude do not intervene (EpochSeam only captures the write), and scheduling races other than that injected point (e.g. reachability↔write, physical OS-pipe interleaving) are not covered.
 #[tokio::test]
 async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_deterministic() {
     use engram_dashboard_agent::backend::InputEncoder;
@@ -2661,15 +2629,12 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
 
     let new_buf_slot: Arc<Mutex<Option<Arc<Mutex<Vec<Vec<u8>>>>>>> = Arc::new(Mutex::new(None));
     let rotated = Arc::new(AtomicBool::new(false));
-    // ★Arc 순환 차단★: registry 는 hook(클로저)을 저장하고, registry 는 manager-side wiring 이 전이 소유한다.
-    //   여기서 hook 이 manager 를 Arc 로 강하게 잡으면 manager↔hook 참조 순환이 생겨, cleanup
-    //   (set_mid_send_hook(None)) 전에 단언이 panic 하면 manager(와 reaper 스레드)가 프로세스 수명 내내
-    //   누수된다. 그래서 Weak 로 잡고 발화 때 upgrade 한다.
+    // Cutting the Arc cycle: the registry stores the hook (a closure) and is transitively owned by the manager-side wiring; a hook holding the manager strongly forms a cycle, so an assertion panic before cleanup (set_mid_send_hook(None)) would leak the manager and reaper thread for the process lifetime. It is held as a Weak and upgraded when fired.
     let mgr_weak = Arc::downgrade(&manager);
     let slot_for_hook = new_buf_slot.clone();
     let rotated_for_hook = rotated.clone();
     registry.set_mid_send_hook(Some(Arc::new(move || {
-        // compare_exchange: 딱 한 번만 rotate(재발화 방어). 이미 rotate 됐으면 즉시 반환.
+        // compare_exchange: rotate exactly once (guards re-firing).
         if rotated_for_hook
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
@@ -2705,51 +2670,54 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
     let v = result.to_json();
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "mid-flight 교체 후에도 현재 incarnation 으로 배달돼야(유실 없음, ADR-0086 §F5): {v}"
+        "must be delivered to the current incarnation even after a mid-flight replacement (no loss, ADR-0086 §F5): {v}"
     );
-    let ack_id = v["id"].as_str().expect("msg-id 동봉").to_string();
+    let ack_id = v["id"].as_str().expect("msg-id is attached").to_string();
 
     let obs = {
         let g = seen.lock().unwrap();
         assert_eq!(
             g.len(),
             1,
-            "논리 메시지 1건 → 관측 레코드 1건(mid-flight 이중배달 없음): {:?}",
+            "1 logical message → 1 observation record (no mid-flight double delivery): {:?}",
             *g
         );
         g[0].clone()
     };
-    assert!(obs.is_delivered(), "is_delivered() = true(전량 수용)");
-    assert_eq!(obs.to_id, id, "레코드 수신자 = 안정 AgentId");
+    assert!(obs.is_delivered(), "is_delivered() = true (fully accepted)");
+    assert_eq!(obs.to_id, id, "the record's recipient = the stable AgentId");
     assert_eq!(
         obs.to_epoch,
         Some(1),
-        "write 는 교체된 현재 incarnation(epoch 1)에 착지 — resolve 시점(epoch 0)이 아님. to_epoch={:?}",
+        "the write lands on the replaced current incarnation (epoch 1) — not the resolve-time one (epoch 0). to_epoch={:?}",
         obs.to_epoch
     );
-    assert_eq!(obs.msg_id, ack_id, "레코드 msg_id = ACK id(상관 축 1)");
+    assert_eq!(
+        obs.msg_id, ack_id,
+        "the record msg_id = ACK id (correlation axis 1)"
+    );
     assert!(
         obs.msg_uuid.is_some(),
-        "성공 배달은 msg_uuid 를 담아야(상관 축 2)"
+        "a successful delivery must carry msg_uuid (correlation axis 2)"
     );
 
     let new_buf = new_buf_slot
         .lock()
         .unwrap()
         .clone()
-        .expect("hook 이 epoch 1 incarnation 을 교체 주입했어야");
+        .expect("the hook must have replace-injected the epoch 1 incarnation");
     assert_eq!(
         new_buf.lock().unwrap().len(),
         1,
-        "현재 incarnation(epoch 1) 이 바이트를 받아야"
+        "the current incarnation (epoch 1) must receive the bytes"
     );
     assert!(
         old_buf.lock().unwrap().is_empty(),
-        "resolve 가 본 구 incarnation(epoch 0) 은 바이트를 받지 않아야(mid-flight 착지는 current)"
+        "the old incarnation (epoch 0) the resolve saw must not receive bytes (a mid-flight landing goes to current)"
     );
     assert!(
         String::from_utf8_lossy(&new_buf.lock().unwrap()[0]).contains("mid-flight-race-body"),
-        "현재 incarnation 버퍼에 봉투 본체가 온전히 담겨야"
+        "the envelope body must be fully contained in the current incarnation buffer"
     );
 
     registry.set_mid_send_hook(None);
@@ -2758,7 +2726,7 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
     handle.shutdown().await;
 }
 
-// ── MCP eg_send 툴: happy path + 교정 에러(rmcp 클라이언트) ─────────────────────────────
+// ── MCP eg_send tool: happy path + corrective errors (rmcp client) ─────────────────────────────
 #[tokio::test]
 async fn mcp_send_message_tool_happy_and_error() {
     use rmcp::model::CallToolRequestParams;
@@ -2785,7 +2753,7 @@ async fn mcp_send_message_tool_happy_and_error() {
     let tools = client.list_all_tools().await.expect("list tools");
     assert!(
         tools.iter().any(|t| t.name == "eg_send"),
-        "tools 에 eg_send: {:?}",
+        "eg_send in tools: {:?}",
         tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
     );
 
@@ -2827,7 +2795,7 @@ async fn mcp_send_message_tool_happy_and_error() {
     let v: serde_json::Value = serde_json::from_str(&text).expect("ack json");
     assert_eq!(
         v["results"][0]["status"], "failed",
-        "★ADR-0111 결정 1★ MCP 입구에서도 없는 수신자는 실패 행: {text}"
+        "★ADR-0111 decision 1★ a nonexistent recipient is a failure row at the MCP entrance too: {text}"
     );
 
     let _ = client.cancel().await;
@@ -2837,12 +2805,10 @@ async fn mcp_send_message_tool_happy_and_error() {
     handle.shutdown().await;
 }
 
-// ── C3(ADR-0103): 회신 계약 — request→reply→replied 전이 + 기한 초과 notice(seam, claude 불요) ────────
+// ── C3 (ADR-0103): reply contract — request→reply→replied transition + overdue notice (seam, no claude needed) ────────
 //
-// ★왜 seam 인가★: 계약 전이·notice 주입은 **배관** 검증이라 실 claude 왕복이 필요 없다(모델 응답에
-//   의존하면 플레이키해진다). structured 캐리어 seam 수신자를 꽂아 주입 바이트를 직접 회계한다.
-// ★결정적 시계★: sweep 은 `now` 를 인자로 받으므로(순수성 불변식) 실제 대기 없이 기한을 넘긴 시각을 손으로
-//   밀어 넣는다 — sleep 기반 타임아웃 테스트의 플레이키를 원천 제거한다.
+// Seam because contract transitions and notice injection verify plumbing, and depending on model responses is flaky; a structured-carrier seam recipient is plugged in and the injected bytes accounted directly.
+// Deterministic clock: sweep takes `now` as an argument (purity invariant), so a past-deadline time is pushed in by hand with no real waiting.
 
 async fn post_send_json(
     base: &str,
@@ -2881,7 +2847,7 @@ async fn c3_request_reply_roundtrip_transitions_ledger_to_replied() {
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("c3-roundtrip").await;
 
-    // A = 요청자(발신자이자 회신 수신자), B = 회신자. 둘 다 structured seam(도달 가능).
+    // A = the requester (both sender and reply recipient), B = the replier. Both are structured seams (reachable).
     let (a_id, a_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let (b_id, b_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let a_name = obs_seam::fallback_name(a_id);
@@ -2897,7 +2863,7 @@ async fn c3_request_reply_roundtrip_transitions_ledger_to_replied() {
         epoch: 0,
     };
 
-    // 1) A → B: request(+ 기한). 봉투에 id/type/reply-by 가 실려야 B 가 회신할 id 를 안다.
+    // 1) A → B: request (+ deadline). The envelope must carry id/type/reply-by so that B knows the id to reply with.
     let ack = handle_send(
         &manager,
         &registry,
@@ -2906,7 +2872,7 @@ async fn c3_request_reply_roundtrip_transitions_ledger_to_replied() {
         ControlCommand {
             from: from_a,
             to: vec![b_name.clone()],
-            body: "코드 짜고 회신해".to_string(),
+            body: "Write the code and reply".to_string(),
             contract: SendContract {
                 request: true,
                 reply_by: Some("10m".to_string()),
@@ -2922,24 +2888,24 @@ async fn c3_request_reply_roundtrip_transitions_ledger_to_replied() {
     let req_id = ack["id"].as_str().expect("msg id").to_string();
     assert!(
         req_id.starts_with("m-") && req_id.len() == 10,
-        "wire id 는 짧은 base36 계약(spec §1): {req_id}"
+        "the wire id is a short base36 contract (spec §1): {req_id}"
     );
     assert_eq!(
         messaging.open_request_count(),
         1,
-        "계약이 장부에 열려야(spec §3 단계 2)"
+        "the contract must open in the ledger (spec §3 step 2)"
     );
 
-    // B 가 실제로 받은 바이트에 request 속성이 들어 있어야 한다(stream-json 인코딩 안이라 substring 검사).
+    // The bytes B actually received must contain the request attributes (inside the stream-json encoding, so a substring check).
     let b_line = String::from_utf8_lossy(&obs_seam::last_written(&b_captured)).to_string();
     for needle in ["type=", "request", &req_id, "reply-by", "10m"] {
         assert!(
             b_line.contains(needle),
-            "B 가 받은 봉투에 '{needle}' 가 있어야: {b_line}"
+            "the envelope B received must contain '{needle}': {b_line}"
         );
     }
 
-    // 2) B → A: 그 id 로 회신. 엄격 매칭이 계약을 닫고 이력을 Replied 로 전이한다.
+    // 2) B → A: reply with that id. Strict matching closes the contract and moves the history to Replied.
     let ack = handle_send(
         &manager,
         &registry,
@@ -2948,7 +2914,7 @@ async fn c3_request_reply_roundtrip_transitions_ledger_to_replied() {
         ControlCommand {
             from: from_b,
             to: vec![a_name.clone()],
-            body: "다 짰음, 테스트 통과".to_string(),
+            body: "Done coding, tests pass".to_string(),
             contract: SendContract {
                 request: false,
                 reply_by: None,
@@ -2957,31 +2923,35 @@ async fn c3_request_reply_roundtrip_transitions_ledger_to_replied() {
         },
     )
     .to_json();
-    assert_eq!(ack["results"][0]["status"], "delivered", "회신 ACK: {ack}");
+    assert_eq!(ack["results"][0]["status"], "delivered", "reply ACK: {ack}");
     assert!(
         ack.get("status").is_none(),
-        "회신 응답 shape 은 통보와 동일해야(새 필드 없음): {ack}"
+        "the reply response shape must be the same as a notice (no new field): {ack}"
     );
 
     assert_eq!(
         messaging.ledger_statuses(&req_id),
         vec![DeliveryStatus::Replied],
-        "request 레코드가 replied 로 전이(spec §3 단계 3)"
+        "the request record transitions to replied (spec §3 step 3)"
     );
-    assert_eq!(messaging.open_request_count(), 0, "계약이 닫혀야");
+    assert_eq!(
+        messaging.open_request_count(),
+        0,
+        "the contract must be closed"
+    );
 
     let a_line = String::from_utf8_lossy(&obs_seam::last_written(&a_captured)).to_string();
     assert!(
         a_line.contains("in-reply-to") && a_line.contains(&req_id),
-        "A 가 받은 회신 봉투에 in-reply-to: {a_line}"
+        "the reply envelope A received must carry in-reply-to: {a_line}"
     );
 
-    // 3) 기한이 지나도 notice 는 없다(회신된 계약은 due 대상이 아님).
+    // 3) Even after the deadline passes there is no notice (a replied contract is not a due target).
     messaging.sweep(Instant::now() + Duration::from_secs(3600));
     let a_line = String::from_utf8_lossy(&obs_seam::last_written(&a_captured)).to_string();
     assert!(
         !a_line.contains("<notice>"),
-        "회신된 계약엔 타임아웃 통지가 없어야: {a_line}"
+        "a replied contract must have no timeout notice: {a_line}"
     );
 
     manager.kill_agent(a_id).ok();
@@ -2998,10 +2968,8 @@ async fn c3_reply_by_timeout_injects_notice_to_the_sender() {
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("c3-timeout").await;
 
-    // A = 요청자(산·도달 — notice 를 받을 대상). B = **수용된** 수신자(산·도달)지만 **답하지 않는다**.
-    // ★ADR-0111 결정 1 로 setup 이 바뀌었다★: 옛 판은 부재 이름 앞으로 request 를 걸었는데, 부재는 이제
-    //   실패 행이고 **계약도 열리지 않는다**(추적 없는 request 금지). 기한 초과 통지의 전제는 "수용된
-    //   수신자에게 계약이 열렸다" 이므로 산 수신자를 쓰고, 회신이 없다는 사실만 그대로 둔다.
+    // A = the requester (live · reachable — receives the notice). B = an accepted recipient (live · reachable) that does not answer.
+    // Setup changed with ADR-0111 decision 1: absence is now a failure row and no contract opens either (no request without tracking); the overdue notice presupposes a contract opened to an accepted recipient, so a live recipient is used and only the missing reply is kept.
     let (a_id, a_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let (b_id, _b_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let silent_worker = obs_seam::fallback_name(b_id);
@@ -3019,7 +2987,7 @@ async fn c3_reply_by_timeout_injects_notice_to_the_sender() {
         ControlCommand {
             from: from_a,
             to: vec![silent_worker.clone()],
-            body: "해줘".to_string(),
+            body: "Do it".to_string(),
             contract: SendContract {
                 request: true,
                 reply_by: Some("1m".to_string()),
@@ -3030,13 +2998,17 @@ async fn c3_reply_by_timeout_injects_notice_to_the_sender() {
     .to_json();
     assert_eq!(
         ack["results"][0]["status"], "delivered",
-        "수용된 수신자에게 배달 — 그 수신자의 계약이 열린다(spec §3): {ack}"
+        "delivered to an accepted recipient — that recipient's contract opens (spec §3): {ack}"
     );
     let req_id = ack["id"].as_str().expect("msg id").to_string();
-    assert_eq!(messaging.open_request_count(), 1, "계약 1건(수신자 1명)");
+    assert_eq!(
+        messaging.open_request_count(),
+        1,
+        "1 contract (1 recipient)"
+    );
     assert!(
         obs_seam::all_written(&a_captured).is_empty(),
-        "아직 A(요청자)에게는 아무 것도 주입되지 않았다"
+        "nothing has been injected into A (the requester) yet"
     );
     let _ = b_id;
 
@@ -3047,26 +3019,25 @@ async fn c3_reply_by_timeout_injects_notice_to_the_sender() {
             &a_captured
         )
         .is_empty()),
-        "flush 레인이 notice 를 A 에게 주입해야"
+        "the flush lane must inject the notice into A"
     );
     let a_line = String::from_utf8_lossy(&obs_seam::last_written(&a_captured)).to_string();
     assert!(
         a_line.contains("<notice>"),
-        "기한 초과 통지는 <notice> 태그(from 없음 = 회신 대상 아님): {a_line}"
+        "the overdue notice is a <notice> tag (no from = not a reply target): {a_line}"
     );
     for needle in [req_id.as_str(), "1m", silent_worker.as_str(), "[engram]"] {
         assert!(
             a_line.contains(needle),
-            "notice 문구에 '{needle}' 가 있어야(spec §1 템플릿): {a_line}"
+            "the notice wording must contain '{needle}' (spec §1 template): {a_line}"
         );
     }
     assert!(
         !a_line.contains("<message"),
-        "notice 는 <message> 로 새면 안 된다(회신 가능성 오인): {a_line}"
+        "the notice must not leak as <message> (mistaken as repliable): {a_line}"
     );
 
-    // 비동기 레인이라 "안 늘어남" 은 잠깐 기다린 뒤 확인해야 의미가 있다(즉시 확인하면 아직 안 온 걸
-    //   안 온 것으로 오판할 수 있다 — false-green 방지).
+    // An asynchronous lane, so "does not grow" is meaningful only after waiting a moment (checking at once could misjudge not-yet-arrived as not arrived — false-green).
     let before = obs_seam::all_written(&a_captured).len();
     messaging.sweep(Instant::now() + Duration::from_secs(120));
     assert!(
@@ -3075,7 +3046,7 @@ async fn c3_reply_by_timeout_injects_notice_to_the_sender() {
         )
         .len()
             > before),
-        "notice 는 정확히 1회(두 번째 sweep 은 아무 것도 안 보낸다)"
+        "the notice is exactly once (the second sweep sends nothing)"
     );
 
     manager.kill_agent(a_id).ok();
@@ -3085,13 +3056,13 @@ async fn c3_reply_by_timeout_injects_notice_to_the_sender() {
 
 #[tokio::test]
 async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance() {
-    // 두 입구의 반려 코드/shape 가 같아야 한다(entrance-agnostic — ADR-0086). 여기선 HTTP 입구로 확인.
+    // The rejection code/shape of the two entrances must be the same (entrance-agnostic — ADR-0086); checked through the HTTP entrance.
     let (_m, registry, base, data_dir, handle, _messaging, _busy) = wire("c3-args").await;
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "c3-args-sender".to_string(), true);
     let tok = Some("c3-args-sender");
 
-    // 상호배타.
+    // Mutually exclusive.
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -3100,10 +3071,9 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(v["code"], "INVALID_SEND_ARGS", "request+reply_to: {body}");
-    assert!(v["hint"].is_string(), "교정 hint 동봉");
+    assert!(v["hint"].is_string(), "the corrective hint is attached");
 
-    // ★`reply_to` 는 수신자 정확히 1명 — **표기 단계에서** 막는다(spec §3 항목 7-① · ADR-0111)★.
-    //   ① 다중 수신자 + reply_to.
+    // `reply_to` takes exactly 1 recipient — blocked at the notation stage (spec §3 item 7-① · ADR-0111). 1) multiple recipients + reply_to.
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -3113,9 +3083,9 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         v["code"], "INVALID_SEND_ARGS",
-        "reply_to+다중 수신자: {body}"
+        "reply_to + multiple recipients: {body}"
     );
-    //   ② `@`토큰 동반 — **펼침 결과가 1명이어도** 반려한다(로스터 상태로 답이 갈리면 규칙을 못 배운다).
+    //   2) with an `@` token — refused even if the expansion is 1 person (an answer split by roster state could not be learned).
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -3125,9 +3095,9 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         v["code"], "INVALID_SEND_ARGS",
-        "reply_to+@주소는 표기 단계에서 반려(펼침 전): {body}"
+        "reply_to + an @ address is refused at the notation stage (before expansion): {body}"
     );
-    //   ③ 대조군 — 수신자 1명 + reply_to 는 통과한다(부재라 행만 실패).
+    //   3) control — 1 recipient + reply_to passes (a row-only failure because of absence).
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -3137,19 +3107,22 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert!(
         v.get("code").is_none(),
-        "단일 수신자 회신은 인자 반려 아님: {body}"
+        "a single-recipient reply is not an argument refusal: {body}"
     );
     assert_eq!(v["results"][0]["status"], "failed", "{body}");
 
-    // ★빈 수신자 목록 = INVALID_SEND_ARGS(spec §6)★ — 빈 배열·빈 문자열 둘 다.
+    // An empty recipient list = INVALID_SEND_ARGS (spec §6) — both an empty array and an empty string.
     for empty in [serde_json::json!([]), serde_json::json!("")] {
         let (_s, body) =
             post_send_json(&base, tok, serde_json::json!({ "to": empty, "body": "x" })).await;
         let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-        assert_eq!(v["code"], "INVALID_SEND_ARGS", "빈 수신자 목록: {body}");
+        assert_eq!(
+            v["code"], "INVALID_SEND_ARGS",
+            "an empty recipient list: {body}"
+        );
     }
 
-    // reply_by 단독.
+    // reply_by alone.
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -3157,9 +3130,9 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     )
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["code"], "INVALID_SEND_ARGS", "reply_by 단독: {body}");
+    assert_eq!(v["code"], "INVALID_SEND_ARGS", "reply_by alone: {body}");
 
-    // 표기 오류.
+    // Notation error.
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -3167,9 +3140,12 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     )
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["code"], "INVALID_SEND_ARGS", "기간 표기 오류: {body}");
+    assert_eq!(
+        v["code"], "INVALID_SEND_ARGS",
+        "a duration notation error: {body}"
+    );
 
-    // ★1분 미만 기한(리뷰 fix 7)★
+    // A deadline under 1 minute (review fix 7).
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -3177,12 +3153,15 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     )
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["code"], "INVALID_SEND_ARGS", "1분 미만 기한: {body}");
+    assert_eq!(
+        v["code"], "INVALID_SEND_ARGS",
+        "a deadline under 1 minute: {body}"
+    );
     assert!(
         v["hint"].as_str().unwrap_or_default().contains("1-minute"),
-        "hint 가 하한을 알려야: {body}"
+        "the hint must state the lower bound: {body}"
     );
-    // 대조군: 정확히 1분(초 표기)은 수용.
+    // Control: exactly 1 minute (in seconds notation) is accepted.
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -3192,11 +3171,10 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         v["results"][0]["status"], "failed",
-        "60s 는 유효한 표기다(수신자 부재로 행은 실패지만 INVALID_SEND_ARGS 가 아니다): {body}"
+        "60s is a valid notation (the row fails because the recipient is absent but it is not INVALID_SEND_ARGS): {body}"
     );
 
-    // ★`@`주소 request 는 이제 **허용**된다(ADR-0111 결정 5 — 옛 "v1 영구 금지" 폐기)★ — 아래 반려는
-    //   "request 라서" 가 아니라 "`@coders` 라는 주소가 없어서" 다(주소 공간 오류 = 전체 반려, ADR-0114 결정 3).
+    // An `@` address request is now allowed (ADR-0111 decision 5 — the old "v1 permanent ban" abolished): the refusal below is "there is no address `@coders`" (address-space error = whole refusal, ADR-0114 decision 3), not "because it is a request".
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -3204,9 +3182,11 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     )
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    // ★`GROUP_REQUEST_UNSUPPORTED` 는 폐지됐다(ADR-0111 결정 5 — 다중 수신자 request 허용)★. 이제 남은
-    //   반려는 **주소 공간 오류**뿐이다: 사용자 정의 그룹이 사라져 `@coders` 라는 주소가 존재하지 않는다.
-    assert_eq!(v["code"], "GROUP_NOT_FOUND", "없는 @주소: {body}");
+    // `GROUP_REQUEST_UNSUPPORTED` was abolished (ADR-0111 decision 5); the only remaining refusal is the address-space error — user-defined groups are gone, so `@coders` does not exist.
+    assert_eq!(
+        v["code"], "GROUP_NOT_FOUND",
+        "a nonexistent @ address: {body}"
+    );
 
     let (_s, body) = post_send_json(
         &base,
@@ -3215,26 +3195,28 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     )
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["code"], "GROUP_NOT_FOUND", "그룹 통보(미등록): {body}");
+    assert_eq!(
+        v["code"], "GROUP_NOT_FOUND",
+        "a group notice (unregistered): {body}"
+    );
 
-    // 옛 `{to, body}` 바디는 그대로 동작해야(통보 wire 호환).
+    // The old `{to, body}` body must still work (notice wire compatibility).
     let (status, body) = post_send(&base, tok, "nobody", "hi").await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         v["results"][0]["status"], "failed",
-        "통보 회귀(수신자 부재로 행만 실패 — 인자 반려가 아님): {body}"
+        "notice regression (a row-only failure because the recipient is absent — not an argument refusal): {body}"
     );
     let id = v["id"].as_str().expect("id");
-    assert!(id.starts_with("m-") && id.len() == 10, "id 포맷: {id}");
+    assert!(id.starts_with("m-") && id.len() == 10, "id format: {id}");
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ★C3 리뷰 fix 1★: 계약 필드(request/reply_to)는 XML 봉투 전용 — 콜론 포맷에선 반려된다.
-//   ★왜 통합 테스트인가★: 판정 로직 자체는 ingress 단위 테스트가 두 갈래(포맷·템플릿 env) 모두 덮는다.
-//   여기서 확인할 건 **실제 입구가 그 판정을 실제로 태우는지**(런타임 포맷 전환이 발송 반려로 이어지는지)다.
+// C3 review fix 1: the contract fields (request/reply_to) are XML-envelope only — refused in the colon format.
+//   Integration, because the decision logic is covered by the ingress unit tests in both branches (format · template env); this checks the real entrance rides that decision (a runtime format switch leads to a send refusal).
 #[tokio::test]
 async fn c3_contract_fields_are_rejected_while_the_colon_envelope_is_active() {
     use engram_dashboard_messaging::envelope::EnvelopeFormat;
@@ -3254,27 +3236,27 @@ async fn c3_contract_fields_are_rejected_while_the_colon_envelope_is_active() {
         let v: serde_json::Value = serde_json::from_str(&body).expect("json");
         assert_eq!(
             v["code"], "INVALID_SEND_ARGS",
-            "콜론 봉투에선 계약 필드 반려({payload}): {body}"
+            "contract fields refused in the colon envelope ({payload}): {body}"
         );
         assert!(
             v["hint"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("XML envelope"),
-            "교정 hint 가 사유를 말해야: {body}"
+            "the corrective hint must state the reason: {body}"
         );
     }
 
-    // 대조군 ①: 같은 콜론 포맷에서도 **통보**는 정상 접수된다(기존 동작 불변).
+    // Control ①: even in the same colon format a **notice** is accepted normally (existing behavior unchanged).
     let (status, body) = post_send(&base, tok, "nobody", "hi").await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         v["results"][0]["status"], "failed",
-        "통보는 포맷 반려에 걸리지 않는다(수신자 부재로 행만 실패): {body}"
+        "a notice is not caught by the format refusal (a row-only failure because the recipient is absent): {body}"
     );
 
-    // 대조군 ②: xml 로 되돌리면 계약 발송이 다시 접수된다(반려는 포맷에만 걸린 것).
+    // Control ②: reverting to xml accepts the contract send again (the refusal was tied only to the format).
     registry.set_envelope_format(EnvelopeFormat::Xml);
     let (_s, body) = post_send_json(
         &base,
@@ -3285,38 +3267,34 @@ async fn c3_contract_fields_are_rejected_while_the_colon_envelope_is_active() {
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         v["results"][0]["status"], "failed",
-        "xml 로 되돌리면 계약 발송이 접수된다(수신자 부재로 행만 실패 — 포맷 반려가 아님): {body}"
+        "reverting to xml accepts the contract send (a row-only failure because the recipient is absent — not a format refusal): {body}"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-/// stream-json 캐리어가 stdin 에 쓴 한 줄에서 **논리 봉투 텍스트**만 꺼낸다(`message.content[0].text`).
+/// Extracts only the logical envelope text (`message.content[0].text`) from a line the stream-json carrier wrote to stdin.
 ///
-/// ★왜 문자열 contains 가 아니라 파싱인가★: 캐리어가 봉투를 JSON 문자열로 감싸며 `"` 를 이스케이프하므로
-///   (`to=\"@all\"`) 원바이트에 대고 `to="@all"` 을 찾으면 **실제로는 맞는데 틀렸다고 나온다**. 봉투 golden
-///   단언은 캐리어 인코딩이 아니라 봉투 자체를 봐야 하므로 한 겹 벗기고 비교한다.
+/// Parsing, not string contains: the carrier wraps the envelope as a JSON string and escapes `"` (`to=\"@all\"`), so looking for `to="@all"` in raw bytes fails even when right; the envelope golden must look at the envelope itself, so one layer is peeled first.
 fn stream_json_text(written: &[u8]) -> String {
     let line = String::from_utf8_lossy(written);
     let v: serde_json::Value = serde_json::from_str(&line)
-        .unwrap_or_else(|e| panic!("stream-json 라인 파싱 실패({e}): {line}"));
+        .unwrap_or_else(|e| panic!("stream-json line parse failed ({e}): {line}"));
     v["message"]["content"][0]["text"]
         .as_str()
-        .unwrap_or_else(|| panic!("stream-json 라인에 봉투 텍스트가 없다: {line}"))
+        .unwrap_or_else(|| panic!("no envelope text in the stream-json line: {line}"))
         .to_string()
 }
 
-// ── S18 메시징 v1 C4 수용 시나리오(spec §4·§6): 그룹 fan-out 이 **실 입구(HTTP /control/send)** 를 탄다 ──
-// ★무엇을 증명하나(단위 테스트와 갈리는 지점)★: service.rs 단위 테스트는 fan-out 로직 자체를 덮는다.
-//   여기서 볼 건 **입구 배선**이다 — `@` 주소가 HTTP 입구에서 fan-out 갈래로 내려가고, 멤버별 결과가
-//   spec §6 의 `results[]`(멤버당 한 줄) JSON 으로 나오며, 실제 수신자 stdin 에 `to="@…"` 봉투가 쓰이는지.
+// ── S18 messaging v1 C4 acceptance scenario (spec §4·§6): group fan-out rides the real entrance (HTTP /control/send) ──
+// Where it differs from the unit tests: service.rs unit tests cover the fan-out logic; here the entrance wiring — an `@` address descends to the fan-out branch at the HTTP entrance, the per-member result comes out as the spec §6 `results[]` (one line per member) JSON, and a `to="@…"` envelope is written to the real recipient stdin.
 
 #[tokio::test]
 async fn c4_all_group_fans_out_to_live_agents_and_excludes_the_sender() {
     let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("c4-all").await;
 
-    // 발신자도 **산 structured 에이전트**여야 "자기 제외" 를 실증할 수 있다(로스터에 있어야 뺄 게 생긴다).
+    // The sender must also be a live structured agent to demonstrate "excluding itself" (someone in the roster to exclude).
     let (sender_id, sender_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let (a_id, a_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let (b_id, b_captured) = obs_seam::insert_seam_recipient(&manager, false);
@@ -3325,18 +3303,26 @@ async fn c4_all_group_fans_out_to_live_agents_and_excludes_the_sender() {
     let b_name = obs_seam::fallback_name(b_id);
     registry.issue(sender_id, 0, "c4-all-token".to_string(), true);
 
-    let (status, body) = post_send(&base, Some("c4-all-token"), "@all", "전원 리베이스 대기").await;
-    assert_eq!(status, reqwest::StatusCode::OK, "방송 접수도 200: {body}");
+    let (status, body) = post_send(
+        &base,
+        Some("c4-all-token"),
+        "@all",
+        "Everyone, wait for the rebase",
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "a broadcast acceptance is also 200: {body}"
+    );
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert!(
         v.get("status").is_none(),
-        "성공 응답엔 최상위 status 없음(spec §6): {body}"
+        "a success response has no top-level status (spec §6): {body}"
     );
 
-    let results = v["results"].as_array().expect("results 배열").clone();
-    // ★순서까지 단언한다(C4 리뷰 fix H)★: `got` 을 정렬하지 않는다 — 운영 `ManagerDeliveryPort` 가 로스터를
-    //   (이름, id) 오름차순으로 내므로 `@all` 의 결과 순서 = **이름 정렬 순서**여야 한다. 정렬하면 이 결정성이
-    //   테스트에서 사라지고(HashMap 순회 순서 그대로여도 초록) 실행마다 다른 주입 순서를 못 잡는다.
+    let results = v["results"].as_array().expect("results array").clone();
+    // Also asserts the order (C4 review fix H): `got` is not sorted — production `ManagerDeliveryPort` emits the roster in (name, id) ascending order, so `@all` result order must be name-sorted. Sorting here would hide the determinism (green even in HashMap order) and miss a different injection order per run.
     let got: Vec<(String, String)> = results
         .iter()
         .map(|r| {
@@ -3353,38 +3339,36 @@ async fn c4_all_group_fans_out_to_live_agents_and_excludes_the_sender() {
     want.sort();
     assert_eq!(
         got, want,
-        "@all = 산 전원 − 발신자, 각자 delivered, **이름 오름차순**(결정적 로스터 — fix H): {body}"
+        "@all = all live − the sender, each delivered, **in name ascending order** (a deterministic roster — fix H): {body}"
     );
     assert!(
         !results
             .iter()
             .any(|r| r["to"].as_str() == Some(sender_name.as_str())),
-        "발신자 자신은 @all 명단에 없다(자기 방송 메아리 금지): {body}"
+        "the sender itself is not on the @all list (no echo of one's own broadcast): {body}"
     );
 
     for (captured, who) in [(&a_captured, &a_name), (&b_captured, &b_name)] {
         let written = obs_seam::all_written(captured);
-        assert_eq!(written.len(), 1, "{who} 에게 정확히 1건 주입");
+        assert_eq!(written.len(), 1, "exactly 1 injection to {who}");
         assert_eq!(
             stream_json_text(&written[0]),
-            format!(r#"<message from="{sender_name}" to="@all">전원 리베이스 대기</message>"#),
-            "방송 봉투 golden — to 속성이 실려야({who})"
+            format!(
+                r#"<message from="{sender_name}" to="@all">Everyone, wait for the rebase</message>"#
+            ),
+            "the broadcast envelope golden — the to attribute must be carried ({who})"
         );
     }
     assert!(
         obs_seam::all_written(&sender_captured).is_empty(),
-        "발신자 자신의 stdin 엔 아무것도 쓰이지 않는다"
+        "nothing is written to the sender's own stdin"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-/// ★왜 실입구 테스트인가★: 이건 **판정들 사이의 불일치** 버그였다 — 그룹 갈래는 raw `to` 를
-///   `starts_with('@')` 로 보고, 그룹 이름 정규화는 trim 한 값을 본다. 그래서 `" @all"` 은 단일 발송으로
-///   흘러 "그런 이름의 에이전트 없음 → **부재 파킹**" 이 됐다: 발신자에겐 `pending` 성공으로 보이는데 실제로는
-///   아무도 못 받고 TTL 에 소멸한다(공백 한 칸 뒤에 숨은 조용한 유실). 두 판정이 같은 문자열을 보는지는
-///   입구를 실제로 태워야 증명된다.
+/// Real-entrance test because this was an inconsistency between decisions: the group branch looks at the raw `to` with `starts_with('@')`, group-name normalization at the trimmed value, so `" @all"` flowed to a single send and became "no agent of that name → absent parking" — a `pending` success to the sender, yet nobody receives it and it expires at the TTL (a silent loss behind one space). Only riding the entrance proves both decisions see the same string.
 #[tokio::test]
 async fn c4_leading_whitespace_in_the_destination_does_not_change_routing() {
     let (manager, registry, base, data_dir, handle, messaging, _busy) = wire("c4-trim").await;
@@ -3395,61 +3379,55 @@ async fn c4_leading_whitespace_in_the_destination_does_not_change_routing() {
     registry.issue(sender, 0, "c4-trim-token".to_string(), true);
     let tok = Some("c4-trim-token");
 
-    // ① `" @all"` — 공백이 있어도 **그룹 갈래**로 간다(단일 발송이 아니라 멤버별 회계).
-    let (status, body) = post_send(&base, tok, " @all", "공백 방송").await;
+    // 1) `" @all"` — even with a space it goes to the group branch (per-member accounting, not a single send).
+    let (status, body) = post_send(&base, tok, " @all", "Space broadcast").await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         v["results"][0]["to"], a_name.as_str(),
-        "results 는 **멤버 이름** — 그룹으로 라우팅됐다는 증거(단일 발송이면 ' @all' 이 그대로 실린다): {body}"
+        "results are **member names** — evidence it was routed as a group (if it were a single send ' @all' would be carried as is): {body}"
     );
     assert_eq!(v["results"][0]["status"], "delivered", "{body}");
     assert_eq!(
         messaging.parked_total_for_test(),
         0,
-        "공백 이름 앞으로 부재 파킹되지 않는다(조용한 유실 방지)"
+        "no absent parking to a space name (prevents silent loss)"
     );
     assert!(
         !stream_json_text(&obs_seam::last_written(&a_captured)).contains("to="),
-        "수용 수신자 1명이면 to 속성 없음(혼자 받은 편지): {:?}",
+        "with 1 accepted recipient there is no to attribute (a letter received alone): {:?}",
         stream_json_text(&obs_seam::last_written(&a_captured))
     );
 
-    // ② `" <이름>"` — ★해석 순서 ①의 트림이 **모든 원소**에 적용된다(spec §5 · ADR-0111)★. 옛 판은 단일
-    //    발송 주소를 바이트 그대로 두어(round-3 fix 4) 공백 붙은 지목이 부재 파킹으로 끝났는데, 부재 파킹이
-    //    폐지된 지금 그 결말은 **조용한 유실이 아니라 실패 행**이고 발신자에겐 아무 이득이 없다. spec 이
-    //    트림을 해석 순서에 명시하므로 데몬 단일점에서 다듬고, 그 결과 공백 지목은 **그 에이전트에게 배달**된다.
-    //    응답 `to` 는 발신자가 쓴 표기(트림된 토큰)를 그대로 돌려준다(WYSIWYA — ADR-0101).
+    // 2) `" <name>"` — the trim of resolution order 1 applies to every element (spec §5 · ADR-0111). The old version left the single-send address byte for byte (round-3 fix 4) so a padded target ended in absent parking; with absent parking abolished that outcome would be a failure row, not a silent loss, and the sender gains nothing.
+    //    The spec states the trim in the resolution order, so it is trimmed at the daemon single point and a padded target is delivered to that agent. The response `to` returns the sender's notation (the trimmed token) as is (WYSIWYA — ADR-0101).
     let padded = format!(" {a_name}");
-    let (status, body) = post_send(&base, tok, &padded, "공백 1:1").await;
+    let (status, body) = post_send(&base, tok, &padded, "Space 1:1").await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "앞뒤 공백은 해석 순서 ①에서 다듬어져 그 에이전트에게 배달된다(spec §5): {body}"
+        "surrounding whitespace is trimmed at resolution order ① and delivered to that agent (spec §5): {body}"
     );
     assert_eq!(
         v["results"][0]["to"],
         a_name.as_str(),
-        "결과 `to` 는 트림된 토큰(발신자 표기) 그대로: {body}"
+        "the result `to` is the trimmed token (the sender's notation) as is: {body}"
     );
     assert_eq!(
         messaging.parked_total_for_test(),
         0,
-        "공백 이름 앞으로 유령 큐가 생기지 않는다"
+        "no phantom queue is created for a space name"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── D(spec §6): 조회 입구 — `messages` 가 MCP·CLI 두 입구에서 동일 JSON ──────────────────────
+// ── D (spec §6): lookup entrance — `messages` gives the same JSON at both the MCP and CLI entrances ──────────────────────
 //
-// ★왜 통합 테스트인가★: 두 입구(MCP 툴 · CLI HTTP 라우트)가 **같은 공통 핸들러**를 부른다는 게 이 증분의
-//   핵심 계약(ADR-0086 entrance-agnostic)인데, 그건 배선을 실제로 태워야만 증명된다 — 단위 테스트는
-//   핸들러 하나만 본다. 그래서 실 데몬(MCP 서버 + auth 미들웨어 + MessagingService)을 띄우고 두 경로의
-//   응답 JSON 이 **동일한지** 직접 비교한다.
-// ★claude 불요★: 조회는 자식 프로세스 stdin 을 건드리지 않는다(읽기뿐).
+// Integration because that the two entrances call the same common handler is this increment's core contract (ADR-0086 entrance-agnostic), proven only by riding the wiring (a unit test sees one handler): a real daemon (MCP server + auth middleware + MessagingService) is started and the two paths' JSON compared for sameness.
+// No claude needed: the lookup does not touch child stdin (read only).
 
 #[tokio::test]
 async fn d_messages_reports_delivery_state_by_id_and_the_callers_open_items() {
@@ -3462,7 +3440,7 @@ async fn d_messages_reports_delivery_state_by_id_and_the_callers_open_items() {
     let tok = Some("d-msg-tok");
     let sender_name = obs_seam::fallback_name(sender);
 
-    // ① 통보 발송 → 그 id 로 status 조회.
+    // ① send a notice → look up its status by that id.
     let (_s, body) = post_send(&base, tok, &recv_name, "hello").await;
     let sent: serde_json::Value = serde_json::from_str(&body).expect("json");
     let msg_id = sent["id"].as_str().expect("id").to_string();
@@ -3477,14 +3455,20 @@ async fn d_messages_reports_delivery_state_by_id_and_the_callers_open_items() {
     assert_eq!(status, reqwest::StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(v["id"], msg_id.as_str());
-    assert_eq!(v["from"], sender_name.as_str(), "발신자 라벨: {body}");
-    assert_eq!(v["awaiting_reply"], false, "통보는 회신 대기 아님");
+    assert_eq!(v["from"], sender_name.as_str(), "the sender label: {body}");
+    assert_eq!(
+        v["awaiting_reply"], false,
+        "a notice is not awaiting a reply"
+    );
     assert_eq!(v["rows"].as_array().map(|a| a.len()), Some(1));
     assert_eq!(v["rows"][0]["to"], recv_name.as_str());
     assert_eq!(v["rows"][0]["status"], "delivered");
-    assert!(v["rows"][0]["age_secs"].is_number(), "경과 초 동봉: {body}");
+    assert!(
+        v["rows"][0]["age_secs"].is_number(),
+        "elapsed seconds are attached: {body}"
+    );
 
-    // ② 없는 id → MESSAGE_NOT_FOUND(반려 shape 은 발송과 동일).
+    // ② a nonexistent id → MESSAGE_NOT_FOUND (the refusal shape is the same as for send).
     let (_s, body) = post_control(
         &base,
         "/control/messages",
@@ -3496,23 +3480,32 @@ async fn d_messages_reports_delivery_state_by_id_and_the_callers_open_items() {
     assert_eq!(v["status"], "error");
     assert_eq!(v["code"], "MESSAGE_NOT_FOUND", "{body}");
 
-    // ③ 무인자 = 내 미결. **파킹 1건**이 outbound_pending 으로 잡힌다.
-    // ★ADR-0111 결정 1 로 setup 이 바뀌었다★: 부재 파킹이 폐지돼(실패 행) 미결을 만들 수 있는 경로는
-    //   spec §5 분기 3 뿐이다 — 여기선 **주입(write) 실패** 파킹을 쓴다(산·도달 수신자인데 stdin write 가
-    //   실패하는 seam). 관측 대상(미결 목록의 방향 태그·필드)은 그대로다.
+    // 3) no argument = my open items. 1 parked item is caught as outbound_pending.
+    // Setup changed with ADR-0111 decision 1: with absent parking abolished the only path making an open item is spec §5 branch 3 — an injection (write) failure parking (a seam where the recipient is live and reachable but the stdin write fails). The observed target (direction tags and fields of the open list) is unchanged.
     let (stuck_id, _stuck_captured) = obs_seam::insert_seam_recipient(&manager, true);
     let stuck_name = obs_seam::fallback_name(stuck_id);
     let (_s, _b) = post_send(&base, tok, &stuck_name, "parked").await;
     let (_s, body) = post_control(&base, "/control/messages", tok, serde_json::json!({})).await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["me"], sender_name.as_str(), "'나' 는 토큰 신원: {body}");
-    let open = v["open"].as_array().expect("open 배열");
-    assert_eq!(open.len(), 1, "미결 1건(배달된 통보는 미결 아님): {body}");
+    assert_eq!(
+        v["me"],
+        sender_name.as_str(),
+        "'me' is the token identity: {body}"
+    );
+    let open = v["open"].as_array().expect("open array");
+    assert_eq!(
+        open.len(),
+        1,
+        "1 open item (a delivered notice is not open): {body}"
+    );
     assert_eq!(open[0]["direction"], "outbound_pending");
     assert_eq!(open[0]["to"], stuck_name.as_str());
-    assert!(open[0].get("reply_by").is_none(), "통보 줄엔 계약 축 없음");
+    assert!(
+        open[0].get("reply_by").is_none(),
+        "a notice line has no contract axis"
+    );
 
-    // ④ 다른 신원으로 물으면 자기 것만 본다(남의 미결이 새지 않는다 — 신원은 토큰 파생).
+    // 4) asking with another identity shows only its own (another's open items do not leak — identity is token-derived).
     let other = AgentId::new_v4();
     registry.issue(other, 0, "d-msg-other".to_string(), true);
     let (_s, body) = post_control(
@@ -3526,7 +3519,7 @@ async fn d_messages_reports_delivery_state_by_id_and_the_callers_open_items() {
     assert_eq!(
         v["open"],
         serde_json::json!([]),
-        "남의 미결은 안 보인다: {body}"
+        "another's open items are not visible: {body}"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -3539,7 +3532,7 @@ async fn d_messages_shows_the_reply_debt_on_both_sides_of_a_request() {
 
     let (recv_id, _c) = obs_seam::insert_seam_recipient(&manager, false);
     let recv_name = obs_seam::fallback_name(recv_id);
-    // 수신자 신원 토큰 — 그쪽 관점의 미결(내가 답할 것)을 물어본다.
+    // The recipient identity token — asks from that side's view (what I must answer).
     registry.issue(recv_id, 0, "d-recv-tok".to_string(), true);
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "d-send-tok".to_string(), true);
@@ -3547,13 +3540,13 @@ async fn d_messages_shows_the_reply_debt_on_both_sides_of_a_request() {
     let (_s, body) = post_send_json(
         &base,
         Some("d-send-tok"),
-        serde_json::json!({ "to": recv_name, "body": "해줘", "request": true, "reply_by": "10m" }),
+        serde_json::json!({ "to": recv_name, "body": "Do it", "request": true, "reply_by": "10m" }),
     )
     .await;
     let sent: serde_json::Value = serde_json::from_str(&body).expect("json");
     let req_id = sent["id"].as_str().expect("id").to_string();
 
-    // 발신자 관점: 회신 대기(awaiting_their_reply) + 기한 표기 원본.
+    // The sender's view: awaiting reply (awaiting_their_reply) + the original deadline notation.
     let (_s, body) = post_control(
         &base,
         "/control/messages",
@@ -3562,14 +3555,17 @@ async fn d_messages_shows_the_reply_debt_on_both_sides_of_a_request() {
     )
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    let open = v["open"].as_array().expect("배열");
+    let open = v["open"].as_array().expect("array");
     assert_eq!(open.len(), 1, "{body}");
     assert_eq!(open[0]["direction"], "awaiting_their_reply");
     assert_eq!(open[0]["id"], req_id.as_str());
-    assert_eq!(open[0]["reply_by"], "10m", "기한 표기 원본 그대로: {body}");
+    assert_eq!(
+        open[0]["reply_by"], "10m",
+        "the original deadline notation as is: {body}"
+    );
     assert_eq!(open[0]["timed_out"], false);
 
-    // 수신자 관점: **내가 답할 차례**(reply_owed_by_me) — 같은 계약이 정반대 태그로 보인다.
+    // The recipient's view: my turn to answer (reply_owed_by_me) — the same contract with the opposite tag.
     let (_s, body) = post_control(
         &base,
         "/control/messages",
@@ -3578,12 +3574,12 @@ async fn d_messages_shows_the_reply_debt_on_both_sides_of_a_request() {
     )
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    let open = v["open"].as_array().expect("배열");
+    let open = v["open"].as_array().expect("array");
     assert_eq!(open.len(), 1, "{body}");
     assert_eq!(open[0]["direction"], "reply_owed_by_me", "{body}");
     assert_eq!(open[0]["id"], req_id.as_str());
 
-    // id 조회는 awaiting_reply 로 같은 사실을 알린다.
+    // An id lookup tells the same fact by awaiting_reply.
     let (_s, body) = post_control(
         &base,
         "/control/messages",
@@ -3606,7 +3602,7 @@ async fn call_mcp_tool(
     use rmcp::model::CallToolRequestParams;
     let mut params = CallToolRequestParams::default();
     params.name = name.to_string().into();
-    params.arguments = Some(args.as_object().expect("객체").clone());
+    params.arguments = Some(args.as_object().expect("object").clone());
     let result = client.call_tool(params).await.expect("call tool");
     let text = result
         .content
@@ -3616,8 +3612,7 @@ async fn call_mcp_tool(
     serde_json::from_str(&text).expect("tool json")
 }
 
-/// ★두 입구 동일 JSON(spec §6)★ — MCP 툴과 CLI 라우트의 응답이 **바이트 동형**인지 직접 비교한다.
-/// 어긋나면 한쪽 입구의 LLM 만 다른 계약을 배우게 되므로(발신 freeze 와 같은 계열의 사고) 회귀 그물이다.
+/// The same JSON at both entrances (spec §6) — directly compares whether the MCP tool's and the CLI route's responses are byte-isomorphic; if they diverge, only one entrance's LLM learns a different contract (the same family as the send freeze).
 #[tokio::test]
 async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() {
     use rmcp::transport::streamable_http_client::{
@@ -3635,32 +3630,32 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
     let transport = StreamableHttpClientTransport::from_config(config);
     let client = ().serve(transport).await.expect("MCP handshake");
 
-    // tools/list 노출 이름 = 프라이밍이 가르치는 이름과 같은 값.
+    // The tools/list exposed names = the same values the priming teaches.
     let tools = client.list_all_tools().await.expect("list tools");
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     for want in ["eg_send", "eg_messages"] {
         assert!(
             names.contains(&want.to_string()),
-            "tools 에 {want}: {names:?}"
+            "{want} in tools: {names:?}"
         );
     }
-    // ★`group` 툴 제거(ADR-0111 결정 4 · ADR-0112 결정 1)★ — 남아 있으면 프라이밍이 없는 툴을 가르친다.
+    // Removal of the `group` tool (ADR-0111 decision 4 · ADR-0112 decision 1) — if it remains, the priming teaches a nonexistent tool.
     assert!(
         !names.contains(&"group".to_string()),
-        "group 툴은 제거돼야: {names:?}"
+        "the group tool must be removed: {names:?}"
     );
 
-    // ① eg_messages 무인자 — 같은 토큰이므로 "나" 도 같고 결과도 같다(빈 미결).
+    // 1) eg_messages with no argument — same token so "me" is the same and the result the same (an empty open list).
     let via_mcp = call_mcp_tool(&client, "eg_messages", serde_json::json!({})).await;
     let (_s, body) = post_control(&base, "/control/messages", tok, serde_json::json!({})).await;
     let via_cli: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         via_mcp, via_cli,
-        "미결 조회가 두 입구에서 **바이트 동형**이어야"
+        "the open lookup must be **byte-isomorphic** at both entrances"
     );
     assert_eq!(via_mcp["open"], serde_json::json!([]));
 
-    // ② 조회 반려도 동일 shape·동일 code.
+    // 2) a lookup refusal is also the same shape and code.
     let via_mcp = call_mcp_tool(
         &client,
         "eg_messages",
@@ -3675,12 +3670,13 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
     )
     .await;
     let via_cli: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(via_mcp, via_cli, "반려 JSON 도 두 입구 동일");
+    assert_eq!(
+        via_mcp, via_cli,
+        "the refusal JSON is also the same at both entrances"
+    );
     assert_eq!(via_mcp["code"], "MESSAGE_NOT_FOUND");
 
-    // ③ ★발송 응답 parity(ADR-0111 다중 수신자)★ — MCP 는 **배열**, CLI 는 **콤마 문자열**로 같은 두
-    //    수신자를 지목한다. 표기는 입구마다 다르지만(콤마 분해는 CLI 전용) **정규화 이후는 데몬 단일점**
-    //    이라 `results[]` 가 바이트 동형이어야 한다(`id` 만 발송마다 다르므로 제외하고 비교).
+    // 3) send response parity (ADR-0111 multi-recipient) — MCP points at the same two recipients with an array, the CLI with a comma string. Notation differs per entrance (comma splitting is CLI-only) but is normalized at the daemon single point, so `results[]` must be byte-isomorphic (compared excluding `id`).
     let (x_id, _x) = obs_seam::insert_seam_recipient(&manager, false);
     let (y_id, _y) = obs_seam::insert_seam_recipient(&manager, false);
     let (x, y) = (obs_seam::fallback_name(x_id), obs_seam::fallback_name(y_id));
@@ -3694,16 +3690,15 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
     let via_cli: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         via_mcp["results"], via_cli["results"],
-        "다중 수신자 발송 응답이 두 입구에서 동일해야: mcp={via_mcp} cli={via_cli}"
+        "the multi-recipient send response must be the same at both entrances: mcp={via_mcp} cli={via_cli}"
     );
     assert_eq!(
         via_mcp["results"].as_array().map(|a| a.len()),
         Some(2),
-        "수신자 1명당 1행: {via_mcp}"
+        "1 row per recipient: {via_mcp}"
     );
 
-    // ④ ★MCP 배열 원소는 **콤마로 쪼개지 않는다**(spec §6)★ — `"a,b"` 는 그런 **이름 하나**다. 같은
-    //    문자열이 CLI 로 오면 두 수신자로 쪼개지므로, 여기서 두 입구의 결과는 **일부러 달라야** 한다.
+    // 4) an MCP array element is not split on commas (spec §6) — `"a,b"` is one such name. The same string via the CLI is split into two recipients, so the two entrances' results must deliberately differ.
     let split_free = call_mcp_tool(
         &client,
         "eg_send",
@@ -3711,25 +3706,23 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
     )
     .await;
     let rows = split_free["results"].as_array().expect("results");
-    assert_eq!(rows.len(), 1, "배열 원소는 이름 하나: {split_free}");
+    assert_eq!(rows.len(), 1, "an array element is one name: {split_free}");
     assert_eq!(rows[0]["status"], "failed");
     assert_eq!(
         rows[0]["code"], "RECIPIENT_NOT_FOUND",
-        "'x,y' 라는 이름의 에이전트는 없다(이중 분해 금지의 증거): {split_free}"
+        "there is no agent named 'x,y' (evidence of no double splitting): {split_free}"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-/// ★D 리뷰 B1 — 실 입구 판 회귀 그물★: 같은 이름의 산 에이전트가 둘일 때, exact AgentId 로 건 request 의
-/// 회신 의무가 **쌍둥이에게 잘못 붙지 않는다**. 신원은 두 토큰(각 AgentId)에서 파생되므로 이 축은 실제
-/// 인증 경로를 태워야만 증명된다(단위 테스트는 서비스 함수 인자만 본다).
+/// D review B1 — a real-entrance regression net: with two live agents of the same name, the reply obligation of a request made with the exact AgentId is not wrongly attached to the twin. Identity derives from two tokens (each AgentId), so this axis is proven only by the real authentication path (unit tests see only service function arguments).
 #[tokio::test]
 async fn d_messages_does_not_misassign_a_reply_obligation_to_a_same_named_twin() {
     let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("d-twin").await;
 
-    // ★같은 **보이는 이름**의 산 에이전트 둘★ — 이 상태에서만 이름-only 귀속의 오귀속이 드러난다.
+    // Two live agents with the same visible name — only then does the misattribution of name-only attribution show.
     let twin_a = AgentId::new_v4();
     let twin_b = AgentId::new_v4();
     let (_a, _cap_a) = obs_seam::insert_seam_recipient_named(&manager, false, twin_a, "worker");
@@ -3739,17 +3732,17 @@ async fn d_messages_does_not_misassign_a_reply_obligation_to_a_same_named_twin()
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "d-twin-send".to_string(), true);
 
-    // exact AgentId 로 A 에게만 request.
+    // exact AgentId request to A only.
     let (_s, body) = post_send_json(
         &base,
         Some("d-twin-send"),
-        serde_json::json!({ "to": twin_a.to_string(), "body": "해줘", "request": true, "reply_by": "10m" }),
+        serde_json::json!({ "to": twin_a.to_string(), "body": "Do it", "request": true, "reply_by": "10m" }),
     )
     .await;
     let sent: serde_json::Value = serde_json::from_str(&body).expect("json");
     let req_id = sent["id"].as_str().expect("id").to_string();
 
-    // A 관점: 내가 답할 차례.
+    // A's view: my turn to answer.
     let (_s, body) = post_control(
         &base,
         "/control/messages",
@@ -3758,12 +3751,16 @@ async fn d_messages_does_not_misassign_a_reply_obligation_to_a_same_named_twin()
     )
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    let a_open = v["open"].as_array().expect("배열");
-    assert_eq!(a_open.len(), 1, "지목된 A 는 의무를 진다: {body}");
+    let a_open = v["open"].as_array().expect("array");
+    assert_eq!(
+        a_open.len(),
+        1,
+        "the targeted A carries the obligation: {body}"
+    );
     assert_eq!(a_open[0]["direction"], "reply_owed_by_me");
     assert_eq!(a_open[0]["id"], req_id.as_str());
 
-    // B 관점: 받은 적이 없으므로 **아무 것도 없다**(옛 구현은 여기서 A 의 의무를 돌려줬다).
+    // B's view: it never received it, so there is nothing (the old implementation returned A's obligation here).
     let (_s, body) = post_control(
         &base,
         "/control/messages",
@@ -3775,14 +3772,14 @@ async fn d_messages_does_not_misassign_a_reply_obligation_to_a_same_named_twin()
     assert_eq!(
         v["open"],
         serde_json::json!([]),
-        "받은 적 없는 쌍둥이에게 의무가 붙으면 안 된다(B1): {body}"
+        "an obligation must not attach to a twin that never received it (B1): {body}"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-/// ★D 리뷰 B2 — 조회가 완전성을 단언하는지 여부를 응답에 싣는다★.
+/// D review B2 — the response carries whether the lookup asserts completeness.
 #[tokio::test]
 async fn d_messages_declares_whether_the_row_list_is_complete() {
     let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("d-trunc").await;
@@ -3804,14 +3801,14 @@ async fn d_messages_declares_whether_the_row_list_is_complete() {
     )
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    // 링이 아직 안 밀린 상태 = **확실히 전부**. 필드는 항상 실린다(부재를 완전성으로 오독하지 않게).
+    // The ring has not been pushed yet = certainly all of it. The field is always carried (absence must not be misread as completeness).
     assert_eq!(
         v["may_be_truncated"], false,
-        "완전성은 적극적으로 단언한다: {body}"
+        "completeness is asserted actively: {body}"
     );
     assert!(
         v.get("hint").is_none(),
-        "완전할 때는 경고 문장을 붙이지 않는다: {body}"
+        "when complete no warning sentence is attached: {body}"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);

@@ -1,57 +1,57 @@
 # Engram Dashboard
 
-여러 AI 에이전트(Claude Code·Codex)를 동시에 띄워 관리하는 Windows 데스크톱 앱입니다. 에이전트를 돌리는 데몬과 화면을 그리는 클라이언트가 분리되어 있어, 창을 닫아도 에이전트는 계속 돕니다.
+A Windows desktop app that launches and manages several AI agents (Claude Code·Codex) at the same time. The daemon that runs the agents and the client that draws the screen are separate, so the agents keep running even when you close the window.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue) ![Release](https://img.shields.io/github/v/release/kimsunzun/engram-dashboard) ![Status](https://img.shields.io/badge/status-WIP-orange) ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB) ![React](https://img.shields.io/badge/React-19-61DAFB) ![Rust](https://img.shields.io/badge/Rust-stable-DEA584)
 
-> 개발 중입니다. Windows 전용입니다.
+> Under development. Windows only.
 
-## 시연 영상
+## Demo video
 
 <p align="center">
   <a href="https://youtu.be/khL5L42PTcY">
-    <img src="https://img.youtube.com/vi/khL5L42PTcY/hqdefault.jpg" alt="Engram Dashboard 시연 영상" width="640">
+    <img src="https://img.youtube.com/vi/khL5L42PTcY/hqdefault.jpg" alt="Engram Dashboard demo video" width="640">
   </a>
   <br>
-  <em>▶ 시연 영상 (약 5분 15초)</em>
+  <em>▶ Demo video (about 5 min 15 s)</em>
 </p>
 
-| 구간 | 내용 |
+| Segment | Content |
 |---|---|
-| [0:00](https://youtu.be/khL5L42PTcY) | 에이전트 띄우기와 화면 배치 — Claude Code와 Codex를 터미널·채팅 두 방식으로 띄우고, 창을 열어 슬롯을 나눠 배치 |
-| [2:34](https://youtu.be/khL5L42PTcY?t=154) | 데몬 테스트 |
-| [3:37](https://youtu.be/khL5L42PTcY?t=217) | 오케스트레이션 |
+| [0:00](https://youtu.be/khL5L42PTcY) | Launching agents and arranging the screen — launch Claude Code and Codex in both terminal and chat modes, open a window and divide it into slots to arrange them |
+| [2:34](https://youtu.be/khL5L42PTcY?t=154) | Daemon test |
+| [3:37](https://youtu.be/khL5L42PTcY?t=217) | Orchestration |
 
-## 주요 기능
+## Main features
 
-- **화면 배치** — 창을 나눈 칸마다 에이전트를 띄우고, 칸을 별도 창으로 떼거나 탭으로 여러 배치를 오갑니다
-- **터미널 또는 채팅** — 에이전트 출력을 터미널 그대로 보거나, JSON 출력을 받아 채팅 화면으로 봅니다
-- **Claude Code·Codex** — 두 종류의 에이전트를 한 화면에 나란히 띄웁니다
-- **에이전트가 직접 조작** — 에이전트가 `engram` CLI로 동료를 깨우고, 새 에이전트를 만들고, 화면 배치까지 바꿉니다
-- **에이전트 간 메시징** — 상대가 작업 중이면 데몬이 메시지를 맡아두었다가 손이 비는 시점에 전달합니다
+- **Screen layout** — launch an agent in each area you split the window into, detach an area into a separate window, or switch between several layouts with tabs
+- **Terminal or chat** — view the agent output as a terminal as it is, or receive JSON output and view it on a chat screen
+- **Claude Code·Codex** — launch both kinds of agents side by side on one screen
+- **Agents operate directly** — through the `engram` CLI, an agent wakes a colleague, creates a new agent, and even changes the screen layout
+- **Messaging between agents** — if the other party is working, the daemon holds the message and delivers it when they are free
 
-## 설치·실행
+## Install and run
 
-[Releases 페이지](https://github.com/kimsunzun/engram-dashboard/releases/latest)에서 `engram-dashboard-*-windows-x64.zip`을 받아 압축을 풀고 `engram-dashboard.exe`를 실행하면 됩니다. 설치 과정은 없고, 아래만 미리 준비하면 됩니다.
+Download `engram-dashboard-*-windows-x64.zip` from the [Releases page](https://github.com/kimsunzun/engram-dashboard/releases/latest), extract it, and run `engram-dashboard.exe`. There is no installation step; you only need to prepare the following beforehand.
 
-- Windows 10 또는 11 (x64)
-- **Claude Code 설치 및 로그인** — `claude` 명령이 `PATH`에 있어야 합니다
-- **Codex 설치 및 로그인**(선택) — Codex 에이전트를 쓸 때만 필요합니다. `codex` 명령이 `PATH`에 있어야 합니다
-- **WebView2 런타임** — 최근 Windows에는 기본 포함되어 있지만, 없는 환경(LTSC·N 에디션 등)에서는 창이 뜨지 않습니다. [Microsoft 배포 페이지](https://developer.microsoft.com/microsoft-edge/webview2/)에서 받으세요
+- Windows 10 or 11 (x64)
+- **Claude Code installed and logged in** — the `claude` command must be on `PATH`
+- **Codex installed and logged in** (optional) — needed only when you use Codex agents. The `codex` command must be on `PATH`
+- **WebView2 runtime** — included by default in recent Windows, but in environments without it (LTSC, N editions, etc.) the window does not appear. Download it from the [Microsoft download page](https://developer.microsoft.com/microsoft-edge/webview2/)
 
-`claude`·`codex` 명령이 없으면 에이전트가 원인 안내 없이 뜨지 못합니다(안내 메시지가 아직 없습니다).
+If the `claude`·`codex` command is missing, an agent cannot launch, with no message explaining the cause (there is no guidance message yet).
 
-**창을 닫아도 앱은 종료되지 않습니다.** 트레이로 내려갈 뿐이고 데몬과 에이전트는 계속 돕니다. 완전히 끄려면 트레이 아이콘 메뉴에서 **「완전 종료」**를 고르세요 — 실행 중인 에이전트도 함께 내려갑니다.
+**The app does not exit when you close the window.** It only drops to the tray, and the daemon and agents keep running. To turn it off completely, choose **「완전 종료」** from the tray icon menu — the running agents go down with it.
 
-명부와 프리셋은 실행파일 옆 `data\` 폴더에 저장됩니다. 지우거나 옮기려면 먼저 앱을 완전히 종료하세요 — 켜져 있는 동안에는 데몬이 폴더를 붙들고 있습니다.
+The registry and presets are stored in the `data\` folder next to the executable. To delete or move it, fully quit the app first — while it is running, the daemon holds the folder.
 
-코드 서명을 하지 않아서 첫 실행 때 SmartScreen 경고가 뜰 수 있습니다.
+The code is not signed, so a SmartScreen warning may appear on first launch.
 
-## 개발
+## Development
 
-Node.js 22.12+(테스트가 플래그 없는 `require(ESM)`에 의존합니다) · Rust stable · Windows가 필요합니다.
+Node.js 22.12+ (the tests depend on flagless `require(ESM)`) · Rust stable · Windows are required.
 
-릴리즈 빌드(`launch\빌드.bat` · `scripts/build-release.ps1`)에는 cargo-about 0.9.2(`cargo install cargo-about --locked --features cli --version 0.9.2`)와 `npm install` 이 더 필요합니다 — [scripts/README.md](scripts/README.md) 참고. Node 는 22.22.2+ 또는 24.15+ 를 권합니다(그보다 낮으면 설치 때 엔진 경고만 납니다).
+The release build (`launch\빌드.bat` · `scripts/build-release.ps1`) additionally needs cargo-about 0.9.2 (`cargo install cargo-about --locked --features cli --version 0.9.2`) and `npm install` — see [scripts/README.md](scripts/README.md). Node 22.22.2+ or 24.15+ is recommended (anything lower only gives an engine warning at install time).
 
 ```bash
 git clone https://github.com/kimsunzun/engram-dashboard.git
@@ -60,15 +60,15 @@ npm install
 scripts\rebuild-run-debug.bat            # 데몬·클라이언트 빌드 + dev 서버 + 앱 실행까지 한 번에
 ```
 
-런처 목록과 빌드·테스트를 돌리는 방법은 [scripts/README.md](scripts/README.md)에 있습니다.
+The list of launchers and how to run builds and tests are in [scripts/README.md](scripts/README.md).
 
-## 문서
+## Documentation
 
-- [아키텍처](docs/reference/architecture.md) — 모듈·연결·런타임 불변식
-- [문서 인덱스](docs/README.md) — 설계 결정·개발 기록을 포함한 전체 문서
+- [Architecture](docs/reference/architecture.md) — modules, connections, runtime invariants
+- [Documentation index](docs/README.md) — all documents, including design decisions and development logs
 
-## 라이선스
+## License
 
 Copyright © 2026 kimsunzun. All rights reserved.
 
-오픈소스 라이선스는 정식 공개 시점에 부여할 예정입니다. 그 전까지 저장소 내용에는 기본 저작권 규칙이 적용되며, 외부 기여(PR)는 받지 않습니다.
+The open-source license will be granted at the time of the official release. Until then the default copyright rules apply to the repository contents, and external contributions (PRs) are not accepted.

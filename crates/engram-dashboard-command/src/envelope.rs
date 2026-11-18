@@ -6,13 +6,12 @@ use crate::CommandError;
 
 /// Round-trip correlation key — **identical across the whole path** (not created anew at each hop, ADR-0081 decision 4).
 ///
-/// Its representation is **the same** as the same-named type in `engram-dashboard-protocol` (uuid) — if a conversion sits in between when crossing a hop,
-/// correlation can break right there.
-/// ★Do not attach `Default` — a request id has no default★: deriving it yields the nil UUID, which means
-/// **every request has the same correlation key**, so a reply attaches to someone else's round trip. The same-named protocol-side
-/// type implements `default()` as a fresh v4, the exact opposite, so if you copy it over by shape alone that difference slips in
-/// silently (it is where `#[serde(default)]` and `..Default::default()` would reach in Step 2, when the envelope is carried
-/// as an `AgentCommand` variant). The only way to make one is [`RequestId::new`].
+/// Its representation is **the same** as the same-named type in `engram-dashboard-protocol` (uuid) — a conversion at a hop could break
+///   correlation.
+/// ★Do not attach `Default` — a request id has no default★: deriving it yields the nil UUID, so **every request has the same correlation
+///   key** and a reply attaches to someone else's round trip. The protocol-side type's `default()` mints a fresh v4,
+/// the exact opposite, so copying by shape alone would slip that difference in (`#[serde(default)]` and `..Default::default()` reach it
+///   when the envelope is carried as an `AgentCommand` variant). The only way to make one is [`RequestId::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RequestId(pub uuid::Uuid);
 
@@ -30,7 +29,7 @@ impl fmt::Display for RequestId {
 
 /// The **runtime** owner identifier obtained through registration.
 ///
-/// ★This is not the declared tier★ — the 「주인」 (owner) is the crate where the declaration lives, and this token points at which connection that owner
+/// ★This is not the declared tier★ — the 「owner」 is the crate where the declaration lives, and this token points at which connection that owner
 /// is attached to right now. Reading the two as the same thing turns the registry back into a build list (TRD §3-7 prohibition clause).
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -55,18 +54,18 @@ impl fmt::Display for OwnerToken {
 
 /// Request envelope.
 ///
-/// ★The missing direction field is intentional★ — **the connection it was written to is the direction**. As a field, the same envelope would have two
-/// truths (the field value / the actual connection), and the moment they disagree, routing splits (TRD §3-2).
-/// ★`name` is the outer cover, `args` is the inside★ — the daemon reads only the outer cover to do per-command authorization and observation, and does not parse the inside
-/// (the core of ADR-0081 「데몬 opaque」 (daemon opaque) is `args`).
+/// ★The missing direction field is intentional★ — **the connection it was written to is the direction**; a field would give the envelope
+///   two truths and routing splits when they disagree (TRD §3-2).
+/// ★`name` is the outer cover, `args` the inside★ — the daemon reads only the cover for per-command authorization and observation, never
+///   the inside (ADR-0081 "daemon opaque").
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommandEnvelope {
     pub name: String,
     pub request_id: RequestId,
-    /// ★This is the **destination** owner token — not the sender★. The previous hop overwrites it with the answer from its own registry
-    /// (`route`), so the receiving hop uses this value to check 「누구 앞으로 온 것인가」 (who was this addressed to) against its own registry and sort it
-    /// (the two-stage delivery of TRD §3-8). ★Do not read it as an identity★ — it does not point at the caller, so the material
-    /// for authorization (TRD §4-⑧) is `name` and **the connection that envelope came from**.
+    /// ★The **destination** owner token — not the sender★. The previous hop overwrites it from its own registry (`route`), so the
+    ///   receiving hop checks "who was this addressed to" against its own registry to sort it
+    /// (two-stage delivery, TRD §3-8). ★Not an identity★ — authorization material (TRD §4-⑧) is `name` and **the connection the envelope
+    ///   came from**.
     pub owner: OwnerToken,
     /// The `CATALOG_VERSION` of the sending crate. ★For diagnostics, not material for branching★ — generation numbers are per crate, so
     /// if the receiver compared it with its own number and gave it meaning, it would be wrong (TRD §4-①).
@@ -110,18 +109,18 @@ mod tests {
         let id = RequestId::new();
 
         let ok = CommandReply::ok(id, serde_json::json!({ "agent_id": "a" }));
-        let text = serde_json::to_string(&ok).expect("직렬화");
+        let text = serde_json::to_string(&ok).expect("serialize");
         assert_eq!(
-            serde_json::from_str::<CommandReply>(&text).expect("복호"),
+            serde_json::from_str::<CommandReply>(&text).expect("decode"),
             ok
         );
 
         let err = CommandReply::err(id, CommandError::of(ErrorCode::NotFound, "no agent 'x'"));
-        let text = serde_json::to_string(&err).expect("직렬화");
-        let decoded: CommandReply = serde_json::from_str(&text).expect("복호");
+        let text = serde_json::to_string(&err).expect("serialize");
+        let decoded: CommandReply = serde_json::from_str(&text).expect("decode");
         assert_eq!(decoded, err);
         assert_eq!(
-            decoded.outcome.expect_err("오류 답장").code(),
+            decoded.outcome.expect_err("error reply").code(),
             ErrorCode::NotFound
         );
     }

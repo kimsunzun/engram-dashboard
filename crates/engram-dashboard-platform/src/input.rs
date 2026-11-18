@@ -1,16 +1,14 @@
-//! The current state of input devices — cursor position, primary button, whether Esc is pressed. Callable from any thread (the place where the drop command reads
-//! after the drag ends — TRD S21-slot-docking 7th edition §3-2).
-//!
-//! All three read the OS's asynchronous state — they bypass the message queue, so whatever capture the webview holds or whatever another process's window does, they give
-//! the current device state. ★If a secure desktop (lock screen, UAC) is in front, the OS does not answer★ — the cursor comes back `None` and the button
-//! as released (MS `GetCursorPos` and `GetAsyncKeyState` docs · TRD S21-slot-docking 6.3rd edition §12 M14).
+//! The current state of input devices — cursor position, primary button, whether Esc is pressed. Callable from any thread (the drop
+//!   command reads it after the drag ends — TRD S21-slot-docking 7th edition §3-2).
+//! All three read the OS's asynchronous state, bypassing the message queue, so webview capture or another process's window does not
+//!   matter. ★If a secure desktop (lock screen, UAC) is in front the OS does not answer★ — the cursor is `None` and the
+//! button reads as released (MS `GetCursorPos`, `GetAsyncKeyState` docs; TRD S21-slot-docking 6.3 §12 M14).
 
-// ADR-0266
-// ADR-0295
+// ADR-0266, ADR-0295
 
 use crate::window::PhysPoint;
 
-/// The cursor position on screen (Win32 `GetCursorPos`). `None` = the OS did not answer (secure desktop and the like) · outside Windows.
+/// The cursor position on screen (Win32 `GetCursorPos`). `None` = the OS did not answer (secure desktop etc.) or outside Windows.
 pub fn cursor_pos() -> Option<PhysPoint> {
     #[cfg(windows)]
     {
@@ -28,8 +26,8 @@ pub fn cursor_pos() -> Option<PhysPoint> {
     }
 }
 
-/// Is the primary button pressed now. With the left-handed setting (button swap `SM_SWAPBUTTON`) it is the physical right button —
-/// `GetAsyncKeyState` looks at the physical button, not the logical one (MS docs). Outside Windows = false.
+/// Is the primary button pressed now. With the left-handed setting (`SM_SWAPBUTTON`) it is the physical right button — `GetAsyncKeyState`
+///   looks at the physical button (MS docs). Outside Windows = false.
 pub fn primary_button_down() -> bool {
     #[cfg(windows)]
     {
@@ -47,8 +45,8 @@ pub fn primary_button_down() -> bool {
     }
 }
 
-/// Is Esc pressed now (Win32 `GetAsyncKeyState(VK_ESCAPE)`). A very short Esc tap may already read as released
-/// (spike 2026-10-20 — the OS missed a short Esc 1/5). Outside Windows = false.
+/// Is Esc pressed now (Win32 `GetAsyncKeyState(VK_ESCAPE)`). A very short Esc tap may already read as released (spike 2026-10-20: missed
+///   1/5). Outside Windows = false.
 // TRD S21-slot-docking §3-2
 pub fn escape_down() -> bool {
     #[cfg(windows)]
@@ -84,14 +82,14 @@ mod tests {
         assert_eq!(primary_vk(true), VK_RBUTTON);
     }
 
-    /// It answers only when an interactive desktop is in front — on a CI runner or lock screen `None` may be the correct answer, so it is run by hand.
+    /// It answers only when an interactive desktop is in front — on a CI runner or lock screen `None` may be correct, so run it by hand.
     #[test]
-    #[ignore = "대화형 데스크톱에서 손으로"]
+    #[ignore = "by hand on an interactive desktop"]
     fn cursor_and_button_answer_on_an_interactive_desktop() {
         assert!(cursor_pos().is_some());
         assert!(
             !primary_button_down(),
-            "시험 중에는 주 버튼을 누르지 않는다"
+            "do not press the primary button during the test"
         );
     }
 }

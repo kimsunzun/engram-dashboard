@@ -1,7 +1,7 @@
-//! ② 격리 통합테스트 — AgentManager 전체 흐름을 실 셸 spawn 으로 단언 검증.
+//! ② Isolation integration test — asserts the whole AgentManager flow with a real shell spawn.
 //!
-//! 실 OS 프로세스(default shell)를 spawn 한다. 가볍고 named-mutex/전역 경합 없는 단일
-//! spawn 이라 default(자동 실행)로 둔다 — `cargo test -p engram-dashboard-agent` 에 잡힌다.
+//! A real OS process (default shell), light single spawn without named-mutex/global contention, so it runs by default under `cargo test -p
+//!   engram-dashboard-agent`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -56,7 +56,6 @@ impl RecordingSink {
 
 impl OutputSink for RecordingSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        // S15 B5 payload-generic: 콘솔 바이트만 수집(구조화 이벤트는 이 headless 테스트가 안 다룸).
         if let OutputPayload::Bytes(b) = frame.payload {
             self.output.lock().unwrap().extend_from_slice(b);
         }
@@ -76,9 +75,9 @@ impl StatusSink for RecordingSink {
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
 }
 
-// ── FIX 6: 제어 채널 provision 레이스 가드 — 같은 id 동시 spawn 이 서로를 짓밟지 않는다 ──────────
+// ── FIX 6: control channel provision race guard — concurrent spawns of the same id do not trample each other ──────────
 //
-// 실 DaemonControlChannel 없이 agent 의 예약(SpawnReservation) 인과만 격리 검증한다(ADR-0012 seam).
+// Verifies the agent's reservation (SpawnReservation) causality in isolation, without a real DaemonControlChannel (ADR-0012 seam).
 #[derive(Clone, Default)]
 struct CountingControl {
     live: Arc<Mutex<std::collections::HashSet<(AgentId, u32)>>>,
@@ -105,12 +104,13 @@ impl ControlChannel for CountingControl {
             epoch,
             url: "http://127.0.0.1:1/mcp".into(),
             token: format!("tok-{id}-{epoch}"),
-            // ADR-0099: config_path 는 Option — 이 테스트 double 은 MCP 채널 물리를 검증하지 않으므로 None.
+            // ADR-0099: config_path is an Option — this test double does not verify the MCP channel physics, so None.
             config_path: None,
             send_exe: None,
-            // ADR-0094: 이 테스트는 grant 번역을 검증하지 않으므로 빈 목록.
+            // ADR-0094
             grants: vec![],
-            // ADR-0133: 우편 인가 산출도 관심사 밖 — 데몬 산출 규칙만 흉내 낸다(재료가 둘이다).
+            // ADR-0133: computing mail authorization is out of concern too — it only imitates the daemon's computation rule (the
+            //   ingredients are two).
             mail_allowed: needs.uses_mail && !needs.accepts_mcp_config,
         }))
     }
@@ -127,8 +127,8 @@ impl CountingControl {
 
 #[test]
 fn concurrent_same_id_spawn_does_not_clobber() {
-    // 여기서 검증하는 건 SpawnReservation 의 exactly-one-wins 인과 그 자체다 — 제어 채널 소비
-    //   backend 의 provision-race 는 이 테스트가 다루지 않고, 그 가드가 동일하게 커버한다.
+    // Verified here = the exactly-one-wins causality of SpawnReservation itself; the provision race of control-channel-consuming backends
+    //   is not covered here (the same guard covers it).
     let control = CountingControl::default();
     let control_dyn: Arc<dyn ControlChannel> = Arc::new(control.clone());
     let status_dyn: Arc<dyn StatusSink> = Arc::new(RecordingSink::new());
@@ -150,7 +150,8 @@ fn concurrent_same_id_spawn_does_not_clobber() {
         control_dyn,
     ));
 
-    // 오래 사는 셸 프로필(동일 id) — spawn 성공분이 즉시 종료돼 reaper 가 토큰을 지우기 전에 관측하려고.
+    // A long-lived shell profile (same id) — so it can be observed before a spawn that succeeded exits immediately and the reaper erases
+    //   the token.
     let profile = AgentProfile::new(
         "race".into(),
         AgentCommand::Shell {
@@ -173,12 +174,11 @@ fn concurrent_same_id_spawn_does_not_clobber() {
             let ok_count = ok_count.clone();
             s.spawn(move || {
                 barrier.wait();
-                // ★세는 축은 「띄웠나」다 — 「오류가 아니었나」가 아니다★: 중복 요청은 이제 오류가 아니라
-                //   결말(moot)이라 전원이 Ok 를 받는다(ADR-0172). 화신을 만든 쪽은 여전히 하나뿐이고,
-                //   그것을 세는 것이 이 가드의 검증 대상이다.
+                // ★The counted axis is 「did it launch」, not 「was it not an error」★: duplicate requests are outcomes (moot), not errors, so
+                //   everyone gets Ok (ADR-0172). Only one side made the incarnation — counting it is what this guard verifies.
                 if manager
                     .spawn_agent(&profile, SpawnMode::Fresh)
-                    .expect("중복 요청은 오류가 아니다")
+                    .expect("a duplicate request is not an error")
                     .started()
                 {
                     ok_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -190,22 +190,22 @@ fn concurrent_same_id_spawn_does_not_clobber() {
     assert_eq!(
         ok_count.load(std::sync::atomic::Ordering::SeqCst),
         1,
-        "같은 id 동시 spawn 중 실제로 띄우는 것은 정확히 하나여야(예약 가드)"
+        "among concurrent spawns of the same id exactly one must actually launch (reservation guard)"
     );
     assert_eq!(
         manager.list_agents().len(),
         1,
-        "세션 맵에 정확히 1개(상대 세션을 짓밟지 않음)"
+        "exactly 1 in the session map (not trampling the other's session)"
     );
     assert_eq!(
         control.provisions.load(std::sync::atomic::Ordering::SeqCst),
         0,
-        "shell 은 supports_control_channel=false 라 provision 미호출(F3)"
+        "shell has supports_control_channel=false, so provision is not called (F3)"
     );
     assert_eq!(
         control.live_count(),
         0,
-        "shell 경로는 산 제어 채널 토큰을 만들지 않는다(registry 미접촉)"
+        "the shell path makes no live control channel token (registry untouched)"
     );
 
     let id = manager.list_agents()[0].id;
@@ -214,9 +214,9 @@ fn concurrent_same_id_spawn_does_not_clobber() {
 }
 
 // ── round-2 F3: backend-conditional provisioning (agent seam) ──────────────────────────────
-// 제어 채널을 소비하지 않는 backend(shell)는 provision 을 **아예 부르지 않는다** — 따라서 항상 실패하는
-// ControlChannel 을 주입해도 셸 스폰은 성공한다. 반대로 소비 backend(claude)는 provision Err 에
-// fail-closed(스폰 중단)한다. 두 인과를 agent 레벨에서 격리 검증한다(seam — 실 DaemonControlChannel 불요).
+// A backend that does not consume the control channel (shell) **never calls provision**, so a shell spawn succeeds even with an
+// always-failing ControlChannel. A consuming backend (claude) fails closed (aborts the spawn) on a provision Err. Both causalities are
+//   verified at the agent level (seam).
 #[derive(Clone, Default)]
 struct FailingControl {
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -272,15 +272,18 @@ fn shell_spawn_ignores_failing_control_channel() {
         false,
     );
     let res = manager.spawn_agent(&profile, SpawnMode::Fresh);
-    assert!(res.is_ok(), "셸은 provision 을 안 부르므로 스폰 성공(F3)");
+    assert!(
+        res.is_ok(),
+        "the shell does not call provision, so the spawn succeeds (F3)"
+    );
     assert_eq!(
         control.calls.load(std::sync::atomic::Ordering::SeqCst),
         0,
-        "셸 경로는 provision 을 호출하지 않아야(F3 backend-conditional)"
+        "the shell path must not call provision (F3 backend-conditional)"
     );
     assert!(
         control.seen_flags.lock().unwrap().is_empty(),
-        "shell → provision 미호출이라 전달된 accepts_mcp_config 플래그가 없어야"
+        "shell → provision not called, so there must be no accepts_mcp_config flag passed"
     );
     let id = manager.list_agents()[0].id;
     manager.kill_agent(id).expect("kill ok");
@@ -289,7 +292,7 @@ fn shell_spawn_ignores_failing_control_channel() {
 
 #[test]
 fn claude_spawn_fails_closed_on_provision_error() {
-    // ★claude 바이너리 불요★: provision Err 가 `?` 로 조기 반환하므로 실제 프로세스 spawn 에 닿지 않는다.
+    // ★No claude binary needed★: the provision Err returns early with `?`, so it never reaches an actual process spawn.
     let control = FailingControl::default();
     let manager = make_manager_with(Arc::new(control.clone()));
     let profile = AgentProfile::new(
@@ -303,21 +306,21 @@ fn claude_spawn_fails_closed_on_provision_error() {
         false,
     );
     let res = manager.spawn_agent(&profile, SpawnMode::Fresh);
-    assert!(res.is_err(), "claude 는 provision Err 에 fail-closed(F3)");
+    assert!(res.is_err(), "claude fails closed on a provision Err (F3)");
     assert_eq!(
         control.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
-        "claude 경로는 provision 을 정확히 1회 호출해야"
+        "the claude path must call provision exactly once"
     );
-    // ADR-0099(FIX 5): backend::accepts_mcp_config 가 claude=true 를 반환하고 그 값이 배관을 타고 도착.
+    // ADR-0099 (FIX 5): backend::accepts_mcp_config returns claude=true and that value arrives through the plumbing.
     assert_eq!(
         *control.seen_flags.lock().unwrap(),
         vec![true],
-        "claude 스폰은 provision 에 accepts_mcp_config=true 를 전달해야(MCP-capable)"
+        "a claude spawn must pass accepts_mcp_config=true to provision (MCP-capable)"
     );
     assert!(
         manager.list_agents().is_empty(),
-        "fail-closed spawn 은 세션을 등록하지 않아야"
+        "a fail-closed spawn must not register a session"
     );
 }
 
@@ -326,7 +329,6 @@ fn manager_spawn_write_resize_kill() {
     let status_sink = RecordingSink::new();
     let status_dyn: Arc<dyn StatusSink> = Arc::new(status_sink.clone());
 
-    // 세션 추적 비활성 — shell 이라 세션 파일이 없다.
     let store = Arc::new(FileProfileStore::new(
         std::env::temp_dir().join(format!("engram-test-headless-{}", Uuid::new_v4())),
     ));
@@ -354,12 +356,12 @@ fn manager_spawn_write_resize_kill() {
         .spawn_agent(&profile, SpawnMode::Fresh)
         .expect("spawn failed")
         .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        .expect("this call actually launches (not a duplicate request)");
 
     assert_eq!(
         manager.list_agents().len(),
         1,
-        "spawn 후 에이전트 1개여야 함"
+        "there must be 1 agent after spawn"
     );
 
     let out_sink = RecordingSink::new();
@@ -368,7 +370,10 @@ fn manager_spawn_write_resize_kill() {
         .expect("subscribe failed");
 
     let got_output = wait_until(Duration::from_secs(2), || out_sink.output_len() > 0);
-    assert!(got_output, "2s 내 PTY 초기 출력을 수신하지 못함");
+    assert!(
+        got_output,
+        "did not receive the initial PTY output within 2s"
+    );
 
     manager
         .write_stdin(info.id, b"echo headless-test\r\n", InputOrigin::User)
@@ -378,7 +383,7 @@ fn manager_spawn_write_resize_kill() {
     });
     assert!(
         echoed,
-        "echo 입력이 PTY 출력에 반영되지 않음(headless-test 미수신)"
+        "the echo input was not reflected in the PTY output (headless-test not received)"
     );
 
     manager.resize(info.id, 100, 30).expect("resize failed");
@@ -388,23 +393,26 @@ fn manager_spawn_write_resize_kill() {
     let removed = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
     let kill_elapsed = kill_started.elapsed();
 
-    assert!(removed, "kill 후 세션이 남아있음 — reaper 맵 제거 실패");
+    assert!(
+        removed,
+        "the session remains after kill — reaper map removal failed"
+    );
     assert!(
         kill_elapsed < Duration::from_secs(5),
-        "kill→reap 가 5s 안에 끝나지 않음(hang 의심): {kill_elapsed:?}"
+        "kill→reap did not finish within 5s (suspected hang): {kill_elapsed:?}"
     );
 
-    // 종점 알림은 pump 단독(ADR-0005)이라 약간 비동기일 수 있어 폴링.
+    // The terminal notification is the pump's alone (ADR-0005), so it can be slightly asynchronous, hence polling.
     let reached_killed = wait_until(Duration::from_secs(2), || {
         matches!(status_sink.statuses().last(), Some(AgentStatus::Killed))
     });
     let seq = status_sink.statuses();
     assert!(
         reached_killed,
-        "status 종점 Killed 미도달 — 전이 기록: {seq:?}"
+        "status did not reach the terminal Killed — transition record: {seq:?}"
     );
     assert!(
         seq.iter().any(|s| matches!(s, AgentStatus::Exiting)),
-        "kill 전이에 Exiting 과도기가 없음: {seq:?}"
+        "the kill transition has no transitional Exiting: {seq:?}"
     );
 }

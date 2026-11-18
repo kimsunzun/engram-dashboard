@@ -1,11 +1,6 @@
-// TRD S21-slot-docking §4-2 · §4-6: tab head = the source of an OS (HTML5) drag. Converts head events (press · dragstart · dragend) into values and passes them to
-//   `dragSource` (where decisions are made — release · revert · send), and registers this tab bar's decision geometry in `localDrag`. The subscriptions that connect the result notice
-//   (`tab_drop:done`) · that window's pointerdown · source window tab bar decision changes to `dragSource` are also attached and detached here (tab bar lifetime).
-// ★Do not remove the dragged head from under the pressed point inside dragstart★ — after handling dragstart, Chromium re-hit-tests the pressed point and if that head is not
-//   there it does not open the OS drag and immediately emits dragend(none) (measured on the old HTML5 drag 15/15 · other DOM changes did not end the drag
-//   25/25). So even if it is redrawn with the state dragstart changed, the tab bar DOM stays as is (`DragSourceSnapshot.motion` does not exist yet).
-// ★Stop only the dragstart of our drag★ — the HTML5 backend of the agent tree (react-arborist → react-dnd) cancels, with a `window` bubble listener, a dragstart that its own
-//   source did not receive (`react-dnd-html5-backend` `handleTopDragStart` — TRD §4-2). dragend is not stopped.
+// TRD S21-slot-docking §4-2 · §4-6: tab head = source of an OS (HTML5) drag. Converts head events (press · dragstart · dragend) into values for `dragSource` (where decisions are made — release · revert · send), registers this tab bar's decision geometry in `localDrag`, and attaches/detaches (tab bar lifetime) the subscriptions for the result notice (`tab_drop:done`) · this window's pointerdown · source window tab bar decision changes.
+// ★Do not remove the dragged head from under the pressed point inside dragstart★ — Chromium re-hit-tests the pressed point after dragstart and, if that head is gone, does not open the OS drag and emits dragend(none) at once (measured on the old HTML5 drag 15/15; other DOM changes did not end the drag 25/25). So the tab bar DOM stays as is even when redrawn with the dragstart-changed state (`DragSourceSnapshot.motion` does not exist yet).
+// ★Stop only the dragstart of our drag★ — the agent tree's HTML5 backend (react-arborist → react-dnd) cancels, with a `window` bubble listener, any dragstart its own source did not receive (`react-dnd-html5-backend` `handleTopDragStart` — TRD §4-2). dragend is not stopped.
 
 import { getIdentifier } from '@tauri-apps/api/app'
 import {
@@ -78,7 +73,7 @@ export interface DrawnStrip {
   /** Drawn order (during a drag = the order carrying the confirmed order move). */
   order: readonly string[]
   bounds: StripBounds
-  /** Measured 「머리들이 쓸 수 있는 폭」 (`null` = could not be measured). */
+  /** Measured width heads can use; `null` = unmeasurable. */
   available: number | null
 }
 
@@ -97,16 +92,9 @@ export interface UseTabDragSourceOptions {
   add: RefObject<HTMLElement | null>
   /** Tab canvas area — measures chrome (viewport − canvas). If absent or size 0, chrome is taken as 0. */
   canvas?: () => Element | null
-  /**
-   * Receive window facts (`window_frame` · `window:frame`) — default `true`. A waiting window is outside the shell window model, so it is `false` (the shell does not know that window,
-   * so the pull fails with `WindowNotFound`). Pulled anew every time it turns `true`.
-   */
+  /** Receive window facts (`window_frame` · `window:frame`) — default `true`. A waiting window is outside the shell window model (the pull would fail with `WindowNotFound`), so it is `false`. Pulled anew every time it turns `true`. */
   pullFrame?: boolean
-  /**
-   * The title row holding this tab bar (TRD S26-window-chrome §7-9 · R14 · D9) — if present, the vertical extent of the tab bar zone base is from the top to the bottom of this row (even a drop on the top margin above the tabs · `+`
-   * still falls in the tab bar). Horizontally, present or not, it is the left of the first tab ~ the right end of `+` — above the empty draggable area · number badge · window buttons is
-   * not the zone (`measure.ts` `stripZoneArea`). If absent, the vertical extent is the tab bar row.
-   */
+  /** The title row holding this tab bar (TRD S26-window-chrome §7-9 · R14 · D9): if present, the tab bar zone base spans this row vertically (a drop on the top margin above the tabs · `+` still counts). Horizontally always first tab ~ right end of `+` — the empty draggable area · number badge · window buttons are not the zone (`measure.ts` `stripZoneArea`). Absent → the tab bar row. */
   titleRow?: RefObject<HTMLElement | null>
 }
 
@@ -117,10 +105,7 @@ export interface TabDragSourceHandle {
   draggable(view: string): boolean
   /** The tab bar writes it on every render — the dragstart computation · decision geometry read it. */
   drawn: MutableRefObject<DrawnStrip | null>
-  /**
-   * Capture phase of head pointerdown — before the press-moment switch (`switch_tab`) (records the active before the press) · even if the close button inside the head stops bubbling, that press is recorded
-   * (material to block a drag started there).
-   */
+  /** Capture phase of head pointerdown — before the press-moment switch (`switch_tab`), recording the active before the press; also records presses on the close button inside the head (which stops bubbling), to block a drag started there. */
   onPointerDown(e: ReactPointerEvent<HTMLElement>, view: string): void
   onDragStart(e: ReactDragEvent<HTMLElement>, view: string): void
   onDragEnd(e: ReactDragEvent<HTMLElement>, view: string): void
@@ -149,8 +134,7 @@ export function useTabDragSource(o: UseTabDragSourceOptions): TabDragSourceHandl
   const drawn = useRef<DrawnStrip | null>(null)
   const press = useRef<Press | null>(null)
 
-  // Tab state that window's store applied — fed with that rendered value (the window layout draws the same value). The store sets the tab list to a new
-  //   array on every apply (`applyWindowTabsUpdated`), so that reference changing is exactly 「알림이 왔다」.
+  // Tab state the window's store applied, fed with the rendered value. The store sets the tab list to a new array on every apply (`applyWindowTabsUpdated`), so a changed reference is exactly "a notification arrived".
   useLayoutEffect(() => {
     src.model(o.label, { tabs: o.tabs, active: o.active })
   }, [src, o.label, o.tabs, o.active])
@@ -200,8 +184,7 @@ export function useTabDragSource(o: UseTabDragSourceOptions): TabDragSourceHandl
       const opts = live.current
       const head = e.currentTarget
       const dt = e.dataTransfer
-      // A drag started from the name input · close button is not a tab drag (text drag · button press) — the engine emits that drag on the draggable ancestor (the head),
-      //   so the pressed spot is looked at separately. It is not our drag so it is not stopped.
+      // A drag from the name input · close button is not a tab drag (text drag · button press) but the engine emits it on the draggable ancestor (the head), so the pressed spot is checked separately; not ours, so not stopped.
       if (opts.editing === view || onControl(head, e.target) || (p !== null && onControl(head, p.target)) || !dt) {
         e.preventDefault()
         return
@@ -247,8 +230,7 @@ export function useTabDragSource(o: UseTabDragSourceOptions): TabDragSourceHandl
 }
 
 /**
- * The tab that the window layout · tab bar show in that window — while the source window swap-redraws, the remaining tab (R15) · while waiting for the revert, the tab to revert to,
- * otherwise the model active. If `tabs` = `null` (that window's tabs not known yet), the model active.
+ * The tab the window layout · tab bar show: while the source window swap-redraws, the remaining tab (R15); while waiting for the revert, the tab to revert to; otherwise the model active. `tabs` = `null` (not known yet) → model active.
  */
 export function useShownTab(label: string, tabs: readonly string[] | null, active: string | null): string | null {
   const src = source
@@ -291,7 +273,7 @@ function plan(
   const row = o.row.current
   const i = d === null ? -1 : d.order.indexOf(view)
   if (app === null || row === null || d === null || i < 0) {
-    console.warn('[useTabDragSource] 끌기 자료를 지을 수 없다 — 끌기를 열지 않는다:', { app, row: row !== null, view })
+    console.warn('[useTabDragSource] cannot build the drag data — not starting the drag:', { app, row: row !== null, view })
     return null
   }
   const b = d.bounds.tabs[i]
@@ -307,8 +289,7 @@ function plan(
   const maximized = frame?.maximized ?? false
   const single = o.label !== MAIN_WINDOW_LABEL && o.tabs.length === 1
   const viewport: SizeCss = { w: window.innerWidth, h: window.innerHeight }
-  // The new window (for a single-tab popout, that window being restored) comes up in normal state — the maximized source's title row has no top margin (TRD S26-window-chrome
-  //   §7-6), so the new window's chrome and the vertical position of the tab bar are larger and lower by that difference. If not subtracted, the new window comes up shifted from the cursor by that amount.
+  // The new window (or the restored one for a single-tab popout) comes up in normal state — the maximized source's title row has no top margin (TRD S26-window-chrome §7-6), so the new chrome and tab bar vertical position differ by that amount; not subtracting it would shift the new window from the cursor.
   const rowGrowth = o.titleRow?.current == null ? 0 : titleRowHeight(false) - titleRowHeight(maximized)
   const sizes = dragSizes({
     restored,
@@ -319,9 +300,7 @@ function plan(
     chrome: chromeOf(o.canvas?.() ?? null, viewport, rowGrowth),
     single,
   })
-  // W1 of `dragGrab` = the width of a single-tab head in the new window's tab bar — the new window's (popout) tab bar row is taken to be the whole inner width of that window and `+` the same
-  //   width as this window's (a popout has no chrome left or right of the tab bar — `PopoutPage` · [untested] TRD §9-2 · M2 measures it). A maximized single-tab popout is
-  //   computed with the restored window width (TRD §3-5).
+  // W1 of `dragGrab` = the single-tab head width in the new window's tab bar: the popout tab bar row is the whole inner width and `+` the same width as here (no chrome left/right of the tab bar — `PopoutPage` · [untested] TRD §9-2 · M2 measures it). A maximized single-tab popout uses the restored window width (TRD §3-5).
   const newWidth = sizes.size !== null ? sizes.size.w : maximized && restored !== null ? restored.w : null
   const addW = o.add.current?.getBoundingClientRect().width ?? 0
   const headRoom = newWidth === null ? null : Math.max(0, newWidth - addW)

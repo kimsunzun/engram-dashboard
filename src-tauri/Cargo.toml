@@ -8,23 +8,23 @@ edition = "2021"
 [lib]
 name = "engram_dashboard_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
-# ★lib 내장 유닛테스트 타깃을 끄고 아래 `[[test]] lib_unit` 으로 대체한다★ — 그 내장 타깃만은
-#   `cargo:rustc-link-arg-tests=` 가 닿지 않아 manifest 리소스를 못 받고, manifest 없는 exe 는
-#   comctl32 v5.82(TaskDialogIndirect 없음)를 물어 로더 단계에서 0xC0000139 로 죽는다(build.rs 참조).
-#   cargo 의 `-tests` 는 「tests/ 폴더 타깃 = kind test」를 뜻하므로, 같은 소스를 명시 `[[test]]` 로
-#   한 번 더 선언하면 그 인자를 받는 타깃이 된다.
-# ★남는 함정 — 이 플래그는 **기본 선택**에서만 뺀다★(실측): `--lib` 도 `--all-targets` 도 여전히 그
-#   내장 타깃을 골라 `engram_dashboard_lib-<hash>.exe` 를 짓고, 그 exe 는 manifest 를 못 받아 그대로
-#   0xC0000139 로 죽는다. 매니페스트로 닫을 수 있는 구멍이 아니니 **호출 형태로 피한다** — 이 패키지의
-#   lib 유닛테스트를 도는 유일하게 올바른 명령은 `cargo test -p engram-dashboard --test lib_unit` 이다.
+# ★Turn off the lib's built-in unit test target and replace it with `[[test]] lib_unit` below★ — only that built-in target
+#   is not reached by `cargo:rustc-link-arg-tests=`, so it gets no manifest resource, and an exe without a manifest
+#   binds comctl32 v5.82 (no TaskDialogIndirect) and dies at the loader stage with 0xC0000139 (see build.rs).
+#   cargo's `-tests` means "targets in the tests/ folder = kind test", so declaring the same source once more as an explicit `[[test]]`
+#   makes it a target that receives that argument.
+# ★Remaining trap — this flag only removes it from the **default selection**★ (measured): `--lib` and `--all-targets` still pick that
+#   built-in target and build `engram_dashboard_lib-<hash>.exe`, and that exe gets no manifest and still
+#   dies with 0xC0000139. It is not a hole a manifest can close, so **avoid it by the invocation form** — the only correct command
+#   to run this package's lib unit tests is `cargo test -p engram-dashboard --test lib_unit`.
 test = false
 # ★doctest is a field **independent** of `test`★ — the `test = false` above does not turn it off (it defaults to true,
 #   and the rlib crate-type keeps the target eligible), so it is turned off here. Why off = this package has no
 #   doctest (no code fence in its doc comments).
 doctest = false
 
-# lib 유닛테스트(`mod tests`, src/** 전역)의 실제 실행 타깃. 위 `[lib] test = false` 의 짝이라
-#   둘 중 하나만 손대면 테스트가 통째로 사라지거나 0xC0000139 가 돌아온다.
+# The actual run target of the lib unit tests (`mod tests`, across src/**). It pairs with `[lib] test = false` above, so
+#   touching only one of the two makes the tests vanish entirely or brings 0xC0000139 back.
 [[test]]
 name = "lib_unit"
 path = "src/lib.rs"
@@ -36,51 +36,51 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-# ★snap-overlay — 기본 OFF(사용자 결정 Q1 2026-10-24 · TRD S26-window-chrome §8-4)★: Windows 11 스냅 레이아웃 메뉴를 웹이
-#   그린 최대화 단추에서 뜨게 하는 오버레이(platform `window::snap`)와 그 invoke `report_max_button_rect`
-#   (`src/commands/snap_overlay.rs`)를 컴파일에 넣는다. 켠 빌드의 컴파일 확인 = `cargo check -p engram-dashboard --features
-#   snap-overlay`. ★`cargo build` 로 지은 셸 exe 는 띄우지 않는다★(`.claude/worker-rules.md` ·
-#   ADR-0137) — 띄울 exe 를 짓는 `scripts/build-client-shell.mjs` 는 기능 인자를 받지 않는다. 띄울 수 있는 켠 빌드는 이
-#   기능을 켜는 날 그 스크립트에 기능 넘기기를 더해서 짓는다(지금은 없다).
-#   꺼진 빌드에서 창 사실 `caption.snap_overlay` 는 늘 거짓이라 웹이 그 invoke 를 부르지 않는다. 운영 그래프에 이 기능이
-#   없다는 것과 켠 빌드가 컴파일된다는 것은 CI 가 잰다(`ci.yml` 의 `snap-overlay gate 1` · `2`). ADR-0304
+# ★snap-overlay — default OFF (user decision Q1 2026-10-24 · TRD S26-window-chrome §8-4)★: compiles in the overlay that makes the Windows 11 snap layout menu
+#   appear from the maximize button the web draws (platform `window::snap`) and its invoke `report_max_button_rect`
+#   (`src/commands/snap_overlay.rs`). Compile check of the enabled build = `cargo check -p engram-dashboard --features
+#   snap-overlay`. ★Do not launch a shell exe built with `cargo build`★ (`.claude/worker-rules.md` ·
+#   ADR-0137) — `scripts/build-client-shell.mjs`, which builds the exe to launch, takes no feature argument. A launchable enabled build
+#   is built by adding feature passing to that script on the day this feature is turned on (there is none now).
+#   In a build with it off, the window fact `caption.snap_overlay` is always false, so the web does not call that invoke. That this feature is absent
+#   from the production graph and that the enabled build compiles are measured by CI (`snap-overlay gate 1` · `2` in `ci.yml`). ADR-0304
 [features]
 snap-overlay = ["engram-dashboard-platform/snap-overlay"]
 
 [dependencies]
-# caret resolve(현재 2.11.3 = 최신 2.x). 2.11.3에서 channel-data 데드락 수정 흡수
-#   (carrier 리서치 2026-06-28: docs/research/tauri-channel-multiwindow-carrier-…). Channel spike 검증 완료.
-# ADR-0026 2단계: tray-icon=네이티브 시스템 트레이, image-ico=Image::from_bytes 의 .ico 디코드(트레이
-# 아이콘을 .ico 에서 RGBA 로 풀어 컬러/회색 두 벌 생성 — 별도 image crate 불필요).
+# caret resolve (currently 2.11.3 = latest 2.x). 2.11.3 absorbs the channel-data deadlock fix
+#   (carrier research 2026-06-28: docs/research/tauri-channel-multiwindow-carrier-…). Channel spike verified.
+# ADR-0026 step 2: tray-icon = native system tray, image-ico = .ico decoding for Image::from_bytes (decodes the tray
+# icon from .ico into RGBA to make the color/gray pair — no separate image crate needed).
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
 tauri-plugin-opener = "2"
-# 네이티브 폴더 선택 다이얼로그(webview 밖 OS 창) — 프론트의 에이전트 만들기가 @tauri-apps/plugin-dialog 의
-#   open({directory:true}) 로 호출한다. 권한은 dialog:allow-open 만 부여(default.json · popup.json). 명령 거절 박스도 이
-#   플러그인의 Rust API 를 쓴다(`src/lib.rs` 의 등록 줄).
+# Native folder picker dialog (an OS window outside the webview) — the frontend's agent creation calls it via
+#   open({directory:true}) of @tauri-apps/plugin-dialog. Only dialog:allow-open is granted (default.json · popup.json). The command-refusal box also uses
+#   this plugin's Rust API (the registration line in `src/lib.rs`).
 tauri-plugin-dialog = "2"
-# single-instance: ADR-0029(daemon-only) — 앱은 데몬 클라이언트 전역 단일 인스턴스(플러그인 무조건 등록).
+# single-instance: ADR-0029 (daemon-only) — the app is a global single instance as the daemon client (plugin always registered).
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
-# S14 ViewManager: 레이아웃 타입을 프론트로 미러(ts-rs). ★protocol/daemon crate 가 아니라 src-tauri
-# 안에서만 export★ — 데몬 UI 불가지론(ADR-0035): View/Layout/Slot 타입은 데몬·protocol 에 누설 금지.
+# S14 ViewManager: mirrors the layout types to the frontend (ts-rs). ★Exported only from inside src-tauri, not from the
+# protocol/daemon crate★ — daemon UI agnosticism (ADR-0035): View/Layout/Slot types must not leak into the daemon or protocol.
 ts-rs = { version = "10", features = ["uuid-impl"] }
 tracing = "0.1"
 thiserror = "1"   # discovery::DiscoveryError
-dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
-# 파일 로그 초기화(`logging::init_logging_with_file`)와 `mask_secrets` — ADR-0175 결정 1 로 코어에서
-#   잎 crate 로 이사했다. `agent.spawnInto` 의 친 cwd 철자 고르기(`path::normalize_spelling`)도 여기서
-#   온다(ADR-0270 결정 5 — `normalize_cwd` 는 base 로 · 결정 1 — 셸은 agent 를 의존하지 않는다).
-#   락 오염 되찾기(`sync::lock` 등 — ADR-0275)도 여기서 온다.
+dunce = "1"       # absolute daemon exe path (canonicalize, avoiding UNC) — WMI returns RV=9 for a relative path
+# File log init (`logging::init_logging_with_file`) and `mask_secrets` — moved from the core to the leaf crate by
+#   ADR-0175 decision 1. Picking the cwd spelling the user typed for `agent.spawnInto` (`path::normalize_spelling`) also comes
+#   from here (ADR-0270 decision 5 — `normalize_cwd` goes to base · decision 1 — the shell does not depend on agent).
+#   Lock poison recovery (`sync::lock` etc. — ADR-0275) also comes from here.
 engram-dashboard-base = { path = "../crates/engram-dashboard-base" }
-# ★`engram-dashboard-agent` 를 여기 되살리지 말 것★ — 셸은 agent crate 를 의존하지 않는다(ADR-0270 결정 1 ·
-#   ADR-0029). 백엔드 정책은 데몬 `SpawnByCwd` 처리부가(ADR-0279), 데몬 이름의 벽은 데몬 등록 반려가 진다.
-#   벽 = CI `shell gate 1`(이 패키지의 normal · build 그래프에 agent 0 줄).
-#   ★그래도 이 패키지의 테스트 빌드는 `agent` 를 컴파일한다★ — 아래 dev-dependencies 의 `daemon` 이 물고
-#   온다(그 간선은 남긴다 — ADR-0286). 이득은 릴리스 빌드 쪽이다.
-# ADR-0155: 이 셸이 `window`/`tab`/`slot` 을 **선언**하는 주인이라 선언 매크로·표·봉투·배달이 필요하다.
-#   ★새 서드파티가 아니다★ — 이 crate 는 워크스페이스 의존 0 이고, 여기 적기 전에도 agent 를 타고 이미
-#   이 셸의 의존 그래프에 링크돼 있었다(직접 간선만 는다).
+# ★Do not bring `engram-dashboard-agent` back here★ — the shell does not depend on the agent crate (ADR-0270 decision 1 ·
+#   ADR-0029). The backend policy is carried by the daemon's `SpawnByCwd` handler (ADR-0279), the daemon-name wall by the daemon's registration bounce.
+#   Wall = CI `shell gate 1` (0 agent lines in this package's normal · build graph).
+#   ★Still, this package's test build compiles `agent`★ — the `daemon` in the dev-dependencies below pulls it
+#   in (that edge stays — ADR-0286). The gain is on the release build side.
+# ADR-0155: this shell is the owner that **declares** `window`/`tab`/`slot`, so it needs the declaration macro, table, envelope and delivery.
+#   ★Not a new third party★ — this crate has 0 workspace dependencies, and even before it was listed here it was already linked
+#   into this shell's dependency graph through agent (only a direct edge is added).
 engram-dashboard-command = { path = "../crates/engram-dashboard-command" }
 # discovery: the daemon.json shared contract (DaemonInfo) + PROTOCOL_VERSION · the daemon WS first frame (`handshake::AuthFrame`).
 #   The first frame's shape lives in protocol (ADR-0310 decision 9), so the shell needs no daemon-side crate for it.
@@ -97,8 +97,8 @@ engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
 #   platform's feature of the same name.
 #   The stop path (`daemon_client::shutdown`) — whether the target still runs (`process::presence`) and the
 #   identity-checked kill (`process::terminate_if_same` — ADR-0343).
-#   ★`windows` 를 이 셸에 직접 되살리지 말 것★ — OS crate 운영 의존은 platform 하나에만 둔다(CI `platform gate 5`).
-#   ★운영 의존에서 `test-support` 를 켜지 않는다★(CI `platform gate 3` — 시험 기능은 아래 dev 재선언에서만).
+#   ★Do not bring `windows` back directly into this shell★ — OS crate production dependencies live only in platform (CI `platform gate 5`).
+#   ★Do not turn on `test-support` in production dependencies★ (CI `platform gate 3` — test features only in the dev re-declaration below).
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform" }
 # Reusable transport lib (ADR-0177) — the shell's daemon link (`daemon_client::link`) is built on it (TRD S21 trd-3 §6-2
 #   U2 · ADR-0310). `ws` = the real-socket dialer. Not a new third-party package set: tokio · futures-util ·
@@ -110,15 +110,15 @@ engram-dashboard-transport = { path = "../crates/engram-dashboard-transport", fe
 #   trd-3-2-u5 §3-5). Wall = CI `shell gate 6` (no `tungstenite` among this package's direct normal dependencies).
 tauri-plugin-autostart = "2"
 
-# T1(S14 모듈①): DaemonClient(비동기 WS 클라이언트) + OutputRouter(arc-swap) 신설을 위해
-#   ADR-0029에서 제거했던 async/WS 관련 deps를 복원한다. 버전은 daemon crate와 정렬(ADR-0036).
-# 데몬: tokio 1 / tokio-tungstenite 0.26 / futures-util 0.3 / serde_json 1 (Cargo.toml 실측).
+# T1 (S14 module ①): to add DaemonClient (async WS client) + OutputRouter (arc-swap),
+#   restores the async/WS deps removed in ADR-0029. Versions aligned with the daemon crate (ADR-0036).
+# Daemon: tokio 1 / tokio-tungstenite 0.26 / futures-util 0.3 / serde_json 1 (measured from Cargo.toml).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 # `BoxFuture` — the boxed futures of the link dialer and the connection driver.
 futures-util = "0.3"
-# `raw_value` = 명령 칸 원문을 푸는 끝자락(ADR-0272 결정 4) — protocol 이 같은 판에 이미 켠다(새 패키지 없음).
+# `raw_value` = the edge that unpacks a command field's raw text (ADR-0272 decision 4) — protocol already enables it at the same version (no new package).
 serde_json = { version = "1", features = ["raw_value"] }
-# OutputRouter 핫패스 lock-free snapshot (spike §2 FIX-F6). 데몬에 없으므로 최신 1.x 안정 버전.
+# OutputRouter hot-path lock-free snapshot (spike §2 FIX-F6). Not in the daemon, so the latest stable 1.x.
 arc-swap = "1"
 
 [dev-dependencies]
@@ -134,22 +134,22 @@ tokio-tungstenite = "0.26"
 # `test-util` = paused tokio time (`tokio::time::pause` / `advance`) — timer tests (the usage shrink timer and others)
 #   run on it instead of the wall clock (ADR-0038 — no magic sleeps). ★Dev only★: release builds get no `test-util`.
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "time", "sync", "net"] }
-# feature-only 재선언 — WMI 플래그 진단 시험(`real_wmi_spawn_flag_matrix` · `#[ignore]`)이 거절 코드를 오류로
-#   올리지 않는 원시 호출(`spawn::wmi_create_raw`)을 쓴다. 기능 요청이 dev 그래프에만 있어 운영 바이너리엔
-#   합쳐지지 않는다(platform 시험 기능 운영 그래프 게이트가 잰다).
-#   ★단 lib 과 시험 타깃을 한 cargo 호출로 지으면(`--all-targets` 등) 이 기능이 그 호출의 셸 운영 바이너리로
-#   합쳐진다★ — 데몬 `Cargo.toml` 「운영 빌드 주의」의 self-dev-dependency 와 같은 위험군이고, 위 게이트는 그 꼴을
-#   못 본다(해석된 그래프만 읽는다 — `ci.yml` 같은 스텝 주석의 「한계」). 배포용 빌드는 그렇게 짓지 않는다.
+# feature-only re-declaration — the WMI flag diagnostic test (`real_wmi_spawn_flag_matrix` · `#[ignore]`) uses the raw call
+#   (`spawn::wmi_create_raw`) that does not raise rejection codes as errors. The feature request is only in the dev graph, so it is not
+#   merged into the production binary (the platform test-feature production graph gate measures it).
+#   ★But if the lib and test targets are built in one cargo invocation (`--all-targets` etc.), this feature is merged into that invocation's
+#   shell production binary★ — the same risk class as the self-dev-dependency in the daemon `Cargo.toml` 「production build caution」, and the gate above
+#   cannot see that shape (it reads only the resolved graph — the 「Limits」 in the same step's comment in `ci.yml`). Release builds are not built that way.
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform", features = ["test-support"] }
 # Feature re-declaration — the link tests drive `daemon_client::link` over the transport's in-memory harness
 #   (`MemoryNetwork` · `ManualClock`). The request stays in the dev graph, so release binaries do not get it
 #   (CI `shell gate 5` checks the resolved normal graph; the `--all-targets` caveat above applies the same way).
 engram-dashboard-transport = { path = "../crates/engram-dashboard-transport", features = ["test-support", "ws"] }
-# 실 데몬 graceful 끄기 왕복 시험(`tests/stop_smoke.rs` · `#[ignore]`)의 임시 데이터 폴더 격리.
+# Temp data folder isolation for the real daemon graceful-stop round-trip test (`tests/stop_smoke.rs` · `#[ignore]`).
 tempfile = "3"
-# feature-only 재선언 — 도킹 골든(`src/layout/bands_golden.json`)을 비트 단위로 읽는다. 이 기능이 없으면 serde_json 이
-#   17 자리 소수를 1 ULP 어긋나게 읽어(실측 2026-10-20 — 0.20833333333333334 → …37) 골든 단언이 거짓으로 빨개진다.
-#   새 패키지는 없고 dev 그래프에만 있어 운영 바이너리의 파싱은 그대로다.
+# feature-only re-declaration — reads the docking golden (`src/layout/bands_golden.json`) bit-exactly. Without this feature serde_json
+#   reads 17-digit decimals 1 ULP off (measured 2026-10-20 — 0.20833333333333334 → …37) and the golden assertions go falsely red.
+#   There is no new package and it is only in the dev graph, so the production binary's parsing is unchanged.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
-# profile.release 는 workspace 루트(../Cargo.toml)로 이동(멤버에 두면 무시됨).
+# profile.release moved to the workspace root (../Cargo.toml) (ignored when placed in a member).

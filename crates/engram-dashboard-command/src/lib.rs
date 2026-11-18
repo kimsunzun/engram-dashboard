@@ -1,38 +1,37 @@
-//! # engram-dashboard-command — 명령 버스 **도구** (명령 0개)
+//! # engram-dashboard-command — the command bus **tool** (0 commands)
 //!
-//! 봉투 · 오류 어휘 · 선언 매크로 · 표 · 라우팅만 담는다. 명령 자체는 **생산자 모듈 옆**에서 선언한다
+//! Holds only the envelope · error vocabulary · declaration macro · table · routing. Commands themselves are declared **next to the
+//!   producer module**
 //! (`agent` = `agent.*`, `daemon` = `mail.*`, `src-tauri` = `window/tab/slot`).
 //!
-//! ## 불변식 셋 (어기면 이 crate 의 존재 이유가 사라진다)
+//! ## Three invariants (break them and this crate loses its reason to exist)
 //!
-//! 1. **워크스페이스 crate 의존 0.** 게이트 = `rg "path\s*=" crates/engram-dashboard-command/Cargo.toml`
-//!    → 0줄. 남이 이 crate 를 의존하는 것은 이 불변식과 무관하다 — 화살표는 한 방향뿐이다.
-//!    이 벽이 있어야 `agent` 가 명령을 선언하면서도 wire 계약(`protocol`)을 안 볼 수 있다.
-//! 2. **명령 0개.** 이 파일 트리에 [`declare_commands!`] 호출이 있으면 위반이다. 도구가 어휘를 갖는 순간
-//!    「선언은 생산자 옆」이 무너지고 중앙 카탈로그가 다른 문으로 돌아온다.
-//! 3. **★T-1★ 링커 수집이 담는 것은 [`CommandSpec`] 까지.** `static`·링커 수집이
-//!    `Arc<dyn CommandHandler>` 를 담으면 테스트가 가짜 의존을 꽂을 자리가 없어져 단위 테스트가 실물
-//!    (프로세스)을 띄운다. 핸들러 실물은 각 모듈의 `make_table(deps)` 가 조립 때 주입한다.
+//! 1. **0 workspace crate dependencies.** Gate = `rg "path\s*=" crates/engram-dashboard-command/Cargo.toml` → 0 lines (others depending on
+//!   this crate is unrelated — the arrow goes one way).
+//!    This wall lets `agent` declare commands without seeing the wire contract (`protocol`).
+//! 2. **0 commands.** A [`declare_commands!`] call in this file tree is a violation — if the tool owns vocabulary, "declarations live next
+//!   to the producer" collapses and the central catalog returns.
+//! 3. **★T-1★ What linker collection holds stops at [`CommandSpec`].** With `Arc<dyn CommandHandler>` in `static`·linker collection, tests
+//!   could not plug in fake dependencies and unit tests would launch the real
+//!    processes. Real handlers are injected by each module's `make_table(deps)` at assembly.
 //!
-//! ## 진입점
+//! ## Entry points
 //!
-//! [`declare_commands!`] 선언 · [`CommandTable`] 내 표 · [`Roster`] 명부 · [`route`] 배달 3단계 ·
-//! [`CommandTable::check_args`] 입구 전용 인자 검문 · [`command_specs`] 이 바이너리에 링크된 선언 전량.
+//! [`declare_commands!`] declaration · [`CommandTable`] own table · [`Roster`] registry · [`route`] 3-step delivery ·
+//! [`CommandTable::check_args`] entrance-only argument check · [`command_specs`] all declarations linked into this binary.
 //!
-//! ## 알려진 예정 사항 (Step 2 착수 전에 읽을 것)
+//! ## Known planned items (read before starting Step 2)
 //!
-//! - **입구 검문은 배선이 부르지 않는다(ADR-0157).** [`CommandTable::check_args`] 는 **사람·LLM 이 치는
-//!   표면**에서만 부른다 — [`route`] 안에 넣으면 버전이 앞선 호출자가 실은 신규 칸이 옛 주인을 하드
-//!   실패시켜 additive 진화가 죽는다(TRD §4-③). 표면별 안내 문구는 어댑터가 덧붙인다.
+//! - **The entrance check is not called by the wiring (ADR-0157).** [`CommandTable::check_args`] is called only on **surfaces typed by
+//!   people·LLMs** — inside [`route`] it would hard-fail old owners on new fields
+//!   from a newer-version caller, killing additive evolution (TRD §4-③). Per-surface guidance text is appended by the adapter.
 //!
-//! - **봉투 타입들은 ts-rs 를 구현하지 않는다.** `protocol` 의 wire 메시지는 전부 `#[derive(TS)]` 라
-//!   [`CommandEnvelope`]·[`CommandReply`]·[`RequestId`]·[`CommandDecl`] 을 그 enum 에 additive variant 로
-//!   싣는 순간 **바인딩 생성이 컴파일 에러로 멈춘다.** 지금 ts-rs 를 안 들인 것은 의도다(외부 의존 최소) —
-//!   Step 2 에서 「도구 crate 에 ts-rs 추가」와 「protocol 쪽에서 `#[ts(type = …)]` 로 덮기」 중 하나를
-//!   골라야 하고, 그건 wire 계약 결정이라 그때 판단한다.
-//! - **패닉 그물은 운영 프로세스에서 닿지 않는다** — 데몬 · 셸은 「가두는 중」 표시 밖의 패닉을 훅이
-//!   되감기 전에 끝내고(ADR-0292), 명령 실행을 표시 안에서 모는 곳은 없다(ADR-0293). 그물은 훅 없는 시험
-//!   빌드에서 산다.
+//! - **The envelope types do not implement ts-rs.** `protocol`'s wire messages are all `#[derive(TS)]`, so adding
+//!   [`CommandEnvelope`]·[`CommandReply`]·[`RequestId`]·[`CommandDecl`] to that enum as variants
+//!   **stops binding generation with a compile error.** Not taking ts-rs is intended (minimal dependencies); Step 2 must choose "add ts-rs
+//!   to the tool crate" or "cover it in `protocol` with `#[ts(type = …)]`" — a wire contract decision.
+//! - **The panic net is not reached in production processes** — see [`route`]'s panic net (ADR-0292 · ADR-0293); it lives in test builds
+//!   without the hook.
 // ADR-0155
 // ADR-0156
 
@@ -61,7 +60,7 @@ pub use spec::{
 };
 pub use table::{blocking_handler, CommandFuture, CommandHandler, CommandTable, TableError};
 
-/// 선언 매크로가 링커 수집 항목을 만들 때 쓴다 — 소비 crate 가 `inventory` 를 직접 의존하지 않게 한다.
+/// Used by the declaration macro when it builds linker-collected items — keeps consuming crates from depending on `inventory` directly.
 #[doc(hidden)]
 pub use inventory;
 

@@ -1,80 +1,24 @@
-//! The daemon connection driver on the transport crate (TRD S21 trd-3 §6-2 U3).
+//! The daemon connection driver on the transport crate. Every `DaemonClient` runs on it: production (`DaemonClient::new_real_with_owned_runtime`) on the ws dialer and the system clock; tests (`DaemonClient::new_on_link`) on a memory network and a manual clock.
 //!
-//! Every `DaemonClient` runs on it: production (`DaemonClient::new_real_with_owned_runtime`) on the ws dialer and the
-//! system clock; tests (`DaemonClient::new_on_link`) on a memory network and a manual clock.
+//! One actor task per client owns the routing: the registry's dialer registrations, [`RouteState`] and the inbox pumps meet on it, and it is the only place that applies what [`route`] returns (connection state · frontend broadcasts · replay events · daemon command requests · usage snapshots · output frames). Callers' round trips run on the callers' tasks through a registry clone, never on the actor.
 //!
-//! One actor task per client owns the routing: the registry's dialer registrations, [`RouteState`] and the inbox pumps
-//! all meet on it, and it is the only place that applies what [`route`] returns (connection state · frontend
-//! broadcasts · replay events · daemon command requests · usage snapshots · output frames). Callers' round trips run on
-//! the callers' tasks through a registry clone, never on the actor.
-//!
-//! - ★The actor never awaits anything that waits on an inbox★ (transport invariant 1, transitively — see `link::pump`):
-//!   no `Peer::request`, no `Peer::close_after_flush` future, no `Registry::close_all`. Its awaits are its two
-//!   channels and the replay deadline timer on the injected clock; it writes with `notify_in`, and the one request it
-//!   makes (the registration) it only queues — the reply is awaited on another task.
-//! - ★Every add is one actor step★ — `register` (a fresh dial address) + `adopt` + `Registry::add` + `spawn_pump`,
-//!   with `adopt`'s output applied; a re-add of the key takes the same step. Every `Ended` gives its dial registration
-//!   back, current or replaced handle.
-//! - ★Routing is the only source of connection state★ — `close` removes the peer and shows nothing itself; the
-//!   `Closed` that follows shows `Down`.
-//! - ★Retries never run out★ — network failures retry without limit on the capped backoff ([`link_policy`] —
-//!   ADR-0346). ★No refusal is retried★: terminal ones stop in the transport (the dialer's version check ·
-//!   `ShellHandshake`), and a refusal the transport would retry (a refusal close code other than 4001 — `RejectKind::of`;
-//!   1000 · 1001 · 4000 are not refusals and retry as network failures) stops here: the actor removes the peer when it
-//!   routes that `ConnectFailed`. ★Best effort★ — the transport has already scheduled its next attempt by then, so an
-//!   actor delayed past the first backoff lets one more dial out before the stop lands. A first connect shows its first
-//!   failure as `Down` at once and keeps retrying in the background (`link::route`).
-//! - ★Every decision that a close must order runs on the actor★ — "already connected" and "was this connect overtaken
-//!   by a close" are answered there, in channel order after any earlier `Close`. A close bumps the close epoch at once;
-//!   a connect / ensure carries the epoch it began under, and an add older than the last close builds nothing (a close
-//!   during `connect`'s daemon search wins).
-//! - `connect` / `ensure` resolve on their handle's first answer — `Connected` (once it is shown: status watch and
-//!   frontend event first — the frontend relies on that order), or its first failure; no live daemon (no or an unusable record)
-//!   answers `NoLiveDaemon`. A connect that a re-add overtakes gets the new handle's answer; a close before the answer
-//!   ends it with `ClosedBeforeHello`.
-//! - ★The boot hold★ (TRD S21 trd-3-2-u5 R20 · R24): the production client holds every band of a never-connected
-//!   handle from its construction until the main window's boot start answers — its failed `daemon_start`, or its
-//!   `daemon_connect` returning (`commands::discovery` gates both on the window) — or any handle connects, or a bound
-//!   passes: 60 s from construction until main's daemon search begins, then that search's timeout +
-//!   [`BOOT_START_MARGIN`] from its start instead. Its end is an actor step that shows what each current handle's last
-//!   answer calls for (`RouteState::end_boot_start_hold`).
-//! - ★Subscribe · Unsubscribe · RequestReplay go through this one actor, in order, onto one peer queue★ (TRD §6-2 U3 —
-//!   master re-check A1). A replay request checks the window routing when the actor takes it, so an `Unsubscribe`
-//!   queued before it is written first and the check sees the routing that `Unsubscribe` came from. The `Subscribe`
-//!   of a merged request is checked again when the one before it resolves.
-//! - ★Replay flights belong to the routed connection★ (`LinkUp` … `LinkDown`): every write goes out with `notify_in`
-//!   on that connection only, and `LinkDown` clears the flights. A replay `Subscribe` that cannot be written, or an
-//!   output frame too short to read, drops that connection (`Peer::drop_link_in` — bound to it, back to the backoff);
-//!   the actor clears its flights at once and handles none of its later output frames or driver events (its
-//!   broadcasts and lifecycle events still pass).
-//!
-//! - ★A connection is opened by the actor before any caller writes on it★ — on its `LinkUp` the actor queues the
-//!   usage subscribe and the command registration (`RegisterCommands`, every connect — TRD §3-7 clause 1), then
-//!   publishes the generation as opened, with the close epoch of its handle. Callers bind their writes to the
-//!   connection live when they were called and write only once it is published, never on "the peer is live" alone: a
-//!   round trip that comes while that connection is live but not yet opened waits for the publish (bounded by the
-//!   request timeout) and fails if the connection ends meanwhile — it never moves on to a later connection (ADR-0195);
-//!   a fire-and-forget then waits in the gate's pending list, which the actor writes out when that connection opens
-//!   (older ones dropped). So a command sent while a connection opens goes out after that connection's on-open
-//!   writes. A publish older than a close the caller saw counts as closed, so `close()` followed by a write fails at
-//!   once.
-//! - ★The gate★ (`Gate` — one leaf lock shared by the callers and the actor) holds the opened connection and the
-//!   pending fire-and-forgets. A caller writes a fire-and-forget on an opened connection while holding it; the actor
-//!   writes the pending ones and sets the opened connection while holding it; a round trip writes only after it saw
-//!   the opened connection there. So ★one caller's fire-and-forget then round trip keep their order, at all times★.
-//!   ★There is no order across callers★, and none between fire-and-forgets and Subscribe · Unsubscribe ·
-//!   RequestReplay (those go through the actor — A1 above; fire-and-forgets go to the peer directly, as in 3-2 U3b).
-//! - ★The registration's reply is never awaited on the actor★ — its request is queued in the `LinkUp` step and the
-//!   reply is read on a spawned task, which logs it and shows a daemon refusal in the refusal box.
-//! - ★A daemon command request is applied off the actor★ (`InboundReceiver::accept`) and its outcome goes back only on
-//!   the connection it came on (`send_command_outcome` with the request's generation).
-//! - ★Usage subscribes are read and queued under the usage lock★ — the actor's (open · nudge · snapshot resend) and a
-//!   caller's ⟳ pre-subscribe alike, so the order the interest is read in is the order the subscribes reach the peer
-//!   queue and the last one on the wire is the latest interest (TRD S21 usage-limit-slot §1-7). The usage socket
-//!   epoch is the routed generation; it does not rewind across re-adds (`Registry::add`).
+//! - ★The actor never awaits anything that waits on an inbox★ (transport invariant 1, transitively — see `link::pump`): no `Peer::request`, no `Peer::close_after_flush` future, no `Registry::close_all`. Its awaits are its two channels and the replay deadline timer on the injected clock; it writes with `notify_in`, and the one request it makes (the registration) it only queues — the reply is awaited on another task.
+//! - ★Every add is one actor step★: `register` (a fresh dial address) + `adopt` + `Registry::add` + `spawn_pump`, with `adopt`'s output applied; a re-add of the key takes the same step. Every `Ended` gives its dial registration back, current or replaced handle.
+//! - ★Routing is the only source of connection state★: `close` removes the peer and shows nothing itself; the `Closed` that follows shows `Down`.
+//! - ★Retries never run out★: network failures retry without limit on the capped backoff ([`link_policy`], ADR-0346). ★No refusal is retried★: terminal ones stop in the transport (the dialer's version check · `ShellHandshake`), and a refusal the transport would retry (a refusal close code other than 4001 — `RejectKind::of`; 1000 · 1001 · 4000 are not refusals) stops here: the actor removes the peer when it routes that `ConnectFailed`. Best effort: the transport has already scheduled its next attempt, so an actor delayed past the first backoff lets one more dial out before the stop lands. A first connect shows its first failure as `Down` at once and keeps retrying in the background (`link::route`).
+//! - ★Every decision that a close must order runs on the actor★: "already connected" and "was this connect overtaken by a close" are answered there, in channel order after any earlier `Close`. A close bumps the close epoch at once; a connect / ensure carries the epoch it began under, and an add older than the last close builds nothing (a close during `connect`'s daemon search wins).
+//! - `connect` / `ensure` resolve on their handle's first answer: `Connected` (once shown: status watch and frontend event first — the frontend relies on that order), or its first failure; no live daemon (no or an unusable record) answers `NoLiveDaemon`. A connect that a re-add overtakes gets the new handle's answer; a close before the answer ends it with `ClosedBeforeHello`.
+//! - ★The boot hold★: the production client holds every band of a never-connected handle from its construction until the main window's boot start answers (its failed `daemon_start`, or its `daemon_connect` returning — `commands::discovery` gates both on the window), or any handle connects, or a bound passes: 60 s from construction until main's daemon search begins, then that search's timeout + [`BOOT_START_MARGIN`] from its start. Its end is an actor step that shows what each current handle's last answer calls for (`RouteState::end_boot_start_hold`).
+//! - ★Subscribe · Unsubscribe · RequestReplay go through this one actor, in order, onto one peer queue★. A replay request checks the window routing when the actor takes it, so an `Unsubscribe` queued before it is written first and the check sees the routing that `Unsubscribe` came from; the `Subscribe` of a merged request is checked again when the one before it resolves.
+//! - ★Replay flights belong to the routed connection★ (`LinkUp` … `LinkDown`): every write goes out with `notify_in` on that connection only, and `LinkDown` clears the flights. A replay `Subscribe` that cannot be written, or an output frame too short to read, drops that connection (`Peer::drop_link_in`, back to the backoff); the actor clears its flights at once and handles none of its later output frames or driver events (its broadcasts and lifecycle events still pass).
+//! - ★A connection is opened by the actor before any caller writes on it★: on `LinkUp` the actor queues the usage subscribe and the command registration (`RegisterCommands`, every connect), then publishes the generation as opened, with the close epoch of its handle. Callers bind their writes to the connection live when they were called and write only once it is published, never on "the peer is live" alone: a round trip that comes while that connection is live but not yet opened waits for the publish (bounded by the request timeout) and fails if the connection ends meanwhile — it never moves on to a later connection (ADR-0195); a fire-and-forget waits in the gate's pending list, which the actor writes out when that connection opens (older ones dropped). So a command sent while a connection opens goes out after that connection's on-open writes, and a publish older than a close the caller saw counts as closed, so `close()` followed by a write fails at once.
+//! - ★The gate★ (`Gate` — one leaf lock shared by the callers and the actor) holds the opened connection and the pending fire-and-forgets. A caller writes a fire-and-forget on an opened connection while holding it; the actor writes the pending ones and sets the opened connection while holding it; a round trip writes only after it saw the opened connection there. So ★one caller's fire-and-forget then round trip keep their order★; ★there is no order across callers★, nor between fire-and-forgets and Subscribe · Unsubscribe · RequestReplay (those go through the actor; fire-and-forgets go to the peer directly).
+//! - ★The registration's reply is never awaited on the actor★: its request is queued in the `LinkUp` step and the reply is read on a spawned task, which logs it and shows a daemon refusal in the refusal box.
+//! - ★A daemon command request is applied off the actor★ (`InboundReceiver::accept`) and its outcome goes back only on the connection it came on (`send_command_outcome` with the request's generation).
+//! - ★Usage subscribes are read and queued under the usage lock★ (the actor's open · nudge · snapshot resend and a caller's ⟳ pre-subscribe alike), so the order the interest is read in is the order the subscribes reach the peer queue and the last one on the wire is the latest interest. The usage socket epoch is the routed generation; it does not rewind across re-adds (`Registry::add`).
 // ADR-0046
 // ADR-0310
-// ADR-0346
+// ADR-0346 (TRD S21 trd-3 §6-2 U3; TRD S21 trd-3-2-u5; TRD §6-2 U3; TRD §3-7; TRD S21 usage-limit-slot §1-7)
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
@@ -130,9 +74,7 @@ use crate::output_router::{OutputRouter, WindowLabel};
 pub enum HandshakeError {
     /// `connect`'s daemon search (which may start a daemon) failed — carries its error (no token).
     Discovery(String),
-    /// No live daemon to attach to — no endpoint record, or one that cannot be used. Carries the cause (a local
-    /// diagnostic, no file content). The text names the cause and asks whether the daemon runs — it does not tell the
-    /// caller to start one (ADR-0021: attaching never spawns; the caller decides).
+    /// No live daemon to attach to — no endpoint record, or one that cannot be used. Carries a local diagnostic cause (no file content). The text names the cause and asks whether the daemon runs; it does not tell the caller to start one (ADR-0021: attaching never spawns).
     NoLiveDaemon(String),
     /// The daemon could not be reached (a network-class failure).
     Connect(String),
@@ -147,59 +89,50 @@ pub enum HandshakeError {
 impl std::fmt::Display for HandshakeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HandshakeError::Discovery(m) => write!(f, "daemon discovery 실패: {m}"),
+            HandshakeError::Discovery(m) => write!(f, "daemon discovery failed: {m}"),
             HandshakeError::NoLiveDaemon(cause) => {
                 write!(f, "no live daemon ({cause}) — is the daemon running?")
             }
-            HandshakeError::Connect(m) => write!(f, "daemon websocket 접속 실패: {m}"),
+            HandshakeError::Connect(m) => write!(f, "daemon websocket connection failed: {m}"),
             HandshakeError::AuthRejected(m) => write!(f, "daemon auth failed: {m}"),
             HandshakeError::ClosedBeforeHello => {
                 write!(f, "daemon websocket closed before handshake")
             }
-            HandshakeError::TaskGone => write!(f, "연결 task 가 핸드셰이크 전 종료됨"),
+            HandshakeError::TaskGone => write!(f, "the connection task ended before the handshake"),
         }
     }
 }
 
 impl std::error::Error for HandshakeError {}
 
-/// The one daemon of stage 3 (D4 ① — the registry is built for N).
 pub(super) const DAEMON: &str = "local";
 
 /// Room in the pumps → actor channel. A full channel is backpressure, not loss (`link::pump`).
 const ROUTABLE_QUEUE: usize = 256;
 
-/// The boot hold's bound from the client's construction — "the main window never booted" (TRD S21 trd-3-2-u5 R20).
+/// The boot hold's bound from the client's construction: "the main window never booted". (TRD S21 trd-3-2-u5)
 const BOOT_START_CAP: Duration = Duration::from_secs(60);
-/// Added to the main window's `daemon_start` search timeout for the boot hold's short bound — covers the `connect` that
-/// follows the search. The bound is armed once the search holds the ensure lock, so another window's search is not in
-/// it. Main's own value — the TRD sets none.
+/// Added to the main window's `daemon_start` search timeout for the boot hold's short bound; covers the `connect` that follows the search. The bound is armed once the search holds the ensure lock, so another window's search is not in it.
 const BOOT_START_MARGIN: Duration = Duration::from_secs(5);
 
-/// Fire-and-forget commands pending in the gate for a connection not opened yet. Past it the caller drops the command
-/// (logged).
+/// Fire-and-forget commands pending in the gate for a connection not opened yet; past it the caller drops the command (logged).
 const QUEUED_FIRES_MAX: usize = 512;
 
-/// A connection the actor opened, and the close epoch its handle was added under — a caller that read a later epoch
-/// (a close came since) does not write on it.
+/// A connection the actor opened, and the close epoch its handle was added under; a caller that read a later epoch (a close came since) does not write on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Opened {
     generation: Generation,
     closes: u64,
 }
 
-/// The callers' and the actor's shared view of the opened connection (module doc). ★A leaf lock★ — no other lock is
-/// taken while it is held (the registry and the usage lock are read before it); under it there are only these fields
-/// and non-blocking `Peer::notify_in` writes. Logging happens after it is released.
+/// The callers' and the actor's shared view of the opened connection (module doc). ★A leaf lock★: no other lock is taken while it is held (the registry and the usage lock are read before it); under it only these fields and non-blocking `Peer::notify_in` writes. Log after releasing it.
 #[derive(Default)]
 struct Gate {
-    /// The connection the actor opened — its on-open writes and its pending fire-and-forgets are queued on the peer.
+    /// The connection the actor opened; its on-open writes and pending fire-and-forgets are queued on the peer.
     opened: Option<Opened>,
-    /// Fire-and-forget commands for a live connection the actor has not opened yet, in the order sent, each with that
-    /// connection's generation.
+    /// Fire-and-forget commands for a live connection the actor has not opened yet, in send order, each with that connection's generation.
     pending: VecDeque<(Generation, AgentCommand)>,
-    /// The close epoch the current handle was added under — set before that handle's peer exists. A caller that read a
-    /// newer epoch saw a close after it: its fire-and-forget is dropped, opened or not.
+    /// The close epoch the current handle was added under, set before that handle's peer exists. A caller that read a newer epoch saw a close after it: its fire-and-forget is dropped, opened or not.
     handle_closes: u64,
 }
 
@@ -218,9 +151,7 @@ pub(crate) fn link_policy() -> Policy {
     policy
 }
 
-// ADR-0181 · ADR-0310 (decision 21, D15 ①): one shared request timeout. 30 s, not the crate's 8 s — D15 ① keeps the
-//   frontend command path's
-//   former 30 s until agent spawn time is measured (ADR-0181 "검증 안 된 것" 1).
+// ADR-0181 · ADR-0310 (decision 21, D15 ①): one shared request timeout, 30 s rather than the crate's 8 s, keeping the frontend command path's former 30 s until agent spawn time is measured (ADR-0181 "Not verified" 1).
 // ADR-0369: launch requests carry their own reply deadline (`reply_deadline_of`); every other request keeps this one.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -260,13 +191,11 @@ fn reply_deadline_of(cmd: &AgentCommand) -> Option<Duration> {
 pub(crate) struct Ports {
     pub events: Arc<dyn DaemonEvents>,
     pub names: Arc<dyn AgentNamesSink>,
-    /// Which windows show which agent — the replay request check and every output frame read it.
+    /// Which windows show which agent; the replay request check and every output frame read it.
     pub router: Arc<OutputRouter>,
-    /// The windows' output channels. Output frames and replay markers go through the same channel so the frontend
-    /// sees them in arrival order (ADR-0046).
+    /// The windows' output channels. Output frames and replay markers share the channel so the frontend sees them in arrival order (ADR-0046).
     pub windows: WindowChannelRegistry,
-    /// The command table slot — the `DaemonClient`'s own, so a table installed after the start is seen (daemon command
-    /// requests · the registration on every connect).
+    /// The command table slot — the `DaemonClient`'s own, so a table installed after the start is seen (daemon command requests, the registration on every connect).
     pub inbound: Arc<InboundSlot>,
     /// The refusal box filter — the `DaemonClient`'s own, so its repeat suppression spans connections.
     pub refusals: Arc<RefusalAlerts>,
@@ -274,25 +203,23 @@ pub(crate) struct Ports {
     pub usage: SharedUsageInterest,
 }
 
-/// The callers' side of the driver — `DaemonClient` holds one.
 pub(crate) struct LinkClient {
     key: DaemonKey,
     rt: Handle,
     source: Arc<dyn EndpointSource>,
     registry: Registry<ShellWire>,
-    /// The actor's dialer — held here for tests of its registrations.
+    /// The actor's dialer, held for tests of its registrations.
     #[cfg(test)]
     dialer: Arc<LocalDaemonDialer>,
     /// The pumps' channel into the actor — tests feed a replaced handle's tail through it.
     #[cfg(test)]
     routable_tx: mpsc::Sender<Routable>,
-    /// Bumped by every `close` before it queues `Close` (module doc).
+    /// Bumped by every `close` before it queues `Close`.
     closes: Arc<AtomicU64>,
     cmd_tx: mpsc::UnboundedSender<DriverCmd>,
     status_rx: watch::Receiver<ConnectionStatus>,
-    /// Shared with the actor (module doc).
     gate: Arc<Mutex<Gate>>,
-    /// Changes whenever the actor changes the gate's opened connection — wakes round trips waiting for it.
+    /// Changes whenever the actor changes the gate's opened connection; wakes round trips waiting for it.
     opened_rx: watch::Receiver<()>,
     /// The ⟳ pre-subscribe reads the interest here.
     usage: SharedUsageInterest,
@@ -300,8 +227,7 @@ pub(crate) struct LinkClient {
     clock: Arc<dyn Clock>,
 }
 
-/// Re-adds the link from outside the client — the stop path (`shutdown::Stopper`) holds one. It does not keep the actor
-/// alive: after the client is gone it does nothing.
+/// Re-adds the link from outside the client (the stop path, `shutdown::Stopper`). It does not keep the actor alive; after the client is gone it does nothing.
 pub(crate) struct LinkControl {
     key: DaemonKey,
     cmd_tx: mpsc::WeakUnboundedSender<DriverCmd>,
@@ -326,8 +252,7 @@ impl LinkControl {
     }
 }
 
-/// Nudges the actor's usage interest without keeping the actor alive — the usage shrink timer holds one
-/// (`DaemonClient::run_usage_action`). A nudge after the client is gone does nothing.
+/// Nudges the actor's usage interest without keeping the actor alive (held by the usage shrink timer, `DaemonClient::run_usage_action`); after the client is gone it does nothing.
 pub(crate) struct UsageNudger(mpsc::WeakUnboundedSender<DriverCmd>);
 
 impl UsageNudger {
@@ -339,11 +264,10 @@ impl UsageNudger {
 }
 
 enum DriverCmd {
-    /// Is the key's current peer live?
-    IsLive { reply: oneshot::Sender<bool> },
-    /// Start a handle for the key — the first one or a re-add — unless the current peer is live (`first` gets `Ok`)
-    /// or a close came after `closes` was read (`first` gets an error). Otherwise `first` gets the new handle's first
-    /// answer.
+    IsLive {
+        reply: oneshot::Sender<bool>,
+    },
+    /// Start a handle for the key (the first one or a re-add) unless the current peer is live (`first` gets `Ok`) or a close came after `closes` was read (`first` gets an error); otherwise `first` gets the new handle's first answer.
     Add {
         closes: u64,
         /// The endpoint `connect`'s daemon search found — the new registration's last-known endpoint.
@@ -352,39 +276,39 @@ enum DriverCmd {
     },
     /// The explicit close (`daemon_close`): no band for the rest of the handle.
     Close,
-    /// Write `Unsubscribe` on the open connection. With none open there is nothing to undo — the daemon drops a
-    /// connection's subscriptions with it.
-    Unsubscribe { agent_id: AgentId },
-    /// Start the agent's replay or join the one in flight (single flight — ADR-0046 M1); `reply` gets the generation
-    /// assigned (a joined request writes nothing and still gets one), or [`REPLAY_UNSENT`] / [`NOT_CONNECTED`] when no
-    /// generation can be served: no open connection, no window shows the agent, or its `Subscribe` could not be written.
+    /// Write `Unsubscribe` on the open connection; with none open there is nothing to undo (the daemon drops a connection's subscriptions with it).
+    Unsubscribe {
+        agent_id: AgentId,
+    },
+    /// Start the agent's replay or join the one in flight (single flight — ADR-0046 M1); `reply` gets the generation assigned (a joined request writes nothing and still gets one), or [`REPLAY_UNSENT`] / [`NOT_CONNECTED`] when none can be served (no open connection, no window shows the agent, or its `Subscribe` could not be written).
     RequestReplay {
         agent_id: AgentId,
         reply: oneshot::Sender<Result<u64, String>>,
     },
-    /// The usage interest may have changed — the set is read when the actor takes this (TRD S21 usage-limit-slot §1-7
-    /// "one serial path"), so it carries none.
+    /// The usage interest may have changed; the set is read when the actor takes this, so the message carries none. (TRD S21 usage-limit-slot §1-7)
     UsageNudge,
     /// Start the boot hold (module doc) — bounded by [`BOOT_START_CAP`] from now.
     HoldForBootStart,
-    /// The main window's daemon search began with timeout `search`: the hold now ends `search` + [`BOOT_START_MARGIN`]
-    /// from now — this bound replaces the 60 s cap. Nothing when no hold is on.
-    BoundBootStart { search: Duration },
+    /// The main window's daemon search began with timeout `search`: the hold now ends `search` + [`BOOT_START_MARGIN`] from now, replacing the 60 s cap. Nothing when no hold is on.
+    BoundBootStart {
+        search: Duration,
+    },
     /// The main window's boot start answered — the hold ends now. Nothing when no hold is on.
-    EndBootStartHold { why: &'static str },
-    /// The key's current handle.
+    EndBootStartHold {
+        why: &'static str,
+    },
     #[cfg(test)]
     CurrentHandle {
         reply: oneshot::Sender<Option<HandleToken>>,
     },
-    /// Whether the boot hold is on.
     #[cfg(test)]
-    BootStartHeld { reply: oneshot::Sender<bool> },
+    BootStartHeld {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 impl LinkClient {
-    /// Starts the actor on `rt`. `inner` dials the resolved daemon address (the transport's ws dialer in production,
-    /// a memory network in tests); `clock` drives the registry, the failure log and the replay deadlines.
+    /// Starts the actor on `rt`. `inner` dials the resolved daemon address (the ws dialer in production, a memory network in tests); `clock` drives the registry, the failure log and the replay deadlines.
     pub(crate) fn start(
         rt: &Handle,
         inner: Arc<dyn Dialer>,
@@ -482,12 +406,11 @@ impl LinkClient {
         (client, driver, cmd_rx, routable_rx)
     }
 
-    /// The connection status routing last showed.
     pub(crate) fn status_rx(&self) -> watch::Receiver<ConnectionStatus> {
         self.status_rx.clone()
     }
 
-    /// Starts the boot hold (module doc) — call it at construction, before any window can attach.
+    /// Starts the boot hold; call at construction, before any window can attach.
     pub(crate) fn hold_bands_for_boot_start(&self) {
         let _ = self.cmd_tx.send(DriverCmd::HoldForBootStart);
     }
@@ -502,7 +425,7 @@ impl LinkClient {
         let _ = self.cmd_tx.send(DriverCmd::EndBootStartHold { why });
     }
 
-    /// Whether the boot hold is on, as the actor sees it — every command sent before is applied by then.
+    /// Whether the boot hold is on as the actor sees it (every command sent before is applied by then).
     #[cfg(test)]
     pub(crate) async fn boot_start_held(&self) -> bool {
         let (reply, answer) = oneshot::channel();
@@ -517,7 +440,6 @@ impl LinkClient {
         self.clock.clone()
     }
 
-    /// A re-add handle for the stop path.
     pub(crate) fn control(&self) -> LinkControl {
         LinkControl {
             key: self.key.clone(),
@@ -526,9 +448,7 @@ impl LinkClient {
         }
     }
 
-    /// Explicit connect (ADR-0021 — may start a daemon). A failed search still starts the handle — unless a close
-    /// overtook this connect, then nothing is built: it reads `daemon.json` on every attempt and connects once a
-    /// daemon is there, and the caller gets the search's error.
+    /// Explicit connect (ADR-0021 — may start a daemon). A failed search still starts the handle unless a close overtook this connect (then nothing is built): it reads `daemon.json` on every attempt and connects once a daemon is there, and the caller gets the search's error.
     pub(crate) async fn connect(&self) -> Result<(), HandshakeError> {
         let closes = self.closes.load(Ordering::SeqCst);
         if self.is_live().await {
@@ -594,19 +514,16 @@ impl LinkClient {
         }
     }
 
-    /// Explicit close — the link does not reconnect. Returns at once; the state follows through routing.
+    /// Explicit close: the link does not reconnect. Returns at once; the state follows through routing.
     ///
-    /// ★Bump the epoch before queueing `Close`★ — the actor reads the epoch after it takes `Close`, so an `Add` that
-    /// captured the old epoch is seen as stale. The other order lets an `Add` queued behind `Close` still read the old
-    /// value and revive the link.
+    /// ★Bump the epoch before queueing `Close`★: the actor reads the epoch after it takes `Close`, so an `Add` that captured the old epoch is seen as stale; the other order lets an `Add` queued behind `Close` still read the old value and revive the link.
     pub(crate) fn close(&self) {
         tracing::info!(peer = %self.key.peer_id(), "closing the daemon link");
         self.closes.fetch_add(1, Ordering::SeqCst);
         let _ = self.cmd_tx.send(DriverCmd::Close);
     }
 
-    /// One command round trip on the caller's task, on the opened connection ([`Self::opened_generation`]); failure
-    /// texts are `link::errors`', plus one for a connection that did not open in time.
+    /// One command round trip on the caller's task, on the opened connection ([`Self::opened_generation`]); failure texts are `link::errors`', plus one for a connection that did not open in time.
     ///
     /// ★Two waits, one after the other★: the wait for the connection to open is the shared [`REQUEST_TIMEOUT`] for every
     /// command, then the reply is bounded by the command's own deadline ([`reply_deadline_of`]). Nothing is sent while it
@@ -647,12 +564,7 @@ impl LinkClient {
         }
     }
 
-    /// A command without a reply, for the connection live now. Never blocks. Not live, or a close came → dropped
-    /// (ADR-0195).
-    ///
-    /// On the opened connection it is written here, under the gate; on a live connection the actor has not opened yet
-    /// it waits in the gate's pending list (at most [`QUEUED_FIRES_MAX`], then dropped) and the actor writes it when
-    /// that connection opens — in either case ahead of any later round trip of this caller (module doc).
+    /// A command without a reply, for the connection live now. Never blocks. Not live, or a close came → dropped (ADR-0195). On the opened connection it is written here under the gate; on a live connection the actor has not opened yet it waits in the gate's pending list (at most [`QUEUED_FIRES_MAX`], then dropped) and the actor writes it when that connection opens; either way ahead of any later round trip of this caller.
     pub(crate) fn send_fire_and_forget(&self, cmd: AgentCommand) {
         let closes = self.closes.load(Ordering::SeqCst);
         let peer = self
@@ -704,9 +616,7 @@ impl LinkClient {
         }
     }
 
-    /// The usage interest may have changed — the actor writes the interest of the moment on the open connection, if it
-    /// differs from what that connection got. Never blocks; with no connection open it does nothing — the next one
-    /// gets the whole interest when it opens.
+    /// The usage interest may have changed: the actor writes the interest of the moment on the open connection if it differs from what that connection got. Never blocks; with no connection open it does nothing (the next one gets the whole interest when it opens).
     pub(crate) fn nudge_usage(&self) {
         let _ = self.cmd_tx.send(DriverCmd::UsageNudge);
     }
@@ -715,14 +625,9 @@ impl LinkClient {
         UsageNudger(self.cmd_tx.downgrade())
     }
 
-    /// The generation of `peer`'s live connection once the actor opened it — the generation a caller writes on.
+    /// The generation of `peer`'s live connection once the actor opened it; the generation a caller writes on.
     ///
-    /// ★Bound to the connection live at the call★ (ADR-0195): waits while the actor has not opened it yet (routing
-    /// trails the peer), bounded by the request timeout, and never moves on to a later connection — the next one may
-    /// be another daemon. `closes` = the close epoch the caller read on entry. `Err` = the text for a command that
-    /// never went out: a close came ([`NOT_CONNECTED`]), the connection ended while waiting
-    /// ([`UNSENT_ON_DISCONNECT`]), the actor is gone ([`CHANNEL_GONE`]), or it did not open in time (a text with
-    /// [`SEND_FAILED_PREFIX`]).
+    /// ★Bound to the connection live at the call★ (ADR-0195): waits while the actor has not opened it yet (routing trails the peer), bounded by the request timeout, and never moves on to a later connection (it may be another daemon). `closes` = the close epoch read on entry. `Err` = the text for a command that never went out: a close came ([`NOT_CONNECTED`]), the connection ended while waiting ([`UNSENT_ON_DISCONNECT`]), the actor is gone ([`CHANNEL_GONE`]), or it did not open in time (a text with [`SEND_FAILED_PREFIX`]).
     async fn opened_generation(
         &self,
         peer: &Peer<ShellWire>,
@@ -771,10 +676,8 @@ impl LinkClient {
         }
     }
 
-    /// Queues the ⟳ pre-subscribe on `generation`, read and queued under the usage lock (module doc). Nothing to queue
-    /// when the usage state does not see `generation` as its socket (it ended meanwhile).
-    // Known residue: the `Err` branch (the subscribe could not be queued, so the ⟳ is not sent and fails with the send
-    //   text) has no test — it needs `notify_in` to refuse on a connection that is opened (full queue · lost link).
+    /// Queues the ⟳ pre-subscribe on `generation`, read and queued under the usage lock (module doc). Nothing to queue when the usage state does not see `generation` as its socket (it ended meanwhile).
+    // Known untested: the `Err` branch (subscribe could not be queued, so the ⟳ is not sent and fails with the send text) needs `notify_in` to refuse on an opened connection (full queue · lost link).
     fn write_refresh_subscribe(
         &self,
         peer: &Peer<ShellWire>,
@@ -796,14 +699,12 @@ impl LinkClient {
             })
     }
 
-    /// Queues the unsubscribe on the actor, behind every earlier unsubscribe and replay request. Never blocks — the
-    /// layout calls it under its lock.
+    /// Queues the unsubscribe on the actor, behind every earlier unsubscribe and replay request. Never blocks (the layout calls it under its lock).
     pub(crate) fn unsubscribe(&self, agent_id: AgentId) {
         let _ = self.cmd_tx.send(DriverCmd::Unsubscribe { agent_id });
     }
 
-    /// The generation the frontend fences this replay with (ADR-0046 M1). `Err` = no open connection
-    /// ([`NOT_CONNECTED`]), or no window shows the agent / its `Subscribe` could not be written ([`REPLAY_UNSENT`]).
+    /// The generation the frontend fences this replay with (ADR-0046 M1). `Err` = no open connection ([`NOT_CONNECTED`]), or no window shows the agent / its `Subscribe` could not be written ([`REPLAY_UNSENT`]).
     pub(crate) async fn request_replay(&self, agent_id: AgentId) -> Result<u64, String> {
         let (reply, answer) = oneshot::channel();
         if self
@@ -819,7 +720,6 @@ impl LinkClient {
     }
 }
 
-/// The actor — see the module doc.
 struct Driver {
     key: DaemonKey,
     source: Arc<dyn EndpointSource>,
@@ -827,16 +727,13 @@ struct Driver {
     dialer: Arc<LocalDaemonDialer>,
     route: RouteState,
     clock: Arc<dyn Clock>,
-    /// Cloned into every pump.
     routable_tx: mpsc::Sender<Routable>,
-    /// The dial address of every handle whose inbox has not ended.
     registrations: HashMap<HandleToken, Address>,
-    /// The newest handle — the key's current one. `None` after a user close or a refusal stop, so a late event of
-    /// that handle cannot act on the key again.
+    /// The newest handle, the key's current one. `None` after a user close or a refusal stop, so a late event of that handle cannot act on the key again.
     current: Option<HandleToken>,
     /// When the boot hold ends by itself — `None` while no hold is on.
     boot_deadline: Option<std::time::Instant>,
-    /// The current handle and the callers waiting for its first answer — callers of a handle it replaced included.
+    /// The current handle and the callers waiting for its first answer, including callers of a handle it replaced.
     first: Option<(
         HandleToken,
         Vec<oneshot::Sender<Result<(), HandshakeError>>>,
@@ -847,26 +744,20 @@ struct Driver {
     names: Arc<dyn AgentNamesSink>,
     router: Arc<OutputRouter>,
     windows: WindowChannelRegistry,
-    /// The connection routed as `LinkUp` and not yet as `LinkDown` — the one replay flights and callers' writes
-    /// belong to.
+    /// The connection routed as `LinkUp` and not yet as `LinkDown`; replay flights and callers' writes belong to it.
     open: Option<Generation>,
-    /// The last known epoch of each agent (ADR-0046 T5). Kept across connections.
+    /// The last known epoch of each agent (ADR-0046 T5); kept across connections.
     subs: HashMap<AgentId, SubState>,
-    /// Single-flight replay bookkeeping. Its generation counters live as long as the actor; its flights end with
-    /// their connection.
+    /// Single-flight replay bookkeeping. Its generation counters live as long as the actor; its flights end with their connection.
     flight: ReplayFlightSet,
-    /// Unknown output tags already warned about on the open connection.
     unknown_tags: UnknownTagLog,
-    /// A connection this actor decided to drop and whose `LinkDown` has not come yet — its later output frames and
-    /// driver events are not handled (`drop_connection`); its broadcasts and lifecycle events still pass.
+    /// A connection this actor decided to drop whose `LinkDown` has not come yet: its later output frames and driver events are not handled (`drop_connection`); broadcasts and lifecycle events still pass.
     dropping: Option<Generation>,
     inbound: Arc<InboundSlot>,
     refusals: Arc<RefusalAlerts>,
     usage: SharedUsageInterest,
-    /// Shared with the callers (module doc): its opened connection is set at the end of a `LinkUp` step and cleared by
-    /// that connection's `LinkDown`, its drop and a close.
+    /// Shared with the callers (module doc): its opened connection is set at the end of a `LinkUp` step and cleared by that connection's `LinkDown`, its drop and a close.
     gate: Arc<Mutex<Gate>>,
-    /// Signalled after every change of the gate's opened connection.
     opened_tx: watch::Sender<()>,
 }
 
@@ -953,9 +844,7 @@ impl Driver {
         }
     }
 
-    /// The current handle's peer is live, or its connection is still open as routed. Routing trails the peer (the
-    /// supervisor publishes `Live` before it queues `Connected`), so a connection that ended but whose `Disconnected`
-    /// is not routed yet still counts — a connect then answers `Ok` instead of re-adding behind its loss.
+    /// The current handle's peer is live, or its connection is still open as routed. Routing trails the peer (the supervisor publishes `Live` before it queues `Connected`), so a connection that ended but whose `Disconnected` is not routed yet still counts; a connect then answers `Ok` instead of re-adding behind its loss.
     fn is_live(&self) -> bool {
         self.current
             .is_some_and(|token| self.route.is_open(&self.key, token))
@@ -971,7 +860,7 @@ impl Driver {
         self.boot_deadline = Some(self.clock.now() + BOOT_START_CAP);
     }
 
-    // TRD R24: the search's own bound replaces the cap — a main start that begins late keeps its whole search.
+    // The search's own bound replaces the cap: a main start that begins late keeps its whole search.
     fn bound_boot_start(&mut self, search: Duration) {
         if !self.route.boot_start_held() {
             return;
@@ -996,9 +885,7 @@ impl Driver {
         self.apply(out);
     }
 
-    /// The link does not reconnect; a late item of the handle no longer counts as the current one's (no refusal
-    /// stops it, no notice follows the close). Callers still waiting for the first answer get `ClosedBeforeHello` now —
-    /// a later handle's answer is not theirs.
+    /// The link does not reconnect; a late item of the handle no longer counts as the current one's (no refusal stops it, no notice follows the close). Callers still waiting for the first answer get `ClosedBeforeHello` now; a later handle's answer is not theirs.
     fn close(&mut self) {
         self.current = None;
         self.registry.remove(self.key.peer_id());
@@ -1064,7 +951,7 @@ impl Driver {
                 let out = self.route_item(&key, token, item);
                 let linked = out.iter().any(|r| matches!(r, Routed::LinkUp { .. }));
                 self.apply(out);
-                // A link that connected ends a cold boot — the boot hold has nothing left to wait for (R-h).
+                // A link that connected ends a cold boot; the boot hold has nothing left to wait for.
                 if linked {
                     self.end_boot_start_hold("a daemon link connected");
                 }
@@ -1085,8 +972,7 @@ impl Driver {
         }
     }
 
-    /// What one inbox item becomes. A refusal the transport would retry stops the peer here, its notice ahead of what
-    /// routing returns — the order of a terminal refusal (`Notice`, then `Down`).
+    /// What one inbox item becomes. A refusal the transport would retry stops the peer here, its notice ahead of what routing returns (the order of a terminal refusal: `Notice`, then `Down`).
     fn route_item(
         &mut self,
         key: &DaemonKey,
@@ -1123,8 +1009,7 @@ impl Driver {
         }
     }
 
-    /// Ends the current peer after a refusal, as the transport ends a terminal one; the `Closed` the removal produces
-    /// shows `Down` (the caller sends the notice).
+    /// Ends the current peer after a refusal, as the transport ends a terminal one; the `Closed` the removal produces shows `Down` (the caller sends the notice).
     fn stop_refused(&mut self, code: engram_dashboard_transport::CloseCode) {
         tracing::warn!(
             peer = %self.key.peer_id(),
@@ -1134,9 +1019,7 @@ impl Driver {
         self.close();
     }
 
-    /// The first answer of the newest handle, when it is a failure. Only that handle is the key's current one (`adopt`
-    /// in the same step as the add), so the handle check is the routing's rule ①; items before it carry no older
-    /// generation of it. A `Connected` is answered by [`Self::on_routable`] after it is applied.
+    /// The first answer of the newest handle, when it is a failure. Only that handle is the key's current one (`adopt` in the same step as the add), so the handle check is routing's rule ①; items before it carry no older generation of it. A `Connected` is answered by [`Self::on_routable`] after it is applied.
     fn answer_first(&mut self, token: HandleToken, item: &Incoming<ShellWire>) {
         let Incoming::Event(event) = item else {
             return;
@@ -1149,8 +1032,7 @@ impl Driver {
                 Some(cause) => HandshakeError::NoLiveDaemon(cause),
                 None => HandshakeError::Connect(e.to_string()),
             }),
-            // The refusal's own text can be the daemon's — the fixed local text instead (ADR-0342), from the same
-            //   decision routing makes for the band (TRD S21 trd-3-2-u5 §4-3).
+            // The refusal's own text can be the daemon's, so use the fixed local text instead (ADR-0342), from the same decision routing makes for the band. (TRD S21 trd-3-2-u5 §4-3)
             TransportEvent::ConnectFailed {
                 cause: ConnectFailure::Rejected { code, .. },
                 ..
@@ -1186,8 +1068,7 @@ impl Driver {
         }
     }
 
-    /// The open connection and the peer to write on — `None` before `LinkUp`, after `LinkDown`, and once a close
-    /// removed the peer.
+    /// The open connection and the peer to write on; `None` before `LinkUp`, after `LinkDown`, and once a close removed the peer.
     fn open_peer(&self) -> Option<(Peer<ShellWire>, Generation)> {
         let generation = self.open?;
         let peer = self.registry.get(self.key.peer_id())?;
@@ -1218,9 +1099,7 @@ impl Driver {
         let Some((peer, generation)) = self.open_peer() else {
             return Err(NOT_CONNECTED.to_owned());
         };
-        // The window check: a `Subscribe` for an agent no window shows would leave a subscription that no
-        //   `Unsubscribe` ever undoes. Running it here, when the actor takes the request, is what orders it after an
-        //   earlier `Unsubscribe` (module doc).
+        // The window check: a `Subscribe` for an agent no window shows would leave a subscription no `Unsubscribe` ever undoes. Running it when the actor takes the request orders it after an earlier `Unsubscribe`.
         if self.router.targets(agent_id).is_empty() {
             tracing::debug!(
                 peer = %self.key.peer_id(),
@@ -1244,10 +1123,7 @@ impl Driver {
         Ok(outcome.generation)
     }
 
-    /// Writes a replay `Subscribe` on connection `generation`; returns whether it went into the peer queue. Its
-    /// generation is already in flight, and a `Subscribe` that never went out gets no answer — the slot would stay
-    /// taken and every later request of the agent would merge into it. So a failed write drops the connection, which
-    /// clears every flight (`drop_connection`).
+    /// Writes a replay `Subscribe` on connection `generation`; returns whether it went into the peer queue. Its generation is already in flight, and a `Subscribe` that never went out gets no answer, so the slot would stay taken and every later request of the agent would merge into it. Hence a failed write drops the connection, which clears every flight (`drop_connection`).
     fn write_subscribe(
         &mut self,
         peer: &Peer<ShellWire>,
@@ -1276,20 +1152,10 @@ impl Driver {
         }
     }
 
-    /// Ends connection `generation` as a lost link (`Peer::drop_link_in`): the handle stays, `Reconnecting` follows
-    /// from the `Disconnected`, and the next dial waits the usual backoff — a daemon that keeps sending what made us
-    /// drop cannot drive a reconnect loop. ★Bound to that connection★: when it already ended, the transport does nothing
-    /// (its `LinkDown` is on the way) and never drops a newer connection.
+    /// Ends connection `generation` as a lost link (`Peer::drop_link_in`): the handle stays, `Reconnecting` follows from the `Disconnected`, and the next dial waits the usual backoff, so a daemon that keeps sending what made us drop cannot drive a reconnect loop. ★Bound to that connection★: when it already ended, the transport does nothing (its `LinkDown` is on the way) and never drops a newer connection.
     ///
-    /// ★The connection is over for this actor at once★: its flights are cleared
-    /// now and `open` goes, and its output frames and replay events still in the inbox (or salvaged before its
-    /// `Disconnected`) are not relayed until its `LinkDown` — a later `ReplayComplete` would mark a replay complete
-    /// that is missing the frame we could not read.
-    ///
-    /// The actor-side part runs with or without a peer — after a close the registry no longer holds one, but the tail of
-    /// the connection is still routed until its `LinkDown`.
-    // A drop lost in the transport would leave a live connection blacked out here; `link_policy` keeps
-    //   `QueueFullPolicy::Disconnect`, under which a drop that meets a full queue drops the link anyway.
+    /// ★The connection is over for this actor at once★: its flights are cleared now and `open` goes; its output frames and replay events still in the inbox (or salvaged before its `Disconnected`) are not relayed until its `LinkDown`, since a later `ReplayComplete` would mark a replay complete that is missing the frame we could not read. The actor-side part runs with or without a peer (after a close the registry holds none, but the connection's tail is still routed until its `LinkDown`).
+    // A drop lost in the transport would leave a live connection blacked out here; `link_policy` keeps `QueueFullPolicy::Disconnect`, under which a drop that meets a full queue drops the link anyway.
     fn drop_connection(&mut self, generation: Generation, cause: DisconnectCause) {
         tracing::info!(
             peer = %self.key.peer_id(),
@@ -1322,10 +1188,7 @@ impl Driver {
         dropping
     }
 
-    /// The `Subscribe` of a merged replay request, released by the resolution of the one before it. ★The window check
-    /// again★ — the agent's last window may have closed since the request merged, and its `Unsubscribe` is already
-    /// written: a `Subscribe` now would leak the subscription (the A1 shape). Then nothing is written and the slot is
-    /// released as a refusal releases it — no answer can come for a `Subscribe` that never went out.
+    /// The `Subscribe` of a merged replay request, released by the resolution of the one before it. ★The window check runs again★: the agent's last window may have closed since the request merged and its `Unsubscribe` is already written, so a `Subscribe` now would leak the subscription (the A1 shape). Then nothing is written and the slot is released as a refusal releases it (no answer can come for a `Subscribe` that never went out).
     fn write_follow_up(&mut self, generation: Generation, agent_id: AgentId, epoch: Option<u32>) {
         if self.router.targets(agent_id).is_empty() {
             tracing::debug!(
@@ -1350,9 +1213,7 @@ impl Driver {
         }
     }
 
-    /// An event of connection `generation` the driver handles itself: a replay event (`SubscribeAck` ·
-    /// `ReplayComplete` · `SubscribeFailed` — the follow-up `Subscribe` goes out on that connection), a daemon command
-    /// request, a command reply too broken to match a request, a usage snapshot.
+    /// An event of connection `generation` the driver handles itself: a replay event (`SubscribeAck` · `ReplayComplete` · `SubscribeFailed`; the follow-up `Subscribe` goes out on that connection), a daemon command request, a command reply too broken to match a request, a usage snapshot.
     fn on_driver_event(&mut self, generation: Generation, event: AgentEvent) {
         let windows = &self.windows;
         let mut deliver =
@@ -1465,10 +1326,7 @@ impl Driver {
         }
     }
 
-    /// A usage snapshot of connection `generation`: matched against the interest, a resend queued on that connection
-    /// when the daemon's set differs, then handed to the windows with a usage slot (`UsageInterest::on_snapshot`).
-    /// ★The resend is queued under the usage lock★ (module doc) — so ahead of the frontend notice, which goes out with
-    /// no lock held (ADR-0006).
+    /// A usage snapshot of connection `generation`: matched against the interest, a resend queued on that connection when the daemon's set differs, then handed to the windows with a usage slot (`UsageInterest::on_snapshot`). ★The resend is queued under the usage lock★ (module doc), so ahead of the frontend notice, which goes out with no lock held (ADR-0006).
     fn relay_usage_snapshot(
         &self,
         generation: Generation,
@@ -1526,10 +1384,7 @@ impl Driver {
         self.opened_tx.send_replace(());
     }
 
-    /// Opens connection `generation` (module doc): the usage subscribe and the command registration are queued, then —
-    /// under the gate — the pending fire-and-forgets of this connection are written (older ones dropped, newer ones
-    /// kept) and the connection is set as opened. With no peer (the user closed, the connection's tail is still routed)
-    /// nothing is written or opened; the usage state still pairs this open with the `LinkDown` to come.
+    /// Opens connection `generation` (module doc): queues the usage subscribe and the command registration, then, under the gate, writes this connection's pending fire-and-forgets (older ones dropped, newer kept) and sets it as opened. With no peer (the user closed; the connection's tail is still routed) nothing is written or opened, but the usage state still pairs this open with the `LinkDown` to come.
     fn on_link_up(&mut self, generation: Generation) {
         self.open = Some(generation);
         let peer = self.registry.get(self.key.peer_id());

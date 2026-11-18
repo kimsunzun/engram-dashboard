@@ -15,30 +15,30 @@ import type { UsageLimitSnapshot } from "./UsageLimitSnapshot";
 
 export type AgentEvent = { "Hello": { protocol_version: number, daemon_version: string, 
 /**
- * 데몬 전체 capability(에이전트별 capability 는 AgentInfo 에).
+ * Daemon-wide capability (per-agent capability is in AgentInfo).
  */
 capabilities: Capabilities | null, } } | { "Ack": { request_id: RequestId, } } | { "SubscribeAck": { agent_id: string, action: SubscribeAction, current_epoch: number, oldest_seq: number, latest_seq: number, 
 /**
- * 이 replay 의 머리 — 실제로 처음 보낸 seq. 보낸 것이 없으면 빈 ring 은 다음에 발급할 seq,
- * 이어받을 꼬리가 없으면 `after_seq+1`. ★dedup 기준(「마지막으로 본 seq」)이 아니다★ — 뷰는
- * 이 값을 flush 시작점 `max(마지막+1, replay_from)` 에만 쓴다(ADR-0231).
+ * The head of this replay — the seq actually sent first. If nothing was sent, the next seq to issue for an empty ring,
+ * or `after_seq+1` if there is no tail to resume. ★It is not the dedup basis (「the last seen seq」)★ — the view
+ * uses this value only for the flush starting point `max(last+1, replay_from)` (ADR-0231).
  */
 replay_from: number, 
 /**
- * ring 밖으로 밀려 일부 손실(clear+tail).
+ * Partial loss from being pushed out of the ring (clear+tail).
  */
 truncated: boolean, 
 /**
- * 이 replay 의 화신은 저장된 대화를 이어받으려고 떴다(스폰이 이어받을 손잡이를 실었다) —
- * ★이어받기가 **성공했다**는 뜻이 아니다★. `current_epoch` 와 같은 구독 응답에서 나온다.
- * 칸이 없는 옛 데몬의 ack 는 `false` 로 읽힌다(`serde(default)`).
- * ★[`crate::PROTOCOL_VERSION`] 은 이 추가로 올리지 않는다★ — 그 기준(조용한 **해로운** 오작동)에
- *   두 방향을 대면 둘 다 오늘의 동작으로 떨어진다:
- *   - **신데몬 + 구셸**: 구셸은 모르는 칸을 버린다(`deny_unknown_fields` 없음) — 이어받는 슬롯이
- *     오늘처럼 첫 화면을 그린다.
- *   - **구데몬 + 신셸**: 칸이 없어 `false` — 역시 오늘처럼 첫 화면을 그린다.
- *   다른 것이 도는 조합이 없고 기능이 없을 뿐이다. 셸↔웹뷰 마커 비트는 셸과 웹뷰가 한 빌드로
- *   나가므로 버전 축이 없다. (ADR-0226)
+ * This replay's incarnation started to resume a stored conversation (the spawn carried a handle to resume) —
+ * ★it does not mean the resume **succeeded**★. It comes from the same subscribe response as `current_epoch`.
+ * An ack from an old daemon without the field reads as `false` (`serde(default)`).
+ * ★[`crate::PROTOCOL_VERSION`] is not bumped for this addition★ — measured against that criterion (a silent **harmful** malfunction),
+ *   both directions fall back to today's behavior:
+ *   - **new daemon + old shell**: the old shell drops the unknown field (no `deny_unknown_fields`) — a resuming slot
+ *     draws the first screen as today.
+ *   - **old daemon + new shell**: no field, so `false` — it also draws the first screen as today.
+ *   No combination runs something different; the feature is just absent. The shell↔webview marker bit has no version axis because the shell and the webview
+ *   ship in one build. (ADR-0226)
  */
 continues_conversation: boolean, } } | { "SubscribeFailed": { agent_id: string, reason: string, } } | { "Output": { agent_id: string, epoch: number, seq: number, chunk: OutputChunk, } } | { "ReplayComplete": { agent_id: string, epoch: number, } } | { "StatusChanged": { agent_id: string, status: AgentStatus, epoch: number, } } | { "AgentListUpdated": { agents: Array<AgentInfo>, } } | { "AgentList": { request_id: RequestId, agents: Array<AgentInfo>, } } | { "RestoreResult": { report: RestoreReport, } } | { "InputLeaseChanged": { agent_id: string, held: boolean, } } | { "ProfileListUpdated": { profiles: Array<AgentProfile>, } } | { "ProfileList": { request_id: RequestId, profiles: Array<AgentProfile>, } } | { "Snapshot": { request_id: RequestId, agent_id: string, chunks: Array<SnapshotChunk>, } } | { "Created": { request_id: RequestId, profile: AgentProfile, } } | { "Spawned": { request_id: RequestId, agent: AgentInfo, 
 /**

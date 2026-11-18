@@ -46,7 +46,7 @@
   - Whether to split the `windows` crate feature into per-function cargo features — `net` needs only the PID decision, yet the Job Object · Restart Manager bindings get pulled in too.
   - Implementations for other OSes do not come from this split. The empty places merely become visible in one spot.
 
-### base tenant candidates (base 입주 후보) (survey 2026-09-26)
+### base tenant candidates (survey 2026-09-26)
 
 **Criteria:** zero domain knowledge · tenants do not reference each other. Looks at **generality** rather than the number of consumers — 「base 는 어디서든 쓰는 잎」 (user 2026-09-26). OS-specific code goes to candidate 1, so it is excluded.
 **Verification:** a light worker surveyed and main checked only the definition locations. ★The behavior differences and the descriptions of private gates are worker reports and main did not re-confirm them★.
@@ -347,7 +347,7 @@ Observations not yet raised as decision candidates. Handle them when passing the
 | When codex is launched in a slot, the tab title is 「Claude Code」 until a refresh — the daemon `SpawnByCwd` handler sends only `Spawned` and does not broadcast `ProfileListUpdated`, so the frontend profile list is empty (display only wrong · no effect on behavior) · source = 2-1 U2 QA full (2026-10-06) | `crates/engram-dashboard-daemon/src/connection_core.rs` (`SpawnByCwd` handler) | Unhandled — daemon cleanup (stage 4) or when passing that handler |
 ---
 
-## Big sections (큰 절) — handled separately later (only collected for now)
+## Big sections — handled separately later (only collected for now)
 
 ### A. Logging system design
 

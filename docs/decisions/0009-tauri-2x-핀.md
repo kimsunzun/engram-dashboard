@@ -1,7 +1,7 @@
 # ADR-0009: Pin tauri to the latest 2.x (Channel losslessness measured)
 
 - 상태: 확정 (S4 channel spike)
-- 관련: CLAUDE.md 의존성 · `src-tauri/Cargo.toml`
+- 관련: CLAUDE.md dependencies · `src-tauri/Cargo.toml`
 
 ## 맥락
 The initial LLD said "no tauri 2.5", but the dependency is caret, so it resolved to 2.11.2. There was doubt about whether Channel is lossless (GitHub #11421), so a version pin decision was needed.

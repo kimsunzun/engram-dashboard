@@ -24,7 +24,7 @@ Written 2026-06-18. Synthesis of PRD opinions (user conversation) + `/consult` 3
 | C3 | **The daemon desired-state is owned by the owner (tray-host). The UI must not ensure directly, only connect.** The current UI bootstrap ensures the daemon → refactor. | "the UI spawns the daemon directly" → multiple-ensure race · the orphan-deciding subject is lost |
 | C4 | **Full-quit order: block ensure/spawn first → daemon graceful drain (ack, timeout + Job forced fallback) → UI exit → tray-host exit.** | "UI exits first" → a re-spawn race in between (the reason automatic restart was discarded recurs) |
 
-Crash automatic re-launch (supervision) is **deferred** — a manual "UI 열기" is already the recovery path. An ADR if it becomes frequent.
+Crash automatic re-launch (supervision) is **deferred** — a manual "Open UI" is already the recovery path. An ADR if it becomes frequent.
 
 ## 2. Process responsibilities
 
@@ -32,7 +32,7 @@ Crash automatic re-launch (supervision) is **deferred** — a manual "UI 열기"
 - Startup-program entry point. Owns the tray icon.
 - **lifecycle owner**: daemon ensure (detached spawn) · stop, UI launch/show/hide/kill, full-quit coordinator.
 - Holds the daemon desired-state (Running/Stopped/Stopping).
-- Status observation: lockfile + port-ping (v1) / WS control (future). Reflected in the menu as "데몬: 실행 중/꺼짐".
+- Status observation: lockfile + port-ping (v1) / WS control (future). Reflected in the menu as "Daemon: running/off".
 - **Spawns the daemon and UI detached** (not put in its own Job) → both survive if tray-host dies.
 
 ### daemon (existing crate, minimal changes)
@@ -48,10 +48,10 @@ Crash automatic re-launch (supervision) is **deferred** — a manual "UI 열기"
 - On receiving the "full quit" intent (reason=full_shutdown), stops reconnect/ensure.
 
 ## 3. Tray menu (v1)
-- **데몬 시작** (start daemon) — the owner ensures a detached daemon (in the background without the UI).
-- **UI 열기** (open UI) — show/focus if the UI is alive; spawn if not (first run / after the UI exited).
-- **UI 종료** (quit UI) — terminates only the UI process (daemon survives). ※ Different from X=hide.
-- **전체 종료** (full quit) — brings the daemon + UI + tray-host all down in the order of §1 C4.
+- **Start daemon** — the owner ensures a detached daemon (in the background without the UI).
+- **Open UI** — show/focus if the UI is alive; spawn if not (first run / after the UI exited).
+- **Quit UI** — terminates only the UI process (daemon survives). ※ Different from X=hide.
+- **Full quit** — brings the daemon + UI + tray-host all down in the order of §1 C4.
 - (Finer-grained items are added later — the tray works like `add(command)`.)
 
 ## 4. Command surface (§5 hands/brain)
@@ -61,7 +61,7 @@ Crash automatic re-launch (supervision) is **deferred** — a manual "UI 열기"
 
 ## 5. Lifecycle sequences
 
-**Boot (login):** tray-host starts → only the tray is shown (WebView 0). (Optional) whether to auto-ensure the daemon = a setting. v1 default: the daemon is ensured at "데몬 시작"/"UI 열기".
+**Boot (login):** tray-host starts → only the tray is shown (WebView 0). (Optional) whether to auto-ensure the daemon = a setting. v1 default: the daemon is ensured at "Start daemon"/"Open UI".
 
 **Open UI:** tray-host → is the UI process alive? → if so show/focus, if not spawn → the UI connects to the daemon (if absent the owner ensures first).
 
@@ -77,11 +77,11 @@ tray-host is not the OS parent but a third party (sends commands). So on forced 
 | What was killed | Result | Coverage |
 |---|---|---|
 | tray-host force-kill (Task Manager) | daemon and UI survive (detached). The graceful command does not go out = intended | on relaunch, **re-adoption** via the lockfile (C2). If the daemon is idle it self-shuts down (C1) |
-| UI force-kill | daemon survives. Unrelated to tray-host | respawn via the tray "UI 열기" → reconnect |
-| daemon force-kill | the UI connection is cut ('down'). No automatic restart | revived only by an explicit "데몬 시작" (ADR-0021). The lockfile is stale → the next ensure cleans it up |
+| UI force-kill | daemon survives. Unrelated to tray-host | respawn via the tray "Open UI" → reconnect |
+| daemon force-kill | the UI connection is cut ('down'). No automatic restart | revived only by an explicit "Start daemon" (ADR-0021). The lockfile is stale → the next ensure cleans it up |
 | everything force-killed, only the lockfile remains | — | the next launch decides stale by the PID/port/generation check → clean up → fresh (C2) |
 
-**Principle:** a daemon remaining after a forced termination is not a bug but the "work survives" design. But with (a) re-adoption catching it again, (b) self-clean if idle, (c) a stale lock reclaimed by the check — these 3 keep it from becoming a Discord-style "unmanageable zombie". A daemon holding live agents is intentionally persistent (reconnect by relaunching; to really turn it off, "전체 종료"/Task Manager).
+**Principle:** a daemon remaining after a forced termination is not a bug but the "work survives" design. But with (a) re-adoption catching it again, (b) self-clean if idle, (c) a stale lock reclaimed by the check — these 3 keep it from becoming a Discord-style "unmanageable zombie". A daemon holding live agents is intentionally persistent (reconnect by relaunching; to really turn it off, "Full quit"/Task Manager).
 
 ## 6. Module/file outline (expected)
 - **New crate/bin** `engram-tray-host` (or a separate bin outside src-tauri): tray-icon + tao, launcher, lockfile observation, lifecycle handles.
@@ -95,7 +95,7 @@ The cost of changing the entry point from the app to tray-host is real and must 
 - → Specify as migration items in the ADR.
 
 ## 8. Unresolved (decided at implementation start)
-- **[Decided] Daemon auto ensure at boot:** default = **(b) on-demand** (ensure only at "데몬 시작"/"UI 열기", in the spirit of ADR-0021). **Auto-start (ensure the daemon right at login) is left only as a settings option** (default off).
+- **[Decided] Daemon auto ensure at boot:** default = **(b) on-demand** (ensure only at "Start daemon"/"Open UI", in the spirit of ADR-0021). **Auto-start (ensure the daemon right at login) is left only as a settings option** (default off).
 - **[Half resolved] lifecycle handle IPC path:** **daemon control = the daemon's existing WS server + lockfile token** (tray-host sends StopDaemon etc. as an authenticated client; force is a taskkill fallback = same as the current `DaemonControl.stop`). **UI control (launch/hide/kill)** = handled separately by tray-host with an OS spawn + a small signal (path not settled).
 - tray-host = pure Rust (tray-icon+tao) vs Tauri-tray-only (no window). The former is recommended (lightweight).
 - Single instance / deep link / updater details (§7).

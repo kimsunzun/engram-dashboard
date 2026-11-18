@@ -10,7 +10,7 @@ After the messaging v1 design was recorded in ADR-0103, the user's re-review bef
 ## 결정
 
 1. **Group resolution = a seam (GroupRegistry: a "group name → member list" resolver, with a pluggable source structure).** v1 sources = the runtime-registered roster + the built-in `@all` (ADR-0103 decision 4 kept). **When folders come to exist owned by the daemon, a folder = an additional source** (`@폴더명`) and is planned as the canonical unit of organizational broadcast. **A sub-agent hierarchy is not adopted as an address unit.**
-2. **wake not adopted (v1) — a sleeping recipient is parked the same as an absent one.** Both general wake (every send wakes) and the request-limited variant are excluded from v1 — the leading v2 candidate = **wake-on-request** (same as the term in spec §8). Add it when the need is demonstrated (the user: "나중으로, 필요할 때 추가").
+2. **wake not adopted (v1) — a sleeping recipient is parked the same as an absent one.** Both general wake (every send wakes) and the request-limited variant are excluded from v1 — the leading v2 candidate = **wake-on-request** (same as the term in spec §8). Add it when the need is demonstrated (the user: 「나중으로, 필요할 때 추가」 ("later, add when needed")).
 3. **Injection timing = an idle gate + a batch flush.** If the recipient is in the middle of a turn (busy), hold the message in the daemon mailbox, and on entering idle (turn end) or appearance (spawn/epoch) inject all the accumulated messages in a batch, oldest first (each message in its own envelope). The `delivered` ledger is stamped only at the actual injection time. busy/idle observation is a backend capability (stream-json turn events) — a backend that cannot be observed falls back to immediate injection. Batch handling is verified with emphasis in the acceptance criteria (strengthened at the user's instruction).
 
 ## 거부한 대안
@@ -24,7 +24,7 @@ After the messaging v1 design was recorded in ADR-0103, the user's re-review bef
 ## 근거
 
 - User decision (2026-07-24, this session): group address unit = the folder direction (hierarchy not adopted) · wake deferred · idle gate + batch adopted + an instruction to strengthen batch verification.
-- The idle injection precedent = the Claude Code team's file inbox + idle injection (confirmed in the research in the 근거 section of ADR-0103) — isomorphic to our mailbox wait and flush.
+- The idle injection precedent = the Claude Code team's file inbox + idle injection (confirmed in the research in the Rationale section of ADR-0103) — isomorphic to our mailbox wait and flush.
 - Unifying on the XML envelope (ADR-0103 decision 1) supports the premise of batch injection — message boundaries within a batch are structurally clear (with the colon format the boundaries would be blurred).
 - Unverified (implementation QA item, spec §7): the real queuing behavior of the CLI (stream-json) when injecting to stdin in the middle of a turn · the accuracy of busy/idle observation (turn events).
 

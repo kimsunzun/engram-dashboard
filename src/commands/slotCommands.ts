@@ -1,13 +1,6 @@
-// ADR-0064 / ADR-0055 / ADR-0035: each command receives the execution context (viewId · slotId) through run(args) and only routes to a viewStore
-//   action (0 new state paths — the layout authority is the backend ViewManager, ADR-0035). Human right click ·
-//   palette · keybindings · the LLM (__engramCmd) all run the same command with the context argument (§5 single control surface).
-//
-// ★Common = '*' single source★ (ADR-0064 invariant): these items attach to every slot via registerSlotMenu('*', …) —
-//   content components do not redeclare them (redeclaring = drift, review reject). Content-specific items go in each content module.
-//
-// ★Popup detach = promoted to common★ (ADR-0064): the old menu enabled 'detach to popup' only when a live agent existed, but
-//   after the slot content union (ADR-0060), a slot must be movable to another window regardless of content kind →
-//   remove the agent gating and move it to '*' (common).
+// ADR-0064 / ADR-0055 / ADR-0035: each command takes the execution context (viewId · slotId) through run(args) and only routes to a viewStore action (0 new state paths — layout authority is the backend ViewManager). Human right click · palette · keybindings · the LLM (__engramCmd) run the same command (§5 single control surface).
+// ★Common = '*' single source★ (ADR-0064 invariant): these attach to every slot via registerSlotMenu('*', …); content components do not redeclare them (drift). Content-specific items go in each content module.
+// ★Popup detach is common★ (ADR-0064): after the slot content union (ADR-0060) a slot must be movable to another window regardless of content kind, so the agent gating is removed and it lives in '*'.
 
 import { invoke } from '@tauri-apps/api/core'
 
@@ -27,8 +20,8 @@ interface SlotCtx {
 function requireCoords(args: SlotCtx | undefined, cmd: string): { viewId: string; slotId: string } {
   const viewId = args?.viewId
   const slotId = args?.slotId
-  if (typeof viewId !== 'string' || viewId.length === 0) throw new Error(`[${cmd}] viewId 필요`)
-  if (typeof slotId !== 'string' || slotId.length === 0) throw new Error(`[${cmd}] slotId 필요`)
+  if (typeof viewId !== 'string' || viewId.length === 0) throw new Error(`[${cmd}] viewId required`)
+  if (typeof slotId !== 'string' || slotId.length === 0) throw new Error(`[${cmd}] slotId required`)
   return { viewId, slotId }
 }
 
@@ -45,9 +38,7 @@ function registerSplit(id: string, title: () => string, dir: SplitDir): void {
   })
 }
 
-// ★Label↔direction wiring = vim convention (ADR-0140)★: `가로 분할` = a horizontal line (a horizontal split line) appears, dividing into top/bottom →
-//   `top_bottom`. Reading only the label word it looks reversed, but flipping it would break the convention the user chose
-//   (reverting to the tmux axis convention = the alternative ADR-0140 rejected). This is the only point where the two vocabularies meet.
+// ★Label↔direction wiring = vim convention (ADR-0140)★: `Split horizontally` = a horizontal split line dividing top/bottom → `top_bottom`. The label word reads reversed, but flipping it would break the convention the user chose (the tmux axis convention is the alternative ADR-0140 rejected). The only point where the two vocabularies meet.
 registerSplit('slot.split.topBottom', () => t('slot.splitTopBottom'), 'top_bottom')
 registerSplit('slot.split.leftRight', () => t('slot.splitLeftRight'), 'left_right')
 
@@ -55,8 +46,7 @@ register({
   id: 'slot.focus',
   title: () => t('slot.focus'),
   category: 'slot',
-  // ADR-0066: click-to-focus — viewStore.focusSlot → invoke(focus_slot) → emit(layout:updated) updates the ring
-  //   (no optimistic update, §5 single control surface). The slot onClick of LayoutLeaf calls the same handle.
+  // ADR-0066: click-to-focus — viewStore.focusSlot → invoke(focus_slot) → emit(layout:updated) updates the ring (no optimistic update); LayoutLeaf's slot onClick calls the same handle.
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.focus')
     return useViewStore.getState().focusSlot(viewId, slotId)
@@ -67,13 +57,8 @@ register({
   id: 'slot.popout',
   title: () => t('slot.popout'),
   category: 'slot',
-  // ADR-0057/0064: MOVE (detach) a slot to a new tab of a new runtime popup window — viewStore.moveSlotToWindow →
-  //   invoke(move_slot_to_window, toWindow=null). Independent of content kind (agent gating removed, ADR-0064).
-  // ★Known transitional split — the same id receives and gives different things on two surfaces★: the shell's command bus also has
-  //   `slot.popout` (`src-tauri/src/layout/commands.rs`). What it receives — here there is no destination argument so it is always
-  //   a new window (the call below does not pass toWindow), whereas that side can also pick an existing window with to_window. What it gives — here it is
-  //   `{window, tab, window_id, number}`, there `{window, new_view_id, window_id, number}`. Do not fix only one side — joining is the job of the follow-up step that
-  //   retires this registry. The same memo is attached on the other side.
+  // ADR-0057/0064: MOVE (detach) a slot to a new tab of a new runtime popup window — viewStore.moveSlotToWindow → invoke(move_slot_to_window, toWindow=null); independent of content kind.
+  // ★Known transitional split — the same id receives and gives different things on two surfaces★: the shell bus also has `slot.popout` (`src-tauri/src/layout/commands.rs`). Receives: here no destination argument, so always a new window (toWindow is not passed), while the bus can pick an existing window with to_window. Gives: here `{window, tab, window_id, number}`, there `{window, new_view_id, window_id, number}`. Do not fix only one side — joining is the follow-up step that retires this registry (same memo on the other side).
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.popout')
     return useViewStore.getState().moveSlotToWindow(viewId, slotId)
@@ -85,11 +70,11 @@ register({
   title: () => t('slot.empty'),
   category: 'slot',
   help: {
-    summary: '그 슬롯을 빈 칸으로 되돌린다(슬롯 자체는 남는다 — 없애려면 slot.close).',
+    summary: 'Returns that slot to an empty area (the slot itself stays — to remove it, slot.close).',
     effect: 'write',
     args: {
-      viewId: { type: 'string', description: '탭 id(UUID) — tab.list 가 준다.' },
-      slotId: { type: 'string', description: '슬롯 id(UUID) — slot.resolveSpatial 이 준다.' },
+      viewId: { type: 'string', description: 'Tab id (UUID) — given by tab.list.' },
+      slotId: { type: 'string', description: 'Slot id (UUID) — given by slot.resolveSpatial.' },
     },
     required: ['viewId', 'slotId'],
   },
@@ -115,13 +100,10 @@ register({
   id: 'slot.resolveSpatial',
   title: () => t('slot.resolveSpatial'),
   category: 'slot',
-  // ★Spatial/directional token → slot id resolution (ADR-0068 — §5 backend authority resolver)★: maps a spatial reference such as "bottom right" · "right of this slot"
-  //   to a slot id through derivation from the logical plan (split direction · ratio) (independent of pixels · getBoundingClientRect —
-  //   the layout truth is the backend ViewManager, ADR-0035). The frontend does not compute but only invokes the backend resolve_spatial
-  //   (no optimistic frontend computation — §5 single control surface). A relative direction is based on the target View's focused_slot_id.
+  // ★Spatial/directional token → slot id (ADR-0068 — §5 backend authority resolver)★: a spatial reference such as "bottom right" · "right of this slot" is resolved by the backend from the logical plan (split direction · ratio), independent of pixels · getBoundingClientRect (layout truth = backend ViewManager, ADR-0035). The frontend only invokes resolve_spatial — no frontend computation. A relative direction is based on the target View's focused_slot_id.
   run: args => {
     const token = args?.token
-    if (typeof token !== 'string' || token.length === 0) throw new Error('[slot.resolveSpatial] token 필요')
+    if (typeof token !== 'string' || token.length === 0) throw new Error('[slot.resolveSpatial] token required')
     const viewId = typeof args?.viewId === 'string' && args.viewId.length > 0 ? args.viewId : undefined
     // If viewId is not specified, pass this webview window (main · popup label) so the backend targets that window's active tab.
     const window = viewId ? undefined : readWindowLabelFromHash()
@@ -129,12 +111,9 @@ register({
   },
 })
 
-// ★Common slot ops contribution = '*' (all slots) single source★ (ADR-0064). group='slot-ops' (rendered below the content items).
-//   Close is by convention at the very bottom, so order 99.
-// ★hideOn trim (ADR-0065)★: slot.empty (re-emptying an empty slot = no-op) is meaningless on an empty slot, so it is
-//   excluded with hideOn:['empty']. The '*' universal registration is kept (common ops single-source invariant) — it is a subtraction filter,
-//   not a per-content-type redeclaration (see the rejected alternative of ADR-0065).
-// ADR-0228: slot.popout gets no hideOn — an empty slot is also a popout target (user decision).
+// ★Common slot ops contribution = '*' single source★ (ADR-0064). group='slot-ops' (below the content items); Close is conventionally last, so order 99.
+// ★hideOn trim (ADR-0065)★: slot.empty (re-emptying an empty slot is a no-op) is excluded with hideOn:['empty'] — a subtraction filter that keeps the '*' registration (single-source invariant), not a per-content-type redeclaration (ADR-0065 rejected alternative).
+// ADR-0228: slot.popout gets no hideOn — an empty slot is also a popout target.
 registerSlotMenu('*', [
   { commandId: 'slot.split.topBottom', group: 'slot-ops', order: 10 },
   { commandId: 'slot.split.leftRight', group: 'slot-ops', order: 20 },

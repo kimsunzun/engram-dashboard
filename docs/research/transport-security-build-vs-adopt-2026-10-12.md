@@ -4,7 +4,7 @@
 - Method: `/research` medium · design-decision mode · four collection tracks (general-program peers · app-level Rust RPC/WS libraries · secure channel/remote layers · measuring our current code) → main session synthesis + source cross-check (grounding) → cross-family adversarial review (codex)
 - Trigger: user question — "if there is a library with good security, then we don't need to implement it ourselves, do we (or wrap it and swap it if there is a problem)". Once external communication works, what must be considered doubles.
 - Comparison basis: **general programs**, not agent products (user instruction 2026-10-12). Agent and terminal peers are the closest in shape, so they are kept for reference only.
-- Confidence legend: **certain (확실)** (source cross-check + independent corroboration) · **likely (가능성 높음)** (source cross-check, single source) · **uncertain (불확실)** (not cross-checked · from memory · third-party aggregation) · **contested** (counter-evidence exists)
+- Confidence legend: **certain** (source cross-check + independent corroboration) · **likely** (source cross-check, single source) · **uncertain** (not cross-checked · from memory · third-party aggregation) · **contested** (counter-evidence exists)
 - Earlier survey: `docs/research/reusable-transport-crate-boundary-2026-09-03.md` (the connection lifecycle management axis — this document revisits only the **security axis**) · ADR-0177
 
 ## 0. Conclusion first
@@ -124,7 +124,7 @@ Sources: tungstenite settings = doc.servo.org (tungstenite `protocol/mod.rs`) ·
 
 Constraint sources = CLAUDE.md 「아키텍처 원칙」 (swappable abstraction · core isolation · platform neutrality) · ADR-0177 decision 5 (wire preservation) · preference for MIT/Apache licenses (the final decision is up to the responsible department).
 
-| Option | Wire preserved (wire 보존) | Swappable seam | Windows | Security gain | Cost |
+| Option | Wire preserved | Swappable seam | Windows | Security gain | Cost |
 |---|---|---|---|---|---|
 | **A. Keep the transport + only layer ③ off the shelf (rustls now · iroh/SSH/VPN when remote) + move ①② over from the `net` one** | ○ | ○ (`Dialer`/`Listener` as is) | ○ (rustls) · iroh not confirmed | encryption · peer authentication left to audited parts | Listener seam · porting Origin/deadline/caps |
 | B. Adopt tonic | ✕ (gRPC) | △ | ○ | TLS · concurrency caps | full wire replacement · authentication · Origin still ours |

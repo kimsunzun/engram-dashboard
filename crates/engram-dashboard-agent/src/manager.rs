@@ -1,15 +1,12 @@
-//! AgentManager — backend/transport/output_core/session 을 묶어 에이전트 생명주기를 관리한다.
+//! AgentManager — binds backend/transport/output_core/session together to manage the agent lifecycle. Zero tauri imports: upper-layer
+//! status notifications are injected through the StatusSink trait.
 //!
-//! tauri import 0 — 상위 상태 알림은 StatusSink trait으로 주입받는다(AppHandle 아님).
+//! ★Single owner of the roster (ADR-0119)★: "all agents + each one alive/asleep" is built only in `roster()`. The profile registry is
+//! **inside** this type and no handle goes out; the outside uses narrow verbs (create/delete/rename/reparent/set-auto-restore/snapshot).
+//! Canonical names are unique across the roster (ADR-0120), enforced at creation, new registration (spawn) and rename.
 //!
-//! ★명부(roster) 단일 소유자(ADR-0119)★: "전체 에이전트 + 각자 살아있음/잠듦" 은 `roster()` 한 곳에서만
-//! 만들어진다. 프로필 레지스트리는 이 타입 **안**에 있고 밖으로 핸들이 나가지 않는다 — 바깥은 좁은
-//! 동사(create/delete/rename/reparent/set-auto-restore/snapshot)만 쓴다.
-//! canonical 이름은 명부 전체에서 유일하며(ADR-0120), 강제 지점은 생성·신규 등록(spawn)·개명 셋뿐이다.
-//!
-//! 락 순서(LLD §10 규칙1): `sessions` RwLock은 조회 전용이다. Arc<AgentSession>을 clone하고
-//! lock을 즉시 해제한 뒤에야 session 내부 lock(core/transport)을 취득한다. sessions lock
-//! 보유 중 session 내부 lock 취득은 금지(데드락 방지).
+//! Lock order (LLD §10 rule 1): `sessions` is lookup-only — clone the `Arc<AgentSession>`, release the lock, only then take
+//! session-internal locks (core/transport). Taking them while holding `sessions` is forbidden (deadlock).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -50,67 +47,51 @@ mod profile_edit;
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
-/// resume spawn 후 이 시간 안에 비정상 종료(code≠0/Failed/Killed)하거나 **진단 스트림이 실패를 말하면**
-/// resume 실패로 판정한다(H-1.7 "조기 종료 윈도"). 성공한 resume은 TUI라 계속 떠 있다.
+/// Within this time after a resume spawn, an abnormal exit (code≠0/Failed/Killed) **or a diagnostic stream saying it failed** decides a
+/// resume failure (H-1.7 "early exit window"); a successful resume is a TUI and stays up.
 ///
-/// ★늘려서 문제를 풀지 마라(실측 2026-08-23)★: 실 claude 는 진단을 +2.2s 에 내고 종료는 +6.4s 에야
-///   한다 — 죽음만 기다리는 판정은 이 창을 6s 넘게 늘려야 맞는데, 활성화는 이 창만큼 **블록**하므로
-///   그러면 멀쩡한 이어받기가 전부 그만큼 느려진다. 그래서 판정 근거를 「죽음」에서 「죽음 또는 증거」로
-///   바꿨다(`EarlyVerdict`) — 오히려 실패를 더 **빨리** 확정한다.
+/// ★Do not enlarge it to wait for death★ (measured: claude emits the diagnostic at +2.2s, exits at +6.4s): activation **blocks** for this
+/// window, so every healthy resume would slow down. The decision ground is 「death or evidence」 instead (`EarlyVerdict`).
 // ADR-0172
 pub(crate) const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(3);
 
-/// 통로가 **연결의 결말을 아예 안 내는** 경우에만 쓰이는 liveness 백스톱.
+/// A liveness backstop used only when the link **never produces the connection outcome**.
 ///
-/// ★★이것은 판정 창이 아니다 — 판정은 연결 그 자체다★★(사용자 결정): 이어받기의 성공은 「N 초 안에 안
-///   죽었다」가 아니라 **「에이전트가 입력을 받을 준비가 됐다고 신호했다」**이고, codex 에서 그 신호는
-///   핸드셰이크 완료(`Link::Up`)다. 거절도 상대가 **즉시** 답한다(실측). 그래서 양방향 모두 기다릴 것이
-///   없고, [`AgentManager::early_activation_verdict`] 는 연결이 결말을 내는 **그 순간** 돌아온다.
-///   ★한때 여기 있던 「연결 판정 창」(15 초를 끝까지 기다리는 정책)은 그 결정이 걷어냈다 — 되살리지 말 것★.
-///
-/// ★그럼에도 이 값이 남아 있는 이유는 **단 하나**다★: 통로가 결말을 **못 내는** 경로가 실재한다.
-///   [`crate::backend::codex`] 의 핸드셰이크 상한은 **응답 대기**에만 걸리고 **쓰기**에는 안 걸린다 —
-///   상대가 우리 stdin 을 읽지 않으면 `write_all` 이 파이프 backpressure 로 무한히 매달리고, 그러면
-///   라이터가 실패 갈래에 도달하지 못해 링크가 `Connecting` 에 영영 멈춘다. 그 상태에서 이 백스톱이
-///   없으면 `activate_profile` 이 **영원히** 블록한다(데몬의 async dispatch 워커 하나가 통째로 묶인다).
-/// ★그래서 이 값이 하는 일은 「판정」이 아니라 「포기」다★ — 여기 닿았다는 것은 상대가 답도 안 하고
-///   우리 쓰기도 안 받는다는 뜻이고, 그 결말은 실패이자 **아래 teardown 의 트리거**다(그 kill 이 매달린
-///   쓰기까지 함께 푼다).
-/// ★값은 통로의 핸드셰이크 상한보다 커야 한다★ — 작으면 통로가 스스로 실패를 확정하기 **전에** 이쪽이
-///   가로채, 사유 없는 포기가 사유 있는 거절을 덮는다. 그 대소는 시험대가 직접 잰다.
+/// ★Not a decision window — the decision is the connection itself★: resume success is 「the agent signaled it is ready to take input」
+/// (codex: handshake completion, `Link::Up`) and a refusal is answered at once, so [`AgentManager::early_activation_verdict`] returns the
+/// moment the outcome exists. Do not bring back the old 15-second connection decision window.
+/// ★The one reason this value remains★: the link's handshake cap ([`crate::backend::codex`]) bounds waiting for **responses**, not
+/// **writes** — a peer that does not read our stdin hangs `write_all` and leaves the link in `Connecting`, so `activate_profile` would block
+/// **forever** (one daemon dispatch worker). So this is 「giving up」, not 「deciding」: reaching it is a failure and **triggers the teardown
+/// below** (that kill also releases the hung write).
+/// ★It must be larger than the link's handshake cap★ — else a reasonless give-up covers a refusal with a reason (measured by the test rig).
 pub(crate) const LINK_RESOLUTION_BACKSTOP: Duration = Duration::from_secs(15);
-/// 복원 시 에이전트 간 spawn 간격(동시 폭주 방지 stagger).
+/// Spawn interval between agents during restore (stagger to prevent concurrent bursts).
 const RESTORE_STAGGER: Duration = Duration::from_millis(200);
 
-/// spawn 요청 하나의 결말. ★"띄웠다" 와 "할 일이 없었다" 를 **호출자가 구분할 수 있어야 한다**★ —
-/// 그래야 등록·epoch·기록 같은 뒷정리를 자기가 만들지 않은 세션에 하지 않는다.
+/// The outcome of one spawn request. ★The caller **must be able to tell** "launched" from "there was nothing to do"★, so registration,
+/// epoch and recording cleanup is not done on a session it did not create.
 ///
-/// ★중복 요청은 오류가 아니다(설계 결정 — 되돌리지 마라)★: 그 항목이 이미 떠 있거나 이미 뜨는 중이면
-///   이 요청은 **무의미(moot)** 하다. 예전엔 그것을 `Err` 로 답했고, 그래서 소비자마다 "이 오류는 진짜
-///   실패가 아니다" 를 알아야 했다 — 그 목록을 세 번 손봤고 세 번 다 하나씩 빠졌다. 오류가 아니라 결말로
-///   두면 빠뜨릴 목록 자체가 없어진다. 프론트는 이미 같은 모양이다(`AgentList` 의 in-flight 가드가 두 번째
-///   활성화를 조용히 흘린다).
-/// ★moot 은 아무것도 바꾸지 않는다★: 한 것이 없으므로 기록할 실패도, 지울 근거도 없다
-///   (`AgentManager::note_spawn_result`).
+/// ★A duplicate request is an outcome, not an error — do not revert★: if that entry is already up or launching the request is **moot**. As
+/// an `Err` every consumer had to know "this error is not a real failure" and one was missed each time; the frontend's in-flight guard is the
+/// same shape. ★moot changes nothing★ — no failure to record, no ground to clear (`AgentManager::note_spawn_result`).
 // ADR-0172
 #[derive(Debug, Clone)]
 pub enum SpawnOutcome {
-    /// 이 호출이 화신을 띄웠다.
+    /// This call launched an incarnation.
     Started(AgentInfo),
-    /// **이 요청은 할 일이 없었다** — 그 항목이 이미 떠 있거나 이미 뜨는 중이라 아무것도 하지 않았다.
-    ///
-    /// `Some` = 그 순간 산 세션을 볼 수 있었다(그 정보를 그대로 돌려준다) · `None` = 승자가 아직 명부에
-    /// 올리기 전이라 볼 것이 없었다. 어느 쪽이든 **이 호출은 아무것도 만들지 않았다**.
+    /// **This request had nothing to do** — the entry was already up or launching. `Some` = the live session seen at that moment · `None` = the
+    /// winner had not yet put it on the roster. Either way **this call created nothing**.
     Moot(Option<AgentInfo>),
 }
 
 impl SpawnOutcome {
-    /// 이 호출이 실제로 띄웠나 — 뒷정리를 할 **자격**의 판정.
+    /// Whether this call actually launched — the decision of the **eligibility** to do cleanup.
     pub fn started(&self) -> bool {
         matches!(self, SpawnOutcome::Started(_))
     }
 
-    /// 결말과 무관하게 "지금 그 에이전트" 정보. moot 은 남이 띄운 세션이라 `None` 일 수 있다.
+    /// "That agent now" information regardless of the outcome. Moot is a session someone else launched, so it can be `None`.
     pub fn into_info(self) -> Option<AgentInfo> {
         match self {
             SpawnOutcome::Started(info) => Some(info),
@@ -118,7 +99,7 @@ impl SpawnOutcome {
         }
     }
 
-    /// **이 호출이 띄운** 화신만. moot 이면 `None` — "내가 만든 것" 에만 뒷정리를 하려는 호출자용이다.
+    /// Only the incarnation **this call launched**. `None` if moot — for callers that want to do cleanup only on "what I made".
     pub fn into_started(self) -> Option<AgentInfo> {
         match self {
             SpawnOutcome::Started(info) => Some(info),
@@ -175,92 +156,67 @@ struct LaunchNotices {
     baseline: Option<String>,
 }
 
-/// 실패 분류가 들여다보는 출력 꼬리의 하드 상한(`OutputCore::terminal_tail` 이 정확히 지킨다). 우리가
-/// 찾는 종료 문구는 마지막 몇 줄에 있다. 이 값은 화면·로그로 나가지 않는다(분류 입력 전용).
+/// Hard cap on the output tail the failure classification looks into (`OutputCore::terminal_tail` keeps it exactly); the exit text is in the last few lines. Classification input only — not
+/// shown on screen or logs.
 // ADR-0172
 const FAILURE_TAIL_BYTES: usize = 4096;
 
-/// 이어받기 시도의 조기 판정 결말 — 「죽었나」가 아니라 「무슨 증거가 섰나」로 갈린다.
+/// The early decision outcome of a resume attempt — split by 「what evidence stood」, not 「did it die」.
 ///
-/// ★`Diagnosed` 가 있는 이유(실측 2026-08-23 — 되돌리지 마라)★: 실 claude 는 `--resume <빈 sid>` 에
-///   대해 **+2.2s 에 진단을 내고 +6.4s 에야 죽는다**(그 사이 SessionEnd 훅이 돈다). 죽음만 기다리면
-///   조기종료 창(3s)을 넘겨 **실패가 성공으로 판정되고 앞선 기록까지 지워진다** — 이 기능의 표제
-///   사례가 통째로 죽는 자리였다. 증거가 이미 섰으면 시체를 기다리지 않는다.
-/// ★창을 늘리는 것은 이 문제의 답이 아니다★: 활성화는 이 창만큼 **블록**하므로, 늘리면 멀쩡한
-///   이어받기가 전부 그만큼 느려진다. 답은 기다림이 아니라 판단 근거를 바꾸는 것이다.
+/// ★Why `Diagnosed` exists (measured — do not revert)★: real claude, for `--resume <empty sid>`, **emits the diagnostic at +2.2s and dies
+/// at +6.4s**; waiting only for death passes the early-exit window (3s) and **decides the failure a success, clearing even the earlier
+/// record**. With the evidence in hand it does not wait for the corpse. Enlarging the window is not the answer (activation **blocks** for it).
 // ADR-0172
 #[derive(Debug)]
 enum EarlyVerdict {
-    /// 창 안에 종점 상태로 들었다. `evidence` = 그 순간 붙잡은 콘솔 꼬리 + 진단 텍스트(best-effort,
-    /// 빈 값이 정상).
+    /// It entered a terminal state within the window. `evidence` = the console tail + diagnostic text captured at that moment (best-effort,
+    /// an empty value is normal).
     Terminal {
         status: AgentStatus,
         evidence: String,
     },
-    /// **아직 살아 있지만** 진단 스트림이 이미 알려진 실패를 말했다 — 죽음을 기다리지 않고 확정한다.
+    /// **Still alive**, but the diagnostic stream already said a known failure — settled without waiting for death.
     Diagnosed(AgentFailureKind),
-    /// 창을 넘겼고 아무 증거도 서지 않았다 = 활성화 성립.
-    ///
-    /// ★이것은 **약한** 성공 증거다★ — 「N 초 안에 안 죽었다」일 뿐 그 에이전트가 입력을 받을 수 있는지는
-    ///   모른다. 연결 축이 없는 통로(claude·shell·stdio)에는 이것뿐이라 그대로 쓴다.
+    /// It passed the window and no evidence stood = activation holds. ★**Weak** success evidence★ — only 「did not die within N seconds」;
+    /// links without a connection axis (claude · shell · stdio) have only this.
     Alive,
-    /// 에이전트가 **입력을 받을 준비가 됐다고 신호했다** = 활성화 성립(사용자 결정).
-    ///
-    /// ★`Alive` 와 갈라 두는 이유가 두 가지다★:
-    ///   ① **증거의 종류가 다르다** — 이쪽은 상대가 낸 긍정 신호(codex 핸드셰이크 완료)이고, 저쪽은
-    ///      아무 일도 안 일어났다는 관측이다. 그래서 이쪽은 기다릴 것이 없다(신호가 오면 그 즉시 끝).
-    ///   ② **「마지막 실패」 처분이 다르다** — 이 낙관적 성공은 기록을 **지우지 않는다**(사용자 조건).
-    ///      지움 규칙의 정본은 `AgentManager::resume_no_fallback` 의 그 자리다.
+    /// The agent **signaled it is ready to take input** = activation holds. Split from `Alive` because ① this is a positive signal (codex
+    /// handshake completion) with nothing to wait for, and ② this optimistic success **does not clear** the last-failure record (the clearing
+    /// rule is in `AgentManager::resume_no_fallback`).
     Ready,
-    /// 통로가 **연결을 못 세웠다** — 프로세스는 살아 있을 수 있다.
-    ///
-    /// ★`Terminal` 과 갈라 두는 이유★: 저쪽은 「죽었다」이고 이쪽은 「살아 있는데 못 쓴다」다. 처분은
-    ///   같은 실패지만 사유 문장과 분류 입력이 다르고, 무엇보다 **이 갈래에는 시체가 없다** — 콘솔
-    ///   꼬리도 진단 꼬리도 비어 있고 증거는 `reason` 하나뿐이다.
+    /// The link **could not set up the connection** — the process may be alive. Split from `Terminal` (died): same failure disposition but a
+    /// different reason sentence and classification input, and **no corpse** — console and diagnostic tails are empty, the only evidence is `reason`.
     LinkFailed { reason: String },
 }
 
-/// 명부(roster) 항목 하나 = **에이전트 하나**(ADR-0119 결정 1). "산 목록"과 "프로필 목록"을 소비자가
-/// 각자 합치던 중복을 없애는 것이 이 타입의 존재 이유다.
-///
-/// ★터미널 상태로 맵에 남은 시체는 항목이 아니다★ — 산 것도 잠든 것도 아니다. 프로필이 남아 있으면
-///   잠듦으로, 없으면(ad-hoc) 아예 목록에 없다.
+/// One roster entry = **one agent** (ADR-0119 decision 1); it removes consumers each merging "the live list" and "the profile list".
+/// ★A corpse left in the map in a terminal state is not an entry★: with a profile it is asleep, ad-hoc it is not listed.
 #[derive(Debug, Clone)]
 pub struct RosterEntry {
     pub id: AgentId,
     pub canonical_name: String,
-    /// `Some` = 살아 있음(Running|Exiting 세션 부착) · `None` = 잠듦(프로필만 있음).
+    /// `Some` = alive (a Running|Exiting session attached) · `None` = asleep (profile only).
     pub live: Option<AgentInfo>,
     /// The working folder. A live entry gives the session cwd (the launch's working folder — the canonical path when
     /// the canonicalize answered, the cwd as given otherwise), a sleeping one the stored raw cwd — **the same material
     /// the name derivation reads** (`roster()`'s "live and sleeping sources differ" rule). Empty when there is neither
     /// a session nor a profile.
     pub cwd: String,
-    /// 트리 부모. 저장 계층이 유일한 출처이므로 산 항목도 프로필에서 읽는다 — `None` = 최상위.
+    /// Tree parent. The stored hierarchy is the only source, so live entries also read it from the profile — `None` = top level.
     pub parent: Option<AgentId>,
 }
 
-/// **지금 실제로 override 를 싣는 경로는 개명 하나뿐**이다 — 표시명 override 를 나르는 wire 명령은
-/// `RenameProfile` 뿐이고, 생성·spawn 쪽에는 그 필드가 아예 없다. 그래서 `try_create_agent`·
-/// `ensure_registered` 쪽 호출은 공개 API 방어선이다.
+/// **Today the only path carrying an override is rename** (`RenameProfile`); the create/spawn side has no such field, so calls from
+/// `try_create_agent` · `ensure_registered` are a public-API defense line.
 ///
-/// ★저장된 이름 · 화면에 그려지는 이름 · 편지 주소가 **같은 문자열**이어야 한다★: 유일성(ADR-0120) 판정은
-///   문자열 비교라 `bob` 과 `" bob "` 은 서로 다른 이름으로 **둘 다** 통과하는데 트리에는 똑같이 그려진다 —
-///   사용자는 편지가 둘 중 누구에게 가는지 구분할 수 없다. 게다가 메시징 입구가 수신자 토큰을 trim 해서
-///   맞추므로 `" bob "` 으로 저장된 에이전트는 보이면서도 이름으로 주소 지정이 안 된다.
-/// ★그 입구 trim(`messaging` service 수신자 대조)은 지우지 말 것★: **CLI 입구**(`engram mail send --to a,b`)가
-///   셸 제약 때문에 수신자 목록을 콤마로 쪼개는데 그때 공백을 떼지 않아(`"alice, bob"` → `["alice", " bob"]`)
-///   두 번째 이후 수신자를 그 trim 이 구제한다. 저장을 정규화하면 그 trim 은 잘 저장된 이름에 대해
-///   no-op 이 될 뿐이고, 콤마 목록 구제 역할은 그대로 남는다.
-/// ★유일성 판정 **전에** 건다★: 판정과 저장이 같은 정규화 값을 봐야 `" bob "` 이 모든 면에서 `bob` 요청이
-///   된다(뒤에 걸면 `" bob "` 이 빈 이름으로 판정돼 동명이 다시 새어 들어온다).
-/// ★안쪽 공백은 이름의 일부다★ — `"bob smith"` 는 그대로 살아야 하므로 양끝만 깎는다.
-/// ★남는 문제는 "같은 구멍의 잔여" 가 아니라 다른 종류다★: `str::trim` 은 Unicode White_Space(스페이스·탭·
-///   NBSP)만 걷어내고 zero-width(U+200B 등)는 **양쪽 어디서도** 떨어지지 않는다 — 그래서 그런 이름은
-///   저장 == 표시 == 주소가 그대로 성립해 위 불변식을 깨지 않는다(패딩 이름이 깬 것은 *주소 도달성*이었다).
-///   남는 것은 눈으로 구분이 안 되는 **시각적 혼동**뿐이고, 그 해법(NFKC·confusable folding)은 정당한
-///   이름까지 뭉개므로 여기서 즉흥 필터로 처리하지 않는다 — 정책 결정 사항이다.
-/// ★이미 저장된 이름은 고치지 않는다★ — 지금부터의 쓰기에만 걸린다(마이그레이션 장치 없음).
+/// ★Stored name · displayed name · mail address must be **the same string**★: uniqueness (ADR-0120) is a string comparison, so `bob` and
+/// `" bob "` would both pass yet look identical in the tree, and the messaging entry trims the recipient, making `" bob "` visible but
+/// unaddressable. ★Do not delete that entry trim (`messaging` recipient matching)★: the CLI splits `--to a,b` by commas without removing
+/// spaces (`"alice, bob"` → `["alice", " bob"]`) and the trim rescues later recipients.
+/// ★Applied **before** the uniqueness decision★ (decision and storage see the same value); ★inner whitespace is part of the name★ (only
+/// both ends are trimmed). ★Residue is a different kind★: `str::trim` leaves zero-width characters (U+200B) — stored == displayed == address
+/// still holds, only visual confusion remains, and NFKC/confusable folding is a policy decision, not an improvised filter here.
+/// ★Already stored names are not fixed★ (no migration).
 fn normalize_display_name(display_name: Option<String>) -> Option<String> {
     let trimmed = display_name?.trim().to_string();
     if trimmed.is_empty() {
@@ -270,61 +226,51 @@ fn normalize_display_name(display_name: Option<String>) -> Option<String> {
     }
 }
 
-/// `name` 이 `base` 계열일 때의 형태. ★`Exact` 와 `Suffixed(0)` 를 **절대 한 값으로 섞지 않는다**★:
-/// 섞으면 리터럴 `bob(0)` 하나가 접미사 없는 `bob` 을 점유한 것처럼 보여, `bob` 이 비어 있는데도
-/// 다음 요청이 `bob(1)` 을 받는다.
+/// The form of `name` in the `base` family. ★**Never mix** `Exact` and `Suffixed(0)`★: a literal `bob(0)` would look like it occupied the unsuffixed `bob`, so a free `bob` would
+/// still get `bob(1)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NameKind {
-    /// `name == base` — 접미사가 아예 없다(= 그 이름 자체가 쓰이고 있음).
+    /// `name == base` — no suffix at all (= that name itself is in use).
     Exact,
-    /// `name == base(n)` — 리터럴 `base(0)` 도 여기 온다.
+    /// `name == base(n)` — a literal `base(0)` also comes here.
     Suffixed(u32),
 }
 
-/// ADR-0115 표기(`이름(N)`)의 파서 — 발급기(`decide_name_with_roster` 의 `format!("{base}({n})")`)와
-/// **정확한 역함수**여야 한다. 표기를 바꾸면 둘 다 바꾼다.
+/// The parser of the ADR-0115 notation (`name(N)`) — it must be **the exact inverse** of the issuer (`format!("{base}({n})")` of `decide_name_with_roster`).
+/// If the notation changes, change both.
 fn classify_name(base: &str, name: &str) -> Option<NameKind> {
     if name == base {
         return Some(NameKind::Exact);
     }
     let rest = name.strip_prefix(base)?;
     let digits = rest.strip_prefix('(')?.strip_suffix(')')?;
-    // 빈 괄호·부호·공백은 우리 표기가 아니다(`base()`·`base(-1)` 은 남남).
+    // Empty parentheses, signs and whitespace are not our notation (`base()`·`base(-1)` are unrelated).
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    // 선행 0(`base(01)`)도 우리 표기가 아니다 — 발급기는 절대 그렇게 쓰지 않는다. 계열에서 빼도
-    // 중복이 생기지 않는다: `base(01)` 은 발급 가능한 어떤 문자열(`base(1)` 등)과도 다른 문자열이다.
+    // Leading zeros (`base(01)`) are not our notation (the issuer never writes it); leaving them out of the family creates no duplicate.
     if digits.len() > 1 && digits.starts_with('0') {
         return None;
     }
     digits.parse::<u32>().ok().map(NameKind::Suffixed)
 }
 
-/// ★명부 총량 상한 = **폭주 백스톱**이지 제품 한도가 아니다★ (사용자 결정 2026-08-11).
+/// ★The total roster cap = **a runaway backstop**, not a product limit★ (ADR-0132).
 ///
-/// 제어 평면은 모든 에이전트에게 열려 있고(ADR-0132 결정 5) 그 결정은 유지된다 — 그러나 무언가가
-/// "에이전트 만들기" 를 반복 호출하면 명부와 프로필 파일이 **상한 없이** 자란다. 그 루프만 끊는다.
-///
-/// ★왜 코어인가(입구가 아니라)★: 상한을 입구에 두면 입구마다 사본이 생기고, 사본이 없는 입구는 그냥
-///   통과한다 — 실제로 제어 라우트에만 두었더니 데스크톱(WS `CreateProfile`)과 ad-hoc spawn 이 그대로
-///   빠져나갔다. 등록을 **커밋하는 자리**에 두면 입구 수와 무관하게 참이고, 이름 배정 게이트 안이라
-///   **원자적**이다(여러 요청이 각자 511 을 관측하고 다 같이 등록하는 창이 없다).
-/// ★왜 개수 검사인가(속도 제한이 아니라)★: 타이머·호출자별 상태·튜닝 노브가 하나도 없어야 이 방어가 스스로
-///   고장 나지 않는다. 세는 것은 명부 총량 하나뿐이다.
-/// ★왜 이 숫자인가 — **튜닝하지 말 것**★: 정당한 사용이 도달할 수 없는 자리에 있으면 그만이다. 실제 팀
-///   트리는 수십 단위다. **"자원이 먼저 바닥나니 상한은 형식" 이라는 논리는 쓰지 말 것** — 그 논리는
-///   프로세스를 띄우는 등록에만 통하고, 프로세스를 하나도 띄우지 않는 **잠든 에이전트 등록**엔 통하지
-///   않는다(그쪽은 아무것도 밀어내지 않으므로 물리적 제동이 아예 없다). 상한이 필요한 이유가 바로 그것이다.
-/// ★기존 명부는 인질이 아니다★: 상한은 **신규 등록**만 본다 — 이미 상한을 넘은 명부의 복원·재spawn 은
-///   그대로 돌아간다(`ensure_registered` 는 있는 id 에 이 검사를 하지 않는다).
+/// The control plane is open to all agents (ADR-0132 decision 5); a loop calling "create agent" would grow the roster and the profile file
+/// **without bound** — only that is cut.
+/// ★Why the core, not the entry★: an entry cap needs a copy per entry and missed the desktop (`CreateProfile`) and ad-hoc spawn. Where the
+/// registration is **committed**, inside the name allocation gate, it holds for every entry and is **atomic** (no window of several requests
+/// all seeing 511). ★A count check, not rate limiting★ — no timers or per-caller state.
+/// ★The number is not to be tuned★: it only has to sit where legitimate use (tens of agents) cannot reach. ★Do not argue "resources run
+/// out first"★ — that fails for **registering asleep agents**, which launch nothing and have no physical brake.
+/// ★The existing roster is not a hostage★: only **new registrations** are checked — restore/respawn of a roster over the cap run as is
+/// (the existing-id branch of `ensure_registered` skips it).
 // ADR-0132
 pub const MAX_ROSTER_SIZE: usize = 512;
 
-/// 신규 등록 전 총량 검사 — **이름 배정 게이트를 보유한 상태에서만** 부른다(그래야 원자적이다).
-///
-/// ★삭제와는 원자적이지 않다(의도)★: 삭제는 이 게이트를 잡지 않지만 개수를 **줄이기만** 하므로, 최악이
-/// "방금 자리가 났는데 이번 호출은 거부" 이고 다음 호출이 통과한다. 백스톱에 필요한 방향의 안전이다.
+/// The total check before a new registration — call **only while holding the name allocation gate** (atomic). ★Not atomic with deletion
+/// (intended)★: deletion only decreases the count, so the worst case is a refusal just after a slot frees; the next call passes.
 fn check_roster_capacity(roster: &[RosterEntry]) -> Result<(), PtyError> {
     if roster.len() >= MAX_ROSTER_SIZE {
         return Err(PtyError::RosterFull {
@@ -335,57 +281,48 @@ fn check_roster_capacity(roster: &[RosterEntry]) -> Result<(), PtyError> {
     Ok(())
 }
 
-/// 접미사 공간 소진의 단일 에러 문구 — 유일성을 포기하고 중복 이름을 발급하는 대신 거부한다(이름 =
-/// 주소이므로 중복은 메일 오배달로 번역된다, ADR-0116).
+/// The single error text for suffix space exhaustion — refuses rather than issue a duplicate name (name = address, so a duplicate
+/// misdelivers mail, ADR-0116).
 ///
-/// ★현실 도달 불가★: `pick_suffix` 는 계열의 1..=u32::MAX 가 **전부** 점유됐을 때만 `None` 을 내므로
-/// (명부에 42억 엔트리) 이 거부는 실제로 발화하지 않는다. 포화는 그 전에 "가장 낮은 빈 번호" 로 흡수된다.
-/// 그래도 이 경로와 `RenameOutcome::Exhausted` 를 남기는 이유는 결정표를 전역 함수로 닫아 두는 것뿐이다 —
-/// 살아 있는 정책으로 읽지 말 것.
-/// ★전용 에러 변형을 만들지 않는다★: 호출부에 필요한 사실은 "이 동사를 지금 수행할 수 없었다" 하나이고
-/// 그건 이미 있는 미지원 신호와 같은 모양이다(`write_stdin_observed_if_epoch` 와 동일 판단).
+/// ★Unreachable in reality★: `pick_suffix` returns `None` only when all of 1..=u32::MAX are occupied; saturation is absorbed earlier by
+/// "the lowest free number". This path and `RenameOutcome::Exhausted` exist to keep the decision table total — not a living policy.
+/// ★No dedicated error variant★: the caller only needs "this verb could not be performed now" (same as `write_stdin_observed_if_epoch`).
 fn name_space_exhausted(base: &str) -> PtyError {
     PtyError::Unsupported(format!(
         "name suffix space exhausted for base {base:?} — refusing rather than minting a duplicate name"
     ))
 }
 
-/// 이름 결정표의 결말 하나(ADR-0120 유일성 · ADR-0123 번호 규칙). 배정 게이트 보유 중에 산출된다.
+/// One outcome of the name decision table (ADR-0120 uniqueness · ADR-0123 numbering rule). Computed while holding the allocation gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NameDecision {
-    /// 요청 이름을 아무도 갖고 있지 않다 → 접미사 없이 그대로 확정.
+    /// Nobody has the requested name → settled as is without a suffix.
     Free,
-    /// 요청 이름은 남에게 있고, 자기가 이미 그 계열의 유일 이름을 쥐고 있다 → 아무것도 바꾸지 않는다.
+    /// The requested name belongs to someone else, and it already holds the unique name of that family → nothing changes.
     KeepCurrent,
-    /// 요청 이름이 남에게 있다 → 접미사를 붙인 이름으로 확정.
+    /// The requested name belongs to someone else → settled with a suffixed name.
     Suffixed(String),
-    /// 계열의 모든 번호(1..=u32::MAX)가 점유됐다 → 발급 불가.
+    /// Every number of the family (1..=u32::MAX) is occupied → cannot issue.
     Exhausted,
 }
 
-/// 개명 결말 — 실패 사유를 호출부가 **구분**할 수 있어야 한다. bool 이면 "그런 에이전트가 없다" 와
-/// "이름을 발급할 수 없다" 가 같은 값으로 뭉개져 wire 응답이 거짓 원인을 말한다.
+/// Rename outcome — the caller must **tell apart** failure reasons; a bool would merge "no such agent" and "cannot issue a name" and the wire would state a false cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenameOutcome {
-    /// 이름이 확정됐다(요청 이름 그대로이거나 접미사가 붙은 형태). 값 = 확정된 canonical 이름.
+    /// The name was settled (the requested name as is or a suffixed form). Value = the settled canonical name.
     Renamed(String),
-    /// 이미 그 계열의 유일 이름을 쥐고 있어 아무것도 바꾸지 않았다. 값 = 유지된 이름.
+    /// It already holds the unique name of that family, so nothing changed. Value = the name kept.
     Unchanged(String),
-    /// 그 id 의 에이전트가 명부에 없다.
+    /// An agent of that id is not in the roster.
     NotFound,
-    /// 접미사 공간 소진 — 이름을 발급할 수 없어 개명을 거부했다(상태 미변경).
+    /// Suffix space exhausted — the rename was refused because no name could be issued (state unchanged).
     Exhausted,
 }
 
-/// `used` = 그 계열이 지금 점유한 번호 집합.
-///
-/// 기본 규칙은 ADR-0115 그대로 **관측 최대 + 1**(같은 명부 안에서 단조 증가 — 산 것끼리 번호가 겹치지
-/// 않는다). 별도 최고수위 상태는 없으므로 계열이 비면 번호는 1부터 다시 나온다(ADR-0123).
-///
-/// ★포화 탈출구(saturation-only)★: 최대가 `u32::MAX` 면 "최대 + 1" 이 없다. 그때만 **가장 낮은 빈
-/// 번호**로 내려간다 — 안 그러면 `이름(4294967295)` 하나가 그 계열의 42억 개 빈 번호를 영구히 봉쇄한다.
-/// 정상 경로는 단조 증가를 유지하고, 이 갈래는 최대가 MAX 일 때만 열린다.
-/// `None` = 1..=MAX 가 전부 점유(현실 도달 불가 — 전역 함수로 두기 위한 종결 갈래).
+/// `used` = the numbers the family currently occupies. Rule (ADR-0115): **observed max + 1**, so live numbers do not overlap; no high-water
+/// state, so an emptied family restarts from 1 (ADR-0123).
+/// ★Saturation escape only★: if the max is `u32::MAX` it goes to **the lowest free number** (else one `name(4294967295)` would block that
+/// family's free numbers forever). `None` = all of 1..=MAX occupied (unreachable; keeps the function total).
 // ADR-0123
 fn pick_suffix(used: &std::collections::BTreeSet<u32>) -> Option<u32> {
     if let Some(&max) = used.iter().next_back() {
@@ -395,7 +332,7 @@ fn pick_suffix(used: &std::collections::BTreeSet<u32>) -> Option<u32> {
     } else {
         return Some(1);
     }
-    // 포화 — 오름차순으로 걸으며 첫 구멍을 찾는다(`used` 는 명부 크기로 유계라 금방 끝난다).
+    // Saturation — walks in ascending order to find the first hole (`used` is bounded by the roster size, so it ends quickly).
     let mut candidate: u32 = 1;
     for &n in used.iter() {
         match n.cmp(&candidate) {
@@ -407,40 +344,31 @@ fn pick_suffix(used: &std::collections::BTreeSet<u32>) -> Option<u32> {
     Some(candidate)
 }
 
-/// 통로가 배달한 연결 결말 한 건 — ★어느 화신의 것인지를 **함께** 나른다★.
-///
-/// ★표식이 값에 붙어 있는 것이 이 타입의 요점이다★: 결말과 화신이 따로 다니면, 수거된 화신의 결말이
-///   막 뜬 후임에게 적용된다(그 정리가 **산 세션을 죽인다**). 소비자는 이 표식을 **일치/불일치로만**
-///   본다 — 대소로 「더 새 것」을 유도하지 않는다(ADR-0163/0164).
+/// One connection outcome the link delivered — ★carries **together** which incarnation it belongs to★: sent separately, the outcome of a
+/// collected incarnation would be applied to the successor just launched (that cleanup **kills a live session**). Consumers compare the
+/// marker **only for match/mismatch** — "newer" is never derived from ordering (ADR-0163/0164).
 #[derive(Debug, Clone)]
 pub(crate) struct LinkVerdict {
     pub(crate) epoch: u32,
     pub(crate) resolution: LinkResolution,
 }
 
-/// 연결의 결말을 기다리는 호출자가 쥐는 한 벌 — **배달함과 spawn 예약이 한 몸**이다.
+/// The set a caller waiting for the connection outcome holds — **the mailbox and the spawn reservation are one body**.
 ///
-/// ★두 칸을 묶은 것이 요점이다★: 연결을 선언하는 통로에서는 「세션이 명부에 올랐다」와 「그 세션에
-///   입력을 보낼 수 있다」 사이가 핸드셰이크 한 왕복만큼 벌어진다. 그 구간에 들어온 두 번째 활성화가
-///   명부만 보고 「떠 있다」로 답하면, 첫 요청이 실패로 판정해 그 화신을 거두는 순간 **두 호출자가
-///   서로 다른 사실을 들고 갈린다**(뒤엣것은 자기 밑에서 죽을 에이전트를 산 것으로 보고한다).
-///   예약을 결말까지 들고 있으면 그 구간의 답이 「이미 뜨는 중」으로 하나가 된다.
-/// ★그래서 이 값을 **버리면 예약이 즉시 풀린다**★ — [`AgentManager::spawn_agent`] 가 그렇게 한다.
-///   그쪽은 결말을 기다리지 않는 갈래라 예약을 들고 있을 근거도 없다.
-/// ★연결 축이 없는 통로에는 이 타입이 아예 오지 않는다★(`Option` 이 `None`) — 그 경로는 예약 수명도
-///   판정도 예전 그대로다.
+/// ★Binding the two fields is the point★: on a link declaring a connection there is a one-handshake gap between 「on the roster」 and 「input
+/// can be sent」; a second activation looking only at the roster would answer 「it is up」 and then the first request's failure would collect
+/// that incarnation under it. Holding the reservation until the outcome makes the answer 「already launching」.
+/// ★Dropping this value releases the reservation at once★ ([`AgentManager::spawn_agent`] does, as it does not wait). ★Links without a
+/// connection axis never get it★ (`Option` is `None`).
 struct LinkWatch {
     rx: Receiver<LinkVerdict>,
-    /// 결말이 날 때까지 놓지 않는다 — 읽지 않는 것이 정상이다(수명 하나가 이 칸의 전부다).
+    /// Not released until the outcome happens — not reading it is normal (a lifetime is all this field is).
     _reservation: SpawnReservation,
 }
 
-/// 통로에 건네줄 배달 포트를 만든다 — 화신 표식을 **여기서** 찍어 채널로 넘긴다.
-///
-/// ★통로는 화신을 모른다★([`session_id_sink`] 와 같은 모양·같은 사유): 표식은 조립점 개념이고, 통로에
-///   넣으면 그 지식이 backend 층으로 샌다(ADR-0004).
-/// ★보내기 실패를 삼키는 것이 의도다★ — 받는 쪽이 이미 떠났다는 뜻(판정이 끝났거나 Fresh spawn 이라
-///   애초에 아무도 안 기다린다)이고, 그때 통로가 할 수 있는 일도 알아야 할 일도 없다.
+/// Builds the delivery port handed to the link — the incarnation marker is stamped **here** and passed into the channel. ★The link does not
+/// know the incarnation★ (as [`session_id_sink`]; ADR-0004 keeps that out of the backend). ★Swallowing a send failure is intended★ — the
+/// receiver already left (decision finished, or a Fresh spawn nobody waits on).
 fn link_verdict_sink(tx: Sender<LinkVerdict>, incarnation: u32) -> LinkSink {
     Arc::new(move |resolution: LinkResolution| {
         let _ = tx.send(LinkVerdict {
@@ -450,23 +378,18 @@ fn link_verdict_sink(tx: Sender<LinkVerdict>, incarnation: u32) -> LinkSink {
     })
 }
 
-/// spawn 도중 프로필이 사라졌다 — **spawn 을 중단한다**. `at` = 어느 단계에서 알아챘나.
-///
-/// ★단계 이름을 싣는 이유★: `spawn_agent` 에는 이 판정 자리가 **셋**이다(화신 표식 확정 · Fresh 의 세션
-///   id 비우기 · Resume 의 이어받기 손잡이 읽기). 어느 자리가 걸렸는지가 그 삭제가 언제 끼어들었나를 말해
-///   주는데, 문구가 같으면 로그·오류에서 구별되지 않는다.
-/// ★셋 다 같은 처분인 것이 규율이다★ — 하나라도 `None` 을 삼키면 삭제된 프로필로 세션이 뜨거나
-///   이어받기가 조용히 새 대화가 된다.
+/// The profile vanished during spawn — **the spawn is aborted**. `at` = the stage noticed: `spawn_agent` decides this in **three** places
+/// (incarnation marker · Fresh's session id clearing · Resume's reading of the handle), told apart in logs by it. ★All three share one
+/// disposition★ — a swallowed `None` would launch with a deleted profile or silently turn a resume into a new conversation.
 fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
     PtyError::SpawnFailed(format!(
         "profile {id} vanished mid-spawn at [{at}] (concurrent delete) — spawn aborted"
     ))
 }
 
-/// 띄우기가 프로세스를 내기 전에 `Err` 로 끝났을 때 「마지막 실패」에 적을 종류.
-///
-/// ★저장 `Err` · 실행 재료 막힘 · 준비 경합은 `SpawnFailed` 가 아니라 「그 밖」이다★ — 셋 다 프로세스를 열려고
-///   한 적이 없다. `SpawnFailed`(실행파일 부재 · 권한 등)로 적으면 화면 · LLM 이 실행 환경을 의심한다.
+/// The kind written into 「the last failure」 when the launch ended with `Err` before producing a process. ★A save `Err` · a
+/// launch-material block · a preparation race are 「other」, not `SpawnFailed`★ — none of them tried to open a process, and `SpawnFailed`
+/// (missing executable · permissions etc.) would make the screen and the LLM suspect the execution environment.
 // ADR-0291 R17
 // ADR-0319
 fn spawn_error_kind(e: &PtyError) -> AgentFailureKind {
@@ -478,8 +401,8 @@ fn spawn_error_kind(e: &PtyError) -> AgentFailureKind {
     }
 }
 
-/// 프로세스를 열기 전에 끊긴 실패 중 호출자가 **종류로** 받아야 하는 것 — 버스가 저장 거절 · 실행 막힘을 다른
-/// 실패와 가른다. 이어받기 동사는 이것만 `Err` 로 올리고 나머지는 활성화 결말 문구로 접는다.
+/// The failures cut before opening a process that the caller must receive **as a kind** — the bus tells a save refusal · launch block from
+/// other failures. The resume verb raises only these as `Err` and folds the rest into the activation outcome text.
 // ADR-0291 R17
 // ADR-0334
 fn refused_before_spawn(e: &PtyError) -> bool {
@@ -489,19 +412,17 @@ fn refused_before_spawn(e: &PtyError) -> bool {
     )
 }
 
-/// 레지스트리의 어느 변경 입구로 바꾸나 — 그 변경을 부른 쪽이 정한다. 아래 동사들은 그 입구의 레지스트리
-/// 동사로 보낼 뿐이고, `Internal` 갈래는 `Err` 를 내지 않는다(저장 실패도 커밋 + dirty).
-///
-/// ★띄우기 경로는 이 값 하나를 공유 함수까지 실어 나른다 — 입구별 띄우기 사본을 두지 말 것★: 부팅 복원과
-///   수동 깨우기가 같은 동사를 쓰는 것이 ADR-0082 · ADR-0201 · ADR-0202 가 막은 「입구마다 판정이 갈려 하나가
-///   뒤처진다」를 닫는 장치다.
+/// Which registry change entry to change through — decided by the caller; the verbs below only forward to that entry's registry verb, and
+/// `Internal` emits no `Err` (a save failure still commits + dirty).
+/// ★The launch path carries this one value to the shared function — no per-entry launch copies★: boot restore and manual wake-up using the
+/// same verb closes 「the decision splits per entry and one falls behind」 (ADR-0082 · ADR-0201 · ADR-0202).
 // ADR-0291 R17 (E3)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Entry {
-    /// 부르는 쪽 있는 변경(버스 · WS · 그 둘이 부른 띄우기) — 저장이 `Err` 면 메모리를 그대로 두고 오류.
+    /// A change with a caller (bus · WS · launches those two called) — if the save is `Err`, memory is left as is and it errors.
     Caller,
-    /// 부르는 쪽 없는 변경(부팅 복원) — 저장의 어떤 `Err` 에도 메모리에 적용 + dirty. 되돌릴 요청이 없고,
-    /// 순간 잠김 하나가 복원을 막지 않게 한다.
+    /// A change without a caller (boot restore) — applied to memory + dirty on any save `Err`. There is no request to revert, and
+    /// it keeps one momentary lock from blocking restore.
     Internal,
 }
 
@@ -543,27 +464,17 @@ impl Entry {
     }
 }
 
-/// Fresh 스폰이 **저장된 세션 id 를 비우고 시작해야 하나**.
+/// Whether a Fresh spawn **must start by clearing the stored session id**. Both required: **1. It is Fresh** (clearing on Resume loses the
+/// resume handle — ADR-0083); **2. ★this incarnation has a path to fill that field★** (else a hand-planted value vanishes with nobody
+/// refilling it).
 ///
-/// ★참인 조건 둘을 전부 요구한다★
-///   1. **Fresh 다.** Resume 에서 비우면 이어받을 손잡이가 사라진다(ADR-0083 이 지키는 그 값이다).
-///   2. ★**이 화신에 그 칸을 채울 경로가 있다**★ — 첫 제출 때 그 칸에 새 값을 적을 근거가 하나라도
-///      있어야 한다. 없는데 비우면, 손으로 심어 둔 값이 아무도 다시 안 채우는 채로 사라진다.
-///
-/// ★2 번의 열거는 **손으로 관리된다**★: 우리가 뽑아 첫 제출에 적는다([`backend::assigns_session_id`]) ·
-///   통로 연결([`backend::declares_link`] — 그 통로가 핸드셰이크 응답에서 받아 래치에 넘긴다) · 제어
-///   평면([`backend::supports_control_channel`]). 넷째 경로가 생기면 여기 더해야 하고, 컴파일러는 그
-///   누락을 못 잡는다 — 진짜 축(「이 화신의 id 를 우리가 알게 되나」)을 선언하는 칸이 없다.
-/// ★오늘 이 판정이 실제로 갈리는 자리★: claude·gemini(발급)·codex 는 참, shell 은 거짓(경로가 없다).
-/// ★**단 codex 의 터미널 모드가 참인 것은 오늘 「우연히」다 — control channel 을 끄는 변경이 오면 이
-///   줄을 먼저 볼 것**★: 그 칸이 켜져 있는 이유는 MCP 우편이고(ADR-0214), 그 모드가 실제로 이 칸을
-///   채우는 경로는 제어 평면이 아니라 **자식이 쥔 writer 락**이다(ADR-0218). 답은 맞고 이유가 틀린
-///   상태라, 우편 쪽 사정으로 그 칸이 꺼지면 이 판정이 **조용히** 거짓으로 뒤집힌다. app-server
-///   모드는 그렇지 않다 — 그쪽은 `declares_link` 가 따로 참이라 제어 채널과 무관하게 선다.
-///
-/// ★없으면 무슨 일이 나나(되살리지 말 것)★: Fresh 는 화신마다 새 대화를 여는데, 칸이 앞 화신 값으로 찬
-///   채 남으면 그 칸은 아래 `resume_session_id` 가 읽는 바로 그 칸이라 **이어받기가 앞 대화로 되감긴다.**
-///   발급하는 backend 도 같다 — 새 값은 첫 제출 때에야 적히므로, 그 전에 끝난 화신 뒤에는 옛 값이 남는다.
+/// ★The enumeration of 2 is **managed by hand**★: first-submission draw ([`backend::assigns_session_id`]) · link connection
+/// ([`backend::declares_link`] — the handshake response feeds the latch) · control plane ([`backend::supports_control_channel`]). A fourth
+/// path must be added here — the compiler cannot catch the omission. Today: claude · gemini · codex true, shell false.
+/// ★codex's terminal mode is true **by chance**★ — its field is on for MCP mail (ADR-0214) while the real fill path is the child's writer
+/// lock (ADR-0218); turning that field off for mail reasons would **silently** flip this to false. App-server mode stands on `declares_link`.
+/// ★Without it (do not bring back)★: the previous incarnation's value stays in the field `resume_session_id` reads, so **the resume rewinds
+/// to the previous conversation**; issuing backends write a new value only at the first submission, so an incarnation ending earlier leaves the old.
 // ADR-0185
 // ADR-0083
 // ADR-0208
@@ -578,15 +489,10 @@ pub(crate) fn fresh_spawn_release_session_id(command: &AgentCommand, mode: Spawn
             || backend::declares_link(command))
 }
 
-/// 이 spawn 이 backend 에게 넘길 **이어받을 손잡이** — ★Fresh 면 저장된 값이 있어도 `None`★.
-///
-/// ★이 한 줄이 「`resume_session_id` 가 있다 ⟺ 이어받기 화신이다」를 성립시키는 자리다★. 그 동치에
-///   기대는 소비자가 둘이고 둘은 서로 다른 인자를 본다: backend 의 argv 조립은 `(mode, 손잡이)` 둘을
-///   보고, 회수를 돌릴지의 판정은 손잡이 **하나만** 본다. 두 판정이 갈리려면 Fresh 인데 손잡이가 실려
-///   나가야 하는데, 그 조합을 만들 수 있는 자리가 여기뿐이라 여기서 막는다.
-/// ★backend 에 모드를 함께 넘기지 않는 것은 결정이다★ — 그쪽 계약(`AgentBackend::open_spawn` 의
-///   `resume_session_id` doc)이 「모드와 값을 둘 다 받으면 『Fresh 인데 이어받을 값이 있다』는 조합이
-///   표현 가능해진다」고 적어 둔 그것이고, 이 함수가 그 표현 불가능성을 만드는 실물이다.
+/// The **resume handle** this spawn hands to the backend — ★`None` on Fresh even if a value is stored★. This line makes 「`resume_session_id`
+/// exists ⟺ resuming incarnation」 hold for two consumers that look at different arguments (argv assembly looks at `(mode, handle)`, the
+/// reclamation decision at the handle only); only this place could produce "Fresh with a handle". Not passing the mode to the backend is the
+/// `AgentBackend::open_spawn` contract, and this function is what makes that inexpressibility real.
 // ADR-0185
 // ADR-0218
 fn resume_handle_for(mode: SpawnMode, stored: Option<uuid::Uuid>) -> Option<uuid::Uuid> {
@@ -596,13 +502,11 @@ fn resume_handle_for(mode: SpawnMode, stored: Option<uuid::Uuid>) -> Option<uuid
     }
 }
 
-/// 이 spawn 이 backend 에 건네고 첫 제출 래치에 넣을 **우리 쪽 세션 id** — 발급 축 backend 에만 `Some`
-/// (Fresh = 새로 뽑은 값 · Resume = spawn 이 읽은 저장값).
-///
-/// ★발급 축(`assigns_session_id`) 단독으로 가른다 — 이어받기 축으로 바꾸지 말 것(ADR-0185)★: 자기 id 를
-///   스스로 발급하는 backend(codex)에 값을 내면, 그 값이 `open_spawn` 보다 먼저 래치에 들어가고 backend 는
-///   argv 에서 버리며, 상대가 준 진짜 id 는 래치의 둘째 offer 로 버려진다. 첫 제출이 그 가짜 값을 영속해
-///   **그 뒤 모든 이어받기가 조용히 실패한다**(ADR-0226).
+/// **Our side's session id** handed to the backend and the first-submission latch — `Some` only for issuing-axis backends (Fresh = newly
+/// drawn · Resume = the stored value).
+/// ★Decided by the issuing axis (`assigns_session_id`) — not the resume axis (ADR-0185)★: handing a value to a backend that issues its own
+/// id (codex) would put it in the latch, the backend would drop it from argv and the real id would be rejected as the latch's second offer —
+/// **every later resume silently fails** (ADR-0226).
 // ADR-0185
 // ADR-0226
 fn session_id_to_hand_over(
@@ -619,38 +523,22 @@ fn session_id_to_hand_over(
     }
 }
 
-/// 이 화신의 세션 id 를 프로필 명부에 적는 **commit 포트**를 만든다 — 부르는 것은 그 화신의 첫 제출
-/// 래치([`SessionIdLatch`])이고, 래치는 이 포트를 화신당 많아야 한 번 부른다.
+/// Builds the **commit port** writing this incarnation's session id into the roster — called by the first-submission latch
+/// ([`SessionIdLatch`]) at most once per incarnation.
 ///
-/// ★적기는 비교-교체다([`ProfileRegistry::commit_session_id`])★ — 칸이 `expected` 이거나 이미 그 값일
-///   때만 쓴다. `expected` = **이 화신이 시작할 때 본 칸의 값**(Fresh = 비운 뒤라 `None` · Resume = spawn 이
-///   읽은 저장값). commit 이 성공하면 포트가 `expected` 를 그 값으로 옮긴다 — 방어 절이다: 래치가 화신당
-///   한 번만 부르므로 운영에서는 옮긴 값이 다시 쓰이지 않는다.
-/// ★덮어쓰기(`observe_session_id`)로 되돌리지 말 것★ — 첫 제출 전에 claude 파일 감시자가 칸을 바꿨으면
-///   덮어쓰기는 그 값을 스폰 때 값으로 되감는다(그 동사 doc 이 정본).
-/// ★`String` → `Uuid` 해독이 여기 있는 이유★: 상대가 주는 것은 문자열이고(codex `Thread.id`) 프로필이
-///   드는 것은 `Uuid` 다. 그 폭을 좁히는 것은 프로필 스키마 지식이라 `backend/` 에 둘 수 없다(ADR-0004).
-/// ★**여기로 들어오는 값이 v4 라고 가정하지 말 것 — 실측은 UUIDv7 이다**★: 실 app-server 가 준 것은
-///   `01a0a08f-…`(버전 니블 `7`)였다. 그래서 `backend_session_id` 한 칸에 **백엔드마다 다른 UUID 버전**이
-///   앉는다 — claude 는 우리가 v4 를 뽑아 건네고, codex 는 받아 적는다. 이 저장소의 시험대는 전부
-///   `Uuid::new_v4()` 로 값을 만들어서 그 차이를 한 번도 겪지 않는다. ★버전 검증을 넣지 말 것★ —
-///   `Uuid::parse_str` 은 버전을 안 보고, 그것이 이 경로가 두 버전 다 받는 이유다.
-/// ★uuid 로 못 읽히면 로그로 남기고 **버린다**★ — panic 도 `unwrap` 도 아니다. 이 호출은 가둠 표시 밖(codex
-///   라이터 스레드 · 리더의 표시 끈 구간 · 입력 제출 경로)에서 돌아, 여기서 panic 하면 상대 형식이 한 번 바뀐
-///   것만으로 훅이 데몬을 끝낸다(ADR-0292). 기록만 못 한 것이 낫다(그러면 이어받기가 Fresh 로 떨어져
-///   정직하게 보고된다).
-/// ★값 자체를 로그에 싣지 않는다★ — 남기는 것은 해독 실패 사유뿐이다.
-/// ★화신 표식을 못 박는다(ADR-0007/0163)★ — 이 포트는 **한 spawn** 에 묶여 있고 그 spawn 의 표식은 호출
-///   시점에 이미 확정돼 있다. 그래서 **더 새 화신이 이미 선** 뒤에 도착한 기록은 거절된다.
-///   ★「늦은 기록을 막는다」로 넓혀 읽지 말 것★ — 세션이 그냥 **끝나기만** 한 경우는 표식이 그대로라
-///   이 가드가 안 선다(그 창의 정본 = 통로의 `record_session_id` doc).
-/// ★세 결말이 로그로 갈린다(`docs/reference/logging-conventions.md` 「계측 의무」)★ — 기록됨(info) ·
-///   거절(debug) · uuid 해독 실패(warn). **받지 못한 결말**은 여기 오지 않고 통로의 핸드셰이크 실패 로그가
-///   낸다. 받았는데 제출이 없어 보류된 결말은 래치가 낸다.
-/// ★`true` 를 「영속됐다」로 읽지 말 것★ — 그 값이 뜻하는 것은 메모리 명부가 바뀌었다는 것뿐이고, 디스크
-///   저장이 실패 · 거절돼도 메모리 변경은 남는다(로그는 저장소가 자기 자리에서 낸다).
-/// ★`expected` 칸을 쥔 채 명부를 부른다★ — 락 순서 `래치 → 이 칸 → profiles → 저장소 상태 칸` 단방향이고,
-///   이 칸을 잡는 곳은 이 포트 하나뿐이다.
+/// ★Compare-and-swap ([`ProfileRegistry::commit_session_id`])★: writes only if the field is `expected` (what this incarnation saw at start —
+/// Fresh `None` after clearing · Resume the stored value) or already that value; ★not the overwrite `observe_session_id`★ (a claude file
+/// watcher change before the first submission would be rewound). On success `expected` moves (defensive; production calls once).
+/// The `String` → `Uuid` decoding is here (profile schema knowledge, not `backend/` — ADR-0004). ★Do not assume v4★: codex gives UUIDv7
+/// (`01a0a08f-…`) while claude's is a drawn v4, in the same `backend_session_id` field; ★no version validation★ (`Uuid::parse_str` accepts both).
+/// ★Unreadable → logged and **dropped**, never a panic★: this call runs outside the containment marker, so a panic would let the hook end the
+/// daemon over a format change (ADR-0292); a failed record just makes the resume fall to Fresh, honestly reported. ★The value is not logged★.
+/// ★Pins the incarnation marker (ADR-0007/0163)★: bound to one spawn, a record arriving after **a newer incarnation stood** is refused; a
+/// session that **only ended** keeps the marker, so this is no late-record block (that window: the link's `record_session_id` doc).
+/// ★Three log outcomes★ (`docs/reference/logging-conventions.md`): recorded (info) · refused (debug) · decode failure (warn); not-received
+/// is the link's handshake log, held-for-lack-of-submission the latch's.
+/// ★`true` ≠ persisted★ — only the in-memory roster changed; a failed disk save keeps it (the store logs). Lock order `latch → expected →
+/// profiles → store-state`, one-way; only this port takes `expected`.
 // ADR-0007
 // ADR-0185
 // ADR-0226
@@ -662,15 +550,14 @@ fn session_id_sink(
 ) -> backend::SessionIdSink {
     let expected = Mutex::new(expected);
     Arc::new(move |raw: &str| {
-        // ★기록 호출을 match 가드에 두지 말 것★ — 부작용이 있는 가드는 앞에 팔 하나만 끼어도 호출 횟수가
-        //   조용히 0 이나 2 가 된다. 판정과 분기를 갈라 둔다.
+        // ★Do not put the record call in a match guard★ — a side-effecting guard runs 0 or 2 times if an arm slips in front; keep decision and branching apart.
         let sid = match uuid::Uuid::parse_str(raw) {
             Ok(sid) => sid,
             Err(e) => {
                 tracing::warn!(
                     agent = %id,
                     epoch = incarnation,
-                    "backend 가 준 세션 id 를 uuid 로 읽지 못해 버린다: {e}"
+                    "could not read the session id the backend gave as a uuid, dropping it: {e}"
                 );
                 return;
             }
@@ -685,15 +572,14 @@ fn session_id_sink(
             tracing::info!(
                 agent = %id,
                 epoch = incarnation,
-                "backend 가 준 세션 id 를 프로필 명부에 반영했다"
+                "reflected the session id the backend gave into the profile roster"
             );
         } else {
-            // ★사유를 가르지 못한다 — 돌아오는 것이 `bool` 하나다★: 화신 표식 불일치 · 다른 기록자가 먼저
-            //   바꿈 · 프로필 부재 · 이미 같은 값, 넷이 같은 `false` 로 온다. 지어내지 않고 그대로 적는다.
+            // ★The reason cannot be told apart — one `bool`★: marker mismatch · another writer changed it first · profile absent · already the same value all give `false`.
             tracing::debug!(
                 agent = %id,
                 epoch = incarnation,
-                "backend 가 준 세션 id 가 명부에 반영되지 않았다 — 화신 표식 불일치·다른 기록자·프로필 부재·같은 값 중 하나"
+                "the session id the backend gave was not reflected into the roster — one of incarnation marker mismatch · another writer · profile absent · same value"
             );
         }
     })
@@ -727,14 +613,11 @@ fn first_turn_sink_recording_hash(
     })
 }
 
-/// spawn 이 세션에 싣는 화신 사실 — [`AgentManager::spawn_session`] 의 **필수** 인자다.
-///
-/// ★`Option` 으로 바꾸거나 기본값을 두지 말 것★: 래치가 세션에 안 실리면 제출이 한 번도 안 세어져 어느
-///   화신도 세션 id 를 영속하지 못하고, **모든 이어받기가 조용히 사라진다**(다음 활성화가 전부 새 대화 —
-///   오류는 없다). 기본값이 운영에 닿는 길을 컴파일러로 막는 모양이다. 받은 래치를 세션에 싣는 것까지는
-///   컴파일러가 강제하지 못해 배선 구조 시험이 잰다.
-/// `continues_conversation` = 이 spawn 이 이어받을 손잡이를 실었다(이어받기의 성공 여부가 아니다).
-/// `launch_lease` = 이 화신의 실행 재료 회수 열쇠 — 세션에 실려 reaper 가 거둔다(TRD S25 §5-2 4 (c2) ②).
+/// The incarnation facts spawn carries into the session — a **required** argument of [`AgentManager::spawn_session`].
+/// ★Never `Option`, no default★: a latch not carried into the session counts no submission, so no incarnation persists its session id and
+/// **every resume silently disappears**; a wiring structure test measures the carrying. `continues_conversation` = this spawn carried a
+/// resume handle (not that the resume succeeded).
+/// `launch_lease` = this incarnation's launch-material reclaim lease — carried on the session and reclaimed by the reaper (TRD S25 §5-2 4 (c2) ②).
 // ADR-0226
 struct SpawnIncarnation {
     continues_conversation: bool,
@@ -745,93 +628,71 @@ struct SpawnIncarnation {
 pub struct AgentManager {
     sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     status_sink: Arc<dyn StatusSink>,
-    // 프로필 단일 소유자.
+    // Single owner of profiles.
     profiles: Arc<ProfileRegistry>,
     tracker: Arc<SessionTracker>,
 
     // ── ADR-0019 reaper ──────────────────────────────────────
-    /// 데몬/앱 셧다운 전역 플래그. shutdown_all 이 각 kill **전에** set 한다 → 그 사이 종료된
-    /// 세션의 finish hook 이 true 를 snapshot 해 reaper 가 disposition 을 스킵(부팅 복원 유지).
+    /// Daemon/app shutdown global flag. shutdown_all sets it **before** each kill, so the finish hook of a session ending in between snapshots true and the reaper skips the disposition (boot
+    /// restore kept).
     shutting_down: Arc<AtomicBool>,
-    /// 세션/pump finish hook 이 ReapMsg 를 보내는 채널(단일 supervisor 가 소비).
+    /// The channel through which the session/pump finish hook sends ReapMsg (consumed by the single supervisor).
     reaper_tx: Sender<ReaperCmd>,
-    /// reaper 스레드 핸들. Drop 시 join(Stop 송신 후 대기) — 테스트 누수 방지.
+    /// Reaper thread handle. On Drop, join (wait after sending Stop) — prevents test leaks.
     reaper_handle: Option<JoinHandle<()>>,
 
-    /// ADR-0086 제어 채널 provisioning seam. spawn 시 provision(토큰+mcp-config 발급), terminal 시
-    /// reaper 가 revoke(폐기+파일 삭제). 데몬만 실제 구현(`DaemonControlChannel`)을 주입하고, 기본은
-    /// NoopControlChannel(제어 채널 없음 — headless 테스트·shell-only 경로). Arc 라 reaper 와 공유.
+    /// ADR-0086 control channel provisioning seam: provision (token + mcp-config) on spawn, the reaper revokes (discard + delete file) at terminal. Only the daemon injects the real one
+    /// (`DaemonControlChannel`); the default is `NoopControlChannel` (headless tests · shell-only paths). An `Arc`, shared with the reaper.
     control: Arc<dyn ControlChannel>,
 
-    /// ADR-0086 provision 레이스 가드(FIX 6) — 현재 spawn 진행 중인 AgentId 예약 집합. contains_key
-    /// 가드(read lock)와 실제 sessions.insert(write lock) 사이의 TOCTOU 창에서 **다른 연결**이 같은
-    /// AgentId 를 동시에 spawn 하면, 둘 다 provision 을 불러 같은 (AgentId,epoch) config 경로에 쓰고
-    /// 한쪽 reaper 가 상대 산 세션을 오삭제할 수 있다. 진입 시 이 집합에 원자적으로 예약(이미 있으면 즉시
-    /// Err)해 두 번째 동시 spawn 을 깨끗이 거부한다. 예약은 성공(등록 완료)·실패(어느 조기 반환)든
-    /// SpawnReservation(RAII)이 drop 시 해제한다. ★sessions 맵과 별개 leaf lock★: 이 Mutex 보유 중
-    /// sessions/status 락을 잡지 않는다(ADR-0006 — 짧은 임계구역, 순수 HashSet 조작).
+    /// ADR-0086 provision race guard (FIX 6) — the AgentIds being spawned (reservations). Without it, another connection spawning the same id in
+    /// the TOCTOU window between the `contains_key` guard and `sessions.insert` would provision the same (AgentId,epoch) path and one reaper
+    /// could delete the other's live session. Entry reserves atomically (immediate `Err` if present); `SpawnReservation` releases on drop.
+    /// ★A leaf lock separate from the sessions map★: no sessions/status lock is taken while holding it (ADR-0006).
     spawning: Arc<Mutex<HashSet<AgentId>>>,
 
-    /// 이름 배정 게이트 — 상태 없는 직렬화 락. 지키는 불변식은 하나: **명부를 관측한 뒤 그 결과로
-    /// 이름을 커밋하기까지 다른 배정이 끼어들지 못한다**(없으면 동시 생성 둘이 같은 이름을 비었다고
-    /// 보고 둘 다 가져간다). 결정표 전체 — 파생·관측·커밋 — 가 이 락 안에서 일어난다.
+    /// The name allocation gate — a stateless serializing lock guarding one invariant: **between observing the roster and committing a name
+    /// from it, no other allocation slips in** (else two creations both take the same free name). Derivation · observation · commit all happen inside.
     ///
-    /// ★락 순서 = name_allocation → sessions/profiles 단방향★. 이 락을 잡는 곳은 셋
-    /// (`try_create_agent`·`try_rename_agent`·`ensure_registered`)이고 셋 다 잡은 **뒤에야** 명부를 만진다.
-    /// 역순(profiles 보유 중 이 락 취득)은 존재하지 않아 ADR-0006 순서에 순환이 없다.
-    ///
-    /// ★임계구역은 값싸지 않다★: ① `roster()` 관측이 **override 없는 잠든 에이전트 1건당
-    /// `dunce::canonicalize` syscall 1회**를 치르고 ② 커밋이 프로필 파일 전체를 디스크에 쓴다(ADR-0071).
-    /// 그래서 생성·개명·신규 등록 spawn 은 전역 직렬화되고, cwd 가 죽은 네트워크 공유에 있는 에이전트가
-    /// 하나라도 있으면 그 syscall 이 멈춘 동안 세 경로가 함께 막힌다.
-    /// ★그래도 메일 배달은 막히지 않는다 — 이 성질을 깨뜨리지 말 것★: `DeliveryPort`(주입·로스터·이름)는
-    /// 이 락을 절대 잡지 않는다(`roster()` 는 락 없이 부를 수 있고 배달 경로가 그렇게 쓴다).
+    /// ★Lock order = name_allocation → sessions/profiles, one-way★ — `try_create_agent` · `try_rename_agent` · `ensure_registered` touch the
+    /// roster only **after** taking it; no reverse order exists (ADR-0006).
+    /// ★The critical section is not cheap★: the `roster()` observation pays **one `dunce::canonicalize` per asleep agent without an override** and
+    /// the commit writes the whole the profile file (ADR-0071), so creation, rename and new-registration spawn serialize globally — a dead network
+    /// share stalls all three. ★Mail delivery must stay unblocked★: `DeliveryPort` never takes this lock (`roster()` works without it).
     // ADR-0006
     name_allocation: Arc<Mutex<()>>,
 
-    /// 턴 관측 표(ADR-0113 사실 계층) — 이 매니저가 띄운 모든 `OutputCore` 가 공유한다.
-    /// 쓰기 = `OutputCore::emit`(★호출 스레드는 둘이다★ — 출력 pump 와 입력 에코를 낸 주입 스레드,
-    /// turn.rs 헤더), 청소 = `OutputCore::finish`(★reaper 가 아니다★ — 종료 후 지각 emit 과의 경쟁을
-    /// finalize 플래그와 같은 지점에서 닫아야 해서다. ADR-0127 결정 5 · 거부한 대안 (d)),
-    /// 읽기 = 소비자(우편 idle 게이트 등).
-    /// ★sessions 락과 무관한 leaf★: 이 표를 잡은 채 sessions/profiles 를 잡는 경로가 없다
-    /// (ADR-0006 순서에 순환을 만들지 않는다).
+    /// The turn observation table (the ADR-0113 fact layer) — shared by every `OutputCore` this manager launched. Written by `OutputCore::emit`
+    /// (★two calling threads★: the output pump and the injection thread emitting the input echo — turn.rs header), cleaned by
+    /// `OutputCore::finish` (★not the reaper★: the late-emit race must close at the finalize flag — ADR-0127 decision 5), read by consumers (the
+    /// mail idle gate). ★A leaf★: nothing takes sessions/profiles while holding it (ADR-0006).
     // ADR-0113
     // ADR-0127
     turns: Arc<TurnObservations>,
 
-    /// 대기 목록 표(「이 화신의 사용자 대기 목록이 비지 않았다」) — 턴 관측 표와 같은 모양의 leaf.
-    /// 읽기 = 우편 바쁨 어댑터. ★sessions 락과 무관★(위 `turns` 와 같은 규율).
+    /// The waiting-list table (「this incarnation's user waiting list is not empty」) — a leaf like the turn observation table; read by the mail busy adapter. ★Unrelated to the sessions lock★.
     // ADR-0231
     inputs_pending: Arc<InputsPendingTable>,
 
-    /// 실행 재료 포트 — 기본 = [`LaunchPorts::noop`](오늘과 같은 실행). 점검 · 준비는 명부 · 예약 · 세션 락을 하나도
-    /// 쥐지 않고 부른다(asset-library 락 → manager 락 한 방향 — ADR-0324).
+    /// The launch-material ports — default = [`LaunchPorts::noop`] (the same launch as today). Check · prepare are called holding none of
+    /// the roster · reservation · session locks (asset-library lock → manager lock, one direction — ADR-0324).
     // ADR-0334
     launch: LaunchPorts,
 
-    /// 시험 전용 — 채워져 있으면 스폰이 조립한 명령과 거기 실은 재료를 여기로 보내고 프로세스를 띄우기 전에 멈춘다(실
-    /// CLI 없이 argv 를 잰다).
+    /// Test only — when filled, the spawn sends the command it assembled and the materials on it here and stops before launching the process
+    /// (measures argv without a real CLI).
     #[cfg(test)]
     spec_probe: Mutex<Option<Sender<(CommandSpec, LaunchArtifacts)>>>,
 }
 
-/// spawn 진행 중 AgentId 예약을 잡고, drop 시 자동 해제하는 RAII 가드(ADR-0086 FIX 6). spawn_agent
-/// 의 어느 조기 반환(provision 실패·PTY 실패·`?`)에서도 예약이 새지 않게 한다. `reserve` 가 이미 예약된
-/// id 면 None(두 번째 동시 spawn 거부).
+/// The RAII guard taking the AgentId reservation during spawn and releasing it on drop (ADR-0086 FIX 6), so no early return of `spawn_agent`
+/// leaks it. `reserve` returns `None` for an already-reserved id.
 ///
-/// ★★이 가드의 **수명**에 다른 두 안전이 얹혀 있다 — 줄이면 둘이 **함께** 열린다★★. 연결을 선언하는
-/// 통로에서는 [`LinkWatch`] 가 이 예약을 **연결의 결말이 날 때까지** 들고 있고, 그동안 같은 id 로는
-/// 새 화신이 설 수 없다. 그 사실에 기대고 있는 것이 둘이다:
-///   1. **배달함의 화신 표식 대조가 발화하지 않는다** — 그래서 [`AgentManager::link_activation_verdict`]
-///      의 `as_verdict` 불일치 갈래가 운영에서 죽은 코드다(그 doc 이 「채널 신선도가 진짜 이유」라고
-///      적은 것의 절반이 이 수명이다).
-///   2. **감독자가 세션을 id 로만 집어도 안전하다** — `link_activation_verdict` 는 `get_session(id)` 로
-///      잡은 세션의 상태·종료 의도를 화신 표식 대조 없이 읽는다. 기다리는 동안 후임이 설 수 없어서
-///      성립하는 성질이지, 그 함수가 스스로 지키는 성질이 아니다.
-/// ★그래서 이 수명을 좁히는 변경은 **둘 다 재검토해야 한다**★ — 한 쪽만 보고 줄이면, 한 번도 발화한 적
-/// 없는 가드에 기대는 모양이 된다(`as_verdict` 가 그렇게 잘못 적혀 있었다 — 같은 실수를 여기서 반복하지
-/// 말 것). 소비자 쪽 주석만으로는 이 의존이 안 보여서 **정의 자리인 여기**에 적는다.
+/// ★Two other safeties rest on this guard's **lifetime** — shortening it opens both together★: on a link declaring a connection, [`LinkWatch`]
+/// holds it **until the connection outcome**, so no new incarnation can stand with the same id. Hence ① the mailbox's incarnation-marker
+/// comparison never fires (the `as_verdict` mismatch branch of [`AgentManager::link_activation_verdict`] is dead in production) and
+/// ② the supervisor may pick the session by id alone (`get_session(id)` without a marker comparison). A change narrowing this lifetime
+/// **must re-examine both**; the dependency is written here, at the definition.
 struct SpawnReservation {
     spawning: Arc<Mutex<HashSet<AgentId>>>,
     id: AgentId,
@@ -859,18 +720,15 @@ impl Drop for SpawnReservation {
     }
 }
 
-/// provision 성공 후 세션 등록 **전에** 실패(exe/PTY 오류·`?` 조기 반환)하면 발급된 토큰+config
-/// 파일이 영원히 샌다(세션이 없어 reaper 가 영영 revoke 안 함) — 이를 막는 RAII 가드(ADR-0086 FIX 3).
-/// provision 이 실제 endpoint 를 돌려줬을 때만 arm 되고, 세션 등록이 끝나면 `disarm()` 으로 무장 해제한다.
-/// drop 시 아직 armed 면 revoke(폐기+파일 삭제)를 부른다 — 모든 pre-registration 실패 경로를 커버한다.
-///
-/// ★lock 미보유(ADR-0006)★: drop 은 sessions/status 락을 잡지 않는 지점(spawn_agent 조기 반환)에서만
-///   일어나므로 revoke(registry leaf lock + 파일 IO)가 락 순서를 깨지 않는다.
+/// The RAII guard for a failure after provision succeeds and **before** session registration (exe/PTY error · `?`): the issued token + config
+/// file would leak forever (no session, so the reaper never revokes) (ADR-0086 FIX 3). Armed only when provision returned a real endpoint,
+/// disarmed by `disarm()` once the session is registered; on drop while armed it calls revoke. ★No lock held (ADR-0006)★: it drops only
+/// where the sessions/status locks are not held.
 struct ProvisionGuard {
     control: Arc<dyn ControlChannel>,
     id: AgentId,
     epoch: u32,
-    /// disarm 이후 등록된 세션의 revoke 는 kill_agent/reaper 소관이다(이중 revoke 방지).
+    /// The revoke of a session registered after disarm is the job of kill_agent/reaper (prevents double revoke).
     armed: bool,
 }
 
@@ -886,7 +744,7 @@ impl Drop for ProvisionGuard {
             tracing::warn!(
                 agent = %self.id,
                 epoch = self.epoch,
-                "ADR-0086: spawn 실패(세션 등록 전) — 발급된 제어 채널 토큰/config 회수(revoke)"
+                "ADR-0086: spawn failed (before session registration) — reclaiming (revoking) the issued control channel token/config"
             );
             self.control.revoke(self.id, self.epoch);
         }
@@ -894,7 +752,7 @@ impl Drop for ProvisionGuard {
 }
 
 impl AgentManager {
-    /// 기본 생성자 — 제어 채널 없음(NoopControlChannel). headless 테스트·제어 채널 미사용 경로.
+    /// Default constructor — no control channel (NoopControlChannel). For headless tests and paths not using a control channel.
     pub fn new(
         status_sink: Arc<dyn StatusSink>,
         profiles: Arc<ProfileRegistry>,
@@ -903,8 +761,7 @@ impl AgentManager {
         Self::new_with_control(status_sink, profiles, tracker, Arc::new(NoopControlChannel))
     }
 
-    /// 제어 채널 주입형(ADR-0086) — 데몬이 `DaemonControlChannel` 을 끼운다. reaper 도 같은 Arc 를
-    /// 공유해 terminal 수렴 지점에서 revoke 한다(spawn=provision / terminal=revoke 인과 대칭).
+    /// The control-channel-injected form (ADR-0086) — the daemon plugs in `DaemonControlChannel`; the reaper shares the same Arc and revokes at terminal (spawn=provision / terminal=revoke symmetry).
     pub fn new_with_control(
         status_sink: Arc<dyn StatusSink>,
         profiles: Arc<ProfileRegistry>,
@@ -942,7 +799,7 @@ impl AgentManager {
         }
     }
 
-    /// 실행 재료 포트를 바꿔 끼운다 — 공유(`Arc`)하기 전에 부른다.
+    /// Swaps the launch-material ports — call before sharing (`Arc`).
     // ADR-0334
     pub fn with_launch_ports(mut self, launch: LaunchPorts) -> Self {
         self.launch = launch;
@@ -957,56 +814,40 @@ impl AgentManager {
         self.inputs_pending.clone()
     }
 
-    /// 에이전트 명부 저장소(프로필 파일)의 지금 상태.
+    /// The current state of the agent roster store (the profile file).
     // ADR-0291 R17 (D6)
     pub fn agents_store_status(&self) -> StoreStatus {
         self.profiles.store_status()
     }
 
-    // ★우편 자격 조회 동사를 여기 두지 않는다(되돌리지 마라)★: 소비자는 명단 스냅샷의
-    //   `AgentInfo::reads_messages` 를 읽는다. id 로 되묻는 동사를 만들면 그 자리에서 TOCTOU·비원자성·
-    //   세션당 락이 되살아난다(그 필드 doc). 판정 출처는 세션이 spawn 때 backend 에서 받아 든 값이고
-    //   (`AgentSession::reads_messages`), **프로필이 아니다** — `DeleteProfile` 은 산 세션을 죽이지 않아
-    //   프로필 축은 운영에서 "모름" 이 되고, 그 fail-open 이 실제로 셸을 명단에 되돌린 구멍이었다.
+    // ★No mail-eligibility query verb here (do not revert)★: consumers read `AgentInfo::reads_messages` of the list snapshot; an ask-back verb by id
+    //   would revive TOCTOU and per-session locks. The source is the value the session received from the backend at spawn
+    //   (`AgentSession::reads_messages`), **not the profile** — `DeleteProfile` does not kill a live session, so the profile axis fails open
+    //   (that hole put a shell back on the list).
 
-    // ── 명부(roster) — 단일 입구 ────────────────────────────────────────────
+    // ── Roster — the single entry ────────────────────────────────────────────
 
-    /// "전체 에이전트 + 각자 살아있음/잠듦" 을 만드는 **유일한 곳**(ADR-0119 결정 2).
+    /// **The only place** building "all agents + each one alive/asleep" (ADR-0119 decision 2).
     ///
-    /// ★스냅샷 1회★: 로스터와 "산 세션 id 집합"(잠듦 차집합의 기준)이 **같은 `list_agents()` 한 장**에서
-    ///   나온다. 두 번 뜨면 그 사이 spawn·종료·삭제가 끼어 같은 발송의 두 수신자가 다른 세계를 본다
-    ///   (ADR-0111 결정 2 금지 부류).
-    /// ★잠듦 = **id 축** 차집합★: 프로필의 세션은 그 프로필 id 로 뜨므로(`activate_profile`) "산 세션이
-    ///   없는 프로필" 을 id 로 정확히 가른다. 이름 축으로 빼면 **산 동명 하나가 잠든 다른 프로필을 통째로
-    ///   가린다**(그 회귀는 `messaging_host` 테스트가 봉인).
-    /// ★잠든 이름은 접지 않는다★: 같은 이름 잠듦 2건은 2건 그대로 올라온다(동명 판정 축이라 dedup 은
-    ///   판정을 조용히 바꾼다).
-    /// ★산/잠듦 이름 출처가 **다르다**(의도 — 합치지 말 것)★: 산 항목은 `list_agents()` 가 만든
-    ///   `AgentInfo.name`(= `resolve_canonical_name`, session.cwd 기반), 잠든 항목은
-    ///   `AgentProfile::canonical_name_when_live()` (profile.cwd + the same normalization). Merging the two derivations
-    ///   changes the parking-key behaviour — the live session reads `session.cwd` (the launch's working folder,
-    ///   canonical when the canonicalize answered), the sleeping profile normalizes the raw `profile.cwd`: different
-    ///   material.
-    /// ★fs 접근은 override 없는 잠든 프로필에서만★: `canonical_name_when_live()` 의 단축(display_name 이
-    ///   비공백이면 syscall 0)을 **여기서 무력화하지 말 것** — 이 조회는 발송 임계 경로에 있고, cwd 가 죽은
-    ///   네트워크 공유면 canonicalize 한 번이 수십 초 블록이다. 그래서 그 함수를 재구현하지 않고 그대로 쓴다.
-    /// ★락 규율(ADR-0006 · ADR-0071)★: `sessions`(RwLock)와 프로필 맵(Mutex)은 **독립 도메인**이다.
-    ///   `list_agents()` 가 sessions 락을 잡아 Arc 를 clone 하고 즉시 놓은 뒤에야 `profiles.list()` 가
-    ///   프로필 락을 잡는다 — **순차이고 중첩이 아니다**. 두 맵을 한 락으로 합치면 프로필 저장(락 보유 중
-    ///   디스크 write)이 세션 조회(= 봉투 주입 경로)를 막는다(ADR-0119 거부 대안).
-    /// ★원자적이 아니고, 원자적으로 만들지 않는다★: 두 조회 사이 경합 잔여는 ADR-0116 이 이미 판단해
-    ///   TTL 24h 로 유계임을 수용했다. "이제 한 입구니 원자적으로" 는 0116 이 기각한 방향이다.
+    /// ★One snapshot★: the roster and the live session id set come from **the same single `list_agents()` sheet** — two takes would let a
+    /// spawn/exit/deletion slip in and two recipients of one send see different worlds (ADR-0111 decision 2).
+    /// ★Asleep = the difference on **the id axis**★ (a profile's session launches with its profile id); subtracting by name would let one live
+    /// same-name entry hide another asleep profile (sealed by the `messaging_host` tests). ★Asleep names are not folded★ (same-name decision axis).
+    /// ★Live and asleep name sources **differ** (do not merge)★: live = `AgentInfo.name` from `list_agents()` (`resolve_canonical_name`, based on
+    /// `session.cwd` — the launch's working folder, canonical when the canonicalize answered), asleep = `AgentProfile::canonical_name_when_live()` (raw `profile.cwd` + normalization) — merging
+    /// changes the parking key behavior.
+    /// ★fs access only for asleep profiles without an override★: do not defeat the `canonical_name_when_live()` shortcut (0 syscalls when
+    /// `display_name` is non-blank) — this is the send critical path and a dead network share blocks one canonicalize for tens of seconds.
+    /// ★Lock discipline (ADR-0006 · ADR-0071)★: `sessions` (RwLock) and the profile map (Mutex) are independent — `list_agents()` clones the Arcs
+    /// and releases, then `profiles.list()` takes the profile lock, **sequential, not nested** (one lock would let profile saves block the
+    /// envelope injection path — ADR-0119). ★Not atomic, not to be made atomic★: the residue between the two lookups was accepted by ADR-0116
+    /// (bounded by a 24h TTL).
     // ADR-0119
     pub fn roster(&self) -> Vec<RosterEntry> {
-        // ★프로필 스냅샷은 **한 장**이고, 산 항목의 이름·계층도 그 한 장에서 나온다(load-bearing)★.
-        //   예전엔 산 항목의 이름을 `list_agents()` 가 세션마다 따로 뜬 프로필에서 얻고 계층은 뒤이은
-        //   목록 조회에서 얻었다 — 그 사이에 개명 + 계층 이동이 커밋되면 **한 번도 존재한 적 없는 조합**
-        //   (옛 이름 + 새 부모)이 한 행에 실린다. 한 장에서 뽑으면 그 조합 자체가 만들어질 수 없다.
-        //   ★세션↔프로필 사이의 비원자성은 그대로 남고, 그건 이미 수용된 성질이다★(위 doc · ADR-0116).
-        //   여기서 닫은 것은 프로필↔프로필 불일치다.
-        // ★부수 효과 = 더 싸졌다★: 옛 경로는 세션 하나마다 `profiles.get`(= AgentProfile 통째 clone +
-        //   뮤텍스 획득)을 했다. 이제 목록 1회로 끝나므로 산 세션 수만큼의 프로필 clone 이 사라진다 —
-        //   이 조회는 우편 발송의 임계 경로에 있다(ADR-0119 · messaging_host `addressing_sources`).
+        // ★The profile snapshot is **one sheet**; live entries' names and hierarchy come from it too (load-bearing)★ — taken separately, a rename +
+        //   hierarchy move committed in between would put a combination that never existed (old name + new parent) in one row. The sessions↔profiles
+        //   non-atomicity remains (ADR-0116); what is closed is profile↔profile. Side effect: no per-session `profiles.get` clone on the mail-send
+        //   critical path (ADR-0119 · messaging_host `addressing_sources`).
         let sessions: Vec<Arc<AgentSession>> = {
             let guard = self.sessions.read().expect("sessions poisoned");
             guard.values().cloned().collect()
@@ -1026,8 +867,8 @@ impl AgentManager {
                     .get(&session.id)
                     .and_then(|p| p.display_name.as_deref()),
             );
-            // 시체(terminal)는 reap 까지 맵에 남는다 — 존재가 아니라 상태로 가른다(ADR-0116 술어).
-            //   ★프로필은 맵에 남겨 둔다★: 시체의 프로필은 아래 루프에서 **잠듦** 항목으로 올라와야 한다.
+            // A corpse (terminal) stays in the map until reaped — split by state, not existence (the ADR-0116 predicate). ★The profile is left in the map★: the corpse's profile must come up as an **asleep**
+            //   entry in the loop below.
             if !info.status.is_live() {
                 continue;
             }
@@ -1047,7 +888,7 @@ impl AgentManager {
             entries.push(RosterEntry {
                 id: p.id,
                 canonical_name: p.canonical_name_when_live(),
-                // 소유한 값이라 **옮긴다** — 유효 UTF-8 이면 버퍼 재사용이고, 아니면 그때만 lossy 사본.
+                // It is an owned value, so it is **moved** — if valid UTF-8 the buffer is reused, otherwise a lossy copy only then.
                 cwd: p
                     .cwd
                     .into_os_string()
@@ -1064,8 +905,8 @@ impl AgentManager {
         self.profiles.get(id)
     }
 
-    /// wire `ProfileList` 가 아직 프로필 타입을 그대로 나르므로 데이터는 경계를 넘지만, 레지스트리
-    /// 핸들은 넘지 않는다.
+    /// The wire `ProfileList` still carries the profile type as is, so the data crosses the boundary, but the registry
+    /// handle does not.
     pub fn agent_snapshots(&self) -> Vec<AgentProfile> {
         self.profiles.list()
     }
@@ -1074,27 +915,22 @@ impl AgentManager {
         self.profiles.get(id).and_then(|p| p.backend_session_id)
     }
 
-    /// 에이전트 신규 등록(트리 "만들기"). 등록 전에 명부 전역 이름 유일성을 강제한다(ADR-0120).
+    /// New agent registration (tree "create"). Enforces global roster name uniqueness before registering (ADR-0120).
     ///
-    /// 반환 = **이 호출이 등록한 프로필**(배정된 이름이 반영된 값). 호출자 응답이 그 이름을 담아야 하므로
-    /// 필요하다 — 접미사가 붙었는데 등록 전 스냅샷을 돌려주면 화면과 명부가 다른 이름을 갖는다.
-    /// ★저장된 값을 되읽은 것은 아니다★: `ProfileRegistry::mutate` 가 저장 직전 `normalize_hierarchy` 를
-    ///   돌리므로 원리적으로는 `parent_id` 가 갈릴 수 있다. 이 경로는 항상 `parent_id == None` 인 새
-    ///   프로필이라 실제로 갈리지 않지만, 되읽기가 필요해지면 명시적으로 다시 조회할 것.
-    ///
-    /// ★배정한 이름은 접미사가 없어도 `display_name` 으로 박는다★: canonical 이름은 override 가 없으면 cwd
-    ///   basename 파생이라, 같은 폴더를 가리키는 둘은 개명 없이도 자동 동명이 되고(ADR-0120 §영향) 작업 폴더가
-    ///   바뀌면 이름도 말없이 바뀐다. 둘 다 막는 저장 자리가 override 다.
-    /// ★부르는 쪽 있는 변경이다★ — Err = 명부 상한 · 접미사 공간 소진 · 저장 거절 · 실패([`PtyError::Store`])이고,
-    ///   어느 쪽이든 등록은 일어나지 않는다(메모리 명부 그대로).
+    /// Returns **the profile this call registered** (assigned name reflected) — the caller's response must carry that name, not the
+    /// pre-registration snapshot. ★Not the stored value read back★: `ProfileRegistry::mutate` runs `normalize_hierarchy` before saving, but a new
+    /// profile has `parent_id == None`, so it does not diverge (re-query if a read-back is ever needed).
+    /// ★The assigned name is pinned as `display_name` even without a suffix★: without an override the name derives from the cwd basename,
+    /// so two on one folder collide without any rename (ADR-0120 §Impact) and a working-folder change silently changes the name; the
+    /// override is the stored spot that prevents both.
+    /// ★A change with a caller★ — `Err` = roster cap · suffix space exhausted · save refusal/failure ([`PtyError::Store`]); no registration then.
     // ADR-0291 R17 (E4)
     pub fn try_create_agent(&self, mut profile: AgentProfile) -> Result<AgentProfile, PtyError> {
         profile.display_name = normalize_display_name(profile.display_name.take());
-        // ★파생도 게이트 안에서★: 요청 이름을 정하는 읽기가 게이트 밖에 있으면 관측과 커밋 사이가 아니라
-        //   **파생과 관측 사이**에 창이 생긴다(그 사이 남이 같은 이름을 커밋하면 둘 다 자유로 판정한다).
+        // ★The derivation is also inside the gate★: a read outside would open a window **between derivation and observation** (someone commits the same name in between, both see it free).
         let _gate = self.lock_name_allocation();
-        // 명부 한 장으로 상한과 이름을 **함께** 판정한다 — 두 번 뜨면 그 사이가 다시 창이 되고, 조회 비용도
-        //   두 배가 된다.
+        // The cap and the name are decided **together** with one roster sheet — taking it twice would make the gap a window again, and the lookup cost
+        //   would double.
         let roster = self.roster();
         check_roster_capacity(&roster)?;
         let desired = profile.canonical_name_when_live();
@@ -1105,11 +941,11 @@ impl AgentManager {
         Ok(profile)
     }
 
-    /// 신규 등록의 이름 — 비었으면 `desired`, 남이 쥐었으면 계열의 빈 번호. ★돌려준 이름을 `display_name` 으로
-    /// 박는다(접미사가 없어도)★ — 작업 폴더에서 파생된 채 두면 작업 폴더를 바꾸는 길이 우편 주소 · 트리 이름을
-    /// 말없이 바꾼다. 배정 게이트를 쥔 채 부른다.
+    /// The name of a new registration — `desired` if free, the next free number of the family if someone holds it. ★The returned name is
+    /// pinned as `display_name` (even without a suffix)★ — left derived from the working folder, a working-folder change would silently
+    /// change the mail address · tree name. Called holding the assignment gate.
     // ADR-0120
-    // TRD S25 §1-5 「display_name 고정」
+    // TRD S25 §1-5 「display_name pinned」
     fn assign_new_name(
         &self,
         roster: &[RosterEntry],
@@ -1121,33 +957,26 @@ impl AgentManager {
             NameDecision::Suffixed(assigned) => Ok(assigned),
             NameDecision::Exhausted => Err(name_space_exhausted(&desired)),
             NameDecision::KeepCurrent => {
-                unreachable!("decide_name(current=None) 은 KeepCurrent 를 낼 수 없다")
+                unreachable!("decide_name(current=None) cannot produce KeepCurrent")
             }
         }
     }
 
-    /// 에이전트 삭제(트리 "지우기") — 부르는 쪽 있는 변경: 저장이 `Err` 면 지우지 않고 [`PtyError::Store`] 다. 없는
-    /// id 도 저장을 시도하므로 거절 상태면 `Err` 다.
+    /// Agent deletion (tree "delete") — a change with a caller: a save `Err` does not delete ([`PtyError::Store`]); a missing id also attempts a save, so in a refusal state it is `Err`.
     // ADR-0291 R17 (E4)
     pub fn try_delete_agent(&self, id: AgentId) -> Result<(), PtyError> {
         self.profiles.try_remove(id).map_err(PtyError::Store)
     }
 
-    /// 표시명 override set/clear(트리 "이름 변경").
+    /// Display name override set/clear (tree "rename").
     ///
-    /// ★개명도 유일성 검사 지점이다(ADR-0120 결정 2)★: 0115 는 신규 등록만 봤으나 트리 개명이 실재해
-    ///   그쪽으로 유일성이 뚫린다. `None`(override 해제)도 검사 대상이다 — 해제하면 canonical 이름이 cwd
-    ///   basename 으로 **바뀌므로** 그것도 개명이다.
-    ///
-    /// ★★결정표(`decide_name`)가 판정을 전담한다 — 여기서 미리 단축하지 않는다★★. 예전엔 "자기가 이미
-    ///   요청 계열 이름을 쥐고 있으면 no-op" 을 게이트 **앞에서** 먼저 걸렀는데, 그러면 **요청 이름이 비어
-    ///   있어도** no-op 이 됐다: `bob(1)` 을 쥔 에이전트가 `bob` 이 비었는데도 개명되지 않고 성공만
-    ///   보고했다(호출부는 Ack + 목록 broadcast 까지 해서 사용자·LLM 이 안 된 일을 됐다고 본다). override
-    ///   해제도 같은 이유로 영구 불가였다(`C:/shared` 의 `shared(1)` 은 해제 결과가 제 계열이라 늘 걸렸다).
-    ///   "비었으면 준다" 는 판정은 명부를 봐야 알 수 있으므로 게이트 안이어야 한다.
-    ///
-    /// ★부르는 쪽 있는 변경이다★ — 저장이 `Err` 면 이름을 그대로 두고 [`PtyError::Store`] 다. 저장을 시도하지 않는
-    ///   결말(`Unchanged` · `Exhausted` · 조회 단계의 `NotFound`)은 저장소 상태와 무관하게 `Ok` 다.
+    /// ★Rename is also a uniqueness check point (ADR-0120 decision 2)★; `None` (clearing the override) is checked too — it makes the name the cwd
+    /// basename, **changing it**.
+    /// ★★`decide_name` decides everything — no shortcut before the gate★★: filtering "already holds a name of the requested family → no-op" before
+    /// it made `bob(1)` stay `bob(1)` although `bob` was free (reported success while the caller sends Ack + list broadcast), and made clearing an
+    /// override impossible (`shared(1)` of `C:/shared` always hit). "Give it if free" is knowable only from the roster, inside the gate.
+    /// ★A change with a caller★ — a save `Err` leaves the name and is [`PtyError::Store`]; outcomes not attempting a save (`Unchanged` ·
+    /// `Exhausted` · `NotFound` at lookup) are `Ok` whatever the store state.
     // ADR-0120
     // ADR-0291 R17 (E4)
     pub fn try_rename_agent(
@@ -1160,28 +989,20 @@ impl AgentManager {
         let Some(profile) = self.profiles.get(id) else {
             return Ok(RenameOutcome::NotFound);
         };
-        // ★자기 현재 이름은 **명부가 말하는 그 값**이어야 한다★: 산 에이전트의 로스터 이름은 session.cwd
-        //   기반이고 프로필 파생은 profile.cwd 기반이라 갈릴 수 있다(`roster()` doc). 따로 파생해 비교하면
-        //   남이 쥔 이름을 자기 것으로 오인해 커밋할 수 있다. 프로필만 있는(잠든) 경우엔 둘이 같은 값이다.
+        // ★Its own current name must be **the value the roster says**★: a live agent's roster name derives from session.cwd, the profile derivation from profile.cwd, and they can diverge (`roster()`);
+        //   deriving separately could mistake a name someone else holds for its own. For a profile-only (asleep) case they are the same.
         let roster = self.roster();
         let current = roster
             .iter()
             .find(|e| e.id == id)
             .map(|e| e.canonical_name.clone())
             .unwrap_or_else(|| profile.canonical_name_when_live());
-        // ★★규칙을 복제하지 않고, **생사에 맞는 기존 파생을 고른다**★★. 두 축은 재료도 함수도 다르다:
-        //   - 산 축(`resolve_canonical_name`) = `canonical_name_or_id_fallback(override, **raw** session.cwd)`
-        //     — canonicalize 를 하지 않는다.
-        //   - 잠든 축(`canonical_name_when_live`) = 먼저 canonicalize 한 뒤 basename.
-        //   그래서 산 에이전트의 예측을 잠든 함수에 태우면 `basename(canonicalize(cwd)) == basename(cwd)` 라는
-        //   **가정**에 기대게 된다. 그 가정은 보편이 아니다: spawn 의 canonicalize 가 실패하면 raw
-        //   `profile.cwd` 가 그대로 session.cwd 가 되고(spawn_agent 의 cwd 처리), 하네스 seam 은 임의 cwd 를
-        //   꽂을 수 있다. 갈리는 순간 **남이 쥔 이름을 Free 로 오판해** 커밋하고 엉뚱한 이름을 보고한다 —
-        //   ADR-0120 전역 유일성이 깨지는 지점이다. 그래서 산 항목은 산 축 함수로 예측한다.
-        // ★반대 방향(산 축에 canonicalize 추가)은 금지★: 그 경로는 메일 배달 임계 경로라 syscall 을 앞에
-        //   놓을 수 없다(ADR-0119). 이 수정은 예측 쪽만 바꾸며, 해제 경로에서 syscall 을 **하나 줄인다**.
-        // ★비공백 override 요청은 두 함수가 글자 그대로 같다★(둘 다 override 를 그대로 돌려주고 cwd 를 보지
-        //   않는다) — 그 경로 동작은 불변이다. 공백-only override 도 양쪽에서 "override 없음" 으로 취급된다.
+        // ★The existing derivation matching liveness is chosen, not one duplicated rule★: live axis (`resolve_canonical_name`) =
+        //   `canonical_name_or_id_fallback(override, **raw** session.cwd)` (no canonicalize); asleep axis (`canonical_name_when_live`) =
+        //   canonicalize, then basename. Predicting a live agent through the asleep function assumes `basename(canonicalize(cwd)) == basename(cwd)`,
+        //   which fails when spawn's canonicalize failed (raw `profile.cwd` kept) or a harness seam plugs an arbitrary cwd — then a name someone else
+        //   holds is misjudged `Free` and ADR-0120 uniqueness breaks. ★Adding canonicalize to the live axis is forbidden★ (mail delivery critical path,
+        //   ADR-0119). For a non-blank override both functions are the same; whitespace-only counts as "no override" on both.
         let self_live_cwd = roster
             .iter()
             .find(|e| e.id == id)
@@ -1198,10 +1019,9 @@ impl AgentManager {
             }
         };
         let outcome = match self.decide_name_with_roster(&roster, id, &desired, Some(&current)) {
-            // ★커밋 결과를 삼키지 않는다★: `get`·`roster()`·`rename` 은 프로필 락을 **각각** 잡으므로 그
-            //   사이 다른 연결의 `DeleteProfile` 이 끼면 커밋이 대상을 못 찾고 false 를 낸다. 그걸 성공으로
-            //   보고하면 wire 가 없는 에이전트에 Ack + 목록 broadcast 를 낸다(게이트는 이름 배정끼리만
-            //   직렬화한다 — 삭제는 이 게이트를 잡지 않는다).
+            // ★The commit result is not swallowed★: `get` · `roster()` · `rename` take the profile lock **separately**, so another connection's
+            //   `DeleteProfile` slipping in makes the commit return false; reporting success would send Ack + list broadcast for a nonexistent agent
+            //   (the gate serializes only name allocations — deletion does not take it).
             NameDecision::Free => {
                 if self
                     .profiles
@@ -1229,7 +1049,7 @@ impl AgentManager {
                 tracing::warn!(
                     agent = %id,
                     base = %desired,
-                    "접미사 공간 소진 — 개명 거부(이름 미변경)"
+                    "suffix space exhausted — rename refused (name unchanged)"
                 );
                 RenameOutcome::Exhausted
             }
@@ -1237,8 +1057,8 @@ impl AgentManager {
         Ok(outcome)
     }
 
-    /// 트리 계층 이동(부모 지정/해제) — 부르는 쪽 있는 변경: 저장이 `Err` 면 계층을 그대로 두고 [`PtyError::Store`]
-    /// 다. 규칙 위반(`Ok(false)`)도 저장을 시도하므로 거절 상태면 `Err` 다.
+    /// Tree hierarchy move (set/clear parent) — a change with a caller: a save `Err` leaves the hierarchy as is ([`PtyError::Store`]); a rule violation (`Ok(false)`) also attempts a save, so in a
+    /// refusal state it is `Err`.
     // ADR-0291 R17 (E4)
     pub fn try_reparent_agent(
         &self,
@@ -1250,8 +1070,7 @@ impl AgentManager {
             .map_err(PtyError::Store)
     }
 
-    /// 부팅 자동 복원 대상 토글 — 부르는 쪽 있는 변경: 저장이 `Err` 면 그대로 두고 [`PtyError::Store`] 다. 없는
-    /// id(`Ok(false)`)도 저장을 시도하므로 거절 상태면 `Err` 다.
+    /// Toggles the boot auto-restore target — a change with a caller: a save `Err` leaves it as is ([`PtyError::Store`]); a missing id (`Ok(false)`) also attempts a save.
     // ADR-0291 R17 (E4)
     pub fn try_set_agent_auto_restore(
         &self,
@@ -1263,39 +1082,30 @@ impl AgentManager {
             .map_err(PtyError::Store)
     }
 
-    /// ★하네스 전용 명부 주입 seam(ADR-0012 — `insert_test_session` 과 동형 게이트)★ — 이름 유일성
-    ///   (ADR-0120)을 **우회해** 프로필을 그대로 심는다. 유일성이 정상 경로로는 만들 수 없게 만든 상태
-    ///   (예: 동명 잠듦 2건)를 재현해야 하는 봉인 테스트 전용이다. 운영 빌드엔 컴파일되지 않는다
-    ///   (feature OFF = 메서드 부재) — 운영 경로가 이걸 부르면 명부 유일성이 조용히 깨진다.
+    /// ★Harness-only roster injection seam (ADR-0012, same gate shape as `insert_test_session`)★ — plants a profile **bypassing** name uniqueness
+    /// (ADR-0120), for tests reproducing states uniqueness forbids. Not compiled into production (feature OFF) — a production call would
+    /// silently break uniqueness.
     #[cfg(feature = "test-harness")]
     #[doc(hidden)]
     pub fn seed_agent_bypassing_uniqueness(&self, profile: AgentProfile) {
         self.profiles.upsert(profile);
     }
 
-    /// 배정 게이트 취득. ★poison 을 무시한다★: 이 Mutex 는 `()` 를 감싸 **보호하는 상태가 없다** —
-    /// 다른 스레드의 패닉이 남길 수 있는 불일치 데이터가 애초에 없다. `expect` 로 두면 무관한 패닉 한 번이
-    /// 생성·개명·스폰을 데몬 재시작까지 영구히 막는다(순수 downside). 이 게이트를 쥐는 자리는 가둠 표시 밖이라
-    /// 운영 프로세스에서는 그 패닉을 훅이 먼저 끝낸다 — 이 내성이 받는 것은 훅 없는 시험 빌드뿐이다(ADR-0292).
+    /// Acquires the allocation gate. ★Ignores poison★: this Mutex wraps `()` and **protects no state**, and `expect` would let one unrelated
+    /// panic block creation, rename and spawn until restart. Holders are outside the containment marker, so production ends that panic first —
+    /// only hook-less test builds use this tolerance (ADR-0292).
     fn lock_name_allocation(&self) -> std::sync::MutexGuard<'_, ()> {
         sync::lock(&self.name_allocation)
     }
 
-    /// ★이름 결정표(ADR-0120 유일성 · ADR-0123 번호 규칙) — 게이트 보유 중에만 부른다★.
+    /// ★The name decision table (ADR-0120 uniqueness · ADR-0123 numbering) — call only while holding the gate★.
     ///
-    /// `self_id` 는 관측에서 **제외**한다(자기 이름과 충돌하지 않게). `current` = 명부가 지금 이 에이전트에
-    /// 대해 말하는 canonical 이름(신규 등록이면 `None`).
-    ///
-    /// 판정 순서가 곧 계약이다:
-    ///   3) `desired` 를 **아무도** 안 갖고 있으면 → `Free`. 자기가 그 계열에 있든 없든 상관없다
-    ///      (여기서 계열을 먼저 보면 "요청 이름이 비었는데 안 바꿔 주는" 조용한 성공이 된다).
-    ///   4a) 남이 갖고 있고 `current` 가 `desired` 계열(`desired` 또는 `desired(n)`)이면 → `KeepCurrent`.
-    ///       재요청이 번호를 태우거나 빈 낮은 번호로 끌어내리는 것을 막는다(이름 = 메일 주소, ADR-0116).
-    ///   4b) 그 밖 → 계열의 빈 번호로 `Suffixed`.
-    ///
-    /// ★로스터 스냅샷을 **받는다**(스스로 뜨지 않는다)★: 호출자는 같은 게이트 구간에서 그 명부로 총량 상한도
-    ///   보고(개명은 자기 현재 이름도 거기서 읽는다) — 두 번 뜨면 판정마다 다른 세계를 보게 되고 조회 비용도
-    ///   배가 된다.
+    /// `self_id` is **excluded** from observation; `current` = the roster's current canonical name for this agent (`None` for a new registration).
+    /// The order is the contract: 3) **nobody** has `desired` → `Free` (family is irrelevant; checking family first would silently not give a free
+    /// requested name); 4a) someone else has it and `current` is in the `desired` family → `KeepCurrent` (a re-request must not burn a number or
+    /// drop to a lower one — name = mail address, ADR-0116); 4b) otherwise → `Suffixed` with a free number of the family.
+    /// ★It **receives** the roster snapshot★ — the caller also checks the total cap (and a rename reads its current name) with it in the same
+    /// gate section; taking it twice splits worlds and doubles the lookup cost.
     // ADR-0120
     fn decide_name_with_roster(
         &self,
@@ -1304,9 +1114,8 @@ impl AgentManager {
         desired: &str,
         current: Option<&str>,
     ) -> NameDecision {
-        // ★두 축을 분리한다★: `taken_exact`(그 문자열을 남이 쓰는가 — 접미사를 붙일지 결정)와 계열 번호
-        //   집합(몇 번을 붙일지 결정). 섞으면 두 방향으로 틀린다: `bob(1)` 만 있어도 `bob` 이 찬 것으로
-        //   보이거나, 리터럴 `bob(0)` 이 접미사 없는 `bob` 을 점유한 것처럼 보인다.
+        // ★Two separate axes★: `taken_exact` (someone else uses that string — whether to suffix) and the family number set (which number). Mixed, `bob` looks taken when only `bob(1)` exists, or a literal
+        //   `bob(0)` looks like it occupied `bob`.
         let mut taken_exact = false;
         let mut used: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         for entry in roster {
@@ -1335,55 +1144,48 @@ impl AgentManager {
         }
     }
 
-    /// spawn 이 **명부에 없는** 프로필을 넣는 지점 — 실행 전처리 앞(`spawn_agent_watching_link` 단독 호출)이라
-    /// 전처리는 늘 명부에 있는 항목을 읽는다. 있으면 아무것도 하지 않는다(갱신은 [`Self::register_for_spawn`]).
-    /// 레지스트리 입구는 `entry` 가 고른다. 돌려주는 값 = 넣었나.
+    /// The point where spawn adds a profile **not in the roster** — before launch preprocessing (only `spawn_agent_watching_link` calls it),
+    /// so preprocessing always reads an entry that is in the roster. Present = does nothing (updates: [`Self::register_for_spawn`]).
+    /// `entry` picks the registry entry. Returns = whether it added.
     ///
     /// ★The launch material is checked on the caller's copy **before** the add — a block adds nothing★ (a create path
     ///   checks before it creates): a block after the add would leave in the roster an entry that cannot start, which
     ///   the caller then has to wake or delete by the id its answer names. A block on the re-check after the add can
     ///   still happen (partial success). That check runs in `scope`, the launch's one scope.
     ///
-    /// ★★유일성 · 상한은 **신규 등록에만** 건다 — epoch 교체는 개명 대상이 아니다(ADR-0115 §영향 · ADR-0007)★★.
-    ///   restart / restore(`restore_all`·`restore_one`) / 재활성화(`activate_profile`) /
-    ///   `resume_no_fallback` 는 전부 **같은 AgentId 의 맵 교체**지 새 에이전트가 아니다. id 가 이미 명부에
-    ///   있는지로 그 둘을 가른다. ad-hoc spawn(연결이 그 자리에서 만든 프로필 — wire `SpawnByCwd` · 스모크 bin)은
-    ///   명부에 없는 id 라 신규 등록으로 잡힌다.
-    /// ★`upsert_preserving_hierarchy` 는 live 엔트리의 `display_name` 을 보존한다★ — 그래서 신규 등록
-    ///   갈래에서만 override 를 심어도 안전하다(기존 id 갈래는 어차피 live 값이 이긴다). 이름이 실제로
-    ///   새려면 이 분기 제거와 그 보존 규칙 상실이 **함께** 일어나야 한다(그 복합 회귀를
-    ///   `epoch_replacement_never_renames_an_existing_agent` 가 잡는다).
-    /// ★분기를 두는 또 하나의 이유 = 복원 경로 비용★: 부팅 복원은 에이전트마다 이걸 부르는데, 검사가 돌면
-    ///   매번 명부 전체 스캔 + override 없는 잠든 에이전트 수만큼 canonicalize syscall 을 배정 게이트
-    ///   안에서 치른다(게이트 필드 주석).
-    /// ★**부활 경로를 전부 닫지는 않는다**★ — 등록이 시작되기 **전에** 삭제가 끝났으면 「없다」로 보여 신규
-    ///   등록으로 간다. 그 둘을 가르려면 호출자가 「원래 있던 항목이다」를 들고 와야 하는데 그 신호가
-    ///   `spawn_agent` 시그니처에 없다(미해결).
-    /// ★Err = 실행 막힘 · 명부 상한 · 접미사 공간 소진 · (`Entry::Caller` 면) 저장 거절 · 실패★ — spawn 이 그
-    ///   Err 로 중단된다(중복 이름으로 뜨지 않는다 · 저장 `Err` 면 명부는 그대로다).
+    /// ★★Uniqueness · the cap apply **only to new registrations** — epoch replacement is not a rename (ADR-0115 §Impact · ADR-0007)★★:
+    /// restart / restore (`restore_all` · `restore_one`) / reactivation (`activate_profile`) / `resume_no_fallback` replace the map entry of
+    /// the same AgentId; whether the id is already in the roster tells them apart (an ad-hoc spawn — a profile the connection made on the
+    /// spot, wire `SpawnByCwd` · smoke bin — has an id not in it → new registration).
+    /// ★`upsert_preserving_hierarchy` keeps the live `display_name`★, so planting the override only on the new branch is safe; a leak needs both
+    /// removed together (`epoch_replacement_never_renames_an_existing_agent`). ★Restore path cost★: boot restore calls this per agent; checking
+    /// would pay a full scan + canonicalize per asleep agent inside the gate.
+    /// ★Not every resurrection path is closed★: a deletion finished **before** registration started looks 「absent」 and goes to new
+    /// registration; telling them apart needs the caller to say "this entry existed" — not in the `spawn_agent` signature (unresolved).
+    /// ★`Err` = launch block · roster cap · suffix exhausted · (`Entry::Caller`) save refusal/failure★ — the spawn aborts (no duplicate
+    /// name; roster unchanged on save `Err`).
     // ADR-0115
     // ADR-0291 R17 (E3)
     // ADR-0319
-    // TRD S25 §1-5 (가) 1 ②
+    // TRD S25 §1-5 (ga) 1 ②
     fn ensure_registered(
         &self,
         scope: &LaunchScope,
         profile: &AgentProfile,
         entry: Entry,
     ) -> Result<bool, PtyError> {
-        // 있는 id 면 이름 배정 자체가 없으므로 게이트를 잡지 않는다. 「있나」와 「넣나」 사이는 이 id 의 스폰
-        //   예약이 덮는다 — 같은 id 의 두 스폰이 함께 여기 오지 않는다.
+        // An existing id has no name allocation at all, so the gate is not taken. Between 「is it there」 and 「insert」 this id's spawn
+        //   reservation covers — two spawns of the same id never come here together.
         if self.profiles.get(profile.id).is_some() {
             return Ok(false);
         }
-        // 이름 배정 게이트를 잡기 **전**이다 — 점검은 manager 락을 하나도 쥐지 않고 부른다(asset-library 락 →
-        //   manager 락 한 방향).
+        // **Before** taking the name-assignment gate — the check is called holding no manager lock (asset-library lock → manager lock, one
+        //   direction).
         self.check_before_create(scope, profile)?;
         let mut fresh = profile.clone();
         fresh.display_name = normalize_display_name(fresh.display_name.take());
         let _gate = self.lock_name_allocation();
-        // ★상한은 여기도 본다★: 이 분기가 **ad-hoc spawn 의 신규 등록 지점**이라, 여기를 비워 두면 명부가
-        //   `try_create_agent` 를 거치지 않고도 무한히 자란다(상한이 "총량" 이라는 말이 거짓이 된다).
+        // ★The cap is checked here too★: this is **the new-registration point of ad-hoc spawn**; empty, the roster could grow without bound bypassing `try_create_agent` (the "total" cap would be false).
         let roster = self.roster();
         check_roster_capacity(&roster)?;
         let desired = fresh.canonical_name_when_live();
@@ -1394,57 +1196,51 @@ impl AgentManager {
         Ok(true)
     }
 
-    /// spawn 이 호출자 사본을 명부에 병합하는 지점(`spawn_agent_watching_link` 단독 호출 · 실행 전처리 뒤) — 런타임이
-    /// 저자인 칸은 명부 값이 이긴다(`merge_preserving_live`). 레지스트리 입구는 `entry` 가 고른다.
+    /// The point where spawn merges the caller copy into the roster (only `spawn_agent_watching_link` calls it · after launch preprocessing) —
+    /// fields whose author is the runtime keep the roster value (`merge_preserving_live`). `entry` picks the registry entry.
     ///
-    /// ★없는 id 를 넣지 않는다★ — 신규 등록은 [`Self::ensure_registered`] 가 전처리 앞에서 끝냈으므로, 여기서
-    ///   없다는 것은 그 사이 지워졌다는 뜻이다. 방금 넣은 id 에는 부르지 않는다 — 넣은 값이 곧 그 사본이라 병합할
-    ///   것이 없고, 부르면 즉석 생성의 저장이 둘이 되어 둘째 실패가 「만들지 않았다」로 잘못 보고된다.
-    /// 명령 · env 는 이 병합이 사본에서 명부로 옮기는 칸이다 — 실행 전처리가 그 둘이 점검한 값과 같을 때만 여기 온다.
-    /// ★Err = 그 사이 지워짐 · (`Entry::Caller` 면) 저장 거절 · 실패★ — spawn 이 그 Err 로 중단된다.
+    /// ★Never inserts an absent id★ — new registration was finished by [`Self::ensure_registered`] before preprocessing, so absent here means
+    ///   deleted in between. Not called for a just-inserted id — the inserted value is that copy, so there is nothing to merge, and calling it
+    ///   would make two saves for an on-the-spot creation, the second failure misreported as 「not created」.
+    /// Command · env are the fields this merge moves from the copy to the roster — it is reached only when launch preprocessing found them equal to the checked values.
+    /// ★Err = deleted in between · (`Entry::Caller`) save refusal · failure★ — the spawn aborts on that Err.
     // ADR-0115
     // ADR-0291 R17 (E3)
     fn register_for_spawn(&self, profile: &AgentProfile, entry: Entry) -> Result<(), PtyError> {
-        // ★★「있나」와 「쓴다」를 **한 임계구역**에서 한다 — 두 호출로 되돌리지 말 것★★:
-        //   조회와 쓰기가 갈리면 그 사이에 낀 `DeleteProfile` 이 무시되고, **삭제가 성공으로 보고된 뒤
-        //   그 프로필이 되살아나며 자식 프로세스까지 따라 뜬다.** 그래서 갱신은
-        //   [`ProfileRegistry::update_preserving_hierarchy`] 가 락 안에서 존재까지 함께 판정하고,
-        //   여기서는 그 결과로만 갈린다.
-        // ★`false` = 그 사이 지워졌다 → **spawn 을 끊는다**★: 신규 등록으로 떨어뜨리면 그게 바로 부활이고,
-        //   그냥 진행하면 프로필 없는 세션이 명부에 오른다.
-        //   ★뒤에 선 `profile_vanished_mid_spawn` 검사들과 **같은 처분, 다른 시점**이다★ — 그쪽은 표식
-        //   확정 **뒤**의 삭제를 잡고 이쪽은 그 앞을 잡는다. 어느 하나로 대체되지 않는다.
+        // ★★「Is it there」 and 「write」 in **one critical section** — do not revert to two calls★★: split, a `DeleteProfile` in between is
+        //   ignored and **the profile comes back to life after the deletion was reported** (even its child launches). So
+        //   [`ProfileRegistry::update_preserving_hierarchy`] decides existence inside the lock and this only branches on it.
+        // ★`false` = deleted in the meantime → **cut the spawn**★: falling to new registration would be that resurrection, and going on would
+        //   put a session without a profile on the roster. ★Same disposition as the later `profile_vanished_mid_spawn` checks, different time★ —
+        //   those catch a deletion **after** the marker settles, this one before; neither replaces the other.
         if entry
             .update_preserving_hierarchy(&self.profiles, profile.clone())
             .map_err(PtyError::Store)?
         {
             Ok(())
         } else {
-            Err(profile_vanished_mid_spawn(profile.id, "spawn 등록"))
+            Err(profile_vanished_mid_spawn(profile.id, "spawn registration"))
         }
     }
 
     // ── spawn ──────────────────────────────────────────────────────────────
 
-    /// ★두 갈래의 「할 일 없음」은 `Ok(Moot)` 다 — `Err` 로 되돌리지 마라★: 그 항목이 이미 떠 있거나
-    /// (아래 이중-spawn 가드) 이미 뜨는 중이면(예약 패배) 이 요청은 무의미하고, 무의미는 실패가 아니다.
-    /// 근거와 그 전환이 없앤 것은 `SpawnOutcome` 주석이 갖는다.
+    /// ★The two branches' 「nothing to do」 is `Ok(Moot)` — do not revert to `Err`★: an entry already up (double-spawn guard below) or already
+    /// launching (reservation lost) is moot, not a failure (see `SpawnOutcome`).
     // ADR-0172
-    /// ★배달 채널을 버리는 얇은 위임★ — 연결 결말을 기다리는 호출자는 아래
-    /// [`AgentManager::spawn_agent_watching_link`] 를 쓴다. 이 갈래에서 채널이 닫히면 통로의 배달은
-    /// 조용히 실패하고(그 포트가 그렇게 설계됐다) 아무도 기다리지 않는다.
-    /// ★그래서 **이 동사로 띄운 화신의 연결 실패는 주인이 없다**★ — 활성화 입구
-    /// ([`AgentManager::activate_profile`]·[`AgentManager::restore_one`])는 Fresh 도 Resume 도
-    /// [`LinkWatch`] 를 쥐는 갈래로 들어가므로 그 구멍에 닿지 않는다.
+    /// ★A thin delegation that drops the delivery channel★ — callers waiting for the connection outcome use
+    /// [`AgentManager::spawn_agent_watching_link`]. Here the link's delivery silently fails (by design) and nobody waits.
+    /// ★So **the connection failure of an incarnation launched with this verb has no owner**★; the activation entries
+    /// ([`AgentManager::activate_profile`] · [`AgentManager::restore_one`]) use the [`LinkWatch`] branch for Fresh and Resume.
     /// ★Its production consumers today: none outside the smoke binaries★ — both create-and-start entrances (WS
     ///   `SpawnByCwd`, bus `agent.spawn {cwd}`) go through [`AgentManager::create_and_activate`], which waits for the
     ///   link verdict, and WS `Spawn` goes through `activate_profile` (its call site pins "one activation entrance").
-    /// ★부르는 쪽 있는 입구다★ — 명부 등록 · 세션 id 비우기의 저장이 `Err` 면 띄우지 않고
-    ///   [`PtyError::Store`] 다(부분 성공 = [`AgentManager::spawn_agent_watching_link`]).
-    /// 실행 재료 점검이 막으면 [`PtyError::LaunchBlocked`] · 점검하는 사이 실행 입력이 두 번 다 바뀌거나 넘긴 사본의
-    ///   명령 · env 가 명부와 다르거나 점검한 원본이 재료 준비 전에 바뀌면 [`PtyError::LaunchRaced`] — 둘 다 띄우지
-    ///   않았다. 명부에 없던 id 는 넣기 전에 점검해 막히면 넣지 않는다 · 넣은 뒤 다시 점검에서 막히거나 경합하면 넣은
-    ///   것은 남는다. 재료 준비가 그 밖의 까닭으로 실패하면 `SpawnFailed` 다.
+    /// ★The entry with a caller★ — a save `Err` of the roster registration or session id clearing does not launch ([`PtyError::Store`]; partial
+    /// success = [`AgentManager::spawn_agent_watching_link`]).
+    /// A launch-material block = [`PtyError::LaunchBlocked`] · the launch inputs changed both times during the check, the passed copy's
+    ///   command · env differ from the roster, or the checked source changed before material preparation = [`PtyError::LaunchRaced`] —
+    ///   neither launched. An id not in the roster is checked before insertion and not inserted when blocked · a block or race at the
+    ///   re-check after insertion leaves the insert. A material preparation failing for any other reason = `SpawnFailed`.
     pub fn spawn_agent(
         &self,
         profile: &AgentProfile,
@@ -1457,15 +1253,13 @@ impl AgentManager {
     /// The shared spawn body — the entries (`spawn_agent` · `activate_profile_reporting` · `restore_one`) reach it
     /// directly or through the two verbs.
     ///
-    /// `entry` = 이 띄우기를 부른 쪽. 프로세스를 열기 전의 명부 변경 셋 중 ① 등록(없으면 점검 뒤 넣기 → 실행
-    ///   전처리 → 있던 id 면 병합) · ③ Fresh 의 세션 id 비우기가 그 입구로 레지스트리를 바꾼다. ② 화신 표식은
-    ///   메모리만이라 입구와 무관하고, 띄운 뒤의 `auto_restore` 올리기(`spawn_session`)는 입구와 무관하게 늘
-    ///   내부다. 실행 전처리는 명부에 쓰지 않는다.
-    /// ★부분 성공은 되돌리지 않는다(`Entry::Caller`)★ — 각 변경이 자기 저장을 가진 독립 변경이다. ① 이
-    ///   저장된 뒤 ③ 의 저장이 `Err` 면 ① 은 남고(명부에 오른 · 갱신된 채 안 뜬 에이전트 — 프로세스 열기
-    ///   실패 뒤와 같은 끝 모양) ② 의 새 표식도 메모리에 남으며(쥔 화신이 없어 무해) 칸에는 옛 손잡이가
-    ///   남는다. 띄우기가 멈췄으므로 어긋날 화신이 없다. ① 이 실패하면 ② · ③ 에 닿지 않는다. 넣은 뒤 실행
-    ///   전처리가 막히거나 경합해도 넣은 것은 남는다(같은 끝 모양).
+    /// `entry` = the caller. Of the three roster changes before opening the process, ① registration (insert after the check if absent →
+    /// launch preprocessing → merge if the id existed) and ③ Fresh's session id clearing use that entry; ② the incarnation marker is
+    /// memory-only; the post-launch `auto_restore` raise (`spawn_session`) is always internal. Launch preprocessing does not write the roster.
+    /// ★Partial success is not reverted (`Entry::Caller`)★: each change has its own save. If ③'s save is `Err` after ① saved, ① remains
+    /// (on the roster · not launched, same shape as a process open failure), ②'s new marker stays in memory (no incarnation holds it) and the
+    /// field keeps the old handle. If ① fails, ② · ③ are not reached. A block or race at preprocessing after insertion also leaves the
+    /// insert (the same shape).
     /// The third slot = this launch's notices — `Some` exactly when this call started a process (`Started`), `None` on
     ///   a moot request. It records nothing; a caller-facing entry decides that ([`NoticeDelivery`]).
     // ADR-0291 R17 (E3 · D8)
@@ -1477,40 +1271,30 @@ impl AgentManager {
         mode: SpawnMode,
         entry: Entry,
     ) -> Result<(SpawnOutcome, Option<LinkWatch>, Option<LaunchNotices>), PtyError> {
-        // ★★예약을 **명부 조회보다 먼저** 잡는다 — 순서를 되돌리지 마라★★: 연결을 선언하는 통로에서는
-        //   예약이 spawn 이 끝날 때까지가 아니라 **연결의 결말이 날 때까지** 살아 있다([`LinkWatch`]).
-        //   그 구간의 세션은 명부에 올라 있지만 아직 **입력을 받을 수 있는지 모르는** 화신이다. 조회를
-        //   먼저 두면 그 화신을 본 두 번째 요청이 `Moot(Some(..))` — 즉 「떠 있다」 — 로 답하는데, 그
-        //   답이 곧 결함이다: 첫 요청이 곧 실패로 판정해 그것을 거두면, 두 번째 요청의 호출자는 **자기
-        //   밑에서 죽을 에이전트를 산 것으로 들고 있게 된다.**
-        //   예약을 먼저 보면 그 구간의 답이 `Moot(None)`(「이미 뜨는 중」)이 되어 두 호출자가 갈리지 않는다.
-        //   ★연결 축이 없는 통로에서는 이 순서가 아무것도 바꾸지 않는다★ — 거기서는 예약이 이 함수와
-        //   함께 끝나므로, 「떠 있다」와 「뜨는 중」이 겹치는 구간이 애초에 명령 몇 개 폭이다.
+        // ★The reservation is taken **before the roster lookup** — do not revert the order★: on a link declaring a connection it lives **until the
+        //   connection outcome** ([`LinkWatch`]), while the session is on the roster but **not yet known to take input**. Looking up first would let a
+        //   second request answer `Moot(Some(..))` 「it is up」, and when the first then fails and collects it the second caller **holds as alive an
+        //   agent about to die**. Reservation first answers `Moot(None)` (「already launching」). ★On links without a connection axis the order changes
+        //   nothing★ (the reservation ends with this function).
         let Some(reservation) = SpawnReservation::reserve(self.spawning.clone(), profile.id) else {
-            // 승자가 아직 명부에 올리기 전이거나, 올렸어도 그 연결이 아직 결말을 못 냈다 — 어느 쪽이든
-            // 우리가 「떠 있다」고 답할 근거가 없다.
+            // The winner has not yet put it on the roster, or even if it has, that connection has not produced its outcome yet — either way
+            // we have no ground to answer 「it is up」.
             tracing::info!(
                 agent = %profile.id,
-                "spawn_agent: 이미 뜨는 중 — 이 요청은 할 일이 없다(moot)"
+                "spawn_agent: already launching — this request has nothing to do (moot)"
             );
             return Ok((SpawnOutcome::Moot(None), None, None));
         };
 
-        // ★잔여 레이스(ADR-0082 미해결·후속)★: 이 이중-spawn 가드는 여기서 read lock 을 잡아 contains_key 를 본 뒤
-        //   놓고, 실제 등록(sessions.insert)은 아래에서 별개 write lock 으로 한다 — 그 사이 창이 있다.
-        //   같은 id 를 동시에 SpawnProfile 하면 둘 다 이 검사와 activate_profile 의 pre-check 를 통과해
-        //   double-spawn 이 날 수 있다. 이 window 는 ADR-0082 이전부터 있던 **선재(pre-existing)
-        //   레이스**이며 그 변경이 도입하지도 닫지도 않았다(후속 과제로 flag).
-        //   ★한때 여기 적혀 있던 「연결 간에만 겹친다(연결당은 직렬이니까)」는 이제 **거짓이다**★:
-        //   데몬이 활성화 명령을 그 연결의 도착순 줄에서 떼어 별도 태스크로 돌리므로(daemon crate 의
-        //   `connection_core::dispatch_order`) **같은 연결의 두 요청**도 여기서 겹칠 수 있다. 창의 폭은
-        //   그대로고 — 막는 것은 위 예약과 pre-check 이지 호출자 쪽 직렬성이 아니었다 — 바뀐 것은
-        //   그 창에 닿을 수 있는 호출자의 범위뿐이다.
-        //   ★위 예약이 그 폭을 **줄이지만 닫지는 않는다**★ — 예약 취득과 이 조회 사이에도 같은 창이 있다.
+        // ★Residual race (ADR-0082 unresolved · follow-up)★: this guard reads `contains_key` under a read lock and releases it, while `sessions.insert`
+        //   happens below under a separate write lock; the same id spawned concurrently can pass both this check and `activate_profile`'s pre-check
+        //   (a double spawn). It predates ADR-0082. ★It is not only cross-connection★: the daemon runs a connection's activation commands as separate
+        //   tasks off its arrival-order lane (`connection_core::dispatch_order`), so **two requests of one connection** can overlap too. The reservation
+        //   above narrows the window but does not close it.
         if let Ok(session) = self.get_session(profile.id) {
             tracing::info!(
                 agent = %profile.id,
-                "spawn_agent: 이미 실행 중 — 이 요청은 할 일이 없다(moot)"
+                "spawn_agent: already running — this request has nothing to do (moot)"
             );
             return Ok((
                 SpawnOutcome::Moot(Some(self.agent_info(&session))),
@@ -1525,65 +1309,49 @@ impl AgentManager {
         // ADR-0360: the folder budgets are per launch.
         // ADR-0334
         let scope = self.launch.kits.begin_launch();
-        // 전처리가 명부의 항목을 읽으므로 없는 id(즉석 생성)를 먼저 넣는다(넣기 전 점검은 그 안에서).
-        // TRD S25 §1-5 (가) 0
+        // Preprocessing reads the roster entry, so an absent id (on-the-spot creation) is inserted first (the pre-insert check runs inside).
+        // TRD S25 §1-5 (ga) 0
         let inserted = self.ensure_registered(&scope, profile, entry)?;
-        // ★실행 전처리는 이 자리다 — 예약 · 떠 있음 확인 **뒤**, 화신 표식 · 세션 파생 **앞**(ADR-0319)★: 예약 앞이면
-        //   같은 에이전트의 두 실행이 함께 점검하고, 표식 · 세션 파생 뒤면 래치 · 표식이 맞추기 전 사본을 본다. 막히면
-        //   제어 채널을 발급하기 전에 끊는다.
+        // ★Launch preprocessing goes here — **after** the reservation · running check, **before** the incarnation marker · session derivation
+        //   (ADR-0319)★: before the reservation, two launches of one agent would check together; after the marker · session derivation, the
+        //   latch · marker would see a copy before alignment. A block cuts off before the control channel is issued.
         let (plan, plan_notices) = self.prelaunch(&scope, profile)?;
 
-        // 방금 넣은 id 는 병합하지 않는다 — 넣은 값이 곧 사본이고, 앞 화신이 없어 아래 표식까지 사이에 낄 지각
-        //   기록도 없다.
+        // A just-inserted id is not merged — the inserted value is the copy, and with no previous incarnation there is no late record to slip in
+        //   before the marker below.
         if !inserted {
             self.register_for_spawn(profile, entry)?;
         }
 
-        // ★화신 표식 확정 — 화신마다 새 값(ADR-0007)★
+        // ★Settling the incarnation marker — a new value per incarnation (ADR-0007)★
         //
-        // ★왜 이 자리인가(호출부가 아니라)★: 맵 교체가 실제로 일어나는 곳이 여기고, **모든 spawn 이
-        //   모드와 무관하게 이 한 줄을 지난다**. 옛날엔 발급이 `activate_profile` 의 Resume 갈래에만
-        //   있어서 Fresh 재spawn 경로들(WS `Spawn` 명령 · `activate_profile` 의 Fresh 갈래 · sid 없는
-        //   프로필의 부팅 복원)이 죽은 화신의 표식을 **그대로 재사용**했다. 그 재사용은 (AgentId, epoch)
-        //   를 키로 쓰는 모든 구조를 무너뜨린다 — 턴 관측 표(ADR-0113: 죽은 화신의 지각 emit 이 산 화신의
-        //   항목을 덮고 그 emit 의 finalize 재확인이 그걸 지운다) · 제어 채널 토큰(ADR-0086) ·
-        //   reap epoch-guard(ADR-0084). 호출부마다 흩뿌리면 새 호출부가 또 빠뜨린다.
-        // ★모드를 보지 않는다(Resume 도 같은 규칙)★: 새 프로세스를 띄웠으면 그건 새 화신이고, 모드는 그
-        //   사실을 바꾸지 않는다. 모드로 가르면 Resume 쪽 재spawn(`restore_all` 을 부팅 밖에서 부르는 등)이
-        //   같은 재사용 구멍으로 남는다 — 그건 규약일 뿐 강제되지 않는다.
-        // ★프로필이 사라졌으면 **spawn 을 중단한다**★: 삭제된 프로필로 세션을 띄울 이유가 없다. `?` 로 끊는다.
-        //
-        // ★**`register_for_spawn` 바로 뒤여야 한다 — 사이에 한 줄도 끼우지 말 것**★:
-        //   [`ProfileRegistry::upsert_preserving_hierarchy`] 는 live 표식을 **보존**하므로(ADR-0084 —
-        //   스냅샷이 표식을 author 하면 안 되기 때문), 이 줄이 돌기 전까지 명부에 서 있는 표식은 여전히
-        //   **앞 화신의 것**이다. 그 구간에 도착한 앞 화신의 지각 기록
-        //   ([`ProfileRegistry::observe_session_id`] 의 `Some(epoch)` 갈래)은 표식이 일치하므로 **거절되지
-        //   않고 통과한다** — 그 가드가 막는 것은 「더 새 화신이 이미 섰다」 하나뿐이고, 새 화신은 아직
-        //   안 섰다. 그래서 이 줄이 **그 구간을 닫는 동사**다.
-        //   ★그 구간이 실제로 무엇을 망가뜨리나(「그냥 낡은 값」이 아니다)★: 이 줄이 아래 Fresh 비우기
-        //   보다 뒤로 가면, 비운 칸에 앞 화신의 지각 기록이 표식 가드를 통과해 앉는다. 그러면 이 화신의
-        //   첫 제출 commit 은 칸이 시작 때 본 값(`None`)과 달라 거절되고, 이 화신의 id 는 영속되지 않아
-        //   다음 활성화가 죽은 화신의 대화를 연다(ADR-0226).
-        //   ★**그 대가로 「프로필이 사라졌다」를 보는 자리가 늘었다 — 아래 셋(명부 다시 읽기 · 세션 id
-        //   비우기 · 이어받기 손잡이 읽기)도 `?` 로 끊는다**★: 여기서 통과한 뒤 그 셋 **사이**에 프로필이
-        //   지워지는 창이 있다. 그 창을 안 막으면 읽기와 비우기가 조용히 `None` 을 돌려주고 spawn 은 계속
-        //   가서, 이어받기가 말없이 새 대화가 되고 프로필 없는 세션이 명부에 오른다 — 이 줄까지 네 자리가
-        //   각자 건다.
+        // ★Why here, not the caller★: the map replacement happens here and **every spawn passes this line regardless of mode**. Issuing used to be only
+        //   in `activate_profile`'s Resume branch, so Fresh respawn paths (WS `Spawn` · Fresh `activate_profile` · boot restore of a profile without
+        //   a sid) **reused the dead incarnation's marker**, collapsing every (AgentId, epoch)-keyed structure: the turn observation table (ADR-0113:
+        //   a dead incarnation's late emit overwrites the live entry), the control channel token (ADR-0086), the reap epoch-guard (ADR-0084).
+        // ★The mode is not looked at★ — a new process is a new incarnation. ★If the profile vanished, **abort the spawn**★ (cut with `?`).
+        // ★**It must come right after `register_for_spawn` — nothing in between**★: [`ProfileRegistry::upsert_preserving_hierarchy`] **keeps** the live
+        //   marker (ADR-0084), so until this line the roster holds **the previous incarnation's** marker, and a late record of it
+        //   (`Some(epoch)` branch of [`ProfileRegistry::observe_session_id`]) **passes** (the guard blocks only 「a newer incarnation already stands」).
+        //   Moved after the Fresh clearing, that late record would sit in the cleared field, this incarnation's first-submission commit would be refused
+        //   (field ≠ `None`) and the next activation would open the dead incarnation's conversation (ADR-0226).
+        // ★Hence more places check 「the profile vanished」, all cut with `?`★: after this line passes, a deletion between the three below
+        //   (the roster reread · the session id clearing · the resume handle read) would make them silently return `None` — a resume silently
+        //   becoming a new conversation, or a session without a profile on the roster. Four places, this line included, each check.
         // ADR-0007
-        let epoch = self
-            .profiles
-            .epoch_for_spawn(profile.id)
-            .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "화신 표식 확정"))?;
+        let epoch = self.profiles.epoch_for_spawn(profile.id).ok_or_else(|| {
+            profile_vanished_mid_spawn(profile.id, "settling the incarnation marker")
+        })?;
 
-        // ★실행 재료 가드는 준비 **앞**에서 무장한다★ — 준비 도중 실패 · 그 뒤 세션이 넘겨받기 전의 어느 실패에서도
-        //   Err 경로는 이 화신의 재료를 정확히 한 번 거둔다(`release` 는 준비한 적 없는 화신에도 안전하다). 패닉은
-        //   운영에서 프로세스를 끝내므로(ADR-0292) 부팅 쓸기가 받친다 — 시험 · contain 안에서만 풀린다. 준비 뒤로
-        //   옮기면 준비가 반쯤 만든 휘발 폴더가 남는다.
-        // ★준비는 다시 읽은 명부가 아니라 점검한 계획으로 한다★ — 대조와 다시 읽기 사이에 바뀐 붙임이 점검 없이 실린다.
-        // ★준비는 세션 id 비우기 · 제어 채널 발급 **앞**이다★ — 원본이 점검 뒤 바뀌어 끊겨도(`LaunchRaced`) 점검 경합과
-        //   같은 끝 모양이다(저장된 세션 id 를 밀지 않고 토큰을 내지 않는다 — 표식만 하나 탄다).
+        // ★The launch-material guard is armed **before** preparation★ — on a failure during preparation or any failure afterwards
+        //   before the session takes over, the Err path reclaims this incarnation's materials exactly once (`release` is safe for an
+        //   incarnation never prepared). A panic ends the process in production (ADR-0292), so the boot sweep backs it — it unwinds only
+        //   in tests · contain. Moved after preparation, a half-made volatile folder would stay.
+        // ★Preparation uses the checked plan, not the reread roster★ — otherwise attachments changed between comparison and reread ride unchecked.
+        // ★Preparation is **before** the session-id clear · control-channel issue★ — a cut because the source changed after the check
+        //   (`LaunchRaced`) ends in the same shape as a check race (the stored session id is not pushed and no token is issued — only one marker is spent).
         // ADR-0334
-        // TRD S25 §1-5 (나) 4 · §5-2 4 (a) (c)
+        // TRD S25 §1-5 (na) 4 · §5-2 4 (a) (c)
         let mut kit_guard = LaunchKitGuard::arm(self.launch.kits.clone(), profile.id, epoch);
         let mut kit = self
             .launch
@@ -1591,15 +1359,16 @@ impl AgentManager {
             .prepare_in(&scope, plan, profile.id, epoch)
             .map_err(|e| prelaunch::prepare_failed(profile.id, e))?;
 
-        // ★여기부터는 호출자 사본이 아니라 **명부의 지금 값**에서 파생한다★ — 위 등록 병합은 명부의 작업 폴더 ·
-        //   붙임을 지키므로(`merge_preserving_live`) 사본을 뜬 뒤 작업 폴더를 바꿨으면(`agent.setWorkspace`) 사본의
-        //   cwd 는 낡았다. 사본으로 띄우면 이 화신의 프로세스 cwd 와 명부 cwd 가 갈리고, 다음 이어받기는 명부 cwd 로
-        //   떠 그 대화를 못 찾는다. 읽는 자리가 표식 확정 **뒤**인 것은 위 「등록 바로 뒤 표식」 규율을 지키려는 것이다.
-        // TRD S25 §1-5 (가) 3
+        // ★From here on, derive from **the roster's current value**, not the caller's copy★ — the registration merge above keeps the
+        //   roster's working folder · attachments (`merge_preserving_live`), so if the working folder changed after the copy was taken
+        //   (`agent.setWorkspace`), the copy's cwd is stale. Launching from the copy would split this incarnation's process cwd from the
+        //   roster cwd, and the next resume would start in the roster cwd and not find that conversation. Reading **after** the marker is
+        //   settled keeps the 「marker right after registration」 rule above.
+        // TRD S25 §1-5 (ga) 3
         let reread = self
             .profiles
             .get(profile.id)
-            .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "명부 다시 읽기"))?;
+            .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "roster reread"))?;
         let profile = &reread;
         // ADR-0337: the stored hash from this re-read — the value the codex translation compares against to decide
         //   whether to resend the instructions (the first-turn recording writes the new hash under the registry lock).
@@ -1613,68 +1382,53 @@ impl AgentManager {
         //   the check passed fail the spawn instead of blocking.
         let cwd = self.launch.kits.working_folder(&scope, &profile.cwd);
 
-        // ★세션 id 규칙(ADR-0226 — 「저장된 id 가 있다 ⟺ 이어받을 대화가 있다」)★: 여기서는 **아무것도
-        //   새로 영속하지 않는다**. 이 화신의 id 는 첫 제출 래치가 첫 사용자 턴이 나가기 직전에 적는다
-        //   (아래 `SessionIdLatch`). 스폰 때 발급해 영속하는 경로를 되살리지 말 것 — 입력 없이 끈 세션마다
-        //   대화 없는 id 가 남아 다음 활성화가 그 id 로 이어받기에 실패한다.
-        //   - Fresh: 옛 손잡이를 이력으로 밀고 빈 칸에서 시작한다(판정·사유의 정본 =
-        //     [`fresh_spawn_release_session_id`]). 발급하는 backend 는 **반드시 새 sid** 를 뽑는다 — 저장된
-        //     sid 를 재사용하면 `--session-id <저장 sid>` 로 떠 디스크 세션과 충돌한다("Session ID already in
-        //     use" → claude 즉사, ADR-0076).
-        //   - Resume: 저장된 sid 를 **읽기만** 한다 — 아래 손잡이 읽기가 이 spawn 의 유일한 읽기다.
-        //   누구에게 우리 sid 를 건네나(발급 축)의 정본 = [`session_id_to_hand_over`].
-        // ★`None` 은 「밀 것이 없다」가 아니라 「프로필이 사라졌다」다 — 삼키지 말고 끊는다★: 위 표식
-        //   확정을 통과한 뒤 지워진 경우가 여기로 온다.
+        // ★Session id rule (ADR-0226 — 「a stored id exists ⟺ there is a conversation to resume」)★: **nothing new is persisted here**; the first-submission
+        //   latch writes this incarnation's id right before the first user turn (`SessionIdLatch` below). Do not bring back issue-and-persist at spawn —
+        //   every session closed without input would leave an id with no conversation.
+        //   - Fresh: pushes the old handle into history and starts from an empty field ([`fresh_spawn_release_session_id`]). An issuing backend **must
+        //     draw a new sid** — reusing the stored one collides with the disk session ("Session ID already in use", ADR-0076).
+        //   - Resume: **only reads** the stored sid. Who gets our sid: [`session_id_to_hand_over`].
+        // ★`None` = 「the profile vanished」 — cut, do not swallow★ (deleted after the marker settled).
         // ADR-0226
         if fresh_spawn_release_session_id(&profile.command, mode) {
             entry
                 .release_session_id(&self.profiles, profile.id)
                 .map_err(PtyError::Store)?
-                .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "세션 id 비우기"))?;
+                .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "clearing the session id"))?;
         }
 
-        // ★**호출자가 준 스냅샷이 아니라 명부를 읽는다**★ — `profile` 은 호출자가 뜬 사본이고, 이 칸의
-        //   값은 **우리가 아니라 상대가 쓴다**(codex 가 핸드셰이크에서 준 thread id 를 기록 포트가 명부에
-        //   적는다). 그래서 스냅샷 시점 뒤에 도착한 손잡이는 사본에 없다 — 그걸 읽으면 낡은 스레드로
-        //   이어받는다.
-        //   ★이 읽기가 실제로 값을 갖는 것은 [`ProfileRegistry::upsert_preserving_hierarchy`] 가
-        //   `backend_session_id` 를 보존하게 된 뒤부터다(사용자 결정)★ — 그 전에는 위
-        //   `register_for_spawn` 이 스냅샷으로 이 칸을 덮어써서, 명부를 읽어도 읽히는 것이 스냅샷이었다.
-        // ★읽는 자리가 위 `epoch_for_spawn` **뒤**인 것이 이 읽기의 근거다★ — 표식이 새로 선 뒤부터
-        //   이 화신의 통로가 아래 래치 `offer_sink` 를 받기 전까지, **표식을 들고 오는** 기록은 전부
-        //   거절된다(앞 화신은 불일치, 이 화신의 통로는 아직 없다).
-        //   ★**그것이 「아무도 못 쓴다」는 뜻은 아니다 — 그렇게 적으면 거짓이다**★:
-        //   [`ProfileRegistry::observe_session_id`] 의 `incarnation: None` 갈래는 대조 없이 **무조건
-        //   쓴다**. 그 갈래로 들어오는 운영 호출자가 실재한다 — 데몬 조립점이 [`SessionTracker`] 에 건
-        //   콜백(`engram-dashboard-daemon/src/lib.rs`)이 그것이다.
-        //   그래서 「읽은 값이 얼어 있다」가 성립하는 근거는 표식 하나가 아니라 **그 관측기가 codex
-        //   프로필에는 붙지 않는다**는 사실이다: `tracker.watch` 는 아래에서 `assigns_sid` 게이트 뒤에만
-        //   불리고 codex 는 그 축이 꺼져 있다(ADR-0185). 그 게이트를 이어받기 축으로 바꾸는 날 이 문장이
-        //   먼저 깨지므로, 그때 여기를 함께 볼 것.
-        // ★`get` 이 `None` = 그 사이 프로필이 지워졌다 → **끊는다**★: `and_then` 으로 삼키면 이어받기가
-        //   **말없이 새 대화**가 되고, 그 다음 `spawn_session` 이 프로필 없는 세션을 명부에 올린다. 그 둘 다
-        //   「조용히 새 대화를 만들지 않는다」 규율 정면 위반이라 `?` 로 끊는다.
+        // ★**Read the roster, not the caller's snapshot**★ — the field is **written by the other side** (the record port stores codex's handshake thread
+        //   id), so a handle arriving after the snapshot is not in the copy (reading it would resume an old thread). It has a value here only since
+        //   [`ProfileRegistry::upsert_preserving_hierarchy`] keeps `backend_session_id`.
+        // ★Reading **after** `epoch_for_spawn` is the grounds★: from the new marker until this link receives `offer_sink`, every marker-carrying record is
+        //   refused. ★Not 「nobody can write」★: the `incarnation: None` branch of [`ProfileRegistry::observe_session_id`] **writes unconditionally**, and
+        //   the daemon's [`SessionTracker`] callback (`engram-dashboard-daemon/src/lib.rs`) enters it. The value is frozen because that observer does
+        //   not attach to codex profiles (`tracker.watch` sits behind the `assigns_sid` gate; codex has it off — ADR-0185) — switching that gate to the
+        //   resume axis breaks this first.
+        // ★`get` → `None` = deleted in the meantime → **cut**★ (`and_then` would silently make a new conversation and put a session without a profile
+        //   on the roster).
         let stored_handle = match mode {
             SpawnMode::Resume => {
                 self.profiles
                     .get(profile.id)
-                    .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "이어받기 손잡이 읽기"))?
+                    .ok_or_else(|| {
+                        profile_vanished_mid_spawn(profile.id, "reading the resume handle")
+                    })?
                     .backend_session_id
             }
             SpawnMode::Fresh => None,
         };
-        // ★이 읽기가 권위다 — 비어 있으면 프로세스를 띄우기 전에 거절한다★: 저장 손잡이로 이어받는
-        //   backend 는 손잡이가 없으면 argv 에서 이어받기 플래그를 **말없이 뺀다**. 그대로 띄우면 우리가
-        //   모르는 id 의 새 대화가 열리고, 판정은 그것을 「이어받음」으로 보고한다. 흔한 경우(명부에 애초에
-        //   없음)는 `resume_no_fallback` 머리가 새 대화로 돌린다 — 여기는 그 판정과 이 읽기 **사이**에
-        //   칸이 비는 경합의 뒷문이고, 같은 술어를 쓴다. 다음 활성화는 손잡이가 없어 새 대화로 간다.
+        // ★This read is authoritative — empty means refuse before launching★: a backend resuming with the stored handle **silently drops** the resume
+        //   flag when there is none, opening an unknown new conversation reported as 「resumed」. The common empty case is turned into a new
+        //   conversation at the head of `resume_no_fallback`; this is the back door of the race where the field empties between that decision and
+        //   this read (same predicate). The next activation has no handle and goes to a new conversation.
         // ADR-0226
         if mode == SpawnMode::Resume
             && stored_handle.is_none()
             && backend::can_resume_stored_session(&profile.command)
         {
             return Err(PtyError::SpawnFailed(format!(
-                "이어받을 손잡이가 spawn 도중 사라졌다 (agent {}) — 프로세스를 띄우지 않는다",
+                "the resume handle vanished during spawn (agent {}) — not launching the process",
                 profile.id
             )));
         }
@@ -1683,20 +1437,14 @@ impl AgentManager {
         let assigns_sid = backend::assigns_session_id(&profile.command);
         let sid = session_id_to_hand_over(&profile.command, mode, stored_handle);
 
-        // ADR-0086 ★spec 조립 직전에 부른다★ — build_command_spec 이 endpoint 를 받아 backend 방식
-        //   (claude=`--mcp-config`)으로 명령줄에 주입해야 하므로. 화신 표식은 위에서 확정된 현재값이라
-        //   화신이 바뀔 때마다 새 토큰이 발급된다(토큰 수명=(AgentId,epoch)).
-        //
-        // ★backend-conditional(round-2 F3)★: 제어 채널을 **소비하는** backend(claude)에만 provision 을
-        //   부른다 — shell 은 supports_control_channel=false 라 provision 을 아예 건드리지 않는다(registry
-        //   미접촉). 이렇게 하면 config-write 실패가 MCP 가 필요 없던 셸 스폰을 중단시키는 회귀가 없다.
-        //   판정은 backend dispatch(ADR-0004) — manager 가 command 를 직접 matches! 하지 않는다.
-        // ★fail-closed(FIX 2)★: provision 을 **부르는** backend 에서 provision 3-값(Ok(Some)/Ok(None)/
-        //   Err) 중 Err(CSPRNG/파일 write 실패)면 **스폰을 중단**한다(제어 채널 없이 몰래 도는 에이전트
-        //   금지 — health 위장 방지). Ok(None)=제어 채널을 안 쓰는 정당한 부재(Noop)라 그대로 진행.
-        //   Ok(Some)=발급 성공 → 아래 ProvisionGuard 로 arm 해, 세션 등록 전 어느 실패에서든 발급된
-        //   토큰/config 를 회수한다(FIX 3 leak 방지). supports_control_channel=false 인 backend 는 provision
-        //   을 건너뛰므로 None(부재)과 동일하게 흐른다 — 그 backend 엔 fail-closed 계약이 적용되지 않는다.
+        // ADR-0086 ★Called right before spec assembly★ — `build_command_spec` must inject the endpoint the backend's way (claude=`--mcp-config`); the
+        //   marker is the value settled above, so a token is issued per incarnation (lifetime = (AgentId,epoch)).
+        // ★Backend-conditional (round-2 F3)★: provision only for backends that **consume** the control channel (claude); shell has
+        //   supports_control_channel=false and the registry is untouched, so a config-write failure never aborts a shell spawn. Decided by backend
+        //   dispatch (ADR-0004), not `matches!` on the command.
+        // ★Fail-closed (FIX 2)★: for a calling backend, `Err` (CSPRNG/file write failure) **aborts the spawn** (no agent running without a control
+        //   channel). `Ok(None)` = legitimately not using one (Noop) → proceed. `Ok(Some)` → armed with ProvisionGuard below, so any failure before
+        //   session registration reclaims the token/config; a non-calling backend (supports_control_channel=false) flows as `None`, outside fail-closed.
         let control_endpoint = if backend::supports_control_channel(&profile.command) {
             // ADR-0099: hand the backend's MCP capability to provision so the channel's physical wiring, the grants
             //   and the mail permission split together (consistency invariant = taught channels ⊆ wired channels —
@@ -1704,12 +1452,11 @@ impl AgentManager {
             //   launch materials, and a non-MCP spawn gets none (ADR-0209 · ADR-0370). The decision is backend
             //   dispatch (ADR-0004) — the manager does not `matches!` on the command itself.
             // ADR-0126
-            // ★두 축을 **각각** 묻는다 — 한쪽에서 다른 쪽을 파생하지 않는다★: 그 접힘이 「제어는 쓰지만
-            //   우편 평면 밖」인 backend 에 보내기 인가를 조용히 열었던 자리다([`ControlChannelNeeds`] doc).
+            // ★The axes are asked **each separately**★ — folding one from the other silently opened send authorization for a backend 「using control but
+            //   outside the mail plane」 ([`ControlChannelNeeds`]).
             // ADR-0133
-            // ★셋째 축도 **각각** 묻는다★ — 「MCP 로 우편을 쓰나」에서 「우리가 쓴 파일을 읽나」를
-            //   파생하면, 다른 기제로 MCP 를 켜는 backend 가 안 읽는 평문 토큰 파일을 스폰마다 받는다
-            //   (ADR-0209 · `backend::writes_mcp_config_file` doc).
+            // ★The third axis too★: deriving 「does it read the file we wrote」 from 「uses mail through MCP」 would hand a backend that enables MCP another way
+            //   a plaintext token file it never reads (ADR-0209 · `backend::writes_mcp_config_file`).
             let needs = crate::types::ControlChannelNeeds {
                 accepts_mcp_config: backend::accepts_mcp_config(&profile.command),
                 writes_mcp_config_file: backend::writes_mcp_config_file(&profile.command),
@@ -1732,12 +1479,10 @@ impl AgentManager {
             armed: true,
         });
 
-        // ★둘째 fail-closed 문 — 데몬이 못 보는 실패를 여기서 끊는다★: 위 provision 의 `?` 가 잡는 것은
-        //   데몬 쪽 실패(CSPRNG·mcp-config write)뿐이라, **파일을 안 쓰는 backend** 의 「부착 값을 못
-        //   만들었다」는 그 문을 그냥 지난다(codex 의 `-c mcp_servers.…`). 그 상태로 뜨면 그 에이전트는
-        //   배달 명단에는 오르는데 발신 입구가 0 이라, 도착한 요청이 전부 아무도 답할 수 없는 계약이 된다.
-        // ★가드 무장 **뒤**에 둔다★ — 여기서 끊기면 이미 발급된 토큰·파일을 그 가드가 회수한다.
-        // ★판정은 backend dispatch(ADR-0004)★ — manager 는 `-c` 문법도 MCP 부착도 모른다.
+        // ★The second fail-closed door — cuts failures the daemon cannot see★: provision's `?` catches only daemon-side failures, so 「could not build the
+        //   attachment value」 of **a backend that writes no file** (codex `-c mcp_servers.…`) would pass; that agent would be on the delivery list with 0 send
+        //   entries, every request an unanswerable contract. ★Placed **after** the guard is armed★ so the issued token and file are reclaimed. Backend
+        //   dispatch (ADR-0004).
         // ADR-0209
         backend::precheck_control_endpoint(&profile.command, control_endpoint.as_ref()).map_err(
             |e| {
@@ -1747,29 +1492,25 @@ impl AgentManager {
             },
         )?;
 
-        // ★`sid` 를 그대로 넘기지 않는다 — 이 칸은 **저장된 backend sid** 다(ADR-0185 의 두 축)★:
-        //   `sid` 는 발급 축이 켜진 backend 에만 채워지므로, 받아 적는 쪽(codex)에서는 이어받을 값이
-        //   실제로 프로필에 있어도 언제나 `None` 이다.
-        // ★한 값을 **두 자리**에 넘긴다 — 쓰는 backend 가 갈릴 뿐이다★: 아래 `build_command_spec` 은
-        //   명령줄로 이어받는 backend(codex 터미널의 `resume <id>`)가 읽고, 더 아래 `open_spawn` 은
-        //   통로가 이어받기를 요청하는 backend(codex app-server 의 `thread/resume`)가 읽는다. 두 자리에
-        //   다른 값을 계산해 넘기면 어느 쪽이 「이 spawn 이 이어받는 것」인지가 갈린다.
-        // ★조립을 여기서 하지 않는다(ADR-0004)★ — 이 자리는 손잡이만 읽어 넘기고, 그것을 하위 명령으로
-        //   쓸지 플래그로 쓸지 아예 안 쓸지는 backend 가 정한다.
-        // ★Fresh 면 비워서 넘긴다★ — 값을 실어 보내고 backend 가 모드를 다시 보게 하면 판정이 두 곳이
-        //   된다. 그 죽은 화신의 thread id 로 새 대화를 열라는 요청이 Fresh 인데, 여기서 안 비우면 그
-        //   요청이 backend 마다 다르게 해석된다(그 문 = 위 `resume_handle_for`).
-        // ★재료는 여기서 한 번만 배치해 아래 조립 · 띄우기에 같은 값으로 넘긴다★ — 두 자리에서 따로 만들면 명령줄과 통로가
-        //   다른 재료를 싣는다. 위 준비가 낸 재료에서만 만든다(다시 읽은 명부에서 풀지 않는다). 배치는 그 화신의 휘발 폴더
-        //   안에만 쓴다(dispatch 가 가둔다). 실패하면 두 가드가 토큰 · 재료를 거둔다. Noop 재료는 아무것도 쓰지 않고
-        //   기본값을 내 argv 골든과 바이트 같다.
+        // ★`sid` is not passed as is — this field is **the stored backend sid** (ADR-0185 two axes)★: `sid` is filled only for issuing backends, so for codex
+        //   it is always `None` even when a resumable value exists.
+        // ★One value goes to **two places**★ — `build_command_spec` (backends resuming by command line, codex terminal `resume <id>`) and `open_spawn`
+        //   (link-requested resume, codex app-server `thread/resume`); different values would split 「what this spawn resumes」. ★No assembly here
+        //   (ADR-0004)★ — the backend decides subcommand/flag/none. ★Empty on Fresh★ (`resume_handle_for` above): the mode is not re-judged by the backend.
+        // ★Materials are placed here once and passed with the same value to assembly · launch below★ — built in two places, the command line
+        //   and the channel would carry different materials. Built only from the materials the preparation above produced (not unpacked from the
+        //   reread roster). Placement writes only inside that incarnation's volatile folder (dispatch confines it). On failure the two guards
+        //   reclaim the token · materials. Noop materials write nothing and yield the default, byte-identical to the argv golden.
         // ADR-0334
-        // TRD S25 §1-5 (나) 6
-        // TODO(TRD S25 §5-2 4 (a)): `build_command_spec` · `materialize` 의 `command` · `env` 는 아직 다시 읽은 명부에서
-        //   온다 — `command` · `env` 를 쓰는 길이 생기면 계획에서 받거나 대조를 다시 한다.
+        // TRD S25 §1-5 (na) 6
+        // TODO(TRD S25 §5-2 4 (a)): `command` · `env` of `build_command_spec` · `materialize` still come from the reread roster — when a path that
+        //   writes `command` · `env` appears, take them from the plan or redo the comparison.
         let artifacts = backend::materialize(&profile.command, &kit, &cwd, &*self.launch.fs)
             .map_err(|e| {
-                PtyError::SpawnFailed(format!("실행 재료 배치 실패: {e} (agent {})", profile.id))
+                PtyError::SpawnFailed(format!(
+                    "launch-material placement failed: {e} (agent {})",
+                    profile.id
+                ))
             })?;
         let spec = backend::build_command_spec(
             &profile.command,
@@ -1784,8 +1525,8 @@ impl AgentManager {
         #[cfg(test)]
         self.probe_spec(&spec, &artifacts)?;
 
-        // ADR-0079: json 모드 claude 만 실제로 transcript 를 읽는다 — 터미널은 TUI PTY repaint 로
-        //   복원되고 shell 은 대화가 없어, 그 외 backend 는 빈 Vec 을 돌려준다.
+        // ADR-0079: only json-mode claude actually reads the transcript — the terminal is restored by TUI PTY repaint
+        //   and shell has no conversation, so other backends return an empty Vec.
         let seed_events = match mode {
             SpawnMode::Resume => match sid {
                 Some(s) => backend::resume_transcript_events(&profile.command, &cwd, s),
@@ -1794,39 +1535,26 @@ impl AgentManager {
             SpawnMode::Fresh => Vec::new(),
         };
 
-        // ADR-0191: 통로 실물과 세션에 실릴 값(backend caps·encoder·턴 분류자·우편 자격)을 backend 가
-        //   **한 dispatch 로** 내준다 — 아스펙트마다 같은 switch 를 다시 타지 않는다. 이 자리는 돌려받은
-        //   통로의 실제 타입을 모른다.
-        //   우편 자격을 세션에 싣는 이유는 그대로다 — 프로필이 지워져도 산 세션이 그 사실을 계속 안다
-        //   (`AgentManager::reads_messages` doc).
-        // ★이 호출이 자식 프로세스를 띄운다 — 위 transcript 읽기보다 반드시 뒤★: 앞뒤를 바꾸면 그
-        //   프로그램이 이미 도는 상태에서 그 대화 파일을 읽게 된다.
-        // ADR-0185: 세션 id 를 **받아 오는** backend(codex)가 그 값을 알릴 곳을 여기서 건넨다 — 받는 쪽은
-        //   이 화신의 첫 제출 래치다(ADR-0226). 래치는 첫 사용자 턴이 나가기 직전에야 명부에 적는다.
-        // ★무조건 건네는 것이 의도다 — `receives_session_id()` 같은 선언 축을 새로 만들지 않았다★:
-        //   이 자리의 형제 둘(`supports_control_channel` · `accepts_mcp_config`)이 선언으로 갈리는 것은
-        //   **주면 효과가 나기 때문**이다(토큰·config 파일 발급). 이 칸은 반대다 — 안 읽는 backend 에게는
-        //   아무 효과도 없어서, 축을 세우면 같은 판정이 두 곳(선언 표 + impl)에 적히고 둘이 어긋날 수 있다.
-        //   판정 지점은 impl 하나로 둔다.
-        //   래치의 commit 포트가 위에서 확정된 `epoch` 을 묶어, 이 spawn 이 죽은 뒤 도착한 기록이 다음
-        //   화신을 덮지 않게 한다.
-        // ★연결을 선언하는 backend 에만 배달 포트를 깐다★ — 없는 곳에 깔면 아무도 안 부르는 채널을
-        //   감독자가 기다리게 되고, 그 backend 의 판정은 옛 경로 그대로여야 한다(claude·shell·stdio·
-        //   codex 터미널은 여기서 `None` 이 되어 바이트 단위로 같은 길을 간다).
-        // ★표식을 **여기서** 찍는다★ — 위에서 확정된 `epoch` 을 포트에 묶어, 이 화신의 결말이 다음
-        //   화신에게 적용되는 일이 없게 한다(`link_verdict_sink` 의 doc 이 그 사유의 정본).
+        // ADR-0191: the backend hands out the real link and the session-carried values (caps · encoder · turn classifier · mail eligibility) **in one
+        //   dispatch**; this place does not know the link's real type. Mail eligibility rides the session so a live session keeps it after profile
+        //   deletion (`AgentManager::reads_messages`).
+        // ★This call launches the child — after the transcript read above★ (else the file is read while the program runs).
+        // ADR-0185: where a backend that **fetches** the session id (codex) announces it — this incarnation's first-submission latch (ADR-0226), which writes
+        //   the roster right before the first user turn. ★Handed unconditionally on purpose — no `receives_session_id()` axis★: it has no effect on
+        //   backends that do not read it (unlike tokens/config files), so a declaration table would duplicate the impl's decision. The commit port binds the
+        //   `epoch` above so a record after this spawn died cannot overwrite the next incarnation.
+        // ★The delivery port only for backends declaring a connection★ — elsewhere the supervisor would wait on a channel nobody calls (claude · shell ·
+        //   stdio · codex terminal get `None` and stay byte-identical). ★The marker is stamped **here**★ (`link_verdict_sink` has the reason).
         let (link_sink, link_rx) = if backend::declares_link(&profile.command) {
             let (tx, rx) = std::sync::mpsc::channel();
             (Some(link_verdict_sink(tx, epoch)), Some(rx))
         } else {
             (None, None)
         };
-        // ★발급하는 backend 는 **여기서, `open_spawn` 보다 먼저** 제 id 를 래치에 넣는다★: 세션은 아래
-        //   명부 등록 순간부터 입력을 받고, 뒤이은 명부 공표가 파킹된 우편을 곧바로 흘려보낸다. 그보다 늦게
-        //   넣으면 첫 제출이 id 를 모르는 채 나가 commit 이 턴보다 늦는다. 판정은 backend 이름이 아니라
-        //   `sid` 를 쥐었나(발급 축) 하나라 백엔드 중립이다 — Fresh 는 방금 뽑은 값, Resume 은 읽은 저장값이다.
-        // ★commit 이 비교할 값 = 이 화신이 시작할 때 본 칸의 값(`stored_handle` — Fresh 는 위에서 비운 뒤라
-        //   `None`)★: 그 사이 다른 기록자(claude 파일 감시자)가 칸을 바꿨으면 commit 은 되감지 않고 거절한다.
+        // ★An issuing backend puts its id into the latch **here, before `open_spawn`**★: input is accepted from the roster registration below and the
+        //   following announcement releases parked mail at once, so a later offer could let the first submission go out unknowing and the commit land after
+        //   the turn. Backend-neutral: it keys on holding `sid` (Fresh = just drawn, Resume = stored). ★Commit compares against what this incarnation saw
+        //   at start (`stored_handle`; Fresh `None`)★ — a concurrent writer (claude file watcher) is refused, not rewound.
         // ADR-0226
         let latch = SessionIdLatch::new(
             profile.id,
@@ -1842,9 +1570,8 @@ impl AgentManager {
             DEFAULT_COLS,
             DEFAULT_ROWS,
             Some(latch.offer_sink()),
-            // ★턴을 통로가 지는 backend 는 여기로 제출을 센다★ — 그 모드의 세션은 세지 않는다. 꽂을지는
-            //   backend 가 정한다(나머지는 버린다).
-            // ADR-0226 · ADR-0231: 사용자 결정 — id 는 진짜가 된 때(상대의 첫 유저 메시지 되울림) 영속한다.
+            // ★A backend whose link owns the turn counts submissions here★ — that mode's session does not; whether to plug it in is the backend's decision (others drop it).
+            // ADR-0226 · ADR-0231: persisted when the id became real (the peer's first user message echo).
             // ADR-0337: the hash recorded is the kit's (what this launch carried), not the re-read roster's.
             Some(first_turn_sink_recording_hash(
                 &latch,
@@ -1864,8 +1591,8 @@ impl AgentManager {
             &artifacts,
         )?;
 
-        // ADR-0226: 이 화신 사실은 세션만 든다(wire 에 싣는 것은 구독 응답이다).
-        // ★재료 회수 열쇠는 가드에서 받는다★ — 준비를 부른 그 출처로 거두게(매니저 생성 때 잡은 포트가 아니다).
+        // ADR-0226: these incarnation facts are held only by the session (what carries them on the wire is the subscription response).
+        // ★The materials reclaim lease comes from the guard★ — so it reclaims through the source that prepared (not the port caught at manager construction).
         // TRD S25 §5-2 4 (c2) ③
         let incarnation = SpawnIncarnation {
             continues_conversation: resume_session_id.is_some(),
@@ -1878,16 +1605,14 @@ impl AgentManager {
         if let Some(g) = provision_guard.as_mut() {
             g.disarm();
         }
-        // ★세션이 명부에 올랐다 — 이 화신의 재료는 이제 reaper 만 거둔다★(세션이 든 열쇠로). 등록과 이 해제 사이에 실패할
-        //   수 있는 단계를 두지 말 것 — 거기서 끊기면 가드와 reaper 가 함께 거두는 주인 둘이 된다.
+        // ★The session is on the roster — from now only the reaper reclaims this incarnation's materials★ (through the lease the session holds). Put no
+        //   step that can fail between registration and this disarm — a cut there makes two owners, the guard and the reaper, reclaiming.
         // TRD S25 §5-2 4 (c2) ① · ②
         kit_guard.disarm();
 
-        // sid drift 관측 부착(best-effort). 관측기를 만드는 것도 "만들 게 없다"고 답하는 것도 backend
-        //   몫이라(ADR-0004) 여기서는 그 프로그램이 무엇을 읽는지 모른다.
-        // ★게이트가 **발급 축**인 이유(ADR-0185)★: 관측기는 우리가 건넨 sid 를 **기준값**(`expected_sid`)
-        //   으로 받아 그것과 달라진 것을 관측한다 — 발급하지 않은 세션에는 그 기준값이 아예 없다.
-        //   이어받기 축으로 갈면 기준값 없는 세션에 관측기가 붙는다.
+        // sid drift observation (best-effort); making the observer or answering "nothing to make" is the backend's job (ADR-0004).
+        // ★The gate is **the issuing axis** (ADR-0185)★: the observer takes the sid we handed over as `expected_sid`; a session we did not issue has no
+        //   reference value, so the resume axis would attach it to one without.
         if let (Some(s), Some(pid)) = (sid, child_pid) {
             if assigns_sid {
                 if let Some(source) =
@@ -1898,13 +1623,12 @@ impl AgentManager {
             }
         }
 
-        tracing::info!(agent = %profile.id, epoch, ?mode, "에이전트 spawn");
+        tracing::info!(agent = %profile.id, epoch, ?mode, "agent spawned");
 
         let info = self.agent_info(&session);
         self.status_sink.agent_list_updated(self.list_agents());
-        // ★배달함과 예약을 **한 벌로** 넘긴다★ — 결말을 기다리는 호출자가 그 사이 예약을 놓지 않게 하는
-        //   것이 [`LinkWatch`] 의 존재 이유다. 연결 축이 없으면 `None` 이고, 그때 예약은 예전 그대로
-        //   이 함수와 함께 끝난다(`reservation` 이 여기서 drop 된다).
+        // ★The mailbox and the reservation are handed over **as one set**★ — a waiter for the outcome must not release the reservation in between ([`LinkWatch`]). Without a connection axis it is `None` and the
+        //   reservation ends with this function (`reservation` dropped here).
         let watch = match link_rx {
             Some(rx) => Some(LinkWatch {
                 rx,
@@ -1921,46 +1645,28 @@ impl AgentManager {
         Ok((SpawnOutcome::Started(info), watch, Some(notices)))
     }
 
-    /// ★수동 활성화 진입점 — 이어받기(resume) 전용, fresh-fallback 폐지(ADR-0082)★.
-    /// SpawnProfile 핸들러가 `spawn_agent` 대신 이걸 부른다. 세 갈래로 나뉜다:
+    /// ★Manual activation entry point — resume only, fresh-fallback abolished (ADR-0082)★. The SpawnProfile handler calls this instead of `spawn_agent`.
     ///
-    /// 1. **이미 실행 중(재활성화 가드)** — 같은 id 세션이 살아 있으면 **아무것도 죽이거나
-    ///    재spawn 하지 않고** 그 세션의 AgentInfo 를 그대로 돌려준다(무해한 "이미 실행 중" 신호,
-    ///    epoch 불변). ★이게 a4aac1a 회귀의 핵심 수정★: 예전엔 이 경로가 `spawn_agent` 이중-spawn
-    ///    가드가 내던 "already running" **Err** 를 만나 `resume_with_fresh_fallback` 이 그걸 "resume
-    ///    실패"로 오인 → `fallback_fresh` 가 **멀쩡히 돌던 산 에이전트를 kill** → 새 화신 표식 → 빈 fresh
-    ///    로 교체(유저 실측 회귀). 지금은 두 겹으로 막힌다: 여기 선제 조회가 먼저 걸러 산 에이전트를
-    ///    놔두고, 그걸 지나쳐도 그 가드는 이제 Err 가 아니라 `SpawnOutcome::Moot` 을 낸다(오인할 오류
-    ///    자체가 없다).
-    /// 2. **Fresh(진짜 신규 — 세션 없음)** — `spawn_fresh_settled` 위임. 이건 실패-fallback 이 아니라
-    ///    정상 신규 생성이다(ADR-0076 "Fresh=새 sid" 유효).
-    /// 3. **Resume** — `resume_no_fallback` 로 이어받기만 시도하고, 그 Failed 결말을 Err 로 노출한다.
+    /// 1. **Already running (reactivation guard)** — returns that session's AgentInfo as is, **without killing or respawning** (a harmless "already
+    ///    running" signal, epoch unchanged). ★Core fix of the a4aac1a regression★: the double-spawn guard's `Err` was mistaken by
+    ///    `resume_with_fresh_fallback` for a resume failure and `fallback_fresh` **killed a healthy live agent** and replaced it with an empty one.
+    ///    Now blocked in two layers: this lookup first, and the guard emits `SpawnOutcome::Moot` instead of an `Err`.
+    /// 2. **Fresh (truly new — no session)** — `spawn_fresh_settled`; normal creation, not a failure fallback (ADR-0076).
+    /// 3. **Resume** — `resume_no_fallback` only; its Failed outcome is exposed as `Err`.
     ///
-    /// ★blocking★: 호출이 얼마나 블록되나는 **모드가 아니라 통로의 연결 축**이 정한다.
-    ///   - 연결을 선언하지 않는 통로(claude·shell·stdio·codex 터미널): Resume 은 최대
-    ///     EARLY_EXIT_WINDOW(현 3s)만큼 폴링하고, Fresh 는 폴링 없이 즉시 반환한다(옛 성질 그대로).
-    ///   - 연결을 선언하는 통로(codex app-server): **Fresh 도 Resume 도** 연결의 결말이 날 때까지
-    ///     기다린다 — 다만 그것은 창이 아니라 **신호**라(ADR-0201) 정상 왕복이면 즉시 돌아온다
-    ///     (실측 약 130ms). 상한은 [`LINK_RESOLUTION_BACKSTOP`] 이고 그것은 판정 창이 아니라 포기다.
-    ///   재활성화 가드와 아래 in-flight 가드는 어느 축에서도 폴링 없이 즉시 반환한다.
-    /// **So this verb must be called only on a blocking pool — that is the caller's duty**: the worst case
-    ///   is the backstop (15 s) plus, after a failure verdict, the teardown's `session.kill` (pump join
-    ///   bounded by 5 s), with **no yield point** in between. Called directly on an async worker it ties up
-    ///   that whole worker, and N stuck activations take N workers and stop other connections' commands
-    ///   too. All four production callers keep the contract today — the two command-bus ones behind
-    ///   `blocking_handler` (`crate::commands::make_table`), the two WS ones behind
-    ///   `tokio::task::spawn_blocking` (`connection_core`'s `Spawn` · `SpawnProfile` — `SpawnProfile`
-    ///   through `activate_profile_reporting`). **This spot once said "only that connection's reply is
-    ///   delayed, other sessions are unaffected"; that is true only when callers keep the contract above,
-    ///   and the two WS callers did not** — so it is written as a contract, not a property.
-    ///   **A failure can return sooner than this cap** — when the diagnostic stream speaks first, it cuts
-    ///   off right there.
-    /// ★부르는 쪽 있는 입구다(`Entry::Caller`)★ — 띄우기 전 명부 변경의 저장이 `Err` 면 띄우지 않고
-    ///   [`PtyError::Store`] 다(부분 성공 = [`AgentManager::spawn_agent_watching_link`]). 같은 동사를 부팅
-    ///   복원은 `Entry::Internal` 로 부른다.
-    /// 실행 재료 점검이 막으면 [`PtyError::LaunchBlocked`] · 실행 입력(붙임 · 명령 · env)이 두 번 다 바뀌거나 넘긴
-    ///   사본의 명령 · env 가 명부와 다르거나 점검한 원본이 재료 준비 전에 바뀌면 [`PtyError::LaunchRaced`] — 새 대화든
-    ///   이어받기든 같은 변형으로 돌아오고, 「마지막 실패」 는 「그 밖」 이다.
+    /// ★blocking★ is decided by the link's connection axis, not the mode: links not declaring a connection (claude · shell · stdio · codex terminal) —
+    /// Resume polls up to EARLY_EXIT_WINDOW (3s), Fresh returns at once; links declaring one (codex app-server) — **both** wait for the connection
+    /// outcome, a **signal** (ADR-0201) returning immediately normally (~130ms), capped by [`LINK_RESOLUTION_BACKSTOP`] (giving up, not deciding).
+    /// The reactivation and in-flight guards return at once on either axis. A failure can return sooner when the diagnostic stream speaks first.
+    /// **Contract: call only on a blocking pool** — worst case is the backstop (15 s) plus the teardown's `session.kill` (pump join ≤ 5 s) with **no
+    /// yield point**, so an async worker would be tied up and N stuck activations stop other connections' commands. The four production callers keep it
+    /// (command bus behind `blocking_handler` in `crate::commands::make_table`; WS `Spawn` · `SpawnProfile` behind `spawn_blocking` in `connection_core`
+    /// — `SpawnProfile` through `activate_profile_reporting`).
+    /// ★The entry with a caller (`Entry::Caller`)★ — a save `Err` of the pre-launch roster change does not launch ([`PtyError::Store`]; partial
+    /// success = [`AgentManager::spawn_agent_watching_link`]); boot restore uses `Entry::Internal`.
+    /// A launch-material block = [`PtyError::LaunchBlocked`] · the launch inputs (attachments · command · env) changed both times, the passed
+    ///   copy's command · env differ from the roster, or the checked source changed before material preparation = [`PtyError::LaunchRaced`] —
+    ///   the same variant returns for a new conversation or a resume, and the 「last failure」 is 「other」.
     /// Records no notice fingerprint and drops the notices — [`AgentManager::activate_profile_reporting`] with
     ///   [`NoticeDelivery::Withheld`].
     // ADR-0082
@@ -1990,22 +1696,16 @@ impl AgentManager {
         mode: SpawnMode,
         delivery: NoticeDelivery,
     ) -> Result<Activated, PtyError> {
-        // ★★「떠 있다」고 답하기 **전에** 「아직 결말이 안 난 활성화」를 본다 — 순서를 되돌리지 마라★★:
-        //   연결을 선언하는 통로에서는 세션이 명부에 오른 뒤에도 그 화신이 입력을 받을 수 있는지가
-        //   아직 안 정해져 있고([`LinkWatch`]), 그 구간을 여는 요청이 예약을 들고 있다. 아래 조회를
-        //   먼저 두면 그 구간의 두 번째 활성화가 `Ok`(도는 중)를 받는데, 첫 요청이 곧 실패로 판정해
-        //   그 화신을 거두면 **두 호출자가 서로 다른 사실을 들고 갈린다** — 뒤엣것은 자기 밑에서 죽을
-        //   에이전트를 산 것으로 보고한다.
-        // ★`Err` 가 정직한 답인 이유★: 이 요청은 아무것도 하지 않았고 돌려줄 산 세션도 없다. 같은 문구를
-        //   아래 Fresh 갈래가 이미 쓰고 있다(승자가 아직 명부에 올리기 전인 경우) — 그 답을 **연결이
-        //   설 때까지로 늘린 것**이 여기다.
-        // ★이 가드는 창을 **줄이지만 닫지는 않는다**★ — 이 검사와 `spawn_agent_watching_link` 의 예약
-        //   취득 사이에 여전히 명령 몇 개 폭의 창이 있다(ADR-0082 「열린 항목」 ③ 의 선재 레이스).
-        //   닫은 것은 핸드셰이크 한 왕복만큼 벌어져 있던 **긴** 창이다.
+        // ★Before answering 「it is up」, check 「an activation without an outcome yet」 — do not revert the order★: on a link declaring a connection the
+        //   incarnation on the roster may not yet take input ([`LinkWatch`]) and the request opening that interval holds the reservation; answering `Ok`
+        //   (running) to a second activation would let it **hold as alive an agent about to die** when the first fails and collects it.
+        // ★`Err` is honest★: this request did nothing and has no live session to return (the Fresh branch below uses the same text) — extended here until the
+        //   connection stands. ★Narrows the window, does not close it★: a few-command window remains before the reservation in
+        //   `spawn_agent_watching_link` (ADR-0082 「Open items」 ③); what closed is the long one-handshake window.
         if self.activation_in_flight(profile.id) {
             tracing::info!(
                 agent = %profile.id,
-                "activate_profile: 다른 요청의 활성화가 아직 결말을 못 냈다 — 이 요청은 할 일이 없다"
+                "activate_profile: another request's activation has not produced its outcome yet — this request has nothing to do"
             );
             return Err(PtyError::SpawnFailed(format!(
                 "another request is already activating agent {}; this one did nothing",
@@ -2016,10 +1716,9 @@ impl AgentManager {
         if let Ok(session) = self.get_session(profile.id) {
             tracing::info!(
                 agent = %profile.id,
-                "activate_profile: 이미 실행 중 — 재활성화 무시(산 에이전트 보존, ADR-0082)"
+                "activate_profile: already running — reactivation ignored (live agent preserved, ADR-0082)"
             );
-            // ★이 갈래는 「마지막 실패」에 아무것도 쓰지 않는다★: 활성화를 시도하지 않았으므로 기록할
-            //   실패도, 지울 근거도 없다 — 아래 `spawn_agent` 의 moot 갈래와 같은 규율이다(ADR-0172).
+            // ★Writes nothing to 「the last failure」★: no activation was attempted — no failure to record, no ground to clear (as the moot branch of `spawn_agent`, ADR-0172).
             // No launch, so no notices and no fingerprint record either.
             return Ok(Activated {
                 info: self.agent_info(&session),
@@ -2028,13 +1727,11 @@ impl AgentManager {
         }
 
         if mode == SpawnMode::Fresh {
-            // ★기록은 이 안에서 한다 — 여기서 또 쓰면 지움 지점이 둘이 된다★(연결 결말을 본 자리만이
-            //   무엇이 일어났는지 안다. Resume 갈래가 `resume_no_fallback` 에 맡기는 것과 같은 규율).
+            // ★The record is made inside it — writing here would make two clearing points★ (only the place that saw the outcome knows what happened; as the Resume branch leaving it to `resume_no_fallback`).
             let outcome = self.spawn_fresh_settled(profile, Entry::Caller);
-            // moot 이면 남이 띄운(띄우는 중인) 세션을 돌려준다. 아직 명부에 없으면 조회로 한 번 더 본다.
-            // ★그마저 없을 때의 문구는 "없는 에이전트" 가 아니다★: 프로필은 실재하고 지금 **다른 요청이
-            //   띄우는 중**이라 우리가 돌려줄 세션이 없을 뿐이다. `NotFound` 를 그대로 흘리면 원인을
-            //   잘못 지목한 문구("agent not found")가 호출자·LLM 에게 간다.
+            // If moot, return the session someone else launched (is launching); if not on the roster yet, look once more.
+            // ★The text when still missing is not "a nonexistent agent"★: the profile exists and **another request is launching it**; `NotFound` would
+            //   misidentify the cause to the caller and the LLM.
             // ADR-0172
             let (outcome, launched) = outcome?;
             return match outcome.into_info() {
@@ -2058,24 +1755,19 @@ impl AgentManager {
             };
         }
 
-        // 띄우기 전 거절(저장 · 실행 막힘 · 준비 경합)은 원형 그대로 돌려준다 — Fresh 갈래의 `?` 와 같은 답이 되게
-        //   (ADR-0291 R17 · ADR-0334).
+        // A refusal before launch (save · launch block · preparation race) is returned in its original form — the same answer as the
+        //   Fresh branch's `?` (ADR-0291 R17 · ADR-0334).
         let (outcome, spawned, launched) = self.resume_no_fallback(profile, Entry::Caller)?;
         match outcome {
-            // 성립·실패 양쪽 다 `resume_no_fallback` 안에서 이미 기록됐다(그 자리가 무엇이 일어났는지
-            //   아는 유일한 곳). 여기서 또 쓰면 지움 지점이 둘이 된다.
-            //
-            // ★조회 실패로 성공을 뒤집지 않는다★: 조기종료 창을 넘긴 순간 우리는 성립으로 판정하고 기록을
-            //   **지웠다**. 그 직후 자식이 죽어 reaper 가 거둬 가면 조회는 실패하는데, 그때 Err 를 내면
-            //   "실패했다고 답하면서 기록은 지운" 모순이 된다. 그래서 spawn 시점 정보로 떨어진다.
-            // ★단 그 정보를 **산 것으로** 돌려주지는 않는다★: spawn 시점 스냅샷의 status 는 `Running` 이라
-            //   그대로 내면 호출자가 시체를 산 에이전트로 보고한다(`state_of` 가 "live" 로 번역하고, WS 는
-            //   그 status 로 `Spawned` 를 낸다 — 그러면 다음 동사가 시체에게 편지를 쓴다). 조회가 놓쳤다는
-            //   것 자체가 "그 사이 수거됐다" 는 관측이므로 종점 상태로 낮춰 싣는다. 코드는 모른다(`None`).
+            // Success and failure were already recorded inside `resume_no_fallback` (the only place knowing what happened); recording here would make two
+            //   clearing points.
+            // ★A lookup failure does not flip a success★: success was decided and the record **cleared** at the early-exit window; if the child dies right
+            //   after and the reaper collects it, `Err` would contradict "failure while having cleared the record" — fall back to spawn-time info.
+            // ★But not returned **as alive**★: the spawn-time snapshot says `Running` (`state_of` → "live", WS `Spawned` carries it, then mail goes to a
+            //   corpse). The lookup missing is itself the observation 「collected in between」, so it is lowered to a terminal state, code unknown (`None`).
             // ADR-0172
-            // ★`Started` 를 `Resumed` 와 **같이** 처리한다 — 둘 다 「떴다」이고 갈리는 것은 보고 어휘다★:
-            //   앞엣것은 이어받을 손잡이가 없어 새 대화를 연 경우다(`resume_no_fallback` 의 그 판정).
-            //   여기서 `Err` 로 내리면 정상적으로 뜬 에이전트가 실패로 보고된다.
+            // ★`Started` = `Resumed`★ — both 「launched」, differing only in vocabulary (no handle → new conversation opened by `resume_no_fallback`); lowering it
+            //   to `Err` would report a normal launch as failure.
             // The success is what the caller is told, so a delivering caller records here even when the lookup
             //   downgraded the status (ADR-0341). `launched` is `None` when the resume was moot.
             RestoreOutcome::Resumed | RestoreOutcome::Started => {
@@ -2095,11 +1787,10 @@ impl AgentManager {
                 })
             }
             RestoreOutcome::Failed { reason } => Err(PtyError::SpawnFailed(reason)),
-            // resumable 프로필로만 진입하므로 나머지 결말은 도달 불가(방어적 Err).
-            // ★방어 갈래는 상태를 건드리지 않는다★: 무슨 일이 있었는지 모르는 자리라, 실패를 단정해 쓰면
-            //   방금 뜬 에이전트에 도장을 찍을 수 있다(그것도 epoch 가드 없이).
+            // Only resumable profiles enter, so other outcomes are unreachable (defensive Err). ★The defensive branch does not touch state★ — it does not know what happened and an assertive failure could stamp an
+            //   agent that just launched (with no epoch guard).
             other => Err(PtyError::SpawnFailed(format!(
-                "activate_profile: 예상 밖 결말 {other:?}"
+                "activate_profile: unexpected outcome {other:?}"
             ))),
         }
     }
@@ -2128,22 +1819,16 @@ impl AgentManager {
         launched.notices
     }
 
-    /// ★「마지막 실패」를 쓰는 **유일한 지점**(ADR-0172 결정 4 — 개정판)★. `None` = 활성화가 성립했다
-    /// → 지운다. `Some(kind)` = 그 자리에서 기록한다.
+    /// ★**The only point** writing 「the last failure」 (ADR-0172 decision 4 — amended)★. `None` = the activation held → clear. `Some(kind)` = record now.
     ///
-    /// ★지우는 조건이 「대화 왕복 성립」에서 「활성화 성공」으로 바뀐 이유 — 되돌리지 마라★:
-    ///   왕복 성립은 **턴 종료 신호**로만 관측되는데 그 신호는 구조화(stream-json) 출력에서만 나온다
-    ///   (터미널·shell 은 분류자가 침묵). 반대로 실패 **분류**는 콘솔 바이트에서만 나온다(구조화 세션은
-    ///   진단을 stderr 로 흘린다). 두 반쪽이 출력 형식으로 갈려 서로 배타적이라, 왕복 기준으로는
-    ///   터미널 에이전트의 기록이 **영영 안 지워진다**. 게다가 그 신호는 epoch 게이트가 없고
-    ///   (`StatusSink::turn_ended` — "잉여는 무해한 no-op") 논블록 계약이라, 거기서 프로필 lock 을 잡는
-    ///   것 자체가 계약 위반이었다.
-    /// ★성공을 지움 근거로 삼는 것이 정직한 이유★: `--resume` 가 조기종료 창을 넘겼으면 이어받을 대화가
-    ///   **실재했다**는 뜻이고, fresh 가 떴으면 이제 하나 생긴다. 그 뒤 한 마디도 없이 닫으면 **다음
-    ///   활성화가 다시 실패해 다시 기록된다** — 그게 「미리 감지하지 않고 실패한 자리에서 기록한다」다.
-    /// ★기록과 같은 스레드에서 부른다★: 활성화를 집행하는 그 스레드다(출력 pump 아님).
-    /// ★`incarnation` 은 지각-쓰기 가드다★ — 계약은 `ProfileRegistry::set_last_failure` 가 갖는다.
-    ///   화신이 만들어진 결말(성공 · 조기종료)은 그 epoch 을 실어 보내고, 화신 전에 끝난 실패만 `None` 이다.
+    /// ★The clearing condition is 「activation success」, not 「a conversation round trip held」 — do not revert★: a round trip is observed only by the turn-end
+    /// signal (structured output only), while failure **classification** comes only from console bytes (structured sessions send diagnostics to stderr);
+    /// the halves are mutually exclusive, so a terminal agent's record **would never clear**. That signal also has no epoch gate and a non-blocking contract
+    /// (`StatusSink::turn_ended`), so taking the profile lock there was a contract violation.
+    /// ★Success is an honest clearing ground★: a `--resume` passing the early-exit window means the conversation **really existed**; if closed without a
+    /// word, **the next activation fails again and is recorded again**.
+    /// ★Called on the activation thread★, not the output pump. ★`incarnation` is the late-write guard★ (contract: `ProfileRegistry::set_last_failure`): outcomes
+    /// that made an incarnation send its epoch; only failures before one are `None`.
     // ADR-0172
     fn note_activation_result(
         &self,
@@ -2154,15 +1839,10 @@ impl AgentManager {
         self.profiles.set_last_failure(id, incarnation, failure);
     }
 
-    /// 이 항목의 활성화가 **아직 결말을 못 낸 채 진행 중**인가.
-    ///
-    /// ★예약 집합을 그대로 읽는 것이 전부다 — 두 번째 상태를 만들지 않았다★: 그 집합의 수명이 이미
-    ///   정확히 「누군가 이 항목을 띄우는 중」이고, 연결을 선언하는 통로에서는 [`LinkWatch`] 가 그
-    ///   수명을 **연결의 결말까지** 늘려 둔다. 별도 「establishing」 표를 만들면 세울 지점과 지울 지점이
-    ///   새로 둘 생기고, 통로가 자기 상태를 칸에 담아 두고 감독자가 들여다보던 옛 모양으로 되돌아간다
-    ///   (그 모양이 이 라운드가 걷어낸 결함 넷의 뿌리다).
-    /// ★락을 잡는 구간은 `contains` 하나다★ — 이 Mutex 보유 중 sessions/profiles 를 잡지 않는다
-    ///   (ADR-0006 · `spawning` 필드 doc).
+    /// Whether this entry's activation is **still in progress without an outcome**. ★Reading the reservation set as is suffices — no second state★: its
+    /// lifetime is already 「someone is launching this entry」 and [`LinkWatch`] extends it **until the connection outcome**; a separate 「establishing」
+    /// table would add two set/clear places and revive the shape where the link kept its own state for the supervisor to peek at (root of four defects).
+    /// One `contains` under the lock; no sessions/profiles lock is taken (ADR-0006).
     fn activation_in_flight(&self, id: AgentId) -> bool {
         self.spawning
             .lock()
@@ -2201,19 +1881,12 @@ impl AgentManager {
             })
     }
 
-    /// **spawn 한 번으로 결말이 나는** 갈래의 기록 — 띄웠으면 그 화신의 epoch 으로 지우고, 실패면
-    /// 기록하고, **할 일이 없었으면 아무것도 쓰지 않는다**.
+    /// The record of branches **settled by one spawn** — launched: clear with that incarnation's epoch; failed: record; **nothing to do: write nothing**.
     ///
-    /// ★「Fresh 의 기록」이 아니다 — 호출자는 이제 [`AgentManager::spawn_fresh_settled`] 하나뿐이고 그
-    ///   안에서도 **연결 축이 없는 통로**에만 쓰인다★: 연결을 선언하는 통로는 spawn 이 `Started` 를
-    ///   돌려준 시점에 아직 결말이 안 났으므로(핸드셰이크가 시작도 안 했다) 여기서 지우면 그것이 곧
-    ///   ADR-0202 가 막으려는 증거 파괴다. 그쪽 갈래는 판정을 본 뒤 자기 자리에서 쓴다.
-    ///
-    /// ★moot 이 아무것도 안 쓰는 것은 예외가 아니라 정의다★: 이 호출은 아무것도 하지 않았으므로 기록할
-    ///   실패도 없고 지울 근거도 없다. `activate_profile` 의 선제 "이미 실행 중" 갈래가 쓰지 않는 것과
-    ///   같은 이유다.
-    /// resume 은 이걸 쓰지 않는다 — spawn 이 Ok 여도 조기종료 창을 넘겨야 성립이라, 결말을 아는 자리가
-    /// `resume_no_fallback` 이다.
+    /// ★Only for [`AgentManager::spawn_fresh_settled`]'s **links without a connection axis**★: on a connection-declaring link `Started` returns before the
+    /// outcome exists, and clearing then is the evidence destruction ADR-0202 prevents (that branch writes after seeing the decision).
+    /// ★moot writing nothing is the definition★ (nothing done → no failure, no ground to clear; same as `activate_profile`'s "already running" branch).
+    /// Resume does not use this — success holds only after the early-exit window, known to `resume_no_fallback`.
     // ADR-0172
     fn note_spawn_result(&self, id: AgentId, result: &Result<SpawnOutcome, PtyError>) {
         match result {
@@ -2221,39 +1894,23 @@ impl AgentManager {
                 self.note_activation_result(id, Some(info.epoch), None)
             }
             Ok(SpawnOutcome::Moot(_)) => {}
-            // 화신이 없으므로 비교할 세대가 없다(`set_last_failure` 계약의 `None` 갈래).
+            // There is no incarnation, so there is no generation to compare (the `None` branch of the `set_last_failure` contract).
             Err(e) => self.note_activation_result(id, None, Some(spawn_error_kind(e))),
         }
     }
 
-    /// Fresh 활성화 — ★프로세스가 떴다는 것만으로 성공을 말하지 않는다★.
+    /// Fresh activation — ★does not claim success just because the process launched★.
     ///
-    /// ★왜 이 함수가 생겼나(회귀 방지 — 지우면 그 구멍이 그대로 돌아온다)★: `spawn_agent` 은 **자식
-    ///   프로세스가 뜬 순간** `Started` 를 돌려주고 배달함을 버린다. 연결을 선언하는 통로에서는 그
-    ///   시점에 핸드셰이크가 아직 시작도 안 했다 — 그래서 Fresh 로 띄운 codex 가 `thread/start` 를
-    ///   거절당해도 **아무도 그 결말을 보지 않았고**, 두 가지가 한꺼번에 일어났다:
-    ///   ① 상대가 stdout 을 붙든 채 남으면 리더가 EOF 를 못 봐 [`OutputCore::finish`] 가 영영 안 돌고
-    ///      그 메시지의 단독 소비자인 reaper 도 안 움직인다 — 화면엔 Running 인데 입력은 전부 거절되는
-    ///      **굳음**이 돌아온다(ADR-0200 이 이어받기 쪽에서 닫은 바로 그 모양).
-    ///   ② `note_spawn_result` 가 그 `Started` 를 성공으로 읽고 **「마지막 실패」를 지웠다** — 거절당한
-    ///      활성화가 성공으로 보고되면서 앞선 실패 증거까지 함께 파괴했다(ADR-0202 가 「아직 참이 아니다」로
-    ///      적어 둔 그 구멍).
-    ///   Fresh 는 새 codex 에이전트의 **일상 경로**이지 변두리가 아니다.
-    ///
-    /// ★그래서 「성공」의 뜻을 Resume 과 **같은 것**으로 둔다(ADR-0201)★: 성공 = 에이전트가 **입력을
-    ///   받을 준비가 됐다고 신호했다**. 프로세스가 살아 있다는 것은 그 질문의 답이 아니다. 새 대화든
-    ///   이어받기든 상대에게 묻는 것은 같으므로(`thread/start` vs `thread/resume` — 통로 안쪽의 갈림),
-    ///   판정 어휘를 갈라 둘 이유가 없다.
-    /// ★성공이 「마지막 실패」를 **지우지 않는다**(ADR-0202)★ — 준비됐다는 관측은 그 뒤의 일을 말해
-    ///   주지 않고, 지움은 되돌릴 수 없다. 자동 지움은 어느 갈래에서도 안 한다.
-    /// ★연결 축이 없는 통로는 **한 줄도 바뀌지 않는다**★ — 그쪽은 아래 let-else 로 빠져 옛
-    ///   `note_spawn_result` 경로(띄웠으면 지움)를 그대로 탄다. claude 의 Fresh 는 지금 깨져 있지 않고,
-    ///   ADR-0201 이 그 경로를 이번 범위 밖으로 못박았다.
-    /// ★실패 종류는 분류하지 않고 [`AgentFailureKind::Other`] 로 둔다★ — `resume_failure_kind` 는
-    ///   **이어받기** 어휘(「이어받을 대화가 없다」)를 내는데, 새 대화를 여는 이 갈래에서 그 문구는
-    ///   거짓이다(이어받으려 한 적이 없다). 없는 어휘를 지어내는 대신 「그 밖」으로 둔다 — 그쪽은
-    ///   재시도 가능이라 화면이 항목을 막지도 않는다(`failureKinds.ts`).
-    /// `entry` 는 받은 그대로 공유 본체에 넘긴다 — 이 동사는 입구를 가르지 않는다.
+    /// ★Why this exists (deleting it brings the hole back)★: `spawn_agent` returns `Started` **when the child launches** and drops the mailbox; on a
+    /// connection-declaring link the handshake has not started, so a codex Fresh whose `thread/start` was refused was **seen by nobody** and: ① a peer
+    /// holding stdout left the reader without EOF, [`OutputCore::finish`] and the reaper never ran — **the freeze** (Running, all input refused; ADR-0200's
+    /// shape on the resume side); ② `note_spawn_result` read `Started` as success and **cleared 「the last failure」**, destroying the earlier evidence
+    /// (the hole ADR-0202 wrote as 「not yet true」). Fresh is the everyday path of new codex agents.
+    /// ★「Success」 means the same as Resume (ADR-0201)★: the agent **signaled it is ready to take input** (`thread/start` vs `thread/resume` is a split inside
+    /// the link). ★Success **does not clear** 「the last failure」 (ADR-0202)★ — readiness says nothing about what follows and clearing is irreversible.
+    /// ★Links without a connection axis change not at all★ — they fall out via the let-else below into the old `note_spawn_result` path (ADR-0201 scope).
+    /// ★The failure kind stays [`AgentFailureKind::Other`]★: `resume_failure_kind` speaks **resume** vocabulary, false here (no resume was tried); 「other」 is
+    /// retryable so the screen does not block the entry (`failureKinds.ts`). `entry` is handed to the shared body as received.
     /// The second slot = the launch's notices, carried only by a success that started a process — a link that failed
     ///   after the start drops them with its `Err`.
     // ADR-0201
@@ -2270,15 +1927,14 @@ impl AgentManager {
             Err(e) => (Err(e), None, None),
         };
 
-        // 기다릴 결말이 없는 셋이 여기서 빠진다 — 연결 축이 없는 통로 · 아무것도 안 만든 요청(moot) ·
-        // 프로세스조차 못 띄운 실패. 셋 다 옛 기록 규율 그대로다(`note_spawn_result`).
+        // The three with no outcome to wait for fall out here — links without a connection axis · a request that made nothing (moot) · a failure before a process opened; all follow the old record discipline
+        // (`note_spawn_result`).
         let (Some(watch), Ok(SpawnOutcome::Started(info))) = (watch.as_ref(), &result) else {
             self.note_spawn_result(profile.id, &result);
             return result.map(|outcome| (outcome, launched));
         };
-        // ★표식을 결말 **밖으로** 들고 나간다★ — 아래 정리·기록은 판정만큼 늦게 일어나고, 그 사이 이
-        //   화신이 수거되고 다음 화신이 떴을 수 있다. 값으로 들고 가야 둘 다 이 화신에만 닿는다
-        //   (ADR-0163/0164 — 비교는 일치/불일치뿐).
+        // ★The marker is carried **out of** the outcome★ — cleanup and record below happen as late as the decision, and the incarnation may have been collected and the next launched; a carried value makes
+        //   both reach only this incarnation (ADR-0163/0164, match/mismatch only).
         let incarnation = info.epoch;
 
         match self.link_activation_verdict(
@@ -2287,17 +1943,11 @@ impl AgentManager {
             &watch.rx,
             LINK_RESOLUTION_BACKSTOP,
         ) {
-            // ★상대가 준비됐다고 신호했다 = 성립★. 기록은 건드리지 않는다(위 doc · ADR-0202).
-            //
-            // ★★스냅샷을 **다시 뜬다** — `result` 를 그대로 돌려주지 마라★★: 그 안의 `info` 는 자식이
-            //   뜬 **직후**에 조립됐고 status 가 `Running` 이다. 예전에는 그 값이 0ms 된 것이라 그대로
-            //   내도 무해했지만, 지금 이 자리는 연결의 결말을 기다린 **뒤**라 최대 백스톱만큼 낡았다.
-            //   그 사이에 자식이 죽었으면 호출자는 시체를 산 에이전트로 보고받고(WS `Spawned` 가 그
-            //   status 를 그대로 나른다) **다음 동사가 시체에게 편지를 쓴다.**
-            // ★조회가 실패하면 성공을 뒤집는 것이 아니라 상태만 낮춘다★ — 조회가 놓쳤다는 것 자체가
-            //   「그 사이 수거됐다」는 관측이다. 활성화는 성립했으므로 `Err` 로 바꾸지 않는다.
-            //   코드는 모른다(`None`). `resume_no_fallback` 의 형제 갈래를 `activate_profile` 이
-            //   처리하는 모양과 **같은 규율**이고, 그쪽 주석이 이 인과의 정본이다.
+            // ★The other side signaled ready = holds★; the record is untouched (ADR-0202).
+            // ★★The snapshot is **taken again** — do not return `result` as is★★: its `info` was assembled right after launch with `Running`; now that we waited for the
+            //   outcome it is stale by up to the backstop, and a child dying meanwhile would be reported alive (WS `Spawned` carries the status; **mail then goes to a
+            //   corpse**). ★A lookup failure only lowers the state★ (observation 「collected in between」), the activation held so no `Err`; code unknown (`None`) — the
+            //   same discipline as `activate_profile`'s sibling branch (canonical there).
             EarlyVerdict::Ready => match self.agent_info_by_id(profile.id) {
                 Ok(fresh) => Ok((SpawnOutcome::Started(fresh), launched)),
                 Err(_) => {
@@ -2306,9 +1956,7 @@ impl AgentManager {
                     Ok((SpawnOutcome::Started(gone), launched))
                 }
             },
-            // ★정리를 **먼저**, 기록을 나중에★ — `resume_no_fallback` 의 같은 갈래와 같은 순서이고 같은
-            //   사유다: 기록은 프로필 뮤텍스를 잡는데 그 뮤텍스가 붙들려 있으면 순서가 뒤집힌 쪽은
-            //   **자식을 영영 안 죽인다**. 백스톱은 바로 그 정체를 위해 있다.
+            // ★Cleanup **first**, record later★ — as `resume_no_fallback`: the record takes the profile mutex, and the reversed order **never kills the child** when it is held (the backstop exists for that stall).
             EarlyVerdict::LinkFailed { reason } => {
                 self.tear_down_failed_activation(profile.id, incarnation);
                 self.note_activation_result(
@@ -2320,21 +1968,20 @@ impl AgentManager {
                     agent = %profile.id,
                     epoch = incarnation,
                     %reason,
-                    "새 대화의 연결이 서지 못했다 → 활성화 실패 — LLM 에스컬레이션 대상"
+                    "the new conversation's connection could not be set up → activation failed — a target for LLM escalation"
                 );
                 Err(PtyError::SpawnFailed(format!(
-                    "새 대화 연결 실패: {reason}"
+                    "new conversation connection failed: {reason}"
                 )))
             }
-            // 판정이 끝나기 전에 프로세스가 죽었다 — 자식이 이미 종점이라 정리할 것이 없다(ADR-0082
-            // 「아무것도 죽지마」: 관측된 시체는 그대로 둔다).
-            // ★사용자가 끊은 것은 활성화 실패가 아니다★ — 기록하지 않는다(`resume_no_fallback` 의 같은 규율).
+            // The process died before the decision finished — already terminal, nothing to clean up (ADR-0082 「kill nothing」: an observed corpse is left).
+            // ★What the user interrupted is not an activation failure★ — not recorded (as `resume_no_fallback`).
             EarlyVerdict::Terminal { status, evidence } => {
                 if matches!(status, AgentStatus::Killed) {
                     tracing::info!(
                         agent = %profile.id,
                         epoch = incarnation,
-                        "새 대화가 서는 중에 사용자가 종료했다 — 활성화 실패로 기록하지 않는다"
+                        "the user terminated while the new conversation was being set up — not recorded as an activation failure"
                     );
                 } else {
                     self.note_activation_result(
@@ -2347,27 +1994,22 @@ impl AgentManager {
                         epoch = incarnation,
                         ?status,
                         %evidence,
-                        "새 대화가 서기 전에 종료했다 → 활성화 실패 — LLM 에스컬레이션 대상"
+                        "exited before the new conversation was set up → activation failed — a target for LLM escalation"
                     );
                 }
-                // ★꼬리를 **오류 문구에 싣지 않는다**★ — 최대 4 KiB 짜리 콘솔 꼬리가 명령 응답으로
-                //   그대로 나간다. 위 로그가 그것을 나르고, 문구는 `resume_no_fallback` 의 형제와 같은
-                //   모양(상태 하나)으로 둔다.
+                // ★The tail is **not carried in the error text**★ — up to 4 KiB of console would go out as the command response; the log above carries it and the text keeps the shape of the `resume_no_fallback` sibling.
                 Err(PtyError::SpawnFailed(format!(
-                    "새 대화가 서기 전에 종료({status:?})"
+                    "exited before the new conversation was set up ({status:?})"
                 )))
             }
-            // ★도달 불가 — [`AgentManager::link_activation_verdict`] 는 이 둘을 내지 않는다★.
-            //   방어 갈래는 상태를 건드리지 않는다: 무슨 일이 있었는지 모르는 자리라, 실패를 단정해 쓰면
-            //   방금 뜬 에이전트에 도장을 찍을 수 있다.
+            // ★Unreachable — [`AgentManager::link_activation_verdict`] does not emit these two★. The defensive branch does not touch state (an assertive failure could stamp an agent that just started).
             other => Err(PtyError::SpawnFailed(format!(
-                "spawn_fresh_settled: 예상 밖 결말 {other:?}"
+                "spawn_fresh_settled: unexpected outcome {other:?}"
             ))),
         }
     }
 
-    /// ★통로를 여기서 만들지 않는다(ADR-0191)★ — 이미 만들어진 것을 `parts` 로 받고, 이 함수는 그
-    ///   실제 타입을 모른다. 호출자가 넘기기 전에 **자식 프로세스는 이미 떠 있다**.
+    /// ★The link is not made here (ADR-0191)★ — it arrives as `parts` and its real type is unknown; **the child process is already up** before the caller hands it over.
     fn spawn_session(
         &self,
         id: AgentId,
@@ -2377,8 +2019,7 @@ impl AgentManager {
         seed_events: Vec<OutputEvent>,
         incarnation: SpawnIncarnation,
     ) -> Result<(Arc<AgentSession>, Option<u32>), PtyError> {
-        // ★이름째 해체한다 — `{ latch: _, .. }` 로 버리지 말 것★: 필수 인자는 래치를 여기까지만 끌고
-        //   오고 세션에 싣는 것은 강제하지 못한다(그 배선은 구조 시험이 잰다 — `SpawnIncarnation` doc).
+        // ★Destructured by name — never `{ latch: _, .. }`★: the required argument carries the latch only this far; the wiring is measured by a structure test (`SpawnIncarnation` doc).
         // ADR-0226
         let SpawnIncarnation {
             continues_conversation,
@@ -2396,10 +2037,9 @@ impl AgentManager {
             delivery_ack,
         } = parts;
 
-        // ADR-0113: 공용 턴 관측 표 + 이 백엔드의 신호 분류자를 함께 꽂는다 — 안 꽂으면 이 세션만
-        //   조용히 관측 밖으로 빠진다.
-        // ADR-0231: 이 화신의 새 명부 + 공용 대기 목록 표도 같은 자리 — 빠뜨리면 사용자 목록이 우편에 안 보인다.
-        //   세션은 명부를 코어에서 꺼내 쓰므로 여기 한 곳만 꽂는다.
+        // ADR-0113: plug in the shared turn observation table + this backend's signal classifier together — without them only this session falls out of observation.
+        // ADR-0231: this incarnation's new registry + the shared waiting-list table go in the same place (the session takes the registry from the core) — omitted,
+        //   the user list is invisible to mail.
         let core = Arc::new(
             OutputCore::new(
                 id,
@@ -2413,16 +2053,11 @@ impl AgentManager {
             }),
         );
 
-        // 2.1. ★ADR-0079 seed-before-publish(load-bearing 순서 — cross-family review 2026-07-13)★:
-        //      resume 복원 과거 이벤트를 **세션이 관측 가능해지기 전에**(= sessions 맵 insert 전) core
-        //      Ring 에 seed 한다. 지금 core 는 이 함수 로컬 Arc 뿐이라 다른 스레드가 닿을 수 없다(구독·emit
-        //      경로 모두 sessions 맵 조회를 거친다). 그래서 seed 를 여기서 끝내면 다음 두 윈도가 원천 차단된다:
-        //        (a) empty-ring replay: insert 후 seed 전에 재접속 구독이 끼면 빈 Ring 을 replay 하고
-        //            seed 는 fanout 안 하므로 과거를 영구 유실 → insert 전 seed 로 제거.
-        //        (b) seq interleave: 그 윈도의 동시 emit/write 가 seed 와 seq 를 뒤섞어 Ring 순서를
-        //            [0,2,1] 로 깨 replay 의 partition_point 전제를 위반 → seed 선행으로 제거.
-        //      seed 는 여전히 start_pump 전이다(라이브 emit 은 pump 가 켜야 시작). seed_events 가 비면
-        //      (Fresh·비-json·transcript 부재) no-op → 기존 fresh 버퍼 동작 불변.
+        // 2.1. ★ADR-0079 seed-before-publish (load-bearing order)★: seed the restored past events of resume into the core Ring **before the session becomes
+        //      observable** (before the sessions map insert) — the core is still this function's local Arc, unreachable by subscribe/emit paths. Closes (a)
+        //      empty-ring replay: a reconnecting subscription slipping in between would replay an empty Ring and, since seed does not fan out, lose the past
+        //      permanently; (b) seq interleave: concurrent emits would break Ring order ([0,2,1]) and replay's `partition_point` premise. Still before
+        //      `start_pump`. Empty `seed_events` (Fresh · non-json · no transcript) is a no-op.
         if !seed_events.is_empty() {
             tracing::info!(
                 agent = %id,
@@ -2433,9 +2068,8 @@ impl AgentManager {
             core.seed(seed_events);
         }
 
-        // ★ADR-0019 finish-snapshot hook★: core.finish 의 finalize 승자 경로에서 1회 호출되며,
-        //   **그 순간** intent·shutting_down 을 snapshot 해 ReapMsg 를 송신한다(reap 시점 live read
-        //   금지 — 크래시→유저kill 오분류 race 방지). send 실패(reaper 종료)는 무시.
+        // ★ADR-0019 finish-snapshot hook★: called once on the finalize winner path of core.finish; snapshots intent · shutting_down **at that moment** and sends ReapMsg (no live read at reap time — avoids the
+        //   crash→user-kill misclassification race). A send failure (reaper ended) is ignored.
         let intent = Arc::new(AtomicU8::new(TerminationIntent::None as u8));
         {
             let intent_hook = intent.clone();
@@ -2471,50 +2105,42 @@ impl AgentManager {
             )
             .with_incarnation(continues_conversation)
             .with_session_id_latch(latch)
-            // TRD S25 §5-2 4 (c2) ②: 빠뜨려도 컴파일되고 오류도 없다 — 뜬 화신의 휘발 폴더를 아무도 안 거둔다.
+            // TRD S25 §5-2 4 (c2) ②: omitting this still compiles with no error — nobody reclaims the launched incarnation's volatile folder.
             .with_launch_lease(launch_lease)
-            // ADR-0231: 빠뜨려도 컴파일되고 오류도 없다 — 이 화신의 모든 입력이 오늘 경로로 간다.
+            // ADR-0231: omitting this still compiles with no error — all of this incarnation's input goes to today's path.
             .with_mid_turn(mid_turn, delivery_ack),
         );
 
-        // ★ADR-0113 턴 관측 자리 선점 — sessions 맵 insert 보다 **먼저**★: 이 화신이 그 id 의 항목을
-        //   차지한다(앞 화신의 항목이 있으면 갈아치운다). insert 전이라 아직 아무 스레드도 이 core 에
-        //   닿을 수 없고(구독·emit 경로가 전부 sessions 조회를 거친다), 그래서 이 화신의 **첫 신호보다
-        //   반드시 먼저**다. 뒤집히면 그 첫 신호가 앞 화신 표식과 안 맞아 버려지고, 이 화신은 앞 화신의
-        //   항목이 거둬질 때까지 미관측(=턴 아님)으로 답한다 — 턴 중 우편 주입이 그 결말이다.
-        //   ★표식 대소로 거르던 옛 규칙을 여기로 옮긴 것이다★(난수 표식에선 대소가 절반만 맞는다 —
-        //   `turn::TurnObservations::register`).
+        // ★ADR-0113 claim the turn observation slot **before** the sessions map insert★: this incarnation takes that id's entry (replacing the previous one).
+        //   Before insert nothing can reach this core, so it is **always before the first signal**; reversed, that signal would mismatch the previous marker and
+        //   be dropped, and the incarnation would answer unobserved (not in a turn) — mail injection mid-turn. ★The old marker-ordering filter moved here★
+        //   (random markers order correctly only half the time — `turn::TurnObservations::register`).
         // ADR-0113
         self.turns.register(id, epoch);
-        // 대기 목록 표도 같은 이유로 같은 자리 — 이 표는 등록 없는 쓰기를 버리므로 늦으면 그 화신의 목록이
-        //   우편에 영영 안 보인다.
+        // The waiting-list table goes in the same place for the same reason — it drops unregistered writes, so a late registration leaves that incarnation's list invisible to mail.
         // ADR-0231
         self.inputs_pending.register(id, epoch);
 
-        // ★ADR-0019 — sessions 등록은 pump 기동(start)보다 **먼저**★: finish hook 이 ReapMsg 를 보내는데,
-        //    pump 가 즉시 EOF→finish 하면 그 시점에 세션이 맵에 있어야 reaper 가 reap 한다. insert 전에
-        //    start 하면 빠른 종료 시 hook send 가 맵에 없는 id 를 가리켜 reap 가 no-op→세션 좀비화.
-        //    attach_pump 는 start 내부 동기 완료라 join_pump 영향 없음(insert 순서 무관).
+        // ★ADR-0019 — register in sessions **before** starting the pump★: the finish hook sends ReapMsg; on a fast exit EOF→finish must find the session in the map
+        //    or reap is a no-op and the session becomes a zombie. `attach_pump` completes synchronously inside start, so `join_pump` is independent of insert order.
         let replaced = self
             .sessions
             .write()
             .expect("sessions poisoned")
             .insert(id, session.clone());
-        // 갈아치운 화신은 reaper 의 표식 대조에 걸리지 않아 재료 회수 · 권한 회수를 잃는다 — 예약 · 떠 있음 확인이 이
-        //   자리를 비워 둔다.
+        // A replaced incarnation would miss the reaper's marker comparison and lose its material reclaim · permission revoke — the reservation ·
+        //   running check keeps this spot empty.
         // TRD S25 §5-2 4 (c2) ②
-        debug_assert!(replaced.is_none(), "명부의 화신을 갈아치웠다 — agent={id}");
+        debug_assert!(
+            replaced.is_none(),
+            "replaced the roster's incarnation — agent={id}"
+        );
 
-        // 5.5. ★ADR-0019 활성화 — 반드시 start_pump 전★: spawn(=지금 떠 있어야 함)이면 프로필을
-        //      auto_restore=true 로 확정·persist 한다(강제종료 후 부팅 복원 대상이 되게). 이 플립을
-        //      pump 기동 **전**에 둬야 race 가 닫힌다: 즉시 크래시(`cmd /c exit 1`)는 start_pump 직후
-        //      pump 가 EOF→finish→reaper 가 auto_restore=false 로 내리는데, 이 플립이 그보다 늦으면
-        //      false 를 true 로 덮어써 크래시 세션이 부팅 복원 대상으로 잘못 남는다(크래시 루프).
-        //      순서를 "플립 true → start_pump → (크래시 시) reaper false" 로 고정해 reaper 의
-        //      downgrade(false)가 항상 **마지막**이 되게 한다. spawn 은 활성화 행동이므로 여기서만 올린다
-        //      (reaper 는 downgrade-only — true 로 올리지 않음).
-        // ★입구와 무관하게 늘 내부 입구다(ADR-0291 E1 · `try_` 로 바꾸지 말 것)★: 프로세스가 이미 떠 있어
-        //   저장 실패로 되돌릴 수 없다. 저장이 `Err` 여도 메모리에 올리고 dirty — 다음 성공 저장이 싣는다.
+        // 5.5. ★ADR-0019 activation — before start_pump★: a spawned (= up) profile is persisted `auto_restore=true`. Flipping before the pump closes the race where an
+        //      immediate crash (`cmd /c exit 1`) makes the reaper lower it to false and a later flip overwrite it — the crashed session would stay a boot restore target
+        //      (crash loop). Order "flip true → start_pump → (crash) reaper false" keeps the reaper's downgrade **last**; spawn only raises here (the reaper only lowers).
+        // ★Always the internal entry whatever the entry (ADR-0291 E1 · not `try_`)★: the process is already up, so a save failure cannot revert it; `Err` still raises
+        //   in memory + dirty and the next save carries it.
         self.profiles.update_with(id, |p| p.auto_restore = true);
 
         session.start_pump();
@@ -2522,20 +2148,18 @@ impl AgentManager {
         Ok((session, child_pid))
     }
 
-    // ── 복원 ────────────────────────────────────────────────────────────────
+    // ── Restore ────────────────────────────────────────────────────────────────
 
-    /// **백그라운드 스레드에서 호출할 것**(stagger·조기종료 윈도 대기로 블로킹 — setup 동기 호출
-    /// 금지, H-1.8).
+    /// **Call from a background thread** (blocks on the stagger and early-exit window waits — no synchronous call from
+    /// setup, H-1.8).
     pub fn restore_all(&self) -> Vec<RestoreReport> {
         let targets = self.profiles.restorable();
-        tracing::info!(count = targets.len(), "restore_all 시작");
+        tracing::info!(count = targets.len(), "restore_all started");
 
         let mut reports = Vec::with_capacity(targets.len());
         for profile in targets {
             let outcome = self.restore_one(&profile);
-            // spawn 이 성공했으면 `epoch_for_spawn` 이 발급한 최신 표식이 명부에 있으므로 그걸 읽는다.
-            //   프로필이 없으면 spawn 이 실패한 경우뿐이라 결말이 Failed 이고, 이때 스냅샷 값은
-            //   보고용 표기일 뿐이다.
+            // After a successful spawn the latest marker from `epoch_for_spawn` is in the roster, so read it; the profile is missing only if spawn failed (outcome Failed; the snapshot value is then report notation only).
             let epoch = self
                 .profiles
                 .get(profile.id)
@@ -2546,7 +2170,7 @@ impl AgentManager {
                 epoch,
                 outcome,
             };
-            tracing::info!(agent = %report.agent_id, ?report.outcome, "복원 결과");
+            tracing::info!(agent = %report.agent_id, ?report.outcome, "restore result");
             self.status_sink.restore_result(report.clone());
             reports.push(report);
             std::thread::sleep(RESTORE_STAGGER);
@@ -2554,25 +2178,20 @@ impl AgentManager {
         reports
     }
 
-    /// ★부팅 복원은 내부 입구다(`Entry::Internal`)★ — 결과를 받아 되돌릴 사람 · LLM 요청이 없으므로, 띄우기
-    ///   전 명부 변경의 저장이 어떤 `Err` 로 돌아와도 메모리에 적용 + dirty 하고 띄우기를 이어 간다. 새 판 ·
-    ///   못 읽는 파일 위에 명부를 쓰지 않는 것은 매 저장의 재판정이 지킨다.
+    /// ★Boot restore is an internal entry (`Entry::Internal`)★ — nobody receives the result to revert, so a pre-launch save `Err` applies to memory + dirty and the
+    /// launch continues; not overwriting a newer-edition or unreadable file is guarded by every save's re-decision.
     // ADR-0291 R17 (E1 · E3)
     fn restore_one(&self, profile: &AgentProfile) -> RestoreOutcome {
-        // ADR-0185: 이어받기 축 — 저장된 sid 를 **누가 발급했는지는 묻지 않는다**(그 축은 spawn 시점의
-        //   `assigns_session_id` 몫). 판정 규칙은 다른 활성화 입구들과 한 몸이라 dispatch 가 갖는다.
+        // ADR-0185: the resume axis — **does not ask who issued** the stored sid (that axis is `assigns_session_id` at spawn). One rule with the other activation entries, held by dispatch.
         let resumable = backend::can_resume_profile(profile);
 
         if !resumable {
-            // ADR-0172: 부팅 복원도 같은 규율 — 띄웠으면 지우고 실패하면 그 자리에서 기록한다.
-            // ★수동 활성화와 **같은 동사**를 쓴다(ADR-0201/0202)★: 이어받을 손잡이가 없는 codex 프로필은
-            //   부팅 복원에서도 이 갈래로 오고, 거기서 `thread/start` 가 거절되면 아무도 그 결말을 보지
-            //   않는 옛 구멍이 **프로필 수만큼** 한꺼번에 선다. 입구마다 판정을 갈라 두면 그중 하나가
-            //   반드시 뒤처진다.
+            // ADR-0172: boot restore follows the same discipline — clear if launched, record on the spot if failed.
+            // ★The **same verb** as manual activation (ADR-0201/0202)★: a codex profile without a resume handle also lands here, and a refused `thread/start` would
+            //   leave the unseen-outcome hole for **every profile** at once; per-entry decisions would let one fall behind.
             let outcome = self.spawn_fresh_settled(profile, Entry::Internal);
             return match outcome {
-                // moot(이미 떠 있음)도 결과적으로 "그 항목은 떠 있다" 라 같은 보고로 접는다 — 복원 보고
-                //   어휘에 「할 일 없었음」 칸이 없다(그 칸을 만드는 것은 wire 변경이라 별건).
+                // moot (already up) folds into the same report ("that entry is up") — the restore report vocabulary has no 「nothing to do」 (adding one is a wire change, separate).
                 Ok(_) => RestoreOutcome::Started,
                 Err(e) => RestoreOutcome::Failed {
                     reason: e.to_string(),
@@ -2583,44 +2202,33 @@ impl AgentManager {
         // Boot restore answers no caller, so its launch notices are only logged — never recorded (ADR-0341).
         match self.resume_no_fallback(profile, Entry::Internal) {
             Ok((outcome, _, _)) => outcome,
-            // 띄우기 전 거절(내부 입구라 저장 `Err` 는 오지 않고 실행 막힘 · 준비 경합만 온다)은 복원 보고 문구로 접는다.
+            // A refusal before launch (the internal entry gets no save `Err`, only a launch block · preparation race) is folded into the restore report text.
             Err(refused) => RestoreOutcome::Failed {
-                reason: format!("resume spawn 실패: {refused}"),
+                reason: format!("resume spawn failed: {refused}"),
             },
         }
     }
 
-    /// ★resume 전용 공용 규율(ADR-0082 — 부팅복원·수동활성화 공유, fresh-fallback 폐지)★.
-    /// 전제: 호출 시점에 이 프로필은 resumable(claude + sid 존재)이라고 이미 판정됐다 — 명시 resume 요청은
-    /// 손잡이 없이도 오는데, 저장 손잡이로 이어받는 backend 의 그 요청은 머리에서 새 대화로 맡긴다(ADR-0226).
+    /// ★Shared discipline for resume only (ADR-0082 — boot restore and manual activation, fresh-fallback abolished)★. Premise: this profile was already decided
+    /// resumable (claude + sid) — an explicit resume request without a handle is left to a new conversation at the head for stored-handle backends (ADR-0226).
     ///
-    /// resume 을 시도하고, spawn 실패거나 EARLY_EXIT_WINDOW 안에 **비정상 종료하거나 진단 스트림이
-    /// 실패를 말하면**(빈/미대화/손상 세션이면 claude 가 "No conversation found ..." 를 stderr 로 낸다)
-    /// **새 대화(fresh)를 자동으로 만들지 않고** 종점(시체)으로 직행한다 — 사유를 로그로 남겨
-    /// LLM 이 읽고 에스컬레이션한다.
-    /// ★그 종점은 `AgentStatus::Failed` 가 아니다★: 상태는 `TerminalReason` 하나로만 갈리고
-    ///   (`OutputCore::finish`) 이 경로엔 상태를 쓰는 줄이 없다 — resume child 가 스스로 죽으므로
-    ///   `Exited{code}`(대개 code≠0)로 간다. 아래 `RestoreOutcome::Failed` 는 **다른 축**(활성화 결과)이다.
-    /// ★"즉사" 가 아니다(실측 2026-08-23 정정)★: claude 는 그 진단을 내고도 종료 훅이 도는 동안 몇 초
-    ///   더 산다. 그래서 판정은 죽음이 아니라 증거로도 선다(`EarlyVerdict::Diagnosed`).
-    /// ★아무것도 kill·재spawn 하지 않는다★: resume child 는 자기 pump 가 EOF→finish 하고, reaper 가
-    ///   그 세션을 맵에서 수거하며 프로필을 `auto_restore=false`(KeepDisableAutoRestore)로 내려
-    ///   트리에 **관측된 종점 그대로** 시체로 남긴다(대개 `Exited{code≠0}` — profile 은 지워지지 않음:
-    ///   exit≠0/불명은 삭제 대상이 아님).
-    ///   이 헬퍼는 종료를 관측만 하고 어떤 파괴 동작도 하지 않는다(옛 fallback_fresh 의 remove_session·
-    ///   화신 표식 재발급·respawn 을 전부 걷어냈다 — ADR-0082 사용자 결정: "아무것도 죽지마, 새로 만들지마").
-    /// 이 로직을 restore_one(부팅 복원)과 activate_profile(수동 활성화)이 **똑같이** 재사용한다.
-    ///
-    /// 반환의 둘째 칸 = 이 시도가 **만들어 낸** 화신(있으면). `activate_profile` 이 성공 판정 뒤 조회가
-    /// 실패했을 때 성공을 뒤집지 않으려고 쓴다(그쪽 주석이 그 인과의 정본).
+    /// On a spawn failure, or within EARLY_EXIT_WINDOW an **abnormal exit or a diagnostic stream saying it failed** (claude: "No conversation found ..." to
+    /// stderr), it goes straight to a terminal point (corpse) **without creating a new conversation**, leaving the reason in the log for the LLM.
+    /// ★The terminal point is not `AgentStatus::Failed`★: state splits only by `TerminalReason` (`OutputCore::finish`); the resume child dies by itself →
+    /// `Exited{code}` (usually ≠0). `RestoreOutcome::Failed` is **a different axis** (the activation result). ★Not "dying immediately"★ (measured): claude runs
+    /// its exit hook a few more seconds, so the decision rests on evidence too (`EarlyVerdict::Diagnosed`).
+    /// ★Nothing is killed or respawned★: the child's pump does EOF→finish, the reaper collects it and lowers `auto_restore=false`, leaving the corpse in its
+    /// observed terminal state (the profile is not deleted: exit≠0/unknown is no deletion target). The old `fallback_fresh` (remove_session · marker reissue ·
+    /// respawn) is gone — decided: kill nothing, create nothing new. `restore_one` and `activate_profile` reuse it **identically**.
+    /// The return's second field = the incarnation this attempt **produced** (if any), so `activate_profile` does not flip a success when
+    /// the lookup fails after it.
     /// The third slot = the launch's notices — `Some` only with `Resumed` / `Started` from a call that started a
     /// process; a moot request (reported as `Resumed` or `Started`) and every `Failed` carry `None`. Do not key the
     /// notice record on the `RestoreOutcome` variant.
-    /// `entry` 는 받은 그대로 공유 본체에 넘긴다 — 이 동사는 입구를 가르지 않는다.
-    /// ★`Err` = 띄우기 전에 거절돼 띄우지 않았다 — 저장 `Err`(부르는 쪽 입구에서만) · 실행 막힘 · 준비 경합(그 셋 =
-    ///   [`refused_before_spawn`])★ — 다른 띄우기 실패처럼 `RestoreOutcome::Failed` 문구로 접지 말 것: 접으면
-    ///   `activate_profile` 이 그 변형을 돌려주지 못해 버스가 저장 거절 · 막힘을 다른 실패와 못 가른다. 실패 기록 ·
-    ///   로그는 접을 때와 같이 남긴다.
+    /// `entry` is handed to the shared body as received.
+    /// ★`Err` = refused before launch, not launched — a save `Err` (only the caller entry) · a launch block · a preparation race (those three =
+    ///   [`refused_before_spawn`])★ — do not fold into a `RestoreOutcome::Failed` text: `activate_profile` could then not return that variant
+    ///   and the bus could not tell a save refusal · block from other failures. Record and log stay as when folded.
     // ADR-0082
     // ADR-0172
     // ADR-0291 R17
@@ -2631,18 +2239,11 @@ impl AgentManager {
         profile: &AgentProfile,
         entry: Entry,
     ) -> Result<(RestoreOutcome, Option<AgentInfo>, Option<LaunchNotices>), PtyError> {
-        // ★이어받을 손잡이가 없는 이어받기 요청은 **새 대화로 연다** — 고름이 아니라 사용자 결정 D1 의
-        //   귀결이다(「저장된 id 가 있다 ⟺ 이어받을 대화가 있다 · id 없음 → Fresh」)★.
-        //   ★그 조합에 실제로 들어오는 것은 WS `SpawnProfile` 의 `resume: true` 명시 요청이다★ — 그
-        //   플래그는 저장된 세션이 없어도 Resume 으로 남긴다(그 자리 주석).
-        //   ★Resume 으로 띄워 보고만 바꾸지 않고 Fresh 경로에 통째로 맡긴다★: 저장 손잡이로 이어받는
-        //   backend 는 손잡이가 없으면 이어받기 플래그를 말없이 빼고 뜨므로, Resume 으로 띄우면 모르는
-        //   id 의 새 대화를 「이어받음」으로 보고하게 된다. 결말은 `Resumed` 가 아니라 `Started` 다.
-        //   ★「새 대화를 만들지 않는다」(ADR-0082)와 부딪히지 않는다★ — 그 결정이 지키는 것은 **이어받을
-        //   대화가 있는** 요청이고, 여기는 이어받을 것이 애초에 없는 요청이다(정상 생성).
-        //   이 판정은 흔한 경우를 싸게 거르는 앞문이고, 이 판정과 spawn 안의 손잡이 읽기 사이에 칸이 비는
-        //   경합은 spawn 이 프로세스를 띄우기 전에 거절한다(같은 술어).
-        //   shell 처럼 저장 손잡이로 이어받지 않는 backend 는 여기 안 걸리고 옛 길 그대로다.
+        // ★A resume request without a handle **opens a new conversation** — consequence of D1 (「a stored id exists ⟺ there is a conversation to resume · no id → Fresh」)★. What reaches it is WS
+        //   `SpawnProfile`'s explicit `resume: true` (it stays Resume even without a stored session). ★Handed entirely to the Fresh path, not launched as Resume with a changed report★: a stored-handle
+        //   backend silently drops the resume flag without a handle, so Resume would report an unknown-id new conversation as 「resumed」; the outcome is `Started`, not `Resumed`.
+        //   ★No clash with 「no new conversation」 (ADR-0082)★ — that guards requests **with a conversation to resume**; this is normal creation. This is the front door filtering the common case; the race where the
+        //   field empties before spawn's handle read is refused by spawn before launching (same predicate). Backends not resuming with the stored handle (shell) are not caught and take the old way.
         // ADR-0226
         let opens_a_new_conversation = backend::can_resume_stored_session(&profile.command)
             && self
@@ -2651,12 +2252,12 @@ impl AgentManager {
                 .and_then(|p| p.backend_session_id)
                 .is_none();
         if opens_a_new_conversation {
-            // 정상 수명주기라 info 다 — 이어받을 대화가 없는 요청의 정해진 결말이다(D1).
+            // It is info because it is a normal lifecycle — the set outcome of a request with no conversation to resume (D1).
             tracing::info!(
                 agent = %profile.id,
-                "이어받기 요청인데 저장된 손잡이가 없다 — 새 대화를 연다(결말은 `Resumed` 가 아니라 `Started` 로 보고한다)"
+                "resume requested but there is no stored handle — opening a new conversation (the outcome is reported as `Started`, not `Resumed`)"
             );
-            // 기록은 새 대화 경로 안에서 한다 — 여기서 또 쓰면 지움 지점이 둘이 된다.
+            // The record is made inside the new-conversation path — writing here again would make two clearing points.
             return match self.spawn_fresh_settled(profile, entry) {
                 Ok((outcome, launched)) => {
                     Ok((RestoreOutcome::Started, outcome.into_info(), launched))
@@ -2664,7 +2265,7 @@ impl AgentManager {
                 Err(e) if refused_before_spawn(&e) => Err(e),
                 Err(e) => Ok((
                     RestoreOutcome::Failed {
-                        reason: format!("새 대화 spawn 실패: {e}"),
+                        reason: format!("new conversation spawn failed: {e}"),
                     },
                     None,
                     None,
@@ -2675,51 +2276,45 @@ impl AgentManager {
         let attempt = self.spawn_agent_watching_link(profile, SpawnMode::Resume, entry);
         let (outcome, watch, launched) = match attempt {
             Err(e) => {
-                // ADR-0172: 실패는 시도한 자리에서 기록한다 — 이 기록이 ADR-0082 가 요구한 "원인을 남겨
-                //   제어 LLM 이 읽는다" 의 화면·API 쪽 실물이다(로그는 사람만 읽는다).
+                // ADR-0172: failure is recorded where attempted — the screen/API-side real thing of ADR-0082's "leave the cause for the control LLM to read" (logs are read only by people).
                 self.note_activation_result(profile.id, None, Some(spawn_error_kind(&e)));
-                // ★띄우기 전 거절은 아래 경고를 내지 않는다★ — 프로세스를 열기 전에 멈춰 종점(시체)이 없고, 그 오류를
-                //   호출자 오류로 바꾸는 표면(버스 · WS)이 한 줄 남긴다. 여기서도 내면 한 요청에 두 줄이다.
+                // ★A refusal before launch does not emit the warning below★ — it stopped before opening a process (no corpse), and the caller-error surface (bus · WS) leaves a line; emitting here makes two for one request.
                 // ADR-0291 R17
                 if refused_before_spawn(&e) {
                     return Err(e);
                 }
-                let reason = format!("resume spawn 실패: {e}");
+                let reason = format!("resume spawn failed: {e}");
                 tracing::warn!(
                     agent = %profile.id,
                     %reason,
-                    "ADR-0082: resume 실패 → 종점(시체), fresh-fallback 없음"
+                    "ADR-0082: resume failed → terminal point (corpse), no fresh-fallback"
                 );
                 return Ok((RestoreOutcome::Failed { reason }, None, None));
             }
             Ok(pair) => pair,
         };
         let spawned = match outcome {
-            // ★할 일이 없었다 — 조기종료 창을 볼 이유도 없다★: 남이 띄운(띄우는 중인) 세션이라 우리가
-            //   관측한 것이 없고, 그래서 기록도 지움도 하지 않는다(`note_spawn_result` 와 같은 규율).
-            //   보고는 「떠 있다」로 접는다 — 복원 어휘에 「할 일 없었음」 칸이 없다.
+            // ★Nothing to do — no early-exit window to watch★: a session someone else launched (is launching) was not observed, so neither record nor clear
+            //   (as `note_spawn_result`). Reported as 「it is up」 — the restore vocabulary has no 「nothing to do」.
             // ADR-0172
             SpawnOutcome::Moot(info) => {
                 tracing::info!(
                     agent = %profile.id,
-                    "resume: 이미 떠 있거나 뜨는 중 — 이 요청은 할 일이 없다(moot)"
+                    "resume: already up or launching — this request has nothing to do (moot)"
                 );
                 return Ok((RestoreOutcome::Resumed, info, None));
             }
             SpawnOutcome::Started(info) => info,
         };
 
-        // ★fable M-1★: 성공한 claude resume은 TUI라 윈도 안에 종료하지 않는다.
-        // 따라서 윈도 내 terminal 진입은 code와 무관하게 resume 실패 신호다
-        // (code==0 조기 종료를 Resumed로 오판하면 빈 화면을 "복원 성공"으로 오보).
-        //
-        // ★`spawned.epoch` 을 창 **밖으로** 들고 나간다(지각-쓰기 가드)★: 아래 두 쓰기는 최대
-        //   EARLY_EXIT_WINDOW 뒤에 일어나고 그때 예약은 이미 풀려 있다. 그 사이 다른 연결이 같은
-        //   프로필을 성공적으로 활성화하면 epoch 이 올라가므로, 이 값을 실어 보내면 옛 관측이 새 화신을
-        //   덮지 못한다(`set_last_failure` 계약).
+        // ★fable M-1★: a successful claude resume is a TUI and does not exit within the window, so entering terminal in it is a resume failure whatever the code
+        //   (a code==0 early exit judged Resumed would report an empty screen as "restore succeeded").
+        // ★`spawned.epoch` is carried **out of** the window (late-write guard)★: the writes below happen up to EARLY_EXIT_WINDOW later with the reservation
+        //   released; if another connection activated the profile meanwhile the epoch rose, so sending this value keeps the old observation from overwriting
+        //   the new incarnation (`set_last_failure` contract).
         // ADR-0172
-        // ★판정 경로가 **통로의 축으로** 갈린다★: 배달 채널이 있으면 결말이 오기를 기다리고, 없으면
-        //   옛 창 판정을 그대로 탄다. 둘을 한 루프에 섞지 않는 이유 = `link_activation_verdict` 의 doc.
+        // ★The decision path splits **by the link's axis**★: with a delivery channel it waits for the outcome, without one the old window decision (why not one
+        //   loop: `link_activation_verdict`).
         let verdict = match watch.as_ref() {
             Some(w) => self.link_activation_verdict(
                 profile.id,
@@ -2736,24 +2331,20 @@ impl AgentManager {
         };
         Ok(match verdict {
             EarlyVerdict::Terminal { status, evidence } => {
-                let reason = format!("resume 조기 종료({status:?})");
-                // ★사용자가 끊은 것은 활성화 실패가 아니다 — 기록하지 않는다★: 창 안에서 kill 이 오면
-                //   (트리 종료·WS `Kill` 프레임·데몬 종료 경로) 그건 우리가 관측할 실패가 아니라 명시적
-                //   ★한때 여기 `agent.kill` 이라 적혀 있었는데 **그런 동사는 없다**★ — 명령 버스의
-                //   `agent.*` 에 kill 은 **의도적으로** 빠져 있다(`types::CLI_AGENT_VERBS` 주석 · ADR-0122
-                //   미해소). 그래서 오늘 kill 이 닿는 표면은 WS 프레임 하나뿐이다.
-                //   개입이다. 기록하면 트리에 「이어받은 직후 종료됐습니다」가 남아, 사용자가 방금 스스로
-                //   끈 항목이 고장 난 것처럼 보인다. 활성화 결과는 여전히 Failed 다(에이전트가 안 떠 있다).
-                //   지우지도 않는다 — 이 시도에 대해 성립을 주장할 근거도 없다.
+                let reason = format!("resume exited early ({status:?})");
+                // ★What the user interrupted is not an activation failure — not recorded★: a kill within the window (tree termination · WS `Kill` frame · daemon shutdown)
+                //   is an explicit intervention; recording 「exited right after resuming」 would make an entry the user just turned off look broken. The result is still
+                //   Failed (not up) and not cleared (no ground for success). Today the only kill surface is the WS frame — `agent.kill` does not exist (kill is
+                //   intentionally absent from `agent.*`: `types::CLI_AGENT_VERBS` · ADR-0122 unresolved).
                 // ADR-0172
                 if matches!(status, AgentStatus::Killed) {
                     tracing::info!(
                         agent = %profile.id,
                         %reason,
-                        "resume 창 안에서 사용자 종료 — 활성화 실패로 기록하지 않는다"
+                        "user exit within the resume window — not recorded as an activation failure"
                     );
                 } else {
-                    // 증거로 종류를 알아보지 못하면 맥락 기본값 — 「이어받기 직후 조기 종료」(재시도 가능).
+                    // If the kind cannot be recognized from the evidence, the contextual default — 「early exit right after resume」 (retryable).
                     let kind = backend::resume_failure_kind(&profile.command, &evidence)
                         .unwrap_or(AgentFailureKind::EarlyExitAfterResume);
                     self.note_activation_result(profile.id, Some(spawned.epoch), Some(kind));
@@ -2761,184 +2352,133 @@ impl AgentManager {
                         agent = %profile.id,
                         %reason,
                         ?kind,
-                        "ADR-0082: resume 조기종료 → 종점(시체), fresh-fallback 없음 — LLM 에스컬레이션 대상"
+                        "ADR-0082: resume early exit → terminal point (corpse), no fresh-fallback — a target for LLM escalation"
                     );
                 }
                 (RestoreOutcome::Failed { reason }, Some(spawned), None)
             }
-            // ★아직 살아 있는데 실패로 접는다 — 그리고 **아무것도 죽이지 않는다**★: claude 는 진단을
-            //   내고도 종료 훅이 도는 동안 몇 초 더 산다(실측 +2.2s 진단 / +6.4s 종료). 그 시체를
-            //   기다리면 창을 넘겨 실패가 성공으로 판정되므로 여기서 확정한다. 처분은 그대로 관측뿐이다
-            //   — 자식은 자기 pump 가 EOF→finish 하고 reaper 가 거둔다(ADR-0082 "아무것도 죽지마").
-            // ★그래서 몇 초간 「도는 중 + 마지막 실패」 조합이 화면에 선다 — 버그가 아니다★: 두 축이
-            //   별개라 표현되는 상태이고, 트리는 「도는 중이 이긴다」로 그 사이를 그린다(ADR-0173).
+            // ★Still alive but folded into failure — **nothing is killed**★: claude runs its exit hook a few more seconds after the diagnostic (+2.2s / +6.4s);
+            //   waiting for the corpse would pass the window and decide success, so it settles here. Observation only — the child does EOF→finish and the reaper
+            //   collects it (ADR-0082 "kill nothing"). ★「running + last failure」 for a few seconds is not a bug★: the axes are separate and the tree draws
+            //   「running wins」 (ADR-0173).
             // ADR-0172
             EarlyVerdict::Diagnosed(kind) => {
-                let reason = format!("resume 실패 진단({kind:?})");
+                let reason = format!("resume failure diagnosed ({kind:?})");
                 self.note_activation_result(profile.id, Some(spawned.epoch), Some(kind));
                 tracing::warn!(
                     agent = %profile.id,
                     %reason,
                     ?kind,
-                    "ADR-0172: 진단 스트림이 이어받기 실패를 확정 — 종료를 기다리지 않는다"
+                    "ADR-0172: the diagnostic stream settled the resume failure — not waiting for the exit"
                 );
                 (RestoreOutcome::Failed { reason }, Some(spawned), None)
             }
-            // ★프로세스는 살아 있는데 **쓸 수 없다** — 살아 있음을 성공으로 세지 않는 자리★.
-            //
-            // 이 갈래가 없던 시절의 결말이 ADR-0082 가 막으려던 바로 그것이었다: 이어받기가 거절당해도
-            //   자식은 멀쩡하고 거절은 stdout 으로 오므로 창은 `Running` 만 보았고, 아래 `Alive` 로
-            //   떨어져 **성공으로 보고되며 마지막 실패 기록까지 지웠다.**
-            // ★증거가 `reason` 하나뿐이다★ — 시체가 없어 콘솔 꼬리도 진단 꼬리도 비어 있다. 그래서
-            //   분류 입력으로 그 문자열을 그대로 넘긴다(무슨 뜻인지는 backend 지식 — ADR-0004).
-            // ★★처분은 `Diagnosed` 와 **다르다 — 이 갈래는 거둔다**★★: 통로는 자기 쪽 stdin 을 놓는
-            //   데까지만 하고(ADR-0199 의 선) 상대가 stdout 을 붙든 채 남으면 그 사슬이 안 돈다. 그래서
-            //   아래에서 `tear_down_failed_activation` 이 기존 2 동사로 거둔다(그 함수의 doc 이 「왜
-            //   매니저가 하나」의 정본).
-            //   ★한때 여기 「아무것도 죽이지 않는다 · 매니저는 관측만 한다」로 적혀 있었는데, 열네 줄
-            //   아래에 그 kill 이 있다★ — 그 문장은 통로가 유계로 기다렸다 스스로 거두던 라운드의 잔재다.
-            //   ADR-0082 의 「아무것도 죽지마」와 어긋나지 않는 이유(관측된 시체 vs 종점이 한 번도 안 선
-            //   화신)도 그 함수 doc 에 있다.
+            // ★The process is alive but **unusable** — alive is not counted as success★. Without this branch (ADR-0082's feared outcome) a refused resume left the
+            //   child fine, the window saw only `Running`, fell to `Alive`, **reported success and cleared the last failure**.
+            // ★The evidence is `reason` alone★ — no corpse, console and diagnostic tails empty; passed as is as the classification input (backend knowledge — ADR-0004).
+            // ★★Disposition **differs** from `Diagnosed` — this branch collects★★: the link only releases its stdin (ADR-0199's line) and if the peer keeps stdout the chain
+            //   never runs, so `tear_down_failed_activation` below collects it with the existing 2 verbs (its doc: why the manager). It does not conflict with
+            //   ADR-0082 「kill nothing」 (an observed corpse vs an incarnation whose terminal point never stood).
             EarlyVerdict::LinkFailed { reason } => {
                 let kind = backend::resume_failure_kind(&profile.command, &reason)
                     .unwrap_or(AgentFailureKind::EarlyExitAfterResume);
-                let reason = format!("resume 연결 실패: {reason}");
-                // ★★정리를 **먼저** 한다 — 기록보다 앞이다★★: 기록은 프로필 뮤텍스를 잡는데, 그 뮤텍스는
-                //   세션 id 기록 경로가 디스크 쓰기를 **쥔 채로** 들고 있을 수 있다. 순서를 뒤집으면
-                //   그 정체가 곧 「자식을 영영 안 죽인다」가 된다 — 백스톱은 바로 그 정체를 위해 있는데
-                //   그 정체 때문에 못 쓰게 되는 모양이다.
-                //   ★한때 여기 「기록이 먼저여야 한다 — 먼저 죽이면 `Killed` 가 서서 사용자 종료와
-                //   구별되지 않는다」로 적혀 있었는데 **그 사유는 틀렸다**★: 그 규율은
-                //   `early_activation_verdict` 의 종점 갈래 안에 있고, 그 함수는 이미 판정을 내고
-                //   돌아온 뒤다. 판정 **뒤에** 서는 상태는 그 판정을 바꾸지 못한다.
+                let reason = format!("resume connection failed: {reason}");
+                // ★★Cleanup **first** — before the record★★: the record takes the profile mutex, which the session id record path may hold **across a disk write**; reversed,
+                //   that stall would become 「never kills the child」 — the backstop exists for exactly that stall. (The old reason 「kill first sets `Killed`, indistinguishable
+                //   from a user exit」 was wrong: that discipline lives in `early_activation_verdict`, already decided and returned.)
                 self.tear_down_failed_activation(profile.id, spawned.epoch);
                 self.note_activation_result(profile.id, Some(spawned.epoch), Some(kind));
                 tracing::warn!(
                     agent = %profile.id,
                     %reason,
                     ?kind,
-                    "ADR-0082: 통로가 연결을 못 세웠다 → 활성화 실패, fresh-fallback 없음 — LLM 에스컬레이션 대상"
+                    "ADR-0082: the link could not set up the connection → activation failed, no fresh-fallback — a target for LLM escalation"
                 );
                 (RestoreOutcome::Failed { reason }, Some(spawned), None)
             }
-            // ★상대가 **준비됐다고 신호했다** = 성립(사용자 결정)★ — 창을 지켜본 것이 아니라 긍정 증거를
-            //   받은 것이다. 그래서 이 갈래는 `Alive` 보다 **빨리**, 그리고 **강한 근거로** 도착한다.
-            //
-            // ★★그런데 「마지막 실패」는 **지우지 않는다**★★(사용자 조건): 이 성공은 낙관적이다 —
-            //   에이전트가 입력을 받을 수 있다는 것까지가 관측이고, 그 뒤에 일어나는 일(턴 오류·연결
-            //   끊김)은 **다른 경로가 지는 다른 사건**이다. 원래 결함의 절반이 「성공 보고가 실패 증거를
-            //   함께 지운 것」이었고, 판정이 빨라진 만큼 그 파괴는 더 이르게 일어난다.
-            // ★그래서 지움 규칙을 이렇게 둔다 — **자동으로는 아무것도 안 지운다**★:
-            //   이 기록이 답하는 질문은 「직전 활성화가 어떻게 끝났나」이고, 그것을 무효로 만드는 증거는
-            //   **다음 실패가 덮어쓰는 것**(`set_last_failure(Some(..))`)과 **프로필 자체가 사라지는 것**
-            //   뿐이다. 「지금 떠 있다」는 그 질문에 대한 답이 아니다.
-            //   ★대가를 정직하게 적는다★: 그래서 낡은 실패가 산 에이전트 옆에 남을 수 있다. 화면에서는
-            //   그 조합이 「도는 중이 이긴다」로 그려지므로(ADR-0173) 오해로 이어지지 않고, 반대 방향의
-            //   대가(증거 소실)는 되돌릴 수 없다 — 그래서 남기는 쪽을 고른다.
-            // ★claude 는 이 갈래로 오지 않는다★ — 그쪽 통로는 연결 축이 없어 아래 `Alive` 로 간다.
-            //   지움 규칙을 그쪽으로 넓히지 말 것(별건이고, 그 경로는 이 결정의 범위 밖이다).
+            // ★The other side **signaled ready** = holds★ — positive evidence, so this branch arrives **sooner** than `Alive` on **stronger grounds**.
+            // ★★But 「the last failure」 is **not cleared**★★: this success is optimistic — it observes only that the agent can take input; what follows (turn errors ·
+            //   connection drops) is **a different event on a different path**, and a success report erasing the failure evidence was half the original defect.
+            // ★Nothing is cleared automatically★: the record answers 「how the last activation ended」; only **the next failure overwriting it**
+            //   (`set_last_failure(Some(..))`) or **the profile disappearing** invalidates it. ★Cost★: a stale failure may sit next to a live agent — drawn with
+            //   「running wins」 (ADR-0173); the opposite error (evidence loss) is irreversible.
+            // ★claude does not come here★ (no connection axis → `Alive` below); do not widen the clearing rule to it.
             EarlyVerdict::Ready => {
-                // 손잡이 없는 요청은 위 머리에서 새 대화로 빠졌으므로 여기 오는 것은 이어받기뿐이다.
+                // A request without a handle already fell out to a new conversation at the head above, so what comes here is only resumes.
                 (RestoreOutcome::Resumed, Some(spawned), launched)
             }
             EarlyVerdict::Alive => {
-                // ★조기종료 창을 넘겼고 진단도 침묵했다 = 이어받을 대화가 실재했다★ — 여기가 「지움」의
-                //   근거다(`note_activation_result` 주석).
-                // ★이 갈래로 오는 것은 **연결 축이 없는 통로**뿐이다★(claude·shell·stdio) — 연결을
-                //   선언하는 통로는 위 `Ready`/`LinkFailed` 에서 이미 갈린다. 그래서 지움 규칙이 여기
-                //   남아 있는 것이 claude 경로를 그대로 두는 것과 같은 말이다.
+                // ★Passed the early-exit window with silent diagnostics = the conversation to resume really existed★ — the ground of 「clearing」 (`note_activation_result`).
+                // ★Only **links without a connection axis** reach here★ (claude · shell · stdio); connection-declaring links split at `Ready`/`LinkFailed` above.
                 self.note_activation_result(profile.id, Some(spawned.epoch), None);
                 (RestoreOutcome::Resumed, Some(spawned), launched)
             }
         })
     }
 
-    /// 활성화가 **실패로 확정된** 세션을 끝낸다 — 프로세스가 아직 살아 있을 때만 의미가 있다.
+    /// Ends a session whose activation is **settled as failed** — meaningful only while the process is still alive.
     ///
-    /// ★왜 매니저가 하나★: 이어받기가 거절되면 통로는 자기 쪽 stdin 만 놓고, 그 뒤 상대가 스스로 끝나기를
-    ///   기다린다. 상대가 stdout 을 붙든 채 남으면 리더가 EOF 를 못 봐 `OutputCore::finish` 가 영영 안 돌고,
-    ///   그 메시지의 단독 소비자인 reaper 도 움직이지 않는다 — 자식·Job·스레드가 데몬 수명 내내 묶인다.
-    ///   그 처분의 주인은 **kill 핸들러**이고(ADR-0001 의 2 동사), 통로가 아니다.
-    ///   ★한때 통로의 라이터가 직접 kill 하던 자리가 있었는데 그것이 ADR-0199 가 그은 선을 넘는 것이라
-    ///   걷어냈다 — 되살리지 말 것★. 여기가 그 대체이고, 새로 발명한 동사가 아니라 이미 있는 teardown 이다.
-    /// ★`kill_agent` 를 그대로 부르지 않는 이유 = **사용자 종료 표식**★: 그쪽은
-    ///   `TerminationIntent::UserKill` 을 세우는데 이건 사용자가 끈 것이 아니다. 그 표식은 `ReapMsg` 에
-    ///   frozen 으로 실려 나가므로, 거짓으로 세우면 종료 분류 기록이 통째로 거짓이 된다.
-    /// ★ADR-0082 「아무것도 죽지마」와 충돌하지 않는다★ — 그 결정이 지키는 것은 **관측된 종점(시체)** 이고,
-    ///   여기서 끝내는 것은 종점이 **한 번도 서지 않은** 화신이다. 죽이는 것이 증거를 지우는 게 아니라
-    ///   **없던 증거(종료 전이)를 만드는** 쪽이다. 실패 사유는 이 호출 **전에** 이미 기록된다.
-    /// ★그래서 `Terminal`·`Diagnosed` 갈래에서는 부르지 않는다★ — 그쪽은 자식이 이미 죽었거나(시체 보존),
-    ///   claude 가 종료 훅을 도는 중이라 ADR-0082 가 그대로 적용된다.
+    /// ★Why the manager★: a refused resume makes the link release only its stdin and wait for the peer to end; if the peer keeps stdout, the reader never sees EOF,
+    /// `OutputCore::finish` and the reaper never run, and the child, Job and threads stay for the daemon's lifetime. The owner is **the kill handler** (ADR-0001's
+    /// 2 verbs), not the link — do not bring back the link writer's direct kill (crosses ADR-0199's line). This is an existing teardown, not a new verb.
+    /// ★Not `kill_agent` as is★: it sets `TerminationIntent::UserKill`, but this is not the user turning it off; that marker is frozen into `ReapMsg`, so a false
+    /// one falsifies the exit classification.
+    /// ★No conflict with ADR-0082 「kill nothing」★: that guards an **observed terminal point (corpse)**; here the terminal point **never stood**, and killing
+    /// **creates the exit transition** rather than erasing evidence (the failure reason is recorded **before** this call). So not called for `Terminal` ·
+    /// `Diagnosed` (child already dead / claude in its exit hook).
     fn tear_down_failed_activation(&self, id: AgentId, incarnation: u32) {
         let Ok(session) = self.get_session(id) else {
             return;
         };
-        // ★★표식이 다르면 **손대지 않는다**★★: 이 정리는 판정만큼 늦게 도착하고, 그 사이 이 화신이
-        //   수거되고 **다음 화신이 떴을 수 있다.** id 로만 찾아 죽이면 그때 죽는 것은 실패한 세션이 아니라
-        //   **막 뜬 건강한 후임**이고, `revoke` 도 그 후임의 토큰을 지운다.
-        //   ★비교는 일치/불일치뿐★ — 대소로 「더 새 것」을 유도하지 않는다(ADR-0163/0164).
+        // ★★A differing marker is **not touched**★★: this cleanup arrives as late as the decision and the incarnation may have been collected and **the next one launched**;
+        //   killing by id alone would kill **the healthy successor** and `revoke` would erase its token. ★Match/mismatch only★ (ADR-0163/0164).
         if session.epoch != incarnation {
             tracing::info!(
                 agent = %id,
                 expected = incarnation,
                 live = session.epoch,
-                "실패한 활성화의 정리를 건너뛴다 — 그 사이 다른 화신이 섰다(산 세션을 죽이지 않는다)"
+                "skipping cleanup of the failed activation — another incarnation stood in between (not killing a live session)"
             );
             return;
         }
-        // 물러남 예고가 첫 걸음이다(사유 = `kill_agent` 의 같은 줄). ★표식 대조 **뒤**여야 한다★ — 앞이면 산 후임의
-        //   통로가 되돌릴 수 없는 물러남 표시를 받는다.
+        // The retreat notice is the first step (reason: `kill_agent`). ★It must come **after** the marker comparison★ — before it, the live successor's link would receive an irreversible retreat marker.
         session.begin_retire();
-        // 실행 재료는 여기서 거두지 않는다 — 자식이 끝난 뒤 reaper 가 거둔다(`kill_agent` 의 같은 줄).
+        // Launch materials are not reclaimed here — the reaper reclaims them after the child ends (the same line as `kill_agent`).
         // TRD S25 §5-2 4 (c2) ④
         self.control.revoke(id, session.epoch);
         let _ = session.enter_exiting();
         session.kill(Duration::from_secs(5));
     }
 
-    /// spawn 후 window 안에 이어받기의 결말을 판정한다 — **죽음 또는 증거**(`EarlyVerdict`).
+    /// After spawn, decides the resume outcome within the window — **death or evidence** (`EarlyVerdict`).
     ///
-    /// ★증거를 죽음보다 먼저 보지 않는다(루프 안 순서 — load-bearing)★: 매 폴에서 상태를 먼저 보고
-    ///   그 다음 진단을 본다. 뒤집으면 창 안에 온 **사용자 종료**가 `Diagnosed` 로 앞질러 잡혀,
-    ///   "사용자가 끊은 것은 실패가 아니다" 규율(아래 `resume_no_fallback`)이 우회된다.
-    /// ★진단만으로 확정하는 것은 stderr 스트림뿐이다 — 콘솔 링을 여기에 넣지 마라★: 콘솔 링에는
-    ///   claude 가 이어받아 **다시 그린 대화 본문**이 통째로 들어온다. 살아 있는 세션의 링에서 실패
-    ///   문구를 찾으면, 예전에 그 문구를 이야기한 대화(이 저장소의 세션이 실제로 그렇다)를 이어받는
-    ///   순간 **성공한 활성화가 실패로 도장 찍힌다.** stderr 는 claude 자신의 진단 채널이라 대화 본문이
-    ///   섞이지 않으므로 그 오탐이 원천적으로 없다. 콘솔 꼬리는 **죽은 뒤**에만 증거로 쓴다(아래).
-    /// ★세션 Arc 를 **루프 밖에서 한 번** 잡는다(load-bearing — 되돌리지 마라)★: 루프 안에서 매번
-    ///   `get_session` 하면 거의 항상 꼬리를 놓친다. `finish` 는 terminal 상태를 세운 **직후** reaper 를
-    ///   깨우고 reaper 는 첫 동작으로 세션을 명부에서 지우는데, 이 루프의 간격은 100ms 다 — 즉 우리가
-    ///   깨어날 때쯤엔 이미 조회가 실패해 빈 꼬리로 떨어지고, 분류는 언제나 맥락 기본값이 된다
-    ///   (그러면 「이어받을 대화 없음」 판정이 사실상 죽은 코드가 된다). Arc 를 들고 있으면 명부에서
-    ///   빠진 뒤에도 같은 `OutputCore` 를 보므로 terminal 상태도 출력 링도 진단 버퍼도 그대로 읽힌다.
-    /// ★첫 조회 실패는 "세션이 없었다" 가 아니다★: `spawn_agent` 가 Ok 를 준 뒤 이 조회에 닿기까지 자식이
-    ///   죽어 reaper 가 이미 거둬 갔을 수 있다(빠른 즉사 배치가 실제로 그 순서를 낸다). 그 경우 꼬리를
-    ///   놓치므로 분류는 맥락 기본값으로 떨어진다 — 어느 쪽이든 재시도 가능 쪽이라 fail-open 이고, 그래서
-    ///   여기서 두 원인을 가르지 않는다.
-    /// ★증거 두 갈래는 배타적이고, 그래서 합쳐서 넘긴다★: PTY(터미널) 세션은 stderr 가 콘솔에 병합돼
-    ///   링에만 있고, 파이프(구조화) 세션은 진단 버퍼에만 있다. 어느 쪽이든 빈 값이 정상 결과이며,
-    ///   둘 다 비면 호출자가 맥락 기본값으로 떨어뜨린다(fail-open).
-    /// ★`command` 를 받는 이유★: "이 문구가 무슨 뜻인가" 는 백엔드 지식이라 판정을 `backend` 에 위임한다
-    ///   (ADR-0004) — manager 는 문자열을 직접 읽지 않는다.
+    /// ★Evidence is not looked at before death (loop order — load-bearing)★: each poll checks state first, then diagnostics; reversed, a **user exit** inside the window
+    /// would be caught as `Diagnosed`, bypassing "what the user interrupted is not a failure" (`resume_no_fallback`).
+    /// ★Only the stderr stream settles by diagnostics — not the console ring★: on resume the ring receives **the redrawn conversation body**, so a conversation that once
+    /// mentioned that text would **stamp a successful activation as failure** (this repository's sessions do). stderr is claude's own diagnostic channel; the console tail
+    /// is evidence only **after death**.
+    /// ★Take the session Arc **once outside the loop** (do not revert)★: `finish` wakes the reaper right after the terminal state and the reaper first removes the session
+    /// from the roster, while the loop polls every 100ms — a per-iteration `get_session` misses the tail almost always and classification always falls to the contextual
+    /// default. Holding the Arc keeps the same `OutputCore` readable after it leaves the roster.
+    /// ★The first lookup failure is not "no session"★: the child may have died and been collected between `spawn_agent` returning and here; the tail is missed and the
+    /// classification falls to the retryable contextual default (fail-open) — causes are not told apart.
+    /// ★The two evidence kinds are exclusive, passed merged★: PTY sessions merge stderr into the console ring, pipe sessions keep it in the diagnostic buffer; both empty →
+    /// contextual default. `command` is received because what the text means is backend knowledge (ADR-0004).
     // ADR-0172
     fn early_activation_verdict(
         &self,
         id: AgentId,
         command: &AgentCommand,
         window: Duration,
-        // ★이 갈래는 연결 축이 없는 통로 전용이라 백스톱을 쓰지 않는다★ — 인자를 남겨 두는 것은 두
-        //   판정의 호출 모양을 같게 유지하기 위함이고, 쓰이지 않는다는 사실이 그 자체로 계약이다.
+        // ★This branch is only for links without a connection axis, so it does not use the backstop★ — the argument keeps the two decisions' call shape the same; being unused is the contract.
         _link_backstop: Duration,
     ) -> EarlyVerdict {
         let session = match self.get_session(id) {
             Ok(s) => s,
-            // 명부에 없다 = 아직 안 올랐거나 이미 거둬졌다 → 어느 쪽이든 종료로 간주(위 doc).
-            // ★이 `AgentStatus::Failed` 는 **공표되지 않는다**★: `StatusSink` 에 닿지 않는 지역값이라
-            //   화면·프론트에는 안 나가고, 아래 `format!("resume 조기 종료({status:?})")` 의 사유 문자열과
-            //   `matches!(status, AgentStatus::Killed)` 판정에만 쓰인다. 그래서 "공표되는 `Failed` 는
-            //   pump 패닉 전용"이 그대로 성립한다 — 다만 *코드에 두 곳뿐*이라고 적으면 여기서 거짓이 된다
-            //   (문서가 그렇게 적었다가 2026-08-25 에 정정됐다. 정본 = docs/reference/architecture.md 「세션 복원 · 활성화」).
+            // Not in the roster = not on it yet or already collected → treated as exited.
+            // ★This `AgentStatus::Failed` is **not published**★ — a local value never reaching `StatusSink`, used only in the reason string
+            //   `format!("resume exited early ({status:?})")` and the `matches!(status, AgentStatus::Killed)` decision. "A published `Failed` is only for pump panics" holds;
+            //   canonical: docs/reference/architecture.md 「Session restore · activation」.
             Err(_) => {
                 return EarlyVerdict::Terminal {
                     status: AgentStatus::Failed {
@@ -2948,9 +2488,8 @@ impl AgentManager {
                 }
             }
         };
-        // ★연결 축이 **없는** 통로만 여기로 온다★ — 축이 있는 쪽은 아래
-        //   [`AgentManager::link_activation_verdict`] 가 배달을 기다린다. 이 갈래는 claude·shell·stdio·
-        //   codex 터미널의 길이고, 라운드 2 이전과 **바이트 단위로 같다**(창 하나, 결말 `Alive`).
+        // ★Only links **without** a connection axis come here★ (claude · shell · stdio · codex terminal); the axis side waits for delivery in [`AgentManager::link_activation_verdict`]. **Byte for byte** as before
+        //   round 2 (one window, outcome `Alive`).
         let deadline = Instant::now() + window;
         loop {
             let status = session.status();
@@ -2973,24 +2512,13 @@ impl AgentManager {
         }
     }
 
-    /// 사용자 취소를 판정으로 옮긴다 — ★`Killed` 를 **여기서 세운다**★.
-    ///
-    /// ★이 `AgentStatus::Killed` 는 공표되지 않는다★: `StatusSink` 에 닿지 않는 지역값이라 화면·프론트로
-    ///   나가지 않고, 호출자의 사유 문자열과 `matches!(status, AgentStatus::Killed)` 판정에만 쓰인다
-    ///   (`early_activation_verdict` 의 `"session gone"` 값과 같은 부류·같은 근거).
-    /// ★「이미 죽었다」가 아니라 「사용자가 끊기로 했다」를 뜻한다★ — 그 순간 자식은 아직 살아 있을 수
-    ///   있다(`session.kill()` 이 도는 중이다). 우리가 단언하는 것은 **이 활성화의 결말을 사용자가
-    ///   정했다**는 것 하나이고, 호출자가 그 값으로 하는 일은 「실패로 기록하지 않는다」뿐이다.
-    /// ★★가로챈 배달의 사유를 **여기서 나르지 않는다 — 나를 곳이 없기 때문이다**★★:
-    ///   이 값을 받는 두 소비자(`spawn_fresh_settled` · `resume_no_fallback`)는 `Killed` 갈래에서
-    ///   **아무것도 기록하지 않고 `evidence` 도 읽지 않는다** — 사용자가 끈 것은 분류할 실패가 아니라서다.
-    ///   한때 이 함수가 그 사유를 `evidence` 에 이어 붙이고 「여기서 안 실으면 어디에도 안 남는다」고
-    ///   적었는데, **둘 다 거짓이었다**: 싣고 나서 아무도 안 읽었고, 그 문구는 이미 남아 있다 —
-    ///   통로가 실패 갈래에 들어서자마자 `tracing::warn!` 로 낸다(`backend/codex/transport.rs` 의
-    ///   `writer_loop`, `deliver_link` 보다 **앞**이고 종료 래치에 **억제되지 않는다**). 없는 보존을
-    ///   약속하던 자리라 걷었다 — 지난 라운드에 걷어낸 `take()` 주장과 같은 부류다.
-    /// ★그래서 꼬리를 로그로 쏟지도 않는다★ — `Killed` 갈래에서 `evidence` 를 찍으면 사용자가 끌 때마다
-    ///   최대 4 KiB 콘솔 꼬리(대화 본문이 들어 있을 수 있다)가 데몬 로그로 나간다. 얻을 것이 없다.
+    /// Moves the user's cancellation into the decision — ★`Killed` is **set here**★. ★Not published★: a local value never reaching `StatusSink`, used only in the caller's
+    /// reason string and the `matches!(status, AgentStatus::Killed)` decision (same as `early_activation_verdict`'s `"session gone"`).
+    /// ★It means 「the user decided to interrupt」, not 「already dead」★ (`session.kill()` may still be running); the caller only uses it to 「not record a failure」.
+    /// ★The reason of the intercepted delivery is **not carried here — nowhere to carry it**★: `spawn_fresh_settled` · `resume_no_fallback` record nothing and do not read
+    /// `evidence` in the `Killed` branch, and the text already remains (the link `tracing::warn!`s it in the failure branch — `writer_loop` of
+    /// `backend/codex/transport.rs` — before `deliver_link`, not suppressed by the exit latch). ★Nor dump the tail to the log★: up to 4 KiB of possible conversation body
+    /// per user turn-off, for nothing.
     fn cancelled_verdict(session: &AgentSession) -> EarlyVerdict {
         EarlyVerdict::Terminal {
             status: AgentStatus::Killed,
@@ -2998,7 +2526,7 @@ impl AgentManager {
         }
     }
 
-    /// 종점 증거 — 콘솔 꼬리 + 진단(stderr) 꼬리. 두 스트림은 통로에 따라 배타적으로 찬다.
+    /// Terminal evidence — console tail + diagnostic (stderr) tail. The two streams fill exclusively depending on the link.
     fn terminal_evidence(session: &AgentSession) -> String {
         let tail = session.terminal_tail(FAILURE_TAIL_BYTES);
         let mut evidence = String::from_utf8_lossy(&tail).into_owned();
@@ -3010,31 +2538,19 @@ impl AgentManager {
         evidence
     }
 
-    /// 연결을 세우는 통로의 활성화 판정 — ★상태를 **읽지** 않고 결말이 **배달되기를** 기다린다★.
+    /// The activation decision of a link that sets up a connection — ★it does not **read** state but waits for the outcome to be **delivered**★.
     ///
-    /// ★이 함수가 따로 있는 이유★: 읽기 기반 판정과 배달 기반 판정은 같은 루프에 못 들어간다. 섞으면
-    ///   「읽은 뒤 행동하기까지의 틈」이 되살아나고, 그 틈이 곧 이 라운드가 닫은 결함 넷이다. 그리고
-    ///   축이 없는 backend 의 길을 **한 줄도** 건드리지 않는 것이 이 분리의 두 번째 값어치다.
-    ///
-    /// 네 가지만 본다 — ★첫째가 **나머지 셋보다 먼저**다★:
-    ///   1. **사용자 취소 래치** — `kill_agent` 가 통로를 내리기 **전에** 세운다. 배달·채널 소멸·상태
-    ///      어느 것보다 먼저 보이므로, 이것을 먼저 보지 않으면 사용자의 취소가 실패나 성공으로 둔갑한다
-    ///      (아래 두 갈래의 주석이 그 두 둔갑의 정본).
-    ///   2. **배달된 결말** — 한 번 보내지면 철회되지 않는다. 화신 표식이 이 spawn 의 것일 때만 받는다.
-    ///   3. **종점 상태** — 래치다(`OutputCore` 가 한 번만 세운다). 그래서 읽어도 뒤집히지 않는다.
-    ///   4. **백스톱** — 통로가 결말을 **못 내는** 경로의 liveness 장치이지 판정 창이 아니다
-    ///      ([`LINK_RESOLUTION_BACKSTOP`]).
-    ///
-    /// ★★종점이 배달을 이기지는 **않는다** — 취소만 이긴다★★: `Ready` 가 실제로 배달됐다면 상대는
-    ///   준비됐다고 **신호한 것**이고, 그 뒤에 스스로 죽는 것은 ADR-0201 이 「별개 사건」으로 못박은
-    ///   그것이다(pump → 종점 → reaper 가 본다). 그래서 자기 죽음으로 성공 판정을 뒤집지 않는다 —
-    ///   대신 호출자가 **그 순간의 상태를 다시 떠서** 돌려준다(`spawn_fresh_settled` 의 `Ready` 갈래 ·
-    ///   `activate_profile` 의 Resume 갈래). 사용자 취소는 다르다: 그건 이 활성화의 결말을 **사람이
-    ///   정한 것**이라 판정 자체가 바뀐다.
-    /// ★`epoch` 을 받아 **일치할 때만** 받는다★ — 오늘 그 불일치가 실제로 생기지 않는 이유와 그래도
-    ///   남겨 두는 이유는 아래 `as_verdict` 의 doc 이 갖는다(여기 되풀어 적지 않는다).
-    /// ★백스톱 직전에 **한 번 더 배달을 확인한다**★ — 시한과 배달이 겹치면 배달이 이긴다. 안 그러면
-    ///   막 성립한 연결이 실패로 기록되고 죽는다(결함 ②: 원래 결함의 부호만 뒤집힌 판).
+    /// ★Why separate★: read-based and delivery-based decisions cannot share a loop — mixing revives 「the gap between reading and acting」 (the four defects this round
+    /// closed) — and backends without the axis must not change by a line.
+    /// It looks at four things — ★the first **before the other three**★: 1. **the user cancellation latch** (`kill_agent` sets it **before** bringing the link down;
+    /// visible before delivery, channel loss and state — else cancellation masquerades as failure or success); 2. **the delivered outcome** (not withdrawn once sent;
+    /// accepted only for this spawn's marker); 3. **the terminal state** (a latch, set once); 4. **the backstop** (liveness for paths where the link **cannot** produce an
+    /// outcome — [`LINK_RESOLUTION_BACKSTOP`]).
+    /// ★★The terminal **does not** beat delivery — only cancellation does★★: a delivered `Ready` means the peer **signaled** ready, and dying later is 「a separate event」
+    /// (ADR-0201); the caller **re-takes the state** and returns it (`Ready` branch of `spawn_fresh_settled` · Resume branch of `activate_profile`). Cancellation is
+    /// **a person deciding** the outcome.
+    /// ★Accepts `epoch` **only on match**★ (why it never mismatches today and stays: `as_verdict`). ★Right before the backstop it **re-checks delivery**★ — on overlap delivery
+    /// wins, else a connection that just held would be recorded as failure and die (defect ②).
     fn link_activation_verdict(
         &self,
         id: AgentId,
@@ -3042,24 +2558,18 @@ impl AgentManager {
         link_rx: &Receiver<LinkVerdict>,
         backstop: Duration,
     ) -> EarlyVerdict {
-        /// 배달 한 건을 판정으로 옮긴다 — 표식이 다르면 **버린다**(다른 화신의 결말이다).
+        /// Moves one delivery into a decision — a differing marker is **dropped** (another incarnation's outcome).
         ///
-        /// ★★이 가드는 **오늘 운영에서 발화하지 않는다 — 그것을 알고 남긴다**★★: 배달함은 spawn 마다
-        ///   새로 만들고([`AgentManager::spawn_agent_watching_link`]) 표식은 그때 포트 클로저에 구워
-        ///   넣으므로, 이 `rx` 로 오는 모든 메시지는 정의상 우리가 기다리는 그 표식을 단다. 즉 오늘
-        ///   불일치를 막는 실물은 이 `if` 가 아니라 **채널의 신선도**다.
-        /// ★그래도 지우지 않는 이유★: 채널을 공유하게 만드는 변경(한 감독자가 여러 spawn 을 보거나,
-        ///   포트를 재사용하거나)이 오면 그 순간 이것이 유일한 벽이 된다. 값싸고 옳다.
-        /// ★한때 이 자리에 「수거된 화신의 결말이 막 뜬 후임에게 적용되는 것을 이 가드가 막는다」로
-        ///   적혀 있었는데 **그렇게 읽으면 거짓이다**★ — 그 일이 안 일어나는 진짜 이유가 채널 신선도라,
-        ///   그 문장을 믿는 사람은 한 번도 발화한 적 없는 가드에 기대게 된다. 발화 경로는 시험대에만
-        ///   있다(`a_verdict_from_another_incarnation_is_discarded` 가 채널을 손으로 만든다).
+        /// ★This guard **does not fire in production today — kept knowingly**★: the mailbox is made per spawn ([`AgentManager::spawn_agent_watching_link`]) with the marker baked
+        /// into the port closure, so every message in this `rx` carries the awaited marker; what blocks mismatches is **channel freshness**, not this `if`. It stays because a
+        /// shared channel (one supervisor over several spawns, a reused port) would make it the only wall. Do not claim it prevents a collected incarnation's outcome reaching
+        /// the successor — it only fires in the test rig (`a_verdict_from_another_incarnation_is_discarded`).
         fn as_verdict(v: LinkVerdict, epoch: u32) -> Option<EarlyVerdict> {
             if v.epoch != epoch {
                 tracing::debug!(
                     delivered = v.epoch,
                     expected = epoch,
-                    "다른 화신의 연결 결말이 도착했다 — 버린다"
+                    "another incarnation's connection outcome arrived — dropping it"
                 );
                 return None;
             }
@@ -3069,14 +2579,11 @@ impl AgentManager {
             })
         }
 
-        /// ★★사용자가 이 화신을 끊었나 — **배달보다 먼저 보는 래치**★★.
+        /// ★★Did the user interrupt this incarnation — **the latch looked at before delivery**★★.
         ///
-        /// ★종점 상태로는 이것을 못 본다★: `kill_agent` 는 `set_intent(UserKill)` → `enter_exiting()`
-        ///   → `session.kill()` 순서로 가고, 종점 전이(`Killed`)는 그 뒤 pump 가 깨어야 선다. 그
-        ///   사이의 상태는 `Exiting` 이라 **종점이 아니고**, 그 구간에 통로가 사라지면 아래 `Disconnected`
-        ///   갈래가 그것을 「연결 실패」로 적는다 — 사용자의 취소가 이어받기 실패로 둔갑한다.
-        /// ★이 래치는 그 모든 관측보다 **반드시 먼저** 보인다★ — 위 순서가 그것을 보장한다
-        ///   (`AgentSession::termination_intent` 의 doc 이 그 인과의 정본).
+        /// ★It cannot be seen through the terminal state★: `kill_agent` goes `set_intent(UserKill)` → `enter_exiting()` → `session.kill()` and `Killed` stands only when the
+        /// pump wakes after; the in-between state is `Exiting` (**not terminal**), and a link disappearing then would be recorded by the `Disconnected` branch as 「connection
+        /// failure」. The latch is **always visible before** those observations (`AgentSession::termination_intent`).
         fn user_cancelled(session: &AgentSession) -> bool {
             matches!(session.termination_intent(), TerminationIntent::UserKill)
         }
@@ -3094,19 +2601,15 @@ impl AgentManager {
         };
         let deadline = Instant::now() + backstop;
         loop {
-            // ★기다림을 슬라이스로 끊는 이유는 **종점 래치를 같이 보기 위해서**다★ — 배달은 이 대기를
-            //   즉시 깨우므로 슬라이스 길이가 성공 지연을 만들지 않는다.
+            // ★The wait is sliced **to look at the terminal latch together**★ — delivery wakes it at once, so the slice adds no success latency.
             let slice = deadline
                 .saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(100));
             match link_rx.recv_timeout(slice) {
                 Ok(v) => {
-                    // ★★사용자 취소가 **배달을 이긴다**★★: 핸드셰이크가 성공해 `Ready` 가 큐에 선
-                    //   직후 사용자가 끊으면, 이 자리에서 그 `Ready` 를 그대로 받아 **죽은 에이전트를
-                    //   성공으로 보고**했다(`restore_one` 은 `Resumed`, `activate_profile` 은 `Ok`).
-                    //   래치를 먼저 보면 그 조합이 「사용자가 끈 것」으로 떨어져 기록도 보고도 정직해진다.
-                    // ★버린 배달의 사유는 **여기서 나르지 않는다**★ — 받는 쪽이 `Killed` 갈래에서
-                    //   `evidence` 를 안 읽고, 그 문구는 이미 통로가 로그로 냈다(`cancelled_verdict` doc).
+                    // ★★User cancellation **beats delivery**★★: if the user interrupts right after the handshake and `Ready` is queued, taking that `Ready` would **report a dead agent as
+                    //   success** (`restore_one` `Resumed`, `activate_profile` `Ok`); the latch first falls to 「what the user turned off」, so record and report stay honest.
+                    // ★The dropped delivery's reason is **not carried**★ — the receiver does not read `evidence` in `Killed` and the link already logged it (`cancelled_verdict`).
                     if user_cancelled(&session) {
                         return Self::cancelled_verdict(&session);
                     }
@@ -3116,21 +2619,14 @@ impl AgentManager {
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    // ★★래치를 **상태보다 먼저** 본다 — 순서를 되돌리지 마라★★: 통로가 사라지는 흔한
-                    //   원인 하나가 **사용자 kill 그 자체**다. kill 은 배달을 억제하고(통로의
-                    //   `deliver_link`) 라이터를 끝내는데, 라이터가 끝나면 보내는 끝이 떨어져 이 갈래가
-                    //   깨어난다 — 그때 `session.kill()` 은 아직 `child.kill()`/`wait()` 안이고 pump 는
-                    //   `finish` 를 못 돌았으므로 상태는 `Exiting`(**종점이 아니다**)이다.
-                    //   상태만 보던 옛 모양은 그 한 번의 읽기로 「통로가 결말을 배달하지 못한 채
-                    //   사라졌다」를 확정했고, 그래서 **사용자의 취소가 이어받기 실패로 기록됐다** —
-                    //   억제 장치가 막으려던 바로 그 결말이다.
-                    // ★유예를 두지 않는 것이 의도다★ — 이 래치는 kill 경로에서 통로 소멸보다 **반드시
-                    //   먼저** 서므로 기다릴 이유가 없고, kill 이 아닌 소멸에서는 유예를 줘도 결말이
-                    //   실패로 같다(문구만 갈린다).
+                    // ★★The latch is looked at **before the state** — do not revert the order★★: a common cause of the link disappearing is **the user kill itself** — it suppresses delivery,
+                    //   ends the writer, the sending end drops and this branch wakes while `session.kill()` is still in `child.kill()`/`wait()` and the state is `Exiting` (**not terminal**).
+                    //   State-only reading recorded **the user's cancellation as a resume failure**, what the suppression meant to prevent.
+                    // ★No grace period, intended★: on the kill path the latch stands **before** the link disappears, and for a non-kill disappearance a grace period gives the same failure.
                     if user_cancelled(&session) {
                         return Self::cancelled_verdict(&session);
                     }
-                    // 통로가 배달 없이 사라졌다 — 남은 사실은 종점 상태뿐이다.
+                    // The link disappeared without delivery — the only fact left is the terminal state.
                     let status = session.status();
                     if matches!(
                         status,
@@ -3144,25 +2640,26 @@ impl AgentManager {
                         };
                     }
                     return EarlyVerdict::LinkFailed {
-                        reason: "통로가 연결의 결말을 배달하지 못한 채 사라졌다".to_string(),
+                        reason: "the link disappeared without delivering the connection outcome"
+                            .to_string(),
                     };
                 }
                 Err(RecvTimeoutError::Timeout) => {}
             }
 
-            // ★사용자 kill 이 여기로도 온다★ — 위 두 갈래와 같은 규율이고, 종점 전이를 기다리지 않는다.
+            // ★A user kill also comes here★ — the same discipline as the two branches above, and it does not wait for the terminal transition.
             if user_cancelled(&session) {
                 return Self::cancelled_verdict(&session);
             }
 
-            // ★종점은 래치라 읽어도 안전하다★ — `OutputCore` 가 한 번만 세우고 되돌리지 않는다.
+            // ★The terminal is a latch, so reading it is safe★ — `OutputCore` sets it only once and does not revert it.
             let status = session.status();
             if matches!(
                 status,
                 AgentStatus::Exited { .. } | AgentStatus::Killed | AgentStatus::Failed { .. }
             ) {
                 let mut evidence = Self::terminal_evidence(&session);
-                // 종점이 배달을 앞질렀어도 사유는 살린다 — 그 문구는 두 꼬리 어디에도 없다.
+                // Even if the terminal outran delivery, the reason is kept — that text is in neither tail.
                 if let Ok(v) = link_rx.try_recv() {
                     if v.epoch == epoch {
                         if let LinkResolution::Failed { reason } = v.resolution {
@@ -3177,7 +2674,7 @@ impl AgentManager {
             }
 
             if Instant::now() >= deadline {
-                // ★포기하기 전에 **마지막으로** 배달함을 본다★ — 결함 ② 가 여기서 닫힌다.
+                // ★Before giving up, look at the mailbox **one last time**★ — defect ② closes here.
                 if let Ok(v) = link_rx.try_recv() {
                     if let Some(verdict) = as_verdict(v, epoch) {
                         return verdict;
@@ -3185,7 +2682,7 @@ impl AgentManager {
                 }
                 return EarlyVerdict::LinkFailed {
                     reason: format!(
-                        "통로가 {}초 안에 연결의 결말을 내지 못했다 — 상대가 답도 하지 않고 우리 쓰기도                          받지 않는다(핸드셰이크 상한은 응답 대기에만 걸린다)",
+                        "the link did not produce the connection outcome within {} seconds — the other side neither answers nor accepts our writes (the handshake cap applies only to waiting for responses)",
                         backstop.as_secs()
                     ),
                 };
@@ -3193,7 +2690,7 @@ impl AgentManager {
         }
     }
 
-    // ── 구독/입출력 ────────────────────────────────────────────────────────
+    // ── Subscribe/IO ────────────────────────────────────────────────────────
 
     pub fn subscribe(
         &self,
@@ -3204,22 +2701,15 @@ impl AgentManager {
         Ok(session.subscribe(sink))
     }
 
-    /// `requested_epoch` = 구독자가 마지막으로 본 화신 표식. 세션이 자기 표식과 대조한다.
+    /// `requested_epoch` = the incarnation marker the subscriber last saw; the session compares it with its own.
+    /// ★One session lookup — do not add a second★: the response's incarnation marker, resume marker and replay must come from the same session.
     ///
-    /// ★세션 조회는 한 번이다 — 두 번째 조회를 더하지 말 것★: 응답의 화신 표식·이어받기 표식과 replay 가
-    ///   같은 세션에서 나와야 한다. 따로 조회하면 그 사이에 화신이 갈려 표식이 replay 한 것과 다른 화신을
-    ///   말한다.
-    ///
-    /// ## ★계약: `Err` ⟹ `on_ready` 는 한 번도 불리지 않는다(load-bearing — 깨면 출력이 죽는다)★
-    /// 실패는 **세션 조회 하나뿐**이고 그건 구조적으로 `on_ready` 를 넘기기 *전*이다. 이 순서에 데몬의
-    /// 구독 거절 통보가 얹혀 있다: 데몬은 `Err` 를 `AgentEvent::SubscribeFailed` 로 바꿔 보내면서
-    /// "이 구독엔 `SubscribeAck`(=`on_ready`)도 `ReplayComplete` 도 뒤따르지 않는다"를 계약으로 광고하고,
-    /// 클라이언트(src-tauri)는 그 광고에 기대어 자기 single-flight 슬롯을 **즉시** 푼다.
-    ///
-    /// 그래서 이 함수에 `on_ready` 를 부른 *뒤* 실패할 수 있는 갈래를 추가하면, 거절과 Ack 가 같은 구독에
-    /// 대해 함께 나가고 클라이언트가 이미 푼 슬롯 위로 늦은 Ack/Complete 가 도착해 **replay 가 돌지 않은
-    /// 세대에 성공 마커**가 붙는다(gen 펜스 붕괴). 새 실패 갈래가 필요하면 `on_ready` 앞에 두거나, 거절
-    /// 통보의 계약을 함께 고쳐야 한다. 회귀망 = `subscribe_from_err_never_invokes_on_ready`.
+    /// ## ★Contract: `Err` ⟹ `on_ready` is never called (load-bearing — breaking it kills output)★
+    /// The only failure is **the one session lookup**, structurally *before* `on_ready`. The daemon turns `Err` into `AgentEvent::SubscribeFailed`, advertising "neither
+    /// `SubscribeAck` (= `on_ready`) nor `ReplayComplete` follows", and the client (src-tauri) releases its single-flight slot **immediately**. A failure branch added
+    /// *after* `on_ready` would send refusal and Ack together and a late Ack/Complete would arrive over the released slot, attaching **a success marker to a generation
+    /// where the replay did not run** (gen fence collapse). A new failure branch goes before `on_ready`, or fix the refusal notice contract together. Regression net =
+    /// `subscribe_from_err_never_invokes_on_ready`.
     // ADR-0226
     pub fn subscribe_from(
         &self,
@@ -3239,8 +2729,7 @@ impl AgentManager {
         Ok(())
     }
 
-    /// 출처를 실은 키 입력·턴 쓰기 — 사람의 입력(WS `WriteStdin`)은 `User`, 사람 아닌 호출자는 `Mail`.
-    /// ★`*_observed` 동사들은 출처를 받지 않는다 — 전부 `Mail` 이다★(우편 배달 경로).
+    /// Keystroke and turn writes carrying the origin — human input (WS `WriteStdin`) is `User`, non-human callers `Mail`. ★The `*_observed` verbs take no origin — all `Mail`★ (the mail delivery path).
     // ADR-0231
     pub fn write_stdin(
         &self,
@@ -3261,11 +2750,9 @@ impl AgentManager {
         self.get_session(agent_id)?.write_input_observed(data)
     }
 
-    /// `write_stdin_observed` 의 **제출 포함** 판 — 백엔드가 제출 바이트를 요구하면(터미널) 본문 뒤에
-    /// 그것이 별도 write 로 한 번 더 나간다(근거·실측 = `AgentSession::submit_input_observed`).
-    ///
-    /// ★어느 쪽을 부를지 = 호출자의 성격★: "완성된 메시지 하나 = 턴 하나"(우편 배달)면 이것, 사람이
-    ///   Enter 를 직접 치는 키 입력 스트리밍이면 `write_stdin`/`write_stdin_observed`.
+    /// The **submit-including** version of `write_stdin_observed` — if the backend requires submit bytes (terminal) they go out again as a separate write after the body
+    /// (`AgentSession::submit_input_observed`). ★Which to call★: this for "one completed message = one turn" (mail delivery); `write_stdin`/`write_stdin_observed` for
+    /// keystroke streaming where a person types Enter.
     pub fn submit_stdin_observed(
         &self,
         agent_id: AgentId,
@@ -3274,30 +2761,18 @@ impl AgentManager {
         self.get_session(agent_id)?.submit_input_observed(data)
     }
 
-    /// ★incarnation 조건부 write★ — `expected_epoch` 가 **지금** 그 AgentId 가 가리키는 세션의 epoch 과
-    ///   같을 때만 쓴다. 다르면 transport 를 아예 건드리지 않고(부작용 0) `Err` 를 낸다.
+    /// ★Incarnation-conditional write★ — writes only when `expected_epoch` equals the epoch of the session the AgentId points at **now**; otherwise it touches nothing and
+    /// returns `Err`.
     ///
-    /// ★왜 필요한가(check-then-write TOCTOU — load-bearing)★: 호출자가 `(id, epoch)` 로 수신자를 정한 뒤
-    ///   `write_stdin_observed(id, ..)` 를 부르면, 그 사이 에이전트가 재시작(= 세션 맵 교체 + 새 화신 표식)했을 때
-    ///   write 는 **새 incarnation** 에 착지한다. 해석과 write 가 별개 연산인 한 호출자가 아무리 앞서 검사해도
-    ///   그 창은 닫히지 않는다 — 판정을 **write 와 같은 단위**로 끌어와야 닫힌다. 그래서 이 함수가 존재한다.
-    /// ★★소비자 없음(ADR-0111 결정 6 이후)★★: 이 동사의 **유일한** 호출자는 데몬 메시징의 그룹 방송
-    ///   결박(= "발송 순간 살아 있던 그 incarnation 에게만")이었고, **그 불변식은 폐지됐다** — 파킹분은 같은
-    ///   이름의 새 화신에게도 배달된다. 그래서 지금 이 함수를 부르는 코드는 없다.
-    ///   ★남겨 둔 이유·부활 조건★: "이 편지는 발송 순간 화신에게만" 이 다시 필요해지면 v2 **개인 메일 옵션**
-    ///   으로 무파괴 추가하기로 했고(spec §8), 그때 필요한 건 이 조건부 write 하나다. 정식 재론 없이 그룹
-    ///   전용 규칙으로 되살리는 것은 ADR-0111 위반이다.
-    ///
-    /// ★왜 이게 실제로 창을 닫나(ADR-0006 락 규율과 함께 읽을 것)★: `get_session` 은 sessions read lock 을
-    ///   잡아 `Arc<AgentSession>` 을 clone 하고 **즉시 해제**한다. 그 뒤의 epoch 비교와 write 는 **같은 Arc**
-    ///   위에서 일어나고, `AgentSession.epoch` 는 생성 시 고정되는 불변 필드다(재시작은 세션을 *교체*할 뿐
-    ///   기존 세션의 epoch 을 바꾸지 않는다). 따라서 비교 이후 맵이 교체돼도 우리가 쓰는 대상은 바뀔 수
-    ///   없다 — 이 함수가 `Ok` 를 내면 "epoch == expected 인 바로 그 세션에 썼다" 가 참이다.
-    ///
-    /// ★불일치 신호 = `PtyError::Unsupported`(전용 변형을 만들지 않는다)★: 호출자에게 필요한 사실은
-    ///   "이 동사를 **지금 이 대상에** 수행할 수 없었고 아무 것도 쓰지 않았다" 하나이고, 그건 이미 있는
-    ///   미지원 신호와 같은 모양이다. 원인 특정은 메시지가 담당한다(요구 epoch / 현재 epoch 을 실는다) —
-    ///   에러 어휘를 늘리면 이 한 갈래 때문에 모든 호출부의 match 가 넓어진다.
+    /// ★Why (check-then-write TOCTOU — load-bearing)★: deciding the recipient by `(id, epoch)` then calling `write_stdin_observed(id, ..)` lets a restart in between land the
+    /// write on **the new incarnation**; the window closes only by pulling the decision into **the same unit as the write**.
+    /// ★★No consumers (since ADR-0111 decision 6)★★: the only caller was the daemon messaging group broadcast ("only to the incarnation alive at sending"), **abolished** —
+    /// parked mail also goes to a new incarnation of the same name. ★Kept · revival condition★: if "only the incarnation at sending" returns it is to be added as a v2
+    /// **personal mail option** (spec §8), needing exactly this write; reviving it as a group-only rule without reopening violates ADR-0111.
+    /// ★Why it really closes the window (ADR-0006)★: `get_session` clones the `Arc<AgentSession>` and **releases**; comparison and write use **the same Arc** and
+    /// `AgentSession.epoch` is immutable, so `Ok` means "wrote to exactly the session with epoch == expected".
+    /// ★Mismatch = `PtyError::Unsupported` (no dedicated variant)★: the caller only needs "could not be performed **on this target now**, nothing written"; the message carries
+    /// requested/current epoch; a new variant would widen every caller's match.
     // ADR-0088
     // ADR-0111
     pub fn write_stdin_observed_if_epoch(
@@ -3307,8 +2782,7 @@ impl AgentManager {
         data: &[u8],
     ) -> Result<crate::types::WriteOutcome, PtyError> {
         let session = self.get_session(agent_id)?;
-        // ★부작용 0 보장★: 불일치면 transport 를 건드리기 **전에** 빠진다 — 호출자가 이 Err 를 "안 보냈다"
-        //   로 확정할 수 있어야 재파킹·skip 판정이 성립한다.
+        // ★Zero side-effect guarantee★: a mismatch leaves **before** touching the transport, so the caller can settle this `Err` as "not sent" (reparking and skip decisions rely on it).
         if session.epoch != expected_epoch {
             return Err(PtyError::Unsupported(format!(
                 "epoch mismatch: agent {agent_id} is now at epoch {}, caller required {expected_epoch} — nothing was written",
@@ -3318,9 +2792,8 @@ impl AgentManager {
         session.write_input_observed(data)
     }
 
-    /// 산 화신의 대기 목록 — 버스 `agent.listQueuedInputs` 와 WS 목록 조회가 같은 이 값을 싣는다.
-    /// `Err(NotFound)` = 산 세션이 없다(잠든 에이전트는 목록을 쥐지 않는다).
-    /// ★락을 겹쳐 쥐지 않는다★: 명부(스냅숏) → 놓고 → 통로(수락 모름) → 턴 관측 표, 차례로 하나씩이다.
+    /// The waiting list of the live incarnation — the bus `agent.listQueuedInputs` and the WS list query carry this value. `Err(NotFound)` = no live session (an asleep agent holds
+    /// no list). ★Locks do not overlap★: registry (snapshot) → release → link (acceptance unknown) → turn observation table, one at a time.
     // ADR-0006
     // ADR-0231
     pub fn list_queued_inputs(&self, agent_id: AgentId) -> Result<QueuedListing, PtyError> {
@@ -3338,8 +2811,7 @@ impl AgentManager {
         })
     }
 
-    /// 산 화신의 대기 입력 하나를 취소한다(결말 번역은 `AgentSession::cancel_queued_input`).
-    /// 산 세션이 없으면 `NotFound` — 잠든 에이전트에는 취소할 항목이 없다.
+    /// Cancels one queued input of the live incarnation (outcome translation in `AgentSession::cancel_queued_input`). `NotFound` = no live session (an asleep agent has nothing to cancel).
     // ADR-0231
     pub fn cancel_queued_input(
         &self,
@@ -3351,21 +2823,13 @@ impl AgentManager {
             .cancel_queued_input(input_id)
     }
 
-    /// ★하네스 전용 세션 주입 seam(ADR-0088 / ADR-0012)★ — 미리 조립한 `AgentSession`(테스트 transport
-    ///   포함)을 sessions 맵에 직접 등록한다. spawn 파이프(실 PTY·claude 바이너리)를 거치지 않고
-    ///   배달-경계 관측 테스트(reachable=structured 캐리어인데 write 성공/실패)를 **바이너리 의존 없이**
-    ///   구동하려는 목적이다 — daemon 통합 테스트가 cross-crate 로 봐야 하므로 `test-harness` 기능으로
-    ///   게이트한다(`#[doc(hidden)]` 은 접근을 막지 못한다 — 임의 `AgentSession` 주입은 spawn 예약·
-    ///   profile+epoch 조율·control-token 발급·pump/reaper 배선·tracker 수명을 통째로 우회하므로,
-    ///   운영 빌드에는 아예 컴파일되지 않아야 한다). 기능 OFF = 운영 빌드에 이 메서드 부재. 기능은
-    ///   daemon 의 `[dev-dependencies]` 에서만 켜지므로(운영 dep 아님) 운영 daemon 바이너리로 유니피케이션
-    ///   되지 않는다. 런타임/운영 경로는 절대 부르지 않는다 — spawn_session 만이 정규 등록점.
+    /// ★Harness-only session injection seam (ADR-0088 / ADR-0012)★ — registers a pre-assembled `AgentSession` (incl. a test transport) in the sessions map, to drive delivery-boundary
+    /// observation tests **without binaries** (no PTY / claude). Gated by the `test-harness` feature, turned on only in the daemon's `[dev-dependencies]`; it must not compile into
+    /// production (an arbitrary session bypasses spawn reservation, profile+epoch coordination, token issuing, pump/reaper wiring and tracker lifetime). Only `spawn_session` is the
+    /// regular registration point.
     ///
-    /// ★안전/불변식★: (a) reaper 미배선 — 주입 세션은 pump 를 start 하지 않으므로 finish hook 이 없고,
-    ///   ReapMsg 가 나가지 않아 manager Drop 까지 sessions 맵에 남는다(노출된 remove 없음, `kill_agent` 도
-    ///   주입 세션을 맵에서 빼지 않는다 — 각 테스트가 fresh manager 를 쓰고 그 Drop 으로 정리된다).
-    ///   (b) 락 규율(ADR-0006) — sessions write lock 을 잡아 insert 후 즉시 해제, 내부 lock 미취득.
-    ///   (c) profiles 미터치 — auto_restore 플립·persist 없음(순수 맵 등록). 같은 id 재주입은 교체.
+    /// ★Invariants★: (a) no reaper — no pump, no finish hook, no `ReapMsg`; it stays in the map until the manager Drop (`kill_agent` does not remove it either; tests use a fresh manager).
+    /// (b) ADR-0006 — takes the sessions write lock, inserts, releases, takes no internal lock. (c) profiles untouched (no auto_restore flip or persist). Reinjecting the same id replaces it.
     #[cfg(feature = "test-harness")]
     #[doc(hidden)]
     pub fn insert_test_session(&self, session: Arc<AgentSession>) {
@@ -3375,14 +2839,10 @@ impl AgentManager {
             .insert(session.id, session);
     }
 
-    /// ★하네스 전용★ — `insert_test_session` 의 짝. 이 매니저의 **통지 경로와 턴 관측 표에 이어진**
-    ///   `OutputCore` 를 만든다(spawn_session 이 하는 배선과 동형).
-    ///
-    /// ★왜 필요한가★: 주입 세션이 `OutputCore::new` 만으로 조립되면 그 세션의 emit 은 매니저의 표에
-    ///   닿지 않아, 게이트·도어벨 배선을 보려는 통합 테스트가 "관측이 없어서 통과" 하는 위약이 된다.
-    ///   반대로 관측이 필요 없는 테스트는 이걸 쓰지 않으면 된다(운영 세션과 달리 선택이다).
-    /// ★대기 목록 표는 여기서 등록한다(턴 관측 표는 안 한다)★ — 턴 관측 표는 등록 없는 쓰기를 받아 주지만
-    ///   대기 목록 표는 버린다. 등록을 빼면 이 코어의 목록이 매니저의 우편 바쁨에 영영 안 보인다.
+    /// ★Harness only★ — the pair of `insert_test_session`: builds an `OutputCore` **connected to this manager's notification path and turn observation table** (spawn_session's wiring).
+    /// ★Why★: an `OutputCore::new` session's emits would not reach the manager's table, making gate/doorbell wiring tests "pass because there is no observation"; tests needing none skip it.
+    /// ★The waiting-list table is registered here (the turn observation table is not)★ — the observation table accepts unregistered writes, the waiting-list table drops them; unregistered,
+    /// this core's list would never be visible to the manager's mail busy.
     #[cfg(feature = "test-harness")]
     #[doc(hidden)]
     pub fn wired_test_core(
@@ -3414,25 +2874,21 @@ impl AgentManager {
         self.get_session(agent_id)?.interrupt()
     }
 
-    // ── kill (LLD §6 절대순서) ───────────────────────────────────────────────
+    // ── kill (LLD §6 absolute order) ───────────────────────────────────────────────
 
-    /// 에이전트 종료(ADR-0019 reaper 위임). **맵 제거·disposition·통지는 하지 않는다** — pump 가 보낸
-    /// ReapMsg 를 reaper 가 단일 소비해 처리한다. 그래서 반환 직후에도 세션이 아직 맵에 있을 수 있다 —
-    /// 호출자가 "사라짐"을 단언하려면 폴링해야 한다(headless 테스트가 그렇게 한다).
+    /// Agent termination (delegated to the ADR-0019 reaper). **No map removal, disposition or notification here** — the reaper singly consumes the pump's ReapMsg, so the session may remain in the map right
+    /// after return; a caller asserting "gone" must poll (headless tests do).
     pub fn kill_agent(&self, agent_id: AgentId) -> Result<(), PtyError> {
         let session = self.get_session(agent_id)?;
-        // ★물러남 예고가 첫 걸음이다 — 권한 회수 · 의도 · `Exiting` · `session.kill` 보다 먼저★: 통로가 뒤에서 돌리는
-        //   일이 아래 종료와 겹치는 창을 가장 좁게 둔다. 자원을 거두지 않는 예고라 아래 인과(ADR-0001)는 그대로이고,
-        //   명부 락은 `get_session` 이 이미 놓았다(ADR-0006).
+        // ★The retreat notice is the first step — before the permission revoke · intent · `Exiting` · `session.kill`★: it narrows the window where the link's background work overlaps the termination. It collects no
+        //   resources, so the ADR-0001 causality is unchanged; the roster lock was released by `get_session` (ADR-0006).
         session.begin_retire();
         let epoch = session.epoch;
 
-        // 0. ★제어 채널 토큰 즉시 폐기 — 블로킹 kill **전에**(FIX 4)★. 이 revoke 가 session.kill(최대
-        //    5s join) **뒤**에 있으면 죽어가는 에이전트의 토큰이 그 5s 창 동안 유효해, 그 사이 에이전트가
-        //    제어 채널로 명령을 낼 수 있다(TOCTOU). 여기선 락 미보유라 안전하고(§10 — registry 는 leaf
-        //    lock, ADR-0006), revoke 는 idempotent 라 reaper 의 terminal revoke 와 겹쳐도 무해(그게 backstop).
-        // ★실행 재료는 이 옆에서 거두지 않는다★ — 아직 산 자식이 휘발 폴더(지침 · 정션)를 쓰고 있다. 세션을 명부에서 뺀
-        //   reaper 하나가 거둔다(주인은 늘 하나).
+        // 0. ★Discard the control channel token immediately — **before** the blocking kill (FIX 4)★: after `session.kill` (up to a 5s join) the dying agent's token would stay valid for that window
+        //    and it could issue commands (TOCTOU). No lock held (registry is a leaf lock, §10 · ADR-0006); revoke is idempotent, so overlap with the reaper's terminal revoke is harmless (backstop).
+        // ★Launch materials are not reclaimed next to this★ — the still-living child is using the volatile folder (instructions · junctions). The
+        //   reaper that removed the session from the roster reclaims them (always one owner).
         // ADR-0086
         // TRD S25 §5-2 4 (c2) ④
         self.control.revoke(agent_id, epoch);
@@ -3441,18 +2897,16 @@ impl AgentManager {
 
         let _ = session.enter_exiting();
 
-        // 1~6. ★revoke 배치가 이 인과를 건드리지 않는다(ADR-0001)★ — revoke 는 registry/파일만 만지고
-        //       shutdown 체인에 개입하지 않아 kill 을 블록·재정렬하지 않는다. join 이 timeout 나도 그냥
-        //       진행한다(세션 제거로 Arc 가 끊겨 자연 종료).
+        // 1~6. ★The revoke placement does not touch this causality (ADR-0001)★ — it touches only registry/files, not the shutdown chain, so it neither blocks nor reorders the kill; a join timeout just proceeds.
         session.kill(Duration::from_secs(5));
 
-        // 7. 세션 추적 해제(S9 — 좀비 watcher 엔트리 방지). reaper 는 tracker 를 모른다.
+        // 7. Release session tracking (S9 — prevents zombie watcher entries). The reaper does not know the tracker.
         self.tracker.unwatch(agent_id);
 
         Ok(())
     }
 
-    // ── 조회/종료 ─────────────────────────────────────────────────────────────
+    // ── Lookup/termination ─────────────────────────────────────────────────────────────
 
     pub fn list_agents(&self) -> Vec<AgentInfo> {
         let sessions: Vec<Arc<AgentSession>> = {
@@ -3467,9 +2921,8 @@ impl AgentManager {
         Ok(session.snapshot())
     }
 
-    /// list_agents 전체 순회·AgentInfo 조립(profiles lock)을 피해 epoch 만 보는 경량 형제.
-    /// ★운영 호출자는 없다★ — 구독 응답의 표식은 `subscribe_from` 의 reply 가 싣는다(ADR-0226). 남은
-    ///   소비자는 daemon 통합 시험(`tests/ws_e2e.rs`)이다.
+    /// A lightweight sibling looking only at the epoch (no full `list_agents` / AgentInfo assembly under the profiles lock). ★No production caller★ — the subscription response marker comes from the
+    /// `subscribe_from` reply (ADR-0226); the remaining consumer is the daemon integration test (`tests/ws_e2e.rs`).
     pub fn agent_epoch(&self, agent_id: AgentId) -> Option<u32> {
         self.sessions
             .read()
@@ -3479,13 +2932,11 @@ impl AgentManager {
     }
 
     pub fn shutdown_all(&self) {
-        // ★ADR-0019★: shutting_down 을 각 kill **전에** set 한다. 이게 kill 보다 늦으면 그 틈에
-        //   종료된 세션의 finish hook 이 shutting_down=false 를 snapshot 해 KeepDisableAutoRestore 를
-        //   맞고(auto_restore=false → 부팅 복원 대상에서 탈락) 마는 race 가 생긴다. set 이 먼저면
-        //   이 시점 이후 모든 finish 가 shutting_down=true 를 snapshot → reaper 가 KeepAsIs(손 안 댐).
+        // ★ADR-0019★: set shutting_down **before** each kill — later, a session exiting in the gap would snapshot shutting_down=false in its finish hook and get KeepDisableAutoRestore
+        //   (dropped from boot restore). Set first, every later finish snapshots true → the reaper does KeepAsIs.
         self.shutting_down.store(true, Ordering::SeqCst);
 
-        // S9: 세션 추적 스레드부터 정지(폴링이 정리 중인 세션을 건드리지 않게).
+        // S9: stop the session tracking thread first (so polling does not touch sessions being cleaned up).
         self.tracker.stop();
 
         let ids: Vec<AgentId> = {
@@ -3501,9 +2952,9 @@ impl AgentManager {
         });
     }
 
-    // ── 내부 헬퍼 ─────────────────────────────────────────────
+    // ── Internal helpers ─────────────────────────────────────────────
 
-    /// §10 규칙1 — read lock 을 즉시 해제한 뒤 Arc clone 을 반환한다(호출부는 락 미보유 상태로 이어간다).
+    /// §10 rule 1 — releases the read lock immediately and returns an Arc clone (the caller continues without holding the lock).
     fn get_session(&self, agent_id: AgentId) -> Result<Arc<AgentSession>, PtyError> {
         self.sessions
             .read()
@@ -3513,29 +2964,21 @@ impl AgentManager {
             .ok_or(PtyError::NotFound(agent_id))
     }
 
-    /// activate_profile 이 resume 성공 후 산 세션의 info 를 얻는 데 쓴다 — resume_no_fallback 은
-    /// 세션을 맵에 등록만 하고 info 를 돌려주지 않으므로(RestoreOutcome 반환) id 로 재조회한다.
+    /// Used by `activate_profile` for the live session's info after a resume succeeds — `resume_no_fallback` returns only `RestoreOutcome`, so it looks up again by id.
     fn agent_info_by_id(&self, id: AgentId) -> Result<AgentInfo, PtyError> {
         let session = self.get_session(id)?;
         Ok(self.agent_info(&session))
     }
 
-    /// 봉투 sender 등 AgentInfo 전체가 필요 없는 호출부가 **agent_info 와 byte-identical** 한 이름을
-    /// 얻게 하는 단일 출처다 — session.cwd 기반 resolve 를 여기 한 곳에 모아 로직 복제를 막는다.
+    /// The single source for callers not needing the whole AgentInfo (e.g. the envelope sender) to get a name **byte-identical to agent_info** — the session.cwd-based resolve lives here once.
     pub fn canonical_name(&self, id: AgentId) -> Option<String> {
         let session = self.get_session(id).ok()?;
         Some(self.resolve_canonical_name(&session))
     }
 
-    /// agent_info·canonical_name 공유 코어 — 이름 파생을 한 곳으로 모아 reaper/ingress/cli 와
-    /// 어긋나지 않게 한다.
+    /// The shared core of agent_info · canonical_name — one place for name derivation so it does not diverge from reaper/ingress/cli.
     ///
-    /// ADR-0101 (WYSIWYA — canonical 이름 통일): AgentInfo.name = "사람이 트리에서 보는 이름"으로
-    ///   맞춘다. 예전엔 profile.name(= createClaudeProfile 에 넘긴 full cwd 문자열, 종종 경로)을 그대로
-    ///   써서 라우팅/로스터가 기대하는 주소와 트리 표시명(display_name ?? basename(cwd))이 어긋났다.
-    ///   라우팅(resolve_recipient)·로스터·봉투 sender·프론트 트리가 **같은 문자열**을 써야 "보이는
-    ///   이름으로 지목하면 그 에이전트에게 간다"가 성립한다.
-    ///
+    /// ADR-0101 (WYSIWYA): AgentInfo.name is "the name a person sees in the tree"; routing (resolve_recipient) · roster · envelope sender · frontend tree must use **the same string**.
     /// ★The cwd source is session.cwd, not profile.cwd★: the frontend tree draws `display_name ?? basename(AgentInfo.cwd)`
     ///   and AgentInfo.cwd = session.cwd (the launch's working folder). profile.cwd may be raw (`.` · `..` · a link), so
     ///   deriving from it would split the basename and the tree label would differ from the routing address. So the
@@ -3543,23 +2986,20 @@ impl AgentManager {
     // ADR-0101
     fn resolve_canonical_name(&self, session: &Arc<AgentSession>) -> String {
         let cwd = session.cwd.to_string_lossy();
-        // get()은 profiles lock 을 잡아 clone 후 즉시 해제한다 — 이 함수 자체가 sessions lock 미보유
-        //   상태에서만 호출되므로 두 락을 동시에 잡지 않는다(§10 락 순서).
+        // get() takes the profiles lock, clones and releases — this function is called without the sessions lock held, so the two are never held together (§10 lock order).
         let display_name = self.profiles.get(session.id).and_then(|p| p.display_name);
         crate::name::canonical_name_or_id_fallback(display_name.as_deref(), &cwd, session.id)
     }
 
-    /// sessions lock 을 보유하지 않은 상태에서만 호출한다.
+    /// Called only without holding the sessions lock.
     fn agent_info(&self, session: &Arc<AgentSession>) -> AgentInfo {
-        // get()은 profiles lock 을 잡아 clone 후 즉시 해제한다 — 이 함수는 sessions lock 미보유 상태에서만
-        //   불리므로 두 락을 동시에 잡지 않는다(§10 락 순서).
+        // get() takes the profiles lock, clones and releases — called without the sessions lock held, so the two are never held together (§10 lock order).
         let display_name = self.profiles.get(session.id).and_then(|p| p.display_name);
         self.agent_info_with(session, display_name.as_deref())
     }
 
-    /// `agent_info` 의 **표시명 주입형** — 여러 세션분을 만들 때 프로필 스냅샷을 이미 손에 쥔 호출자
-    /// (`roster`)가 세션마다 프로필을 다시 뜨지 않게 한다. 이름 파생 규칙 자체는 여기 하나뿐이다
-    /// (`canonical_name_or_id_fallback` — 규칙을 복제하지 않는다는 `resolve_canonical_name` 의 규율 그대로).
+    /// The **display-name-injected form** of `agent_info` — lets a caller already holding the profile snapshot (`roster`) skip a per-session profile fetch. The derivation rule exists only here
+    /// (`canonical_name_or_id_fallback`, as `resolve_canonical_name`).
     fn agent_info_with(
         &self,
         session: &Arc<AgentSession>,
@@ -3576,16 +3016,14 @@ impl AgentManager {
             rows: session.rows.load(Ordering::Relaxed),
             epoch: session.epoch,
             capabilities: session.capabilities(),
-            // 같은 세션 Arc 에서 뽑는다 — 소비자가 나중에 되묻지 않아도 되게(그 필드 doc).
+            // Drawn from the same session Arc — so consumers do not have to ask back later (that field's doc).
             reads_messages: session.reads_messages(),
         }
     }
 }
 
 impl Drop for AgentManager {
-    /// ★명시 Stop 이 필요한 이유★: reaper_tx drop 만으로도 channel 이 닫혀 recv 가 Err 로 끝나지만,
-    /// 세션들이 보유한 finish hook 클로저가 reaper_tx clone 을 들고 있어 즉시 안 닫힐 수 있다.
-    /// 송신 실패(reaper 가 이미 종료)는 무시한다.
+    /// ★Why an explicit Stop★: dropping reaper_tx closes the channel, but the sessions' finish hook closures hold reaper_tx clones, so recv may not end at once. A send failure (reaper already ended) is ignored.
     fn drop(&mut self) {
         let _ = self.reaper_tx.send(ReaperCmd::Stop);
         if let Some(handle) = self.reaper_handle.take() {
@@ -3608,14 +3046,11 @@ mod tests {
         }
     }
 
-    // ── ADR-0185: 「받아 온 세션 id」 기록 동사 ────────────────────────────────────────────
+    // ── ADR-0185: the record verb for 「the fetched session id」 ────────────────────────────────────────────
     //
-    // 여기서 재는 것은 `session_id_sink` 가 만든 동사 하나다 — 그 동사가 실제로 spawn 에 실리는지는
-    //   `backend/codex/mod.rs` 의 app-server 종단 항목이 잰다.
+    // Measured here: the one verb `session_id_sink` builds; that it is carried on spawn is measured by `backend/codex/mod.rs`'s app-server end-to-end entry.
 
-    /// ★저장소가 **메모리**인 것은 의도다★ — 이 세 항목이 단언하는 것은 레지스트리의 판정뿐이라
-    /// 영속이 무관하고, `bare_manager` 처럼 파일 저장을 쓰면 호출마다 temp 폴더가 하나씩 남는다
-    /// (한 번의 crate 회귀에 9개가 쌓였다 — 실측).
+    /// ★The store being **memory** is intended★ — these entries assert only the registry's decision; file storage (as `bare_manager`) leaves a temp folder per call (9 piled up in one regression run).
     fn sink_fixture() -> (Arc<crate::profile::ProfileRegistry>, AgentId, u32) {
         #[derive(Default)]
         struct MemStore(Mutex<Vec<AgentProfile>>);
@@ -3643,11 +3078,11 @@ mod tests {
         );
         let id = p.id;
         profiles.upsert(p);
-        let epoch = profiles.epoch_for_spawn(id).expect("갓 넣은 프로필");
+        let epoch = profiles.epoch_for_spawn(id).expect("a profile just put in");
         (profiles, id, epoch)
     }
 
-    // ── Fresh 스폰의 손잡이 반납(ADR-0185) ──────────────────────────────────────
+    // ── The Fresh spawn returning its handle (ADR-0185) ──────────────────────────────────────
 
     use uuid::Uuid;
 
@@ -3658,10 +3093,7 @@ mod tests {
         }
     }
 
-    /// ★판정표 — 백엔드 선언을 **읽어서** 갈린다(리터럴 사본이 아니다)★.
-    ///
-    /// ★이 시험이 재지 않는 것★: 이 술어가 실제로 `spawn_agent` 에 실리는지. 그쪽은 실 프로세스를 띄워야
-    ///   하는 자리라 이 파일이 안 잰다(형제 `session_id_sink` 시험들과 같은 범위).
+    /// ★Decision table — split by **reading** the backend declarations (not a literal copy)★. Not measured: that this predicate is carried on `spawn_agent` (needs a real process).
     #[test]
     fn fresh_spawn_releases_the_handle_only_where_something_can_refill_it() {
         use crate::profile::AgentOutputFormat as Fmt;
@@ -3674,37 +3106,37 @@ mod tests {
             output_format: Fmt::Terminal,
         };
 
-        // 발급 축이 꺼져 있고 보고 경로가 있는 두 모양 — 비운다.
+        // The two shapes with the issuing axis off and a report path — they clear.
         for c in [codex(Fmt::Terminal), codex(Fmt::StreamJson)] {
             assert!(
                 fresh_spawn_release_session_id(&c, SpawnMode::Fresh),
-                "{c:?}: Fresh 는 빈 칸에서 시작해야 한다"
+                "{c:?}: Fresh must start from an empty field"
             );
-            // ★Resume 은 **절대** 비우지 않는다★ — 그 칸이 이어받을 손잡이다(ADR-0083).
+            // ★Resume **never** clears★ — that field is the handle to resume (ADR-0083).
             assert!(
                 !fresh_spawn_release_session_id(&c, SpawnMode::Resume),
-                "{c:?}: Resume 이 손잡이를 지웠다"
+                "{c:?}: Resume erased the handle"
             );
         }
 
-        // 보고 경로가 하나도 없다 — 비우면 손으로 심어 둔 값이 아무도 안 채우는 채로 사라진다.
+        // There is no report path at all — clearing would make a hand-planted value disappear with nobody filling it.
         assert!(!fresh_spawn_release_session_id(&shell, SpawnMode::Fresh));
         assert!(!fresh_spawn_release_session_id(&shell, SpawnMode::Resume));
 
-        // 우리가 발급하는 쪽 — 새 값은 첫 제출 때에야 적히므로 Fresh 도 빈 칸에서 시작한다(ADR-0226).
+        // The side we issue for — the new value is written only at the first submission, so Fresh also starts from an empty field (ADR-0226).
         assert!(fresh_spawn_release_session_id(&claude, SpawnMode::Fresh));
         assert!(!fresh_spawn_release_session_id(&claude, SpawnMode::Resume));
     }
 
-    /// 비운 칸은 commit 포트가 곧바로 채운다 — Fresh 의 commit 이 비교할 값은 비운 뒤의 `None` 이다.
+    /// The cleared field is filled right away by the commit port — the value the Fresh commit compares against is the `None` after clearing.
     #[test]
     fn releasing_the_handle_does_not_disturb_a_transport_that_refills_it() {
         let (profiles, id, epoch) = sink_fixture();
         profiles.observe_session_id(id, Some(epoch), Uuid::new_v4());
-        let next_epoch = profiles.epoch_for_spawn(id).expect("프로필");
+        let next_epoch = profiles.epoch_for_spawn(id).expect("profile");
         assert_eq!(profiles.release_session_id(id), Some(true));
 
-        // 통로가 핸드셰이크 응답으로 받은 값을 그 자리에 적는다(운영과 같은 동사).
+        // The link writes in that place the value it received in the handshake response (the same verb as production).
         let from_transport = Uuid::new_v4();
         session_id_sink(profiles.clone(), id, next_epoch, None)(&from_transport.to_string());
 
@@ -3714,10 +3146,8 @@ mod tests {
         );
     }
 
-    /// ★commit 포트는 비교-교체다 — 첫 제출 전에 다른 기록자가 바꾼 칸을 되감지 않는다(ADR-0226)★.
-    ///
-    /// claude 파일 감시자가 대조 없이 쓴 값(Y)이 칸에 있을 때, 이 화신의 포트가 시작 때 본 값(S)으로
-    /// commit 하면 거절돼야 한다. 덮어쓰기로 바뀌면 Y 가 S 로 되감기고 Y 가 이력으로 밀린다.
+    /// ★The commit port is compare-and-swap — it does not rewind a field another writer changed before the first submission (ADR-0226)★: with Y written by the claude file watcher, a
+    /// commit with the start value S must be refused (an overwrite would rewind Y to S and push Y into history).
     #[test]
     fn the_commit_port_does_not_rewind_a_value_another_writer_set() {
         let (profiles, id, epoch) = sink_fixture();
@@ -3725,27 +3155,30 @@ mod tests {
         assert!(profiles.observe_session_id(id, Some(epoch), started_with));
         let tracker_wrote = Uuid::new_v4();
         assert!(profiles.observe_session_id(id, None, tracker_wrote));
-        let history = profiles.get(id).expect("프로필").old_session_ids;
+        let history = profiles.get(id).expect("profile").old_session_ids;
 
         session_id_sink(profiles.clone(), id, epoch, Some(started_with))(&started_with.to_string());
 
-        let p = profiles.get(id).expect("프로필");
+        let p = profiles.get(id).expect("profile");
         assert_eq!(
             p.backend_session_id,
             Some(tracker_wrote),
-            "포트가 다른 기록자의 값을 시작 때 값으로 되감았다 — 덮어쓰기 동사로 바뀌었다"
+            "the port rewound another writer's value to the start value — it changed to an overwrite verb"
         );
-        assert_eq!(p.old_session_ids, history, "거절인데 이력이 움직였다");
+        assert_eq!(
+            p.old_session_ids, history,
+            "a refusal but the history moved"
+        );
     }
 
-    /// (f) ★이어받은 화신의 첫 되울림은 쓸 것이 없다★ — 핸드셰이크가 준 id 가 저장값 그대로면, 통로가 첫 턴
-    ///   포트를 불러 commit 이 돌아도 칸도 이력도 움직이지 않는다(비교-교체의 「이미 같은 값」 · ADR-0226 개정).
+    /// (f) ★The first echo of a resumed incarnation has nothing to write★ — if the handshake id equals the stored value, neither field nor history moves even if the link calls the first-turn port and the
+    ///   commit runs (compare-and-swap's 「already the same value」 · ADR-0226 amendment).
     #[test]
     fn a_resumed_thread_s_first_echo_changes_nothing() {
         let (profiles, id, epoch) = sink_fixture();
         let stored = Uuid::new_v4();
         assert!(profiles.observe_session_id(id, Some(epoch), stored));
-        let history = profiles.get(id).expect("프로필").old_session_ids;
+        let history = profiles.get(id).expect("profile").old_session_ids;
         let latch = SessionIdLatch::new(
             id,
             epoch,
@@ -3755,9 +3188,12 @@ mod tests {
         (latch.offer_sink())(&stored.to_string());
         (latch.first_turn_sink())(true);
 
-        let p = profiles.get(id).expect("프로필");
+        let p = profiles.get(id).expect("profile");
         assert_eq!(p.backend_session_id, Some(stored));
-        assert_eq!(p.old_session_ids, history, "같은 값인데 이력이 움직였다");
+        assert_eq!(
+            p.old_session_ids, history,
+            "the same value but the history moved"
+        );
     }
 
     // ── The first-turn instructions hash (ADR-0337) ──
@@ -3875,12 +3311,8 @@ mod tests {
         );
     }
 
-    /// ★우리 sid 는 발급 축 backend 에만 나간다(ADR-0185 · ADR-0226)★ — 선언 표를 **읽어서** 잰다.
-    ///
-    /// 자기 id 를 스스로 발급하는 backend(codex)에 값이 나가면, 그 값이 `open_spawn` 보다 먼저 래치에
-    /// 들어가고 backend 는 argv 에서 버리며 상대가 준 진짜 id 는 래치의 둘째 offer 로 버려진다 — 첫 제출이
-    /// 가짜 값을 영속해 그 뒤 모든 이어받기가 조용히 실패한다. 저장값이 **있어도** 안 나가야 한다(이어받기
-    /// 축으로 판정이 갈리면 여기서 걸린다).
+    /// ★Our sid goes out only to issuing-axis backends (ADR-0185 · ADR-0226)★, measured by **reading** the declaration table: a value sent to codex would enter the latch, be dropped from
+    /// argv and the real id rejected — every later resume silently fails. Not even **with** a stored value (a resume-axis decision is caught here).
     #[test]
     fn only_a_backend_that_assigns_ids_gets_one_handed_over() {
         use crate::profile::AgentOutputFormat as Fmt;
@@ -3894,7 +3326,7 @@ mod tests {
                 assert_eq!(
                     session_id_to_hand_over(&c, mode, stored),
                     None,
-                    "{c:?} {mode:?}: 우리가 발급하지 않는 backend 에 sid 가 나갔다"
+                    "{c:?} {mode:?}: a sid went out to a backend we do not issue for"
                 );
             }
         }
@@ -3907,18 +3339,17 @@ mod tests {
             assert_eq!(
                 session_id_to_hand_over(&claude, SpawnMode::Resume, stored),
                 stored,
-                "{claude:?}: Resume 은 읽은 저장값을 건넨다"
+                "{claude:?}: Resume hands over the stored value read"
             );
             let minted = session_id_to_hand_over(&claude, SpawnMode::Fresh, stored);
             assert!(
                 minted.is_some() && minted != stored,
-                "{claude:?}: Fresh 는 새로 뽑은 값이어야 한다(저장값 재사용 금지 — ADR-0076): {minted:?}"
+                "{claude:?}: Fresh must be a newly drawn value (no reuse of the stored value — ADR-0076): {minted:?}"
             );
         }
     }
 
-    /// ★포트가 `expected` 를 옮기는 방어 절★ — 성공한 commit 뒤 같은 포트의 둘째 호출은 첫 값을 「이 화신이
-    /// 본 값」으로 보고 교체한다. 래치가 화신당 한 번만 부르므로 운영에서는 닿지 않는 갈래다.
+    /// ★The defensive clause where the port moves `expected`★ — after a successful commit a second call would take the first value as 「seen at start」; the latch calls once per incarnation, so production never reaches it.
     #[test]
     fn a_commit_port_moves_its_expected_value_after_a_successful_commit() {
         let (profiles, id, epoch) = sink_fixture();
@@ -3929,24 +3360,26 @@ mod tests {
         port(&first.to_string());
         port(&second.to_string());
 
-        let p = profiles.get(id).expect("프로필");
+        let p = profiles.get(id).expect("profile");
         assert_eq!(p.backend_session_id, Some(second));
         assert_eq!(p.old_session_ids, vec![first]);
     }
 
-    /// 빈 칸을 또 비우는 것은 무동작이다(저장도 안 탄다).
+    /// Clearing an empty field again is a no-op (it does not save either).
     #[test]
     fn releasing_an_empty_handle_changes_nothing() {
         let (profiles, id, _) = sink_fixture();
         assert_eq!(profiles.release_session_id(id), Some(false));
         assert_eq!(profiles.get(id).and_then(|p| p.backend_session_id), None);
-        assert!(profiles.get(id).expect("프로필").old_session_ids.is_empty());
+        assert!(profiles
+            .get(id)
+            .expect("profile")
+            .old_session_ids
+            .is_empty());
     }
 
-    /// ★Fresh 는 저장된 손잡이를 **backend 로 안 내보낸다**★ — 이 한 칸이 「`resume_session_id` 가
-    /// 있다 ⟺ 이어받기 화신이다」를 성립시키고, codex 터미널 모드의 세션 id 회수가 그 동치 위에 선다
-    /// (그쪽은 손잡이 하나만 보고 fresh 를 판정한다 — ADR-0218 결정 5). 여기서 새면 이어받은 화신이
-    /// 자기 id 를 다시 회수하려 들거나, 새 대화가 회수를 건너뛴다.
+    /// ★Fresh **does not send the stored handle out to the backend**★ — it makes 「`resume_session_id` exists ⟺ resuming incarnation」 hold, which the codex terminal reclamation relies on (it
+    /// decides fresh from the handle alone — ADR-0218 decision 5); a leak makes a resumed incarnation reclaim again or a new conversation skip reclaiming.
     #[test]
     fn fresh_never_carries_a_resume_handle() {
         let stored = uuid::Uuid::new_v4();
@@ -3958,7 +3391,7 @@ mod tests {
         assert_eq!(
             resume_handle_for(SpawnMode::Fresh, Some(stored)),
             None,
-            "Fresh 인데 손잡이가 실려 나갔다 — 그 조합이 표현 가능해지는 순간 두 소비자의 판정이 갈린다"
+            "a handle was carried out on Fresh — the moment that combination becomes expressible, the two consumers' decisions split"
         );
         assert_eq!(resume_handle_for(SpawnMode::Fresh, None), None);
     }
@@ -3973,29 +3406,30 @@ mod tests {
         assert_eq!(profiles.get(id).unwrap().backend_session_id, Some(sid));
     }
 
-    /// ★죽은 화신의 뒤늦은 기록이 산 화신의 값을 덮지 못한다★ — 이 동사는 자기 spawn 의 표식을 들고
-    /// 있고, 그 표식은 다음 spawn 이 새로 뽑으면서 낡는다.
+    /// ★A dead incarnation's late record cannot overwrite the live one's value★ — this verb holds its own spawn's marker, which goes stale when the next spawn draws a new one.
     #[test]
     fn a_dead_incarnations_sink_cannot_overwrite_a_live_value() {
         let (profiles, id, dead_epoch) = sink_fixture();
         let dead_sink = session_id_sink(profiles.clone(), id, dead_epoch, None);
 
-        // 새 화신이 서고 자기 값을 적는다.
-        let live_epoch = profiles.epoch_for_spawn(id).expect("프로필은 그대로다");
+        // A new incarnation stands and writes its own value.
+        let live_epoch = profiles
+            .epoch_for_spawn(id)
+            .expect("the profile is unchanged");
         let live_sid = uuid::Uuid::new_v4();
         session_id_sink(profiles.clone(), id, live_epoch, None)(&live_sid.to_string());
 
-        // 죽은 화신의 통로가 이제야 자기 thread id 를 들고 돌아온다.
+        // The dead incarnation's link finally comes back with its own thread id.
         dead_sink(&uuid::Uuid::new_v4().to_string());
 
         assert_eq!(
             profiles.get(id).unwrap().backend_session_id,
             Some(live_sid),
-            "죽은 화신의 기록이 산 화신의 값을 덮었다"
+            "the dead incarnation's record overwrote the live incarnation's value"
         );
     }
 
-    /// uuid 로 못 읽히는 값은 **버린다** — panic 하면 표시 밖이라 데몬이 끝난다([`session_id_sink`] doc).
+    /// A value that cannot be read as a uuid is **dropped** — a panic would end the daemon, being outside the marker ([`session_id_sink`] doc).
     #[test]
     fn a_non_uuid_session_id_is_dropped_without_panicking() {
         let (profiles, id, epoch) = sink_fixture();
@@ -4007,23 +3441,14 @@ mod tests {
         assert_eq!(
             profiles.get(id).unwrap().backend_session_id,
             None,
-            "해독 실패한 값이 프로필에 적혔다"
+            "a value that failed decoding was written into the profile"
         );
     }
 
-    /// ★버리는 것의 **대가**를 잰다 — 「안 적혔다」가 아니라 「갈렸다」다★.
-    ///
-    /// 위 항목은 빈 프로필에서 시작해서 「버렸다」와 「원래 없었다」가 구별되지 않는다. 실제로 아픈 모양은
-    /// 이쪽이다: 저장된 손잡이가 **이미 있는데** 상대가 uuid 아닌 thread id 를 주면, 통로는 그 문자열을
-    /// 들고 그 뒤 모든 턴을 그것으로 내보내는데 디스크는 옛 값 그대로 남는다. 두 축이 조용히 갈리고
-    /// 다음 이어받기는 이 화신이 실제로 말한 스레드가 아닌 곳을 연다 — 화면에는 아무 표시도 없다.
-    ///
-    /// ★그 조건을 만드는 짝은 `backend/codex/mod.rs` 의
-    ///   `tests::a_resume_target_makes_the_handshake_issue_thread_resume` 이다★ — 그 시험대의 가짜가
-    ///   `resumed-<uuid>` 를 돌려주는데 그 문자열은 uuid 가 아니다(그쪽이 그 사실을 단언한다).
-    /// ★이 항목은 「버려야 한다」를 뒤집자는 것이 아니다★ — 여기서 panic 하거나 옛 값을 지우면 더 나쁘다
-    ///   (그 사유는 [`session_id_sink`] 의 doc). 못 박는 것은 **이 결말에 값이 있다**는 사실이고,
-    ///   그래서 이 갈래가 조용해질 때 회귀가 아니라 **결정**이 되도록 남긴다.
+    /// ★Measures the **cost** of dropping — 「diverged」, not 「not written」★: with a stored handle **already present** and a non-uuid thread id from the peer, the link keeps sending with that string
+    /// while the disk stays old — the next resume opens a thread this incarnation never talked in, silently. Pair: `backend/codex/mod.rs`
+    /// `tests::a_resume_target_makes_the_handshake_issue_thread_resume` (its fake returns `resumed-<uuid>`). ★Not about flipping 「must drop」★ (reason: [`session_id_sink`]); it pins that the
+    /// outcome **has a cost**, so silence is a decision, not a regression.
     #[test]
     fn a_non_uuid_thread_id_leaves_the_stored_one_diverged() {
         let (profiles, id, epoch) = sink_fixture();
@@ -4035,16 +3460,14 @@ mod tests {
         assert_eq!(
             profiles.get(id).unwrap().backend_session_id,
             Some(stored),
-            "해독 실패한 값이 저장된 손잡이를 건드렸다 — 버리기로 한 결정이 깨졌다"
+            "a value that failed decoding touched the stored handle — the decision to drop was broken"
         );
     }
 
-    // ── ADR-0044/0191: backend 가 넘겨준 통로가 무엇을 나르나 ──────────────────────────────
+    // ── ADR-0044/0191: what the link the backend handed over carries ──────────────────────────────
     //
-    // ★통로 **타입**이 아니라 통로가 신고하는 caps 로 잰다★: 만드는 코드가 `backend/<이름>/` 안으로
-    //   들어가 조립점에는 이름으로 부를 타입이 없다(ADR-0191). 재는 사실은 그대로다.
-    // ★`probe_spec` 은 실 CLI 가 아니다★: 즉시 끝나는 프로브를 그 backend 의 통로 선택으로 띄워, 어느
-    //   구현체가 골라졌는지만 본다(ADR-0012 격리 — 실 claude 바이너리 불요).
+    // ★Measured by the caps the link reports, not its **type**★ (the building code lives in `backend/<name>/`, ADR-0191). `probe_spec` launches an immediately-ending probe through that
+    //   backend's link choice and looks only at which implementation was chosen (ADR-0012, no real claude).
     #[cfg(windows)]
     #[test]
     fn stream_json_backend_hands_over_structured_pipe() {
@@ -4064,13 +3487,13 @@ mod tests {
         let caps = parts.transport.capabilities();
         assert!(
             caps.output.structured && !caps.output.terminal_bytes,
-            "stream-json → 구조화 파이프(structured 출력, 터미널 바이트 아님)"
+            "stream-json → structured pipe (structured output, not terminal bytes)"
         );
-        assert!(!caps.control.resize, "파이프 resize 불가");
+        assert!(!caps.control.resize, "a pipe cannot resize");
         parts.transport.shutdown();
     }
 
-    // ── 회귀 ──
+    // ── Regression ──
     #[cfg(windows)]
     #[test]
     fn terminal_backend_hands_over_pty() {
@@ -4090,17 +3513,16 @@ mod tests {
         let caps = parts.transport.capabilities();
         assert!(
             caps.output.terminal_bytes && !caps.output.structured,
-            "터미널 모드 → PTY(터미널 바이트, 구조화 아님)"
+            "terminal mode → PTY (terminal bytes, not structured)"
         );
-        assert!(caps.control.resize, "PTY resize 가능");
+        assert!(caps.control.resize, "PTY can resize");
         parts.transport.shutdown();
     }
 
     // ── write_stdin_observed_if_epoch ──
     //
-    // ★왜 실 spawn 없이 세션을 맵에 직접 꽂나★: 검증 대상은 "맵이 가리키는 세션의 epoch 과 요구 epoch 을
-    //   비교해 write 를 집행/거부하는가" 뿐이라, 실 자식·PTY·claude 바이너리가 전부 무관하다(ADR-0012 격리).
-    //   in-crate 테스트라 private `sessions` 에 직접 접근한다 — `insert_test_session`(feature gate) 불요.
+    // ★The session is plugged into the map directly, no real spawn★: only "compares the mapped session's epoch with the requested one and executes/refuses the write" is verified (ADR-0012);
+    //   in-crate, so the private `sessions` is reachable without `insert_test_session`.
 
     use crate::backend::InputEncoder;
     use crate::persistence::FileProfileStore;
@@ -4151,12 +3573,9 @@ mod tests {
         }
     }
 
-    /// 연결을 **세워야 하는** 통로의 대역 — `link_state` 를 밖에서 갈아 끼울 수 있다.
-    ///
-    /// ★실 codex 없이 재는 이유★: 재려는 것은 「판정이 그 축을 보나」이고, 그 답에 실 CLI 는 무관하다
-    ///   (ADR-0012 격리). 실물로 재려면 codex 바이너리 + 거절당할 스레드 id 가 필요해 CI 에서 못 돈다.
+    /// A stand-in for a link that **must set up** a connection — `link_state` can be swapped from outside. Measured without a real codex (needs a binary + a refusing thread id; ADR-0012).
     struct LinkedTransport {
-        /// `shutdown()` 이 몇 번 불렸나 — 실패한 활성화의 teardown 이 실제로 통로까지 가는지 잰다.
+        /// How many times `shutdown()` was called — measures whether the teardown of a failed activation actually reaches the link.
         shutdowns: Arc<Mutex<usize>>,
     }
     impl AgentTransport for LinkedTransport {
@@ -4222,7 +3641,7 @@ mod tests {
         AgentManager::new_with_control(Arc::new(NoopStatus), profiles, tracker, control)
     }
 
-    /// 같은 id 재삽입 = 재시작(incarnation 교체) 모사.
+    /// Reinserting the same id = imitating a restart (incarnation replacement).
     fn put_session(manager: &AgentManager, id: AgentId, epoch: u32) -> Arc<Mutex<Vec<Vec<u8>>>> {
         let written = Arc::new(Mutex::new(Vec::new()));
         let core = Arc::new(OutputCore::new(
@@ -4265,12 +3684,8 @@ mod tests {
         written
     }
 
-    /// 명부에 **살아 있는**(종점 상태가 아닌) 세션 하나를 꽂고 그 화신의 `OutputCore` 를 돌려준다.
-    ///
-    /// ★실 프로세스를 쓰지 않는 이유★: 여기서 재는 것은 "진단 텍스트가 있고 세션이 살아 있을 때 판정이
-    ///   어떻게 서는가" 뿐이라 자식·PTY·claude 바이너리가 전부 무관하다(ADR-0012 격리). `RecordingTransport`
-    ///   는 아무것도 띄우지 않으므로 이 세션은 **스스로 절대 죽지 않는다** — 그게 "죽음을 기다리지 않는다"
-    ///   를 재는 데 필요한 성질이다(실 claude 로는 그 상태를 결정적으로 붙들 수 없다).
+    /// Plugs one **live** (non-terminal) session into the roster and returns its `OutputCore`. `RecordingTransport` launches nothing, so it **never dies by itself** — needed to measure "it does not
+    /// wait for death" (a real claude cannot hold that state deterministically; ADR-0012).
     // ADR-0172
     pub(super) fn put_live_session(
         manager: &AgentManager,
@@ -4280,7 +3695,7 @@ mod tests {
         put_live_session_leased(manager, id, epoch, None)
     }
 
-    /// [`put_live_session`] 에 실행 재료 회수 열쇠를 실을 수 있는 꼴.
+    /// The form of [`put_live_session`] that can carry a launch-material reclaim lease.
     pub(super) fn put_live_session_leased(
         manager: &AgentManager,
         id: AgentId,
@@ -4330,9 +3745,8 @@ mod tests {
         core
     }
 
-    /// 연결 축이 있는 통로를 단 산 세션을 명부에 꽂는다 — 돌려주는 것은 코어와 kill 계수기다.
-    ///
-    /// ★연결 상태를 들려 보내지 않는다★ — 이제 결말은 **배달**되고, 시험대는 그 채널을 직접 쥔다.
+    /// Plugs a live session carrying a connection-axis link into the roster — returns the core and the kill counter. ★The connection state is not passed in★ — the outcome is **delivered** and the rig holds
+    /// the channel directly.
     fn put_session_with_link(
         manager: &AgentManager,
         id: AgentId,
@@ -4385,9 +3799,7 @@ mod tests {
         (id, kills)
     }
 
-    /// ★배달된 `Ready` 는 **그 자리에서** 판정을 끝낸다★ — 어떤 창도 기다리지 않는다(사용자 결정).
-    ///
-    /// 백스톱을 크게 주고 경과를 재는 것이 요점이다: 판정이 다시 시간을 기다리기 시작하면 여기서 잡힌다.
+    /// ★A delivered `Ready` finishes the decision **on the spot**★ — no window wait. A large backstop is given and the elapsed time measured; a decision that waits for time again is caught here.
     #[test]
     fn a_delivered_ready_ends_the_verdict_at_once() {
         let manager = bare_manager();
@@ -4397,7 +3809,7 @@ mod tests {
             epoch: 7,
             resolution: LinkResolution::Ready,
         })
-        .expect("배달");
+        .expect("deliver");
 
         let started = Instant::now();
         let verdict = manager.link_activation_verdict(id, 7, &rx, Duration::from_secs(6));
@@ -4405,15 +3817,15 @@ mod tests {
 
         assert!(
             matches!(verdict, EarlyVerdict::Ready),
-            "배달된 준비 신호가 성공으로 읽히지 않았다 — got {verdict:?}"
+            "the delivered ready signal was not read as success — got {verdict:?}"
         );
         assert!(
             elapsed < Duration::from_secs(1),
-            "이미 배달된 결말을 두고 판정이 기다렸다({elapsed:?}) — 성공의 근거는 신호이지 경과 시간이 아니다"
+            "the decision waited ({elapsed:?}) with an outcome already delivered — the ground of success is the signal, not elapsed time"
         );
     }
 
-    /// ★배달된 실패는 **사유를 들고** 온다★ — 그 문구가 분류의 유일한 입구다(두 꼬리에는 없다).
+    /// ★A delivered failure comes **carrying its reason**★ — that text is the only entry of the classification (it is in neither tail).
     #[test]
     fn a_delivered_failure_carries_the_reason_to_the_classifier() {
         let manager = bare_manager();
@@ -4425,25 +3837,22 @@ mod tests {
                 reason: "thread/resume: -32600 no rollout found for thread id".into(),
             },
         })
-        .expect("배달");
+        .expect("deliver");
 
         let EarlyVerdict::LinkFailed { reason } =
             manager.link_activation_verdict(id, 3, &rx, Duration::from_secs(6))
         else {
-            panic!("배달된 실패가 실패로 읽히지 않았다");
+            panic!("the delivered failure was not read as a failure");
         };
         assert_eq!(
             backend::resume_failure_kind(&codex_app_server_command(), &reason),
             Some(AgentFailureKind::NoConversationToResume),
-            "사유가 분류에 닿지 않는다 — 그러면 원인 대신 맥락 기본값이 마지막 실패에 찍힌다"
+            "the reason does not reach the classification — then the contextual default is stamped as the last failure instead of the cause"
         );
     }
 
-    /// ★★다른 화신의 결말은 **버린다**★★ — 이것이 「수거된 화신의 정리가 산 후임을 죽인다」의 뿌리다.
-    ///
-    /// 표식이 값에 붙어 있지 않던 시절에는 감독자가 id 로만 찾았고, 그 사이 화신이 바뀌면 옛 결말이
-    /// 새 세션의 판정이 됐다. 여기서는 불일치가 조용히 버려지고, 판정은 **아무 일도 없었던 것처럼**
-    /// 백스톱까지 간다.
+    /// ★★Another incarnation's outcome is **dropped**★★ — the root of 「the cleanup of a collected incarnation kills the live successor」: without the marker the supervisor found it by id alone and an old
+    /// outcome became the new session's decision. A mismatch is dropped silently and the decision goes to the backstop **as if nothing happened**.
     #[test]
     fn a_verdict_from_another_incarnation_is_discarded() {
         let manager = bare_manager();
@@ -4453,21 +3862,17 @@ mod tests {
             epoch: 10,
             resolution: LinkResolution::Ready,
         })
-        .expect("배달");
+        .expect("deliver");
 
         let verdict = manager.link_activation_verdict(id, 11, &rx, Duration::from_millis(200));
         assert!(
             matches!(verdict, EarlyVerdict::LinkFailed { .. }),
-            "죽은 화신의 결말이 이 화신의 판정으로 쓰였다 — 그 뒤 정리가 산 세션을 죽인다: got {verdict:?}"
+            "a dead incarnation's outcome was used as this incarnation's decision — the cleanup after it kills a live session: got {verdict:?}"
         );
     }
 
-    /// ★배달된 값은 **시한에 지지 않는다**★ — 결함 ②(원래 결함의 부호만 뒤집힌 판)가 여기서 닫힌다.
-    ///
-    /// 백스톱이 이미 만료한 상태로 불러도, 채널에 값이 있으면 그 값이 판정이다. 옛 모양은 상태를 읽고
-    /// 그 뒤 시한을 보았기 때문에 **막 성립한 연결이 실패로 기록되고 죽었다**.
-    /// ★여기서 재는 것은 「값이 있으면 절대 시한으로 지지 않는다」는 성질이다★ — 시한과 배달이 정확히
-    ///   겹치는 순간을 시험대가 만들 수는 없으므로, 그 성질을 만료된 시한으로 대신 확인한다.
+    /// ★A delivered value **does not lose to the time limit**★ — defect ②: even with the backstop already expired, a value in the channel is the decision (the old shape read state, then time, and
+    /// **recorded a just-held connection as a failure**). The exact overlap cannot be made, so an expired limit stands in.
     #[test]
     fn a_delivered_resolution_outranks_an_expired_backstop() {
         let manager = bare_manager();
@@ -4477,16 +3882,16 @@ mod tests {
             epoch: 5,
             resolution: LinkResolution::Ready,
         })
-        .expect("배달");
+        .expect("deliver");
 
         let verdict = manager.link_activation_verdict(id, 5, &rx, Duration::ZERO);
         assert!(
             matches!(verdict, EarlyVerdict::Ready),
-            "시한이 배달을 이겼다 — 막 성립한 연결이 실패로 기록되고 죽는다: got {verdict:?}"
+            "the time limit beat the delivery — a connection that just held is recorded as a failure and dies: got {verdict:?}"
         );
     }
 
-    /// ★아무도 배달하지 않으면 백스톱이 포기한다★ — 그 결말은 성공이 아니다.
+    /// ★If nobody delivers, the backstop gives up★ — that outcome is not success.
     #[test]
     fn nothing_delivered_ends_at_the_backstop_as_a_failure() {
         let manager = bare_manager();
@@ -4496,15 +3901,11 @@ mod tests {
         let verdict = manager.link_activation_verdict(id, 1, &rx, Duration::from_millis(150));
         assert!(
             matches!(verdict, EarlyVerdict::LinkFailed { .. }),
-            "연결이 결말을 못 냈는데 성공으로 떨어졌다 — got {verdict:?}"
+            "the connection produced no outcome but it fell to success — got {verdict:?}"
         );
     }
 
-    /// ★사용자 kill 은 **배달 없이** 종점으로 온다 — 그래서 이어받기 실패로 기록되지 않는다★.
-    ///
-    /// 통로가 kill 갈래를 배달하지 않는 것이 전제이고(그쪽 `deliver_link` 가 그 규율의 정본), 여기서는
-    /// 그 전제 위에서 감독자가 무엇을 내는지 본다: 종점 갈래이고, 거기엔 「사용자가 끈 것은 실패가
-    /// 아니다」 규율이 이미 있다.
+    /// ★A user kill reaches the terminal **without delivery** — not recorded as a resume failure★ (the link does not deliver the kill branch — `deliver_link`); measures the supervisor's terminal branch.
     #[test]
     fn a_user_kill_reaches_the_verdict_as_terminal_not_as_a_link_failure() {
         let manager = bare_manager();
@@ -4522,27 +3923,23 @@ mod tests {
                     ..
                 }
             ),
-            "사용자 종료가 연결 실패로 읽혔다 — 그러면 사용자의 취소가 이어받기 실패로 기록되고 그 위에              정리까지 한 번 더 돈다: got {verdict:?}"
+            "a user exit was read as a connection failure — then the user's cancellation is recorded as a resume failure and cleanup runs once more on top of it: got {verdict:?}"
         );
     }
 
-    /// ★★사용자 kill 이 배달을 **억제**하면 채널이 닫히는데, 그것을 실패로 읽지 않는다★★.
-    ///
-    /// 이 라운드가 되살릴 뻔한 결함이다: `deliver_link` 는 **메시지**를 억제하지만 **채널 소멸**은 못
-    /// 막는다(포트를 쥔 라이터 스레드가 끝나면 보내는 끝이 떨어진다). 그때 `session.kill()` 은 아직
-    /// `child.kill()`/`wait()` 안이라 pump 가 `finish` 를 못 돌았고, 상태는 `Exiting` — **종점이 아니다.**
-    /// 상태만 보던 옛 모양은 그 한 번의 읽기로 「통로가 결말을 배달하지 못한 채 사라졌다」를 확정했고,
-    /// 그래서 **사용자의 취소가 이어받기 실패로 기록됐다** — 억제 장치가 막으려던 바로 그 결말이다.
-    /// ★시험대가 그 인터리빙을 **결정적으로** 만든다★: 의도 래치를 세우고 `Exiting` 으로 전이시킨 뒤
-    ///   보내는 끝을 떨어뜨린다 — 실제 kill 경로가 통과하는 상태 그대로다(종점은 아직 안 섰다).
+    /// ★★A user kill **suppresses** delivery and the channel closes — not read as a failure★★: `deliver_link` suppresses **the message** but not **the channel disappearing** (the writer ends, the sending end
+    /// drops) while `session.kill()` is still in `child.kill()`/`wait()` and the state is `Exiting` (**not terminal**); state-only reading recorded the cancellation as a resume failure.
+    /// ★Made **deterministically**★: set the intent latch, go `Exiting`, then drop the sending end — the real kill path's states.
     #[test]
     fn a_kill_that_suppresses_delivery_is_not_read_as_a_link_failure() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
         let (_core, _kills) = put_session_with_link(&manager, id, 13);
-        let session = manager.get_session(id).expect("전제: 세션이 명부에 있다");
+        let session = manager
+            .get_session(id)
+            .expect("premise: the session is in the roster");
 
-        // kill_agent 가 통로를 내리기 전에 지나가는 두 줄 그대로.
+        // Exactly the two lines kill_agent passes before bringing the link down.
         session.set_intent(TerminationIntent::UserKill);
         let _ = session.enter_exiting();
         assert!(
@@ -4550,10 +3947,10 @@ mod tests {
                 session.status(),
                 AgentStatus::Exited { .. } | AgentStatus::Killed | AgentStatus::Failed { .. }
             ),
-            "전제: 아직 종점이 아니다 — 이 항목이 재는 창이 바로 그 구간이다"
+            "premise: not terminal yet — that interval is exactly the window this entry measures"
         );
 
-        // 억제된 배달 = 아무 메시지 없이 보내는 끝이 떨어진다.
+        // Suppressed delivery = the sending end drops without any message.
         let (tx, rx) = std::sync::mpsc::channel::<LinkVerdict>();
         drop(tx);
 
@@ -4566,31 +3963,28 @@ mod tests {
                     ..
                 }
             ),
-            "사용자가 끊어서 닫힌 채널을 「연결 실패」로 읽었다 — 그러면 사용자의 취소가 활성화 실패로              기록되고, 억제 장치가 하는 일이 없어진다: got {verdict:?}"
+            "a channel closed by the user's interrupt was read as a connection failure — then the user's cancellation is recorded as an activation failure and the suppression device does nothing: got {verdict:?}"
         );
     }
 
-    /// ★★큐에 선 `Ready` 가 사용자 취소를 **이기지 못한다**★★ — 위 형제의 부호 반대 판.
-    ///
-    /// 핸드셰이크가 성공해 `Ready` 가 배달된 직후 사용자가 끊으면, 배달을 먼저 받는 모양은 **죽은
-    /// 에이전트를 성공으로 보고**한다(`restore_one` 은 `Resumed`, `activate_profile` 은 `Ok(info)`).
-    /// ★그래도 「종점이 배달을 이긴다」로 넓히지는 않았다★ — 스스로 죽는 것은 ADR-0201 이 「별개 사건」
-    ///   으로 못박았고, 그쪽은 판정을 뒤집는 대신 호출자가 상태를 다시 떠서 돌려준다. 이기는 것은
-    ///   **사람이 정한 결말** 하나뿐이다.
+    /// ★★A queued `Ready` **cannot beat** the user's cancellation★★ (opposite sign of the sibling): else a dead agent is **reported as success** (`restore_one` `Resumed`, `activate_profile`
+    /// `Ok(info)`). ★Not widened to 「the terminal beats delivery」★ — dying by itself is 「a separate event」 (ADR-0201); only **a person's decided outcome** wins.
     #[test]
     fn a_queued_ready_does_not_outrank_a_user_cancellation() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
         let (_core, _kills) = put_session_with_link(&manager, id, 21);
-        let session = manager.get_session(id).expect("전제: 세션이 명부에 있다");
+        let session = manager
+            .get_session(id)
+            .expect("premise: the session is in the roster");
 
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(LinkVerdict {
             epoch: 21,
             resolution: LinkResolution::Ready,
         })
-        .expect("배달");
-        // 배달이 큐에 선 **뒤** 사용자가 끊는다.
+        .expect("deliver");
+        // The user interrupts **after** the delivery stood in the queue.
         session.set_intent(TerminationIntent::UserKill);
         let _ = session.enter_exiting();
 
@@ -4603,39 +3997,26 @@ mod tests {
                     ..
                 }
             ),
-            "큐에 선 준비 신호가 사용자 취소를 이겼다 — 방금 사용자가 끈 에이전트를 성공으로 보고한다:              got {verdict:?}"
+            "a queued ready signal beat the user's cancellation — it reports an agent the user just turned off as success: got {verdict:?}"
         );
     }
 
-    /// ★★취소가 배달을 가로채도 그 **사유는 통로의 로그에 이미 남아 있다**★★ — 그것이 이 자리가
-    /// 사유를 나르지 않는 근거이고, 그래서 그 로그 줄을 여기서 지킨다.
-    ///
-    /// ★왜 이 항목이 생겼나★: 한때 감독자가 가로챈 사유를 `evidence` 로 옮겨 싣고 「여기서 안 실으면
-    ///   어디에도 안 남는다」고 적었는데 **둘 다 거짓이었다** — 받는 쪽 둘이 `Killed` 갈래에서
-    ///   `evidence` 를 읽지 않아 그대로 버려졌고(그 갈래는 기록 자체를 안 한다), 문구는 이미 통로가
-    ///   내고 있었다. 기계를 걷어냈으므로, **걷어낸 근거인 그 로그 줄**을 대신 못 박는다.
-    /// ★지켜야 하는 성질 둘★: ① 실패 갈래에 들어서면 사유를 **로그로 낸다** ② 그 줄이 `deliver_link`
-    ///   보다 **앞**이다 — 뒤로 가면 종료 래치가 배달을 억제하는 인터리빙에서 사유가 통째로 사라진다
-    ///   (억제되는 것은 배달이지 로그가 아니다).
-    /// ★왜 소스에서 재나★: 로그 방출을 실행으로 재려면 `tracing` 수집기를 붙여야 하는데 이 crate 에는
-    ///   그 하네스가 없고, 무엇보다 재야 하는 것이 **두 줄의 순서**다.
+    /// ★★Even if the cancellation intercepts the delivery, **its reason already remains in the link's log**★★ — the ground for not carrying it. Two properties: ① on entering the failure branch the reason is
+    /// **logged** ② **before** `deliver_link` (after it, the reason vanishes when the exit latch suppresses delivery). ★Measured in the source★: the crate has no `tracing` collector, and what must be
+    /// measured is **the order of two lines**.
     #[test]
     fn the_transport_logs_the_rejection_reason_before_it_may_be_suppressed() {
-        // ★★주석을 걷고 훑는다 — 안 걷으면 **주석 한 줄이 실물 호출 행세를 한다**★★: 그 갈래는
-        //   자기가 지키는 이름을 그대로 인용하는 주석으로 덮여 있고(이 저장소의 주석 규약이다), 그중
-        //   하나가 로그 줄보다 앞에서 `deliver_link(` 를 언급하는 순간 이 항목은 **아무것도 안 재면서
-        //   초록**이 된다. 같은 결함으로 통로 쪽 순서 가드 둘이 실제로 비어 있었다.
-        //   ★그쪽 헬퍼(`writer_loop_code`)를 쓰지 못한다★ — 다른 파일의 test 모듈 안이라 여기서
-        //   닿지 않는다. 그래서 같은 걷기를 여기 한 벌 둔다(옮기려면 둘 다 아는 자리가 먼저 필요하다).
+        // ★Comments are stripped before scanning — else **a comment line poses as a real call**★: that branch's comments quote the names they guard, so a `deliver_link(` mention before the log line would make this
+        //   **green while measuring nothing** (two link-side order guards were empty this way). Another file's `writer_loop_code` is unreachable here, so the stripping is copied.
         let src = include_str!("backend/codex/transport.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let failure_arm: String = production
             .split("fn writer_loop(")
             .nth(1)
-            .expect("`writer_loop` 본문")
+            .expect("`writer_loop` body")
             .split("Err(failure) => {")
             .nth(1)
-            .expect("핸드셰이크 실패 갈래")
+            .expect("handshake failure branch")
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
@@ -4644,67 +4025,59 @@ mod tests {
         let logged = failure_arm
             .find("tracing::warn!(\"{}: {reason}\", failure.headline());")
             .expect(
-                "통로가 실패 사유를 로그로 내지 않는다 — 감독자가 그것을 안 나르기로 한 근거가 사라진다",
+                "the link does not log the failure reason — the ground for the supervisor not carrying it disappears",
             );
         let delivered = failure_arm
             .find("deliver_link(")
-            .expect("실패 갈래가 배달을 하지 않는다 — 이 항목의 전제가 낡았다");
+            .expect("the failure branch does not deliver — this entry's premise is stale");
         assert!(
             logged < delivered,
-            "사유 로그가 배달보다 뒤에 있다 — 종료 래치가 배달을 억제하는 인터리빙에서 그 문구가              어디에도 안 남는다(억제되는 것은 배달이지 로그가 아니다)"
+            "the reason log is after the delivery — in the interleaving where the exit latch suppresses delivery, that text remains nowhere (what is suppressed is the delivery, not the log)"
         );
     }
 
-    /// ★★Fresh 성공은 **기다린 뒤의 상태**를 돌려준다 — spawn 시점 스냅샷이 아니다★★.
-    ///
-    /// `info` 는 자식이 뜬 직후 조립되고 status 가 `Running` 이다. 예전엔 0ms 된 값이라 그대로 내도
-    /// 무해했지만, 연결을 기다리는 지금은 최대 백스톱만큼 낡는다 — 그 사이 죽은 에이전트를 호출자가
-    /// 산 것으로 보고받으면(WS `Spawned` 가 그 status 를 그대로 나른다) **다음 동사가 시체에게 편지를
-    /// 쓴다.** Resume 형제는 `activate_profile` 에서 같은 일을 한다.
-    /// ★왜 소스에서 재나★: 이 갈래를 실행으로 몰려면 실 codex 가 핸드셰이크를 성공시켜 줘야 한다.
+    /// ★★A Fresh success returns **the state after waiting** — not the spawn-time snapshot★★: `info` is `Running` from right after launch; now stale by up to the backstop, so an agent dead in between would be told alive
+    /// (WS `Spawned`) and **mail would go to a corpse**. The Resume sibling does the same in `activate_profile`. ★Measured in the source★: running needs a real codex handshake.
     #[test]
     fn a_fresh_success_reports_the_state_after_the_wait_not_the_spawn_snapshot() {
         let ready = fresh_arm("EarlyVerdict::Ready =>", "EarlyVerdict::LinkFailed");
         assert!(
             ready.contains("self.agent_info_by_id(profile.id)"),
-            "성공 갈래가 spawn 시점 스냅샷을 그대로 돌려준다 — 백스톱만큼 낡은 `Running` 이 호출자에게              간다: {ready}"
+            "the success branch returns the spawn-time snapshot as is — a `Running` stale by the backstop goes to the caller: {ready}"
         );
         assert!(
             ready.contains("AgentStatus::Exited { code: None }"),
-            "조회가 놓쳤을 때 상태를 낮추지 않는다 — 그러면 수거된 세션이 산 것으로 보고된다: {ready}"
+            "it does not lower the state when the lookup missed — then a collected session is reported as alive: {ready}"
         );
     }
 
-    /// ★★실패한 활성화의 정리는 **그 화신에만** 닿는다★★ — 결함 ①.
-    ///
-    /// 정리는 판정만큼 늦게 도착하고, 그 사이 이 화신이 수거되고 다음 화신이 떴을 수 있다. 표식을 안 보면
-    /// 그때 죽는 것은 실패한 세션이 아니라 **막 뜬 건강한 후임**이다.
+    /// ★★The cleanup of a failed activation reaches **only that incarnation**★★ — defect ①: it arrives as late as the decision, and without the marker it would kill **the healthy successor just launched**.
     #[test]
     fn a_stale_teardown_never_touches_a_live_successor() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
         let (_core, kills) = put_session_with_link(&manager, id, 42);
 
-        // 죽은 화신(41)의 정리가 뒤늦게 도착한다 — 지금 명부에 있는 것은 42 다.
+        // The dead incarnation's (41) cleanup arrives late — what is in the roster now is 42.
         manager.tear_down_failed_activation(id, 41);
         assert_eq!(
             *kills.lock().expect("shutdowns poisoned"),
             0,
-            "죽은 화신의 정리가 산 후임을 죽였다"
+            "the dead incarnation's cleanup killed the live successor"
         );
 
-        // 자기 화신의 정리는 그대로 돈다(위 단언만 있으면 「아무것도 안 한다」도 통과한다).
+        // Its own incarnation's cleanup runs as is (with only the assertion above, 「doing nothing」 would also pass).
         manager.tear_down_failed_activation(id, 42);
         assert_eq!(
             *kills.lock().expect("shutdowns poisoned"),
             1,
-            "자기 화신의 정리가 돌지 않았다 — 실패한 세션이 아무도 못 거두는 채로 남는다"
+            "its own incarnation's cleanup did not run — the failed session remains with nobody collecting it"
         );
     }
 
-    // ── 물러남 예고의 자리: 끝내기로 정한 첫 걸음 ──
-    // 한 기록에 제어 채널(권한 회수) · 코어의 상태 알림(`Exiting`) · 통로(예고 · 종료)가 부른 차례대로 적는다. 종료
-    //   의도는 적을 동사가 없어 예고 순간의 값을 따로 찍는다.
+    // ── The place of the retreat notice: the first step once ending is decided ──
+    // One record in call order: control channel (permission revoke) · core status notification (`Exiting`) · link (notice · termination). The termination intent has no verb to write it, so the value at
+    //   the notice moment is stamped separately.
 
     type CallLog = Arc<Mutex<Vec<&'static str>>>;
 
@@ -4781,7 +4154,7 @@ mod tests {
         }
     }
 
-    /// 명부에 `epoch` 화신 하나를 꽂는다 — 코어의 상태 알림과 통로가 `log` 에 적는다. 돌려주는 것 = 예고 순간의 종료 의도.
+    /// Plugs one `epoch` incarnation into the roster — the core's status notification and the link write to `log`. Returns = the termination intent at the moment of the notice.
     fn put_retire_probe(
         manager: &AgentManager,
         id: AgentId,
@@ -4839,17 +4212,17 @@ mod tests {
         let id = AgentId::new_v4();
         let intent_at_retire = put_retire_probe(&manager, id, 7, &log);
 
-        manager.kill_agent(id).expect("명부에 있는 세션");
+        manager.kill_agent(id).expect("a session in the roster");
 
         assert_eq!(
             *log.lock().expect("log poisoned"),
             vec!["begin_retire", "revoke", "exiting", "shutdown"],
-            "물러남 예고가 권한 회수 · `Exiting` · 종료보다 먼저 오지 않는다"
+            "the retreat notice does not come before the permission revoke · `Exiting` · termination"
         );
         assert_eq!(
             *intent_at_retire.lock().expect("intent poisoned"),
             Some(TerminationIntent::None as u8),
-            "예고 때 사용자 종료 의도가 이미 서 있다 — 예고가 의도 뒤로 밀렸다"
+            "at the notice the user termination intent already stands — the notice was pushed after the intent"
         );
     }
 
@@ -4863,26 +4236,20 @@ mod tests {
         manager.tear_down_failed_activation(id, 41);
         assert!(
             log.lock().expect("log poisoned").is_empty(),
-            "죽은 화신의 정리가 산 후임에게 물러남을 예고했다 — 그 표시는 되돌릴 수 없다"
+            "the dead incarnation's cleanup gave the live successor a retreat notice — that marker cannot be undone"
         );
 
         manager.tear_down_failed_activation(id, 42);
         assert_eq!(
             *log.lock().expect("log poisoned"),
             vec!["begin_retire", "revoke", "exiting", "shutdown"],
-            "자기 화신의 정리가 물러남 예고로 시작하지 않는다"
+            "its own incarnation's cleanup does not start with the retreat notice"
         );
     }
 
-    /// ★★아직 결말이 안 난 활성화를 「도는 중」이라고 답하지 않는다★★ — 두 호출자가 갈리는 자리.
-    ///
-    /// 연결을 선언하는 통로에서는 세션이 명부에 오른 뒤에도 그 화신이 입력을 받을 수 있는지가 아직
-    /// 안 정해져 있다. 그 구간에 들어온 두 번째 활성화가 `Ok`(도는 중)를 받으면, 첫 요청이 곧 실패로
-    /// 판정해 그 화신을 거두는 순간 **두 호출자가 서로 다른 사실을 들고 갈린다**.
-    /// ★예약을 직접 들고 그 구간을 만든다★ — 스레드 경쟁을 기다리지 않는다(`LinkWatch` 가 실물에서
-    ///   하는 일이 정확히 이것이다: 결말이 날 때까지 예약을 놓지 않는다).
-    /// ★대조군이 요점이다★ — 예약이 없을 때는 같은 조합이 여전히 「도는 중」으로 답해야 한다. 그 단언이
-    ///   없으면 「항상 거절한다」도 통과하고, 그건 ADR-0082 의 재활성화 가드를 부수는 것이다.
+    /// ★★An activation without an outcome yet is not answered 「running」★★ — where two callers split: on a connection-declaring link a second activation getting `Ok` would **hold different facts** from the
+    /// first once it fails and collects the incarnation. ★The interval is made by holding the reservation directly★ (`LinkWatch` does exactly this). ★The control group is the point★: without a reservation the same
+    /// combination must still answer 「running」, else 「always refuse」 passes and breaks ADR-0082's reactivation guard.
     #[test]
     fn an_unresolved_activation_is_not_reported_to_a_second_caller_as_running() {
         let manager = bare_manager();
@@ -4892,28 +4259,28 @@ mod tests {
             Some("still-establishing"),
         );
         let id = profile.id;
-        // 첫 요청이 명부에 올려 둔 화신.
+        // The incarnation the first request put on the roster.
         let (_core, _kills) = put_session_with_link(&manager, id, 4);
 
         let settled = manager.activate_profile(&profile, SpawnMode::Fresh);
         assert_eq!(
             settled.as_ref().ok().map(|i| i.id),
             Some(id),
-            "전제: 결말이 난 화신은 그대로 「도는 중」으로 답한다(ADR-0082 재활성화 가드)"
+            "premise: an incarnation with an outcome answers running as is (ADR-0082 reactivation guard)"
         );
 
-        // 첫 요청이 결말을 기다리는 그 구간 — `LinkWatch` 가 예약을 쥐고 있다.
-        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("예약");
+        // That interval where the first request waits for the outcome — `LinkWatch` holds the reservation.
+        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("reservation");
         let during = manager.activate_profile(&profile, SpawnMode::Fresh);
         assert!(
             during.is_err(),
-            "연결이 아직 안 선 화신을 「도는 중」으로 답했다 — 첫 요청이 그것을 실패로 판정해 거두면 이              호출자는 자기 밑에서 죽을 에이전트를 산 것으로 들고 있게 된다: got {:?}",
+            "answered running for an incarnation whose connection has not stood yet — if the first request decides it a failure and collects it, this caller ends up holding as alive an agent about to die under it: got {:?}",
             during.map(|i| i.id)
         );
     }
 
-    /// ★같은 구간에서 `spawn_agent` 도 「떠 있다」로 답하지 않는다★ — 예약을 명부 조회보다 **먼저**
-    /// 보는 그 순서가 여기서 잡힌다.
+    /// ★In the same interval `spawn_agent` also does not answer 「it is up」★ — the order of looking at the reservation **before** the roster lookup
+    /// is caught here.
     #[test]
     fn a_spawn_request_during_an_unresolved_activation_does_not_hand_back_the_live_session() {
         let manager = bare_manager();
@@ -4927,152 +4294,138 @@ mod tests {
 
         let settled = manager
             .spawn_agent(&profile, SpawnMode::Fresh)
-            .expect("중복 요청은 오류가 아니다");
+            .expect("a duplicate request is not an error");
         assert_eq!(
             settled.into_info().map(|i| i.id),
             Some(id),
-            "전제: 결말이 난 화신은 moot 이어도 그 정보를 돌려준다"
+            "premise: an incarnation with an outcome returns that information even if moot"
         );
 
-        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("예약");
+        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("reservation");
         let during = manager
             .spawn_agent(&profile, SpawnMode::Fresh)
-            .expect("중복 요청은 오류가 아니다");
+            .expect("a duplicate request is not an error");
         assert!(
             during.into_info().is_none(),
-            "연결이 아직 안 선 화신을 「떠 있다」로 돌려줬다 — 명부 조회가 예약보다 앞서면 이 답이 나온다"
+            "returned an incarnation whose connection has not stood yet as up — this answer comes out if the roster lookup precedes the reservation"
         );
     }
 
-    /// ★위 두 항목이 **못 재는 절반**을 여기서 잰다★ — 그 구간이 실제로 **연결의 결말까지** 이어지나.
-    ///
-    /// 위 둘은 예약을 시험대가 직접 들고 그 구간을 모사하므로, 운영 코드가 예약을 spawn 이 끝나는
-    /// 자리에서 놓아 버려도 **초록으로 남는다**. 그러면 가드는 그대로인데 지켜야 할 구간이 사라진다.
-    /// ★왜 소스에서 재나★: 그 구간을 실행으로 관측하려면 실 codex app-server 가 핸드셰이크를 붙들고
-    ///   있어 줘야 한다 — 시험대에 그 상대가 없다.
-    /// ★이 항목이 **못 잡는 것**도 적어 둔다★: 결말을 기다리는 쪽이 받은 값에서 배달함만 꺼내 들고
-    ///   나머지를 버리면(예: `watch.map(|w| w.rx)`) 예약은 조용히 풀리고 이 단언은 그대로 통과한다.
-    ///   그 모양을 막는 것은 컴파일러도 이 항목도 아니고, 두 호출자가 `watch` 를 통째로 들고 있다는
-    ///   사실뿐이다.
+    /// ★Measures **the half the two entries above cannot**★ — that the interval lasts **until the connection outcome**: they hold the reservation by hand and stay green even if production releases it where spawn
+    /// ends. ★Measured in the source★ (needs a real app-server holding the handshake). ★Cannot catch★ a waiter taking only the mailbox from the value (e.g. `watch.map(|w| w.rx)`), silently releasing the
+    /// reservation — only both callers holding `watch` whole prevents that.
     #[test]
     fn the_link_watch_holds_the_spawn_reservation_until_the_verdict() {
         let src = include_str!("manager.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
 
         let declaration = production
             .split("struct LinkWatch {")
             .nth(1)
-            .expect("`LinkWatch` 선언")
+            .expect("`LinkWatch` declaration")
             .split('}')
             .next()
-            .expect("선언 본문");
+            .expect("declaration body");
         assert!(
             declaration.contains("_reservation: SpawnReservation"),
-            "배달함이 예약을 더는 들고 있지 않다 — 그러면 세션이 명부에 오른 순간 예약이 풀리고, 연결이              서는 동안 들어온 두 번째 요청이 다시 「떠 있다」로 답한다: {declaration}"
+            "the mailbox no longer holds the reservation — then the reservation is released the moment the session goes onto the roster, and a second request coming in while the connection stands answers up again: {declaration}"
         );
 
         let spawning = production
             .split("fn spawn_agent_watching_link(")
             .nth(1)
-            .expect("`spawn_agent_watching_link` 본문")
+            .expect("`spawn_agent_watching_link` body")
             .split("pub fn activate_profile(")
             .next()
-            .expect("다음 함수까지");
+            .expect("up to the next function");
         assert!(
             spawning.contains("_reservation: reservation"),
-            "예약이 배달함에 실리지 않는다 — 이 함수가 돌아오는 순간 풀린다: {spawning}"
+            "the reservation is not carried in the mailbox — it is released the moment this function returns: {spawning}"
         );
     }
 
-    /// 운영 구획에서 `spawn_fresh_settled` 의 한 갈래 본문만 잘라 온다.
+    /// Cuts out from the production section only the body of one branch of `spawn_fresh_settled`.
     fn fresh_arm(start: &str, end: &str) -> String {
         let src = include_str!("manager.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let body = production
             .split("fn spawn_fresh_settled(")
             .nth(1)
-            .expect("`spawn_fresh_settled` 본문")
+            .expect("`spawn_fresh_settled` body")
             .split("fn spawn_session(")
             .next()
-            .expect("다음 함수까지");
-        let i = body
-            .find(start)
-            .unwrap_or_else(|| panic!("`{start}` 갈래가 없다 — 이 항목의 전제가 낡았다"));
+            .expect("up to the next function");
+        let i = body.find(start).unwrap_or_else(|| {
+            panic!("the `{start}` branch is missing — this entry's premise is stale")
+        });
         let rest = &body[i..];
         let j = rest
             .find(end)
-            .unwrap_or_else(|| panic!("`{end}` 가 그 뒤에 없다 — 이 항목의 전제가 낡았다"));
+            .unwrap_or_else(|| panic!("`{end}` is not after it — this entry's premise is stale"));
         rest[..j].to_string()
     }
 
-    /// ★★Fresh 스폰도 연결의 결말을 보고 나서 성공을 말한다★★ — 그리고 **두 입구 다** 그렇게 한다.
-    ///
-    /// ★왜 소스에서 재나★: 이 갈래를 실행으로 몰려면 실 codex app-server 가 `thread/start` 를 거절해
-    ///   줘야 하는데 시험대에 그 상대가 없다(`link_activation_verdict` 단위 항목들이 그래서 채널을 직접
-    ///   쥔다). 회귀했을 때 나는 것은 빨간 단언이 아니라 **조용한 무주공산**이다 — 화면엔 Running 인데
-    ///   입력은 전부 거절되고 아무도 거두지 않는다.
-    /// ★입구를 둘 다 재는 것이 요점이다★ — 하나만 고치면 다른 하나가 뒤처지고, 부팅 복원 쪽이 뒤처지면
-    ///   그 구멍이 이어받을 손잡이 없는 codex 프로필 수만큼 한꺼번에 선다.
+    /// ★★A Fresh spawn also claims success only after seeing the connection outcome★★, in **both entries**. ★Measured in the source★: running needs a real app-server refusing `thread/start`; a regression is
+    /// **a silent ownerless state** (Running, all input refused, nobody collecting). Both entries: a boot restore that falls behind opens the hole for every codex profile without a resume handle.
     #[test]
     fn both_fresh_entrances_settle_the_link_before_reporting_success() {
         let src = include_str!("manager.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
 
         let settling = production
             .split("fn spawn_fresh_settled(")
             .nth(1)
-            .expect("`spawn_fresh_settled` 본문")
+            .expect("`spawn_fresh_settled` body")
             .split("fn spawn_session(")
             .next()
-            .expect("다음 함수까지");
+            .expect("up to the next function");
         assert!(
             settling.contains("self.link_activation_verdict("),
-            "Fresh 갈래가 연결의 결말을 보지 않는다 — 거절당한 핸드셰이크에 주인이 없어진다: {settling}"
+            "the Fresh branch does not look at the connection outcome — a refused handshake has no owner: {settling}"
         );
         assert!(
             settling.contains("self.note_spawn_result("),
-            "연결 축이 없는 통로(claude·shell)의 옛 기록 경로가 사라졌다 — 그 경로는 이 변경의 범위 밖이다"
+            "the old record path of links without a connection axis (claude · shell) disappeared — that path is outside this change's scope"
         );
 
         let activate = production
             .split("pub fn activate_profile(")
             .nth(1)
-            .expect("`activate_profile` 본문")
+            .expect("`activate_profile` body")
             .split("fn note_activation_result(")
             .next()
-            .expect("다음 함수까지");
+            .expect("up to the next function");
         assert!(
             activate.contains("self.spawn_fresh_settled(profile, Entry::Caller)"),
-            "수동 활성화의 Fresh 갈래가 판정을 안 도는 동사로 돌아갔거나 부르는 쪽 입구를 안 싣는다: {activate}"
+            "the Fresh branch of manual activation went back to a verb that does not run the decision, or does not carry the caller entry: {activate}"
         );
 
         let restore = production
             .split("fn restore_one(")
             .nth(1)
-            .expect("`restore_one` 본문")
+            .expect("`restore_one` body")
             .split("fn resume_no_fallback(")
             .next()
-            .expect("다음 함수까지");
+            .expect("up to the next function");
         assert!(
             restore.contains("self.spawn_fresh_settled(profile, Entry::Internal)"),
-            "부팅 복원의 비-이어받기 갈래가 판정을 안 도는 동사로 돌아갔거나 내부 입구를 안 싣는다: {restore}"
+            "the non-resume branch of boot restore went back to a verb that does not run the decision, or does not carry the internal entry: {restore}"
         );
 
-        // ★두 입구가 **같은 동사**에 **다른 입구 값**을 넘긴다(ADR-0291 E3)★ — 입구별 띄우기 사본이 생기면
-        //   ADR-0082 · ADR-0201 · ADR-0202 가 막은 「입구마다 판정이 갈려 하나가 뒤처진다」가 돌아온다.
+        // ★The two entries pass **different entry values** to **the same verb** (ADR-0291 E3)★ — per-entry launch copies would bring back 「the decision splits per entry and one falls behind」 (ADR-0082 · ADR-0201 · ADR-0202).
         assert!(
             activate.contains(".resume_no_fallback(profile, Entry::Caller)"),
-            "수동 활성화의 이어받기 갈래가 부르는 쪽 입구를 안 싣는다: {activate}"
+            "the resume branch of manual activation does not carry the caller entry: {activate}"
         );
         assert!(
             restore.contains(".resume_no_fallback(profile, Entry::Internal)"),
-            "부팅 복원의 이어받기 갈래가 내부 입구를 안 싣는다: {restore}"
+            "the resume branch of boot restore does not carry the internal entry: {restore}"
         );
         let spawn_agent =
             squashed_production_body("pub fn spawn_agent(", "fn spawn_agent_watching_link(");
         assert!(
             spawn_agent.contains("self.spawn_agent_watching_link(profile,mode,Entry::Caller)"),
-            "즉석 생성 입구가 부르는 쪽 입구를 안 싣는다: {spawn_agent}"
+            "the instant creation entry does not carry the caller entry: {spawn_agent}"
         );
         for (name, body) in [
             ("activate_profile", activate),
@@ -5080,13 +4433,13 @@ mod tests {
         ] {
             assert!(
                 !body.contains("Entry::Internal"),
-                "부르는 쪽 있는 입구 `{name}` 이 내부 입구를 싣는다 — 저장 거절에도 메모리가 바뀐 채 「바꿨다」고 답한다"
+                "the entry with a caller `{name}` carries the internal entry — even on a save refusal memory changes and it answers that it changed"
             );
         }
         assert_eq!(
             production.matches("fn spawn_agent_watching_link(").count(),
             1,
-            "띄우기 공유 본체가 둘 이상이다 — 입구별 사본은 판정을 가른다"
+            "there are two or more shared launch bodies — per-entry copies split the decision"
         );
         // ADR-0348: the create entrance is the Fresh activation path, not a third spawn body.
         let create =
@@ -5099,11 +4452,11 @@ mod tests {
             !create.contains("spawn_agent"),
             "the create entrance reaches a spawn verb directly — it skips the link verdict: {create}"
         );
-        // 두 동사는 받은 값을 그대로 넘기고, 공유 본체는 그 값으로 ① 등록 · ③ 비우기의 입구를 고른다.
+        // The two verbs pass the received value as is, and the shared body uses that value to choose the entry of ① registration · ③ clearing.
         let fresh = squashed_production_body("fn spawn_fresh_settled(", "fn spawn_session(");
         assert!(
             fresh.contains("self.spawn_agent_watching_link(profile,SpawnMode::Fresh,entry)"),
-            "Fresh 동사가 받은 입구를 넘기지 않는다: {fresh}"
+            "the Fresh verb does not pass the received entry: {fresh}"
         );
         let resume =
             squashed_production_body("fn resume_no_fallback(", "fn tear_down_failed_activation(");
@@ -5113,7 +4466,7 @@ mod tests {
         ] {
             assert!(
                 resume.contains(call),
-                "이어받기 동사가 받은 입구를 넘기지 않는다(`{call}`)"
+                "the resume verb does not pass the received entry (`{call}`)"
             );
         }
         let body =
@@ -5124,34 +4477,29 @@ mod tests {
         ] {
             assert!(
                 body.contains(call),
-                "공유 본체가 입구 값으로 레지스트리 입구를 고르지 않는다(`{call}`)"
+                "the shared body does not choose the registry entry by the entry value (`{call}`)"
             );
         }
 
         assert_eq!(
             production.matches("self.note_spawn_result(").count(),
             1,
-            "「spawn 한 번으로 끝나는 기록」의 호출자가 늘었다 — 그 동사는 연결 축이 **없는** 통로 전용이고,              축이 있는 곳에서 부르면 그것이 곧 ADR-0202 가 막는 증거 파괴다"
+            "the callers of the record settled by one spawn grew — that verb is only for links **without** a connection axis, and calling it where there is one is exactly the evidence destruction ADR-0202 blocks"
         );
     }
 
-    /// ★Fresh 의 낙관적 성공도 「마지막 실패」를 지우지 않는다★(ADR-0202) — Resume 쪽 형제와 같은 규율.
-    ///
-    /// ADR-0202 가 「아직 참이 아니다」로 적어 둔 구멍이 정확히 이 자리였다: Fresh 는 프로세스가 뜬
-    /// 순간을 성공으로 읽고 앞선 실패 기록을 지웠다.
+    /// ★Fresh's optimistic success does not clear 「the last failure」 either★ (ADR-0202) — as the Resume sibling; Fresh used to read launch as success and clear the earlier record.
     #[test]
     fn a_fresh_success_does_not_clear_the_failure_record() {
         let ready = fresh_arm("EarlyVerdict::Ready =>", "EarlyVerdict::LinkFailed");
         assert!(
             !ready.contains("note_activation_result"),
-            "Fresh 성공 갈래가 「마지막 실패」를 건드린다 — 이 판정은 「입력을 받을 준비가 됐다」까지만              관측하므로, 그것으로 옛 실패 증거를 지우면 되돌릴 수 없는 소실이다: {ready}"
+            "the Fresh success branch touches the last failure — this decision observes only up to being ready to take input, so erasing old failure evidence with it is an irreversible loss: {ready}"
         );
     }
 
-    /// ★Fresh 실패 갈래도 **정리를 먼저, 기록을 나중에**★ — Resume 쪽 형제와 같은 순서·같은 사유.
-    ///
-    /// 기록은 프로필 뮤텍스를 잡는데 그 뮤텍스가 붙들려 있으면, 순서가 뒤집힌 쪽은 **자식을 영영 안
-    /// 죽인다**. 그리고 정리는 화신 표식을 들고 불려야 한다 — 안 그러면 산 후임을 죽인다.
+    /// ★The Fresh failure branch also does **cleanup first, record later**★ (as the Resume sibling): the record takes the profile mutex, and the reversed order **never kills the child** if it is held; the cleanup must
+    /// carry the incarnation marker or it kills the live successor.
     #[test]
     fn a_failed_fresh_link_tears_down_before_it_records() {
         let arm = fresh_arm(
@@ -5160,17 +4508,17 @@ mod tests {
         );
         let teardown = arm
             .find("tear_down_failed_activation")
-            .expect("Fresh 연결 실패 갈래가 정리를 부르지 않는다 — 실패한 세션을 아무도 못 거둔다");
+            .expect("the Fresh connection failure branch does not call the cleanup — nobody collects the failed session");
         let record = arm
             .find("note_activation_result")
-            .expect("Fresh 연결 실패 갈래가 실패를 기록하지 않는다 — 증거가 어디에도 안 남는다");
+            .expect("the Fresh connection failure branch does not record the failure — the evidence remains nowhere");
         assert!(
             teardown < record,
-            "기록이 정리보다 앞선다 — 프로필 뮤텍스가 붙들려 있으면 자식이 영영 안 죽는다: {arm}"
+            "the record precedes the cleanup — if the profile mutex is held, the child never dies: {arm}"
         );
         assert!(
             arm.contains("tear_down_failed_activation(profile.id, incarnation)"),
-            "정리가 화신 표식 없이 불린다 — 그 사이 다른 화신이 섰으면 산 후임을 죽인다: {arm}"
+            "the cleanup is called without the incarnation marker — if another incarnation stood in between, it kills the live successor: {arm}"
         );
     }
 
@@ -5228,7 +4576,7 @@ mod tests {
         );
 
         let src = include_str!("manager.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         assert_eq!(
             production.matches(".record_notice_fingerprint(").count(),
             1,
@@ -5241,61 +4589,54 @@ mod tests {
         );
     }
 
-    /// 운영 구획에서 `resume_no_fallback` 의 한 갈래 본문만 잘라 온다.
+    /// Cuts out from the production section only the body of one branch of `resume_no_fallback`.
     fn resume_arm(start: &str, end: &str) -> String {
         let src = include_str!("manager.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let body = production
             .split("fn resume_no_fallback(")
             .nth(1)
-            .expect("`resume_no_fallback` 본문")
+            .expect("`resume_no_fallback` body")
             .split("fn tear_down_failed_activation(")
             .next()
-            .expect("다음 함수까지");
-        let i = body
-            .find(start)
-            .unwrap_or_else(|| panic!("`{start}` 갈래가 없다 — 이 항목의 전제가 낡았다"));
+            .expect("up to the next function");
+        let i = body.find(start).unwrap_or_else(|| {
+            panic!("the `{start}` branch is missing — this entry's premise is stale")
+        });
         let rest = &body[i..];
         let j = rest
             .find(end)
-            .unwrap_or_else(|| panic!("`{end}` 가 그 뒤에 없다 — 이 항목의 전제가 낡았다"));
+            .unwrap_or_else(|| panic!("`{end}` is not after it — this entry's premise is stale"));
         rest[..j].to_string()
     }
 
-    /// ★낙관적 성공은 「마지막 실패」를 **지우지 않는다**★(사용자 조건) — 원래 결함의 절반이 그 파괴였다.
-    ///
-    /// ★왜 소스에서 재나★: 지움은 `note_activation_result(.., None)` 호출 **하나**이고, 그 부재를
-    ///   실행으로 재려면 실 codex 로 이어받기를 성공시켜 놓고 옛 실패 기록이 남아 있는지 봐야 한다 —
-    ///   시험대에 그 조합이 없다. 회귀했을 때 나는 것은 빨간 단언이 아니라 **조용한 증거 소실**이다.
-    /// ★`Alive` 갈래에는 그 호출이 **남아 있어야** 한다★ — 그쪽은 연결 축이 없는 통로(claude)의 길이고
-    ///   이 결정의 범위 밖이다. 둘을 함께 재야 「범위를 안 넘었다」까지 잡힌다.
+    /// ★An optimistic success **does not clear** 「the last failure」★ — half the original defect. ★Measured in the source★: the clearing is **one** `note_activation_result(.., None)` call, and running needs a real codex
+    /// resume; a regression is **silent evidence loss**. ★The `Alive` branch must **keep** that call★ (claude's path, out of scope) — measuring both also catches overstepping.
     #[test]
     fn an_optimistic_success_does_not_clear_the_failure_record() {
         let ready = resume_arm("EarlyVerdict::Ready => {", "EarlyVerdict::Alive => {");
         assert!(
             !ready.contains("note_activation_result"),
-            "낙관적 성공 갈래가 「마지막 실패」를 건드린다 — 이 판정은 「입력을 받을 준비가 됐다」까지만              관측하므로, 그것으로 옛 실패 증거를 지우면 되돌릴 수 없는 소실이다: {ready}"
+            "the optimistic success branch touches the last failure — this decision observes only up to being ready to take input, so erasing old failure evidence with it is an irreversible loss: {ready}"
         );
 
         let src = include_str!("manager.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let body = production
             .split("fn resume_no_fallback(")
             .nth(1)
-            .expect("본문");
-        let alive = &body[body.find("EarlyVerdict::Alive => {").expect("`Alive` 갈래")..];
+            .expect("body");
+        let alive = &body[body
+            .find("EarlyVerdict::Alive => {")
+            .expect("the `Alive` branch")..];
         assert!(
             alive.contains("note_activation_result(profile.id, Some(spawned.epoch), None)"),
-            "연결 축이 없는 통로(claude)의 지움까지 함께 걷혔다 — 이 결정의 범위는 연결을 선언하는              통로뿐이다"
+            "the clearing of links without a connection axis (claude) was removed too — this decision's scope is only links declaring a connection"
         );
     }
 
-    /// ★실패 갈래는 **정리를 먼저, 기록을 나중에** 한다★ — 순서가 뒤집히면 백스톱이 무력해진다.
-    ///
-    /// 기록은 프로필 뮤텍스를 잡는데, 그 뮤텍스는 세션 id 기록 경로가 디스크 쓰기를 쥔 채 들고 있을 수
-    /// 있다. 기록이 앞서면 그 정체가 곧 **「자식을 영영 안 죽인다」**가 된다 — 백스톱은 바로 그런 정체를
-    /// 위해 있는데, 그 정체 때문에 못 쓰게 되는 모양이다.
-    /// ★그리고 정리는 **화신 표식을 들고** 불려야 한다★ — 안 그러면 산 후임을 죽인다(결함 ①).
+    /// ★The failure branch does **cleanup first, record later**★ — reversed, the record's profile mutex (possibly held across the session id record's disk write) turns the stall into **「never kills the child」**,
+    /// disabling the backstop. ★The cleanup must carry **the incarnation marker**★ or it kills the live successor (defect ①).
     #[test]
     fn the_failed_activation_arm_tears_down_before_it_records() {
         let arm = resume_arm(
@@ -5304,24 +4645,22 @@ mod tests {
         );
         let teardown = arm
             .find("tear_down_failed_activation")
-            .expect("연결 실패 갈래가 정리를 부르지 않는다 — 실패한 세션을 아무도 못 거둔다");
+            .expect("the connection failure branch does not call the cleanup — nobody collects the failed session");
         let record = arm
             .find("note_activation_result")
-            .expect("연결 실패 갈래가 실패를 기록하지 않는다");
+            .expect("the connection failure branch does not record the failure");
         assert!(
             teardown < record,
-            "기록이 정리보다 앞선다 — 프로필 뮤텍스가 붙들려 있으면 자식이 영영 안 죽는다: {arm}"
+            "the record precedes the cleanup — if the profile mutex is held, the child never dies: {arm}"
         );
         assert!(
             arm.contains("tear_down_failed_activation(profile.id, spawned.epoch)"),
-            "정리가 화신 표식 없이 불린다 — 그 사이 다른 화신이 섰으면 산 후임을 죽인다: {arm}"
+            "the cleanup is called without the incarnation marker — if another incarnation stood in between, it kills the live successor: {arm}"
         );
     }
 
-    /// ★종점이 배달을 앞질러도 **사유는 살아남는다**★ — 이 통로의 실패 문구는 두 꼬리 어디에도 없다.
-    ///
-    /// 실 거절 경로에서 상대는 41–51ms 만에 exit 하므로 종점 관측이 배달보다 먼저 들 수 있다. 그때
-    /// 사유를 버리면 원인 대신 맥락 기본값(조기 종료)이 마지막 실패에 찍힌다.
+    /// ★Even if the terminal outruns delivery, **the reason survives**★ — this link's failure text is in neither tail, and the peer exits in 41–51ms on a real refusal; dropping it would stamp the contextual default (early exit)
+    /// instead of the cause.
     #[test]
     fn a_terminal_verdict_still_carries_the_delivered_reason() {
         let manager = bare_manager();
@@ -5334,22 +4673,21 @@ mod tests {
                 reason: "thread/resume: -32600 no rollout found for thread id".into(),
             },
         })
-        .expect("배달");
-        // 두 꼬리는 **빈 채로** 둔다 — 구조화 통로의 실제 모양(거절은 stdout 으로 온다).
+        .expect("deliver");
+        // The two tails are left **empty** — the real shape of a structured link (the refusal comes over stdout).
         core.finish(crate::types::TerminalReason::Exited { code: Some(1) });
 
-        // ★어느 갈래로 떨어지든 **사유는 살아 있어야 한다**★ — 배달과 종점 관측 중 무엇이 먼저 들지는
-        //   타이밍이고, 그것을 못 박으면 항목 자체가 깜빡이가 된다. 재는 것은 「원인이 분류에 닿나」다.
+        // ★Whichever branch it falls to, **the reason must be alive**★ — delivery vs terminal observation order is timing and pinning it would flicker; what is measured is 「does the cause reach the classification」.
         let verdict = manager.link_activation_verdict(id, 9, &rx, Duration::from_millis(300));
         let carried = match &verdict {
             EarlyVerdict::LinkFailed { reason } => reason.clone(),
             EarlyVerdict::Terminal { evidence, .. } => evidence.clone(),
-            other => panic!("전제: 실패로 관측된다 — got {other:?}"),
+            other => panic!("premise: observed as a failure — got {other:?}"),
         };
         assert_eq!(
             backend::resume_failure_kind(&codex_app_server_command(), &carried),
             Some(AgentFailureKind::NoConversationToResume),
-            "배달된 사유가 판정 밖으로 나오지 못했다 — 원인 대신 맥락 기본값(조기 종료)이 마지막 실패에              찍힌다: verdict={verdict:?}"
+            "the delivered reason did not get out of the decision — the contextual default (early exit) is stamped as the last failure instead of the cause: verdict={verdict:?}"
         );
     }
 
@@ -5375,30 +4713,22 @@ mod tests {
         }
     }
 
-    // ── ADR-0172: 판정은 죽음이 아니라 **증거**로도 선다 ────────────────────────────────
+    // ── ADR-0172: the decision also stands on **evidence**, not only death ────────────────────────────────
 
-    /// ★이 기능의 표제 사례 회귀망(실측 2026-08-23)★ — 진단이 이미 실패를 말했으면 프로세스가 아직
-    /// 살아 있어도 그 자리에서 확정한다.
-    ///
-    /// 잡는 회귀는 정확히 이것이다: 실 claude 는 `--resume <빈 sid>` 에 대해 **+2.2s 에 진단을 내고
-    /// +6.4s 에야 죽는다**(그 사이 SessionEnd 훅이 돈다). 죽음만 기다리는 옛 판정은 3s 창을 넘겨
-    /// **실패를 성공으로 판정하고 앞선 기록까지 지웠다** — 표제 사례가 통째로 죽어 있었다.
-    ///
-    /// ★시계를 단언하지 않는다(이 저장소의 옛 flaky 재발 방지)★: "빨리 돌아왔다" 를 경과시간으로 재지
-    ///   않는다. 대신 **창을 아주 길게** 주고 결말만 본다 — 죽음을 기다리는 구현이라면 이 세션은 스스로
-    ///   죽지 않으므로 창 끝까지 갔다가 `Alive` 를 내고, 그 단언이 붉어진다. 통과 조건이 타이밍에
-    ///   좌우되지 않는다.
+    /// ★Regression net of the headline case★ — diagnostics already saying it failed settle at once even with the process alive: real claude for `--resume <empty sid>` **emits the diagnostic at +2.2s and dies at +6.4s**, and
+    /// the old death-only decision passed the 3s window, **decided success and cleared the earlier record**.
+    /// ★The clock is not asserted (no flaky recurrence)★: a **very long window** is given and only the outcome is read — a death-waiting implementation (this session never dies) runs to the window's end and emits
+    /// `Alive`, going red; no timing dependence.
     #[test]
     fn a_diagnosed_failure_settles_the_verdict_without_waiting_for_the_process_to_die() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
         let core = put_live_session(&manager, id, 1);
-        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        // The seeding is done outside the assertion (avoiding action-in-assertion).
         core.push_diagnostic("No conversation found with session ID: 8b1c");
 
-        // ★창을 운영값(3s)보다 훨씬 길게 준다★: 이 세션은 스스로 죽지 않으므로, 죽음만 기다리는 구현은
-        //   창 끝까지 갔다가 `Alive` 를 내고 아래 단언이 붉어진다. 값이 크면 "우연히 데드라인에 걸려
-        //   통과" 가 불가능해진다(그 대가는 회귀 시 red 가 느린 것뿐이다).
+        // ★The window is much longer than production (3s)★: this session never dies by itself, so a death-waiting implementation runs to the window's end, emits `Alive` and the assertion goes red; a large value rules
+        //   out "passing by hitting the deadline" (cost: a slow red on regression).
         let verdict = manager.early_activation_verdict(
             id,
             &claude_terminal_command(),
@@ -5411,10 +4741,11 @@ mod tests {
                 verdict,
                 EarlyVerdict::Diagnosed(AgentFailureKind::NoConversationToResume)
             ),
-            "진단이 이미 말했으면 시체를 기다리지 않는다 — got {:?}",
+            "if the diagnostics already said it, it does not wait for the corpse — got {:?}",
             match verdict {
                 EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
-                EarlyVerdict::Alive => "Alive(죽음만 기다리는 옛 판정 = 회귀)".into(),
+                EarlyVerdict::Alive =>
+                    "Alive (the old decision waiting only for death = regression)".into(),
                 EarlyVerdict::Terminal { ref status, .. } => format!("Terminal({status:?})"),
                 EarlyVerdict::LinkFailed { ref reason } => format!("LinkFailed({reason})"),
                 EarlyVerdict::Ready => "Ready".into(),
@@ -5422,23 +4753,21 @@ mod tests {
         );
         assert!(
             !matches!(
-                manager.get_session(id).expect("세션은 명부에 있다").status(),
+                manager.get_session(id).expect("the session is in the roster").status(),
                 AgentStatus::Exited { .. } | AgentStatus::Killed | AgentStatus::Failed { .. }
             ),
-            "판정 시점에 이 세션은 아직 살아 있어야 한다 — 죽었다면 이 테스트는 옛 갈래를 재는 것이다"
+            "at decision time this session must still be alive — if it died, this test is measuring the old branch"
         );
     }
 
-    /// ★같은 자리의 오탐 방어★ — 진단이 침묵하면 살아 있는 세션은 그대로 성립으로 넘어간다.
-    ///
-    /// 이 단언이 없으면 위 테스트는 "아무 텍스트에나 Diagnosed 를 내는" 구현으로도 통과한다. 그 구현은
-    /// **성공한 이어받기를 실패로 도장 찍는다**(fail-open 위반 — ADR-0172 §영향).
+    /// ★False-hit defense★ — with silent diagnostics a live session passes as holding; else an implementation emitting `Diagnosed` for any text would pass the test above and **stamp a successful resume as failure**
+    /// (ADR-0172 §Impact, fail-open).
     #[test]
     fn a_live_session_with_nothing_to_say_is_not_diagnosed() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
         let core = put_live_session(&manager, id, 1);
-        // 시드는 단언 밖에서 한다 — 모르는 문구는 단정 대상이 아니다.
+        // The seeding is done outside the assertion — unknown text is not something to settle.
         core.push_diagnostic("[DEBUG] loading plugins…");
 
         let verdict = manager.early_activation_verdict(
@@ -5450,7 +4779,7 @@ mod tests {
 
         assert!(
             matches!(verdict, EarlyVerdict::Alive),
-            "모르는 진단은 활성화를 막지 않는다(fail-open) — got {}",
+            "unknown diagnostics do not block activation (fail-open) — got {}",
             match verdict {
                 EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
                 EarlyVerdict::Alive => "Alive".into(),
@@ -5461,16 +4790,14 @@ mod tests {
         );
     }
 
-    /// ★죽은 세션의 증거에 **진단 스트림**도 들어간다★ — 구조화 세션은 콘솔 링이 비고 stderr 만 찬다.
-    ///
-    /// 이 갈래가 빠져 있었던 것이 결함 (2) 다: 분류기는 콘솔 꼬리만 봤고, stream-json 이 기본 출력
-    /// 형식이라 **대부분의 에이전트에서 분류기가 눈이 먼 채로** 돌았다.
+    /// ★A dead session's evidence includes **the diagnostic stream**★ — a structured session's console ring is empty and only stderr fills; missing it was defect (2) (stream-json is the default, so the classifier ran
+    /// blind for most agents).
     #[test]
     fn a_dead_sessions_diagnostic_stream_counts_as_evidence_too() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
         let core = put_live_session(&manager, id, 1);
-        // 시드는 단언 밖에서 한다 — 콘솔 링은 **비운 채로** 둔다(구조화 세션의 실제 모양).
+        // The seeding is done outside the assertion — the console ring is left **empty** (the real shape of a structured session).
         core.push_diagnostic("No conversation found with session ID: 8b1c");
         core.finish(TerminalReason::Exited { code: Some(1) });
 
@@ -5484,7 +4811,7 @@ mod tests {
         let evidence = match verdict {
             EarlyVerdict::Terminal { evidence, .. } => evidence,
             other => panic!(
-                "전제: 종점 상태로 관측된다 — got {}",
+                "premise: observed in a terminal state — got {}",
                 match other {
                     EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
                     EarlyVerdict::Alive => "Alive".into(),
@@ -5497,17 +4824,14 @@ mod tests {
         assert_eq!(
             backend::resume_failure_kind(&claude_terminal_command(), &evidence),
             Some(AgentFailureKind::NoConversationToResume),
-            "콘솔 링이 비어도 stderr 가 분류를 세워야 한다 — got evidence {evidence:?}"
+            "even with the console ring empty, stderr must set up the classification — got evidence {evidence:?}"
         );
     }
 
-    // ── subscribe_from: Err 은 on_ready 앞이다(데몬 거절 통보 계약의 전제) ──────────────
+    // ── subscribe_from: Err comes before on_ready (the premise of the daemon's refusal notice contract) ──────────────
     //
-    // ★무엇을 지키나★: 데몬은 이 `Err` 를 `AgentEvent::SubscribeFailed` 로 바꿔 보내면서 "이 구독엔 Ack 도
-    //   ReplayComplete 도 뒤따르지 않는다"를 광고하고, 클라이언트는 그 광고에 기대어 single-flight 슬롯을
-    //   즉시 푼다. `on_ready` 뒤에서 실패하는 갈래가 생기면 거절과 Ack 가 같은 구독에 대해 함께 나가고,
-    //   이미 푼 슬롯 위로 늦은 Ack/Complete 가 도착해 replay 가 돌지 않은 세대에 성공 마커가 붙는다.
-    //   그 회귀는 런타임에 무신호라(출력이 조용히 죽는다) 이 단언이 유일한 감지기다.
+    // ★What it guards★: the contract on `subscribe_from`; a branch failing after `on_ready` would send refusal and Ack together and a late Ack/Complete would attach a success marker to a generation where the replay did
+    //   not run. Signal-less at runtime (output silently dies), so this assertion is the only detector.
     #[test]
     fn subscribe_from_err_never_invokes_on_ready() {
         struct NoopSink;
@@ -5524,20 +4848,20 @@ mod tests {
         }
 
         let manager = bare_manager();
-        let missing = AgentId::new_v4(); // 맵에 없는 id — get_session 이 실패한다.
+        let missing = AgentId::new_v4(); // an id not in the map — get_session fails.
         let mut ready_calls = 0usize;
         let res = manager.subscribe_from(missing, Arc::new(NoopSink), None, None, |_| {
             ready_calls += 1;
         });
-        assert!(res.is_err(), "없는 에이전트 구독은 Err");
+        assert!(res.is_err(), "subscribing to a missing agent is Err");
         assert_eq!(
             ready_calls, 0,
-            "Err 경로에서 on_ready(=SubscribeAck) 발행 0"
+            "0 on_ready (=SubscribeAck) emitted on the Err path"
         );
     }
 
-    /// ★구독 응답의 화신 사실은 replay 한 그 세션에서 나온다★ — `on_ready`(= 데몬의 Ack)가 받은 것과
-    ///   돌려받은 것(= 데몬의 `ReplayComplete`)이 같은 화신을 말하고, 표식 대조도 그 세션이 한다.
+    /// ★The incarnation facts of the subscription response come from the session that replayed★ — `on_ready` (the daemon's Ack) and the return (`ReplayComplete`) speak of the same incarnation, which also does the marker
+    ///   comparison.
     // ADR-0226
     #[test]
     fn subscribe_from_reports_the_incarnation_it_replayed_from() {
@@ -5563,30 +4887,33 @@ mod tests {
             .subscribe_from(id, Arc::new(NoopSink), Some(0), Some(3), |r| {
                 at_ready = Some(r.incarnation)
             })
-            .expect("명부에 있다");
+            .expect("in the roster");
         let expected = crate::types::Incarnation {
             epoch: 3,
             continues_conversation: false,
         };
-        assert_eq!(reply.incarnation, expected, "기본 세션 = 이어받기 아님");
+        assert_eq!(
+            reply.incarnation, expected,
+            "default session = not a resume"
+        );
         assert_eq!(
             at_ready,
             Some(expected),
-            "on_ready 와 반환이 같은 화신을 말해야 한다"
+            "on_ready and the return must speak of the same incarnation"
         );
         assert_eq!(
             reply.outcome.kind,
             crate::types::ReplayKind::Resumed,
-            "요청 표식이 세션 표식과 같으면 seq 이어받기"
+            "if the requested marker equals the session marker, continue by seq"
         );
 
         let stale = manager
             .subscribe_from(id, Arc::new(NoopSink), Some(0), Some(4), |_| {})
-            .expect("명부에 있다");
+            .expect("in the roster");
         assert_eq!(
             stale.outcome.kind,
             crate::types::ReplayKind::FromOldest,
-            "표식이 다르면 처음부터"
+            "if the markers differ, from the beginning"
         );
     }
 
@@ -5598,16 +4925,16 @@ mod tests {
 
         let out = manager
             .write_stdin_observed_if_epoch(id, 3, b"hello")
-            .expect("일치하면 정상 write");
+            .expect("on a match, a normal write");
         assert_eq!(out.bytes_requested, 5);
         assert_eq!(
             out.epoch, 3,
-            "WriteOutcome.epoch = write 를 집행한 세션의 epoch"
+            "WriteOutcome.epoch = the epoch of the session that executed the write"
         );
         assert_eq!(
             written.lock().unwrap().as_slice(),
             &[b"hello".to_vec()],
-            "요구 epoch 과 현재 incarnation 이 같으면 그대로 쓴다"
+            "if the requested epoch equals the current incarnation, it writes as is"
         );
     }
 
@@ -5620,26 +4947,26 @@ mod tests {
 
         let err = manager
             .write_stdin_observed_if_epoch(id, 0, b"broadcast")
-            .expect_err("교체된 incarnation 에는 쓰지 않는다");
+            .expect_err("does not write to a replaced incarnation");
         assert!(
             matches!(err, PtyError::Unsupported(ref m) if m.contains("epoch mismatch")),
-            "불일치는 미지원 신호 + 원인 메시지: {err}"
+            "a mismatch is the unsupported signal + a cause message: {err}"
         );
         assert!(
             new_written.lock().unwrap().is_empty(),
-            "새 incarnation 에 단 한 바이트도 가면 안 된다(부작용 0)"
+            "not a single byte must go to the new incarnation (zero side effects)"
         );
         assert!(
             old_written.lock().unwrap().is_empty(),
-            "옛 세션은 맵에서 밀려났으므로 그쪽에도 쓰지 않는다"
+            "the old session was pushed out of the map, so it is not written to either"
         );
         manager
             .write_stdin_observed_if_epoch(id, 1, b"broadcast")
-            .expect("현재 incarnation 지목은 통과");
+            .expect("pointing at the current incarnation passes");
         assert_eq!(new_written.lock().unwrap().len(), 1);
     }
 
-    // ── 대기 목록 조회·취소 (ADR-0231) ──
+    // ── Waiting-list query and cancel (ADR-0231) ──
 
     #[test]
     fn the_queued_listing_carries_the_incarnation_and_the_halt_from_the_turn_table() {
@@ -5650,34 +4977,37 @@ mod tests {
         let halted = |manager: &AgentManager| {
             manager
                 .list_queued_inputs(id)
-                .expect("산 세션")
+                .expect("live session")
                 .stopped_after_error
         };
 
         assert_eq!(
-            manager.list_queued_inputs(id).expect("산 세션"),
+            manager.list_queued_inputs(id).expect("live session"),
             QueuedListing {
                 rows: vec![],
                 as_of_seq: None,
                 epoch: 3,
                 stopped_after_error: false,
             },
-            "턴 관측 표에 항목이 없으면 멈춤은 거짓"
+            "without an entry in the turn observation table, the stop is false"
         );
 
         let turns = manager.turns();
         turns.register(id, 3);
-        assert!(!halted(&manager), "등록 직후 = 거짓");
+        assert!(!halted(&manager), "right after registration = false");
         turns.observe(id, 3, 1, TurnSignal::Ended(TurnEndKind::Failed));
-        assert!(halted(&manager), "오류 끝 뒤 = 멈춤(표의 칸 그대로)");
+        assert!(
+            halted(&manager),
+            "after an error end = stop (the table's field as is)"
+        );
         turns.observe(id, 3, 2, TurnSignal::Ended(TurnEndKind::Clean));
-        assert!(!halted(&manager), "깨끗한 끝이 푼다");
+        assert!(!halted(&manager), "a clean end clears it");
 
         turns.register(id, 4);
         turns.observe(id, 4, 1, TurnSignal::Ended(TurnEndKind::Failed));
         assert!(
             !halted(&manager),
-            "표의 항목이 다른 화신 것이면 항목 없음과 같다"
+            "if the table's entry belongs to another incarnation, it is the same as no entry"
         );
     }
 
@@ -5700,7 +5030,7 @@ mod tests {
                 manager.cancel_queued_input(id, "q1"),
                 Err(CancelError::NotFound)
             ),
-            "목록을 쓰지 않는 세션(정책 None)도 NotFound 다 — 오늘 모든 백엔드의 답"
+            "a session that does not use the list (policy None) is also NotFound — today's answer of every backend"
         );
     }
 
@@ -5709,17 +5039,17 @@ mod tests {
         let manager = bare_manager();
         let err = manager
             .write_stdin_observed_if_epoch(AgentId::new_v4(), 0, b"x")
-            .expect_err("없는 에이전트");
+            .expect_err("a missing agent");
         assert!(
             matches!(err, PtyError::NotFound(_)),
-            "부재는 epoch 불일치와 다른 사실이다: {err}"
+            "absence is a different fact from an epoch mismatch: {err}"
         );
     }
 
-    // ── 명부 단일 입구(ADR-0119) · 이름 전역 유일(ADR-0120) ─────────────────────
+    // ── Roster single entry (ADR-0119) · globally unique names (ADR-0120) ─────────────────────
 
-    /// 프로필 없음 = ad-hoc 산 에이전트. `put_session` 은 cwd 가 `"."` 로 고정이라 이름 축 단언을
-    /// 못 해서 따로 둔다.
+    /// No profile = an ad-hoc live agent. `put_session` fixes the cwd at `"."`, so name-axis assertions
+    /// cannot be made, hence a separate one.
     fn put_live_session_at(manager: &AgentManager, id: AgentId, cwd: &str) {
         let core = Arc::new(OutputCore::new(
             id,
@@ -5778,11 +5108,11 @@ mod tests {
     fn create(manager: &AgentManager, cwd: &str, display_name: Option<&str>) -> AgentProfile {
         manager
             .try_create_agent(agent_profile(cwd, display_name))
-            .expect("이 픽스처는 접미사 공간을 소진시키지 않는다")
+            .expect("this fixture does not exhaust the suffix space")
     }
 
     impl AgentManager {
-        /// 스폰의 등록 두 걸음(없으면 넣기 · 있던 id 면 사본 병합) — 실행 전처리는 운영에서 그 사이에 돈다.
+        /// The two registration steps of a spawn (insert if absent · merge the copy if the id existed) — launch preprocessing runs between them in production.
         fn register_like_spawn(&self, profile: &AgentProfile) -> Result<(), PtyError> {
             if self.ensure_registered(&LaunchScope::default(), profile, Entry::Caller)? {
                 return Ok(());
@@ -5791,13 +5121,8 @@ mod tests {
         }
     }
 
-    /// ★산 항목의 이름과 계층은 **같은 프로필 스냅샷**에서 나온다★.
-    ///
-    /// 예전엔 이름이 `list_agents()` 안의 세션별 프로필 조회에서, 계층은 그 뒤의 목록 조회에서 왔다 — 그
-    /// 사이에 개명 + 계층 이동이 커밋되면 한 행에 **한 번도 존재한 적 없는 조합**(옛 이름 + 새 부모)이 실린다.
-    /// ★이 테스트가 증명하는 것과 못 하는 것★: 두 사실이 프로필 등록부에서 함께 읽힌다는 것은 여기서 본다.
-    /// 두 읽기 사이의 창이 **없다**는 것은 구조로 보장되며(조회 자체가 하나뿐이다) 결정적 재현 테스트는
-    /// 만들 수 없다 — 재현하려면 이제 존재하지 않는 두 읽기 사이에 seam 을 넣어야 한다.
+    /// ★A live entry's name and hierarchy come from **the same profile snapshot**★ (else a rename + hierarchy move in between gives a never-existed row: old name + new parent). ★Proves vs cannot★: the two facts are
+    /// read together here; the absence of a window between reads holds by structure (one lookup), and a deterministic reproduction needs a seam between reads that no longer exist.
     #[test]
     fn a_live_roster_row_reads_its_name_and_hierarchy_from_one_profile_snapshot() {
         let manager = bare_manager();
@@ -5808,45 +5133,43 @@ mod tests {
         assert!(
             manager
                 .try_reparent_agent(helper.id, Some(lead.id))
-                .expect("저장 성공"),
-            "전제"
+                .expect("save succeeds"),
+            "premise"
         );
         assert!(
             renamed_ok(
                 manager
                     .try_rename_agent(helper.id, Some("helper-renamed".into()))
-                    .expect("저장 성공")
+                    .expect("save succeeds")
             ),
-            "전제"
+            "premise"
         );
 
         let entry = manager
             .roster()
             .into_iter()
             .find(|e| e.id == helper.id)
-            .expect("명부에 있어야");
-        assert_eq!(entry.canonical_name, "helper-renamed", "새 이름");
+            .expect("must be in the roster");
+        assert_eq!(entry.canonical_name, "helper-renamed", "new name");
         assert_eq!(
             entry.parent,
             Some(lead.id),
-            "새 부모 — 옛 이름과 짝지어지지 않는다"
+            "new parent — not paired with the old name"
         );
-        let live = entry.live.as_ref().expect("살아 있어야");
+        let live = entry.live.as_ref().expect("must be alive");
         assert_eq!(
             live.name, entry.canonical_name,
-            "한 파생에서 나온 값이라 항목 안에서 갈릴 수 없다"
+            "values from one derivation, so they cannot diverge within the entry"
         );
         assert_eq!(
             entry.cwd, "C:/live/helper",
-            "산 항목의 cwd 는 세션 cwd(ADR-0101)"
+            "the cwd of a live entry is the session cwd (ADR-0101)"
         );
     }
 
-    // ── 폭주 백스톱(명부 총량 상한) ──────────────────────────────────────────────────
+    // ── Runaway backstop (total roster cap) ──────────────────────────────────────────────────
 
-    /// 상한 테스트 전용 매니저 — 프로필 저장이 **메모리**다. `bare_manager` 의 파일 저장은 등록마다 명부
-    /// 전체를 디스크에 쓰므로(락 보유 중 save) 512건 채우기가 O(n²) 디스크 I/O 가 된다. 여기서 보는 것은
-    /// 개수 판정이지 영속이 아니다.
+    /// A manager only for cap tests — **memory** profile storage: `bare_manager`'s file storage writes the whole roster per registration (save under lock), making 512 fills O(n²) disk I/O; only the count decision is looked at.
     fn capacity_manager() -> AgentManager {
         #[derive(Default)]
         struct MemStore(Mutex<Vec<AgentProfile>>);
@@ -5872,33 +5195,31 @@ mod tests {
         AgentManager::new(Arc::new(NoopStatus), profiles, tracker)
     }
 
-    /// 상한 직전까지 채운다. 유일성 배정을 거치지 않는 seam 을 쓰는 이유는 속도뿐이다(정상 경로로 채우면
-    /// 등록마다 명부를 훑어 O(n²)이 된다).
+    /// Fills up to just below the cap. The uniqueness-bypassing seam is used only for speed (the normal path scans the roster per registration, O(n²)).
     fn fill_roster_to(manager: &AgentManager, count: usize) {
         for i in 0..count {
             let mut p = agent_profile(&format!("C:/filler/{i}"), Some(&format!("filler-{i}")));
             p.id = AgentId::new_v4();
             manager.profiles.upsert(p);
         }
-        assert_eq!(manager.roster().len(), count, "채움 전제");
+        assert_eq!(manager.roster().len(), count, "fill premise");
     }
 
-    /// ★상한은 입구가 아니라 **등록 커밋 자리**에 있다★ — 그래서 어느 입구로 들어와도 같은 답이다.
-    ///   입구에 두었을 때 실제로 새던 두 경로(데스크톱 CreateProfile · ad-hoc spawn 등록)를 여기서 함께 본다.
+    /// ★The cap is at **the place where registration commits**, not the entry★ — any entry gets the same answer; the two paths that leaked at the entry (desktop CreateProfile · ad-hoc spawn registration) are looked at together.
     #[test]
     fn both_registration_paths_refuse_a_new_agent_at_the_ceiling() {
         let manager = capacity_manager();
         fill_roster_to(&manager, MAX_ROSTER_SIZE - 1);
 
-        // 마지막 한 자리는 통과한다 — 경계가 "근처" 가 아니라 정확히 상한에서 닫힌다.
+        // The last slot passes — the boundary closes not "near" but exactly at the cap.
         let last = manager
             .try_create_agent(agent_profile("C:/last", Some("last-one")))
-            .expect("상한 미만은 통과");
+            .expect("below the cap passes");
         assert_eq!(manager.roster().len(), MAX_ROSTER_SIZE);
 
         let err = manager
             .try_create_agent(agent_profile("C:/over", Some("one-too-many")))
-            .expect_err("상한 초과 등록은 거부");
+            .expect_err("a registration over the cap is refused");
         assert!(
             matches!(
                 err,
@@ -5907,51 +5228,51 @@ mod tests {
                     limit: MAX_ROSTER_SIZE
                 }
             ),
-            "이름 공간 소진과 **구분되는** 전용 신호여야(호출자가 할 일이 다르다): {err}"
+            "must be a dedicated signal **distinct** from name space exhaustion (the caller has different things to do): {err}"
         );
 
-        // ad-hoc spawn 의 신규 등록 경로도 같은 답 — 이쪽이 뚫려 있으면 "총량" 이 거짓이 된다.
+        // The new-registration path of ad-hoc spawn gives the same answer — if this side were open, "total" would be false.
         let err = manager
             .ensure_registered(
                 &LaunchScope::default(),
                 &agent_profile("C:/adhoc", Some("adhoc")),
                 Entry::Caller,
             )
-            .expect_err("ad-hoc 신규 등록도 거부");
+            .expect_err("ad-hoc new registration is also refused");
         assert!(matches!(err, PtyError::RosterFull { .. }), "{err}");
         assert_eq!(
             manager.roster().len(),
             MAX_ROSTER_SIZE,
-            "거부된 등록은 명부를 늘리지 않는다"
+            "a refused registration does not grow the roster"
         );
 
-        // ★기존 에이전트는 인질이 아니다★: 같은 id 재등록(복원·재spawn)과 개명은 상한에서도 계속 된다.
+        // ★Existing agents are not hostages★: re-registration of the same id (restore · respawn) and rename keep working even at the cap.
         assert!(
             !manager
                 .ensure_registered(&LaunchScope::default(), &last, Entry::Caller)
-                .expect("기존 id 는 넣지 않고 지난다 — 상한과 무관"),
-            "기존 id 를 넣었다고 답한다"
+                .expect("an existing id passes without insertion — the cap does not apply"),
+            "answers that it inserted an existing id"
         );
         manager
             .register_for_spawn(&last, Entry::Caller)
-            .expect("기존 id 재등록은 상한과 무관");
+            .expect("re-registration of an existing id is unrelated to the cap");
         assert!(
             renamed_ok(
                 manager
                     .try_rename_agent(last.id, Some("still-renameable".into()))
-                    .expect("저장 성공")
+                    .expect("save succeeds")
             ),
-            "상한이 명부를 얼려 버리면 복구 자체가 불가능해진다"
+            "if the cap froze the roster, recovery itself would become impossible"
         );
     }
 
-    /// ★검사와 커밋이 같은 임계구역★ — 동시 등록이 각자 상한 미만을 관측하고 다 함께 커밋하는 창이 없다.
+    /// ★The check and the commit are the same critical section★ — no window where concurrent registrations each observe below the cap and all commit together.
     #[test]
     fn concurrent_registrations_cannot_all_slip_through_the_last_slot() {
         let manager = Arc::new(capacity_manager());
         fill_roster_to(&manager, MAX_ROSTER_SIZE - 1);
 
-        // 남은 자리는 하나인데 여덟이 동시에 등록을 시도한다.
+        // There is one slot left but eight try to register at the same time.
         let winners = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         std::thread::scope(|s| {
             for i in 0..8 {
@@ -5970,7 +5291,7 @@ mod tests {
         assert_eq!(
             winners.load(Ordering::SeqCst),
             1,
-            "빈 자리가 하나면 정확히 하나만 통과해야"
+            "with one free slot exactly one must pass"
         );
         assert_eq!(manager.roster().len(), MAX_ROSTER_SIZE);
     }
@@ -5984,14 +5305,14 @@ mod tests {
             .roster()
             .into_iter()
             .find(|e| e.id == id)
-            .expect("명부에 있어야")
+            .expect("must be in the roster")
             .canonical_name
     }
 
     fn name_of(manager: &AgentManager, id: AgentId) -> String {
         manager
             .agent_snapshot(id)
-            .expect("명부에 있어야")
+            .expect("must be in the roster")
             .canonical_name_when_live()
     }
 
@@ -6003,24 +5324,27 @@ mod tests {
         let dormant = create(&manager, "C:/roster/beta", Some("beta"));
 
         let roster = manager.roster();
-        assert_eq!(roster.len(), 2, "산 1 + 잠듦 1: {roster:?}");
+        assert_eq!(roster.len(), 2, "1 live + 1 asleep: {roster:?}");
         let live = roster
             .iter()
             .find(|e| e.id == live_id)
-            .expect("산 에이전트가 명부에 있어야");
-        assert!(live.live.is_some(), "산 항목은 세션이 붙어 있어야");
+            .expect("the live agent must be in the roster");
+        assert!(
+            live.live.is_some(),
+            "a live entry must have a session attached"
+        );
         assert_eq!(
             live.canonical_name, "alpha",
-            "산 이름은 AgentInfo(session.cwd 기반)에서 온다"
+            "the live name comes from AgentInfo (based on session.cwd)"
         );
         let asleep = roster
             .iter()
             .find(|e| e.id == dormant.id)
-            .expect("잠든 에이전트도 같은 명부에 있어야");
-        assert!(asleep.live.is_none(), "잠든 항목엔 세션이 없다");
+            .expect("the asleep agent must also be in the same roster");
+        assert!(asleep.live.is_none(), "an asleep entry has no session");
         assert_eq!(
             asleep.canonical_name, "beta",
-            "잠든 이름은 canonical_name_when_live() 에서 온다"
+            "the asleep name comes from canonical_name_when_live()"
         );
     }
 
@@ -6029,8 +5353,7 @@ mod tests {
         let manager = bare_manager();
         let live_id = AgentId::new_v4();
         put_live_session_at(&manager, live_id, "C:/roster/twin");
-        // ★유일성을 우회해 직접 심는다★: 정상 경로(try_create_agent)면 ADR-0120 이 "twin(1)" 로 개명하므로
-        //   이 상태를 만들 수 없다. 여기서 보는 건 그 위층 규칙이 아니라 **차집합의 축**이다.
+        // ★Planted directly, bypassing uniqueness★: the normal path (try_create_agent) would rename it to "twin(1)" under ADR-0120 and this state could not be made; what is looked at is **the axis of the difference**.
         let dormant = agent_profile("C:/elsewhere/quiet", Some("twin"));
         let dormant_id = dormant.id;
         manager.profiles.upsert(dormant);
@@ -6042,13 +5365,13 @@ mod tests {
                 .filter(|e| e.canonical_name == "twin")
                 .count(),
             2,
-            "산 동명과 잠든 동명이 **둘 다** 있어야(이름 축으로 빼면 잠든 쪽이 사라진다): {roster:?}"
+            "both the live same-name and the asleep same-name must be present (subtracting by the name axis would make the asleep one disappear): {roster:?}"
         );
         assert!(
             roster
                 .iter()
                 .any(|e| e.id == dormant_id && e.live.is_none()),
-            "잠든 쪽은 id 가 산 집합에 없으므로 남아야: {roster:?}"
+            "the asleep one must remain since its id is not in the live set: {roster:?}"
         );
     }
 
@@ -6065,27 +5388,26 @@ mod tests {
                 .filter(|e| e.canonical_name == "twin" && e.live.is_none())
                 .count(),
             2,
-            "동명 잠듦 2건은 2건 그대로: {roster:?}"
+            "two asleep entries with the same name stay two: {roster:?}"
         );
     }
 
     #[test]
     fn a_dormant_agent_with_a_display_name_does_not_depend_on_the_filesystem() {
-        // ★관측 방법의 한계(정직 명시)★: syscall 자체는 세지 못한다 — 실재하지 않는 cwd 를 써서
-        //   "canonicalize 를 탔다면 결과가 달라졌을" 상황을 만들고 결과 불변을 단언한다.
+        // ★Limit of the observation (stated honestly)★: the syscall cannot be counted — a nonexistent cwd makes "the result would differ had canonicalize run" and the unchanged result is asserted.
         let vanished = "C:/engram-does-not-exist-9f1c/never/created";
         assert!(
             dunce::canonicalize(vanished).is_err(),
-            "이 테스트의 전제 — 이 경로는 실재하지 않아야 한다"
+            "the premise of this test — this path must not exist"
         );
         let manager = bare_manager();
         let p = create(&manager, vanished, Some("Named"));
 
         let roster = manager.roster();
-        let entry = roster.iter().find(|e| e.id == p.id).expect("잠듦 항목");
+        let entry = roster.iter().find(|e| e.id == p.id).expect("asleep entry");
         assert_eq!(
             entry.canonical_name, "Named",
-            "override 가 있으면 cwd 파생(=fs 접근)을 타지 않는다 — cwd 를 봤다면 'created' 가 됐을 것"
+            "with an override the cwd derivation (= fs access) is not taken — had the cwd been looked at it would have become 'created'"
         );
     }
 
@@ -6093,31 +5415,30 @@ mod tests {
     fn creating_a_colliding_name_gets_the_next_free_suffix() {
         let manager = bare_manager();
         let a = create(&manager, "C:/x", Some("bob"));
-        assert_eq!(a.canonical_name_when_live(), "bob", "첫 번째는 그대로");
+        assert_eq!(a.canonical_name_when_live(), "bob", "the first one as is");
         let b = create(&manager, "C:/x", Some("bob"));
         assert_eq!(b.canonical_name_when_live(), "bob(1)");
         let c = create(&manager, "C:/x", Some("bob"));
         assert_eq!(
             c.canonical_name_when_live(),
             "bob(2)",
-            "번호는 현재 계열 최대 + 1"
+            "the number is the current family max + 1"
         );
     }
 
     #[test]
     fn a_suffix_number_is_reused_once_nothing_holds_it() {
-        // ★안전 근거★: 프로필 삭제는 메시징 삭제 정리 훅을 돌리므로(connection_core DeleteProfile) 재발급된
-        //   이름이 옛 주인의 파킹 메일·오픈 계약을 물려받지 않는다.
+        // ★Safety ground★: profile deletion runs the messaging cleanup hook (connection_core DeleteProfile), so a reissued name does not inherit the old owner's parked mail or open contracts.
         let manager = bare_manager();
         create(&manager, "C:/x", Some("bob"));
         let one = create(&manager, "C:/x", Some("bob"));
         assert_eq!(one.canonical_name_when_live(), "bob(1)");
-        manager.try_delete_agent(one.id).expect("저장 성공");
+        manager.try_delete_agent(one.id).expect("save succeeds");
         let again = create(&manager, "C:/x", Some("bob"));
         assert_eq!(
             again.canonical_name_when_live(),
             "bob(1)",
-            "그 번호를 쥔 것이 아무도 없으면 다시 (1) 이다"
+            "if nobody holds that number, it is (1) again"
         );
     }
 
@@ -6130,29 +5451,29 @@ mod tests {
         assert!(renamed_ok(
             manager
                 .try_rename_agent(alice.id, Some("bob".into()))
-                .expect("저장 성공")
+                .expect("save succeeds")
         ));
         assert_eq!(
             name_of(&manager, alice.id),
             "bob(1)",
-            "남의 이름으로 개명하면 접미사가 붙는다"
+            "renaming to someone else's name attaches a suffix"
         );
         assert!(renamed_ok(
             manager
                 .try_rename_agent(bob.id, Some("bob".into()))
-                .expect("저장 성공")
+                .expect("save succeeds")
         ));
         assert_eq!(
             name_of(&manager, bob.id),
             "bob",
-            "자기 이름 재확정에 접미사가 붙으면 개명할 때마다 번호가 늘어난다"
+            "if re-settling its own name attached a suffix, the number would grow with every rename"
         );
     }
 
     #[test]
     fn repeating_a_rename_request_does_not_burn_a_new_number() {
-        // ★상류 가드 부재★: 프론트의 "값 안 바뀜" 가드는 현재 이름이 `bob(1)` 이라 재요청에 걸리지
-        //   않고, LLM `RenameProfile` 엔 가드가 없다.
+        // ★No upstream guard★: the frontend's "value unchanged" guard does not catch the re-request because the current name is `bob(1)`,
+        //   and the LLM `RenameProfile` has no guard.
         let manager = bare_manager();
         create(&manager, "C:/x", Some("bob"));
         let alice = create(&manager, "C:/y", Some("alice"));
@@ -6160,26 +5481,26 @@ mod tests {
         assert!(renamed_ok(
             manager
                 .try_rename_agent(alice.id, Some("bob".into()))
-                .expect("저장 성공")
+                .expect("save succeeds")
         ));
         assert_eq!(name_of(&manager, alice.id), "bob(1)");
         assert!(
             renamed_ok(
                 manager
                     .try_rename_agent(alice.id, Some("bob".into()))
-                    .expect("저장 성공")
+                    .expect("save succeeds")
             ),
-            "재요청은 실패가 아니라 성공(no-op)으로 보고한다"
+            "a re-request is reported as success (no-op), not a failure"
         );
         assert_eq!(
             name_of(&manager, alice.id),
             "bob(1)",
-            "번호를 태우지 않는다"
+            "does not burn a number"
         );
         assert!(renamed_ok(
             manager
                 .try_rename_agent(alice.id, Some("bob".into()))
-                .expect("저장 성공")
+                .expect("save succeeds")
         ));
         assert_eq!(name_of(&manager, alice.id), "bob(1)");
         assert!(
@@ -6187,7 +5508,7 @@ mod tests {
                 .roster()
                 .iter()
                 .any(|e| e.canonical_name == "bob(2)"),
-            "재요청이 새 번호를 만들면 안 된다: {:?}",
+            "a re-request must not create a new number: {:?}",
             manager.roster()
         );
 
@@ -6197,22 +5518,22 @@ mod tests {
         assert!(renamed_ok(
             manager
                 .try_rename_agent(carol.id, Some("bob".into()))
-                .expect("저장 성공")
+                .expect("save succeeds")
         ));
         assert_eq!(name_of(&manager, carol.id), "bob(3)");
-        manager.try_delete_agent(filler.id).expect("저장 성공");
+        manager.try_delete_agent(filler.id).expect("save succeeds");
         assert!(
             renamed_ok(
                 manager
                     .try_rename_agent(carol.id, Some("bob".into()))
-                    .expect("저장 성공")
+                    .expect("save succeeds")
             ),
-            "같은 요청 재제출"
+            "the same request resubmitted"
         );
         assert_eq!(
             name_of(&manager, carol.id),
             "bob(3)",
-            "재요청은 빈 낮은 번호로 끌어내리지 않는다(이름=주소가 흔들린다)"
+            "a re-request does not drag it down to a free lower number (name = address would waver)"
         );
     }
 
@@ -6223,24 +5544,28 @@ mod tests {
         assert_eq!(
             a.canonical_name_when_live(),
             "shared",
-            "override 없으면 cwd basename 파생(이 테스트의 전제)"
+            "without an override, derived from the cwd basename (the premise of this test)"
         );
         let b = create(&manager, "C:/shared", Some("bee"));
         assert_eq!(b.canonical_name_when_live(), "bee");
 
         assert!(renamed_ok(
-            manager.try_rename_agent(b.id, None).expect("저장 성공")
+            manager.try_rename_agent(b.id, None).expect("save succeeds")
         ));
         assert_eq!(name_of(&manager, b.id), "shared(1)");
         assert_eq!(
             manager.agent_snapshot(b.id).unwrap().display_name,
             Some("shared(1)".to_string()),
-            "충돌하는 해제는 override 를 없애지 않는다(없애면 동명이 된다)"
+            "a conflicting clear does not remove the override (removing it would make same names)"
         );
         assert!(renamed_ok(
-            manager.try_rename_agent(b.id, None).expect("저장 성공")
+            manager.try_rename_agent(b.id, None).expect("save succeeds")
         ));
-        assert_eq!(name_of(&manager, b.id), "shared(1)", "해제 재요청도 멱등");
+        assert_eq!(
+            name_of(&manager, b.id),
+            "shared(1)",
+            "a clear re-request is idempotent too"
+        );
         assert_eq!(name_of(&manager, a.id), "shared");
     }
 
@@ -6253,7 +5578,7 @@ mod tests {
         assert_eq!(
             plain.canonical_name_when_live(),
             "bob",
-            "리터럴 bob(0) 은 접미사 없는 bob 을 점유하지 않는다"
+            "a literal bob(0) does not occupy the unsuffixed bob"
         );
         let next = create(&manager, "C:/z", Some("bob"));
         assert_eq!(next.canonical_name_when_live(), "bob(1)");
@@ -6266,13 +5591,13 @@ mod tests {
         assert_eq!(
             one.canonical_name_when_live(),
             "bob(1)",
-            "비어 있으면 요청한 이름 그대로(계열로 재해석 금지)"
+            "if free, the requested name as is (no reinterpretation as a family)"
         );
         let plain = create(&manager, "C:/y", Some("bob"));
         assert_eq!(
             plain.canonical_name_when_live(),
             "bob",
-            "bob(1) 이 있다고 bob 을 못 쓰게 되면 삭제로 이름을 회수하는 경로가 막힌다"
+            "if bob(1) existing made bob unusable, the path of reclaiming names by deletion would be blocked"
         );
         let nested = create(&manager, "C:/z", Some("bob(1)"));
         assert_eq!(nested.canonical_name_when_live(), "bob(1)(1)");
@@ -6280,7 +5605,7 @@ mod tests {
         assert_eq!(
             bob2.canonical_name_when_live(),
             "bob(2)",
-            "bob 계열 최대는 bob(1) 의 1 뿐이다(bob(1)(1) 은 계열 아님)"
+            "the bob family max is only the 1 of bob(1) (bob(1)(1) is not in the family)"
         );
         let nested2 = create(&manager, "C:/v", Some("bob(1)"));
         assert_eq!(nested2.canonical_name_when_live(), "bob(1)(2)");
@@ -6288,7 +5613,7 @@ mod tests {
 
     #[test]
     fn a_saturated_family_falls_back_to_the_lowest_free_number() {
-        // ★포화가 이론이 아니다★: `이름(4294967295)` 은 UI 개명 한 번으로 만들 수 있는 평범한 상태다.
+        // ★Saturation is not theory★: `name(4294967295)` is an ordinary state one UI rename can make.
         let manager = bare_manager();
         create(&manager, "C:/x", Some("bob"));
         create(&manager, "C:/y", Some("bob(4294967295)"));
@@ -6297,7 +5622,7 @@ mod tests {
         assert_eq!(
             first.canonical_name_when_live(),
             "bob(1)",
-            "포화여도 빈 번호를 준다(거부하면 계열 전체가 영구 봉쇄된다)"
+            "even when saturated it gives a free number (refusing would block the whole family permanently)"
         );
         let second = create(&manager, "C:/w", Some("bob"));
         assert_eq!(second.canonical_name_when_live(), "bob(2)");
@@ -6306,11 +5631,11 @@ mod tests {
         assert!(renamed_ok(
             manager
                 .try_rename_agent(carol.id, Some("bob".into()))
-                .expect("저장 성공")
+                .expect("save succeeds")
         ));
         assert_eq!(name_of(&manager, carol.id), "bob(3)");
 
-        // ★게이트가 poison 되지 않았다★ — 무관한 이름 배정이 계속 된다.
+        // ★The gate was not poisoned★ — unrelated name allocations keep working.
         let fine = create(&manager, "C:/ok", Some("dave"));
         assert_eq!(fine.canonical_name_when_live(), "dave");
     }
@@ -6325,7 +5650,7 @@ mod tests {
         assert_eq!(
             pick_suffix(&set(&[2])),
             Some(3),
-            "구멍(1)이 있어도 포화가 아니면 내려가지 않는다"
+            "even with a hole (1), it does not go down unless saturated"
         );
         assert_eq!(pick_suffix(&set(&[u32::MAX])), Some(1));
         assert_eq!(pick_suffix(&set(&[1, u32::MAX])), Some(2));
@@ -6333,9 +5658,9 @@ mod tests {
         assert_eq!(
             pick_suffix(&set(&[2, u32::MAX])),
             Some(1),
-            "포화 갈래는 가장 낮은 구멍을 쓴다"
+            "the saturation branch uses the lowest hole"
         );
-        // ★`None`(계열 전체 점유)은 봉인하지 않는다★ — 1..=u32::MAX 를 다 채운 입력을 만들 수 없다.
+        // ★`None` (the whole family occupied) is not sealed★ — an input filling all of 1..=u32::MAX cannot be made.
     }
     #[test]
     fn epoch_replacement_never_renames_an_existing_agent() {
@@ -6345,54 +5670,57 @@ mod tests {
         let newcomer = agent_profile("C:/x", Some("bob"));
         manager
             .register_like_spawn(&newcomer)
-            .expect("신규 등록 성공");
+            .expect("new registration succeeds");
         assert_eq!(
             name_of(&manager, newcomer.id),
             "bob(1)",
-            "명부에 없던 id = 신규 등록 → 접미사"
+            "an id not in the roster = new registration → suffix"
         );
 
-        manager.register_like_spawn(&bob).expect("재등록 성공");
+        manager
+            .register_like_spawn(&bob)
+            .expect("re-registration succeeds");
         assert_eq!(
             name_of(&manager, bob.id),
             "bob",
-            "재시작이 이름을 바꾸면 안 된다"
+            "a restart must not change the name"
         );
-        manager.register_like_spawn(&newcomer).expect("재등록 성공");
+        manager
+            .register_like_spawn(&newcomer)
+            .expect("re-registration succeeds");
         assert_eq!(
             name_of(&manager, newcomer.id),
             "bob(1)",
-            "재등록은 접미사를 누적하지 않는다"
+            "re-registration does not accumulate suffixes"
         );
 
         let third = create(&manager, "C:/x", Some("bob"));
         assert_eq!(third.canonical_name_when_live(), "bob(2)");
 
-        // ★★stale 스냅샷 재등록 — 실전 회귀 시나리오★★: 산 세션 도중 트리에서 개명 → 그 뒤 재시작이
-        //   **개명 전 스냅샷**을 들고 재등록하는데, 그 옛 이름을 그사이 **다른 에이전트가 차지**했다.
-        //   이때 신규-등록 검사가 돌면 옛 이름이 충돌로 판정돼 재시작이 에이전트를 엉뚱한 이름으로 개명한다.
+        // ★★Stale snapshot re-registration — a real regression scenario★★: rename in the tree while live → a later restart re-registers with **the pre-rename snapshot** whose old name **another agent took** meanwhile; a
+        //   new-registration check would call it a collision and rename the agent wrongly.
         let agent = create(&manager, "C:/stale", Some("was-here"));
         let stale_snapshot = agent.clone();
         assert!(renamed_ok(
             manager
                 .try_rename_agent(agent.id, Some("renamed".into()))
-                .expect("저장 성공")
+                .expect("save succeeds")
         ));
         assert_eq!(name_of(&manager, agent.id), "renamed");
         let squatter = create(&manager, "C:/squat", Some("was-here"));
         assert_eq!(squatter.canonical_name_when_live(), "was-here");
         manager
             .register_like_spawn(&stale_snapshot)
-            .expect("재등록 성공");
+            .expect("re-registration succeeds");
         assert_eq!(
             name_of(&manager, agent.id),
             "renamed",
-            "재시작이 stale 스냅샷의 옛 이름으로 개명 판정을 하면 안 된다"
+            "a restart must not make a rename decision with the stale snapshot's old name"
         );
         assert_eq!(
             name_of(&manager, squatter.id),
             "was-here",
-            "재시작이 남의 이름도 건드리지 않는다"
+            "a restart does not touch someone else's name either"
         );
     }
 
@@ -6403,14 +5731,14 @@ mod tests {
         let second = create(&manager, "C:/y", Some("bob"));
         assert_eq!(second.canonical_name_when_live(), "bob(1)");
 
-        manager.try_delete_agent(first.id).expect("저장 성공");
+        manager.try_delete_agent(first.id).expect("save succeeds");
         let out = manager
             .try_rename_agent(second.id, Some("bob".into()))
-            .expect("저장 성공");
+            .expect("save succeeds");
         assert_eq!(
             out,
             RenameOutcome::Renamed("bob".to_string()),
-            "빈 이름 요청은 확정돼야 한다(무변경 성공 보고는 거짓이다)"
+            "a request for a free name must be settled (reporting unchanged success is false)"
         );
         assert_eq!(name_of(&manager, second.id), "bob");
     }
@@ -6422,21 +5750,21 @@ mod tests {
         assert_eq!(holder.canonical_name_when_live(), "shared");
         let b = create(&manager, "C:/shared", Some("bee"));
         assert!(renamed_ok(
-            manager.try_rename_agent(b.id, None).expect("저장 성공")
+            manager.try_rename_agent(b.id, None).expect("save succeeds")
         ));
         assert_eq!(
             name_of(&manager, b.id),
             "shared(1)",
-            "충돌 중엔 접미사 유지"
+            "the suffix stays while in conflict"
         );
 
-        manager.try_delete_agent(holder.id).expect("저장 성공");
-        let out = manager.try_rename_agent(b.id, None).expect("저장 성공");
+        manager.try_delete_agent(holder.id).expect("save succeeds");
+        let out = manager.try_rename_agent(b.id, None).expect("save succeeds");
         assert_eq!(out, RenameOutcome::Renamed("shared".to_string()));
         assert_eq!(
             manager.agent_snapshot(b.id).unwrap().display_name,
             None,
-            "해제가 가능해졌으면 override 가 실제로 지워져야 한다"
+            "once clearing became possible, the override must actually be removed"
         );
         assert_eq!(name_of(&manager, b.id), "shared");
     }
@@ -6450,23 +5778,23 @@ mod tests {
         assert_eq!(
             manager
                 .try_rename_agent(AgentId::new_v4(), Some("bob".into()))
-                .expect("저장 성공"),
+                .expect("save succeeds"),
             RenameOutcome::NotFound,
-            "없는 id 는 NotFound 다(이름 문제가 아니다)"
+            "a missing id is NotFound (not a name problem)"
         );
         assert_eq!(
             manager
                 .try_rename_agent(alice.id, Some("bob".into()))
-                .expect("저장 성공"),
+                .expect("save succeeds"),
             RenameOutcome::Renamed("bob(1)".to_string()),
-            "확정은 확정된 이름을 함께 보고한다"
+            "settling reports the settled name with it"
         );
         assert_eq!(
             manager
                 .try_rename_agent(alice.id, Some("bob".into()))
-                .expect("저장 성공"),
+                .expect("save succeeds"),
             RenameOutcome::Unchanged("bob(1)".to_string()),
-            "멱등 재요청은 무변경으로 구분된다"
+            "an idempotent re-request is told apart as unchanged"
         );
     }
 
@@ -6475,28 +5803,32 @@ mod tests {
         let manager = bare_manager();
         create(&manager, "C:/x", Some("bob"));
         let x = create(&manager, "C:/somewhere/zeta", None);
-        // 만들기는 이름을 박는다 — 두 축이 갈리는 override 없는 상태는 이름 지우기가 만든다.
+        // Creation pins the name — the no-override state where the two axes split is made by clearing the name.
         assert!(renamed_ok(
-            manager.try_rename_agent(x.id, None).expect("저장 성공")
+            manager.try_rename_agent(x.id, None).expect("save succeeds")
         ));
         let stored = manager.agent_snapshot(x.id).unwrap();
         assert_eq!(stored.display_name, None);
-        assert_eq!(stored.canonical_name_when_live(), "zeta", "프로필 파생 축");
+        assert_eq!(
+            stored.canonical_name_when_live(),
+            "zeta",
+            "profile derivation axis"
+        );
         put_live_session_at(&manager, x.id, "C:/live/bob(1)");
-        assert_eq!(name_of_in_roster(&manager, x.id), "bob(1)", "명부 축");
+        assert_eq!(name_of_in_roster(&manager, x.id), "bob(1)", "roster axis");
 
         let out = manager
             .try_rename_agent(x.id, Some("bob".into()))
-            .expect("저장 성공");
+            .expect("save succeeds");
         assert_eq!(
             out,
             RenameOutcome::Unchanged("bob(1)".to_string()),
-            "명부가 말하는 자기 이름으로 판정해야 한다"
+            "it must decide with its own name as the roster says"
         );
         assert_eq!(
             manager.agent_snapshot(x.id).unwrap().display_name,
             None,
-            "무변경이면 override 를 새로 심지 않는다(심으면 조용한 개명이다)"
+            "if unchanged, no new override is planted (planting one would be a silent rename)"
         );
     }
 
@@ -6508,48 +5840,47 @@ mod tests {
         assert_eq!(
             created.display_name,
             Some("bob".to_string()),
-            "생성 응답이 들고 가는 값부터 정규화돼야 한다"
+            "normalized starting from the value the creation response carries"
         );
         assert_eq!(
             manager.agent_snapshot(created.id).unwrap().display_name,
             Some("bob".to_string()),
-            "명부에 저장된 값도 같아야 한다"
+            "the value stored in the roster must also be the same"
         );
 
         let renamed = create(&manager, "C:/y", Some("carol"));
         assert!(renamed_ok(
             manager
                 .try_rename_agent(renamed.id, Some("\tdave\n".into()))
-                .expect("저장 성공")
+                .expect("save succeeds")
         ));
         assert_eq!(
             manager.agent_snapshot(renamed.id).unwrap().display_name,
             Some("dave".to_string()),
-            "개명 경로(탭·개행 포함)"
+            "rename path (including tabs · newlines)"
         );
 
         let spawned = agent_profile("C:/z", Some(" erin "));
         manager
             .register_like_spawn(&spawned)
-            .expect("신규 등록 성공");
+            .expect("new registration succeeds");
         assert_eq!(
             manager.agent_snapshot(spawned.id).unwrap().display_name,
             Some("erin".to_string()),
-            "신규 등록 경로"
+            "new registration path"
         );
     }
 
     #[test]
     fn a_whitespace_only_override_is_stored_as_no_override() {
-        // 공백-only override 는 파생 함수들이 이미 무시하지만(빈 라벨 방지), 그건 **표시**만 구제할 뿐
-        //   명부엔 쓸모없는 문자열이 남는다.
+        // A whitespace-only override is already ignored by the derivation functions (no empty labels), which rescues only **the display**; a useless string remains in the roster.
         let manager = bare_manager();
 
         let blank = create(&manager, "C:/blankdir", Some("   "));
         assert_eq!(
             blank.display_name,
             Some("blankdir".to_string()),
-            "공백만 남는 요청은 이름 요청이 아니다 — cwd 파생 이름을 박는다(이름 고정)"
+            "a request leaving only whitespace is not a name request — the cwd-derived name is pinned (name pinned)"
         );
         assert_eq!(name_of(&manager, blank.id), "blankdir");
 
@@ -6557,12 +5888,12 @@ mod tests {
         assert!(renamed_ok(
             manager
                 .try_rename_agent(named.id, Some(" ".into()))
-                .expect("저장 성공")
+                .expect("save succeeds")
         ));
         assert_eq!(
             manager.agent_snapshot(named.id).unwrap().display_name,
             None,
-            "개명 경로의 공백-only 요청 = override 해제"
+            "a whitespace-only request on the rename path = clearing the override"
         );
         assert_eq!(name_of(&manager, named.id), "otherdir");
     }
@@ -6583,9 +5914,9 @@ mod tests {
         assert_eq!(
             manager
                 .try_rename_agent(bob.id, Some("  bob  ".into()))
-                .expect("저장 성공"),
+                .expect("save succeeds"),
             RenameOutcome::Renamed("bob".to_string()),
-            "요청은 `bob` 요청이므로 이름이 바뀌지 않는다"
+            "the request is a `bob` request, so the name does not change"
         );
         assert_eq!(name_of(&manager, bob.id), "bob");
         assert_eq!(
@@ -6596,7 +5927,7 @@ mod tests {
         assert_eq!(
             next.canonical_name_when_live(),
             "bob(1)",
-            "패딩 개명이 bob 을 비웠으면 여기서 동명 두 건이 앉는다"
+            "if the padded rename had freed bob, two same-named entries would sit here"
         );
     }
 
@@ -6609,27 +5940,26 @@ mod tests {
         assert_eq!(
             other.display_name,
             Some("bob(1)".to_string()),
-            "패딩 요청도 접미사 계열로 들어간다"
+            "a padded request also goes into the suffix family"
         );
         assert_eq!(name_of(&manager, other.id), "bob(1)");
 
         assert_eq!(
             manager
                 .try_rename_agent(other.id, Some(" bob ".into()))
-                .expect("저장 성공"),
+                .expect("save succeeds"),
             RenameOutcome::Unchanged("bob(1)".to_string())
         );
         let third = create(&manager, "C:/t", Some("bob"));
         assert_eq!(
             third.canonical_name_when_live(),
             "bob(2)",
-            "재요청이 번호를 태웠으면 여기가 bob(3) 이 된다"
+            "if the re-request had burned a number, this would become bob(3)"
         );
     }
 
-    /// ★왜 훅 지점이 `capabilities()` 인가★: `roster()` → `list_agents()` → `agent_info()` 가 세션마다
-    ///   그걸 부른다. 즉 `try_rename_agent` 의 **관측 도중** 임의 코드를 끼울 수 있는 유일한 주입점이라,
-    ///   "커밋 직전에 프로필이 사라지는" 창을 스레드·타이밍 없이 결정적으로 재현할 수 있다.
+    /// ★Why the hook point is `capabilities()`★: `roster()` → `list_agents()` → `agent_info()` calls it per session — the only injection point for arbitrary code **during the observation** of `try_rename_agent`, so
+    ///   "the profile disappears right before commit" is reproduced deterministically without threads or timing.
     struct HookedTransport {
         hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
@@ -6728,22 +6058,22 @@ mod tests {
             "C:/live/victim",
             Box::new(HookedTransport {
                 hook: Mutex::new(Some(Box::new(move || {
-                    profiles.try_remove(vid).expect("저장 성공")
+                    profiles.try_remove(vid).expect("save succeeds")
                 }))),
             }),
         );
 
         let out = manager
             .try_rename_agent(vid, Some("after".into()))
-            .expect("저장 성공");
+            .expect("save succeeds");
         assert_eq!(
             out,
             RenameOutcome::NotFound,
-            "착지하지 않은 커밋을 성공으로 보고하면 안 된다(Free 갈래)"
+            "a commit that did not land must not be reported as success (Free branch)"
         );
         assert!(
             manager.agent_snapshot(vid).is_none(),
-            "전제 — 프로필은 실제로 사라졌다"
+            "premise — the profile actually disappeared"
         );
 
         let holder = create(&manager, "C:/holder", Some("taken"));
@@ -6756,23 +6086,23 @@ mod tests {
             "C:/live/victim2",
             Box::new(HookedTransport {
                 hook: Mutex::new(Some(Box::new(move || {
-                    profiles2.try_remove(vid2).expect("저장 성공")
+                    profiles2.try_remove(vid2).expect("save succeeds")
                 }))),
             }),
         );
         let out2 = manager
             .try_rename_agent(vid2, Some("taken".into()))
-            .expect("저장 성공");
+            .expect("save succeeds");
         assert_eq!(
             out2,
             RenameOutcome::NotFound,
-            "접미사 배정 갈래의 커밋 결과도 삼키면 안 된다"
+            "the commit result of the suffix allocation branch must not be swallowed either"
         );
         assert!(manager.agent_snapshot(vid2).is_none());
         assert_eq!(
             name_of(&manager, holder.id),
             "taken",
-            "실패한 개명이 남의 이름을 건드리지 않는다"
+            "a failed rename does not touch someone else's name"
         );
     }
 
@@ -6780,51 +6110,51 @@ mod tests {
     fn clearing_an_override_predicts_the_name_from_the_live_axis() {
         let manager = bare_manager();
         let y = create(&manager, "C:/other", Some("q"));
-        // X: override "x", 프로필 축 basename "p", 산 축 basename "q"(= Y 와 충돌하는 쪽).
+        // X: override "x", profile-axis basename "p", live-axis basename "q" (= the side conflicting with Y).
         let x = create(&manager, "C:/prof/p", Some("x"));
         put_live_session_at(&manager, x.id, "C:/live/q");
         assert_eq!(
             name_of_in_roster(&manager, x.id),
             "x",
-            "전제 — override 가 이름"
+            "premise — the override is the name"
         );
 
-        let out = manager.try_rename_agent(x.id, None).expect("저장 성공");
+        let out = manager.try_rename_agent(x.id, None).expect("save succeeds");
         assert_eq!(
             out,
             RenameOutcome::Renamed("q(1)".to_string()),
-            "프로필 축('p')으로 예측하면 Free 로 오판해 Renamed(\"p\") 를 보고한다"
+            "predicting with the profile axis ('p') misjudges Free and reports Renamed(\"p\")"
         );
         assert_eq!(
             name_of_in_roster(&manager, x.id),
             "q(1)",
-            "명부에서도 접미사 이름이어야 한다"
+            "it must be the suffixed name in the roster too"
         );
-        assert_eq!(name_of_in_roster(&manager, y.id), "q", "Y 의 이름은 그대로");
+        assert_eq!(name_of_in_roster(&manager, y.id), "q", "Y's name unchanged");
         let roster = manager.roster();
         let unique: std::collections::BTreeSet<&String> =
             roster.iter().map(|e| &e.canonical_name).collect();
         assert_eq!(
             unique.len(),
             roster.len(),
-            "명부에 동명이 앉으면 안 된다: {roster:?}"
+            "no same-named entries must sit in the roster: {roster:?}"
         );
     }
 
     #[test]
     fn clearing_an_override_predicts_with_the_live_derivation_not_the_dormant_one() {
-        // 이 픽스처는 두 축의 갈림을 `<temp>/.` 로 직접 만든다 — raw basename 은 `"."`, canonicalize 하면
-        //   `<temp>` 의 마지막 세그먼트다.
+        // This fixture makes the split of the two axes directly with `<temp>/.` — the raw basename is `"."`, and canonicalized it is
+        //   the last segment of `<temp>`.
         let temp = std::env::temp_dir();
         let dotted = format!("{}/.", temp.to_string_lossy());
         let raw_base = crate::name::cwd_basename(&dotted);
         let canon_base = {
-            let c = dunce::canonicalize(&dotted).expect("temp 디렉터리는 실재한다");
+            let c = dunce::canonicalize(&dotted).expect("the temp directory exists");
             crate::name::cwd_basename(&c.to_string_lossy())
         };
         assert_ne!(
             raw_base, canon_base,
-            "이 테스트의 전제 — 두 축이 실제로 갈려야 한다"
+            "the premise of this test — the two axes must actually split"
         );
 
         let manager = bare_manager();
@@ -6834,35 +6164,31 @@ mod tests {
         assert_eq!(
             name_of_in_roster(&manager, x.id),
             "x",
-            "전제 — override 가 이름"
+            "premise — the override is the name"
         );
 
-        let out = manager.try_rename_agent(x.id, None).expect("저장 성공");
+        let out = manager.try_rename_agent(x.id, None).expect("save succeeds");
         assert_eq!(
             out,
             RenameOutcome::Renamed(format!("{raw_base}(1)")),
-            "잠든 함수로 예측하면 canonicalize 된 이름(비어 있음)을 보고 Free 로 오판한다"
+            "predicting with the asleep function sees the canonicalized name (free) and misjudges Free"
         );
         assert_eq!(name_of_in_roster(&manager, x.id), format!("{raw_base}(1)"));
-        assert_eq!(name_of_in_roster(&manager, y.id), raw_base, "Y 는 그대로");
+        assert_eq!(name_of_in_roster(&manager, y.id), raw_base, "Y unchanged");
         let roster = manager.roster();
         let unique: std::collections::BTreeSet<&String> =
             roster.iter().map(|e| &e.canonical_name).collect();
         assert_eq!(
             unique.len(),
             roster.len(),
-            "명부에 동명이 앉으면 안 된다: {roster:?}"
+            "no same-named entries must sit in the roster: {roster:?}"
         );
     }
 
     #[test]
     fn concurrent_creates_of_one_name_never_both_take_it() {
-        // ★Barrier 로 겹침을 **설계로** 만든다★: 배리어 없이는 스레드들이 순차로 흘러 우연히 겹칠 때만
-        //   경합이 재현된다(그 우연은 하네스의 디스크 쓰기 지연에 얹혀 있어 보증이 아니다). 전원이 배리어를
-        //   통과한 직후 동시에 배정에 진입하므로 게이트가 없으면 여러 스레드가 같은 관측을 본다.
-        // ★그래도 확률적 탐지다(정직 명시)★: 배리어는 **진입 시점**만 맞추고 그 뒤 인터리빙은 스케줄러
-        //   소관이다. 게이트를 제거하면 거의 항상 실패하지만 운 좋게 통과할 수 있다. 결정적 봉인은 배정
-        //   지점의 yield-seam 이 필요하고 그건 별도 결정이다.
+        // ★The overlap is made **by design** with a Barrier★ — without it threads flow sequentially and contention depends on disk latency. ★Still probabilistic★: the barrier aligns only the entry time; removing the gate
+        //   fails almost always but may pass by luck. A deterministic seal needs a yield-seam at the allocation point (a separate decision).
         const THREADS: usize = 8;
         let manager = Arc::new(bare_manager());
         let start = Arc::new(std::sync::Barrier::new(THREADS));
@@ -6872,11 +6198,11 @@ mod tests {
                     let m = Arc::clone(&manager);
                     let start = Arc::clone(&start);
                     scope.spawn(move || {
-                        // 프로필 조립은 배리어 **전에** 끝내 배정만 동시에 시작하게 한다.
+                        // Profile assembly is finished **before** the barrier so that only the allocation starts at the same time.
                         let p = agent_profile("C:/race", Some("bob"));
                         start.wait();
                         m.try_create_agent(p)
-                            .expect("배정 성공")
+                            .expect("allocation succeeds")
                             .canonical_name_when_live()
                     })
                 })
@@ -6888,7 +6214,7 @@ mod tests {
         assert_eq!(
             unique.len(),
             THREADS,
-            "동시 배정이 서로 다른 이름을 받아야 한다(중복 = 유일성 붕괴): {names:?}"
+            "concurrent allocations must receive different names (duplicate = uniqueness collapse): {names:?}"
         );
         let roster = manager.roster();
         assert_eq!(roster.len(), THREADS);
@@ -6897,17 +6223,14 @@ mod tests {
         assert_eq!(
             roster_unique.len(),
             THREADS,
-            "명부에 동명이 앉으면 안 된다: {roster:?}"
+            "no same-named entries must sit in the roster: {roster:?}"
         );
     }
 
-    // ── ADR-0172: 중복 요청은 오류가 아니라 「할 일 없음」이고, 아무것도 바꾸지 않는다 ────────────
+    // ── ADR-0172: a duplicate request is not an error but 「nothing to do」, and changes nothing ────────────
 
-    /// ★이미 뜨는 중인 항목에 온 요청 — 예약을 잡아 두어 **결정적으로** 그 상황을 만든다★.
-    ///
-    /// 스레드 경쟁을 기다리지 않는다: 예약을 직접 들고 있으면 그 뒤 오는 요청은 반드시 진다.
-    /// 확인하는 것 셋 — 오류가 아니라 결말이라는 것 · 호출자가 「내가 띄운 게 아니다」를 구분할 수 있다는 것 ·
-    /// 그리고 **기록도 지움도 일어나지 않는다**는 것(앞서 기록해 둔 값이 그대로 남는다).
+    /// ★A request to an entry already launching — made **deterministically** by holding the reservation★ (no thread race). Checks: an outcome, not an error · the caller can tell 「I did not launch it」 · **neither record
+    /// nor clear** (the earlier value stays).
     #[test]
     fn a_request_that_arrives_while_another_spawn_is_in_flight_is_moot_and_changes_nothing() {
         use crate::failure::AgentFailureKind;
@@ -6915,17 +6238,17 @@ mod tests {
         let manager = bare_manager();
         let profile = create(&manager, "C:/moot-in-flight", Some("moot-in-flight"));
         let id = profile.id;
-        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        // The seeding is done outside the assertion (avoiding action-in-assertion).
         let seeded = manager.profiles.set_last_failure(
             id,
             None,
             Some(AgentFailureKind::NoConversationToResume),
         );
-        assert!(seeded, "전제: 시드가 실제로 값을 바꾼다");
+        assert!(seeded, "premise: the seed actually changes the value");
 
-        // 다른 요청이 진행 중인 상황 그 자체 — 놓지 않고 들고 있는다.
-        let _held =
-            SpawnReservation::reserve(manager.spawning.clone(), id).expect("예약을 잡을 수 있다");
+        // The very situation of another request in progress — held without releasing.
+        let _held = SpawnReservation::reserve(manager.spawning.clone(), id)
+            .expect("the reservation can be taken");
 
         let outcome = manager
             .activate_profile(&profile, SpawnMode::Fresh)
@@ -6933,21 +6256,20 @@ mod tests {
             .map(|e| e.to_string());
         assert!(
             outcome.is_some(),
-            "승자가 아직 명부에 올리기 전이라 돌려줄 세션이 없다 — NotFound 가 정직한 답이다"
+            "the winner has not yet put it on the roster, so there is no session to return — NotFound is the honest answer"
         );
         assert!(
             manager.list_agents().is_empty(),
-            "이 요청은 프로세스를 띄우지 않았다"
+            "this request did not launch a process"
         );
         assert_eq!(
             manager.agent_snapshot(id).and_then(|p| p.last_failure),
             Some(AgentFailureKind::NoConversationToResume),
-            "할 일이 없었으므로 기록하지도, 지우지도 않는다"
+            "there was nothing to do, so it neither records nor clears"
         );
     }
 
-    /// ★이미 떠 있는 항목에 온 요청 — 실 프로세스로 본다★. 위 형제와 갈리는 지점은 **돌려줄 세션이
-    /// 있다**는 것이라, 호출자가 moot 을 받고도 그 에이전트 정보를 얻는다.
+    /// ★A request to an entry already up — with a real process★. It differs from the sibling above by having **a session to return**, so the caller gets that agent's information even on moot.
     #[cfg(windows)]
     #[test]
     fn a_request_for_an_already_running_agent_is_moot_and_returns_the_live_session() {
@@ -6962,42 +6284,46 @@ mod tests {
         let id = profile.id;
         let first = manager
             .spawn_agent(&profile, SpawnMode::Fresh)
-            .expect("최초 spawn");
-        assert!(first.started(), "전제: 첫 요청이 실제로 띄웠다");
+            .expect("first spawn");
+        assert!(
+            first.started(),
+            "premise: the first request actually launched"
+        );
 
-        // 산 에이전트에 기록을 심어 두고, 중복 요청이 그것을 건드리지 않는지 본다.
-        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        // Plant a record on the live agent and see that the duplicate request does not touch it.
+        // The seeding is done outside the assertion (avoiding action-in-assertion).
         let seeded = manager.profiles.set_last_failure(
             id,
             None,
             Some(AgentFailureKind::EarlyExitAfterResume),
         );
-        assert!(seeded, "전제: 시드가 실제로 값을 바꾼다");
+        assert!(seeded, "premise: the seed actually changes the value");
 
         let again = manager
             .spawn_agent(&profile, SpawnMode::Fresh)
-            .expect("중복 요청은 오류가 아니다");
-        assert!(!again.started(), "이 호출은 아무것도 띄우지 않았다");
+            .expect("a duplicate request is not an error");
+        assert!(!again.started(), "this call launched nothing");
         assert_eq!(
             again.into_info().map(|i| i.id),
             Some(id),
-            "moot 이어도 산 세션 정보는 돌려준다"
+            "even moot returns the live session information"
         );
         assert_eq!(
             manager.agent_snapshot(id).and_then(|p| p.last_failure),
             Some(AgentFailureKind::EarlyExitAfterResume),
-            "할 일이 없었으므로 기록도 지움도 없다"
+            "there was nothing to do, so neither record nor clear"
         );
-        assert_eq!(manager.list_agents().len(), 1, "화신은 여전히 하나다");
+        assert_eq!(
+            manager.list_agents().len(),
+            1,
+            "there is still one incarnation"
+        );
 
         manager.kill_agent(id).ok();
     }
 
-    /// 활성화가 성립하면 그 자리에서 지운다(ADR-0172 결정 4 개정판) — 그리고 그 뒤에도 축은 여전히
-    /// 별개다: 도는 항목에 기록을 다시 붙일 수 있어야 화면의 「도는 중이 이긴다」 규칙이 설 자리가 있다.
-    ///
-    /// ★in-crate 테스트인 이유★: 시드에 `set_last_failure` 가 필요하고 그 동사는 `pub(crate)` 다
-    ///   (단일 쓰기 지점 경계를 crate 밖으로는 컴파일러가 지키게 한다).
+    /// When activation holds it clears at once (ADR-0172 decision 4 amended); the axes stay separate — a record must be attachable again to a running entry so the screen's 「running wins」 has a place. ★In-crate★: seeding
+    /// needs `set_last_failure`, which is `pub(crate)` (the compiler guards the single-write-point boundary).
     #[cfg(windows)]
     #[test]
     fn a_successful_activation_clears_the_last_failure_but_the_axis_stays_separate() {
@@ -7010,76 +6336,67 @@ mod tests {
             Some("clear-on-success"),
         );
         let id = profile.id;
-        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        // The seeding is done outside the assertion (avoiding action-in-assertion).
         let seeded = manager.profiles.set_last_failure(
             id,
             None,
             Some(AgentFailureKind::NoConversationToResume),
         );
-        assert!(seeded, "전제: 시드가 실제로 값을 바꾼다");
+        assert!(seeded, "premise: the seed actually changes the value");
 
         let info = manager
             .activate_profile(&profile, SpawnMode::Fresh)
-            .expect("활성화는 성공한다");
+            .expect("activation succeeds");
         assert!(
             !matches!(
                 info.status,
                 AgentStatus::Failed { .. } | AgentStatus::Killed | AgentStatus::Exited { .. }
             ),
-            "전제: 이 세션은 살아 있다 — got {:?}",
+            "premise: this session is alive — got {:?}",
             info.status
         );
         assert_eq!(
             manager.agent_snapshot(id).and_then(|p| p.last_failure),
             None,
-            "활성화가 성립했으니 지워야 한다"
+            "activation held, so it must clear"
         );
 
-        // 축 독립성 — 상태 열거형에 합쳤다면 이 조합이 아예 표현되지 않는다.
-        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        // Axis independence — merged into the state enum, this combination could not be expressed. Seeding is outside the assertion (no action-in-assertion).
         let seeded = manager.profiles.set_last_failure(
             id,
             Some(info.epoch),
             Some(AgentFailureKind::SpawnFailed),
         );
-        assert!(seeded, "전제: 시드가 실제로 값을 바꾼다");
+        assert!(seeded, "premise: the seed actually changes the value");
         assert!(
             manager.list_agents().iter().any(|a| a.id == id),
-            "여전히 산 명부에 있다"
+            "still in the live roster"
         );
         assert_eq!(
             manager.agent_snapshot(id).and_then(|p| p.last_failure),
             Some(AgentFailureKind::SpawnFailed),
-            "도는 중 + 마지막 실패 조합이 표현된다"
+            "the running + last failure combination is expressed"
         );
 
         manager.kill_agent(id).ok();
     }
 
-    /// ★죽은 세션의 출력 꼬리가 실제로 읽히는지 — 실 프로세스로만 말할 수 있다(ADR-0172)★.
-    ///
-    /// 이 테스트가 잡는 회귀는 하나다: 폴링 루프 **안에서** 세션을 다시 조회하면, `finish` 가 상태를 세운
-    /// 직후 reaper 가 명부에서 지우므로(우리 폴링 간격은 100ms) 거의 언제나 조회가 실패해 꼬리가 빈다.
-    /// 그러면 분류는 항상 맥락 기본값으로 떨어지고 「이어받을 대화 없음」 판정이 **죽은 코드**가 된다 —
-    /// 순수 dispatch 테스트는 그 사실을 못 본다.
+    /// ★Whether a dead session's output tail is readable — only a real process can say (ADR-0172)★: a session looked up again **inside** the polling loop is removed by the reaper right after `finish` (polling is 100ms), so
+    /// the tail is empty, classification always falls to the contextual default and 「no conversation to resume」 becomes **dead code** — invisible to a pure dispatch test.
     #[cfg(windows)]
     #[test]
     fn early_verdict_captures_the_dead_sessions_output_tail() {
         use crate::failure::AgentFailureKind;
 
-        // ★배치 파일인 이유★: portable-pty CommandBuilder 가 `&`·`>` 를 개별 quoting 해 ConPTY 통과 중
-        //   깨뜨린다(activation.rs 픽스처의 실측). 배치는 cmd 가 직접 파싱하니 결정적이다.
-        // ★죽기 전에 잠깐 산다(ping)★: 이 테스트의 대상은 "reaper 가 명부에서 지운 **뒤에도** 링을
-        //   읽는가" 다. 즉사시키면 첫 `get_session` 이 reaper 와 경쟁해 세션을 못 잡는 쪽으로 질 수 있고,
-        //   그러면 대상과 무관한 이유로 붉어진다(거짓 red). 잠깐 살려 Arc 획득을 확실히 한 뒤 죽인다 —
-        //   수거 후 읽기라는 검증 대상은 그대로다.
+        // ★A batch file★: portable-pty `CommandBuilder` quotes `&`·`>` individually and breaks them through ConPTY (activation.rs fixture); cmd parses a batch directly.
+        // ★It lives briefly before dying (ping)★: the subject is reading the ring **after** the reaper removed it; dying at once could lose the first `get_session` race and go red for an unrelated reason.
         let uniq = uuid::Uuid::new_v4();
         let batch = std::env::temp_dir().join(format!("engram-tail-probe-{uniq}.cmd"));
         std::fs::write(
             &batch,
             "@echo off\r\necho No conversation found with session ID: 8b1c\r\nping -n 2 127.0.0.1 >nul\r\nexit /b 1\r\n",
         )
-        .expect("배치 write");
+        .expect("batch write");
 
         let manager = bare_manager();
         let mut draft = agent_profile(&std::env::temp_dir().to_string_lossy(), Some("tail-probe"));
@@ -7087,89 +6404,73 @@ mod tests {
             program: "cmd.exe".into(),
             args: vec!["/c".into(), batch.to_string_lossy().to_string()],
         };
-        let profile = manager.try_create_agent(draft).expect("등록");
+        let profile = manager.try_create_agent(draft).expect("register");
         manager
             .spawn_agent(&profile, SpawnMode::Fresh)
             .expect("spawn")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+            .expect("this call actually launches (not a duplicate request)");
 
-        // ★shell 프로필이라 진단 버퍼는 비어 있다(PTY 는 stderr 를 콘솔에 병합한다)★ — 즉 여기서
-        //   서는 증거는 오롯이 **콘솔 꼬리**이고, 그게 이 테스트가 재는 것이다.
+        // ★A shell profile, so the diagnostic buffer is empty (the PTY merges stderr into the console)★ — the evidence here is solely **the console tail**, which this test measures.
         let EarlyVerdict::Terminal { status, evidence } = manager.early_activation_verdict(
             profile.id,
             &claude_terminal_command(),
             Duration::from_secs(10),
             LINK_RESOLUTION_BACKSTOP,
         ) else {
-            panic!("이 배치는 즉시 죽는다(전제)")
+            panic!("this batch dies immediately (premise)")
         };
         assert!(
             matches!(
                 status,
                 AgentStatus::Exited { .. } | AgentStatus::Failed { .. } | AgentStatus::Killed
             ),
-            "전제: 종점 상태로 관측된다 — got {status:?}"
+            "premise: observed in a terminal state — got {status:?}"
         );
         assert!(
             evidence.contains("No conversation found"),
-            "reaper 가 세션을 거둔 뒤에도 꼬리가 읽혀야 한다 — 비면 분류가 언제나 맥락 기본값이다. got {evidence:?}"
+            "the tail must be readable even after the reaper collected the session — if empty, the classification is always the contextual default. got {evidence:?}"
         );
-        // 그 꼬리가 실제로 분류까지 이어진다(claude 어휘 — 실 claude 없이 dispatch 만 태운다).
+        // That tail actually continues into the classification (claude vocabulary — runs only dispatch without a real claude).
         assert_eq!(
             backend::resume_failure_kind(&claude_terminal_command(), &evidence),
             Some(AgentFailureKind::NoConversationToResume),
-            "실 세션에서 읽은 꼬리가 「이어받을 대화 없음」으로 분류돼야 한다"
+            "the tail read from the real session must be classified as no conversation to resume"
         );
 
         let _ = std::fs::remove_file(&batch);
     }
 
-    /// ★`spawn_agent` 안의 **세 동사 순서**를 못 박는다 — 이 순서가 이어받기 값의 레이스 없음을 낸다★.
-    ///
-    /// 못 박는 것 둘:
-    ///   1. `register_for_spawn` **바로 뒤**가 `epoch_for_spawn` 이다. 앞엣것은 live 표식을 **보존**하므로
-    ///      (ADR-0084) 그 사이 구간에는 여전히 **앞 화신의 표식**이 서 있고, 그 구간에 도착한 앞 화신의
-    ///      지각 기록은 표식이 일치해 **거절되지 않는다**. 사이에 cwd 정규화(syscall)나 Fresh 비우기
-    ///      (프로필 파일 통째 쓰기)가 끼면 그 구간이 실제로 벌어진다.
-    ///   2. 이어받기 손잡이를 읽는 자리가 `epoch_for_spawn` **뒤**다. 표식이 바뀐 뒤부터 이 spawn 이
-    ///      기록 포트를 건네기 전까지는 어떤 화신의 기록도 통과하지 못해 명부 값이 얼어 있고, 그래서
-    ///      「읽은 값 = 이 화신이 이어받는 값」이 성립한다.
-    ///
-    /// ★그리고 그 읽기가 **명부**여야 한다★ — 호출자 스냅샷(`profile.backend_session_id`)을 읽으면 그
-    ///   사이 상대가 준 thread id 를 통째로 놓친다(그 칸은 우리가 아니라 상대가 쓴다).
-    ///
-    /// ★왜 소스에서 재나★: 이 순서를 실행으로 재려면 실 codex 바이너리와 지각 기록을 끼워 넣을 창이
-    ///   동시에 있어야 한다. 그 둘은 시험대에 없고, 어긋났을 때 나는 것은 컴파일 에러도 빨간 단언도 아닌
-    ///   **낮은 확률의 조용한 오기록**이다. 선례·같은 사유 =
-    ///   `backend::codex::transport::tests::the_session_id_is_recorded_before_the_gate_opens`.
+    /// ★Pins **the order of three verbs** inside `spawn_agent` — the race-freedom of the resume value★: 1. `epoch_for_spawn` **right after** `register_for_spawn` — the latter **keeps** the live marker (ADR-0084), so in
+    /// between **the previous incarnation's marker** stands and a late record of it is **not refused**; cwd normalization (a syscall) or the Fresh clearing (whole profile-file write) in between would open the interval.
+    /// 2. The resume handle read is **after** `epoch_for_spawn`: until this spawn hands over the record port no record passes, so the roster value is frozen and 「read = resumed」 holds.
+    /// ★The read must be **from the roster**★ — the caller snapshot would miss the thread id the peer gave meanwhile. ★Measured in the source★: running needs a real codex and a window for a late record; a divergence is
+    /// **a low-probability silent miswrite**. Precedent: `backend::codex::transport::tests::the_session_id_is_recorded_before_the_gate_opens`.
     #[test]
     fn the_resume_handle_is_read_from_the_roster_after_the_incarnation_tag_is_stamped() {
         let src = include_str!("manager.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
 
-        // ★본문을 오려 내기 전에 **오려 낸 것이 맞는지** 먼저 본다★(리뷰 지적): 두 경계 이름은 자유
-        //   텍스트라, 다른 함수가 `spawn_agent` 위로 올라가면 잘라 낸 덩어리가 엉뚱하게 커지고 아래
-        //   순서 단언이 무관한 코드 위에서 초록이 된다. 그 조용한 통과를 막는 것이 이 두 줄이다.
+        // ★Before cutting out the body, check **that what is cut out is right**★: the two boundary names are free text, and a function moved above `spawn_agent` would grow the lump so the order assertions go green over
+        //   unrelated code; these two lines block that silent pass.
         assert_eq!(
             production.matches("pub fn spawn_agent(").count(),
             1,
-            "`spawn_agent` 이름이 운영 구획에 둘 이상이다 — 아래 오려내기가 어느 것을 잡았는지 알 수 없다"
+            "the `spawn_agent` name appears twice or more in the production section — it is unknown which one the cut below caught"
         );
         let body = production
             .split("pub fn spawn_agent(")
             .nth(1)
-            .expect("`spawn_agent` 본문")
+            .expect("`spawn_agent` body")
             .split("pub fn activate_profile(")
             .next()
-            .expect("다음 함수까지");
+            .expect("up to the next function");
         assert!(
             !body.contains("pub fn "),
-            "잘라 낸 덩어리에 다른 `pub fn` 이 들어 있다 — 경계 함수가 옮겨져 범위가 넘쳤다"
+            "the cut lump contains another `pub fn` — the boundary function moved and the range overflowed"
         );
 
-        // ★바이트 오프셋이 아니라 **실행되는 줄의 나열**로 본다★ — rustfmt 가 체인을 줄로 쪼개므로
-        //   한 덩어리 문자열 검색은 포매팅 한 번에 깨진다(실제로 깨졌다).
+        // ★Looked at as **the list of executed lines**, not byte offsets★ — rustfmt splits chains, so a single-lump string search breaks on one formatting (it did).
         let code: Vec<&str> = body
             .lines()
             .map(str::trim)
@@ -7185,7 +6486,7 @@ mod tests {
             assert_eq!(
                 hits.len(),
                 1,
-                "`{needle}` 이 `spawn_agent` 에서 {}회 잡힌다 — 정확히 하나여야 이 항목이 자리를 특정한다",
+                "`{needle}` is caught {} times in `spawn_agent` — it must be exactly one for this entry to pin down the place",
                 hits.len()
             );
             hits[0]
@@ -7193,96 +6494,93 @@ mod tests {
 
         let registered = only("self.register_for_spawn(profile, entry)?;");
         let stamped = only(".epoch_for_spawn(profile.id)");
-        // ★앵커는 **명부에서 읽는 그 줄**이다★ — 그 뒤에 `resume_handle_for` 가 Fresh 를 비우는 한
-        //   줄이 더 있고(그 함수의 doc 이 사유의 정본), 아래 순서 단언이 재는 것은 「읽기」의 자리다.
+        // ★The anchor is **the line reading from the roster**★ — one more line follows (`resume_handle_for` clearing Fresh); the order assertion measures the place of 「the read」.
         let resume_read = only("let stored_handle = match mode {");
         let handle_gated = only("let resume_session_id = resume_handle_for(");
         let spec_built = only("let spec = backend::build_command_spec(");
 
-        // ★읽기가 spec 조립보다 **앞**이어야 한다(ADR-0208)★ — 명령줄로 이어받는 backend(codex 터미널의
-        //   `resume <id>`)는 그 값을 argv 조립 시점에 받는다. 뒤로 밀리면 그 자리에 넘길 값이 없어
-        //   이어받기가 **말없이 새 대화**가 되고, 통로로 이어받는 형제(app-server)만 멀쩡해 증상이
-        //   한 모드에서만 난다.
+        // ★The read must be **before** the spec assembly (ADR-0208)★ — a command-line-resuming backend (codex terminal `resume <id>`) takes the value at argv assembly; pushed after, the resume **silently becomes a new
+        //   conversation** in that mode only.
         assert!(
             resume_read < spec_built,
-            "손잡이 읽기가 spec 조립보다 뒤다(읽기 {resume_read} · 조립 {spec_built}) — 명령줄로 \
-             이어받는 backend 가 넘겨받을 값이 없어진다"
+            "the handle read is after the spec assembly (read {resume_read} · assembly {spec_built}) — the backend resuming by command \
+             line loses the value it would receive"
         );
-        // 읽어 놓고 안 넘기면 위 순서만 맞고 값은 `None` 인 상태가 초록으로 지나간다.
+        // Reading but not passing would let a state where only the order above matches and the value is `None` pass green.
         let spec_call_end = code[spec_built..]
             .iter()
             .position(|l| l.starts_with(");"))
-            .expect("spec 조립 호출의 끝");
+            .expect("end of the spec assembly call");
         let spec_call = &code[spec_built..spec_built + spec_call_end];
         assert!(
             spec_call.iter().any(|l| l.contains("resume_session_id")),
-            "spec 조립이 이어받기 손잡이를 안 받는다 — 터미널 모드 codex 가 `resume <id>` 를 못 낸다: \
+            "the spec assembly does not receive the resume handle — the terminal-mode codex cannot emit `resume <id>`: \
              {spec_call:?}"
         );
 
         assert!(
             registered < stamped && stamped < resume_read,
-            "세 동사의 순서가 어긋났다(등록 {registered} · 표식 {stamped} · 손잡이 읽기 {resume_read}) — \
-             표식이 등록보다 앞서면 등록이 앞 화신 표식을 되살리고, 손잡이 읽기가 표식보다 앞서면 그 \
-             구간의 명부 값이 앞 화신의 지각 기록에 열려 있다"
+            "the order of the three verbs diverged (registration {registered} · marker {stamped} · handle read {resume_read}) — \
+             if the marker precedes the registration, the registration revives the previous incarnation's marker, and if the handle read precedes the marker, the roster value of that \
+             interval is open to the previous incarnation's late records"
         );
 
-        // 등록 **바로 다음 실행 줄**이 표식 바인딩의 시작이어야 한다(주석·빈 줄과 방금 넣은 id 면 병합을 건너뛰는
-        //   가드의 닫는 괄호만 사이에 허용).
+        // The **very next executed line** after registration must be the start of the marker binding (only comments, blank lines and the
+        //   closing brace of the guard that skips the merge for a just-inserted id allowed in between).
         let after_registration = match code[registered + 1] {
             "}" => registered + 2,
             _ => registered + 1,
         };
         assert!(
             code[after_registration].starts_with("let epoch"),
-            "`register_for_spawn` 다음 실행 줄이 표식 바인딩이 아니다 — 그만큼 앞 화신의 표식이 명부에 \
-             서 있는 구간이 벌어지고, 그 구간에 도착한 지각 기록이 비운 칸에 앉아 이 화신의 첫 제출 \
-             commit 을 거절되게 만든다: {:?}",
+            "the executed line after `register_for_spawn` is not the marker binding — the interval where the previous incarnation's marker stands in the roster \
+             widens by that much, and a late record arriving in that interval sits in the cleared field and makes this incarnation's first submission \
+             commit refused: {:?}",
             code[after_registration]
         );
 
-        // ★Fresh 를 비우는 문이 읽기와 spec 조립 **사이**여야 한다★ — 그 문이 사라지면 Fresh 스폰이
-        //   저장된 손잡이를 그대로 실어 보내고, 그 값 하나만 보는 소비자(codex 터미널의 세션 id 회수 —
-        //   ADR-0218 결정 5)가 새 대화를 「이어받기 화신」으로 오판해 회수를 통째로 건너뛴다.
+        // ★The door clearing Fresh must be **between** the read and the spec assembly★ — without it a Fresh spawn carries the stored handle out and the consumer reading only that value (codex terminal session id
+        //   reclamation — ADR-0218 decision 5) misjudges a new conversation as 「resuming」 and skips reclamation.
         assert!(
             resume_read < handle_gated && handle_gated < spec_built,
-            "Fresh 를 비우는 문의 자리가 어긋났다(읽기 {resume_read} · 문 {handle_gated} · 조립 \n             {spec_built})"
+            "the place of the door clearing Fresh diverged (read {resume_read} · door {handle_gated} · assembly \n             {spec_built})"
         );
 
         let binding_end = code[resume_read..]
             .iter()
             .position(|l| *l == "};")
-            .expect("이어받기 바인딩의 끝(`};`)");
+            .expect("end of the resume binding (`};`)");
         let binding = &code[resume_read..resume_read + binding_end];
         assert!(
             !binding.iter().any(|l| l.contains("profile.backend_session_id")),
-            "이어받기 손잡이를 호출자 스냅샷에서 읽는다 — 스냅샷 뒤에 상대가 준 thread id 를 놓치고 \
-             낡은 스레드로 이어받는다: {binding:?}"
+            "it reads the resume handle from the caller snapshot — it misses the thread id the other side gave after the snapshot and \
+             resumes a stale thread: {binding:?}"
         );
         assert!(
             binding.iter().any(|l| l.contains(".get(profile.id)")),
-            "이어받기 손잡이를 명부에서 읽지 않는다: {binding:?}"
+            "it does not read the resume handle from the roster: {binding:?}"
         );
-        // ★부재를 삼키지 않는다★ — 프로필이 지워졌는데 `None` 으로 흘리면 이어받기가 말없이 새 대화가
-        //   된다(위 그 줄 주석이 사유의 정본).
+        // ★Absence is not swallowed★ — a deleted profile with `None` flowing on would silently make the resume a new conversation (see the comment on that line above).
         assert!(
             binding.iter().any(|l| l.contains("profile_vanished_mid_spawn")),
-            "프로필 부재를 끊지 않는다 — `and_then` 으로 삼키면 이어받기가 조용히 새 대화가 된다: {binding:?}"
+            "it does not cut on profile absence — swallowed with `and_then`, the resume silently becomes a new conversation: {binding:?}"
         );
     }
 
-    /// 운영 구획에서 `start` 와 `end` 사이 함수 본문을 잘라 **주석 줄을 빼고 공백을 전부 지운** 문자열로 준다
-    /// — rustfmt 가 줄을 어떻게 쪼개든 같은 호출이 같은 문자열로 잡힌다. 끝 쉼표(`,}`·`,)`)는 접는다.
+    /// Gives the function body between `start` and `end` in the production section **with comment lines removed and all whitespace erased** — rustfmt line splits give the same string; trailing commas
+    /// (`,}`·`,)`) are folded.
     fn squashed_production_body(start: &str, end: &str) -> String {
         let src = include_str!("manager.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let body = production
             .split(start)
             .nth(1)
-            .unwrap_or_else(|| panic!("`{start}` 가 운영 구획에 없다 — 이 항목의 전제가 낡았다"))
+            .unwrap_or_else(|| {
+                panic!("`{start}` is not in the production section — this entry's premise is stale")
+            })
             .split(end)
             .next()
-            .expect("다음 함수까지");
+            .expect("up to the next function");
         body.lines()
             .map(str::trim)
             .filter(|l| !l.starts_with("//"))
@@ -7293,11 +6591,8 @@ mod tests {
             .replace(",)", ")")
     }
 
-    /// ★대기 입력 명부가 spawn 경로에 실린다(ADR-0231)★ — 배선을 소스에서 못 박는다.
-    ///
-    /// 못 박는 것: 코어가 이 화신의 새 명부 + 매니저의 대기 목록 표로 꽂히고, 그 표에 이 화신이 sessions 맵
-    ///   insert 보다 **먼저** 등록된다. 둘 다 빠뜨려도 컴파일되고 오류도 없다 — 그 화신의 사용자 목록이 우편에
-    ///   안 보여, 목록이 찬 동안에도 우편이 사용자 글보다 먼저 stdin 에 닿는 것이 유일한 증상이다.
+    /// ★The queued input registry is carried on the spawn path (ADR-0231)★ — wiring pinned in the source: the core gets this incarnation's new registry + the manager's waiting-list table, registered **before** the sessions
+    /// map insert. Omitting either compiles; the symptom is the user list invisible to mail (mail reaches stdin before user text).
     #[test]
     fn the_queued_registry_and_pending_table_are_wired_through_the_spawn_path() {
         let session = squashed_production_body("fn spawn_session(", "pub fn restore_all(");
@@ -7305,124 +6600,113 @@ mod tests {
             session.contains(
                 ".with_queued(QueuedWiring{registry:Arc::new(QueuedInputs::new()),pending:self.inputs_pending.clone()})"
             ),
-            "spawn 코어에 이 화신의 새 명부 + 매니저의 대기 목록 표가 꽂히지 않는다"
+            "the spawn core is not plugged with this incarnation's new registry + the manager's waiting-list table"
         );
         assert!(
             session.contains(".with_mid_turn(mid_turn,delivery_ack)"),
-            "backend 가 신고한 턴 도중 입력 정책·받음 알림 값이 세션에 실리지 않는다 — 모든 입력이 오늘 경로로 간다"
+            "the mid-turn input policy and ack value the backend reported are not carried on the session — all input goes to today's path"
         );
         let register = session
             .find("self.inputs_pending.register(id,epoch);")
-            .expect("대기 목록 표에 이 화신을 등록하지 않는다 — 표가 그 화신의 쓰기를 전부 버린다");
+            .expect("this incarnation is not registered in the waiting-list table — the table drops all of that incarnation's writes");
         let insert = session
             .find("self.sessions.write()")
-            .expect("sessions 맵 insert");
+            .expect("sessions map insert");
         assert!(
             register < insert,
-            "등록이 sessions insert 뒤다 — 그 사이 첫 목록 사건의 「찼다」가 버려진다"
+            "the registration is after the sessions insert — the filled of the first list event in between is dropped"
         );
     }
 
-    /// ★첫 제출 래치가 spawn 경로에 실제로 실린다(ADR-0226)★ — 배선을 소스에서 못 박는다.
-    ///
-    /// 못 박는 것:
-    ///   ① `open_spawn` 의 기록 포트 자리가 래치의 `offer_sink` 이고, 명부에 곧바로 쓰는 옛 포트가 없다.
-    ///   ② 발급한 값의 `offer` 가 `open_spawn` 보다 **앞**이고, 그 값은 발급 축 판정
-    ///      (`session_id_to_hand_over`)을 거친 것이다 — 세션은 명부 등록 순간부터 입력을 받으므로 늦으면 첫
-    ///      제출이 id 를 모르는 채 나가 commit 이 턴보다 늦는다.
-    ///   ③ 같은 래치가 `spawn_session` 으로 가고, 그 함수는 머리에서 `SpawnIncarnation` 을 **이름째**
-    ///      해체해 `.with_incarnation(` 과 `.with_session_id_latch(` 를 **둘 다** 부른다. 운영 구획에 스폰 때
-    ///      발급해 영속하던 옛 동사가 없다.
-    /// ★③ 의 `.with_session_id_latch(` 단언을 빼지 말 것★ — 필수 인자는 래치를 함수까지만 끌고 오고 세션에
-    ///   싣는 것은 강제하지 못한다(`{ latch: _, .. }` 로 버려도 컴파일되고, 이름째 해체한 뒤 안 써도
-    ///   경고일 뿐이다). 그 빌더가 빠지면 제출이 한 번도 안 세어져 **모든 이어받기가 조용히 사라진다.**
-    ///   실 프로세스 짝 = `tests/activation.rs` 의
-    ///   `d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission`.
+    /// ★The first-submission latch is carried on the spawn path (ADR-0226)★ — wiring pinned in the source: ① `open_spawn`'s record port slot is the latch's `offer_sink` (no old port writing the roster) ② the `offer` of the
+    /// issued value is **before** `open_spawn` and went through `session_id_to_hand_over` (input is accepted from the roster registration) ③ the same latch goes to `spawn_session`, which destructures `SpawnIncarnation`
+    /// **by name** and calls **both** `.with_incarnation(` and `.with_session_id_latch(`; no old issue-and-persist verb. ★Do not remove ③'s `.with_session_id_latch(` assertion★ — the required argument cannot force
+    /// carrying the latch into the session (`{ latch: _, .. }` compiles); without it no submission is counted and **every resume silently disappears**. Real-process pair: `tests/activation.rs`
+    /// `d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission`.
     #[test]
     fn the_first_submission_latch_is_wired_through_the_spawn_path() {
         let spawning =
             squashed_production_body("fn spawn_agent_watching_link(", "pub fn activate_profile(");
         assert!(
             spawning.contains("Some(latch.offer_sink())"),
-            "`open_spawn` 의 기록 포트가 래치의 수령 포트가 아니다 — 받아 온 id 가 래치를 비켜 간다"
+            "the record port of `open_spawn` is not the latch's receiving port — the fetched id bypasses the latch"
         );
-        // ★턴을 통로가 지는 모드(codex JSON)의 제출은 이 포트로만 온다★ — 빠지면 그 모드의 어느 화신도 id 를
-        //   영속하지 못한다(세션은 그 모드에서 세지 않는다 — ADR-0226 개정).
+        // ★Submissions of the mode where the link owns the turn (codex JSON) come only through this port★ — missing, no incarnation of that mode can persist its id (the session does not count there — ADR-0226 amendment).
         // The latch's port reaches the transport inside the hash-recording wrapper, bound to this incarnation and the
         //   kit's hash (what the wrapper does = `first_turn_sink_recording_hash` tests).
         assert!(
             spawning.contains(
                 "Some(first_turn_sink_recording_hash(&latch,self.profiles.clone(),profile.id,epoch,kit.instructions_hash.clone()))"
             ),
-            "`open_spawn` 에 래치의 첫 턴 포트가 안 실린다 — 통로가 턴을 지는 모드의 id 가 영영 영속되지 않는다"
+            "the latch's first-turn port is not carried on `open_spawn` — the id of the mode where the link owns the turn is never persisted"
         );
         assert!(
             !spawning.contains("Some(session_id_sink("),
-            "명부에 곧바로 쓰는 포트가 통로에 다시 건네진다 — 0턴 화신의 id 가 영속된다"
+            "the port writing straight to the roster is handed to the link again — the id of a 0-turn incarnation is persisted"
         );
         assert!(
             spawning.contains(
                 "letlatch=SessionIdLatch::new(profile.id,epoch,session_id_sink(self.profiles.clone(),profile.id,epoch,stored_handle))"
             ),
-            "래치의 commit 포트가 이 화신의 표식·시작 때 본 값으로 묶이지 않았다"
+            "the latch's commit port is not bound to this incarnation's marker and start-time value"
         );
-        // 래치에 넣는 값은 발급 축 판정을 거친 것이어야 한다 — 그 판정 자체는
-        //   `only_a_backend_that_assigns_ids_gets_one_handed_over` 가 잰다.
+        // The value put into the latch must have gone through the issuing-axis decision — that decision itself is
+        //   measured by `only_a_backend_that_assigns_ids_gets_one_handed_over`.
         assert!(
             spawning
                 .contains("letsid=session_id_to_hand_over(&profile.command,mode,stored_handle);"),
-            "래치에 넣을 sid 가 발급 축 판정(`session_id_to_hand_over`)을 거치지 않는다"
+            "the sid to put into the latch does not go through the issuing-axis decision (`session_id_to_hand_over`)"
         );
         let offer = spawning.find("ifletSome(s)=sid{latch.offer(").expect(
-            "발급한 값을 래치에 넣는 줄이 없다 — 발급하는 backend 의 id 가 영영 commit 되지 않는다",
+            "there is no line putting the issued value into the latch — the id of an issuing backend is never committed",
         );
         let open = spawning
             .find("backend::open_spawn(")
-            .expect("`open_spawn` 호출");
+            .expect("`open_spawn` call");
         assert!(
             offer < open,
-            "발급한 값의 offer 가 `open_spawn` 보다 뒤다 — 첫 제출이 id 를 모르는 채 나갈 수 있다"
+            "the offer of the issued value is after `open_spawn` — the first submission may go out without knowing the id"
         );
         assert!(
             spawning.contains(
                 "SpawnIncarnation{continues_conversation:resume_session_id.is_some(),latch,launch_lease:kit_guard.lease()}"
             ),
-            "spawn 이 만든 그 래치 · 준비한 출처의 재료 열쇠가 `SpawnIncarnation` 에 실리지 않는다"
+            "the latch spawn made · the materials lease of the source that prepared are not carried in `SpawnIncarnation`"
         );
         assert!(
             spawning.contains(
                 "self.spawn_session(profile.id,spec,parts,epoch,seed_events,incarnation)"
             ),
-            "`SpawnIncarnation` 이 `spawn_session` 으로 가지 않는다"
+            "`SpawnIncarnation` does not go to `spawn_session`"
         );
 
         let session = squashed_production_body("fn spawn_session(", "pub fn restore_all(");
         let head = session
             .find("letSpawnIncarnation{continues_conversation,latch,launch_lease}=incarnation;")
-            .expect("`spawn_session` 이 `SpawnIncarnation` 을 이름째 해체하지 않는다");
+            .expect("`spawn_session` does not destructure `SpawnIncarnation` by name");
         let parts = session
             .find("letbackend::SpawnParts{")
-            .expect("`SpawnParts` 해체");
+            .expect("`SpawnParts` destructuring");
         assert!(
             head < parts,
-            "`SpawnIncarnation` 해체가 함수 머리에 있지 않다"
+            "the `SpawnIncarnation` destructuring is not at the function head"
         );
         assert!(
             session.contains(".with_incarnation(continues_conversation)"),
-            "세션에 화신 사실이 실리지 않는다"
+            "the incarnation facts are not carried on the session"
         );
         assert!(
             session.contains(".with_session_id_latch(latch)"),
-            "세션에 래치가 실리지 않는다 — 제출이 한 번도 안 세어져 모든 이어받기가 조용히 사라진다"
+            "the latch is not carried on the session — no submission is ever counted, and every resume silently disappears"
         );
-        // TRD S25 §5-2 4 (c2) ②: 빠지면 뜬 화신의 재료를 reaper 가 못 거둔다(오류 없음).
+        // TRD S25 §5-2 4 (c2) ②: without it the reaper cannot reclaim the launched incarnation's materials (no error).
         assert!(
             session.contains(".with_launch_lease(launch_lease)"),
-            "세션에 재료 회수 열쇠가 실리지 않는다 — 뜬 화신의 휘발 폴더를 아무도 안 거둔다"
+            "the session carries no materials reclaim lease — nobody reclaims the launched incarnation's volatile folder"
         );
 
         let src = include_str!("manager.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let code: String = production
             .lines()
             .map(str::trim)
@@ -7431,13 +6715,13 @@ mod tests {
         for verb in [".ensure_session_id(", ".new_session_id("] {
             assert!(
                 !code.contains(verb),
-                "스폰 때 발급해 영속하는 옛 동사 `{verb}` 가 운영 구획에 돌아왔다"
+                "the old verb `{verb}` issuing and persisting at spawn came back to the production section"
             );
         }
     }
 
-    /// ★실 프로세스로 보는 이유★: 표식 발급은 `spawn_agent` 안에 있고, 그 자리를 타는지는 실 spawn 만이
-    /// 말한다.
+    /// ★Why it is looked at with a real process★: marker issuing is inside `spawn_agent`, and only a real spawn says whether it
+    /// passes that place.
     #[cfg(windows)]
     #[test]
     fn a_fresh_respawn_of_a_reaped_agent_never_reuses_the_prior_epoch() {
@@ -7449,11 +6733,11 @@ mod tests {
         );
         let first = manager
             .spawn_agent(&profile, SpawnMode::Fresh)
-            .expect("첫 spawn")
+            .expect("first spawn")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+            .expect("this call actually launches (not a duplicate request)");
         manager.kill_agent(first.id).ok();
-        // reaper 가 맵에서 수거할 때까지 — 그 뒤라야 두 번째 spawn 이 이중 spawn 가드를 통과한다.
+        // Until the reaper collects it from the map — only after that does the second spawn pass the double-spawn guard.
         let reaped = (0..200).any(|_| {
             if manager.list_agents().is_empty() {
                 return true;
@@ -7461,22 +6745,21 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
             false
         });
-        assert!(reaped, "kill 후 세션이 수거돼야(전제)");
+        assert!(reaped, "the session must be collected after kill (premise)");
 
         let second = manager
             .spawn_agent(&profile, SpawnMode::Fresh)
-            .expect("Fresh 재spawn")
+            .expect("Fresh respawn")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+            .expect("this call actually launches (not a duplicate request)");
         assert_ne!(
             second.epoch, first.epoch,
-            "Fresh 재spawn 이 죽은 화신의 표식을 재사용하면 안 된다"
+            "a Fresh respawn must not reuse the dead incarnation's marker"
         );
         manager.kill_agent(second.id).ok();
     }
 
-    /// 실 spawn 경로가 정말 `ensure_registered` 를 탄다는 것(= 위 단위 테스트가 죽은 코드를 보고 있지
-    /// 않다는 것)을 실 프로세스로 확인한다. cmd.exe 두 개를 잠깐 띄웠다 죽인다.
+    /// Confirms with a real process that the real spawn path really takes `ensure_registered` (the unit test above is not looking at dead code). Two `cmd.exe` are launched briefly and killed.
     #[cfg(windows)]
     #[test]
     fn spawning_a_brand_new_agent_with_a_taken_name_gets_a_suffix() {
@@ -7488,12 +6771,12 @@ mod tests {
         );
         let first = manager
             .spawn_agent(&existing, SpawnMode::Fresh)
-            .expect("기존 에이전트 spawn")
+            .expect("spawn of an existing agent")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+            .expect("this call actually launches (not a duplicate request)");
         assert_eq!(
             first.name, "bob",
-            "이미 명부에 있는 에이전트를 띄우는 건 개명 대상이 아니다"
+            "launching an agent already in the roster is not a rename target"
         );
 
         let adhoc = agent_profile(&std::env::temp_dir().to_string_lossy(), Some("bob"));
@@ -7501,14 +6784,17 @@ mod tests {
             .spawn_agent(&adhoc, SpawnMode::Fresh)
             .expect("ad-hoc spawn")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
-        assert_eq!(second.name, "bob(1)", "신규 등록 spawn 은 접미사를 받는다");
+            .expect("this call actually launches (not a duplicate request)");
+        assert_eq!(
+            second.name, "bob(1)",
+            "a new-registration spawn gets a suffix"
+        );
 
         manager.kill_agent(first.id).ok();
         manager.kill_agent(second.id).ok();
     }
 
-    // ── 저장 거절 · 실패 — 레지스트리 입구 둘(ADR-0291 R17 · D2 · E1 · E3 · E4 · D8) ─────────────
+    // ── Save refusal · failure — the two registry entries (ADR-0291 R17 · D2 · E1 · E3 · E4 · D8) ─────────────
 
     use crate::profile::scripted_store::{Outcome, ScriptedStore, FAILURES};
 
@@ -7526,7 +6812,7 @@ mod tests {
         (manager, store)
     }
 
-    // E4 — 부르는 쪽 있는 판 다섯: 저장 `Err` → `PtyError::Store` · 메모리 명부 그대로 · dirty 안 섬.
+    // E4 — the five versions with a caller: save `Err` → `PtyError::Store` · in-memory roster unchanged · dirty not set.
 
     #[test]
     fn try_create_agent_registers_nothing_when_the_store_does_not_save() {
@@ -7537,7 +6823,7 @@ mod tests {
 
             let err = manager
                 .try_create_agent(profile.clone())
-                .expect_err("저장 실패는 오류다");
+                .expect_err("a save failure is an error");
 
             assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
             assert!(manager.agent_snapshot(profile.id).is_none(), "{failure:?}");
@@ -7555,7 +6841,7 @@ mod tests {
 
             let err = manager
                 .try_delete_agent(agent.id)
-                .expect_err("저장 실패는 오류다");
+                .expect_err("a save failure is an error");
 
             assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
             assert!(manager.agent_snapshot(agent.id).is_some(), "{failure:?}");
@@ -7573,7 +6859,7 @@ mod tests {
             let err = manager
                 .try_rename_agent(agent.id, Some("after".into()))
                 .expect_err(
-                    "저장 실패는 오류다 — `Renamed` 로 답하면 호출자가 안 된 개명을 됐다고 본다",
+                    "a save failure is an error — answering `Renamed` would make the caller see a rename that did not happen as done",
                 );
 
             assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
@@ -7592,7 +6878,7 @@ mod tests {
 
             let err = manager
                 .try_reparent_agent(helper.id, Some(lead.id))
-                .expect_err("저장 실패는 오류다");
+                .expect_err("a save failure is an error");
 
             assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
             assert_eq!(
@@ -7609,12 +6895,12 @@ mod tests {
         for failure in FAILURES {
             let (manager, store) = scripted_manager();
             let agent = create(&manager, "C:/store/auto", Some("auto"));
-            assert!(!agent.auto_restore, "전제");
+            assert!(!agent.auto_restore, "premise");
             store.set(failure);
 
             let err = manager
                 .try_set_agent_auto_restore(agent.id, true)
-                .expect_err("저장 실패는 오류다");
+                .expect_err("a save failure is an error");
 
             assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
             assert_eq!(
@@ -7631,10 +6917,10 @@ mod tests {
         let (manager, store) = scripted_manager();
         let lead = manager
             .try_create_agent(agent_profile("C:/store/ok-lead", Some("lead")))
-            .expect("저장되면 등록");
+            .expect("registers when saved");
         let helper = manager
             .try_create_agent(agent_profile("C:/store/ok-helper", Some("helper")))
-            .expect("저장되면 등록");
+            .expect("registers when saved");
 
         assert!(matches!(
             manager.try_rename_agent(helper.id, Some("renamed".into())),
@@ -7642,24 +6928,23 @@ mod tests {
         ));
         assert!(manager
             .try_reparent_agent(helper.id, Some(lead.id))
-            .expect("저장된다"));
+            .expect("saved"));
         assert!(manager
             .try_set_agent_auto_restore(helper.id, true)
-            .expect("저장된다"));
-        let saved = store.disk(helper.id).expect("디스크에 있다");
+            .expect("saved"));
+        let saved = store.disk(helper.id).expect("on disk");
         assert_eq!(saved.display_name.as_deref(), Some("renamed"));
         assert_eq!(saved.parent_id, Some(lead.id));
         assert!(saved.auto_restore);
 
-        manager.try_delete_agent(lead.id).expect("저장된다");
+        manager.try_delete_agent(lead.id).expect("saved");
         assert!(store.disk(lead.id).is_none());
         assert!(manager.agent_snapshot(lead.id).is_none());
     }
 
-    // D2 · E1 — 부르는 쪽 없는 내부 변경(첫 제출 래치).
+    // D2 · E1 — internal changes without a caller (first-submission latch).
 
-    /// ★래치의 기록은 저장의 어떤 `Err` 에도 메모리에 서고 dirty 를 세운다★ — 버리면 이 화신의 세션 id 가
-    ///   사라져 다음 활성화가 대화를 잃는다(ADR-0226).
+    /// ★The latch's record stands in memory and sets dirty on any save `Err`★ — dropping it would lose this incarnation's session id and the next activation the conversation (ADR-0226).
     #[test]
     fn the_latch_commit_port_keeps_the_id_in_memory_and_marks_dirty_on_any_save_error() {
         for failure in FAILURES {
@@ -7674,7 +6959,7 @@ mod tests {
             );
             let id = p.id;
             profiles.upsert(p);
-            let epoch = profiles.epoch_for_spawn(id).expect("갓 넣은 프로필");
+            let epoch = profiles.epoch_for_spawn(id).expect("a profile just put in");
             store.set(failure);
             let sid = Uuid::new_v4();
 
@@ -7689,13 +6974,12 @@ mod tests {
             assert_eq!(
                 store.disk(id).and_then(|p| p.backend_session_id),
                 None,
-                "{failure:?}: 디스크에는 아직 없다"
+                "{failure:?}: not on disk yet"
             );
         }
     }
 
-    /// ★거절 동안 디스크 바이트는 그대로다★ — 실 파일 저장소로 본다: 실행 중에 프로필 파일이 새 판이 되면
-    ///   래치의 기록은 메모리에만 서고(dirty) 그 파일은 한 바이트도 안 바뀐다.
+    /// ★During a refusal the disk bytes stay the same★ — with a real file store: if the profile file becomes a newer edition while running, the latch's record stands only in memory (dirty) and the file does not change by a byte.
     #[test]
     fn a_refused_latch_commit_leaves_the_profile_file_bytes_alone() {
         let dir =
@@ -7712,10 +6996,10 @@ mod tests {
         );
         let id = p.id;
         profiles.upsert(p);
-        let epoch = profiles.epoch_for_spawn(id).expect("갓 넣은 프로필");
+        let epoch = profiles.epoch_for_spawn(id).expect("a profile just put in");
         let newer = r#"{"schema_version":2,"profiles":[]}"#;
         std::fs::write(dir.join(crate::persistence::PROFILES_FILE), newer)
-            .expect("새 판 파일 쓰기");
+            .expect("write a newer-edition file");
         let sid = Uuid::new_v4();
 
         session_id_sink(profiles.clone(), id, epoch, None)(&sid.to_string());
@@ -7726,21 +7010,18 @@ mod tests {
         );
         assert!(profiles.is_dirty());
         assert_eq!(
-            std::fs::read_to_string(dir.join(crate::persistence::PROFILES_FILE)).expect("읽기"),
+            std::fs::read_to_string(dir.join(crate::persistence::PROFILES_FILE)).expect("read"),
             newer,
-            "거절 동안 dirty 명부는 새 판 파일에 닿지 않는다"
+            "during the refusal the dirty registry does not touch the newer-edition file"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // E3 · D8 — 띄우기 경로의 입구 값.
+    // E3 · D8 — the entry value of the launch path.
 
-    /// ★같은 동사, 다른 입구 — 부팅 복원은 띄우고 수동 깨우기는 거절한다(E3)★.
-    ///
-    /// 같은 저장 실패 아래에서 부팅 복원은 띄우기 전 명부 변경을 메모리에 적용 + dirty 하고 띄운다(띄운 뒤
-    ///   `auto_restore` 올리기 · reaper 의 내리기도 내부 변경이라 메모리에 선다). 수동 활성화는 같은 변경의
-    ///   저장이 `Err` 라 띄우지 않고 `PtyError::Store` 로 돌아오며, 메모리 명부도 밀린 dirty 도 그대로다.
-    /// ★실 프로세스로 보는 이유★: `Started` 와 띄운 뒤 올리기는 실 spawn 만이 지난다.
+    /// ★Same verb, different entry — boot restore launches, manual wake-up refuses (E3)★: under the same save failure boot restore applies the pre-launch change to memory + dirty and launches (the post-launch `auto_restore`
+    /// raise and the reaper's lowering are internal, in memory); manual activation's save `Err` does not launch and returns `PtyError::Store` with roster and dirty unchanged. ★Real process★: `Started` and the post-launch raise pass
+    /// only a real spawn.
     #[cfg(windows)]
     #[test]
     fn boot_restore_starts_through_a_failing_store_while_a_manual_wake_refuses() {
@@ -7756,7 +7037,7 @@ mod tests {
             );
             store.set(failure);
 
-            // 스냅샷이 명부와 다른 칸 하나를 싣는다 — 등록(①)이 적용됐는지를 그 칸으로 본다.
+            // The snapshot carries one field different from the roster — that field shows whether the registration (①) was applied.
             let mut restored = profile.clone();
             restored.name = "restored-snapshot".into();
             let outcome = manager.restore_one(&restored);
@@ -7765,23 +7046,23 @@ mod tests {
                 matches!(outcome, RestoreOutcome::Started),
                 "{failure:?}: {outcome:?}"
             );
-            let mem = manager.agent_snapshot(profile.id).expect("명부에 있다");
+            let mem = manager.agent_snapshot(profile.id).expect("in the roster");
             assert_eq!(
                 mem.name, "restored-snapshot",
-                "{failure:?}: 등록이 메모리에 섰다"
+                "{failure:?}: the registration stood in memory"
             );
             assert!(
                 mem.auto_restore,
-                "{failure:?}: 띄운 뒤 올리기가 메모리에 섰다"
+                "{failure:?}: the post-launch raise stood in memory"
             );
             assert!(manager.profiles.is_dirty(), "{failure:?}");
             assert_eq!(
                 store.disk(profile.id).map(|p| p.name),
                 Some(profile.name.clone()),
-                "{failure:?}: 디스크는 그대로다"
+                "{failure:?}: the disk is unchanged"
             );
 
-            manager.kill_agent(profile.id).expect("산 세션");
+            manager.kill_agent(profile.id).expect("a live session");
             let lowered = (0..250).any(|_| {
                 let reaped = manager.list_agents().is_empty()
                     && manager
@@ -7794,7 +7075,7 @@ mod tests {
             });
             assert!(
                 lowered,
-                "{failure:?}: reaper 의 내리기가 메모리에 서야 한다"
+                "{failure:?}: the reaper's lowering must stand in memory"
             );
             assert!(manager.profiles.is_dirty(), "{failure:?}");
 
@@ -7802,37 +7083,31 @@ mod tests {
             woken.name = "woken-snapshot".into();
             let err = manager
                 .activate_profile(&woken, SpawnMode::Fresh)
-                .expect_err("부르는 쪽 입구는 저장 실패로 멈춘다");
+                .expect_err("the caller entry stops on a save failure");
 
             assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
             assert_eq!(
                 manager.agent_snapshot(profile.id).map(|p| p.name),
                 Some("restored-snapshot".to_string()),
-                "{failure:?}: 메모리 명부 그대로"
+                "{failure:?}: in-memory roster unchanged"
             );
             assert!(
                 manager.list_agents().is_empty(),
-                "{failure:?}: 띄우지 않았다"
+                "{failure:?}: did not launch"
             );
             assert!(
                 manager.profiles.is_dirty(),
-                "{failure:?}: 거절된 요청이 밀린 변경을 지우지 않는다"
+                "{failure:?}: the refused request does not clear the pending change"
             );
         }
     }
 
-    /// claude 백엔드 그대로라 세션 id 비우기 · 이어받기 갈래가 도는 프로필 — 단 프로세스 열기가 실패한다: 작업
-    /// 폴더와 자식 PATH 가 같은 빈 폴더다. 회귀해서 저장 `Err` 를 지나쳐도 실 claude 가 뜨지 않고, 그 결말은 저장
-    /// 오류가 아니라서 첫 단언이 잡는다. 부른 쪽이 끝에 그 폴더(`cwd`)를 지운다.
-    /// ★프로그램 이름이 아니라 PATH 로 막는다★ — backend 가 `cmd.exe /c claude` 로 고정한다. 자식 PATH 가 빈
-    ///   폴더면 CreateProcessW 가 `cmd.exe` 부터 못 찾아 실패한다(실측 — os error 2, 뜬 프로세스 0). 터미널(PTY)
-    ///   통로만 그렇다 — 출력 형식을 JSON 으로 바꾸면 std `Command` 가 System32 를 뒤져 `cmd.exe` 는 뜬다(claude 는
-    ///   여전히 못 찾는다).
-    /// ★폴더는 실재해야 한다★ — 없는 작업 폴더는 portable-pty 가 홈 폴더로 바꿔 띄운다(실측: 없는 폴더만으로는 실
-    ///   claude 가 떴다).
+    /// A profile that stays claude so session id clearing and resume branches run, but process opening fails: working folder and child PATH are the same empty folder (a regression past the save `Err` would not launch real claude
+    /// and the first assertion catches it); the caller deletes `cwd`. ★Blocked by PATH, not program name★: the backend pins `cmd.exe /c claude`, and an empty-folder PATH makes CreateProcessW fail on `cmd.exe` (os error 2) — only
+    /// the PTY link (JSON output makes std `Command` search System32). ★The folder must exist★ — portable-pty replaces a nonexistent one with the home folder (real claude launched).
     fn claude_profile_that_cannot_launch() -> AgentProfile {
         let dir = std::env::temp_dir().join(format!("engram-no-claude-{}", Uuid::new_v4()));
-        std::fs::create_dir(&dir).expect("빈 폴더 만들기");
+        std::fs::create_dir(&dir).expect("create an empty folder");
         let path = dir.to_string_lossy().to_string();
         AgentProfile::new(
             "raw".into(),
@@ -7846,9 +7121,8 @@ mod tests {
         )
     }
 
-    /// ★이어받기 활성화도 저장 `Err` 를 원형으로 돌려준다(부르는 쪽 입구)★ — 복원 보고 문구로 접혀
-    ///   `PtyError::SpawnFailed` 가 되면 버스가 저장 거절을 다른 실패와 못 가른다. 손잡이가 있는 이어받기와 손잡이
-    ///   없는 이어받기 요청(새 대화 갈래) 둘 다 본다. 띄우기는 등록(①)에서 멈추므로 프로세스를 띄우지 않는다.
+    /// ★A resume activation also returns the save `Err` in its original form (caller entry)★ — folded into the restore report as `PtyError::SpawnFailed`, the bus could not tell a save refusal from other failures. Both a
+    /// resume with a handle and one without (new-conversation branch); the launch stops at registration (①), no process.
     #[test]
     fn a_resume_activation_returns_the_store_error_unflattened() {
         for failure in FAILURES {
@@ -7861,30 +7135,30 @@ mod tests {
 
                 let err = manager
                     .activate_profile(&profile, SpawnMode::Resume)
-                    .expect_err("부르는 쪽 입구는 저장 실패로 멈춘다");
+                    .expect_err("the caller entry stops on a save failure");
 
                 assert!(
                     matches!(err, PtyError::Store(_)),
-                    "{failure:?} · 손잡이 {stored:?}: {err}"
+                    "{failure:?} · handle {stored:?}: {err}"
                 );
                 assert!(
                     manager.list_agents().is_empty(),
-                    "{failure:?} · 손잡이 {stored:?}: 띄우지 않았다"
+                    "{failure:?} · handle {stored:?}: did not launch"
                 );
                 assert_eq!(
                     manager
                         .agent_snapshot(profile.id)
                         .and_then(|p| p.backend_session_id),
                     stored,
-                    "{failure:?}: 메모리 명부 그대로"
+                    "{failure:?}: in-memory roster unchanged"
                 );
                 assert_eq!(
                     manager
                         .agent_snapshot(profile.id)
                         .and_then(|p| p.last_failure),
                     Some(AgentFailureKind::Other),
-                    "{failure:?} · 손잡이 {stored:?}: 원형으로 돌려주기 전에 실패를 기록한다(E2) — 띄우기 \
-                     실패가 아니라 「그 밖」으로"
+                    "{failure:?} · handle {stored:?}: records the failure before returning the original (E2) — as other, not as a launch \
+                     failure"
                 );
                 assert!(!manager.profiles.is_dirty(), "{failure:?}");
                 let _ = std::fs::remove_dir(&profile.cwd);
@@ -7892,8 +7166,7 @@ mod tests {
         }
     }
 
-    /// ★새 대화 활성화의 저장 `Err` 도 「그 밖」으로 적는다★ — 프로세스를 열려고 한 적이 없으니 `SpawnFailed`
-    ///   (실행파일 · 권한)가 아니다. 띄우기는 등록(①)에서 멈추므로 프로세스를 띄우지 않는다.
+    /// ★The save `Err` of a new-conversation activation is also recorded as 「other」★ — no process open was tried, so not `SpawnFailed` (executable · permission). The launch stops at registration (①).
     // ADR-0291 R17
     #[test]
     fn a_fresh_activation_the_store_refuses_records_other_not_spawn_failed() {
@@ -7905,7 +7178,7 @@ mod tests {
 
             let err = manager
                 .activate_profile(&profile, SpawnMode::Fresh)
-                .expect_err("부르는 쪽 입구는 저장 실패로 멈춘다");
+                .expect_err("the caller entry stops on a save failure");
 
             assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
             assert_eq!(
@@ -7917,15 +7190,15 @@ mod tests {
             );
             assert!(
                 manager.list_agents().is_empty(),
-                "{failure:?}: 띄우지 않았다"
+                "{failure:?}: did not launch"
             );
             let _ = std::fs::remove_dir(&profile.cwd);
         }
     }
 
-    /// ★부르는 쪽 입구의 부분 성공은 되돌리지 않는다(D8)★ — 등록(①)이 저장된 뒤 세션 id 비우기(③)의 저장이
-    ///   `Err` 면 등록은 남고 칸에는 옛 손잡이가 남으며 띄우지 않는다. 띄우기는 ③ 에서 멈추므로 프로세스를
-    ///   띄우지 않는다. 즉석 생성의 등록은 넣기 하나다 — 방금 넣은 id 는 병합하지 않는다.
+    /// ★Partial success of the caller entry is not reverted (D8)★ — if ③ (session id clearing) save is `Err` after ① (registration) saved, the registration stays, the field keeps the old handle, and it does not launch
+    /// (stops at ③, no process).
+    /// An on-the-spot creation's registration is a single insert — a just-inserted id is not merged.
     #[test]
     fn a_caller_spawn_whose_release_save_fails_keeps_the_registration_and_the_old_handle() {
         for failure in FAILURES {
@@ -7938,36 +7211,36 @@ mod tests {
 
             let err = manager
                 .spawn_agent(&profile, SpawnMode::Fresh)
-                .expect_err("세션 id 비우기의 저장 실패로 멈춘다");
+                .expect_err("stops on the save failure of the session id clearing");
 
             assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
             let mem = manager
                 .agent_snapshot(profile.id)
-                .expect("등록은 되돌리지 않는다");
+                .expect("the registration is not reverted");
             assert_eq!(
                 mem.backend_session_id,
                 Some(old),
-                "{failure:?}: 비우기가 적용되지 않아 옛 손잡이가 남는다"
+                "{failure:?}: the clearing was not applied, so the old handle remains"
             );
             assert!(mem.old_session_ids.is_empty(), "{failure:?}");
             assert_ne!(
                 mem.epoch, profile.epoch,
-                "{failure:?}: 새 화신 표식은 메모리에 남는다"
+                "{failure:?}: the new incarnation marker remains in memory"
             );
             assert!(
                 manager.list_agents().is_empty(),
-                "{failure:?}: 띄우지 않았다"
+                "{failure:?}: did not launch"
             );
             assert!(!manager.profiles.is_dirty(), "{failure:?}");
             assert_eq!(
                 store.attempts(),
                 2,
-                "{failure:?}: 등록 · 비우기의 저장 둘뿐이다"
+                "{failure:?}: only the two saves of registration · clearing"
             );
             assert_eq!(
                 store.disk(profile.id).and_then(|p| p.backend_session_id),
                 Some(old),
-                "{failure:?}: 등록은 저장됐다"
+                "{failure:?}: the registration was saved"
             );
             let _ = std::fs::remove_dir(&profile.cwd);
         }

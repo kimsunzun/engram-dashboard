@@ -400,7 +400,7 @@ fn admitted_on_disk(root: &Path, path: &Path) -> bool {
         Err(e) => {
             tracing::warn!(
                 ?path,
-                "라이브러리 훑기: 라이브러리 경로가 될 수 없는 이름이라 뺐다: {e}"
+                "library scan: left out a name that cannot be a library path: {e}"
             );
             false
         }

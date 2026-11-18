@@ -61,8 +61,8 @@ function veil(): HTMLElement | null {
   return document.querySelector('[data-slot-dead="1"]')
 }
 
-describe('DomSlot — 에이전트 부재 표시(ADR-0148 결정 1~3)', () => {
-  it('명부 수신 후 해석 안 되는 에이전트면 부재 막을 띄운다', async () => {
+describe('DomSlot — agent absence display (ADR-0148 decisions 1~3)', () => {
+  it('if an agent cannot be resolved after the roster is received it raises the absence veil', async () => {
     agentStoreState.agentsLoaded = true
     render(<DomSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -70,7 +70,7 @@ describe('DomSlot — 에이전트 부재 표시(ADR-0148 결정 1~3)', () => {
     expect(veil()).not.toBeNull()
   })
 
-  it('명부를 아직 못 받은 구간은 부재로 보지 않는다', async () => {
+  it('the span where the roster is not yet received is not seen as absent', async () => {
     agentStoreState.agentsLoaded = false
     render(<DomSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -78,9 +78,9 @@ describe('DomSlot — 에이전트 부재 표시(ADR-0148 결정 1~3)', () => {
     expect(veil()).toBeNull()
   })
 
-  // ★Do not leave the reason as text (user decision 2026-08-20)★: the old badge wrote `Failed: <메시지>` as is.
+  // ★Do not leave the reason as text (user decision 2026-08-20)★: the old badge wrote `Failed: <message>` as is.
   //   Now the three slots speak with a single symbol only — this assertion is the regression net for that decision.
-  it('terminal 상태로 발견돼도 사유를 글로 적지 않는다(심볼만)', async () => {
+  it('even when found in a terminal state it does not write the reason as text (symbol only)', async () => {
     agentStoreState.agentsLoaded = true
     agentStoreState.agents = [
       { id: AGENT, cwd: 'C:/x', status: { type: 'Failed', message: 'boom' } },
@@ -97,7 +97,7 @@ describe('DomSlot — 에이전트 부재 표시(ADR-0148 결정 1~3)', () => {
 
 // ★Scroll-follow wiring (ADR-0242 · TRD §2-1)★: the decision and the hook are measured by the scrollFollow/ tests. Here we only check that this slot
 //   plugged the hook into the observation viewport and that clearing re-attaches it. There is no layout, so only the Radix Viewport is given geometry.
-describe('DomSlot — 스크롤 따라가기(ADR-0242)', () => {
+describe('DomSlot — scroll follow (ADR-0242)', () => {
   const tops = new WeakMap<Element, number>()
   const isViewport = (el: Element): boolean => el.hasAttribute('data-radix-scroll-area-viewport')
 
@@ -118,7 +118,7 @@ describe('DomSlot — 스크롤 따라가기(ADR-0242)', () => {
 
   const viewport = (): HTMLElement => document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
 
-  it('관측 뷰포트에 붙어 시작하고 바닥으로 쓴다 · 손잡이 맵에 그 슬롯으로 오른다', async () => {
+  it('starts attached to the observation viewport and writes to the bottom · it goes into the handle map with that slot', async () => {
     render(<DomSlot viewId="v1" agentId={AGENT} />)
     await flush()
     expect(viewport().getAttribute('data-scroll-follow')).toBe('pinned')
@@ -126,7 +126,7 @@ describe('DomSlot — 스크롤 따라가기(ADR-0242)', () => {
     expect(getFollow('v1')).toBeDefined()
   })
 
-  it('비우기(onReset)는 다시 붙인다', async () => {
+  it('clear (onReset) attaches again', async () => {
     render(<DomSlot viewId="v1" agentId={AGENT} />)
     await flush()
     fireEvent.wheel(viewport(), { deltaY: -40 })

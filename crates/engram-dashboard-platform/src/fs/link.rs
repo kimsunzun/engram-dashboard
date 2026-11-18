@@ -1,19 +1,19 @@
-//! 디렉터리 링크 — 만들기 · 걷기. Windows = 디렉터리 정션(관리자 권한 · 개발자 모드 불요) · 그 밖 = 심볼릭 링크.
+//! Directory links — making · removing. Windows = directory junction (no admin rights or developer mode needed) · elsewhere = symbolic link.
 
 // ADR-0336
 
 use std::io;
 use std::path::Path;
 
-/// `link` 자리에 폴더 `target` 을 가리키는 디렉터리 링크를 만든다 — Windows = 디렉터리 정션 · 그 밖 = 심볼릭 링크.
+/// Makes a directory link at `link` pointing to the folder `target` — Windows = directory junction · elsewhere = symbolic link.
 ///
-/// - `target` 은 절대 경로이고 NUL 이 없어야 한다 — 아니면 `InvalidInput` 이고 아무것도 만들지 않는다. 있지 않아도
-///   된다(끊긴 링크가 된다).
-/// - `link` 자리에 무엇이든 이미 있으면 `AlreadyExists` 이고 그것은 그대로다.
-/// - Windows 의 정션은 재해석 지점을 받는 볼륨(NTFS 등)에서만 선다.
-/// - Windows 에서 그 밖의 이유로 실패하면 `link` 자리에 빈 폴더가 남을 수 있다 — 지우지 않는다(남이 만든 폴더를
-///   지울 수 있어서). 쓰는 곳은 휘발 폴더 안이라 그 폴더째 치워진다.
-/// - Windows 에서 링크 자리 폴더를 열 권한이 없으면 접근 거부(원시 5 — [`super::is_access_denied`])다.
+/// - `target` must be absolute and contain no NUL — otherwise `InvalidInput` and nothing is made. It need not exist (the link is
+///   then broken).
+/// - Anything already at `link` = `AlreadyExists`, and it is left as is.
+/// - A Windows junction stands only on volumes that take reparse points (NTFS etc.).
+/// - Any other failure on Windows may leave an empty folder at `link` — it is not deleted (it could be someone else's folder). The
+///   users work inside a volatile folder, which is cleared as a whole.
+/// - On Windows, no permission to open the folder at the link = access denied (raw 5 — [`super::is_access_denied`]).
 #[cfg(windows)]
 pub fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
     check_target(target)?;
@@ -26,22 +26,23 @@ pub fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
-/// [`link_dir`] 로 만든 링크를 걷는다 — 링크만 지우고 대상 폴더와 그 안은 그대로다. 대상이 사라진 끊긴 링크도
-/// 걷는다.
+/// Removes a link made by [`link_dir`] — only the link goes; the target folder and its contents stay. A broken link (target gone) is
+/// removed too.
 ///
-/// - `link` 가 링크가 아니면 `InvalidInput` 이고 아무것도 지우지 않는다. Windows 는 정션만 링크로 친다 — 진짜
-///   폴더 · 파일 · 디렉터리 심볼릭 링크 · 클라우드 자리표시 같은 다른 재해석 지점은 거절한다. 남이 쓰고 있거나 지울
-///   수 없는 진짜 폴더도 그렇다(그 자리의 속성조차 못 읽으면 그 열기 오류다). 그 밖은 심볼릭 링크만 친다.
-/// - 없으면 `NotFound`.
-/// - Windows 는 열어서 정션임을 확인한 바로 그 객체를 같은 핸들로 지운다 — 확인 뒤 그 이름에 다른 객체가 들어서도
-///   그것을 지우지 않는다(객체 신원). 쥔 동안 공유는 읽기만 주어 남이 이름 바꾸기나 쓰기 · 삭제 권한 열기를 못
-///   하지만, 속성 쓰기(`FILE_WRITE_ATTRIBUTES`)만 청한 핸들은 공유 검사를 건너뛰고 MS-FSA 로는 그 권한으로 재해석
-///   지점을 벗길 수 있다(`FSCTL_DELETE_REPARSE_POINT`). 확인과 지우기 사이에 누가 그렇게 벗기면 지워지는 것은 같은
-///   객체 — 이제 빈 폴더 — 다(안이 찬 폴더는 지우기 표시가 실패한다). 미검 — 그 경합은 재지 않았다.
-/// - Windows 에서 그 정션을 남이 삭제 공유 없이 열고 있거나 쓰기 · 삭제 권한으로 열고 있으면 공유 위반(원시 32 —
-///   [`super::is_sharing_violation`]), 지울 권한이 없으면 접근 거부(원시 5)다.
-/// - Windows 밖은 확인과 지우기가 한 동작이 아니다(그 사이 바뀐 파일을 지울 수 있다).
-/// - Windows 의 볼륨 마운트 지점은 정션과 같은 재해석 tag 라 가르지 않는다(미검 — 마운트 지점은 관리자만 만든다).
+/// - `link` not a link = `InvalidInput` and nothing is deleted. Windows counts only junctions as links — a real folder · file ·
+///   directory symbolic link · other reparse points such as cloud placeholders are refused. So is a real folder someone is using or
+///   that cannot be deleted (if even its attributes cannot be read, that open error). Elsewhere only symbolic links count.
+/// - Missing = `NotFound`.
+/// - Windows deletes, through the same handle, exactly the object it opened and confirmed to be a junction — another object taking
+///   that name after the check is not deleted (object identity). While held, sharing is read-only, so others cannot rename it or
+///   open it for write · delete; but a handle asking only `FILE_WRITE_ATTRIBUTES` skips the sharing check, and per MS-FSA that right
+///   can strip the reparse point (`FSCTL_DELETE_REPARSE_POINT`). If someone strips it between check and delete, the deleted object
+///   is the same one — now an empty folder (a non-empty folder fails the delete mark). Unverified — that race was not measured.
+/// - On Windows, someone holding that junction open without delete sharing or with write · delete access = sharing violation (raw
+///   32 — [`super::is_sharing_violation`]); no permission to delete = access denied (raw 5).
+/// - Outside Windows, check and delete are not one action (a file changed in between can be deleted).
+/// - A Windows volume mount point has the same reparse tag as a junction and is not told apart (unverified — only admins make mount
+///   points).
 #[cfg(windows)]
 pub fn unlink_dir(link: &Path) -> io::Result<()> {
     unlink_junction(link).map(|_| ())
@@ -51,14 +52,15 @@ pub fn unlink_dir(link: &Path) -> io::Result<()> {
     if !std::fs::symlink_metadata(link)?.file_type().is_symlink() {
         return Err(not_a_link());
     }
-    // 심볼릭 링크는 가리키는 것이 폴더여도 파일로 지운다 — `remove_dir` 는 `ENOTDIR` 이다.
+    // A symbolic link is removed as a file even when it points to a folder — `remove_dir` gives `ENOTDIR`.
     std::fs::remove_file(link)
 }
 
-// `std::fs::remove_dir` 처럼 경로로 다시 찾아 지우면 확인 뒤 그 이름에 들어선 남의 빈 폴더를 지운다 — 확인한 그
-//   핸들로 지운다. 재해석 지점 자체를 연 핸들이라 지워지는 것은 링크뿐이고 대상은 건드리지 않는다.
-//   `junction::delete` 는 reparse 만 벗겨 빈 폴더를 남기고, `junction::exists` 는 링크를 따라가 끊긴 정션에 `false`
-//   라 확인에 못 쓴다. 어느 꼴로 지웠나는 시험이 남의 핸들이 열린 정션의 이름이 언제 빠지는지를 가르는 데 쓴다.
+// Finding the name again by path, as `std::fs::remove_dir` does, would delete someone else's empty folder that took the name after
+//   the check — so delete through the checked handle. It is a handle on the reparse point itself, so only the link goes and the
+//   target is untouched. `junction::delete` strips only the reparse data and leaves an empty folder, and `junction::exists` follows
+//   the link and says `false` for a broken junction, so neither can check. The returned disposition lets a test tell when the name
+//   of a junction held open elsewhere disappears.
 #[cfg(windows)]
 fn unlink_junction(link: &Path) -> io::Result<Disposition> {
     let junction = open_junction(link)?;
@@ -69,33 +71,33 @@ fn check_target(target: &Path) -> io::Result<()> {
     if !target.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "링크 대상은 절대 경로여야 한다",
+            "link target must be an absolute path",
         ));
     }
-    // `junction::create` 는 NUL 을 보지 않고 넘겨, OS 가 그 앞에서 자른 경로에 링크를 건다(2.1.0 `get_full_path`).
+    // `junction::create` passes a NUL through unchecked, and the OS links the path cut before it (2.1.0 `get_full_path`).
     if target.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "링크 대상에 NUL 이 있다",
+            "link target contains NUL",
         ));
     }
     Ok(())
 }
 
-// NUL 은 아래 `symlink_metadata` 도 `InvalidInput` 으로 거절하지만 그 문장은 어느 인자인지 말하지 않는다 — 링크
-//   자리라고 밝히려고 먼저 본다.
+// `symlink_metadata` below also refuses NUL with `InvalidInput`, but its message does not say which argument — check first to name
+//   the link path.
 #[cfg(windows)]
 fn check_link(link: &Path) -> io::Result<()> {
     if link.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "링크 자리에 NUL 이 있다",
+            "link path contains NUL",
         ));
     }
     match std::fs::symlink_metadata(link) {
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "링크 자리에 이미 무언가 있다",
+            "something already exists at the link path",
         )),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -103,11 +105,11 @@ fn check_link(link: &Path) -> io::Result<()> {
 }
 
 fn not_a_link() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, "디렉터리 링크가 아니다")
+    io::Error::new(io::ErrorKind::InvalidInput, "not a directory link")
 }
 
-// junction 2.1.0 은 링크 폴더 열기가 접근 거부면 심볼릭 링크 특권을 켜 보고, 토큰에 그 특권이 없으면 원래 거부
-//   대신 `ERROR_NOT_ALL_ASSIGNED`(1300)를 돌려준다(`helpers.rs` 소스) — 1300 은 그 자리에서만 난다.
+// junction 2.1.0, when opening the link folder is access denied, tries turning on the symbolic-link privilege, and if the token
+//   lacks it returns `ERROR_NOT_ALL_ASSIGNED` (1300) instead of the original denial (`helpers.rs` source) — 1300 arises only there.
 #[cfg(windows)]
 fn junction_error(e: io::Error) -> io::Error {
     const ERROR_NOT_ALL_ASSIGNED: i32 = 1300;
@@ -118,8 +120,8 @@ fn junction_error(e: io::Error) -> io::Error {
     }
 }
 
-// 링크를 따라가지 않고 그 자리 자체를 지울 권한으로 열고 재해석 tag 를 본다 — std 는 tag 를 내주지 않는다. 공유를
-//   읽기만 주는 까닭과 그것이 못 막는 것 = `unlink_dir` 문서.
+// Opens the spot itself, without following the link, with the right to delete it, and reads the reparse tag — std does not expose
+//   the tag. Why sharing is read-only and what that does not block = the `unlink_dir` doc.
 #[cfg(windows)]
 fn open_junction(path: &Path) -> io::Result<std::fs::File> {
     use windows::Win32::Storage::FileSystem::{
@@ -128,8 +130,8 @@ fn open_junction(path: &Path) -> io::Result<std::fs::File> {
     let file = match open_reparse_point(path, (DELETE | FILE_READ_ATTRIBUTES).0, FILE_SHARE_READ.0)
     {
         Ok(file) => file,
-        // 지울 권한으로 못 연 것이 남이 쓰고 있거나 지울 수 없는 진짜 폴더라서일 수 있다 — 속성만 여는 핸들로 tag 를
-        //   보고 링크가 아니면 `InvalidInput`, 링크이거나 그마저 못 보면 원래 오류다. 그 핸들로는 지우지 않는다.
+        // Failing to open with delete access may mean a real folder that is in use or cannot be deleted — read the tag through an
+        //   attributes-only handle: not a link = `InvalidInput`; a link, or even that fails = the original error. Never delete through that handle.
         Err(e) if super::is_access_denied(&e) || super::is_sharing_violation(&e) => {
             let probed = open_reparse_point(
                 path,
@@ -172,11 +174,11 @@ fn is_junction(file: &std::fs::File) -> io::Result<bool> {
         FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_ATTRIBUTE_TAG_INFO,
     };
-    // 이 상수 하나 때문에 `Win32_System_SystemServices` 를 켜지 않는다.
+    // Not turning on `Win32_System_SystemServices` for this one constant.
     const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
 
     let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
-    // SAFETY: `file` 이 이 호출 동안 열려 있는 핸들이고, 버퍼는 넘긴 크기 그대로의 `FILE_ATTRIBUTE_TAG_INFO` 다.
+    // SAFETY: `file` is a handle open for this call, and the buffer is a `FILE_ATTRIBUTE_TAG_INFO` of exactly the size passed.
     unsafe {
         GetFileInformationByHandleEx(
             HANDLE(file.as_raw_handle()),
@@ -197,10 +199,10 @@ enum Disposition {
     Classic,
 }
 
-// 지우기 표시만 하고 지워지는 것은 `file` 을 닫을 때다. POSIX 꼴은 이 핸들을 닫는 순간 이름을 뺀다 — 남이 그 정션을
-//   열고 있어도 그렇다. 옛 꼴은 남의 핸들이 닫힐 때까지 이름이 남아, 이어서 부모 폴더를 지우면 「비어 있지 않다」(145)
-//   로 실패한다(실측 2026-11-01 · Windows 11 26200 NTFS). POSIX 꼴을 모르는 Windows · 파일 시스템이 내는 오류(1 · 50 ·
-//   87)면 옛 꼴로 물러난다(미검 — 이 PC 의 NTFS 는 POSIX 꼴을 받는다).
+// Only sets the delete mark; the deletion happens when `file` closes. The POSIX form removes the name the moment this handle closes —
+//   even if someone else has the junction open. The classic form keeps the name until the other handles close, so deleting the
+//   parent folder next fails with "directory not empty" (145) (measured 2026-11-01 · Windows 11 26200 NTFS). Errors from a Windows
+//   or file system that does not know the POSIX form (1 · 50 · 87) fall back to the classic form (unverified — this PC's NTFS takes it).
 #[cfg(windows)]
 fn delete_on_close(file: &std::fs::File) -> io::Result<Disposition> {
     const ERROR_INVALID_FUNCTION: i32 = 1;
@@ -220,8 +222,8 @@ fn delete_on_close(file: &std::fs::File) -> io::Result<Disposition> {
     }
 }
 
-// 읽기 전용 속성이 붙은 정션도 지운다 — std `remove_dir_all` 이 쓰는 깃발 그대로다. 옛 꼴엔 이 깃발이 없어 읽기 전용
-//   정션은 접근 거부다(미검). 이 깃발을 모르는 Windows 는 87 을 내 옛 꼴로 물러난다고 본다(미검).
+// Also deletes a junction with the read-only attribute — the same flag std `remove_dir_all` uses. The classic form lacks this flag, so
+//   a read-only junction is access denied there (unverified). A Windows that does not know the flag is assumed to give 87 and fall back (unverified).
 #[cfg(windows)]
 fn posix_delete_on_close(file: &std::fs::File) -> io::Result<()> {
     use windows::Win32::Storage::FileSystem::{
@@ -258,8 +260,8 @@ fn set_disposition<T>(
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::SetFileInformationByHandle;
-    // SAFETY: `file` 이 이 호출 동안 열려 있는 핸들이고, `info` 는 넘긴 크기 그대로의 그 정보 꼴 구조체다(부르는
-    //   두 곳이 정보 꼴과 구조체를 짝지어 넘긴다).
+    // SAFETY: `file` is a handle open for this call, and `info` is the struct of that info class with exactly the size passed (both
+    //   callers pass the class and struct as a pair).
     unsafe {
         SetFileInformationByHandle(
             HANDLE(file.as_raw_handle()),
@@ -286,19 +288,19 @@ mod tests {
                 std::process::id(),
                 uuid::Uuid::new_v4()
             ));
-            std::fs::create_dir(&dir).expect("시험 폴더");
+            std::fs::create_dir(&dir).expect("test folder");
             Self(dir)
         }
 
         fn target_with_file(&self) -> PathBuf {
             let target = self.0.join("target");
-            std::fs::create_dir(&target).expect("대상 폴더");
-            std::fs::write(target.join("inner.txt"), b"kept").expect("대상 안 파일");
+            std::fs::create_dir(&target).expect("target folder");
+            std::fs::write(target.join("inner.txt"), b"kept").expect("file inside target");
             target
         }
     }
 
-    // 단언이 중간에 실패해도 치운다. std `remove_dir_all` 은 링크를 따라 들어가지 않는다.
+    // Cleans up even if an assertion fails midway. std `remove_dir_all` does not follow links.
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
@@ -315,23 +317,23 @@ mod tests {
         let target = scratch.target_with_file();
         let link = scratch.0.join("link");
 
-        link_dir(&target, &link).expect("링크 만들기");
+        link_dir(&target, &link).expect("make link");
         assert_eq!(
-            std::fs::read(link.join("inner.txt")).expect("링크로 읽기"),
+            std::fs::read(link.join("inner.txt")).expect("read through link"),
             b"kept"
         );
         assert_eq!(
-            file_identity(&link).expect("링크의 신원"),
-            file_identity(&target).expect("대상의 신원"),
-            "신원은 링크를 따라간다"
+            file_identity(&link).expect("link identity"),
+            file_identity(&target).expect("target identity"),
+            "the identity follows the link"
         );
 
-        unlink_dir(&link).expect("링크 걷기");
-        assert!(gone(&link), "링크 자리가 비어야");
+        unlink_dir(&link).expect("unlink");
+        assert!(gone(&link), "the link path must be empty");
         assert_eq!(
-            std::fs::read(target.join("inner.txt")).expect("대상 안 파일"),
+            std::fs::read(target.join("inner.txt")).expect("file inside target"),
             b"kept",
-            "대상은 그대로"
+            "the target stays"
         );
     }
 
@@ -340,19 +342,19 @@ mod tests {
         let scratch = Scratch::new();
         let real = scratch.target_with_file();
         let empty = scratch.0.join("empty");
-        std::fs::create_dir(&empty).expect("빈 폴더");
+        std::fs::create_dir(&empty).expect("empty folder");
         let file = scratch.0.join("file.txt");
-        std::fs::write(&file, b"f").expect("파일");
+        std::fs::write(&file, b"f").expect("file");
 
         for path in [&real, &empty, &file] {
-            let e = unlink_dir(path).expect_err("링크가 아니면 거절");
+            let e = unlink_dir(path).expect_err("refused when not a link");
             assert_eq!(
                 e.kind(),
                 io::ErrorKind::InvalidInput,
                 "{}: {e}",
                 path.display()
             );
-            assert!(path.exists(), "{} 는 그대로", path.display());
+            assert!(path.exists(), "{} stays", path.display());
         }
         assert!(real.join("inner.txt").exists());
     }
@@ -362,17 +364,17 @@ mod tests {
         let scratch = Scratch::new();
         let target = scratch.target_with_file();
         let link = scratch.0.join("link");
-        link_dir(&target, &link).expect("링크 만들기");
-        std::fs::remove_dir_all(&target).expect("대상 지우기");
+        link_dir(&target, &link).expect("make link");
+        std::fs::remove_dir_all(&target).expect("delete target");
 
-        unlink_dir(&link).expect("끊긴 링크도 걷는다");
+        unlink_dir(&link).expect("a broken link is unlinked too");
         assert!(gone(&link));
     }
 
     #[test]
     fn unlinking_a_missing_path_is_not_found() {
         let scratch = Scratch::new();
-        let e = unlink_dir(&scratch.0.join("missing")).expect_err("없는 자리");
+        let e = unlink_dir(&scratch.0.join("missing")).expect_err("missing path");
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
 
@@ -380,7 +382,7 @@ mod tests {
     fn a_relative_target_is_refused_and_nothing_is_made() {
         let scratch = Scratch::new();
         let link = scratch.0.join("link");
-        let e = link_dir(Path::new("relative/target"), &link).expect_err("상대 경로 거절");
+        let e = link_dir(Path::new("relative/target"), &link).expect_err("relative path refused");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
         assert!(gone(&link));
     }
@@ -390,27 +392,27 @@ mod tests {
         let scratch = Scratch::new();
         let target = scratch.target_with_file();
         let occupied = scratch.0.join("occupied");
-        std::fs::create_dir(&occupied).expect("이미 있는 폴더");
-        std::fs::write(occupied.join("mine.txt"), b"m").expect("그 안 파일");
+        std::fs::create_dir(&occupied).expect("existing folder");
+        std::fs::write(occupied.join("mine.txt"), b"m").expect("file inside it");
         let empty = scratch.0.join("empty");
-        std::fs::create_dir(&empty).expect("이미 있는 빈 폴더");
+        std::fs::create_dir(&empty).expect("existing empty folder");
 
-        let e = link_dir(&target, &occupied).expect_err("이미 있는 자리");
+        let e = link_dir(&target, &occupied).expect_err("occupied path");
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
-        assert!(occupied.join("mine.txt").exists(), "있던 것은 그대로");
+        assert!(occupied.join("mine.txt").exists(), "what was there stays");
 
-        let e = link_dir(&target, &empty).expect_err("이미 있는 빈 자리");
+        let e = link_dir(&target, &empty).expect_err("occupied empty path");
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert!(
             std::fs::symlink_metadata(&empty).is_ok_and(|m| m.is_dir()),
-            "있던 빈 폴더는 링크가 아닌 폴더 그대로"
+            "the existing empty folder stays a folder, not a link"
         );
         assert!(
             std::fs::read_dir(&empty)
-                .expect("빈 폴더 읽기")
+                .expect("read empty folder")
                 .next()
                 .is_none(),
-            "빈 채로"
+            "still empty"
         );
     }
 
@@ -418,7 +420,7 @@ mod tests {
     fn a_target_with_nul_is_refused_and_nothing_is_made() {
         let scratch = Scratch::new();
         let link = scratch.0.join("link");
-        let e = link_dir(&scratch.0.join("tar\0get"), &link).expect_err("NUL 거절");
+        let e = link_dir(&scratch.0.join("tar\0get"), &link).expect_err("NUL refused");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
         assert!(gone(&link));
     }
@@ -428,26 +430,29 @@ mod tests {
         let scratch = Scratch::new();
         let target = scratch.target_with_file();
         let nested = target.join("nested");
-        std::fs::create_dir(&nested).expect("안 폴더");
-        std::fs::write(nested.join("deep.txt"), b"deep").expect("안 폴더의 파일");
-        let identity = file_identity(&target).expect("대상의 신원");
+        std::fs::create_dir(&nested).expect("inner folder");
+        std::fs::write(nested.join("deep.txt"), b"deep").expect("file in inner folder");
+        let identity = file_identity(&target).expect("target identity");
         let link = scratch.0.join("link");
-        link_dir(&target, &link).expect("링크 만들기");
+        link_dir(&target, &link).expect("make link");
 
-        unlink_dir(&link).expect("링크 걷기");
+        unlink_dir(&link).expect("unlink");
         assert!(gone(&link));
-        assert_eq!(file_identity(&target).expect("걷은 뒤 신원"), identity);
         assert_eq!(
-            std::fs::read(target.join("inner.txt")).expect("대상 안 파일"),
+            file_identity(&target).expect("identity after unlink"),
+            identity
+        );
+        assert_eq!(
+            std::fs::read(target.join("inner.txt")).expect("file inside target"),
             b"kept"
         );
         assert_eq!(
-            std::fs::read(nested.join("deep.txt")).expect("안 폴더의 파일"),
+            std::fs::read(nested.join("deep.txt")).expect("file in inner folder"),
             b"deep"
         );
     }
 
-    // 옮기기만 원시 코드로 본다 — 1300 이 나는 자리(링크 폴더 ACL 거부 + 특권 없는 토큰)는 시험이 만들지 않는다.
+    // Checks only the mapping by raw code — the test does not create the spot where 1300 arises (link folder ACL denial + a token without the privilege).
     #[cfg(windows)]
     #[test]
     fn a_privilege_failure_from_junction_reads_as_access_denied() {
@@ -460,11 +465,11 @@ mod tests {
         assert_eq!(mapped.kind(), io::ErrorKind::PermissionDenied);
 
         let other = junction_error(io::Error::from_raw_os_error(3));
-        assert_eq!(other.raw_os_error(), Some(3), "다른 오류는 그대로");
+        assert_eq!(other.raw_os_error(), Some(3), "other errors stay as is");
     }
 
-    // 5천 자 대상은 정션 버퍼(16 KiB)에 안 담겨 junction 2.1.0 의 길이 확인(OS 코드 없는 `InvalidInput`)에서 실패한다.
-    //   그 확인은 링크 자리 폴더를 만든 뒤라 빈 폴더가 남는다 — 그것을 재야 지우는 정리 코드가 되살아나면 잡힌다.
+    // A 5000-character target does not fit the junction buffer (16 KiB) and fails junction 2.1.0's length check (`InvalidInput`
+    //   without an OS code). That check runs after the link folder is made, so an empty folder stays — measuring it catches a revived cleanup that deletes.
     #[cfg(windows)]
     #[test]
     fn a_too_long_target_fails_and_deletes_nothing() {
@@ -473,24 +478,24 @@ mod tests {
         let too_long = scratch.0.join("x".repeat(5000));
         let link = scratch.0.join("link");
 
-        let e = link_dir(&too_long, &link).expect_err("버퍼를 넘는 대상");
+        let e = link_dir(&too_long, &link).expect_err("target over the buffer");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e:?}");
         assert_eq!(e.raw_os_error(), None);
         assert!(
             std::fs::symlink_metadata(&link).is_ok_and(|m| m.is_dir()),
-            "링크 자리엔 링크가 아닌 폴더가 남는다"
+            "a folder that is not a link stays at the link path"
         );
         assert!(
             std::fs::read_dir(&link)
-                .expect("남은 폴더 읽기")
+                .expect("read the remaining folder")
                 .next()
                 .is_none(),
-            "빈 채로"
+            "still empty"
         );
         assert_eq!(
-            std::fs::read(sibling.join("inner.txt")).expect("곁 폴더 안 파일"),
+            std::fs::read(sibling.join("inner.txt")).expect("file in the sibling folder"),
             b"kept",
-            "곁의 것은 그대로"
+            "the sibling stays"
         );
     }
 
@@ -500,20 +505,20 @@ mod tests {
         let scratch = Scratch::new();
         let target = scratch.target_with_file();
         let link = scratch.0.join("link");
-        link_dir(&target, &link).expect("링크 만들기");
+        link_dir(&target, &link).expect("make link");
 
-        let junction = open_junction(&link).expect("정션 열기");
-        classic_delete_on_close(&junction).expect("옛 꼴 지우기 표시");
+        let junction = open_junction(&link).expect("open junction");
+        classic_delete_on_close(&junction).expect("classic delete mark");
         drop(junction);
         assert!(gone(&link));
         assert_eq!(
-            std::fs::read(target.join("inner.txt")).expect("대상 안 파일"),
+            std::fs::read(target.join("inner.txt")).expect("file inside target"),
             b"kept"
         );
     }
 
-    // 남이 그 자리 자체를 읽기(또는 읽기+쓰기)로 연다 — 속성만 여는 핸들은 공유 검사에 들지 않아(실측) 그런 핸들로는
-    //   아래 시험들이 재는 것이 없다.
+    // Someone else opens the spot itself for read (or read+write) — an attributes-only handle takes no part in the sharing check
+    //   (measured), so with such a handle the tests below measure nothing.
     #[cfg(windows)]
     fn hold(path: &Path, write: bool, share: u32) -> std::fs::File {
         use std::os::windows::fs::OpenOptionsExt;
@@ -526,11 +531,11 @@ mod tests {
             .share_mode(share)
             .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS).0)
             .open(path)
-            .expect("남이 그 자리를 연다")
+            .expect("someone else opens the spot")
     }
 
-    // POSIX 꼴을 고른 까닭(`delete_on_close` 주석)을 잰다 — 남이 정션 자체를 열고 있어도 걷은 즉시 이름이 빠져 부모
-    //   폴더를 지울 수 있다. 옛 꼴로 물러난 볼륨이면 이름은 그 핸들이 닫힐 때 빠진다.
+    // Measures why the POSIX form was chosen (`delete_on_close` comment) — even with the junction itself held open elsewhere, the name
+    //   disappears at once on unlink and the parent folder can be deleted. On a volume that fell back to the classic form the name goes when that handle closes.
     #[cfg(windows)]
     #[test]
     fn a_junction_held_open_elsewhere_is_gone_once_unlinked() {
@@ -540,25 +545,28 @@ mod tests {
         let scratch = Scratch::new();
         let target = scratch.target_with_file();
         let parent = scratch.0.join("parent");
-        std::fs::create_dir(&parent).expect("부모 폴더");
+        std::fs::create_dir(&parent).expect("parent folder");
         let link = parent.join("link");
-        link_dir(&target, &link).expect("링크 만들기");
+        link_dir(&target, &link).expect("make link");
         let held = hold(
             &link,
             false,
             (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0,
         );
 
-        match unlink_junction(&link).expect("링크 걷기") {
+        match unlink_junction(&link).expect("unlink") {
             Disposition::Posix => {
-                assert!(gone(&link), "남의 핸들이 열린 채로도 이름이 빠져야");
-                std::fs::remove_dir(&parent).expect("부모 폴더를 지울 수 있어야");
+                assert!(
+                    gone(&link),
+                    "the name must go even with the other handle open"
+                );
+                std::fs::remove_dir(&parent).expect("the parent folder must be deletable");
                 drop(held);
             }
             Disposition::Classic => {
                 drop(held);
-                assert!(gone(&link), "남의 핸들이 닫히면 이름이 빠져야");
-                std::fs::remove_dir(&parent).expect("부모 폴더를 지울 수 있어야");
+                assert!(gone(&link), "the name must go once the other handle closes");
+                std::fs::remove_dir(&parent).expect("the parent folder must be deletable");
             }
         }
         assert!(target.join("inner.txt").exists());
@@ -571,17 +579,17 @@ mod tests {
         let scratch = Scratch::new();
         let target = scratch.target_with_file();
         let link = scratch.0.join("link");
-        link_dir(&target, &link).expect("링크 만들기");
+        link_dir(&target, &link).expect("make link");
         let held = hold(&link, false, FILE_SHARE_READ.0);
 
-        let e = unlink_dir(&link).expect_err("공유 위반");
+        let e = unlink_dir(&link).expect_err("sharing violation");
         assert!(super::super::is_sharing_violation(&e), "{e:?}");
         drop(held);
-        unlink_dir(&link).expect("놓으면 걷힌다");
+        unlink_dir(&link).expect("unlinks once released");
         assert!(gone(&link));
     }
 
-    // 걷기 핸들은 읽기만 공유한다 — 남이 모든 공유를 주고 쓰기로 연 정션도 공유 위반이다.
+    // The unlink handle shares read only — a junction someone opened for writing with every share is a sharing violation too.
     #[cfg(windows)]
     #[test]
     fn unlink_is_a_sharing_violation_while_someone_holds_the_junction_for_writing() {
@@ -591,22 +599,22 @@ mod tests {
         let scratch = Scratch::new();
         let target = scratch.target_with_file();
         let link = scratch.0.join("link");
-        link_dir(&target, &link).expect("링크 만들기");
+        link_dir(&target, &link).expect("make link");
         let held = hold(
             &link,
             true,
             (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0,
         );
 
-        let e = unlink_dir(&link).expect_err("공유 위반");
+        let e = unlink_dir(&link).expect_err("sharing violation");
         assert!(super::super::is_sharing_violation(&e), "{e:?}");
         drop(held);
-        unlink_dir(&link).expect("놓으면 걷힌다");
+        unlink_dir(&link).expect("unlinks once released");
         assert!(gone(&link));
     }
 
-    // 남이 삭제 공유 없이 연 진짜 폴더(다른 프로세스의 작업 폴더가 그렇다)는 지울 권한으로 못 열지만 링크가 아니라
-    //   `InvalidInput` 이다 — 첫 단언이 그 열기가 실제로 막히는지 잰다.
+    // A real folder someone opened without delete sharing (another process's working folder is one) cannot be opened with delete
+    //   access, but it is not a link, so `InvalidInput` — the first assertion measures that the open is really blocked.
     #[cfg(windows)]
     #[test]
     fn a_busy_real_directory_is_refused_as_not_a_link() {
@@ -618,19 +626,19 @@ mod tests {
         let held = hold(&real, false, (FILE_SHARE_READ | FILE_SHARE_WRITE).0);
         let blocked =
             open_reparse_point(&real, (DELETE | FILE_READ_ATTRIBUTES).0, FILE_SHARE_READ.0)
-                .expect_err("전제: 지울 권한 열기가 막힌다");
+                .expect_err("premise: the delete-access open is blocked");
         assert!(
             super::super::is_sharing_violation(&blocked),
-            "전제: {blocked:?}"
+            "premise: {blocked:?}"
         );
 
-        let e = unlink_dir(&real).expect_err("링크가 아니면 거절");
+        let e = unlink_dir(&real).expect_err("refused when not a link");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e:?}");
         drop(held);
-        assert!(real.join("inner.txt").exists(), "진짜 폴더는 그대로");
+        assert!(real.join("inner.txt").exists(), "the real folder stays");
     }
 
-    // 디렉터리 심볼릭 링크는 개발자 모드 · 특권이 있어야 만들어진다 — 못 만드는 PC 에선 확인할 것이 없어 끝낸다.
+    // A directory symbolic link needs developer mode or the privilege — on a PC that cannot make one there is nothing to check.
     #[cfg(windows)]
     #[test]
     fn a_directory_symlink_is_not_taken_for_a_junction() {
@@ -638,14 +646,14 @@ mod tests {
         let target = scratch.target_with_file();
         let symlink = scratch.0.join("symlink");
         if let Err(e) = std::os::windows::fs::symlink_dir(&target, &symlink) {
-            eprintln!("디렉터리 심볼릭 링크를 만들 수 없어 건너뜀: {e}");
+            eprintln!("cannot create a directory symbolic link, skipping: {e}");
             return;
         }
-        let e = unlink_dir(&symlink).expect_err("정션이 아니면 거절");
+        let e = unlink_dir(&symlink).expect_err("refused when not a junction");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
         assert!(
             std::fs::symlink_metadata(&symlink).is_ok(),
-            "심볼릭 링크는 그대로"
+            "the symbolic link stays"
         );
     }
 }

@@ -46,7 +46,7 @@ impl TestWindow {
                 None,
             )
         }
-        .expect("시험 창 짓기");
+        .expect("build test window");
         Self { hwnd }
     }
 
@@ -57,7 +57,7 @@ impl TestWindow {
     pub(crate) fn outer(&self) -> PhysRect {
         let mut r = RECT::default();
         // SAFETY: the window this value holds — it fails if it is gone.
-        unsafe { GetWindowRect(self.hwnd, &mut r) }.expect("창 사각형");
+        unsafe { GetWindowRect(self.hwnd, &mut r) }.expect("window rectangle");
         PhysRect {
             x: r.left,
             y: r.top,

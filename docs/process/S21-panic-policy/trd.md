@@ -1,8 +1,8 @@
 # TRD — Panic policy implementation: narrow containment · immediate-exit hook · unwind switch (S21)
 
 > **Status: edition 11, revision 4 (2026-10-12 · user decision A) · implementation U1~U5 landed (2026-10-12 — commits are in the step-log).** All user decisions done (§3) · `/review trd full` round 3 done (1 = FIX · FIX → 2 = blind PASS · doc-aware FIX → 3 = doc-aware PASS · the last minor item applied). Revision 2 (review 1) = removed `usage.get` from containment (the allowlist has two entries) · the mark-off primitive and its four places · the invariant 「표시 범위 ⊆ catch 클로저」 · U3 things to verify. Revision 3 (review 2) = added the condition 「효과 없음」 to the allowlist · added Idle coalescing to the things that do not turn the mark off. Revision 4 = on a pump panic, dropped the explicit kill and use the existing cleanup path + a test (user decision A — §4-2).
-> **Withdrawn — ADR-0293 (2026-10-12):** the command-side containment (§4-2 B1 — the two allowlisted read commands) was withdrawn. The only contained places are the four on the agent side (A1~A4); the bus command execution span is not contained. The allowlist · B1 · the command's `INTERNAL` fold · 「읽기 명령 둘」 · 「다섯 자리」 wording in this document is history (§0 ① · §1 · §3 (마) · §4-2 · §4-3 · §4-6 ① · ② · §5 U2 · §7 · §8 — to find them: `rg "허용 목록|B1|INTERNAL|다섯" docs/process/S21-panic-policy/trd.md`).
-> **History:** edition 10 = `git show a722a879:docs/process/S21-panic-policy/trd.md` (shutdown tail · watchdog thread · decisions (다)(바)(바′)(라′) · the compile guard is void under the new direction) · edition 11 draft = `bedda3f3` ((가) lock poisoning · (나) multi-step spans · request-side entries R1~R7 — withdrawn by user decision ②).
+> **Withdrawn — ADR-0293 (2026-10-12):** the command-side containment (§4-2 B1 — the two allowlisted read commands) was withdrawn. The only contained places are the four on the agent side (A1~A4); the bus command execution span is not contained. The allowlist · B1 · the command's `INTERNAL` fold · 「읽기 명령 둘」 · 「다섯 자리」 wording in this document is history (§0 ① · §1 · §3 (ma) · §4-2 · §4-3 · §4-6 ① · ② · §5 U2 · §7 · §8 — to find them: `rg "허용 목록|B1|INTERNAL|다섯" docs/process/S21-panic-policy/trd.md`).
+> **History:** edition 10 = `git show a722a879:docs/process/S21-panic-policy/trd.md` (shutdown tail · watchdog thread · decisions (da)(ba)(ba′)(ra′) · the compile guard is void under the new direction) · edition 11 draft = `bedda3f3` ((ga) lock poisoning · (na) multi-step spans · request-side entries R1~R7 — withdrawn by user decision ②).
 > **Frame:** ADR-0288 · ADR-0290 + user decisions 2026-10-10 · 2026-10-11~12 · 2026-10-12 ② (§1). ★The three ADRs (0288 ~ 0290) exist only on branch `origin/v0.3.3/feat/panic-policy`★ — bring that branch in before committing this TRD, or the links will not resolve. The implementation ADR = ADR-0292 (planned).
 > **Replaces the old record:** `docs/process/S20-command-bus/trd.md` §4 ⑨ 「릴리즈 `panic = "abort"` 유지」. The convention of that section (a command handler fails by value) stays.
 > **Notation:** measured = tree `743530fb` (the code is the same as `2c25cdd`, which edition 10 measured — the commits in between are docs only). `crates/engram-dashboard-` in paths is shortened to `agent/` · `daemon/` · `base/` and so on. 「표시」 = the 「가두는 중」 mark (§4-3). 「가안」 = name · shape not final. Where no confidence label is given, it is certain.
@@ -55,15 +55,15 @@
 
 ## 3. User decisions (2026-10-12 — all done)
 
-> (가) · (나) were removed by user decision ②, and (라) the shell was settled by ② as S1 (hook only · shell panic = exit immediately) (§4-5). (마) · (사) were decided as recommended — the table · section below stay as their basis. For ending the CLI on a pump panic, the user decided between the reviewers' opposing positions (§4-2).
+> (ga) · (na) were removed by user decision ②, and (ra) the shell was settled by ② as S1 (hook only · shell panic = exit immediately) (§4-5). (ma) · (sa) were decided as recommended — the table · section below stay as their basis. For ending the CLI on a pump panic, the user decided between the reviewers' opposing positions (§4-2).
 
 | Group | Decision | User's words |
 |---|---|---|
-| (마) How a contained agent panic is announced | **N2a current surface** — the screen shows `Failed` · input is rejected as before · details go to the log (§4-4 the hook logs regardless of the mark) | 「그냥 내부에서 대되 로그는 남겨지는건 맞지?」 |
-| (사) Means of exit | **`std::process::abort`** | 「추천으로해」 |
+| (ma) How a contained agent panic is announced | **N2a current surface** — the screen shows `Failed` · input is rejected as before · details go to the log (§4-4 the hook logs regardless of the mark) | 「그냥 내부에서 대되 로그는 남겨지는건 맞지?」 |
+| (sa) Means of exit | **`std::process::abort`** | 「추천으로해」 |
 | Ending the CLI on a pump panic | **A existing cleanup path** — no explicit kill · confirm with a test · if it fails, B | 「A안」 |
 
-### (마) Announcing a contained agent panic
+### (ma) Announcing a contained agent panic
 
 The bus command is already fixed — `INTERNAL` 「command handler panicked: …」 (ADR-0159). What is left is the agent side.
 
@@ -74,7 +74,7 @@ The bus command is already fixed — `INTERNAL` 「command handler panicked: …
 
 - Recommendation N2a — no new screen mechanism. An immediate exit looks the same as today's 「데몬 꺼짐」 (no reason is shown — a deferred mechanism).
 
-### (사) Means of exit
+### (sa) Means of exit
 
 | Option | Result | Cost |
 |---|---|---|
@@ -93,7 +93,7 @@ The bus command is already fixed — `INTERNAL` 「command handler panicked: …
 Contain only when all four hold. If any one is missing, do not contain → exit immediately.
 
 1. It is the **outermost entry** of that unit of work.
-2. There is a **way to report the failure** (`Failed` state · error reply — (마)).
+2. There is a **way to report the failure** (`Failed` state · error reply — (ma)).
 3. The unit **does not change state, or changes only its own state**. A unit that changes shared state is not contained (user decision ②) — a shared-state call inside a contained unit turns the mark off (§4-2 mark-off).
 4. After that unit is discarded, **the rest is sound** (no dangling thread · surviving child · filling pipe is left).
 
@@ -211,7 +211,7 @@ Delete the one line `panic = "abort"` at `Cargo.toml:40` (the default is unwind)
 - **Missing mark · missing mark-off** — if a new containment place enters without the mark, it exits immediately (the safe side). If contained code newly changes shared state and the mark-off is forgotten, that half-changed state remains — review watches for it.
 - **Restart loop on a deterministic panic during boot · the tray icon staying until the mouse hovers after an immediate shell exit (inference)** — the same as today's abort.
 
-**When widening:** to contain a place that is not contained, re-check the four in §4-1. Trigger = that place actually appears in the log's reason lines. On the day a state-changing place is contained, the lock-poisoning policy · the multi-step span device (edition 11 draft (가)(나) — `git show bedda3f3:docs/process/S21-panic-policy/trd.md`) are needed again.
+**When widening:** to contain a place that is not contained, re-check the four in §4-1. Trigger = that place actually appears in the log's reason lines. On the day a state-changing place is contained, the lock-poisoning policy · the multi-step span device (edition 11 draft (ga)(na) — `git show bedda3f3:docs/process/S21-panic-policy/trd.md`) are needed again.
 
 **Out of scope:**
 

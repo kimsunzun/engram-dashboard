@@ -1,13 +1,11 @@
-//! engram-dashboard-daemon — 라이브러리 표면.
+//! engram-dashboard-daemon — the library surface.
 //!
-//! `main.rs`(데몬 진입점)와 격리 하네스(`tests/ws_e2e.rs`)가 **같은 기동 흐름**을 공유하도록
-//! 서버 조립·accept loop 를 여기로 모았다. main 은 `run()` 한 줄만 부르고, 테스트는
-//! `start_test_server()`(기능 `test-support` 뒤 — 운영 빌드에는 없다)로 in-process 서버를 띄워 WS 클라이언트로
-//! 검증한다.
+//! Server assembly and the accept loop live here so `main.rs` (one line, `run()`) and the isolation harness (`tests/ws_e2e.rs`, via
+//! `start_test_server()` behind the `test-support` feature, absent from production builds) share the same startup flow.
 //!
-//! ★Scope of this crate (ADR-0130)★ — the application layer, assembly (`run()` decides the order the parts are called in),
-//! and process housekeeping: the single-instance guard (`instance`) and `daemon.json` (`portfile`). The accepting side runs
-//! on the transport crate (`link`) and meets the upper layers through the connection port contract (`conn_port`).
+//! Scope of this crate (ADR-0130): the application layer, assembly (`run()` decides the call order of the parts), and process
+//! housekeeping — the single-instance guard (`instance`) and `daemon.json` (`portfile`). The accepting side runs on the transport crate
+//! (`link`) and meets the upper layers through the connection port contract (`conn_port`).
 
 pub mod agent_conn;
 pub mod command_delivery;
@@ -64,25 +62,22 @@ use usage_service::clock::OsUsageClock;
 use usage_service::observe::UsageObserveSink;
 use usage_service::{OsProbeThreads, ProbeThreads, UsageParts, UsageService};
 
-// The link's keepalive settings appear in this crate's public signature (`start_test_server_with_keepalive` — called by
-//   `tests/ws_e2e.rs`), so the one type is re-exported, not the module. That signature is behind feature `test-support`,
-//   so the re-export is too (ADR-0286); without the feature only the private import the accept loop uses remains.
+// The link's keepalive settings appear in this crate's public signature (`start_test_server_with_keepalive`), so the type is
+//   re-exported, not the module; that signature is behind feature `test-support`, so the re-export is too (ADR-0286).
 #[cfg(feature = "test-support")]
 pub use link::server::KeepaliveConfig;
 #[cfg(not(feature = "test-support"))]
 use link::server::KeepaliveConfig;
-// ADR-0129 0-4: 핸드셰이크 프레임(protocol `handshake::AuthFrame`)은 **재수출하지 않는다** — 이 crate 의 공개
-//   시그니처에 나타나지 않으므로 위 재수출의 사유가 성립하지 않고, 한 타입에 import 경로가 둘이 생긴다.
-//   `tests/ws_e2e.rs` 는 protocol 을 직접 부른다(여기 normal 의존이라 테스트 타깃에서 그대로 보인다) —
-//   경계가 각 사용 지점에서 보이게 두는 슬라이스 1 의 원칙 그대로다(step-log S18.21).
+// ADR-0129 0-4: the handshake frame (protocol `handshake::AuthFrame`) is not re-exported — it is absent from this crate's public
+//   signatures, so one type would get two import paths; `tests/ws_e2e.rs` calls protocol directly.
 
-// ★경로를 여기서 조립하지 마라★: 데몬이 **붙잡는** 파일과 **쓰는** 파일이 같아야 단일 인스턴스가
-//   성립한다(ADR-0135). 경로는 `data_dir::DataLayout` 하나가 내고, 쓰기는 붙잡은 guard 로만 한다. 이 이름은 로그 문구용이다.
+// Do not assemble the path here: the file the daemon holds and the file it writes must be the same for the single instance to hold
+//   (ADR-0135). The path comes from `data_dir::DataLayout` alone, written only through the held guard; this name is for log wording.
 use crate::portfile::DAEMON_FILE;
 
-// ── data dir / 토큰 ──────────────────────────────────────────────────────────────
+// ── data dir / token ──────────────────────────────────────────────────────────────
 
-/// 보안: 반환값은 로그에 찍지 말 것(daemon.json 에만 기록).
+/// Security: do not print the return value to logs (it is written only to daemon.json).
 pub fn generate_token() -> Result<String, getrandom::Error> {
     let mut buf = [0u8; 32];
     getrandom::getrandom(&mut buf)?;
@@ -112,58 +107,50 @@ pub fn root_generation_base() -> u64 {
     drawn % BELOW
 }
 
-// ── 제어 평면 CLI 위치 탐색 (ADR-0086 스텝 2 · F1) ─────────────────────────────────
+// ── control plane CLI location search (ADR-0086 step 2 · F1) ─────────────────────────────────
 //
-// ★왜 형제 exe 를 찾아야 하나★: **MCP 를 못 쓰는 백엔드**의 에이전트가 다른 에이전트에게 메시지를
-// 보내려면 그 CLI(파일명 = `CLI_EXE_NAME` + 플랫폼 확장자)를 shell 로 불러야 하는데, 이 바이너리는
-// **PATH 에 없다**(데몬과 함께 배포되는 내부 도구라 bare 이름으로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
-// **형제**에서 절대경로를 찾아(그 규칙 = platform `env::sibling_exe` 한 곳 — 셸 `discovery` 모듈의
-// `locate_daemon_exe` 첫 후보도 같은 함수다 · 배포 시 세 exe 동거),
-// provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 는 control endpoint 가 있는 스폰
-// **전부**에 그걸 ENGRAM_CLI_EXE·PATH 로 주입한다 — 제어 동사가 전원 개방이라(ADR-0132 결정 5) 우편만 쓰는
-// 경로가 아니다.
+// An agent of a backend that cannot use MCP must call the control CLI (`CLI_EXE_NAME` + platform extension) from a shell, but the binary
+// is not on PATH. So the daemon finds the absolute path among the siblings of its own exe folder (rule = platform `env::sibling_exe`, the
+// same function as the first candidate of the shell `discovery` module's `locate_daemon_exe`; the three exes deploy together), and
+// provision carries it as ControlEndpoint.send_exe. The backend injects it as ENGRAM_CLI_EXE·PATH into every spawn with a control
+// endpoint — control verbs are open to everyone (ADR-0132 decision 5), not just mail.
 //
-// ★best-effort(fail-open)★: 못 찾아도(개발 중 부분 빌드 등) None 을 돌려주고 데몬은 계속 뜬다 — MCP 가능
-// 백엔드(claude)는 제어 CLI 를 잃을 뿐이고, 비-MCP 백엔드 스폰은 우편 입구가 0 이 되므로 provision 에서
-// fail-closed 로 막힌다. warn 로그로 원인을 남긴다(관측성).
+// Best-effort (fail-open): if not found (a partial dev build), it returns None and the daemon keeps starting — an MCP-capable backend
+// (claude) only loses the control CLI, and a non-MCP backend spawn has 0 mail entrances so provision blocks it fail-closed. A warn log records the cause.
 
-/// env 를 세팅하지 않고 **경로 값**을 돌려준다(env 주입은 backend 소유).
+/// Returns the path value without setting env (env injection is the backend's).
 ///
-/// ★호출자가 하나뿐이어도 지우지 말 것★: 이 값은 **비-MCP 백엔드의 유일한 우편 입구**이자(그쪽은 MCP
-/// 입구가 아예 없다) **모든 스폰의 제어 입구**이고, 없으면 비-MCP provision 이 fail-closed 로 스폰을 막는다
-/// — 즉 삭제는 dead-code 정리가 아니라 CLI 우편과 제어 평면의 제거다. 이 구간은 테스트가 없어(지우고
-/// 호출부에 None 을 넘겨도 전 스위트가 초록) 이 앵커가 유일한 방어선이다 — 뒤 구간(provision→endpoint→
-/// 스폰 env)은 daemon control 테스트 `provision_*_wires_the_*_cli_*` 두 짝이 잡는다.
+/// Do not delete it even with one caller: this value is the only mail entrance of non-MCP backends and the control entrance of every
+/// spawn; without it non-MCP provision blocks spawns fail-closed. This stretch has no test (passing None at the call site keeps the suite
+/// green), so this anchor is the only defense; the later stretch (provision→endpoint→spawn env) is caught by the daemon control tests
+/// `provision_*_wires_the_*_cli_*`.
 // ADR-0133
 fn locate_send_exe() -> Option<PathBuf> {
-    // 파일명은 상수에서 파생한다 — 여기 이름을 따로 적으면 배포된 실행파일과 갈릴 수 있고, 갈리면
-    //   CLI 입구가 조용히 비활성된다(경고 로그 한 줄 외엔 증상이 없다).
+    // The file name derives from the constant — a separate literal could diverge from the deployed executable and silently disable the CLI entrance.
     if let Some(send_exe) = engram_dashboard_platform::env::sibling_exe(CLI_EXE_NAME) {
         if send_exe.is_file() {
-            tracing::info!(path = %send_exe.display(), "제어 평면 CLI 위치 확정(ADR-0086 F1)");
+            tracing::info!(path = %send_exe.display(), "control plane CLI location settled (ADR-0086 F1)");
             return Some(send_exe);
         }
     }
     tracing::warn!(
         name = %engram_dashboard_platform::env::exe_file_name(CLI_EXE_NAME),
-        "제어 평면 CLI 형제 exe 를 못 찾음 — CLI 입구 비활성(MCP 입구는 정상, ADR-0086 F1)"
+        "could not find the control plane CLI sibling exe — CLI entrance disabled (MCP entrance normal, ADR-0086 F1)"
     );
     None
 }
 
-// ── 파일 로그 · 패닉 훅 ───────────────────────────────────────────────────────────
+// ── file log · panic hook ───────────────────────────────────────────────────────────
 
-/// 이 뒤로 모든 패닉은 사유 줄(스레드 · 문장 · 자리)을 이 로그에 남기고, 가둠 표시(base `panic::contain`) 밖이면
-/// 데몬 프로세스를 그 자리에서 끝낸다 — 가둔 자리(에이전트 펌프 셋 · 입력 라이터 배수)의 패닉만 그 자리의 실패
-/// 표면으로 접힌다. 버스 명령 실행은 가두지 않는다(ADR-0293). ★tokio 가 태스크 패닉을 그 태스크에 가두는 일은
-/// 여기서 일어나지 않는다★ — 훅이 되감기 전에 끝낸다.
+/// After this, every panic leaves a reason line (thread · sentence · location) in this log, and a panic outside the containment mark
+/// (base `panic::contain`) ends the daemon process on the spot — only contained places (the three agent pumps · input writer drain) fold
+/// into that place's failure surface. Bus command execution is not contained (ADR-0293). The hook ends things before unwinding, so
+/// tokio does not contain a task panic in that task.
 ///
-/// 로그 자리를 하나도 못 열어도(`None`) 훅은 그대로 끝낸다. 데이터 폴더를 못 쓰면 `run()` 이 바로 뒤
-/// (`ensure_data_dir_writable`)에서 기동을 멈추므로, 이 경우는 「폴더는 쓸 수 있는데 그 `logs` 와 `%TEMP%` 폴백을
-/// 둘 다 못 열 때」뿐이다. 그때 사유 줄은 stdout(로그 필터가 ERROR 를 막으면 그마저 없다)과 이전 훅의 stderr 에만
-/// 간다 — 셸이 띄운 데몬엔 남는 곳이 없다(릴리즈는 콘솔이 없고 디버그 콘솔 창은 프로세스와 함께 닫힌다. 손으로
-/// 띄운 디버그 데몬이나 표준 핸들을 넘겨받은 데몬엔 남는다). 물러날 다른 자리가 없고, 배포판은 이전에도 같았다(TRD
-/// S21-panic-policy §7).
+/// Even with no log place openable (`None`) the hook still ends things. An unwritable data folder stops startup (`ensure_data_dir_writable`),
+/// so this case is: the folder is writable but both its `logs` and the `%TEMP%` fallback cannot be opened. Then the reason line goes only
+/// to stdout (and the previous hook's stderr) — nowhere to remain for a shell-launched daemon (release has no console). No other fallback
+/// (TRD S21-panic-policy §7).
 // ADR-0292
 fn init_logging_and_panic_hook(layout: &DataLayout) -> Option<PathBuf> {
     let log_file = logging::init_logging_with_file(&layout.logs_dir(), logging::LogKind::Daemon);
@@ -171,46 +158,30 @@ fn init_logging_and_panic_hook(layout: &DataLayout) -> Option<PathBuf> {
     log_file
 }
 
-// ── AgentManager 배선 (src-tauri lib.rs setup 미러) ───────────────────────────────
+// ── AgentManager wiring (mirror of src-tauri lib.rs setup) ───────────────────────────────
 
-/// 조립이 한 덩이로 들고 다니는 데몬 배선 — `AgentManager` 와 **그 status sink 이 팬아웃하는 바로 그**
-/// 연결 레지스트리를 묶는다.
+/// The daemon wiring the assembly carries as one lump — ties `AgentManager` with the very connection registry its status sink fans out to.
 ///
-/// ★왜 묶는가(load-bearing — 풀면 조용한 장애가 표현 가능해진다)★: manager 는 자기 안에
-///   `DaemonStatusSink` → `Arc<dyn FrameFanout>` 을 **투명하게** 지고 있어서, 둘을 따로 넘기면
-///   `build_daemon_wiring(A)` 로 만든 manager 를 `run_accept_loop(.., 레지스트리 B)` 에 짝지어 넣는 것이
-///   **컴파일된다**. 그러면 연결은 B 에 등록되고 상태·목록·복원 통지는 A 로 나가 아무 클라에도 닿지
-///   않는다 — 빈 맵은 루프 0회라 **실패 로그조차 없고**, 프론트는 목록 이벤트로 terminal 을 판정하므로
-///   (ADR-0005) 모든 에이전트가 영원히 살아 있는 것으로 보인다. lease/프로필 브로드캐스트도
-///   같은 방식으로 사라진다.
-/// ★어긋난 짝이 표현 가능한 자리 — **규칙으로 적는다**★. 경로를 열거하면 매번 한 자리씩 모자란다
-///   (실제로 두 번 그랬다: 처음엔 `manager` 가, 그다음엔 `handlers` 가 열거를 빠져나갔다). 규칙은:
-///   **"레지스트리를 받는 파라미터" 와 "팬아웃을 — 직접이든 전이적이든 — 나르는 파라미터" 를 함께
-///   받는 자리마다** 어긋난 짝이 표현 가능하다. `manager`(→ status sink)도 `handlers`(→ 공장 →
-///   `AgentConnections.fanout`)도 전이적 운반자다. 그래서 **"팬아웃 타입을 파라미터로 안 받으니
-///   안전" 은 판정 기준이 될 수 없다** — 무엇을 나르는지를 봐야 한다.
-///   지금 이 규칙에 걸리는 자리는 **조립 밖의 진입점**(`link::server::Server::new` ·
-///   `AgentConnections::new` · `ConnectionCore::new`)과 **`link::server` 의** 테스트 하네스이고,
-///   **조립 안에는 없다** —
-///   그게 이 struct 의 존재 이유다. 이 struct 를 손으로 조립해 남의 레지스트리를 끼우는 것도 한 모듈
-///   안이라 타입으로 못 막는다.
-/// ★그 진입점을 여기서 고치지 않는 이유★: `Server::new` 는 레지스트리가 정당히 필요하고
-///   **공장이 어떻게 조립됐는지는 알아선 안 된다** — 레지스트리에서 공장을 파생시키면 층이 뒤집힌다.
-///   정공법은 슬라이스 3의 투영(`impl ConnRegistry { pub fn fanout(&self) -> Arc<dyn FrameFanout> }`)
-///   이다 — **그 슬라이스는 ADR-0130 으로 보류됐으므로 예정 작업이 아니라 재개 시의 처방이다**:
-///   팬아웃을 레지스트리에서만 얻게
-///   만들면 **모든** 호출 지점에서 맞는 짝이 곧 발견 가능한 짝이 된다 — `Server::new` 도 포함.
-/// ★사용량 서비스도 같은 짝이다★ — `manager` 의 status sink 사슬(`UsageObserveSink`)이 관측을 넘기는 서비스와
-///   연결 계층이 구독·⟳ 를 거는 서비스가 **같은 것**이어야 한다. 어긋나면 관측은 한 서비스에 쌓이고 구독자는
-///   다른 서비스에 걸려 한 장도 안 받는다 — 역시 실패 로그 없이 조용하다. 둘을 이 struct 가 한 조립에서 함께
-///   들고 다니는 것이 그 짝을 지키는 수단이다.
+/// Why tie them (load-bearing): the manager carries `DaemonStatusSink` → `Arc<dyn FrameFanout>` inside it, so a manager made with
+/// `build_daemon_wiring(A)` passed into `run_accept_loop(.., registry B)` compiles. Connections register in B while state · list · restore
+/// notifications go to A and reach no client — an empty map is 0 iterations, with not even a failure log, and the frontend decides terminal by
+/// list events (ADR-0005), so every agent looks alive forever. Lease/profile broadcasts vanish the same way.
+/// A mismatched pair is representable at every place that takes both a parameter receiving the registry and a parameter carrying the
+/// fanout, directly or transitively (`manager` → status sink; `handlers` → factory → `AgentConnections.fanout`). Enumerating paths always
+/// missed one, so "it does not take the fanout type" is not a criterion. Today the rule catches the entry points outside the assembly
+/// (`link::server::Server::new` · `AgentConnections::new` · `ConnectionCore::new`) and the `link::server` test harness; none inside the
+/// assembly, which is why this struct exists. Hand-assembling it with someone else's registry is within one module, so the type cannot block it.
+/// Those entry points are not fixed here: `Server::new` legitimately needs the registry and must not know how the factory was assembled.
+/// The fix is slice 3's projection (`impl ConnRegistry { pub fn fanout(&self) -> Arc<dyn FrameFanout> }`), deferred by ADR-0130 — the
+/// prescription for when it resumes, not planned work.
+/// The usage service is the same pair: the service the `manager`'s status sink chain (`UsageObserveSink`) feeds and the one the connection
+/// layer subscribes and ⟳s on must be one; otherwise observations pile up in one while subscribers get no sheet, quietly.
 // ADR-0129
 struct DaemonWiring {
     manager: Arc<AgentManager>,
-    /// 연결이 등록되는 맵. `manager` 안의 status sink 가 팬아웃하는 그 맵과 **같은 것**이다
-    /// (`ConnRegistry` 는 내부가 Arc — clone 이 같은 맵을 본다).
+    /// The map connections are registered in — the same as the map the status sink inside `manager` fans out to (`ConnRegistry` is an Arc inside).
     registry: ConnRegistry,
-    /// `manager` 의 status sink 사슬이 관측을 넘기는 그 서비스 — 연결 계층이 구독·⟳ 를 같은 것에 건다.
+    /// The service the `manager`'s status sink chain feeds — the connection layer subscribes and ⟳s on the same one.
     usage: Arc<UsageService>,
     /// The library service plugged in as `manager`'s launch-kit source — the same one, for the library commands.
     /// `None` = the Noop kits (the test server). Production reads it only for the first-start step and the boot scan
@@ -220,11 +191,9 @@ struct DaemonWiring {
 }
 
 impl DaemonWiring {
-    /// 제어 라우트(`/control/agent`)가 명부 변경을 알릴 때 쓰는 팬아웃 어댑터(ADR-0132).
+    /// The fanout adapter the control route (`/control/agent`) uses to announce roster changes (ADR-0132).
     ///
-    /// ★필드를 밖으로 풀지 않고 **여기서** 만든다★: 팬아웃과 매니저를 따로 꺼내 조립하면 위 struct 주석이
-    ///   막으려는 어긋난 짝(다른 조립의 레지스트리 + 이 매니저)이 다시 표현 가능해진다. 이 메서드는 제 필드
-    ///   둘만 쓰므로 그 조합이 구조적으로 불가능하다.
+    /// Made here from the struct's own two fields: taking fanout and manager out separately would make the mismatched pair above representable again.
     fn roster_broadcast(&self) -> Arc<dyn control::agent::RosterBroadcast> {
         Arc::new(connection_core::RosterFanout::new(
             Arc::new(self.registry.clone()),
@@ -242,9 +211,8 @@ fn build_daemon_wiring(
     let state_dir = layout.daemon_state_dir();
     let profile_store = Arc::new(FileProfileStore::new(state_dir.clone()));
     let scratch_root = layout.usage_probe_dir();
-    // ★이 쓸기의 안전은 시점에 기댄다★ — 인스턴스 잠금을 쥔 **뒤**(다른 데몬이 같은 폴더에서 조회 중일 수
-    //   없다)이고 스케줄러·조회가 하나도 뜨기 **전**(제 조회의 폴더를 지우지 않는다)이다. 잠금 앞이나
-    //   [`build_usage_service`] 뒤로 옮기면 살아 있는 조회의 폴더를 지울 수 있다.
+    // The safety of this sweep depends on timing: after taking the instance lock (no other daemon can be querying in the folder) and before any
+    //   scheduler or query starts. Moved before the lock or after [`build_usage_service`], it could delete a live query's folder.
     engram_dashboard_agent::usage::sweep_stale_scratch(&scratch_root);
     // The launch folders left by an earlier daemon go on the same timing: after the instance lock, and before the
     //   library service is plugged in below (boot restore is off, so nothing launches before). Plugged first, a launch
@@ -371,8 +339,7 @@ pub fn build_library_service(
     )
 }
 
-/// 사용량 서비스가 조립 밖에서 받는 부품 — 운영은 실물([`build_daemon_wiring`]), 테스트 서버는 조회기 0개.
-/// 시계와 인코더는 둘 다 실물이라 여기 없다.
+/// The parts the usage service receives from outside the assembly — production has the real ones ([`build_daemon_wiring`]), the test server 0 probers.
 struct UsageInputs {
     probes: Vec<&'static dyn UsageProbe>,
     spawner: Arc<dyn ProbeSpawner>,
@@ -380,7 +347,7 @@ struct UsageInputs {
     scratch_root: PathBuf,
 }
 
-/// build_daemon_wiring 의 store 주입형 — 테스트가 in-memory store 를 끼워 디스크/Embedded 와 격리한다.
+/// The store-injecting form of build_daemon_wiring — tests slot in an in-memory store to isolate from disk/Embedded.
 fn build_daemon_wiring_with_store(
     store: Arc<dyn ProfileStore>,
     usage_inputs: UsageInputs,
@@ -389,9 +356,8 @@ fn build_daemon_wiring_with_store(
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
 ) -> DaemonWiring {
-    // ADR-0129: 운영 조립에서 연결 레지스트리와 그 팬아웃 면(面)을 만드는 **유일한 자리**다 — 포트화(dyn)
-    //   이전엔 concrete `ConnRegistry` 를 받아 짝 불일치가 타입상 불가능했고, 그 보장을 산문으로 격하시키지
-    //   않으려 생성을 한 자리로 모았다(ADR-0129 결정 3 — 조립 행만 두 행을 다 안다).
+    // ADR-0129: the only place in the production assembly that makes the connection registry and its fanout face — a concrete `ConnRegistry`
+    //   used to make a pair mismatch impossible by type, so creation is gathered in one place to keep that guarantee (ADR-0129 decision 3).
     let registry = ConnRegistry::new();
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
     let usage = build_usage_service(usage_inputs);
@@ -407,7 +373,7 @@ fn build_daemon_wiring_with_store(
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig::default(),
         Arc::new(move |agent_id, new_sid| {
-            // 화신 표식 자리에 `None` — 이 관측기(`SessionTracker`)는 그 축을 나르지 않는다.
+            // `None` in the incarnation marker place — this observer (`SessionTracker`) does not carry that axis.
             profiles_cb.observe_session_id(agent_id, None, new_sid);
         }),
     ));
@@ -439,11 +405,11 @@ fn build_daemon_wiring_with_store(
     }
 }
 
-/// 사용량 서비스를 세우고 스케줄러 스레드를 띄운다.
+/// Sets up the usage service and launches the scheduler thread.
 ///
-/// ★스케줄러를 못 띄워도 데몬은 뜬다★ — 요청(⟳)·줍기·구독 교체는 그대로 돌고, 멈추는 것은 시간이 이끄는 일(자동
-///   조회 · 기한이 차서 나가는 발행)뿐이다. 스레드는 서비스를 약하게만 쥐어 서비스가 drop 되면 스스로 끝난다 —
-///   그래서 소유는 `manager` 의 status sink 사슬과 연결 계층이 진다.
+/// The daemon starts even if the scheduler cannot launch: requests (⟳) · pickup · subscription replacement keep running; only time-driven work
+/// (automatic queries · deadline emits) stops. The thread holds the service weakly and ends when it is dropped — ownership is carried by the
+/// `manager`'s status sink chain and the connection layer.
 fn build_usage_service(inputs: UsageInputs) -> Arc<UsageService> {
     let UsageInputs {
         probes,
@@ -460,16 +426,16 @@ fn build_usage_service(inputs: UsageInputs) -> Arc<UsageService> {
         encoder: Arc::new(agent_conn::UsageEventEncoder),
     });
     match usage_service::schedule::spawn_scheduler(&usage, wakes) {
-        Ok(_) => tracing::info!(thread = "usage-scheduler", "사용량 스케줄러 스레드 시작"),
+        Ok(_) => tracing::info!(thread = "usage-scheduler", "usage scheduler thread started"),
         Err(e) => tracing::warn!(
             error = %e,
-            "사용량 스케줄러 스레드를 못 띄웠다 — 자동 조회와 기한 발행 없이 돈다"
+            "could not launch the usage scheduler thread — running without automatic queries and deadline emits"
         ),
     }
     usage
 }
 
-/// 운영 status sink 사슬 — `MessagingFlushSink(UsageObserveSink(DaemonStatusSink))`.
+/// The production status sink chain — `MessagingFlushSink(UsageObserveSink(DaemonStatusSink))`.
 fn status_chain(
     fanout: Arc<dyn FrameFanout>,
     usage: Arc<UsageService>,
@@ -483,7 +449,7 @@ fn status_chain(
     )
 }
 
-// ── accept loop (main + 테스트 공유) ──────────────────────────────────────────────
+// ── accept loop (shared by main + tests) ──────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 async fn run_accept_loop(
@@ -492,13 +458,11 @@ async fn run_accept_loop(
     multiview: MultiViewState,
     control_registry: Arc<control::registry::ControlRegistry>,
     messaging_slot: Arc<control::mcp_server::MessagingSlot>,
-    // 명령 버스(ADR-0155/0156/0160) — 명부·자리 표·1단계 표를 묶은 **그 한 부**. 여기서 만들지 않는
-    //   이유는 제어 평면의 두 라우트(발견·호출)가 같은 부를 쓰기 때문이다
-    //   (`control::mcp_server::start_mcp_server_with_help`). 안에서 만들면 그 라우트들은 자기 사본을 보게 되고,
-    //   증상은 에러도 로그도 없이 발견이 클라이언트가 얹은 이름을 안 보여 주고 중계가 남의 자리 표를
-    //   쓰는 것이다.
+    // Command bus (ADR-0155/0156/0160) — the one copy binding the roster · seat table · stage-1 table. Not made here because the two control
+    //   plane routes (discovery · call) use the same copy (`control::mcp_server::start_mcp_server_with_help`); separate copies would silently
+    //   hide client-registered names from discovery and give relay another seat table.
     bus: command_delivery::CommandBus,
-    // 만료 수거기 — ★버스를 만든 자리에서 띄운 것을 받아 여기서 멈춘다★(`CommandBus::new` 가 짝으로 낸다).
+    // Expiry reaper — takes the one launched where the bus was made and stops it here (`CommandBus::new` produces it as a pair).
     sweeper: command_delivery::BusSweeper,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
@@ -506,9 +470,8 @@ async fn run_accept_loop(
     enable_ctrl_c: bool,
     keepalive: KeepaliveConfig,
 ) {
-    // ★팬아웃 포트를 인자로 받지 않고 여기서 뽑는 이유(ADR-0129)★: 아래 accept 갈래가 등록하는 **그 값**
-    //   에서 뽑으므로 "브로드캐스트 대상 ≠ 등록 대상" 을 이 함수 안에서는 쓸 수가 없다. 조립 밖에서 여전히
-    //   표현 가능한 자리와 그 판정 규칙은 `DaemonWiring` 주석에 있다.
+    // The fanout port is pulled from the very value the accept branch below registers, so "broadcast target ≠ registration target" cannot be
+    //   written inside this function (ADR-0129); remaining representable places and the rule are in the `DaemonWiring` comment.
     let DaemonWiring {
         manager,
         registry,
@@ -541,193 +504,180 @@ async fn run_accept_loop(
     let stop = async move {
         loop {
             tokio::select! {
-                // StopDaemon 명령 수신 — watch 가 true 로 바뀌면 종료.
+                // StopDaemon command received — exit when the watch changes to true.
                 res = shutdown_rx.changed() => {
                     match res {
                         Ok(()) if *shutdown_rx.borrow() => {
-                            tracing::info!("종료 신호(watch=true) 수신 — accept loop 탈출");
+                            tracing::info!("shutdown signal (watch=true) received — leaving the accept loop");
                             break;
                         }
-                        Ok(()) => {} // false 로의 변경은 무시(현재 발생 안 함)
-                        Err(_) => break, // 모든 sender drop — 종료
+                        Ok(()) => {} // a change to false is ignored (does not happen now)
+                        Err(_) => break, // all senders dropped — exit
                     }
                 }
                 _ = tokio::signal::ctrl_c(), if enable_ctrl_c => {
-                    tracing::info!("Ctrl-C 수신 — accept loop 탈출");
+                    tracing::info!("Ctrl-C received — leaving the accept loop");
                     break;
                 }
             }
         }
     };
-    // Returns after every connection was closed with what it had queued flushed (the stop `Ack` · a last `Error`), or
-    //   once the flush deadline passed. The process ends soon after `run()` returns, so without this wait those frames
-    //   could die with it (TRD trd-3 §3-0 ④).
+    // Returns after every connection was closed with its queue flushed (the stop `Ack` · a last `Error`), or the flush deadline passed. The
+    //   process ends soon after `run()` returns, so without this wait those frames could die with it (TRD trd-3 §3-0 ④).
     server.run(listening, stop).await;
 
-    // ── 명령 왕복 정리(ADR-0154) ───────────────────────────────────────────────────
+    // ── command round trip cleanup (ADR-0154) ───────────────────────────────────────────────────
     // ★Waiting for the sweeper is what bounds the shutdown★: on its way out it answers every remaining seat
     //   (`CommandDeliveries::drain`) and those answers free the delivery tasks **at once**. Without the wait the seats
     //   and tasks live on after "stopped" is logged, until each seat's own deadline (7 s ordinary, up to 91 s for a
     //   launch — ADR-0360).
-    // ★탈출 이유와 무관하게 여기 한 번 온다★ — 종료 갈래가 셋인데(StopDaemon · Ctrl-C · 송신단 소멸)
-    //   그중 Ctrl-C 는 데몬 종료 watch 를 건드리지 않는다.
+    // It comes here once regardless of the exit reason — three exit branches (StopDaemon · Ctrl-C · sender gone), and Ctrl-C does not touch the daemon shutdown watch.
     sweeper.stop().await;
 }
 
-// ── main 본체 (운영) ──────────────────────────────────────────────────────────────
+// ── main body (production) ──────────────────────────────────────────────────────────────
 
-/// 데몬 본체. 반환 Err(code) 면 호출자(main)가 그 코드로 exit. 정상 종료(이미 실행 중 포함)는 Ok.
+/// The daemon body. `Err(code)` makes the caller (main) exit with that code; a normal exit (including already running) is Ok.
 pub async fn run() -> Result<(), i32> {
-    // 0) ★data_dir 해석이 로깅보다 먼저다★ — 파일 로그가 그 폴더 안에 살기 때문이다. 이 함수는
-    //    순수(env 조회 + 경로 조립)라 로깅 없이 돌려도 잃는 줄이 없다. 이 순서를 뒤집으면
-    //    아래 1)~2) 의 기동 실패가 다시 stdout 으로만 가고, 릴리즈에서 stdout 은 아무 데도 없다.
+    // 0) data_dir resolution comes before logging because the file log lives in that folder. It is pure (env lookup + path assembly), so no
+    //    lines are lost; reversing it would send the startup failures of 1)~2) to stdout only, which goes nowhere in release.
     let layout = DataLayout::resolve();
     let data_dir = layout.root().to_path_buf();
 
-    // 0.1) 파일 로그 → 패닉 훅.
-    //    ★마스킹은 미포함★ — init_logging 은 키를 가리지 않는다. mask_secrets 는 헬퍼만 제공하고
-    //    적용은 호출자 책임이다(민감 출력 로깅 시 명시 적용). 근거: docs/reference/logging-conventions.md.
+    // 0.1) file log → panic hook.
+    //    Masking is not included: init_logging does not hide keys; mask_secrets is only a helper and the caller applies it
+    //    (docs/reference/logging-conventions.md).
     // ADR-0292
     let log_file = init_logging_and_panic_hook(&layout);
 
-    // 1) data_dir 생성 + 쓰기 가능 확인.
-    //    ★폴백 없음(ADR-0134 결정 4)★: 못 쓰는 폴더면 여기서 멈춘다. 다른 곳으로 흘려보내면
-    //    "폴더를 지웠는데 명부가 살아 있다"가 되고, 그게 포터블 배포가 없애려는 혼란 그 자체다.
-    //    ★이 줄이 어디에 남는지가 이 실패의 전부다★: 폴더를 못 쓰면 파일 로그도 같은 폴더에서
-    //    막히므로, `%TEMP%` 아래로 물러난 sink 가 이 줄을 받는다(base `logging` 머리말).
-    //    그 폴백까지 실패하면 남는 곳이 없고, 그 경우의 주인은 클라이언트의 spawn 전 사전
-    //    점검이다(ADR-0135) — 데몬은 사용자에게 보일 화면이 없다.
+    // 1) data_dir creation + writability check.
+    //    No fallback (ADR-0134 decision 4): an unwritable folder stops here; flowing elsewhere would give "I deleted the folder but the roster is alive".
+    //    This line is all that remains of this failure: the file log is blocked in the same folder too, so the sink that fell back under `%TEMP%`
+    //    receives it (base `logging` header). If even that fails, the owner is the client's pre-spawn check (ADR-0135) — the daemon has no screen.
     if let Err(e) = ensure_data_dir_writable(&data_dir) {
-        // e 안에 폴더 경로와 조치가 이미 들어 있다(`data_dir::DataDirUnwritable`).
-        tracing::error!("데이터 폴더를 준비하지 못해 데몬을 시작할 수 없음: {e}");
+        // e already holds the folder path and the remedy (`data_dir::DataDirUnwritable`).
+        tracing::error!(
+            "cannot start the daemon because the data folder could not be prepared: {e}"
+        );
         return Err(1);
     }
     if let Err(e) = layout.ensure_daemon_dirs() {
         tracing::error!(
             data_dir = %data_dir.display(),
-            "데몬 폴더(daemon/state · daemon/run)를 만들지 못해 시작할 수 없음: {e}"
+            "cannot start because the daemon folders (daemon/state · daemon/run) could not be created: {e}"
         );
         return Err(1);
     }
-    // ADR-0134 §영향: 잠금에 이름이 없으므로, 어느 폴더를 잡았는지 사람이 확인할 유일한 수단이다.
+    // ADR-0134 §Impact: the lock has no name, so this is the only means for a person to check which folder was taken.
     tracing::info!(
         data_dir = %data_dir.display(),
         log_file = ?log_file,
-        "데이터 폴더 결정"
+        "data folder decided"
     );
 
-    // 2) 단일 인스턴스 가드 = 그 데이터 폴더의 접속 파일(`daemon\run\daemon.json`)을 붙잡는 것(ADR-0135
-    //    결정 1 — 잠그는 파일과 클라이언트가 읽는 파일이 같다. 스코프는 여전히 폴더다).
-    //    ★guard 는 프로세스 수명 동안 살아 있어야 한다★(Drop 시 해제 = 단일성 깨짐). 여기서 얻은
-    //    핸들이 아래 8)에서 접속 정보를 쓰는 그 핸들이다 — 순서가 곧 불변식이다(획득 → 쓰기).
-    //    ★세 갈래를 뭉치지 말 것★: 중복(정상 양보)·제3자 방해·시스템 오류는 사용자가 할 일이 서로
-    //    다르다. 하나의 에러로 접으면 릴리스에서 "왜 안 뜨는지"가 사라진다(ADR-0134 결정 4).
+    // 2) Single instance guard = holding that data folder's connection file (`daemon\run\daemon.json`) (ADR-0135 decision 1 — the locked file
+    //    and the file clients read are the same; the scope is the folder).
+    //    The guard must live for the process lifetime (released on Drop = singleness broken). The handle obtained here writes the connection
+    //    info in 8) — acquire → write is the invariant.
+    //    Do not lump the three branches: duplicate (normal yield) · third-party obstruction · system error ask the user for different things.
     // ADR-0264
     use crate::instance::{AcquireError, Acquired};
     let daemon_path = layout.daemon_file();
     let mut guard = match crate::instance::acquire(&daemon_path) {
         Ok(Acquired::Held(g)) => g,
         Ok(Acquired::AlreadyRunning { pid }) => {
-            // 어느 폴더가 잡혀 있었는지가 이 줄의 존재 이유다 — 없으면 "왜 안 뜨지"를 추적할 수 없다.
+            // Which folder was held is the reason this line exists — without it "why does it not start" cannot be traced.
             tracing::info!(
                 data_dir = %data_dir.display(),
                 owner_pid = pid,
-                "이 데이터 폴더의 데몬이 이미 실행 중 — 종료"
+                "a daemon for this data folder is already running — exiting"
             );
             return Ok(());
         }
-        // ★「중복 데몬 아님」으로 단정하지 마라★: 먼저 뜬 데몬이 잠금을 얻고 아직 발행하기 전(아래 8) 까지)이면
-        //   진단 읽기가 빈 파일을 봐 이 갈래로 온다.
+        // Do not conclude "not a duplicate daemon": if the first daemon got the lock and has not published yet (until 8), the diagnostic read sees an empty file and comes here.
         Err(e @ AcquireError::FileBusy { .. }) => {
             tracing::error!(
                 lock_file = %daemon_path.display(),
-                "다른 프로그램, 또는 아직 발행 전인 다른 데몬이 {DAEMON_FILE} 을 쥐고 있어 시작할 수 없음(백신·인덱서·백업 확인): {e}"
+                "cannot start because another program, or another daemon that has not published yet, holds {DAEMON_FILE} (check antivirus · indexers · backup): {e}"
             );
             return Err(1);
         }
-        // ★재시작해도 안 풀리는 상태라 문구가 달라야 한다★: 위 FileBusy 는 "기다리면 풀린다", 이건
-        //   "권한을 고치거나 다른 곳에 풀어라". 뭉치면 사용자가 정반대 조치를 한다.
+        // A restart does not clear this state, so the wording must differ: FileBusy is "clears if you wait", this is "fix the permissions or extract elsewhere".
         Err(e @ AcquireError::AccessDenied { .. }) => {
             tracing::error!(
                 lock_file = %daemon_path.display(),
-                "{DAEMON_FILE} 에 쓸 수 없어 시작할 수 없음: {e}"
+                "cannot start because {DAEMON_FILE} cannot be written: {e}"
             );
             return Err(1);
         }
         Err(e) => {
             tracing::error!(
                 lock_file = %daemon_path.display(),
-                "단일 인스턴스 가드 획득 실패: {e}"
+                "failed to acquire the single instance guard: {e}"
             );
             return Err(1);
         }
     };
 
-    // 2.5) 기존 내용을 덮어쓰기 전 진단 로그.
+    // 2.5) Diagnostic log before overwriting the existing contents.
     //
-    // ★pid 생존은 더 이상 거부권이 아니다(ADR-0134 결정 3)★: 이 줄에 닿았다는 것은 우리가 이 폴더의
-    //   파일을 **이미 쥐었다**는 뜻이고, 그건 이 폴더를 소유한 다른 데몬이 없다는 증명이다. 그 위에
-    //   pid 생존 검사를 얹으면 무관한 프로세스가 옛 pid 를 재사용했을 때 데몬이 **영구히** 못 뜬다
-    //   (사용자가 daemon.json 을 손으로 지우기 전까지 회복 경로가 없다). 보유가 권위다 — 여기서
-    //   되돌리지 말 것.
+    // PID liveness is no longer a veto (ADR-0134 decision 3): reaching here means we already hold this folder's file, proving no other daemon owns
+    //   it. A PID check on top would make the daemon permanently unable to start when an unrelated process reused the old PID. Holding is
+    //   the authority — do not revert.
     if let Some(prev) = crate::portfile::read(&daemon_path) {
         tracing::info!(
             pid = prev.pid,
             stale = crate::portfile::is_stale(&prev),
-            "기존 daemon.json 을 덮어씀(폴더 잠금은 우리 소유)"
+            "overwriting the existing daemon.json (the folder lock is ours)"
         );
     }
 
-    // 3) bind → 실제 포트 취득.
+    // 3) bind → get the actual port.
     let listening = match Listening::bind_loopback() {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!("WS listener bind 실패: {e}");
+            tracing::error!("WS listener bind failed: {e}");
             return Err(1);
         }
     };
     let port = listening.port();
 
-    // 4) WS auth 토큰 생성.
+    // 4) Generate the WS auth token.
     let token = match generate_token() {
         Ok(t) => t,
         Err(e) => {
-            tracing::error!("토큰 생성 실패: {e}");
+            tracing::error!("token generation failed: {e}");
             return Err(1);
         }
     };
 
-    // ADR-0086: 제어 채널 토큰 레지스트리. **위 4)의 daemon.json WS 토큰과는 완전히 다른 관심사다**
-    //   (혼용 금지 — ADR-0086 §맥락).
+    // ADR-0086: control channel token registry — a different concern from the daemon.json WS token in 4) (no mixing — ADR-0086 §Context).
     let control_registry = Arc::new(control::registry::ControlRegistry::new());
 
-    // 5b) 멀티뷰어 협상 상태 — 전 연결이 공유한다.
+    // 5b) Multi-viewer negotiation state — shared by all connections.
     let multiview = MultiViewState::new();
 
-    // 5b.5) 부팅 스윕(FIX 5). ★반드시 MCP 서버·provision 시작 전★: `control_registry` 를 방금 빈
-    //   상태로 만들었으므로(위) 이 시점의 모든 기존 mcp-config 는 dead credential 이다.
+    // 5b.5) Boot sweep (FIX 5). Must come before the MCP server and provision start: `control_registry` was just made empty, so every existing
+    //   mcp-config now is a dead credential.
     let mcp_dir = control::mcp_config::McpDir::new(layout.mcp_config_dir());
     control::mcp_config::sweep_stale_configs(&mcp_dir);
 
-    // 5c) 제어 채널 MCP 서버 기동.
-    //     ★fail-closed(FIX 1)★: bind/start 실패는 **치명**이다 — 데몬을 NoopControlChannel 로 조용히
-    //     계속 띄우면(옛 동작) 제어 채널 없이 도는데도 health 를 위장한다. 대신 이미 만든 자원(WS
-    //     listener·control_registry)을 drop 하고 Err(1) 로 데몬 시작을 중단한다. 데몬은 자기 제어
-    //     엔드포인트 없이는 뜨지 않는다(에이전트 오케스트레이션이 §5 LLM-우선 제어의 근간이라, 그게
-    //     없는 반쪽 데몬은 정상 상태가 아니다). ★반드시 에이전트 spawn 전★.
+    // 5c) Start the control channel MCP server.
+    //     Fail-closed (FIX 1): a bind/start failure is fatal — keeping the daemon up with NoopControlChannel (the old behavior) would fake health
+    //     without a control channel. It drops the made resources (WS listener · control_registry) and aborts startup with Err(1); agent
+    //     orchestration is the foundation of §5 LLM-first control. Must come before any agent spawn.
     let manager_slot = Arc::new(control::mcp_server::ManagerSlot::new());
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
     let roster_broadcast_slot = Arc::new(control::mcp_server::RosterBroadcastSlot::new());
     let command_table_slot = Arc::new(control::mcp_server::CommandTableSlot::new());
-    // 명령 버스(ADR-0155/0156/0160) — 명부·자리 표·1단계 표 한 부. ★MCP 서버보다 **먼저** 난다★: 제어
-    //   라우트 둘이 이것을 쓰므로(발견은 명부 절반을, 호출은 배달 기계를) 서버 조립이 그것을 받아야 한다.
-    //   아래 accept loop 에도 **같은 부**가 들어간다 — 두 곳에 다른 부를 넘기면 클라이언트가 얹은 이름이
-    //   발견에서만 사라지거나 두 입구가 서로의 왕복을 못 보고, 그 어긋남은 런타임에 아무 신호도 내지 않는다.
-    // ★1단계 표는 값이 아니라 슬롯으로 든다★: 표는 매니저 조립 뒤(아래 6단계)에 생기므로 지금은 비어 있다.
-    //   값을 잡으면 그 빈 표가 프로세스 수명 내내 「내 명령 없음」으로 굳고, 증상은 에러도 로그도 없이
-    //   `agent.*` 가 모르는 명령으로 되돌아오는 것이다(`command_delivery::LocalCommands` 의 그 성질).
-    // ★수거기는 버스와 **짝으로** 난다 — 따로 띄우는 형태면 수락 루프까지 미루는 조립이 표현 가능해지고,
-    //   그 사이의 제어 라우트 호출이 마감을 볼 눈 없이 매달린다★(`CommandBus::new`). 아래 accept loop 가 나가는 길에 멈춘다.
+    // Command bus (ADR-0155/0156/0160) — one copy of roster · seat table · stage-1 table. It comes before the MCP server: the two control routes
+    //   use it (discovery the roster half, call the delivery machine). The same copy goes into the accept loop below — different copies would
+    //   hide client-registered names from discovery only or keep the two entrances from seeing each other's round trips, with no runtime signal.
+    // The stage-1 table goes in as a slot, not a value: the table is created after the manager assembly (stage 6), so it is empty now; capturing
+    //   the value would freeze that empty table as "not my command" for the process lifetime, and `agent.*` would come back as unknown commands
+    //   (that property of `command_delivery::LocalCommands`).
+    // The reaper comes out paired with the bus: launched separately, an assembly deferring it to the accept loop becomes representable and control
+    //   route calls in between hang with no eye on the deadline (`CommandBus::new`). The accept loop below stops it.
     let (command_bus, command_sweeper) = command_delivery::CommandBus::new(
         command_roster::CommandRoster::new(),
         command_delivery::CommandDeliveries::new(),
@@ -738,7 +688,7 @@ pub async fn run() -> Result<(), i32> {
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
 
-    // ★핸들은 프로세스 수명 동안 살아 있어야 한다★(drop = 서버 종료).
+    // The handle must live for the process lifetime (drop = server shutdown).
     let (control, mut mcp_server_handle): (
         Arc<dyn engram_dashboard_agent::types::ControlChannel>,
         Option<control::mcp_server::McpServerHandle>,
@@ -766,36 +716,30 @@ pub async fn run() -> Result<(), i32> {
             (channel, Some(handle))
         }
         Err(e) => {
-            // fail-closed 정리는 이게 전부다 — ★연결 레지스트리는 아직 없다★(아래 6단계
-            //   `build_daemon_wiring` 이 만든다).
-            // ★daemon.json 에 **레코드**는 아직 안 썼다(발행은 아래 8단계)★. 단 파일 자체는 위 2)의
-            //   acquire 가 이미 열었거나(있던 파일) 만들었다(없던 폴더) — 우리는 물러나며 guard 를
-            //   Drop 할 뿐이라 옛 데몬의 레코드는 그대로 남고, 새 폴더였다면 0바이트 파일이 남는다.
-            //   둘 다 다음 기동이 덮어쓴다(0바이트는 읽는 쪽이 "아직 준비 안 됨"으로 본다).
+            // This is all of the fail-closed cleanup — the connection registry does not exist yet (stage 6, `build_daemon_wiring`).
+            // The record has not been written to daemon.json yet (stage 8), but the acquire in 2) already opened (existing) or created (new folder) the
+            //   file; dropping the guard leaves the old daemon's record as is, or a 0-byte file in a new folder. Both are overwritten by the next startup
+            //   (the reader sees 0 bytes as "not ready yet").
             tracing::error!(
-                "MCP 서버 기동 실패 — 제어 채널 없이는 데몬을 띄우지 않는다(fail-closed): {e}"
+                "MCP server startup failed — the daemon is not started without the control channel (fail-closed): {e}"
             );
             drop(listening);
             return Err(1);
         }
     };
 
-    // 6) AgentManager 배선.
+    // 6) AgentManager wiring.
     let wiring = build_daemon_wiring(&layout, control, flush_tx.clone(), idle_coalescer.clone());
-    // ★레지스트리는 `wiring` 이 계속 들고 있다가 accept loop 로 함께 넘어간다★ — 여기서 풀어 두면
-    //   짝을 어긋나게 넘길 여지가 생긴다(ADR-0129 `DaemonWiring`).
+    // `wiring` keeps holding the registry and hands it to the accept loop together — untying it would allow a mismatched pair (ADR-0129 `DaemonWiring`).
     let manager = wiring.manager.clone();
     manager_slot.set(manager.clone());
-    // 제어 라우트가 바꾼 명부를 붙어 있는 클라이언트가 보게 하는 배선(ADR-0132). ★이 한 줄이 빠지면★
-    //   `engram agent rename/new/move` 가 성공해도 대시보드 트리는 무관한 이벤트가 올 때까지 옛 명부를
-    //   보여 준다(에러도 로그도 없다).
+    // The wiring that lets attached clients see the roster the control route changed (ADR-0132). Without this line, `engram agent rename/new/move`
+    //   succeeds yet the dashboard tree shows the old roster until an unrelated event (no error, no log).
     roster_broadcast_slot.set(wiring.roster_broadcast());
-    // ★제어 동사의 실입구가 이 표다(ADR-0155)★ — 이 줄이 빠지면 `/control/agent` 는 요청마다 503 이다.
-    //   ★위 팬아웃 set 과의 순서에 의존하지 않는다★: 표가 쥐는 것은 팬아웃 값이 아니라 슬롯이라 통지
-    //   시점에 읽는다(`control::commands::make_daemon_table`).
-    // ★임대 포트는 아래 수락 루프에 넘기는 **그 `multiview`** 다(ADR-0231)★ — `clone()` 은 같은 공유 상태를
-    //   가리키는 손잡이라 수락 루프와 한 표를 본다. ★새 `MultiViewState::new()` 를 꽂으면 틀린다★ — 빈 표라
-    //   버스·CLI 취소가 뷰어의 입력 임대를 조용히 무시한다.
+    // This table is the real entrance of control verbs (ADR-0155) — without it `/control/agent` is 503 on every request. It does not depend on
+    //   the order relative to the fanout set above: the table holds the slot, read at notification time (`control::commands::make_daemon_table`).
+    // The lease port is that `multiview` passed to the accept loop below (ADR-0231): `clone()` is a handle on the same shared state. A new
+    //   `MultiViewState::new()` is wrong — an empty table would make bus · CLI cancels silently ignore the viewer's input lease.
     command_table_slot.set(Arc::new(control::commands::make_daemon_table(
         manager.clone(),
         roster_broadcast_slot.clone(),
@@ -803,8 +747,7 @@ pub async fn run() -> Result<(), i32> {
         wiring.usage.clone(),
     )));
 
-    // 6.4) idle 게이트 조립 — ★턴 관측 자체는 코어가 출력 pump 에서 직접 적재하므로 여기서 배선할
-    //    것이 없다★.
+    // 6.4) idle gate assembly — turn observation is loaded directly by the core from the output pump, so nothing to wire here.
     let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
         flush_tx,
         idle_coalescer.clone(),
@@ -814,7 +757,7 @@ pub async fn run() -> Result<(), i32> {
         idle_notifier.clone(),
     ));
 
-    // 6.5) MessagingService 조립.
+    // 6.5) MessagingService assembly.
     let messaging = Arc::new(
         messaging_host::messaging_for_manager_gated(
             manager.clone(),
@@ -825,31 +768,28 @@ pub async fn run() -> Result<(), i32> {
     );
     messaging_slot.set(messaging.clone());
 
-    // 6.6) 유지보수 sweep task(데몬 수명 동안 도는 long-lived tokio task).
-    //    ★주기 = 60s(내부 선택 — 보고)★: TTL(24h)에 비해 촘촘해 만료가 크게 지연되지 않고, 극저
-    //    메시지율이라 부하가 무의미하다.
-    //    ★`spawn_blocking` 없이 async task 로 두는 근거★: 두 sweep 어느 쪽도 자식 stdin blocking write 를
-    //    하지 않는다(실제 주입은 도어벨을 받은 flush 레인 몫 — service.rs `deliver_notice` 주석). 그래서
-    //    abort 도 즉시 먹는다.
-    //    ★reply_by 하한과의 결합★: 기한 초과 판정 해상도가 곧 이 주기다 — ingress 의 `MIN_REPLY_BY_SECS`
-    //    (1분)가 이 값과 짝이므로, 주기를 바꾸면 그 하한도 함께 봐야 한다.
+    // 6.6) Maintenance sweep task (a long-lived tokio task for the daemon's lifetime).
+    //    Period = 60s (internal choice): dense against the TTL (24h) so expiry is not delayed much, negligible load at a low message rate.
+    //    An async task without `spawn_blocking`: neither sweep does a blocking write to child stdin (injection is the flush lane's job — service.rs
+    //    `deliver_notice` comment), so abort takes effect at once.
+    //    Coupling: the overdue decision's resolution is this period — ingress's `MIN_REPLY_BY_SECS` (1 minute) pairs with it; change both together.
     const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
     let sweep_messaging = messaging.clone();
     let sweep_busy = busy.clone();
     let sweep_task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
-        // 첫 tick 즉발을 건너뛴다(부팅 직후 파킹 없음 — 첫 주기 뒤부터 sweep).
+        // Skip the immediate first tick (no parking right after boot).
         ticker.tick().await;
         loop {
             ticker.tick().await;
             let now = std::time::Instant::now();
-            // 틱 본체의 패닉은 가둠 표시 밖이라 0.1) 의 패닉 훅이 데몬을 끝낸다(ADR-0292).
+            // A panic in the tick body is outside the containment mark, so the panic hook of 0.1) ends the daemon (ADR-0292).
             sweep_messaging.sweep(now);
             sweep_busy.sweep_stale_busy(now);
         }
     });
 
-    // 6.7) flush worker task(sweep task 옆 — 종료 시 abort).
+    // 6.7) flush worker task (next to the sweep task — aborted on shutdown).
     let flush_worker = messaging_host::spawn_flush_worker(
         flush_rx,
         messaging_host::FlushWiring {
@@ -858,10 +798,10 @@ pub async fn run() -> Result<(), i32> {
         },
     );
 
-    // 7) auth 비교용 토큰을 Arc 로 보관(daemon.json 에 token 을 move 하므로 그 전에 공유본을 뜸).
+    // 7) Keep the token for auth comparison in an Arc (the token moves into daemon.json, so a shared copy is taken first).
     let expected_token = Arc::new(token.clone());
 
-    // 8) daemon.json 기록.
+    // 8) Write daemon.json.
     let start_time = engram_dashboard_platform::process::current_process_start_time().unwrap_or(0);
     let info = crate::portfile::DaemonInfo {
         pid: std::process::id(),
@@ -871,10 +811,10 @@ pub async fn run() -> Result<(), i32> {
         protocol_version: PROTOCOL_VERSION,
         start_time,
     };
-    // ★2)에서 얻은 그 핸들로 쓴다(ADR-0135)★: 임시 파일 + rename 은 우리가 삭제 공유를 닫은 채
-    //   쥐고 있어 거부되고, 무엇보다 획득보다 먼저 쓰면 두 데몬의 쓰기가 섞인다.
+    // Write with the handle obtained in 2) (ADR-0135): a temp file + rename is refused because we hold the file with delete sharing closed, and
+    //   writing before acquisition would mix two daemons' writes.
     if let Err(e) = guard.publish(&info) {
-        tracing::error!("{DAEMON_FILE} 기록 실패: {e}");
+        tracing::error!("{DAEMON_FILE} write failed: {e}");
         return Err(1);
     }
     tracing::info!(
@@ -882,26 +822,23 @@ pub async fn run() -> Result<(), i32> {
         pid = info.pid,
         protocol_version = PROTOCOL_VERSION,
         path = %daemon_path.display(),
-        "데몬 시작 — {DAEMON_FILE} 기록 완료"
+        "daemon started — {DAEMON_FILE} written"
     );
 
-    // ★사라진 파일을 다시 발행하는 주기 작업을 되살리지 마라(ADR-0135 결정 4)★: 이 파일은 우리가
-    //   쥐고 있는 동안 지워지지 않으므로 되살릴 일이 없고, 실행 중인 앱이 사용자가 방금 지운 파일을
-    //   말없이 다시 쓰는 동작은 선례 전부에서 버그로 신고돼 있다.
+    // Do not revive a periodic job that republishes a vanished file (ADR-0135 decision 4): the file cannot be deleted while we hold it, and an app
+    //   silently rewriting a file the user just deleted is reported as a bug in every precedent.
 
-    // 9) ★자동 부팅 resume 기본 OFF (2026-07-09, 사용자 결정)★ — 부팅 시 auto_restore=true 프로필을
-    //   전부 되살리던 mgr.restore_all() 을 비활성화한다. 기본 = "부팅 자동 복원 안 함"(이벤트성으로
-    //   꼭 떠야 하는 일부만 명시 복원). auto_restore 필드·reaper disposition·restore_all() 구현은
-    //   그대로 유지(호출만 끔) — 특정 에이전트 이벤트성 복원은 향후 명시 command(RestoreAgents 류)에서
-    //   restore_all() 을 부른다. handle 은 아래 abort/await 계약 유지용 no-op.
-    //   (ADR-0016 "부팅 복원" 기본을 이 stopgap 이 뒤집음 — 정식 opt-in 설계 시 ADR 로 박을 것.)
+    // 9) Automatic boot resume default OFF (2026-07-09, user decision): `mgr.restore_all()`, which revived every auto_restore=true profile at boot,
+    //   is not called. The auto_restore field · reaper disposition · restore_all() implementation stay; event-driven restore of specific agents will
+    //   call restore_all() from an explicit command in the future. `handle` is a no-op kept for the abort/await contract below.
+    //   (This stopgap reverses the ADR-0016 "boot restore" default — record it in an ADR when designing the proper opt-in.)
     let restore_handle = tokio::task::spawn_blocking(|| {});
 
-    // 10) 종료 신호 채널(watch). StopDaemon 명령이 이 watch 로 종료를 트리거한다.
+    // 10) Shutdown signal channel (watch); the StopDaemon command triggers shutdown through it.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // 11) accept loop.
-    tracing::info!("accept loop 시작(WS 핸들링 활성)");
+    tracing::info!("accept loop started (WS handling active)");
     run_accept_loop(
         listening,
         wiring,
@@ -913,53 +850,52 @@ pub async fn run() -> Result<(), i32> {
         expected_token,
         shutdown_tx,
         shutdown_rx,
-        true, // 운영: Ctrl-C graceful 종료 활성
+        true, // production: Ctrl-C graceful shutdown enabled
         KeepaliveConfig::default(),
     )
     .await;
 
-    // 12) graceful 종료.
+    // 12) graceful shutdown.
     restore_handle.abort();
     let _ = restore_handle.await;
 
-    // ★남은 만료 처리는 불요★: 파킹은 인메모리라 프로세스 종료 = 상태 소멸이다(spec §0 "영속화 없음").
-    //    sweep 은 blocking write 를 하지 않으므로(6.6) abort 가 항상 즉시 먹는다 — flush worker 와 다르다.
+    // No remaining expiry processing: parking is in-memory, so process exit = state gone (spec §0 "no persistence"); the sweep does no blocking
+    //    writes (6.6), so abort takes effect at once — unlike the flush worker.
     sweep_task.abort();
     let _ = sweep_task.await;
 
-    // ★종료 순서(BLOCK — round-3 finding 1)★: 에이전트 정리(shutdown_all)를 **flush worker 종료보다
-    //   먼저** 한다. 자식이 살아 stdin 을 안 비우면 flush 의 blocking write 는 abort 로 끊기지 않으므로,
-    //   순서를 뒤집으면 데몬 종료가 영영 hang 한다(잔여 분석 = `FlushWorkerHandles::shutdown`).
+    // Shutdown order (BLOCK): agent cleanup (shutdown_all) comes before ending the flush worker. A live child that does not drain stdin keeps the
+    //   flush's blocking write uncut by abort, so the reverse order would hang shutdown forever (`FlushWorkerHandles::shutdown`).
     let mgr = manager.clone();
     if let Err(e) = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await {
-        tracing::warn!("shutdown_all join 실패: {e}");
+        tracing::warn!("shutdown_all join failed: {e}");
     }
 
     flush_worker.shutdown().await;
 
-    // ADR-0086: 제어 채널 MCP 서버 graceful 종료(에이전트 정리 후 — 남은 세션도 함께 정리된다).
+    // ADR-0086: graceful shutdown of the control channel MCP server (after agent cleanup — remaining sessions are cleaned up with it).
     if let Some(handle) = mcp_server_handle.take() {
         handle.shutdown().await;
-        tracing::info!("MCP 서버 종료 완료");
+        tracing::info!("MCP server shutdown complete");
     }
 
-    // daemon.json 은 남겨둔다 — 다음 부팅이 stale 판정으로 무시한다.
-    tracing::info!("데몬 종료 완료");
+    // daemon.json is left behind — the next boot ignores it by the stale decision.
+    tracing::info!("daemon shutdown complete");
     Ok(())
 }
 
-// ── 테스트용 서버 기동 헬퍼 ───────────────────────────────────────────────────────
-// 이 구획의 항목은 전부 기능 `test-support` 뒤에 둔다(운영 빌드에 싣지 않는다) — 새 항목도 같은 cfg 를 단다.
-//   빠뜨리면 기능 없는 빌드에서 쓰이지 않는 코드 경고가 나거나 테스트 비계가 다시 공개 API 로 나간다.
+// ── test server startup helpers ───────────────────────────────────────────────────────
+// Every item in this section is behind the `test-support` feature (not shipped in production builds) — new items get the same cfg, or
+//   unused-code warnings appear without the feature and test scaffolding leaks as public API.
 // ADR-0286
 
-/// in-process 로 뜬 테스트 서버 핸들. 좀비 PTY 를 남기지 않으려면 테스트가 끝에서 반드시
-/// `shutdown().await` 를 부른다 — drop 은 accept loop 만 끝내고 자식 정리를 하지 않는다.
+/// The handle of a test server launched in-process. Tests must call `shutdown().await` at the end — drop only ends the accept loop and
+/// does not clean up children (zombie PTYs).
 ///
-/// 단일 인스턴스 가드·daemon.json 은 ★의도적으로 생략★(실프로세스 전용 관심사). 그 경로는
-/// `tests/ws_e2e.rs` 의 #[ignore]/harness 가 실제 .exe 로 검증한다.
+/// The single instance guard · daemon.json are intentionally omitted (real-process-only); that path is verified with a real .exe by the
+/// #[ignore]/harness of `tests/ws_e2e.rs`.
 ///
-/// 기능 `test-support` 를 켠 빌드에만 있다 — 다른 패키지의 시험은 데몬 dev 의존에 그 기능을 켠다.
+/// Exists only with the `test-support` feature — tests of other packages turn it on in their daemon dev dependency.
 #[cfg(feature = "test-support")]
 pub struct TestServerHandle {
     pub port: u16,
@@ -972,8 +908,8 @@ pub struct TestServerHandle {
 
 #[cfg(feature = "test-support")]
 impl TestServerHandle {
-    /// 서버를 graceful 하게 내린다. **전 에이전트 kill → flush worker 종료** 순서가 load-bearing 이며
-    /// (근거 = run() 종료 주석), 좀비 PTY 방지를 위해 shutdown_all 까지 동기 대기한다.
+    /// Brings the server down gracefully. The order kill all agents → end the flush worker is load-bearing (basis = the run() shutdown
+    /// comment); it waits synchronously through shutdown_all to prevent zombie PTYs.
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
         let _ = self.accept_handle.await;
@@ -994,8 +930,7 @@ pub async fn start_test_server() -> std::io::Result<TestServerHandle> {
     start_test_server_with_store(store).await
 }
 
-/// keepalive 주입형 — keepalive(half-open 감지) 동작을 검증하는 테스트가 짧은 ping/idle 값을 끼운다
-/// (운영 기본값이면 그 테스트가 수십 초 걸린다).
+/// The keepalive-injecting form — keepalive (half-open detection) tests slot in short ping/idle values (production defaults would take tens of seconds).
 #[cfg(feature = "test-support")]
 pub async fn start_test_server_with_keepalive(
     keepalive: KeepaliveConfig,
@@ -1004,7 +939,7 @@ pub async fn start_test_server_with_keepalive(
     start_test_server_inner(store, keepalive).await
 }
 
-/// store 주입형 — 복원·persist 동작을 검증하고 싶은 테스트가 store 를 직접 끼운다.
+/// The store-injecting form — restore · persist tests slot in the store directly.
 #[cfg(feature = "test-support")]
 pub async fn start_test_server_with_store(
     store: Arc<dyn ProfileStore>,
@@ -1020,26 +955,25 @@ async fn start_test_server_inner(
     let listening = Listening::bind_loopback().map_err(std::io::Error::other)?;
     let port = listening.port();
 
-    // getrandom::Error 는 std::error::Error 미구현이라 메시지로 변환해 io::Error 로 감싼다.
+    // getrandom::Error does not implement std::error::Error, so it is converted to a message and wrapped in io::Error.
     let token =
         generate_token().map_err(|e| std::io::Error::other(format!("token gen failed: {e}")))?;
     let expected_token = Arc::new(token.clone());
 
     let multiview = MultiViewState::new();
-    // ADR-0096: WS dispatch(SetEnvelopeFormat)가 쓰는 봉투 포맷 전역 상태 거처. 테스트 서버는 MCP 서버·
-    //   제어 채널을 배선하지 않으므로(아래 Noop) accept loop 전용 standalone registry 를 새로 만든다 —
-    //   같은 Arc 라 dispatch 가 쓴 값을 그 서버 수명 동안 관측할 수 있다(운영은 control_registry 공유).
+    // ADR-0096: the home of the envelope format global state used by WS dispatch (SetEnvelopeFormat). The test server wires no MCP server ·
+    //   control channel (Noop below), so a new standalone registry serves only the accept loop — the same Arc, so the value dispatch wrote
+    //   is observable for that server's lifetime (production shares control_registry).
     let control_registry = Arc::new(control::registry::ControlRegistry::new());
-    // WS 테스트는 제어 채널 미사용 → Noop(제어 채널 통합 테스트는 control::mcp_server 쪽이 담당).
+    // WS tests do not use the control channel → Noop (control channel integration tests are on the control::mcp_server side).
     let control: Arc<dyn engram_dashboard_agent::types::ControlChannel> =
         Arc::new(engram_dashboard_agent::types::NoopControlChannel);
-    // WS 테스트는 send/flush 를 검증하지 않지만 status sink wrapper 가 채널을 요구하므로 메시징 배선을
-    //   함께 세운다.
+    // WS tests do not verify send/flush, but the status sink wrapper requires the channel, so the messaging wiring is set up with it.
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
-    // ★조회기 0개 — 이 서버에서는 어떤 경로로도 실 CLI 가 뜨지 않는다★(구독·⟳ 는 칸이 없어 조회를 시작할 수 없다).
-    //   사용량 wire 의 연결 계층 시험은 가짜 조회기를 단 서비스로 `agent_conn` 에서 잰다.
+    // 0 probers — on this server no real CLI starts by any path (subscription · ⟳ have no cells, so no query can start). The connection-layer
+    //   tests of the usage wire are in `agent_conn` with a service carrying fake probers.
     let wiring = build_daemon_wiring_with_store(
         store,
         UsageInputs {
@@ -1055,21 +989,20 @@ async fn start_test_server_inner(
         idle_coalescer.clone(),
     );
     let manager = wiring.manager.clone();
-    // ★제어 동사의 실입구를 운영과 같은 자리에 꽂는다★(ADR-0155): 이 표가 버스 배달의 1단계이자 발견
-    //   목록의 자기 몫이다. 안 꽂으면 이 서버에서만 `agent.*` 가 「모르는 명령」으로 되돌아가고, WS 통합
-    //   시험은 그 사실을 **운영이 그렇다는 뜻으로** 읽는다.
+    // Plug the real entrance of control verbs in the same place as production (ADR-0155): this table is stage 1 of bus delivery and the discovery
+    //   list's own part. Unplugged, `agent.*` would come back as "unknown command" only on this server, and the WS integration tests would read
+    //   that as production behavior.
     let command_table_slot = Arc::new(control::mcp_server::CommandTableSlot::new());
     let roster_broadcast_slot = Arc::new(control::mcp_server::RosterBroadcastSlot::new());
     roster_broadcast_slot.set(wiring.roster_broadcast());
-    // 임대 포트 = 수락 루프와 같은 공유 상태의 손잡이(`clone()`) — 새 `MultiViewState::new()` 면 틀린다(운영 조립 주석).
+    // Lease port = a handle (`clone()`) of the same shared state as the accept loop — a new `MultiViewState::new()` is wrong (see production assembly).
     command_table_slot.set(Arc::new(control::commands::make_daemon_table(
         manager.clone(),
         roster_broadcast_slot,
         Arc::new(multiview.clone()),
         wiring.usage.clone(),
     )));
-    // 이 서버는 MCP 제어 평면을 배선하지 않으므로(위 Noop) 버스를 나눠 쓸 상대가 없다 — accept loop 가
-    //   유일한 소비자다. 조립 자체는 운영과 같은 함수를 쓴다.
+    // This server does not wire the MCP control plane (Noop above), so the accept loop is the only consumer of the bus; the assembly uses the same function as production.
     let (command_bus, command_sweeper) = command_delivery::CommandBus::new(
         command_roster::CommandRoster::new(),
         command_delivery::CommandDeliveries::new(),
@@ -1077,7 +1010,7 @@ async fn start_test_server_inner(
             command_table_slot,
         )),
     );
-    // ★배선을 운영 run() 과 동일하게 유지한다★ — "테스트 서버에서만 게이트가 없는" 갈래를 만들지 않는다.
+    // Keep the wiring the same as production run() — no branch "with no gate only on the test server".
     let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
         flush_tx,
         idle_coalescer.clone(),
@@ -1117,7 +1050,7 @@ async fn start_test_server_inner(
                 expected_token,
                 shutdown_tx,
                 shutdown_rx,
-                false, // 테스트: Ctrl-C 미설치(watch 로만 종료)
+                false, // test: Ctrl-C not installed (shutdown only via watch)
                 keepalive,
             )
             .await;
@@ -1134,7 +1067,7 @@ async fn start_test_server_inner(
     })
 }
 
-/// 운영의 `FileProfileStore` 를 대신해 테스트 격리(디스크/Embedded 비오염)를 만든다.
+/// Stands in for production's `FileProfileStore` for test isolation (no disk/Embedded pollution).
 #[cfg(feature = "test-support")]
 #[derive(Default)]
 struct MemProfileStore {
@@ -1159,9 +1092,8 @@ impl ProfileStore for MemProfileStore {
 mod tests {
     use super::*;
 
-    /// 운영 status sink 사슬에 세 고리가 다 든다 — 사용량 관측은 서비스까지 가서 구독한 연결이 받고(전-연결로는
-    /// 안 흐른다) 상태 사건은 팬아웃까지 간다. 고리 차례는 생성자가 타입으로 묶는다(`MessagingFlushSink::new` 가
-    /// `UsageObserveSink` 를 받는다).
+    /// All three links are in the production status sink chain — usage observations go as far as the service and the subscribed connections (not
+    /// all connections), state events as far as the fanout. Link order is tied by type in the constructors (`MessagingFlushSink::new` takes a `UsageObserveSink`).
     #[test]
     fn the_status_chain_feeds_the_usage_service_and_the_fanout() {
         use crate::conn_port::{Frame, FrameSink};
@@ -1175,7 +1107,7 @@ mod tests {
         let frames: Arc<dyn FrameSink> = Arc::new(test_doubles::FakeFrameSink::new(tx));
         usage.attach(1, agent_conn::ConnUsageOutlet::new(frames));
         usage.replace_subscription(1, [real.key()].into());
-        assert!(rx.try_recv().is_ok(), "첫 한 장");
+        assert!(rx.try_recv().is_ok(), "the first sheet");
 
         let fanout = Arc::new(test_doubles::RecordingFanout::new());
         let (flush_tx, _flush_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1199,7 +1131,7 @@ mod tests {
             limits_unavailable: None,
         });
         let Ok(Frame::Text(text)) = rx.try_recv() else {
-            panic!("관측이 서비스를 거쳐 구독한 연결에 닿아야 한다");
+            panic!("the observation must reach the subscribed connection through the service");
         };
         assert!(text.contains("UsageLimitsUpdated"), "{text}");
         assert!(fanout.texts().is_empty(), "{:?}", fanout.texts());
@@ -1211,10 +1143,10 @@ mod tests {
     #[test]
     fn token_is_64_hex_chars() {
         let t = generate_token().expect("token gen");
-        assert_eq!(t.len(), 64, "256-bit = 32B → hex 64자");
+        assert_eq!(t.len(), 64, "256-bit = 32B → 64 hex chars");
         assert!(
             t.chars().all(|c| c.is_ascii_hexdigit()),
-            "hex 문자만 포함해야 함"
+            "must contain only hex characters"
         );
     }
 
@@ -1312,7 +1244,7 @@ mod tests {
 
     /// ★The production assembly plugs the real kits★ (WS tests run the Noop kits, so nothing else sees this): built
     /// over a temp data folder, it sweeps what an earlier daemon left in the launch folder, and the plugged service
-    /// launches a plain claude agent with 「기본」 from the repo `builtin\` — a real plan whose merged instructions file,
+    /// launches a plain claude agent with the built-in default preset (`engram:/default`) from the repo `builtin\` — a real plan whose merged instructions file,
     /// in this launch's volatile folder, is the shipped priming. No process is spawned.
     #[test]
     fn the_production_wiring_plugs_the_library_with_the_builtin_priming() {
@@ -1346,7 +1278,9 @@ mod tests {
             false,
         );
         let scope = library.begin_launch();
-        let plan = library.check_in(&scope, &profile).expect("「기본」 passes");
+        let plan = library
+            .check_in(&scope, &profile)
+            .expect("the built-in default preset passes");
         let kit = library
             .prepare_in(&scope, plan, profile.id, 1)
             .expect("prepared");
@@ -1469,7 +1403,7 @@ mod tests {
     }
 
     /// The production assembly over `layout`. ★Built inside a log capture★ — a boot log callsite is then hit only inside
-    /// one ([`log_capture`] 「관측 조건」 ①).
+    /// one ([`log_capture`] "Observation conditions" ①).
     fn production_wiring(layout: &DataLayout) -> DaemonWiring {
         let (flush_tx, _flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wiring, _logged) = log_capture::capture_loud(|| {

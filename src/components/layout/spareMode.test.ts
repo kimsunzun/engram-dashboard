@@ -26,7 +26,7 @@ const ticks = async (): Promise<void> => {
 
 function emit(event: string, payload: unknown): void {
   const l = listeners.get(event)
-  if (!l) throw new Error(`${event} 구독 없음`)
+  if (!l) throw new Error(`no subscription for ${event}`)
   l.handler({ payload })
 }
 
@@ -69,8 +69,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('watchSpareMode — 듣기 · 창 모드', () => {
-  it('spare:adopted 하나만 자기 창 대상으로 건 뒤 window_role 을 adoptable: true 로 묻는다', async () => {
+describe('watchSpareMode — listening · window mode', () => {
+  it('hooks only spare:adopted on its own window, then asks window_role with adoptable: true', async () => {
     await watched()
     expect(order).toEqual([`listen:${EVT_SPARE_ADOPTED}`, `invoke:${CMD_WINDOW_ROLE}`])
     expect(listeners.get(EVT_SPARE_ADOPTED)?.options).toEqual({ target: LABEL })
@@ -78,7 +78,7 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
     expect(modes).toEqual([normal()])
   })
 
-  it('듣기가 걸린 뒤에야 window_role 을 묻는다', async () => {
+  it('asks window_role only after the listening is hooked', async () => {
     let finish: (off: () => void) => void = () => {}
     listenMock.mockImplementationOnce(async (event: string, handler: (e: { payload: unknown }) => void, options?: unknown) => {
       order.push(`listen:${event}`)
@@ -99,11 +99,11 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
   const REPLIES: { name: string; reply: () => Promise<unknown>; out: ModeChange; warns: boolean }[] = [
     { name: 'spare → spare', reply: async () => ({ role: 'spare', generation: null }), out: SPARE, warns: false },
     { name: 'model → normal', reply: async () => ({ role: 'model', generation: null }), out: normal(), warns: false },
-    { name: 'model + 번호 → normal + 그 번호', reply: async () => ({ role: 'model', generation: 5 }), out: normal(5), warns: false },
-    { name: 'model + 번호 0 → normal + 0', reply: async () => ({ role: 'model', generation: 0 }), out: normal(0), warns: false },
+    { name: 'model + number → normal + that number', reply: async () => ({ role: 'model', generation: 5 }), out: normal(5), warns: false },
+    { name: 'model + number 0 → normal + 0', reply: async () => ({ role: 'model', generation: 0 }), out: normal(0), warns: false },
     { name: 'unknown → normal', reply: async () => ({ role: 'unknown', generation: null }), out: normal(), warns: false },
     {
-      name: '실패 → normal(경고 로그)',
+      name: 'failure → normal (warning log)',
       reply: async () => {
         throw new Error('gone')
       },
@@ -112,20 +112,20 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
     },
   ]
   for (const c of REPLIES) {
-    it(`window_role 답 ${c.name}`, async () => {
+    it(`window_role answer ${c.name}`, async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       invokeMock.mockImplementation(c.reply)
       await watched()
       expect(modes).toEqual([c.out])
       if (c.warns) {
-        expect(warn).toHaveBeenCalledWith(`[spareMode] ${CMD_WINDOW_ROLE} 실패 — 보통으로 그린다:`, expect.any(Error))
+        expect(warn).toHaveBeenCalledWith(`[spareMode] ${CMD_WINDOW_ROLE} failed — drawing as normal:`, expect.any(Error))
       } else {
         expect(warn).not.toHaveBeenCalled()
       }
     })
   }
 
-  it('window_role = spare → spare · 그 뒤 spare:adopted 마다 normal + 그 번호를 알린다', async () => {
+  it('window_role = spare → spare · after that on each spare:adopted notifies normal + that number', async () => {
     invokeMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
     await watched()
     expect(modes).toEqual([SPARE])
@@ -135,7 +135,7 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
   })
 
   // Even if the body is broken, adoption is accepted as normal mode — only the number is lost.
-  it('번호가 없는 spare:adopted 몸도 normal 이다(번호 null)', async () => {
+  it('a spare:adopted body without a number is also normal (number null)', async () => {
     invokeMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
     await watched()
     emit(EVT_SPARE_ADOPTED, null)
@@ -143,7 +143,7 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
     expect(modes).toEqual([SPARE, normal(), normal()])
   })
 
-  it('정리하면 듣기를 떼고 그 뒤 사건에 반응하지 않는다', async () => {
+  it('on cleanup it detaches the listening and does not react to later events', async () => {
     await watched()
     stop?.()
     stop = null
@@ -154,7 +154,7 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
     expect(modes).toEqual([normal()])
   })
 
-  it('window_role 답이 정리 뒤에 오면 알리지 않는다', async () => {
+  it('if the window_role answer comes after cleanup it does not notify', async () => {
     let answer: (v: unknown) => void = () => {}
     invokeMock.mockImplementation(
       () =>
@@ -171,7 +171,7 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
     expect(modes).toEqual([])
   })
 
-  it('듣기가 정리 뒤에 걸리면 곧바로 떼고 window_role 을 묻지 않는다', async () => {
+  it('if the listening is hooked after cleanup it detaches at once and does not ask window_role', async () => {
     let finish: (off: () => void) => void = () => {}
     listenMock.mockImplementationOnce(
       () =>
@@ -192,7 +192,7 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
 })
 
 // ── one direction (TRD S21-slot-docking §3-9 · §9-2) — the answer and the event come by different paths and have no order ──
-describe('watchSpareMode — 모드는 한 방향', () => {
+describe('watchSpareMode — the mode is one direction', () => {
   function pendingRole(): (reply: unknown) => void {
     let answer: (reply: unknown) => void = () => {}
     invokeMock.mockImplementation(
@@ -204,7 +204,7 @@ describe('watchSpareMode — 모드는 한 방향', () => {
     return reply => answer(reply)
   }
 
-  it('채택을 본 뒤 늦게 온 window_role 답 spare 는 대기로 되돌리지 않는다', async () => {
+  it('a late window_role answer spare after seeing adoption does not return it to waiting', async () => {
     const answer = pendingRole()
     await watched()
     emit(EVT_SPARE_ADOPTED, { generation: 4 })
@@ -213,7 +213,7 @@ describe('watchSpareMode — 모드는 한 방향', () => {
     expect(modes).toEqual([normal(4)])
   })
 
-  it('채택을 본 뒤 늦게 온 답 model(+ 번호)도 다시 알리지 않는다', async () => {
+  it('a late answer model (+ number) after seeing adoption also does not notify again', async () => {
     const answer = pendingRole()
     await watched()
     emit(EVT_SPARE_ADOPTED, { generation: 4 })
@@ -222,7 +222,7 @@ describe('watchSpareMode — 모드는 한 방향', () => {
     expect(modes).toEqual([normal(4)])
   })
 
-  it('답 model + 번호 뒤에 온 사건은 같은 번호로 다시 알린다(같은 값 거듭)', async () => {
+  it('an event after the answer model + number notifies again with the same number (the same value repeated)', async () => {
     invokeMock.mockImplementation(async () => ({ role: 'model', generation: 6 }))
     await watched()
     emit(EVT_SPARE_ADOPTED, { generation: 6 })
@@ -231,7 +231,7 @@ describe('watchSpareMode — 모드는 한 방향', () => {
 })
 
 // ── listening failure (I28) — a waiting window without listening stays empty even when adopted ──
-describe('watchSpareMode — spare:adopted 듣기 실패', () => {
+describe('watchSpareMode — spare:adopted listening failure', () => {
   function failListen() {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     listenMock.mockImplementationOnce(async () => {
@@ -240,11 +240,11 @@ describe('watchSpareMode — spare:adopted 듣기 실패', () => {
     return error
   }
 
-  it('오류 로그 · window_role 을 adoptable: false 로 묻는다', async () => {
+  it('error log · asks window_role with adoptable: false', async () => {
     const error = failListen()
     await watched()
     expect(error).toHaveBeenCalledWith(
-      `[spareMode] ${EVT_SPARE_ADOPTED} 구독 실패 — 대기 모드로 들지 않는다(adoptable: false):`,
+      `[spareMode] ${EVT_SPARE_ADOPTED} subscription failed — not entering waiting mode (adoptable: false):`,
       expect.any(Error),
     )
     expect(order).toEqual([`invoke:${CMD_WINDOW_ROLE}`])
@@ -253,12 +253,12 @@ describe('watchSpareMode — spare:adopted 듣기 실패', () => {
   })
 
   const REPLIES: { name: string; reply: unknown; out: ModeChange }[] = [
-    { name: 'spare 가 와도 normal', reply: { role: 'spare', generation: null }, out: normal() },
-    { name: 'unknown(셸이 풀의 창을 닫음) → normal', reply: { role: 'unknown', generation: null }, out: normal() },
-    { name: 'model + 번호 → normal + 그 번호', reply: { role: 'model', generation: 2 }, out: normal(2) },
+    { name: 'normal even if spare comes', reply: { role: 'spare', generation: null }, out: normal() },
+    { name: 'unknown (the shell closed the pool window) → normal', reply: { role: 'unknown', generation: null }, out: normal() },
+    { name: 'model + number → normal + that number', reply: { role: 'model', generation: 2 }, out: normal(2) },
   ]
   for (const c of REPLIES) {
-    it(`답 ${c.name}`, async () => {
+    it(`answer ${c.name}`, async () => {
       failListen()
       invokeMock.mockImplementation(async () => c.reply)
       await watched()
@@ -267,7 +267,7 @@ describe('watchSpareMode — spare:adopted 듣기 실패', () => {
   }
 
   // If a cleaned-up watch asks anyway, the shell closes that window even if StrictMode's second watch attached listening.
-  it('정리 뒤에 듣기가 실패하면 window_role 을 묻지 않는다', async () => {
+  it('if the listening fails after cleanup it does not ask window_role', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     let fail: (err: Error) => void = () => {}
     listenMock.mockImplementationOnce(

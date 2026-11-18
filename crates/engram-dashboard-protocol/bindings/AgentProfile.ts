@@ -5,45 +5,45 @@ import type { RestartPolicy } from "./RestartPolicy";
 
 export type AgentProfile = { id: string, name: string, 
 /**
- * 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). `Some` → 그대로 표시, `None` → cwd
- * basename 파생(기존 동작 불변). 프론트 트리가 `name` 대신
- * 이 값을 우선 표시명으로 쓴다(`name` 은 CreateProfile 이름/ad-hoc cwd 문자열이라 표시명 부적합).
+ * User-specified display name override (ADR-0061 enrichment — tree rename). `Some` → shown as is, `None` → derived from the cwd
+ * basename (existing behavior unchanged). The frontend tree uses this value as the preferred display name
+ * instead of `name` (`name` is the CreateProfile name/ad-hoc cwd string, so it is unsuitable as a display name).
  */
 display_name: string | null, 
 /**
- * 트리 계층 부모 프로필 id(ADR-0072). `Some` → 이 프로필은 해당 부모의 자식(트리 들여쓰기), `None` →
- * 최상위(루트). 1단 중첩·부모삭제=루트승격 규칙은 데몬(reparent).
- * `#[serde(default)]` 라 이 필드 없는 옛 wire → None(루트, PROTOCOL_VERSION 유지 — display_name 과 동형).
+ * Tree hierarchy parent profile id (ADR-0072). `Some` → this profile is a child of that parent (tree indentation), `None` →
+ * top level (root). One-level nesting·parent deletion=promotion to root rules are the daemon's (reparent).
+ * `#[serde(default)]`, so old wire without this field → None (root, PROTOCOL_VERSION kept — same shape as display_name).
  */
 parent_id: string | null, command: AgentSpawnCommand, 
 /**
- * 정규화된 cwd.
+ * Normalized cwd.
  */
 cwd: string, 
 /**
- * ※자격증명 금지(평문 persist).
+ * ※No credentials (persisted in plain text).
  */
 env: Array<[string, string]>, backend_session_id: string | null, old_session_ids: string[], epoch: number, auto_restore: boolean, restart_policy: RestartPolicy, 
 /**
- * 크래시 가드 카운터(수동 재시작 시 0 리셋). **예약(reserved)** — 동작 미구현, ADR-0016 유효.
+ * Crash guard counter (reset to 0 on manual restart). **Reserved** — behavior not implemented, ADR-0016 in effect.
  */
 restart_count: number, 
 /**
- * Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속, 수동 깨우기 전까지 자동복원 제외(ADR-0016).
- * **예약(reserved)** — 동작 미구현이나 ADR-0016에서 유효, 제거 금지(버전 bump 유발).
+ * Failed (auto-restore suspend) reason — persists across cold boot, excluded from auto-restore until a manual wake-up (ADR-0016).
+ * **Reserved** — behavior not implemented but in effect per ADR-0016, do not remove (causes a version bump).
  */
 failed_reason: string | null, 
 /**
- * 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0172). `null` = 실패 기록 없음.
+ * The kind of this item's last activation failure (ADR-0172). `null` = no failure record.
  *
- * ★데몬 메모리에만 산다★ — agent 쪽 원본이 `#[serde(skip)]` 이라 프로필 파일에 없고, 데몬을
- *   재기동하면 사라진다(앱 창 재시작은 견딘다).
- * `#[serde(default)]` 라 이 필드 없는 옛 wire → None(PROTOCOL_VERSION 유지 — display_name·
- * parent_id 와 동형 additive). 모르는 **값**은 `Other` 로 흡수된다(`AgentFailureKind` 의
- * `Deserialize` 구현 — 그 doc 이 왜 필요한지의 정본).
+ * ★Lives only in daemon memory★ — the agent-side original is `#[serde(skip)]`, so it is not in the profile file, and it disappears
+ *   when the daemon restarts (it survives an app window restart).
+ * `#[serde(default)]`, so old wire without this field → None (PROTOCOL_VERSION kept — the same additive shape as display_name·
+ * parent_id). An unknown **value** is absorbed into `Other` (the `Deserialize` impl of `AgentFailureKind` — that doc is
+ * canonical for why it is needed).
  */
 last_failure: AgentFailureKind | null, created_at: bigint, last_active: bigint, 
 /**
- * 마지막 프로세스 기동 시각(기록·디버깅용, 리셋 판정엔 미사용).
+ * Last process start time (for records·debugging, not used for the reset decision).
  */
 last_start_at: number | null, };

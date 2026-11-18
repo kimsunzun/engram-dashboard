@@ -1,12 +1,11 @@
-//! The vendor-neutral vocabulary of usage-limit observations — made by backends and received by the daemon ([`crate::types::StatusSink::usage_observed`]).
+//! The vendor-neutral vocabulary of usage-limit observations — made by backends, received by the daemon
+//!   ([`crate::types::StatusSink::usage_observed`]).
 //!
-//! ★Do not put vendor names · policy (cooldown · deadline) here★ — each vendor's backend module carries them (ADR-0004
-//!   「백엔드 확장」). This module knows a vendor only as one opaque word.
-//! Shared producer-side tools live here too — field value normalization ([`used_pct_from_fraction`] etc.) · upstream string tools
-//! ([`display_text`]·[`has_word`]) · the grounds of an abnormal result and the upstream original text ([`UsageDetail`]·[`UpstreamText`]) · the decoder wrapper that blocks the pickup of agents that are not the
-//! default account ([`UsageGate`]).
-//! The seam of active query ([`UsageProbe`]·[`ProbeSpawner`]) and its real implementations ([`OsProbeSpawner`]·[`ScratchDir`]) are here too —
-//! each backend implements the vendor query on top of this seam.
+//! ★No vendor names · policy (cooldown · deadline) here★ — each vendor's backend module carries them (ADR-0004 「backend extension」); a
+//! vendor is one opaque word here. Shared producer-side tools live here too — field normalization ([`used_pct_from_fraction`] etc.) ·
+//! upstream string tools ([`display_text`]·[`has_word`]) · abnormal-result grounds and upstream original text
+//! ([`UsageDetail`]·[`UpstreamText`]) · the decoder wrapper blocking non-default-account pickup ([`UsageGate`]). The active-query seam
+//!   ([`UsageProbe`]·[`ProbeSpawner`]) and its real implementations ([`OsProbeSpawner`]·[`ScratchDir`]) are here too.
 // ADR-0004
 
 mod detail;
@@ -32,13 +31,13 @@ pub use process::{OsProbeSpawner, KILL_WAIT};
 pub use scratch::{sweep_stale_scratch, ScratchDir};
 pub use text::{display_text, has_word};
 
-/// An opaque word that points at a vendor — the receiving side does not interpret it and uses it only as an entry key.
+/// An opaque word that points at a vendor — the receiving side does not interpret it, only uses it as an entry key.
 ///
-/// ★The canonical spelling is the single `&'static str` the vendor declared★ — incoming words (wire lowercase · bus capitalized)
-///   are folded to that canonical form before being used as the key. A key made from an unfolded word makes the two entrances hit different entries.
-/// ★Accepting only `&'static str` is intended★: a string from disk · wire cannot make a key (unless leaked), so it has to go through the canonical form.
-///   Do not widen it to `String`. But literals cannot be blocked — only vendor declarations and test doubles should call `new`
-///   (the daemon calling it with a vendor literal violates ADR-0004).
+/// ★The canonical spelling is the single `&'static str` the vendor declared★ — incoming words (wire lowercase · bus capitalized) are
+///   folded to it before use as a key; an unfolded key makes the two entrances hit different entries.
+/// ★Only `&'static str` is accepted, on purpose — do not widen to `String`★: a string from disk · wire cannot make a key (unless leaked),
+///   so it must go through the canonical form. Literals cannot be blocked — only vendor declarations and test doubles should call `new`
+///   (the daemon doing so violates ADR-0004).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UsageVendorKey(&'static str);
 
@@ -52,9 +51,8 @@ impl UsageVendorKey {
     }
 }
 
-/// A word that tells accounts apart within the same vendor. ★For now it is always the [`Default`] value (`"default"` — the daemon env's default login)
-/// ★ — the field is laid down early so that a client attached to several daemons can tell where a value came from.
-/// That word goes out over the wire · to disk.
+/// A word telling accounts apart within one vendor. ★For now always the [`Default`] value (`"default"` — the daemon env's default login)★
+/// — the field is laid down early so a client attached to several daemons can tell where a value came from. It goes over the wire · to disk.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageAccountKey(String);
 
@@ -70,7 +68,6 @@ impl Default for UsageAccountKey {
     }
 }
 
-/// The key of one usage-state entry — `(벤더, 계정)`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageKey {
     pub vendor: UsageVendorKey,
@@ -79,8 +76,8 @@ pub struct UsageKey {
 
 /// An observation of one limit window.
 ///
-/// - `used_pct` = the percentage of the amount **used** (not the amount remaining). The producer normalizes it to a finite number 0–100 and carries it.
-/// - `resets_at` = the time that window resets, epoch seconds.
+/// - `used_pct` = percentage **used** (not remaining); the producer normalizes it to a finite 0–100.
+/// - `resets_at` = reset time, epoch seconds.
 /// - `None` in both fields = unknown, not 0.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowObs {
@@ -98,19 +95,17 @@ pub struct ScopedWindowObs {
 /// Where the observation came from. What a missing field means is unrelated to this ([`UsageObservation`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageSource {
-    /// Picked up from a conversation stream.
     Passive,
-    /// Received by query.
     Active,
 }
 
 /// One usage observation of one vendor.
 ///
-/// ★A missing field (`None`) means 「안 실렸다」 (not carried) regardless of source★ — the receiving side leaves the value it held as is
-///   (the same for `model_scoped` · `plan`). A null window in a query result is not 「없음」 (none) either.
-/// `model_scoped: Some` replaces the whole list — it is not merged per item. `Some(vec![])` is
-///   「모델별 창 없음」 (no per-model window) — the receiver empties the list it holds (the producer emits this when it read the container and it had 0 items).
-/// ★Does not carry the observation time★ — the receiving daemon stamps it. The producer (decoder) has no clock.
+/// ★A missing field (`None`) means 「not carried」 whatever the source★ — the receiving side keeps the value it held (same for
+///   `model_scoped` · `plan`); a null window in a query result is not 「none」 either.
+/// `model_scoped: Some` replaces the whole list, not per item; `Some(vec![])` = 「no per-model window」 — the receiver empties its list
+///   (emitted when the producer read the container and it had 0 items).
+/// ★The observation time is not carried★ — the receiving daemon stamps it; the producer (decoder) has no clock.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageObservation {
     pub vendor: UsageVendorKey,
@@ -119,12 +114,11 @@ pub struct UsageObservation {
     pub model_scoped: Option<Vec<ScopedWindowObs>>,
     pub plan: Option<String>,
     pub source: UsageSource,
-    /// `Some` = the query succeeded but upstream answered 「이 계정엔 한도 정보가 없다」 (this account has no limit information) — the value is its grounds (Claude
+    /// `Some` = the query succeeded but upstream answered 「this account has no limit information」 — the value is its grounds (Claude
     /// `rate_limits_available: false` — API key · Bedrock · Vertex · a token without profile permission · logged out).
-    /// If `Some`, the window fields (`five_hour` · `weekly` · `model_scoped`) are all `None` and `source` is
-    /// `Active` — a promise kept by the maker. The receiver empties all window values and folds into the 「정보 없음」 (no information)
-    /// state — it is not a failure (a failure leaves the held values as they are).
-    /// A `Passive` observation is always `None`.
+    /// If `Some`, the window fields (`five_hour` · `weekly` · `model_scoped`) are all `None` and `source` is `Active` — a promise kept by
+    /// the maker. The receiver empties all window values and folds into 「no information」 — not a failure (a failure keeps held values). A
+    ///   `Passive` observation is always `None`.
     pub limits_unavailable: Option<UsageDetail>,
 }
 
@@ -172,7 +166,7 @@ mod tests {
         assert_eq!(
             sink.calls.load(Ordering::SeqCst),
             0,
-            "기본 구현이 다른 훅으로 새면 안 된다"
+            "the default implementation must not leak into another hook"
         );
     }
 
@@ -182,8 +176,7 @@ mod tests {
         assert_eq!(UsageAccountKey::default().as_str(), "default");
     }
 
-    /// The daemon's subscription set (`BTreeSet`) iterates in this order — it must be string order, not the word's address, so the same word
-    /// becomes one element and comparing sets works.
+    /// The daemon's subscription set (`BTreeSet`) iterates in this order — string order, not the word's address, so one word is one element.
     #[test]
     fn vendor_keys_order_as_their_words() {
         let mut keys = vec![
@@ -200,7 +193,7 @@ mod tests {
         assert_eq!(
             UsageVendorKey::new(leaked).cmp(&UsageVendorKey::new("a-vendor")),
             std::cmp::Ordering::Equal,
-            "다른 주소의 같은 낱말은 같은 키다"
+            "the same word at a different address is the same key"
         );
     }
 }

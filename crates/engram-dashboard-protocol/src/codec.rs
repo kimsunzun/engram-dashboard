@@ -1,18 +1,16 @@
 //! Binary frame codec of the output hot path (design §1-2).
 //!
-//! Fixed header: `[tag:1][agent_id:16][epoch:4 BE][seq:8 BE][raw payload...]`.
-//! No base64-in-JSON (33% inflation) and no serde parsing — sent as is on the WS binary opcode.
-//! Multi-byte values are big-endian (network byte order, consistent with mobile/other platforms). JS decodes with
-//! `DataView.getUint32(false)`/`getBigUint64(false)`.
+//! Header: `[tag:1][agent_id:16][epoch:4 BE][seq:8 BE][raw payload...]`; sent as is on the WS binary opcode (no base64-in-JSON, no serde
+//!   parsing).
+//! Multi-byte values are big-endian; JS decodes with `DataView.getUint32(false)`/`getBigUint64(false)`.
 
 use crate::ids::AgentId;
 
 /// payload = VT byte stream (console).
 pub const FRAME_TAG_TERMINAL_BYTES: u8 = 0;
 
-/// ADR-0045. payload = **self-describing serialized structured event**.
-/// The codec does not know the payload schema (opaque bytes) — the serialization format and event type are the daemon adapter's (B7)
-/// concern; here only the header is attached and the payload is carried as is. Same header layout as tag0.
+/// ADR-0045. payload = **self-describing serialized structured event**, opaque to the codec (format and event type belong to the daemon adapter, B7).
+/// Same header layout as tag0.
 pub const FRAME_TAG_STRUCTURED_EVENT: u8 = 1;
 
 pub const FRAME_HEADER_LEN: usize = 1 + 16 + 4 + 8;
@@ -72,11 +70,10 @@ pub struct FrameHeader {
     pub seq: u64,
 }
 
-/// Reads only the header fields — **does not tell tags apart**. The only rejection is when the header is too short (`TooShort`).
+/// Reads only the header fields — **does not tell tags apart**; the only rejection is a too-short header (`TooShort`).
 ///
-/// ★A frame that [`decode_frame`] rejected on an unknown tag can still be read here (ADR-0231)★ — agent id · incarnation
-/// marker · seq are fixed positions independent of the tag, so the shell uses those fields to make a same-seq [`crate::placeholder_error_frame`]
-/// and does not punch a hole in that view's seq stream.
+/// ★A frame [`decode_frame`] rejected on an unknown tag is still readable here (ADR-0231)★ — the fixed-position fields let the shell build a same-seq
+/// [`crate::placeholder_error_frame`].
 // ADR-0231
 pub fn peek_frame_header(buf: &[u8]) -> Result<FrameHeader, CodecError> {
     if buf.len() < FRAME_HEADER_LEN {

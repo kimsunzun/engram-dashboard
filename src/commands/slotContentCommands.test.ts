@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-// slotContentCommands 는 top-level 에서 tauri plugin-dialog·clientFactory 를 import 한다 → headless 에서 mock.
+// slotContentCommands imports tauri plugin-dialog·clientFactory at top level → mocked for headless.
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }))
 vi.mock('../api/clientFactory', () => ({
   agentClient: { spawnAgent: vi.fn(), killAgent: vi.fn() },
@@ -18,27 +18,27 @@ beforeEach(() => {
   useMonitoringPickerStore.setState({ target: null })
 })
 
-describe('slot.assignRunningAgent 등록·라우팅 (ADR-0067)', () => {
-  it('registry 에 등록된다', () => {
+describe('slot.assignRunningAgent registration·routing (ADR-0067)', () => {
+  it('is registered in the registry', () => {
     expect(getCommand('slot.assignRunningAgent')).toBeDefined()
-    // 리터럴 기대값 — t('agent.monitor')로 비교하면 production·assert 둘 다 ko.ts 참조라 순환(잘못된 값도 통과).
-    //   화면에 실제로 나가는 문자열을 리터럴로 못 박아 ko.ts 값 회귀를 잡는다.
+    // A literal expected value — comparing with t('agent.monitor') makes production and assert both reference ko.ts, which is circular (a wrong value passes too).
+    //   Pinning the string that actually goes on screen as a literal catches a regression of the ko.ts value.
     expect(getCommand('slot.assignRunningAgent')!.title()).toBe('에이전트 모니터링')
   })
 
-  it('run(ctx) 이 우클릭한 slot 좌표로 monitoringPickerStore.open 을 부른다', () => {
+  it('run(ctx) calls monitoringPickerStore.open with the right-clicked slot coordinates', () => {
     run('slot.assignRunningAgent', { viewId: 'view-1', slotId: 'slot-9' })
     expect(useMonitoringPickerStore.getState().target).toEqual({ viewId: 'view-1', slotId: 'slot-9' })
   })
 
-  it('viewId/slotId 없으면 throw(requireCoords fail-loud) + 스토어 미변경', () => {
-    expect(() => run('slot.assignRunningAgent', {})).toThrow(/viewId 필요/)
-    expect(() => run('slot.assignRunningAgent', { viewId: 'v' })).toThrow(/slotId 필요/)
+  it('without viewId/slotId → throw (requireCoords fail-loud) + store unchanged', () => {
+    expect(() => run('slot.assignRunningAgent', {})).toThrow(/viewId required/)
+    expect(() => run('slot.assignRunningAgent', { viewId: 'v' })).toThrow(/slotId required/)
     expect(useMonitoringPickerStore.getState().target).toBeNull()
   })
 })
 
-describe('슬롯 메뉴 기여 — 가시성 hideOn (ADR-0067)', () => {
+describe('slot menu contributions — visibility hideOn (ADR-0067)', () => {
   const allIds = (contentType: Parameters<typeof buildSlotMenu>[0]): string[] => {
     const flat: string[] = []
     for (const item of buildSlotMenu(contentType)) {
@@ -48,19 +48,19 @@ describe('슬롯 메뉴 기여 — 가시성 hideOn (ADR-0067)', () => {
     return flat
   }
 
-  it('empty·agent 슬롯엔 "에이전트 모니터링" 이 뜬다', () => {
+  it('"Monitor agent" shows on empty·agent slots', () => {
     expect(allIds('empty')).toContain('slot.assignRunningAgent')
     expect(allIds('agent')).toContain('slot.assignRunningAgent')
   })
 
-  it('소스 슬롯(agent_list)·사용량 슬롯엔 hideOn 으로 빠진다', () => {
+  it('source slots (agent_list) and the usage slot drop it through hideOn', () => {
     expect(allIds('agent_list')).not.toContain('slot.assignRunningAgent')
     expect(allIds('usage')).not.toContain('slot.assignRunningAgent')
   })
 })
 
-describe('스폰 정리 — "생성" 제거 회귀 (ADR-0067)', () => {
-  it('empty "새 콘텐츠" 서브메뉴는 트리·사용량만(생성 제거)', () => {
+describe('spawn cleanup — "Create" removal regression (ADR-0067)', () => {
+  it('the empty "New content" submenu has only tree · usage (Create removed)', () => {
     const container = buildSlotMenu('empty').find(i => i.id === 'container:slot.newContent')
     expect(container).toBeDefined()
     const childIds = container!.children!.map(c => c.id)

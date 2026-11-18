@@ -1,34 +1,13 @@
-//! The one stop path — [`DaemonClient::stop_daemon`] (TRD S21 trd-3-2-u5 §3-3). Tray 「데몬 끄기」 and app exit run it
-//! today; the band and the LLM command join in U5b. The wire half is `link::stop`.
-//!
-//! - ★One flight per client★ (R2): a stop while one runs joins it and gets its outcome; the first caller's plan rules.
-//!   An [`StopPlan::Exit`] joiner waits only its own bound.
-//! - ★One absolute clock★ (R13): every deadline is measured from flight start — the `daemon.json` read and its retries
-//!   included — on the client's one clock. Flight start = the instant the starting caller asked (the blocking wrapper
-//!   takes it before its spawn). [`StopPlan::User`] = 10 s graceful + 3 s margin, [`StopPlan::Exit`] = 3 s + 1 s.
-//! - Order (R1): the target resolved once (the kill uses this identity, never a re-read) → the stop client → "gone"
-//!   polled → the identity-checked kill (`User` only: at once when nothing was sent, at the graceful deadline when it
-//!   was; never without a start time) → the attach-only re-add fired, not awaited (not for `Exit`).
-//! - ★The shell's link is left alone★ (user decision 2026-11-10): it stays open through the flight, so the daemon's own
-//!   shutdown broadcasts (its agents exiting, the emptied agent list) reach the frontend. When the daemon exits the link
-//!   sees a normal disconnect and reconnects as always; its first failed reconnect shows band ①. ★Do not close it at
-//!   flight start★ — those broadcasts are then lost and the agent tree keeps showing running agents. Accepted instead: a
-//!   redial during the flight may reach the exiting daemon, and an attach or a tray 「데몬 켜기」 during the flight is
-//!   not held back — a failed redial just shows ①.
-//! - The re-add is for a link parked by a terminal refusal (band ② — a version refusal never redials): without it ②
-//!   would stay after the old daemon is gone. With a live link it does nothing; with no daemon it fails and the link
-//!   keeps retrying in the background (U4 — no "intended stop" latch).
-//! - ★Expiry (R19)★: a timer outside the flight task aborts it at the flight deadline. Every side effect (dial ·
-//!   `StopDaemon` · kill) checks that deadline before it runs, a `daemon.json` read still running is discarded, and the
-//!   supervisor fires the re-add. Joiners and the blocking wrapper get `Timeout`, never a dropped sender.
-//! - Outcome (R1 step 6): gone without a kill → `Closed`; gone after a kill (whatever the kill call returned) →
-//!   `Killed`; alive or unknown at the end → `Timeout`; nothing to stop → `NoTarget`. An unreadable process ("unknown")
-//!   is never reported as gone.
-//! - ★A stop sets no band★ (user decision 2026-11-09): only routing does, from the link's own answers.
-// ADR-0021
-// ADR-0026
-// ADR-0343
-// ADR-0344
+//! The one stop path — [`DaemonClient::stop_daemon`] (TRD S21 trd-3-2-u5 §3-3). Tray 「Stop daemon」 and app exit run it; the band and the LLM command join in U5b. The wire half is `link::stop`.
+//! - One flight per client (R2): a stop while one runs joins it and gets its outcome; the first caller's plan rules. A [`StopPlan::Exit`] joiner waits only its own bound.
+//! - One absolute clock (R13): every deadline is measured from flight start (the instant the starting caller asked — the blocking wrapper takes it before its spawn) on the client's one clock, the `daemon.json` read and its retries included. [`StopPlan::User`] = 10 s graceful + 3 s margin, [`StopPlan::Exit`] = 3 s + 1 s.
+//! - Order (R1): target resolved once (the kill uses this identity, never a re-read) → the stop client → "gone" polled → the identity-checked kill (`User` only: at once when nothing was sent, at the graceful deadline when it was; never without a start time) → the attach-only re-add fired, not awaited (not for `Exit`).
+//! - The shell's link is left alone (user decision 2026-11-10): it stays open through the flight so the daemon's own shutdown broadcasts (agents exiting, the emptied agent list) reach the frontend; when the daemon exits the link sees a normal disconnect and reconnects as always, its first failed reconnect showing band ①. Do not close it at flight start — those broadcasts would be lost and the agent tree keep showing running agents. Accepted: a redial during the flight may reach the exiting daemon, and an attach or tray 「Start daemon」 during the flight is not held back (a failed redial just shows ①).
+//! - The re-add is for a link parked by a terminal refusal (band ② — a version refusal never redials): without it ② would stay after the old daemon is gone. With a live link it does nothing; with no daemon it fails and the link keeps retrying in the background (U4 — no "intended stop" latch).
+//! - Expiry (R19): a timer outside the flight task aborts it at the flight deadline. Every side effect (dial · `StopDaemon` · kill) checks that deadline first, a still-running `daemon.json` read is discarded, and the supervisor fires the re-add. Joiners and the blocking wrapper get `Timeout`, never a dropped sender.
+//! - Outcome (R1 step 6): gone without a kill → `Closed`; gone after a kill (whatever the kill call returned) → `Killed`; alive or unknown at the end → `Timeout`; nothing to stop → `NoTarget`. An unreadable process ("unknown") is never reported as gone.
+//! - A stop sets no band (user decision 2026-11-09): only routing does, from the link's own answers.
+// ADR-0021 · ADR-0026 · ADR-0343 · ADR-0344
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,7 +29,6 @@ use super::link::stop::{
 use super::{DaemonClient, CLIENT_THREAD_NAME, DAEMON_MESSAGE_MAX_BYTES};
 use crate::discovery::{PidLiveness, RealLiveness};
 
-/// How a stop may end the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopPlan {
     /// A user asked (tray · band · LLM): 10 s graceful, then the identity-checked kill.
@@ -68,7 +46,6 @@ impl StopPlan {
         }
     }
 
-    /// Room after the graceful deadline for busy-read retries, the kill and the "gone" poll — not a graceful budget.
     fn margin(self) -> Duration {
         match self {
             StopPlan::User => Duration::from_secs(3),
@@ -76,18 +53,15 @@ impl StopPlan {
         }
     }
 
-    /// From flight start to the flight deadline — the longest a flight lasts.
     pub fn flight_bound(self) -> Duration {
         self.grace() + self.margin()
     }
 }
 
-/// Who asked — logged only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOrigin {
     Tray,
     AppExit,
-    /// The `daemon_shutdown` command — the LLM `daemon.stop`.
     Command,
 }
 
@@ -109,26 +83,17 @@ pub enum StopOutcome {
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum StopReason {
-    /// `no_target`: no `daemon.json`.
     NoRecord,
-    /// `no_target`: `daemon.json` could not be read.
     RecordUnreadable,
-    /// `no_target`: `daemon.json` does not parse.
     RecordBroken,
-    /// `no_target`: `daemon.json` stayed held by another process for every read.
     RecordBusy,
-    /// `no_target`: the record names a pid that is not alive.
     DeadPid,
-    /// `no_target`: the daemon is newer than this app — this app does not stop it.
     NewerDaemon,
     /// `timeout`: the daemon did not stop and its record has no start time, so it is not killed (TRD R1).
     NoIdentity,
-    /// `timeout`: the daemon was not seen gone — still running or unreadable — and was not (or could not be) ended:
-    /// app exit never kills, or it outlived the kill.
+    /// `timeout`: the daemon was not seen gone (still running or unreadable) and was not (or could not be) ended: app exit never kills, or it outlived the kill.
     StillRunning,
-    /// `timeout`: the flight deadline passed before the stop finished (or before the kill could run).
     FlightExpired,
-    /// `timeout`: the stop task failed.
     StopFailed,
 }
 
@@ -155,15 +120,12 @@ impl StopResult {
     }
 }
 
-/// Whether the target process still runs, and ending it — the OS behind a seam (ADR-0012).
+/// ADR-0012
 pub trait TargetProcess: Send + Sync {
-    /// One handle, three answers (R4) — `platform::process::presence`.
     fn presence(&self, pid: u32, start_time: u64) -> Presence;
-    /// `platform::process::terminate_if_same`.
     fn terminate_if_same(&self, pid: u32, start_time: u64) -> std::io::Result<bool>;
 }
 
-/// The real one.
 pub struct OsProcess;
 
 impl TargetProcess for OsProcess {
@@ -176,8 +138,7 @@ impl TargetProcess for OsProcess {
     }
 }
 
-/// Everything a stop flight touches outside memory. ★No clock★ — a client's flight runs on the client's one clock, its
-/// link's (`Stopper`).
+/// Everything a stop flight touches outside memory. No clock: a client's flight runs on the client's one clock, its link's (`Stopper`).
 #[derive(Clone)]
 pub struct StopPorts {
     pub reader: Arc<dyn RecordReader>,
@@ -187,7 +148,6 @@ pub struct StopPorts {
 }
 
 impl StopPorts {
-    /// The local daemon of `data_dir` — production's ports: `daemon.json` there, the OS, the ws dialer.
     pub fn local(data_dir: &Path) -> Self {
         Self {
             reader: Arc::new(DaemonFileReader::new(data_dir)),
@@ -198,17 +158,12 @@ impl StopPorts {
     }
 }
 
-/// Reads of a busy `daemon.json` per flight, and the gap between them (TRD R1 제안 — 5 × 100 ms).
 const BUSY_READS: u32 = 5;
 const BUSY_GAP: Duration = Duration::from_millis(100);
-/// Kept off the dial bound so the stop still has time to finish after a `Hello` at the last moment.
 const DIAL_RESERVE: Duration = Duration::from_millis(500);
-/// How often "gone" is asked while waiting.
 const GONE_POLL: Duration = Duration::from_millis(100);
 
-/// One stop flight without its single-flight bookkeeping: steps 2–6 of R1 against `ports`, every deadline measured from
-/// `started` (the flight's start on `clock`). The caller owns the re-add and expiry
-/// ([`DaemonClient::stop_daemon`]); a real-daemon test drives this directly (`tests/stop_smoke.rs`).
+/// One stop flight without single-flight bookkeeping: steps 2–6 of R1 against `ports`, every deadline measured from `started` (the flight's start on `clock`). The caller owns the re-add and expiry ([`DaemonClient::stop_daemon`]); a real-daemon test drives this directly (`tests/stop_smoke.rs`).
 pub async fn stop_flight(
     ports: &StopPorts,
     clock: &Arc<dyn Clock>,
@@ -249,7 +204,6 @@ pub async fn stop_flight(
     }
 }
 
-/// The target from `daemon.json`, a busy record read again within the flight deadline. `Err` = nothing to stop, and why.
 async fn resolve(
     ports: &StopPorts,
     clock: &dyn Clock,
@@ -282,8 +236,7 @@ async fn resolve(
     Err(StopReason::RecordBusy)
 }
 
-/// The stop client's one dial, bounded by the graceful time left minus [`DIAL_RESERVE`] (R13). No time left = nothing
-/// sent — the graceful deadline comes before the flight deadline, so this is also the dial's flight-deadline gate.
+/// The stop client's one dial, bounded by the graceful time left minus [`DIAL_RESERVE`] (R13). No time left = nothing sent — the graceful deadline precedes the flight deadline, so this is also the dial's flight-deadline gate.
 async fn dial(
     ports: &StopPorts,
     clock: &Arc<dyn Clock>,
@@ -314,7 +267,6 @@ async fn dial(
     .await
 }
 
-/// Asks "gone" until it is or `until` passes — the last answer.
 async fn wait_gone(
     ports: &StopPorts,
     clock: &dyn Clock,
@@ -331,7 +283,6 @@ async fn wait_gone(
     }
 }
 
-/// The identity-checked kill and the wait for its effect (R1 step 5).
 async fn kill(
     ports: &StopPorts,
     clock: &dyn Clock,
@@ -377,7 +328,6 @@ async fn kill(
     }
 }
 
-/// Test-only: a step run once where [`Self::fire`] is called — so a test lands its step exactly there.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct TestHook(Mutex<Option<Box<dyn FnOnce() + Send>>>);
@@ -397,24 +347,19 @@ impl TestHook {
     }
 }
 
-/// The single flight of one client — see the module doc.
 pub(crate) struct Stopper {
-    /// The client's runtime — flights and their supervisors run here whoever calls.
     rt: Handle,
     ports: StopPorts,
     link: LinkControl,
-    /// The client's one clock — its link's.
     clock: Arc<dyn Clock>,
     flight: Mutex<Option<Flight>>,
     next_flight: AtomicU64,
-    /// [`DaemonClient::stop_daemon_blocking`]: the flight start is taken, the stop not yet spawned.
     #[cfg(test)]
     pub(crate) blocking_start_taken: TestHook,
 }
 
 struct Flight {
     id: u64,
-    /// `None` until the supervisor publishes the end.
     outcome: watch::Receiver<Option<StopResult>>,
 }
 
@@ -437,15 +382,11 @@ impl Stopper {
         })
     }
 
-    /// The client's clock — flights and their deadlines run on it.
     pub(crate) fn clock(&self) -> &Arc<dyn Clock> {
         &self.clock
     }
 
-    /// Joins the flight in progress or starts one, then waits for its end — an `Exit` joiner at most its own bound.
-    /// `started` = when the caller asked, on [`Self::clock`]: a flight this call starts measures its deadlines from it,
-    /// and an `Exit` joiner its own bound. With no flight to join and its bound already over, it starts nothing and
-    /// returns `Timeout`.
+    /// Joins the flight in progress or starts one, then waits for its end (an `Exit` joiner at most its own bound). `started` = when the caller asked, on [`Self::clock`]: a flight this call starts measures its deadlines from it, and an `Exit` joiner its own bound. With no flight to join and its bound already over, it starts nothing and returns `Timeout`.
     pub(crate) async fn stop(
         self: &Arc<Self>,
         plan: StopPlan,
@@ -496,8 +437,7 @@ impl Stopper {
         }
         let deadline = started + plan.flight_bound();
         if self.clock().now() >= deadline {
-            // The caller's task ran only after its whole bound (a stalled runtime) — its wait is over, so nothing starts,
-            //   not even the re-add.
+            // The caller's task ran only after its whole bound (a stalled runtime) — its wait is over, so nothing starts, not even the re-add.
             tracing::warn!(
                 ?origin,
                 ?plan,
@@ -520,7 +460,6 @@ impl Stopper {
         (rx, false)
     }
 
-    /// Runs the flight under its deadline, then ends the flight: re-add fired, outcome published.
     async fn supervise(
         self: Arc<Self>,
         id: u64,
@@ -563,25 +502,16 @@ impl Stopper {
 }
 
 impl DaemonClient {
-    /// The one stop path — see the module doc. Returns when the flight this call started or joined ends.
     pub async fn stop_daemon(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome {
         self.stop_daemon_with_reason(plan, origin).await.outcome
     }
 
-    /// [`Self::stop_daemon`] with why it ended so.
     pub async fn stop_daemon_with_reason(&self, plan: StopPlan, origin: StopOrigin) -> StopResult {
         let started = self.stopper.clock().now();
         self.stopper.stop(plan, origin, started).await
     }
 
-    /// [`Self::stop_daemon`] for a caller off the async runtimes (tray worker · `quit_app` on the main thread): runs it on
-    /// the client's runtime and waits until the plan's flight deadline (R5). The re-add is fired, never awaited.
-    ///
-    /// The flight start is taken here, before the spawn, and the wait ends at the deadline measured from it — a slow
-    /// spawn eats into the flight's time, never past the wait.
-    ///
-    /// ★Never call it on a client runtime thread★ — the flight runs on that runtime, and a blocked worker there can stall
-    /// the flight it waits for.
+    /// [`Self::stop_daemon`] for a caller off the async runtimes (tray worker · `quit_app` on the main thread): runs it on the client's runtime and waits until the plan's flight deadline (R5); the re-add is fired, never awaited. The flight start is taken here before the spawn and the wait ends at the deadline measured from it — a slow spawn eats the flight's time, never extends the wait. Never call it on a client runtime thread: the flight runs there and a blocked worker could stall the flight it waits for.
     pub fn stop_daemon_blocking(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome {
         debug_assert_ne!(
             std::thread::current().name(),
@@ -604,7 +534,6 @@ impl DaemonClient {
         })
     }
 
-    /// Fires [`Self::ensure`] on the client's runtime and logs a failure — for a caller that does not wait (tray).
     pub fn ensure_in_background(self: &Arc<Self>) {
         let client = self.clone();
         self.rt.spawn(async move {
@@ -615,7 +544,6 @@ impl DaemonClient {
     }
 }
 
-/// Ports that find nothing to stop — for client tests that never stop a daemon.
 #[cfg(test)]
 pub(crate) fn inert_ports(dialer: Arc<dyn Dialer>) -> StopPorts {
     use super::link::stop::RecordRead;

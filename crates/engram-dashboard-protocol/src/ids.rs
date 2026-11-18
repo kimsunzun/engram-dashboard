@@ -1,13 +1,13 @@
 use ts_rs::TS;
 
-/// agent 의 `AgentId = uuid::Uuid` 와 동일 표현.
+/// Same representation as agent's `AgentId = uuid::Uuid`.
 pub type AgentId = uuid::Uuid;
 
-/// 현 agent 의 profile id 와 동일.
+/// Same as the profile id in the current agent crate.
 pub type ProfileId = uuid::Uuid;
 
-/// side-effect command 의 idempotency 키(설계 §3). 데몬이 짧은 TTL dedup table 로 중복 흡수.
-/// 자동 재시도 금지(writeStdin 중복=입력 중복) — 끊김 시 reconnect 후 결과 조회.
+/// Idempotency key of a side-effect command (design §3). The daemon absorbs duplicates with a short-TTL dedup table.
+/// No automatic retry (duplicate writeStdin = duplicate input) — on disconnect, query the result after reconnecting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct RequestId(#[ts(type = "string")] pub uuid::Uuid);
@@ -24,15 +24,12 @@ impl Default for RequestId {
     }
 }
 
-/// 등록 패킷(`RegisterCommands` · `UpdateCommands`)의 주인 표지 — 명령 버스 도구 crate 의 같은 이름
-/// 타입의 wire 사본이다(ADR-0310 결정 23).
+/// The owner mark of registration packets (`RegisterCommands` · `UpdateCommands`) — the wire copy of the same-named command bus tool crate type (ADR-0310 decision 23).
 ///
-/// - **직렬화 = 안쪽 문자열 그대로**(`serde(transparent)`) — 도구 crate 타입과 wire 바이트가 같다.
-/// - 도구 crate 타입으로 옮겨 담는 것은 데몬 끝자락 하나다(`connection_core.rs` 의 `owner_from_wire`) —
-///   셸은 광고 값을 처음부터 이 타입으로 짓는다. 변환을 여기 두면 protocol 이 도구 crate 의존을 못 놓는다.
-/// - ★`TS` 를 달지 않는다★ — 이 타입에 `TS` 가 없어야 칸의 `#[ts(type = "string")]` 를 지우면 컴파일이
-///   깨져 `AgentCommand.ts` 의 `owner: string` 이 지켜진다. `TS` 를 달고 그 덮어쓰기를 지우면 생성물이
-///   말없이 `owner: OwnerToken` 과 그 import 로 바뀐다.
+/// - Serialization = the inner string as is (`serde(transparent)`).
+/// - Conversion into the tool crate type happens only at the daemon edge (`owner_from_wire` in `connection_core.rs`), so protocol does not depend on the tool crate.
+/// - ★Do not attach `TS`★: only while this type has no `TS` does removing the field's `#[ts(type = "string")]` break compilation, which keeps `owner: string` in
+///   `AgentCommand.ts`; with `TS` and no override the generated file silently becomes `owner: OwnerToken`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct OwnerToken(pub String);

@@ -1,9 +1,9 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// ── react-arborist(react-window) jsdom 보정 ──────────────────────────────────────
-// jsdom 은 ResizeObserver 를 제공하지 않는다 — Tree 컨테이너 실측 훅이 참조하므로 no-op stub.
-//   (콜백은 안 돌지만 AgentList 는 dimensions 초기값이 비-0 이라 트리가 첫 렌더부터 행을 그린다.)
+// ── react-arborist (react-window) jsdom shim ──────────────────────────────────────
+// jsdom has no ResizeObserver — the Tree container measuring hook references it, so a no-op stub.
+//   (The callback never runs, but AgentList's dimensions initial value is non-zero so the tree draws rows from the first render.)
 globalThis.ResizeObserver ||= class {
   observe() {}
   unobserve() {}
@@ -11,8 +11,7 @@ globalThis.ResizeObserver ||= class {
 } as unknown as typeof ResizeObserver
 
 // ── clientFactory stub ────────────────────────────────────────────────────────
-// spawn 은 통합 슬롯 메뉴의 agentlist.createAgent command 로 이전 — AgentList 는 더 이상 registry.run 을
-//   부르지 않는다(ADR-0064).
+// ADR-0064: spawn goes through the unified slot menu's agentlist.createAgent command; AgentList does not call registry.run.
 const clientMock = vi.hoisted(() => ({
   spawnProfile: vi.fn(async () => ({ id: 'a' })),
   killAgent: vi.fn(async () => undefined),
@@ -30,16 +29,16 @@ vi.mock('../../api/clientFactory', () => ({
   },
   getAgentClient: vi.fn(),
 }))
-// refreshProfiles 는 rename/activate/cancel 성공 후 권위 목록 재적용 안전망(broadcast 유실 대비).
+// refreshProfiles is the safety net that re-applies the authoritative list after rename/activate/cancel succeed (against a lost broadcast).
 const refreshProfilesMock = vi.hoisted(() => vi.fn(async () => undefined))
 vi.mock('../../store/eventBus', () => ({ refreshProfiles: refreshProfilesMock }))
-// viewStore 는 assignAgent(열기 경로)만 참조 — getState 로 접근하므로 실제 store 를 얕게 stub.
-//   assignAgent 는 hoisted 한 곳에 두고 getState/셀렉터가 동일 인스턴스를 반환하게 한다(호출 검증용).
+// viewStore only references assignAgent (the open path) — accessed via getState, so the real store is shallowly stubbed.
+//   assignAgent is kept in one hoisted place so getState and selectors return the same instance (for call verification).
 const assignAgentMock = vi.hoisted(() => vi.fn(async () => undefined))
-// selectView 는 CachedView({layout, focusedSlotId, foreignSlots})를 반환한다 — openInFocusedSlot 이
-//   selectOpenTarget(layout, focusedSlotId, foreignSlots)로 대상 슬롯을 고른다. 기본은 포커스 슬롯('slot-1')을
-//   empty 콘텐츠 슬롯으로 둬 기본 경로(포커스 슬롯 배정)가 성립하게 한다. 제어 슬롯/빈 슬롯 없음 엣지는 안전망
-//   스위트가 selectViewMock 반환을 갈아끼워 검증한다(hoisted 라 per-test 로 변경 가능).
+// selectView returns CachedView({layout, focusedSlotId, foreignSlots}) — openInFocusedSlot picks the target slot with
+//   selectOpenTarget(layout, focusedSlotId, foreignSlots). By default the focused slot ('slot-1') is an
+//   empty content slot so the default path (assign to the focused slot) holds. The control-slot / no-empty-slot edge cases are verified by the safety-net
+//   suite swapping the selectViewMock return (hoisted, so it can change per test).
 const selectViewMock = vi.hoisted(() =>
   vi.fn<() => { layout: LayoutNode; focusedSlotId: string | null; foreignSlots: string[] } | null>(() => ({
     layout: { type: 'slot', id: 'slot-1', content: { type: 'empty' } },
@@ -57,13 +56,13 @@ vi.mock('../../store/viewStore', () => ({
   selectView: () => selectViewMock(),
 }))
 
-// Ban = 마지막 실패 축의 금지 표식(ADR-0173) — 상태 축 4모양(Circle/Square/X)과 달리 `lastFailure` 가
-//   있을 때만 나온다. 그래서 아래 「4모양 밖은 나오지 않는다」 allowlist(상태 축 단독 호출)에는 안 든다.
+// Ban = the forbidden marker of the last-failure axis (ADR-0173) — unlike the status axis's 4 shapes (Circle/Square/X) it appears only when `lastFailure`
+//   exists. So it is not in the 「nothing outside the 4 shapes comes out」 allowlist below (status axis called alone).
 import { Ban, Circle, Loader, Square, X } from 'lucide-react'
 
 import AgentList, { statusGlyphColor, statusGlyphIcon } from './AgentList'
-// 시연(presentation) 층은 매핑 SSOT 인 statusGlyph 에서 직접 가져온다 — AgentList 의 re-export 는
-//   옛 importer 를 위한 통로일 뿐이라 새 축을 거기로 늘리지 않는다.
+// The presentation layer is imported directly from statusGlyph, the mapping SSOT — AgentList's re-export is
+//   only a path for old importers, so no new axis is added there.
 import { rowGlyphColor, rowGlyphIcon, rowPhase } from './statusGlyph'
 import { useAgentStore } from '../../store/agentStore'
 import { setLanguage, t } from '../../i18n'
@@ -109,7 +108,7 @@ beforeEach(() => {
   clientMock.reparentProfile.mockClear()
   refreshProfilesMock.mockClear()
   assignAgentMock.mockClear()
-  // 기본 selectView/currentViewId 로 리셋(안전망 스위트가 per-test 로 갈아끼운 것 격리).
+  // Reset to the default selectView/currentViewId (isolates what the safety-net suite swapped per test).
   selectViewMock.mockReset()
   selectViewMock.mockReturnValue({
     layout: { type: 'slot', id: 'slot-1', content: { type: 'empty' } },
@@ -118,7 +117,7 @@ beforeEach(() => {
   })
   currentViewIdMock.mockReset()
   currentViewIdMock.mockReturnValue('main-view')
-  // 기본은 「명부 · 프로필 둘 다 받음」 — 미수신 구간은 그 시험이 플래그를 직접 내린다.
+  // Default is 「roster and profiles both received」 — a test for the not-received span lowers the flag itself.
   useAgentStore.setState({
     agents: [], agentsLoaded: true, profiles: [], profilesLoaded: true, selectedAgentId: null,
   })
@@ -128,37 +127,37 @@ afterEach(() => {
   useAgentStore.setState({ agents: [], profiles: [], selectedAgentId: null })
 })
 
-// ── statusGlyphIcon: 전 분기(pure, ADR-0062) ─────────────────────────────────
-// 아이콘 동일성은 **컴포넌트 참조**로 잰다 — lucide 의 클래스명 규약이 바뀌어도 매핑 테스트는 성립한다.
-//   클래스명은 아래 렌더 스위트에서만 본다(실제 svg 가 떴나).
-describe('statusGlyphIcon (pure, 전 분기)', () => {
-  it('Running → 채운 원 (작업중)', () => {
+// ── statusGlyphIcon: every branch (pure, ADR-0062) ─────────────────────────────────
+// Icon identity is measured by **component reference** — so the mapping test holds even if lucide's class-name convention changes.
+//   Class names are seen only in the render suite below (did a real svg appear).
+describe('statusGlyphIcon (pure, all branches)', () => {
+  it('Running → filled circle (working)', () => {
     const g = statusGlyphIcon('Running')
     expect(g.Icon).toBe(Circle)
     expect(g.fill).toBe('currentColor')
     expect(g.shape).toBe('filled-circle')
   })
-  it('Exiting → 사각 (멈춤 전이)', () => expect(statusGlyphIcon('Exiting').Icon).toBe(Square))
-  it('Exited → 사각 (멈춤)', () => expect(statusGlyphIcon('Exited').Icon).toBe(Square))
-  it('Killed → 사각 (멈춤)', () => expect(statusGlyphIcon('Killed').Icon).toBe(Square))
-  it('Failed → ✗ 모양 (에러)', () => expect(statusGlyphIcon('Failed').Icon).toBe(X))
-  it('Reserved → 빈 원 (유휴/미spawn)', () => {
+  it('Exiting → square (transition to stopped)', () => expect(statusGlyphIcon('Exiting').Icon).toBe(Square))
+  it('Exited → square (stopped)', () => expect(statusGlyphIcon('Exited').Icon).toBe(Square))
+  it('Killed → square (stopped)', () => expect(statusGlyphIcon('Killed').Icon).toBe(Square))
+  it('Failed → ✗ shape (error)', () => expect(statusGlyphIcon('Failed').Icon).toBe(X))
+  it('Reserved → empty circle (idle/not spawned)', () => {
     const g = statusGlyphIcon('Reserved')
     expect(g.Icon).toBe(Circle)
     expect(g.fill).toBe('none')
     expect(g.shape).toBe('circle')
   })
-  it('미지 status → 빈 원 (degrade, 빈 칸 방지)', () => {
+  it('unknown status → empty circle (degrade, avoids an empty cell)', () => {
     const g = statusGlyphIcon('???')
     expect(g.Icon).toBe(Circle)
     expect(g.shape).toBe('circle')
   })
 
-  // ★옛 "◐ 를 반환하지 않는다" 테스트의 계승★(ADR-0062 — 입력대기는 어휘로만, 미점등): 문자 비교가
-  //   사라졌으므로 **치역 allowlist** 로 잰다. 반쯤 채운 모양(CircleDashed·PieChart…)이든 뭐든 아래 4모양
-  //   밖의 것을 새 분기가 반환하면 여기서 깨진다. 입력 목록에 InputWaiting/Idle/Waiting 을 섞어 둔 이유 =
-  //   그런 분기가 실제로 붙는다면 이 이름들로 붙기 때문(안 붙어 있으면 default 로 떨어져 통과한다).
-  it('4모양 밖(◐ 같은 반쯤 채운 모양 포함)은 어떤 입력으로도 나오지 않는다', () => {
+  // ★Successor of the old "does not return ◐" test★ (ADR-0062 — awaiting input is vocabulary only, never lit): since character comparison
+  //   is gone, it is measured by a **range allowlist**. If a new branch returns anything outside the 4 shapes below — a half-filled shape (CircleDashed, PieChart…) or whatever —
+  //   this breaks here. InputWaiting/Idle/Waiting are mixed into the input list because
+  //   if such a branch were really attached it would be attached under these names (if not attached they fall to default and pass).
+  it('nothing outside the 4 shapes (including half-filled shapes like ◐) comes out for any input', () => {
     const inputs = [
       'Running', 'Exiting', 'Exited', 'Failed', 'Killed', 'Reserved', 'unknown', '',
       'InputWaiting', 'Idle', 'Waiting',
@@ -174,82 +173,80 @@ describe('statusGlyphIcon (pure, 전 분기)', () => {
   })
 })
 
-// ── statusGlyphColor: 색 부가(pure, ADR-0062 색 개정) ─────────────────────────
-// 색은 변수만(리터럴 금지) — e-ink 는 theme.css 에서 --status-running 을 var(--text-muted) 로
-// 중립화하므로 여기 로직은 테마 무관 단일.
+// ── statusGlyphColor: color supplement (pure, ADR-0062 color revision) ─────────────────────────
+// Color is variables only (no literals) — e-ink neutralizes --status-running to var(--text-muted) in theme.css,
+// so the logic here is single regardless of theme.
 describe('statusGlyphColor (pure)', () => {
-  it('Running → var(--status-running) (활성 green)', () =>
+  it('Running → var(--status-running) (active green)', () =>
     expect(statusGlyphColor('Running')).toBe('var(--status-running)'))
   it('Exited → var(--text-muted)', () => expect(statusGlyphColor('Exited')).toBe('var(--text-muted)'))
   it('Killed → var(--text-muted)', () => expect(statusGlyphColor('Killed')).toBe('var(--text-muted)'))
   it('Failed → var(--text-muted)', () => expect(statusGlyphColor('Failed')).toBe('var(--text-muted)'))
   it('Exiting → var(--text-muted)', () => expect(statusGlyphColor('Exiting')).toBe('var(--text-muted)'))
   it('Reserved → var(--text-muted)', () => expect(statusGlyphColor('Reserved')).toBe('var(--text-muted)'))
-  it('미지 status → var(--text-muted) (default)', () =>
+  it('unknown status → var(--text-muted) (default)', () =>
     expect(statusGlyphColor('???')).toBe('var(--text-muted)'))
 })
 
-// ── 마지막 실패가 기호를 갈아끼운다(ADR-0173) ────────────────────────────────
-// 기호를 하나 더 늘리지 않는다 — 상태 기호 자리를 금지 표식이 **대체**하고 색도 함께 갈린다.
+// ── The last failure swaps the glyph (ADR-0173) ────────────────────────────────
+// No extra glyph is added — the forbidden marker **replaces** the status glyph's place and the color changes with it.
 //
-// ★관측 대상이 문자에서 모양 토큰으로 옮겨갔다★: 아이콘화(ADR-0168) 전에는 이 스위트가 반환 문자
-//   (`'⊘'`·`'●'`)를 그대로 비교했는데, 이제 반환물이 {아이콘·채움·모양 토큰} 한 벌이라 비교할 문자가
-//   없다. 대신 `shape`(DOM 에도 그대로 나가는 안정 토큰)로 잰다 — 아이콘 컴포넌트 대신 토큰을 쓰는
-//   이유는 lucide 가 컴포넌트를 갈아끼워도 "무엇으로 읽히나"는 이 토큰이 지기 때문이다.
-describe('statusGlyphIcon/Color — 마지막 실패 축', () => {
+// ★Assert the `shape` token★ (stable, also goes out to the DOM), not the icon component — even if lucide swaps the component,
+//   the token still carries what the glyph reads as.
+describe('statusGlyphIcon/Color — last-failure axis', () => {
   const reserved = 'Reserved'
-  it('쉬고 있는 항목은 상태와 무관하게 금지 표식으로 갈린다', () => {
+  it('an item at rest is swapped to the forbidden marker regardless of status', () => {
     for (const s of [reserved, 'Exited', 'Killed', 'Failed', '???']) {
       const g = statusGlyphIcon(s, 'NoConversationToResume')
       expect(g.shape).toBe('blocked')
       expect(g.Icon).toBe(Ban)
-      // 채우면 Running(채운 원)과 실루엣이 겹쳐 e-ink 에서 구분이 사라진다.
+      // If filled, its silhouette overlaps Running (filled circle) and the distinction vanishes on e-ink.
       expect(g.fill).toBe('none')
       expect(statusGlyphColor(s, 'NoConversationToResume')).toBe('var(--status-blocked)')
     }
   })
-  it('★도는 중이 이긴다★ — 마지막 실패를 들고 있어도 Running 이면 원래 기호·색 그대로', () => {
+  it('★running wins★ — even holding a last failure, Running keeps the original glyph and color', () => {
     expect(statusGlyphIcon('Running', 'NoConversationToResume').shape).toBe('filled-circle')
     expect(statusGlyphColor('Running', 'NoConversationToResume')).toBe('var(--status-running)')
   })
-  it('Exiting 은 과도기라 도는 중 쪽으로 센다(정상 종료 몇 초 동안 깜빡이면 안 된다)', () => {
+  it('Exiting is transitional so it counts on the running side (it must not flicker for the few seconds of a normal exit)', () => {
     expect(statusGlyphIcon('Exiting', 'NoConversationToResume')).toEqual(statusGlyphIcon('Exiting'))
     expect(statusGlyphColor('Exiting', 'NoConversationToResume')).toBe(statusGlyphColor('Exiting'))
   })
-  it('마지막 실패가 없으면 기존 매핑이 한 톨도 바뀌지 않는다', () => {
+  it('with no last failure the existing mapping does not change a bit', () => {
     for (const s of ['Running', 'Exiting', 'Exited', 'Killed', 'Failed', 'Reserved', '???']) {
       expect(statusGlyphIcon(s, null)).toEqual(statusGlyphIcon(s))
       expect(statusGlyphColor(s, null)).toBe(statusGlyphColor(s))
     }
   })
-  it('종류가 달라도 기호는 하나다(종류별 기호를 늘리지 않는다)', () => {
+  it('even with different kinds the glyph is one (no per-kind glyphs are added)', () => {
     const kinds = ['NoConversationToResume', 'SpawnFailed', 'EarlyExitAfterResume', 'Other'] as const
     const shapes = new Set(kinds.map(k => statusGlyphIcon(reserved, k).shape))
     expect(shapes.size).toBe(1)
   })
 })
 
-// ── 시연 층: 「답을 기다리는 중」·「방금 거절당했다」(pure) ────────────────────────
-// 백엔드 status 는 세션이 생기는 순간 낙관적으로 Running 이 되므로 "연결됐다"를 뜻하지 않는다. 그래서
-//   답이 오기 전 구간과 거절 직후 구간을 상태 축 **위에** 얹는다 — `isFailureBlocked` 의 의미는 불변.
-describe('rowPhase / rowGlyphIcon / rowGlyphColor (시연 층, pure)', () => {
-  it('우선순위 = pending > rejected > settled(재시도가 지난 거절을 이긴다)', () => {
+// ── Presentation layer: 「waiting for an answer」 · 「pure」 ────────────────────────
+// The backend status becomes Running optimistically the moment a session exists, so it does not mean "connected". So
+//   the span before an answer arrives and the span right after a refusal are laid **on top of** the status axis — the meaning of `isFailureBlocked` is unchanged.
+describe('rowPhase / rowGlyphIcon / rowGlyphColor (presentation layer, pure)', () => {
+  it('priority = pending > rejected > settled (a retry beats a past refusal)', () => {
     expect(rowPhase(true, false)).toBe('pending')
     expect(rowPhase(true, true)).toBe('pending')
     expect(rowPhase(false, true)).toBe('rejected')
     expect(rowPhase(false, false)).toBe('settled')
   })
 
-  it('pending = 바퀴살 모양 + 새 토큰(기존 다섯을 재사용·개명하지 않는다)', () => {
+  it('pending = spoke shape + a new token (the existing five are neither reused nor renamed)', () => {
     const g = rowGlyphIcon('pending', 'Running', null)
     expect(g.Icon).toBe(Loader)
     expect(g.shape).toBe('pending')
-    // 바퀴살은 선이라 채울 면이 없다 — 채우면 lucide 가 획을 뭉갠다.
+    // Spokes are lines with no area to fill — filling would let lucide smear the strokes.
     expect(g.fill).toBe('none')
   })
 
-  it('★기다리는 동안 초록은 없다★ — 낙관적 Running 이어도 색이 muted 로 눌린다', () => {
-    // 이 결함의 본체가 그 초록이었다: 답을 모르는 구간에 "돌고 있다"고 주장한 것.
+  it('★no green while waiting★ — even with an optimistic Running the color is pressed down to muted', () => {
+    // The core of this defect was that green: claiming "running" in the span where the answer is unknown.
     for (const s of ['Running', 'Exiting', 'Exited', 'Failed', 'Killed', 'Reserved', '???']) {
       expect(rowGlyphColor('pending', s, null)).toBe('var(--text-muted)')
       expect(rowGlyphColor('pending', s, null)).not.toBe('var(--status-running)')
@@ -257,18 +254,18 @@ describe('rowPhase / rowGlyphIcon / rowGlyphColor (시연 층, pure)', () => {
     }
   })
 
-  it('★거절은 기록도 사망 관측도 기다리지 않는다★ — lastFailure=null·status=Running 이어도 금지 표식', () => {
-    // 실측한 거짓말의 정확한 구간: RPC 는 이미 거절했는데 프로세스가 아직 살아 있어 status 는 Running.
+  it('★a refusal waits for neither the record nor the observed death★ — forbidden marker even with lastFailure=null and status=Running', () => {
+    // The exact span of the measured lie: the RPC already refused but the process is still alive so status is Running.
     const g = rowGlyphIcon('rejected', 'Running', null)
     expect(g.shape).toBe('blocked')
     expect(g.Icon).toBe(Ban)
     expect(rowGlyphColor('rejected', 'Running', null)).toBe('var(--status-blocked)')
-    // 「도는 중이 이긴다」(ADR-0173)는 *지난* 시도의 기록에 대한 규칙이라 여기 적용되지 않는다 —
-    //   거절은 방금 이 화면이 직접 받은 답이다.
+    // 「ADR-0173」 is a rule about the record of a *past* attempt so it does not apply here —
+    //   the refusal is the answer this screen just received directly.
     expect(rowGlyphIcon('rejected', 'Running', null)).not.toEqual(statusGlyphIcon('Running', null))
   })
 
-  it('settled 는 상태 축을 한 톨도 바꾸지 않는다(위임 — 사본을 만들지 않는다)', () => {
+  it('settled does not change the status axis a bit (delegation — no copy is made)', () => {
     for (const s of ['Running', 'Exiting', 'Exited', 'Killed', 'Failed', 'Reserved', '???']) {
       for (const f of [null, 'NoConversationToResume'] as const) {
         expect(rowGlyphIcon('settled', s, f)).toEqual(statusGlyphIcon(s, f))
@@ -277,7 +274,7 @@ describe('rowPhase / rowGlyphIcon / rowGlyphColor (시연 층, pure)', () => {
     }
   })
 
-  it('상태 축 단독(statusGlyphIcon)은 절대 pending 을 내지 않는다(층이 섞이지 않는다)', () => {
+  it('the status axis alone (statusGlyphIcon) never yields pending (the layers do not mix)', () => {
     for (const s of ['Running', 'Exiting', 'Exited', 'Killed', 'Failed', 'Reserved', '???', '']) {
       expect(statusGlyphIcon(s).shape).not.toBe('pending')
       expect(statusGlyphIcon(s, 'SpawnFailed').shape).not.toBe('pending')
@@ -285,32 +282,32 @@ describe('rowPhase / rowGlyphIcon / rowGlyphColor (시연 층, pure)', () => {
   })
 })
 
-// ── 첫 목록 수신 전(새 창) — 중간 화면을 그리지 않는다 ──────────────────────────
-describe('AgentList 첫 목록 수신 전', () => {
+// ── Before the first list is received (new window) — no intermediate screen is drawn ──────────────────────────
+describe('AgentList before the first list is received', () => {
   beforeEach(() => {
     useAgentStore.setState({ agentsLoaded: false, profilesLoaded: false })
   })
 
-  it('둘 다 못 받음 → 빈 목록 안내도 트리도 없다(라벨만)', () => {
+  it('neither received → neither the empty-list notice nor the tree (label only)', () => {
     render(<AgentList />)
     expect(screen.queryByText(/에이전트 없음/)).toBeNull()
     expect(document.querySelector('[data-testid="agent-tree"]')).toBeNull()
     expect(document.querySelector('[data-slot-label="agent-list"]')).toBeTruthy()
   })
 
-  it('명부만 빈 채로 받음(프로필 대기) → 아직 빈 목록 안내를 그리지 않는다', () => {
+  it('only the roster received, empty (profile pending) → the empty-list notice is not drawn yet', () => {
     render(<AgentList />)
     act(() => useAgentStore.getState().setAgents([]))
     expect(screen.queryByText(/에이전트 없음/)).toBeNull()
   })
 
-  it('프로필만 받음(명부 대기) → 예약 행을 먼저 그리지 않는다', () => {
+  it('only profiles received (roster pending) → reserved rows are not drawn first', () => {
     render(<AgentList />)
     act(() => useAgentStore.getState().setProfiles([profile('p1', 'C:/r')]))
     expect(document.querySelector('[data-agent-row="p1"]')).toBeNull()
   })
 
-  it('둘 다 빈 채로 받음 → 그때 빈 목록 안내', () => {
+  it('both received empty → then the empty-list notice', () => {
     render(<AgentList />)
     act(() => {
       useAgentStore.getState().setAgents([])
@@ -319,7 +316,7 @@ describe('AgentList 첫 목록 수신 전', () => {
     expect(screen.getByText(/에이전트 없음/)).toBeTruthy()
   })
 
-  it('둘 다 받음 + 비지 않음 → 트리 행, 빈 목록 안내는 끝내 나오지 않는다', () => {
+  it('both received + non-empty → tree rows, and the empty-list notice never appears', () => {
     render(<AgentList />)
     act(() => {
       useAgentStore.getState().setAgents([agent('a1', 'C:/w')])
@@ -332,16 +329,16 @@ describe('AgentList 첫 목록 수신 전', () => {
   })
 })
 
-// ── 트리 렌더(react-arborist, ADR-0072) ────────────────────────────────────────
-describe('AgentList 트리 렌더', () => {
-  it('빈 목록 → 안내 문구', () => {
+// ── Tree render (react-arborist, ADR-0072) ────────────────────────────────────────
+describe('AgentList tree render', () => {
+  it('empty list → notice text', () => {
     render(<AgentList />)
     expect(screen.getByText(/에이전트 없음/)).toBeTruthy()
   })
 
-  // ★빈 상태 안내는 트리(react-arborist) 밖의 flex-1 센터링 div★ — 그릴 노드가 없으면 트리(가상화 스크롤)를
-  //   마운트하지 않고 안내 문구만 세로 중앙 정렬(옛 FIX-A 취지 유지 — 빈 상태엔 스크롤 표면 없음).
-  it('빈 목록 → 안내 문구는 트리 컨테이너 밖에 있고 트리는 마운트되지 않는다', () => {
+  // ★The empty-state notice is a flex-1 centering div outside the tree (react-arborist)★ — with no nodes to draw the tree (virtualized scroll) is not
+  //   mounted and only the notice text is vertically centered (keeps the old FIX-A intent — an empty state has no scroll surface).
+  it('empty list → the notice text is outside the tree container and the tree is not mounted', () => {
     render(<AgentList />)
     const tree = document.querySelector('[data-testid="agent-tree"]')
     expect(tree).toBeNull()
@@ -350,7 +347,7 @@ describe('AgentList 트리 렌더', () => {
     expect(empty.closest('[data-agent-list]')).toBeTruthy()
   })
 
-  it('비빈 목록 → 트리 컨테이너 마운트 + 행이 그 안에 있다', () => {
+  it('non-empty list → the tree container mounts + rows are inside it', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     const tree = document.querySelector('[data-testid="agent-tree"]')
@@ -358,7 +355,7 @@ describe('AgentList 트리 렌더', () => {
     expect(tree?.querySelector('[data-agent-row="a1"]')).toBeTruthy()
   })
 
-  it('running ∪ reserved 행 렌더 + 표시명 = cwd basename(이름 미저장)', () => {
+  it('running ∪ reserved rows render + display name = cwd basename (name not stored)', () => {
     useAgentStore.setState({
       agents: [agent('a1', 'C:/work/engram')],
       profiles: [profile('p1', '/home/me/reserved-proj')],
@@ -370,9 +367,9 @@ describe('AgentList 트리 렌더', () => {
     expect(screen.getByText('reserved-proj')).toBeTruthy()
   })
 
-  // 관측 표면 둘을 같이 잰다: data-agent-glyph-shape(안정 토큰)와 실제 lucide svg(클래스 + fill).
-  //   속성만 맞고 아이콘이 안 그려지는 회귀를 토큰 단독으로는 못 잡는다.
-  it('상태가 아이콘 모양으로 뜬다(Failed=✗ / reserved=빈 원)', () => {
+  // Measure both observation surfaces together: data-agent-glyph-shape (stable token) and the real lucide svg (class + fill).
+  //   A regression where only the attribute is right but the icon is not drawn cannot be caught by the token alone.
+  it('status shows as an icon shape (Failed=✗ / reserved=empty circle)', () => {
     useAgentStore.setState({
       agents: [agent('a1', 'C:/w', { type: 'Failed', message: 'x' })],
       profiles: [profile('p1', 'C:/r')],
@@ -386,9 +383,9 @@ describe('AgentList 트리 렌더', () => {
     expect(resGlyph.querySelector('svg.lucide-circle')).toBeTruthy()
   })
 
-  // Running 과 Reserved 는 같은 원이라 **채움 여부가 유일한 모양 차이**다(e-ink 에선 색이 중립화돼 이것만
-  //   남는다 — ADR-0062). 그래서 fill 을 DOM 에서 직접 고정한다.
-  it('Running=채운 원 / Reserved=빈 원 — 채움이 두 상태를 가른다', () => {
+  // Running and Reserved are the same circle so **fill is the only shape difference** (on e-ink color is neutralized and only this
+  //   remains — ADR-0062). So fill is pinned directly in the DOM.
+  it('Running=filled circle / Reserved=empty circle — fill tells the two states apart', () => {
     useAgentStore.setState({
       agents: [agent('a1', 'C:/w')],
       profiles: [profile('p1', 'C:/r')],
@@ -402,10 +399,10 @@ describe('AgentList 트리 렌더', () => {
     expect(resSvg.getAttribute('fill')).toBe('none')
   })
 
-  // 선택 표시를 배경색 하나에만 걸면 테마별로 조용히 사라진다 — `--surface-elevated` 를 썼다가 light·
-  //   e-ink 에서 패널 배경과 동색이 돼 선택이 안 보이던 실발생(2026-08-23)이 계기다. jsdom 은 CSS 변수를
-  //   풀지 않아 *색 자체*는 못 재므로, 기계 판독 채널(`data-selected`)이 회귀망을 대신 진다.
-  it('선택 행은 색이 아니라 data-selected 로도 식별된다(테마 무관 채널)', () => {
+  // Hanging the selection mark on background color alone silently vanishes per theme — the trigger was a real incident (2026-08-23) where `--surface-elevated` was used and
+  //   in light · e-ink became the same color as the panel background so the selection was invisible. jsdom does not resolve CSS variables so it cannot measure the *color itself*,
+  //   so the machine-readable channel (`data-selected`) carries the regression net instead.
+  it('the selected row is identified not by color but also by data-selected (theme-independent channel)', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w'), agent('a2', 'C:/x')] })
     render(<AgentList />)
     fireEvent.click(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
@@ -413,9 +410,9 @@ describe('AgentList 트리 렌더', () => {
     expect(document.querySelector('[data-agent-row="a2"]')?.getAttribute('data-selected')).toBe('false')
   })
 
-  // 선택 배경이 패널 배경 토큰과 *같은 토큰*으로 회귀하면 테마에 따라 안 보인다. 값 비교는 jsdom 이 못
-  //   하므로 "같은 var 를 쓰지 않는다"는 약한 형태로 고정한다.
-  it('선택 배경은 패널 배경(--bg-secondary)을 그대로 쓰지 않는다', () => {
+  // If the selection background regresses to *the same token* as the panel background token it is invisible depending on theme. jsdom cannot
+  //   compare values so it is pinned in the weak form "does not use the same var".
+  it('the selection background does not use the panel background (--bg-secondary) as is', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     fireEvent.click(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
@@ -425,33 +422,33 @@ describe('AgentList 트리 렌더', () => {
     expect(bg).toContain('var(')
   })
 
-  it('예약 행 더블클릭 → spawnProfile(restore UX 유지)', () => {
+  it('reserved row double-click → spawnProfile (restore UX kept)', () => {
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
     render(<AgentList />)
     fireEvent.doubleClick(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
     expect(clientMock.spawnProfile).toHaveBeenCalledWith('p1', false)
   })
 
-  it('스타일 = 변수-only(루트 background 가 var 참조)', () => {
+  it('style = variables only (the root background is a var reference)', () => {
     render(<AgentList />)
     const root = document.querySelector('[data-agent-list]') as HTMLElement
     expect(root.style.background).toContain('var(')
   })
 })
 
-// ── ★배경(bg) 메뉴 제거 = 통합 슬롯 메뉴로 버블(ADR-0064)★ ──────────────────────
-describe('배경 우클릭 = 자체 메뉴 없음(통합 슬롯 메뉴로 버블)', () => {
-  it('배경 우클릭 → 옛 bg "에이전트 생성" 메뉴/픽커가 뜨지 않는다(제거됨)', () => {
+// ── ★Background (bg) menu removed = bubbles to the unified slot menu (ADR-0064)★ ──────────────────────
+describe('background right-click = no own menu (bubbles to the unified slot menu)', () => {
+  it('background right-click → the old bg "create agent" menu/picker does not appear (removed)', () => {
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
     expect(document.querySelector('[data-agent-create]')).toBeNull()
     expect(document.querySelector('[data-agent-picker]')).toBeNull()
   })
 
-  it('배경 우클릭 이벤트는 stopPropagation 하지 않는다(상위 통합 슬롯 메뉴가 받게 버블)', () => {
+  it('a background right-click event does not stopPropagation (bubbles so the parent unified slot menu receives it)', () => {
     render(<AgentList />)
     const pane = document.querySelector('[data-agent-list]') as HTMLElement
-    // 옛 stopPropagation 제거의 회귀 안전망.
+    // Regression safety net for removing the old stopPropagation.
     const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
     const stopSpy = vi.spyOn(ev, 'stopPropagation')
     pane.dispatchEvent(ev)
@@ -459,9 +456,9 @@ describe('배경 우클릭 = 자체 메뉴 없음(통합 슬롯 메뉴로 버블
   })
 })
 
-// ── 행 우클릭 메뉴: 종료·이름변경 wired / 재시작 disabled(ADR-0061 리치화) ──────────
-describe('행 우클릭 메뉴', () => {
-  it('열린 동안만 오버레이 표지를 단다(ADR-0237) — 문서 Esc 가 닫으면 함께 사라진다', () => {
+// ── Row right-click menu: kill · rename wired / restart disabled (ADR-0061 enrichment) ──────────
+describe('row right-click menu', () => {
+  it('carries the overlay marker only while open (ADR-0237) — it disappears with it when a document Esc closes it', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     expect(document.querySelector(OVERLAY_SELECTOR)).toBeNull()
@@ -471,7 +468,7 @@ describe('행 우클릭 메뉴', () => {
     expect(document.querySelector(OVERLAY_SELECTOR)).toBeNull()
   })
 
-  it('실행중 행: 종료는 killAgent 호출, 재시작은 "준비 중" 비활성(no-op)', () => {
+  it('running row: kill calls killAgent, restart is "coming soon" disabled (no-op)', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
@@ -482,13 +479,13 @@ describe('행 우클릭 메뉴', () => {
     expect(clientMock.killAgent).toHaveBeenCalledWith('a1')
   })
 
-  // ★인라인 편집 키(Enter/Escape)는 ROW div 에서 발화★: keydown 핸들러는 항상 렌더되는 행 div 에 있다
-  //   (input 이 아니라). react-window 가상화 안에서 조건부 mount 되는 input 의 onKeyDown 은 React 19 이벤트
-  //   위임이 2번째 이후 재-mount root 에 keydown 리스너를 못 붙여 synthetic 이 안 뜬다(react-window+jsdom
-  //   상호작용 — click/blur/change 정상, keydown 만). 그래서 컴포넌트가 keydown 을 행 div 로 올렸고, 테스트도
-  //   실제 핸들러 소유 요소(행 div)에 keydown 을 쏜다(input 값 변경은 change 로 그대로 검증).
-  it('실행중 행 이름변경 → 인라인 입력 → Enter 확정 → renameProfile(id, trimmed) 호출', () => {
-    // 프로필 없는 ad-hoc running 이면 rename 대상이 없지만, 여기선 매칭 프로필을 둬 override 저장 경로를 검증.
+  // ★Inline-edit keys (Enter/Escape) fire on the ROW div★: the keydown handler is on the always-rendered row div
+  //   (not the input). The onKeyDown of an input conditionally mounted inside react-window virtualization does not get a synthetic event because React 19 event
+  //   delegation cannot attach a keydown listener to the root re-mounted from the 2nd time on (a react-window+jsdom
+  //   interaction — click/blur/change fine, only keydown). So the component raised keydown to the row div, and the test also
+  //   fires keydown at the element that really owns the handler (the row div) (input value changes are still verified by change).
+  it('running row rename → inline input → Enter commit → calls renameProfile(id, trimmed)', () => {
+    // An ad-hoc running row without a profile has no rename target, but here a matching profile is placed to verify the override save path.
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')], profiles: [profile('a1', 'C:/w')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
@@ -500,7 +497,7 @@ describe('행 우클릭 메뉴', () => {
     expect(clientMock.renameProfile).toHaveBeenCalledWith('a1', '내 에이전트')
   })
 
-  it('예약 행 이름변경 → Esc 취소 → renameProfile 미발화(revert)', () => {
+  it('reserved row rename → Esc cancel → renameProfile not fired (revert)', () => {
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
@@ -526,19 +523,19 @@ describe('행 우클릭 메뉴', () => {
     expect(clientMock.renameProfile).not.toHaveBeenCalled()
   })
 
-  it('이름변경 미변경(표시명과 동일) → renameProfile 미발화', () => {
+  it('rename unchanged (same as the display name) → renameProfile not fired', () => {
     useAgentStore.setState({ profiles: [profile('p2', 'C:/x', 0, '고정명')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="p2"]') as HTMLElement)
     fireEvent.click(screen.getByText('이름 변경'))
-    // 시드된 draft = 현재 표시명('고정명').
+    // The seeded draft = the current display name (the fixed-name fixture).
     fireEvent.keyDown(document.querySelector('[data-agent-row="p2"]') as HTMLElement, { key: 'Enter' })
     expect(clientMock.renameProfile).not.toHaveBeenCalled()
   })
 
-  // Tauri `drag.js` 는 창 끌 자리 누름의 기본 동작(포커스 옮김)을 막는다. 그 흉내 = 먼저 건 document 거품 단계 듣는 쪽 — 뒤
-  //   듣기도 끊는다(jsdom 은 누름으로 포커스를 옮기지 않으니 기본 동작 쪽은 이미 같다).
-  it('이름변경 중 창 끌 자리(제목 줄) 누름 → 포커스 잃음과 같이 확정한다 · 끌 자리 밖 누름은 편집을 둔다', () => {
+  // Tauri `drag.js` blocks the default action (focus move) of pressing the window-drag area. The imitation = a listener registered earlier on the document bubble phase — it also cuts the
+  //   later listeners (jsdom does not move focus on a press so the default-action side is already the same).
+  it('pressing the window-drag area (title row) during rename → commits like losing focus · pressing outside the drag area keeps the edit', () => {
     const grab = document.createElement('div')
     grab.setAttribute('data-tauri-drag-region', '')
     document.body.appendChild(grab)
@@ -555,7 +552,7 @@ describe('행 우클릭 메뉴', () => {
       fireEvent.click(screen.getByText('이름 변경'))
       const input = () => document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
       expect(document.activeElement).toBe(input())
-      // 가상 목록이 입력 칸을 다시 붙일 수 있어 칸은 그때마다 새로 찾는다.
+      // The virtual list may re-attach the input field, so the field is re-found each time.
       fireEvent.change(input(), { target: { value: '  새이름  ' } })
 
       fireEvent.mouseDown(document.body)
@@ -572,13 +569,13 @@ describe('행 우클릭 메뉴', () => {
   })
 })
 
-// ── 증상4 회귀 안전망: 한 노드 조작이 형제 노드를 떨어뜨리지 않는다 ────────────────────
-//   버그 리포트("트리에 3개 있을 때 하나를 조작하면 나머지 2개가 사라진다")를 겨눈다. rename 경로는
-//   낙관 갱신 없이 store 미러(agents/profiles 전체)를 그대로 두므로, mergeTreeNodes 가 그리는 형제 행은
-//   렌더에서 사라지면 안 된다. 또한 rename 성공은 refreshProfiles(권위 목록 재적용 안전망 — broadcast 유실
-//   대비)로 이어져 spawn/delete 와 대칭이어야 한다. 옛 회귀(부분 목록 덮어쓰기)가 재발하면 이 단언이 깨진다.
-describe('증상4 회귀: 한 노드 rename 이 형제 노드를 떨어뜨리지 않는다', () => {
-  it('3노드(running 1 + reserved 2) 중 하나 rename → 나머지 2 노드 행 유지 + refreshProfiles 호출', () => {
+// ── Symptom 4 regression safety net: operating one node does not drop sibling nodes ────────────────────
+//   Targets the bug report ("with 3 in the tree, operating one makes the other 2 disappear"). The rename path
+//   leaves the store mirror (the whole agents/profiles) as is without an optimistic update, so the sibling rows drawn by mergeTreeNodes
+//   must not vanish from the render. Also a rename success must continue to refreshProfiles (the authoritative-list re-apply safety net — against a lost
+//   broadcast) symmetric with spawn/delete. If the old regression (overwriting with a partial list) recurs this assertion breaks.
+describe('symptom 4 regression: renaming one node does not drop sibling nodes', () => {
+  it('rename one of 3 nodes (running 1 + reserved 2) → the other 2 node rows stay + refreshProfiles is called', () => {
     useAgentStore.setState({
       agents: [agent('a1', 'C:/work/aaa')],
       profiles: [profile('p1', 'C:/r/bbb', 1), profile('p2', 'C:/r/ccc', 2)],
@@ -592,7 +589,7 @@ describe('증상4 회귀: 한 노드 rename 이 형제 노드를 떨어뜨리지
     fireEvent.click(screen.getByText('이름 변경'))
     const input = document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
     fireEvent.change(input, { target: { value: '새이름' } })
-    // Enter 확정은 행 div keydown 소유(위 주석 — react-window+React19 회피). 행 div 에 발화.
+    // Enter commit is owned by the row div keydown (comment above — avoiding react-window+React19). Fire on the row div.
     fireEvent.keyDown(document.querySelector('[data-agent-row="p1"]') as HTMLElement, { key: 'Enter' })
 
     expect(clientMock.renameProfile).toHaveBeenCalledWith('p1', '새이름')
@@ -602,7 +599,7 @@ describe('증상4 회귀: 한 노드 rename 이 형제 노드를 떨어뜨리지
     expect(document.querySelectorAll('[data-agent-row]').length).toBe(3)
   })
 
-  it('rename 성공 → refreshProfiles(권위 목록 재적용 안전망) 호출 — spawn/delete 와 대칭', async () => {
+  it('rename success → refreshProfiles (authoritative-list re-apply safety net) is called — symmetric with spawn/delete', async () => {
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r/bbb', 1)] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
@@ -610,20 +607,20 @@ describe('증상4 회귀: 한 노드 rename 이 형제 노드를 떨어뜨리지
     const input = document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
     fireEvent.change(input, { target: { value: '새이름' } })
     await act(async () => {
-      // Enter 확정은 행 div keydown 소유(위 주석). 행 div 에 발화.
+      // Enter commit is owned by the row div keydown (comment above). Fire on the row div.
       fireEvent.keyDown(document.querySelector('[data-agent-row="p1"]') as HTMLElement, { key: 'Enter' })
-      // renameProfile Promise resolve 후 .then(refreshProfiles) 가 도는 microtask 를 flush.
+      // Flush the microtask in which .then(refreshProfiles) runs after the renameProfile Promise resolves.
       await Promise.resolve()
     })
     expect(refreshProfilesMock).toHaveBeenCalledTimes(1)
   })
 })
 
-// ── FIX#1: 동기 in-flight 가드(useRef) — 연타 더블파이어 1회로 접힘 ─────────────
-describe('동기 in-flight 가드(useRef, FIX#1)', () => {
-  // spawnProfile 을 미해결 Promise 로 잡아 두 번째 doubleClick 이 아직 in-flight 인 상태에서 들어오게 한다.
-  //   useState 만이면 re-render commit 전 stale closure 로 둘 다 통과하지만, busyRef 동기 가드는 즉시 차단한다.
-  it('예약 행 더블클릭 연타 → spawnProfile 은 1회만(busyRef 동기 차단)', () => {
+// ── FIX#1: sync in-flight guard (useRef) — rapid clicks collapse into one fire ─────────────
+describe('sync in-flight guard (useRef, FIX#1)', () => {
+  // Hold spawnProfile as an unresolved Promise so the second doubleClick arrives while still in flight.
+  //   With useState alone both pass via a stale closure before the re-render commits, but the busyRef sync guard blocks at once.
+  it('reserved row double-click spam → spawnProfile only once (busyRef sync block)', () => {
     let resolveSpawn: (() => void) | undefined
     clientMock.spawnProfile.mockImplementationOnce(
       () => new Promise<{ id: string }>(res => { resolveSpawn = () => res({ id: 'p1' }) }),
@@ -634,14 +631,14 @@ describe('동기 in-flight 가드(useRef, FIX#1)', () => {
     fireEvent.doubleClick(row)
     fireEvent.doubleClick(row)
     expect(clientMock.spawnProfile).toHaveBeenCalledTimes(1)
-    resolveSpawn?.() // cleanup(핸들 미해결 방지)
+    resolveSpawn?.() // cleanup (avoid an unresolved handle)
   })
 
-  it('실행중 행 종료 연타 → killAgent 은 1회만(busyRef 동기 차단)', () => {
-    clientMock.killAgent.mockImplementationOnce(() => new Promise<undefined>(() => {})) // 영구 미해결
+  it('running row kill spam → killAgent only once (busyRef sync block)', () => {
+    clientMock.killAgent.mockImplementationOnce(() => new Promise<undefined>(() => {})) // never resolves
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
-    // 메뉴 → 종료 클릭(메뉴는 클릭 시 닫히므로 매번 다시 연다).
+    // menu → click kill (the menu closes on click, so reopen each time).
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
     fireEvent.click(screen.getByText('종료'))
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
@@ -649,8 +646,8 @@ describe('동기 in-flight 가드(useRef, FIX#1)', () => {
     expect(clientMock.killAgent).toHaveBeenCalledTimes(1)
   })
 
-  it('열기 연타 → assignAgent 은 1회만(busyRef 동기 차단)', () => {
-    assignAgentMock.mockImplementationOnce(() => new Promise<undefined>(() => {})) // 영구 미해결
+  it('open spam → assignAgent only once (busyRef sync block)', () => {
+    assignAgentMock.mockImplementationOnce(() => new Promise<undefined>(() => {})) // never resolves
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
@@ -661,21 +658,21 @@ describe('동기 in-flight 가드(useRef, FIX#1)', () => {
   })
 })
 
-// ── ★더블클릭한 행은 답이 올 때까지 상태를 주장하지 않는다★ ────────────────────────────
-//   실측한 결함(2026-08-24): 더블클릭 후 2.4초에 활성화 RPC 가 이미 **거절**했는데도 행은 4.2초 더
-//   초록 채운 원을 그렸다 — 「실패」배지와 나란히. 초록은 status 를 따라 그려지고, 그 status 는 세션이
-//   생기는 순간 낙관적으로 Running 이 되어(코어) 프로세스가 죽어 관측될 때까지 남기 때문이다.
-//   여기서 고정하는 성질 넷: ① in-flight = 스피너 ② 거절 = 즉시 금지 표식 ③ 성공 = 평소 기호
-//   ④ 기다리는 동안 초록은 어떤 경로로도 나오지 않는다.
+// ── ★A double-clicked row does not claim a state until the answer arrives★ ────────────────────────────
+//   A measured defect (2026-08-24): 2.4s after the double-click the activation RPC had already **refused**, yet the row drew a
+//   green filled circle for 4.2 more seconds — next to the 「failed」 badge. Green is drawn following status, and that status becomes
+//   Running optimistically the moment the session exists (core) and stays until the process death is observed.
+//   The four properties pinned here: ① in-flight = spinner ② refusal = immediate forbidden marker ③ success = usual glyph
+//   ④ while waiting, green never appears by any path.
 //
-//   ★시간을 재지 않는다★: 이 저장소엔 벽시계 단언으로 흔들린 테스트 전례가 있다. 대신 spawnProfile
-//   Promise 를 직접 쥐고(미해결/거절/해결) microtask 만 flush 해 구간을 결정적으로 만든다.
-describe('활성화 진행/거절이 행 기호를 몬다(초록 거짓말 회귀 안전망)', () => {
+//   ★No time is measured★: this repo has precedent of tests made flaky by wall-clock assertions. Instead the spawnProfile
+//   Promise is held directly (unresolved/rejected/resolved) and only microtasks are flushed to make the span deterministic.
+describe('activation progress/refusal drives the row glyph (green-lie regression safety net)', () => {
   const rowOf = (id: string) => document.querySelector(`[data-agent-row="${id}"]`) as HTMLElement
   const glyphOf = (id: string) =>
     document.querySelector(`[data-agent-row="${id}"] [data-agent-glyph]`) as HTMLElement
 
-  /** reject/resolve 뒤 .catch → .finally 까지 도는 microtask 를 확정적으로 비운다(타이머 아님). */
+  /** Deterministically drain the microtasks that run through .catch → .finally after reject/resolve (not a timer). */
   async function flush(): Promise<void> {
     await act(async () => {
       await Promise.resolve()
@@ -684,7 +681,7 @@ describe('활성화 진행/거절이 행 기호를 몬다(초록 거짓말 회�
     })
   }
 
-  it('①④ 더블클릭 후 답이 오기 전 → 스피너, 그 사이 명부에 Running 이 올라와도 초록 아님', () => {
+  it('①④ after a double-click before the answer → spinner, and even if Running rises in the roster meanwhile it is not green', () => {
     let resolveSpawn: (() => void) | undefined
     clientMock.spawnProfile.mockImplementationOnce(
       () => new Promise<{ id: string }>(res => { resolveSpawn = () => res({ id: 'p1' }) }),
@@ -695,27 +692,27 @@ describe('활성화 진행/거절이 행 기호를 몬다(초록 거짓말 회�
 
     expect(glyphOf('p1').dataset.agentGlyphShape).toBe('pending')
     expect(glyphOf('p1').querySelector('svg.lucide-loader')).toBeTruthy()
-    // 회전은 스타일시트가 소유한다(agentGlyph.css) — 컴포넌트는 클래스만 붙인다.
+    // Rotation is owned by the stylesheet (agentGlyph.css) — the component only attaches the class.
     expect(glyphOf('p1').classList.contains('engram-glyph-spin')).toBe(true)
     expect(glyphOf('p1').style.color).not.toBe('var(--status-running)')
-    // hover 도 같은 판정을 따라간다 — 기다리는 중에 옛 실패 문구/cwd 가 뜨면 기호와 말이 어긋난다.
+    // Hover also follows the same verdict — if an old failure text/cwd appeared while waiting the glyph and words would disagree.
     expect(rowOf('p1').getAttribute('title')).toBe('진행 중…')
 
-    // ★결함의 정확한 구간★: 백엔드가 세션 생성과 함께 낙관적 Running 을 명부에 올린다. 그래도
-    //   아직 답이 아니므로 초록으로 갈아타면 안 된다.
+    // ★The exact span of the defect★: the backend raises an optimistic Running into the roster together with session creation. Even so
+    //   it is not yet the answer, so it must not switch to green.
     act(() => { useAgentStore.setState({ agents: [agent('p1', 'C:/r')] }) })
     expect(glyphOf('p1').dataset.agentGlyphShape).toBe('pending')
     expect(glyphOf('p1').dataset.agentGlyphShape).not.toBe('filled-circle')
     expect(glyphOf('p1').style.color).not.toBe('var(--status-running)')
 
-    resolveSpawn?.() // cleanup(핸들 미해결 방지)
+    resolveSpawn?.() // cleanup (avoid an unresolved handle)
   })
 
-  it('② 거절 → lastFailure 기록이 오기 전에 이미 금지 표식(배지와 같은 순간)', async () => {
+  it('② refusal → the forbidden marker already before the lastFailure record arrives (the same moment as the badge)', async () => {
     clientMock.spawnProfile.mockImplementationOnce(() =>
       Promise.reject(new Error('no conversation to resume')),
     )
-    // last_failure = null 로 둔다 — 기록이 아직 안 온 상태가 이 테스트의 전제다.
+    // last_failure = null — the record not having arrived yet is this test's premise.
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
     render(<AgentList />)
     fireEvent.doubleClick(rowOf('p1'))
@@ -725,24 +722,24 @@ describe('활성화 진행/거절이 행 기호를 몬다(초록 거짓말 회�
     expect(glyphOf('p1').dataset.agentGlyphShape).toBe('blocked')
     expect(glyphOf('p1').querySelector('svg.lucide-ban')).toBeTruthy()
     expect(glyphOf('p1').style.color).toBe('var(--status-blocked)')
-    // 「실패」배지 = 프론트가 답을 이미 쥐고 있었다는 증거. 기호가 그것과 같은 순간에 갈린다.
+    // The 「failed」 badge = proof the frontend already held the answer. The glyph switches at the same moment.
     expect(rowOf('p1').textContent).toContain('실패')
   })
 
-  it('② 거절 후 프로세스가 아직 살아 status=Running 이어도 초록으로 돌아가지 않는다', async () => {
+  it('② after a refusal, even if the process is still alive with status=Running it does not return to green', async () => {
     clientMock.spawnProfile.mockImplementationOnce(() => Promise.reject(new Error('rejected')))
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
     render(<AgentList />)
     fireEvent.doubleClick(rowOf('p1'))
     await flush()
-    // 죽어 가는 프로세스가 명부에 Running 으로 남아 있는 구간(실측 +2.4s ~ +6.6s).
+    // The span where a dying process stays in the roster as Running (measured +2.4s ~ +6.6s).
     act(() => { useAgentStore.setState({ agents: [agent('p1', 'C:/r')] }) })
 
     expect(glyphOf('p1').dataset.agentGlyphShape).toBe('blocked')
     expect(glyphOf('p1').style.color).not.toBe('var(--status-running)')
   })
 
-  it('③ 성공 → 평소 상태 기호(초록 채운 원은 여기서만 난다)', async () => {
+  it('③ success → the usual status glyph (the green filled circle comes only here)', async () => {
     clientMock.spawnProfile.mockImplementationOnce(async () => ({ id: 'p1' }))
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
     render(<AgentList />)
@@ -758,7 +755,7 @@ describe('활성화 진행/거절이 행 기호를 몬다(초록 거짓말 회�
     expect(glyphOf('p1').classList.contains('engram-glyph-spin')).toBe(false)
   })
 
-  it('거절 후 재시도 → 스피너가 금지 표식을 이긴다(지난 답은 지금의 사실이 아니다)', async () => {
+  it('retry after a refusal → the spinner beats the forbidden marker (the past answer is not the current fact)', async () => {
     clientMock.spawnProfile.mockImplementationOnce(() => Promise.reject(new Error('rejected')))
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
     render(<AgentList />)
@@ -776,17 +773,17 @@ describe('활성화 진행/거절이 행 기호를 몬다(초록 거짓말 회�
   })
 })
 
-// ── ★"열기" 안전망: 제어 슬롯 포커스 제외(selectOpenTarget 통합, ADR-0066 정제)★ ──────────────
-//   click-to-focus 게이트가 앞으로는 포커스를 제어 슬롯에 안 앉히지만, 기존/엣지 백엔드 상태(이미 트리
-//   슬롯이 포커스됐거나 focus=null)에서도 "열기"가 제어 슬롯을 덮지 않고 빈 슬롯으로 폴백해야 한다.
-//   빈 슬롯도 없으면 배정 안 함(실패 인라인, 클로버 금지).
-describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)', () => {
+// ── ★"open" safety net: control-slot focus excluded (selectOpenTarget integration, ADR-0066 refinement)★ ──────────────
+//   The click-to-focus gate will no longer seat focus on a control slot, but even in existing/edge backend states (the tree
+//   slot already focused or focus=null) "open" must not overwrite a control slot and must fall back to an empty slot.
+//   With no empty slot either, nothing is assigned (inline failure, no clobbering).
+describe('open safety net — control-slot focus excluded (selectOpenTarget)', () => {
   function openRow(agentId: string): void {
     fireEvent.contextMenu(document.querySelector(`[data-agent-row="${agentId}"]`) as HTMLElement)
     fireEvent.click(screen.getByText('열기'))
   }
 
-  it('포커스가 트리(agent_list) + 빈 슬롯 존재 → 트리 대신 빈 슬롯으로 assignAgent', () => {
+  it('focus on the tree (agent_list) + an empty slot exists → assignAgent to the empty slot instead of the tree', () => {
     selectViewMock.mockReturnValue({
       layout: {
         type: 'split', id: 'root', dir: 'left_right', ratio: 0.3,
@@ -802,8 +799,8 @@ describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)'
     expect(assignAgentMock).toHaveBeenCalledWith('main-view', 'empty', 'a1')
   })
 
-  // TRD S21-storage §6-2: 모르는 내용 슬롯은 `empty` 로 실린다 — 캐시의 foreignSlots 를 넘기지 않으면 그 원문을 덮는다.
-  it('포커스가 모르는 내용 슬롯 + 빈 슬롯 존재 → 그 슬롯 대신 빈 슬롯으로 assignAgent', () => {
+  // TRD S21-storage §6-2: an unknown content slot is carried as `empty` — if the cache's foreignSlots is not passed it would overwrite that original.
+  it('focus on an unknown content slot + an empty slot exists → assignAgent to the empty slot instead of that slot', () => {
     selectViewMock.mockReturnValue({
       layout: {
         type: 'split', id: 'root', dir: 'left_right', ratio: 0.5,
@@ -819,7 +816,7 @@ describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)'
     expect(assignAgentMock).toHaveBeenCalledWith('main-view', 'empty', 'a1')
   })
 
-  it('포커스가 사용량 슬롯(usage) + 빈 슬롯 없음 → assignAgent 미호출 + 실패 인라인 배지', () => {
+  it('focus on the usage slot (usage) + no empty slot → assignAgent not called + failure inline badge', () => {
     selectViewMock.mockReturnValue({
       layout: {
         type: 'split', id: 'root', dir: 'left_right', ratio: 0.5,
@@ -837,7 +834,7 @@ describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)'
     expect(row.textContent).toContain('실패')
   })
 
-  it('활성 뷰/캐시 부재(selectView=null) → assignAgent 미호출 + 실패 인라인', () => {
+  it('no active view/cache (selectView=null) → assignAgent not called + failure inline', () => {
     selectViewMock.mockReturnValue(null)
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
@@ -848,10 +845,10 @@ describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)'
   })
 })
 
-// ── FIX#3: 예약 행 "삭제" → deleteProfile(리그레션 복원) ────────────────────────
-//   메뉴 라벨은 '삭제'(rowCancelReserved). 동작은 deleteProfile 그대로.
-describe('삭제(deleteProfile, FIX#3)', () => {
-  it('예약 행 우클릭 → "삭제" → deleteProfile(id) 호출', () => {
+// ── FIX#3: reserved row "delete" → deleteProfile (regression restored) ────────────────────────
+//   The menu label is 'delete' (rowCancelReserved). The behavior is deleteProfile as is.
+describe('delete (deleteProfile, FIX#3)', () => {
+  it('reserved row right-click → "delete" → calls deleteProfile(id)', () => {
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
@@ -859,7 +856,7 @@ describe('삭제(deleteProfile, FIX#3)', () => {
     expect(clientMock.deleteProfile).toHaveBeenCalledWith('p1')
   })
 
-  it('실행중 행 메뉴엔 "삭제" 없음(reserved 전용)', () => {
+  it('a running row menu has no "delete" (reserved only)', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
@@ -867,9 +864,9 @@ describe('삭제(deleteProfile, FIX#3)', () => {
   })
 })
 
-// ── 행(ROW) 메뉴는 stopPropagation 유지(item-targeted, ADR-0064) ─────────────────
-describe('행 우클릭 stopPropagation(통합 메뉴 대신 행 메뉴가 이긴다)', () => {
-  it('행 우클릭 이벤트는 stopPropagation 한다(상위 통합 슬롯 메뉴가 안 뜨게)', () => {
+// ── The ROW menu keeps stopPropagation (item-targeted, ADR-0064) ─────────────────
+describe('row right-click stopPropagation (the row menu wins over the unified menu)', () => {
+  it('a row right-click event does stopPropagation (so the parent unified slot menu does not appear)', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     const row = document.querySelector('[data-agent-row="a1"]') as HTMLElement
@@ -880,9 +877,9 @@ describe('행 우클릭 stopPropagation(통합 메뉴 대신 행 메뉴가 이�
   })
 })
 
-// ── Escape 로 열린 행 메뉴 닫기 ──────────────────────────────────────────────
-describe('Escape 로 행 메뉴 닫기', () => {
-  it('행 메뉴 열림 → Escape → 닫힘', () => {
+// ── Close an open row menu with Escape ──────────────────────────────────────────────
+describe('close the row menu with Escape', () => {
+  it('row menu open → Escape → closed', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
@@ -892,48 +889,48 @@ describe('Escape 로 행 메뉴 닫기', () => {
   })
 })
 
-// ── 타깃이 목록에서 사라지면 행 메뉴가 닫힌다(stale-target 가드) ──────────────────
-//   rowMenu 상태는 대상 행보다 오래 산다: 목록이 바뀌어 대상 agentId 가 rows 에서 빠져도(kill/삭제/
-//   마지막 에이전트 제거) rowMenu 는 남는다. empty 전이로 트리 컨테이너가 언마운트돼 메뉴가 잠깐 사라졌다가
-//   새 에이전트 등장으로 non-empty 재마운트되면 stale 좌표에 떠난 agentId 를 겨눈 메뉴가 되살아난다.
-describe('타깃 사라지면 행 메뉴 닫힘(stale-target 가드)', () => {
-  it('행 메뉴 열림 → 대상 에이전트 제거(목록 empty) → 메뉴 사라짐', () => {
+// ── The row menu closes when the target disappears from the list (stale-target guard) ──────────────────
+//   rowMenu state outlives its row: even if the list changes and the target agentId drops out of rows (kill/delete/
+//   last agent removed) rowMenu stays. The tree container unmounts on the empty transition so the menu vanishes briefly, and
+//   when a new agent appears and it remounts non-empty a menu aimed at the departed agentId revives at stale coordinates.
+describe('row menu closes when the target disappears (stale-target guard)', () => {
+  it('row menu open → target agent removed (list empty) → menu disappears', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
     expect(screen.getByText('열기')).toBeTruthy()
-    // act 로 감싸 리셋 effect 를 flush.
+    // Wrap in act to flush the reset effect.
     act(() => useAgentStore.setState({ agents: [] }))
     expect(screen.queryByText('열기')).toBeNull()
   })
 
-  it('대상 제거 후 다른 에이전트 등장(non-empty 재마운트) → stale 메뉴가 되살아나지 않는다', () => {
+  it('after removing the target another agent appears (non-empty remount) → the stale menu does not revive', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
     expect(screen.getByText('열기')).toBeTruthy()
-    // 각 전이를 act 로 flush.
+    // Flush each transition with act.
     act(() => useAgentStore.setState({ agents: [] }))
     act(() => useAgentStore.setState({ agents: [agent('a2', 'C:/x')] }))
     expect(screen.queryByText('열기')).toBeNull()
     expect(document.querySelector('[data-agent-row="a2"]')).toBeTruthy()
   })
 
-  it('여러 행 중 대상만 제거(목록은 non-empty 유지) → 메뉴 사라짐', () => {
+  it('among several rows only the target removed (list stays non-empty) → menu disappears', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w'), agent('a2', 'C:/x')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
     expect(screen.getByText('열기')).toBeTruthy()
-    // act 로 flush.
+    // Flush with act.
     act(() => useAgentStore.setState({ agents: [agent('a2', 'C:/x')] }))
     expect(screen.queryByText('열기')).toBeNull()
   })
 })
 
-// ── 계층 중첩 렌더 + 접기/펼치기(react-arborist, ADR-0072) ──────────────────────────
-describe('계층 중첩(parent_id → 부모 밑 자식, ADR-0072)', () => {
-  it('자식(parent_id=A)이 부모 A 밑에 중첩 렌더 + 자식 행이 더 들여쓰기됨', () => {
-    // openByDefault 라 자식도 펼쳐진 상태로 렌더.
+// ── Hierarchical nesting render + collapse/expand (react-arborist, ADR-0072) ──────────────────────────
+describe('hierarchical nesting (parent_id → child under parent, ADR-0072)', () => {
+  it('a child (parent_id=A) renders nested under parent A + the child row is indented more', () => {
+    // Rendered with the children also expanded since openByDefault.
     useAgentStore.setState({
       profiles: [profile('A', 'C:/a', 1), profile('B', 'C:/b', 2, null, 'A')],
     })
@@ -949,7 +946,7 @@ describe('계층 중첩(parent_id → 부모 밑 자식, ADR-0072)', () => {
     expect(childPad).toBeGreaterThan(parentPad)
   })
 
-  it('부모 토글 클릭 → 자식 접힘(사라짐), 다시 클릭 → 펼쳐짐', () => {
+  it('parent toggle click → children collapse (disappear), click again → expand', () => {
     useAgentStore.setState({
       profiles: [profile('A', 'C:/a', 1), profile('B', 'C:/b', 2, null, 'A')],
     })
@@ -958,7 +955,7 @@ describe('계층 중첩(parent_id → 부모 밑 자식, ADR-0072)', () => {
     const toggle = document.querySelector('[data-agent-row="A"] [data-agent-toggle="1"]') as HTMLElement
     act(() => { fireEvent.click(toggle) })
     expect(document.querySelector('[data-agent-row="B"]')).toBeNull()
-    // 토글은 재조회 — 접힘 상태에서 부모 행은 유지.
+    // The toggle is a re-lookup — the parent row stays in the collapsed state.
     const toggle2 = document.querySelector('[data-agent-row="A"] [data-agent-toggle="1"]') as HTMLElement
     act(() => { fireEvent.click(toggle2) })
     expect(document.querySelector('[data-agent-row="B"]')).toBeTruthy()

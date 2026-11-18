@@ -1,6 +1,6 @@
-//! ② Isolated integration test — directly assert-verifies the PtyTransport + OutputCore new path without a manager.
+//! ② Isolated integration test — asserts the PtyTransport + OutputCore new path directly, without a manager.
 //!
-//! Spawns a real PTY (default shell). Light and with no global contention, so default (runs automatically).
+//! A real PTY (default shell); light, no global contention, so it runs by default.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -80,7 +80,7 @@ fn transport_open_input_resize_shutdown() {
     let core = Arc::new(OutputCore::new(id, 0, status_sink, TurnWiring::detached()));
     assert!(
         matches!(core.status(), AgentStatus::Running),
-        "open 직후 status 가 Running 이어야 함"
+        "right after open the status must be Running"
     );
 
     let transport: Box<dyn AgentTransport> = Box::new(transport);
@@ -90,7 +90,7 @@ fn transport_open_input_resize_shutdown() {
 
     assert!(
         wait_until(Duration::from_secs(2), || out_sink.output_len() > 0),
-        "2s 내 PTY 초기 출력 미수신"
+        "did not receive the initial PTY output within 2s"
     );
 
     transport
@@ -99,7 +99,7 @@ fn transport_open_input_resize_shutdown() {
     assert!(
         wait_until(Duration::from_secs(3), || out_sink
             .output_contains("smoke-test")),
-        "echo 입력이 PTY 출력에 반영되지 않음(smoke-test 미수신)"
+        "the echo input was not reflected in the PTY output (smoke-test not received)"
     );
 
     transport.resize(100, 30).expect("resize failed");
@@ -110,19 +110,19 @@ fn transport_open_input_resize_shutdown() {
     let join_elapsed = join_started.elapsed();
     assert!(
         join_elapsed < Duration::from_secs(5),
-        "join_pump 가 5s 안에 끝나지 않음(hang 의심): {join_elapsed:?}"
+        "join_pump did not finish within 5s (suspected hang): {join_elapsed:?}"
     );
 
     assert!(
         matches!(core.status(), AgentStatus::Killed),
-        "shutdown 후 status 가 Killed 가 아님: {:?}",
+        "after shutdown the status is not Killed: {:?}",
         core.status()
     );
 
     // 20s = a looser leeway bound than the individual stages (5s) — catches only a whole-hang regression.
     assert!(
         started.elapsed() < Duration::from_secs(20),
-        "전체 흐름이 비정상적으로 오래 걸림: {:?}",
+        "the whole flow took abnormally long: {:?}",
         started.elapsed()
     );
 }
@@ -131,10 +131,10 @@ fn transport_open_input_resize_shutdown() {
 // Input queue (no ADR assigned — `transport::input_queue`) — regression net on the PTY side
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-/// ★Proves★: **FIFO is preserved** even through the queue — three lines put in separately arrive at the child in that order and
-///   are echoed in that order. A regression where the writer scrambles the queue or merges chunks is caught by the subsequence assertion below.
-/// ★Why the assertion is set as a "subsequence"★: a PTY spits out prompts · ANSI mixed in, so an exact match would depend on the shell.
-///   We look only at whether the three markers appear **in this order** — that is all of the property being measured (order).
+/// ★Proves★: **FIFO is preserved** through the queue — three separately-put lines reach the child and echo in that order. A writer that
+///   scrambles the queue or merges chunks is caught by the subsequence assertion.
+/// ★Why a "subsequence"★: a PTY mixes prompts · ANSI in, so exact match would depend on the shell; only whether the three markers appear
+///   **in order** is the measured property.
 #[test]
 fn pty_input_queue_preserves_fifo_order() {
     let spec = CommandSpec {
@@ -157,44 +157,43 @@ fn pty_input_queue_preserves_fifo_order() {
 
     assert!(
         wait_until(Duration::from_secs(5), || sink.output_len() > 0),
-        "5s 내 PTY 초기 출력 미수신"
+        "did not receive the initial PTY output within 5s"
     );
 
     // Put in three separate times — we are measuring whether the queue keeps order, so sending as one chunk would be meaningless.
     for marker in ["fifo-alpha", "fifo-bravo", "fifo-charlie"] {
         transport
             .send_input(InputEvent::Raw(format!("echo {marker}\r\n").into_bytes()))
-            .expect("send_input 실패");
+            .expect("send_input failed");
     }
 
     assert!(
         wait_until(Duration::from_secs(20), || sink
             .output_contains("fifo-charlie")),
-        "20s 내 마지막 표식 미도달 — 큐가 흘러 나가지 않는다"
+        "the last marker did not arrive within 20s — the queue does not drain"
     );
 
     let text = {
         let buf = sink.output.lock().unwrap();
         String::from_utf8_lossy(&buf).into_owned()
     };
-    let a = text.find("fifo-alpha").expect("alpha 미도달");
-    let b = text.find("fifo-bravo").expect("bravo 미도달");
-    let c = text.find("fifo-charlie").expect("charlie 미도달");
+    let a = text.find("fifo-alpha").expect("alpha did not arrive");
+    let b = text.find("fifo-bravo").expect("bravo did not arrive");
+    let c = text.find("fifo-charlie").expect("charlie did not arrive");
     assert!(
         a < b && b < c,
-        "FIFO 위반 — 도착 위치 alpha={a} bravo={b} charlie={c}"
+        "FIFO violation — arrival positions alpha={a} bravo={b} charlie={c}"
     );
 
     transport.shutdown();
     core.join_pump(Duration::from_secs(5));
 }
 
-/// ★Proves★: exceeding the bound is **refused** with `Err` (not discarded), and input after `shutdown` is refused too —
-///   that is, there is no place for bytes to silently pile up after the writer is gone.
-/// ★The refusal after `shutdown` is the observation window of the writer's termination★ — no one joins that thread (that is
-///   the basis for it not delaying the kill causality), so there is no way to see its death directly. Instead we observe from outside the very
-///   signal that ends that thread (the queue closing). That the loop itself ends on that signal is measured by
-///   `close_terminates_the_drain_loop` in `transport::input_queue`.
+/// ★Proves★: exceeding the bound is **refused** with `Err` (not discarded), and input after `shutdown` is refused too — no place for bytes
+///   to silently pile up after the writer is gone.
+/// ★The refusal after `shutdown` is the observation window of the writer's termination★ — nobody joins that thread (so it does not delay
+///   the kill causality) and its death cannot be seen directly; we observe from outside the signal that ends it (the queue closing). That
+///   the loop ends on that signal is measured by `close_terminates_the_drain_loop` in `transport::input_queue`.
 #[test]
 fn pty_input_queue_refuses_overflow_and_writes_after_shutdown() {
     use engram_dashboard_agent::transport::input_queue::INPUT_QUEUE_MAX_BYTES;
@@ -215,11 +214,11 @@ fn pty_input_queue_refuses_overflow_and_writes_after_shutdown() {
     ));
     let transport: Box<dyn AgentTransport> = Box::new(transport);
 
-    // ★Measured before `start()`★ — with no writer the queue is not drained, so the bound decision is deterministic (once the writer
-    //   runs, the boundary wobbles by how much was drained). Also measures the fact that the queue accepts even before `start()`.
+    // ★Measured before `start()`★ — with no writer the queue is not drained, so the bound decision is deterministic (a running writer
+    //   wobbles the boundary by how much it drained). Also measures that the queue accepts before `start()`.
     let err = transport
         .send_input(InputEvent::Raw(vec![b'z'; INPUT_QUEUE_MAX_BYTES + 1]))
-        .expect_err("상한 초과는 거절돼야 한다");
+        .expect_err("exceeding the cap must be refused");
     assert!(matches!(err, PtyError::WriteFailed(_)), "{err:?}");
 
     transport.start(core.clone());
@@ -228,7 +227,7 @@ fn pty_input_queue_refuses_overflow_and_writes_after_shutdown() {
     let late = transport.send_input(InputEvent::Raw(b"late\r\n".to_vec()));
     assert!(
         matches!(late, Err(PtyError::WriteFailed(_))),
-        "shutdown 뒤의 입력은 거절돼야 한다(조용히 쌓이면 유실): {late:?}"
+        "input after shutdown must be refused (silently piling up would be a loss): {late:?}"
     );
 
     core.join_pump(Duration::from_secs(5));

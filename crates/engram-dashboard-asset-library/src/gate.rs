@@ -431,7 +431,7 @@ impl Gate {
             tracing::debug!(
                 ?noted,
                 ?now,
-                "라이브러리 늦은 합치기: 읽은 뒤 세대가 움직여 버렸다"
+                "library late merge: generation moved after the read"
             );
             return Vec::new();
         }
@@ -556,7 +556,7 @@ impl Gate {
                 drop(state);
                 tracing::debug!(
                     range = range.map(LibPath::as_str),
-                    "라이브러리 훑기: 훑는 사이 변경 세대가 움직여 다시 훑는다"
+                    "library scan: change generation moved during the scan; rescanning"
                 );
                 continue;
             }

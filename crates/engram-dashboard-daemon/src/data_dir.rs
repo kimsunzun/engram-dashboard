@@ -2,14 +2,11 @@
 //! the folder · the install location · the daemon's layout ([`DataLayout`], which also computes the library root
 //! setting's default place from that rule).
 //!
-//! ★루트 규칙과 `daemon.json` · `logs\` 자리의 정본이 여기다★ — 셸은 데몬 crate 를 운영 의존하지 않으므로 그
-//! 셋의 사본을 따로 갖고, 두 벌이 같은 경로를 내는지는 시험이 묶는다(ADR-0271 결정 4 · ADR-0282 결정 3). 규칙을 고치면 셸 사본도
-//! 같은 변경에서 고친다 — 갈리면 셸이 데몬이 쓰지 않는 폴더에서 `daemon.json` 을 찾는다.
+//! ★The root rule and the places of `daemon.json` · `logs\` are defined here★ — the shell does not depend on the daemon crate in production, so it keeps its own copy of those three, and tests tie that the two copies give the same paths (ADR-0271 decision 4 · ADR-0282 decision 3). Change the rule and the shell copy together, or the shell looks for `daemon.json` in a folder the daemon does not use.
 //!
-//! ★The OS split lives only in [`default_data_root`]★ — the layout is `Path::join` only (CLAUDE.md 「플랫폼 중립」).
+//! ★The OS split lives only in [`default_data_root`]★ — the layout is `Path::join` only (CLAUDE.md platform-neutrality rule).
 //!
-//! ★배치의 이름들은 디스크 계약이다★ — 바꾸면 기존 폴더의 데이터는 읽히지 않고 남는다. 옮겨 주는 코드는 없다
-//! (ADR-0264 — 옛 데이터는 버린다).
+//! ★The names of the layout are a disk contract★ — renaming leaves existing folders' data unread, and no code moves it (ADR-0264 — old data is discarded).
 // ADR-0271
 // ADR-0264
 
@@ -18,38 +15,27 @@ use std::path::{Path, PathBuf};
 use crate::portfile::DAEMON_FILE;
 use engram_dashboard_base::writable::{probe_write_in, retry_if_vanished};
 
-// ★ENGRAM_DATA_DIR override (테스트 격리 탈출구 — 배포 노브 아님)★:
-//   - **유일한 용도 = 통합 테스트의 데이터 격리.** 실프로세스 통합 테스트(daemon `tests/ws_e2e.rs`)가
-//     데몬을 임시 디렉토리로 보내 운영 `<repo>/.engram-dev` 오염을 막기 위함이다. 이 env 가 없으면
-//     테스트 데몬이 운영 폴더에 daemon.json/프로필 파일을 쓴다(오염).
-//   - **배포용 경로 커스터마이즈 노브가 아니다.** 배포 단계의 데이터 위치는 실행 폴더 하위로
-//     확정돼 있다(ADR-0134). 이 override 를 "사용자가 데이터 폴더를 바꾸는 수단"으로 쓰지 말 것.
-//   - ★ADR-0134 이후 부수 효과★: 데이터 폴더가 곧 단일 인스턴스 스코프라, 이 env 만 갈라 주면
-//     인스턴스도 함께 갈린다(따로 챙길 열쇠 변수가 없다).
-//   - 부모 환경을 물려받아 뜬 데몬에만 먹는다 — WMI 로 뜬 데몬은 물려받지 않는다(그 한계는 띄우는 쪽인
-//     셸이 적는다).
+// ★ENGRAM_DATA_DIR override (test isolation escape hatch — not a deployment knob)★:
+//   - The only use = data isolation for integration tests: the real-process test (`tests/ws_e2e.rs`) sends the daemon to a temp directory instead of polluting the production `<repo>/.engram-dev` with daemon.json and the profile file.
+//   - Not a deployment customization knob — the deployed data location is fixed under the executable folder (ADR-0134). Do not use it as "a way for the user to change the data folder".
+//   - ★Since ADR-0134★ the data folder is the single-instance scope, so splitting this env splits the instance too.
+//   - It takes effect only on a daemon launched inheriting the parent environment — a WMI-launched daemon does not inherit it (the launching shell documents that limit).
 const DATA_DIR_ENV: &str = "ENGRAM_DATA_DIR";
 
-// ADR-0029: debug 분기(walk-up `.engram-dev`)와 그 단위테스트에서만 쓰인다 — release
-// default_data_root 은 exe 옆 `data` 만 쓰므로 release 비-test 빌드에선 dead_code.
+// ADR-0029: used only in the debug branch (walk-up `.engram-dev`) and its unit tests — dead_code in a release non-test build.
 // ADR-0264
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 const LOCAL_DATA_DIR: &str = ".engram-dev";
 
-/// ADR-0134 결정 2: 릴리스 데이터는 실행 폴더 **하위 한 폴더**에 모인다 — exe 옆에 흩어두면 배포
-/// 파일과 섞여 새 버전 압축을 덮어쓸 때 사용자 데이터가 함께 날아간다.
+/// ADR-0134 decision 2: release data gathers in one folder under the executable folder — scattered next to the exe it would mix with distribution files and be wiped when a new version's archive is extracted over it.
 ///
-/// ★`engram-` 접두사를 붙이지 마라(되살리지 마라)★: 이 폴더는 사용자가 이미 이름 붙인 배포 폴더
-/// **안에** 있어 접두사가 부모 이름을 되풀이할 뿐이고, 형제인 `prompts/` 는 접두사가 없어 규칙도
-/// 어긋난다. 위 [`LOCAL_DATA_DIR`] 과 이름이 다른 것은 실수가 아니다 — 디버그 쪽은 폴더가 많은 repo
-/// 루트에 맨몸으로 놓이고 앞의 점이 가려 주므로 접두사가 값을 한다. 대칭을 맞추려 하지 말 것.
-/// (사용자 결정 2026-08-14)
+/// ★Do not add the `engram-` prefix (do not revive it)★: this folder is inside the distribution folder the user already named, so a prefix only repeats the parent name, and the sibling `prompts/` has none. That it differs from [`LOCAL_DATA_DIR`] is not a mistake — the debug one sits bare in a repo root with many folders and the leading dot hides it, so its prefix earns its keep. Do not make them symmetric (user decision).
 const RELEASE_DATA_DIR: &str = "data";
 
 const DAEMON_DIR: &str = "daemon";
-/// 프로그램이 쓰고 다음 실행에 다시 읽는 것(명부).
+/// What the program writes and reads again on the next run (roster).
 const STATE_DIR: &str = "state";
-/// 버려도 되는 것(잠금+접속 파일 · 토큰을 담은 스폰 부착 파일 · 임시 폴더).
+/// What may be thrown away (lock + connection file · spawn attachment files holding tokens · temp folders).
 const RUN_DIR: &str = "run";
 const LOGS_DIR: &str = "logs";
 const MCP_CONFIG_DIR: &str = "mcp-config";
@@ -77,15 +63,12 @@ pub enum DataRootOrigin {
 
 /// The engram process's data folder (ADR-0024/0029) and the rule that found it.
 ///
-/// 우선순위:
-/// 1. **`ENGRAM_DATA_DIR`(설정+non-empty)** → 그 경로 그대로(테스트 격리 탈출구 — 배포 노브 아님).
-/// 2. **디버그(`cfg!(debug_assertions)`)**: current_exe 에서 위로 올라가 repo 루트(`.git` 또는
-///    `Cargo.toml` 의 `[workspace]`)를 찾아 `<root>/.engram-dev`. 루트 못 찾으면 exe 디렉토리
-///    fallback, 그것도 안 되면 cwd. → 개발 한 곳에서 여러 빌드(app·daemon)가 한 폴더 공유.
-/// 3. **릴리즈(`not(debug_assertions)`)**: **실행 파일 폴더 하위 `data/`**
-///    ([`release_data_dir`]). 배포판 폴더를 지우면 흔적이 남지 않는다 — 완전 포터블(ADR-0134 결정 1).
+/// Priority:
+/// 1. `ENGRAM_DATA_DIR` (set + non-empty) → that path as is (test isolation escape hatch — not a deployment knob).
+/// 2. Debug (`cfg!(debug_assertions)`): walk up from current_exe to the repo root (`.git` or `[workspace]` in `Cargo.toml`) → `<root>/.engram-dev`; no root → the exe directory, then cwd. Several builds (app · daemon) in one development place share one folder.
+/// 3. Release (`not(debug_assertions)`): `data/` under the executable folder ([`release_data_dir`]). Deleting the distribution folder leaves no trace — fully portable (ADR-0134 decision 1).
 ///
-/// 어느 경로든 **절대 패닉하지 않는다**(배포·루트 미발견 상황에서도 PathBuf 를 반드시 반환).
+/// Never panics: it always returns a PathBuf.
 pub fn default_data_root() -> (PathBuf, DataRootOrigin) {
     if let Some(path) = data_dir_env_override() {
         return (path, DataRootOrigin::Given);
@@ -93,9 +76,7 @@ pub fn default_data_root() -> (PathBuf, DataRootOrigin) {
 
     #[cfg(debug_assertions)]
     {
-        // ★왜 exe-기준 walk-up 인가★: 데몬은 WMI Win32_Process.Create 로 떠 **부모의 cwd 를 상속하지
-        // 않는다**(WmiPrvSE 자식) — cwd 는 신뢰할 수 없다. 반면 exe 경로는 신뢰 가능하고, 개발 빌드
-        // 산출물은 같은 repo 의 target/ 아래라 어느 exe 에서 올라가도 같은 repo 루트로 수렴한다.
+        // ★Why an exe-based walk-up★: the daemon is launched by WMI Win32_Process.Create and does not inherit the parent's cwd (a WmiPrvSE child), so cwd cannot be trusted. Dev build outputs are under the same repo's target/, so walking up from any exe converges on the same root.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(root) = find_workspace_root(&exe) {
                 return (root.join(LOCAL_DATA_DIR), DataRootOrigin::Dev);
@@ -110,8 +91,7 @@ pub fn default_data_root() -> (PathBuf, DataRootOrigin) {
 
     #[cfg(not(debug_assertions))]
     {
-        // exe 경로는 WMI spawn(부모 cwd 미상속) 아래서도 신뢰 가능한 유일한 기준점이다 — 디버그
-        // 분기의 walk-up 이 exe 에서 출발하는 것과 같은 이유.
+        // The exe path is the only trustworthy reference under a WMI spawn — same reason as the debug walk-up.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 return (release_data_dir(dir), DataRootOrigin::Release);
@@ -122,7 +102,7 @@ pub fn default_data_root() -> (PathBuf, DataRootOrigin) {
     }
 }
 
-/// `ENGRAM_DATA_DIR` override 가 **활성**이면 그 경로. 빈 값은 미설정과 같다.
+/// The `ENGRAM_DATA_DIR` override if active; an empty value is the same as unset.
 fn data_dir_env_override() -> Option<PathBuf> {
     let val = std::env::var_os(DATA_DIR_ENV)?;
     if val.is_empty() {
@@ -131,34 +111,30 @@ fn data_dir_env_override() -> Option<PathBuf> {
     Some(PathBuf::from(val))
 }
 
-/// 릴리스 데이터 폴더 = `<exe 폴더>/data`(ADR-0134 결정 1·2).
+/// Release data folder = `<exe folder>/data` (ADR-0134 decisions 1·2).
 ///
-/// ★cfg 를 걸지 않는다(load-bearing)★: 호출부인 [`default_data_root`] 의 릴리즈 분기는
-/// `not(debug_assertions)` 아래에 있고 **테스트는 항상 debug 로 돈다** — 이 함수까지 cfg 로 가리면
-/// 릴리스 규칙을 단언할 수단이 사라진다.
+/// ★No cfg on it (load-bearing)★: the caller's release branch is under `not(debug_assertions)` and tests always run in debug — hiding this function behind cfg would remove the means to assert the release rule.
 pub fn release_data_dir(exe_dir: &Path) -> PathBuf {
     exe_dir.join(RELEASE_DATA_DIR)
 }
 
-/// 데이터 폴더를 쓸 수 없다 — 원인이 무엇이든 이것 하나로 접는다. 사용자가 할 일은 "쓸 수 있는 곳에
-/// 풀기" 하나다.
+/// The data folder cannot be written — any cause folds into this one; the one thing the user can do is "extract it somewhere writable".
 ///
-/// ★메시지에 조치가 들어 있다(ADR-0134 결정 4)★: 데몬은 사용자에게 보일 화면이 없어 기동 실패 로그의 이
-/// 문구가 남는 전부다. 셸의 사전 점검이 같은 실패를 같은 문구로 프론트까지 올린다(셸 쪽 오류 타입).
+/// ★The message holds the remedy (ADR-0134 decision 4)★: the daemon has no screen to show the user, so this wording in the startup failure log is all that remains. The shell's pre-check raises the same failure with the same wording (the shell-side error type).
 #[derive(Debug, thiserror::Error)]
-#[error("데이터 폴더에 쓸 수 없음({path}): {reason} — 쓰기 가능한 위치에 압축을 풀어 주세요")]
+#[error(
+    "cannot write to the data folder ({path}): {reason} — please extract to a writable location"
+)]
 pub struct DataDirUnwritable {
     path: String,
     reason: String,
 }
 
-/// 데이터 폴더를 **만들고** 실제로 쓸 수 있는지 확인한다(ADR-0134 결정 4 — 폴백 없음).
+/// Creates the data folder and checks it can really be written (ADR-0134 decision 4 — no fallback).
 ///
-/// ★폴더를 소유하는 쪽(데몬) 전용★: 폴더를 생성하는 부수효과가 있다. 아직 그 폴더를 쓸지 확정하지
-/// 않은 쪽(셸의 사전 점검)은 만들지 않고 되돌리는 자기 확인을 쓴다(ADR-0271 결정 3).
+/// ★Only for the side that owns the folder (the daemon)★: it creates the folder. The shell's pre-check, which has not settled on using the folder, uses a self-check that does not create and rolls back (ADR-0271 decision 3).
 ///
-/// 존재 검사만으로는 부족하다: 권한 없는 위치(`C:\Program Files` 하위 등)는 폴더가 이미 있어도 첫
-/// 쓰기에서 막힌다.
+/// An existence check is not enough: an unprivileged location (under `C:\Program Files` etc.) blocks the first write even if the folder exists.
 pub fn ensure_data_dir_writable(dir: &Path) -> Result<(), DataDirUnwritable> {
     retry_if_vanished(|| {
         std::fs::create_dir_all(dir)?;
@@ -235,7 +211,7 @@ fn is_workspace_root(dir: &Path) -> bool {
     }
     let cargo = dir.join("Cargo.toml");
     match std::fs::read_to_string(&cargo) {
-        // 주석에 박힌 `[workspace]` 문자열 같은 극단 케이스는 무시 — repo 루트는 .git 으로도 잡힌다.
+        // Extreme cases like `[workspace]` embedded in a comment are ignored — the repo root is caught by .git too.
         Ok(s) => s.contains("[workspace]"),
         Err(_) => false,
     }
@@ -245,10 +221,9 @@ fn is_workspace_root(dir: &Path) -> bool {
 /// looks at the disk — the one exception is [`ensure_daemon_dirs`](Self::ensure_daemon_dirs); nothing here creates
 /// the default library place.
 ///
-/// ★셸 폴더(`shell\…` · `webview\`)는 여기 없다★ — 셸이 자기 배치로 갖는다(ADR-0271 결정 4).
+/// ★Shell folders (`shell\…` · `webview\`) are not here★ — the shell holds them in its own layout (ADR-0271 decision 4).
 ///
-/// ★한 저장소만 쓰는 파일 이름은 여기 두지 않는다★: 프로필 파일 이름은 그 저장소가 소유하고
-/// 받은 디렉터리 안에서만 붙인다. 이름까지 여기 두면 그 저장소(agent crate)가 데몬을 알아야 한다.
+/// ★File names used by only one store are not kept here★: the profile file name is owned by its store and attached inside the directory it was given — keeping it here would make that store (agent crate) know the daemon.
 // ADR-0264
 // ADR-0271
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,8 +282,7 @@ impl DataLayout {
         self.root.join(DAEMON_DIR).join(RUN_DIR)
     }
 
-    /// 데몬의 잠금이자 접속 파일(ADR-0135) — 클라이언트가 읽는 레코드는 여기에만 발행된다. 셸과 스크립트
-    /// (`scripts/engram.mjs`)가 같은 자리를 따로 안다.
+    /// The daemon's lock and connection file (ADR-0135) — the record clients read is published only here. The shell and `scripts/engram.mjs` know the same place separately.
     pub fn daemon_file(&self) -> PathBuf {
         self.daemon_run_dir().join(DAEMON_FILE)
     }
@@ -327,12 +301,12 @@ impl DataLayout {
         self.daemon_run_dir().join(LAUNCH_DIR)
     }
 
-    /// 데몬 · 셸이 함께 쓰는 로그 폴더(파일은 프로세스마다 따로 — ADR-0264 결정 2). 셸도 사본을 갖는다.
+    /// The log folder the daemon and the shell share (separate files per process — ADR-0264 decision 2). The shell has a copy too.
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join(LOGS_DIR)
     }
 
-    /// 데몬의 `state` · `run` 폴더를 만든다(이미 있으면 그대로).
+    /// Creates the daemon's `state` · `run` folders (no-op if present).
     pub fn ensure_daemon_dirs(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(self.daemon_state_dir())?;
         std::fs::create_dir_all(self.daemon_run_dir())
@@ -345,9 +319,7 @@ mod tests {
 
     // ── data_dir resolver ─────────────────────────────────────────────────────────────
 
-    /// `ENGRAM_DATA_DIR` 은 프로세스 전역 env 라, 이걸 만지는 테스트끼리 병렬로 돌면 서로 set/remove 를
-    /// 짓밟는다. ★이 시험 바이너리에서 그 env 를 바꾸는 시험은 전부 이 락 하나를 쥔다★ — 락이 둘이면 서로를
-    /// 막지 못한다.
+    /// `ENGRAM_DATA_DIR` is a process-global env, so parallel tests touching it trample each other. ★Every test in this binary that changes that env holds this one lock★ — two locks could not block each other.
     // ADR-0282
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -360,17 +332,20 @@ mod tests {
         let want = std::env::temp_dir().join("engram-override-data-dir-test");
         std::env::set_var(DATA_DIR_ENV, &want);
         let got = default_data_dir();
-        // 단언 전에 복원해 단언 실패에도 env 가 leak 되지 않게 한다.
+        // Restore before asserting so the env does not leak on an assertion failure.
         match &prev {
             Some(v) => std::env::set_var(DATA_DIR_ENV, v),
             None => std::env::remove_var(DATA_DIR_ENV),
         }
-        assert_eq!(got, want, "ENGRAM_DATA_DIR set 시 그 경로 그대로 반환");
+        assert_eq!(
+            got, want,
+            "with ENGRAM_DATA_DIR set, returns that path as is"
+        );
     }
 
     #[test]
     fn data_dir_empty_env_falls_through_to_default() {
-        // 테스트는 항상 debug 빌드라 walk-up `.engram-dev` 분기를 탄다.
+        // Tests are always debug builds, so they take the walk-up `.engram-dev` branch.
         let _g = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -383,7 +358,7 @@ mod tests {
         }
         assert!(
             got.ends_with(LOCAL_DATA_DIR),
-            "빈 env 는 기본 분기로 통과 → `.engram-dev` 로 끝나야: {got:?}"
+            "an empty env passes through to the default branch → must end in `.engram-dev`: {got:?}"
         );
     }
 
@@ -400,19 +375,18 @@ mod tests {
         }
         assert!(
             got.ends_with(LOCAL_DATA_DIR),
-            "debug 는 폴더-로컬 `.engram-dev` 로 끝나야: {got:?}"
+            "debug must end in the folder-local `.engram-dev`: {got:?}"
         );
     }
 
-    /// release 분기는 `not(debug_assertions)` 라 테스트(항상 debug)가 직접 못 탄다 — 그래서 규칙을
-    /// 담은 순수 헬퍼를 cfg 없이 두고 여기서 단언한다(ADR-0134).
+    /// Tests (always debug) cannot take the `not(debug_assertions)` release branch, so the rule lives in a pure helper without cfg and is asserted here (ADR-0134).
     #[test]
     fn release_data_dir_is_exe_adjacent() {
         let exe_dir = Path::new("C:\\portable\\engram");
         assert_eq!(
             release_data_dir(exe_dir),
             exe_dir.join("data"),
-            "릴리스 데이터 폴더는 exe 폴더 하위 data(`engram-` 접두사 없음 — 상수 주석 참조)"
+            "the release data folder is data under the exe folder (no `engram-` prefix — see the constant's comment)"
         );
     }
 
@@ -432,7 +406,7 @@ mod tests {
         assert_eq!(
             got.root(),
             want,
-            "ENGRAM_DATA_DIR set 시 그 경로로 격리돼야"
+            "with ENGRAM_DATA_DIR set, it must be isolated to that path"
         );
         assert_eq!(got.origin(), DataRootOrigin::Given);
         assert_eq!(got.default_library_root(), want.join("library"));
@@ -495,9 +469,9 @@ mod tests {
         );
     }
 
-    // ── 데이터 폴더 쓰기 가능 프로브(ADR-0134 결정 4) ─────────────────────────────────
+    // ── data folder writability probe (ADR-0134 decision 4) ─────────────────────────────────
 
-    /// 프로브 전용 유니크 폴더(테스트 병렬 실행에서 서로 밟지 않게).
+    /// A unique folder for the probe only (parallel tests do not collide).
     fn fresh_probe_dir(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -510,7 +484,7 @@ mod tests {
         dir
     }
 
-    /// 폴더 안에 프로브 잔여물이 하나라도 있나(이름이 호출마다 달라 접두사로 센다).
+    /// Any probe leftover in the folder (the name differs per call, so count by prefix).
     fn probe_leftovers(dir: &Path) -> usize {
         use engram_dashboard_base::writable::WRITE_PROBE_PREFIX;
         std::fs::read_dir(dir)
@@ -529,27 +503,27 @@ mod tests {
     #[test]
     fn writable_probe_accepts_temp_dir_and_leaves_nothing() {
         let dir = fresh_probe_dir("ok");
-        ensure_data_dir_writable(&dir).expect("temp 하위는 쓸 수 있어야");
+        ensure_data_dir_writable(&dir).expect("under temp must be writable");
         let left = probe_leftovers(&dir);
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(left, 0, "프로브 파일을 남기면 안 됨");
+        assert_eq!(left, 0, "must not leave probe files behind");
     }
 
     #[test]
     fn writable_probe_rejects_child_of_a_file() {
-        // 파일의 자식 경로는 만들 수 없다 — 폴더 생성 자체가 막히는 경우의 대표.
+        // A child path of a file cannot be created — the representative case where folder creation itself is blocked.
         let file = fresh_probe_dir("blocker");
         std::fs::create_dir_all(file.parent().unwrap()).ok();
-        std::fs::write(&file, b"x").expect("blocker 파일 생성");
+        std::fs::write(&file, b"x").expect("create blocker file");
         let err = ensure_data_dir_writable(&file.join("child")).unwrap_err();
         let _ = std::fs::remove_file(&file);
         assert!(
-            err.to_string().contains("쓰기 가능한 위치"),
-            "사용자가 할 일이 메시지에 있어야: {err}"
+            err.to_string().contains("writable location"),
+            "the message must hold what the user should do: {err}"
         );
     }
 
-    // ── find_workspace_root / is_workspace_root (임시 디렉토리 트리, 빌드모드 무관) ──────
+    // ── find_workspace_root / is_workspace_root (temp directory tree, regardless of build mode) ──────
 
     fn unique_tmp(tag: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -569,8 +543,8 @@ mod tests {
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::create_dir_all(root.join(".git")).unwrap();
 
-        let got = find_workspace_root(&deep).expect(".git 마커를 위로 올라가며 찾아야");
-        // 임시 디렉토리는 심볼릭(예: macOS /var→/private) 일 수 있어 canonicalize 후 비교.
+        let got = find_workspace_root(&deep).expect("must find the .git marker walking up");
+        // The temp directory may be a symlink (e.g. macOS /var→/private), so compare after canonicalize.
         assert_eq!(
             std::fs::canonicalize(&got).unwrap(),
             std::fs::canonicalize(&root).unwrap()
@@ -586,7 +560,7 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers = [\"x\"]\n").unwrap();
 
-        let got = find_workspace_root(&sub).expect("[workspace] Cargo.toml 을 찾아야");
+        let got = find_workspace_root(&sub).expect("must find the [workspace] Cargo.toml");
         assert_eq!(
             std::fs::canonicalize(&got).unwrap(),
             std::fs::canonicalize(&root).unwrap()
@@ -604,7 +578,7 @@ mod tests {
 
         assert!(
             find_workspace_root(&deep).is_none(),
-            "마커 없으면 None — [package] 단독은 workspace 루트가 아님"
+            "no marker → None — [package] alone is not a workspace root"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -612,11 +586,11 @@ mod tests {
 
     #[test]
     fn find_install_root_yields_absolute_path() {
-        // 구체 경로는 실행 환경 의존이라 값은 단언하지 않고 절대성만 본다.
-        let root = find_install_root().expect("테스트 실행 중이면 current_exe 존재 → Some");
+        // The concrete path depends on the environment — assert only absoluteness.
+        let root = find_install_root().expect("while a test runs, current_exe exists → Some");
         assert!(
             root.is_absolute(),
-            "find_install_root 는 절대경로여야(cwd 불신 계약): {root:?}"
+            "find_install_root must be an absolute path (the cwd-distrust contract): {root:?}"
         );
     }
 
@@ -683,7 +657,7 @@ mod tests {
         let base = unique_tmp("is");
         let git_dir = base.join("g");
         std::fs::create_dir_all(git_dir.join(".git")).unwrap();
-        assert!(is_workspace_root(&git_dir), ".git 존재 → true");
+        assert!(is_workspace_root(&git_dir), ".git exists → true");
 
         let ws_dir = base.join("w");
         std::fs::create_dir_all(&ws_dir).unwrap();
@@ -693,16 +667,16 @@ mod tests {
         let pkg_dir = base.join("p");
         std::fs::create_dir_all(&pkg_dir).unwrap();
         std::fs::write(pkg_dir.join("Cargo.toml"), b"[package]\nname=\"q\"\n").unwrap();
-        assert!(!is_workspace_root(&pkg_dir), "[package] 단독 → false");
+        assert!(!is_workspace_root(&pkg_dir), "[package] alone → false");
 
         let empty_dir = base.join("e");
         std::fs::create_dir_all(&empty_dir).unwrap();
-        assert!(!is_workspace_root(&empty_dir), "마커 없음 → false");
+        assert!(!is_workspace_root(&empty_dir), "no marker → false");
 
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // ── DataLayout(데몬 쪽 배치) ──────────────────────────────────────────────────────
+    // ── DataLayout (daemon-side layout) ──────────────────────────────────────────────────────
 
     #[test]
     fn every_path_hangs_off_the_root_in_its_component_and_kind() {
@@ -739,8 +713,9 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         let l = DataLayout::new(&root);
-        l.ensure_daemon_dirs().expect("첫 생성");
-        l.ensure_daemon_dirs().expect("이미 있어도 성공");
+        l.ensure_daemon_dirs().expect("first creation");
+        l.ensure_daemon_dirs()
+            .expect("success even if it already exists");
         let made = (l.daemon_state_dir().is_dir(), l.daemon_run_dir().is_dir());
         let top: Vec<_> = std::fs::read_dir(&root)
             .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
@@ -750,7 +725,7 @@ mod tests {
         assert_eq!(
             top,
             vec![std::ffi::OsString::from("daemon")],
-            "데몬 폴더만 만든다"
+            "creates only the daemon folders"
         );
     }
 }

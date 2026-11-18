@@ -47,7 +47,7 @@ afterEach(() => {
 })
 
 describe('subscribeCanvasReport', () => {
-  it('성공 응답으로 lastSent 가 바뀔 때마다 새 값으로 알린다', async () => {
+  it('on every change of lastSent by a success response it notifies with the new value', async () => {
     const seen: Array<CanvasPx | null> = []
     listen(s => seen.push(s))
 
@@ -67,7 +67,7 @@ describe('subscribeCanvasReport', () => {
     expect(seen).toHaveLength(2)
   })
 
-  it('실패에는 알리지 않고, 재시도가 성공하면 그때 한 번 알린다', async () => {
+  it('on failure it does not notify, and when the retry succeeds it notifies once then', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     invokeMock.mockRejectedValueOnce(new Error('not yet'))
@@ -86,7 +86,7 @@ describe('subscribeCanvasReport', () => {
     expect(cb).toHaveBeenCalledWith({ w: 100, h: 50 })
   })
 
-  it('해제하면 더 알리지 않는다 — 같은 함수를 두 번 걸어도 해제는 각자다', async () => {
+  it('on release it notifies no more — even hooking the same function twice, release is each its own', async () => {
     const cb = vi.fn()
     const off1 = listen(cb)
     const off2 = listen(cb)
@@ -104,7 +104,7 @@ describe('subscribeCanvasReport', () => {
     expect(cb).toHaveBeenCalledTimes(3)
   })
 
-  it('테스트 초기화는 값이 있었을 때만 null 로 알린다', async () => {
+  it('a test reset notifies null only when there was a value', async () => {
     const cb = vi.fn()
     listen(cb)
 
@@ -119,7 +119,7 @@ describe('subscribeCanvasReport', () => {
     expect(getCanvasReport().lastSent).toBeNull()
   })
 
-  it('초기화로 버려진 상태의 늦은 성공은 지금 구독자에게 알리지 않는다', async () => {
+  it('a late success of a state discarded by reset is not notified to the current subscribers', async () => {
     let finish: () => void = () => {}
     invokeMock.mockImplementationOnce(
       () =>
@@ -139,7 +139,7 @@ describe('subscribeCanvasReport', () => {
     expect(getCanvasReport().lastSent).toBeNull()
   })
 
-  it('구독자가 던져도 보고 실패로 치지 않는다 — 다시 보내지 않고 다른 구독자도 받는다', async () => {
+  it('a subscriber throwing is not counted as a report failure — it does not resend and other subscribers also receive', async () => {
     vi.useFakeTimers()
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -156,6 +156,6 @@ describe('subscribeCanvasReport', () => {
     expect(reportCalls()).toHaveLength(1)
     expect(cb).toHaveBeenCalledTimes(1)
     expect(getCanvasReport().lastSent).toEqual({ w: 100, h: 50 })
-    expect(err).toHaveBeenCalledWith('[windowCanvasReport] 캔버스 구독자 오류:', expect.any(Error))
+    expect(err).toHaveBeenCalledWith('[windowCanvasReport] canvas subscriber error:', expect.any(Error))
   })
 })

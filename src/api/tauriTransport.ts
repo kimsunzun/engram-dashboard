@@ -1,28 +1,17 @@
-// TauriTransport — Transport 의 Tauri(app.emit/invoke/Channel) carrier 구현 (ADR-0036).
-// (범례: 본문·테스트의 Fix-C ①/④·Fix-D 라벨 = S14 리뷰 수정 앵커 — 해당 가드 주석을 짚는다.)
+// TauriTransport — the Tauri (app.emit/invoke/Channel) carrier implementation of Transport (ADR-0036).
+// (Fix-C / Fix-D labels in the body and tests = S14 review fix anchors pointing at the corresponding guard comments.)
 //
-// WsTransport 가 창 단위로 데몬 WS 에 직접 붙던 구조를 src-tauri DaemonClient 로 끌어올린
-// 뒤, 프론트는 이 transport 를 통해 Rust 쪽과 통신한다. 3개 통신 평면:
+// The frontend talks to the Rust DaemonClient (src-tauri) through this transport; 3 communication planes:
+//  ① control broadcast (list/status/profile): Rust `app.emit(event)` → `listen` → control InboundMessage.
+//  ② command upstream: `invoke('forward_daemon_command', { cmd })` → Rust → daemon WS.
+//  ③-a reply downstream (answer to ②): forward_daemon_command return (reply AgentEvent) → control InboundMessage.
+//  ③-b output downstream: per-window Tauri Channel (`subscribe_output` invoke) → raw bytes → decodeOutputFrame → output InboundMessage.
 //
-//  ① control 방송(목록/상태/프로필) : Rust `app.emit(event)` → `listen` → control InboundMessage.
-//  ② command 상행                  : `invoke('forward_daemon_command', { cmd })` → Rust → 데몬 WS.
-//  ③-a reply 하행(②의 답)          : forward_daemon_command 반환(reply AgentEvent) → control InboundMessage.
-//  ③-b output 하행(터미널 출력)     : per-window Tauri Channel(`subscribe_output` invoke) → raw bytes →
-//                                    decodeOutputFrame → output InboundMessage.
+// Same shape as WsTransport: reply/output are raised as the same InboundMessage shape, so ProtocolClient (unmodified) does not know whether the carrier is WS or Tauri.
 //
-// ★WsTransport 동형(계약 미러)★: WsTransport 가 WS Text frame→control / WS binary frame→output 으로
-//   올리는 것과 동일한 InboundMessage 형태로 reply·output 을 올린다. 그래서 ProtocolClient 는 carrier
-//   가 WS 인지 Tauri 인지 모른 채 기존 로직(pending 매칭 / handleOutput)으로 처리한다(ProtocolClient 무수정).
-//
-// ★교체 완료★: clientFactory.ts 가 이 transport 를 생성한다 — 프론트는 Rust 연결 단일화 경로를 탄다
-//   (창이 몇 개든 데몬엔 Rust 연결 1개 — ADR-0036 목표).
-//
-// ## ★연결 상태 단일 진실원 = Rust emit (Fix-C ①)★
-// 연결 상태(connected/reconnecting/down)는 **Rust DaemonClient 가 보내는 `daemon-connection-state`
-// 이벤트(u5)** 가 단일 진실원이다. 프론트(doConnect)는 절대 임의로 connected 로 만들지 않는다 — Rust
-// 가 Hello 수신/재연결 성공/끊김을 권위적으로 알고 emit 하므로, 프론트가 invoke resolve 만 보고
-// connected 를 추정하면 Rust 의 실제 상태(예: stale 폐기·재연결 중)와 어긋난다. doConnect 는 연결
-// "시도"(invoke + 출력 Channel 등록)만 하고, 상태 전이는 u5 가 반영한다.
+// Connection state = Rust emit is the single source of truth (Fix-C ①): the `daemon-connection-state` event (u5) from the Rust DaemonClient.
+// The frontend (doConnect) never makes it connected on its own — Rust knows Hello receipt/reconnect/disconnect authoritatively, and a guess from the invoke resolve
+// would diverge (stale discard · reconnecting). doConnect only attempts the connection (invoke + output Channel registration); u5 drives the state.
 
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -34,9 +23,8 @@ import type { ConnectionState, UsageSnapshotPull } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import { decodeOutputFrame, decodeReplayMarker } from './wsFrame'
 
-// 셸이 웹뷰에 주는 사용량 payload 둘의 칸 이름 — ts 바인딩을 굽지 않아(원소가 protocol 타입) 손으로 맞춘다. 정본 =
-//   `src-tauri/src/commands/usage.rs` `UsageSnapshotReply` · `src-tauri/src/daemon_client/events.rs`
-//   `UsageLimitsUpdatedPayload`. 한쪽 칸 이름이 바뀌면 여기서 조용히 `undefined` 가 된다.
+// Field names of the two usage payloads the shell gives the webview — no ts bindings (elements are protocol types), so matched by hand. Canonical =
+//   `src-tauri/src/commands/usage.rs` `UsageSnapshotReply` · `src-tauri/src/daemon_client/events.rs` `UsageLimitsUpdatedPayload`. A renamed field silently becomes `undefined` here.
 interface ShellUsageSnapshotReply {
   socket_epoch: number
   snapshots: UsageLimitSnapshot[]
@@ -48,9 +36,8 @@ interface ShellUsageLimitsUpdated {
 }
 
 /**
- * One `daemon-connection-state` payload or `daemon_connection_state` reply (`ConnectionStatus`), read defensively —
- * an unknown `state` reads as `down` and an unknown `band.kind` as band ① without a cause, each with a warning
- * (TRD S21 trd-3-2-u5 §4-2), so a word the shell adds later is never misread as `connected` or as no band.
+ * One `daemon-connection-state` payload or `daemon_connection_state` reply (`ConnectionStatus`), read defensively: an unknown `state` reads as `down`
+ * and an unknown `band.kind` as band ① without a cause, each with a warning (TRD S21 trd-3-2-u5 §4-2) — a word the shell adds later is never misread as `connected` or as no band.
  */
 function parseConnectionStatus(raw: unknown): { state: ConnectionState; band: Band | null } {
   const status = isRecord(raw) ? raw : {}
@@ -92,42 +79,28 @@ export class TauriTransport implements Transport {
 
   private unlisten: Array<() => void> = []
 
-  // ★출력 Channel(③-b)★: 이 창의 모든 agent 출력을 운반하는 per-window Channel(spike §7 D4 — 프레임에
-  //   agent_id 태그 내장). connected 시 subscribe_output invoke 로 Rust registry 에 1회 등록한다.
-  //   raw bytes(Response::new) 를 받아 decodeOutputFrame → output InboundMessage 로 올린다(WsTransport
-  //   binary arm 과 동형). #13133: 정리는 null 대입이 아니라 delete channel.onmessage.
+  // Output Channel (③-b): the per-window Channel carrying all agent output of this window (agent_id tag embedded in the frame), registered once in the Rust registry
+  //   with `subscribe_output` on connected. Receives raw bytes, raises them via decodeOutputFrame. #13133: cleanup is `delete channel.onmessage`, not a null assignment.
   private outputChannel: Channel<ArrayBuffer> | null = null
 
-  // ★출력 Channel 등록 single-flight(FIX 6)★: 겹치는 등록(예: self-heal pull + 전이 이벤트가 근접)이
-  //   동시에 돌면 각자 새 Channel 을 만들어 옛 onmessage 를 delete 한 뒤 subscribe_output 을 await 한다.
-  //   더 오래된 invoke 가 Rust 에 *나중에* 도착하면 Rust 는 그 (onmessage 이미 delete 된) Channel 을
-  //   마지막 window_label 로 붙잡아 출력이 조용히 두절된다 — 프론트는 어느 invoke 가 Rust 에 마지막으로
-  //   닿을지 통제 못 한다. 그래서 등록을 직렬화한다: 진행 중이면 이 promise 를 공유(재사용)하고, 진행 중에
-  //   또 등록 요청이 들어오면 pending 플래그만 세워 완료 후 정확히 1회 재등록한다(동시 invoke 0 → Rust 가
-  //   붙드는 Channel 이 항상 마지막 완료분과 일치).
+  // ★Output Channel registration single-flight (FIX 6)★: overlapping registrations each make a Channel and delete the old onmessage; if an older invoke reaches Rust *later*,
+  //   Rust holds the Channel whose onmessage was deleted and output is silently cut off (the arrival order is uncontrollable). So registration is serialized: in progress the promise is shared,
+  //   a request meanwhile only sets the pending flag and re-registers exactly once after completion.
   private outputChannelInflight: Promise<void> | null = null
   private outputChannelRerun = false
-  // 이 창의 출력 Channel 이 지금 세대에서 등록을 마쳤나(`subscribe_output` resolve). 등록을 시작할 때와
-  //   close() 가 내린다 — replay 요청이 이 값을 본다(`awaitOutputChannel`).
+  // Whether this window's output Channel has finished registering in the current generation (`subscribe_output` resolved). Lowered at registration start and by close(); replay requests check it (`awaitOutputChannel`).
   private outputChannelRegistered = false
 
   private connectPromise: Promise<void> | null = null
 
   private closedByUser = false
 
-  // ★연결 세대(close 세대 가드, Fix-C ①)★: close() 가 호출될 때마다 +1. in-flight doConnect 는 진입
-  //   시점 세대(myGen)를 캡처하고, invoke resolve 후 출력 Channel 등록 전에 자기 세대가 여전히 current
-  //   인지(=그 사이 close() 가 끼지 않았는지) 재확인한다. 뒤늦게 완료된 stale doConnect 가 출력 Channel
-  //   을 등록(좀비)하거나 연결을 부활시키지 않게 한다. ★상태(connected) 부활 자체는 Rust emit 단일
-  //   진실원이라 doConnect 가 setStatus 를 안 하므로 구조적으로 막히지만, 출력 Channel 등록·side-effect
-  //   는 이 가드로 막는다.
+  // ★Connection generation (Fix-C ①)★: +1 on every close(). An in-flight doConnect captures it (myGen) and re-checks after the invoke resolves, so a stale doConnect that completed late
+  //   cannot register a zombie output Channel. State revival is already blocked structurally (Rust emit is the single source; doConnect does not setStatus).
   private generation = 0
 
-  // ★상태 적용 버전(selfHeal pull-vs-event 레이스 가드, FIX 5)★: applyConnectionStatus 가 실제로 상태를
-  //   반영할 때마다 +1. selfHeal 은 invoke 전 이 값을 캡처하고, pull 결과를 적용하기 직전 값이 그대로인지
-  //   본다 — 그 사이 실제 daemon-connection-state 이벤트가 하나라도 끼어 applyConnectionStatus 를 돌렸으면
-  //   pull 스냅샷은 이벤트보다 오래된 것이라 폐기한다. (기존 last-write 는 순서가 pull 뒤 이벤트일 때만
-  //   맞고, 이벤트 뒤 pull 이면 낡은 스냅샷이 새 상태를 덮어써 역전된다.)
+  // State application version (selfHeal pull-vs-event race guard, FIX 5): +1 each time applyConnectionStatus applies a state. selfHeal captures it before the invoke and
+  //   discards the pull result if it changed — the pull snapshot is older than any event that cut in (event→pull would otherwise overwrite the new state).
   private stateVersion = 0
 
   get connectionState(): ConnectionState {
@@ -136,7 +109,7 @@ export class TauriTransport implements Transport {
 
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void {
     this.stateListeners.add(cb)
-    // 등록 즉시 현재 상태 1회 통지(WsTransport 동형 — ProtocolClient 초기 상태 인식).
+    // Notify the current state once right at registration (same shape as WsTransport — ProtocolClient learns the initial state).
     cb(this._state)
     return () => {
       this.stateListeners.delete(cb)
@@ -150,8 +123,7 @@ export class TauriTransport implements Transport {
     }
   }
 
-  /** The shell's connection band (TRD S21 trd-3-2-u5 §4) — `null` = none. Listeners hear a band change as a call with
-   *  the state word, even when the word did not change. */
+  /** The shell's connection band (TRD S21 trd-3-2-u5 §4) — `null` = none. Listeners hear a band change as a call with the state word, even when the word did not change. */
   get connectionBand(): Band | null {
     return this._band
   }
@@ -164,48 +136,34 @@ export class TauriTransport implements Transport {
   }
 
   // ── Applying the shell's connection status (the single source of truth) ────────────────────────
-  // The one path the `daemon-connection-state` event handler and the self-heal pull share: both carry the shell's
-  //   `ConnectionStatus` ({state, band} — src-tauri binding). First connect, the shell's own reconnects and the reload
-  //   self-heal all go through here (no double registration).
-  //
-  // ★Idempotent (double registration / event race guard)★: when already connected (wasConnected) the output Channel
-  //   is not registered again — a self-heal pull and a real event that overlap register exactly once per transition.
-  //   The self-heal does not cache its reply but feeds it here at once; when an event lands between its query and the
-  //   reply, the pull result is dropped by the stateVersion compare (FIX 5 — the event always wins; see selfHeal).
+// The one path the `daemon-connection-state` event handler and the self-heal pull share (both carry the shell's `ConnectionStatus` {state, band}).
+//
+// Idempotent (FIX 5): when already connected (wasConnected) the output Channel is not registered again — an overlapping self-heal pull and real event register once per transition.
+//   The self-heal feeds its reply here at once; an event landing between its query and reply makes the stateVersion compare drop the pull result (the event wins; see selfHeal).
   private applyConnectionStatus(raw: unknown): void {
     const { state, band } = parseConnectionStatus(raw)
-    // ★버전 bump(FIX 5)★: 상태를 실제로 반영하는 매 호출마다 +1 — selfHeal 이 이걸로 "내 pull 이후
-    //   이벤트가 끼었나"를 판별한다. setStatus 가 no-op(동일 상태)이어도 이벤트가 온 사실 자체를 표시해야
-    //   하므로 setStatus 여부와 무관하게 올린다.
+    // Version bump (FIX 5): +1 on every applied call even when setStatus is a no-op (same state) — the fact that an event came must be marked for selfHeal.
     this.stateVersion += 1
     const wasConnected = this._state === 'connected'
     this.setStatus(state, band)
     if (state === 'connected' && !wasConnected) {
       this.registerOutputChannel().catch((err: unknown) => {
-        console.warn('[TauriTransport] 출력 Channel 등록 실패:', err)
+        console.warn('[TauriTransport] output Channel registration failed:', err)
       })
     }
   }
 
-  // ── 리로드 자가복구(Fix-D — pull 조회 1회) ───────────────────────────────────
-  // ★왜 필요한가(결함)★: Rust DaemonClient 는 `daemon-connection-state` 를 상태 *전이* 시에만 emit
-  //   한다 — connect()/ensure() 는 이미 Connected 면 emit 없이 Ok 로 단락한다(mod.rs connect/ensure
-  //   진입 단축 + connection.rs 는 전이에서만 app.emit). 그래서 웹뷰가 리로드되면 TauriTransport 가
-  //   _state='down' 으로 재생성되는데, 데몬이 이미 Connected 라 어떤 전이 이벤트도 오지 않는다 →
-  //   이 창은 연결을 영영 못 알아채 출력 Channel(subscribe_output)을 등록하지 못한다 → 그 창의 모든
-  //   slot 에서 replay/live 출력이 전부 두절된다(창 단위 사각지대).
-  //
-  //   전이 emit(push) 모델의 사각지대를 pull 조회로 1회 메운다: 리스너 등록이 끝난 뒤 현재 상태를
-  //   직접 물어, connected 인데 _state 가 아직 그렇지 않으면 이벤트 핸들러와 *같은 경로*
-  //   (applyConnectionStatus)로 흘려보내 setStatus('connected') + 출력 Channel 등록을 유발한다.
-  //
-  // ★레이스 가드(critical, FIX 5)★: 조회와 응답 사이에 실제 `daemon-connection-state` 이벤트가 끼어들
-  //   수 있다(진짜 전이). 두 순서 다 방어한다: (1) event→pull(이벤트 먼저): stateVersion 캡처-비교로
-  //   pull 결과를 폐기한다 — invoke 대기 중 이벤트가 applyConnectionStatus 를 돌리면 버전이 바뀌어 낡은
-  //   pull 스냅샷이 최신 상태를 덮어쓰지 못한다(이벤트 승). (2) pull→event(pull 먼저): pull 이 반영된 뒤
-  //   온 이벤트는 정상 경로로 그대로 이긴다(pull 은 no-op 아니라 실제 전이 이벤트가 나중에 반영). 또한
-  //   applyConnectionStatus 의 wasConnected 가드가 이미 connected 면 출력 Channel 재등록을 생략하므로
-  //   이중 등록도 없다. 조회가 non-connected 를 반환하면 아무 것도 하지 않는다(이후 전이 이벤트가 처리).
+  // ── reload self-recovery (Fix-D — one pull query) ───────────────────────────────────
+// Why needed: the Rust DaemonClient emits `daemon-connection-state` only on a state *transition* — connect()/ensure() short-circuit without an emit when already Connected
+//   (mod.rs connect/ensure entry shortcut; connection.rs emits only on transitions). A reloaded webview recreates TauriTransport with _state='down' while the daemon is already
+//   Connected, so no event comes and the window never registers the output Channel — all replay/live output of that window is cut off.
+//
+// The push model's blind spot is filled by one pull: after listener registration, ask the current state, and if connected while _state is not, pass it through the same path
+//   as the event handler (applyConnectionStatus).
+//
+// ★Race guard (FIX 5)★: a real event can cut in between query and response. (1) event first: the stateVersion compare discards the stale pull snapshot (the event wins).
+//   (2) pull first: a later event is applied normally through the same path. applyConnectionStatus's wasConnected guard prevents double Channel registration.
+//   A non-connected answer does nothing (later transition events handle it).
   private async selfHeal(): Promise<void> {
     const versionBefore = this.stateVersion
     const genBefore = this.generation
@@ -213,35 +171,27 @@ export class TauriTransport implements Transport {
     try {
       raw = await invoke<unknown>('daemon_connection_state')
     } catch (e) {
-      // 조회 실패(초기화 레이스 등)는 치명적 아님 — 이후 실제 전이 이벤트가 상태를 채운다.
-      console.warn('[TauriTransport] 연결 상태 self-heal 조회 실패:', e)
+      // A query failure (init race etc.) is not fatal — later real transition events fill in the state.
+      console.warn('[TauriTransport] connection state self-heal query failed:', e)
       return
     }
     if (this.stateVersion !== versionBefore) {
       return
     }
-    // 조회 대기 중 close() 가 끼었으면 버린다 — close 는 이벤트가 아니라 버전을 안 올리므로, 이 가드가 없으면
-    //   닫힌 transport 가 connected 로 되살아나 좀비 Channel 을 등록한다.
+    // If close() cut in while the query waited, discard — close does not raise the version, so a closed transport would otherwise come back connected with a zombie Channel.
     if (this.generation !== genBefore) return
     this.applyConnectionStatus(raw)
   }
 
-  // ── Tauri 이벤트 구독 등록 ──────────────────────────────────────────────────
-  // Rust DaemonClient 가 `app.emit(event, payload)` 로 push 하는 이벤트를 수신해
-  // InboundMessage(control)로 정규화해 ProtocolClient 로 올린다.
+  // ── Tauri event subscription registration ──────────────────────────────────────────────────
+  // Receives the events the Rust DaemonClient pushes with `app.emit(event, payload)`, normalizes them into control InboundMessage and raises them to ProtocolClient.
   //
-  // ★멱등(MED-1)★: 이미 등록돼 있으면(unlisten 비어있지 않음) no-op. doConnect 가 매 연결마다 부르되
-  //   close()→cleanupListeners 로 비워진 뒤의 재연결에서만 실제 재등록한다(이중 리스너 방지).
+  // ★Idempotent (MED-1)★: no-op if already registered (unlisten not empty); re-registers only after close()→cleanupListeners emptied it (prevents double listeners).
   //
-  // ★부분 등록 정리(Fix-C ①, low)★: listen() 중간에 하나라도 실패하면 *앞서 등록한* 리스너를 즉시
-  //   해제하고 throw 한다. 이전엔 전부 성공해야 unlisten 에 저장했어서, 중간 실패 시 앞 리스너가
-  //   해제 경로 없이 누수됐다. 부분 등록분을 모아 두고 실패 시 전부 off 한다.
+  // ★Partial registration cleanup (Fix-C ①)★: if a listen() fails midway, the listeners registered before it are released immediately and it throws (otherwise they leaked with no release path).
   //
-  // ★in-flight close 가드(Fix-C ①)★: listen() 은 async 라, registerListeners 가 await 중인 사이 close()
-  //   가 동기로 끼면 close 의 cleanupListeners 는 아직 빈 `this.unlisten` 을 본다 → 그 후 등록이 완료돼
-  //   `this.unlisten = registered` 가 되면 *close 후에 좀비 리스너가 살아남는다*(close 가 못 정리한 것).
-  //   그래서 등록 완료 시점에 진입 세대(myGen)가 여전히 current 인지 본다 — close() 가 generation 을
-  //   올렸으면(stale) 방금 등록한 것을 즉시 해제하고 this.unlisten 에 저장하지 않는다.
+  // ★In-flight close guard (Fix-C ①)★: listen() is async; a close() cutting in while awaiting would see the still-empty `this.unlisten`, then registration completes and a zombie listener survives.
+  //   So at completion the entry generation (myGen) is re-checked; if stale, what was just registered is released and not stored.
   private async registerListeners(): Promise<void> {
     if (this.unlisten.length > 0) return
     const myGen = this.generation
@@ -288,10 +238,9 @@ export class TauriTransport implements Transport {
           })
         }),
       )
-      // 셸은 전 웹뷰에 emit 하고 대상은 payload 의 `labels`(사용량 슬롯이 있는 창)로 고른다 — 자기 label 이
-      //   안 들면 버린다. ★label 은 Tauri 가 준다★(해시 라우트에서 유추하면 `#/popup?window=` 밖의 창은 전부 `main` 으로 읽힌다).
-      //   `socketEpoch` 는 셸이 곁들인 칸이라 데몬 wire(`subscribed` 는 셸이 대조에만 쓰고 싣지 않는다)와
-      //   섞이지 않게 camelCase 다.
+      // The shell emits to every webview; the target is picked by the payload's `labels` (windows that have a usage slot) — dropped if its own label is not in it.
+      //   The label is given by Tauri (inferred from the hash route, every window other than `#/popup?window=` would read as `main`).
+      //   `socketEpoch` is a shell-added field, camelCase so it does not mix with the daemon wire (`subscribed` is used by the shell only for the check, not carried).
       registered.push(
         await listen<ShellUsageLimitsUpdated>('usage-limits-updated', (e) => {
           const { labels, socket_epoch, snapshot } = e.payload
@@ -302,18 +251,12 @@ export class TauriTransport implements Transport {
           })
         }),
       )
-      // ★연결 상태 동기화(단일 진실원)★: Rust 쪽 연결 task 가 상태 전이(connected/reconnecting/down)
-      //   시 이 이벤트를 emit 한다. 프론트는 이 이벤트로만 상태를 바꾼다(doConnect 임의 전이 없음).
+      // ★Connection state sync (single source of truth)★: the Rust connection task emits this on a transition (connected/reconnecting/down); the frontend changes state only through it.
       //
-      // ★출력 Channel 등록 = 이 전이 단일 경로(Fix-C ④)★: 비-connected → connected 재전이를 감지하면
-      //   registerOutputChannel 을 호출한다 — **첫 연결·Rust 내부 재연결(reconnecting→connected) 모두**
-      //   이 경로로 등록한다.
-      //   왜 doConnect 가 아니라 여기인가: Rust 는 connect Ok 시 `connected` emit 을 invoke resolve *보다
-      //   먼저* 한다(connection.rs: app.emit("connected") → ready_tx.send → invoke resolve). 그래서 이
-      //   전이 핸들러가 doConnect 의 invoke resolve 보다 *항상 먼저* 돈다 → 여기서 등록하면 "등록 전 도착
-      //   출력 유실 갭"이 더 일찍 닫히고(Fix-C ④ 순서 목적), 첫 연결/재연결을 한 경로로 통일해 doConnect
-      //   와의 멱등 *중복* 등록도 없앤다. Rust 주도 재연결도 doConnect 를 안 거치므로(디커플) 이 단일
-      //   경로가 그 갭까지 메운다. 멱등이라(같은 window_label 덮어쓰기, 옛 onmessage delete) 안전.
+      // ★Output Channel registration = this single transition path (Fix-C ④)★: on a non-connected → connected transition it calls registerOutputChannel — the first connection and
+      //   Rust-internal reconnects alike. Why here, not in doConnect: on connect Ok Rust emits `connected` *before* the invoke resolves (connection.rs: app.emit("connected") → ready_tx.send → invoke resolve),
+      //   so this handler always runs first, closing the gap where output is lost before registration; one path also removes duplicate registration with doConnect, and covers
+      //   Rust-driven reconnects that never go through doConnect. Idempotent (same window_label, old onmessage deleted).
       registered.push(
         await listen<unknown>('daemon-connection-state', (e) => {
           this.applyConnectionStatus(e.payload)
@@ -335,24 +278,19 @@ export class TauriTransport implements Transport {
     this.unlisten = []
   }
 
-  // ── 출력 Channel 등록(③-b, HIGH-1) ───────────────────────────────────────────
-  // 이 창의 per-window 출력 Channel 을 만들어 subscribe_output invoke 로 Rust registry 에 등록한다.
-  // Rust 연결 task 가 이 Channel 로 그 창의 모든 agent 출력을 raw bytes(Response::new)로 fan-out 하면,
-  // decodeOutputFrame 으로 풀어 output InboundMessage 로 올린다(WsTransport binary arm 과 동형).
+  // ── output Channel registration (③-b, HIGH-1) ───────────────────────────────────────────
+  // Makes this window's per-window output Channel and registers it in the Rust registry with `subscribe_output`; the Rust connection task fans out all agent output of the window
+  // as raw bytes through it, decoded with decodeOutputFrame and raised as an output InboundMessage (same shape as the WsTransport binary arm).
   //
-  // ★멱등(Fix-C ①·④)★: connected 전이마다(첫 연결·Rust 내부 재연결·리로드 self-heal) 불릴 수 있으나,
-  //   새 Channel 을 만들어 재등록하면 Rust 가 같은 window_label 로 덮어쓴다(agent.rs subscribe_output:
-  //   같은 라벨 재등록은 옛 WindowEntry drop). ★이전 outputChannel onmessage 는 먼저 delete 로 정리(#13133 — null 대입
-  //   아님)★ 해 동시 doConnect 두 개가 각각 Channel 을 만들어 좀비 콜백을 남기는 일을 막는다. 재연결
-  //   후에도 출력이 끊기지 않게 한다.
+  // ★Idempotent (Fix-C ①·④)★: may be called on every connected transition (first connection · Rust-internal reconnect · reload self-heal); re-registering overwrites the same window_label
+  //   in Rust (agent.rs subscribe_output drops the old WindowEntry). The previous outputChannel onmessage is cleaned up first with delete (#13133 — not a null assignment),
+  //   so two concurrent doConnects cannot leave zombie callbacks.
   //
-  // ★single-flight(FIX 6)★: 이 메서드는 등록을 직렬화하는 게이트다. 진행 중이면 그 promise 를 재사용하고
-  //   재실행 요청만 기록한다 — 동시에 두 개의 subscribe_output invoke 가 Rust 에 떠 있는 상황(어느 게
-  //   마지막으로 닿을지 통제 불가)을 원천 차단한다. 실제 등록 작업은 doRegisterOutputChannel.
+  // ★Single-flight (FIX 6)★: a gate serializing registration — in progress it reuses that promise and only records a rerun request, so two subscribe_output invokes are never in flight to Rust at once
+  //   (which reaches last cannot be controlled). The work itself is doRegisterOutputChannel.
   private registerOutputChannel(): Promise<void> {
     if (this.outputChannelInflight) {
-      // 진행 중인 등록이 이미 최신 상태를 반영할 수도 있으나, 안전측으로 1회 재등록해 재연결 경계에서
-      //   확실히 살아있는 Channel 로 수렴시킨다.
+      // The registration in progress may already reflect the latest state; re-register once anyway so the reconnect boundary converges on a Channel that is surely alive.
       this.outputChannelRerun = true
       return this.outputChannelInflight
     }
@@ -374,21 +312,19 @@ export class TauriTransport implements Transport {
   private async doRegisterOutputChannel(): Promise<void> {
     const myGen = this.generation
     this.outputChannelRegistered = false
-    // 옛 Channel 정리(#13133: null 대입 아님 — delete). 멱등성의 핵심 — 좀비 onmessage 제거.
-    // ★실물 `@tauri-apps/api` Channel 에선 이 delete 가 아무것도 안 한다★(onmessage 가 프로토타입 접근자 —
-    //   `node_modules/@tauri-apps/api/core.js`) — 옛 Channel 은 Rust 가 새 것으로 갈아 끼울 때까지 계속 흘린다.
-    //   ADR-0231: 그 틈의 프레임을 잃지 않는 것이 거기 기댄다 — 떼기를 「진짜로」 만들지 말 것(갈아 끼우기 전 프레임이 빠진다).
+    // Clean up the old Channel (#13133: delete, not a null assignment) — removes zombie onmessage.
+    // ★On a real `@tauri-apps/api` Channel this delete does nothing★ (onmessage is a prototype accessor — `node_modules/@tauri-apps/api/core.js`); the old Channel keeps flowing until Rust swaps in the new one.
+    //   ADR-0231: not losing the frames in that gap relies on this — ★do not make the detach 「real」★ (frames before the swap would be lost).
     if (this.outputChannel) {
       delete (this.outputChannel as { onmessage?: unknown }).onmessage
       this.outputChannel = null
     }
     const channel = new Channel<ArrayBuffer>()
     channel.onmessage = (raw: ArrayBuffer) => {
-      // raw = Rust Response::new(frame bytes). 두 종류가 같은 Channel 로 온다(ADR-0046 — 마커도 동일
-      //   Channel 경로라 replay 꼬리 뒤 순서가 보존됨):
-      //   - 데몬 output frame: [tag0/1][agentId:16][epoch:4][seq:8][payload]
-      //   - replay 경계 마커:  [tag255][agentId:16][epoch:4][gen:8][flags:1][replay_from:8]
-      // ★마커 먼저 검사★: tag 로 갈린다. 마커(tag=255)면 replayBoundary 로 정규화(공개 표면 미노출).
+      // raw = Rust Response::new(frame bytes). Two kinds share the Channel (ADR-0046 — markers take the same path, so order after the replay tail is preserved):
+      //   - daemon output frame: [tag0/1][agentId:16][epoch:4][seq:8][payload]
+      //   - replay boundary marker: [tag255][agentId:16][epoch:4][gen:8][flags:1][replay_from:8]
+      // Check for the marker first; a marker (tag=255) is normalized into a replayBoundary (not exposed on the public surface).
       const marker = decodeReplayMarker(raw)
       if (marker) {
         this.messageCb?.({
@@ -407,7 +343,7 @@ export class TauriTransport implements Transport {
       if (!f) return
       this.messageCb?.({
         kind: 'output',
-        tag: f.tag, // frame 종류(0 터미널 / 1 구조화) — WsTransport binary arm 과 동형.
+        tag: f.tag, // frame kind (0 terminal / 1 structured) — same shape as the WsTransport binary arm.
         agentId: f.agentId,
         epoch: f.epoch,
         seq: f.seq,
@@ -415,19 +351,17 @@ export class TauriTransport implements Transport {
       })
     }
     this.outputChannel = channel
-    // window_label 은 Rust 가 호출 webview 에서 자동 주입(agent.rs subscribe_output: tauri::Window).
+    // window_label is injected automatically by Rust from the calling webview (agent.rs subscribe_output: tauri::Window).
     await invoke('subscribe_output', { channel })
     if (myGen === this.generation) this.outputChannelRegistered = true
   }
 
   /**
-   * 이 창의 출력 Channel 등록이 끝날 때까지 기다린다 — 진행 중이면 그것을, 한 번도 안 됐으면 새로 등록한다.
-   * reject = 닫혔다 · 등록 실패.
+   * Waits until this window's output Channel registration finishes — the one in progress if any, otherwise registers anew if never done. reject = closed · registration failed.
    *
-   * ★replay 요청은 이것을 거친다(load-bearing)★: 셸은 등록 안 된 창 몫의 프레임을 말없이 건너뛴다
-   *   (`output_channel.rs` `send_to_windows`). `subscribe_output` 은 sync 명령 · `request_replay` 는 async
-   *   명령이라 부른 순서대로 돈다는 보장이 없어, 등록 전에 replay 가 흐르면 그 머리가 이 창에서 사라진다 —
-   *   뷰는 마커의 replay 머리부터 흘리려다 첫 구멍 뒤를 전부 붙들고, 한가한 에이전트면 영영 빈 화면이다.
+   * ★Replay requests go through this (load-bearing)★: the shell silently skips frames for an unregistered window (`output_channel.rs` `send_to_windows`), and `subscribe_output` (sync command)
+   *   vs `request_replay` (async command) have no ordering guarantee — a replay flowing before registration loses its head in this window, the view holds everything after the first gap,
+   *   and an idle agent's screen stays empty forever.
    */
   // ADR-0231
   private async awaitOutputChannel(): Promise<void> {
@@ -438,102 +372,72 @@ export class TauriTransport implements Transport {
     if (!this.outputChannelRegistered) throw new Error('output Channel registration superseded')
   }
 
-  // ── 전송 준비 보장 = attach-only(ADR-0021) ─────────────────────────────────
-  // WsTransport.ensureReady 와 대응. Rust DaemonClient 가 연결 단일화를 이미 담당하므로 여기선
-  // 자체 재연결 루프를 두지 않는다.
+  // ── ensure transport readiness = attach-only (ADR-0021) ─────────────────────────────────
+// Counterpart of WsTransport.ensureReady. The Rust DaemonClient already unifies connection, so no own reconnect loop here.
   ensureReady(): Promise<void> {
     if (this._state === 'connected') return Promise.resolve()
     if (this.connectPromise) return this.connectPromise
     if (this.closedByUser) {
       return Promise.reject(
-        new Error('daemon down — daemon_start 로 명시 시작 필요 (ADR-0021: 명령은 respawn 안 함)'),
+        new Error('daemon down — explicit start with daemon_start required (ADR-0021: commands do not respawn)'),
       )
     }
     this.connectPromise = this.doConnect(false)
     return this.connectPromise
   }
 
-  // ── 명시 spawn 진입점(ADR-0021 §1) ──────────────────────────────────────────
-  // Rust DaemonClient.connect()(spawn 가능)를 invoke 로 호출한다.
-  //
-  // ★재진입 가드(Fix-C ①)★: 진행 중인 doConnect 가 있으면(connectPromise) 그 promise 를 재사용한다 —
-  //   확인 없이 connectPromise 를 덮어쓰면 중복 `daemon_connect` invoke 가 나가 Rust 가 세대를 두 번
-  //   올린다(불필요한 승계). 단 start 의 의미(명시 spawn 의도 = closedByUser 리셋)는 진행 중이든 아니든
-  //   유지한다 — 사용자가 닫은 뒤 다시 start 하면 재연결이 다시 가능해야 하므로.
+  // ── explicit spawn entry point (ADR-0021 §1) ──────────────────────────────────────────
+// Calls Rust DaemonClient.connect() (may spawn) through invoke.
+//
+// ★Re-entry guard (Fix-C ①)★: if a doConnect is in progress (connectPromise), reuse its promise — overwriting it would send a duplicate `daemon_connect` invoke and make Rust raise the generation twice.
+//   The meaning of start (explicit spawn intent = closedByUser reset) is kept either way: after the user closed it, start again must allow reconnecting.
   start(): Promise<void> {
     if (this._state === 'connected') return Promise.resolve()
     this.closedByUser = false
-    // 진행 중인 게 ensure(no-spawn)였더라도 start 의 spawn 의도는 closedByUser 리셋으로 이미 반영됐다 —
-    //   그 ensure 가 실패해 재시도하면 다음 호출이 spawn 경로를 탄다.
+    // Even if the one in progress was ensure (no-spawn), start's spawn intent is already reflected by the closedByUser reset — if that ensure fails and retries, the next call takes the spawn path.
     if (this.connectPromise) return this.connectPromise
     this.connectPromise = this.doConnect(true)
     return this.connectPromise
   }
 
-  // ★연결 시도만(MED-1 + Fix-C ①·④)★: doConnect 는 (1)control 리스너 멱등 등록 (2)Rust connect/ensure
-  //   invoke 만 한다. 상태 전이와 출력 Channel 등록은 *둘 다* Rust 상태가 단일 권위로 담당한다 — 전이
-  //   emit(u5 리스너), emit 이 없었으면 같은 경로의 조회(selfHeal). doConnect 는 이 둘을 직접 하지 않는다.
-  //   - registerListeners(멱등): close()→cleanupListeners 후 재연결하면 control 이벤트(목록/상태/프로필)
-  //     리스너가 비어 전부 유실된다 → 매 연결마다 멱등 재등록으로 보장(이미 등록돼 있으면 no-op).
-  //
-  // ★상태 전이 안 함(Fix-C ①)★: 이전 구현은 invoke resolve 후 `setState('connected')` 를 했으나, 이는
-  //   Rust 의 실제 상태(stale 폐기·재연결)와 어긋날 수 있어 제거했다. 상태는 u5 가 단일 진실원이다.
-  //
-  // ★출력 Channel 등록도 u5(Fix-C ④)★: doConnect 가 아니라 u5 의 connected 전이 핸들러가 등록한다
-  //   (더 이른 등록 + 첫 연결/재연결 단일 경로 통일). 근거(connect Ok 시 emit↔resolve 순서)·상세 =
-  //   registerListeners 의 u5 주석 정본 참조.
-  //
-  // ★close 세대 가드(Fix-C ①)★: invoke await 동안 close() 가 끼면 myGen != generation. 상태·출력 Channel
-  //   부활은 이미 구조적으로 막혀 있다(아래 본문 주석) — 가드는 stale doConnect 가 connectPromise 를
-  //   잘못 비우지 않게 하는 데 쓴다(finally).
-  // 실패는 그대로 전파(ensureReady/start 호출자가 catch).
+  // Connection attempt only (MED-1 + Fix-C ①·④): doConnect does (1) idempotent registerListeners (so reconnecting after close()→cleanupListeners does not lose the control event listeners)
+  //   (2) the Rust connect/ensure invoke. State transition and output Channel registration both belong to u5 (the transition emit; selfHeal's query when no emit came) — see registerListeners.
+  //   Setting `connected` after the invoke resolves could diverge from Rust's real state (stale discard · reconnect).
+  // ★Close generation guard (Fix-C ①)★: if close() cuts in during the invoke await (myGen != generation), the guard keeps a stale doConnect from wrongly clearing connectPromise (finally).
+  // Failures propagate as is (the ensureReady/start caller catches).
   private async doConnect(allowSpawn: boolean): Promise<void> {
     const myGen = this.generation
     try {
-      // 리스너를 invoke *전에* 멱등 등록한다(★순서 load-bearing★): Rust 는 connect 성공 시
-      // `daemon-connection-state="connected"` 를 emit 한 *뒤* invoke 를 resolve 한다. invoke resolve
-      // 후에 리스너를 달면 그 초기 connected 이벤트를 놓쳐 _state 가 'down' 에 고착될 수 있다(상태
-      // 단일 진실원이 u5 라 더욱 치명적). 먼저 달아두면 connect 가 발행하는 첫 전이(connected)부터
-      // 빠짐없이 받는다(이미 등록돼 있으면 no-op). ★출력 Channel 등록도 그 connected 전이 핸들러(u5)가
-      // 한다★ — doConnect 는 등록을 직접 하지 않는다(중복 제거, registerListeners 주석 참조).
+      // ★Register listeners idempotently *before* the invoke (order load-bearing)★: on connect success Rust emits `daemon-connection-state="connected"` and *then* resolves the invoke;
+      // attaching after the resolve can miss that event and leave _state stuck at 'down'.
       await this.registerListeners()
       await invoke(allowSpawn ? 'daemon_connect' : 'daemon_ensure')
-      // ★세대 가드★: invoke await 동안 close() 가 끼었으면(generation 증가) 이 연결은 stale 이다.
-      //   상태·출력 Channel 부활은 구조적으로 이미 막혀 있다 — 상태는 u5(Rust emit) 단일 진실원이고
-      //   doConnect 는 setStatus 를 안 하며, 출력 Channel 등록도 u5 가 하는데 close() 가 cleanupListeners
-      //   로 u5 를 제거했으므로 close 후 도착하는 connected emit 은 무시된다. 여기선 추가 side-effect 가
-      //   없어 별도 분기는 불필요하나, 가독성을 위해 stale 이면 조용히 빠진다.
+      // ★Generation guard★: if close() cut in during the invoke await, this connection is stale. State and Channel revival are already blocked (u5 is the single source; close() removed its listeners),
+      //   so there is no extra side effect — it just drops out quietly.
       if (myGen !== this.generation || this.closedByUser) {
         return
       }
-      // ADR-0231: 셸이 이미 Connected 면 connect/ensure 는 전이 emit 없이 Ok 로 단락한다 — 리로드·팝아웃 창은
-      //   init 의 조회가 끝나기 전에 여기까지 올 수 있다. 조회로 상태를 받고, 그 전이가 시작한 출력 Channel
-      //   등록을 마친 뒤에 풀린다(곧이어 나갈 replay 요청보다 등록이 먼저 — `awaitOutputChannel`).
-      //   emit 이 온 경로는 기다리지 않는다(그 경로의 replay 요청은 `awaitOutputChannel` 이 기다린다).
+      // ADR-0231: when the shell is already Connected, connect/ensure short-circuit with Ok without a transition emit — reloaded and popout windows can get here before init's query finishes.
+      //   Get the state from the query and wait for the output Channel registration that transition started (registration before the replay request about to go out — `awaitOutputChannel`).
+      //   The path where an emit came does not wait (that path's replay request waits on `awaitOutputChannel`).
       if (this._state !== 'connected') {
         await this.selfHeal()
         await this.outputChannelInflight?.catch((err: unknown) => {
-          console.warn('[TauriTransport] 출력 Channel 등록 실패:', err)
+          console.warn('[TauriTransport] output Channel registration failed:', err)
         })
       }
     } finally {
-      // 이 doConnect 가 current 세대의 것일 때만 connectPromise 를 비운다 — close() 가 이미 다른
-      //   connectPromise(=null)로 만들었을 수 있어, stale doConnect 가 새 promise 를 지우면 안 된다.
+      // Clear connectPromise only for the current generation — close() may already have made a different one (=null); a stale doConnect must not erase it.
       if (myGen === this.generation) this.connectPromise = null
     }
   }
 
-  // ── 명령 전송 + reply 하행(③-a, HIGH-2) ──────────────────────────────────────
-  // ProtocolClient 가 AgentCommand wire 객체를 넘기면 invoke 로 Rust DaemonClient 에 전달한다.
-  // Rust forward_daemon_command 는 request_id 있는 명령의 데몬 reply(AgentEvent)를 그대로 직렬화해
-  // 반환한다 — 그 반환을 control InboundMessage 로 올려 ProtocolClient.handleEvent 가 pending 을 깬다
-  // (WsTransport 가 데몬 Text frame 을 control 로 올리는 것과 동형). request_id 없는 명령(Resize/
-  // Subscribe/Unsubscribe)은 null 을 반환하므로 올리지 않는다(fire-and-forget).
-  //
-  // ★Promise 반환★: ProtocolClient.sendCommand 는 send 가 Promise 면 그 .catch 만 본다(성공 반환은
-  //   무시). 그래서 reply 는 여기서 직접 onMessage 로 올리고, invoke 실패(연결 끊김/Rust Err/reply
-  //   타임아웃)는 reject 해 ProtocolClient 가 해당 pending 을 reject 하게 한다(영구 hang 차단). reply
-  //   자체는 onMessage 경로로 resolve 되므로 이 Promise 의 resolve 값은 ProtocolClient 가 쓰지 않는다.
+  // ── command send + reply downstream (③-a, HIGH-2) ──────────────────────────────────────
+// ProtocolClient passes an AgentCommand wire object; it is delivered to the Rust DaemonClient by invoke. Rust forward_daemon_command returns the daemon reply (AgentEvent) of a command with a request_id
+// as is, and that return is raised as a control InboundMessage so ProtocolClient.handleEvent breaks the pending. Commands without a request_id (Resize/Subscribe/Unsubscribe) return null — fire-and-forget.
+//
+// ★Returns a Promise★: ProtocolClient.sendCommand looks only at .catch (a successful return is ignored), so the reply is raised directly to onMessage and an invoke failure
+//   (disconnect/Rust Err/reply timeout) rejects, rejecting that pending (blocks a permanent hang).
   send(payload: unknown): void | Promise<void> {
     return invoke<unknown>('forward_daemon_command', { cmd: payload }).then((reply) => {
       if (reply != null && typeof reply === 'object') {
@@ -542,25 +446,19 @@ export class TauriTransport implements Transport {
     })
   }
 
-  // ── 뷰 주도 replay 요청(ADR-0046 F2) ──────────────────────────────────────────
-  // 뷰(slot)가 (re)mount·재연결·watchdog·실패 사다리에서 ProtocolClient 를 통해 부른다. src-tauri
-  // single-flight command `request_replay` 에 그 agent 의 데몬 ring 전량 재replay(wire Subscribe
-  // {after_seq:None})를 요청하고, 부여된 gen(u64)을 회수한다. window_label 은 Rust 가 호출 webview 에서
-  // 자동 주입(위조 불가). 종결 마커(성공/실패)는 출력 Channel 로 tag=255 프레임이 별도 도착한다.
-  //
-  // ★gen = BigInt(§F2)★: invoke 는 u64 를 JSON number 로 직렬화하므로 여기서 BigInt 로 변환한다 —
-  //   마커 frame(getBigUint64) 과 폭을 맞춰 gen 펜스 비교가 정밀도 소실 없이 정확하다. reply 가 number 든
-  //   string 든(직렬화 폭에 따라) BigInt() 로 흡수한다.
+  // ── view-driven replay request (ADR-0046 F2) ──────────────────────────────────────────
+// A view (slot) calls it through ProtocolClient on (re)mount · reconnect · watchdog · the failure ladder. Asks the src-tauri single-flight command `request_replay` for a full re-replay of that
+// agent's daemon ring (wire Subscribe {after_seq:None}) and collects the assigned gen (u64). window_label is injected by Rust from the calling webview (unforgeable).
+// The closing marker (success/failure) arrives separately as a tag=255 frame through the output Channel.
+//
+// gen = BigInt (§F2): invoke serializes u64 as a JSON number; BigInt() (absorbing number or string) matches the marker frame's getBigUint64 width so the gen fence comparison is exact.
   async requestReplay(agentId: string): Promise<bigint> {
-    // ADR-0231: 이 창의 출력 Channel 등록보다 먼저 나가지 않는다(`awaitOutputChannel`).
+    // ADR-0231: it does not go out before this window's output Channel registration (`awaitOutputChannel`).
     await this.awaitOutputChannel()
     const gen = await invoke<number | string>('request_replay', { agentId })
-    // ★안전 정수 가드(FIX-5)★: invoke 가 u64 gen 을 JSON number 로 직렬화하면 2^53 초과분은 이미
-    //   부동소수점에서 정밀도가 깨진 채 도착한다(그 뒤 BigInt() 로 바꿔도 복원 불가). 실무상 도달 불가 —
-    //   gen 은 per-agent replay 요청마다 +1 하는 단조 카운터라 2^53(=9경) 회 요청은 수명 내 불가능. 그래도
-    //   조용한 오각인(잘못된 gen 펜스 비교)보다 1줄 경고가 낫다. BigInt 변환은 유지(정상 범위는 무손실).
+    // ★Safe integer guard (FIX-5)★: a u64 gen over 2^53 serialized as a JSON number already lost precision (BigInt() cannot restore it). Unreachable in practice (monotonic +1 per replay request); a warning beats a silent gen-fence misread.
     if (typeof gen === 'number' && !Number.isSafeInteger(gen)) {
-      console.warn(`[TauriTransport] request_replay gen 이 안전 정수 범위 초과(${gen}) — 정밀도 소실 가능(실무 도달 불가)`)
+      console.warn(`[TauriTransport] request_replay gen exceeds the safe integer range (${gen}) — precision may be lost (unreachable in practice)`)
     }
     return BigInt(gen)
   }
@@ -570,39 +468,32 @@ export class TauriTransport implements Transport {
     return { socketEpoch: r.socket_epoch, snapshots: r.snapshots }
   }
 
-  // ★세대 가드(Fix-C ①)★: generation++ 으로 in-flight doConnect 를 stale 화한다 — 뒤늦게 resolve 된
-  //   doConnect 가 출력 Channel 을 등록하거나 connectPromise 를 건드리지 못하게 한다. connectPromise=null
-  //   로 비워 다음 ensureReady/start 가 새 연결을 시작하게 한다(closedByUser 가 막지만 start 가 리셋).
+  // Generation guard (Fix-C ①): generation++ makes an in-flight doConnect stale. connectPromise=null lets the next ensureReady/start connect anew (closedByUser blocks it, but start resets it).
   close(): void {
     this.closedByUser = true
     this.generation += 1
     this.connectPromise = null
     this.cleanupListeners()
-    // 출력 Channel 정리(#13133: null 대입 아님 — delete onmessage). 재연결 시 u5 의 connected 전이
-    //   핸들러가 새로 등록(doConnect 아님).
+    // Clean up the output Channel (#13133: delete onmessage). On reconnect u5's connected handler registers anew.
     if (this.outputChannel) {
       delete (this.outputChannel as { onmessage?: unknown }).onmessage
       this.outputChannel = null
     }
-    // ★single-flight 재등록 취소(FIX 6)★: 진행 중 등록의 "완료 후 재등록" 플래그를 끈다 — close 후
-    //   좀비 Channel 을 다시 붙이지 않게. in-flight promise 자체는 완료되며 스스로 null 로 정리한다.
+    // Cancel the single-flight re-registration (FIX 6): clears the "re-register after completion" flag so no zombie Channel is attached after close; the in-flight promise completes and nulls itself.
     this.outputChannelRerun = false
     this.outputChannelRegistered = false
     invoke('daemon_close').catch((e: unknown) => {
-      console.warn('[TauriTransport] daemon_close 실패:', e)
+      console.warn('[TauriTransport] daemon_close failed:', e)
     })
-    // An explicit close shows no band (TRD S21 trd-3-2-u5 R7) — and its listener is gone, so the shell's status for it
-    //   never arrives here.
+    // An explicit close shows no band (TRD S21 trd-3-2-u5 R7), and its listener is gone, so the shell's status never arrives here.
     this.setStatus('down', null)
   }
 
-  // ProtocolClient 는 transport 를 생성자에서 받는다. 리스너 등록은 async 이므로 별도 init 을
-  // 호출하거나 clientFactory 에서 await 로 처리한다. doConnect 도 멱등 registerListeners 를 부르므로,
-  // 부팅 시 init→connect 순서든 connect 단독이든 control 리스너는 정확히 1벌 등록된다.
+  // ProtocolClient takes the transport in its constructor and listener registration is async, so init is called separately (or awaited in clientFactory).
+  // doConnect also calls the idempotent registerListeners, so init→connect or connect alone registers exactly one set.
   async init(): Promise<void> {
     await this.registerListeners()
-    // ★리로드 자가복구(Fix-D)★: 리스너 등록이 끝난 뒤 현재 연결 상태를 1회 pull 조회해 리로드 웹뷰의
-    //   전이 emit 사각지대를 메운다. 결함·pull 전략·레이스 가드 = selfHeal 주석 정본 참조.
+    // Reload self-recovery (Fix-D): pull the current connection state once after listener registration — see selfHeal.
     await this.selfHeal()
   }
 }

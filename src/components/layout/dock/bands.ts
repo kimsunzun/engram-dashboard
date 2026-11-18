@@ -1,14 +1,7 @@
-// TRD S21-slot-docking §4-5: docking bands — a mirror of the shell `src-tauri/src/layout/bands.rs`. The tab bar zone · outer bands ·
-//   area bands · their effective regions · attach share · rectangle to attach (preview) · band choice for a point · area zone lines of one window canvas. Coordinates = CSS px of that window canvas (canvas
-//   top-left origin) · bands · regions · rectangles to attach are half-open integer rectangles. Pure.
-// ★It is a set with the shell version★ — during a drag the drag does not align its decision with the shell (ADR-0296 · ADR-0297), so the web counts the same rules alone. The two read the golden
-//   `src-tauri/src/layout/bands_golden.json` together — if a rule is changed, change the shell · golden · this file in the same change.
-// ★The numbers are the one generated set `DOCK_CONSTANTS`★ — band · zone · cap numbers are not written by hand in this file (TRD §4-5). The split ratio
-//   limits are received as snapshot `ratio_min` · `ratio_max` (ADR-0227).
-// Entry points: `canvasZone` (tab bar zone) → `windowBands` (only on dragenter · visible tab · snapshot change — area frames · bands · validity · zone lines) →
-//   on every dragover `choose` · `zonesAt` (point choosing only). Order of precedence (R6a) = tab bar zone > outer bands > area bands — the tab bar zone is filtered out
-//   before this file (`judge.ts`). Blocked bands (R8) are treated as absent — painting and choosing use this same list, and a blocked outer band does not
-//   cover the area band beneath (AC36).
+// TRD S21-slot-docking §4-5: docking bands — mirror of shell `src-tauri/src/layout/bands.rs`: tab bar zone · outer bands · area bands · effective regions · attach share · landing rectangle (preview) · band choice for a point · area zone lines of one window canvas. Coordinates = CSS px of the window canvas (top-left origin); bands · regions · landings are half-open integer rectangles. Pure.
+// ★One set with the shell version★: the drag does not align its decision with the shell (ADR-0296 · ADR-0297), so the web counts the same rules alone; both read the golden `src-tauri/src/layout/bands_golden.json` — change shell · golden · this file together.
+// ★Numbers come from the generated `DOCK_CONSTANTS`★ (TRD §4-5), never hand-written here; split ratio limits arrive as snapshot `ratio_min` · `ratio_max` (ADR-0227).
+// Entry points: `canvasZone` → `windowBands` (on dragenter · visible tab · snapshot change) → per dragover `choose` · `zonesAt`. Precedence (R6a) = tab bar zone > outer bands > area bands; the tab bar zone is filtered before this file (`judge.ts`). Blocked bands (R8) are treated as absent — painting and choosing use the same list, and a blocked outer band does not cover the area band beneath (AC36).
 
 import type { LayoutNode } from '../../../api/layoutTypes'
 import { DOCK_CONSTANTS } from '../../../../src-tauri/bindings/DockConstants'
@@ -72,15 +65,12 @@ export interface WindowBands {
   zones: Array<SlotZones | null>
 }
 
-// The dragged tab when there is no shape field — the id has the form of the field name of `tabDragData.parseShape`, so it does not collide with the visible tab's area id (uuid).
+// Stand-in for a dragged tab with no shape field; its id mirrors a field name of `tabDragData.parseShape`, so it cannot collide with a visible area uuid.
 const ONE_SLOT: LayoutNode = { type: 'slot', id: 'shape-slot-0', content: { type: 'empty' } }
 
 // ── tab bar zone ─────────────────────────────────────────────────────────────────
 
-/**
- * Shell `strip_zone` — horizontally the same as the base rectangle `area` (viewport CSS px — the base of `localDrag.StripGeometry.zoneViewport`), vertically
- * `STRIP_ZONE_PX` above and below.
- */
+/** Shell `strip_zone` — same horizontal extent as base rectangle `area` (viewport CSS px, base of `localDrag.StripGeometry.zoneViewport`), `STRIP_ZONE_PX` above and below. */
 // ADR-0295
 export function stripZone(area: RectCss): RectCss {
   return { x0: area.x0, y0: area.y0 - STRIP_ZONE_PX, x1: area.x1, y1: area.y1 + STRIP_ZONE_PX }
@@ -91,7 +81,7 @@ export function contains(r: RectCss, p: PointCss): boolean {
   return r.x0 <= p.x && p.x < r.x1 && r.y0 <= p.y && p.y < r.y1
 }
 
-/** Shell `zone_in_canvas` — moves the zone into canvas coordinates and widens it outward to integer boundaries. The tab bar decision · band subtraction use this one boundary. */
+/** Shell `zone_in_canvas` — zone in canvas coordinates, widened outward to integer boundaries; the tab bar decision and band subtraction share this boundary. */
 // ADR-0295
 export function zoneInCanvas(zone: RectCss, canvasOrigin: PointCss): RectCss {
   return {
@@ -102,7 +92,7 @@ export function zoneInCanvas(zone: RectCss, canvasOrigin: PointCss): RectCss {
   }
 }
 
-/** The tab bar zone (canvas coordinates) of the base rectangle `area` (viewport · `null` = tab bar unknown — `stripZone`) — `BandsInput.zone` · the zone of the decision. */
+/** Tab bar zone in canvas coordinates for base rectangle `area` (`null` = tab bar unknown) — `BandsInput.zone`. */
 export function canvasZone(area: RectCss | null, canvasOrigin: PointCss): RectCss | null {
   return area === null ? null : zoneInCanvas(stripZone(area), canvasOrigin)
 }
@@ -110,9 +100,7 @@ export function canvasZone(area: RectCss | null, canvasOrigin: PointCss): RectCs
 // ── share · band ──────────────────────────────────────────────────────────────────
 
 /**
- * Shell `attach_share` — the share when attaching to the `side` of area `target` (the canvas for an outer band) = `min(L, T × ATTACH_SHARE_MAX) ÷ T`
- * clamped to `[ratio.min, ATTACH_SHARE_MAX]` (`L` = length of the original size in the splitting direction · `T` = length of the area in the same direction). For any input it is a finite
- * value in that range — area length 0 · `L` NaN · +∞ = upper bound · 0 or less = lower bound.
+ * Shell `attach_share`: share when attaching to `side` of area `target` (the canvas for an outer band) = `min(L, T × ATTACH_SHARE_MAX) ÷ T` clamped to `[ratio.min, ATTACH_SHARE_MAX]` (`L` = original size along the split, `T` = area length along it). Always finite and in range — area length 0 · `L` NaN · +∞ = upper bound; ≤ 0 = lower bound.
  */
 // ADR-0295
 export function attachShare(original: SizeCss, side: DockSide, target: PxRect, ratio: RatioLimits): number {
@@ -127,8 +115,7 @@ export function attachShare(original: SizeCss, side: DockSide, target: PxRect, r
 }
 
 /**
- * Shell `band_frame` — the band frame of area `frame`. From the area frame, subtract `OUTER_BAND_PX` inside the canvas edge for each side (`outer`) where an effective outer band stands —
- * do not subtract for a side whose outer band is blocked (that share belongs to the area band — AC36). If the area is entirely inside that share it is an empty rectangle.
+ * Shell `band_frame`: area `frame` minus `OUTER_BAND_PX` inside the canvas edge for each side (`outer`) with an effective outer band — not for a side whose outer band is blocked (that share belongs to the area band — AC36). Entirely inside that share → empty rectangle.
  */
 // ADR-0295
 export function bandFrame(frame: PxRect, canvas: CanvasPx, outer: readonly DockSide[]): PxRect {
@@ -173,8 +160,7 @@ export function slotBand(frame: PxRect, room: PxRect, side: DockSide): PxRect {
 }
 
 /**
- * Shell `slot_centre` — the center (fractional) not inside any of the four area bands. The lines joining the corners of `room` and the same-side corners of this rectangle are the
- * `choose` boundaries of the two adjacent area bands. For a narrow area where the left/right (top/bottom) bands exceed half of `room`, it shrinks to a segment of width 0 on that axis.
+ * Shell `slot_centre`: the center (fractional) outside all four area bands. Lines joining `room` corners to this rectangle's same-side corners are the `choose` boundaries of adjacent area bands. When left/right (top/bottom) bands exceed half of `room` it shrinks to width 0 on that axis.
  */
 export function slotCentre(frame: PxRect, room: PxRect): RectCss {
   const [tw, th] = roomThickness(frame, room)
@@ -198,8 +184,7 @@ export function outerStrips(canvas: CanvasPx): Array<[DockSide, PxRect]> {
 }
 
 /**
- * Shell `landing_rect` — the canvas px rectangle the inserted part will occupy when `incoming` is inserted with share `share` at the `side` of the `anchor` of target tree `target`
- * (preview = the bounding rectangle of the inserted areas as drawn after the drop — R4). `null` if a new zero-area area appears in the result (R8) or the reference area is missing.
+ * Shell `landing_rect`: canvas px rectangle the inserted part occupies when `incoming` is inserted with share `share` at `side` of `anchor` in `target` (preview = bounding rectangle of the inserted areas after the drop — R4). `null` if a zero-area area would appear (R8) or the reference area is missing.
  */
 // ADR-0227
 export function landingRect(
@@ -299,8 +284,7 @@ function zoneCut(zone: RectCss | null): PxRect | null {
 // ── point ────────────────────────────────────────────────────────────────────────
 
 /**
- * Shell `choose` — the `bands` index chosen at point `p` (canvas CSS px). ① among outer band regions containing the point, the one with the smallest normalized distance (distance to the band edge ÷ thickness)
- * ② otherwise among area band regions by the same criterion ③ on a tie the earlier one (hence `SIDE_ORDER`) ④ if none, `null` (area center · outside the canvas — R6).
+ * Shell `choose`: index in `bands` chosen at point `p`: ① among outer band regions containing it, the smallest normalized distance (distance to band edge ÷ thickness); ② else among area band regions by the same criterion; ③ ties → earlier (hence `SIDE_ORDER`); ④ none → `null` (area center · outside canvas — R6).
  */
 // ADR-0295
 export function choose(bands: readonly BandHit[], p: PointCss): number | null {
@@ -328,8 +312,7 @@ export function frameAt(wb: WindowBands, p: PointCss): number | null {
 }
 
 /**
- * Shell `slot_zones` — the `frames` index of the area to draw zone lines for at point `p`. `null` = the chosen band is an outer band (then the guide is the layout frame) · outside
- * the canvas · the area under the point has no effective area band. The tab bar zone is filtered out before this function (no lines are drawn on the tab bar).
+ * Shell `slot_zones`: `frames` index of the area to draw zone lines for at `p`; `null` = chosen band is an outer band (the guide is then the layout frame) · outside the canvas · no effective area band under the point. The tab bar zone is filtered out before this function.
  */
 export function zonesAt(wb: WindowBands, p: PointCss, picked: number | null): number | null {
   if (picked !== null && wb.bands[picked].anchor.type === 'outer') return null

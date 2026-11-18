@@ -589,7 +589,7 @@ impl LibraryService {
                 Ok(None) => {}
                 Err(e) => tracing::debug!(
                     path = path.as_str(),
-                    "first_link 실패, not-found 행을 그대로 둠: {e}"
+                    "first_link failed; keeping the not-found row: {e}"
                 ),
             }
         }
@@ -724,7 +724,7 @@ impl LibraryService {
             Box::new(move || merge_from(&gate, noted, &slot))
         };
         if let Err(e) = self.io.spawner().spawn(MERGE_JOB, job) {
-            tracing::warn!("library-merge spawn 실패, 호출 스레드에서 합침: {e}");
+            tracing::warn!("library-merge spawn failed; merging on the calling thread: {e}");
             merge_from(&self.gate, noted, &slot);
         }
     }
@@ -1113,7 +1113,7 @@ impl LibraryService {
             Err(e) => {
                 tracing::debug!(
                     path = path.as_str(),
-                    "build_scan 실패, Observed::Refused로 읽지 않음: {}",
+                    "build_scan failed; not read (Observed::Refused): {}",
                     escape_controls(&e.to_string())
                 );
                 Observed::Refused

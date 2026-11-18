@@ -1,23 +1,16 @@
-//! Transcript tap — a pure parser that reads the raw session JSONL left by the claude CLI **for measurement only** (ADR-0090).
+//! Transcript tap — a pure parser reading the raw session JSONL the claude CLI leaves, for measurement only (ADR-0090).
 //!
-//! ## ★Standing (honest scope) — this is an experiment measurement tap, not a product feature★
-//! The core decoder (`ClaudeStreamDecoder`) **discards** `cache_creation_input_tokens`/`cache_read_input_tokens` (where the real
-//! context size lives) · `system/init` (model id) · compact-related raw lines. The core is a no-modification
-//! target (ADR-0090 constraint) so this information cannot be obtained from the spawn path. Workaround: since **we control the session id**
-//! (`--session-id`, ADR-0008), read the raw transcript the claude CLI leaves at `~/.claude/projects/<munged-cwd>/<session-id>.jsonl`
-//! **best-effort** to supplement the measurements.
+//! ## ★Standing — an experiment measurement tap, not a product feature★
+//! The core decoder (`ClaudeStreamDecoder`) discards `cache_creation_input_tokens`/`cache_read_input_tokens` (where the real context size lives) · `system/init` (model id) · compact-related raw lines, and the core is a no-modification target (ADR-0090), so the spawn path cannot supply them. Workaround: we control the session id (`--session-id`, ADR-0008), so read the raw transcript at `~/.claude/projects/<munged-cwd>/<session-id>.jsonl` best-effort to supplement measurements.
 //!
-//! ★ADR-0008 boundary — no product feature is built on a trace file★: this transcript is **for the experiment measurement tap only**.
-//! ADR-0008 pins down "restore correctness depends only on the controlled sid; the trace file is best-effort — no feature expansion with it".
-//! So this module **never fails the harness** on a missing file or parse failure (best-effort).
+//! ★ADR-0008 boundary — no product feature is built on a trace file★: restore correctness depends only on the controlled sid; the trace file is best-effort. So this module never fails the harness on a missing file or parse failure.
 // ADR-0090
 
 use std::path::{Path, PathBuf};
 
 use super::record::{event_type_key, line_mentions_compact, parse_init_model};
 
-/// The **real context footprint** tokens of one assistant turn. Looking only at claude usage `input_tokens` gives that turn's
-/// incremental input, which does not reflect the cumulative context.
+/// The real context footprint tokens of one assistant turn. claude usage `input_tokens` alone is that turn's increment and does not reflect the cumulative context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RealUsage {
     /// Non-cache input tokens (newly sent in that turn).
@@ -30,8 +23,7 @@ pub struct RealUsage {
 }
 
 impl RealUsage {
-    /// Real context footprint = input + cache_creation + cache_read. The two cache terms are most of the true context size,
-    /// so this sum is a ground-truth approximation of "the number of context tokens the model is looking at now".
+    /// Real context footprint = input + cache_creation + cache_read. The cache terms are most of the true context size, so this sum approximates "the context tokens the model is looking at now".
     pub fn context_footprint(&self) -> u64 {
         self.input_tokens
             .saturating_add(self.cache_creation_input_tokens)
@@ -42,8 +34,7 @@ impl RealUsage {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TranscriptSummary {
     pub resolved_model: Option<String>,
-    /// Holds **only assistant-message per-turn footprints** (appearance order = turn order). The aggregate usage
-    ///   of a result line is not mixed in here.
+    /// Only assistant-message per-turn footprints (appearance order = turn order); a result line's aggregate usage is not mixed in.
     pub real_usage_series: Vec<RealUsage>,
     /// The top-level aggregate usage of a result line (the last one) — for diagnosis and records.
     pub aggregate_result_usage: Option<RealUsage>,
@@ -55,9 +46,7 @@ pub struct TranscriptSummary {
     pub total_lines: usize,
 }
 
-/// ★cwd-munging not hardcoded★: claude puts the transcript under a directory name made by munging the cwd (e.g.
-/// `C--Users-x-proj`). That rule may change by version, so we match only the file name by **recursive search** — absorbs
-/// changes in the munging rule regardless.
+/// ★cwd-munging not hardcoded★: claude puts the transcript under a directory named by munging the cwd (e.g. `C--Users-x-proj`), a rule that may change by version — so match only the file name by recursive search.
 pub fn locate_transcript(session_id: &str) -> Option<PathBuf> {
     let projects = claude_projects_dir()?;
     let target = format!("{session_id}.jsonl");
@@ -65,7 +54,7 @@ pub fn locate_transcript(session_id: &str) -> Option<PathBuf> {
 }
 
 fn claude_projects_dir() -> Option<PathBuf> {
-    // Find home via std env — the dirs crate is not introduced (no-new-deps).
+    // Home via std env — no dirs crate (no-new-deps).
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)?;
@@ -77,7 +66,7 @@ fn claude_projects_dir() -> Option<PathBuf> {
     }
 }
 
-/// The depth cap is to prevent runaway — claude's structure is shallow, projects/<munged>/<sid>.jsonl, so 8 is enough.
+/// Depth cap prevents runaway — claude's structure is shallow (projects/<munged>/<sid>.jsonl), so 8 is enough.
 fn find_file_recursive(dir: &Path, target: &str, depth: usize) -> Option<PathBuf> {
     const MAX_DEPTH: usize = 8;
     if depth > MAX_DEPTH {
@@ -109,7 +98,7 @@ fn real_usage_from_obj(usage: &serde_json::Value) -> Option<RealUsage> {
     let cache_creation = get("cache_creation_input_tokens");
     let cache_read = get("cache_read_input_tokens");
     let output = get("output_tokens");
-    // If the token fields are all 0/absent it is a meaningless usage — e.g. an object with only geo/tier.
+    // All token fields 0/absent = a meaningless usage (e.g. an object with only geo/tier).
     if input == 0 && cache_creation == 0 && cache_read == 0 && output == 0 {
         return None;
     }
@@ -121,9 +110,7 @@ fn real_usage_from_obj(usage: &serde_json::Value) -> Option<RealUsage> {
     })
 }
 
-/// ★finding 4 warning★: this function **does not check whether the line is an assistant line** — it also extracts the top-level `usage` of a result line (aggregate ·
-///   partial). If this function is used directly to build the running context series, an aggregate line overwrites the per-turn
-///   footprint. The per-turn series must use `assistant_footprint_from_line`.
+/// ★Warning★: this function does not check that the line is an assistant line — it also extracts a result line's top-level `usage` (aggregate · partial). Building the running context series with it lets an aggregate line overwrite the per-turn footprint; the per-turn series must use `assistant_footprint_from_line`.
 ///
 /// Measured schema (claude 2.1.170): an assistant line is `{"type":"assistant","message":{...,"usage":{
 /// "input_tokens":N,"cache_creation_input_tokens":N,"cache_read_input_tokens":N,"output_tokens":N}}}`.
@@ -136,14 +123,9 @@ pub fn real_usage_from_line(line: &str) -> Option<RealUsage> {
     real_usage_from_obj(usage)
 }
 
-/// Extracts **only the assistant message's per-turn footprint** — this is the true running series of "the context
-///   the model is looking at now".
+/// Extracts only the assistant message's per-turn footprint — the true running series of "the context the model is looking at now".
 ///
-/// ★Why this distinction is load-bearing★: the last line of a claude transcript is often an **aggregate/partial usage** like `{"type":"result",...,
-///   "usage":{"input_tokens":1200,...}}` — this input_tokens is only that turn's increment and not the cumulative context.
-///   If this line is mixed into the running series,
-///   right after a 49k footprint is logged the result line's 1200 overwrites series.last() and the driver misreads it as "the context dropped sharply from 49k→1200" (a fake
-///   compaction + wrong per-turn usage). So the running series is built only from assistant message footprints.
+/// ★Load-bearing distinction★: the last line of a claude transcript is often an aggregate/partial usage like `{"type":"result",...,"usage":{"input_tokens":1200,...}}` — only that turn's increment, not the cumulative context. Mixed into the series, right after a 49k footprint the result line's 1200 overwrites series.last() and the driver misreads "context dropped sharply 49k→1200" (a fake compaction + wrong per-turn usage). So the running series uses only assistant message footprints.
 pub fn assistant_footprint_from_line(line: &str) -> Option<RealUsage> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
@@ -153,10 +135,7 @@ pub fn assistant_footprint_from_line(line: &str) -> Option<RealUsage> {
     real_usage_from_obj(usage)
 }
 
-/// Extracts the model id from the `message.model` of an assistant line (transcript parser). The transcript of the spawn path (stream-json
-/// headless) **has no** `system/init` line (measured 2026-07-20, claude 2.1.170) and the model id is carried in the
-/// assistant message's `message.model` — so parse_init_model alone cannot get the spawn-path model id,
-/// and this auxiliary extractor is needed. `<synthetic>` (placeholder for synthetic messages) is not a real model so it is excluded.
+/// Extracts the model id from the `message.model` of an assistant line. The spawn path's transcript (stream-json headless) has no `system/init` line (measured claude 2.1.170); the model id is carried in the assistant message's `message.model`, so parse_init_model alone cannot get it. `<synthetic>` (placeholder for synthetic messages) is not a real model and is excluded.
 pub fn model_from_assistant_line(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
@@ -197,7 +176,7 @@ pub fn line_is_compact_marker(line: &str) -> bool {
     }
 }
 
-/// Parsing is per line so one corrupted line does not break the whole (that line is absorbed into the non_json histogram).
+/// Parsing is per line so one corrupted line does not break the whole (it is absorbed into the non_json histogram).
 pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
     let content = std::fs::read_to_string(path).ok()?;
     Some(parse_transcript_str(&content))
@@ -243,8 +222,7 @@ pub fn parse_transcript_str(content: &str) -> TranscriptSummary {
 mod tests {
     use super::*;
 
-    // ── Fixtures (excerpted and redacted from the real transcript form) ────────────────────────────────
-    //   Modeled exactly on the real transcript structure — sensitive content replaced with harmless text.
+    // ── Fixtures (excerpted and redacted from the real transcript form; sensitive content replaced) ──
 
     /// Terminal-mode model id source.
     const INIT_LINE: &str = r#"{"type":"system","subtype":"init","cwd":"C:\\tmp\\ws","model":"claude-sonnet-4-5-20250929","session_id":"abc"}"#;
@@ -289,7 +267,7 @@ mod tests {
         assert_eq!(u.context_footprint(), 12 + 8000 + 41000);
         assert!(
             u.context_footprint() > u.input_tokens * 100,
-            "실 컨텍스트는 bare input 의 수백 배(캐시 항)"
+            "the real context is hundreds of times the bare input (cache terms)"
         );
     }
 
@@ -317,8 +295,8 @@ mod tests {
             line_is_compact_marker(COMPACT_BOUNDARY),
             "system/compact_boundary"
         );
-        assert!(!line_is_compact_marker(ASSISTANT_LINE_1), "일반 assistant");
-        assert!(!line_is_compact_marker(USER_LINE), "일반 user");
+        assert!(!line_is_compact_marker(ASSISTANT_LINE_1), "plain assistant");
+        assert!(!line_is_compact_marker(USER_LINE), "plain user");
     }
 
     #[test]
@@ -334,13 +312,17 @@ mod tests {
         assert_eq!(
             model_from_assistant_line(SYNTHETIC_LINE),
             None,
-            "<synthetic> 제외"
+            "<synthetic> excluded"
         );
-        assert_eq!(model_from_assistant_line(USER_LINE), None, "user 라인 제외");
+        assert_eq!(
+            model_from_assistant_line(USER_LINE),
+            None,
+            "user line excluded"
+        );
         assert_eq!(
             model_from_assistant_line(INIT_LINE),
             None,
-            "system 라인 제외"
+            "system line excluded"
         );
         assert_eq!(model_from_assistant_line("not json"), None);
     }
@@ -397,7 +379,7 @@ mod tests {
         assert_eq!(
             assistant_footprint_from_line(RESULT_1200),
             None,
-            "result 집계 라인은 per-turn footprint 아님"
+            "the result aggregate line is not a per-turn footprint"
         );
     }
 
@@ -408,17 +390,17 @@ mod tests {
         assert_eq!(
             s.real_usage_series.len(),
             1,
-            "assistant 1턴만 running 계열에"
+            "only the assistant turn 1 goes to the running series"
         );
         assert_eq!(
             s.real_usage_series.last().unwrap().context_footprint(),
             8 + 2000 + 47000,
-            "running context 는 49k 유지(1200 이 덮지 않음)"
+            "running context stays at 49k (1200 does not overwrite it)"
         );
         assert_eq!(
             s.aggregate_result_usage.map(|u| u.input_tokens),
             Some(1200),
-            "result 집계 usage 는 분리 필드에"
+            "the result aggregate usage goes in a separate field"
         );
         let max = s
             .real_usage_series

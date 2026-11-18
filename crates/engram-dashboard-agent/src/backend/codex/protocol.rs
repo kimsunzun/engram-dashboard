@@ -1,33 +1,29 @@
 //! codex app-server wire types — the envelope · method names · the payloads we send and receive.
 //!
-//! ★Source and how to regenerate (do not infer again)★: the field names · required-ness · enum values in this file were
-//!   read from the JSON Schema that codex-cli **0.154.0** emitted — ★one exception = the usage limit
-//!   section (`AccountRateLimitsUpdatedNotification`·`GetAccountRateLimits*` and the types under them) was read from the **0.156.1** schema★.
-//!   The command to extract it again =
-//!   `codex app-server generate-json-schema --out <dir>` — 266 per-type files
-//!   land under `v2/`. To check whether upstream changed, do not read this file but extract again with that command and compare.
+//! ★Source and regeneration (do not infer again)★: field names · required-ness · enum values were read from the JSON Schema codex-cli
+//!   **0.154.0** emitted — ★except the usage limit
+//!   section (`AccountRateLimitsUpdatedNotification`·`GetAccountRateLimits*` and their types), read from the **0.156.1** schema★.
+//!   Regenerate with
+//!   `codex app-server generate-json-schema --out <dir>` (266 per-type files under `v2/`); to check upstream drift, regenerate and compare
+//!   — do not read this file.
 //!
-//! ★The envelope is not JSON-RPC 2.0★ — the `jsonrpc` field appears 0 times in the whole schema. Do not send it and
-//!   do not require it on receipt.
+//! ★The envelope is not JSON-RPC 2.0★ — `jsonrpc` appears 0 times in the schema. Do not send it or require it.
 //!
-//! ★Inbound structs carry **only the fields we read**★ — serde ignores unknown fields, so copying even the required fields
-//!   we do not read gains nothing and only adds deserialization failure points. Conversely **outbound** carries every field
-//!   the schema marks required — if missing, the server rejects it.
+//! ★Inbound structs carry **only the fields we read**★ (serde ignores unknown fields; unread required fields only add failure points).
+//!   **Outbound** carries every field the schema marks
+//!   required, or the server rejects it.
 //!
-//! ★`deny_unknown_fields` is attached nowhere — it is a correctness requirement, not taste★ (measured 0.154.0):
-//!   real responses carry fields that are **not in the schema at all**. In the `thread/start` response alone, what was observed is
-//!   `environments`·`runtimeWorkspaceRoots`·`extra`·`canAcceptDirectInput`·`daybreakEnabled`
-//!   ·`multiAgentMode`·`activePermissionProfile`·`historyMode`. The moment unknown fields are rejected,
-//!   a normal response becomes a decode failure.
+//! ★`deny_unknown_fields` is attached nowhere — a correctness requirement★ (measured 0.154.0): real responses carry fields **not in the
+//!   schema** (the `thread/start` response alone:
+//!   `environments`·`runtimeWorkspaceRoots`·`extra`·`canAcceptDirectInput`·`daybreakEnabled`·`multiAgentMode`·`activePermissionProfile`·`historyMode`); rejecting them fails a normal response.
 //!
-//! ★A crate-wide `rename_all` is not used★ — this protocol mixes casing within itself
-//!   (`input_text` alongside `inputText`, `approved_for_session` alongside `acceptForSession`).
-//!   `rename_all` is attached **only to types whose fields were all confirmed camelCase in the schema**.
+//! ★No crate-wide `rename_all`★ — casing is mixed within the protocol (`input_text` beside `inputText`, `approved_for_session` beside
+//!   `acceptForSession`);
+//!   `rename_all` is attached **only to types whose fields were all confirmed camelCase**.
 //!
-//! This file does no I/O — string in, type out.
+//! No I/O in this file — string in, type out.
 
-// chunk 1 only sets up the types and the translator and does no wiring at all. The consumer of the surface below (the path implementation)
-//   is made by chunk 2, and this allow is removed then.
+// chunk 1 sets up only the types and the translator, no wiring; chunk 2 adds the consumer of the surface below and removes this allow.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -37,15 +33,14 @@ use serde_json::Value;
 
 // ── Envelope ──────────────────────────────────────────────────────────────────────
 
-/// JSON-RPC id. The schema is `anyOf[string, i64]` and lists string first (`RequestId.json`).
+/// JSON-RPC id. The schema is `anyOf[string, i64]`, string first (`RequestId.json`).
 ///
-/// ★An id the server issued must be returned **character for character**★ — so it is not normalized to a number.
-/// Being i64 is also intentional: the schema is `format: int64`, so a JS-side peer may send an id above 2^53.
+/// ★An id the server issued must be returned **character for character**★ — not normalized to a number. i64 is intentional (`format:
+///   int64`; a JS-side peer may send an id above 2^53).
 ///
-/// ★That there is no variant that can serialize as `null` is the invariant of this type★ (measured 0.154.0):
-/// if `id: null` is sent, the server's untagged envelope union **reclassifies that line as a notification and quietly
-/// drops it** — no error, not one line on stderr. Wrapping in `Option` or adding a Null variant
-/// would revive that silence.
+/// ★No variant may serialize as `null` — the invariant of this type★ (measured 0.154.0): `id: null` makes the server's untagged envelope
+///   union **reclassify the line as a notification and
+/// drop it silently** (no error, nothing on stderr). No `Option`, no Null variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum RequestId {
@@ -55,16 +50,15 @@ pub(crate) enum RequestId {
 
 /// `JSONRPCErrorError` — the body of the error envelope.
 ///
-/// ★`code` is an opaque i64★: the schema has no enum · const · min/max, and the `-32xxx` range appears **not once**
-/// (including `-32001` — grep 0 hits). Overload · rate limit come not in this envelope but in the `error`
-/// **notification**'s `codexErrorInfo` (`serverOverloaded`·`rateLimitExceeded`).
-/// ★Whether a code like `-32001` actually arrives at runtime is unverified★ — we put no code that branches on the number
-/// here. If handling of a specific code becomes necessary, real-server observation comes first.
+/// ★`code` is an opaque i64★: the schema has no enum · const · min/max and `-32xxx` appears **not once** (`-32001` — grep 0 hits).
+///   Overload · rate limit come in the `error`
+/// **notification**'s `codexErrorInfo` (`serverOverloaded`·`rateLimitExceeded`), not this envelope.
+/// ★Whether a code like `-32001` arrives at runtime is unverified★ — no code branches on the number; observe a real server first if a
+///   specific code needs handling.
 ///
-/// Measured 0.154.0: the answer to an unknown method is `-32600` and the `data` field **did not come** (we still make it
-/// optional — the schema allows it). ★`message` can reach 4KB★ — the body of an unknown-method
-/// error lists all 160 valid methods. Whoever carries this string to a log · the screen
-/// must cut it.
+/// Measured 0.154.0: an unknown method answers `-32600` and `data` **did not come** (still optional — the schema allows it). ★`message`
+///   can reach 4KB★ (the unknown-method body lists all 160
+/// valid methods); cut it before a log · the screen.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RpcError {
     pub(crate) code: i64,
@@ -75,10 +69,10 @@ pub(crate) struct RpcError {
 
 /// The four envelope shapes of one line coming in from the server.
 ///
-/// ★Discrimination is by **presence of fields** — in principle it cannot be told by the id value★: the id the server issued must be
-/// returned as is, so the two id spaces are bound to overlap (TRD §4-4).
-/// It is not made `#[serde(untagged)]` — the required sets of the four shapes overlap and none forbids extra fields, so
-/// order would become a trap that decides meaning (`JSONRPCMessage` has that shape).
+/// ★Discrimination is by **presence of fields**, never the id value★: server-issued ids are returned as is, so the two id spaces overlap
+///   (TRD §4-4).
+/// Not `#[serde(untagged)]` — the four shapes' required sets overlap and none forbids extra fields, so order would decide meaning
+///   (`JSONRPCMessage` has that shape).
 #[derive(Debug, Clone)]
 pub(crate) enum Inbound {
     /// `method` + `id` — the server asks us. ★If not answered, that agent freezes permanently★.
@@ -89,10 +83,9 @@ pub(crate) enum Inbound {
     },
     /// `method` only — nobody waits for an answer. This is all the translator receives.
     ///
-    /// ★A real notification envelope carries one more `emittedAtMs` alongside `method`·`params`★
-    /// (measured 0.154.0 — present in 12/12 notifications and absent in 8/8 responses. It is a field not in the schema).
-    /// Here we **deliberately do not carry** it — translation at this stage does not depend on order. If needed,
-    /// read that key from the original line (discrimination stands as it is even with that field present).
+    /// ★A real notification also carries `emittedAtMs` beside `method`·`params`★ (measured 0.154.0 — 12/12 notifications, 0/8 responses;
+    ///   not in the schema). **Deliberately not carried**:
+    /// translation here does not depend on order; read that key from the original line if needed (discrimination holds with it present).
     Notification {
         method: String,
         params: Option<Value>,
@@ -105,59 +98,56 @@ pub(crate) enum Inbound {
 
 /// The reason [`classify`] could not read a line as any of the four envelopes.
 ///
-/// ★All are non-fatal★ — the caller logs that one line and drops it, and does not cut the stream
-/// (TRD §4-6: we do not die on a non-JSON stdout line).
+/// ★All non-fatal★ — the caller logs the line and drops it; the stream is not cut (TRD §4-6).
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ParseError {
-    #[error("JSON 이 아니다: {0}")]
+    #[error("not JSON: {0}")]
     NotJson(serde_json::Error),
-    #[error("JSON 최상위가 객체가 아니다")]
+    #[error("the JSON top level is not an object")]
     NotObject,
-    #[error("`method` 가 문자열이 아니다")]
+    #[error("`method` is not a string")]
     MethodNotString,
-    #[error("`id` 가 문자열도 i64 도 아니다")]
+    #[error("`id` is neither a string nor an i64")]
     BadId,
-    #[error("`error` 가 {{code,message}} 모양이 아니다: {0}")]
+    #[error("`error` does not have the {{code,message}} shape: {0}")]
     BadError(serde_json::Error),
-    #[error("`{0}` 봉투에 `id` 가 없다")]
+    #[error("the `{0}` envelope has no `id`")]
     MissingId(&'static str),
-    /// `result` and `error` came together in one line. It is a line claiming success and failure at once, so reading it either way may be wrong —
-    /// ★if the field that appears first is let to win, a failure is read as a success★.
-    #[error("`result` 와 `error` 가 한 봉투에 함께 있다")]
+    /// `result` and `error` came together in one line — claims success and failure at once; ★if the field that appears first won, a
+    ///   failure would be read as a success★.
+    #[error("`result` and `error` are together in one envelope")]
     ConflictingEnvelope,
-    #[error("네 봉투 모양 중 어느 것도 아니다 — method·result·error 가 전부 없다")]
+    #[error("none of the four envelope shapes — method, result and error are all missing")]
     UnknownShape,
 }
 
-/// Read one **line** as one envelope. Line splitting is the caller's job and this function does not handle newlines.
+/// Read one **line** as one envelope. Line splitting is the caller's job.
 ///
-/// The discrimination order is the contract: if `method` is present it is a request/notification (then the presence of `id` splits the two),
-/// and only when absent are `result`·`error` looked at. ★A line with `method` and `id` together is always a request★ —
-/// reading it as a notification would drop a request that must be answered.
+/// The discrimination order is the contract: `method` present → request/notification (then `id` splits the two); only when absent are
+///   `result`·`error` looked at.
+/// ★A line with `method` and `id` is always a request★ — reading it as a notification would drop a request that must be answered.
 ///
-/// ★Discrimination stands even with unknown sibling fields★ — real notifications always come with `emittedAtMs`
-/// (measured 0.154.0), and upstream may add fields not in the schema at any time. If read as "there is an extra field so it is none of the four
-/// shapes", normal lines would be dropped whole.
+/// ★Discrimination holds with unknown sibling fields★ — real notifications always carry `emittedAtMs` (measured 0.154.0) and upstream may
+///   add more; "extra field → none of the four shapes"
+/// would drop normal lines whole.
 ///
-/// A line that is not JSON, or is JSON but fits none of the four shapes, comes back as an **error** — neither a panic nor
-/// a quiet drop.
+/// A non-JSON line, or JSON fitting none of the four shapes, is an **error** — neither a panic nor a quiet drop.
 ///
-/// ★One requirement on the caller — put a deadline on every request sent★ (measured 0.154.0): the server
-/// **gives no answer to an envelope it could not decode, even if an `id` is carried** (for the one line `{"id":90}`
-/// only a stderr log was left and stdout stayed silent forever). Answers come only for *parameter* errors after the envelope was read.
-/// So a waiting ticket that "waits until the answer comes" will sooner or later hang forever.
+/// ★Caller requirement — put a deadline on every request sent★ (measured 0.154.0): the server **gives no answer to an envelope it could
+///   not decode, even with an `id`** (`{"id":90}` left
+/// only a stderr log; stdout stayed silent forever). Answers come only for *parameter* errors after the envelope was read, so a ticket
+///   that "waits until the answer comes" will hang.
 ///
-/// ★Known limitation — duplicate keys are not filtered★: for a line like `{"id":1,"id":2,"result":{}}` serde_json
-/// **takes the last value**. So if such a line comes we read `id=2`, and that response is **delivered to the
-/// wrong waiter** (the original request is never released and someone else's request gets someone else's answer). To filter,
-/// a dedicated visitor that does not go through a map is needed, so it is not done here — unverified, and we have
-/// never seen a real server emit such a line.
+/// ★Known limitation — duplicate keys are not filtered★: `{"id":1,"id":2,"result":{}}` reads `id=2` (serde_json takes the last value) and
+///   the response is **delivered to the wrong waiter**
+/// (the original request is never released). Filtering needs a map-free visitor — not done; unverified, and no real server has been seen
+///   to emit such a line.
 pub(crate) fn classify(line: &str) -> Result<Inbound, ParseError> {
     let value: Value = serde_json::from_str(line).map_err(ParseError::NotJson)?;
     let obj = value.as_object().ok_or(ParseError::NotObject)?;
 
-    // ★Look at it before the method branch★ — the contradiction is independent of the envelope kind, and if looked at later, the branch that picks `result` first
-    //   reads a failure as a success.
+    // ★Check before the method branch★ — the contradiction is independent of the envelope kind; a branch picking `result` first would read
+    //   a failure as a success.
     if obj.contains_key("result") && obj.contains_key("error") {
         return Err(ParseError::ConflictingEnvelope);
     }
@@ -209,8 +199,8 @@ fn parse_id(raw: &Value) -> Result<RequestId, ParseError> {
 
 // ── Method names ───────────────────────────────────────────────────────────────
 
-/// Wire method names. ★There is no version prefix★ — `v1/`·`v2/` in the schema tree are merely directories for source organization,
-/// and methods go out as bare names like `thread/start`.
+/// Wire method names. ★No version prefix★ — `v1/`·`v2/` in the schema tree are only source directories; methods go out as bare names like
+///   `thread/start`.
 pub(crate) mod method {
     // Us → server requests
     pub(crate) const INITIALIZE: &str = "initialize";
@@ -228,14 +218,11 @@ pub(crate) mod method {
 
     /// Receive the past items of a resumed thread **as pages** (ADR-0203).
     ///
-    /// ★The twin `thread/turns/list` is not used★ — the unit we draw on the screen is the item, not the turn, and that one
-    /// wraps the same item one more layer inside a turn envelope. It only adds one envelope to peel.
+    /// ★The twin `thread/turns/list` is not used★ — we draw items, not turns, and that one wraps the same item in one more turn envelope.
     pub(crate) const THREAD_ITEMS_LIST: &str = "thread/items/list";
 
-    /// Us → server notification. ★The only notification a client can send is this one, and it has no params field
-    /// at all★ (`ClientNotification.json`).
-    /// ★Sending it is not a duty★ (measured 0.154.0 — in both the sent and unsent cases
-    /// `thread/start` succeeded the same). Sending is harmless, so we keep it on the side of matching the handshake shape.
+    /// Us → server notification. ★The only notification a client can send, and it has no params field★ (`ClientNotification.json`).
+    /// ★Sending it is not a duty★ (measured 0.154.0: `thread/start` succeeded either way); it is harmless, so we match the handshake shape.
     pub(crate) const INITIALIZED: &str = "initialized";
 
     // Among server → us notifications, the ones the translator knows by name
@@ -246,19 +233,20 @@ pub(crate) mod method {
     pub(crate) const ERROR: &str = "error";
     pub(crate) const DEPRECATION_NOTICE: &str = "deprecationNotice";
 
-    /// ★Carried into a usage observation, not a screen event★ — it is account-level state, so it must not go through per-agent replay
-    /// (this arm of `decoder` · interpretation = this folder's `usage`).
+    /// ★Carried into a usage observation, not a screen event★ — account-level state must not go through per-agent replay (`decoder` arm ·
+    ///   interpretation = this folder's `usage`).
     pub(crate) const ACCOUNT_RATE_LIMITS_UPDATED: &str = "account/rateLimits/updated";
 
     /// Us → server request — only one active usage query is sent (this folder's `usage_probe`). The conversation path does not send this.
     pub(crate) const ACCOUNT_RATE_LIMITS_READ: &str = "account/rateLimits/read";
 
-    /// ★This one name has two consumers★ — the translator carries it into a turn boundary (`decoder`), and the path reads it as input to the queue-release
-    /// state machine (`transport`). The two each look at the same line.
+    /// ★This one name has two consumers★ — the translator carries it into a turn boundary (`decoder`) and the path feeds it to the
+    ///   queue-release state machine (`transport`); each reads the same line.
     pub(crate) const TURN_COMPLETED: &str = "turn/completed";
 
-    // Among server → us requests, the ones the path knows by name. ★Refusal is done the same way for any request★ — on top of that these two remember the refused
-    // item and attribute the end of that item to our refusal (ADR-0241).
+    // Among server → us requests, the ones the path knows by name. ★Refusal is the same for any request★; these two additionally remember
+    //   the refused item and attribute that item's
+    // end to our refusal (ADR-0241).
     pub(crate) const ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL: &str =
         "item/commandExecution/requestApproval";
     pub(crate) const ITEM_FILE_CHANGE_REQUEST_APPROVAL: &str = "item/fileChange/requestApproval";
@@ -266,41 +254,40 @@ pub(crate) mod method {
 
 /// All four values of `TurnStatus` (schema 0.154.0 `definitions.TurnStatus` — a closed `enum`).
 ///
-/// ★Kept as string constants and not received as a Rust `enum`★: if deserialized into a closed type, the day upstream adds a fifth value
-/// the **whole** `turn/completed` line fails, and then the turn boundary vanishes entirely and the screen's waiting
-/// indicator spins forever. That outcome is the very defect these constants fix.
+/// ★Kept as string constants, not a Rust `enum`★: a closed type would fail the **whole** `turn/completed` line the day upstream adds a
+///   fifth value, the turn boundary would vanish and
+/// the screen's waiting indicator would spin forever — the defect these constants fix.
 pub(crate) mod turn_status {
     pub(crate) const COMPLETED: &str = "completed";
     pub(crate) const INTERRUPTED: &str = "interrupted";
     pub(crate) const FAILED: &str = "failed";
     pub(crate) const IN_PROGRESS: &str = "inProgress";
 
-    /// For telling grades apart — a value **not** here is upstream drift, and a value that is here but not carried into an outcome
-    /// (today [`IN_PROGRESS`] alone) is 「뜻을 아직 모른다」 (meaning not yet known). Either way the translation is still done.
+    /// For telling grades apart — a value **not** here is upstream drift; one that is here but not carried into an outcome (today
+    ///   [`IN_PROGRESS`] alone) is 「meaning not yet known」. Either way
+    /// the translation is still done.
     pub(crate) const ALL: &[&str] = &[COMPLETED, INTERRUPTED, FAILED, IN_PROGRESS];
 }
 
 /// The code carried when refusing an inbound **request** we do not know.
 ///
-/// ★The schema does not fix a code range★ — `JSONRPCErrorError.code` is an unconstrained i64 and
-/// `-32xxx` never appears in the schema. We are the side that defines the envelope, so we pick the value, borrowing
-/// the JSON-RPC 2.0 convention's "method not found" (its meaning is clear to a reader).
-/// ★The app-server reads this answer to an approval request as 「승인 요청 실패」 (approval request failed)★ (measured codex-cli 0.156.1 · fixture
-/// `refuse_u2a`): it closes that item right away without executing it (command = `failed` · file change = `declined`), and the turn continues and
-/// ends with `completed` — there is no `error` notification. The reaction to a non-approval request is unverified. Either way it is better than dropping:
-/// if dropped, that agent freezes permanently (TRD §6-2).
+/// ★The schema fixes no code range★ (`JSONRPCErrorError.code` is an unconstrained i64). We define the envelope side, so we borrow the
+///   JSON-RPC 2.0 convention's "method not found", whose
+/// meaning a log reader knows.
+/// ★The app-server reads this answer to an approval request as 「approval request failed」★ (measured codex-cli 0.156.1 · fixture
+///   `refuse_u2a`): it closes the item right away without
+/// executing it (command = `failed` · file change = `declined`) and the turn continues to `completed` with no `error` notification. The
+///   reaction to a non-approval request is unverified.
+/// Either way better than dropping, which freezes that agent permanently (TRD §6-2).
 ///
-/// For reference, **codex itself returns `-32600` for an unknown method** (measured 0.154.0) — that is, the peer
-/// does not count "unknown method" separately. Still, our value is -32601, whose conventional meaning is clear:
-/// the first reader of this number is the person who opens the log.
+/// For reference, **codex itself returns `-32600` for an unknown method** (measured 0.154.0); ours is -32601 for its conventional meaning.
 pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
 
 // ── Serialization helpers ───────────────────────────────────────────────────────────────
 
-/// Build one request line. ★The returned string is a **complete line including the newline**★ — if the caller
-/// also appends `\n`, one extra empty line goes out.
+/// Build one request line. ★The returned string is a **complete line including the newline**★ — appending `\n` again sends an extra empty line.
 ///
-/// If `params` serialization fails it is an error (our types cannot fail, but it is generic so the contract leaves it open).
+/// A `params` serialization failure is an error (our types cannot fail, but it is generic).
 pub(crate) fn request_line<P: Serialize>(
     id: &RequestId,
     method: &str,
@@ -320,9 +307,9 @@ pub(crate) fn notification_line(method: &str) -> String {
 
 /// One error response line that refuses a server request (newline included).
 ///
-/// ★`id` is carried exactly as received★ — it is the server's waiting-ticket key, so if normalized that request is never released.
-/// ★Success must not be disguised★ — if a success response is returned to an approval request it becomes an automatic approval and
-/// bypasses the approval policy (TRD §6-2).
+/// ★`id` is carried exactly as received★ — it is the server's waiting-ticket key; a normalized id is never released.
+/// ★Success must not be disguised★ — a success response to an approval request becomes an automatic approval and bypasses the approval
+///   policy (TRD §6-2).
 pub(crate) fn error_response_line(id: &RequestId, code: i64, message: &str) -> String {
     format!(
         "{}\n",
@@ -335,11 +322,12 @@ pub(crate) fn error_response_line(id: &RequestId, code: i64, message: &str) -> S
 
 // ── initialize ────────────────────────────────────────────────────────────────
 
-/// The client name carried in `initialize` (shared by the conversation path · usage query). The peer writes this value into its own log · `user_agent`.
+/// The client name carried in `initialize` (shared by the conversation path · usage query). The peer writes this value into its own log ·
+///   `user_agent`.
 pub(crate) const CLIENT_NAME: &str = "engram-dashboard";
 
-/// ★It can be sent only once★ (measured 0.154.0) — a second `initialize` comes back as `-32600` `"Already
-/// initialized"`. The responsibility to keep a retry path from sending this again lies with the caller.
+/// ★Can be sent only once★ (measured 0.154.0) — a second `initialize` returns `-32600` `"Already initialized"`. The caller must keep a
+///   retry path from sending it again.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InitializeParams {
@@ -369,10 +357,9 @@ pub(crate) struct ClientInfo {
     // `title` is optional so it is not carried.
 }
 
-/// ★There is no protocol version here★ — `protocolVersion` appears 0 times in the whole schema.
-/// What `initialize` negotiates is not a version but a capability set ([`InitializeParams::capabilities`]).
-/// The only values that tell upstream drift after the fact are `user_agent` and `Thread.cliVersion`, so they are recorded once at
-/// startup (TRD §4-7 item 1).
+/// ★No protocol version here★ — `protocolVersion` appears 0 times in the schema; `initialize` negotiates a capability set
+///   ([`InitializeParams::capabilities`]), not a version.
+/// Upstream drift is visible only through `user_agent` and `Thread.cliVersion`, so they are recorded once at startup (TRD §4-7 item 1).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InitializeResponse {
@@ -384,9 +371,9 @@ pub(crate) struct InitializeResponse {
 
 // ── thread/start · thread/resume ──────────────────────────────────────────────
 
-/// Approval policy. The schema is `oneOf[문자열 3 종, GranularAskForApproval]` but ★we send only the string branch★
-/// — the granular side is a field we do not use, so we did not copy its shape.
-/// Note that the value spelling is kebab-case: the other approval enums of the same protocol are camelCase.
+/// Approval policy. The schema is `oneOf[3 strings, GranularAskForApproval]` but ★we send only the string branch★ (the granular shape is
+///   not copied). The value spelling is
+/// kebab-case; the protocol's other approval enums are camelCase.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) enum AskForApproval {
     #[serde(rename = "untrusted")]
@@ -399,9 +386,9 @@ pub(crate) enum AskForApproval {
 
 /// The type of the `sandbox` field of `thread/start`·`thread/resume`.
 ///
-/// ★Do not confuse it with the differently-typed same name★ — `TurnStartParams.sandboxPolicy` and
-/// `ThreadStartResponse.sandbox` are a structured union (`SandboxPolicy`) and not this string enum.
-/// The response's `sandbox` cannot be put back into this field as it is.
+/// ★Do not confuse it with the same-named differently typed fields★ — `TurnStartParams.sandboxPolicy` and `ThreadStartResponse.sandbox`
+///   are a structured union (`SandboxPolicy`), not this
+/// string enum; the response's `sandbox` cannot be put back into this field.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) enum SandboxMode {
     #[serde(rename = "read-only")]
@@ -412,9 +399,8 @@ pub(crate) enum SandboxMode {
     DangerFullAccess,
 }
 
-/// ★The schema has no `required` array at all — `{}` is valid params★. So every field must be
-/// `Option` + `skip_serializing_if`: otherwise codex receives an explicit `null`
-/// where it expected "absence".
+/// ★The schema has no `required` array — `{}` is valid params★. Every field is `Option` + `skip_serializing_if`, or codex gets an explicit
+///   `null` where it expected absence.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadStartParams {
@@ -424,14 +410,14 @@ pub(crate) struct ThreadStartParams {
     pub(crate) approval_policy: Option<AskForApproval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sandbox: Option<SandboxMode>,
-    /// Instructions **appended after** codex's default instructions. Absent = nothing is appended.
+    /// Instructions **appended after** codex's default instructions. Absent = nothing appended.
     ///
-    /// ★It is appending, not replacing★ — whatever is put in this field, codex's own default instructions remain
-    ///   (measured 0.155.0: the body stands in front as a `developer`-role message at `input[0]` and the default prompt is undamaged).
-    /// ★It **carries the same thing as the terminal mode's `-c developer_instructions=…` but is not the same path**★:
-    ///   this one is a JSON body, so there is no command-line length cap, no `%VAR%` substitution, no line-break truncation. So the value is carried
-    ///   **untouched, as it is** — do not bring that side's line-break conversion · character guard over here (it would block no
-    ///   risk while only ruining the document the agent reads).
+    /// ★Appending, not replacing★ — codex's default instructions remain (measured 0.155.0: the body stands as a `developer`-role message
+    ///   at `input[0]`, default prompt intact).
+    /// ★Carries the same thing as terminal mode's `-c developer_instructions=…` but **not the same path**★: this is a JSON body — no
+    ///   command-line length cap, no `%VAR%` substitution, no
+    ///   line-break truncation — so the value goes **untouched**; do not bring that side's line-break conversion · character guard here
+    ///   (it blocks no risk and only ruins the document).
     // ADR-0215
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) developer_instructions: Option<String>,
@@ -465,11 +451,11 @@ pub(crate) struct ThreadResumeParams {
     pub(crate) developer_instructions: Option<String>,
 }
 
-/// The **second request** of the handshake — open a new thread, or resume a saved thread.
+/// The **second request** of the handshake — open a new thread, or resume a saved one.
 ///
-/// ★The one place that chooses is [`crate::backend::AgentBackend::open_spawn`] in `backend/codex/mod.rs`★ —
-/// the path emits what it received as is. If the path looked at its own state and decided again, there would be two places that decide
-/// (the same shape as what ADR-0191 withdrew from path selection).
+/// ★The one place that chooses is [`crate::backend::AgentBackend::open_spawn`] in `backend/codex/mod.rs`★ — the path emits what it
+///   received; a path deciding again from its own state would make
+/// two deciders (the shape ADR-0191 withdrew from path selection).
 // ADR-0185
 pub(crate) enum ThreadOpen {
     Start(ThreadStartParams),
@@ -482,16 +468,15 @@ pub(crate) struct ThreadStartResponse {
     pub(crate) thread: Thread,
 }
 
-/// The `thread/resume` response. Its field composition is the `thread/start` response with two more cursors attached.
+/// The `thread/resume` response — the `thread/start` response plus two more cursors.
 ///
-/// ★One of those cursors is now read — it is the **entry point** of screen restore★ (ADR-0203). How to use it the schema
-/// (0.154.0) writes directly in that field's description: "Pass this as `cursor` to `thread/items/list` with
+/// ★One cursor is read — the **entry point** of screen restore★ (ADR-0203). The schema (0.154.0) describes it: "Pass this as `cursor` to
+///   `thread/items/list` with
 /// `sortDirection: \"desc\"`. The first page includes the item identified by the cursor."
-/// ★It is left `default` because the schema is so★ — it is not in the `required` list and has `default: null`.
-/// Absent = there is no history to go back to, and it is **not a failure** (restore is skipped).
-/// ★The `thread/start` response has no such field at all★ — so a new conversation has no material to take this path.
-/// ★The other cursor (`turnsBackwardsCursor`) is still not read★ — [`method::THREAD_ITEMS_LIST`] above carries the
-/// reason for not using that twin.
+/// ★`default` because the schema is so★ (not in `required`, `default: null`): absent = no history to go back to, **not a failure**
+///   (restore skipped).
+/// ★The `thread/start` response has no such field★ — a new conversation has nothing to restore.
+/// ★The other cursor (`turnsBackwardsCursor`) is still not read★ — see [`method::THREAD_ITEMS_LIST`] for why its twin is unused.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadResumeResponse {
@@ -500,10 +485,10 @@ pub(crate) struct ThreadResumeResponse {
     pub(crate) items_backwards_cursor: Option<String>,
 }
 
-/// Which direction to walk the page — all two values of the schema's closed `enum` (0.154.0 `SortDirection`).
+/// Which direction to walk the page — both values of the schema's closed `enum` (0.154.0 `SortDirection`).
 ///
-/// ★[`SortDirection::Asc`] is used by nobody today — we write it anyway★: this is an **outgoing** field so the value cannot be
-/// invented, and with both written, a change that reverses direction does not create a new constant.
+/// ★[`SortDirection::Asc`] is unused today — written anyway★: this is an **outgoing** field (values cannot be invented), so a
+///   direction-reversing change adds no new constant.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) enum SortDirection {
     #[serde(rename = "asc")]
@@ -512,10 +497,9 @@ pub(crate) enum SortDirection {
     Desc,
 }
 
-/// `thread/items/list` request. ★Only `threadId` is required★ (schema 0.154.0) — all the rest may be omitted, so they are left as
-/// `Option` + `skip_serializing_if` (the same reason as [`ThreadStartParams`]: an explicit
-/// `null` is not sent where absence is expected).
-/// ★`turnId`, which narrows to one turn, was not copied★ — we walk the whole thread from the end.
+/// `thread/items/list` request. ★Only `threadId` is required★ (schema 0.154.0); the rest are `Option` + `skip_serializing_if` (same reason
+///   as [`ThreadStartParams`]).
+/// ★`turnId` (narrows to one turn) is not copied★ — we walk the whole thread from the end.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadItemsListParams {
@@ -530,9 +514,9 @@ pub(crate) struct ThreadItemsListParams {
 
 /// One page.
 ///
-/// ★If `nextCursor` is absent or `null`, there is nothing more to see in that direction★ — the schema says so, and in measurement too
-/// `null` came on the last page (2026-09-16, real 0.154.0 · a 28-item thread ended as 25+3).
-/// ★`backwardsCursor`, used when reversing direction, was not copied★ — we walk in one direction only.
+/// ★`nextCursor` absent or `null` = nothing more in that direction★ — the schema says so and measurement agrees (`null` on the last page,
+///   2026-09-16, real 0.154.0, a 28-item thread = 25+3).
+/// ★`backwardsCursor` (for reversing direction) is not copied★ — we walk one direction only.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadItemsListResponse {
@@ -543,10 +527,11 @@ pub(crate) struct ThreadItemsListResponse {
 
 /// One item carried in a page + the turn it belongs to.
 ///
-/// ★That `item` is the **same type** as that field of [`ItemNotification`] is the ground of ADR-0203★ — in the vendor
-/// schema the item definition hash is the same for the `item/completed` notification · resume response · page response (19 variants).
-/// So we do not write a new translator but only peel the envelope. The reason for taking [`Value`] is also the same as that side — one unknown variant
-/// must not kill the **whole** page.
+/// ★`item` is the **same type** as that of [`ItemNotification`] — the ground of ADR-0203★: the vendor schema's item definition hash is
+///   identical for the `item/completed` notification ·
+/// resume response · page response (19 variants), so we only peel the envelope instead of writing a new translator. [`Value`] for the same
+///   reason as there: one unknown variant must not kill
+/// the **whole** page.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadItemEntry {
@@ -557,22 +542,22 @@ pub(crate) struct ThreadItemEntry {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Thread {
-    /// Issued by codex — ★the caller cannot decide it★. The value is a UUIDv7 string and `thread.sessionId`
-    /// holds the same value (measured 0.154.0). It sits at `result.thread.id`, not at the response top level.
+    /// Issued by codex — ★the caller cannot decide it★. A UUIDv7 string, and `thread.sessionId` holds the same value (measured 0.154.0);
+    ///   at `result.thread.id`, not the response top level.
     pub(crate) id: String,
-    /// ★The schema marks it required but we allow absence★ — failing the whole thread start because one diagnostic value is gone is
-    /// worse. It is the value that tells upstream drift after the fact.
+    /// ★Required in the schema but absence is allowed★ — failing the whole thread start over one diagnostic value is worse; it is the
+    ///   value that tells upstream drift after the fact.
     #[serde(default)]
     pub(crate) cli_version: Option<String>,
 }
 
 // ── turn/start · turn/interrupt ───────────────────────────────────────────────
 
-/// One piece of turn input. The schema has 7 variants (text·image·localImage·audio·localAudio·skill·mention) but
-/// ★what we send is `text` alone★, so we did not copy the rest.
+/// One piece of turn input. The schema has 7 variants (text·image·localImage·audio·localAudio·skill·mention) but ★we send only `text`★ and
+///   did not copy the rest.
 ///
-/// ★Not carrying `text_elements` is also intentional★ — it is optional with default `[]`, and its spelling is the only snake_case
-/// in this camelCase type. If needed it must be written with that spelling.
+/// ★Not carrying `text_elements` is intentional★ — optional with default `[]`, and the only snake_case spelling in this camelCase type;
+///   write it with that spelling if needed.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum UserInput {
@@ -586,8 +571,8 @@ pub(crate) struct TurnStartParams {
     pub(crate) thread_id: String,
     pub(crate) input: Vec<UserInput>,
     /// Our id that comes back as `clientId` on the echo (`userMessage`) of the first input (since 0.140.0 — measured 0.156.1).
-    /// ★If `None`, the field itself is not carried★ — the envelopes of inputs without an identifier and of incarnations below the minimum codex version are
-    /// byte-for-byte the same as before this field existed.
+    /// ★`None` → the field is not carried★ — envelopes of inputs without an identifier and of incarnations below the minimum codex version
+    ///   are byte-for-byte as before this field existed.
     // ADR-0231
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) client_user_message_id: Option<String>,
@@ -631,14 +616,15 @@ pub(crate) struct SkillsExtraRootsSetParams {
     pub(crate) extra_roots: Vec<String>,
 }
 
-/// `turn/steer` — put one input into a running turn. The success response is `{turnId}` and that is **acceptance**, not a receipt
-/// (the receipt is the echo carrying `clientId` — measured 0.156.1). The response body is not read.
+/// `turn/steer` — put one input into a running turn. The success response `{turnId}` is **acceptance**, not a receipt (the receipt is the
+///   echo carrying `clientId` — measured 0.156.1);
+/// the body is not read.
 ///
-/// ★`expectedTurnId` is a precondition the vendor requires★ — if that turn has already ended or the id mismatches, an error
-///   response (`-32600 "no active turn to steer"`) comes. So a steer that reaches an ended turn late does not mix into the
-///   next turn.
-/// ★Not making `clientUserMessageId` an `Option` is intentional★ — it is an optional field in the schema, but steer is sent only for entries that
-///   have an identifier from an incarnation that meets the minimum codex version (without an identifier the handed-over text cannot be matched against the echo).
+/// ★`expectedTurnId` is a vendor-required precondition★ — an ended turn or mismatched id returns an error (`-32600 "no active turn to
+///   steer"`), so a late steer never mixes into the next turn.
+/// ★`clientUserMessageId` is deliberately not an `Option`★ — optional in the schema, but steer is sent only for entries with an identifier
+///   from an incarnation meeting the minimum codex version
+///   (without one the handed-over text cannot be matched to the echo).
 // ADR-0231
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -654,11 +640,11 @@ pub(crate) struct TurnStartResponse {
     pub(crate) turn: Turn,
 }
 
-/// Turn — ★this type reads the `turn/start` **response**, and the `turn/completed` notification is not read with it★.
-/// The `turn` of that notification is the same schema type, but the translator scans it directly as a [`Value`] (source of truth for the reason is
-/// the `turn/completed` spot of [`crate::backend::codex::decoder`] — even if one field is off, the turn boundary must stand).
-/// All that is needed here is the one id to put into `turn/interrupt`, so we did not copy the other fields (`status`·`items`·`error`
-/// ·`startedAt`·`completedAt`·`durationMs`·`itemsView`).
+/// Turn — ★reads the `turn/start` **response** only, not the `turn/completed` notification★: that `turn` is the same schema type, but the
+///   translator scans it directly as a [`Value`]
+/// (reason: the `turn/completed` spot of [`crate::backend::codex::decoder`] — one off field must not stop the turn boundary standing).
+/// Only the id for `turn/interrupt` is needed, so the other fields
+///   (`status`·`items`·`error`·`startedAt`·`completedAt`·`durationMs`·`itemsView`) are not copied.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Turn {
     pub(crate) id: String,
@@ -671,12 +657,12 @@ pub(crate) struct TurnInterruptParams {
     pub(crate) turn_id: String,
 }
 
-/// The result of `turn/interrupt` — ★a truly empty object, with neither properties nor required in the schema★.
-/// We **only receive** this (the only response we emit is the refusal error).
+/// The result of `turn/interrupt` — ★a truly empty object (neither properties nor required in the schema)★. We **only receive** it (our
+///   only emitted response is the refusal error).
 ///
-/// Writing it as a struct with braces is intentional — a unit struct serializes as `null`, not `{}`.
-/// Right now no line goes out in that direction, but we pin it so the shape does not change quietly when this type is some day carried on an outgoing line
-/// (the regression net measures that serialization).
+/// A braced struct is intentional — a unit struct serializes as `null`, not `{}`. No line goes out this way now; it is pinned so the shape
+///   does not change quietly if this type is ever
+/// carried outbound (the regression net measures that serialization).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct TurnInterruptResponse {}
 
@@ -693,11 +679,9 @@ pub(crate) struct AgentMessageDeltaNotification {
 
 /// The common read fields of `item/started` · `item/completed`.
 ///
-/// ★The two notifications differ only in `startedAtMs` vs `completedAtMs`, and the `item` union is the same★ — so
-/// we read with one type and branch by `method`.
-/// Taking `item` as a [`Value`] and not as a type is intentional — an internally-tagged enum meeting an unknown
-/// `type` makes **the whole line a deserialization failure**, and this union has 19 variants today and upstream keeps
-/// growing it. One unknown variant must not kill the line.
+/// ★The two differ only in `startedAtMs` vs `completedAtMs`; the `item` union is the same★ — one type, branched by `method`.
+/// `item` is a [`Value`], not a type, intentionally: an internally-tagged enum meeting an unknown `type` fails **the whole line**, and
+///   this union has 19 variants and keeps growing.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ItemNotification {
@@ -713,21 +697,20 @@ pub(crate) struct ThreadTokenUsageUpdatedNotification {
     pub(crate) token_usage: ThreadTokenUsage,
 }
 
-/// ★The schema does not explain what `last` and `total` count★ — there is no description string and both are
-/// required. We read by name alone, `last` = the model request that just ended, `total` = cumulative, and the translator
-/// uses `last` (the reason is at the usage translation spot of [`crate::backend::codex::decoder`]).
+/// ★The schema does not explain what `last` and `total` count★ (no description, both required). Read by name: `last` = the model request
+///   that just ended, `total` = cumulative; the translator
+/// uses `last` (reason: the usage translation spot of [`crate::backend::codex::decoder`]).
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ThreadTokenUsage {
     pub(crate) last: TokenUsageBreakdown,
 }
 
-/// ★Our `Usage` vocabulary has only two fields, so the rest is lost★ — they are `cachedInputTokens`
-/// ·`reasoningOutputTokens`·`totalTokens`·`cacheWriteInputTokens`. Growing the vocabulary is
-/// a wire change and outside the scope of this stage.
+/// ★Our `Usage` vocabulary has only two fields, so the rest is lost★
+///   (`cachedInputTokens`·`reasoningOutputTokens`·`totalTokens`·`cacheWriteInputTokens`); growing it is a wire change, out of scope.
 ///
-/// ★It is a signed `i64` because the schema declares `format: int64`★ — if narrowed to `u64`, a single
-/// negative or out-of-range value makes **the whole notification fail deserialization** and that turn's `Usage` vanishes entirely.
-/// Our vocabulary field is `u64`, so a negative is clamped to 0 at the translation spot (the comment there is the source of truth).
+/// ★Signed `i64` because the schema declares `format: int64`★ — `u64` would fail **the whole notification** on one negative or
+///   out-of-range value and lose that turn's `Usage`. Our vocabulary
+/// field is `u64`, so a negative is clamped to 0 at the translation spot (its comment is canonical).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TokenUsageBreakdown {
@@ -737,9 +720,9 @@ pub(crate) struct TokenUsageBreakdown {
 
 /// `error` notification.
 ///
-/// ★`threadId`·`turnId`·`willRetry` are marked required by the schema but absence is allowed here★ —
-/// dropping an undecodable error whole is the worst outcome in this protocol, so
-/// we let it through as long as the error body is present.
+/// ★`threadId`·`turnId`·`willRetry` are required in the schema but absence is allowed★ — dropping an undecodable error whole is the worst
+///   outcome in this protocol; pass it as long as the error
+/// body is present.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ErrorNotification {
@@ -748,14 +731,14 @@ pub(crate) struct ErrorNotification {
     pub(crate) will_retry: bool,
 }
 
-/// ★Two fields carry this type★ — the `error` of the `error` notification, and `Turn.error`. The schema writes on the latter
-/// 「Only populated when the Turn's status is failed」 (0.154.0). So the reason of a failed turn is read by this one type,
-/// and the place that makes the screen string is also one.
+/// ★Two fields carry this type★ — `error` of the `error` notification, and `Turn.error` (schema: 「Only populated when the Turn's status is
+///   failed」, 0.154.0). A failed turn's reason is read by this
+/// one type, and one place makes the screen string.
 ///
-/// ★Taking `codexErrorInfo` as a [`Value`] is intentional★ — it is a union mixing 13 string enums and 5 wrapper objects
-/// (= `oneOf` members 6), and all we use is one label a person can read. Inside it are
-/// `serverOverloaded`·`rateLimitExceeded` — the schema's only backpressure vocabulary,
-/// and it comes via **this notification**, not a numeric error code.
+/// ★`codexErrorInfo` is a [`Value`] intentionally★ — a union mixing 13 string enums and 5 wrapper objects (`oneOf` members 6), of which we
+///   use one human-readable label. It holds
+/// `serverOverloaded`·`rateLimitExceeded` — the schema's only backpressure vocabulary, which comes via **this notification**, not a
+///   numeric error code.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TurnError {
@@ -768,22 +751,20 @@ pub(crate) struct TurnError {
     pub(crate) misalignment: Option<MisalignmentErrorDetails>,
 }
 
-/// Detail for when a turn is blocked by a model-alignment violation. ★`message` alone cannot tell "why it was blocked" nor "what to
-/// do"★ — these three carry those two.
+/// Detail for a turn blocked by a model-alignment violation. ★`message` alone cannot tell "why it was blocked" or "what to do"★ — these
+///   three carry that.
 ///
-/// The schema has no `required` array — all three fields are optional and all three are nullable.
+/// The schema has no `required` array — all three fields are optional and nullable.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MisalignmentErrorDetails {
     /// An already localized explanation comes (schema description: "A substantive localized explanation").
     #[serde(default)]
     pub(crate) detailed_explanation: Option<String>,
-    /// ★Not a closed enum★ — the schema left it open with "clients must accept categories added by Responses",
-    /// so it is received as a string as is.
+    /// ★Not a closed enum★ — the schema leaves it open ("clients must accept categories added by Responses"), so it is received as a string.
     #[serde(default)]
     pub(crate) error_type: Option<String>,
-    /// If we decide to continue, it is the **sentence to submit as-is as the next turn input** — not a sentence we invent,
-    /// but one codex gave.
+    /// If we decide to continue, the **sentence to submit as-is as the next turn input** — given by codex, not invented by us.
     #[serde(default)]
     pub(crate) steer: Option<MisalignmentSteer>,
 }
@@ -795,15 +776,17 @@ pub(crate) struct MisalignmentSteer {
 
 // ── params of the usage limit notification ─────────────────────────────────────────────────
 
-/// `account/rateLimits/updated`. ★The fields of this section were read from the schema of **codex-cli 0.156.1**, not 0.154.0★
-/// (`v2/AccountRateLimitsUpdatedNotification.json` — the regeneration command is in this file's header).
+/// `account/rateLimits/updated`. ★This section was read from the schema of **codex-cli 0.156.1**, not 0.154.0★
+///   (`v2/AccountRateLimitsUpdatedNotification.json`; regeneration: this file's header).
 ///
-/// ★One notification = a sparse update of **one** limit bucket★ — buckets are told apart by [`RateLimitSnapshot::limit_id`]. The schema
-/// description says 「가장 최근 `account/rateLimits/read` 응답에 병합하라 — 비어 온 값은 앞 값을 지우지 않는다」 (merge into the most recent account/rateLimits/read response — an empty value does not erase the earlier value).
-/// It was measured that it arrives mid-turn (`docs/process/S21-codex-backend/trd-phase2a.md` L7), and no carried value has ever been captured.
+/// ★One notification = a sparse update of **one** limit bucket★, told apart by [`RateLimitSnapshot::limit_id`]. Schema description: 「merge
+///   into the most recent account/rateLimits/read response —
+/// an empty value does not erase the earlier value」. Arrives mid-turn (`docs/process/S21-codex-backend/trd-phase2a.md` L7); no carried
+///   value has ever been captured.
 ///
-/// ★If params and `rateLimits` are not JSON **objects**, it is a deserialization failure ([`object_only`])★ — unlike the two field-lenient types below,
-///   here that line is dropped whole: if the whole notification or the whole snapshot has another shape, there is no field to save.
+/// ★Params and `rateLimits` that are not JSON **objects** fail deserialization ([`object_only`])★ — unlike the two field-lenient types
+///   below, the line is dropped whole: with a different overall
+///   shape there is no field to save.
 #[derive(Debug, Clone)]
 pub(crate) struct AccountRateLimitsUpdatedNotification {
     pub(crate) rate_limits: RateLimitSnapshot,
@@ -826,14 +809,14 @@ impl<'de> Deserialize<'de> for AccountRateLimitsUpdatedNotification {
 
 /// A snapshot of one limit bucket (schema `RateLimitSnapshot` — all fields optional · nullable).
 ///
-/// ★Each field fails separately★ — a field of the wrong type becomes `None` for that field alone and the snapshot survives ([`lenient`]·[`lenient_object`]).
-/// If one field's shape change made the whole notification a deserialization failure, the bucket's remaining values would be lost too.
-/// ★Only `limit_id` is taken as a raw [`Value`] intentionally★ — this field tells 「어느 버킷인가」 (which bucket it is), and if a wrong type were folded into
-///   `None` it could not be told apart from absence (= the side read as the default bucket). The consumer interprets.
-/// ★This type itself would read even a JSON array in field order★ — enforcing an object is carried by the [`object_only`] of the side that carries this type (the notification ·
-///   [`GetAccountRateLimitsResponse`]). When this type is read on a new path, it must also pass that gate — if not, a
-///   plausible fake window appears.
-/// `limit_name`·`plan_type` are read only by the query response (pickup does not carry plan · per-model windows — this folder's `usage`).
+/// ★Each field fails separately★ — a wrong-typed field becomes `None` alone and the snapshot survives ([`lenient`]·[`lenient_object`]);
+///   one field's shape change must not lose the bucket's other values.
+/// ★Only `limit_id` is a raw [`Value`] intentionally★ — it says 「which bucket」, and a wrong type folded into `None` would be
+///   indistinguishable from absence (read as the default bucket). The consumer interprets.
+/// ★This type would read even a JSON array in field order★ — the object requirement is carried by the [`object_only`] of the carrying side
+///   (the notification · [`GetAccountRateLimitsResponse`]);
+///   a new read path must pass that gate too, or a plausible fake window appears.
+/// `limit_name`·`plan_type` are read only by the query response (pickup carries no plan · per-model windows — this folder's `usage`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RateLimitSnapshot {
@@ -845,17 +828,17 @@ pub(crate) struct RateLimitSnapshot {
     pub(crate) primary: Option<RateLimitWindow>,
     #[serde(default, deserialize_with = "lenient_object")]
     pub(crate) secondary: Option<RateLimitWindow>,
-    /// The schema is a closed enum (`PlanType`) but we receive it as a string — the day upstream adds a value, only this field needs to be read.
+    /// The schema is a closed enum (`PlanType`) but received as a string — when upstream adds a value, only this field needs reading.
     #[serde(default, deserialize_with = "lenient")]
     pub(crate) plan_type: Option<String>,
 }
 
-/// One limit window (schema `RateLimitWindow`). Schema types = `usedPercent` int32 (required) · `windowDurationMins`
-/// int64 · `resetsAt` int64 (epoch seconds) — none has a range constraint, so the consumer decides range.
+/// One limit window (schema `RateLimitWindow`: `usedPercent` int32 (required) · `windowDurationMins` int64 · `resetsAt` int64 (epoch
+///   seconds) — no range constraints; the consumer decides range).
 ///
 /// ★`primary`/`secondary` are slot names, not 5-hour/weekly★ (measured — the consumer tells them apart by `window_duration_mins`).
-/// ★Taking `used_percent` as `f64` is intentional★ — the schema says integer, but there is no reason to reject a fraction, and the field value is
-///   `f64` anyway. The reset time, by contrast, accepts integers only (we do not do float → integer conversion on external values).
+/// ★`used_percent` as `f64` is intentional★ — the schema says integer but there is no reason to reject a fraction; the reset time accepts
+///   integers only (no float → integer conversion of external values).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RateLimitWindow {
@@ -869,29 +852,28 @@ pub(crate) struct RateLimitWindow {
 
 // ── account/rateLimits/read ───────────────────────────────────────────────────
 
-/// The params of `account/rateLimits/read` — ★no field is carried at all (`{}`)★. The schema (0.156.1
-/// `v2/NullableGetAccountRateLimitsParams.json`) accepts `null` or an object whose fields are all optional, and the probe measured with `{}`
-/// (`.claude/handoff/attachments/codex-usage-probe.mjs`).
-/// ★Not carrying `excludeResetCreditDetails` is to keep the measured shape★ — the schema description is 「배경 폴링용 —
-///   리셋 크레딧 상세 조회를 건너뛴다」 (for background polling — skips the reset credit detail query) and fits our use, but a request carrying that field has not been measured.
+/// The params of `account/rateLimits/read` — ★no field carried (`{}`)★. The schema (0.156.1 `v2/NullableGetAccountRateLimitsParams.json`)
+///   accepts `null` or an all-optional object; the probe
+/// measured with `{}` (`.claude/handoff/attachments/codex-usage-probe.mjs`).
+/// ★`excludeResetCreditDetails` is not carried to keep the measured shape★ — its description (「for background polling — skips the reset
+///   credit detail query」) fits, but a request with it is unmeasured.
 ///
-/// Being a struct with braces is for the same reason as [`TurnInterruptResponse`] — a unit struct serializes as `null`.
+/// A braced struct for the same reason as [`TurnInterruptResponse`] — a unit struct serializes as `null`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct GetAccountRateLimitsParams {}
 
-/// The `account/rateLimits/read` response (schema 0.156.1 `v2/GetAccountRateLimitsResponse.json`) — only two fields read.
+/// The `account/rateLimits/read` response (schema 0.156.1 `v2/GetAccountRateLimitsResponse.json`) — two fields read.
 ///
-/// ★Not carrying `accountId` is a decision★ — an account identifier comes at the response top level. If not read, there is no way for this value to leak into logs · error
-///   strings starting from the type (TRD §1-3). If it becomes needed (account key — TRD §3 #33), decide that value's exit first.
-/// ★Snapshot slots accept objects only ([`object_only`])★ — if the response itself is not an object it is a deserialization failure, and if a snapshot
-///   slot (`rateLimits` · each map entry) is not an object, **only that slot** is treated as absent.
+/// ★Not carrying `accountId` is a decision★ — it sits at the response top level; unread, it cannot leak into logs · error strings (TRD
+///   §1-3). If needed (account key — TRD §3 #33), decide its exit first.
+/// ★Snapshot slots accept objects only ([`object_only`])★ — a non-object response fails deserialization; a non-object snapshot slot
+///   (`rateLimits` · each map entry) is treated as absent for **that slot only**.
 #[derive(Debug, Clone)]
 pub(crate) struct GetAccountRateLimitsResponse {
-    /// Schema description = "Backward-compatible single-bucket view" — ★no guarantee it is the default bucket★ (it may reflect another bucket).
-    /// `None` = absent, `null`, or not an object.
+    /// Schema: "Backward-compatible single-bucket view" — ★not guaranteed to be the default bucket★. `None` = absent, `null`, or not an object.
     pub(crate) rate_limits: Option<RateLimitSnapshot>,
-    /// `rateLimitsByLimitId` — bucket id → snapshot, **sorted by id** (JSON map order differs with each serde_json feature combination so
-    /// we decide). `None` = the field is absent, `null`, or not an object.
+    /// `rateLimitsByLimitId` — bucket id → snapshot, **sorted by id** (JSON map order varies with serde_json features). `None` = absent,
+    ///   `null`, or not an object.
     pub(crate) rate_limits_by_limit_id: Option<Vec<(String, RateLimitSnapshot)>>,
 }
 
@@ -925,7 +907,8 @@ impl<'de> Deserialize<'de> for GetAccountRateLimitsResponse {
     }
 }
 
-/// Read one field, and if its shape is wrong (including `null`) put **that field only** as `None`. A missing field is handled by `#[serde(default)]`.
+/// Read one field, and if its shape is wrong (including `null`) put **that field only** as `None`. A missing field is handled by
+///   `#[serde(default)]`.
 fn lenient<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -936,8 +919,9 @@ where
 }
 
 /// Same as [`lenient`] but accepts only JSON **objects**.
-/// ★Do not remove the object check★ — struct deserialization made by serde also accepts arrays and fills in field order. If an array
-///   comes at a window slot, those numbers are read as utilization · window length · reset in declaration order and become a plausible fake window.
+/// ★Do not remove the object check★ — serde struct deserialization also accepts arrays, filling in field order; an array at a window slot
+///   would read as utilization · window length · reset and become a
+///   plausible fake window.
 fn lenient_object<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -951,8 +935,9 @@ where
     })
 }
 
-/// Read only JSON **objects** and anything else is an error. The ground of the object check is the same as [`lenient_object`] — an array is read in field order
-/// and becomes a plausible fake value (params that are `[{…스냅숏…}]` · a snapshot that is `["codex", {…창…}, {…창…}]`).
+/// Read only JSON **objects**; anything else is an error. Same ground as [`lenient_object`] — an array is read in field order and becomes
+///   a plausible fake value (params `[{…snapshot…}]` · a snapshot
+/// `["codex", {…window…}, {…window…}]`).
 fn object_only<'de, D, T>(de: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -960,7 +945,7 @@ where
 {
     let value = Value::deserialize(de)?;
     if !value.is_object() {
-        return Err(serde::de::Error::custom("JSON 객체가 아니다"));
+        return Err(serde::de::Error::custom("not a JSON object"));
     }
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
@@ -971,7 +956,7 @@ mod tests {
 
     fn field<'a>(v: &'a Value, key: &str) -> &'a Value {
         v.get(key)
-            .unwrap_or_else(|| panic!("필드 `{key}` 가 없다: {v}"))
+            .unwrap_or_else(|| panic!("field `{key}` is missing: {v}"))
     }
 
     // ── Envelope discrimination ────────────────────────────────────────────────────────────
@@ -979,50 +964,50 @@ mod tests {
     #[test]
     fn notification_has_method_and_no_id() {
         let line = r#"{"method":"item/agentMessage/delta","params":{"delta":"hi"}}"#;
-        match classify(line).expect("알림으로 읽혀야 한다") {
+        match classify(line).expect("must read as a notification") {
             Inbound::Notification { method, params } => {
                 assert_eq!(method, "item/agentMessage/delta");
                 assert_eq!(field(&params.unwrap(), "delta"), "hi");
             }
-            other => panic!("알림이 아니다: {other:?}"),
+            other => panic!("not a notification: {other:?}"),
         }
     }
 
     #[test]
     fn method_plus_id_is_a_request_never_a_notification() {
         let line = r#"{"id":7,"method":"item/fileChange/requestApproval","params":{}}"#;
-        match classify(line).expect("요청으로 읽혀야 한다") {
+        match classify(line).expect("must read as a request") {
             Inbound::Request { id, method, .. } => {
                 assert_eq!(id, RequestId::Num(7));
                 assert_eq!(method, "item/fileChange/requestApproval");
             }
-            other => panic!("요청이 아니다: {other:?}"),
+            other => panic!("not a request: {other:?}"),
         }
     }
 
     #[test]
     fn id_plus_result_is_a_response_never_a_request() {
         let line = r#"{"id":"abc","result":{"thread":{"id":"t-1"}}}"#;
-        match classify(line).expect("응답으로 읽혀야 한다") {
+        match classify(line).expect("must read as a response") {
             Inbound::Response { id, result } => {
                 assert_eq!(id, RequestId::Str("abc".to_string()));
                 assert_eq!(field(field(&result, "thread"), "id"), "t-1");
             }
-            other => panic!("응답이 아니다: {other:?}"),
+            other => panic!("not a response: {other:?}"),
         }
     }
 
     #[test]
     fn id_plus_error_is_an_error_envelope() {
         let line = r#"{"id":3,"error":{"code":-1,"message":"nope"}}"#;
-        match classify(line).expect("오류로 읽혀야 한다") {
+        match classify(line).expect("must read as an error") {
             Inbound::Error { id, error } => {
                 assert_eq!(id, RequestId::Num(3));
                 assert_eq!(error.code, -1);
                 assert_eq!(error.message, "nope");
                 assert!(error.data.is_none());
             }
-            other => panic!("오류 봉투가 아니다: {other:?}"),
+            other => panic!("not an error envelope: {other:?}"),
         }
     }
 
@@ -1031,7 +1016,7 @@ mod tests {
         let line = r#"{"id":"req-42","method":"x","params":null}"#;
         match classify(line).unwrap() {
             Inbound::Request { id, .. } => assert_eq!(id, RequestId::Str("req-42".to_string())),
-            other => panic!("요청이 아니다: {other:?}"),
+            other => panic!("not a request: {other:?}"),
         }
     }
 
@@ -1057,7 +1042,6 @@ mod tests {
         ));
     }
 
-    /// A line claiming success and failure at once — picking one of the two to read can read a failure as a success.
     #[test]
     fn result_and_error_together_is_an_error_not_a_response() {
         assert!(matches!(
@@ -1095,20 +1079,19 @@ mod tests {
         ));
     }
 
-    /// Measured 0.154.0 — notification envelopes always come with `emittedAtMs`. If discrimination wobbles because of the extra sibling field,
-    /// normal notifications would be dropped whole.
+    /// Measured 0.154.0 — notification envelopes always carry `emittedAtMs`; wobbling discrimination on the extra sibling field would drop
+    ///   normal notifications whole.
     #[test]
     fn an_extra_sibling_key_does_not_break_classification() {
         let line =
             r#"{"method":"item/started","params":{"turnId":"u"},"emittedAtMs":1764000000000}"#;
-        match classify(line).expect("알림으로 읽혀야 한다") {
+        match classify(line).expect("must read as a notification") {
             Inbound::Notification { method, .. } => assert_eq!(method, "item/started"),
-            other => panic!("알림이 아니다: {other:?}"),
+            other => panic!("not a notification: {other:?}"),
         }
     }
 
-    /// Measured 0.154.0 — responses carry several fields not in the schema. If unknown fields are rejected, a normal response
-    /// becomes a decode failure.
+    /// Measured 0.154.0 — responses carry several fields not in the schema; rejecting unknown fields would fail a normal response.
     #[test]
     fn unknown_fields_on_a_response_are_tolerated() {
         let v = serde_json::json!({
@@ -1124,7 +1107,7 @@ mod tests {
     fn missing_params_is_not_an_error() {
         match classify(r#"{"method":"thread/closed"}"#).unwrap() {
             Inbound::Notification { params, .. } => assert!(params.is_none()),
-            other => panic!("알림이 아니다: {other:?}"),
+            other => panic!("not a notification: {other:?}"),
         }
     }
 
@@ -1147,7 +1130,7 @@ mod tests {
                 assert_eq!(field(&p, "threadId"), "t-1");
                 assert_eq!(field(&p, "turnId"), "u-9");
             }
-            other => panic!("요청이 아니다: {other:?}"),
+            other => panic!("not a request: {other:?}"),
         }
     }
 
@@ -1189,12 +1172,12 @@ mod tests {
                 assert_eq!(error.code, -32601);
                 assert_eq!(error.message, "unsupported");
             }
-            other => panic!("오류 봉투가 아니다: {other:?}"),
+            other => panic!("not an error envelope: {other:?}"),
         }
     }
 
-    /// Measured 0.154.0 — a request with `id: null` is **reclassified as a notification by the server and quietly dropped** (no error and no
-    /// stderr). So our id must never become `null` by any path.
+    /// Measured 0.154.0 — a request with `id: null` is **reclassified as a notification and silently dropped** (no error, no stderr). Our
+    ///   id must never become `null` by any path.
     #[test]
     fn ids_never_serialize_as_null() {
         for id in [RequestId::Str(String::new()), RequestId::Num(0)] {
@@ -1294,8 +1277,8 @@ mod tests {
         assert_eq!(field(&v, "cwd"), "C:/w");
         assert_eq!(field(&v, "approvalPolicy"), "never");
         assert_eq!(field(&v, "sandbox"), "workspace-write");
-        // ★Going out as camelCase is the contract★ — if it leaks out as snake_case, codex reads it as an unknown field and quietly
-        //   drops it, and the one symptom is 「프라이밍이 안 먹는다」 (priming has no effect) (there is no error).
+        // ★Going out as camelCase is the contract★ — snake_case leaks as an unknown field codex silently drops (symptom: 「priming has no
+        //   effect」, no error).
         assert_eq!(field(&v, "developerInstructions"), "be brief");
     }
 
@@ -1371,7 +1354,7 @@ mod tests {
         assert_eq!(field(item, "text"), "hello");
         assert!(
             v.get("clientUserMessageId").is_none(),
-            "식별자 없는 봉투에 칸이 생겼다: {v}"
+            "a field appeared on an envelope without an identifier: {v}"
         );
         assert_eq!(
             v.as_object().unwrap().len(),
@@ -1434,7 +1417,11 @@ mod tests {
         let item = &field(&v, "input").as_array().unwrap()[0];
         assert_eq!(field(item, "type"), "text");
         assert_eq!(field(item, "text"), "more");
-        assert_eq!(v.as_object().unwrap().len(), 4, "모르는 칸이 실렸다: {v}");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            4,
+            "an unknown field was carried: {v}"
+        );
     }
 
     #[test]
@@ -1531,20 +1518,20 @@ mod tests {
             "error": {
                 "message": "blocked",
                 "misalignment": {
-                    "detailedExplanation": "이 요청은 정책을 벗어난다",
+                    "detailedExplanation": "this request is outside the policy",
                     "errorType": "somethingBrandNew",
-                    "steer": {"message": "다르게 물어보세요"}
+                    "steer": {"message": "ask it differently"}
                 }
             }
         }))
         .unwrap();
-        let m = n.error.misalignment.expect("misalignment 가 읽혀야 한다");
+        let m = n.error.misalignment.expect("misalignment must be read");
         assert_eq!(
             m.detailed_explanation.as_deref(),
-            Some("이 요청은 정책을 벗어난다")
+            Some("this request is outside the policy")
         );
         assert_eq!(m.error_type.as_deref(), Some("somethingBrandNew"));
-        assert_eq!(m.steer.unwrap().message, "다르게 물어보세요");
+        assert_eq!(m.steer.unwrap().message, "ask it differently");
     }
 
     #[test]

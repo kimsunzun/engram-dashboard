@@ -1,5 +1,4 @@
-//! Unit tests of [`super`]. `info` · `FakeLiveness` are also used by the stop path's tests ([`crate::daemon_client::link::stop`] ·
-//! [`crate::daemon_client::shutdown`]).
+//! Unit tests of [`super`]. `info` · `FakeLiveness` are also used by the stop path's tests ([`crate::daemon_client::link::stop`] · [`crate::daemon_client::shutdown`]).
 
 use super::*;
 use std::cell::{Cell, RefCell};
@@ -9,7 +8,6 @@ use std::time::Instant;
 
 // ── data-folder writability probe (ADR-0134 decision 4) ─────────────────────────────────
 
-/// A unique folder dedicated to the probe (so parallel test runs do not step on each other).
 fn fresh_probe_dir(tag: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -22,7 +20,6 @@ fn fresh_probe_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// Is there any probe leftover in the folder (the name differs per call so count by prefix).
 fn probe_leftovers(dir: &Path) -> usize {
     use engram_dashboard_base::writable::WRITE_PROBE_PREFIX;
     std::fs::read_dir(dir)
@@ -38,21 +35,15 @@ fn probe_leftovers(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// ★Aims at a real race★: the pre-check **undoes the folder it created**, so when two calls overlap,
-/// right after B sees the folder A created as "there", A deletes it and B's probe trips with NotFound. That is
-/// timing, not permission, so a perfectly good folder must not be decided "not writable".
-/// The tray "turn daemon on" and the boot ensure are not serialized (commands/discovery.rs).
-///
-/// ★Do not create the target folder in advance★: if it is created, no one undoes it and the interleaving above never happens at all
-/// (then this test passes yet proves nothing).
+/// A real race: the pre-check undoes the folder it created, so when two calls overlap, right after B sees A's folder as "there" A deletes it and B's probe trips with NotFound — timing, not permission, so a perfectly good folder must not be decided "not writable". The tray "turn daemon on" and the boot ensure are not serialized (commands/discovery.rs).
+/// Do not create the target folder in advance: then no one undoes it and the interleaving never happens (the test would pass proving nothing).
 #[test]
 fn concurrent_checks_racing_on_folder_creation_do_not_produce_a_false_failure() {
     let parent = fresh_probe_dir("concurrent");
-    std::fs::create_dir_all(&parent).expect("상위 폴더 생성");
+    std::fs::create_dir_all(&parent).expect("create parent folder");
     let target = parent.join("data");
 
-    // Mix the shell pre-check (create and undo) with a daemon start (create and keep — calls the daemon's version through the dev dependency) — two actors that really
-    // overlap. The error types differ so match them by wording.
+    // Mix the shell pre-check (create and undo) with a daemon start (create and keep — calls the daemon's version through the dev dependency) — two actors that really overlap. The error types differ, so match by wording.
     let results: Vec<Result<(), String>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..12)
             .map(|i| {
@@ -74,21 +65,19 @@ fn concurrent_checks_racing_on_folder_creation_do_not_produce_a_false_failure() 
     let _ = std::fs::remove_dir_all(&parent);
     assert!(
         results.iter().all(|r| r.is_ok()),
-        "겹친 점검이 서로를 실패시키면 안 됨: {results:?}"
+        "overlapping checks must not fail each other: {results:?}"
     );
-    assert_eq!(left, 0, "겹쳐도 프로브 잔여물은 없어야");
+    assert_eq!(left, 0, "no probe leftovers even when overlapping");
 }
 
-/// ★The pre-check leaves no folder — including intermediate folders★: `create_dir_all` can create in a chain, so
-/// deleting only the leaf leaves the rest permanently. So it looks with a deep path that **makes it create the ancestors that did not exist**
-/// (if the folder right above is created in advance this damage mode is not reproduced).
+/// The pre-check leaves no folder, intermediates included: `create_dir_all` can create in a chain, so deleting only the leaf leaves the rest permanently. A deep path that makes it create ancestors that did not exist is used (a pre-created parent would not reproduce this damage).
 #[test]
 fn check_writable_leaves_no_folder_behind_including_intermediates() {
     let root = fresh_probe_dir("nocreate");
-    std::fs::create_dir_all(&root).expect("루트 폴더 생성");
+    std::fs::create_dir_all(&root).expect("create root folder");
     let target = root.join("a").join("b").join("data");
 
-    check_data_dir_writable(&target).expect("만들 수 있으면 통과");
+    check_data_dir_writable(&target).expect("passes when it can be created");
 
     let leaf = target.exists();
     let mid_b = root.join("a").join("b").exists();
@@ -96,22 +85,21 @@ fn check_writable_leaves_no_folder_behind_including_intermediates() {
     let left = probe_leftovers(&root);
     let _ = std::fs::remove_dir_all(&root);
 
-    assert!(!leaf, "대상 폴더를 남기면 안 됨");
+    assert!(!leaf, "must not leave the target folder behind");
     assert!(
         !mid_b && !mid_a,
-        "중간 폴더도 되돌려야(a={mid_a}, a/b={mid_b})"
+        "intermediate folders must be rolled back too (a={mid_a}, a/b={mid_b})"
     );
-    assert_eq!(left, 0, "프로브도 남기면 안 됨");
-    assert!(root.parent().is_some(), "루트 자체는 손대지 않는다");
+    assert_eq!(left, 0, "must not leave the probe behind either");
+    assert!(root.parent().is_some(), "the root itself is not touched");
 }
 
-/// ★It undoes even when it fails midway★: escaping through an early return leaves the layers already created as they are.
-/// To make only the last layer fail, use a name Windows rejects (`?` — `ERROR_INVALID_NAME`).
+/// It undoes even when it fails midway — an early return would leave already-created layers. To fail only the last layer use a name Windows rejects (`?` — `ERROR_INVALID_NAME`).
 #[cfg(windows)]
 #[test]
 fn check_writable_unwinds_what_it_created_even_when_creation_fails_midway() {
     let root = fresh_probe_dir("partial-unwind");
-    std::fs::create_dir_all(&root).expect("루트 폴더 생성");
+    std::fs::create_dir_all(&root).expect("create root folder");
     let mid = root.join("a");
     let target = mid.join("b?");
 
@@ -121,57 +109,60 @@ fn check_writable_unwinds_what_it_created_even_when_creation_fails_midway() {
     let _ = std::fs::remove_dir_all(&root);
     assert!(
         matches!(err, DiscoveryError::DataDirUnwritable { .. }),
-        "만들 수 없는 이름은 실패여야: {err:?}"
+        "a name that cannot be created must fail: {err:?}"
     );
     assert!(
         !mid_left,
-        "실패 경로에서도 우리가 만든 중간 폴더를 되돌려야"
+        "the failure path must also roll back the intermediate folders we created"
     );
 }
 
-/// An already existing **intermediate** folder is not undone — the observable half of the contract that records only the layers we won
-/// (the side that does not delete a layer someone else created first is a race, so `concurrent_checks_...` sweeps it probabilistically).
+/// An already existing intermediate folder is not undone — the observable half of the contract that records only layers we won (not deleting one someone else created first is a race, swept probabilistically by `concurrent_checks_...`).
 #[test]
 fn check_writable_keeps_intermediate_folders_it_did_not_create() {
     let root = fresh_probe_dir("keep-mid");
     let mid = root.join("a");
-    std::fs::create_dir_all(&mid).expect("중간 폴더까지 미리 생성");
+    std::fs::create_dir_all(&mid).expect("create up to the intermediate folder in advance");
     let target = mid.join("b").join("data");
 
-    check_data_dir_writable(&target).expect("만들 수 있으면 통과");
+    check_data_dir_writable(&target).expect("passes when it can be created");
 
     let mid_left = mid.exists();
     let ours_left = mid.join("b").exists();
     let _ = std::fs::remove_dir_all(&root);
-    assert!(mid_left, "이미 있던 중간 폴더는 남아야");
-    assert!(!ours_left, "우리가 만든 겹은 되돌려야");
+    assert!(
+        mid_left,
+        "an intermediate folder that already existed must remain"
+    );
+    assert!(!ours_left, "the layer we created must be rolled back");
 }
 
-/// An already existing folder is not undone — the opposite side of the contract that only what we created is undone.
 #[test]
 fn check_writable_does_not_remove_pre_existing_folders() {
     let root = fresh_probe_dir("preexisting");
     let target = root.join("data");
-    std::fs::create_dir_all(&target).expect("대상까지 미리 생성");
-    check_data_dir_writable(&target).expect("통과");
+    std::fs::create_dir_all(&target).expect("create up to the target in advance");
+    check_data_dir_writable(&target).expect("passes");
     let survived = target.exists();
     let _ = std::fs::remove_dir_all(&root);
-    assert!(survived, "이미 있던 폴더를 검사가 지우면 안 됨");
+    assert!(
+        survived,
+        "the check must not delete a folder that already existed"
+    );
 }
 
-/// ★R10★: if the target path is a **file**, `create_dir_all` is certain to fail — passing it by looking at the parent
-/// makes the user see a timeout instead of a message.
+/// R10: if the target path is a file, `create_dir_all` surely fails — passing by looking at the parent would show the user a timeout instead of a message.
 #[test]
 fn check_writable_rejects_a_path_that_exists_as_a_file() {
     let parent = fresh_probe_dir("asfile");
-    std::fs::create_dir_all(&parent).expect("상위 폴더 생성");
+    std::fs::create_dir_all(&parent).expect("create parent folder");
     let target = parent.join("data");
-    std::fs::write(&target, b"not a folder").expect("같은 이름 파일 생성");
+    std::fs::write(&target, b"not a folder").expect("create a file with the same name");
     let err = check_data_dir_writable(&target).unwrap_err();
     let _ = std::fs::remove_dir_all(&parent);
     assert!(
         matches!(err, DiscoveryError::DataDirUnwritable { .. }),
-        "같은 이름의 파일이 있으면 실패여야: {err:?}"
+        "must fail when a file with the same name exists: {err:?}"
     );
 }
 
@@ -179,7 +170,7 @@ fn check_writable_rejects_a_path_that_exists_as_a_file() {
 fn check_writable_fails_when_the_folder_cannot_be_created() {
     let blocker = fresh_probe_dir("blocked");
     std::fs::create_dir_all(blocker.parent().unwrap()).ok();
-    std::fs::write(&blocker, b"x").expect("blocker 파일 생성");
+    std::fs::write(&blocker, b"x").expect("create blocker file");
     let err = check_data_dir_writable(&blocker.join("a").join("b")).unwrap_err();
     let _ = std::fs::remove_file(&blocker);
     assert!(
@@ -188,42 +179,43 @@ fn check_writable_fails_when_the_folder_cannot_be_created() {
     );
 }
 
-/// ★Partial record = not ready yet (ADR-0135)★: the daemon writes daemon.json **in place** (atomic replacement
-/// is impossible — the daemon holds that file), so the client can actually see half-written content. Then it must go to `Parse` rather than a hard
-/// failure for polling to continue (the (c) branch of `ensure_with` ignores only `Parse`).
+/// Partial record = not ready yet (ADR-0135): the daemon writes daemon.json in place (atomic replacement is impossible — it holds the file), so the client can see half-written content; it must go to `Parse` rather than a hard failure so polling continues (the (c) branch of `ensure_with` ignores only `Parse`).
 #[test]
 fn real_reader_treats_a_partially_written_file_as_not_ready() {
     let dir = fresh_probe_dir("partial-json");
-    std::fs::create_dir_all(&dir).expect("폴더 생성");
+    std::fs::create_dir_all(&dir).expect("create folder");
     let path = dir.join(DAEMON_FILE);
-    let full = serde_json::to_vec_pretty(&info(1234, PROTOCOL_VERSION)).expect("직렬화");
+    let full = serde_json::to_vec_pretty(&info(1234, PROTOCOL_VERSION)).expect("serialize");
 
-    std::fs::write(&path, &full[..full.len() / 2]).expect("절반만 기록");
+    std::fs::write(&path, &full[..full.len() / 2]).expect("write only half");
     let partial = FileReader { path: path.clone() }.read();
     // The window right after the length was cut to 0.
-    std::fs::write(&path, b"").expect("빈 파일");
+    std::fs::write(&path, b"").expect("empty file");
     let empty = FileReader { path: path.clone() }.read();
     // After it is fully written it reads as is — this also pins that the two above are not "never readable".
-    std::fs::write(&path, &full).expect("전체 기록");
+    std::fs::write(&path, &full).expect("write all");
     let whole = FileReader { path }.read();
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
         matches!(partial, Err(DiscoveryError::Parse(_))),
-        "부분 파일은 Parse(= 아직 준비 안 됨)여야: {partial:?}"
+        "a partial file must be Parse (= not ready yet): {partial:?}"
     );
     assert!(
         matches!(empty, Err(DiscoveryError::Parse(_))),
-        "빈 파일도 Parse 여야: {empty:?}"
+        "an empty file must be Parse too: {empty:?}"
     );
-    assert!(matches!(whole, Ok(Some(_))), "완성되면 읽혀야: {whole:?}");
+    assert!(
+        matches!(whole, Ok(Some(_))),
+        "must be readable once complete: {whole:?}"
+    );
 }
 
 #[test]
 fn public_entry_points_read_the_record_from_the_layout_daemon_file() {
     let dir = fresh_probe_dir("layout-entry");
     let layout = DataLayout::new(&dir);
-    std::fs::create_dir_all(layout.daemon_file().parent().unwrap()).expect("폴더");
+    std::fs::create_dir_all(layout.daemon_file().parent().unwrap()).expect("folder");
     // Own process = a live pid. Creation time 0 = decided by PID alone.
     let mut me = info(std::process::id(), PROTOCOL_VERSION);
     me.start_time = 0;
@@ -296,8 +288,7 @@ impl Spawner for CountingSpawner {
     }
 }
 
-/// ★Does not embed the base `ManualClock`★ — to embed it we would have to newly turn on the base test feature in this crate's dev dependencies
-/// (TRD S21 boundary 1-1 §3-3).
+/// Does not embed the base `ManualClock` — that would newly require the base test feature in this crate's dev dependencies (TRD S21 boundary 1-1 §3-3).
 struct FakeClock {
     now: Mutex<Instant>,
     slept: AtomicUsize,
@@ -323,7 +314,6 @@ impl Clock for FakeClock {
     }
 }
 
-/// Most ensure_with tests do not deal with the spawn gate — this one always lets the spawn through.
 fn noop_pre_spawn() -> impl FnMut() -> Result<(), DiscoveryError> {
     || Ok(())
 }
@@ -344,13 +334,12 @@ fn live_existing_file_returns_without_spawn() {
         &mut noop_pre_spawn(),
         Duration::from_secs(5),
     )
-    .expect("live 파일이면 성공");
+    .expect("succeeds when the file is live");
     assert_eq!(got.pid, 100);
-    assert_eq!(spawner.count.get(), 0, "live 면 spawn 금지");
+    assert_eq!(spawner.count.get(), 0, "no spawn when live");
 }
 
-/// ★attach does not pass the gate (ADR-0134)★: even if the folder is unusable it must still attach to an already running daemon —
-/// attaching needs only reading. If the gate stood in front it would make a healthy daemon unusable.
+/// attach does not pass the gate (ADR-0134): even with an unusable folder it must still attach to an already running daemon — attaching needs only reading, and a gate in front would make a healthy daemon unusable.
 #[test]
 fn attach_to_live_daemon_skips_the_pre_spawn_gate() {
     let reader = FakeReader::new(vec![Ok(Some(info(100, PROTOCOL_VERSION)))]);
@@ -362,7 +351,7 @@ fn attach_to_live_daemon_skips_the_pre_spawn_gate() {
         gate_calls.set(gate_calls.get() + 1);
         Err(DiscoveryError::DataDirUnwritable {
             path: "X".into(),
-            reason: "테스트".into(),
+            reason: "test".into(),
         })
     };
 
@@ -375,12 +364,15 @@ fn attach_to_live_daemon_skips_the_pre_spawn_gate() {
         &mut pre_spawn,
         Duration::from_secs(5),
     )
-    .expect("live 데몬엔 관문과 무관하게 붙어야");
+    .expect("must attach to a live daemon regardless of the gate");
     assert_eq!(got.pid, 100);
-    assert_eq!(gate_calls.get(), 0, "attach 경로는 관문을 부르지 않는다");
+    assert_eq!(
+        gate_calls.get(),
+        0,
+        "the attach path does not call the gate"
+    );
 }
 
-/// The opposite direction: on the path going to spawn the gate stands, and if it fails there is no spawn at all.
 #[test]
 fn pre_spawn_gate_failure_blocks_spawn_and_propagates() {
     let reader = FakeReader::new(vec![Ok(None)]);
@@ -390,7 +382,7 @@ fn pre_spawn_gate_failure_blocks_spawn_and_propagates() {
     let mut pre_spawn = || {
         Err(DiscoveryError::DataDirUnwritable {
             path: "X".into(),
-            reason: "테스트".into(),
+            reason: "test".into(),
         })
     };
 
@@ -408,23 +400,21 @@ fn pre_spawn_gate_failure_blocks_spawn_and_propagates() {
         matches!(err, DiscoveryError::DataDirUnwritable { .. }),
         "{err:?}"
     );
-    assert_eq!(spawner.count.get(), 0, "관문이 막으면 spawn 하지 않는다");
+    assert_eq!(spawner.count.get(), 0, "no spawn when the gate blocks");
 }
 
-/// ★R3 regression guard★: when the gate blocks, someone else's portfile must survive. The old implementation deleted the file right after the stale decision
-/// and ran the gate afterward, so when the gate blocked only an irreversible deletion remained.
-/// (On a network share that file may belong to **a live daemon on another computer**.)
+/// R3 regression guard: when the gate blocks, someone else's portfile must survive. The old implementation deleted the file right after the stale decision and ran the gate afterward, so a blocking gate left only an irreversible deletion (on a network share the file may belong to a live daemon on another computer).
 #[test]
 fn gate_failure_leaves_an_existing_portfile_intact() {
     let dir = fresh_probe_dir("portfile-survives");
-    std::fs::create_dir_all(&dir).expect("폴더 생성");
+    std::fs::create_dir_all(&dir).expect("create folder");
     let path = dir.join(DAEMON_FILE);
     let existing = info(4321, PROTOCOL_VERSION);
     std::fs::write(
         &path,
-        serde_json::to_vec(&existing).expect("기존 portfile 직렬화"),
+        serde_json::to_vec(&existing).expect("serialize existing portfile"),
     )
-    .expect("기존 portfile 작성");
+    .expect("write existing portfile");
 
     let reader = FileReader { path: path.clone() };
     let spawner = CountingSpawner::ok();
@@ -434,7 +424,7 @@ fn gate_failure_leaves_an_existing_portfile_intact() {
     let mut pre_spawn = || {
         Err(DiscoveryError::DataDirUnwritable {
             path: dir.display().to_string(),
-            reason: "테스트".into(),
+            reason: "test".into(),
         })
     };
 
@@ -457,20 +447,22 @@ fn gate_failure_leaves_an_existing_portfile_intact() {
         matches!(err, DiscoveryError::DataDirUnwritable { .. }),
         "{err:?}"
     );
-    assert!(survived, "관문이 막아도 남의 portfile 을 지우면 안 된다");
+    assert!(
+        survived,
+        "even when the gate blocks, someone else's portfile must not be deleted"
+    );
     assert_eq!(
         same,
         Some(serde_json::to_vec(&existing).unwrap()),
-        "내용까지 그대로여야"
+        "the contents must stay unchanged too"
     );
     assert_eq!(spawner.count.get(), 0);
 }
 
-/// Even when decided dead the file is left alone — polling only has to see the new file, and the winning daemon overwrites it.
 #[test]
 fn a_dead_looking_portfile_is_never_deleted() {
     let dir = fresh_probe_dir("portfile-kept");
-    std::fs::create_dir_all(&dir).expect("폴더 생성");
+    std::fs::create_dir_all(&dir).expect("create folder");
     let path = dir.join(DAEMON_FILE);
     std::fs::write(
         &path,
@@ -495,8 +487,11 @@ fn a_dead_looking_portfile_is_never_deleted() {
 
     let survived = path.exists();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(survived, "dead 판정만으로 남의 portfile 을 지우지 않는다");
-    assert_eq!(spawner.count.get(), 1, "대신 spawn 은 한다");
+    assert!(
+        survived,
+        "a dead decision alone does not delete someone else's portfile"
+    );
+    assert_eq!(spawner.count.get(), 1, "it spawns instead");
 }
 
 #[test]
@@ -520,19 +515,19 @@ fn stale_file_triggers_cleanup_and_spawn_then_polls_new() {
         &mut noop_pre_spawn(),
         Duration::from_secs(5),
     )
-    .expect("새 데몬 발견 성공");
+    .expect("new daemon discovered");
     assert_eq!(got.pid, 200);
-    assert_eq!(spawner.count.get(), 1, "stale 면 spawn 1회");
+    assert_eq!(spawner.count.get(), 1, "one spawn when stale");
     assert!(
         reader.calls.get() >= 2,
-        "옛 파일을 지우지 않고 폴링으로 새 파일을 본다"
+        "sees the new file by polling without deleting the old file"
     );
 }
 
 #[test]
 fn missing_file_spawns_and_polls() {
     let reader = FakeReader::new(vec![
-        Ok(None),                              // (a) 없음
+        Ok(None),                              // (a) absent
         Ok(Some(info(300, PROTOCOL_VERSION))), // (c)
     ]);
     let spawner = CountingSpawner::ok();
@@ -702,7 +697,7 @@ fn spawn_failure_propagates() {
 #[test]
 fn polling_keeps_going_on_repeated_corrupt_then_timeout() {
     let reader = FakeReader::new(vec![
-        Ok(None),                                     // (a) 없음
+        Ok(None),                                     // (a) absent
         Err(DiscoveryError::Parse("partial".into())), // (c) being written
         Err(DiscoveryError::Parse("partial".into())),
         Err(DiscoveryError::Parse("partial".into())),
@@ -767,9 +762,7 @@ fn info_with_start(pid: u32, version: u32, start: u64) -> DaemonInfo {
     i
 }
 
-// Only the first is_dead call answers dead — the misjudgment scenario of seeing the same (pid,start) as dead in (a) and as
-// live at the timeout recheck holds only that way (the real thing = a network share where a remote daemon pid is
-// measured with a local OpenProcess).
+// Only the first is_dead call answers dead — the misjudgment scenario (seeing the same (pid,start) as dead in (a) and live at the timeout recheck) holds only that way (real: a network share where a remote daemon pid is measured with a local OpenProcess).
 struct FlipLiveness {
     calls: Cell<usize>,
 }
@@ -802,8 +795,11 @@ fn timeout_recovers_old_daemon_if_still_live() {
         &mut noop_pre_spawn(),
         Duration::from_millis(150),
     )
-    .expect("옛 데몬이 사실 live 면 복구");
-    assert_eq!(got.pid, 42, "dead 로 봤던 옛 데몬 정보를 복구");
+    .expect("recovers if the old daemon is actually live");
+    assert_eq!(
+        got.pid, 42,
+        "recovers the info of the old daemon seen as dead"
+    );
 }
 
 #[test]
@@ -834,7 +830,7 @@ fn timeout_reports_version_mismatch_if_old_daemon_is_live_but_mismatched() {
             DiscoveryError::VersionMismatch { daemon, expected }
                 if daemon == PROTOCOL_VERSION - 1 && expected == PROTOCOL_VERSION
         ),
-        "원인 없는 Timeout 대신 버전을 실어야: {err:?}"
+        "must carry the version instead of a cause-less Timeout: {err:?}"
     );
 }
 
@@ -887,7 +883,7 @@ fn status_version_mismatch_is_not_alive() {
     let reader = FakeReader::new(vec![Ok(Some(info(333, PROTOCOL_VERSION + 1)))]);
     let liveness = FakeLiveness { dead: vec![] };
     let s = status_with(&reader, &liveness);
-    assert!(!s.alive, "버전 불일치는 붙을 수 없으므로 alive=false");
+    assert!(!s.alive, "a version mismatch cannot attach, so alive=false");
     assert_eq!(s.pid, Some(333));
 }
 
@@ -907,14 +903,14 @@ fn status_missing_file_is_not_alive_no_pid() {
 fn read_live_returns_full_info_with_token() {
     let reader = FakeReader::new(vec![Ok(Some(info(666, PROTOCOL_VERSION)))]);
     let liveness = FakeLiveness { dead: vec![] };
-    let got = read_live_with(&reader, &liveness).expect("live 데몬이면 Some");
+    let got = read_live_with(&reader, &liveness).expect("Some when the daemon is live");
     assert_eq!(got.pid, 666);
     assert_eq!(got.host, "127.0.0.1");
     assert_eq!(got.port, 12345);
     assert_eq!(
         got.token.expose(),
         "t".repeat(64),
-        "재연결 attach 에 token 이 실려야 함"
+        "the reconnect attach must carry the token"
     );
 }
 
@@ -961,7 +957,7 @@ fn locate_daemon_exe_picks_first_existing() {
     let second = dir.join("second-daemon.exe");
     std::fs::write(&second, b"x").unwrap();
     let got = locate_in(&[first.clone(), second]).unwrap();
-    assert_eq!(got, first, "첫 존재 후보 우선");
+    assert_eq!(got, first, "the first existing candidate wins");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -977,21 +973,11 @@ fn ensure_daemon_missing_exe_is_exe_not_found() {
 }
 
 // ── real WMI spawn smoke (real process) — Windows only ─────────────────────────────────
-//
-// Run: `cargo test -p engram-dashboard --test lib_unit -- --ignored real_wmi --test-threads=1`. In this shell lib test suite
-//   only these two create processes (WMI launch · `taskkill`) — the default run skips them with `#[ignore]`.
-//   The two share the same `daemon.json` backup and the single instance — if they overlap, one's backup holds the other's daemon record.
-//   Both hold `DATA_DIR_ENV_LOCK` through their whole body so they already do not overlap, and `--test-threads=1` is a double
-//   safety for when that lock is removed (`--ignored real_wmi` runs only these two).
-//
-// ★If an existing daemon is alive our spawn is rejected by the single-instance lock and the check is meaningless, so
-//   skip (return) in that case.★
-//
-// Limit (no concealing): this smoke touches the production data_dir (`.engram-dev`) (minimized by backup/restore but
-//   not fully isolated), so it is for local manual verification rather than CI.
+// Run: `cargo test -p engram-dashboard --test lib_unit -- --ignored real_wmi --test-threads=1`. In this shell lib suite only these two create processes (WMI launch · `taskkill`); the default run skips them with `#[ignore]`. They share the same `daemon.json` backup and the single instance, so overlapping would put one's backup holding the other's daemon record — both hold `DATA_DIR_ENV_LOCK` through their whole body so they do not overlap, and `--test-threads=1` is a double safety if that lock is removed.
+// If an existing daemon is alive our spawn is rejected by the single-instance lock and the check is meaningless, so skip (return) then.
+// Limit: this smoke touches the production data_dir (`.engram-dev`) — minimized by backup/restore, not fully isolated — so it is for local manual verification, not CI.
 
-/// The daemon exe the test launches = the one in `target\<profile>`. The production [`locate_daemon_exe`] does not fit tests — the first candidate (next to the current
-/// exe) is `deps\` where the test exe lives, and the cwd candidate relies on which folder cargo runs the test in.
+/// The daemon exe the test launches = the one in `target\<profile>`. The production [`locate_daemon_exe`] does not fit tests: its first candidate (next to the current exe) is `deps\` where the test exe lives, and the cwd candidate depends on where cargo runs the test.
 // ADR-0282
 #[cfg(windows)]
 fn test_daemon_exe() -> PathBuf {
@@ -999,7 +985,7 @@ fn test_daemon_exe() -> PathBuf {
     let profile_dir = exe
         .parent()
         .and_then(Path::parent)
-        .expect("시험 exe 는 target\\<profile>\\deps 아래에 있다");
+        .expect("the test exe is under target\\<profile>\\deps");
     profile_dir.join(engram_dashboard_platform::env::exe_file_name(
         "engram-dashboard-daemon",
     ))
@@ -1007,7 +993,7 @@ fn test_daemon_exe() -> PathBuf {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "실제 WMI Win32_Process.Create — 데몬 exe 필요(수동 통합, Windows 전용)"]
+#[ignore = "real WMI Win32_Process.Create — needs the daemon exe (manual integration, Windows-only)"]
 fn real_wmi_spawn_smoke() {
     let _env = DATA_DIR_ENV_LOCK
         .lock()
@@ -1015,14 +1001,14 @@ fn real_wmi_spawn_smoke() {
     let exe = test_daemon_exe();
     let exe_abs = dunce::canonicalize(&exe).unwrap_or_else(|e| {
         panic!(
-            "daemon exe({}) — 먼저 `cargo build -p engram-dashboard-daemon` 필요: {e}",
+            "daemon exe({}) — run `cargo build -p engram-dashboard-daemon` first: {e}",
             exe.display()
         )
     });
 
     // The default path the WMI-spawned daemon actually uses (env not inherited).
     let data_dir = default_data_dir();
-    std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
+    std::fs::create_dir_all(&data_dir).expect("create data_dir");
     let daemon_path = DataLayout::new(&data_dir).daemon_file();
 
     let backup = std::fs::read(&daemon_path).ok();
@@ -1030,8 +1016,8 @@ fn real_wmi_spawn_smoke() {
         if let Ok(prev) = DaemonInfo::parse(bytes) {
             if !RealLiveness.is_dead(prev.pid, prev.start_time) {
                 eprintln!(
-                    "real_wmi_spawn_smoke: 기존 데몬(pid={})이 살아있어 단일-인스턴스로 spawn 이 \
-                     거부됨 — 검증 무의미하므로 skip",
+                    "real_wmi_spawn_smoke: an existing daemon (pid={}) is alive, so the spawn is refused by \
+                     single-instance — the check is meaningless, skipping",
                     prev.pid
                 );
                 return;
@@ -1043,7 +1029,7 @@ fn real_wmi_spawn_smoke() {
 
     WmiSpawner { console: false }
         .spawn(&exe_abs)
-        .expect("WMI Win32_Process.Create 성공(RV=0, windowless)");
+        .expect("WMI Win32_Process.Create succeeds (RV=0, windowless)");
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut spawned: Option<DaemonInfo> = None;
@@ -1076,22 +1062,19 @@ fn real_wmi_spawn_smoke() {
         }
     }
 
-    let info = result.expect("WMI spawn 한 데몬이 daemon.json 을 발행해야");
-    assert!(info.port != 0, "spawn 한 데몬은 유효 포트 발행");
+    let info = result.expect("the daemon spawned by WMI must publish daemon.json");
+    assert!(info.port != 0, "the spawned daemon publishes a valid port");
     assert_eq!(
         info.protocol_version, PROTOCOL_VERSION,
-        "spawn 한 데몬의 protocol_version 일치"
+        "protocol_version of the spawned daemon matches"
     );
 }
 
 // ── CreateFlags diagnostic matrix (measured) — pin down which flag causes RV=21 ─────────────
-//
-// Demonstrates the root cause of the ADR-0021 #1 bug (windowless spawn RV=21).
-//
-// After each spawn, retrieve the PID by polling daemon.json → kill at once (prevents daemons from accumulating).
+// Demonstrates the root cause of the ADR-0021 #1 bug (windowless spawn RV=21). After each spawn, poll daemon.json for the PID → kill at once (daemons must not accumulate).
 #[cfg(windows)]
 #[test]
-#[ignore = "실제 WMI Win32_Process.Create 플래그 매트릭스 — 데몬 exe 필요(수동 진단)"]
+#[ignore = "real WMI Win32_Process.Create flag matrix — needs the daemon exe (manual diagnosis)"]
 fn real_wmi_spawn_flag_matrix() {
     const CREATE_NEW_CONSOLE: i32 = 0x0000_0010;
     const DETACHED_PROCESS: i32 = 0x0000_0008;
@@ -1103,13 +1086,13 @@ fn real_wmi_spawn_flag_matrix() {
     let exe = test_daemon_exe();
     let exe_abs = dunce::canonicalize(&exe).unwrap_or_else(|e| {
         panic!(
-            "daemon exe({}) — 먼저 `cargo build -p engram-dashboard-daemon` 필요: {e}",
+            "daemon exe({}) — run `cargo build -p engram-dashboard-daemon` first: {e}",
             exe.display()
         )
     });
 
     let data_dir = default_data_dir();
-    std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
+    std::fs::create_dir_all(&data_dir).expect("create data_dir");
     let daemon_path = DataLayout::new(&data_dir).daemon_file();
 
     let backup = std::fs::read(&daemon_path).ok();
@@ -1117,7 +1100,7 @@ fn real_wmi_spawn_flag_matrix() {
         if let Ok(prev) = DaemonInfo::parse(bytes) {
             if !RealLiveness.is_dead(prev.pid, prev.start_time) {
                 eprintln!(
-                    "real_wmi_spawn_flag_matrix: 기존 데몬(pid={})이 살아있어 skip",
+                    "real_wmi_spawn_flag_matrix: an existing daemon (pid={}) is alive, skipping",
                     prev.pid
                 );
                 return;
@@ -1128,7 +1111,7 @@ fn real_wmi_spawn_flag_matrix() {
     let run_case = |label: &str, flags: Option<i32>| -> u32 {
         let _ = std::fs::remove_file(&daemon_path);
         let rv = engram_dashboard_platform::spawn::wmi_create_raw(&exe_abs, flags)
-            .expect("WMI create 호출 자체는 성공해야");
+            .expect("the WMI create call itself must succeed");
         eprintln!("[flag-matrix] {label}: ReturnValue={rv}");
         if rv == 0 {
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -1141,7 +1124,7 @@ fn real_wmi_spawn_flag_matrix() {
                                 .stdout(std::process::Stdio::null())
                                 .stderr(std::process::Stdio::null())
                                 .status();
-                            eprintln!("[flag-matrix] {label}: 데몬 pid={} kill", info.pid);
+                            eprintln!("[flag-matrix] {label}: killing daemon pid={}", info.pid);
                             break;
                         }
                     }
@@ -1152,7 +1135,7 @@ fn real_wmi_spawn_flag_matrix() {
         rv
     };
 
-    let rv_none = run_case("None(ProcessStartup 생략)", None);
+    let rv_none = run_case("None(ProcessStartup omitted)", None);
     let rv_new_console = run_case("CREATE_NEW_CONSOLE(0x10)", Some(CREATE_NEW_CONSOLE));
     let rv_detached = run_case("DETACHED_PROCESS(0x08)", Some(DETACHED_PROCESS));
     let rv_no_window = run_case("CREATE_NO_WINDOW(0x08000000)", Some(CREATE_NO_WINDOW));
@@ -1168,19 +1151,19 @@ fn real_wmi_spawn_flag_matrix() {
 
     // DETACHED is only observed (no assertion — for reference on alternative b).
     eprintln!(
-        "[flag-matrix] 요약: None={rv_none} NEW_CONSOLE={rv_new_console} \
+        "[flag-matrix] summary: None={rv_none} NEW_CONSOLE={rv_new_console} \
          DETACHED={rv_detached} NO_WINDOW={rv_no_window}"
     );
     assert_eq!(
         rv_none, 0,
-        "windowless 채택안(ProcessStartup 생략)은 RV=0 이어야"
+        "the adopted windowless option (ProcessStartup omitted) must be RV=0"
     );
     assert_eq!(
         rv_new_console, 0,
-        "console=true(CREATE_NEW_CONSOLE)는 RV=0 이어야"
+        "console=true (CREATE_NEW_CONSOLE) must be RV=0"
     );
     assert_ne!(
         rv_no_window, 0,
-        "기존 버그 플래그 CREATE_NO_WINDOW 는 거부(RV!=0)되어야 — 버그 재현"
+        "the old bug flag CREATE_NO_WINDOW must be refused (RV!=0) — bug reproduced"
     );
 }

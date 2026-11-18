@@ -695,7 +695,7 @@ pub fn set_log_level(level: &str) -> Result<(), String>;
 ```
 
 > **D-1 update:** Relative to the original (ENGRAM_LOG · default INFO · `LogConfig{mask_api_keys}` · returns a handle · verbose-log feature),
-> the code changed to RUST_LOG · default warn (= OFF, user requirement "릴리스 기본 OFF") · global OnceLock · no arguments.
+> the code changed to RUST_LOG · default warn (= OFF, user requirement 「릴리스 기본 OFF」 (release default OFF)) · global OnceLock · no arguments.
 > **`mask_api_keys` (API key masking) is not discarded — it is deferred (tracking T-1).** With the default OFF, PTY output does not currently flow into logs, so the risk is low. It must be reintroduced at the point where PTY content can be printed to logs via `set_log_level("debug")` (debug logging/headless) — a security item.
 
 **How to turn logging on/off:**

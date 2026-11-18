@@ -1,5 +1,5 @@
-//! wire 메시지 — 클→데몬 [`AgentCommand`], 데몬→클 [`AgentEvent`].
-//! 둘 다 externally-tagged JSON(serde 기본).
+//! wire messages — client→daemon [`AgentCommand`], daemon→client [`AgentEvent`].
+//! Both are externally-tagged JSON (serde default).
 
 use serde_json::value::RawValue;
 use ts_rs::TS;
@@ -12,34 +12,29 @@ use crate::ids::{AgentId, OwnerToken, ProfileId, RequestId};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
-// ★`Auth` variant 는 여기 없다(ADR-0129 0-4)★: 연결 후 첫 frame 전용 인증 프레임은 따로 된 타입
-//   `handshake::AuthFrame` 이다 — 토큰 인증은 "이 소켓을 살릴지" 판정이라, 그 판정을 하는 네트워크 행이
-//   에이전트 어휘(이 enum)를 타입으로 몰라도 그 프레임은 풀 수 있어야 한다(ADR-0129 결정 1). 프레임은
-//   `{"Auth":{"token":"…","protocol_version":N}}` 이고, 그 형태의 정본 테스트는 그 모듈의 golden JSON 이다.
-//   ★여기에 다시 넣지 말 것★: 두 정의가 공존하면 조용히 갈라진다. 프론트 바인딩(`bindings/AgentCommand.ts`)
-//   에도 그래서 `Auth` 가 없다(프론트 `wsTransport` 는 원래 타입 없이 객체 리터럴로 만든다).
+// ★There is no `Auth` variant here (ADR-0129 0-4)★: the first-frame auth frame is the separate type `handshake::AuthFrame` — token auth
+//   decides whether the socket lives, so the
+//   network layer must decode it without knowing this enum (ADR-0129 decision 1). Shape and canonical golden: that module. ★Do not put it
+//   back here★: two definitions silently
+//   diverge (hence `bindings/AgentCommand.ts` has no `Auth`).
 //
-// ★이름 충돌★ — agent `profile::AgentCommand` 는 뜻이 다르다(프로필이 띄울 프로그램).
-//   그쪽의 wire 미러는 이 enum 이 아니라 `AgentSpawnCommand` 다. crate 를 빼고
-//   "AgentCommand" 라 부르면 뜻이 안 정해진다.
-// ★★활성화 셋(`Spawn`·`SpawnByCwd`·`SpawnProfile`)의 **호출 계약** — 클라이언트가 지켜야 하는 것★★
-//   데몬은 이 셋을 그 연결의 도착순 줄에서 **떼어 별도 태스크로** 돌린다(활성화는 결말까지 기다리는
-//   갈래라, 줄에 두면 그동안 그 연결의 다른 명령이 전부 함께 늦는다 — 데몬 crate 의
-//   `connection_core::dispatch_order`). 그 대가가 이 계약이다:
-//   ① **활성화의 답(`Spawned`/`Error`)을 받기 전에 그 에이전트 id 앞으로 아무것도 보내지 말 것.**
-//      같은 소켓으로 `SpawnProfile(X)` 직후 `WriteStdin(X)` 을 보내면 뒤엣것이 먼저 돌아
-//      「agent not found」로 실패한다. 답에는 요청의 `request_id` 가 그대로 실려 오므로 상관은
-//      클라이언트가 세울 수 있다.
-//   ② **같은 id 의 활성화를 답 받기 전에 다시 보내지 말 것.** 두 요청이 데몬의 검사/등록 창에 함께
-//      들어간다. 그 창은 이 배치가 만든 것이 아니라 선재이고(데몬의 `SpawnReservation` 가드가 좁히지만
-//      닫지는 않는다), 이 배치가 바꾼 것은 **한 연결만으로도 그 창에 닿을 수 있게 됐다**는 점뿐이다.
-//   ★이 저장소의 프론트는 이미 이 계약대로 돈다★ — `src/api/protocolClient.ts` 가 `request_id` 상관표로
-//   활성화 Promise 를 잡고, 호출부가 그것을 `await` 한 뒤에 돌아온 `agent.id` 를 쓴다.
-//   ★순서로 되돌리지 않은 이유★: 「같은 id 앞으로 가는 명령을 그 id 의 활성화 뒤에 줄 세운다」는 갈래는
-//   그 대기가 곧 그 연결 전체의 정지가 되므로(활성화는 전형 2s·백스톱 15s), 이 배치가 없애려던 증상을
-//   조건부로 되살린다.
+// ★Name collision★ — agent `profile::AgentCommand` is the program a profile launches; its wire mirror is `AgentSpawnCommand`, not this enum.
+// ★★Call contract of the activation set (`Spawn`·`SpawnByCwd`·`SpawnProfile`) — what the client must keep★★
+//   The daemon **takes these three off** that connection's arrival-order lane and runs them **as separate tasks** (activation waits for
+//   its outcome, so keeping it in the lane
+//   would delay every other command of that connection — daemon `connection_core::dispatch_order`). The price:
+//   ① **Send nothing addressed to that agent id before receiving the activation's answer (`Spawned`/`Error`).** `WriteStdin(X)` right
+//   after `SpawnProfile(X)` on the same socket
+//      runs first and fails with "agent not found". The answer carries the request's `request_id`, so the client can correlate.
+//   ② **Do not send the activation of the same id again before the answer.** Both requests enter the daemon's check/register window
+//   together (it pre-existed;
+//      `SpawnReservation` narrows but does not close it — what changed is that a single connection alone can now reach it).
+//   ★The frontend already follows this★ — `src/api/protocolClient.ts` holds the activation Promise in a `request_id` correlation table and
+//   uses the returned `agent.id` after `await`.
+//   ★Do not revert to ordering★: queuing commands for the same id behind its activation turns that wait into a stall of the whole
+//   connection (activation typically 2s · backstop 15s).
 pub enum AgentCommand {
-    /// 프로필 id 로 활성화. ★답을 기다리는 계약 = 이 enum 머리의 「활성화 셋의 호출 계약」★.
+    /// Activate by profile id. ★Contract of waiting for the answer = 「the call contract of the activation set」 at the head of this enum★.
     Spawn {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -50,7 +45,7 @@ pub enum AgentCommand {
         agent_id: AgentId,
         request_id: RequestId,
     },
-    /// 진행 중 작업만 중단. 프로세스는 생존. 터미널 모드(PTY)는 거절한다 — 터미널이 키를 직접 받는다(ADR-0245).
+    /// Interrupts only the in-progress work. The process survives. Terminal mode (PTY) is refused — the terminal receives keys directly (ADR-0245).
     Interrupt {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -64,7 +59,7 @@ pub enum AgentCommand {
         data: Vec<u8>,
         request_id: RequestId,
     },
-    /// viewport_id 는 멀티뷰 중 어느 뷰가 요청했는지(ControlLease 판정용).
+    /// viewport_id = which view among the multi-views made the request (for the ControlLease decision).
     Resize {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -72,8 +67,8 @@ pub enum AgentCommand {
         rows: u16,
         viewport_id: Option<String>,
     },
-    /// epoch/after_seq 로 재연결 resume(설계 §1-3).
-    /// 둘 다 None = 처음부터(oldest 부터) 받겠다는 신규 구독.
+    /// Reconnect resume with epoch/after_seq (design §1-3).
+    /// Both None = a new subscription that wants to receive from the start (from the oldest).
     Subscribe {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -85,39 +80,39 @@ pub enum AgentCommand {
         #[ts(type = "string")]
         agent_id: AgentId,
     },
-    /// 입력 lease 획득 요청(다중 뷰어 입력 충돌 방지, Zellij 명시 lease 모델). lease 가 비었으면
-    /// 이 연결이 입력 권한을 잡는다. 이미 다른 연결이 보유하면 Error. §5: LLM 도 이 명령으로 권한을 쥔다.
+    /// Input lease acquire request (prevents input collisions between multiple viewers, Zellij explicit lease model). If the lease is empty,
+    /// this connection takes the input right. If another connection already holds it, Error. §5: the LLM also takes the right with this command.
     AcquireInput {
         #[ts(type = "string")]
         agent_id: AgentId,
         request_id: RequestId,
     },
-    /// 보유자만 해제할 수 있다(보유자 아니면 Error). 해제 후엔 누구나 다시 acquire 가능.
+    /// Only the holder can release it (Error if not the holder). After release anyone can acquire again.
     ReleaseInput {
         #[ts(type = "string")]
         agent_id: AgentId,
         request_id: RequestId,
     },
-    /// 전체 에이전트 목록 조회(연결 직후 데몬이 자동 push 도 하지만 명시 조회도 허용).
-    /// 응답은 request_id 동봉 [`AgentEvent::AgentList`](전용 reply).
+    /// Query the whole agent list (the daemon also auto-pushes right after connecting, but explicit queries are allowed too).
+    /// The response is [`AgentEvent::AgentList`] with request_id attached (dedicated reply).
     ListAgents { request_id: RequestId },
-    /// 데몬 종료(§5 LLM 제어). force=true 면 활성 에이전트 있어도 종료, kill_agents=true 면 함께 정리.
+    /// Daemon shutdown (§5 LLM control). force=true shuts down even with active agents, kill_agents=true cleans them up together.
     StopDaemon {
         force: bool,
         kill_agents: bool,
         request_id: RequestId,
     },
 
-    // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────────
-    /// cwd 와 백엔드만으로 ad-hoc spawn — 호출자가 미리 만들어 둔 프로필이 필요 없다. 프로필을 즉석
-    /// 생성(생성 시 auto_restore=false)해 Fresh spawn 하고, spawn 경로가 그 프로필을 registry 에
-    /// 등록·persist 한다.
+    // ── Profile CRUD + ad-hoc spawn (phase4 step 1) ───────────────────────────────────
+    /// ad-hoc spawn with only cwd and backend — no profile made in advance by the caller is needed. It creates a profile on the spot
+    /// (auto_restore=false on creation) and does a Fresh spawn, and the spawn path registers · persists that profile in the
+    /// registry.
     ///
-    /// `backend` 는 `#[serde(default)]` 라 **옛 클라이언트의 패킷도 역직렬화는 된다**(PROTOCOL_VERSION
-    /// 유지 — 봉투에 변형을 더한 게 아니라 기존 변형에 칸을 더했다). 그 대신 **핸들러가 부재를
-    /// 거절한다** — 조용한 기본 백엔드를 두지 않기로 한 결정의 실물이다(`AgentBackendKind` 참조).
+    /// `backend` is `#[serde(default)]`, so **packets from old clients still deserialize** (PROTOCOL_VERSION
+    /// kept — it added a field to an existing variant, not a variant to the envelope). Instead, **the handler refuses
+    /// its absence** — this is the actual form of the decision not to have a silent default backend (see `AgentBackendKind`).
     ///
-    /// ★답을 기다리는 계약 = 이 enum 머리의 「활성화 셋의 호출 계약」★.
+    /// ★Contract of waiting for the answer = 「the call contract of the activation set」 at the head of this enum★.
     SpawnByCwd {
         cwd: String,
         #[serde(default)]
@@ -132,25 +127,25 @@ pub enum AgentCommand {
         deliver_notices: bool,
     },
 
-    /// 응답은 request_id 동봉 [`AgentEvent::ProfileList`](전용 reply).
+    /// The response is [`AgentEvent::ProfileList`] with request_id attached (dedicated reply).
     ListProfiles { request_id: RequestId },
 
-    /// 프로필 생성(스폰하지 않음 — 등록·persist만). ※env 에 자격증명 금지(평문 persist).
+    /// Create a profile (does not spawn — register · persist only). ※No credentials in env (persisted in plain text).
     CreateProfile {
         name: String,
         cwd: String,
         extra_args: Vec<String>,
         env: Vec<(String, String)>,
         auto_restore: bool,
-        /// `#[serde(default)]` 라 이 필드 없는 옛 프론트/wire 는 Terminal 로 흡수(기존 동작 불변,
-        /// PROTOCOL_VERSION 유지 — sibling OutputCaps.structured 와 같은 additive·tolerant 접근).
-        /// ★두 백엔드가 다 읽는다★ — claude 는 PTY/headless NDJSON 을, codex 는 대화형 TUI/상주 JSON
-        /// 서버(`codex app-server`)를 가른다. codex 가 이 값을 읽게 된 것이
-        /// [`crate::PROTOCOL_VERSION`] v5 의 사유다 — 그 값을 버리던 데몬은 「코덱스 JSON」 라벨 뒤에서
-        /// 대화형 TUI 를 띄우면서 역직렬화는 성공시키므로, 그 어긋남을 잡는 것이 버전 게이트뿐이다.
+        /// `#[serde(default)]`, so an old frontend/wire without this field is absorbed as Terminal (existing behavior unchanged,
+        /// PROTOCOL_VERSION kept — the same additive·tolerant approach as sibling OutputCaps.structured).
+        /// ★Both backends read it★ — claude splits PTY/headless NDJSON, codex splits interactive TUI/resident JSON
+        /// server (`codex app-server`). codex coming to read this value is
+        /// the reason for [`crate::PROTOCOL_VERSION`] v5 — a daemon that discarded the value would launch an interactive TUI behind the 「Codex JSON」 label
+        /// while still deserializing successfully, so the version gate is the only thing that catches that mismatch.
         #[serde(default)]
         output_format: AgentOutputFormat,
-        /// 부재 = 오류(형제 `SpawnByCwd.backend` 와 같은 계약 — `AgentBackendKind` 참조).
+        /// Absent = error (the same contract as sibling `SpawnByCwd.backend` — see `AgentBackendKind`).
         #[serde(default)]
         backend: Option<AgentBackendKind>,
         request_id: RequestId,
@@ -162,9 +157,9 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// resume=true 면 기존 세션 이어받기(claude `--resume`).
+    /// resume=true resumes the existing session (claude `--resume`).
     ///
-    /// ★답을 기다리는 계약 = 이 enum 머리의 「활성화 셋의 호출 계약」★.
+    /// ★Contract of waiting for the answer = 「the call contract of the activation set」 at the head of this enum★.
     SpawnProfile {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -179,13 +174,13 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// 프로필 표시명 override 설정/해제(ADR-0061 리치화 — 트리 rename). `name=Some` → override 저장,
-    /// `None` → 해제(cwd basename 파생 복귀). ★정규화는 데몬 저장 게이트(`AgentManager::try_rename_agent`)
-    /// 책임★ — 양끝 공백 제거와 "공백만 남으면 override 없음" 판정을 이름 유일성 판정 **전에** 거기서
-    /// 끝낸다. 그래서 `" bob "` 이 그대로 와도 `bob` 요청으로 확정되고, 같은 요청 재제출도 게이트가 멱등
-    /// 처리한다(접미사 번호 미소모). 프론트가 미리 다듬어 보내도 되지만 그건 UX 편의지 계약이 아니다.
-    /// 없는 id 면 Error(SetProfileAutoRestore 와 동형). 성공 후 [`AgentEvent::ProfileListUpdated`]
-    /// broadcast(낙관 갱신 X — 모든 창 동기화).
+    /// Set/clear the profile display name override (ADR-0061 enrichment — tree rename). `name=Some` → store override,
+    /// `None` → clear (back to the cwd basename derivation). ★Normalization is the responsibility of the daemon's store gate (`AgentManager::try_rename_agent`)★
+    /// — trimming both ends and deciding "only whitespace left means no override" are finished there **before** the name-uniqueness
+    /// decision. So even if `" bob "` arrives as is, it is settled as a `bob` request, and the gate handles resubmission of the same request idempotently
+    /// (no suffix number consumed). The frontend may trim before sending, but that is UX convenience, not the contract.
+    /// Error for an unknown id (same shape as SetProfileAutoRestore). After success, [`AgentEvent::ProfileListUpdated`]
+    /// broadcast (no optimistic update — every window synced).
     RenameProfile {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -194,11 +189,11 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// 트리 부모 지정/해제(ADR-0072 계층 reparent). `parent_id=Some(pid)` → child 를 pid 의 자식으로
-    /// (1단 중첩), `None` → 루트 승격. 검증(self-parent·nonexistent parent·1단 상한·2단 금지)은 데몬이
-    /// `ProfileRegistry::try_reparent` 로 한 임계구역에서 수행 — 위반이면 Error, 성공이면 Ack +
-    /// [`AgentEvent::ProfileListUpdated`] broadcast(RenameProfile 와 동형 — 모든 창 동기화, 낙관 갱신 X).
-    /// §5로 LLM/사용자가 같은 command 로 트리를 구성한다(사람 드래그는 보조 입력).
+    /// Set/clear the tree parent (ADR-0072 hierarchy reparent). `parent_id=Some(pid)` → child becomes a child of pid
+    /// (one level of nesting), `None` → promoted to root. Validation (self-parent·nonexistent parent·one-level cap·no two levels) is done by the daemon
+    /// in one critical section with `ProfileRegistry::try_reparent` — Error on violation, Ack +
+    /// [`AgentEvent::ProfileListUpdated`] broadcast on success (same shape as RenameProfile — every window synced, no optimistic update).
+    /// Per §5, the LLM/user builds the tree with the same command (human dragging is an auxiliary input).
     ReparentProfile {
         #[ts(type = "string")]
         child_id: ProfileId,
@@ -207,56 +202,57 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// 응답은 [`AgentEvent::Snapshot`].
-    /// (Subscribe replay 와 별개의 1회성 조회.)
+    /// The response is [`AgentEvent::Snapshot`].
+    /// (A one-time query separate from Subscribe replay.)
     GetSnapshot {
         #[ts(type = "string")]
         agent_id: AgentId,
         request_id: RequestId,
     },
 
-    /// 봉투 포맷 전역 스위치(ADR-0096) — A→B 메시지 봉투를 colon/xml 로 전환한다. 데몬이 **전역 상태
-    /// 하나**를 들고, 이후 모든 `wrap_message` 조립이 그 값을 읽는다(ADR-0086 단일 wrap point
-    /// 불변 유지 — 상태는 입력일 뿐 조립은 여전히 한 곳). ★조종 표면 전용★: 이 커맨드는 src-tauri Tauri
-    /// command `set_envelope_format` 가 데몬으로 전달하는 경로로만 온다 — 워커 MCP 채널엔 노출하지 않는다
-    /// (관리당하는 에이전트가 팀-전역 포맷을 바꾸면 안 됨, ADR-0096 결정 3·ADR-0094 최소권한).
-    /// 지속성 없음(데몬 재시작 시 리셋 — 백로그).
+    /// Global envelope format switch (ADR-0096) — switches the A→B message envelope to colon/xml. The daemon holds **one global
+    /// state**, and every later `wrap_message` assembly reads that value (ADR-0086 single wrap point
+    /// invariant kept — the state is only an input, assembly is still in one place). ★Steering surface only★: this command arrives only via the path where the src-tauri Tauri
+    /// command `set_envelope_format` forwards it to the daemon — it is not exposed on the worker MCP channel
+    /// (a managed agent must not change the team-wide format, ADR-0096 decision 3 · ADR-0094 least privilege).
+    /// No persistence (reset on daemon restart — backlog).
     SetEnvelopeFormat {
         format: EnvelopeFormat,
         request_id: RequestId,
     },
 
-    // ── 명령 버스 등록 wire(ADR-0155/0156 · TRD §3-7) ───────────────────────────────
-    // 데몬 dispatch 가 이 셋을 주인 명부에 반영하고 [`AgentEvent::CommandList`] 로 답한다
-    //   (`connection_core.rs`). 등록 둘을 보내는 쪽은 셸이다 — 연결마다 `RegisterCommands` 전량
-    //   (`daemon_client/connection.rs`), 웹뷰 화면 명단이 바뀔 때 `UpdateCommands`(`commands/view_bus.rs`).
+    // ── Command bus registration wire (ADR-0155/0156 · TRD §3-7) ───────────────────────────────
+    // The daemon dispatch reflects these three into the owner registry and answers with [`AgentEvent::CommandList`]
+    //   (`connection_core.rs`). The senders are the shell: the full
+    //   `RegisterCommands` per connection (`daemon_client/connection.rs`), `UpdateCommands` when the webview screen list changes
+    //   (`commands/view_bus.rs`).
     //
-    // ★`request_id` 에 `#[serde(default)]` 를 달지 말 것★ — 이 crate 의 [`RequestId::default`] 는
-    //   **새 v4 를 찍는다**(`ids.rs`). 기본값을 허용하면 그 칸이 빠진 패킷이 거절 대신 **아무와도 짝이
-    //   안 맞는 새 상관 키**를 얻어 답장이 영영 안 붙는다(도구 crate 쪽 동명 타입은 정반대로 `Default`
-    //   자체가 없다 — 도구 crate 의 `envelope.rs` 가 그 이유를 적고 있다).
-    /// 주인이 **붙는 순간** 자기 선언 전량을 한 방에 얹는다(TRD §3-7 조항 1). 이름마다 왕복하지 않고,
-    /// 재연결마다 전량 재전송한다.
+    // ★Do not put `#[serde(default)]` on `request_id`★ — [`RequestId::default`] **mints a new v4** (`ids.rs`), so a packet missing the
+    //   field would get a **correlation key that pairs
+    //   with nothing** instead of refusal, and the reply would never attach (the tool crate's same-named type has no `Default` — see its
+    //   `envelope.rs`).
+    /// The owner puts its full set of declarations **at the moment it attaches**, in one shot (TRD §3-7 clause 1). No round trip per name;
+    /// the full set is resent on every reconnect.
     ///
-    /// ★`owner` 로 인수인계를 기대하지 말 것 — 이 칸은 **광고**다★: 데몬은 명부의 주인을 **그 패킷이 온
-    /// 연결**에서 파생하고 이 칸은 쓰지 않는다(신원은 봉투가 아니라 연결이라는 계약 — TRD §4-⑧).
-    /// 그래서 보내는 쪽이 고정된 `owner` 문자열을 만들어 두어도 그 값으로는 아무것도 이어받지 못한다.
-    /// 인수인계는 **이름 단위 last-wins** 로 일어난다 — 재연결한 새 연결이 같은 이름을 다시 얹으면 그
-    /// 이름의 주인이 새 연결로 넘어온다(TRD §3-7 조항 1·4).
+    /// ★Do not expect a handover through `owner` — this field is **an advertisement**★: the daemon derives the registry owner from **the connection the packet
+    /// came on** and does not use this field (the contract that identity is the connection, not the envelope — TRD §4-⑧).
+    /// So even if the sender prepares a fixed `owner` string, nothing is taken over through that value.
+    /// The handover happens **last-wins per name** — when the new reconnected connection puts the same name again,
+    /// that name's owner moves to the new connection (TRD §3-7 clauses 1·4).
     ///
-    /// ★`decls` 는 원문 JSON 칸이다(ADR-0272 결정 3)★ — 바이트는 명령 버스 도구 crate 의 등록 항목 목록
-    /// (`CommandDecl` 의 배열 — 모양은 아래 TS 칸)을 직렬화한 그대로이고, 이 crate 는 그 구조를 모른다. 목록
-    /// 통째가 칸 하나다 — 명부가 패킷을 통째로 받거나 반려하므로 항목마다 가를 일이 없다. 싸는 것은 셸 끝자락,
-    /// 푸는 것은 데몬 끝자락이다(에이전트 참조 칸 `agent_args` 를 명부에 얹는 것도 그 풀기다 — ADR-0308).
-    /// [`AgentCommand::Command`] 의 봉투 칸처럼 **모양이 틀린 목록도 패킷으로는 풀린다** — 그 갈래의 처리는
-    /// 끝자락 몫이다(ADR-0272 결정 6). 상관 키(`request_id`)는 칸 밖이라 목록이 깨져도 읽힌다.
-    /// ★TS 칸은 컴파일러가 안 본다★ — 도구 crate 의 항목 모양과 대조하는 지킴이는 칸을 싸는 셸 끝자락에 있다
-    /// (`daemon_client::protocol_state` 의 `command_decl_hand_written_ts_matches_rust_shape`).
+    /// ★`decls` is a raw JSON field (ADR-0272 decision 3)★ — the bytes are the command bus tool crate's registration item list
+    /// (an array of `CommandDecl` — shape in the TS field below) serialized as is, and this crate does not know that structure. The whole
+    /// list is one field — the registry accepts or bounces the packet as a whole, so there is nothing to split per item. Wrapping is at the shell edge,
+    /// unwrapping at the daemon edge (putting the agent-reference field `agent_args` into the registry is part of that unwrapping too — ADR-0308).
+    /// Like the envelope field of [`AgentCommand::Command`], **a list with the wrong shape still decodes as a packet** — handling that branch is
+    /// the edge's job (ADR-0272 decision 6). The correlation key (`request_id`) is outside the field, so it is read even if the list is broken.
+    /// ★The compiler does not check the TS field★ — the guard that compares it with the tool crate's item shape is at the shell edge that wraps the field
+    /// (`daemon_client::protocol_state`'s `command_decl_hand_written_ts_matches_rust_shape`).
     ///
-    /// 항목의 `help` 는 **불투명 문자열**이다 — 받는 쪽(데몬)이 파싱·검증하거나 그 내용으로 분기하면
-    /// 위반이다(TRD §3-7 하드 제약). 도구 crate 의 그 칸이 `String` 인 것 자체가 그 게이트다.
-    /// `catalog_version` 은 보낸 쪽 crate 의 세대 번호이고 **진단용**이다 — 받는 쪽이 자기 번호와
-    /// 비교해 거절하면 틀린다(TRD §4-①).
+    /// An item's `help` is **an opaque string** — it is a violation if the receiver (daemon) parses · validates it or branches on its content
+    /// (TRD §3-7 hard constraint). That field being `String` in the tool crate is itself that gate.
+    /// `catalog_version` is the sending crate's generation number and is **for diagnostics** — the receiver is wrong if it compares it with its own number
+    /// and refuses (TRD §4-①).
     RegisterCommands {
         #[ts(type = "string")]
         owner: OwnerToken,
@@ -268,13 +264,13 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// 붙어 있는 동안의 **차분** — 늦게 뜬 기능이 이름을 더하고 꺼진 기능이 이름을 내린다
-    /// (TRD §3-7 조항 3). 전량 재전송은 [`AgentCommand::RegisterCommands`] 뿐이다.
+    /// The **diff** while attached — a late-starting feature adds names and a feature turned off removes names
+    /// (TRD §3-7 clause 3). The full resend is only [`AgentCommand::RegisterCommands`].
     ///
-    /// `added` 는 [`AgentCommand::RegisterCommands`] 의 `decls` 와 같은 원문 칸이다(ADR-0272 결정 3).
-    /// `removed` 가 이름만 나르는 것은 의도다 — 내릴 때 모양은 필요 없다. 내린 이름은 명부에서 **자리째
-    /// 지워지고**(ADR-0150 결정 3) 그 뒤로 `UNKNOWN_COMMAND` 로 답한다 — 자취로 남기면 붙어 있는 주인이
-    /// 이름을 바꿔 가며 자기 몫 상한을 영구히 채울 수 있다.
+    /// `added` is the same raw field as `decls` of [`AgentCommand::RegisterCommands`] (ADR-0272 decision 3).
+    /// It is intentional that `removed` carries only names — no shape is needed when removing. A removed name is **erased along with its spot**
+    /// from the registry (ADR-0150 decision 3) and from then on answers with `UNKNOWN_COMMAND` — if it were left as a trace, an attached owner
+    /// could keep changing names and fill its own share cap permanently.
     UpdateCommands {
         #[ts(type = "string")]
         owner: OwnerToken,
@@ -286,27 +282,27 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// 명부 전량 조회. 응답은 request_id 동봉 [`AgentEvent::CommandList`](전용 reply).
+    /// Query the whole registry. The response is [`AgentEvent::CommandList`] with request_id attached (dedicated reply).
     ListCommands { request_id: RequestId },
 
-    /// 이 클라이언트가 내는 **명령 요청** — 답은 [`AgentEvent::CommandReply`] 로 온다(ADR-0155 결정 3).
+    /// A **command request** this client issues — the answer comes as [`AgentEvent::CommandReply`] (ADR-0155 decision 3).
     ///
-    /// ★[`AgentEvent::CommandRequest`] 의 거울상이고 봉투 칸이 **같다**★ — 같은 어휘가 두 방향으로
-    /// 흐르고 **어느 연결에 썼는가가 방향**이다(TRD §3-2). 그래서 방향 필드도, 방향마다 다른 봉투도 없다.
+    /// ★The mirror image of [`AgentEvent::CommandRequest`], and the envelope field is **the same**★ — the same vocabulary flows in two directions
+    /// and **which connection it was written to is the direction** (TRD §3-2). So there is no direction field and no per-direction envelope.
     ///
-    /// ★`envelope` 은 원문 JSON 칸이다(ADR-0272 결정 3)★ — 바이트는 명령 버스 도구 crate 의 봉투
-    /// (`CommandEnvelope` — 모양은 아래 TS 칸)를 직렬화한 그대로이고, 이 crate 는 그 구조를 모른다. 봉투로 푸는
-    /// 것은 셸 · 데몬 끝자락이다. 패킷을 풀 때 이 칸에서 보는 것은 「유효한 JSON 인가」 하나라 **모양이 틀린 봉투도
-    /// 패킷으로는 풀린다** — 그 갈래의 처리는 끝자락 몫이다(ADR-0272 결정 6).
+    /// ★`envelope` is a raw JSON field (ADR-0272 decision 3)★ — the bytes are the command bus tool crate's envelope
+    /// (`CommandEnvelope` — shape in the TS field below) serialized as is, and this crate does not know that structure. Unwrapping it into an envelope
+    /// is the shell · daemon edge. When decoding the packet, the only thing checked in this field is 「is it valid JSON」, so **an envelope with the wrong shape
+    /// still decodes as a packet** — handling that branch is the edge's job (ADR-0272 decision 6).
     ///
-    /// ★상관 키가 봉투 안에 있어 이 variant 엔 `request_id` 칸이 없다★ — 형제들과 달라 보이지만 pending 매칭
-    /// 대상이다: 셸의 짝 맞추기(`daemon_client::protocol_state` 의 `command_request_id`)가 봉투를 풀어 번호를
-    /// 읽는다(ADR-0272 결정 4). 그 짝이 같은 모듈 `event_reply_request_id` 의 `CommandReply` 갈래다 — **둘 중
-    /// 하나만 `Some` 이면 왕복이 안 닫힌다.**
+    /// ★The correlation key is inside the envelope, so this variant has no `request_id` field★ — it looks different from its siblings, but it is a pending-match
+    /// target: the shell's pairing (`daemon_client::protocol_state`'s `command_request_id`) unwraps the envelope and reads the number
+    /// (ADR-0272 decision 4). Its pair is the `CommandReply` branch of `event_reply_request_id` in the same module — **if only one of the two
+    /// is `Some`, the round trip does not close.**
     ///
-    /// 봉투의 `owner` 는 **목적지** 토큰이지 보낸 이가 아니다 — 최종 지목은 데몬이 자기 명부로 한다
-    /// (ADR-0154). 봉투의 `args` 는 데몬이 해석하지 않고 넘긴다(ADR-0081 「데몬 opaque 유지」) — 단 주인이 등록 때
-    /// 에이전트 참조로 표시한 칸은 데몬이 중계 전에 id 로 바꿔 적는다(ADR-0308).
+    /// The envelope's `owner` is the **destination** token, not the sender — the final targeting is done by the daemon with its own registry
+    /// (ADR-0154). The envelope's `args` are passed through without the daemon interpreting them (ADR-0081 「keep the daemon opaque」) — except that fields the owner
+    /// marked as agent references at registration are rewritten to ids by the daemon before relaying (ADR-0308).
     Command {
         #[ts(
             type = "{ name: string, request_id: string, owner: string, proto_ver: number, args: unknown }"
@@ -314,26 +310,26 @@ pub enum AgentCommand {
         envelope: Box<RawValue>,
     },
 
-    /// 데몬이 배달한 명령([`AgentEvent::CommandRequest`])의 **결말**.
+    /// The **outcome** of a command the daemon delivered ([`AgentEvent::CommandRequest`]).
     ///
-    /// ★이것은 요청이 아니라 답장이다★ — 그래서 자기 `request_id` 칸이 없고 상관 키는 `reply` 안에 있다
-    /// (봉투가 받은 그 키 그대로 — 홉마다 새로 만들지 않는다, ADR-0081 「request_id 왕복 보존」).
-    /// 셸의 짝 맞추기(`daemon_client::protocol_state` 의 `command_request_id`)가 이 variant 에 `None` 을 주는
-    /// 것이 그 사실의 표현이다: pending 매칭에 넣으면 깨울 짝이 없어 영구 pending 이 된다.
-    /// ★방향 필드가 없는 것과 짝이다★ — 같은 봉투 어휘가 두 방향으로 흐르고, 어느 연결에 썼는가가 방향이다
-    /// (TRD §3-2 · 도구 crate `CommandEnvelope::owner` 주석).
+    /// ★This is a reply, not a request★ — so it has no `request_id` field of its own, and the correlation key is inside `reply`
+    /// (the very key the envelope received — not minted anew per hop, ADR-0081 「preserve request_id round trip」).
+    /// The shell's pairing (`daemon_client::protocol_state`'s `command_request_id`) giving `None` to this variant
+    /// is the expression of that fact: putting it into pending matching would leave nothing to wake, so it would stay pending forever.
+    /// ★It pairs with the absence of a direction field★ — the same envelope vocabulary flows in two directions, and which connection it was written to is the direction
+    /// (TRD §3-2 · tool crate `CommandEnvelope::owner` comment).
     ///
-    /// ★`reply` 는 원문 JSON 칸이다(ADR-0272 결정 3)★ — 바이트는 명령 버스 도구 crate 의 답장(`CommandReply` —
-    /// 모양은 아래 TS 칸)을 직렬화한 그대로이고, 이 crate 는 그 구조를 모른다. 답장으로 푸는 것은 셸 · 데몬
-    /// 끝자락이다. [`AgentCommand::Command`] 의 봉투 칸처럼 **모양이 틀린 답장도 패킷으로는 풀린다** — 그 갈래의
-    /// 처리는 끝자락 몫이다(ADR-0272 결정 6).
+    /// ★`reply` is a raw JSON field (ADR-0272 decision 3)★ — the bytes are the command bus tool crate's reply (`CommandReply` —
+    /// shape in the TS field below) serialized as is, and this crate does not know that structure. Unwrapping it into a reply is the shell · daemon
+    /// edge. Like the envelope field of [`AgentCommand::Command`], **a reply with the wrong shape still decodes as a packet** — handling that branch
+    /// is the edge's job (ADR-0272 decision 6).
     ///
-    /// ★TS 칸은 **끝자락이 답장을 풀 때 받아들이는 것**을 적는다 — 내보내는 것만 적으면 거짓이 된다★: 오류 세
-    /// 칸은 전부 생략·`null` 이 허용되고(`CommandError` 의 `RawError` 가 `Option<String>` 셋) 계약 밖 필드도
-    /// 그대로 통과한다(`#[serde(flatten)] extra` — `deny_unknown_fields` 는 additive 진화를 깨므로 안 단다). 필수
-    /// 문자열로 적으면 **유효한 입력을 TS 로는 표현할 수 없다.** 되보내는 방향에도 그 관용이 실재한다 —
-    /// 릴레이 홉이 받은 원문을 재직렬화하면 세 칸 중 일부가 빠진 채 나간다(그 `Serialize` 구현). 그 관용을 재는
-    /// 시험은 답장을 푸는 데몬 끝자락에 있다(`connection_core` 의
+    /// ★The TS field records **what the edge accepts when it unwraps a reply** — recording only what it emits would be false★: all three error
+    /// fields allow omission · `null` (`CommandError`'s `RawError` is three `Option<String>`) and fields outside the contract
+    /// pass through as is (`#[serde(flatten)] extra` — `deny_unknown_fields` is not attached because it breaks additive evolution). Writing them as required
+    /// strings would make **valid input inexpressible in TS.** That tolerance is real in the sending-back direction too —
+    /// when a relay hop reserializes the raw text it received, it goes out with some of the three fields missing (its `Serialize` impl). The test measuring that tolerance
+    /// is at the daemon edge that unwraps the reply (`connection_core`'s
     /// `the_outcome_slot_accepts_everything_its_ts_type_advertises`).
     CommandOutcome {
         #[ts(
@@ -342,19 +338,19 @@ pub enum AgentCommand {
         reply: Box<RawValue>,
     },
 
-    // ── 대기 입력 목록(ADR-0231) ─────────────────────────────────────────────────────
-    // 버스 `agent.listQueuedInputs`·`agent.cancelQueuedInput` 의 WS 짝 — 데몬이 같은 manager 값을 싣는다.
-    /// 산 화신의 대기 입력 목록 조회. 응답은 전용 reply [`AgentEvent::QueuedInputs`]. ★입력 임대를 보지 않는다★
-    /// (읽기다). 산 세션이 없으면 `Error`(`NOT_FOUND: …`).
+    // ── Queued input list (ADR-0231) ─────────────────────────────────────────────────────
+    // The WS pair of bus `agent.listQueuedInputs`·`agent.cancelQueuedInput` — the daemon carries the same manager values.
+    /// Query the queued input list of the live incarnation. The response is the dedicated reply [`AgentEvent::QueuedInputs`]. ★It does not look at the input lease★
+    /// (it is a read). `Error` (`NOT_FOUND: …`) if there is no live session.
     ListQueuedInputs {
         #[ts(type = "string")]
         agent_id: AgentId,
         request_id: RequestId,
     },
-    /// 대기 입력 하나를 취소한다(화면 ✕ 와 같은 명령). 응답은 전용 reply [`AgentEvent::QueuedInputCancelReply`].
-    /// ★입력 임대는 `WriteStdin` 과 같은 검사를 거친다★ — 비보유자는 같은 문구의 `Error` 로 거절된다.
-    /// 목록에 없는 id(모르는 · 이미 결말이 난 · 잠든 에이전트)는 `Error`(`NOT_FOUND: …`).
-    /// `input_id` 는 필수다 — 「없으면 가장 최근」 같은 기본값을 두지 않는다.
+    /// Cancels one queued input (the same command as the on-screen ✕). The response is the dedicated reply [`AgentEvent::QueuedInputCancelReply`].
+    /// ★The input lease goes through the same check as `WriteStdin`★ — a non-holder is refused with an `Error` of the same wording.
+    /// An id not in the list (unknown · already settled · sleeping agent) is `Error` (`NOT_FOUND: …`).
+    /// `input_id` is required — no default like 「if absent, the most recent」.
     CancelQueuedInput {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -362,36 +358,36 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    // ── 사용량 한도(TRD S21 usage-limit-slot §1-6) ──────────────────────────────────────
-    /// 이 연결의 사용량 구독 집합을 **통째로** 바꾼다 — 빈 배열 = 해제, 연결이 끊기면 빈 집합이다. 답은 없다
-    /// (`request_id` 없음). 새로 든 벤더마다 [`AgentEvent::UsageLimitsUpdated`] 한 장이 이 연결에만 온다. 데몬이
-    /// 사용량을 두지 않는 벤더 낱말은 버려진다.
-    /// ★구독/해제 짝을 두지 않는다★ — 해제 한 장이 사라지면 조회가 계속 돈다. 전량 교체면 마지막 한 장이 곧
-    ///   상태다. 그래서 한 연결의 교체들은 도착순으로 적용된다.
+    // ── Usage limits (TRD S21 usage-limit-slot §1-6) ──────────────────────────────────────
+    /// Replaces this connection's usage subscription set **as a whole** — empty array = unsubscribe; when the connection drops it is the empty set. No answer
+    /// (no `request_id`). For each newly added vendor, one [`AgentEvent::UsageLimitsUpdated`] comes to this connection only. Vendor words the daemon
+    /// keeps no usage for are discarded.
+    /// ★No subscribe/unsubscribe pair★ — if one unsubscribe is lost, the query keeps running. With full replacement, the last one is the
+    ///   state. So one connection's replacements are applied in arrival order.
     UsageSubscribe { vendors: Vec<AgentBackendKind> },
-    /// ⟳ — 그 벤더의 사용량을 새로 조회하라. 답 = [`AgentEvent::Ack`] 이고 **값을 싣지 않는다** — 값은 그 벤더를
-    /// 구독한 연결에 [`AgentEvent::UsageLimitsUpdated`] 로 간다(보낸 연결도 구독했을 때만 받는다).
-    /// `Ack` 는 조회를 띄웠으면(진행 중이면 거기 붙어) 그 끝을 데몬의 상한(수 초)까지 기다린 뒤 온다. 거절 기한
-    /// 안이면 조회 없이 곧바로 온다. 데몬이 그 벤더의 사용량을 두지 않으면 `Error`(이 `request_id`).
-    /// ★데몬은 이 명령을 그 연결의 도착순 줄 밖에서 돌린다★ — 같은 연결의 뒤 명령의 답이 이 답보다 먼저 올 수
-    ///   있다.
+    /// ⟳ — query that vendor's usage anew. Answer = [`AgentEvent::Ack`] and it **carries no value** — the value goes to connections that subscribed
+    /// to that vendor as [`AgentEvent::UsageLimitsUpdated`] (the sending connection receives it only if it subscribed too).
+    /// If a query was started (or joined while in progress), `Ack` comes after waiting for its end up to the daemon's cap (a few seconds). Within the refusal
+    /// deadline it comes right away without a query. If the daemon keeps no usage for that vendor, `Error` (this `request_id`).
+    /// ★The daemon runs this command outside that connection's arrival-order lane★ — the answer to a later command of the same connection
+    ///   can come before this answer.
     RefreshUsageLimits {
         vendor: AgentBackendKind,
         request_id: RequestId,
     },
 }
 
-/// 데몬 명부의 **클라이언트 투영** 한 줄([`AgentEvent::CommandList`] 의 원소).
+/// One row of the daemon registry's **client projection** (an element of [`AgentEvent::CommandList`]).
 ///
-/// ★버스 계약이 아니라 wire 계약이라 여기 산다★ — 도구 crate 의 `CommandDecl`(등록 단위)과 필드가
-/// 겹치지만 방향과 주인이 다르다: `CommandDecl` 은 주인→데몬이 얹는 것이고, 이쪽은 데몬이 명부를
-/// 훑어 내려 주는 것이라 명부만 아는 칸(`available`)이 하나 더 붙는다.
+/// ★It lives here because it is a wire contract, not a bus contract★ — its fields overlap with the tool crate's `CommandDecl` (registration unit),
+/// but the direction and owner differ: `CommandDecl` is what the owner puts to the daemon, and this is what the daemon sweeps out of the registry
+/// and hands down, so it carries one more field only the registry knows (`available`).
 ///
-/// ★`available` 은 **지금 항상 `true`** 이고 분기 근거로 쓰지 말 것★ — 주인이 끊기면 그 이름이 명부에서
-/// 사라져 목록에 아예 실리지 않으므로(ADR-0150 결정 3) 실려 온 항목은 전부 살아 있는 등록이다. `false` 는
-/// 도달 불가고, 이 칸으로 가용성을 판정하는 코드는 **판정할 것이 없는 판정**이다. 칸을 떼지 않은 이유는
-/// 떼는 것 자체가 wire 계약 변경인데 얻는 것이 없어서다(TRD §3-7).
-/// `help` 는 주인이 얹은 문자열 **그대로**다(데몬이 열어보지 않으므로 가공도 없다).
+/// ★`available` is **always `true` now** and must not be used as a branching basis★ — when the owner disconnects, that name disappears from the registry
+/// and is not listed at all (ADR-0150 decision 3), so every listed item is a live registration. `false` is
+/// unreachable, and code that decides availability by this field is **a decision with nothing to decide**. The reason the field was not removed is
+/// that removing it is itself a wire contract change with nothing gained (TRD §3-7).
+/// `help` is the string the owner put, **as is** (the daemon does not open it, so there is no processing either).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct CommandListEntry {
@@ -400,29 +396,29 @@ pub struct CommandListEntry {
     pub available: bool,
 }
 
-/// 대기 입력 목록의 한 줄([`AgentEvent::QueuedInputs`] 의 원소) — 버스 `agent.listQueuedInputs` 행과 같은 모양·낱말.
+/// One row of the queued input list (an element of [`AgentEvent::QueuedInputs`]) — the same shape · words as the bus `agent.listQueuedInputs` row.
 ///
-/// `state` = `queued` | `sent` | `unconfirmed` | `cancelling`. `sent` = 통로가 벤더에 넘긴 대기 행(환원 상태 — 재부착
-///   대조는 넘김 표지가 선 행으로 읽는다 · 취소 대기 행의 표지는 `cancelling` 에 묻힌다).
-///   ★`unconfirmed` 는 명부의 환원 상태가 아니다★ — 조회 순간
-///   통로가 수락 모름으로 쥔 항목을 덧댄 표지라 `as_of_seq` 와 한 원자가 아니고, 재부착 대조는 `queued` 로 읽는다.
-/// ★낱말 칸을 enum 으로 올리지 않는다★ — 낱말이 늘 때 구셸이 응답 전체를 못 읽는 대신 그 행만 모르는 낱말로
-///   받는다(버스 행도 문자열이다).
-/// `cancel` = `cancelling` 행에만 실린다(그 밖은 `null`).
+/// `state` = `queued` | `sent` | `unconfirmed` | `cancelling`. `sent` = a queued row the link handed to the vendor (reduced state — the reattach
+///   reconciliation reads it as a row with the handover mark set · the mark of a cancel-pending row is buried in `cancelling`).
+///   ★`unconfirmed` is not a reduced state of the registry★ — it is a mark patched onto an item the link held as acceptance-unknown
+///   at query time, so it is not one atom with `as_of_seq`, and the reattach reconciliation reads it as `queued`.
+/// ★The word field is not raised to an enum★ — when words grow, an old shell receives just that row with an unknown word
+///   instead of failing to read the whole response (the bus row is a string too).
+/// `cancel` = carried only on `cancelling` rows (`null` otherwise).
 // ADR-0231
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct QueuedInputRow {
-    /// [`AgentCommand::CancelQueuedInput`] 의 `input_id` 로 그대로 쓴다.
+    /// Used as is as the `input_id` of [`AgentCommand::CancelQueuedInput`].
     pub id: String,
     pub text: String,
     pub state: String,
     pub cancel: Option<QueuedInputCancel>,
 }
 
-/// 취소 대기 행의 두 칸 — 명부의 환원 상태 그대로다(스냅숏 위에 뒤 사건을 다시 환원하려면 둘 다 필요하다).
-/// `answer` = `none`(우리 취소 요청의 응답이 아직 없다) | `not_removed`(안 뺐다고 답했거나 요청이 실패했다).
-/// `vendor_closed` = 그 id 의 벤더 닫힘을 이미 봤다.
+/// The two fields of a cancel-pending row — the registry's reduced state as is (both are needed to re-reduce later events on top of the snapshot).
+/// `answer` = `none` (no response to our cancel request yet) | `not_removed` (answered that it did not remove it, or the request failed).
+/// `vendor_closed` = the vendor close of that id was already seen.
 // ADR-0231
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -434,14 +430,14 @@ pub struct QueuedInputCancel {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub enum AgentEvent {
-    /// 연결 직후 핸드셰이크.
+    /// Handshake right after connecting.
     Hello {
         protocol_version: u32,
         daemon_version: String,
-        /// 데몬 전체 capability(에이전트별 capability 는 AgentInfo 에).
+        /// Daemon-wide capability (per-agent capability is in AgentInfo).
         capabilities: Option<Capabilities>,
     },
-    /// side-effect command 수신/처리 확인.
+    /// Acknowledgement of receiving/handling a side-effect command.
     Ack {
         request_id: RequestId,
     },
@@ -454,47 +450,47 @@ pub enum AgentEvent {
         oldest_seq: u64,
         #[ts(type = "number")]
         latest_seq: u64,
-        /// 이 replay 의 머리 — 실제로 처음 보낸 seq. 보낸 것이 없으면 빈 ring 은 다음에 발급할 seq,
-        /// 이어받을 꼬리가 없으면 `after_seq+1`. ★dedup 기준(「마지막으로 본 seq」)이 아니다★ — 뷰는
-        /// 이 값을 flush 시작점 `max(마지막+1, replay_from)` 에만 쓴다(ADR-0231).
+        /// The head of this replay — the seq actually sent first. If nothing was sent, the next seq to issue for an empty ring,
+        /// or `after_seq+1` if there is no tail to resume. ★It is not the dedup basis (「the last seen seq」)★ — the view
+        /// uses this value only for the flush starting point `max(last+1, replay_from)` (ADR-0231).
         #[ts(type = "number")]
         replay_from: u64,
-        /// ring 밖으로 밀려 일부 손실(clear+tail).
+        /// Partial loss from being pushed out of the ring (clear+tail).
         truncated: bool,
-        /// 이 replay 의 화신은 저장된 대화를 이어받으려고 떴다(스폰이 이어받을 손잡이를 실었다) —
-        /// ★이어받기가 **성공했다**는 뜻이 아니다★. `current_epoch` 와 같은 구독 응답에서 나온다.
-        /// 칸이 없는 옛 데몬의 ack 는 `false` 로 읽힌다(`serde(default)`).
-        /// ★[`crate::PROTOCOL_VERSION`] 은 이 추가로 올리지 않는다★ — 그 기준(조용한 **해로운** 오작동)에
-        ///   두 방향을 대면 둘 다 오늘의 동작으로 떨어진다:
-        ///   - **신데몬 + 구셸**: 구셸은 모르는 칸을 버린다(`deny_unknown_fields` 없음) — 이어받는 슬롯이
-        ///     오늘처럼 첫 화면을 그린다.
-        ///   - **구데몬 + 신셸**: 칸이 없어 `false` — 역시 오늘처럼 첫 화면을 그린다.
-        ///   다른 것이 도는 조합이 없고 기능이 없을 뿐이다. 셸↔웹뷰 마커 비트는 셸과 웹뷰가 한 빌드로
-        ///   나가므로 버전 축이 없다. (ADR-0226)
+        /// This replay's incarnation started to resume a stored conversation (the spawn carried a handle to resume) —
+        /// ★it does not mean the resume **succeeded**★. It comes from the same subscribe response as `current_epoch`.
+        /// An ack from an old daemon without the field reads as `false` (`serde(default)`).
+        /// ★[`crate::PROTOCOL_VERSION`] is not bumped for this addition★ — measured against that criterion (a silent **harmful** malfunction),
+        ///   both directions fall back to today's behavior:
+        ///   - **new daemon + old shell**: the old shell drops the unknown field (no `deny_unknown_fields`) — a resuming slot
+        ///     draws the first screen as today.
+        ///   - **old daemon + new shell**: no field, so `false` — it also draws the first screen as today.
+        ///   No combination runs something different; the feature is just absent. The shell↔webview marker bit has no version axis because the shell and the webview
+        ///   ship in one build. (ADR-0226)
         #[serde(default)]
         continues_conversation: bool,
     },
-    /// [`AgentCommand::Subscribe`] 가 **거절**됐다 — [`AgentEvent::SubscribeAck`] 의 실패 짝.
+    /// [`AgentCommand::Subscribe`] was **refused** — the failure pair of [`AgentEvent::SubscribeAck`].
     ///
-    /// ★왜 `Error` 로 안 보내나(load-bearing — 이 variant 의 존재 이유)★: `Subscribe` 는 `request_id` 가
-    /// 없는 명령이라(셸 `protocol_state::command_request_id` 가 `None`) 그 거절은 `Error{request_id: None}`
-    /// 으로 나갔고, 그 봉투엔 **주인을 식별할 필드가 없다**. 받는 쪽(src-tauri)은 어느 에이전트의 구독이
-    /// 깨졌는지 알 수 없어 자기 single-flight 슬롯을 풀지 못했고, 그 슬롯이 좀비로 남아 **그 에이전트의 Subscribe 가 두 번
-    /// 다시 나가지 못했다** — 데몬 재기동 뒤 그 에이전트의 출력이 모든 창에서 영구 두절(실측 2026-08-19).
-    /// 그래서 거절에 `agent_id` 를 실어 상관 가능하게 만든다.
+    /// ★Why not send it as `Error` (load-bearing — the reason this variant exists)★: `Subscribe` is a command without
+    /// `request_id` (the shell's `protocol_state::command_request_id` is `None`), so its refusal went out as `Error{request_id: None}`,
+    /// and that envelope has **no field identifying the owner**. The receiver (src-tauri) could not tell which agent's subscription
+    /// broke, so it could not release its single-flight slot; that slot stayed a zombie and **that agent's Subscribe could never go out
+    /// again** — after a daemon restart, that agent's output was permanently cut off in every window (measured 2026-08-19).
+    /// So the refusal carries `agent_id` to make it correlatable.
     ///
-    /// ★계약★: 이 이벤트가 나가면 **그 Subscribe 에 대한 `SubscribeAck` 도 `ReplayComplete` 도 오지
-    /// 않는다**(둘 다 거절 지점 이후에만 발행된다). 받는 쪽은 이 사실에 기대어 슬롯을 즉시 해제해도
-    /// 안전하다 — 나중에 도착해 오귀속될 응답이 존재하지 않는다.
+    /// ★Contract★: when this event goes out, **neither `SubscribeAck` nor `ReplayComplete` for that Subscribe
+    /// comes** (both are emitted only after the refusal point). The receiver can rely on this and release the slot immediately
+    /// safely — no response exists that could arrive later and be misattributed.
     ///
-    /// ★`reason` 은 사람이 읽는 진단 문자열이다★ — 기계 분기 금지(문구는 예고 없이 바뀐다). 분기해야 하면
-    /// 코드 필드를 새로 판다.
+    /// ★`reason` is a human-readable diagnostic string★ — no machine branching (the wording changes without notice). If branching is needed,
+    /// add a new code field.
     SubscribeFailed {
         #[ts(type = "string")]
         agent_id: AgentId,
         reason: String,
     },
-    /// 저빈도 구조화 출력(TextDelta/Usage/ToolCall 등).
+    /// Low-frequency structured output (TextDelta/Usage/ToolCall etc.).
     Output {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -503,26 +499,26 @@ pub enum AgentEvent {
         seq: u64,
         chunk: OutputChunk,
     },
-    /// replay 구간 끝 — 이후는 라이브(C4 원자 전환의 클라측 신호).
+    /// End of the replay section — live from here on (the client-side signal of the C4 atomic switch).
     ReplayComplete {
         #[ts(type = "string")]
         agent_id: AgentId,
         epoch: u32,
     },
-    /// epoch 동봉(옛 세션 stale 알림 방어).
+    /// epoch attached (defends against stale notices from an old session).
     StatusChanged {
         #[ts(type = "string")]
         agent_id: AgentId,
         status: AgentStatus,
         epoch: u32,
     },
-    /// 전체 목록 갱신(broadcast). terminal 판정은 이걸로(status_changed 아님 — 설계 불변식).
+    /// Whole-list update (broadcast). The terminal decision is made with this (not status_changed — design invariant).
     AgentListUpdated {
         agents: Vec<AgentInfo>,
     },
-    /// ListAgents 조회 응답(전용 reply) — request_id 에코로 "내 요청 결과"를 정확히 매칭.
-    /// broadcast 인 AgentListUpdated 와 페이로드는 동일하나 편승 매칭(다음 도착 메시지 짝짓기)을
-    /// 제거하기 위해 request_id 를 동봉한다(Spawned/Created 와 동형).
+    /// ListAgents query response (dedicated reply) — request_id echo to match "the result of my request" exactly.
+    /// Same payload as the broadcast AgentListUpdated, but request_id is attached to remove
+    /// piggyback matching (pairing with the next arriving message) (same shape as Spawned/Created).
     AgentList {
         request_id: RequestId,
         agents: Vec<AgentInfo>,
@@ -530,27 +526,27 @@ pub enum AgentEvent {
     RestoreResult {
         report: RestoreReport,
     },
-    /// 입력 lease 상태 변경 통보(다중 뷰어가 "지금 잠겨있음"을 알게 함). held=true 면 누군가 보유 중,
-    /// false 면 비어 있음(아무나 acquire 가능). 보유자 conn 식별값은 보안상 노출하지 않는다(잠김 여부만).
+    /// Input lease state change notice (lets multiple viewers know "it is locked now"). held=true means someone holds it,
+    /// false means it is empty (anyone can acquire). The holder conn identifier is not exposed for security (only whether it is locked).
     InputLeaseChanged {
         #[ts(type = "string")]
         agent_id: AgentId,
         held: bool,
     },
-    /// 프로필 목록 갱신(broadcast). CRUD(생성/삭제/토글) 후 자동 push.
+    /// Profile list update (broadcast). Auto-pushed after CRUD (create/delete/toggle).
     ProfileListUpdated {
         profiles: Vec<AgentProfile>,
     },
-    /// ListProfiles 조회 응답(전용 reply) — request_id 에코. broadcast 인 ProfileListUpdated 와
-    /// 페이로드는 같으나 편승 매칭 제거를 위해 request_id 동봉(Spawned/Created 와 동형).
+    /// ListProfiles query response (dedicated reply) — request_id echo. Same payload as the broadcast ProfileListUpdated,
+    /// but request_id is attached to remove piggyback matching (same shape as Spawned/Created).
     ProfileList {
         request_id: RequestId,
         profiles: Vec<AgentProfile>,
     },
 
-    /// GetSnapshot 응답(전용 reply) — 그 시점 replay buffer 스냅샷.
-    /// request_id 에코로 같은 agent 동시 조회를 정확히 매칭(이전 agent_id 편승 매칭 제거).
-    /// broadcast 아님(특정 요청에만 응답).
+    /// GetSnapshot response (dedicated reply) — the replay buffer snapshot at that moment.
+    /// request_id echo to match concurrent queries of the same agent exactly (removes the old agent_id piggyback matching).
+    /// Not a broadcast (responds only to the specific request).
     Snapshot {
         request_id: RequestId,
         #[ts(type = "string")]
@@ -558,14 +554,14 @@ pub enum AgentEvent {
         chunks: Vec<SnapshotChunk>,
     },
 
-    /// CreateProfile 응답 — 생성된 프로필을 request_id 에 동봉(DaemonClient 가 "내 것" 매칭용).
-    /// 기존 ProfileListUpdated broadcast 와 별개(그건 전 연결 미러 갱신용, request_id 없음).
+    /// CreateProfile response — the created profile with request_id attached (for DaemonClient's "mine" matching).
+    /// Separate from the existing ProfileListUpdated broadcast (that one is for updating every connection's mirror, no request_id).
     Created {
         request_id: RequestId,
         profile: AgentProfile,
     },
-    /// SpawnByCwd/SpawnProfile 응답 — spawn 된 AgentInfo 를 request_id 에 동봉.
-    /// 기존 AgentListUpdated broadcast 와 별개(StatusSink 가 전 연결에 push, request_id 없음).
+    /// SpawnByCwd/SpawnProfile response — the spawned AgentInfo with request_id attached.
+    /// Separate from the existing AgentListUpdated broadcast (StatusSink pushes it to every connection, no request_id).
     Spawned {
         request_id: RequestId,
         agent: AgentInfo,
@@ -581,37 +577,36 @@ pub enum AgentEvent {
         notices: Option<Vec<serde_json::Value>>,
     },
 
-    /// [`AgentCommand::ListCommands`] 응답(전용 reply, ADR-0155/0156) — request_id 에코.
-    /// broadcast 가 아니다(요청한 연결에만 간다). 데몬 dispatch 가 명부를 훑어 이걸 낸다.
+    /// [`AgentCommand::ListCommands`] response (dedicated reply, ADR-0155/0156) — request_id echo.
+    /// Not a broadcast (goes only to the requesting connection). The daemon dispatch sweeps the registry and emits this.
     ///
-    /// ★구형 셸 안전은 오직 "전용 reply" 라는 사실에만 기댄다★ — 구형 셸은 `ListCommands` 를 보내지
-    /// 않으니 이 답장도 못 받고, 설령 받아도 모르는 externally-tagged variant 키는 조용히 버린다(에러도
-    /// 로그도 없음). **이 variant 를 나중에 broadcast(요청 없이 push)로 바꾸는 순간** 모든 구형 셸이
-    /// 그 이벤트를 아무 신호 없이 잃는다 — broadcast 로 바꾸려면 이 안전을 다시 설계해야 한다.
+    /// ★Old-shell safety relies only on the fact that it is a "dedicated reply"★ — an old shell does not send `ListCommands`,
+    /// so it never receives this reply either, and even if it did, it silently drops an unknown externally-tagged variant key (no error,
+    /// no log). **The moment this variant is changed to a broadcast (push without a request)**, every old shell
+    /// loses that event without any signal — changing it to a broadcast requires redesigning this safety.
     ///
-    /// 주인이 끊긴 이름은 실려 오지 않는다 — 명부에서 사라졌기 때문이다(ADR-0150 결정 3). 그래서 목록에
-    /// 없는 이름은 「없는 이름」과 「주인이 자리 비움」이 합쳐진 답이다(감수한 손실).
+    /// Names whose owner disconnected are not listed — because they disappeared from the registry (ADR-0150 decision 3). So a name missing
+    /// from the list is an answer that merges 「no such name」 and 「the owner is away」 (an accepted loss).
     CommandList {
         request_id: RequestId,
         entries: Vec<CommandListEntry>,
     },
 
-    /// 데몬이 이 클라이언트 앞으로 배달하는 **명령**(ADR-0155 결정 3 의 2단계).
+    /// A **command** the daemon delivers addressed to this client (step 2 of ADR-0155 decision 3).
     ///
-    /// 이 variant 가 클라이언트를 「데몬 명령 **수신** peer」로 만든다 — ADR-0081 이 「신규 능력」으로 적은
-    /// 그것이고, 그 ADR 의 3-variant opaque relay 봉투는 ADR-0155 이 이 통합 봉투로 대체했다.
+    /// This variant makes the client a 「daemon command **receiving** peer」 — what ADR-0081 recorded as a 「new capability」,
+    /// and that ADR's 3-variant opaque relay envelope was replaced by ADR-0155 with this unified envelope.
     ///
-    /// ★이 enum 의 유일한 「요청」 variant 다★ — 나머지는 전부 알림이거나 내가 보낸 명령의 답장이다. 그래서
-    /// 받는 쪽은 이것만 [`AgentEvent`] 소비 흐름에서 갈라내 인바운드 수신기로 넘기고, 답은
-    /// [`AgentCommand::CommandOutcome`] 으로 되돌린다. 셸의 짝 맞추기(`daemon_client::protocol_state` 의
-    /// `event_reply_request_id`)가 여기 `None` 을 주는 것이 계약이다 — `Some` 이면 받는 쪽 pending 매칭이 이
-    /// 요청을 「내가 기다린 답장」으로 읽고 삼킨다(그 봉투는 실행되지 않고 사라지고, 보낸 쪽은 마감시각까지
-    /// 매달린다).
+    /// ★The only 「request」 variant of this enum★ — all the rest are notices or replies to commands I sent. So
+    /// the receiver splits only this one out of the [`AgentEvent`] consumption flow and hands it to the inbound receiver, and the answer
+    /// goes back as [`AgentCommand::CommandOutcome`]. The contract is that the shell's pairing (`daemon_client::protocol_state`'s
+    /// `event_reply_request_id`) gives `None` here — with `Some`, the receiver's pending matching would read this
+    /// request as 「the reply I was waiting for」 and swallow it (the envelope vanishes without being executed, and the sender hangs
+    /// until the deadline).
     ///
-    /// `envelope` 은 [`AgentCommand::Command`] 와 같은 원문 JSON 칸이다(모양 · 끝자락이 푸는 것 · 깨진 봉투의
-    /// 처리 — 그 variant 주석, ADR-0272). 봉투의 `args` 는 데몬이 해석하지 않고 넘긴 값이다(ADR-0081 「데몬
-    /// opaque 유지」) — 단 주인이 등록 때 에이전트 참조로 표시한 칸은 데몬이 중계 전에 id 로 바꿔 적은
-    /// 값이다(ADR-0308). 봉투의 `owner` 는 **목적지** 토큰이고 보낸 이가 아니다.
+    /// `envelope` is the same raw JSON field as [`AgentCommand::Command`] (shape · what the edge unwraps · handling of broken
+    /// envelopes — see that variant's comment, ADR-0272). The envelope's `args` are values the daemon passed through without interpreting (ADR-0081 「keep the daemon opaque」) — except that fields the owner marked as agent references at registration are values the daemon rewrote to ids before relaying
+    /// (ADR-0308). The envelope's `owner` is the **destination** token, not the sender.
     CommandRequest {
         #[ts(
             type = "{ name: string, request_id: string, owner: string, proto_ver: number, args: unknown }"
@@ -619,43 +614,43 @@ pub enum AgentEvent {
         envelope: Box<RawValue>,
     },
 
-    /// [`AgentCommand::Command`] 의 **답장**(전용 reply, ADR-0155 결정 3) — 상관 키는 `reply` 칸 안의
-    /// `request_id` 다.
+    /// The **reply** to [`AgentCommand::Command`] (dedicated reply, ADR-0155 decision 3) — the correlation key is the `request_id`
+    /// inside the `reply` field.
     ///
-    /// ★[`AgentCommand::CommandOutcome`] 과 칸이 같고 방향만 다르다★ — 이쪽은 내가 낸 요청의 답이라
-    /// 셸의 `event_reply_request_id` 가 `Some` 을 주고, 저쪽은 내가 보내는 답이라 `None` 이다. 동형이라
-    /// 헷갈리기 쉬운 자리이고, 갈림의 근거는 **어느 왕복의 주인이 나인가** 하나다.
-    /// ★broadcast 로 바꾸지 말 것★ — [`AgentEvent::CommandList`] 와 같은 이유로 「전용 reply」라는
-    /// 사실 위에 구형 셸 안전이 서 있다.
+    /// ★Same fields as [`AgentCommand::CommandOutcome`], only the direction differs★ — this one is the answer to a request I made, so
+    /// the shell's `event_reply_request_id` gives `Some`, and that one is an answer I send, so `None`. They have the same shape, so
+    /// this is an easy place to get confused, and the only basis for the split is **whether I own that round trip**.
+    /// ★Do not change it to a broadcast★ — for the same reason as [`AgentEvent::CommandList`], old-shell safety stands on the
+    /// fact that it is a 「dedicated reply」.
     ///
-    /// `reply` 는 [`AgentCommand::CommandOutcome`] 과 같은 원문 JSON 칸이고, TS 칸이 광고하는 관용(오류 세 칸
-    /// 생략·`null` 허용, 계약 밖 필드 통과)의 근거도 거기 적었다 — 같은 칸이라 같은 관용이다(ADR-0272).
+    /// `reply` is the same raw JSON field as [`AgentCommand::CommandOutcome`], and the basis for the tolerance the TS field advertises (three error fields
+    /// may be omitted · `null` allowed, fields outside the contract pass through) is written there too — same field, same tolerance (ADR-0272).
     ///
-    /// ★생산자는 이제 있다★ — 데몬이 자기 명부에서 주인을 찾아 배달하고 그 결말을 이 답장으로 되돌린다
-    /// (`engram_dashboard_daemon::command_delivery` · ADR-0154). ★그래도 **프론트까지는 안 닿는다**★ —
-    /// 아래 두 조각이 아직 비어 있고, 그 둘은 **같은 변경에서** 서야 한다(마지막 문단).
+    /// ★A producer exists now★ — the daemon finds the owner in its own registry, delivers, and returns the outcome with this reply
+    /// (`engram_dashboard_daemon::command_delivery` · ADR-0154). ★Still, **it does not reach the frontend**★ —
+    /// the two pieces below are still empty, and the two must be added **in the same change** (last paragraph).
     ///
-    /// 셸은 상관한다: 셸의 짝 맞추기(`daemon_client::protocol_state` 의 `command_request_id`)가
-    /// [`AgentCommand::Command`] 에 `Some` 을 주므로 `forward_daemon_command`(`src-tauri/src/commands/agent.rs`)가
-    /// **답장 대기** 갈래를 탄다(그 함수엔 variant allowlist 가 없다 — `Subscribe`/`Unsubscribe` 만 막고 나머지는
-    /// 이 `Some`/`None` 하나로 갈린다). 답장이 오면 `src-tauri/src/daemon_client/connection.rs` 가 같은 모듈의
-    /// `event_reply_request_id` 로 pending 을 깨고 그 이벤트를 **그대로** 돌려준다.
-    /// carrier 도 통과시킨다: `TauriTransport.send`(`src/api/tauriTransport.ts`)가 그 invoke 반환을
-    /// control 메시지로 올려 `ProtocolClient.handleEvent` 에 넣는다. ★이름 붙은 broadcast 몇 종만
-    /// 되만드는 필터는 **push 방향에만** 있다 — 답장 방향은 무필터 통과다★.
+    /// The shell correlates: the shell's pairing (`daemon_client::protocol_state`'s `command_request_id`)
+    /// gives `Some` to [`AgentCommand::Command`], so `forward_daemon_command` (`src-tauri/src/commands/agent.rs`)
+    /// takes the **wait for reply** branch (that function has no variant allowlist — it blocks only `Subscribe`/`Unsubscribe`, and the rest
+    /// split on this one `Some`/`None`). When the reply comes, `src-tauri/src/daemon_client/connection.rs` wakes the pending with the same module's
+    /// `event_reply_request_id` and returns that event **as is**.
+    /// The carrier passes it too: `TauriTransport.send` (`src/api/tauriTransport.ts`) lifts that invoke return into a
+    /// control message and puts it into `ProtocolClient.handleEvent`. ★The filter that rebuilds only a few named broadcasts
+    /// exists **only in the push direction** — the reply direction passes unfiltered★.
     ///
-    /// ★그런데 `handleEvent`(`src/api/protocolClient.ts`)에는 이 variant 갈래가 **없다**★ — 마지막 `if`
-    /// 를 지나 아무 일 없이 끝난다(else 도 warn 도 throw 도 없는 조용한 폐기).
-    /// ★그러면 그 호출의 promise 는 **영영 안 풀린다**★: 프론트 `sendCommand` 는 타이머를 걸지 않고,
-    /// `invoke` 가 **성공**으로 끝났으니 `send().catch` 도 안 불린다. 남는 탈출구는 연결 상태 전이나
-    /// `close()` 의 일괄 reject 뿐이다. 셸의 30초 답장 상한은 **답장이 안 오는 경우**를 막는 장치라
-    /// 여기(답장이 와서 버려진 경우)엔 닿지 않는다.
+    /// ★But `handleEvent` (`src/api/protocolClient.ts`) has **no** branch for this variant★ — it passes the last `if`
+    /// and ends with nothing done (a silent discard with no else, no warn, no throw).
+    /// ★Then that call's promise **never resolves**★: the frontend `sendCommand` sets no timer, and
+    /// `invoke` ended in **success**, so `send().catch` is not called either. The only escape hatches left are a connection state transition or
+    /// the bulk reject of `close()`. The shell's 30-second reply cap is a device against **the case where no reply comes**, so
+    /// it does not reach here (the case where the reply came and was discarded).
     ///
-    /// ★그러므로 **화면 쪽 producer**(웹뷰가 [`AgentCommand::Command`] 를 내는 자리 — 오늘 `src/` 에 0건)를
-    /// 얹는 변경이 `handleEvent` 갈래도 **같은 변경에서** 얹어야 한다★ — 셸의 두 상관 함수가 한 쌍으로만
-    /// 성립하는 것과 같은 요구가 한 층 아래에서 그대로 반복된다. 그 producer 가 없는 동안 이 구멍은 **도달
-    /// 불가**다: 데몬이 배달하는 봉투는 셸이 자기 표에서 실행하고(`daemon_client::inbound`) 답장도 셸이
-    /// 받으므로 웹뷰의 pending 을 거치지 않는다.
+    /// ★So the change that adds **the screen-side producer** (the spot where the webview emits [`AgentCommand::Command`] — 0 cases in `src/` today)
+    /// must add the `handleEvent` branch **in the same change** too★ — the same requirement as the shell's two correlation functions holding
+    /// only as a pair repeats one layer down. While that producer does not exist, this hole is **unreachable**:
+    /// envelopes the daemon delivers are executed by the shell from its own table (`daemon_client::inbound`) and the replies are also
+    /// received by the shell, so they do not pass through the webview's pending.
     CommandReply {
         #[ts(
             type = "{ request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }"
@@ -663,12 +658,12 @@ pub enum AgentEvent {
         reply: Box<RawValue>,
     },
 
-    /// [`AgentCommand::ListQueuedInputs`] 응답(전용 reply) — 버스 `agent.listQueuedInputs` 의 답과 같은 값이다.
+    /// [`AgentCommand::ListQueuedInputs`] response (dedicated reply) — the same value as the answer of the bus `agent.listQueuedInputs`.
     ///
-    /// `inputs` = 비종결 항목만(목록 순서 그대로). `as_of_seq` = 행이 환원한 마지막 목록 사건의 seq(`null` = 이
-    /// 화신의 목록 사건이 아직 없다) — ★`epoch` 안에서만 견준다★(재부착 대조가 스냅숏과 라이브 사건을 이 seq 로
-    /// 맞춘다). `stopped_after_error` = 오류로 끝난 턴 뒤라 사용자의 다음 턴이 성공할 때까지 우편이 멈춰 있다.
-    /// ★broadcast 로 바꾸지 말 것★ — [`AgentEvent::CommandList`] 와 같은 이유로 구형 셸 안전이 「전용 reply」에 선다.
+    /// `inputs` = non-final items only (in list order). `as_of_seq` = the seq of the last list event the row reduced (`null` = this
+    /// incarnation has no list event yet) — ★compare only within `epoch`★ (the reattach reconciliation aligns the snapshot and live events by
+    /// this seq). `stopped_after_error` = mail is stopped after a turn that ended in error, until the user's next turn succeeds.
+    /// ★Do not change it to a broadcast★ — for the same reason as [`AgentEvent::CommandList`], old-shell safety stands on 「dedicated reply」.
     // ADR-0231
     QueuedInputs {
         request_id: RequestId,
@@ -680,10 +675,10 @@ pub enum AgentEvent {
         epoch: u32,
         stopped_after_error: bool,
     },
-    /// [`AgentCommand::CancelQueuedInput`] 응답(전용 reply). ★「취소됐다」가 아니라 취소 요청에 대한 답이다★ —
-    /// `outcome` = `cancelled`(곧바로 거뒀다) | `requested`(취소를 요청했다 · 이미 취소 대기였다 — 결말은 뒤따르는
-    /// 목록 사건이 정한다). 그래서 이름이 `…Cancelled` 가 아니다. 실패(임대 거절 · `NOT_FOUND` · 취소 줄 쓰기
-    /// 실패)는 이 variant 가 아니라 `Error` 로 온다.
+    /// [`AgentCommand::CancelQueuedInput`] response (dedicated reply). ★It is the answer to the cancel request, not 「it was cancelled」★ —
+    /// `outcome` = `cancelled` (withdrawn right away) | `requested` (cancellation requested · it was already cancel-pending — the outcome is decided by the
+    /// following list event). That is why the name is not `…Cancelled`. Failures (lease refusal · `NOT_FOUND` · failure to write the cancel line)
+    /// come as `Error`, not this variant.
     // ADR-0231
     QueuedInputCancelReply {
         request_id: RequestId,
@@ -694,15 +689,15 @@ pub enum AgentEvent {
     },
 
     // ADR-0253
-    /// 사용량 한 장 — 그 벤더를 구독한 연결에만 간다([`AgentCommand::UsageSubscribe`]). 요청의 답이 아니다.
-    /// `subscribed` = 받는 연결의 구독 집합 — 데몬이 이 한 장을 짓던 순간의 것이라 한 발 늦을 수 있다.
-    /// ★같은 칸의 한 장이 뒤바뀌어 오거나 두 번 올 수 있다★ — 칸마다 가장 큰 `snapshot.revision` 만 남긴다.
+    /// One usage sheet — goes only to connections that subscribed to that vendor ([`AgentCommand::UsageSubscribe`]). Not an answer to a request.
+    /// `subscribed` = the receiving connection's subscription set — as of the moment the daemon built this sheet, so it can be one step behind.
+    /// ★A sheet for the same area can arrive out of order or twice★ — keep only the largest `snapshot.revision` per area.
     UsageLimitsUpdated {
         snapshot: UsageLimitSnapshot,
         subscribed: Vec<AgentBackendKind>,
     },
 
-    /// request_id 있으면 특정 command 실패.
+    /// With request_id, a specific command failed.
     Error {
         request_id: Option<RequestId>,
         message: String,
@@ -726,71 +721,69 @@ pub enum AgentEvent {
     },
 }
 
-/// Subscribe 결과 분기(설계 §1-3).
+/// Subscribe result branches (design §1-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub enum SubscribeAction {
-    /// epoch 불일치 → 완전 초기화 후 oldest 부터.
+    /// epoch mismatch → full reset, then from the oldest.
     Reset,
-    /// epoch 일치 & after_seq<oldest → oldest 부터(앞부분 손실, clear+tail).
+    /// epoch match & after_seq<oldest → from the oldest (front part lost, clear+tail).
     TruncatedReplay,
-    /// epoch 일치 & after_seq>=oldest → after_seq+1 부터 무손실 이어받기.
+    /// epoch match & after_seq>=oldest → lossless resume from after_seq+1.
     Resume,
 }
 
-/// 구조화 출력 이벤트 wire 미러(ADR-0045 tag1 StructuredEvent) — agent `OutputEvent`의 **충실한 미러**.
+/// Structured output event wire mirror (ADR-0045 tag1 StructuredEvent) — a **faithful mirror** of agent `OutputEvent`.
 ///
-/// ★왜 새 타입인가(OutputChunk 확장 아님)★: 기존 wire `OutputChunk`(아래)는 S14 잔재라 `turn_id`/
-/// `id`/`message_id`가 없고 `MessageDone`/`Error` variant도 없다. 게다가 `AgentEvent::Output`·
-/// `export_all_to` 사용처에 묶여 있어 확장하면 그 계약이 깨질 위험이 있다. ADR-0045 "self-describing +
-/// 교체성(optional turn_id/message_id 보존)"을 만족하려면 agent `OutputEvent`를 필드 유실 0으로 미러해야
-/// 하므로, 오염 없는 **새 wire 타입**을 신설한다(OutputChunk 는 GetSnapshot 스냅샷 전용으로 그대로 둔다).
+/// ★Why a new type (not extending OutputChunk)★: the existing wire `OutputChunk` (below) is an S14 leftover, so it has no `turn_id`/
+/// `id`/`message_id` and no `MessageDone`/`Error` variant. Besides, it is tied to the `AgentEvent::Output`·
+/// `export_all_to` use sites, so extending it risks breaking that contract. Satisfying ADR-0045 "self-describing +
+/// swappability (preserve optional turn_id/message_id)" requires mirroring agent `OutputEvent` with zero field loss,
+/// so a clean **new wire type** is introduced (OutputChunk stays as is, only for the GetSnapshot snapshot).
 ///
-/// ★agent↔wire 변환은 daemon adapter★(ADR-0003 격리): agent `OutputEvent`(도메인 타입, Serialize 미부착)
-/// → 이 wire 타입은 daemon `connection_core::output_event_to_wire` 가 명시 매핑한다. protocol 은 wire
-/// 타입만 소유(agent 무의존).
+/// ★The agent↔wire conversion is the daemon adapter★ (ADR-0003 isolation): agent `OutputEvent` (domain type, no Serialize)
+/// → this wire type is mapped explicitly by daemon `connection_core::output_event_to_wire`. protocol owns only the wire
+/// type (no agent dependency).
 ///
-/// ★TerminalBytes 는 제외★: 콘솔 raw 바이트는 tag0 terminal frame(payload=raw bytes)으로만 흐르고
-/// tag1 payload 에 실리지 않는다. 따라서 이 미러에는 TerminalBytes variant 를 두지 않는다 — agent
-/// `OutputEvent::TerminalBytes` 가 이 변환에 오면 adapter 가 방어적으로 흡수(근거 주석은 output_event_to_wire).
+/// ★TerminalBytes is excluded★: console raw bytes flow only in the tag0 terminal frame (payload=raw bytes) and
+/// are not carried in the tag1 payload. So this mirror has no TerminalBytes variant — if agent
+/// `OutputEvent::TerminalBytes` comes to this conversion, the adapter absorbs it defensively (the rationale comment is in output_event_to_wire).
 ///
-/// ★self-describing serde★: internally-tagged(`#[serde(tag="type")]`) — payload JSON 에 `"type"` 판별자가
-/// 박혀 프론트가 JSON.parse 후 variant 를 가른다.
-/// wire 직렬화 형식 = JSON(serde_json) — daemon adapter 가 `serde_json::to_vec` 로 tag1 payload 를 만든다.
+/// ★self-describing serde★: internally-tagged (`#[serde(tag="type")]`) — the `"type"` discriminator is embedded in the payload JSON
+/// so the frontend splits the variant after JSON.parse.
+/// wire serialization format = JSON (serde_json) — the daemon adapter builds the tag1 payload with `serde_json::to_vec`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type")]
 #[ts(export)]
 pub enum StructuredEvent {
-    /// 어시스턴트 텍스트 증분(스트리밍 델타).
+    /// Assistant text increment (streaming delta).
     TextDelta {
         text: String,
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// 직렬화된 인자(backend별 스키마 그대로).
+    /// Serialized arguments (the per-backend schema as is).
     ToolCall {
         name: String,
         args_json: String,
-        /// 호출 식별자(권한 UX·결과 매칭용). claude tool_use id 등.
+        /// Call identifier (for permission UX · result matching). claude tool_use id etc.
         id: Option<String>,
         turn_id: Option<String>,
         message_id: Option<String>,
-        /// 도구의 중립 종류. ★칸이 없으면(옛 데몬) 프론트 소비자는 `Other` 로 읽는다★ — 새 데몬은 늘 싣는다.
-        // ADR-0239: `PROTOCOL_VERSION` 은 이 칸으로 올리지 않는다 — `TurnEnd` 와 같은 판단(데몬→셸 한 방향 ·
-        //   옛 쪽엔 오독할 것이 없다).
-        // ts-rs 는 이 serde 속성을 못 읽어 경고("failed to parse")하고 무시한다 — TS 칸 모양은 아래
-        //   `ts(optional)` 이 정한다.
+        /// The tool's neutral category. ★If the field is absent (old daemon), the frontend consumer reads it as `Other`★ — a new daemon always carries it.
+        // ADR-0239: `PROTOCOL_VERSION` not bumped for this field (same judgment as `TurnEnd`: one direction daemon→shell, nothing to
+        //   misread on the old side).
+        // ts-rs cannot read this serde attribute ("failed to parse" warning, ignored) — the TS field shape is decided by `ts(optional)` below.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         category: Option<ToolCategory>,
     },
-    /// 도구 호출 하나의 끝 결과(agent `OutputEvent::ToolResult` 의 미러) — 앞선 `ToolCall` 을 `id` 로 가리킨다.
-    /// ★새 행이 아니다★ — 가리킬 호출이 없으면 붙일 곳이 없다.
+    /// The end result of one tool call (mirror of agent `OutputEvent::ToolResult`) — points to the preceding `ToolCall` by `id`.
+    /// ★Not a new row★ — if there is no call to point to, there is nowhere to attach.
     ///
-    /// ★이 사건이 없다 = 성공이 아니다★ — 없음은 「모름」이다(옛 데몬 · 링에서 밀려남 · 끝이 안 옴).
-    /// ★턴 끝 **뒤에도** 온다★ — 지난 턴의 행에 붙는다. 「새 내용이 왔다」로 읽어 대기 표시를 풀지 말 것.
-    // ADR-0241: `PROTOCOL_VERSION` 은 이 변형으로 올리지 않는다 — `TurnEnd` 와 같은 판단(데몬→셸 한 방향 ·
-    //   옛 셸엔 오독할 것이 없다 · 옛 데몬은 이 사건을 안 보낼 뿐이다).
+    /// ★No such event ≠ success★ — absence is 「unknown」 (old daemon · pushed out of the ring · the end never came).
+    /// ★It also comes **after** the turn end★ — it attaches to a row of the previous turn. Do not read it as 「new content arrived」 and release the waiting indicator.
+    // ADR-0241: `PROTOCOL_VERSION` not bumped for this variant (same judgment as `TurnEnd`; an old daemon just does not send this event).
     ToolResult { id: String, outcome: ToolOutcome },
     Usage {
         #[ts(type = "number")]
@@ -799,66 +792,66 @@ pub enum StructuredEvent {
         output_tokens: u64,
         turn_id: Option<String>,
     },
-    /// 한 메시지(turn 응답) 종료 신호.
+    /// End signal of one message (turn response).
     MessageDone {
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// 턴 경계 + **어떻게 끝났나**(agent `OutputEvent::TurnEnd` 의 미러).
+    /// Turn boundary + **how it ended** (mirror of agent `OutputEvent::TurnEnd`).
     ///
-    /// ★`MessageDone` 과 별 타입인 것이 계약이다★ — 그쪽은 "한 메시지가 닫혔다", 이쪽은 "한 턴이 이
-    ///   결말로 닫혔다". 한 턴에 완료 항목이 여럿인 백엔드에서 둘은 같은 사건이 아니다.
-    /// ★`PROTOCOL_VERSION` 은 이 추가로 올리지 않는다★ — [`crate::PROTOCOL_VERSION`] 이 적어 둔 bump
-    ///   기준은 모양이 아니라 **조용한 오작동**이다. 그 기준에 두 방향을 각각 대면 이렇게 된다:
-    ///   - **신데몬 + 구셸**: 이벤트 enum 은 모르는 변형이 와도 Rust 쪽이 조용히 통과시키므로 그 조합이
-    ///     깨지지 않는다. ★단 프론트 누산기 switch 에는 `default:` 가지가 없어 **화면에서는 조용하지
-    ///     않다**★(모르는 `type` 은 항목이 안 들어가고 턴 표시도 안 움직인다) — 그 가지를 세우는 것이 이
-    ///     어휘를 소비하는 쪽의 몫이다.
-    ///   - **구데몬 + 신셸**: ★이쪽이 로컬 개발의 일상 조합이다★ — 데몬은 셸 재빌드보다 오래 산다(그
-    ///     사실은 그 상수의 v4 항목에 적혀 있다). 구데몬은 이 이벤트를 **아예 안 보낸다**. 그래서 신셸의
-    ///     대기 표시가 영영 안 풀리고 알림도 안 뜬다 — 사람이 「고친 게 안 돈다」와 「네 데몬이 낡았다」를
-    ///     **구분할 수 없다**.
-    /// ★그래도 안 올리는 이유★ — 그 기준이 든 사례들은 전부 **두 쪽이 같은 데이터를 서로 다르게 해석하는**
-    ///   경우다. 이 변경은 **한 방향뿐이다**: 이벤트는 데몬→셸 으로만 흐르고 신셸이 데몬에 새로 보내는
-    ///   것은 없다. 그래서 구데몬에는 오독할 것이 아예 없고 **그 기능이 없을 뿐**이다. 「옛 빌드에 새
-    ///   수정이 없다」를 조용한 오작동으로 세면 **데몬 쪽 수정마다** bump 를 강제하게 된다.
-    /// ★그리고 미출시라 대가가 싸다★ — 밖의 사용자가 아직 없어 이 조합을 만나는 사람은 개발자뿐이고,
-    ///   나중에 이 판단을 뒤집는 값도 싸다. (사용자 결정 2026-09-14)
-    /// ★증상으로 되찾는 길★: **대기 표시가 영영 안 풀리면 버그를 뒤지기 전에 데몬이 낡았는지 먼저 본다.**
+    /// ★Being a separate type from `MessageDone` is the contract★ — that one is "one message closed", this one is "one turn closed with this
+    ///   outcome". In backends with several completed items per turn, the two are not the same event.
+    /// ★`PROTOCOL_VERSION` is not bumped for this addition★ — the bump criterion [`crate::PROTOCOL_VERSION`] records
+    ///   is not shape but **silent malfunction**. Measuring each of the two directions against that criterion gives this:
+    ///   - **new daemon + old shell**: the event enum lets an unknown variant pass silently on the Rust side, so that combination
+    ///     does not break. ★But the frontend accumulator switch has no `default:` branch, so **it is not silent on the
+    ///     screen**★ (an unknown `type` adds no item and does not move the turn indicator) — adding that branch is the job of
+    ///     the side that consumes this vocabulary.
+    ///   - **old daemon + new shell**: ★this is the everyday combination of local development★ — the daemon outlives shell rebuilds (that
+    ///     fact is recorded in that constant's v4 entry). The old daemon **never sends** this event. So the new shell's
+    ///     waiting indicator never releases and no notification shows — a person **cannot tell apart** 「my fix does not work」 and
+    ///     「your daemon is stale」.
+    /// ★Why it is still not bumped★ — the cases that criterion lists are all cases where **the two sides interpret the same data
+    ///   differently**. This change is **one direction only**: events flow only daemon→shell, and the new shell sends nothing new
+    ///   to the daemon. So the old daemon has nothing to misread at all and **merely lacks the feature**. Counting 「an old build lacks a new
+    ///   fix」 as a silent malfunction would force a bump **for every daemon-side fix**.
+    /// ★And it is unreleased, so the price is cheap★ — there are no outside users yet, so only developers meet this combination, and
+    ///   reversing this judgment later is cheap too. (user decision 2026-09-14)
+    /// ★The way to recover from the symptom★: **if the waiting indicator never releases, check whether the daemon is stale before digging for a bug.**
     TurnEnd {
         turn_id: Option<String>,
         outcome: TurnOutcome,
     },
-    /// backend 가 보고한 오류 — ★**턴 경계가 아니다**★.
+    /// An error the backend reported — ★**not a turn boundary**★.
     ///
-    /// ★두 어휘가 각각 무엇을 뜻하나 — 소비자가 여기서 갈린다★:
-    ///   - `Error` = **턴 안에서 일어난 사고**. 그 뒤에도 같은 턴이 이어진다(재시도되는 스트림 오류가
-    ///     이 부류다). 이것을 턴 종료로 읽으면 한 턴이 사고 횟수만큼 쪼개지고, 뒤에 오는 진짜 경계는
-    ///     이미 끝난 턴에 붙는다.
-    ///   - [`StructuredEvent::TurnEnd`] = **턴이 끝났다**. 실패로 끝난 턴도 이쪽 어휘로 온다 — 사유는
-    ///     그 안의 결말 칸이 나른다.
-    /// ★그래서 「재시도되나」를 칸으로 따로 내보내지 않는다★ — 그 구별은 **이벤트 타입**이 이미 지고
-    ///   있고, 칸을 하나 더 만들면 같은 사실이 두 곳에 살다가 하나가 낡는다.
+    /// ★What each of the two words means — consumers split here★:
+    ///   - `Error` = **an incident within the turn**. The same turn continues after it (a retried stream error is
+    ///     of this kind). Reading it as turn end splits one turn into as many pieces as incidents, and the real boundary that follows
+    ///     attaches to an already-ended turn.
+    ///   - [`StructuredEvent::TurnEnd`] = **the turn ended**. A turn that ended in failure also comes in this word — the reason
+    ///     is carried by its outcome field.
+    /// ★So 「is it retried」 is not emitted as a separate field★ — that distinction is already carried by the **event type**,
+    ///   and making one more field would have the same fact live in two places until one goes stale.
     Error { message: String },
-    /// 위 정형 variant 로 안 잡히는 backend별 이벤트의 탈출구(forward-compat).
-    /// kind=종류 태그, json=원본 직렬화 payload(프론트가 kind 로 분기·해석).
+    /// The escape hatch for per-backend events not caught by the regular variants above (forward-compat).
+    /// kind=category tag, json=original serialized payload (the frontend branches · interprets by kind).
     Structured { kind: String, json: String },
-    /// 대기 입력 명부 사건(agent `OutputEvent::QueuedInput` 의 미러). 모양 = `{"type":"QueuedInput","op":{"kind":…}}`.
+    /// Queued input registry event (mirror of agent `OutputEvent::QueuedInput`). Shape = `{"type":"QueuedInput","op":{"kind":…}}`.
     ///
-    /// ★프론트 누산기는 이 사건열을 agent 명부와 **같은 환원 규칙**으로 읽는다★ — 두 판의 공유 골든은
-    ///   `crates/engram-dashboard-agent/src/queued_input_golden.json` 이고, 그 사건 객체가 곧 `op` 의 모양이다.
-    /// ★`PROTOCOL_VERSION` 은 이 변형으로 올리지 않는다★ — [`StructuredEvent::TurnEnd`] 와 같은 판단이다
-    ///   (데몬→셸 한 방향 · 구데몬은 이 사건을 안 보낼 뿐 오독할 것이 없다).
+    /// ★The frontend accumulator reads this event sequence with **the same reduction rules** as the agent registry★ — the shared golden of the two sides is
+    ///   `crates/engram-dashboard-agent/src/queued_input_golden.json`, and its event object is exactly the shape of `op`.
+    /// ★`PROTOCOL_VERSION` is not bumped for this variant★ — the same judgment as [`StructuredEvent::TurnEnd`]
+    ///   (one direction daemon→shell · an old daemon just does not send this event, nothing to misread).
     // ADR-0231
     QueuedInput { op: QueuedInputEvent },
 }
 
-/// 대기 입력 명부 사건 — agent `QueuedInputEvent` 의 미러. 판별자 = `"kind"`(바깥 봉투의 `"type"` 과 겹치지
-/// 않게 — [`TurnOutcome`] 과 같은 이유).
+/// Queued input registry event — mirror of agent `QueuedInputEvent`. Discriminator = `"kind"` (so it does not overlap with the outer envelope's `"type"`
+/// — the same reason as [`TurnOutcome`]).
 ///
-/// ★`Delivered` 는 본문을 싣지 않는다★ — 말풍선 본문은 앞선 `Queued` 의 `text`(우리 로컬 사본)다.
-/// ★`AckUnavailable.delivered` 는 링에 적힐 때 늘 채워져 있다(agent 코어가 채운다)★ — 그 사건이 받음으로
-///   닫는 항목마다 (id, 본문) 한 벌. 링 창이 `Queued` 를 잃은 창도 이 사본으로 그 자리 말풍선을 그린다.
+/// ★`Delivered` does not carry the body★ — the bubble body is the preceding `Queued`'s `text` (our local copy).
+/// ★`AckUnavailable.delivered` is always filled when written to the ring (the agent core fills it)★ — one (id, body) pair for each item that event closes
+///   as received. Even a ring window that lost `Queued` draws that bubble from this copy.
 // ADR-0231
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "kind")]
@@ -871,7 +864,7 @@ pub enum QueuedInputEvent {
     CancelRequested {
         id: String,
     },
-    /// `removed: true` 만 결말(취소됨)이다 — `false` 는 뒤이은 벤더 닫힘의 원인을 가르는 재료다.
+    /// Only `removed: true` is an outcome (cancelled) — `false` is material for telling the cause of the following vendor close.
     CancelAnswered {
         id: String,
         removed: bool,
@@ -879,8 +872,8 @@ pub enum QueuedInputEvent {
     CancelFailed {
         id: String,
     },
-    /// 넘김 표지 — `sent: true` = 통로가 벤더에 넘겼다 · `false` = 쥔 자리로 되돌렸다. 결말이 아니다(행은 남는다 —
-    ///   넘긴 행은 ✕ 가 숨는다). 목록에 없는 id 면 무동작 · 마지막 것이 이긴다.
+    /// Handover mark — `sent: true` = the link handed it to the vendor · `false` = put back to the held spot. Not an outcome (the row stays —
+    ///   a handed-over row hides ✕). No-op for an id not in the list · the last one wins.
     HandedOver {
         id: String,
         sent: bool,
@@ -888,7 +881,7 @@ pub enum QueuedInputEvent {
     Delivered {
         id: String,
     },
-    /// `Rejected` 는 그 id 로 그린 말풍선도 지운다.
+    /// `Rejected` also erases the bubble drawn with that id.
     Dropped {
         id: String,
         cause: DropCause,
@@ -898,8 +891,8 @@ pub enum QueuedInputEvent {
     },
 }
 
-/// [`QueuedInputEvent::Dropped`] 의 원인 — wire 에서는 문자열 하나(`"Withdrawn"` 등).
-/// ★`Unknown` 만 되살림 가능한 묘비를 남긴다★(뒤늦은 `Delivered` 가 이긴다).
+/// The cause of [`QueuedInputEvent::Dropped`] — one string on the wire (`"Withdrawn"` etc.).
+/// ★Only `Unknown` leaves a revivable tombstone★ (a late `Delivered` wins).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -911,7 +904,7 @@ pub enum DropCause {
     Unknown,
 }
 
-/// [`QueuedInputEvent::AckUnavailable`] 이 싣는 말풍선 사본.
+/// The bubble copy [`QueuedInputEvent::AckUnavailable`] carries.
 // ADR-0231
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -920,44 +913,44 @@ pub struct DeliveredCopy {
     pub text: String,
 }
 
-/// 턴이 **어떻게** 끝났나 — [`StructuredEvent::TurnEnd`] 가 나르는 중립 어휘(agent `TurnOutcome` 미러).
+/// **How** a turn ended — the neutral vocabulary [`StructuredEvent::TurnEnd`] carries (mirror of agent `TurnOutcome`).
 ///
-/// ★중립인 것은 **판별자**다 — `detail` 은 아니다★(ADR-0004): 상대 프로토콜의 상태 어휘
-///   (`completed`·`failed`·`inProgress` 같은 값)는 각 backend decoder 안에서 끝나고 밖으로는 이 네
-///   갈래만 나간다. 그래서 **소비자가 분기하는 축**에는 backend 이름이 없다.
-/// ★그 대신 `detail` 에는 상대가 만든 문장이 그대로 실린다 — 그것이 이 칸의 계약이다★: 실패 사유는
-///   상대가 준 것이 유일한 정보이고(codex 는 `serverOverloaded` 같은 자기 라벨과 「다음 턴에 그대로
-///   넣을 문장」을 거기 싣는다), 중립 어휘로 옮기려면 뜻을 지어내야 한다. 그래서 이 칸의 등급은
-///   [`StructuredEvent::Error`] 의 `message` 와 **같다** — 사람이 읽는 불투명 문자열이고, 길이와
-///   자격증명 마스킹만 backend decoder 가 책임진다.
-/// ★소비자 의무 = 그리기만 한다★: `detail` 을 파싱하거나 그 내용으로 분기하면 그 순간 프론트가
-///   backend 어휘를 알게 되고 격리가 실제로 샌다. 분기는 판별자로만 한다.
-/// ★`Unknown` 을 아는 셋 중 하나로 접지 말 것★ — 접으려면 모르는 값의 뜻을 추측해야 하고, 틀리면
-///   화면이 거짓 결말을 그린다. 모른다는 사실 자체가 실린다.
-/// ★self-describing serde★: internally-tagged(`#[serde(tag="kind")]`) — 바깥 봉투가 `"type"` 을 쓰므로
-///   여기는 `"kind"` 를 쓴다(같은 객체에 두 판별자가 겹치지 않게).
+/// ★What is neutral is the **discriminator** — `detail` is not★ (ADR-0004): the counterpart protocol's state vocabulary
+///   (values like `completed`·`failed`·`inProgress`) ends inside each backend decoder, and only these four
+///   branches go out. So **the axis consumers branch on** has no backend name.
+/// ★Instead, `detail` carries the sentence the counterpart made as is — that is this field's contract★: the failure reason is
+///   the only information the counterpart gave (codex puts its own label like `serverOverloaded` and 「the sentence to put in
+///   the next turn as is」 there), and translating it into neutral vocabulary would mean inventing meaning. So this field's grade is
+///   **the same** as `message` of [`StructuredEvent::Error`] — a human-readable opaque string, and only length and
+///   credential masking are the backend decoder's responsibility.
+/// ★Consumer duty = only draw it★: parsing `detail` or branching on its content makes the frontend know
+///   backend vocabulary at that moment, and the isolation really leaks. Branch only on the discriminator.
+/// ★Do not fold `Unknown` into one of the three known ones★ — folding requires guessing the meaning of an unknown value, and if wrong
+///   the screen draws a false outcome. The fact that it is unknown is itself carried.
+/// ★self-describing serde★: internally-tagged (`#[serde(tag="kind")]`) — the outer envelope uses `"type"`, so
+///   this one uses `"kind"` (so two discriminators do not overlap in the same object).
 // ADR-0045
 // ADR-0004
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "kind")]
 #[ts(export)]
 pub enum TurnOutcome {
-    /// 정상 종료.
+    /// Normal end.
     Completed,
-    /// 실패. `detail` = **상대가 만든 사람이 읽는 사유**(없을 수 있다 — 사유 없이 실패만 아는 경우).
-    ///   ★중립 어휘가 아니다 — 분기하지 말고 그리기만 할 것★(타입 doc).
+    /// Failure. `detail` = **the human-readable reason the counterpart made** (may be absent — when only the failure is known, without a reason).
+    ///   ★Not neutral vocabulary — do not branch on it, only draw it★ (type doc).
     Failed { detail: Option<String> },
-    /// 사용자가 끊었다 — ★실패가 아니다★.
+    /// The user interrupted — ★not a failure★.
     Interrupted,
-    /// 결말을 알 수 없다(모르는 값이거나 아예 없었다). 그래도 턴은 끝난 것으로 센다.
+    /// The outcome cannot be known (an unknown value, or none at all). The turn still counts as ended.
     Unknown,
 }
 
-/// 도구 호출의 중립 종류 — [`StructuredEvent::ToolCall`] 의 `category`(agent `ToolCategory` 미러). wire 에서는
-/// 문자열 하나(`"Read"` 등).
+/// The neutral category of a tool call — `category` of [`StructuredEvent::ToolCall`] (mirror of agent `ToolCategory`). On the wire,
+/// one string (`"Read"` etc.).
 ///
-/// ★벤더 도구 이름 · item 타입은 여기 오지 않는다★(ADR-0004) — 판정은 각 backend 번역기 안에서 끝난다.
-/// ★프론트 소비자는 모르는 낱말을 `Other` 로 읽는다★ — 더 새 데몬이 변형을 더해도 화면이 선다.
+/// ★Vendor tool names · item types do not come here★ (ADR-0004) — the decision ends inside each backend translator.
+/// ★The frontend consumer reads an unknown word as `Other`★ — the screen holds up even if a newer daemon adds variants.
 // ADR-0239
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -973,16 +966,16 @@ pub enum ToolCategory {
     Other,
 }
 
-/// 도구 호출 끝 결과의 중립 결말 — [`StructuredEvent::ToolResult`] 의 `outcome`(agent `ToolOutcome` 미러). wire
-/// 에서는 문자열 하나(`"Failed"` 등).
+/// The neutral outcome of a tool call's end result — `outcome` of [`StructuredEvent::ToolResult`] (mirror of agent `ToolOutcome`). On the wire,
+/// one string (`"Failed"` etc.).
 ///
-/// - `Completed` = 정상 완료. ★지금 어느 데몬도 싣지 않는다★ — 실패 · 거부만 오고 이 낱말은 선 어휘로만 있다.
-/// - `Failed` = 돌다 실패했다.
-/// - `Declined` = 실행되지 않았다 — 우리 거절로 귀속되지 않은 거부. 이유는 모른다.
-/// - `Refused` = 대시보드가 승인 요청을 거절해 실행되지 않았다.
+/// - `Completed` = completed normally. ★No daemon carries it now★ — only failure · refusal come, and this word exists only as laid-down vocabulary.
+/// - `Failed` = it ran and failed.
+/// - `Declined` = it was not executed — a refusal not attributed to our rejection. The reason is unknown.
+/// - `Refused` = it was not executed because the dashboard rejected the approval request.
 ///
-/// ★벤더 끝 상태 문자열은 여기 오지 않는다★(ADR-0004). ★프론트 소비자는 모르는 낱말을 표식 없음으로 읽는다★ —
-/// 더 새 데몬이 낱말을 더해도 화면이 선다.
+/// ★Vendor end-state strings do not come here★ (ADR-0004). ★The frontend consumer reads an unknown word as no mark★ —
+/// the screen holds up even if a newer daemon adds words.
 // ADR-0241
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -993,15 +986,15 @@ pub enum ToolOutcome {
     Refused,
 }
 
-/// 출력 청크 — 종류 불가지(설계 §2).
-/// (구조화 turn 단위 출력은 TUI↔구조화 스위칭 모드 설계 때 실제 채움 — 지금은 형태만 연다.)
+/// Output chunk — kind-agnostic (design §2).
+/// (Structured per-turn output gets actually filled in when the TUI↔structured switching mode is designed — for now only the shape is opened.)
 ///
-/// ※S15/ADR-0045: tag1 구조화 이벤트는 이 타입이 아니라 위 [`StructuredEvent`]로 흐른다(필드 유실 0
-/// 미러). 이 `OutputChunk`는 GetSnapshot 스냅샷(AgentEvent::Output/Snapshot) 계약 전용으로 남는다.
+/// ※S15/ADR-0045: tag1 structured events flow not through this type but through [`StructuredEvent`] above (zero field loss
+/// mirror). This `OutputChunk` remains only for the GetSnapshot snapshot (AgentEvent::Output/Snapshot) contract.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub enum OutputChunk {
-    /// 콘솔 raw 바이트(현 유일 실사용). JSON 경로엔 안 실림 — codec binary frame 전용.
+    /// Console raw bytes (the only real use now). Not carried on the JSON path — codec binary frame only.
     TerminalBytes(
         #[serde(with = "serde_bytes")]
         #[ts(type = "number[]")]
@@ -1016,7 +1009,7 @@ pub enum OutputChunk {
         name: String,
         args_json: String,
     },
-    /// 임의 구조화 페이로드(forward-compat 탈출구).
+    /// Arbitrary structured payload (forward-compat escape hatch).
     Structured {
         kind: String,
         json: String,
@@ -1110,18 +1103,19 @@ mod tests {
             },
         ];
         for ev in cases {
-            let json = serde_json::to_string(&ev).expect("직렬화 성공");
+            let json = serde_json::to_string(&ev).expect("serialization succeeds");
             assert!(
                 json.contains("\"type\""),
-                "internally-tagged 판별자 누락: {json}"
+                "internally-tagged discriminator missing: {json}"
             );
-            let back: StructuredEvent = serde_json::from_str(&json).expect("역직렬화 성공");
-            assert_eq!(ev, back, "round-trip 무손실(필드 유실 0)");
+            let back: StructuredEvent =
+                serde_json::from_str(&json).expect("deserialization succeeds");
+            assert_eq!(ev, back, "lossless round trip (zero field loss)");
         }
     }
 
-    /// optional turn_id/message_id 가 None 일 때도 정확히 None 으로 복원되는지(교체성 — codex/gemini 가
-    /// 못 채우는 필드가 임의 값으로 채워지면 안 됨).
+    /// Whether optional turn_id/message_id restore exactly as None when they are None (swappability — fields codex/gemini
+    /// cannot fill must not be filled with arbitrary values).
     #[test]
     fn structured_event_optional_fields_preserve_none() {
         let ev = StructuredEvent::TextDelta {
@@ -1137,20 +1131,17 @@ mod tests {
                 message_id,
                 ..
             } => {
-                assert!(turn_id.is_none() && message_id.is_none(), "None 보존");
+                assert!(turn_id.is_none() && message_id.is_none(), "None preserved");
             }
-            _ => panic!("variant 불일치"),
+            _ => panic!("variant mismatch"),
         }
     }
 
-    /// ★프론트가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 바깥 봉투 판별자는 `"type"`,
-    /// 결말 판별자는 `"kind"` 다. 둘을 같은 이름으로 두면 한 객체에서 겹쳐 결말이 사라진다.
+    /// ★The frontend reads these characters as is — pin them with a golden★: envelope discriminator `"type"`, outcome discriminator `"kind"` (the same name would overlap
+    /// in one object and the outcome would vanish).
     ///
-    /// ★이 항목이 못 박는 중립성은 **판별자 집합** 하나다★ — 그 넷이 곧 프론트가 분기하는 축이고,
-    /// 거기에 backend 어휘가 들어오면 여기가 빨개진다. ★`detail` 은 그 축이 아니다 — 그 칸에는 상대가
-    /// 만든 문장이 그대로 실린다★(아래 마지막 단언이 그 사실을 명시로 고정한다). 「wire 에 backend
-    /// 어휘가 하나도 안 오른다」로 읽지 말 것 — 그것은 거짓이고, 한때 이 자리와 타입 doc 이 그렇게
-    /// 적혀 있었다.
+    /// ★The neutrality pinned here is the **discriminator set**★ — the four the frontend branches on; backend vocabulary there turns this red. ★`detail` is not that axis★ — it carries
+    /// the counterpart's sentence as is (the last assertion pins it); it is false that no backend vocabulary reaches the wire.
     #[test]
     fn turn_end_wire_shape_is_pinned_and_the_outcome_discriminant_is_neutral() {
         assert_eq!(
@@ -1180,8 +1171,8 @@ mod tests {
             r#"{"type":"TurnEnd","turn_id":null,"outcome":{"kind":"Unknown"}}"#
         );
 
-        // ★판별자 집합이 곧 중립성이다★ — 넷 말고 다른 값이 나가면 프론트의 분기 축에 backend 어휘가
-        //   실린 것이다. 값은 `serde_json` 이 내는 그대로를 읽는다(이름을 손으로 베끼지 않는다).
+        // ★The discriminator set is the neutrality★ — a value outside the four means backend vocabulary on the frontend's branching axis
+        //   (values read as `serde_json` emits them).
         let discriminants: Vec<String> = [
             TurnOutcome::Completed,
             TurnOutcome::Failed { detail: None },
@@ -1201,9 +1192,9 @@ mod tests {
             ["Completed", "Failed", "Interrupted", "Unknown"]
         );
 
-        // ★그리고 `detail` 은 **그대로** 간다 — 이것이 계약이고 결함이 아니다★: 실패 사유는 상대가
-        //   준 것이 유일한 정보라 중립 어휘로 옮기려면 뜻을 지어내야 한다. 소비자는 이 칸을 그리기만
-        //   하고 파싱·분기하지 않는다(타입 doc). 그 등급은 `Error{message}` 와 같다.
+        // ★`detail` goes **as is** — contract, not defect★: the counterpart's failure reason is the only information, so translating it
+        //   would invent meaning;
+        //   consumers only draw it (type doc).
         let raw = "stream error (serverOverloaded) [willRetry]";
         assert_eq!(
             serde_json::to_string(&StructuredEvent::TurnEnd {
@@ -1219,10 +1210,10 @@ mod tests {
         );
     }
 
-    // ── 도구 종류(ADR-0239) ──────────────────────────────────────────────────────────
+    // ── Tool category (ADR-0239) ──────────────────────────────────────────────────────────
 
-    /// ★프론트가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 종류는 문자열 하나이고, 칸이 없는 옛 데몬의
-    /// 줄도 읽히며(→ `None`), `None` 은 칸 자체를 싣지 않는다.
+    /// ★The frontend reads these characters as is — pin them with a golden★: the category is one string, a line from an old daemon without the field
+    /// is still read (→ `None`), and `None` does not carry the field at all.
     // ADR-0239
     #[test]
     fn tool_call_category_wire_shape_is_pinned_and_absent_means_none() {
@@ -1245,7 +1236,8 @@ mod tests {
         );
 
         let old = r#"{"type":"ToolCall","name":"Read","args_json":"{}","id":"c1","turn_id":null,"message_id":null}"#;
-        let back: StructuredEvent = serde_json::from_str(old).expect("칸 없는 옛 줄이 안 읽힌다");
+        let back: StructuredEvent =
+            serde_json::from_str(old).expect("an old line without the field does not read");
         assert_eq!(
             back,
             StructuredEvent::ToolCall {
@@ -1260,12 +1252,12 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&back).unwrap(),
             old,
-            "None 이 칸을 실었다"
+            "None carried the field"
         );
     }
 
-    /// ★아홉 낱말이 그대로 문자열로 오간다★ — 프론트는 생성물 `ToolCategory.ts` 로 이 낱말을 읽는다
-    /// (`structuredAccumulator.ts` 의 `TOOL_CATEGORIES`).
+    /// ★The nine words travel as strings as is★ — the frontend reads these words through the generated `ToolCategory.ts`
+    /// (`TOOL_CATEGORIES` in `structuredAccumulator.ts`).
     // ADR-0239
     #[test]
     fn every_tool_category_round_trips_as_its_own_name() {
@@ -1290,9 +1282,9 @@ mod tests {
         }
     }
 
-    // ── 도구 끝 결과(ADR-0241) ──────────────────────────────────────────────────────────
+    // ── Tool end result (ADR-0241) ──────────────────────────────────────────────────────────
 
-    /// ★프론트 누산기가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 판별자 `"type"`, 결말은 문자열 하나.
+    /// ★The frontend accumulator reads these characters as is — pin them with a golden★: discriminator `"type"`, the outcome is one string.
     // ADR-0241
     #[test]
     fn tool_result_wire_shape_is_pinned() {
@@ -1316,8 +1308,8 @@ mod tests {
         }
     }
 
-    /// ★네 낱말이 그대로 문자열로 오간다★ — 프론트는 생성물 `ToolOutcome.ts` 로 이 낱말을 읽는다
-    /// (`structuredAccumulator.ts` 의 `toolResultMark`).
+    /// ★The four words travel as strings as is★ — the frontend reads these words through the generated `ToolOutcome.ts`
+    /// (`toolResultMark` in `structuredAccumulator.ts`).
     // ADR-0241
     #[test]
     fn every_tool_outcome_round_trips_as_its_own_name() {
@@ -1334,10 +1326,10 @@ mod tests {
         }
     }
 
-    // ── 대기 입력 명부 사건(ADR-0231) ────────────────────────────────────────────────
+    // ── Queued input registry events (ADR-0231) ────────────────────────────────────────────────
 
-    /// ★프론트 누산기가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 바깥 판별자 `"type"`, 사건 판별자
-    /// `"kind"`, 원인은 문자열 하나, 사본은 `{id,text}` 배열.
+    /// ★The frontend accumulator reads these characters as is — pin them with a golden★: outer discriminator `"type"`, event discriminator
+    /// `"kind"`, the cause is one string, the copy is an `{id,text}` array.
     #[test]
     fn queued_input_wire_shape_is_pinned() {
         let json = |op| serde_json::to_string(&StructuredEvent::QueuedInput { op }).unwrap();
@@ -1406,27 +1398,31 @@ mod tests {
         );
     }
 
-    /// 공유 골든의 사건 객체가 곧 wire `op` 다 — 누산기는 그 객체를 `{type:"QueuedInput", op}` 로 먹는다. 골든을
-    /// 고쳐 wire 가 못 읽는 모양이 들어오면 여기서 빨개진다(파일은 agent crate 에 있다 — 명부 옆이 집이다).
+    /// The event objects of the shared golden are exactly the wire `op` — the accumulator eats that object as `{type:"QueuedInput", op}`. If the golden
+    /// is changed and a shape the wire cannot read comes in, this turns red (the file is in the agent crate — its home is next to the registry).
     #[test]
     fn the_shared_queued_input_golden_speaks_the_wire_shape() {
         let golden: serde_json::Value = serde_json::from_str(include_str!(
             "../../engram-dashboard-agent/src/queued_input_golden.json"
         ))
-        .expect("골든 JSON");
+        .expect("golden JSON");
         let mut fed = 0;
         for case in golden["cases"].as_array().expect("cases") {
             for ev in case["events"].as_array().expect("events") {
                 let op: QueuedInputEvent = serde_json::from_value(ev.clone())
-                    .unwrap_or_else(|e| panic!("wire 가 못 읽는 골든 사건 {ev}: {e}"));
-                assert_eq!(&serde_json::to_value(&op).unwrap(), ev, "왕복 무손실");
+                    .unwrap_or_else(|e| panic!("golden event the wire cannot read {ev}: {e}"));
+                assert_eq!(
+                    &serde_json::to_value(&op).unwrap(),
+                    ev,
+                    "lossless round trip"
+                );
                 fed += 1;
             }
         }
         assert!(fed > 0);
     }
 
-    // ── 구독 응답의 이어받기 표식(ADR-0226) ──────────────────────────────────────────
+    // ── Resume marker of the subscribe response (ADR-0226) ──────────────────────────────────────────
     #[test]
     fn subscribe_ack_json_golden_carries_continues_conversation() {
         let agent_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
@@ -1447,22 +1443,24 @@ mod tests {
         );
     }
 
-    /// 옛 데몬은 이 칸을 모른다 — 빠진 ack 가 거절되지 않고 `false` 로 읽혀야 신셸이 옛 데몬에 붙는다.
+    /// An old daemon does not know this field — an ack missing the field must not be refused but read as `false` for a new shell to attach to an old daemon.
     #[test]
     fn a_subscribe_ack_from_an_older_daemon_reads_as_not_continuing() {
         let old = r#"{"SubscribeAck":{"agent_id":"11111111-1111-1111-1111-111111111111","action":"Resume","current_epoch":7,"oldest_seq":1,"latest_seq":2,"replay_from":1,"truncated":true}}"#;
-        match serde_json::from_str::<AgentEvent>(old).expect("칸 없는 옛 ack 도 읽힌다") {
+        match serde_json::from_str::<AgentEvent>(old)
+            .expect("an old ack without the field reads too")
+        {
             AgentEvent::SubscribeAck {
                 continues_conversation,
                 truncated,
                 current_epoch,
                 ..
             } => {
-                assert!(!continues_conversation, "빠진 칸 = 이어받지 않음");
-                assert!(truncated, "나머지 칸은 그대로 읽힌다");
+                assert!(!continues_conversation, "missing field = not resuming");
+                assert!(truncated, "the remaining fields read as is");
                 assert_eq!(current_epoch, 7);
             }
-            other => panic!("SubscribeAck 이어야: {other:?}"),
+            other => panic!("must be SubscribeAck: {other:?}"),
         }
     }
 
@@ -1539,9 +1537,9 @@ mod tests {
         let notices = serde_json::json!([
             {
                 "code": "skipped-field", "args": { "field": "model" }, "line": 4,
-                "text": "알림(skipped-field): 의도된 동작입니다. 대상 — model"
+                "text": "Notice (skipped-field): intended behavior. Target — model"
             },
-            { "code": "plain", "args": {}, "text": "알림(plain): 의도된 동작입니다." }
+            { "code": "plain", "args": {}, "text": "Notice (plain): intended behavior." }
         ]);
         let mut json: serde_json::Value = serde_json::from_str(&format!(
             r#"{{"Spawned":{{"request_id":"{nil}","agent":{SPAWNED_AGENT_JSON}}}}}"#
@@ -1677,8 +1675,8 @@ mod tests {
         assert_eq!(launch_blocked, None);
     }
 
-    /// ★옛 프리셋 wire 는 디코드되지 않는다 — 그래서 판이 8 이다★(`PROTOCOL_VERSION` 의 v8 항목). 이 판의 데몬이
-    ///   옛 셸의 프리셋 명령을 받으면 파싱 실패로 가고, 그 조합을 악수 전에 끊는 것이 판 대조다.
+    /// ★The old preset wire does not decode — that is why the version is 8★ (`PROTOCOL_VERSION`'s v8 entry). A daemon of this
+    ///   version fails to parse an old shell's preset command; the version check cuts that pair before the handshake.
     #[test]
     fn the_retired_preset_wire_does_not_decode_and_the_version_is_8() {
         let nil = "00000000-0000-0000-0000-000000000000";
@@ -1705,19 +1703,19 @@ mod tests {
     fn rename_profile_command_json_golden_and_roundtrip() {
         let cmd = AgentCommand::RenameProfile {
             profile_id: Uuid::nil(),
-            name: Some("내 에이전트".into()),
+            name: Some("내 에이전트".into()), // hangul-ok
             request_id: RequestId(Uuid::nil()),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert_eq!(
             json,
-            r#"{"RenameProfile":{"profile_id":"00000000-0000-0000-0000-000000000000","name":"내 에이전트","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
-            "RenameProfile wire 형태가 golden 과 불일치"
+            r#"{"RenameProfile":{"profile_id":"00000000-0000-0000-0000-000000000000","name":"내 에이전트","request_id":"00000000-0000-0000-0000-000000000000"}}"#, // hangul-ok
+            "RenameProfile wire shape does not match the golden"
         );
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         assert!(matches!(
             back,
-            AgentCommand::RenameProfile { name: Some(ref n), .. } if n == "내 에이전트"
+            AgentCommand::RenameProfile { name: Some(ref n), .. } if n == "내 에이전트" // hangul-ok
         ));
     }
 
@@ -1731,7 +1729,7 @@ mod tests {
         assert_eq!(
             json,
             r#"{"SetEnvelopeFormat":{"format":"xml","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
-            "SetEnvelopeFormat wire 형태가 golden 과 불일치(format 은 소문자 xml 이어야 — invoke JSON 계약)"
+            "SetEnvelopeFormat wire shape does not match the golden (format must be lowercase xml — invoke JSON contract)"
         );
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         assert!(matches!(
@@ -1750,7 +1748,7 @@ mod tests {
         assert_eq!(
             colon_json,
             r#"{"SetEnvelopeFormat":{"format":"colon","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
-            "colon variant 도 소문자여야"
+            "the colon variant must be lowercase too"
         );
         let colon_back: AgentCommand = serde_json::from_str(&colon_json).unwrap();
         assert_eq!(colon_json, serde_json::to_string(&colon_back).unwrap());
@@ -1761,7 +1759,7 @@ mod tests {
         assert_eq!(
             EnvelopeFormat::default(),
             EnvelopeFormat::Xml,
-            "기본 봉투 포맷 = xml(ADR-0103 기본 flip — 데몬 운영 기본과 정합)"
+            "default envelope format = xml (ADR-0103 default flip — consistent with the daemon's operating default)"
         );
         let xml: EnvelopeFormat = serde_json::from_str(r#""xml""#).unwrap();
         assert_eq!(xml, EnvelopeFormat::Xml);
@@ -1783,7 +1781,7 @@ mod tests {
         assert_eq!(
             json,
             r#"{"ReparentProfile":{"child_id":"11111111-1111-1111-1111-111111111111","parent_id":"22222222-2222-2222-2222-222222222222","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
-            "ReparentProfile(Some) wire 형태가 golden 과 불일치"
+            "ReparentProfile(Some) wire shape does not match the golden"
         );
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         assert!(matches!(
@@ -1800,7 +1798,7 @@ mod tests {
         assert_eq!(
             clear_json,
             r#"{"ReparentProfile":{"child_id":"11111111-1111-1111-1111-111111111111","parent_id":null,"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
-            "ReparentProfile(None) wire 형태가 golden 과 불일치"
+            "ReparentProfile(None) wire shape does not match the golden"
         );
         let clear_back: AgentCommand = serde_json::from_str(&clear_json).unwrap();
         assert!(matches!(
@@ -1812,18 +1810,18 @@ mod tests {
         ));
     }
 
-    // ── 명령 버스 등록 wire(ADR-0155/0156) ─────────────────────────────────────────
+    // ── Command bus registration wire (ADR-0155/0156) ─────────────────────────────────────────
     //
-    // ★등록 항목 목록 칸은 원문 JSON 이다(ADR-0272 결정 3)★ — 여기는 패킷 바깥 모양과 「칸 바이트가 그대로
-    //   건넌다」만 잰다. 항목 → 바이트 golden(`agent_args` 있음 · 없음)과 손으로 적은 TS 칸의 지킴이는 칸을 싸는
-    //   셸 끝자락(`daemon_client::protocol_state` 시험)이, 칸이 빠진 옛 항목을 빈 `agent_args` 로 푸는 것은 칸을
-    //   푸는 데몬 끝자락(`connection_core` 시험)이 같은 리터럴로 진다.
+    // ★The registration item list field is raw JSON (ADR-0272 decision 3)★ — this measures only the packet's outer shape and that the
+    //   field bytes cross as is. The item → bytes golden
+    //   (with · without `agent_args`) and the hand-written TS guard live at the shell edge (`daemon_client::protocol_state` tests);
+    //   unwrapping an old item missing `agent_args`
+    //   is the daemon edge's (`connection_core` tests).
 
     const SPAWN_DECLS: &str = r#"[{"name":"agent.spawn","help":"{\"name\":\"agent.spawn\",\"effect\":\"Write\",\"since\":1}"}]"#;
     const MIXED_DECLS: &str = r#"[{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]},{"name":"tab.focus","help":"{}"}]"#;
 
-    /// 등록 패킷이 항목 목록 칸을 실어 왕복한다 — `owner` 는 맨 문자열, 칸은 **바이트 그대로** 건넌다(항목의
-    /// `help` 가 한 글자도 안 바뀐다 — 중계자가 열어보지 않는다는 계약의 실물).
+    /// A registration packet round-trips carrying the item list field — `owner` is a bare string, the field crosses **byte for byte** (relays do not open an item's `help`).
     #[test]
     fn register_commands_round_trips_declarations() {
         let cmd = AgentCommand::RegisterCommands {
@@ -1836,21 +1834,25 @@ mod tests {
         assert_eq!(
             json,
             r#"{"RegisterCommands":{"owner":"shell","decls":[{"name":"agent.spawn","help":"{\"name\":\"agent.spawn\",\"effect\":\"Write\",\"since\":1}"}],"catalog_version":1,"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
-            "RegisterCommands wire 형태가 golden 과 불일치(owner 는 맨 문자열, help 는 통짜 문자열)"
+            "RegisterCommands wire shape does not match the golden (owner is a bare string, help is a whole string)"
         );
 
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         match back {
             AgentCommand::RegisterCommands { owner, decls, .. } => {
                 assert_eq!(owner.as_str(), "shell");
-                assert_eq!(decls.get(), SPAWN_DECLS, "원문 칸은 바이트 그대로 건넌다");
+                assert_eq!(
+                    decls.get(),
+                    SPAWN_DECLS,
+                    "the raw field crosses byte for byte"
+                );
             }
-            other => panic!("variant 불일치: {other:?}"),
+            other => panic!("variant mismatch: {other:?}"),
         }
     }
 
-    /// 차분은 `added`(모양 포함) + `removed`(이름만)로 갈린다 — 둘을 한 모양으로 합치면 내릴 때
-    /// 없는 `help` 를 지어내야 한다.
+    /// The diff splits into `added` (with shape) + `removed` (names only) — merging the two into one shape would require inventing
+    /// a nonexistent `help` when removing.
     #[test]
     fn update_commands_carries_added_shapes_and_removed_names() {
         let cmd = AgentCommand::UpdateCommands {
@@ -1863,24 +1865,23 @@ mod tests {
         assert_eq!(
             json,
             r#"{"UpdateCommands":{"owner":"shell","added":[{"name":"chat.get","help":"{}"}],"removed":["chat.reset"],"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
-            "UpdateCommands wire 형태가 golden 과 불일치"
+            "UpdateCommands wire shape does not match the golden"
         );
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(json, serde_json::to_string(&back).unwrap());
     }
 
-    /// ★에이전트 참조 칸(ADR-0308)이 없는 옛 항목과 있는 새 항목이 같은 원문 칸으로 건넌다★ — 칸이 비면 wire 에서
-    /// 빠져 위 두 골든(표시 없는 등록)이 그대로 선다. 빠진 칸을 빈 목록으로 읽는 것은 데몬 끝자락이다
-    /// (`connection_core` 의 `an_old_register_slot_unpacks_to_no_agent_args`).
+    /// ★Old items without the agent-reference field (ADR-0308) and new items with it cross through the same raw field★ — an empty field is left out on the wire, so the goldens above
+    /// stand; reading the missing field as empty is the daemon edge's job (`connection_core`'s `an_old_register_slot_unpacks_to_no_agent_args`).
     #[test]
     fn decl_agent_args_are_optional_on_the_wire() {
         let old_decls = r#"[{"name":"tab.focus","help":"{}"}]"#;
         let old = format!(
             r#"{{"RegisterCommands":{{"owner":"shell","decls":{old_decls},"catalog_version":1,"request_id":"00000000-0000-0000-0000-000000000000"}}}}"#
         );
-        match serde_json::from_str::<AgentCommand>(&old).expect("옛 패킷") {
+        match serde_json::from_str::<AgentCommand>(&old).expect("old packet") {
             AgentCommand::RegisterCommands { decls, .. } => assert_eq!(decls.get(), old_decls),
-            other => panic!("variant 불일치: {other:?}"),
+            other => panic!("variant mismatch: {other:?}"),
         }
 
         let cmd = AgentCommand::UpdateCommands {
@@ -1895,7 +1896,7 @@ mod tests {
         assert_eq!(
             json,
             r#"{"UpdateCommands":{"owner":"shell","added":[{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]}],"removed":[],"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
-            "표시가 있으면 선언 순서 그대로 실린다"
+            "with marks, they are carried in declaration order"
         );
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(json, serde_json::to_string(&back).unwrap());
@@ -1913,8 +1914,8 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&cmd).unwrap(),
             golden,
-            "RegisterCommands 패킷 바깥 모양이 golden 과 불일치 — 항목 모양은 셸 \
-             `command_decl_json_golden_with_and_without_agent_args` 가 지킨다"
+            "RegisterCommands packet outer shape does not match the golden — the item shape is guarded by the shell's \
+             `command_decl_json_golden_with_and_without_agent_args`"
         );
         match serde_json::from_str::<AgentCommand>(golden).unwrap() {
             AgentCommand::RegisterCommands {
@@ -1924,16 +1925,20 @@ mod tests {
                 request_id,
             } => {
                 assert_eq!(owner.as_str(), "shell");
-                assert_eq!(decls.get(), MIXED_DECLS, "원문 칸은 바이트 그대로 건넌다");
+                assert_eq!(
+                    decls.get(),
+                    MIXED_DECLS,
+                    "the raw field crosses byte for byte"
+                );
                 assert_eq!(catalog_version, 1);
                 assert_eq!(request_id, RequestId(Uuid::nil()));
             }
-            other => panic!("variant 불일치: {other:?}"),
+            other => panic!("variant mismatch: {other:?}"),
         }
     }
 
-    /// ★항목 목록 칸도 「유효한 JSON 인가」만 본다★(ADR-0272 결정 3 · 6) — 모양이 틀린 목록도 패킷으로는 풀려야
-    /// 끝자락이 그 갈래를 처리할 수 있다(데몬 = 그 패킷의 `request_id` 로 거절 · 웹뷰 길 = invoke 실패).
+    /// ★The item list field also checks only "is it valid JSON"★ (ADR-0272 decisions 3 · 6) — a wrong-shape list must still decode as a packet for the edge
+    /// (daemon = refuse with the packet's `request_id` · webview = invoke failure).
     #[test]
     fn the_decl_slots_take_any_json_but_reject_non_json() {
         let nil = "00000000-0000-0000-0000-000000000000";
@@ -1941,18 +1946,18 @@ mod tests {
             let registered: AgentCommand = serde_json::from_str(&format!(
                 r#"{{"RegisterCommands":{{"owner":"shell","decls":{decls},"catalog_version":1,"request_id":"{nil}"}}}}"#
             ))
-            .expect("모양이 틀린 목록도 RegisterCommands 패킷으로는 풀려야");
+            .expect("a list with the wrong shape must still decode as a RegisterCommands packet");
             let AgentCommand::RegisterCommands { decls: carried, .. } = registered else {
-                panic!("RegisterCommands 여야");
+                panic!("must be RegisterCommands");
             };
             assert_eq!(carried.get(), decls);
 
             let updated: AgentCommand = serde_json::from_str(&format!(
                 r#"{{"UpdateCommands":{{"owner":"shell","added":{decls},"removed":[],"request_id":"{nil}"}}}}"#
             ))
-            .expect("모양이 틀린 목록도 UpdateCommands 패킷으로는 풀려야");
+            .expect("a list with the wrong shape must still decode as an UpdateCommands packet");
             let AgentCommand::UpdateCommands { added: carried, .. } = updated else {
-                panic!("UpdateCommands 여야");
+                panic!("must be UpdateCommands");
             };
             assert_eq!(carried.get(), decls);
         }
@@ -1965,12 +1970,11 @@ mod tests {
                 r#"{{"UpdateCommands":{{"owner":"shell","removed":[],"request_id":"{nil}"}}}}"#
             ))
             .is_err(),
-            "목록 칸이 없는 패킷은 거절"
+            "a packet without the list field is refused"
         );
     }
 
-    /// 조회 왕복. `available=false` 를 함께 굽는 것은 지금 의도다 — 데몬은 그 값을 내지 않지만
-    /// (ADR-0150 결정 3) 계약은 두 값을 다 나르고, 이 골든이 그 칸이 조용히 사라지지 않게 붙든다.
+    /// Query round trip; bakes `available=false` in too — the daemon does not emit it (ADR-0150 decision 3), but the contract carries both values and this keeps the field from silently disappearing.
     #[test]
     fn list_commands_and_command_list_round_trip() {
         let req = AgentCommand::ListCommands {
@@ -2000,13 +2004,13 @@ mod tests {
         assert_eq!(
             json,
             r#"{"CommandList":{"request_id":"00000000-0000-0000-0000-000000000000","entries":[{"name":"agent.spawn","help":"{}","available":true},{"name":"tab.create","help":"{}","available":false}]}}"#,
-            "CommandList wire 형태가 golden 과 불일치"
+            "CommandList wire shape does not match the golden"
         );
         let back: AgentEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(json, serde_json::to_string(&back).unwrap());
     }
 
-    // ── 대기 입력 목록 wire(ADR-0231) — 프론트·셸이 이 글자를 그대로 읽는다 ─────────────
+    // ── Queued input list wire (ADR-0231) — the frontend · shell read these characters as is ─────────────
     const NIL: &str = "00000000-0000-0000-0000-000000000000";
 
     #[test]
@@ -2035,15 +2039,15 @@ mod tests {
             let json = serde_json::to_string(&cmd).unwrap();
             assert_eq!(
                 json, golden,
-                "대기 입력 명령의 wire 형태가 golden 과 불일치"
+                "queued input command wire shape does not match the golden"
             );
             let back: AgentCommand = serde_json::from_str(&json).unwrap();
             assert_eq!(json, serde_json::to_string(&back).unwrap());
         }
     }
 
-    /// 행 모양·낱말은 버스 `agent.listQueuedInputs` 행과 같다 — 취소 대기 행만 두 칸(`answer`·`vendor_closed`)을
-    /// 싣고, 그 밖은 `cancel: null`. `as_of_seq` 는 JSON number(프론트 바인딩도 `number | null`).
+    /// The row shape · words are the same as the bus `agent.listQueuedInputs` row — only cancel-pending rows carry the two fields (`answer`·`vendor_closed`),
+    /// the rest `cancel: null`. `as_of_seq` is a JSON number (the frontend binding is `number | null` too).
     #[test]
     fn queued_inputs_reply_json_golden_and_roundtrip() {
         let reply = AgentEvent::QueuedInputs {
@@ -2076,7 +2080,7 @@ mod tests {
             format!(
                 r#"{{"QueuedInputs":{{"request_id":"{NIL}","agent_id":"{NIL}","inputs":[{{"id":"q1","text":"first","state":"queued","cancel":null}},{{"id":"q2","text":"second","state":"cancelling","cancel":{{"answer":"not_removed","vendor_closed":true}}}}],"as_of_seq":7,"epoch":3,"stopped_after_error":true}}}}"#
             ),
-            "QueuedInputs wire 형태가 golden 과 불일치"
+            "QueuedInputs wire shape does not match the golden"
         );
         let back: AgentEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(json, serde_json::to_string(&back).unwrap());
@@ -2094,7 +2098,7 @@ mod tests {
             format!(
                 r#"{{"QueuedInputs":{{"request_id":"{NIL}","agent_id":"{NIL}","inputs":[],"as_of_seq":null,"epoch":0,"stopped_after_error":false}}}}"#
             ),
-            "목록 사건이 아직 없는 화신 = as_of_seq null"
+            "an incarnation with no list event yet = as_of_seq null"
         );
     }
 
@@ -2112,13 +2116,13 @@ mod tests {
             format!(
                 r#"{{"QueuedInputCancelReply":{{"request_id":"{NIL}","agent_id":"{NIL}","input_id":"q1","outcome":"requested"}}}}"#
             ),
-            "QueuedInputCancelReply wire 형태가 golden 과 불일치"
+            "QueuedInputCancelReply wire shape does not match the golden"
         );
         let back: AgentEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(json, serde_json::to_string(&back).unwrap());
     }
 
-    /// `input_id` 에 기본값이 없다 — 빠진 취소는 「가장 최근」 같은 것으로 흡수되지 않고 반려된다.
+    /// `input_id` has no default — a missing cancel is not absorbed into something like 「the most recent」 but bounced.
     #[test]
     fn queued_input_commands_reject_missing_fields() {
         for json in [
@@ -2128,14 +2132,13 @@ mod tests {
         ] {
             assert!(
                 serde_json::from_str::<AgentCommand>(&json).is_err(),
-                "빠진 칸이 기본값으로 흡수되면 안 된다: {json}"
+                "a missing field must not be absorbed into a default: {json}"
             );
         }
     }
 
-    /// `request_id` 가 빠진 패킷은 **거절돼야 한다** — 이 crate 의 `RequestId::default()` 는 새 v4 를
-    /// 찍으므로 `#[serde(default)]` 가 붙으면 조용히 짝 없는 상관 키가 생긴다(답장이 영영 안 붙는다).
-    /// 그 attribute 가 실수로 들어오면 이 단언이 먼저 깨진다.
+    /// A packet missing `request_id` **must be refused**: `RequestId::default()` mints a new v4, so `#[serde(default)]` would silently create an unpaired correlation key (the reply
+    /// would never attach).
     #[test]
     fn registration_variants_reject_missing_request_id() {
         for json in [
@@ -2145,7 +2148,7 @@ mod tests {
         ] {
             assert!(
                 serde_json::from_str::<AgentCommand>(json).is_err(),
-                "request_id 부재는 기본값으로 흡수되면 안 된다: {json}"
+                "a missing request_id must not be absorbed into a default: {json}"
             );
         }
     }
@@ -2183,7 +2186,10 @@ mod tests {
             let p = mk(parent_id);
             let json = serde_json::to_string(&p).unwrap();
             let back: WireProfile = serde_json::from_str(&json).unwrap();
-            assert_eq!(back.parent_id, parent_id, "parent_id 왕복 보존");
+            assert_eq!(
+                back.parent_id, parent_id,
+                "parent_id preserved in round trip"
+            );
             assert_eq!(json, serde_json::to_string(&back).unwrap());
         }
 
@@ -2204,17 +2210,17 @@ mod tests {
             "last_active": 1,
             "last_start_at": null
         }"#;
-        let p: WireProfile = serde_json::from_str(legacy).expect("parent_id 없는 wire 역직렬화");
-        assert_eq!(p.parent_id, None, "parent_id 부재 → None(루트)");
+        let p: WireProfile =
+            serde_json::from_str(legacy).expect("deserialize wire without parent_id");
+        assert_eq!(p.parent_id, None, "parent_id absent → None (root)");
         assert_eq!(
             p.last_failure, None,
-            "last_failure 부재 → None(ADR-0172 additive — 옛 wire 가 그대로 통과해야 버전 bump 가 없다)"
+            "last_failure absent → None (ADR-0172 additive — old wire must pass as is so there is no version bump)"
         );
     }
 
-    /// ★어휘가 늘 때 옛 피어를 지키는 절반★: 모르는 종류 문자열 하나가 `AgentProfile` **메시지 전체**의
-    /// 디코드를 깨면, 그 프로필이 화면에서 통째로 사라진다(필드만 비는 게 아니다). 프론트 표의
-    /// `table[kind] ?? Other` 와 짝을 이룬다.
+    /// ★Protects old peers when the vocabulary grows★: one unknown kind string must not break decoding of the **whole** `AgentProfile` message (the profile would vanish
+    /// from the screen). Pairs with the frontend's `table[kind] ?? Other`.
     // ADR-0172
     #[test]
     fn an_unknown_failure_kind_is_absorbed_instead_of_failing_the_whole_profile() {
@@ -2239,124 +2245,123 @@ mod tests {
             "last_start_at": null
         }"#;
         let p: WireProfile = serde_json::from_str(with_future_kind)
-            .expect("모르는 종류가 메시지를 깨뜨리면 안 된다");
-        assert_eq!(p.name, "future", "프로필의 나머지 칸이 온전히 남는다");
+            .expect("an unknown kind must not break the message");
+        assert_eq!(
+            p.name, "future",
+            "the rest of the profile's fields remain intact"
+        );
         assert_eq!(
             p.last_failure,
             Some(AgentFailureKind::Other),
-            "모르는 종류는 「그 밖」으로 흡수된다(재시도 가능 = fail-open)"
+            "an unknown kind is absorbed into `Other` (retriable = fail-open)"
         );
 
-        // 아는 어휘는 그대로 통과한다(흡수가 전부를 뭉개지 않는다).
+        // Known vocabulary passes as is (the absorption does not squash everything).
         let known = with_future_kind.replace("SomeKindFromANewerDaemon", "NoConversationToResume");
-        let p: WireProfile = serde_json::from_str(&known).expect("아는 종류");
+        let p: WireProfile = serde_json::from_str(&known).expect("known kind");
         assert_eq!(
             p.last_failure,
             Some(AgentFailureKind::NoConversationToResume)
         );
 
-        // ★흡수는 **모르는 문자열** 에만 열려 있다★: 형식 위반까지 삼키면 망가진 값이 `Other` 로 둔갑해
-        //   실패가 없는 항목에 실패 문구가 뜬다(흡수가 아니라 날조).
+        // ★Absorption is open only to **unknown strings**★: if it swallowed format violations too, a broken value would turn into `Other` and
+        //   a failure message would show on an item with no failure (fabrication, not absorption).
         for bad in ["42", "[]", "{}", "true"] {
             let broken = with_future_kind.replace("\"SomeKindFromANewerDaemon\"", bad);
             assert!(
                 serde_json::from_str::<WireProfile>(&broken).is_err(),
-                "비-문자열 {bad} 은 흡수 대상이 아니다"
+                "non-string {bad} is not subject to absorption"
             );
         }
     }
 
-    /// ★wire 어휘와 **생성된 TS 유니온**이 같아야 한다★: 프론트가 받는 타입은 ts-rs 가 만들고, 실제
-    /// JSON 은 `as_wire_str` 가 만든다. 둘이 갈리면 프론트 표가 모든 값을 「그 밖」으로 흡수해 문구가
-    /// 조용히 하나로 뭉개진다.
+    /// ★The wire vocabulary and the **generated TS union** must be the same★: ts-rs builds the frontend type, `as_wire_str` builds the JSON; if they diverge the frontend table
+    /// absorbs every value into `Other`.
     ///
-    /// ★테스트 안에 어휘를 다시 적지 않는다(그러면 아무것도 안 재는 테스트가 된다)★: 예전 형태는 튜플에
-    ///   손으로 쓴 문자열을 비교했는데, 변형을 `Other`→`Unknown` 으로 바꾸고 arm 이 `"Other"` 를 계속
-    ///   내보내도 **통과**했다 — 정확히 이 doc 이 막는다고 적힌 사고다. 이제 한쪽은 생성물 파일에서,
-    ///   다른 쪽은 매크로가 `stringify!` 로 만든 목록에서 온다.
+    /// ★Do not write the vocabulary again inside the test (it would measure nothing)★: one side comes from the generated file, the other from the macro's `stringify!` list.
     // ADR-0172
     #[test]
     fn failure_kind_vocabulary_matches_the_generated_ts_union() {
         use crate::domain::AgentFailureKind;
 
-        // 생성물에서 유니온 멤버를 뽑는다(ts-rs 가 변형 이름으로 만든 쪽).
+        // Extract the union members from the generated file (the side ts-rs made from variant names).
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/bindings/AgentFailureKind.ts");
         let src = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("생성된 바인딩을 읽어야 한다({path}): {e}"));
+            .unwrap_or_else(|e| panic!("must read the generated binding ({path}): {e}"));
         let decl = src
             .lines()
             .find(|l| l.starts_with("export type AgentFailureKind"))
-            .expect("유니온 선언 줄");
-        // `export type X = "A" | "B";` → 홀수 조각이 멤버다.
+            .expect("union declaration line");
+        // `export type X = "A" | "B";` → the odd pieces are the members.
         let ts_members: Vec<&str> = decl.split('"').skip(1).step_by(2).collect();
 
         let wire_names: Vec<&str> = AgentFailureKind::wire_names().collect();
         assert_eq!(
             ts_members, wire_names,
-            "TS 유니온과 wire 어휘가 갈렸다 — 프론트가 받는 값이 표에 없어 전부 「그 밖」으로 접힌다"
+            "the TS union and the wire vocabulary diverged — values the frontend receives are not in the table, so all fold into `Other`"
         );
 
-        // 그리고 그 어휘가 실제로 왕복한다(직렬화 문자열 = 그 이름, 역직렬화 = 그 변형).
+        // And that vocabulary actually round-trips (serialized string = that name, deserialized = that variant).
         for (kind, name) in AgentFailureKind::all() {
             assert_eq!(serde_json::to_string(kind).unwrap(), format!("\"{name}\""));
             assert_eq!(
                 &serde_json::from_str::<AgentFailureKind>(&format!("\"{name}\"")).unwrap(),
                 kind,
-                "왕복이 성립해야 한다"
+                "the round trip must hold"
             );
         }
     }
 
-    /// ★이스케이프가 든 값도 디코드돼야 한다★: 빌린 `&str` 로 받던 시절엔 `"Other"` 하나로
-    /// `AgentProfile` **메시지 전체**가 깨졌고, src-tauri 수신부는 그 실패를 조용히 버려 증상이
-    /// "트리가 영영 안 바뀐다" 뿐이었다.
+    /// ★Values containing escapes must decode too★: a borrowed `&str` broke the **whole** `AgentProfile` message on a single `"Other"`, and the src-tauri receiver silently
+    /// discarded it (symptom: the tree never changes).
     // ADR-0172
     #[test]
     fn an_escaped_failure_kind_string_still_decodes() {
         use crate::domain::AgentFailureKind;
 
-        // `O` = 'O' — 값은 같고 인코딩만 이스케이프다.
+        // `O` = 'O' — same value, only the encoding is an escape.
         let escaped = r#""Other""#;
         assert_eq!(
-            serde_json::from_str::<AgentFailureKind>(escaped).expect("이스케이프도 디코드된다"),
+            serde_json::from_str::<AgentFailureKind>(escaped).expect("escapes decode too"),
             AgentFailureKind::Other
         );
 
-        // 모르는 어휘 + 이스케이프 조합도 흡수로 떨어진다(오류가 아니다).
+        // An unknown word + escape combination also falls into absorption (not an error).
         let unknown_escaped = r#""SomeKindFromANewerDaemon""#;
         assert_eq!(
-            serde_json::from_str::<AgentFailureKind>(unknown_escaped).expect("흡수"),
+            serde_json::from_str::<AgentFailureKind>(unknown_escaped).expect("absorbed"),
             AgentFailureKind::Other
         );
 
-        // 소유 값 경로(`from_value`)도 같다 — 빌린 `&str` 은 여기서도 실패했다.
+        // The owned value path (`from_value`) is the same — the borrowed `&str` failed here too.
         let owned = serde_json::Value::String("SpawnFailed".to_string());
         assert_eq!(
-            serde_json::from_value::<AgentFailureKind>(owned).expect("from_value 경로"),
+            serde_json::from_value::<AgentFailureKind>(owned).expect("from_value path"),
             AgentFailureKind::SpawnFailed
         );
     }
 
-    // ── 명령 버스 wire 계약(ADR-0155 결정 3 의 2단계) ─────────────────────────────────
+    // ── Command bus wire contract (step 2 of ADR-0155 decision 3) ─────────────────────────────────
     //
-    // ★이 golden 들이 지키는 것은 손으로 적은 `#[ts(type = …)]` 이다★ — 봉투 타입은 도구 crate 소유라
-    //   ts-rs derive 가 없고(그 crate 가 ts-rs 를 안 든다), 그래서 TS 칸을 이 파일이 손으로 적는다. Rust 쪽
-    //   모양이 바뀌어도 그 문자열은 조용히 그대로 남으므로, 실제 JSON 을 여기서 못박아 갈림을 드러낸다.
+    // ★These goldens guard the hand-written `#[ts(type = …)]`★ — the envelope types belong to the tool crate (no ts-rs derive), so the TS
+    //   field is written by hand and silently stays
+    //   as is when the Rust shape changes; the actual JSON is pinned here.
     //
-    // ★봉투 · 답장 칸은 원문 JSON 이다(ADR-0272 결정 3 — 등록 항목 목록 칸도 같은 법이다, 위 등록 구획)★ — 그래서 그 칸이 든 패킷의 golden 은 바이트 리터럴로
-    //   짓고, 원문 칸 안은 「바이트 그대로 건넌다」만 잰다. 봉투 · 답장 구조체 → 바이트(손으로 적은 TS 칸과 맞서는
-    //   쪽)의 golden 은 그 칸을 푸는 끝자락이 같은 리터럴로 진다(셸 `daemon_client::protocol_state` · 데몬
-    //   `connection_core` 시험).
+    // ★The envelope · reply fields are raw JSON (ADR-0272 decision 3; the registration list follows the same rule)★ — packet goldens are
+    //   byte literals and only "crosses byte for byte"
+    //   is measured inside the raw field. Envelope · reply struct → bytes goldens (against the hand-written TS field) live at the
+    //   unwrapping edge with the same literals
+    //   (shell `daemon_client::protocol_state`, daemon `connection_core` tests).
     //
-    // ★한 리터럴이 중계 다리와 발신자 다리에 **함께** 쓰이는 것은 의도다★ — 두 다리의 봉투 · 답장이 같은 칸·같은
-    //   모양이라는 것이 계약이고(TRD §3-2 대칭), 다리마다 다른 리터럴을 두면 그 갈림이 안 보인다.
+    // ★One literal used **together** by the relay leg and the sender leg is intended★ — same fields · same shape in both legs is the
+    //   contract (TRD §3-2 symmetry).
 
     const NIL_ENVELOPE: &str = r#"{"name":"tab.create","request_id":"00000000-0000-0000-0000-000000000000","owner":"shell","proto_ver":1,"args":{"window":"main"}}"#;
     const NIL_FAILED_REPLY: &str = r#"{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}"#;
     const NIL_OK_REPLY: &str = r#"{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Ok":{"view_id":"v1"}}}"#;
 
     fn raw_slot(json: &str) -> Box<RawValue> {
-        RawValue::from_string(json.to_string()).expect("칸 리터럴은 유효한 JSON")
+        RawValue::from_string(json.to_string()).expect("the field literal is valid JSON")
     }
 
     fn nil_envelope() -> Box<RawValue> {
@@ -2372,48 +2377,51 @@ mod tests {
         assert_eq!(
             json,
             r#"{"CommandRequest":{"envelope":{"name":"tab.create","request_id":"00000000-0000-0000-0000-000000000000","owner":"shell","proto_ver":1,"args":{"window":"main"}}}}"#,
-            "CommandRequest 패킷 바깥 모양이 golden 과 불일치 — 봉투 모양은 셸 \
-             `the_envelope_slot_unpacks_to_the_bus_envelope_byte_for_byte` · 데몬 \
-             `the_relay_repacks_the_envelope_into_the_golden_bytes` 가 지킨다"
+            "CommandRequest packet outer shape does not match the golden — the envelope shape is guarded by the shell's \
+             `the_envelope_slot_unpacks_to_the_bus_envelope_byte_for_byte` · the daemon's \
+             `the_relay_repacks_the_envelope_into_the_golden_bytes`"
         );
         let back: AgentEvent = serde_json::from_str(&json).unwrap();
         let AgentEvent::CommandRequest { envelope } = &back else {
-            panic!("CommandRequest 로 복호돼야 한다");
+            panic!("must decode as CommandRequest");
         };
         assert_eq!(
             envelope.get(),
             NIL_ENVELOPE,
-            "원문 칸은 바이트 그대로 건넌다"
+            "the raw field crosses byte for byte"
         );
     }
 
-    /// ★패킷은 「유효한 JSON 인가」만 보고 봉투 모양은 안 본다★(ADR-0272 결정 3 · 6) — 모양이 틀린 봉투도
-    /// 패킷으로는 풀려야 끝자락이 그 갈래를 처리할 수 있다(셸 = 요청 번호 없음 · 데몬 = `Error{request_id: None}`).
-    /// 거꾸로 JSON 이 아닌 칸은 패킷째 거절된다 — 그때는 끝자락까지 오지 않는다.
+    /// ★The packet checks only "is it valid JSON", not the envelope shape★ (ADR-0272 decisions 3 · 6): a wrong-shape envelope must still decode for the edge to handle
+    /// (shell = no request number · daemon = `Error{request_id: None}`); a non-JSON field is refused with the whole packet.
     #[test]
     fn the_envelope_slot_takes_any_json_but_rejects_non_json() {
         for envelope in [r#"{"name":1}"#, "[]", "null", r#""tab.create""#] {
             let sent: AgentCommand =
                 serde_json::from_str(&format!(r#"{{"Command":{{"envelope":{envelope}}}}}"#))
-                    .expect("모양이 틀린 봉투도 Command 패킷으로는 풀려야");
+                    .expect(
+                        "an envelope with the wrong shape must still decode as a Command packet",
+                    );
             let AgentCommand::Command { envelope: carried } = sent else {
-                panic!("Command 여야");
+                panic!("must be Command");
             };
             assert_eq!(carried.get(), envelope);
 
             let delivered: AgentEvent = serde_json::from_str(&format!(
                 r#"{{"CommandRequest":{{"envelope":{envelope}}}}}"#
             ))
-            .expect("모양이 틀린 봉투도 CommandRequest 패킷으로는 풀려야");
+            .expect(
+                "an envelope with the wrong shape must still decode as a CommandRequest packet",
+            );
             let AgentEvent::CommandRequest { envelope: carried } = delivered else {
-                panic!("CommandRequest 여야");
+                panic!("must be CommandRequest");
             };
             assert_eq!(carried.get(), envelope);
         }
         assert!(serde_json::from_str::<AgentCommand>(r#"{"Command":{"envelope":}}"#).is_err());
         assert!(
             serde_json::from_str::<AgentCommand>(r#"{"Command":{}}"#).is_err(),
-            "봉투 칸이 없는 패킷은 거절"
+            "a packet without the envelope field is refused"
         );
     }
 
@@ -2435,22 +2443,20 @@ mod tests {
             .unwrap();
             assert_eq!(
                 json, golden,
-                "CommandOutcome 패킷 바깥 모양이 golden 과 불일치 — 답장 모양은 셸 \
-                 `the_reply_slot_unpacks_to_the_bus_reply_byte_for_byte` · 데몬 \
-                 `the_relay_repacks_the_reply_into_the_golden_bytes` 가 지킨다"
+                "CommandOutcome packet outer shape does not match the golden — the reply shape is guarded by the shell's \
+                 `the_reply_slot_unpacks_to_the_bus_reply_byte_for_byte` · the daemon's \
+                 `the_relay_repacks_the_reply_into_the_golden_bytes`"
             );
             let back: AgentCommand = serde_json::from_str(&json).unwrap();
             let AgentCommand::CommandOutcome { reply: carried } = &back else {
-                panic!("CommandOutcome 으로 복호돼야 한다");
+                panic!("must decode as CommandOutcome");
             };
-            assert_eq!(carried.get(), reply, "원문 칸은 바이트 그대로 건넌다");
+            assert_eq!(carried.get(), reply, "the raw field crosses byte for byte");
         }
     }
 
-    /// ★답장 칸도 「유효한 JSON 인가」만 본다★(ADR-0272 결정 3 · 6) — 모양이 틀린 답장도 패킷으로는 풀려야 끝자락이
-    /// 그 갈래를 처리할 수 있다(셸 = 요청 번호 없음 · 데몬 = `Error{request_id: None}`). TS 칸이 광고하는 관용(세 칸
-    /// 부재 · `null` · 계약 밖 필드)은 이 칸이 아니라 답장을 푸는 끝자락이 잰다(데몬
-    /// `the_outcome_slot_accepts_everything_its_ts_type_advertises`).
+    /// ★The reply field also checks only "is it valid JSON"★ (ADR-0272 decisions 3 · 6) — a wrong-shape reply must still decode for the edge (shell = no request number ·
+    /// daemon = `Error{request_id: None}`). The tolerance the TS field advertises is measured at the unwrapping edge (daemon `the_outcome_slot_accepts_everything_its_ts_type_advertises`).
     #[test]
     fn the_reply_slot_takes_any_json_but_rejects_non_json() {
         for reply in [
@@ -2461,24 +2467,27 @@ mod tests {
         ] {
             let sent: AgentCommand =
                 serde_json::from_str(&format!(r#"{{"CommandOutcome":{{"reply":{reply}}}}}"#))
-                    .expect("모양이 틀린 답장도 CommandOutcome 패킷으로는 풀려야");
+                    .expect(
+                        "a reply with the wrong shape must still decode as a CommandOutcome packet",
+                    );
             let AgentCommand::CommandOutcome { reply: carried } = sent else {
-                panic!("CommandOutcome 여야");
+                panic!("must be CommandOutcome");
             };
             assert_eq!(carried.get(), reply);
 
-            let answered: AgentEvent =
-                serde_json::from_str(&format!(r#"{{"CommandReply":{{"reply":{reply}}}}}"#))
-                    .expect("모양이 틀린 답장도 CommandReply 패킷으로는 풀려야");
+            let answered: AgentEvent = serde_json::from_str(&format!(
+                r#"{{"CommandReply":{{"reply":{reply}}}}}"#
+            ))
+            .expect("a reply with the wrong shape must still decode as a CommandReply packet");
             let AgentEvent::CommandReply { reply: carried } = answered else {
-                panic!("CommandReply 여야");
+                panic!("must be CommandReply");
             };
             assert_eq!(carried.get(), reply);
         }
         assert!(serde_json::from_str::<AgentEvent>(r#"{"CommandReply":{"reply":}}"#).is_err());
         assert!(
             serde_json::from_str::<AgentCommand>(r#"{"CommandOutcome":{}}"#).is_err(),
-            "답장 칸이 없는 패킷은 거절"
+            "a packet without the reply field is refused"
         );
     }
 
@@ -2491,18 +2500,18 @@ mod tests {
         assert_eq!(
             json,
             r#"{"Command":{"envelope":{"name":"tab.create","request_id":"00000000-0000-0000-0000-000000000000","owner":"shell","proto_ver":1,"args":{"window":"main"}}}}"#,
-            "Command 패킷 바깥 모양이 golden 과 불일치 — 봉투 모양은 셸 \
-             `the_envelope_slot_unpacks_to_the_bus_envelope_byte_for_byte` · 데몬 \
-             `the_relay_repacks_the_envelope_into_the_golden_bytes` 가 지킨다"
+            "Command packet outer shape does not match the golden — the envelope shape is guarded by the shell's \
+             `the_envelope_slot_unpacks_to_the_bus_envelope_byte_for_byte` · the daemon's \
+             `the_relay_repacks_the_envelope_into_the_golden_bytes`"
         );
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         let AgentCommand::Command { envelope } = &back else {
-            panic!("Command 로 복호돼야 한다");
+            panic!("must decode as Command");
         };
         assert_eq!(
             envelope.get(),
             NIL_ENVELOPE,
-            "원문 칸은 바이트 그대로 건넌다"
+            "the raw field crosses byte for byte"
         );
     }
 
@@ -2524,19 +2533,19 @@ mod tests {
             .unwrap();
             assert_eq!(
                 json, golden,
-                "CommandReply 패킷 바깥 모양이 golden 과 불일치 — 답장 모양은 셸 \
-                 `the_reply_slot_unpacks_to_the_bus_reply_byte_for_byte` · 데몬 \
-                 `the_relay_repacks_the_reply_into_the_golden_bytes` 가 지킨다"
+                "CommandReply packet outer shape does not match the golden — the reply shape is guarded by the shell's \
+                 `the_reply_slot_unpacks_to_the_bus_reply_byte_for_byte` · the daemon's \
+                 `the_relay_repacks_the_reply_into_the_golden_bytes`"
             );
             let back: AgentEvent = serde_json::from_str(&json).unwrap();
             let AgentEvent::CommandReply { reply: carried } = &back else {
-                panic!("CommandReply 로 복호돼야 한다");
+                panic!("must decode as CommandReply");
             };
-            assert_eq!(carried.get(), reply, "원문 칸은 바이트 그대로 건넌다");
+            assert_eq!(carried.get(), reply, "the raw field crosses byte for byte");
         }
     }
 
-    // ── 사용량 한도 ──
+    // ── Usage limits ──
 
     #[test]
     fn usage_commands_json_golden_and_roundtrip() {
@@ -2560,18 +2569,21 @@ mod tests {
             ),
         ] {
             let json = serde_json::to_string(&cmd).unwrap();
-            assert_eq!(json, golden, "사용량 명령의 wire 형태가 golden 과 불일치");
+            assert_eq!(
+                json, golden,
+                "usage command wire shape does not match the golden"
+            );
             let back: AgentCommand = serde_json::from_str(&json).unwrap();
             assert_eq!(json, serde_json::to_string(&back).unwrap());
         }
-        // 기본값으로 흡수되면 ⟳ 가 짝 없는 답을 기다린다.
+        // If absorbed into a default, ⟳ waits for an unpaired answer.
         assert!(serde_json::from_str::<AgentCommand>(
             r#"{"RefreshUsageLimits":{"vendor":"claude"}}"#
         )
         .is_err());
     }
 
-    /// 스냅숏 모양 전체의 정본은 `domain` 의 golden 이다 — 여기서는 이벤트 봉투와 `subscribed` 를 잰다.
+    /// The canonical full snapshot shape is the golden in `domain` — this measures the event envelope and `subscribed`.
     #[test]
     fn usage_limits_updated_json_golden_and_roundtrip() {
         let ev = AgentEvent::UsageLimitsUpdated {

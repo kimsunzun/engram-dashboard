@@ -1,9 +1,9 @@
-//! 프로필 편집 포트의 `AgentManager` 구현.
+//! `AgentManager`'s implementation of the profile edit port.
 //!
-//! 붙임 쓰기는 명부 락 한 번씩이고(저장 포함 — 순서는 `ProfileRegistry` 의 것 그대로), 잠김 읽기는 예약 ·
-//! 세션 · 명부를 **하나씩 따로** 잠깐 잡고 놓는다(겹쳐 쥐지 않는다 — ADR-0006).
+//! An attachment write takes the roster lock once each (saving included — the order is `ProfileRegistry`'s as is); the lock read
+//! briefly takes and releases the reservations · sessions · roster **one at a time** (never held together — ADR-0006).
 // ADR-0311
-// TRD S25 §1-5 「프로필 편집 포트」
+// TRD S25 §1-5 「profile edit port」
 
 use super::AgentManager;
 use crate::profile_edit::{
@@ -33,13 +33,13 @@ impl ProfileEditPort for AgentManager {
 
     // ADR-0321
     fn workspace_lock(&self, id: AgentId) -> Result<Option<WorkspaceLock>, ProfileEditError> {
-        // 읽는 순서 = 예약 → 세션 → 명부. 실행은 세션을 올린 **뒤에** 예약을 놓으므로, 이 호출과 겹친 실행은 둘
-        //   중 하나에 반드시 걸린다(거꾸로 읽으면 그 사이 끝난 실행을 둘 다 놓친다). 세션 id 는 그 실행의 첫 제출이
-        //   적으므로 맨 뒤에 읽는다.
-        // TODO(TRD S25 10a `agent.setWorkspace`): 바꾸기가 자기 예약을 쥔 채 이 판정을 부르면 그 예약이 `Preparing`
-        //   으로 보인다 — 예약 표가 쥔 쪽을 가르게 될 때 함께 고친다.
+        // Read order = reservations → sessions → roster. A launch releases its reservation **after** raising the session, so a launch
+        //   overlapping this call is always caught by one of the two (reading in reverse misses a launch that finished in between). The
+        //   session id is written by that launch's first submission, so it is read last.
+        // TODO(TRD S25 10a `agent.setWorkspace`): a change that calls this decision while holding its own reservation sees that
+        //   reservation as `Preparing` — fix together when the reservation table tells holders apart.
         let preparing = self.activation_in_flight(id);
-        // ADR-0116: 시체(reaper 가 거두기 전)는 떠 있지 않다 — 명부와 같은 술어.
+        // ADR-0116: a corpse (before the reaper reaps it) is not running — the same predicate as the roster.
         let running = self
             .get_session(id)
             .is_ok_and(|session| session.status().is_live());
@@ -86,7 +86,7 @@ mod tests {
         }
     }
 
-    /// 명부에 프로필 하나를 심은 매니저 — 저장 결과는 시험이 정한다.
+    /// A manager with one profile seeded in the roster — the test decides the save result.
     fn seeded() -> (
         AgentManager,
         Arc<crate::profile::scripted_store::ScriptedStore>,
@@ -105,7 +105,7 @@ mod tests {
             .update_with(id, |p| p.backend_session_id = Some(Uuid::new_v4())));
     }
 
-    // ── 붙임 쓰기 ──
+    // ── attachment writes ──
 
     #[test]
     fn set_attachments_writes_through_and_tells_a_missing_agent_apart() {
@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(store.disk(id).unwrap().presets, next.presets);
         manager
             .set_attachments(id, next.clone())
-            .expect("같은 값은 오류가 아니다");
+            .expect("the same value is not an error");
 
         let missing = Uuid::new_v4();
         assert!(matches!(
@@ -202,7 +202,7 @@ mod tests {
         }
     }
 
-    // ── 작업 폴더 잠김 ──
+    // ── working folder lock ──
 
     #[test]
     fn workspace_lock_reports_each_reason_alone() {
@@ -210,13 +210,17 @@ mod tests {
         assert_eq!(manager.workspace_lock(id).unwrap(), None);
 
         {
-            let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("예약");
+            let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("reserve");
             assert_eq!(
                 manager.workspace_lock(id).unwrap(),
                 Some(WorkspaceLock::Preparing)
             );
         }
-        assert_eq!(manager.workspace_lock(id).unwrap(), None, "예약을 놓았다");
+        assert_eq!(
+            manager.workspace_lock(id).unwrap(),
+            None,
+            "reservation released"
+        );
 
         let (manager, _store, id) = seeded();
         put_live_session(&manager, id, 1);
@@ -237,22 +241,22 @@ mod tests {
     fn workspace_lock_reports_the_first_of_running_preparing_conversed() {
         let (manager, _store, id) = seeded();
         converse(&manager, id);
-        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("예약");
+        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("reserve");
         assert_eq!(
             manager.workspace_lock(id).unwrap(),
             Some(WorkspaceLock::Preparing),
-            "준비 중 > 대화함"
+            "preparing > conversed"
         );
 
         put_live_session(&manager, id, 1);
         assert_eq!(
             manager.workspace_lock(id).unwrap(),
             Some(WorkspaceLock::Running),
-            "떠 있음 > 준비 중 · 대화함"
+            "running > preparing · conversed"
         );
     }
 
-    /// 끝나는 중(`Exiting`)은 아직 떠 있다 — 명부와 같은 술어(ADR-0116).
+    /// Exiting (`Exiting`) is still running — the same predicate as the roster (ADR-0116).
     #[test]
     fn an_exiting_session_still_locks_as_running() {
         let (manager, _store, id) = seeded();
@@ -265,14 +269,14 @@ mod tests {
         );
     }
 
-    /// ★읽는 순서 예약 → 세션 → 명부를 소스에서 못 박는다★ — 위 항목들은 한 스레드에서 차례로 재므로 순서를
-    /// 뒤집어도 초록이다. 뒤집히면 겹친 실행(세션을 올린 뒤 예약을 놓는다)을 둘 다 놓쳐 잠김이 풀려 보인다.
+    /// ★Pins the read order reservations → sessions → roster in the source★ — the items above measure in turn on one thread, so they
+    /// stay green with the order reversed. Reversed, an overlapping launch (raises the session, then releases the reservation) is missed by both reads and the lock looks open.
     #[test]
     fn workspace_lock_reads_reservation_then_session_then_roster() {
         let body = squashed_production_body("fn workspace_lock(", "#[cfg(test)]");
         let at = |call: &str| {
             body.find(call).unwrap_or_else(|| {
-                panic!("`{call}` 를 안 읽는다 — 이 항목의 전제가 낡았다: {body}")
+                panic!("`{call}` is not read — this item's premise is stale: {body}")
             })
         };
         let reservation = at("self.activation_in_flight(id)");
@@ -280,22 +284,24 @@ mod tests {
         let roster = at("self.profiles.get(id)");
         assert!(
             reservation < session && session < roster,
-            "읽는 순서가 예약 → 세션 → 명부가 아니다: {body}"
+            "the read order is not reservations → sessions → roster: {body}"
         );
     }
 
-    /// 운영 구획에서 `start` 와 `end` 사이를 잘라 주석 줄을 빼고 공백을 전부 지운다 — `manager.rs` 시험의 같은
-    /// 이름 도우미와 같은 꼴(이 파일을 읽는다).
+    /// Cuts the production section between `start` and `end`, drops comment lines and removes all whitespace — the same shape as
+    /// the helper of that name in the `manager.rs` tests (reads this file).
     fn squashed_production_body(start: &str, end: &str) -> String {
         let src = include_str!("profile_edit.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let body = production
             .split(start)
             .nth(1)
-            .unwrap_or_else(|| panic!("`{start}` 가 운영 구획에 없다 — 이 항목의 전제가 낡았다"))
+            .unwrap_or_else(|| {
+                panic!("`{start}` is not in the production section — this item's premise is stale")
+            })
             .split(end)
             .next()
-            .expect("다음 구획까지");
+            .expect("up to the next section");
         body.lines()
             .map(str::trim)
             .filter(|l| !l.starts_with("//"))
@@ -327,7 +333,7 @@ mod tests {
             Err(ProfileEditError::NotFound(got)) if got == stranger
         ));
 
-        // 명부에 없으면 세션이 떠 있어도 없다고 답한다.
+        // Not in the roster = answers absent even with a running session.
         put_live_session(&manager, stranger, 1);
         assert!(matches!(
             manager.workspace_lock(stranger),

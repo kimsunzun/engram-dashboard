@@ -1,15 +1,14 @@
-//! 선언 매크로의 **허용 타입 알파벳**을 실제로 태워 본다(TRD §2-2 3 의 미확인 항목).
+//! Actually runs **the allowed type alphabet** of the declaration macro (an unconfirmed item of TRD §2-2 3).
 //!
-//! `agent.*` 가 쓰지 않는 갈래(정수·실수·bool·enum·`Option<Vec<T>>`)까지 여기서 덮는다 — 실무가 알파벳을
-//! 넘는지는 선언해 보기 전엔 알 수 없고, 넘는 순간 컴파일이 멈춰야 한다.
-//! ★여기 선언된 이름은 명령이 아니라 하네스 픽스처다★(`fixture.*` — 어느 표에도 꽂히지 않는다).
+//! Covers branches `agent.*` does not use (integers · floats · bool · enum · `Option<Vec<T>>`) — whether real use exceeds the alphabet is
+//! unknowable before declaring, and compilation must stop the moment it does.
+//! ★The names declared here are harness fixtures, not commands★ (`fixture.*` — plugged into no table).
 
 use engram_dashboard_command::declare_commands;
 
 declare_commands! {
     catalog_version: 7;
 
-    /// 중첩 struct — 부모 스키마에 인라인으로 펼쳐진다.
     struct Sample {
         flag: bool,
         count: u32,
@@ -29,7 +28,6 @@ declare_commands! {
         args: Json,
     }
 
-    /// 알파벳 전량.
     #[effect(Write)]
     #[since(3)]
     "fixture.alphabet" => args AlphabetArgs {
@@ -50,11 +48,10 @@ declare_commands! {
         notes: Vec<Note>,
     } errors [INVALID_ARGUMENT, UNSUPPORTED];
 
-    /// 에이전트 참조 표시(ADR-0308) — 표시한 칸 이름만 `agent_args` 로 나가고 스키마 · 타입은 그대로다.
+    /// Agent reference marker (ADR-0308) — only the marked field names go out as `agent_args`, and the schema and type stay the same.
     #[effect(Write)]
     #[since(1)]
     "fixture.agentRefs" => args AgentRefsArgs {
-        /// 고를 에이전트 — 이름이나 id.
         #[agent_ref]
         target: String,
         label: String,
@@ -70,7 +67,7 @@ declare_commands! {
 }
 
 fn args_schema() -> serde_json::Value {
-    serde_json::from_str(AlphabetArgs::SPEC.args_schema).expect("args 스키마는 JSON")
+    serde_json::from_str(AlphabetArgs::SPEC.args_schema).expect("the args schema is JSON")
 }
 
 #[test]
@@ -84,9 +81,9 @@ fn primitives_map_to_json_types() {
     assert_eq!(props["ratio"]["type"], "number");
 }
 
-/// ★정수 칸은 실제 범위를 광고한다★ — 상한이 없으면 `18446744073709551616` 이 광고상 허용인데
-/// 역직렬화는 반려한다(그 값을 보고 인자를 채우는 호출자에게 거짓말이다). 64비트 경계는 배정도로 읽는
-/// 검증기에서 한 칸 반올림되지만, 그건 「없음」보다 좁다.
+/// ★Integer fields advertise their real range★ — without an upper bound, `18446744073709551616` would pass the advertisement but fail
+/// deserialization (a lie to callers filling arguments by it). The 64-bit boundary is rounded by one step in validators reading double
+///   precision, still narrower than 「none」.
 #[test]
 fn integer_fields_advertise_their_range() {
     let schema = args_schema();
@@ -132,7 +129,7 @@ fn block_declared_types_are_inlined_not_referenced() {
     assert_eq!(schema["properties"]["mode"]["enum"][1], "Slow");
 }
 
-/// 선언한 struct 는 실제 Rust 타입이고 wire 왕복이 된다 — 스키마만 있고 타입이 없으면 소용없다.
+/// A declared struct is a real Rust type and round-trips over the wire — a schema without a type is useless.
 #[test]
 fn declared_types_round_trip_through_serde() {
     let value = serde_json::json!({
@@ -149,12 +146,12 @@ fn declared_types_round_trip_through_serde() {
         "nested_many": [],
         "mode": "Slow"
     });
-    let parsed: AlphabetArgs = serde_json::from_value(value.clone()).expect("역직렬화");
+    let parsed: AlphabetArgs = serde_json::from_value(value.clone()).expect("deserialize");
     assert_eq!(parsed.mode, Mode::Slow);
-    assert_eq!(serde_json::to_value(&parsed).expect("직렬화"), value);
+    assert_eq!(serde_json::to_value(&parsed).expect("serialize"), value);
 }
 
-/// `Option` 필드는 아예 빠져도 된다 — LLM 호출자가 안 쓰는 칸을 채우지 않아도 되게.
+/// `Option` fields may be omitted entirely — so LLM callers need not fill fields they do not use.
 #[test]
 fn absent_option_fields_are_none() {
     let value = serde_json::json!({
@@ -169,7 +166,7 @@ fn absent_option_fields_are_none() {
         "nested_many": [],
         "mode": "Fast"
     });
-    let parsed: AlphabetArgs = serde_json::from_value(value).expect("역직렬화");
+    let parsed: AlphabetArgs = serde_json::from_value(value).expect("deserialize");
     assert!(parsed.maybe.is_none());
     assert!(parsed.maybe_many.is_none());
 }
@@ -222,22 +219,21 @@ fn catalog_version_is_per_block() {
     assert_eq!(AlphabetArgs::SPEC.since, 3);
 }
 
-// ── 에이전트 참조 표시(ADR-0308) ───────────────────────────────────────────────────────
+// ── Agent reference marker (ADR-0308) ───────────────────────────────────────────────────────
 
 #[test]
 fn marked_fields_become_agent_args_in_declaration_order() {
     assert_eq!(AgentRefsArgs::SPEC.agent_args, ["target", "after"]);
     assert!(
         AlphabetArgs::SPEC.agent_args.is_empty(),
-        "표시 없는 선언은 빈 목록"
+        "a declaration without markers gives an empty list"
     );
 }
 
-/// 표시는 데몬에게 주는 신호일 뿐 — 광고 스키마 · Rust 타입 · wire 모양은 표시 없는 칸과 같다.
 #[test]
 fn the_mark_leaves_the_schema_and_the_type_alone() {
     let schema: serde_json::Value =
-        serde_json::from_str(AgentRefsArgs::SPEC.args_schema).expect("args 스키마는 JSON");
+        serde_json::from_str(AgentRefsArgs::SPEC.args_schema).expect("the args schema is JSON");
     let props = &schema["properties"];
     assert_eq!(props["target"], props["label"]);
     assert_eq!(props["after"], props["maybe"]);
@@ -254,7 +250,7 @@ fn the_mark_leaves_the_schema_and_the_type_alone() {
         "reparent": null,
         "many": []
     });
-    let parsed: AgentRefsArgs = serde_json::from_value(value).expect("역직렬화");
+    let parsed: AgentRefsArgs = serde_json::from_value(value).expect("deserialize");
     assert_eq!(parsed.target, "lead");
     assert_eq!(parsed.after.as_deref(), Some("worker"));
     assert_eq!(parsed.reparent, Some(None));

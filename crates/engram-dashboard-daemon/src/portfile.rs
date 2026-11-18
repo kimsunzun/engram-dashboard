@@ -1,25 +1,16 @@
-//! `daemon.json` — the daemon discovery file and also the **single-instance lock file** (ADR-0135 decision 1).
+//! `daemon.json` — the daemon discovery file and also the single-instance lock file (ADR-0135 decision 1).
 //!
-//! Here we put only the file name · the daemon-side write/read · the stale decision. The side that **holds** that file
-//! is [`crate::instance`], and writes coming from outside the crate must pass through it (the guard).
+//! Only the file name · the daemon-side write/read · the stale decision live here. The side that holds the file is [`crate::instance`], and writes from outside the crate must pass through its guard.
 //!
-//! ★That the log of [`read`] does not leak the token is guarded by only this comment right now (known gap)★: on a parse failure
-//! it prints the serde error's `Display`, which holds only the position · expected type and not the value —
-//! because `token` is a `String`, there is no place for a value echo of the `invalid type` kind. Changing the field type
-//! breaks that premise. `link/auth.rs` blocks the same trap with a regression test, but there is no test here.
+//! ★That [`read`]'s log does not leak the token is guarded only by this comment (known gap)★: on a parse failure it prints the serde error's `Display`, which holds only position · expected type, and `token` is a `String`, so there is no value echo of the `invalid type` kind. Changing the field type breaks that premise. `link/auth.rs` blocks the same trap with a regression test; there is none here.
 //!
-//! ★Do not revive atomic replacement (temp file + rename)★: the daemon holds this file without delete sharing, so
-//! rename is refused (measured `ERROR_SHARING_VIOLATION`). So [`write_in_place`] writes
-//! in place to the held handle.
+//! ★Do not revive atomic replacement (temp file + rename)★: the daemon holds this file without delete sharing, so rename is refused (`ERROR_SHARING_VIOLATION`). [`write_in_place`] writes in place to the held handle.
 //!
-//! ★So the reading side can see partially written content★: a parse failure must be treated not as corruption but as **not ready yet**
-//! (the reason [`read`] gives `None`). The client already polls at 50ms.
+//! ★The reading side can see partially written content★: a parse failure means not ready yet, not corruption (why [`read`] gives `None`). The client already polls at 50ms.
 //!
-//! ★Do not periodically re-emit a vanished file (do not revive it)★: a running app silently rewriting a
-//! file the user just deleted is reported as a bug in every precedent we surveyed (ADR-0135 rejected alternative 1).
-//! After the merge it cannot be deleted either, so there is no occasion to revive it at all.
+//! ★Do not periodically re-emit a vanished file (do not revive it)★: a running app silently rewriting a file the user just deleted is reported as a bug in every surveyed precedent (ADR-0135 rejected alternative 1). It cannot be deleted after the merge anyway.
 //!
-//! **Security:** the token is kept in this file only (no logging).
+//! Security: the token is kept in this file only (no logging).
 
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom, Write};
@@ -32,18 +23,13 @@ pub use engram_dashboard_protocol::DaemonInfo;
 /// ★The daemon must build the path only from this constant★: if the file it holds and the file it writes diverge, singleness silently breaks.
 pub const DAEMON_FILE: &str = "daemon.json";
 
-/// Writes the connection record in place with the daemon's **held handle**.
+/// Writes the connection record in place with the daemon's held handle.
 ///
-/// ★The only entry point is [`crate::instance::InstanceGuard::publish`]★ — that is why it is `pub(crate)`. Since the move into
-/// the daemon crate, `pub(crate)` spans the whole daemon, so "only through the guard" is kept by review, not by the type.
-/// If this function is opened as `pub` or reverted to a form that takes a path (`&Path`), a side that has not proven ownership
-/// could emit, and two daemons' writes would mix.
+/// ★The only entry point is [`crate::instance::InstanceGuard::publish`]★ — hence `pub(crate)`. `pub(crate)` spans the whole daemon, so "only through the guard" is kept by review, not by the type. Opening this as `pub` or taking a path (`&Path`) would let a side that has not proven ownership emit, mixing two daemons' writes.
 ///
-/// ★But what the type blocks stops there★: inside the crate (including this file's tests) it can be called with an arbitrary `File`, and
-/// **the real enforcement is the OS share mode held** — before acquisition or after Drop nothing blocks anything.
+/// ★What the type blocks stops there★: inside the crate (including this file's tests) it can be called with an arbitrary `File`; the real enforcement is the held OS share mode — before acquisition or after Drop nothing blocks anything.
 ///
-/// Because the length is first cut to 0, a reader in between can see an empty file — the module header's "not ready yet"
-/// contract covers that window.
+/// The length is first cut to 0, so a reader in between can see an empty file — the module header's "not ready yet" contract covers that window.
 // ADR-0135
 pub(crate) fn write_in_place(f: &mut File, info: &DaemonInfo) -> io::Result<()> {
     let json = info
@@ -52,15 +38,13 @@ pub(crate) fn write_in_place(f: &mut File, info: &DaemonInfo) -> io::Result<()> 
     f.set_len(0)?;
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&json)?;
-    // Visibility to other processes is already secured at the write_all point (they see the same cache). sync_all is the durability part that keeps the address
-    //   even if power is cut, and since it is once per boot the cost is not a concern.
+    // Visibility to other processes is already secured at write_all (they see the same cache). sync_all is the durability part that keeps the address across a power cut; once per boot, so cost is no concern.
     f.sync_all()
 }
 
 /// None if missing or unparseable.
 ///
-/// ★Do not promote a parse failure to corruption★: the daemon may be mid-write (module header). The caller treats it as "not yet
-/// ready" and looks again.
+/// ★Do not promote a parse failure to corruption★: the daemon may be mid-write (module header). The caller treats it as "not yet ready" and looks again.
 pub fn read(path: &Path) -> Option<DaemonInfo> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
@@ -69,20 +53,17 @@ pub fn read(path: &Path) -> Option<DaemonInfo> {
     match DaemonInfo::parse(&bytes) {
         Ok(info) => Some(info),
         Err(e) => {
-            tracing::warn!("{DAEMON_FILE} 파싱 실패: {e} — 무시(쓰는 중일 수 있음)");
+            tracing::warn!("{DAEMON_FILE} parse failed: {e} — ignored (it may be mid-write)");
             None
         }
     }
 }
 
-/// Decides whether the recorded daemon is no longer alive (stale). true = dead (can be ignored).
+/// Whether the recorded daemon is no longer alive (stale). true = dead (can be ignored).
 ///
-/// The liveness decision is delegated to the shared function of the OS-layer crate `platform` (`pid_alive_with_start_time`) — so daemon·tauri
-/// both use the same logic (DRY). It is judged alive only when "PID alive AND creation time == recorded value".
-/// If start_time==0 (unknown, old daemon.json), it conservatively decides by PID survival alone.
+/// Liveness is delegated to the OS-layer crate `platform` (`pid_alive_with_start_time`), shared with tauri. Alive only when "PID alive AND creation time == recorded value"; start_time==0 (unknown, old daemon.json) falls back conservatively to PID survival alone.
 ///
-/// ★PID reuse (M2) defense★: even if the daemon died and another process got the same PID, the creation time
-/// differs so it is decided dead → a wrong process is not mistaken for the living daemon.
+/// ★PID reuse (M2) defense★: even if the daemon died and another process got the same PID, the creation time differs, so it is decided dead.
 pub fn is_stale(info: &DaemonInfo) -> bool {
     !engram_dashboard_platform::process::pid_alive_with_start_time(info.pid, info.start_time)
 }
@@ -132,7 +113,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Because it is an in-place write, a tail can remain if the old content was longer — an assertion that set_len cuts it.
+    /// In-place write can leave a tail if the old content was longer — asserts set_len cuts it.
     #[test]
     fn rewrite_leaves_no_tail_of_the_previous_record() {
         let dir = temp_dir("no-tail");
@@ -145,9 +126,9 @@ mod tests {
         let short = sample();
         write_in_place(&mut f, &short).unwrap();
         assert_eq!(
-            read(&path).expect("재파싱"),
+            read(&path).expect("reparse"),
             short,
-            "옛 꼬리가 남으면 안 됨"
+            "the old tail must not remain"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -160,7 +141,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// ★Partial write = not ready★: because it is an in-place write, the client can actually see this state.
+    /// ★Partial write = not ready★: the in-place write makes the client able to actually see this state.
     #[test]
     fn read_partial_is_none_not_an_error() {
         let dir = temp_dir("partial");
@@ -198,7 +179,7 @@ mod tests {
     fn pid_zero_is_stale() {
         let mut info = sample();
         info.pid = 0;
-        assert!(is_stale(&info), "PID 0 은 stale");
+        assert!(is_stale(&info), "PID 0 is stale");
     }
 
     #[test]
@@ -208,7 +189,7 @@ mod tests {
         info.start_time = 0;
         assert!(
             !is_stale(&info),
-            "미상 start_time + 살아있는 PID → not stale"
+            "unknown start_time + live PID → not stale"
         );
     }
 
@@ -218,7 +199,7 @@ mod tests {
         let mut info = sample();
         info.pid = std::process::id();
         info.start_time = engram_dashboard_platform::process::current_process_start_time().unwrap();
-        assert!(!is_stale(&info), "PID+creation time 일치면 not stale");
+        assert!(!is_stale(&info), "PID+creation time match means not stale");
     }
 
     #[cfg(windows)]
@@ -228,14 +209,15 @@ mod tests {
         info.pid = std::process::id();
         let real = engram_dashboard_platform::process::current_process_start_time().unwrap();
         info.start_time = real.wrapping_add(999);
-        assert!(is_stale(&info), "creation time 불일치 = 재사용 PID → stale");
+        assert!(
+            is_stale(&info),
+            "creation time mismatch = reused PID → stale"
+        );
     }
 
-    /// A record of a daemon that exited while someone still holds its process object is stale — the handle still
-    /// opens, so the open-process check alone kept it live (TRD S21 trd-3-2-u5 R4).
+    /// A record of a daemon that exited while someone still holds its process object is stale — the handle still opens, so the open-process check alone kept it live (TRD S21 trd-3-2-u5 R4).
     ///
-    /// Only with an unknown start time. The known-start-time case is platform's
-    /// `an_exited_process_whose_object_is_held_is_gone` — [`is_stale`] is the negation it checks.
+    /// Only with an unknown start time; the known-start-time case is platform's `an_exited_process_whose_object_is_held_is_gone` — [`is_stale`] is the negation it checks.
     #[cfg(windows)]
     #[test]
     fn an_exited_process_whose_object_is_held_is_stale() {

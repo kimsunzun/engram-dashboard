@@ -1,11 +1,9 @@
-// ADR-0227: pure computation of divider drag — preview state and reconcile rules, allowed ratio range, linear remapping of shell rectangles.
-//   It knows neither React nor invoke. Token issuing · the `set_split_ratio` call · the pull timer are borne by the hook on the renderer side.
-// ★The frontend does not hold a second tree geometry★ — the preview only moves the rectangles the shell gave and does not unfold the tree again.
-//   Last-digit differences are covered by the confirmed snapshot (TRD §2f).
+// ADR-0227: pure computation of divider drag — preview state and reconcile rules, allowed ratio range, linear remapping of shell rectangles. No React or invoke; token issuing · the `set_split_ratio` call · the pull timer belong to the renderer-side hook.
+// ★The frontend holds no second tree geometry★ — the preview only moves the rectangles the shell gave and never unfolds the tree again; last-digit differences are covered by the confirmed snapshot (TRD §2f).
 
 import type { SlotRect, SplitRatioOutcome, SplitRect } from '../../api/layoutTypes'
 
-/** Minimum area size (CSS px). It is a policy constant of the screen and the only source of truth — the shell receives it through `report_ui_metrics` and uses it. */
+/** Minimum area size (CSS px) — a policy constant of the screen and the only source of truth; the shell receives it through `report_ui_metrics`. */
 export const MIN_PANE_PX = 30
 
 /** Time to wait for that version's snapshot after an `Applied` response. If exceeded, `get_view` is pulled once (against event loss). */
@@ -13,10 +11,7 @@ export const COMMIT_PULL_DELAY_MS = 500
 
 export type PreviewPhase = 'drag' | 'commit'
 
-/**
- * One preview per view. `ratio` = the share of the a-side (left/top) area (ADR-0140).
- * `awaitVersion` exists only after `commit` has received an `Applied` response — it is the version of the snapshot in which that write was announced.
- */
+/** One preview per view. `ratio` = the share of the a-side (left/top) area (ADR-0140). `awaitVersion` exists only after `commit` received `Applied` — the version of the snapshot announcing that write. */
 export interface SplitPreview {
   token: number
   splitId: string
@@ -28,9 +23,7 @@ export interface SplitPreview {
 export type PreviewState = SplitPreview | null
 
 /**
- * `token` = a value the caller draws anew for every drag. Responses · failures carry that drag's token.
- * `response.cachedVersion` = the version of this view's cache at the moment the response was received.
- * `snapshot` = every time this view's cache adopts a new snapshot — `splitIds` is all the split ids of that snapshot.
+ * `token` = a value the caller draws anew per drag; responses · failures carry it. `response.cachedVersion` = version of this view's cache when the response was received. `snapshot` = each time the cache adopts a new snapshot — `splitIds` is all split ids of it.
  */
 export type PreviewEvent =
   | { type: 'dragStart'; token: number; splitId: string; ratio: number }
@@ -77,10 +70,7 @@ export function reducePreview(state: PreviewState, ev: PreviewEvent): PreviewSta
   }
 }
 
-/**
- * Whether this is a state in which to set a pull timer after commit — true only when it is `commit` and the awaited version is above the cache.
- * Before the response (no `awaitVersion`) and for an unchanged response it does not wait for a snapshot, so it is false.
- */
+/** Whether to set a pull timer after commit — true only in `commit` with an awaited version above the cache; false before the response and for an unchanged response (no snapshot awaited). */
 export function needsPull(state: PreviewState, cachedVersion: number): boolean {
   return (
     state !== null &&
@@ -91,11 +81,8 @@ export function needsPull(state: PreviewState, cachedVersion: number): boolean {
 }
 
 /**
- * Allowed ratio range of the split being dragged. null = locked (neither side can be given `minPanePx` — `L < 2·minPanePx`).
- * `axisPx` = that axis length of the integer canvas this window reported to the shell, `boxExtent` = that axis width of the snapshot split box (`x1 - x0` or `y1 - y0`).
- * ★The same formula · same operation order as the px clamp of shell `ViewManager::set_split_ratio` (`src-tauri/src/layout/manager.rs`) ④★
- * — with the same input the range is bit-for-bit equal, so the confirmed value is not clipped again in the shell (no jump on release).
- * To change the formula, change it together with the shell.
+ * Allowed ratio range of the split being dragged; null = locked (neither side can get `minPanePx` — `L < 2·minPanePx`). `axisPx` = that axis length of the integer canvas this window reported to the shell, `boxExtent` = that axis width of the snapshot split box (`x1 - x0` or `y1 - y0`).
+ * ★Same formula · same operation order as the px clamp of shell `ViewManager::set_split_ratio` (`src-tauri/src/layout/manager.rs`) ④★ — same input gives a bit-for-bit equal range, so the confirmed value is not clipped again (no jump on release). Change both together.
  */
 export function ratioRange(p: {
   ratioMin: number
@@ -113,8 +100,7 @@ export function ratioRange(p: {
 }
 
 /**
- * Convert the pointer position (normalized relative to the root, split axis) into a ratio inside the split box and clamp it into `range`.
- * If the computation is NaN (box width 0, etc.) return `range.lo` — so NaN does not leak into the preview · command.
+ * Convert the pointer position (normalized relative to the root, split axis) into a ratio in the split box, clamped into `range`; NaN (box width 0 etc.) → `range.lo`, so NaN never leaks into the preview · command.
  */
 export function ratioFromPointer(p: {
   pointerNorm: number
@@ -130,12 +116,9 @@ export function ratioFromPointer(p: {
 type Axis = 'x' | 'y'
 
 /**
- * Apply the preview to the shell rectangles — inside the box of the split being dragged (the areas · splits of that subtree) only that axis coordinate is linearly remapped.
- * Rectangles outside the box are returned as the same object — since the reference is the same, the caller can skip re-rendering that area.
- * The input array is not changed.
- * Remapping is a function of coordinate values, so boundaries that were bit-for-bit equal in the input are equal in the result. Box edges stay in place
- * (except for degenerate input where a boundary sticks to the box end — the shell's write path does not create such splits).
- * If `preview` is null, or that split id is absent, or the ratio is not finite, the input is returned as is.
+ * Apply the preview to the shell rectangles — only inside the box of the split being dragged (that subtree's areas · splits) is that axis coordinate linearly remapped. Rectangles outside the box are returned as the same object (the caller can skip re-rendering). The input array is not changed.
+ * Remapping is a function of coordinate values, so boundaries bit-for-bit equal in the input stay equal; box edges stay put (except degenerate input where a boundary sticks to the box end — the shell's write path creates no such splits).
+ * `preview` null, an absent split id, or a non-finite ratio → the input as is.
  */
 export function remapRects(
   slotRects: SlotRect[],

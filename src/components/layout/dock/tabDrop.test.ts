@@ -46,14 +46,14 @@ function fakeIpc() {
 const flush = () => new Promise(r => setTimeout(r, 0))
 
 describe('tabDrop — send', () => {
-  it('`tab_drop` 을 `{ drop }` 으로 부르고 답을 그대로 돌려준다', async () => {
+  it('calls `tab_drop` with `{ drop }` and returns the answer as is', async () => {
     const f = fakeIpc()
     const reply = await createTabDropClient(f.ipc).send(DROP)
     expect(f.ipc.invoke).toHaveBeenCalledWith(CMD_TAB_DROP, { drop: DROP })
     expect(reply).toEqual({ type: 'applied', window: 'main', window_id: 'main', number: 1, reused: false })
   })
 
-  it('IPC 오류면 거절한다(부르는 쪽이 바꿔 그리기를 곧바로 푼다)', async () => {
+  it('on an IPC error it rejects (the caller releases the swapped drawing at once)', async () => {
     const f = fakeIpc()
     vi.mocked(f.ipc.invoke).mockRejectedValueOnce('ipc down')
     await expect(createTabDropClient(f.ipc).send(DROP)).rejects.toBe('ipc down')
@@ -67,7 +67,7 @@ describe('tabDrop — onDone', () => {
   })
   afterEach(() => warn.mockRestore())
 
-  it('모양이 맞는 done 만 넘기고 깨진 몸은 경고 후 버린다', async () => {
+  it('passes on only a done of the right shape and drops a broken body after a warning', async () => {
     const f = fakeIpc()
     const seen: unknown[] = []
     createTabDropClient(f.ipc).onDone(d => seen.push(d))
@@ -81,7 +81,7 @@ describe('tabDrop — onDone', () => {
     expect(warn).toHaveBeenCalledTimes(3)
   })
 
-  it('떼면 등록을 풀고 그 뒤 사건은 넘기지 않는다', async () => {
+  it('on detach it releases the registration and does not pass on later events', async () => {
     const f = fakeIpc()
     const seen: unknown[] = []
     const off = createTabDropClient(f.ipc).onDone(d => seen.push(d))
@@ -93,7 +93,7 @@ describe('tabDrop — onDone', () => {
     expect(seen).toEqual([])
   })
 
-  it('등록이 끝나기 전에 떼면 늦게 풀린 등록을 곧바로 푼다', async () => {
+  it('if detached before registration ends it releases the late-resolving registration at once', async () => {
     const f = fakeIpc()
     const off = createTabDropClient(f.ipc).onDone(() => {})
     off()
@@ -102,7 +102,7 @@ describe('tabDrop — onDone', () => {
     expect(f.unlisten).toHaveBeenCalledTimes(1)
   })
 
-  it('등록이 거절되면 다시 단다', async () => {
+  it('if registration is refused it hooks again', async () => {
     vi.useFakeTimers()
     try {
       const f = fakeIpc()
@@ -122,15 +122,15 @@ describe('tabDrop — onDone', () => {
   })
 })
 
-describe('tabDrop — Tauri 어댑터', () => {
-  it('done 은 자기 창 label 을 타깃으로 듣는다(TRD §2-2)', async () => {
+describe('tabDrop — Tauri adapter', () => {
+  it('done is listened to with its own window label as the target (TRD §2-2)', async () => {
     const off = tabDropClient.onDone(() => {})
     await flush()
     expect(listenMock).toHaveBeenCalledWith(EVT_TAB_DROP_DONE, expect.any(Function), { target: 'slot-popup-3' })
     off()
   })
 
-  it('send 는 Tauri invoke 로 간다', async () => {
+  it('send goes by Tauri invoke', async () => {
     await tabDropClient.send(DROP)
     expect(invokeMock).toHaveBeenCalledWith(CMD_TAB_DROP, { drop: DROP })
   })

@@ -70,7 +70,7 @@
 | CLI % formula = 3 input kinds / window | binary `…input_tokens+e.cache_creation_input_tokens+e.cache_read_input_tokens,s=Math.round(r/n*100),g=Math.min(100,Math.max(0,s))…` | supported |
 | `init.effort` only when defined | binary `if(e.effort!==void 0)i.effort=e.effort` | supported |
 | `modelUsage.contextWindow` schema | binary `costUSD:k(),contextWindow:k().int(),maxOutputTokens:k().int()` | supported |
-| our Claude decoder skips `system/init` | `backend/claude/mod.rs:863` comment "system/init·thinking_tokens 등 메타 라인 … skip" | supported |
+| our Claude decoder skips `system/init` | `backend/claude/mod.rs:863` comment "system/init·thinking_tokens and other meta lines … skip" | supported |
 | vibe-kanban 200k default · `[1m]` → 1M | `claude.rs:723` · `:1264` | supported |
 | t3code 「Avoid getContextUsage」 | `ClaudeAdapter.ts:2677` | supported |
 | paseo Codex = `last.totalTokens` · `modelContextWindow` · ring 90/70 | `codex-app-server-agent.ts:928,930` · `context-window-meter.tsx:67,70` | supported |

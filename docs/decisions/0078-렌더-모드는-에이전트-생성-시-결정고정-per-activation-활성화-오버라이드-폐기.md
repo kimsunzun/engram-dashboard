@@ -1,16 +1,16 @@
 # ADR-0078: The render mode is decided and fixed at agent creation (per-activation activation override discarded)
 
 - 상태: 확정 (2026-07-13, basis: user decision + live GUI measurement + /review code full, /qa PASS)
-- 관련: CLAUDE.md §5(LLM 제어) · ADR-0044 (output_format render mode) · ADR-0064/0065 (single contribution API for the slot menu, 1-level submenu container) · ADR-0076/0077 (activation resume, fresh-fallback) · `src/commands/agentCommands.ts` · step-log 2026-07-13
+- 관련: CLAUDE.md §5(LLM control) · ADR-0044 (output_format render mode) · ADR-0064/0065 (single contribution API for the slot menu, 1-level submenu container) · ADR-0076/0077 (activation resume, fresh-fallback) · `src/commands/agentCommands.ts` · step-log 2026-07-13
 
 ## 맥락
-When activating a reserved node (a claude reserved profile), the question was where to decide the render mode — Terminal (PTY/xterm) vs StreamJson (headless NDJSON→RichSlot chat). The two modes themselves already exist through ADR-0044, and `createClaudeProfile` takes `output_format` at creation and persists it in the profile. The initial implementation attached a [클로드 터미널/클로드 JSON] ([Claude Terminal / Claude JSON]) submenu to the tree right-click "활성화" (Activate) so the mode was chosen **at every activation**, a per-activation override (the intent was to keep the stored profile's output_format immutable).
+When activating a reserved node (a claude reserved profile), the question was where to decide the render mode — Terminal (PTY/xterm) vs StreamJson (headless NDJSON→RichSlot chat). The two modes themselves already exist through ADR-0044, and `createClaudeProfile` takes `output_format` at creation and persists it in the profile. The initial implementation attached a [Claude Terminal / Claude JSON] submenu to the tree right-click "Activate" so the mode was chosen **at every activation**, a per-activation override (the intent was to keep the stored profile's output_format immutable).
 
 ## 결정
 The render mode is **decided at the time the agent (profile) is created and immutable afterwards** — the mode is an essential property of the agent.
 
-- Expand the tree pane background right-click "에이전트 생성" (Create agent) into a 1-level submenu **[클로드 터미널 생성 / 클로드 JSON 생성]** ([Create Claude Terminal / Create Claude JSON]) (the ADR-0064/0065 slot menu container). Each child calls `createClaudeProfile` with `'Terminal'`/`'StreamJson'` and persists output_format in the profile (reusing ADR-0044).
-- Activation is a single "활성화" (Activate) (no mode selection) — it spawns with the stored mode as is.
+- Expand the tree pane background right-click "Create agent" into a 1-level submenu **[Create Claude Terminal / Create Claude JSON]** (the ADR-0064/0065 slot menu container). Each child calls `createClaudeProfile` with `'Terminal'`/`'StreamJson'` and persists output_format in the profile (reusing ADR-0044).
+- Activation is a single "Activate" (no mode selection) — it spawns with the stored mode as is.
 - §5 (LLM control): 3 creation commands — `agentlist.createTerminal` (`'Terminal'`) · `agentlist.createJson` (`'StreamJson'`) · `agentlist.createAgent` (a parameterized primitive, `args.outputFormat ?? 'StreamJson'`, an input outside the valid values throws fail-loud before the dialog opens). The menu references only command ids (the ADR-0064 invariant).
 
 ## 거부한 대안

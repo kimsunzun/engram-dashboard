@@ -1,18 +1,19 @@
-//! tray core — the **pure logic** of tray behavior (no dependence on OS/GUI/network).
-//!
-//! Purity invariant: zero tauri/discovery imports — it deals only with slices/enums (CLAUDE.md 「코어 격리」).
-//! Seams of the Launcher/DaemonProbe/dispatch kind are **deliberately absent** — in the integrated app the tray handler calls the
-//! discovery command directly, so they are unnecessary (ADR-0026, TRD §2).
-//! There is no QuitTray in the menu because tray = app integration makes it meaningless (ADR-0026).
-//! ★Note: the show_main_ui/hide_main_ui actions·commands are kept★ — for ShowUi/HideUi only the menu *item* was removed
+//! tray core — the pure logic of tray behavior (no dependence on OS/GUI/network).
+// hangul-ok-begin
+//! Purity invariant: zero tauri/discovery imports — only slices/enums (CLAUDE.md 「코어 격리」).
+// hangul-ok-end
+//! Seams of the Launcher/DaemonProbe/dispatch kind are deliberately absent — in the integrated app the tray handler calls the discovery command directly (ADR-0026, TRD §2). There is no QuitTray in the menu because tray = app integration makes it meaningless (ADR-0026).
+//! The show_main_ui/hide_main_ui actions·commands are kept: only the ShowUi/HideUi menu item was removed
+// hangul-ok-begin
 //! (the tray left click replaces it), and LLM/cdp control (CLAUDE.md 「LLM-우선 제어」) keeps using the same actions functions.
+// hangul-ok-end
 
 use crate::layout::MAIN_WINDOW_LABEL;
 
 // ── Menu intent ──────────────────────────────────────────────────────────────────
 
 // The **intent** a tray menu click expresses. Human clicks · LLM calls · shortcuts all converge
-// on this intent (CLAUDE.md 「LLM-우선 제어」).
+// on this intent (CLAUDE.md 「LLM-우선 제어」). // hangul-ok
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
     StartDaemon,
@@ -22,8 +23,7 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    // Stable id — unchanged even if the label changes or follows the UI language (click mapping stays stable). The label is
-    //   `ui_text::tray_label`.
+    // Stable id — unchanged even if the label changes or follows the UI language (click mapping stays stable); the label is `ui_text::tray_label`.
     pub const fn menu_id(self) -> &'static str {
         match self {
             MenuAction::StartDaemon => "start_daemon",
@@ -63,15 +63,10 @@ pub fn icon_state_for(alive: bool) -> IconState {
 
 // ── Target windows for show·hide (pure) ──────────────────────────────────────────────────────
 
-// The windows tray show·hide handle = all popouts (ascending number) and then main. Other windows are left out — so the tray does not bring up windows
-// that were not made to be shown to a person.
-// ★Main being last is the contract★: the caller shows · unminimizes windows and gives focus in the order received, and all three of those activate the window
-//   (tao 0.35 Windows = `SW_SHOW` · `SW_RESTORE` · `SetForegroundWindow`) — if a popout is handled after main, it takes
-//   the focus. For the same reason the popout with the largest number comes right below main.
-// ★Do not keep popouts in the order received★: the `webview_windows()` the caller passes is a new HashMap with a random hasher on every call
-//   (tauri 2.11.3 `src/lib.rs:588-601`), so following that order would shuffle the popout stacking order on every show.
-// The popout decision is taken as an argument — so that code outside tests does not lean on the Tauri-bound `commands` module,
-//   and tests pass the canonical decision (`commands::popout::is_popup_label`) as is to pin down the contract.
+// The windows tray show·hide handle = all popouts (ascending number) then main; other windows are left out so the tray does not bring up windows not made to be shown to a person.
+// Main last is the contract: the caller shows · unminimizes · focuses in the order received, and all three activate the window (tao 0.35 Windows = `SW_SHOW` · `SW_RESTORE` · `SetForegroundWindow`) — a popout handled after main takes the focus; for the same reason the largest-number popout sits right below main.
+// Do not keep popouts in received order: the `webview_windows()` the caller passes is a new HashMap with a random hasher on every call (tauri 2.11.3 `src/lib.rs:588-601`), so that order would shuffle the popout stacking on every show.
+// The popout decision is an argument so non-test code does not lean on the Tauri-bound `commands` module, and tests pass the canonical decision (`commands::popout::is_popup_label`) as is to pin the contract.
 // ADR-0229
 pub fn ui_windows<'a>(
     labels: impl IntoIterator<Item = &'a str>,
@@ -86,8 +81,7 @@ pub fn ui_windows<'a>(
             windows.push(label);
         }
     }
-    // Numbered ones first (by number), unnumbered ones after by label. The same number ("7"·"007") is also split by label to make a total order
-    //   — a comparator mixing numeric·text comparison is not a total order and the sort may panic.
+    // Numbered first (by number), unnumbered after by label. The same number ("7"·"007") is also split by label for a total order — a comparator mixing numeric·text comparison is not a total order and the sort may panic.
     windows.sort_by_key(|&label| {
         let n = popout_number(label);
         (n.is_none(), n, label)
@@ -96,27 +90,19 @@ pub fn ui_windows<'a>(
     windows
 }
 
-// Number = the tail after the last `-`. For an issued label (`slot-popup-<실행 표식>-<n>` — TRD S26-window-chrome §4-5) it is the issue sequence number n —
-// the prefix constant is in the Tauri-bound `commands::popout` and is not used here. An empty tail · non-digits · over u64 is `None`.
+// Number = the tail after the last `-`; for an issued label (`slot-popup-<run marker>-<n>` — TRD S26-window-chrome §4-5) it is the issue sequence number n — the prefix constant lives in the Tauri-bound `commands::popout` and is not used here. An empty tail · non-digits · over u64 → `None`.
 fn popout_number(label: &str) -> Option<u64> {
     label.rsplit_once('-')?.1.parse().ok()
 }
 
 // ── Icon pixel conversion (pure) ──────────────────────────────────────────────────────────
 
-// `rgba.len()` must be `w*h*4` (RGBA 4 channels). This precondition is guaranteed by the caller (the `.rgba()` decoded with Tauri `Image::from_bytes`) —
-// the decode result is a buffer of a length consistent with `(width, height)`.
-// len ≠ w*h*4 is always a contract violation (regardless of being a multiple of 4). A debug build catches it at once with the debug_assert below as a
-// panic, and release is caught downstream but **soft** — the direct consumer `Image::new_owned(_, w, h)`
-// is an unvalidated constructor, but before that `Image` reaches the tray it goes through the length check of `TryFrom → tray_icon::Icon::from_rgba`
-// (builder path = swallowed with `.ok()` so the icon is not set / `set_icon` path = warn
-// log degrade — neither is a panic). So debug_assert is not the only line of defense but the only one that catches immediately
-// and loudly. If the precondition holds, there is no chunks_exact remainder.
+// `rgba.len()` must be `w*h*4` (RGBA 4 channels) — guaranteed by the caller (the `.rgba()` decoded with Tauri `Image::from_bytes` is a buffer consistent with `(width, height)`). len ≠ w*h*4 is always a contract violation (even a multiple of 4): a debug build catches it at once with the debug_assert below, and release is caught downstream but softly — the direct consumer `Image::new_owned(_, w, h)` is an unvalidated constructor, but before the `Image` reaches the tray it goes through the length check of `TryFrom → tray_icon::Icon::from_rgba` (builder path = swallowed with `.ok()` so the icon is not set / `set_icon` path = warn-log degrade; neither panics). So debug_assert is not the only defense but the only one that catches immediately and loudly. If the precondition holds there is no chunks_exact remainder.
 pub fn to_grayscale_rgba(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     debug_assert_eq!(
         rgba.len(),
         (w as usize) * (h as usize) * 4,
-        "to_grayscale_rgba: 버퍼 길이 ≠ w*h*4 (RGBA)"
+        "to_grayscale_rgba: buffer length != w*h*4 (RGBA)"
     );
     let mut out = Vec::with_capacity(rgba.len());
     for px in rgba.chunks_exact(4) {
@@ -150,7 +136,7 @@ mod tests {
         use crate::ui_text::{tray_label, Lang};
         assert_eq!(
             tray_label(Lang::Ko, MenuAction::ToggleAutostart),
-            "부팅 시 자동 시작"
+            "부팅 시 자동 시작" // hangul-ok: the Korean UI table
         );
         assert_eq!(
             tray_label(Lang::En, MenuAction::ToggleAutostart),
@@ -176,12 +162,11 @@ mod tests {
 
     #[test]
     fn all_variants_present_in_all_array() {
-        // Preventing an ALL omission: if a new variant is added, the exhaustive match below gives a compile error
-        // (non-exhaustive) that forces awareness of "did you put this variant in ALL".
+        // Prevents an ALL omission: a new variant makes the exhaustive match below a compile error (non-exhaustive), forcing "did you put this variant in ALL".
         fn assert_in_all(a: MenuAction) {
             assert!(
                 MenuAction::ALL.contains(&a),
-                "{a:?} 가 MenuAction::ALL 에 없음 — 라우팅에서 silent 누락"
+                "{a:?} is missing from MenuAction::ALL — silently dropped from routing"
             );
         }
         match MenuAction::StartDaemon {
@@ -190,7 +175,11 @@ mod tests {
             MenuAction::QuitApp => assert_in_all(MenuAction::QuitApp),
             MenuAction::ToggleAutostart => assert_in_all(MenuAction::ToggleAutostart),
         }
-        assert_eq!(MenuAction::ALL.len(), 4, "variant 수 ↔ ALL 길이 불일치");
+        assert_eq!(
+            MenuAction::ALL.len(),
+            4,
+            "variant count and ALL length do not match"
+        );
     }
 
     #[test]
@@ -200,7 +189,7 @@ mod tests {
         let mut dedup = ids.clone();
         dedup.sort_unstable();
         dedup.dedup();
-        assert_eq!(ids.len(), dedup.len(), "menu_id 중복: {ids:?}");
+        assert_eq!(ids.len(), dedup.len(), "duplicate menu_id: {ids:?}");
     }
 
     #[test]
@@ -210,16 +199,19 @@ mod tests {
                 .iter()
                 .map(|&a| crate::ui_text::tray_label(lang, a))
                 .collect();
-            assert!(labels.iter().all(|l| !l.is_empty()), "빈 라벨: {labels:?}");
+            assert!(
+                labels.iter().all(|l| !l.is_empty()),
+                "empty label: {labels:?}"
+            );
             let mut dedup = labels.clone();
             dedup.sort_unstable();
             dedup.dedup();
-            assert_eq!(labels.len(), dedup.len(), "label 중복: {labels:?}");
+            assert_eq!(labels.len(), dedup.len(), "duplicate label: {labels:?}");
         }
     }
 
     // ── Target windows for show·hide ──
-    // Pass the same canonical popout decision as production — with a separate decision for tests, this stays green even if the canonical one changes.
+    // Pass the same canonical popout decision as production — a separate decision for tests would stay green even if the canonical one changes.
     use crate::commands::popout::is_popup_label;
 
     #[test]
@@ -237,7 +229,7 @@ mod tests {
         assert_eq!(
             ui_windows(labels, is_popup_label).last(),
             Some(&"main"),
-            "메인이 마지막이 아니면 뒤에 펼친 팝아웃이 포커스를 가져간다",
+            "if main is not last, a pop-out spread after it takes the focus",
         );
     }
 
@@ -335,13 +327,13 @@ mod tests {
             10, 200, 30, 255, // Greenish, alpha=255
         ];
         let out = to_grayscale_rgba(&rgba, 2, 1);
-        assert_eq!(out.len(), rgba.len(), "길이 보존");
+        assert_eq!(out.len(), rgba.len(), "length preserved");
         assert_eq!(out[0], out[1]);
         assert_eq!(out[1], out[2]);
-        assert_eq!(out[3], 128, "alpha 보존(px0)");
+        assert_eq!(out[3], 128, "alpha preserved (px0)");
         assert_eq!(out[4], out[5]);
         assert_eq!(out[5], out[6]);
-        assert_eq!(out[7], 255, "alpha 보존(px1)");
+        assert_eq!(out[7], 255, "alpha preserved (px1)");
         let expected0 = (0.299 * 200.0 + 0.587 * 10.0 + 0.114 * 30.0f32).round() as u8;
         assert_eq!(out[0], expected0, "px0 luma");
     }

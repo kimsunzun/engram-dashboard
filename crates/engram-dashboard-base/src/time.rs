@@ -14,12 +14,10 @@ pub fn now_epoch_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// The 「지금 읽기」 (read now) seam — lets a test move the time by hand to measure decisions that split by time, without real-time waiting
-/// (ADR-0269 decision 3-1).
+/// The "read now" seam — lets a test move time by hand to measure time-split decisions without real-time waiting (ADR-0269 decision 3-1).
 ///
-/// ★Waiting is not put here★ (ADR-0269 decision 3-2) — a side that needs sleep makes this the supertrait of its own trait and
-/// adds `sleep`. A blocking sleep · a future sleep · a thread launch differ in shape for each user, so they are not
-/// bound into one trait.
+/// ★Waiting is not put here★ (ADR-0269 decision 3-2) — a side needing sleep makes this the supertrait of its own trait and adds `sleep`
+///   (blocking sleep · future sleep · thread launch differ per user).
 // ADR-0275
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
@@ -56,16 +54,17 @@ impl ManualClock {
         }
     }
 
-    /// Moves forward by `by`. If the accumulated amount exceeds `u64` nanoseconds (about 584 years) it panics — a loud failure is better than wrapping around and the time
+    /// Moves forward by `by`. If the accumulated amount exceeds `u64` nanoseconds (about 584 years) it panics — a loud failure is better
+    ///   than wrapping around and the time
     /// going backwards.
     pub fn advance(&self, by: Duration) {
-        let by = u64::try_from(by.as_nanos())
-            .expect("ManualClock: 한 번에 미는 폭이 u64 나노초를 넘는다");
+        let by =
+            u64::try_from(by.as_nanos()).expect("ManualClock: one advance exceeds u64 nanoseconds");
         self.offset_nanos
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
                 cur.checked_add(by)
             })
-            .expect("ManualClock: 쌓인 폭이 u64 나노초를 넘는다");
+            .expect("ManualClock: the accumulated advance exceeds u64 nanoseconds");
     }
 }
 
@@ -92,7 +91,7 @@ mod tests {
     fn wall_ms() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("시험 기계의 시계는 1970 뒤다")
+            .expect("the test machine's clock is after 1970")
             .as_millis() as i64
     }
 
@@ -151,12 +150,12 @@ mod tests {
         let pusher = Arc::clone(&clock);
         std::thread::spawn(move || pusher.advance(Duration::from_secs(3)))
             .join()
-            .expect("미는 스레드");
+            .expect("advancing thread");
         assert_eq!(seen.now() - start, Duration::from_secs(3));
     }
 
     #[test]
-    #[should_panic(expected = "쌓인 폭")]
+    #[should_panic(expected = "accumulated advance")]
     fn an_advance_beyond_the_counter_panics_instead_of_wrapping() {
         let clock = ManualClock::new();
         clock.advance(Duration::from_nanos(u64::MAX));

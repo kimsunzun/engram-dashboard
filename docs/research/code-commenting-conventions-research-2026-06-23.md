@@ -15,7 +15,7 @@
 **Diagnosis of engram's current state (prior Explore):**
 - The concurrency · kill · race core (`output_core.rs`/`reaper.rs`/`session.rs`) is good, with a comment density of 22~28%. With 36 `// ADR-NNNN` anchors, the file headers (`//!`), and Korean "why" comments, compliance with the CLAUDE.md convention is ~85%.
 - Weaknesses: the ADR anchors are partial (relative to the load-bearing points), and the internal branches of `session_tracker.rs` (resolve/poll/PID shim) and some large tests leave a first-time reader lost.
-- There is no comment-only ADR. The principle lives only in the CLAUDE.md "컨벤션" section (why-only · no comments on the self-evident · plant load-bearing intent · the `ENGRAM_DATA_DIR` accidental deletion case).
+- There is no comment-only ADR. The principle lives only in the CLAUDE.md "Conventions" section (why-only · no comments on the self-evident · plant load-bearing intent · the `ENGRAM_DATA_DIR` accidental deletion case).
 
 The thread of this research's conclusion → organize **options + trade-offs** on how to refine engram's comment convention, for the user's decision (no arbitrary adoption).
 
@@ -138,7 +138,7 @@ engram's current convention already matches the evidence-supported shape at ~85%
 
 - **Option A (minimal):** leave the convention text as is, and only gradually reinforce the files diagnosed as weak (ADR anchors · internal why comments). No ADR/CLAUDE.md change.
   - Trade-off: minimal cost · minimal rot risk / the standard stays implicit, so the next session may miss "overview quality".
-- **Option B (middle, recommended):** write a **2-layer comment convention** into the CLAUDE.md "컨벤션" section — (1) inline = why/intent/invariant/load-bearing (existing) (2) **new: load-bearing files must have an "understand at a glance" overview header** (role · responsibilities · invariants · entry points) + gradually expand `// ADR-NNNN` anchors. If it is a major decision, ADR-00xx.
+- **Option B (middle, recommended):** write a **2-layer comment convention** into the CLAUDE.md "Conventions" section — (1) inline = why/intent/invariant/load-bearing (existing) (2) **new: load-bearing files must have an "understand at a glance" overview header** (role · responsibilities · invariants · entry points) + gradually expand `// ADR-NNNN` anchors. If it is a major decision, ADR-00xx.
   - Trade-off: meets the user's "understand at a glance" need directly in the evidence-supported shape / headers can also rot → a discipline of "update together with code changes" is needed.
 - **Option C (strong):** B + aim at NL-outline-style structured overviews · automatic updating (living doc) tooling (e.g., a notice to update the header when a change is detected).
   - Trade-off: stops rot structurally · the most agent-friendly / high tooling cost, with a risk of over-engineering at this stage (a high-cost-uncertain area, not low-risk-long-term).

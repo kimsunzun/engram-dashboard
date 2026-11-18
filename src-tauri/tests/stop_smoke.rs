@@ -1,16 +1,6 @@
-//! Isolation harness — the stop path against a real daemon process, end to end.
-//!
-//! Subject: does one stop flight (`daemon_client::shutdown::stop_flight` on production's ports — `daemon.json`, the ws
-//! dialer, the OS) make a live daemon exit gracefully: the stop handshake with the daemon's own version →
-//! `StopDaemon{force}` → the daemon's `shutdown_all` → self-exit. The single flight and the link around
-//! it are unit-tested in memory (`daemon_client::shutdown` tests); this measures the wire and the process.
-//!
-//! ★ENGRAM_DATA_DIR isolation (unlike the WMI path)★: this test **spawns directly with std::process::Command**,
-//!   so the env is inherited and it is fully isolated to a temp folder — it does not touch the production `.engram-dev`.
-//!   (A direct spawn is enough to verify the stop round trip — the detached nature of WMI is unrelated to it.)
-//!
-//! Run: `cargo test -p engram-dashboard --test stop_smoke -- --ignored --test-threads=1`
-//!   (skipped by #[ignore] in the default `cargo test` — needs the daemon exe + a real process. Kept as a verification asset.)
+//! Isolation harness — the stop path against a real daemon process, end to end. Subject: does one stop flight (`daemon_client::shutdown::stop_flight` on production's ports — `daemon.json`, the ws dialer, the OS) make a live daemon exit gracefully: the stop handshake with the daemon's own version → `StopDaemon{force}` → the daemon's `shutdown_all` → self-exit. The single flight and the link around it are unit-tested in memory (`daemon_client::shutdown` tests); this measures the wire and the process.
+//! ENGRAM_DATA_DIR isolation (unlike the WMI path): this test spawns directly with `std::process::Command`, so the env is inherited and it is fully isolated to a temp folder — it does not touch the production `.engram-dev` (a direct spawn suffices for the stop round trip; WMI's detached nature is unrelated).
+//! Run: `cargo test -p engram-dashboard --test stop_smoke -- --ignored --test-threads=1` (skipped by `#[ignore]` in the default `cargo test` — needs the daemon exe + a real process; kept as a verification asset).
 
 #![cfg(windows)]
 
@@ -27,8 +17,7 @@ use engram_dashboard_lib::daemon_client::shutdown::{
 use engram_dashboard_lib::discovery::daemon_status;
 use engram_dashboard_transport::{Clock, SystemClock};
 
-/// The candidates of discovery::locate_daemon_exe are next to current_exe (the test exe is in deps/) · based on cwd, so in tests
-/// it relies on which folder cargo runs the test in (tests only — the production path stays locate_daemon_exe as is).
+/// discovery::locate_daemon_exe's candidates are next to current_exe (the test exe is in deps/) · based on cwd, so in tests they depend on where cargo runs the test (tests only — production keeps locate_daemon_exe).
 fn daemon_exe_path() -> PathBuf {
     // This test binary is in target/<profile>/deps/, so two levels above it is the <profile> folder.
     let mut p = std::env::current_exe().expect("current_exe");
@@ -37,9 +26,7 @@ fn daemon_exe_path() -> PathBuf {
     p.join("engram-dashboard-daemon.exe")
 }
 
-/// Waits until `daemon.json` names a pid that is in the OS — whatever its protocol version (`daemon_status` reports the
-/// pid of an incompatible record too, only `alive` is false for it). The data folder is a fresh temp folder, so the
-/// record can only be the daemon this test started.
+/// Waits until `daemon.json` names a pid that is in the OS — whatever its protocol version (`daemon_status` reports an incompatible record's pid too, only `alive` is false). The data folder is a fresh temp folder, so the record can only be the daemon this test started.
 fn wait_published(data_dir: &Path, timeout: Duration) -> Option<u32> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -54,16 +41,12 @@ fn wait_published(data_dir: &Path, timeout: Duration) -> Option<u32> {
     None
 }
 
-/// ★Why tasklist instead of daemon_status (load-bearing)★: this test spawns the daemon directly with std::process, so
-/// the parent (the test) holds the process HANDLE of the Child. As long as that handle is open, **even if the daemon exits (exit code 0)**
-/// OpenProcess+GetProcessTimes keeps returning a creation_time for the dead PID (Windows behavior — a handle keeps the
-/// process object alive). tasklist shows **only active processes**, so it sees whether it has "actually exited"
-/// regardless of holding a handle → an independent witness next to the stop path's own exit-code check.
+/// Why tasklist instead of daemon_status (load-bearing): this test spawns the daemon directly with std::process, so the parent holds the Child's process HANDLE; as long as it is open, even after the daemon exits (code 0) OpenProcess+GetProcessTimes keeps returning a creation_time for the dead PID (Windows keeps the process object alive). tasklist shows only active processes, so it sees whether it actually exited regardless of the handle — an independent witness next to the stop path's own exit-code check.
 fn pid_in_tasklist(pid: u32) -> bool {
     let out = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
         .output()
-        .expect("tasklist 실행");
+        .expect("run tasklist");
     let s = String::from_utf8_lossy(&out.stdout);
     s.contains(&format!("\"{pid}\""))
 }
@@ -106,13 +89,9 @@ impl Drop for Guard {
 /// What one stop against a real daemon showed.
 struct Stopped {
     outcome: StopOutcome,
-    /// The pid `daemon.json` named — the process the stop aimed at.
     published: u32,
-    /// The pid this test spawned.
     spawned: u32,
-    /// The published process left the OS within 10 s.
     gone: bool,
-    /// The spawned process's exit status, if it has exited.
     exit: Option<std::process::ExitStatus>,
 }
 
@@ -121,8 +100,7 @@ struct Stopped {
 enum RecordAt {
     /// This app's layout (`DataLayout::daemon_file`).
     Current,
-    /// The data folder root — daemons before the per-component layout (ADR-0264, which moves no old data), `v0.3.2`
-    /// among them. This app never reads there, so the test copies the record to where it does.
+    /// The data folder root — daemons before the per-component layout (ADR-0264, which moves no old data), `v0.3.2` among them. This app never reads there, so the test copies the record to where it does.
     Root,
 }
 
@@ -148,16 +126,15 @@ fn adopt_root_record(data_dir: &Path, timeout: Duration) {
 
 /// Spawns `exe` on a temp data folder and runs one `User` stop flight against it.
 fn stop_a_real_daemon(exe: &Path, record_at: RecordAt) -> Stopped {
-    assert!(exe.is_file(), "데몬 exe 없음({})", exe.display());
-    let tmp = tempfile::tempdir().expect("tempdir 생성");
+    assert!(exe.is_file(), "daemon exe not found ({})", exe.display());
+    let tmp = tempfile::tempdir().expect("create tempdir");
     let data_dir = tmp.path().to_path_buf();
 
-    // The debug-build daemon is a console app — it inherits stdout/stderr so that with RUST_LOG=debug an Auth
-    // rejection/parse failure is visible on the console.
+    // The debug-build daemon is a console app — it inherits stdout/stderr so with RUST_LOG=debug an Auth rejection/parse failure is visible on the console.
     let child = Command::new(exe)
         .env("ENGRAM_DATA_DIR", &data_dir)
         .spawn()
-        .expect("데몬 spawn");
+        .expect("spawn the daemon");
     let spawned = child.id();
     let mut guard = Guard {
         child,
@@ -169,7 +146,7 @@ fn stop_a_real_daemon(exe: &Path, record_at: RecordAt) -> Stopped {
     }
     let published = wait_published(&data_dir, Duration::from_secs(15)).unwrap_or_else(|| {
         panic!(
-            "데몬이 15s 내 daemon.json 발행 — 빌드/포트/mutex 확인 (last status: {:?})",
+            "daemon did not publish daemon.json within 15s — check build/port/mutex (last status: {:?})",
             daemon_status(&data_dir)
         )
     });
@@ -205,12 +182,12 @@ fn stop_a_real_daemon(exe: &Path, record_at: RecordAt) -> Stopped {
 }
 
 #[test]
-#[ignore = "실프로세스 stop 경로 왕복 — 데몬 exe 필요(Windows 전용, 수동 통합)"]
+#[ignore = "real-process stop path round trip — needs the daemon exe (Windows only, manual integration)"]
 fn stop_flight_makes_a_real_daemon_exit_gracefully() {
     let exe = daemon_exe_path();
     assert!(
         exe.is_file(),
-        "데몬 exe 없음({}) — 먼저 `cargo build -p engram-dashboard-daemon`",
+        "daemon exe not found ({}) — first run `cargo build -p engram-dashboard-daemon`",
         exe.display()
     );
     let stopped = stop_a_real_daemon(&exe, RecordAt::Current);
@@ -235,18 +212,10 @@ fn stop_flight_makes_a_real_daemon_exit_gracefully() {
     );
 }
 
-/// TRD S21 trd-3-2-u5 §5 QA: the cross-version case — a shipped daemon of an older protocol (tag `v0.3.2`, protocol 6)
-/// accepts the stop handshake in its own version and exits.
-///
-/// ★It measures the wire, not discovery★ — `v0.3.2` writes its record at the data folder root, where this app does not
-/// look (ADR-0264 moved the record and moves no old data); the test copies the record over ([`RecordAt::Root`]).
-///
-/// ★The old daemon is not built here★ — building a tag needs its own checkout and build; point
-/// `ENGRAM_OLD_DAEMON_EXE` at an `engram-dashboard-daemon.exe` built from `v0.3.2`. Without it the test prints
-/// `SKIPPED` with that instruction and returns — it then measured nothing (user decision 2026-11-09: the build is run only
-/// for changes to the stop handshake; the qa binding says when).
+/// TRD S21 trd-3-2-u5 §5 QA: the cross-version case — a shipped daemon of an older protocol (tag `v0.3.2`, protocol 6) accepts the stop handshake in its own version and exits. Measures the wire, not discovery: `v0.3.2` writes its record at the data folder root where this app does not look (ADR-0264 moved the record and moves no old data), so the test copies it over ([`RecordAt::Root`]).
+/// The old daemon is not built here — building a tag needs its own checkout and build; point `ENGRAM_OLD_DAEMON_EXE` at an `engram-dashboard-daemon.exe` built from `v0.3.2`. Without it the test prints `SKIPPED` with that instruction and returns, having measured nothing (user decision 2026-11-09: the build is run only for changes to the stop handshake; the qa binding says when).
 #[test]
-#[ignore = "실프로세스 cross-version stop — ENGRAM_OLD_DAEMON_EXE(v0.3.2 데몬 exe) 필요"]
+#[ignore = "real-process cross-version stop — needs ENGRAM_OLD_DAEMON_EXE (v0.3.2 daemon exe)"]
 fn stop_flight_makes_an_older_daemon_exit() {
     let Some(exe) = std::env::var_os("ENGRAM_OLD_DAEMON_EXE").map(PathBuf::from) else {
         eprintln!(
@@ -269,19 +238,16 @@ fn stop_flight_makes_an_older_daemon_exit() {
     );
 }
 
-/// Diagnosis: tells apart whether the close timing right after `StopDaemon` leaves it unprocessed (pinned down the QA
-/// root cause of the old sync client — kept as the evidence behind `link::stop`'s "no close right behind StopDaemon").
-///
-/// Takes a scenario as an argument and changes only the close behavior after sending Auth → StopDaemon:
-///   - "noclose"   : no close after flush (connection kept) — diag baseline.
-///   - "delayclose": close after waiting 250ms after flush — gives the daemon time to read StopDaemon.
-/// If in both the daemon vanishes from the OS (graceful self-exit), the problem is an **immediate close**.
+/// Diagnosis: tells apart whether the close timing right after `StopDaemon` leaves it unprocessed (pinned the QA root cause of the old sync client — kept as the evidence behind `link::stop`'s "no close right behind StopDaemon"). Takes a scenario and changes only the close behavior after sending Auth → StopDaemon: "noclose" = no close after flush (connection kept) — diag baseline; "delayclose" = close 250 ms after flush — gives the daemon time to read StopDaemon. If in both the daemon vanishes from the OS (graceful self-exit), the problem is an immediate close.
 fn diag_send_with_close_mode(mode: &str) -> bool {
     use std::net::TcpStream;
     use tokio_tungstenite::tungstenite::{self, Message};
 
     let exe = daemon_exe_path();
-    assert!(exe.is_file(), "데몬 exe 없음 — cargo build -p ...-daemon");
+    assert!(
+        exe.is_file(),
+        "daemon exe not found — cargo build -p ...-daemon"
+    );
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
     let mut child = Command::new(&exe)
@@ -331,19 +297,19 @@ fn diag_send_with_close_mode(mode: &str) -> bool {
 }
 
 #[test]
-#[ignore = "진단 — StopDaemon 직후 close-race 가설 확인(close 안 함)"]
+#[ignore = "diagnostic — checking the close-race hypothesis right after StopDaemon (no close)"]
 fn diag_noclose_lets_daemon_exit() {
     assert!(
         diag_send_with_close_mode("noclose"),
-        "close 안 하면 데몬이 self-exit 하는가"
+        "does the daemon self-exit without close"
     );
 }
 
 #[test]
-#[ignore = "진단 — StopDaemon 직후 close-race 가설 확인(250ms 후 close)"]
+#[ignore = "diagnostic — checking the close-race hypothesis right after StopDaemon (close after 250ms)"]
 fn diag_delayclose_lets_daemon_exit() {
     assert!(
         diag_send_with_close_mode("delayclose"),
-        "close 전 데몬이 read 할 시간을 주면 self-exit 하는가"
+        "does the daemon self-exit if given time to read before close"
     );
 }

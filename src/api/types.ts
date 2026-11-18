@@ -1,5 +1,4 @@
-// Rust 백엔드 타입 미러 — LLD §3 / frontend-integration-lld.md §1
-// 백엔드 #[serde(tag="type")]와 정확히 일치하는 discriminated union.
+// Rust backend type mirror — LLD §3 / frontend-integration-lld.md §1; discriminated unions match the backend #[serde(tag="type")].
 
 export type AgentStatus =
   | { type: 'Running' }
@@ -11,12 +10,12 @@ export type AgentStatus =
 export interface PtyEvent {
   agent_id: string
   seq: number
-  /** 세션 epoch — WS binary frame 헤더와 동형(BLOCKER 1). */
+  /** Session epoch — same as the WS binary frame header. */
   epoch: number
   data_b64: string
 }
 
-// ── Capabilities (Rust Capabilities 미러, snake_case) ──────────────────────────
+// ── Capabilities (Rust Capabilities mirror, snake_case) ──────────────────────────
 
 export interface InputCaps {
   raw: boolean
@@ -26,7 +25,7 @@ export interface InputCaps {
 
 export interface OutputCaps {
   terminal_bytes: boolean
-  /** 구조화 스트림(NDJSON) 여부 — 렌더러 분기(xterm vs RichSlot) 근거 (ADR-0044) */
+  /** Whether it is a structured stream (NDJSON) — the basis for the renderer split (xterm vs RichSlot) (ADR-0044) */
   structured: boolean
   markdown: boolean
   tool_events: boolean
@@ -62,18 +61,14 @@ export interface Capabilities {
 
 export interface AgentInfo {
   id: string
-  /** 표시용 canonical 이름 — 백엔드가 `display_name ?? cwd basename` 으로 채움(ADR-0101). profile.name 이 아니다. */
+  /** Canonical display name — the backend fills it with `display_name ?? cwd basename` (ADR-0101). Not profile.name. */
   name: string
   cwd: string
   status: AgentStatus
   cols: number
   rows: number
   /**
-   * ★화신(incarnation) 하나를 가리키는 **불투명 표식**★ — 화신마다 새로 뽑은 난수라 **순서에 뜻이 없다**.
-   * 비교는 일치/불일치만 쓴다(대소로 "더 새 것" 을 유도하지 말 것). 프론트는 이 값을 "지금 읽는 출력
-   * 스트림이 아까 그 스트림인가" 의 판정 축으로만 쓴다 — ★재구독·재마운트 트리거로 쓰지 말 것★:
-   * 종료가 곧 명부에서 사라지는 것이라, 이 값을 컴포넌트 prop 으로 내려보내면 종료 순간 값이 떨어지며
-   * **replay 가 오기도 전에** 화면이 지워진다(데몬 ring 은 이미 없어 복구 불가). (ADR-0007)
+   * ★**Opaque marker** of one incarnation★ — a random number drawn per incarnation, so **its order means nothing**: compare only match/mismatch (never derive "newer" from magnitude). The frontend uses it only to decide whether the output stream being read is the same stream as before — ★never as a resubscribe/remount trigger★: exit means leaving the roster, so passing it down as a prop drops the value at exit and erases the screen **before the replay arrives** (the daemon ring is gone, unrecoverable) (ADR-0007).
    */
   epoch: number
   capabilities: Capabilities
@@ -82,22 +77,18 @@ export interface AgentInfo {
 export interface AgentStatusChanged {
   id: string
   status: AgentStatus
-  /** 이 알림을 낸 화신의 표식 — 옛 세션의 지연 알림을 버리는 데 쓴다(일치/불일치만, AgentInfo.epoch). */
+  /** The marker of the incarnation that issued this notification — used to drop delayed notifications of an old session (match/mismatch only, AgentInfo.epoch). */
   epoch: number
 }
 
-// ── S9: 프로필 + 복원 ──────────────────────────────────────────────────────────
+// ── S9: profiles + restore ──────────────────────────────────────────────────────────
 
-/** 에이전트 출력 모드 — Terminal=PTY, StreamJson=JSON 기반 비터미널. 교환 모양은 backend 가 정한다. (ADR-0044) */
+/** Agent output mode — Terminal=PTY, StreamJson=JSON-based non-terminal. The exchange shape is decided by the backend. (ADR-0044) */
 export type AgentOutputFormat = 'Terminal' | 'StreamJson'
 
 /**
- * 에이전트 실행 명령 — 백엔드 #[serde(tag="kind")]와 일치.
- *
- * ★이름 충돌★ — 러스트 `protocol` 의 동명 타입은 뜻이 다르다(데몬에 보내는 wire 명령).
- * 이 타입의 러스트 짝은 `AgentSpawnCommand` 다. 생성 바인딩을 물릴 때 `AgentCommand.ts`
- * 가 아니라 `AgentSpawnCommand.ts` 를 가져올 것 — 전자는 모양이 달라 tsc 가 잡지만,
- * 그 방어는 이 값을 짓는 테스트 픽스처가 있을 때만 작동한다(프로덕션 코드는 안 만든다).
+ * Agent launch command — matches the backend #[serde(tag="kind")].
+ * ★Name collision★: the Rust `protocol` has a same-named type meaning something else (the wire command to the daemon). The counterpart of this type is `AgentSpawnCommand` — import `AgentSpawnCommand.ts`, not `AgentCommand.ts`, when wiring generated bindings (tsc catches it only if a test fixture builds this value).
  */
 export type AgentCommand =
   | { kind: 'Claude'; extra_args: string[]; output_format: AgentOutputFormat }
@@ -105,23 +96,15 @@ export type AgentCommand =
   | { kind: 'Codex'; extra_args: string[]; output_format: AgentOutputFormat }
 
 /**
- * 스폰 패킷이 고르는 백엔드 — wire `AgentBackendKind` 미러. ★부재는 기본값이 아니라 오류다★: 이 낱말을
- * 안 실은 스폰 패킷은 데몬이 거절한다(고르지 않은 것과 claude 를 고른 것을 구별하려는 결정).
- * ★렌더러 선택에 쓰지 말 것★ — 어느 슬롯을 띄우나(터미널·리치·DOM)는 `capabilities.output.structured`
- * 한 칸이 가른다. 여기로 그 분기를 세우면 같은 능력을 두 곳이 각자 판정하게 된다.
- * ★한 렌더러 **안**의 백엔드 표기(제목·표식·색조)는 이 금지에 들지 않는다★ — 그건 무엇을 그리느냐가
- * 아니라 누구와 말하느냐를 적는 것이다. 단 그 판정도 이 타입이 아니라 프로필의 `command.kind` 가 한다
- * (정의처 = `components/slot/richBranding.ts`) — 이 낱말은 스폰 패킷이 실어 보내는 값이지 화면이 읽는
- * 값이 아니다.
+ * The backend a spawn packet picks — mirror of wire `AgentBackendKind`. ★Absence is an error, not a default★: the daemon refuses a spawn packet without this word (not picking is told apart from picking claude).
+ * ★Not for renderer selection★ — `capabilities.output.structured` alone decides which slot launches (terminal · rich · DOM); branching here would make two places decide the same capability. Backend labelling **within** one renderer (title · mark · tint) is not banned, but it uses the profile's `command.kind` (`components/slot/richBranding.ts`), not this type — this is the value the spawn packet carries, not what the screen reads.
  */
 export type AgentBackendKind = 'claude' | 'codex'
 
 export type RestartPolicy = 'Never' | 'OnCrash' | 'Always'
 
 /**
- * 「마지막 실패」의 종류 — wire `AgentFailureKind` 미러(ADR-0172).
- * 지금 상태(AgentStatus)와 **별개 축**이다: 도는 중이면서 마지막 실패를 들고 있을 수 있고,
- * 그 조합이 화면의 「도는 중이 이긴다」 규칙(ADR-0173)이 서는 자리다.
+ * Kind of "the last failure" — mirror of wire `AgentFailureKind` (ADR-0172). **A separate axis** from AgentStatus: a running agent may hold a last failure, where the screen's "running wins" rule (ADR-0173) applies.
  */
 export type AgentFailureKind =
   | 'NoConversationToResume'
@@ -129,21 +112,13 @@ export type AgentFailureKind =
   | 'EarlyExitAfterResume'
   | 'Other'
 
-/** 영속 프로필 — 데몬 프로필 파일 단위. env에 자격증명 금지(평문 저장) */
+/** Persistent profile — the daemon profile file unit. No credentials in env (stored in plain text) */
 export interface AgentProfile {
   id: string
   name: string
-  /**
-   * 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). Some → 그대로 표시, null → cwd basename
-   * 파생(기존 동작 불변). 트리는 `name`(CreateProfile 이름/ad-hoc cwd 문자열, 표시명 부적합) 대신 이 값을
-   * 우선한다. wire `AgentProfile.display_name` 미러(#[serde(default)] — 키가 없는 항목은 null).
-   */
+  /** User display-name override (ADR-0061, tree rename): Some → shown as is, null → cwd basename. Preferred over `name` (the CreateProfile name / ad-hoc cwd string). Mirror of wire `AgentProfile.display_name` (#[serde(default)] — null when the key is absent). */
   display_name: string | null
-  /**
-   * 트리 계층의 부모 프로필 id(ADR-0072). Some(pid) → pid 의 자식(들여쓰기), null → 최상위(루트).
-   * 1단 중첩만 허용(부모는 반드시 루트) — 검증은 백엔드 ProfileRegistry::try_reparent + 쓰기 경계 정규화.
-   * wire `AgentProfile.parent_id` 미러(#[serde(default)] — 키가 없는 항목은 null).
-   */
+  /** Parent profile id of the tree hierarchy (ADR-0072): Some(pid) → child of pid, null → root. One level only (the parent must be a root) — validated by backend ProfileRegistry::try_reparent + write boundary normalization. Mirror of wire `AgentProfile.parent_id` (#[serde(default)] — null when the key is absent). */
   parent_id: string | null
   command: AgentCommand
   cwd: string
@@ -153,24 +128,19 @@ export interface AgentProfile {
   epoch: number
   auto_restore: boolean
   restart_policy: RestartPolicy
-  /** 크래시 가드 카운터(수동 재시작 시 0 리셋 — 동작 TODO) */
+  /** Crash guard counter (reset to 0 on a manual restart — behaviour TODO) */
   restart_count: number
-  /** Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속(ADR-0016). 동작 TODO */
+  /** Reason for Failed (auto-restore suspend) — persists across cold boots (ADR-0016). Behaviour TODO */
   failed_reason: string | null
-  /**
-   * 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0172). null = 실패 기록 없음.
-   * 데몬 메모리에만 사는 값이라 프로필 파일엔 없고 데몬 재기동 시 사라진다(앱 창 재시작은 견딘다).
-   * wire `AgentProfile.last_failure` 미러(#[serde(default)] — 옛 wire 는 null).
-   * 종류→{다시 해볼 가치·문구·권하는 행동} 표 = `src/components/agent/failureKinds.ts`.
-   */
+  /** Kind of this entry's last activation failure (ADR-0172); null = none. Lives only in daemon memory — not in the profile file, lost on daemon restart (survives an app window restart). Mirror of wire `AgentProfile.last_failure` (#[serde(default)]). Kind→{retryable · text · action} table = `src/components/agent/failureKinds.ts`. */
   last_failure: AgentFailureKind | null
   created_at: number
   last_active: number
-  /** 마지막 프로세스 기동 시각(기록·디버깅용, 리셋 판정엔 미사용) */
+  /** Last process launch time (for records/debugging, not used for reset decisions) */
   last_start_at: number | null
 }
 
-/** 복원 결말 — restore-result event, #[serde(tag="type")] */
+/** Restore outcome — restore-result event, #[serde(tag="type")] */
 export type RestoreOutcome =
   | { type: 'Resumed' }
   | { type: 'Started' }
@@ -178,7 +148,7 @@ export type RestoreOutcome =
   | { type: 'Blocked'; reason: string }
   | { type: 'Failed'; reason: string }
 
-/** restore-result Tauri event 페이로드의 `result` 필드 */
+/** The `result` field of the restore-result Tauri event payload */
 export interface RestoreReport {
   agent_id: string
   epoch: number

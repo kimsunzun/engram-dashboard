@@ -1,10 +1,10 @@
-//! 실행 재료 포트 — 붙은 프리셋에서 나온 재료(지침 · 스킬 · 원문 설정)를 manager 가 받아 스폰에 싣는 길.
+//! The launch-material port — the path by which the manager takes the materials from attached presets (instructions · skills · raw settings) and puts them on a spawn.
 //!
-//! 이 파일이 갖는 것: 재료 출처 [`LaunchKitSource`] 와 기본 구현 [`NoopLaunchKits`] · backend 배치가 디스크에 쓰는
-//! [`LaunchFs`] 와 운영 구현 [`StdLaunchFs`] · 배치를 휘발 폴더 안에 가두는 `place_in_volatile` · 배치 결과
-//! [`LaunchArtifacts`] · 스폰 실패에서 재료를 거두는 `LaunchKitGuard` · 뜬 화신의 재료를 reaper 가 거둘
-//! `LaunchLease` · manager 가 받는 묶음 [`LaunchPorts`].
-//! 프리셋 해석은 여기 없다(실물 = 데몬이 꽂는 asset-library 서비스). 플래그 번역도 없다(backend 몫).
+//! This file holds: the material source [`LaunchKitSource`] and its default implementation [`NoopLaunchKits`] · [`LaunchFs`], through
+//! which backend placement writes to disk, with its production implementation [`StdLaunchFs`] · `place_in_volatile`, which confines
+//! placement to the volatile folder · the placement result [`LaunchArtifacts`] · `LaunchKitGuard`, which reclaims materials when a spawn
+//! fails · `LaunchLease`, with which the reaper reclaims a launched incarnation's materials · [`LaunchPorts`], the bundle the manager takes.
+//! Preset resolution is not here (the real one = the asset-library service the daemon plugs in). Neither is flag translation (the backend's job).
 // ADR-0334
 
 use std::any::Any;
@@ -21,11 +21,11 @@ use serde_json::{Map, Number, Value};
 use crate::profile::{AgentCommand, AgentProfile};
 use crate::types::AgentId;
 
-// ── 계획 · 재료 ───────────────────────────────────────────────────────────────
+// ── plan · materials ───────────────────────────────────────────────────────────────
 
-/// 사유 하나 — 기계가 읽는 코드와 그 인자, 걸린 줄. 막힘 사유와 알림이 같은 꼴을 쓴다.
+/// One reason — the machine-readable code, its arguments and the line hit. Block reasons and notices share this shape.
 ///
-/// `line` = 걸린 에셋 파일의 줄 — 1 부터 센다(첫 줄 = 1). `None` = 줄로 짚을 수 없는 사유.
+/// `line` = the line of the asset file hit — counted from 1 (first line = 1). `None` = a reason that cannot point at a line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reason {
     pub code: String,
@@ -33,11 +33,11 @@ pub struct Reason {
     pub line: Option<u32>,
 }
 
-/// 실행 성공 답에 실리는 알림 — 꼴은 [`Reason`] 그대로다.
+/// A notice carried in a launch success answer — the shape is [`Reason`] as is.
 pub type Notice = Reason;
 
-// `Value` 에 `Ord` 가 없어 손으로 단다 — `BlockReason` 의 `Ord` 가 이것을 탄다. 순서는 `==` 와 어긋나지 않는다
-//   (같다 ⟺ `==`) — 어긋나면 정렬이 패닉할 수 있다.
+// `Value` has no `Ord`, so it is written by hand — `BlockReason`'s `Ord` rides on it. The order agrees with `==`
+//   (equal ⟺ `==`) — if it did not, sorting could panic.
 impl Ord for Reason {
     fn cmp(&self, other: &Self) -> Ordering {
         self.code
@@ -53,8 +53,8 @@ impl PartialOrd for Reason {
     }
 }
 
-// 객체는 키 이름순으로 견준다 — `Value` 의 `==` 는 키 순서를 안 보고, `preserve_order` 기능이 같은 빌드의 다른 crate
-//   에서 켜지면 순회 순서가 넣은 순서가 된다.
+// Objects compare by key name order — `Value`'s `==` ignores key order, and if the `preserve_order` feature is turned on in another
+//   crate of the same build, iteration order becomes insertion order.
 fn cmp_json(a: &Value, b: &Value) -> Ordering {
     fn rank(v: &Value) -> u8 {
         match v {
@@ -96,8 +96,8 @@ fn cmp_json(a: &Value, b: &Value) -> Ordering {
     }
 }
 
-// `==` 인 두 수는 같다(-0.0 과 0.0 포함). 아니면 (갈래, 값) 순이고, 그래도 못 가르면 글자로 — 글자 가름은
-//   `arbitrary_precision` 기능이 켜져 `==` 가 글자를 견줄 때만 닿는다.
+// Two numbers that are `==` are equal (-0.0 and 0.0 included). Otherwise by (kind, value), and if still undecided by text — the text
+//   comparison is reached only when the `arbitrary_precision` feature is on and `==` compares text.
 fn cmp_number(a: &Number, b: &Number) -> Ordering {
     if a == b {
         return Ordering::Equal;
@@ -123,7 +123,7 @@ fn cmp_number(a: &Number, b: &Number) -> Ordering {
     by_value.then_with(|| a.to_string().cmp(&b.to_string()))
 }
 
-/// 지침 원천 하나.
+/// One instructions source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRef {
     /// Where the source comes from, in one of three forms: a library path from the root (`/`-separated), a built-in
@@ -132,37 +132,37 @@ pub struct SourceRef {
     /// A `folder:` string must not be matched against a library path (a folder inside the library is still a folder).
     // ADR-0341
     pub path: String,
-    /// 그 파일의 절대 경로.
+    /// The absolute path of that file.
     pub file: PathBuf,
 }
 
-/// 실을 스킬 하나 — 이름과 절대 폴더.
+/// One skill to carry — its name and absolute folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillRef {
     pub name: String,
     pub dir: PathBuf,
 }
 
-/// 그 백엔드 원문 설정 한 덩이 — `preset` = 그것을 낸 프리셋의 참조.
+/// One block of that backend's raw settings — `preset` = the reference of the preset that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawSetting {
     pub preset: String,
     pub value: Value,
 }
 
-/// [`LaunchKitSource::check`] 가 낸 실행 계획.
+/// The launch plan [`LaunchKitSource::check`] produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchPlan {
-    /// 에이전트 백엔드 낱말 — [`AgentCommand`] 의 serde `kind` 꼬리표를 소문자로 쓴 것(`claude` · `codex` ·
-    /// `shell`). 모든 [`LaunchKitSource`] 구현이 [`backend_word`] 로만 채운다 — 구현마다 따로 만들면 같은 백엔드가
-    /// 대소문자 · 철자가 다른 낱말로 갈린다.
+    /// The agent backend word — the serde `kind` tag of [`AgentCommand`] in lowercase (`claude` · `codex` ·
+    /// `shell`). Every [`LaunchKitSource`] implementation fills it only through [`backend_word`] — building it per implementation would
+    /// split one backend into words differing in case · spelling.
     pub backend: String,
-    /// 지침 원천 — 합칠 순서대로.
+    /// Instructions sources — in merge order.
     pub instructions: Vec<SourceRef>,
     pub skills: Vec<SkillRef>,
-    /// 그 백엔드 원문 — 붙인 순서대로. 모델 · 강도도 여기 든다(따로 된 칸이 없다).
+    /// That backend's raw settings — in attach order. Model · effort go here too (there is no separate field).
     pub raw_settings: Vec<RawSetting>,
-    /// Whether the merged instructions take 「기본」's priming (the shipped `builtin\`). Meaningful only when
+    /// Whether the merged instructions take 「Default」's priming (the shipped `builtin\`). Meaningful only when
     /// [`LaunchPlan::real`] — otherwise nobody reads it, and the launch carries no priming at all (ADR-0370).
     pub include_priming: bool,
     pub notices: Vec<Notice>,
@@ -183,18 +183,18 @@ pub struct LaunchPlan {
     pub stamp: Option<String>,
 }
 
-/// [`LaunchKitSource::prepare`] 가 낸 이 화신의 재료.
+/// This incarnation's materials as [`LaunchKitSource::prepare`] produced them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchKit {
     pub plan: LaunchPlan,
-    /// 이 화신의 휘발 폴더 — 절대 경로. `None` = 폴더를 만들지 않았다(backend 배치는 아무것도 못 쓴다).
-    /// backend 배치는 이 폴더 안에만 쓴다(`place_in_volatile` 이 막는다 — 상대 경로면 배치가 실패한다).
+    /// This incarnation's volatile folder — absolute path. `None` = no folder was made (backend placement can write nothing).
+    /// Backend placement writes only inside this folder (`place_in_volatile` enforces it — a relative path fails the placement).
     pub volatile_dir: Option<PathBuf>,
-    /// 합친 지침 파일. `None` = 실을 지침이 없다.
+    /// The merged instructions file. `None` = no instructions to carry.
     pub instructions_file: Option<PathBuf>,
-    /// 실을 스킬 — 절대 폴더.
+    /// Skills to carry — absolute folders.
     pub skills: Vec<SkillRef>,
-    /// 합친 지침의 해시 — codex JSON 이어받기가 지난 적용값과 견준다. `None` = 실을 지침이 없다.
+    /// The hash of the merged instructions — codex JSON resume compares it with the last applied value. `None` = no instructions to carry.
     pub instructions_hash: Option<String>,
     /// The hash of the instructions the agent's conversation last received
     /// ([`AgentProfile::last_applied_instructions_hash`]). [`LaunchKitSource::prepare`] leaves it `None`; the manager
@@ -203,9 +203,9 @@ pub struct LaunchKit {
     pub last_applied_instructions_hash: Option<String>,
 }
 
-// ── 막힘 ──────────────────────────────────────────────────────────────────────
+// ── blocks ──────────────────────────────────────────────────────────────────────
 
-/// 실행을 막는 사유 하나. 변형 순서가 보이는 순서다 — `Ord` 가 이 순서로 가른다(TRD S25 §1-3 8).
+/// One reason that blocks a launch. Variant order is display order — `Ord` sorts by it (TRD S25 §1-3 8).
 ///
 /// `item` = the blocked item: its library path, or for a folder entry `folder:` + the normalized absolute folder path
 /// (the same third form as [`SourceRef::path`]). A row about no library item names what it is about with a kind tag
@@ -216,7 +216,7 @@ pub struct LaunchKit {
 // ADR-0361
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BlockReason {
-    /// 붙은 파일이 없다.
+    /// The attached file is missing.
     Missing {
         item: String,
         via: Vec<String>,
@@ -229,16 +229,16 @@ pub enum BlockReason {
         via: Vec<String>,
         reason: Reason,
     },
-    /// 충돌 하나 — `items` = 걸린 항목마다 (경로, 온 길).
+    /// One conflict — `items` = (path, route) per item hit.
     Conflict {
         reason: Reason,
         items: Vec<(String, Vec<String>)>,
     },
-    /// 라이브러리 폴더가 미설정이거나 없는데 라이브러리 프리셋이 붙었다.
+    /// A library preset is attached while the library folder is unset or missing.
     LibraryUnavailable { reason: Reason },
 }
 
-/// [`LaunchKitSource::check`] 의 거절 — 걸린 사유 전부.
+/// [`LaunchKitSource::check`]'s refusal — every reason hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchBlocked {
     pub reasons: Vec<BlockReason>,
@@ -246,31 +246,28 @@ pub struct LaunchBlocked {
 
 impl fmt::Display for LaunchBlocked {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("실행 막힘: ")?;
+        f.write_str("launch blocked: ")?;
         if self.reasons.is_empty() {
-            return f.write_str("(사유 없음)");
+            return f.write_str("(no reason)");
         }
         for (i, r) in self.reasons.iter().enumerate() {
             if i > 0 {
                 f.write_str(" · ")?;
             }
             match r {
-                BlockReason::Missing { item, reason, .. } => write!(
-                    f,
-                    "찾을 수 없음 {} ({})",
-                    escape_controls(item),
-                    reason.code
-                )?,
+                BlockReason::Missing { item, reason, .. } => {
+                    write!(f, "not found {} ({})", escape_controls(item), reason.code)?
+                }
                 BlockReason::Broken { item, reason, .. } => {
-                    write!(f, "오류 {} ({})", escape_controls(item), reason.code)?
+                    write!(f, "error {} ({})", escape_controls(item), reason.code)?
                 }
                 BlockReason::Conflict { reason, items } => {
                     let paths: Vec<String> =
                         items.iter().map(|(p, _)| escape_controls(p)).collect();
-                    write!(f, "충돌 {} ({})", paths.join(", "), reason.code)?
+                    write!(f, "conflict {} ({})", paths.join(", "), reason.code)?
                 }
                 BlockReason::LibraryUnavailable { reason } => {
-                    write!(f, "라이브러리 폴더 없음 ({})", reason.code)?
+                    write!(f, "library folder missing ({})", reason.code)?
                 }
             }
         }
@@ -418,10 +415,10 @@ pub fn notice_text(notice: &Notice) -> String {
     collect_listed(&notice.args, &mut listed);
     let code = escape_controls(&notice.code);
     if listed.is_empty() {
-        format!("알림({code}): 의도된 동작입니다.")
+        format!("Notice ({code}): intended behavior.")
     } else {
         format!(
-            "알림({code}): 의도된 동작입니다. 대상 — {}",
+            "Notice ({code}): intended behavior. Target — {}",
             listed.join(" · ")
         )
     }
@@ -437,24 +434,25 @@ fn own_wording(notice: &Notice) -> Option<String> {
     match notice.code.as_str() {
         CODEX_TERMINAL_OMITTED => {
             let mut parts = Vec::new();
-            for (key, label) in [("instructions", "지시서"), ("skills", "스킬")] {
+            for (key, label) in [("instructions", "instructions"), ("skills", "skills")] {
                 let names = text_list(args, key)?;
                 if !names.is_empty() {
                     parts.push(format!("{label} {}", names.join(", ")));
                 }
             }
-            let head = "알림: codex 터미널 모드는 프리셋 지시서와 스킬을 지원하지 않습니다.";
+            let head =
+                "Notice: codex terminal mode does not support preset instructions and skills.";
             Some(if parts.is_empty() {
                 head.to_string()
             } else {
-                format!("{head} 적용되지 않은 항목: {}", parts.join(", "))
+                format!("{head} Not applied: {}", parts.join(", "))
             })
         }
         CODEX_TERMINAL_FOLDER_OMITTED => {
             let folder = escape_controls(args.get("folder")?.as_str()?);
             let items = text_list(args, "items")?;
             let head =
-                "알림: codex 터미널 모드는 폴더 항목을 지원하지 않습니다. 적용되지 않은 폴더:";
+                "Notice: codex terminal mode does not support folder entries. Folder not applied:";
             Some(if items.is_empty() {
                 format!("{head} {folder}")
             } else {
@@ -468,14 +466,14 @@ fn own_wording(notice: &Notice) -> Option<String> {
                 return None;
             }
             Some(format!(
-                "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 ${name}(으)로 부르면 어느 쪽도 선택되지 않습니다. {name}: {}",
+                "Notice: skills with the same name exist in several places. Calling ${name} in codex selects none of them. {name}: {}",
                 paths.join(", ")
             ))
         }
         FOLDER_LISTING_PARTIAL => {
             let folder = escape_controls(args.get("folder")?.as_str()?);
             Some(format!(
-                "알림: 폴더 {folder}의 항목이 {}개를 넘어 일부만 확인했습니다.",
+                "Notice: folder {folder} has more than {} entries; only some were checked.",
                 grouped(FOLDER_LISTING_CAP)
             ))
         }
@@ -487,11 +485,11 @@ fn own_wording(notice: &Notice) -> Option<String> {
             }
             let named = paths.len().min(FOLDER_LISTING_SKIPPED_NAMED);
             let mut text = format!(
-                "알림: 폴더 {folder}에서 읽을 수 없는 항목을 건너뛰었습니다: {}",
+                "Notice: folder {folder}: skipped unreadable entries: {}",
                 paths[..named].join(", ")
             );
             if paths.len() > named {
-                text.push_str(&format!(" 외 {}개", grouped(paths.len() - named)));
+                text.push_str(&format!(" and {} more", grouped(paths.len() - named)));
             }
             Some(text)
         }
@@ -499,7 +497,7 @@ fn own_wording(notice: &Notice) -> Option<String> {
             let path = escape_controls(args.get("path")?.as_str()?);
             let why = escape_controls(args.get("why")?.as_str()?);
             Some(format!(
-                "알림: 기본 제공 {path}을(를) 읽지 못해 빈 내용으로 적용했습니다. 이유: {why}"
+                "Notice: could not read built-in {path}; applied it with empty content. Reason: {why}"
             ))
         }
         _ => None,
@@ -605,34 +603,34 @@ fn canonical_json(value: &Value) -> String {
     }
 }
 
-/// [`LaunchKitSource::prepare`] 의 실패 — manager 가 갈래마다 다른 실패로 옮긴다.
+/// [`LaunchKitSource::prepare`]'s failure — the manager maps each arm to a different failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrepareError {
-    /// 점검 뒤 계획의 원본(지침 · 스킬 · 프리셋 파일)이 사라졌거나 바뀌었다 — 점검이 낸 계획이 이미 낡았다.
-    /// manager 는 [`crate::types::PtyError::LaunchRaced`] 로 끊는다(프로세스를 열려고 한 적이 없다).
+    /// After the check, a source of the plan (instructions · skills · preset files) disappeared or changed — the checked plan is already stale.
+    /// The manager cuts it off with [`crate::types::PtyError::LaunchRaced`] (it never tried to open the process).
     // TRD S25 §5-2 4 (c)
     Stale(String),
-    /// 그 밖 — 휘발 폴더를 못 만들었다 등. manager 는 `SpawnFailed` 로 끊는다.
+    /// Anything else — the volatile folder could not be made, etc. The manager cuts it off with `SpawnFailed`.
     Failed(String),
 }
 
 impl fmt::Display for PrepareError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stale(why) => write!(f, "점검 뒤 실행 재료 원본이 바뀌었다: {why}"),
-            Self::Failed(why) => write!(f, "실행 재료 준비 실패: {why}"),
+            Self::Stale(why) => write!(f, "launch-material source changed after the check: {why}"),
+            Self::Failed(why) => write!(f, "launch-material preparation failed: {why}"),
         }
     }
 }
 
 impl std::error::Error for PrepareError {}
 
-// ── 재료 출처 포트 ────────────────────────────────────────────────────────────
+// ── material source port ────────────────────────────────────────────────────────────
 
-/// 실행 재료의 출처 — 데몬이 꽂는다(기본 = [`NoopLaunchKits`]).
+/// The source of launch materials — the daemon plugs it in (default = [`NoopLaunchKits`]).
 ///
-/// manager 는 명부 · 예약 락을 쥐지 않고 부른다 — 구현은 그 안에서 명부를 읽어도 된다(asset-library → manager
-/// 한 방향).
+/// The manager calls it without holding the roster · reservation locks — the implementation may read the roster inside (asset-library →
+/// manager, one direction).
 ///
 /// The four scope methods ([`LaunchKitSource::begin_launch`] · [`LaunchKitSource::check_in`] ·
 /// [`LaunchKitSource::prepare_in`] · [`LaunchKitSource::working_folder`]) are overridden all together or not at all,
@@ -640,12 +638,12 @@ impl std::error::Error for PrepareError {}
 // ADR-0334
 // ADR-0324
 pub trait LaunchKitSource: Send + Sync + 'static {
-    /// 이 프로필로 띄울 수 있나 — 막히면 걸린 사유 전부.
+    /// Whether this profile can be launched — when blocked, every reason hit.
     ///
-    /// ★읽기만 한다★ — 명부 읽기와 [`crate::profile_edit::ProfileEditPort::workspace_lock`] 까지다.
-    /// [`crate::profile_edit::ProfileEditPort::set_attachments`] 를 비롯한 프로필 쓰기는 부르지 않는다: manager 가
-    /// 이 호출 전후의 붙임 · 명령 · env 를 견주므로, 여기서 쓰면 그 대조가 늘 어긋나 실행이 경합 실패
-    /// ([`crate::types::PtyError::LaunchRaced`])로 끝난다.
+    /// ★Read-only★ — reading the roster and up to [`crate::profile_edit::ProfileEditPort::workspace_lock`].
+    /// It never calls profile writes, [`crate::profile_edit::ProfileEditPort::set_attachments`] included: the manager compares the
+    /// attachments · command · env before and after this call, so a write here would always break that comparison and end the launch in
+    /// a race failure ([`crate::types::PtyError::LaunchRaced`]).
     /// ★The launching agent's own `workspace_lock` reads `Preparing`★ — the launch's spawn reservation is held during
     /// this call, so the check sees its own reservation. Do not read it as an outside lock and block (every launch would
     /// block). A profile not yet in the roster (the pre-create check of an ad-hoc create) also comes here — through
@@ -653,8 +651,8 @@ pub trait LaunchKitSource: Send + Sync + 'static {
     /// `NotFound` (not a block reason).
     fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked>;
 
-    /// `plan` 대로 이 화신의 재료를 준비한다(휘발 폴더 · 합친 지침 · 스킬 목록). 그 사이 만든 것은 성패와 무관하게
-    /// [`LaunchKitSource::release`] 가 거둔다(부르는 쪽은 준비 **앞**에서 거둘 채비를 한다).
+    /// Prepares this incarnation's materials per `plan` (volatile folder · merged instructions · skill list). Whatever is made meanwhile is
+    /// reclaimed by [`LaunchKitSource::release`] regardless of outcome (the caller arms the reclaim **before** preparing).
     ///
     /// `plan` = the one this launch's check ([`LaunchKitSource::check_in`]) returned — not resolved again from the
     /// profile. If a source vanished or changed after the check, the answer is [`PrepareError::Stale`] (kept apart from
@@ -662,17 +660,17 @@ pub trait LaunchKitSource: Send + Sync + 'static {
     fn prepare(&self, plan: LaunchPlan, id: AgentId, epoch: u32)
         -> Result<LaunchKit, PrepareError>;
 
-    /// 이 화신의 재료를 거둔다. 몇 번 불려도 되고, 준비한 적 없는 화신이어도 된다.
+    /// Reclaims this incarnation's materials. May be called any number of times, and for an incarnation never prepared.
     ///
-    /// 부르는 자리 = 스폰 실패 가드(그 스폰 스레드) · 뜬 화신을 수거한 reaper(전역 단일 직렬 스레드 — 뒤의 모든 수거가
-    /// 이 호출 뒤에 선다). 그래서 구현은:
-    /// - 유계이고 빠르다 — 기다리기 · 다시 하기 · sleep 이 없다.
-    /// - panic 하지 않는다 — reaper 는 가두지 않아 운영에서는 panic 이 데몬을 끝낸다(ADR-0292).
-    /// - 정확히 `(id, epoch)` 의 재료만 거둔다 — id 전체를 쓸지 않는다(그 id 의 다음 화신 `prepare(id, e2)` 가 함께 돌
-    ///   수 있다).
-    /// - 최선 노력이다 — CLI 트리가 아직 살아 휘발 폴더를 쥐고 있을 수 있다: 핸들이 풀리기를 기다리지 않고 못 지운 것은
-    ///   남기며(부팅 쓸기가 받친다), 스스로 만들지 않은 재해석 지점은 따라가지 않는다.
-    /// - 라이브러리 쓰기 잠금을 잡지 않고, 수거를 기다리는 매니저 길로 되부르지 않는다(reaper 가 자기를 기다린다).
+    /// Callers = the spawn failure guard (on that spawn thread) · the reaper that reaped a launched incarnation (the global single serial
+    /// thread — every later reap queues behind this call). So the implementation:
+    /// - is bounded and fast — no waiting · retrying · sleep.
+    /// - does not panic — the reaper does not contain it, so in production a panic ends the daemon (ADR-0292).
+    /// - reclaims exactly the materials of `(id, epoch)` — it never sweeps the whole id (that id's next incarnation `prepare(id, e2)` can run
+    ///   at the same time).
+    /// - is best effort — the CLI tree may still be alive holding the volatile folder: it does not wait for handles to close, leaves what it
+    ///   cannot delete (the boot sweep backs it), and does not follow reparse points it did not make itself.
+    /// - takes no library write lock and never calls back into a manager path that waits for reaping (the reaper would wait on itself).
     // TRD S25 §5-2 4 (c2) ⑤
     fn release(&self, id: AgentId, epoch: u32);
 
@@ -775,8 +773,8 @@ impl LaunchKitSource for NoopLaunchKits {
     fn release(&self, _id: AgentId, _epoch: u32) {}
 }
 
-/// [`LaunchPlan::backend`] 를 채우는 유일한 길 — `command` 의 serde `kind` 꼬리표를 소문자로.
-// 백엔드 이름을 여기 적지 않는다(ADR-0004).
+/// The only way to fill [`LaunchPlan::backend`] — `command`'s serde `kind` tag in lowercase.
+// No backend name is written here (ADR-0004).
 pub fn backend_word(command: &AgentCommand) -> String {
     serde_json::to_value(command)
         .ok()
@@ -788,38 +786,38 @@ pub fn backend_word(command: &AgentCommand) -> String {
         .unwrap_or_default()
 }
 
-// ── 배치 포트 ─────────────────────────────────────────────────────────────────
+// ── placement port ─────────────────────────────────────────────────────────────────
 
-/// backend 배치가 디스크에 쓰는 길 — 휘발 폴더 안에서만 쓴다(작업 폴더에는 쓰지 않는다).
+/// The way backend placement writes to disk — only inside the volatile folder (never in the working folder).
 ///
-/// 지우기가 없는 것은 의도다 — 휘발 폴더 정리는 [`LaunchKitSource::release`] 몫이고, 정션을 따라가 라이브러리
-/// 스킬을 지우지 않게 그쪽이 링크를 먼저 뗀다.
+/// There is no delete on purpose — clearing the volatile folder is [`LaunchKitSource::release`]'s job, and it detaches links first so it
+/// does not follow a junction and delete library skills.
 ///
-/// ★운영 구현은 링크를 따라간다★ — 쓰는 경로(`write_file` 의 `path` · `link_dir` 의 `link`)의 조상이 링크면 그 대상
-/// 폴더(라이브러리 스킬) 안에 쓴다. 그래서 backend 는 이 포트를 `place_in_volatile` 의 가둠 포트로만 받는다(그쪽이
-/// [`LaunchFs::is_link`] 로 막는다). 메모리 구현은 링크 안 쓰기를 거절한다.
-// `'static` 을 요구하지 않는다 — 빌린 포트를 감싼 `place_in_volatile` 의 가둠 포트도 이것이다.
+/// ★The production implementation follows links★ — if an ancestor of the written path (`write_file`'s `path` · `link_dir`'s `link`) is
+/// a link, it writes inside that target folder (a library skill). So a backend gets this port only as `place_in_volatile`'s confined port
+/// (which blocks it with [`LaunchFs::is_link`]). The memory implementation refuses writes inside links.
+// No `'static` bound — `place_in_volatile`'s confined port wrapping a borrowed port is one too.
 // ADR-0334
 pub trait LaunchFs: Send + Sync {
-    /// `path` 에 `bytes` 를 쓴다 — 있으면 덮고, 없는 부모 폴더는 만든다.
+    /// Writes `bytes` to `path` — overwrites if present, creates missing parent folders.
     fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
 
-    /// `link` 자리에 폴더 `target` 을 가리키는 디렉터리 링크(Windows = 정션)를 만든다 — 없는 부모 폴더는
-    /// 만든다. `target` 이 절대 경로가 아니거나 NUL 이 있으면 `InvalidInput` 이고 부모 폴더도 만들지 않는다.
-    /// `link` 자리에 무엇이든 있으면 `AlreadyExists`.
+    /// Makes a directory link (Windows = junction) at `link` pointing to the folder `target` — creates missing parent folders.
+    /// `target` not absolute or containing NUL = `InvalidInput`, and no parent folder is made either.
+    /// Anything at `link` = `AlreadyExists`.
     fn link_dir(&self, link: &Path, target: &Path) -> io::Result<()>;
 
-    /// 그 자리에 무엇이든 있나 — 링크는 따라가지 않는다(대상이 사라진 링크도 있다고 답한다). 확인이 실패하면
-    /// 까닭을 가리지 않고(접근 거부 포함) `false` 다.
+    /// Whether anything is at that spot — links are not followed (a link whose target is gone counts as present). A failed check is `false`
+    /// whatever the cause (access denied included).
     fn exists(&self, path: &Path) -> bool;
 
-    /// 그 자리가 링크인가 — 링크는 따라가지 않는다. 링크 = Windows 의 이름 대리 재해석 지점(정션 · 심볼릭 링크 ·
-    /// 마운트 지점) · 그 밖의 심볼릭 링크. 클라우드 자리표시 같은 다른 재해석 지점은 링크가 아니다.
-    /// `Ok(false)` = 링크 아닌 것이 있다 · `NotFound` = 없다 · 그 밖의 `Err` = 확인 실패.
+    /// Whether that spot is a link — links are not followed. Link = a Windows name-surrogate reparse point (junction · symbolic link ·
+    /// mount point) · a symbolic link elsewhere. Other reparse points such as cloud placeholders are not links.
+    /// `Ok(false)` = something that is not a link is there · `NotFound` = nothing · any other `Err` = the check failed.
     fn is_link(&self, path: &Path) -> io::Result<bool>;
 }
 
-/// 운영 배치 — std 파일 쓰기 + platform 디렉터리 링크.
+/// Production placement — std file writes + platform directory links.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StdLaunchFs;
 
@@ -839,24 +837,24 @@ impl LaunchFs for StdLaunchFs {
         std::fs::symlink_metadata(path).is_ok()
     }
 
-    // Windows std 의 `is_symlink` = 재해석 지점 중 이름 대리 tag(정션 · 심볼릭 링크)다.
+    // Windows std `is_symlink` = the name-surrogate tags among reparse points (junction · symbolic link).
     fn is_link(&self, path: &Path) -> io::Result<bool> {
         std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink())
     }
 }
 
-// platform `link_dir` 도 같은 둘을 보지만 부모 폴더를 만든 뒤라, 거절된 대상이 빈 폴더를 남긴다 — 그 전에 본다.
+// platform `link_dir` checks the same two, but after making the parent folders, so a refused target leaves an empty folder — check before.
 fn check_link_target(target: &Path) -> io::Result<()> {
     if !target.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "링크 대상은 절대 경로여야 한다",
+            "link target must be an absolute path",
         ));
     }
     if target.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "링크 대상에 NUL 이 있다",
+            "link target contains NUL",
         ));
     }
     Ok(())
@@ -869,30 +867,31 @@ fn create_parent(path: &Path) -> io::Result<()> {
     }
 }
 
-/// `place` 를 이 화신의 휘발 폴더에 갇힌 배치 포트로 돌린다 — `backend::materialize` 가 backend 배치를 이것으로만
-/// 부른다.
+/// Runs `place` with a placement port confined to this incarnation's volatile folder — `backend::materialize` calls backend placement only
+/// through this.
 ///
-/// 막는 쓰기(`write_file` 의 `path` · `link_dir` 의 `link`):
-/// - 휘발 폴더 밖 · 휘발 폴더 자신. 고르기 전 원래 철자로 본다 — 앞머리는 휘발 폴더 철자와 대소문자만 달라야 하고
-///   ([`engram_dashboard_platform::fs::same_path`] — Windows = 접는다), 구분자 · 접두(`\\?\` 등) 철자가 다르면 밖이다.
-/// - 휘발 폴더 뒤를 `\` · `/` 둘 다로 가른 낱말 중 빈 것(겹친 구분자) · `.` · `..` · 끝이 `.` 나 공백인 것 · `:` 가 든
-///   것 — 모든 OS 에서 막는다.
-///   Windows 는 끝의 점 · 공백을 떼고 열어 다른 이름과 같은 자리가 되고, `:` 는 대체 데이터 스트림이다.
-/// - 휘발 폴더 바로 아래부터 쓰는 자리의 부모까지(`write_file` 은 그 자리 자신까지) 이미 있는 것 중 링크
-///   ([`LaunchFs::is_link`] — 디스크에 묻는다)가 있으면. 준비가 만든 링크 · 이 배치가 만든 링크 둘 다이고, 대소문자로
-///   철자를 바꿔도 디스크가 같은 자리로 답하므로 걸린다(8.3 이름 철자도 — 실측: 막힘, S25 P4b-2 재리뷰 2026-11-01). 그
-///   확인이 `NotFound` 아닌 오류여도 막는다.
+/// Blocked writes (`write_file`'s `path` · `link_dir`'s `link`):
+/// - Outside the volatile folder · the volatile folder itself. Checked in the original spelling before normalizing — the head may differ
+///   from the volatile folder's spelling only in case ([`engram_dashboard_platform::fs::same_path`] — Windows folds), and a different
+///   separator · prefix (`\\?\` etc.) spelling is outside.
+/// - Among the words after the volatile folder split on both `\` and `/`: an empty one (doubled separator) · `.` · `..` · one ending in
+///   `.` or a space · one containing `:` — blocked on every OS.
+///   Windows opens a name with its trailing dots · spaces stripped, landing on the same spot as another name, and `:` is an alternate data stream.
+/// - Any existing link ([`LaunchFs::is_link`] — asks the disk) from right under the volatile folder up to the written spot's parent
+///   (for `write_file`, up to the spot itself). Both links the preparation made and links this placement made; a case-changed spelling
+///   is caught because the disk answers for the same spot (8.3 name spellings too — measured: blocked, S25 P4b-2 re-review 2026-11-01).
+///   Blocked too when that check fails with an error other than `NotFound`.
 ///
-/// 보장하지 않는 것: 확인과 쓰기 사이에 남이 링크를 끼우는 경합 — 배치는 CLI 를 띄우기 전이고 휘발 폴더는 이 화신
-/// 몫이라 그 사이 쓰는 이가 없다. 휘발 폴더 자신과 그 위는 보지 않는다(준비가 만든 자리다). 이름 대리 아닌 재해석
-/// 지점은 링크로 치지 않는다.
+/// Not guaranteed: a race where someone inserts a link between the check and the write — placement runs before the CLI is launched and
+/// the volatile folder belongs to this incarnation, so nobody writes there meanwhile. The volatile folder itself and above are not
+/// checked (the preparation made them). Reparse points that are not name surrogates do not count as links.
 ///
-/// 막힌 쓰기는 경고 로그 + `PermissionDenied` 이고, 하나라도 있었으면 `place` 의 답과 무관하게 `Err` 다(backend 가 그
-/// 오류를 삼켜도 배치는 실패한다 · `place` 도 `Err` 였으면 그 사유를 뒤에 잇는다). 휘발 폴더가 없으면 쓰기를 전부
-/// 막는다. `exists` · `is_link` 는 그대로 넘긴다. 휘발 폴더가 절대 경로가 아니면 `place` 를 부르지 않고 `Err` — 상대
-/// 경로는 데몬의 현재 폴더 기준이 된다.
+/// A blocked write = a warning log + `PermissionDenied`, and if there was any, the result is `Err` whatever `place` answered (even if the
+/// backend swallows the error the placement fails · if `place` was `Err` too, its reason is appended). With no volatile folder every
+/// write is blocked. `exists` · `is_link` pass through. A volatile folder that is not absolute = `Err` without calling `place` — a
+/// relative path would resolve against the daemon's current folder.
 // ADR-0334
-// TRD S25 §1-5 (나) 6
+// TRD S25 §1-5 (na) 6
 pub(crate) fn place_in_volatile<T>(
     kit: &LaunchKit,
     fs: &dyn LaunchFs,
@@ -901,7 +900,7 @@ pub(crate) fn place_in_volatile<T>(
     let root = kit.volatile_dir.as_deref();
     if let Some(root) = root.filter(|r| !r.is_absolute()) {
         return Err(format!(
-            "휘발 폴더가 절대 경로가 아니다: {}",
+            "volatile folder is not an absolute path: {}",
             root.display()
         ));
     }
@@ -912,40 +911,43 @@ pub(crate) fn place_in_volatile<T>(
     };
     let placed = place(&confined);
     if let Some((path, why)) = sync::lock(&confined.refused).take() {
-        let refused = format!("휘발 폴더 배치 쓰기를 막았다({why}): {}", path.display());
+        let refused = format!(
+            "blocked a volatile-folder placement write ({why}): {}",
+            path.display()
+        );
         return Err(match placed {
             Ok(_) => refused,
-            Err(e) => format!("{refused} · 배치 오류: {e}"),
+            Err(e) => format!("{refused}  · placement error: {e}"),
         });
     }
     placed
 }
 
-/// [`place_in_volatile`] 의 가둠 포트.
+/// [`place_in_volatile`]'s confined port.
 struct VolatileOnly<'a> {
     inner: &'a dyn LaunchFs,
     root: Option<&'a Path>,
-    /// 처음 막힌 경로와 그 까닭.
+    /// The first blocked path and why.
     refused: Mutex<Option<(PathBuf, &'static str)>>,
 }
 
 impl VolatileOnly<'_> {
-    /// `through_self` = 쓰는 자리 자신이 링크여도 막는다(파일 쓰기).
+    /// `through_self` = block even when the written spot itself is a link (file writes).
     fn admit(&self, path: &Path, through_self: bool) -> io::Result<()> {
         let Some(why) = self.refusal(path, through_self) else {
             return Ok(());
         };
-        tracing::warn!(path = %path.display(), why, "휘발 폴더 배치 쓰기를 막았다");
+        tracing::warn!(path = %path.display(), why, "blocked a volatile-folder placement write");
         sync::lock(&self.refused).get_or_insert_with(|| (path.to_path_buf(), why));
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("휘발 폴더 배치 쓰기를 막았다: {why}"),
+            format!("blocked a volatile-folder placement write: {why}"),
         ))
     }
 
     fn refusal(&self, path: &Path, through_self: bool) -> Option<&'static str> {
         let Some(root) = self.root else {
-            return Some("휘발 폴더 없음");
+            return Some("no volatile folder");
         };
         if let Some(why) = spelling_refusal(path, root) {
             return Some(why);
@@ -953,14 +955,14 @@ impl VolatileOnly<'_> {
         let mut parts = path.components();
         let head: PathBuf = parts.by_ref().take(root.components().count()).collect();
         if !same_path(&head, &root.components().collect::<PathBuf>()) {
-            return Some("휘발 폴더 밖");
+            return Some("outside the volatile folder");
         }
         let rest: Vec<Component> = parts.collect();
         if rest.is_empty() {
-            return Some("휘발 폴더 자신");
+            return Some("the volatile folder itself");
         }
         if !rest.iter().all(plain_name) {
-            return Some("`..` · 끝의 점 · 공백 · `:` 가 든 이름");
+            return Some("a name with `..` · a trailing dot · space · `:`");
         }
         let walked = if through_self {
             rest.len()
@@ -972,43 +974,43 @@ impl VolatileOnly<'_> {
             at.push(name);
             match self.inner.is_link(&at) {
                 Ok(false) => {}
-                Ok(true) => return Some("링크 너머"),
+                Ok(true) => return Some("past a link"),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => break,
-                Err(_) => return Some("링크인지 확인 실패"),
+                Err(_) => return Some("could not check for a link"),
             }
         }
         None
     }
 }
 
-/// 원래 철자로 먼저 본다 — `components()` 는 구분자를 고르고 `.` · 겹친 구분자를 떨궈, 그 뒤에 보면 놓친다.
-/// 앞머리는 휘발 폴더 철자와 대소문자만 달라야 하고(구분자 · 접두 철자가 다르면 밖), 그 뒤는 `\` · `/` 둘 다로 갈라
-/// 낱말마다 본다. UTF-8 아닌 경로는 막는다.
+/// Checks the original spelling first — `components()` normalizes separators and drops `.` · doubled separators, so checking after it
+/// would miss them. The head may differ from the volatile folder's spelling only in case (a different separator · prefix spelling is
+/// outside), and the rest is split on both `\` and `/` and checked word by word. A non-UTF-8 path is blocked.
 fn spelling_refusal(path: &Path, root: &Path) -> Option<&'static str> {
     let (Some(text), Some(root_text)) = (path.to_str(), root.to_str()) else {
-        return Some("UTF-8 아닌 경로");
+        return Some("a non-UTF-8 path");
     };
     let is_sep = |b: u8| b == b'\\' || b == b'/';
     let Some(head) = text.get(..root_text.len()) else {
-        return Some("휘발 폴더 밖");
+        return Some("outside the volatile folder");
     };
     let separators_match = head
         .bytes()
         .zip(root_text.bytes())
         .all(|(a, b)| a == b || !(is_sep(a) || is_sep(b)));
     if !separators_match || !same_path(Path::new(head), root) {
-        return Some("휘발 폴더 밖");
+        return Some("outside the volatile folder");
     }
     let mut rest = &text[root_text.len()..];
     if !root_text.bytes().last().is_some_and(is_sep) {
         match rest.bytes().next() {
-            None => return Some("휘발 폴더 자신"),
+            None => return Some("the volatile folder itself"),
             Some(b) if is_sep(b) => rest = &rest[1..],
-            Some(_) => return Some("휘발 폴더 밖"),
+            Some(_) => return Some("outside the volatile folder"),
         }
     }
     if rest.is_empty() {
-        return Some("휘발 폴더 자신");
+        return Some("the volatile folder itself");
     }
     let bad = |name: &str| {
         name.is_empty()
@@ -1018,7 +1020,7 @@ fn spelling_refusal(path: &Path, root: &Path) -> Option<&'static str> {
             || name.contains(':')
     };
     if rest.split(['\\', '/']).any(bad) {
-        return Some("빈 낱말 · `.` · `..` · 끝의 점 · 공백 · `:` 가 든 이름");
+        return Some("an empty word · `.` · `..` · a name with a trailing dot · space · `:`");
     }
     None
 }
@@ -1062,10 +1064,10 @@ pub(crate) const SKILL_LINKS_PARENT: &str = "engram";
 /// See [`SKILL_LINKS_PARENT`].
 pub(crate) const SKILL_LINKS_DIR: &str = "skills";
 
-/// backend 배치의 결과 — 그 backend 가 명령줄 · 통로에 실을 경로와 인자 조각. 기본값 = 실을 것 없음.
+/// The result of backend placement — the paths and argument pieces that backend puts on its command line · channel. Default = nothing to carry.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct LaunchArtifacts {
-    /// [`LaunchPlan::real`] 그대로.
+    /// [`LaunchPlan::real`] as is.
     pub real: bool,
     pub args: Vec<String>,
     pub instructions_file: Option<PathBuf>,
@@ -1103,12 +1105,12 @@ pub struct LaunchArtifacts {
     pub instructions_changed: bool,
 }
 
-// ── 가드 · 묶음 ───────────────────────────────────────────────────────────────
+// ── guard · bundle ───────────────────────────────────────────────────────────────
 
-/// 스폰이 끝나기 전 어디서 실패하든 이 화신의 재료를 거두는 가드 — 무장한 채 떨어지면
-/// [`LaunchKitSource::release`] 를 정확히 한 번 부른다. 스폰이 성공하면 [`LaunchKitGuard::disarm`].
+/// A guard that reclaims this incarnation's materials wherever the spawn fails before it ends — dropped while armed, it calls
+/// [`LaunchKitSource::release`] exactly once. On spawn success, [`LaunchKitGuard::disarm`].
 ///
-/// 제어 채널의 `ProvisionGuard` 와 독립이다. `release` 는 디스크를 지우므로 락을 쥔 채 떨어뜨리지 않는다.
+/// Independent of the control channel's `ProvisionGuard`. `release` deletes from disk, so never drop it while holding a lock.
 // ADR-0334
 pub(crate) struct LaunchKitGuard {
     kits: Arc<dyn LaunchKitSource>,
@@ -1118,7 +1120,7 @@ pub(crate) struct LaunchKitGuard {
 }
 
 impl LaunchKitGuard {
-    /// [`LaunchKitSource::prepare`] **앞**에서 무장한다 — 준비 도중 실패도 거둔다.
+    /// Arms **before** [`LaunchKitSource::prepare`] — a failure during preparation is reclaimed too.
     pub(crate) fn arm(kits: Arc<dyn LaunchKitSource>, id: AgentId, epoch: u32) -> Self {
         Self {
             kits,
@@ -1132,7 +1134,7 @@ impl LaunchKitGuard {
         self.armed = false;
     }
 
-    /// 세션에 실을 이 화신의 회수 열쇠 — 가드가 쥔 바로 그 출처(준비를 부른 것)로 거둔다.
+    /// This incarnation's reclaim lease to put on the session — reclaims through the very source the guard holds (the one that prepared).
     pub(crate) fn lease(&self) -> LaunchLease {
         LaunchLease {
             kits: self.kits.clone(),
@@ -1149,20 +1151,20 @@ impl Drop for LaunchKitGuard {
             tracing::warn!(
                 agent = %self.id,
                 epoch = self.epoch,
-                "실행 재료 가드 발동 — 세션 등록 전 실패 · 재료 회수"
+                "launch-material guard fired; failure before session registration, reclaiming materials"
             );
             self.kits.release(self.id, self.epoch);
         }
     }
 }
 
-/// 뜬 화신의 재료를 거둘 열쇠 — 세션이 들고, 그 세션을 명부에서 뺀 reaper 가 꺼내 한 번 쓴다.
+/// The lease for reclaiming a launched incarnation's materials — the session holds it, and the reaper that removed that session from the roster takes it out and uses it once.
 ///
-/// 한 번만 쓰는 것을 타입이 지킨다 — `Clone` 이 없고 [`LaunchLease::release`] 가 열쇠를 먹으며, 세션은 꺼내기로만
-/// 내준다(`AgentSession::take_launch_lease`).
-/// ★`Drop` 을 달지 말 것★: 세션 `Arc` 는 관측자 · 하네스도 쥐어 어디서 마지막으로 떨어질지 모른다 — 떨어질 때 거두면
-///   거두는 이가 둘이 된다. 세션 등록 뒤 거두는 이는 화신 표식으로 거른 reaper 하나다.
-/// 출처는 [`LaunchKitGuard::lease`] 가 준다 — 매니저 생성 때 잡은 포트가 아니라 그 화신을 준비한 포트다.
+/// The type keeps it single-use — no `Clone`, [`LaunchLease::release`] consumes the lease, and the session hands it out only by taking
+/// (`AgentSession::take_launch_lease`).
+/// ★Do not add `Drop`★: observers · harnesses hold the session `Arc` too, so where it drops last is unknown — reclaiming on drop would
+///   make two reclaimers. After session registration the only reclaimer is the reaper filtered by the incarnation marker.
+/// The source comes from [`LaunchKitGuard::lease`] — the port that prepared that incarnation, not the port caught at manager construction.
 // ADR-0334
 // TRD S25 §5-2 4 (c2) ② · ③
 pub(crate) struct LaunchLease {
@@ -1181,13 +1183,13 @@ impl LaunchLease {
         self.epoch
     }
 
-    /// 거둔다 — 락을 하나도 쥐지 않은 채 부른다(`release` 는 디스크를 지운다).
+    /// Reclaims — called while holding no lock (`release` deletes from disk).
     pub(crate) fn release(self) {
         self.kits.release(self.id, self.epoch);
     }
 }
 
-/// manager 가 받는 실행 재료 포트 둘.
+/// The two launch-material ports the manager takes.
 #[derive(Clone)]
 pub struct LaunchPorts {
     pub kits: Arc<dyn LaunchKitSource>,
@@ -1204,9 +1206,9 @@ impl LaunchPorts {
     }
 }
 
-// ── 시험용 메모리 배치 ─────────────────────────────────────────────────────────
+// ── in-memory placement for tests ─────────────────────────────────────────────────────────
 
-/// 디스크 없는 [`LaunchFs`] — 폴더는 항목의 조상으로만 있고, 링크 안으로는 쓰지 않는다.
+/// A diskless [`LaunchFs`] — folders exist only as ancestors of entries, and nothing is written inside links.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct MemLaunchFs {
@@ -1222,7 +1224,7 @@ enum MemEntry {
 
 #[cfg(test)]
 impl MemLaunchFs {
-    /// 쓴 자리 전부(파일 · 링크 — 저절로 생긴 부모 폴더는 들지 않는다), 경로순.
+    /// Every spot written (files · links — parent folders made implicitly are not included), in path order.
     pub(crate) fn paths(&self) -> Vec<PathBuf> {
         engram_dashboard_base::sync::lock(&self.entries)
             .keys()
@@ -1263,14 +1265,14 @@ impl LaunchFs for MemLaunchFs {
         if Self::parent_is_not_a_dir(&entries, path) {
             return Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
-                "부모가 폴더가 아니다",
+                "parent is not a folder",
             ));
         }
         let is_dir = entries.keys().any(|k| k != path && k.starts_with(path));
         if is_dir || matches!(entries.get(path), Some(MemEntry::Link(_))) {
             return Err(io::Error::new(
                 io::ErrorKind::IsADirectory,
-                "폴더 · 링크 자리다",
+                "the spot is a folder · link",
             ));
         }
         entries.insert(path.to_path_buf(), MemEntry::File(bytes.to_vec()));
@@ -1283,13 +1285,13 @@ impl LaunchFs for MemLaunchFs {
         if Self::parent_is_not_a_dir(&entries, link) {
             return Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
-                "부모가 폴더가 아니다",
+                "parent is not a folder",
             ));
         }
         if Self::occupied(&entries, link) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "링크 자리에 이미 있다",
+                "something already exists at the link path",
             ));
         }
         entries.insert(link.to_path_buf(), MemEntry::Link(target.to_path_buf()));
@@ -1346,7 +1348,7 @@ mod tests {
         }
     }
 
-    /// 부른 `release` 를 센다.
+    /// Counts the `release` calls.
     #[derive(Default)]
     struct CountingKits {
         released: Mutex<Vec<(AgentId, u32)>>,
@@ -1384,7 +1386,7 @@ mod tests {
         for (command, word) in [(claude(), "claude"), (codex, "codex"), (shell, "shell")] {
             let plan = NoopLaunchKits
                 .check(&profile(command))
-                .expect("Noop 은 막지 않는다");
+                .expect("Noop never blocks");
             assert_eq!(
                 plan,
                 LaunchPlan {
@@ -1429,7 +1431,7 @@ mod tests {
         assert!(!ports.kits.check(&profile(claude())).unwrap().real);
     }
 
-    // ── 가드 ──
+    // ── guard ──
 
     #[test]
     fn guard_releases_exactly_once_when_dropped_armed() {
@@ -1452,7 +1454,7 @@ mod tests {
     fn guard_releases_on_an_early_return() {
         fn fails(kits: Arc<dyn LaunchKitSource>) -> Result<(), String> {
             let mut guard = LaunchKitGuard::arm(kits, Uuid::from_u128(9), 1);
-            Err::<(), _>("준비 실패".to_string())?;
+            Err::<(), _>("prepare failed".to_string())?;
             guard.disarm();
             Ok(())
         }
@@ -1471,7 +1473,7 @@ mod tests {
         send_sync::<LaunchKitGuard>();
     }
 
-    // ── 막힘 ──
+    // ── blocks ──
 
     #[test]
     fn block_reasons_sort_in_the_declared_order() {
@@ -1574,7 +1576,7 @@ mod tests {
         };
         assert_eq!(
             blocked.to_string(),
-            "실행 막힘: 찾을 수 없음 team/a.yaml (missing-file) · 충돌 x/s, y/s (skill-name) · 라이브러리 폴더 없음 (root-unset)"
+            "launch blocked: not found team/a.yaml (missing-file) · conflict x/s, y/s (skill-name) · library folder missing (root-unset)"
         );
     }
 
@@ -1602,12 +1604,12 @@ mod tests {
         let line = blocked.to_string();
         assert_eq!(
             line,
-            "실행 막힘: 찾을 수 없음 a\\nb.yaml (not-found) · 오류 ../x\\u{1b}[31m (item-path-invalid) · 충돌 x\\r/s (skill-name)"
+            "launch blocked: not found a\\nb.yaml (not-found) · error ../x\\u{1b}[31m (item-path-invalid) · conflict x\\r/s (skill-name)"
         );
         assert!(!line.chars().any(char::is_control), "{line:?}");
     }
 
-    // ── 배치 ──
+    // ── placement ──
 
     fn mem_root() -> PathBuf {
         std::env::temp_dir().join("engram-mem-launch-fs")
@@ -1667,7 +1669,7 @@ mod tests {
         assert_eq!(fs.paths(), vec![file, link]);
     }
 
-    // ── 휘발 폴더 가둠 ──
+    // ── volatile folder confinement ──
 
     fn kit_in(volatile_dir: Option<PathBuf>) -> LaunchKit {
         let p = profile(claude());
@@ -1678,10 +1680,10 @@ mod tests {
         kit
     }
 
-    /// ★배치 쓰기는 휘발 폴더 안에서만 받은 포트로 간다★ — 밖 · 폴더 자신 · `..` 로 빠지는 경로 · 끝이 점 · 공백이거나
-    /// `:` 가 든 이름 · 이 배치가 만든 링크 너머는 포트에 닿지 않고, 하나라도 있었으면 배치 전체가 실패한다(backend 가
-    /// 그 오류를 삼켜도).
-    // TRD S25 §1-5 (나) 6
+    /// ★Placement writes reach the given port only inside the volatile folder★ — outside · the folder itself · a path escaping by `..` · a name
+    /// ending in a dot · space or containing `:` · past a link this placement made do not reach the port, and if there was any, the whole
+    /// placement fails (even if the backend swallows the error).
+    // TRD S25 §1-5 (na) 6
     #[test]
     fn placement_writes_reach_the_fs_only_inside_the_volatile_folder() {
         let volatile = mem_root().join("launch").join("a-1");
@@ -1692,10 +1694,10 @@ mod tests {
                 .map_err(|e| e.to_string())?;
             fs.link_dir(&volatile.join("engram").join("skills").join("s"), &library)
                 .map_err(|e| e.to_string())?;
-            assert!(fs.exists(&volatile.join("engram")), "확인은 그대로 넘긴다");
-            Ok("배치함")
+            assert!(fs.exists(&volatile.join("engram")), "checks pass through");
+            Ok("placed")
         });
-        assert_eq!(placed, Ok("배치함"));
+        assert_eq!(placed, Ok("placed"));
         assert_eq!(
             fs.paths(),
             vec![
@@ -1705,7 +1707,7 @@ mod tests {
         );
 
         let work = mem_root().join("work");
-        // 원래 철자로 만든 경로 — `join` 은 이 꼴을 못 만든다.
+        // A path built in the original spelling — `join` cannot build this shape.
         let main = std::path::MAIN_SEPARATOR;
         let alt = if main == '\\' { '/' } else { '\\' };
         let root_text = volatile.to_string_lossy().into_owned();
@@ -1715,33 +1717,33 @@ mod tests {
         let spelled = |s: String| PathBuf::from(s);
         let outside: Vec<(&str, PathBuf)> = vec![
             (
-                "대문자 · 다른 구분자 앞머리 + `.`",
+                "uppercase · other-separator head + `.`",
                 spelled(format!(
                     "{}{alt}.{alt}sub\\x",
                     root_text.to_uppercase().replace(main, &alt.to_string())
                 )),
             ),
             (
-                "앞머리에 섞인 구분자",
+                "mixed separators in the head",
                 spelled(format!("{mixed_root}{main}engram{main}x")),
             ),
             (
-                "겹친 구분자",
+                "doubled separator",
                 spelled(format!("{root_text}{main}{main}engram{main}x")),
             ),
             (
-                "`.` 낱말",
+                "`.` word",
                 spelled(format!("{root_text}{main}.{main}engram{main}x")),
             ),
-            ("작업 폴더", work.join("AGENTS.override.md")),
-            ("휘발 폴더 자신", volatile.clone()),
+            ("working folder", work.join("AGENTS.override.md")),
+            ("the volatile folder itself", volatile.clone()),
             (
-                "이웃 화신",
+                "neighbouring incarnation",
                 mem_root().join("launch").join("a-10").join("x"),
             ),
-            ("`..` 로 빠짐", volatile.join("..").join("a-2").join("x")),
+            ("escapes by `..`", volatile.join("..").join("a-2").join("x")),
             (
-                "링크 너머",
+                "past a link",
                 volatile
                     .join("engram")
                     .join("skills")
@@ -1749,13 +1751,13 @@ mod tests {
                     .join("SKILL.md"),
             ),
             (
-                "링크 자리 자신",
+                "the link spot itself",
                 volatile.join("engram").join("skills").join("s"),
             ),
-            ("끝의 점", volatile.join("engram.").join("x")),
-            ("끝의 공백", volatile.join("engram ").join("x")),
-            ("스트림", volatile.join("engram").join("x:y")),
-            ("점만 든 이름", volatile.join("...").join("x")),
+            ("trailing dot", volatile.join("engram.").join("x")),
+            ("trailing space", volatile.join("engram ").join("x")),
+            ("stream", volatile.join("engram").join("x:y")),
+            ("dots-only name", volatile.join("...").join("x")),
         ];
         for (what, path) in outside {
             let fs = MemLaunchFs::default();
@@ -1773,35 +1775,38 @@ mod tests {
             assert_eq!(
                 fs.paths(),
                 vec![volatile.join("engram").join("skills").join("s")],
-                "{what}: 막은 쓰기가 포트에 닿았다"
+                "{what}: a blocked write reached the port"
             );
         }
 
-        // 링크도 같다 — 막힌 링크 자리는 포트에 닿지 않는다.
+        // Links too — a blocked link spot does not reach the port.
         let fs = MemLaunchFs::default();
         let placed = place_in_volatile(&kit_in(Some(volatile.clone())), &fs, |fs| {
             let _ = fs.link_dir(&work.join(".agents").join("skills").join("s"), &library);
             Ok(())
         });
-        assert!(placed.is_err(), "삼킨 오류도 배치 실패다");
+        assert!(
+            placed.is_err(),
+            "a swallowed error still fails the placement"
+        );
         assert!(fs.paths().is_empty());
 
-        // backend 가 제 사유로 실패했으면 그 사유를 막은 쓰기 뒤에 잇는다(갈아치우지 않는다).
+        // If the backend failed for its own reason, that reason is appended after the blocked writes (not replaced).
         let placed: Result<(), String> =
             place_in_volatile(&kit_in(Some(volatile.clone())), &fs, |fs| {
                 let _ = fs.write_file(&work.join("x"), b"x");
-                Err("backend 사유".to_string())
+                Err("backend reason".to_string())
             });
         let message = placed.unwrap_err();
         assert!(
             message.contains(&work.join("x").display().to_string())
-                && message.contains("backend 사유"),
+                && message.contains("backend reason"),
             "{message}"
         );
     }
 
-    /// 앞머리는 OS 처럼 대소문자를 접어 견준다 — 접는 OS(Windows)에서는 대소문자만 다른 휘발 폴더 철자도 안이고, 접지
-    /// 않는 OS 에서는 밖이다.
+    /// The head is compared with case folded as the OS does — on a folding OS (Windows) a volatile-folder spelling differing only in case is
+    /// inside; on a non-folding OS it is outside.
     #[test]
     fn placement_compares_the_volatile_prefix_as_the_os_does() {
         let volatile = mem_root().join("launch").join("a-1");
@@ -1816,7 +1821,7 @@ mod tests {
         assert_eq!(placed.is_ok(), folds, "{placed:?}");
     }
 
-    /// 조상이 링크인지 확인하지 못하면(`NotFound` 아닌 오류) 막는다.
+    /// If whether an ancestor is a link cannot be checked (an error other than `NotFound`), the write is blocked.
     #[test]
     fn placement_refuses_when_a_link_check_fails() {
         struct Unsure(MemLaunchFs);
@@ -1844,7 +1849,7 @@ mod tests {
         assert!(fs.0.paths().is_empty());
     }
 
-    /// 휘발 폴더가 없으면 쓰기를 전부 막고, 상대 경로면 배치를 부르지도 않는다.
+    /// With no volatile folder every write is blocked, and with a relative path placement is not even called.
     #[test]
     fn placement_without_an_absolute_volatile_folder_writes_nothing() {
         let fs = MemLaunchFs::default();
@@ -1856,7 +1861,7 @@ mod tests {
         assert_eq!(
             place_in_volatile(&kit_in(None), &fs, |_| Ok(7)),
             Ok(7),
-            "쓰지 않는 배치는 선다"
+            "a placement that writes nothing succeeds"
         );
         assert!(fs.paths().is_empty());
 
@@ -1870,13 +1875,16 @@ mod tests {
             },
         );
         assert!(
-            matches!(&placed, Err(m) if m.contains("절대 경로")),
+            matches!(&placed, Err(m) if m.contains("absolute path")),
             "{placed:?}"
         );
-        assert!(!called.get(), "상대 경로 휘발 폴더로 배치를 불렀다");
+        assert!(
+            !called.get(),
+            "placement was called with a relative volatile folder"
+        );
     }
 
-    /// 지나면 지워지는 임시 폴더 — 안의 링크는 먼저 뗀다.
+    /// A temp folder deleted on drop — the links inside are detached first.
     struct Scratch {
         root: PathBuf,
         links: Vec<PathBuf>,
@@ -1933,14 +1941,17 @@ mod tests {
                 "{bad:?}"
             );
         }
-        assert!(!scratch.root.exists(), "거절된 대상이 부모 폴더를 남겼다");
+        assert!(
+            !scratch.root.exists(),
+            "a refused target left the parent folder"
+        );
     }
 
-    /// ★실 디스크에서 철자를 바꿔도 링크를 지나 쓰지 않는다★ — 준비가 휘발 폴더에 만든 링크(Windows = 정션 · 그 밖 =
-    /// 심볼릭 링크)를 대소문자 · 끝의 점 · 끝의 공백 · 스트림 이름으로 비켜 쓰거나 링크를 겹쳐 만들어도 라이브러리 스킬
-    /// 폴더가 그대로다. 대소문자만 다른 철자는 볼륨이 접을 때만 같은 자리라, 접지 않는 볼륨에서는 휘발 폴더 안 새
-    /// 폴더로 들어가 들인다 — 그 갈래는 디스크에 물어 가른다(OS 로 가르지 않는다).
-    // TRD S25 §1-5 (나) 6
+    /// ★On a real disk, a changed spelling still never writes through a link★ — writing around a link the preparation made in the volatile
+    /// folder (Windows = junction · elsewhere = symbolic link) by case · trailing dot · trailing space · stream name, or stacking links, leaves
+    /// the library skill folder untouched. A case-only spelling is the same spot only when the volume folds case, so on a non-folding volume
+    /// it goes into a new folder inside the volatile folder — that branch is decided by asking the disk (not by OS).
+    // TRD S25 §1-5 (na) 6
     #[test]
     fn placement_never_writes_through_a_link_on_a_real_disk() {
         let mut scratch = Scratch {
@@ -1966,7 +1977,7 @@ mod tests {
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
             names.sort();
-            assert_eq!(names, ["SKILL.md", "s"], "{what}: 라이브러리에 새 항목");
+            assert_eq!(names, ["SKILL.md", "s"], "{what}: new entry in the library");
         };
 
         enum Write {
@@ -1974,35 +1985,35 @@ mod tests {
             Link(PathBuf),
         }
         let attempts = [
-            ("그대로", Write::File(link.join("s").join("x.md")), true),
+            ("as is", Write::File(link.join("s").join("x.md")), true),
             (
-                "덮어쓰기",
+                "overwrite",
                 Write::File(link.join("s").join("SKILL.md")),
                 true,
             ),
-            ("링크 자리 자신", Write::File(link.clone()), true),
+            ("the link spot itself", Write::File(link.clone()), true),
             (
-                "대소문자",
+                "case",
                 Write::File(volatile.join("SKILLS").join("s").join("x.md")),
                 folds,
             ),
             (
-                "끝의 점",
+                "trailing dot",
                 Write::File(volatile.join("skills.").join("s").join("x.md")),
                 true,
             ),
             (
-                "끝의 공백",
+                "trailing space",
                 Write::File(volatile.join("skills ").join("s").join("x.md")),
                 true,
             ),
             (
-                "스트림",
+                "stream",
                 Write::File(link.join("s").join("SKILL.md:x")),
                 true,
             ),
             (
-                "링크 안 링크",
+                "link inside a link",
                 Write::Link(volatile.join("SKILLS").join("t")),
                 folds,
             ),
@@ -2025,7 +2036,7 @@ mod tests {
                 fs.write_file(&settings, b"{}").map_err(|e| e.to_string())
             }),
             Ok(()),
-            "링크 밖 쓰기까지 막았다"
+            "even the write outside the link was blocked"
         );
         assert_eq!(std::fs::read(&settings).unwrap(), b"{}");
     }
@@ -2101,20 +2112,20 @@ mod tests {
 
     #[test]
     fn a_notice_row_carries_code_args_line_and_text() {
-        let with_line = reason("omitted", json!({ "names": ["지시서.md"] }), Some(7));
+        let with_line = reason("omitted", json!({ "names": ["instructions.md"] }), Some(7));
         assert_eq!(
             notice_row(&with_line),
             json!({
                 "code": "omitted",
-                "args": { "names": ["지시서.md"] },
+                "args": { "names": ["instructions.md"] },
                 "line": 7,
-                "text": "알림(omitted): 의도된 동작입니다. 대상 — 지시서.md",
+                "text": "Notice (omitted): intended behavior. Target — instructions.md",
             })
         );
         let without = reason("bare", json!({}), None);
         assert_eq!(
             notice_row(&without),
-            json!({ "code": "bare", "args": {}, "text": "알림(bare): 의도된 동작입니다." }),
+            json!({ "code": "bare", "args": {}, "text": "Notice (bare): intended behavior." }),
             "no `line` key when the notice names none"
         );
     }
@@ -2128,7 +2139,7 @@ mod tests {
         );
         assert_eq!(
             notice_text(&n),
-            "알림(omitted): 의도된 동작입니다. 대상 — 2 · i.md · s1 · s2"
+            "Notice (omitted): intended behavior. Target — 2 · i.md · s1 · s2"
         );
     }
 
@@ -2137,18 +2148,18 @@ mod tests {
     fn the_notice_text_escapes_control_characters() {
         let n = reason(
             "omit\nted",
-            json!({ "names": ["a\nb.md", "\u{1b}[31mred", "탭\t이름"] }),
+            json!({ "names": ["a\nb.md", "\u{1b}[31mred", "tab\tname"] }),
             None,
         );
         let text = notice_text(&n);
         assert_eq!(
             text,
-            "알림(omit\\nted): 의도된 동작입니다. 대상 — a\\nb.md · \\u{1b}[31mred · 탭\\t이름"
+            "Notice (omit\\nted): intended behavior. Target — a\\nb.md · \\u{1b}[31mred · tab\\tname"
         );
         assert!(!text.chars().any(char::is_control), "{text:?}");
         assert_eq!(
             notice_row(&n)["args"],
-            json!({ "names": ["a\nb.md", "\u{1b}[31mred", "탭\t이름"] }),
+            json!({ "names": ["a\nb.md", "\u{1b}[31mred", "tab\tname"] }),
             "the args stay raw — only the display line is escaped"
         );
     }
@@ -2161,15 +2172,15 @@ mod tests {
         let cases = [
             (
                 json!({ "instructions": ["team/a.md", "team/b.md"], "skills": ["review", "lint"] }),
-                "알림: codex 터미널 모드는 프리셋 지시서와 스킬을 지원하지 않습니다. 적용되지 않은 항목: 지시서 team/a.md, team/b.md, 스킬 review, lint",
+                "Notice: codex terminal mode does not support preset instructions and skills. Not applied: instructions team/a.md, team/b.md, skills review, lint",
             ),
             (
                 json!({ "instructions": [], "skills": ["a", "b"] }),
-                "알림: codex 터미널 모드는 프리셋 지시서와 스킬을 지원하지 않습니다. 적용되지 않은 항목: 스킬 a, b",
+                "Notice: codex terminal mode does not support preset instructions and skills. Not applied: skills a, b",
             ),
             (
                 json!({ "instructions": ["team/a.md"], "skills": [] }),
-                "알림: codex 터미널 모드는 프리셋 지시서와 스킬을 지원하지 않습니다. 적용되지 않은 항목: 지시서 team/a.md",
+                "Notice: codex terminal mode does not support preset instructions and skills. Not applied: instructions team/a.md",
             ),
         ];
         for (args, text) in cases {
@@ -2186,7 +2197,7 @@ mod tests {
                 json!({ "folder": "D:\\rules\\company", "items": ["AGENTS.md", ".agents\\skills"] }),
                 None,
             )),
-            "알림: codex 터미널 모드는 폴더 항목을 지원하지 않습니다. 적용되지 않은 폴더: D:\\rules\\company (AGENTS.md, .agents\\skills)"
+            "Notice: codex terminal mode does not support folder entries. Folder not applied: D:\\rules\\company (AGENTS.md, .agents\\skills)"
         );
         assert_eq!(
             notice_text(&reason(
@@ -2194,7 +2205,7 @@ mod tests {
                 json!({ "name": "review", "paths": ["D:\\lib\\review", "C:\\Users\\u\\.agents\\skills\\review"] }),
                 None,
             )),
-            "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 $review(으)로 부르면 어느 쪽도 선택되지 않습니다. review: D:\\lib\\review, C:\\Users\\u\\.agents\\skills\\review"
+            "Notice: skills with the same name exist in several places. Calling $review in codex selects none of them. review: D:\\lib\\review, C:\\Users\\u\\.agents\\skills\\review"
         );
     }
 
@@ -2209,7 +2220,7 @@ mod tests {
         ));
         assert_eq!(
             text,
-            "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 $a\\nb(으)로 부르면 어느 쪽도 선택되지 않습니다. a\\nb: \\u{1b}[31mred"
+            "Notice: skills with the same name exist in several places. Calling $a\\nb in codex selects none of them. a\\nb: \\u{1b}[31mred"
         );
         assert!(!text.chars().any(char::is_control), "{text:?}");
 
@@ -2219,7 +2230,7 @@ mod tests {
                 json!({ "items": ["x"] }),
                 None
             )),
-            "알림(codex-terminal-folder-omitted): 의도된 동작입니다. 대상 — x"
+            "Notice (codex-terminal-folder-omitted): intended behavior. Target — x"
         );
         assert_eq!(
             notice_text(&reason(
@@ -2227,7 +2238,7 @@ mod tests {
                 json!({ "skills": "one" }),
                 None
             )),
-            "알림(codex-terminal-omitted): 의도된 동작입니다. 대상 — one"
+            "Notice (codex-terminal-omitted): intended behavior. Target — one"
         );
         for args in [
             json!({ "name": "review" }),
@@ -2235,20 +2246,20 @@ mod tests {
         ] {
             assert_eq!(
                 notice_text(&reason(CODEX_SAME_NAME_SKILLS, args.clone(), None)),
-                "알림(codex-same-name-skills): 의도된 동작입니다. 대상 — review",
+                "Notice (codex-same-name-skills): intended behavior. Target — review",
                 "{args}"
             );
         }
         for args in [json!(["team/a.md"]), json!("x"), json!(null)] {
             let text = notice_text(&reason(CODEX_TERMINAL_OMITTED, args.clone(), None));
             assert!(
-                text.starts_with("알림(codex-terminal-omitted): 의도된 동작입니다."),
+                text.starts_with("Notice (codex-terminal-omitted): intended behavior."),
                 "{args} · {text}"
             );
         }
         assert_eq!(
             notice_text(&reason("codex-other", json!({ "name": "x" }), None)),
-            "알림(codex-other): 의도된 동작입니다. 대상 — x"
+            "Notice (codex-other): intended behavior. Target — x"
         );
     }
 
@@ -2259,19 +2270,19 @@ mod tests {
         for (args, text) in [
             (
                 json!({ "folder": "D:\\rules", "paths": ["a", "b/c"] }),
-                "알림: 폴더 D:\\rules에서 읽을 수 없는 항목을 건너뛰었습니다: a, b/c",
+                "Notice: folder D:\\rules: skipped unreadable entries: a, b/c",
             ),
             (
                 json!({ "folder": "D:\\rules", "paths": ["a", "b", "c"] }),
-                "알림: 폴더 D:\\rules에서 읽을 수 없는 항목을 건너뛰었습니다: a, b, c",
+                "Notice: folder D:\\rules: skipped unreadable entries: a, b, c",
             ),
             (
                 json!({ "folder": "D:\\rules", "paths": ["a", "b", "c", "d", "e"] }),
-                "알림: 폴더 D:\\rules에서 읽을 수 없는 항목을 건너뛰었습니다: a, b, c 외 2개",
+                "Notice: folder D:\\rules: skipped unreadable entries: a, b, c and 2 more",
             ),
             (
                 json!({ "folder": "D:\\a\nb", "paths": ["x\u{1b}y"] }),
-                "알림: 폴더 D:\\a\\nb에서 읽을 수 없는 항목을 건너뛰었습니다: x\\u{1b}y",
+                "Notice: folder D:\\a\\nb: skipped unreadable entries: x\\u{1b}y",
             ),
         ] {
             let rendered = notice_text(&reason(FOLDER_LISTING_SKIPPED, args.clone(), None));
@@ -2285,7 +2296,7 @@ mod tests {
                 json!({ "folder": "D:\\rules", "paths": many }),
                 None
             )),
-            "알림: 폴더 D:\\rules에서 읽을 수 없는 항목을 건너뛰었습니다: p0, p1, p2 외 1,003개"
+            "Notice: folder D:\\rules: skipped unreadable entries: p0, p1, p2 and 1,003 more"
         );
         for args in [
             json!({ "paths": ["a"] }),
@@ -2297,7 +2308,7 @@ mod tests {
         ] {
             let text = notice_text(&reason(FOLDER_LISTING_SKIPPED, args.clone(), None));
             assert!(
-                text.starts_with("알림(folder-listing-skipped): 의도된 동작입니다."),
+                text.starts_with("Notice (folder-listing-skipped): intended behavior."),
                 "{args} · {text}"
             );
         }
@@ -2310,11 +2321,11 @@ mod tests {
         for (args, text) in [
             (
                 json!({ "folder": "D:\\rules\\big" }),
-                "알림: 폴더 D:\\rules\\big의 항목이 10,000개를 넘어 일부만 확인했습니다.",
+                "Notice: folder D:\\rules\\big has more than 10,000 entries; only some were checked.",
             ),
             (
                 json!({ "folder": "D:\\a\nb" }),
-                "알림: 폴더 D:\\a\\nb의 항목이 10,000개를 넘어 일부만 확인했습니다.",
+                "Notice: folder D:\\a\\nb has more than 10,000 entries; only some were checked.",
             ),
         ] {
             let rendered = notice_text(&reason(FOLDER_LISTING_PARTIAL, args.clone(), None));
@@ -2324,7 +2335,7 @@ mod tests {
         for args in [json!({ "path": "D:\\x" }), json!("D:\\x")] {
             let text = notice_text(&reason(FOLDER_LISTING_PARTIAL, args.clone(), None));
             assert!(
-                text.starts_with("알림(folder-listing-partial): 의도된 동작입니다."),
+                text.starts_with("Notice (folder-listing-partial): intended behavior."),
                 "{args} · {text}"
             );
         }
@@ -2337,11 +2348,11 @@ mod tests {
         for (args, text) in [
             (
                 json!({ "path": "engram:/default", "why": "yaml-syntax: bad" }),
-                "알림: 기본 제공 engram:/default을(를) 읽지 못해 빈 내용으로 적용했습니다. 이유: yaml-syntax: bad",
+                "Notice: could not read built-in engram:/default; applied it with empty content. Reason: yaml-syntax: bad",
             ),
             (
                 json!({ "path": "engram:/priming", "why": "a\nb\u{1b}" }),
-                "알림: 기본 제공 engram:/priming을(를) 읽지 못해 빈 내용으로 적용했습니다. 이유: a\\nb\\u{1b}",
+                "Notice: could not read built-in engram:/priming; applied it with empty content. Reason: a\\nb\\u{1b}",
             ),
         ] {
             let rendered = notice_text(&reason(BUILTIN_UNAVAILABLE, args.clone(), None));
@@ -2357,7 +2368,7 @@ mod tests {
         ] {
             let text = notice_text(&reason(BUILTIN_UNAVAILABLE, args.clone(), None));
             assert!(
-                text.starts_with("알림(builtin-unavailable): 의도된 동작입니다."),
+                text.starts_with("Notice (builtin-unavailable): intended behavior."),
                 "{args} · {text}"
             );
         }
@@ -2378,7 +2389,7 @@ mod tests {
                     json!({ "settings": "team/models.yaml" }),
                     None
                 )),
-                format!("알림({code}): 의도된 동작입니다. 대상 — team/models.yaml")
+                format!("Notice ({code}): intended behavior. Target — team/models.yaml")
             );
         }
     }

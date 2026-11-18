@@ -6,8 +6,8 @@ const clientMock = vi.hoisted(() => ({
   renameProfile: vi.fn(async () => undefined),
   createClaudeProfile: vi.fn(async () => ({ id: 'new-profile' })),
   createCodexProfile: vi.fn(async () => ({ id: 'new-codex-profile' })),
-  // refreshProfiles(eventBus) 가 부르는 listProfiles — 생성 직후 store/tree 반영 검증용. 기본 []
-  //   (테스트별로 mockResolvedValueOnce 로 생성 프로필을 실어 반환).
+  // listProfiles as called by refreshProfiles(eventBus) — for checking the store/tree update right after creation. Default []
+  //   (each test loads the created profile with mockResolvedValueOnce).
   listProfiles: vi.fn(async () => [] as unknown[]),
   cancelQueuedInput: vi.fn(async (): Promise<string> => 'requested'),
   interruptAgent: vi.fn(async (): Promise<void> => undefined),
@@ -25,7 +25,7 @@ vi.mock('../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
-// agentlist.createAgent 는 폴더 다이얼로그(open)로 cwd 를 고른다 — 픽/취소를 테스트별로 제어.
+// agentlist.createAgent picks the cwd with the folder dialog (open) — pick/cancel is controlled per test.
 const dialogMock = vi.hoisted(() => ({ open: vi.fn(async () => null as string | null) }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: (...args: unknown[]) => dialogMock.open(...(args as [])),
@@ -57,18 +57,18 @@ afterEach(() => {
   useAgentStore.setState({ profiles: [] })
 })
 
-describe('agent.spawn 라우팅', () => {
-  it('raw cwd → spawnAgent(trim 된 cwd)', () => {
+describe('agent.spawn routing', () => {
+  it('raw cwd → spawnAgent(trimmed cwd)', () => {
     run('agent.spawn', { cwd: '  C:/new/path  ' })
     expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/new/path', 'claude')
   })
 
-  it('parent 세팅 → throw(중첩 미지원)', () => {
-    expect(() => run('agent.spawn', { cwd: 'C:/x', parent: 'p1' })).toThrow(/parent nesting 미지원/)
+  it('parent set → throw (nesting not supported)', () => {
+    expect(() => run('agent.spawn', { cwd: 'C:/x', parent: 'p1' })).toThrow(/parent nesting not supported/)
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
-  it('빈/공백 cwd → throw', () => {
+  it('empty/blank cwd → throw', () => {
     expect(() => run('agent.spawn', { cwd: '   ' })).toThrow()
     expect(() => run('agent.spawn', {})).toThrow()
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
@@ -76,31 +76,30 @@ describe('agent.spawn 라우팅', () => {
 })
 
 // ── agent.rename(§5 — ADR-0061) ──────────────────────────────────────────────
-describe('agent.rename 라우팅', () => {
+describe('agent.rename routing', () => {
   it('id + name → renameProfile(id, trimmed)', () => {
-    run('agent.rename', { id: '  a1  ', name: '  내 에이전트  ' })
-    expect(clientMock.renameProfile).toHaveBeenCalledWith('a1', '내 에이전트')
+    run('agent.rename', { id: '  a1  ', name: '  my agent  ' })
+    expect(clientMock.renameProfile).toHaveBeenCalledWith('a1', 'my agent')
   })
-  it('name 생략/빈문자열 → null(override 해제)', () => {
+  it('name omitted/empty string → null (clear the override)', () => {
     run('agent.rename', { id: 'a1' })
     expect(clientMock.renameProfile).toHaveBeenCalledWith('a1', null)
     clientMock.renameProfile.mockClear()
     run('agent.rename', { id: 'a1', name: '   ' })
     expect(clientMock.renameProfile).toHaveBeenCalledWith('a1', null)
   })
-  it('빈 id → throw(조용한 no-op 금지)', () => {
-    expect(() => run('agent.rename', { name: 'x' })).toThrow(/id 가 비어 있음/)
+  it('empty id → throw (no silent no-op)', () => {
+    expect(() => run('agent.rename', { name: 'x' })).toThrow(/id is empty/)
     expect(clientMock.renameProfile).not.toHaveBeenCalled()
   })
 })
 
-// ── agent_list 생성 계열 어댑터(ADR-0064 / ADR-0078) ──────────────────────────────
-// ★동작 변경★: 옛 즉시 셸(cmd.exe) 스폰(agent.spawn) → claude reserved(비활성) 프로필 등록.
-describe('agent_list 생성 계열 라우팅', () => {
-  // 생성 프로필의 최소 형태(AgentProfile) — refreshProfiles → setProfiles 로 store/tree 에 실릴 값.
+// agentlist.create* registers a reserved (inactive) profile; it does not spawn.
+describe('agent_list creation-family routing', () => {
+  // Minimal shape of the created profile (AgentProfile) — the value loaded into the store/tree via refreshProfiles → setProfiles.
   const createdProfile = { id: 'p-created', cwd: 'C:/work/engram', display_name: null }
 
-  it('createTerminal → createClaudeProfile 를 outputFormat=Terminal 로 호출', async () => {
+  it('createTerminal → calls createClaudeProfile with outputFormat=Terminal', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
 
@@ -114,7 +113,7 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
-  it('createJson → createClaudeProfile 를 outputFormat=StreamJson 로 호출', async () => {
+  it('createJson → calls createClaudeProfile with outputFormat=StreamJson', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
 
@@ -128,11 +127,8 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
-  // ★사람이 codex 대화형 TUI 를 고르는 문★ — 형제와 마찬가지로 등록만 하고 스폰하지 않는다 — 뜨는 것은
-  //   활성화(더블클릭)에서다.
-  // ★`runAsHuman` 인 것은 이제 **게이트 때문이 아니라 사람 경로를 재려고**다★ — 2026-09-22 에
-  //   `humanOnly` 가 걷히면서 두 진입점이 같아졌고, LLM 쪽은 아래 별도 항목이 따로 잰다.
-  it('createCodex(사람 경로) → createCodexProfile 를 outputFormat=Terminal 로 호출', async () => {
+  // ★The door where a human picks the codex interactive TUI★ — like its siblings it only registers and does not spawn; it launches on activation (double click). ★`runAsHuman` here measures the human path, not a gate★ — `humanOnly` was lifted and the two entry points are the same; the LLM side is measured by the entry below.
+  it('createCodex (human path) → calls createCodexProfile with outputFormat=Terminal', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
 
@@ -147,9 +143,9 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
-  // ★모드 축이 실제로 갈리는 것을 재는 자리★ — 두 codex 문이 같은 `createCodexProfile` 을 부르므로,
-  //   모드를 안 싣거나 둘 다 같은 값을 실으면 위 항목과 이 항목 중 하나가 빨개진다.
-  it('createCodexJson(사람 경로) → createCodexProfile 를 outputFormat=StreamJson 로 호출', async () => {
+  // ★The place that measures that the mode axis really splits★ — the two codex doors call the same `createCodexProfile`, so
+  //   if the mode is not carried or both carry the same value, one of the entry above and this entry goes red.
+  it('createCodexJson (human path) → calls createCodexProfile with outputFormat=StreamJson', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
 
@@ -164,9 +160,8 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
-  // 형제 `createCodex` 와 **같은 게이트를 진다** — 한쪽만 열리거나 한쪽만 닫히는 것이 이 항목이 막는
-  //   회귀다(그 게이트는 지금 열려 있다).
-  it('createCodexJson: LLM 진입점(registry.run)도 사람 경로와 같은 프로필을 만든다', async () => {
+  // Same gate as sibling `createCodex` (open) — only one side opening or closing is the regression this entry blocks.
+  it('createCodexJson: the LLM entry point (registry.run) also makes the same profile as the human path', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
 
@@ -178,14 +173,10 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
   })
 
-  // ★세 번째 생성 문 — 두 진입점이 같은 문을 연다★(2026-09-22: 옛 `humanOnly` 게이트를 걷었다).
-  //
-  // 이 항목은 **사람 메뉴이면서 동시에 LLM command** 다. 그 겸직을 닫고 있던 것은 백엔드 낱말이 아니라
-  // **호출자 축**이었고, 그 축을 세운 전제(codex 의 신뢰 확인 모달을 LLM 이 못 지난다)가 실측으로
-  // 죽었다 — 근거의 정본 = `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY` 의 codex 줄.
-  // ★그래서 이 둘이 재는 것이 뒤집혔다★: 게이트를 되살리면 이 두 항목이 빨개진다. 되살릴 일이 생기면
-  // 그 표부터 닫을 것 — 표는 열린 채 여기만 닫으면 `agent.new` 로는 만들고 이 문으로는 못 만든다.
-  it('createCodex: LLM 진입점(registry.run)도 사람 경로와 같은 프로필을 만든다', async () => {
+  // ★The third creation door — both entry points open the same door★ (the old `humanOnly` gate was lifted).
+  // This entry is **a human menu and an LLM command at once**. What kept that double role closed was the **caller axis**, whose premise (the LLM cannot get past codex's trust confirmation modal) died by measurement — canonical rationale = the codex row of `commands::LLM_BACKEND_POLICY` in `engram-dashboard-agent`.
+  // ★So what these two measure was flipped★: reviving the gate turns them red. If it ever needs reviving, close that table first — closing only here leaves it makeable through `agent.new` but not this door.
+  it('createCodex: the LLM entry point (registry.run) also makes the same profile as the human path', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
 
@@ -197,11 +188,11 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
   })
 
-  it('createCodex: 사람 경로(트리 메뉴 → fireAndForget)는 그대로 codex 를 만든다', async () => {
+  it('createCodex: the human path (tree menu → fireAndForget) still makes codex', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
 
-    // `SlotContextMenu` 가 메뉴 항목에 쓰는 바로 그 호출이다(그 파일의 `fireAndForget(id, …)`).
+    // This is the very call `SlotContextMenu` uses for menu items (`fireAndForget(id, …)` in that file).
     fireAndForget('agentlist.createCodex')
 
     await vi.waitFor(() => expect(clientMock.createCodexProfile).toHaveBeenCalled())
@@ -210,7 +201,7 @@ describe('agent_list 생성 계열 라우팅', () => {
     )
   })
 
-  it('createAgent(파라미터형): 인자 없으면 StreamJson 기본, args.outputFormat 주면 그 값 사용', async () => {
+  it('createAgent (parametric): StreamJson by default without arguments, the given value when args.outputFormat is set', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
     await run('agentlist.createAgent', {})
@@ -226,9 +217,8 @@ describe('agent_list 생성 계열 라우팅', () => {
     )
   })
 
-  // ★대소문자 무관 수용 + 선언 철자 정규화(사용자 결정 2026-09-23)★: 백엔드로 나가는 값은 호출자가 쓴
-  //   철자가 아니라 'Terminal'·'StreamJson' 이어야 한다 — 그래야 wire 가 종전과 바이트 동일하다.
-  it('createAgent(파라미터형): outputFormat 대소문자 무관 수용 → 선언 철자로 정규화해 전달', async () => {
+  // ★Case-insensitive acceptance + normalization to the declared spelling★: the value sent to the backend must be 'Terminal'·'StreamJson', not the caller's spelling — so the wire is byte-identical to before.
+  it('createAgent (parametric): outputFormat accepted case-insensitively → normalized to the declared spelling and passed on', async () => {
     for (const [given, expected] of [
       ['terminal', 'Terminal'],
       ['TERMINAL', 'Terminal'],
@@ -244,14 +234,14 @@ describe('agent_list 생성 계열 라우팅', () => {
     }
   })
 
-  it('createAgent(파라미터형): 잘못된 outputFormat → 명시 throw + createClaudeProfile 미호출', async () => {
-    // 다이얼로그(open)보다 검증이 먼저라 폴더 픽·createClaudeProfile 모두 타지 않는다.
+  it('createAgent (parametric): invalid outputFormat → explicit throw + createClaudeProfile not called', async () => {
+    // Validation comes before the dialog (open), so neither the folder pick nor createClaudeProfile runs.
     await expect(run('agentlist.createAgent', { outputFormat: 'invalid' })).rejects.toThrow(/invalid/)
     expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
-  it('취소(다이얼로그 null) → no-op(클라이언트·refetch 미호출)', async () => {
+  it('cancel (dialog null) → no-op (client and refetch not called)', async () => {
     dialogMock.open.mockResolvedValueOnce(null)
     await run('agentlist.createTerminal', {})
     expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
@@ -261,10 +251,10 @@ describe('agent_list 생성 계열 라우팅', () => {
   })
 })
 
-// ── agent_list pane 메뉴 = 1단 서브메뉴 컨테이너(ADR-0078 / ADR-0065) ──────────────
-// side-effect import 로 registerSlotMenu 가 이미 컨테이너를 기여했다.
-describe('agent_list 생성 서브메뉴(ADR-0078)', () => {
-  it('"에이전트 생성" 컨테이너 + 자식 4개(선언 순서 Json→Terminal→Codex→CodexJson)', () => {
+// ── agent_list pane menu = one-level submenu container (ADR-0078 / ADR-0065) ──────────────
+// registerSlotMenu has already contributed the container through the side-effect import.
+describe('agent_list creation submenu (ADR-0078)', () => {
+  it('"Create agent" container + 4 children (declaration order Json→Terminal→Codex→CodexJson)', () => {
     const items = buildSlotMenu('agent_list')
     const container = items.find(i => i.title === '에이전트 생성')
     expect(container).toBeDefined()
@@ -278,29 +268,29 @@ describe('agent_list 생성 서브메뉴(ADR-0078)', () => {
   })
 })
 
-// ── ADR-0231: 대기 입력 ✕ 와 LLM 이 같은 핸들을 흔든다 ─────────────────────────────────────
+// ── ADR-0231: the queued input ✕ and the LLM shake the same handle ─────────────────────────────────────
 describe('agent.cancelQueuedInput', () => {
-  it('등록돼 있고 help 가 없다 — 버스 명단에 안 오른다(데몬이 답하는 이름이라 오르면 등록 묶음 전체가 반려된다)', () => {
+  it('registered and has no help — not on the bus list (it is a name the daemon answers, so if listed the whole registration bundle is bounced)', () => {
     expect(getCommand('agent.cancelQueuedInput')).toBeDefined()
     expect(getCommand('agent.cancelQueuedInput')?.help).toBeUndefined()
     expect(list().find((c) => c.id === 'agent.cancelQueuedInput')?.help).toBeUndefined()
   })
 
-  it('agentId·inputId 로 agentClient.cancelQueuedInput 을 부르고 결말 낱말을 돌려준다', async () => {
+  it('calls agentClient.cancelQueuedInput with agentId·inputId and returns the outcome word', async () => {
     await expect(run('agent.cancelQueuedInput', { agentId: ' a1 ', inputId: 'q1' })).resolves.toEqual({
       outcome: 'requested',
     })
     expect(clientMock.cancelQueuedInput).toHaveBeenCalledWith('a1', 'q1')
   })
 
-  it('모르는 결말 낱말도 그대로 돌려준다', async () => {
+  it('returns an unknown outcome word as is too', async () => {
     clientMock.cancelQueuedInput.mockImplementation(async () => 'deferred')
     await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).resolves.toEqual({
       outcome: 'deferred',
     })
   })
 
-  it('코드 없이 온 임대 거절 문구는 CONFLICT 로 읽힌다', async () => {
+  it('a lease refusal text that came without a code reads as CONFLICT', async () => {
     clientMock.cancelQueuedInput.mockImplementation(async () => {
       throw new Error(INPUT_LOCKED_REFUSAL)
     })
@@ -309,7 +299,7 @@ describe('agent.cancelQueuedInput', () => {
     )
   })
 
-  it('운영 carrier 처럼 맨 문자열로 온 임대 거절 문구도 CONFLICT 로 읽힌다', async () => {
+  it('a lease refusal text that came as a bare string like the operating carrier also reads as CONFLICT', async () => {
     clientMock.cancelQueuedInput.mockImplementation(async () => {
       throw INPUT_LOCKED_REFUSAL
     })
@@ -318,7 +308,7 @@ describe('agent.cancelQueuedInput', () => {
     )
   })
 
-  it('맨 문자열로 온 다른 거절(NOT_FOUND)은 문자열 그대로 다시 던진다', async () => {
+  it('another refusal (NOT_FOUND) that came as a bare string is rethrown as the string', async () => {
     clientMock.cancelQueuedInput.mockImplementation(async () => {
       throw 'NOT_FOUND: no waiting input'
     })
@@ -327,7 +317,7 @@ describe('agent.cancelQueuedInput', () => {
     )
   })
 
-  it('문자열도 Error 도 아닌 거절은 건드리지 않는다', async () => {
+  it('a refusal that is neither a string nor an Error is left alone', async () => {
     const odd = { code: 'X' }
     clientMock.cancelQueuedInput.mockImplementation(async () => {
       throw odd
@@ -335,7 +325,7 @@ describe('agent.cancelQueuedInput', () => {
     await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toBe(odd)
   })
 
-  it('코드를 단 실패(NOT_FOUND)와 코드 없는 다른 실패(끊김)는 그대로 둔다', async () => {
+  it('a failure with a code (NOT_FOUND) and another code-less failure (disconnect) are left as they are', async () => {
     clientMock.cancelQueuedInput.mockImplementation(async () => {
       throw new Error('NOT_FOUND: no waiting input')
     })
@@ -350,41 +340,41 @@ describe('agent.cancelQueuedInput', () => {
     )
   })
 
-  it('빈 agentId·inputId 는 보내지 않고 던진다', async () => {
+  it('throws without sending for an empty agentId·inputId', async () => {
     await expect(run('agent.cancelQueuedInput', { agentId: '  ', inputId: 'q1' })).rejects.toThrow(/agentId/)
     await expect(run('agent.cancelQueuedInput', { agentId: 'a1' })).rejects.toThrow(/inputId/)
     expect(clientMock.cancelQueuedInput).not.toHaveBeenCalled()
   })
 
-  it('사람 경로(✕ 클릭 → fireAndForget)도 같은 명령을 부른다', async () => {
+  it('the human path (✕ click → fireAndForget) calls the same command too', async () => {
     fireAndForget('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q2' })
     await Promise.resolve()
     expect(clientMock.cancelQueuedInput).toHaveBeenCalledWith('a1', 'q2')
   })
 })
 
-// ── ADR-0237: 채팅 칸 Esc 와 LLM 이 같은 핸들을 흔든다 ─────────────────────────────────────
+// ── ADR-0237: the chat area's Esc and the LLM shake the same handle ─────────────────────────────────────
 describe('agent.interrupt', () => {
-  it('등록돼 있고 help 가 없다 — 버스 명단에 안 오른다(데몬이 답하는 이름이라 오르면 등록 묶음 전체가 반려된다)', () => {
+  it('registered and has no help — not on the bus list (it is a name the daemon answers, so if listed the whole registration bundle is bounced)', () => {
     expect(getCommand('agent.interrupt')).toBeDefined()
     expect(getCommand('agent.interrupt')?.help).toBeUndefined()
     expect(list().find((c) => c.id === 'agent.interrupt')?.help).toBeUndefined()
   })
 
-  it('agentId 로 agentClient.interruptAgent 를 부르고 requested 를 돌려준다', async () => {
+  it('calls agentClient.interruptAgent with agentId and returns requested', async () => {
     await expect(run('agent.interrupt', { agentId: ' a1 ' })).resolves.toEqual({ outcome: 'requested' })
     expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
     expect(clientMock.interruptAgent).toHaveBeenCalledWith('a1')
   })
 
-  it('빈·없는·문자열 아닌 agentId 는 보내지 않고 던진다', async () => {
+  it('throws without sending for an empty, missing or non-string agentId', async () => {
     await expect(run('agent.interrupt', { agentId: '  ' })).rejects.toThrow(/agentId/)
     await expect(run('agent.interrupt', {})).rejects.toThrow(/agentId/)
     await expect(run('agent.interrupt', { agentId: 7 })).rejects.toThrow(/agentId/)
     expect(clientMock.interruptAgent).not.toHaveBeenCalled()
   })
 
-  it('코드 없이 온 임대 거절 문구는 Error 로 오든 맨 문자열로 오든 CONFLICT 로 읽힌다', async () => {
+  it('a lease refusal text that came without a code reads as CONFLICT whether it comes as an Error or a bare string', async () => {
     clientMock.interruptAgent.mockImplementation(async () => {
       throw new Error(INPUT_LOCKED_REFUSAL)
     })
@@ -395,7 +385,7 @@ describe('agent.interrupt', () => {
     await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(`CONFLICT: ${INPUT_LOCKED_REFUSAL}`)
   })
 
-  it('그 밖의 거절(끊을 턴 없음 · 끊김)은 모양 그대로 다시 던진다', async () => {
+  it('other refusals (no turn to interrupt · disconnect) are rethrown in their shape', async () => {
     clientMock.interruptAgent.mockImplementation(async () => {
       throw 'no turn to interrupt'
     })
@@ -406,14 +396,14 @@ describe('agent.interrupt', () => {
     await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(/^connection lost$/)
   })
 
-  it('부르는 쪽이 동기로 던진 임대 거절도 CONFLICT 로 읽힌다', async () => {
+  it('a lease refusal the caller threw synchronously also reads as CONFLICT', async () => {
     clientMock.interruptAgent.mockImplementation((() => {
       throw new Error(INPUT_LOCKED_REFUSAL)
     }) as unknown as () => Promise<void>)
     await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(`CONFLICT: ${INPUT_LOCKED_REFUSAL}`)
   })
 
-  it('사람 경로(Esc → fireAndForget)도 같은 명령을 부르고, 거절은 경고로만 삼킨다', async () => {
+  it('the human path (Esc → fireAndForget) calls the same command too, and a refusal is only swallowed as a warning', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     clientMock.interruptAgent.mockImplementation(async () => {
       throw 'no turn to interrupt'
@@ -428,12 +418,12 @@ describe('agent.interrupt', () => {
   })
 })
 
-// ── ADR-0244: 끊기를 보낸 뒤 턴 끝까지 「중단하는 중」 · 그동안 다시 보내지 않는다 ───────────────────────────
-describe('agent.interrupt — 중단하는 중(ADR-0244)', () => {
+// ── ADR-0244: 「interrupting」 from sending the interrupt until turn end · no resending meanwhile ───────────────────────────
+describe('agent.interrupt — interrupting (ADR-0244)', () => {
   const interrupting = (agentId: string): boolean =>
     pendingInterrupt(useInterruptStore.getState(), agentId) !== undefined
 
-  /** 답을 시험이 푸는 끊기 요청. */
+  /** An interrupt request whose answer the test resolves. */
   function deferred(): { resolve: () => void; reject: (e: unknown) => void } {
     const handle = { resolve: () => {}, reject: (_e: unknown) => {} }
     clientMock.interruptAgent.mockImplementation(
@@ -446,7 +436,7 @@ describe('agent.interrupt — 중단하는 중(ADR-0244)', () => {
     return handle
   }
 
-  it('그 에이전트의 대화 뷰가 있으면 보내는 즉시 서고, 끊기가 받아들여져도 턴 끝까지 남는다', async () => {
+  it('if the agent has a conversation view, it is set as soon as it sends, and stays until turn end even when the interrupt is accepted', async () => {
     useInterruptStore.getState().watch('a1')
     const answer = deferred()
     const result = run('agent.interrupt', { agentId: ' a1 ' }) as Promise<unknown>
@@ -455,16 +445,16 @@ describe('agent.interrupt — 중단하는 중(ADR-0244)', () => {
     answer.resolve()
     await expect(result).resolves.toEqual({ outcome: 'requested' })
     expect(interrupting('a1')).toBe(true)
-    // 턴 끝에 걷는 것은 대화 뷰다(RichSlot.test.tsx).
+    // Clearing at turn end is the conversation view's job (RichSlot.test.tsx).
     useInterruptStore.getState().end('a1')
     expect(interrupting('a1')).toBe(false)
   })
 
   it.each<[string, () => unknown]>([
-    ['임대 거절(CONFLICT)', () => new Error(INPUT_LOCKED_REFUSAL)],
-    ['끊을 턴 없음(맨 문자열)', () => 'no turn to interrupt'],
-    ['끊김', () => new Error('connection lost')],
-  ])('거절되면 걷는다 — %s', async (_label, error) => {
+    ['lease refusal (CONFLICT)', () => new Error(INPUT_LOCKED_REFUSAL)],
+    ['no turn to interrupt (bare string)', () => 'no turn to interrupt'],
+    ['disconnect', () => new Error('connection lost')],
+  ])('cleared when refused — %s', async (_label, error) => {
     useInterruptStore.getState().watch('a1')
     clientMock.interruptAgent.mockImplementation(async () => {
       throw error()
@@ -473,20 +463,20 @@ describe('agent.interrupt — 중단하는 중(ADR-0244)', () => {
     expect(interrupting('a1')).toBe(false)
   })
 
-  it('중단하는 중에 다시 부르면 보내지 않고 requested 로 답한다', async () => {
+  it('calling again while interrupting does not send and answers with requested', async () => {
     useInterruptStore.getState().watch('a1')
     await expect(run('agent.interrupt', { agentId: 'a1' })).resolves.toEqual({ outcome: 'requested' })
     await expect(run('agent.interrupt', { agentId: 'a1' })).resolves.toEqual({ outcome: 'requested' })
     expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
     expect(interrupting('a1')).toBe(true)
 
-    // 턴이 끝나면 다음 부름은 다시 보낸다.
+    // After the turn ends, the next call sends again.
     useInterruptStore.getState().end('a1')
     await run('agent.interrupt', { agentId: 'a1' })
     expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
   })
 
-  it('첫 요청이 아직 답을 기다리면 다시 부른 쪽은 그 결말을 따른다 — 거절도', async () => {
+  it('if the first request is still waiting for an answer, the repeated call follows its outcome — refusal too', async () => {
     useInterruptStore.getState().watch('a1')
     const answer = deferred()
     const first = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
@@ -498,11 +488,11 @@ describe('agent.interrupt — 중단하는 중(ADR-0244)', () => {
     expect(interrupting('a1')).toBe(false)
   })
 
-  it('늦게 온 옛 요청의 거절은 그 뒤 새 요청의 중단하는 중을 걷지 않는다', async () => {
+  it("a late refusal of an old request does not clear a newer request's interrupting state", async () => {
     useInterruptStore.getState().watch('a1')
     const oldAnswer = deferred()
     const old = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
-    // 옛 요청이 답을 기다리는 동안 턴이 끝났고, 다음 턴에서 새로 끊는다.
+    // The turn ended while the old request was waiting for an answer, and a new interrupt is sent in the next turn.
     useInterruptStore.getState().end('a1')
     const newAnswer = deferred()
     const fresh = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
@@ -515,26 +505,26 @@ describe('agent.interrupt — 중단하는 중(ADR-0244)', () => {
     await expect(fresh).resolves.toEqual({ outcome: 'requested' })
   })
 
-  it('이 창에 그 에이전트의 대화 뷰가 없으면 서지 않고, 다시 부르면 다시 보낸다', async () => {
+  it('if this window has no conversation view of that agent, it is not set, and calling again sends again', async () => {
     await run('agent.interrupt', { agentId: 'a1' })
     expect(interrupting('a1')).toBe(false)
     await run('agent.interrupt', { agentId: 'a1' })
     expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
   })
 
-  it('마지막 대화 뷰가 풀려야 걷힌다 — 같은 에이전트의 다른 뷰가 남으면 그대로다', async () => {
+  it('cleared only when the last conversation view is released — stays while another view of the same agent remains', async () => {
     const releaseA = useInterruptStore.getState().watch('a1')
     const releaseB = useInterruptStore.getState().watch('a1')
     await run('agent.interrupt', { agentId: 'a1' })
     releaseA()
-    releaseA() // 두 번 불러도 한 번만 센다.
+    releaseA() // counted once even when called twice.
     expect(interrupting('a1')).toBe(true)
     releaseB()
     expect(interrupting('a1')).toBe(false)
     expect(useInterruptStore.getState().views).toEqual({})
   })
 
-  it("프로토타입 이름('constructor')을 중단하는 중으로 읽지 않는다", async () => {
+  it("does not read a prototype name ('constructor') as interrupting", async () => {
     await run('agent.interrupt', { agentId: 'constructor' })
     expect(clientMock.interruptAgent).toHaveBeenCalledWith('constructor')
   })

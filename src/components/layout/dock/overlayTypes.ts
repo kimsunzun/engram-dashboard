@@ -1,7 +1,5 @@
 // TRD S21-slot-docking §4-1: TS-specific types used by drag decision · guide.
-// ★Do not import `RectCss` from the generated bindings★ — the shell `RectCss` is a type slated to be detached from the ts export (§5-4), so if linked, the places using this file would break along with it when that binding is
-//   withdrawn (the end condition rg of that withdrawal counts the path string, so that path is not written in comments either). The shape is
-//   the same as that binding, and the golden `src-tauri/src/layout/bands_golden.json` ties it to the shell version.
+// ★Do not import `RectCss` from the generated bindings★ — the shell `RectCss` is slated to be detached from the ts export (§5-4), so linking it would break these users when it is withdrawn (that withdrawal's end-condition rg counts the path string, so the path is not written in comments either). The shape equals that binding; the golden `src-tauri/src/layout/bands_golden.json` ties it to the shell version.
 
 import type { PxRect } from './dockedTree'
 
@@ -31,11 +29,10 @@ export interface SlotZones {
  * Rectangles are half-open.
  */
 export interface OverlayView {
-  /** Effective area band regions of the area under the cursor — not drawn (the boundaries of area bands are visible through the zone lines of `slot` · user decision 2026-10-19). */
+  /** Effective area band regions of the area under the cursor — not drawn (area band boundaries show through the zone lines of `slot`). */
   bands: RectCss[]
   /**
-   * Effective outer band regions — carried only when the cursor is inside an outer band, otherwise an empty list (the outer frame only on contact — user decision 2026-10-19). If not
-   * empty, draw the layout frame (layer border = canvas frame) · the region itself is not painted.
+   * Effective outer band regions — carried only when the cursor is inside an outer band, else an empty list (the outer frame appears only on contact). Non-empty → draw the layout frame (layer border = canvas frame); the region itself is not painted.
    */
   outer: RectCss[]
   /** Rectangle to attach for the chosen band — `null` = no band chosen. */

@@ -1,17 +1,17 @@
-//! `agent.*` 명령 — **선언과 본문이 한 세트**로 일하는 코드(`AgentManager`) 옆에 산다(ADR-0155).
+//! `agent.*` commands — live next to the code that works with **declaration and body as one set** (`AgentManager`) (ADR-0155).
 //!
-//! ★이 표가 제어 동사의 실입구다 — 표면은 **둘**이다★: CLI 의 `/control/agent` 라우트(`{verb}` 를
-//!   `agent.<verb>` 로 찾는다)와 클라이언트가 명령 버스로 내는 봉투(배달 3단계의 1단계). 둘 다 데몬의
-//!   공통 입구 하나를 지난다(daemon `control/commands.rs`). 즉 이 파일의 반환 모양·오류 코드·통지 횟수가
-//!   그대로 `engram agent …` 의 응답이자 LLM 이 버스로 받는 답이다.
-//! ★호스팅은 데몬, 선언은 코어★ — 이 둘이 갈리는 유일한 자리다(ADR-0029 + TRD §2-3).
+//! ★This table is the real entry of the control verbs — **two** surfaces★: the CLI's `/control/agent` route (finds `{verb}` as
+//!   `agent.<verb>`) and the envelope the client issues on the command bus. Both pass through the daemon's one common entry
+//!   (daemon `control/commands.rs`), so this file's return shapes, error codes and notification counts are exactly the response of `engram
+//!   agent …` and the answer the LLM receives on the bus.
+//! ★Hosted by the daemon, declared by the core★ (ADR-0029 + TRD §2-3).
 //!
-//! ★`usage.*`(사용량 한도 두 동사)도 여기서 선언한다 — 본문은 여기 없다★: 어휘(백엔드 낱말 `AgentBackend`·행
-//!   타입)의 생산자가 이 crate 라 선언이 여기 살고(ADR-0155 결정 1), 실물은 데몬의 사용량 서비스가 포트
-//!   [`UsageCommandHost`] 로 꽂는다(TRD S21 usage-limit-slot §3 #18).
+//! ★`usage.*` (the two usage-limit verbs) are declared here too — their bodies are not★: this crate produces the vocabulary
+//!   (`AgentBackend` word · row types), so the declaration lives here (ADR-0155 decision 1) and the daemon's usage service plugs the real
+//!   thing in through [`UsageCommandHost`] (TRD S21 usage-limit-slot §3 #18).
 //!
-//! 진입점: [`make_table`](fn.make_table.html)(조립) · [`AgentCommandHost`](trait.AgentCommandHost.html)(주입 seam) ·
-//! [`UsageCommandHost`](trait.UsageCommandHost.html)(사용량 포트).
+//! Entry points: [`make_table`](fn.make_table.html) (assembly) · [`AgentCommandHost`](trait.AgentCommandHost.html) (injection seam) ·
+//!   [`UsageCommandHost`](trait.UsageCommandHost.html) (usage port).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ use crate::launch::{notice_text, LaunchBlocked, Notice};
 use crate::manager::{Activated, AgentManager, NotStarted, NoticeDelivery, RenameOutcome};
 use crate::persistence::PROFILES_FILE;
 use crate::queued_input::{ListedState, QueuedListing};
-// 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
+// An alias telling the core enum apart from the declaration vocabulary of the same name below.
 use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
 use crate::profile::{AgentCommand, AgentProfile, Refusal, SpawnMode, StoreError, StoreStatus};
 use crate::types::{
@@ -34,8 +34,8 @@ use crate::types::{
 };
 use crate::usage::UsageVendorKey;
 
-// ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
-//   더 감쌀 이유가 없다.
+// ★Success responses are flat (user decision 2026-08-13)★: each command declares its return, so there is no reason to wrap one more
+//   layer `{"agent":{…}}`.
 declare_commands! {
     // v9 (2026-11-01): the old presets (working-folder bookmarks) were removed — `agent.new` lost its `preset` field
     //   and `cwd` became required (`NOT_FOUND` left its advertised errors), and the `agent.list` answer lost
@@ -43,23 +43,22 @@ declare_commands! {
     //   gains `notices` (TRD S25 step 16), and with `cwd` a launch blocked before the add answers `CONFLICT` with
     //   nothing created (TRD S25 step 20 — the `agent.spawn` summary). Also: `agent.spawn` is declared with the launch
     //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`).
-    // v8(2026-10-26): 이름 하나가 늘었다 — `agent.resolve`(ADR-0307 · TRD S28 §6).
-    // v7(2026-10-10): `agent.list` 의 답에 칸 `store` 가 늘었다 — 명부 저장소 둘(agents · presets)의 상태(ADR-0291
-    //   R17 · D6). 이름은 그대로이고 답의 모양이 바뀌었다.
-    // v6(2026-09-28·29): 이름 셋이 늘었다 — `agent.interrupt`(ADR-0237) · `usage.get`·`usage.refresh`(TRD S21
-    //   usage-limit-slot §1-6). 두 갈래가 따로 6 으로 올렸고 v6 은 어느 릴리스(태그)에도 실린 적이 없어 한 판으로 합쳤다.
-    // v5(2026-09-26): 이름 둘이 늘었다 — `agent.listQueuedInputs`·`agent.cancelQueuedInput`(ADR-0231).
-    // v4(2026-09-22): `agent.new` 의 `backend` 어휘가 **`Claude` 하나 → `Claude`·`Codex` 둘**이 됐다
-    //   (ADR-0219). 이름도 칸도 안 늘었지만 **그 칸이 받는 낱말 집합**이 바뀌었고 그것이 호출자가 보는
-    //   선언이다 — 생성물이 그 차이를 그대로 싣는다(`bindings/commands.schema.json` 의
-    //   `"backend":{"enum":[…]}`). 안 올리면 codex 를 만들어 주는 빌드와 거절하는 빌드가 같은 세대를
-    //   보고한다. ★세대는 **이름이 늘 때만** 올리는 번호가 아니다 — 선언이 바뀌면 올린다.★
-    // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
-    //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
-    //   않는다(`connection_core` 의 RegisterCommands 갈래).
+    // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
+    // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
+    // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
+    //   6 and v6 never shipped, so they merged into one generation.
+    // v5: `agent.listQueuedInputs`·`agent.cancelQueuedInput` added (ADR-0231).
+    // v4: the `backend` vocabulary of `agent.new` went from `Claude` alone → `Claude`·`Codex` (ADR-0219). No names or fields grew but
+    //   **the set of words that field accepts** changed, and the generated output carries it
+    //   (`"backend":{"enum":[…]}` of `bindings/commands.schema.json`); without raising it, a build that creates codex and one that refuses
+    //   it would report the same generation.
+    //   ★The generation is raised when the declaration changes, not only when names grow.★
+    // v3: the `backend` of `agent.new` went from optional → required — a breaking change removing the silent claude default (reason: that
+    //   field's doc). This number is diagnostic; the receiving side does not refuse by it
+    //   (the RegisterCommands branch of `connection_core`).
     catalog_version: 9;
 
-    /// 명부의 한 행.
+    /// One row of the roster.
     struct AgentRow {
         id: String,
         name: String,
@@ -68,151 +67,151 @@ declare_commands! {
         parent: Option<String>,
     }
 
-    /// `agent.resolve` 답의 한 줄 — 요청한 말 하나가 가리킨 에이전트.
+    /// One line of the `agent.resolve` answer — the agent one requested word pointed at.
     struct ResolvedAgentRow {
-        /// 요청에 실린 말 그대로.
+        /// The word carried in the request, as is.
         target: String,
         id: String,
-        /// 지금 명부의 이름.
+        /// The current roster name.
         name: String,
-        /// `agent.list` 의 `state` 가 `live` 인 것과 같은 판정이다.
+        /// The same decision as `state` being `live` in `agent.list`.
         live: bool,
     }
 
-    // ── 명부 저장소 상태(`agent.list` 의 `store` — ADR-0291 R17 · D6) ─────────────────────────────────────
-    // ★매크로 enum 은 문자열 열거뿐이라 저장소 상태(까닭을 든 태그 enum `profile::StoreStatus`)를 단어 + 선택 칸으로
-    //   편다★ — 사용량 행과 같은 꼴이다.
+    // ── Roster store state (`store` of `agent.list` — ADR-0291 R17 · D6) ─────────────────────────────────────
+    // ★A macro enum is only a string enumeration, so the store state (the tag enum `profile::StoreStatus` carrying a reason) is spread
+    //   into a word + optional fields★ — same shape as the usage rows.
 
-    /// 저장소 파일 하나의 상태 — `Writable`(쓸 수 있다) | `ReadOnly`(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가
-    /// 비어 있고 이 실행 내내 명부를 바꾸는 요청은 `CONFLICT` 다(지목할 항목이 없으면 `NOT_FOUND`). 파일을 고치거나
-    /// 바꾼 뒤 데몬을 다시 띄워야 풀린다) |
-    /// `Refusing`(마지막 저장이 거절됐다 — 다음 변경이 다시 판정하고, 받아들이면 풀린다. 그 사이 파일이 고쳐졌으면
-    /// 이 값은 낡았다).
+    /// The state of one store file — `Writable` (writable) | `ReadOnly` (the daemon did not accept that file when it started — the roster is
+    /// empty, and for this whole run requests changing the roster are `CONFLICT` (`NOT_FOUND` if there is no entry to point at). It clears only by fixing
+    /// or replacing the file and then restarting the daemon) |
+    /// `Refusing` (the last save was refused — the next change decides again and it clears if accepted. If the file was fixed in the meantime,
+    /// this value is stale).
     enum StoreStateWord {
         Writable,
         ReadOnly,
         Refusing,
     }
 
-    /// 저장소가 받지 않는 까닭 — `Newer`(이 데몬보다 새 판이 쓴 파일) | `Unreadable`(파일을 못 읽었다 — 잠김 ·
-    /// 권한 등).
+    /// The reason the store does not accept — `Newer` (a file written by a newer edition than this daemon) | `Unreadable` (the file could not be read — lock ·
+    /// permission etc.).
     enum StoreRefusalWord {
         Newer,
         Unreadable,
     }
 
-    /// 저장소 파일 하나의 상태 행.
+    /// The state row of one store file.
     struct StoreStatusRow {
         state: StoreStateWord,
-        /// `ReadOnly` · `Refusing` 의 까닭 — `Writable` 이면 `null`.
+        /// The reason for `ReadOnly` · `Refusing` — `null` if `Writable`.
         reason: Option<StoreRefusalWord>,
-        /// `Newer` 일 때 그 파일이 적은 판 번호 — 그 밖은 `null`.
+        /// For `Newer`, the edition number that file wrote — otherwise `null`.
         file_version: Option<u64>,
     }
 
-    /// 명부 저장소 — `agents`(프로필 파일 `agent-profiles.json` · 에이전트 명부).
+    /// The roster store — `agents` (the profile file `agent-profiles.json` · agent roster).
     struct RosterStoreRow {
         agents: StoreStatusRow,
     }
 
-    /// 새 에이전트를 돌릴 백엔드 — ★오늘 받는 값은 `Claude` 와 `Codex` 둘이다★(2026-09-22 에 codex 가
-    /// 들어왔다).
+    /// The backend to run the new agent on — ★the values accepted today are the two `Claude` and `Codex`★ (codex came in
+    /// on 2026-09-22).
     ///
-    /// 코어에는 다른 백엔드도 있지만(`agent::backend` 의 gemini·shell) **프로필 생성 경로가 그것들로
-    /// 도는지 확인된 바 없다** — 그래서 칸은 열어 두되 값은 확인된 둘로 좁혀 둔다(나중에 계약 **모양**이
-    /// 바뀌지 않게).
-    /// ★변형을 더하는 값어치는 **짝이 이미 있나**가 가른다★: 실행 명령(`AgentCommand`)은
-    /// `#[serde(tag = "kind")]` 로 **프로필 파일에 그대로 적히고**, 모르는 kind 를 만난 옛 빌드는 그
-    /// 파일을 **한 덩이로** 손상으로 보고 **빈 명부로 뜬다** — 첫 저장이 그 파일을 `.corrupt` 로 떠 두고 덮는다
-    /// (persistence `FileProfileStore::load` · 그보다 옛 빌드는 적재 때 `.corrupt-<ms>` 로 옮긴다). 그러니
-    /// `AgentCommand` 에 **아직 없는** 백엔드를 여기 더하는 것은 디스크 호환을 깨는 이주이고, 짝이 **이미
-    /// 있는** 백엔드를 더하는 것은 이주가 아니다.
-    /// ★`Codex` 는 후자였다★ — `AgentCommand::Codex { extra_args, output_format }` 는 그 전부터 있었고
-    /// 사람 메뉴(`agentlist.createCodex`·`createCodexJson`)가 **그 모양 그대로** `agents.json` 에 이미
-    /// 쓰고 있었다. 이 문을 연 것은 새 kind 도 새 칸도 스키마 상향도 아니다 — ★한때 이 자리에 「codex 를
-    /// 여는 것은 디스크 호환을 깨는 이주다」라고 적혀 있었는데, 사람 문이 같은 모양을 이미 쓰고 있어
-    /// 그때도 사실이 아니었다.★
-    /// ★전자의 실물은 `Gemini` 다★ — `agent::backend::gemini` 는 stub 으로 서 있지만 `AgentCommand` 에
-    /// 짝이 없다. 그 낱말을 여기 더하는 편집은 **디스크에 새 kind 를 앉히므로** 위 이주를 함께 설계해야
-    /// 한다. 두 경우를 같은 무게로 읽지 말 것.
-    /// ★**왜** 열려 있고 **다음 낱말은 어떻게 여나**는 [`LLM_BACKEND_POLICY`] 가 진다★ — 그 표를 나머지
-    /// 생성 문들도 본다(그 표 머리말이 문을 나눠 적는다).
+    /// The core has other backends too (gemini · shell of `agent::backend`), but **it has not been confirmed that the profile creation path
+    /// runs with them** — so the field is left open but the values are narrowed to the confirmed two (so the contract's **shape** does not
+    /// change later).
+    /// ★The worth of adding a variant is decided by **whether its pair already exists**★: the run command (`AgentCommand`)
+    /// **is written as is into the profile file** with `#[serde(tag = "kind")]`, and an old build meeting an unknown kind treats that
+    /// file **as one lump** as damaged and **comes up with an empty roster** — the first save copies that file aside to `.corrupt` and overwrites it
+    /// (persistence `FileProfileStore::load` · builds older than that move it to `.corrupt-<ms>` at load). So
+    /// adding here a backend **not yet** in `AgentCommand` is a migration that breaks disk compatibility, and adding a backend whose pair **already
+    /// exists** is not a migration.
+    /// ★`Codex` was the latter★ — `AgentCommand::Codex { extra_args, output_format }` existed before that, and
+    /// the human menu (`agentlist.createCodex`·`createCodexJson`) was already writing **exactly that shape** into `agents.json`.
+    /// What opened this door was neither a new kind, a new field nor a schema bump — ★at one point this place said 「opening codex is a migration that breaks disk compatibility」,
+    /// but the human door was already writing the same shape, so
+    /// it was not true even then.★
+    /// ★The real case of the former is `Gemini`★ — `agent::backend::gemini` stands as a stub, but `AgentCommand` has
+    /// no pair for it. An edit adding that word here **puts a new kind onto disk**, so the migration above must be designed
+    /// along with it. Do not read the two cases with the same weight.
+    /// ★**Why** it is open and **how the next word is opened** are carried by [`LLM_BACKEND_POLICY`]★ — the other
+    /// creation doors look at that table too (that table's header writes the doors out separately).
     enum AgentBackend {
         Claude,
         Codex,
     }
 
-    /// 새 에이전트의 출력 형식(= 렌더 모드) — 생성 시점에 고정되고 이후 불변이다(ADR-0044/0078).
+    /// The output format (= render mode) of the new agent — fixed at creation and immutable afterwards (ADR-0044/0078).
     ///
-    /// `Terminal` = PTY 대화형(xterm 렌더) · `StreamJson` = 헤드리스 NDJSON 스트림.
-    /// 어휘는 코어 `profile::AgentOutputFormat` 과 **변형도 wire 표기도** 같아야 한다 — ★개명(ADR-0194)
-    /// 뒤로 이 선언 어휘와 코어 enum 이 **같은 이름을 쓴다**★. 가리킬 땐 경로를 붙여 적을 것(맨 이름은
-    /// 이 파일 안에서 이 선언을 가리킨다 — 그래서 위 import 가 코어 쪽에 별칭을 단다). 갈리면 프론트 allowlist
-    /// (`coerceOutputFormat`)와 이 입구가 같은 낱말을 다르게 읽는다. 그 일치를 산문이 아니라 컴파일러가
-    /// 지키는 자리는 `tests::the_declared_vocabularies_are_pinned_to_the_core_ones`.
+    /// `Terminal` = PTY interactive (xterm render) · `StreamJson` = headless NDJSON stream.
+    /// The vocabulary must be the same as the core `profile::AgentOutputFormat` **in both variants and wire notation** — ★since the rename (ADR-0194)
+    /// this declaration vocabulary and the core enum **use the same name**★. When pointing at it, write it with the path (the bare name
+    /// points at this declaration within this file — that is why the import above puts an alias on the core side). If they diverge, the frontend allowlist
+    /// (`coerceOutputFormat`) and this entry read the same word differently. The place where the compiler, not prose, keeps that match
+    /// is `tests::the_declared_vocabularies_are_pinned_to_the_core_ones`.
     enum AgentOutputFormat {
         Terminal,
         StreamJson,
     }
 
-    /// 취소 대기 항목의 두 칸 — 명부의 환원 상태 그대로다(스냅숏 위에 뒤 사건을 다시 환원하려면 둘 다 필요하다).
+    /// The two fields of a pending-cancel entry — the registry's reduced state as is (both are needed to re-reduce later events on top of the snapshot).
     struct QueuedInputCancel {
-        /// 우리 취소 요청의 응답 — `none`(아직 없다) | `not_removed`(안 뺐다고 답했거나 요청이 실패했다).
+        /// The response to our cancel request — `none` (none yet) | `not_removed` (it answered it did not remove it, or the request failed).
         answer: String,
-        /// 그 id 의 벤더 닫힘을 이미 봤다.
+        /// The vendor close of that id has already been seen.
         vendor_closed: bool,
     }
 
-    /// 대기 목록의 한 줄.
+    /// One line of the waiting list.
     struct QueuedInputRow {
-        /// 입력 id — `agent.cancelQueuedInput` 의 `input_id` 로 그대로 쓴다.
+        /// The input id — used as is as the `input_id` of `agent.cancelQueuedInput`.
         id: String,
         text: String,
-        /// `queued` | `sent`(통로가 넘겼고 되울림을 기다린다) | `unconfirmed`(통로가 넘겼는데 받혔는지 모른다 —
-        /// 우편이 그 결말을 기다린다 · ★오늘 내는 백엔드가 없다★ — ADR-0235) | `cancelling`(취소 대기 — 결말이 날
-        /// 때까지 목록에 남는다).
+        /// `queued` | `sent` (the link handed it over and waits for the echo) | `unconfirmed` (the link handed it over but it is unknown whether it was accepted —
+        /// mail waits for that outcome · ★no backend emits it today★ — ADR-0235) | `cancelling` (pending cancel — stays on the list until
+        /// the outcome happens).
         state: String,
-        /// `cancelling` 행만 싣는다 — 그 밖은 `null`.
+        /// Carried only on `cancelling` rows — otherwise `null`.
         cancel: Option<QueuedInputCancel>,
     }
 
-    // ── 사용량 한도(`usage.*` — TRD S21 usage-limit-slot §1-6) ──────────────────────────────────────
-    // ★매크로 enum 은 문자열 열거뿐이라 wire 상태(칸을 든 태그 enum)를 단어 + 선택 칸으로 편다★ — 단어는 wire
-    //   상태 여섯과 1:1 이고 칸은 그 상태일 때만 싣는다(`UsageVendorRow`).
+    // ── Usage limits (`usage.*` — TRD S21 usage-limit-slot §1-6) ──────────────────────────────────────
+    // ★A macro enum is only a string enumeration, so the wire state (a tag enum carrying fields) is spread into a word + optional fields★
+    //   — words map 1:1 to the six wire states, fields are carried only in that state (`UsageVendorRow`).
 
-    /// 사용량 창의 종류 — `FiveHour`(5시간) · `Weekly`(주간) · `ModelWeekly`(모델별 주간 — `label` 이 그 이름).
+    /// The kind of usage window — `FiveHour` (5 hours) · `Weekly` (weekly) · `ModelWeekly` (per-model weekly — `label` is its name).
     enum UsageWindowWord {
         FiveHour,
         Weekly,
         ModelWeekly,
     }
 
-    /// 사용량 한도 창 하나.
+    /// One usage limit window.
     struct UsageWindowRow {
         window: UsageWindowWord,
-        /// `ModelWeekly` 만 싣는다(벤더가 준 표시용 이름) — 나머지는 `null`.
+        /// Carried only for `ModelWeekly` (the display name the vendor gave) — otherwise `null`.
         label: Option<String>,
-        /// **쓴** 양의 백분율 0–100(남은 양이 아니다). `null` = 모른다 — 0 이 아니다.
+        /// Percentage 0–100 of the amount **used** (not the amount left). `null` = unknown — not 0.
         used_pct: Option<f64>,
-        /// 남은 양 — 화면과 같은 `floor(clamp(100 − used_pct, 0, 100))`. `used_pct` 가 `null` 이면 `null`.
+        /// The amount left — the same `floor(clamp(100 − used_pct, 0, 100))` as the screen. `null` if `used_pct` is `null`.
         left_pct: Option<u64>,
-        /// 리셋 시각, epoch 초 — 이 행의 유일한 절대 시각이다.
+        /// Reset time, epoch seconds — the only absolute time of this row.
         resets_at: Option<u64>,
-        /// 이 값을 관측한 뒤 흐른 초(답한 순간 기준).
+        /// Seconds elapsed since this value was observed (as of the moment of answering).
         age_secs: u64,
-        /// 데몬이 리셋 경과를 확인했다 — 값은 지난 창의 것이다.
+        /// The daemon confirmed the reset has passed — the value is that of the previous window.
         expired: bool,
     }
 
-    /// 답이 이 요청이 기다린 조회에서 나왔나 — 데몬 `usage_service::UsageServed` 를 그대로 옮긴 단어.
+    /// Whether the answer came from the query this request waited for — a word moving daemon `usage_service::UsageServed` as is.
     enum UsageServedWord {
-        /// 이 요청이 기다린 조회(또는 그 뒤의 조회)가 성공해 받아 온 값이다.
+        /// A value fetched by the successful query this request waited for (or a query after it).
         Fresh,
-        /// 이번 요청 동안 새로 받은 값이 없다(조회 안 함 · 실패 · 기다림 상한 초과) — 들고 있던 값이다.
+        /// No new value was received during this request (no query · failure · wait cap exceeded) — it is the value held.
         Cached,
     }
 
-    /// 벤더 조회의 상태 — wire `UsageVendorState` 여섯과 1:1 이다(칸은 [`UsageVendorRow`] 가 편다).
+    /// The state of the vendor query — 1:1 with the six wire `UsageVendorState` (the fields are spread by [`UsageVendorRow`]).
     enum UsageStateWord {
         Ready,
         NotInstalled,
@@ -234,10 +233,10 @@ declare_commands! {
         text: String,
     }
 
-    // errors 에는 **이 명령 고유의** 코드만 적는다 — 인자 반려(INVALID_ARGUMENT)와 내부 실패(INTERNAL)는
-    //   표가 내는 것이라 `CommandSpec::advertised_errors` 가 자동으로 얹는다.
+    // errors lists only codes **specific to this command** — argument rejection (INVALID_ARGUMENT) and internal failure (INTERNAL)
+    //   are emitted by the table, so `CommandSpec::advertised_errors` adds them automatically.
 
-    /// 명부 전량 — 이름·생사·작업 폴더·부모 — 와 명부 저장소의 상태(`store`).
+    /// The whole roster — name · liveness · working folder · parent — and the state of the roster store (`store`).
     #[effect(Read)]
     #[since(1)]
     "agent.list" => args AgentListArgs {}
@@ -245,16 +244,18 @@ declare_commands! {
                  errors [];
 
     // ADR-0307
-    // ★실패 문구의 머리 `targets[i]: ` 는 계약이다★ — 셸(TRD S28 §5-1)이 이 머리로 실패를 자기 인자 이름에 되짚는다.
-    //   셸은 이 crate 를 의존하지 않아 바뀌어도 컴파일이 안 멈춘다. 머리를 짓는 자리 = `target_failure` · 못 박는 시험 =
+    // ★The head `targets[i]: ` of the failure text is a contract★ — the shell (TRD S28 §5-1) traces a failure back to its own argument
+    //   name by this head.
+    //   The shell does not depend on this crate, so compilation does not stop if it changes. The place building the head =
+    //   `target_failure` · the pinning test =
     //   `tests::the_resolve_failure_prefix_is_a_stable_contract`.
-    /// 에이전트를 가리키는 말(이름 또는 id) 1~8 개를 한 번에 푼다 — `agents` 는 요청과 같은 차례다. 푸는 규칙은 `target`
-    /// 을 받는 다른 동사와 같다(id 정확 일치가 먼저 · 그다음 이름 정확 일치 — 대소문자 구분 · 잠든 에이전트 포함).
-    /// `live` = `agent.list` 의 `state` 가 `live`. 하나라도 못 풀면 아무 줄도 돌려주지 않고 실패한다. 말 하나 때문에
-    /// 난 실패의 문구는 언제나 `targets[i]: `(i = 0 부터 센 그 말의 자리)로 시작한다 — INVALID_ARGUMENT = 빈 말(공백뿐) ·
-    /// NOT_FOUND = 그런 에이전트가 없다(문구 끝 `candidates` = 고를 만한 이름, 이름순 · 명부가 비었으면 `none`) ·
-    /// CONFLICT = 그 이름이 둘 이상이다(문구 끝 `candidates` = 그 id 들 — id 로 다시 부른다). 개수가 1~8 밖이면
-    /// 그 머리 없이 INVALID_ARGUMENT 다.
+    /// Resolves 1–8 words pointing at agents (name or id) at once — `agents` is in the same order as the request. The resolving rules are the same as other verbs
+    /// taking `target` (exact id match first · then exact name match — case-sensitive · asleep agents included).
+    /// `live` = `state` of `agent.list` is `live`. If even one cannot be resolved, it returns no line and fails. The text of a failure caused by one word
+    /// always starts with `targets[i]: ` (i = that word's position counting from 0) — INVALID_ARGUMENT = an empty word (only whitespace) ·
+    /// NOT_FOUND = no such agent (the trailing `candidates` of the text = names worth choosing, in name order · `none` if the roster is empty) ·
+    /// CONFLICT = that name exists two or more times (the trailing `candidates` of the text = those ids — call again by id). If the count is outside 1–8,
+    /// it is INVALID_ARGUMENT without that head.
     #[effect(Read)]
     #[since(8)]
     "agent.resolve" => args AgentResolveArgs {
@@ -275,11 +276,11 @@ declare_commands! {
     #[since(1)]
     #[deadline(Launch)]
     "agent.spawn" => args AgentSpawnArgs {
-        /// 깨울 대상(이름 또는 id). cwd 와 상호배타.
+        /// The target to wake (name or id). Mutually exclusive with cwd.
         target: Option<String>,
-        /// 새로 만들어 띄울 작업 폴더. target 과 상호배타.
+        /// The working folder to create and launch anew. Mutually exclusive with target.
         cwd: Option<String>,
-        /// 새로 만들 때만 쓴다 — 깨우기에는 적용되지 않는다.
+        /// Used only when creating anew — does not apply to waking.
         name: Option<String>,
     } -> ok AgentSpawnOk {
         agent_id: String,
@@ -291,20 +292,20 @@ declare_commands! {
         notices: Vec<LaunchNoticeRow>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 새 에이전트를 명부에 등록한다(띄우지는 않는다 — 잠든 상태로 남는다).
+    /// Registers a new agent in the roster (does not launch it — it stays asleep).
     #[effect(Write)]
     #[since(1)]
     "agent.new" => args AgentNewArgs {
         cwd: String,
         name: Option<String>,
-        /// 미지정 = StreamJson.
+        /// Unspecified = StreamJson.
         output_format: Option<AgentOutputFormat>,
-        /// 어느 백엔드를 돌릴 것인가 — ★**필수다. 미지정은 반려**★(2026-09-08).
+        /// Which backend to run — ★**required. Unspecified is rejected**★ (2026-09-08).
         ///
-        /// 예전엔 미지정이 `Claude` 였다. 백엔드가 둘이 된 뒤로 그 조용한 기본값은 **고르지 않은
-        /// 것**과 **claude 를 고른 것**을 같은 값으로 접는다 — 스폰 패킷에서 같은 이유로 이미 걷어낸
-        /// 모양이고(`protocol` 의 `AgentBackendKind` doc · 데몬의 `MISSING_BACKEND`), 이 문만 남겨
-        /// 두면 그 결정이 입구마다 갈린다.
+        /// Unspecified used to mean `Claude`. Since there came to be two backends, that silent default folds **not choosing**
+        /// and **choosing claude** into the same value — it is the shape already removed from the spawn packet for the same reason
+        /// (the `AgentBackendKind` doc of `protocol` · the daemon's `MISSING_BACKEND`), and leaving only this door
+        /// would split that decision per entry.
         backend: AgentBackend,
     } -> ok AgentNewOk {
         agent_id: String,
@@ -312,7 +313,7 @@ declare_commands! {
         state: String,
     } errors [CONFLICT];
 
-    /// 표시 이름을 바꾼다.
+    /// Changes the display name.
     #[effect(Write)]
     #[since(1)]
     "agent.rename" => args AgentRenameArgs {
@@ -320,18 +321,18 @@ declare_commands! {
         name: String,
     } -> ok AgentRenameOk {
         agent_id: String,
-        /// 확정된 이름 — 요청한 이름과 다를 수 있다(명부 유일성 접미사).
+        /// The settled name — may differ from the requested name (roster uniqueness suffix).
         name: String,
         outcome: String,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 트리에서 부모를 바꾼다.
+    /// Changes the parent in the tree.
     #[effect(Write)]
     #[since(1)]
     "agent.move" => args AgentMoveArgs {
         target: String,
-        /// 새 부모(이름 또는 id). ★`null` = 최상위로 뗀다 · **필드 부재는 반려**★ — 오타 필드 하나가
-        /// 조용히 계층 해제로 실행되면 안 되므로 부재와 `null` 을 가른다(바깥 Option = 실렸나).
+        /// The new parent (name or id). ★`null` = detach to top level · **an absent field is rejected**★ — so that a single typo field
+        /// does not silently run as a hierarchy release, absence and `null` are told apart (the outer Option = whether it was carried).
         parent: Option<Option<String>>,
     } -> ok AgentMoveOk {
         agent_id: String,
@@ -339,46 +340,46 @@ declare_commands! {
         parent: Option<String>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 산 에이전트가 턴 도중 받아 아직 받혔다는 확인이 없는 입력 목록(비종결만). `state` = `queued`(확인 전 —
-    /// 우리가 쥐고 있거나 에이전트에 넘겨 결말을 기다린다. codex 는 도는 턴의 도구가 끝날 때 steer 로, 도구 없이 턴이
-    /// 끝나면 다음 턴으로 넘긴다 · claude 는 곧바로 CLI 대기열로 넘긴다) | `sent`(codex 가 에이전트에 넘겼고 받았다는
-    /// 되울림을 기다린다 — 취소해도 빠지지 않는다) | `unconfirmed`(넘겼는데 받혔는지 모른다 —
-    /// 목록에 남고 우편이 그 결말을 기다리며, 취소하면 곧바로 빠진다 · ★오늘 내는 백엔드가 없다★ — codex 의 그
-    /// 단계는 걷혔다, ADR-0235) | `cancelling`(취소를 요청했다 — 에이전트가 결말을 낼 때까지 남는다).
-    /// `cancel.answer` = `none`(아직 답이 없다) | `not_removed`(에이전트가 못 뺐다고 답했거나 요청이 실패했다) ·
-    /// `cancel.vendor_closed` = 에이전트가 그 항목을 이미 닫았다.
-    /// `stopped_after_error` = 직전 턴이 실제 오류로 끝났고 그 뒤 성공으로 끝난 턴이 아직 없다 — 그동안 우편은
-    /// 자동으로 들어가지 않는다(커널 `last_end_failed`). codex 가 쥔 사용자 글은 새 사용자 글이 드는 순간 다시 나갈
-    /// 수 있다(ADR-0235 결정 4). 잠든 에이전트는 목록을 쥐지 않는다(NOT_FOUND).
+    /// The list of inputs a live agent received mid-turn without confirmation yet that they were accepted (non-terminal only). `state` = `queued` (before confirmation —
+    /// we hold it or handed it to the agent and wait for the outcome. codex hands it over by steer when the running turn's tool ends, or to the next turn if the turn
+    /// ends without a tool · claude hands it to the CLI queue right away) | `sent` (codex handed it to the agent and waits for the echo saying it was received
+    /// — cancelling does not remove it) | `unconfirmed` (handed over but unknown whether it was accepted —
+    /// it stays on the list and mail waits for that outcome, and cancelling removes it right away · ★no backend emits it today★ — that stage of codex
+    /// was removed, ADR-0235) | `cancelling` (a cancel was requested — stays until the agent produces an outcome).
+    /// `cancel.answer` = `none` (no answer yet) | `not_removed` (the agent answered it could not remove it, or the request failed) ·
+    /// `cancel.vendor_closed` = the agent already closed that entry.
+    /// `stopped_after_error` = the previous turn ended with a real error and no turn has ended successfully since — meanwhile mail
+    /// does not go in automatically (kernel `last_end_failed`). User text codex holds may go out again the moment new user text comes in
+    /// (ADR-0235 decision 4). An asleep agent holds no list (NOT_FOUND).
     #[effect(Read)]
     #[since(5)]
     "agent.listQueuedInputs" => args AgentListQueuedInputsArgs {
         target: String,
     } -> ok AgentListQueuedInputsOk {
         inputs: Vec<QueuedInputRow>,
-        /// 행이 환원한 마지막 목록 사건의 seq(`null` = 아직 없다). `epoch` 안에서만 견준다 — 재부착 대조용.
+        /// The seq of the last list event the rows reduced (`null` = none yet). Compared only within `epoch` — for reattach comparison.
         as_of_seq: Option<u64>,
-        /// 화신 표식 — 일치/불일치로만 견준다.
+        /// Incarnation marker — compared only for match/mismatch.
         epoch: u32,
         stopped_after_error: bool,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 대기 목록의 항목 하나를 취소한다(화면 ✕ 와 같은 명령) — `outcome` = `cancelled`(곧바로 거뒀다) |
-    /// `requested`(취소를 요청했다 — 결말은 목록이 보여 준다). 목록에 없는 id 는 NOT_FOUND. CONFLICT = 이름이
-    /// 모호하다(같은 이름이 둘 이상 — id 로 지목한다) 또는 연결된 뷰어가 이 에이전트의 입력을 쥐고 있다(놓은 뒤 다시).
+    /// Cancels one entry of the waiting list (the same command as the ✕ on screen) — `outcome` = `cancelled` (withdrawn right away) |
+    /// `requested` (a cancel was requested — the list shows the outcome). An id not on the list is NOT_FOUND. CONFLICT = the name is
+    /// ambiguous (two or more with the same name — point at it by id) or a connected viewer holds this agent's input (try again after it lets go).
     #[effect(Write)]
     #[since(5)]
     "agent.cancelQueuedInput" => args AgentCancelQueuedInputArgs {
         target: String,
-        /// ★필수다★ — 「없으면 가장 최근」 같은 기본값을 두지 않는다(TRD §5-6).
+        /// ★Required★ — no default like 「the most recent if absent」 (TRD §5-6).
         input_id: String,
     } -> ok AgentCancelQueuedInputOk {
         outcome: String,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 도는 턴을 끊는다(≠ kill — 프로세스는 산다). `outcome` = `requested`(끊기를 보냈다 — 턴이 실제로 멈췄는지는 턴 끝 사건이 알린다).
-    /// NOT_FOUND = 그런 에이전트가 없거나 잠들었다. CONFLICT = 이름이 모호하다 · 끊을 턴이 없다 · 이 에이전트는
-    /// 끊기를 지원하지 않는다 · 연결된 뷰어가 이 에이전트의 입력을 쥐고 있다.
+    /// Interrupts the running turn (≠ kill — the process lives). `outcome` = `requested` (the interrupt was sent — whether the turn actually stopped is announced by the turn-end event).
+    /// NOT_FOUND = no such agent or it is asleep. CONFLICT = the name is ambiguous · there is no turn to interrupt · this agent
+    /// does not support interrupt · a connected viewer holds this agent's input.
     #[effect(Write)]
     #[since(6)]
     "agent.interrupt" => args AgentInterruptArgs {
@@ -387,64 +388,64 @@ declare_commands! {
         outcome: String,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 백엔드 하나의 사용량 한도(5시간·주간·모델별 주간) — 데몬이 들고 있는 값이다. 다음 자동 조회 시각이 지났으면
-    /// 여기서 조회를 띄우고(진행 중이면 거기 붙는다) 그 끝을 최대 5초 기다린다 — 넘으면 들고 있던 값에
-    /// `in_flight` = true 로 답하고 조회는 계속된다. `served` = `Fresh`(이 요청이 기다린 조회가 받아 온 값) |
-    /// `Cached`. `state` = `Ready` | `NotInstalled` | `NeedsLogin` | `Unavailable`(이 계정엔 한도 정보가 없다 — 창을
-    /// 싣지 않는다) | `Failed`(`next_attempt_in_secs` = 다음 자동 조회까지) | `Rejected`(상류가 거절했다 —
-    /// `retry_in_secs` 가 지나기 전엔 `usage.refresh` 도 조회하지 않는다). 실패해도 창은 마지막으로 알던 값이다.
-    /// 비정상 상태의 원인 = `detail_kind`(분류 낱말) · `detail_code`(상류가 준 수) · `upstream`(상류
-    /// 원문 — 비밀 가림 · 200자). 창의 `left_pct` = 남은 양(`used_pct` 는 쓴 양)이고 `null` 은 모른다는 뜻이다(0 이
-    /// 아니다). 시간 칸은 답한 순간 기준 상대 초이고 `resets_at` 만 epoch 초다. 이 데몬이 칸을 안 드는 백엔드는
+    /// The usage limits of one backend (5-hour · weekly · per-model weekly) — the values the daemon holds. If the next automatic query time has passed,
+    /// it launches a query here (or attaches to one in progress) and waits up to 5 seconds for it to end — past that it answers with the held value with
+    /// `in_flight` = true and the query continues. `served` = `Fresh` (a value fetched by the query this request waited for) |
+    /// `Cached`. `state` = `Ready` | `NotInstalled` | `NeedsLogin` | `Unavailable` (this account has no limit info — no windows
+    /// are carried) | `Failed` (`next_attempt_in_secs` = until the next automatic query) | `Rejected` (upstream refused —
+    /// until `retry_in_secs` passes, even `usage.refresh` does not query). Even on failure, the windows are the last known values.
+    /// The cause of an abnormal state = `detail_kind` (category word) · `detail_code` (the number upstream gave) · `upstream` (upstream
+    /// original text — secrets masked · 200 chars). A window's `left_pct` = the amount left (`used_pct` is the amount used), and `null` means unknown (not
+    /// 0). Time fields are relative seconds as of the moment of answering, and only `resets_at` is epoch seconds. A backend whose field this daemon does not hold is
     /// NOT_FOUND.
     #[effect(Read)]
     #[since(6)]
     "usage.get" => args UsageGetArgs {
-        /// 어느 백엔드의 한도인가 — `agent.new` 와 같은 낱말.
+        /// Whose backend's limits — the same word as `agent.new`.
         backend: AgentBackend,
     } -> ok UsageVendorRow {
         backend: AgentBackend,
-        /// 같은 백엔드 안의 계정 — 지금은 늘 `"default"`(데몬의 기본 로그인).
+        /// The account within the same backend — always `"default"` for now (the daemon's default login).
         account_key: String,
         plan: Option<String>,
-        /// 벤더가 준 창만 — 5시간 · 주간 · 모델별 주간 차례. 사용률을 모르는 창(`used_pct: null`)도 싣는다.
+        /// Only the windows the vendor gave — in the order 5-hour · weekly · per-model weekly. Windows with unknown utilization (`used_pct: null`) are carried too.
         windows: Vec<UsageWindowRow>,
-        /// 조회가 아직 진행 중이다 — 이 행의 값은 그 조회 전의 것이다.
+        /// The query is still in progress — the values of this row are from before that query.
         in_flight: bool,
         served: UsageServedWord,
         state: UsageStateWord,
-        /// `Failed` 만 싣는다 — 다음 자동 조회까지 남은 초(이미 지났으면 0).
+        /// Carried only for `Failed` — seconds left until the next automatic query (0 if already passed).
         next_attempt_in_secs: Option<u64>,
-        /// `Rejected` 만 싣는다 — 이 초가 지나기 전엔 강제 새로고침도 조회를 내보내지 않는다.
+        /// Carried only for `Rejected` — until these seconds pass, even a forced refresh sends no query.
         retry_in_secs: Option<u64>,
-        /// 비정상 상태의 분류 낱말(예 `timeout`·`rpc_error`) — 번역하지 않는 문자열이다. `null` = 원인을 모른다.
+        /// The category word of an abnormal state (e.g. `timeout`·`rpc_error`) — an untranslated string. `null` = the cause is unknown.
         detail_kind: Option<String>,
-        /// 상류가 준 수(Codex JSON-RPC `error.code`).
+        /// The number upstream gave (Codex JSON-RPC `error.code`).
         detail_code: Option<i64>,
-        /// 상류 원문(비밀 가림 · 공백류 제어는 공백 · 200자) — UI 와 이 행에만 가고 로그에는 안 간다.
+        /// The upstream original text (secrets masked · whitespace-class controls become spaces · 200 chars) — it goes only to the UI and this row, not to logs.
         ///
-        /// ★이 타입의 `Debug` 는 원문을 그대로 찍는다 — 행 통째로든 이 칸이든 `{:?}`·tracing `?` 필드로 로그에
-        ///   싣지 말 것★. 선언 매크로가 `Debug` 를 늘 derive 하고 타입마다 끌 문이 없어, 가린 `Debug`(agent
-        ///   `usage::UpstreamText` · protocol `UsageStateDetail`)처럼 손으로 쓸 수 없다. 로그로 가는 길은 마감 뒤 결과
-        ///   로그 하나이고 거기서는 JSON 사본에서 이 이름의 키를 걷어 낸다(daemon `command_delivery::log_late_local`).
+        /// ★The `Debug` of this type prints the original as is — do not put it into logs with `{:?}` or a tracing `?` field, whether the whole row or this
+        ///   field★. The declaration macro always derives `Debug` and there is no door to turn it off per type, so it cannot be hand-written like the masked `Debug` (agent
+        ///   `usage::UpstreamText` · protocol `UsageStateDetail`). The way to the log is the one result log after the deadline,
+        ///   and there the key of this name is stripped from the JSON copy (daemon `command_delivery::log_late_local`).
         upstream: Option<String>,
     } errors [NOT_FOUND];
 
-    /// 사용량 한도를 강제로 새로 조회한다(화면 ⟳ 와 같은 명령) — 조회를 띄우고(진행 중이면 거기 붙는다) 그 끝을
-    /// 최대 5초 기다려 `usage.get` 과 같은 행으로 답한다. 호출 간격 제한은 없다 — 직전 조회가 막 끝났어도 다시
-    /// 조회하고, 잦으면 상류가 거절할 수 있다(그 거절이 `Rejected` 가 아니라 `Failed` 로만 보일 수도 있다). 조회하지
-    /// 않고 들고 있던 값(`Cached`)으로 답하는 경우 = 상류 거절 기한이 남았다(거절 중에 값이 들어와 `state` 가
-    /// `Ready` 여도 기한은 남는다 — 그때는 `retry_in_secs` 가 안 실린다). 조회가 실패하거나 5초 안에 안 끝나도
-    /// `Cached` 다(그때는 조회가 나갔다). 칸의 뜻은 `usage.get` 과 같다. 이 데몬이 칸을 안 드는 백엔드는 NOT_FOUND.
+    /// Forces a new query of the usage limits (the same command as ⟳ on screen) — launches a query (or attaches to one in progress) and waits up to 5 seconds for
+    /// it to end, answering with the same row as `usage.get`. There is no call interval limit — it queries again even if the previous query just ended,
+    /// and if frequent, upstream may refuse (that refusal may show only as `Failed`, not `Rejected`). Answering with the held value (`Cached`)
+    /// without querying = the upstream refusal period remains (even if a value came in during the refusal and `state` is
+    /// `Ready`, the period remains — `retry_in_secs` is not carried then). Even if the query fails or does not end within 5 seconds, it is
+    /// `Cached` (the query did go out then). The meaning of the fields is the same as `usage.get`. A backend whose field this daemon does not hold is NOT_FOUND.
     #[effect(Write)]
     #[since(6)]
     "usage.refresh" => args UsageRefreshArgs {
-        /// 어느 백엔드의 한도인가 — `agent.new` 와 같은 낱말.
+        /// Whose backend's limits — the same word as `agent.new`.
         backend: AgentBackend,
     } -> ok UsageRefreshOk {
-        // ★칸은 `UsageVendorRow` 와 한 글자도 다르지 않아야 한다★ — 매크로가 명령마다 반환 struct 를 새로 지어
-        //   두 명령이 한 타입을 나눌 수 없다. 짝 맞춤은 `From<UsageVendorRow>`(분해 구조 — 칸이 갈리면 컴파일이
-        //   멈춘다)와 두 반환 스키마의 바이트 대조 시험이 진다. 칸의 뜻은 `UsageVendorRow` 쪽 doc.
+        // ★The fields must not differ by a character from `UsageVendorRow`★ — the macro builds a new return struct per command, so two
+        //   commands cannot share a type. The pairing is `From<UsageVendorRow>` (destructuring — compilation stops on
+        //   divergence) and the test comparing the two return schemas' bytes. Field meanings: the `UsageVendorRow` doc.
         backend: AgentBackend,
         account_key: String,
         plan: Option<String>,
@@ -456,24 +457,20 @@ declare_commands! {
         retry_in_secs: Option<u64>,
         detail_kind: Option<String>,
         detail_code: Option<i64>,
-        /// 상류 원문 — ★`Debug` 가 원문을 찍는다, `{:?}` 로 로그에 싣지 말 것★(`UsageVendorRow.upstream` 의 doc).
+        /// Upstream original text — ★`Debug` prints the original; do not put it into logs with `{:?}`★ (the doc of `UsageVendorRow.upstream`).
         upstream: Option<String>,
     } errors [NOT_FOUND];
 }
 
-/// 산 에이전트의 **입력을 움직이는** 명령 — 공통 입구가 입력 임대(`check_input`)를 먼저 본다.
+/// Commands that **move the input** of a live agent — the common entry looks at the input lease (`check_input`) first.
 ///
-/// ★선언 매크로에 칸을 더하지 않고 여기 둔다★ — `CommandSpec` 에 표식을 얹으면 명령 crate 가 입력 임대라는
-///   도메인을 알게 된다. 이 목록의 이름은 전부 이 블록의 `Write` 선언이어야 한다(시험이 잰다).
-/// 조회(`agent.listQueuedInputs`)는 임대를 안 본다 — 읽기다.
-/// 끊기(`agent.interrupt`)도 든다 — WS `Interrupt` 가 임대를 보는 것과 같게.
+/// ★Kept here rather than as a declaration-macro field★ — a marker on `CommandSpec` would make the command crate know the domain of input leases. Every name must be a `Write` declaration of this block (a test measures it).
+/// The query (`agent.listQueuedInputs`) is a read and skips the lease; interrupt (`agent.interrupt`) is included, like WS `Interrupt`.
 // ADR-0231
 // ADR-0237
 pub const INPUT_AFFECTING: &[&str] = &["agent.cancelQueuedInput", "agent.interrupt"];
 
-/// 명부 한 행 — 이 표가 매니저에게서 보는 것만.
-///
-/// `live` = `Some(status)` 이면 세션이 붙어 있다(생사 판정은 [`AgentStatus::is_live`] 하나, ADR-0116).
+/// One roster row — only what this table sees from the manager. `live` = `Some(status)` means a session is attached (liveness = [`AgentStatus::is_live`] alone, ADR-0116).
 pub struct AgentRosterRow {
     pub id: AgentId,
     pub canonical_name: String,
@@ -502,18 +499,15 @@ impl From<Activated> for StartedAgent {
     }
 }
 
-/// `agent.*` 핸들러가 매니저에게 시키는 일 **전부**.
+/// **Everything** the `agent.*` handlers have the manager do.
 ///
-/// ★왜 trait 인가★: `AgentManager` 를 그대로 받으면 핸들러 하나를 단언하려고 실제 PTY 프로세스가
-///   딸려온다 — ADR-0012 「외부 의존을 seam 으로 끊는다」의 직접 위반이고, 규칙 T-1 이 금지하는 형태다.
-///   이 seam 이 있어야 가짜 매니저로 표 전체가 프로세스 없이 검증된다.
-/// ★구현체는 번역만 한다★: 동사 규칙(지목 해석 · 모드 유도 · 결말 번역)은 **핸들러가** 갖는다.
-///   구현체에 규칙이 들어가면 진짜와 가짜가 서로 다른 규칙을 돌게 되어 하네스가 아무것도 못 지킨다.
+/// ★Why a trait★: taking `AgentManager` as is would drag in a real PTY process to assert one handler — a violation of ADR-0012 「cut external dependencies with a seam」 (form rule T-1). With this seam the whole table is verified with a fake manager.
+/// ★Implementations only translate★: the verb rules (target resolution · mode derivation · outcome translation) are held **by the handlers**; rules in implementations would make real and fake run different rules and the harness guard nothing.
 // ADR-0155
 // ADR-0012
 pub trait AgentCommandHost: Send + Sync {
     fn roster(&self) -> Vec<AgentRosterRow>;
-    /// 명부 저장소(프로필 파일)의 지금 상태 — `agent.list` 가 [`RosterStoreRow`] 로 편다.
+    /// The current state of the roster store (the profile file) — `agent.list` spreads it into [`RosterStoreRow`].
     // ADR-0291 R17 (D6)
     fn store_status(&self) -> StoreStatus;
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile>;
@@ -543,68 +537,59 @@ pub trait AgentCommandHost: Send + Sync {
         id: AgentId,
         display_name: Option<String>,
     ) -> Result<RenameOutcome, PtyError>;
-    /// ★`Ok(false)` 는 사유를 말해 주지 않는다★ — 매니저가 bool 하나만 준다(`ProfileRegistry::try_reparent`).
-    /// 부재와 구조 충돌은 핸들러가 **명부 재조회로** 가른다(`verb_move`).
+    /// ★`Ok(false)` does not tell the reason★ — the manager gives only one bool (`ProfileRegistry::try_reparent`).
+    /// Absence and a structural conflict are told apart by the handler **by re-querying the roster** (`verb_move`).
     fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> Result<bool, PtyError>;
-    /// 산 화신의 대기 목록. `None` = 산 세션이 없다.
+    /// The waiting list of the live incarnation. `None` = no live session.
     // ADR-0231
     fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing>;
-    /// 산 화신의 대기 입력 하나를 취소한다. 산 세션이 없으면 `CancelError::NotFound`.
+    /// Cancels one queued input of the live incarnation. `CancelError::NotFound` if there is no live session.
     // ADR-0231
     fn cancel_queued_input(
         &self,
         id: AgentId,
         input_id: &str,
     ) -> Result<CancelOutcome, CancelError>;
-    /// 산 화신의 도는 턴을 끊는다. 산 세션이 없으면 `PtyError::NotFound` · 끊을 턴이 없거나 통로가 끊기를
-    /// 못 하면 `PtyError::Unsupported`.
+    /// Interrupts the running turn of the live incarnation. `PtyError::NotFound` if no live session · `PtyError::Unsupported` if no turn to interrupt or the link cannot interrupt.
     // ADR-0237
     fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError>;
 }
 
-/// 명부가 바뀌었음을 붙어 있는 클라이언트에게 알리는 출구(포트).
+/// The exit (port) telling attached clients the roster changed.
 ///
-/// ★이게 빠지면 나는 증상★: 에이전트를 만들거나 이름을 바꿔도 대시보드 트리가 **무관한 이벤트가 올
-///   때까지 옛 명부를 보여 준다**(조용한 stale). 명부의 **구성**을 바꾼 동사는 반드시 이 포트를 부른다 —
-///   그 판정은 동사마다 다르고(깨우기는 구성을 안 바꾼다) 핸들러가 진다.
-/// ★왜 표의 의존이 아니라 포트인가★: 실제 통지는 전-연결 팬아웃이라 데몬 소유다. 소비자인 여기가 좁은
-///   trait 만 갖고 실물 어댑터는 조립부가 준다(daemon `control::RosterBroadcast` 와 같은 모양).
-/// 논블록이어야 한다 — 팬아웃은 연결별 큐에 try_send 만 한다.
+/// ★Missing, the dashboard tree **shows the old roster until an unrelated event comes**★ (silent stale). A verb that changed the roster's **composition** must call it — that differs per verb (waking does not change composition), so the handler carries it.
+/// ★A port, not a dependency of the table★: the real notification is an all-connection fan-out owned by the daemon; the consumer holds a narrow trait and the assembly provides the adapter (like daemon `control::RosterBroadcast`).
+/// Must be non-blocking — the fan-out only does try_send to per-connection queues.
 // ADR-0155
 pub trait RosterChanged: Send + Sync {
     fn roster_changed(&self);
 }
 
-/// `usage.*` 핸들러가 데몬의 사용량 서비스에게 시키는 일 **전부**(포트) — 실물 = daemon `UsageService`.
+/// **Everything** the `usage.*` handlers have the daemon's usage service do (a port) — the real thing = daemon `UsageService`.
 ///
-/// ★동기다 — blocking 풀 스레드에서 불린다(TRD S21 usage-limit-slot §3 #17)★: 데몬의 공통 입구는 첫 poll 에서
-///   끝나는 핸들러만 몰고(`call_daemon_command`) 기다리는 async 핸들러는 `OUTCOME_UNKNOWN` 이 된다. 그래서 두
-///   메서드는 조회 끝을 **부른 스레드에서** 기다린다(상한 5초). 실물은 std 채널로 기다린다 — 이 crate 는 async
-///   런타임을 모른 채로 남는다.
-/// ★칸은 들어온 철자가 아니라 [`usage_vendor_of`] 로 찾는다★ — 버스 낱말(`Claude`)과 wire 낱말(`claude`)이 한
-///   칸을 쳐야 한다(§3 #43).
-/// `None` = 이 데몬이 그 백엔드의 칸을 들고 있지 않다 — 핸들러가 `NOT_FOUND` 로 답한다.
+/// ★Synchronous — called on a blocking pool thread (TRD S21 usage-limit-slot §3 #17)★: the daemon's common entry drives only handlers that finish at the first poll (`call_daemon_command`); an async handler that waits becomes `OUTCOME_UNKNOWN`.
+///   So both methods wait for the query to end **on the calling thread** (cap 5 s) on a std channel — no async runtime here.
+/// ★The field is found by [`usage_vendor_of`], not the incoming spelling★ — the bus word (`Claude`) and the wire word (`claude`) must hit one field (§3 #43).
+/// `None` = this daemon holds no field of that backend — the handler answers `NOT_FOUND`.
 // ADR-0155
 // ADR-0012
 pub trait UsageCommandHost: Send + Sync {
-    /// 요청 표의 `Get` — 다음 자동 조회 시각 전이면 조회 없이 지금 값으로 답한다.
+    /// The `Get` of the request table — before the next automatic query time, it answers with the current value without querying.
     fn get(&self, backend: &AgentBackend) -> Option<UsageVendorRow>;
-    /// 요청 표의 `Refresh` — 거절 기한 안이면 조회 없이 지금 값으로 답한다.
+    /// The `Refresh` of the request table — within the refusal period, it answers with the current value without querying.
     fn refresh(&self, backend: &AgentBackend) -> Option<UsageVendorRow>;
 }
 
-/// 버스 낱말 → 사용량 칸의 벤더 키. `None` = 그 낱말의 조회기가 없다.
+/// Bus word → the vendor key of the usage field; `None` = no prober for that word.
 ///
-/// ★wire 입구와 같은 길이다★ — 두 입구 모두 [`usage_probe_for`](crate::backend::usage_probe_for) 로 조회기를 찾고
-///   그 조회기의 키로 칸을 삼는다(daemon `connection_core` 의 wire 쪽 짝). 들어온 철자로 키를 만들면 두 입구가
-///   다른 칸을 친다.
+/// ★Same path as the wire entry★ — both find the prober with [`usage_probe_for`](crate::backend::usage_probe_for) and take its key as the field (wire-side pair: daemon `connection_core`); a key from the incoming spelling would hit different fields.
 // ADR-0004
 pub fn usage_vendor_of(backend: &AgentBackend) -> Option<UsageVendorKey> {
     crate::backend::usage_probe_for(&backend_word(backend)).map(|probe| probe.key())
 }
 
-/// `usage.refresh` 의 반환 — 칸이 `UsageVendorRow` 와 같다(선언의 주석). ★분해 구조로 옮긴다(`..` 없이)★ — 어느
-/// 쪽에 칸이 늘어도 여기서 컴파일이 멈춘다.
+/// The return of `usage.refresh` — its fields are the same as `UsageVendorRow` (the declaration's comment). ★Moved by destructuring (without `..`)★ — if either
+/// side gains a field, compilation stops here.
 impl From<UsageVendorRow> for UsageRefreshOk {
     fn from(row: UsageVendorRow) -> Self {
         let UsageVendorRow {
@@ -711,23 +696,19 @@ impl AgentCommandHost for AgentManager {
     }
 }
 
-/// 새로 만드는 에이전트의 백엔드 출력 형식.
+/// The backend output format of a newly created agent.
 ///
-/// ★왜 StreamJson 인가★: 이 계열을 부르는 주체가 LLM 이고, 프론트에서 LLM 이 부르는 생성 커맨드
-///   (`agentlist.createAgent`)의 기본값이 이미 StreamJson 이다(ADR-0078). 두 입구가 같은 동사에 다른
-///   기본을 주면 "만들었는데 화면이 다르다" 가 된다.
-/// ★값의 집은 여기 하나다★ — 만들기 동사를 여는 입구가 늘어도 자기 상수를 두지 않고 이것을 참조한다.
-/// ★**값 자체를 못 박는 자리는 하나뿐이다**★ — `tests::the_new_agent_default_output_format_is_pinned_to_a_literal`.
-/// 나머지 단언은 전부 이 상수와의 **상대 비교**라 값을 뒤집어도 함께 따라 움직인다(그래서 그 하나가 없으면
-/// 이 줄을 바꾸는 편집이 전 스위트 초록으로 통과한다).
+/// ★Why StreamJson★: the LLM is the caller and the frontend creation command the LLM calls (`agentlist.createAgent`) already defaults to StreamJson (ADR-0078); different defaults per entry would give "created it, but the screen is different".
+/// ★The home of the value is here alone★ — new create-verb entries reference this instead of their own constant.
+/// ★**Only one place pins the value itself**★ — `tests::the_new_agent_default_output_format_is_pinned_to_a_literal`; all other assertions compare relatively and would stay green if the value flipped.
 pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat::StreamJson;
 
-// ── LLM 제어 표면의 백엔드 생성 정책(ADR-0219 — 2026-09-22 · ADR-0279) ───────────────────────────
+// ── Backend creation policy of the LLM control surface (ADR-0219 · ADR-0279) ───────────────────────────
 //
-// ★근거가 갈아탔다★ — 이 표를 세운 것은 「안 연다」(사용자 결정 2026-09-07 · TRD S21 §6-G)였고 그
-// 결정은 **폴더 신뢰 모달을 LLM 이 못 지난다**는 전제 위에 서 있었다. 그 전제가 2026-09-22 실측으로
-// 뒤집혀(app-server 통로엔 그 모달이 없다) 거절이 걷혔다 — 그 번복의 정본이 ADR-0219 다. 옛 좌표를
-// 근거로 이 표를 도로 닫지 말 것: 그 자리는 ADR-0219 「거부한 대안」이 (b) 로 이미 재고했다.
+// ★The grounds switched★ — this table was set up as 「do not open」 (TRD S21 §6-G) on the premise that **the LLM cannot get past the folder
+//   trust modal**; measurement overturned it (the app-server link has no such modal) and the refusal was removed
+// (canonical record: ADR-0219). Do not close the table again on the old coordinates (already rejected as (b) in ADR-0219's 「Rejected
+//   alternatives」).
 //
 // ★This table is the policy's only home★ — the doors that ask it live in two crates:
 //   ① `agent.new` (this file) — the declared vocabulary `AgentBackend` narrows on its own, and this table stands one
@@ -744,17 +725,17 @@ pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat
 //      spelling before anything is registered (ADR-0348 decision 4). Pinned by
 //      `tests::the_body_refuses_a_closed_backend_before_calling_the_host` (the body) and
 //      `tests::the_bus_cwd_arm_hands_the_production_policy_to_the_body` (the wiring).
-// ★셸은 문이 아니다★ — 셸 `agent.spawnInto` 는 오탈자 그물(`parse_backend` — wire enum 에 묻는다)만 지고
-// 이 표를 보지 않는다. 셸은 이 crate 를 의존하지 않는다(ADR-0270 결정 1).
+// ★The shell is not a door★ — `agent.spawnInto` carries only a typo net (`parse_backend`, asks the wire enum) and does not depend on this
+//   crate (ADR-0270 decision 1).
 // ★Some create paths do not see this table — do not miss them when counting doors★ (an uncounted door stays open
 // without ever asking): the daemon `CreateProfile` (the front's reserved-node create doors — `agentlist.createCodex`
 // and the like — go there). The front command registry (`humanOnly`) is not a door of this table — the codex door's
 // `humanOnly` was removed on 2026-09-22.
-// 문마다 각자 목록을 들면 「한 문으로는 만드는데 다른 문으로는 못 만드는 백엔드」가 생긴다. 어긋남을 재는
-// 자리 = ①은 `tests::new_creates_exactly_what_the_llm_backend_policy_opens` ·
-// `tests::new_advertises_exactly_the_backends_the_llm_policy_opens`(이 파일) · ②는 데몬
-// `connection_core.rs` 의 `every_wire_backend_declares_an_llm_policy` ·
-// `the_production_core_asks_the_agent_backend_policy` · `spawn_by_cwd_refuses_a_backend_the_policy_closes`.
+// Per-door lists would show 「a backend one door creates but another cannot」. Mismatch measured at ①
+//   `tests::new_creates_exactly_what_the_llm_backend_policy_opens` · `tests::new_advertises_exactly_the_backends_the_llm_policy_opens`
+//   (this file) ·
+// ② the daemon's `every_wire_backend_declares_an_llm_policy` in `connection_core.rs` · `the_production_core_asks_the_agent_backend_policy`
+//   · `spawn_by_cwd_refuses_a_backend_the_policy_closes`.
 //
 // ★Why the table is keyed by a word, not a type★ — the wire vocabulary lives in `protocol::AgentBackendKind`, which
 // this crate does not depend on (the canon of that ban = the `[dependencies]` comment in this crate's `Cargo.toml`),
@@ -763,70 +744,49 @@ pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat
 // ([`backend_word`]); the table compares ignoring case. A wire word with no row in the table is caught by ②'s first
 // test (`every_wire_backend_declares_an_llm_policy`).
 
-/// 정책 표의 한 줄.
+/// One line of the policy table.
 pub struct LlmBackendPolicy {
-    /// 백엔드 낱말. **대소문자를 무시하고** 비교한다 — 이 crate 의 선언 어휘는 `Claude`, wire 어휘는
-    /// `claude` 로 적히고(그 차이의 사유는 두 enum 의 doc 이 이미 진다) 같은 백엔드를 두 줄로 적을
-    /// 이유가 없다.
+    /// The backend word, compared **case-insensitively** — the declaration vocabulary writes `Claude`, the wire vocabulary `claude` (the two enums' docs carry why).
     pub word: &'static str,
-    /// `None` = 이 표면이 만든다. `Some` = 안 만든다 — **사유와 여는 시점**을 함께 싣는다.
+    /// `None` = this surface creates it. `Some` = it does not — carries **the reason and when it opens** together.
     pub refusal: Option<&'static str>,
 }
 
-/// ★LLM 제어 표면이 어느 백엔드를 만들 수 있나 — 그 정책의 유일한 자리★. 이름과 달리 데몬 `SpawnByCwd`
-/// 문은 호출자를 가리지 않고 이 표를 적용해 사람 경로도 막는다(위 구획 머리 ② · ADR-0279).
+/// ★Which backends the LLM control surface can create — the only place of that policy★. The daemon `SpawnByCwd` door applies this table without distinguishing callers and blocks human paths too (② of the section header · ADR-0279).
 ///
-/// ★오늘 이 표는 아무것도 거절하지 않는다★(2026-09-22 에 codex 의 거절을 걷었다 — 사유는 그 줄에).
-/// 그래도 표를 걷지 않는 이유 둘: 다음 백엔드가 올 때 「선언 없음 = 닫힘」([`NO_POLICY_DECLARED`])이
-/// 그대로 서 있어야 하고, 생성 문이 각자 목록을 들지 않게 하는 자리가 여기라서다.
+/// ★Today this table refuses nothing★ (codex's refusal was removed — reason on that line). It stays because the next backend must be 「no declaration = closed」 ([`NO_POLICY_DECLARED`]) and it keeps creation doors from each holding a list.
 ///
-/// ★어느 줄의 `refusal` 을 `Some` 으로 바꾸거나 선언 없는 낱말을 들이기 전에 ADR-0279 를 다시 연다★ —
-/// 데몬 `SpawnByCwd` 문이 사람 경로도 막는다. 그 ADR 의 재론 계기가 바로 그 편집이다(그때 스폰 패킷에
-/// 호출자 축을 더한다).
-///
-/// ★한 줄을 여는 것만으로는 안 끝난다★ — `AgentBackend` 어휘에 그 변형을 더하고 [`backend_command`] 의
-/// 짝을 채워야 `agent.new` 가 실제로 만든다. 이 표만 열고 그 둘을 안 하면 위 시험이 빨개진다 — 그게 이
-/// 표를 여는 사람에게 남는 유일한 안내다.
-///
-/// ★이 표가 가르는 것은 **백엔드 낱말 하나뿐이다 — 다만 출력 모드 축에는 이미 LLM 표현이 있다**★:
-/// `agent.new` 의 `output_format` 칸(`Terminal`|`StreamJson`, 미지정 = [`NEW_AGENT_OUTPUT_FORMAT`])이
-/// 그것이고, [`verb_new`] 는 그 값을 **백엔드와 무관하게** 그대로 [`backend_command`] 로 넘긴다. 그래서
-/// 낱말을 열면 두 모드가 함께 열린다. ★한때 이 자리에 「출력 모드 축은 어디에도 LLM 표현이 없다」고
-/// 적혀 있었는데 그 칸은 그 문장보다 먼저 있었다 — 쓰일 때부터 거짓이었다.★ 그 문장을 근거로 모드 축에
-/// 두 번째 입구를 짓지 말 것(CLAUDE.md 「LLM-우선 제어」의 「두 번째 표면을 만들지 않는다」).
+/// ★Reopen ADR-0279 before changing any line's `refusal` to `Some` or bringing in an undeclared word★ — the daemon door blocks human paths too; that edit is the trigger for adding a caller axis to the spawn packet.
+/// ★Opening one line alone does not finish it★ — `agent.new` creates only after that variant is added to the `AgentBackend` vocabulary and the pair is filled in [`backend_command`]; otherwise the tests above go red.
+/// ★This table splits only the backend word — the output mode axis already has an LLM expression★: `output_format` of `agent.new` (`Terminal`|`StreamJson`, unspecified = [`NEW_AGENT_OUTPUT_FORMAT`]) which [`verb_new`] passes to [`backend_command`] **regardless of
+/// the backend**, so opening a word opens both modes. Do not build a second entry on the mode axis (CLAUDE.md 「LLM-first control」: do not make a second surface).
 pub const LLM_BACKEND_POLICY: &[LlmBackendPolicy] = &[
     LlmBackendPolicy {
         word: "claude",
         refusal: None,
     },
-    // ★codex 의 거절은 2026-09-22 에 걷혔고, 걷힌 이유는 그 거절이 세워진 전제가 실측으로 뒤집혔기
-    //   때문이다★. 옛 사유 = 「처음 보는 폴더에서 codex 가 자기 신뢰 확인 모달을 띄우고 사람이 아닌
-    //   호출자는 그것을 못 지난다」. 실측(codex 0.155.1, 2026-09-22) = `app-server` 경로는 한 번도 본
-    //   적 없는 폴더에 `thread/start` 를 **성공**으로 돌려준다(약 338ms · 오류 없음 · 인바운드 신뢰
-    //   요청 없음). 그리고 그 폴더를 자기 `config.toml` 에 `trust_level = "trusted"` 로 **스스로 적는다**.
-    //   즉 폴더 신뢰 모달은 **TUI 전용 장치**였다.
-    // ★그래서 신뢰를 확인하는 코드를 두지 않는다★ — 이 경로에 검사할 게이트가 애초에 없고, 있는 척
-    //   검사를 지으면 codex 의 설정 파일을 읽는 의존(TOML)만 늘고 지키는 것은 없다.
+    // ★codex's refusal was removed because the premise it was built on was overturned by measurement★. Old reason: 「in a never-seen folder
+    //   codex shows its own trust modal and a non-human caller cannot get past it」. Measured (codex 0.155.1):
+    //   the `app-server` path returns `thread/start` as **success** for a never-seen folder (~338 ms · no error · no inbound trust
+    //   request) and **writes that folder itself** into its `config.toml` as `trust_level = "trusted"` — the modal was **TUI-only**.
+    // ★No code checking trust is kept★ — the path has no gate, and a pretend check would only add a dependency reading codex's TOML
+    //   settings while guarding nothing.
     LlmBackendPolicy {
         word: "codex",
         refusal: None,
     },
 ];
 
-/// 표에 없는 낱말의 사유 — ★없음은 열림이 아니라 닫힘이다★. 새 백엔드가 정책 선언 없이 조용히 열리면
-/// 이 게이트는 아무것도 안 지킨 셈이 된다.
-const NO_POLICY_DECLARED: &str = "이 백엔드에는 LLM 제어 표면 정책이 아직 선언되지 않았다 — 선언 전에는 닫힘이다(engram-dashboard-agent 의 `commands::LLM_BACKEND_POLICY` 에 한 줄을 더할 것).";
+/// The reason for a word not in the table — ★absence is not open but closed★. If a new backend silently opened without a policy declaration,
+/// this gate would have guarded nothing.
+const NO_POLICY_DECLARED: &str = "no LLM control surface policy has been declared for this backend yet — it is closed until declared (add one line to `commands::LLM_BACKEND_POLICY` of engram-dashboard-agent).";
 
-/// 이 낱말의 백엔드를 **이 정책을 묻는 문이 지금 만들 수 있나** — `None` = 만든다, `Some(사유)` = 안 만든다.
+/// Whether **the door asking this policy can create** the backend of this word now — `None` = creates, `Some(reason)` = does not.
 ///
-/// ★「모르는 낱말」과는 다른 축이다★ — 여기서 `Some` 이 나오는 값도 이 저장소가 아는 정당한 백엔드라, 두
-/// 거절을 한 문구로 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다. 호출자는 두 축을 각각 다른 문구로
-/// 낼 것.
-/// ★막히는 것이 사람이 아닌 호출자뿐이라고 읽지 말 것★ — 데몬 `SpawnByCwd` 문은 호출자를 가리지 않고 이
-/// 판정을 적용해 사람 경로(프론트 `slot.createAgentHere` · `agent.spawn`)도 막는다(ADR-0279). 이 판정을 안
-/// 묻는 경로(데몬 `CreateProfile` 등 — 위 구획 머리)에서만 그대로 만들어진다.
+/// ★A different axis from 「an unknown word」★ — `Some` here is also a legitimate backend this repository knows; lumping the two refusals into one text would make the caller fix a typo that does not exist. Emit the two axes with different texts.
+/// ★Do not read it as blocking only non-human callers★ — the daemon `SpawnByCwd` door applies it without distinguishing callers (frontend `slot.createAgentHere` · `agent.spawn` too — ADR-0279); only paths that do not ask (daemon `CreateProfile` etc.) create as is.
 ///
-/// 표에 없는 낱말도 `Some` 이다(fail-closed).
+/// A word not in the table is also `Some` (fail-closed).
 pub fn llm_creation_refusal(backend_word: &str) -> Option<&'static str> {
     LLM_BACKEND_POLICY
         .iter()
@@ -834,9 +794,7 @@ pub fn llm_creation_refusal(backend_word: &str) -> Option<&'static str> {
         .map_or(Some(NO_POLICY_DECLARED), |policy| policy.refusal)
 }
 
-/// 선언 어휘의 낱말 — 정책 표에 물어보려면 낱말이 필요하다. `AgentBackend` 는 unit variant 뿐이라 serde
-/// 직렬화가 곧 그 낱말이고, 손으로 적으면 변형이 늘 때 조용히 어긋난다. 직렬화가 실패하면 빈 낱말이
-/// 되어 정책이 닫는다(fail-closed).
+/// The word of the declaration vocabulary — asking the policy table needs a word. `AgentBackend` has only unit variants, so serde serialization is the word itself (hand-writing would silently diverge as variants grow); a serialization failure gives an empty word and the policy closes (fail-closed).
 fn backend_word(backend: &AgentBackend) -> String {
     serde_json::to_value(backend)
         .ok()
@@ -844,22 +802,19 @@ fn backend_word(backend: &AgentBackend) -> String {
         .unwrap_or_default()
 }
 
-/// 선언 어휘 → 실행 명령.
+/// Declaration vocabulary → run command.
 ///
-/// ★이 `match` 는 **선언 enum** 을 훑는다 — 코어에 백엔드가 늘어도 여기서는 컴파일이 깨지지 않는다★.
-/// 그 방향(코어가 늘었는데 선언이 좁은 채로 남는 것)을 잡는 그물은 `AgentCommand` 를 훑는 역방향 `match`
-/// 이고, 그 자리는 `tests::the_declared_vocabularies_are_pinned_to_the_core_ones` 하나다.
-/// ★`output_format` 은 백엔드와 **무관하게** 그대로 실린다★ — 그래서 낱말 하나를 열면 두 모드가 함께
-/// 열린다(codex 의 두 모드를 가르는 자리는 `backend::codex::is_app_server` 이고 그 판정도 이 칸을 본다).
+/// ★This `match` sweeps **the declaration enum** — core backend growth does not break compilation here★. The net for that direction (core grew, declaration stays narrow) is the reverse `match` sweeping `AgentCommand` in
+/// `tests::the_declared_vocabularies_are_pinned_to_the_core_ones`.
+/// ★`output_format` is carried as is **regardless of the backend**★ — opening one word opens both modes (codex's two-mode split is `backend::codex::is_app_server`, which also reads this field).
 fn backend_command(backend: AgentBackend, output_format: CoreAgentOutputFormat) -> AgentCommand {
     match backend {
         AgentBackend::Claude => AgentCommand::Claude {
             extra_args: vec![],
             output_format,
         },
-        // ★`extra_args` 가 비는 것은 결정이다★ — 이 입구는 인자 표면을 늘리지 않는다(모델·추론 강도
-        //   따위를 고르는 칸을 두지 않는다). codex 가 실제로 받는 인자는 `backend::codex::build_spec`
-        //   이 이 명령 하나에서 전부 조립한다.
+        // ★`extra_args` empty is a decision★ — this entry does not grow the argument surface (no model / reasoning-effort field); codex's
+        //   arguments are all assembled from this command by `backend::codex::build_spec`.
         AgentBackend::Codex => AgentCommand::Codex {
             extra_args: vec![],
             output_format,
@@ -867,8 +822,8 @@ fn backend_command(backend: AgentBackend, output_format: CoreAgentOutputFormat) 
     }
 }
 
-/// 선언 어휘 → 코어 어휘. **미지정은 [`NEW_AGENT_OUTPUT_FORMAT`]** 이고, 어휘 밖 값은 여기 오기 전에
-/// 역직렬화가 `INVALID_ARGUMENT` 로 반려한다(조용한 fallback 없음 — 프론트 `coerceOutputFormat` 과 같은 규율).
+/// Declaration vocabulary → core vocabulary. **Unspecified is [`NEW_AGENT_OUTPUT_FORMAT`]**, and values outside the vocabulary are rejected
+/// by deserialization as `INVALID_ARGUMENT` before reaching here (no silent fallback — the same discipline as the frontend's `coerceOutputFormat`).
 fn output_format(given: Option<AgentOutputFormat>) -> CoreAgentOutputFormat {
     match given {
         None => NEW_AGENT_OUTPUT_FORMAT,
@@ -877,17 +832,13 @@ fn output_format(given: Option<AgentOutputFormat>) -> CoreAgentOutputFormat {
     }
 }
 
-/// `agent.*` 표를 조립한다 — ★핸들러 실물이 들어오는 유일한 자리★(규칙 T-1).
+/// Assembles the `agent.*` table — ★the only place real handlers come in★ (rule T-1).
 ///
-/// ★blocking 계약★: 핸들러 본문은 프로필 락을 쥔 채 디스크를 쓰고 resume 조기 종료를 폴링한다
-///   (`AgentManager::activate_profile`). async 런타임 스레드에서 폴링하면 그 스레드를 막으므로 조립부가
-///   `spawn_blocking` 뒤에서 불러야 한다 — 이 표를 부르는 두 표면(데몬의 `/control/agent` 라우트와
-///   명령 버스 배달)이 그 공통 입구 하나로 들어오고, 그 자리가 blocking 풀 위에 있다.
-/// ★`notify` 를 인자로 받는 이유★: 명부를 바꾼 동사는 반드시 통지해야 하는데(포트 doc 참조) 그 실물은
-///   데몬 소유다. 조립부가 넘기게 하면 **빠뜨릴 수 없다** — trait 기본 구현으로 두면 조용히 안 부른다.
-/// ★명령이 늘어도 조립부(실행 파일)는 안 바뀐다★ — 늘어나는 것은 선언 블록과 이 함수의 한 줄이다.
-/// ★`usage` 도 같은 이유로 인자다★: `usage.*` 의 실물(데몬 사용량 서비스)은 데몬 소유라 조립부가 넘긴다. 운영
-///   밖 조립(스모크 bin · 시험)은 칸이 없는 포트를 넘긴다 — 그 조립에서 `usage.*` 는 `NOT_FOUND` 로 답한다.
+/// ★blocking contract★: handler bodies write to disk holding the profile lock and poll for resume early exit (`AgentManager::activate_profile`); polling on an async runtime thread would block it, so the assembly must call it behind `spawn_blocking` — both
+///   surfaces (the daemon's `/control/agent` route and command bus delivery) come through that one common entry, which sits on the blocking pool.
+/// ★`notify` is an argument★: a roster-changing verb must notify (port doc) but the real thing is the daemon's; passing it makes it **impossible to omit** (a trait default would silently not be called).
+/// ★`usage` is an argument for the same reason★: the daemon owns the real `usage.*`; assemblies outside production (smoke bins · tests) pass a port without fields, where `usage.*` answers `NOT_FOUND`.
+/// Command growth changes the declaration block and one line here, not the assembly (the executable).
 // ADR-0155
 pub fn make_table(
     host: Arc<dyn AgentCommandHost>,
@@ -908,21 +859,21 @@ pub fn make_table(
     let usage_get = Arc::clone(&usage);
     let usage_refresh = usage;
 
-    // ★조립 때 터뜨린다★: insert 가 반려하는 셋(선언 집합에 없는 이름 · 중복 삽입 · 선언 스키마 텍스트가
-    //   JSON 이 아님) 전부 **빌드가 정하는 값**이라 런타임에 달라지지 않는다. 어느 것인지는 패닉에 함께
-    //   실리는 `TableError` 가 말하므로 아래 메시지는 사유를 단정하지 않는다.
+    // ★Blow up at assembly★: the three insert rejects (name outside the declared set · duplicate insertion · declared schema text not
+    //   JSON) are **build-decided values**, never runtime-varying; the `TableError` carried with the panic tells which, so messages below
+    //   do not assert the reason.
     table
         .insert(
             "agent.list",
             blocking_handler(move |_: AgentListArgs| verb_list(list.as_ref())),
         )
-        .expect("agent.list 를 표에 꽂지 못했다");
+        .expect("could not plug agent.list into the table");
     table
         .insert(
             "agent.resolve",
             blocking_handler(move |args: AgentResolveArgs| verb_resolve(resolve.as_ref(), args)),
         )
-        .expect("agent.resolve 를 표에 꽂지 못했다");
+        .expect("could not plug agent.resolve into the table");
     table
         .insert(
             "agent.spawn",
@@ -930,7 +881,7 @@ pub fn make_table(
                 verb_spawn(spawn.0.as_ref(), spawn.1.as_ref(), args)
             }),
         )
-        .expect("agent.spawn 을 표에 꽂지 못했다");
+        .expect("could not plug agent.spawn into the table");
     table
         .insert(
             "agent.new",
@@ -938,7 +889,7 @@ pub fn make_table(
                 verb_new(new.0.as_ref(), new.1.as_ref(), args)
             }),
         )
-        .expect("agent.new 를 표에 꽂지 못했다");
+        .expect("could not plug agent.new into the table");
     table
         .insert(
             "agent.rename",
@@ -946,7 +897,7 @@ pub fn make_table(
                 verb_rename(rename.0.as_ref(), rename.1.as_ref(), args)
             }),
         )
-        .expect("agent.rename 을 표에 꽂지 못했다");
+        .expect("could not plug agent.rename into the table");
     table
         .insert(
             "agent.move",
@@ -954,7 +905,7 @@ pub fn make_table(
                 verb_move(move_.0.as_ref(), move_.1.as_ref(), args)
             }),
         )
-        .expect("agent.move 를 표에 꽂지 못했다");
+        .expect("could not plug agent.move into the table");
     table
         .insert(
             "agent.listQueuedInputs",
@@ -962,7 +913,7 @@ pub fn make_table(
                 verb_list_queued_inputs(list_queued.as_ref(), args)
             }),
         )
-        .expect("agent.listQueuedInputs 를 표에 꽂지 못했다");
+        .expect("could not plug agent.listQueuedInputs into the table");
     table
         .insert(
             "agent.cancelQueuedInput",
@@ -970,7 +921,7 @@ pub fn make_table(
                 verb_cancel_queued_input(cancel_queued.as_ref(), args)
             }),
         )
-        .expect("agent.cancelQueuedInput 을 표에 꽂지 못했다");
+        .expect("could not plug agent.cancelQueuedInput into the table");
     table
         .insert(
             "agent.interrupt",
@@ -978,15 +929,16 @@ pub fn make_table(
                 verb_interrupt(interrupt.as_ref(), args)
             }),
         )
-        .expect("agent.interrupt 를 표에 꽂지 못했다");
-    // ★둘 다 `blocking_handler` 다(TRD §3 #17)★ — 조회 끝을 기다리는 본문이지만 async 로 두면 데몬 입구가 첫
-    //   poll 에서 `OUTCOME_UNKNOWN` 으로 끊는다. 기다림은 포트 안(std 채널)에서 끝난다.
+        .expect("could not plug agent.interrupt into the table");
+    // ★Both are `blocking_handler` (TRD §3 #17)★ — the bodies wait for the query to end, but as async the daemon entry would cut them off
+    //   at the first
+    //   poll with `OUTCOME_UNKNOWN`. The waiting ends inside the port (a std channel).
     table
         .insert(
             "usage.get",
             blocking_handler(move |args: UsageGetArgs| verb_usage_get(usage_get.as_ref(), args)),
         )
-        .expect("usage.get 을 표에 꽂지 못했다");
+        .expect("could not plug usage.get into the table");
     table
         .insert(
             "usage.refresh",
@@ -994,7 +946,7 @@ pub fn make_table(
                 verb_usage_refresh(usage_refresh.as_ref(), args)
             }),
         )
-        .expect("usage.refresh 를 표에 꽂지 못했다");
+        .expect("could not plug usage.refresh into the table");
 
     table
 }
@@ -1018,8 +970,8 @@ fn verb_usage_refresh(
         .ok_or_else(|| no_usage_limits(&args.backend))
 }
 
-/// 칸이 없는 백엔드 — wire ⟳ 의 같은 부재와 **같은 코드·같은 문장**이다(daemon `connection_core` 의
-/// `no_usage_text`). 낱말만 이 입구의 철자(`Claude`)로 싣는다.
+/// A backend without a field — **the same code and the same sentence** as the same absence of wire ⟳ (`no_usage_text` of daemon
+/// `connection_core`). Only the word is carried in this entry's spelling (`Claude`).
 fn no_usage_limits(backend: &AgentBackend) -> CommandError {
     CommandError::not_found(format!(
         "this daemon keeps no usage limits for backend '{}'",
@@ -1028,8 +980,9 @@ fn no_usage_limits(backend: &AgentBackend) -> CommandError {
 }
 
 fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
-    // ★한 번의 명부 조회로 전부 만든다★: 이름·생사·cwd·계층이 같은 스냅샷에서 나와야 한 응답 안의
-    //   행끼리 정합한다.
+    // ★Everything is built from one roster lookup★: name · liveness · cwd · hierarchy must come from the same snapshot for the rows within
+    //   one response
+    //   to be consistent.
     let agents = host
         .roster()
         .into_iter()
@@ -1041,7 +994,8 @@ fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
             parent: row.parent.map(|p| p.to_string()),
         })
         .collect();
-    // 명부 한 장과 같은 순간의 값은 아니다 — 저장소 상태는 마지막 저장 시도 기준이라 원래 그 정도로만 맞는다.
+    // Not a value at the same moment as the roster sheet — the store state is as of the last save attempt, so it only matches that well to
+    //   begin with.
     let store = host.store_status();
     Ok(AgentListOk {
         agents,
@@ -1051,7 +1005,7 @@ fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
     })
 }
 
-// TRD S28 §6 의 상한.
+// The cap of TRD S28 §6.
 const RESOLVE_TARGETS_MAX: usize = 8;
 
 // ADR-0307
@@ -1065,7 +1019,7 @@ fn verb_resolve(
             "targets takes 1 to {RESOLVE_TARGETS_MAX} agent names or ids, got {count}"
         )));
     }
-    // 빈 말은 전부 모아 한 번에 낸다 — 머리는 첫 자리 하나라 나머지는 문구 끝에 덧붙인다.
+    // Blank words are all gathered and emitted at once — the head is only the first position, so the rest are appended at the end of the text.
     let blanks: Vec<usize> = args
         .targets
         .iter()
@@ -1087,7 +1041,8 @@ fn verb_resolve(
             CommandError::invalid_argument(message),
         ));
     }
-    // ★명부 한 장으로 전부 푼다★ — 말마다 다시 읽으면 한 답 안의 줄끼리 다른 순간의 명부를 본다.
+    // ★Resolve everything with one roster sheet★ — reading again per word would have the lines within one answer see the roster at
+    //   different moments.
     let roster = host.roster();
     let mut agents = Vec::with_capacity(count);
     for (index, target) in args.targets.into_iter().enumerate() {
@@ -1107,7 +1062,7 @@ fn verb_resolve(
     Ok(AgentResolveOk { agents })
 }
 
-/// 말 하나 때문에 난 실패에 그 자리의 머리 `targets[i]: ` 를 붙인다 — 코드 · 재시도는 그대로 둔다.
+/// Puts the head `targets[i]: ` of that position on a failure caused by one word — the code and retry are left as is.
 // ADR-0307
 fn target_failure(index: usize, mut error: CommandError) -> CommandError {
     let message = format!("targets[{index}]: {}", error.message());
@@ -1115,7 +1070,7 @@ fn target_failure(index: usize, mut error: CommandError) -> CommandError {
     error
 }
 
-/// 저장소 상태(까닭을 든 태그 enum)를 단어 + 선택 칸으로 편다.
+/// Spreads the store state (a tag enum carrying a reason) into a word + optional fields.
 // ADR-0291 R17 (D6)
 fn store_status_row(status: StoreStatus) -> StoreStatusRow {
     let (state, refusal) = match status {
@@ -1146,9 +1101,9 @@ fn verb_spawn(
         args.cwd.as_deref(),
         args.name.as_deref(),
     );
-    // ★이 동사의 제약은 칸 하나가 아니라 **조합**이다★: 선언상 셋 다 `Option` 이지만 호출에는 `target` 이나
-    //   `cwd` 중 하나가 반드시 있어야 한다. 그래서 「빼도 된다」로 안내하면 그대로 뺀 재시도가 「둘 중 하나는
-    //   줘야 한다」로 **다시 반려**된다 — 칸 하나만 보는 문구로는 이 조건을 말할 수 없어 여기서 직접 쓴다.
+    // ★The constraint of this verb is **a combination**, not one field★: all three are `Option` by declaration but a call needs `target`
+    //   or `cwd`. 「May be omitted」 guidance would get the omitting retry **rejected again** with 「one of the two must be given」; a text
+    //   looking at one field cannot state this, so it is written here.
     let blanks = blank_fields(&[("target", target), ("cwd", cwd), ("name", name)]);
     if !blanks.is_empty() {
         return Err(CommandError::invalid_argument(format!(
@@ -1157,8 +1112,8 @@ fn verb_spawn(
         )));
     }
 
-    // ★두 동사가 한 이름을 쓴다(깨우기 / 만들어서 띄우기)★: 어느 쪽인지는 인자가 가른다. 둘 다 주면
-    //   고를 근거가 없고, 조용히 한쪽을 고르면 만들려던 에이전트 대신 남을 깨운다.
+    // ★Two verbs use one name (wake / create and launch)★: which one is decided by the arguments. If both are given
+    //   there is no ground to choose, and silently choosing one would wake someone else instead of the agent meant to be created.
     match (target, cwd) {
         (Some(_), Some(_)) => Err(CommandError::invalid_argument(
             "spawn takes either an existing agent (target) or cwd for a new one, not both",
@@ -1166,10 +1121,9 @@ fn verb_spawn(
         (None, None) => Err(CommandError::invalid_argument(
             "spawn needs either an existing agent to wake (target) or cwd to create a new one",
         )),
-        // 깨우기는 이름을 바꾸지 않으므로 name 이 아무 일도 못 한다 — 조용히 무시하면 호출자는 이름이
-        //   바뀐 줄 안다.
-        // ★문구에 명령 식별자를 적지 않는다★: `agent.rename` 은 카탈로그 이름이지 칠 수 있는 명령이
-        //   아니라, 그대로 적으면 LLM 이 그것을 셸에 친다. 표면별 표기는 어댑터가 붙인다.
+        // Waking does not change the name, so a name does nothing — silently ignoring it would make the caller think the name changed.
+        // ★No command identifier in the text★: `agent.rename` is a catalog name, not a typeable command, and writing it would make the LLM
+        //   type it into the shell; the adapter attaches per-surface notation.
         (Some(token), None) if name.is_some() => Err(CommandError::invalid_argument(format!(
             "name does not apply when waking an existing agent ({token}) — changing a name is a separate verb, so drop this field"
         ))),
@@ -1198,11 +1152,8 @@ fn verb_spawn(
     }
 }
 
-/// ★깨우기도 명부 통지를 낸다 — 항목 수·이름·계층이 그대로여도★: 활성화 결말이 그 항목의
-/// 「마지막 실패」를 바꾸는데(성공=지움 / 실패=기록, ADR-0172) 그 축은 **프로필 목록으로만** 흐른다.
-/// 매니저가 흘리는 생사 전이(`agent_list_updated`)는 산 세션 목록이라 이 값을 나르지 않는다 —
-/// 여기서 안 알리면 LLM 이 깨운 결과가 화면에 영영 안 뜬다(사람 클릭 경로는 뜬다 = 두 핸들이 갈린다,
-/// CLAUDE.md 「LLM-우선 제어」).
+/// ★Waking also emits a roster notification — even with entry count, names and hierarchy unchanged★: the activation outcome changes that entry's 「last failure」 (success = clear / failure = record, ADR-0172), an axis that flows **only through the profile list**.
+/// The manager's liveness transitions (`agent_list_updated`) are the live session list and do not carry it — unannounced, an LLM wake-up result would never appear on screen (the human click path does; CLAUDE.md 「LLM-first control」).
 // ADR-0172
 fn wake_existing(
     host: &dyn AgentCommandHost,
@@ -1213,19 +1164,19 @@ fn wake_existing(
     let Some(profile) = host.agent_snapshot(id) else {
         return Err(not_found(token));
     };
-    // ★모드 유도 규칙은 WS 경로와 같은 것을 쓴다(ADR-0076)★: 저장된 세션이 있으면 이어받기, 없으면
-    //   새로. 여기서 다른 규칙을 쓰면 같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을 잃는다.
-    //   ★sid 존재만으로 가르지 않는다(ADR-0185)★: 저장된 sid 가 그 명령으로 **이어받을 수 있는 것인지**
-    //     를 백엔드에 먼저 묻는다 — 그 판정은 부팅 복원·WS 입구와 같은 dispatch 가 소유한다. 안 물으면
-    //     이어받을 수 없는 모양이 Resume 으로 떠, 새 대화가 열렸는데 「이어받음」으로 보고된다.
+    // ★The mode derivation rule is the same as the WS path (ADR-0076)★: resume if there is a stored session, otherwise new — a different
+    //   rule would make one agent lose its history depending on which entry wakes it.
+    //   ★Not split by sid presence alone (ADR-0185)★: first ask the backend whether the stored sid is **resumable with that command** —
+    //   owned by the same dispatch as boot restore and the WS entry; otherwise a non-resumable shape would launch as Resume,
+    //     opening a new conversation reported as 「resumed」.
     let mode = if crate::backend::can_resume_profile(&profile) {
         SpawnMode::Resume
     } else {
         SpawnMode::Fresh
     };
     let started = host.activate_profile(&profile, mode);
-    // ★실패 때도 알린다 — 저장 거절이어도★: 활성화 실패는 그 항목의 「마지막 실패」를 적는다(ADR-0172 ·
-    //   ADR-0291 E2 — 「변경 뒤 부수효과는 `Ok` 일 때만」에서 이 통지는 뺐다).
+    // ★It announces on failure too — even on a save refusal★: an activation failure writes that entry's 「last failure」 (ADR-0172 ·
+    //   ADR-0291 E2 — this notification was excluded from 「side effects after a change only on `Ok`」).
     notify.roster_changed();
     let started = started.map_err(|e| match e {
         PtyError::Store(error) => store_error(
@@ -1241,7 +1192,7 @@ fn wake_existing(
         ),
         // A launch refused before any process is a `CONFLICT` so the daemon releases the request id
         //   (`command_delivery::retains_the_id`) — `INTERNAL` would hold it and swallow the fixed retry as
-        //   `ALREADY_APPLIED` (TRD S25 §1-5 (가) 1 ①).
+        //   `ALREADY_APPLIED` (TRD S25 §1-5 (ga) 1 ①).
         PtyError::LaunchBlocked(blocked) => CommandError::of(
             ErrorCode::Conflict,
             format!(
@@ -1414,7 +1365,7 @@ fn spawn_create_refusal(refused: CreateRefused, cwd: &str, word: &str) -> Comman
 /// A backend the policy closes — the same words on every door that asks it.
 fn policy_refusal(word: &str, reason: &str) -> CommandError {
     CommandError::invalid_argument(format!(
-        "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason}"
+        "backend '{word}' is a known word, but this surface does not create it now — {reason}"
     ))
 }
 
@@ -1428,24 +1379,20 @@ fn verb_new(
         ("cwd", Some(cwd), Blank::NeedsValue),
         ("name", name, Blank::OrOmit),
     ])?;
-    // ★기본값이 없다★ — 미지정은 역직렬화가 반려한다(`AgentNewArgs::backend` 의 doc). 여기서
-    //   `unwrap_or(Claude)` 를 되살리지 말 것: 백엔드가 둘인 지금 그것은 「고르지 않았다」를 조용히
-    //   claude 로 접는 경로이고, 스폰 패킷에서 이미 같은 이유로 걷어냈다.
+    // ★No default★ — unspecified is rejected by deserialization (`AgentNewArgs::backend` doc). Do not bring back `unwrap_or(Claude)`: with
+    //   two backends it silently folds 「did not choose」 into claude (already removed from the spawn packet for the same reason).
     let backend = args.backend.clone();
     let word = backend_word(&backend);
-    // ★정책을 묻는 문은 모두 이 표 하나를 본다★ — 이 `if` 는 매 호출 돌지만 **거절 팔은 오늘도 닿지 않는다**.
-    //   ★단 닿지 않는 **사유**가 2026-09-22 에 갈렸다★: 그 전에는 「선언 어휘([`AgentBackend`])가
-    //   정책 표보다 좁아서」였고, 지금은 **어휘와 표가 여는 집합이 정확히 같아서**(둘 다 claude·codex)
-    //   그리고 **표가 아무 낱말도 안 닫아서**다. 표 밖 낱말은 여전히 그 전에 역직렬화가 반려한다.
-    //   ★그래도 지우지 말 것★ — 이 팔이 막는 편집은 「어휘를 넓히면서 [`LLM_BACKEND_POLICY`] 는 안
-    //   넓히는 것」이고, 그 편집이 오면 팔이 그날 살아난다. 그 사실을 시험이 잰다 =
-    //   `tests::new_creates_exactly_what_the_llm_backend_policy_opens`(어휘를 넓히고 표를 안 열면
-    //   빨개진다). 형제 문의 자리 = 하나뿐인 생성 본체 [`create_and_start`](데몬 `SpawnByCwd` · 버스
-    //   `agent.spawn --cwd` 가 부른다 — 호출자를 안 가린다 · ADR-0279 · ADR-0348). ★**오늘은 그 문도 정책으로 아무것도 안 막는다**★(2026-09-22 · ADR-0219 — wire 어휘가
-    //   claude·codex 둘뿐인데 표가 둘 다 열었다). 셸 `agent.spawnInto` 는 문이 아니다 — 거기 남는 거절은
-    //   정책이 아니라 `parse_backend` 의 오탈자 그물이다(ADR-0270). 프론트 `commands/registry.ts` 는 형제 문이
-    //   아니다 — codex 문의 `humanOnly` 사유 문자열이 그날 지워졌다. ★한때 이 자리에 「셸은 런타임
-    //   거절이 오늘도 닿는다」고 적혀 있었는데 표가 열린 뒤로 거짓이다.★
+    // ★Every door asking the policy looks at this one table★ — this `if` runs on every call but **the refusal arm does not reach today**:
+    //   the vocabulary and the table open exactly the same set (claude · codex) and **the table closes no word**; words outside the table
+    //   are rejected
+    //   earlier by deserialization (ADR-0219).
+    //   ★Do not delete it★ — it blocks 「widening the vocabulary without widening [`LLM_BACKEND_POLICY`]」 and comes alive the day that edit
+    //   arrives; `tests::new_creates_exactly_what_the_llm_backend_policy_opens` measures that (red if the vocabulary is widened without
+    //   opening the
+    //   table). Sibling door: the one creation body [`create_and_start`] (called by the daemon `SpawnByCwd` · the bus `agent.spawn --cwd` —
+    //   does not distinguish callers · ADR-0279 · ADR-0348), which also blocks nothing by policy today. The shell `agent.spawnInto` is not a door (its refusal is the `parse_backend` typo net, ADR-0270);
+    //   the frontend `commands/registry.ts` is not a sibling door.
     if let Some(reason) = llm_creation_refusal(&word) {
         return Err(policy_refusal(&word, reason));
     }
@@ -1465,8 +1412,7 @@ fn verb_new(
 
 /// The registration of `agent.new` (create without starting).
 ///
-/// ★확정 이름은 요청 이름과 다를 수 있다★: 명부 전역 유일성 때문에 접미사가 붙는다(ADR-0120/0123).
-/// 그래서 응답은 **등록된 값**에서 이름을 읽는다 — 요청 이름을 되돌려주면 화면·주소와 어긋난다.
+/// ★The settled name can differ from the requested one★: a suffix is attached for global roster uniqueness (ADR-0120/0123), so the response reads the name from **the registered value** — the requested name would diverge from the screen and address.
 fn register(
     host: &dyn AgentCommandHost,
     cwd: &str,
@@ -1500,11 +1446,12 @@ fn new_profile(cwd: &str, name: Option<String>, command: AgentCommand) -> AgentP
 /// out-of-workspace text. Shared by `agent.new` and the bus `agent.spawn --cwd` refusal.
 // ADR-0348
 fn create_error(e: PtyError, cwd: &str) -> CommandError {
-    // ★실패 사유마다 호출자가 할 일이 다르다★ — 자리를 비워라(CONFLICT) · 인자를 고쳐라
-    //   (INVALID_ARGUMENT) · 다시 시도해도 소용없다(INTERNAL). 한 코드로 뭉개면 그 갈림이 사라진다.
+    // ★The caller has different things to do per failure reason★ — free a slot (CONFLICT) · fix the arguments
+    //   (INVALID_ARGUMENT) · retrying is useless (INTERNAL). Mashing them into one code would lose that split.
     match e {
-        // ★상한의 **성격**을 문구가 밝힌다★: 이 줄이 없으면 상한에 부딪힌 호출자(사람·LLM)의 첫 반응이
-        //   "숫자를 올린다" 가 된다 — 그건 폭주 생성 루프를 막으려고 둔 백스톱을 스스로 걷는 것이다.
+        // ★The text reveals the **nature** of the cap★: without this line, the first reaction of a caller (person · LLM) hitting the cap
+        //   would be
+        //   "raise the number" — that would be removing by oneself the backstop placed to stop runaway creation loops.
         PtyError::RosterFull { current, limit } => CommandError::of(
             ErrorCode::Conflict,
             format!(
@@ -1544,7 +1491,8 @@ fn verb_rename(
         ("name", Some(name), Blank::NeedsValue),
     ])?;
     let id = resolve(host, token)?.id;
-    // ★저장소가 받지 않은 개명은 통지 없이 오류다★ — 이름은 그대로라 알릴 변화가 없다(ADR-0291 D3).
+    // ★A rename the store did not accept is an error without notification★ — the name is unchanged, so there is no change to announce
+    //   (ADR-0291 D3).
     let outcome = host
         .rename_agent(id, Some(name.to_string()))
         .map_err(|e| match e {
@@ -1561,8 +1509,8 @@ fn verb_rename(
             ),
             other => CommandError::internal(format!("could not rename '{token}': {other}")),
         })?;
-    // ★네 결말을 뭉개지 않는다★: 확정된 이름 · 이미 그 계열을 쥐어 무변경 · 부재 · 이름 공간 소진.
-    //   앞 둘은 성공이지만 다른 사실이라 outcome 으로 갈라 싣는다.
+    // ★The four outcomes are not mashed★: the settled name · no change since it already holds that family · absent · name space exhausted.
+    //   The first two are successes but different facts, so they are carried split by outcome.
     match outcome {
         RenameOutcome::Renamed(committed) => {
             notify.roster_changed();
@@ -1594,20 +1542,21 @@ fn verb_move(
     args: AgentMoveArgs,
 ) -> Result<AgentMoveOk, CommandError> {
     let token = args.target.as_str();
-    // ★부재는 「부모를 안 줬으니 떼자」가 아니다★ — 루트로 떼는 지시는 `null` 이다. 부재를 접으면 오타
-    //   필드 하나가 계층 해제로 실행된다.
-    // ★wire 로 들어온 부재는 여기까지 못 온다★ — 선언 매크로가 이 칸에 `#[serde(default)]` 를 안 달아
-    //   역직렬화가 `missing field` 로 반려한다. 이 갈래는 코드가 인자를 직접 지어 부르는 경로 몫이다.
+    // ★Absence is not 「no parent given, so detach」★ — detaching to root is the instruction `null`; folding absence would let one typo
+    //   field run as a hierarchy release.
+    // ★Absence over the wire cannot get here★ — the declaration macro puts no `#[serde(default)]` on this field, so deserialization
+    //   rejects it with `missing field`; this branch is for code building the arguments directly.
     let Some(parent_token) = args.parent.as_ref() else {
         return Err(CommandError::invalid_argument(
             "move needs parent: a name/id to move under, or null to move it back to the top level",
         ));
     };
     let parent_token = parent_token.as_deref();
-    // ★`parent` 의 회복 경로는 다른 칸과 다르다★ — 빈 값을 「값을 채워라」로만 반려하면 위 부재 문구가 알려
-    //   주는 `null` 갈래(최상위로 떼기)가 이 갈래에서만 감춰진다. 그렇다고 이 칸만 먼저 반려하면 **형제 칸이
-    //   숨는다**: 둘 다 빈 값인 요청이 `parent` 만 지적받고, 고쳐 보낸 다음 트립에서 `target` 을 처음 듣는다.
-    //   두 요구는 같은 검사 안에서 선다 — 칸마다 다른 안내를, 한 번에.
+    // ★The recovery path of `parent` differs from other fields★ — answering a blank value only with 「fill in a value」 would hide, in this
+    //   branch alone, the `null` branch (detach to top level) the absence text tells about. Rejecting only this field first would **hide
+    //   the sibling**:
+    //   with both blank the caller would hear about `target` only on the next trip. Both demands stand in the same check, different
+    //   guidance per field, at once.
     reject_blanks(&[
         ("target", Some(token), Blank::NeedsValue),
         (
@@ -1621,7 +1570,8 @@ fn verb_move(
         None => None,
         Some(p) => Some(resolve(host, p)?.id),
     };
-    // ★저장소가 받지 않은 이동은 통지 없이 오류다★ — 계층은 그대로라 알릴 변화가 없다(ADR-0291 D3).
+    // ★A move the store did not accept is an error without notification★ — the hierarchy is unchanged, so there is no change to announce
+    //   (ADR-0291 D3).
     let moved = host.reparent_agent(child.id, parent).map_err(|e| match e {
         PtyError::Store(error) => store_error(
             "move",
@@ -1637,17 +1587,18 @@ fn verb_move(
         other => CommandError::internal(format!("could not move '{token}': {other}")),
     })?;
     if !moved {
-        // ★`false` 하나로는 사유를 모른다★: 방금 해석한 대상이 그 사이 사라졌을 수도 있고(NOT_FOUND),
-        //   트리 구조가 거부했을 수도 있다(CONFLICT). 둘은 호출자가 할 일이 다르므로 명부를 다시 보고
-        //   가른다 — 사유 목록은 `ProfileRegistry::try_reparent` 의 거부 조건과 한 줄씩 대응한다.
-        // ★사라진 쪽의 이름을 댄다★: 둘 중 어느 쪽이 없어졌든 자식 이름을 대면, 부모만 사라진 경우에
-        //   호출자는 **멀쩡히 있는** 에이전트를 없다고 듣고 엉뚱한 데를 뒤진다.
+        // ★`false` alone does not tell the reason★: the resolved target may have vanished in between (NOT_FOUND) or the tree structure
+        //   refused it (CONFLICT) — different remedies, so the roster is looked at again (the reason list corresponds line by line to the
+        //   refusal
+        //   conditions of `ProfileRegistry::try_reparent`).
+        // ★Name the side that vanished★: naming the child whichever vanished would, when only the parent vanished, tell the caller an
+        //   agent that **is there** is missing.
         let roster = host.roster();
         let gone = |id: AgentId| !roster.iter().any(|row| row.id == id);
         if gone(child.id) {
             return Err(not_found(token));
         }
-        // parent 가 Some 이면 parent_token 도 Some 이다(위 match 가 그 둘을 함께 만든다).
+        // If parent is Some, parent_token is Some too (the match above makes the two together).
         if let Some((parent_token, parent_id)) = parent_token.zip(parent) {
             if gone(parent_id) {
                 return Err(not_found(parent_token));
@@ -1661,25 +1612,26 @@ fn verb_move(
         ));
     }
     notify.roster_changed();
-    // ★이 응답은 한 시점의 스냅샷이 **아니다**(알고 남긴 범위)★: 이름은 적용 뒤 명부에서 읽고 `parent` 는
-    //   **이 호출이 지시한 값**이다. 그래서 뒤이어 다른 호출이 같은 에이전트를 또 옮기면, 응답은 「지금
-    //   이름 + 이 호출이 붙인 부모」가 되어 그 조합이 어느 순간에도 동시에 참이 아닐 수 있다. 그래도 이
-    //   보고는 **거짓이 아니다** — 이 호출이 요청한 이동은 실제로 적용됐고, 그것이 이 답이 진술하는 전부다.
-    //   원자적 스냅샷을 원하면 매니저가 「적용 후 상태」를 함께 돌려주는 API 가 필요하고, 그건 여기 결정이
-    //   아니다. 같은 이유로 **적용 뒤 사라진 대상도 `Ok`** 다(요청한 이동은 일어났다).
+    // ★This response is **not** a one-moment snapshot (a scope left knowingly)★: the name is read from the roster after applying and
+    //   `parent` is **the value this call instructed**, so a concurrent move can make 「current name + the parent this call attached」 a
+    //   combination
+    //   never simultaneously true — still **not false**: the requested move was applied, which is all this answer states. An atomic
+    //   snapshot would need an API where the manager returns the post-apply state — not decided here. Likewise **a target that vanished
+    //   after applying is
+    //   also `Ok`**.
     Ok(AgentMoveOk {
         agent_id: child.id.to_string(),
-        // ★이름은 **적용 뒤** 명부에서 다시 읽는다★: 해석 시점 값을 그대로 실으면, 그 사이 커밋된 개명
-        //   때문에 응답이 「옛 이름 + 새 부모」라는 **실재한 적 없는 조합**이 된다(호출자는 그 이름으로
-        //   다음 명령을 친다). 대가는 성공 경로의 명부 조회 한 번이다.
-        // ★못 읽으면 해석 시점 이름으로 되돌린다 — 빈 문자열로 접지 않는다★: 그 사이 사라진 경우에
-        //   이름 없는 행을 성공 응답으로 내면 호출자의 판정기가 그것을 "읽을 수 없는 응답" 으로 읽는다.
+        // ★The name is read again from the roster **after** applying★: the resolve-time value could, after a rename committed in between,
+        //   make the response 「old name + new parent」, **a combination that never existed** (the caller types the next command with that name).
+        //   Cost: one roster lookup on the success path.
+        // ★If unreadable, fall back to the resolve-time name — not an empty string★: a nameless row as a success response would be read by
+        //   the caller's decider as "an unreadable response".
         name: current_name(host, child.id).unwrap_or(child.name),
         parent: parent.map(|p| p.to_string()),
     })
 }
 
-// ★두 동사는 명부를 바꾸지 않는다 — 명부 통지를 내지 않는다★(대기 목록은 에이전트 출력 스트림으로 흐른다).
+// ★The two verbs do not change the roster — they emit no roster notification★ (the waiting list flows through the agent output stream).
 // ADR-0231
 fn verb_list_queued_inputs(
     host: &dyn AgentCommandHost,
@@ -1727,20 +1679,20 @@ fn verb_cancel_queued_input(
         ("target", Some(token), Blank::NeedsValue),
         ("input_id", Some(input_id), Blank::NeedsValue),
     ])?;
-    // ★문구엔 지목 토큰이 아니라 명부 이름을 싣는다★ — 공통 입구가 `target` 을 푼 id 로 바꿔 적으므로
-    //   (데몬 `admit_input`) 여기 오는 토큰은 대개 UUID 다.
+    // ★The text carries the roster name, not the pointing token★ — the common entry rewrites `target` as the resolved id
+    //   (daemon `admit_input`), so the token arriving here is usually a UUID.
     let agent = resolve(host, token)?;
     let name = agent.name.as_str();
     match host.cancel_queued_input(agent.id, input_id) {
         Ok(outcome) => Ok(AgentCancelQueuedInputOk {
             outcome: outcome.as_str().to_string(),
         }),
-        // ★「이미 결말이 났다」와 「잠들었다」를 가르지 않는다★ — 호출자가 할 일이 같다(목록을 다시 본다).
+        // ★「already has an outcome」 and 「asleep」 are not told apart★ — the caller has the same thing to do (look at the list again).
         Err(CancelError::NotFound) => Err(CommandError::not_found(format!(
             "'{name}' has no waiting input '{input_id}' — it was already delivered, cancelled or dropped, or the agent is not running; list its queued inputs to see what is still waiting"
         ))),
-        // ★다시 부르라고 안내하지 않는다★: 항목은 취소 대기 그대로라 재호출은 아무것도 쓰지 않고 `requested`
-        //   를 돌려준다(멱등). 결말은 에이전트 자신의 수명주기가 정한다.
+        // ★It does not guide to call again★: the entry stays pending cancel, so calling again writes nothing and returns `requested`
+        //   (idempotent). The outcome is decided by the agent's own lifecycle.
         Err(CancelError::Write(e)) => Err(CommandError::internal(format!(
             "the cancel request for '{input_id}' could not be written to '{name}': {e} — the item stays in the cancelling state and calling again will not resend it; its fate now follows the agent's own lifecycle, so watch it in the queued-input list"
         ))),
@@ -1754,19 +1706,20 @@ fn verb_interrupt(
 ) -> Result<AgentInterruptOk, CommandError> {
     let token = args.target.as_str();
     reject_blanks(&[("target", Some(token), Blank::NeedsValue)])?;
-    // 문구엔 명부 이름을 싣는다 — 공통 입구가 `target` 을 푼 id 로 바꿔 적는다(`verb_cancel_queued_input` 과 같다).
+    // The text carries the roster name — the common entry rewrites `target` as the resolved id (same as `verb_cancel_queued_input`).
     let agent = resolve(host, token)?;
     let name = agent.name.as_str();
     match host.interrupt_agent(agent.id) {
-        // ★`requested` 는 「멈췄다」가 아니다★ — 끊기를 보냈을 뿐이고 멈춤은 턴 끝 사건이 알린다.
+        // ★`requested` is not 「stopped」★ — it only sent the interrupt, and the stop is announced by the turn-end event.
         Ok(()) => Ok(AgentInterruptOk {
             outcome: "requested".to_string(),
         }),
         Err(PtyError::NotFound(_)) => Err(CommandError::not_found(format!(
             "'{name}' is not running, so it has no turn to interrupt"
         ))),
-        // 두 사유(끊을 턴이 없다 · 끊기를 못 하는 통로)를 가르지 않는다 — 통로가 한 변형으로 답하고 호출자가
-        //   할 일도 같다.
+        // The two reasons (no turn to interrupt · a link that cannot interrupt) are not told apart — the link answers with one variant and
+        //   the caller
+        //   has the same thing to do.
         Err(PtyError::Unsupported(reason)) => Err(CommandError::of(
             ErrorCode::Conflict,
             format!(
@@ -1779,21 +1732,14 @@ fn verb_interrupt(
     }
 }
 
-/// 저장소(프로필)가 받지 않은 부르는 쪽 변경 → 호출자 오류(코드 + 재시도 지시). 버스와 WS(daemon
-/// `connection_core`)가 이 하나를 쓰고, 셸 설정(`settings.set` · `settings.reset`)도 같은 나눔을 따른다(사용자 결정
-/// 2026-10-11):
-/// - 적재 때 거절된 저장소(이 실행 내내 읽기 전용 — 까닭 무관) = `CONFLICT` · `never` — 파일을 고치거나 바꾸고 데몬을
-///   다시 띄워야 풀린다.
-/// - 쓰기 직전 재판정의 거절 — 새 판이 쓴 파일 = `CONFLICT` · `never`(그 파일이 그대로면 다시 해도 같다) · 못 읽음 =
-///   `CONFLICT` · `after-condition`(대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다).
-/// - 쓰기 실패 = `INTERNAL`.
+/// A change with a caller that the store (profiles) did not accept → a caller error (code + retry instruction). The bus and WS (daemon `connection_core`) use this, and the shell settings (`settings.set` · `settings.reset`) follow the same split:
+/// - A store refused at load (read-only for this whole run, any cause) = `CONFLICT` · `never` — clears only by fixing or replacing the file and restarting the daemon.
+/// - A refusal by the re-decision right before writing — file written by a newer edition = `CONFLICT` · `never` (same while that file stays) · unreadable = `CONFLICT` · `after-condition` (usually a briefly held lock).
+/// - Write failure = `INTERNAL`.
 ///
-/// ★셋 다 명부는 그대로다★ — 부르는 쪽 있는 변경은 저장이 성공해야 커밋한다(레지스트리 · 매니저의 `try_` 판). 그래서
-///   `CONFLICT` 는 데몬이 「아무것도 적용 안 된 반려」로 읽는 그 뜻 그대로다(daemon
-///   `command_delivery::retains_the_id`).
-/// ★오늘 그 재시도 지시는 부르는 쪽에 닿지 않는다★ — 소켓 버스의 출구가 `never` 로 내리고(daemon
-///   `command_delivery::send_reply` · ADR-0159) 제어 라우트의 답은 그 칸을 싣지 않는다. 그래서 「조금 뒤 다시」는
-///   문구([`store_error_reason`])와 도움말이 함께 나른다.
+/// ★In all three the roster is unchanged★ — a change with a caller commits only if the save succeeds (the `try_` versions of registry · manager), so `CONFLICT` means what the daemon reads as 「a rejection with nothing applied」 (`command_delivery::retains_the_id`).
+/// ★Today the retry instruction does not reach the caller★ — the socket bus exit lowers it to `never` (daemon `command_delivery::send_reply` · ADR-0159) and the control route's answer carries no such field, so 「again a little later」 is carried by the text
+/// ([`store_error_reason`]) and the help.
 // ADR-0291 R17
 pub fn store_command_error(error: &StoreError, message: String) -> CommandError {
     match error {
@@ -1807,8 +1753,7 @@ pub fn store_command_error(error: &StoreError, message: String) -> CommandError 
     }
 }
 
-/// 호출자 문구에 싣는 사유 — 어느 파일(`file`)이 왜 받지 않았나와 호출자가 할 일. ★LLM 이 읽는 표면이라 영어다★ —
-/// 저장소 오류의 한국어 `Display` 는 로그 몫이다.
+/// The reason carried in the caller text — which file (`file`) did not accept and why, and what the caller should do. ★English on purpose: the LLM reads it★ (the stores' own `Display` is for logs).
 // ADR-0291 R17
 pub fn store_error_reason(file: &str, error: &StoreError) -> String {
     let cause = store_error_cause(file, error);
@@ -1829,8 +1774,7 @@ pub fn store_error_reason(file: &str, error: &StoreError) -> String {
     }
 }
 
-/// 같은 사유에서 까닭만 — 어느 파일(`file`)이 왜 받지 않았나. 할 일 지시가 그 요청에 맞지 않는 자리(이미 만든 뒤의
-/// 띄우기 실패 — 할 일은 그 문구의 꼬리가 댄다)가 쓴다.
+/// The same reason, cause only — which file (`file`) did not accept and why. For requests where an instruction does not fit (a launch failure after creating — the text's tail gives what to do).
 // ADR-0291 R17
 fn store_error_cause(file: &str, error: &StoreError) -> String {
     match error {
@@ -1850,21 +1794,20 @@ fn store_error_cause(file: &str, error: &StoreError) -> String {
     }
 }
 
-/// 저장소가 받지 않은 변경의 호출자 오류(`failure`)를 그대로 돌려주며 남긴다 — ★거절을 남기는 한 줄이 여기
-/// 하나다★(이 표면에서 그 요청이 오류가 되는 자리). 저장소의 로그는 파일 쪽 사실(무엇이 막았나)이고 이 줄은 요청 쪽
-/// 사실(어느 요청이 막혔나)이다. `action` = 무엇을 하려다 막혔나. 호출자가 친 값(이름 · 경로)은 로그에 싣지 않는다.
+/// Returns the caller error (`failure`) of a change the store did not accept as is, while recording it — ★the one line recording the refusal is here alone★ (where that request becomes an error on this surface). The store's log is the file-side fact (what blocked),
+/// this line the request-side fact (which request). `action` = what it was trying to do. Caller-typed values (names · paths) are not logged.
 // ADR-0291 R17
 fn store_error(action: &'static str, error: &StoreError, failure: CommandError) -> CommandError {
     tracing::warn!(
         action,
         file = PROFILES_FILE,
         %error,
-        "저장소가 받지 않아 이 요청을 오류로 돌려준다(명령 버스)"
+        "the store did not accept it, so this request is returned as an error (command bus)"
     );
     failure
 }
 
-/// 명부에는 있는데 산 세션이 없다 — 대기 목록은 산 화신만 쥔다.
+/// It is in the roster but there is no live session — only a live incarnation holds a waiting list.
 fn not_running(token: &str) -> CommandError {
     CommandError::not_found(format!(
         "'{token}' is not running, so it holds no queued inputs — an asleep agent has nothing waiting"
@@ -1914,11 +1857,9 @@ fn launch_blocked_reason(blocked: &LaunchBlocked) -> String {
     )
 }
 
-/// 상태 → wire 어휘의 **단일 매핑**. 술어는 [`AgentStatus::is_live`] 하나다(ADR-0116).
+/// **The single mapping** of state → wire vocabulary; the predicate is [`AgentStatus::is_live`] alone (ADR-0116).
 ///
-/// ★리터럴을 박지 않는 이유(실제로 갈렸던 자리)★: 변경 동사가 `"live"` 를 박으면 깨우자마자 죽은
-/// 에이전트(ADR-0082 resume 조기 종료)를 `spawn` 은 살아 있다고, 직후의 `list` 는 잠들었다고 보고한다 —
-/// 그러면 호출자는 시체에게 편지를 쓴다.
+/// ★No literal baked in (it diverged here)★: a change verb baking `"live"` would report an agent that dies right after waking (ADR-0082 resume early exit) as alive by `spawn` and asleep by the next `list`, and the caller would write mail to a corpse.
 fn state_of(status: Option<&AgentStatus>) -> &'static str {
     match status {
         Some(s) if s.is_live() => AGENT_STATE_LIVE,
@@ -1926,29 +1867,22 @@ fn state_of(status: Option<&AgentStatus>) -> &'static str {
     }
 }
 
-/// 지목 토큰 → 에이전트 하나.
+/// Pointing token → one agent.
 ///
-/// ★규칙(우편 입구와 **같아야** 한다)★: ① agent id 일치를 먼저 본다 — UUID 처럼 생긴 *이름* 이 id 지목을
-/// 가로채지 못하게 ② 그다음 이름 **정확** 일치(대소문자 구분 · 접두 매칭 없음 · 공백 보정 없음) ③ 같은 이름이
-/// 둘 이상이면 아무도 고르지 않고 거부한다.
-/// ★관대한 해석기를 들이지 말 것★: 사람과 LLM 은 우편의 수신자 토큰과 제어의 지목 토큰이 같은 X 를
-/// 가리킨다고 읽는다. 두 입구의 해석이 갈리면 편지를 받은 에이전트와 이름이 바뀐 에이전트가 달라진다 —
-/// 그 일치는 데몬 crate 의 교차 대조 테스트가 [`resolve_in`] 을 태워 지킨다.
+/// ★Rules (must be **the same** as the mail entry)★: ① an agent id match first — a *name* that looks like a UUID cannot hijack id pointing; ② then **exact** name match (case-sensitive · no prefix · no whitespace correction); ③ the same name two or more times → nobody chosen, refused.
+/// ★Do not bring in a lenient resolver★: people and LLMs read the mail recipient token and the control pointing token as the same X; diverging resolution would make the agent that got the mail differ from the one renamed — guarded by the daemon crate's cross-check
+/// test running [`resolve_in`].
 // ADR-0132
 fn resolve(host: &dyn AgentCommandHost, token: &str) -> Result<ResolvedAgent, CommandError> {
     resolve_in(&host.roster(), token)
 }
 
-/// [`resolve`] 의 순수한 알맹이 — **제어 입구가 실제로 쓰는 해석 규칙 그 자체**다.
+/// The pure kernel of [`resolve`] — **the very resolution rule the control entry uses**.
 ///
-/// ★`pub` 인 이유 둘★: ① 데몬 crate 의 교차 대조 테스트가 우편 입구와 **같은 규칙**인지를 재려면 실입구가
-/// 쓰는 해석기를 태워야 한다. 명부를 인자로 받는 형태라 그 테스트가 `AgentCommandHost` 전체를 흉내 내지
-/// 않아도 되고, 사본을 따로 두지 않으므로 재는 것과 도는 것이 갈릴 수 없다. ② 데몬의 입력 임대 검문
-/// (`control::commands::admit_input` — 운영 경로)이 [`INPUT_AFFECTING`] 명령의 `target` 을 동사 본문과 **같은
-/// 규칙으로** 한 번 풀어 그 id 로 임대를 본다. 해석기가 둘이면 검사한 에이전트와 실행하는 에이전트가 갈린다.
-/// ★결말은 코드로 읽는다★: 부재 = `NOT_FOUND` · 동명 둘 이상 = `CONFLICT`(이 함수가 내는 두 코드다). 두 문구 끝에
-/// ` — candidates: a, b` 가 붙는다(최대 5 · 정렬) — 부재 = 고를 만한 이름(명부가 비었으면 `none`) · 동명 = 그 id
-/// 들. 문구는 읽는 글이지 계약이 아니다(CLI · 교차 대조는 코드만 본다).
+/// ★Two reasons it is `pub`★: ① the daemon crate's cross-check test must run the real resolver to measure it is **the same rule** as the mail entry; taking the roster as an argument avoids imitating the whole `AgentCommandHost` and keeps no separate copy.
+/// ② the daemon's input lease check (`control::commands::admit_input`) resolves the `target` of [`INPUT_AFFECTING`] commands **by the same rule** as the verb body; two resolvers would let the agent checked and the agent executed diverge.
+/// ★The outcome is read by code★: absent = `NOT_FOUND` · same name two or more = `CONFLICT`. Both texts end with ` — candidates: a, b` (≤5 · sorted) — absent = names worth choosing (`none` if the roster is empty), same name = those ids. The text is prose, not a
+/// contract (CLI · cross-check look only at the code).
 // ADR-0132
 // ADR-0155
 // ADR-0231
@@ -1958,9 +1892,9 @@ pub fn resolve_in(roster: &[AgentRosterRow], token: &str) -> Result<ResolvedAgen
         id: row.id,
         name: row.canonical_name.clone(),
     };
-    // ★정규 철자로 견주지 않는다★: 데몬이 셸 명령의 에이전트 칸(옛 `agent_id` 포함)을 이 함수로 바꾸므로(ADR-0308)
-    //   정규 철자만 맞추면 대문자 등 다른 철자의 id 를 보내던 옛 호출자가 `NOT_FOUND` 를 받는다. 명부에 없는 id 꼴은
-    //   이름으로 넘어간다.
+    // ★Not compared in canonical spelling★: the daemon converts shell commands' agent fields (including the old `agent_id`) with this
+    //   function (ADR-0308), so canonical-only matching would give old callers sending ids in other spellings (e.g. uppercase) `NOT_FOUND`.
+    //   An id-shaped value not in the roster falls through to the name.
     if let Ok(id) = AgentId::parse_str(token) {
         if let Some(row) = roster.iter().find(|r| r.id == id) {
             return Ok(found(row));
@@ -1993,13 +1927,12 @@ pub fn resolve_in(roster: &[AgentRosterRow], token: &str) -> Result<ResolvedAgen
     }
 }
 
-// TRD S28 §5-3 의 상한.
+// The cap of TRD S28 §5-3.
 const CANDIDATES_MAX: usize = 5;
 
-/// 없는 말에 낼 이름 후보 — 그 말을 (대소문자 무시) 품은 이름이 있으면 그것들, 없으면 전부에서 이름순으로 앞의 것.
-/// 같은 이름은 한 번만 싣는다.
-// ★정렬한다★: 명부의 행 차례는 정해져 있지 않다(잠든 행은 매번 새 HashMap 에서 나온다 — `AgentManager::roster`).
-//   차례대로 자르면 같은 요청이 부를 때마다 다른 후보를 받는다.
+/// Name candidates for a missing word — names containing it (case-insensitive) if any, otherwise the first ones of all in name order; the same name once.
+// ★Sorted★: the roster's row order is not fixed (asleep rows come from a new HashMap each time — `AgentManager::roster`); cutting in that
+//   order would give the same request different candidates each call.
 fn name_candidates(roster: &[AgentRosterRow], token: &str) -> Vec<String> {
     let mut names: Vec<&str> = roster
         .iter()
@@ -2025,7 +1958,7 @@ fn name_candidates(roster: &[AgentRosterRow], token: &str) -> Vec<String> {
         .collect()
 }
 
-/// 후보가 없으면(빈 명부) `none` — 꼬리를 빼면 「후보가 없다」와 「후보를 싣지 않는 문구」가 구별되지 않는다.
+/// `none` if there are no candidates (an empty roster) — dropping the tail would make 「no candidates」 indistinguishable from 「a text that carries no candidates」.
 fn with_candidates(message: String, candidates: Vec<String>) -> String {
     if candidates.is_empty() {
         return format!("{message} — candidates: none");
@@ -2033,7 +1966,7 @@ fn with_candidates(message: String, candidates: Vec<String>) -> String {
     format!("{message} — candidates: {}", candidates.join(", "))
 }
 
-/// 지목이 가리킨 에이전트 — id 와 **그때 명부가 말한 이름**.
+/// The agent the pointing pointed at — the id and **the name the roster said at that time**.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAgent {
     pub id: AgentId,
@@ -2050,16 +1983,12 @@ fn not_found_message(token: &str) -> String {
     )
 }
 
-/// 공백만 있는 값은 **부재로 접지 않고** 반려한다.
+/// A whitespace-only value is **rejected rather than folded into absence**.
 ///
-/// ★셸에서 미설정 변수가 빈 인자로 펼쳐지는 형태(`--parent "$UNSET"`)가 현실적으로 들어온다★ — 그걸
-/// "안 준 것" 으로 접으면 오타 한 번이 다른 동작(계층 해제 등)으로 조용히 바뀐다.
-/// ★한 칸씩 끊지 않고 **전부 모아** 낸다★: 첫 칸에서 끊으면 셋을 빈 값으로 보낸 호출자가 반려·수정을
-/// 세 번 반복한다(같은 이유로 입구의 모르는 칸 검문도 전부 센다 — `CommandTable::check_args`).
-/// ★안내는 **칸마다** 다르다(load-bearing)★: 시키는 대로 했더니 또 반려당하면 호출자(특히 LLM)는 같은
-/// 자리를 맴돈다. 필수 칸에 "빼도 된다" 고 말하면 뺀 재시도가 「빠졌다」로 반려되고, `null` 이 적극적 지시인
-/// 칸에 "값을 채워라" 만 말하면 그 갈래가 통째로 감춰진다. 그래서 칸마다 **그 칸에서 실제로 통하는 길**을
-/// 적는다([`Blank`]).
+/// ★An unset shell variable expanding to an empty argument (`--parent "$UNSET"`) realistically comes in★ — folding it as "not given" would turn one typo into a different action (hierarchy release etc.).
+/// ★Emitted **all gathered**, not cut per field★: cutting at the first would make a caller sending three blanks repeat rejection and fix three times (like the entry's unknown-field check — `CommandTable::check_args`).
+/// ★Guidance differs **per field** (load-bearing)★: a caller (especially an LLM) rejected again after doing as told circles the same place — telling a required field "may be omitted" gets the omitting retry rejected as 「missing」, and telling a field where `null` is an
+/// active instruction only "fill in a value" hides that branch. Each field gets **the way that works for that field** ([`Blank`]).
 fn reject_blanks(fields: &[(&str, Option<&str>, Blank)]) -> Result<(), CommandError> {
     let advice: Vec<String> = fields
         .iter()
@@ -2079,13 +2008,13 @@ fn reject_blanks(fields: &[(&str, Option<&str>, Blank)]) -> Result<(), CommandEr
     )))
 }
 
-/// 빈 값으로 온 칸에서 **무엇이 실제로 통하는가**.
+/// **What actually works** for a field that came blank.
 enum Blank<'a> {
-    /// 값이 반드시 있어야 한다(빼면 「빠졌다」로 반려된다).
+    /// A value is required (omitting it is rejected as 「missing」).
     NeedsValue,
-    /// 값을 넣거나 칸을 통째로 빼면 된다.
+    /// Putting a value in or omitting the field entirely works.
     OrOmit,
-    /// 값 말고 다른 갈래가 있다 — 그 갈래를 문구에 그대로 싣는다(예: `null` 이 적극적 지시인 칸).
+    /// There is a branch other than a value — that branch is carried in the text as is (e.g. a field where `null` is an active instruction).
     OrElse(&'a str),
 }
 
@@ -2093,7 +2022,7 @@ fn is_blank(given: Option<&str>) -> bool {
     given.is_some_and(|v| v.trim().is_empty())
 }
 
-/// 빈 값으로 온 칸 이름 전부 — 반려 문구를 **동사가 직접** 쓸 때 쓴다(제약이 칸 하나가 아니라 조합인 자리).
+/// All names of fields that came blank — used when **the verb writes** the rejection text directly (places where the constraint is a combination, not one field).
 fn blank_fields<'a>(fields: &[(&'a str, Option<&str>)]) -> Vec<&'a str> {
     fields
         .iter()
@@ -2113,7 +2042,7 @@ mod tests {
     use super::*;
     use crate::launch::{notice_row, BlockReason, Reason};
 
-    /// 가짜 매니저 — ★프로세스도 PTY 도 없다★. 이 하네스가 서지 않으면 T-1 이 깨진 것이다.
+    /// Fake manager — ★neither a process nor a PTY★. If this harness does not stand, T-1 is broken.
     #[derive(Default)]
     struct FakeHost {
         rows: Mutex<Vec<AgentRosterRow>>,
@@ -2131,35 +2060,33 @@ mod tests {
         create_fails: Mutex<Option<PtyError>>,
         /// Every `create_and_activate` call — the profile the body built and the delivery it asked for.
         creates: Mutex<Vec<(AgentProfile, NoticeDelivery)>>,
-        /// 켜져 있으면 명부를 바꾸는 셋과 활성화가 저장 거절(새 판이 쓴 파일)로 돌아온다 — 명부는 그대로다.
+        /// When on, the three that change the roster and activation come back with a save refusal (a file written by a newer edition) — the roster is unchanged.
         // ADR-0291 R17
         store_refuses: Mutex<bool>,
-        /// `agent.list` 가 싣는 저장소 상태 — 기본은 쓸 수 있음.
+        /// The store state `agent.list` carries — writable by default.
         // ADR-0291 R17 (D6)
         store_status: Mutex<StoreStatus>,
-        /// reparent 호출 **안에서** 명부에서 지울 대상 — 「그 사이 사라졌다」를 재현한다(자식이든 부모든).
-        /// ★적용 성패와 무관하게 지운다★: 실패 뒤 사라짐은 사유 분기를, 성공 뒤 사라짐은 응답 이름의
-        /// fallback 을 태운다 — 한쪽에만 걸면 다른 쪽 코드에 어떤 테스트도 못 닿는다.
+        /// The target to delete from the roster **inside** the reparent call — reproduces 「vanished in the meantime」 (child or parent). ★Deleted regardless of apply success★: after a failure it exercises the reason branch, after success the response name's fallback;
+        /// one side only would leave the other side's code unreached.
         vanish_on_reparent: Mutex<Option<AgentId>>,
-        /// `activate_profile` 이 돌려줄 상태. ★terminal 을 넣을 수 있어야 한다★ — 띄우자마자 죽는 경우
-        ///   (ADR-0082 resume 조기 종료)가 응답 상태를 지어내는지 재는 유일한 방법이고, 여기가 `Running`
-        ///   으로 굳어 있으면 `started_payload` 에 `"live"` 를 박아도 전 스위트가 초록이다.
+        /// The state `activate_profile` returns. ★It must be possible to put a terminal one in★ — dying right after launching (ADR-0082 resume early exit) is the only way to measure whether the response state is made up; fixed at `Running`, baking `"live"` into
+        ///   `started_payload` would keep the suite green.
         started_status: Mutex<Option<AgentStatus>>,
-        /// reparent 성공 직후 자식이 얻는 새 이름 — 「적용 뒤 개명이 끼어들었다」를 재현한다.
+        /// The new name the child gets right after a reparent succeeds — reproduces 「a rename slipped in after applying」.
         rename_on_reparent: Mutex<Option<String>>,
-        /// 대기 목록 조회의 답. `None` = 산 세션이 없다.
+        /// The answer of the waiting-list query. `None` = no live session.
         queued_listing: Mutex<Option<QueuedListing>>,
-        /// 대기 입력 취소의 답(한 번 쓰고 비운다). 비었으면 `NotFound`.
+        /// The answer of the queued input cancellation (used once and emptied). `NotFound` if empty.
         cancel_answer: Mutex<Option<Result<CancelOutcome, CancelError>>>,
-        /// 두 동사가 매니저에 넘긴 지목 — 푼 id 가 그대로 가는지 잰다.
+        /// The pointing the two verbs handed to the manager — measures whether the resolved id goes as is.
         queued_calls: Mutex<Vec<(AgentId, Option<String>)>>,
-        /// 끊기의 답(한 번 쓰고 비운다). 비었으면 `Ok(())`.
+        /// The answer of the interrupt (used once and emptied). `Ok(())` if empty.
         interrupt_answer: Mutex<Option<Result<(), PtyError>>>,
-        /// 끊기가 매니저에 넘긴 지목.
+        /// The pointing the interrupt handed to the manager.
         interrupt_calls: Mutex<Vec<AgentId>>,
     }
 
-    /// 명부 통지 계수기 — 「이름을 바꿨는데 트리가 옛 명부를 보여준다」의 감시자.
+    /// Roster notification counter — the watcher of 「renamed but the tree shows the old roster」.
     #[derive(Default)]
     struct FakeNotify {
         calls: Mutex<usize>,
@@ -2171,7 +2098,7 @@ mod tests {
         }
     }
 
-    /// 가짜 사용량 포트 — 받은 백엔드를 적고 심어 둔 행을 돌려준다(`None` = 칸이 없다).
+    /// Fake usage port — records the received backend and returns the planted row (`None` = no field).
     #[derive(Default)]
     struct FakeUsage {
         row: Mutex<Option<UsageVendorRow>>,
@@ -2211,7 +2138,7 @@ mod tests {
             })
         }
 
-        /// 저장 거절이 켜져 있으면 매니저의 `try_` 판처럼 명부를 건드리기 전에 돌아온다.
+        /// If save refusal is on, it returns before touching the roster, like the manager's `try_` versions.
         fn refuse_if_set(&self) -> Result<(), PtyError> {
             if *self.store_refuses.lock().unwrap() {
                 return Err(PtyError::Store(StoreError::ReadOnly(
@@ -2225,8 +2152,8 @@ mod tests {
             self.with_status(name, live.then_some(AgentStatus::Running), resumable)
         }
 
-        /// 명부 행의 상태를 **그대로** 심는다 — terminal 상태의 행이 `list` 에서 어떤 낱말로 나오는지를
-        /// 재려면 `Running` 말고도 넣을 수 있어야 한다.
+        /// Plants the row's state **as is** — to measure what word a terminal-state row comes out as in `list`,
+        /// something other than `Running` must be insertable too.
         fn with_status(
             self: &Arc<Self>,
             name: &str,
@@ -2244,8 +2171,8 @@ mod tests {
             )
         }
 
-        /// 행의 **명령**까지 정하는 변형 — 활성화 모드 유도가 백엔드 축을 보는지 재려면 claude 말고 다른
-        /// 명령도 심을 수 있어야 한다(claude 만 심으면 그 판정이 늘 같은 답을 내 아무것도 안 갈린다).
+        /// The variant deciding even the row's **command** — to measure whether activation mode derivation looks at the backend axis, commands other than claude
+        /// must be plantable too (planting only claude makes that decision always give the same answer, splitting nothing).
         fn with_status_command(
             self: &Arc<Self>,
             name: &str,
@@ -2397,12 +2324,13 @@ mod tests {
         ) -> Result<bool, PtyError> {
             self.refuse_if_set()?;
             let ok = *self.reparent_ok.lock().unwrap();
-            // ★적용 성패와 무관하게 사라진다★: 성공 **뒤** 사라지는 창이 응답 이름의 fallback 을 태우는
-            //   유일한 경로다. 실패 쪽에만 걸면 그 fallback 은 어떤 테스트로도 못 닿는다.
+            // ★It vanishes regardless of apply success★: the window vanishing **after** success is the only path that exercises the
+            //   response name's fallback.
+            //   Putting it only on the failure side leaves that fallback unreached by any test.
             if let Some(vanished) = *self.vanish_on_reparent.lock().unwrap() {
                 self.rows.lock().unwrap().retain(|row| row.id != vanished);
             }
-            // 적용과 응답 사이에 개명이 커밋되는 창 — 실제로는 다른 호출자가 낸다.
+            // The window where a rename is committed between applying and responding — in reality another caller issues it.
             if let (true, Some(renamed)) = (ok, self.rename_on_reparent.lock().unwrap().take()) {
                 for row in self.rows.lock().unwrap().iter_mut() {
                     if row.id == child {
@@ -2449,8 +2377,8 @@ mod tests {
         name: &str,
         mut args: serde_json::Value,
     ) -> Result<serde_json::Value, CommandError> {
-        // 표를 거쳐 부른다 — 인자를 선언 스키마에 맞추는 자리가 거기 하나뿐이다(`CommandTable::call`).
-        let future = table.call(name, &mut args).expect("표에 있는 이름");
+        // Called through the table — the only place fitting the arguments to the declared schema (`CommandTable::call`).
+        let future = table.call(name, &mut args).expect("a name in the table");
         block_on(future)
     }
 
@@ -2546,7 +2474,7 @@ mod tests {
         let (table, _notify) = wiring(&FakeHost::new());
         for decl in table.decls() {
             let item: serde_json::Value =
-                serde_json::from_str(&decl.help).expect("help 는 JSON 항목 하나");
+                serde_json::from_str(&decl.help).expect("help is one JSON item");
             assert_eq!(item["name"], decl.name.as_str());
             assert!(item["args"]["type"] == "object");
             assert!(item["ok"]["type"] == "object");
@@ -2561,8 +2489,8 @@ mod tests {
         host.with_agent("beta", false, false);
         let (table, _notify) = wiring(&host);
 
-        let out = call(&table, "agent.list", json!({})).expect("조회 성공");
-        let agents = out["agents"].as_array().expect("배열");
+        let out = call(&table, "agent.list", json!({})).expect("query succeeds");
+        let agents = out["agents"].as_array().expect("array");
         assert_eq!(agents.len(), 2);
         assert_eq!(agents[0]["name"], "alpha");
         assert_eq!(agents[0]["state"], "live");
@@ -2570,15 +2498,14 @@ mod tests {
         assert_eq!(agents[0]["parent"], serde_json::Value::Null);
     }
 
-    /// ★저장소 상태 셋이 까닭과 함께 `agent.list` 에 실린다(D6)★ — `Refusing` 이 없으면 실행 중 거절은 `Writable` 로
-    ///   보이는데 바꾸는 요청은 `CONFLICT` 로 돌아와, 호출자가 그 오류를 설명할 상태를 못 본다.
+    /// ★The three store states are carried in `agent.list` with their reasons (D6)★ — without `Refusing`, a refusal during the run would look `Writable` while changes come back `CONFLICT`, leaving the error unexplained.
     // ADR-0291 R17 (D6)
     #[test]
     fn list_reports_the_store_status_with_its_reason() {
         let host = FakeHost::new();
         let (table, _notify) = wiring(&host);
 
-        let out = call(&table, "agent.list", json!({})).expect("조회 성공");
+        let out = call(&table, "agent.list", json!({})).expect("query succeeds");
         assert_eq!(
             out["store"],
             json!({ "agents": { "state": "Writable", "reason": null, "file_version": null } })
@@ -2603,13 +2530,12 @@ mod tests {
             ),
         ] {
             *host.store_status.lock().unwrap() = status;
-            let out = call(&table, "agent.list", json!({})).expect("조회 성공");
+            let out = call(&table, "agent.list", json!({})).expect("query succeeds");
             assert_eq!(out["store"], json!({ "agents": expected }), "{status:?}");
         }
     }
 
-    /// ★실 매니저가 명부 저장소의 상태를 싣는다(D6)★ — 가짜 매니저는 심은 칸을 돌려줄 뿐이라, 매니저 쪽 구현이 그
-    ///   상태를 늘 `Writable` 로 두는 것은 실물로만 잡힌다.
+    /// ★The real manager carries the roster store's state (D6)★ — the fake only returns planted fields, so a manager always leaving that state `Writable` is caught only with the real thing.
     // ADR-0291 R17 (D6)
     #[test]
     fn a_real_manager_reports_its_store_status() {
@@ -2652,7 +2578,7 @@ mod tests {
             Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
         );
 
-        let out = call(&table, "agent.list", json!({})).expect("조회 성공");
+        let out = call(&table, "agent.list", json!({})).expect("query succeeds");
         assert_eq!(
             out["store"],
             json!({
@@ -2669,14 +2595,14 @@ mod tests {
             "agent.spawn",
             json!({ "target": "alpha", "cwd": "C:/x" }),
         )
-        .expect_err("둘 다 주면 반려");
+        .expect_err("giving both is rejected");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn spawn_refuses_neither_target_nor_cwd() {
         let (table, _notify) = wiring(&FakeHost::new());
-        let err = call(&table, "agent.spawn", json!({})).expect_err("아무것도 안 주면 반려");
+        let err = call(&table, "agent.spawn", json!({})).expect_err("giving nothing is rejected");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
     }
 
@@ -2691,7 +2617,7 @@ mod tests {
             "agent.spawn",
             json!({ "target": "alpha", "name": "beta" }),
         )
-        .expect_err("깨우기에 name 은 아무 일도 못 한다");
+        .expect_err("name can do nothing for waking");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
     }
 
@@ -2701,19 +2627,18 @@ mod tests {
         let id = host.with_agent("alpha", false, true);
         let (table, notify) = wiring(&host);
 
-        let out = call(&table, "agent.spawn", json!({ "target": "alpha" })).expect("깨우기");
+        let out = call(&table, "agent.spawn", json!({ "target": "alpha" })).expect("wake");
         assert_eq!(out["created"], false);
         assert_eq!(out["state"], "live");
         assert_eq!(host.started.lock().unwrap().as_slice(), &[(id, true)]);
         assert_eq!(
             *notify.calls.lock().unwrap(),
             1,
-            "구성은 그대로여도 활성화가 「마지막 실패」를 바꾼다(ADR-0172) — 그 축은 프로필 목록으로만 흐른다"
+            "even if the composition is unchanged, activation changes the last failure (ADR-0172) — that axis flows only through the profile list"
         );
     }
 
-    /// ★LLM 이 깨운 실패가 화면에 닿아야 한다★: 이 통지가 없으면 사람 클릭(WS `SpawnProfile`)으로는
-    /// 실패 표시가 뜨는데 명령 버스로는 안 떠, 두 핸들이 같은 것을 흔들지 않게 된다.
+    /// ★A failure from an LLM wake-up must reach the screen★: without this notification a human click (WS `SpawnProfile`) shows the failure marker but the command bus does not — the two handles would not move the same thing.
     // ADR-0172
     #[test]
     fn waking_that_fails_still_announces_the_roster() {
@@ -2723,19 +2648,14 @@ mod tests {
         let (table, notify) = wiring(&host);
 
         call(&table, "agent.spawn", json!({ "target": "alpha" }))
-            .expect_err("전제: 활성화가 실패한다");
+            .expect_err("premise: activation fails");
         assert_eq!(*notify.calls.lock().unwrap(), 1);
     }
 
-    /// ★저장된 sid 만으로 Resume 을 유도하지 않는다(ADR-0185)★ — 이어받을 수 없는 명령에 sid 가 남아
-    /// 있는 상태는 오늘도 만들어진다(손으로 고친 프로필 파일 · 백엔드를 갈아탄 프로필). 그때 Resume 으로
-    /// 띄우면 **새 대화가 열리는데 결과는 「이어받음」으로 보고된다** — wire 에 그것이 새 대화라는 표식이
-    /// 없어 화면도 LLM 도 구별하지 못한다.
-    /// ★WS 입구에도 같은 짝이 있다★ — 두 핸들이 같은 것을 흔들어야 한다(CLAUDE.md 「LLM-우선 제어」).
+    /// ★Resume is not derived from a stored sid alone (ADR-0185)★ — a sid on a command that cannot resume exists today (a hand-edited profile file · a profile that switched backends); launching it as Resume **opens a new conversation but reports 「resumed」**, and the
+    /// wire has no marker for a new conversation, so neither screen nor LLM can tell. ★The WS entry has the same pair★ (CLAUDE.md 「LLM-first control」).
     // ADR-0185
-    /// ★표본이 셸인 것은 의도다 — codex 터미널 모드를 여기 되돌리지 말 것★: 그 모드는 ADR-0208 로
-    /// `codex resume <id>` 를 쓰게 되어 이제 이어받기 축이 **true** 다. 축이 꺼진 표본은 셸뿐이고,
-    /// 셸을 잘못된 표본이라 여겨 갈아 끼우면 이 항목이 재는 것이 사라진다.
+    /// ★The sample being shell is intended — do not bring the codex terminal mode back here★: by ADR-0208 that mode uses `codex resume <id>` and its resume axis is **true**; shell is the only sample with the axis off, and replacing it would remove what this entry measures.
     #[test]
     fn waking_does_not_resume_a_profile_whose_backend_cannot_resume() {
         let host = FakeHost::new();
@@ -2755,16 +2675,15 @@ mod tests {
             "agent.spawn",
             json!({ "target": "shell-with-stale-sid" }),
         )
-        .expect("깨우기");
+        .expect("wake");
         assert_eq!(
             host.started.lock().unwrap().as_slice(),
             &[(id, false)],
-            "sid 가 있어도 이어받을 수 없는 명령이면 Fresh 로 떠야 한다"
+            "even with a sid, a command that cannot resume must launch Fresh"
         );
     }
 
-    /// ★위 항목의 짝 — codex 터미널 모드는 이제 **반대쪽**에 선다(ADR-0208)★: 손잡이가 명부에 있으면
-    /// 그 모드도 Resume 으로 떠야 한다. 이것이 없으면 위 항목만 남아, 축을 통째로 꺼도 초록이다.
+    /// ★The pair of the entry above — the codex terminal mode now stands **on the opposite side** (ADR-0208)★: with the handle in the roster it must also launch as Resume; without this the entry above would stay green even if the axis were turned off entirely.
     // ADR-0208
     #[test]
     fn waking_a_codex_terminal_profile_with_a_stored_handle_resumes() {
@@ -2780,11 +2699,11 @@ mod tests {
         );
         let (table, _notify) = wiring(&host);
 
-        call(&table, "agent.spawn", json!({ "target": "codex-term" })).expect("깨우기");
+        call(&table, "agent.spawn", json!({ "target": "codex-term" })).expect("wake");
         assert_eq!(
             host.started.lock().unwrap().as_slice(),
             &[(id, true)],
-            "훅이 받아 적은 손잡이가 있는데 Fresh 로 뜨면 그 id 는 영영 안 쓰인다"
+            "if it launched Fresh while a handle the hook recorded exists, that id would never be used"
         );
     }
 
@@ -2794,7 +2713,7 @@ mod tests {
         let id = host.with_agent("alpha", false, false);
         let (table, _notify) = wiring(&host);
 
-        call(&table, "agent.spawn", json!({ "target": "alpha" })).expect("깨우기");
+        call(&table, "agent.spawn", json!({ "target": "alpha" })).expect("wake");
         assert_eq!(host.started.lock().unwrap().as_slice(), &[(id, false)]);
     }
 
@@ -2812,7 +2731,7 @@ mod tests {
             "agent.spawn",
             json!({ "cwd": r#"C:\work\gamma"#, "name": "gamma" }),
         )
-        .expect("생성 + 띄우기");
+        .expect("create + launch");
         assert_eq!(out["created"], true);
         assert_eq!(out["name"], "gamma");
         assert_eq!(host.started.lock().unwrap().len(), 1);
@@ -2840,10 +2759,14 @@ mod tests {
         *host.start_fails.lock().unwrap() = true;
         let (table, notify) = wiring(&host);
 
-        let err =
-            call(&table, "agent.spawn", json!({ "cwd": "C:/work/gamma" })).expect_err("기동 실패");
+        let err = call(&table, "agent.spawn", json!({ "cwd": "C:/work/gamma" }))
+            .expect_err("start fails");
         assert_eq!(err.code(), ErrorCode::Internal);
-        assert_eq!(host.rows.lock().unwrap().len(), 1, "명부에는 남는다");
+        assert_eq!(
+            host.rows.lock().unwrap().len(),
+            1,
+            "it remains in the roster"
+        );
         assert_eq!(
             *notify.calls.lock().unwrap(),
             1,
@@ -3450,16 +3373,20 @@ mod tests {
             "agent.new",
             json!({ "cwd": "C:/work/delta", "backend": "Claude" }),
         )
-        .expect("등록");
+        .expect("register");
         assert_eq!(out["state"], "sleeping");
-        assert!(host.started.lock().unwrap().is_empty(), "띄우지 않는다");
-        assert_eq!(*notify.calls.lock().unwrap(), 1, "명부 변경을 알린다");
+        assert!(host.started.lock().unwrap().is_empty(), "does not launch");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            1,
+            "announces the roster change"
+        );
     }
 
-    // ── 손으로 친 낱말의 철자 ───────────────────────────────────────────────────────────────
+    // ── Spelling of hand-typed words ───────────────────────────────────────────────────────────────
 
-    /// 백엔드 낱말은 대소문자를 가리지 않는다 — 표를 거쳐 부르는 이 helper 가 그 조정이 도는 자리
-    /// (`CommandTable::call`)를 실제로 태운다.
+    /// Backend words are case-insensitive — this helper calling through the table actually runs the place where that adjustment happens
+    /// (`CommandTable::call`).
     #[test]
     fn new_accepts_the_backend_word_in_any_casing() {
         for word in ["claude", "Claude", "CLAUDE", "codex", "Codex", "CODEX"] {
@@ -3471,12 +3398,12 @@ mod tests {
                 "agent.new",
                 json!({ "cwd": "C:/work/delta", "backend": word }),
             )
-            .unwrap_or_else(|e| panic!("backend '{word}' 는 받아야 한다: {e:?}"));
+            .unwrap_or_else(|e| panic!("backend '{word}' must be accepted: {e:?}"));
             assert_eq!(out["state"], "sleeping", "{word}");
         }
     }
 
-    /// 관용은 **철자**에만 든다 — 모르는 낱말은 그대로 반려한다.
+    /// Leniency applies only to **spelling** — an unknown word is rejected as is.
     #[test]
     fn new_still_refuses_a_backend_word_it_does_not_know() {
         let host = FakeHost::new();
@@ -3487,19 +3414,19 @@ mod tests {
             "agent.new",
             json!({ "cwd": "C:/work/delta", "backend": "codx" }),
         )
-        .expect_err("모르는 낱말은 반려");
+        .expect_err("an unknown word is rejected");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
     }
 
-    /// 내보내는 철자는 안 바뀐다 — 생성물(`bindings/commands.schema.json` 의 `"enum"`)이 이 값을 싣는다.
+    /// The emitted spelling does not change — the generated output (the `"enum"` of `bindings/commands.schema.json`) carries this value.
     #[test]
     fn the_declared_backend_words_still_serialize_in_pascal_case() {
         assert_eq!(
-            serde_json::to_value(AgentBackend::Claude).expect("직렬화"),
+            serde_json::to_value(AgentBackend::Claude).expect("serialize"),
             json!("Claude")
         );
         assert_eq!(
-            serde_json::to_value(AgentBackend::Codex).expect("직렬화"),
+            serde_json::to_value(AgentBackend::Codex).expect("serialize"),
             json!("Codex")
         );
     }
@@ -3524,7 +3451,7 @@ mod tests {
         }
     }
 
-    /// 등록 실패는 사유마다 다른 코드 · 재시도 지시로 나간다 — 호출자가 할 일이 갈리기 때문이다.
+    /// Registration failures go out with a different code and retry instruction per reason — because what the caller should do differs.
     #[test]
     fn registration_failures_map_to_distinct_codes() {
         use crate::profile::Refusal;
@@ -3547,9 +3474,9 @@ mod tests {
                 ErrorCode::Internal,
                 RetryMode::Never,
             ),
-            // ADR-0291 R17 — 거절은 `CONFLICT` 이고 재시도 지시는 어디서 났나 · 까닭이 가른다(사용자 결정
-            //   2026-10-11): 적재 거절 = `never`(데몬을 다시 띄워야 풀린다) · 재판정의 새 판 = `never` · 재판정의 못 읽음
-            //   = `after-condition`(대개 잠깐 쥔 잠김). 쓰기 실패는 `INTERNAL`.
+            // ADR-0291 R17 — a refusal is `CONFLICT`; the retry instruction depends on origin: load refusal = `never` (clears only by
+            //   restarting the daemon) · re-decision newer edition = `never` · re-decision unreadable = `after-condition` (usually a
+            //   briefly held lock). Write failure = `INTERNAL`.
             (
                 PtyError::Store(StoreError::ReadOnly(Refusal::Newer { found: 2 })),
                 ErrorCode::Conflict,
@@ -3589,16 +3516,16 @@ mod tests {
                 "agent.new",
                 json!({ "cwd": "C:/work/delta", "backend": "Claude" }),
             )
-            .expect_err("등록 실패");
+            .expect_err("registration fails");
             assert_eq!(err.code(), expected, "{label}");
             assert_eq!(err.retry(), retry, "{label}");
             assert_eq!(
                 *notify.calls.lock().unwrap(),
                 0,
-                "실패했으면 명부는 안 바뀌었다"
+                "if it failed, the roster did not change"
             );
             if from_store {
-                // 어느 파일이 왜 받지 않았나를 문구가 댄다 — 호출자가 고칠 자리를 찾게.
+                // The text names which file did not accept and why — so the caller finds the place to fix.
                 assert!(
                     err.message().contains(PROFILES_FILE)
                         && err.message().contains("nothing was registered"),
@@ -3609,8 +3536,7 @@ mod tests {
         }
     }
 
-    /// ★저장소 거절의 사유는 영어로, 할 일까지 댄다★ — LLM 이 읽는 표면이다. 적재 거절은 다시 띄우기를, 재판정의 못
-    ///   읽음은 조금 뒤 다시를 말한다(재시도 지시는 데몬 출구에서 내려가므로 문구가 그 몫을 진다).
+    /// ★A store refusal's reason is English and names what to do★ — the LLM reads it. A load refusal says restart; a re-decision's unreadable says again a little later (the retry instruction is lowered at the daemon exit, so the text carries it).
     // ADR-0291 R17
     #[test]
     fn store_refusal_reasons_are_english_and_name_the_way_out() {
@@ -3638,7 +3564,7 @@ mod tests {
         );
     }
 
-    /// ★작업 폴더 없이는 만들지 않는다★ — 만들 자리가 없는 에이전트가 명부에 앉으면 그것을 지우는 동사가 없다
+    /// ★No create without a working folder★ — an agent with no place to work sitting in the roster has no verb to remove it
     /// (ADR-0122).
     #[test]
     fn new_without_a_cwd_is_refused_and_registers_nothing() {
@@ -3646,19 +3572,23 @@ mod tests {
         let (table, notify) = wiring(&host);
 
         let err = call(&table, "agent.new", json!({ "backend": "Claude" }))
-            .expect_err("만들 자리가 없다");
+            .expect_err("no place to create");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
         assert!(err.message().contains("cwd"), "{}", err.message());
         assert!(
             host.rows.lock().unwrap().is_empty(),
-            "반려는 등록하지 않는다"
+            "a rejection does not register"
         );
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            0,
+            "a rejection does not notify"
+        );
     }
 
-    /// ★`preset` 은 `agent.new` 의 칸이 아니다★ — 입구 검문(`CommandTable::check_args`)이 모르는 칸으로 반려한다.
-    ///   역직렬화는 모르는 칸을 버리므로(additive 규칙) 이 검문이 빠지면 경로 북마크 id 를 실은 옛 호출이 그 칸을
-    ///   잃은 채 `cwd` 로 만들어진다.
+    /// ★`preset` is not a field of `agent.new`★ — the entry check (`CommandTable::check_args`) rejects it as an unknown field.
+    ///   Deserialization drops unknown fields (the additive rule), so without this check an old call carrying a path bookmark id
+    ///   would lose that field and be created with `cwd`.
     #[test]
     fn preset_is_not_an_argument_of_new() {
         let (table, _notify) = wiring(&FakeHost::new());
@@ -3668,13 +3598,13 @@ mod tests {
                 "agent.new",
                 &json!({ "cwd": "C:/work/x", "preset": "bookmark-1", "backend": "Claude" }),
             )
-            .expect_err("선언에 없는 칸");
+            .expect_err("a field not in the declaration");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
         assert!(err.message().contains(r#""preset""#), "{}", err.message());
     }
 
-    /// ★미지정은 StreamJson, 어휘 밖 값은 반려★ — 조용한 fallback 이 있으면 "만들었는데 화면이 다르다"가
-    /// 되고(ADR-0078) 호출자는 자기 오타를 영영 모른다.
+    /// ★Unspecified is StreamJson, values outside the vocabulary are rejected★ — with a silent fallback it would become "created it, but the screen is different"
+    /// (ADR-0078) and the caller would never learn of their own typo.
     #[test]
     fn new_defaults_the_output_format_and_refuses_a_word_outside_the_vocabulary() {
         let host = FakeHost::new();
@@ -3687,11 +3617,11 @@ mod tests {
                 .unwrap()
                 .iter()
                 .find(|row| row.canonical_name == name)
-                .expect("등록된 행")
+                .expect("registered row")
                 .id;
             match host.profiles.lock().unwrap()[&id].command.clone() {
                 AgentCommand::Claude { output_format, .. } => output_format,
-                other => panic!("claude 프로필이어야: {other:?}"),
+                other => panic!("must be a claude profile: {other:?}"),
             }
         };
 
@@ -3700,7 +3630,7 @@ mod tests {
             "agent.new",
             json!({ "cwd": "C:/x", "name": "silent", "backend": "Claude" }),
         )
-        .expect("미지정");
+        .expect("unspecified");
         assert_eq!(format_of("silent"), NEW_AGENT_OUTPUT_FORMAT);
 
         call(
@@ -3708,16 +3638,16 @@ mod tests {
             "agent.new",
             json!({ "cwd": "C:/x", "name": "typed", "output_format": "Terminal", "backend": "Claude" }),
         )
-        .expect("명시");
+        .expect("explicit");
         assert_eq!(format_of("typed"), CoreAgentOutputFormat::Terminal);
 
-        // 대소문자만 다른 철자는 어휘 밖이 아니다 — 선언된 철자로 옮겨져 통한다.
+        // A spelling differing only in case is not outside the vocabulary — it is moved to the declared spelling and works.
         call(
             &table,
             "agent.new",
             json!({ "cwd": "C:/x", "name": "folded", "output_format": "terminal", "backend": "Claude" }),
         )
-        .expect("철자만 다른 값");
+        .expect("a value differing only in spelling");
         assert_eq!(format_of("folded"), CoreAgentOutputFormat::Terminal);
 
         let err = call(
@@ -3725,23 +3655,18 @@ mod tests {
             "agent.new",
             json!({ "cwd": "C:/x", "output_format": "Ndjson", "backend": "Claude" }),
         )
-        .expect_err("어휘 밖 값");
+        .expect_err("a value outside the vocabulary");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
         assert!(
             err.message().contains("Terminal") && err.message().contains("StreamJson"),
-            "무엇이 통하는지 말해야: {}",
+            "must say what works: {}",
             err.message()
         );
     }
 
-    /// ★반려가 **명부를 하나도 안 건드린다**는 사실은 다른 crate 의 판정 재료다★
-    ///
-    /// 데몬은 마감 뒤 재질의를 막을지 가를 때 「실패 답 = 아무것도 안 남았다」를 전제로 쓴다
-    /// (`command_delivery::retains_the_id`). 그 전제가 깨지면 그쪽이 **조용히** 틀린다 — 실패한 번호를
-    /// 붙들어 정상 재시도를 막거나, 적용된 번호를 놓아 두 번 적용되게 한다.
-    /// ★`agent.spawn` 은 이 단언에 **없다 — 그 동사만 다르기 때문이다**★: 만들고 나서 못 띄우면 에이전트를
-    /// 명부에 남긴 채 `INTERNAL` 로 답한다(이웃 시험 `a_created_agent_that_fails_to_start_is_not_rolled_back`
-    /// 이 그 사실을 못박는다). 그래서 데몬 쪽 판정도 그 코드 하나를 예외로 갈라 둔다.
+    /// ★That a rejection **touches nothing in the roster** is decision material for another crate★: the daemon uses 「failure answer = nothing remained」 to decide whether to block re-queries after the deadline (`command_delivery::retains_the_id`); if it breaks, that side
+    /// is **silently** wrong (holding a failed number blocks a normal retry; letting go of an applied number applies twice).
+    /// ★`agent.spawn` is **absent** here — only that verb differs★: if it cannot launch after creating it answers `INTERNAL` with the agent left in the roster (`a_created_agent_that_fails_to_start_is_not_rolled_back` pins that), so the daemon splits that one code off as an exception.
     #[test]
     fn a_rejection_from_the_mutating_verbs_leaves_the_roster_untouched() {
         let host = FakeHost::new();
@@ -3756,7 +3681,7 @@ mod tests {
         };
         let before = snapshot();
 
-        // 반려가 나는 갈래를 동사별로 훑는다 — 코드는 다르지만 전부 「손대기 전」이어야 한다.
+        // Sweeps the branches where rejections happen, per verb — the codes differ but all must be 「before touching anything」.
         let rejections = [
             ("agent.new", json!({ "cwd": "   ", "backend": "Claude" })),
             ("agent.new", json!({ "backend": "Claude" })),
@@ -3766,16 +3691,21 @@ mod tests {
             ("agent.move", json!({ "target": "alpha" })),
         ];
         for (name, args) in rejections {
-            let err = call(&table, name, args.clone()).expect_err("반려여야: {name} {args}");
+            let err =
+                call(&table, name, args.clone()).expect_err("must be a rejection: {name} {args}");
             assert_ne!(
                 err.code(),
                 ErrorCode::Internal,
-                "{name}: 이 갈래가 INTERNAL 이면 데몬은 「적용됐을 수 있다」로 읽는다 — {args}"
+                "{name}: if this branch is INTERNAL, the daemon reads it as may-have-been-applied — {args}"
             );
-            assert_eq!(snapshot(), before, "{name}: 반려가 명부를 바꿨다 — {args}");
+            assert_eq!(
+                snapshot(),
+                before,
+                "{name}: the rejection changed the roster — {args}"
+            );
         }
-        // ★저장소가 받지 않은 변경도 같다★ — 매니저의 `try_` 판은 저장이 성공해야 커밋하므로 `CONFLICT` 가 「손대기
-        //   전」이라는 데몬의 전제가 그대로 선다.
+        // ★The same holds for changes the store did not accept★ — the manager's `try_` versions commit only if the save succeeds, so the
+        //   daemon's premise that `CONFLICT` is 「before touching anything」 stands.
         // ADR-0291 R17
         *host.store_refuses.lock().unwrap() = true;
         for (name, args) in [
@@ -3786,19 +3716,23 @@ mod tests {
             ("agent.rename", json!({ "target": "alpha", "name": "beta" })),
             ("agent.move", json!({ "target": "alpha", "parent": "lead" })),
         ] {
-            let err = call(&table, name, args.clone()).expect_err("저장 거절이어야: {name} {args}");
+            let err = call(&table, name, args.clone())
+                .expect_err("must be a save refusal: {name} {args}");
             assert_eq!(err.code(), ErrorCode::Conflict, "{name}: {args}");
             assert_eq!(
                 snapshot(),
                 before,
-                "{name}: 저장 거절이 명부를 바꿨다 — {args}"
+                "{name}: the save refusal changed the roster — {args}"
             );
         }
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            0,
+            "a rejection does not notify"
+        );
     }
 
-    /// ★저장소가 받지 않은 개명 · 이동은 `CONFLICT` 이고 통지가 없다★ — 이름 · 계층이 그대로라 알릴 변화가 없다.
-    ///   개명이 `Renamed` 로 답하면 호출자는 바뀐 이름으로 다음 명령을 친다.
+    /// ★A rename or move the store did not accept is `CONFLICT` with no notification★ — name and hierarchy are unchanged, so nothing to announce; answering `Renamed` would make the caller type the next command with a changed name.
     // ADR-0291 R17 (D3)
     #[test]
     fn a_rename_or_move_the_store_refuses_is_a_conflict_that_announces_nothing() {
@@ -3813,7 +3747,7 @@ mod tests {
             "agent.rename",
             json!({ "target": "alpha", "name": "beta" }),
         )
-        .expect_err("개명은 저장 거절로 돌아온다 — Renamed 가 아니다");
+        .expect_err("the rename comes back as a save refusal — not Renamed");
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert!(
             err.message().contains(PROFILES_FILE)
@@ -3827,15 +3761,14 @@ mod tests {
             "agent.move",
             json!({ "target": "alpha", "parent": "lead" }),
         )
-        .expect_err("이동은 저장 거절로 돌아온다");
+        .expect_err("the move comes back as a save refusal");
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert!(err.message().contains(PROFILES_FILE), "{}", err.message());
 
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "바뀐 것이 없다");
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "nothing changed");
     }
 
-    /// ★깨우기는 저장 거절이어도 명부를 알린다(E2)★ — 활성화 실패가 그 항목의 「마지막 실패」를 적고, 그 축은
-    ///   명부 통지로만 화면에 닿는다(ADR-0172). 코드는 `CONFLICT` 다.
+    /// ★Waking announces the roster even on a save refusal (E2)★ — the activation failure writes that entry's 「last failure」, which reaches the screen only through the roster notification (ADR-0172). The code is `CONFLICT`.
     // ADR-0291 R17 (E2)
     #[test]
     fn a_wake_the_store_refuses_is_a_conflict_that_still_announces_the_roster() {
@@ -3845,7 +3778,7 @@ mod tests {
         let (table, notify) = wiring(&host);
 
         let err = call(&table, "agent.spawn", json!({ "target": "alpha" }))
-            .expect_err("깨우기는 저장 거절로 돌아온다");
+            .expect_err("waking comes back as a save refusal");
 
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert!(
@@ -3854,12 +3787,11 @@ mod tests {
             "{}",
             err.message()
         );
-        assert!(host.started.lock().unwrap().is_empty(), "뜬 것이 없다");
+        assert!(host.started.lock().unwrap().is_empty(), "nothing launched");
         assert_eq!(*notify.calls.lock().unwrap(), 1);
     }
 
-    /// ★만들고 띄우기의 만들기가 거절되면 띄우기에 닿지 않는다(§3-9 ⓐ)★ — 명부 그대로 · 띄우기 시도 0 · 통지 0.
-    ///   다시 해도 중복이 생기지 않는다(만들기도 거절된다).
+    /// ★If the create of create-and-launch is refused, it does not reach the launch (§3-9 ⓐ)★ — roster unchanged · 0 launch attempts · 0 notifications; a retry creates no duplicate.
     // ADR-0291 R17
     #[test]
     fn a_create_and_start_whose_create_the_store_refuses_starts_nothing_and_announces_nothing() {
@@ -3872,7 +3804,7 @@ mod tests {
             "agent.spawn",
             json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
         )
-        .expect_err("만들기가 저장 거절로 돌아온다");
+        .expect_err("the create comes back as a save refusal");
 
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert!(
@@ -3880,15 +3812,13 @@ mod tests {
             "{}",
             err.message()
         );
-        assert!(host.rows.lock().unwrap().is_empty(), "명부 그대로");
-        assert!(host.started.lock().unwrap().is_empty(), "띄우기 시도 0");
+        assert!(host.rows.lock().unwrap().is_empty(), "roster unchanged");
+        assert!(host.started.lock().unwrap().is_empty(), "0 launch attempts");
         assert_eq!(*notify.calls.lock().unwrap(), 0);
     }
 
-    /// ★만든 뒤 띄우기를 저장소가 거절해도 `INTERNAL` 이다(§3-9 ⓑ)★ — 이미 만든 에이전트가 남으므로 데몬이
-    ///   「손대기 전 반려」(`CONFLICT`)로 읽어 요청 번호를 놓으면 같은 번호의 재시도가 또 만든다. 문구는 회복 길
-    ///   (그 이름으로 다시 띄우기)을 그대로 나르고 저장소의 사유는 까닭만 싣는다 — 「조금 뒤 다시」·「다시 해도
-    ///   소용없다」 같은 할 일 지시가 섞이면 같은 `--cwd` 로 또 만들거나 꼬리와 어긋난다. 거절의 까닭마다 잰다.
+    /// ★A store refusal of the launch after creating is `INTERNAL` (§3-9 ⓑ)★ — the created agent remains, so `CONFLICT` (「rejection before touching」) would let the daemon release the request number and a same-number retry create again. The text carries the recovery path
+    ///   (launch again by that name) and the store's reason only the cause — mixed-in 「again a little later」 · 「retrying is useless」 would make the caller create again with the same `--cwd` or contradict the tail. Measured per refusal cause.
     // ADR-0291 R17
     #[test]
     fn a_created_agent_whose_start_the_store_refuses_stays_internal_with_the_recovery_hint() {
@@ -3996,7 +3926,7 @@ mod tests {
                 "agent.spawn",
                 json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
             )
-            .expect_err("띄우기가 저장 거절로 돌아온다");
+            .expect_err("the launch comes back as a save refusal");
 
             let message = err.message();
             assert_eq!(err.code(), ErrorCode::Internal, "{message}");
@@ -4008,14 +3938,18 @@ mod tests {
                     ),
                 "{message}"
             );
-            // 까닭만 — 할 일 지시는 꼬리 하나다.
+            // Only the cause — the instruction of what to do is the one tail.
             assert!(
                 !message.contains("retry in a moment")
                     && !message.contains("retrying will not help")
                     && !message.contains("restart the daemon"),
                 "{message}"
             );
-            assert_eq!(host.rows.lock().unwrap().len(), 1, "만든 에이전트는 남는다");
+            assert_eq!(
+                host.rows.lock().unwrap().len(),
+                1,
+                "the created agent remains"
+            );
             assert!(host.started.lock().unwrap().is_empty());
             assert_eq!(
                 *notify.calls.lock().unwrap(),
@@ -4025,11 +3959,9 @@ mod tests {
         }
     }
 
-    /// ★실 매니저 · 받지 않는 저장소로 버스를 지난다★ — 가짜 매니저는 `try_` 판을 흉내 낼 뿐이라, 표가 정말 매니저의
-    ///   부르는 쪽 입구를 부르는지(옛 판이면 메모리에 서고 `Ok` 다)는 실물로만 잰다. 판정 거절 = `CONFLICT` · 쓰기
-    ///   실패 = `INTERNAL` 이고, 어느 쪽이든 명부 그대로 · 뜬 것 없음 · 통지는 깨우기의 활성화 뒤 하나뿐이다(E2).
-    /// ★프로세스를 띄우지 않는다★ — 띄우기는 등록(①)에서 멈춘다. 회귀해 지나쳐도 없는 프로그램을 부르는 셸이라
-    ///   실패로 끝난다.
+    /// ★Through the bus with the real manager and a store that does not accept★ — the fake only imitates the `try_` versions, so whether the table really calls the manager's caller entry (an old version would stand in memory and be `Ok`) is measurable only with the real thing.
+    ///   Decision refusal = `CONFLICT` · write failure = `INTERNAL`; either way roster unchanged · nothing launched · the only notification is the one after waking's activation (E2).
+    /// ★It launches no process★ — the launch stops at registration (①); a regression passing through would be a shell calling a nonexistent program, ending in failure.
     // ADR-0291 R17 (D3 · E2)
     #[test]
     fn a_real_manager_behind_the_bus_changes_nothing_while_its_store_does_not_save() {
@@ -4078,10 +4010,10 @@ mod tests {
             };
             let alpha = manager
                 .try_create_agent(shell("alpha"))
-                .expect("저장되면 등록");
+                .expect("register when saved");
             manager
                 .try_create_agent(shell("lead"))
-                .expect("저장되면 등록");
+                .expect("register when saved");
             let roster = |m: &AgentManager| -> Vec<(AgentId, Option<String>, Option<AgentId>)> {
                 let mut rows: Vec<_> = m
                     .agent_snapshots()
@@ -4111,7 +4043,7 @@ mod tests {
                 ("agent.spawn", json!({ "target": "alpha" })),
             ] {
                 let err = call(&table, name, args.clone())
-                    .expect_err("저장소가 받지 않으면 오류다: {name} {args}");
+                    .expect_err("an error if the store does not accept: {name} {args}");
                 assert_eq!(err.code(), expected, "{failure:?} · {name} {args}");
                 assert!(
                     err.message().contains(PROFILES_FILE),
@@ -4120,72 +4052,63 @@ mod tests {
                 );
             }
 
-            assert_eq!(roster(&manager), before, "{failure:?}: 명부 그대로");
+            assert_eq!(roster(&manager), before, "{failure:?}: roster unchanged");
             assert!(
                 manager.list_agents().is_empty(),
-                "{failure:?}: 뜬 것이 없다"
+                "{failure:?}: nothing launched"
             );
             assert_eq!(
                 *notify.calls.lock().unwrap(),
                 1,
-                "{failure:?}: 깨우기의 활성화 뒤 통지(E2) 하나뿐"
+                "{failure:?}: only the notification after waking's activation (E2)"
             );
             assert_eq!(
                 manager
                     .agent_snapshot(alpha.id)
                     .and_then(|p| p.last_failure),
                 Some(crate::failure::AgentFailureKind::Other),
-                "{failure:?}: 띄우기 실패가 아니라 「그 밖」으로 적는다"
+                "{failure:?}: recorded as 'other', not as a launch failure"
             );
         }
     }
 
-    /// ★[`NEW_AGENT_OUTPUT_FORMAT`] 의 **값 자체**를 글자로 못 박는다★ — 이 상수를 읽는 자리는 전부
-    /// 상대 비교(`assert_eq!(…, NEW_AGENT_OUTPUT_FORMAT)`)라, 상수를 `Terminal` 로 뒤집어도 그 단언들이
-    /// 함께 따라 움직여 **워크스페이스 전체가 초록으로 남는다**(2026-09-22 실측 — 그 값을 글자로 재는
-    /// 단언이 저장소에 하나도 없었다). 상대 비교는 「두 갈래가 같은 집을 본다」만 재고 「그 집에 무엇이
-    /// 들었나」는 안 잰다 — 후자가 사용자에게 보이는 값(생성 직후 화면이 챗이냐 터미널이냐)이라 여기서
-    /// 따로 잰다. 값을 바꾸는 것은 결정이므로, 이 줄을 고치는 편집은 그 결정을 지나야 한다(ADR-0078).
+    /// ★Pins **the value itself** of [`NEW_AGENT_OUTPUT_FORMAT`] as a literal★ — every reader of the constant compares relatively (`assert_eq!(…, NEW_AGENT_OUTPUT_FORMAT)`), so flipping it to `Terminal` moves those assertions along and **the whole workspace stays green**
+    /// (no literal assertion existed). Relative comparison measures 「both branches look at the same home」, not 「what is in it」 — the latter is what the user sees (chat or terminal after creation). Changing the value is a decision (ADR-0078).
     #[test]
     fn the_new_agent_default_output_format_is_pinned_to_a_literal() {
         assert_eq!(NEW_AGENT_OUTPUT_FORMAT, CoreAgentOutputFormat::StreamJson);
     }
 
-    /// `agent.new` 선언이 광고한 그 칸의 값 목록 — **호출자가 실제로 보는 목록**이다. 시험이 이것을 손으로
-    /// 적으면 세 번째 목록이 되어, 재려던 갈림을 자기가 만든다.
+    /// The value list of that field the `agent.new` declaration advertised — **the list callers actually see**. If the test wrote this by hand,
+    /// it would become a third list and create the very divergence it meant to measure.
     fn advertised(field: &str) -> Vec<String> {
         let schema: serde_json::Value =
-            serde_json::from_str(AgentNewArgs::SPEC.args_schema).expect("args 스키마");
-        // ★두 모양을 다 읽는다★ — 필수 칸은 `{"enum":[…]}` 로 바로 펴지고 생략 가능한 칸은
-        //   `{"anyOf":[{"enum":[…]},…]}` 로 한 겹 감싸인다. 한 모양만 읽으면 그 칸이 필수↔선택을
-        //   오갈 때 순회가 **빈 목록**이 되어 조용히 아무것도 안 잰다(호출부의 `is_empty` 단언이
-        //   마지막 방어지만, 여기서 안 접으면 그 단언이 매번 터진다).
+            serde_json::from_str(AgentNewArgs::SPEC.args_schema).expect("args schema");
+        // ★Both shapes are read★ — a required field spreads as `{"enum":[…]}`, an omittable one is wrapped as
+        //   `{"anyOf":[{"enum":[…]},…]}`; reading one shape would make the sweep an **empty list** when the field switches
+        //   required/optional, silently measuring nothing
+        //   (the caller's `is_empty` assertion is the last defense).
         let property = &schema["properties"][field];
         let branches = match property.get("anyOf") {
-            Some(any_of) => any_of.as_array().expect("anyOf 는 배열").clone(),
+            Some(any_of) => any_of.as_array().expect("anyOf is an array").clone(),
             None => vec![property.clone()],
         };
         branches
             .iter()
             .filter_map(|branch| branch.get("enum"))
-            .flat_map(|values| values.as_array().expect("enum 배열").clone())
-            .map(|value| value.as_str().expect("문자열").to_string())
+            .flat_map(|values| values.as_array().expect("enum array").clone())
+            .map(|value| value.as_str().expect("string").to_string())
             .collect()
     }
 
-    /// ★선언 어휘와 코어 어휘를 **컴파일러가** 묶는 자리★ — 산문으로만 묶으면 코어에 변형이 하나 늘 때
-    /// 선언 쪽이 조용히 좁은 채로 남고, 그 낱말은 입구에서 `INVALID_ARGUMENT` 로 반려된다(에러도 로그도
-    /// 없는 기능 부재라 아무도 알아채지 못한다).
+    /// ★The place where **the compiler** binds the declaration vocabulary and the core vocabulary★ — prose binding would leave the declaration silently narrow when the core gains a variant, and that word would be rejected at the entry with `INVALID_ARGUMENT` (no error or log).
     ///
-    /// ★이 시험이 재는 것은 절반이 **컴파일**이다★ — 아래 두 `match` 에는 와일드카드가 없어서 코어 enum 에
-    /// 변형이 늘면 이 파일이 **컴파일되지 않는다**. 그러니 갈래를 채울 때 `_ =>` 를 넣지 말 것: 넣는 순간
-    /// 그 절반이 아무것도 지키지 않는다.
-    /// ★나머지 절반은 **선언이 광고한 값 목록**에서 나온다★ — 낱말을 손으로 적으면 변형을 더하면서 그
-    /// 목록에 안 넣는 편집이 철자 대조를 조용히 비껴간다. 광고에서 끌어오면 그럴 수 없다: 코어에 변형이
-    /// 늘면 `match` 가 깨지고 → 선언에 변형을 더하게 되고 → 그 변형이 광고에 들어가 → 이 순회가 덮는다.
+    /// ★Half is **compilation**★ — the two `match`es below have no wildcard, so a new core variant **fails to compile** here; do not put `_ =>` when filling branches.
+    /// ★The other half comes from **the value list the declaration advertised**★ — hand-written words would let an edit adding a variant but not the list bypass the spelling check. Drawn from the advertisement: core gains a variant → `match` breaks → variant added to the
+    /// declaration → enters the advertisement → this sweep covers it.
     #[test]
     fn the_declared_vocabularies_are_pinned_to_the_core_ones() {
-        // ── 출력 형식: 선언 변형 ↔ 코어 변형이 일대일이고 wire 표기까지 같다 ──
+        // ── Output format: declaration variants ↔ core variants are one-to-one, down to the wire notation ──
         fn declared_output_format(core: CoreAgentOutputFormat) -> AgentOutputFormat {
             match core {
                 CoreAgentOutputFormat::Terminal => AgentOutputFormat::Terminal,
@@ -4193,72 +4116,75 @@ mod tests {
             }
         }
         let formats = advertised("output_format");
-        assert!(!formats.is_empty(), "광고가 비면 이 순회가 무장 해제된다");
+        assert!(
+            !formats.is_empty(),
+            "if the advertisement is empty, this sweep is disarmed"
+        );
         for word in &formats {
             let spelled = serde_json::Value::String(word.clone());
-            // 같은 낱말이 **양쪽에서** 읽혀야 한다 — 한쪽만 읽히면 그 자리가 곧 어긋난 지점이다.
-            let declared: AgentOutputFormat =
-                serde_json::from_value(spelled.clone()).expect("선언 어휘가 광고를 읽는다");
+            // The same word must be read **on both sides** — if only one side reads it, that place is exactly the point of divergence.
+            let declared: AgentOutputFormat = serde_json::from_value(spelled.clone())
+                .expect("the declaration vocabulary reads the advertisement");
             let core: CoreAgentOutputFormat =
-                serde_json::from_value(spelled).expect("코어 어휘가 같은 낱말을 읽는다");
+                serde_json::from_value(spelled).expect("the core vocabulary reads the same word");
             assert_eq!(
                 declared_output_format(core),
                 declared,
-                "{word}: 두 어휘가 같은 낱말을 다른 변형으로 읽는다"
+                "{word}: the two vocabularies read the same word as different variants"
             );
             assert_eq!(
                 output_format(Some(declared)),
                 core,
-                "{word}: 선언 → 코어 사상이 일대일이어야 한다"
+                "{word}: the declaration → core mapping must be one-to-one"
             );
         }
 
-        // ── 백엔드: 코어의 실행 명령 변형마다 **이 입구가 만들 수 있나**를 여기서 정한다 ──
+        // ── Backends: for each run command variant of the core, decide here **whether this entry can create it** ──
         fn declared_backend(command: &AgentCommand) -> Option<AgentBackend> {
             match command {
                 AgentCommand::Claude { .. } => Some(AgentBackend::Claude),
-                // ★`Shell` 이 `None` 인 것은 빈칸이 아니라 결정이다★ — 이 입구로는 만들 수 없다
-                //   (프로필 생성 경로가 그것으로 도는지 확인된 바 없다 — `AgentBackend` 선언).
+                // ★`Shell` being `None` is a decision, not a blank★ — this entry cannot create it
+                //   (it has not been confirmed that the profile creation path runs with it — the `AgentBackend` declaration).
                 AgentCommand::Shell { .. } => None,
-                // ★`Codex` 는 2026-09-22 에 열렸다★ — 옛 `None` 의 사유(「처음 보는 폴더의 신뢰 확인
-                //   모달을 LLM 이 못 지난다」)가 실측으로 뒤집혔다(그 표 = [`LLM_BACKEND_POLICY`] 의
-                //   codex 줄이 근거를 진다). 지금 이 줄이 재는 것은 그 결정이 아니라 **어휘 왕복**이다:
-                //   선언 `Codex` 가 짓는 실행 명령이 다시 `Codex` 로 읽히고, 저장되는 `kind` 태그도
-                //   같은 철자인가.
+                // ★`Codex` is open★ — its old `None` reason (trust modal) was overturned by measurement (grounds: the codex line of
+                //   [`LLM_BACKEND_POLICY`]). This line now measures **the vocabulary round trip**: whether the run command the declaration
+                //   `Codex` builds reads back as `Codex`
+                //   and the stored `kind` tag has the same spelling.
                 AgentCommand::Codex { .. } => Some(AgentBackend::Codex),
             }
         }
         let backends = advertised("backend");
-        assert!(!backends.is_empty(), "광고가 비면 이 순회가 무장 해제된다");
+        assert!(
+            !backends.is_empty(),
+            "if the advertisement is empty, this sweep is disarmed"
+        );
         for word in &backends {
             let declared: AgentBackend =
                 serde_json::from_value(serde_json::Value::String(word.clone()))
-                    .expect("선언 어휘가 광고를 읽는다");
+                    .expect("the declaration vocabulary reads the advertisement");
             let built = backend_command(declared.clone(), NEW_AGENT_OUTPUT_FORMAT);
             assert_eq!(
                 declared_backend(&built),
                 Some(declared),
-                "{word}: 선언 어휘가 짓는 실행 명령이 그 어휘로 되읽히지 않는다"
+                "{word}: the run command the declaration vocabulary builds does not read back into that vocabulary"
             );
-            // ★코어 쪽 wire 철자까지 묶는다★: `AgentCommand` 는 `#[serde(tag = "kind")]` 로 디스크에 그대로
-            //   적히므로(프로필 파일), 그 태그 값을 바꾸면 여기서 걸려야 한다 — 안 걸리면 선언 어휘와
-            //   저장 어휘가 조용히 갈리고, 그 갈림은 옛 빌드가 파일을 못 읽는 형태로 나타난다.
+            // ★Binds the core-side wire spelling too★: `AgentCommand` is written to disk as is with `#[serde(tag = "kind")]`
+            //   (the profile file), so changing that tag value must be caught here — otherwise the declared vocabulary and the
+            //   stored vocabulary diverge silently, and the divergence shows up as an old build unable to read the file.
             assert_eq!(
-                serde_json::to_value(&built).expect("코어 직렬화")["kind"],
+                serde_json::to_value(&built).expect("core serialization")["kind"],
                 serde_json::Value::String(word.clone()),
-                "{word}: 선언 어휘와 저장되는 kind 태그가 갈렸다"
+                "{word}: the declaration vocabulary and the stored kind tag diverged"
             );
         }
     }
 
-    /// ★오늘 통과하는 값은 `Claude`·`Codex` 둘이고, 그 둘 **각각이 두 모드로** 통한다★(2026-09-22).
+    /// ★The values passing today are `Claude`·`Codex`, **each working in both modes**★.
     ///
-    /// 코어에는 `Shell` 도 있지만 생성 경로가 그것으로 도는지 확인된 바 없어 어휘 밖이다(사유 =
-    /// `AgentBackend` 선언).
+    /// The core also has `Shell`, but the creation path is unconfirmed with it, so it is outside the vocabulary (reason: the `AgentBackend` declaration).
     ///
-    /// ★모드 축을 여기서 함께 재는 이유★ — codex 를 여는 것은 낱말 하나가 아니라 **낱말 × 두 모드**이고,
-    /// 모드가 실제로 실렸는지는 **저장된 실행 명령**을 들여다봐야만 보인다(`AgentNewOk` 에는 그 칸이
-    /// 없다). 여기서 안 재면 [`backend_command`] 가 codex 를 한 모드에 박아 넣어도 전 스위트가 초록이다.
+    /// ★The mode axis is measured here too★ — opening codex is **word × two modes**, and whether the mode was carried is visible only in **the stored run command** (`AgentNewOk` has no such field); otherwise the suite would stay green even if [`backend_command`] pinned codex
+    /// to one mode.
     #[test]
     fn new_accepts_both_declared_backends_and_refuses_the_rest() {
         for word in ["Claude", "Codex"] {
@@ -4275,11 +4201,14 @@ mod tests {
                     json!({ "cwd": "C:/x", "backend": word, "output_format": spelled }),
                 )
                 .unwrap_or_else(|e| {
-                    panic!("{word}/{spelled}: 선언 어휘가 반려됐다 — {}", e.message())
+                    panic!(
+                        "{word}/{spelled}: the declaration vocabulary was rejected — {}",
+                        e.message()
+                    )
                 });
 
                 let profiles = host.profiles.lock().unwrap();
-                let stored = profiles.values().next().expect("등록된 프로필 하나");
+                let stored = profiles.values().next().expect("one registered profile");
                 let (kind, format) = match &stored.command {
                     AgentCommand::Claude {
                         extra_args,
@@ -4289,22 +4218,30 @@ mod tests {
                         extra_args,
                         output_format,
                     } => ("Codex", (extra_args.clone(), *output_format)),
-                    other => panic!("{word}/{spelled}: 엉뚱한 실행 명령 — {other:?}"),
+                    other => panic!("{word}/{spelled}: the wrong run command — {other:?}"),
                 };
-                assert_eq!(kind, word, "{word}/{spelled}: 다른 백엔드가 저장됐다");
-                // ★이 입구는 인자 표면을 늘리지 않는다★ — 모델·추론 강도 같은 칸이 여기로 새면 빈다는
-                //   단언이 먼저 깨진다.
+                assert_eq!(
+                    kind, word,
+                    "{word}/{spelled}: a different backend was stored"
+                );
+                // ★This entry does not grow the argument surface★ — if fields like model or reasoning effort leaked in here, the assertion
+                //   that it is empty
+                //   breaks first.
                 assert!(
                     format.0.is_empty(),
-                    "{word}/{spelled}: 이 입구는 extra_args 를 싣지 않는다 — {:?}",
+                    "{word}/{spelled}: this entry carries no extra_args — {:?}",
                     format.0
                 );
-                assert_eq!(format.1, expected, "{word}/{spelled}: 모드가 실리지 않았다");
+                assert_eq!(
+                    format.1, expected,
+                    "{word}/{spelled}: the mode was not carried"
+                );
             }
         }
 
-        // ★어휘 밖은 등록 전에 반려된다 — 단 **철자는 어휘 밖의 축이 아니다**★: 대소문자만 다른 낱말은
-        //   같은 낱말로 읽힌다(`new_accepts_the_backend_word_in_any_casing`).
+        // ★Outside the vocabulary is rejected before registration — but **spelling is not the outside-vocabulary axis**★: a word differing
+        //   only in case
+        //   reads as the same word (`new_accepts_the_backend_word_in_any_casing`).
         let host = FakeHost::new();
         let (table, notify) = wiring(&host);
         for outside in ["Gemini", "Shell", "codx"] {
@@ -4313,72 +4250,68 @@ mod tests {
                 "agent.new",
                 json!({ "cwd": "C:/x", "backend": outside }),
             )
-            .expect_err("어휘 밖 백엔드");
+            .expect_err("a backend outside the vocabulary");
             assert_eq!(err.code(), ErrorCode::InvalidArgument, "{outside}");
-            // 무엇이 통하는지 **전부** 말해야 한다 — 하나만 말하면 어휘가 넓어진 날 안내가 뒤처진다.
+            // It must say **everything** that works — saying only one would make the guidance fall behind the day the vocabulary widens.
             for accepted in ["Claude", "Codex"] {
                 assert!(
                     err.message().contains(accepted),
-                    "{outside}: 통하는 낱말 '{accepted}' 를 안 말한다 — {}",
+                    "{outside}: does not say the working word '{accepted}' — {}",
                     err.message()
                 );
             }
         }
         assert!(
             host.rows.lock().unwrap().is_empty(),
-            "반려는 등록하지 않는다"
+            "a rejection does not register"
         );
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            0,
+            "a rejection does not notify"
+        );
     }
 
-    /// ★칸을 아예 안 주면 반려다 — 조용히 claude 가 되지 않는다★(2026-09-08).
-    ///
-    /// 예전엔 미지정이 `Claude` 였다. 백엔드가 둘이 된 뒤로 그 기본값은 「고르지 않았다」와 「claude 를
-    /// 골랐다」를 같은 값으로 접는데, 스폰 패킷에서는 같은 이유로 이미 걷어냈다(데몬의 `MISSING_BACKEND`).
-    /// 이 문만 남겨 두면 그 결정이 입구마다 갈린다.
+    /// ★Not giving the field at all is a rejection — it does not silently become claude★. Unspecified used to mean `Claude`; with two backends that default folds 「did not choose」 and 「chose claude」 into one value (already removed from the spawn packet — the daemon's
+    /// `MISSING_BACKEND`), and leaving only this door would split that decision per entry.
     #[test]
     fn new_refuses_an_unspecified_backend_instead_of_defaulting() {
         let host = FakeHost::new();
         let (table, notify) = wiring(&host);
 
         let err = call(&table, "agent.new", json!({ "cwd": "C:/x" }))
-            .expect_err("고르지 않은 것은 claude 를 고른 것이 아니다");
+            .expect_err("not choosing is not choosing claude");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
         assert!(
             err.message().contains("backend"),
-            "어느 칸이 비었는지 말해야: {}",
+            "must say which field is empty: {}",
             err.message()
         );
         assert!(
             host.rows.lock().unwrap().is_empty(),
-            "반려는 등록하지 않는다"
+            "a rejection does not register"
         );
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            0,
+            "a rejection does not notify"
+        );
     }
 
-    /// ★이 문이 [`LLM_BACKEND_POLICY`] 와 **같은 집합**을 연다 — 목록 대조가 아니라 **호출**로 잰다★.
+    /// ★This door opens **the same set** as [`LLM_BACKEND_POLICY`] — measured by **calls**, not by comparing lists★.
     ///
-    /// 목록만 맞춰 보면 게이트를 통째로 걷어내도 초록이다(형제 문에서 실제로 그랬다 — 2026-09-08 리뷰).
-    /// 그래서 표의 낱말마다 `agent.new` 를 **불러** 결말을 본다: 표가 연 낱말은 명부에 오르고, 표가 닫은
-    /// 낱말은 **어떤 철자로도** 안 오른다.
+    /// List matching stays green even with the gate removed entirely (it happened at a sibling door). So for each table word `agent.new` is **called**: words the table opened go onto the roster, words it closed do not **in any spelling**.
     ///
-    /// ★이 문이 받는 철자는 선언 어휘가 정한다★ — 표의 낱말과 대소문자만 다르다([`LlmBackendPolicy`]
-    /// 의 `word` doc). 그래서 낱말 하나에 **이 문이 받아들일 수 있는 철자 전부**를 넣어 본다. 한 철자만
-    /// 넣으면 어휘가 넓어진 날 그 시도가 엉뚱한 철자에 걸려 조용히 통과한다.
+    /// ★The spellings this door accepts are decided by the declaration vocabulary★ — they differ from the table's words only in case ([`LlmBackendPolicy`] `word` doc), so **every spelling this door could accept** is tried; one spelling would silently pass the day the vocabulary widens.
     ///
-    /// ★무엇을 잡나 — 정확히 적는다(2026-09-22 갱신: 표가 아무것도 안 닫으면서 두 방향의 무게가 갈렸다)★
-    ///   - **표를 닫았는데 이 문이 그대로 만든다** → 빨개진다. 어휘([`AgentBackend`])를 넓힌 채
-    ///     `verb_new` 의 [`llm_creation_refusal`] 팔만 지우는 편집이 여기 걸린다. 그 팔의 회귀망은
-    ///     여기 하나뿐이다.
-    ///   - **표는 열었는데 이 문이 안 만든다** → 빨개진다. 표에 한 줄만 더하고 어휘·[`backend_command`]
-    ///     를 안 채우는 편집이 여기 걸린다(그 안내를 [`LLM_BACKEND_POLICY`] 의 doc 이 낸다).
+    /// ★What it catches★:
+    ///   - **table closed but this door still creates** → red: an edit widening the vocabulary ([`AgentBackend`]) while deleting only the [`llm_creation_refusal`] arm of `verb_new`. The only regression net of that arm.
+    ///   - **table opened but this door does not create** → red: an edit adding a table line without filling the vocabulary and [`backend_command`] (guidance in the [`LLM_BACKEND_POLICY`] doc).
     ///
-    /// ★**팔만 지우는 것**은 오늘도 이 시험이 못 잡는다★ — 다만 사유가 갈렸다: 그 전에는 「어휘가 표보다
-    /// 좁아서」였고 지금은 「표가 아무것도 안 닫아서 팔에 닿는 입력이 아예 없어서」다. 그 사실을 「그러니
-    /// 팔은 필요 없다」로 읽지 말 것 — 표가 다시 한 줄을 닫는 날 그 팔이 유일한 런타임 방어가 된다.
+    /// ★**Deleting only the arm** is uncatchable here even today★ — the table closes nothing, so no input reaches the arm. Do not read that as 「the arm is unnecessary」: the day the table closes a line again it is the only runtime defense.
     #[test]
     fn new_creates_exactly_what_the_llm_backend_policy_opens() {
-        /// 이 문이 이 낱말에 대해 받아들일 수 있는 철자 후보 — 표는 소문자, 선언 어휘는 PascalCase 다.
+        /// Spelling candidates this door can accept for this word — the table is lowercase, the declaration vocabulary PascalCase.
         fn spellings(word: &str) -> Vec<String> {
             let mut chars = word.chars();
             let pascal = match chars.next() {
@@ -4394,7 +4327,7 @@ mod tests {
 
         assert!(
             !LLM_BACKEND_POLICY.is_empty(),
-            "표가 비면 이 순회가 무장 해제된다"
+            "if the table is empty, this sweep is disarmed"
         );
         for policy in LLM_BACKEND_POLICY {
             let mut opened_by_some_spelling = false;
@@ -4412,14 +4345,14 @@ mod tests {
                         assert_eq!(
                             host.rows.lock().unwrap().len(),
                             1,
-                            "{spelling}: 통과했는데 명부에 안 올랐다"
+                            "{spelling}: passed but did not go onto the roster"
                         );
                     }
                     Err(err) => {
                         assert_eq!(err.code(), ErrorCode::InvalidArgument, "{spelling}");
                         assert!(
                             host.rows.lock().unwrap().is_empty(),
-                            "{spelling}: ★등록 전에 거부★"
+                            "{spelling}: ★refused before registration★"
                         );
                         assert_eq!(*notify.calls.lock().unwrap(), 0, "{spelling}");
                     }
@@ -4428,29 +4361,26 @@ mod tests {
             assert_eq!(
                 opened_by_some_spelling,
                 policy.refusal.is_none(),
-                "'{}': 이 문이 여는 집합과 정책 표가 갈렸다 — 표는 {}, 이 문은 {}",
+                "'{}': the set this door opens and the policy table diverged — the table {}, this door {}",
                 policy.word,
                 if policy.refusal.is_none() {
-                    "연다"
+                    "opens"
                 } else {
-                    "닫는다"
+                    "closes"
                 },
                 if opened_by_some_spelling {
-                    "만든다"
+                    "creates"
                 } else {
-                    "안 만든다"
+                    "does not create"
                 }
             );
         }
     }
 
-    /// ★`agent.new` 가 **광고하는** backend 낱말 == 정책 표가 여는 집합★ — 철자는 대소문자만 다르다
-    /// (선언 어휘 `Claude` · 표 `claude`).
+    /// ★The backend words `agent.new` **advertises** == the set the policy table opens★ (spellings differ only in case: declaration `Claude` · table `claude`).
     ///
-    /// `new_creates_exactly_what_the_llm_backend_policy_opens` 는 **표의 줄**을 훑으므로 광고에만 있는
-    /// 낱말을 못 본다 — 어휘에 변형을 더하고 표에 줄을 안 더하면 그 낱말은 광고되는데
-    /// [`NO_POLICY_DECLARED`] 로 닫혀, 호출자는 고를 수 있다고 들은 값을 반려받는다. 이 시험이 그 방향을
-    /// 잡는다.
+    /// `new_creates_exactly_what_the_llm_backend_policy_opens` sweeps **the table's lines** and cannot see a word only in the advertisement — a variant added to the vocabulary without a table line is advertised but closed by [`NO_POLICY_DECLARED`], rejecting a value the caller
+    /// was told it could choose. This catches that direction.
     #[test]
     fn new_advertises_exactly_the_backends_the_llm_policy_opens() {
         let mut opened: Vec<String> = LLM_BACKEND_POLICY
@@ -4464,13 +4394,13 @@ mod tests {
             .collect();
         assert!(
             !advertised.is_empty(),
-            "광고가 비면 이 시험이 무장 해제된다"
+            "if the advertisement is empty, this test is disarmed"
         );
         opened.sort();
         advertised.sort();
         assert_eq!(
             advertised, opened,
-            "`agent.new` 의 `AgentBackend` 어휘와 `LLM_BACKEND_POLICY` 가 여는 집합이 갈렸다"
+            "the `AgentBackend` vocabulary of `agent.new` and the set `LLM_BACKEND_POLICY` opens diverged"
         );
     }
 
@@ -4486,7 +4416,7 @@ mod tests {
             "agent.rename",
             json!({ "target": "alpha", "name": "alpha" }),
         )
-        .expect("개명");
+        .expect("rename");
         assert_eq!(out["outcome"], "unchanged");
 
         let out = call(
@@ -4494,13 +4424,13 @@ mod tests {
             "agent.rename",
             json!({ "target": "alpha", "name": "beta" }),
         )
-        .expect("개명");
+        .expect("rename");
         assert_eq!(out["outcome"], "renamed");
         assert_eq!(out["name"], "beta");
         assert_eq!(
             *notify.calls.lock().unwrap(),
             2,
-            "두 결말 모두 명부 표시가 바뀌므로 알린다"
+            "both outcomes change the roster display, so they announce"
         );
     }
 
@@ -4516,12 +4446,12 @@ mod tests {
             "agent.rename",
             json!({ "target": "alpha", "name": "beta" }),
         )
-        .expect_err("이름 공간 소진");
+        .expect_err("name space exhausted");
         assert_eq!(err.code(), ErrorCode::Conflict);
     }
 
-    /// ★`null` 은 「루트로 떼라」는 적극적 지시이고, **부재는 반려**다★ — 접으면 오타 필드 하나가
-    /// 조용히 계층 해제를 실행한다.
+    /// ★`null` is an active instruction to 「detach to root」, and **absence is rejected**★ — folding them would make one typo field
+    /// silently run a hierarchy release.
     #[test]
     fn move_splits_an_absent_parent_from_an_explicit_null() {
         let host = FakeHost::new();
@@ -4533,20 +4463,31 @@ mod tests {
             "agent.move",
             json!({ "target": "alpha", "parent": null }),
         )
-        .expect("null = 최상위로");
+        .expect("null = to top level");
         assert_eq!(out["parent"], serde_json::Value::Null);
-        assert_eq!(out["name"], "alpha", "성공 응답에 이름이 실린다");
-        assert_eq!(*notify.calls.lock().unwrap(), 1, "명부 변경을 알린다");
+        assert_eq!(
+            out["name"], "alpha",
+            "the success response carries the name"
+        );
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            1,
+            "announces the roster change"
+        );
 
-        let err =
-            call(&table, "agent.move", json!({ "target": "alpha" })).expect_err("부재는 반려");
+        let err = call(&table, "agent.move", json!({ "target": "alpha" }))
+            .expect_err("absence is rejected");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
         assert!(
             err.message().contains("parent"),
-            "어느 칸이 빠졌는지 말한다: {}",
+            "says which field is missing: {}",
             err.message()
         );
-        assert_eq!(*notify.calls.lock().unwrap(), 1, "반려는 통지하지 않는다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            1,
+            "a rejection does not notify"
+        );
     }
 
     #[test]
@@ -4562,12 +4503,12 @@ mod tests {
             "agent.move",
             json!({ "target": "alpha", "parent": "beta" }),
         )
-        .expect_err("트리 구조가 거부");
+        .expect_err("the tree structure refuses");
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert_eq!(*notify.calls.lock().unwrap(), 0);
     }
 
-    /// ★`false` 하나를 사유로 읽지 않는다★ — 그 사이 사라진 경우와 구조 충돌은 호출자가 할 일이 다르다.
+    /// ★A single `false` is not read as a reason★ — vanished in the meantime and a structural conflict have different things for the caller to do.
     #[test]
     fn a_target_that_vanished_mid_move_is_not_found() {
         let host = FakeHost::new();
@@ -4581,13 +4522,13 @@ mod tests {
             "agent.move",
             json!({ "target": "alpha", "parent": null }),
         )
-        .expect_err("대상이 사라졌다");
+        .expect_err("the target vanished");
         assert_eq!(err.code(), ErrorCode::NotFound);
         assert!(err.message().contains("alpha"), "{}", err.message());
     }
 
-    /// ★사라진 쪽의 이름을 댄다★ — 부모만 없어졌는데 자식 이름을 대면, 호출자는 멀쩡히 있는 에이전트를
-    /// 없다고 듣고 엉뚱한 데를 뒤진다.
+    /// ★Name the side that vanished★ — if only the parent disappeared but the child's name were given, the caller would hear that an agent that is perfectly there
+    /// is missing and search in the wrong place.
     #[test]
     fn a_parent_that_vanished_mid_move_names_the_parent_not_the_child() {
         let host = FakeHost::new();
@@ -4602,11 +4543,11 @@ mod tests {
             "agent.move",
             json!({ "target": "alpha", "parent": "beta" }),
         )
-        .expect_err("새 부모가 사라졌다");
+        .expect_err("the new parent vanished");
         assert_eq!(err.code(), ErrorCode::NotFound);
         assert!(
             err.message().contains("beta") && !err.message().contains("alpha"),
-            "사라진 쪽을 지목해야 한다: {}",
+            "must point at the side that vanished: {}",
             err.message()
         );
     }
@@ -4619,11 +4560,11 @@ mod tests {
         let (table, _notify) = wiring(&host);
 
         let missing =
-            call(&table, "agent.spawn", json!({ "target": "nope" })).expect_err("없는 이름");
+            call(&table, "agent.spawn", json!({ "target": "nope" })).expect_err("a missing name");
         assert_eq!(missing.code(), ErrorCode::NotFound);
 
-        let ambiguous =
-            call(&table, "agent.spawn", json!({ "target": "twin" })).expect_err("동명 둘");
+        let ambiguous = call(&table, "agent.spawn", json!({ "target": "twin" }))
+            .expect_err("two with the same name");
         assert_eq!(ambiguous.code(), ErrorCode::Conflict);
     }
 
@@ -4633,7 +4574,7 @@ mod tests {
         let id = host.with_agent("alpha", false, false);
         let (table, _notify) = wiring(&host);
 
-        call(&table, "agent.spawn", json!({ "target": id.to_string() })).expect("id 지목");
+        call(&table, "agent.spawn", json!({ "target": id.to_string() })).expect("id pointing");
         assert_eq!(host.started.lock().unwrap()[0].0, id);
     }
 
@@ -4648,20 +4589,19 @@ mod tests {
             "agent.move",
             json!({ "target": "alpha", "parent": "   " }),
         )
-        .expect_err("공백만 있는 값");
+        .expect_err("a whitespace-only value");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
-        // ★같은 칸이면 어느 실수를 했든 같은 갈래를 알려 준다★: 부재 문구가 알려 주는 `null`(최상위로
-        //   떼기)을 빈 값 문구가 감추면, 호출자는 그 칸에 값을 넣는 길밖에 없다고 읽는다.
+        // ★For the same field, whichever mistake was made, the same branch is told★: if the blank-value text hid the `null` (detach to top
+        //   level)
+        //   the absence text tells about, the caller would read that putting a value into that field is the only way.
         assert!(
             err.message().contains("null"),
-            "빈 값에도 null 갈래를 알려야: {}",
+            "must tell the null branch for a blank value too: {}",
             err.message()
         );
     }
 
-    /// ★반려 문구가 시키는 대로 하면 통해야 한다★: 필수 칸을 빈 값으로 보낸 호출자에게 "빼도 된다" 고
-    /// 말하면, 그대로 뺀 재시도가 **다시 반려**된다(이번엔 「빠졌다」로) — LLM 은 문구를 그대로 따르므로
-    /// 같은 자리를 맴돈다. 필수 칸에는 값을 채우라고만 말한다.
+    /// ★Doing as the rejection text says must work★: telling a caller who sent a required field blank "may be omitted" would get the omitting retry **rejected again** (as 「missing」) and the LLM circles the same place; a required field is told only to fill in a value.
     #[test]
     fn the_advice_for_a_blank_required_field_does_not_tell_the_caller_to_drop_it() {
         let host = FakeHost::new();
@@ -4672,58 +4612,65 @@ mod tests {
             "agent.new",
             json!({ "cwd": "   ", "backend": "Claude" }),
         )
-        .expect_err("만들 자리를 정하는 칸이 공백")
+        .expect_err("the field deciding where to create is blank")
         .message()
         .to_string();
         assert!(
             required.contains("cwd needs a real value"),
-            "값을 채우라고 말해야: {required}"
+            "must say to fill the value: {required}"
         );
         assert!(
             !required.contains("left out"),
-            "빼라고 하면 그 재시도가 「빠졌다」로 다시 반려된다: {required}"
+            "saying to omit it gets the retry rejected again as 「missing」: {required}"
         );
-        // ★반려는 아무것도 만들지 않는다★ — 검사가 등록 뒤로 밀리면 빈 인자 호출이 에이전트를 만들어 놓고
-        //   반려를 답한다(호출자는 실패로 읽고 다시 부른다 — 이름만 하나씩 늘어난다).
+        // ★A rejection creates nothing★ — if the check were pushed after registration, a call with blank arguments would create an agent
+        //   and then
+        //   answer with a rejection (the caller reads it as a failure and calls again — only the names grow one by one).
         assert!(
             host.rows.lock().unwrap().is_empty(),
-            "반려는 등록하지 않는다"
+            "a rejection does not register"
         );
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            0,
+            "a rejection does not notify"
+        );
 
-        // 선택 칸은 반대다 — 빼는 것이 실제로 통하는 길이라 그 길을 함께 알려 준다.
+        // An optional field is the opposite — omitting it is the way that actually works, so that way is told too.
         let optional = call(
             &table,
             "agent.new",
             json!({ "cwd": "C:/x", "name": " ", "backend": "Claude" }),
         )
-        .expect_err("선택 칸이 공백")
+        .expect_err("an optional field is blank")
         .message()
         .to_string();
         assert!(
             optional.contains("name") && optional.contains("left out"),
-            "선택 칸은 빼도 된다고 말해도 참이다: {optional}"
+            "saying an optional field may be omitted is true: {optional}"
         );
         assert!(
             host.rows.lock().unwrap().is_empty(),
-            "반려는 등록하지 않는다"
+            "a rejection does not register"
         );
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            0,
+            "a rejection does not notify"
+        );
 
-        // 시킨 대로 뺀 재시도가 실제로 통한다.
+        // The retry that omitted it as told actually works.
         call(
             &table,
             "agent.new",
             json!({ "cwd": "C:/x", "backend": "Claude" }),
         )
-        .expect("빼라는 안내대로 하면 통한다");
+        .expect("following the omit guidance works");
     }
 
-    /// ★`rename` 의 두 칸은 **둘 다 필수**다★ — 어느 쪽에든 「빼도 된다」고 말하면 그대로 뺀 재시도가 입구
-    /// 검문에서 「requires …」로 다시 반려되어 호출자가 같은 자리를 맴돈다.
+    /// ★Both fields of `rename` are **required**★ — telling either 「may be omitted」 would get the omitting retry rejected at the entry check with 「requires …」.
     ///
-    /// ★칸 하나하나가 아니라 **호출 지점마다** 봐야 하는 성질이다★: 빈 값 안내의 옳고 그름은 그 칸이 그
-    /// 동사에서 무엇을 요구받는지에 달렸으므로, 공용 함수를 한 번 검사하는 것으로는 어느 동사도 안 지켜진다.
+    /// ★A property to look at **per call site**, not per field★: whether blank-value guidance is right depends on what that field must be in that verb, so checking the shared function once guards no verb.
     #[test]
     fn a_blank_rename_argument_is_told_to_fill_it_not_to_drop_it() {
         let host = FakeHost::new();
@@ -4735,34 +4682,36 @@ mod tests {
             (json!({ "target": " ", "name": "beta" }), "target"),
         ] {
             let refusal = call(&table, "agent.rename", args.clone())
-                .expect_err("공백 값")
+                .expect_err("blank value")
                 .message()
                 .to_string();
 
             assert!(
                 refusal.contains(&format!("{blank} needs a real value")),
-                "{blank} 에 값을 채우라고 말해야: {refusal}"
+                "must say to fill in {blank}: {refusal}"
             );
             assert!(
                 !refusal.contains("left out"),
-                "{blank} 을 빼라고 하면 그 재시도가 「requires」로 다시 반려된다: {refusal}"
+                "saying to omit {blank} gets that retry rejected again with requires: {refusal}"
             );
-            assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                0,
+                "a rejection does not notify"
+            );
         }
 
-        // 문구대로 두 칸을 채운 재시도가 통한다.
+        // The retry that filled both fields as the text said works.
         let out = call(
             &table,
             "agent.rename",
             json!({ "target": "alpha", "name": "beta" }),
         )
-        .expect("안내대로 채우면 통한다");
+        .expect("filling in as guided works");
         assert_eq!(out["name"], "beta", "{out}");
     }
 
-    /// ★`spawn` 의 제약은 칸이 아니라 **조합**이다★: `cwd` 는 선언상 `Option` 이라 「빼도 된다」가 선언
-    /// 기준으로는 참이지만, 그대로 뺀 재시도는 「target 이나 cwd 중 하나는 줘야 한다」로 다시 반려된다.
-    /// 문구가 조합을 말해야 한 번에 빠져나온다.
+    /// ★The constraint of `spawn` is **a combination**, not a field★: `cwd` is `Option` by declaration so 「may be omitted」 is true there, but omitting it is rejected again with 「either target or cwd must be given」; the text must state the combination in one go.
     #[test]
     fn a_blank_spawn_argument_is_told_what_actually_satisfies_the_verb() {
         let host = FakeHost::new();
@@ -4771,36 +4720,44 @@ mod tests {
         let before = host.rows.lock().unwrap().len();
 
         let refusal = call(&table, "agent.spawn", json!({ "cwd": "  " }))
-            .expect_err("공백 cwd")
+            .expect_err("blank cwd")
             .message()
             .to_string();
 
-        assert!(refusal.contains("cwd"), "어느 칸인지 짚어야: {refusal}");
+        assert!(
+            refusal.contains("cwd"),
+            "must point out which field: {refusal}"
+        );
         assert!(
             !refusal.contains("left out"),
-            "빼라고 하면 그 재시도가 다시 반려된다: {refusal}"
+            "saying to omit it gets that retry rejected again: {refusal}"
         );
         assert!(
             refusal.contains("target") && refusal.contains("cwd"),
-            "무엇을 주면 통하는지(둘 중 하나)를 말해야: {refusal}"
+            "must say what to give for it to work (one of the two): {refusal}"
         );
-        // ★이 동사에서 반려는 **되돌릴 수 없는 일을 하기 전에** 나야 한다★: 빈 값 검사가 조합 분기 뒤로
-        //   밀리면 `cwd` 가 공백인 호출이 에이전트를 **만들고 통지까지 한 다음** 반려를 답한다. 호출자는
-        //   실패로 읽고 다시 부르므로 이름만 하나씩 늘고, 만들어진 것은 지울 경로가 없다(ADR-0122).
+        // ★In this verb the rejection must come **before anything irreversible**★: a blank-value check after the combination branch would
+        //   let a blank `cwd` **create an agent and notify** and then answer with a rejection; the caller reads a failure, calls again,
+        //   names grow
+        //   one by one, and the created ones cannot be deleted (ADR-0122).
         assert_eq!(
             host.rows.lock().unwrap().len(),
             before,
-            "반려가 에이전트를 만들었다"
+            "the rejection created an agent"
         );
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            0,
+            "a rejection does not notify"
+        );
 
-        // 문구가 가리키는 두 길이 **둘 다** 실제로 통한다.
-        call(&table, "agent.spawn", json!({ "target": "alpha" })).expect("깨우기 길");
-        call(&table, "agent.spawn", json!({ "cwd": "C:/work/new" })).expect("만들기 길");
+        // **Both** ways the text points at actually work.
+        call(&table, "agent.spawn", json!({ "target": "alpha" })).expect("the wake way");
+        call(&table, "agent.spawn", json!({ "cwd": "C:/work/new" })).expect("the create way");
     }
 
-    /// ★`move` 는 빈 칸 둘을 **한 번에** 짚는다★ — `parent` 만 먼저 반려하면 고쳐 보낸 다음 트립에서야
-    /// `target` 을 처음 듣는다(한 번 잘못 친 호출에 왕복 두 번). 그러면서도 `parent` 의 `null` 갈래는 남는다.
+    /// ★`move` points out the two blank fields **at once**★ — rejecting only `parent` first would make the caller hear about `target` only on the next trip after fixing it
+    /// (two round trips for one mistyped call). And the `null` branch of `parent` still remains.
     #[test]
     fn a_move_with_two_blank_fields_names_both_in_one_trip() {
         let host = FakeHost::new();
@@ -4812,28 +4769,31 @@ mod tests {
             "agent.move",
             json!({ "target": " ", "parent": "  " }),
         )
-        .expect_err("둘 다 공백")
+        .expect_err("both blank")
         .message()
         .to_string();
 
-        assert!(refusal.contains("target"), "형제 칸이 숨었다: {refusal}");
+        assert!(
+            refusal.contains("target"),
+            "the sibling field was hidden: {refusal}"
+        );
         assert!(refusal.contains("parent"), "{refusal}");
         assert!(
             refusal.contains("null"),
-            "한 번에 짚으면서도 null 갈래를 잃지 않는다: {refusal}"
+            "points out at once without losing the null branch: {refusal}"
         );
 
-        // 문구대로 고친 재시도가 통한다.
+        // The retry fixed as the text said works.
         call(
             &table,
             "agent.move",
             json!({ "target": "alpha", "parent": null }),
         )
-        .expect("안내대로 고치면 통한다");
+        .expect("fixing as guided works");
     }
 
-    /// ★빈 칸이 여럿이면 여럿 다 나온다★ — 하나씩 짚으면 셸의 미설정 변수 셋을 보낸 호출자가 반려·수정을
-    /// 세 번 반복한다(입구의 모르는 칸 검문과 같은 규율).
+    /// ★With several blank fields, all of them come out★ — pointing one at a time would make a caller who sent three unset shell variables repeat rejection and fix
+    /// three times (the same discipline as the entry's unknown-field check).
     #[test]
     fn every_blank_field_is_named_not_just_the_first() {
         let (table, _notify) = wiring(&FakeHost::new());
@@ -4843,37 +4803,36 @@ mod tests {
             "agent.spawn",
             json!({ "target": " ", "cwd": "  ", "name": "\t" }),
         )
-        .expect_err("전부 공백");
+        .expect_err("all blank");
 
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
         for field in ["target", "cwd", "name"] {
             assert!(
                 err.message().contains(field),
-                "{field} 이 빠졌다: {}",
+                "{field} is missing: {}",
                 err.message()
             );
         }
     }
 
-    // ── 상태 정직성 ──────────────────────────────────────────────────────────────
+    // ── State honesty ──────────────────────────────────────────────────────────────
 
-    /// ★변경 동사와 `list` 가 같은 함수를 지나야 두 답이 갈릴 수 없다★ — 전 상태를 여기서 못박는다.
+    /// ★The change verbs and `list` must pass through the same function so the two answers cannot diverge★ — every state is pinned here.
     ///
-    /// ★알려진 사각(고치지 않았다)★: 아래 목록은 **손으로 적은 것**이고 `state_of` 는 포괄 갈래(`_ =>`)로
-    /// 잠듦을 낸다. 그래서 새 변형이 생겨도 이 테스트는 초록이고, 그 변형이 「살아 있는 성질」이면 조용히
-    /// 잠듦으로 나간다. 목록을 자동으로 채우려면 `AgentStatus` 쪽 형태를 바꿔야 해 여기서 하지 않는다.
+    /// ★Known blind spot (not fixed)★: the list below is **hand-written** and `state_of` emits asleep through a catch-all (`_ =>`), so a new 「live-natured」 variant would silently go out as asleep with this test green; filling the list automatically needs a shape change on the
+    /// `AgentStatus` side.
     #[test]
     fn every_status_maps_to_one_of_the_two_agent_state_words() {
         assert_eq!(
             state_of(None),
             AGENT_STATE_SLEEPING,
-            "세션이 없으면 잠든 것"
+            "no session means asleep"
         );
         assert_eq!(state_of(Some(&AgentStatus::Running)), AGENT_STATE_LIVE);
         assert_eq!(
             state_of(Some(&AgentStatus::Exiting)),
             AGENT_STATE_LIVE,
-            "내려가는 중은 아직 산 것이다"
+            "going down is still alive"
         );
         for dead in [
             AgentStatus::Exited { code: Some(0) },
@@ -4886,19 +4845,18 @@ mod tests {
             assert_eq!(
                 state_of(Some(&dead)),
                 AGENT_STATE_SLEEPING,
-                "시체는 산 것이 아니다: {dead:?}"
+                "a corpse is not alive: {dead:?}"
             );
         }
-        // 메시지 결말 어휘와 섞이지 않는다(두 축을 섞어 결정이 꼬인 적이 있다 — ADR-0116).
+        // Not mixed with the message outcome vocabulary (mixing the two axes once tangled decisions — ADR-0116).
         for message_word in ["delivered", "pending", "failed"] {
             assert_ne!(AGENT_STATE_LIVE, message_word);
             assert_ne!(AGENT_STATE_SLEEPING, message_word);
         }
     }
 
-    /// ★응답의 상태는 **파생**이지 리터럴이 아니다★: 띄우자마자 죽은 에이전트(ADR-0082 resume 조기 종료 —
-    /// fresh fallback 이 없다)를 `spawn` 이 살아 있다고 답하면, 직후의 `list` 는 잠들었다고 답한다. 호출자는
-    /// 그 사이에 시체에게 편지를 쓴다. `started_payload` 에 `"live"` 를 박으면 여기서 죽는다.
+    /// ★The response state is **derived**, not a literal★: if `spawn` answered alive for an agent that died right after launching (ADR-0082 resume early exit — no fresh fallback) the next `list` would say asleep and the caller would write mail to a corpse. Baking `"live"` into
+    /// `started_payload` dies here.
     #[test]
     fn a_spawn_whose_activation_lands_terminal_reports_sleeping() {
         for terminal in [
@@ -4913,24 +4871,24 @@ mod tests {
             *host.started_status.lock().unwrap() = Some(terminal.clone());
             let (table, _notify) = wiring(&host);
 
-            let woken = call(&table, "agent.spawn", json!({ "target": "alpha" })).expect("깨우기");
+            let woken = call(&table, "agent.spawn", json!({ "target": "alpha" })).expect("wake");
             assert_eq!(
                 woken["state"], AGENT_STATE_SLEEPING,
-                "깨우자마자 죽은 것을 살아 있다고 보고하면 안 된다: {terminal:?}"
+                "something that died right after waking must not be reported as alive: {terminal:?}"
             );
             assert_eq!(woken["created"], false);
 
             let born = call(&table, "agent.spawn", json!({ "cwd": "C:/work/beta" }))
-                .expect("만들어서 띄우기");
+                .expect("create and launch");
             assert_eq!(
                 born["state"], AGENT_STATE_SLEEPING,
-                "만들기 경로도 같은 파생을 쓴다: {terminal:?}"
+                "the create path uses the same derivation: {terminal:?}"
             );
             assert_eq!(born["created"], true);
         }
     }
 
-    /// 명부가 든 terminal 상태도 같은 낱말로 나온다 — 변경 동사와 조회가 한 함수를 지난다는 축의 나머지 반.
+    /// Terminal states held in the roster come out as the same words — the other half of the axis that change verbs and queries pass through one function.
     #[test]
     fn the_roster_reports_a_terminal_status_as_sleeping() {
         let host = FakeHost::new();
@@ -4944,22 +4902,22 @@ mod tests {
         host.with_status("alive", Some(AgentStatus::Running), false);
         let (table, _notify) = wiring(&host);
 
-        let out = call(&table, "agent.list", json!({})).expect("조회");
-        let agents = out["agents"].as_array().expect("배열");
+        let out = call(&table, "agent.list", json!({})).expect("query");
+        let agents = out["agents"].as_array().expect("array");
         assert_eq!(agents[0]["state"], AGENT_STATE_SLEEPING, "{out}");
         assert_eq!(agents[1]["state"], AGENT_STATE_LIVE, "{out}");
     }
 
-    /// ★이동 응답의 이름은 **적용 뒤** 값이다★ — 해석 시점 값을 실으면 그 사이 커밋된 개명 때문에 응답이
-    /// 「옛 이름 + 새 부모」라는 실재한 적 없는 조합이 되고, 호출자는 그 옛 이름으로 다음 명령을 친다.
+    /// ★The name of the move response is the value **after** applying★ — carrying the resolve-time value would, because of a rename committed in between, make the response
+    /// 「old name + new parent」, a combination that never existed, and the caller would type the next command with that old name.
     #[test]
     fn move_reports_the_name_the_agent_has_after_the_move() {
         let host = FakeHost::new();
         let helper = host.with_agent("helper", false, false);
         let lead = host.with_agent("lead", false, false);
-        // ★옛 부모를 심어 둔다★: 응답의 `parent` 가 **이 호출이 지시한 부모**인지 명부에 남아 있던 옛 값인지를
-        //   가르는 유일한 방법이다(둘 다 없으면 어느 쪽을 실어도 같은 값이라 구분이 안 된다).
-        //   ★가짜 매니저는 부모 칸을 안 고친다★ — 그래서 명부에는 이 옛 값이 그대로 남는다.
+        // ★The old parent is planted★: the only way to tell whether the response's `parent` is **the parent this call instructed** or the
+        //   old value left in the roster (otherwise both carry the same value). ★The fake manager does not fix the parent field★, so the
+        //   old value stays.
         let stale = AgentId::new_v4();
         for row in host.rows.lock().unwrap().iter_mut() {
             if row.id == helper {
@@ -4974,25 +4932,23 @@ mod tests {
             "agent.move",
             json!({ "target": "helper", "parent": "lead" }),
         )
-        .expect("이동");
+        .expect("move");
         assert_eq!(out["name"], "renamed", "{out}");
         assert_eq!(
             out["parent"],
             lead.to_string(),
-            "이 호출이 붙인 부모를 싣는다(명부에 남은 옛 부모가 아니다): {out}"
+            "carries the parent this call attached (not the old parent left in the roster): {out}"
         );
     }
 
-    /// ★적용은 됐는데 그 사이 사라진 대상★ — 응답은 **이름 없는 성공 행**이 되면 안 된다. 빈 이름을 실으면
-    /// 호출자의 판정기가 성공 응답을 "읽을 수 없는 응답" 으로 읽고, 실제로 일어난 이동이 실패로 기록된다.
+    /// ★A target applied but vanished in the meantime★ — the response must not become **a nameless success row** (an empty name would make the caller's decider read the success as "an unreadable response" and record a move that happened as a failure).
     ///
-    /// ★해석은 성공해야 이 갈래에 닿는다★: 명부를 미리 비우면 `resolve` 가 먼저 `NOT_FOUND` 를 내 이 코드는
-    /// 돌지도 않는다 — 그래서 사라짐을 **적용 시점에** 일으킨다(`vanish_on_reparent`).
+    /// ★Resolution must succeed to reach this branch★: an emptied roster would make `resolve` emit `NOT_FOUND` first, so the vanishing is caused **at apply time** (`vanish_on_reparent`).
     #[test]
     fn move_falls_back_to_the_resolved_name_when_the_agent_vanishes_after_the_move() {
         let host = FakeHost::new();
         let helper = host.with_agent("helper", false, false);
-        // 적용은 성공하되(reparent_ok = true) 그 호출 안에서 명부에서 사라진다.
+        // The apply succeeds (reparent_ok = true) but within that call it vanishes from the roster.
         *host.vanish_on_reparent.lock().unwrap() = Some(helper);
         let (table, notify) = wiring(&host);
 
@@ -5001,37 +4957,41 @@ mod tests {
             "agent.move",
             json!({ "target": "helper", "parent": null }),
         )
-        .expect("적용 자체는 성공했다");
+        .expect("the apply itself succeeded");
 
-        // ★이 단언이 없으면 테스트가 fallback 을 안 태운다★: 행이 남아 있으면 `current_name` 이 값을 내
-        //   아래 이름 단언이 그대로 통과한다 — 즉 seam 이 안 발화해도 초록이다.
+        // ★Without this assertion the test does not exercise the fallback★: if the row remained, `current_name` would give a value and
+        //   the name assertion below would pass as is — that is, green even if the seam did not fire.
         assert!(
             host.roster().iter().all(|row| row.id != helper),
-            "전제: 적용 도중 명부에서 사라졌어야 fallback 이 돈다"
+            "premise: it must have vanished from the roster during the apply for the fallback to run"
         );
         assert_eq!(
             out["name"], "helper",
-            "적용 뒤 못 읽으면 해석 시점 이름으로 되돌린다(빈 이름 금지): {out}"
+            "if it cannot be read after applying, fall back to the resolve-time name (no empty name): {out}"
         );
         assert_eq!(out["agent_id"], helper.to_string(), "{out}");
         assert!(
             out["name"].as_str().is_some_and(|n| !n.is_empty()),
-            "성공 응답에 이름 없는 행이 실리면 안 된다: {out}"
+            "a nameless row must not be carried in a success response: {out}"
         );
-        // 대상이 사라져도 **부모 축은 이 호출이 지시한 값**을 싣는다 — 떼라고 시킨 요청이 성공했는데
-        //   `parent` 칸이 비거나 사라지면 호출자는 무엇이 적용됐는지 못 읽는다.
-        //   (옛 부모를 싣는 결함은 명부가 남아 있어야 갈리므로 아래 이웃 테스트가 본다.)
+        // Even if the target vanished, **the parent axis carries the value this call instructed** — an empty or missing `parent` would
+        //   leave the caller unable to read what was applied. (The old-parent defect splits only while the roster remains; the neighboring
+        //   test looks at it.)
         assert!(
             out["parent"].is_null(),
-            "떼라고 지시했으니 null 이다: {out}"
+            "it was told to detach, so null: {out}"
         );
-        assert_eq!(*notify.calls.lock().unwrap(), 1, "적용됐으므로 알린다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            1,
+            "it was applied, so it announces"
+        );
     }
 
-    // ── 지목 해석(교차 대조가 태우는 그 함수) ────────────────────────────────────────
+    // ── Pointing resolution (the function the cross-check runs) ────────────────────────────────────────
 
-    /// ★데몬의 교차 대조 테스트가 태우는 진입점이 이것이다★ — 여기가 표의 동사들이 쓰는 해석기와 같은
-    /// 함수라는 것이 그 대조의 전제다(`resolve` 가 이 함수로 위임한다).
+    /// ★This is the entry point the daemon's cross-check test runs★ — that this is the same function as the resolver the table's verbs use is
+    /// the premise of that check (`resolve` delegates to this function).
     #[test]
     fn resolve_in_matches_ids_first_then_exact_names_and_refuses_duplicates() {
         let host = FakeHost::new();
@@ -5040,29 +5000,33 @@ mod tests {
         let _twin_b = host.with_agent("twin", false, false);
         let roster = host.roster();
 
-        assert_eq!(resolve_in(&roster, "alpha").expect("이름 일치").id, alpha);
+        assert_eq!(resolve_in(&roster, "alpha").expect("name match").id, alpha);
         assert_eq!(
             resolve_in(&roster, &twin_a.to_string())
-                .expect("id 일치")
+                .expect("id match")
                 .id,
             twin_a,
-            "동명이어도 id 지목은 통한다"
+            "id pointing works even with the same name"
         );
         assert_eq!(
-            resolve_in(&roster, "twin").expect_err("동명 둘").code(),
+            resolve_in(&roster, "twin")
+                .expect_err("two with the same name")
+                .code(),
             ErrorCode::Conflict
         );
         for miss in ["ALPHA", "alph", " alpha", "alpha "] {
             assert_eq!(
-                resolve_in(&roster, miss).expect_err("정확 일치만").code(),
+                resolve_in(&roster, miss)
+                    .expect_err("exact match only")
+                    .code(),
                 ErrorCode::NotFound,
                 "{miss}"
             );
         }
     }
 
-    /// ★id 는 `Uuid` 가 읽는 철자 전부로 받는다 — 이름보다 먼저★: 대문자 철자를 이름으로 단 다른 에이전트가 있어도 id 가
-    /// 이긴다. 명부에 없는 id 꼴은 이름으로 넘어가 없음이다.
+    /// ★Ids are accepted in every spelling `Uuid` reads — before names★: even if another agent carries the uppercase spelling as its name, the id
+    /// wins. An id-shaped value not in the roster falls through to the name and is absent.
     #[test]
     fn resolve_in_reads_every_uuid_spelling_as_the_id_before_names() {
         let alpha = AgentId::new_v4();
@@ -5085,7 +5049,7 @@ mod tests {
             alpha.urn().to_string(),
         ] {
             assert_eq!(
-                resolve_in(&roster, &spelling).expect("id 철자").id,
+                resolve_in(&roster, &spelling).expect("id spelling").id,
                 alpha,
                 "{spelling}"
             );
@@ -5093,21 +5057,21 @@ mod tests {
         let ghost = AgentId::new_v4().to_string().to_uppercase();
         assert_eq!(
             resolve_in(&roster, &ghost)
-                .expect_err("명부에 없는 id")
+                .expect_err("an id not in the roster")
                 .code(),
             ErrorCode::NotFound
         );
         assert_eq!(
             resolve_in(&roster, &format!(" {alpha}"))
-                .expect_err("공백 보정 없음")
+                .expect_err("no whitespace correction")
                 .code(),
             ErrorCode::NotFound
         );
     }
 
-    // ── 지목 실패의 후보(TRD S28 §6) ───────────────────────────────────────────────
+    // ── Candidates of pointing failures (TRD S28 §6) ───────────────────────────────────────────────
 
-    /// 명부에 이름 줄을 그대로 심는다 — 후보는 명부 행만 보므로 프로필이 필요 없다.
+    /// Plants name lines into the roster as is — candidates look only at roster rows, so no profile is needed.
     fn roster_of(names: &[&str]) -> Vec<AgentRosterRow> {
         names
             .iter()
@@ -5126,14 +5090,14 @@ mod tests {
     fn a_missing_name_lists_the_names_that_contain_it_ignoring_case() {
         let roster = roster_of(&["alpha-main", "beta", "ALPHA-two", "gamma"]);
 
-        let err = resolve_in(&roster, "alpha").expect_err("정확 일치가 없다");
+        let err = resolve_in(&roster, "alpha").expect_err("there is no exact match");
         assert_eq!(err.code(), ErrorCode::NotFound);
         assert!(
             err.message().starts_with(&not_found_message("alpha")),
-            "옛 문구가 앞에 그대로 남는다: {}",
+            "the old text stays in front as is: {}",
             err.message()
         );
-        // 이름순(바이트 순 — 대문자가 앞).
+        // In name order (byte order — uppercase first).
         assert!(
             err.message()
                 .ends_with(" — candidates: ALPHA-two, alpha-main"),
@@ -5142,13 +5106,13 @@ mod tests {
         );
     }
 
-    /// 품은 이름이 없으면 전부에서 이름순으로 앞의 다섯 — 같은 이름은 한 번.
+    /// Without containing names, the first five of all in name order — the same name once.
     // ADR-0307
     #[test]
     fn with_no_containing_name_the_first_five_distinct_names_by_name_are_listed() {
         let roster = roster_of(&["f", "b", "d", "b", "a", "e", "c"]);
 
-        let err = resolve_in(&roster, "zzz").expect_err("없다");
+        let err = resolve_in(&roster, "zzz").expect_err("absent");
         assert_eq!(err.code(), ErrorCode::NotFound);
         assert!(
             err.message().ends_with(" — candidates: a, b, c, d, e"),
@@ -5157,7 +5121,7 @@ mod tests {
         );
     }
 
-    /// ★명부 행의 차례가 후보를 바꾸지 않는다★ — 운영 명부의 잠든 행은 HashMap 차례로 온다.
+    /// ★The order of roster rows does not change the candidates★ — asleep rows of the production roster come in HashMap order.
     // ADR-0307
     #[test]
     fn candidates_do_not_depend_on_roster_row_order() {
@@ -5176,17 +5140,17 @@ mod tests {
 
         for token in ["zzz", "twin"] {
             assert_eq!(
-                resolve_in(&forward, token).expect_err("실패").message(),
-                resolve_in(&backward, token).expect_err("실패").message(),
+                resolve_in(&forward, token).expect_err("failure").message(),
+                resolve_in(&backward, token).expect_err("failure").message(),
                 "{token}"
             );
         }
     }
 
-    /// 빈 명부는 `none` — 꼬리가 없으면 「후보 없음」과 「후보를 싣지 않는 문구」가 같아 보인다.
+    /// An empty roster gives `none` — without the tail, 「no candidates」 and 「a text that carries no candidates」 look the same.
     #[test]
     fn an_empty_roster_says_there_are_no_candidates() {
-        let err = resolve_in(&[], "alpha").expect_err("없다");
+        let err = resolve_in(&[], "alpha").expect_err("absent");
         assert_eq!(err.code(), ErrorCode::NotFound);
         assert_eq!(
             err.message(),
@@ -5194,12 +5158,12 @@ mod tests {
         );
     }
 
-    /// 동명의 후보는 이름이 아니라 id 다 — 이름을 다시 주면 또 같은 CONFLICT 다.
+    /// Candidates for the same name are ids, not names — giving the name again would be the same CONFLICT again.
     // ADR-0307
     #[test]
     fn a_duplicate_name_lists_the_clashing_ids_up_to_five() {
         let roster = roster_of(&["other", "twin", "twin"]);
-        let err = resolve_in(&roster, "twin").expect_err("동명 둘");
+        let err = resolve_in(&roster, "twin").expect_err("two with the same name");
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert!(
             err.message()
@@ -5217,7 +5181,7 @@ mod tests {
         );
 
         let crowd = roster_of(&["twin"; 7]);
-        let err = resolve_in(&crowd, "twin").expect_err("동명 일곱");
+        let err = resolve_in(&crowd, "twin").expect_err("seven with the same name");
         let mut ids: Vec<String> = crowd.iter().map(|row| row.id.to_string()).collect();
         ids.sort();
         ids.truncate(5);
@@ -5229,7 +5193,7 @@ mod tests {
         );
     }
 
-    /// 후보는 해석기 하나에서 나오므로 `target` 을 받는 동사가 모두 함께 받는다.
+    /// Candidates come from the one resolver, so every verb taking `target` receives them together.
     #[test]
     fn a_target_verb_carries_the_candidates_too() {
         let host = FakeHost::new();
@@ -5241,7 +5205,7 @@ mod tests {
             "agent.rename",
             json!({ "target": "alp", "name": "x" }),
         )
-        .expect_err("없는 이름");
+        .expect_err("a missing name");
         assert_eq!(err.code(), ErrorCode::NotFound);
         assert!(
             err.message().ends_with(" — candidates: alpha"),
@@ -5266,7 +5230,7 @@ mod tests {
             "agent.resolve",
             json!({ "targets": ["beta", alpha.to_string(), "gamma", "alpha"] }),
         )
-        .expect("전부 풀린다");
+        .expect("all resolve");
         assert_eq!(
             out,
             json!({ "agents": [
@@ -5276,11 +5240,15 @@ mod tests {
                 { "target": "alpha", "id": alpha.to_string(), "name": "alpha", "live": true },
             ]})
         );
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "조회는 명부를 안 바꾼다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            0,
+            "a query does not change the roster"
+        );
     }
 
-    /// ★`live` 는 `agent.list` 의 `state` 와 한 판정이다★ — 세션이 남아 있어도 끝난 화신(reaper 가 아직 안 거둠)은
-    /// 산 것이 아니다(ADR-0116).
+    /// ★`live` is one decision with the `state` of `agent.list`★ — even if the session remains, an ended incarnation (not yet collected by the reaper)
+    /// is not alive (ADR-0116).
     #[test]
     fn resolve_and_list_agree_on_liveness() {
         let host = FakeHost::new();
@@ -5289,18 +5257,18 @@ mod tests {
         host.with_agent("asleep", false, false);
         let (table, _notify) = wiring(&host);
 
-        let listed = call(&table, "agent.list", json!({})).expect("조회");
+        let listed = call(&table, "agent.list", json!({})).expect("query");
         let resolved = call(
             &table,
             "agent.resolve",
             json!({ "targets": ["exiting", "exited", "asleep"] }),
         )
-        .expect("조회");
+        .expect("query");
         for (row, answer) in listed["agents"]
             .as_array()
-            .expect("배열")
+            .expect("array")
             .iter()
-            .zip(resolved["agents"].as_array().expect("배열"))
+            .zip(resolved["agents"].as_array().expect("array"))
         {
             assert_eq!(
                 answer["live"].as_bool(),
@@ -5310,7 +5278,7 @@ mod tests {
         }
     }
 
-    /// 셸이 읽는 꼴 그대로 — `targets[` + 10진 자리 + `]: `. 꼴이 어긋나면 `None`.
+    /// Exactly the form the shell reads — `targets[` + decimal position + `]: `. `None` if the form does not match.
     fn failing_position(message: &str) -> Option<usize> {
         let rest = message.strip_prefix("targets[")?;
         let (digits, after) = rest.split_once(']')?;
@@ -5321,8 +5289,7 @@ mod tests {
         digits.parse().ok()
     }
 
-    /// ★말 하나 때문에 난 실패는 그 코드 그대로이고 문구가 `targets[i]: ` 로 시작한다 — 셸이 이 머리를 읽는다★
-    /// (선언 머리 주석). 빈 말이 여럿이면 머리는 첫 자리다.
+    /// ★A failure caused by one word keeps its code and its text starts with `targets[i]: ` — the shell reads this head★ (the declaration header comment). With several blank words the head is the first position.
     // ADR-0307
     #[test]
     fn the_resolve_failure_prefix_is_a_stable_contract() {
@@ -5332,7 +5299,7 @@ mod tests {
         host.with_agent("twin", false, false);
         let (table, _notify) = wiring(&host);
         let fail = |targets: serde_json::Value| {
-            call(&table, "agent.resolve", json!({ "targets": targets })).expect_err("실패")
+            call(&table, "agent.resolve", json!({ "targets": targets })).expect_err("failure")
         };
 
         let missing = fail(json!(["alpha", "ghost"]));
@@ -5372,7 +5339,8 @@ mod tests {
             ambiguous.message()
         );
 
-        // 빈 말은 해석기에 닿기 전에 본다 — 앞 자리(0)의 없는 이름보다 뒤의 빈 말이 먼저 반려된다.
+        // Blank words are checked before reaching the resolver — a later blank word is rejected before a missing name at an earlier
+        //   position (0).
         let blank = fail(json!(["ghost", "alpha", "  ", ""]));
         assert_eq!(blank.code(), ErrorCode::InvalidArgument);
         assert_eq!(
@@ -5388,7 +5356,7 @@ mod tests {
         );
         assert!(
             blank.message().ends_with("(also blank: targets[3])"),
-            "나머지 빈 자리도 한 번에 댄다: {}",
+            "the remaining blank positions are named at once too: {}",
             blank.message()
         );
     }
@@ -5405,12 +5373,12 @@ mod tests {
                 "agent.resolve",
                 json!({ "targets": vec!["alpha"; count] }),
             )
-            .expect_err("개수 밖");
+            .expect_err("count out of range");
             assert_eq!(err.code(), ErrorCode::InvalidArgument, "{count}");
             assert_eq!(
                 failing_position(err.message()),
                 None,
-                "개수 반려는 말 하나의 실패가 아니라 머리가 없다: {}",
+                "a count rejection is not one word's failure, so there is no head: {}",
                 err.message()
             );
         }
@@ -5419,28 +5387,27 @@ mod tests {
             "agent.resolve",
             json!({ "targets": vec!["alpha"; RESOLVE_TARGETS_MAX] }),
         )
-        .expect("상한까지는 받는다");
+        .expect("up to the cap is accepted");
         assert_eq!(
             out["agents"].as_array().map(Vec::len),
             Some(RESOLVE_TARGETS_MAX)
         );
     }
 
-    /// ★답 모양을 파일에 못 박는다★ — 셸은 이 crate 를 의존하지 않고 답을 타입 없는 JSON 으로 읽으며, 셸 시험의
-    /// 가짜 데몬이 같은 파일로 답을 짓는다(TRD S28 §6). 칸 이름이 바뀌면 여기나 셸 쪽이 빨개진다.
+    /// ★The answer shape is pinned to a file★ — the shell does not depend on this crate and reads the answer as untyped JSON, and the shell tests' fake daemon builds answers from the same file (TRD S28 §6); a changed field name turns either side red.
     // ADR-0307
     #[test]
     fn the_resolve_reply_matches_the_golden_fixture() {
         let golden: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/agent_resolve_ok.json"))
-                .expect("골든은 JSON");
+                .expect("the golden is JSON");
         let host = FakeHost::new();
         for (id, name, live) in [
             ("11111111-1111-4111-8111-111111111111", "alpha", true),
             ("22222222-2222-4222-8222-222222222222", "beta", false),
         ] {
             host.rows.lock().unwrap().push(AgentRosterRow {
-                id: id.parse().expect("고정 id"),
+                id: id.parse().expect("fixed id"),
                 canonical_name: name.to_string(),
                 cwd: format!("C:/work/{name}"),
                 parent: None,
@@ -5454,29 +5421,30 @@ mod tests {
             "agent.resolve",
             json!({ "targets": ["alpha", "beta"] }),
         )
-        .expect("풀린다");
+        .expect("resolves");
         assert_eq!(out, golden);
     }
 
     #[test]
     fn a_wrong_argument_type_is_invalid_argument() {
         let (table, _notify) = wiring(&FakeHost::new());
-        let err = call(&table, "agent.rename", json!({ "target": 5 })).expect_err("타입 어긋남");
+        let err = call(&table, "agent.rename", json!({ "target": 5 })).expect_err("type mismatch");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn the_list_schema_inlines_the_nested_row_type() {
         let spec = AgentListArgs::SPEC;
-        let ok: serde_json::Value = serde_json::from_str(spec.ok_schema).expect("ok 스키마는 JSON");
+        let ok: serde_json::Value =
+            serde_json::from_str(spec.ok_schema).expect("the ok schema is JSON");
         assert_eq!(ok["properties"]["agents"]["type"], "array");
         assert_eq!(
             ok["properties"]["agents"]["items"]["properties"]["state"]["type"], "string",
-            "블록 안 선언 struct 가 인라인으로 펼쳐진다"
+            "a struct declared inside the block is spread inline"
         );
     }
 
-    // ── 대기 목록 조회·취소 (ADR-0231 · TRD §5-6) ──
+    // ── Waiting-list query and cancel (ADR-0231 · TRD §5-6) ──
 
     fn listed(id: &str, state: ListedState) -> crate::queued_input::ListedRow {
         crate::queued_input::ListedRow {
@@ -5521,7 +5489,7 @@ mod tests {
             "agent.listQueuedInputs",
             json!({ "target": "alpha" }),
         )
-        .expect("조회 성공");
+        .expect("query succeeds");
         assert_eq!(
             out,
             json!({
@@ -5540,7 +5508,11 @@ mod tests {
             })
         );
         assert_eq!(*host.queued_calls.lock().unwrap(), vec![(id, None)]);
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "명부를 바꾸지 않는다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            0,
+            "does not change the roster"
+        );
     }
 
     #[test]
@@ -5559,7 +5531,7 @@ mod tests {
             "agent.listQueuedInputs",
             json!({ "target": "alpha" }),
         )
-        .expect("조회 성공");
+        .expect("query succeeds");
         assert_eq!(
             out,
             json!({ "inputs": [], "as_of_seq": null, "epoch": 0, "stopped_after_error": false })
@@ -5579,11 +5551,11 @@ mod tests {
             "agent.listQueuedInputs",
             json!({ "target": "asleep" }),
         )
-        .expect_err("산 세션이 없다");
+        .expect_err("there is no live session");
         assert_eq!(asleep.code(), ErrorCode::NotFound);
         assert!(
             asleep.message().contains("not running"),
-            "명부에 있는 에이전트를 없다고 하지 않는다: {}",
+            "does not say that an agent in the roster is missing: {}",
             asleep.message()
         );
         for (target, code) in [
@@ -5595,20 +5567,20 @@ mod tests {
                 "agent.listQueuedInputs",
                 json!({ "target": target }),
             )
-            .expect_err("지목 실패");
+            .expect_err("pointing fails");
             assert_eq!(err.code(), code, "{target}");
         }
-        let blank =
-            call(&table, "agent.listQueuedInputs", json!({ "target": " " })).expect_err("빈 값");
+        let blank = call(&table, "agent.listQueuedInputs", json!({ "target": " " }))
+            .expect_err("blank value");
         assert_eq!(blank.code(), ErrorCode::InvalidArgument);
         assert_eq!(
             host.queued_calls.lock().unwrap().len(),
             1,
-            "지목이 서지 않으면 매니저에 닿지 않는다(잠든 에이전트 한 번만 물었다)"
+            "if the pointing does not stand, it does not reach the manager (asked only once, for the asleep agent)"
         );
     }
 
-    /// TRD §7-1 데몬 행의 「취소 결과」 — 세션의 답이 동사 응답으로 한 줄씩 번역된다.
+    /// The 「cancel result」 of the daemon row of TRD §7-1 — the session's answer is translated line by line into the verb response.
     #[test]
     fn cancel_translates_every_session_answer() {
         let answers: Vec<(Result<CancelOutcome, CancelError>, Result<&str, ErrorCode>)> = vec![
@@ -5642,7 +5614,7 @@ mod tests {
                     if code == ErrorCode::Internal {
                         assert!(
                             err.message().contains("stays in the cancelling state"),
-                            "쓰기 실패는 항목이 취소 대기로 남는다고 말한다: {}",
+                            "a write failure says the entry stays pending cancel: {}",
                             err.message()
                         );
                     }
@@ -5651,18 +5623,18 @@ mod tests {
             assert_eq!(
                 *host.queued_calls.lock().unwrap(),
                 vec![(id, Some("q1".to_string()))],
-                "{label}: 푼 id 와 input_id 가 그대로 넘어간다"
+                "{label}: the resolved id and input_id are handed over as is"
             );
             assert_eq!(
                 *notify.calls.lock().unwrap(),
                 0,
-                "{label}: 명부를 바꾸지 않는다"
+                "{label}: does not change the roster"
             );
         }
     }
 
-    /// ★실패 문구는 명부 이름으로 부른다★ — 데몬 공통 입구가 `target` 을 푼 id 로 바꿔 적으므로 토큰을 그대로
-    /// 실으면 호출자는 자기가 치지 않은 UUID 를 읽는다.
+    /// ★The failure text calls it by the roster name★ — the daemon's common entry rewrites `target` as the resolved id, so carrying the token as is
+    /// would make the caller read a UUID it did not type.
     #[test]
     fn cancel_failures_name_the_agent_by_its_roster_name_even_when_targeted_by_id() {
         for answer in [
@@ -5688,7 +5660,7 @@ mod tests {
             );
             assert!(
                 !err.message().contains(&id.to_string()),
-                "{label}: id 를 이름 자리에 싣지 않는다: {}",
+                "{label}: does not carry the id in the name position: {}",
                 err.message()
             );
         }
@@ -5706,7 +5678,7 @@ mod tests {
             json!({ "target": "alpha", "input_id": "   " }),
             json!({ "target": " ", "input_id": "q1" }),
         ] {
-            let err = call(&table, "agent.cancelQueuedInput", args.clone()).expect_err("반려");
+            let err = call(&table, "agent.cancelQueuedInput", args.clone()).expect_err("rejection");
             assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
         }
         let unknown = call(
@@ -5714,15 +5686,15 @@ mod tests {
             "agent.cancelQueuedInput",
             json!({ "target": "nobody", "input_id": "q1" }),
         )
-        .expect_err("지목 실패");
+        .expect_err("pointing fails");
         assert_eq!(unknown.code(), ErrorCode::NotFound);
         assert!(
             host.queued_calls.lock().unwrap().is_empty(),
-            "인자·지목이 서지 않으면 매니저에 닿지 않는다"
+            "if the arguments or pointing do not stand, it does not reach the manager"
         );
     }
 
-    /// 통로의 답이 동사 결말로 한 줄씩 번역된다(TRD S21-chat-ux §3-3).
+    /// The link's answer is translated line by line into the verb outcome (TRD S21-chat-ux §3-3).
     // ADR-0237
     #[test]
     fn interrupt_translates_every_transport_answer() {
@@ -5760,7 +5732,7 @@ mod tests {
                     assert_eq!(err.code(), code, "{label}");
                     assert!(
                         err.message().contains("'alpha'"),
-                        "{label}: 명부 이름으로 부른다: {}",
+                        "{label}: calls it by the roster name: {}",
                         err.message()
                     );
                 }
@@ -5769,7 +5741,7 @@ mod tests {
             assert_eq!(
                 *notify.calls.lock().unwrap(),
                 0,
-                "{label}: 명부를 바꾸지 않는다"
+                "{label}: does not change the roster"
             );
         }
     }
@@ -5780,21 +5752,22 @@ mod tests {
         host.with_agent("alpha", true, false);
         let (table, _notify) = wiring(&host);
 
-        let blank = call(&table, "agent.interrupt", json!({ "target": " " })).expect_err("빈 값");
+        let blank =
+            call(&table, "agent.interrupt", json!({ "target": " " })).expect_err("blank value");
         assert_eq!(blank.code(), ErrorCode::InvalidArgument);
-        let unknown =
-            call(&table, "agent.interrupt", json!({ "target": "nobody" })).expect_err("지목 실패");
+        let unknown = call(&table, "agent.interrupt", json!({ "target": "nobody" }))
+            .expect_err("pointing fails");
         assert_eq!(unknown.code(), ErrorCode::NotFound);
         assert!(
             host.interrupt_calls.lock().unwrap().is_empty(),
-            "인자·지목이 서지 않으면 매니저에 닿지 않는다"
+            "if the arguments or pointing do not stand, it does not reach the manager"
         );
     }
 
     #[test]
     fn the_queue_list_schema_inlines_the_row_and_the_cancel_pair() {
         let ok: serde_json::Value =
-            serde_json::from_str(AgentListQueuedInputsArgs::SPEC.ok_schema).expect("ok 스키마");
+            serde_json::from_str(AgentListQueuedInputsArgs::SPEC.ok_schema).expect("ok schema");
         let row = &ok["properties"]["inputs"]["items"]["properties"];
         assert_eq!(row["state"]["type"], "string");
         assert_eq!(
@@ -5805,12 +5778,12 @@ mod tests {
             .as_array()
             .expect("required")
             .iter()
-            .map(|v| v.as_str().expect("문자열"))
+            .map(|v| v.as_str().expect("string"))
             .collect();
         assert_eq!(required, vec!["inputs", "epoch", "stopped_after_error"]);
     }
 
-    // ── 사용량(`usage.*` — TRD S21 usage-limit-slot §1-6) ───────────────────────────────────────────
+    // ── Usage (`usage.*` — TRD S21 usage-limit-slot §1-6) ───────────────────────────────────────────
 
     fn usage_table(usage: &Arc<FakeUsage>) -> CommandTable {
         make_table(
@@ -5845,24 +5818,31 @@ mod tests {
         }
     }
 
-    /// 두 동사가 같은 포트의 제 메서드로 가고(받은 낱말 그대로), 답은 한 겹 없이 평평한 행이며 두 동사의 답 모양이
-    /// 같다 — `usage.refresh` 의 반환 struct 가 따로 지어져도 JSON 은 한 행이다.
+    /// The two verbs go to their own methods of the same port (with the received word as is), the answer is a flat row without a layer, and the answer shapes of the two verbs
+    /// are the same — even though the return struct of `usage.refresh` is built separately, the JSON is one row.
     #[test]
     fn the_usage_verbs_answer_the_ports_row_flat_and_alike() {
         let usage = Arc::new(FakeUsage::default());
         *usage.row.lock().unwrap() = Some(usage_row());
         let table = usage_table(&usage);
 
-        let got = call(&table, "usage.get", json!({ "backend": "Claude" })).expect("성공");
-        let refreshed = call(&table, "usage.refresh", json!({ "backend": "Codex" })).expect("성공");
+        let got = call(&table, "usage.get", json!({ "backend": "Claude" })).expect("success");
+        let refreshed =
+            call(&table, "usage.refresh", json!({ "backend": "Codex" })).expect("success");
 
-        assert_eq!(got, serde_json::to_value(usage_row()).expect("행 직렬화"));
+        assert_eq!(
+            got,
+            serde_json::to_value(usage_row()).expect("row serialization")
+        );
         assert_eq!(got["state"], "Failed");
         assert_eq!(got["served"], "Fresh");
         assert_eq!(got["windows"][0]["window"], "FiveHour");
         assert_eq!(got["windows"][0]["left_pct"], 60);
         assert_eq!(got["detail_code"], -32_603);
-        assert_eq!(refreshed, got, "두 동사의 답은 같은 행 모양이다");
+        assert_eq!(
+            refreshed, got,
+            "the answers of the two verbs have the same row shape"
+        );
         assert_eq!(
             *usage.calls.lock().unwrap(),
             vec![
@@ -5872,13 +5852,13 @@ mod tests {
         );
     }
 
-    /// 칸이 없는 백엔드는 **값으로** 실패한다(패닉 없음) — wire ⟳ 의 같은 부재와 같은 코드·같은 문장이다.
+    /// A backend without a field fails **with a value** (no panic) — the same code and the same sentence as the same absence of wire ⟳.
     #[test]
     fn a_backend_without_a_usage_slot_fails_by_value_with_not_found() {
         let usage = Arc::new(FakeUsage::default());
         let table = usage_table(&usage);
         for name in ["usage.get", "usage.refresh"] {
-            let err = call(&table, name, json!({ "backend": "Codex" })).expect_err("칸이 없다");
+            let err = call(&table, name, json!({ "backend": "Codex" })).expect_err("no field");
             assert_eq!(err.code(), ErrorCode::NotFound, "{name}");
             assert!(
                 err.message()
@@ -5888,27 +5868,28 @@ mod tests {
         }
     }
 
-    /// ★버스 낱말(대문자 시작)이 wire 낱말(소문자)과 같은 칸 키에 닿는다★ — 선언 낱말 전부. 들어온 철자로 키를
-    /// 지으면 두 입구가 다른 칸을 친다(TRD §3 #43).
+    /// ★The bus word (capitalized) reaches the same field key as the wire word (lowercase)★ — all declared words. Building the key from the incoming spelling
+    /// would have the two entries hit different fields (TRD §3 #43).
     #[test]
     fn every_declared_backend_reaches_the_usage_key_its_wire_word_reaches() {
         let every = |backend: &AgentBackend| match backend {
-            // 선언 낱말이 늘면 여기서 컴파일이 멈춘다 — 아래 목록에 더할 것.
+            // If the declared words grow, compilation stops here — add to the list below.
             AgentBackend::Claude | AgentBackend::Codex => (),
         };
         for backend in [AgentBackend::Claude, AgentBackend::Codex] {
             every(&backend);
-            let bus = usage_vendor_of(&backend).unwrap_or_else(|| panic!("{backend:?} 의 조회기"));
+            let bus =
+                usage_vendor_of(&backend).unwrap_or_else(|| panic!("the prober of {backend:?}"));
             let wire_word = backend_word(&backend).to_ascii_lowercase();
             let wire = crate::backend::usage_probe_for(&wire_word)
-                .unwrap_or_else(|| panic!("{wire_word} 의 조회기"))
+                .unwrap_or_else(|| panic!("the prober of {wire_word}"))
                 .key();
             assert_eq!(bus, wire, "{backend:?}");
         }
     }
 
-    /// 두 동사의 반환 스키마는 바이트까지 같다 — 반환 struct 가 둘이라 칸이 한쪽에만 늘 수 있다(`From` 이 컴파일로
-    /// 막지만, 광고는 스키마가 나른다).
+    /// The return schemas of the two verbs are the same down to the bytes — with two return structs, a field could grow on only one side (`From` blocks it at compile
+    /// time, but the advertisement is carried by the schema).
     #[test]
     fn the_two_usage_verbs_advertise_one_row_schema() {
         assert_eq!(
@@ -5916,7 +5897,7 @@ mod tests {
             UsageRefreshArgs::SPEC.ok_schema
         );
         let ok: serde_json::Value =
-            serde_json::from_str(UsageGetArgs::SPEC.ok_schema).expect("ok 스키마");
+            serde_json::from_str(UsageGetArgs::SPEC.ok_schema).expect("ok schema");
         let window = &ok["properties"]["windows"]["items"]["properties"];
         assert_eq!(
             window["window"]["enum"],
@@ -5939,7 +5920,7 @@ mod tests {
         );
         assert_eq!(
             ok["properties"]["detail_code"]["anyOf"][0]["type"], "integer",
-            "상류 수는 JSON 수로 싣는다"
+            "upstream numbers are carried as JSON numbers"
         );
     }
 }

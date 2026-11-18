@@ -1,94 +1,73 @@
-//! 명령 배달 — 명부에서 주인을 찾아 **그 연결의 프레임 출구로 봉투를 쓰고**, 돌아온 결말을 **원래 물어본
-//! 연결**에 실어 준다(ADR-0154 · TRD §3-5·§3-8).
+//! Command delivery — finds the owner in the roster, **writes the envelope to that connection's frame outlet**, and carries the returned outcome
+//! **to the connection that originally asked** (ADR-0154 · TRD §3-5·§3-8).
 //!
-//! 배달 규칙 자체는 여기 없다 — 도구 crate 의 3단계([`route`])가 전 홉 공통이고(ADR-0155 결정 3) 이
-//! 모듈이 더하는 것은 그 3단계가 필요로 하는 **데몬 몫의 네 조각**뿐이다:
-//! ① 주인 토큰에서 연결로 가는 링크([`OwnerLink`] — 그 자리가 [`CommandRoster::sink_of`]) ·
-//! ② 요청 상관 표([`CommandDeliveries`] — `request_id` → 원 연결 · 마감시각) ·
-//! ③ 데몬이 스스로 답하는 1단계([`LocalCommands`]) — **그 단계만 `route` 밖에서** 돈다(사유 = [`deliver`]) ·
-//! ④ 중계 전 에이전트 참조 칸 변환([`resolve_agent_args`] — ADR-0308). 데몬은 화면 내용을 모른 채, 주인이
-//!    표시한 칸의 이름만 자기 해석기로 id 로 바꾼다.
+//! The delivery rules themselves are not here — the tool crate's 3 stages ([`route`]) are common to every hop (ADR-0155 decision 3). This module adds
+//! only the **four daemon-side pieces** those stages need:
+//! ① the link from an owner token to a connection ([`OwnerLink`] — [`CommandRoster::sink_of`]) ·
+//! ② the request correlation table ([`CommandDeliveries`] — `request_id` → origin connection · deadline) ·
+//! ③ stage 1, which the daemon answers by itself ([`LocalCommands`]) — **only that stage runs outside `route`** (reason = [`deliver`]) ·
+//! ④ the agent-reference field conversion before the relay ([`resolve_agent_args`] — ADR-0308): the daemon turns only the names in fields the owner
+//!    marked into ids with its own resolver, without knowing screen content.
 //!
-//! ## ★받은 질의 하나에 답장은 정확히 하나★(TRD §4-⑤)
+//! ## ★Exactly one reply per received query★ (TRD §4-⑤)
 //!
-//! ★「한 `request_id` 에 한 장」이 **아니다** — 그 문장은 이 코드에 대해 거짓이다★: 같은 번호로 질의가
-//! 여럿 오면([`Seat::Conflict`]·[`Seat::Taken`]·[`Seat::LocalStillRunning`]·[`Seat::LocalAlreadyRan`]·
-//! [`Seat::Closed`]) 각 질의가 **자기 답장 한 장**을 받으므로 그 번호에는 여러 장이 오간다. 이 모듈이
-//! 실제로 지키는 것은 **질의당 한 장**이고, 합침([`Seat::Coalesced`])은 그중 질의를 **묻지 않은 것으로
-//! 만드는** 것이 아니라 진행 중인 답장 한 장이 두 질의를 함께 답하게 하는 갈래다.
+//! ★It is **not** "one frame per `request_id`" — that sentence is false for this code★: when several queries arrive with the same number
+//! ([`Seat::Conflict`]·[`Seat::Taken`]·[`Seat::LocalStillRunning`]·[`Seat::LocalAlreadyRan`]·[`Seat::Closed`]) each gets **its own reply**.
+//! What this module keeps is **one per query**; coalescing ([`Seat::Coalesced`]) is the branch where one in-flight reply answers two queries together.
 //!
-//! 그것을 지키는 기제가 **상관 표의 자리**이고, 규칙은 두 줄이다:
+//! What keeps it is the **seat of the correlation table**, and the rules are two lines:
+//! 1. **Open the seat first** ([`CommandDeliveries::open`]) and only then do anything — [`deliver`] opens it **before** `route`, so whichever
+//!    stage makes the answer, that answer sits on one seat.
+//! 2. **Release the seat only after the frame has gone out** ([`CommandDeliveries::release`]) — the end of the seat is the moment the frame **went out**, not the
+//!    moment the outcome attaches; releasing in between lets a re-query of the same id see an empty table and send the envelope once more.
 //!
-//! 1. **자리를 먼저 열고**([`CommandDeliveries::open`]) 그 뒤에 무엇이든 한다 — [`deliver`] 가 `route`
-//!    보다 **앞서** 연다. 그래서 3단계 중 어느 단계가 답을 만들든 그 답은 자리 하나를 깔고 앉아 있다.
-//! 2. **프레임을 내보낸 뒤에야 자리를 놓는다**([`CommandDeliveries::release`]). 결말이 붙는 순간이 아니라
-//!    **나간 순간**이 자리의 끝이다 — 그 사이에 놓으면 같은 id 의 재질의가 빈 표를 보고 봉투를 한 번 더
-//!    보낸다(같은 조작이 두 번 적용되고 프레임도 둘이 된다).
+//! ★Do not make a reply without going through the seat★ — **every** frame leaving this module rests on one decision of the table: a reply that won a seat, or a
+//! refusal carrying the very decision that no seat was won. A late outcome gets nothing in [`CommandDeliveries::complete`] and is discarded.
+//! (Stage 1 (own table) and stage 3 (owner absent) of `route` once bypassed the table and emitted a second frame under the key of a round trip in progress.)
 //!
-//! ★자리를 거치지 않고 답장을 만들지 말 것★ — 이 모듈에서 나가는 **모든** 프레임은 표의 단일 판정 하나를
-//! 근거로 나간다: 자리를 얻어 낸 답장이거나, 자리를 못 얻었다는 그 판정 자체를 실은 반려다. 예전에는
-//! `route` 의 1단계(내 표)와 3단계(주인 부재)가 표를 아예 안 거치는 우회로였고, 그 둘이 진행 중인 왕복의
-//! 키로 두 번째 프레임을 냈다.
-//! 늦게 온 결말은 [`CommandDeliveries::complete`] 에서 빈손을 받고 버려진다 — 답장 자리를 이미 누가
-//! 가져갔기 때문이다.
+//! ## ★Stage 1 with the same number runs only once — but only **while it is remembered**★
 //!
-//! ## ★같은 번호의 1단계는 한 번만 실행된다 — 단 **기억하는 동안**만★
+//! A command the daemon answers by itself (stage 1) has side effects and no verb to undo it (`agent.new` — ADR-0122), so a re-query of the same number is
+//! stopped from applying it twice **by one seat**: while the body runs ([`Seat::LocalStillRunning`]) and after it ends ([`SeatState::Retained`]) that seat
+//! keeps holding the number, and the point where the state changes is one critical section.
+//! ★The owner of the number is **one seat table** — do not make a second table that collects numbers separately★: two authorities over one namespace
+//! always diverge.
+//! ★Only **what was applied** is held and the hold is **bounded**★ — decision = [`retains_the_id`], window = the one deadline, and a re-query outside
+//! it cannot be told apart from a new request. An unbounded guarantee needs a real dedup store that replays completed work (TRD §4-⑥ · see [`no_retry`]) — this hold is **not** that store.
 //!
-//! 데몬이 스스로 답하는 명령(1단계)은 부수효과가 있고 되돌릴 동사가 없다(`agent.new` — ADR-0122). 그래서
-//! 같은 번호의 재질의가 그것을 두 번 적용하지 못하게 **자리 하나로** 막는다: 본문이 도는 동안에도
-//! ([`Seat::LocalStillRunning`]) 끝난 뒤에도([`SeatState::Retained`]) 그 자리가 계속 그 번호를 쥐고 있고,
-//! 처지가 바뀌는 지점이 한 임계 구역이라 그 사이에 틈이 없다.
-//! ★번호의 임자는 **자리 표 하나**다 — 번호만 따로 모으는 두 번째 표를 만들지 말 것★: 한 이름 공간에
-//! 권위가 둘이면 반드시 갈린다(실행하지 않은 번호가 남거나, 무관한 읽기 트래픽이 남의 번호를 밀어내거나,
-//! 두 수명이 어긋난다 — 전부 실제로 겪은 형태다).
-//! ★붙드는 것은 **적용된 것**뿐이고 보유는 **유계**다★ — 판정은 [`retains_the_id`], 창은 마감 하나이며
-//! 그 밖의 재질의는 새 요청과 구분되지 않는다. 무한한 보장을 원하면 완료분을 재생하는 진짜 dedup
-//! 저장소가 필요하다(TRD §4-⑥ · 그 부재의 정본은 [`no_retry`]) — 이 보유는 그 저장소가 **아니다**.
+//! ## ★Do not hold a handed-out copy beyond a round trip★ (ADR-0154)
 //!
-//! ## ★내준 사본을 왕복 너머로 들지 않는다★(ADR-0154)
+//! The roster cannot take back a frame outlet copy it handed out. So [`OwnerLink::send`] writes with the copy on the spot and drops it, and when giving the
+//! reply it **looks up the origin connection again**. The correlation table holds only the connection **identifier** — a copy kept here would outlive `on_disconnect` and leak a live connection.
 //!
-//! 명부는 내보낸 프레임 출구 사본을 **회수할 수단이 없다.** 그래서 [`OwnerLink::send`] 는 사본을 받아
-//! 그 자리에서 쓰고 버리고, 답장을 낼 때는 **원 연결을 다시 조회한다**. 상관 표가 드는 것은 연결
-//! **식별자**뿐이다 — 여기에 출구 사본을 넣으면 그 사본이 `on_disconnect` 를 넘겨 살아 연결이 샌다.
+//! ## ★The correlation table and the roster are different tables — they are not merged★ (TRD §4-④)
 //!
-//! ## ★상관 표와 명부는 다른 표다 — 합치지 않는다★(TRD §4-④)
+//! The lifetime units differ: a correlation entry hangs on **one round trip** and also vanishes at the deadline, a roster registration hangs on **one connection**
+//! and vanishes only at its end. Merged, one deadline would erase the vocabulary.
 //!
-//! 수명 단위가 다르다: 상관 표의 항목은 **왕복 하나**에 매달려 마감시각으로도 사라지고, 명부 등록은
-//! **연결 하나**에 매달려 종료로만 사라진다. 합치면 마감시각 하나가 어휘를 지운다.
+//! ★This module calls [`CommandRoster::detach`] in **one place** — the destructor of [`CallerSeat`]★: it only reaps the one fake caller connection it set up (no name is
+//! registered, so there is no roster entry to erase), and its number space does not overlap with the disconnect cleanup of a real connection (carve-out canonical in the `detach` doc).
+//! ★That destructor reaps **both tables together**★ (`detach` + `drop_origin`, the same pair as the real disconnect hook) — a fake connection has no such hook, so reaping only
+//! one side would leave the other for the whole process lifetime.
+//! ★For "together" to hold **the first line must not panic**★: the roster's `lock_for_cleanup` inside [`CommandRoster::detach`] and
+//! [`CommandDeliveries::lock_for_cleanup`] each reclaim a poisoned lock (base `sync::lock`). Reverting either to a panicking lock kills the destructor on that line
+//! so the later line does not run, and during unwinding it is a double panic that aborts the process. ★The production process has no poisoning★ (a panic holding the two tables is outside the
+//! containment marker and the hook ends the process first — ADR-0292); the discipline pays off in test builds without the hook (range = the doc of the two `lock_for_cleanup`).
+//! ★Cleaning the correlation table does not touch the roster★ — deadline · completion · disconnect cleanup all finish inside the seat table.
 //!
-//! ★이 모듈은 [`CommandRoster::detach`] 를 **한 자리에서** 부른다 — [`CallerSeat`] 의 소멸자다★: 그
-//! 호출은 자기가 세운 가짜 호출자 연결 하나를 거둘 뿐이고(이름을 등록하지 않으므로 지울 명부 항목이
-//! 없다), 실 연결의 끊김 정리와 번호 공간이 겹치지 않는다. 그 카브아웃의 정본은 `detach` 의 doc 이다.
-//! ★그 소멸자는 **두 표를 함께** 거둔다★ — 실 연결의 끊김 훅과 같은 짝이다(`detach` + `drop_origin`).
-//! 가짜 연결에는 그 훅이 없으므로, 한쪽만 거두면 나머지 한쪽이 프로세스 수명 내내 남는다.
-//! ★「함께」가 서려면 **첫 줄이 패닉하지 않아야** 한다 — 그것을 지는 것은 두 표의 정리용 잠금이다★:
-//! 명부는 [`CommandRoster::detach`] 안의 `lock_for_cleanup`, 상관 표는
-//! [`CommandDeliveries::lock_for_cleanup`] 이 각각 오염된 잠금을 되찾아(base `sync::lock`) 통과한다. 어느 한쪽을
-//! 패닉하는 잠금으로 되돌리면 그 줄에서 소멸자가 죽어 **뒷줄이 안 돌고**(그 표가 샌다) 되감기 중이면
-//! 이중 패닉이라 프로세스가 abort 한다. ★단 운영 프로세스에는 오염 자체가 없다★ — 두 표를 쥔 채 나는 패닉은
-//! 가둠 표시 밖이라 훅이 되감기 전에 끝낸다(ADR-0292). 이 규율이 실제로 값을 하는 것은 훅 없는 시험 빌드다(그
-//! 범위 = 두 `lock_for_cleanup` 의 doc).
-//! ★상관 표 정리에서 명부를 건드리지 않는다★ — 마감·완료·끊김 정리는 전부 자리 표 안에서 끝난다(위
-//! 소멸자는 그 반대 방향이다: 연결 수명이 두 표를 함께 거둔다).
+//! ## ★Two entrances, one machine★ (ADR-0160)
 //!
-//! ## ★입구는 둘, 기계는 하나★(ADR-0160)
+//! [`deliver`] is called from two places — socket dispatch and the control route ([`CommandBus::invoke`]) — and both use the same seat table · deadline · duplicate prevention.
+//! ★Do not make a different device per entrance★: with two wait tickets one entrance cannot see a seat the other opened, and a re-query of the same number applies the same operation twice.
+//! ★But **of the 3 stages, stage 1 is ridden only by the socket entrance**★ — [`CommandBus::invoke`] refuses the daemon's own names and the decision part
+//! (`control::catalog::handle_call`) answers them in its own place. The reason is cancellation: the stage 1 body is `spawn_blocking` and is not cancelled while an HTTP handler
+//! future is, so the seat · cap would be left without cleanup (full text = the comment at that refusal). So "two entrances" concerns **stages 2·3**, and the entrance label of stage 1
+//! ([`LocalCommands::run`]'s `entrance`) has one value today.
 //!
-//! [`deliver`] 를 부르는 자리가 둘이다 — 소켓 디스패치와 제어 라우트([`CommandBus::invoke`]). 둘은 같은
-//! 자리 표·같은 마감·같은 중복 방지를 쓴다. ★입구별로 다른 장치를 만들지 말 것★ — 대기표가 둘이면 한
-//! 입구가 연 자리를 다른 입구가 못 봐서, 같은 번호의 재질의가 같은 조작을 두 번 적용한다.
+//! ## Entry points
 //!
-//! ★단 **3단계 중 1단계는 소켓 입구만 탄다**★ — 제어 라우트는 데몬 자기 이름을 [`CommandBus::invoke`] 가
-//! 거절하고, 그 이름의 답은 판정부(`control::catalog::handle_call`)가 자기 자리에서 낸다. 이유는 취소다:
-//! 1단계 본문은 `spawn_blocking` 이라 취소되지 않는데 HTTP 핸들러 future 는 취소되므로, 그 조합에서는
-//! 자리·상한이 뒷정리 없이 남는다(전문 = 그 거절 자리의 주석). 그래서 「입구는 둘」은 **2·3단계**의
-//! 이야기이고, 1단계의 입구 라벨([`LocalCommands::run`] 의 `entrance`)은 오늘 값이 하나다.
-//!
-//! ## 진입점
-//!
-//! [`deliver`] 가 왕복 하나를 통째로 돈다(연결 태스크 **밖**에서 돌아야 한다 — 그 사유는 그 함수 doc) ·
-//! [`CommandBus::invoke`] 가 연결 없는 호출자(제어 라우트)를 그 함수에 태우고 ·
-//! [`CommandDeliveries::complete`] 가 주인의 결말을 그 왕복에 붙이고 ·
-//! [`CommandDeliveries::expire`] 와 [`CommandDeliveries::drop_origin`] 이 나머지 둘을 거둔다.
+//! [`deliver`] runs a whole round trip (it must run **outside** the connection task — see its doc) · [`CommandBus::invoke`] puts a connectionless caller (the control route) on it ·
+//! [`CommandDeliveries::complete`] attaches the owner's outcome · [`CommandDeliveries::expire`] and [`CommandDeliveries::drop_origin`] reap the other two.
 // ADR-0154
 // ADR-0160
 
@@ -115,37 +94,36 @@ use crate::connection_core::{
     envelope_to_wire, event_json, reply_from_wire, reply_to_wire, sanitize_for_log, sanitize_within,
 };
 
-/// 물어본 연결이 이미 떠났을 때의 문구 — 이 답장도 갈 곳이 없다(그 연결이 사라졌다).
+/// The wording when the connection that asked has already left — this reply has nowhere to go either (that connection vanished).
 const CALLER_ALREADY_GONE: &str = "the calling connection went away before the envelope was sent";
 
-/// 배달을 부른 문 — 로그 필드 `entrance` 의 값이자 [`deliver`] 의 인자다.
+/// The door that called delivery — the value of the log field `entrance` and the argument of [`deliver`].
 ///
-/// ★리터럴을 자리마다 적지 말 것★: 이 필드로 두 입구의 사고를 가르는 것이 목적인데, 철자가 자리마다
-/// 갈리면 그 필터가 조용히 절반만 잡는다. `"cli"` 는 배달을 안 타는 제어 라우트의 **직접 실행** 몫이라
-/// 여기 없다(그 자리 = `control::commands::call_daemon_command` 의 호출부).
+/// ★Do not write the literal at each place★: the point is to tell the incidents of the two entrances apart by this field, and if the spelling
+/// diverges per place that filter quietly catches only half. `"cli"` belongs to the **direct execution** of the control route that does not ride delivery
+/// so it is not here (that place = the call site of `control::commands::call_daemon_command`).
 pub const ENTRANCE_SOCKET: &str = "bus";
-/// 제어 라우트가 남의 이름으로 태운 중계.
+/// A relay the control route ran with another's name.
 ///
-/// ★이 값을 내는 자리가 둘이고 **같은 호출의 앞뒤**다★: 중계를 시작할 때 누가 시켰는지 적는 줄
-/// (`control::mcp_server::control_call_handler`)과 그 결말을 적는 줄([`CommandBus::invoke`]). 한쪽만
-/// 이 값을 쓰면 「누가 시켰나」와 「어떻게 끝났나」가 다른 라벨로 갈려 필터가 절반만 잡는다.
+/// ★Two places emit this value and they are **the before and after of the same call**★: the line that writes who ordered it when the relay starts
+/// (`control::mcp_server::control_call_handler`) and the line that writes its outcome ([`CommandBus::invoke`]). If only one side
+/// uses this value "who ordered it" and "how it ended" split into different labels and the filter catches only half.
 pub const ENTRANCE_CONTROL: &str = "control";
 
-/// 이 경로가 짓는 **모든** 실패 답 — ★재시도 지시는 예외 없이 `Never` 다★.
+/// **Every** failure answer this path builds — ★the retry instruction is `Never` without exception★.
 ///
-/// ## 왜 코드에서 파생된 지시를 쓰지 않나
+/// ## Why not use an instruction derived from the code
 ///
-/// ADR-0159 의 자는 「안전 × 쓸모」이고, `same-request-id` 의 **안전** 다리는 「같은 번호로 다시 묻는
-/// 것이라 같은 조작이 두 번 적용되지 않는다」이다. 그 전제는 **최초 수신 데몬이 완료분을 캐시해 재생해 줄
-/// 때만** 성립하는데(TRD §4-⑥ 「완료분 재생」), 그 dedup 저장소는 이 저장소 어디에도 없다(실측). 저장소가
-/// 없으면 재질의는 재질의가 아니라 **재실행**이고, 부수효과 있는 명령은 두 번 적용된다. 안전 다리가
-/// 거짓이면 쓸모와 무관하게 판정은 「끝」이다 — 그래서 전부 `Never` 다.
+/// The ruler of ADR-0159 is "safety × usefulness", and the **safety** leg of `same-request-id` is "asking again with the same number does not
+/// apply the same operation twice". That premise holds **only when the first receiving daemon caches completed work and replays it**
+/// (TRD §4-⑥ "completed-work replay"), but that dedup store exists nowhere in this repo (measured). Without a store a re-query is not a re-query but **a
+/// re-execution**, and a command with side effects is applied twice. If the safety leg is false the decision is "end" regardless of usefulness — so everything is `Never`.
 ///
-/// ★코드 어휘는 그대로 둔다★: `OUTCOME_UNKNOWN` 은 **확실성 서술**이라 사실 그대로 남고(적용됐는지 모른다),
-/// 바꾸는 것은 **지시**뿐이다. 계약에 두 칸이 따로 있는 이유가 이것이다. 새 오류 코드를 만들지 않는다.
+/// ★The code vocabulary is left as it is★: `OUTCOME_UNKNOWN` is a **statement of certainty** so it stays as fact (it is not known whether it was applied),
+/// and what changes is **only the instruction**. This is why the contract has two separate fields. No new error code is made.
 ///
-/// ★재개 조건★ — dedup 저장소(완료분 재생 + TTL)가 서면 그때 이 함수를 걷고 코드에서 파생된 지시를
-/// 되살린다. 그전에 되살리면 「안전하다」는 거짓말이 된다.
+/// ★Condition to resume★ — when a dedup store (completed-work replay + TTL) stands, lift this function and revive the instruction derived from the code.
+/// Reviving it before then would make "it is safe" a lie.
 ///
 /// ★This is the only place in this file that builds an error★ — machine-checked by
 /// `tests::this_module_can_only_build_do_not_retry_failures`. `agent_ref_refusal` does not build one: it
@@ -182,7 +160,7 @@ const CLI_CALLER_WINDOW: Duration =
 
 const _: () = assert!(
     fits_caller_silence_window(CommandDeliveries::DEFAULT_DEADLINE, CLI_CALLER_WINDOW),
-    "명령 마감 + 수거 주기 + 여유가 CLI 의 침묵 한도를 넘는다 — 답장이 나가기 전에 호출자가 끊는다"
+    "command deadline + reap period + margin exceeds the CLI's silence limit — the caller cuts off before the reply goes out"
 );
 const _: () = assert!(
     fits_caller_silence_window(LAUNCH_REPLY_BOUND, LAUNCH_CALLER_WAIT),
@@ -213,171 +191,155 @@ pub const LAUNCH_RELAY_SEAT: Duration =
 pub const LAUNCH_RELAY_CALLER_WAIT: Duration =
     Duration::from_secs(engram_dashboard_agent::types::LAUNCH_RELAY_CALLER_WAIT_SECS);
 
-/// 진행 중인 왕복 하나 — **원 연결**과 **마감시각**, 그리고 답장을 받아 갈 자리.
+/// One in-flight round trip — **the origin connection**, **the deadline**, and the place to take the reply.
 ///
-/// ★프레임 출구 사본을 여기 넣지 말 것★ — 이 항목은 연결보다 오래 살 수 있고, 살아남은 사본 하나가
-/// 끊긴 연결의 writer 를 자기 종료하지 못하게 만든다(모듈 헤더 · ADR-0154).
+/// ★Do not put a frame outlet copy here★ — this entry can outlive the connection, and one surviving copy keeps the disconnected connection's writer
+/// from ending itself (module header · ADR-0154).
 struct Pending {
-    /// 답장을 되돌릴 연결. **세대 번호가 없다 — 그래서 연결 id 가 재사용되지 않는 데 기대고 있다.**
+    /// The connection to return the reply to. **It has no generation number — so it relies on connection ids not being reused.**
     ///
-    /// ★안전한 이유는 배달 코드가 아니라 **할당기**에 있다(실측 2026-08-18)★: 연결 id 는 네트워크 행
-    /// `link/server.rs` 의 `ConnRegistry::alloc_id` 가 `AtomicU64`(초기값 1)에서 `fetch_add(1)` 로 뽑고, 해제
-    /// (`unregister`)는 맵에서 지울 뿐 그 값을 되돌려 놓지 않는다. 레지스트리는 데몬 조립에서 한 번 나므로
-    /// 그 카운터는 프로세스 수명 내내 단조 증가하고, u64 소진은 도달 불가다.
-    /// ★그 성질이 바뀌면 여기가 깨진다★ — id 를 재사용(풀 반납·해시·클라이언트 제공 값)하게 되면, 마감
-    /// 전에 남은 자리가 **같은 번호를 새로 받은 다른 피어**에게 남의 답장을 건넨다. 그때 필요한 것은 이
-    /// 칸에 세대 번호를 붙이는 것이고, 지금 미리 붙이지 않는 이유는 도달 불가한 위험에 대한 값이라서다.
+    /// ★The safety lies not in the delivery code but in the **allocator** (measured 2026-08-18)★: the connection id is drawn by `ConnRegistry::alloc_id` of the network layer
+    /// `link/server.rs` as `fetch_add(1)` from an `AtomicU64` (initial value 1), and release
+    /// (`unregister`) only erases it from the map and never puts that value back. The registry is made once in the daemon assembly so
+    /// that counter increases monotonically for the whole process lifetime, and exhausting u64 is unreachable.
+    /// ★If that property changes this breaks★ — if ids become reused (pool return · hash · client-supplied value), a seat left before the
+    /// deadline would hand another's reply to **another peer that newly got the same number**. What is needed then is attaching a generation number to this
+    /// field, and the reason it is not attached ahead of time is that it is a cost for an unreachable risk.
     origin: ConnId,
     deadline: Instant,
     /// This seat's own duration ([`CommandDeliveries::seat_span`]) — `deadline` is its open time + this, and an applied
     /// stage-1 seat is retained for this long ([`SeatState::Retained`]).
     // ADR-0369
     span: Duration,
-    /// ★자리의 신분증 — **키가 아니라 이것이 그 왕복을 가리킨다**★.
+    /// ★The seat's ID card — **not the key, this is what points at that round trip**★.
     ///
-    /// 없으면 뒷정리가 `request_id` 하나로 자리를 집는데, 그 사이 먼저 열린 자리가 사라지고 **같은 키로 새
-    /// 자리**가 서 있을 수 있다(마감·종료가 걷어 간 뒤 호출자가 계약대로 같은 id 로 재질의한 경우가
-    /// 그것이다 — 계약이 같은 번호의 재질의를 막지 않으므로 이 코드는 그것을 견뎌야 한다). 키로 집으면 늦은 태스크가
-    /// **남의 자리**를 거두고 자기 답장을 내보내 프레임이 둘이 된다. 그래서 [`CommandDeliveries::release`]
-    /// 는 키와 이 표를 **함께** 대조한다.
+    /// Without it cleanup picks a seat by `request_id` alone, and in between the earlier-opened seat may be gone and **a new seat with the same key**
+    /// may be standing (the case where after the deadline or a close reaped it the caller re-queried with the same id per the contract —
+    /// the contract does not forbid a re-query of the same number so this code must tolerate it). If picked by key a late task would
+    /// reap **another's seat** and send out its own reply so there would be two frames. So [`CommandDeliveries::release`]
+    /// compares the key and this table **together**.
     token: SeatToken,
-    /// 이 자리를 연 요청의 **정체** — 같은 id 를 다시 본 것이 재질의인지 딴 요청인지 이걸로 가른다.
+    /// The **identity** of the request that opened this seat — this is what tells whether seeing the same id again is a re-query or a different request.
     ///
-    /// ★상주 비용을 지고 산다★: 봉투의 이름·인자를 자리에 한 부 복사해 왕복 동안 들고 있다. 안 들면
-    /// 「같은 id + 다른 페이로드」를 구분할 길이 없어(TRD §4-⑥ 셋째 다리) 딴 요청이 남의 답을 받는다.
-    /// 표 전체의 상주 상한은 아직 없다 — 그 미결의 기록은 [`CommandDeliveries`] 헤더.
+    /// ★It lives bearing a resident cost★: it keeps one copy of the envelope's name · arguments in the seat for the round trip. Without it
+    /// there is no way to distinguish "same id + a different payload" (TRD §4-⑥ third leg) and another request would receive another's answer.
+    /// There is not yet a resident cap for the whole table — the record of that open item is the [`CommandDeliveries`] header.
     name: String,
     args: serde_json::Value,
     state: SeatState,
-    /// ★이 왕복은 **데몬이 스스로 답한다**★ — 봉투가 아무에게도 나가지 않았다는 뜻이고, 세 가지를
-    /// 이 한 칸이 결정한다:
+    /// ★This round trip is **answered by the daemon itself**★ — meaning the envelope went to no one, and this one field
+    /// decides three things:
     ///
-    /// 1. **남이 보낸 결말을 받지 않는다**([`CommandDeliveries::complete`]). 봉투를 안 보냈으므로 이
-    ///    번호로 도착하는 `CommandOutcome` 은 **정의상 정당한 답이 아니다** — 받아 주면 그 페이로드가
-    ///    핸들러의 진짜 결과를 밀어내고 답장으로 나간다(그리고 진짜 결과는 조용히 버려진다).
-    /// 2. **마감이 지나도 자리를 놓지 않는다**([`Seat::LocalStillRunning`]) — 본문은 취소할 수 없어
-    ///    계속 도는데, 자리를 놓으면 같은 번호의 재질의가 **같은 Write 동사를 한 번 더** 돌린다.
-    /// 3. **끊긴 호출자 정리에서도 남는다**([`CommandDeliveries::drop_origin`]) — 같은 이유다.
+    /// 1. **It does not accept an outcome sent by another** ([`CommandDeliveries::complete`]). Since no envelope was sent the `CommandOutcome` arriving with this
+    ///    number is **by definition not a legitimate reply** — accepting it would push out the handler's real result with that payload as the reply
+    ///    (and the real result would be quietly discarded).
+    /// 2. **It does not release the seat even after the deadline** ([`Seat::LocalStillRunning`]) — the body cannot be cancelled and
+    ///    keeps running, and releasing the seat lets a re-query of the same number run **the same Write verb once more**.
+    /// 3. **It stays through disconnected-caller cleanup too** ([`CommandDeliveries::drop_origin`]) — the same reason.
     ///
-    /// ★자리가 **날 때** 정해진다★: 나중에 켜면 그 사이에 도착한 위 1번 결말이 통과한다(창이 좁다고
-    /// 없는 것이 아니다 — 연결마다 태스크가 따로 돌아 정말로 겹친다).
+    /// ★Decided **when the seat is born**★: turning it on later lets the outcome of item 1 arriving in between pass (a narrow window
+    /// is not an absent one — connection tasks run separately so they really overlap).
     local: bool,
 }
 
-/// 자리를 여는 순서에서 나오는 단조 증가 번호 — [`Pending::token`].
+/// A monotonic number from the order seats are opened — [`Pending::token`].
 type SeatToken = u64;
 
-/// 자리의 처지 — ★답장이 **아직 안 정해졌나 / 결과를 실었나 / 빈손인가**로 갈린다★.
+/// The standing of a seat — ★it splits by whether the reply is **not yet decided / carries a result / is empty-handed**★.
 ///
-/// 이 셋을 구분하는 이유는 「같은 id 로의 재질의」를 어떻게 대접할지가 갈리기 때문이다: 결과를 실은 답장이
-/// 나가는 중이면 재질의는 그 답을 같이 쓰면 되지만, 빈손으로 접힌 자리는 **다음 시도를 흡수하면 안 된다**
-/// (흡수하면 재시도가 조용히 no-op 이 되고 호출자는 자기가 다시 묻기 전에 정해진 답을 받는다).
+/// The three are distinguished because how to treat "a re-query with the same id" diverges: if a reply carrying a result is going out
+/// a re-query can share that answer, but a seat folded up empty-handed **must not absorb the next attempt**
+/// (absorbing it makes the retry a quiet no-op and the caller gets an already-settled answer before asking again).
 enum SeatState {
-    /// 답을 기다리는 중 — 이 자리가 그 왕복의 답장 발권이다.
+    /// Waiting for the answer — this seat is that round trip's reply ticket.
     Awaiting(oneshot::Sender<CommandReply>),
-    /// 결말이 붙었다 — 프레임이 나가는 중이고 아직 [`CommandDeliveries::release`] 전이다.
+    /// The outcome has attached — the frame is going out and it is still before [`CommandDeliveries::release`].
     Fulfilled,
-    /// 결말 **없이** 접혔다(마감 초과). 나갈 프레임에 결과가 없으므로 재질의는 새로 시도해야 한다.
+    /// Folded **without** an outcome (deadline exceeded). The frame to go out has no result so a re-query must try anew.
     ///
-    /// ★그 선택이 남기는 잔여 — 번호를 재사용한 호출자는 남의 결말을 받을 수 있다★
+    /// ★The residue that choice leaves — a caller who reuses a number can receive another's outcome★
     ///
-    /// 이 자리가 갈아엎히고 같은 번호로 **다른 내용**의 요청이 새 자리를 열면, 그 뒤에 도착한 **옛 시도의
-    /// 늦은 결말**이 그 새 자리에 들어앉는다 — 결말 프레임이 드는 것은 요청 번호뿐이라 어느 시도의 답인지
-    /// 가릴 수단이 이 표에 없다([`CommandDeliveries::complete`] 가 보내는 쪽 연결조차 안 보는 것과 같은
-    /// 이유). 가리려면 결말에도 발권이 실려야 하고, 그건 wire 계약을 늘리는 일이다.
-    /// ★오늘 이것을 견디는 근거★: 이 경로는 재시도 지시를 전부 `Never` 로 내리므로([`no_retry`]) **번호
-    /// 재사용을 권하지 않는다.** 그래도 규약을 어긴 호출자에게는 여전히 일어난다 — 없앤 위험이 아니라
-    /// **권고로 좁힌 위험**이다.
-    /// ★단 **1단계 자리는 갈아엎지 않는다**★ — 부수효과가 있고 되돌릴 동사가 없어 위 잔여를 감당할 수 없다.
-    /// 그 자리는 본문이 도는 동안 [`Seat::LocalStillRunning`] 이, 끝난 뒤에는 [`SeatState::Retained`] 가 막는다.
+    /// If this seat is overturned and a request of **different content** with the same number opens a new seat, the **late outcome of the old attempt**
+    /// arriving afterwards settles into that new seat — what the outcome frame carries is only the request number so this table has no means
+    /// to tell which attempt's reply it is (the same reason [`CommandDeliveries::complete`] does not even look at the sending connection). To tell apart the outcome
+    /// would also have to carry a ticket, and that means growing the wire contract.
+    /// ★The basis for tolerating this today★: this path lowers every retry instruction to `Never` ([`no_retry`]) so it **does not recommend
+    /// reusing numbers.** Even so it still happens to a caller who breaks the convention — it is not a risk removed but
+    /// **a risk narrowed by advice**.
+    /// ★But **a stage 1 seat is not overturned**★ — it has side effects and no verb to undo, so it cannot bear the residue above.
+    /// That seat is blocked by [`Seat::LocalStillRunning`] while the body runs and by [`SeatState::Retained`] after it ends.
     Void,
-    /// **적용이 끝났고 그 번호를 붙들고 있다** — 답장은 이미 나갔다.
+    /// **Applied and holding that number** — the reply has already gone out.
     ///
-    /// ★자리를 놓지 않고 이 처지로 남기는 이유★: 마감 뒤 재질의의 가장 흔한 모양이 「마감 → `TIMEOUT` →
-    /// 본문 완료 → 재질의」인데, 완료 즉시 자리를 놓으면 그 재질의가 빈 표를 보고 **같은 Write 동사를 다시**
-    /// 돌린다(에이전트가 하나 더 생기고 지울 동사가 없다 — ADR-0122).
-    /// ★번호를 붙드는 곳이 **자리 하나뿐**인 것이 요점이다★ — 같은 일을 하는 두 번째 표(번호만 따로 모으는
-    /// 기억)를 두면 두 권위가 한 이름 공간을 두고 갈린다: 실행하지 않은 자리가 기억에 남거나, 무관한 읽기
-    /// 트래픽이 기억을 밀어내거나, 둘의 수명이 어긋난다. 자리가 곧 그 번호의 임자다.
+    /// ★The reason it stays in this standing without releasing the seat★: the most common shape of a re-query after the deadline is "deadline → `TIMEOUT` →
+    /// body completes → re-query", and releasing the seat the moment it completes lets that re-query see an empty table and run **the same Write verb again**
+    /// (one more agent comes up and there is no verb to delete it — ADR-0122).
+    /// ★The point is that the place holding the number is **one seat only**★ — with a second table doing the same job (a memory collecting only numbers)
+    /// two authorities diverge over one namespace: a seat that did not run remains in the memory, or unrelated read
+    /// traffic pushes out the memory, or the two lifetimes drift apart. The seat is the owner of that number.
     /// ★It is held for one window of **that seat's own deadline**★ (`until` — [`Pending::span`]: 7 s for an ordinary
     /// name, the launch bound for a launch-class one), then the sweeper lets it go ([`CommandDeliveries::expire`]).
-    /// ★끊긴 호출자의 것도 창이 지날 때까지 **남는다**★: [`CommandDeliveries::drop_origin`] 은 1단계 자리를
-    /// 건드리지 않는다(그 필터의 사유가 그 함수에 있다 — 끊김은 오히려 그 보유가 가장 필요한 사건이다).
-    /// 놓는 자리는 수거기 하나뿐이다.
+    /// ★A disconnected caller's too **remains** until the window passes★: [`CommandDeliveries::drop_origin`] does not
+    /// touch stage 1 seats (the reason for that filter is in that function — a disconnect is exactly the event where that hold is most needed).
+    /// The only place that releases is the collector.
     Retained { until: Instant },
 }
 
-/// 주인이 보내 온 결말을 붙여 본 결과 — ★부르는 쪽이 **셋을 다르게 대접해야** 한다★.
+/// The result of trying to attach an outcome the owner sent — ★the caller **must treat the three differently**★.
 ///
-/// 「붙였다 / 못 붙였다」의 bool 하나로 접으면 [`OutcomeLanding::NotDelegated`] 가 늦게 온 결말과
-/// 같은 얼굴이 된다 — 앞은 **있을 수 없는 프레임**(그 번호엔 주인이 없다)이고 뒤는 흔한 정상 경합이다.
+/// Folding into a single bool of "attached / not attached" would give [`OutcomeLanding::NotDelegated`] the same face as a late
+/// outcome — the former is an **impossible frame** (that number has no owner) and the latter a common normal race.
 // ADR-0154
 #[derive(Debug, PartialEq, Eq)]
 pub enum OutcomeLanding {
-    /// 그 왕복에 붙었다 — 배달 태스크가 깨어나 답장을 낸다.
+    /// Attached to that round trip — the delivery task wakes and gives the reply.
     Attached,
-    /// 붙일 자리가 없다 — 마감이 지나 거둬졌거나, 아무도 그 번호로 묻지 않았다.
+    /// No place to attach — it was reaped after the deadline, or nobody asked with that number.
     NoSeat,
-    /// ★그 번호의 왕복은 **아무에게도 위임되지 않았다**★ — 데몬이 스스로 답하는 자리다.
+    /// ★The round trip of that number was **never delegated to anyone**★ — a place the daemon answers by itself.
     NotDelegated,
 }
 
-/// 자리를 열어 본 결과 — ★갈래가 **프레임을 몇 장 내는가**와 **무슨 지시를 실어 보내는가**로 갈린다★.
-///
-/// 표는 `request_id` 하나에 자리 하나다. 그 키가 이미 차 있는데 판정 없이 답장을 내면 같은 키의 프레임이
-/// 둘이 되므로(TRD §4-⑤ 위반), 「자리를 못 얻었다」를 한 값으로 뭉치지 않고 타입으로 가른다.
-/// ★반려 갈래도 프레임을 낸다 — 그것이 **그 질의에 대한 유일한 답**이다★: 이 판정 자체가 표의 한 잠금
-/// 아래서 났으므로 질의 하나에 답 하나라는 계산은 그대로 선다.
+/// The result of trying to open a seat — ★the branches split by **how many frames they emit** and **what instruction they carry**★.
+/// The table has one seat per `request_id`. Answering without a decision when that key is already taken would give the same key two frames (a TRD §4-⑤ violation),
+/// so "could not get a seat" is split by type rather than lumped into one value.
+/// ★A refusal branch emits a frame too — that is **the only answer to that query**★: the decision itself was made under one lock of the table, so one answer per query still holds.
 enum Seat {
     Opened {
         rx: oneshot::Receiver<CommandReply>,
         token: SeatToken,
     },
-    /// ★**같은 연결**이 **같은 요청**을 다시 냈다 — 답장을 하나 더 내지 않는다★.
-    ///
-    /// 오류가 아니라 **정상 경로**다: 진행 중인 그 왕복의 답장 하나가 두 요청을 다 답한다(TRD §4-⑥
-    /// 「in-flight 중복 = 같은 pending 에 coalesce」).
-    /// ★여기서 답장을 하나 더 내지 말 것★ — 같은 키의 프레임이 둘이 되고, 호출자의 pending 은 먼저 온
-    /// 것으로 풀린 뒤 나머지 하나를 고아로 받는다. 합침은 그 둘째 프레임을 **만들지 않는** 방법이자,
-    /// 봉투를 두 번 보내지 않는 방법이다(같은 조작의 이중 적용 방지).
-    /// ★합치는 것과 「다시 물어도 된다」는 별개다★ — 이 경로는 재시도를 지시하지 않는다([`no_retry`]).
-    /// 합침이 사는 것은 그 지시와 무관하게, **이미 도착한 중복 질의**를 어떻게 대접할지의 문제라서다.
+    /// ★**The same connection** asked **the same request** again — no second reply is emitted★.
+    /// This is the **normal path**, not an error: the one reply of the in-flight round trip answers both requests (TRD §4-⑥ "in-flight duplicate = coalesce into the same pending").
+    /// ★Do not emit a second reply here★ — the same key would get two frames and the caller's pending would resolve on the first and receive the other as an orphan. Coalescing is how to **not make** that
+    /// second frame and also how not to send the envelope twice (prevents applying the same operation twice).
+    /// ★Coalescing and "it is fine to ask again" are separate★ — this path does not instruct a retry ([`no_retry`]); coalescing is about how to treat **a duplicate query that has already arrived**.
     Coalesced,
-    /// **같은 id 인데 딴 요청**이다(이름·인자가 다르다) — TRD §4-⑥ 의 셋째 다리.
-    ///
-    /// ★합치면 안 되는 이유가 여기서 갈린다★: 합치면 이 요청은 **한 번도 전달되지 않고** 답장도 못 받는
-    /// 채, 그 키로 나가는 한 장이 **딴 요청의 결과**를 실어 간다 — 호출자는 엉뚱한 payload 로 자기 promise
-    /// 를 푼다. 그래서 `REQUEST_ID_CONFLICT` 로 반려한다 — 코드가 **사실 그대로**다: 아무것도 실행되지
-    /// 않았고(확실성 = 확실), 원인은 그 번호가 이미 딴 요청에 물려 있다는 것 하나다. 호출자가 할 일은
-    /// **새 id 를 쓰는 것**이다.
+    /// **The same id but a different request** (name · arguments differ) — the third leg of TRD §4-⑥.
+    /// ★Why it must not be coalesced★: coalesced, this request would **never be delivered** and never get its reply, and the one frame going out under that key would carry
+    /// **another request's result** — the caller resolves its promise with the wrong payload. So it is refused with `REQUEST_ID_CONFLICT`, a code that is **the plain fact**:
+    /// nothing was executed (certainty = certain) and the only cause is that the number is already bound to another request. What the caller should do is **use a new id**.
     Conflict,
-    /// **다른 연결**이 그 id 로 같은 요청을 물고 있다.
-    ///
-    /// 이쪽엔 답장을 낸다 — 안 내면 이 호출자가 아무 답도 못 받고 매달린다(그 연결엔 자리가 없어 마감
-    /// 수거도 못 건드린다). 그 답장은 먼저 열린 왕복의 답장과 **다른 연결**로 가므로 호출자별 「답장
-    /// 하나」는 그대로 지켜진다.
-    /// ★무슨 코드를 실을지는 **그 자리 임자가 아직 붙어 있나**로 갈린다 — 판정은 [`deliver`] 가 한다★
-    /// (여기서 못 하는 이유: 상관 표는 명부를 모른다).
+    /// **Another connection** holds the same request on that id.
+    /// This side gets a reply — otherwise this caller would hang with no answer (that connection has no seat so deadline reaping cannot touch it). That reply goes to a **different connection** than
+    /// the reply of the round trip opened first, so "one reply" per caller still holds.
+    /// ★Which code to carry depends on **whether that seat's owner is still attached** — [`deliver`] decides★ (it cannot be decided here: the correlation table does not know the roster).
     Taken { holder: ConnId },
-    /// **마감은 지났는데 그 번호의 1단계 본문이 아직 돌고 있다**([`Pending::local`]).
-    ///
-    /// ★여기서 다시 돌리지 않는 것이 요점이다★: 이 자리는 이미 `TIMEOUT` 으로 답했지만 본문은 취소할 수
-    /// 없어(blocking 풀) 계속 돈다. 갈아엎고 새로 돌리면 같은 Write 동사가 두 번 적용된다.
-    /// ★페이로드 비교보다 **앞선다**★ — 같은 번호로 다른 인자가 와도 마찬가지다. 지금 이 데몬이 그 번호로
-    /// 무슨 일을 하는 중인지가 지배적 사실이고, 그 일이 끝나기 전에는 어떤 갈래도 새 실행을 열 수 없다.
+    /// **The deadline has passed but the stage 1 body of that number is still running** ([`Pending::local`]).
+    /// ★The point is not to run it again here★: this seat already answered `TIMEOUT` but the body cannot be cancelled (blocking pool) and keeps running. Overturning it and running anew
+    /// would apply the same Write verb twice.
+    /// ★It comes **before the payload comparison**★ — the same holds even if different arguments arrive with the same number. What this daemon is doing with that number right now is the dominant fact, and until it ends no branch may open a new execution.
     LocalStillRunning,
-    /// **그 번호의 1단계는 이미 적용됐다** — 자리가 아직 그 번호를 붙들고 있다([`SeatState::Retained`]).
-    ///
-    /// ★이 갈래가 없으면 마감 뒤 재질의가 같은 Write 동사를 두 번째로 적용한다★(가장 흔한 모양:
-    /// 마감 → `TIMEOUT` → 본문 완료 → 재질의).
+    /// **Stage 1 of that number has already been applied** — the seat still holds the number ([`SeatState::Retained`]).
+    /// ★Without this branch a re-query after the deadline applies the same Write verb a second time★ (the most common shape: deadline → `TIMEOUT` → body completes → re-query).
     LocalAlreadyRan,
-    /// 표가 닫혔다 — 데몬이 내려가는 중이라 새 왕복을 받지 않는다([`CommandDeliveries::drain`]).
+    /// The table is closed — the daemon is going down so it takes no new round trips ([`CommandDeliveries::drain`]).
     Closed,
 }
 
-/// 요청 상관 표 — 전 연결이 같은 한 부를 본다(`Arc` clone 이 같은 표를 본다).
+/// The request correlation table — all connections see the same one (an `Arc` clone sees the same table).
 ///
-/// ## 상주 — **한 축만 닫혀 있다**
+/// ## Residency — **only one axis is closed**
 ///
 /// - **Seats in flight**: the table itself has no cap. A round trip opens at most one seat and the seat's own deadline
 ///   reaps it (its class's span — [`CommandDeliveries::DEFAULT_DEADLINE`] for an ordinary name, the launch spans for a
@@ -391,58 +353,47 @@ enum Seat {
 ///   with an issued agent credential), but behind the second there are **many keys, one per agent**, that do not know
 ///   each other, so that door's cap is carried by the constant, not by trust. If this table ever gets a cap, the
 ///   precedent is the roster's (`engram_dashboard_command::Roster::MAX_NAMES`).
-/// - **보유 중인 자리**: 닫혀 있다. 이쪽은 왕복이 끝난 **뒤에도** 한 창을 더 살아서 상주가 「동시성」이 아니라
-///   **도착률 × 창**이 된다 — 그래서 시각(창)과 개수([`MAX_RETAINED_LOCAL`]) 둘로 묶고, 넘길 때 페이로드를
-///   버린다([`CommandDeliveries::settle_local`]). ★이 축을 「마감이 걷어 가니 괜찮다」로 읽지 말 것★ —
-///   보유 자리는 마감으로 안 걷힌다.
+/// - **Held seats**: closed. These live **after** the round trip ends for one more window, so residency becomes **arrival rate × window**, not "concurrency" — so they are bounded by both time (the window) and count
+///   ([`MAX_RETAINED_LOCAL`]), and the payload is discarded when crossing it ([`CommandDeliveries::settle_local`]). ★Do not read this axis as "the deadline reaps it so it is fine"★ — held seats are not reaped by the deadline.
 // ADR-0154
 #[derive(Clone)]
 pub struct CommandDeliveries {
     inner: Arc<Mutex<Seats>>,
-    /// ★주입인 이유★: 마감 초과는 **시각이 지났는가** 하나로 갈리는데, 그것을 `Instant::now()` 로 직접
-    /// 읽으면 그 갈래를 재는 시험이 실시간 대기를 써야 한다(느리고, 부하가 걸린 러너에서 뒤집힌다). 밖에서
-    /// 꽂으면 시험이 시각을 **손으로 밀어** 결정적으로 판정한다(ADR-0012).
+    /// ★Why injected★: the deadline overrun is decided by one thing, **has the time passed**, and reading `Instant::now()` directly would make a test measuring that branch use real
+    /// waiting (slow, and it flips on a loaded runner). Plugged in from outside the test **pushes the time by hand** and decides deterministically (ADR-0012).
     clock: Arc<dyn Clock>,
     deadline: Duration,
     max_local: usize,
     max_resolving: usize,
 }
 
-/// 표의 속 — 자리들 + 발권 번호 + 닫힘 표식 + 지금 도는 1단계 수.
+/// The inside of the table — seats + ticket number + closed marker + the number of stage 1 running now.
 #[derive(Default)]
 struct Seats {
     open: HashMap<RequestId, Pending>,
     next_token: SeatToken,
-    /// ★닫힌 표는 **거절하되 답은 한다**★ — 근거는 [`CommandDeliveries::drain`].
+    /// ★A closed table **refuses but still answers**★ — basis = [`CommandDeliveries::drain`].
     closed: bool,
-    /// 지금 blocking 풀에 나가 있는 1단계 본문의 수 — 상한 판정의 재료([`MAX_LOCAL_IN_FLIGHT`]).
-    ///
-    /// ★자리 수를 세어 대신하지 않는다★: 자리는 전달 중인 왕복도 함께 세므로 남의 이름으로 오는 트래픽이
-    /// 우리 실행 상한을 갉아먹는다. 이 수는 **이 데몬이 실제로 돌리고 있는 일**만 센다.
+    /// The number of stage 1 bodies currently out on the blocking pool — material for the cap decision ([`MAX_LOCAL_IN_FLIGHT`]).
+    /// ★Do not substitute by counting seats★: seats also count round trips being relayed so traffic arriving under another's name would eat our execution cap. This number
+    /// counts **only what this daemon is actually running**.
     local_running: usize,
-    /// 상한 사건을 **마지막으로 적은 시각** — 없으면 아직 한 줄도 안 적었다.
-    ///
-    /// ★셈으로 다시 열지 않는다(그렇게 하면 정반대가 된다)★: 포화 상태에서는 거절 하나 뒤에 완료 하나가
-    /// 따라오므로 「셈이 상한 아래로 내려가면 재무장」은 **명령 하나당 한 줄**이 되어, 막으려던
-    /// 「로그 크기를 상대가 정한다」가 그대로 일어난다. 반대로 진짜로 물린 상태(셈이 영영 안 내려감)에서는
-    /// 재무장이 아예 안 돼 **프로세스 수명 내내 한 줄**뿐이다 — 가장 시끄러워야 할 상황이 가장 조용하다.
-    /// 시각으로 열면 두 쪽이 같이 풀린다: 최대 [`CEILING_WARN_INTERVAL`] 마다 한 줄, 물린 동안에도 계속.
+    /// **When the cap event was last written** — if absent no line has been written yet.
+    /// ★Do not reopen by the count (that would be the opposite)★: in saturation one refusal is followed by one completion, so "re-arm when the count drops below the cap" becomes
+    /// **one line per command** and "the other side decides the log size", which this set out to prevent, happens as is. Conversely in a truly bitten state (the count never drops)
+    /// re-arming never happens so there is **one line for the whole process lifetime** — the loudest situation becomes the quietest. Opening by time releases both:
+    /// at most one line per [`CEILING_WARN_INTERVAL`], continuing even while bitten.
     ceiling_warned_at: Option<Instant>,
-    /// 지금 blocking 풀에서 도는 에이전트 참조 칸 풀기(명부 읽기)의 수 — 상한 판정의 재료([`MAX_RESOLVING_IN_FLIGHT`]).
+    /// The number of agent-reference field resolutions (roster reads) currently running on the blocking pool — material for the cap decision ([`MAX_RESOLVING_IN_FLIGHT`]).
     resolving: usize,
-    /// 풀기 상한 사건을 마지막으로 적은 시각 — 규율은 [`Seats::ceiling_warned_at`] 과 같다.
+    /// When the resolution cap event was last written — the discipline is the same as [`Seats::ceiling_warned_at`].
     resolve_warned_at: Option<Instant>,
-    /// ★이 표에 수거기가 **이미 붙었나**★ — 두 번째를 붙이는 조립을 [`CommandDeliveries::spawn_sweeper`]
-    /// 가 이 값으로 거절한다.
-    ///
-    /// ★가시성만으로는 못 막는다(그 근거가 이 칸이다)★: 표는 [`CommandBus::deliveries`] 로 공유되고
-    /// `CommandDeliveries` 는 `Clone` 이며 [`CommandBus::new`] 는 `pub` 이라, **모듈 밖에서도**
-    /// `CommandBus::new(.., bus.deliveries().clone(), ..)` 로 둘째 수거기를 세울 수 있었다. 그 표식이
-    /// 떨어지는 순간 나가는 길의 [`CommandDeliveries::drain`] 이 **살아 있는 데몬의 공유 표를 닫아**
-    /// 그 뒤 모든 왕복이 [`Seat::Closed`] 가 된다(데몬은 멀쩡한데 명령만 전부 「종료 중」).
-    /// ★그래서 이 칸은 **표 자신이** 자기 수거기를 기억하는 형태다★ — 그 상태를 만들려는 조립은 조용히
-    /// 성립하는 대신 그 자리에서 패닉한다(선례 = `CommandTable::new` 의 중복 선언 패닉 — 조립 사고는
-    /// 조립보다 먼저 터뜨린다).
+    /// ★Has a sweeper **already been attached** to this table★ — [`CommandDeliveries::spawn_sweeper`] refuses an assembly that attaches a second one by this value.
+    /// ★Visibility alone cannot prevent it (that is the basis of this field)★: the table is shared via [`CommandBus::deliveries`], `CommandDeliveries` is `Clone` and [`CommandBus::new`] is `pub`, so **even outside the module**
+    /// `CommandBus::new(.., bus.deliveries().clone(), ..)` could set up a second sweeper. The moment that marker falls, [`CommandDeliveries::drain`] on its way out **closes the live daemon's shared table**
+    /// and every later round trip becomes [`Seat::Closed`] (the daemon is fine yet every command is "shutting down").
+    /// ★So this field makes **the table itself** remember its sweeper★ — an assembly trying to make that state panics on the spot instead of quietly succeeding (precedent = the duplicate-declaration panic of
+    /// `CommandTable::new` — an assembly accident should blow up earlier than the assembly).
     swept: bool,
 }
 
@@ -450,13 +401,10 @@ impl Seats {
     /// Brings the retained seats back under [`MAX_RETAINED_LOCAL`] — releasing first the ones whose retention ends
     /// soonest (`until`). With one span for every seat that is the oldest; with launch seats retained longer (their own
     /// span — ADR-0360), it keeps the launch ids longest.
-    ///
-    /// ★시각 경계만으로는 표가 안 닫힌다★: 창 안에 들어올 수 있는 요청 수에는 상한이 없어(도착률 × 창)
-    /// 개수도 함께 묶어야 상주가 유계다. `agent.rename` 을 빠르게 도는 클라이언트 하나가 그 곱을 실제로
-    /// 만든다.
-    /// ★밀려난 번호는 보호를 잃는다★ — 그 번호의 재질의는 새 요청이 되어 다시 실행된다. 그래도 오래된
-    /// 것부터 버리는 이유는 재질의가 창 **앞쪽**에 몰리기 때문이다(마감 직후에 온다).
-    /// ★훑는 비용★: 보유 자리는 이 상한만큼만 있고 이 함수는 보유가 하나 늘 때만 돈다.
+    /// ★The time boundary alone does not close the table★: the number of requests that can enter the window has no cap (arrival rate × window) so the count must be bounded too for residency to be bounded. One client running
+    /// `agent.rename` fast really makes that product.
+    /// ★An evicted number loses its protection★ — a re-query of that number becomes a new request and runs again. Even so the oldest go first because re-queries cluster at the **front** of the window (they come right after the deadline).
+    /// ★Scan cost★: held seats number at most this cap and this function runs only when one more is held.
     fn evict_oldest_retained(&mut self) {
         let mut retained: Vec<(RequestId, Instant)> = self
             .open
@@ -480,58 +428,41 @@ impl Seats {
 }
 
 impl CommandDeliveries {
-    /// 마감시각 기본값(TRD §4-⑥).
-    ///
-    /// ★계약상 마감은 **호출자가 정한다** — 오늘 그 칸이 wire 에 없어 데몬이 기본값을 쓴다★:
-    /// `CommandEnvelope` 에 마감 칸이 없으므로 부르는 쪽이 값을 실을 방법이 아직 없다. 칸이 생기면
-    /// (additive) 여기가 그 값의 fallback 이 된다.
-    ///
-    /// ★이 값은 호출자의 **침묵 한도** 안에 있어야 한다 — [`fits_caller_silence_window`] 가 그것을 문다★:
-    /// 제어 라우트(ADR-0160)의 호출자는 `engram` CLI 이고 그 소켓 상한이
-    /// [`CLI_CONTROL_READ_TIMEOUT_SECS`] 다. 넘으면 **답장이 나가기 전에 클라이언트가 끊어**, 사용자는
-    /// 「데몬에 닿지 못했다」를 보고(거짓이다 — 닿았고 적용됐을 수도 있다) 데몬은 답장을 낼 곳을 잃는다.
-    /// 옛 값 10초가 정확히 그 상태였다: 양쪽이 10초인데 CLI 의 시계가 먼저 시작하고(연결·파싱·blocking 풀
-    /// 스케줄링) 이쪽 답은 [`CommandDeliveries::SWEEP_INTERVAL`] 뒤에야 나가, 클라이언트가 **결정적으로**
-    /// 먼저 끊었다.
-    /// ★그 상한은 **총 예산이 아니다 — `set_read_timeout` 이라 「침묵 한도」다**★(실측 — CLI `post_json`):
-    /// 클라이언트가 포기하는 조건은 「요청을 보낸 뒤 **한 번의 read 가** 그 시간 안에 아무 바이트도 못
-    /// 받는 것」이다. 총 소요가 아니라 **연속 무응답 구간**을 잰다. 이 라우트가 답 전에 아무것도 안 보내므로
-    /// 오늘은 둘이 사실상 같지만, 그 성질에 기대는 문장을 쓰지 말 것 — 중간에 바이트를 흘리는 형태(청크·
-    /// 진행 알림)로 바뀌면 총 소요는 이 값을 넘어도 클라이언트는 안 끊고, 반대로 이 값을 「예산」으로 읽고
-    /// 총 소요를 재는 시험은 그날부터 엉뚱한 것을 잰다.
-    /// ★7초의 셈★: 한도 10 − 수거 주기 1 − 여유 2([`CommandDeliveries::CALLER_MARGIN`]) = 7. 처리량이 아니라
-    /// **관측 가능성**을 사는 값이라 여유 쪽에 치우쳐 잡는다.
-    /// ★소켓 입구도 같은 값을 쓴다 — 그게 요점이다★: 마감은 자리 표 하나의 성질이고 입구마다 갈리면
-    /// 두 기계가 된다(모듈 헤더). 셸 쪽에는 이 값에 묶인 상수가 없다(실측 — `HANDSHAKE_TIMEOUT` 은 핸드셰이크
-    /// 전용이다).
+    /// The default deadline (TRD §4-⑥).
+    /// ★By contract the deadline is **set by the caller** — today that field is not on the wire so the daemon uses a default★: `CommandEnvelope` has no deadline field so there is no way yet for the caller to carry a value. When the
+    /// field appears (additive) this becomes its fallback.
+    /// ★This value must be inside the caller's **silence limit** — [`fits_caller_silence_window`] bites it★: the caller of the control route (ADR-0160) is the `engram` CLI and its socket cap is
+    /// [`CLI_CONTROL_READ_TIMEOUT_SECS`]. Exceeding it makes **the client cut off before the reply goes out**, the user sees "could not reach the daemon" (false — it reached and may have applied) and the daemon loses a place to send the reply.
+    /// The old 10 s was exactly that state: both sides at 10 s, but the CLI's clock starts first (connection · parsing · blocking pool scheduling) and this side's reply goes out only after
+    /// [`CommandDeliveries::SWEEP_INTERVAL`], so the client **deterministically** cut off first.
+    /// ★That cap is **not a total budget — it is `set_read_timeout` so it is a "silence limit"**★ (measured — CLI `post_json`): the condition for the client to give up is "after sending the request **one read** receives no byte
+    /// within that time". It measures **a run of consecutive silence**, not total elapsed time. Since this route sends nothing before the answer the two are effectively the same today, but do not write a sentence that leans on that property — if it changes to a shape
+    /// that streams bytes midway (chunks · progress notices) the client does not cut off even when total elapsed exceeds this value, and a test that reads this value as a "budget" and measures total elapsed measures the wrong thing from that day.
+    /// ★The arithmetic of 7 s★: limit 10 − reap period 1 − margin 2 ([`CommandDeliveries::CALLER_MARGIN`]) = 7. It buys **observability**, not throughput, so it is set toward the margin side.
+    /// ★The socket entrance uses the same value — that is the point★: the deadline is a property of one seat table and if it diverges per entrance it becomes two machines (module header). The shell side has no constant tied to this value (measured — `HANDSHAKE_TIMEOUT` is for the handshake only).
     /// ★Ordinary names only★ — a launch-class name gets a launch seat instead ([`CommandDeliveries::seat_span`] ·
     /// ADR-0369).
     pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(7);
 
-    /// 만료 수거 주기 — 마감 초과가 이 간격만큼 늦게 관측될 수 있다.
-    ///
-    /// ★수거를 **트래픽에 얹지 않는 것**이 요점이다★: 다음 프레임이 올 때 훑는 형태면 조용한 데몬에서
-    /// 마감이 영영 안 지나가고, 그러면 호출자가 답도 오류도 없이 매달린다(ADR-0154 이 지목한 무한 대기).
+    /// The expiry reap period — a deadline overrun can be observed this much later.
+    /// ★The point is **not to ride the reaping on traffic**★: a shape that sweeps when the next frame comes means on a quiet daemon the deadline never passes, and the caller hangs with neither answer nor error (the unbounded wait ADR-0154 pointed at).
     const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
-    /// 왕복 **밖**에서 흘러가는 시간의 몫 — 연결·요청 파싱·`spawn_blocking` 대기·응답 직렬화.
-    ///
-    /// ★부등식에 이 항이 있어야 산문이 참이 된다★: 없으면 마감 8.9초도 통과하는데, 그 값은 위 넷이
-    /// 0.1초만 써도 클라이언트의 침묵 한도를 넘긴다. 「여유 2초」를 문장으로만 적어 두었을 때 실제로 그
-    /// 상태였다.
+    /// The part of time that flows **outside** the round trip — connection · request parsing · `spawn_blocking` wait · response serialization.
+    /// ★The inequality must have this term for the prose to be true★: without it even a deadline of 8.9 s passes, and that value exceeds the client's silence limit if the above four spend just 0.1 s. When "2 s margin" was
+    /// written only as a sentence it really was in that state.
     const CALLER_MARGIN: Duration = Duration::from_secs(2);
 
     pub fn new() -> Self {
         Self::with_clock(Arc::new(SystemClock), Self::DEFAULT_DEADLINE)
     }
 
-    /// ★마감을 **주입**하는 유일한 자리이므로 여기서 부등식을 다시 문다★(ADR-0161 결정 3): 상수만 재는
-    /// 단언은 이 인자를 못 본다 — 실제로 시험 하네스가 그 관계를 어기는 값을 넣고 전 스위트를 돌던 적이 있다.
-    /// ★`pub(crate)` 인 것도 그 일부다★ — 이 문을 crate 밖으로 열면 부등식을 아는 곳 밖에서 마감이 정해진다.
+    /// ★This is the only place the deadline is **injected**, so the inequality is bitten again here★ (ADR-0161 decision 3): an assertion measuring only the constant cannot see this argument — a test harness really ran the whole suite once with a value violating that relation.
+    /// ★That it is `pub(crate)` is part of this★ — opening this door outside the crate would let the deadline be set outside the places that know the inequality.
     pub(crate) fn with_clock(clock: Arc<dyn Clock>, deadline: Duration) -> Self {
         assert!(
             fits_caller_silence_window(deadline, CLI_CALLER_WINDOW),
-            "주입된 명령 마감이 호출자의 침묵 한도를 넘는다 — 답장이 나가기 전에 호출자가 끊어 TIMEOUT 이 도달 불가가 된다(CommandDeliveries::DEFAULT_DEADLINE doc)"
+            "the injected command deadline exceeds the caller's silence limit — the caller cuts off before the reply goes out so TIMEOUT becomes unreachable (CommandDeliveries::DEFAULT_DEADLINE doc)"
         );
         Self {
             inner: Arc::new(Mutex::new(Seats::default())),
@@ -542,61 +473,47 @@ impl CommandDeliveries {
         }
     }
 
-    /// 1단계 동시 실행 상한을 낮춰 잡는다 — **상한 갈래를 재는 시험 전용**이다.
-    ///
-    /// 운영 값으로 그 갈래를 태우려면 파킹한 본문을 64개 띄워야 하고, 그러면 시험이 재는 것이 판정이
-    /// 아니라 스레드 풀이 된다.
+    /// Sets the stage 1 concurrency cap lower — **only for tests measuring the cap branch**.
+    /// To run that branch with the production value 64 parked bodies would have to be launched, and then what the test measures is the thread pool, not the decision.
     #[cfg(test)]
     pub(crate) fn with_local_limit(mut self, max_local: usize) -> Self {
         self.max_local = max_local;
         self
     }
 
-    /// 에이전트 참조 칸 풀기 상한을 낮춰 잡는다 — 형제 [`CommandDeliveries::with_local_limit`] 와 같은 사유의 **시험 전용**.
+    /// Sets the agent-reference field resolution cap lower — **test only** for the same reason as the sibling [`CommandDeliveries::with_local_limit`].
     #[cfg(test)]
     pub(crate) fn with_resolve_limit(mut self, max_resolving: usize) -> Self {
         self.max_resolving = max_resolving;
         self
     }
 
-    /// 지금 도는 풀기 수 — 시험이 「표식은 읽기가 끝나야 풀린다」를 잰다.
+    /// The number of resolutions running now — a test measures "the marker is released only after the read ends".
     #[cfg(test)]
     pub(crate) fn resolving(&self) -> usize {
         self.lock().resolving
     }
 
-    /// 만료 수거 태스크를 띄운다 — 데몬 종료 신호가 오면 **남은 자리를 전부 답하고** 멈춘다.
-    ///
-    /// ★수거가 없으면 「불명」이 「영원한 무응답」이 된다★(TRD §4-④). 이 한 줄이 빠져도 정상 왕복은 전부
-    /// 도므로 **증상이 답 없는 요청 하나로만 나타난다** — 조립에서 빠뜨리기 쉬운 자리다.
-    ///
+    /// Launches the expiry sweeper task — on the daemon shutdown signal it **answers every remaining seat** and stops.
+    /// ★Without the sweeper "unknown" becomes "an answer that never comes"★ (TRD §4-④). Even if this one line is missing every normal round trip still runs so **the symptom shows only as one unanswered request** — an easy place to miss in assembly.
     /// ★Calling [`CommandDeliveries::drain`] on the way out is what bounds the shutdown★: a delivery task waits on its
     /// reply seat, and the **sending half of that seat lives in this table**. Ending without draining leaves those tasks
     /// with nothing to wake them until their seat's deadline (7 s for an ordinary name, up to 91 s for a launch — ADR-0360),
     /// so the table and the tasks outlive the moment the daemon reported it had stopped. Draining frees them all
     /// **at once**.
-    /// ★반환한 핸들을 버리지 말 것★ — 조립부가 이것을 기다려야 「수거기가 멈췄다」가 관측된다.
+    /// ★Do not discard the returned handle★ — the assembly must wait on it for "the sweeper stopped" to be observed.
     ///
-    /// ★한 표에 수거기는 **하나뿐이고, 그것을 지는 것은 가시성이 아니라 표의 표식이다**★
-    ///
-    /// 이 함수가 `pub` 이 아닌 것은 필요조건일 뿐 충분조건이 아니었다: 표는 [`CommandBus::deliveries`] 로
-    /// 공유되고 `CommandDeliveries` 는 `Clone` 이며 [`CommandBus::new`] 는 `pub` 이라, 모듈 밖에서
-    /// `CommandBus::new(.., bus.deliveries().clone(), ..)` 한 줄이 **살아 있는 데몬의 공유 표에** 둘째
-    /// 수거기를 붙일 수 있었다. 그 표식이 떨어지면 나가는 길의 [`CommandDeliveries::drain`] 이 그 표를
-    /// 닫아 그 뒤 모든 왕복이 [`Seat::Closed`] 로 반려된다.
-    /// ★그래서 표가 자기 수거기를 기억하고([`Seats::swept`]) 둘째 요구를 **패닉으로** 끊는다★ — 조립
-    /// 사고이므로 조용히 성립하는 쪽보다 그 자리에서 터지는 쪽이 값에 맞다. 그 선례가
-    /// `CommandTable::new` 의 중복 선언 패닉인데, ★그 선례가 **요청 경로 핸들러 무패닉**(TRD §4-⑨)의 예외가
-    /// 아니라 **그 축 밖**이라는 점이 이 자리의 근거다★: 그 조항이 묶는 것은 남이 보낸 요청을 처리하는
-    /// 핸들러이고, 이것은 조립 시점 불변식이라 그 시점에 요청이 존재하지 않는다(어길 수 있는 것은 데몬을
-    /// 짜는 코드뿐이고, 그 잘못은 트래픽으로 도달할 수 없다). 정상 조립에서 이 자리를 부르는 것은
-    /// [`CommandBus::new`] 하나다.
-    /// ★단언은 잠금 **밖**이다 — 그렇지 않으면 이 단언이 자기가 지키려는 상태를 만든다★: 되감기가 가드를
-    /// 떨어뜨려 [`Seats`] 의 잠금이 오염되고, 그러면 살아 있는 데몬의 그 뒤 모든 명령이
-    /// [`CommandDeliveries::lock`] 에서 죽는다(정리 경로만 조용히 지나간다 — 표식이 막으려던 것과 같은
-    /// 「공유 표가 망가진」 상태다). 읽기와 세우기가 임계 구역 안에서 한 번에 끝나므로 밖에서 재도 원자성은
-    /// 그대로다. 회귀망 = `tests::a_refused_second_sweeper_leaves_the_shared_table_usable`.
-    #[must_use = "조립부가 이 핸들을 기다려야 종료가 유계다"]
+    /// ★A table has **only one sweeper, and what carries that is the table's marker, not visibility**★
+    /// That this function is not `pub` was only a necessary condition: the table is shared via [`CommandBus::deliveries`], `CommandDeliveries` is `Clone` and [`CommandBus::new`] is `pub`, so one line
+    /// outside the module, `CommandBus::new(.., bus.deliveries().clone(), ..)`, could attach a second sweeper **to the live daemon's shared table**. When that marker falls, [`CommandDeliveries::drain`] on the way out closes
+    /// that table and every later round trip is refused as [`Seat::Closed`].
+    /// ★So the table remembers its sweeper ([`Seats::swept`]) and cuts a second request **by panic**★ — it is an assembly accident so blowing up on the spot fits the value better than quietly succeeding. The precedent is the duplicate-declaration
+    /// panic of `CommandTable::new`, and ★the point is that that precedent is not an exception to **no panic in request-path handlers** (TRD §4-⑨) but is **outside that axis**★: that clause binds handlers processing requests others send, and this is an assembly-time invariant so no request exists
+    /// then (only the code assembling the daemon can violate it, and that mistake cannot be reached by traffic). In a normal assembly the only caller of this place is [`CommandBus::new`].
+    /// ★The assertion is **outside** the lock — otherwise it creates the very state it guards★: unwinding drops the guard and poisons the lock of [`Seats`], and then every later command of the live daemon dies at
+    /// [`CommandDeliveries::lock`] (only cleanup paths pass quietly — the same "shared table is broken" state the marker was meant to prevent). Reading and setting finish at once in the critical section so measuring from outside keeps atomicity.
+    /// Regression net = `tests::a_refused_second_sweeper_leaves_the_shared_table_usable`.
+    #[must_use = "the assembly must wait on this handle for the shutdown to be bounded"]
     fn spawn_sweeper(&self, mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
         let already_swept = {
             let mut table = self.lock();
@@ -604,23 +521,23 @@ impl CommandDeliveries {
         };
         assert!(
             !already_swept,
-            "이 자리 표에는 이미 수거기가 붙어 있다 — 둘째 수거기는 나가는 길에 공유 표를 닫아 그 뒤 모든 명령을 「종료 중」으로 반려한다(CommandBus::new 에 남의 CommandDeliveries 를 넘겼는지 볼 것)"
+            "this seat table already has a sweeper attached — a second sweeper closes the shared table on the way out and refuses every later command as \"shutting down\" (check whether another CommandDeliveries was passed to CommandBus::new)"
         );
         let deliveries = self.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Self::SWEEP_INTERVAL);
-            // 밀린 틱을 몰아 치지 않는다 — 수거는 「지금 만료된 것」만 보므로 따라잡을 빚이 없다.
+            // Delayed ticks are not burst — the sweep sees only "what has expired now" so there is no debt to catch up.
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
                         let expired = deliveries.expire();
                         if expired > 0 {
-                            tracing::debug!(expired, "마감 지난 명령 왕복을 거둬 TIMEOUT 으로 답했다");
+                            tracing::debug!(expired, "reaped command round trips past the deadline and answered TIMEOUT");
                         }
                     }
                     changed = shutdown.changed() => {
-                        // 보내는 쪽이 사라진 것도 종료다(Err) — 그 뒤로는 신호가 올 수 없다.
+                        // The sender side vanishing is also shutdown (Err) — no signal can come after that.
                         if changed.is_err() || *shutdown.borrow() {
                             break;
                         }
@@ -631,30 +548,23 @@ impl CommandDeliveries {
             if drained > 0 {
                 tracing::info!(
                     drained,
-                    "데몬 종료 — 진행 중이던 명령 왕복을 전부 답하고 거뒀다"
+                    "daemon shutdown — answered and reaped every command round trip that was in flight"
                 );
             }
         })
     }
 
-    /// 남은 자리를 **전부** 거둬 답한다(종료 경로). 반환 = 거둔 수.
+    /// Reaps and answers **every** remaining seat (the shutdown path). Return = the number reaped.
+    /// ★Why `OUTCOME_UNKNOWN`★: the envelope may already have gone to the owner so whether it was applied is **unknown**. That is the **certainty** axis of "safety × usefulness" (ADR-0159). Folding to `INTERNAL` would make the caller read an
+    /// operation that may have been applied as a **certain failure** — not the fact. (The instruction is `Never` regardless of the code — [`no_retry`].)
+    /// ★Unlike the deadline it does not look at the clock★ — shutdown is an event, not a time.
+    /// ★It does not stop at emptying but **closes the table**★: emptying alone lets a `Command` that arrives afterward open a seat and wait for an answer, but by then the sweeper has stopped and there are no eyes anywhere to watch the deadline — that round trip would get zero replies
+    /// until the process dies. This window is not theory: even after the accept loop is cut the connection tasks stay alive (detached spawns with no shutdown receiver) and the daemon spends several more seconds on session cleanup · flush.
+    /// A query after closing is **refused at once** as [`Seat::Closed`] so "shutdown is bounded" holds in that window too. ★After closing, the seats are erased wholesale★ — the reason to prevent reuse (a new round trip of the same key) has already vanished with the close.
     ///
-    /// ★`OUTCOME_UNKNOWN` 인 이유★: 봉투는 이미 주인에게 갔을 수 있어 적용 여부가 **불명**이다. 「안전 ×
-    /// 쓸모」(ADR-0159)의 **확실성** 축이 그것이다. `INTERNAL` 로 접으면 호출자는 적용됐을지도 모르는
-    /// 조작을 **확실한 실패**로 읽는다 — 사실이 아니다. (지시는 코드와 무관하게 `Never` 다 — [`no_retry`].)
-    /// ★마감과 달리 시계를 보지 않는다★ — 종료는 시각이 아니라 사건이다.
-    ///
-    /// ★비우는 것으로 끝내지 않고 **표를 닫는다**★: 비우기만 하면 그 뒤에 도착한 `Command` 가 자리를 열고
-    /// 답을 기다리는데, 그때 이미 수거기는 멈췄고 마감을 볼 눈이 아무 데도 없다 — 그 왕복은 답장 0장으로
-    /// 프로세스가 죽을 때까지 매달린다. 이 창은 이론이 아니다: 수락 루프가 끊긴 뒤에도 연결 태스크들은
-    /// 살아 있고(떼어 낸 spawn 이라 종료 수신기가 없다) 데몬은 세션 정리·flush 에 수 초를 더 쓴다.
-    /// 닫힌 뒤의 질의는 [`Seat::Closed`] 로 **즉시 반려**되므로 「종료는 유계다」가 그 창에서도 선다.
-    /// ★닫은 뒤엔 자리를 통째로 지운다★ — 재사용을 막을 이유(같은 키의 새 왕복)가 닫힘으로 이미 사라졌다.
-    ///
-    /// ★`pub` 이 아니다★ — 표를 닫는 동사이므로 부를 수 있는 자리가 종료 경로 하나여야 한다(사유 전문 =
-    /// [`CommandDeliveries::spawn_sweeper`]). 유일한 호출자가 그 수거기다.
+    /// ★Not `pub`★ — it is a verb that closes the table so the callable place must be the one shutdown path (full reason = [`CommandDeliveries::spawn_sweeper`]). The only caller is that sweeper.
     fn drain(&self) -> usize {
-        // 잠금 밖에서 답한다 — 근거는 [`CommandDeliveries::expire`] 와 같다.
+        // Answer outside the lock — the basis is the same as [`CommandDeliveries::expire`].
         let outstanding: Vec<(RequestId, Pending)> = {
             let mut table = self.lock();
             table.closed = true;
@@ -662,7 +572,7 @@ impl CommandDeliveries {
         };
         let mut count = 0;
         for (request_id, pending) in outstanding {
-            // 이미 답이 붙은 자리(`Fulfilled`·`Void`)는 셈에서 뺀다 — 그 프레임은 이미 나가는 중이다.
+            // A seat that already has an answer (`Fulfilled`·`Void`) is left out of the count — its frame is already going out.
             if let SeatState::Awaiting(waiter) = pending.state {
                 count += 1;
                 let _ = waiter.send(CommandReply::err(
@@ -677,15 +587,10 @@ impl CommandDeliveries {
         count
     }
 
-    /// 왕복 하나를 연다 — ★[`deliver`] 가 **제일 먼저** 부른다★. 답장은 돌려준 자리로 온다.
-    ///
-    /// ★무엇을 하기 전에 연다★ — 봉투를 쓴 뒤에 열면 발 빠른 주인의 결말이 자리보다 먼저 도착해 빈손을
-    /// 받고, `route` 의 다른 단계가 답을 만들면 그 답이 표를 아예 안 거치고 나간다(모듈 헤더 규칙 1).
-    /// ★이미 찬 키를 덮지 않는다★: 덮으면 먼저 열린 왕복의 자리가 조용히 사라져 그쪽 호출자가 마감까지
-    /// 매달린다. 갈래별 뜻은 [`Seat`].
-    ///
-    /// `local` = 이 이름을 **데몬이 스스로 답하나**([`LocalCommands::owns`]). 자리가 날 때 정해야 하는
-    /// 이유는 [`Pending::local`].
+    /// Opens one round trip — ★[`deliver`] calls it **first of all**★. The reply comes to the seat returned.
+    /// ★Open before doing anything★ — opening after writing the envelope lets a quick owner's outcome arrive before the seat and get nothing, and if another stage of `route` makes the answer that answer goes out without going through the table at all (module header rule 1).
+    /// ★Do not overwrite an already taken key★: overwriting quietly erases the earlier round trip's seat and that caller hangs until the deadline. The meaning of each branch is [`Seat`].
+    /// `local` = **does the daemon answer this name by itself** ([`LocalCommands::owns`]). The reason it must be decided when the seat is born is [`Pending::local`].
     /// `class` = the name's declared deadline class — the seat is sized from it here, when it opens
     /// ([`CommandDeliveries::seat_span`]).
     fn open(
@@ -697,17 +602,11 @@ impl CommandDeliveries {
         local: bool,
         class: DeadlineClass,
     ) -> Seat {
-        // ★마감 지난 자리를 **여기서 먼저** 정산한다★(잠그기 전에 — `expire` 가 스스로 잠근다).
-        //
-        // 수거기는 1초마다 도는데 재시도는 마감 직후에 온다. 그 사이에 도착한 재질의가 「아직 안 걷힌
-        // 시체」에 합쳐지면 **그 시도는 한 번도 전달되지 않고**, 호출자는 자기가 다시 묻기 전에 정해진
-        // 이전 시도의 `TIMEOUT` 을 답으로 받는다 — 재시도가 조용한 no-op 이 된다. 먼저 정산하면 그 자리는
-        // 결말 없는 `Void` 가 되고, 아래에서 갈아엎여 이 시도가 제 왕복을 얻는다.
-        //
-        // ★그 대가로 두 프레임의 **순서가 뒤집힌다**★: 여기서 깨어난 옛 왕복은 제 `TIMEOUT` 을 쓰려고
-        // 스케줄만 됐을 뿐이라, 실제 쓰기는 이 재시도가 자리를 얻고 봉투까지 보낸 **뒤에** 일어난다 —
-        // 같은 연결에 **옛 답이 새 답보다 늦게** 닿을 수 있다. 두 프레임 다 정상이고(각 시도에 한 장씩)
-        // 상관 키도 같지만, 호출자가 「마지막에 온 것이 마지막 답」이라고 가정하면 그 가정이 여기서 깨진다.
+        // ★Settle expired seats **here first**★ (before locking — `expire` locks by itself).
+        // The sweeper runs every second but the retry comes right after the deadline. If a re-query arriving in between were coalesced into "a corpse not yet reaped", **that attempt would never be delivered** and the caller would get the
+        // `TIMEOUT` of the earlier attempt, settled before it asked again — a retry becomes a quiet no-op. Settling first makes that seat a `Void` with no outcome and it is overturned below so this attempt gets its own round trip.
+        // ★The price is that the **order of two frames flips**★: the old round trip woken here has only been scheduled to write its `TIMEOUT`, so the actual write happens **after** this retry got its seat and even sent the envelope —
+        // **the old answer can reach the same connection later than the new answer**. Both frames are normal (one per attempt) and the correlation key is the same, but a caller assuming "the last to arrive is the last answer" has that assumption broken here.
         self.expire();
 
         let (waiter, rx) = oneshot::channel();
@@ -715,37 +614,33 @@ impl CommandDeliveries {
         let span = self.seat_span(class, local);
         let deadline = now + span;
         let mut table = self.lock();
-        // 닫힌 표는 아무 자리도 열지 않는다 — 열어 봐야 깨워 줄 눈이 없다([`CommandDeliveries::drain`]).
+        // A closed table opens no seat — opening one has no eyes to wake it ([`CommandDeliveries::drain`]).
         if table.closed {
             return Seat::Closed;
         }
 
-        // ★판정이 **이 임계 구역 안**이어야 한다★ — 밖에서 「이미 있나」를 먼저 보고 들어오는 형태로 바꾸면
-        //   같은 연결이 연달아 낸 두 배달 태스크가 둘 다 빈 표를 보고 각자 자리를 연다.
+        // ★The decision must be **inside this critical section**★ — if changed to look at "is it already there" first outside and then enter, two delivery tasks of the same connection issued back to back would both see an empty table and each open a seat.
         enum Occupancy {
             Free,
-            /// 결말 없이 접힌 시체 — 다음 시도를 흡수하면 안 되므로 갈아엎는다.
+            /// A corpse folded with no outcome — it must not absorb the next attempt so it is overturned.
             Stale,
             Held(Seat),
         }
         let occupancy = match table.open.get(&request_id) {
             None => Occupancy::Free,
-            // ★이 번호는 **이미 적용됐다**★ — 보유 창이 지나기 전에는 어떤 갈래도 새 실행을 열 수 없다
-            //   (근거 = [`SeatState::Retained`]). 페이로드 비교보다 앞선다: 같은 번호로 다른 인자가 와도
-            //   그 번호가 무엇을 이미 했는지가 지배적 사실이다.
+            // ★This number has **already been applied**★ — before the hold window passes no branch can open a new execution (basis = [`SeatState::Retained`]). It comes before the payload comparison: even if different arguments arrive with the same number
+            // what that number has already done is the dominant fact.
             Some(held) if matches!(held.state, SeatState::Retained { .. }) => {
                 Occupancy::Held(Seat::LocalAlreadyRan)
             }
-            // ★본문이 도는 자리는 **아무도 갈아엎지 못한다**★ — 마감이 지나 이미 답장이 나갔더라도,
-            //   그 일은 취소할 수 없어(blocking 풀) 여전히 돌고 있다. 여기서 갈아엎으면 같은 Write 동사가
-            //   두 번 적용된다(근거·범위 = [`Seat::LocalStillRunning`] · [`Pending::local`]).
+            // ★A seat whose body is running **cannot be overturned by anyone**★ — even if the deadline passed and the reply already went out, that work cannot be cancelled (blocking pool) and still runs. Overturning here would apply
+            // the same Write verb twice (basis · range = [`Seat::LocalStillRunning`] · [`Pending::local`]).
             Some(held) if held.local && matches!(held.state, SeatState::Void) => {
                 Occupancy::Held(Seat::LocalStillRunning)
             }
             Some(held) if matches!(held.state, SeatState::Void) => Occupancy::Stale,
-            // ★페이로드를 **먼저** 본다★: 같은 id 라도 딴 요청이면 누가 물었든 합칠 수 없다(TRD §4-⑥
-            //   셋째 다리). 이름만 보지 않고 인자까지 보는 이유는 같은 이름의 다른 조작이 흔해서다
-            //   (`tab.create` 를 창을 바꿔 두 번 — 합치면 한 번만 열린다).
+            // ★Look at the payload **first**★: even with the same id, a different request cannot be coalesced whoever asked (TRD §4-⑥ third leg). The reason to look at the arguments and not only the name is that different operations under the same name are common
+            // (`tab.create` twice with the window changed — coalesced, it opens only once).
             Some(held) if held.name != name || &held.args != args => {
                 Occupancy::Held(Seat::Conflict)
             }
@@ -757,14 +652,11 @@ impl CommandDeliveries {
         match occupancy {
             Occupancy::Held(seat) => return seat,
             Occupancy::Stale => {
-                // 시체의 발권은 여기서 무효가 된다 — 늦게 오는 `release` 는 표를 대조해 빈손으로 돌아간다.
+                // The corpse's ticket becomes invalid here — a late `release` compares against the table and returns empty-handed.
                 //
-                // ★형제들과 달리 잠금 **안에서** 떨어뜨린다 — 그래도 되는 전제가 하나 있다★:
-                //   `Void` 는 [`CommandDeliveries::expire`] 가 **sender 를 꺼낸 뒤**에만 붙으므로 여기
-                //   떨어지는 값에는 깨울 상대가 없다. `expire`·`drop_origin`·`drain` 이 잠금 밖에서
-                //   떨어뜨리는 이유(소멸자가 기다리던 태스크를 깨운다)가 이 줄엔 해당되지 않는다.
-                //   ★sender 를 남긴 채 `Void` 를 붙이는 코드가 생기면 이 줄이 곧바로 위반이 된다★ —
-                //   그때 잡아 줄 시험이 없으니, 그 전제를 바꾸는 편집은 이 줄도 함께 옮겨야 한다.
+                // ★Unlike its siblings it is dropped **inside** the lock — there is one premise that makes that allowed★: `Void` is attached by [`CommandDeliveries::expire`] only **after taking out the sender**, so the value
+                // dropped here has no one to wake. The reason `expire` · `drop_origin` · `drain` drop outside the lock (the destructor wakes a waiting task) does not apply to this line.
+                // ★If code appears that attaches `Void` while leaving the sender, this line immediately becomes a violation★ — there is no test then to catch it, so an edit changing that premise must move this line too.
                 table.open.remove(&request_id);
             }
             Occupancy::Free => {}
@@ -808,17 +700,12 @@ impl CommandDeliveries {
         }
     }
 
-    /// 1단계 본문을 시작해도 되나 — 상한 안이면 셈을 올리고 **되돌릴 표식지기**를 낸다.
-    ///
-    /// ★상한을 여기서 보는 이유★: 자리는 이미 열려 있고(그래야 답장이 자리 하나를 깔고 앉는다) 막을 것은
-    /// **실행**이다. 넘치면 아무것도 돌리지 않고 반려하므로 확실성은 「확실히 실패」다 —
-    /// 코드가 `CONFLICT` 인 것은 패킷이 틀려서가 아니라 이 데몬의 **상태**가 그렇다는 뜻이다(명부의
-    /// 상한 반려와 같은 어휘).
-    /// ★자리의 `local` 표식은 여기서 켜지 않는다★ — 그것은 자리가 **날 때** 정해진다([`Pending::local`]).
-    /// 이 함수가 세는 것은 **자원**(도는 본문)이고, 표식이 말하는 것은 **정체**(누가 답하나)다.
-    /// ★반환 `Err` 는 로그를 남기고 온다★ — 전역 상한을 친 것은 운영 사건인데, 안 남기면 유일한 목격자가
-    /// **거절당한 호출자**뿐이다(로깅 컨벤션 「무로그 삼킴」). 한 번 친 뒤로는 셈이 상한 아래로 내려갈
-    /// 때까지 조용하다 — 거절마다 적으면 로그 크기를 상대가 정한다.
+    /// May a stage 1 body start — within the cap it raises the count and issues **a marker keeper that undoes it**.
+    /// ★Why the cap is looked at here★: the seat is already open (that is how the reply sits on one seat) and what must be blocked is the **execution**. On overflow nothing is run and it is refused so certainty is "certainly failed" — the code is `CONFLICT`
+    /// not because the packet is wrong but because this daemon's **state** is so (the same vocabulary as the roster's cap refusal).
+    /// ★The seat's `local` marker is not turned on here★ — it is decided when the seat is **born** ([`Pending::local`]). What this function counts is a **resource** (running bodies) and what the marker says is **identity** (who answers).
+    /// ★The `Err` returned is logged before it comes★ — hitting the global cap is an operational event and without a log the only witness is **the refused caller**
+    /// (logging convention "no silent swallow"). After one hit it stays quiet until the count drops below the cap — logging per refusal would let the other side decide the log size.
     fn reserve_local_slot(
         &self,
         name: &str,
@@ -838,7 +725,7 @@ impl CommandDeliveries {
                     command = name,
                     running,
                     ceiling = self.max_local,
-                    "데몬 자기 명령의 동시 실행 상한 — 이 상한 아래로 내려갈 때까지 전부 거절한다(프로필 저장이 막혀 있으면 안 풀린다)"
+                    "the daemon's own commands hit the concurrent-execution cap — refusing all of them until it drops below the cap (it does not clear while profile saving is blocked)"
                 );
             }
             return Err(no_retry(
@@ -855,23 +742,18 @@ impl CommandDeliveries {
         })
     }
 
-    /// 1단계 본문이 끝났다 — 셈을 되돌린다. [`LocalGuard`] 의 소멸자만 부른다.
-    ///
-    /// ★여기서는 잠금 실패에 패닉하지 않는다★: 이 함수는 **소멸자 경로**라, 되감기 중에 패닉하면 프로세스가
-    /// 곧바로 abort 한다 — 그건 이 뺄셈 하나가 감당할 값이 아니다. 게다가 못 빼면 상한이 한 칸씩 영구히
-    /// 닫혀 결국 계열 전체가 막히므로, 오염된 잠금이라도 **속을 꺼내 뺄셈은 반드시 한다**(그 시점에 표가
-    /// 어떤 상태든, 세는 값이 실제보다 큰 채로 굳는 것보다 낫다).
+    /// A stage 1 body ended — undoes the count. Called only by the destructor of [`LocalGuard`].
+    /// ★No panic on a lock failure here★: this function is on the **destructor path** so a panic during unwinding aborts the process at once — that is not a value this one subtraction can bear. Moreover, if it cannot subtract the cap loses one
+    /// permit at a time permanently and eventually the whole family is blocked, so even a poisoned lock has its **contents taken out and the subtraction is always done** (whatever state the table is in at that moment, better than the count freezing larger than reality).
     fn release_local_slot(&self) {
         let mut table = self.lock_for_cleanup();
-        // 표식지기가 정확히 한 번 부르므로 이 뺄셈도 한 번이다 — 그래도 saturating 인 것은 셈이 음수로
-        //   돌아 상한이 영원히 열리는 쪽이 한 칸 새는 쪽보다 나쁘기 때문이다.
+        // The keeper calls exactly once so this subtraction is once too — it is still saturating because a count wrapping negative and leaving the cap open forever is worse than leaking one permit.
         table.local_running = table.local_running.saturating_sub(1);
     }
 
-    /// 에이전트 참조 칸 풀기(명부 읽기)를 시작해도 되나 — 상한 안이면 셈을 올리고 **되돌릴 표식**을 낸다(ADR-0308).
-    ///
-    /// 넘치면 아무것도 읽지 않고 반려하므로 확실성은 「확실히 실패」(봉투는 주인에게 안 갔다)이고, 코드가 `CONFLICT`
-    /// 인 것은 형제 [`CommandDeliveries::reserve_local_slot`] 과 같은 뜻(이 데몬의 **상태**)이다. 로그 규율도 같다.
+    /// May an agent-reference field resolution (roster read) start — within the cap it raises the count and issues **a marker that undoes it** (ADR-0308).
+    /// On overflow nothing is read and it is refused so certainty is "certainly failed" (the envelope never went to the owner), and the code `CONFLICT` has the same meaning as the sibling [`CommandDeliveries::reserve_local_slot`]
+    /// (this daemon's **state**). The logging discipline is the same.
     fn reserve_resolve_slot(
         &self,
         name: &str,
@@ -891,7 +773,7 @@ impl CommandDeliveries {
                     command = name,
                     running,
                     ceiling = self.max_resolving,
-                    "에이전트 참조 칸 풀기의 동시 상한 — 명부 읽기가 끝나 이 아래로 내려갈 때까지 표시된 명령을 전부 거절한다(잠든 에이전트의 작업 폴더가 응답하지 않으면 늦게 풀린다)"
+                    "agent-reference resolution hit the concurrent cap — refusing every marked command until roster reads finish and the count drops below it (it clears late if a dormant agent's working folder does not respond)"
                 );
             }
             return Err(no_retry(
@@ -907,28 +789,26 @@ impl CommandDeliveries {
         })
     }
 
-    /// 명부 읽기가 끝났다 — 셈을 되돌린다. [`ResolveGuard`] 의 소멸자만 부른다(소멸자 경로라 패닉하지 않는다 —
-    /// 근거는 형제 [`CommandDeliveries::release_local_slot`]).
+    /// A roster read ended — undoes the count. Called only by the destructor of [`ResolveGuard`] (no panic since it is a destructor path —
+    /// the basis is the sibling [`CommandDeliveries::release_local_slot`]).
     fn release_resolve_slot(&self) {
         let mut table = self.lock_for_cleanup();
         table.resolving = table.resolving.saturating_sub(1);
     }
 
-    /// 적용이 끝난 1단계 자리를 **보유 상태로** 넘긴다 — 자리를 놓지 않고 그 번호를 계속 쥔다.
-    ///
-    /// ★자리를 놓는 형제([`CommandDeliveries::release`])와 이것을 **결과로 갈라 부른다**★: 아무것도
-    /// 적용되지 않은 왕복(호출자 이탈·상한 거절·반려)까지 붙들면, 오타를 고쳐 같은 번호로 다시 보낸
-    /// 호출자가 **돌지도 않은 명령**을 「이미 적용됐다」로 돌려받는다. 판정은 [`retains_the_id`].
-    /// ★발권으로 집는다★ — 이 호출이 늦어 같은 키에 다른 왕복이 앉았다면 그 왕복을 건드리면 안 된다.
+    /// Hands a stage 1 seat whose application ended over **into a held state** — it does not release the seat and keeps holding that number.
+    /// ★This and the sibling that releases a seat ([`CommandDeliveries::release`]) are **called split by outcome**★: if even a round trip where nothing was applied (caller left · cap refusal · rejection) were held, a caller who fixed a typo and resent with the same number
+    /// would get back "already applied" for a **command that never ran**. The decision is [`retains_the_id`].
+    /// ★Picks by ticket★ — if this call is late and a different round trip sits on the same key it must not be touched.
     fn settle_local(&self, request_id: RequestId, token: SeatToken, retain: bool) {
         let now = self.clock.now();
         let mut table = self.lock();
-        // 셈 반환이 **같은 잠금 안**이라 그 사이에 상한 한 칸이 비어 보이는 창이 없다.
+        // The count return is **inside the same lock** so there is no window where a permit looks free in between.
         table.local_running = table.local_running.saturating_sub(1);
         let Some(pending) = table.open.get_mut(&request_id) else {
             return;
         };
-        // 발권으로 집는다 — 이 호출이 늦어 같은 키에 다른 왕복이 앉았다면 그것을 건드리면 안 된다.
+        // Picked by ticket — if this call is late and a different round trip sits on the same key it must not be touched.
         if pending.token != token {
             return;
         }
@@ -939,18 +819,15 @@ impl CommandDeliveries {
         pending.state = SeatState::Retained {
             until: now + pending.span,
         };
-        // ★보유 자리는 **번호로만** 답한다 — 페이로드를 들고 있을 이유가 없다★: 처지 판정이 인자 비교보다
-        //   앞서므로([`Seat::LocalAlreadyRan`]) 이 둘은 다시 읽히지 않는데, 그대로 두면 호출자가 준 JSON 이
-        //   창 내내 상주에 얹힌다. 지우면 보유 한 칸의 크기가 고정된다.
+        // ★A held seat answers **by number only — there is no reason to hold the payload**★: the standing decision comes before the arguments comparison ([`Seat::LocalAlreadyRan`]) so these two are never read again, but left as is the JSON the caller gave
+        // would stay resident for the whole window. Erasing it fixes the size of one held entry.
         pending.name.clear();
         pending.args = serde_json::Value::Null;
         table.evict_oldest_retained();
     }
 
-    /// 그 왕복이 끝났다 — ★프레임이 나간 **뒤에** 자리를 놓는다★(모듈 헤더 규칙 2).
-    ///
-    /// ★키가 아니라 발권으로 집는다★: 이 호출이 늦으면 같은 키에 **다른 왕복**이 앉아 있을 수 있고
-    /// (마감·종료가 걷어 간 뒤의 정상 재질의), 키로 지우면 그 왕복이 이유 없이 답을 잃는다.
+    /// That round trip ended — ★releases the seat **after the frame goes out**★ (module header rule 2).
+    /// ★Picks by ticket, not by key★: if this call is late a **different round trip** may sit on the same key (a normal re-query after deadline · shutdown reaped), and erasing by key makes that round trip lose its answer for no reason.
     fn release(&self, request_id: RequestId, token: SeatToken) {
         let mut table = self.lock();
         if table
@@ -962,38 +839,27 @@ impl CommandDeliveries {
         }
     }
 
-    /// 주인이 돌려준 결말을 그 왕복에 붙인다. **거짓 = 붙일 자리가 없었다**(늦게 왔거나, 아무도 안 물었다).
-    ///
-    /// ★자리를 **지우지 않는다** — 결말을 붙이고 `Fulfilled` 로 두기만 한다★: 지우면 프레임이 아직 나가기
-    /// 전인 그 찰나에 같은 호출자의 재질의가 빈 표를 보고 **봉투를 한 번 더 보낸다**(같은 조작이 두 번
-    /// 적용되고 같은 키의 프레임도 둘이 된다). 자리는 [`CommandDeliveries::release`] 가 프레임을 내보낸
-    /// 뒤에 놓는다. 그 사이에 온 재질의는 [`Seat::Coalesced`] 로 접혀 **나가는 그 한 장**을 같이 쓴다.
-    ///
-    /// ★어느 연결이 보냈는지는 보지 않는다★: 이 결말이 도착하는 문은 **소켓 하나뿐이고**(운영 호출자 =
-    /// `connection_core` 의 디스패치) 그 문은 데몬 토큰으로 이미 인증 경계 안이라, 상관 키 문자열을 아는
-    /// 것만으로 신뢰한다(ADR-0153). 보낸 연결까지 대조하려면 표가 주인 연결도 들어야 하는데, 그러면 주인이
-    /// 재접속한 왕복이 자기 답을 못 붙인다.
-    /// ★「추측 불가한 난수라서 안전하다」로 읽지 말 것 — 그 다리는 이제 없다★: 키는 호출자가 실어 보낼 수
-    /// 있고(ADR-0161 결정 1) 데몬이 요구하는 것은 **UUID 문법**뿐이라(`control::catalog` 의 `parse_str`)
-    /// nil 이나 v4 아닌 값도 통과한다. 즉 예측 가능한 키가 이 표에 앉을 수 있다. 오늘 그것이 문제가 안 되는
-    /// 근거는 **이 함수에 닿는 문이 제어 라우트가 아니라는 사실 하나**다 — 그 라우트의 호출자는 결말을 보낼
-    /// 수단이 없다. 그 문이 하나라도 늘면 이 자리부터 다시 봐야 한다.
-    /// ★단 **봉투를 아무에게도 안 보낸 왕복**은 예외다★ — 그 자리는 결말을 받을 이유가 없으므로 거절한다
-    /// ([`OutcomeLanding::NotDelegated`] · 근거 = [`Pending::local`]).
+    /// Attaches the outcome the owner returned to that round trip. **False = there was no place to attach** (it came late, or nobody asked).
+    /// ★The seat is **not erased** — the outcome attaches and it is only left as `Fulfilled`★: erasing would, in the instant before the frame goes out, let the same caller's re-query see an empty table and **send the envelope once more** (the same operation is applied twice and the frames of the same key
+    /// become two). The seat is released by [`CommandDeliveries::release`] after the frame has gone out. A re-query that comes in between is folded as [`Seat::Coalesced`] and **shares that one frame going out**.
+    /// ★It does not look at which connection sent it★: the door this outcome arrives at is **one socket only** (the production caller = the dispatch of `connection_core`) and that door is already inside the auth boundary by the daemon token, so knowing the correlation key
+    /// string is enough to trust it (ADR-0153). Checking the sending connection too would need the table to hold the owner connection as well, and then a round trip where the owner reconnected could not attach its own answer.
+    /// ★Do not read it as "safe because it is an unguessable random number" — that leg is gone now★: the key can be carried by the caller (ADR-0161 decision 1) and the daemon requires only **UUID syntax** (`parse_str` in `control::catalog`)
+    /// so nil or a non-v4 value passes too. That is, a predictable key can sit in this table. What makes that not a problem today is **the single fact that the door reaching this function is not the control route** — that route's caller has no means to send an outcome.
+    /// If even one such door is added, look at this place again.
+    /// ★But **a round trip whose envelope went to no one** is the exception★ — that seat has no reason to receive an outcome so it is refused ([`OutcomeLanding::NotDelegated`] · basis = [`Pending::local`]).
     pub fn complete(&self, reply: CommandReply) -> OutcomeLanding {
-        // 잠금 밖에서 답한다(ADR-0006) — 발권만 안에서 뽑아 온다.
+        // Answer outside the lock (ADR-0006) — only the ticket is drawn inside.
         let waiter = {
             let mut table = self.lock();
             match table.open.get_mut(&reply.request_id) {
-                // ★이 자리는 데몬이 스스로 답한다 — 남이 보낸 결말은 **정의상 정당한 답이 아니다**★:
-                //   봉투가 아무에게도 안 나갔으므로 답할 주인이 없다. 받아 주면 그 페이로드가 핸들러의
-                //   진짜 결과를 밀어내고 답장으로 나가고(호출자는 남이 지어낸 값을 자기 명령의 결과로
-                //   읽는다), 진짜 결과는 조용히 버려진다.
+                // ★This seat is answered by the daemon itself — an outcome another sent is **by definition not a legitimate reply**★: since the envelope went to no one there is no owner to answer. Accepting it would let that payload push out the handler's real
+                // result and go out as the reply (the caller reads a value another made up as its own command's result), and the real result would be quietly discarded.
                 Some(pending) if pending.local => return OutcomeLanding::NotDelegated,
                 Some(pending) => {
                     match std::mem::replace(&mut pending.state, SeatState::Fulfilled) {
                         SeatState::Awaiting(waiter) => Some(waiter),
-                        // 이미 답이 붙은 자리다 — 처지를 되돌려 놓고 빈손으로 나간다.
+                        // A seat that already has an answer — put the standing back and go out empty-handed.
                         settled => {
                             pending.state = settled;
                             None
@@ -1006,26 +872,19 @@ impl CommandDeliveries {
         let Some(waiter) = waiter else {
             return OutcomeLanding::NoSeat;
         };
-        // 받는 쪽이 이미 사라졌으면(배달 태스크가 끝났다) 보낼 곳이 없다 — 그것도 답장 하나를 지킨 결과다.
+        // If the receiving side has already vanished (the delivery task ended) there is nowhere to send — that too is the result of keeping to one reply.
         let _ = waiter.send(reply);
         OutcomeLanding::Attached
     }
 
-    /// 마감 지난 왕복을 전부 거둬 `TIMEOUT` 으로 답한다. 반환 = 거둔 수.
-    ///
-    /// ★`TIMEOUT` 은 확실성 「불명」이다★ — 주인이 늦게 답할 수도 있어 적용 여부를 모른다(TRD §4-④·§4-⑥).
-    /// 그렇다고 「같은 번호로 다시 물어라」로 이어지지는 않는다 — 그 지시가 안전하려면 완료분을 재생해 줄
-    /// dedup 저장소가 있어야 하는데 없다([`no_retry`]).
-    /// ★자리를 지우지 않고 `Void` 로 접는다★ — 지우는 것은 [`CommandDeliveries::release`] 뿐이다(근거는
-    /// [`CommandDeliveries::complete`] 와 같다: 프레임이 나가기 전에 키가 비면 재질의가 봉투를 한 번 더
-    /// 보낸다). 접힌 자리가 다음 시도를 삼키지 않는 근거는 [`SeatState::Void`].
-    /// ★**보유 창이 지난 자리는 여기서 놓는다**★ — 그 자리는 답을 기다리는 것이 아니라 번호만 쥐고 있으므로
-    /// (`SeatState::Retained`) 답장 없이 지우고 **거둔 수에도 안 센다**(그 수는 「답이 못 온 왕복」의 수다).
-    /// 같은 1초 수거기가 두 일을 겸하는 이유는 주기가 같고 판정 재료(시계)가 같아서다.
+    /// Reaps every round trip past the deadline and answers `TIMEOUT`. Return = the number reaped.
+    /// ★`TIMEOUT` is the certainty "unknown"★ — the owner may answer late so whether it was applied is not known (TRD §4-④·§4-⑥). That does not lead to "ask again with the same number" — for that instruction to be safe there would need to be a dedup store replaying completed work, and there is none ([`no_retry`]).
+    /// ★The seat is not erased but folded into `Void`★ — erasing is only [`CommandDeliveries::release`] (the basis is the same as [`CommandDeliveries::complete`]: if the key empties before the frame goes out a re-query sends the envelope once more). The basis for a folded seat not swallowing the next attempt is [`SeatState::Void`].
+    /// ★**A seat past the hold window is released here**★ — that seat is not waiting for an answer but holding only the number (`SeatState::Retained`) so it is erased with no reply and **not counted in the number reaped** (that number is the count of "round trips whose answer could not come").
+    /// The same 1-second sweeper does both jobs because the period and the material for the decision (the clock) are the same.
     pub fn expire(&self) -> usize {
         let now = self.clock.now();
-        // ★잠금 안에서 답하지 않는다★(ADR-0006): 발권을 뽑고 놓은 뒤에 깨운다 — 깨어난 태스크가 곧바로
-        //   이 표를 다시 잠글 수 있고, 답장을 기다리는 배달 하나가 등록·정리·다른 배달을 세우면 안 된다.
+        // ★Do not answer inside the lock★ (ADR-0006): wake after taking the tickets out and releasing — the woken task may lock this table again right away, and one delivery waiting for a reply must not stall registration · cleanup · other deliveries.
         let expired: Vec<(RequestId, oneshot::Sender<CommandReply>)> = {
             let mut table = self.lock();
             table
@@ -1034,15 +893,14 @@ impl CommandDeliveries {
             table
                 .open
                 .iter_mut()
-                // 보유 자리는 답을 기다리는 것이 아니다 — 위에서 창을 본 뒤라 여기서 다시 만질 이유가
-                //   없고, 만지면 매 틱마다 처지를 뺐다 도로 넣는 헛일이 된다.
+                // A held seat is not waiting for an answer — we looked at the window above so there is no reason to touch it again here, and touching it would be a pointless pulling out and putting back of the standing every tick.
                 .filter(|(_, pending)| {
                     pending.deadline <= now && !matches!(pending.state, SeatState::Retained { .. })
                 })
                 .filter_map(|(id, pending)| {
                     match std::mem::replace(&mut pending.state, SeatState::Void) {
                         SeatState::Awaiting(waiter) => Some((*id, waiter)),
-                        // 이미 접혔거나 결말이 붙은 자리는 두 번 세지 않는다.
+                        // A seat already folded or with an outcome attached is not counted twice.
                         settled => {
                             pending.state = settled;
                             None
@@ -1064,36 +922,26 @@ impl CommandDeliveries {
         count
     }
 
-    /// 그 연결이 **낸** 왕복을 거둔다 — 답장을 받아 갈 곳이 사라졌다. 반환 = 거둔 수.
-    ///
-    /// ★단 1단계 본문이 도는 자리는 남긴다★ — 사유는 아래 필터 주석([`Pending::local`]).
-    /// ★답장을 만들지 않고 자리만 놓는다★: 받을 연결이 없으므로 어떤 결말을 지어내도 갈 곳이 없다. 자리를
-    /// 놓으면 기다리던 배달이 「기다릴 상대가 사라졌다」로 풀려 태스크가 끝난다.
-    /// ★**미구현 — TRD §4-④ 와 어긋나 있다**★(이번 라운드 범위 밖 · 에스컬레이션됨)
-    ///
-    /// ① **주인 쪽 끊김은 여기서 안 잡힌다.** 이 표는 원 연결만 기억하므로(ADR-0154 이 고정한 항목 모양)
-    /// 주인이 왕복 도중 죽으면 그 왕복은 마감까지 기다렸다 `TIMEOUT` 으로 끝난다 — TRD §4-④ 는 그 상황에
-    /// `OUTCOME_UNKNOWN` 을 적어 두었다. 코드가 다르다는 사실 자체가 계약 미준수다. 호출자가 **하는 일**은
-    /// 갈리지 않는다(둘 다 확실성 「불명」이고 지시도 같다)는 것이 오늘 이것을 견디는 이유지, 맞다는 뜻이
-    /// 아니다.
-    /// ② **§4-④ 의 「어느 쪽 연결이든 cleanup 시 그 ConnId 키 sweep」도 없다** — 이 함수는 원 연결 쪽
-    /// 절반만 한다. 나머지 절반을 하려면 주인 연결 색인이 있어야 하는데 ADR-0154 이 못 박은 항목 모양이
-    /// 그 칸을 배제한다. 그래서 이건 코드로 메울 수 있는 구멍이 아니라 **결정으로 풀 건**이다.
+    /// Reaps the round trips that connection **issued** — the place to take the reply is gone. Return = the number reaped.
+    /// ★But a seat whose stage 1 body is running is left★ — the reason is the filter comment below ([`Pending::local`]).
+    /// ★It makes no reply and only releases the seat★: there is no connection to receive so whatever outcome it invented has nowhere to go. Releasing the seat frees the waiting delivery as "the one to wait for vanished" and the task ends.
+    /// ★**Unimplemented — diverges from TRD §4-④**★ (out of this round's scope · escalated)
+    /// ① **The owner side disconnecting is not caught here.** This table remembers only the origin connection (the entry shape ADR-0154 fixed), so if the owner dies mid round trip that round trip waits to the deadline and ends in `TIMEOUT` — TRD §4-④ wrote `OUTCOME_UNKNOWN` for that situation.
+    /// That the code differs is itself non-compliance with the contract. What makes it tolerable today is that what the caller **does** does not split (both are certainty "unknown" with the same instruction), not that it is right.
+    /// ② **TRD §4-④'s "on cleanup of either connection sweep by that ConnId key" is also missing** — this function does only the origin-connection half. Doing the other half needs an owner-connection index and the entry shape ADR-0154 pinned excludes that field. So this is not
+    /// a hole to fill with code but **one to resolve by decision**.
     pub fn drop_origin(&self, conn_id: ConnId) -> usize {
-        // 거둔 항목은 잠금 **밖에서** 떨어뜨린다 — 소멸자가 기다리던 태스크를 깨운다(위 `expire` 와 같은 이유).
+        // Drop the reaped items **outside the lock** — the destructor wakes a waiting task (the same reason as `expire` above).
         let dropped: Vec<Pending> = {
-            // ★이 함수는 소멸자에서도 불린다([`CallerSeat`])★ — 그래서 잠금 실패에 패닉하지 않는다.
+            // ★This function is called from a destructor too ([`CallerSeat`])★ — so it does not panic on a lock failure.
             let mut table = self.lock_for_cleanup();
             let mine: Vec<RequestId> = table
                 .open
                 .iter()
-                // ★1단계 자리는 **도는 중이든 보유 중이든** 여기서 안 거둔다★: 보유는 `request_id` 에
-                //   매인 것이지 연결에 매인 것이 아니다. 끊김은 오히려 그 보유가 가장 필요한 사건이다 —
-                //   호출자는 명령이 닿았는지 모른 채 끊기고, 다시 붙어 **같은 번호로 다시 묻는다**(형제
-                //   [`Seat::Taken`] 갈래가 그 시나리오를 이미 적어 두었다). 그때 자리가 없으면 같은 Write
-                //   동사가 두 번 적용되고 지울 동사가 없다(ADR-0122).
-                //   그 대가는 자리 하나가 **최대 한 창** 더 사는 것뿐이고, 그 상주는 창·개수 두 상한 안에
-                //   있다([`MAX_RETAINED_LOCAL`]). 자리는 창이 지나면 수거기가 놓는다.
+                // ★Stage 1 seats are **not reaped here whether running or held**★: holding is tied to `request_id`, not to the connection. A disconnect is rather the event where that holding is most needed —
+                //   the caller is cut off not knowing whether the command arrived, reconnects and **asks again with the same number** (the sibling [`Seat::Taken`] branch already wrote that scenario). With no seat then the same Write
+                //   verb would be applied twice and there is no verb to delete it (ADR-0122). The cost is only that a seat lives **at most one more window**, and that residency is inside the two caps of window and count
+                //   ([`MAX_RETAINED_LOCAL`]). The sweeper releases the seat when the window passes.
                 .filter(|(_, pending)| pending.origin == conn_id && !pending.local)
                 .map(|(id, _)| *id)
                 .collect();
@@ -1104,9 +952,9 @@ impl CommandDeliveries {
         dropped.len()
     }
 
-    /// 지금 표에 앉아 있는 자리 수 — 표가 새는지 보는 관측 표면이다.
+    /// The number of seats now sitting in the table — an observation surface for whether the table leaks.
     ///
-    /// 답이 붙었지만 아직 프레임이 안 나간 자리도 센다 — 그 자리는 아직 그 키를 쥐고 있다.
+    /// A seat that has an answer attached but whose frame has not yet gone out is counted too — that seat still holds the key.
     pub fn in_flight(&self) -> usize {
         self.lock().open.len()
     }
@@ -1115,19 +963,13 @@ impl CommandDeliveries {
         self.inner.lock().expect("command deliveries poisoned")
     }
 
-    /// 잠금 실패에 패닉하지 않는 획득 — ★**소멸자 경로 전용**이다★.
-    ///
-    /// 형제 [`CommandDeliveries::lock`] 은 오염된 표를 계속 쓰는 것을 막으려 패닉하지만, 소멸자 안에서
-    /// 패닉하면(되감기 중이면 곧바로 abort) 그 대가가 이 정리 하나가 감당할 값을 넘는다. 그리고 정리를
-    /// 건너뛰는 것 자체가 이 표의 손해다 — 못 놓은 자리는 아무도 다시 놓아 주지 않는다.
-    ///
-    /// ★이 규율은 **표마다 따로 서야 한다**★: [`CallerSeat`] 의 소멸자는 명부를 먼저 거두므로, 그 줄이
-    /// 패닉하는 잠금을 쓰면 이 함수는 아예 안 불린다. 그래서 명부 쪽에도 같은 짝이 있다
-    /// ([`CommandRoster::detach`] 안의 `lock_for_cleanup`) — 둘 중 하나만 있으면 「두 표를 함께 거둔다」가
-    /// 거짓이 된다.
-    /// ★운영 프로세스에서는 이 갈래에 닿지 못한다★ — 이 표를 쥔 패닉은 가둠 표시 밖이라 훅이 되감기 전에
-    /// 끝내 오염이 생기지 않는다(ADR-0292 — 그래서 이것이 지키는 것은 훅 없는 시험 빌드다). 그 사실을 근거로
-    /// 걷지 말 것: 그 빌드에서 새는 표가 회귀 시험의 관측을 그대로 망친다.
+    /// An acquire that does not panic on a lock failure — ★**for the destructor path only**★.
+    /// The sibling [`CommandDeliveries::lock`] panics to stop use of a poisoned table, but panicking inside a destructor (an immediate abort during unwinding) costs more than this one cleanup can bear. And skipping the
+    /// cleanup is itself a loss for this table — a seat not released is never released by anyone.
+    /// ★This discipline must hold **per table**★: the destructor of [`CallerSeat`] reaps the roster first, so if that line used a panicking lock this function would never be called. That is why the roster side has the same pair
+    /// (`lock_for_cleanup` inside [`CommandRoster::detach`]) — with only one of the two, "reaps both tables together" becomes false.
+    /// ★The production process cannot reach this branch★ — a panic holding this table is outside the containment marker so the hook ends the process before unwinding and no poisoning arises (ADR-0292 — so what this guards is test builds without the hook).
+    /// Do not lift it on that basis: in that build a leaking table ruins the observations of the regression tests as is.
     fn lock_for_cleanup(&self) -> std::sync::MutexGuard<'_, Seats> {
         sync::lock(&self.inner)
     }
@@ -1139,22 +981,18 @@ impl Default for CommandDeliveries {
     }
 }
 
-/// 3단계 배달의 2단계가 쓰는 전송 — 주인 토큰을 그 주인이 붙어 있는 연결의 프레임 출구로 옮긴다.
-///
-/// ★future 는 이 struct 를 빌리지 않는다★: 명부 조회·봉투 쓰기는 `send` 안에서 **동기로** 끝내고, 밖으로
-/// 나가는 것은 답장 자리 하나뿐이다. 그래야 내준 출구 사본이 왕복 너머로 살지 않는다(모듈 헤더).
+/// The transport stage 2 of the 3-stage delivery uses — moves an owner token to the frame outlet of the connection that owner is attached to.
+/// ★The future does not borrow this struct★: the roster lookup and envelope write finish **synchronously** inside `send`, and only one reply seat goes outside. That is how a handed-out outlet copy does not outlive the round trip (module header).
 struct OwnerLink<'a> {
     roster: &'a CommandRoster,
     origin: ConnId,
-    /// [`deliver`] 가 **미리 연** 자리의 수신단 — `send` 가 한 번 꺼내 간다.
-    ///
-    /// ★여기서 자리를 열지 않는다★: 열고 닫는 일이 이 안에 있으면 실패 갈래마다 되돌리기가 필요하고, 그
-    /// 되돌리기는 키로 자리를 집어 **남의 왕복**을 지운다(자리는 `.await` 없이도 선점 사이에 바뀔 수 있다).
-    /// 자리의 수명을 통째로 [`deliver`] 로 올리면 그 되돌리기 자체가 사라진다.
+    /// The receiving end of the seat **opened beforehand** by [`deliver`] — `send` takes it out once.
+    /// ★The seat is not opened here★: if opening and closing were in here each failure branch would need an undo, and that undo picks the seat by key and erases **another's round trip** (a seat can change between preemptions even without `.await`).
+    /// Lifting the seat's whole lifetime into [`deliver`] removes that undo itself.
     waiter: Mutex<Option<oneshot::Receiver<CommandReply>>>,
 }
 
-/// 이미 정해진 답을 그대로 내는 자리 — `route` 가 요구하는 반환 모양을 맞춘다.
+/// A seat that emits an already-decided answer as is — fits the return shape `route` requires.
 fn settled(reply: CommandReply) -> Pin<Box<dyn Future<Output = CommandReply> + Send>> {
     Box::pin(std::future::ready(reply))
 }
@@ -1162,9 +1000,8 @@ fn settled(reply: CommandReply) -> Pin<Box<dyn Future<Output = CommandReply> + S
 impl CommandLink for OwnerLink<'_> {
     fn send(&self, env: CommandEnvelope) -> Pin<Box<dyn Future<Output = CommandReply> + Send>> {
         let request_id = env.request_id;
-        // 오류 갈래의 문구에 실을 이름 — 봉투는 아래에서 통째로 옮겨진다.
-        // ★되돌려 보내는 호출자 문자열에 길이 상한을 두지 않는다★(ADR-0152) — 읽는 주체가 LLM 이라 꼬리를
-        //   자르면 다음 행동이 사라진다. 자르는 것은 **로그** 쪽뿐이다.
+        // The name to put in the wording of the error branch — the envelope is moved whole below.
+        // ★No length cap on the caller string sent back★ (ADR-0152) — the reader is an LLM and cutting the tail removes its next action. Only the **log** side truncates.
         let name = env.name.clone();
 
         let taken = self
@@ -1173,7 +1010,7 @@ impl CommandLink for OwnerLink<'_> {
             .expect("owner link waiter poisoned")
             .take();
         let Some(rx) = taken else {
-            // `route` 는 홉당 한 번만 부른다 — 두 번째 호출은 이 모듈의 결함이고 기다린다고 안 바뀐다.
+            // `route` is called only once per hop — a second call is a defect of this module and waiting does not change it.
             return settled(CommandReply::err(
                 request_id,
                 no_retry(
@@ -1183,25 +1020,19 @@ impl CommandLink for OwnerLink<'_> {
             ));
         };
 
-        // ★봉투를 넘기기 **직전** 물어본 연결이 아직 있는지 본다 — 없으면 안 보낸다★
+        // ★Just **before** handing over the envelope check whether the asking connection still exists — if not, do not send★
+        // This task was detached by `dispatch` so **its first poll can be later than the cleanup**: in that order `drop_origin` sees an empty table and passes, and if we wake late and send the envelope
+        // a command with side effects runs for a caller that has already left.
         //
-        // 이 태스크는 `dispatch` 가 떼어 낸 것이라 **첫 폴링이 정리보다 늦을 수 있다**: 그 순서에서
-        // `drop_origin` 은 빈 표를 보고 지나가고, 뒤늦게 깨어난 우리가 봉투를 보내면 이미 떠난 호출자를
-        // 위해 부수효과 있는 명령이 실행된다.
+        // ★Written split into what this check closes and what it does not★ — it is not "closes completely":
+        // ① **Closes — orphan seats.** `on_disconnect` removes from the roster first (`detach`) and then reaps the seat (`drop_origin`), so if cleanup came before us this lookup is certainly empty-handed, and if we came first
+        //    our seat is in the table and cleanup reaps it. **Reversing the order of those two lines disables this check.**
+        // ② **Does not close — side effects.** This lookup is **a sample of that instant** and the envelope goes out below. A connection that drops in between is not seen here
+        //    (the inherent residue of check-then-act that cannot be removed in this place — removing it would need carrying the roster lock to the envelope write, and that is the lock `route` deliberately released).
+        //    ★So do not read this check as "a command of a caller who has now left is never executed"★.
         //
-        // ★이 검사가 닫는 것과 못 닫는 것을 갈라 적는다★ — 「완전히 닫는다」가 아니다:
-        // ① **닫는다 — 고아 자리.** `on_disconnect` 는 명부에서 먼저 빼고(`detach`) 그다음 자리를
-        //    거두므로(`drop_origin`), 정리가 우리보다 앞섰다면 이 조회는 반드시 빈손이고, 우리가 앞섰다면
-        //    우리 자리가 표에 있어 정리가 그것을 거둔다. **그 두 줄의 순서를 뒤집으면 이 검사가 무력해진다.**
-        // ② **못 닫는다 — 부수효과.** 이 조회는 **그 순간의 표본**이고 봉투는 아래에서 나간다. 그 사이에
-        //    끊긴 연결은 여기서 안 보인다(check-then-act 의 본래 잔여라 이 자리에서는 못 없앤다 — 없애려면
-        //    명부 잠금을 봉투 쓰기까지 들고 가야 하고, 그건 `route` 가 일부러 놓은 그 잠금이다).
-        //    ★그러니 이 검사를 「이제 떠난 호출자의 명령은 절대 실행되지 않는다」로 읽지 말 것★.
-        //
-        // ★이 갈래의 답장은 **아무 데도 안 나간다**★ — 조회가 방금 빈손이었고 연결 id 는 재사용되지 않으므로
-        // ([`Pending::origin`]) 그 연결의 출구가 다시 생길 길이 없다. 그래서 코드 선택은 호출자에게 아무
-        // 지시도 못 준다(관측 불가) — `CONFLICT` 인 것은 「나가면 안 될 답장이 샜다」를 한 문구로 잡기 위한
-        // 시험용 표식이다([`CALLER_ALREADY_GONE`]).
+        // ★The reply of this branch goes **nowhere**★ — the lookup was just empty-handed and connection ids are not reused ([`Pending::origin`]) so that connection's outlet has no way to come back. So the code choice
+        // cannot give the caller any instruction (unobservable) — `CONFLICT` is a test marker to catch "a reply that must not go out leaked" in one wording ([`CALLER_ALREADY_GONE`]).
         if self.roster.sink_for_conn(self.origin).is_none() {
             return settled(CommandReply::err(
                 request_id,
@@ -1210,43 +1041,40 @@ impl CommandLink for OwnerLink<'_> {
         }
 
         let outcome = match self.roster.sink_of(&env.owner) {
-            // ★찢어진 창★ — 명부 조회는 `Available` 을 답했는데 그 사이 주인이 끊겼다. `route` 는 조회와
-            //   전달 사이에 명부 잠금을 **일부러** 놓으므로 이 경합은 설계된 잔여다.
-            //   답은 `OUTCOME_UNKNOWN` 이다: 주인은 다시 붙을 수 있으므로 같은 id 재질의가 **안전하면서
-            //   쓸모도 있다**(ADR-0159 의 자). ★`UNKNOWN_COMMAND`·`OWNER_UNAVAILABLE` 로 접지 말 것 —
-            //   ADR-0154 이 못 박았고 새 코드도 만들지 않는다★.
+            // ★Torn window★ — the roster lookup answered `Available` and in between the owner disconnected. `route` **deliberately** releases the roster lock between lookup and
+            //   delivery so this race is a designed residue. The answer is `OUTCOME_UNKNOWN`: the owner may reattach so a re-query of the same id is **both safe and useful**
+            //   (the ruler of ADR-0159). ★Do not fold into `UNKNOWN_COMMAND`·`OWNER_UNAVAILABLE` — ADR-0154 pinned that and no new code is made either★.
             None => Err(no_retry(
                 ErrorCode::OutcomeUnknown,
                 format!("the owner of '{name}' went away while the envelope was being handed over"),
             )),
             Some(sink) => {
-                // ADR-0272: 원문 칸으로 다시 싼다 — 중계가 고친 인자(ADR-0308)가 이 바이트에 실린다.
+                // ADR-0272: re-wrap into the raw field — the arguments the relay fixed (ADR-0308) are carried in these bytes.
                 let packet = envelope_to_wire(&env)
                     .ok()
                     .and_then(|envelope| event_json(&AgentEvent::CommandRequest { envelope }));
                 let written = match packet {
-                    // 큐 포화·닫힘 — 봉투는 나가지 못했지만 큐는 비워질 수 있어 같은 id 재질의가 쓸모 있다.
+                    // Queue saturated · closed — the envelope could not go out but the queue may drain so a re-query of the same id is useful.
                     Some(text) => sink.try_send(Frame::Text(text)).map_err(|_| {
                         no_retry(
                             ErrorCode::OutcomeUnknown,
                             format!("the owner of '{name}' could not take the envelope right now"),
                         )
                     }),
-                    // 직렬화 실패는 우리 쪽 결함이고 기다린다고 달라지지 않는다 — 쓸모 항이 거짓(ADR-0159).
+                    // A serialization failure is a defect on our side and waiting does not change it — the usefulness term is false (ADR-0159).
                     None => Err(no_retry(
                         ErrorCode::Internal,
                         format!("this daemon could not encode the envelope for '{name}'"),
                     )),
                 };
-                // 여기서 사본이 떨어진다 — 받아서 즉시 쓰고 버린다(ADR-0154).
+                // The copy drops here — taken, written on the spot and discarded (ADR-0154).
                 drop(sink);
                 written
             }
         };
 
         if let Err(error) = outcome {
-            // ★자리를 여기서 되돌리지 않는다★ — 자리는 [`deliver`] 것이고, 그쪽이 이 답장을 내보낸 뒤
-            //   발권을 대조해 놓는다. 여기서 키로 집으면 그 사이 같은 키에 앉은 **다른 왕복**을 지운다.
+            // ★Do not undo the seat here★ — the seat belongs to [`deliver`], which after sending this reply compares the ticket and releases it. Picking by key here would erase **another round trip** that sat on the same key in between.
             return settled(CommandReply::err(request_id, error));
         }
 
@@ -1254,7 +1082,7 @@ impl CommandLink for OwnerLink<'_> {
     }
 }
 
-/// 답장 자리를 기다린다. 자리가 **답 없이 사라지면**(원 연결 소멸) 그것도 결말 하나로 접는다.
+/// Waits for the reply seat. If the seat **vanishes with no answer** (the origin connection disappeared) that too is folded into one outcome.
 fn settled_later(
     rx: oneshot::Receiver<CommandReply>,
     request_id: RequestId,
@@ -1272,48 +1100,33 @@ fn settled_later(
     })
 }
 
-/// 3단계 배달의 **1단계** — 이 데몬이 스스로 답하는 명령(`agent.*`).
-///
-/// ★주입인 이유(ADR-0012)★: 실물은 `AgentManager` 를 쥔 표라 실 프로세스·디스크가 딸려 온다. 배달
-/// 규칙을 재는 하네스가 그것을 끌고 올 수 없으므로 포트로 끊는다 — 그래서 이 파일의 시험은 표 없이
-/// (또는 가짜 표로) 1단계 갈래를 잰다.
-/// ★구현은 표를 **부를 때** 읽어야 한다★: 표는 매니저 조립 뒤에야 생기는데 이 포트는 그보다 먼저 연결
-/// 공장에 실린다(daemon `lib.rs` 조립 순서). 조립 시점 값을 잡아 두면 그 뒤로 영영 「내 명령 없음」으로
-/// 굳고, 증상은 에러도 로그도 없이 `agent.*` 가 **모르는 명령**으로 되돌아오는 것이다.
+/// **Stage 1** of the 3-stage delivery — commands this daemon answers by itself (`agent.*`).
+/// ★Why injected (ADR-0012)★: the real thing is a table holding `AgentManager` so real processes · disk come with it. The harness measuring the delivery rules cannot drag that in so it is cut by a port — so this file's tests measure the stage 1 branch without a table
+/// (or with a fake table).
+/// ★The implementation must read the table **at call time**★: the table exists only after the manager is assembled but this port is loaded into the connection factory before that (the daemon `lib.rs` assembly order). Catching the assembly-time value would freeze it
+/// forever as "no commands of mine", and the symptom is `agent.*` coming back as an **unknown command** with neither error nor log.
 // ADR-0155
 pub trait LocalCommands: Send + Sync {
-    /// 이 이름을 내가 쥐고 있나 — 쥐고 있으면 그 명령의 **효과**를 함께 답한다.
-    ///
-    /// ★이 답이 그 이름의 **유일한 라우팅 권위**다★: `Some` 이면 이 왕복은 아무에게도 위임되지 않고
-    /// (자리가 그 사실을 든다 — [`Pending::local`]) 반드시 여기서 끝난다. 예전에는 [`LocalCommands::run`]
-    /// 이 빈손을 답해 다음 단계로 떨어지는 갈래가 licensed 였는데, 그러면 자리는 「아무에게도 안 줬다」고
-    /// 주장하는 채로 봉투가 주인에게 가서 ① 주인의 정당한 결말이 거절되고([`OutcomeLanding::NotDelegated`])
-    /// ② 끊김 정리가 그 자리를 안 치운다. 권위를 하나로 두면 그 어긋남이 **표현 불가능**해진다.
-    /// ★판정만 한다★ — 실행도, 그 실행이 잡는 잠금·디스크도 없다. `None` 이면 [`deliver`] 는 blocking 풀에
-    /// 들르지 않고 곧장 다음 단계로 간다(남의 이름을 나르는 것이 이 데몬의 상시 경로다).
-    /// ★효과를 여기서 받는 이유★: 적용된 Write 만 번호를 붙들고([`SeatState::Retained`]) 읽기는 안 붙든다.
-    /// 그 판정을 결말이 난 뒤에 하려면 이름으로 선언을 다시 뒤져야 하는데, 그때는 이미 표가 바뀌었을 수도
-    /// 있는 값이다 — 자리와 함께 태어난 값을 쓰는 편이 어긋날 수 없다.
+    /// Do I hold this name — if so, also answers that command's **effect**.
+    /// ★This answer is the name's **only routing authority**★: with `Some` this round trip is delegated to no one (the seat carries that fact — [`Pending::local`]) and always ends here. It used to be that [`LocalCommands::run`]
+    /// could answer empty-handed and fall through to the next stage, but then the seat claimed "gave it to no one" while the envelope went to the owner, so ① the owner's legitimate outcome is refused ([`OutcomeLanding::NotDelegated`]) and
+    /// ② disconnect cleanup does not clear that seat. Keeping one authority makes that mismatch **unrepresentable**.
+    /// ★It only decides★ — no execution, and none of the locks · disk that execution takes. With `None` [`deliver`] does not stop by the blocking pool and goes straight to the next stage (carrying another's name is this daemon's constant path).
+    /// ★Why the effect is received here★: only an applied Write holds the number ([`SeatState::Retained`]) and a read does not. Deciding that after the outcome would mean searching the declaration by name again, a value that may have
+    /// changed by then — using the value born with the seat cannot diverge.
     /// The declared [`DeadlineClass`] comes with the effect for the same reason: the seat is sized from it when it
     /// opens ([`CommandDeliveries::seat_span`] — ADR-0369).
     fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)>;
 
-    /// 검문하고 실행해 결말을 낸다.
-    ///
-    /// ★`None` 은 **계약 위반**이다★ — [`LocalCommands::claim`] 이 내 것이라 답한 이름만 여기 오므로 빈손일
-    /// 수 없다. 그래도 반환 타입에 남겨 둔 것은 구현이 그 상태를 만들 수 있기 때문이고, [`deliver`] 는 그것을
-    /// 다음 단계로 흘리지 않고 `INTERNAL` 로 **드러낸다**(흘리면 위 doc 의 그 어긋남이 되살아난다).
-    /// ★blocking 이다★ — [`deliver`] 가 blocking 풀에서 부른다. 여기서 async 를 기다리지 말 것.
-    /// ★입구 검문(ADR-0157)이 이 **안에** 있어야 한다★: 검문 없이 표를 부르는 구현을 꽂으면 이 경로가
-    /// 검문 없이 도는 두 번째 입구가 된다 — 오타 칸 하나가 조용히 다른 동작으로 실행되는 그 실패다.
-    /// ★`Ok` payload 는 **로그에 실린다**★(마감 뒤 완료 — [`log_late_local`]). 그래서 이 포트로 나가는
-    /// 성공 payload 에 자격증명·토큰 같은 비밀을 담지 말 것. ★오늘 실물(`agent.*`·`usage.*`)이 id·이름·상태뿐인
-    /// 것은 아니다★ — `agent.listQueuedInputs` 의 payload 는 사용자가 친 글을, `usage.*` 의 행은 상류 원문
-    /// (`upstream`)을 싣는다. 앞의 것이 로그에 안 앉는 이유는 그 기록이 **붙든 Write 의 성공**에만 payload 를 싣기
-    /// 때문이고(읽기는 사건만 남긴다 — [`log_late_local`]), 뒤의 것은 붙든 Write(`usage.refresh`)라 실리는데 그
-    /// 기록이 싣기 전에 **이름이 `upstream` 인 키를 명령과 무관하게 깊이 끝까지 걷는다**([`strip_upstream`]).
-    /// `caller` = 호출한 연결(입력 임대 판정의 재료 — ADR-0231). `None` = 연결 없는 입구(`/control/call`)이고
-    /// 임대 보유자로 치지 않는다.
+    /// Checks and executes to produce the outcome.
+    /// ★`None` is a **contract violation**★ — only names [`LocalCommands::claim`] answered as mine come here so it cannot be empty-handed. It is left in the return type because an implementation could make that state, and [`deliver`] does not let it flow to the
+    /// next stage but **surfaces** it as `INTERNAL` (letting it flow would revive the mismatch in the doc above).
+    /// ★This is blocking★ — [`deliver`] calls it on the blocking pool. Do not await async here.
+    /// ★The entrance check (ADR-0157) must be **inside** this★: plugging in an implementation that calls the table without a check makes this path a second entrance running with no check — the failure where one typo field quietly runs as a different action.
+    /// ★The `Ok` payload is **put in the log**★ (completion after the deadline — [`log_late_local`]). So do not put secrets such as credentials · tokens in a success payload leaving through this port. ★Today's real ones (`agent.*`·`usage.*`) are not
+    /// only id · name · status★ — the payload of `agent.listQueuedInputs` carries text the user typed and the rows of `usage.*` carry the upstream raw text (`upstream`). The former does not sit in the log because that record carries a payload only for the **success of a held Write**
+    /// (a read leaves only the event — [`log_late_local`]), and the latter is a held Write (`usage.refresh`) so it is carried, but before that record carries it **it walks every key named `upstream` all the way down regardless of the command** ([`strip_upstream`]).
+    /// `caller` = the calling connection (material for the input lease decision — ADR-0231). `None` = an entrance with no connection (`/control/call`) and it is not counted as a lease holder.
     fn run(
         &self,
         name: &str,
@@ -1322,22 +1135,19 @@ pub trait LocalCommands: Send + Sync {
         caller: Option<ConnId>,
     ) -> Option<Result<serde_json::Value, CommandError>>;
 
-    /// 이 데몬이 스스로 답하는 이름 전량 — 발견(`ListCommands`)이 명부와 **합쳐서** 내린다.
+    /// Every name this daemon answers by itself — discovery (`ListCommands`) emits it **merged** with the roster.
     fn decls(&self) -> Vec<CommandDecl>;
 
-    /// 남의 명령의 에이전트 참조 칸을 풀 명부(ADR-0308) — 1단계 동사가 지목을 푸는 **그 명부**여야 한다
-    /// (해석기 하나 — ADR-0132). 둘이 갈리면 같은 이름이 입구마다 다른 에이전트로 풀린다.
-    ///
-    /// ★blocking 이다★ — 잠든 프로필의 경로 정규화가 길게 걸릴 수 있다(agent `AgentManager::roster`).
-    /// [`deliver`] 가 blocking 풀에서 부른다.
-    /// ★기본 몸통을 두지 않는다★: 빈 명부를 돌려주는 구현은 표시된 칸을 전부 `NOT_FOUND` 로 반려해 그 명령들을 통째로
-    /// 막는다. 기본값으로 두면 명부가 있는 조립이 이 메서드를 빠뜨려도 컴파일이 통과하고 증상은 런타임의 반려뿐이다 —
-    /// 에이전트를 두지 않는 조립은 빈 명부를 **스스로** 적는다.
+    /// The roster that resolves the agent-reference fields of another's command (ADR-0308) — it must be **the very roster** the stage 1 verbs use to resolve targeting
+    /// (one resolver — ADR-0132). If the two diverge the same name resolves to a different agent per entrance.
+    /// ★This is blocking★ — path normalization of a dormant profile can take long (agent `AgentManager::roster`). [`deliver`] calls it on the blocking pool.
+    /// ★No default body is provided★: an implementation returning an empty roster refuses every marked field as `NOT_FOUND` and blocks those commands wholesale. With a default, an assembly that has a roster could omit this method and still compile and the symptom would be only a runtime refusal —
+    /// an assembly that holds no agents writes an empty roster **by itself**.
     // ADR-0308
     fn agent_roster(&self) -> Vec<AgentRosterRow>;
 }
 
-/// 자기 명령이 없는 조립 — 1단계가 언제나 미스다(스모크 bin · 배달 규칙만 재는 하네스).
+/// An assembly with no commands of its own — stage 1 is always a miss (smoke bins · harnesses measuring only the delivery rules).
 pub struct NoLocalCommands;
 
 impl LocalCommands for NoLocalCommands {
@@ -1359,87 +1169,63 @@ impl LocalCommands for NoLocalCommands {
         Vec::new()
     }
 
-    // 에이전트를 두지 않는 조립 — 표시된 칸은 전부 `NOT_FOUND` 로 반려되고 중계되지 않는다.
+    // An assembly that holds no agents — every marked field is refused as `NOT_FOUND` and not relayed.
     fn agent_roster(&self) -> Vec<AgentRosterRow> {
         Vec::new()
     }
 }
 
-/// 동시에 blocking 풀에 나가 있을 수 있는 1단계 본문의 수.
+/// The number of stage 1 bodies that can be out on the blocking pool at the same time.
+/// ★Without a cap both seats and the pool queue grow without bound★: if profile-save I/O stops the body does not end, and the deadline **cannot reap** that seat (it holds the seat while the body runs — [`Pending::local`]). Then for every command
+/// arriving under a different number one seat + one pool job piles up and the two swell together until the I/O returns.
+/// ★The basis of the value — **burst absorption**, not throughput★: every write verb of this family queues on one profile lock (the lock discipline of agent `ProfileRegistry`) so raising concurrency does not raise throughput. So this number is not "how fast to handle at once"
+/// but "how many to hold before refusing loudly", and on overflow it refuses instead of quietly growing the queue (the same argument as the roster capping its own residency — `Roster::MAX_NAMES`). It also leaves ample room in tokio's default blocking pool (512 threads).
+/// ★This entrance is inside the auth boundary (ADR-0153)★ — it is not a surface anyone can push into so the value need not be tight.
 ///
-/// ★상한이 없으면 자리도 풀 큐도 무한히 자란다★: 프로필 저장 I/O 가 멈추면 본문이 안 끝나고, 마감은 그
-/// 자리를 **거둘 수 없다**(본문이 도는 동안 자리를 붙들기 때문 — [`Pending::local`]). 그러면 서로 다른
-/// 번호로 들어오는 명령마다 자리 하나 + 풀 작업 하나가 쌓여, 그 둘이 I/O 가 돌아올 때까지 함께 부푼다.
-/// ★값의 근거 — 처리량이 아니라 **버스트 흡수량**이다★: 이 계열의 쓰기 동사는 전부 프로필 락 하나를 두고
-/// 줄을 서므로(agent `ProfileRegistry` 의 락 규율) 동시성을 늘려도 처리량은 안 는다. 그래서 이 수는 「동시에
-/// 얼마나 빨리 처리하나」가 아니라 「몇 개까지 물고 있다가 큰 소리로 거절하나」이고, 넘치면 조용히 큐를
-/// 늘리는 대신 반려한다(명부가 자기 상주에 상한을 두는 것과 같은 논거 — `Roster::MAX_NAMES`).
-/// tokio 기본 blocking 풀(512 스레드)에도 넉넉히 여유를 남긴다.
-/// ★이 입구는 인증 경계 안이다(ADR-0153)★ — 아무나 밀어 넣는 표면이 아니라서 값이 빡빡할 필요가 없다.
+/// ## ★Two things this cap **cannot do** — left knowingly★
 ///
-/// ## ★이 상한이 **하지 못하는 것** 둘 — 알고 남긴다★
-///
-/// ① **되돌아오지 않을 수 있다(일방 래칫).** 이것이 막는 상황(프로필 저장이 막힌 채 본문이 안 끝나는 것)이
-///    실제로 벌어지면 그 64개는 **영원히 안 풀린다**: 마감은 자리를 못 거두고([`Pending::local`]),
-///    끊김 정리도 건너뛰며([`CommandDeliveries::drop_origin`]), 본문 자체에는 시한이 없다 —
-///    `spawn_blocking` 은 취소가 안 되므로 이 층에서 시한을 걸 수단이 아예 없다. 그 뒤로 버스의 `agent.*`
-///    는 프로세스 수명 내내 `CONFLICT` 다. 그래서 거절 문구가 「기다렸다 다시」로 끝나지 않고 **데몬을 다시
-///    띄워야 한다**까지 말한다(그 상태에서 기다림은 거짓 안내다). 진짜로 닫으려면 시한을 걸 수 있는 곳,
-///    즉 **프로필 저장 I/O 자체**에 걸어야 한다 — 이 층의 결정이 아니다.
-/// ② **제어 라우트(`/control/agent`)에는 안 걸린다.** 그쪽도 같은 핸들러를 `spawn_blocking` 으로 몰지만
-///    (`mcp_server::control_agent_handler`) 이 셈을 안 본다. 두 입구가 공유하는 자리
-///    (`control::commands::call_daemon_command`)에 옮기면 **판정이 풀 작업 안에서** 나므로, 지키려던 자원을
-///    이미 집은 뒤에 거절하게 된다 — 입장 통제는 자원을 잡기 **전**이어야 해서 그 seam 은 이 정책의 집이
-///    될 수 없다. 제대로 공유하려면 조립 시점에 만든 입장 통제 객체를 `start_mcp_server_with_help` 와
-///    `run_accept_loop` 양쪽에 넘겨야 하고, 그건 이번 범위 밖이다. ★그러니 HTTP 표면의 풀 적재는 여전히
-///    무계다★ — 이 상수가 그것까지 막는다고 읽지 말 것.
+/// ① **It may not come back (a one-way ratchet).** If the situation it blocks (profile save blocked and bodies not ending) really happens those 64 **never release**: the deadline cannot reap the seat ([`Pending::local`]), disconnect cleanup skips it too
+///    ([`CommandDeliveries::drop_origin`]), and the body itself has no time limit — `spawn_blocking` cannot be cancelled so there is no means at this layer to impose one. After that the bus's `agent.*` is `CONFLICT` for
+///    the whole process lifetime. So the refusal wording does not end with "wait and retry" but goes as far as **the daemon must be restarted** (waiting in that state is a false instruction). To truly close it the limit must be placed where one can be imposed,
+///    that is on **the profile save I/O itself** — not this layer's decision.
+/// ② **It does not apply to the control route (`/control/agent`).** That too drives the same handlers by `spawn_blocking` (`mcp_server::control_agent_handler`) but does not look at this count. Moving it into the place both entrances share
+///    (`control::commands::call_daemon_command`) would make the decision **inside the pool job**, refusing after already taking the resource it meant to guard — admission control must come **before** taking the resource so that seam cannot be this policy's home.
+///    Sharing it properly means passing an admission-control object made at assembly time to both `start_mcp_server_with_help` and `run_accept_loop`, and that is out of this scope. ★So the pool load of the HTTP surface is still
+///    unbounded★ — do not read this constant as blocking that too.
 const MAX_LOCAL_IN_FLIGHT: usize = 64;
 
-/// 동시에 blocking 풀에서 돌 수 있는 에이전트 참조 칸 풀기(명부 읽기)의 수(ADR-0308).
-///
-/// ★상한이 없으면 막힌 읽기가 무한히 쌓인다★: 읽기는 `spawn_blocking` 이라 취소되지 않는다 — 그 왕복의 자리가 먼저
-/// 정산되거나(마감 · 종료 · 호출자 이탈) 제어 라우트 호출이 취소돼 기다리는 쪽이 떠나도 끝까지 돈다. 잠든 에이전트의
-/// cwd 가 죽은 네트워크 공유면 그 읽기 하나가 수십 초 막히므로(agent `AgentManager::roster`) 번호가 다른 표시된
-/// 명령마다 막힌 스레드가 하나씩 는다. 그래서 셈의 표식([`ResolveGuard`])은 읽기 클로저 **안으로** 옮겨 가 읽기가
-/// 끝날 때만 풀린다.
-/// 값의 근거: 막힌 읽기는 모두 같은 공유를 기다려 동시성이 처리량을 늘리지 않으므로, 배치 명령 한 차례 몰림을 받을
-/// 만큼(16)만 열고 1단계 상한과 합쳐도 tokio 기본 blocking 풀(512)에 넉넉히 남긴다.
+/// The number of agent-reference field resolutions (roster reads) that can run on the blocking pool at the same time (ADR-0308).
+/// ★Without a cap blocked reads pile up without bound★: a read is `spawn_blocking` so it is not cancelled — it runs to the end even if that round trip's seat is settled first (deadline · shutdown · caller left) or a control route call is cancelled and the waiting side leaves.
+/// If a dormant agent's cwd is a dead network share one read blocks for tens of seconds (agent `AgentManager::roster`), so for every marked command with a different number one more blocked thread appears. So the count's marker ([`ResolveGuard`]) moves **into** the read closure and is released only when the read ends.
+/// The basis of the value: blocked reads all wait on the same share so concurrency does not raise throughput; it opens only enough (16) to take one burst of batch commands and, even summed with the stage 1 cap, leaves ample room in tokio's default blocking pool (512).
 const MAX_RESOLVING_IN_FLIGHT: usize = 16;
 
-/// 상한 사건을 다시 적기까지의 최소 간격.
-///
-/// ★두 방향을 한 값으로 연다★: 포화가 이어지는 동안 **줄 수를 상대가 못 정하게** 하면서, 진짜로 물려
-/// 셈이 안 내려가는 동안에도 **계속 신호가 나게** 한다(그 상황이 가장 시끄러워야 한다 — 근거는
-/// [`Seats::ceiling_warned_at`]). 값은 사람이 로그를 훑는 주기 감각이다.
+/// The minimum interval before a cap event is written again.
+/// ★One value opens both directions★: while saturation continues it **keeps the other side from deciding the line count**, and while truly bitten with the count not dropping it **keeps the signal coming** (that situation should be the loudest — basis =
+/// [`Seats::ceiling_warned_at`]). The value is a sense of the period at which a person skims logs.
 const CEILING_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
-/// 번호를 붙들고 있을 수 있는 자리 수의 상한([`Seats::evict_oldest_retained`]).
-///
-/// ★값의 셈★: 보유 한 칸은 처지·시각·발권·연결 id 뿐이다(페이로드는 보유로 넘길 때 버린다 —
+/// The cap on the number of seats that can hold a number ([`Seats::evict_oldest_retained`]).
+/// ★The arithmetic of the value★: one held entry is only standing · time · ticket · connection id (the payload is discarded when handing over to holding —
 /// [`CommandDeliveries::settle_local`]). 256 entries stay within tens of KiB and exceed the write round trips that
 /// finish within one retention window in normal use (a seat's own span — 7 s ordinary, longer for a launch) — those
 /// round trips queue on one profile lock, so the throughput per window is small. Passing this count means a **runaway
 /// caller**, not normal use, and what must hold then is the table's bound.
 const MAX_RETAINED_LOCAL: usize = 256;
 
-/// 도는 1단계 하나를 나타내는 표식 — ★`Drop` 이 셈을 **반드시** 되돌린다★.
-///
-/// 이른 반환·패닉·취소 어느 길로 나가도 셈이 새지 않아야 상한이 한 번 차고 영영 안 열리는 상태가 없다.
+/// A marker representing one stage 1 running — ★`Drop` **always** undoes the count★.
+/// The count must not leak by any exit — early return · panic · cancellation — so there is no state where the cap fills once and never reopens.
 struct LocalGuard {
     deliveries: CommandDeliveries,
-    /// 이미 정산됐나 — `Drop` 이 셈을 **두 번** 빼지 않게 한다.
+    /// Already settled — keeps `Drop` from subtracting the count **twice**.
     settled: bool,
 }
 
 impl LocalGuard {
-    /// 셈 반환과 자리 처분을 **한 임계 구역에서** 끝낸다.
-    ///
-    /// ★쪼개면 그 사이가 창이다★: 답장은 이미 나갔는데 자리는 아직 `Awaiting` 인 순간에 같은 요청이 다시
-    /// 오면 [`Seat::Coalesced`] 로 접혀 **프레임을 한 장도 못 받는다**(합칠 답장이 이미 나가 버렸다). 정산이
-    /// 한 번의 잠금이면 그 창은 잠금 한 번 폭으로 좁아진다.
-    /// ★그래도 0 은 아니다★ — 프레임을 내보낸 **뒤에** 정산한다는 순서(자리 규칙 2)는 그대로라, 그 사이의
-    /// 재질의는 여전히 합쳐진다. 완전히 없애려면 보유 갈래만 프레임보다 **먼저** 정산해야 하는데, 그러면
-    /// 놓는 갈래와 순서가 갈려 규칙이 둘이 된다.
+    /// Finishes returning the count and disposing the seat **in one critical section**.
+    /// ★Splitting makes the gap a window★: in the instant the reply has already gone out but the seat is still `Awaiting`, if the same request comes again it is folded as [`Seat::Coalesced`] and **receives not one frame** (the reply to coalesce has already gone). If settlement is
+    /// one lock that window narrows to the width of one lock. ★Still it is not 0★ — the order that settlement happens **after** the frame goes out (seat rule 2) stands, so a re-query in between is still coalesced. Removing it completely would need the held branch alone to settle
+    /// **before** the frame, but then the order diverges from the releasing branch and the rules become two.
     fn settle(mut self, request_id: RequestId, token: SeatToken, retain: bool) {
         self.deliveries.settle_local(request_id, token, retain);
         self.settled = true;
@@ -1454,10 +1240,8 @@ impl Drop for LocalGuard {
     }
 }
 
-/// 도는 명부 읽기 하나를 나타내는 표식 — ★읽기 클로저 안에서 떨어진다★([`MAX_RESOLVING_IN_FLIGHT`]).
-///
-/// 기다리는 쪽(배달 태스크)이 들고 있으면 그쪽이 먼저 떠날 때(자리 정산 · 취소) 셈이 풀려, 아직 막혀 있는 읽기가
-/// 상한 밖으로 샌다. `Drop` 이라 읽기가 패닉해도 셈이 돌아온다.
+/// A marker representing one roster read running — ★dropped inside the read closure★ ([`MAX_RESOLVING_IN_FLIGHT`]).
+/// If the waiting side (the delivery task) held it, when that side leaves first (seat settlement · cancellation) the count would be released and a read still blocked would leak beyond the cap. Being `Drop` the count comes back even if the read panics.
 struct ResolveGuard {
     deliveries: CommandDeliveries,
 }
@@ -1468,7 +1252,7 @@ impl Drop for ResolveGuard {
     }
 }
 
-/// blocking 본문이 돌려주는 것 — 봉투와 표의 결말(`None` = 표가 빈손).
+/// What the blocking body returns — the envelope and the table's outcome (`None` = the table is empty-handed).
 type LocalJoin = Result<
     (
         CommandEnvelope,
@@ -1477,42 +1261,28 @@ type LocalJoin = Result<
     tokio::task::JoinError,
 >;
 
-/// 이 결말이 그 번호를 **붙들 만한가** — 자리를 보유로 넘길지 놓을지를 가른다.
+/// Is this outcome **worth holding that number** — decides whether the seat is handed to holding or released.
+/// ★Why split★: if even a round trip where nothing was applied were held, a caller who fixed a typo and resent with the same number would get back "already applied" for a **command that never ran** (wrong a field name to `agent.new` → refused →
+/// fixed and resent). Conversely not holding what was applied would apply the same Write verb twice. The decision axis is one: "what was actually applied".
 ///
-/// ★가르는 이유★: 아무것도 적용되지 않은 왕복까지 붙들면, 오타를 고쳐 같은 번호로 다시 보낸 호출자가
-/// **돌지도 않은 명령**을 「이미 적용됐다」로 돌려받는다(`agent.new` 에 칸 이름을 틀렸다 → 반려 → 고쳐서
-/// 재전송). 반대로 적용된 것을 안 붙들면 같은 Write 동사가 두 번 적용된다. 판정 축은 「무엇이 실제로
-/// 적용됐나」 하나다.
+/// ★The decision is made by **the list to release** — not the list of "may have been applied"★
+/// Because the costs of the two directions are asymmetric: holding too much **blocks one retry in the window** (the caller uses a new number), holding too little **leaves an undeletable duplicate permanently** (ADR-0122 — there is no delete verb). So only "certainly left nothing" is released and
+/// everything else is held. This shape errs **toward the safe side** even when verbs grow or a code's meaning changes.
 ///
-/// ★판정은 **놓을 목록**으로 한다 — 「적용됐을 수 있다」의 목록이 아니다★
-///
-/// 두 방향의 대가가 비대칭이라서다: 과하게 붙들면 **창 안의 재시도 하나가 막히고**(호출자는 새 번호를 쓰면
-/// 된다), 덜 붙들면 **지울 수 없는 중복이 영구히 남는다**(ADR-0122 — 삭제 동사가 없다). 그래서 「확실히
-/// 아무것도 안 남긴 것」만 놓고 나머지는 전부 붙든다. 이 형태는 동사가 늘거나 코드의 뜻이 바뀔 때도 **안전한
-/// 쪽으로** 틀린다.
-///
-/// - **`Read` 는 놓는다** — 다시 돌아도 상태가 안 바뀌고, 붙들면 흔한 조회가 그 번호를 막는다.
-/// - **놓는 실패 셋 = `INVALID_ARGUMENT`·`NOT_FOUND`·`CONFLICT`.** 오늘 다섯 동사에서 이 셋은 전부 명부를
-///   건드리기 **전**의 반려다(빈 값 · 지목 실패 · 구조 거부 · 저장소의 판정 거절 — agent 쪽
-///   `a_rejection_from_the_mutating_verbs_leaves_the_roster_untouched` 가 그 사실을 못박는다). 이 셋을 놓아야
-///   오타를 고쳐 같은 번호로 다시 보낸 호출자가 「돌지도 않은 명령」을 `ALREADY_APPLIED` 로 돌려받지 않는다.
-///   ★예외 하나 — 깨우기(`agent.spawn` 의 `target`)의 판정 거절★: 그 항목을 같은 값으로 다시 적는 등록이 저장된
-///   뒤에 거절될 수 있다(ADR-0291 §3-9 부분 성공) — 재시도가 같은 결과라 놓아도 된다. 만들고 띄우기의 띄우기
-///   거절은 만든 에이전트가 남으므로 `CONFLICT` 가 아니라 `INTERNAL` 로 나온다(agent `create_and_start`).
+/// - **`Read` is released** — running it again does not change state, and holding it would let a common lookup block that number.
+/// - **The failures to release are three = `INVALID_ARGUMENT`·`NOT_FOUND`·`CONFLICT`.** Today across the five verbs these three are all rejections **before touching** the roster (empty value · targeting failure · structural refusal · the store's decision refusal — agent side
+///   `a_rejection_from_the_mutating_verbs_leaves_the_roster_untouched` pins that fact). Releasing these three keeps a caller who fixed a typo and resent with the same number from getting `ALREADY_APPLIED` for a "command that never ran".
+///   ★One exception — a decision refusal of waking (`target` of `agent.spawn`)★: a registration rewriting that entry with the same value can be refused after it was saved (ADR-0291 §3-9 partial success) — a retry gives the same result so releasing is fine.
+///   A launch refusal of create-and-launch leaves the created agent so it comes out as `INTERNAL`, not `CONFLICT` (agent `create_and_start`).
 ///   A wake's launch refusal (blocked or raced, TRD S25 step 16) is a second such `CONFLICT` after a write: it
 ///   records the last failure (and a race consumes an epoch) — releasing is still safe, a rerun gives the same answer.
-/// - **나머지는 전부 붙든다** — `INTERNAL`·`OUTCOME_UNKNOWN` 이 여기 든다. 특히 후자는 「일부가 이미
-///   적용됐을 수 있다」를 **문구로 명시하는** 코드다(`control::commands::drive_to_completion`).
-/// - **빈손은 놓는다** — 표가 아무것도 안 돌렸다는 것이 확실하다([`fold_local`] 이 그것을 `INTERNAL` 답장으로
-///   접지만, 판정은 답장이 아니라 표의 결말을 본다).
-/// - **죽음은 붙든다** — 어디까지 갔는지 모른다.
+/// - **Everything else is held** — `INTERNAL`·`OUTCOME_UNKNOWN` fall here. The latter especially is a code that **states in its wording** "part may already have been applied" (`control::commands::drive_to_completion`).
+/// - **Empty-handed is released** — it is certain the table ran nothing ([`fold_local`] folds it into an `INTERNAL` reply but the decision looks at the table's outcome, not the reply).
+/// - **Death is held** — it is not known how far it got.
 ///
-/// ★알려진 과보유 하나 — 저장 쓰기 실패의 `INTERNAL`★: 명부를 바꾸는 동사는 저장이 성공해야 커밋하므로 저장소가
-/// 쓰지 못한 실패는 사실 **손대기 전** 실패인데, 코드가 `INTERNAL` 이다(agent `store_command_error` — 판정 거절만
-/// `CONFLICT`). 그런데 이 판정은 코드만 보고 붙들므로, 저장이 실패한 호출자가 창 안에 다시 보내면 **바뀌지 않은
-/// 상태**를 두고 `ALREADY_APPLIED` 를 받는다. 위 비대칭에 따라 감수한다 — 새 번호로 다시 보내면 통한다.
-/// ★진짜 해법은 이 함수가 아니다★: 포트에 「무엇을 적용했나」를 말하는 칸이 없어(결말은 `Ok`/`Err` 뿐)
-/// 동사별 진실을 볼 수단이 없다. [`LocalCommands::run`] 이 그 신호를 싣게 되면 이 근사는 사라진다.
+/// ★One known over-hold — `INTERNAL` of a store write failure★: a verb that changes the roster commits only if the save succeeds so a failure the store could not write is in fact a failure **before touching**, yet the code is `INTERNAL`
+/// (agent `store_command_error` — only a decision refusal is `CONFLICT`). But this decision holds by code alone, so a caller whose save failed and resends within the window gets `ALREADY_APPLIED` for a **state that did not change**. Accepted under
+/// the asymmetry above — resending with a new number works. ★The real fix is not this function★: the port has no field saying "what was applied" (the outcome is only `Ok`/`Err`) so there is no means to see the per-verb truth. When [`LocalCommands::run`] carries that signal this approximation disappears.
 fn retains_the_id(effect: Effect, joined: &LocalJoin) -> bool {
     if effect == Effect::Read {
         return false;
@@ -1527,13 +1297,10 @@ fn retains_the_id(effect: Effect, joined: &LocalJoin) -> bool {
     }
 }
 
-/// 1단계 본문을 **blocking 풀에** 내보낸다 — 그 계약의 근거는 [`LocalCommands::run`].
-///
-/// ★`spawn_blocking` 인 이유★: 이 표의 핸들러는 프로필 락을 쥔 채 디스크를 쓰고 resume 조기 종료를 약
-/// 3초 폴링한다(agent `make_table` doc). 그대로 async 태스크에서 폴링하면 그 시간 내내 런타임 워커 하나가
-/// 막히고, 같은 워커에 얹힌 다른 연결의 프레임 처리가 함께 선다.
-/// ★그 대가 — **취소가 안 된다**★: 한 번 나간 본문은 되부를 수 없으므로 마감이 지나도 계속 돈다. 그
-/// 사실이 [`Pending::local`] 과 [`Seat::LocalStillRunning`] 이 존재하는 이유 전부다.
+/// Sends the stage 1 body **out to the blocking pool** — the basis of that contract is [`LocalCommands::run`].
+/// ★Why `spawn_blocking`★: this table's handlers write disk holding the profile lock and poll resume early-exit for about 3 seconds (agent `make_table` doc). Polled as is in an async task, a runtime worker is blocked that whole time
+/// and the frame handling of other connections on the same worker stalls with it.
+/// ★The cost — **it cannot be cancelled**★: a body once sent out cannot be recalled so it keeps running past the deadline. That fact is the whole reason [`Pending::local`] and [`Seat::LocalStillRunning`] exist.
 fn spawn_local(
     locals: Arc<dyn LocalCommands>,
     roster: CommandRoster,
@@ -1546,19 +1313,13 @@ fn spawn_local(
 )> {
     tokio::task::spawn_blocking(move || {
         let mut envelope = envelope;
-        // ★부수효과를 내기 **직전** 호출자를 다시 본다★ — 2단계가 봉투를 넘기기 직전에 하는 그 검사와
-        //   같은 것이고(`OwnerLink::send`), 같은 것을 막는다: 이미 떠난 호출자를 위해 부수효과 있는 명령이
-        //   실행되는 일. ★1단계에서는 이 **늦은** 검사가 본체다★ — 이 클로저는 풀에 줄을 서 있었을 수
-        //   있어서 태스크가 뜰 때 본 표본은 그새 낡는다. 그래서 두 번 본다(태스크를 띄우기 전 · 여기).
-        // ★그래도 check-then-act 잔여는 남는다★: 이 조회와 아래 실행 사이에 끊긴 연결은 여기서도 안
-        //   보인다. 없애려면 명부 잠금을 실행 내내 들고 있어야 하고, 그러면 느린 한 명령이 등록·정리·다른
-        //   배달을 전부 세운다. **「떠난 호출자의 명령은 절대 실행되지 않는다」로 읽지 말 것.**
-        // ★출구 사본을 **받지 않는 술어**를 쓴다★(ADR-0154): 여기서 `sink_for_conn` 으로 사본을 받으면
-        //   그 강참조가 수 초짜리 본문 내내 살아 있어, 끊긴 연결의 writer 가 자기 종료를 못 한다. 답장을 낼
-        //   때의 사본은 그때 다시 조회해 쓰고 버린다(`send_reply`).
-        // ★`ConnId` 만 비교해도 되는 근거★: 연결 id 는 재사용되지 않는다(단조 증가 — 그 실측의 정본은
-        //   [`Pending::origin`]). 재사용이 생기면 이 술어가 **다른 피어**를 살아 있다고 답하므로, 그때는
-        //   여기도 세대 번호를 함께 봐야 한다.
+        // ★Look at the caller again **just before** the side effect★ — the same check stage 2 does just before handing over the envelope (`OwnerLink::send`), preventing the same thing: a command with side effects running for a caller who has already left.
+        //   ★In stage 1 this **late** check is the substance★ — this closure may have queued in the pool so the sample seen when the task started goes stale, hence two looks (before launching the task · here).
+        // ★The check-then-act residue still remains★: a connection that drops between this lookup and the execution below is not seen here either. Removing it would mean holding the roster lock through the whole execution and then one slow command stalls
+        //   registration · cleanup · other deliveries. **Do not read it as "a command of a caller who has left is never executed".**
+        // ★Use a predicate that **does not take an outlet copy**★ (ADR-0154): taking a copy here with `sink_for_conn` would keep that strong reference alive through a body of several seconds and the disconnected connection's writer could not end itself.
+        //   The copy for giving the reply is looked up again then and used and dropped (`send_reply`).
+        // ★Why comparing only the `ConnId` is enough★: connection ids are not reused (monotonic — the canonical measurement is [`Pending::origin`]). If reuse appears this predicate would answer "alive" for **another peer**, and then this place too must look at a generation number.
         if !roster.is_attached(origin) {
             return (
                 envelope,
@@ -1570,22 +1331,14 @@ fn spawn_local(
     })
 }
 
-/// 본문의 join 결과 → 결말.
-///
-/// ★태스크가 답 없이 끝나면 `OUTCOME_UNKNOWN` 이다★ — 본문은 첫 poll 에서 끝까지 도는 형태라 어디서
-/// 죽었는지 알 수 없고, 조작의 일부가 이미 적용됐을 수 있다(ADR-0159 의 확실성 축). `INTERNAL` 로 접으면
-/// 「여기서 확실히 실패했다」는 오보가 된다.
-/// ★계측이 load-bearing 이다★: 이 갈래는 답장 하나로만 나타나므로 로그가 없으면 서버 쪽에 흔적이 아예
-/// 없다(로깅 컨벤션 「무로그 삼킴」 금지). CLI 쌍둥이가 같은 사고에 `entrance = "cli"` 로 error 를 남기므로
-/// (`mcp_server::control_agent_handler`) 여기도 같은 모양으로 남긴다 — 두 표면의 사고를 한 필드로 가른다.
-/// ★어떻게 여기 닿나(알려진 경로)★: `blocking_handler` 의 패닉 그물은 **핸들러 본문**만 덮는다. 표가
-/// 인자를 선언 스키마에 맞추는 `CommandTable::call` 안의 보정은 그 그물 **밖**이라, 거기서 터지면 이
-/// 태스크가 통째로 죽어 여기로 온다.
-/// ★이 경로에 셋째 그물을 세우지 않는다 — 어느 이름에도(ADR-0293)★: 버스 명령의 실행 구간은 가두지 않는다.
-/// 잡은 패닉을 `INTERNAL`(「확실히 실패」)로 접으려면 본문이 아무것도 안 바꿨어야 하고, 그 확인 없이는 이
-/// 갈래(`OUTCOME_UNKNOWN`)가 맞다(다시 가둘 때의 조건 = `control::commands::call_daemon_command` doc).
-/// ★운영 프로세스에서는 위 경로의 패닉이 이 갈래에 오지 않는다★ — 가둠 표시 밖이라 훅이 사유 줄을 남기고
-/// 그 자리에서 데몬을 끝낸다(ADR-0292). 위 경로로 여기 닿는 것은 훅 없는 시험 빌드다.
+/// The join result of the body → the outcome.
+/// ★If the task ends with no answer it is `OUTCOME_UNKNOWN`★ — the body runs to the end on its first poll so it cannot be known where it died and part of the operation may already have been applied (the certainty axis of ADR-0159). Folding to `INTERNAL` would be a false report "certainly failed here".
+/// ★The instrumentation is load-bearing★: this branch appears only as one reply so without a log there is no trace on the server side at all (logging convention no silent swallow). The CLI twin leaves an error with `entrance = "cli"` for the same incident
+/// (`mcp_server::control_agent_handler`) so the same shape is left here — the incidents of the two surfaces are split by one field.
+/// ★How it gets here (a known path)★: the panic net of `blocking_handler` covers **only the handler body**. The correction inside `CommandTable::call`, where the table fits arguments to the declared schema, is **outside** that net, so if it blows up there this task dies whole and comes here.
+/// ★No third net on this path — for no name (ADR-0293)★: the execution span of a bus command is not contained. To fold a caught panic into `INTERNAL` ("certainly failed") the body must have changed nothing, and without that check this branch (`OUTCOME_UNKNOWN`) is right
+/// (the condition for containing again = the `control::commands::call_daemon_command` doc).
+/// ★In the production process a panic on the above path does not reach this branch★ — it is outside the containment marker so the hook leaves a reason line and ends the daemon on the spot (ADR-0292). Reaching here by the above path happens only in test builds without the hook.
 fn fold_local(
     joined: LocalJoin,
     request_id: RequestId,
@@ -1597,15 +1350,14 @@ fn fold_local(
             request_id,
             outcome,
         },
-        // ★계약 위반을 **다음 단계로 흘리지 않는다**★: `claim` 이 내 것이라 답했으므로 이 자리는 「아무에게도
-        //   위임되지 않았다」고 주장하는 중이다([`Pending::local`]). 그 주장을 켜 둔 채 봉투를 주인에게 보내면
-        //   주인의 정당한 결말이 거절되고 끊김 정리도 이 자리를 안 치운다 — 조용한 어긋남 대신 드러낸다.
+        // ★Do not let a contract violation **flow to the next stage**★: since `claim` answered mine, this place is claiming "delegated to no one" ([`Pending::local`]). Sending the envelope to the owner with that claim on would refuse the owner's legitimate outcome and
+        //   disconnect cleanup would not clear this seat either — surface it instead of a quiet mismatch.
         Ok((envelope, None)) => {
             tracing::error!(
                 entrance,
                 command = name,
                 %request_id,
-                "1단계 표가 자기 이름이라 해 놓고 빈손을 냈다 — 라우팅 권위(`claim`)와 실행이 갈렸다"
+                "the stage-1 table claimed the name as its own and came up empty-handed — the routing authority (`claim`) and execution diverged"
             );
             CommandReply::err(
                 request_id,
@@ -1631,9 +1383,8 @@ fn fold_local(
     }
 }
 
-/// 본문이 답 없이 끝난 사건 — ★두 갈래(마감 전·마감 후)가 **같은 한 줄**을 쓴다★.
-///
-/// 필드 모양을 갈래마다 따로 지으면 한쪽만 고쳐지고 다른 쪽이 조용히 다른 이름으로 남는다.
+/// The event where the body ended with no answer — ★the two branches (before and after the deadline) **use the same one line**★.
+/// If the field shape were built separately per branch only one side would get fixed and the other would quietly remain under a different name.
 fn log_local_death(
     joined: &tokio::task::JoinError,
     request_id: RequestId,
@@ -1645,29 +1396,20 @@ fn log_local_death(
         command = name,
         panicked = joined.is_panic(),
         %request_id,
-        "데몬 자기 명령이 답 없이 끝났다 — 태스크가 패닉했거나 런타임이 내려갔다(조작의 일부가 적용됐을 수 있다)"
+        "the daemon's own command ended with no answer — the task panicked or the runtime went down (part of the operation may have been applied)"
     );
 }
 
-/// 마감 뒤 성공 payload 를 로그에 실을 때의 폭.
-///
-/// ★이름용 기본 폭(64)을 그대로 쓰면 **이 로그가 존재하는 이유가 잘려 나간다**★: 이 줄의 값은
-/// `{"agent_id":"<uuid>",…}` 이고 그 한 칸만 해도 49자다 — 앞에 칸이 하나 붙거나 id 표기가 길어지는 순간
-/// 조용히 사라진다(그리고 그때가 바로 이 로그가 필요한 때다). 그래서 폭을 **이 자리 것으로** 따로 든다.
-/// ★넓혔다고 아무거나 실어도 된다는 뜻이 아니다★ — 이 경로가 성공 payload 를 통째로 적는다는 사실은
-/// 포트 계약에 적혀 있고([`LocalCommands::run`]), 비밀을 담지 않는 것은 그쪽 구현의 의무다.
+/// The width when putting a post-deadline success payload in the log.
+/// ★Using the default name width (64) as is **cuts off the reason this log exists**★: this line's value is `{"agent_id":"<uuid>",…}` and that one field alone is 49 characters — the moment a field is added before it or the id notation gets longer it quietly disappears
+/// (and that is exactly when this log is needed). So the width is taken **separately for this place**. ★Widening does not mean anything may be carried★ — that this path writes the success payload whole is stated in the port contract ([`LocalCommands::run`]) and keeping secrets out is that implementation's duty.
 const MAX_LATE_OUTCOME_CHARS: usize = 512;
 
-/// 마감 **뒤에** 끝난 본문의 결말을 기록한다 — 답장은 이미 `TIMEOUT` 으로 나갔다.
-///
-/// ★버리되 **말없이 버리지는 않는다**★: 호출자에게는 「적용됐는지 확인하라」고 해 놓고 그 답을 이쪽이
-/// 손에 쥔 채 버리는 셈이라, 서버 기록이 없으면 무엇이 실제로 일어났는지 아무도 모른다. `agent.new` 라면
-/// **호출자가 모르는 에이전트가 하나 등록된 채 남는다**(지우는 동사가 없다 — ADR-0122). 그 재조정에
-/// 필요한 것이 payload 의 `agent_id` 라서 문구에 그대로 싣는다.
-/// ★레벨이 `warn` 인 이유★: 데이터가 깨진 것은 아니지만 **호출자가 아는 상태와 실제 상태가 갈렸다**.
-/// 죽음(`JoinError`)만 `error` 로 갈라 형제 갈래와 같은 줄을 쓴다([`log_local_death`]).
-/// ★실는 payload 는 사본에서 `upstream` 키를 걷은 것이다([`strip_upstream`])★ — 상류 원문은 UI 와 LLM 행에만
-///   간다(TRD S21 usage-limit-slot §1-4 「버스」 개정 4).
+/// Records the outcome of a body that ended **after** the deadline — the reply already went out as `TIMEOUT`.
+/// ★Discard but **not silently**★: it tells the caller to "check whether it was applied" while this side holds that answer and throws it away, so without a server record nobody knows what really happened. With `agent.new` **one agent the caller does not know of stays registered**
+/// (there is no delete verb — ADR-0122). What that reconciliation needs is the `agent_id` in the payload so it is carried in the wording as is.
+/// ★Why the level is `warn`★: the data is not broken but **the state the caller knows and the real state diverged**. Only death (`JoinError`) is split to `error` and uses the same line as the sibling branch ([`log_local_death`]).
+/// ★The payload carried is a copy with the `upstream` key stripped ([`strip_upstream`])★ — the upstream raw text goes only to the UI and LLM rows (TRD S21 usage-limit-slot §1-4 amendment 4).
 fn log_late_local(
     joined: LocalJoin,
     retained: bool,
@@ -1676,9 +1418,8 @@ fn log_late_local(
     entrance: &'static str,
 ) {
     match joined {
-        // ★payload 는 **붙든 것**에만 싣는다★: 실을 이유가 「호출자가 모르는 채 남은 것을 되찾는 실마리」인데,
-        //   붙들지 않는 결말(읽기 · 반려)에는 되찾을 것이 없다. 그리고 읽기의 payload 는 명부 전량이라
-        //   에이전트들의 **cwd 절대 경로**가 통째로 로그에 앉는다 — 그건 이 줄이 사려던 값이 아니다.
+        // ★The payload is carried only for **what was held**★: the reason to carry it is "a clue to recover what remained unknown to the caller" and an outcome not held (a read · a rejection) has nothing to recover. And a read's payload is the whole roster
+        //   so the agents' **absolute cwd paths** would sit whole in the log — not the value this line was meant to buy.
         Ok((_, Some(Ok(mut payload)))) if retained => {
             strip_upstream(&mut payload);
             tracing::warn!(
@@ -1686,40 +1427,38 @@ fn log_late_local(
                 command = name,
                 %request_id,
                 outcome = %sanitize_within(&payload.to_string(), MAX_LATE_OUTCOME_CHARS),
-                "마감 뒤에 끝난 데몬 자기 명령이 **성공했다** — 호출자는 TIMEOUT 을 받았으므로 이 결과를 모른다"
+                "a daemon-own command that finished after the deadline **succeeded** — the caller received TIMEOUT so it does not know this result"
             )
         }
-        // 되찾을 것이 없는 성공(읽기) — 사건은 남기되 내용은 안 싣는다.
+        // A success with nothing to recover (a read) — the event is left but the content is not carried.
         Ok((_, Some(Ok(_)))) => tracing::debug!(
             entrance,
             command = name,
             %request_id,
-            "마감 뒤에 끝난 데몬 자기 명령이 성공했다 — 붙들지 않는 결말이라 되찾을 것이 없다"
+            "a daemon-own command that finished after the deadline succeeded — an outcome not held so there is nothing to recover"
         ),
         Ok((_, Some(Err(failed)))) => tracing::warn!(
             entrance,
             command = name,
             %request_id,
             code = %failed.code(),
-            "마감 뒤에 끝난 데몬 자기 명령이 실패했다 — 호출자는 TIMEOUT 을 받았으므로 이 사유를 모른다: {}",
+            "a daemon-own command that finished after the deadline failed — the caller received TIMEOUT so it does not know this reason: {}",
             sanitize_for_log(failed.message())
         ),
-        // 이름은 우리 것인데 표가 빈손이었다(2·3단계로 갔어야 한다) — 부수효과가 없으므로 조용히 적는다.
+        // The name is ours but the table was empty-handed (it should have gone to stage 2·3) — there is no side effect so it is written quietly.
         Ok((_, None)) => tracing::debug!(
             entrance,
             command = name,
             %request_id,
-            "마감 뒤에 끝난 1단계가 빈손이었다 — 전달 단계로 넘길 기회는 이미 지났다"
+            "stage 1 that finished after the deadline was empty-handed — the chance to pass it to the delivery stage has already passed"
         ),
         Err(joined) => log_local_death(&joined, request_id, name, entrance),
     }
 }
 
-/// 로그에 싣기 전 payload 에서 **이름이 `upstream` 인 객체 키를 깊이와 무관하게 전부** 걷는다.
-///
-/// ★명령 이름을 보지 않는다★ — 이름(`usage.*`)으로 가르면 다른 명령이 같은 칸을 실을 때 뚫린다. 배열 안의
-///   객체까지 내려간다. ★키 이름이 계약이다★ — 상류 원문 칸(agent `UsageVendorRow.upstream`)의 이름을 바꾸면
-///   여기와 핀 시험이 함께 바뀌어야 한다.
+/// Strips **every object key named `upstream` regardless of depth** from the payload before it goes in the log.
+/// ★It does not look at the command name★ — splitting by name (`usage.*`) is breached when another command carries the same field. It descends into objects inside arrays. ★The key name is the contract★ — if the name of the upstream raw field
+///   (agent `UsageVendorRow.upstream`) changes, this and the pin test must change together.
 fn strip_upstream(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
@@ -1731,32 +1470,23 @@ fn strip_upstream(value: &mut serde_json::Value) {
     }
 }
 
-/// 왕복 하나를 통째로 돈다 — 배달하고, 답장을 원 연결에 실어 준다.
+/// Runs a whole round trip — delivers, and carries the reply to the origin connection.
+/// ★It must run **outside** the connection task★ (TRD §3-6): the frames of one connection are handled by that connection's read loop one at a time to the end, so waiting for this round trip inside that loop means **when the owner is that connection itself it cannot
+/// take its own answer out** (the path where the shell puts its own name on and calls it itself — self-deadlock). That one reason is why the caller spawns this future in `dispatch`.
+/// ★The reply goes out by **looking up the origin connection again**★ — because no outlet copy is held beyond the round trip (module header). If the origin connection dropped in between there is nowhere to send, and that is the normal end.
 ///
-/// ★연결 태스크 **밖**에서 돌려야 한다★(TRD §3-6): 한 연결의 프레임은 그 연결의 읽기 루프가 한 장씩
-/// 끝까지 기다려 처리하므로, 이 왕복을 그 루프 안에서 기다리면 **주인이 곧 그 연결일 때 자기 답을 자기가
-/// 못 꺼낸다**(셸이 자기 이름을 얹고 자기가 부르는 경로가 그것이다 — self-deadlock). 부르는 쪽이
-/// `dispatch` 에서 이 future 를 spawn 하는 이유가 그 하나다.
+/// ## ★Stage 1 is **outside** [`route`] — this function is that place★
 ///
-/// ★답장은 **원 연결을 다시 조회해** 내보낸다★ — 출구 사본을 왕복 너머로 들지 않기 때문이다(모듈 헤더).
-/// 그 사이 원 연결이 끊겼으면 낼 곳이 없고, 그것이 정상 종료다.
+/// The daemon's `agent.*` table now answers through this path ([`LocalCommands`] · `control::commands` are the real ones). The reasons **not** to plug that stage 1 in as the table handed to `route` are two, and both are things `route` cannot express:
+/// ① **blocking** — `route` waits the handler future in its own task, but this table's body is blocking that runs to the end on its first poll (profile lock + disk + 3-second polling) and blocks a runtime worker. Moving it to the pool
+///    must wrap `table.call` and that call is `route`'s ([`spawn_local`]).
+/// ② **entrance check** — `route` deliberately does not call `CommandTable::check_args` (without tolerance between hops additive evolution dies — that function's doc · TRD §4-③). The envelope arriving here, by contrast, is what a person · the LLM just typed
+///    so our own names must get a check (ADR-0157). So the check is applied **only to names in our table** (another's name has no declaration to compare against and passes as is) and that check is done by **the same function** as the control route —
+///    two entrances with one check is the point.
+/// So the table handed to `route` stays empty, and the two stages after it (roster → error) are hop-common as is.
 ///
-/// ## ★1단계는 [`route`] **밖**에 있다 — 그 자리가 이 함수다★
-///
-/// 데몬의 `agent.*` 표는 이제 이 경로로 답한다([`LocalCommands`] · `control::commands` 가 실물). 그 1단계를
-/// `route` 에 넘겨 주는 표로 꽂지 **않는** 이유는 둘이고, 둘 다 `route` 가 표현할 수 없는 것이다:
-/// ① **blocking** — `route` 는 핸들러 future 를 자기 태스크에서 기다리는데 이 표의 본문은 첫 poll 에서
-///    끝까지 도는 blocking 이라(프로필 락 + 디스크 + 3초 폴링) 런타임 워커를 막는다. 풀로 옮기는 일은
-///    `table.call` 을 감싸야 하는데 그 호출은 `route` 것이다([`spawn_local`]).
-/// ② **입구 검문** — `route` 는 `CommandTable::check_args` 를 일부러 안 부른다(홉 간 관용이 없으면
-///    additive 진화가 죽는다 — 그 함수 doc · TRD §4-③). 반면 여기 오는 봉투는 사람·LLM 이 방금 친
-///    것이므로 우리 이름에는 검문이 붙어야 한다(ADR-0157). 그래서 검문은 **우리 표의 이름에만** 걸리고
-///    (남의 이름은 대조할 선언이 없어 그대로 통과한다) 그 검문은 제어 라우트와 **같은 함수**가 한다 —
-///    입구가 둘인데 검문이 하나인 것이 요점이다.
-/// 그래서 `route` 에 넘기는 표는 계속 비어 있고, 그 뒤 두 단계(명부 → 오류)는 홉 공통 그대로다.
-///
-/// ★남의 이름은 `route` 에 넘기기 전에 에이전트 참조 칸을 id 로 바꾼다★([`resolve_agent_args`] · ADR-0308)
-/// — 두 입구가 다 이 함수를 지나므로 변환 자리도 여기 하나다. 풀리지 않으면 봉투를 넘기지 않고 그 오류로 답한다.
+/// ★For another's name, the agent-reference fields are turned into ids before handing to `route`★ ([`resolve_agent_args`] · ADR-0308)
+/// — both entrances pass this function so the conversion place is one here. If unresolved the envelope is not handed over and it answers with that error.
 pub async fn deliver(
     roster: CommandRoster,
     deliveries: CommandDeliveries,
@@ -1768,12 +1498,9 @@ pub async fn deliver(
     let request_id = envelope.request_id;
     let name = sanitize_for_log(&envelope.name);
 
-    // ★무엇을 하기 전에 자리부터 연다★(모듈 헤더 규칙 1) — 3단계 중 **어느 단계가 답을 만들든**(1단계는
-    //   아래 `spawn_local` 이다) 그 답이 자리 하나를 깔고 앉게 하려면 여기여야 한다. 예전엔 2단계(전달)만
-    //   자리를 열어서, 1단계(내 표)와 3단계(주인 부재)의 답장이 표를 아예 안 거치고 나갔다 — 진행 중인
-    //   왕복의 키로 두 번째 프레임을 내는 결정적 경로였다(경합 없이도 난다).
-    // ★자리를 열기 **전에** 이 이름이 내 것인지 정한다★: 그 사실이 자리와 함께 태어나야 남이 보낸 결말이
-    //   끼어들 틈이 없다([`Pending::local`]). 이 물음은 순수하다 — 실행도 잠금도 없다.
+    // ★Open the seat before anything★ (module header rule 1) — so that **whichever of the 3 stages makes the answer** (stage 1 is `spawn_local` below) that answer sits on one seat it must be here. It used to be that only stage 2 (delivery) opened a seat,
+    //   so the replies of stage 1 (own table) and stage 3 (owner absent) went out without going through the table at all — a deterministic path emitting a second frame under the key of a round trip in progress (it happens even without a race).
+    // ★Decide whether this name is mine **before opening the seat**★: that fact must be born with the seat so there is no gap for an outcome another sent to slip in ([`Pending::local`]). This question is pure — no execution, no lock.
     let claim = locals.claim(&envelope.name);
     // The seat is sized when it opens, so a relayed name's class is read before `open` — the roster lock is taken and
     //   released inside `class_of`, then `open` takes the seat table's: never nested. Accepted: a re-registration
@@ -1792,17 +1519,17 @@ pub async fn deliver(
         class,
     ) {
         Seat::Opened { rx, token } => (rx, token),
-        // 답장은 먼저 열린 그 왕복이 낸다 — 여기서 내면 같은 키에 둘이 된다(근거 = [`Seat::Coalesced`]).
+        // The reply is given by the round trip opened first — giving it here would make two under the same key (basis = [`Seat::Coalesced`]).
         Seat::Coalesced => {
             tracing::debug!(
                 conn = origin,
                 %request_id,
                 %name,
-                "같은 연결의 같은 요청 — 진행 중인 왕복에 합쳤다(답장은 그쪽이 낸다)"
+                "same request from the same connection — coalesced into the round trip in progress (that one gives the reply)"
             );
             return;
         }
-        // 아래 셋은 자리를 못 얻었지만 **답은 낸다** — 그 판정이 이 질의의 유일한 답이다(근거 = [`Seat`]).
+        // The three below failed to get a seat but **still answer** — that decision is this query's only answer (basis = [`Seat`]).
         Seat::Conflict => {
             send_reply(
                 &roster,
@@ -1821,18 +1548,12 @@ pub async fn deliver(
             return;
         }
         Seat::Taken { holder } => {
-            // ★임자가 아직 붙어 있나로 갈린다 — 갈리는 것은 **코드가 말하는 사실**뿐이다★
-            //
-            //   지시는 두 갈래 다 `Never` 로 같다([`no_retry`]) — 그래서 여기서 고르는 것은 「호출자가
-            //   무엇을 할까」가 아니라 「무슨 일이 벌어졌다고 말할까」다(ADR-0159 의 확실성 축).
-            //   · 붙어 있다 = 살아 있는 남의 왕복과 키가 겹쳤다. 우리는 **아무것도 실행하지 않았고** 그
-            //     사실이 확실하다 → `REQUEST_ID_CONFLICT`. 원인도 정확히 그 한 줄이다.
-            //   · 없다 = 그 자리 임자는 이미 떠났다. 십중팔구 **같은 클라이언트가 끊겼다 다시 붙어** 그
-            //     번호로 다시 묻는 중인데(클라이언트에는 재접속을 건너 사는 신분이 없어 연결 id 로는
-            //     남남으로 보인다), 그 앞선 왕복의 봉투는 **이미 주인에게 갔을 수 있다**. 적용 여부가
-            //     불명이므로 `OUTCOME_UNKNOWN` 이 사실이다.
-            //   ★둘을 `REQUEST_ID_CONFLICT` 로 뭉치지 말 것★ — 그러면 적용됐을지도 모르는 조작을
-            //   「아무 일도 없었다」로 적어 보내는 것이고, 그건 진단이 아니라 오보다.
+            // ★It splits by whether the owner is still attached — what splits is **only the fact the code states**★. The instruction is `Never` for both branches ([`no_retry`]) so what is chosen here is not "what should the caller do" but
+            //   "what to say happened" (the certainty axis of ADR-0159).
+            //   · attached = the key overlapped with a live round trip of another. We **ran nothing** and that is certain → `REQUEST_ID_CONFLICT`. The cause is exactly that one line.
+            //   · absent = that seat's owner has already left. Most likely **the same client dropped and reattached** and is asking again with that number (the client has no identity that lives across reconnects
+            //     so by connection id it looks like a stranger), and the envelope of that earlier round trip **may already have gone to the owner**. Whether it was applied is unknown so `OUTCOME_UNKNOWN` is the fact.
+            //   ★Do not lump the two into `REQUEST_ID_CONFLICT`★ — that would write an operation that may have been applied as "nothing happened", and that is not a diagnosis but a false report.
             let reply = if roster.sink_for_conn(holder).is_some() {
                 CommandReply::err(
                     request_id,
@@ -1857,10 +1578,8 @@ pub async fn deliver(
             send_reply(&roster, origin, &name, reply);
             return;
         }
-        // ★같은 번호로 다시 물었지만 **그 일이 아직 돌고 있다**★ — 다시 돌리지 않는다(같은 Write 동사가
-        //   두 번 적용된다). 확실성은 「불명」이다: 앞선 시도는 이미 `TIMEOUT` 으로 답했지만 그 본문은
-        //   지금도 돌고 있어 적용될 수도, 실패할 수도 있다. 그러니 코드는 사실 그대로 `OUTCOME_UNKNOWN`
-        //   이고, 호출자가 할 일은 **새 번호로 다시 묻는 것**이 아니라 **결과를 조회해 확인하는 것**이다.
+        // ★Asked again with the same number but **that work is still running**★ — it is not run again (the same Write verb would be applied twice). The certainty is "unknown": the earlier attempt already answered `TIMEOUT` but its body is still running now
+        //   and may be applied or may fail. So the code is `OUTCOME_UNKNOWN` as the fact, and what the caller should do is not **ask again with a new number** but **look up the result to confirm**.
         Seat::LocalStillRunning => {
             send_reply(
                 &roster,
@@ -1878,9 +1597,8 @@ pub async fn deliver(
             );
             return;
         }
-        // ★이미 돌린 번호다 — 두 번째 적용을 만들지 않는다★. 확실성은 **적용됐다**(그 본문은 끝까지
-        //   돌았다). 결과 자체는 안 들고 있으므로(그건 완료분 재생 = 진짜 dedup 저장소의 몫이다) 사실만
-        //   확인해 주는 `ALREADY_APPLIED` 가 정확히 이 자리의 어휘다.
+        // ★A number already run — a second application is not made★. The certainty is **applied** (that body ran to the end). The result itself is not held (that is the job of completed-work replay = a real dedup store) so `ALREADY_APPLIED`,
+        //   which confirms only the fact, is exactly the vocabulary of this place.
         Seat::LocalAlreadyRan => {
             send_reply(
                 &roster,
@@ -1915,15 +1633,12 @@ pub async fn deliver(
         }
     };
 
-    // ── 1단계 — 내 표(위 doc 의 「1단계는 route 밖에 있다」) ──────────────────────────
+    // ── stage 1 — my own table ("stage 1 is outside route" in the doc above) ──────────────────────────
     if let Some((effect, _)) = claim {
-        // ★떠난 호출자를 위해 **일을 시작하지 않는다**★ — 2단계가 봉투를 넘기기 직전에 하는 검사와 같은
-        //   것이고(`OwnerLink::send`), 여기 것은 **일찍** 보는 쪽이다: 통과 못 할 일을 풀에 넣지 않고
-        //   상한 한 칸도 안 쓴다. 실제로 부수효과 직전에 보는 **늦은** 검사는 본문 안에 있다
-        //   ([`spawn_local`]) — 그 클로저가 풀에서 줄을 설 수 있어 여기 표본은 그새 낡기 때문이다.
-        //   둘 중 하나만 두면: 이른 것만 두면 큐 대기 동안의 이탈을 놓치고, 늦은 것만 두면 이미 떠난
-        //   호출자를 위해 자리·풀 작업·상한 한 칸을 쓴다.
-        // ★여기서도 출구 사본을 받지 않는다★ — 사유는 `spawn_local` 안의 같은 검사.
+        // ★Do not **start work** for a caller who left★ — the same as the check stage 2 does just before handing over the envelope (`OwnerLink::send`), and this one is the **early** side: it does not put work that cannot pass into the pool and uses not one cap permit.
+        //   The **late** check actually just before the side effect is inside the body ([`spawn_local`]) — that closure can queue in the pool so the sample here goes stale. With only one of the two: with only the early one an exit during queue wait is missed, and with only the late one
+        //   a seat · pool job · one cap permit is spent for a caller who has already left.
+        // ★Here too no outlet copy is taken★ — the reason is the same check inside `spawn_local`.
         if !roster.is_attached(origin) {
             send_reply(
                 &roster,
@@ -1937,9 +1652,8 @@ pub async fn deliver(
             deliveries.release(request_id, token);
             return;
         }
-        // 동시 실행 상한 — 넘치면 **아무것도 돌리지 않고** 거절한다(그리고 그 사건을 서버에 남긴다).
-        // ★자리는 놓는다(보유가 아니다)★: 아무것도 안 돌았으므로 그 번호를 붙들면 정상적인 재시도가
-        //   `ALREADY_APPLIED` 로 막힌다 — 판정 규칙은 [`retains_the_id`].
+        // The concurrent-execution cap — on overflow it refuses **running nothing** (and leaves that event on the server).
+        // ★The seat is released (not held)★: nothing ran so holding that number would block a normal retry with `ALREADY_APPLIED` — the decision rule is [`retains_the_id`].
         let guard = match deliveries.reserve_local_slot(&name, entrance) {
             Ok(guard) => guard,
             Err(refused) => {
@@ -1961,28 +1675,22 @@ pub async fn deliver(
             entrance,
         );
 
-        // ★본문과 **자리**를 함께 기다린다★ — 자리를 안 보면 마감이 지나도 아무 프레임이 안 나가
-        //   호출자가 무한정 매달리고, 수거기 로그만 「TIMEOUT 으로 답했다」고 적는다(하지 않은 일을
-        //   적는 것이다). 본문만 기다리는 형태로 되돌리지 말 것.
-        // ★`biased` 인 이유★: 둘 다 준비됐으면 **진짜 결말**을 고른다. 무작위로 고르면 이미 끝난 일을
-        //   두고 `TIMEOUT` 을 내보내는 창이 생긴다. 그 찰나에 수거기 로그는 여전히 「TIMEOUT 으로
-        //   답했다」고 적지만, 로그가 한 틱 부정확한 편이 답을 잃는 것보다 낫다.
+        // ★Wait for the body and **the seat** together★ — without looking at the seat no frame goes out even past the deadline and the caller hangs indefinitely while only the sweeper log writes "answered with TIMEOUT" (writing what was not done).
+        //   Do not revert to a shape that waits only for the body.
+        // ★Why `biased`★: if both are ready pick the **real outcome**. Picking at random opens a window to send `TIMEOUT` for work that has already ended. In that instant the sweeper log still writes "answered with TIMEOUT"
+        //   but a log one tick inaccurate is better than losing the answer.
         let mut rx = rx;
         let (reply, retain) = tokio::select! {
             biased;
             joined = &mut job => {
-                // ★붙들지 판정은 **표가 낸 결말**로 한다 — 우리가 지어낸 답장이 아니다★: 빈손을 `INTERNAL`
-                //   답장으로 접은 뒤 그 답장을 보면 「적용됐다」로 읽혀 돌지도 않은 번호를 붙든다.
+                // ★Whether to hold is decided by **the outcome the table gave** — not a reply we made up★: folding empty-handed into an `INTERNAL` reply and then looking at that reply would read as "applied" and hold a number that never ran.
                 let retain = retains_the_id(effect, &joined);
                 (fold_local(joined, request_id, &name, entrance), retain)
             }
-            // ★자리가 먼저 정산되는 길은 **둘뿐**이다 — 마감([`CommandDeliveries::expire`])과 데몬
-            //   종료([`CommandDeliveries::drain`])★. 셋째로 보일 만한 것(주인이 보낸 결말)은 이 자리에
-            //   닿지 못한다: 이 왕복은 아무에게도 위임되지 않았고 표가 그 사실로 거절한다
-            //   ([`OutcomeLanding::NotDelegated`]). 그 거절이 없으면 남이 지어낸 payload 가 여기서
-            //   **이 명령의 답으로** 나가고 진짜 결과는 아래에서 버려진다.
+            // ★There are **only two** ways a seat settles first — the deadline ([`CommandDeliveries::expire`]) and daemon shutdown ([`CommandDeliveries::drain`])★. What might look like a third (an outcome sent by the owner) cannot reach this seat:
+            //   this round trip was delegated to no one and the table refuses by that fact ([`OutcomeLanding::NotDelegated`]). Without that refusal a payload another made up would go out here **as this command's answer** and the real result would be discarded below.
             settled = &mut rx => {
-                // 그 답장이 **이 왕복의 유일한 프레임**이다.
+                // That reply is **this round trip's only frame**.
                 send_reply(&roster, origin, &name, settled.unwrap_or_else(|_| CommandReply::err(
                     request_id,
                     no_retry(
@@ -1990,13 +1698,10 @@ pub async fn deliver(
                         "the caller's connection went away while this daemon was running the command",
                     ),
                 )));
-                // ★프레임을 낸 뒤에도 **본문이 끝날 때까지 자리를 붙든다**★ — 여기서 놓으면 같은 번호의
-                //   재질의가 빈 자리를 보고 **같은 Write 동사를 한 번 더** 돌린다(에이전트가 둘 생긴다).
-                //   본문은 취소할 수 없으므로([`spawn_local`]) 「기다렸다 놓는다」가 유일한 수단이다.
-                //   그 사이의 재질의는 [`Seat::LocalStillRunning`] 이 막는다.
-                // ★결말은 **버리되 기록한다**★: 답장은 이미 나갔으므로 이 결과를 실어 보낼 자리가 없다.
-                //   말없이 버리면 호출자는 TIMEOUT 만 알고, 실제로 만들어진 것(예: 에이전트 하나)을 아무도
-                //   모른다([`log_late_local`]).
+                // ★After the frame goes out it **still holds the seat until the body ends**★ — releasing here would let a re-query of the same number see an empty seat and run **the same Write verb once more** (two agents appear).
+                //   The body cannot be cancelled ([`spawn_local`]) so "wait then release" is the only means. A re-query in between is blocked by [`Seat::LocalStillRunning`].
+                // ★The outcome is **discarded but recorded**★: the reply already went out so there is no place to carry this result. Discarded silently, the caller knows only TIMEOUT and nobody knows what was actually made (e.g. one agent)
+                //   ([`log_late_local`]).
                 let joined = (&mut job).await;
                 let retain = retains_the_id(effect, &joined);
                 log_late_local(joined, retain, request_id, &name, entrance);
@@ -2005,8 +1710,7 @@ pub async fn deliver(
             }
         };
         send_reply(&roster, origin, &name, reply);
-        // ★자리 처분은 **프레임이 나간 뒤**다★(자리 규칙 2): 그 전에 놓으면, 방금 마감이 스쳐 `Void` 가 된
-        //   자리를 재질의가 갈아엎어 같은 동사를 한 번 더 돌린다.
+        // ★The seat is disposed **after the frame goes out**★ (seat rule 2): releasing before that lets a re-query overturn a seat that the deadline just brushed into `Void` and run the same verb once more.
         guard.settle(request_id, token, retain);
         return;
     }
@@ -2034,12 +1738,11 @@ pub async fn deliver(
         origin,
         waiter: Mutex::new(Some(rx)),
     };
-    // 남은 두 단계는 홉마다 같다 — 특별 케이스를 두지 않는다(ADR-0155 결정 3).
+    // The remaining two stages are the same per hop — no special case is made (ADR-0155 decision 3).
     let reply = route(&CommandTable::new(&[]), &roster, &link, envelope).await;
 
     send_reply(&roster, origin, &name, reply);
-    // ★프레임이 나간 **뒤에** 놓는다★(모듈 헤더 규칙 2) — 그 전에 놓으면 재질의가 봉투를 한 번 더 보낸다.
-    //   발권으로 집으므로, 이 자리가 이미 다른 왕복으로 갈렸다면 이 호출은 아무것도 안 한다.
+    // ★Released **after the frame goes out**★ (module header rule 2) — releasing before that makes a re-query send the envelope once more. It picks by ticket so if this seat has already gone to another round trip this call does nothing.
     deliveries.release(request_id, token);
 }
 
@@ -2053,20 +1756,15 @@ fn agent_ref_refusal(arg: &str, mut refused: CommandError) -> CommandError {
     refused
 }
 
-/// 중계 전 에이전트 참조 변환(ADR-0308) — 주인이 등록 때 표시한 칸의 **문자열 값**을 이 데몬의 해석기
-/// ([`resolve_in`] — ADR-0132)로 에이전트 id 로 바꿔 봉투에 다시 적는다.
-///
-/// 데몬이 아는 것은 「이 칸은 내 에이전트를 가리킨다」뿐이다 — 그 칸이 주인 쪽에서 무슨 뜻인지는 모르고
-/// `help` 도 열지 않는다. 칸은 표시 순서대로 풀고, 부재 · `null` · 문자열 아닌 값은 손대지 않는다(주인이
-/// 그 값으로 반려한다).
-/// `Err` = **이 왕복의 답**이고 봉투는 나가지 않는다 — 호출자가 이미 떠남 · 풀기 상한([`MAX_RESOLVING_IN_FLIGHT`]) ·
-/// 해석 실패(코드는 해석기 그대로 · 문구 앞에 `<칸>: `) · 해석 도중 자리가 먼저 정산됨(마감 · 종료 · 호출자 이탈 — 그
-/// 판정의 코드가 답이고 문구는 「주인에게 안 갔다」로 고친다) · 해석 작업의 죽음.
-/// ★자리가 먼저 정산됐으면 중계하지 않는다★: 그대로 넘기면 주인은 명령을 실행하는데 호출자는 이미 낸
-/// `TIMEOUT` 을 받는다.
-/// ★남는 창 — 표시는 여기서 읽고 주인은 `route` 가 다시 찾는다★: 그 사이 같은 이름을 다시 등록한 주인의
-/// 표시가 달라졌으면 그 칸은 이번 왕복에서 덜 바뀌거나 더 바뀐다. 이름이 남으면 주인이 반려하고, id 는
-/// 해석기가 이름보다 먼저 보므로 더 바뀐 칸은 같은 에이전트다.
+/// The agent-reference conversion before the relay (ADR-0308) — turns the **string values** of the fields the owner marked at registration into agent ids with this daemon's resolver
+/// ([`resolve_in`] — ADR-0132) and writes them back into the envelope.
+/// All the daemon knows is "this field points at my agent" — what that field means on the owner side it does not know and it does not open `help` either. Fields are resolved in the marked order, and absent · `null` · non-string values are left untouched (the owner
+/// refuses with that value).
+/// `Err` = **this round trip's answer** and the envelope does not go out — the caller already left · the resolve cap ([`MAX_RESOLVING_IN_FLIGHT`]) · resolution failure (the code is the resolver's as is · `<field>: ` before the wording) ·
+/// the seat settled first during resolution (deadline · shutdown · caller left — the code of that decision is the answer and the wording is corrected to "did not go to the owner") · death of the resolution job.
+/// ★If the seat settled first it does not relay★: handed over as is the owner would run the command while the caller receives the `TIMEOUT` already given.
+/// ★The remaining window — the marking is read here and `route` looks the owner up again★: if in between an owner that re-registered the same name has different markings, that field is changed less or more this round trip. If the name remains the owner
+/// refuses, and since the resolver looks at an id before a name a more-changed field is the same agent.
 // ADR-0308
 async fn resolve_agent_args(
     roster: &CommandRoster,
@@ -2090,8 +1788,7 @@ async fn resolve_agent_args(
     if refs.is_empty() {
         return Ok(());
     }
-    // 떠난 호출자를 위해 읽기를 시작하지 않는다 — 1단계의 이른 검사와 같은 것이다(`deliver` 의 그 갈래 · 출구 사본을
-    //   받지 않는 술어인 사유도 같다).
+    // Do not start a read for a caller who left — the same as the early check of stage 1 (that branch of `deliver`; the reason it is a predicate that takes no outlet copy is the same).
     if !roster.is_attached(origin) {
         return Err(CommandReply::err(
             request_id,
@@ -2105,7 +1802,7 @@ async fn resolve_agent_args(
     let locals = Arc::clone(locals);
     let started = Instant::now();
     let mut job = tokio::task::spawn_blocking(move || {
-        // 표식은 읽기가 끝날 때 떨어진다 — 기다리는 쪽이 먼저 떠나도 막힌 읽기가 상한 안에 남는다([`ResolveGuard`]).
+        // The marker drops when the read ends — even if the waiting side leaves first a blocked read stays within the cap ([`ResolveGuard`]).
         let _slot = slot;
         let agents = locals.agent_roster();
         refs.into_iter()
@@ -2116,7 +1813,7 @@ async fn resolve_agent_args(
             .collect::<Result<Vec<_>, CommandError>>()
     });
 
-    // ★`biased` 로 자리를 먼저 본다★ — 둘 다 준비됐을 때 해석 결과를 고르면 이미 답한 왕복을 중계한다.
+    // ★Look at the seat first with `biased`★ — if both are ready and the resolution result were picked, a round trip that already answered would be relayed.
     let joined = tokio::select! {
         biased;
         settled = &mut *rx => {
@@ -2133,7 +1830,7 @@ async fn resolve_agent_args(
                 %request_id,
                 elapsed = ?started.elapsed(),
                 code = %reply.outcome.as_ref().err().map_or("ok", |e| e.code().as_str()),
-                "에이전트 참조 칸을 푸는 동안 그 왕복의 자리가 먼저 정산됐다 — 중계하지 않았다"
+                "while resolving the agent-reference fields the round trip's seat settled first — not relayed"
             );
             return Err(reply);
         }
@@ -2153,7 +1850,7 @@ async fn resolve_agent_args(
                 %command,
                 %request_id,
                 panicked = died.is_panic(),
-                "에이전트 참조 칸을 풀던 작업이 답 없이 끝났다 — 봉투는 중계하지 않았다"
+                "the job resolving the agent-reference fields ended with no answer — the envelope was not relayed"
             );
             Err(CommandReply::err(
                 request_id,
@@ -2166,10 +1863,9 @@ async fn resolve_agent_args(
     }
 }
 
-/// 에이전트 참조 칸을 푸는 동안 자리를 정산한 답 — 마감([`CommandDeliveries::expire`]) · 종료
-/// ([`CommandDeliveries::drain`])의 문구는 봉투를 보낸 왕복의 사정(「주인이 답하지 않았다」 · 「도는 중에 내려갔다」)이라
-/// 여기서는 거짓이다. 봉투는 주인에게 간 적이 없으므로 확실성은 「아무것도 안 돌았다」(ADR-0159 의 확실성 축)이고, 문구를
-/// 그 사실로 고친다. ★코드는 정산한 쪽이 정한 그대로 둔다★. 그 밖의 답은 손대지 않는다.
+/// The answer that settled the seat while resolving agent-reference fields — the wording of deadline ([`CommandDeliveries::expire`]) · shutdown ([`CommandDeliveries::drain`]) describes the circumstances of a round trip that sent the envelope
+/// ("the owner did not answer" · "it went down while running") so here it is false. The envelope never went to the owner so the certainty is "nothing ran" (the certainty axis of ADR-0159), and the wording
+/// is corrected to that fact. ★The code stays as the settling side decided★. Other answers are left alone.
 // ADR-0308
 fn never_sent(reply: CommandReply) -> CommandReply {
     let Err(settled) = &reply.outcome else {
@@ -2184,27 +1880,18 @@ fn never_sent(reply: CommandReply) -> CommandReply {
     CommandReply::err(reply.request_id, no_retry(code, message))
 }
 
-/// 답장 한 장을 **원 연결을 다시 조회해** 내보낸다 — 출구 사본을 왕복 너머로 들지 않기 때문이다(모듈 헤더).
-///
-/// ★부르는 자리마다 「이 질의의 유일한 답」이다★ — [`deliver`] 의 갈래 어디서 불려도 그 갈래는 곧바로
-/// 끝난다. 두 번 부르는 갈래를 만들지 말 것.
-///
-/// ★그리고 이 자리가 재시도 지시를 내리는 **유일한 출구**다★ — 근거는 아래 그 줄.
+/// Sends out one reply by **looking up the origin connection again** — because no outlet copy is held beyond a round trip (module header).
+/// ★At every call place this is "this query's only answer"★ — whichever branch of [`deliver`] calls it, that branch ends right away. Do not make a branch that calls it twice.
+/// ★And this place is **the only outlet that issues the retry instruction**★ — the basis is the line below.
 fn send_reply(roster: &CommandRoster, origin: ConnId, name: &str, mut reply: CommandReply) {
     let request_id = reply.request_id;
 
-    // ★출처를 안 가리고 **여기서 한 번** 내린다★: 이 데몬이 호출자에게 내보내는 실패 답은 자기가 지은
-    //   것([`no_retry`])이든 `route` 의 패닉 그물이 지은 것이든 **주인이 보내 온 것을 중계하는 것**이든
-    //   전부 `Never` 로 나간다.
-    //   ★중계 홉이 지시를 내리는 것은 계약이 이미 상정한 동작이다★ — 그래서 코드 칸과 `retry` 칸이 따로
-    //   있다: 확실성 서술(무슨 일이 있었나)은 원래 답한 쪽 것이고, 지시(그래서 뭘 해라)는 그 지시를 감당할
-    //   장치를 가진 홉의 몫이다. 완료분을 재생해 줄 dedup 이 서기 전까지 그 책임은 이 홉에 있다 —
-    //   여기서 안 내리면 「같은 번호로 다시 물어라」가 **재실행**을 부른다(사유 전문·재개 조건 = [`no_retry`]).
-    //   ★코드 어휘는 손대지 않는다★ — 내리는 것은 지시뿐이고 확실성 서술은 원문 그대로 간다. 그래서
-    //   `set_retry` 가 아니라 `set_retry_for_relay` 다: 앞의 것은 **원문 사본을 통째로 버려** 주인이 실어
-    //   보낸 미지 코드와 계약 밖 필드까지 지운다(중계 홉이 남의 어휘를 지우는 것 = `received` 문서가
-    //   금하는 바로 그것). 뒤의 것은 사본의 `retry` 칸만 덮어 지시는 실제로 내려가고 어휘는 산다.
-    //   ★이 자리를 늘리지 말 것★: 두 군데서 내리면 다음 세션이 한쪽만 고치고 나머지가 조용히 샌다.
+    // ★Issued **once here** regardless of origin★: every failure answer this daemon sends the caller — one it built itself ([`no_retry`]), one built by `route`'s panic net, or **one relaying what the owner sent** — goes out as `Never`.
+    //   ★A relay hop issuing the instruction is behavior the contract already assumed★ — that is why the code field and the `retry` field are separate: the certainty statement (what happened) belongs to the side that originally answered, and the instruction
+    //   (so do this) belongs to the hop that has the device to bear that instruction. Until a dedup that replays completed work stands, that responsibility is on this hop — if not issued here "ask again with the same number" would cause **re-execution**
+    //   (full reason · condition to resume = [`no_retry`]). ★The code vocabulary is left alone★ — only the instruction is issued and the certainty statement goes as the original. That is why it is `set_retry_for_relay` and not `set_retry`:
+    //   the former **throws away the whole raw copy** and erases even the unknown code and out-of-contract fields the owner sent (a relay hop erasing another's vocabulary = exactly what the `received` doc forbids). The latter overwrites only the `retry` field of the copy
+    //   so the instruction really goes down and the vocabulary survives. ★Do not add places for this★: issued in two places a later session fixes only one and the other quietly leaks.
     if let Err(error) = &mut reply.outcome {
         error.set_retry_for_relay(RetryMode::Never);
     }
@@ -2213,42 +1900,40 @@ fn send_reply(roster: &CommandRoster, origin: ConnId, name: &str, mut reply: Com
             conn = origin,
             %request_id,
             %name,
-            "명령 답장을 낼 곳이 없다 — 물어본 연결이 이미 끊겼다"
+            "no place to send the command reply — the asking connection has already dropped"
         );
         return;
     };
-    // ADR-0272: 원문 칸으로 싼다 — 위에서 내린 재시도 지시가 이 바이트에 실린다.
+    // ADR-0272: wrapped into the raw field — the retry instruction issued above is carried in these bytes.
     let packet = match reply_to_wire(&reply) {
         Ok(reply) => event_json(&AgentEvent::CommandReply { reply }),
         Err(e) => {
-            tracing::error!(conn = origin, %request_id, %name, "명령 답장을 원문 칸으로 싸지 못했다: {e}");
+            tracing::error!(conn = origin, %request_id, %name, "could not wrap the command reply into the raw field: {e}");
             None
         }
     };
     let Some(text) = packet else {
-        // 두 실패 모두 이미 error! 를 남겼다(`event_json` · 위 갈래) — 여기서 한 줄 더 내면 같은 사건이 두 번 적힌다.
+        // Both failures already left an error! (`event_json` · the branch above) — one more line here would write the same incident twice.
         return;
     };
-    // ★이 실패를 조용히 삼키지 않는다★: 이것은 그 `request_id` 의 **유일한** 답장이고, 결말은 이미 자리를
-    //   거둬 갔으므로 되돌릴 길이 없다 — 삼키면 호출자는 마감도 안 걸린 채 영영 답을 못 받고, 서버 쪽엔
-    //   그 사건의 흔적이 아무 데도 안 남는다(로깅 컨벤션 「계측 의무」 · 안티패턴 「무로그 삼킴」).
-    //   레벨이 `warn!` 인 이유: 데이터 위험은 없지만(안전) **정상이 아니다** — 큐 포화·닫힘이면 네트워크
-    //   행이 그 연결을 곧 닫으므로 호출자는 어차피 끊긴다.
+    // ★Do not quietly swallow this failure★: this is the **only** reply of that `request_id`, and the outcome already took the seat away so there is no way to undo — swallowed, the caller would never get an answer with not even a deadline set, and the server side
+    //   would have no trace of the incident anywhere (logging convention "instrumentation duty" · antipattern "silent swallow"). The level is `warn!` because there is no data risk (safe) but it is **not normal** — if the queue is saturated or closed the network layer closes that
+    //   connection soon so the caller is cut off anyway.
     if sink.try_send(Frame::Text(text)).is_err() {
         tracing::warn!(
             conn = origin,
             %request_id,
             %name,
-            "명령 답장을 그 연결에 넣지 못했다 — 이 왕복의 유일한 답장이 사라진다(큐 포화·닫힘)"
+            "could not put the command reply into that connection — this round trip's only reply is lost (queue saturated · closed)"
         );
     }
 }
 
-// ── 두 번째 입구 — 연결 없는 호출자(ADR-0160) ────────────────────────────────────
+// ── the second entrance — a connectionless caller (ADR-0160) ────────────────────────────────────
 
-/// 동시에 중계를 물고 있을 수 있는 제어 라우트 호출의 수.
+/// The number of control-route calls that can hold a relay at the same time.
 ///
-/// ★이 상수가 묶는 것은 **동시성 하나뿐이다** — 상주 바이트가 아니다★
+/// ★What this constant binds is **concurrency only** — not resident bytes★
 ///
 /// The cap is needed because this door has no connection lifetime: a socket round trip hangs on **one connection**
 /// and is cleaned up when it drops ([`CommandDeliveries::drop_origin`]), but a caller of this door stands up anew per
@@ -2256,62 +1941,44 @@ fn send_reply(roster: &CommandRoster, origin: ConnId, name: &str, mut reply: Com
 /// ([`CommandDeliveries::seat_span`] — the default seat, or the relay seat for a launch-class name), and all three come
 /// back even when it leaves by cancellation (the count via [`RelaySlot`], the other two via [`CallerSeat`]) — so what
 /// this number counts really is "the round trips held at the same time now".
-/// ★넷째가 하나 더 있다 — 에이전트 참조 칸을 표시한 명령의 명부 읽기(blocking 풀)★: 그것은 취소로 돌아오지 않고
-/// 읽기가 끝날 때까지 남는다(`spawn_blocking`). 그래서 이 수로는 못 묶고 [`MAX_RESOLVING_IN_FLIGHT`] 가 따로 묶는다.
+/// ★There is a fourth — the roster read (blocking pool) of a command that marked agent-reference fields★: it does not come back on cancellation and remains until the read ends (`spawn_blocking`). So this number cannot bind it and [`MAX_RESOLVING_IN_FLIGHT`] binds it separately.
 ///
-/// ★바이트 상한을 여기서 주장하지 말 것★: 자리가 드는 것은 요청 바디가 아니라 **파싱된
-/// `serde_json::Value` 사본**이다([`Pending::args`]). 바디는 1 MiB 에서 닫혀 있지만(`mcp_server` 의
-/// `MAX_BODY_BYTES`) 그 바이트가 `Value` 로 부푸는 배율은 **모양이 정한다** — 작은 원소를 잔뜩 담은 배열
-/// 하나가 원소마다 `Value` 를 만든다. 그러니 「1 MiB × 이 수 = 64 MiB」는 참이 아니고, 바이트를 묶고 싶으면
-/// 자리가 드는 것의 크기를 재는 축이 따로 서야 한다(지금은 없다).
+/// ★Do not claim a byte cap here★: what a seat holds is not the request body but **a parsed `serde_json::Value` copy** ([`Pending::args`]). The body is closed at 1 MiB (`MAX_BODY_BYTES` of `mcp_server`) but the ratio at which those bytes swell into a `Value`
+/// is **decided by shape** — one array full of small elements makes a `Value` per element. So "1 MiB × this number = 64 MiB" is not true, and to bind bytes a separate axis measuring the size of what a seat holds must stand (there is none now).
 ///
-/// ★값의 셈★: 형제 상한 [`MAX_LOCAL_IN_FLIGHT`] 와 같은 자릿수로 잡아 「이 데몬이 한 번에 물고 있는 일」의
-/// 규모를 둘이 같이 말하게 한다. 처리량 조절기가 아니다 — 넘치면 큐를 늘리는 대신 **큰 소리로 거절한다**
-/// (명부가 자기 상주에 상한을 두는 것과 같은 논거 — `Roster::MAX_NAMES`).
-/// ★1단계 상한과 **다른 축**이다★: 저쪽은 blocking 풀에 나가 있는 **자기 본문**의 수라 중계에는 안 걸린다
-/// (그 상수 doc ②). 둘을 하나로 합치면 남의 이름을 나르는 트래픽이 자기 실행 상한을 갉아먹는다.
-/// ★축이 **전역**이다 — 모든 자격증명이 이 64 를 나눠 쓴다★: 그래서 에이전트 하나가 이 수를 다 물면 나머지
-/// 전부가 거절당한다(자기 몫이 보장되지 않는다). 자격증명별로 갈라야 하는지는 **미결**이고, 지금 전역인
-/// 것은 그 판단이 서서가 아니라 이 라운드에서 정하지 않았기 때문이다.
+/// ★The arithmetic of the value★: set to the same order as the sibling cap [`MAX_LOCAL_IN_FLIGHT`] so the two together speak of the scale of "work this daemon holds at once". It is not a throughput governor — on overflow it **refuses loudly** instead of growing the queue
+/// (the same argument as the roster capping its own residency — `Roster::MAX_NAMES`).
+/// ★A **different axis** from the stage 1 cap★: that one counts **its own bodies** out on the blocking pool so it does not apply to relays (that constant's doc ②). Merging the two would let traffic carrying another's name eat its own execution cap.
+/// ★The axis is **global — all credentials share this 64**★: so one agent holding all of it makes every other refused (its own share is not guaranteed). Whether to split per credential is **open**, and that it is global now is not because that judgment was made but
+/// because this round did not decide.
 const MAX_RELAYED_IN_FLIGHT: usize = 64;
 
-/// 명령 버스 한 부 — ★두 입구가 **이 값 하나**를 든다★(소켓 디스패치 · 제어 라우트).
+/// One copy of the command bus — ★both entrances hold **this one value**★ (socket dispatch · the control route).
 ///
-/// 넷을 한 값으로 묶는 이유는 **배선 사고를 타입으로 막는 것**이다: 자리 표·명부·1단계 표는 같은 조립에서
-/// 난 짝이어야 하는데, 따로 넘기면 한 입구에만 딴 부가 들어가는 조립이 표현 가능하다. 그때 증상은 에러도
-/// 로그도 없이 「발견은 되는데 호출만 영영 모르는 이름」이거나, 한 입구가 연 자리를 다른 입구가 못 보는 것
-/// (같은 번호의 재질의가 같은 조작을 두 번 적용한다)이다.
+/// The reason to bind the four into one value is **to block a wiring accident by type**: the seat table · roster · stage 1 table must be a pair from the same assembly, but if passed separately an assembly where only one entrance gets a different copy is representable. The symptom then is, with neither error
+/// nor log, "discovery works but only the call forever does not know the name", or one entrance cannot see a seat the other opened (a re-query of the same number applies the same operation twice).
 #[derive(Clone)]
 pub struct CommandBus {
     roster: CommandRoster,
     deliveries: CommandDeliveries,
     locals: Arc<dyn LocalCommands>,
-    /// 연결 없는 호출자에게 붙일 다음 번호 — [`CommandBus::open_caller`].
+    /// The next number to give a connectionless caller — [`CommandBus::open_caller`].
     callers: Arc<AtomicU64>,
-    /// 지금 중계를 물고 있는 제어 라우트 호출의 수 — 상한 판정의 재료([`MAX_RELAYED_IN_FLIGHT`]).
+    /// The number of control-route calls holding a relay now — material for the cap decision ([`MAX_RELAYED_IN_FLIGHT`]).
     relayed: Arc<AtomicUsize>,
 }
 
 impl CommandBus {
-    /// 버스와 **그 버스의 유일한 수거기**를 함께 낸다.
-    ///
-    /// ★수거기를 따로 띄우는 함수로 두지 않는 이유★: 그 형태는 한 버스에 수거기 둘을 **표현 가능**하게
-    /// 하는데, 그 상태의 증상이 고약하다 — 먼저 떨어지는 표식 하나가 나가는 길에
-    /// [`CommandDeliveries::drain`] 을 불러 **공유 표를 닫아 버리고**, 그 뒤의 모든 왕복이
-    /// [`Seat::Closed`] 로 반려된다(데몬은 멀쩡히 살아 있는데 명령만 전부 「종료 중」이 된다). 짝으로 내면
-    /// 그 상태를 만들 수 없다.
-    /// ★짝으로 내는 것도, 두 동사를 감추는 것도 **그것만으로는 못 닫는다**★: 자리 표는
-    /// [`CommandBus::deliveries`] 로 공유되고 `Clone` 이라, 이 생성자가 `pub` 인 채로 **남의 표를 받으면**
-    /// 밖에서 `CommandBus::new(.., bus.deliveries().clone(), ..)` 한 줄로 위 상태를 그대로 지을 수 있었다
-    /// (`spawn_sweeper`·`drain` 이 이 모듈 밖에서 안 보이는 것과 무관하게). 그 구멍을 실제로 닫는 것은
-    /// **표가 자기 수거기를 기억하는 것**이고([`Seats::swept`]), 둘째 요구는 이 생성자 안에서 패닉한다.
-    /// 그러니 이 자리에 「그런 상태는 표현 불가」라고 적을 때 근거로 댈 것은 가시성이 아니라 그 표식이다.
-    /// ★버스를 만든 **그 자리에서** 띄우는 것도 이 형태가 강제한다★: 수락 루프에 맡기면 창이 생긴다 —
-    /// 제어 서버는 수락 루프보다 먼저 서는데(daemon `run()` 의 fail-closed 순서) 그 사이에 온 제어 라우트
-    /// 호출은 마감을 볼 눈이 아무 데도 없어 답도 오류도 없이 매달린다. 소켓 입구만 있던 시절엔 두 시점이
-    /// 같아 이 창이 없었다.
-    /// ★async 문맥에서 불러야 한다★ — 수거기가 tokio 태스크다.
-    #[must_use = "조립부가 이 표식을 들고 있다가 종료 때 멈춰야 종료가 유계다"]
+    /// Returns the bus **together with that bus's only sweeper**.
+    /// ★Why this is not a function that launches the sweeper separately★: that shape makes **representable** two sweepers on one bus, and the symptom of that state is nasty — the marker that drops first calls [`CommandDeliveries::drain`] on its way out and **closes the shared table**,
+    /// and every later round trip is refused as [`Seat::Closed`] (the daemon is perfectly alive yet every command becomes "shutting down"). Returned as a pair that state cannot be made.
+    /// ★Returning as a pair and hiding the two verbs **are not enough alone**★: the seat table is shared via [`CommandBus::deliveries`] and is `Clone`, so with this constructor left `pub` and **accepting another's table** one line
+    /// `CommandBus::new(.., bus.deliveries().clone(), ..)` outside could build the above state as is (regardless of `spawn_sweeper`·`drain` being invisible outside this module). What really closes that hole is
+    /// **the table remembering its own sweeper** ([`Seats::swept`]) and the second request panics inside this constructor. So when writing "such a state is unrepresentable" here the basis to cite is that marker, not visibility.
+    /// ★This form also forces launching **at the very place the bus is made**★: leaving it to the accept loop creates a window — the control server stands before the accept loop (the fail-closed order of daemon `run()`) and a control route call arriving in between has no eyes to
+    /// watch the deadline and hangs with neither answer nor error. In the days with only the socket entrance the two moments were the same so this window did not exist.
+    /// ★It must be called in an async context★ — the sweeper is a tokio task.
+    #[must_use = "the assembly must hold this marker and stop it at shutdown for shutdown to be bounded"]
     pub fn new(
         roster: CommandRoster,
         deliveries: CommandDeliveries,
@@ -2324,9 +1991,8 @@ impl CommandBus {
             callers: Arc::new(AtomicU64::new(u64::MAX)),
             relayed: Arc::new(AtomicUsize::new(0)),
         };
-        // ★정지 신호가 데몬 종료 watch 가 아니라 **이 표식이 소유한 별개 신호**인 이유★: 종료 갈래가
-        //   셋인데(StopDaemon · Ctrl-C · 송신단 소멸) 그중 Ctrl-C 는 그 watch 를 건드리지 않아, 그것을
-        //   구독시키면 그 갈래에서 수거기가 영영 안 깨어나 종료 대기가 안 끝난다.
+        // ★Why the stop signal is **a separate signal this marker owns**, not the daemon shutdown watch★: there are three shutdown branches (StopDaemon · Ctrl-C · sender gone) and Ctrl-C of them does not touch that watch, so subscribing it would
+        //   mean on that branch the sweeper never wakes and the shutdown wait never ends.
         let (stop, stopped) = watch::channel(false);
         let sweeper = BusSweeper {
             task: bus.deliveries.spawn_sweeper(stopped),
@@ -2335,15 +2001,10 @@ impl CommandBus {
         (bus, sweeper)
     }
 
-    /// 자기 표도 붙은 주인도 없는 버스 — ★제어 평면의 **다른 부분**만 재는 조립 전용★(스모크 bin · 우편
-    /// 게이트·인증 시험).
-    ///
-    /// ★운영 조립에 쓰지 말 것★: 1단계 표 슬롯을 안 물었으므로 `agent.*` 가 조용히 「모르는 명령」이 되고
-    /// 명부가 비어 있어 어떤 이름도 중계되지 않는다. 운영은 [`CommandBus::new`] 다.
-    /// ★수거기는 여기서도 함께 난다★ — 이것이 「자기 표가 없다」와 별개인 이유는 마감을 볼 눈이 없는 버스의
-    /// [`CommandBus::invoke`] 는 자리가 하나 열리는 순간 **영영 안 깨어나기** 때문이다. 그 상태를 만들지
-    /// 않는 편이 그 사실을 산문으로 적는 것보다 싸다.
-    #[must_use = "수거기 표식을 버리면 그 자리에서 자리 표가 닫힌다"]
+    /// A bus with neither its own table nor attached owners — ★only for assemblies measuring **other parts** of the control plane★ (smoke bins · mail gate · auth tests).
+    /// ★Do not use in a production assembly★: it does not ask the stage 1 table slot so `agent.*` quietly becomes an "unknown command" and since the roster is empty no name is relayed. Production is [`CommandBus::new`].
+    /// ★The sweeper is made here too★ — the reason this is separate from "has no table of its own" is that [`CommandBus::invoke`] of a bus without eyes on the deadline **never wakes** the moment one seat is opened. Not making that state is cheaper than writing that fact in prose.
+    #[must_use = "dropping the sweeper marker closes the seat table on the spot"]
     pub fn without_commands() -> (Self, BusSweeper) {
         Self::new(
             CommandRoster::new(),
@@ -2356,12 +2017,9 @@ impl CommandBus {
         &self.roster
     }
 
-    /// 이 버스가 든 자리 표 — 연결 정리(`agent_conn`)와 조립·시험이 같은 한 부를 잡는 자리다.
-    ///
-    /// ★이 접근자로 **표의 수명을 건드리지 못한다**★: 수거기를 띄우는 동사와 표를 닫는 동사는 이 모듈
-    /// 밖에서 안 보이고(사유 = [`CommandDeliveries::spawn_sweeper`]), 여기서 얻은 사본을
-    /// [`CommandBus::new`] 에 되먹여 둘째 수거기를 세우는 길도 표의 표식이 막는다([`Seats::swept`]) —
-    /// 그 조립은 성립하지 않고 그 자리에서 패닉한다. 그 둘 중 하나라도 걷으면 이 문장이 거짓이 된다.
+    /// The seat table this bus holds — the place where connection cleanup (`agent_conn`) and assembly · tests hold the same one copy.
+    /// ★This accessor **cannot touch the table's lifetime**★: the verb launching the sweeper and the verb closing the table are invisible outside this module (reason = [`CommandDeliveries::spawn_sweeper`]), and the path of feeding a copy obtained here back to
+    /// [`CommandBus::new`] to stand a second sweeper is blocked by the table's marker ([`Seats::swept`]) — that assembly does not stand and panics on the spot. If either is lifted this sentence becomes false.
     pub fn deliveries(&self) -> &CommandDeliveries {
         &self.deliveries
     }
@@ -2370,84 +2028,59 @@ impl CommandBus {
         &self.locals
     }
 
-    /// 시험 전용 — 상한 갈래를 **자원을 64개 잡지 않고** 겨눈다.
-    ///
-    /// 운영 값으로 그 갈래를 태우려면 답 안 하는 주인에게 64개를 걸어 둬야 하고, 그러면 시험이 재는 것이
-    /// 판정이 아니라 런타임 스케줄러가 된다(형제 [`CommandDeliveries::with_local_limit`] 와 같은 사유).
+    /// Test only — aims at the cap branch **without holding 64 resources**.
+    /// To run that branch with the production value 64 would have to be hung on an owner that does not answer and then what the test measures is not the decision but the runtime scheduler (the same reason as the sibling [`CommandDeliveries::with_local_limit`]).
     #[cfg(test)]
     pub(crate) fn relayed_counter(&self) -> &Arc<AtomicUsize> {
         &self.relayed
     }
 
-    /// 연결 없는 호출자에게 붙이는 **연결 번호** — 왕복 하나만 살고 [`CallerSeat`] 이 거둔다.
-    ///
-    /// ★네트워크 행의 번호와 겹치면 안 된다★: 겹치면 [`CommandRoster::attach`] 가 산 연결의 프레임 출구를
-    /// 덮어(그 함수가 못 박은 전제) 그 연결 앞으로 갈 봉투가 이 HTTP 요청으로 새고, 이쪽 답장은 반대로
-    /// 사라진다. 네트워크 행은 1부터 **올라가고**(`link/server.rs` 의 `ConnRegistry::alloc_id` — 해제해도 되돌리지
-    /// 않는다) 여기는 `u64::MAX` 에서 **내려간다**. 두 수열이 만나려면 2^63 번을 할당해야 하므로 도달 불가다.
-    /// ★한 프로세스에 이 발급기가 하나여야 한다★ — 그래서 [`CommandBus`] 를 clone 으로 나눠 준다(사본마다
-    /// 새 발급기를 만들면 두 사본이 같은 번호를 낸다).
+    /// The **connection number** given to a connectionless caller — one round trip lives and [`CallerSeat`] reaps it.
+    /// ★It must not overlap the network layer's numbers★: if it did, [`CommandRoster::attach`] would overwrite the live connection's frame outlet (the premise that function pinned) so an envelope bound for that connection would leak into this HTTP request while this side's reply would vanish.
+    /// The network layer **goes up** from 1 (`ConnRegistry::alloc_id` of `link/server.rs` — release does not give it back) and here it **goes down** from `u64::MAX`. For the two sequences to meet 2^63 allocations are needed so it is unreachable.
+    /// ★There must be one of this issuer per process★ — that is why [`CommandBus`] is handed out by clone (making a new issuer per copy would make two copies emit the same number).
     fn open_caller(&self) -> ConnId {
         self.callers.fetch_sub(1, Ordering::Relaxed)
     }
 
-    /// 연결 없는 호출자의 명령 하나 — ★배달 기계는 소켓 입구와 **같은 것**을 탄다★(ADR-0160 결정 1).
+    /// One command of a connectionless caller — ★the delivery machine rides **the same one** as the socket entrance★ (ADR-0160 decision 1).
+    /// ★It takes `request_id` as an argument — it is not made here★: whether to ask again with the same number is **the caller's** decision, and that re-query being caught by the seat table's duplicate prevention ([`SeatState::Retained`]) is why this door does not make a second wait
+    /// ticket (ADR-0161 decisions 1·2). On the control route that value is one the request body carried (a retry sends back the same value) or, if absent, one the daemon issued with [`RequestId::new`] — **that the latter gets no duplicate prevention
+    /// is the contract** (the impact section of the same decision).
     ///
-    /// ★`request_id` 를 인자로 받는다 — 여기서 만들지 않는다★: 같은 번호로 다시 물을지는 **호출자**가
-    /// 정하는 것이고, 그 재질의가 자리 표의 중복 방지([`SeatState::Retained`])에 걸리는 것이 이 문이 두 번째
-    /// 대기표를 안 만드는 이유다(ADR-0161 결정 1·2). 제어 라우트에서 그 값은 요청 바디가 실어 온 것이거나
-    /// (재시도가 같은 값을 되보낸다) 없으면 데몬이 [`RequestId::new`] 로 발급한 것이다 — **후자는 중복
-    /// 방지가 안 걸린다는 사실이 계약이다**(같은 결정 영향 절).
+    /// ★Sets up one fake connection and reaps it★: the delivery machine holds "the connection that asked" by number (seat owner · aliveness check · reply destination) and all three go through the roster. A connection that stands only during the round trip is **the lifetime of the HTTP
+    /// request itself** so it is a fact, not a pretense, and that is why [`deliver`] can be ridden without changing one line.
+    /// ★What reaps is the destructor of [`CallerSeat`] — do not revert to straight-line code★: this future **is cancelled**. axum/hyper drops the handler future when the client drops (the sibling route wrote the same fact — the at-least-once section of
+    /// `mcp_server::eg_send`), and then the cleanup of straight-line code **does not run a single line**. ★No name is registered★ — this connection cannot become a command owner (the control door is call-only). With no registration path here no name can stand under this number so
+    /// another's envelope cannot come here.
     ///
-    /// ★가짜 연결 하나를 세웠다 거둔다★: 배달 기계는 「물어본 연결」을 번호로 들고(자리 주인 · 살아 있는지
-    /// 확인 · 답장 목적지) 그 셋이 전부 명부를 거친다. 왕복 동안만 서는 연결은 **HTTP 요청의 수명 그 자체**라
-    /// 흉내가 아니라 사실이고, 그래서 [`deliver`] 를 한 줄도 안 고치고 태울 수 있다.
-    /// ★거두는 것은 [`CallerSeat`] 의 소멸자다 — 직선 코드로 되돌리지 마라★: 이 future 는 **취소된다**.
-    /// axum/hyper 는 클라이언트가 끊기면 핸들러 future 를 drop 하는데(형제 라우트가 같은 사실을 적어 두었다 —
-    /// `mcp_server::eg_send` 의 at-least-once 절), 그러면 직선 코드의 뒷정리는 **한 줄도 안 돈다**.
-    /// ★이름을 등록하지 않는다★ — 이 연결은 명령 주인이 될 수 없다(제어 문은 호출 전용이다). 등록 경로가
-    /// 여기 없으므로 이 번호 앞으로는 어떤 이름도 설 수 없고, 따라서 남의 봉투가 이리로 올 수 없다.
+    /// ★It waits right there and does not spawn `deliver`★: the reason spawn is needed is **the self-deadlock where a connection task cannot take its own answer out** (that function's doc), and here it is a per-request task, not a connection task,
+    /// so that causality is absent. Rather, spawning here would need yet another place to take the reply.
     ///
-    /// ★`deliver` 를 spawn 하지 않고 그 자리에서 기다린다★: spawn 이 필요한 이유는 **연결 태스크가 자기
-    /// 답을 자기가 못 꺼내는 self-deadlock** 인데(그 함수 doc) 여기는 연결 태스크가 아니라 요청당 태스크라
-    /// 그 인과가 없다. 오히려 여기서 spawn 하면 답장을 받아 갈 자리를 또 만들어야 한다.
-    ///
-    /// ★마감 초과는 `TIMEOUT` 답장으로 온다 — 그것을 만드는 것은 수거기다★
-    /// ([`CommandDeliveries::expire`]). 그 수거기는 [`CommandBus::new`] 가 함께 낸다.
+    /// ★A deadline overrun comes as a `TIMEOUT` reply — what makes it is the sweeper★ ([`CommandDeliveries::expire`]). That sweeper is brought out together by [`CommandBus::new`].
     pub async fn invoke(
         &self,
         request_id: RequestId,
         name: String,
         args: serde_json::Value,
     ) -> CommandReply {
-        // ★이 문으로는 **데몬 자기 이름이 오지 않는다 — 그 계약을 여기서 강제한다**★
-        //
-        //   판정부가 자기 표를 먼저 태우므로(`control::catalog::handle_call`) 오늘 이 갈래는 안 온다.
-        //   ★그 「먼저」가 **같은 표**여야 이 문장이 서고, 오늘 그것을 지는 것은 타입이다★: 판정부가 1단계
-        //   표를 `&dyn LocalCommands` 로 받고 어댑터가 넘기는 것이 [`CommandBus::locals`] 하나라, 그쪽
-        //   판정과 이 아래 검사는 **같은 값에 같은 질문**을 한다(그 근거는 `handle_call` 의 그 문단). 표를
-        //   따로 받는 형태로 되돌리면 두 판정이 다른 부를 볼 수 있고, 그때 이 거절은 정당한 중계를 막거나
-        //   (한쪽만 자기 이름이라 답한다) 조용한 no-op 이 된다.
-        //   그래도 이 검사를 걷지 않는 이유는 [`deliver`] 의 1단계 갈래가 **그 사실에 기대고 있어서**다:
-        //   그 갈래가 이 문을 타면 취소 한 번에 자리가 영구히 남는다. HTTP 핸들러 future 는 취소되는데
-        //   ([`CallerSeat`]) 1단계 본문은 `spawn_blocking` 이라 취소가 안 되므로 그 뒷정리
-        //   (`LocalGuard::settle`)가 한 줄도 안 돌고, 남은 자리는 `local` 표식 때문에 끊김 정리도
-        //   ([`CommandDeliveries::drop_origin`]) 마감 수거도([`CommandDeliveries::expire`] 는 `Retained`
-        //   만 놓는다) 건드리지 못한다 — 이름·인자 사본을 든 자리 하나와 「아직 돌고 있다」로 굳은 번호
-        //   하나가 프로세스 수명 내내 남고, 그 번호는 영영 [`Seat::LocalStillRunning`] 만 답한다. 덤으로
-        //   상한 셈([`MAX_LOCAL_IN_FLIGHT`])은 본문이 도는 채로 풀려 그 축이 산 본문을 못 묶는다.
-        //   ★그러니 산문으로 두지 않고 **기대는 자리에서 거절한다**★ — 그러면 그 갈래가 이 문에서
-        //   도달 불가가 되고, 위 누수는 코드로 표현할 수 없게 된다.
-        // ★어휘는 `INTERNAL` 이다★: 배선 결함이고 아무것도 돌지 않았다(확실성 = 확실). 그리고 자원을
-        //   하나도 잡기 전에 돌아선다 — 아래 입장 통제보다 앞이다.
-        // ★`debug_assert` 를 두지 않는 이유★: 그러면 이 갈래를 재는 시험 자체가 debug 에서 패닉해,
-        //   강제하려는 계약의 회귀망을 없애는 셈이 된다. 레벨(`error!`)이 그 몫을 진다.
+        // ★**The daemon's own names do not come through this door — that contract is enforced here**★
+        //   The decision part runs its own table first (`control::catalog::handle_call`) so today this branch does not come. ★For that "first" to stand it must be **the same table**, and today what carries that is the type★: the decision part takes the stage 1 table as `&dyn LocalCommands`
+        //   and what the adapter passes is the one [`CommandBus::locals`], so that decision and the check below ask **the same question of the same value** (the basis is that paragraph of `handle_call`). Reverting to a shape that takes the table
+        //   separately would let the two decisions see different copies, and then this refusal would either block a legitimate relay (one side answers it is its own) or become a quiet no-op.
+        //   Even so the reason this check is not lifted is that [`deliver`]'s stage 1 branch **leans on that fact**: if that branch rode this door a single cancellation would leave a seat permanently. An HTTP handler future is cancelled
+        //   ([`CallerSeat`]) while the stage 1 body is `spawn_blocking` and cannot be cancelled so its cleanup (`LocalGuard::settle`) runs not a single line, and the leftover seat, because of the `local` marker, can be touched by neither disconnect cleanup
+        //   ([`CommandDeliveries::drop_origin`]) nor deadline reaping ([`CommandDeliveries::expire`] releases only `Retained`) — one seat holding copies of the name · arguments and one number frozen as "still running" remain for the whole process lifetime, and
+        //   that number is only ever answered with [`Seat::LocalStillRunning`]. Besides, the cap count ([`MAX_LOCAL_IN_FLIGHT`]) is released while the body still runs so that axis cannot bind a live body.
+        //   ★So it is not left as prose but **refused at the place that leans on it**★ — then that branch becomes unreachable at this door and the above leak cannot be expressed in code.
+        // ★The vocabulary is `INTERNAL`★: it is a wiring defect and nothing ran (certainty = certain). And it turns away before taking any resource — it comes before the admission control below.
+        // ★Why there is no `debug_assert`★: then the test measuring this branch would itself panic in debug, removing the regression net of the contract being enforced. The level (`error!`) carries that job.
         if self.locals.claim(&name).is_some() {
             tracing::error!(
                 entrance = ENTRANCE_CONTROL,
                 command = %sanitize_for_log(&name),
                 %request_id,
-                "제어 라우트가 데몬 자기 이름을 중계로 보냈다 — 그 이름은 판정부가 자기 자리에서 답해야 한다(배선 결함, ADR-0160)"
+                "the control route sent the daemon's own name as a relay — that name must be answered by the decision part in its own place (wiring defect, ADR-0160)"
             );
             return CommandReply::err(
                 request_id,
@@ -2458,7 +2091,7 @@ impl CommandBus {
             );
         }
 
-        // ★입장 통제는 자원을 잡기 **전**이다★ — 자리도 태스크도 명부 칸도 여기 통과한 뒤에 난다.
+        // ★Admission control comes **before** taking resources★ — the seat, the task and the roster entry are all created after passing here.
         let Some(_admitted) = RelaySlot::admit(&self.relayed, &name, request_id) else {
             return CommandReply::err(
                 request_id,
@@ -2475,7 +2108,7 @@ impl CommandBus {
         let (answer, wait) = oneshot::channel();
         let caller = self.open_caller();
         let catcher: Arc<dyn FrameSink> = Arc::new(ReplyCatcher::new(answer, request_id));
-        // 소멸자가 거둔다 — 취소로 이 함수를 떠나도 명부 칸도 자리도 남지 않는다([`CallerSeat`]).
+        // The destructor reaps — even if cancellation leaves this function neither the roster entry nor the seat remains ([`CallerSeat`]).
         let seat = CallerSeat::attach(
             self.roster.clone(),
             self.deliveries.clone(),
@@ -2491,8 +2124,7 @@ impl CommandBus {
             CommandEnvelope {
                 name,
                 request_id,
-                // ★목적지 주인은 `route` 가 명부 조회 결과로 **덮어 쓴다**★(그 함수) — 여기서 지어낸 값은
-                //   어디서도 읽히지 않는다. 자칭 신원을 실어 보내는 자리가 아니다(`CommandEnvelope::owner`).
+                // ★The destination owner is **overwritten** by `route` with the roster lookup result★ (that function) — a value made up here is read nowhere. This is not a place to carry a self-claimed identity (`CommandEnvelope::owner`).
                 owner: OwnerToken::new(""),
                 proto_ver: engram_dashboard_agent::commands::CATALOG_VERSION,
                 args,
@@ -2501,30 +2133,22 @@ impl CommandBus {
         )
         .await;
 
-        // ★답장이 나간 **뒤에** 거둔다★ — 그 전에 거두면 `send_reply` 가 낼 곳을 못 찾아 이 왕복의 유일한
-        //   답장이 사라진다. 소멸자에 맡겨도 스코프 끝이라 순서는 같지만, 명시적으로 놓아 그 순서가 편집에
-        //   드러나게 한다.
-        // ★이 줄이 **자리도** 놓는다 — 다만 정상 왕복에서는 놓을 것이 없다★([`CallerSeat`]): 위 `deliver`
-        //   가 프레임을 낸 뒤 자기 자리를 이미 처분했다([`CommandDeliveries::release`]). 그래서 여기서
-        //   지워지는 자리가 있는 경우는 취소 하나뿐이고, 그 갈래에서는 이 줄이 **아래 `wait.await` 에 닿기도
-        //   전에** 돈다.
-        //   ★그 「하나뿐」이 서는 근거는 이 함수 맨 앞의 거절이다★ — 1단계 갈래는 취소되면 자리를 놓지
-        //   못하는데(본문이 `spawn_blocking` 이라 뒷정리가 안 돈다) 그 갈래가 이 문에서 도달 불가라
-        //   여기 오는 자리는 전달 갈래의 것뿐이다. 그 거절을 걷으면 이 문장이 곧바로 거짓이 된다.
-        //   즉 이 자리를 앞으로 당기면 안 되는 이유는 자리 축이 아니라 **명부 축**이 그대로 진다(위 첫 줄).
+        // ★Reap **after the reply goes out**★ — reaping before that leaves `send_reply` nowhere to send and this round trip's only reply vanishes. Left to the destructor the order is the same (end of scope), but releasing explicitly makes that order visible in edits.
+        // ★This line releases **the seat too** — but in a normal round trip there is nothing to release★ ([`CallerSeat`]): the `deliver` above already disposed of its own seat after sending the frame ([`CommandDeliveries::release`]). So the only case where a seat is erased here is
+        //   cancellation, and in that branch this line runs **even before reaching `wait.await` below**. ★The basis for that "only" is the refusal at the very top of this function★ — a stage 1 branch cannot release its seat when cancelled (the body is
+        //   `spawn_blocking` so cleanup does not run) and since that branch is unreachable at this door, only seats of the delivery branch come here. Lifting that refusal makes this sentence false at once. That is, the reason this place must not be moved earlier is
+        //   not the seat axis but the **roster axis** (the first line above).
         drop(seat);
 
         let reply = wait.await.unwrap_or_else(|_| {
-            // 여기 오는 길은 **답장 프레임이 이 출구에 안 닿은 것**뿐이다. 하나는 인코딩 실패
-            //   (`send_reply` 의 `event_json` 이 빈손 — 그쪽이 이미 error! 를 남겼다), 하나는 이 catcher 가
-            //   그 프레임을 거절한 것(짝 안 맞는 번호·두 번째 장 — 각각 자기 자리에서 남긴다). 합침
-            //   ([`Seat::Coalesced`])은 이 문에서 날 수 없다 — 연결 번호가 요청마다 새것이라 같은
-            //   (번호, 연결) 쌍이 두 번 서지 않는다.
+            // The only way to get here is **the reply frame not reaching this outlet**. One is an encoding failure (`event_json` of `send_reply` came back empty — that side already left an error!), the other is this catcher
+            //   rejecting that frame (a mismatched number · a second frame — each leaves its own at its own place). Coalescing ([`Seat::Coalesced`]) cannot arise at this door — the connection number is new per request so the same
+            //   (number, connection) pair does not stand twice.
             tracing::error!(
                 entrance = ENTRANCE_CONTROL,
                 command = %logged,
                 %request_id,
-                "제어 라우트 명령이 답장 없이 끝났다 — 배달이 낸 프레임이 이 요청에 닿지 못했다"
+                "the control route command ended with no reply — the frame the delivery emitted did not reach this request"
             );
             CommandReply::err(
                 request_id,
@@ -2534,59 +2158,44 @@ impl CommandBus {
                 ),
             )
         });
-        // ★성공도 남긴다★ — 실패만 적는 계측은 「이 문으로 무엇이 얼마나 지나갔나」에 답하지 못해, 사고가
-        //   났을 때 **그 명령이 이 데몬을 거쳤는지조차** 로그로 못 가린다(로깅 컨벤션 「계측 의무」).
-        //   결말 payload 는 싣지 않는다 — 남의 명령의 반환값이라 무엇이 들었는지 이 층이 모른다.
-        // ★레벨이 갈린다 — 실패만 `warn`, 성공은 `info`★
-        //
-        //   갈리는 축은 **사후 복구 가능성**이다. 이 경로에서 `warn` 을 받는 줄은 하나이고
-        //   (`control::mcp_server` 의 귀속 줄) 그것이 담는 것은 **사건이 지나간 뒤 어디서도 다시 만들 수
-        //   없는 사실**이다: 사용자 눈에 보이는 대시보드 변경을 **어느 자격증명이** 시켰나. 로그 레벨을
-        //   나중에 올려도 이미 벌어진 조작의 주인은 그때도 모른다. 이 라우트가 그 한 줄을 warn 에 두는 것은
-        //   「에이전트가 사람 화면을 움직였다」를 **평상시 잡음이 아니라 봐야 할 사건으로** 취급하기로 한
-        //   판단이고, 형제 게이트(우편 거절)가 같은 자리에 있다.
-        //   반면 여기 성공 줄이 더하는 것은 **끝났다는 사실 하나**뿐이고, 그것은 사후에 복구된다 — 조작
-        //   자체가(탭이 생겼다·창이 닫혔다) 그 증거이며 상태 조회로 확인된다. 그래서 기본 레벨에서 안
-        //   찍히는 것이 손실이 아니다.
-        //   실패는 다시 warn 이다: 「반려됐다」는 화면에 아무 흔적을 남기지 않으므로 로그가 유일한 증거다.
-        //   ★결과적으로 중계 한 번에 warn 은 한 줄이다★ — 성공을 올리면 두 줄이 되고, 그러면 이 채널에서
-        //   「봐야 할 사건」과 「정상 완료」가 구분되지 않는다. 그 이유로 올리지 말 것.
-        // ★이것은 로깅 컨벤션 레벨 표에서 **의도적으로 벗어난 자리**다★(`docs/reference/
-        //   logging-conventions.md` — 정상 수명주기 이벤트 = info). 그 문서 §15 가 금하는 것은 「기본 필터가
-        //   가린다」를 사유로 정상 알림의 레벨을 올리는 것이고, 위 사유는 그것이 아니라 **복구 불가한 귀속
-        //   기록**이다. 그 예외를 그 문서에 적는 일은 아직 안 됐다(미결 — 이 라운드 범위 밖).
+        // ★Success is recorded too★ — instrumentation that writes only failures cannot answer "what went through this door and how much", so when an incident happens even **whether that command passed through this daemon** cannot be told from the log (logging convention "instrumentation duty").
+        //   The outcome payload is not carried — it is the return value of another's command so this layer does not know what is in it.
+        // ★The level splits — only failures are `warn`, success is `info`★
+        //   The axis that splits is **post-hoc recoverability**. The one line on this path that gets `warn` is one (the attribution line of `control::mcp_server`) and what it holds is **a fact that cannot be remade anywhere after the event passed**: **which credential**
+        //   made a dashboard change visible to the user. Even raising the log level later does not tell the owner of an operation that already happened. Putting that one line at warn on this route is the judgment to treat "an agent moved a human's screen" as
+        //   **an event to look at rather than everyday noise**, and the sibling gate (the mail refusal) sits in the same place. By contrast what the success line here adds is **only the one fact that it ended**, and that is recovered after the fact — the operation
+        //   itself (a tab was created · a window was closed) is the evidence and a state lookup confirms it. So not being printed at the default level is not a loss. A failure is warn again: "it was rejected" leaves no trace on screen so the log is the only evidence.
+        //   ★As a result one relay has one warn line★ — raising success would make two lines and then "an event to look at" and "normal completion" cannot be told apart in this channel. Do not raise it for that reason.
+        // ★This is **an intentional departure from the logging convention's level table**★ (`docs/reference/logging-conventions.md` — normal lifecycle event = info). What its §15 forbids is raising the level of a normal notice on the ground that
+        //   "the default filter hides it", and the reason above is not that but **a record of attribution that cannot be recovered**. Writing that exception into that document has not been done yet (open — out of this round's scope).
         match &reply.outcome {
             Ok(_) => tracing::info!(
                 entrance = ENTRANCE_CONTROL,
                 command = %logged,
                 %request_id,
-                "제어 라우트 명령을 중계해 결말을 받았다"
+                "relayed the control route command and received the outcome"
             ),
             Err(failed) => tracing::warn!(
                 entrance = ENTRANCE_CONTROL,
                 command = %logged,
                 %request_id,
                 code = %failed.code(),
-                "제어 라우트 명령이 실패로 끝났다"
+                "the control route command ended in failure"
             ),
         }
         reply
     }
 }
 
-/// 중계 하나가 물고 있는 자리 — ★`Drop` 이 셈을 **반드시** 되돌린다★(취소·이른 반환·패닉 무관).
-///
-/// 형제 [`LocalGuard`] 와 같은 규율이고, 다른 것은 세는 축뿐이다(그쪽은 blocking 풀에 나간 자기 본문).
+/// The seat one relay holds — ★`Drop` **always** undoes the count★ (regardless of cancellation · early return · panic).
+/// The same discipline as the sibling [`LocalGuard`] and the only difference is the axis counted (that one is its own body out on the blocking pool).
 struct RelaySlot(Arc<AtomicUsize>);
 
 impl RelaySlot {
-    /// 상한 안이면 셈을 올리고 표식을 낸다. `None` = 상한을 쳤다(아무것도 안 돌린다).
-    ///
-    /// ★`fetch_update` 인 이유★: 「읽고 → 비교하고 → 올린다」를 쪼개면 두 요청이 같은 값을 읽고 둘 다
-    /// 통과한다. 상한이 하나 새는 것보다 **정확히** 세는 편이 이 값이 사는 이유에 맞다.
-    /// ★거절을 로그로 남긴다★ — 전역 상한을 친 것은 운영 사건인데 안 남기면 유일한 목격자가 거절당한
-    /// 호출자뿐이다(로깅 컨벤션 「무로그 삼킴」). 형제와 달리 시각 억제를 두지 않는 것은 이 문의 도착률이
-    /// **요청당 연결**이라 훨씬 낮아서다 — 시끄러워지면 그때 형제의 억제를 가져온다.
+    /// Within the cap it raises the count and issues a marker. `None` = hit the cap (nothing is run).
+    /// ★Why `fetch_update`★: splitting "read → compare → raise" lets two requests read the same value and both pass. Counting **exactly** fits the reason this value lives better than leaking one over the cap.
+    /// ★The refusal is logged★ — hitting the global cap is an operational event and without it the only witness is the refused caller (logging convention "no silent swallow"). Unlike the sibling there is no time suppression because
+    /// this door's arrival rate is **a connection per request** and much lower — if it gets noisy bring the sibling's suppression then.
     fn admit(counter: &Arc<AtomicUsize>, name: &str, request_id: RequestId) -> Option<Self> {
         counter
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
@@ -2600,7 +2209,7 @@ impl RelaySlot {
                     held,
                     ceiling = MAX_RELAYED_IN_FLIGHT,
                     %request_id,
-                    "제어 라우트 중계의 동시 상한 — 이 아래로 내려갈 때까지 전부 거절한다"
+                    "the control route relay's concurrent cap — refusing all of them until it drops below this"
                 );
             })
             .ok()
@@ -2609,7 +2218,7 @@ impl RelaySlot {
 
 impl Drop for RelaySlot {
     fn drop(&mut self) {
-        // saturating 인 이유는 형제와 같다 — 셈이 음수로 돌아 상한이 영원히 열리는 쪽이 더 나쁘다.
+        // The reason for saturating is the same as the sibling — a count wrapping negative and leaving the cap open forever is worse.
         let _ = self
             .0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
@@ -2618,24 +2227,18 @@ impl Drop for RelaySlot {
     }
 }
 
-/// 가짜 호출자 연결 하나의 수명 — ★`Drop` 이 **두 표에서** 반드시 거둔다★(명부 칸 + 상관 표의 자리).
+/// The life of one fake caller connection — ★`Drop` **always** reaps from **both tables**★ (the roster entry + the seat of the correlation table).
 ///
-/// ★직선 코드로 되돌리지 마라★: 이 항목들을 거둘 다른 경로가 없다. 실 연결은 끊김 훅 하나가 두 표를 함께
-/// 정리하는데(`agent_conn` 의 `on_disconnect` — `detach` 다음 줄이 `drop_origin` 이다) 가짜 연결은 그 훅에
-/// 닿지 않는다. 그리고 이 뒷정리를 건너뛰는 길은 패닉만이 아니다 — HTTP 핸들러 future 는 클라이언트가
-/// 끊기면 **취소**된다.
+/// ★Do not revert to straight-line code★: there is no other path to reap these items. A real connection has one disconnect hook that cleans the two tables together (`on_disconnect` of `agent_conn` — the line after `detach` is `drop_origin`) but a fake connection does not
+/// reach that hook. And panic is not the only way to skip this cleanup — an HTTP handler future is **cancelled** when the client drops.
 ///
-/// ★두 축을 **함께** 들어야 하는 이유★: 취소는 [`deliver`] 의 `await` 한복판에서 나므로 그 함수의 자리
-/// 처분([`CommandDeliveries::release`])은 한 줄도 안 돈다. 남은 자리는 마감으로도 안 사라진다 —
-/// [`CommandDeliveries::expire`] 는 `Awaiting` 을 [`SeatState::Void`] 로 바꾸고 **항목은 남긴다**. 그래서
-/// 명부 축만 거두면 봉투의 이름·인자 사본이([`Pending::args`]) 프로세스 수명 내내 앉아 있고, 자리 하나가
-/// 두 입구 **전부**에 값을 매긴다([`CommandDeliveries::open`] 이 배달마다 `expire` 를 부른다). 덤으로
-/// 주인이 이미 답한 뒤 취소된 자리는 `Fulfilled` 로 남아, 그 번호의 재질의가 **죽은 가짜 연결**을 임자로
-/// 지목한 [`Seat::Taken`] 을 영구히 받는다.
+/// ★Why **both axes** must be held together★: cancellation occurs in the middle of an `await` of [`deliver`] so that function's seat disposal ([`CommandDeliveries::release`]) runs not a single line. The leftover seat does not vanish by the deadline either —
+/// [`CommandDeliveries::expire`] turns `Awaiting` into [`SeatState::Void`] and **leaves the item**. So if only the roster axis is reaped, the copy of the envelope's name · arguments ([`Pending::args`]) sits for the whole process lifetime, and one seat prices **every**
+/// entrance of both ([`CommandDeliveries::open`] calls `expire` on every delivery). Besides, a seat cancelled after the owner already answered stays as `Fulfilled` and a re-query of that number permanently receives a [`Seat::Taken`]
+/// that names the **dead fake connection** as owner.
 struct CallerSeat {
     roster: CommandRoster,
-    /// ★명부와 같은 소멸자에 든다 — 따로 정리하는 자리를 만들지 말 것★: 나뉘면 한쪽만 도는 갈래가 생기고,
-    /// 그 갈래의 증상이 위 상주 누수다(런타임엔 아무 신호도 없다).
+    /// ★It sits in the same destructor as the roster — do not make a separate cleanup place★: split, a branch where only one side runs arises, and the symptom of that branch is the residency leak above (no signal at runtime).
     deliveries: CommandDeliveries,
     conn: ConnId,
 }
@@ -2648,7 +2251,7 @@ impl CallerSeat {
         frames: Arc<dyn FrameSink>,
     ) -> Self {
         roster.attach(conn, &frames);
-        // 사본은 명부가 든다 — 왕복 너머로 하나 더 들고 있지 않는다(모듈 헤더 · ADR-0154).
+        // The copy is held by the roster — one more is not held beyond a round trip (module header · ADR-0154).
         drop(frames);
         Self {
             roster,
@@ -2659,29 +2262,21 @@ impl CallerSeat {
 }
 
 impl Drop for CallerSeat {
-    /// ★순서는 실 연결의 끊김 정리와 같게 둔다★(명부 → 상관 표) — 두 정리가 읽을 때 갈리지 않게 하려는
-    /// 것이고, 저쪽에서 그 순서가 지키는 것(자리가 풀려 답장을 내려는데 명부에 죽은 출구가 아직 있는 상태)은
-    /// **여기서는 날 수 없다**: [`CommandBus::invoke`] 가 [`deliver`] 를 그 자리에서 기다리므로 이 소멸자가
-    /// 도는 시점에 그 배달은 이미 끝났거나 함께 drop 됐다.
-    /// ★잠금은 겹치지 않는다★(ADR-0006) — 두 줄이 각자 잠그고 그 안에서 놓는다.
-    /// ★두 줄 **다** 정리용 잠금이라 첫 줄이 죽어 뒷줄을 건너뛰는 갈래가 없다★ — 근거·범위는 모듈 헤더의
-    /// 그 문단(그리고 두 `lock_for_cleanup` 의 doc). 어느 한쪽을 패닉하는 잠금으로 바꾸면 여기 적힌
-    /// 「함께 거둔다」가 곧바로 거짓이 된다.
+    /// ★The order is the same as a real connection's disconnect cleanup★ (roster → correlation table) — so the two cleanups do not diverge when read, and what that order guards there (the state where a seat is released and tries to reply but the roster still has a dead outlet)
+    /// **cannot occur here**: [`CommandBus::invoke`] waits for [`deliver`] right there so by the time this destructor runs that delivery has already ended or been dropped together.
+    /// ★The locks do not overlap★ (ADR-0006) — the two lines each lock and release inside.
+    /// ★**Both** lines are cleanup locks so there is no branch where the first line dies and the later one is skipped★ — the basis · range are in that paragraph of the module header (and the doc of the two `lock_for_cleanup`). Changing either to a panicking lock makes the "reaps together" written here false at once.
     fn drop(&mut self) {
         self.roster.detach(self.conn);
-        // ★반환값을 세지 않는다★: 정상 왕복은 [`deliver`] 가 이미 자리를 놓아 여기 셈이 0 이고, 1 이 되는
-        //   길은 취소뿐이다 — 그 사건은 이 층이 아니라 HTTP 층에서 관측된다(호출자가 끊겼다).
+        // ★The return value is not counted★: in a normal round trip [`deliver`] already released the seat so the count here is 0, and the only way to 1 is cancellation — that event is observed not at this layer but at the HTTP layer (the caller dropped).
         self.deliveries.drop_origin(self.conn);
     }
 }
 
-/// 만료 수거기 하나를 든 표식 — ★조립부가 종료 때 [`BusSweeper::stop`] 을 불러야 종료가 유계다★.
-///
-/// 안 부르면 배달 태스크들이 마감까지 깨어날 계기가 없고, 그동안 「종료했다」고 보고된 시점보다 오래 산다
-/// (근거 = [`CommandDeliveries::drain`]).
-/// ★그냥 떨어뜨려도 표는 비워지고 닫힌다★ — 정지 신호의 송신단이 사라지면 수거기가 그것을 종료로 읽는다
-/// ([`CommandDeliveries::spawn_sweeper`]). 다만 **기다리지 않으므로** 종료가 유계라는 보장은 없고, 그
-/// 버스의 그 뒤 왕복은 전부 [`Seat::Closed`] 로 반려된다.
+/// The marker holding one expiry sweeper — ★the assembly must call [`BusSweeper::stop`] at shutdown for shutdown to be bounded★.
+/// If not called the delivery tasks have no occasion to wake until the deadline and meanwhile live longer than the moment they are reported "ended" (basis = [`CommandDeliveries::drain`]).
+/// ★Even simply dropping it empties and closes the table★ — when the sending end of the stop signal vanishes the sweeper reads that as shutdown ([`CommandDeliveries::spawn_sweeper`]). But since it **does not wait** there is no guarantee shutdown is bounded, and
+/// every later round trip of that bus is refused as [`Seat::Closed`].
 pub struct BusSweeper {
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
@@ -2691,24 +2286,20 @@ impl BusSweeper {
     pub async fn stop(self) {
         let _ = self.stop.send(true);
         if let Err(e) = self.task.await {
-            tracing::warn!("명령 왕복 수거기 종료 대기 실패: {e}");
+            tracing::warn!("failed to wait for the command round trip sweeper to stop: {e}");
         }
     }
 }
 
-/// 답장 한 장을 받아 [`CommandBus::invoke`] 에게 넘기는 프레임 출구.
-///
-/// ★프레임을 되읽는 이유★: 배달은 답장을 **프레임 출구**로 내보내는 것 하나로 끝나고(`send_reply`), 그
-/// 출구가 이 계층에서 유일하게 꽂을 수 있는 자리다. 여기에 타입드 지름길을 하나 더 내면 답장을 내보내는
-/// 길이 둘이 되고, 둘이 갈리는 날 한쪽만 고쳐진다.
+/// The frame outlet that receives one reply and hands it to [`CommandBus::invoke`].
+/// ★Why the frame is read back★: delivery ends with sending the reply out through **the frame outlet** (`send_reply`), and that outlet is the only place this layer can plug in. Adding one more typed shortcut here would make two paths for sending the reply, and
+/// the day they diverge only one gets fixed.
 struct ReplyCatcher {
-    /// 한 장만 받는다 — 두 번째 프레임은 [`FrameError`] 로 되돌린다.
+    /// Receives only one — a second frame is returned as a [`FrameError`].
     seat: Mutex<Option<oneshot::Sender<CommandReply>>>,
-    /// 이 출구가 기다리는 왕복의 번호 — 다른 번호의 답장은 **이 요청의 답이 아니다**.
-    ///
-    /// ★대조하는 이유★: 이 출구는 요청 하나만 보지만 그것을 **보장하는 것은 이 대조뿐**이다. 명부의 칸을
-    /// 덮어쓰는 사고(같은 연결 번호 두 번 — `CommandRoster::attach` 가 error! 로 적고 덮는다)나 배달의
-    /// 상관 실수가 나면, 대조가 없는 출구는 남의 결말을 **이 호출의 결과로** HTTP 응답에 싣는다.
+    /// The number of the round trip this outlet waits for — a reply with another number is **not the answer to this request**.
+    /// ★Why it compares★: this outlet sees only one request but **only this comparison guarantees it**. If an accident overwrites a roster entry (the same connection number twice — `CommandRoster::attach` writes an error! and overwrites) or the delivery
+    /// mis-correlates, an outlet with no comparison would carry another's outcome in the HTTP response **as this call's result**.
     expected: RequestId,
 }
 
@@ -2722,24 +2313,23 @@ impl ReplyCatcher {
 }
 
 impl FrameSink for ReplyCatcher {
-    /// ★로그는 잠금 **밖에서** 찍는다★ — 파일 sink 가 동기 쓰기라(로깅 컨벤션 「인프라」) 임계 구역 안에서
-    /// 부르면 그 IO 만큼 이 출구가 잠긴다. 명부의 attach/detach 가 같은 이유로 로그를 밖으로 뺐다.
+    /// ★The log is printed **outside** the lock★ — the file sink is a synchronous write (logging convention "infrastructure") so calling it inside the critical section would lock this outlet for that IO. The roster's attach/detach also took their logs outside for the same reason.
     fn try_send(&self, frame: Frame) -> Result<(), FrameError> {
         let Frame::Text(text) = frame else {
             tracing::error!(
                 entrance = ENTRANCE_CONTROL,
-                "제어 라우트 왕복에 text 아닌 프레임이 왔다"
+                "a non-text frame came to the control route round trip"
             );
             return Err(FrameError);
         };
         let reply = match serde_json::from_str::<AgentEvent>(&text) {
-            // 이 출구에 오는 답장은 이 데몬이 `send_reply` 로 싼 것이라 늘 풀린다 — 못 풀리면 우리 쪽 결함이다.
+            // The reply coming to this outlet is one this daemon wrapped with `send_reply` so it always unpacks — if it does not that is a defect on our side.
             Ok(AgentEvent::CommandReply { reply }) => match reply_from_wire(&reply) {
                 Ok(reply) => reply,
                 Err(e) => {
                     tracing::error!(
                         entrance = ENTRANCE_CONTROL,
-                        "제어 라우트 왕복의 답장을 풀 수 없다 — 이 데몬이 싼 답장이 깨졌다: {e}"
+                        "cannot unpack the control route round trip's reply — the reply this daemon wrapped is broken: {e}"
                     );
                     return Err(FrameError);
                 }
@@ -2747,7 +2337,7 @@ impl FrameSink for ReplyCatcher {
             _ => {
                 tracing::error!(
                     entrance = ENTRANCE_CONTROL,
-                    "제어 라우트 왕복에 답장 아닌 이벤트가 왔다 — 이 출구에는 그 왕복의 답장만 온다"
+                    "an event that is not a reply came to the control route round trip — only that round trip's reply comes to this outlet"
                 );
                 return Err(FrameError);
             }
@@ -2757,7 +2347,7 @@ impl FrameSink for ReplyCatcher {
                 entrance = ENTRANCE_CONTROL,
                 expected = %self.expected,
                 got = %reply.request_id,
-                "제어 라우트 왕복에 남의 번호로 온 답장 — 이 요청의 결과가 아니다"
+                "a reply with another's number came to the control route round trip — it is not this request's result"
             );
             return Err(FrameError);
         }
@@ -2766,11 +2356,11 @@ impl FrameSink for ReplyCatcher {
             tracing::error!(
                 entrance = ENTRANCE_CONTROL,
                 request_id = %reply.request_id,
-                "제어 라우트 왕복에 답장이 두 번 왔다 — 질의 하나에 답장 하나가 깨졌다"
+                "the reply came twice to the control route round trip — one reply per query is broken"
             );
             return Err(FrameError);
         };
-        // 받을 쪽이 사라졌다 = 요청이 이미 끝났다. 낼 곳이 없다는 사실을 부르는 쪽이 알아야 한다.
+        // The receiving side vanished = the request already ended. The caller must know there is nowhere to send.
         seat.send(reply).map_err(|_| FrameError)
     }
 
@@ -2789,18 +2379,14 @@ pub(crate) mod tests {
     use serde_json::json;
     use tokio::sync::mpsc;
 
-    /// ★운영 마감을 그대로 쓴다 — 하네스가 자기 값을 고르지 않는다★: 예전에는 여기서 10초를 넣었고, 그
-    /// 값은 `fits_caller_silence_window` 가 금하는 관계라 **전 스위트가 그 관계를 어긴 채** 돌았다. 시각을
-    /// 손으로 미는 시험들은 마감이 몇 초인지에 안 묶여야 하므로(아래 `advance` 들은 이 값에서 파생한다)
-    /// 여기서 값을 고를 이유도 없다.
+    /// ★Use the production deadline as is — the harness does not pick its own value★: it used to put 10 seconds here, and that value was a relation `fits_caller_silence_window` forbids so **the whole suite ran with that relation violated**. The tests that push the time
+    /// by hand must not be tied to how many seconds the deadline is (the `advance`s below derive from this value) so there is no reason to pick a value here either.
     pub(crate) fn deliveries_with(clock: Arc<ManualClock>) -> CommandDeliveries {
         CommandDeliveries::with_clock(clock, CommandDeliveries::DEFAULT_DEADLINE)
     }
 
-    /// 배달 규칙을 재는 기본 배선 — **자기 명령이 없는 데몬**이다(1단계는 언제나 미스).
-    ///
-    /// ★[`super::deliver`] 를 가리는 이름인 것이 의도다★: 아래 시험 대부분은 2·3단계(전달·주인 부재)를
-    /// 재므로 1단계가 끼면 재는 것이 흐려진다. 1단계를 태우는 시험은 `super::deliver` 를 직접 부른다.
+    /// The default wiring measuring the delivery rules — **a daemon with no commands of its own** (stage 1 is always a miss).
+    /// ★That it is a name that shadows [`super::deliver`] is intended★: most of the tests below measure stages 2·3 (delivery · owner absent) so if stage 1 gets in what is measured blurs. A test that rides stage 1 calls `super::deliver` directly.
     fn deliver(
         roster: CommandRoster,
         deliveries: CommandDeliveries,
@@ -2821,7 +2407,7 @@ pub(crate) mod tests {
         sink_with_capacity(16)
     }
 
-    /// 용량을 정해 만드는 출구 — 작게 잡으면 **포화**(넣지 못하는 상태)를 만들 수 있다.
+    /// An outlet made with a given capacity — set small it can make **saturation** (a state where nothing can be put in).
     fn sink_with_capacity(capacity: usize) -> (Arc<dyn FrameSink>, mpsc::Receiver<Frame>) {
         let (tx, rx) = mpsc::channel::<Frame>(capacity);
         (Arc::new(FakeFrameSink::new(tx)), rx)
@@ -2839,37 +2425,34 @@ pub(crate) mod tests {
         }
     }
 
-    /// 프레임 하나를 이벤트로 읽는다.
+    /// Reads one frame as an event.
     fn event_from(frame: Frame) -> AgentEvent {
         match frame {
-            Frame::Text(text) => serde_json::from_str(&text).expect("이벤트 디코드"),
-            other => panic!("Text 여야 함: {other:?}"),
+            Frame::Text(text) => serde_json::from_str(&text).expect("event decode"),
+            other => panic!("expected Text: {other:?}"),
         }
     }
 
-    /// 배달 태스크의 끝을 기다린다 — 상한 근거는 [`next_event`] 와 같다.
+    /// Waits for the end of a delivery task — the basis of the cap is the same as [`next_event`].
     async fn finished(handle: tokio::task::JoinHandle<()>) {
         tokio::time::timeout(Duration::from_secs(10), handle)
             .await
-            .expect("배달 태스크가 안 끝난다")
-            .expect("배달 태스크");
+            .expect("the delivery task does not end")
+            .expect("the delivery task");
     }
 
-    /// ★기다림에 상한을 둔다 — 배달이 깨지면 **hang 이 아니라 실패**여야 한다★
-    ///
-    /// 이 시험들이 재는 것은 「그 프레임이 그 연결로 오는가」라, 답장이 엉뚱한 연결로 새는 구현에서는 여기가
-    /// 영영 안 깨어난다. 무기한 대기는 러너에서 **멈춘 것처럼** 보이고 어느 단언이 틀렸는지도 안 알려 준다.
-    /// ★상한은 판정 기준이 아니다★ — 정상 경로는 즉시 깨어나므로 이 값은 「깨졌다」의 관측 수단일 뿐이고,
-    /// 느린 러너에서 오탐이 나지 않게 넉넉히 잡는다.
+    /// ★Put a cap on the wait — if delivery breaks it must be **a failure, not a hang**★
+    /// What these tests measure is "does that frame come to that connection", so in an implementation where the reply leaks to a wrong connection this never wakes. An unbounded wait looks **as if stuck** on the runner and does not say which assertion was wrong.
+    /// ★The cap is not a criterion★ — the normal path wakes at once so this value is only a means of observing "it is broken" and is set generously so a slow runner gives no false positive.
     async fn next_event(rx: &mut mpsc::Receiver<Frame>) -> AgentEvent {
         let frame = tokio::time::timeout(Duration::from_secs(10), rx.recv())
             .await
-            .expect("프레임을 기다리다 상한을 넘겼다 — 배달이 이 연결로 오지 않는다")
-            .expect("프레임 하나");
+            .expect("exceeded the cap waiting for a frame — the delivery does not come to this connection")
+            .expect("one frame");
         event_from(frame)
     }
 
-    /// 주인 하나가 이름 하나를 얹고 붙어 있는 명부 + 그 주인 앞으로 나가는 프레임을 받는 곳.
+    /// A roster with one owner attached holding one name + the place that receives the frames sent to that owner.
     fn roster_with_owner(conn_id: ConnId, name: &str) -> (CommandRoster, mpsc::Receiver<Frame>) {
         let roster = CommandRoster::new();
         let (sink, inbox) = sink_with_inbox();
@@ -2884,42 +2467,42 @@ pub(crate) mod tests {
                     deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
-            .expect("등록");
+            .expect("registration");
         (roster, inbox)
     }
 
-    /// 물어보는 쪽 연결을 명부에 세운다 — 답장은 그 연결의 출구로 나간다.
+    /// Puts the asking connection on the roster — the reply goes out through that connection's outlet.
     fn attach_caller(roster: &CommandRoster, conn_id: ConnId) -> mpsc::Receiver<Frame> {
         let (sink, inbox) = sink_with_inbox();
         roster.attach(conn_id, &sink);
         inbox
     }
 
-    // ── 갈래 ⓪ 내 표(1단계) ──────────────────────────────────────────────────────
+    // ── branch ⓪ my own table (stage 1) ──────────────────────────────────────────
 
-    /// 1단계 가짜 표 — ★매니저도 실 표도 없이★ 이 갈래를 재게 한다(포트의 존재 이유 = [`LocalCommands`]).
+    /// A fake stage 1 table — ★with neither a manager nor a real table★ so this branch can be measured (the reason the port exists = [`LocalCommands`]).
     struct FakeLocal {
-        /// 내가 쥐고 있다고 답할 이름.
+        /// The name it answers as held.
         name: &'static str,
-        /// 낼 결말. `None` = 「내 이름인데 빈손」(다음 단계로 떨어지는 갈래).
+        /// The outcome to give. `None` = "my name but empty-handed" (the branch that falls to the next stage).
         answer: Option<Result<serde_json::Value, CommandError>>,
-        /// 본문이 돈 스레드 — blocking 풀로 옮겨졌나를 이 값으로 잰다.
+        /// The thread the body ran on — measures whether it was moved to the blocking pool.
         ran_on: Mutex<Option<std::thread::ThreadId>>,
-        /// 본문이 받은 인자 — 봉투가 그대로 실려 오는지 본다.
+        /// The arguments the body received — to see whether the envelope arrives as is.
         saw: Mutex<Option<serde_json::Value>>,
-        /// 본문이 받은 **입구 라벨** — 배달이 자기 입구를 그대로 넘기는지 재는 수단이다.
+        /// The **entrance label** the body received — the means to measure that delivery passes its own entrance as is.
         saw_entrance: Mutex<Option<&'static str>>,
-        /// 본문이 받은 호출자 — 배달이 봉투를 낸 연결을 임대 판정 재료로 넘기는지 본다.
+        /// The caller the body received — to see whether delivery passes the connection that sent the envelope as material for the lease decision.
         saw_caller: Mutex<Option<Option<ConnId>>>,
-        /// 본문이 **몇 번** 돌았나 — 「같은 Write 동사가 두 번 적용되지 않는다」의 관측 수단이다.
+        /// **How many times** the body ran — the means to observe "the same Write verb is not applied twice".
         runs: std::sync::atomic::AtomicUsize,
-        /// 본문이 들어왔음을 알리는 신호 — 시험이 「본문이 도는 동안」을 결정적으로 겨눌 수 있게 한다.
+        /// A signal that the body has entered — lets a test aim deterministically at "while the body runs".
         entered: Mutex<Option<mpsc::UnboundedSender<()>>>,
-        /// 본문을 붙잡아 두는 문 — 시험이 열어 줄 때까지 안 끝난다.
+        /// A door holding the body — it does not end until the test opens it.
         gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
-        /// 문이 열린 **뒤에** 터진다 — 「마감을 넘긴 본문이 답 없이 죽는다」를 결정적으로 만든다.
+        /// Blows up **after** the door opens — makes "a body past the deadline dies with no answer" deterministic.
         panic_after_gate: bool,
-        /// 이 이름의 효과 — 번호를 붙드는지(Write) 아닌지(Read)를 가른다([`retains_the_id`]).
+        /// The effect of this name — separates whether it holds the number (Write) or not (Read) ([`retains_the_id`]).
         effect: Effect,
         /// This name's declared deadline class — sizes its seat ([`CommandDeliveries::seat_span`]).
         deadline: DeadlineClass,
@@ -2963,8 +2546,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// 문 달린 1단계 표 — 본문이 **도는 중**인 상태를 시험이 손에 쥔다(마감·재질의·상한이 그 상태에서만
-    /// 갈린다). 반환: 표 · 문을 여는 손잡이 · 본문이 들어왔다는 신호.
+    /// A stage 1 table with a door — the test holds the state where the body is **running** (the deadline · re-query · cap diverge only in that state).
+    /// Returns: the table · the handle that opens the door · the signal that the body entered.
     fn parked_local(
         name: &'static str,
     ) -> (
@@ -2982,7 +2565,7 @@ pub(crate) mod tests {
         (Arc::new(local), open, entered_rx)
     }
 
-    /// 문이 열린 뒤 **죽는** 1단계 표 — 마감을 넘긴 본문이 답 없이 끝나는 갈래를 결정적으로 만든다.
+    /// A stage 1 table that **dies** after the door opens — makes deterministic the branch where a body past the deadline ends with no answer.
     fn parked_dying_local(
         name: &'static str,
     ) -> (
@@ -3020,8 +2603,7 @@ pub(crate) mod tests {
             if let Some(entered) = self.entered.lock().expect("fake local poisoned").as_ref() {
                 let _ = entered.send(());
             }
-            // ★문은 잠금 **밖에서** 기다린다★ — 안에서 기다리면 두 번째 본문이 잠금에 막혀, 「두 번 돌았다」가
-            //   실패가 아니라 **hang** 으로 나타난다. 문을 꺼내 오면 두 번째는 그냥 통과해 계수에 잡힌다.
+            // ★The door is waited on **outside** the lock★ — waiting inside would block the second body on the lock and "ran twice" would show up not as a failure but as a **hang**. Taking the door out lets the second simply pass and be caught in the count.
             let gate = self.gate.lock().expect("fake local poisoned").take();
             if let Some(gate) = gate {
                 let _ = gate.recv();
@@ -3039,10 +2621,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// ★내 표가 있으면 그 이름은 **여기서 끝난다**★ — 같은 이름을 얹은 주인이 붙어 있어도 봉투가 나가지
-    /// 않는다. 이 우선순위는 [`route`] 의 단계 순서(내 표 → 명부)를 그대로 따른 것이고, 발견 목록도 같은
-    /// 순서로 답해야 한다(`connection_core` 의 그 시험) — 둘이 갈리면 호출자는 남의 help 로 인자를 맞춘 뒤
-    /// 데몬 핸들러에게 반려당한다.
+    /// ★If my own table has it, that name **ends here**★ — no envelope goes out even if an owner that put on the same name is attached. This priority follows the stage order of [`route`] (my table → roster) as is, and the discovery list must
+    /// answer in the same order (that test in `connection_core`) — if the two diverge the caller fits arguments by another's help and gets refused by the daemon handler.
     #[tokio::test]
     async fn a_name_my_own_table_holds_is_answered_here_and_never_reaches_the_roster() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "agent.list");
@@ -3071,27 +2651,28 @@ pub(crate) mod tests {
                 assert_eq!(reply.request_id, request_id);
                 assert_eq!(reply.outcome, Ok(json!({ "agents": [] })));
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         }
         assert!(
             owner_inbox.try_recv().is_err(),
-            "내 표가 답했으면 봉투는 아무 데도 안 나간다(같은 이름을 얹은 주인이 있어도)"
+            "if my table answered no envelope goes anywhere (even if an owner put on the same name)"
         );
         assert_eq!(
             *local.saw.lock().unwrap(),
             Some(json!({ "window": "main" })),
-            "봉투의 인자가 그대로 실려 온다"
+            "the envelope's arguments arrive as is"
         );
-        // 적용된 Write 는 자리를 **놓지 않고 붙든다** — 그 번호로 다시 오면 안 돌린다([`SeatState::Retained`]).
-        assert_eq!(deliveries.in_flight(), 1, "적용된 번호는 자리가 계속 쥔다");
+        // An applied Write **holds the seat without releasing** — if it comes again with that number it is not run ([`SeatState::Retained`]).
+        assert_eq!(
+            deliveries.in_flight(),
+            1,
+            "the seat keeps holding an applied number"
+        );
     }
 
-    /// ★본문은 **런타임 워커가 아닌 곳**에서 돈다★ — 이 표의 핸들러는 프로필 락을 쥔 채 디스크를 쓰고
-    /// 조기 종료를 수 초 폴링하므로(agent `make_table` doc), 배달 태스크에서 그대로 돌면 그 시간 내내
-    /// 워커 하나가 막혀 같은 워커의 다른 연결이 함께 선다.
-    ///
-    /// ★현재 스레드 런타임이라 이 대조가 성립한다★: 배달 future 는 이 테스트 스레드에서 돌고,
-    /// `spawn_blocking` 본문은 정의상 블로킹 풀 스레드에서 돈다 — 두 id 가 같으면 offload 가 사라진 것이다.
+    /// ★The body runs **somewhere other than a runtime worker**★ — this table's handlers write disk holding the profile lock and poll early exit for seconds (agent `make_table` doc), so running as is on the delivery task blocks one worker that whole time
+    /// and another connection on the same worker stalls with it.
+    /// ★Being a current-thread runtime is what makes this comparison hold★: the delivery future runs on this test thread and the `spawn_blocking` body by definition runs on a blocking-pool thread — if the two ids are equal the offload is gone.
     #[tokio::test]
     async fn my_own_table_runs_off_the_delivery_task() {
         let roster = CommandRoster::new();
@@ -3109,20 +2690,21 @@ pub(crate) mod tests {
         .await;
 
         let _ = next_event(&mut caller_inbox).await;
-        let ran_on = local.ran_on.lock().unwrap().expect("본문이 돌았어야");
+        let ran_on = local
+            .ran_on
+            .lock()
+            .unwrap()
+            .expect("the body must have run");
         assert_ne!(
             ran_on,
             std::thread::current().id(),
-            "내 표를 배달 태스크에서 그대로 돌리면 그 워커가 막힌다"
+            "running my table as is on the delivery task blocks that worker"
         );
     }
 
-    /// ★자기 이름이라 해 놓고 빈손을 내면 **드러낸다** — 다음 단계로 흘리지 않는다★
-    ///
-    /// 라우팅 권위는 [`LocalCommands::claim`] 하나다. 그 답이 「내 것」이면 자리는 「아무에게도 위임하지
-    /// 않았다」고 주장하는 중이므로([`Pending::local`]), 그 상태로 봉투를 주인에게 보내면 ① 주인의 정당한
-    /// 결말이 [`OutcomeLanding::NotDelegated`] 로 거절되고 ② 끊김 정리가 그 자리를 안 치운다. 조용한
-    /// 어긋남 대신 `INTERNAL` 로 답하고 서버에 남긴다.
+    /// ★Claiming it as its own name yet returning empty-handed is **surfaced** — it does not flow to the next stage★
+    /// The routing authority is [`LocalCommands::claim`] alone. If that answers "mine" the seat is claiming "delegated to no one" ([`Pending::local`]), so sending the envelope to the owner in that state would ① have the owner's legitimate outcome refused with
+    /// [`OutcomeLanding::NotDelegated`] and ② leave the seat uncleaned by disconnect cleanup. Instead of a quiet mismatch it answers `INTERNAL` and leaves it on the server.
     #[test]
     fn a_local_table_that_claims_a_name_but_answers_nothing_is_surfaced() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "agent.list");
@@ -3142,31 +2724,27 @@ pub(crate) mod tests {
             .await;
         });
 
-        match event_from(caller_inbox.try_recv().expect("답장 한 장")) {
+        match event_from(caller_inbox.try_recv().expect("one reply")) {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
-                let err = reply.outcome.expect_err("계약 위반");
+                let err = reply.outcome.expect_err("contract violation");
                 assert_eq!(err.code(), ErrorCode::Internal);
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         }
         assert!(
             owner_inbox.try_recv().is_err(),
-            "내 것이라 해 놓고 남에게 보내면 그 자리가 주인의 결말을 거절한다"
+            "claiming mine then sending to another makes that seat refuse the owner's outcome"
         );
         assert!(
             logged.iter().any(|line| line.contains("agent.list")),
-            "권위와 실행이 갈린 사건이 서버에도 남아야 한다: {logged:?}"
+            "the incident where authority and execution diverged must also remain on the server: {logged:?}"
         );
-        assert_eq!(
-            deliveries.in_flight(),
-            0,
-            "아무것도 안 돌았으므로 붙들지 않는다"
-        );
+        assert_eq!(deliveries.in_flight(), 0, "nothing ran so it is not held");
     }
 
-    /// ★내 표의 실패도 **그 왕복의 답장 하나**다★ — 코드는 표가 지은 그대로 가고, 재시도 지시만 이 홉이
-    /// 내린다([`no_retry`] · [`send_reply`]).
+    /// ★A failure of my own table is also **that round trip's one reply**★ — the code goes as the table built it and only the retry instruction is issued by this hop
+    /// ([`no_retry`] · [`send_reply`]).
     #[tokio::test]
     async fn a_failure_from_my_own_table_travels_as_the_reply() {
         let roster = CommandRoster::new();
@@ -3189,23 +2767,25 @@ pub(crate) mod tests {
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
-                let err = reply.outcome.expect_err("실패 답장");
+                let err = reply.outcome.expect_err("failure reply");
                 assert_eq!(err.code(), ErrorCode::NotFound);
                 assert!(err.message().contains("ghost"), "{}", err.message());
-                assert_eq!(err.retry(), RetryMode::Never, "지시는 이 홉이 내린다");
+                assert_eq!(
+                    err.retry(),
+                    RetryMode::Never,
+                    "the instruction is issued by this hop"
+                );
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         }
     }
 
-    /// ★마감은 1단계에도 **살아 있어야** 한다★ — 본문이 마감을 넘겨도 호출자는 유계 답을 받는다.
-    ///
-    /// 이 시험이 없으면 나는 회귀: 배달이 본문만 기다리고 **자리를 안 보면**, 수거기가 `TIMEOUT` 을 자리에
-    /// 넣어도 그것을 꺼내 프레임으로 만들 사람이 없어 **한 장도 안 나간다**. 그런데 수거기 로그는
-    /// 「TIMEOUT 으로 답했다」고 적어, 서버 기록만 보면 답한 것처럼 보인다(하지 않은 일을 적는 로그).
+    /// ★The deadline must **stay alive** in stage 1 too★ — even if the body passes the deadline the caller gets a bounded answer.
+    /// The regression that occurs without this test: if delivery waits only for the body and **does not look at the seat**, even when the sweeper puts `TIMEOUT` in the seat nobody takes it out and makes it a frame so **not one goes out**. Yet the sweeper log
+    /// writes "answered TIMEOUT" so by the server record alone it looks as if it answered (a log writing what was not done).
     #[test]
     fn a_local_command_that_outlives_its_deadline_still_answers_the_caller() {
-        // 마감 뒤 성공 warn 자리를 때리므로 capture 안에서 돈다(`log_capture` 「관측 조건」①).
+        // It hits the post-deadline success warn place so it runs inside capture (`log_capture` "Observation conditions" ①).
         let _logged = capture_loud(async {
             let roster = CommandRoster::new();
             let mut caller_inbox = attach_caller(&roster, 2);
@@ -3221,40 +2801,45 @@ pub(crate) mod tests {
                 envelope("agent.new", &OwnerToken::new("whatever")),
                 ENTRANCE_SOCKET,
             ));
-            // 전제: 본문이 **도는 중**이어야 이 시험이 그 상태를 잰다.
-            entered.recv().await.expect("본문이 들어갔다");
+            // Premise: the body must be **running** for this test to measure that state.
+            entered.recv().await.expect("the body entered");
 
             clock.advance(Duration::from_secs(11));
-            assert_eq!(deliveries.expire(), 1, "마감이 그 자리를 거둔다");
+            assert_eq!(deliveries.expire(), 1, "the deadline reaps that seat");
 
             match next_event(&mut caller_inbox).await {
                 AgentEvent::CommandReply { reply } => {
                     let reply = opened_reply(&reply);
-                    let err = reply.outcome.expect_err("마감은 실패 답장이다");
+                    let err = reply.outcome.expect_err("the deadline is a failure reply");
                     assert_eq!(err.code(), ErrorCode::Timeout);
                     assert_eq!(err.retry(), RetryMode::Never);
                 }
-                other => panic!("마감도 답장 한 장으로 나가야: {other:?}"),
+                other => panic!("the deadline must go out as one reply too: {other:?}"),
             }
 
-            // 문을 열면 본문이 끝난다 — 적용된 Write 라 자리는 놓이지 않고 **보유**로 넘어간다.
-            open.send(()).expect("문 열기");
+            // Opening the door ends the body — an applied Write so the seat is not released but passes to **holding**.
+            open.send(()).expect("open the door");
             finished(round_trip).await;
             assert_eq!(local.runs(), 1);
-            assert_eq!(deliveries.in_flight(), 1, "적용된 번호는 자리가 계속 쥔다");
-            // 보유 창이 지나면 수거기가 놓는다 — 안 놓으면 그 번호가 영영 막힌다.
+            assert_eq!(
+                deliveries.in_flight(),
+                1,
+                "the seat keeps holding an applied number"
+            );
+            // When the hold window passes the sweeper releases it — if it did not that number would stay blocked forever.
             clock.advance(Duration::from_secs(11));
             assert_eq!(deliveries.expire(), 0);
-            assert_eq!(deliveries.in_flight(), 0, "창이 지나면 자리를 놓는다");
+            assert_eq!(
+                deliveries.in_flight(),
+                0,
+                "when the window passes the seat is released"
+            );
         });
     }
 
-    /// ★남이 보낸 결말이 **내가 답하는 명령의 답**이 될 수 없다★
-    ///
-    /// 이 왕복의 봉투는 아무에게도 나가지 않았으므로 그 번호로 오는 `CommandOutcome` 은 정의상 정당한
-    /// 답이 아니다. 그것을 받아 주면 남이 지어낸 payload 가 답장으로 나가고(호출자는 그것을 자기 명령의
-    /// 결과로 읽는다) 핸들러의 진짜 결과는 조용히 버려진다 — 인증 경계 안이라도 **한 연결이 다른 연결의
-    /// 명령 결과를 정할 수 있으면 안 된다**.
+    /// ★An outcome another sent **cannot become the answer of a command I answer**★
+    /// This round trip's envelope went to no one so a `CommandOutcome` arriving with that number is by definition not a legitimate answer. Accepting it would send a payload another made up out as the reply (the caller reads it as its own command's result) and quietly discard the
+    /// handler's real result — **even inside the auth boundary one connection must not be able to decide another connection's command result**.
     #[tokio::test]
     async fn a_wire_outcome_cannot_answer_a_command_this_daemon_answers_itself() {
         let roster = CommandRoster::new();
@@ -3272,7 +2857,7 @@ pub(crate) mod tests {
             env,
             ENTRANCE_SOCKET,
         ));
-        entered.recv().await.expect("본문이 들어갔다");
+        entered.recv().await.expect("the body entered");
 
         assert_eq!(
             deliveries.complete(CommandReply::ok(
@@ -3280,10 +2865,10 @@ pub(crate) mod tests {
                 json!({ "agent_id": "forged", "state": "sleeping" })
             )),
             OutcomeLanding::NotDelegated,
-            "위임한 적 없는 왕복의 결말은 거절된다"
+            "the outcome of a round trip that was never delegated is refused"
         );
 
-        open.send(()).expect("문 열기");
+        open.send(()).expect("open the door");
         finished(round_trip).await;
 
         match next_event(&mut caller_inbox).await {
@@ -3292,22 +2877,20 @@ pub(crate) mod tests {
                 assert_eq!(
                     reply.outcome,
                     Ok(json!({ "ok": true })),
-                    "핸들러의 진짜 결과가 나가야 한다"
+                    "the handler's real result must go out"
                 );
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         }
-        assert!(caller_inbox.try_recv().is_err(), "질의 하나에 프레임 하나");
+        assert!(caller_inbox.try_recv().is_err(), "one frame per query");
     }
 
-    /// ★마감 뒤 같은 번호로 다시 물어도 **같은 Write 동사를 두 번 돌리지 않는다**★
-    ///
-    /// 계약은 같은 번호의 재질의를 막지 않으므로([`Pending::token`]) 이 코드가 그것을 견뎌야 한다. 본문은
-    /// 취소할 수 없어(blocking 풀) 마감 뒤에도 돌고 있는데, 그때 자리를 갈아엎으면 에이전트가 둘 생기고
-    /// 한 번호에 프레임이 둘 나간다. 자리를 붙들어 두는 것이 그 둘을 함께 막는 수단이다.
+    /// ★Even if asked again with the same number after the deadline, **the same Write verb is not run twice**★
+    /// The contract does not forbid a re-query of the same number ([`Pending::token`]) so this code must tolerate it. The body cannot be cancelled (blocking pool) and still runs after the deadline, and overturning the seat then would create two agents
+    /// and send two frames under one number. Holding the seat is the means that blocks both together.
     #[test]
     fn a_resend_after_the_deadline_does_not_run_the_same_local_command_twice() {
-        // 마감 뒤 성공 warn 자리를 때리므로 capture 안에서 돈다(`log_capture` 「관측 조건」①).
+        // It hits the post-deadline success warn place so it runs inside capture (`log_capture` "Observation conditions" ①).
         let _logged = capture_loud(async {
             let roster = CommandRoster::new();
             let mut caller_inbox = attach_caller(&roster, 2);
@@ -3326,16 +2909,16 @@ pub(crate) mod tests {
                 env,
                 ENTRANCE_SOCKET,
             ));
-            entered.recv().await.expect("본문이 들어갔다");
+            entered.recv().await.expect("the body entered");
             clock.advance(Duration::from_secs(11));
             assert_eq!(deliveries.expire(), 1);
             let timed_out = next_event(&mut caller_inbox).await;
             assert!(
                 matches!(timed_out, AgentEvent::CommandReply { .. }),
-                "전제: 마감 답장이 먼저 나갔다"
+                "premise: the deadline reply went out first"
             );
 
-            // 규약대로 같은 번호로 재질의 — 본문은 아직 돌고 있다.
+            // Re-query with the same number per the convention — the body is still running.
             super::deliver(
                 roster.clone(),
                 deliveries.clone(),
@@ -3355,37 +2938,34 @@ pub(crate) mod tests {
             match next_event(&mut caller_inbox).await {
                 AgentEvent::CommandReply { reply } => {
                     let reply = opened_reply(&reply);
-                    let err = reply.outcome.expect_err("다시 돌리지 않는다");
+                    let err = reply.outcome.expect_err("it is not run again");
                     assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
                     assert!(
                         err.message().contains("still running"),
-                        "무슨 일이 벌어지는 중인지 말해야: {}",
+                        "must say what is happening: {}",
                         err.message()
                     );
                 }
-                other => panic!("재질의도 답을 받아야: {other:?}"),
+                other => panic!("the re-query must get an answer too: {other:?}"),
             }
             assert_eq!(
                 local.runs(),
                 1,
-                "재질의가 본문을 한 번 더 돌리면 에이전트가 둘 생긴다"
+                "if the re-query ran the body once more two agents would come up"
             );
 
-            open.send(()).expect("문 열기");
+            open.send(()).expect("open the door");
             finished(round_trip).await;
             assert_eq!(local.runs(), 1);
         });
     }
 
-    /// ★본문이 끝난 **뒤에** 온 재질의도 다시 돌리지 않는다★ — 자리가 그 번호를 계속 붙들기 때문이다.
-    ///
-    /// 경합이 필요 없는 순서다: 마감 → `TIMEOUT` → 본문 완료 → 재질의. 자리를 완료 즉시 놓으면 그 재질의가
-    /// 빈 표를 보고 **에이전트를 하나 더 만든다**(지우는 동사가 없다 — ADR-0122).
-    /// ★번호를 붙드는 곳이 **자리 하나뿐**이라는 것이 이 시험의 다른 절반이다★ — 별도 기억표를 두면 실행
-    /// 여부·효과와 무관하게 번호가 남아, 아래 이웃 시험들이 재는 갈래가 전부 어긋난다.
+    /// ★A re-query that comes **after the body ended** is not run again either★ — because the seat keeps holding that number.
+    /// An order that needs no race: deadline → `TIMEOUT` → body completes → re-query. Releasing the seat the moment it completes would let that re-query see an empty table and **make one more agent** (there is no delete verb — ADR-0122).
+    /// ★That **only one seat** holds the number is the other half of this test★ — with a separate memory table the number would remain regardless of whether it ran or its effect, and every branch the neighboring tests below measure would go off.
     #[test]
     fn a_resend_after_the_body_finished_is_refused_by_the_retained_seat() {
-        // 마감 뒤 성공 warn 자리를 때리므로 capture 안에서 돈다(`log_capture` 「관측 조건」①).
+        // It hits the post-deadline success warn place so it runs inside capture (`log_capture` "Observation conditions" ①).
         let _logged = capture_loud(async {
             let roster = CommandRoster::new();
             let mut caller_inbox = attach_caller(&roster, 2);
@@ -3411,18 +2991,18 @@ pub(crate) mod tests {
                 env,
                 ENTRANCE_SOCKET,
             ));
-            entered.recv().await.expect("본문이 들어갔다");
+            entered.recv().await.expect("the body entered");
             clock.advance(Duration::from_secs(11));
             assert_eq!(deliveries.expire(), 1);
             let _timed_out = next_event(&mut caller_inbox).await;
 
-            // 본문이 끝난다 — 자리는 **놓이지 않고** 보유로 넘어간다.
-            open.send(()).expect("문 열기");
+            // The body ends — the seat is **not released** and passes to holding.
+            open.send(()).expect("open the door");
             finished(round_trip).await;
             assert_eq!(
                 deliveries.in_flight(),
                 1,
-                "전제: 적용된 번호는 자리가 계속 쥔다"
+                "premise: an applied number is still held by the seat"
             );
 
             super::deliver(
@@ -3438,32 +3018,32 @@ pub(crate) mod tests {
             match next_event(&mut caller_inbox).await {
                 AgentEvent::CommandReply { reply } => {
                     let reply = opened_reply(&reply);
-                    let err = reply.outcome.expect_err("다시 돌리지 않는다");
+                    let err = reply.outcome.expect_err("it is not run again");
                     assert_eq!(err.code(), ErrorCode::AlreadyApplied);
                     assert_eq!(err.retry(), RetryMode::Never);
                 }
-                other => panic!("재질의도 답을 받아야: {other:?}"),
+                other => panic!("the re-query must get an answer too: {other:?}"),
             }
-            assert_eq!(local.runs(), 1, "두 번째 실행이 없어야 한다");
+            assert_eq!(local.runs(), 1, "there must be no second execution");
 
-            // ★보유는 유계다 — 창이 지나면 수거기가 자리를 놓는다★(알고 남긴 잔여: 그 뒤의 재질의는 새 요청이다).
+            // ★The hold is bounded — when the window passes the sweeper releases the seat★ (a known residue: a re-query after that is a new request).
             clock.advance(Duration::from_secs(11));
             assert_eq!(
                 deliveries.expire(),
                 0,
-                "보유 만료는 「답 못 받은 왕복」이 아니다"
+                "a hold expiry is not a 'round trip that got no answer'"
             );
-            assert_eq!(deliveries.in_flight(), 0, "창이 지나면 자리를 놓는다");
+            assert_eq!(
+                deliveries.in_flight(),
+                0,
+                "when the window passes the seat is released"
+            );
         });
     }
 
-    /// ★끊김은 보유를 **끝내지 않는다** — 오히려 보유가 가장 필요한 사건이다★
-    ///
-    /// 소켓이 끊기는 순간이야말로 호출자가 「내 명령이 닿았나」를 모르는 때다. 다시 붙어 같은 번호로 다시
-    /// 묻는 것이 그 다음 수순이고(형제 [`Seat::Taken`] 갈래가 그 시나리오를 이미 적어 두었다), 그때 자리가
-    /// 없으면 같은 Write 동사가 두 번 적용된다 — 지울 동사가 없다(ADR-0122).
-    /// ★보유의 수명은 **번호**에 매여 있지 연결에 매여 있지 않다★ — 그래서 정리는 그것을 건드리지 않고,
-    /// 창이 지나면 수거기가 놓는다.
+    /// ★A disconnect does **not end** the hold — it is rather the event where the hold is most needed★
+    /// The very moment the socket drops is when the caller does not know "did my command arrive". Reattaching and asking again with the same number is the next step (the sibling [`Seat::Taken`] branch already wrote that scenario), and with no seat then the same Write verb is applied twice — there is no verb to delete it (ADR-0122).
+    /// ★The life of the hold is tied to the **number**, not to the connection★ — so cleanup does not touch it, and when the window passes the sweeper releases it.
     #[tokio::test]
     async fn cleanup_leaves_a_retained_seat_for_the_reconnecting_caller() {
         let roster = CommandRoster::new();
@@ -3482,18 +3062,22 @@ pub(crate) mod tests {
         )
         .await;
         let _ = next_event(&mut caller_inbox).await;
-        assert_eq!(deliveries.in_flight(), 1, "전제: 적용된 번호를 붙들고 있다");
+        assert_eq!(
+            deliveries.in_flight(),
+            1,
+            "premise: the applied number is held"
+        );
 
-        // 운영의 `on_disconnect` 순서 그대로.
+        // Exactly the production `on_disconnect` order.
         roster.detach(2);
         assert_eq!(
             deliveries.drop_origin(2),
             0,
-            "보유 자리를 거두면 재접속 재질의가 같은 동사를 다시 돌린다"
+            "if the held seat were reaped a reconnect re-query would run the same verb again"
         );
         assert_eq!(deliveries.in_flight(), 1);
 
-        // 창이 지나면 그때 놓인다 — 영구 상주가 아니다.
+        // It is released when the window passes — not permanent residency.
         clock.advance(Duration::from_secs(11));
         assert_eq!(deliveries.expire(), 0);
         assert_eq!(deliveries.in_flight(), 0);
@@ -3739,8 +3323,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// ★보유는 **개수로도** 닫혀 있다★ — 창만으로는 도착률 × 창만큼 자란다(빠르게 도는 클라이언트 하나가
-    /// 그 곱을 실제로 만든다). 넘치면 **오래된 것부터** 밀려나고, 밀려난 번호는 보호를 잃는다.
+    /// ★The hold is closed **by count** too★ — by the window alone it grows to arrival rate × window (one fast-running client really makes that product). On overflow **the oldest are pushed out first** and a pushed-out number loses its protection.
     #[tokio::test]
     async fn retention_is_bounded_by_count_not_only_by_time() {
         let roster = CommandRoster::new();
@@ -3767,15 +3350,12 @@ pub(crate) mod tests {
         assert_eq!(
             deliveries.in_flight(),
             MAX_RETAINED_LOCAL,
-            "창 안에 몇 개가 오든 보유는 상한을 넘지 않는다"
+            "however many come inside the window the hold does not exceed the cap"
         );
     }
 
-    /// ★**돌지 않은** 번호는 붙들지 않는다★ — 이것이 별도 기억표가 못 가리던 갈래다.
-    ///
-    /// 일상적인 순서다: 칸 이름을 틀려 반려당한다 → 고쳐서 **같은 번호로** 다시 보낸다. 반려를 「적용됐다」로
-    /// 기억하면 그 재시도가 `ALREADY_APPLIED` 를 받고, 호출자는 **돌지도 않은 명령**을 두고 "현재 상태를
-    /// 읽어 보라"는 안내를 듣는다.
+    /// ★A number that **did not run** is not held★ — this is the branch a separate memory table could not tell apart.
+    /// The everyday order: a wrong field name gets rejected → fixed and resent **with the same number**. Remembering the rejection as "applied" would give that retry `ALREADY_APPLIED` and the caller would hear "read the current state" about a **command that never ran**.
     #[tokio::test]
     async fn a_rejected_local_command_does_not_hold_its_request_id() {
         let roster = CommandRoster::new();
@@ -3801,11 +3381,15 @@ pub(crate) mod tests {
         let refused = next_event(&mut caller_inbox).await;
         assert!(
             matches!(refused, AgentEvent::CommandReply { .. }),
-            "전제: 반려 답장이 나갔다"
+            "premise: the rejection reply went out"
         );
-        assert_eq!(deliveries.in_flight(), 0, "반려는 번호를 붙들지 않는다");
+        assert_eq!(
+            deliveries.in_flight(),
+            0,
+            "a rejection does not hold the number"
+        );
 
-        // 칸을 고쳐 **같은 번호로** 다시 — 이번에는 도는 표다.
+        // Fix the field and resend **with the same number** — this time it is a table that runs.
         let fixed = Arc::new(FakeLocal::answering("agent.new", Ok(json!({ "ok": true }))));
         super::deliver(
             roster.clone(),
@@ -3829,19 +3413,17 @@ pub(crate) mod tests {
                 assert_eq!(
                     reply.outcome,
                     Ok(json!({ "ok": true })),
-                    "고쳐 보낸 재시도는 실제로 돌아야 한다"
+                    "the retry sent after fixing must actually run"
                 );
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         }
         assert_eq!(fixed.runs(), 1);
     }
 
-    /// ★「적용됐을 수 있다」고 **말하는** 실패는 붙든다★ — 판정이 놓을 목록으로 서 있다는 것의 알맹이다.
-    ///
-    /// `OUTCOME_UNKNOWN` 은 이 저장소에서 「일부가 이미 적용됐을 수 있다」를 문구로 명시하는 코드다
-    /// (`control::commands::drive_to_completion`). 붙들 목록을 손으로 세는 형태였다면 이 코드가 거기 빠져
-    /// **재실행으로 새어** 나갔다 — 목록을 뒤집어야만 이런 코드가 자동으로 안전한 쪽에 선다.
+    /// ★A failure that **says** "it may have been applied" is held★ — the substance of the decision standing as a list to release.
+    /// `OUTCOME_UNKNOWN` is, in this repo, a code that states in its wording "part may already have been applied" (`control::commands::drive_to_completion`). Had the list to hold been counted by hand this code would have been missing from it and
+    /// **leaked into re-execution** — only by inverting the list does such a code automatically stand on the safe side.
     #[tokio::test]
     async fn a_failure_that_may_have_applied_still_holds_its_request_id() {
         let roster = CommandRoster::new();
@@ -3869,12 +3451,11 @@ pub(crate) mod tests {
         assert_eq!(
             deliveries.in_flight(),
             1,
-            "적용됐을 수 있는 번호를 놓으면 재질의가 그것을 한 번 더 적용한다"
+            "releasing a number that may have been applied lets a re-query apply it once more"
         );
     }
 
-    /// ★읽기는 번호를 붙들지 않는다★ — 붙들면 흔한 조회가 그 번호를 막고, 별도 기억표였다면 **다른 번호의
-    /// 보유까지** 밀어냈다(개수 상한을 조회 트래픽이 갉아먹는 형태).
+    /// ★A read does not hold the number★ — holding it would let a common lookup block that number, and with a separate memory table it pushed out **even other numbers' holds** (traffic of lookups eating the count cap).
     #[tokio::test]
     async fn a_read_command_does_not_hold_its_request_id() {
         let roster = CommandRoster::new();
@@ -3898,14 +3479,12 @@ pub(crate) mod tests {
             let _ = next_event(&mut caller_inbox).await;
         }
 
-        assert_eq!(deliveries.in_flight(), 0, "읽기는 자리를 남기지 않는다");
-        assert_eq!(reading.runs(), 2, "읽기는 매번 돈다");
+        assert_eq!(deliveries.in_flight(), 0, "a read leaves no seat");
+        assert_eq!(reading.runs(), 2, "a read runs every time");
     }
 
-    /// ★마감 뒤에 끝난 결말을 **말없이 버리지 않는다**★
-    ///
-    /// 호출자에게는 `TIMEOUT`(「적용됐는지 확인하라」)을 보내 놓고 정작 그 답을 이쪽이 손에 쥔 채 버린다.
-    /// 서버 기록이 없으면 만들어진 에이전트를 아무도 못 찾는다 — 지우는 동사도 없다(ADR-0122).
+    /// ★An outcome that ended after the deadline is **not discarded silently**★
+    /// The caller is sent `TIMEOUT` ("check whether it was applied") while this side holds that answer in hand and throws it away. Without a server record nobody can find the agent that was made — and there is no delete verb either (ADR-0122).
     #[test]
     fn a_body_that_finishes_after_its_deadline_is_recorded_not_dropped() {
         let roster = CommandRoster::new();
@@ -3923,21 +3502,21 @@ pub(crate) mod tests {
                 envelope("agent.new", &OwnerToken::new("whatever")),
                 ENTRANCE_SOCKET,
             ));
-            entered.recv().await.expect("본문이 들어갔다");
+            entered.recv().await.expect("the body entered");
             clock.advance(Duration::from_secs(11));
             assert_eq!(deliveries.expire(), 1);
             let _timed_out = next_event(&mut caller_inbox).await;
-            open.send(()).expect("문 열기");
+            open.send(()).expect("open the door");
             finished(round_trip).await;
         });
 
         assert!(
             logged.iter().any(|line| line.contains("\"ok\":true")),
-            "마감 뒤에 난 결과가 서버에 남아야 한다: {logged:?}"
+            "the result produced after the deadline must remain on the server: {logged:?}"
         );
     }
 
-    /// 같은 자리에서 본문이 **죽어도** 기록은 남는다 — 마감 전 갈래에만 계측을 달면 이쪽이 통째로 조용해진다.
+    /// At the same place the record remains **even if the body dies** — had instrumentation been attached only to the before-deadline branch this side would go wholly silent.
     #[test]
     fn a_body_that_dies_after_its_deadline_is_logged_too() {
         let roster = CommandRoster::new();
@@ -3956,11 +3535,11 @@ pub(crate) mod tests {
                     envelope("agent.new", &OwnerToken::new("whatever")),
                     ENTRANCE_SOCKET,
                 ));
-                entered.recv().await.expect("본문이 들어갔다");
+                entered.recv().await.expect("the body entered");
                 clock.advance(Duration::from_secs(11));
                 assert_eq!(deliveries.expire(), 1);
                 let _timed_out = next_event(&mut caller_inbox).await;
-                open.send(()).expect("문 열기");
+                open.send(()).expect("open the door");
                 finished(round_trip).await;
             })
         });
@@ -3969,21 +3548,19 @@ pub(crate) mod tests {
             logged
                 .iter()
                 .any(|line| line.contains("agent.new") && line.contains("panicked")),
-            "마감 뒤에 죽은 본문도 형제 갈래와 같은 줄을 남겨야 한다: {logged:?}"
+            "a body that died after the deadline must leave the same line as the sibling branch: {logged:?}"
         );
-        // ★죽은 본문은 **어디까지 갔는지 모른다** — 그래서 그 번호를 붙든다★(안 붙들면 재질의가 적용됐을지도
-        //   모르는 조작을 한 번 더 돌린다). 보유는 창이 지나면 수거기가 놓는다.
+        // ★A dead body **does not know how far it got** — so it holds that number★ (if not held a re-query might apply
+        //   an operation that may have been applied once more). The hold is released by the sweeper when the window passes.
         assert_eq!(
             deliveries.in_flight(),
             1,
-            "확실성이 불명이면 붙드는 쪽이 안전하다"
+            "if the certainty is unknown, holding is the safe side"
         );
     }
 
-    /// ★1단계는 **무한히 쌓이지 않는다**★ — 상한을 넘으면 큐를 늘리는 대신 큰 소리로 거절한다.
-    ///
-    /// 저장 I/O 가 멈추면 본문이 안 끝나고 마감도 그 자리를 못 거두므로([`Pending::local`]), 상한이 없으면
-    /// 자리와 풀 작업이 함께 무한히 자란다.
+    /// ★Stage 1 **does not pile up without bound**★ — past the cap it refuses loudly instead of growing the queue.
+    /// If storage I/O stops the body does not end and the deadline cannot reap that seat either ([`Pending::local`]), so without a cap seats and pool jobs grow together without bound.
     #[test]
     fn stage_one_refuses_to_queue_past_its_ceiling() {
         let roster = CommandRoster::new();
@@ -4000,9 +3577,9 @@ pub(crate) mod tests {
                 envelope("agent.new", &OwnerToken::new("whatever")),
                 ENTRANCE_SOCKET,
             ));
-            entered.recv().await.expect("본문이 들어갔다");
+            entered.recv().await.expect("the body entered");
 
-            // 두 번째는 **다른 번호**인데도 상한에 막힌다 — 상한은 번호가 아니라 도는 일의 수를 센다.
+            // The second is blocked by the cap though it is a **different number** — the cap counts the number of running jobs, not numbers.
             super::deliver(
                 roster.clone(),
                 deliveries.clone(),
@@ -4016,41 +3593,41 @@ pub(crate) mod tests {
             match next_event(&mut caller_inbox).await {
                 AgentEvent::CommandReply { reply } => {
                     let reply = opened_reply(&reply);
-                    let err = reply.outcome.expect_err("상한 거절");
+                    let err = reply.outcome.expect_err("cap refusal");
                     assert_eq!(err.code(), ErrorCode::Conflict);
                     assert!(
                         err.message().contains("nothing was run"),
-                        "아무것도 안 돌았다는 사실이 실려야: {}",
+                        "the fact that nothing ran must be carried: {}",
                         err.message()
                     );
                     assert!(
                         err.message().contains("restarted"),
-                        "안 풀리는 상태일 수 있다는 것까지 말해야: {}",
+                        "it must even say the state may not clear: {}",
                         err.message()
                     );
                 }
-                other => panic!("거절도 답장 한 장이다: {other:?}"),
+                other => panic!("a refusal is one reply too: {other:?}"),
             }
-            assert_eq!(local.runs(), 1, "거절은 본문을 돌리지 않는다");
+            assert_eq!(local.runs(), 1, "a refusal does not run the body");
             assert_eq!(
                 deliveries.in_flight(),
                 1,
-                "거절한 왕복의 자리는 놓는다 — 그 번호가 막히면 안 된다"
+                "the seat of a refused round trip is released — that number must not get blocked"
             );
 
-            open.send(()).expect("문 열기");
+            open.send(()).expect("open the door");
             finished(first).await;
         });
 
-        // ★거절당한 호출자만이 유일한 목격자면 안 된다★ — 전역 상한은 운영 사건이다.
+        // ★The refused caller must not be the only witness★ — the global cap is an operational event.
         assert!(
             logged.iter().any(|line| line.contains("ceiling")),
-            "상한 사건이 서버에도 남아야 한다: {logged:?}"
+            "the cap event must remain on the server too: {logged:?}"
         );
     }
 
-    /// 답을 못 내고 죽는 1단계 — 표의 패닉 그물 **밖**에서 터지는 자리를 대신한다(실물에서 그런 자리가
-    /// 하나 있다: 표가 인자를 선언 스키마에 맞추는 보정은 `blocking_handler` 의 그물 밖이다).
+    /// A stage 1 that dies without an answer — stands in for a place that blows up **outside** the table's panic net (there is one such place in the real thing: the correction where the table fits arguments to
+    /// the declared schema is outside the net of `blocking_handler`).
     struct PanickingLocal;
 
     impl LocalCommands for PanickingLocal {
@@ -4077,11 +3654,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// ★1단계 본문이 **답 없이 죽으면** 서버 쪽에도 흔적이 남아야 한다★
-    ///
-    /// 호출자는 「불명」 한 마디를 받지만, 그것만으로는 운영자가 무엇이 터졌는지 알 길이 없다(로깅 컨벤션
-    /// 「무로그 삼킴」 금지). CLI 쌍둥이는 같은 사고에 `entrance = "cli"` 로 error 를 남기므로
-    /// (`mcp_server::control_agent_handler`) 이 표면도 같은 모양으로 남긴다.
+    /// ★When a stage 1 body **dies with no answer** a trace must remain on the server side too★
+    /// The caller gets the single word "unknown" but that alone gives the operator no way to know what blew up (logging convention no silent swallow). The CLI twin leaves an error with `entrance = "cli"` for the same incident
+    /// (`mcp_server::control_agent_handler`) so this surface leaves the same shape.
     #[test]
     fn a_local_body_that_dies_without_answering_is_logged_not_swallowed() {
         let roster = CommandRoster::new();
@@ -4102,30 +3677,29 @@ pub(crate) mod tests {
             })
         });
 
-        match event_from(caller_inbox.try_recv().expect("답장 한 장")) {
+        match event_from(caller_inbox.try_recv().expect("one reply")) {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
-                let err = reply.outcome.expect_err("죽은 본문");
-                // 적용됐는지 알 수 없다 — `INTERNAL` 로 접으면 「확실히 실패했다」는 오보가 된다.
+                let err = reply.outcome.expect_err("a dead body");
+                // Whether it was applied cannot be known — folding to `INTERNAL` would be a false report "certainly failed".
                 assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         }
         assert!(
             logged.iter().any(|line| line.contains("agent.new")),
-            "어느 명령이 죽었는지 서버에도 남아야 한다: {logged:?}"
+            "which command died must remain on the server too: {logged:?}"
         );
-        // ★죽은 본문은 **어디까지 갔는지 모른다** — 그래서 그 번호를 붙든다★(안 붙들면 재질의가 적용됐을지도
-        //   모르는 조작을 한 번 더 돌린다). 보유는 창이 지나면 수거기가 놓는다.
+        // ★A dead body **does not know how far it got** — so it holds that number★ (if not held a re-query would run an operation that may have been applied
+        //   once more). The hold is released by the sweeper when the window passes.
         assert_eq!(
             deliveries.in_flight(),
             1,
-            "확실성이 불명이면 붙드는 쪽이 안전하다"
+            "if the certainty is unknown, holding is the safe side"
         );
     }
 
-    /// ★상한 신호는 **양쪽으로** 유계여야 한다★ — 거절마다 적으면 로그 크기를 상대가 정하고, 셈이 내려갈
-    /// 때만 다시 열면 진짜로 물린 상태(셈이 영영 안 내려감)에서 신호가 **한 줄로 끝난다**.
+    /// ★The cap signal must be bounded in **both directions**★ — writing per refusal lets the other side decide the log size, and reopening only when the count drops makes the signal **end at one line** in a truly bitten state (the count never drops).
     #[test]
     fn the_ceiling_signal_repeats_on_a_clock_not_on_every_refusal() {
         let roster = CommandRoster::new();
@@ -4143,9 +3717,9 @@ pub(crate) mod tests {
                 envelope("agent.new", &OwnerToken::new("whatever")),
                 ENTRANCE_SOCKET,
             ));
-            entered.recv().await.expect("본문이 들어갔다");
+            entered.recv().await.expect("the body entered");
 
-            // 상한에 연달아 부딪힌다 — 줄은 한 번만 는다.
+            // It hits the cap back to back — the line grows only once.
             for _ in 0..3 {
                 super::deliver(
                     roster.clone(),
@@ -4158,7 +3732,7 @@ pub(crate) mod tests {
                 .await;
                 let _ = next_event(&mut caller_inbox).await;
             }
-            // 간격이 지나면 다시 한 줄 — 물려 있는 동안에도 신호가 끊기지 않는다.
+            // After the interval one more line — the signal does not stop even while bitten.
             clock.advance(CEILING_WARN_INTERVAL + Duration::from_secs(1));
             super::deliver(
                 roster.clone(),
@@ -4171,7 +3745,7 @@ pub(crate) mod tests {
             .await;
             let _ = next_event(&mut caller_inbox).await;
 
-            open.send(()).expect("문 열기");
+            open.send(()).expect("open the door");
             finished(first).await;
         });
 
@@ -4181,13 +3755,12 @@ pub(crate) mod tests {
             .count();
         assert_eq!(
             ceiling_lines, 2,
-            "거절 넷에 두 줄이어야 한다(간격당 한 줄): {logged:?}"
+            "four refusals must give two lines (one per interval): {logged:?}"
         );
     }
 
-    /// ★마감 뒤 성공 로그의 **존재 이유가 잘리면 안 된다**★ — 그 줄의 값은 호출자가 모르는 채 만들어진
-    /// 것을 되찾는 유일한 실마리(`agent_id`)다. 이름용 기본 폭(64자)을 그대로 쓰면 payload 에 칸이 하나만
-    /// 늘어도 조용히 사라진다.
+    /// ★The **reason a post-deadline success log exists must not be cut off**★ — that line's value is the only clue (`agent_id`) to recover what was made without the caller's knowledge. Using the default name width (64 characters) as is
+    /// would quietly lose it as soon as the payload grew by even one field.
     #[test]
     fn the_late_success_log_keeps_the_datum_it_exists_for() {
         let roster = CommandRoster::new();
@@ -4195,7 +3768,7 @@ pub(crate) mod tests {
         let clock = Arc::new(ManualClock::new());
         let deliveries = deliveries_with(clock.clone());
         let (local, open, mut entered) = parked_local("agent.new");
-        // 이름순으로 `agent_id` **앞에** 오는 칸이 붙어도 살아남아야 한다.
+        // It must survive even if a field that sorts **before** `agent_id` by name is added.
         let payload = json!({
             "agent_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
             "a_long_field_that_comes_first": "x".repeat(80),
@@ -4218,11 +3791,11 @@ pub(crate) mod tests {
                 envelope("agent.new", &OwnerToken::new("whatever")),
                 ENTRANCE_SOCKET,
             ));
-            entered.recv().await.expect("본문이 들어갔다");
+            entered.recv().await.expect("the body entered");
             clock.advance(Duration::from_secs(11));
             assert_eq!(deliveries.expire(), 1);
             let _timed_out = next_event(&mut caller_inbox).await;
-            open.send(()).expect("문 열기");
+            open.send(()).expect("open the door");
             finished(round_trip).await;
         });
 
@@ -4230,20 +3803,16 @@ pub(crate) mod tests {
             logged
                 .iter()
                 .any(|line| line.contains("3f2504e0-4f89-11d3-9a0c-0305e82c3301")),
-            "되찾을 실마리가 잘려 나갔다: {logged:?}"
+            "the clue to recover was cut off: {logged:?}"
         );
     }
 
-    /// ★이미 떠난 호출자를 위해 **부수효과를 내지 않는다**★ — 2단계가 봉투를 넘기기 직전에 하는 검사와
-    /// 같은 것이다(`OwnerLink::send`). `agent.new` 에는 되돌릴 경로가 없어(ADR-0122) 남는 것이 영구다.
-    ///
-    /// ★여기서 재는 것은 **이른** 검사다★ — 부수효과 직전의 **늦은** 검사는 본문 안에 있고([`spawn_local`])
-    /// 같은 술어를 쓴다. 그쪽은 「풀에서 줄 서는 동안 끊긴다」를 결정적으로 만들 수단이 이 하네스에 없어
-    /// 따로 겨누지 않는다 — 대신 아래 다른 시험들이 전부 그 검사를 통과해야 본문이 도므로, 그 검사가
-    /// 거짓 양성을 내면 이 파일이 통째로 붉어진다.
+    /// ★Does **not produce side effects** for a caller who has already left★ — the same as the check stage 2 does just before handing over the envelope (`OwnerLink::send`). `agent.new` has no way back (ADR-0122) so what remains is permanent.
+    /// ★What is measured here is the **early** check★ — the **late** check just before the side effect is inside the body ([`spawn_local`]) and uses the same predicate. That one is not aimed at separately because this harness has no means to deterministically
+    /// make "disconnect while queued in the pool" — instead every other test below must pass that check for the body to run, so if that check gave a false positive this whole file would turn red.
     #[tokio::test]
     async fn a_caller_that_already_left_does_not_get_its_local_command_run() {
-        // 호출자를 명부에 붙이지 않는다 = 이미 떠난 상태.
+        // Does not attach the caller to the roster = already left.
         let roster = CommandRoster::new();
         let local = Arc::new(FakeLocal::answering("agent.new", Ok(json!({ "ok": true }))));
 
@@ -4260,23 +3829,21 @@ pub(crate) mod tests {
         assert_eq!(
             local.runs(),
             0,
-            "떠난 호출자를 위해 되돌릴 수 없는 조작을 실행하면 안 된다"
+            "an irreversible operation must not be run for a caller who has left"
         );
     }
 
-    // ── 갈래 ① 정상 왕복 ─────────────────────────────────────────────────────────
+    // ── branch ① normal round trip ────────────────────────────────────────────
 
-    /// ★답장이 **원래 물어본 연결**로 돌아온다★ — 다른 연결로 새면 그쪽은 자기가 안 시킨 것의 결과를
-    /// 받고, 물어본 쪽은 마감까지 매달린다.
-    /// 겉봉의 주인 토큰이 **명부가 답한 값으로 덮여** 나가는 것까지 함께 잰다(TRD §3-8 의 2단 배달에서
-    /// 중간 홉이 갈라 주는 근거가 그 칸이다).
+    /// ★The reply comes back to **the connection that originally asked**★ — leaking to another connection makes that side receive the result of something it did not order, and the asker hangs until the deadline.
+    /// It also measures that the owner token on the outer envelope goes out **overwritten with the value the roster answered** (that field is the basis on which the middle hop splits in the 2-stage delivery of TRD §3-8).
     #[tokio::test]
     async fn a_command_reaches_its_owner_and_the_answer_returns_to_the_caller() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
         let mut bystander_inbox = attach_caller(&roster, 3);
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
-        // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬 몫이다(ADR-0154).
+        // ★The destination field is whatever the caller writes★ — targeting is the daemon's job (ADR-0154).
         let env = envelope("tab.create", &OwnerToken::new("whatever-the-caller-thinks"));
         let request_id = env.request_id;
 
@@ -4285,30 +3852,33 @@ pub(crate) mod tests {
         match next_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => {
                 let envelope = opened(&envelope);
-                assert_eq!(envelope.request_id, request_id, "id 는 전 구간 동일");
+                assert_eq!(
+                    envelope.request_id, request_id,
+                    "the id is the same throughout"
+                );
                 assert_eq!(
                     envelope.owner,
                     CommandRoster::owner_of(1),
-                    "명부가 답한 주인이 겉봉에 실린다"
+                    "the owner the roster answered is carried on the outer envelope"
                 );
                 assert_eq!(
                     envelope.args,
                     json!({ "window": "main" }),
-                    "속은 그대로 통과"
+                    "the inside passes through as is"
                 );
             }
-            other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
+            other => panic!("the owner receives a CommandRequest: {other:?}"),
         }
         assert_eq!(
             deliveries.in_flight(),
             1,
-            "답을 기다리는 동안 표에 앉아 있다"
+            "it sits in the table while waiting for the answer"
         );
 
         assert_eq!(
             deliveries.complete(CommandReply::ok(request_id, json!({ "tab": 4 }))),
             OutcomeLanding::Attached,
-            "진행 중인 왕복에 붙는다"
+            "it attaches to the round trip in progress"
         );
         finished(round_trip).await;
 
@@ -4316,20 +3886,28 @@ pub(crate) mod tests {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
-                assert_eq!(reply.outcome, Ok(json!({ "tab": 4 })), "주인의 결말 그대로");
+                assert_eq!(
+                    reply.outcome,
+                    Ok(json!({ "tab": 4 })),
+                    "the owner's outcome as is"
+                );
             }
-            other => panic!("물어본 연결은 CommandReply 를 받는다: {other:?}"),
+            other => panic!("the connection that asked receives a CommandReply: {other:?}"),
         }
         assert!(
             bystander_inbox.try_recv().is_err(),
-            "남의 왕복이 다른 연결로 새면 안 된다"
+            "another's round trip must not leak to another connection"
         );
-        assert_eq!(deliveries.in_flight(), 0, "끝난 왕복은 표에서 사라진다");
+        assert_eq!(
+            deliveries.in_flight(),
+            0,
+            "a finished round trip leaves the table"
+        );
     }
 
-    // ── 갈래 ② 주인 부재 ─────────────────────────────────────────────────────────
+    // ── branch ② owner absent ────────────────────────────────────────────────
 
-    /// 명부에 없는 이름 — 끊긴 주인의 이름과 **같은 답**을 받는다(ADR-0150 가 감수한 구분 손실).
+    /// A name not on the roster — gets **the same answer** as the name of a disconnected owner (the distinction loss ADR-0150 accepted).
     #[tokio::test]
     async fn a_command_nobody_owns_is_answered_unknown_command() {
         let roster = CommandRoster::new();
@@ -4344,22 +3922,23 @@ pub(crate) mod tests {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
-                let err = reply.outcome.expect_err("주인이 없다");
+                let err = reply.outcome.expect_err("there is no owner");
                 assert_eq!(err.code(), ErrorCode::UnknownCommand);
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
-        assert_eq!(deliveries.in_flight(), 0, "안 열린 자리가 남으면 안 된다");
+        assert_eq!(
+            deliveries.in_flight(),
+            0,
+            "a seat that was not opened must not remain"
+        );
     }
 
-    // ── 갈래 ③ 찢어진 창 ─────────────────────────────────────────────────────────
+    // ── branch ③ torn window ────────────────────────────────────────────────
 
-    /// ★조회는 `Available` 인데 닿는 길이 없다★ — `route` 가 조회와 전달 사이에 명부 잠금을 일부러 놓아
-    /// 생기는 설계된 잔여다(ADR-0154). 그 상태를 결정적으로 만들려고 표에 든 주인 토큰만 갈아 끼운다:
-    /// 명부는 옛 토큰 앞으로 이름을 들고 있고, 그 토큰으로는 이제 아무 출구도 안 나온다.
-    ///
-    /// ★`UNKNOWN_COMMAND` 가 아닌 것이 요점이다★ — 조회가 방금 주인이 있다고 답했으므로 그 코드는 거짓
-    /// 확신이다 — 조회가 방금 주인이 있다고 답했고, 그 주인은 곧 다시 붙을 수 있다.
+    /// ★The lookup is `Available` but there is no way to reach★ — a designed residue that arises because `route` deliberately releases the roster lock between lookup and delivery (ADR-0154). To make that state deterministic only the owner token held in the table is swapped:
+    /// the roster holds the name under the old token and no outlet comes out of that token now.
+    /// ★The point is that it is not `UNKNOWN_COMMAND`★ — the lookup just answered that an owner exists, so that code is a false certainty, and that owner can reattach soon.
     #[tokio::test]
     async fn a_command_whose_owner_vanished_mid_handover_is_outcome_unknown() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -4375,29 +3954,31 @@ pub(crate) mod tests {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
-                let err = reply.outcome.expect_err("닿는 길이 없다");
+                let err = reply.outcome.expect_err("there is no way to reach");
                 assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
                 assert_eq!(
                     err.retry(),
                     engram_dashboard_command::RetryMode::Never,
-                    "dedup 저장소가 없으므로 이 경로는 재시도를 지시하지 않는다"
+                    "there is no dedup store so this path does not instruct a retry"
                 );
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
         assert!(
             owner_inbox.try_recv().is_err(),
-            "닿는 길이 없으면 아무 데도 안 나간다"
+            "if there is no way to reach, nothing goes anywhere"
         );
-        assert_eq!(deliveries.in_flight(), 0, "열었던 자리를 도로 거둬야 한다");
+        assert_eq!(
+            deliveries.in_flight(),
+            0,
+            "the seat that was opened must be taken back"
+        );
     }
 
-    // ── 갈래 ④ 마감 초과 ─────────────────────────────────────────────────────────
+    // ── branch ④ deadline exceeded ──────────────────────────────────────────
 
-    /// ★마감이 지나면 답장이 **정확히 한 번** 나가고, 늦게 온 결말은 두 번째 답장을 만들지 못한다★
-    ///
-    /// 늦은 결말을 버리는 자리는 표의 단일 소유권 지점 하나다 — 만료가 자리를 거뒀으므로 그 뒤의
-    /// `complete` 는 빈손을 받는다.
+    /// ★After the deadline the reply goes out **exactly once**, and a late outcome cannot make a second reply★
+    /// The place that discards a late outcome is the table's single ownership point — expiry reaped the seat so a later `complete` gets nothing.
     #[tokio::test]
     async fn a_deadline_answers_once_and_a_late_outcome_cannot_answer_again() {
         let clock = Arc::new(ManualClock::new());
@@ -4408,58 +3989,65 @@ pub(crate) mod tests {
         let request_id = env.request_id;
 
         let round_trip = tokio::spawn(deliver(roster.clone(), deliveries.clone(), 2, env));
-        // 봉투가 나간 것을 본 시점부터 그 왕복은 답을 기다리는 중이다.
+        // From the moment the envelope is seen to have gone out that round trip is waiting for the answer.
         assert!(matches!(
             next_event(&mut owner_inbox).await,
             AgentEvent::CommandRequest { .. }
         ));
 
-        // ★경계를 마감에서 **파생**한다★ — 숫자를 박으면 마감을 고치는 편집이 이 시험을 조용히 반대편
-        //   갈래로 옮긴다(「마감 전」이 「마감 후」가 되고 첫 단언이 여전히 초록일 수 있다).
+        // ★The boundary is **derived** from the deadline★ — hard-coding a number lets an edit fixing the deadline quietly move this test to the opposite branch ("before the deadline" becomes "after the deadline"
+        //   and the first assertion may still be green).
         let deadline = CommandDeliveries::DEFAULT_DEADLINE;
         clock.advance(deadline - Duration::from_secs(1));
-        assert_eq!(deliveries.expire(), 0, "마감 전에는 거두지 않는다");
+        assert_eq!(
+            deliveries.expire(),
+            0,
+            "it is not reaped before the deadline"
+        );
         clock.advance(Duration::from_secs(2));
-        assert_eq!(deliveries.expire(), 1, "마감이 지나면 거둔다");
+        assert_eq!(
+            deliveries.expire(),
+            1,
+            "it is reaped when the deadline passes"
+        );
         finished(round_trip).await;
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
-                let err = reply.outcome.expect_err("마감 초과");
+                let err = reply.outcome.expect_err("deadline exceeded");
                 assert_eq!(err.code(), ErrorCode::Timeout);
                 assert_eq!(err.retry(), engram_dashboard_command::RetryMode::Never);
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
 
         assert_eq!(
             deliveries.complete(CommandReply::ok(request_id, json!({ "tab": 4 }))),
             OutcomeLanding::NoSeat,
-            "붙일 자리가 없다"
+            "there is no place to attach"
         );
         assert!(
             caller_inbox.try_recv().is_err(),
-            "늦게 온 결말이 두 번째 답장이 되면 안 된다"
+            "a late outcome must not become a second reply"
         );
     }
 
-    // ── 중계 전 에이전트 참조 변환(ADR-0308) ─────────────────────────────────────────
+    // ── agent-reference conversion before the relay (ADR-0308) ────────────────────────────────
 
-    /// 에이전트 명부만 든 1단계 표 — 내 이름은 하나도 없고(그래서 모든 이름이 중계로 간다) 참조 칸을 풀
-    /// 명부만 낸다.
+    /// A stage 1 table holding only an agent roster — it has none of my names (so every name goes by relay) and gives only the roster to resolve the reference fields.
     struct AgentsOnly {
         agents: Vec<(uuid::Uuid, &'static str)>,
-        /// 명부를 읽은 스레드 — 배달 태스크 밖(blocking 풀)에서 읽나를 잰다.
+        /// The thread that read the roster — measures whether it reads outside the delivery task (on the blocking pool).
         read_on: Mutex<Option<std::thread::ThreadId>>,
-        /// 명부를 읽기 시작했다는 신호 — 시험이 「푸는 도중」을 결정적으로 겨눈다.
+        /// A signal that the roster read started — the test aims deterministically at "while resolving".
         entered: Mutex<Option<mpsc::UnboundedSender<()>>>,
-        /// 명부 읽기를 붙잡아 두는 문 — 시험이 열 때까지 안 끝난다.
+        /// A door holding the roster read — it does not end until the test opens it.
         gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
-        /// 명부를 읽은 횟수.
+        /// The number of times the roster was read.
         reads: AtomicUsize,
-        /// 참이면 명부 읽기가 (문을 지난 뒤) 패닉한다 — 풀기 작업이 답 없이 죽는 갈래.
+        /// If true the roster read panics (after passing the door) — the branch where the resolution job dies with no answer.
         panics: bool,
     }
 
@@ -4468,7 +4056,7 @@ pub(crate) mod tests {
             Arc::new(Self::build(agents, None, None, false))
         }
 
-        /// 첫 명부 읽기를 문 앞에 세워 두는 표 — 읽기가 시작되면 셋째 값이 울리고, 둘째 값으로 문을 열어야 끝난다.
+        /// A table that stops the first roster read at the door — when the read starts the third value rings, and the door must be opened with the second value for it to end.
         fn gated(
             agents: &[(uuid::Uuid, &'static str)],
         ) -> (
@@ -4549,7 +4137,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// 에이전트 참조 칸을 표시한 이름 하나를 얹은 주인.
+    /// An owner that put on one name marking agent-reference fields.
     fn roster_with_marked_owner(
         conn_id: ConnId,
         name: &str,
@@ -4568,7 +4156,7 @@ pub(crate) mod tests {
                     deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
-            .expect("등록");
+            .expect("registration");
         (roster, inbox)
     }
 
@@ -4579,7 +4167,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// 중계가 안 되고 답이 왔다 — 그 답의 오류를 돌려준다.
+    /// It was not relayed and an answer came — returns that answer's error.
     async fn refused_without_relay(
         caller_inbox: &mut mpsc::Receiver<Frame>,
         owner_inbox: &mut mpsc::Receiver<Frame>,
@@ -4590,20 +4178,19 @@ pub(crate) mod tests {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
-                reply.outcome.expect_err("풀리지 않았다")
+                reply.outcome.expect_err("it did not resolve")
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         };
         assert!(
             owner_inbox.try_recv().is_err(),
-            "풀리지 않은 명령은 주인에게 가지 않는다"
+            "a command that did not resolve does not go to the owner"
         );
-        assert_eq!(deliveries.in_flight(), 0, "자리를 놓는다");
+        assert_eq!(deliveries.in_flight(), 0, "the seat is released");
         err
     }
 
-    /// ★표시한 칸의 이름은 id 로, id 는 그대로, 표시 없는 칸은 손대지 않고 넘긴다★ — 주인은 표시한 칸에서
-    /// id 만 본다. 명부는 배달 태스크 밖에서 읽는다(잠든 프로필 경로 정규화가 길 수 있다).
+    /// ★The name in a marked field becomes an id, an id stays, and an unmarked field is passed untouched★ — the owner sees only ids in marked fields. The roster is read outside the delivery task (path normalization of a dormant profile can be long).
     #[tokio::test]
     async fn a_marked_name_is_relayed_as_the_agent_id() {
         let lead = uuid::Uuid::new_v4();
@@ -4640,20 +4227,20 @@ pub(crate) mod tests {
                         "label": "lead",
                         "count": 3
                     }),
-                    "표시한 칸만 id 로 바뀐다"
+                    "only marked fields become ids"
                 );
             }
-            other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
+            other => panic!("the owner receives a CommandRequest: {other:?}"),
         }
         let read_on = agents
             .read_on
             .lock()
             .unwrap()
-            .expect("명부를 읽었어야 한다");
+            .expect("the roster must have been read");
         assert_ne!(
             read_on,
             std::thread::current().id(),
-            "명부는 배달 태스크 밖에서 읽는다"
+            "the roster is read outside the delivery task"
         );
 
         deliveries.complete(CommandReply::ok(request_id, json!({})));
@@ -4664,7 +4251,7 @@ pub(crate) mod tests {
         ));
     }
 
-    /// ★없는 이름은 중계하지 않고 해석기의 답(후보 포함)을 칸 이름을 앞에 달아 낸다★
+    /// ★A nonexistent name is not relayed and the resolver's answer (with candidates) goes out with the field name in front★
     #[tokio::test]
     async fn an_unknown_marked_name_is_refused_with_the_arg_name_and_never_relayed() {
         let agents = AgentsOnly::new(&[
@@ -4699,7 +4286,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// ★같은 이름이 둘이면 고르지 않는다★ — 해석기의 `CONFLICT` 그대로이고 후보는 두 id 다.
+    /// ★If there are two of the same name none is picked★ — the resolver's `CONFLICT` as is and the candidates are the two ids.
     #[tokio::test]
     async fn a_duplicate_marked_name_is_a_conflict_and_never_relayed() {
         let twin_a = uuid::Uuid::new_v4();
@@ -4759,7 +4346,7 @@ pub(crate) mod tests {
         assert_eq!(answer.args(), Some(&args));
     }
 
-    /// ★칸은 표시 순서대로 푼다★ — 둘 다 안 풀리면 먼저 표시된 칸이 답이 된다(같은 요청에 같은 답).
+    /// ★Fields are resolved in marked order★ — if both fail to resolve the first-marked field becomes the answer (the same answer for the same request).
     #[tokio::test]
     async fn marked_args_are_resolved_in_the_order_they_were_marked() {
         let agents = AgentsOnly::new(&[]);
@@ -4792,8 +4379,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// ★부재 · `null` · 문자열 아닌 값은 손대지 않고 넘긴다★ — 반려는 그 칸의 계약을 아는 주인 몫이다.
-    /// 빈 명부라 무엇이든 풀려고 했다면 `NOT_FOUND` 가 났을 것이다.
+    /// ★Absent · `null` · non-string values are passed untouched★ — a refusal is the job of the owner that knows that field's contract. Against an empty roster, had it tried to resolve anything `NOT_FOUND` would have come.
     #[tokio::test]
     async fn marked_args_without_a_string_value_are_left_for_the_owner() {
         let agents = AgentsOnly::new(&[]);
@@ -4817,20 +4403,19 @@ pub(crate) mod tests {
         match next_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => {
                 let envelope = opened(&envelope);
-                assert_eq!(envelope.args, args, "그대로 통과");
+                assert_eq!(envelope.args, args, "passes through as is");
             }
-            other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
+            other => panic!("the owner receives a CommandRequest: {other:?}"),
         }
         assert!(
             agents.read_on.lock().unwrap().is_none(),
-            "풀 칸이 없으면 명부를 읽지 않는다"
+            "with no field to resolve the roster is not read"
         );
         deliveries.complete(CommandReply::ok(request_id, json!({})));
         finished(round_trip).await;
     }
 
-    /// ★푸는 도중 마감이 지나면 그 `TIMEOUT` 이 답이고 봉투는 나가지 않는다★ — 넘기면 주인은 명령을
-    /// 실행하는데 호출자는 이미 실패를 받았다.
+    /// ★If the deadline passes while resolving, that `TIMEOUT` is the answer and the envelope does not go out★ — passed on, the owner would run the command while the caller already received a failure.
     #[tokio::test]
     async fn a_deadline_while_resolving_answers_timeout_and_never_relays() {
         let clock = Arc::new(ManualClock::new());
@@ -4851,35 +4436,43 @@ pub(crate) mod tests {
         ));
         tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
             .await
-            .expect("명부 읽기가 시작되지 않는다")
-            .expect("신호");
+            .expect("the roster read does not start")
+            .expect("signal");
 
         clock.advance(CommandDeliveries::DEFAULT_DEADLINE + Duration::from_secs(1));
-        assert_eq!(deliveries.expire(), 1, "푸는 동안에도 마감이 자리를 거둔다");
+        assert_eq!(
+            deliveries.expire(),
+            1,
+            "the deadline reaps the seat even while resolving"
+        );
         finished(round_trip).await;
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
-                let err = reply.outcome.expect_err("마감 초과");
-                assert_eq!(err.code(), ErrorCode::Timeout, "코드는 정산한 쪽 그대로");
+                let err = reply.outcome.expect_err("deadline exceeded");
+                assert_eq!(
+                    err.code(),
+                    ErrorCode::Timeout,
+                    "the code is the settling side's as is"
+                );
                 assert!(
                     err.message().contains("never sent to its owner"),
-                    "주인이 답하지 않은 것이 아니라 보내지 않았다: {}",
+                    "it is not that the owner did not answer but that it was not sent: {}",
                     err.message()
                 );
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
         let _ = open.send(());
         assert!(
             owner_inbox.try_recv().is_err(),
-            "답한 왕복의 봉투는 나가지 않는다"
+            "the envelope of an answered round trip does not go out"
         );
     }
 
-    /// 읽기가 끝나 풀기 셈이 `n` 이 될 때까지 기다린다 — 셈은 blocking 풀의 읽기가 끝나야 내려간다.
+    /// Waits until the read ends and the resolve count becomes `n` — the count goes down only when the blocking-pool read ends.
     async fn resolving_settles_at(deliveries: &CommandDeliveries, n: usize) {
         tokio::time::timeout(Duration::from_secs(10), async {
             while deliveries.resolving() != n {
@@ -4887,10 +4480,10 @@ pub(crate) mod tests {
             }
         })
         .await
-        .expect("풀기 셈이 안 내려간다");
+        .expect("the resolve count does not go down");
     }
 
-    /// ★푸는 도중 데몬이 내려가면 `OUTCOME_UNKNOWN` 그대로이되 「보내지 않았다」고 말한다★ — 봉투는 주인에게 간 적이 없다.
+    /// ★If the daemon goes down while resolving it stays `OUTCOME_UNKNOWN` but says "it was not sent"★ — the envelope never went to the owner.
     #[tokio::test]
     async fn a_shutdown_while_resolving_says_the_command_was_never_sent() {
         let (agents, open, mut entered_rx) = AgentsOnly::gated(&[(uuid::Uuid::new_v4(), "lead")]);
@@ -4909,14 +4502,16 @@ pub(crate) mod tests {
         ));
         tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
             .await
-            .expect("명부 읽기가 시작되지 않는다")
-            .expect("신호");
+            .expect("the roster read does not start")
+            .expect("signal");
         assert_eq!(deliveries.drain(), 1);
         finished(round_trip).await;
 
         let err = match next_event(&mut caller_inbox).await {
-            AgentEvent::CommandReply { reply } => opened_reply(&reply).outcome.expect_err("종료"),
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            AgentEvent::CommandReply { reply } => {
+                opened_reply(&reply).outcome.expect_err("shutdown")
+            }
+            other => panic!("expected a CommandReply: {other:?}"),
         };
         assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
         assert!(
@@ -4926,10 +4521,13 @@ pub(crate) mod tests {
         );
         let _ = open.send(());
         resolving_settles_at(&deliveries, 0).await;
-        assert!(owner_inbox.try_recv().is_err(), "봉투는 나가지 않는다");
+        assert!(
+            owner_inbox.try_recv().is_err(),
+            "the envelope does not go out"
+        );
     }
 
-    /// ★이미 떠난 호출자를 위해 명부를 읽지 않는다★ — 1단계의 이른 검사와 같다. 답은 갈 곳이 없고 자리만 놓인다.
+    /// ★It does not read the roster for a caller who has already left★ — the same as the early check of stage 1. The answer has nowhere to go and only the seat is released.
     #[tokio::test]
     async fn a_caller_already_gone_starts_no_roster_read() {
         let agents = AgentsOnly::new(&[(uuid::Uuid::new_v4(), "lead")]);
@@ -4949,15 +4547,21 @@ pub(crate) mod tests {
         assert_eq!(
             agents.reads.load(Ordering::SeqCst),
             0,
-            "읽기를 시작하지 않는다"
+            "it does not start the read"
         );
-        assert_eq!(deliveries.resolving(), 0, "상한 한 칸도 안 쓴다");
-        assert_eq!(deliveries.in_flight(), 0, "자리를 놓는다");
-        assert!(owner_inbox.try_recv().is_err(), "봉투는 나가지 않는다");
+        assert_eq!(
+            deliveries.resolving(),
+            0,
+            "it does not use even one cap permit"
+        );
+        assert_eq!(deliveries.in_flight(), 0, "the seat is released");
+        assert!(
+            owner_inbox.try_recv().is_err(),
+            "the envelope does not go out"
+        );
     }
 
-    /// ★푸는 동안 호출자가 떠나면(자리가 거둬지면) 그 사실이 답이고 봉투는 나가지 않는다★ — 읽기는 끝까지 돌고, 그
-    /// 셈은 읽기가 끝나야 풀린다. 답을 읽으려고 상관 표만 거둔다(운영은 명부에서 먼저 빠져 이 답이 갈 곳이 없다).
+    /// ★If the caller leaves while resolving (the seat is reaped) that fact is the answer and the envelope does not go out★ — the read runs to the end and the count is released only when the read ends. To read the answer only the correlation table is reaped (in production it is removed from the roster first so this answer has nowhere to go).
     #[tokio::test]
     async fn a_caller_leaving_while_resolving_is_answered_gone_and_never_relayed() {
         let (agents, open, mut entered_rx) = AgentsOnly::gated(&[(uuid::Uuid::new_v4(), "lead")]);
@@ -4977,8 +4581,8 @@ pub(crate) mod tests {
         ));
         tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
             .await
-            .expect("명부 읽기가 시작되지 않는다")
-            .expect("신호");
+            .expect("the roster read does not start")
+            .expect("signal");
         assert_eq!(deliveries.drop_origin(2), 1);
         finished(round_trip).await;
 
@@ -4987,16 +4591,20 @@ pub(crate) mod tests {
                 .await;
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert_eq!(err.message(), CALLER_ALREADY_GONE);
-        assert_eq!(deliveries.resolving(), 1, "읽기가 끝나기 전엔 셈이 남는다");
+        assert_eq!(
+            deliveries.resolving(),
+            1,
+            "before the read ends the count remains"
+        );
         let _ = open.send(());
         resolving_settles_at(&deliveries, 0).await;
         assert!(
             owner_inbox.try_recv().is_err(),
-            "읽기가 끝나도 봉투는 나가지 않는다"
+            "even when the read ends the envelope does not go out"
         );
     }
 
-    /// ★풀기 작업이 답 없이 죽으면 `INTERNAL` 이고 중계하지 않는다★ — 셈은 패닉으로도 돌아온다.
+    /// ★If the resolution job dies with no answer it is `INTERNAL` and does not relay★ — the count comes back even by panic.
     #[tokio::test]
     async fn a_resolver_that_dies_answers_internal_and_never_relays() {
         let agents = AgentsOnly::panicking();
@@ -5023,8 +4631,7 @@ pub(crate) mod tests {
         resolving_settles_at(&deliveries, 0).await;
     }
 
-    /// ★풀기 상한을 넘으면 읽지도 중계하지도 않고 `CONFLICT` 로 거절한다 — 셈은 막힌 읽기가 끝나야 풀린다★: 첫 왕복이
-    /// 마감으로 답해 떠난 뒤에도 그 읽기가 막혀 있는 동안은 거절이 이어지고, 읽기가 끝나면 다음 명령이 중계된다.
+    /// ★Past the resolve cap it neither reads nor relays but refuses with `CONFLICT` — the count is released only when the blocked read ends★: even after the first round trip answered by the deadline and left, refusals continue while that read is blocked, and when the read ends the next command is relayed.
     #[tokio::test]
     async fn resolving_past_the_ceiling_is_refused_until_the_stuck_read_ends() {
         let lead = uuid::Uuid::new_v4();
@@ -5049,8 +4656,8 @@ pub(crate) mod tests {
         let stuck = round_trip(marked());
         tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
             .await
-            .expect("명부 읽기가 시작되지 않는다")
-            .expect("신호");
+            .expect("the roster read does not start")
+            .expect("signal");
 
         let env = marked();
         let request_id = env.request_id;
@@ -5059,18 +4666,18 @@ pub(crate) mod tests {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
-                reply.outcome.expect_err("넘쳤다")
+                reply.outcome.expect_err("overflowed")
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         };
         assert!(
             owner_inbox.try_recv().is_err(),
-            "넘친 명령은 중계하지 않는다"
+            "an overflowing command is not relayed"
         );
         assert_eq!(
             deliveries.in_flight(),
             1,
-            "넘친 명령의 자리는 놓고 막힌 왕복의 자리만 남는다"
+            "an overflowing command's seat is released and only the blocked round trip's seat remains"
         );
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert!(
@@ -5081,7 +4688,7 @@ pub(crate) mod tests {
         assert_eq!(
             agents.reads.load(Ordering::SeqCst),
             1,
-            "넘친 명령은 명부를 읽지 않는다"
+            "an overflowing command does not read the roster"
         );
 
         clock.advance(CommandDeliveries::DEFAULT_DEADLINE + Duration::from_secs(1));
@@ -5100,7 +4707,7 @@ pub(crate) mod tests {
         assert_eq!(
             err.code(),
             ErrorCode::Conflict,
-            "답한 왕복의 읽기가 아직 막혀 있으면 셈도 남는다"
+            "if the answered round trip's read is still blocked the count remains too"
         );
 
         let _ = open.send(());
@@ -5108,18 +4715,18 @@ pub(crate) mod tests {
         let after = round_trip(marked());
         let envelope = match next_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => opened(&envelope),
-            other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
+            other => panic!("the owner receives a CommandRequest: {other:?}"),
         };
         assert_eq!(envelope.args["agent"], json!(lead.to_string()));
         deliveries.complete(CommandReply::ok(envelope.request_id, json!({})));
         finished(after).await;
     }
 
-    // ── 끊김 정리 ────────────────────────────────────────────────────────────────
+    // ── disconnect cleanup ────────────────────────────────────────────────
 
-    /// 물어본 연결이 사라지면 그 연결이 물고 있던 항목이 전부 없어지고, 기다리던 배달도 끝난다.
+    /// When the asking connection vanishes every item that connection held disappears, and the waiting delivery ends too.
     ///
-    /// ★항목이 남는 경로가 없어야 한다★ — 남으면 아무도 안 기다리는 왕복이 마감까지 표에 앉는다.
+    /// ★There must be no path where an item remains★ — if one remains a round trip nobody waits for sits in the table until the deadline.
     #[tokio::test]
     async fn a_caller_that_disconnects_takes_its_pending_round_trips_with_it() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5133,15 +4740,19 @@ pub(crate) mod tests {
             AgentEvent::CommandRequest { .. }
         ));
 
-        // 운영 순서 그대로 — 명부에서 먼저 빠지고(그 연결의 출구가 사라진다) 상관 표가 뒤따른다.
+        // Exactly the production order — it leaves the roster first (that connection's outlet vanishes) and the correlation table follows.
         roster.detach(2);
-        assert_eq!(deliveries.drop_origin(2), 1, "그 연결의 왕복을 거둔다");
+        assert_eq!(
+            deliveries.drop_origin(2),
+            1,
+            "that connection's round trip is reaped"
+        );
 
         finished(round_trip).await;
         assert_eq!(deliveries.in_flight(), 0);
     }
 
-    /// 남의 연결이 끊겨도 내 왕복은 안 건드린다 — 아니면 멀쩡한 호출자가 이유 없이 답을 잃는다.
+    /// Another's connection dropping does not touch my round trip — otherwise a healthy caller loses its answer for no reason.
     #[tokio::test]
     async fn another_connections_cleanup_does_not_touch_my_round_trip() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5156,8 +4767,8 @@ pub(crate) mod tests {
             AgentEvent::CommandRequest { .. }
         ));
 
-        assert_eq!(deliveries.drop_origin(7), 0, "남의 연결 정리");
-        assert_eq!(deliveries.in_flight(), 1, "내 왕복은 그대로다");
+        assert_eq!(deliveries.drop_origin(7), 0, "another's connection cleanup");
+        assert_eq!(deliveries.in_flight(), 1, "my round trip stays as is");
 
         assert_eq!(
             deliveries.complete(CommandReply::ok(request_id, json!({}))),
@@ -5170,12 +4781,10 @@ pub(crate) mod tests {
         ));
     }
 
-    // ── 내준 사본을 왕복 너머로 들지 않는다(ADR-0154) ─────────────────────────────
+    // ── do not hold a handed-out copy beyond a round trip (ADR-0154) ──────────────────────────
 
-    /// ★주인의 출구 사본이 왕복 동안 살아 있으면 안 된다★
-    ///
-    /// 대기표에 사본을 넣는 구현은 여기서 빨개진다 — 봉투를 쓴 뒤 주인이 끊겼는데도 그 사본이 남아 있어
-    /// 강참조가 안 풀린다(그러면 끊긴 연결의 송신 큐가 명부보다 오래 살아 연결이 샌다).
+    /// ★The owner's outlet copy must not stay alive during a round trip★
+    /// An implementation that puts the copy in the wait ticket turns red here — after the envelope is written and the owner drops, that copy remains so the strong reference is not released (then the dropped connection's send queue outlives the roster and the connection leaks).
     #[tokio::test]
     async fn the_owners_sink_is_released_as_soon_as_the_envelope_is_written() {
         let roster = CommandRoster::new();
@@ -5192,8 +4801,8 @@ pub(crate) mod tests {
                     deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
-            .expect("등록");
-        drop(owner_sink); // 이제 명부가 유일한 강참조다.
+            .expect("registration");
+        drop(owner_sink); // Now the roster is the only strong reference.
         let _caller_inbox = attach_caller(&roster, 2);
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
@@ -5205,16 +4814,16 @@ pub(crate) mod tests {
             AgentEvent::CommandRequest { .. }
         ));
 
-        // 봉투는 이미 나갔고 답장은 아직이다 — 이 상태에서 주인이 끊긴다.
+        // The envelope already went out and the reply has not — the owner drops in this state.
         roster.detach(1);
         drop(owner_inbox);
 
         assert!(
             released.upgrade().is_none(),
-            "배달이 주인의 출구 사본을 왕복 너머로 들고 있다"
+            "delivery is holding the owner's outlet copy beyond the round trip"
         );
 
-        // 왕복은 여전히 마감이 거둔다 — 사본을 놓았다고 답장이 사라지지 않는다.
+        // The round trip is still reaped by the deadline — releasing the copy does not make the reply vanish.
         assert_eq!(
             deliveries.complete(CommandReply::ok(request_id, json!({}))),
             OutcomeLanding::Attached
@@ -5222,16 +4831,13 @@ pub(crate) mod tests {
         finished(round_trip).await;
     }
 
-    // ── 같은 id 가 겹칠 때(FIX 1) ────────────────────────────────────────────────
+    // ── when the same id overlaps (FIX 1) ────────────────────────────────────
     //
-    // ★여기서 재는 것은 표가 아니라 **밖으로 나간 프레임**이다★: 표의 자리 수만 보면 「자리는 하나인데
-    // 답장은 둘」이라는 실제 위반이 통째로 안 보인다. 그 둘은 호출자의 pending 을 먼저 온 것으로 풀고
-    // 나머지를 고아로 만든다(TRD §4-⑤).
+    // ★What is measured here is not the table but **the frames that went outside**★: looking only at the table's seat count completely misses the real violation "one seat yet two replies". Those two resolve the caller's pending with the one
+    // that came first and make the rest an orphan (TRD §4-⑤).
 
-    /// ★같은 연결의 같은 `request_id` = 재질의 → 답장은 **하나뿐**★
-    ///
-    /// 두 번째 요청은 진행 중인 왕복에 합쳐지고, 나중에 도착한 주인의 결말 하나가 둘을 다 답한다.
-    /// 합침이 깨지면 두 번째 요청이 그 자리에서 오류를 한 장 내고, 뒤이어 진짜 결말이 같은 키로 또 한 장 나간다.
+    /// ★The same connection's same `request_id` = a re-query → **only one** reply★
+    /// The second request coalesces into the round trip in progress, and the one owner outcome that arrives later answers both. If coalescing breaks the second request emits one error on the spot and then the real outcome goes out once more under the same key.
     #[tokio::test]
     async fn a_repeat_of_an_inflight_request_id_from_the_same_caller_yields_exactly_one_reply() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5249,18 +4855,18 @@ pub(crate) mod tests {
             next_event(&mut owner_inbox).await,
             AgentEvent::CommandRequest { .. }
         ));
-        // 같은 연결이 같은 키로 다시 낸다 — 이 태스크는 아무것도 내보내지 않고 끝나야 한다.
+        // The same connection issues again with the same key — this task must end without emitting anything.
         let b = tokio::spawn(deliver(roster.clone(), deliveries.clone(), 2, again));
         finished(b).await;
 
         assert!(
             caller_inbox.try_recv().is_err(),
-            "합쳐진 요청이 자기 답장을 따로 내면 같은 키의 답장이 둘이 된다"
+            "if a coalesced request gave its own reply separately the same key would get two replies"
         );
-        assert_eq!(deliveries.in_flight(), 1, "자리는 처음 하나 그대로다");
+        assert_eq!(deliveries.in_flight(), 1, "the seat stays as the first one");
         assert!(
             owner_inbox.try_recv().is_err(),
-            "봉투도 두 번 나가면 안 된다 — 주인이 같은 조작을 두 번 한다"
+            "the envelope must not go out twice either — the owner would do the same operation twice"
         );
 
         assert_eq!(
@@ -5275,18 +4881,17 @@ pub(crate) mod tests {
                 assert_eq!(reply.request_id, request_id);
                 assert_eq!(reply.outcome, Ok(json!({ "tab": 4 })));
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
         assert!(
             caller_inbox.try_recv().is_err(),
-            "★이 왕복이 낸 답장은 정확히 하나다★"
+            "★this round trip gave exactly one reply★"
         );
     }
 
-    /// **다른** 연결이 쓰고 있는 id 로 물으면 그쪽은 답을 받아야 한다 — 안 그러면 매달린다.
-    ///
-    /// 그 답장은 먼저 열린 왕복의 답장과 **다른 연결**로 가므로 호출자별 「답장 하나」가 지켜진다.
-    /// (합침을 연결 구분 없이 하면 이 호출자는 자리도 답장도 없이 영영 기다린다.)
+    /// If asked with an id that **another** connection is using, that side must get an answer — otherwise it hangs.
+    /// That reply goes to a **different connection** than the reply of the round trip opened first, so "one reply" per caller is kept.
+    /// (If coalescing ignored the connection this caller would wait forever with neither seat nor reply.)
     #[tokio::test]
     async fn another_caller_reusing_an_inflight_request_id_is_told_so_on_its_own_connection() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5318,15 +4923,18 @@ pub(crate) mod tests {
                 let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 assert_eq!(
-                    reply.outcome.expect_err("남의 왕복이 쥔 키").code(),
+                    reply
+                        .outcome
+                        .expect_err("the key another's round trip holds")
+                        .code(),
                     ErrorCode::RequestIdConflict
                 );
             }
-            other => panic!("두 번째 호출자도 답을 받아야 한다: {other:?}"),
+            other => panic!("the second caller must get an answer too: {other:?}"),
         }
         assert!(
             first_inbox.try_recv().is_err(),
-            "남의 충돌이 먼저 열린 왕복의 답장 자리를 건드리면 안 된다"
+            "another's conflict must not touch the reply seat of the round trip opened first"
         );
 
         assert_eq!(
@@ -5340,16 +4948,13 @@ pub(crate) mod tests {
         ));
         assert!(
             second_inbox.try_recv().is_err(),
-            "먼저 열린 왕복의 결말이 남의 연결로 새면 안 된다"
+            "the outcome of the round trip opened first must not leak to another's connection"
         );
     }
 
-    /// ★`route` 의 **다른 단계**가 만든 답장도 자리를 거쳐야 한다★ — 경합 없이 나는 결함이었다.
-    ///
-    /// 예전엔 자리를 2단계(전달) 안에서 열어서, 3단계(주인 부재 → `UNKNOWN_COMMAND`)와 1단계(내 표)의
-    /// 답장은 표를 아예 안 보고 나갔다. 그래서 **주인이 왕복 도중 끊긴 뒤 같은 요청을 다시 물으면** 그
-    /// 재질의가 3단계로 떨어져 `UNKNOWN_COMMAND` 를 그 키로 한 장 내보내고, 뒤이어 진짜 결말이 또 한 장
-    /// 나갔다. 지금은 자리를 `route` **앞에서** 열므로 그 재질의는 진행 중인 왕복에 합쳐져 아무것도 안 낸다.
+    /// ★A reply made by **another stage** of `route` must also go through the seat★ — it was a defect that arose without a race.
+    /// Before, the seat was opened inside stage 2 (delivery) so the replies of stage 3 (owner absent → `UNKNOWN_COMMAND`) and stage 1 (my table) went out without looking at the table at all. So **when the owner dropped mid round trip and the same request was asked again** that
+    /// re-query fell to stage 3 and sent `UNKNOWN_COMMAND` once under that key, then the real outcome went out once more. Now the seat is opened **before** `route` so that re-query coalesces into the round trip in progress and emits nothing.
     #[tokio::test]
     async fn a_reply_from_another_routing_stage_cannot_bypass_an_inflight_seat() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5368,7 +4973,7 @@ pub(crate) mod tests {
             AgentEvent::CommandRequest { .. }
         ));
 
-        // 주인이 왕복 도중 끊긴다 — 이제 그 이름은 명부에 없고, 재질의는 3단계로 떨어질 처지다.
+        // The owner drops mid round trip — now that name is not on the roster and the re-query is in a position to fall to stage 3.
         roster.detach(1);
         finished(tokio::spawn(deliver(
             roster.clone(),
@@ -5380,9 +4985,9 @@ pub(crate) mod tests {
 
         assert!(
             caller_inbox.try_recv().is_err(),
-            "3단계의 UNKNOWN_COMMAND 가 진행 중인 왕복의 키로 새 나가면 안 된다"
+            "the UNKNOWN_COMMAND of stage 3 must not leak under the key of a round trip in progress"
         );
-        assert_eq!(deliveries.in_flight(), 1, "자리는 처음 하나 그대로다");
+        assert_eq!(deliveries.in_flight(), 1, "the seat stays as the first one");
 
         assert_eq!(
             deliveries.complete(CommandReply::ok(request_id, json!({ "tab": 4 }))),
@@ -5392,21 +4997,23 @@ pub(crate) mod tests {
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
-                assert_eq!(reply.outcome, Ok(json!({ "tab": 4 })), "주인의 결말 그대로")
+                assert_eq!(
+                    reply.outcome,
+                    Ok(json!({ "tab": 4 })),
+                    "the owner's outcome as is"
+                )
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
         assert!(
             caller_inbox.try_recv().is_err(),
-            "★이 왕복이 낸 답장은 정확히 하나다★"
+            "★this round trip gave exactly one reply★"
         );
     }
 
-    /// ★결말이 붙은 **직후** 온 재질의가 봉투를 한 번 더 보내면 안 된다★
-    ///
-    /// 결말이 자리를 지우고 프레임은 그 뒤에 나가던 구조에서는 그 사이가 빈 표였다: 재질의가 새 자리를 열고
-    /// 같은 명령을 **다시 실행시킨다.** 그 창을 결정적으로 겨눈다 — `complete` 뒤 배달 태스크가 깨어나기
-    /// **전에** 두 번째 배달의 첫 폴링을 넣는다(현재 스레드 런타임이라 그 사이에 남이 못 낀다).
+    /// ★A re-query that comes **right after the outcome attaches** must not send the envelope once more★
+    /// In the structure where the outcome erased the seat and the frame went out after that, the gap in between was an empty table: the re-query opens a new seat and **makes the same command run again.** This aims at that window deterministically — it puts the first poll of
+    /// the second delivery **before** the delivery task wakes after `complete` (a current-thread runtime so nobody else can slip in between).
     #[tokio::test]
     async fn a_repeat_arriving_before_the_reply_is_sent_does_not_forward_again() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5425,22 +5032,22 @@ pub(crate) mod tests {
             AgentEvent::CommandRequest { .. }
         ));
 
-        // 결말은 붙었지만 프레임은 아직 안 나갔다 — 그 태스크는 아직 깨어나지 못했다.
+        // The outcome has attached but the frame has not gone out — that task has not yet been able to wake.
         assert_eq!(
             deliveries.complete(CommandReply::ok(request_id, json!({ "tab": 4 }))),
             OutcomeLanding::Attached
         );
-        // 상한을 둔다 — 이 회귀가 살아나면 두 번째 배달이 제 자리를 열고 오지 않을 답을 영원히 기다린다.
+        // Put a cap — if this regression revives the second delivery opens its own seat and waits forever for an answer that will not come.
         tokio::time::timeout(
             Duration::from_secs(10),
             deliver(roster.clone(), deliveries.clone(), 2, again),
         )
         .await
-        .expect("재질의가 제 왕복을 열어 매달렸다 — 합쳐졌어야 한다");
+        .expect("the re-query opened its own round trip and hung — it should have coalesced");
 
         assert!(
             owner_inbox.try_recv().is_err(),
-            "결말과 프레임 사이에 온 재질의가 같은 조작을 한 번 더 시키면 안 된다"
+            "a re-query that came between the outcome and the frame must not make the same operation run once more"
         );
 
         finished(a).await;
@@ -5448,14 +5055,19 @@ pub(crate) mod tests {
             next_event(&mut caller_inbox).await,
             AgentEvent::CommandReply { .. }
         ));
-        assert!(caller_inbox.try_recv().is_err(), "★프레임은 정확히 한 장★");
-        assert_eq!(deliveries.in_flight(), 0, "프레임이 나간 뒤 자리가 풀린다");
+        assert!(
+            caller_inbox.try_recv().is_err(),
+            "★the frame is exactly one★"
+        );
+        assert_eq!(
+            deliveries.in_flight(),
+            0,
+            "the seat is released after the frame goes out"
+        );
     }
 
-    /// ★같은 id 인데 **딴 요청**이면 합치지 않고 반려한다★(TRD §4-⑥ 셋째 다리)
-    ///
-    /// 합치면 그 요청은 **한 번도 전달되지 않고** 답장도 못 받은 채, 그 키로 나가는 한 장이 **앞 요청의
-    /// 결과**를 실어 간다 — 호출자는 엉뚱한 payload 로 자기 promise 를 푼다.
+    /// ★If it is the same id but **a different request** it is not coalesced and is refused★ (the third leg of TRD §4-⑥)
+    /// Coalesced, that request would **never be delivered** and never get its reply, and the one frame going out under that key would carry **the earlier request's result** — the caller resolves its promise with the wrong payload.
     #[tokio::test]
     async fn a_different_command_under_an_inflight_request_id_is_refused_not_folded() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5463,7 +5075,7 @@ pub(crate) mod tests {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let first = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = first.request_id;
-        // 같은 키, 다른 이름 — 부르는 쪽이 id 를 재사용한 **딴 조작**이다.
+        // The same key, a different name — **a different operation** where the caller reused the id.
         let other = CommandEnvelope {
             request_id,
             name: "theme.set".to_string(),
@@ -5487,16 +5099,16 @@ pub(crate) mod tests {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(
-                    reply.outcome.expect_err("딴 요청이 같은 키를 썼다").code(),
+                    reply.outcome.expect_err("a different request used the same key").code(),
                     ErrorCode::RequestIdConflict,
-                    "합쳐서 남의 결과를 주면 안 된다 — 그 자리에서 반려한다"
+                    "coalescing and handing over another's result is wrong — it is refused on the spot"
                 );
             }
-            other => panic!("딴 요청도 답을 받아야 한다: {other:?}"),
+            other => panic!("the different request must get an answer too: {other:?}"),
         }
         assert!(
             owner_inbox.try_recv().is_err(),
-            "반려한 요청을 주인에게 보내면 안 된다"
+            "a refused request must not be sent to the owner"
         );
 
         assert_eq!(
@@ -5510,24 +5122,19 @@ pub(crate) mod tests {
                 assert_eq!(
                     reply.outcome,
                     Ok(json!({ "tab": 4 })),
-                    "먼저 열린 왕복은 제 결과를 그대로 받는다"
+                    "the round trip opened first receives its own result as is"
                 )
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
     }
 
-    /// ★마감이 지났는데 아직 안 걷힌 자리는 **다음 시도를 흡수하면 안 된다**★
+    /// ★A seat past the deadline but not yet reaped **must not absorb the next attempt**★
+    /// The sweeper runs every second but the retry comes right after the deadline. If it absorbed, that attempt would never be delivered and the caller would receive the `TIMEOUT` of the earlier attempt, settled **before** it asked again — a retry becomes a quiet no-op.
+    /// ★The sweeper is deliberately not started★: the point of this test is that what blocks absorption must be the query path itself, not the sweep period.
     ///
-    /// 수거기는 1초마다 도는데 재시도는 마감 직후에 온다. 흡수하면 그 시도는 한 번도 전달되지 않고,
-    /// 호출자는 자기가 다시 묻기 **전에** 정해진 이전 시도의 `TIMEOUT` 을 답으로 받는다 — 재시도가 조용한
-    /// no-op 이 된다. ★수거기를 일부러 안 띄운다★: 흡수를 막는 것이 수거 주기가 아니라 질의 경로 자신이어야
-    /// 한다는 것이 이 시험의 요점이다.
-    ///
-    /// ★아래가 축복하는 것 — 프레임 **두 장**과 그 **순서**★: 한 시도에 한 장씩이라 두 장이 맞고, 이 시험은
-    /// 옛 시도의 `TIMEOUT` 이 **재시도가 주인에게 전달된 뒤에** 같은 연결에 쓰이는 순서를 그대로 단언한다
-    /// (사유 = `CommandDeliveries::open` 의 인라인 정산 주석). 즉 상관 키가 같은 두 프레임이 「옛 답 →
-    /// 새 답」 순으로 도착할 수 있다는 뜻이고, 그것이 이 설계에서 정상이다.
+    /// ★What the below blesses — **two** frames and their **order**★: it is one per attempt so two is right, and this test asserts as is the order in which the earlier attempt's `TIMEOUT` is written to the same connection **after the retry was delivered to the owner**
+    /// (reason = the inline settlement comment of `CommandDeliveries::open`). That is, two frames with the same correlation key can arrive in the order "old answer → new answer", and that is normal in this design.
     #[tokio::test]
     async fn a_retry_after_the_deadline_is_not_absorbed_by_the_unswept_seat() {
         let clock = Arc::new(ManualClock::new());
@@ -5547,7 +5154,7 @@ pub(crate) mod tests {
             AgentEvent::CommandRequest { .. }
         ));
 
-        // 마감은 지났지만 아무도 안 걷었다 — 계약이 시킨 그대로의 재질의가 이 상태에서 도착한다.
+        // The deadline has passed but nobody reaped — a re-query exactly as the contract instructs arrives in this state.
         clock.advance(Duration::from_secs(11));
         let b = tokio::spawn(deliver(roster.clone(), deliveries.clone(), 2, retry));
 
@@ -5556,19 +5163,22 @@ pub(crate) mod tests {
                 next_event(&mut owner_inbox).await,
                 AgentEvent::CommandRequest { .. }
             ),
-            "재시도는 제 왕복을 얻어 주인에게 다시 가야 한다"
+            "the retry must get its own round trip and go to the owner again"
         );
-        // 첫 시도는 결말 없이 접혔다 — 그 한 장이 먼저 나간다.
+        // The first attempt folded with no outcome — that one frame goes out first.
         finished(a).await;
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(
-                    reply.outcome.expect_err("첫 시도는 마감").code(),
+                    reply
+                        .outcome
+                        .expect_err("the first attempt is the deadline")
+                        .code(),
                     ErrorCode::Timeout
                 );
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
 
         assert_eq!(
@@ -5582,19 +5192,17 @@ pub(crate) mod tests {
                 assert_eq!(
                     reply.outcome,
                     Ok(json!({ "tab": 4 })),
-                    "재시도는 제 결과를 받는다 — 앞 시도의 TIMEOUT 을 물려받지 않는다"
+                    "the retry gets its own result — it does not inherit the earlier attempt's TIMEOUT"
                 )
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
-        assert_eq!(deliveries.in_flight(), 0, "남은 자리가 없어야 한다");
+        assert_eq!(deliveries.in_flight(), 0, "no seat may remain");
     }
 
-    /// ★재접속한 호출자에게 「아무 일도 없었다」고 말하지 않는다★ — 그 봉투는 이미 갔을 수 있다.
-    ///
-    /// 클라이언트에는 재접속을 건너 사는 신분이 없어, 반쯤 끊겼다 다시 붙어 같은 id 로 다시 묻는 그 요청이
-    /// 연결 id 로는 **남남**으로 보인다. 자리 임자가 이미 떠났으면 그 왕복의 적용 여부는 **불명**이므로
-    /// 확실성도 지시도 그렇게 답한다(ADR-0159).
+    /// ★A reattached caller is not told "nothing happened"★ — that envelope may already have gone.
+    /// The client has no identity that lives across reconnects, so a request that was half-dropped, reattached and asked again with the same id looks like a **stranger** by connection id. If the seat's owner has already left, whether that round trip was applied is **unknown**
+    /// so both the certainty and the instruction answer so (ADR-0159).
     #[tokio::test]
     async fn a_reconnected_caller_retrying_its_id_is_not_told_nothing_happened() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5614,7 +5222,7 @@ pub(crate) mod tests {
             AgentEvent::CommandRequest { .. }
         ));
 
-        // 끊김만 관측됐고 정리(`drop_origin`)는 아직이다 — 그 사이에 재접속한 연결이 같은 id 로 다시 묻는다.
+        // Only the disconnect was observed and cleanup (`drop_origin`) has not yet run — in between the reattached connection asks again with the same id.
         roster.detach(2);
         finished(tokio::spawn(deliver(
             roster.clone(),
@@ -5629,15 +5237,15 @@ pub(crate) mod tests {
                 let reply = opened_reply(&reply);
                 let err = reply
                     .outcome
-                    .expect_err("남의 자리가 아직 그 키를 쥐고 있다");
+                    .expect_err("another's seat still holds that key");
                 assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
                 assert_eq!(
                     err.retry(),
                     engram_dashboard_command::RetryMode::Never,
-                    "dedup 저장소가 없으므로 이 경로는 재시도를 지시하지 않는다"
+                    "there is no dedup store so this path does not instruct a retry"
                 );
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
 
         assert_eq!(
@@ -5647,10 +5255,8 @@ pub(crate) mod tests {
         finished(a).await;
     }
 
-    /// ★종료 창에 도착한 명령도 **답을 받는다**★ — 안 그러면 프로세스가 죽을 때까지 매달린다.
-    ///
-    /// 표를 비우기만 하고 닫지 않으면 그 뒤 명령이 자리를 여는데, 그때 수거기는 이미 멈춰 마감을 볼 눈이
-    /// 없다. 기다림에 상한을 두어 그 회귀가 hang 이 아니라 실패로 보이게 한다.
+    /// ★A command arriving in the shutdown window also **gets an answer**★ — otherwise it hangs until the process dies.
+    /// If the table is only emptied and not closed, a later command opens a seat, and by then the sweeper has already stopped and there are no eyes to watch the deadline. A cap is put on the wait so that regression shows as a failure, not a hang.
     #[tokio::test]
     async fn a_command_arriving_after_shutdown_is_answered_instead_of_hanging() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5659,52 +5265,58 @@ pub(crate) mod tests {
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = env.request_id;
 
-        assert_eq!(deliveries.drain(), 0, "비울 것 없이 표만 닫는다");
+        assert_eq!(
+            deliveries.drain(),
+            0,
+            "there is nothing to empty so only the table is closed"
+        );
 
         tokio::time::timeout(
             Duration::from_secs(10),
             deliver(roster.clone(), deliveries.clone(), 2, env),
         )
         .await
-        .expect("종료 뒤 도착한 명령이 답도 없이 매달린다");
+        .expect("a command that arrived after shutdown hangs with no answer");
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
-                let err = reply.outcome.expect_err("데몬이 내려가는 중");
+                let err = reply.outcome.expect_err("the daemon is going down");
                 assert_eq!(
                     err.code(),
                     ErrorCode::OutcomeUnknown,
-                    "적용 여부는 불명이다"
+                    "whether it was applied is unknown"
                 );
                 assert_eq!(err.retry(), engram_dashboard_command::RetryMode::Never);
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
         assert!(
             owner_inbox.try_recv().is_err(),
-            "닫힌 표에서는 봉투가 나가지 않는다"
+            "no envelope goes out on a closed table"
         );
-        assert_eq!(deliveries.in_flight(), 0, "거절한 질의는 표에 앉지 않는다");
+        assert_eq!(
+            deliveries.in_flight(),
+            0,
+            "a refused query does not sit in the table"
+        );
     }
 
-    // ── 답장을 넣지 못한 경우(FIX 2) ─────────────────────────────────────────────
+    // ── when the reply could not be put in (FIX 2) ──────────────────────────────────
 
-    /// ★유일한 답장을 못 넣었으면 **로그로라도 남는다**★
-    ///
-    /// 결말은 이미 자리를 거둬 갔으므로 되돌릴 길이 없다. 삼키면 호출자는 마감도 안 걸린 채 영영 답을 못
-    /// 받고 서버엔 흔적이 하나도 안 남는다(로깅 컨벤션 「무로그 삼킴」 안티패턴).
-    /// 큐를 1칸으로 잡고 미리 채워 포화를 만든다.
+    /// ★If the only reply could not be put in **it remains in the log at least**★
+    /// The outcome already took the seat away so there is no way to undo. Swallowed, the caller would never get an answer with not even a deadline set and no trace at all would remain on the server (the logging convention antipattern "silent swallow").
+    /// The queue has capacity 1 and is pre-filled to make saturation.
     #[test]
     fn a_reply_that_cannot_be_enqueued_is_reported_not_swallowed() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
-        // 용량 1 — 아래에서 한 장을 미리 채워 두면 답장이 들어갈 자리가 없다.
+        // Capacity 1 — if one frame is pre-filled below there is no place for the reply to go.
         let (caller_sink, _caller_inbox) = sink_with_capacity(1);
         roster.attach(2, &caller_sink);
         caller_sink
             .try_send(Frame::Text("occupied".into()))
-            .expect("한 칸은 비어 있다");
+            .expect("the one place is free");
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = env.request_id;
@@ -5726,21 +5338,18 @@ pub(crate) mod tests {
             logged
                 .iter()
                 .any(|line| line.contains(&request_id.to_string())),
-            "어느 왕복의 답장이 사라졌는지 남아야 한다: {logged:?}"
+            "which round trip's reply vanished must remain: {logged:?}"
         );
     }
 
-    // ── 이미 떠난 호출자(FIX 3) ─────────────────────────────────────────────────
+    // ── a caller who already left (FIX 3) ────────────────────────────────────
 
-    /// ★정리가 배달 태스크의 **첫 폴링보다 먼저** 돌아도 명령이 실행되면 안 된다★
+    /// ★Even if cleanup runs **before the delivery task's first poll** the command must not be executed★
+    /// `dispatch` detaches delivery so that task's first poll can be later than `on_disconnect`. In that order `drop_origin` sees an empty table and passes, and if the late-waking task opens a seat and sends the envelope ① **a command with side effects is executed**
+    /// for a caller who has already left and ② nobody reaps that seat so it stays until the deadline.
     ///
-    /// `dispatch` 는 배달을 떼어 내므로 그 태스크의 첫 폴링이 `on_disconnect` 보다 늦을 수 있다. 그 순서에서
-    /// `drop_origin` 은 빈 표를 보고 지나가고, 뒤늦게 깨어난 태스크가 자리를 열어 봉투를 보내면 ① 이미 떠난
-    /// 호출자를 위해 **부수효과 있는 명령이 실행되고** ② 그 자리는 아무도 안 거둬 마감까지 남는다.
-    ///
-    /// ★그 나쁜 순서를 결정적으로 만든다★: `deliver` 는 `async fn` 이라 **부를 때가 아니라 폴링될 때**
-    /// 돈다. 그래서 future 를 만들어 두고 정리를 먼저 돌린 뒤에 await 하면 그 인터리브가 정확히 재현된다
-    /// (spawn 으로는 첫 폴링 시점을 시험이 정할 수 없어 이 순서를 못 만든다).
+    /// ★Make that bad order deterministic★: `deliver` is an `async fn` so it runs **when polled, not when called**. So building the future, running cleanup first and then awaiting reproduces exactly that interleave
+    /// (with spawn the test cannot decide the first-poll moment so it cannot make this order).
     #[tokio::test]
     async fn a_command_from_a_caller_that_already_left_is_never_forwarded() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5748,46 +5357,43 @@ pub(crate) mod tests {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
 
-        // 아직 한 번도 폴링되지 않은 배달.
+        // A delivery that has never been polled.
         let pending_delivery = deliver(roster.clone(), deliveries.clone(), 2, env);
 
-        // 운영의 `on_disconnect` 순서 그대로 — 명부에서 먼저 빼고 자리를 거둔다.
+        // Exactly the production `on_disconnect` order — remove from the roster first and then reap the seat.
         roster.detach(2);
         assert_eq!(
             deliveries.drop_origin(2),
             0,
-            "아직 자리가 없다 — 이 빈손이 이 회귀의 출발점이다"
+            "there is no seat yet — this empty-handedness is the starting point of this regression"
         );
 
-        // ★기다림에 상한을 둔다★ — 이 회귀가 살아나면 봉투가 나가고 배달은 **영원히** 주인의 답을 기다린다
-        //   (그 자리는 아무도 안 거두고, 이 시험엔 마감을 밀 수거기도 없다). 상한이 없으면 그 회귀가 실패가
-        //   아니라 hang 으로 나타나 어느 단언이 틀렸는지조차 안 알려 준다([`next_event`] 와 같은 규약 —
-        //   정상 경로는 폴링 한 번으로 끝나므로 이 값은 판정 기준이 아니다).
+        // ★Put a cap on the wait★ — if this regression revives the envelope goes out and delivery waits **forever** for the owner's answer (nobody reaps that seat and this test has no sweeper to push the deadline). Without the cap that regression shows not as a failure
+        //   but as a hang and does not even say which assertion was wrong (the same convention as [`next_event`] — the normal path ends in one poll so this value is not a criterion).
         tokio::time::timeout(Duration::from_secs(10), pending_delivery)
             .await
             .expect(
-                "떠난 호출자의 배달이 안 끝난다 — 봉투가 나갔고 오지 않을 답을 기다리는 중이다",
+                "the departed caller's delivery does not end — the envelope went out and it is waiting for an answer that will not come",
             );
 
         assert!(
             owner_inbox.try_recv().is_err(),
-            "떠난 호출자의 명령을 주인에게 배달하면 안 된다 — 부수효과가 그대로 일어난다"
+            "a departed caller's command must not be delivered to the owner — the side effect happens as is"
         );
         assert_eq!(
             deliveries.in_flight(),
             0,
-            "아무도 안 거둘 자리를 남기면 마감까지 표에 앉는다"
+            "leaving a seat nobody will reap would sit in the table until the deadline"
         );
     }
 
-    // ── 종료(FIX 4) ─────────────────────────────────────────────────────────────
+    // ── shutdown (FIX 4) ──────────────────────────────────────────────────
 
-    /// ★종료는 유계다 — 남은 자리를 전부 답하고 그 답이 배달 태스크를 즉시 푼다★
-    ///
+    /// ★Shutdown is bounded — it answers every remaining seat and those answers free the delivery tasks at once★
     /// Without the drain a delivery task waits on its reply seat whose **sending half lives in this table**, so nothing
     /// wakes it until the seat's deadline (7 s ordinary, up to 91 s for a launch); meanwhile the table and the task
     /// outlive the moment the daemon reported it had stopped.
-    /// 수거기를 **기다려** 그 사실을 관측한다 — 핸들을 버리면 이 단언이 설 자리가 없다.
+    /// The sweeper is **waited on** to observe that fact — dropping the handle leaves this assertion nowhere to stand.
     #[tokio::test]
     async fn shutdown_answers_every_outstanding_round_trip_and_stops_the_sweeper() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5805,32 +5411,32 @@ pub(crate) mod tests {
         ));
         assert_eq!(deliveries.in_flight(), 1);
 
-        stop.send(true).expect("수거기가 살아 있다");
+        stop.send(true).expect("the sweeper is alive");
         tokio::time::timeout(Duration::from_secs(10), sweeper)
             .await
-            .expect("수거기가 종료 신호에 안 멈춘다")
-            .expect("수거기 태스크");
+            .expect("the sweeper does not stop on the shutdown signal")
+            .expect("the sweeper task");
 
-        assert_eq!(deliveries.in_flight(), 0, "남은 자리가 없어야 한다");
-        // ★시계를 한 톱니도 안 밀었다★ — 마감이 아니라 종료가 푼 것이다.
+        assert_eq!(deliveries.in_flight(), 0, "no seat may remain");
+        // ★The clock was not pushed even one notch★ — it was shutdown, not the deadline, that released it.
         finished(round_trip).await;
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
                 let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
-                let err = reply.outcome.expect_err("종료");
+                let err = reply.outcome.expect_err("shutdown");
                 assert_eq!(
                     err.code(),
                     ErrorCode::OutcomeUnknown,
-                    "적용 여부는 불명이다"
+                    "whether it was applied is unknown"
                 );
                 assert_eq!(err.retry(), engram_dashboard_command::RetryMode::Never);
             }
-            other => panic!("CommandReply 여야 함: {other:?}"),
+            other => panic!("expected a CommandReply: {other:?}"),
         }
     }
 
-    /// 비울 것이 없으면 조용하고, 두 번 비워도 답장이 두 번 나가지 않는다.
+    /// If there is nothing to empty it is quiet, and emptying twice does not send a reply twice.
     #[test]
     fn draining_twice_answers_each_seat_once() {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
@@ -5843,18 +5449,20 @@ pub(crate) mod tests {
             false,
             DeadlineClass::Ordinary,
         ) else {
-            panic!("자리를 얻어야 한다");
+            panic!("must get a seat");
         };
 
         assert_eq!(deliveries.drain(), 1);
-        assert_eq!(deliveries.drain(), 0, "두 번째 비움은 답할 것이 없다");
+        assert_eq!(
+            deliveries.drain(),
+            0,
+            "the second emptying has nothing to answer"
+        );
         assert_eq!(deliveries.in_flight(), 0);
     }
 
-    /// ★비운 표는 **닫힌다** — 그 뒤 질의는 자리를 얻지 못하고 즉시 반려된다★(종료가 유계인 근거).
-    ///
-    /// 닫지 않으면 종료 창에 도착한 명령이 자리를 열고 답을 기다리는데, 그때 수거기는 이미 멈춰 있어
-    /// 마감을 볼 눈이 없다 — 그 왕복은 답장 0장으로 프로세스가 죽을 때까지 매달린다.
+    /// ★An emptied table **closes** — a later query gets no seat and is refused at once★ (the basis of shutdown being bounded).
+    /// Without closing, a command arriving in the shutdown window opens a seat and waits for an answer, but by then the sweeper has already stopped and there are no eyes to watch the deadline — that round trip hangs with zero replies until the process dies.
     #[test]
     fn a_drained_table_refuses_new_round_trips() {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
@@ -5872,18 +5480,20 @@ pub(crate) mod tests {
                 ),
                 Seat::Closed
             ),
-            "닫힌 표는 자리를 내주지 않는다"
+            "a closed table gives no seat"
         );
-        assert_eq!(deliveries.in_flight(), 0, "거절한 질의는 표에 앉지 않는다");
+        assert_eq!(
+            deliveries.in_flight(),
+            0,
+            "a refused query does not sit in the table"
+        );
     }
 
-    // ── 상관 표 자체 ─────────────────────────────────────────────────────────────
+    // ── the correlation table itself ─────────────────────────────────────────
 
-    /// 진행 중인 키를 덮지 않고, **무엇을 다시 물었나 → 누가 다시 물었나** 순으로 갈린다.
-    ///
-    /// 덮으면 먼저 열린 왕복이 조용히 자리를 잃는다. 그리고 갈래를 뭉치면 하나씩 깨진다 — 같은 요청에
-    /// 오류를 내면 같은 키의 답장이 둘이 되고, 다른 연결에 아무것도 안 내면 그쪽이 매달리고, **딴 요청을
-    /// 합치면 그 요청은 실행도 답장도 없이 남의 결과를 받는다**(근거 = [`Seat`]).
+    /// It does not overwrite an in-progress key and splits in the order **what was asked again → who asked again**.
+    /// Overwriting makes the round trip opened first quietly lose its seat. And if the branches are lumped they break one by one — giving an error to the same request makes two replies under one key, giving nothing to another connection makes that side hang, and
+    /// **coalescing a different request makes that request receive another's result with neither execution nor reply** (basis = [`Seat`]).
     #[test]
     fn a_second_open_of_the_same_request_id_splits_on_payload_then_on_who_asked() {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
@@ -5897,7 +5507,7 @@ pub(crate) mod tests {
             false,
             DeadlineClass::Ordinary,
         ) else {
-            panic!("첫 왕복은 자리를 얻는다");
+            panic!("the first round trip gets a seat");
         };
 
         assert!(
@@ -5912,7 +5522,7 @@ pub(crate) mod tests {
                 ),
                 Seat::Coalesced
             ),
-            "같은 연결의 같은 요청은 합친다"
+            "the same request from the same connection is coalesced"
         );
         assert!(
             matches!(
@@ -5926,7 +5536,7 @@ pub(crate) mod tests {
                 ),
                 Seat::Conflict
             ),
-            "이름이 다르면 딴 요청이다 — 합치면 안 된다"
+            "a different name is a different request — it must not be coalesced"
         );
         assert!(
             matches!(
@@ -5940,7 +5550,7 @@ pub(crate) mod tests {
                 ),
                 Seat::Conflict
             ),
-            "인자가 다르면 딴 요청이다 — 이름만 보면 여기가 뚫린다"
+            "different arguments are a different request — looking only at the name leaves a hole here"
         );
         assert!(
             matches!(
@@ -5954,15 +5564,17 @@ pub(crate) mod tests {
                 ),
                 Seat::Taken { holder: 1 }
             ),
-            "다른 연결이면 그쪽에 답해야 한다"
+            "if it is another connection that side must be answered"
         );
-        assert_eq!(deliveries.in_flight(), 1, "먼저 열린 자리는 그대로다");
+        assert_eq!(
+            deliveries.in_flight(),
+            1,
+            "the seat opened first stays as is"
+        );
     }
 
-    /// ★자리는 결말이 붙는 순간이 아니라 **프레임이 나간 뒤**에 풀린다★(모듈 헤더 규칙 2).
-    ///
-    /// 결말이 붙자마자 키가 비면, 그 프레임이 나가기 전에 도착한 재질의가 빈 표를 보고 **봉투를 한 번 더**
-    /// 보낸다 — 같은 조작이 두 번 적용되고 같은 키의 프레임도 둘이 된다.
+    /// ★The seat is released **after the frame goes out**, not the moment the outcome attaches★ (module header rule 2).
+    /// If the key empties as soon as the outcome attaches, a re-query that arrives before that frame goes out sees an empty table and sends **the envelope once more** — the same operation is applied twice and the frames of the same key become two.
     #[test]
     fn a_seat_stays_claimed_until_its_reply_has_been_sent() {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
@@ -5976,7 +5588,7 @@ pub(crate) mod tests {
             false,
             DeadlineClass::Ordinary,
         ) else {
-            panic!("자리를 얻어야 한다");
+            panic!("must get a seat");
         };
 
         assert_eq!(
@@ -5995,7 +5607,7 @@ pub(crate) mod tests {
                 ),
                 Seat::Coalesced
             ),
-            "결말이 붙었어도 프레임 전이면 자리는 아직 그 왕복 것이다"
+            "even if the outcome has attached, before the frame the seat still belongs to that round trip"
         );
 
         deliveries.release(request_id, token);
@@ -6011,14 +5623,12 @@ pub(crate) mod tests {
                 ),
                 Seat::Opened { .. }
             ),
-            "프레임이 나간 뒤에는 같은 id 로 새 왕복을 열 수 있다"
+            "after the frame goes out a new round trip can be opened with the same id"
         );
     }
 
-    /// ★늦은 `release` 는 **같은 키에 앉은 다른 왕복**을 지우지 않는다★ — 그래서 발권으로 집는다.
-    ///
-    /// 마감·종료가 걷어 간 뒤 호출자가 같은 id 로 다시 묻는 것은 계약이 막지 않는 정상
-    /// 경로다. 키로 지우면 그 새 왕복이 이유 없이 답을 잃는다.
+    /// ★A late `release` does not erase **another round trip that sits on the same key**★ — that is why it picks by ticket.
+    /// A caller asking again with the same id after the deadline · shutdown reaped it is a normal path the contract does not forbid. Erasing by key makes that new round trip lose its answer for no reason.
     #[test]
     fn a_late_release_cannot_evict_the_next_round_trip_under_the_same_id() {
         let clock = Arc::new(ManualClock::new());
@@ -6037,14 +5647,14 @@ pub(crate) mod tests {
             DeadlineClass::Ordinary,
         )
         else {
-            panic!("첫 왕복은 자리를 얻는다");
+            panic!("the first round trip gets a seat");
         };
 
-        // 마감이 그 왕복을 결말 없이 접는다 — 여기까지가 첫 시도의 끝이다.
+        // The deadline folds that round trip with no outcome — up to here is the end of the first attempt.
         clock.advance(Duration::from_secs(11));
         assert_eq!(deliveries.expire(), 1);
 
-        // 계약이 막지 않는 같은 번호의 재질의 — 새 왕복이 같은 키에 앉아야 한다.
+        // A re-query of the same number that the contract does not forbid — the new round trip must sit on the same key.
         let Seat::Opened { rx: _second, .. } = deliveries.open(
             request_id,
             1,
@@ -6053,30 +5663,23 @@ pub(crate) mod tests {
             false,
             DeadlineClass::Ordinary,
         ) else {
-            panic!("재질의가 새 자리를 얻는다");
+            panic!("the re-query gets a new seat");
         };
 
-        // 첫 태스크가 이제서야 프레임을 내보내고 자기 자리를 놓는다.
+        // The first task only now sends out its frame and releases its own seat.
         deliveries.release(request_id, stale);
         assert_eq!(
             deliveries.in_flight(),
             1,
-            "늦은 정리가 남의 자리를 지우면 그 호출자는 답을 잃는다"
+            "a late cleanup erasing another's seat makes that caller lose its answer"
         );
     }
 
-    /// ★**지어낸 답이 아니라 중계한 답**에도 지시 내림이 걸린다 — 그리고 그 내림이 **주인의 어휘를
-    /// 지우지 않는다**★(FIX 9 의 구조 게이트가 못 보는 절반)
-    ///
-    /// 주인은 남의 프로세스라 이 모듈의 생성자를 안 쓴다 — 제 판단대로 `retry: same-request-id` 를 실어
-    /// 보낼 수 있고, 데몬은 그 답을 **그대로 중계한다.** 운영 프로세스에서도 살아 있는 경로라(패닉 그물은
-    /// 운영에서 훅이 앞선다 — ADR-0292 · ADR-0293) 패닉 그물보다 이쪽이 중요하다.
-    ///
-    /// ★주인의 답을 **wire 에서 디코드해** 넣는 것이 이 시험의 요점이다★: in-process 로 지어낸 오류에는
-    /// 원문 사본([`CommandError::received`])이 비어 있어 「어휘가 보존되나」라는 물음 자체가 공허해진다.
-    /// 여기서는 **모르는 코드**(`RATE_LIMITED`)와 **계약 밖 필드**(`hint`)를 실어 보내, 나간 프레임에서
-    /// 그 둘이 살아 있으면서 지시만 내려갔는지를 **원문 JSON 으로** 잰다(타입으로 돌려 읽으면 미지 코드가
-    /// `INTERNAL` 로 보여 애초에 못 잰다).
+    /// ★Issuing the instruction applies to **an answer relayed, not one made up** — and that issuing **does not erase the owner's vocabulary**★ (the half FIX 9's structural gate cannot see)
+    /// The owner is another process and does not use this module's constructors — by its own judgment it can send `retry: same-request-id`, and the daemon **relays that answer as is.** It is a path alive in the production process too (the panic net is preceded by
+    /// the hook in production — ADR-0292 · ADR-0293) so this matters more than the panic net.
+    /// ★The point of this test is to put the owner's answer in **decoded from the wire**★: an error made up in-process has an empty raw copy ([`CommandError::received`]) so the question "is the vocabulary preserved" itself becomes vacuous. Here an **unknown code** (`RATE_LIMITED`)
+    /// and an **out-of-contract field** (`hint`) are carried, and whether those two are alive in the outgoing frame with only the instruction lowered is measured **in raw JSON** (read back by type an unknown code would look like `INTERNAL` and could not be measured at all).
     #[tokio::test]
     async fn an_error_relayed_from_the_owner_keeps_its_vocabulary_and_loses_only_its_retry_hint() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -6091,57 +5694,56 @@ pub(crate) mod tests {
             AgentEvent::CommandRequest { .. }
         ));
 
-        // 주인이 보낸 바이트 그대로 — 이 데몬이 모르는 코드와 모르는 필드를 함께 실었다.
+        // Exactly the bytes the owner sent — carrying a code this daemon does not know and a field it does not know together.
         let from_owner: CommandReply = serde_json::from_str(&format!(
             r#"{{"request_id":"{request_id}","outcome":{{"Err":{{"code":"RATE_LIMITED","message":"slow down","retry":"same-request-id","hint":"5s"}}}}}}"#
         ))
-        .expect("주인의 답장을 디코드한다");
+        .expect("decode the owner's reply");
         assert_eq!(deliveries.complete(from_owner), OutcomeLanding::Attached);
         finished(round_trip).await;
 
         let frame = tokio::time::timeout(Duration::from_secs(10), caller_inbox.recv())
             .await
-            .expect("답장이 오지 않는다")
-            .expect("프레임 하나");
+            .expect("the reply does not come")
+            .expect("one frame");
         let Frame::Text(text) = frame else {
-            panic!("Text 여야 함: {frame:?}")
+            panic!("expected Text: {frame:?}")
         };
         let sent: serde_json::Value =
-            serde_json::from_str(&text).expect("나간 프레임을 원문으로 읽는다");
+            serde_json::from_str(&text).expect("read the outgoing frame as raw");
         let error = &sent["CommandReply"]["reply"]["outcome"]["Err"];
 
         assert_eq!(
             error["retry"], "never",
-            "중계 홉이 위험한 지시를 내린다 — dedup 이 설 때까지 그 책임은 여기 있다"
+            "the relay hop issues the dangerous instruction — until dedup stands that responsibility is here"
         );
         assert_eq!(
             error["code"], "RATE_LIMITED",
-            "★주인의 어휘를 지우지 않는다★ — 지시를 내리려고 사본을 버리면 여기가 INTERNAL 로 바뀐다"
+            "★the owner's vocabulary is not erased★ — throwing away the copy to issue the instruction would change this to INTERNAL"
         );
         assert_eq!(
             error["hint"], "5s",
-            "계약 밖 필드도 최종 호출자까지 간다(additive 확장이 중계에서 죽으면 안 된다)"
+            "an out-of-contract field also reaches the final caller (an additive extension must not die in the relay)"
         );
-        assert_eq!(error["message"], "slow down", "문구도 주인 것 그대로다");
+        assert_eq!(
+            error["message"], "slow down",
+            "the wording is the owner's as is too"
+        );
     }
 
-    // ── 재시도 지시 정책(FIX 9) ─────────────────────────────────────────────────
+    // ── retry instruction policy (FIX 9) ────────────────────────────────────
 
-    /// ★이 경로가 「같은 번호로 다시 물어라」를 다시 내보내면 여기서 떨어진다★
+    /// ★If this path emits "ask again with the same number" again, it falls here★
+    /// The basis is in [`no_retry`] (summary: there is no dedup store replaying completed work so a re-query becomes a **re-execution**).
+    /// A behavior test can guard only the branches touched at the time, and when the next branch is added only that place quietly returns to the old instruction — so what is measured from the source is **whether the way to build an error is itself only one**.
+    /// ★The needed strings are joined with `concat!`★ — written as is, this test would trip over its own pattern.
     ///
-    /// 근거는 [`no_retry`] 에 있다(요약: 완료분을 재생해 줄 dedup 저장소가 없어 재질의가 **재실행**이 된다).
-    /// 행동 시험으로는 그때그때 만져 본 갈래만 지킬 수 있고, 다음에 갈래가 하나 늘면 그 자리만 조용히
-    /// 옛 지시로 돌아간다 — 그래서 **오류를 짓는 길 자체가 하나뿐인지**를 소스로 잰다.
-    /// ★필요한 문자열은 `concat!` 로 이어 붙인다★ — 그대로 적으면 이 시험 자신이 자기 패턴에 걸린다.
-    ///
-    /// ★이 게이트를 실제 보장으로 읽지 말 것★ — 두 겹으로 못 본다:
-    /// ① **출처**: 이 모듈이 *지은* 답만 잰다. 밖에서 들어와 이 모듈이 **통과시키는** 답(`route` 의 패닉
-    ///    그물 · 주인이 보내 온 오류)은 여기 안 걸린다.
-    /// ② **형태**: 두 생성자의 **철자**를 셀 뿐이라, 그것을 감싼 얇은 래퍼(`CommandError::internal` ·
-    ///    `not_found` 같은 것)로 오류를 지으면 그대로 통과한다.
-    /// ★이 경로의 실제 보장은 [`send_reply`] 의 출구 내림 한 줄이고**, 그것을 잰다** 자리는
-    /// [`tests::an_error_relayed_from_the_owner_keeps_its_vocabulary_and_loses_only_its_retry_hint`].
-    /// 이 게이트는 그 위에 얹는 **조기 경보**다 — 지시를 직접 싣는 새 자리가 생기면 출구까지 안 가서 걸린다.
+    /// ★Do not read this gate as the real guarantee★ — it is blind in two layers:
+    /// ① **Origin**: it measures only answers this module *built*. Answers coming in from outside that this module **passes through** (`route`'s panic net · an error the owner sent) do not trip it.
+    /// ② **Shape**: it only counts the **spelling** of the two constructors, so building an error through a thin wrapper around them (like `CommandError::internal` · `not_found`) passes as is.
+    /// ★The real guarantee of this path is the one line of exit lowering in [`send_reply`], and the place that measures it is
+    /// [`tests::an_error_relayed_from_the_owner_keeps_its_vocabulary_and_loses_only_its_retry_hint`]★ — this gate is an **early warning** laid on top: when a new place that carries the instruction directly appears
+    /// it trips before reaching the exit.
     #[test]
     fn this_module_can_only_build_do_not_retry_failures() {
         let src = include_str!("command_delivery.rs");
@@ -6151,21 +5753,21 @@ pub(crate) mod tests {
         assert_eq!(
             src.matches(derived).count(),
             0,
-            "코드에서 지시를 파생시키는 생성자를 쓰면 안 된다 — 오류는 no_retry 로만 짓는다"
+            "a constructor that derives the instruction from the code must not be used — errors are built only with no_retry"
         );
         assert_eq!(
             src.matches(typed).count(),
             1,
-            "지시를 직접 싣는 생성자는 no_retry 안의 그 한 줄뿐이어야 한다"
+            "the constructor that carries the instruction directly must be only that one line inside no_retry"
         );
         assert_eq!(
             no_retry(ErrorCode::OutcomeUnknown, "x").retry(),
             RetryMode::Never,
-            "그 한 줄이 싣는 지시"
+            "the instruction that one line carries"
         );
     }
 
-    /// 아무도 안 물은 결말은 붙을 자리가 없다.
+    /// An outcome nobody asked for has no place to attach.
     #[test]
     fn an_outcome_for_an_unknown_request_id_finds_no_seat() {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
@@ -6176,19 +5778,18 @@ pub(crate) mod tests {
         );
     }
 
-    // ── 두 번째 입구 — 연결 없는 호출자(ADR-0160) ──────────────────────────────────
+    // ── the second entrance — a connectionless caller (ADR-0160) ────────────────────────────
 
-    /// ★첫 가짜 호출자의 번호는 `u64::MAX` 다★ — 발급기가 거기서 내려가므로(`CommandBus::open_caller`)
-    /// 갓 만든 버스의 첫 호출은 이 번호를 쓴다. 아래 누수 시험이 그 번호를 손에 쥐는 근거다.
+    /// ★The first fake caller's number is `u64::MAX`★ — the issuer goes down from there (`CommandBus::open_caller`) so the first call on a fresh bus uses this number. That is the basis for the leak test below getting that number in hand.
     const FIRST_CONTROL_CALLER: ConnId = u64::MAX;
 
-    /// ★수거기를 함께 돌려준다 — 받은 쪽이 들고 있어야 자리 표가 안 닫힌다([`BusSweeper`]).★
-    /// 이 시험들은 마감을 **손으로** 미므로 수거기는 돌아도 아무것도 거두지 않는다(수동 시계는 스스로 안 간다).
+    /// ★It returns the sweeper too — the receiver must hold it or the seat table closes ([`BusSweeper`]).★
+    /// These tests push the deadline **by hand** so the sweeper runs but reaps nothing (a manual clock does not advance by itself).
     fn bus_with(roster: CommandRoster, clock: Arc<ManualClock>) -> (CommandBus, BusSweeper) {
         CommandBus::new(roster, deliveries_with(clock), Arc::new(NoLocalCommands))
     }
 
-    /// 제어 라우트 호출 하나를 띄운다 — 답은 [`answered`] 로 받는다.
+    /// Launches one control-route call — the answer is received with [`answered`].
     fn invoking(
         bus: &CommandBus,
         request_id: RequestId,
@@ -6202,36 +5803,35 @@ pub(crate) mod tests {
         })
     }
 
-    /// 호출의 답을 **상한 안에서** 받는다 — 근거는 [`next_event`] 와 같다(깨지면 hang 이 아니라 실패여야
-    /// 한다). ★이 문의 호출을 그냥 `.await` 하지 말 것★: 답장은 자리 표를 거쳐 오므로 두 입구가 다른 표를
-    /// 보는 회귀에서는 영영 안 오고, 그때 시험은 어느 단언이 틀렸는지도 안 알려 준 채 멈춘다.
+    /// Receives the call's answer **within a cap** — the basis is the same as [`next_event`] (breaking must be a failure, not a hang). ★Do not simply `.await` a call on this door★: the reply comes through the seat table so in a regression where the two entrances
+    /// see different tables it never comes, and then the test stops without even saying which assertion was wrong.
     async fn answered(call: tokio::task::JoinHandle<CommandReply>) -> CommandReply {
         tokio::time::timeout(Duration::from_secs(10), call)
             .await
-            .expect("제어 라우트 호출이 답 없이 매달렸다")
-            .expect("호출 태스크")
+            .expect("the control route call hung with no answer")
+            .expect("the call task")
     }
 
-    /// 주인에게 나간 패킷의 원문 봉투 칸을 푼다 — 데몬이 다시 싼 봉투는 늘 풀린다(ADR-0272).
+    /// Unpacks the raw envelope field of the packet that went out to the owner — an envelope the daemon re-wrapped always unpacks (ADR-0272).
     fn opened(raw: &serde_json::value::RawValue) -> CommandEnvelope {
-        crate::connection_core::envelope_from_wire(raw).expect("데몬이 다시 싼 봉투는 풀린다")
+        crate::connection_core::envelope_from_wire(raw)
+            .expect("the envelope the daemon re-wrapped unpacks")
     }
 
-    /// 호출자에게 나간 답장 패킷의 원문 칸을 푼다 — 데몬이 싼 답장은 늘 풀린다(ADR-0272).
+    /// Unpacks the raw field of the reply packet that went out to the caller — a reply the daemon wrapped always unpacks (ADR-0272).
     fn opened_reply(raw: &serde_json::value::RawValue) -> CommandReply {
-        reply_from_wire(raw).expect("데몬이 싼 답장은 풀린다")
+        reply_from_wire(raw).expect("the reply the daemon wrapped unpacks")
     }
 
     async fn envelope_from(inbox: &mut mpsc::Receiver<Frame>) -> CommandEnvelope {
         match next_event(inbox).await {
             AgentEvent::CommandRequest { envelope } => opened(&envelope),
-            other => panic!("봉투가 와야: {other:?}"),
+            other => panic!("an envelope must come: {other:?}"),
         }
     }
 
-    /// ★제어 라우트의 왕복이 끝에서 끝까지 돈다★ — 봉투가 주인에게 나가고, 그 결말이 **이 호출의 반환**으로
-    /// 돌아온다(완결 조건 1). 그리고 세운 가짜 연결을 거둔다 — 안 거두면 명부의 생존 표가 요청마다 한 칸씩
-    /// 영구히 자란다(그 누수는 런타임에 아무 신호도 내지 않는다).
+    /// ★The control route's round trip runs end to end★ — the envelope goes out to the owner and its outcome comes back as **this call's return** (completion condition 1). And the fake connection it set up is reaped — if not reaped the roster's liveness table grows one entry per request
+    /// permanently (that leak gives no signal at runtime).
     #[tokio::test]
     async fn the_control_door_hands_the_envelope_over_and_brings_the_answer_back() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -6242,11 +5842,14 @@ pub(crate) mod tests {
         let envelope = envelope_from(&mut owner_inbox).await;
         assert_eq!(envelope.request_id, request_id);
         assert_eq!(envelope.name, "tab.create");
-        assert_eq!(envelope.args["window"], "main", "인자는 그대로 건너간다");
+        assert_eq!(
+            envelope.args["window"], "main",
+            "the arguments cross as they are"
+        );
         assert_eq!(
             envelope.owner,
             OwnerToken::new("conn-1"),
-            "목적지 주인은 명부 조회 결과로 덮인다"
+            "the destination owner is overwritten by the roster lookup result"
         );
         assert_eq!(
             bus.deliveries()
@@ -6256,15 +5859,15 @@ pub(crate) mod tests {
 
         let reply = answered(call).await;
         assert_eq!(reply.request_id, request_id);
-        assert_eq!(reply.outcome.expect("주인의 성공")["tab"], "t-1");
-        assert_eq!(bus.deliveries().in_flight(), 0, "자리를 놓는다");
+        assert_eq!(reply.outcome.expect("the owner's success")["tab"], "t-1");
+        assert_eq!(bus.deliveries().in_flight(), 0, "the seat is released");
         assert!(
             !bus.roster().is_attached(FIRST_CONTROL_CALLER),
-            "왕복이 끝났으면 그 가짜 연결도 거둬져야 한다"
+            "once the round trip ends that fake connection must be reaped too"
         );
     }
 
-    /// ★제어 라우트도 표시한 칸의 이름을 id 로 바꿔 중계한다★ — 변환은 두 입구가 지나는 `deliver` 한 곳에 있다(ADR-0308).
+    /// ★The control route too turns the names in marked fields into ids before relaying★ — the conversion is in the one place `deliver`, which both entrances pass (ADR-0308).
     #[tokio::test]
     async fn the_control_door_relays_a_marked_name_as_the_agent_id() {
         let lead = uuid::Uuid::new_v4();
@@ -6291,19 +5894,22 @@ pub(crate) mod tests {
         assert_eq!(
             envelope.args,
             json!({ "slot_of": lead.to_string(), "window": "main" }),
-            "표시한 칸만 id 로 바뀐다"
+            "only marked fields become ids"
         );
         bus.deliveries()
             .complete(CommandReply::ok(request_id, json!({ "ok": true })));
 
         let reply = answered(call).await;
-        assert_eq!(reply.outcome.expect("주인의 성공")["ok"], true);
-        assert_eq!(bus.deliveries().in_flight(), 0, "자리를 놓는다");
-        assert_eq!(bus.deliveries().resolving(), 0, "풀기 셈도 돌아온다");
+        assert_eq!(reply.outcome.expect("the owner's success")["ok"], true);
+        assert_eq!(bus.deliveries().in_flight(), 0, "the seat is released");
+        assert_eq!(
+            bus.deliveries().resolving(),
+            0,
+            "the resolve count comes back too"
+        );
     }
 
-    /// 아무도 그 이름을 선언하지 않았으면 배달이 「모르는 명령」으로 답한다 — 이 문이 그 갈래를 삼키지
-    /// 않는다(완결 조건 2 의 배달 쪽 절반. 제어 라우트가 명부 조회로 먼저 거르는 쪽은 `control::catalog`).
+    /// If nobody declared that name delivery answers "unknown command" — this door does not swallow that branch (the delivery-side half of completion condition 2. The side where the control route filters first by roster lookup is `control::catalog`).
     #[tokio::test]
     async fn a_name_with_no_owner_comes_back_as_an_unknown_command() {
         let (bus, _sweeper) = bus_with(CommandRoster::new(), Arc::new(ManualClock::new()));
@@ -6311,14 +5917,13 @@ pub(crate) mod tests {
         let reply = answered(invoking(&bus, RequestId::new(), "nope.nope")).await;
 
         assert_eq!(
-            reply.outcome.expect_err("반려").code(),
+            reply.outcome.expect_err("refusal").code(),
             ErrorCode::UnknownCommand
         );
         assert_eq!(bus.deliveries().in_flight(), 0);
     }
 
-    /// ★답 없는 주인은 **마감이 푼다**★(완결 조건 3) — 이 문이 자기 시한을 따로 세우지 않고 소켓 문과 같은
-    /// 마감을 쓴다는 뜻이다. 시계를 손으로 밀어 그 갈래만 결정적으로 태운다.
+    /// ★An owner that does not answer is **released by the deadline**★ (completion condition 3) — meaning this door does not set its own time limit but uses the same deadline as the socket door. The clock is pushed by hand to ride only that branch deterministically.
     #[tokio::test]
     async fn a_control_call_that_passes_its_deadline_answers_timeout() {
         let clock = Arc::new(ManualClock::new());
@@ -6329,16 +5934,17 @@ pub(crate) mod tests {
         let _ = envelope_from(&mut owner_inbox).await;
 
         clock.advance(Duration::from_secs(11));
-        assert_eq!(bus.deliveries().expire(), 1, "마감이 그 자리를 거둔다");
+        assert_eq!(bus.deliveries().expire(), 1, "the deadline reaps that seat");
 
         let reply = answered(call).await;
-        assert_eq!(reply.outcome.expect_err("반려").code(), ErrorCode::Timeout);
+        assert_eq!(
+            reply.outcome.expect_err("refusal").code(),
+            ErrorCode::Timeout
+        );
     }
 
-    /// ★같은 번호의 두 번째 질의는 **봉투를 하나 더 보내지 않는다**★(완결 조건 4 — 전달 갈래).
-    ///
-    /// 이 문은 요청마다 새 연결 번호를 쓰므로 두 질의는 남남으로 보이고, 그래서 자리 표의
-    /// [`Seat::Taken`] 이 판정한다. 그 판정이 없으면 같은 조작이 주인에게 두 번 간다.
+    /// ★A second query with the same number **does not send one more envelope**★ (completion condition 4 — the delivery branch).
+    /// This door uses a new connection number per request so the two queries look like strangers, and so [`Seat::Taken`] of the seat table decides. Without that decision the same operation goes to the owner twice.
     #[tokio::test]
     async fn a_repeat_of_the_same_request_id_does_not_send_a_second_envelope() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -6350,31 +5956,27 @@ pub(crate) mod tests {
 
         let repeat = answered(invoking(&bus, request_id, "tab.create")).await;
         assert_eq!(
-            repeat.outcome.expect_err("반려").code(),
+            repeat.outcome.expect_err("refusal").code(),
             ErrorCode::RequestIdConflict
         );
         assert!(
             owner_inbox.try_recv().is_err(),
-            "봉투는 한 장이어야 한다 — 두 번째 질의가 같은 조작을 다시 보냈다"
+            "the envelope must be one — the second query sent the same operation again"
         );
 
         bus.deliveries()
             .complete(CommandReply::ok(request_id, json!({ "tab": "t-1" })));
         assert!(
             answered(first).await.outcome.is_ok(),
-            "먼저 연 왕복은 제 답을 받는다"
+            "the round trip opened first gets its own answer"
         );
     }
 
-    /// ★이 문은 **데몬 자기 이름을 태우지 않는다 — 그 계약을 이 문이 스스로 문다**★
-    ///
-    /// 오늘 그 이름이 여기 안 오는 근거는 **다른 모듈**에 있었다(`control::catalog::handle_call` 이 자기 표를
-    /// 먼저 태운다). 그런데 [`deliver`] 의 1단계 갈래가 그 근거에 기대고 있고, 그 갈래가 이 문을 타면 취소
-    /// 한 번에 **자리 하나와 번호 하나가 프로세스 수명 내내** 남는다(사유 전문 = [`CommandBus::invoke`] 맨
-    /// 앞의 거절 주석). 그래서 기대는 자리에서 거절하고, 이 시험이 그 거절을 못 박는다.
-    /// ★재는 축은 「반려 코드」가 아니라 **아무것도 잡지 않았나**다★ — 본문·자리·명부 칸·상한 셈 넷 다.
-    /// ★이 갈래를 없애고 1단계를 이 문에 되살리려면 취소-완결성을 먼저 만들어야 한다★(그때 필요한 것 =
-    /// `spawn_blocking` 뒷정리를 취소에서 떼어 내는 것). 그 전에 거절만 걷으면 위 누수가 그대로 돌아온다.
+    /// ★This door **does not ride the daemon's own names — this door bites that contract itself**★
+    /// Today the basis for those names not coming here was in **another module** (`control::catalog::handle_call` runs its own table first). But the stage 1 branch of [`deliver`] leans on that basis, and if that branch rode this door a single cancellation would leave
+    /// **one seat and one number for the whole process lifetime** (full reason = the refusal comment at the very top of [`CommandBus::invoke`]). So it refuses at the place that leans on it, and this test pins that refusal.
+    /// ★The axis measured is not the "refusal code" but **whether anything was taken**★ — all four of body · seat · roster entry · cap count.
+    /// ★To remove this branch and revive stage 1 at this door, cancellation-completeness must be built first★ (what is needed then = separating the `spawn_blocking` cleanup from cancellation). Lifting only the refusal before that brings the above leak straight back.
     #[tokio::test]
     async fn the_control_door_refuses_a_name_this_daemon_answers_itself() {
         let local = Arc::new(FakeLocal::answering(
@@ -6390,32 +5992,28 @@ pub(crate) mod tests {
         let refused = answered(invoking(&bus, RequestId::new(), "agent.new")).await;
 
         assert_eq!(
-            refused.outcome.expect_err("반려").code(),
+            refused.outcome.expect_err("refusal").code(),
             ErrorCode::Internal,
-            "배선 결함이지 호출자가 고칠 것이 아니다"
+            "a wiring defect, not something the caller can fix"
         );
-        assert_eq!(local.runs(), 0, "본문을 돌리지 않는다");
-        assert_eq!(bus.deliveries().in_flight(), 0, "자리를 열지 않는다");
+        assert_eq!(local.runs(), 0, "the body is not run");
+        assert_eq!(bus.deliveries().in_flight(), 0, "no seat is opened");
         assert!(
             !bus.roster().is_attached(FIRST_CONTROL_CALLER),
-            "명부에 칸을 만들지 않는다"
+            "no roster entry is made"
         );
         assert_eq!(
             bus.relayed_counter().load(Ordering::SeqCst),
             0,
-            "상한 셈도 잡기 전에 돌아선다"
+            "it turns away before even taking the cap count"
         );
     }
 
-    /// ★1단계에 도착하는 입구 라벨은 **그 문의 것**이다★ — 이 필드로 두 문의 사고를 가르는 것이 목적이라,
-    /// 한쪽이 남의 이름표를 달면 그 필터가 조용히 절반만 잡는다(중계된 제어 호출이 소켓에서 온 것처럼
-    /// 적혔던 적이 있다).
-    ///
-    /// ★오늘 1단계를 타는 문은 소켓 하나뿐이다★(형제 시험의 그 거절) — 그래서 이 시험은 두 축을 함께
-    /// 잰다: 소켓의 라벨이 그대로 도착하는가, 그리고 제어 라우트가 1단계를 **아예 안 태우는가**.
-    /// ★어댑터의 forwarding 은 여기서 못 잰다★ — 이 더블은 받은 라벨을 그냥 기록하므로 `DaemonLocalCommands`
-    /// 가 상수를 박는 회귀는 여기 안 잡힌다. 그 축은 `control::commands` 의
-    /// `the_entrance_label_is_forwarded_not_hardcoded` 가 그 어댑터를 직접 태워 잰다.
+    /// ★The entrance label that arrives at stage 1 is **that door's own**★ — the point is to tell the incidents of two doors apart by this field, and if one side wears another's name tag that filter quietly catches only half (a relayed control call
+    /// was once written as if it came from the socket).
+    /// ★Today the only door that rides stage 1 is the socket★ (the refusal in the sibling test) — so this test measures two axes together: that the socket's label arrives as is, and that the control route **does not ride stage 1 at all**.
+    /// ★The adapter's forwarding cannot be measured here★ — this double just records the label it received so a regression where `DaemonLocalCommands` hard-codes a constant is not caught here. That axis is measured by `the_entrance_label_is_forwarded_not_hardcoded` in `control::commands`
+    /// riding that adapter directly.
     #[tokio::test]
     async fn stage_one_carries_the_label_of_the_door_that_drove_it() {
         let local = Arc::new(FakeLocal::answering("agent.new", Ok(json!({}))));
@@ -6431,9 +6029,13 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(local.entrance(), Some(ENTRANCE_SOCKET));
-        // ADR-0231: 봉투를 낸 연결이 임대 판정의 호출자로 도착한다 — `None` 이면 보유자의 버스 취소가 거절된다.
-        assert_eq!(local.caller(), Some(Some(9)), "배달은 호출한 연결을 넘긴다");
-        assert_eq!(local.runs(), 1, "전제: 소켓 문이 1단계를 태웠다");
+        // ADR-0231: the connection that sent the envelope arrives as the caller of the lease decision — with `None` a holder's bus cancel would be refused.
+        assert_eq!(
+            local.caller(),
+            Some(Some(9)),
+            "delivery passes the connection that called"
+        );
+        assert_eq!(local.runs(), 1, "premise: the socket door rode stage 1");
 
         let (bus, _sweeper) = CommandBus::new(
             CommandRoster::new(),
@@ -6444,21 +6046,18 @@ pub(crate) mod tests {
         assert_eq!(
             local.entrance(),
             Some(ENTRANCE_SOCKET),
-            "제어 라우트가 1단계를 태웠다 — 그 문은 그 갈래에 닿을 수 없어야 한다"
+            "the control route rode stage 1 — that door must not be able to reach that branch"
         );
-        assert_eq!(local.runs(), 1, "본문이 한 번 더 돌았다");
+        assert_eq!(local.runs(), 1, "the body ran once more");
     }
 
-    /// ★한 자리 표에 수거기 **둘**을 붙이는 조립은 성립하지 않는다★
-    ///
-    /// 성립했을 때의 증상이 고약해서다: 먼저 떨어지는 표식 하나가 나가는 길에
-    /// [`CommandDeliveries::drain`] 을 불러 **살아 있는 데몬의 공유 표를 닫고**, 그 뒤 모든 왕복이
-    /// [`Seat::Closed`] 로 반려된다(데몬은 멀쩡한데 명령만 전부 「종료 중」).
-    /// ★이 시험이 겨누는 것은 **가시성이 못 막는 경로**다★ — `CommandBus::new` 는 `pub` 이고 자리 표는
-    /// [`CommandBus::deliveries`] 로 공유되며 `Clone` 이므로, 모듈 밖에서 이 두 줄을 쓸 수 있었다. 막는
-    /// 것은 표 자신의 표식이다([`Seats::swept`]).
+    /// ★An assembly that attaches **two** sweepers to one seat table does not stand★
+    /// Because the symptom when it stands is nasty: the marker that drops first calls [`CommandDeliveries::drain`] on its way out and **closes the live daemon's shared table**, and every later round trip is refused as [`Seat::Closed`] (the daemon is fine yet every command is
+    /// "shutting down").
+    /// ★What this test aims at is **a path visibility cannot block**★ — `CommandBus::new` is `pub` and the seat table is shared via [`CommandBus::deliveries`] and is `Clone`, so outside the module these two lines could be written. What blocks it is the table's own marker
+    /// ([`Seats::swept`]).
     #[tokio::test]
-    #[should_panic(expected = "이미 수거기가 붙어")]
+    #[should_panic(expected = "already has a sweeper attached")]
     async fn a_second_sweeper_over_a_live_seat_table_cannot_be_assembled() {
         let (bus, _sweeper) = CommandBus::new(
             CommandRoster::new(),
@@ -6473,20 +6072,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// ★거절이 **그 표를 망가뜨리면 안 된다**★ — 단언이 지키려는 상태를 단언 자체가 만들던 자리다.
-    ///
-    /// 그 단언을 표의 잠금을 **든 채로** 두면 되감기가 그 가드를 떨어뜨려 [`Seats`] 의 잠금이 오염된다. 그때
-    /// 살아 있는 데몬이 얻는 상태가 정확히 이 표식이 막으려던 것이다: 그 뒤 [`CommandDeliveries::open`]
-    /// ·[`CommandDeliveries::complete`]·[`CommandDeliveries::in_flight`] 은 오염에 패닉하는 잠금을 쓰므로
-    /// (`lock`) 모든 명령이 죽고, 소멸자 경로만(`lock_for_cleanup`) 조용히 지나간다.
-    /// ★운영 프로세스에서는 이 갈래에 닿지 못한다★ — 그 단언의 패닉은 가둠 표시 밖이라 훅이 되감기 전에
-    /// 끝내 오염 자체가 없다(ADR-0292). 그래서 이 시험이 지키는 것은 훅 없는 시험 빌드이고, 그것으로 충분한
-    /// 이유는 그 빌드에서 패닉을 잡아 계속 도는 호출자가 **실제로 있다**는 것이다(시험 하네스가 그 형태다).
-    /// ★단언을 잠금 밖으로 낸 뒤에도 원자성은 그대로다★ — 읽기와 세우기가 임계 구역 안에서 한 번에 끝나고,
-    /// 밖으로 나가는 것은 「이미 있었나」라는 지역 값 하나다.
-    ///
-    /// 되감기 출력(패닉 백트레이스)이 stderr 에 한 번 찍히는 것은 정상이다 — 전역 패닉 훅을 갈아 끼우면
-    /// 같은 바이너리의 다른 시험 출력까지 삼키므로 건드리지 않는다.
+    /// ★The refusal **must not break that table**★ — this is the place where the assertion itself used to make the state it meant to guard.
+    /// If that assertion is kept **while holding** the table's lock, unwinding drops that guard and the lock of [`Seats`] is poisoned. The state the live daemon then gets is exactly what this marker meant to prevent: afterward [`CommandDeliveries::open`]
+    /// · [`CommandDeliveries::complete`] · [`CommandDeliveries::in_flight`] use a lock that panics on poisoning (`lock`) so every command dies, and only the destructor path (`lock_for_cleanup`) passes quietly.
+    /// ★The production process cannot reach this branch★ — the panic of that assertion is outside the containment marker so the hook ends the process before unwinding and there is no poisoning (ADR-0292). So what this test guards is test builds without the hook, and the reason that is enough is that in that build
+    /// there **really are** callers that catch a panic and keep running (the test harness is that shape).
+    /// ★Even after moving the assertion outside the lock atomicity is unchanged★ — reading and setting finish at once inside the critical section, and what goes out is one local value, "was it already there".
+    /// It is normal for the unwinding output (the panic backtrace) to print once on stderr — swapping the global panic hook would swallow other tests' output in the same binary so it is not touched.
     #[tokio::test]
     async fn a_refused_second_sweeper_leaves_the_shared_table_usable() {
         let (bus, _sweeper) = CommandBus::new(
@@ -6504,19 +6096,20 @@ pub(crate) mod tests {
             )
         }));
 
-        assert!(refused.is_err(), "전제: 둘째 수거기 요구는 거절된다");
+        assert!(
+            refused.is_err(),
+            "premise: the second sweeper request is refused"
+        );
         assert!(
             !shared.inner.is_poisoned(),
-            "거절이 살아 있는 데몬의 공유 표를 오염시켰다 — 그 뒤 모든 명령이 잠금에서 패닉한다"
+            "the refusal poisoned the live daemon's shared table — every later command panics at the lock"
         );
-        // 오염됐다면 `lock` 이 패닉해 이 줄에서 죽는다 — 성질을 기능으로도 한 번 더 문다.
-        assert_eq!(shared.in_flight(), 0, "표가 계속 쓸 수 있어야 한다");
+        // If poisoned `lock` panics and dies on this line — the property is bitten once more as a function.
+        assert_eq!(shared.in_flight(), 0, "the table must stay usable");
     }
 
-    /// ★상한을 친 중계는 **아무것도 잡지 않고** 거절된다★ — 자리도 태스크도 명부 칸도 나기 전이다.
-    ///
-    /// 이 문에는 연결 수명이 없어(요청마다 새로 선다) 소켓 입구가 가진 자연 상한이 없다. 상한이 없으면
-    /// 왕복 하나가 마감 동안 무는 것(태스크 + 자리 + 명부 한 칸 + 인자 사본)이 무계로 쌓인다.
+    /// ★A relay that hit the cap is refused **taking nothing**★ — before the seat, the task or the roster entry exists.
+    /// This door has no connection lifetime (it stands anew per request) so it lacks the natural cap the socket entrance has. Without a cap what one round trip holds for the deadline (a task + a seat + a roster entry + an argument copy) piles up without bound.
     #[tokio::test]
     async fn a_relayed_call_past_the_ceiling_is_refused_without_taking_anything() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -6526,21 +6119,23 @@ pub(crate) mod tests {
 
         let reply = answered(invoking(&bus, RequestId::new(), "tab.create")).await;
 
-        assert_eq!(reply.outcome.expect_err("반려").code(), ErrorCode::Conflict);
+        assert_eq!(
+            reply.outcome.expect_err("refusal").code(),
+            ErrorCode::Conflict
+        );
         assert!(
             owner_inbox.try_recv().is_err(),
-            "거절은 봉투를 내보내기 전이어야 한다"
+            "the refusal must come before the envelope goes out"
         );
-        assert_eq!(bus.deliveries().in_flight(), 0, "자리를 열지 않는다");
+        assert_eq!(bus.deliveries().in_flight(), 0, "no seat is opened");
         assert!(
             !bus.roster().is_attached(FIRST_CONTROL_CALLER),
-            "명부에 칸을 만들지 않는다"
+            "no roster entry is made"
         );
     }
 
-    /// ★상한은 **왕복이 끝나면 되돌아온다**★ — 안 그러면 한 번 찬 데몬이 프로세스 수명 내내 중계를 거절한다.
-    ///
-    /// 되돌리는 것은 [`RelaySlot`] 의 소멸자이고, 그래서 취소·이른 반환·패닉 어느 길로 떠나도 같다.
+    /// ★The cap **comes back when the round trip ends**★ — otherwise a daemon that filled once refuses relays for the whole process lifetime.
+    /// What gives it back is the destructor of [`RelaySlot`], so it is the same however it leaves — cancellation · early return · panic.
     #[tokio::test]
     async fn the_relay_ceiling_is_given_back_when_the_round_trip_ends() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -6552,7 +6147,7 @@ pub(crate) mod tests {
         assert_eq!(
             bus.relayed_counter().load(Ordering::SeqCst),
             1,
-            "왕복 중에는 한 칸을 물고 있다"
+            "during a round trip it holds one permit"
         );
 
         bus.deliveries()
@@ -6562,38 +6157,32 @@ pub(crate) mod tests {
         assert_eq!(
             bus.relayed_counter().load(Ordering::SeqCst),
             0,
-            "왕복이 끝나면 셈이 돌아와야 한다"
+            "when the round trip ends the count must come back"
         );
     }
 
-    /// ★취소로 떠나도 **세 축이 다 비어야 한다**★ — 명부 칸 · 상한 셈 · **자리**. HTTP 핸들러 future 는
-    /// 클라이언트가 끊기면 drop 된다.
-    ///
-    /// 직선 코드(`attach` → `await` → `detach`)로 되돌리면 이 시험이 빨개진다: drop 된 future 의 뒷줄은
-    /// 한 줄도 안 돌아 그 칸이 프로세스 수명 내내 남고, [`CommandRoster::sink_of`] 가 **모든 배달마다**
-    /// 그 표를 잠근 채 선형으로 훑는다.
-    /// ★자리 축을 여기서 빼지 말 것 — 그 축이 가장 비싸다★: 취소 시 자리를 안 놓으면 그 자리가 봉투의
-    /// 이름·인자 사본을 **프로세스 수명 내내** 든다([`Pending::args`]). 게다가 [`CommandDeliveries::open`]
-    /// 이 배달마다 [`CommandDeliveries::expire`] 를 부르고 그 함수는 표를 두 번 훑으므로, 남은 자리는 두
-    /// 입구 **양쪽**의 모든 명령에 비용을 매긴다. 이 축이 없던 판(명부·셈만 보던 판)은 그 누수를 안고도
-    /// 초록이었다.
+    /// ★Even leaving by cancellation **all three axes must be empty**★ — roster entry · cap count · **seat**. An HTTP handler future is dropped when the client drops.
+    /// Reverting to straight-line code (`attach` → `await` → `detach`) turns this test red: the lines after a dropped future do not run a single line so that entry stays for the whole process lifetime, and [`CommandRoster::sink_of`] walks that table linearly
+    /// holding it locked on **every delivery**.
+    /// ★Do not remove the seat axis here — that axis is the most expensive★: if a cancelled seat is not released it holds a copy of the envelope's name · arguments **for the whole process lifetime** ([`Pending::args`]). Moreover [`CommandDeliveries::open`]
+    /// calls [`CommandDeliveries::expire`] on every delivery and that function walks the table twice, so a leftover seat prices every command at **both** entrances. The version without this axis (looking only at the roster · count) was green while carrying that leak.
     #[tokio::test]
     async fn a_cancelled_control_call_leaves_no_seat_or_pseudo_connection_behind() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let (bus, _sweeper) = bus_with(roster, Arc::new(ManualClock::new()));
 
-        // 답하지 않는 주인에게 걸어 둔 채로 그 future 를 버린다 = 호출자가 끊긴 것과 같은 인과다.
+        // Dropping that future while it hangs on an owner that does not answer = the same causality as the caller dropping.
         let call = invoking(&bus, RequestId::new(), "tab.create");
         let _ = envelope_from(&mut owner_inbox).await;
         assert_eq!(
             bus.deliveries().in_flight(),
             1,
-            "전제: 취소 시점에 자리가 하나 열려 있다"
+            "premise: one seat is open at the moment of cancellation"
         );
         call.abort();
         let _ = call.await;
 
-        // abort 는 즉시 관측되지 않을 수 있다 — 상한 안에서 사라지는지를 본다(안 사라지면 영원히 안 사라진다).
+        // The abort may not be observed at once — look at whether it vanishes within a cap (if it does not vanish it never will).
         for _ in 0..200 {
             if !bus.roster().is_attached(FIRST_CONTROL_CALLER)
                 && bus.relayed_counter().load(Ordering::SeqCst) == 0
@@ -6604,21 +6193,21 @@ pub(crate) mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!(
-            "취소된 제어 라우트 호출이 뒤에 남긴 것: 명부={} 셈={} 자리={}",
+            "what the cancelled control route call left behind: roster={} count={} seat={}",
             bus.roster().is_attached(FIRST_CONTROL_CALLER),
             bus.relayed_counter().load(Ordering::SeqCst),
             bus.deliveries().in_flight()
         );
     }
 
-    // ── 마감 뒤 결과 로그의 원문 걷기(TRD S21 usage-limit-slot §1-4 「버스」 개정 4) ─────────────────────
+    // ── stripping the raw text of the post-deadline result log (TRD S21 usage-limit-slot §1-4 bus amendment 4) ───────────────
     //
-    // ★마감 뒤 갈래를 곧장 부른다★ — 재는 것은 「그 갈래가 무엇을 싣나」이고, 마감을 넘기는 배달 경로는 위 시험들이
-    //   이미 잰다. ★셋 다 capture 안에서만 그 callsite 를 때린다★(`log_capture` 「관측 조건」①).
+    // ★Calls the post-deadline branch directly★ — what is measured is "what that branch carries", and the delivery path that passes the deadline is already measured above.
+    //   ★All three hit that callsite only inside capture★ (`log_capture` "Observation conditions" ①).
 
     const UPSTREAM_TEXT: &str = "upstream said: quota blob 7f3a";
 
-    /// 실제 행 타입으로 지은 `usage.*` 답 — 칸 이름(`upstream`)이 바뀌면 여기서 컴파일이 멈춘다.
+    /// A `usage.*` answer built with the real row type — if the field name (`upstream`) changes compilation stops here.
     fn usage_payload() -> serde_json::Value {
         use engram_dashboard_agent::commands::{
             AgentBackend, UsageServedWord, UsageStateWord, UsageVendorRow, UsageWindowRow,
@@ -6646,7 +6235,7 @@ pub(crate) mod tests {
             detail_code: Some(-32_603),
             upstream: Some(UPSTREAM_TEXT.to_owned()),
         })
-        .expect("행 직렬화")
+        .expect("row serialization")
     }
 
     fn late_success(name: &str, payload: serde_json::Value) -> LocalJoin {
@@ -6656,14 +6245,14 @@ pub(crate) mod tests {
         ))
     }
 
-    /// ★붙든 Write(`usage.refresh`)의 마감 뒤 성공은 payload 를 싣되 상류 원문은 빼고 싣는다★ — 나머지 칸은 남는다
-    /// (그 줄이 있는 이유 = 호출자가 모르는 결과를 되찾는 실마리).
+    /// ★The post-deadline success of a held Write (`usage.refresh`) carries the payload but with the upstream raw text removed★ — the other fields remain
+    /// (the reason that line exists = a clue to recover the result the caller does not know).
     #[test]
     fn a_late_usage_row_is_logged_without_its_upstream_text() {
         let payload = usage_payload();
         assert!(
             payload.to_string().contains(UPSTREAM_TEXT),
-            "전제: 행이 원문을 싣는다"
+            "premise: the row carries the raw text"
         );
         let request_id = RequestId::new();
 
@@ -6678,25 +6267,27 @@ pub(crate) mod tests {
         });
 
         let [line] = logged.as_slice() else {
-            panic!("한 줄이어야 한다: {logged:?}");
+            panic!("must be one line: {logged:?}");
         };
         assert!(
             !line.contains(UPSTREAM_TEXT),
-            "원문이 로그에 앉았다: {line}"
+            "the raw text sat in the log: {line}"
         );
-        assert!(!line.contains("\"upstream\""), "키째 걷는다: {line}");
+        assert!(
+            !line.contains("\"upstream\""),
+            "stripped key and all: {line}"
+        );
         for kept in [
             "\"state\":\"Failed\"",
             "\"detail_kind\":\"rpc_error\"",
             "\"detail_code\":-32603",
             "\"left_pct\":60",
         ] {
-            assert!(line.contains(kept), "{kept} 는 남아야 한다: {line}");
+            assert!(line.contains(kept), "{kept} must remain: {line}");
         }
     }
 
-    /// ★명령 이름과 무관하게, 깊이와 무관하게 걷는다★ — 이름으로 가르면(`usage.` 로 시작하는 것만) 다른 명령이 같은
-    /// 칸을 실을 때 뚫리고, 맨 위만 보면 배열·중첩 객체 안의 원문이 샌다.
+    /// ★Stripped regardless of command name and regardless of depth★ — splitting by name (only those starting with `usage.`) leaves a hole when another command carries the field, and looking only at the top leaks raw text inside arrays and nested objects.
     #[test]
     fn the_upstream_scrub_ignores_the_command_name_and_reaches_nested_keys() {
         let payload = json!({
@@ -6716,7 +6307,7 @@ pub(crate) mod tests {
         });
 
         let [line] = logged.as_slice() else {
-            panic!("한 줄이어야 한다: {logged:?}");
+            panic!("must be one line: {logged:?}");
         };
         assert!(!line.contains("TOP-LEVEL-ORIGINAL"), "{line}");
         assert!(!line.contains("NESTED-ORIGINAL"), "{line}");
@@ -6725,8 +6316,7 @@ pub(crate) mod tests {
         assert!(line.contains("\"keep\":7"), "{line}");
     }
 
-    /// 읽기(`usage.get`)의 마감 뒤 성공은 번호를 안 붙들므로 **payload 없이 debug 한 줄**이다 — 이름 대조가 아니라
-    /// `retained` 로 가르는 기존 규칙이다.
+    /// The post-deadline success of a read (`usage.get`) does not hold a number so it is **one debug line with no payload** — the existing rule that splits not by name comparison but by `retained`.
     #[test]
     fn a_late_usage_get_is_a_payloadless_debug_line() {
         let logged = crate::log_capture::capture_levels(|| {
@@ -6740,10 +6330,13 @@ pub(crate) mod tests {
         });
 
         let [(level, line)] = logged.as_slice() else {
-            panic!("한 줄이어야 한다: {logged:?}");
+            panic!("must be one line: {logged:?}");
         };
         assert_eq!(*level, tracing::Level::DEBUG, "{line}");
-        assert!(!line.contains("outcome="), "payload 를 싣지 않는다: {line}");
+        assert!(
+            !line.contains("outcome="),
+            "the payload is not carried: {line}"
+        );
         assert!(!line.contains(UPSTREAM_TEXT), "{line}");
         assert!(line.contains("usage.get"), "{line}");
     }

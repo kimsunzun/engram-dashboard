@@ -1,17 +1,8 @@
-//! Window placement — writes `Moved` and `Resized` into the model ([`record`]) and applies the saved placement to windows ([`restore_windows`] — boot
-//! steps 8 and 9 create the static window (main) at that placement · TRD S21-storage §4 · §6-3 · §6-5 · the window port of runtime restore acceptance
-//! [`TauriRestoreWindows`] — §6-7 ② ④).
-//!
-//! - ★Position = physical outer position (`outer_position` as is), size = logical inner size divided by the window's scale factor★. A logical position
-//!   becomes ambiguous when monitors with different scale factors are mixed: one value points at two monitors (150% to the right of 100% — the logical x 1280..1920 band), so the window is
-//!   restored on the other monitor — ★do not turn the position back into logical★. Writing the position as physical is the same as tauri-plugin-window-state
-//!   (that plugin writes the size as physical too). Keeping the size logical preserves the visible size even if the scale setting changes, and it goes straight into the popout
-//!   builder's size argument (logical).
-//! - The monitor a window actually sits on is decided by its physical position — the monitor [`locate`] picks is used only to decide whether to discard and for the popout builder's first
-//!   placement.
-//! - ★Call window getters and setters before any lock (or after releasing it), and only write values inside a lock★ — no OS
-//!   calls while the layout lock is held (§6-3 · `layout/apply.rs` header 「락 규율」).
-//! - Does not panic — it is called from the window event handler, and a panic in the shell is turned into a shell exit right away by the hook (ADR-0292).
+//! Window placement — writes `Moved` and `Resized` into the model ([`record`]) and applies the saved placement to windows ([`restore_windows`] — boot steps 8 and 9 create the static window (main) at that placement · TRD S21-storage §4 · §6-3 · §6-5; the window port of runtime restore acceptance [`TauriRestoreWindows`] — §6-7 ② ④).
+//! - Position = physical outer position (`outer_position` as is), size = logical inner size divided by the window's scale factor. A logical position is ambiguous when monitors of different scale factors are mixed (150% right of 100%: the logical x 1280..1920 band points at two monitors), so the window would restore on the other monitor — do not turn the position back into logical. Writing the position physical equals tauri-plugin-window-state (which writes the size physical too); a logical size keeps the visible size across scale changes and goes straight into the popout builder's (logical) size argument.
+//! - The monitor a window actually sits on is decided by its physical position — the one [`locate`] picks is used only to decide whether to discard and for the popout builder's first placement.
+//! - Call window getters and setters before any lock (or after releasing it) and only write values inside a lock: no OS calls under the layout lock (§6-3 · `layout/apply.rs` header 「lock discipline」).
+//! - Does not panic — it is called from the window event handler, and the hook turns a shell panic into a shell exit at once (ADR-0292).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
@@ -31,7 +22,6 @@ use crate::layout::{
 use crate::theme::ThemeControl;
 use crate::webview_env::{Backdrop, WebviewEnv};
 
-/// One monitor — the physical-pixel rectangle the OS reported and its scale factor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MonitorArea {
     pub x: i32,
@@ -41,7 +31,6 @@ pub struct MonitorArea {
     pub scale: f64,
 }
 
-/// The placement [`locate`] picked — the physical outer position and the scale factor of the chosen monitor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Landing {
     pub x: i32,
@@ -49,10 +38,7 @@ pub struct Landing {
     pub scale: f64,
 }
 
-/// The monitor the saved placement goes to. For each monitor, take the physical rectangle for 「창이 그 모니터에 있다면」 (if the window were on that monitor) (the saved position as is · logical size ×
-/// that monitor's scale factor) and pick the monitor it overlaps most (the first enumerated if equal). `None` = it overlaps
-/// no monitor (including zero-area contact) — that placement is discarded and the window opens at the default placement (§6-5 ⑧ ⑨ · user decision F8). A monitor whose scale factor
-/// is not a finite positive number is treated as absent.
+/// The monitor the saved placement goes to. For each monitor take the physical rectangle for "the window on that monitor" (saved position as is · logical size × that monitor's scale factor) and pick the one it overlaps most (the first enumerated if equal). `None` = overlaps no monitor (zero-area contact included) — that placement is discarded and the window opens at the default placement (§6-5 ⑧ ⑨ · user decision F8). A monitor whose scale factor is not a finite positive number is treated as absent.
 pub fn locate(bounds: WindowBounds, monitors: &[MonitorArea]) -> Option<Landing> {
     let (left, top) = (bounds.x(), bounds.y());
     let mut best: Option<(f64, f64)> = None;
@@ -82,8 +68,7 @@ fn to_px(v: f64) -> i32 {
     v.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
 }
 
-/// Turn getter values (physical outer position · physical inner size · the window's scale factor) into a placement to record — the position stays as is, the size is divided by the scale factor (module
-/// header). `None` if the scale factor is not a finite positive number or [`WindowBounds::new`] rejects it (size 0 — minimized, etc.).
+/// Getter values (physical outer position · physical inner size · the window's scale factor) → a placement to record — the position as is, the size divided by the scale factor (module header). `None` if the scale factor is not a finite positive number or [`WindowBounds::new`] rejects it (size 0 — minimized, etc.).
 pub fn saved_bounds(x: i32, y: i32, w: u32, h: u32, scale: f64) -> Option<WindowBounds> {
     if !(scale.is_finite() && scale > 0.0) {
         return None;
@@ -96,11 +81,7 @@ pub fn saved_bounds(x: i32, y: i32, w: u32, h: u32, scale: f64) -> Option<Window
     )
 }
 
-/// Boot step 9 — open a window with `open` for each popout in the model (in label issue order). A window that could not be opened is removed from the model — the next periodic
-/// save carries that. Returns the removed labels. ★Call `open` outside the lock★ (creating a window = an OS call).
-///
-/// ★Boot only★ — it assumes the model's popouts have no windows yet. Called at runtime, window creation fails for every popout that is up, because
-/// its label already exists, so the popout is removed from the model while the OS window stays. Runtime restore (P3c1) uses a different path.
+/// Boot step 9 — open a window with `open` for each popout in the model (in label issue order). A window that could not be opened is removed from the model (the next periodic save carries that); returns the removed labels. Call `open` outside the lock (creating a window = an OS call). Boot only: it assumes the model's popouts have no windows yet — at runtime window creation fails for every popout already up (its label exists), removing it from the model while the OS window stays; runtime restore (P3c1) takes a different path.
 pub fn open_restored_popouts(
     layout: &LayoutState,
     mut open: impl FnMut(&str, WindowAttrs) -> Result<(), String>,
@@ -115,7 +96,7 @@ pub fn open_restored_popouts(
         Err(_) => {
             tracing::error!(
                 module = "state",
-                "레이아웃 락에 독이 들어 복원한 팝아웃 창을 열지 못했다"
+                "the layout lock is poisoned, so the restored popout windows could not be opened"
             );
             return Vec::new();
         }
@@ -132,7 +113,7 @@ pub fn open_restored_popouts(
                     module = "state",
                     label,
                     error = %e,
-                    "복원한 팝아웃 창을 못 열어 모델에서 지운다"
+                    "could not open the restored popout window — removing it from the model"
                 );
                 Some(label)
             }
@@ -148,16 +129,14 @@ pub fn open_restored_popouts(
             Err(_) => tracing::error!(
                 module = "state",
                 ?failed,
-                "레이아웃 락에 독이 들어 못 연 팝아웃을 모델에서 지우지 못했다"
+                "the layout lock is poisoned, so the popout that could not be opened could not be removed from the model"
             ),
         }
     }
     failed
 }
 
-/// The end of boot step 9 — open the restored popout windows ([`open_restored_popouts`] — its return value too) and **then** push the effective theme to all
-/// windows once (§5-6). Since it comes after opening, new popouts are in the receiving window list too, and popouts that could not be opened are already out of the model.
-/// ★The caller holds no lock★.
+/// The end of boot step 9 — open the restored popout windows ([`open_restored_popouts`], its return value too) and then push the effective theme to all windows once (§5-6): after opening, new popouts are in the receiving window list and unopenable ones are already out of the model. The caller holds no lock.
 fn open_popouts_then_push_themes(
     layout: &LayoutState,
     open: impl FnMut(&str, WindowAttrs) -> Result<(), String>,
@@ -169,37 +148,21 @@ fn open_popouts_then_push_themes(
 }
 
 /// The maximize desire to apply when that window becomes visible — one per label (true = maximize · false = original size · a later write overrides an earlier one).
-///
-/// - Writers = the paths that apply the placement · maximize to main (boot ⑧ [`restore_windows`] · runtime restore acceptance
-///   [`TauriRestoreWindows`] — while main is hidden, until it is shown; if visible, until it is applied on the spot —
-///   [`DeferredMaximize::apply_now`]) · maximized popouts created hidden (boot restore [`open_popout`] · runtime restore acceptance
-///   `RestoreWindows::open_hidden`) — up to here it is always true · window-state commands on a window that is not visible (`window.maximize` ·
-///   `window.unmaximize` — [`defer_maximize`] · TRD S26-window-chrome §5-2). Clearers = the path that applied it successfully · every show
-///   path (the first-paint show [`show_placed`] · the no-focus show in `first_paint` · the tray show · the show that does not steal
-///   focus — all pass through [`apply_deferred_maximize`]) · a window-state command on a window already at that size ([`drop_deferred_maximize`]) ·
-///   runtime restore applying a non-maximized copy (main) · window destruction ([`forget_deferred_maximize`]).
-/// - When a hidden window is maximized, tao emits `SW_MAXIMIZE` (which shows and activates the window) and only then hides it again with `SW_HIDE` (tao 0.35.3
-///   `platform_impl/windows/window_state.rs` `apply_diff`) — on a `--hidden` boot main flashes and takes focus. Unmaximize is
-///   recorded as a desire for the same reason (TRD §5-2).
-/// - While a desire exists (whatever its value), that window's placement is not recorded ([`record`]) — a `Moved` · `Resized` that arrives while hidden
-///   reads the normal placement the restore applied as 「최대화 아님」 (not maximized), and recording it lowers the model's maximize marker (if it finishes before the window is shown, the next
-///   boot loses the maximize). So when only the desire is left, recording that window's placement and pushing `window:frame` stop.
-/// - Boot always creates main and popouts hidden ([`restore_windows`]) and the desire stays until they are shown — for a visible boot, until the first-paint
-///   show; for a `--hidden` boot, until the tray show. For runtime restore acceptance on a hidden main (the LLM's answer after a tray hide · a `--hidden` boot), it stays
-///   until it is shown.
-/// - The lock is a leaf — while holding it, make no window call · log · other lock.
+/// - Writers: the paths applying placement · maximize to main (boot ⑧ [`restore_windows`] · runtime restore acceptance [`TauriRestoreWindows`] — while main is hidden, until it is shown; if visible, until applied on the spot — [`DeferredMaximize::apply_now`]) · maximized popouts created hidden (boot restore [`open_popout`] · runtime restore acceptance `RestoreWindows::open_hidden` — always true here) · window-state commands on a non-visible window (`window.maximize` · `window.unmaximize` — [`defer_maximize`] · TRD S26-window-chrome §5-2). Clearers: the path that applied it successfully · every show path (the first-paint show [`show_placed`] · the no-focus show in `first_paint` · the tray show · the show that does not steal focus — all through [`apply_deferred_maximize`]) · a window-state command on a window already at that size ([`drop_deferred_maximize`]) · runtime restore applying a non-maximized copy (main) · window destruction ([`forget_deferred_maximize`]).
+/// - Maximizing a hidden window makes tao emit `SW_MAXIMIZE` (shows and activates) and only then hide it again with `SW_HIDE` (tao 0.35.3 `platform_impl/windows/window_state.rs` `apply_diff`) — a `--hidden` boot's main would flash and take focus. Unmaximize is recorded as a desire for the same reason (TRD §5-2).
+/// - While a desire exists (any value) that window's placement is not recorded ([`record`]): a `Moved` · `Resized` arriving while hidden reads the restore-applied normal placement as "not maximized", and recording it lowers the model's maximize marker (finishing before the window is shown, the next boot loses the maximize). So with only the desire left, recording that window's placement and pushing `window:frame` stop.
+/// - Boot always creates main and popouts hidden ([`restore_windows`]) and the desire stays until they are shown — a visible boot until the first-paint show, a `--hidden` boot until the tray show. For runtime restore acceptance on a hidden main (the LLM's answer after a tray hide · a `--hidden` boot) it stays until shown.
+/// - The lock is a leaf — while holding it, no window call · log · other lock.
 #[derive(Debug, Default)]
 pub struct DeferredMaximize(Mutex<Wishes>);
 
 #[derive(Debug, Default)]
 struct Wishes {
-    // Goes up by one on every write — even writing the same value again (including true → false → true) gives a different revision.
     next_rev: u64,
     by_label: BTreeMap<String, Wish>,
 }
 
-// `rev` = the revision that wrote this desire. The side that applies outside the lock clears only if the revision it read is unchanged — looking at the value alone would erase a desire
-//   of the same value that was written again in between.
+// `rev` = the revision that wrote this desire. The side applying outside the lock clears only if the revision it read is unchanged — looking at the value alone would erase a desire of the same value written again in between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Wish {
     maximized: bool,
@@ -208,7 +171,6 @@ struct Wish {
 
 impl DeferredMaximize {
     fn wishes(&self) -> MutexGuard<'_, Wishes> {
-        // The field is a single table, so there is no half-changed state — it is called from the window event handler, so it must not panic (module header).
         sync::lock(&self.0)
     }
 
@@ -231,7 +193,6 @@ impl DeferredMaximize {
         self.wish(label).is_some()
     }
 
-    /// If there was one, clear it and return its value — clearing on window destruction is this too.
     fn take(&self, label: &str) -> Option<bool> {
         self.wishes()
             .by_label
@@ -239,8 +200,7 @@ impl DeferredMaximize {
             .map(|wish| wish.maximized)
     }
 
-    // Clear only if the desire that was read is still there — so that it does not erase a desire newly written by another thread (runtime restore acceptance · window-state command)
-    //   while applying.
+    // Clear only if the desire read is still there, so a desire newly written by another thread (runtime restore acceptance · window-state command) while applying is not erased.
     fn take_if_unchanged(&self, label: &str, seen: Wish) -> bool {
         let mut wishes = self.wishes();
         let unchanged = wishes.by_label.get(label) == Some(&seen);
@@ -250,10 +210,7 @@ impl DeferredMaximize {
         unchanged
     }
 
-    /// If there is a desire, apply it with `set(바람)` (the desire) and clear it only if applied — `true` = applied and cleared this time (the caller
-    /// records the placement). ★If it could not be applied, keep it★ — clearing would record the normal placement as 「최대화 아님」 (not maximized), erasing the model's maximize with no way to
-    /// apply it again. If kept, the next show applies it again. `set` is called outside the lock — if the desire was written again in between (even with the same
-    /// value), keep the new desire and return `false`.
+    /// If there is a desire, apply it with `set(desire)` and clear it only if applied — `true` = applied and cleared this time (the caller records the placement). If it could not be applied keep it: clearing would record the normal placement as "not maximized", erasing the model's maximize with no way to apply it again; kept, the next show applies it again. `set` is called outside the lock — a desire written again in between (even the same value) is kept and `false` returned.
     fn apply(&self, label: &str, set: impl FnOnce(bool) -> bool) -> bool {
         let Some(seen) = self.wish(label) else {
             return false;
@@ -261,14 +218,9 @@ impl DeferredMaximize {
         set(seen.maximized) && self.take_if_unchanged(label, seen)
     }
 
-    /// Apply maximize to a visible window now — write a true desire, call `place` (normal placement) and `maximize`, and clear it only if
-    /// applied. `true` = applied. ★If it could not be applied, keep it★ — [`record`] does not record that window as 「최대화 아님」 (not maximized) (including the placement
-    /// record after runtime restore acceptance) and the next show applies it again (the same reason as [`Self::apply`]). `place` · `maximize` are called outside
-    /// the lock.
-    /// - ★Write it before `place`★ — so that the `Moved` · `Resized` emitted by applying the placement do not record the normal placement as 「최대화 아님」
-    ///   (not maximized).
-    /// - ★Call `maximize` even if a show applied and cleared the desire in between★ — the position setter after that lowered the maximize (F8).
-    ///   If it could not be applied, write it again for that reason.
+    /// Apply maximize to a visible window now — write a true desire, call `place` (normal placement) and `maximize`, and clear it only if applied; `true` = applied. If it could not be applied keep it: [`record`] then does not record that window as "not maximized" (the placement record after runtime restore acceptance included) and the next show applies it again (same reason as [`Self::apply`]). `place` · `maximize` are called outside the lock.
+    /// - Write it before `place` so the `Moved` · `Resized` emitted by applying the placement do not record the normal placement as "not maximized".
+    /// - Call `maximize` even if a show applied and cleared the desire in between: the position setter after that lowered the maximize (F8); if it could not be applied, write it again for that reason.
     fn apply_now(
         &self,
         label: &str,
@@ -287,23 +239,11 @@ impl DeferredMaximize {
     }
 }
 
-// ── Tauri side — it needs a window to run, so it is for GUI measurement ──────────────────────────────
-
-/// Boot steps 8 and 9 — create the static window (main) that the config declares at the saved placement (maximize of a hidden main is
-/// deferred until it is shown — [`DeferredMaximize`]), open the restored popout windows (if one cannot be opened, remove it from the model), and push the effective
-/// theme to all windows once (§5-6). ★The caller holds no lock★. The subscription recompute that follows (⑩) is the caller's job — the model after this function ends
-/// is the final window set.
-///
-/// - ★Call it after the run marker (⑤) (I6)★ — if the app dies while creating windows, the next boot reads it as abnormal. The user setup always comes after the boot
-///   step plugins, so it holds if it is inside setup.
-/// - `boot_hidden` = a `--hidden` boot — main is not shown even at first paint and waits for the tray show. Popouts are still raised so they are visible
-///   at first paint, and the caller's hide withdraws that raise and keeps them hidden together with main (user decision F13 ·
-///   `crate::first_paint`).
-/// - `Err` = main could not be created — stop right there (no popouts · no theme push) and the caller ends the app (user decision
-///   2026-10-07).
-///
-/// ★Boot only★ — it assumes neither static windows nor popouts exist yet (what happens when called at runtime is in
-/// [`open_restored_popouts`]).
+/// Boot steps 8 and 9 — create the static window (main) the config declares at the saved placement (a hidden main's maximize is deferred until shown — [`DeferredMaximize`]), open the restored popout windows (one that cannot be opened is removed from the model), and push the effective theme to all windows once (§5-6). The caller holds no lock; the subscription recompute that follows (⑩) is the caller's — the model after this function is the final window set.
+/// - Call it after the run marker (⑤) (I6): if the app dies while creating windows the next boot reads it as abnormal. The user setup always comes after the boot step plugins, so inside setup it holds.
+/// - `boot_hidden` = a `--hidden` boot — main is not shown even at first paint and waits for the tray show. Popouts are still raised so they are visible at first paint, and the caller's hide withdraws that raise and keeps them hidden together with main (user decision F13 · `crate::first_paint`).
+/// - `Err` = main could not be created — stop right there (no popouts · no theme push) and the caller ends the app (user decision 2026-10-07).
+/// Boot only: assumes neither static windows nor popouts exist yet (what a runtime call does is in [`open_restored_popouts`]).
 pub(crate) fn restore_windows(
     app: &AppHandle,
     env: &WebviewEnv,
@@ -317,7 +257,7 @@ pub(crate) fn restore_windows(
         Err(_) => {
             tracing::debug!(
                 module = "state",
-                "레이아웃 락에 독이 들어 main 창 자리를 입히지 않는다"
+                "the layout lock is poisoned, so the main window position is not applied"
             );
             None
         }
@@ -332,12 +272,10 @@ pub(crate) fn restore_windows(
     .map(drop)
 }
 
-/// The main window could not be created — a reason to end the app ([`restore_windows`]).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MainWindowFailed;
 
-/// The static window (main) that boot ⑧ creates — the saved attributes laid on top of the config's declaration (TRD S21-storage §4). `at` = the saved normal placement and the
-/// monitor it goes to (`None` = open with the config's placement · size). `hide` = create it hidden even if the config says it is a visible window (`--hidden`).
+/// The static window (main) boot ⑧ creates — the saved attributes laid on top of the config's declaration (TRD S21-storage §4). `at` = the saved normal placement and its monitor (`None` = open with the config's placement · size). `hide` = create it hidden even if the config says visible (`--hidden`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct StaticWindow {
     at: Option<(WindowBounds, Landing)>,
@@ -345,8 +283,7 @@ struct StaticWindow {
     hide: bool,
 }
 
-/// `main` = the model's main field (`None` = could not be read — open as configured) · `boot_hidden` = a `--hidden` boot. A placement that overlaps
-/// no monitor is discarded ([`land`]).
+/// `main` = the model's main field (`None` = unreadable — open as configured) · `boot_hidden` = a `--hidden` boot. A placement overlapping no monitor is discarded ([`land`]).
 fn static_window(
     main: Option<WindowAttrs>,
     monitors: &[MonitorArea],
@@ -362,9 +299,7 @@ fn static_window(
     }
 }
 
-/// The order of boot ⑧ ⑨ — create main (`open_static` — `Err` = could not be created) and **then** open popouts and push themes
-/// ([`open_popouts_then_push_themes`] — the `Ok` value too). Since main comes first, that window is in the receiving window list too. If main cannot be
-/// created, stop right there with `Err`.
+/// The order of boot ⑧ ⑨ — create main (`open_static` — `Err` = could not be created) and then open popouts and push themes ([`open_popouts_then_push_themes`], the `Ok` value too); main first so it is in the receiving window list too. If main cannot be created, stop there with `Err`.
 fn open_boot_windows(
     main: StaticWindow,
     open_static: impl FnOnce(StaticWindow) -> Result<(), String>,
@@ -377,7 +312,7 @@ fn open_boot_windows(
             module = "state",
             label = MAIN_WINDOW_LABEL,
             error = %e,
-            "main 창을 만들지 못해 앱을 끝낸다"
+            "could not create the main window — ending the app"
         );
         return Err(MainWindowFailed);
     }
@@ -402,8 +337,7 @@ fn open_static(app: &AppHandle, env: &WebviewEnv, window: StaticWindow) -> Resul
     Ok(())
 }
 
-// Create the window from the config's declaration — `at` = the first placement to give the builder (the caller sets the exact placement after creating — the same reason as for popouts ·
-//   `at` of `build_runtime_window`). The webview environment is attached by the common finishing step — a window that skips it differs in environment from the other windows.
+// Create the window from the config's declaration — `at` = the first placement to give the builder (the caller sets the exact placement after creating — same reason as for popouts · `at` of `build_runtime_window`). The webview environment is attached by the common finishing step — a window that skips it differs in environment from the others.
 // ADR-0054
 fn build_static(
     app: &AppHandle,
@@ -418,24 +352,18 @@ fn build_static(
         .windows
         .iter()
         .find(|config| config.label == label)
-        .ok_or_else(|| "설정에 그 창의 선언이 없다".to_owned())?;
+        .ok_or_else(|| "the config has no declaration for that window".to_owned())?;
     let mut builder = WebviewWindowBuilder::from_config(app, config).map_err(|e| e.to_string())?;
     if let Some((position, size)) = at {
         builder = builder
             .position(position.x, position.y)
             .inner_size(size.width, size.height);
     }
-    // ★Always created hidden★ — even a visible boot shows at first paint after applying the placement (`crate::first_paint`).
+    // Always created hidden — even a visible boot shows at first paint after applying the placement (`crate::first_paint`).
     builder = builder.visible(false);
-    // A window kept hidden does not take focus — if it did, right after the hidden window is created it would take the foreground from the visible window. The origin of this rule
-    //   is the hidden-tree window, now removed (ADR-0225 · QA observation 2026-10-07 — visible boot 3/3, that window took main's foreground).
-    //   The remaining use is the single main of a `--hidden` boot, and its benefit (not stealing another app's foreground at autostart) is
-    //   [unverified — GUI]. wry 0.55.1 puts keyboard focus into a `focused` webview right after creating it, with `MoveFocus`
-    //   (the end of creation in `webview2/mod.rs`) — that this is the cause is a source reading [unverified — GUI]. When shown, the window's `WM_SETFOCUS`
-    //   hands focus to the webview (the parent-window subclass in the same file). tao 0.35.3 shows this window without activation
-    //   (`SW_SHOWNOACTIVATE`) — the tray show then brings it to the front with `set_focus`.
-    // The main of a visible boot takes focus as configured — it already took it while hidden (the `MoveFocus` above), and the first-paint show activates it.
-    //   ★That show must be the activating show (`SW_SHOW`) so the deferred maximize is applied without a normal-size frame★ ([`show_placed`]).
+    // Hidden windows must not take focus — they would steal the foreground from the visible window (ADR-0225).
+    // wry 0.55.1 focuses a new `focused` webview via `MoveFocus` [unverified — GUI]; tao 0.35.3 shows it with `SW_SHOWNOACTIVATE`, so the tray show calls `set_focus`.
+    // Visible boot: the first-paint show must be the activating `SW_SHOW` so the deferred maximize applies without a normal-size frame ([`show_placed`]).
     if hide {
         builder = builder.focused(false);
     }
@@ -449,11 +377,7 @@ fn build_static(
     Ok(built)
 }
 
-// Even if `build()` returns `Ok`, the runtime may not have created the window — tauri-runtime-wry 2.11.3 only logs a window creation failure on the main thread (no WebView
-//   runtime — including `WebviewRuntimeNotInstalled` from `create_webview`) (handling of `Message::CreateWindow`) and Tauri still
-//   returns that window (QA measured 2026-10-07 — when the runtime was hidden with `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER`). That window is not in the
-//   runtime window table, so the getter's reply channel is closed — `answer` = one getter call on the created window. To the reason, attach the answer of the same
-//   lookup (`webview_version`) that the runtime uses to decide 「설치됨」 (installed).
+// Even if `build()` returns `Ok` the runtime may not have created the window — tauri-runtime-wry 2.11.3 only logs a window creation failure on the main thread (no WebView runtime — including `WebviewRuntimeNotInstalled` from `create_webview`) (handling of `Message::CreateWindow`) and Tauri still returns that window (QA measured 2026-10-07 with the runtime hidden via `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER`). That window is not in the runtime window table, so the getter's reply channel is closed — `answer` = one getter call on the created window; the reason gets the answer of the same lookup (`webview_version`) the runtime uses to decide "installed".
 fn confirm_created(
     answer: Result<bool, String>,
     webview_version: impl FnOnce() -> Result<String, String>,
@@ -462,13 +386,14 @@ fn confirm_created(
         return Ok(());
     };
     Err(match webview_version() {
-        Err(runtime) => format!("WebView 런타임을 찾지 못해 창이 만들어지지 않았다: {runtime}"),
-        Ok(_) => format!("창이 만들어지지 않았다 — 런타임이 그 창을 모른다: {e}"),
+        Err(runtime) => format!(
+            "the window was not created because the WebView runtime was not found: {runtime}"
+        ),
+        Ok(_) => format!("the window was not created — the runtime does not know that window: {e}"),
     })
 }
 
-/// Open one restored popout window — the saved placement (the label's default placement if it overlaps no monitor) · maximize · the first placement
-/// record. The window must already be in the model (the record writes into that entry).
+/// Open one restored popout window — the saved placement (the label's default if it overlaps no monitor) · maximize · the first placement record. The window must already be in the model (the record writes into that entry).
 fn open_popout(
     app: &AppHandle,
     label: &str,
@@ -494,7 +419,7 @@ fn open_popout(
             None => tracing::warn!(
                 module = "state",
                 label,
-                "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화를 입히지 않는다"
+                "the deferred maximize table is not registered, so that window's maximize is not applied"
             ),
         }
     }
@@ -503,8 +428,7 @@ fn open_popout(
     Ok(())
 }
 
-// The popout builder's first placement — the logical position · logical size resolved with the chosen monitor's scale factor. The exact placement is set by [`place`] after creation
-//   (the `at` argument of `build_runtime_window`).
+// The popout builder's first placement — the logical position · size resolved with the chosen monitor's scale factor; the exact placement is set by [`place`] after creation (the `at` argument of `build_runtime_window`).
 pub(crate) fn first_place(
     (bounds, at): (WindowBounds, Landing),
 ) -> (LogicalPosition<f64>, LogicalSize<f64>) {
@@ -514,16 +438,12 @@ pub(crate) fn first_place(
     )
 }
 
-/// Where the window goes if the saved placement is discarded — it only distinguishes the log wording of [`land`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Fallback {
-    /// A newly opened window — open at the default placement (popout = the label's cascade placement · static window at boot = the config's placement).
     DefaultPlace,
-    /// An existing window (main in runtime restore acceptance) — stays at its current placement.
     StayPut,
 }
 
-/// [`locate`] plus one log line — a placement discarded because it overlaps no monitor is left in the log at info.
 pub(crate) fn land(
     label: &str,
     bounds: WindowBounds,
@@ -536,12 +456,12 @@ pub(crate) fn land(
             Fallback::DefaultPlace => tracing::info!(
                 module = "state",
                 label,
-                "저장된 창 자리가 어느 모니터에도 안 걸쳐 버렸다 — 기본 자리로 연다"
+                "the saved window position overlaps no monitor and was discarded — opening at the default position"
             ),
             Fallback::StayPut => tracing::info!(
                 module = "state",
                 label,
-                "저장된 창 자리가 어느 모니터에도 안 걸쳐 버렸다 — 창은 지금 자리에 남는다"
+                "the saved window position overlaps no monitor and was discarded — the window stays at its current position"
             ),
         }
     }
@@ -550,17 +470,13 @@ pub(crate) fn land(
 
 pub(crate) fn place(window: &Window, bounds: WindowBounds, at: Landing) {
     let label = window.label();
-    // Position first, size after — tao resolves a logical size with the scale factor the window has at that moment (`set_inner_size`), and that scale factor
-    //   changes in WM_DPICHANGED handling. Setting the size after makes it resolve with the arrival monitor's scale factor. tauri-plugin-window-state
-    //   also changed to this order, because the version that set the size first made the size jump on a monitor with a different scale factor (plugins-workspace #2583).
-    //   [unverified — whether WM_DPICHANGED is handled inside the position setter (including whether it reaches a hidden window). If it comes late, tao
-    //   re-measures the size at that point, and on Windows 11 the OS-suggested rectangle is applied as is, so it may be
-    //   off by a few px from the saved position · size — for GUI measurement]
+    // Position first, size after: tao resolves a logical size with the scale factor the window has at that moment (`set_inner_size`), and that scale factor changes in WM_DPICHANGED handling — setting the size after resolves it with the arrival monitor's scale factor. tauri-plugin-window-state changed to this order too, because the version setting size first made the size jump on a monitor with a different scale factor (plugins-workspace #2583).
+    // [unverified — GUI] whether WM_DPICHANGED is handled inside the position setter (including whether it reaches a hidden window); if it comes late, tao re-measures the size then and on Windows 11 the OS-suggested rectangle is applied as is, so it may be off by a few px from the saved position · size.
     if let Err(e) = window.set_position(PhysicalPosition::new(at.x, at.y)) {
-        tracing::warn!(module = "state", label, error = %e, "저장된 창 위치를 못 입혔다");
+        tracing::warn!(module = "state", label, error = %e, "could not apply the saved window position");
     }
     if let Err(e) = window.set_size(LogicalSize::new(bounds.w(), bounds.h())) {
-        tracing::warn!(module = "state", label, error = %e, "저장된 창 크기를 못 입혔다");
+        tracing::warn!(module = "state", label, error = %e, "could not apply the saved window size");
     }
 }
 
@@ -569,7 +485,7 @@ fn maximize(window: &Window) -> bool {
     match window.maximize() {
         Ok(()) => true,
         Err(e) => {
-            tracing::warn!(module = "state", label = window.label(), error = %e, "저장된 최대화를 못 입혔다");
+            tracing::warn!(module = "state", label = window.label(), error = %e, "could not apply the saved maximize");
             false
         }
     }
@@ -580,16 +496,14 @@ fn unmaximize(window: &Window) -> bool {
     match window.unmaximize() {
         Ok(()) => true,
         Err(e) => {
-            tracing::warn!(module = "state", label = window.label(), error = %e, "원래 크기 바람을 못 입혔다");
+            tracing::warn!(module = "state", label = window.label(), error = %e, "could not apply the original size desire");
             false
         }
     }
 }
 
-// ── Placement application that returns results — the docking window port's share (TRD S21-slot-docking edition 5.8 §1-2 「적용 서비스」) ──────────
-//
-// [`place`] only logs failures — boot · restore have nothing more to do there. Docking must know which step could not be applied, to withdraw the new window or
-// answer that the move failed, so each setter returns a result. The order is the same — position → size (reason = [`place`]).
+// ── Placement application that returns results — the docking window port's part (TRD S21-slot-docking edition 5.8 §1-2 「apply service」) ──────────
+// [`place`] only logs failures — boot · restore have nothing more to do there. Docking must know which step could not be applied, to withdraw the new window or answer that the move failed, so each setter returns a result; same order, position → size (reason = [`place`]).
 
 /// The two window setters — a seam cut so [`move_steps`] can be tested without a window. Position = physical outer top-left · size = logical inner (module header).
 pub(crate) trait Setters {
@@ -633,9 +547,7 @@ pub(crate) fn usable_size(size: Option<(f64, f64)>) -> Option<(f64, f64)> {
     size.filter(|&(w, h)| WindowBounds::new(0.0, 0.0, w, h).is_some())
 }
 
-/// Test the placement docking picked against the monitors — if the rectangle made of `at.pos` plus the size (`at.size` · `default_size` if unusable)
-/// overlaps a monitor, that normal placement and landing ([`locate`]). `None` if there is no position or it overlaps nowhere, and for one that overlaps nothing
-/// [`land`] leaves the `fallback` wording.
+/// Test the placement docking picked against the monitors — if the rectangle of `at.pos` plus the size (`at.size`, `default_size` if unusable) overlaps a monitor, that normal placement and landing ([`locate`]). `None` with no position or no overlap; for one overlapping nothing [`land`] leaves the `fallback` wording.
 pub(crate) fn resolve_place(
     label: &str,
     at: &WindowPlace,
@@ -649,17 +561,9 @@ pub(crate) fn resolve_place(
     land(label, bounds, monitors, fallback).map(|landing| (bounds, landing))
 }
 
-/// Widen and pull in (TRD S26-window-chrome §7-7 · D14) — once when the window is opened, if the width of the normal placement `bounds` is narrower than the minimum width
-/// `min_w` the web reported (logical inner px), widen it to that width; and if the widened window's ★visible right edge★ goes past the right of the work area `work` (the work area of the
-/// monitor the window sits on — physical px · `scale` = that window's scale factor), pull it into the work area. If the work area is
-/// narrower than the window, put the visible left edge at the left end of the work area (R20). `frame` = outer width − inner width (physical px — even a window whose OS frame was removed
-/// keeps an invisible border for resizing). Visible edge = inward from the outer edge by one side of that border (`frame` / 2 — tao 0.35.3 puts the same
-/// thickness on left and right · `calculate_insets_for_dpi`) — if the outer edges are aligned, the visible window sits
-/// that far (about 8 px at 100 %) from the work-area edge.
-///
-/// If there is nothing to widen, return it as is — even a placement that straddles off-screen is not moved (that is not the job of widen-and-pull). Height · vertical position are
-/// left alone. If the scale factor is not a finite positive number, only widen and do not pull.
-// ADR-0303 — Chrome-style title bar
+/// Widen and pull in (TRD S26-window-chrome §7-7 · D14) — once when the window is opened: if the normal placement `bounds` is narrower than the minimum width `min_w` the web reported (logical inner px), widen it to that width; if the widened window's visible right edge goes past the right of the work area `work` (the work area of the monitor the window sits on — physical px · `scale` = that window's scale factor), pull it into the work area; if the work area is narrower than the window, put the visible left edge at its left end (R20). `frame` = outer width − inner width (physical px — a window with the OS frame removed keeps an invisible resize border). Visible edge = inward from the outer edge by one side of that border (`frame` / 2 — tao 0.35.3 puts the same thickness on left and right · `calculate_insets_for_dpi`), so with outer edges aligned the visible window sits that far (about 8 px at 100 %) from the work-area edge.
+/// With nothing to widen it returns as is — even a placement straddling off-screen is not moved (not widen-and-pull's job). Height · vertical position are left alone. A scale factor that is not a finite positive number only widens, no pull.
+// ADR-0303
 pub(crate) fn fit_min_width(
     bounds: WindowBounds,
     min_w: f64,
@@ -674,8 +578,7 @@ pub(crate) fn fit_min_width(
         let side = frame.max(0.0) / 2.0;
         let left = f64::from(work.x);
         let right = left + f64::from(work.w);
-        // The range of outer x — visible right (x + side + inner width) ≤ work-area right · visible left (x + side) ≥ work-area left.
-        //   Fit the right first and the left wins — if both cannot be met (the work area is narrow), it is the visible left end.
+        // The range of outer x — visible right (x + side + inner width) ≤ work-area right · visible left (x + side) ≥ work-area left. Fit the right first and the left wins — if both cannot be met (narrow work area), the visible left end.
         let max_x = (right - side - min_w * work.scale).floor();
         let min_x = (left - side).ceil();
         bounds.x().min(max_x).max(min_x)
@@ -685,8 +588,7 @@ pub(crate) fn fit_min_width(
     WindowBounds::new(x, bounds.y(), min_w, bounds.h()).unwrap_or(bounds)
 }
 
-/// The Tauri implementation of the window port `move_window` (contract = `layout::apply::WindowHost`). If the position overlaps no monitor, that
-/// step is skipped — a window that is up is not moved to the default placement.
+/// The Tauri implementation of the window port `move_window` (contract = `layout::apply::WindowHost`). A position overlapping no monitor skips that step — a window that is up is not moved to the default placement.
 pub(crate) fn move_window(
     app: &AppHandle,
     label: &str,
@@ -695,7 +597,7 @@ pub(crate) fn move_window(
     let Some(window) = app.get_webview_window(label) else {
         return Err(MoveFailed {
             step: MoveStep::Position,
-            error: "옮길 창이 없다".to_string(),
+            error: "no window to move".to_string(),
         });
     };
     let window = window.as_ref().window();
@@ -713,10 +615,7 @@ pub(crate) fn move_window(
     move_steps(&window, pos, size)
 }
 
-// The size (logical) used to measure overlap for a move that did not choose a size — it is the size that window will have after the move. Measuring with the popout default size would decide that a window smaller than that
-//   overlaps, and it would be placed off-screen. The model's normal-placement size comes first — the getter of a maximized window gives the maximized size, but
-//   when the position setter lowers the maximize it goes back to the normal size (F8). If not in the model, the current inner size. ★The layout lock only reads the value and
-//   releases it right away★ — the getter is outside it (module header).
+// The size (logical) used to measure overlap for a move that chose no size — the window's size after the move. The popout default size would decide a smaller window overlaps and place it off-screen. The model's normal-placement size comes first (a maximized window's getter gives the maximized size, but the position setter lowers the maximize and it returns to normal size — F8); not in the model → the current inner size. The layout lock only reads the value and releases it at once — the getter is outside it (module header).
 fn kept_size(app: &AppHandle, window: &Window, label: &str) -> Option<(f64, f64)> {
     if let Some(layout) = app.try_state::<LayoutState>() {
         let modeled = sync::lock(&layout.0)
@@ -732,8 +631,7 @@ fn kept_size(app: &AppHandle, window: &Window, label: &str) -> Option<(f64, f64)
     saved_bounds(0, 0, size.width, size.height, scale).map(|b| (b.w(), b.h()))
 }
 
-// Apply the normal placement and maximize to main — the contract is `RestoreWindows::place_main` (boot ⑧ takes the same path). If visibility cannot be
-//   read, treat it as visible — if deferred on a visible window, the maximize does not happen until the show path is called again.
+// Apply the normal placement and maximize to main — contract: `RestoreWindows::place_main` (boot ⑧ takes the same path). If visibility cannot be read treat it as visible — if deferred on a visible window, the maximize does not happen until the show path is called again.
 fn place_main(
     app: &AppHandle,
     window: &Window,
@@ -747,20 +645,18 @@ fn place_main(
     };
     let deferred = app.try_state::<DeferredMaximize>();
     if !maximized {
-        // Clear the desire first — so that the `Moved` · `Resized` emitted by the placement application below are recorded ([`record`]). Whatever value
-        //   the desire written earlier had, the copy wins.
+        // Clear the desire first so the `Moved` · `Resized` emitted by the placement application below are recorded ([`record`]); whatever value the earlier desire had, the copy wins.
         if deferred.is_some_and(|deferred| deferred.take(MAIN_WINDOW_LABEL).is_some()) {
             tracing::debug!(
                 module = "state",
-                "사본의 main 이 최대화가 아니라 적어 둔 최대화 바람을 거둔다"
+                "the copy's main is not maximized, so the recorded maximize desire is cleared"
             );
         }
         place_at();
-        // [unverified — if a hidden main is maximized, tao's unmaximize (`SW_RESTORE`) shows and hides the window (the same path as maximize —
-        //   [`DeferredMaximize`]). For GUI measurement]
+        // [unverified — GUI] if a hidden main is maximized, tao's unmaximize (`SW_RESTORE`) shows and hides the window (same path as maximize — [`DeferredMaximize`]).
         if matches!(window.is_maximized(), Ok(true)) {
             if let Err(e) = window.unmaximize() {
-                tracing::warn!(module = "state", error = %e, "사본대로 main 의 최대화를 풀지 못했다");
+                tracing::warn!(module = "state", error = %e, "could not undo main's maximize to match the copy");
             }
         }
         return;
@@ -770,9 +666,7 @@ fn place_main(
         Some(deferred) if hidden => {
             let seen = deferred.defer(MAIN_WINDOW_LABEL, true);
             place_at();
-            // If, after reading visibility, the tray 「보이기」 cut in and already applied the deferred maximize, the position setter after that
-            //   lowered the maximize (F8) — for a main that became visible, apply it here and clear the deferral. If that show comes after this, the deferral stays
-            //   and that side applies it. If it could not be applied, keep the deferral (the same reason as [`DeferredMaximize::apply`]).
+            // If after reading visibility the tray 「Show」 cut in and already applied the deferred maximize, the position setter after that lowered it (F8) — for a main that became visible apply it here and clear the deferral; if that show comes after this, the deferral stays and that side applies it. If it could not be applied keep the deferral (same reason as [`DeferredMaximize::apply`]).
             if matches!(window.is_visible(), Ok(true)) && maximize(window) {
                 deferred.take_if_unchanged(MAIN_WINDOW_LABEL, seen);
             }
@@ -787,13 +681,9 @@ fn place_main(
     }
 }
 
-/// Called by the show path ★after it shows the window and also unminimizes it (`unminimize`)★ — if that window has a maximize desire, apply it (true =
-/// maximize · false = original size) and record the current placement ([`DeferredMaximize`]). It fills in here the placement that was not recorded while the desire existed.
-/// If it could not be applied, keep the desire and do not record ([`DeferredMaximize::apply`]). If there is no desire, no-op.
-///
-/// ★Do not call it before the unminimize★ — tao 0.35.3 lowers the maximize flag of a minimized window, so applying the original size does nothing, just
-/// clears the desire, and the later unminimize (`SW_RESTORE`) goes back to the pre-minimize maximize and loses the desire (TRD S26-window-chrome §6-2 ⓑ).
-// TRD S26-window-chrome §5-2 「모든 보이기 갈래가 미룬 최대화를 입힌다」
+/// Called by the show path after it shows the window and also unminimizes it (`unminimize`) — if that window has a maximize desire, apply it (true = maximize · false = original size) and record the current placement ([`DeferredMaximize`]); this fills in the placement not recorded while the desire existed. If it could not be applied keep the desire and do not record ([`DeferredMaximize::apply`]); no desire → no-op.
+/// Do not call it before the unminimize: tao 0.35.3 lowers the maximize flag of a minimized window, so applying the original size does nothing but clear the desire, and the later unminimize (`SW_RESTORE`) goes back to the pre-minimize maximize and loses the desire (TRD S26-window-chrome §6-2 ⓑ).
+// TRD S26-window-chrome §5-2 「every show branch applies the deferred maximize」
 pub fn apply_deferred_maximize(window: &Window) {
     if window
         .app_handle()
@@ -812,9 +702,7 @@ pub fn apply_deferred_maximize(window: &Window) {
     }
 }
 
-/// Write the maximize state that a window-state command (`window.maximize` · `window.unmaximize`) on a window that is not visible wants — it
-/// overrides what was written earlier. The path that shows that window applies it with [`apply_deferred_maximize`] (TRD S26-window-chrome §5-2). If the table is not
-/// registered, do nothing.
+/// Write the maximize state a window-state command (`window.maximize` · `window.unmaximize`) on a non-visible window wants — it overrides what was written earlier; the path that shows that window applies it with [`apply_deferred_maximize`] (TRD S26-window-chrome §5-2). Table not registered → nothing.
 pub(crate) fn defer_maximize(app: &AppHandle, label: &str, maximized: bool) {
     match app.try_state::<DeferredMaximize>() {
         Some(deferred) => {
@@ -823,32 +711,20 @@ pub(crate) fn defer_maximize(app: &AppHandle, label: &str, maximized: bool) {
         None => tracing::warn!(
             module = "state",
             label,
-            "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화 바람을 적지 않는다"
+            "the deferred maximize table is not registered, so that window's maximize desire is not recorded"
         ),
     }
 }
 
-/// Clear the maximize desire that was written (no-op if none) — called by the window-state command for a window whose OS window already is or is about to be at that size (TRD
-/// S26-window-chrome §5-2 「이미 그 크기면 바람을 거둔다」).
+/// Clear the maximize desire that was written (no-op if none) — called by the window-state command for a window whose OS window already is or is about to be at that size (TRD S26-window-chrome §5-2 「if it is already that size, clear the desire」).
 pub(crate) fn drop_deferred_maximize(app: &AppHandle, label: &str) {
     if let Some(deferred) = app.try_state::<DeferredMaximize>() {
         deferred.take(label);
     }
 }
 
-/// Show for the first time a window that was built hidden and had its placement applied — the first-paint show (`crate::first_paint`). If the maximize desire is true, show it straight as
-/// maximized without passing through a normal-size frame (platform `restore_placement` — the current normal placement is set as the placement to return to) and record the placement.
-/// If that show fails (including outside Windows), maximize after showing it normally — the same path as the tray show, so a normal-size
-/// frame is seen once. If the desire is false, show normally and then apply the original size ([`apply_deferred_maximize`]). ★Call it on the main
-/// thread★.
-///
-/// It shows and activates.
-///
-/// ★A window to be shown maximized must be one built with the focus-taking builder (`focused(true)`)★ — Tauri `show`, which shows with raw Win32 and then
-/// matches the tao visibility flag, emits `SW_SHOWNOACTIVATE` for a window built without focus (tao 0.35.3 `window_state.rs`
-/// `apply_diff` — the code that clears that marker only reaches the copy, so it stays · source reading). That command
-/// can undo the maximize, like `SW_SHOWNORMAL` [unverified]. Every window shown by this path (main of a visible boot · restored popouts · popouts the window port built as active) was
-/// built with the focus-taking builder.
+/// Show for the first time a window built hidden with its placement applied — the first-paint show (`crate::first_paint`). With a true maximize desire, show it straight as maximized without a normal-size frame (platform `restore_placement` — the current normal placement is set as the placement to return to) and record the placement; if that show fails (including outside Windows), maximize after a normal show — the tray show's path, so a normal-size frame is seen once. With a false desire, show normally then apply the original size ([`apply_deferred_maximize`]). Call it on the main thread. It shows and activates.
+/// A window to be shown maximized must be built with the focus-taking builder (`focused(true)`): Tauri `show` (raw Win32 show, then matching the tao visibility flag) emits `SW_SHOWNOACTIVATE` for a window built without focus (tao 0.35.3 `window_state.rs` `apply_diff` — the code clearing that marker only reaches the copy, so it stays · source reading), which can undo the maximize like `SW_SHOWNORMAL` [unverified]. Every window shown by this path (main of a visible boot · restored popouts · popouts the window port built as active) was built with the focus-taking builder.
 pub(crate) fn show_placed(window: &Window) {
     let label = window.label();
     let app = window.app_handle();
@@ -860,10 +736,9 @@ pub(crate) fn show_placed(window: &Window) {
     if let Some(seen) = seen {
         match show_maximized(window) {
             Ok(()) => {
-                // Match the tao visibility flag — if left false, the next flag setter hides the window and the tray hide does nothing
-                //   (if no flag changed, tao 0.35.3 `apply_diff` returns early · source reading).
+                // Match the tao visibility flag — left false, the next flag setter hides the window and the tray hide does nothing (with no changed flag tao 0.35.3 `apply_diff` returns early · source reading).
                 if let Err(e) = window.show() {
-                    tracing::warn!(module = "state", label, error = %e, "최대화로 보인 창의 보임 깃발을 맞추지 못했다");
+                    tracing::warn!(module = "state", label, error = %e, "could not sync the visible flag of a window shown maximized");
                 }
                 if deferred.is_some_and(|deferred| deferred.take_if_unchanged(label, seen)) {
                     record(window);
@@ -873,12 +748,12 @@ pub(crate) fn show_placed(window: &Window) {
             Err(e) => tracing::warn!(
                 module = "state",
                 label,
-                "곧바로 최대화로 보이지 못해 보통으로 보인 뒤 최대화한다: {e}"
+                "could not show it maximized right away — showing it normal, then maximizing: {e}"
             ),
         }
     }
     if let Err(e) = window.show() {
-        tracing::warn!(module = "state", label, error = %e, "숨긴 창을 보이지 못했다");
+        tracing::warn!(module = "state", label, error = %e, "could not show the hidden window");
         return;
     }
     apply_deferred_maximize(window);
@@ -898,8 +773,7 @@ fn show_maximized(window: &Window) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// The window was destroyed (`WindowEvent::Destroyed`) — clear that window's deferred maximize. A popout label is not reused, so leaving it would not apply to another
-/// window, but if not cleared the set grows with every window that was created hidden and withdrawn.
+/// The window was destroyed (`WindowEvent::Destroyed`) — clear its deferred maximize. A popout label is not reused so a left one would not apply to another window, but uncleared the set grows with every window created hidden and withdrawn.
 pub fn forget_deferred_maximize(app: &AppHandle, label: &str) {
     if app
         .try_state::<DeferredMaximize>()
@@ -908,13 +782,12 @@ pub fn forget_deferred_maximize(app: &AppHandle, label: &str) {
         tracing::debug!(
             module = "state",
             label,
-            "미룬 최대화를 입히기 전에 창이 소멸했다"
+            "the window was destroyed before the deferred maximize was applied"
         );
     }
 }
 
-/// The OS window port for runtime restore acceptance — the Tauri implementation (TRD S21-storage §6-7 ② ④). It does not use [`restore_windows`] ·
-/// [`open_restored_popouts`], which are boot-only — it shares only placement decision ([`locate`]) and application ([`place`]).
+/// The OS window port for runtime restore acceptance — the Tauri implementation (TRD S21-storage §6-7 ② ④). It does not use the boot-only [`restore_windows`] · [`open_restored_popouts`]; it shares only placement decision ([`locate`]) and application ([`place`]).
 pub struct TauriRestoreWindows {
     app: AppHandle,
 }
@@ -930,7 +803,7 @@ impl TauriRestoreWindows {
             tracing::debug!(
                 module = "state",
                 label,
-                "창이 없어 복원한 자리 · 보임을 입히지 않는다"
+                "no window, so the restored position · visibility are not applied"
             );
         }
         window.map(|window| window.as_ref().window())
@@ -963,7 +836,7 @@ impl RestoreWindows for TauriRestoreWindows {
                     tracing::debug!(
                         module = "state",
                         label,
-                        "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화를 입히지 않는다"
+                        "the deferred maximize table is not registered, so that window's maximize is not applied"
                     );
                     None
                 }
@@ -991,9 +864,7 @@ impl RestoreWindows for TauriRestoreWindows {
         let window = built.as_ref().window();
         if let Some((bounds, at)) = at {
             place(&window, bounds, at);
-            // If, after creating it, the tray 「보이기」 cut in and already applied the deferred maximize, the position setter just now lowered that maximize (F8)
-            //   — apply it again here to a window that became visible (the same reason as `place_main`). If that show comes after this, the deferral stays
-            //   and that side applies it.
+            // If after creating it the tray 「Show」 cut in and already applied the deferred maximize, the position setter just now lowered it (F8) — apply it again to a window that became visible (same reason as `place_main`); if that show comes after this, the deferral stays and that side applies it.
             if maximized && matches!(window.is_visible(), Ok(true)) && maximize(&window) {
                 if let Some((deferred, seen)) = &deferred {
                     deferred.take_if_unchanged(label, *seen);
@@ -1010,7 +881,7 @@ impl RestoreWindows for TauriRestoreWindows {
                 module = "state",
                 label,
                 error = %e,
-                "창의 보임 여부를 못 읽어 보이는 것으로 친다"
+                "could not read whether the window is visible — treating it as visible"
             );
             true
         }))
@@ -1018,10 +889,7 @@ impl RestoreWindows for TauriRestoreWindows {
 
     fn place_main(&self, at: Option<(WindowBounds, Landing)>, maximized: bool) {
         if let Some(window) = self.window(MAIN_WINDOW_LABEL) {
-            // If the copy's main width is narrower than the minimum width, widen and pull it in (TRD S26-window-chrome §7-7 · D14 · PRD AC34 「사본 수락」).
-            //   main is not rebuilt, so its page does not report again, and the OS minimum size it already has grows a narrow placement
-            //   while keeping the left end fixed — so lift that minimum size before the placement, and the opening mark after the placement widens and pulls in with the value it already holds, then applies again.
-            //   ★Hand off the lift job before the placement setter★ — both take effect in the order they were handed to the main-thread queue (`crate::chrome::lift_min`).
+            // If the copy's main width is narrower than the minimum width, widen and pull it in (TRD S26-window-chrome §7-7 · D14 · PRD AC34 「copy accept」): main is not rebuilt, so its page does not report again and the OS minimum size it already has grows a narrow placement keeping the left end fixed — so lift that minimum size before the placement; the opening mark after the placement widens and pulls in with the value it already holds, then applies again. Hand off the lift job before the placement setter — both take effect in the order handed to the main-thread queue (`crate::chrome::lift_min`).
             crate::chrome::lift_min(&self.app, MAIN_WINDOW_LABEL);
             place_main(&self.app, &window, at, maximized);
             crate::chrome::mark_opening(&self.app, MAIN_WINDOW_LABEL);
@@ -1049,7 +917,7 @@ impl RestoreWindows for TauriRestoreWindows {
                     match window.hide() {
                         Ok(()) => true,
                         Err(e) => {
-                            tracing::warn!(module = "state", label, error = %e, "복원한 창을 숨기지 못했다");
+                            tracing::warn!(module = "state", label, error = %e, "could not hide the restored window");
                             false
                         }
                     }
@@ -1067,7 +935,7 @@ impl RestoreWindows for TauriRestoreWindows {
     fn focus(&self, label: &str) {
         if let Some(window) = self.window(label) {
             if let Err(e) = window.set_focus() {
-                tracing::debug!(module = "state", label, error = %e, "복원 뒤 창에 포커스를 주지 못했다");
+                tracing::debug!(module = "state", label, error = %e, "could not give focus to the window after the restore");
             }
         }
     }
@@ -1077,14 +945,9 @@ impl RestoreWindows for TauriRestoreWindows {
     }
 }
 
-// Does our process hold the foreground window now — only then does tao's focus-giving stand without a fake Alt (`force_window_active` fires Alt
-//   only when `SetForegroundWindow` is refused — tao 0.35.3).
-// ★On Windows, do not use the window's focus getter (`is_focused`)★ — wry 0.55.1 hands focus to the webview on every `WM_SETFOCUS` of the window
-//   (`MoveFocus`), so the window immediately receives `WM_KILLFOCUS`, and tao 0.35.3's value (`is_active && is_focused`) is
-//   `false` while the webview holds keyboard focus. tauri-runtime-wry 2.11.3 therefore makes the window's focus events from the
-//   webview's GotFocus · LostFocus rather than from tao. [unverified — source reading. For GUI measurement]
-// On other OSes, that getter is used as is — when the OS layer says it has no means to answer (`None`). [unverified — that branch does not run on
-//   Windows] The OS branch lives in the OS-layer crate (ADR-0266 — no `#[cfg(windows)]` in the shell).
+// Does our process hold the foreground window now — only then does tao's focus-giving stand without a fake Alt (`force_window_active` fires Alt only when `SetForegroundWindow` is refused — tao 0.35.3).
+// On Windows do not use the window's focus getter (`is_focused`): wry 0.55.1 hands focus to the webview on every `WM_SETFOCUS` of the window (`MoveFocus`), so the window at once gets `WM_KILLFOCUS` and tao 0.35.3's value (`is_active && is_focused`) is `false` while the webview holds keyboard focus; tauri-runtime-wry 2.11.3 therefore makes the window's focus events from the webview's GotFocus · LostFocus rather than tao. [unverified — GUI; source reading]
+// On other OSes that getter is used as is — when the OS layer says it has no means to answer (`None`) [unverified — that branch does not run on Windows]. The OS branch lives in the OS-layer crate (ADR-0266 — no `#[cfg(windows)]` in the shell).
 pub(crate) fn foreground_is_ours(app: &AppHandle) -> bool {
     engram_dashboard_platform::window::foreground_is_current_process().unwrap_or_else(|| {
         app.webview_windows()
@@ -1109,15 +972,14 @@ pub(crate) fn monitors(app: &AppHandle) -> Vec<MonitorArea> {
             tracing::warn!(
                 module = "state",
                 error = %e,
-                "모니터 목록을 못 읽어 저장된 창 자리를 모두 버린다"
+                "could not read the monitor list — discarding all saved window positions"
             );
             Vec::new()
         }
     }
 }
 
-/// One set of window getters. `None` if the minimized · maximized state cannot be read (do not record — the placement during minimize would be recorded as the normal placement).
-/// ★Call it holding no lock★.
+/// One set of window getters. `None` if the minimized · maximized state cannot be read (do not record — the placement during minimize would be recorded as the normal placement). Call it holding no lock.
 fn read(window: &Window) -> Option<WindowPlacement> {
     let label = window.label();
     let flags = window
@@ -1130,7 +992,7 @@ fn read(window: &Window) -> Option<WindowPlacement> {
                 module = "state",
                 label,
                 error = %e,
-                "창의 최소화 · 최대화 여부를 못 읽어 이번 자리는 적지 않는다"
+                "could not read whether the window is minimized · maximized — not recording this position"
             );
             return None;
         }
@@ -1146,7 +1008,7 @@ fn read(window: &Window) -> Option<WindowPlacement> {
             module = "state",
             label,
             error = %e,
-            "창 위치 · 크기를 못 읽어 이번 자리는 적지 않는다"
+            "could not read the window position · size — not recording this position"
         );
         None
     });
@@ -1157,11 +1019,7 @@ fn read(window: &Window) -> Option<WindowPlacement> {
     })
 }
 
-/// Record one window's current placement in that label's entry of the layout model. A label that is not in the model (a late event after close · a new
-/// window before it entered the model) is dropped — a popout label is not reused, so it is not wrongly recorded on another window (`PopupCounter`). A window
-/// whose maximize is deferred is not recorded either ([`DeferredMaximize`]).
-/// The rules (minimize · maximize) are in `observe` of [`WindowAttrs`]. If recorded, after releasing the lock, push that window's window fact (`window:frame`) only when it
-/// changes (`commands::tab_drop::push_window_frame`).
+/// Record one window's current placement in that label's entry of the layout model. A label not in the model (a late event after close · a new window before it entered the model) is dropped — a popout label is not reused, so it is never wrongly recorded on another window (`PopupCounter`); a window whose maximize is deferred is not recorded either ([`DeferredMaximize`]). The rules (minimize · maximize) are in `observe` of [`WindowAttrs`]. If recorded, after releasing the lock push that window's window fact (`window:frame`) only when it changes (`commands::tab_drop::push_window_frame`).
 pub fn record(window: &Window) {
     let label = window.label();
     let app = window.app_handle();
@@ -1172,7 +1030,7 @@ pub fn record(window: &Window) {
         tracing::debug!(
             module = "state",
             label,
-            "최대화를 보일 때로 미뤄 둔 동안이라 이번 자리는 적지 않는다"
+            "the maximize is deferred until shown, so this position is not recorded"
         );
         return;
     }
@@ -1183,7 +1041,7 @@ pub fn record(window: &Window) {
         tracing::debug!(
             module = "state",
             label,
-            "레이아웃 상태가 등록돼 있지 않아 창 자리를 적지 않는다"
+            "the layout state is not registered, so the window position is not recorded"
         );
         return;
     };
@@ -1192,14 +1050,14 @@ pub fn record(window: &Window) {
         tracing::debug!(
             module = "state",
             label,
-            "레이아웃 락에 독이 들어 창 자리를 적지 않는다"
+            "the layout lock is poisoned, so the window position is not recorded"
         );
         return;
     };
     let attrs = match mgr.observe_window_placement(label, seen) {
         Ok(()) => mgr.window_attrs(label).ok(),
         Err(e) => {
-            tracing::debug!(module = "state", label, error = %e, "모델에 없는 창의 자리라 버린다");
+            tracing::debug!(module = "state", label, error = %e, "the position of a window not in the model — discarding it");
             None
         }
     };
@@ -1271,7 +1129,7 @@ mod tests {
         assert_eq!(
             locate(rect(100.0, 1500.0, 800.0, 600.0), &both),
             None,
-            "아래"
+            "below"
         );
         // If only the edges touch, the area is 0 — it does not overlap.
         assert_eq!(locate(rect(4480.0, 0.0, 800.0, 600.0), &both), None);
@@ -1279,7 +1137,7 @@ mod tests {
         assert_eq!(
             locate(rect(0.0, 0.0, 800.0, 600.0), &[]),
             None,
-            "모니터 없음"
+            "no monitors"
         );
     }
 
@@ -1342,7 +1200,7 @@ mod tests {
 
     #[test]
     fn a_zero_size_or_an_unusable_scale_gives_no_bounds() {
-        assert_eq!(saved_bounds(-32000, -32000, 0, 0, 1.0), None, "최소화");
+        assert_eq!(saved_bounds(-32000, -32000, 0, 0, 1.0), None, "minimized");
         for scale in [0.0, -2.0, f64::NAN] {
             assert_eq!(saved_bounds(0, 0, 100, 100, scale), None);
         }
@@ -1374,7 +1232,7 @@ mod tests {
             assert_eq!(
                 (size.width, size.height),
                 (w, h),
-                "크기도 같은 물리 px 로 돌아온다"
+                "the size also comes back in the same physical px"
             );
         }
     }
@@ -1407,7 +1265,7 @@ mod tests {
 
         let mut opened = Vec::new();
         let removed = open_restored_popouts(&layout, |label, attrs| {
-            assert!(layout.0.try_lock().is_ok(), "락 밖에서 연다");
+            assert!(layout.0.try_lock().is_ok(), "opened outside the lock");
             opened.push((label.to_string(), attrs));
             Ok(())
         });
@@ -1427,7 +1285,7 @@ mod tests {
 
         let removed = open_restored_popouts(&layout, |label, _| {
             if label == "slot-popup-1" {
-                Err("창 생성 실패(시험)".into())
+                Err("window creation failed (test)".into())
             } else {
                 Ok(())
             }
@@ -1440,7 +1298,7 @@ mod tests {
         assert_eq!(windows, [MAIN_WINDOW_LABEL, "slot-popup-2"]);
         assert!(
             mgr.version > version,
-            "지운 것이 레이아웃 변경이라 기록기가 싣는다"
+            "the removal is a layout change, so the writer picks it up"
         );
         // `Destroyed` never arrives for a window that could not be opened — the number is released right away and the next new window gets it (TRD S26-window-chrome §4-1).
         assert!(mgr.closing_numbers().is_empty());
@@ -1453,7 +1311,7 @@ mod tests {
     fn a_model_without_popouts_opens_nothing() {
         let layout = LayoutState::new();
         let removed = open_restored_popouts(&layout, |label, _| {
-            panic!("열 팝아웃이 없다: {label}");
+            panic!("no popout to open: {label}");
         });
         assert!(removed.is_empty());
     }
@@ -1479,8 +1337,7 @@ mod tests {
         }
     }
 
-    /// ★Boot restore pushes each window's effective theme★ — a window with its own theme (main · popout) gets that value, a popout without one gets the
-    /// global value. A popout is pushed after it is opened, so it is in the receiving window list.
+    /// Boot restore pushes each window's effective theme — a window with its own theme (main · popout) gets that value, a popout without one the global value; a popout is pushed after it is opened, so it is in the receiving window list.
     #[test]
     fn boot_restore_pushes_each_window_its_effective_theme_after_opening_popouts() {
         let layout = layout_with_popouts(&["slot-popup-1", "slot-popup-2"]);
@@ -1590,14 +1447,13 @@ mod tests {
                     ..
                 }
             ),
-            "숨긴 채 만든다(보였다 숨지 않는다) · 최대화는 그대로 싣는다(숨은 main 에는 보일 때로 미룬다)"
+            "created hidden (does not show then hide) · the maximize is carried as is (for a hidden main it is deferred until shown)"
         );
         let main = static_window(saved, &[PRIMARY], false);
         assert!(matches!(main, StaticWindow { hide: false, .. }));
     }
 
-    // A window the config declares is not created by Tauri but by boot ⑧ — if Tauri were let to create it, the webview finishing step would be skipped (ADR-0054) and ⑧'s creation of the same
-    //   label would fail. A window that is only declared and that ⑧ does not know is created by no one.
+    // A config-declared window is created by boot ⑧, not Tauri — letting Tauri create it would skip the webview finishing step (ADR-0054) and ⑧'s creation of the same label would fail; a window only declared that ⑧ does not know is created by no one.
     #[test]
     fn every_config_window_is_left_to_the_boot_and_the_boot_knows_them_all() {
         let conf: serde_json::Value =
@@ -1611,7 +1467,7 @@ mod tests {
         for window in &declared {
             assert!(
                 !window.create,
-                "창 {} 의 \"create\" 가 false 가 아니다",
+                "\"create\" of window {} is not false",
                 window.label
             );
         }
@@ -1677,7 +1533,7 @@ mod tests {
         assert_eq!(
             *screen.live.lock().unwrap(),
             [MAIN_WINDOW_LABEL, "slot-popup-1"],
-            "main 을 먼저 만든다"
+            "main is created first"
         );
         assert_eq!(pushed(&screen), [MAIN_WINDOW_LABEL, "slot-popup-1"]);
     }
@@ -1689,14 +1545,14 @@ mod tests {
 
         let outcome = open_boot_windows(
             main_window(),
-            |_| Err("창 생성 실패(시험)".into()),
+            |_| Err("window creation failed (test)".into()),
             &layout,
-            |label, _| panic!("팝아웃을 열지 않는다: {label}"),
+            |label, _| panic!("does not open popouts: {label}"),
             &themes,
         );
 
         assert_eq!(outcome, Err(MainWindowFailed));
-        assert!(pushed(&screen).is_empty(), "테마를 밀지 않는다");
+        assert!(pushed(&screen).is_empty(), "does not push the theme");
     }
 
     // ── Checking the created window ──
@@ -1704,7 +1560,7 @@ mod tests {
     #[test]
     fn a_window_that_answers_its_getter_was_created() {
         assert_eq!(
-            confirm_created(Ok(false), || panic!("런타임을 다시 묻지 않는다")),
+            confirm_created(Ok(false), || panic!("does not ask the runtime again")),
             Ok(())
         );
     }
@@ -1714,9 +1570,9 @@ mod tests {
         let missing = || Err("failed to receive message from webview".to_owned());
 
         let without_runtime =
-            confirm_created(missing(), || Err("런타임 없음(시험)".into())).unwrap_err();
+            confirm_created(missing(), || Err("no runtime (test)".into())).unwrap_err();
         assert!(
-            without_runtime.contains("런타임 없음(시험)"),
+            without_runtime.contains("no runtime (test)"),
             "{without_runtime}"
         );
 
@@ -1736,31 +1592,30 @@ mod tests {
         assert_eq!(
             deferred.take(MAIN_WINDOW_LABEL),
             None,
-            "미룬 것이 없으면 입히지 않는다"
+            "not applied when nothing is deferred"
         );
 
         deferred.defer(MAIN_WINDOW_LABEL, true);
         assert!(
             deferred.is_pending(MAIN_WINDOW_LABEL),
-            "서 있는 동안 main 의 자리를 적지 않는다"
+            "main's position is not recorded while it stands"
         );
         assert_eq!(deferred.take(MAIN_WINDOW_LABEL), Some(true));
         assert!(!deferred.is_pending(MAIN_WINDOW_LABEL));
         assert_eq!(
             deferred.take(MAIN_WINDOW_LABEL),
             None,
-            "다음 보이기는 다시 최대화하지 않는다"
+            "the next show does not maximize again"
         );
     }
 
-    // A desire is one per label — a value written later overrides an earlier one, and applying receives that value. An original-size desire also stops placement
-    //   recording while it stands (`record` — regardless of value).
+    // A desire is one per label — a later value overrides an earlier one and applying receives that value. An original-size desire also stops placement recording while it stands (`record` — regardless of value).
     #[test]
     fn a_later_wish_overwrites_an_earlier_one_and_is_applied_with_its_value() {
         let deferred = DeferredMaximize::default();
         deferred.defer("slot-popup-5", true);
         deferred.defer("slot-popup-5", false);
-        assert!(deferred.is_pending("slot-popup-5"), "원래 크기 바람");
+        assert!(deferred.is_pending("slot-popup-5"), "original size desire");
         let mut applied = Vec::new();
         assert!(deferred.apply("slot-popup-5", |maximized| {
             applied.push(maximized);
@@ -1813,7 +1668,7 @@ mod tests {
         assert!(deferred.is_pending("slot-popup-5"));
         assert!(
             deferred.apply("slot-popup-5", |maximized| maximized),
-            "다음 보이기가 남은 바람을 입힌다"
+            "the next show applies the remaining desire"
         );
         assert!(!deferred.is_pending("slot-popup-5"));
     }
@@ -1822,28 +1677,30 @@ mod tests {
     fn a_deferred_maximize_that_fails_to_apply_stays_pending_for_the_next_show() {
         let deferred = DeferredMaximize::default();
         assert!(
-            !deferred.apply("slot-popup-5", |_| panic!("미룬 것이 없으면 입히지 않는다")),
-            "미룬 것이 없다"
+            !deferred.apply("slot-popup-5", |_| panic!(
+                "not applied when nothing is deferred"
+            )),
+            "nothing is deferred"
         );
 
         deferred.defer("slot-popup-5", true);
         assert!(
             !deferred.apply("slot-popup-5", |_| false),
-            "못 입혔으면 자리를 적지 않는다"
+            "if it could not be applied, the position is not recorded"
         );
         assert!(
             deferred.is_pending("slot-popup-5"),
-            "못 입힌 미룸은 남는다 — 그동안 보통 자리를 「최대화 아님」으로 적지 않는다"
+            "a deferral that could not be applied remains — meanwhile the normal position is not recorded as 「not maximized」"
         );
 
         assert!(
             deferred.apply("slot-popup-5", |_| true),
-            "다음 보이기가 다시 입힌다"
+            "the next show applies it again"
         );
         assert!(!deferred.is_pending("slot-popup-5"));
         assert!(
-            !deferred.apply("slot-popup-5", |_| panic!("한 번만 입힌다")),
-            "입힌 뒤에는 다시 입히지 않는다"
+            !deferred.apply("slot-popup-5", |_| panic!("applied only once")),
+            "once applied, it is not applied again"
         );
     }
 
@@ -1854,25 +1711,25 @@ mod tests {
             MAIN_WINDOW_LABEL,
             || assert!(
                 deferred.is_pending(MAIN_WINDOW_LABEL),
-                "자리를 입히는 동안 main 의 자리를 적지 않는다"
+                "main's position is not recorded while the position is being applied"
             ),
             || false,
         ));
         assert!(
             deferred.is_pending(MAIN_WINDOW_LABEL),
-            "못 입혔으면 남는다 — 복원 뒤의 자리 기록이 main 을 「최대화 아님」으로 적지 않는다"
+            "if it could not be applied, it remains — the position record after the restore does not record main as 「not maximized」"
         );
 
         assert!(
             deferred.apply(MAIN_WINDOW_LABEL, |_| true),
-            "다음 보이기가 다시 입힌다"
+            "the next show applies it again"
         );
         assert!(!deferred.is_pending(MAIN_WINDOW_LABEL));
 
         assert!(deferred.apply_now(MAIN_WINDOW_LABEL, || {}, || true));
         assert!(
             !deferred.is_pending(MAIN_WINDOW_LABEL),
-            "입혔으면 거둔다 — main 의 자리가 다시 적힌다"
+            "if applied, it is cleared — main's position is recorded again"
         );
     }
 
@@ -1882,17 +1739,17 @@ mod tests {
         let mut maximized = false;
         assert!(!deferred.apply_now(
             MAIN_WINDOW_LABEL,
-            // The tray 「보이기」 cut in, applied the deferred maximize and cleared it — the position setter after that lowers that maximize (F8).
+            // The tray 「Show」 cut in, applied the deferred maximize and cleared it — the position setter after that lowers that maximize (F8).
             || assert!(deferred.apply(MAIN_WINDOW_LABEL, |_| true)),
             || {
                 maximized = true;
                 false
             },
         ));
-        assert!(maximized, "거둬졌어도 입히기를 부른다");
+        assert!(maximized, "calls the apply even though it was cleared");
         assert!(
             deferred.is_pending(MAIN_WINDOW_LABEL),
-            "못 입혔으면 거둬졌던 미룸을 다시 세운다"
+            "if it could not be applied, the cleared deferral is set up again"
         );
     }
 
@@ -1904,22 +1761,22 @@ mod tests {
 
         assert!(
             !deferred.is_pending(MAIN_WINDOW_LABEL),
-            "다른 창은 그대로 적힌다"
+            "other windows are recorded as is"
         );
         assert_eq!(
             deferred.take("slot-popup-3"),
             Some(true),
-            "보인 창 하나만 입힌다"
+            "applies only the one shown window"
         );
         assert!(!deferred.is_pending("slot-popup-3"));
         assert!(
             deferred.is_pending("slot-popup-4"),
-            "아직 숨은 창의 미룸은 남는다"
+            "the deferral of a still hidden window remains"
         );
         assert_eq!(
             deferred.take("slot-popup-4"),
             Some(false),
-            "창 소멸도 같은 거두기다 — 거둔 뒤 표가 빈다"
+            "window destruction is the same clearing — the table is empty after clearing"
         );
         assert!(deferred.wishes().by_label.is_empty());
     }
@@ -1941,7 +1798,7 @@ mod tests {
         assert_eq!(
             fit_min_width(rect(300.0, 200.0, 200.0, 500.0), 286.0, WORK, FRAME),
             rect(300.0, 200.0, 286.0, 500.0),
-            "넓힌 창이 작업 영역 안이면 자리는 그대로다"
+            "if the widened window is inside the work area, the position is unchanged"
         );
     }
 
@@ -1964,8 +1821,7 @@ mod tests {
 
     #[test]
     fn the_pull_uses_the_window_scale_for_the_visible_width() {
-        // 150 % — visible width = 286 × 1.5 = 429 · one-side border = 24 / 2 = 12 → fitting the visible right end 1920 + 2560 = 4480,
-        //   outer x = 4480 − 12 − 429 = 4039.
+        // 150 % — visible width = 286 × 1.5 = 429 · one-side border = 24 / 2 = 12 → fitting the visible right end 1920 + 2560 = 4480, outer x = 4480 − 12 − 429 = 4039.
         let work = monitor(1920, 0, 2560, 1392, 1.5);
         assert_eq!(
             fit_min_width(rect(4400.0, 100.0, 200.0, 400.0), 286.0, work, 24.0),
@@ -1979,7 +1835,7 @@ mod tests {
         assert_eq!(
             fit_min_width(rect(-500.0, 40.0, 120.0, 300.0), 286.0, tiny, FRAME),
             rect(-648.0, 40.0, 286.0, 300.0),
-            "보이는 폭 286 > 작업 영역 280 — 보이는 왼쪽 끝(바깥 x + 8) = 작업 영역 왼쪽 끝"
+            "visible width 286 > work area 280 — the visible left edge (outer x + 8) = the work area's left edge"
         );
     }
 
@@ -1988,7 +1844,7 @@ mod tests {
         assert_eq!(
             fit_min_width(rect(-300.0, 200.0, 120.0, 500.0), 286.0, WORK, FRAME),
             rect(-8.0, 200.0, 286.0, 500.0),
-            "넓힐 때는 왼쪽 밖 자리도 보이는 왼쪽 끝 = 작업 영역 왼쪽 끝으로 당긴다"
+            "when widening, a position off to the left is also pulled so the visible left edge = the work area's left edge"
         );
     }
 
@@ -2035,7 +1891,7 @@ mod tests {
         fn call(&self, step: MoveStep, what: String) -> Result<(), String> {
             self.calls.lock().unwrap().push(what);
             if self.fail.contains(&step) {
-                return Err(format!("{step:?} 실패(시험)"));
+                return Err(format!("{step:?} failed (test)"));
             }
             Ok(())
         }
@@ -2071,7 +1927,7 @@ mod tests {
         let err = move_steps(&window, Some((10, 20)), Some((300.0, 200.0))).unwrap_err();
         assert_eq!(err.step, MoveStep::Position);
         assert!(err.error.contains("Position"), "{err:?}");
-        assert_eq!(window.calls(), ["position 10,20"], "크기는 안 불린다");
+        assert_eq!(window.calls(), ["position 10,20"], "the size is not called");
 
         let window = FakeSetters::failing(&[MoveStep::Size]);
         let err = move_steps(&window, Some((10, 20)), Some((300.0, 200.0))).unwrap_err();
@@ -2148,13 +2004,12 @@ mod tests {
                         scale: 1.0
                     }
                 )),
-                "{size:?} — 기본 크기"
+                "{size:?} — default size"
             );
         }
     }
 
-    // A move that did not choose a size measures overlap with the size the window will carry (`kept_size` of `move_window`) — measuring with the popout default size
-    //   would decide that a window smaller than that overlaps, and it would be placed off-screen.
+    // A move that chose no size measures overlap with the size the window will carry (`kept_size` of `move_window`) — the popout default size would decide a smaller window overlaps and place it off-screen.
     #[test]
     fn a_small_window_left_of_the_monitor_does_not_land_though_the_default_size_would() {
         let at = WindowPlace {
@@ -2163,10 +2018,14 @@ mod tests {
         };
         let land_with =
             |size| resolve_place("slot-popup-1", &at, size, &[PRIMARY], Fallback::StayPut);
-        assert_eq!(land_with((300.0, 200.0)), None, "창 크기로 재면 화면 밖");
+        assert_eq!(
+            land_with((300.0, 200.0)),
+            None,
+            "measured by the window size it is off screen"
+        );
         assert!(
             land_with((720.0, 500.0)).is_some(),
-            "전제: 기본 크기로 재면 걸친다"
+            "premise: measured by the default size it overlaps"
         );
     }
 

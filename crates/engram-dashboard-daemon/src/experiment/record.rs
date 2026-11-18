@@ -1,13 +1,11 @@
 //! JSONL record types + serialization + raw stream-json line parser (ADR-0090 Stage 2 pilot).
 //!
 //! ## Role
-//! (1) **JSONL records**: serde types of the NDJSON records the pilot appends on every run.
-//! (2) **raw stream-json line parser**: the input is a raw stream-json/transcript line (not a decoded OutputEvent).
-//!     It is the live path the `experiment::transcript` tap calls on every line — why raw lines live only in the tap is
-//!     in the `transcript` module header, the authority.
+//! (1) JSONL records: serde types of the NDJSON records the pilot appends on every run.
+//! (2) Raw stream-json line parser: input is a raw stream-json/transcript line (not a decoded OutputEvent); the `experiment::transcript` tap calls it on every line (why raw lines live only in the tap: the `transcript` module header).
 //!
 //! ## Core invariants
-//! - **Filler original text not recorded** (ADR-0090 d2): a turn record carries no body, only sha256 + len.
+//! - Filler original text not recorded (ADR-0090 d2): a turn record carries no body, only sha256 + len.
 // ADR-0090
 
 use engram_dashboard_base::text::hex_lower;
@@ -31,8 +29,7 @@ pub enum Record {
 }
 
 impl Record {
-    /// No newline at the end — the file writer adds it. A serialization failure is replaced by an error line — so one record
-    /// does not break the whole file.
+    /// No trailing newline — the file writer adds it. A serialization failure becomes an error line so one record does not break the whole file.
     pub fn to_jsonl_line(&self) -> String {
         serde_json::to_string(self)
             .unwrap_or_else(|e| format!(r#"{{"type":"serialize_error","error":"{}"}}"#, e))
@@ -48,12 +45,11 @@ pub struct HeaderRecord {
     pub model_pin: String,
     /// The resolved exact model id reported by the transcript tap's system/init (None when the tap or the init line is absent).
     pub resolved_model: Option<String>,
-    /// Reason resolved_model could not be filled (honest gap note — None when the tap succeeded).
+    /// Reason resolved_model could not be filled (None when the tap succeeded).
     pub resolved_model_note: Option<String>,
-    /// Did the transcript tap find the session JSONL (best-effort measurement tap — ADR-0008 boundary). If false, real usage and model
-    /// id are absent and the driver falls back to character estimates.
+    /// Did the transcript tap find the session JSONL (best-effort measurement tap — ADR-0008 boundary). If false, real usage and model id are absent and the driver falls back to character estimates.
     pub transcript_available: bool,
-    /// Absolute path of the transcript found (for after-the-fact cross-checking). None if absent.
+    /// Absolute path of the transcript found (for cross-checking). None if absent.
     pub transcript_path: Option<String>,
     /// Approximate RFC3339 string.
     pub timestamp_utc: String,
@@ -71,14 +67,13 @@ pub struct TurnRecord {
     /// task|fill|inject|probe|final.
     pub kind: String,
     pub chars_sent: usize,
-    /// sha256 (hex) of the body sent — the same body as `chars_sent`. For an inject turn it is the hash of the authored note body,
-    ///   not the envelope (envelope actual byte count = `InjectionRecord.bytes_requested`).
+    /// sha256 (hex) of the body sent — the same body as `chars_sent`. For an inject turn it is the hash of the authored note body, not the envelope (envelope byte count = `InjectionRecord.bytes_requested`).
     pub body_sha256: String,
     pub usage: Option<UsageSnapshot>,
     pub wallclock_ms: u64,
 }
 
-/// Keep **both** the measured and estimated series, so the estimated↔measured ratio can be calibrated afterwards (a pilot product).
+/// Keep both the measured and estimated series so the estimated↔measured ratio can be calibrated afterwards.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct UsageSnapshot {
     /// Decoded `Usage.input_tokens` — that turn's increment, not the cumulative context.
@@ -98,7 +93,7 @@ pub struct InjectionRecord {
     /// The fill fraction at which this injection fired (the config inject_at value).
     pub at_fraction: f64,
     pub msg_id: String,
-    /// Answers — for cross-checking probe grading. They are experiment meta so they are recorded as an exception to the no-original-text invariant.
+    /// Answers — for cross-checking probe grading. Experiment meta, recorded as an exception to the no-original-text invariant.
     pub codeword: String,
     pub sender_name: String,
     /// `DeliveryObservation::is_delivered`.
@@ -115,10 +110,9 @@ pub struct InjectionRecord {
 pub struct ProbeRecord {
     /// None for FINAL REPORT.
     pub for_injection_k: Option<u32>,
-    /// ★finding 4★: the real turn index (0-based) this probe consumed — the same index as `TurnRecord` (kind="probe").
-    ///   Previously a probe bumped turn_idx without leaving a TurnRecord, creating a hole in the index.
+    /// The real turn index (0-based) this probe consumed — same index as `TurnRecord` (kind="probe"), so a probe leaves no hole in the index.
     pub turn_idx: u32,
-    /// A probe is also a real turn that consumes context, so it is left in the series the same as fill/inject turns (calibration consistency).
+    /// A probe is also a real turn consuming context, so it stays in the series like fill/inject turns (calibration consistency).
     pub usage: Option<UsageSnapshot>,
     pub question: String,
     /// 4KB cap — may be truncated.
@@ -131,7 +125,7 @@ pub struct ProbeRecord {
 pub struct HistogramRecord {
     /// key = event `type` or `type/subtype`, value = count.
     pub counts: std::collections::BTreeMap<String, u64>,
-    /// Whether this histogram is of raw stream-json types or of decoded event variants (honest scope).
+    /// Whether this histogram is of raw stream-json types or decoded event variants.
     pub source: String,
 }
 
@@ -164,16 +158,14 @@ pub struct SummaryRecord {
     pub duration_ms: u64,
     /// The reason if it ended by abort (None if it completed normally).
     pub abort_reason: Option<String>,
-    /// ★finding 1★: the exact model id fixed by the authoritative transcript parse at the end of the run. The header's resolved_model is
-    ///   usually None right after spawn (the transcript is written only after the first turn), so the reproducibility pin (ADR-0088 d5a) is
-    ///   lost if it relies on the header alone — the summary preserves the pin with the value fixed at the end of the run. None if the tap or the model line is absent.
+    /// The exact model id fixed by the authoritative transcript parse at the end of the run. The header's resolved_model is usually None right after spawn (the transcript is written after the first turn), so the summary preserves the reproducibility pin (ADR-0088 d5a). None if the tap or the model line is absent.
     pub resolved_model: Option<String>,
-    /// Values at the end of the run (the meaning is that of the same-named field in `HeaderRecord`).
+    /// Values at the end of the run (meaning as the same-named field in `HeaderRecord`).
     pub transcript_available: bool,
     pub transcript_path: Option<String>,
 }
 
-/// Prevents file runaway from probe/compact verbatim (ADR-0090 — suppresses file size and noise).
+/// Prevents file runaway from probe/compact verbatim (ADR-0090).
 pub const RESPONSE_CAP_BYTES: usize = 4096;
 
 pub fn cap_response(s: &str) -> String {
@@ -193,9 +185,7 @@ pub fn parse_init_model(line: &str) -> Option<String> {
     if v.get("type").and_then(|t| t.as_str()) != Some("system") {
         return None;
     }
-    // ★finding 14 fix★: back when the check passed on the mere presence of model without subtype, a forged line like `{"type":"system","model":"spoof"}`
-    //   got in as an authoritative model id (a spoofing surface) — do not relax. The real model id of the stream-json headless path is
-    //   handled by `model_from_assistant_line` (assistant.message.model), so no legitimate source is lost.
+    // ★Do not relax★: passing on the mere presence of `model` without subtype let a forged line like `{"type":"system","model":"spoof"}` in as an authoritative model id. The real model id of the stream-json headless path is handled by `model_from_assistant_line` (assistant.message.model), so no legitimate source is lost.
     if v.get("subtype").and_then(|s| s.as_str()) != Some("init") {
         return None;
     }
@@ -235,9 +225,8 @@ pub fn line_mentions_compact(line: &str) -> bool {
     has("type") || has("subtype")
 }
 
-// ── std-only SHA-256 (FIPS 180-4) ──────────────────────────────────────────────────
-// ★Why hand-implemented★: ADR-0090 forbids adding new dependencies (no new deps) and the workspace has no sha2.
-//   Performance is irrelevant — tens to hundreds of documents per run do not register on the wall clock.
+// ── std-only SHA-256 (FIPS 180-4) ──
+// ★Hand-implemented★: ADR-0090 forbids new dependencies and the workspace has no sha2; performance is irrelevant (tens to hundreds of documents per run).
 
 struct Sha256;
 
@@ -437,17 +426,17 @@ mod tests {
 
     #[test]
     fn cap_response_respects_char_boundary() {
-        let s = "가".repeat(RESPONSE_CAP_BYTES); // '가' = 3 bytes.
+        let s = "가".repeat(RESPONSE_CAP_BYTES); // '가' = 3 bytes. hangul-ok
         let capped = cap_response(&s);
         assert!(capped.len() <= RESPONSE_CAP_BYTES);
         assert!(std::str::from_utf8(capped.as_bytes()).is_ok());
     }
 
-    /// If the cap falls in the middle of a character, cut at the **lower** boundary — keep as much as possible without exceeding it.
-    /// 4096 is not a multiple of 3, so in a run of `'가'` (3 bytes) the cap falls in the middle of a character.
+    /// If the cap falls mid-character, cut at the lower boundary — keep as much as possible without exceeding it.
+    /// 4096 is not a multiple of 3, so in a run of 3-byte characters the cap falls in the middle of a character.
     #[test]
     fn cap_response_cuts_at_the_last_boundary_below_the_cap() {
-        let s = "가".repeat(RESPONSE_CAP_BYTES);
+        let s = "가".repeat(RESPONSE_CAP_BYTES); // hangul-ok
         let capped = cap_response(&s);
         assert_eq!(capped.len(), RESPONSE_CAP_BYTES / 3 * 3);
         assert!(s.starts_with(&capped));
@@ -478,7 +467,7 @@ mod tests {
         assert_eq!(
             parse_init_model(r#"{"type":"system","model":"spoof"}"#),
             None,
-            "subtype 없는 system 라인은 authoritative 모델 id 아님(스푸핑 방지)"
+            "a system line without subtype is not an authoritative model id (anti-spoofing)"
         );
         assert_eq!(
             parse_init_model(r#"{"type":"system","subtype":"result","model":"spoof"}"#),

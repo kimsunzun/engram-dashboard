@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn the_excerpt_is_capped_in_characters() {
-        let long = "가".repeat(EXCERPT_CHARS + 50);
+        let long = "가".repeat(EXCERPT_CHARS + 50); // hangul-ok — multi-byte fixture
         let got = excerpt(&long);
         assert_eq!(got.chars().count(), EXCERPT_CHARS);
         assert!(long.starts_with(&got));

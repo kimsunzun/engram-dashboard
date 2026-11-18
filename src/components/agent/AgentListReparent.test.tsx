@@ -1,8 +1,4 @@
-// ★왜 별도 파일 + Tree mock★: 실제 드래그는 jsdom 에서 시뮬레이션이 어렵고, react-arborist <Tree> 를 통째
-//   mock 하면 렌더 스모크 테스트(AgentList.test.tsx)와 충돌한다. 그래서 이 파일에서만 react-arborist 를
-//   mock 해 <Tree> 가 받은 onMove 콜백을 캡처하고, 사람 드래그가 부르는 것과 동일 인자로 직접 호출해
-//   컴포넌트의 재부모화 배선(reparentProfile 커맨드 형태 · null=루트 승격 · no-op 억제 · refreshProfiles
-//   안전망)을 검증한다. 사람 드래그와 LLM 호출이 같은 reparentProfile 핸들을 쓴다(§5 손발/두뇌 분리).
+// ★Why a separate file + Tree mock★: real dragging is hard to simulate in jsdom, and mocking the whole react-arborist <Tree> conflicts with the render smoke test (AgentList.test.tsx). Here react-arborist is mocked to capture the `onMove` the <Tree> received and call it with a human drag's arguments, verifying the reparent wiring (reparentProfile command shape · null=root promotion · no-op suppression · refreshProfiles safety net). A human drag and an LLM call use the same reparentProfile handle (§5).
 
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -37,8 +33,8 @@ vi.mock('../../store/viewStore', () => ({
   selectView: () => ({ focusedSlotId: 'slot-1' }),
 }))
 
-// ── react-arborist Tree mock — onMove·disableDrag·disableDrop 캡처 ─────────────────
-//   실제 트리 렌더는 필요 없다. Tree 가 받은 콜백들을 밖에서 잡아 사람 드래그와 동일 인자로 호출한다.
+// ── react-arborist Tree mock — captures onMove·disableDrag·disableDrop ──
+//   No real tree render needed: the callbacks the <Tree> received are caught outside and called with a human drag's arguments.
 type MoveArgs = Parameters<MoveHandler<unknown>>[0]
 type DropArgs = { parentNode: unknown; dragNodes: unknown[]; index: number }
 const captured = vi.hoisted(() => ({
@@ -74,14 +70,13 @@ function profile(id: string, cwd: string, createdAt = 0, parentId: string | null
   }
 }
 
-// dragIds/parentId 만 컴포넌트가 소비한다(나머지 MoveHandler 필드는 더미).
+// The component consumes only dragIds/parentId (the other MoveHandler fields are dummies).
 function moveArgs(dragId: string, parentId: string | null): MoveArgs {
   return { dragIds: [dragId], dragNodes: [], parentId, parentNode: null, index: 0 } as unknown as MoveArgs
 }
 
-// ── NodeApi 최소 fake(disableDrop/disableDrag 가 소비하는 필드만) ────────────────────
-//   disableDrop 이 읽는 것: parentNode.{isRoot, level, id, data.hasProfile} · dragNodes[i].{data.children,
-//   parent}. parent 는 다시 NodeApi(루트면 isRoot=true). 실제 NodeApi 전부를 흉내 내지 않고 소비 필드만 채운다.
+// ── NodeApi minimal fake (only the fields disableDrop/disableDrag consume) ──
+//   disableDrop reads: parentNode.{isRoot, level, id, data.hasProfile} · dragNodes[i].{data.children, parent}; parent is again a NodeApi (isRoot=true if root).
 type FakeNode = {
   id: string
   isRoot: boolean
@@ -89,7 +84,7 @@ type FakeNode = {
   data: { hasProfile?: boolean; children?: unknown[] }
   parent: FakeNode | null
 }
-// 내부 루트 pseudo-node(react-arborist canDrop 이 루트 드롭 때 넘기는 것 — data={id:ROOT_ID}, level=-1).
+// Internal root pseudo-node (what react-arborist canDrop passes on a root drop — data={id:ROOT_ID}, level=-1).
 const rootNode: FakeNode = { id: '__ROOT__', isRoot: true, level: -1, data: {}, parent: null }
 function node(
   id: string,
@@ -123,8 +118,8 @@ afterEach(() => {
   useAgentStore.setState({ agents: [], profiles: [], selectedAgentId: null })
 })
 
-describe('드래그 재부모화 배선(onMove → reparentProfile, ADR-0072 §5)', () => {
-  it('자식을 부모 밑으로 드롭 → reparentProfile(childId, parentId)', async () => {
+describe('drag reparent wiring (onMove → reparentProfile, ADR-0072 §5)', () => {
+  it('drop a child under a parent → reparentProfile(childId, parentId)', async () => {
     useAgentStore.setState({ profiles: [profile('A', 'C:/a', 1), profile('B', 'C:/b', 2)] })
     render(<AgentList />)
     expect(captured.onMove).toBeTypeOf('function')
@@ -136,7 +131,7 @@ describe('드래그 재부모화 배선(onMove → reparentProfile, ADR-0072 §5
     expect(refreshProfilesMock).toHaveBeenCalledTimes(1)
   })
 
-  it('루트로 드롭(parentId=null) → reparentProfile(childId, null) 루트 승격', async () => {
+  it('drop to root (parentId=null) → reparentProfile(childId, null) root promotion', async () => {
     useAgentStore.setState({ profiles: [profile('A', 'C:/a', 1), profile('B', 'C:/b', 2, 'A')] })
     render(<AgentList />)
     await act(async () => {
@@ -146,7 +141,7 @@ describe('드래그 재부모화 배선(onMove → reparentProfile, ADR-0072 §5
     expect(clientMock.reparentProfile).toHaveBeenCalledWith('B', null)
   })
 
-  it('이미 그 부모면 no-op(불필요 command 억제)', async () => {
+  it('if it is already that parent it is a no-op (suppresses a needless command)', async () => {
     useAgentStore.setState({ profiles: [profile('A', 'C:/a', 1), profile('B', 'C:/b', 2, 'A')] })
     render(<AgentList />)
     await act(async () => {
@@ -156,7 +151,7 @@ describe('드래그 재부모화 배선(onMove → reparentProfile, ADR-0072 §5
     expect(clientMock.reparentProfile).not.toHaveBeenCalled()
   })
 
-  it('이미 루트인 노드를 루트로 드롭 → no-op', async () => {
+  it('dropping a node that is already root onto root → no-op', async () => {
     useAgentStore.setState({ profiles: [profile('A', 'C:/a', 1)] })
     render(<AgentList />)
     await act(async () => {
@@ -167,59 +162,58 @@ describe('드래그 재부모화 배선(onMove → reparentProfile, ADR-0072 §5
   })
 })
 
-// ── 드래그/드롭 UI 가드(disableDrag / disableDrop, ADR-0072 폴리시) ────────────────────
-//   백엔드가 무효 op 를 권위로 거부하지만(데이터 손상 없음), 프론트 가드는 흔한 오조작에서 불필요한 실패
-//   커맨드·에러 토스트·혼란을 pre-filter 한다.
-describe('드래그 가드(disableDrag = 프로필 없는 노드, #1)', () => {
-  it('프로필 있는 노드(reserved·매칭 running)는 드래그 가능(disableDrag=false)', () => {
+// ── Drag/drop UI guards (disableDrag / disableDrop, ADR-0072 polish) ──
+//   The backend authoritatively rejects invalid ops; the frontend guard pre-filters needless failed commands, error toasts and confusion from common mis-operations.
+describe('drag guard (disableDrag = a node without a profile, #1)', () => {
+  it('a node with a profile (reserved · matching running) is draggable (disableDrag=false)', () => {
     useAgentStore.setState({ profiles: [profile('A', 'C:/a', 1)] })
     render(<AgentList />)
     expect(captured.disableDrag).toBeTypeOf('function')
     expect(captured.disableDrag!({ hasProfile: true })).toBe(false)
   })
 
-  it('프로필 없는 ad-hoc 노드는 드래그 불가(disableDrag=true)', () => {
+  it('an ad-hoc node without a profile is not draggable (disableDrag=true)', () => {
     useAgentStore.setState({ profiles: [profile('A', 'C:/a', 1)] })
     render(<AgentList />)
     expect(captured.disableDrag!({ hasProfile: false })).toBe(true)
   })
 })
 
-describe('드롭 가드(disableDrop, #1·#5 + 기존 1단 상한)', () => {
+describe('drop guard (disableDrop, #1·#5 + the existing one-level cap)', () => {
   function mountTree() {
     useAgentStore.setState({ profiles: [profile('A', 'C:/a', 1)] })
     render(<AgentList />)
     expect(captured.disableDrop).toBeTypeOf('function')
   }
 
-  it('[#1] 프로필 없는 부모(ad-hoc) 밑으로 드롭 → 비활성', () => {
+  it('[#1] drop under a parent without a profile (ad-hoc) → disabled', () => {
     mountTree()
     const adhocParent = node('adhoc', { hasProfile: false })
-    const drag = node('B') // 루트 레벨 자식(현재 부모 = 루트) → 부모가 바뀌므로 #5 에 안 걸림.
+    const drag = node('B') // a root-level child (current parent = root) → the parent changes so #5 does not catch it.
     expect(callDrop(adhocParent, [drag])).toBe(true)
   })
 
-  it('[#1] 프로필 있는 부모(루트 레벨) 밑으로 드롭 → 허용(부모가 실제로 바뀔 때)', () => {
+  it('[#1] drop under a parent with a profile (root level) → allowed (when the parent actually changes)', () => {
     mountTree()
     const realParent = node('A', { hasProfile: true })
     const drag = node('B')
     expect(callDrop(realParent, [drag])).toBe(false)
   })
 
-  it('[#5] 같은 부모(A 자식 → 다시 A 밑)로의 드롭 → 비활성(reorder 미지원)', () => {
+  it('[#5] drop onto the same parent (A\'s child → under A again) → disabled (reorder unsupported)', () => {
     mountTree()
     const parentA = node('A', { hasProfile: true })
     const child = node('B', { parent: parentA })
     expect(callDrop(parentA, [child])).toBe(true)
   })
 
-  it('[#5] 루트↔루트 드롭(현재 루트 노드를 루트로) → 비활성(부모 안 바뀜)', () => {
+  it('[#5] root↔root drop (dropping a current root node onto root) → disabled (the parent does not change)', () => {
     mountTree()
     const drag = node('B')
     expect(callDrop(rootNode, [drag])).toBe(true)
   })
 
-  it('[기존] 자식 밑(부모 level>0)으로 드롭 → 비활성(2단 방지)', () => {
+  it('[existing] drop under a child (parent level>0) → disabled (prevents two levels)', () => {
     mountTree()
     const parentA = node('A', { hasProfile: true })
     const childC = node('C', { parent: parentA, hasProfile: true })
@@ -227,34 +221,30 @@ describe('드롭 가드(disableDrop, #1·#5 + 기존 1단 상한)', () => {
     expect(callDrop(childC, [drag])).toBe(true)
   })
 
-  it('[기존] 이미 자식을 가진 노드를 남의 밑으로 드롭 → 비활성(2단 방지)', () => {
+  it('[existing] dropping a node that already has children under another → disabled (prevents two levels)', () => {
     mountTree()
     const parentA = node('A', { hasProfile: true })
     const dragWithChildren = node('P', { children: [{ id: 'x' }] })
     expect(callDrop(parentA, [dragWithChildren])).toBe(true)
   })
 
-  it('루트 자식(현재 루트)을 프로필 있는 부모 밑으로 → 허용(정상 재부모화)', () => {
+  it('a root child (currently root) under a parent with a profile → allowed (normal reparent)', () => {
     mountTree()
     const parentA = node('A', { hasProfile: true })
     const drag = node('B')
     expect(callDrop(parentA, [drag])).toBe(false)
   })
 
-  // ★isRoot 정규화 회귀 가드★: 위 '루트↔루트' 테스트는 현재-루트 노드를 루트로 드롭해 true(차단) 기대라,
-  //   parentNode.isRoot 정규화가 깨져도 pseudo-root 의 data.hasProfile 부재(②)가 독립적으로 차단해 통과해버린다.
-  //   여기서는 자식(level 1)을 루트로 '승격'하는 합법 드롭 — isRootDrop 정규화가 dropParentId 를 null 로 잡고
-  //   currentParentId('A')와 달라 허용(false)이어야 한다. isRoot 정규화가 깨지면(예: pseudo-root 를 실 부모로
-  //   취급) ②(hasProfile 부재)나 dropParentId 오판으로 true 가 되어 이 테스트가 실패한다 = 진짜 회귀 가드.
-  it('[승격] A 자식 B(level 1)를 루트로 드롭 → 허용(disableDrop=false)', () => {
+  // ★isRoot normalization regression guard★: the 'root↔root' test above drops a current-root node onto root expecting true (blocked), so even if the parentNode.isRoot normalization breaks, the pseudo-root's missing data.hasProfile (②) blocks independently and it passes anyway. Here a legal drop 'promoting' a child (level 1) to root must be allowed (false): isRootDrop takes dropParentId as null, differing from currentParentId('A'). If the normalization breaks (e.g. the pseudo-root treated as a real parent) it turns true via ② or a dropParentId misjudgment and this test fails.
+  it('[promote] drop child B of A (level 1) onto root → allowed (disableDrop=false)', () => {
     mountTree()
     const parentA = node('A', { hasProfile: true })
     const childB = node('B', { parent: parentA, hasProfile: true })
     expect(callDrop(rootNode, [childB])).toBe(false)
   })
 
-  // 부모-변경 이동의 허용측 회귀 가드(same-parent no-op 대칭).
-  it('[이동] A 자식 B 를 다른 부모 C 밑으로 드롭 → 허용(disableDrop=false)', () => {
+  // A regression guard on the allowing side of a parent-changing move (symmetric with same-parent no-op).
+  it('[move] drop child B of A under another parent C → allowed (disableDrop=false)', () => {
     mountTree()
     const parentA = node('A', { hasProfile: true })
     const childB = node('B', { parent: parentA, hasProfile: true })

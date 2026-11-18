@@ -167,7 +167,7 @@ impl LibPath {
 /// A built-in asset — the closed set of `engram:/…` ids, backed by files of the distribution's `builtin\` folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BuiltinId {
-    /// `engram:/default` — the built-in preset 「기본」.
+    /// `engram:/default` — the built-in preset 「Default」.
     DefaultPreset,
     /// `engram:/priming` — the priming instruction.
     Priming,
@@ -340,7 +340,7 @@ mod tests {
     fn lib_path_accepts_names_that_only_look_odd() {
         for text in [
             "a",
-            "업무/규칙.md",
+            "업무/규칙.md", // hangul-ok — non-ASCII path fixture
             "a/b/c/SKILL.md",
             ".hidden/x.md",
             "a/.x",
@@ -384,7 +384,9 @@ mod tests {
     #[test]
     fn to_path_and_from_disk_round_trip_under_a_root() {
         let root = Path::new("lib-root");
+        // hangul-ok-begin — non-ASCII path fixture
         for text in ["a.md", "업무/규칙.md", "a/b/c/SKILL.md"] {
+            // hangul-ok-end
             let disk = lib(text).to_path(root);
             assert!(disk.starts_with(root), "{disk:?}");
             let joined = text
@@ -525,7 +527,7 @@ mod tests {
         let refs = BuiltinId::ALL
             .into_iter()
             .map(AssetRef::BuiltIn)
-            .chain([AssetRef::Library(lib("업무/a.md"))]);
+            .chain([AssetRef::Library(lib("업무/a.md"))]); // hangul-ok — non-ASCII path fixture
         for asset in refs {
             assert_eq!(
                 AssetRef::parse(&asset.spelling()),

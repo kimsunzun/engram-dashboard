@@ -55,7 +55,7 @@ impl Builtins {
     /// `backends`, as in a library preset.
     pub fn new(dir: Option<&Path>, backends: &dyn Backends) -> Self {
         if dir.is_none() {
-            tracing::warn!("built-in 폴더 없음, 모든 built-in을 stand-in으로 시작");
+            tracing::warn!("no built-in folder; all built-ins start as stand-ins");
         }
         let entry = |id| match dir.map(|dir| dir.join(file_of(id))) {
             None => stand_in(id, NO_FOLDER.to_owned()),
@@ -70,7 +70,7 @@ impl Builtins {
                     tracing::warn!(
                         builtin = id.id(),
                         path = ?path,
-                        "built-in load 실패, stand-in으로 대체: {}",
+                        "built-in load failed; using a stand-in: {}",
                         escape_controls(&why)
                     );
                     stand_in(id, why)
@@ -106,10 +106,10 @@ impl Builtins {
 }
 
 /// Why every built-in stands in when there is no built-in folder.
-const NO_FOLDER: &str = "기본 제공 폴더 없음";
+const NO_FOLDER: &str = "no built-in folder";
 
 /// Why a built-in YAML file that declares no `kind` stands in.
-const NO_KIND: &str = "`kind` 없음";
+const NO_KIND: &str = "no `kind`";
 
 /// The built-in `id` read from `path` with the file's text, or why it cannot be used — a file that does not parse
 /// gives its reader's code and message.

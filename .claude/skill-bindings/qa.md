@@ -159,7 +159,7 @@ cargo test -p engram-dashboard-daemon --test launch_kits_live -- --ignored --tes
 
 깨진 테스트를 가를 때 이름과 메시지가 둘 다 맞으면 `FAIL(알려진 실패)` 다 — 기준점에서 재현하지 않는다. 메시지는 실행마다 바뀌는 값(pid · 시각 · 임시 경로)을 빼고 비교한다. 그래도 다르면 목록 밖이다.
 
-- `ws_e2e` `real_process::ignored_daemon_kill_cleans_pty_child` — panic `… PTY child(cmd.exe)를 OS 트리 열거로 식별하지 못함`(데몬 부팅 자동 복원을 꺼 자식이 안 뜬다). 기록 = `docs/process/step-log.md` 「부팅 자동 resume OFF」.
+- `ws_e2e` `real_process::ignored_daemon_kill_cleans_pty_child` — panic `… the PTY child (cmd.exe) of the daemon (pid=…) could not be identified by OS tree enumeration`(S38 이 영어로 옮김)(데몬 부팅 자동 복원을 꺼 자식이 안 뜬다). 기록 = `docs/process/step-log.md` 「부팅 자동 resume OFF」.
 
 ## 추적 기록 위치
 

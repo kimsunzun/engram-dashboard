@@ -1,33 +1,33 @@
-// generate-license-file 설정 — THIRD_PARTY_LICENSES.txt 의 npm 부분. 부르는 쪽 = scripts/gen-third-party-licenses.mjs
-//   (`--config` 로 이 파일을 넘긴다). 경로는 이 파일 기준이다. ★주석은 줄 전체 `//` 만 쓴다★ — 생성 스크립트도 이 파일을
-//   읽는데(아래 키 대조) 줄 주석만 걷어 내고 JSON 으로 읽는다.
+// generate-license-file settings — the npm part of THIRD_PARTY_LICENSES.txt. Caller = scripts/gen-third-party-licenses.mjs
+//   (passes this file with `--config`). Paths are relative to this file. ★Use only whole-line `//` comments★ — the generator script also
+//   reads this file (the key check below), stripping only line comments and reading it as JSON.
 {
-  // 도구가 라이선스 본문을 못 찾으면 package.json 의 SPDX 식별자 한 줄("MIT")이나 엉뚱한 파일을 본문으로 싣는다 — 허락
-  //   문구가 빠지므로 생성 스크립트가 그런 항목을 실패로 막고, 여기서 본문을 대 준다.
-  // ★키는 `<이름>@<버전>` 정확 버전이다★ — 도구가 그 버전에만 대 주고, 생성 스크립트가 설치된 운영 의존에 그 이름@버전이
-  //   없으면(버전이 바뀌었거나 패키지가 빠졌다) 실패한다. 새 버전의 본문은 다시 확인하고 키를 고친다.
+  // When the tool cannot find the license text, it carries package.json's one-line SPDX identifier ("MIT") or an unrelated file as the text — the permission
+  //   wording goes missing, so the generator script blocks such entries as failures, and the text is supplied here.
+  // ★Keys are `<name>@<version>` with the exact version★ — the tool supplies it only for that version, and the generator script fails if that name@version is not
+  //   among the installed production dependencies (the version changed or the package dropped out). For a new version, recheck the text and fix the key.
   "replace": {
-    // 라이선스 파일 이름(LICENSE_MIT · LICENSE_APACHE-2.0)을 도구가 못 찾는다. 이중 라이선스 중 MIT 를 고른다 — Rust 쪽과 같은 우선순위.
+    // The tool cannot find the license file names (LICENSE_MIT · LICENSE_APACHE-2.0). Of the dual license, MIT is picked — the same priority as the Rust side.
     "@tauri-apps/api@2.11.0": "../../node_modules/@tauri-apps/api/LICENSE_MIT",
-    // 이 둘은 라이선스 파일 대신 SPDX 메타데이터 문서(LICENSE.spdx)만 싣고, 도구가 그것을 본문으로 집는다. 같은 버전의 Rust
-    //   crate(tauri-plugin-dialog · tauri-plugin-opener)가 싣는 LICENSE_MIT 는 위 @tauri-apps/api 의 것과 글자까지 같다(실측 2026-10-15).
+    // These two carry only an SPDX metadata document (LICENSE.spdx) instead of a license file, and the tool picks that as the text. The LICENSE_MIT that the Rust
+    //   crates of the same version (tauri-plugin-dialog · tauri-plugin-opener) carry is identical, letter for letter, to the one of @tauri-apps/api above (measured 2026-10-15).
     "@tauri-apps/plugin-dialog@2.7.1": "../../node_modules/@tauri-apps/api/LICENSE_MIT",
     "@tauri-apps/plugin-opener@2.5.4": "../../node_modules/@tauri-apps/api/LICENSE_MIT",
-    // 플랫폼 바이너리 패키지에는 라이선스 파일이 없다 — 같은 버전으로 함께 깔리는 본체 패키지(esbuild · rollup)의 것을 쓴다.
+    // The platform binary packages have no license file — the one of the main package installed alongside at the same version (esbuild · rollup) is used.
     "@esbuild/win32-x64@0.25.12": "../../node_modules/esbuild/LICENSE.md",
     "@rollup/rollup-win32-x64-gnu@4.61.1": "../../node_modules/rollup/LICENSE.md",
     "@rollup/rollup-win32-x64-msvc@4.61.1": "../../node_modules/rollup/LICENSE.md",
-    // 아래 넷은 npm 패키지에 라이선스 파일이 아예 없다 — 상류 저장소의 파일을 npm/ 에 받아 둔다. 커밋은 npm 레지스트리가
-    //   기록한 그 버전의 gitHead 다(`npm view <패키지>@<버전> gitHead`). 버전을 올리면 같은 방법으로 다시 받는다.
+    // The four below have no license file at all in their npm package — the upstream repository's file is downloaded into npm/. The commit is the gitHead of that
+    //   version recorded by the npm registry (`npm view <package>@<version> gitHead`). When the version is raised, download it again the same way.
     // react-arborist 3.9.0 = github.com/jameskerr/react-arborist @ 3c6a9a7d3d023a52dbd3a9da88b87154328191dc : LICENSE
     "react-arborist@3.9.0": "npm/react-arborist.txt",
-    // react-remove-scroll-bar 2.3.8 은 gitHead(b3b1287a…)가 GitHub 에 올라가 있지 않고, 그 버전 출시(2024-12-15) 때 상류에
-    //   LICENSE 가 없었다. 뒤에 기여자 monholm 이 PR #76(커밋 7301c160)으로 더했고 메인테이너가 2025-05-26 에 받아들였다 —
-    //   「Copyright (c) 2025 Anton Korzunov」(메인테이너) 이름의 MIT 다(package.json 의 MIT 선언과 같다). 그 파일을 쓴다 =
-    //   github.com/theKashey/react-remove-scroll-bar @ 8ca9ba5ea52de03308fe8ced94f7b159a44d28ff(그 PR 의 머지 커밋) : LICENSE
+    // The gitHead (b3b1287a…) of react-remove-scroll-bar 2.3.8 was never pushed to GitHub, and when that version was released (2024-12-15), upstream had
+    //   no LICENSE. Later the contributor monholm added one in PR #76 (commit 7301c160) and the maintainer accepted it on 2025-05-26 —
+    //   it is MIT in the name 「Copyright (c) 2025 Anton Korzunov」 (the maintainer) (the same as the MIT declaration in package.json). That file is used =
+    //   github.com/theKashey/react-remove-scroll-bar @ 8ca9ba5ea52de03308fe8ced94f7b159a44d28ff (that PR's merge commit) : LICENSE
     "react-remove-scroll-bar@2.3.8": "npm/react-remove-scroll-bar.txt",
-    // 둘 다 github.com/remarkjs/remark-math 의 루트 license — rehype-katex 7.0.1 @ 88a9497e1ede93b958237c85edbf5651faeca7af ·
-    //   remark-math 6.0.0 @ d5d0660b150810a535bbb07eac6cc96a4510aa24 (두 판의 글이 같다).
+    // Both are the root license of github.com/remarkjs/remark-math — rehype-katex 7.0.1 @ 88a9497e1ede93b958237c85edbf5651faeca7af ·
+    //   remark-math 6.0.0 @ d5d0660b150810a535bbb07eac6cc96a4510aa24 (the text of the two versions is the same).
     "rehype-katex@7.0.1": "npm/rehype-katex.txt",
     "remark-math@6.0.0": "npm/remark-math.txt"
   }

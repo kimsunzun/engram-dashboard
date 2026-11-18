@@ -1,9 +1,4 @@
-//! 배치 줄(TRD S28 §4-5) — 모델의 배치를 칸마다 한 줄로 편다. `layout.get` 과 배치를 바꾼 명령의 답이 싣는다(규칙
-//! §1-4). 명령 버스 매크로가 재귀 타입을 못 실어 트리 대신 평평한 줄이고, 좌우 · 위아래 · 몫은 정규 좌표가 나른다.
-//!
-//! 모델(`ViewManager`)을 읽기만 하고 락을 모른다 — 락은 적용 서비스가 잡는다(조회 = `apply::layout_rows` · 바꾼 명령의
-//! 답 = 바꾸는 그 락 안에서 `apply::dock_target` 이 결말에 싣는다). 줄 순서 =
-//! 창 번호 순(`window.list`) → 탭 줄 순 → 트리 전위 순. 좌표 = 셸 안 기하의 단일 출처 `geometry::compute`(ADR-0227).
+//! Layout rows (TRD S28 §4-5) — flattens the model's layout into one row per area, carried by the answers of `layout.get` and of commands that change the layout (rule §1-4). The command bus macro cannot carry recursive types, so rows are flat instead of a tree, and left-right · top-bottom · share travel as normalized coordinates. It only reads the model (`ViewManager`) and knows no locks — the apply service takes the lock (query = `apply::layout_rows`; for a command that changed the layout `apply::dock_target` puts the rows in the outcome inside the very lock that changes it). Row order = window number order (`window.list`) → tab row order → tree preorder; coordinates = `geometry::compute`, the single source of geometry inside the shell (ADR-0227).
 // ADR-0307
 
 use uuid::Uuid;
@@ -15,7 +10,7 @@ use super::target::{tabs_of, windows_in_order};
 use super::tree;
 use super::types::SlotContent;
 
-/// 칸에 든 것의 종류. `Unknown` = 이 판이 모르는 내용(저장 파일에서 읽은 원문을 쥔 칸 — 메모리 내용은 `Empty`).
+/// What an area holds. `Unknown` = content this version does not know (an area holding raw text read from a saved file — in-memory content is `Empty`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotKind {
     Empty,
@@ -25,12 +20,7 @@ pub enum SlotKind {
     Unknown,
 }
 
-/// 칸 하나의 줄. id 칸(`window_id` · `tab` · `slot` · `agent_id`)은 늘 채운다 — 답에 실을지는 부르는 쪽이 고른다.
-///
-/// - `tab_index` = 그 창 탭 줄 자리(0 부터) — 탭 이름은 겹칠 수 있어 같은 탭의 줄을 묶는 열쇠는 이것이다.
-/// - `agent_id` = 칸에 적힌 에이전트 id 그대로 · `agent` = 그 표시 이름(셸 장부 — 없으면 `None`). 둘 다
-///   `content = Agent` 일 때만.
-/// - `x` · `y` · `w` · `h` = 탭 캔버스 안 정규 좌표(0~1) — 소수 둘째 자리로 반올림.
+/// One area's row. The id fields (`window_id` · `tab` · `slot` · `agent_id`) are always filled — the caller chooses whether to put them in the answer. `tab_index` = position in that window's tab row (from 0) — tab names can repeat, so it is the key grouping one tab's rows. `agent_id` = the agent id written in the area as is · `agent` = its display name (shell roster — `None` if absent); both only when `content = Agent`. `x` · `y` · `w` · `h` = normalized coordinates inside the tab canvas (0..1), rounded to two decimals.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutRow {
     pub window: WindowLabel,
@@ -51,15 +41,13 @@ pub struct LayoutRow {
     pub h: f64,
 }
 
-/// 줄 거르기 — 빈 칸은 거르지 않는다. `window` = 그 창(label)의 줄만 · `agent` = 그 에이전트가 든 칸의 줄만(UUID 값
-/// 비교 — 철자 무관).
+/// Row filter — empty areas are not filtered out. `window` = only rows of that window (label) · `agent` = only rows of areas holding that agent (UUID value comparison — spelling-insensitive).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RowFilter {
     pub window: Option<WindowLabel>,
     pub agent: Option<Uuid>,
 }
 
-/// 모델 전체의 줄 중 `filter` 에 드는 것.
 pub fn layout_rows(mgr: &ViewManager, filter: &RowFilter) -> Vec<LayoutRow> {
     let mut rows = all_rows(mgr, |label, _| {
         filter.window.as_ref().is_none_or(|want| want == label)
@@ -75,8 +63,7 @@ pub fn layout_rows(mgr: &ViewManager, filter: &RowFilter) -> Vec<LayoutRow> {
     rows
 }
 
-/// 탭 `views` 의 줄 — 명령 답의 「바뀐 탭」 몫. 순서는 `views` 순이 아니라 모듈 머리의 순서다. 모델에 없는 탭은 줄이
-/// 없다.
+/// Rows of tabs `views` — the "changed tabs" part of a command answer; order is the module head's, not `views` order. A tab not in the model has no rows.
 pub fn rows_of_views(mgr: &ViewManager, views: &[ViewId]) -> Vec<LayoutRow> {
     all_rows(mgr, |_, view| views.contains(&view))
 }
@@ -145,7 +132,7 @@ mod tests {
     use crate::layout::types::SplitDir;
     use crate::layout::MAIN_WINDOW_LABEL;
 
-    // 모르는 내용을 쥔 칸은 메모리 내용(`Empty`)이 아니라 `Unknown` 이다 — 곁표 원문은 복원만 세운다(crate 안 문).
+    // An area holding unknown content is `Unknown`, not in-memory content (`Empty`) — the raw text of a side table only stands for restore (in-crate door).
     #[test]
     fn a_slot_holding_foreign_content_is_unknown_and_its_neighbour_keeps_its_kind() {
         let mut mgr = ViewManager::new();

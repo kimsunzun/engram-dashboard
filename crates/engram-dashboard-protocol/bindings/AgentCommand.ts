@@ -12,15 +12,15 @@ export type AgentCommand = { "Spawn": { profile_id: string, request_id: RequestI
  */
 deliver_notices?: boolean, } } | { "ListProfiles": { request_id: RequestId, } } | { "CreateProfile": { name: string, cwd: string, extra_args: Array<string>, env: Array<[string, string]>, auto_restore: boolean, 
 /**
- * `#[serde(default)]` 라 이 필드 없는 옛 프론트/wire 는 Terminal 로 흡수(기존 동작 불변,
- * PROTOCOL_VERSION 유지 — sibling OutputCaps.structured 와 같은 additive·tolerant 접근).
- * ★두 백엔드가 다 읽는다★ — claude 는 PTY/headless NDJSON 을, codex 는 대화형 TUI/상주 JSON
- * 서버(`codex app-server`)를 가른다. codex 가 이 값을 읽게 된 것이
- * [`crate::PROTOCOL_VERSION`] v5 의 사유다 — 그 값을 버리던 데몬은 「코덱스 JSON」 라벨 뒤에서
- * 대화형 TUI 를 띄우면서 역직렬화는 성공시키므로, 그 어긋남을 잡는 것이 버전 게이트뿐이다.
+ * `#[serde(default)]`, so an old frontend/wire without this field is absorbed as Terminal (existing behavior unchanged,
+ * PROTOCOL_VERSION kept — the same additive·tolerant approach as sibling OutputCaps.structured).
+ * ★Both backends read it★ — claude splits PTY/headless NDJSON, codex splits interactive TUI/resident JSON
+ * server (`codex app-server`). codex coming to read this value is
+ * the reason for [`crate::PROTOCOL_VERSION`] v5 — a daemon that discarded the value would launch an interactive TUI behind the 「Codex JSON」 label
+ * while still deserializing successfully, so the version gate is the only thing that catches that mismatch.
  */
 output_format: AgentOutputFormat, 
 /**
- * 부재 = 오류(형제 `SpawnByCwd.backend` 와 같은 계약 — `AgentBackendKind` 참조).
+ * Absent = error (the same contract as sibling `SpawnByCwd.backend` — see `AgentBackendKind`).
  */
 backend: AgentBackendKind | null, request_id: RequestId, } } | { "DeleteProfile": { profile_id: string, request_id: RequestId, } } | { "SpawnProfile": { profile_id: string, resume: boolean, request_id: RequestId, } } | { "SetProfileAutoRestore": { profile_id: string, auto_restore: boolean, request_id: RequestId, } } | { "RenameProfile": { profile_id: string, name: string | null, request_id: RequestId, } } | { "ReparentProfile": { child_id: string, parent_id: string | null, request_id: RequestId, } } | { "GetSnapshot": { agent_id: string, request_id: RequestId, } } | { "SetEnvelopeFormat": { format: EnvelopeFormat, request_id: RequestId, } } | { "RegisterCommands": { owner: string, decls: Array<{ name: string, help: string, agent_args?: Array<string>, deadline?: "Ordinary" | "Launch" }>, catalog_version: number, request_id: RequestId, } } | { "UpdateCommands": { owner: string, added: Array<{ name: string, help: string, agent_args?: Array<string>, deadline?: "Ordinary" | "Launch" }>, removed: Array<string>, request_id: RequestId, } } | { "ListCommands": { request_id: RequestId, } } | { "Command": { envelope: { name: string, request_id: string, owner: string, proto_ver: number, args: unknown }, } } | { "CommandOutcome": { reply: { request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }, } } | { "ListQueuedInputs": { agent_id: string, request_id: RequestId, } } | { "CancelQueuedInput": { agent_id: string, input_id: string, request_id: RequestId, } } | { "UsageSubscribe": { vendors: Array<AgentBackendKind>, } } | { "RefreshUsageLimits": { vendor: AgentBackendKind, request_id: RequestId, } };

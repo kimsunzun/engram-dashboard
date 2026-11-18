@@ -1,12 +1,6 @@
 // tag gate regression test (FIX-1, S15/ADR-0045).
-//
-// Background: the subscribeOutput stream delivers tag0 (terminal raw bytes)/tag1 (StructuredEvent JSON) to every subscriber in one seq space.
-//   RichSlot ignores tag0, but if a slot that consumes tag0 (TerminalSlot=xterm write / DomSlot=<pre> append) has no symmetric gate,
-//   tag1 JSON bytes leak straight through and pollute the screen.
-//
-// Strategy: mock subscribeOutput to capture the onChunk callback, inject tag0/tag1 chunks directly after mount, and observe whether they are
-//   reflected in xterm.write (TerminalSlot) / <pre> text (DomSlot). xterm · transport are stubbed with the same pattern as
-//   ViewLayoutRenderer.test.tsx.
+// Why: the subscribeOutput stream delivers tag0 (terminal raw bytes) / tag1 (StructuredEvent JSON) to every subscriber in one seq space. RichSlot ignores tag0, but a tag0 consumer (TerminalSlot = xterm write / DomSlot = <pre> append) without a symmetric gate would leak tag1 JSON bytes straight through and pollute the screen.
+// Strategy: mock subscribeOutput to capture onChunk, inject tag0/tag1 chunks after mount, and observe xterm.write (TerminalSlot) / <pre> text (DomSlot); xterm · transport are stubbed as in ViewLayoutRenderer.test.tsx.
 
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,17 +8,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FRAME_TAG_STRUCTURED_EVENT, FRAME_TAG_TERMINAL_BYTES } from '../../api/wsFrame'
 import type { OutputChunk } from '../../api/agentClient'
 
-// jsdom does not provide ResizeObserver — TerminalSlot does new ResizeObserver at mount, so lay down a
-// no-op stub (fit/resize are not this test's concern — its concern is only the tag gate).
+// jsdom has no ResizeObserver — a no-op stub (TerminalSlot creates one at mount; fit/resize are not this test's concern, only the tag gate).
 globalThis.ResizeObserver = class {
   observe() {}
   unobserve() {}
   disconnect() {}
 } as unknown as typeof ResizeObserver
 
-// jsdom has no IntersectionObserver either — TerminalSlot does new IntersectionObserver at mount for WebGL visibility linkage (ADR-0056).
-// A no-op stub that never fires the callback → WebGL is not attached and only the data path (tag gate) is checked.
-// The WebGL lifecycle itself is verified separately in TerminalSlot.test.tsx.
+// jsdom has no IntersectionObserver either (TerminalSlot creates one at mount for WebGL visibility linkage, ADR-0056): a no-op stub that never fires, so WebGL is not attached and only the data path (tag gate) is checked; the WebGL lifecycle is in TerminalSlot.test.tsx.
 globalThis.IntersectionObserver = class {
   observe() {}
   unobserve() {}
@@ -35,7 +26,6 @@ globalThis.IntersectionObserver = class {
 } as unknown as typeof IntersectionObserver
 
 // ── holder capturing the subscribeOutput callback ─────────────────────────────────────────────
-// Made with vi.hoisted so the mock factory and the test body share the same reference.
 const captured = vi.hoisted(() => ({ onChunk: null as ((c: OutputChunk) => void) | null }))
 
 vi.mock('../../api/clientFactory', () => ({
@@ -65,8 +55,7 @@ vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: { agents: unknown[] }) => unknown) => selector(agentStoreState),
 }))
 
-// ── xterm stub — observe write calls (TerminalSlot). Because a Terminal instance is created fresh each time,
-//    expose the write mock through a static holder so the test checks the call arguments. ──
+// ── xterm stub — observe write calls (TerminalSlot). The Terminal instance is created fresh each time, so the write mock is exposed through a static holder. ──
 const xtermWrite = vi.hoisted(() => vi.fn())
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -118,8 +107,8 @@ afterEach(() => {
   cleanup()
 })
 
-describe('TerminalSlot — tag 게이트(FIX-1)', () => {
-  it('tag0(터미널 바이트) chunk 는 xterm 에 write 한다(회귀)', async () => {
+describe('TerminalSlot — tag gate (FIX-1)', () => {
+  it('a chunk of tag0 (terminal bytes) is written to xterm (regression)', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
     expect(captured.onChunk).toBeTruthy()
@@ -129,7 +118,7 @@ describe('TerminalSlot — tag 게이트(FIX-1)', () => {
     expect(calls).toContain('hello')
   })
 
-  it('tag1(StructuredEvent JSON) chunk 는 무시한다 — xterm 에 write 하지 않는다(오염 방지)', async () => {
+  it('a chunk of tag1 (StructuredEvent JSON) is ignored — not written to xterm (prevents pollution)', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
@@ -137,7 +126,7 @@ describe('TerminalSlot — tag 게이트(FIX-1)', () => {
     expect(xtermWrite).not.toHaveBeenCalled()
   })
 
-  it('tag1 을 건너뛰어도 seq dedup 은 정합 — 이어지는 tag0 은 정상 write(한 seq 공간)', async () => {
+  it('even skipping tag1 the seq dedup is consistent — the following tag0 is written normally (one seq space)', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
@@ -148,8 +137,8 @@ describe('TerminalSlot — tag 게이트(FIX-1)', () => {
   })
 })
 
-describe('DomSlot — tag 게이트(FIX-1)', () => {
-  it('tag0(터미널 바이트) chunk 는 <pre> 관측 텍스트에 반영한다(회귀)', async () => {
+describe('DomSlot — tag gate (FIX-1)', () => {
+  it('a chunk of tag0 (terminal bytes) is reflected in the <pre> observation text', async () => {
     render(<DomSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
     expect(captured.onChunk).toBeTruthy()
@@ -159,7 +148,7 @@ describe('DomSlot — tag 게이트(FIX-1)', () => {
     expect(pre).toBeTruthy()
   })
 
-  it('tag1(StructuredEvent JSON) chunk 는 무시한다 — 관측 텍스트를 오염시키지 않는다', async () => {
+  it('a chunk of tag1 (StructuredEvent JSON) is ignored — does not corrupt the observation text', async () => {
     render(<DomSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 

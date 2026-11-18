@@ -1,7 +1,6 @@
-//! ADR-0086 스텝 1 — manager-level 제어 채널 생명주기 통합 테스트(FIX 10).
+//! ADR-0086 step 1 — manager-level control channel lifecycle integration test (FIX 10).
 //!
-//! 실제 `DaemonControlChannel` + `AgentManager`(new_with_control)를 배선해, unit·mcp_control.rs 가 못
-//! 보는 spawn/kill 경로를 단언한다.
+//! Wires the real `DaemonControlChannel` + `AgentManager` (new_with_control) to assert the spawn/kill paths that unit tests and mcp_control.rs cannot see.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,11 +15,9 @@ use engram_dashboard_agent::types::{
 };
 use engram_dashboard_base::testing::wait_until;
 
-/// MCP 가능 스폰이 넘기는 축 셋 — 이 파일들은 채널 물리(토큰·config 파일)만 재므로 운영이 그 값을
-/// 어디서 읽는지는 관심사 밖이다(그 판정을 재는 자리 = `mail_gate.rs`).
+/// The three axes an MCP-capable spawn passes — these files measure only the channel physics (token · config file); where production reads those values from is measured by `mail_gate.rs`.
 ///
-/// ★이 파일이 재는 config 파일은 **파일 축이 켜진 행**의 것이다★ — 그 칸을 false 로 바꾸면 여기
-///   단언들이 무너진다. 그 조합을 재는 자리는 데몬 `control/mod.rs` 의 그 시험이다(ADR-0209).
+/// ★The config file measured here is that of the row with the file axis on★ — set that field to false and the assertions collapse. That combination is measured by the test in the daemon's `control/mod.rs` (ADR-0209).
 fn mcp_needs() -> ControlChannelNeeds {
     ControlChannelNeeds {
         accepts_mcp_config: true,
@@ -42,13 +39,10 @@ impl StatusSink for NoopSink {
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
 }
 
-/// ★중계 수거기를 **프로세스 수명에** 묶는 자리★
+/// ★Ties the relay reaper to the process lifetime★
 ///
-/// 떨어뜨리면 수거기가 나가는 길에 자리 표를 비우고 **닫아**(`CommandDeliveries::drain`) 그 서버의 그 뒤
-/// 중계가 전부 「종료 중」으로 반려된다 — 아래 두 하네스에서 지역 변수로 묶으면 함수를 빠져나오는 순간
-/// 그 일이 일어난다(이 파일이 그 상태였고, 여기 테스트가 자리 표를 안 거치는 것만 불러 초록이었다).
-/// ★반환 튜플에 축을 하나 더 얹지 않는 이유★: 어느 테스트도 그 축을 읽지 않고, 이 하네스가 세우는 서버는
-/// 테스트 종료 = 프로세스 종료로 회수된다. 형제 파일(`control_send.rs`)이 같은 형태를 쓴다.
+/// If dropped, the reaper empties and closes the seat table (`CommandDeliveries::drain`) and every later relay is bounced as 「shutting down」 — tied to a local of the two harnesses below, that happens when the function returns (this file was green in that state because its tests skipped the seat table).
+/// ★No extra axis in the return tuple★: no test reads it, and the server is reclaimed at test end = process end. The sibling `control_send.rs` has the same shape.
 static RELAY_SWEEPERS: std::sync::Mutex<
     Vec<engram_dashboard_daemon::command_delivery::BusSweeper>,
 > = std::sync::Mutex::new(Vec::new());
@@ -69,8 +63,7 @@ async fn make_manager_with_control(
     engram_dashboard_daemon::control::mcp_server::McpServerHandle,
 ) {
     let registry = Arc::new(ControlRegistry::new());
-    // ★수거기를 들고 있어야 한다★ — 지역 변수로 묶으면 이 함수를 나가는 순간 자리 표가 닫힌다
-    //   ([`hold_for_the_process`] 가 그 사유를 적는다).
+    // ★Hold the reaper★ — tied to a local, the seat table closes when this function returns ([`hold_for_the_process`]).
     let (relay_bus, relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     hold_for_the_process(relay_sweeper);
@@ -78,7 +71,7 @@ async fn make_manager_with_control(
         registry.clone(),
         Arc::new(ManagerSlot::new()),
         Arc::new(MessagingSlot::new()),
-        // 이 파일은 제어 동사를 부르지 않는다 — 명령 표를 비우면 그 라우트만 503 이 된다.
+        // No control verbs are called here — an empty command table only makes that route 503.
         Arc::new(CommandTableSlot::new()),
         relay_bus,
     )
@@ -90,7 +83,7 @@ async fn make_manager_with_control(
         registry.clone(),
         handle.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
-        None, // send_exe: 이 파일의 테스트는 CLI 입구를 쓰지 않는다.
+        None, // send_exe: the tests in this file do not use the CLI entry.
     ));
 
     let (manager, registry, data_dir, handle) =
@@ -108,8 +101,7 @@ async fn make_manager_with_control_channel(
     engram_dashboard_daemon::control::mcp_server::McpServerHandle,
 ) {
     let registry = Arc::new(ControlRegistry::new());
-    // ★수거기를 들고 있어야 한다★ — 지역 변수로 묶으면 이 함수를 나가는 순간 자리 표가 닫힌다
-    //   ([`hold_for_the_process`] 가 그 사유를 적는다).
+    // ★Hold the reaper★ — tied to a local, the seat table closes when this function returns ([`hold_for_the_process`]).
     let (relay_bus, relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     hold_for_the_process(relay_sweeper);
@@ -117,7 +109,7 @@ async fn make_manager_with_control_channel(
         registry.clone(),
         Arc::new(ManagerSlot::new()),
         Arc::new(MessagingSlot::new()),
-        // 이 파일은 제어 동사를 부르지 않는다 — 명령 표를 비우면 그 라우트만 503 이 된다.
+        // No control verbs are called here — an empty command table only makes that route 503.
         Arc::new(CommandTableSlot::new()),
         relay_bus,
     )
@@ -156,9 +148,8 @@ fn make_manager_with_injected(
     (manager, registry, data_dir, handle)
 }
 
-// ── round-2 F3: claude(제어 채널 소비) spawn ─────────────────────────────────────────
-// ★claude 바이너리 불요★: provision Err 가 `?` 로 조기 반환하므로 실제 프로세스 spawn 에 닿지 않는다 —
-//   is_err() 가 "claude 미설치" 로 우연히 초록이 되는 경로가 없다.
+// ── round-2 F3: claude (consumes the control channel) spawn ──
+// ★No claude binary needed★: provision Err returns early via `?` before the real process spawn — is_err() cannot turn green by accident as "claude not installed".
 #[tokio::test]
 async fn claude_spawn_fails_closed_when_provision_errors() {
     use engram_dashboard_agent::types::{AgentId as CoreAgentId, ControlEndpoint, ProvisionError};
@@ -192,18 +183,18 @@ async fn claude_spawn_fails_closed_when_provision_errors() {
     let res = manager.spawn_agent(&profile, SpawnMode::Fresh);
     assert!(
         res.is_err(),
-        "claude 는 제어 채널을 소비하므로 provision Err 에 fail-closed(스폰 중단)"
+        "claude consumes the control channel, so it fails closed on provision Err (spawn aborted)"
     );
     assert!(
         manager.list_agents().is_empty(),
-        "fail-closed spawn 은 세션을 등록하지 않아야"
+        "a fail-closed spawn must not register a session"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── round-2 F3: shell(제어 채널 미소비) spawn ────────────────────────────────────────
+// ── round-2 F3: shell (does not consume the control channel) spawn ────────────────────────────────────────
 #[tokio::test]
 async fn shell_spawn_succeeds_with_failing_control_channel() {
     use engram_dashboard_agent::types::{AgentId as CoreAgentId, ControlEndpoint, ProvisionError};
@@ -236,17 +227,17 @@ async fn shell_spawn_succeeds_with_failing_control_channel() {
 
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("shell 스폰은 provision 실패와 무관하게 성공해야(F3)")
+        .expect("a shell spawn must succeed regardless of provision failure (F3)")
         .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        .expect("this call really launches (not a duplicate request)");
     assert!(
         wait_until(Duration::from_secs(3), || manager.list_agents().len() == 1),
-        "셸 spawn 직후 세션 존재"
+        "session exists right after the shell spawn"
     );
     assert_eq!(
         registry.live_token_count(),
         0,
-        "셸은 provision 을 안 부르므로 registry 미접촉(산 토큰 0)"
+        "a shell does not call provision, so the registry is untouched (0 live tokens)"
     );
 
     manager.kill_agent(info.id).expect("kill ok");
@@ -256,10 +247,8 @@ async fn shell_spawn_succeeds_with_failing_control_channel() {
     handle.shutdown().await;
 }
 
-// ── FIX 3: ProvisionGuard 회수 자원 ──────────────────────────────────────────────────
-// ★drop 경로 자체는 여기서 검증되지 않는다★: cmd/c claude(또는 잘못된 cwd)로도 Windows ConPTY spawn 이
-//   실패하지 않아 "transport open 실패 → guard drop revoke" 를 통합 경로에서 결정적으로 재현할 수 없다.
-//   여기선 guard 가 drop 시 부르는 것과 **같은** revoke 가 실존 자원을 회수하는지만 본다.
+// ── FIX 3: resources ProvisionGuard reclaims ──
+// ★The drop path itself is not verified here★: even with cmd/c claude (or a wrong cwd) the Windows ConPTY spawn does not fail, so "transport open failed → guard drop revoke" cannot be reproduced deterministically on the integration path. This only checks that the same revoke the guard calls on drop reclaims the real resources.
 #[tokio::test]
 async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
     use engram_dashboard_agent::types::ControlChannel;
@@ -278,34 +267,35 @@ async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
         .provision(id, 0, mcp_needs())
         .expect("provision ok")
         .expect("endpoint");
-    assert_eq!(registry.live_token_count(), 1, "provision 후 산 토큰 1개");
+    assert_eq!(
+        registry.live_token_count(),
+        1,
+        "one live token after provision"
+    );
     let cfg = ep
         .config_path
         .clone()
         .expect("MCP-capable → config_path Some");
-    assert!(cfg.exists(), "provision 이 실제 config 파일을 씀");
+    assert!(cfg.exists(), "provision writes a real config file");
 
     channel.revoke(id, 0);
     assert_eq!(
         registry.live_token_count(),
         0,
-        "revoke 후 산 토큰 0(FIX 3 가 회수하는 자원 = 실 토큰)"
+        "0 live tokens after revoke (the resource FIX 3 reclaims = the real token)"
     );
     assert!(
         !cfg.exists(),
-        "revoke 후 config 파일 삭제(FIX 3 가 회수하는 자원 = 실 파일)"
+        "config file deleted after revoke (the resource FIX 3 reclaims = the real file)"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── FIX 4: revoke-before-kill ────────────────────────────────────────────────────────
-// ★backend 무관★: kill_agent 는 세션 backend 와 무관하게 revoke 를 부르므로, 셸 세션으로 spawn 하되
-//   registry 에 그 세션의 (id, 화신 표식) 토큰을 직접 심어 "provision 된 claude" 를 모사한다.
-//   ★표식은 spawn 이 돌려준 값을 쓴다 — 상수로 박지 말 것★: 표식은 화신마다 뽑은 난수라 첫 spawn 도 0 이
-//   아니고, 어긋난 값으로 심으면 revoke 의 epoch-guard 에 걸려 토큰이 안 지워진다(= 이 테스트가 재는
-//   revoke-before-kill 이 아니라 심는 쪽이 틀린 것이다).
+// ── FIX 4: revoke-before-kill ──
+// ★Backend-independent★: kill_agent calls revoke whatever the session backend, so spawn with a shell session and plant that session's (id, incarnation marker) token directly in the registry to mimic "a provisioned claude".
+//   ★Use the marker spawn returned — do not hardcode a constant★: the marker is a random number per incarnation (not 0 even for the first spawn); a mismatched planted value is caught by revoke's epoch-guard and the token is not deleted (the planting side would be wrong, not the revoke-before-kill under test).
 #[tokio::test]
 async fn kill_revokes_token_before_pump_join() {
     let (manager, registry, data_dir, handle) = make_manager_with_control("kill-revoke").await;
@@ -324,10 +314,10 @@ async fn kill_revokes_token_before_pump_join() {
         .spawn_agent(&profile, SpawnMode::Fresh)
         .expect("spawn ok")
         .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        .expect("this call really launches (not a duplicate request)");
     assert!(
         wait_until(Duration::from_secs(3), || manager.list_agents().len() == 1),
-        "spawn 직후 세션 존재"
+        "session exists right after spawn"
     );
     registry.issue(
         info.id,
@@ -335,20 +325,20 @@ async fn kill_revokes_token_before_pump_join() {
         "simulated-live-token".to_string(),
         true,
     );
-    assert_eq!(registry.live_token_count(), 1, "심은 산 토큰 1개");
+    assert_eq!(registry.live_token_count(), 1, "one planted live token");
 
     manager.kill_agent(info.id).expect("kill ok");
     assert_eq!(
         registry.live_token_count(),
         0,
-        "kill_agent 반환 직후 토큰이 이미 폐기(revoke-before-kill — reaper backstop 대기 불요)"
+        "the token is already revoked right after kill_agent returns (revoke-before-kill — no need to wait for the reaper backstop)"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
 
-// ── FIX 5: 부팅 스윕 ─────────────────────────────────────────────────────────────────
+// ── FIX 5: boot sweep ─────────────────────────────────────────────────────────────────
 #[test]
 fn boot_sweep_removes_stale_configs() {
     let data_dir = std::env::temp_dir().join(format!("engram-mcp-sweep-{}", AgentId::new_v4()));
@@ -359,14 +349,14 @@ fn boot_sweep_removes_stale_configs() {
     let f2 = sub.join(format!("{}-3.json", AgentId::new_v4()));
     std::fs::write(&f1, "{\"stale\":1}").unwrap();
     std::fs::write(&f2, "{\"stale\":2}").unwrap();
-    assert!(f1.exists() && f2.exists(), "사전 stale 파일 존재");
+    assert!(f1.exists() && f2.exists(), "stale files exist beforehand");
 
     mcp_config::sweep_stale_configs(&mcp_config::McpDir::new(&sub));
-    assert!(!f1.exists(), "스윕 후 stale 파일 1 삭제");
-    assert!(!f2.exists(), "스윕 후 stale 파일 2 삭제");
+    assert!(!f1.exists(), "stale file 1 deleted after the sweep");
+    assert!(!f2.exists(), "stale file 2 deleted after the sweep");
 
     let fresh = std::env::temp_dir().join(format!("engram-mcp-sweep-none-{}", AgentId::new_v4()));
-    mcp_config::sweep_stale_configs(&mcp_config::McpDir::new(fresh.join("mcp-config"))); // panic 없이 통과해야.
+    mcp_config::sweep_stale_configs(&mcp_config::McpDir::new(fresh.join("mcp-config"))); // must pass without panic.
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }

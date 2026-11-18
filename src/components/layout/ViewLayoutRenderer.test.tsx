@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// ── Tauri / transport 계층 stub ────────────────────────────────────────────────
+// ── Tauri / transport layer stubs ────────────────────────────────────────────────
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async () => undefined),
   Channel: class {
@@ -13,9 +13,9 @@ vi.mock('@tauri-apps/api/event', () => ({
 }))
 
 // ── agentClient / clientFactory stub ─────────────────────────────────────────
-// TerminalSlot 이 내부에서 agentClient 를 import 하지만 이번 테스트에선 TerminalSlot 자체를
-// mock 하므로 실제 호출은 일어나지 않는다. clientFactory 도 Tauri invoke 를 사용하므로 stub.
-// killAgent 도 stub — SlotContextMenu 의 '에이전트 종료'(kill) 경로가 부른다.
+// TerminalSlot imports agentClient internally, but this test mocks TerminalSlot itself,
+// so no real call happens. clientFactory also uses Tauri invoke, so it is stubbed.
+// killAgent is stubbed too — the SlotContextMenu 'kill agent' path calls it.
 const clientMock = vi.hoisted(() => ({
   spawnAgent: vi.fn(async () => ({ id: 'spawned-agent-id' })),
   killAgent: vi.fn(async () => undefined),
@@ -28,7 +28,7 @@ vi.mock('../../api/clientFactory', () => ({
     spawnAgent: (...args: unknown[]) => clientMock.spawnAgent(...(args as [])),
     killAgent: (...args: unknown[]) => clientMock.killAgent(...(args as [])),
     connectionState: 'down',
-    // 연결 상태 표면 — 슬롯이 부재 막 판정에 읽는다(등록 즉시 1회 통지 + disposer 반환).
+    // Connection-state surface — the slot reads it for the absence-veil verdict (notifies once on registration + returns a disposer).
     onConnectionStateChange: (cb: (s: string) => void) => {
       cb('down')
       return () => {}
@@ -37,11 +37,11 @@ vi.mock('../../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
-// ── agentStore stub — ViewLayoutRenderer 가 그리는 LayoutLeaf 가 `useAgentStore(s => s.agents)` 로 caps 를 조회한다. ──
-// FIX 1(ADR-0041): 렌더러 분기가 store 의 AgentInfo 유무·caps 에 의존하므로 테스트가 agents 를 제어할 수
-// 있어야 한다. vi.hoisted 로 가변 holder 를 만들어 selector 에 흘린다(TerminalSlot/RichSlot 은 stub 이라
-// 자기 useAgentStore 호출은 무해). afterEach 에서 초기화.
-// ADR-0148: 세 갈래 게이트(명부 미수신 / 프로필 생존 / 프로필 부재)가 agentsLoaded·profiles 를 함께 본다.
+// ── agentStore stub — the LayoutLeaf drawn by ViewLayoutRenderer looks up caps via `useAgentStore(s => s.agents)`. ──
+// FIX 1 (ADR-0041): the renderer branch depends on the store's AgentInfo presence and caps, so the test must control agents.
+// A mutable holder is made with vi.hoisted and fed to the selector (TerminalSlot/RichSlot are stubs so
+// their own useAgentStore calls are harmless). Reset in afterEach.
+// ADR-0148: the three-way gate (roster not received / profile alive / profile absent) looks at agentsLoaded and profiles together.
 const agentStoreState = vi.hoisted(() => ({
   agents: [] as unknown[],
   agentsLoaded: false,
@@ -55,17 +55,17 @@ vi.mock('../../store/agentStore', () => ({
   ),
 }))
 
-// ── 네이티브 폴더 다이얼로그 stub(ADR-0064) — slot.createAgentHere / agentlist.createAgent 가
-//    @tauri-apps/plugin-dialog open 을 부른다. 테스트마다 반환(경로/null)을 갈아끼운다. ──
+// ── Native folder dialog stub (ADR-0064) — slot.createAgentHere / agentlist.createAgent call
+//    @tauri-apps/plugin-dialog open. The return (path/null) is swapped per test. ──
 const dialogMock = vi.hoisted(() => ({ open: vi.fn(async () => null as string | null) }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: (...args: unknown[]) => dialogMock.open(...(args as [])),
 }))
 
-// ── 슬롯 stub 3종 — 실 구독/xterm 없이 마운트 여부·전달된 prop 만 확인 ─────────────────
-// ★넘기는 prop 전량을 그린다★: 상위가 무엇을 내려보내는지가 이 렌더러의 계약이라, prop 을 그리지 않으면
-//   드리프트가 DOM 에서 안 보인다. ★회차(epoch)를 여기 되살리면 그 값이 곧 재마운트 트리거가 되고,
-//   종료로 명부에서 수거되는 순간 값이 떨어지며 보존하려던 대화가 지워진다★(아래 회귀 케이스).
+// ── Three slot stubs — only check mount presence and the props passed, with no real subscription/xterm ─────────────────
+// ★Draw every prop passed★: what the parent passes down is this renderer's contract, so if props are not drawn,
+//   drift is invisible in the DOM. ★If the epoch is revived here that value becomes a remount trigger itself,
+//   and the moment the roster reaps on exit the value drops and the conversation being preserved is erased★ (regression case below).
 vi.mock('../slot/TerminalSlot', () => ({
   default: ({ viewId, agentId }: { viewId: string; agentId: string }) => (
     <div data-testid="terminal-slot" data-agent-id={agentId} data-view-id={viewId} />
@@ -84,7 +84,7 @@ vi.mock('../slot/DomSlot', () => ({
   ),
 }))
 
-// ── UsageSlot stub — usage variant 마운트 여부와 내려보낸 켜고 끔·슬롯 좌표만 확인(화면은 UsageSlot.test 담당) ──
+// ── UsageSlot stub — only checks the usage variant mounts and the toggles and slot coordinates passed down (the screen is UsageSlot.test's job) ──
 vi.mock('../slot/UsageSlot', () => ({
   default: ({
     content,
@@ -104,12 +104,12 @@ vi.mock('../slot/UsageSlot', () => ({
     />
   ),
 }))
-// ── AgentList stub(ADR-0060/0062) — agent_list variant 마운트 여부만 확인(내부 배선은 AgentList.test 담당) ──
+// ── AgentList stub (ADR-0060/0062) — only checks the agent_list variant mounts (internal wiring is AgentList.test's job) ──
 vi.mock('../agent/AgentList', () => ({
   default: () => <div data-testid="agent-list" />,
 }))
 
-// ── @xterm stub — TerminalSlot 이 실제로 렌더되지 않지만 import 해소 방어용 ────
+// ── @xterm stub — TerminalSlot is not actually rendered, but this guards import resolution ────
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     loadAddon = vi.fn()
@@ -128,13 +128,13 @@ vi.mock('@xterm/addon-fit', () => ({
   },
 }))
 
-// ── 테스트 대상 ────────────────────────────────────────────────────────────────
-// ADR-0064: 통합 메뉴는 buildSlotMenu(content.type) 로 command 참조를 resolve 한다 → command·기여가
-//   레지스트리에 등록돼 있어야 한다. 매니페스트를 side-effect import 해 부팅과 동일하게 등록한다.
+// ── Subject under test ────────────────────────────────────────────────────────────────
+// ADR-0064: the unified menu resolves command references with buildSlotMenu(content.type) → the commands and contributions must be
+//   registered in the registry. The manifest is side-effect imported to register the same as boot.
 import '../../commands/contributions'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import { setLanguage } from '../../i18n'
-// 메뉴 배치의 앵커 간격(ADR-0143 결정 4)은 SlotContextMenu 소관 — 여기선 좌표 기대값을 그 상수에서 파생시킨다.
+// The menu placement anchor gap (ADR-0143 decision 4) belongs to SlotContextMenu — here the coordinate expectations derive from that constant.
 import { ANCHOR_GAP } from '../slot/SlotContextMenu'
 import type { LayoutNode, SlotContent, SplitDir } from '../../api/layoutTypes'
 import type { AgentInfo, Capabilities } from '../../api/types'
@@ -142,7 +142,7 @@ import { useViewStore } from '../../store/viewStore'
 import { rectsFor } from './testing/rects'
 import { __resetUiMetricsReportForTest } from './uiMetricsReport'
 
-// 잎이 마운트되면 칸 틀 지표를 웹뷰당 한 번 보낸다(모듈 상태) — 테스트 순서가 그 보고 여부를 가르지 않게 매번 비운다.
+// When a leaf mounts it sends the area frame metrics once per webview (module state) — cleared every time so test order does not decide whether it was reported.
 beforeEach(() => {
   __resetUiMetricsReportForTest()
 })
@@ -156,7 +156,7 @@ afterEach(() => {
   agentStoreState.profilesLoaded = false
 })
 
-// ── 헬퍼 ──────────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────────
 function slotNode(id: string, agentId: string | null): LayoutNode {
   return {
     type: 'slot',
@@ -170,43 +170,43 @@ function splitNode(id: string, a: LayoutNode, b: LayoutNode, ratio = 0.5, dir: S
 }
 
 /**
- * 빈 슬롯 플레이스홀더 = `+` 아이콘(ADR-0141 로 옛 `Slot <id8>` / `— empty —` 텍스트를 대체).
- * ADR-0143 로 버튼이 아니라 순수 그림이라 role·접근성 이름이 없다 — 칸 테두리 요소 직속 svg 가 유일한 표면이다.
- * ADR-0227: 칸은 틀(`[data-slot-id]` — 위치·이벤트)과 그 안의 테두리 요소(`[data-slot-border]` — 테두리·정렬·콘텐츠)로
- *   갈렸다. 틀 직속을 찾으면 늘 빈 배열이라 「아이콘 없음」 단언이 헛되이 통과한다.
+ * Empty-slot placeholder = a `+` icon (ADR-0141 replaced the old `Slot <id8>` / `— empty —` text).
+ * Since ADR-0143 it is a pure picture, not a button, so it has no role or accessible name — the svg directly under the area border element is the only surface.
+ * ADR-0227: an area is split into a frame (`[data-slot-id]` — position·events) and the border element inside it (`[data-slot-border]` — border·alignment·content).
+ *   Looking directly under the frame always gives an empty array so a 「no icon」 assertion would pass vacuously.
  */
 function emptyIcons(): HTMLElement[] {
   return Array.from(document.querySelectorAll<HTMLElement>('[data-slot-border] > svg'))
 }
 
-/** 칸 틀(`[data-slot-id]`) — 사각형 위치·클릭·우클릭이 걸린 바깥 요소. */
+/** Area frame (`[data-slot-id]`) — the outer element carrying the rectangle position, click and right-click. */
 function frameOf(slotId: string): HTMLElement {
   const el = document.querySelector<HTMLElement>(`[data-slot-id="${slotId}"]`)
-  if (el === null) throw new Error(`칸 틀 ${slotId} 가 없다`)
+  if (el === null) throw new Error(`area frame ${slotId} is missing`)
   return el
 }
 
-/** 칸 테두리 요소 — 틀의 직속 자식이어야 한다(틀 밖에 있으면 틀의 overflow:hidden 에 잘리지 않는다). */
+/** Area border element — must be a direct child of the frame (outside the frame it would not be clipped by the frame's overflow:hidden). */
 function borderOf(slotId: string): HTMLElement {
   const el = frameOf(slotId).querySelector<HTMLElement>(':scope > [data-slot-border]')
-  if (el === null) throw new Error(`칸 ${slotId} 의 테두리 요소가 틀 직속에 없다`)
+  if (el === null) throw new Error(`the border element of area ${slotId} is not directly under the frame`)
   return el
 }
 
 /**
- * 잎이 직접 그린 부재 막(`SlotUnavailableVeil`) — 테두리 요소 직속만 본다. 슬롯 컴포넌트(여기선 stub)가 제 안에 그리는
- * 막과 가르려고 직속으로 좁힌다.
+ * The absence veil the leaf draws itself (`SlotUnavailableVeil`) — looks only directly under the border element. The slot component (a stub here) draws
+ * its own veil inside itself, so it is narrowed to direct children to tell them apart.
  */
 function leafVeil(slotId: string): HTMLElement | null {
   return borderOf(slotId).querySelector<HTMLElement>(':scope > [data-slot-dead="1"]')
 }
 
-/** 틀에 실린 사각형 사용자 속성 넷(숫자). 빈 값을 0 으로 읽어 헛되이 맞지 않게, 없으면 던진다. */
+/** The four rectangle custom properties carried on the frame (numbers). Throws if missing so an empty value is not read as 0 and matches vacuously. */
 function frameRect(slotId: string): { x0: number; y0: number; x1: number; y1: number } {
   const s = frameOf(slotId).style
   const read = (name: string): number => {
     const raw = s.getPropertyValue(name)
-    if (raw.trim() === '') throw new Error(`칸 틀 ${slotId} 에 ${name} 가 없다`)
+    if (raw.trim() === '') throw new Error(`area frame ${slotId} has no ${name}`)
     return Number(raw)
   }
   return { x0: read('--x0'), y0: read('--y0'), x1: read('--x1'), y1: read('--y1') }
@@ -216,7 +216,7 @@ function contentSlotNode(id: string, content: SlotContent): LayoutNode {
   return { type: 'slot', id, content }
 }
 
-// caps 만 관건이라 나머지 필드는 최소값. structured=true → RichSlot, false → TerminalSlot 분기.
+// Only caps matter so the other fields are minimal. structured=true → RichSlot, false → TerminalSlot branch.
 function caps(structured: boolean): Capabilities {
   return {
     input: { raw: true, message: false, attachment: false },
@@ -227,7 +227,7 @@ function caps(structured: boolean): Capabilities {
   }
 }
 
-/** epoch 은 이 렌더러의 판정에 안 쓰이지만 AgentInfo 필수 필드라 채운다(값에 뜻 없음). */
+/** epoch is not used by this renderer's verdict but AgentInfo requires it, so it is filled (the value has no meaning). */
 function agentInfo(id: string, structured: boolean, epoch = 2): AgentInfo {
   return {
     id,
@@ -241,15 +241,15 @@ function agentInfo(id: string, structured: boolean, epoch = 2): AgentInfo {
   }
 }
 
-/** store 에 AgentInfo 를 seed(FIX 1: caps 도착 후에만 구체 렌더러가 마운트되므로 대부분 테스트가 필요). */
+/** Seed AgentInfo into the store (FIX 1: a concrete renderer mounts only after caps arrive, so most tests need this). */
 function seedAgents(...infos: AgentInfo[]): void {
   agentStoreState.agents = infos
 }
 
-// ── 테스트 케이스 ─────────────────────────────────────────────────────────────
+// ── Test cases ─────────────────────────────────────────────────────────────
 
-describe('ViewLayoutRenderer — slot 분기', () => {
-  it('agent_id 있는 slot(비structured caps) → TerminalSlot 이 마운트되고 agentId prop 이 전달된다', () => {
+describe('ViewLayoutRenderer — slot branch', () => {
+  it('slot with agent_id (non-structured caps) → TerminalSlot mounts and the agentId prop is passed', () => {
     const agentId = 'aaaa-bbbb-cccc-dddd'
     seedAgents(agentInfo(agentId, false))
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
@@ -258,34 +258,34 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(terminal.getAttribute('data-agent-id')).toBe(agentId)
   })
 
-  it('agent_id null slot → `+` 아이콘 플레이스홀더가 뜨고 TerminalSlot 은 없다(옛 텍스트 없음)', () => {
+  it('slot with null agent_id → the `+` icon placeholder shows and there is no TerminalSlot (no old text)', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
     expect(screen.queryByTestId('terminal-slot')).toBeNull()
     expect(emptyIcons()).toHaveLength(1)
-    // 옛 플레이스홀더 텍스트 회귀 방어(ADR-0141).
+    // Guards against a regression of the old placeholder text (ADR-0141).
     expect(screen.queryByText(/^Slot /)).toBeNull()
     expect(screen.queryByText('— empty —')).toBeNull()
   })
 
-  it('focusedSlotId == node.id → 포커스 링 오버레이(inset box-shadow, accent 40%)가 컨텐츠 위에 뜬다', () => {
+  it('focusedSlotId == node.id → the focus-ring overlay (inset box-shadow, accent 40%) shows above the content', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId="s1" />)
     const border = borderOf('s1')
-    // ADR-0066(focus-ring): 링은 테두리가 아니라 컨텐츠 *위* absolute 오버레이로 그린다(overflow:hidden
-    //   슬롯에서 100% 채운 자식이 inset box-shadow 를 덮던 버그 수정). 앵커는 테두리 요소다(ADR-0227).
+    // ADR-0066 (focus-ring): the ring is drawn as an absolute overlay *above* the content, not as the border (fixes the bug where a child filling 100% of an
+    //   overflow:hidden slot covered the inset box-shadow). The anchor is the border element (ADR-0227).
     const overlay = [...border.querySelectorAll('div')].find(d => d.style.boxShadow.includes('accent'))
     expect(overlay).toBeTruthy()
     expect(overlay!.parentElement).toBe(border)
-    // ★강도를 실제로 잰다★: 예전 단언은 `includes('accent')` 뿐이라 65%로 되돌려도 통과했다 — 값을 바꾸는
-    //   회귀를 못 잡으면서 제목만 강도를 광고하는 테스트였다(리뷰 지적 2026-08-23). 값 = ADR-0168 결정 1.
+    // ★Actually measure the strength★: the old assertion was only `includes('accent')` so it passed even if reverted to 65% — a test that
+    //   could not catch a value-changing regression while only its title advertised the strength (review finding 2026-08-23). Value = ADR-0168 decision 1.
     expect(overlay!.style.boxShadow).toContain('40%')
     expect(overlay!.style.pointerEvents).toBe('none')
     expect(overlay!.style.position).toBe('absolute')
-    // 테두리 색은 포커스로 바뀌지 않는다 — 링은 오버레이 몫이다.
+    // The border color does not change with focus — the ring is the overlay's job.
     expect(border.style.borderColor).toBe('var(--border)')
     expect(border.style.borderColor).not.toContain('accent')
   })
 
-  it('focusedSlotId != node.id → 비포커스: 링 오버레이 없음', () => {
+  it('focusedSlotId != node.id → not focused: no ring overlay', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId="s-other" />)
     const border = borderOf('s1')
     expect(border.style.borderColor).toBe('var(--border)')
@@ -294,18 +294,18 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(overlay).toBeUndefined()
   })
 
-  // ── ADR-0060/0062: agent_list variant → 실 렌더러 마운트(hasContent=true) ──
-  it('content.type=agent_list slot(Slice C) → AgentList 가 마운트된다(hasContent=true)', () => {
+  // ── ADR-0060/0062: agent_list variant → real renderer mounts (hasContent=true) ──
+  it('content.type=agent_list slot (Slice C) → AgentList mounts (hasContent=true)', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'agent_list' })} focusedSlotId={null} />)
     expect(screen.getByTestId('agent-list')).toBeTruthy()
-    // empty 플레이스홀더가 아니라 실 렌더러 — 중앙정렬 flex 없어야 목록 레이아웃이 안 깨진다.
-    //   정렬은 테두리 요소가 진다(ADR-0227) — 겨냥이 맞는지는 아래 빈 슬롯 양성 짝이 지킨다.
+    // A real renderer, not the empty placeholder — there must be no centering flex or the list layout breaks.
+    //   Alignment is carried by the border element (ADR-0227) — the empty-slot positive pair below guards that the targeting is right.
     expect(emptyIcons()).toHaveLength(0)
     expect(borderOf('s1').style.justifyContent).not.toBe('center')
     expect(borderOf('s1').style.overflow).toBe('hidden')
   })
 
-  it('content.type=usage slot → UsageSlot 이 슬롯 내용(show_*)을 받아 마운트된다(hasContent=true)', () => {
+  it('content.type=usage slot → UsageSlot receives the slot content (show_*) and mounts (hasContent=true)', () => {
     render(
       <ViewLayoutRenderer
         node={contentSlotNode('s1', { type: 'usage', show_claude: true, show_codex: false })}
@@ -320,9 +320,9 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(borderOf('s1').style.overflow).toBe('hidden')
   })
 
-  // ★양성 짝★: 위·아래의 `!== 'center'` 단언은 겨냥한 요소가 틀리면 헛되이 초록이 된다. 같은 겨냥으로 빈 슬롯에서는
-  //   실제로 중앙정렬이 보인다는 것을 함께 잰다.
-  it('빈 슬롯의 테두리 요소는 플레이스홀더를 중앙정렬한다(겨냥 확인용 양성 짝)', () => {
+  // ★Positive pair★: the `!== 'center'` assertions above and below pass vacuously if the targeted element is wrong. With the same targeting the empty slot
+  //   is also measured to actually show centering.
+  it('the border element of an empty slot centers the placeholder (positive pair to confirm the targeting)', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
     const border = borderOf('s1')
     expect(border.style.display).toBe('flex')
@@ -332,9 +332,9 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(emptyIcons()[0].parentElement).toBe(border)
   })
 
-  // TRD S21-storage §6-2: 모르는 내용 슬롯은 `empty` 로 실리지만 비어 있지 않다 — `+` 대신 아이콘 자리표시를 그린다
-  //   (문구·안내 줄·막 없음 — 사용자 결정 2026-10-06).
-  it('foreignSlots 의 슬롯 → 「알 수 없는 내용」 아이콘 자리표시(`+`·문구·막 없음), 다른 빈 슬롯은 그대로 `+`', () => {
+  // TRD S21-storage §6-2: an unknown content slot is carried as `empty` but is not empty — draw an icon placeholder instead of `+`
+  //   (no text, notice line or veil — user decision 2026-10-06).
+  it('a slot in foreignSlots → an 「unknown content」 icon placeholder (no `+`, text or veil), other empty slots stay `+`', () => {
     const node = splitNode('p', slotNode('foreign', null), slotNode('plain', null))
     const { slotRects, splitRects } = rectsFor(node)
     render(
@@ -359,18 +359,18 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(foreign.style.justifyContent).toBe('center')
     expect(borderOf('plain').querySelector(':scope > svg')).not.toBeNull()
     expect(borderOf('plain').querySelector('[data-slot-foreign]')).toBeNull()
-    // 아이콘은 pointer-events 를 끊지 않으므로, 그 위 우클릭도 버블로 틀에 닿아 빈 슬롯 메뉴가 열려야 한다.
+    // The icon does not cut pointer-events, so a right-click on it also bubbles to the frame and must open the empty-slot menu.
     fireEvent.contextMenu(mark!)
     expect(screen.getByText('새 콘텐츠')).toBeTruthy()
   })
 
-  it('data-slot-id 속성이 node.id 로 설정된다(cdp 검증용 불변식)', () => {
+  it('the data-slot-id attribute is set to node.id (invariant for cdp verification)', () => {
     const id = 'test-slot-uuid'
     render(<ViewLayoutRenderer node={slotNode(id, null)} focusedSlotId={null} />)
     expect(document.querySelector(`[data-slot-id="${id}"]`)).toBeTruthy()
   })
 
-  it('agent_id 있는 slot(caps 도착) 래퍼에는 중앙정렬 flex 가 없다(터미널 레이아웃 오염 방지)', () => {
+  it('the wrapper of a slot with agent_id (caps arrived) has no centering flex (prevents polluting the terminal layout)', () => {
     seedAgents(agentInfo('some-agent-id', false))
     render(<ViewLayoutRenderer node={slotNode('s1', 'some-agent-id')} focusedSlotId={null} />)
     expect(screen.getByTestId('terminal-slot')).toBeTruthy()
@@ -380,28 +380,28 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(border.style.overflow).toBe('hidden')
   })
 
-  // ── FIX 1(ADR-0041 replay 소유권): caps 도착 전엔 구체 렌더러를 마운트하지 않는다 ──────────────
-  it('agent 배정됐지만 store 에 AgentInfo 없음 → "에이전트 연결 중…" 플레이스홀더(TerminalSlot/RichSlot 없음)', () => {
-    // store 를 비워 두면(=caps 미도착) 스왑 시 replay 유실을 피하려 중립 플레이스홀더만 떠야 한다.
+  // ── FIX 1 (ADR-0041 replay ownership): do not mount a concrete renderer before caps arrive ──────────────
+  it('agent assigned but no AgentInfo in the store → "agent connecting…" placeholder (no TerminalSlot/RichSlot)', () => {
+    // With the store empty (= caps not arrived), only a neutral placeholder must show to avoid losing replay on a swap.
     render(<ViewLayoutRenderer node={slotNode('s1', 'not-in-store')} focusedSlotId={null} />)
     expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
     expect(screen.queryByTestId('terminal-slot')).toBeNull()
     expect(screen.queryByTestId('rich-slot')).toBeNull()
   })
 
-  // ── ADR-0148: "명부에 없는 에이전트" 를 세 갈래로 가른다 ────────────────────────────────
+  // ── ADR-0148: split "an agent not in the roster" three ways ────────────────────────────────
   //
-  // 한 상태(agent==null)가 세 가지 뜻을 겹쳐 갖고 있었다. 종료(kill)의 실제 결말은 reaper 가 세션을
-  // 수거하며 **명부에서 지우고 프로필은 남기는** 것이라, 옛 게이트는 죽은 슬롯을 「연결 중」으로 그리며
-  // 뷰를 내렸다 — 데몬이 replay ring 을 세션과 함께 버리므로 그 순간 대화가 영구 소실됐다.
-  describe('ADR-0148 — 에이전트 없는 슬롯 세 갈래', () => {
+  // One state (agent==null) carried three meanings. The real outcome of exit (kill) is that the reaper reaps the session,
+  // **removes it from the roster and leaves the profile**, so the old gate drew a dead slot as 「connecting」 and tore
+  // the view down — the daemon discards the replay ring with the session, so at that moment the conversation was permanently lost.
+  describe('ADR-0148 — three branches of a slot without an agent', () => {
     const GONE = 'gone-agent'
 
     function profile(id: string, epoch = 3): unknown {
       return { id, name: id, cwd: '/tmp', display_name: null, parent_id: null, created_at: 0, epoch }
     }
 
-    /** 살아있는 에이전트로 한 번 마운트해 "기억"을 만든다. */
+    /** Mount once with a live agent to create the "memory". */
     function mountAlive(structured = true, epoch = 3) {
       seedAgents(agentInfo(GONE, structured, epoch))
       agentStoreState.agentsLoaded = true
@@ -410,10 +410,10 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       return render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
     }
 
-    // TRD S21-storage §6-8 · 사용자 결정 2026-10-06: ADR-0149 (A) 의 「스폰 대기도 연결 중」을 대체한다 — 목록을 받은
-    //   뒤엔 무기한 「연결 중」이 없고, 끊기거나 죽은 슬롯과 같은 부재 막을 그린다(문구·단추 없음).
-    it('프로필 있음 + 마운트 기억 없음 → 부재 막(문구·단추 없음, 「연결 중」 아님)', () => {
-      // 트레이 종료 뒤 복원 직후가 이 상태다: 프로필은 있고 데몬은 그 에이전트를 띄우지 않았다.
+    // TRD S21-storage §6-8 · user decision 2026-10-06: replaces ADR-0149 (A)'s 「spawn pending is also connecting」 — once the list is
+    //   received there is no indefinite 「connecting」, and the same absence veil as a disconnected or dead slot is drawn (no text or button).
+    it('profile present + no mount memory → absence veil (no text or button, not 「connecting」)', () => {
+      // This is the state right after restore following a tray exit: the profile exists and the daemon did not bring that agent up.
       agentStoreState.agentsLoaded = true
       agentStoreState.profilesLoaded = true
       agentStoreState.profiles = [profile(GONE)]
@@ -426,14 +426,14 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(borderOf('s1').textContent).toBe('')
       expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
       expect(screen.queryByText('대상 없음')).toBeNull()
-      // 아직 뜬 적 없는 슬롯이라 죽은 에이전트로 구독을 걸지 않는다.
+      // A slot that has never been up, so no subscription is made with a dead agent.
       expect(screen.queryByTestId('rich-slot')).toBeNull()
       expect(screen.queryByTestId('terminal-slot')).toBeNull()
     })
 
-    // 사용자 결정 2026-10-06: 포커스 링 색은 슬롯 상태로 달라지지 않는다 — 링이 막 위에 선다. jsdom 은 칠하지 않으므로
-    //   쌓임 규칙의 입력(같은 z · 트리 순서)만 잰다. 실제 색은 GUI QA 몫이다.
-    it('포커스된 기억 없는 슬롯: 포커스 링이 잎의 부재 막보다 위에 선다', () => {
+    // User decision 2026-10-06: the focus-ring color does not vary with slot state — the ring stands above the veil. jsdom does not paint, so only the
+    //   inputs of the stacking rule (same z · tree order) are measured. The real color is GUI QA's job.
+    it('focused slot without memory: the focus ring stands above the leaf absence veil', () => {
       agentStoreState.agentsLoaded = true
       agentStoreState.profilesLoaded = true
       agentStoreState.profiles = [profile(GONE)]
@@ -449,9 +449,9 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(ring!.style.pointerEvents).toBe('none')
     })
 
-    it('명부·프로필 목록 자체를 못 받은 구간도 「에이전트 연결 중…」(「대상 없음」으로 새지 않는다)', () => {
-      // profilesLoaded=false = refreshProfiles 미도착·실패. 여기서 「대상 없음」으로 새면 대화를 보존 중인
-      //   뷰가 조기 언마운트된다.
+    it('even while the roster and profile list themselves are not received it is 「agent connecting…」 (does not leak into 「no target」)', () => {
+      // profilesLoaded=false = refreshProfiles not arrived or failed. Leaking into 「no target」 here would
+      //   unmount early the view that is preserving the conversation.
       agentStoreState.agentsLoaded = true
       agentStoreState.profilesLoaded = false
       agentStoreState.profiles = []
@@ -461,8 +461,8 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(screen.queryByText('대상 없음')).toBeNull()
     })
 
-    it('프로필 목록은 받았어도 명부를 못 받았으면 「에이전트 연결 중…」(부재 막으로 새지 않는다)', () => {
-      // 명부 미수신이면 agents=[] 라 실행 중인 에이전트도 reserved 로 보인다.
+    it('even if the profile list is received, without the roster it is 「agent connecting…」 (does not leak into the absence veil)', () => {
+      // With the roster not received agents=[] so even a running agent looks reserved.
       agentStoreState.agentsLoaded = false
       agentStoreState.profilesLoaded = true
       agentStoreState.profiles = [profile(GONE)]
@@ -472,7 +472,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(leafVeil('s1')).toBeNull()
     })
 
-    it('목록이 도착하면 「연결 중」에서 부재 막으로 넘어간다', () => {
+    it('when the list arrives it moves from 「connecting」 to the absence veil', () => {
       agentStoreState.profiles = [profile(GONE)]
       const { rerender } = render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
       expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
@@ -485,8 +485,8 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(leafVeil('s1')).not.toBeNull()
     })
 
-    // 트리에서 활성화하면 명부에 오르고, 그 순간 슬롯이 평소 화면으로 붙는다(슬롯은 활성화를 부르지 않는다).
-    it('부재 막 → 그 에이전트가 명부에 오르면 평소 화면(막 없음)', () => {
+    // Activating in the tree puts it in the roster, and at that moment the slot attaches to the usual screen (the slot does not call activation).
+    it('absence veil → when that agent enters the roster, the usual screen (no veil)', () => {
       agentStoreState.agentsLoaded = true
       agentStoreState.profilesLoaded = true
       agentStoreState.profiles = [profile(GONE)]
@@ -499,28 +499,28 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(leafVeil('s1')).toBeNull()
     })
 
-    // ★F1 회귀★: 종료 순간 슬롯 prop 이 흔들리면 재마운트가 돌아 보존하려던 대화가 그 자리에서 지워진다
-    //   (데몬 ring 도 세션과 함께 사라져 재구독으로도 못 살린다). "같은 DOM 노드가 그대로 있나" 로 본다 —
-    //   텍스트 존재만 보면 재마운트와 리렌더가 구분되지 않는다.
-    //   ★흔드는 값을 아예 안 넘기는 것이 방어선이다★ — 그래서 아래 케이스는 "무엇을 넘기든 안 흔들린다"
-    //   가 아니라 "넘기는 것이 viewId·agentId 뿐이다" 로 지킨다(맨 아래 케이스).
-    it('프로필 있음 + 기억 있음 → 같은 노드를 유지한다(대화 보존)', () => {
+    // ★F1 regression★: if slot props shake at exit a remount runs and the conversation being preserved is erased on the spot
+    //   (the daemon ring also vanishes with the session so even resubscribing cannot revive it). Judged by "is the same DOM node still there" —
+    //   looking only at text presence cannot tell a remount from a re-render.
+    //   ★The defense is not passing the shaking value at all★ — so the case below guards "what is passed is only viewId and agentId"
+    //   rather than "it does not shake whatever is passed" (bottom case).
+    it('profile present + memory present → keeps the same node (conversation preserved)', () => {
       const { rerender } = mountAlive(true, 3)
       const before = screen.getByTestId('rich-slot')
 
-      // 종료 = 명부에서 사라지고 프로필만 남는다.
+      // Exit = disappears from the roster and only the profile remains.
       agentStoreState.agents = []
       rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
 
       const after = screen.getByTestId('rich-slot')
-      expect(Object.is(before, after)).toBe(true) // 재마운트되지 않았다 = 대화 보존
+      expect(Object.is(before, after)).toBe(true) // not remounted = conversation preserved
       expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
       expect(screen.queryByText('대상 없음')).toBeNull()
-      // 기억 있는 부재는 잎의 부재 막이 아니다 — 뷰를 지키는 ADR-0149 (B) 그대로다(막은 슬롯 컴포넌트가 그린다).
+      // An absence with memory is not the leaf's absence veil — it is ADR-0149 (B) as is, which keeps the view (the veil is drawn by the slot component).
       expect(leafVeil('s1')).toBeNull()
     })
 
-    it('터미널 모드도 같다 — 노드 유지', () => {
+    it('terminal mode is the same — node kept', () => {
       const { rerender } = mountAlive(false, 5)
       const before = screen.getByTestId('terminal-slot')
 
@@ -531,10 +531,10 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(Object.is(before, after)).toBe(true)
     })
 
-    // ★회차(epoch)를 슬롯에 되돌려 넣지 말 것★: 그 값은 살아있는 명부에서만 나오는데 종료가 곧 명부에서
-    //   사라지는 것이라, prop 으로 내려보내는 순간 **종료 = prop 변화 = 재마운트 = 대화 소실**이 된다.
-    //   화신 회전은 구독 쪽이 권위 명부로 판정해 비우기 신호로 낸다(protocolClient.observeRoster).
-    it('슬롯에 넘기는 것은 viewId·agentId 뿐이다(회차를 내려보내지 않는다)', () => {
+    // ★Do not put the epoch back into the slot★: that value comes only from the live roster, and exit means disappearing from the roster,
+    //   so the moment it is passed down as a prop **exit = prop change = remount = conversation loss**.
+    //   Incarnation rotation is judged by the subscription against the authoritative roster and emitted as a clear signal (protocolClient.observeRoster).
+    it('what is passed to the slot is only viewId and agentId (the epoch is not passed down)', () => {
       mountAlive(true, 3)
       const slot = screen.getByTestId('rich-slot')
       expect(slot.getAttribute('data-view-id')).toBe('s1')
@@ -542,13 +542,13 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(slot.getAttribute('data-epoch')).toBeNull()
     })
 
-    // ★F2 회귀★: 기억은 그 에이전트 것이다. 다른 에이전트를 배정하면 caps 게이트를 건너뛰어선 안 된다 —
-    //   B 가 터미널 모드인데 A 의 기억으로 RichSlot 이 뜨면 tag0 바이트를 버린다.
-    it('슬롯에 다른 에이전트를 배정하면 기억을 쓰지 않는다(caps 게이트 유지)', () => {
+    // ★F2 regression★: the memory belongs to that agent. Assigning another agent must not skip the caps gate —
+    //   if B is in terminal mode but RichSlot appears from A's memory, tag0 bytes are dropped.
+    it('assigning another agent to the slot does not use the memory (caps gate kept)', () => {
       const { rerender } = mountAlive(true, 3)
       expect(screen.getByTestId('rich-slot')).toBeTruthy()
 
-      // B 배정 — 아직 명부에 없다(caps 미도착).
+      // B assigned — not in the roster yet (caps not arrived).
       const OTHER = 'other-agent'
       agentStoreState.profiles = [profile(GONE), profile(OTHER)]
       rerender(<ViewLayoutRenderer node={slotNode('s1', OTHER)} focusedSlotId={null} />)
@@ -558,10 +558,10 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(leafVeil('s1')).not.toBeNull()
     })
 
-    // ★G1 회귀★: 프로필 목록을 못 받은 채(단발 pull 실패·지연) 종료되면 presence 는 'unknown' 이다.
-    //   그걸로 뷰를 내리면 보존하려던 대화가 영구 소실된다 — "프로필이 없다" 는 목록을 받은 뒤에만 믿는다.
-    it('프로필 목록을 못 받은 상태에서 종료돼도 기억이 있으면 뷰를 지킨다', () => {
-      // 명부는 받았고(에이전트가 실제로 떴다) 프로필 목록만 못 받은 조합.
+    // ★G1 regression★: if it exits without having received the profile list (a one-shot pull failed or was delayed) presence is 'unknown'.
+    //   Tearing the view down on that permanently loses the conversation being preserved — "no profile" is trusted only after the list is received.
+    it('even if it exits without having received the profile list, the view is kept if there is memory', () => {
+      // The combination where the roster was received (the agent really came up) and only the profile list was not.
       seedAgents(agentInfo(GONE, true, 4))
       agentStoreState.agentsLoaded = true
       agentStoreState.profilesLoaded = false
@@ -577,36 +577,36 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
     })
 
-    // ★G2 회귀★: 기억을 안 지우면 배정을 뺐다가 되돌릴 때 되살아난다. 그 사이 뷰는 이미 언마운트돼
-    //   대화가 없으므로, 되살아난 기억은 "빈 화면 + 흐림 + 수거된 에이전트로 구독" 을 만든다.
-    it('배정을 다른 에이전트로 옮겼다가 되돌리면 기억이 되살아나지 않는다', () => {
+    // ★G2 regression★: if the memory is not erased it revives when the assignment is removed and put back. In between, the view has already unmounted
+    //   and there is no conversation, so a revived memory produces "empty screen + dim + subscription with a reaped agent".
+    it('moving the assignment to another agent and back does not revive the memory', () => {
       const OTHER = 'other-agent'
       const { rerender } = mountAlive(true, 3)
       expect(screen.getByTestId('rich-slot')).toBeTruthy()
 
-      // 종료 → 뷰 유지(정상).
+      // Exit → view kept (normal).
       agentStoreState.agents = []
       rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
       expect(screen.getByTestId('rich-slot')).toBeTruthy()
 
-      // 같은 슬롯에 B 배정 → A 의 뷰는 언마운트되고(대화 state 도 여기서 죽는다) 기억도 버려져야 한다.
+      // Assign B to the same slot → A's view unmounts (the conversation state dies here too) and the memory must also be dropped.
       agentStoreState.profiles = [profile(GONE), profile(OTHER)]
       rerender(<ViewLayoutRenderer node={slotNode('s1', OTHER)} focusedSlotId={null} />)
       expect(screen.queryByTestId('rich-slot')).toBeNull()
 
-      // 다시 A 배정 — 되살릴 대화가 없으므로 빈 뷰를 띄우지 않는다.
+      // Assign A again — there is no conversation to revive, so no empty view is brought up.
       rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
       expect(screen.queryByTestId('rich-slot')).toBeNull()
       expect(leafVeil('s1')).not.toBeNull()
     })
 
-    // ★잎 key = slot id(ADR-0227)★: 같은 자리에 다른 slot id 가 오면 잎을 새로 짓는다. 기억이 s2 로 넘어가면
-    //   s2 가 한 번도 띄운 적 없는 뷰를 「보존」해 수거된 에이전트로 구독을 건다.
-    it('같은 자리의 슬롯이 다른 slot id 로 바뀌면 기억을 넘기지 않는다(잎 재마운트)', () => {
+    // ★Leaf key = slot id (ADR-0227)★: when a different slot id comes at the same place the leaf is built anew. If the memory passed to s2,
+    //   s2 would 「preserve」 a view it never brought up and subscribe with a reaped agent.
+    it('when the slot at the same place changes to a different slot id the memory is not carried over (leaf remount)', () => {
       const { rerender } = mountAlive(true, 3)
       expect(screen.getByTestId('rich-slot')).toBeTruthy()
 
-      // 종료 — 명부에서 사라지고 프로필은 남는다(reserved). 같은 s1 이면 뷰를 지키는 조합이다.
+      // Exit — disappears from the roster and the profile stays (reserved). With the same s1 this is the combination that keeps the view.
       agentStoreState.agents = []
       rerender(<ViewLayoutRenderer node={slotNode('s2', GONE)} focusedSlotId={null} />)
 
@@ -614,11 +614,11 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(leafVeil('s2')).not.toBeNull()
     })
 
-    it('프로필 없음 → 「대상 없음」(보존 중이던 뷰도 여기서 내려간다 — 의도)', () => {
+    it('no profile → 「no target」 (the view that was being preserved also comes down here — intended)', () => {
       const { rerender } = mountAlive(true, 3)
       expect(screen.getByTestId('rich-slot')).toBeTruthy()
 
-      // 종료 후 프로필까지 삭제 = 사용자의 명시적 정리 동작.
+      // After exit, deleting the profile too = the user's explicit cleanup action.
       agentStoreState.agents = []
       agentStoreState.profiles = []
       rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
@@ -629,7 +629,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     })
   })
 
-  it('agent 가 store 에 있고 structured caps → RichSlot(TerminalSlot 없음)', () => {
+  it('agent in the store and structured caps → RichSlot (no TerminalSlot)', () => {
     const agentId = 'struct-agent'
     seedAgents(agentInfo(agentId, true))
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
@@ -638,8 +638,8 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
   })
 
-  // ── RenderMode 기본 유도(defaultRenderMode): 오버라이드 없을 때 caps 로 렌더러가 정해진다 ──────────
-  it('오버라이드 없음 + structured=true caps → 기본 유도로 RichSlot(TerminalSlot 없음)', () => {
+  // ── Default RenderMode derivation (defaultRenderMode): with no override the renderer is decided by caps ──────────
+  it('no override + structured=true caps → RichSlot by default derivation (no TerminalSlot)', () => {
     const agentId = 'derive-rich'
     seedAgents(agentInfo(agentId, true))
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
@@ -647,7 +647,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.queryByTestId('terminal-slot')).toBeNull()
   })
 
-  it('오버라이드 없음 + structured=false caps → 기본 유도로 TerminalSlot(RichSlot 없음)', () => {
+  it('no override + structured=false caps → TerminalSlot by default derivation (no RichSlot)', () => {
     const agentId = 'derive-terminal'
     seedAgents(agentInfo(agentId, false))
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
@@ -655,8 +655,8 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.queryByTestId('rich-slot')).toBeNull()
   })
 
-  // ── 오버라이드가 기본을 이긴다(setRenderMode) ────────────────────────────────────────────────
-  it('setRenderMode(id,"terminal")는 structured 기본(rich)을 덮어 TerminalSlot 을 마운트한다', () => {
+  // ── An override beats the default (setRenderMode) ────────────────────────────────────────────────
+  it('setRenderMode(id,"terminal") overrides the structured default (rich) and mounts TerminalSlot', () => {
     const agentId = 'override-terminal'
     seedAgents(agentInfo(agentId, true))
     useViewStore.getState().setRenderMode('s1', 'terminal')
@@ -665,7 +665,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.queryByTestId('rich-slot')).toBeNull()
   })
 
-  it('setRenderMode(id,"rich")는 비structured 기본(terminal)을 덮어 RichSlot 을 마운트한다', () => {
+  it('setRenderMode(id,"rich") overrides the non-structured default (terminal) and mounts RichSlot', () => {
     const agentId = 'override-rich'
     seedAgents(agentInfo(agentId, false))
     useViewStore.getState().setRenderMode('s1', 'rich')
@@ -674,10 +674,10 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.queryByTestId('terminal-slot')).toBeNull()
   })
 
-  // ── DOM 오버라이드(§5 관측): caps 기본 렌더러보다 우선, caps-ready 게이팅은 유지 ──────────────
-  it('renderModeOverride=dom 인 slot(caps 도착) → DomSlot 이 마운트되고 Terminal/Rich 는 없다', () => {
+  // ── DOM override (§5 observation): takes priority over the caps default renderer, caps-ready gating kept ──────────────
+  it('slot with renderModeOverride=dom (caps arrived) → DomSlot mounts and Terminal/Rich do not', () => {
     const agentId = 'dom-agent'
-    seedAgents(agentInfo(agentId, false)) // 비structured(터미널 기본)라도 DOM 모드가 우선해야 한다
+    seedAgents(agentInfo(agentId, false)) // even non-structured (terminal default), DOM mode must take priority
     useViewStore.getState().setRenderMode('s1', 'dom')
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
     const dom = screen.getByTestId('dom-slot')
@@ -687,7 +687,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.queryByTestId('rich-slot')).toBeNull()
   })
 
-  it('renderModeOverride=dom 은 structured caps 기본(rich)보다 우선(DomSlot, RichSlot 아님)', () => {
+  it('renderModeOverride=dom takes priority over the structured caps default (rich) (DomSlot, not RichSlot)', () => {
     const agentId = 'dom-struct-agent'
     seedAgents(agentInfo(agentId, true))
     useViewStore.getState().setRenderMode('s1', 'dom')
@@ -696,17 +696,17 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.queryByTestId('rich-slot')).toBeNull()
   })
 
-  it('renderModeOverride=dom 이라도 caps 미도착 → DomSlot 안 뜨고 "에이전트 연결 중…"(replay 게이팅 유지)', () => {
-    // caps 미도착이면 오버라이드가 있어도 구체 렌더러를 마운트하지 않는다(스왑 전 바이트 유실 방지 — replay 소유권).
+  it('even with renderModeOverride=dom, if caps have not arrived DomSlot does not show and "agent connecting…" shows (replay gating kept)', () => {
+    // If caps have not arrived no concrete renderer is mounted even with an override (prevents losing pre-swap bytes — replay ownership).
     useViewStore.getState().setRenderMode('s1', 'dom')
     render(<ViewLayoutRenderer node={slotNode('s1', 'not-in-store')} focusedSlotId={null} />)
     expect(screen.queryByTestId('dom-slot')).toBeNull()
     expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
   })
 
-  it('clearRenderMode(id)로 오버라이드 해제 시 caps 유도 기본으로 복귀한다', () => {
+  it('releasing the override with clearRenderMode(id) returns to the caps-derived default', () => {
     const agentId = 'clear-agent'
-    seedAgents(agentInfo(agentId, false)) // 기본 = terminal
+    seedAgents(agentInfo(agentId, false)) // default = terminal
     useViewStore.getState().setRenderMode('s1', 'dom')
     useViewStore.getState().clearRenderMode('s1')
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
@@ -715,11 +715,11 @@ describe('ViewLayoutRenderer — slot 분기', () => {
   })
 })
 
-// ── 분할 트리(ADR-0227 평평한 렌더러) ─────────────────────────────────────────────────────────
-// 분할 트리는 재귀로 풀지 않는다 — 셸 스냅샷의 사각형으로 칸 틀을 루트 하나 아래에 나란히 두고, 구분선을 그 뒤에 둔다.
-//   사각형은 테스트 전용 픽스처(`testing/rects.ts`)가 만든다. 여기서는 렌더러가 받은 사각형을 그대로 싣는지만 보고,
-//   값이 셸과 같은지는 보지 않는다(기하 = Rust `geometry.rs` 테스트 몫). 재마운트·순서는 `.flat.test.tsx` 가 잰다.
-describe('ViewLayoutRenderer — split 분기(셸 사각형)', () => {
+// ── Split tree (ADR-0227 flat renderer) ─────────────────────────────────────────────────────────
+// A split tree is not unrolled recursively — the area frames are laid side by side under one root using the shell snapshot's rectangles, with dividers behind them.
+//   Rectangles are made by a test-only fixture (`testing/rects.ts`). Here we only see that the renderer carries the rectangles it received as they are,
+//   and do not check whether the values equal the shell's (geometry = the Rust `geometry.rs` tests' job). Remount and order are measured by `.flat.test.tsx`.
+describe('ViewLayoutRenderer — split branch (shell rectangles)', () => {
   function renderTree(node: LayoutNode) {
     const { slotRects, splitRects } = rectsFor(node)
     return render(
@@ -727,20 +727,20 @@ describe('ViewLayoutRenderer — split 분기(셸 사각형)', () => {
     )
   }
 
-  it('left_right split → 두 칸 틀이 좌/우 사각형(--x*·--y*)으로 그려지고 구분선 하나가 붙는다', () => {
+  it('left_right split → two area frames are drawn with left/right rectangles (--x*·--y*) and one divider is attached', () => {
     const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.5, 'left_right')
     renderTree(node)
     expect(frameRect('s1')).toEqual({ x0: 0, y0: 0, x1: 0.5, y1: 1 })
     expect(frameRect('s2')).toEqual({ x0: 0.5, y0: 0, x1: 1, y1: 1 })
     const divider = document.querySelector<HTMLElement>('[data-split-id="sp"][data-dir="left_right"]')
     expect(divider).not.toBeNull()
-    // 구분선은 칸 틀 안이 아니라 루트 직속 형제다(레이아웃 공간을 먹지 않는 오버레이).
+    // The divider is a direct sibling of the root, not inside an area frame (an overlay that takes no layout space).
     expect(divider!.parentElement).toBe(frameOf('s1').parentElement)
     expect(divider!.getAttribute('aria-orientation')).toBe('vertical')
   })
 
-  // dir → 화면 방향의 매핑(ADR-0140)은 셸이 사각형으로 푼다 — 렌더러는 받은 y 경계를 그대로 싣는다.
-  it('top_bottom split → 두 칸 틀이 위/아래 사각형으로 그려지고 구분선 data-dir 이 top_bottom 이다', () => {
+  // The dir → screen direction mapping (ADR-0140) is resolved by the shell with rectangles — the renderer carries the received y boundaries as they are.
+  it('top_bottom split → two area frames are drawn with top/bottom rectangles and the divider data-dir is top_bottom', () => {
     const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.5, 'top_bottom')
     renderTree(node)
     expect(frameRect('s1')).toEqual({ x0: 0, y0: 0, x1: 1, y1: 0.5 })
@@ -750,7 +750,7 @@ describe('ViewLayoutRenderer — split 분기(셸 사각형)', () => {
     expect(divider?.getAttribute('aria-orientation')).toBe('horizontal')
   })
 
-  it('받은 사각형 값을 그대로 싣는다(비율 0.2 픽스처 → 첫 칸 x1 = 0.2)', () => {
+  it('carries the received rectangle values as they are (ratio 0.2 fixture → first area x1 = 0.2)', () => {
     const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.2)
     const { slotRects } = rectsFor(node)
     renderTree(node)
@@ -760,7 +760,7 @@ describe('ViewLayoutRenderer — split 분기(셸 사각형)', () => {
     expect(frameRect('s1').x1).toBe(0.2)
   })
 
-  it('중첩 split → 칸 셋·구분선 둘이 루트 하나 아래 평평하게 놓인다', () => {
+  it('nested split → three areas and two dividers are laid flat under one root', () => {
     const node = splitNode('outer', slotNode('s1', null), splitNode('inner', slotNode('s2', null), slotNode('s3', null), 0.5, 'top_bottom'))
     renderTree(node)
     const root = frameOf('s1').parentElement!
@@ -770,7 +770,7 @@ describe('ViewLayoutRenderer — split 분기(셸 사각형)', () => {
     expect(frameRect('s3')).toEqual({ x0: 0.5, y0: 0.5, x1: 1, y1: 1 })
   })
 
-  it('split 자식에 agent_id 있으면(caps 도착) 해당 칸에만 TerminalSlot 이 마운트된다', () => {
+  it('a split child with agent_id (caps arrived) mounts TerminalSlot only in that area', () => {
     const agentId = 'zzzz-agent'
     seedAgents(agentInfo(agentId, false))
     renderTree(splitNode('sp', slotNode('s1', agentId), slotNode('s2', null)))
@@ -783,8 +783,8 @@ describe('ViewLayoutRenderer — split 분기(셸 사각형)', () => {
     expect(borderOf('s2').contains(emptyIcons()[0])).toBe(true)
   })
 
-  // 운영 경로엔 없다(스냅샷이 늘 사각형을 싣는다) — 화면은 트리 기하를 따로 계산하지 않으므로 그리지 않고 알린다.
-  it('사각형 없이 루트가 분할이면 오류를 남기고 아무것도 그리지 않는다', () => {
+  // Not in the production path (the snapshot always carries rectangles) — the screen does not compute tree geometry itself, so it does not draw but reports.
+  it('a root that is a split without rectangles leaves an error and draws nothing', () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       const { container } = render(
@@ -797,21 +797,21 @@ describe('ViewLayoutRenderer — split 분기(셸 사각형)', () => {
     }
   })
 
-  it('사각형 없이 루트가 슬롯이면 전체 상자(0,0)-(1,1)로 그린다', () => {
+  it('a root that is a slot without rectangles is drawn as the full box (0,0)-(1,1)', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
     expect(frameRect('s1')).toEqual({ x0: 0, y0: 0, x1: 1, y1: 1 })
     expect(document.querySelectorAll('[data-split-id]')).toHaveLength(0)
   })
 })
 
-// ── ★click-to-focus 게이트(제어 슬롯 포커스 제외 — ADR-0066 정제)★ ─────────────────────────────
-// ★이 스위트가 막는 것★: 트리(agent_list) 등 제어 슬롯 pane 클릭이 focusSlot 을 부르면
-// 안 된다(작업 슬롯이 아니라 포커스 대상 아님). 이어지는 우클릭 "열기"가 그 제어 슬롯을 대상으로 잡아
-// 트리를 에이전트 터미널로 덮어쓰던 선존 UX 버그의 뿌리. 콘텐츠 슬롯(empty/agent)은 기존대로 focusSlot 호출.
+// ── ★click-to-focus gate (control-slot focus excluded — ADR-0066 refinement)★ ─────────────────────────────
+// ★What this suite blocks★: a click on the pane of the tree (agent_list) or another control slot must not call focusSlot
+// (they are not work slots, so not focus targets). That was the root of the pre-existing UX bug where the following right-click "open" took that control slot as target and
+// overwrote the tree with an agent terminal. Content slots (empty/agent) call focusSlot as before.
 //
-// 전략: real viewStore 에 focusSlot spy 를 주입하고(사람 클릭 = LLM = 단일 표면), windows["main"].active 를
-//   채워 targetViewId 폴백이 성립하게 한다(컨텍스트 메뉴 스위트와 동형 세팅).
-describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커스 제외)', () => {
+// Strategy: inject a focusSlot spy into the real viewStore (human click = LLM = single surface) and fill windows["main"].active so the
+//   targetViewId fallback holds (same setup as the context-menu suite).
+describe('ViewLayoutRenderer — click-to-focus gate (control-slot focus excluded)', () => {
   const FOCUS_VIEW = 'focus-view-1'
   const focusSlotSpy = vi.fn(async () => undefined)
   const origHash = window.location.hash
@@ -835,56 +835,56 @@ describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커�
     fireEvent.click(document.querySelector('[data-slot-id="s1"]') as HTMLElement)
   }
 
-  it('empty 슬롯 클릭 → focusSlot(viewId, slotId) 호출(콘텐츠 슬롯 = 포커스 대상)', () => {
+  it('empty slot click → calls focusSlot(viewId, slotId) (content slot = focus target)', () => {
     clickSlot({ type: 'empty' })
     expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
   })
 
-  // ADR-0144: 빈 슬롯 좌클릭은 메뉴를 열지 않는다 — 포커스 이동은 그대로다.
-  it('empty 슬롯 좌클릭은 focusSlot 만 부르고 메뉴는 열지 않는다', () => {
+  // ADR-0144: a left-click on an empty slot does not open the menu — focus movement is unchanged.
+  it('left-click on an empty slot calls only focusSlot and does not open the menu', () => {
     clickSlot({ type: 'empty' })
     expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  // ★아이콘은 클릭을 삼키지 않는다★: 아이콘 위 클릭도 컨테이너까지 닿아야 focusSlot 이 불린다. 여기가
-  //   없으면 아이콘에 상호작용을 되붙여도 스위트가 초록이라 click-to-focus 가 조용히 죽는다(좌클릭이
-  //   메뉴를 열지 않는 지금은 포커스링 외엔 눈으로 확인할 신호도 없다, ADR-0144).
-  it('`+` 아이콘 위 클릭도 컨테이너까지 닿아 focusSlot 을 부른다', () => {
+  // ★The icon does not swallow clicks★: a click on the icon must also reach the container for focusSlot to be called. Without this,
+  //   re-attaching interaction to the icon leaves the suite green and click-to-focus quietly dies (with left-click no longer
+  //   opening a menu there is no visible signal other than the focus ring, ADR-0144).
+  it('a click on the `+` icon also reaches the container and calls focusSlot', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'empty' })} focusedSlotId={null} />)
     fireEvent.click(emptyIcons()[0], { clientX: 5, clientY: 5 })
     expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
   })
 
-  it('agent 슬롯 클릭 → focusSlot 호출(콘텐츠 슬롯)', () => {
-    seedAgents(agentInfo('a-focus', false)) // caps 도착(무해 — 게이트는 content.type 만 본다)
+  it('agent slot click → calls focusSlot (content slot)', () => {
+    seedAgents(agentInfo('a-focus', false)) // caps arrived (harmless — the gate looks only at content.type)
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'agent', agent_id: 'a-focus' })} focusedSlotId={null} />)
     fireEvent.click(document.querySelector('[data-slot-id="s1"]') as HTMLElement)
     expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
   })
 
-  it('agent_list(트리) 슬롯 클릭 → focusSlot 미호출(제어 슬롯 = 포커스 제외)', () => {
+  it('agent_list (tree) slot click → focusSlot not called (control slot = focus excluded)', () => {
     clickSlot({ type: 'agent_list' })
     expect(focusSlotSpy).not.toHaveBeenCalled()
   })
 
-  // 포커스 게이트는 allowlist(isContentSlot)라 새 variant 는 따로 빼지 않아도 제외된다.
-  it('usage(사용량) 슬롯 클릭 → focusSlot 미호출', () => {
+  // The focus gate is an allowlist (isContentSlot), so a new variant is excluded without being singled out.
+  it('usage slot click → focusSlot not called', () => {
     clickSlot({ type: 'usage', show_claude: true, show_codex: true })
     expect(focusSlotSpy).not.toHaveBeenCalled()
   })
 })
 
-// ── ★우클릭 통합 컨텍스트 메뉴(§5, ADR-0064)★ ─────────────────────────────────────────────────
-// ★이 스위트가 실제로 막는 것★: 캔버스 슬롯 우클릭 → 통합 SlotContextMenu 마운트(buildSlotMenu(content.type)
-// 산출) + 각 항목 클릭이 그 command.run(ctx) 를 통해 viewStore/agentClient 로 (viewId, slotId, agentId)를
-// 흘리는지. 메뉴 항목 = command id 참조(ADR-0064) — 콘텐츠 전용(에이전트 종료·트리 열기·생성) +
-// 공통 '*'(가로/세로 분할·팝업 분리·비우기·닫기)가 한 메뉴에 공존한다.
+// ── ★Right-click unified context menu (§5, ADR-0064)★ ─────────────────────────────────────────────────
+// ★What this suite actually blocks★: right-clicking a canvas slot mounts the unified SlotContextMenu (the output of buildSlotMenu(content.type))
+// and each item click flows (viewId, slotId, agentId) through its command.run(ctx) to viewStore/agentClient.
+// Menu items = command id references (ADR-0064) — content-specific (kill agent · open tree · create) +
+// common '*' (split horizontal/vertical · detach popup · clear · close) coexist in one menu.
 //
-// 전략: split/closeSlot/assignAgent/setSlotContent/moveSlotToWindow 를 real viewStore 에 spy 로 주입한다
-// (command 는 useViewStore.getState().split(...) 로 이들을 부른다 → LLM/__engramCmd 와 물리적으로 동일).
-// '에이전트 종료'(agent.kill)는 agentClient.killAgent 로 이어진다.
-describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어 표면)', () => {
+// Strategy: spies for split/closeSlot/assignAgent/setSlotContent/moveSlotToWindow are injected into the real viewStore
+// (a command calls them via useViewStore.getState().split(...) → physically identical to LLM/__engramCmd).
+// 'kill agent' (agent.kill) continues to agentClient.killAgent.
+describe('ViewLayoutRenderer — right-click context menu (§5 single control surface)', () => {
   const ACTIVE_VIEW = 'active-view-9'
   const splitSpy = vi.fn(async () => 'new-slot')
   const closeSlotSpy = vi.fn(async () => undefined)
@@ -908,9 +908,9 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     clientMock.killAgent.mockClear()
     dialogMock.open.mockClear()
     dialogMock.open.mockResolvedValue(null)
-    // ★탭 소유 모델(ADR-0057)★: ViewLayoutRenderer 는 viewIdOverride 없으면 useCurrentViewId()(이 웹뷰 창의
-    //   active 탭)로 폴백해 ctx.viewId 를 채운다. 메인 창(#/) 컨텍스트로 두고 windows["main"].active=ACTIVE_VIEW
-    //   를 주입 → 폴백 경로가 ACTIVE_VIEW 를 집는다. 레이아웃 액션도 store 에 주입(단일 표면).
+    // ★Tab ownership model (ADR-0057)★: without viewIdOverride, ViewLayoutRenderer falls back to useCurrentViewId() (this webview window's
+    //   active tab) to fill ctx.viewId. Set the main window (#/) context and inject windows["main"].active=ACTIVE_VIEW
+    //   → the fallback path picks ACTIVE_VIEW. Layout actions are also injected into the store (single surface).
     window.location.hash = '#/'
     useViewStore.setState({
       windows: {
@@ -928,7 +928,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     window.location.hash = origHash
   })
 
-  /** viewIdOverride 를 넘기면 그 view 로 렌더한다(Fix 3). */
+  /** If viewIdOverride is passed, render with that view (Fix 3). */
   function openMenu(
     slotId: string,
     agentId: string | null,
@@ -948,12 +948,12 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
 
   const POPUP_VIEW = 'popup-view-77'
 
-  /** ADR-0065: 빈 슬롯 fill-ops 는 "새 콘텐츠" 컨테이너로 접혔다 — hover 로 flyout 을 펴야 자식이 보인다. */
+  /** ADR-0065: empty-slot fill-ops folded into a "new content" container — the flyout must be opened by hover for the children to show. */
   function openNewContentFlyout(): void {
     fireEvent.mouseEnter(screen.getByText('새 콘텐츠'))
   }
 
-  it('빈 슬롯 우클릭 → 최상위 = 에이전트 모니터링 + 새 콘텐츠(컨테이너) + 공통 슬롯 ops, 채움은 flyout 안 (ADR-0067/0065)', () => {
+  it('right-click on an empty slot → top level = agent monitoring + new content (container) + common slot ops, fills inside the flyout (ADR-0067/0065)', () => {
     openMenu('s1', null)
     expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
     expect(screen.getByText('새 콘텐츠')).toBeTruthy()
@@ -966,17 +966,17 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     openNewContentFlyout()
     expect(screen.getByText('에이전트 트리 열기')).toBeTruthy()
     expect(screen.getByText('사용량 한도 열기')).toBeTruthy()
-    // ADR-0067: "에이전트 생성"은 서브메뉴에서 제거됐다(스폰 = 트리 소관).
+    // ADR-0067
     expect(screen.queryByText('에이전트 생성')).toBeNull()
   })
 
-  it('우클릭 전에는 메뉴가 없다(preventDefault 후 상태 기반 마운트)', () => {
+  it('there is no menu before a right-click (state-based mount after preventDefault)', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  // ★잎 key = slot id(ADR-0227)★: 메뉴 상태는 잎이 쥔다 — 같은 자리에 다른 slot id 가 오면 새 잎이라 메뉴가 따라가지 않는다.
-  it('같은 자리의 슬롯이 다른 slot id 로 바뀌면 열린 메뉴가 닫힌다(잎 재마운트)', () => {
+  // ★Leaf key = slot id (ADR-0227)★: the leaf holds the menu state — a different slot id at the same place is a new leaf so the menu does not follow.
+  it('when the slot at the same place changes to a different slot id the open menu closes (leaf remount)', () => {
     const { rerender } = render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
     const before = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     fireEvent.contextMenu(before)
@@ -989,17 +989,16 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(before.isConnected).toBe(false)
   })
 
-  // ── ★메뉴는 우클릭 전용(ADR-0144)★ ────────────────────────────────────────────────────────
-  // ADR-0141/0143 은 빈 슬롯 좌클릭도 메뉴를 열게 했으나, "클릭할 때마다 메뉴가 뜬다"는 불편 제보로
-  // ADR-0144 가 되돌렸다 — 빈 슬롯 좌클릭도 이제 다른 콘텐츠 슬롯과 같이 포커스만 옮긴다. 아래 세
-  // 케이스는 우클릭으로 연 메뉴에 걸려 있던 불변식(재앵커 금지·바깥 클릭 처리·command 경로)이 좌클릭
-  // 오프너 제거 후에도 유지되는지를 검증한다.
-  /** 메뉴 div(position:fixed 컨테이너) — 좌표 단언용. */
+  // ── ★The menu is right-click only (ADR-0144)★ ────────────────────────────────────────────────────────
+  // ADR-0141/0143 made a left-click on an empty slot open the menu too, but after reports of "a menu appears on every click"
+  // ADR-0144 reverted it — a left-click on an empty slot now only moves focus. The following three cases verify the invariants of the
+  // right-click-opened menu (no re-anchoring · outside-click handling · command path).
+  /** The menu div (position:fixed container) — for coordinate assertions. */
   function openedMenu(): HTMLElement {
     return screen.getByText('가로 분할').closest('[style*="position: fixed"]') as HTMLElement
   }
 
-  /** 아이콘이 아닌 빈 여백 좌클릭 = 슬롯 래퍼가 표적(ADR-0144 이후엔 메뉴를 열지 않는다). */
+  /** A left-click on blank margin that is not the icon = the slot wrapper is the target (after ADR-0144 it does not open the menu). */
   function leftClickSlot(slotId: string, x: number, y: number): void {
     fireEvent.click(document.querySelector(`[data-slot-id="${slotId}"]`) as HTMLElement, {
       clientX: x,
@@ -1007,7 +1006,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     })
   }
 
-  /** 메뉴 오프너는 우클릭뿐(ADR-0144) — 좌표가 필요한 케이스(재앵커·바깥 클릭)는 openMenu() 대신 이걸 쓴다. */
+  /** The menu opener is right-click only (ADR-0144) — cases that need coordinates (re-anchor · outside click) use this instead of openMenu(). */
   function rightClickSlot(slotId: string, x: number, y: number): void {
     fireEvent.contextMenu(document.querySelector(`[data-slot-id="${slotId}"]`) as HTMLElement, {
       clientX: x,
@@ -1015,11 +1014,11 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     })
   }
 
-  // ★상호작용을 되붙이지 않는다(ADR-0143 §영향)★: 빈 슬롯 안에는 role·tabindex·버튼이 없어야 한다 —
-  //   되붙이면 컨테이너 핸들러와 겹쳐 이중 오픈이 되고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 살아난다.
-  //   ★한계★: React 는 핸들러를 루트에 위임하므로 아이콘에 onClick 을 되붙였는지는 DOM 으로 볼 수 없다
-  //   (양쪽이 같은 좌표를 쓰면 동작으로도 구별되지 않는다). 그 조항은 리뷰가 지키는 몫으로 남는다.
-  it('빈 슬롯엔 상호작용 요소가 없다(role·tabindex·button 부재)', () => {
+  // ★Do not re-attach interaction (ADR-0143 §Impact)★: an empty slot must have no role, tabindex or button —
+  //   re-attaching would overlap the container handler and open twice, and revive a path to a menu that cannot be left by keyboard.
+  //   ★Limit★: React delegates handlers to the root, so whether an onClick was re-attached to the icon cannot be seen in the DOM
+  //   (with both using the same coordinates they cannot be told apart by behavior either). That clause is left to review.
+  it('an empty slot has no interactive element (no role · tabindex · button)', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-inert', null)} focusedSlotId={null} />)
     const wrapper = document.querySelector('[data-slot-id="slot-inert"]') as HTMLElement
     expect(wrapper.querySelector('button, [role], [tabindex]')).toBeNull()
@@ -1027,24 +1026,24 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(icon.hasAttribute('tabindex')).toBe(false)
     expect(icon.hasAttribute('role')).toBe(false)
     expect(icon.hasAttribute('aria-label')).toBe(false)
-    // ADR-0143 결정 2: 순수 그림 — pointer-events 를 끊어 클릭이 항상 컨테이너까지 닿는다(ADR-0144 이후도 유효).
+    // ADR-0143 decision 2: a pure picture — pointer-events is cut so clicks always reach the container (still valid after ADR-0144).
     expect(getComputedStyle(icon).pointerEvents).toBe('none')
   })
 
-  // ★아이콘 크기 = 32px 초과(ADR-0143 결정 3)★: Tailwind `size-N` = N×0.25rem = N×4px(기본 스케일)이라
-  //   클래스에서 px 를 되짚는다. jsdom 은 Tailwind 를 적용하지 않아 계산된 값으로는 볼 수 없다(실측은 GUI).
-  it('`+` 아이콘은 32px 보다 크다', () => {
+  // ★Icon size = over 32px (ADR-0143 decision 3)★: Tailwind `size-N` = N×0.25rem = N×4px (default scale), so
+  //   px is recovered from the class. jsdom does not apply Tailwind so it cannot be seen by computed value (measured in the GUI).
+  it('the `+` icon is larger than 32px', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-size', null)} focusedSlotId={null} />)
     const sizeClass = [...emptyIcons()[0].classList].map(c => /^size-(\d+)$/.exec(c)).find(m => m != null)
-    expect(sizeClass, 'size-N 유틸리티가 없다').not.toBeUndefined()
+    expect(sizeClass, 'no size-N utility').not.toBeUndefined()
     expect(Number(sizeClass![1]) * 4).toBeGreaterThan(32)
   })
 
-  // ★열린 메뉴는 재앵커되지 않는다(메뉴 *안쪽* 클릭)★: SlotContextMenu 는 포털이 아니라 슬롯 래퍼 안에
-  //   마운트돼 서브메뉴 컨테이너 행 클릭이 래퍼까지 버블한다. 재앵커하면 메뉴가 커서 밑으로 점프해 앵커가
-  //   메뉴에 겹치고 이어지는 클릭이 커서 밑 항목을 실행한다. 좌클릭이 메뉴를 열지 않게 된 뒤에도(ADR-0144)
-  //   우클릭으로 연 메뉴 안쪽 클릭에 대해선 이 불변식이 여전히 성립해야 한다.
-  it('열린 메뉴의 "새 콘텐츠" 행 클릭은 메뉴를 다시 앵커하지 않는다', () => {
+  // ★An open menu is not re-anchored (a click *inside* the menu)★: SlotContextMenu is mounted inside the slot wrapper, not a portal,
+  //   so a click on a submenu container row bubbles to the wrapper. Re-anchoring would make the menu jump under the cursor, the anchor would overlap
+  //   the menu and the following click would run the item under the cursor. Even after a left-click stopped opening the menu (ADR-0144)
+  //   this invariant must still hold for clicks inside a menu opened by right-click.
+  it('a click on the "new content" row of an open menu does not re-anchor the menu', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-reanchor', null)} focusedSlotId={null} />)
     rightClickSlot('slot-reanchor', 42, 77)
     fireEvent.click(screen.getByText('새 콘텐츠'), { clientX: 300, clientY: 400 })
@@ -1052,11 +1051,11 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(openedMenu().style.top).toBe(`${77 + ANCHOR_GAP}px`)
   })
 
-  // ★메뉴 *바깥*(슬롯 여백) 좌클릭은 메뉴를 닫을 뿐, 새 좌표로 다시 열지 않는다(ADR-0144)★: SlotContextMenu
-  //   의 바깥닫기는 여전히 `mousedown` 에서 먼저 돌아 상태를 비운다(ADR-0143 시절과 동일). 달라진 건 그
-  //   다음이다 — 좌클릭이 더는 메뉴를 열지 않으므로(위 "메뉴는 우클릭 전용" 섹션) 바깥 클릭 뒤 메뉴는 새
-  //   좌표로 옮겨 열리지 않고 닫힌 채로 남는다.
-  it('열린 메뉴 밖(슬롯 여백) 좌클릭은 메뉴를 닫고 새 좌표로 다시 열지 않는다', () => {
+  // ★A left-click *outside* the menu (slot margin) only closes the menu and does not reopen it at new coordinates (ADR-0144)★: SlotContextMenu's
+  //   outside-close still runs first on `mousedown` and clears the state (same as in the ADR-0143 days). What changed is what comes
+  //   after — a left-click no longer opens the menu (the "menu is right-click only" section above), so after an outside click the menu is not
+  //   moved open at new coordinates and stays closed.
+  it('a left-click outside the open menu (slot margin) closes the menu and does not reopen it at new coordinates', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-move', null)} focusedSlotId={null} />)
     rightClickSlot('slot-move', 42, 77)
     expect(openedMenu().style.left).toBe(`${42 + ANCHOR_GAP}px`)
@@ -1066,59 +1065,59 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  it('우클릭으로 열린 메뉴의 "가로 분할"도 같은 command 경로로 split(…, "top_bottom") 을 부른다', () => {
+  it('"split horizontally" of a menu opened by right-click also calls split(…, "top_bottom") through the same command path', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-lc2', null)} focusedSlotId={null} />)
     rightClickSlot('slot-lc2', 8, 9)
     fireEvent.click(screen.getByText('가로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-lc2', 'top_bottom')
   })
 
-  // ★좌클릭은 어느 슬롯 타입도 메뉴를 열지 않는다(ADR-0144)★: 터미널 입력·트리 노드 선택
-  //   클릭 위에 메뉴가 뜨면 그 슬롯들이 가진 자기 클릭 의미를 덮는다. 빈 슬롯도 이제 같은 규칙이고(그
-  //   케이스는 focusSlot 과 함께 위 click-to-focus 게이트 스위트가 검증한다) 아래 두 케이스는 제어
-  //   슬롯 몫이다('가로 분할'은 콘텐츠 종류와 무관한 공통 항목이라 "메뉴가 떴는지"의 판별자로 쓴다).
-  it('agent(터미널) 슬롯 좌클릭은 메뉴를 열지 않는다', () => {
+  // ★A left-click opens no menu for any slot type (ADR-0144)★: a menu over terminal input or tree node selection
+  //   clicks would cover the click meaning those slots have. An empty slot now follows the same rule (that
+  //   case is verified with focusSlot by the click-to-focus gate suite above) and the two cases below are the control
+  //   slots' share ('split horizontally' is a common item independent of content kind, so it serves as the discriminator of "did a menu appear").
+  it('a left-click on an agent (terminal) slot does not open a menu', () => {
     seedAgents(agentInfo('a-lc', false))
     render(<ViewLayoutRenderer node={slotNode('slot-agent-lc', 'a-lc')} focusedSlotId={null} />)
     leftClickSlot('slot-agent-lc', 20, 30)
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  it('agent_list(트리) 슬롯 좌클릭은 메뉴를 열지 않는다', () => {
+  it('a left-click on an agent_list (tree) slot does not open a menu', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('slot-tree-lc', { type: 'agent_list' })} focusedSlotId={null} />)
     leftClickSlot('slot-tree-lc', 20, 30)
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  // ★라벨↔방향 결선(ADR-0140 = vim 관례)★: 가로줄이 생겨 위/아래로 나뉜다 → top_bottom. 뒤집히면
-  //   사용자가 고른 관례가 깨진다(tmux 축 관례로 회귀).
-  it('"가로 분할" → split(viewId, slotId, "top_bottom") 호출(§5 command 경로)', () => {
+  // ★Label ↔ direction wiring (ADR-0140 = vim convention)★: a horizontal line appears and splits up/down → top_bottom. If reversed
+  //   the convention the user chose breaks (regresses to the tmux axis convention).
+  it('"split horizontally" → calls split(viewId, slotId, "top_bottom") (§5 command path)', () => {
     openMenu('slot-A', null)
     fireEvent.click(screen.getByText('가로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-A', 'top_bottom')
   })
 
-  it('"세로 분할" → split(viewId, slotId, "left_right") 호출', () => {
+  it('"split vertically" → calls split(viewId, slotId, "left_right")', () => {
     openMenu('slot-B', null)
     fireEvent.click(screen.getByText('세로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-B', 'left_right')
   })
 
-  it('"닫기" → closeSlot(viewId, slotId) 호출', () => {
+  it('"close" → calls closeSlot(viewId, slotId)', () => {
     openMenu('slot-C', null)
     fireEvent.click(screen.getByText('닫기'))
     expect(closeSlotSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-C')
   })
 
-  // ── ★empty fill-ops(ADR-0063/0064/0065)★: "새 콘텐츠" flyout 안 → setSlotContent(view, slot, {type}) ──
-  it('"에이전트 트리 열기"(flyout) → setSlotContent(viewId, slotId, {type:agent_list})', () => {
+  // ── ★empty fill-ops (ADR-0063/0064/0065)★: inside the "new content" flyout → setSlotContent(view, slot, {type}) ──
+  it('"open agent tree" (flyout) → setSlotContent(viewId, slotId, {type:agent_list})', () => {
     openMenu('slot-T', null)
     openNewContentFlyout()
     fireEvent.click(screen.getByText('에이전트 트리 열기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-T', { type: 'agent_list' })
   })
 
-  it('"사용량 한도 열기"(flyout) → setSlotContent(viewId, slotId, {type:usage, 두 회사 켬})', () => {
+  it('"open usage limits" (flyout) → setSlotContent(viewId, slotId, {type:usage, both companies on})', () => {
     openMenu('slot-W', null)
     openNewContentFlyout()
     fireEvent.click(screen.getByText('사용량 한도 열기'))
@@ -1129,8 +1128,8 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     })
   })
 
-  // ── 사용량 슬롯 — 우클릭 메뉴엔 사용량 항목이 없다(사용자 결정 2026-09-29 — ⟳ 는 작은 표시, 표시 토글은 팝업) ──
-  it('사용량 슬롯 우클릭 → 사용량 항목(⟳ · 회사 표시) 없이 공통 슬롯 ops 만 · UsageSlot 은 이 슬롯 좌표를 받는다', () => {
+  // ── Usage slot — the right-click menu has no usage items (user decision 2026-09-29 — ⟳ is a small indicator, display toggles are in the popup) ──
+  it('right-click on a usage slot → only common slot ops without usage items (⟳ · company display) · UsageSlot receives this slot coordinates', () => {
     render(
       <ViewLayoutRenderer
         node={contentSlotNode('slot-U1', { type: 'usage', show_claude: true, show_codex: false })}
@@ -1148,43 +1147,41 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(usage.getAttribute('data-slot-id')).toBe('slot-U1')
   })
 
-  it('빈 슬롯엔 "비우기"가 없다(ADR-0065 hideOn:["empty"] 트림 — 이미 빈 슬롯 재비우기는 no-op)', () => {
+  it('an empty slot has no "clear" (ADR-0065 hideOn:["empty"] trim — re-clearing an already empty slot is a no-op)', () => {
     openMenu('slot-V', null)
     expect(screen.queryByText('비우기')).toBeNull()
   })
 
-  it('viewIdOverride 있으면 "에이전트 트리 열기"(flyout)가 오버라이드 view 로 setSlotContent 를 부른다', () => {
+  it('with viewIdOverride, "open agent tree" (flyout) calls setSlotContent with the override view', () => {
     openMenu('slot-to', null, POPUP_VIEW)
     openNewContentFlyout()
     fireEvent.click(screen.getByText('에이전트 트리 열기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-to', { type: 'agent_list' })
   })
 
-  // ADR-0067: "에이전트 생성"(slot.createAgentHere)은 슬롯 콘텐츠-채움 메뉴에서 제거됐다(스폰 = 트리
-  //   소관). command 정의는 남지만 이 메뉴 경로가 없어져 옛 flyout spawn 테스트 2개는 삭제했다 —
-  //   command 직접 라우팅 회귀는 slotCommands.test.ts 가 계속 커버한다.
+  // ADR-0067: the slot content-fill menu has no spawn path; direct command routing is covered by slotCommands.test.ts.
 
-  // ── ★agent 슬롯: 콘텐츠 전용 "에이전트 종료" + 공통 ops 공존(ADR-0064)★ ──────────────────────
-  it('agent 배정 슬롯 우클릭 → "에이전트 종료"(콘텐츠) 클릭 시 killAgent(그 agentId) 호출', () => {
+  // ── ★agent slot: content-specific "kill agent" + common ops coexist (ADR-0064)★ ──────────────────────
+  it('right-click on an agent-assigned slot → clicking "kill agent" (content) calls killAgent(that agentId)', () => {
     openMenu('slot-E', 'assigned-agent')
     fireEvent.click(screen.getByText('에이전트 종료'))
     expect(clientMock.killAgent).toHaveBeenCalledWith('assigned-agent')
   })
 
-  it('agent 슬롯에도 공통 슬롯 ops(닫기·분할·팝업)가 함께 뜬다(공통 소실 버그 방지)', () => {
+  it('an agent slot also shows the common slot ops (close · split · popup) (prevents the common-loss bug)', () => {
     openMenu('slot-E2', 'some-agent')
-    expect(screen.getByText('에이전트 종료')).toBeTruthy() // 콘텐츠
-    expect(screen.getByText('닫기')).toBeTruthy() // 공통
-    expect(screen.getByText('팝업으로 분리')).toBeTruthy() // 공통(agent 게이팅 제거)
+    expect(screen.getByText('에이전트 종료')).toBeTruthy()
+    expect(screen.getByText('닫기')).toBeTruthy()
+    expect(screen.getByText('팝업으로 분리')).toBeTruthy()
   })
 
-  it('빈 슬롯 메뉴엔 "에이전트 종료"가 없다(agent 전용 콘텐츠 항목)', () => {
+  it('an empty-slot menu has no "kill agent" (agent-only content item)', () => {
     openMenu('slot-empty-x', null)
     expect(screen.queryByText('에이전트 종료')).toBeNull()
   })
 
-  // ── TRD S21-storage §6-8: 「대상 없음」·부재 막 슬롯 = 배정 유지 + 에이전트 슬롯 메뉴 그대로(사용자 결정 2026-10-06) ──
-  it('「대상 없음」 슬롯 우클릭 → 에이전트 슬롯 메뉴 그대로 — 「비우기」로 그 슬롯을 비운다', () => {
+  // ── TRD S21-storage §6-8: 「no target」 · absence-veil slot = assignment kept + the agent slot menu as is (user decision 2026-10-06) ──
+  it('right-click on a 「no target」 slot → the agent slot menu as is — "clear" empties that slot', () => {
     agentStoreState.agentsLoaded = true
     agentStoreState.profilesLoaded = true
     openMenu('slot-NT', 'deleted-agent')
@@ -1196,7 +1193,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-NT', { type: 'empty' })
   })
 
-  it('부재 막 슬롯(프로필 있음 · 실행 중 아님) 메뉴도 에이전트 슬롯 메뉴 그대로다(「비우기」 있음)', () => {
+  it('the menu of an absence-veil slot (profile present · not running) is also the agent slot menu as is ("clear" present)', () => {
     agentStoreState.agentsLoaded = true
     agentStoreState.profilesLoaded = true
     agentStoreState.profiles = [{ id: 'stopped-x', name: 'stopped-x', cwd: '/tmp', display_name: null, parent_id: null, created_at: 0, epoch: 1 }]
@@ -1207,8 +1204,8 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.queryByText('새 콘텐츠')).toBeNull()
   })
 
-  // TRD S21-storage §6-2: 모르는 내용 슬롯도 빈 슬롯 메뉴로 다른 내용을 **명시적으로** 놓을 수 있다(원문 버림은 셸 몫).
-  it('모르는 내용 슬롯 우클릭 → 빈 슬롯 메뉴 → 채움이 그 슬롯에 놓인다', () => {
+  // TRD S21-storage §6-2: an unknown content slot can also have other content placed **explicitly** via the empty-slot menu (discarding the original is the shell's job).
+  it('right-click on an unknown content slot → empty-slot menu → the fill is placed on that slot', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-F', null)} focusedSlotId={null} foreignSlots={['slot-F']} />)
     fireEvent.contextMenu(frameOf('slot-F'))
     expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
@@ -1217,41 +1214,41 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-F', { type: 'agent_list' })
   })
 
-  // ── ★"팝업으로 분리" = 공통(ADR-0064)★: 빈 슬롯 포함 콘텐츠 종류와 무관하게 뜨고(ADR-0228) (viewId, slotId)로 move. ──
-  it('"팝업으로 분리"(공통, 비-empty) → moveSlotToWindow(viewId, slotId) 호출', () => {
+  // ── ★"detach to popup" = common (ADR-0064)★: shown regardless of content kind including empty (ADR-0228) and moves (viewId, slotId). ──
+  it('"detach to popup" (common, non-empty) → calls moveSlotToWindow(viewId, slotId)', () => {
     openMenu('slot-P', 'agent-p')
     fireEvent.click(screen.getByText('팝업으로 분리'))
     expect(moveSlotToWindowSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-P')
   })
 
-  it('빈 슬롯의 "팝업으로 분리" → moveSlotToWindow(viewId, slotId) 호출 (ADR-0228)', () => {
+  it('"detach to popup" of an empty slot → calls moveSlotToWindow(viewId, slotId) (ADR-0228)', () => {
     openMenu('slot-PE', null)
     fireEvent.click(screen.getByText('팝업으로 분리'))
     expect(moveSlotToWindowSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-PE')
   })
 
-  // ── ★viewIdOverride 스레딩★ — 팝업 창 경로는 activeViewId(=main) 대신 넘겨받은 view 로 액션한다 ──
-  // ViewLayoutRenderer 가 ctx.viewId = viewIdOverride ?? currentViewId 로 조립해 command.run 에 넘긴다.
-  it('viewIdOverride 있으면 "가로 분할"이 오버라이드 view 로 split 을 부른다', () => {
+  // ── ★viewIdOverride threading★ — the popup window path acts on the view passed in instead of activeViewId(=main) ──
+  // ViewLayoutRenderer assembles ctx.viewId = viewIdOverride ?? currentViewId and passes it to command.run.
+  it('with viewIdOverride, "split horizontally" calls split with the override view', () => {
     openMenu('slot-po', null, POPUP_VIEW)
     fireEvent.click(screen.getByText('가로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-po', 'top_bottom')
     expect(splitSpy).not.toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-po', 'top_bottom')
   })
 
-  it('viewIdOverride 있으면 "닫기"가 오버라이드 view 로 closeSlot 을 부른다', () => {
+  it('with viewIdOverride, "close" calls closeSlot with the override view', () => {
     openMenu('slot-pc', null, POPUP_VIEW)
     fireEvent.click(screen.getByText('닫기'))
     expect(closeSlotSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-pc')
   })
 
-  it('viewIdOverride 있으면 "팝업으로 분리"가 오버라이드 view 로 moveSlotToWindow 를 부른다', () => {
+  it('with viewIdOverride, "detach to popup" moves with the override view through moveSlotToWindow', () => {
     openMenu('slot-pp', 'po-agent', POPUP_VIEW)
     fireEvent.click(screen.getByText('팝업으로 분리'))
     expect(moveSlotToWindowSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-pp')
   })
 
-  it('viewIdOverride 없으면(메인 창 경로) 종전대로 activeViewId 로 폴백한다(하위호환)', () => {
+  it('without viewIdOverride (main window path) it falls back to activeViewId as before (backward compatible)', () => {
     openMenu('slot-main', null)
     fireEvent.click(screen.getByText('가로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-main', 'top_bottom')

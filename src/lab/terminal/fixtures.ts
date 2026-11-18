@@ -19,6 +19,7 @@ const W = 86
 const bar = '─'.repeat(W)
 const pad = (s: string, visibleLen: number) => s + ' '.repeat(Math.max(0, W - visibleLen))
 
+// hangul-ok-begin — the Hangul (double-width) text inside the box is part of the width-breakage sample
 export const ansiWelcomeSample =
   `${C.cyan}╭${bar}╮${C.reset}\r\n` +
   `${C.cyan}│${C.reset}${pad(`  ${C.yellow}Claude Code${C.reset}  ${C.dim}v2.1 — RichSlot Lab terminal fixture${C.reset}`, 2 + 11 + 2 + 36)}${C.cyan}│${C.reset}\r\n` +
@@ -29,3 +30,4 @@ export const ansiWelcomeSample =
   `\r\n` +
   `${C.dim}$ ${C.reset}echo "리사이즈 시 fit→onResize 전파 + reflow 확인"\r\n` +
   `리사이즈 시 fit→onResize 전파 + reflow 확인\r\n`
+// hangul-ok-end

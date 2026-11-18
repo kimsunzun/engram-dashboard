@@ -1,6 +1,6 @@
-//! ③ reaper 종료 분류 통합테스트 — 실 셸 spawn 으로 ADR-0019 disposition 을 단언 검증.
+//! ③ reaper exit classification integration test — asserts the ADR-0019 disposition with real shell spawns.
 //!
-//! 셸을 띄우는 앞쪽 네 테스트도 단일 spawn(named-mutex/전역 경합 없음)이라 default 로 둔다.
+//! The first four shell-launching tests are single spawns (no named-mutex/global contention), left as default.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -97,7 +97,7 @@ fn exit_profile(code: i32) -> AgentProfile {
     )
 }
 
-// ── 자연 종료(exit 0) ────────────────────────────────────────────────────────
+// ── Natural exit (exit 0) ────────────────────────────────────────────────────────
 #[test]
 fn natural_exit_zero_reaps_and_keeps_profile_corpse() {
     let (manager, sink, profiles) = make_manager("exit0");
@@ -109,7 +109,7 @@ fn natural_exit_zero_reaps_and_keeps_profile_corpse() {
         .spawn_agent(&profile, SpawnMode::Fresh)
         .expect("spawn failed")
         .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        .expect("this call actually launches (not a duplicate request)");
 
     let removed = wait_until(Duration::from_secs(15), || manager.list_agents().is_empty());
     if !removed {
@@ -119,24 +119,27 @@ fn natural_exit_zero_reaps_and_keeps_profile_corpse() {
             agents.iter().map(|a| &a.status).collect::<Vec<_>>()
         );
     }
-    assert!(removed, "exit0: reaper 가 세션을 맵에서 제거하지 못함");
+    assert!(
+        removed,
+        "exit0: the reaper did not remove the session from the map"
+    );
     assert!(
         wait_until(Duration::from_secs(2), || {
             profiles.get(id).map(|p| !p.auto_restore).unwrap_or(false)
         }),
-        "exit0: 정상 종료 시체는 프로필 유지 + auto_restore=false 여야 함(ADR-0083 — 삭제 아님)"
+        "exit0: a corpse of a normal exit must keep the profile + auto_restore=false (ADR-0083 — not deleted)"
     );
     assert!(
         profiles.get(id).is_some(),
-        "exit0: 정상 종료인데 프로필이 삭제됨 — 시체로 보존돼야 함(ADR-0083)"
+        "exit0: a normal exit but the profile was deleted — it must be kept as a corpse (ADR-0083)"
     );
     assert!(
         sink.list_update_count() > updates_before,
-        "exit0: reaper 가 agent_list_updated 를 통지하지 않음"
+        "exit0: the reaper did not notify agent_list_updated"
     );
 }
 
-// ── 크래시(exit 1) ───────────────────────────────────────────────────────────
+// ── Crash (exit 1) ───────────────────────────────────────────────────────────
 #[test]
 fn crash_exit_one_keeps_profile_disables_auto_restore() {
     let (manager, _sink, profiles) = make_manager("exit1");
@@ -147,29 +150,28 @@ fn crash_exit_one_keeps_profile_disables_auto_restore() {
         .spawn_agent(&profile, SpawnMode::Fresh)
         .expect("spawn failed")
         .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        .expect("this call actually launches (not a duplicate request)");
 
     assert!(
         wait_until(Duration::from_secs(5), || manager.list_agents().is_empty()),
-        "exit1: reaper 가 세션을 제거하지 못함"
+        "exit1: the reaper did not remove the session"
     );
     assert!(
         wait_until(Duration::from_secs(2), || {
             profiles.get(id).map(|p| !p.auto_restore).unwrap_or(false)
         }),
-        "exit1: 크래시 후 프로필 유지 + auto_restore=false 가 아님(존재해야 하며 false 여야 함)"
+        "exit1: after a crash it is not profile kept + auto_restore=false (it must exist and be false)"
     );
     assert!(
         profiles.get(id).is_some(),
-        "exit1: 크래시인데 프로필이 삭제됨(유지돼야 함)"
+        "exit1: a crash but the profile was deleted (it must be kept)"
     );
 }
 
-// ── 유저 kill ────────────────────────────────────────────────────────────────
+// ── User kill ────────────────────────────────────────────────────────────────
 #[test]
 fn user_kill_keeps_profile_corpse_with_session_id() {
     let (manager, _sink, profiles) = make_manager("userkill");
-    // 오래 사는 셸(즉시 종료 금지) — kill 로만 끝나게.
     let profile = AgentProfile::new(
         "reaper-kill".into(),
         AgentCommand::Shell {
@@ -178,49 +180,49 @@ fn user_kill_keeps_profile_corpse_with_session_id() {
         },
         PathBuf::from("."),
         vec![],
-        true, // auto_restore=true 로 시작 → kill 수거가 false 로 다운그레이드하는지 단언 가능.
+        true, // start with auto_restore=true → can assert whether the kill collection downgrades it to false.
     );
     let id = profile.id;
     let sid = Uuid::new_v4();
     let mut seeded = profile.clone();
     seeded.backend_session_id = Some(sid);
-    profiles.try_upsert(seeded.clone()).expect("저장 성공");
+    profiles.try_upsert(seeded.clone()).expect("save succeeds");
 
     let info = manager
         .spawn_agent(&seeded, SpawnMode::Fresh)
         .expect("spawn failed")
         .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        .expect("this call actually launches (not a duplicate request)");
 
     assert!(
         wait_until(Duration::from_secs(2), || manager.list_agents().len() == 1),
-        "userkill: spawn 직후 세션이 없음"
+        "userkill: no session right after spawn"
     );
 
     manager.kill_agent(info.id).expect("kill_agent failed");
 
     assert!(
         wait_until(Duration::from_secs(5), || manager.list_agents().is_empty()),
-        "userkill: reaper 가 세션을 맵에서 제거하지 못함"
+        "userkill: the reaper did not remove the session from the map"
     );
     assert!(
         wait_until(Duration::from_secs(2), || {
             profiles.get(id).map(|p| !p.auto_restore).unwrap_or(false)
         }),
-        "userkill: 유저 kill 시체는 프로필 유지 + auto_restore=false 여야 함(ADR-0083 — 삭제 아님)"
+        "userkill: a corpse of a user kill must keep the profile + auto_restore=false (ADR-0083 — not deleted)"
     );
     assert!(
         profiles.get(id).is_some(),
-        "userkill: 유저 kill 인데 프로필이 삭제됨 — 시체로 보존돼야 함(ADR-0083)"
+        "userkill: a user kill but the profile was deleted — it must be kept as a corpse (ADR-0083)"
     );
     assert_eq!(
         profiles.get(id).and_then(|p| p.backend_session_id),
         Some(sid),
-        "userkill: backend_session_id 가 유실됨 — 재활성화 resume 불가(ADR-0083 회귀)"
+        "userkill: backend_session_id was lost — reactivation cannot resume (ADR-0083 regression)"
     );
 }
 
-// ── shutdown_all 중 종료 ─────────────────────────────────────────────────────
+// ── Exit during shutdown_all ─────────────────────────────────────────────────────
 #[test]
 fn shutdown_all_keeps_profiles_for_boot_restore() {
     let (manager, _sink, profiles) = make_manager("shutdown");
@@ -239,33 +241,33 @@ fn shutdown_all_keeps_profiles_for_boot_restore() {
         .spawn_agent(&profile, SpawnMode::Fresh)
         .expect("spawn failed")
         .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        .expect("this call actually launches (not a duplicate request)");
     assert!(
         wait_until(Duration::from_secs(2), || manager.list_agents().len() == 1),
-        "shutdown: spawn 직후 세션이 없음"
+        "shutdown: no session right after spawn"
     );
 
     assert!(
         profiles.get(id).map(|p| p.auto_restore).unwrap_or(false),
-        "shutdown: spawn 후 auto_restore 가 true 가 아님(활성화 규칙)"
+        "shutdown: auto_restore is not true after spawn (activation rule)"
     );
 
     manager.shutdown_all();
 
     assert!(
         wait_until(Duration::from_secs(5), || manager.list_agents().is_empty()),
-        "shutdown: 세션 맵 제거 실패"
+        "shutdown: session map removal failed"
     );
     let p = profiles
         .get(id)
-        .expect("shutdown: 프로필이 삭제됨(유지돼야 함)");
+        .expect("shutdown: the profile was deleted (it must be kept)");
     assert!(
         p.auto_restore,
-        "shutdown: auto_restore 가 false 로 떨어짐 — 부팅 복원 대상에서 탈락(KeepAsIs 위반)"
+        "shutdown: auto_restore dropped to false — dropped from boot restore targets (KeepAsIs violation)"
     );
 }
 
-// ── 결정적 reap_one 단언(타이밍 무관) ─────────────────────────────────────────────
+// ── Deterministic reap_one assertions (timing-independent) ─────────────────────────────────────────────
 
 fn make_reaper_deps(tag: &str) -> (Arc<ProfileRegistry>, CountingSink, ReaperDeps) {
     let sink = CountingSink::new();
@@ -285,7 +287,7 @@ fn make_reaper_deps(tag: &str) -> (Arc<ProfileRegistry>, CountingSink, ReaperDep
     (profiles, sink, deps)
 }
 
-/// ApiTransport(껍데기)를 끼워 실 자원·pump 없이 맵에 넣는 세션 — start/kill 을 부르지 않는다.
+/// A session put into the map with an ApiTransport (stub) plugged in, without real resources or a pump — start/kill are not called.
 fn make_test_session(
     id: AgentId,
     epoch: u32,
@@ -298,7 +300,7 @@ fn make_test_session(
         TurnWiring::detached(),
     ));
     let intent = Arc::new(AtomicU8::new(TerminationIntent::None as u8));
-    // ApiTransport 라 caps 내용은 무관 — 합성 경로를 만족시키는 더미로 셸 caps 를 넣는다.
+    // It is ApiTransport, so the caps content is irrelevant — the shell caps are put in as a dummy satisfying the composition path.
     let shell_cmd = engram_dashboard_agent::profile::AgentCommand::Shell {
         program: "cmd.exe".into(),
         args: vec![],
@@ -311,10 +313,9 @@ fn make_test_session(
         24,
         intent,
         ShellBackend.capabilities(&shell_cmd),
-        // 이 테스트 세션은 write_input 을 안 쓰지만 생성자가 encoder 를 요구 → Raw 더미.
         engram_dashboard_agent::backend::InputEncoder::Raw,
-        // ★리터럴로 쓰지 마라★: "산 세션 값 == 백엔드 파생값" 이 우편 자격 방어의 전제라, 하네스가
-        //   실물과 반대값을 들면 그 전제가 인트리에서 먼저 깨진다. 같은 명령에서 파생시킨다.
+        // ★Do not write it as a literal★: "live session value == backend-derived value" is the premise of the mail eligibility defense, so
+        //   a harness holding the opposite of the real thing would break that premise in-tree first. Derived from the same command.
         engram_dashboard_agent::backend::reads_messages(&shell_cmd),
         core,
         Box::new(ApiTransport::new()),
@@ -327,21 +328,20 @@ fn epoch_mismatch_does_not_reap_current_session() {
     let (profiles, sink, deps) = make_reaper_deps("epoch-race");
     let id = Uuid::new_v4();
 
-    // epoch=1 = 재spawn 으로 표식이 갈린 "현재" 세션(값 자체엔 뜻이 없다 — 0 과 다르기만 하면 된다).
+    // epoch=1 = the "current" session whose marker changed by respawn (the value itself has no meaning — it only needs to differ from 0).
     let status_dyn: Arc<dyn StatusSink> = Arc::new(sink.clone());
     let session = make_test_session(id, 1, status_dyn);
     deps.sessions.write().unwrap().insert(id, session);
 
-    // 프로필은 어느 처분이든 보존되므로 존재 여부론 구분이 안 된다 — auto_restore=true 로 두고
-    //   잘못된 다운그레이드가 일어나는지로 판정한다.
+    // The profile is kept under any disposition, so existence cannot tell them apart — set auto_restore=true and decide by whether a wrong
+    //   downgrade happens.
     let mut profile = exit_profile(0);
     profile.id = id;
     profile.auto_restore = true;
-    profiles.try_upsert(profile).expect("저장 성공");
+    profiles.try_upsert(profile).expect("save succeeds");
 
     let updates_before = sink.list_update_count();
 
-    // 늦게 도착한 옛 epoch=0 의 유령 done.
     let stale = ReapMsg {
         id,
         epoch: 0,
@@ -353,16 +353,16 @@ fn epoch_mismatch_does_not_reap_current_session() {
 
     assert!(
         deps.sessions.read().unwrap().contains_key(&id),
-        "epoch race: epoch 불일치 done 이 현재(epoch=1) 세션을 잘못 제거함"
+        "epoch race: an epoch-mismatched done wrongly removed the current (epoch=1) session"
     );
     assert!(
         profiles.get(id).map(|p| p.auto_restore).unwrap_or(false),
-        "epoch race: epoch 불일치인데 disposition(auto_restore 다운그레이드)이 적용됨"
+        "epoch race: an epoch mismatch but the disposition (auto_restore downgrade) was applied"
     );
     assert_eq!(
         sink.list_update_count(),
         updates_before,
-        "epoch race: epoch 불일치인데 agent_list_updated 통지가 발생함"
+        "epoch race: an epoch mismatch but an agent_list_updated notification happened"
     );
 }
 
@@ -376,11 +376,11 @@ fn duplicate_reap_processes_exactly_once() {
     let session = make_test_session(id, 0, status_dyn);
     deps.sessions.write().unwrap().insert(id, session);
 
-    // auto_restore=true 라야 1회차 다운그레이드가 관측된다.
+    // auto_restore=true is needed for the first downgrade to be observed.
     let mut profile = exit_profile(0);
     profile.id = id;
     profile.auto_restore = true;
-    profiles.try_upsert(profile).expect("저장 성공");
+    profiles.try_upsert(profile).expect("save succeeds");
 
     let updates_before = sink.list_update_count();
 
@@ -395,36 +395,36 @@ fn duplicate_reap_processes_exactly_once() {
     deps.reap_one(done.clone());
     assert!(
         !deps.sessions.read().unwrap().contains_key(&id),
-        "idempotency: 1회차에 세션이 맵에서 제거되지 않음"
+        "idempotency: on the first round the session was not removed from the map"
     );
     assert!(
         profiles.get(id).map(|p| !p.auto_restore).unwrap_or(false),
-        "idempotency: 1회차에 disposition(프로필 유지 + auto_restore=false)이 적용되지 않음"
+        "idempotency: on the first round the disposition (profile kept + auto_restore=false) was not applied"
     );
     assert_eq!(
         sink.list_update_count(),
         updates_before + 1,
-        "idempotency: 1회차 통지가 정확히 1회가 아님"
+        "idempotency: the first round's notification is not exactly once"
     );
 
-    // 2회차 no-op 의 실제 근거는 맵 조회 실패다 — epoch 검사 구간에서 그대로 return 한다.
+    // The real ground of the second round's no-op is the map lookup failure — it returns as is at the epoch check section.
     deps.reap_one(done);
     assert_eq!(
         sink.list_update_count(),
         updates_before + 1,
-        "idempotency: 2회차 중복 reap 이 통지를 추가로 발생시킴(정확히 1회 위반)"
+        "idempotency: the second duplicate reap caused an extra notification (violates exactly once)"
     );
     assert!(
         profiles.get(id).map(|p| !p.auto_restore).unwrap_or(false),
-        "idempotency: 2회차에 프로필 상태가 흔들림(유지 + auto_restore=false 여야 함)"
+        "idempotency: on the second round the profile state wavered (must be kept + auto_restore=false)"
     );
 }
 
 // ── ADR-0084 apply_disposition epoch-guard ───────────────────────────────────
 //
-// ★맵을 비워두고 reap_one 을 부르면 안 된다★ — epoch=0 세션을 맵에 남겨 sessions.remove 를
-//   통과시켜야 apply_disposition 까지 도달한다. remove 가드는 **세션** epoch 를, disposition 가드는
-//   **프로필** epoch 를 보므로, 세션은 맞추고 프로필만 1 로 올려 후자만 불일치시킨다.
+// ★Do not call reap_one with the map empty★ — the epoch=0 session must stay in the map to pass sessions.remove and reach
+//   apply_disposition. The remove guard looks at the **session** epoch and the disposition guard at the **profile** epoch, so the session
+//   matches and only the profile is raised to 1.
 #[test]
 fn stale_disposition_does_not_downgrade_reactivated_live_session() {
     let (profiles, _sink, deps) = make_reaper_deps("disp-epoch-guard");
@@ -434,14 +434,13 @@ fn stale_disposition_does_not_downgrade_reactivated_live_session() {
     let dead = make_test_session(id, 0, status_dyn);
     deps.sessions.write().unwrap().insert(id, dead);
 
-    // 재활성화가 일어난 산 세션을 모사 — auto_restore=true 라야 잘못된 강등이 드러난다.
+    // Imitates a live session where reactivation happened — auto_restore=true is needed for a wrong downgrade to show.
     let mut profile = exit_profile(0);
     profile.id = id;
-    profile.epoch = 1; // 재활성화로 화신 표식이 갈린 상태(reaped_epoch=0 과 불일치).
+    profile.epoch = 1; // the state where the incarnation marker changed by reactivation (mismatching reaped_epoch=0).
     profile.auto_restore = true;
-    profiles.try_upsert(profile).expect("저장 성공");
+    profiles.try_upsert(profile).expect("save succeeds");
 
-    // 옛 reap(reaped_epoch=0)이 뒤늦게 도착.
     let stale = ReapMsg {
         id,
         epoch: 0,
@@ -453,11 +452,11 @@ fn stale_disposition_does_not_downgrade_reactivated_live_session() {
 
     assert!(
         profiles.get(id).map(|p| p.auto_restore).unwrap_or(false),
-        "ADR-0084: epoch 불일치(재활성화) stale reap 이 산 세션 auto_restore 를 강등하면 안 됨"
+        "ADR-0084: an epoch-mismatched (reactivated) stale reap must not downgrade the live session's auto_restore"
     );
 }
 
-// ── ADR-0084 대조군(epoch 일치) ───────────────────────────────────────────────
+// ── ADR-0084 control group (epoch match) ───────────────────────────────────────────────
 #[test]
 fn matching_epoch_disposition_downgrades_as_before() {
     let (profiles, _sink, deps) = make_reaper_deps("disp-epoch-match");
@@ -469,9 +468,9 @@ fn matching_epoch_disposition_downgrades_as_before() {
 
     let mut profile = exit_profile(0);
     profile.id = id;
-    profile.epoch = 0; // 재활성화 없음 → reaped_epoch=0 과 일치.
+    profile.epoch = 0; // no reactivation → matches reaped_epoch=0.
     profile.auto_restore = true;
-    profiles.try_upsert(profile).expect("저장 성공");
+    profiles.try_upsert(profile).expect("save succeeds");
 
     let done = ReapMsg {
         id,
@@ -484,6 +483,6 @@ fn matching_epoch_disposition_downgrades_as_before() {
 
     assert!(
         profiles.get(id).map(|p| !p.auto_restore).unwrap_or(false),
-        "ADR-0084: epoch 일치 시 정상 종료는 auto_restore 를 false 로 다운그레이드해야 함(가드가 정상 경로를 막지 않음)"
+        "ADR-0084: on an epoch match a normal exit must downgrade auto_restore to false (the guard does not block the normal path)"
     );
 }

@@ -1,13 +1,13 @@
-//! Noop 실행 재료의 argv 골든 — 오늘의 `backend::build_command_spec` 결과(프로그램 · 인자 · env · cwd)를 백엔드 ·
-//! 모드 · 이어받기 · 제어 채널 모양마다 못 박는다. 실행 재료가 없는 스폰의 argv 는 이것과 바이트 같아야 한다
-//! (TRD S25 §1-5). 일부러 바꿀 때만 `regenerate_launch_argv_golden` 으로 다시 뜬다.
+//! argv golden of Noop launch materials — pins today's `backend::build_command_spec` result (program · args · env · cwd) per backend ·
+//! mode · resume · control-channel shape. A spawn without launch materials must produce argv byte-identical to this
+//! (TRD S25 §1-5). Regenerate with `regenerate_launch_argv_golden` only for an intended change.
 //!
-//! ★argv 만 잰다(`build_command_spec` 을 직접 부른다)★ — manager 의 스폰 길(활성화 · 깨우기 · 즉석 생성)이 같은
-//! argv 를 내는지는 manager 수준 Noop 회귀(`src/manager/prelaunch.rs` 시험)가 이 골든에 견준다(TRD S25 §5-2 4).
+//! ★Measures argv only (calls `build_command_spec` directly)★ — whether the manager's spawn paths (activation · wake-up · on-the-spot
+//! creation) produce the same argv is checked against this golden by the manager-level Noop regression (`src/manager/prelaunch.rs` tests) (TRD S25 §5-2 4).
 //!
-//! OS 가 가르는 둘은 골든에 OS 중립으로 적는다 — 콘솔 감싸기(`console` 칸 · 견줄 때 platform `console_command` 로
-//! 다시 감싼다)와 PATH 구분자(`;` 로 적는다). 고정 경로는 `/` 로만 적어 두 OS 에서 같은 글자다. 그래서 다시 뜨기는
-//! 감싸기가 보이는 OS(Windows)에서만 된다.
+//! The two things the OS decides are written OS-neutral in the golden — console wrapping (the `console` field · re-wrapped with platform
+//! `console_command` when comparing) and the PATH separator (written as `;`). Fixed paths use only `/`, the same text on both OSes. So
+//! regeneration works only on the OS where wrapping is visible (Windows).
 // ADR-0334
 
 use std::path::PathBuf;
@@ -41,7 +41,7 @@ struct GoldenCase {
     cwd: String,
 }
 
-/// (경우 이름, 명령, 제어 채널 꼴마다 (이름 꼬리, 모양)) — 제어 채널 없는 꼴(`no-endpoint`)은 모든 명령이 따로 받는다.
+/// (case name, command, per control-channel shape (name suffix, shape)) — the shape without a control channel (`no-endpoint`) is taken by every command separately.
 type Command = (
     &'static str,
     AgentCommand,
@@ -89,8 +89,8 @@ fn commands() -> Vec<Command> {
             },
             vec![("endpoint", codex_endpoint())],
         ),
-        // shell 은 운영에서 제어 채널을 받지 않는다(`supports_control_channel` = false 라 데몬이 provision 하지 않는다).
-        //   이 `endpoint` 꼴은 운영 모양이 아니라 「shell 은 제어 채널을 무시한다」 를 지키는 표지다.
+        // shell gets no control channel in production (`supports_control_channel` = false, so the daemon does not provision one).
+        //   This `endpoint` shape is not a production shape but a marker guarding 「shell ignores the control channel」.
         (
             "shell",
             AgentCommand::Shell {
@@ -102,14 +102,14 @@ fn commands() -> Vec<Command> {
     ]
 }
 
-/// 즉석 생성 길(wire `SpawnByCwd` — `commands::create_and_start` → `AgentManager::create_and_activate` 로 Fresh ·
-/// 스모크 bin — 명부에 없는 프로필을 `spawn_agent` 로 Fresh)의 명령 모양. env 가
-/// 비어 있어 제어 채널 꼴은 `no-endpoint` 하나만 뜬다 — 제어 채널이 CLI 입구를 PATH 에 넣을 때 이 프로세스의 PATH 를
-/// 읽어 결정적이지 않다.
-// TRD S25 §5-2 4 「골든에 그 두 길을 넣는다」
+/// The command shape of the on-the-spot creation paths (wire `SpawnByCwd` — `commands::create_and_start` → `AgentManager::create_and_activate`
+/// Fresh · smoke bin — a profile not in the roster spawned Fresh with `spawn_agent`). The env is
+/// empty, so only the `no-endpoint` control-channel shape is generated — when a control channel puts the CLI entry on PATH it reads this
+/// process's PATH, which is not deterministic.
+// TRD S25 §5-2 4 「put those two paths in the golden」
 fn spawn_path_commands() -> Vec<(&'static str, AgentCommand)> {
     vec![
-        // `commands::create_and_start` 의 기본 명령 — 받은 백엔드 · 공통 기본 모드 · 인자 없음.
+        // The default command of `commands::create_and_start` — the received backend · the common default mode · no args.
         (
             "spawn-by-cwd/claude",
             AgentCommand::Claude {
@@ -124,7 +124,7 @@ fn spawn_path_commands() -> Vec<(&'static str, AgentCommand)> {
                 output_format: NEW_AGENT_OUTPUT_FORMAT,
             },
         ),
-        // 하네스 bin(`saturation_pilot` 등) — `--model <m>` 을 싣는 claude JSON.
+        // Harness bins (`saturation_pilot` etc.) — claude JSON carrying `--model <m>`.
         (
             "smoke-bin/claude-json",
             AgentCommand::Claude {
@@ -180,10 +180,10 @@ fn codex_endpoint() -> ControlEndpoint {
     }
 }
 
-// PATH 를 넣는 것은 결정성 때문이다 — 없으면 CLI 입구 주입이 이 프로세스의 PATH 를 읽는다.
+// PATH is set for determinism — without it the CLI entry injection reads this process's PATH.
 fn profile_env() -> Vec<(String, String)> {
     let path = std::env::join_paths(["/golden/sys", "/golden/tools"])
-        .expect("고정 PATH")
+        .expect("fixed PATH")
         .into_string()
         .expect("UTF-8");
     vec![
@@ -192,7 +192,7 @@ fn profile_env() -> Vec<(String, String)> {
     ]
 }
 
-/// 경우마다 manager 가 넘기는 꼴 그대로(세션 id 두 칸은 백엔드 축 dispatch 로 가른다).
+/// The shape the manager passes per case as is (the two session id fields are split by backend-axis dispatch).
 fn actual_cases() -> Vec<(String, CommandSpec)> {
     let mut out = Vec::new();
     for (name, command, endpoints) in commands() {
@@ -237,7 +237,7 @@ fn actual_cases() -> Vec<(String, CommandSpec)> {
     out
 }
 
-/// 콘솔 감싸기의 앞머리 — `console_command` 가 감싸는 OS 에서만 `Some((감싼 프로그램, 앞 인자))`.
+/// The console wrapping prefix — `Some((wrapping program, leading args))` only on an OS where `console_command` wraps.
 fn console_wrapper() -> Option<(String, Vec<String>)> {
     const PROBE: &str = "launch-golden-probe";
     let (program, mut args) = console_command(PROBE, Vec::new());
@@ -247,7 +247,7 @@ fn console_wrapper() -> Option<(String, Vec<String>)> {
     assert_eq!(
         args.pop().as_deref(),
         Some(PROBE),
-        "감싼 꼴의 끝 = 감싼 프로그램"
+        "the end of the wrapped form = the wrapped program"
     );
     Some((program, args))
 }
@@ -309,17 +309,17 @@ fn render() -> String {
         .iter()
         .map(|(name, spec)| record(name, spec))
         .collect();
-    serde_json::to_string_pretty(&cases).expect("직렬화") + "\n"
+    serde_json::to_string_pretty(&cases).expect("serialize") + "\n"
 }
 
 #[test]
 fn noop_argv_matches_the_golden() {
-    let golden: Vec<GoldenCase> = serde_json::from_str(GOLDEN).expect("골든은 JSON");
+    let golden: Vec<GoldenCase> = serde_json::from_str(GOLDEN).expect("the golden is JSON");
     let actual = actual_cases();
     assert_eq!(
         golden.iter().map(|g| g.case.as_str()).collect::<Vec<_>>(),
         actual.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
-        "골든의 경우 목록"
+        "the golden's case list"
     );
     let drift: Vec<String> = golden
         .iter()
@@ -329,20 +329,20 @@ fn noop_argv_matches_the_golden() {
         .collect();
     assert!(
         drift.is_empty(),
-        "Noop argv 가 골든과 다르다 — 실행 재료 포트는 Noop 스폰을 바이트 하나 바꾸지 않아야 한다. 일부러 바꾼 것이면 \
-         `regenerate_launch_argv_golden` 으로 다시 뜬다. 지금 값:\n{}",
+        "Noop argv differs from the golden — the launch-material port must not change a Noop spawn by a single byte. If the change is \
+         intended, regenerate with `regenerate_launch_argv_golden`. Current value:\n{}",
         drift.join("\n")
     );
 }
 
 #[test]
-#[ignore = "골든을 다시 뜬다 — Noop argv 를 일부러 바꿨을 때만 돌린다"]
+#[ignore = "regenerates the golden — run only when Noop argv was changed on purpose"]
 fn regenerate_launch_argv_golden() {
     assert!(
         console_wrapper().is_some(),
-        "콘솔 감싸기가 보이는 OS(Windows)에서 다시 뜬다 — 아니면 `console` 칸을 뜰 수 없다"
+        "regenerate on the OS where console wrapping is visible (Windows) — otherwise the `console` field cannot be generated"
     );
     let text = render();
-    assert_eq!(text, render(), "두 번 뜨면 같은 바이트");
-    std::fs::write(GOLDEN_PATH, text).expect("골든 쓰기");
+    assert_eq!(text, render(), "two generations give the same bytes");
+    std::fs::write(GOLDEN_PATH, text).expect("write the golden");
 }

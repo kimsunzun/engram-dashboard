@@ -4,14 +4,14 @@ import type { Capabilities } from "./Capabilities";
 
 export type AgentInfo = { id: string, 
 /**
- * 표시용 이름(ProfileRegistry 단일 진실원, 없으면 id 앞 8자).
+ * Display name (single source of truth is ProfileRegistry; if absent, the first 8 chars of the id).
  */
 name: string, cwd: string, status: AgentStatus, cols: number, rows: number, 
 /**
- * ★화신(incarnation) 하나를 가리키는 **불투명 표식**★ — 화신마다 새로 뽑은 난수라 **순서에 뜻이
- * 없다**. 비교는 일치/불일치만 쓴다(대소로 "더 새 것" 을 유도하지 말 것, ADR-0163). 받는 쪽은 이
- * 값으로 "지금 읽는 출력 스트림이 아까 그 스트림인가" 를 판정한다 — 재구독 계기·deps 는 이
- * 필드가 아니라 권위 명부 관측이다(ADR-0164 결정 8).
- * 데몬 프로세스를 넘겨 살지 않는다 — 재기동하면 같은 에이전트도 다른 표식으로 돌아온다.
+ * ★An **opaque marker** pointing at one incarnation★ — a random number drawn anew per incarnation, so **its order has no
+ * meaning**. Comparison uses only equal/unequal (do not derive "newer" from magnitude, ADR-0163). The receiver uses this
+ * value to decide "is the output stream I am reading now the same stream as before" — the resubscribe trigger·deps are not this
+ * field but observation of the authoritative registry (ADR-0164 decision 8).
+ * It does not outlive the daemon process — after a restart, even the same agent comes back with a different marker.
  */
 epoch: number, capabilities: Capabilities, };

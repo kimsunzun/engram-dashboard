@@ -10,12 +10,12 @@ import { t } from '../../i18n'
 afterEach(cleanup)
 
 describe('StateFileNotice', () => {
-  it('ok 이고 저장하는 실행이면 아무것도 그리지 않는다', () => {
+  it('if ok and a saving run it draws nothing', () => {
     render(<StateFileNotice stateFile="ok" saves={true} />)
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  it('아직 못 받았으면(undefined) 아무것도 그리지 않는다', () => {
+  it('if not received yet (undefined) it draws nothing', () => {
     render(<StateFileNotice stateFile={undefined} saves={undefined} />)
     expect(screen.queryByRole('status')).toBeNull()
   })
@@ -26,20 +26,20 @@ describe('StateFileNotice', () => {
     ['newer', false, t('restore.stateFileNewer')],
     ['corrupt_copied_aside', true, t('restore.stateFileCorruptCopiedAside')],
     ['corrupt_not_copied', true, t('restore.stateFileCorruptNotCopied')],
-  ])('%s 면 그 문구를 띄운다', (stateFile, saves, text) => {
+  ])('%s shows that text', (stateFile, saves, text) => {
     render(<StateFileNotice stateFile={stateFile} saves={saves} />)
     expect(screen.getByRole('status').textContent).toContain(text)
   })
 
   // The row contract of the covering layer (the `NoticeOverlay` doc) — if `wrap-anywhere` is lost, long wording pushes the ✕ off screen.
-  it('줄은 불투명 바탕이고 글 칸은 아무 데서나 줄을 바꾼다', () => {
+  it('the row has an opaque background and the text field wraps anywhere', () => {
     render(<StateFileNotice stateFile="unreadable" saves={false} />)
     const row = screen.getByRole('status')
     expect(row.className).toMatch(/\bbg-elevated\b/)
     expect(row.firstElementChild?.className).toMatch(/\bwrap-anywhere\b/)
   })
 
-  it('unreadable 문구는 파일 이름과 「이번 실행은 저장하지 않는다」를 싣는다', () => {
+  it('the unreadable text carries the file name and 「this run does not save」', () => {
     render(<StateFileNotice stateFile="unreadable" saves={false} />)
     const text = screen.getByRole('status').textContent ?? ''
     expect(text).toContain('state.json')
@@ -47,7 +47,7 @@ describe('StateFileNotice', () => {
   })
 
   // ADR-0291: a file saved by a newer version is separate from the corruption wording — since we do not copy it aside, we do not mention .corrupt.
-  it('newer 문구는 파일 이름 · 「저장하지 않는다」 · 「그대로 둔다」를 싣고 .corrupt 를 말하지 않는다', () => {
+  it('the newer text carries the file name · 「does not save」 · 「leaves it as is」 and does not mention .corrupt', () => {
     render(<StateFileNotice stateFile="newer" saves={false} />)
     expect(screen.getAllByRole('status')).toHaveLength(1)
     const text = screen.getByRole('status').textContent ?? ''
@@ -59,7 +59,7 @@ describe('StateFileNotice', () => {
     expect(text).not.toContain(t('restore.stateFileNotSaving'))
   })
 
-  it('떠 두지 못한 경우는 .corrupt 를 이번 실행의 백업이 아니라 이전 실행이 남긴 것이라고 말한다', () => {
+  it('when it could not leave a copy, it says .corrupt was left by an earlier run, not this run\'s backup', () => {
     render(<StateFileNotice stateFile="corrupt_not_copied" saves={true} />)
     const text = screen.getByRole('status').textContent ?? ''
     expect(text).toContain('보관하지 못했습니다')
@@ -67,12 +67,12 @@ describe('StateFileNotice', () => {
     expect(text).toContain('백업이 아닙니다')
   })
 
-  it('떠 둔 경우는 state.json.corrupt 를 가리킨다', () => {
+  it('when it left a copy it points to state.json.corrupt', () => {
     render(<StateFileNotice stateFile="corrupt_copied_aside" saves={true} />)
     expect(screen.getByRole('status').textContent).toContain('state.json.corrupt')
   })
 
-  it('닫으면 사라지고, 다시 그려져도 돌아오지 않는다', () => {
+  it('it disappears on close, and does not return even when redrawn', () => {
     const { rerender } = render(<StateFileNotice stateFile="unreadable" saves={false} />)
     fireEvent.click(screen.getByLabelText(t('restore.dismissNotice')))
     expect(screen.queryByRole('status')).toBeNull()
@@ -81,8 +81,8 @@ describe('StateFileNotice', () => {
   })
 })
 
-describe('StateFileNotice — 가드 ⅱ(사본을 못 떠 이 실행이 저장하지 않는다)', () => {
-  it('ok 인데 saves:false 면 「저장하지 않는다 · 다시 묻는다」를 띄운다', () => {
+describe('StateFileNotice — guard ⅱ (could not make a copy so this run does not save)', () => {
+  it('ok with saves:false shows 「does not save · asks again」', () => {
     render(<StateFileNotice stateFile="ok" saves={false} />)
     const notice = screen.getByRole('status')
     expect(notice.textContent).toContain(t('restore.stateFileNotSaving'))
@@ -91,22 +91,22 @@ describe('StateFileNotice — 가드 ⅱ(사본을 못 떠 이 실행이 저장�
     expect(notice.getAttribute('data-saves')).toBe('false')
   })
 
-  it('state_file 을 모르면(셸과 판이 어긋남) saves:false 여도 그리지 않는다 — 어느 문구인지 모른다', () => {
+  it('if state_file is unknown (version mismatch with the shell) it does not draw even with saves:false — it is unknown which text applies', () => {
     render(<StateFileNotice stateFile={undefined} saves={false} />)
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  it('ok 인데 saves 를 모르면(셸과 판이 어긋남) 그리지 않는다', () => {
+  it('ok with saves unknown (version mismatch with the shell) does not draw', () => {
     render(<StateFileNotice stateFile="ok" saves={undefined} />)
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  it('원인이 여럿이라 state.json 을 탓하지 않는다', () => {
+  it('with several causes it does not blame state.json', () => {
     render(<StateFileNotice stateFile="ok" saves={false} />)
     expect(screen.getByRole('status').textContent).not.toContain('state.json')
   })
 
-  it('unreadable(가드 ⅰ — 역시 saves:false)이면 그 문구 하나만 — 가드 ⅱ 문구를 겹치지 않는다', () => {
+  it('unreadable (guard ⅰ — also saves:false) shows only that one text — guard ⅱ text does not overlap', () => {
     render(<StateFileNotice stateFile="unreadable" saves={false} />)
     expect(screen.getAllByRole('status')).toHaveLength(1)
     const text = screen.getByRole('status').textContent ?? ''
@@ -114,7 +114,7 @@ describe('StateFileNotice — 가드 ⅱ(사본을 못 떠 이 실행이 저장�
     expect(text).not.toContain(t('restore.stateFileNotSaving'))
   })
 
-  it('닫으면 사라지고, 다시 그려져도 돌아오지 않는다', () => {
+  it('it disappears on close, and does not repeat even when redrawn', () => {
     const { rerender } = render(<StateFileNotice stateFile="ok" saves={false} />)
     fireEvent.click(screen.getByLabelText(t('restore.dismissNotice')))
     expect(screen.queryByRole('status')).toBeNull()

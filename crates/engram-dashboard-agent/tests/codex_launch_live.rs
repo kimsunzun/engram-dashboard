@@ -251,7 +251,7 @@ impl OutputSink for Events {
     }
 }
 
-/// The fields of every "codex 실행 재료 적용" line (the §4-7 handshake log line), process-wide.
+/// The fields of every "codex launch materials applied" line (the §4-7 handshake log line), process-wide.
 fn applied_lines() -> &'static Mutex<Vec<std::collections::BTreeMap<String, String>>> {
     static LINES: OnceLock<Mutex<Vec<std::collections::BTreeMap<String, String>>>> =
         OnceLock::new();
@@ -295,7 +295,7 @@ impl tracing::Subscriber for AppliedCapture {
         event.record(&mut Fields(&mut fields));
         if fields
             .get("message")
-            .is_some_and(|m| m.contains("codex 실행 재료 적용"))
+            .is_some_and(|m| m.contains("codex launch materials applied"))
         {
             applied_lines().lock().unwrap().push(fields);
         }
@@ -479,7 +479,7 @@ fn one_turn(manager: &AgentManager, id: AgentId, events: &Events, prompt: &str) 
     from
 }
 
-/// The 「기본」 priming as shipped.
+/// The 「Default」 priming as shipped.
 fn shipped_priming() -> String {
     std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -493,7 +493,7 @@ fn shipped_priming() -> String {
 /// L1 — a fresh JSON launch with a real kit: one library skill (through the junction), one folder root, the
 ///   instructions with a marker. One turn names the skills and prints the marker; the working folder and the folder
 ///   entry are unchanged; the volatile folder holds only the instructions file and the junction (B1).
-/// L2 — a resume with realistic instructions (the 「기본」 priming + a few KB, the marker at the end) and a stored hash
+/// L2 — a resume with realistic instructions (the 「Default」 priming + a few KB, the marker at the end) and a stored hash
 ///   that differs: the §4-7 line shows opt-in on, two roots, resume instructions on, context on; the turn is not
 ///   rejected and prints the new marker; the L1 turn hydrates; the context does not show in the user bubble.
 /// L3 — a resume with the stored hash equal to the kit's, no model turn: opt-in off, context off, resume instructions
@@ -682,7 +682,7 @@ fn l1_l2_l3_codex_json_fresh_then_changed_then_unchanged_resume() {
 
 // ── L4 — codex terminal ─────────────────────────────────────────────────────────────────────
 
-/// L4 — a terminal launch with a real kit (the 「기본」 priming and two raw lines, the second turning the startup
+/// L4 — a terminal launch with a real kit (the 「Default」 priming and two raw lines, the second turning the startup
 /// update check off) and a control endpoint, no model turn: the TUI comes up (the OSC 7501 idle signal codex 0.163.0
 /// sends once the composer is up — the readiness signal of `backend_contract`), the real command line carries the
 /// preset `-c` lines in order before the MCP and priming `-c`, and no new file appears in the working folder or the

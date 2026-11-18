@@ -1,12 +1,6 @@
-// TRD S21-slot-docking §2-4 · §4-6: the source window's 「바꿔 그리기」 (swap redraw) — a pure reducer that decides, when the cursor is outside its own tab bar zone during a drag, the web display
-//   showing the remaining tab instead of the dragged tab (R15 · the model is unchanged), and when to withdraw that display · the tab bar's order-move look (transform) after the drop.
-//   It also decides here whether to issue the original-selection revert (`switch_tab_if(initial, expect = 끄는 탭)`) — issuing is done by the caller (the source hook).
-// ★There is no deadline★ — there are only four triggers for release: ① that drag's `tab_drop:done` (immediately if its own invoke errored) ② after dragend, a `window:tabs-updated` that does not
-//   leave the dragged tab active ③ the next pointerdown · dragstart of that window ④ a source dragend whose end the shell does not decide (drop in place in the same webview ·
-//   a drag the engine collapsed). Releasing by a deadline would show the dragged tab for a frame or two before `Drop` is applied. While waiting for the revert, that
-//   revert's error also releases (falls back to the model active — TRD §4-6).
-// Caller's promise: feed events together with the tab state (`WindowModel`) **after** it was applied to that window's store. Feed dragend **before**
-//   sending that drag's `DragEnd` invoke — so that a `done` that arrived before dragend can be told apart as the receiving window's `Drop` share.
+// TRD S21-slot-docking §2-4 · §4-6: the source window's "swap redraw" — a pure reducer deciding when, with the cursor outside its own tab bar zone during a drag, the web shows the remaining tab instead of the dragged tab (R15; the model is unchanged), and when that display · the tab bar's order-move look (transform) is withdrawn after the drop. It also decides whether to issue the original-selection revert (`switch_tab_if(initial, expect = dragged tab)`); issuing is the caller's (the source hook).
+// ★No deadline★ — four release triggers: ① that drag's `tab_drop:done` (immediately if its own invoke errored) ② after dragend, a `window:tabs-updated` that does not leave the dragged tab active ③ the next pointerdown · dragstart of that window ④ a source dragend the shell does not decide (drop in place in the same webview · a drag the engine collapsed). A deadline would show the dragged tab for a frame or two before `Drop` is applied. While waiting for the revert, the revert's error also releases (falls back to the model active — TRD §4-6).
+// Caller's promise: feed events with the tab state (`WindowModel`) **after** it was applied to that window's store; feed dragend **before** sending that drag's `DragEnd` invoke, so a `done` that arrived before dragend is told apart as the receiving window's `Drop` share.
 
 import type { DropOutcome } from '../../../../src-tauri/bindings/DropOutcome'
 import type { EndEffect } from '../../../../src-tauri/bindings/EndEffect'
@@ -22,9 +16,7 @@ export interface WindowModel {
 export type OverrideState =
   | { phase: 'idle' }
   /**
-   * A revert (`Revert`) was issued and it waits for that active to reach the model — meanwhile `to` is drawn (transform 0). If released, the model
-   * active (still the dragged tab) would be drawn immediately and flash `to` → dragged tab → `to` (main decision 2026-10-20). If the revert never arrives, ② · ③ release it
-   * — if the shell did not change anything because the condition no longer held, the notice from whoever changed the active in the meantime is ②.
+   * A revert (`Revert`) was issued and waits for that active to reach the model — meanwhile `to` is drawn (transform 0). Releasing early would draw the model active (still the dragged tab) and flash `to` → dragged tab → `to`. If the revert never arrives, ② · ③ release — when the shell changed nothing because the condition no longer held, the notice from whoever changed the active is ②.
    */
   | { phase: 'reverting'; drag: string; view: string; to: string }
   | {
@@ -53,9 +45,7 @@ export type OverrideEvent =
   /** The cursor entered (`out: false`) · left (`out: true`) its own tab bar zone — heard only until dragend. */
   | { type: 'zone'; out: boolean }
   /**
-   * Source dragend. `local` = this drag's end is not sent to the shell, so it is released here (④ · no revert — the pressed tab stays active, same as a click):
-   * this webview's drop was at the same place in the same window so it was not sent · a dragend that occurred in the same task as dragstart = the engine could not open an OS drag and
-   * collapsed it (measured on the old HTML5 drag — 0–1 ms after dragstart · main decision 2026-10-20 — nothing is sent to the shell).
+   * Source dragend. `local` = this drag's end is not sent to the shell, so it is released here (④, no revert — the pressed tab stays active, like a click): a same-place same-window drop was not sent, or dragend in the same task as dragstart = the engine could not open an OS drag and collapsed it (old HTML5 drag: 0–1 ms after dragstart).
    */
   | { type: 'end'; effect: EndEffect; local: boolean }
   | { type: 'done'; drag: string; outcome: DropOutcome }
@@ -69,8 +59,7 @@ export type OverrideEvent =
   | { type: 'pointerdown' }
 
 /**
- * Revert to the original selection (R12 · R15) — issued as `switch_tab_if(window, to, expect)`: the shell changes to `to` only when that window's active is still `expect` (the dragged tab
- * that the press made active). So a tab chosen by the user · LLM before the revert arrives is not overwritten (even if the web store is late).
+ * Revert to the original selection (R12 · R15), issued as `switch_tab_if(window, to, expect)`: the shell changes to `to` only when that window's active is still `expect` (the dragged tab the press made active), so a tab chosen by the user · LLM before the revert arrives is not overwritten.
  */
 export interface Revert {
   window: string
@@ -140,9 +129,7 @@ export function stepOverride(state: OverrideState, event: OverrideEvent, model: 
         const next = { ...state, applied: true }
         return state.remaining === null || orderChanged(next, model) ? released() : { state: next, revert: null }
       }
-      // Cancel · ignore. What arrived before dragend belongs to the receiving window's `Drop` — the source dragend is `move`. If `move`, the receiving side's `Drop` result
-      //   follows or that window did not send it (same window, same place) — releasing on this would show the dragged tab before `Drop` is applied, and reverting would
-      //   differ from a click.
+      // Cancel · ignore. What arrived before dragend belongs to the receiving window's `Drop` — the source dragend is `move`; then the receiving side's `Drop` result follows (or none for same window, same place), and releasing now would show the dragged tab before `Drop` is applied, and reverting would differ from a click.
       if (state.phase === 'live' || state.effect === 'move') return same
       const to = revertTarget(state, model)
       return to === null
@@ -153,8 +140,7 @@ export function stepOverride(state: OverrideState, event: OverrideEvent, model: 
           }
     }
     case 'tabs':
-      // The dragged tab left that window — release at any time (main decision 2026-10-20). If it moved out, the model active is already the remaining tab, and if it was closed
-      //   during the drag, the dragend of the detached head never arrives.
+      // The dragged tab left that window — release at any time: if moved out the model active is already the remaining tab; if closed during the drag the detached head's dragend never arrives.
       if (!model.tabs.includes(state.view)) return released()
       if (state.applied && orderChanged(state, model)) return released()
       return state.phase === 'ended' && model.active !== state.view ? released() : same
@@ -171,8 +157,7 @@ export function shownTab(state: OverrideState, model: WindowModel): string | nul
 }
 
 /**
- * Whether the tab bar's order-move look (transform) may be drawn — only while the drag is not released and that window's tab order is still as at dragstart. It must be withdrawn on the frame the model order
- * changes so the dropped tab does not jump (TRD §2-4 · §8-3 ④).
+ * Whether the order-move look (transform) may be drawn — only while the drag is not released and that window's tab order is still as at dragstart; withdrawn on the frame the model order changes so the dropped tab does not jump (TRD §2-4 · §8-3 ④).
  */
 export function stripHeld(state: OverrideState, model: WindowModel): boolean {
   return (state.phase === 'live' || state.phase === 'ended') && sameOrder(state.startTabs, model.tabs)
@@ -187,8 +172,7 @@ function sameOrder(a: readonly string[], b: readonly string[]): boolean {
 }
 
 /**
- * The tab to revert after cancel · ignore (TRD §4-6) — the active changed by the press's `switch_tab` back to what it was before the press. Skipped = no `initial` · the dragged tab itself ·
- * not a tab of that window · that window's active is already not the dragged tab (the user · LLM changed it in the meantime — do not overwrite).
+ * The tab to revert to after cancel · ignore (TRD §4-6) — the active the press's `switch_tab` changed, back to before the press. Skipped when no `initial` · the dragged tab itself · not a tab of that window · that window's active is already not the dragged tab (user · LLM changed it — do not overwrite).
  */
 function revertTarget(state: { view: string; initial: string | null }, model: WindowModel): string | null {
   const { view, initial } = state

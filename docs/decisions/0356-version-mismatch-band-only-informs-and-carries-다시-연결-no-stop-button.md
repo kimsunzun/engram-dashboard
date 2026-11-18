@@ -1,7 +1,7 @@
 # ADR-0356: Version-mismatch band only informs and carries 「다시 연결」, no stop button
 
-- 상태: 확정 (2026-11-10, 근거: 사용자 결정 2026-11-10 「높고 낮은거 빼고 안내만해. 데몬은 알아서 끄라고하고. 나중에 업데이트 시스템에서 자세히 다루면 될듯」 · 「ㅇㅇ 그냥 다시연결로해. 끄기 말고. 그게 좋아보이네」)
-- 관련: Amends ADR-0344 (결정 1에서 4의 띠 끄기 버튼) · Amends ADR-0350 (결정 1의 버전 다름 띠 끄기 버튼) · ADR-0345 (「다시 연결」 on the disconnected band — the same button now also sits on the version band) · ADR-0342 (version mismatch shown on the connection-failure surface) · `docs/tracking.md` T-84 (update system)
+- 상태: 확정 (2026-11-10, basis: user decision 2026-11-10 「높고 낮은거 빼고 안내만해. 데몬은 알아서 끄라고하고. 나중에 업데이트 시스템에서 자세히 다루면 될듯」 · 「ㅇㅇ 그냥 다시연결로해. 끄기 말고. 그게 좋아보이네」)
+- 관련: Amends ADR-0344 (the stop button of the band in decisions 1 through 4) · Amends ADR-0350 (the stop button on the version-mismatch band in decision 1) · ADR-0345 (「다시 연결」 on the disconnected band — the same button now also sits on the version band) · ADR-0342 (version mismatch shown on the connection-failure surface) · `docs/tracking.md` T-84 (update system)
 
 ## 맥락
 
@@ -19,7 +19,7 @@ On a version mismatch the app and the daemon do not talk at all: the shell's att
 
 ## 거부한 대안
 
-- **Keep 「데몬 끄기」 on ② for an older daemon (ADR-0344)** — the user ruled that the fix for a mismatch is an update and that the band should only inform; the confirm and 「끄는 중…」 states also leave the frontend topic. (약함 · 사용자 직접 기각)
+- **Keep 「데몬 끄기」 on ② for an older daemon (ADR-0344)** — the user ruled that the fix for a mismatch is an update and that the band should only inform; the confirm and 「끄는 중…」 states also leave the frontend topic. (weak · rejected directly by the user)
 - **② with text only, no button** — after an external stop the refused link does not redial, so ② would stay until the app restarts (the given-up link and the re-add that only the shell's own stop fires — ADR-0350 decision 3).
 - **Stop and restart (or update) from the band now** — no update system exists, and from an older app it would downgrade a newer daemon. Deferred to T-84 by the user.
 

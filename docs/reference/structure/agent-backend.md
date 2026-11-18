@@ -63,7 +63,7 @@ flowchart TD
 
 **Anchors** — `crates/engram-dashboard-agent/src/backend/mod.rs` (file header · backend_for · backend_for_encoder · the `open_spawn` default and `SpawnParts` · tripwire) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs` (`open_spawn` — the only place where the real transport diverges) · `crates/engram-dashboard-agent/src/transport/pty.rs`
 
-## Render branch (렌더 분기) — override first, then capability
+## Render branch — override first, then capability
 
 What to draw in a slot is decided in two layers. **First** it checks whether the slot has a forced value (`renderModeOverride`) set by a person or an LLM, and **only when there is none** does it fall to the one capability field the agent reports. That field is 「출력이 구조화되어 있나」, and if structured it is the chat form (rich), otherwise the terminal (xterm). The renderer **never once looks at the backend name** — so even when a new backend comes in, the frontend does not change.
 
@@ -84,7 +84,7 @@ Two things are often got wrong. First, **there are three render modes** — `ter
 
 **Anchors** — canonical source of the priority = **ADR-0078** + the JSDoc of the `renderModeOverride` field in `src/store/viewStore.ts` · the real decision point = `SlotBody` in `src/components/layout/LayoutLeaf.tsx` (`renderModeOverride[node.id] ?? defaultRenderMode(agent)`) · mode vocabulary = `src/components/slot/renderMode.ts` (`RENDER_MODES`) · `src/api/types.ts`
 
-## The closed door (닫힌 문) — one policy table, two doors that look at that table
+## The closed door — one policy table, two doors that look at that table
 
 There are several entrances for creating an agent, so if 「어느 백엔드를 만들 수 있나」 were written separately at each entrance, they would certainly drift apart. So **the policy is one table** (`LLM_BACKEND_POLICY`). A backend whose name is not in the table is not open but **blocked** (fail-closed) — the default is set toward preventing the accident of a new backend quietly opening without writing a policy.
 
@@ -122,7 +122,7 @@ The command line that actually launches. The **order** of the arguments we attac
 | `claude` (stream-json) | same | `-p --input-format stream-json --output-format stream-json --verbose` + the session · MCP · launch-material · grant arguments above — the launch materials (real kits' `--add-dir` · instructions file · snapshot off · `--plugin-dir` · merged `--settings`; none with Noop kits) do not depend on the mode | same |
 | `codex` (terminal) | `codex` — the same one layer of `cmd.exe /c` | If Resume, the `resume <thread id>` subcommand at the **very front** (★not a flag★ — if pushed back, clap reads it as the root's `[PROMPT]`) · `--cd <폴더> -s workspace-write -a on-request` · **after** the passthrough, real kits' preset `-c` lines, then if there is a control channel `-c mcp_servers.engram={…}` (the mail entrance), then, with real kits, `-c developer_instructions=…` (the merged instructions; none with Noop kits) | **after** our arguments, but **before** those `-c` overrides — if the same config key is passed twice with `-c` the last one wins (measured 0.155.0), so the mail entrance is loaded afterwards so that a single passthrough line cannot erase it |
 | `codex` (app-server) | same | `app-server --stdio` + **after** the passthrough, real kits' preset `-c` lines, then if there is a control channel `-c mcp_servers.engram={…}` — the same order as terminal mode. The working folder · sandbox · approval policy go not in argv but as `thread/start` parameters (`cwd` · `sandbox` · `approvalPolicy`), and so do the instructions (`developerInstructions` — real kits: the merged instructions; Noop kits: none); real kits' skill roots go by `skills/extraRoots/set` (`app_server_open`). ★The lock polling of terminal mode is not in this mode★ — the transport receives the session id directly from the `thread/start` response (why terminal mode looks at the lock holder instead of that response = 「세션 id 회수」 (session id recovery) below) | same — ★but the two modes have different option sets, so an argument written by looking at the interactive CLI may be rejected here★ (not filtering per mode is a decision — the code comment is canonical) |
-| `gemini` (unwired · 미배선) | `gemini` — ★best-guess, before the CLI spike★ | stub (the session flags are best-guess too) | undetermined |
+| `gemini` (unwired) | `gemini` — ★best-guess, before the CLI spike★ | stub (the session flags are best-guess too) | undetermined |
 
 The reason for wrapping one more layer on Windows is that the name on PATH is not the real executable but a `.cmd` shim — launching it directly dies with error 193. The reason we do not find the real path and call it is that the path is tied to the version and the CLI updates itself and moves it.
 
@@ -134,7 +134,7 @@ The reason for wrapping one more layer on Windows is that the name on PATH is no
 
 ★**Do not use `mcp_server_override` as an anchor — there is no such symbol**★ (measured 2026-09-21 · 0 definitions in a whole-repository search). That name was written here and there was nothing for it to point at. The real thing is split into a prefix constant and an assembly function, so **the two names above are canonical.** ★The same name still lives in two rustdoc links of `backend/codex/mod.rs`★ — that is code, so it was not fixed here (broken intra-doc links).
 
-## Session id recovery (세션 id 회수) (codex terminal mode)
+## Session id recovery (codex terminal mode)
 
 codex issues the session id itself, and terminal mode has no response channel that tells it to us. So **we ask the OS** — codex runs **holding open** `$CODEX_HOME/thread-writer-locks/<thread id>.lock`, and we ask Windows Restart Manager **who is holding** that file and pick the one **inside our process tree**. The file name is the thread id. (ADR-0218)
 
@@ -162,7 +162,7 @@ codex issues the session id itself, and terminal mode has no response channel th
 
 It is not that a feature is 「빠진」 (missing); **the backend reports for itself that it has none**, and the core locks the plumbing as reported. So the `false` cells of this table are generally the list of items to open in the next stage. ★But do not read every `false` as 「아직 안 연 것」 (not yet opened)★ — the `false` of `writes_mcp_config_file` is not unwired but **a decision not to write secrets to disk** (the last cell of that row is canonical). When a new variant is wired, the tripwires force this report with a compile error — because on an axis whose default is fail-open, omitting the declaration quietly turns green. ★The two session axes are not that kind★: the trait has no default, so a **new backend** has no choice but to write a value, and instead, since the compiler cannot see a **new output mode**, the per-mode tripwire (`backend::tests::expected_session_axes`) takes care of that side.
 
-| Declaration | `claude` | `codex` | `gemini` (unwired · 미배선) | What the core locks with that value |
+| Declaration | `claude` | `codex` | `gemini` (unwired) | What the core locks with that value |
 |---|---|---|---|---|
 | `assigns_session_id` | `true` (both modes) | `false` (both modes) | `true` (best-guess stub) | Whether **we** draw the sid and pass it into the spec. If `true`, the manager issues it and **persists it at the first submit** (before that it is only in memory — the first-submit latch, ADR-0226) and also uses it as the watcher's reference value. Do not read `false` as 「세션이 없다」 (there is no session) — it may be that the program issues its own id itself |
 | `can_resume_stored_session` | `true` (both modes) | `true` (both modes — only the **means** of taking over differs) | `true` (best-guess stub) | Whether **it can take over with the stored backend sid**. It does not ask who issued it. Boot restore and the activation entrance both decide with the single `backend::can_resume_profile` (this axis ∧ sid exists) — if `false`, Fresh even when a sid remains. ★One exception★: WS `SpawnProfile{resume:true}` **bypasses** that decision and goes to Resume (`resume \|\| can_resume_profile(…)`) |
@@ -201,7 +201,7 @@ A similar misreading exists in the model-selection field. codex has `-m` and yet
 
 「LLM 이 이 백엔드를 만들 수 있나」 is closed differently at each entrance. The difference matters because, when trying to open some door, **what has to be touched differs per door.**
 
-| Endpoint | Where | `claude` | `codex` | `gemini` (unwired · 미배선) |
+| Endpoint | Where | `claude` | `codex` | `gemini` (unwired) |
 |---|---|---|---|---|
 | Human menu — the three claude-family items (`agentlist.createAgent` · `createTerminal` · `createJson`) | `src/commands/agentCommands.ts` | creates — claude is hard-coded in the code through `createReservedProfile` → `createClaudeProfile` | **cannot choose** (there is no field that accepts that word) | no item |
 | Human menu — the two codex items (`agentlist.createCodex` · `createCodexJson` — interactive TUI / resident JSON server) | same | — | creates (the LLM too, via `registry.run` — row below) | no item |
@@ -222,7 +222,7 @@ A similar misreading exists in the model-selection field. codex has `-m` and yet
 
 If you add one backend, the word has to stand in **four places** each. The core's execution-command variant, the wire word that flows over the socket, the declared vocabulary of the LLM entrance, and the dispatch wiring. If you widen only one of the four, the rest stay not knowing that word.
 
-| Axis | `claude` | `codex` | `gemini` (unwired · 미배선) |
+| Axis | `claude` | `codex` | `gemini` (unwired) |
 |---|---|---|---|
 | Core `AgentCommand` variant — being `#[serde(tag = "kind")]` it sits in `agents.json` as is | `Claude { extra_args, output_format }` | `Codex { extra_args, output_format }` | none (variant not created) |
 | wire `AgentSpawnCommand` variant — the mirror of the variant above (the registry that flows over the socket has this shape) | `Claude { extra_args, output_format }` | `Codex { extra_args, output_format }` | none |
@@ -242,7 +242,7 @@ Two more things are nailed in as decisions. **The backend field is required** �
 
 ---
 
-## What is untested (무엇이 미검인가)
+## What is untested
 
 **Limits attached to the structure.** A folder path containing `%VAR%` still leaks to a different folder, and the known fix is not a general escape but is in a not-yet-ported state. There is **no unknown-`kind` regression test** that would catch the disk backward compatibility above. And **a real model turn has not been measured** — the standing lane of the contract test bench is only the declaration-table comparison, and the lane that launches a real CLI is `#[ignore]`, so it runs only when called.
 

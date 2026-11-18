@@ -1,6 +1,6 @@
 # ADR automation: industry practice for the "script + a spoonful of judgment" hybrid (research)
 
-- 상태: done (2026-06-26) · depth: research skill **medium**
+- Status: done (2026-06-26) · depth: research skill **medium**
 - Method: Claude (Sonnet) 2 branches (supersede / hybrid architecture) + Codex 1, **BLIND independent collection** → opus cross-check and adversarial verification. (The numbering and index branches were collected in the 6-25 round.)
 - Purpose: redesign the engram `adr` skill as a "deterministic script + LLM judgment" hybrid. Look for answers to the partial-discard, lint and numbering holes that `/review trd full` caught.
 - Confidence legend: certain / likely / uncertain

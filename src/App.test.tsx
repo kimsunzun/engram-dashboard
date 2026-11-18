@@ -1,4 +1,4 @@
-// App 부팅 배선 — 탭 창은 전역 배선(설정 · 키 · 버스 명령 보고 · 스크롤 · 데몬 부팅 · 목록 조회)을 돌린다.
+// App boot wiring — a tab window runs the global wiring (settings · keys · bus command report · scroll · daemon boot · list query).
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -47,8 +47,8 @@ afterEach(() => {
   window.location.hash = origHash
 })
 
-describe('App — 부팅 배선', () => {
-  it('탭 창 경로(#/)는 전역 배선을 돌린다', async () => {
+describe('App — boot wiring', () => {
+  it('a tab window path (#/) runs the global wiring', async () => {
     window.location.hash = '#/'
     render(<App />)
     expect(screen.getByTestId('app-layout')).toBeTruthy()

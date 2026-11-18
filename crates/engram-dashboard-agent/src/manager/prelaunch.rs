@@ -1,19 +1,19 @@
-//! 실행 전처리 — 스폰 예약 · 「이미 떠 있음」 확인 뒤, 화신 표식 · 세션 파생 앞에서 **명부의** 프로필로 실행 재료를
-//! 점검한다(`spawn_agent_watching_link` 단독 호출). 명부에 없는 id 는 넣기 전에도 호출자 사본으로 점검한다
-//! (`ensure_registered` 단독 호출). 재료 준비의 실패를 스폰 실패로 옮기는 것(`prepare_failed`)도 여기다 — 준비를
-//! 부르는 자리는 스폰 길의 화신 표식 뒤다.
+//! Launch preprocessing — after the spawn reservation · the 「already running」 check, and before the incarnation marker · session
+//! derivation, checks launch materials with the **roster's** profile (called only from `spawn_agent_watching_link`). An id not in the
+//! roster is also checked with the caller's copy before it is inserted (called only from `ensure_registered`). Mapping a material
+//! preparation failure to a spawn failure (`prepare_failed`) lives here too — preparation is called after the spawn path's incarnation marker.
 //!
-//! 점검([`crate::launch::LaunchKitSource::check_in`])은 명부 · 예약 · 세션 · 이름 배정 락을 하나도 쥐지 않고 부른다 —
-//! asset-library 락 → manager 락 한 방향이라, 쥔 채 부르면 라이브러리 쓰기와 교착한다. 명부에 쓰지 않고 비교만
-//! 한다(무인 기본값 채움은 다음 주제 — M16): 점검하는 사이 실행 입력(붙임 · 명령 · env)이 바뀌었으면 막힘이든
-//! 통과든 그 답을 버리고 한 번 다시 하고, 또 바뀌었으면 끊는다.
+//! The check ([`crate::launch::LaunchKitSource::check_in`]) is called holding none of the roster · reservation · session · name-assignment
+//! locks — asset-library lock → manager lock is one direction, so calling while holding one deadlocks with library writes. It never writes
+//! the roster, only compares (filling unattended defaults is a later topic — M16): if the launch inputs (attachments · command · env)
+//! changed during the check, the answer is dropped, blocked or not, and redone once; if they changed again, the launch is cut off.
 //!
 //! Every check here runs inside the launch's scope, which the spawn body opens and passes in — this file never opens
 //! one (contract = `LaunchKitSource::begin_launch`).
 // ADR-0319
 // ADR-0324
 // ADR-0334
-// TRD S25 §1-5 (가)
+// TRD S25 §1-5 (ga)
 
 use super::{profile_vanished_mid_spawn, AgentManager};
 use crate::launch::{
@@ -22,17 +22,17 @@ use crate::launch::{
 use crate::profile::{AgentProfile, LaunchInputs};
 use crate::types::{AgentId, PtyError};
 
-/// 점검 → 대조를 몇 번까지 하나 — 처음 한 번 + 실행 입력이 바뀌었을 때 다시 한 번.
-// TRD S25 §1-5 (가) 2
+/// How many times check → compare runs — once, plus once more when the launch inputs changed.
+// TRD S25 §1-5 (ga) 2
 const PRELAUNCH_ATTEMPTS: u32 = 2;
 
 impl AgentManager {
-    /// 명부에 없는 프로필을 넣기 **전에** 호출자 사본으로 점검한다 — 막히면 아무것도 넣지 않는다. 통과한 계획은
-    /// 버린다(넣은 뒤 [`Self::prelaunch`] 가 명부 값으로 다시 점검한다).
+    /// Checks a profile not in the roster with the caller's copy **before** inserting it — when blocked nothing is inserted. A passing plan is
+    /// dropped (after insertion [`Self::prelaunch`] checks again with the roster values).
     ///
     /// `scope` = this launch's scope — the one the prelaunch and the prepare of the same launch get.
     // ADR-0360
-    // TRD S25 §1-5 (가) 1 ②
+    // TRD S25 §1-5 (ga) 1 ②
     pub(super) fn check_before_create(
         &self,
         scope: &LaunchScope,
@@ -44,13 +44,13 @@ impl AgentManager {
         }
     }
 
-    /// 이 에이전트를 띄울 계획 — 명부에서 읽은 프로필을 점검하고, 그 뒤 실행 입력이 그대로일 때만 그 답을 낸다.
+    /// The plan to launch this agent — checks the profile read from the roster, and returns that answer only if the launch inputs are unchanged afterwards.
     ///
-    /// `caller` = 스폰 호출자가 넘긴 사본 — 점검하지 않는다. 있던 id 면 스폰이 이 뒤에 사본의 명령 · env 를 명부에
-    /// 병합하므로, 그 둘이 점검한 값과 다르면 점검하지 않은 명령으로 뜨지 않게 끊는다.
-    /// `Err` = 막힘([`PtyError::LaunchBlocked`]) · 실행 입력이 두 번 다 바뀜 또는 사본의 명령 · env 가 점검한 값과
-    /// 다름([`PtyError::LaunchRaced`]) · 그 사이 지워짐(`SpawnFailed`). 어느 쪽이든 명부 · 세션 · 제어 채널은
-    /// 그대로다.
+    /// `caller` = the copy the spawn caller passed — not checked. For an existing id the spawn merges the copy's command · env into the
+    /// roster after this, so if those differ from the checked values the launch is cut off rather than run with an unchecked command.
+    /// `Err` = blocked ([`PtyError::LaunchBlocked`]) · launch inputs changed both times, or the copy's command · env differ from the checked
+    /// values ([`PtyError::LaunchRaced`]) · deleted meanwhile (`SpawnFailed`). In every case the roster · sessions · control channel are
+    /// unchanged.
     /// With the plan comes its notice comparison against the fingerprint on the same roster read ([`PlanNotices`]) —
     ///   compared here, recorded by nobody here.
     /// `scope` = this launch's scope — both attempts check inside it.
@@ -63,14 +63,14 @@ impl AgentManager {
     ) -> Result<(LaunchPlan, PlanNotices), PtyError> {
         let id = caller.id;
         for attempt in 1..=PRELAUNCH_ATTEMPTS {
-            // 호출자 사본이 아니라 명부 값 — 사본을 뜬 뒤 붙인 프리셋까지 본다. `get` 은 사본을 뜨고 락을 놓는다.
+            // The roster value, not the caller's copy — sees presets attached after the copy was taken. `get` takes a copy and releases the lock.
             let profile = self
                 .profiles
                 .get(id)
-                .ok_or_else(|| profile_vanished_mid_spawn(id, "실행 전처리 읽기"))?;
+                .ok_or_else(|| profile_vanished_mid_spawn(id, "prelaunch read"))?;
             let seen = LaunchInputs::of(&profile);
-            // ★답을 쥔 채 대조부터 한다 — 막힘도 대조가 맞을 때만 답이다★: 점검하는 사이 바뀐 붙임으로 막혔으면 그
-            //   막힘은 이미 낡았다(고친 붙임이 낡은 막힘에 걸려 끊긴다).
+            // ★Compare first while holding the answer — even a block is an answer only when the comparison matches★: a block from
+            //   attachments that changed during the check is already stale (fixed attachments would be cut off by a stale block).
             let checked = self.launch.kits.check_in(scope, &profile);
             match self.profiles.launch_inputs_unchanged(id, &seen) {
                 Some(true) => {
@@ -82,32 +82,32 @@ impl AgentManager {
                 Some(false) => tracing::debug!(
                     agent = %id,
                     attempt,
-                    "점검하는 사이 실행 입력(붙임 · 명령 · env)이 바뀌었다 — 명부를 다시 읽는다"
+                    "launch inputs (attachments, command, env) changed during the check; rereading the roster"
                 ),
-                None => return Err(profile_vanished_mid_spawn(id, "실행 전처리 대조")),
+                None => return Err(profile_vanished_mid_spawn(id, "prelaunch comparison")),
             }
         }
         tracing::info!(
             agent = %id,
-            "실행 준비 중 실행 입력(프리셋 · 명령 · 환경)이 계속 바뀌었다 — 띄우지 않는다(다시 시도하면 선다)"
+            "launch inputs kept changing during launch preparation; not launching (a retry succeeds)"
         );
         Err(PtyError::LaunchRaced)
     }
 }
 
-/// 대조가 맞은 점검의 답을 낸다 — 사본의 명령 · env 가 점검한 값과 다르면 답과 무관하게 경합이다.
+/// Returns the answer of a check whose comparison matched — if the copy's command · env differ from the checked values, it is a race whatever the answer.
 fn settle(
     caller: &AgentProfile,
     seen: &LaunchInputs,
     checked: Result<LaunchPlan, LaunchBlocked>,
 ) -> Result<LaunchPlan, PtyError> {
     let id = caller.id;
-    // ★병합해 덮지 않고 끊는다★: 오늘 명령 · env 를 바꾸는 운영 길은 없어 사본과 명부가 갈리지 않는다 — 갈렸으면 사본을
-    //   뜬 뒤 그 둘이 바뀐 것이고, 다시 시도하면 새 사본으로 선다.
+    // ★Cut off rather than merge over★: no production path changes command · env today, so the copy and the roster do not diverge — if
+    //   they did, both changed after the copy was taken, and a retry succeeds with a new copy.
     if !seen.same_command_and_env(caller) {
         tracing::info!(
             agent = %id,
-            "호출자 사본의 명령 · env 가 점검한 명부 값과 다르다 — 띄우지 않는다(다시 시도하면 선다)"
+            "caller copy's command or env differs from the checked roster values; not launching (a retry succeeds)"
         );
         return Err(PtyError::LaunchRaced);
     }
@@ -119,7 +119,7 @@ fn settle(
             code = %notice.code,
             args = %notice.args,
             line = ?notice.line,
-            "실행 알림"
+            "launch notice"
         );
     }
     Ok(plan)
@@ -156,12 +156,12 @@ impl PlanNotices {
 }
 
 fn launch_blocked(id: AgentId, blocked: LaunchBlocked) -> PtyError {
-    tracing::info!(agent = %id, %blocked, "실행 재료 점검이 실행을 막았다 — 띄우지 않는다");
+    tracing::info!(agent = %id, %blocked, "launch-material check blocked the launch; not launching");
     PtyError::LaunchBlocked(blocked)
 }
 
-/// 재료 준비([`crate::launch::LaunchKitSource::prepare_in`])의 실패를 스폰 실패로 옮긴다 — 원본이 점검 뒤 바뀐 것은
-/// 경합([`PtyError::LaunchRaced`] — 프로세스를 열려고 한 적이 없다), 그 밖은 `SpawnFailed`.
+/// Maps a material preparation ([`crate::launch::LaunchKitSource::prepare_in`]) failure to a spawn failure — a source changed after the
+/// check is a race ([`PtyError::LaunchRaced`] — it never tried to open the process), anything else `SpawnFailed`.
 // TRD S25 §5-2 4 (c)
 pub(super) fn prepare_failed(id: AgentId, e: PrepareError) -> PtyError {
     match &e {
@@ -169,7 +169,7 @@ pub(super) fn prepare_failed(id: AgentId, e: PrepareError) -> PtyError {
             tracing::info!(
                 agent = %id,
                 %e,
-                "점검 뒤 실행 재료 원본이 바뀌었다 — 띄우지 않는다(다시 시도하면 선다)"
+                "launch-material source changed after the check; not launching (a retry succeeds)"
             );
             PtyError::LaunchRaced
         }
@@ -179,7 +179,7 @@ pub(super) fn prepare_failed(id: AgentId, e: PrepareError) -> PtyError {
 
 #[cfg(test)]
 impl AgentManager {
-    /// 스폰이 조립한 명령과 거기 실은 재료를 시험이 받아 간다 — 받는 쪽이 있으면 프로세스를 띄우기 전에 멈춘다.
+    /// Hands the command the spawn assembled and the materials on it to the test — with a receiver present it stops before launching the process.
     pub(super) fn probe_spec(
         &self,
         spec: &crate::types::CommandSpec,
@@ -189,7 +189,7 @@ impl AgentManager {
             Some(tx) => {
                 let _ = tx.send((spec.clone(), artifacts.clone()));
                 Err(PtyError::SpawnFailed(
-                    "시험 — 명령만 조립하고 띄우지 않았다".to_string(),
+                    "test probe — assembled the command only, did not launch".to_string(),
                 ))
             }
             None => Ok(()),
@@ -236,12 +236,12 @@ mod tests {
         ControlEndpoint, ProvisionError, PtyError, StatusSink,
     };
 
-    // 골든(`tests/launch_argv_golden.rs`)과 같은 고정값 — 그쪽이 바뀌면 아래 대조가 골든에서 경우를 못 찾아 빨개진다.
+    // The same fixed values as the golden (`tests/launch_argv_golden.rs`) — if those change, the comparison below cannot find the case in the golden and turns red.
     const WORK: &str = "/golden/work";
     const FRESH_SID: Uuid = Uuid::from_u128(0x1111_1111_1111_4111_8111_1111_1111_1111);
     const STORED_SID: Uuid = Uuid::from_u128(0x2222_2222_2222_4222_8222_2222_2222_2222);
 
-    // ── 시험대 ──
+    // ── test rig ──
 
     struct QuietStatus;
     impl StatusSink for QuietStatus {
@@ -249,7 +249,7 @@ mod tests {
         fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
     }
 
-    /// 발급 요청을 센다 — 답은 「제어 채널 없음」(`NoopControlChannel` 과 같다).
+    /// Counts issue requests — the answer is 「no control channel」 (same as `NoopControlChannel`).
     #[derive(Default)]
     struct CountingControl {
         provisions: AtomicUsize,
@@ -268,7 +268,7 @@ mod tests {
         fn revoke(&self, _id: AgentId, _epoch: u32) {}
     }
 
-    /// 부른 배치 포트 호출을 센다(쓰기 · 확인 모두) — 메모리에만 쓴다.
+    /// Counts the placement port calls (writes · checks both) — writes only to memory.
     #[derive(Default)]
     struct CountingFs {
         calls: AtomicUsize,
@@ -298,8 +298,8 @@ mod tests {
         }
     }
 
-    /// 메모리 저장소 · 셀 수 있는 제어 채널 · 셀 수 있는 배치 포트 · 조립한 명령을 받아 가는 탐침 — 프로세스는 하나도
-    /// 띄우지 않는다.
+    /// Memory store · countable control channel · countable placement port · a probe taking the assembled command — launches no process
+    /// at all.
     struct Rig {
         manager: AgentManager,
         store: Arc<ScriptedStore>,
@@ -342,7 +342,7 @@ mod tests {
             }
         }
 
-        /// 배치 포트를 부른 수 — 쓰기 · 확인 모두.
+        /// The number of placement port calls — writes · checks both.
         fn fs_calls(&self) -> usize {
             self.fs.calls.load(Ordering::SeqCst)
         }
@@ -351,16 +351,16 @@ mod tests {
             Self::new(Arc::new(NoopLaunchKits))
         }
 
-        /// 이 스폰이 조립한 명령 — 없으면 스폰이 조립까지 가지 않았다.
+        /// The command this spawn assembled — none means the spawn did not get as far as assembly.
         fn spec(&self) -> CommandSpec {
             self.assembled().0
         }
 
-        /// 이 스폰이 조립한 명령과 거기 실은 재료.
+        /// The command this spawn assembled and the materials on it.
         fn assembled(&self) -> (CommandSpec, LaunchArtifacts) {
             self.specs
                 .try_recv()
-                .expect("스폰이 명령을 조립하지 않았다")
+                .expect("the spawn did not assemble a command")
         }
 
         fn assembled_nothing(&self) -> bool {
@@ -372,7 +372,7 @@ mod tests {
         }
     }
 
-    /// 점검 한 번이 본 것.
+    /// What one check saw.
     #[derive(Debug, Clone)]
     struct Seen {
         profile: AgentProfile,
@@ -387,53 +387,53 @@ mod tests {
 
     type Meanwhile = Box<dyn FnOnce(&ProfileRegistry, AgentId) + Send>;
 
-    /// 점검 한 번마다 할 일 — 줄이 비면 Noop 계획.
+    /// What to do on each check — an empty queue = a Noop plan.
     enum Turn {
         Pass,
-        /// 이 계획으로 통과한다.
+        /// Passes with this plan.
         Plan(LaunchPlan),
         Block(LaunchBlocked),
-        /// 점검하는 사이 명부를 바꾼다(다른 연결의 붙이기 · 지우기 흉내) — 그다음 Noop 계획.
+        /// Changes the roster during the check (imitating another connection's attach · delete) — then a Noop plan.
         Meanwhile(Meanwhile),
-        /// 명부를 바꾸고 막는다 — 바뀌기 전 값으로 낸 막힘.
+        /// Changes the roster and blocks — a block issued with the value before the change.
         MeanwhileBlock(Meanwhile, LaunchBlocked),
     }
 
-    /// 준비 한 번이 본 것.
+    /// What one preparation saw.
     #[derive(Debug, Clone)]
     struct Prepared {
         plan: LaunchPlan,
         id: AgentId,
         epoch: u32,
-        /// 명부 · 예약 · 세션 · 이름 배정 락이 모두 비었나.
+        /// Whether the roster · reservation · session · name-assignment locks were all free.
         locks_free: bool,
         reserved: bool,
         roster_epoch: Option<u32>,
         roster_sid: Option<Uuid>,
-        /// 그때까지의 제어 채널 발급 요청 수.
+        /// The number of control-channel issue requests so far.
         provisions: usize,
         live_session: bool,
     }
 
-    /// 준비 한 번마다 낼 답 — 줄이 비면 받은 계획 그대로의 Noop 재료.
+    /// The answer for each preparation — an empty queue = Noop materials matching the received plan.
     enum Prep {
-        /// 재료의 계획에 실 재료 표시를 켠다 — 점검한 계획은 Noop 이라, 실린 재료가 켜져 있으면 그것은 재료에서 왔다.
+        /// Turns on the real-materials mark in the materials' plan — the checked plan is Noop, so a carried material that is on came from the materials.
         MarkReal,
         Fail(PrepareError),
-        /// 이 휘발 폴더를 단 Noop 재료.
+        /// Noop materials with this volatile folder.
         Volatile(PathBuf),
     }
 
-    /// 거두기 한 번이 본 것 — 무엇을 거뒀나는 `released` 가 같은 차례로 든다.
+    /// What one reclaim saw — what was reclaimed is held by `released` in the same order.
     #[derive(Debug, Clone)]
     struct Release {
-        /// 명부 · 예약 · 세션 · 이름 배정 락이 모두 비었나.
+        /// Whether the roster · reservation · session · name-assignment locks were all free.
         locks_free: bool,
-        /// 그 에이전트 세션이 아직 세션 표에 있나.
+        /// Whether that agent's session was still in the session table.
         live_session: bool,
-        /// reaper 스레드가 불렀나.
+        /// Whether the reaper thread called it.
         on_reaper: bool,
-        /// 그때 명부의 `auto_restore` — `None` = 명부 락이 잡혀 있었거나 항목이 없다.
+        /// The roster's `auto_restore` then — `None` = the roster lock was held or there was no entry.
         auto_restore: Option<bool>,
     }
 
@@ -445,7 +445,7 @@ mod tests {
         control: Arc<CountingControl>,
     }
 
-    /// 매니저의 명부 · 예약 · 세션 표를 들여다보며 점검 · 준비하고, 거두기를 세는 가짜 재료 출처.
+    /// A fake material source that checks · prepares by looking into the manager's roster · reservation · session tables, and counts reclaims.
     #[derive(Default)]
     struct ScriptedKits {
         turns: Mutex<VecDeque<Turn>>,
@@ -453,7 +453,7 @@ mod tests {
         preps: Mutex<VecDeque<Prep>>,
         prepared: Mutex<Vec<Prepared>>,
         released: Mutex<Vec<(AgentId, u32)>>,
-        /// 표를 건 시험대에서만 찬다.
+        /// Filled only by a rig that hung the tables.
         releases: Mutex<Vec<Release>>,
         tables: OnceLock<Tables>,
     }
@@ -506,9 +506,9 @@ mod tests {
 
     impl LaunchKitSource for ScriptedKits {
         fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
-            let t = self.tables.get().expect("시험대가 표를 걸었다");
+            let t = self.tables.get().expect("the rig hung the tables");
             let id = profile.id;
-            // 잡을 수 있나부터 본다 — 매니저가 쥔 채 불렀으면 아래 읽기가 같은 스레드에서 다시 잡아 매달린다.
+            // First see whether they can be taken — if the manager called while holding one, the reads below would take it again on the same thread and hang.
             let roster_free = t.profiles.lock_is_free();
             let reservations_free = t.spawning.try_lock().is_ok();
             let sessions_free = t.sessions.try_write().is_ok();
@@ -553,7 +553,7 @@ mod tests {
             id: AgentId,
             epoch: u32,
         ) -> Result<LaunchKit, PrepareError> {
-            let t = self.tables.get().expect("시험대가 표를 걸었다");
+            let t = self.tables.get().expect("the rig hung the tables");
             let roster_free = t.profiles.lock_is_free();
             let reservations_free = t.spawning.try_lock().is_ok();
             let sessions_free = t.sessions.try_write().is_ok();
@@ -614,13 +614,13 @@ mod tests {
         }
     }
 
-    // ── 픽스처 ──
+    // ── fixtures ──
 
     fn strings(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
     }
 
-    /// 골든의 명령 다섯 — 이름이 골든 경우 이름의 머리다.
+    /// The golden's five commands — the name is the head of the golden case name.
     fn golden_commands() -> Vec<(&'static str, AgentCommand)> {
         vec![
             (
@@ -661,7 +661,7 @@ mod tests {
         ]
     }
 
-    /// 즉석 생성 길의 명령 셋 — 데몬 `SpawnByCwd`(받은 백엔드 · 공통 기본 모드 · 인자 없음) · 스모크 bin.
+    /// The three commands of the on-the-spot creation paths — daemon `SpawnByCwd` (received backend · common default mode · no args) · smoke bin.
     fn spawn_path_commands() -> Vec<(&'static str, AgentCommand)> {
         vec![
             (
@@ -690,7 +690,7 @@ mod tests {
 
     fn golden_env() -> Vec<(String, String)> {
         let path = std::env::join_paths(["/golden/sys", "/golden/tools"])
-            .expect("고정 PATH")
+            .expect("fixed PATH")
             .into_string()
             .expect("UTF-8");
         vec![
@@ -739,7 +739,7 @@ mod tests {
         }
     }
 
-    /// 활성화 갈래 셋 — 이어받기는 저장 손잡이가 있을 때만 이어받고, 없으면 새 대화로 넘긴다(`resume_no_fallback` 머리).
+    /// The three activation arms — resume resumes only with a stored handle, otherwise it falls back to a new conversation (`resume_no_fallback` head).
     #[derive(Debug, Clone, Copy)]
     enum Way {
         Fresh,
@@ -757,7 +757,7 @@ mod tests {
             }
         }
 
-        /// 이 갈래로 띄울 명부 항목 — 이어받기만 손잡이를 단다.
+        /// The roster entry to launch with this arm — only resume gets a handle.
         fn profile(self) -> AgentProfile {
             let mut p = profile_of(claude_terminal(), golden_env());
             if matches!(self, Way::Resume) {
@@ -767,7 +767,7 @@ mod tests {
         }
     }
 
-    // ── 골든 대조 ──
+    // ── golden comparison ──
 
     #[derive(Deserialize)]
     struct GoldenCase {
@@ -779,17 +779,16 @@ mod tests {
         cwd: String,
     }
 
-    /// (프로그램, 인자, env, cwd) — 골든과 같은 꼴로 편다(`tests/launch_argv_golden.rs` 의 `matches`).
+    /// (program, args, env, cwd) — laid out in the same shape as the golden (`matches` in `tests/launch_argv_golden.rs`).
     type Shape = (String, Vec<String>, Vec<(String, String)>, String);
 
     fn golden(case: &str) -> Shape {
         let all: Vec<GoldenCase> =
             serde_json::from_str(include_str!("../../tests/fixtures/launch_argv_golden.json"))
-                .expect("골든은 JSON");
-        let g = all
-            .into_iter()
-            .find(|g| g.case == case)
-            .unwrap_or_else(|| panic!("골든에 `{case}` 가 없다 — 이 항목의 전제가 낡았다"));
+                .expect("the golden is JSON");
+        let g = all.into_iter().find(|g| g.case == case).unwrap_or_else(|| {
+            panic!("`{case}` is not in the golden — this item's premise is stale")
+        });
         let (program, args) = if g.console {
             console_command(&g.program, g.args)
         } else {
@@ -798,7 +797,7 @@ mod tests {
         (program, args, g.env, g.cwd)
     }
 
-    /// 스폰이 뽑은 세션 id 만 골든의 고정값으로 바꾼다 — 나머지는 바이트 그대로.
+    /// Replaces only the session id the spawn drew with the golden's fixed value — the rest stays byte for byte.
     fn shape(spec: &CommandSpec) -> Shape {
         let mut args = spec.args.clone();
         if let Some(i) = args.iter().position(|a| a == "--session-id") {
@@ -834,15 +833,15 @@ mod tests {
         assert_eq!(
             shape(spec),
             golden(case),
-            "{path} 길의 argv 가 골든 `{case}` 와 다르다 — Noop 실행 재료는 스폰을 바이트 하나 바꾸지 않아야 한다"
+            "the argv of the {path} path differs from the golden `{case}` — Noop launch materials must not change a spawn by a single byte"
         );
     }
 
-    // ── Noop 회귀 ──
+    // ── Noop regression ──
 
-    /// ★Noop 재료로는 manager 의 어느 스폰 길도 오늘과 바이트 같은 argv 를 낸다★ — 활성화 · 깨우기(이어받기) · 즉석
-    /// 생성(데몬 `SpawnByCwd` · 스모크 bin). 붙은 프리셋 · 「기본」 칸은 Noop 이 읽지 않고, `extra_args` 는 그대로 실린다.
-    /// 배치는 기본값을 내고 배치 포트를 한 번도 부르지 않는다.
+    /// ★With Noop materials every manager spawn path produces argv byte-identical to today's★ — activation · wake-up (resume) · on-the-spot
+    /// creation (daemon `SpawnByCwd` · smoke bin). Noop reads neither the attached presets nor the 「Default」 field, and `extra_args` ride as is.
+    /// Placement yields the default and never calls the placement port.
     // TRD S25 §4 「agent manager」 · §5-2 4
     #[test]
     fn noop_spawn_paths_produce_todays_argv() {
@@ -850,7 +849,11 @@ mod tests {
             let (spec, artifacts) = rig.assembled();
             assert_golden(case, path, &spec);
             assert_eq!(artifacts, LaunchArtifacts::default(), "{path} · {case}");
-            assert_eq!(rig.fs_calls(), 0, "{path} · {case}: 배치 포트를 불렀다");
+            assert_eq!(
+                rig.fs_calls(),
+                0,
+                "{path} · {case}: called the placement port"
+            );
         }
 
         for (name, command) in golden_commands() {
@@ -861,7 +864,7 @@ mod tests {
             p.presets = attachments(true, &["/team/a.md"]).presets;
             rig.manager.profiles.upsert(p.clone());
             let _ = rig.manager.activate_profile(&p, SpawnMode::Fresh);
-            assert_noop(&rig, &fresh, "활성화");
+            assert_noop(&rig, &fresh, "activation");
 
             let rig = Rig::noop();
             let mut p = profile_of(command.clone(), golden_env());
@@ -871,12 +874,12 @@ mod tests {
             }
             rig.manager.profiles.upsert(p.clone());
             let _ = rig.manager.activate_profile(&p, SpawnMode::Resume);
-            assert_noop(&rig, &format!("{name}/resume/no-endpoint"), "깨우기");
+            assert_noop(&rig, &format!("{name}/resume/no-endpoint"), "wake-up");
 
             let rig = Rig::noop();
             let p = profile_of(command, golden_env());
             let _ = rig.manager.spawn_agent(&p, SpawnMode::Fresh);
-            assert_noop(&rig, &fresh, "즉석 생성");
+            assert_noop(&rig, &fresh, "on-the-spot creation");
         }
 
         for (name, command) in spawn_path_commands() {
@@ -884,16 +887,16 @@ mod tests {
             let p = profile_of(command, Vec::new());
             assert!(
                 p.default_preset,
-                "생성자는 「기본」 을 단다 — Noop 은 그것을 읽지 않는다"
+                "the constructor attaches 「Default」 — Noop does not read it"
             );
             let _ = rig.manager.spawn_agent(&p, SpawnMode::Fresh);
             assert_noop(&rig, &format!("{name}/fresh/no-endpoint"), name);
         }
     }
 
-    /// ★작업 폴더는 호출자 사본이 아니라 명부에서 읽는다★ — 사본을 뜬 뒤 작업 폴더가 바뀌었으면(`agent.setWorkspace`)
-    /// 사본의 cwd 는 낡았다.
-    // TRD S25 §1-5 (가) 3
+    /// ★The working folder is read from the roster, not the caller's copy★ — if the working folder changed after the copy was taken
+    /// (`agent.setWorkspace`), the copy's cwd is stale.
+    // TRD S25 §1-5 (ga) 3
     #[test]
     fn the_spawned_cwd_is_the_rosters_not_the_callers_copy() {
         let rig = Rig::noop();
@@ -909,13 +912,13 @@ mod tests {
         assert_eq!(
             rig.manager.profiles.get(stored.id).unwrap().cwd,
             PathBuf::from("/golden/moved"),
-            "사본의 cwd 가 명부를 되돌리지 않는다"
+            "the copy's cwd does not revert the roster"
         );
     }
 
-    // ── 순서 ──
+    // ── order ──
 
-    /// ★점검은 예약 뒤 · 화신 표식과 세션 파생 앞에, 명부의 값으로, 매니저 락 없이 돈다★.
+    /// ★The check runs after the reservation · before the incarnation marker and session derivation, with roster values, without manager locks★.
     // ADR-0319
     #[test]
     fn the_check_runs_on_the_roster_after_the_reservation_and_before_the_incarnation() {
@@ -935,36 +938,40 @@ mod tests {
         let _ = rig.manager.activate_profile(&caller, SpawnMode::Fresh);
 
         let seen = kits.seen();
-        assert_eq!(seen.len(), 1, "점검은 한 번");
+        assert_eq!(seen.len(), 1, "one check");
         let s = &seen[0];
         assert!(
             s.roster_free && s.reservations_free && s.sessions_free && s.names_free,
-            "점검을 매니저 락을 쥔 채 불렀다: {s:?}"
+            "the check was called while holding a manager lock: {s:?}"
         );
-        assert!(s.reserved, "예약 뒤가 아니다");
+        assert!(s.reserved, "not after the reservation");
         assert!(!s.live_session);
         assert_eq!(
             (s.profile.default_preset, s.profile.presets.clone()),
             (attached.default_preset, attached.presets),
-            "호출자 사본이 아니라 명부 값을 점검한다"
+            "checks the roster value, not the caller's copy"
         );
-        assert_eq!(s.roster_epoch, Some(epoch_before), "화신 표식 앞이 아니다");
+        assert_eq!(
+            s.roster_epoch,
+            Some(epoch_before),
+            "not before the incarnation marker"
+        );
         assert_eq!(
             s.profile.backend_session_id,
             Some(STORED_SID),
-            "세션 파생(Fresh 비우기) 앞이 아니다"
+            "not before session derivation (the Fresh clear)"
         );
 
-        // 점검 뒤로 스폰이 이어졌다 — 표식을 뽑고 세션 id 를 비우고 명령을 조립했다.
+        // The spawn continued after the check — drew the marker, cleared the session id and assembled the command.
         let _ = rig.spec();
         let after = rig.manager.profiles.get(caller.id).unwrap();
         assert_ne!(after.epoch, epoch_before);
         assert_eq!(after.backend_session_id, None);
     }
 
-    /// ★명부에 없는 id 는 넣기 전에 호출자 사본으로 한 번, 넣은 뒤 명부 값으로 한 번 점검한다★ — 앞엣것은 막히면
-    /// 아무것도 넣지 않으려는 것이고, 띄울 계획은 뒤엣것이다(배정된 이름 · 생성자 기본값을 본다).
-    // TRD S25 §1-5 (가) 0 · 1 ②
+    /// ★An id not in the roster is checked once with the caller's copy before insertion and once with the roster value after★ — the
+    /// first inserts nothing when blocked, and the plan to launch is the second (it sees the assigned name · constructor defaults).
+    // TRD S25 §1-5 (ga) 0 · 1 ②
     #[test]
     fn an_unregistered_profile_is_checked_before_registration_and_again_on_the_roster() {
         let kits = ScriptedKits::new(Vec::new());
@@ -974,35 +981,41 @@ mod tests {
         let _ = rig.manager.spawn_agent(&adhoc, SpawnMode::Fresh);
 
         let seen = kits.seen();
-        assert_eq!(seen.len(), 2, "넣기 전 · 넣은 뒤 한 번씩");
+        assert_eq!(seen.len(), 2, "once before and once after insertion");
         let (before, after) = (&seen[0], &seen[1]);
         assert!(
             before.roster_free
                 && before.reservations_free
                 && before.sessions_free
                 && before.names_free,
-            "넣기 전 점검을 매니저 락을 쥔 채 불렀다: {before:?}"
+            "the pre-insert check was called while holding a manager lock: {before:?}"
         );
-        assert!(before.reserved, "넣기 전 점검이 예약 뒤가 아니다");
-        assert_eq!(before.roster_epoch, None, "넣기 전 점검이 넣은 뒤에 돌았다");
+        assert!(
+            before.reserved,
+            "the pre-insert check is not after the reservation"
+        );
+        assert_eq!(
+            before.roster_epoch, None,
+            "the pre-insert check ran after insertion"
+        );
         assert_eq!(
             before.profile.display_name, None,
-            "넣기 전 점검은 호출자 사본을 본다"
+            "the pre-insert check sees the caller's copy"
         );
         assert_eq!(
             after.roster_epoch,
             Some(adhoc.epoch),
-            "점검 때 명부에 있었고 표식은 아직 안 뽑혔다"
+            "in the roster at check time, and the marker not yet drawn"
         );
         assert!(
             after.profile.display_name.is_some(),
-            "이름은 둘째 점검 앞에 배정된다"
+            "the name is assigned before the second check"
         );
         assert!(after.profile.default_preset && after.profile.presets.is_empty());
         let _ = rig.spec();
     }
 
-    /// ★떠 있거나 뜨는 중이면 점검하지 않는다★ — 전처리는 예약 · 「이미 떠 있음」 확인 뒤다.
+    /// ★Running or starting = no check★ — preprocessing comes after the reservation · 「already running」 check.
     #[test]
     fn a_running_or_starting_agent_is_not_checked() {
         let kits = ScriptedKits::new(Vec::new());
@@ -1012,7 +1025,7 @@ mod tests {
 
         {
             let _held =
-                SpawnReservation::reserve(rig.manager.spawning.clone(), p.id).expect("예약");
+                SpawnReservation::reserve(rig.manager.spawning.clone(), p.id).expect("reserve");
             assert!(matches!(
                 rig.manager.spawn_agent(&p, SpawnMode::Fresh),
                 Ok(SpawnOutcome::Moot(None))
@@ -1024,14 +1037,14 @@ mod tests {
             Ok(SpawnOutcome::Moot(Some(_)))
         ));
 
-        assert!(kits.seen().is_empty(), "점검이 돌았다: {:?}", kits.seen());
+        assert!(kits.seen().is_empty(), "the check ran: {:?}", kits.seen());
         assert!(rig.assembled_nothing());
     }
 
-    // ── 막힘 · 경합 ──
+    // ── blocks · races ──
 
-    /// ★막히면 띄우지 않는다★ — 제어 채널 · 화신 표식 · 세션 id 를 건드리지 않고 구조 있는 거절을 그대로 돌려주며,
-    /// 「마지막 실패」 는 「그 밖」 이다(이어받기 길 · 손잡이 없는 이어받기의 새 대화 넘김도 같은 답).
+    /// ★Blocked = not launched★ — returns the structured refusal as is without touching the control channel · incarnation marker · session
+    /// id, and the 「last failure」 is 「other」 (the resume path · a handle-less resume falling back to a new conversation give the same answer).
     #[test]
     fn a_blocked_activation_starts_nothing_and_records_other() {
         for way in Way::ALL {
@@ -1044,23 +1057,26 @@ mod tests {
             let err = rig
                 .manager
                 .activate_profile(&p, way.mode())
-                .expect_err("막힘은 오류다");
+                .expect_err("a block is an error");
 
             assert!(
                 matches!(&err, PtyError::LaunchBlocked(b) if *b == blocked()),
                 "{way:?}: {err}"
             );
-            assert!(rig.assembled_nothing(), "{way:?}: 명령을 조립했다");
-            assert_eq!(rig.provisions(), 0, "{way:?}: 제어 채널을 발급했다");
+            assert!(rig.assembled_nothing(), "{way:?}: assembled a command");
+            assert_eq!(rig.provisions(), 0, "{way:?}: issued a control channel");
             assert!(rig.manager.list_agents().is_empty(), "{way:?}");
             let after = rig.manager.profiles.get(p.id).unwrap();
-            assert_eq!(after.epoch, epoch_before, "{way:?}: 화신 표식을 뽑았다");
+            assert_eq!(
+                after.epoch, epoch_before,
+                "{way:?}: drew the incarnation marker"
+            );
             assert_eq!(after.backend_session_id, p.backend_session_id, "{way:?}");
             assert_eq!(after.last_failure, Some(AgentFailureKind::Other), "{way:?}");
         }
     }
 
-    /// ★부팅 복원이 막히면 띄우지 않고 「실패」 로 보고한다★ — 이어받기 · 새 대화 두 갈래 다(`restore_one`).
+    /// ★A blocked boot restore is not launched and is reported as 「failed」★ — both arms, resume · new conversation (`restore_one`).
     // ADR-0334
     #[test]
     fn a_blocked_boot_restore_reports_failed_and_starts_nothing() {
@@ -1078,10 +1094,13 @@ mod tests {
                     if reason.contains(&blocked().to_string())),
                 "{way:?}: {outcome:?}"
             );
-            assert!(rig.assembled_nothing(), "{way:?}: 명령을 조립했다");
-            assert_eq!(rig.provisions(), 0, "{way:?}: 제어 채널을 발급했다");
+            assert!(rig.assembled_nothing(), "{way:?}: assembled a command");
+            assert_eq!(rig.provisions(), 0, "{way:?}: issued a control channel");
             let after = rig.manager.profiles.get(p.id).unwrap();
-            assert_eq!(after.epoch, epoch_before, "{way:?}: 화신 표식을 뽑았다");
+            assert_eq!(
+                after.epoch, epoch_before,
+                "{way:?}: drew the incarnation marker"
+            );
             assert_eq!(after.backend_session_id, p.backend_session_id, "{way:?}");
             assert_eq!(after.last_failure, Some(AgentFailureKind::Other), "{way:?}");
         }
@@ -1090,7 +1109,7 @@ mod tests {
     /// ★An ad-hoc create blocked by the pre-add check adds nothing★ — a block found before the add leaves no roster row
     /// that cannot start. A create that fails after the add leaves the agent asleep, and the wire `SpawnByCwd` answer
     /// names it by `created_agent_id` so the caller wakes it instead of creating another (ADR-0348).
-    // TRD S25 §1-5 (가) 1 ②
+    // TRD S25 §1-5 (ga) 1 ②
     #[test]
     fn a_blocked_ad_hoc_spawn_registers_nothing_and_starts_nothing() {
         let kits = ScriptedKits::new(vec![Turn::Block(blocked())]);
@@ -1100,20 +1119,20 @@ mod tests {
         let err = rig
             .manager
             .spawn_agent(&adhoc, SpawnMode::Fresh)
-            .expect_err("막힘은 오류다");
+            .expect_err("a block is an error");
 
         assert!(
             matches!(&err, PtyError::LaunchBlocked(b) if *b == blocked()),
             "{err}"
         );
-        assert_eq!(kits.seen().len(), 1, "넣기 전 점검에서 끊긴다");
-        assert!(rig.manager.profiles.get(adhoc.id).is_none(), "넣었다");
-        assert_eq!(rig.store.attempts(), 0, "저장했다");
+        assert_eq!(kits.seen().len(), 1, "cut off at the pre-insert check");
+        assert!(rig.manager.profiles.get(adhoc.id).is_none(), "inserted");
+        assert_eq!(rig.store.attempts(), 0, "saved");
         assert!(rig.assembled_nothing());
         assert_eq!(rig.provisions(), 0);
     }
 
-    /// 넣은 뒤 명부 값 점검에서 막히면 넣은 항목은 남는다(부분 성공 — 등록은 되돌리지 않는다).
+    /// Blocked at the post-insert roster-value check = the inserted entry stays (partial success — registration is not rolled back).
     #[test]
     fn an_ad_hoc_spawn_blocked_after_registration_keeps_it_and_starts_nothing() {
         let kits = ScriptedKits::new(vec![Turn::Pass, Turn::Block(blocked())]);
@@ -1123,18 +1142,18 @@ mod tests {
         let err = rig
             .manager
             .spawn_agent(&adhoc, SpawnMode::Fresh)
-            .expect_err("막힘은 오류다");
+            .expect_err("a block is an error");
 
         assert!(matches!(err, PtyError::LaunchBlocked(_)), "{err}");
         assert_eq!(kits.seen().len(), 2);
         assert!(rig.manager.profiles.get(adhoc.id).is_some());
-        assert_eq!(rig.store.attempts(), 1, "넣기의 저장 하나");
+        assert_eq!(rig.store.attempts(), 1, "the insert's one save");
         assert!(rig.assembled_nothing());
         assert_eq!(rig.provisions(), 0);
     }
 
-    /// ★점검하는 사이 붙임이 바뀌면 명부를 다시 읽어 한 번 더 점검한다★ — 두 번째는 새 값을 본다.
-    // TRD S25 §1-5 (가) 2
+    /// ★If the attachments change during the check, the roster is reread and checked once more★ — the second sees the new value.
+    // TRD S25 §1-5 (ga) 2
     #[test]
     fn a_preset_change_during_the_check_is_checked_again_once() {
         let next = attachments(true, &["/team/b.md"]);
@@ -1149,13 +1168,16 @@ mod tests {
         let _ = rig.manager.activate_profile(&p, SpawnMode::Fresh);
 
         let seen = kits.seen();
-        assert_eq!(seen.len(), 2, "다시 한 번만 점검한다");
+        assert_eq!(seen.len(), 2, "checks again only once");
         assert!(seen[0].profile.presets.is_empty());
-        assert_eq!(seen[1].profile.presets, next.presets, "다시 읽은 명부 값");
+        assert_eq!(
+            seen[1].profile.presets, next.presets,
+            "the reread roster value"
+        );
         let _ = rig.spec();
     }
 
-    /// 점검하는 사이 붙임을 `paths` 로 바꾼다.
+    /// Changes the attachments to `paths` during the check.
     fn set_presets(paths: &'static [&'static str]) -> Meanwhile {
         Box::new(move |profiles: &ProfileRegistry, id| {
             assert!(profiles
@@ -1164,8 +1186,8 @@ mod tests {
         })
     }
 
-    /// ★두 번 다 바뀌면 띄우지 않고 경합으로 끊는다★ — 「마지막 실패」 는 「그 밖」(이어받기 길 · 손잡이 없는
-    /// 이어받기의 새 대화 넘김도 같은 답).
+    /// ★Changed both times = not launched, cut off as a race★ — the 「last failure」 is 「other」 (the resume path · a handle-less resume
+    /// falling back to a new conversation give the same answer).
     #[test]
     fn presets_that_keep_changing_fail_the_launch_as_raced() {
         for way in Way::ALL {
@@ -1180,7 +1202,7 @@ mod tests {
             let err = rig
                 .manager
                 .activate_profile(&p, way.mode())
-                .expect_err("경합은 오류다");
+                .expect_err("a race is an error");
 
             assert!(matches!(err, PtyError::LaunchRaced), "{way:?}: {err}");
             assert_eq!(kits.seen().len(), 2, "{way:?}");
@@ -1192,9 +1214,9 @@ mod tests {
         }
     }
 
-    /// ★점검하는 사이 실행 입력이 바뀌었으면 막힘도 버리고 다시 점검한다★ — 그 막힘은 바뀌기 전 값으로 낸 것이라
-    /// 낡았다(고친 붙임이 낡은 막힘에 걸려 끊긴다).
-    // TRD S25 §1-5 (가) 1 · 2
+    /// ★If the launch inputs changed during the check, even a block is dropped and the check redone★ — that block was issued with the
+    /// value before the change and is stale (fixed attachments would be cut off by a stale block).
+    // TRD S25 §1-5 (ga) 1 · 2
     #[test]
     fn a_block_from_presets_that_changed_during_the_check_is_checked_again() {
         let kits = ScriptedKits::new(vec![Turn::MeanwhileBlock(
@@ -1208,16 +1230,16 @@ mod tests {
         let _ = rig.manager.activate_profile(&p, SpawnMode::Fresh);
 
         let seen = kits.seen();
-        assert_eq!(seen.len(), 2, "낡은 막힘을 버리고 한 번 더 점검한다");
+        assert_eq!(seen.len(), 2, "drops the stale block and checks once more");
         assert_eq!(
             seen[1].profile.presets,
             attachments(true, &["/team/b.md"]).presets,
-            "다시 읽은 명부 값"
+            "the reread roster value"
         );
         let _ = rig.spec();
     }
 
-    /// ★바뀐 입력으로 두 번 다 막히면 막힘이 아니라 경합이다★ — 어느 막힘도 지금 명부 값의 답이 아니다.
+    /// ★Blocked both times with changed inputs = a race, not a block★ — neither block answers for the current roster value.
     #[test]
     fn blocks_from_presets_that_keep_changing_fail_the_launch_as_raced() {
         let kits = ScriptedKits::new(vec![
@@ -1231,7 +1253,7 @@ mod tests {
         let err = rig
             .manager
             .activate_profile(&p, SpawnMode::Fresh)
-            .expect_err("경합은 오류다");
+            .expect_err("a race is an error");
 
         assert!(matches!(err, PtyError::LaunchRaced), "{err}");
         assert_eq!(kits.seen().len(), 2);
@@ -1243,9 +1265,9 @@ mod tests {
         );
     }
 
-    /// ★넘긴 사본의 명령 · env 가 점검한 명부 값과 다르면 띄우지 않는다★ — 스폰은 그 둘을 사본에서 명부로 옮기므로
-    /// 그대로 가면 점검하지 않은 명령으로 뜬다. 명부도 그 사본으로 덮지 않는다.
-    // TRD S25 §1-5 (가) 2
+    /// ★If the passed copy's command · env differ from the checked roster values, it is not launched★ — the spawn moves those two from
+    /// the copy to the roster, so going ahead would launch an unchecked command. The roster is not overwritten with that copy either.
+    // TRD S25 §1-5 (ga) 2
     #[test]
     fn a_callers_copy_whose_command_or_env_differs_from_the_roster_is_raced() {
         let edits: [(&str, fn(&mut AgentProfile)); 2] = [
@@ -1265,13 +1287,13 @@ mod tests {
             let err = rig
                 .manager
                 .activate_profile(&caller, SpawnMode::Fresh)
-                .expect_err("경합은 오류다");
+                .expect_err("a race is an error");
 
             assert!(matches!(err, PtyError::LaunchRaced), "{what}: {err}");
             assert_eq!(
                 kits.seen().len(),
                 1,
-                "{what}: 명부가 그대로라 다시 점검하지 않는다"
+                "{what}: the roster is unchanged, so no recheck"
             );
             assert!(rig.assembled_nothing(), "{what}");
             assert_eq!(rig.provisions(), 0, "{what}");
@@ -1279,13 +1301,13 @@ mod tests {
             assert_eq!(
                 (after.command, after.env),
                 (stored.command.clone(), stored.env.clone()),
-                "{what}: 사본이 명부를 덮었다"
+                "{what}: the copy overwrote the roster"
             );
             assert_eq!(after.last_failure, Some(AgentFailureKind::Other), "{what}");
         }
     }
 
-    /// 점검하는 사이 지워졌으면 끊는다 — 지운 프로필로 뜨지 않는다.
+    /// Deleted during the check = cut off — no launch with a deleted profile.
     #[test]
     fn a_profile_deleted_during_the_check_is_not_started() {
         let kits = ScriptedKits::new(vec![Turn::Meanwhile(Box::new(|profiles, id| {
@@ -1298,16 +1320,13 @@ mod tests {
         let err = rig
             .manager
             .activate_profile(&p, SpawnMode::Fresh)
-            .expect_err("지워졌다");
+            .expect_err("deleted");
 
         assert!(
-            matches!(&err, PtyError::SpawnFailed(m) if m.contains("실행 전처리 대조")),
+            matches!(&err, PtyError::SpawnFailed(m) if m.contains("prelaunch comparison")),
             "{err}"
         );
-        assert!(
-            rig.manager.profiles.get(p.id).is_none(),
-            "되살아나지 않는다"
-        );
+        assert!(rig.manager.profiles.get(p.id).is_none(), "not revived");
         assert!(rig.assembled_nothing());
     }
 
@@ -1416,12 +1435,12 @@ mod tests {
             (
                 "failed prepare",
                 Some(PrepareError::Failed("disk".to_string())),
-                |e| matches!(e, PtyError::SpawnFailed(m) if !m.contains("시험")),
+                |e| matches!(e, PtyError::SpawnFailed(m) if !m.contains("test probe")),
             ),
             (
                 "spawn error after the assembly",
                 None,
-                |e| matches!(e, PtyError::SpawnFailed(m) if m.contains("시험")),
+                |e| matches!(e, PtyError::SpawnFailed(m) if m.contains("test probe")),
             ),
         ];
         for (what, prep, expected) in cases {
@@ -1451,9 +1470,9 @@ mod tests {
         }
     }
 
-    // ── 재료 준비 ──
+    // ── material preparation ──
 
-    /// 점검이 낸 계획임을 알아볼 표시를 단 Noop 계획.
+    /// A Noop plan with a mark identifying it as the check's plan.
     fn marked_plan() -> LaunchPlan {
         LaunchPlan {
             notices: vec![Reason {
@@ -1467,8 +1486,8 @@ mod tests {
         }
     }
 
-    /// ★재료는 점검한 계획으로, 화신 표식 뒤 · 세션 id 비우기와 제어 채널 발급 앞에, 매니저 락 없이 준비한다★.
-    // TRD S25 §1-5 (나) 4 · §5-2 4 (a)
+    /// ★Materials are prepared from the checked plan, after the incarnation marker · before the session-id clear and control-channel issue, without manager locks★.
+    // TRD S25 §1-5 (na) 4 · §5-2 4 (a)
     #[test]
     fn the_kit_is_prepared_from_the_checked_plan_after_the_incarnation_without_manager_locks() {
         let kits = ScriptedKits::preparing(vec![Turn::Plan(marked_plan())], Vec::new());
@@ -1480,21 +1499,21 @@ mod tests {
         let _ = rig.manager.activate_profile(&p, SpawnMode::Fresh);
 
         let prepared = kits.prepared();
-        assert_eq!(prepared.len(), 1, "준비는 한 번");
+        assert_eq!(prepared.len(), 1, "one preparation");
         let s = &prepared[0];
-        assert_eq!(s.plan, marked_plan(), "점검이 낸 계획 그대로가 아니다");
-        assert!(s.locks_free, "준비를 매니저 락을 쥔 채 불렀다: {s:?}");
-        assert!(s.reserved, "예약 밖에서 준비했다");
+        assert_eq!(s.plan, marked_plan(), "not the checked plan as is");
+        assert!(s.locks_free, "prepared while holding a manager lock: {s:?}");
+        assert!(s.reserved, "prepared outside the reservation");
         assert!(!s.live_session);
         assert_eq!(s.id, p.id);
-        assert_ne!(s.epoch, epoch_before, "화신 표식 앞이다");
+        assert_ne!(s.epoch, epoch_before, "before the incarnation marker");
         assert_eq!(
             s.roster_epoch,
             Some(s.epoch),
-            "이 화신의 표식으로 준비하지 않았다"
+            "not prepared with this incarnation's marker"
         );
-        assert_eq!(s.roster_sid, Some(STORED_SID), "세션 id 비우기 뒤다");
-        assert_eq!(s.provisions, 0, "제어 채널 발급 뒤다");
+        assert_eq!(s.roster_sid, Some(STORED_SID), "after the session-id clear");
+        assert_eq!(s.provisions, 0, "after the control-channel issue");
         let _ = rig.spec();
     }
 
@@ -1502,7 +1521,7 @@ mod tests {
     /// real, the assembled materials are real too. An empty real kit carries only that mark and does not call the layout
     /// port (the claude translation has nothing to place from it). Noop materials stay at the default (argv golden =
     /// `noop_spawn_paths_produce_todays_argv`).
-    // TRD S25 §1-5 (나) 6 · 7
+    // TRD S25 §1-5 (na) 6 · 7
     #[test]
     fn the_assembled_artifacts_come_from_the_prepared_kit() {
         let p = profile_of(claude_terminal(), golden_env());
@@ -1518,7 +1537,7 @@ mod tests {
                 ..LaunchArtifacts::default()
             }
         );
-        assert!(rig.assembled_nothing(), "한 번만 조립한다");
+        assert!(rig.assembled_nothing(), "assembles only once");
         assert_eq!(rig.fs_calls(), 0);
 
         let rig = Rig::noop();
@@ -1528,9 +1547,10 @@ mod tests {
         assert_eq!(rig.fs_calls(), 0);
     }
 
-    /// ★배치가 실패하면 띄우지 않고 그 화신의 재료를 가드가 정확히 한 번 거둔다★ — 여기서는 준비가 상대 경로 휘발
-    /// 폴더를 내 배치가 끊는다(가둘 뿌리가 데몬 현재 폴더 기준이 된다). 조립 · 띄우기 전이고 세션도 없다.
-    // TRD S25 §1-5 (나) 6 · §5-2 4 (c2) ①
+    /// ★A failed placement is not launched, and the guard reclaims that incarnation's materials exactly once★ — here the preparation yields
+    /// a relative volatile folder and placement cuts it off (the confining root would resolve against the daemon's current folder). Before
+    /// assembly · launch, and there is no session.
+    // TRD S25 §1-5 (na) 6 · §5-2 4 (c2) ①
     #[test]
     fn a_failed_materialize_releases_the_kit_once_and_starts_nothing() {
         let kits = ScriptedKits::preparing(
@@ -1544,10 +1564,10 @@ mod tests {
         let err = rig
             .manager
             .activate_profile(&p, SpawnMode::Fresh)
-            .expect_err("배치 실패는 오류다");
+            .expect_err("a placement failure is an error");
 
         assert!(
-            matches!(&err, PtyError::SpawnFailed(m) if m.contains("실행 재료 배치 실패")),
+            matches!(&err, PtyError::SpawnFailed(m) if m.contains("launch-material placement failed")),
             "{err}"
         );
         let prepared = kits.prepared();
@@ -1555,11 +1575,11 @@ mod tests {
         assert_eq!(
             kits.released(),
             vec![(p.id, prepared[0].epoch)],
-            "거두기가 정확히 한 번이 아니다"
+            "not reclaimed exactly once"
         );
         let r = &kits.releases()[0];
         assert!(r.locks_free && !r.on_reaper && !r.live_session, "{r:?}");
-        assert!(rig.assembled_nothing(), "배치 앞에서 끊기지 않았다");
+        assert!(rig.assembled_nothing(), "not cut off before placement");
         assert_eq!(rig.fs_calls(), 0);
         assert!(rig.manager.list_agents().is_empty());
         assert_eq!(
@@ -1568,17 +1588,17 @@ mod tests {
         );
     }
 
-    /// ★준비가 실패하면 그 화신의 재료를 정확히 한 번 거두고 띄우지 않는다★ — 원본이 점검 뒤 바뀐 것은 경합(「마지막
-    /// 실패」 = 그 밖), 그 밖은 `SpawnFailed`. 어느 쪽이든 저장된 세션 id 를 밀지 않고 제어 채널을 발급하지 않는다.
+    /// ★A failed preparation reclaims that incarnation's materials exactly once and is not launched★ — a source changed after the check is a
+    /// race (「last failure」 = other), anything else `SpawnFailed`. Either way the stored session id is not pushed and no control channel is issued.
     // TRD S25 §5-2 4 (c)
     #[test]
     fn a_failed_prepare_releases_the_kit_once_and_starts_nothing() {
         for way in Way::ALL {
             for stale in [true, false] {
                 let err = if stale {
-                    PrepareError::Stale("team/a.md 사라짐".to_string())
+                    PrepareError::Stale("team/a.md gone".to_string())
                 } else {
-                    PrepareError::Failed("휘발 폴더를 못 만듦".to_string())
+                    PrepareError::Failed("could not make the volatile folder".to_string())
                 };
                 let kits = ScriptedKits::preparing(Vec::new(), vec![Prep::Fail(err)]);
                 let rig = kits.rig();
@@ -1588,14 +1608,14 @@ mod tests {
                 let got = rig
                     .manager
                     .activate_profile(&p, way.mode())
-                    .expect_err("준비 실패는 오류다");
+                    .expect_err("a preparation failure is an error");
 
                 let case = format!("{way:?} stale={stale}");
                 if stale {
                     assert!(matches!(got, PtyError::LaunchRaced), "{case}: {got}");
                 } else {
                     assert!(
-                        matches!(&got, PtyError::SpawnFailed(m) if m.contains("휘발 폴더를 못 만듦")),
+                        matches!(&got, PtyError::SpawnFailed(m) if m.contains("could not make the volatile folder")),
                         "{case}: {got}"
                     );
                 }
@@ -1604,7 +1624,7 @@ mod tests {
                 assert_eq!(
                     kits.released(),
                     vec![(p.id, prepared[0].epoch)],
-                    "{case}: 거두기가 정확히 한 번이 아니다"
+                    "{case}: not reclaimed exactly once"
                 );
                 assert!(rig.assembled_nothing(), "{case}");
                 assert_eq!(rig.provisions(), 0, "{case}");
@@ -1621,8 +1641,8 @@ mod tests {
         }
     }
 
-    /// ★준비 뒤 세션이 넘겨받기 전에 끊겨도 재료를 정확히 한 번 거둔다★ — 여기서는 조립 뒤 시험 탐침이 띄우기 전에
-    /// 끊는다(띄우기 · 세션 등록 실패와 같은 구간).
+    /// ★Cut off after preparation but before the session takes over = materials still reclaimed exactly once★ — here the test probe cuts
+    /// it off after assembly, before launch (the same span as a launch · session-registration failure).
     #[test]
     fn a_failure_between_prepare_and_the_session_releases_the_kit_once() {
         let kits = ScriptedKits::preparing(Vec::new(), Vec::new());
@@ -1633,10 +1653,10 @@ mod tests {
         let err = rig
             .manager
             .activate_profile(&p, SpawnMode::Fresh)
-            .expect_err("탐침이 띄우기 전에 끊는다");
+            .expect_err("the probe cuts off before launch");
 
         assert!(
-            matches!(&err, PtyError::SpawnFailed(m) if m.contains("시험")),
+            matches!(&err, PtyError::SpawnFailed(m) if m.contains("test probe")),
             "{err}"
         );
         let _ = rig.spec();
@@ -1645,7 +1665,7 @@ mod tests {
         assert_eq!(kits.released(), vec![(p.id, prepared[0].epoch)]);
     }
 
-    /// 실 셸 하나를 띄울 시험대 — 탐침을 떼 띄우기까지 간다.
+    /// A rig launching one real shell — the probe is removed so it goes as far as launching.
     fn started_shell(kits: &Arc<ScriptedKits>) -> (Rig, AgentInfo) {
         let rig = kits.rig();
         *sync::lock(&rig.manager.spec_probe) = None;
@@ -1661,25 +1681,25 @@ mod tests {
         let info = rig
             .manager
             .activate_profile(&p, SpawnMode::Fresh)
-            .expect("셸이 뜬다");
+            .expect("the shell launches");
         (rig, info)
     }
 
-    /// 첫 거두기를 기다린 뒤 잠깐 더 기다려 그 뒤로 거두기가 더 오지 않았나까지 본다.
+    /// Waits for the first reclaim, then a little longer to see that no further reclaim comes.
     fn settled_releases(kits: &ScriptedKits) -> Vec<Release> {
         assert!(
             engram_dashboard_base::testing::wait_until(Duration::from_secs(15), || {
                 !kits.released().is_empty()
             }),
-            "세션이 끝났는데 재료를 아무도 안 거뒀다"
+            "the session ended but nobody reclaimed the materials"
         );
         std::thread::sleep(Duration::from_millis(300));
         kits.releases()
     }
 
-    /// ★뜬 화신의 재료는 가드가 거두지 않는다 — 끄면 세션을 명부에서 뺀 reaper 가 정확히 한 번 거둔다★: kill 의 앞당긴
-    /// 권한 회수 옆이 아니라(그때는 자식이 살아 있다), 락을 하나도 쥐지 않은 채, auto_restore 를 내린 뒤에. 시험대는
-    /// 생성 뒤 재료 포트를 바꿔 끼운다 — reaper 가 생성 때 잡은 포트로 거두면 여기 아무것도 안 온다.
+    /// ★The guard does not reclaim a launched incarnation's materials — on kill, the reaper that removed the session from the roster reclaims
+    /// exactly once★: not next to kill's early permission revoke (the child is alive then), holding no lock, after auto_restore is lowered. The
+    /// rig swaps the material port after construction — a reaper reclaiming through the port caught at construction would bring nothing here.
     // ADR-0019
     // ADR-0334
     // TRD S25 §5-2 4 (c2) ② · ③ · ④
@@ -1691,36 +1711,42 @@ mod tests {
         assert_eq!(kits.prepared().len(), 1);
         assert!(
             kits.released().is_empty(),
-            "뜬 화신의 재료를 가드가 거뒀다: {:?}",
+            "the guard reclaimed a launched incarnation's materials: {:?}",
             kits.released()
         );
-        rig.manager.kill_agent(info.id).expect("끈다");
+        rig.manager.kill_agent(info.id).expect("kill");
 
         let releases = settled_releases(&kits);
         assert_eq!(
             kits.released(),
             vec![(info.id, info.epoch)],
-            "거두기가 이 화신으로 정확히 한 번이 아니다"
+            "not reclaimed exactly once for this incarnation"
         );
         let r = &releases[0];
-        assert!(r.on_reaper, "reaper 밖에서 거뒀다: {r:?}");
-        assert!(!r.live_session, "세션이 명부에 있는 채 거뒀다: {r:?}");
-        assert!(r.locks_free, "매니저 락을 쥔 채 거뒀다: {r:?}");
+        assert!(r.on_reaper, "reclaimed outside the reaper: {r:?}");
+        assert!(
+            !r.live_session,
+            "reclaimed with the session still in the roster: {r:?}"
+        );
+        assert!(
+            r.locks_free,
+            "reclaimed while holding a manager lock: {r:?}"
+        );
         assert_eq!(
             r.auto_restore,
             Some(false),
-            "auto_restore 를 내리기 전에 거뒀다: {r:?}"
+            "reclaimed before auto_restore was lowered: {r:?}"
         );
     }
 
-    /// ★스스로 끝난 화신의 재료도 reaper 가 정확히 한 번 거둔다★ — 셸에 `exit` 를 쳐 끝낸다.
+    /// ★A self-ended incarnation's materials are reclaimed exactly once by the reaper too★ — ended by typing `exit` into the shell.
     // TRD S25 §5-2 4 (c2) ②
     #[test]
     fn the_reaper_releases_a_naturally_exited_agents_kit_once() {
         let kits = ScriptedKits::preparing(Vec::new(), Vec::new());
         let (rig, info) = started_shell(&kits);
 
-        // 셸이 아직 입력을 안 읽었으면 다시 친다 — 끝난 뒤의 쓰기 실패는 무시한다.
+        // If the shell has not read the input yet, type again — write failures after it ended are ignored.
         let exited = (0..10).any(|_| {
             let _ = rig
                 .manager
@@ -1729,7 +1755,7 @@ mod tests {
                 !kits.released().is_empty()
             })
         });
-        assert!(exited, "셸이 `exit` 로 끝나지 않았다");
+        assert!(exited, "the shell did not end with `exit`");
 
         let releases = settled_releases(&kits);
         assert_eq!(kits.released(), vec![(info.id, info.epoch)]);
@@ -1738,8 +1764,8 @@ mod tests {
         assert_eq!(r.auto_restore, Some(false), "{r:?}");
     }
 
-    /// ★거두기는 표식이 맞는 수거 승자 한 번뿐이다★ — 늦게 온 앞 화신의 수거 · 같은 수거의 되풀이는 아무것도 거두지
-    /// 않고, 지금 화신의 세션을 빼지도 않는다. 열쇠는 자기 화신만 거둔다.
+    /// ★Reclaiming happens only once, for the reap winner whose marker matches★ — a late reap of an earlier incarnation · a repeat of the same
+    /// reap reclaims nothing and does not remove the current incarnation's session. A lease reclaims only its own incarnation.
     // ADR-0084
     // TRD S25 §5-2 4 (c2) ②
     #[test]
@@ -1765,12 +1791,19 @@ mod tests {
 
         put_live_session_leased(manager, id, 7, lease(7));
         deps.reap_one(reap(3));
-        assert!(kits.released().is_empty(), "앞 화신의 수거가 거뒀다");
+        assert!(
+            kits.released().is_empty(),
+            "the earlier incarnation's reap reclaimed"
+        );
         assert!(manager.sessions.read().unwrap().contains_key(&id));
 
         deps.reap_one(reap(7));
         deps.reap_one(reap(7));
-        assert_eq!(kits.released(), vec![(id, 7)], "수거 승자 한 번이 아니다");
+        assert_eq!(
+            kits.released(),
+            vec![(id, 7)],
+            "not once for the reap winner"
+        );
         assert!(!kits.releases()[0].live_session);
 
         put_live_session_leased(manager, id, 9, lease(9));
@@ -1778,7 +1811,7 @@ mod tests {
         assert_eq!(
             kits.released(),
             vec![(id, 7)],
-            "늦게 온 앞 화신의 수거가 지금 화신을 거뒀다"
+            "a late reap of the earlier incarnation reclaimed the current incarnation"
         );
         assert!(manager.sessions.read().unwrap().contains_key(&id));
     }
@@ -2023,19 +2056,21 @@ mod tests {
         assert!(kits.unscoped().is_empty());
     }
 
-    // ── 소스 순서 ──
+    // ── source order ──
 
-    /// 운영 구획에서 `start` 와 `end` 사이를 잘라 주석 줄을 빼고 공백을 전부 지운다(`manager.rs` 시험의 같은 이름
-    /// 도우미와 같은 꼴).
+    /// Cuts the production section between `start` and `end`, drops comment lines and removes all whitespace (the same shape as the helper of
+    /// that name in the `manager.rs` tests).
     fn squashed(src: &str, start: &str, end: &str) -> String {
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let body = production
             .split(start)
             .nth(1)
-            .unwrap_or_else(|| panic!("`{start}` 가 운영 구획에 없다 — 이 항목의 전제가 낡았다"))
+            .unwrap_or_else(|| {
+                panic!("`{start}` is not in the production section — this item's premise is stale")
+            })
             .split(end)
             .next()
-            .expect("다음 구획까지");
+            .expect("up to the next section");
         body.lines()
             .map(str::trim)
             .filter(|l| !l.starts_with("//"))
@@ -2050,23 +2085,20 @@ mod tests {
             assert_eq!(
                 body.matches(needle).count(),
                 1,
-                "`{needle}` 가 정확히 한 번이 아니다 — 이 항목이 자리를 특정하지 못한다"
+                "`{needle}` does not occur exactly once — this item cannot pin the spot"
             );
             let at = body.find(needle).unwrap();
             if let Some((prev, prev_at)) = last {
-                assert!(
-                    prev_at < at,
-                    "`{prev}` 가 `{needle}` 보다 앞이 아니다: {body}"
-                );
+                assert!(prev_at < at, "`{prev}` is not before `{needle}`: {body}");
             }
             last = Some((needle, at));
         }
     }
 
-    /// ★전처리 자리를 소스에서 못 박는다★ — 위 시험들은 한 스레드에서 차례로 재므로, 예약 · 떠 있음 확인 앞으로
-    /// 옮겨도(같은 에이전트의 두 실행이 함께 점검) 표식 · 세션 파생 뒤로 밀어도(래치 · 표식이 맞추기 전 사본을 봄)
-    /// 일부는 초록이다. 막힘이 제어 채널 발급 앞에서 끊기는 것과 명부 다시 읽기가 표식 뒤인 것, 대조가 점검의 답을
-    /// 풀기 전인 것, 넣기 전 점검이 이름 배정 게이트 앞인 것도 함께 본다.
+    /// ★Pins the preprocessing spot in the source★ — the tests above measure in turn on one thread, so moving it before the reservation ·
+    /// running check (two launches of one agent checking together) or pushing it after the marker · session derivation (the latch · marker
+    /// see a copy before alignment) leaves some green. Also checks that a block cuts off before the control-channel issue, that the roster
+    /// reread is after the marker, that the comparison comes before unpacking the check's answer, and that the pre-insert check is before the name-assignment gate.
     // ADR-0319
     #[test]
     fn the_prelaunch_sits_after_the_reservation_and_before_the_incarnation_in_source() {
@@ -2104,7 +2136,7 @@ mod tests {
             &prelaunch,
             &[
                 "self.profiles.get(id)",
-                // 답(막힘 포함)을 쥔 채 곧바로 대조한다 — 사이에서 풀면 바뀐 입력의 막힘이 그대로 나간다.
+                        // Compare right away while holding the answer (blocks included) — unpacking in between would let a block of changed inputs go out as is.
                 "letchecked=self.launch.kits.check_in(scope,&profile);matchself.profiles.launch_inputs_unchanged(id,&seen)",
                 "Some(true)=>{returnsettle(caller,&seen,checked)",
             ],
@@ -2126,7 +2158,10 @@ mod tests {
         //   scope. The scope is opened once, in the spawn body, and not here; the spawn path keeps no canonicalize of
         //   its own (the working folder is the kit source's answer).
         // ADR-0360
-        let production = manager.split("mod tests {").next().expect("운영 구획");
+        let production = manager
+            .split("mod tests {")
+            .next()
+            .expect("production section");
         assert!(!production.contains(".kits.check("));
         assert!(!production.contains(".kits.check_in("));
         assert_eq!(production.matches(".begin_launch()").count(), 1);
@@ -2137,19 +2172,20 @@ mod tests {
         let own = include_str!("prelaunch.rs")
             .split("mod tests {")
             .next()
-            .expect("운영 구획");
+            .expect("production section");
         assert!(!own.contains(".kits.check("));
         assert_eq!(own.matches(".kits.check_in(scope,").count(), 2);
         assert!(!own.contains(".begin_launch()"));
     }
 
-    /// ★재료 가드 자리를 소스에서 못 박는다★ — 무장은 준비 **앞**(준비 실패도 거둔다 — Err 경로는 정확히 한 번 ·
-    /// 패닉은 운영에서 프로세스를 끝내므로(ADR-0292) 부팅 쓸기가 받친다 — 시험 · contain 안에서만 풀린다) · 준비는
-    /// 표식 뒤 · 세션 id 비우기와 제어 채널 발급 앞 · 재료는 한 번 파생해 조립 · 띄우기에 같은 값으로 · 무장 해제는
-    /// 세션이 명부에 오른 뒤이고 그 사이에 `?` 가 없다(insert 와 해제 사이 실패 = 주인 둘). 세션 등록 실패는 차례로
-    /// 재는 시험이 닿지 않는다. 등록 뒤 거두는 자리가 reaper 하나인 것도 함께 본다.
+    /// ★Pins the material guard spots in the source★ — arming is **before** preparation (a preparation failure is reclaimed too — the Err path
+    /// exactly once · a panic ends the process in production (ADR-0292), so the boot sweep backs it — it unwinds only in tests · contain) ·
+    /// preparation is after the marker · before the session-id clear and control-channel issue · materials are derived once and passed with the
+    /// same value to assembly · launch · disarming is after the session is in the roster with no `?` in between (a failure between insert and
+    /// disarm = two owners). A session-registration failure is out of reach of the in-turn tests. Also checks that the reaper is the only
+    /// reclaimer after registration.
     // ADR-0334
-    // TRD S25 §1-5 (나) 4 · 6 · 7 · §5-2 4 (c2)
+    // TRD S25 §1-5 (na) 4 · 6 · 7 · §5-2 4 (c2)
     #[test]
     fn the_kit_guard_is_armed_before_prepare_and_handed_off_after_the_session_in_source() {
         let manager = include_str!("../manager.rs");
@@ -2183,19 +2219,19 @@ mod tests {
             .split("self.spawn_session(profile.id,spec,parts,epoch,seed_events,incarnation)?;")
             .nth(1)
             .and_then(|rest| rest.split("kit_guard.disarm();").next())
-            .expect("세션 등록 ~ 무장 해제 구간");
+            .expect("the session registration ~ disarm span");
         assert!(
             !handoff.contains('?'),
-            "세션 등록과 재료 가드 해제 사이에 실패할 수 있는 단계가 있다: {handoff}"
+            "a step that can fail sits between session registration and the material guard disarm: {handoff}"
         );
         assert!(
             !spawn.contains("&LaunchArtifacts::"),
-            "준비가 낸 재료 말고 다른 재료를 넘긴다"
+            "passes materials other than the prepared ones"
         );
         assert_eq!(
             spawn.matches("&artifacts").count(),
             3,
-            "조립 · 탐침 · 띄우기 말고 재료를 넘기는 자리가 있다"
+            "something other than assembly · probe · launch passes the materials"
         );
 
         // The prepare is called from the spawn path only, inside the launch's scope.
@@ -2203,7 +2239,7 @@ mod tests {
         let production: String = manager
             .split("mod tests {")
             .next()
-            .expect("운영 구획")
+            .expect("production section")
             .lines()
             .map(str::trim)
             .filter(|l| !l.starts_with("//"))
@@ -2213,9 +2249,9 @@ mod tests {
         assert_eq!(production.matches(".kits.prepare(").count(), 0);
         assert_eq!(production.matches(".kits.prepare_in(").count(), 1);
 
-        // TRD S25 §5-2 4 (c2) ② · ④: 세션 등록 뒤 거두는 자리는 reaper 하나다 — 이 crate 의 다른 운영 소스(kill · 실패
-        //   정리 포함)는 거두지 않는다. 출처를 직접 부르는 자리는 가드 · 열쇠(`launch.rs`)뿐이고, 열쇠를 꺼내는 자리는
-        //   reaper 하나다(열쇠는 복제되지 않고 거두기가 열쇠를 먹는다).
+        // TRD S25 §5-2 4 (c2) ② · ④: after session registration the reaper is the only reclaimer — no other production source of this crate
+        //   (kill · failure cleanup included) reclaims. Only the guard · lease (`launch.rs`) call the source directly, and the reaper is the
+        //   only one taking the lease out (the lease is not cloned and reclaiming consumes it).
         let sources = production_sources();
         let callers = |needle: &str| -> Vec<(String, usize)> {
             sources
@@ -2231,13 +2267,13 @@ mod tests {
             callers(".take_launch_lease()"),
             vec![("reaper.rs".to_string(), 1)]
         );
-        // 열쇠를 만드는 자리는 스폰 길 하나뿐이다(두 번 만들면 한 재료를 두 주인이 거둔다).
+        // The spawn path is the only place that makes a lease (making two = two owners reclaiming one set of materials).
         assert_eq!(
             callers("kit_guard.lease()"),
             vec![("manager.rs".to_string(), 1)]
         );
-        // 수거 승자가 세션을 빼고 놓고 권한을 거둔 뒤, auto_restore 내리기 · 목록 통지 **뒤**에 거둔다(ADR-0019 「내리기가
-        //   마지막」 을 회수가 붙들지 않게).
+        // The reap winner removes the session, lets it go and revokes permissions, then reclaims **after** lowering auto_restore · the list
+        //   notification (so reclaiming does not hold up ADR-0019 「lowering is last」).
         let reap = squashed(
             include_str!("../reaper.rs"),
             "pub fn reap_one(",
@@ -2257,12 +2293,12 @@ mod tests {
         );
     }
 
-    /// 이 crate 의 운영 소스 — (`src/` 아래 경로, 시험 모듈 앞까지에서 주석 줄을 빼고 공백을 지운 본문). 통째로 시험인
-    /// 파일(`tests.rs` · `tests/` 아래)은 뺀다.
+    /// This crate's production sources — (path under `src/`, body up to the test module with comment lines dropped and whitespace removed).
+    /// Files that are entirely tests (`tests.rs` · under `tests/`) are left out.
     fn production_sources() -> Vec<(String, String)> {
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).expect("소스 폴더 읽기") {
-                let path = entry.expect("소스 폴더 항목").path();
+            for entry in std::fs::read_dir(dir).expect("read the source folder") {
+                let path = entry.expect("source folder entry").path();
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if path.is_dir() {
                     if name != "tests" {
@@ -2278,13 +2314,13 @@ mod tests {
         walk(&src, &mut files);
         assert!(
             files.iter().any(|f| f.ends_with("reaper.rs")),
-            "소스 폴더를 못 훑었다: {}",
+            "could not scan the source folder: {}",
             src.display()
         );
         files
             .into_iter()
             .map(|file| {
-                let text = std::fs::read_to_string(&file).expect("소스 읽기");
+                let text = std::fs::read_to_string(&file).expect("read the source");
                 let production = text.split("mod tests {").next().unwrap_or_default();
                 let body = production
                     .lines()
@@ -2295,7 +2331,7 @@ mod tests {
                     .collect::<String>();
                 let rel = file
                     .strip_prefix(&src)
-                    .expect("src 아래")
+                    .expect("under src")
                     .to_string_lossy()
                     .replace('\\', "/");
                 (rel, body)

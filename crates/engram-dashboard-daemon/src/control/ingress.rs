@@ -1,17 +1,12 @@
-//! ControlIngress seam(ADR-0086 스텝 2) — 듀얼 입구(MCP + CLI)의 공통 파이프라인.
+//! ControlIngress seam (ADR-0086 step 2) — the common pipeline of the dual entrance (MCP + CLI).
 //!
-//! ★역할★: 두 입구(MCP `eg_send` 툴 · `/control/send` HTTP 라우트)가 각자 요청을 정규화한
-//!   `ControlCommand` 로 만들어 **이 모듈의 단일 핸들러**(`handle_send`)를 부른다. 그 아래(Validator·
-//!   Relay·ACK)는 어느 입구로 들어왔는지 모른다(entrance-agnostic) — 입구별 코드 중복·표류를 막는다.
+//! The two entrances (MCP `eg_send` tool · `/control/send` HTTP route) each build a normalized `ControlCommand` and call the single `handle_send`; what is below it
+//! (Validator·Relay·ACK) is entrance-agnostic, preventing per-entrance duplication and drift.
 //!
-//! ★불변식(ADR-0086)★:
-//!   - `from`(발신자 신원)은 **토큰/세션에서만 파생**된다 — 페이로드가 아니라. 두 어댑터 모두
-//!     BoundIdentity(auth 미들웨어/세션 바인딩이 검증한 신원)를 넣어 ControlCommand 를 만든다(사칭 차단).
-//!   - ACK/에러 JSON 은 **두 입구에서 동일 shape** 다(같은 코드가 만든다) — 자기교정 로스터(RECIPIENT_*
-//!     hint)도 동일.
-//!   - 발신 인자의 **구문 검증은 전부 여기 소유**다 — 서비스 위임 전에 끝나고, 양 입구가 같은 반려를 받는다.
-//!
-//! tauri import 0(daemon crate).
+//! Invariants (ADR-0086):
+//!   - `from` (sender identity) is derived only from the token/session, never the payload — both adapters build the ControlCommand with the BoundIdentity (blocks impersonation).
+//!   - ACK/error JSON has the same shape on both entrances (same code), as does the self-correction roster (RECIPIENT_* hint).
+//!   - All syntax validation of send arguments is owned here; it finishes before delegating to the service.
 
 use std::sync::Arc;
 
@@ -20,63 +15,52 @@ use engram_dashboard_messaging::envelope::{new_msg_id, Entrance, EnvelopeFormat}
 
 use super::registry::{BoundIdentity, ControlRegistry};
 
-/// body **문자열** 자체의 상한 — MCP 라우트의 전송 계층 상한(`mcp_server` `RequestBodyLimitLayer`)과 별개다.
+/// The cap on the body string itself — separate from the MCP route's transport-layer cap (`mcp_server` `RequestBodyLimitLayer`).
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// 정규화된 제어 커맨드(ADR-0086) — 두 입구가 이 형태로 만들어 `handle_send` 에 넘긴다.
+/// The normalized control command (ADR-0086) both entrances build and hand to `handle_send`.
 #[derive(Debug, Clone)]
 pub struct ControlCommand {
     pub from: BoundIdentity,
-    /// 각 원소 = 에이전트 이름 · 정확한 AgentId 문자열 · `@`주소(혼용 가능). **콤마 분해는 CLI 입구
-    ///   전용**이라 어댑터가 이 목록을 만들 때 이미 끝나 있다(MCP 배열 원소는 절대 쪼개지 않는다 — spec §6).
+    /// Each element = an agent name · an exact AgentId string · an `@`address (mixable). Comma splitting is CLI-entrance only and done by the adapter (MCP array elements are never split — spec §6).
     pub to: Vec<String>,
-    /// 순수 텍스트(첨부·구조화는 범위 밖).
+    /// Plain text (attachments · structuring are out of scope).
     pub body: String,
     pub contract: SendContract,
 }
 
-/// ★회신 계약 발송 인자(C3 · spec §6 `eg_send { …, request?, reply_by?, reply_to? }`)★.
+/// Reply-contract send arguments (C3 · spec §6 `eg_send { …, request?, reply_by?, reply_to? }`).
 ///
-/// ★왜 별도 struct 인가★: 세 인자는 전부 **선택**이고 기본값(`Default`)이 곧 "통보"다. `ControlCommand` 에
-///   평평하게 늘어놓으면 plain 발송을 만드는 모든 자리(테스트·스모크 bin 포함)가 세 필드를 매번 써야 한다.
-/// ★어댑터는 파싱하지 않는다★: 이 struct 는 **날것 그대로**를 나르고 검증은 `validate_contract` 한 곳뿐이다.
-// ADR-0103 (결정 2/3 — request 타입 + 회신 계약)
+/// A separate struct since all three are optional and `Default` is "notification": flat in `ControlCommand`, every plain-send builder (tests, smoke bins) would write three fields.
+/// Adapters carry raw values; validation is only in `validate_contract`.
+// ADR-0103 (decisions 2/3 — request type + reply contract)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SendContract {
-    /// `true` = 회신 요구(장부에 미회신 오픈 + 봉투 `type="request"`). ★다중 수신자·`@all` 도 허용★ —
-    ///   수신자마다 **독립 계약 1건**이 열린다(ADR-0111 결정 5).
+    /// `true` = reply required (an unreplied ledger entry + envelope `type="request"`). Multiple recipients and `@all` are allowed: one independent contract per recipient (ADR-0111 decision 5).
     pub request: bool,
-    /// 회신 기한 **기간 표기**(`"5m"`/`"10m"`/`"1h"`, 최소 1분). `request` 전용 — 단독 지정은 반려.
+    /// Reply deadline as a duration notation (`"5m"`/`"10m"`/`"1h"`, at least 1 minute). `request` only — alone it is bounced.
     pub reply_by: Option<String>,
-    /// 어느 request 의 회신인가(원본 메시지 id). `request` 와 **상호배타**(spec §6).
+    /// Which request this replies to (the original message id). Mutually exclusive with `request` (spec §6).
     pub reply_to: Option<String>,
 }
 
-/// `reply_by` 기간 표기 상한 — 30일. 초과는 반려한다.
+/// Cap of the `reply_by` duration notation — 30 days; over is bounced.
 ///
-/// ★왜 상한이 필요한가(load-bearing — 데몬 안정성)★: 장부는 기한을 `created_at + reply_by`(`Instant +
-///   Duration`)로 계산하는데, 이 덧셈은 **오버플로 시 패닉**한다. 상한이 없으면 에이전트가
-///   `--reply-by 99999999999999s` 하나로 sweep task 를 죽일 수 있다(가용성 결함). 30일은 인메모리 단계의
-///   현실적 상한이다 — 파킹 TTL 이 24h 이고 데몬 재시작이면 장부 자체가 소멸하므로 그보다 긴 기한은 의미가 없다.
+/// Load-bearing for daemon stability: the ledger computes `created_at + reply_by` (`Instant + Duration`), which panics on overflow — without a cap one `--reply-by 99999999999999s`
+/// could kill the sweep task. 30 days suffices for the in-memory stage (parking TTL 24h; a restart wipes the ledger).
 const MAX_REPLY_BY_SECS: u64 = 30 * 24 * 60 * 60;
 
-/// `reply_by` 하한 — 1분. 미만은 반려한다.
+/// Floor of `reply_by` — 1 minute; under is bounced.
 ///
-/// ★왜 하한이 필요한가(load-bearing — 계약 정직성)★: 기한 **초과 판정은 sweep 주기(60초)에서만** 일어난다
-///   (lib.rs `SWEEP_INTERVAL`). `30s` 를 받아 주면 실제 통지는 60~120초 뒤에 나가, 발신자는 "30초 뒤
-///   알려준다" 는 약속을 받고 두 배 넘게 기다린다 — 지킬 수 없는 기한은 받지 않는다.
-///   `s` 단위 자체는 계속 받는다(`120s` 처럼 60 이상이면 유효) — 막는 건 **값의 크기**지 표기가 아니다.
+/// Load-bearing for contract honesty: the overdue decision runs only on the sweep period (60 s, lib.rs `SWEEP_INTERVAL`), so a `30s` promise would be noticed 60~120 s later.
+/// The `s` unit stays accepted (`120s` is valid) — what is blocked is the value size, not the notation.
 const MIN_REPLY_BY_SECS: u64 = 60;
 
-/// ★`reply_by` 기간 표기 파서(spec §3 "기간 표기 10m/1h — 데몬이 절대시각 환산")★ — 엄격.
-///
-/// ★왜 관대하게 받지 않나★: 이 값은 발신 LLM 이 자유롭게 쓰는 자리라 "받아는 줬는데 뜻이 어긋나는"
-///   해석(예: `"10"` 을 분으로 추측)이 조용한 계약 오차가 된다 — 모호하면 반려하고 힌트로 형태를 알려
-///   자기교정시킨다.
-/// (`0` 을 막는 이유: 기한 0 = 발송 즉시 초과라 notice 를 즉발한다 — 계약이 아니라 오타로 보는 게 안전하다.)
+/// The `reply_by` duration notation parser (spec §3) — strict: this value is written freely by the sending LLM, so a lenient guess (`"10"` as minutes) becomes a silent contract
+/// error; when ambiguous, bounce and show the form in the hint so it self-corrects. `0` is blocked (overdue the instant it is sent — more likely a typo).
 pub(crate) fn parse_reply_by(s: &str) -> Result<std::time::Duration, String> {
     let bytes = s.as_bytes();
-    // 바이트 단위로 자르므로 멀티바이트 문자는 단위 매치에서 자연히 걸린다.
+    // Cuts by bytes, so multibyte characters are caught at the unit match.
     if bytes.len() < 2 {
         return Err(format!(
             "reply_by '{s}' is not a duration; use an integer with a unit like 5m, 10m, or 1h (minimum 1 minute)."
@@ -125,7 +109,7 @@ pub(crate) fn parse_reply_by(s: &str) -> Result<std::time::Duration, String> {
     Ok(std::time::Duration::from_secs(secs))
 }
 
-/// 인자 정합 검증 — 첫 위반에서 반려하고, 반려 코드는 전부 `INVALID_SEND_ARGS` 다(호출부가 붙인다).
+/// Argument consistency validation — bounces at the first violation; every code is `INVALID_SEND_ARGS` (the caller attaches it).
 fn validate_contract(
     c: &SendContract,
 ) -> Result<engram_dashboard_messaging::service::SendMeta, String> {
@@ -147,9 +131,8 @@ fn validate_contract(
     };
     let reply_to = match &c.reply_to {
         Some(raw) => {
-            // ★입구 정규화로서의 trim(의도적 — 리뷰에서 제기됐으나 유지)★: 다듬은 값이 **봉투 렌더와 장부
-            //   엄격 매칭 양쪽에 그대로** 쓰이므로(`SendMeta.reply_to` 하나) 매칭이 느슨해지지 않는다. 안
-            //   다듬으면 `" m-7f3k"` 가 같은 id 를 가리키는데도 NoMatch 로 조용히 빗나간다.
+            // trim as entrance normalization (intentional, kept after review): the trimmed value is used as is for both the envelope render and the ledger's strict matching (one
+            //   `SendMeta.reply_to`), so matching does not loosen; untrimmed, `" m-7f3k"` would silently miss as NoMatch.
             let t = raw.trim();
             if t.is_empty() {
                 return Err(
@@ -170,24 +153,19 @@ fn validate_contract(
     })
 }
 
-/// ★`reply_to` 표기 규칙(spec §3 항목 7-①)★ — 회신은 **수신자가 정확히 1명**일 때만 유효하다.
+/// `reply_to` notation rule (spec §3 item 7-①) — a reply is valid only with exactly 1 recipient.
 ///
-/// ★왜 "표기 단계" 인가(load-bearing)★: `@`토큰이 섞이면 **펼침 결과가 1명이어도** 거부한다. 펼침 뒤에 세면
-///   같은 발송이 로스터 상태에 따라 어떤 날은 통과하고 어떤 날은 반려돼(비결정) 발신 LLM 이 규칙을 배울 수
-///   없다 — 표기만 보면 답이 항상 같다.
+/// Decided at the notation stage (load-bearing): an `@`token refuses even if it expands to 1 person — counting after expansion would make the same send pass or bounce depending on roster state, and the LLM could not learn the rule.
 fn reply_to_has_single_recipient(recipients: &[String]) -> bool {
     recipients.len() == 1 && !recipients[0].starts_with('@')
 }
 
-/// ★계약 필드(request/reply_to)가 **현재 봉투 렌더 경로에서 표현 불가**인가(load-bearing)★.
+/// Are the contract fields (request/reply_to) inexpressible on the current envelope render path (load-bearing)?
 ///
-/// ★왜 반려까지 하나(조용한 열화 거부)★: colon 렌더와 `ENGRAM_WRAP_FORMAT` 템플릿은 둘 다 id·type·
-///   reply-by·in-reply-to 속성을 버린다. 그 상태의 request 는 결말이 **정해져 있다** — 수신자는 회신에 쓸
-///   id 를 본 적이 없는데 장부는 엄격 매칭을 요구하므로(spec §2) 회신이 구조적으로 불가능하고, 기한이
-///   지나면 "회신 없음" 통지가 **반드시** 간다(거짓 타임아웃이 보장된 계약). 회신도 `in-reply-to` 가 사라져
-///   수신자가 무엇에 대한 답인지 모른다.
-/// ★env 를 여기서 읽는 이유★: 템플릿은 `wrap_message` 가 **최우선**으로 보는 전역 스위치라, 이 판정이
-///   registry 포맷만 보면 템플릿이 켜진 프로세스에서 그대로 새 나간다. 판정과 렌더가 같은 입력을 봐야 한다.
+/// Bounced to refuse silent degradation: the colon render and the `ENGRAM_WRAP_FORMAT` template drop the id·type·reply-by·in-reply-to attributes, so a request there has a fixed ending —
+/// the recipient never sees the id to reply with, the ledger demands strict matching (spec §2), and after the deadline a "no reply" notice always fires (a guaranteed false timeout); a reply
+/// also loses `in-reply-to`.
+/// Env is read here because the template is a global switch `wrap_message` checks first; the decision and the render must look at the same input.
 fn contract_unsupported_by_envelope(
     meta: &engram_dashboard_messaging::service::SendMeta,
     format: EnvelopeFormat,
@@ -205,7 +183,7 @@ fn contract_unsupported_by_envelope(
     )
 }
 
-/// 한 수신자에 대한 발송 결과 — spec §6 `results[]` 원소(수신자 1명당 1행, 그룹 단위 요약이 아니다).
+/// The send result for one recipient — a spec §6 `results[]` element (one row per recipient, not a group summary).
 #[derive(Debug, Clone)]
 pub struct SendResult {
     pub to: String,
@@ -214,10 +192,9 @@ pub struct SendResult {
     pub hint: Option<String>,
 }
 
-/// 제어 커맨드 처리 결과 — `to_json` 이 wire JSON 을 만든다.
+/// The control command processing result — `to_json` makes the wire JSON.
 ///
-/// ★파서 분기 기준(수용된 비대칭 — 명시)★: 성공 응답엔 top-level `status` 가 없고, 반려 응답엔 `results` 가
-///   없다 — 수신 측은 `status == "error"` 존재 여부로 분기한다(shape 통일은 하지 않는다, 기존 계약 유지).
+/// Parser branching (accepted asymmetry): a success has no top-level `status` and a bounce has no `results`; the receiver branches on whether `status == "error"` exists (shapes not unified — existing contract).
 #[derive(Debug, Clone)]
 pub enum ControlResult {
     Ok {
@@ -257,30 +234,24 @@ impl ControlResult {
         }
     }
 
-    /// ★행 실패는 여기서 실패가 아니다★: 부분 진행이 정상 경로라(ADR-0111 결정 3) "일부가 못 받았다" 는
-    ///   발신자가 `results[]` 를 읽고 판단할 사실이지 호출 자체의 실패가 아니다. **전원이 실패해도 접수**다
-    ///   — 발송 단위 반려(인자 오류·주소 공간 오류)만 실패로 본다.
+    /// A row failure is not a failure here: partial progress is normal (ADR-0111 decision 3), so "some did not get it" is for the sender to read in `results[]`; even if everyone failed it is accepted — only send-level bounces (argument errors · address space errors) are failures.
     pub fn is_accepted(&self) -> bool {
         matches!(self, ControlResult::Ok { .. })
     }
 }
 
-/// ★듀얼 입구 공통 핸들러★ — 두 어댑터(MCP 툴 · HTTP 라우트)가 유일하게 부르는 진입점이다.
+/// The dual-entrance common handler — the only entry point the two adapters (MCP tool · HTTP route) call.
 ///
-/// 검사 순서(첫 실패에서 발송 단위 반려):
-///   0. 회신 계약 인자 정합 → `INVALID_SEND_ARGS`. 주소보다 **먼저** 본다: 순수 구문 오류라 로스터 상태와
-///      무관하게 항상 같은 답이 나와야 한다.
-///   0-b. 계약 필드는 XML 봉투 전용 → `INVALID_SEND_ARGS`.
-///   1. 수신자 목록 정규화 — 남은 게 없으면 `INVALID_SEND_ARGS`.
-///   2. `reply_to` 는 수신자 정확히 1명 → 아니면 `INVALID_SEND_ARGS`.
-///   3. body 상한 → `BODY_TOO_LARGE`.
-///   4. 그 외 전부 MessagingService 위임. 주소 공간 오류(`GROUP_NOT_FOUND`/`GROUP_EMPTY`)와 id 충돌만
-///      발송 단위 반려로 되돌아온다.
+/// Check order (send-level bounce at the first failure):
+///   0. Reply-contract argument consistency → `INVALID_SEND_ARGS`, before addresses: a pure syntax error must answer the same regardless of roster state.
+///   0-b. Contract fields are XML-envelope only → `INVALID_SEND_ARGS`.
+///   1. Normalize the recipient list — if nothing is left, `INVALID_SEND_ARGS`.
+///   2. `reply_to` needs exactly 1 recipient → otherwise `INVALID_SEND_ARGS`.
+///   3. body cap → `BODY_TOO_LARGE`.
+///   4. Everything else is delegated to MessagingService; only address space errors (`GROUP_NOT_FOUND`/`GROUP_EMPTY`) and id collisions come back as send-level bounces.
 ///
-/// ★부재 수신자는 여기서 걸러지지 않는다(ADR-0111 결정 1)★: 존재·동명 판정은 **발송 순간 로스터 스냅샷 한
-///   장**으로 서비스가 수신자마다 한다. 스냅샷을 두 번 뜨면 반쪽 판정이 재발한다 — 옛 입구 사전검사의
-///   TOCTOU 가 그 자리였다. 그래서 입구는 로스터를 보지 않는다.
-/// ★self-send 허용★: `to` 에 자기 이름을 명시하면 정상 배달된다(spec §4).
+/// Missing recipients are not filtered here (ADR-0111 decision 1): the service decides existence and same-name per recipient from one roster snapshot at send time; a second snapshot
+/// brings back half-decisions (the old pre-check's TOCTOU), so the entrance does not look at the roster. Self-send is allowed (spec §4).
 // ADR-0086
 // ADR-0111
 pub fn handle_send(
@@ -309,8 +280,7 @@ pub fn handle_send(
         };
     }
 
-    // ★트림은 하되 그 이상의 보정은 없다★: 이름 자체는 바이트 그대로의 주소 네임스페이스다
-    //   (WYSIWYA — ADR-0101).
+    // Trim, but no correction beyond that: the name is a byte-exact address namespace (WYSIWYA — ADR-0101).
     let recipients: Vec<String> = cmd
         .to
         .iter()
@@ -345,13 +315,13 @@ pub fn handle_send(
 
     let mut msg_id = new_msg_id();
     if !registry.is_identity_live(cmd.from) {
-        // ★이 로그에 body/토큰을 싣지 않는다(보안)★.
+        // Do not carry body/token in this log (security).
         tracing::warn!(
             from = %cmd.from.agent_id,
             from_epoch = cmd.from.epoch,
             msg_id = %msg_id,
             entrance = entrance.as_str(),
-            "제어 채널 메시지 발송 — 발신자가 relay 시점에 더 이상 산 신원 아님(작성 시점 인증으로 유효, 게이트 아님·기록용 관측, ADR-0086·사용자 결정 2026-07-19)"
+            "control channel message send — the sender is no longer a live identity at relay time (valid by authentication at write time; not a gate, an observation for the record; ADR-0086 · user decision 2026-07-19)"
         );
     }
 
@@ -375,7 +345,7 @@ pub fn handle_send(
             collided = %collided,
             replacement = %msg_id,
             entrance = entrance.as_str(),
-            "메시지 id 충돌 — 새 id 로 1회 재시도(ADR-0103 · 사실상 불가한 경로라 난수/장부 배선을 의심할 것)"
+            "message id collision — retrying once with a new id (ADR-0103 · a practically impossible path, so suspect the random/ledger wiring)"
         );
         outcome = messaging.handle_send(
             &msg_id,
@@ -423,20 +393,18 @@ pub fn handle_send(
     }
 }
 
-// ── 조회 입구(D · spec §6 `eg_messages`) ─────────────────────────────────────────────────────
+// ── query entrance (D · spec §6 `eg_messages`) ─────────────────────────────────────────────────────
 //
-// ★spawn_blocking 을 쓰지 않는 이유★: 이 경로엔 자식 stdin blocking write 가 없다(inject 없음). 잡는 락은
-//   messaging state 하나이고 그 임계구역은 순수 자료구조 조작뿐이라(port 호출은 락 밖) 짧다 — async 워커를
-//   붙들지 않는다. `handle_send` 가 blocking 풀로 가는 이유(막힌 파이프)가 여기엔 성립하지 않는다.
+// No spawn_blocking: this path has no blocking write to child stdin (no inject); the only lock is the messaging state with a short pure-data critical section (port calls are outside it).
+// The reason `handle_send` uses the blocking pool (a blocked pipe) does not hold here.
 
 /// The result of a query command — its **error shape matches the send entrance** (`ControlResult`):
 /// `{status:"error", code, hint}`, so the sending LLM / CLI reads success and failure by one rule. The one
 /// addition is an optional `args` (the code's arguments), which only refusals folded from a `CommandError`
 /// carry; a reader that ignores it still reads the shared shape.
 ///
-/// ★왜 발송과 다른 타입인가★: 발송 성공은 `{id, results[]}` 로 **shape 이 고정**돼 있지만(계약), 조회 성공은
-///   동사마다 모양이 다르다. 억지로 한 enum 에 넣으면 variant 가 동사마다 늘어 계약이 흐려지므로, 성공
-///   payload 는 만든 쪽이 통째로 싣고 **에러 축만** 공유한다.
+/// A different type from send: a send success has a fixed shape `{id, results[]}`, a query success differs per verb; one enum would grow a variant per verb and blur the contract, so
+/// the success payload belongs to its maker and only the error axis is shared.
 // PartialEq only: tests compare results; nothing needs `Eq` here.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlQueryResult {
@@ -468,11 +436,8 @@ impl ControlQueryResult {
         }
     }
 
-    /// 소비하며 값을 내주는 형제 — 성공 payload 가 클 수 있는 자리가 쓴다.
-    ///
-    /// ★[`ControlQueryResult::to_json`] 은 성공 갈래에서 payload 를 **통째로 깊은 복사**한다★. 명령 카탈로그
-    /// 처럼 payload 가 수 MB 까지 갈 수 있는 응답에서 그 복사는 요청마다 한 번 더 나는 CPU·메모리다 —
-    /// 봉투를 다시 쓸 일이 없는 호출자(HTTP 핸들러가 전부 그렇다)는 이쪽을 쓴다.
+    /// The consuming sibling that gives out the value — for large success payloads: [`ControlQueryResult::to_json`] deep-copies the whole payload on success, which costs CPU·memory per request when
+    /// the payload reaches several MB (the command catalog). Callers with no need to reuse the envelope (all HTTP handlers) use this.
     pub fn into_json(self) -> serde_json::Value {
         match self {
             ControlQueryResult::Ok(v) => v,
@@ -485,28 +450,24 @@ impl ControlQueryResult {
     }
 }
 
-/// ★`messages { id? }` 공통 핸들러(D · spec §6)★ — **읽기 전용**. 장부를 조회만 하고 어떤 상태도 바꾸지 않는다.
+/// `messages { id? }` common handler (D · spec §6) — read-only: it only queries the ledger.
 ///
-/// ★응답 shape(계약 — 두 입구 동일)★
+/// Response shape (contract, the same on both entrances):
 ///
-/// `id` 지정 = 그 메시지의 배달 장부. 다중 수신자·`@all` 발송은 **수신자별 1행**(1 msg_id : N 배달기록):
+/// `id` given = that message's delivery ledger. A multi-recipient or `@all` send is one row per recipient (1 msg_id : N delivery records):
 /// ```json
 /// { "id": "m-7f3k", "from": "alice", "awaiting_reply": false, "may_be_truncated": false,
 ///   "rows": [ { "to": "bob", "status": "delivered", "age_secs": 42, "updated_secs_ago": 40 } ] }
 /// ```
-/// - `status` = **장부 어휘**(`pending|delivered|replied|expired|failed|skipped`). 발송 응답 어휘
-///   (`delivered|pending|failed`)와 **같은 집합이 아니다** — 둘은 spec §6 대응표가 잇는 **다른 축**이다:
-///   응답은 "그 발송 호출이 어떻게 끝났나" 의 순간 스냅샷, 조회는 "그 배달기록이 지금 어디까지 갔나" 다.
-/// - `code`/`hint` 는 **행에 있을 때만** 실린다 — 사후에 종결된 행의 사유다(지금 나타나는 값은
-///   `RECIPIENT_DELETED` 하나).
-/// - `awaiting_reply` = 이 메시지가 request 인데 아직 회신이 안 왔다(통보면 항상 false).
-/// - ★`may_be_truncated`★ = `rows` 가 **그 메시지의 전부라는 보장이 없다**(인메모리 이력 링이 밀려 앞쪽
-///   행이 사라졌을 수 있다). `false` 면 확실히 전부다 — 그래서 **항상 싣는다**: 참일 때만 실으면 필드의
-///   부재가 완전성으로 읽혀 조회자가 남은 행을 전체로 오독한다(10인 방송의 앞 6행이 밀려나면 "4명에게만
-///   나갔다" 로 읽힌다). `true` 면 `hint` 도 함께 실어 사람/LLM 이 읽을 문장으로도 알린다.
-/// - 없는 id → `{status:"error", code:"MESSAGE_NOT_FOUND", hint}`.
+/// - `status` = ledger vocabulary (`pending|delivered|replied|expired|failed|skipped`), not the send response vocabulary (`delivered|pending|failed`) — different axes joined by the spec §6 mapping table:
+///   the response is an instant snapshot of how the send call ended, the query is how far that delivery record has gone now.
+/// - `code`/`hint` appear only when present on the row — the reason of a row terminated after the fact (today only `RECIPIENT_DELETED`).
+/// - `awaiting_reply` = this message is a request and no reply has come yet (always false for a notification).
+/// - `may_be_truncated` = no guarantee `rows` is all of that message (the in-memory history ring may have pushed out the front rows); `false` means certainly all. Always carried:
+///   carrying it only when true would make its absence read as completeness (10-person broadcast with 6 rows pushed out would read "went to only 4"). When `true`, `hint` is carried too.
+/// - Unknown id → `{status:"error", code:"MESSAGE_NOT_FOUND", hint}`.
 ///
-/// `id` 없음 = **호출자의 미결**(세 갈래를 한 목록으로, 오래된 순):
+/// No `id` = the caller's open items (three branches in one list, oldest first):
 /// ```json
 /// { "me": "alice", "open": [
 ///     { "direction": "outbound_pending",     "id": "m-1", "from": "alice", "to": "ghost", "age_secs": 90 },
@@ -514,13 +475,11 @@ impl ControlQueryResult {
 ///       "reply_by": "10m", "timed_out": false },
 ///     { "direction": "reply_owed_by_me",     "id": "m-3", "from": "carol", "to": "alice", "age_secs": 5 } ] }
 /// ```
-/// - `direction` = 이 줄이 무엇인지(안정 토큰). 세 값의 **할 일이 정반대**라 이 태그가 필수다.
-/// - `reply_by`·`timed_out` 은 request 줄에만 실린다.
-/// - 미결이 없으면 `open: []`.
+/// - `direction` = what this line is (a stable token); the three values have opposite things to do, so the tag is required.
+/// - `reply_by`·`timed_out` appear only on request lines. With no open items, `open: []`.
 ///
-/// ★호출자 매칭 = id(ADR-0309)★: 미결은 호출자 신원의 에이전트 id 로 고른다(`open_items_for(from.agent_id, …)`).
-///   표시 이름(`sender_display_name` — 발송 봉투와 같은 계산 · WYSIWYA — ADR-0101)은 출력에만 쓰고 매칭에는
-///   쓰지 않는다.
+/// Caller matching = id (ADR-0309): open items are picked by the agent id of the caller's identity (`open_items_for(from.agent_id, …)`); the display name
+/// (`sender_display_name`, the same computation as the send envelope · WYSIWYA — ADR-0101) is only for output.
 pub fn handle_messages(
     manager: &Arc<AgentManager>,
     messaging: &Arc<engram_dashboard_messaging::service::MessagingService>,
@@ -557,8 +516,7 @@ pub fn handle_messages(
                         "age_secs": r.age_secs,
                         "updated_secs_ago": r.updated_secs_ago,
                     });
-                    // ★있을 때만 싣는다★: 정상 행에 `code: null` 을 붙이면 조회자가 모든 행에 사유가
-                    //   있다고 오독한다.
+                    // Carried only when present: `code: null` on a normal row would make every row read as having a reason.
                     if let Some(code) = r.code {
                         row["code"] = serde_json::Value::String(code.to_string());
                     }
@@ -609,16 +567,13 @@ pub fn handle_messages(
     }
 }
 
-/// ADR-0101 (WYSIWYA): 봉투 sender 이름은 수신자가 로스터·트리·라우팅에서 보는 이름과 **byte-identical**
-///   해야 한다 — 안 그러면 "A: 안녕" 봉투를 받고도 로스터엔 A 가 다른 문자열로 떠 지목이 어긋난다.
+/// ADR-0101 (WYSIWYA): the envelope sender name must be byte-identical to the name the recipient sees in roster · tree · routing, or the recipient gets "A: hi" while A shows as another string and targeting misses.
 fn sender_display_name(manager: &Arc<AgentManager>, from: BoundIdentity) -> String {
     if let Some(name) = manager.canonical_name(from.agent_id) {
         return name;
     }
-    // 세션 수거됨(발신자 terminal). `profile.cwd` 는 raw 라 canonical 과 다를 수 있으나, 이 경로는 산
-    //   세션이 없어 라우팅 대상도 아니다(표시 전용 best-effort).
-    // ★`canonical_name_when_live()` 로 바꾸지 말 것(동작 보존)★: 그쪽은 display_name 이 있으면 fs 를 안
-    //   보는 단축이 있어 cwd 정규화 유무가 갈리고 결과가 달라진다.
+    // The session was reaped (sender terminal). `profile.cwd` is raw and may differ from canonical, but there is no live session, so it is not a routing target either (display-only best-effort).
+    // Do not change it to `canonical_name_when_live()` (behavior preservation): it skips fs when display_name exists, so cwd normalization diverges and the result differs.
     if let Some(p) = manager.agent_snapshot(from.agent_id) {
         return engram_dashboard_agent::name::canonical_name_or_id_fallback(
             p.display_name.as_deref(),
@@ -643,8 +598,7 @@ mod tests {
     }
     use engram_dashboard_messaging::envelope::wrap_message;
 
-    /// ENGRAM_WRAP_FORMAT 은 프로세스 전역 env — set/remove·미설정 단언 테스트끼리 직렬화한다
-    /// (병렬 실행 시 한 테스트의 set 이 다른 테스트의 "미설정" 단언을 짓밟지 않게).
+    /// ENGRAM_WRAP_FORMAT is a process-global env — tests asserting set/remove · unset are serialized so one test's set does not trample another's "unset" assertion.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // ── ControlResult wire shape ──────────────────────────────
@@ -665,11 +619,11 @@ mod tests {
         assert_eq!(v["results"][0]["status"], "delivered");
         assert!(
             v["results"][0].get("hint").is_none(),
-            "delivered 는 hint 생략"
+            "delivered omits the hint"
         );
         assert!(
             v.get("status").is_none(),
-            "성공 응답엔 최상위 status 없음(spec §6)"
+            "a success response has no top-level status (spec §6)"
         );
         assert!(r.is_accepted());
     }
@@ -688,7 +642,10 @@ mod tests {
         let v = r.to_json();
         assert_eq!(v["results"][0]["status"], "pending");
         assert_eq!(v["results"][0]["hint"], "parked");
-        assert!(r.is_accepted(), "pending 도 접수 성공(반려 아님)");
+        assert!(
+            r.is_accepted(),
+            "pending is an accepted success too (not a bounce)"
+        );
     }
 
     #[test]
@@ -701,10 +658,10 @@ mod tests {
         assert_eq!(v["status"], "error");
         assert_eq!(v["code"], "GROUP_NOT_FOUND");
         assert_eq!(v["hint"], "h");
-        assert!(!r.is_accepted(), "반려는 접수 성공 아님");
+        assert!(!r.is_accepted(), "a bounce is not an accepted success");
     }
 
-    // ── ControlCommand 정규화 ──────────────
+    // ── ControlCommand normalization ──────────────
     #[test]
     fn control_command_carries_identity_not_payload_from() {
         let id = AgentId::new_v4();
@@ -717,21 +674,21 @@ mod tests {
         assert_eq!(cmd.from.agent_id, id);
     }
 
-    // ── C3: reply_by 기간 표기 파서 ──────────────────────────────────────────────────────────
+    // ── C3: reply_by duration notation parser ──────────────────────────────────────────────────────────
 
     #[test]
     fn reply_to_requires_exactly_one_non_group_recipient() {
         let one = |v: &[&str]| {
             reply_to_has_single_recipient(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
         };
-        assert!(one(&["bob"]), "수신자 1명 = 유효");
-        assert!(!one(&["bob", "carol"]), "다중 수신자 = 반려");
+        assert!(one(&["bob"]), "1 recipient = valid");
+        assert!(!one(&["bob", "carol"]), "multiple recipients = bounce");
         assert!(
             !one(&["@all"]),
-            "@토큰 단독도 반려 — 펼침 결과가 1명이어도 표기 단계에서 막는다(비결정 금지)"
+            "an @token alone is bounced too — blocked at the notation stage even if the expansion is 1 person (no nondeterminism)"
         );
-        assert!(!one(&["@all", "bob"]), "혼용도 반려");
-        assert!(!one(&[]), "빈 목록은 애초에 유효하지 않다");
+        assert!(!one(&["@all", "bob"]), "mixing is bounced too");
+        assert!(!one(&[]), "an empty list is not valid in the first place");
     }
 
     #[test]
@@ -756,47 +713,53 @@ mod tests {
     #[test]
     fn parse_reply_by_rejects_below_one_minute_floor() {
         for bad in ["1s", "30s", "59s"] {
-            let err = parse_reply_by(bad).expect_err("1분 미만은 반려");
+            let err = parse_reply_by(bad).expect_err("under 1 minute is bounced");
             assert!(
                 err.contains("1-minute minimum"),
-                "hint 가 하한을 알려야: {err}"
+                "the hint must tell the floor: {err}"
             );
         }
-        assert!(parse_reply_by("60s").is_ok(), "정확히 1분은 수용");
-        assert!(parse_reply_by("1m").is_ok(), "1m 도 같은 값이라 수용");
+        assert!(
+            parse_reply_by("60s").is_ok(),
+            "exactly 1 minute is accepted"
+        );
+        assert!(
+            parse_reply_by("1m").is_ok(),
+            "1m is the same value, so accepted"
+        );
     }
 
     #[test]
     fn parse_reply_by_rejects_malformed_forms() {
         for bad in [
             "", "s", "m", "10", "10 m", " 10m", "10m ", "10M", "1H", "10x", "-5m", "1.5h", "1h30m",
-            "0s", "0m", "0h", "십분", "10초",
+            "0s", "0m", "0h", "십분", "10초", // hangul-ok
         ] {
             assert!(
                 parse_reply_by(bad).is_err(),
-                "'{bad}' 는 반려돼야(엄격 파서)"
+                "'{bad}' must be bounced (strict parser)"
             );
         }
     }
 
     #[test]
     fn parse_reply_by_rejects_overflow_and_beyond_cap() {
-        assert!(parse_reply_by("721h").is_err(), "30일 초과는 반려");
+        assert!(parse_reply_by("721h").is_err(), "over 30 days is bounced");
         assert!(
             parse_reply_by("18446744073709551615s").is_err(),
-            "u64 최대치도 상한에서 반려"
+            "the u64 maximum is bounced at the cap too"
         );
         assert!(
             parse_reply_by("99999999999999999999s").is_err(),
-            "u64 파싱 초과도 반려"
+            "u64 parse overflow is bounced too"
         );
         assert!(
             parse_reply_by("18446744073709551615h").is_err(),
-            "곱셈 오버플로도 반려"
+            "multiplication overflow is bounced too"
         );
     }
 
-    // ── C3 리뷰 fix 1: 계약 필드는 XML 봉투 전용 ─────────────────────────────────────────────
+    // ── C3 review fix 1: contract fields are XML-envelope only ─────────────────────────────────────────────
 
     fn req_meta() -> engram_dashboard_messaging::service::SendMeta {
         engram_dashboard_messaging::service::SendMeta {
@@ -822,12 +785,12 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         assert!(
             std::env::var("ENGRAM_WRAP_FORMAT").is_err(),
-            "전제: 템플릿 env 미설정"
+            "premise: the template env is unset"
         );
         for meta in [req_meta(), reply_meta()] {
             let hint = contract_unsupported_by_envelope(&meta, EnvelopeFormat::Colon)
-                .expect("colon 에선 계약 필드 반려");
-            assert!(hint.contains("XML envelope"), "교정 hint: {hint}");
+                .expect("contract fields are bounced under colon");
+            assert!(hint.contains("XML envelope"), "correction hint: {hint}");
         }
         assert_eq!(
             contract_unsupported_by_envelope(
@@ -835,7 +798,7 @@ mod tests {
                 EnvelopeFormat::Colon
             ),
             None,
-            "통보는 포맷과 무관하게 허용(기존 동작 불변)"
+            "a notification is allowed regardless of format (existing behavior unchanged)"
         );
         assert_eq!(
             contract_unsupported_by_envelope(&req_meta(), EnvelopeFormat::Xml),
@@ -848,7 +811,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         assert!(
             std::env::var("ENGRAM_WRAP_FORMAT").is_err(),
-            "전제: 다른 테스트가 남긴 값이 없어야"
+            "premise: no value left behind by another test"
         );
         std::env::set_var("ENGRAM_WRAP_FORMAT", "<{sender}#{id}> {body}");
         let under_template = contract_unsupported_by_envelope(&req_meta(), EnvelopeFormat::Xml);
@@ -862,20 +825,21 @@ mod tests {
 
         assert!(
             under_template.is_some(),
-            "템플릿이 켜져 있으면 xml 포맷이어도 계약 필드는 반려"
+            "with the template on, contract fields are bounced even under the xml format"
         );
         assert_eq!(
             plain_under_template, None,
-            "템플릿 아래서도 통보는 통과(기존 스파이크 경로 불변)"
+            "a notification passes even under the template (the existing spike path unchanged)"
         );
-        assert_eq!(under_empty, None, "빈 값 = 미설정 취급");
+        assert_eq!(under_empty, None, "empty value = treated as unset");
     }
 
-    // ── C3: 발송 인자 정합(spec §6 상호배타) ──────────────────────────────────────────────────
+    // ── C3: send argument consistency (spec §6 mutual exclusion) ──────────────────────────────────────────────────
 
     #[test]
     fn contract_default_is_plain_notice_message() {
-        let m = validate_contract(&SendContract::default()).expect("통보는 항상 유효");
+        let m =
+            validate_contract(&SendContract::default()).expect("a notification is always valid");
         assert!(!m.request);
         assert_eq!(m.reply_by, None);
         assert_eq!(m.reply_to, None);
@@ -888,10 +852,10 @@ mod tests {
             reply_by: None,
             reply_to: Some("m-7f3k".to_string()),
         };
-        let e = validate_contract(&c).expect_err("상호배타(spec §6)");
+        let e = validate_contract(&c).expect_err("mutually exclusive (spec §6)");
         assert!(
             e.contains("mutually exclusive"),
-            "hint 가 사유를 말해야: {e}"
+            "the hint must state the reason: {e}"
         );
     }
 
@@ -902,8 +866,8 @@ mod tests {
             reply_by: Some("10m".to_string()),
             reply_to: None,
         };
-        let e = validate_contract(&c).expect_err("reply_by 는 request 전용");
-        assert!(e.contains("request"), "hint 가 교정법을 말해야: {e}");
+        let e = validate_contract(&c).expect_err("reply_by is request-only");
+        assert!(e.contains("request"), "the hint must state the fix: {e}");
     }
 
     #[test]
@@ -913,14 +877,13 @@ mod tests {
             reply_by: Some("ten minutes".to_string()),
             reply_to: None,
         };
-        let e = validate_contract(&c).expect_err("표기 오류");
-        assert!(e.contains("10m"), "허용 형태 예시: {e}");
-        // ★hint 는 **지금 유효한** 예시만 든다(리뷰 fix 7 의 짝)★: 하한 도입 후에도 `30s` 를 예시로 남기면
-        //   그 예시를 따라 고친 발신자가 다시 반려당한다(자기교정 루프). 예시는 반드시 통과하는 값이어야.
+        let e = validate_contract(&c).expect_err("notation error");
+        assert!(e.contains("10m"), "example of an allowed form: {e}");
+        // The hint gives only examples valid now (pair of review fix 7): `30s` left as an example after the floor would bounce a sender that followed it (a self-correction loop); an example must always pass.
         for example in ["30s", "1s", "59s"] {
             assert!(
                 !e.contains(example),
-                "hint 가 반려되는 값을 예시로 들면 안 된다('{example}'): {e}"
+                "the hint must not give a value that gets bounced as an example ('{example}'): {e}"
             );
         }
     }
@@ -934,7 +897,7 @@ mod tests {
         };
         assert!(
             validate_contract(&empty).is_err(),
-            "공백만 reply_to 는 반려"
+            "a whitespace-only reply_to is bounced"
         );
 
         let padded = SendContract {
@@ -942,11 +905,11 @@ mod tests {
             reply_by: None,
             reply_to: Some("  m-7f3k  ".to_string()),
         };
-        let m = validate_contract(&padded).expect("trim 후 유효");
+        let m = validate_contract(&padded).expect("valid after trim");
         assert_eq!(
             m.reply_to.as_deref(),
             Some("m-7f3k"),
-            "앞뒤 공백은 잘라 받는다"
+            "leading and trailing whitespace is trimmed"
         );
     }
 
@@ -963,7 +926,7 @@ mod tests {
         assert_eq!(m.reply_by, Some(std::time::Duration::from_secs(600)));
     }
 
-    // ── C3: 봉투 속성 조립(노출 원칙 — spec §1) ────────────────────────────────────────────────
+    // ── C3: envelope attribute assembly (exposure principle — spec §1) ────────────────────────────────────────────────
 
     #[test]
     fn request_envelope_exposes_id_type_reply_by_only() {
@@ -977,13 +940,13 @@ mod tests {
         let w = wrap_message(
             "qa-alpha",
             "m-7f3k",
-            "코드 짜고 회신해",
+            "write the code and reply",
             EnvelopeFormat::Xml,
             &m.envelope_fields("m-7f3k"),
         );
         assert_eq!(
             w,
-            r#"<message from="qa-alpha" id="m-7f3k" type="request" reply-by="10m">코드 짜고 회신해</message>"#
+            r#"<message from="qa-alpha" id="m-7f3k" type="request" reply-by="10m">write the code and reply</message>"#
         );
     }
 
@@ -999,13 +962,13 @@ mod tests {
         let w = wrap_message(
             "qa-bravo",
             "m-other",
-            "다 짰음",
+            "all written",
             EnvelopeFormat::Xml,
             &m.envelope_fields("m-other"),
         );
         assert_eq!(
-            w, r#"<message from="qa-bravo" in-reply-to="m-7f3k">다 짰음</message>"#,
-            "회신엔 id/type 이 없다(노출 원칙)"
+            w, r#"<message from="qa-bravo" in-reply-to="m-7f3k">all written</message>"#,
+            "a reply has no id/type (exposure principle)"
         );
     }
 
@@ -1016,11 +979,11 @@ mod tests {
         let w = wrap_message(
             "alice",
             "m-zz",
-            "빌드 끝났음",
+            "build finished",
             EnvelopeFormat::Xml,
             &m.envelope_fields("m-zz"),
         );
-        assert_eq!(w, r#"<message from="alice">빌드 끝났음</message>"#);
+        assert_eq!(w, r#"<message from="alice">build finished</message>"#);
     }
 
     #[test]

@@ -1,12 +1,12 @@
 //! Probe grading + suspected-compaction detection (ADR-0090 Stage 2 pilot).
 //!
 //! ## Core invariants
-//! - **Pure and deterministic** — everything is a function of the input alone (0 external state or clock).
-//! - **Decision = recall holds even after a delay** (ADR-0088) — an immediate ack is not success. `ProbeScores` is that encoding.
+//! - Pure and deterministic — everything is a function of the input alone (no external state or clock).
+//! - Decision = recall holds even after a delay (ADR-0088) — an immediate ack is not success. `ProbeScores` encodes that.
 
 use serde::{Deserialize, Serialize};
 
-/// Grading result of one probe response. Carried as is in the JSONL.
+/// Grading result of one probe response, carried as is in the JSONL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeScores {
     pub sender_recalled: bool,
@@ -35,7 +35,7 @@ fn normalize(s: &str) -> String {
         .collect()
 }
 
-/// Prevents a short token from accidentally matching as part of another word (e.g. so "id" is not caught in "identity").
+/// Prevents a short token from matching as part of another word (e.g. "id" in "identity").
 fn contains_token_seq(haystack_norm: &str, needle: &str) -> bool {
     let needle_norm = normalize(needle);
     let needle_tokens: Vec<&str> = needle_norm.split_whitespace().collect();
@@ -48,12 +48,9 @@ fn contains_token_seq(haystack_norm: &str, needle: &str) -> bool {
         .any(|w| w == needle_tokens.as_slice())
 }
 
-/// ★Why pattern matching (finding 11 fix)★: a plain "is the correct number token in the response" gives a false positive in a sentence like "I received 41 documents;
-///   DOC-42 was not received" (correct answer 42), where 42 appears as a document **reference** (DOC-42).
-///   So we require an adjacent (±1) context where the correct number reads as a count report.
+/// ★Why pattern matching★: a plain "is the correct number token in the response" gives a false positive on "I received 41 documents; DOC-42 was not received" (answer 42), where 42 is a document reference (DOC-42). So require an adjacent (±1) context where the correct number reads as a count report.
 fn count_reported_with_cue(haystack_norm: &str, expected_count: u32) -> bool {
-    // Why the count nouns are here: "Total documents: 42" becomes "total documents 42" after normalization, so the count
-    //   noun stands **before** the number.
+    // "Total documents: 42" normalizes to "total documents 42", so the count noun stands before the number.
     const LEADING_CUES: &[&str] = &[
         "total",
         "received",
@@ -66,9 +63,9 @@ fn count_reported_with_cue(haystack_norm: &str, expected_count: u32) -> bool {
         "documents",
         "docs",
     ];
-    // "document" (singular) also appears in DOC-N references, but when it stands **after** the number it is the count-noun usage so it is included.
+    // "document" (singular) also appears in DOC-N references, but after the number it is the count-noun usage, so it is included.
     const TRAILING_NOUNS: &[&str] = &["documents", "docs", "document"];
-    // When it stands **before** the number it is a document reference (DOC-N) and not a count — excluded.
+    // Before the number it is a document reference (DOC-N), not a count — excluded.
     const REFERENCE_LABELS: &[&str] = &["doc", "document"];
 
     let expected = expected_count.to_string();
@@ -91,8 +88,7 @@ fn count_reported_with_cue(haystack_norm: &str, expected_count: u32) -> bool {
     false
 }
 
-/// Only `response` is agent output and `sender_name`·`msg_id`·`codeword`·`expected_*` are all **answers**.
-/// `expected_doc_count`/`expected_doc1_title` are ignored if `final_report` is false.
+/// Only `response` is agent output; `sender_name`·`msg_id`·`codeword`·`expected_*` are all answers. `expected_doc_count`/`expected_doc1_title` are ignored if `final_report` is false.
 #[allow(clippy::too_many_arguments)]
 pub fn score_probe(
     response: &str,
@@ -108,9 +104,7 @@ pub fn score_probe(
     let sender_recalled = !sender_name.is_empty() && contains_token_seq(&norm, sender_name);
     let codeword_recalled = !codeword.is_empty() && contains_token_seq(&norm, codeword);
 
-    // ★finding 12 fix★: a raw substring (`response.contains(prefix)`) gave a false positive when the 8-hex prefix landed **inside** an unrelated word
-    //   (`deadbeef` in `undeadbeefed`) — do not relax. At the same time, since it is starts_with and not equality,
-    //   prefix recall holds even if the agent writes the full id (`1a2b3c4d5e`).
+    // ★Do not relax★: a raw substring (`response.contains(prefix)`) gave a false positive when the 8-hex prefix landed inside an unrelated word (`deadbeef` in `undeadbeefed`). It is starts_with, not equality, so prefix recall holds even if the agent writes the full id.
     let id_prefix_recalled = if msg_id.len() >= ID_PREFIX_LEN {
         let prefix = normalize(&msg_id[..ID_PREFIX_LEN]);
         let prefix = prefix.trim();
@@ -151,7 +145,7 @@ pub struct UsageSample {
     pub harness_reset: bool,
 }
 
-/// Suspicious if the context tokens between two consecutive turns fall by **more than** this ratio.
+/// Suspicious if the context tokens between two consecutive turns fall by more than this ratio.
 pub const COMPACTION_DROP_THRESHOLD: f64 = 0.30;
 
 pub fn real_series_from_footprints(footprints: &[u64]) -> Vec<UsageSample> {
@@ -166,13 +160,9 @@ pub fn real_series_from_footprints(footprints: &[u64]) -> Vec<UsageSample> {
         .collect()
 }
 
-/// ★finding 2 — single-source selection contract★: choose **one source** series to run detection on. **Never join
-///   two series.**
+/// ★Single-source selection contract★: choose one source series to run detection on. ★Never join two series.★
 ///
-/// ★Why (load-bearing)★: with a mixed series, at the **moment the transcript tap first attaches**, that turn's value dropped sharply as the source switched from the previous turn's (larger)
-///   estimate to the (smaller) real first footprint, and that artificial drop crossed the threshold and a fake
-///   compaction flag was raised. With a single source that switch itself does not exist — a real drop is still caught. When this guarantee
-///   existed only in a `match` inside the bin, it existed only as prose and unit tests could not reach it.
+/// ★Why (load-bearing)★: in a mixed series, at the moment the transcript tap first attaches, the turn's value dropped sharply as the source switched from the previous turn's (larger) estimate to the (smaller) real footprint, and that artificial drop crossed the threshold and raised a fake compaction flag. With a single source the switch does not exist, and a real drop is still caught. This guarantee existed only as a `match` in the bin, out of unit-test reach.
 pub fn select_detection_series(
     real_footprints: Option<&[u64]>,
     estimate: &[UsageSample],
@@ -183,11 +173,9 @@ pub fn select_detection_series(
     }
 }
 
-/// Returned element = **the turn_idx of the (later) turn where the drop was observed** (cur in prev→cur).
+/// Returned element = the turn_idx of the (later) turn where the drop was observed (cur in prev→cur).
 ///
-/// ★Why an external approximation★: claude stream-json may not give compaction as an explicit signal (ADR-0090 context),
-///   so if context tokens drop sharply without a reset we **suspect** internal compaction. It is a flag, not confirmation —
-///   material for the pilot to cross-check against the real signal (if any).
+/// ★Why an external approximation★: claude stream-json may not give compaction as an explicit signal (ADR-0090), so a sharp context drop without a reset makes us suspect internal compaction. A flag, not confirmation — material for cross-checking against the real signal (if any).
 pub fn detect_suspected_compaction(samples: &[UsageSample]) -> Vec<u32> {
     let mut flags = Vec::new();
     for pair in samples.windows(2) {
@@ -196,7 +184,7 @@ pub fn detect_suspected_compaction(samples: &[UsageSample]) -> Vec<u32> {
         if cur.harness_reset {
             continue;
         }
-        // If prev is 0 the ratio is meaningless — skip.
+        // prev = 0 makes the ratio meaningless — skip.
         if prev.context_tokens == 0 {
             continue;
         }
@@ -227,9 +215,9 @@ mod tests {
             "1a2b3c4d5e6f7g8h",
             "MOONLIGHT",
         );
-        assert!(s.sender_recalled, "발신자 회상");
-        assert!(s.id_prefix_recalled, "id 접두 회상");
-        assert!(s.codeword_recalled, "codeword 회상");
+        assert!(s.sender_recalled, "sender recalled");
+        assert!(s.id_prefix_recalled, "id prefix recalled");
+        assert!(s.codeword_recalled, "codeword recalled");
     }
 
     #[test]
@@ -277,7 +265,7 @@ mod tests {
     #[test]
     fn codeword_no_partial_word_match() {
         let s = score("it was sunlight outside", "x", "zzzzzzzz", "sun");
-        assert!(!s.codeword_recalled, "부분 단어 매칭 금지");
+        assert!(!s.codeword_recalled, "no partial word matching");
     }
 
     #[test]
@@ -285,10 +273,13 @@ mod tests {
         let s = score("the word undeadbeefed appeared", "x", "deadbeef0000", "c");
         assert!(
             !s.id_prefix_recalled,
-            "id 접두가 무관 단어 내부 substring 으로 매칭되면 안 됨"
+            "the id prefix must not match as a substring inside an unrelated word"
         );
         let s2 = score("the id was deadbeef here", "x", "deadbeef0000", "c");
-        assert!(s2.id_prefix_recalled, "토큰 경계로 등장하면 회상");
+        assert!(
+            s2.id_prefix_recalled,
+            "recalled when it appears at a token boundary"
+        );
     }
 
     #[test]
@@ -302,8 +293,8 @@ mod tests {
             42,
             "Silent kernel cascade",
         );
-        assert!(s.final_count_correct, "문서 수 42 회상");
-        assert!(s.doc1_title_recalled, "doc1 제목 회상");
+        assert!(s.final_count_correct, "doc count 42 recalled");
+        assert!(s.doc1_title_recalled, "doc1 title recalled");
     }
 
     #[test]
@@ -333,7 +324,7 @@ mod tests {
         );
         assert!(
             !s.final_count_correct,
-            "정답 숫자가 문서 참조(DOC-42)로만 등장하면 회상 아님 — 41 이 실 보고"
+            "if the correct number appears only as a doc reference (DOC-42) it is not recalled — 41 is the real report"
         );
     }
 
@@ -350,7 +341,7 @@ mod tests {
         );
         assert!(
             !s.final_count_correct,
-            "보고 신호어 없는 벌거벗은 숫자는 회상 아님"
+            "a bare number without a report signal word is not recalled"
         );
         let s2 = score_probe(
             "In total I received 42 documents.",
@@ -361,7 +352,7 @@ mod tests {
             42,
             "",
         );
-        assert!(s2.final_count_correct, "신호어 근접 42 는 회상");
+        assert!(s2.final_count_correct, "42 near a signal word is recalled");
     }
 
     #[test]
@@ -375,8 +366,8 @@ mod tests {
             42,
             "Silent kernel cascade",
         );
-        assert!(!s.final_count_correct, "비-final 은 항상 false");
-        assert!(!s.doc1_title_recalled, "비-final 은 항상 false");
+        assert!(!s.final_count_correct, "non-final is always false");
+        assert!(!s.doc1_title_recalled, "non-final is always false");
     }
 
     // ── compaction detection ──
@@ -432,7 +423,7 @@ mod tests {
         assert_eq!(detect_suspected_compaction(&samples), Vec::<u32>::new());
     }
 
-    // ── finding 2: a single consistent series (real_series_from_footprints) ──
+    // ── a single consistent series (real_series_from_footprints) ──
 
     #[test]
     fn source_transition_drop_does_not_flag_when_series_is_single_source() {
@@ -444,16 +435,16 @@ mod tests {
             selected
                 .iter()
                 .all(|s| real_first_5k.contains(&s.context_tokens)),
-            "real 이 있으면 선택 계열은 real 값만 — 추정값(30000 등)이 섞이면 안 된다"
+            "if real exists, the chosen series has real values only — estimates (30000 etc.) must not mix in"
         );
         assert!(
             !selected.iter().any(|s| s.context_tokens == 30_000),
-            "추정 30000 은 감지 계열에 절대 새어 들지 않아야 한다(소스 전환 급감 원천 차단)"
+            "the estimate 30000 must never leak into the detection series (blocks source-switch drops at the root)"
         );
         assert_eq!(
             detect_suspected_compaction(&selected),
             Vec::<u32>::new(),
-            "단일 소스(실측) 계열은 소스 전환 인공 급감(30000→5000)이 존재하지 않는다"
+            "a single-source (measured) series has no artificial source-switch drop (30000→5000)"
         );
     }
 
@@ -474,7 +465,7 @@ mod tests {
             !selected
                 .iter()
                 .any(|s| s.context_tokens == 9_999 || s.context_tokens == 29_999),
-            "estimate 값이 real 선택 계열에 섞이면 안 된다"
+            "estimate values must not mix into the real chosen series"
         );
     }
 
@@ -486,7 +477,7 @@ mod tests {
         assert_eq!(
             detect_suspected_compaction(&samples),
             vec![2],
-            "실 계열 내부의 진짜 급감은 잡아야 한다"
+            "a genuine drop inside the real series must be caught"
         );
     }
 

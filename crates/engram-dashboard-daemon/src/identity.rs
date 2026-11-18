@@ -126,8 +126,8 @@ mod tests {
         Some(doc["daemon_id"].as_str().unwrap().to_owned())
     }
 
-    /// `load_or_create` inside a log capture (every call of its callsites runs inside one — `log_capture` 「관측
-    /// 조건」 ①), with the WARN and ERROR lines it made.
+    /// `load_or_create` inside a log capture (every call of its callsites runs inside one — `log_capture` "Observation
+    /// conditions" ①), with the WARN and ERROR lines it made.
     fn run(dir: &Path) -> (String, Vec<String>) {
         capture_loud(|| load_or_create(dir))
     }

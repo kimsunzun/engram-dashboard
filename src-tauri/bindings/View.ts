@@ -3,10 +3,10 @@ import type { LayoutNode } from "./LayoutNode";
 import type { TabName } from "./TabName";
 
 /**
- * 한 View(탭/팝업 하나) = 레이아웃 트리 + 포커스 슬롯.
+ * One View (a tab/popup) = layout tree + focus slot.
  */
 export type View = { id: string, name: TabName, layout: LayoutNode, 
 /**
- * 가리키던 슬롯이 사라지면 트리 첫 슬롯으로 폴백.
+ * If the slot it pointed to disappears, falls back to the first slot of the tree.
  */
 focused_slot_id: string | null, };

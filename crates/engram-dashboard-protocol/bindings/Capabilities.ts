@@ -6,6 +6,6 @@ import type { OutputCaps } from "./OutputCaps";
 import type { SessionCaps } from "./SessionCaps";
 
 /**
- * 영역별 capability(bool 폭증 방지).
+ * Per-area capability (prevents a bool explosion).
  */
 export type Capabilities = { input: InputCaps, output: OutputCaps, control: ControlCaps, session: SessionCaps, model: ModelCaps, };

@@ -1,6 +1,4 @@
-//! The pure decision of the drop command — from one command · the input read after the drag ended · the source window frame, it picks the docking request to apply, or cancel · ignore.
-//! Zero Tauri · locks · OS calls, so it can be tested alone (ADR-0012). Entry point = [`plan`] · the new-window distinction inside it [`decide`] ·
-//! the new-window placement [`new_window_origin`].
+//! The pure decision of the drop command — from one command · the input read after the drag ended · the source window frame, picks the docking request to apply, or cancel · ignore. Zero Tauri · locks · OS calls, so it is testable alone (ADR-0012). Entry points: [`plan`] · the new-window distinction [`decide`] · the new-window placement [`new_window_origin`].
 // ADR-0296 · ADR-0297
 // TRD S21-slot-docking §3-3 · §3-5
 
@@ -11,25 +9,19 @@ use crate::layout::dock::DockAnchor;
 use crate::layout::geometry::Insets;
 use crate::layout::manager::{DockMove, FocusPolicy, WindowLabel};
 
-/// The ignore reason (the spelling of `TabDropReply::Ignored.why`).
 pub const NO_CURSOR: &str = "no-cursor";
 pub const LOST_DROP: &str = "lost-drop";
 pub const ACCEPTED_OURS: &str = "accepted-ours";
 pub const ACCEPTED_UNKNOWN: &str = "accepted-unknown";
 
-/// A physical-px point on the screen (virtual-screen coordinates — origin at the primary monitor's top-left · negative for a monitor to the left · above). The adapter converts the same-named
-/// type of the OS-layer crate — so this module does not lean on that crate.
+/// A physical-px point on the screen (virtual-screen coordinates — origin at the primary monitor's top-left, negative for a monitor to the left · above). The adapter converts the OS-layer crate's same-named type, so this module does not lean on that crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PhysPoint {
     pub x: i32,
     pub y: i32,
 }
 
-/// The topmost top-level window under the cursor (z-order — invisible · minimized · see-through windows skipped).
-///
-/// - `Ours`: our webview window (that label) — the frame outside the webview (title bar · border) is this too.
-/// - `Foreign`: another app's window · the desktop.
-/// - `Unknown`: could not be read (cursor unreadable · outside Windows · the OS did not answer).
+/// The topmost top-level window under the cursor (z-order — invisible · minimized · see-through windows skipped). `Ours` = our webview window (that label; the frame outside the webview — title bar · border — is this too) · `Foreign` = another app's window · the desktop · `Unknown` = unreadable (cursor unreadable · outside Windows · the OS did not answer).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopAt {
     Ours(WindowLabel),
@@ -37,12 +29,7 @@ pub enum TopAt {
     Unknown,
 }
 
-/// The input the shell read after the drag ended — read right after receiving the command, before the lock · ledger (so it is the same moment as the drop point).
-///
-/// - `cursor`: `None` = could not be read.
-/// - `primary_down` · `escape_down`: are they pressed at that moment. A `drop` command does not read them (false).
-/// - `top`: only a `drag_end` command reads it (`drop` is `Unknown`).
-/// - `scale`: the scale factor of the monitor under the cursor — if unreadable, it is the source window's scale factor. If it is not a finite positive number, [`SourceFrame::scale`] is used.
+/// The input the shell read after the drag ended — read right after receiving the command, before the lock · ledger (the same moment as the drop point). `cursor` `None` = unreadable; `primary_down` · `escape_down` = pressed at that moment (a `drop` command does not read them: false); `top` is read only by `drag_end` (`drop` is `Unknown`); `scale` = the scale factor of the monitor under the cursor — if unreadable, the source window's; a non-finite-positive value falls back to [`SourceFrame::scale`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputNow {
     pub cursor: Option<PhysPoint>,
@@ -52,15 +39,13 @@ pub struct InputNow {
     pub scale: f64,
 }
 
-/// The frame of the source window (the window of the dragged tab) — `insets` = window frame (CSS px · computed the same as `window:frame` [`super::frame_insets`]) · `scale` =
-/// that window's scale factor. The new window's frame is taken to be the same as the source window's (the frames of popouts and main are the same).
+/// The frame of the source window (the dragged tab's window) — `insets` = window frame (CSS px, computed as `window:frame` [`super::frame_insets`]) · `scale` = that window's scale factor. The new window's frame is taken to equal the source window's (popouts and main have the same frame).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceFrame {
     pub insets: Insets,
     pub scale: f64,
 }
 
-/// The answer of [`decide`] — `Place` = a new window at that cursor spot (or move a popout that has only one tab).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Cancel,
@@ -68,7 +53,6 @@ pub enum Decision {
     Place(PhysPoint),
 }
 
-/// The answer of [`plan`] — only `Dock` writes the model.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
     Dock(DockRequest),
@@ -77,15 +61,8 @@ pub enum Plan {
 }
 
 /// Convert one drop command into something to apply. `caller` = the window that called the command — the window of a tab-bar drop (not `drop.from`).
-///
-/// Every docking request is `FocusPolicy::Reveal`, and the next active (`mv.successor`) is `initial` only when `initial ≠ view`,
-/// and is used only when the dragged tab is in the `from` window at apply time (`mv.successor_window = from` — if it is in another window,
-/// that window follows the shell succession). The new window's size is carried only when it is a finite positive number.
-///
-/// What the drop pointed at (the dragged tab · target tab · target area · tab-bar window) is found again by the model by id in the current state — if present, it is applied matched to the current
-/// state (a tab-bar position is clipped to the end of the current list · it also attaches to an area split in the meantime · a dragged tab that went to another window in the meantime is taken out of its current window), and if absent it is rejected
-/// (model unchanged). ★Do not revive the cross-check that rejects by comparing the tab list · revision number · active tab · source window the drop saw★ —
-/// if the result is slightly off, the user can drag again, and the cross-check only adds exceptions to reject.
+/// Every docking request is `FocusPolicy::Reveal`; the next active (`mv.successor`) is `initial` only when `initial ≠ view`, used only if the dragged tab is in the `from` window at apply time (`mv.successor_window = from` — in another window, that window follows the shell succession). The new window's size is carried only when a finite positive number.
+/// What the drop pointed at (dragged tab · target tab · target area · tab-bar window) is found again by id in the current state — if present it is applied matched to the current state (a tab-bar position clipped to the current list's end · an area split meanwhile still attaches · a dragged tab that went to another window is taken from its current window), if absent it is rejected (model unchanged). Do not revive the cross-check rejecting by comparing the tab list · revision number · active tab · source window the drop saw: a slightly-off result lets the user drag again, and the cross-check only adds exceptions to reject.
 // ADR-0297
 // TRD S21-slot-docking §3-3
 pub fn plan(drop: &TabDrop, caller: &str, input: &InputNow, frame: &SourceFrame) -> Plan {
@@ -141,12 +118,10 @@ pub fn plan(drop: &TabDrop, caller: &str, input: &InputNow, frame: &SourceFrame)
     }
 }
 
-/// Distinguish a new-window drop — the order below is the contract (the earlier wins). If the cursor could not be read, the topmost window is also treated as unread.
-///
+/// Distinguish a new-window drop — the order below is the contract (the earlier wins); an unreadable cursor also makes the topmost window unread.
 /// 1. `drop` → `Place` at the cursor spot (no cursor = `Ignore(no-cursor)`).
-/// 2. `drag_end{none}` + (Esc pressed ∨ primary button pressed ∨ no cursor) → `Cancel`. `move` skips this line (somewhere received it).
-/// 3. `drag_end` + topmost is our window → `Ignore` — `none` = `lost-drop` · `move` = `accepted-ours` (the receiving window's `drop` comes
-///    separately). The title bar · border are also our window, so nothing happens.
+/// 2. `drag_end{none}` + (Esc pressed ∨ primary button pressed ∨ no cursor) → `Cancel`; `move` skips this line (somewhere received it).
+/// 3. `drag_end` + topmost is our window → `Ignore` — `none` = `lost-drop` · `move` = `accepted-ours` (the receiving window's `drop` comes separately); the title bar · border are our window too, so nothing happens.
 /// 4. `drag_end` + another app · the desktop (both `none` · `move`) · `drag_end{none}` + unreadable → `Place`.
 /// 5. `drag_end{move}` + unreadable → `Ignore(accepted-unknown)`.
 // TRD S21-slot-docking §3-5
@@ -173,8 +148,7 @@ pub fn decide(by: &NewWindowBy, i: &InputNow) -> Decision {
     }
 }
 
-/// The new window's outer top-left (physical px) = `cursor − round((inset_dip + grab) × scale)` — the cursor lands at `grab` of the new window's viewport.
-/// `inset_dip` = the window frame's (left, top) (CSS px) · `scale` = the scale factor of the monitor dropped on. Rounding takes .5 to the side away from 0.
+/// The new window's outer top-left (physical px) = `cursor − round((inset_dip + grab) × scale)` — the cursor lands at `grab` of the new window's viewport. `inset_dip` = the window frame's (left, top) (CSS px), `scale` = the dropped-on monitor's scale factor; .5 rounds away from 0.
 // TRD S21-slot-docking §3-5
 pub fn new_window_origin(
     cursor: PhysPoint,
@@ -249,7 +223,7 @@ mod tests {
     fn request(p: Plan) -> DockRequest {
         match p {
             Plan::Dock(req) => req,
-            other => panic!("도킹 요청이어야: {other:?}"),
+            other => panic!("should be a docking request: {other:?}"),
         }
     }
 
@@ -291,7 +265,7 @@ mod tests {
                     successor_window: Some(MAIN.into()),
                 },
             },
-            "탭바 창 = 부른 창(인자의 from 이 아니다)"
+            "tab bar window = calling window (not the argument's from)"
         );
     }
 
@@ -313,7 +287,7 @@ mod tests {
             assert_eq!(
                 req.mv.successor_window.as_deref(),
                 Some(MAIN),
-                "from 창에서만"
+                "only from the from window"
             );
         }
     }
@@ -414,7 +388,7 @@ mod tests {
                 &FLAT,
             ));
             let DockDest::NewWindow { at } = req.to else {
-                panic!("새 창이어야");
+                panic!("should be a new window");
             };
             assert_eq!(at.size, None, "{size:?}");
         }
@@ -457,7 +431,7 @@ mod tests {
                 ..quiet(TopAt::Unknown)
             };
             let DockDest::NewWindow { at } = request(plan(&d, MAIN, &i, &frame)).to else {
-                panic!("새 창이어야");
+                panic!("should be a new window");
             };
             assert_eq!(at.pos, Some((480, 380)), "{bad}");
         }
@@ -543,7 +517,7 @@ mod tests {
             assert_eq!(
                 at_top(TopAt::Foreign),
                 Decision::Place(c),
-                "다른 앱이 받아도 새 창(Q39)"
+                "a new window even if another app receives it (Q39)"
             );
             assert_eq!(at_top(TopAt::Unknown), Decision::Ignore(ACCEPTED_UNKNOWN));
         }
@@ -570,7 +544,7 @@ mod tests {
                         &input(None, button, esc, top.clone())
                     ),
                     Decision::Ignore(ACCEPTED_UNKNOWN),
-                    "커서를 못 읽으면 맨 위 창도 못 읽은 것이다 — {top:?}"
+                    "if the cursor cannot be read, the topmost window cannot be read either — {top:?}"
                 );
             }
         }

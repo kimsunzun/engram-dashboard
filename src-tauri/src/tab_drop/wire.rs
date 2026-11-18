@@ -293,7 +293,7 @@ mod tests {
                 "type": "applied", "window": "slot-popup-2", "window_id": null, "number": null,
                 "reused": true,
             }),
-            "닫힌 재사용 창 — 칸은 빠지지 않고 null 이다"
+            "closed reused window — the field is not dropped but is null"
         );
         assert_eq!(
             serde_json::to_value(TabDropReply::Ignored {
@@ -309,10 +309,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(TabDropReply::Rejected {
                 kind: "SlotNotFound".into(),
-                reason: "슬롯 없음: x (SlotNotFound)".into()
+                reason: "slot not found: x (SlotNotFound)".into()
             })
             .unwrap(),
-            json!({ "type": "rejected", "kind": "SlotNotFound", "reason": "슬롯 없음: x (SlotNotFound)" })
+            json!({ "type": "rejected", "kind": "SlotNotFound", "reason": "slot not found: x (SlotNotFound)" })
         );
         assert_eq!(
             serde_json::to_value(TabDropDone {

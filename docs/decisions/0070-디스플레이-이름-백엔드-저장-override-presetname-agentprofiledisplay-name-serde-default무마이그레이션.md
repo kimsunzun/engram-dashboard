@@ -22,7 +22,7 @@ Display rule: `Some` → show as is; `None` → derive from the cwd basename (**
 ## 거부한 대안
 
 - **Frontend-only localStorage storage** — violates §5. If rename lives only in frontend state, there is no control handle the backend-side LLM/orchestrator can reach, so renaming happens **only by human click**, and it is not persistent across windows or machines.
-- **Reusing the existing `AgentProfile.name`** — cannot be used because it is a polluted axis (see 맥락 above). Overwriting `name` with the display name destroys its original meaning of identifying the profile → add a separate axis `display_name`.
+- **Reusing the existing `AgentProfile.name`** — it is a polluted axis so it cannot be used (see the context above). Overwriting `name` with the display name destroys its original meaning of identifying the profile → add a separate axis `display_name`.
 - **New field + migration script** — unnecessary. Because of `#[serde(default)]`, old `presets.json`/`agents.json` without this field are absorbed as `None` on load → no migration.
 
 ## 근거

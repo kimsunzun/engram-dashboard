@@ -1,14 +1,7 @@
-// The endpoint that attaches the shell settings (`shell\config\settings.json`) to the screen — holds the last applied value and `rev` per key,
-// and passes changed values to subscribers (e.g. the chat style applier). The only writes are the shell commands `settings_set`/`settings_reset`.
-//
-// ★Apply rule = `rev` per key★ — the source of truth is the `SettingsSnapshot` doc (`src-tauri/src/settings/mod.rs`). Notices · the boot pull ·
-// write answers all go through the same `apply`.
-//
-// ★Calls invoke/listen directly★: the owner of settings is the shell, not the daemon, so agentClient should not carry it —
-// the same exception as `theme/uiSettings.ts`. The two are cut at `SettingsIpc` so tests plug in a fake (ADR-0012).
-//
-// ★`set`/`reset` before the shell `setup` opens writes are rejected with an error string★ — this module does not write during boot,
-// and a rejection is returned as is through the caller's promise.
+// Attaches the shell settings (`shell\config\settings.json`) to the screen — holds the last applied value and `rev` per key and passes changed values to subscribers (e.g. the chat style applier). The only writes are the shell commands `settings_set`/`settings_reset`.
+// ★Apply rule = `rev` per key★ — source of truth is the `SettingsSnapshot` doc (`src-tauri/src/settings/mod.rs`); notices · the boot pull · write answers all go through the same `apply`.
+// ★Calls invoke/listen directly★: the shell owns settings, not the daemon (same exception as `theme/uiSettings.ts`); cut at `SettingsIpc` so tests plug in a fake (ADR-0012).
+// ★`set`/`reset` before the shell `setup` opens writes are rejected with an error string★ — this module does not write during boot; the rejection comes back through the caller's promise.
 // ADR-0265
 
 import { invoke } from '@tauri-apps/api/core'
@@ -43,8 +36,7 @@ export interface SettingsClient {
   /** The value applied to this window — `undefined` for a key not yet received. */
   get(key: string): string | undefined
   /**
-   * On subscribing, receives all values applied so far once (not called if there are none), and after that only keys whose value changed.
-   * Returns = unsubscribe.
+   * On subscribing, receives all values applied so far once (not called if none), then only keys whose value changed. Returns = unsubscribe.
    */
   subscribe(listener: SettingsListener): () => void
   /** A rejection (unknown key · format · writes not open · disk failure) rejects with the shell's error string. */
@@ -76,7 +68,7 @@ export function createSettingsClient(ipc: SettingsIpc): SettingsClient {
     try {
       listener(changes)
     } catch (e) {
-      console.error('[settings] 구독자가 던졌다:', e)
+      console.error('[settings] a subscriber threw:', e)
     }
   }
 
@@ -95,7 +87,7 @@ export function createSettingsClient(ipc: SettingsIpc): SettingsClient {
   function applyRaw(raw: unknown, where: string): void {
     const snap = snapshotOf(raw)
     if (!snap) {
-      console.warn(`[settings] ${where}: 모양이 계약과 다르다 — 버린다`, raw)
+      console.warn(`[settings] ${where}: the shape differs from the contract — dropped`, raw)
       return
     }
     apply(snap.rev, snap.items)
@@ -113,17 +105,14 @@ export function createSettingsClient(ipc: SettingsIpc): SettingsClient {
       }
     },
 
-    // Paint the answer by the same rule — the shell only logs a notice emit failure, so even if a notice is lost the writing window stays correct.
-    // ★Paint the `changed:false` answer too★: that answer's value is the shell's current value and its `rev` the current number, so if this window
-    //   missed an earlier notice and holds an old value, this corrects it. It cannot overwrite a newer notice (`rev` per key).
+    // Paint the answer by the same rule — the shell only logs a notice emit failure, so a lost notice leaves the writing window correct. ★Paint `changed:false` too★: its value is the shell's current value and its `rev` the current number, so it corrects a window that missed an earlier notice; it cannot overwrite a newer notice (`rev` per key).
     async set(key, value) {
       const outcome = await ipc.invoke<SetOutcome>(CMD_SET, { key, value })
       apply(outcome.rev, [{ key: outcome.key, value: outcome.value }])
       return outcome
     },
 
-    // Only keys that actually changed (`changed`) carry a value in the answer — a key that was already default (a key only in `reset`) has no value
-    //   and cannot be painted.
+    // Only keys that actually changed (`changed`) carry a value in the answer — a key already default (a key only in `reset`) has none and cannot be painted.
     async reset(key) {
       const outcome = await ipc.invoke<ResetOutcome>(CMD_RESET, { key })
       apply(outcome.rev, outcome.changed)
@@ -135,10 +124,8 @@ export function createSettingsClient(ipc: SettingsIpc): SettingsClient {
       let unlisten: (() => void) | undefined
 
       void (async () => {
-        // ★Pull **after** the subscription registration finishes — do not fire them side by side★ (reason = the same clause in `theme/uiSettings.ts`).
-        //   Reversed, a notice that arrives before registration never reaches this window, and a late answer may be older than it.
-        // ★Known residual — if `listen()` never resolves without rejecting, the pull never goes out either★ (retry covers only rejections ·
-        //   the same residual as `theme/uiSettings.ts`).
+        // ★Pull **after** the subscription registration finishes — not side by side★ (same clause as `theme/uiSettings.ts`): reversed, a notice arriving before registration never reaches this window and a late answer may be older than it.
+        // ★Known residual★: if `listen()` never resolves without rejecting, the pull never goes out either (retry covers only rejections — same as `theme/uiSettings.ts`).
         try {
           const off = await retryAsync(
             () =>
@@ -150,7 +137,7 @@ export function createSettingsClient(ipc: SettingsIpc): SettingsClient {
             {
               isCancelled: () => disposed,
               onRetry: (err, attempt) => {
-                console.warn(`[settings] ${EVT_SETTINGS_CHANGED} 구독 재시도 #${attempt}:`, err)
+                console.warn(`[settings] retrying the ${EVT_SETTINGS_CHANGED} subscription #${attempt}:`, err)
               },
             },
           )
@@ -163,7 +150,7 @@ export function createSettingsClient(ipc: SettingsIpc): SettingsClient {
           if (e instanceof RetryCancelledError) return
           // Issue the pull even if the subscription died — even if later changes cannot be received, the current value must be right.
           console.error(
-            `[settings] ${EVT_SETTINGS_CHANGED} 구독 실패 — 이 창은 이후 설정 변경을 못 받는다:`,
+            `[settings] subscribing to ${EVT_SETTINGS_CHANGED} failed — this window will not receive later settings changes:`,
             e,
           )
         }
@@ -172,16 +159,15 @@ export function createSettingsClient(ipc: SettingsIpc): SettingsClient {
           const answer = await retryAsync(() => ipc.invoke<unknown>(CMD_GET), {
             isCancelled: () => disposed,
             onRetry: (err, attempt) => {
-              console.warn(`[settings] ${CMD_GET} 재시도 #${attempt}:`, err)
+              console.warn(`[settings] retrying ${CMD_GET} #${attempt}:`, err)
             },
           })
           if (disposed) return
           applyRaw(answer, CMD_GET)
         } catch (e) {
           if (e instanceof RetryCancelledError) return
-          // A key not received stays at the screen's fallback (e.g. `--chat-*` in `theme.css`) — notices carry only changed keys, so
-          //   it stays that way until that key changes again (or until refresh).
-          console.error(`[settings] ${CMD_GET} 최종 실패:`, e)
+          // A key not received stays at the screen's fallback (e.g. `--chat-*` in `theme.css`) — notices carry only changed keys, so it stays until that key changes again (or refresh).
+          console.error(`[settings] ${CMD_GET} finally failed:`, e)
         }
       })()
 
@@ -194,8 +180,7 @@ export function createSettingsClient(ipc: SettingsIpc): SettingsClient {
   }
 }
 
-// ★Do not pass `target`★ — the shell sends this notice to every webview in the same envelope (`emit`). Unlike `ui:settings-updated`, which the shell sends with
-//   a different value addressed to each window — do not copy that side's window label subscription.
+// ★Do not pass `target`★ — the shell sends this notice to every webview in one envelope (`emit`); unlike `ui:settings-updated`, sent per window with a different value, do not copy that window-label subscription.
 const tauriIpc: SettingsIpc = {
   listen: (event, handler) => listen<unknown>(event, e => handler(e.payload)),
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => invoke<T>(cmd, args),

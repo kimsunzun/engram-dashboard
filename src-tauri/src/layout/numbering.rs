@@ -1,25 +1,19 @@
-//! Pure computation of window numbers (TRD S26-window-chrome §3-4 · §4-1 · PRD R1 · D1–D3) — the number a new window gets (`smallest_free`) ·
-//! fixing a saved number (`resolve_saved`) · range decision on a saved value (`saved_number`). It only computes and does not hold numbers
-//! (it knows nothing of Tauri or the model).
-// ADR-0300 — window number
+//! Pure computation of window numbers (TRD S26-window-chrome §3-4 · §4-1 · PRD R1 · D1–D3) — the number a new window gets (`smallest_free`) · fixing a saved number (`resolve_saved`) · range decision on a saved value (`saved_number`). It only computes and holds no numbers (knows nothing of Tauri or the model).
+// ADR-0300
 
 use std::collections::BTreeSet;
 
-/// Number of the main window — main is always alive and always has this number (D1). The main entry of the saved file is not looked at.
 pub const MAIN_WINDOW_NUMBER: u32 = 1;
 
-/// Upper bound of a number accepted from the saved file — AC38 measures the form that shows up to three digits (TRD §3-4 M3).
-/// The number of a new window at run time does not look at this bound.
+/// Upper bound of a number accepted from the saved file — AC38 measures the form showing up to three digits (TRD §3-4 M3). A new window's number at run time ignores this bound.
 pub const MAX_SAVED_NUMBER: u32 = 999;
 
 fn in_saved_range(n: u32) -> bool {
     (1..=MAX_SAVED_NUMBER).contains(&n)
 }
 
-/// The number a new window (popout) gets = the smallest positive integer that is neither in `held` nor the main's 1. The order · duplicates ·
-/// 0 · 1 in `held` do not matter. 1 is not given even if it is not in `held` — even if the caller leaves out main, 1 does not end up twice.
-/// The caller passes both the numbers of live windows and the numbers of windows that are closing.
-// ADR-0300 — window number
+/// The number a new window (popout) gets = the smallest positive integer in neither `held` nor main's 1. Order · duplicates · 0 · 1 in `held` do not matter; 1 is not given even if absent from `held`, so main's 1 never ends up twice. The caller passes both live windows' numbers and closing windows' numbers.
+// ADR-0300
 pub fn smallest_free(held: impl IntoIterator<Item = u32>) -> u32 {
     let held: BTreeSet<u32> = held.into_iter().collect();
     let mut want = MAIN_WINDOW_NUMBER + 1;
@@ -32,23 +26,14 @@ pub fn smallest_free(held: impl IntoIterator<Item = u32>) -> u32 {
     want
 }
 
-/// Reads one number field of the saved file — only a JSON integer in `1..=MAX_SAVED_NUMBER` is `Some`. A missing field (`Null`) · 0 · negative ·
-/// real number (including `2.0`) · string · boolean · over the bound is `None`. Even with `None` that window is not skipped —
-/// `resolve_saved` gives it a free number (AC25 · AC38).
+/// Reads one number field of the saved file — only a JSON integer in `1..=MAX_SAVED_NUMBER` is `Some`; missing (`Null`) · 0 · negative · real (including `2.0`) · string · boolean · over the bound is `None`. Even with `None` the window is not skipped — `resolve_saved` gives it a free number (AC25 · AC38).
 pub fn saved_number(raw: &serde_json::Value) -> Option<u32> {
     raw.as_u64()
         .and_then(|n| u32::try_from(n).ok())
         .filter(|&n| in_saved_range(n))
 }
 
-/// Fixes the popout numbers in saved order (`saved` — main excluded) and returns numbers of the same length · same order (D3).
-///
-/// 1. Out of range · main's 1 = none.
-/// 2. If the same number is written two or more times, only the earlier window in saved order keeps it.
-/// 3. A number in `held` (numbers other windows already hold) = none — the window that already holds it keeps it (D2).
-/// 4. After all valid numbers are set first, windows that are none get the smallest free number in saved order.
-///
-/// Main's 1 is not given even if it is not in `held`. A fixed window (the warning part) is told apart by `saved[i] != Some(out[i])`.
+/// Fixes the popout numbers in saved order (`saved` — main excluded) and returns numbers of the same length · order (D3): 1. out of range · main's 1 = none. 2. A number written two or more times stays only with the earlier window in saved order. 3. A number in `held` (held by other windows) = none — the holder keeps it (D2). 4. After all valid numbers are set, windows that are none get the smallest free number in saved order. Main's 1 is not given even if absent from `held`. A fixed window (the warning part) is told apart by `saved[i] != Some(out[i])`.
 pub fn resolve_saved(saved: &[Option<u32>], held: impl IntoIterator<Item = u32>) -> Vec<u32> {
     let mut taken: BTreeSet<u32> = held.into_iter().collect();
     let kept: Vec<Option<u32>> = saved
@@ -74,15 +59,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The fixed numbers do not overlap each other, and do not overlap main's 1 or `held`.
     fn assert_disjoint(out: &[u32], held: &[u32]) {
         let mut seen: BTreeSet<u32> = held.iter().copied().collect();
         seen.insert(MAIN_WINDOW_NUMBER);
         for &n in out {
-            assert!(
-                seen.insert(n),
-                "{n} 이 겹친다 — out {out:?} · held {held:?}"
-            );
+            assert!(seen.insert(n), "{n} overlaps — out {out:?} · held {held:?}");
         }
     }
 

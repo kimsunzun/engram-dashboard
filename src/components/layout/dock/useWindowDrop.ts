@@ -4,7 +4,7 @@
 //   (TRD §4-2). Our drag is stopped at `document` so it does not reach there —
 //   attached to `window`, the registration order of the same node wins and stopping does not hold, and stopping at `document` capture means the handlers of elements below do not receive it (the same clause of the old
 //   HTML5 drag `dockDrag.ts`). The file · URL drop block (`fileDropGuard`) lives on separately as is — the two do not look at each other's drag.
-// ★mousemove is `window` capture★ — the guide layer does not receive the pointer, so 「덮개 위 이동」 arrives at the element below it · it is seen even if an app handler stops propagation.
+// ★mousemove is `window` capture★ — the guide layer does not receive the pointer, so 「move over the cover」 arrives at the element below it · it is seen even if an app handler stops propagation.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 

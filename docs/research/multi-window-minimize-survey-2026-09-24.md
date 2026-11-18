@@ -1,6 +1,6 @@
 # Multi-Window Minimize Linkage — Peer Practice · Win32 Owned Windows · Tauri v2
 
-- 상태: **research done · decision made → ADR-0229** (user decision 2026-09-24: minimize works per window on its own · the main X hides all windows to the tray · the tray icon revives all windows — options A–D below are all rejected, the reason is in the ADR) · Date: 2026-09-24
+- Status: **research done · decision made → ADR-0229** (user decision 2026-09-24: minimize works per window on its own · the main X hides all windows to the tray · the tray icon revives all windows — options A–D below are all rejected, the reason is in the ADR) · Date: 2026-09-24
 - Method: `/research` **medium** (design survey — the user called it light, but it was promoted by the design-survey rule) · main track collection 2 (peer practice · mechanism) + code-fact collection 1 · main grounding (「grounding」 below) · one cross-family adversarial review (「적대 리뷰」 below)
 - Question (user, 2026-09-24): 「최소화했다가 아이콘을 누르면 복원되는데, 창을 여러 개로 분리했을 때는 메인 창만 적용된다. 메인 창이 최소화되면 다른 창도 다 최소화돼야 하지 않나.」
 - Confidence legend: **certain** = primary source quoted + independently cross-confirmed · **likely** = one primary source or local source confirmed · **uncertain** = weak source · inference · **unknown** = no source

@@ -2,7 +2,7 @@
 name = "engram-dashboard-transport"
 version = "0.1.0"
 edition = "2021"
-description = "Engram Dashboard 재사용 전송 lib — 프레임 경계·요청/응답 상관·스트림 살림·연결 수명·상대 N개 명부. 타입 seam 은 `Wire` 제네릭, 전송·시간은 dyn. 워크스페이스 crate 의존 0(ADR-0177)."
+description = "Engram Dashboard reusable transport lib — frame boundaries·request/response correlation·stream lifecycle management·connection lifetime·registry of N peers. The type seam is the `Wire` generic, transport·time are dyn. 0 workspace crate dependencies (ADR-0177)."
 
 [lib]
 name = "engram_dashboard_transport"

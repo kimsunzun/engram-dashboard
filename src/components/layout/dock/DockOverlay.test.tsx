@@ -31,13 +31,13 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('DockOverlayView — 그림', () => {
-  it('그림이 없으면(null) 아무것도 그리지 않는다', () => {
+describe('DockOverlayView — drawing', () => {
+  it('if there is no drawing (null) it draws nothing', () => {
     const { container } = render(<DockOverlayView guide={null} />)
     expect(container.innerHTML).toBe('')
   })
 
-  it('칸 구역 선 = 가운데 사각형 + 칸 모서리에서 가운데 모서리로 가는 대각선 넷 · 얇고 옅은 선이고 칠하지 않는다', () => {
+  it('area zone lines = a center rectangle + four diagonals from the area corners to the center corners · thin faint lines and not filled', () => {
     render(<DockOverlayView guide={view({ preview: null })} />)
     expect(screen.getByTestId('dock-slot-centre').getAttribute('d')).toBe('M60 108H540V748H60Z')
     expect(screen.getAllByTestId('dock-slot-diagonal').map(line)).toEqual([
@@ -56,13 +56,13 @@ describe('DockOverlayView — 그림', () => {
   })
 
   it.each([
-    ['600 × 200 · 원점 (100, 50)', { slot: { x0: 100, y0: 50, x1: 700, y1: 250 }, centre: { x0: 160, y0: 70, x1: 640, y1: 230 } }],
-    ['200 × 600 · 원점 (30, 40)', { slot: { x0: 30, y0: 40, x1: 230, y1: 640 }, centre: { x0: 50, y0: 100, x1: 210, y1: 580 } }],
+    ['600 × 200 · origin (100, 50)', { slot: { x0: 100, y0: 50, x1: 700, y1: 250 }, centre: { x0: 160, y0: 70, x1: 640, y1: 230 } }],
+    ['200 × 600 · origin (30, 40)', { slot: { x0: 30, y0: 40, x1: 230, y1: 640 }, centre: { x0: 50, y0: 100, x1: 210, y1: 580 } }],
     [
-      '소수 원점 (20.5, 48.5)',
+      'fractional origin (20.5, 48.5)',
       { slot: { x0: 20.5, y0: 48.5, x1: 1180.5, y1: 808.5 }, centre: { x0: 140.5, y0: 128.5, x1: 1060.5, y1: 728.5 } },
     ],
-  ])('대각선의 두 끝 = 칸 구역 틀 모서리 · 그린 가운데 사각형의 같은 쪽 모서리(%s)', (_, zones) => {
+  ])('both ends of a diagonal = the area zone frame corner · the same-side corner of the drawn center rectangle (%s)', (_, zones) => {
     render(<DockOverlayView guide={view({ slot: zones, preview: null })} />)
     const d = screen.getByTestId('dock-slot-centre').getAttribute('d') ?? ''
     const m = /^M(\S+) (\S+)H(\S+)V(\S+)H(\S+)Z$/.exec(d)
@@ -85,13 +85,13 @@ describe('DockOverlayView — 그림', () => {
     expect(screen.getAllByTestId('dock-slot-diagonal').map(line)).toEqual(outer.map((o, i) => [...o, ...drawn[i]]))
   })
 
-  it('좁은 칸의 폭 0 가운데도 선분으로 그린다', () => {
+  it('a center of width 0 in a narrow area is also drawn as a segment', () => {
     const narrow = { slot: { x0: 10, y0: 0, x1: 30, y1: 400 }, centre: { x0: 20, y0: 33, x1: 20, y1: 367 } }
     render(<DockOverlayView guide={view({ slot: narrow, preview: null })} />)
     expect(screen.getByTestId('dock-slot-centre').getAttribute('d')).toBe('M20 33H20V367H20Z')
   })
 
-  it('칸 띠를 고르면 선과 함께 붙을 사각형을 옅은 채움 + 1px 테두리로 그린다(빗금 없음) · 층은 캔버스를 덮는 절대 층이고 클릭을 받지 않는다', () => {
+  it('choosing an area band draws the rectangle to attach as a faint fill + 1px border together with the lines (no hatching) · the layer is an absolute layer covering the canvas and takes no clicks', () => {
     render(<DockOverlayView guide={view()} />)
     expect(opacity('dock-slot-lines')).toBe('1')
     const preview = screen.getByTestId('dock-preview')
@@ -107,7 +107,7 @@ describe('DockOverlayView — 그림', () => {
     expect(layer.style.position).not.toBe('fixed')
   })
 
-  it('바깥 띠면(outer 가 비지 않음) 칸 선 없이 레이아웃 틀(층 테두리)과 붙을 사각형을 그린다 · 바깥 띠 영역은 칠하지 않는다', () => {
+  it('for an outer band (outer is non-empty) it draws the layout frame (layer border) and the rectangle to attach without area lines · the outer band region is not painted', () => {
     render(
       <DockOverlayView
         guide={view({ slot: null, outer: [{ x0: 0, y0: 0, x1: 20, y1: 800 }], preview: { x0: 0, y0: 0, x1: 400, y1: 800 } })}
@@ -123,7 +123,7 @@ describe('DockOverlayView — 그림', () => {
     expect(box(screen.getByTestId('dock-preview'))).toEqual({ left: '0px', top: '0px', width: '400px', height: '800px' })
   })
 
-  it('칸 띠 영역(bands)은 칠하지 않는다 — 층 안 그림은 구역 선 · 틀 · 붙을 사각형 셋뿐이다', () => {
+  it('the area band region (bands) is not painted — the only drawings inside the layer are the zone lines · frame · rectangle to attach', () => {
     render(<DockOverlayView guide={view({ slot: null, preview: null, bands: [{ x0: 150, y0: 28, x1: 210, y1: 328 }] })} />)
     const layer = screen.getByTestId('dock-overlay')
     const ids = [...layer.querySelectorAll(':scope > [data-testid]')].map(el => el.getAttribute('data-testid'))
@@ -131,7 +131,7 @@ describe('DockOverlayView — 그림', () => {
     expect(['dock-slot-lines', 'dock-frame', 'dock-preview'].map(opacity)).toEqual(['0', '0', '0'])
   })
 
-  it('slot 칸이 없는 몸도 받는다 — 선 없이 붙을 사각형을 그린다', () => {
+  it('a body without the slot area is also accepted — it draws the rectangle to attach without lines', () => {
     const old = { bands: [{ x0: 10, y0: 20, x1: 30, y1: 40 }], outer: [], preview: { x0: 10, y0: 20, x1: 50, y1: 40 } }
     render(<DockOverlayView guide={old} />)
     expect(opacity('dock-slot-lines')).toBe('0')
@@ -140,8 +140,8 @@ describe('DockOverlayView — 그림', () => {
   })
 })
 
-describe('DockOverlayView — 움직임', () => {
-  it('나타나면 150 ms 페이드로 보이고 · null 이면 흐려진 뒤 150 ms 에 층을 걷는다', () => {
+describe('DockOverlayView — motion', () => {
+  it('when it appears it shows with a 150 ms fade · on null it fades and then removes the layer after 150 ms', () => {
     vi.useFakeTimers()
     const { rerender } = render(<DockOverlayView guide={view()} />)
     const layer = screen.getByTestId('dock-overlay')
@@ -156,7 +156,7 @@ describe('DockOverlayView — 움직임', () => {
     expect(screen.queryByTestId('dock-overlay')).toBeNull()
   })
 
-  it('흐려지는 동안 다시 그림이 오면 층을 걷지 않고 다시 보인다', () => {
+  it('if a drawing comes again while fading it does not remove the layer and shows again', () => {
     vi.useFakeTimers()
     const { rerender } = render(<DockOverlayView guide={view()} />)
     rerender(<DockOverlayView guide={null} />)
@@ -167,7 +167,7 @@ describe('DockOverlayView — 움직임', () => {
     expect(screen.getByTestId('dock-overlay').style.opacity).toBe('1')
   })
 
-  it('붙을 사각형 — 사라지면 마지막 자리에서 흐려지고 · 다시 나타나면 미끄러지지 않고 제자리에서 · 띠 사이 옮김은 70 ms', () => {
+  it('the rectangle to attach — when it disappears it fades at the last position · when it appears again it does not slide but is in place · moving between bands is 70 ms', () => {
     const { rerender } = render(<DockOverlayView guide={view({ preview: { x0: 0, y0: 0, x1: 100, y1: 100 } })} />)
     const preview = () => screen.getByTestId('dock-preview')
     expect(preview().style.transition).toBe(FADE)
@@ -187,7 +187,7 @@ describe('DockOverlayView — 움직임', () => {
     expect(preview().style.transition).toBe(`${MOVE}, ${FADE}`)
   })
 
-  it('처음 나타나는 붙을 사각형도 미리 깔린 요소의 불투명도로 나타난다(층 안에서 0 → 1)', () => {
+  it('even the first appearing rectangle to attach appears with the opacity of a pre-laid element (0 → 1 in the layer)', () => {
     const { rerender } = render(<DockOverlayView guide={view({ preview: null })} />)
     expect(opacity('dock-preview')).toBe('0')
     rerender(<DockOverlayView guide={view()} />)
@@ -195,7 +195,7 @@ describe('DockOverlayView — 움직임', () => {
     expect(screen.getByTestId('dock-preview').style.transition).toBe(FADE)
   })
 
-  it('구역 선 — 사라지면 마지막 선을 남긴 채 흐려진다', () => {
+  it('zone lines — when they disappear they fade leaving the last lines', () => {
     const { rerender } = render(<DockOverlayView guide={view({ preview: null })} />)
     rerender(<DockOverlayView guide={view({ slot: null, preview: null })} />)
     expect(opacity('dock-slot-lines')).toBe('0')
@@ -203,7 +203,7 @@ describe('DockOverlayView — 움직임', () => {
     expect(screen.getByTestId('dock-slot-lines').style.transition).toBe(FADE)
   })
 
-  it('움직임 줄이기(prefers-reduced-motion: reduce)면 전환 0 ms · null 이면 곧바로 걷는다', () => {
+  it('with reduced motion (prefers-reduced-motion: reduce) transition is 0 ms · on null it is removed at once', () => {
     vi.stubGlobal('matchMedia', (q: string) => ({ matches: q === '(prefers-reduced-motion: reduce)' }))
     const { rerender } = render(<DockOverlayView guide={view()} />)
     expect(screen.getByTestId('dock-overlay').style.transition).toBe('opacity 0ms ease-out')

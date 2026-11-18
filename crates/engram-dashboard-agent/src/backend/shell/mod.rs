@@ -1,8 +1,7 @@
-//! ShellBackend — 임의 셸 프로그램 전용 CommandSpec 산출.
+//! ShellBackend — produces the CommandSpec for arbitrary shell programs only.
 //!
-//! ★이 폴더가 세우는 규칙 = shell 지식은 여기 안에만 산다(ADR-0004)★. 근거·게이트·게이트가
-//! 못 보는 것의 정본은 `backend/claude/mod.rs` 헤더이고 여기 되풀어 적지 않는다 — 이름만 바꿔
-//! 읽는다. 밖으로 나가는 표면은 [`crate::backend::AgentBackend`] 구현 하나뿐이다.
+//! ★The rule this folder sets = shell knowledge lives only here (ADR-0004)★. Grounds, gates and what the gates cannot see: the
+//! `backend/claude/mod.rs` header (read it with names swapped). The only surface out is the one [`crate::backend::AgentBackend`] implementation.
 //!
 //! tauri import 0.
 
@@ -18,7 +17,7 @@ use crate::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, Session
 pub struct ShellBackend;
 
 impl AgentBackend for ShellBackend {
-    /// 셸에는 대화 세션 개념이 없다 — 두 축 모두 false.
+    /// A shell has no conversation-session concept — both axes are false.
     fn assigns_session_id(&self, _command: &AgentCommand) -> bool {
         false
     }
@@ -32,15 +31,14 @@ impl AgentBackend for ShellBackend {
     }
 
     fn accepts_mcp_config(&self) -> bool {
-        // provision 을 애초에 안 부르므로(위 false) 이 값은 실제 소비되지 않지만, 계약 완결성 위해
-        //   정직하게 false.
+        // provision is never called (false above), so this value is not consumed; honestly false for contract completeness.
         // ADR-0099
         false
     }
 
-    /// ★셸은 편지를 읽는 주체가 아니다(사용자 결정 2026-08-17)★ — 셸에 도착한 봉투는 읽히는 게 아니라
-    /// **명령으로 실행된다**. 본문은 LLM 자유 텍스트라 `&`·`|`·`;` 가 섞이면 그 뒤가 별도 명령으로
-    /// 파싱된다. 그래서 수신자 명단(`@all` 포함)에서 아예 뺀다 — 제출 바이트를 빼는 식의 완화가 아니다.
+    /// ★A shell is not a reader of mail (user decision 2026-08-17)★ — an envelope reaching a shell is **executed as a command**, not read.
+    /// The body is LLM free text, so `&`·`|`·`;` would make what follows a separate command. So it is left out of the recipient list
+    ///   (including `@all`) entirely — not a mitigation such as dropping submit bytes.
     fn reads_messages(&self) -> bool {
         false
     }
@@ -64,13 +62,13 @@ impl AgentBackend for ShellBackend {
                 cwd,
             },
             AgentCommand::Claude { .. } | AgentCommand::Codex { .. } => {
-                unreachable!("ShellBackend는 Shell variant만 처리함. dispatch 버그.")
+                unreachable!("ShellBackend handles only the Shell variant. dispatch bug.")
             }
         }
     }
 
-    /// 범용 셸은 `--resume` 같은 세션 재개 개념이 없다 → resume=false. 예전엔 transport 가 backend
-    /// 무관하게 resume=true 를 하드코딩해 shell 이 부정확했다. cwd_env=true — 셸도 cwd 에서 실행한다.
+    /// A general-purpose shell has no session-resume concept like `--resume` → resume=false (the transport once hardcoded true for every
+    /// backend, wrong for shell). cwd_env=true — a shell also runs in the cwd.
     fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
         BackendCaps {
             session: SessionCaps {

@@ -1,6 +1,6 @@
 # How to drive codex as an automatic code reviewer (research + own measurement)
 
-- 상태: ★**열화(degraded)**★ (2026-09-16) · Strength: research skill **medium — adversarial review omitted (no cross-family verification)**
+- Status: ★**degraded**★ (2026-09-16) · Strength: research skill **medium — adversarial review omitted (no cross-family verification)**
 - Method: 3 lightweight Claude tracks collected in parallel (official primary / real-world precedents / tool-agnostic patterns) → main grounding.
   **We did not run the cross-family adversarial review that the convention requires** — that slot is codex itself, and
   we had already burned 4 measurement runs the same day, so we spared the limit. To remove this label, the adversarial review must be run.

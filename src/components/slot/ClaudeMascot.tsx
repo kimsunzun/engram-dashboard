@@ -1,10 +1,6 @@
 // ClaudeMascot — pixel-grid mascot drawn in the JSON-mode empty state (ADR-0145).
-//
-// ★The only places to tune are the three constants below★ — shape (MASCOT_ROWS) · color · cell size. The user looks at the screen and
-//   edits the shape, so it is kept apart from the render code.
-//
-// Why no image asset: it blurs with scaling. Why no text blocks: monospace cells are not
-// square, so the character stretches vertically (the alternative ADR-0145 rejected).
+// ★Tune only the three constants below★ — shape (MASCOT_ROWS) · color · cell size; the user edits the shape while looking at the screen, so it is kept apart from the render code.
+// Why no image asset: it blurs with scaling. Why no text blocks: monospace cells are not square, so the character stretches vertically (ADR-0145 rejected alternative).
 
 /**
  * Mascot dot layout. `█` = filled cell, any other character (space) = empty cell.
@@ -36,7 +32,7 @@ const MASCOT_ROWS = [
   '     ██ ██      ██ ██     ',
 ]
 
-/** Approximates the original body color (terracotta-ish apricot) — does not follow the theme accent color (ADR-0145 user decision). */
+/** Approximates the original body color (terracotta-ish apricot) — does not follow the theme accent color (ADR-0145). */
 const MASCOT_COLOR = '#c97b5c'
 
 /** Side of one cell (px). Same value for width and height = 1:1 square cells. */
@@ -46,10 +42,7 @@ const FILLED = '█'
 
 const MASCOT_COLS = Math.max(...MASCOT_ROWS.map(row => row.length))
 
-/**
- * List of horizontally adjacent cells merged into one rect. Emitting a node per cell would grow the DOM by the number of grid cells,
- * multiplied by the number of slots showing the empty state. The data is constant, so it is computed once at module load.
- */
+/** Horizontally adjacent cells merged into one rect — a node per cell would grow the DOM by grid cells × slots showing the empty state. Constant data, computed once at module load. */
 const MASCOT_RUNS: { x: number; y: number; w: number }[] = MASCOT_ROWS.flatMap((row, y) => {
   const runs: { x: number; y: number; w: number }[] = []
   let x = 0

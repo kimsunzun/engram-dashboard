@@ -1,12 +1,6 @@
 // Regression for the hidden guard on the initial size report right after subscribing — a size that cannot be measured is not sent, and another path emits it once visible.
-//
-// Background: when the subscription resolves the slot emits its current size to the PTY once (ADR-0036). If that spot sends without a guard in a hidden tab (keep-alive = display:none,
-//   ADR-0056) or an area whose box has collapsed, an untrustworthy grid produced by fit() in an unmeasurable state goes out and
-//   overwrites the PTY size a visible slot viewing the same agent had set. Industry rule = do not send a size that cannot be measured
-//   and keep the last size (docs/research/hidden-tab-terminal-subscription-survey-2026-09-25.md).
-//
-// ★Measuring the guard alone also passes an implementation that 「영영 안 보낸다」 (never sends)★ — so we also measure that, on the transition to visible after skipping, the visibility effect
-//   (WebGL attach) emits it, and that if the attach fails, RO emits the size.
+// Why: when the subscription resolves the slot emits its current size to the PTY once (ADR-0036). Without a guard, a hidden tab (keep-alive = display:none, ADR-0056) or a collapsed box would send an untrustworthy grid from fit() in an unmeasurable state and overwrite the PTY size a visible slot viewing the same agent had set. Industry rule = do not send a size that cannot be measured, keep the last size (docs/research/hidden-tab-terminal-subscription-survey-2026-09-25.md).
+// ★Measuring the guard alone also passes an implementation that "never sends"★ — so we also measure that on the transition to visible after skipping the visibility effect (WebGL attach) emits it, and that if the attach fails RO emits the size.
 
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -75,7 +69,7 @@ HTMLElement.prototype.getBoundingClientRect = function (): DOMRect {
   } as DOMRect
 }
 
-// The test holds when the subscription resolves — 「풀리는 순간 보이나」 (is it visible the moment it resolves) is this guard's decision point.
+// The test holds when the subscription resolves — 「is it visible the moment it resolves」 is this guard's decision point.
 const pending = vi.hoisted(() => ({ resolvers: [] as Array<() => void> }))
 const conn = vi.hoisted(() => ({ cbs: new Set<(s: string) => void>() }))
 vi.mock('../../api/clientFactory', () => ({
@@ -185,8 +179,8 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('TerminalSlot — 구독 직후 초기 치수의 숨김 가드', () => {
-  it('보이는 슬롯은 구독이 풀리는 순간 실측 치수를 정확히 한 번 보낸다', async () => {
+describe('TerminalSlot — the hide guard of the initial size right after subscribing', () => {
+  it('a visible slot sends the measured size exactly once the moment the subscription is released', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     fitAddonFit.mockClear()
@@ -198,9 +192,8 @@ describe('TerminalSlot — 구독 직후 초기 치수의 숨김 가드', () => 
     expect(agentClient.resizePty).toHaveBeenCalledWith(AGENT, 137, 25)
   })
 
-  // The value real fit() produces under display:none (measured 11×6 — TerminalSlot helper comment) is not imitated by the mock, so
-  //   we decide by fit() not being called rather than by size.
-  it('숨은 슬롯(display:none)에서 구독이 풀리면 fit() 도 치수도 보내지 않는다', async () => {
+  // Real fit() under display:none gives 11×6 (measured — TerminalSlot helper comment), which the mock does not imitate, so decide by fit() not being called rather than by size.
+  it('on a hidden slot (display:none) when the subscription is released it sends neither fit() nor a size', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     layout.visible = false
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
@@ -212,13 +205,12 @@ describe('TerminalSlot — 구독 직후 초기 치수의 숨김 가드', () => 
     expect(agentClient.resizePty).not.toHaveBeenCalled()
   })
 
-  // On a collapsed axis fit() clamps to the floor value (2 columns · 1 row) (FitAddon source) — that grid is indistinguishable from a normal size by value, so
-  //   the assertion hangs on fit() not being called. ★The two cases with only one axis at 0 weigh the same as both axes at 0★.
+  // On a collapsed axis fit() clamps to the floor (2 columns · 1 row) (FitAddon source) — indistinguishable from a normal size by value, so the assertion hangs on fit() not being called. ★The two cases with only one axis at 0 weigh the same as both at 0★.
   it.each([
     [0, 0],
     [0, 400],
     [800, 0],
-  ])('표시됐지만 박스가 %i×%i 로 붕괴한 채 구독이 풀리면 fit() 에 닿기 전에 빠진다', async (width, height) => {
+  ])('if the subscription is released while shown but with the box collapsed to %i×%i it drops out before reaching fit()', async (width, height) => {
     const { agentClient } = await import('../../api/clientFactory')
     layout.width = width
     layout.height = height
@@ -232,7 +224,7 @@ describe('TerminalSlot — 구독 직후 초기 치수의 숨김 가드', () => 
   })
 
   // The actual harm the guard blocks — when two views watch one PTY, the hidden view does not decide the size.
-  it('같은 에이전트를 보이는 슬롯과 숨은 슬롯이 함께 보면 보이는 쪽만 보낸다', async () => {
+  it('if a visible slot and a hidden slot watch the same agent together only the visible one sends', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     render(
       <>
@@ -250,8 +242,8 @@ describe('TerminalSlot — 구독 직후 초기 치수의 숨김 가드', () => 
   })
 })
 
-describe('TerminalSlot — 숨은 채 건너뛴 치수는 보이게 될 때 다른 경로가 낸다', () => {
-  it('보임 전이의 가시성 effect(WebGL 부착)가 실측 치수를 낸다', async () => {
+describe('TerminalSlot — a size skipped while hidden is produced by another path when it becomes visible', () => {
+  it('the visibility effect of the visible transition (WebGL attach) produces the measured size', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     layout.visible = false
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
@@ -266,9 +258,8 @@ describe('TerminalSlot — 숨은 채 건너뛴 치수는 보이게 될 때 다�
     expect(agentClient.resizePty).toHaveBeenCalledWith(AGENT, 137, 25)
   })
 
-  // If the WebGL attach fails, the size propagation bundled inside it is dropped too — only RO is left. Leaving hiding
-  //   is itself a container size change (0×0 → real), so RO fires.
-  it('WebGL 부착이 실패해도 컨테이너가 커지며 울리는 RO 가 치수를 낸다', async () => {
+  // If the WebGL attach fails, the size propagation bundled inside it is dropped too — only RO is left; leaving hiding is itself a container size change (0×0 → real), so RO fires.
+  it('even if the WebGL attach fails the RO fired as the container grows produces the size', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     layout.visible = false

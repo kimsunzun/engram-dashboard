@@ -3,10 +3,7 @@
 
 use ts_rs::TS;
 
-/// The spare window entered the model — shell → that window's webview (target = that window's label) · body = [`SpareAdopted`]. On receiving it, draws in normal mode and
-/// then carries the body's adoption number in the first-paint notification after that (`webview_painted`) (the webview-side name = `EVT_SPARE_ADOPTED` of `spareMode.ts`). The mode at mount time
-/// is given by `window_role` — only changes after that come through this event. Emitter = commit ④
-/// (the commit port of `commands::spare` — TRD S21-slot-docking §3-9 「`committed`」).
+/// The spare window entered the model — shell → that window's webview (target = that window's label) · body = [`SpareAdopted`]. On receiving it the webview draws in normal mode and carries the body's adoption number in the first-paint notification after that (`webview_painted`) (webview-side name = `EVT_SPARE_ADOPTED` of `spareMode.ts`). The mode at mount time comes from `window_role`; only later changes come through this event. Emitter = commit ④ (the commit port of `commands::spare` — TRD S21-slot-docking §3-9 「`committed`」).
 pub const EVT_SPARE_ADOPTED: &str = "spare:adopted";
 
 /// Body of the event `spare:adopted` (`EVT_SPARE_ADOPTED`).

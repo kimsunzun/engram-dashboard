@@ -1,12 +1,12 @@
-//! ADR-0086 스텝 2 · F7(b) · ADR-0132 — `engram` CLI **프로세스 레벨** 테스트.
+//! ADR-0086 step 2 · F7(b) · ADR-0132 — **process-level** tests of the `engram` CLI.
 //!
-//! 단위 테스트는 순수 함수만 봤다 — 여기선 **wire → 파싱 → stdout JSON → exit code** 전 경로를 실측한다
-//! (env 읽기·TCP·프로세스 종료코드 포함).
+//! Unit tests look only at pure functions — here the whole path **wire → parse → stdout JSON → exit code** is measured (env
+//!   reads·TCP·process exit codes).
 //!
-//! ★claude 불요·결정적★: 스텁은 std 만 쓰고 고정 응답을 내므로 claude/데몬 없이 항상 같은 결과다.
-//! ★help 도 스텁 앞에서 잰다★: 화면은 데몬이 내므로(`/control/help`) 여기서 재는 것은 CLI 몫 — 요청 줄 ·
-//!   바디 글자 · 받은 화면을 그대로 찍기 · 실패 길 — 이고, 화면 내용은 데몬 시험(`control::help` ·
-//!   `tests/mail_gate.rs`)이 잰다.
+//! ★No claude needed·deterministic★: the stubs use only std and give fixed responses, with no claude/daemon.
+//! ★help is measured in front of a stub too★: the screen is the daemon's (`/control/help`), so what is measured here is the CLI's part —
+//!   request line · body characters · printing the received screen as is · failure paths;
+//!   screen content is measured by the daemon tests (`control::help` · `tests/mail_gate.rs`).
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -29,14 +29,15 @@ fn spawn_capturing_stub(response: &'static str) -> (String, u16, thread::JoinHan
     let handle = thread::spawn(move || {
         let mut seen = String::new();
         if let Ok((mut stream, _)) = listener.accept() {
-            // 요청을 조금 읽어 소켓을 소비(전부 안 읽어도 응답은 보낼 수 있다). non-blocking 회피 위해 짧게.
+            // Reads a little of the request to consume the socket (a response can be sent without reading it all). Kept short to avoid
+            //   non-blocking.
             let mut buf = [0u8; 4096];
             if let Ok(n) = stream.read(&mut buf) {
                 seen = String::from_utf8_lossy(&buf[..n]).to_string();
             }
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
-            // Connection: close 응답이면 여기서 stream drop → 클라이언트가 EOF 를 본다.
+            // With a Connection: close response, the stream drops here → the client sees EOF.
         }
         seen
     });
@@ -52,10 +53,10 @@ fn ok_response(body: &str) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
-/// 요청 **여러 번**에 순서대로 답하는 스텁 — 발견 표면의 호출 경로가 두 왕복(목록 → 호출)이라 필요하다.
+/// A stub that answers **several** requests in order — the discovery call path is two round trips (list → call).
 ///
-/// ★한 연결짜리 스텁으로는 그 경로를 못 잰다★: CLI 는 `Connection: close` 로 매번 새 소켓을 연다. 형제
-///   스텁(`spawn_capturing_stub`)을 그대로 쓰면 두 번째 왕복이 연결 실패로 끝나 테스트가 늘 exit 1 을 본다.
+/// ★A one-connection stub cannot measure that path★: the CLI opens a new socket per request (`Connection: close`), so the sibling
+///   `spawn_capturing_stub` would fail the second round trip and the test would always see exit 1.
 fn spawn_scripted_stub(
     responses: Vec<&'static str>,
 ) -> (String, u16, thread::JoinHandle<Vec<String>>) {
@@ -63,8 +64,8 @@ fn spawn_scripted_stub(
     listener.set_nonblocking(true).expect("nonblocking stub");
     let addr = listener.local_addr().expect("addr");
     let handle = thread::spawn(move || {
-        // ★기한을 두는 이유★: CLI 가 대본보다 **적게** 부르는 것이 정상인 케이스가 있다(로컬 반려는 두
-        //   번째 왕복을 안 한다). blocking accept 로 두면 그 테스트가 join 에서 영원히 멈춘다.
+        // ★Why there is a deadline★: the CLI may legitimately call **fewer** times than the script (a local bounce skips the second round
+        //   trip); a blocking accept would hang that test at join.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut seen = Vec::new();
         for response in responses {
@@ -91,11 +92,10 @@ fn spawn_scripted_stub(
     (addr.ip().to_string(), addr.port(), handle)
 }
 
-/// 요청 하나를 **끝까지** 읽는다 — 헤더 경계까지, 그 다음 `Content-Length` 만큼.
+/// Reads one request **to the end** — up to the header boundary, then `Content-Length` worth.
 ///
-/// ★한 번의 `read` 로 끝내면 안 된다★: TCP 는 헤더와 본문을 다른 세그먼트로 줄 수 있고, 그러면 바디를 보는
-///   단언이 **실패가 아니라 패닉**으로 끝난다(있어야 할 것이 아예 안 들어온다). 스텁이 그 갈림을 없애야
-///   테스트가 재현 가능해진다.
+/// ★Must not finish with a single `read`★: TCP can split header and body into different segments, and a body assertion would **panic, not
+///   fail**; the stub must remove that split for reproducibility.
 fn read_request(stream: &mut std::net::TcpStream) -> String {
     let mut raw: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -162,7 +162,7 @@ fn run_cli(control_url: &str, args: &[&str], stdin: Option<&str>) -> (String, i3
     if let Some(text) = stdin {
         let mut sink = child.stdin.take().expect("stdin piped");
         sink.write_all(text.as_bytes()).expect("write stdin");
-        // drop → EOF: `--body-stdin` 의 read_to_end 가 여기서 끝난다.
+        // drop → EOF: the read_to_end of `--body-stdin` ends here.
     }
     let out = child.wait_with_output().expect("wait engram CLI");
     (
@@ -199,18 +199,18 @@ fn engram_mail_send_delivered_prints_ack_and_exits_zero() {
     let (stdout, code) = run_send(&url, "bob", "hi");
     let _ = handle.join();
 
-    assert_eq!(code, 0, "성공 shape(results) → exit 0. stdout={stdout}");
+    assert_eq!(code, 0, "success shape (results) → exit 0. stdout={stdout}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "stdout 에 ACK JSON: {stdout}"
+        "ACK JSON on stdout: {stdout}"
     );
     assert_eq!(v["results"][0]["to"], "bob");
 }
 
 #[test]
 fn engram_mail_send_corrective_error_prints_body_and_exits_one() {
-    // chunk 크기는 16진 — "{\"status\":\"error\"," (0x12=18) + "\"code\":\"X\"}" (0xb=11) + 0.
+    // chunk sizes are hex — "{\"status\":\"error\"," (0x12=18) + "\"code\":\"X\"}" (0xb=11) + 0.
     let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
                     12\r\n{\"status\":\"error\",\r\n\
                     b\r\n\"code\":\"X\"}\r\n\
@@ -221,11 +221,11 @@ fn engram_mail_send_corrective_error_prints_body_and_exits_one() {
     let (stdout, code) = run_send(&url, "ghost", "hi");
     let _ = handle.join();
 
-    assert_eq!(code, 1, "교정 에러 → exit 1. stdout={stdout}");
+    assert_eq!(code, 1, "correctable error → exit 1. stdout={stdout}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(
         v["status"], "error",
-        "stdout 에 에러 JSON(de-chunked): {stdout}"
+        "error JSON on stdout (de-chunked): {stdout}"
     );
     assert_eq!(v["code"], "X");
 }
@@ -239,28 +239,30 @@ fn engram_mail_send_non_2xx_exits_one() {
     let (_stdout, code) = run_send(&url, "bob", "hi");
     let _ = handle.join();
 
-    assert_eq!(code, 1, "비-2xx → exit 1");
+    assert_eq!(code, 1, "non-2xx → exit 1");
 }
 
 #[test]
 fn engram_mail_send_transport_error_exits_one_with_error_json() {
-    // ★결정적 연결 실패(TOCTOU 없음)★: 포트 0 은 OS 가 예약한 포트로 어떤 프로세스도 리스닝할 수 없다.
-    //   bind→drop 방식은 drop 과 connect 사이에 다른 프로세스가 그 포트를 재사용하는 TOCTOU 가 있지만,
-    //   http://127.0.0.1:0 을 직접 목표로 하면 connect 가 즉시 실패하고 리스너 경합이 아예 없다.
+    // ★Deterministic connection failure (no TOCTOU)★: port 0 is OS-reserved, so nothing can listen on it; bind→drop would let another
+    //   process reuse the port before connect.
     let url = "http://127.0.0.1:0";
     let (stdout, code) = run_send(url, "bob", "hi");
 
-    assert_eq!(code, 1, "전송 실패 → exit 1. stdout={stdout}");
+    assert_eq!(code, 1, "transport failure → exit 1. stdout={stdout}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
-    assert_eq!(v["status"], "error", "전송 실패는 에러 JSON: {stdout}");
+    assert_eq!(
+        v["status"], "error",
+        "a transport failure is error JSON: {stdout}"
+    );
     let code_str = v["code"].as_str().unwrap_or("");
     assert!(
         matches!(code_str, "CONNECT_FAILED" | "INCOMPLETE_RESPONSE"),
-        "전송-계층 에러 코드 집합 중 하나여야(레이스 견고): got {code_str:?} — {stdout}"
+        "must be one of the transport-layer error code set (race-robust): got {code_str:?} — {stdout}"
     );
 }
 
-// ── D: 우편 동사 미러 — 라우트 선택·stdin 본문을 **프로세스 레벨**로 실측 ────────────────
+// ── D: mail verb mirror — measures route selection·stdin body at the **process level** ────────────────
 
 #[test]
 fn engram_mail_pending_posts_to_the_messages_route_and_exits_zero() {
@@ -271,16 +273,16 @@ fn engram_mail_pending_posts_to_the_messages_route_and_exits_zero() {
     let (stdout, code) = run_cli(&url, &["mail", "pending"], None);
     let request = stub.join().expect("stub join");
 
-    assert_eq!(code, 0, "조회 성공 → exit 0. stdout={stdout}");
+    assert_eq!(code, 0, "query success → exit 0. stdout={stdout}");
     assert!(
         request.starts_with("POST /control/messages HTTP/1.1"),
-        "pending 은 messages 라우트로: {request}"
+        "pending goes to the messages route: {request}"
     );
     assert!(
         request.contains("Authorization: Bearer test-token"),
-        "신원은 토큰으로만(요청 바디엔 신원 없음): {request}"
+        "identity only through the token (no identity in the request body): {request}"
     );
-    assert!(request.ends_with("{}"), "무인자 조회 바디: {request}");
+    assert!(request.ends_with("{}"), "no-argument query body: {request}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(v["me"], "alice");
 }
@@ -311,19 +313,19 @@ fn engram_mail_query_verbs_hit_their_routes_and_group_is_gone() {
         "{request}"
     );
 
-    // 회귀 가드(ADR-0111 결정 4 · ADR-0112 결정 1) — group 동사가 부활하면 프라이밍이 없는 명령을 가르친다.
-    // ★네트워크를 타지 않는다★: 인자 파싱 단계에서 끝나므로 스텁 서버가 필요 없다.
+    // Regression guard (ADR-0111 decision 4 · ADR-0112 decision 1) — if the group verb revives, it teaches a command that has no priming.
+    // ★Does not touch the network★: it ends at the argument parsing stage, so no stub server is needed.
     let (stdout, code) = run_cli("http://127.0.0.1:1", &["mail", "group", "list"], None);
-    assert_eq!(code, 1, "모르는 서브커맨드는 BAD_ARGS: {stdout}");
+    assert_eq!(code, 1, "an unknown subcommand is BAD_ARGS: {stdout}");
     assert!(
         stdout.contains("BAD_ARGS"),
-        "인자 오류로 끝나야(라우트 조회 없음): {stdout}"
+        "must end as an argument error (no route query): {stdout}"
     );
 }
 
 #[test]
 fn engram_mail_send_body_stdin_sends_the_piped_text_verbatim() {
-    // ★인용 지옥 회피의 요점★: 셸이 건드리기 쉬운 문자(따옴표·`$`·`&`·개행)가 **그대로** 본문에 실려야 한다.
+    // ★The point of avoiding quoting hell★: characters the shell easily touches (quotes·`$`·`&`·newline) must be carried in the body **as is**.
     let response = ok_response(r#"{"id":"m1","results":[{"to":"bob","status":"delivered"}]}"#);
     let (host, port, stub) = spawn_capturing_stub(response);
     let url = format!("http://{host}:{port}");
@@ -336,16 +338,16 @@ fn engram_mail_send_body_stdin_sends_the_piped_text_verbatim() {
     );
     let request = stub.join().expect("stub join");
 
-    assert_eq!(code, 0, "발송 성공 → exit 0. stdout={stdout}");
+    assert_eq!(code, 0, "send success → exit 0. stdout={stdout}");
     assert!(
         request.starts_with("POST /control/send HTTP/1.1"),
         "{request}"
     );
-    let body_start = request.find("\r\n\r\n").expect("본문 경계") + 4;
+    let body_start = request.find("\r\n\r\n").expect("body boundary") + 4;
     let v: serde_json::Value =
-        serde_json::from_str(request[body_start..].trim()).expect("요청 바디 json");
+        serde_json::from_str(request[body_start..].trim()).expect("request body json");
     assert_eq!(v["to"], "bob");
-    assert_eq!(v["body"], piped, "stdin 본문이 바이트 그대로: {request}");
+    assert_eq!(v["body"], piped, "the stdin body byte for byte: {request}");
 }
 
 #[test]
@@ -353,7 +355,7 @@ fn engram_mail_send_body_stdin_lossily_replaces_invalid_utf8_instead_of_refusing
     let response = ok_response(r#"{"id":"m1","results":[{"to":"bob","status":"delivered"}]}"#);
     let (host, port, stub) = spawn_capturing_stub(response);
     let url = format!("http://{host}:{port}");
-    // 0xB0 0xA1 = cp949 '가' — UTF-8 로는 무효 바이트열이다.
+    // 0xB0 0xA1 = cp949 encoding of U+AC00 — an invalid byte sequence in UTF-8.
     let piped: &[u8] = b"before \xB0\xA1 after";
 
     let (stdout, code) = run_cli_bytes(
@@ -363,27 +365,27 @@ fn engram_mail_send_body_stdin_lossily_replaces_invalid_utf8_instead_of_refusing
     );
     let request = stub.join().expect("stub join");
 
-    assert_eq!(code, 0, "비-UTF8 이어도 발송된다. stdout={stdout}");
-    let body_start = request.find("\r\n\r\n").expect("본문 경계") + 4;
+    assert_eq!(code, 0, "sent even if non-UTF8. stdout={stdout}");
+    let body_start = request.find("\r\n\r\n").expect("body boundary") + 4;
     let v: serde_json::Value =
-        serde_json::from_str(request[body_start..].trim()).expect("요청 바디 json");
-    let body = v["body"].as_str().expect("body 문자열");
+        serde_json::from_str(request[body_start..].trim()).expect("request body json");
+    let body = v["body"].as_str().expect("body string");
     assert!(
         body.starts_with("before ") && body.ends_with(" after"),
-        "유효한 부분은 그대로 살아야: {body:?}"
+        "the valid part must survive as is: {body:?}"
     );
     assert!(
         body.contains('\u{FFFD}'),
-        "무효 바이트는 U+FFFD 로 치환돼야(거부가 아니라 열화): {body:?}"
+        "invalid bytes must be replaced with U+FFFD (degradation, not refusal): {body:?}"
     );
 }
 
-// ── ADR-0132 조각 ②: 제어 계열(`agent`) — 라우트 선택·바디·exit code 를 프로세스 레벨로 실측 ──────
+// ── ADR-0132 piece ②: control family (`agent`) — measures route selection·body·exit code at the process level ──────
 
-/// 스텁이 받은 요청에서 JSON 바디만 꺼낸다.
+/// Extracts only the JSON body from the request the stub received.
 fn request_body(request: &str) -> serde_json::Value {
-    let start = request.find("\r\n\r\n").expect("본문 경계") + 4;
-    serde_json::from_str(request[start..].trim()).expect("요청 바디 json")
+    let start = request.find("\r\n\r\n").expect("body boundary") + 4;
+    serde_json::from_str(request[start..].trim()).expect("request body json")
 }
 
 #[test]
@@ -421,17 +423,17 @@ fn engram_agent_verbs_post_to_the_control_agent_route_with_the_verb_in_the_body(
         let (stdout, code) = run_cli(&url, args, None);
         let request = stub.join().expect("stub join");
 
-        assert_eq!(code, 0, "성공 응답 → exit 0({args:?}): {stdout}");
+        assert_eq!(code, 0, "success response → exit 0 ({args:?}): {stdout}");
         assert!(
             request.starts_with("POST /control/agent HTTP/1.1"),
-            "제어 계열은 한 라우트로({args:?}): {request}"
+            "the control family goes to one route ({args:?}): {request}"
         );
         assert!(
             request.contains("Authorization: Bearer test-token"),
-            "토큰을 실어야({args:?}): {request}"
+            "must carry the token ({args:?}): {request}"
         );
         assert_eq!(request_body(&request), want_body, "{args:?}");
-        // stdout 은 데몬 응답 그대로 — CLI 가 산문으로 다시 쓰지 않는다.
+        // stdout is the daemon response as is — the CLI does not rewrite it in prose.
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(stdout.trim()).expect("stdout json"),
             serde_json::from_str::<serde_json::Value>(response).expect("response json"),
@@ -448,7 +450,7 @@ fn engram_agent_rejections_from_the_daemon_exit_one_with_the_body_intact() {
     let (stdout, code) = run_cli(&url, &["agent", "spawn", "ghost"], None);
     let _ = stub.join().expect("stub join");
 
-    assert_eq!(code, 1, "반려 → exit 1: {stdout}");
+    assert_eq!(code, 1, "bounce → exit 1: {stdout}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(v["code"], "AGENT_NOT_FOUND", "{stdout}");
 }
@@ -496,7 +498,7 @@ fn engram_agent_spawn_prints_launch_blocks_and_notices_as_received() {
         ),
         (
             &["agent", "spawn", "worker"],
-            r#"{"agent_id":"i","name":"worker","state":"live","created":false,"notices":[{"code":"omitted","args":{"names":["a.md"]},"line":null,"text":"알림(omitted): 의도된 동작입니다. 대상 — a.md"}]}"#,
+            r#"{"agent_id":"i","name":"worker","state":"live","created":false,"notices":[{"code":"omitted","args":{"names":["a.md"]},"line":null,"text":"Notice (omitted): intended behavior. Target — a.md"}]}"#,
             0,
         ),
     ];
@@ -512,22 +514,21 @@ fn engram_agent_spawn_prints_launch_blocks_and_notices_as_received() {
     }
 }
 
-/// ★변경의 증거가 없는 2xx 는 성공이 아니다★: 우편 조회 판정기를 그대로 썼을 땐 `{}` 도 exit 0 이라,
-///   아무것도 만들지 않은 응답을 받고도 호출자가 만들어졌다고 믿었다. 재시도 대상(1)이 아니라 보고
-///   대상(2)이라는 것까지 프로세스 레벨로 못박는다.
+/// ★A 2xx without evidence of the change is not success★: with the mail query decider even `{}` was exit 0 and the caller believed
+///   something was created. Pins at the process level that it is a report target (2), not a retry target (1).
 #[test]
 fn engram_agent_hollow_success_bodies_exit_two_not_zero() {
     for (args, body) in [
         (vec!["agent", "new", "--cwd", "C:/x"], r#"{}"#),
         (vec!["agent", "new", "--cwd", "C:/x"], r#"{"status":"ok"}"#),
         (vec!["agent", "list"], r#"{"agents":"not-an-array"}"#),
-        // 신원은 다 실렸는데 결말(`outcome`)이 없다 — 개명이 일어났는지 그대로였는지를 답하지 않은 body 다.
+        // The identity is all carried but there is no outcome (`outcome`) — a body that does not answer whether the rename happened or not.
         (
             vec!["agent", "rename", "a", "b"],
             r#"{"agent_id":"i","name":"b"}"#,
         ),
-        // 중첩(`{agent:{…}}`)은 어떤 데몬도 내지 않는 shape 이다 — 이 줄이 **프로세스 레벨**에서 그 갈래의
-        //   부활을 막는다. 단위 표에만 두면 실제 exe 를 돌리는 이 스위트는 부활해도 전부 초록으로 남는다.
+        // Nesting (`{agent:{…}}`) is a shape no daemon emits — blocks the revival of that branch **at the process level** (a unit table
+        //   alone would let this suite, which runs the real exe, stay green).
         (
             vec!["agent", "spawn", "w"],
             r#"{"agent":{"id":"i","name":"w","state":"live"},"created":false}"#,
@@ -537,13 +538,16 @@ fn engram_agent_hollow_success_bodies_exit_two_not_zero() {
         let url = format!("http://{host}:{port}");
         let (stdout, code) = run_cli(&url, &args, None);
         let _ = stub.join().expect("stub join");
-        assert_eq!(code, 2, "증거 없는 2xx → exit 2({args:?}): {stdout}");
+        assert_eq!(
+            code, 2,
+            "2xx without evidence → exit 2 ({args:?}): {stdout}"
+        );
     }
 }
 
-/// ★성공 shape(`{agent_id,name,state,…}`)이 프로세스 레벨에서 exit 0★ — 여기서 새면 정상 데몬 앞에서
-///   `engram agent spawn` 이 exit 2 를 낸다.
-///   ★대조는 그대로★: 마지막 케이스가 그 축을 같이 못박는다(필드만 다 있고 요청과 어긋난 응답).
+/// ★The success shape (`{agent_id,name,state,…}`) is exit 0 at the process level★ — if it leaked here, `engram agent spawn` would
+///   give exit 2 in front of a normal daemon.
+///   ★The contrast stays★: the last case pins that axis too (a response with all fields but mismatched with the request).
 #[test]
 fn engram_agent_accepts_the_success_shape_with_the_same_cross_checks() {
     let cases: [(&[&str], &str, i32); 5] = [
@@ -584,12 +588,12 @@ fn engram_agent_accepts_the_success_shape_with_the_same_cross_checks() {
 
 #[test]
 fn engram_agent_argument_errors_never_touch_the_network() {
-    // 목적지가 포트 0 이므로 하나라도 POST 를 시도하면 CONNECT_FAILED 가 나와 단언이 깨진다.
+    // The destination is port 0, so if even one POST is attempted, CONNECT_FAILED comes out and the assertion breaks.
     for args in [
         vec!["agent"],
         vec!["agent", "wat"],
         vec!["agent", "list", "--json"],
-        // 만들기와 깨우기를 동시에 요구한 호출 — 어느 뜻인지 고를 근거가 없다.
+        // A call that asks for create and wake at once — there is no basis to pick which is meant.
         vec!["agent", "spawn", "qa-bravo", "--cwd", "C:/work"],
         vec!["agent", "spawn"],
         vec!["agent", "new"],
@@ -598,19 +602,19 @@ fn engram_agent_argument_errors_never_touch_the_network() {
         vec!["agent", "new", "--cwd", "a", "--cwd", "b"],
         vec!["agent", "new", "--cwd", "--name"],
         vec!["agent", "spawn", "--help"],
-        // 셸의 미설정 변수가 빈 인자로 펼쳐지는 형태 — "안 준 것" 으로 접으면 다른 명령이 실행된다.
+        // The shape where an unset shell variable expands to an empty argument — folding it into "not given" would run a different command.
         vec!["agent", "move", "helper", "--parent", ""],
         vec!["agent", "new", "--cwd", ""],
     ] {
         let (stdout, code) = run_cli(UNREACHABLE_URL, &args, None);
-        assert_eq!(code, 1, "인자 오류 → exit 1({args:?}): {stdout}");
+        assert_eq!(code, 1, "argument error → exit 1 ({args:?}): {stdout}");
         let v: serde_json::Value =
             serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("stdout json: {e}"));
         assert_eq!(v["code"], "BAD_ARGS", "{args:?} → BAD_ARGS: {stdout}");
         let suggestions = backticked_help_commands(v["hint"].as_str().unwrap_or_default());
         assert!(
             !suggestions.is_empty(),
-            "hint 에 실행 가능한 help 명령이 하나도 없다({args:?}): {stdout}"
+            "the hint has no runnable help command at all ({args:?}): {stdout}"
         );
         for suggested in suggestions {
             assert_suggested_help_runs(&suggested, &format!("{args:?}"));
@@ -626,32 +630,31 @@ fn engram_agent_help_is_discoverable_the_same_way_as_the_mail_group() {
         vec!["agent", "-h"],
     ] {
         let (out, code, requests) = run_help_against_stub(&args, "engram agent - stub screen");
-        assert_eq!(code, 0, "계열 help 는 성공 종료({args:?}): {out}");
+        assert_eq!(code, 0, "family help exits successfully ({args:?}): {out}");
         assert_eq!(
             out, "engram agent - stub screen\n",
-            "받은 화면을 그대로 찍는다({args:?})"
+            "prints the received screen as is ({args:?})"
         );
         assert_help_request(&requests, r#"{"topic":"agent"}"#);
     }
 }
 
-// ── ADR-0132: 계열 표면 — help 와 인자 오류 ──────────────────────────────────────────────────
+// ── ADR-0132: family surface — help and argument errors ──────────────────────────────────────────────────
 
-/// ★목적지 = 아무도 리스닝할 수 없는 포트 0★: 인자 오류 케이스가 네트워크 전에 끝난다는 주장을 URL 로
-///   못박는다. 하나라도 POST 를 시도하면 연결 실패 JSON(CONNECT_FAILED)이 나와 단언이 깨진다. 데몬에 못 닿는
-///   실패를 일부러 낼 때도 같은 목적지를 쓴다.
+/// ★Destination = port 0, where nobody can listen★: argument-error cases must end before the network — one POST would produce
+///   CONNECT_FAILED and break the assertion. Also used to deliberately produce a failure to reach the daemon.
 const UNREACHABLE_URL: &str = "http://127.0.0.1:0";
 
-/// help 라우트의 요청 줄 — ★글자로 적는다★: 공유 상수(`CLI_HELP_ROUTE`)로 적으면 그 상수가 바뀌어도 이
-///   단언은 따라 움직여 아무것도 못 잡는다.
+/// The request line of the help route — ★written as characters★: with the shared constant (`CLI_HELP_ROUTE`) the assertion would move
+///   along with a changed constant and catch nothing.
 const HELP_REQUEST_LINE: &str = "POST /control/help HTTP/1.1\r\n";
 
-/// help 라우트 성공 봉투 — 데몬이 렌더한 화면 하나를 싣는다.
+/// The help route success envelope — carries one screen the daemon rendered.
 fn screen_response(screen: &str) -> &'static str {
     ok_response(&serde_json::json!({ "screen": screen }).to_string())
 }
 
-/// help 호출 하나를 화면 스텁 앞에서 돌린다 — (stdout, exit code, 스텁이 받은 요청들).
+/// Runs one help call in front of a screen stub — (stdout, exit code, the requests the stub received).
 fn run_help_against_stub(args: &[&str], screen: &str) -> (String, i32, Vec<String>) {
     let (host, port, stub) = spawn_scripted_stub(vec![screen_response(screen)]);
     let (stdout, code) = run_cli(&format!("http://{host}:{port}"), args, None);
@@ -659,96 +662,97 @@ fn run_help_against_stub(args: &[&str], screen: &str) -> (String, i32, Vec<Strin
     (stdout, code, requests)
 }
 
-/// 요청이 정확히 하나이고, help 라우트로 그 바디를 **글자 그대로** 실었나.
+/// Was there exactly one request, and did it carry that body to the help route **character for character**.
 fn assert_help_request(requests: &[String], body: &str) {
-    assert_eq!(requests.len(), 1, "help 는 왕복 하나: {requests:?}");
+    assert_eq!(requests.len(), 1, "help is one round trip: {requests:?}");
     let request = &requests[0];
     assert!(
         request.starts_with(HELP_REQUEST_LINE),
-        "help 라우트로 가야: {request}"
+        "must go to the help route: {request}"
     );
     assert_eq!(
         request.split_once("\r\n\r\n").map(|(_, b)| b),
         Some(body),
-        "요청 바디는 글자 그대로: {request}"
+        "the request body character for character: {request}"
     );
 }
 
-/// ★hint 가 제안한 help 명령이 실제로 도는지★: 형태가 맞아 help 요청 하나로 나가고(화면은 스텁이 낸다)
-///   exit 0 이어야 한다 — 시키는 대로 한 호출자가 같은 벽에 다시 부딪히면 안 된다. 그 낱말이 실제 화면인지는
-///   데몬 몫이다(`control::help`).
+/// ★Does the help command the hint suggested actually run★: with the right shape it goes out as one help request (the stub produces the screen)
+///   and must be exit 0 — a caller that did as told must not hit the same wall again. Whether that word is a real screen is
+///   the daemon's job (`control::help`).
 fn assert_suggested_help_runs(suggested: &str, context: &str) {
     let argv: Vec<&str> = suggested.split_whitespace().skip(1).collect();
     let (out, code, requests) = run_help_against_stub(&argv, "stub screen");
     assert_eq!(
         code, 0,
-        "hint 가 제안한 명령이 실제로 돌아야({context}): `{suggested}` → {out}"
+        "the command the hint suggested must actually run ({context}): `{suggested}` → {out}"
     );
     assert_eq!(
         requests.len(),
         1,
-        "`{suggested}` 는 help 요청 하나: {requests:?}"
+        "`{suggested}` is one help request: {requests:?}"
     );
     assert!(
         requests[0].starts_with(HELP_REQUEST_LINE),
-        "`{suggested}` 는 help 라우트로 가야: {}",
+        "`{suggested}` must go to the help route: {}",
         requests[0]
     );
 }
 
-/// ★배송되는 파일 이름 ↔ 상수(`CLI_EXE_NAME`) 대조★ — 이 방향은 다른 어떤 테스트도 못 본다: 프라이밍
-///   pin 은 프라이밍을 **상수와** 대조하고(둘이 함께 움직이면 통과), 아래 프로세스 테스트들은 바이너리를
-///   **매니페스트를 통해** 찾는다(매니페스트가 정의한 이름으로 찾으니 언제나 통과). 그래서 상수·프라이밍만
-///   개명하고 `[[bin]]` 을 놓친 조합은 여기서만 빨개진다. 그 조합의 런타임 증상은 배포된 실행파일이 에이전트가
-///   배운 이름과 달라 우편이 조용히 멈추는 것이다(ADR-0094 정렬 불변식).
-/// ★경로 출처(실측 2026-08-11)★: `CARGO_BIN_EXE_<name>` 의 `<name>` 은 **매니페스트의 `[[bin]] name`** 이다.
-///   레포 사본에서 `name` 만 `engram2` 로 바꿔(`path` 는 `src/bin/engram.rs` 그대로) 빌드하니
-///   `error: environment variable CARGO_BIN_EXE_engram not defined at compile time` 로 **컴파일이 멈췄고**,
-///   `cargo metadata` 의 bin 타깃도 `engram2` 하나뿐이었다 — 명시 타깃이 그 경로를 이미 점유하므로
-///   `src/bin/*.rs` 자동 발견이 같은 파일로 `engram` 타깃을 되살리지 않는다. 즉 매니페스트만 개명한 경우는
-///   컴파일이, 상수만 개명한 경우는 아래 단언이 잡는다.
+/// ★Shipped file name ↔ constant (`CLI_EXE_NAME`) match★ — no other test sees this direction: the priming pin compares priming **with the
+///   constant** (passes if both move together), and the process tests find the binary **through the manifest**
+///   (always pass). So only here does a rename of the constant·priming that misses `[[bin]]` turn red; at runtime the deployed executable
+///   would differ from the name the agent learned and mail would stop silently (ADR-0094 alignment invariant).
+/// ★Path source★: the `<name>` of `CARGO_BIN_EXE_<name>` is **the manifest's `[[bin]] name`** — renaming only `name` stops **compilation**
+///   (`CARGO_BIN_EXE_engram not defined`; the explicit target occupies the path, so auto-discovery does not revive an `engram` target).
+///   So a manifest-only rename is caught by compilation, a constant-only rename by the assertion below.
 #[test]
 fn the_built_binary_file_name_matches_the_shared_constant() {
     let exe = std::path::Path::new(env!("CARGO_BIN_EXE_engram"));
-    let stem = exe
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_else(|| panic!("빌드 산출 경로에서 파일 stem 을 못 읽음: {exe:?}"));
+    let stem = exe.file_stem().and_then(|s| s.to_str()).unwrap_or_else(|| {
+        panic!("could not read the file stem from the build output path: {exe:?}")
+    });
     assert_eq!(
         stem, CLI_EXE_NAME,
-        "배송되는 실행파일 이름과 CLI_EXE_NAME 이 갈렸다 — grant·프라이밍·PATH 해석이 전부 상수를 따르므로 \
-         에이전트가 배운 명령이 존재하지 않게 된다: {exe:?}"
+        "the shipped executable name and CLI_EXE_NAME diverged — grant·priming·PATH resolution all follow the constant, so \
+          the command the agent learned would not exist: {exe:?}"
     );
 }
 
-/// ★help 는 낱말 하나를 데몬에 싣고 받은 화면을 그대로 찍는다★ — 화면 내용(계열 목록 · 계열 화면)은 데몬이
-///   렌더하고 데몬 시험이 잰다. 여기서 재는 것은 CLI 몫: 요청 줄 · 바디 글자 · 화면을 다듬지 않고 줄바꿈 하나만
-///   붙여 찍기 · 형태 오류는 왕복 없이 끊기.
+/// ★help carries one word to the daemon and prints the received screen as is★ — screen content is the daemon's and measured by its tests;
+///   here: request line · body characters · screen printed untouched with one newline appended · shape errors cut without a round trip.
 #[test]
 fn engram_help_carries_one_word_and_prints_the_screen_it_gets() {
-    // 인자 0 = help = 목차(에이전트가 이름만 쳐도 표면을 본다).
+    // 0 arguments = help = table of contents (an agent sees the surface just by typing the name).
     let root = "engram - stub root\n\n  engram help mail      x\n";
     for args in [vec!["help"], vec![]] {
         let (stdout, code, requests) = run_help_against_stub(&args, root);
-        assert_eq!(code, 0, "help 는 성공 종료({args:?}): {stdout}");
+        assert_eq!(code, 0, "help exits successfully ({args:?}): {stdout}");
         assert_eq!(
             stdout,
             format!("{root}\n"),
-            "받은 화면 + 줄바꿈 하나({args:?})"
+            "the received screen + one newline ({args:?})"
         );
         assert_help_request(&requests, r#"{"topic":null}"#);
     }
 
     for group in ["mail", "agent", "window", "settings"] {
         let (screen, code, requests) = run_help_against_stub(&["help", group], "stub screen");
-        assert_eq!(code, 0, "계열 help 는 성공 종료({group}): {screen}");
+        assert_eq!(
+            code, 0,
+            "family help exits successfully ({group}): {screen}"
+        );
         assert_eq!(screen, "stub screen\n", "{group}");
         assert_help_request(&requests, &format!(r#"{{"topic":"{group}"}}"#));
     }
 
-    // 계열 밑으로 한 칸 더 들어가는 자리는 없다 — 왕복 없이 인자 오류로 끊고 목록을 보는 길로 안내한다.
+    // There is no spot one level further below a family — it is cut as an argument error without a round trip and guided to the way to see
+    //   the list.
     let (deeper, code) = run_cli(UNREACHABLE_URL, &["help", "mail", "send"], None);
-    assert_eq!(code, 1, "계열 다음 칸은 인자 오류: {deeper}");
+    assert_eq!(
+        code, 1,
+        "the spot after the family is an argument error: {deeper}"
+    );
     let v: serde_json::Value =
         serde_json::from_str(deeper.trim()).unwrap_or_else(|e| panic!("stdout json: {e}"));
     assert_eq!(v["code"], "BAD_ARGS", "{deeper}");
@@ -757,11 +761,11 @@ fn engram_help_carries_one_word_and_prints_the_screen_it_gets() {
             .as_str()
             .unwrap_or_default()
             .contains(&format!("`{CLI_EXE_NAME} help`")),
-        "반려가 목록을 보는 길로 안내해야: {deeper}"
+        "the bounce must guide to the way to see the list: {deeper}"
     );
 }
 
-/// ENGRAM_TOKEN·ENGRAM_CONTROL_URL 을 **주지 않고** 돌린다 — 상속된 값까지 지워 "스폰 밖" 을 재현한다.
+/// Runs **without** ENGRAM_TOKEN·ENGRAM_CONTROL_URL — erasing even inherited values to reproduce "outside a spawn".
 fn run_cli_without_credentials(args: &[&str]) -> (String, i32) {
     let out = Command::new(env!("CARGO_BIN_EXE_engram"))
         .args(args)
@@ -775,22 +779,22 @@ fn run_cli_without_credentials(args: &[&str]) -> (String, i32) {
     )
 }
 
-/// ★help 는 다른 명령과 같은 길로 실패한다(ADR-0285)★ — 자격증명이 없으면 `mail pending` 과, 데몬에 못 닿으면
-///   `agent list` 와 **바이트까지 같은** 봉투 · exit 1 이다. help 만 다른 길(폴백 · 사본 · 다른 코드 · 다른
-///   채널)로 가면 같은 상태가 명령마다 다르게 보인다.
-/// ★대조군을 같은 실행에서 뜬다★: 기대 출력을 글자로 박으면 문구를 고칠 때마다 이 시험도 고쳐야 하고, 그러다
-///   help 쪽만 다른 문구가 되어도 못 잡는다.
+/// ★help fails the same way as other commands (ADR-0285)★ — without credentials it matches `mail pending`, and with the daemon unreachable
+///   it matches `agent list`, with the same envelope · exit 1 **down to the bytes**; a help-only path
+///   (fallback · copy · different code · channel) would make the same state look different per command.
+/// ★The control group is taken from the same run★: hard-coded expected output would need fixing on every wording change and would not
+///   catch help alone ending up with different wording.
 // ADR-0285
 #[test]
 fn help_fails_the_same_way_as_every_other_command_without_credentials_or_a_daemon() {
     let (no_token, code) = run_cli_without_credentials(&["mail", "pending"]);
-    assert_eq!(code, 1, "크레덴셜 없는 우편 동사는 실패: {no_token}");
+    assert_eq!(code, 1, "a mail verb without credentials fails: {no_token}");
     let v: serde_json::Value = serde_json::from_str(no_token.trim())
         .unwrap_or_else(|e| panic!("stdout json: {e} — {no_token}"));
     assert_eq!(v["code"], "NO_TOKEN", "{no_token}");
 
     let (unreached, code) = run_cli(UNREACHABLE_URL, &["agent", "list"], None);
-    assert_eq!(code, 1, "데몬 불통은 실패: {unreached}");
+    assert_eq!(code, 1, "an unreachable daemon is a failure: {unreached}");
     let v: serde_json::Value = serde_json::from_str(unreached.trim())
         .unwrap_or_else(|e| panic!("stdout json: {e} — {unreached}"));
     assert_eq!(v["code"], "CONNECT_FAILED", "{unreached}");
@@ -813,24 +817,24 @@ fn help_fails_the_same_way_as_every_other_command_without_credentials_or_a_daemo
         assert_eq!(
             (stdout.as_str(), code),
             (no_token.as_str(), 1),
-            "크레덴셜 없는 help 는 다른 명령과 같은 봉투({args:?})"
+            "help without credentials is the same envelope as other commands ({args:?})"
         );
         let (stdout, code) = run_cli(UNREACHABLE_URL, &args, None);
         assert_eq!(
             (stdout.as_str(), code),
             (unreached.as_str(), 1),
-            "데몬에 못 닿은 help 는 다른 명령과 같은 봉투({args:?})"
+            "help that could not reach the daemon is the same envelope as other commands ({args:?})"
         );
     }
 }
 
-/// `engram mail --help` = `engram help mail`(같은 요청). 두 철자가 다른 요청을 보내면 LLM 이 배운 대로 쳤을 때
-/// 화면이 달라진다.
+/// `engram mail --help` = `engram help mail` (the same request). If the two spellings sent different requests, the screen would differ
+/// when the LLM typed what it learned.
 #[test]
 fn conventional_help_spellings_render_the_same_screens() {
-    // ★`<계열> --help` 철자를 갖는 것은 파서가 계열로 받는 둘뿐이다★: `window`·`settings` 는 데몬 쪽
-    //   `<계열> <동사>` 입구가 없어 `engram help <낱말>` 로만 닿는다. 옛 낱말 `theme` 도 낱말 그대로 실린다
-    //   (settings 화면으로 푸는 것은 데몬이다).
+    // ★Only the two the parser accepts as families have the `<family> --help` spelling★: `window`·`settings` have no daemon-side `<family>
+    //   <verb>` entrance and are reached only through `engram help <word>`; the old word `theme` is carried as is (alias resolution is the
+    //   daemon's).
     for (spellings, body) in [
         (
             vec![vec!["help"], vec!["--help"], vec!["-h"], vec![]],
@@ -867,66 +871,69 @@ fn conventional_help_spellings_render_the_same_screens() {
         }
     }
 
-    // 모르는 낱말은 데몬이 반려한다 — 그 body 를 그대로 찍고 exit 1(최상위로 조용히 되돌아가면 오타가 성공으로
-    //   읽힌다).
+    // An unknown word is bounced by the daemon — that body is printed as is with exit 1 (silently going back to the top level would make a typo
+    //   read as success).
     let refusal =
         r#"{"status":"error","code":"INVALID_ARGUMENT","hint":"unknown help topic: inbox"}"#;
     let (host, port, stub) = spawn_scripted_stub(vec![ok_response(refusal)]);
     let (out, code) = run_cli(&format!("http://{host}:{port}"), &["help", "inbox"], None);
     let requests = stub.join().expect("stub join");
-    assert_eq!(code, 1, "모르는 계열은 실패: {out}");
-    assert_eq!(out, format!("{refusal}\n"), "데몬의 반려가 그대로 흘러야");
+    assert_eq!(code, 1, "an unknown family is a failure: {out}");
+    assert_eq!(
+        out,
+        format!("{refusal}\n"),
+        "the daemon's bounce must flow through as is"
+    );
     assert_help_request(&requests, r#"{"topic":"inbox"}"#);
 }
 
 #[test]
 fn engram_unknown_group_and_bare_flags_are_argument_errors_without_touching_the_network() {
-    // 옛 표기(계열 없는 플래그·동사)를 그대로 치면 발송으로 흐르지 않고 인자 오류로 끝난다.
+    // Typing the old notation (flags·verbs without a family) as is ends as an argument error instead of flowing into a send.
     for args in [
         vec!["wat"],
         vec!["--to", "bob", "--body", "hi"],
         vec!["pending"],
         vec!["status", "m-1"],
-        // help 토큰이 값 자리에 온 경우 — `status <id> --help` 는 예전에 `--help` 를 메시지 id 로
-        //   **조회**해 실제 왕복을 했다. 이 목록에 있다는 것 자체가 "네트워크를 안 탄다" 는 주장이다
-        //   (포트 0). 계열 **바로 다음 칸**은 반대로 화면이다 — 위 철자 테스트가 그쪽을 잰다.
+        // A help token in a value position — `status <id> --help` used to **query** `--help` as a message id
+        //   and make a real round trip. Being in this list is itself the claim "does not touch the network"
+        //   (port 0). The spot **right after** a family is, conversely, a screen — the spelling test above measures that side.
         vec!["mail", "status", "m-7f3k9q2d", "--help"],
         vec!["mail", "status", "m-7f3k9q2d", "-h"],
         vec!["help", "mail", "inbox"],
-        // help + 잔여 인자 — exit 0 으로 삼키면 편지가 성공 코드와 함께 사라진다.
+        // help + leftover arguments — swallowing them with exit 0 would make the letter vanish with a success code.
         vec!["mail", "--help", "--to", "bob", "--body", "hi"],
         vec!["--help", "mail", "--to", "bob"],
-        // help 뒤에 또 help 토큰 — 화면 낱말이 아니다(형태 규칙 — 왕복하지 않는다).
+        // Another help token after help — not a screen word (shape rule — no round trip).
         vec!["help", "--help"],
         vec!["--help", "help"],
-        // hint 가 자기 자신을 무효한 명령으로 되받던 자리.
+        // The spot where the hint used to suggest itself back as an invalid command.
         vec!["help", "--to", "bob"],
-        // 중복 값 플래그 — 조용한 유실 대신 반려.
+        // A duplicated value flag — bounced instead of a silent loss.
         vec![
             "mail", "send", "--to", "a", "--body", "first", "--body", "second",
         ],
-        // 값을 빠뜨린 값 플래그 — 예전엔 다음 플래그를 본문으로 삼켜 파이프 본문을 버렸다.
+        // A value flag missing its value — it used to swallow the next flag as the body and discard the piped body.
         vec!["mail", "send", "--to", "bob", "--body", "--body-stdin"],
         vec!["mail", "send", "--to", "--body", "hi"],
     ] {
         let (stdout, code) = run_cli(UNREACHABLE_URL, &args, None);
-        assert_eq!(code, 1, "인자 오류 → exit 1({args:?}): {stdout}");
+        assert_eq!(code, 1, "argument error → exit 1 ({args:?}): {stdout}");
         let v: serde_json::Value =
             serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("stdout json: {e}"));
         assert_eq!(v["code"], "BAD_ARGS", "{args:?} → BAD_ARGS: {stdout}");
         assert!(
             v["hint"].as_str().unwrap_or_default().contains("help"),
-            "hint 가 help 로 안내해야({args:?}): {stdout}"
+            "the hint must guide to help ({args:?}): {stdout}"
         );
-        // ★안내한 명령이 실제로 도는지까지 본다★: 예전엔 `engram help --to bob` 이 "run `engram help --to`"
-        //   를 제안했다 — 그 자체가 또 인자 오류라, 시키는 대로 한 호출자가 같은 벽에 다시 부딪힌다.
-        //   "hint 에 help 라는 낱말이 있다" 만 보면 그런 제안도 통과한다.
+        // ★Checks that the suggested command actually runs★: `engram help --to bob` used to suggest "run `engram help --to`", itself
+        //   another argument error, so a caller that did as told hit the same wall; looking only for the word help in the hint lets that pass.
         let suggestions = backticked_help_commands(v["hint"].as_str().unwrap_or_default());
-        // ★공집합이면 이 테스트는 아무것도 단언하지 않은 채 통과한다★ — 커버리지처럼 읽히는 빈 테스트를
-        //   만들지 않으려면 "적어도 하나는 뽑혔다" 를 먼저 못박아야 한다.
+        // ★If the set is empty, this test passes without asserting anything★ — to avoid making an empty test that reads as coverage,
+        //   "at least one was picked" must be pinned first.
         assert!(
             !suggestions.is_empty(),
-            "hint 에 실행 가능한 help 명령이 하나도 없다({args:?}): {stdout}"
+            "the hint has no runnable help command at all ({args:?}): {stdout}"
         );
         for suggested in suggestions {
             assert_suggested_help_runs(&suggested, &format!("{args:?}"));
@@ -934,7 +941,7 @@ fn engram_unknown_group_and_bare_flags_are_argument_errors_without_touching_the_
     }
 }
 
-/// hint 안의 백틱 구간 중 **help 호출**만 골라 낸다(예시 발송 명령은 자리표시자라 실행 대상이 아니다).
+/// Picks only the **help calls** among the backtick spans in the hint (example send commands are placeholders, not things to run).
 fn backticked_help_commands(hint: &str) -> Vec<String> {
     hint.split('`')
         .skip(1)
@@ -959,18 +966,18 @@ fn engram_mail_send_rejects_body_and_body_stdin_together_without_touching_the_ne
         ],
         None,
     );
-    assert_eq!(code, 1, "형태 오류 → exit 1. stdout={stdout}");
+    assert_eq!(code, 1, "shape error → exit 1. stdout={stdout}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(v["code"], "BAD_ARGS", "{stdout}");
     assert!(
         v["hint"].as_str().unwrap_or_default().contains("mutually"),
-        "사유가 상호배타임을 알려야: {stdout}"
+        "the reason must say it is mutual exclusion: {stdout}"
     );
 }
 
-// ── ADR-0155/0156: 발견(`commands`)과 전체 이름 호출 — 프로세스 레벨 ────────────────────────
+// ── ADR-0155/0156: discovery (`commands`) and full-name calls — process level ────────────────────────
 
-/// 데몬 자기 표가 내는 것과 **같은 모양**의 스키마 항목(`spec_item_json`) — 목록의 `help` 칸에 통째로 실린다.
+/// A schema item (`spec_item_json`) of **the same shape** as what the daemon's own table emits — carried whole in the list's `help` field.
 fn schema_blob(
     name: &str,
     summary: &str,
@@ -1003,7 +1010,7 @@ fn catalog_response(rows: Vec<serde_json::Value>) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
-/// `slot.assign` 픽스처의 인자 스키마 — 타입 갈래를 한 명령에 모아 둔다.
+/// The argument schema of the `slot.assign` fixture — gathers the type branches into one command.
 fn slot_args() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1011,8 +1018,8 @@ fn slot_args() -> serde_json::Value {
             "index": { "type": "integer" },
             "sticky": { "type": "boolean" },
             "name": { "type": "string" },
-            // ★`help` 라는 이름의 **불리언** 인자★: 이 칸이 있어야 "사용법을 물었더니 Write 가 돌았다" 는
-            //   갈래를 재현할 수 있다(리뷰 A). 픽스처에서 빼면 그 회귀가 다시 보이지 않는다.
+            // ★A **boolean** argument named `help`★: this field is needed to reproduce the branch "asked for usage and Write ran"
+            //   (review A). Taking it out of the fixture would hide that regression again.
             "help": { "type": "boolean" },
             "mode": { "anyOf": [{ "enum": ["wide", "tall"] }, { "type": "null" }] }
         },
@@ -1020,8 +1027,8 @@ fn slot_args() -> serde_json::Value {
     })
 }
 
-/// 목록 픽스처 — 한 응답에 갈래를 모은다: 우리가 아는 스키마 · **JSON 이 아닌** help · `callable:false` ·
-/// nullable 필수 칸 · 우편 이름(그 계열이 화면에 새는지 재는 재료).
+/// List fixture — gathers the branches into one response: a schema we know · a help that is **not JSON** · `callable:false` ·
+/// a nullable required field · a mail name (material to measure whether that family leaks onto the screen).
 fn sample_catalog() -> &'static str {
     catalog_response(vec![
         catalog_row(
@@ -1057,20 +1064,20 @@ fn sample_catalog() -> &'static str {
                 "slot.assign",
                 "put an agent in a slot",
                 slot_args(),
-                // ★반환 칸 이름이 명령 이름의 부분문자열이면 안 된다★: `slot` 은 `slot.assign` 안에 이미
-                //   있어서, 그 낱말로 단언하면 반환 구획이 통째로 사라져도 초록이다.
+                // ★The return field name must not be a substring of the command name★: `slot` is already inside `slot.assign`,
+                //   so asserting on that word stays green even if the whole return section vanishes.
                 serde_json::json!({ "type": "object", "properties": { "placed_at": { "type": "integer" } }, "required": ["placed_at"] }),
             ),
             true,
         ),
-        // 클라이언트가 등록한 자유 텍스트 — JSON 이 아니다. 이 한 줄이 목록 전체를 가라앉히면 안 된다.
+        // Free text registered by a client — not JSON. This one line must not sink the whole list.
         catalog_row(
             "tab.create",
             "opens a tab in the dashboard\nsecond line nobody should see in the listing",
             false,
         ),
-        // ★우편 계열 이름이 표에 실려 온 경우★: 이 행이 없으면 아래 누출 테스트는 어떤 구현에서도 통과한다
-        //   (픽스처에 그 낱말이 아예 없으니 단언이 늘 참이다).
+        // ★When a mail family name is carried in the table★: without this row, the leak test below passes on any implementation
+        //   (the fixture does not have that word at all, so the assertion is always true).
         catalog_row(
             &format!("{CLI_GROUP_MAIL}.send"),
             &schema_blob(
@@ -1091,16 +1098,20 @@ fn engram_commands_lists_every_name_with_its_summary_and_marks_what_it_cannot_ru
     let (stdout, code) = run_cli(&url, &["commands"], None);
     let requests = stub.join().expect("stub join");
 
-    assert_eq!(code, 0, "목록 렌더 성공 → exit 0: {stdout}");
-    assert_eq!(requests.len(), 1, "목록은 한 왕복: {requests:?}");
+    assert_eq!(code, 0, "list render success → exit 0: {stdout}");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the list is one round trip: {requests:?}"
+    );
     assert!(
         requests[0].starts_with("POST /control/commands HTTP/1.1"),
-        "발견 라우트로: {}",
+        "to the discovery route: {}",
         requests[0]
     );
     assert!(
         requests[0].contains("Authorization: Bearer test-token"),
-        "토큰을 실어야: {}",
+        "must carry the token: {}",
         requests[0]
     );
 
@@ -1111,39 +1122,41 @@ fn engram_commands_lists_every_name_with_its_summary_and_marks_what_it_cannot_ru
         let row = stdout
             .lines()
             .find(|l| l.trim_start().starts_with(name))
-            .unwrap_or_else(|| panic!("{name} 이 목록에 없다: {stdout}"));
-        assert!(row.contains(summary), "이름 옆에 요약이 와야: {row}");
+            .unwrap_or_else(|| panic!("{name} is not in the list: {stdout}"));
+        assert!(
+            row.contains(summary),
+            "the summary must come next to the name: {row}"
+        );
     }
-    // ★못 읽는 블롭이 목록을 가라앉히지 않는다★ — 이름은 남고, 남길 수 있는 만큼(첫 줄)이 요약이 된다.
+    // ★An unreadable blob does not sink the list★ — the name remains, and what can be kept (the first line) becomes the summary.
     let free_text = stdout
         .lines()
         .find(|l| l.trim_start().starts_with("tab.create"))
-        .unwrap_or_else(|| panic!("파싱 안 되는 help 가 줄을 통째로 없앴다: {stdout}"));
+        .unwrap_or_else(|| panic!("an unparseable help removed the whole line: {stdout}"));
     assert!(
         free_text.contains("opens a tab"),
-        "자유 텍스트의 첫 줄이 요약: {free_text}"
+        "the first line of free text is the summary: {free_text}"
     );
     assert!(
         !free_text.contains("second line"),
-        "한 명령 = 한 줄이어야: {free_text}"
+        "one command = must be one line: {free_text}"
     );
-    // ★이 행은 **오늘 데몬이 내지 않는 값**을 스크립트한 것이다★ — 목록을 합치는 두 출처가 둘 다
-    //   도달 가능해졌으므로(ADR-0160) 진짜 데몬은 지금 모든 행을 `callable:true` 로 낸다. 그래도
-    //   이 갈래를 재는 이유는 그 칸이 상수가 아니기 때문이다 — 거짓을 받는 날 CLI 가 그걸 화면에
-    //   보여 줘야 한다. ★단 문구가 `UNSUPPORTED` 를 약속하면 안 된다★: 그 코드를 내던 생산자는
-    //   사라졌고(`catalog::not_mine` 삭제), 지금 그 자리에 오는 거절은 데몬이 정하는 다른 코드다.
+    // ★This row scripts **a value no daemon emits today**★ (both merged sources are reachable, ADR-0160, so every real row is
+    //   `callable:true`) — measured because the field is not a constant: the day it receives false, the CLI must show it.
+    //   ★The wording must not promise `UNSUPPORTED`★: its producer is gone (`catalog::not_mine` deleted) and the refusal now is a
+    //   different code the daemon decides.
     assert!(
         stdout.contains("cannot run"),
-        "부를 수 없는 이름이라는 사실이 화면에 보여야: {stdout}"
+        "the fact that the name cannot be called must be visible on the screen: {stdout}"
     );
     assert!(
         !stdout.contains("UNSUPPORTED"),
-        "지워진 오류 코드를 약속하고 있다: {stdout}"
+        "it promises an error code that was removed: {stdout}"
     );
-    // 발견 화면은 렌더된 평문이다 — 원문 JSON 을 그대로 흘리지 않는다.
+    // The discovery screen is rendered plain text — it does not leak the raw JSON as is.
     assert!(
         !stdout.trim_start().starts_with('{'),
-        "목록은 평문 화면: {stdout}"
+        "the list is a plain-text screen: {stdout}"
     );
 }
 
@@ -1154,42 +1167,51 @@ fn engram_commands_with_a_name_shows_its_arguments_return_shape_and_errors() {
     let (stdout, code) = run_cli(&url, &["commands", "slot.assign"], None);
     let requests = stub.join().expect("stub join");
 
-    assert_eq!(code, 0, "상세 렌더 성공 → exit 0: {stdout}");
-    assert_eq!(requests.len(), 1, "상세도 목록 한 왕복: {requests:?}");
+    assert_eq!(code, 0, "detail render success → exit 0: {stdout}");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the detail is one list round trip too: {requests:?}"
+    );
     for token in [
         "slot.assign",
         "put an agent in a slot",
         "--index <integer>",
         "--name <string>",
         "--sticky <true|false>",
-        // 옵션 칸이라 null 표기가 붙지 않는다 — 붙이면 화면이 안 되는 사용법을 광고한다(M).
+        // It is an optional field, so the null notation is not attached — attaching it, the screen would advertise a usage that does not
+        //   work (M).
         "--mode <wide|tall>",
         "required",
         "optional",
-        // ★반환 칸은 명령 이름의 부분문자열이 아닌 낱말로 잰다★: 예전엔 `slot` 으로 재서, 반환 구획이
-        //   통째로 사라져도 `slot.assign` 이 그 낱말을 담고 있어 초록이었다.
+        // ★The return field is measured with a word that is not a substring of the command name★: it used to be measured with `slot`, so
+        //   even if the return section
+        //   vanished entirely, `slot.assign` contained that word and it stayed green.
         "placed_at",
         "NOT_FOUND",
         "INVALID_ARGUMENT",
     ] {
-        assert!(stdout.contains(token), "{token} 이 상세 화면에: {stdout}");
+        assert!(
+            stdout.contains(token),
+            "{token} on the detail screen: {stdout}"
+        );
     }
     let returns = stdout
         .lines()
         .position(|l| l.starts_with("Returns —"))
-        .unwrap_or_else(|| panic!("반환 구획이 없다: {stdout}"));
+        .unwrap_or_else(|| panic!("no return section: {stdout}"));
     assert!(
         stdout
             .lines()
             .skip(returns)
             .any(|l| l.trim_start().starts_with("placed_at")),
-        "반환 칸이 그 구획 안에 있어야: {stdout}"
+        "the return field must be inside that section: {stdout}"
     );
 }
 
-/// ★A. 사용법 요청이 명령을 실행하면 안 된다★: `slot.assign` 픽스처는 `help` 라는 이름의 **불리언** 인자를
-///   선언한다 — 예전 파서는 `--help` 를 그 칸으로 읽어 `{"help":true}` 를 `/control/call` 로 보냈다.
-///   사용법을 물었더니 Write 가 돈 것이다. 세 철자 모두 상세 화면으로 가고, 호출 라우트는 한 번도 안 열린다.
+/// ★A. A usage request must not execute the command★: the `slot.assign` fixture declares a **boolean** argument named `help`
+///   — the old parser read `--help` as that field and sent `{"help":true}` to `/control/call`.
+///   Asked for usage and Write ran. All three spellings go to the detail screen, and the call route is never opened.
 #[test]
 fn asking_a_full_name_for_help_renders_its_detail_and_never_calls_it() {
     for token in ["--help", "-h", "help"] {
@@ -1198,20 +1220,28 @@ fn asking_a_full_name_for_help_renders_its_detail_and_never_calls_it() {
         let (stdout, code) = run_cli(&url, &["slot.assign", token], None);
         let requests = stub.join().expect("stub join");
 
-        assert_eq!(code, 0, "사용법 요청은 성공 종료({token}): {stdout}");
-        assert_eq!(requests.len(), 1, "목록 한 왕복뿐({token}): {requests:?}");
+        assert_eq!(
+            code, 0,
+            "a usage request exits successfully ({token}): {stdout}"
+        );
+        assert_eq!(
+            requests.len(),
+            1,
+            "only one list round trip ({token}): {requests:?}"
+        );
         assert!(
             !requests.iter().any(|r| r.contains("POST /control/call")),
-            "사용법 요청이 명령을 실행했다({token}): {requests:?}"
+            "a usage request executed the command ({token}): {requests:?}"
         );
         assert!(
             stdout.contains("--index <integer>"),
-            "상세 화면이어야({token}): {stdout}"
+            "must be the detail screen ({token}): {stdout}"
         );
     }
-    // ★L. 한 칸 옆으로 밀린 help 도 인자가 아니다★: 예전엔 첫 자리만 봐서 `--index 1 --help` 가 그 불리언
-    //   칸으로 바인딩돼 `{"index":1,"help":true}` 가 실제로 POST 됐다. 어느 자리든 명령은 돌지 않는다 —
-    //   그리고 이 케이스들은 목적지가 포트 0 이라 **네트워크를 타지도 않는다**.
+    // ★L. A help shifted one position over is not an argument either★: it used to look only at the first position, so `--index 1 --help`
+    //   was bound to that boolean
+    //   field and `{"index":1,"help":true}` was actually POSTed. In any position the command does not run —
+    //   and these cases have port 0 as the destination, so they **do not touch the network either**.
     for args in [
         vec!["slot.assign", "--index", "1", "--help"],
         vec!["slot.assign", "--index", "1", "-h"],
@@ -1219,28 +1249,34 @@ fn asking_a_full_name_for_help_renders_its_detail_and_never_calls_it() {
         vec!["slot.assign", "--help", "--index", "1"],
     ] {
         let (stdout, code) = run_cli(UNREACHABLE_URL, &args, None);
-        assert_eq!(code, 1, "밀린 help 는 인자 오류({args:?}): {stdout}");
+        assert_eq!(
+            code, 1,
+            "a shifted help is an argument error ({args:?}): {stdout}"
+        );
         let v: serde_json::Value = serde_json::from_str(stdout.trim())
-            .unwrap_or_else(|e| panic!("봉투 JSON({args:?}): {e} — {stdout}"));
+            .unwrap_or_else(|e| panic!("envelope JSON ({args:?}): {e} — {stdout}"));
         assert_eq!(
             v["code"], "BAD_ARGS",
-            "왕복도 실행도 없어야({args:?}): {stdout}"
+            "there must be neither a round trip nor execution ({args:?}): {stdout}"
         );
     }
-    // 단독 호출과 그 규칙이 갈리지 않는다.
+    // It does not diverge from the rule of the lone call.
     let (stdout, code) = run_cli(
         UNREACHABLE_URL,
         &["slot.assign", "--help", "--index", "1"],
         None,
     );
-    assert_eq!(code, 1, "잔여 인자가 붙은 help 는 인자 오류: {stdout}");
+    assert_eq!(
+        code, 1,
+        "help with leftover arguments is an argument error: {stdout}"
+    );
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(v["code"], "BAD_ARGS", "{stdout}");
 }
 
-/// ★B. 부모를 떼는 형태가 이 표면에도 있어야 한다★: `parent` 는 nullable 이면서 필수라, null 을 실을 방법이
-///   없으면 문자열 `"none"` 이 나가 NOT_FOUND 가 되거나 하필 그 이름의 에이전트 밑으로 들어간다.
-///   옛 계열의 `detaching_sends_an_explicit_null_parent_not_an_absent_key` 와 **같은 사실**을 새 입구에서 잰다.
+/// ★B. The shape that detaches the parent must exist on this surface too★: `parent` is nullable and required, so without a way to carry null
+///   the string `"none"` goes out and becomes NOT_FOUND, or it ends up under an agent that happens to have that name.
+///   It measures **the same fact** as the old family's `detaching_sends_an_explicit_null_parent_not_an_absent_key` at the new entrance.
 #[test]
 fn detaching_over_the_full_name_surface_sends_a_real_json_null() {
     let ok = ok_response(r#"{"agent_id":"a-1"}"#);
@@ -1253,16 +1289,16 @@ fn detaching_over_the_full_name_surface_sends_a_real_json_null() {
     );
     let requests = stub.join().expect("stub join");
 
-    assert_eq!(code, 0, "호출 성공 → exit 0: {stdout}");
+    assert_eq!(code, 0, "call success → exit 0: {stdout}");
     assert_eq!(requests.len(), 2, "{requests:?}");
     let sent = request_body(&requests[1]);
     assert_eq!(
         sent["args"]["parent"],
         serde_json::Value::Null,
-        "루트로 떼는 요청은 null 이어야: {sent}"
+        "a request to detach to root must be null: {sent}"
     );
     assert_eq!(sent["args"]["target"], serde_json::json!("qa"));
-    // 붙이는 쪽은 문자열 그대로 — 두 뜻이 한 낱말에 겹쳐 있으므로 반대 방향도 함께 못박는다.
+    // The attaching side is the string as is — two meanings overlap in one word, so the opposite direction is pinned too.
     let ok = ok_response(r#"{"agent_id":"a-1"}"#);
     let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog(), ok]);
     let url = format!("http://{host}:{port}");
@@ -1279,9 +1315,10 @@ fn detaching_over_the_full_name_surface_sends_a_real_json_null() {
     );
 }
 
-/// ★M. 그 낱말이 **옵션 칸까지** 먹으면 조용한 사고가 된다★: `agent.spawn --cwd none` 이 `{"cwd":null}` 로
-///   나가면 데몬 기본 폴더에 만들어지는데 그 응답은 `cwd` 를 안 실어, 다른 폴더가 쓰였다는 사실이 어디에도
-///   보이지 않는다. 옵션 칸에서 "값 없음" 은 플래그를 빼는 것이고, 옛 계열도 같은 입력을 문자열로 보낸다.
+/// ★M. If that word consumed **even optional fields**, it would be a silent accident★: if `agent.spawn --cwd none` went out as `{"cwd":null}`,
+///   it would be created in the daemon's default folder, and that response does not carry `cwd`, so the fact that a different folder was
+///   used would be
+///   visible nowhere. In an optional field "no value" means leaving out the flag, and the old families also send the same input as a string.
 #[test]
 fn the_detach_word_reaches_the_daemon_as_a_string_in_an_optional_slot() {
     let ok = ok_response(r#"{"placed_at":1}"#);
@@ -1307,12 +1344,12 @@ fn the_detach_word_reaches_the_daemon_as_a_string_in_an_optional_slot() {
     assert_eq!(
         sent["args"]["mode"],
         serde_json::json!("none"),
-        "옵션 칸은 nullable 이어도 문자열로 나가야: {sent}"
+        "an optional field must go out as a string even if nullable: {sent}"
     );
 }
 
-/// ★N. 버린 행을 "목록에 없다" 로 보고하면 안 된다★: `callable` 이 빠진 등록 하나로 그 행이 사라지는데,
-///   기계가 읽는 봉투에 부재가 단정되면 호출자는 실재하는 명령을 영구히 포기한다.
+/// ★N. Dropped rows must not be reported as "not in the list"★: one registration missing `callable` makes that row vanish,
+///   and if absence is asserted in the envelope a machine reads, the caller permanently gives up on a command that exists.
 #[test]
 fn a_call_for_a_name_whose_row_was_dropped_does_not_claim_the_name_is_absent() {
     let poisoned = catalog_response(vec![
@@ -1326,7 +1363,7 @@ fn a_call_for_a_name_whose_row_was_dropped_does_not_claim_the_name_is_absent() {
             ),
             true,
         ),
-        // 등록이 `callable` 을 빼먹었다 — 그 행만 읽히지 않는다.
+        // The registration left out `callable` — only that row cannot be read.
         serde_json::json!({ "name": "slot.assign", "help": "x" }),
     ]);
     let (host, port, stub) = spawn_scripted_stub(vec![poisoned]);
@@ -1334,18 +1371,18 @@ fn a_call_for_a_name_whose_row_was_dropped_does_not_claim_the_name_is_absent() {
     let (stdout, code) = run_cli(&url, &["slot.assign", "--index", "1"], None);
     let requests = stub.join().expect("stub join");
 
-    assert_eq!(code, 1, "부를 수는 없다 → exit 1: {stdout}");
-    assert_eq!(requests.len(), 1, "호출은 나가지 않는다: {requests:?}");
+    assert_eq!(code, 1, "cannot be called → exit 1: {stdout}");
+    assert_eq!(requests.len(), 1, "the call does not go out: {requests:?}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(v["code"], "UNKNOWN_COMMAND", "{stdout}");
     let hint = v["hint"].as_str().unwrap_or_default();
     assert!(
         !hint.contains("does not list"),
-        "읽히지 않은 행을 부재로 단정하면 안 된다: {hint}"
+        "must not assert rows that were not read as absent: {hint}"
     );
-    assert!(hint.contains("unreadable"), "사실을 말해야: {hint}");
+    assert!(hint.contains("unreadable"), "must state the facts: {hint}");
 
-    // 대조군 — 버린 행이 없으면 부재를 그대로 단정한다(위 문구가 늘 나오는 게 아니라는 증명).
+    // Control group — without dropped rows it asserts absence as is (proof that the wording above does not always come out).
     let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog()]);
     let url = format!("http://{host}:{port}");
     let (stdout, code) = run_cli(&url, &["nope.nope", "--x", "1"], None);
@@ -1361,8 +1398,8 @@ fn a_call_for_a_name_whose_row_was_dropped_does_not_claim_the_name_is_absent() {
     );
 }
 
-/// ★D. 읽을 수 없는 행 하나가 표면 전체를 죽이면 안 된다★: 등록 하나가 빈 이름을 내면 예전에는 목록·상세·
-///   **모든 호출**이 그 클라이언트가 끊길 때까지 exit 2 였다.
+/// ★D. One unreadable row must not kill the whole surface★: when one registration gave an empty name, the list·detail·
+///   **every call** used to be exit 2 until that client disconnected.
 #[test]
 fn a_single_unreadable_catalog_row_does_not_take_the_surface_down() {
     let poisoned = catalog_response(vec![
@@ -1376,17 +1413,20 @@ fn a_single_unreadable_catalog_row_does_not_take_the_surface_down() {
             ),
             true,
         ),
-        // 이름이 빈 등록 — 명부는 길이만 재므로 실제로 올 수 있다.
+        // A registration with an empty name — the registry measures only length, so it can really come.
         serde_json::json!({ "name": "", "help": "h", "callable": true }),
     ]);
     let (host, port, stub) = spawn_scripted_stub(vec![poisoned]);
     let url = format!("http://{host}:{port}");
     let (stdout, code) = run_cli(&url, &["commands"], None);
     let _ = stub.join().expect("stub join");
-    assert_eq!(code, 0, "읽을 수 있는 행이 있으면 목록은 선다: {stdout}");
+    assert_eq!(
+        code, 0,
+        "if there are readable rows, the list stands: {stdout}"
+    );
     assert!(stdout.contains("agent.list"), "{stdout}");
 
-    // 같은 상태에서 호출도 살아 있어야 한다 — 예전엔 이 경로가 통째로 막혔다.
+    // In the same state the call must stay alive too — this path used to be blocked entirely.
     let poisoned = catalog_response(vec![
         catalog_row(
             "agent.list",
@@ -1404,7 +1444,7 @@ fn a_single_unreadable_catalog_row_does_not_take_the_surface_down() {
     let url = format!("http://{host}:{port}");
     let (stdout, code) = run_cli(&url, &["agent.list"], None);
     let requests = stub.join().expect("stub join");
-    assert_eq!(code, 0, "호출도 살아 있어야: {stdout}");
+    assert_eq!(code, 0, "the call must be alive too: {stdout}");
     assert_eq!(requests.len(), 2, "{requests:?}");
 }
 
@@ -1415,13 +1455,14 @@ fn engram_commands_for_a_name_the_catalog_does_not_list_is_a_failure_not_a_crash
     let (stdout, code) = run_cli(&url, &["commands", "nope.nope"], None);
     let _ = stub.join().expect("stub join");
 
-    assert_eq!(code, 1, "표에 없는 이름 → exit 1: {stdout}");
+    assert_eq!(code, 1, "name not in the table → exit 1: {stdout}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(v["code"], "UNKNOWN_COMMAND", "{stdout}");
 }
 
-/// ★값의 생김새가 아니라 **선언된 타입**이 정한다★: `--name 123` 은 문자열 칸이므로 문자열로 실려야 하고,
-///   `--index 3` 은 정수 칸이므로 수로 실려야 한다. 한쪽만 보면 "전부 문자열" 이나 "전부 JSON 파싱" 도 통과한다.
+/// ★The **declared type** decides, not what the value looks like★: `--name 123` is a string field, so it must be carried as a string,
+///   and `--index 3` is an integer field, so it must be carried as a number. Looking at only one side lets "all strings" or "all JSON
+///   parsing" pass too.
 #[test]
 fn engram_invoking_a_full_name_coerces_each_value_to_its_declared_type() {
     let ok = ok_response(r#"{"placed_at":3}"#);
@@ -1443,11 +1484,11 @@ fn engram_invoking_a_full_name_coerces_each_value_to_its_declared_type() {
     );
     let requests = stub.join().expect("stub join");
 
-    assert_eq!(code, 0, "호출 성공 → exit 0: {stdout}");
+    assert_eq!(code, 0, "call success → exit 0: {stdout}");
     assert_eq!(
         requests.len(),
         2,
-        "스키마 조회 + 호출 두 왕복: {requests:?}"
+        "schema query + call, two round trips: {requests:?}"
     );
     assert!(
         requests[0].starts_with("POST /control/commands HTTP/1.1"),
@@ -1464,29 +1505,30 @@ fn engram_invoking_a_full_name_coerces_each_value_to_its_declared_type() {
     assert_eq!(
         sent["args"]["index"],
         serde_json::json!(3),
-        "정수 칸: {sent}"
+        "integer field: {sent}"
     );
     assert_eq!(
         sent["args"]["name"],
         serde_json::json!("123"),
-        "문자열 칸은 숫자처럼 생겨도 문자열: {sent}"
+        "a string field is a string even if it looks like a number: {sent}"
     );
     assert_eq!(
         sent["args"]["sticky"],
         serde_json::json!(true),
-        "불리언 칸은 값 없이 서고 값을 안 삼킨다: {sent}"
+        "a boolean field stands without a value and does not swallow a value: {sent}"
     );
     assert_eq!(sent["args"]["mode"], serde_json::json!("wide"), "{sent}");
-    // 호출 응답은 데몬 body 그대로 — CLI 가 다시 쓰지 않는다.
+    // The call response is the daemon body as is — the CLI does not rewrite it.
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(stdout.trim()).expect("stdout json"),
         serde_json::json!({ "placed_at": 3 })
     );
 }
 
-/// ★F. 호출 응답도 **선언된 반환**으로 잰다★: 관대한 판정기를 쓰면 여기서 exit 0 이 나는데, 같은 응답에
-///   옛 계열은 exit 2 를 낸다. 한 명령이 입구에 따라 반대 판정을 받으면 호출자는 일어나지 않은 일을 사실로
-///   기록한다. 재료(`ok.required`)는 첫 왕복에 이미 왔다.
+/// ★F. The call response is also measured by **the declared return**★: with a lenient decider this gives exit 0, while for the same response
+///   the old family gives exit 2. If one command got opposite decisions depending on the entrance, the caller would record something that
+///   did not happen
+///   as fact. The material (`ok.required`) already came in the first round trip.
 #[test]
 fn a_call_answered_without_the_declared_return_fields_exits_two_not_zero() {
     for body in [r#"{"status":"ok"}"#, r#"{}"#, r#"[]"#] {
@@ -1494,13 +1536,13 @@ fn a_call_answered_without_the_declared_return_fields_exits_two_not_zero() {
         let url = format!("http://{host}:{port}");
         let (stdout, code) = run_cli(&url, &["slot.assign", "--index", "1", "--name", "qa"], None);
         let requests = stub.join().expect("stub join");
-        assert_eq!(requests.len(), 2, "호출은 나갔다: {requests:?}");
+        assert_eq!(requests.len(), 2, "the call went out: {requests:?}");
         assert_eq!(
             code, 2,
-            "증거 없는 2xx → exit 2(재시도 아니라 보고 대상): {body} → {stdout}"
+            "2xx without evidence → exit 2 (a report target, not a retry): {body} → {stdout}"
         );
     }
-    // 대조군 — 선언된 칸이 다 실린 응답은 그대로 성공이다(위 판정이 거짓 경보가 아니라는 증명).
+    // Control group — a response carrying all declared fields is success as is (proof that the decision above is not a false alarm).
     let (host, port, stub) =
         spawn_scripted_stub(vec![sample_catalog(), ok_response(r#"{"placed_at":1}"#)]);
     let url = format!("http://{host}:{port}");
@@ -1516,18 +1558,26 @@ fn engram_invoking_with_an_unparsable_value_never_reaches_the_call_route() {
     let (stdout, code) = run_cli(&url, &["slot.assign", "--index", "three"], None);
     let requests = stub.join().expect("stub join");
 
-    assert_eq!(code, 1, "옮길 수 없는 값 → exit 1: {stdout}");
-    assert_eq!(requests.len(), 1, "호출 라우트는 안 두드린다: {requests:?}");
+    assert_eq!(
+        code, 1,
+        "a value that cannot be converted → exit 1: {stdout}"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "does not knock on the call route: {requests:?}"
+    );
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(v["code"], "BAD_ARGS", "{stdout}");
     assert!(
         v["hint"].as_str().unwrap_or_default().contains("integer"),
-        "선언된 타입을 알려야: {stdout}"
+        "must state the declared type: {stdout}"
     );
 }
 
-/// ★모르는 플래그는 **로컬에서** 끝난다★: 데몬도 같은 판정을 하지만 그 왕복은 부작용 있는 입구를 한 번 더
-///   두드리면서 호출자에게 아무것도 더 주지 않는다. 문구엔 고칠 재료(선언된 칸 전량)가 실려야 한다.
+/// ★An unknown flag ends **locally**★: the daemon makes the same decision too, but that round trip knocks on a side-effecting entrance one
+///   more time
+///   while giving the caller nothing more. The wording must carry the material to fix it (all declared fields).
 #[test]
 fn engram_invoking_with_an_unknown_flag_fails_locally_with_the_declared_list() {
     let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog()]);
@@ -1535,11 +1585,11 @@ fn engram_invoking_with_an_unknown_flag_fails_locally_with_the_declared_list() {
     let (stdout, code) = run_cli(&url, &["slot.assign", "--index", "1", "--nope", "x"], None);
     let requests = stub.join().expect("stub join");
 
-    assert_eq!(code, 1, "모르는 플래그 → exit 1: {stdout}");
+    assert_eq!(code, 1, "unknown flag → exit 1: {stdout}");
     assert_eq!(
         requests.len(),
         1,
-        "스키마 조회까지만 — 호출은 안 나간다: {requests:?}"
+        "only up to the schema query — the call does not go out: {requests:?}"
     );
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(v["code"], "BAD_ARGS", "{stdout}");
@@ -1547,13 +1597,13 @@ fn engram_invoking_with_an_unknown_flag_fails_locally_with_the_declared_list() {
     for declared in ["--index", "--name", "--sticky", "--mode"] {
         assert!(
             hint.contains(declared),
-            "선언된 칸 전량이 실려야({declared}): {hint}"
+            "all declared fields must be carried ({declared}): {hint}"
         );
     }
 }
 
-/// ★E. 어느 요청이 실패했는지 말해야 한다★: 목록 조회가 실패하면 stdout 에는 그 라우트의 body 가 찍히는데,
-///   그것이 명령 자신의 반려와 바이트 단위로 같다 — 호출자(LLM)는 멀쩡한 인자를 고치기 시작한다.
+/// ★E. It must say which request failed★: when the list query fails, stdout prints that route's body,
+///   and it is byte-identical to the command's own bounce — the caller (LLM) starts fixing arguments that are fine.
 #[test]
 fn a_catalog_failure_during_a_call_says_which_request_failed() {
     let refusal = ok_response(r#"{"status":"error","code":"INTERNAL","hint":"roster is wedged"}"#);
@@ -1562,22 +1612,22 @@ fn a_catalog_failure_during_a_call_says_which_request_failed() {
     let (stdout, stderr, code) = run_cli_streams(&url, &["agent.list"]);
     let requests = stub.join().expect("stub join");
 
-    assert_eq!(code, 1, "반려 → exit 1: {stdout}");
-    assert_eq!(requests.len(), 1, "호출은 나가지 않았다: {requests:?}");
+    assert_eq!(code, 1, "bounce → exit 1: {stdout}");
+    assert_eq!(requests.len(), 1, "the call did not go out: {requests:?}");
     assert!(
         stdout.contains("INTERNAL"),
-        "실패한 body 는 그대로 흘러야: {stdout}"
+        "a failed body must flow through as is: {stdout}"
     );
     assert!(
         stderr.contains("/control/commands") && stderr.contains("agent.list"),
-        "어느 요청이 실패했는지 밝혀야: {stderr}"
+        "must state which request failed: {stderr}"
     );
     assert!(
         stderr.contains("never called"),
-        "명령 자신은 안 불렸다는 사실을 말해야: {stderr}"
+        "must say that the command itself was not called: {stderr}"
     );
 
-    // 대조군 — `commands` 자신의 실패에는 그 줄이 붙지 않는다(그때는 어느 요청인지 물을 여지가 없다).
+    // Control group — `commands`'s own failure does not get that line (then there is no room to ask which request).
     let refusal = ok_response(r#"{"status":"error","code":"INTERNAL","hint":"roster is wedged"}"#);
     let (host, port, stub) = spawn_scripted_stub(vec![refusal]);
     let url = format!("http://{host}:{port}");
@@ -1587,7 +1637,7 @@ fn a_catalog_failure_during_a_call_says_which_request_failed() {
     assert!(!stderr.contains("never called"), "{stderr}");
 }
 
-/// stdout·stderr 를 **따로** 받는다 — 어느 요청이 실패했나 같은 진단은 stderr 로 나가고, 기존 헬퍼는 그것을 버린다.
+/// Receives stdout·stderr **separately** — diagnostics like which request failed go to stderr, and the existing helper discards it.
 fn run_cli_streams(control_url: &str, args: &[&str]) -> (String, String, i32) {
     let out = Command::new(env!("CARGO_BIN_EXE_engram"))
         .args(args)
@@ -1602,13 +1652,12 @@ fn run_cli_streams(control_url: &str, args: &[&str]) -> (String, String, i32) {
     )
 }
 
-/// ★부를 수 없다는 판정의 정본은 데몬이다★: 목록이 `callable:false` 라 해도 CLI 가 미리 끊지 않는다 —
-///   끊으면 그 거절이 관측되지 않는다.
+/// ★The daemon is the source of truth for deciding it cannot be called★: even with `callable:false` the CLI does not cut it beforehand —
+///   that would leave the refusal unobserved.
 ///
-/// ★거절 코드는 **지금 데몬이 실제로 내는 것**이어야 한다★: 예전 이 시험은 `UNSUPPORTED` 를
-///   스크립트했는데, 그 코드를 내던 생산자가 중계 도입으로 사라졌다(ADR-0160). 스크립트된 스텀은
-///   무엇이든 되돌려 주므로 그 시험은 **어떤 구현에서도 초록**이었다. 지금 그 이름을 부르면 중계되고,
-///   주인이 마감까지 안 답하면 `TIMEOUT` 이 돌아온다.
+/// ★The refusal code must be **what the daemon actually emits now**★: this test used to script `UNSUPPORTED`, whose producer disappeared
+///   with relaying (ADR-0160); a scripted stub returns anything, so it was **green on any implementation**.
+/// Calling that name is now relayed, and if the owner does not answer by the deadline `TIMEOUT` comes back.
 #[test]
 fn engram_invoking_a_name_this_entrance_cannot_run_surfaces_the_daemons_refusal() {
     let refusal = ok_response(
@@ -1619,11 +1668,11 @@ fn engram_invoking_a_name_this_entrance_cannot_run_surfaces_the_daemons_refusal(
     let (stdout, code) = run_cli(&url, &["tab.create", "--title", "x"], None);
     let requests = stub.join().expect("stub join");
 
-    assert_eq!(code, 1, "데몬 반려 → exit 1: {stdout}");
+    assert_eq!(code, 1, "daemon bounce → exit 1: {stdout}");
     assert_eq!(
         requests.len(),
         2,
-        "호출은 실제로 나가야(로컬 차단이 아니다): {requests:?}"
+        "the call must actually go out (not a local block): {requests:?}"
     );
     assert!(
         requests[1].starts_with("POST /control/call HTTP/1.1"),
@@ -1631,20 +1680,23 @@ fn engram_invoking_a_name_this_entrance_cannot_run_surfaces_the_daemons_refusal(
         requests[1]
     );
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
-    assert_eq!(v["code"], "TIMEOUT", "거절 사유가 그대로 흘러야: {stdout}");
-    // ★호출은 자기 번호를 실어 보낸다★(ADR-0161 결정 2) — 안 실으면 데몬이 요청마다 새로 발급해
-    //   재실행 방지 좌석이 구조적으로 한 번도 안 걸린다.
+    assert_eq!(
+        v["code"], "TIMEOUT",
+        "the refusal reason must flow through as is: {stdout}"
+    );
+    // ★A call carries its own number★ (ADR-0161 decision 2) — without it the daemon would issue a new one per request,
+    //   and the re-execution prevention seat would structurally never be hit.
     assert!(
         requests[1].contains("request_id"),
-        "호출 바디에 요청 번호가 실려야: {}",
+        "the call body must carry the request number: {}",
         requests[1]
     );
 }
 
-/// 2xx 인데 **봉투**를 목록으로 읽을 수 없으면 반려(1)가 아니라 보고 대상(2)이다 — 기존 3분법 그대로다.
+/// A 2xx whose **envelope** cannot be read as a list is a report target (2), not a bounce (1) — the existing three-way split as is.
 ///
-/// ★행 하나가 깨진 것은 여기 들지 않는다★: 그건 살릴 수 있는 갈래라 목록이 그대로 서고(위
-///   `a_single_unreadable_catalog_row_does_not_take_the_surface_down`), 버린 수만 stderr 로 나간다.
+/// ★One broken row does not belong here★: that is a recoverable branch, so the list stands as is (see
+///   `a_single_unreadable_catalog_row_does_not_take_the_surface_down` above), and only the dropped count goes to stderr.
 #[test]
 fn engram_commands_reports_an_unreadable_catalog_envelope_as_two_not_one() {
     for body in [
@@ -1656,17 +1708,17 @@ fn engram_commands_reports_an_unreadable_catalog_envelope_as_two_not_one() {
         let url = format!("http://{host}:{port}");
         let (stdout, code) = run_cli(&url, &["commands"], None);
         let _ = stub.join().expect("stub join");
-        assert_eq!(code, 2, "읽을 수 없는 봉투 → exit 2 ({body}): {stdout}");
+        assert_eq!(code, 2, "unreadable envelope → exit 2 ({body}): {stdout}");
     }
-    // 빈 목록은 결함이 아니다 — 표 슬롯이 비어 있는 데몬이 내는 정상적인 답이다.
+    // An empty list is not a defect — it is the normal answer of a daemon whose table slot is empty.
     let (host, port, stub) = spawn_scripted_stub(vec![ok_response(r#"{"commands":[]}"#)]);
     let url = format!("http://{host}:{port}");
     let (stdout, code) = run_cli(&url, &["commands"], None);
     let _ = stub.join().expect("stub join");
-    assert_eq!(code, 0, "빈 목록은 정상: {stdout}");
+    assert_eq!(code, 0, "an empty list is normal: {stdout}");
 
-    // 버린 행은 침묵하지 않는다 — 찾던 이름이 그 안에 있었으면 다음 줄이 UNKNOWN_COMMAND 인데, 그 둘을
-    //   잇는 실마리가 이 줄밖에 없다.
+    // Dropped rows are not silent — if the name being looked for was among them, the next line is UNKNOWN_COMMAND, and this line is
+    //   the only clue linking the two.
     let (host, port, stub) = spawn_scripted_stub(vec![ok_response(
         r#"{"commands":[{"name":"","help":"h","callable":true}]}"#,
     )]);
@@ -1676,7 +1728,7 @@ fn engram_commands_reports_an_unreadable_catalog_envelope_as_two_not_one() {
     assert_eq!(code, 0);
     assert!(
         stderr.contains("could not be read"),
-        "버린 행 수를 알려야: {stderr}"
+        "must announce the dropped row count: {stderr}"
     );
 }
 
@@ -1687,34 +1739,34 @@ fn engram_commands_maps_rejections_and_transport_failures_to_one() {
     let url = format!("http://{host}:{port}");
     let (stdout, code) = run_cli(&url, &["commands"], None);
     let _ = stub.join().expect("stub join");
-    assert_eq!(code, 1, "데몬 반려 → exit 1: {stdout}");
+    assert_eq!(code, 1, "daemon bounce → exit 1: {stdout}");
     assert!(
         stdout.contains("INTERNAL"),
-        "실패한 목록의 body 는 그대로 흘러야: {stdout}"
+        "the body of a failed list must flow through as is: {stdout}"
     );
 
     let (stdout, code) = run_cli(UNREACHABLE_URL, &["commands"], None);
-    assert_eq!(code, 1, "데몬 불통 → exit 1: {stdout}");
+    assert_eq!(code, 1, "daemon unreachable → exit 1: {stdout}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(v["status"], "error", "{stdout}");
 }
 
-/// 발견·호출 표면의 인자 오류도 옛 계열과 같은 규율 — **네트워크를 타지 않는다**(목적지 = 포트 0).
+/// Argument errors on the discovery·call surface follow the same discipline as the old families — **they do not touch the network**
+///   (destination = port 0).
 ///
-/// ★사유까지 단언한다★: 예전 판은 exit 1 + BAD_ARGS 만 봤는데, 이 케이스들은 **이 표면이 생기기 전에도**
-///   전부 "모르는 계열" 로 반려됐다 — 즉 옛 바이너리에서도 초록이라 새 규칙을 하나도 지키지 않았다.
-///   각 줄이 어떤 규칙에 걸리는지를 문구로 못박아야 그 규칙이 사라졌을 때 빨개진다.
+/// ★It asserts down to the reason★: asserting only exit 1 + BAD_ARGS was green on the old binary too (all these cases were bounced as
+///   "unknown family" before this surface existed); pinning which rule each line hits turns it red when that rule disappears.
 #[test]
 fn engram_catalog_and_call_argument_errors_never_touch_the_network() {
     for (args, expect) in [
         (vec!["commands", "agent.list", "extra"], "at most one"),
         (vec!["commands", "--help"], "not a command name"),
         (vec!["commands", "-h"], "not a command name"),
-        // 호출 형태는 위치 인자를 받지 않는다 — 스키마를 봐도 답이 달라지지 않으므로 여기서 끊는다.
+        // The call shape does not take positional arguments — looking at the schema would not change the answer, so it is cut here.
         (vec!["agent.list", "oops"], "is not a flag"),
-        // 플래그 검사가 이름 검사보다 앞이다(점 달린 오타 플래그가 이름으로 읽히면 왕복을 낭비한다).
+        // The flag check comes before the name check (if a dotted typo flag were read as a name, it would waste a round trip).
         (vec!["--nope.nope"], "not a flag"),
-        // `<계열>.<동사>` 가 아닌 것은 표에 있을 수 없다 — 인증된 POST 를 낭비하지 않는다.
+        // Anything that is not `<family>.<verb>` cannot be in the table — no wasting an authenticated POST.
         (vec!["."], "neither side may be empty"),
         (vec![".."], "neither side may be empty"),
         (vec![".foo"], "neither side may be empty"),
@@ -1722,11 +1774,12 @@ fn engram_catalog_and_call_argument_errors_never_touch_the_network() {
         (vec!["README.md", "--x", "1"], "unknown command"),
     ] {
         let (stdout, code) = run_cli(UNREACHABLE_URL, &args, None);
-        assert_eq!(code, 1, "인자 오류 → exit 1({args:?}): {stdout}");
+        assert_eq!(code, 1, "argument error → exit 1 ({args:?}): {stdout}");
         let v: serde_json::Value =
             serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("stdout json: {e}"));
         let hint = v["hint"].as_str().unwrap_or_default();
-        // `README.md` 는 형태가 멀쩡해 목록을 물어야 알 수 있다 — 그 줄만 연결 실패로 끝난다(왕복은 한 번).
+        // `README.md` has a fine shape, so it can only be known by asking the list — only that line ends in a connection failure (one
+        //   round trip).
         if expect == "unknown command" {
             assert_eq!(v["code"], "CONNECT_FAILED", "{args:?}: {stdout}");
             continue;
@@ -1734,14 +1787,14 @@ fn engram_catalog_and_call_argument_errors_never_touch_the_network() {
         assert_eq!(v["code"], "BAD_ARGS", "{args:?} → BAD_ARGS: {stdout}");
         assert!(
             hint.contains(expect),
-            "사유가 이 규칙을 말해야({args:?}, {expect:?}): {hint}"
+            "the reason must state this rule ({args:?}, {expect:?}): {hint}"
         );
     }
 }
 
-/// ★help 는 발견 목록을 받지 않는다 — 목차 화면은 `engram commands` 를 가리키기만 한다★: help 가 목록까지
-///   받으면 화면 하나에 왕복이 둘이 되고, 목록의 실패가 help 의 실패로 보인다. 대본에 화면 하나만 두므로 두
-///   번째 왕복을 하면 그 연결이 실패해 exit 0 이 깨진다.
+/// ★help does not receive the discovery list — the table-of-contents screen only points to `engram commands`★: otherwise one screen would
+///   take two round trips and a list failure would look like a help failure;
+///   the script has one screen, so a second round trip would fail the connection and break exit 0.
 #[test]
 fn the_static_help_points_at_the_catalog_without_fetching_it() {
     let (root, code, requests) = run_help_against_stub(&["help"], "stub root");
@@ -1749,17 +1802,17 @@ fn the_static_help_points_at_the_catalog_without_fetching_it() {
     assert_help_request(&requests, r#"{"topic":null}"#);
     assert!(
         requests.iter().all(|r| !r.contains("/control/commands")),
-        "help 는 목록 라우트를 안 부른다: {requests:?}"
+        "help does not call the list route: {requests:?}"
     );
 }
 
-/// 발견 목록은 **데몬이 보낸 행**만 낸다 — 계열 이름이 화면에 나오는 자리는 그 행뿐이어야 한다.
+/// The discovery list emits only **rows the daemon sent** — the only place family names appear on the screen must be those rows.
 ///
-/// ★픽스처에 우편 이름이 실려 있는 것이 이 테스트의 요점이다★: 예전 판은 픽스처에 그 낱말이 아예 없어서
-///   **어떤 구현에서도** 통과했다(단언이 늘 참). 이제 목록에 `mail.send` 가 오므로, 우리 chrome
-///   (머리글·구획 제목·안내)이 그 낱말을 더하면 줄 수가 늘어 빨개진다.
-/// ★표가 실어 온 이름을 지우지는 않는다★: 무엇이 실리느냐는 데몬 정책이고(그 질문은 별도로 파킹돼 있다),
-///   목록에서 빼면 발견이 "있다" 를 말하지 않게 된다 — 이 CLI 가 고칠 층이 아니다.
+/// ★The fixture carrying a mail name is the point★: without that word in the fixture the assertion was always true and passed on any
+///   implementation; now `mail.send` is in the list, so any of our chrome (headers·section titles·guidance) adding it grows the line count
+///   and turns red.
+/// ★It does not erase names the table carried★: what is carried is daemon policy (parked separately); removing it would make discovery not
+///   say "it exists" — this CLI is not the layer to fix that.
 #[test]
 fn the_catalog_surface_renders_only_the_rows_the_daemon_sent() {
     let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog()]);
@@ -1780,31 +1833,30 @@ fn the_catalog_surface_renders_only_the_rows_the_daemon_sent() {
     assert_eq!(
         leaking.len(),
         1,
-        "우편 낱말은 데몬이 보낸 행에만 있어야: {stdout}"
+        "the mail word must be only in rows the daemon sent: {stdout}"
     );
     assert!(
         leaking[0]
             .trim_start()
             .starts_with(&format!("{CLI_GROUP_MAIL}.send")),
-        "그 한 줄이 표가 실어 온 행이어야: {}",
+        "that one line must be the row the table carried: {}",
         leaking[0]
     );
 }
 
-// ── ADR-0133: 우편은 데몬이 거절한다 — CLI 는 화면도 실행도 막지 않는다 ─────────────────────
+// ── ADR-0133: the daemon refuses mail — the CLI blocks neither the screen nor execution ─────────────────────
 
-/// ★우편 화면 요청은 환경이 무엇을 싣고 있든 같다★ — 스폰 env 로 화면을 고르던 표식(`ENGRAM_MAIL`)은
-///   제거됐고(사용자 결정 2026-09-23), 그것을 되살리면 **에이전트 자신이 지울 수 있는 값**이 다시 화면을 정하게
-///   된다. CLI 가 싣는 것은 낱말 하나뿐이어야 한다 — 화면이 호출자와 무관하게 같다는 것은 데몬 통합 시험
-///   (`tests/mail_gate.rs`)이 잰다.
+/// ★A mail screen request is the same whatever the environment carries★ — the marker (`ENGRAM_MAIL`) that picked the screen by spawn env
+///   was removed; reviving it would let **a value the agent itself can erase** decide the screen again.
+///   That the screen is the same regardless of the caller is measured by the daemon integration test (`tests/mail_gate.rs`).
 ///
-/// ★두 조건을 나란히 재는 것이 요점이다★: 표식이 없는 env 와 옛 표식을 실은 env 가 **같은** 요청을 보내야
-///   한다. 한쪽만 재면 환경에 매인 분기가 되살아나도 초록이다.
+/// ★Measuring both conditions side by side is the point★: an env without the marker and one with the old marker must send **the same**
+///   request; one side alone stays green if an environment-bound branch revives.
 // ADR-0133
 #[test]
 fn the_mail_screen_opens_whatever_the_environment_carries() {
     let screen = format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL} - stub screen");
-    for (label, marker) in [("표식 없음", None), ("옛 우편 표식", Some("0"))] {
+    for (label, marker) in [("no marker", None), ("old mail marker", Some("0"))] {
         for args in [
             vec!["help", CLI_GROUP_MAIL],
             vec![CLI_GROUP_MAIL, "--help"],
@@ -1825,7 +1877,7 @@ fn the_mail_screen_opens_whatever_the_environment_carries() {
             assert_eq!(
                 out.status.code().unwrap_or(-1),
                 0,
-                "{label}: 우편 화면은 성공 종료({args:?}): {stdout}"
+                "{label}: the mail screen exits successfully ({args:?}): {stdout}"
             );
             assert_eq!(stdout, format!("{screen}\n"), "{label}: {args:?}");
             assert_help_request(&requests, r#"{"topic":"mail"}"#);
@@ -1833,8 +1885,8 @@ fn the_mail_screen_opens_whatever_the_environment_carries() {
     }
 }
 
-/// ★강제는 데몬 하나뿐이다(ADR-0133 §영향)★: 거절당할 자격증명으로 친 발송도 **실제로 네트워크를
-///   탄다** — 여기서 미리 끊으면 그 거절이 관측되지 않는다.
+/// ★Enforcement is the daemon's alone (ADR-0133 §Impact)★: a send typed with credentials that will be refused also **actually goes over the
+///   network** — cutting it here beforehand would leave that refusal unobserved.
 // ADR-0133
 #[test]
 fn a_mail_verb_the_daemon_refuses_still_posts_and_surfaces_the_refusal() {
@@ -1850,24 +1902,24 @@ fn a_mail_verb_the_daemon_refuses_still_posts_and_surfaces_the_refusal() {
     let request = stub.join().expect("stub thread");
     assert!(
         request.contains("POST /control/send"),
-        "요청은 나가야 — 로컬 차단이 아니다: {request}"
+        "the request must go out — not a local block: {request}"
     );
     assert_eq!(
         out.status.code().unwrap_or(-1),
         1,
-        "데몬 거절은 기존 3분법의 실패(1): {stdout}"
+        "a daemon refusal is a failure (1) of the existing three-way split: {stdout}"
     );
     assert!(
         stdout.contains("MAIL_NOT_ALLOWED"),
-        "거절 사유가 그대로 흘러야: {stdout}"
+        "the refusal reason must flow through as is: {stdout}"
     );
 }
 
-// ── ADR-0285: 데몬을 부르는 명령의 공통 실패 길 ──────────────────────────────────────────────
+// ── ADR-0285: the common failure path of commands that call the daemon ──────────────────────────────────────────────
 
-/// ★자격증명 없는 `--body-stdin` 은 stdin 을 기다리지 않고 실패한다★ — stdin 을 자격증명보다 먼저 읽으면
-///   열린 채 닫히지 않는 stdin(에이전트 셸 · 파이프)에 매달려 실패하지 못하고, 공통 실패 길에 닿지도 못한다.
-///   stdin 을 열어 둔 채 쓰지도 닫지도 않고 띄워, 시한 안에 `NO_TOKEN` 으로 끝나는지 본다.
+/// ★`--body-stdin` without credentials fails without waiting for stdin★ — reading stdin first would hang on an open stdin (agent shell ·
+///   pipe), neither failing nor reaching the common failure path.
+///   Launches with stdin open but neither written nor closed and checks `NO_TOKEN` within the deadline.
 // ADR-0285
 #[test]
 fn a_body_stdin_send_without_credentials_fails_without_waiting_for_stdin() {
@@ -1883,7 +1935,7 @@ fn a_body_stdin_send_without_credentials_fails_without_waiting_for_stdin() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn engram CLI");
-    // 손잡이를 끝까지 쥐고 있어야 상대가 EOF 를 못 본다 — 그래야 「열린 채 닫히지 않는 stdin」이 재현된다.
+    // The handle must be held to the end so the other side does not see EOF — that is what reproduces 「an stdin that stays open」.
     let held_stdin = child.stdin.take().expect("stdin piped");
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1897,7 +1949,7 @@ fn a_body_stdin_send_without_credentials_fails_without_waiting_for_stdin() {
     if !exited {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("자격증명 없는 --body-stdin 이 5초 안에 끝나지 않았다 — stdin 을 자격증명보다 먼저 읽고 있다");
+        panic!("--body-stdin without credentials did not end within 5 seconds — it is reading stdin before the credentials");
     }
     let out = child.wait_with_output().expect("collect engram CLI output");
     drop(held_stdin);
@@ -1909,8 +1961,8 @@ fn a_body_stdin_send_without_credentials_fails_without_waiting_for_stdin() {
     assert_eq!(v["code"], "NO_TOKEN", "{stdout}");
 }
 
-/// ★데몬이 그 라우트를 모르면(404 — 이 CLI 와 다른 빌드의 데몬) help 도 다른 명령도 같은 `PROTOCOL_MISMATCH`
-///   봉투 · exit 1 이다★ — 데몬의 404 는 body 가 비어 있어, 그것을 빈 줄로 흘리면 호출자는 아무것도 못 배운다.
+/// ★If the daemon does not know that route (404 — a daemon of a different build), help and other commands give the same
+///   `PROTOCOL_MISMATCH` envelope · exit 1★ — the 404 body is empty, so passing it through as an empty line would teach nothing.
 // ADR-0285
 #[test]
 fn a_daemon_that_does_not_serve_the_route_is_reported_as_a_version_mismatch() {
@@ -1919,18 +1971,21 @@ fn a_daemon_that_does_not_serve_the_route_is_reported_as_a_version_mismatch() {
         let (host, port, stub) = spawn_scripted_stub(vec![not_found]);
         let (stdout, code) = run_cli(&format!("http://{host}:{port}"), &args, None);
         let requests = stub.join().expect("stub join");
-        assert_eq!(requests.len(), 1, "왕복은 하나({args:?}): {requests:?}");
-        assert_eq!(code, 1, "판 어긋남은 실패({args:?}): {stdout}");
+        assert_eq!(requests.len(), 1, "one round trip ({args:?}): {requests:?}");
+        assert_eq!(
+            code, 1,
+            "a version mismatch is a failure ({args:?}): {stdout}"
+        );
         let v: serde_json::Value = serde_json::from_str(stdout.trim())
             .unwrap_or_else(|e| panic!("stdout json({args:?}): {e} — {stdout}"));
         assert_eq!(v["status"], "error", "{stdout}");
         assert_eq!(v["code"], "PROTOCOL_MISMATCH", "{args:?}: {stdout}");
-        // 어느 라우트를 모르는지 밝혀야 한다 — 실제로 친 경로를 요청 줄에서 꺼내 견준다.
+        // It must state which route it does not know — the path actually typed is taken out of the request line and compared.
         let requested = requests[0].split_whitespace().nth(1).unwrap_or_default();
         assert!(
             requested.starts_with("/control/")
                 && v["hint"].as_str().unwrap_or_default().contains(requested),
-            "hint 가 친 라우트({requested})를 밝혀야({args:?}): {stdout}"
+            "the hint must state the typed route ({requested}) ({args:?}): {stdout}"
         );
     }
 }

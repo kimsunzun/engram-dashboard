@@ -1,95 +1,72 @@
-//! 백엔드 계약 시험대 — 백엔드마다 **같은 질문표**를 묻고, 답을 실측으로 채운다(S21 TRD §3).
+//! Backend contract test bench — asks every backend the **same question table** and fills the answers by measurement (S21 TRD §3).
 //!
-//! 이 파일이 소유하는 것은 질문표 하나다. 백엔드가 셋째로 늘면 [`backend_table`] 에 **행이 하나 늘고**
-//! 질문 함수들은 그대로다 — 파일이 느는 구조가 아니다.
+//! This file owns one question table. A third backend **adds one row** to [`backend_table`]; the question functions stay as they are.
 //!
-//! **There are two lanes.**
-//! - Not ignored: the declaration checks ([`declaration_table_is_filled_for_every_backend`] and the
-//!   four per-channel checks) and the trust-record checks (`trust_record_*` · `no_trust_record_*`,
-//!   over fixture text). They spawn no process and run as-is in the default regression run and CI.
+//! **Two lanes.**
+//! - Not ignored: the declaration checks ([`declaration_table_is_filled_for_every_backend`] and the four per-channel checks) and the
+//!   trust-record checks (`trust_record_*` · `no_trust_record_*`, over fixture text). They spawn no process and run in the default
+//!   regression run and CI.
 //! - Everything else is `#[ignore]` — it spawns the real CLI and runs only under `-- --ignored`.
 //!
-//! ★비-ignore 항목이 있는 이유 = `#[ignore]` 의 대가★: `#[ignore]` 스위트는 통째로 증발해도 초록이다.
-//!   컴파일과 표의 존재를 지키는 항목이 하나는 남아 있어야 그 침묵이 안 생긴다.
+//! ★Why non-ignore items exist = the price of `#[ignore]`★: an `#[ignore]` suite is green even if it evaporates entirely, so at least one
+//!   item guarding the compile and the table's existence must remain.
 //!
-//! ★`--ignored` 레인 안에서 바이너리 부재는 skip 이 아니라 실패다★: 이 레인을 부른 사람은 "재겠다" 고
-//!   말한 것이라 조용한 초록을 돌려주면 안 된다. 게다가 Windows 에서 CLI 는 `cmd.exe /c <prog>` 로
-//!   감싸져 뜨므로 **바이너리가 없어도 `cmd.exe` 는 반드시 성공적으로 뜬다** — "스폰이 됐나" 로는 유무를
-//!   영영 못 가른다. 그래서 [`assert_program_present`] 가 실 스폰보다 먼저 선다.
+//! ★Inside the `--ignored` lane a missing binary is a failure, not a skip★: the caller said "I will measure". On Windows the CLI launches
+//!   wrapped as `cmd.exe /c <prog>`, so **`cmd.exe` always launches even without the binary** and "did the spawn happen"
+//!   cannot tell presence — [`assert_program_present`] stands before the real spawn.
 //!
-//! ★**실 스폰의 argv 를 이 파일이 적지 않는다 — 백엔드에게 물어서 쓴다**★: 아래 모든 실 스폰은
-//!   [`production_spec`] 이 **운영과 같은 경로**([`AgentBackend::build_spec`])로 뽑은 argv 를 그대로
-//!   띄운다. 옛 모양은 인자를 이 파일에 문자열(`-s read-only -a never`)로 적어 두었고, 그래서 **운영이
-//!   실제로 쓰는 인자(`--cd` · `-s workspace-write` · `-a on-request`)를 이 시험대가 하나도 안 재고
-//!   있었다** — 재는 것과 운영이 띄우는 것이 달랐는데 `backend/codex/` 헤더는 "그 실측을 다시 재는
-//!   자리가 여기" 라고 적혀 있었다. 지금은 운영 argv 가 바뀌면 실 CLI 가 **그 바뀐 argv 로** 떠서 이
-//!   레인이 그것을 겪는다 — 같은 파일 안에서 상수와 그 복사본을 맞대는 자리가 여기엔 없다.
+//! ★**This file does not write the argv of real spawns — it asks the backend**★: every real spawn launches the argv [`production_spec`]
+//!   draws through **the same path as operation** ([`AgentBackend::build_spec`]). The old shape hand-wrote arguments (`-s read-only -a never`),
+//!   so the bench measured none of the arguments operation uses (`--cd` · `-s workspace-write` · `-a on-request`). Now a changed operating
+//!   argv is launched **as changed** and this lane goes through it; no constant is matched against its copy inside this file.
 //!
-//! ★**그 대가 = 안전 봉투를 시험대가 직접 세운다**★: 운영 argv 는 `-s workspace-write -a on-request` 라
-//!   모델이 내는 명령이 작업 폴더에 **쓸 수 있다**. 프롬프트를 넣는 항목(Q4·Q5)이 그대로 뜨면 이 시험대가
-//!   쓰기 권한을 쥔 에이전트를 돌리게 된다. 그래서 [`SafetySwap`] 이 운영 argv 에서 **정책 값 두 칸만**
-//!   무해한 것(`read-only` · `never`)으로 덮어쓰고, 봉투를 우회하는 인자가 섞여 있으면 아예 안 띄운다.
-//!   ★덮어쓸 플래그를 argv 에서 못 찾으면 그 자리에서 실패다★ — 무해하게 만들 수 없는 argv 를 그냥
-//!   띄우느니 멈춘다. 운영이 `-s` 를 `--sandbox` 로 바꾸는 날 이 레인은 빨개지고, 사람이 새 argv 의 봉투를
-//!   다시 세운 뒤에야 돈다.
+//! ★**The price = the bench sets up the safety envelope itself**★: the operating argv is `-s workspace-write -a on-request`, so commands
+//!   the model issues **can write** to the working folder, and the prompt-sending items (Q4·Q5) would run an agent holding write permission.
+//!   So [`SafetySwap`] overwrites **only the two policy value fields** with harmless ones (`read-only` · `never`) and does not launch at
+//!   all if arguments that bypass the envelope are mixed in. ★If the flag to overwrite is not found in the argv it fails right there★
+//!   — the day operation changes `-s` to `--sandbox` this lane goes red and runs again only after a person sets up the new argv's envelope.
 //!
-//! ★**So what is still unmeasured — stated honestly**★: there is **no observation of a real
-//!   model turn** under `-s workspace-write` · `-a on-request`. That would mean this harness
-//!   running an agent that holds write access, and harmlessness (read-only · no approvals ·
-//!   short prompts · no network work · never this repo as cwd) is this file's premise, so we
-//!   do not trade it away. [`q11_production_argv_is_accepted_and_reaches_a_composer`] measures
-//!   only "the real CLI accepts the production argv carrying those two values and **reaches a
-//!   composer**" — the only keys it sends are the ones that pass the startup screen (the probe
-//!   characters of [`PtySession::pass_startup_modal`], their erasure, and one CR); it submits
-//!   no prompt (without a model turn that permission never gets a chance to be used). "What
-//!   the model can do under that policy" is outside this file, and that cell is empty.
+//! ★**Still unmeasured**★: **no real model turn** under `-s workspace-write` · `-a on-request` — that would mean running an agent holding
+//!   write access, and harmlessness (read-only · no approvals · short prompts · no network work · never this repo as cwd) is this file's
+//!   premise. [`q11_production_argv_is_accepted_and_reaches_a_composer`] measures only that the real CLI accepts the production argv
+//!   carrying those two values and **reaches a composer**; the only keys sent are the ones that pass the startup screen (the probe characters
+//!   of [`PtySession::pass_startup_modal`], their erasure, one CR), no prompt (without a model turn the permission is never used). "What
+//!   the model can do under that policy" is outside this file; that cell is empty.
 //!
-//! ★**Which version was measured is left in the log**★: this CLI updates itself, so an
-//!   observation means something only when tied to a version. [`record_version_once`]
-//!   asks `--version` **through the production argv** and prints it (latest measurement
-//!   = codex-cli 0.163.0, 2026-11-02). ★Not asserting the value is deliberate★ — pinning
-//!   it would turn red on every update, and that is a calendar, not a regression.
+//! ★**The measured version is left in the log**★: this CLI self-updates, so an observation means something only tied to a version.
+//!   [`record_version_once`] asks `--version` **through the production argv** and prints it (latest: codex-cli 0.163.0). ★The value is
+//!   not asserted on purpose★ — pinning it would turn red on every update, a calendar not a regression.
 //!
-//! ★**Markers are matched ignoring whitespace layout**([`mentions`])★ — under load this TUI draws a
-//!   sentence word by word with cursor moves, so the text left after stripping control sequences
-//!   loses its spaces. There `flatten` + `contains` misses the marker, and **the next question then
-//!   dies with "the composer never came up"** — a harness malfunction, not the question's answer,
-//!   yet both are the same red. The evidence and measurements live in that function's comment.
+//! ★**Markers are matched ignoring whitespace layout**([`mentions`])★ — under load this TUI draws a sentence word by word with cursor
+//!   moves, so stripped text loses its spaces; `flatten` + `contains` then misses the marker and **the next question dies with "the composer
+//!   never came up"** — a harness malfunction that is the same red as a real answer. Evidence: that function's comment.
 //!
-//! **§3-5 게이트** — 아래가 빨개지면 Phase 1 배선을 시작하지 않는다: **Q1 · Q4 · Q5 · Q8 · Q10**.
-//! Q3 · Q6 · Q9 는 게이트가 아니라 관측이다(어느 쪽으로 나오든 배선의 *모양* 이 아니라 인자 하나·기록이
-//! 갈린다). Q7(사람 눈 — 우리 xterm 에서 보기에 나은가)은 **이 시험대가 덮지 않는다**: 바이트에
-//! alt-screen 시퀀스가 있나(Q6)는 잴 수 있어도 "그래서 화면이 나은가" 는 여기서 못 잰다.
+//! **§3-5 gate** — if these go red Phase 1 wiring does not start: **Q1 · Q4 · Q5 · Q8 · Q10**. Q3 · Q6 · Q9 are observations, not gates
+//!   (either outcome changes one argument or a record, not the *shape* of the wiring). Q7 (does it look better in our xterm) is
+//! **not covered**: whether the bytes contain an alt-screen sequence (Q6) is measurable, "so is the screen better" is not.
 //!
-//! ★A fact the TRD did not know — a first-visit folder shows a **modal**
-//!   first★: a folder-trust prompt is drawn over the composer, and while
-//!   it is up keystrokes go to the modal, not the composer.
-//!   ★When it appears and what it says are per-version★ — measured on 0.163.0: a git-repo cwd
-//!   gets the trust modal, a non-git cwd gets no modal at all, and the wording changed.
-//!   (History: 0.153.4 also showed it for a non-git cwd — the old Q8 record.) So every question
-//!   about the composer or the cwd first goes through [`PtySession::pass_startup_modal`] until
-//!   the composer accepts keys, **modal or not** — that verb never reads the modal's wording.
-//!   ★Q8 being on that list is this file's most expensive lesson★ — while a modal holds the
-//!   process, "still Running after 5 s" **cannot be false**, so the old Q8, which never
-//!   passed the modal, never asked about the cwd policy. That green cell was in fact empty.
-//!   **Our spawn entry accepts any folder, so this is not just the harness's problem** — a
-//!   codex tab started in an unseen cwd takes no input until a person passes the modal.
+//! ★A fact the TRD did not know — a first-visit folder shows a **modal** first★: a folder-trust prompt is drawn over the composer and
+//!   keystrokes go to the modal while it is up. ★When it appears and what it says are per-version★ — 0.163.0: a git-repo cwd gets the trust
+//!   modal, a non-git cwd gets none, and the wording changed (0.153.4 also showed it for a non-git cwd — the old Q8 record). So every
+//!   composer or cwd question first goes through [`PtySession::pass_startup_modal`] until the composer accepts keys, **modal or not**;
+//!   that verb never reads the modal's wording. ★Q8 on that list is this file's most expensive lesson★: while a modal holds the process
+//!   "still Running after 5 s" **cannot be false**, so the old Q8, which never passed the modal, never asked about the cwd policy — a
+//!   green cell that was empty. **Our spawn entry accepts any folder, so this is not only the harness's problem**: a codex tab started in
+//!   an unseen cwd takes no input until a person passes the modal.
 //!
-//! ★**The real user home is never touched**★: passing the modal makes the CLI **write the folder
-//!   trust into its own config file**. Left alone, every harness run would pile dead entries for
-//!   deleted paths into the developer's real `~/.codex/config.toml` (it really did — that is why
-//!   [`LiveProbe::home_redirect`] exists). So every real spawn in this harness redirects the
-//!   CLI's state directory to **a temp home dug fresh per item**, and copies only the files
-//!   needed for auth from the real home. The temp home lives ★outside the system temp dir, on a
-//!   short path★ — codex requires both (evidence = [`Scratch::new_home`]).
-//!   ★That guarantee is measured too★ —
-//!   [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`] asserts
-//!   from both sides that the item's temp path **was written to the temp home and not to the
-//!   real home**. This paragraph used to be only a promise, kept by nobody but a human eye.
+//! ★**The real user home is never touched**★: passing the modal makes the CLI **write the folder trust into its own config file**; left
+//!   alone, every run would pile dead entries for deleted paths into the developer's real `~/.codex/config.toml` (it did — why
+//!   [`LiveProbe::home_redirect`] exists). So every real spawn redirects the CLI's state directory to **a temp home dug fresh per item**,
+//!   copying only the auth files from the real home. The temp home lives ★outside the system temp dir, on a short path★ — codex requires
+//!   both (evidence: [`Scratch::new_home`]). ★Measured too★:
+//!   [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`] asserts from both sides that the item's temp path
+//!   **was written to the temp home, not the real one**.
 //!
-//! 실 자식 프로세스를 띄우므로 `-- --test-threads=4` 로 돈다(TRD §7 0-2 · `.claude/skill-bindings/qa.md` 「모듈별 명령」).
-//!   ★보안 소프트웨어 DLL 이 프로세스 생성을 후킹하는 PC 에서는 1 로 낮춘다★ — 같은 문서의 「그래도
-//!   죽으면 2로 낮춘다」 조항과 같은 사유이고, 이 스위트는 한 항목이 실 CLI 를 여러 번 띄운다.
+// hangul-ok-begin
+//! It launches real child processes, so it runs with `-- --test-threads=4` (TRD §7 0-2 · `.claude/skill-bindings/qa.md` 「모듈별 명령」).
+// hangul-ok-end
+//!   ★On a PC where a security-software DLL hooks process creation, lower it to 1★ — same reason as that document's 「if it still dies,
+//!   lower it to 2」, and one item here launches the real CLI several times.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -113,219 +90,194 @@ use engram_dashboard_agent::types::{
 };
 use engram_dashboard_base::testing::wait_until;
 
-// ── 질문표 ───────────────────────────────────────────────────────────────────
+// ── Question table ───────────────────────────────────────────────────────────────────
 
-/// 실행 없이 대조하는 열 — 백엔드가 **스스로 신고하는** 값 전부. 새 백엔드 행은 이 칸들을 다 적어야
-/// 컴파일된다(그것이 "표가 채워져 있는가" 의 실물).
+/// Columns compared without running — every value the backend **reports about itself**. A new backend row compiles only if it fills all of
+///   them (the concrete form of "is the table filled").
 ///
-/// ★단 한 행을 채우는 데 필요한 칸이 이 구조체로 끝나지 않는다★ — [`BackendRow::can_resume_stored_session`]
-///   과 [`BackendRow::session_resume`] 도 기본값이 없어 함께 적어야 컴파일된다. 통로별로 갈리는 축이라
-///   그쪽에 사는 것이고, 「이 구조체를 채웠으니 행이 다 찼다」로 읽으면 그 칸들을 놓친다.
+/// ★Filling a row does not end with this struct★ — [`BackendRow::can_resume_stored_session`] and [`BackendRow::session_resume`] have no
+///   default either; they are per-link axes and live there, so 「this struct is filled, the row is complete」 misses them.
 struct Declared {
-    /// ★모드 무관이라 한 칸으로 둔다★ — 오늘 모든 백엔드가 두 통로에서 같은 값을 신고하고, 아래
-    /// [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 그 불변을 실제로 잰다. 갈리는
-    /// 날엔 이 칸도 [`BackendRow::can_resume_stored_session`] 처럼 통로별로 쪼개야 한다.
+    /// ★Mode-independent, one field★ — every backend reports the same value on both links
+    ///   ([`declarations_are_the_same_across_a_backend_s_two_channels`] measures that invariant); if they ever differ, split it per link
+    ///   like [`BackendRow::can_resume_stored_session`].
     assigns_session_id: bool,
     supports_control_channel: bool,
     accepts_mcp_config: bool,
-    /// 데몬이 이 백엔드에 **mcp-config 파일을 써 주나** — 위 칸과 갈린 축이다.
+    /// Does the daemon **write an mcp-config file** for this backend — an axis split from the field above.
     ///
-    /// ★위 칸에서 파생하지 말 것★: 위는 오늘 「MCP 로 우편을 쓰나」를 뜻하고, 이 칸은 「그 프로그램이
-    ///   우리가 쓴 파일을 경로로 읽나」다. 둘이 갈린 행(codex)이 이 칸을 세운 이유이고, true 인 행은
-    ///   스폰마다 평문 Bearer 토큰 JSON 을 디스크에 받는다(그 write 실패는 fail-closed — 스폰 중단).
+    /// ★Do not derive it from the field above★: that one means 「does it use mail via MCP」, this one 「does the program read the file we
+    ///   wrote by path」. A row where they differ (codex) is why this field exists, and a true row gets a plaintext Bearer token JSON on
+    ///   disk at every
+    ///   spawn (that write failing is fail-closed — spawn aborted).
     // ADR-0209
     writes_mcp_config_file: bool,
     reads_messages: bool,
-    /// 보내기 축 — 위 받기 축의 짝이다. ★둘이 갈린 행은 「보내기만 되는」 비대칭이므로 그 행의 사유가
-    /// 그 백엔드 폴더에 적혀 있어야 한다★.
+    /// The sending axis — the counterpart of the receiving axis above. ★A row where the two differ is the asymmetric 「can only send」, so
+    ///   that row's reason
+    /// must be written in that backend's folder★.
     uses_mail: bool,
     session_snapshot: bool,
-    /// ★This cell has real evidence — it does not stop at matching
-    /// declarations★: it claims "cwd and env are used as given", so
-    /// [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`]
-    /// measures each half with a real process (the working root is set
-    /// by `--cd` · env = the state directory passed in is really used).
+    /// ★This cell has real evidence, beyond matching declarations★: it claims "cwd and env are used as given", and
+    /// [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`] measures each half with a real process (working root
+    ///   set by `--cd` · env = the passed state directory is really used).
     ///
-    /// ★단 그 근거는 **실 프로브가 있는 행에만** 붙는다★ — `probe: None` 인 행(claude)의 이 칸은
-    ///   여전히 선언 대조뿐이고, 이 파일은 그 행의 cwd·env 를 잰 적이 없다. 그 행의 근거는 이 시험대
-    ///   밖에 있다(그 백엔드는 실 CLI 를 안 띄우기로 한 행이다 — [`BackendRow::probe`] 주석).
+    /// ★That ground attaches **only to rows with a real probe**★ — for `probe: None` (claude) this stays a declaration comparison and this
+    ///   file never measured that row's cwd·env (the row chose not to launch the real CLI — [`BackendRow::probe`] comment).
     session_cwd_env: bool,
     model_select: bool,
     model_temperature: bool,
     model_max_tokens: bool,
 }
 
-/// 운영 argv 에서 **정책 값만** 시험대용으로 바꾸는 규칙. 이것이 있어야 운영이 실제로 쓰는 argv 를
-/// 그대로 띄우면서도 이 시험대가 띄우는 에이전트가 아무것도 못 바꾼다.
+/// The rule that changes **only the policy values** in the operating argv for the bench, so the argv operation uses launches as is while
+///   the agent this bench launches can change nothing.
 ///
-/// ★왜 이것이 「인자를 다시 적는 것」이 아닌가★: 여기 적히는 것은 **기대하는 argv** 가 아니라 **시험대가
-///   허용하는 정책**이다. 운영이 어떤 인자를 내든 argv 자체는 [`production_spec`] 이 주고, 이 표는 그중
-///   지목한 칸의 값만 덮어쓴다. 그래서 운영이 인자를 더하거나 바꾸면 이 파일은 그것을 **모르는 채로 그대로
-///   띄우고** 실 CLI 가 그 판정을 낸다 — 그게 목적이다. 이 표가 커지면 그만큼 시험대가 운영과 달라지므로
-///   ★칸을 늘리기 전에 「이게 안전 봉투인가, 아니면 내가 재기 싫은 인자인가」를 묻는다★.
+/// ★Not 「writing the arguments again」★: what is written is not **the expected argv** but **the policy the bench allows**. The argv itself
+///   comes from [`production_spec`] and this table only overwrites designated fields, so argument changes in operation are **launched
+///   as is without knowing** and the real CLI decides. Growing this table diverges the bench from operation by that much, so ★before
+///   adding a field ask 「is this the safety envelope, or an argument I do not want to measure」★.
 struct SafetySwap {
-    /// `(플래그, 시험대가 쓸 값)`. ★argv 에 그 플래그가 없으면 그 자리에서 실패다★ — 무해하게 만들 수
-    /// 없는 argv 를 그냥 띄우느니 멈춘다.
+    /// `(flag, value the test bench uses)`. ★If the argv lacks that flag, it fails right there★ — rather than just launching an argv that
+    /// cannot be made harmless, it stops.
     values: &'static [(&'static str, &'static str)],
-    /// argv 어디에도 나오면 안 되는 조각. 값 한 칸을 덮어써도 **다른 인자가 그 벽을 우회**하기 때문에
-    /// (샌드박스 자체를 무르는 인자 · 승인을 자동 통과시키는 인자 · 망을 켜는 인자) 그 이름들을 따로 막는다.
-    /// 부분 문자열로 본다 — 값으로 오든 플래그로 오든 걸린다.
+    /// Fragments that must not appear anywhere in the argv — even with one value field overwritten, **other arguments bypass that wall**
+    ///   (undoing the sandbox · passing approval automatically · turning on the network). Checked as substrings, so a value or a flag is caught.
     forbidden: &'static [&'static str],
 }
 
-/// 실 프로세스로 묻는 열. `None` 인 행은 `--ignored` 레인에서 아예 안 뜬다.
+/// Columns asked of a real process. A row with `None` does not launch at all in the `--ignored` lane.
 struct LiveProbe {
-    /// PATH 로 해석되는 bare 실행파일 이름. ★이 값으로 프로세스를 띄우지 않는다★ — 스폰 argv 는
-    /// 전부 [`production_spec`] 이 백엔드에게서 받아 온다. 여기 남은 쓰임은 **PATH 해석 한 번**
-    /// ([`assert_program_present`] 의 `where`)뿐이고, 그 결과는 shim 사슬이 어디서 시작하는지를
-    /// 보여 주는 Q10 의 전제다.
+    /// A bare executable name resolved through PATH. ★No process is launched with this value★ (spawn argv comes from [`production_spec`]);
+    ///   its only use is **one PATH resolution** (`where` in [`assert_program_present`]), the premise of Q10 that shows where the shim
+    ///   chain starts.
     program: &'static str,
-    /// ★대화형 인자를 여기 적지 않는다★ — 운영 argv 는 [`production_spec`] 이 백엔드에게 물어서
-    /// 만들고, 이 표는 그 argv 를 **무해하게 만드는 규칙**만 갖는다. 기대하는 인자를 적는 칸이 아니다.
+    /// ★Interactive arguments are not written here★ — the operating argv is made by [`production_spec`] asking the backend,
+    /// and this table has only **the rules that make that argv harmless**. It is not a field for writing expected arguments.
     safety: SafetySwap,
-    /// Q6 — alt-screen 을 끄는 인자. `None` = 그런 인자가 없는 백엔드 → **Q6 은 그 행을 건너뛴다**.
+    /// Q6 — the argument that turns alt-screen off. `None` = a backend without it → **Q6 skips that row**.
     ///
-    /// ★왜 `Option` 인가★: 필수 `&'static str` 로 두면 그 인자가 없는 셋째 백엔드가 행을 채우려고
-    ///   **자리채움 문자열**을 적어야 하고, Q6 은 그것을 진짜 인자로 알고 스폰한다. "셋째 백엔드 = 행 하나"
-    ///   라는 이 파일의 계약이 그 자리에서 깨진다.
+    /// ★Why `Option`★: a required `&'static str` would make a third backend without that argument write **a placeholder** that Q6 would
+    ///   spawn with, breaking the "third backend = one row" contract.
     no_alt_screen_arg: Option<&'static str>,
-    /// Q3 — 파이프 stdin 을 거부할 때 그 CLI 가 내는 **말**. 종료코드만으로는 "stdin 이 tty 가 아니라서"
-    /// 죽었는지 다른 이유로 죽었는지 못 가른다(우리는 세 fd 를 전부 파이프로 준다). `None` = 그 문구를
-    /// 모르는 백엔드 → 종료코드만 본다.
+    /// Q3 — the **words** that CLI emits when it rejects piped stdin. The exit code alone cannot tell "stdin is not a tty" from another
+    ///   cause (all three fds are pipes). `None` = the backend does not know that phrase → only the exit code is looked at.
     stdin_refusal_marker: Option<&'static str>,
-    /// 이 CLI 의 **사용자별 상태 디렉터리**를 옮기는 길. `None` = 그런 길이 없는 백엔드 → 시험대가 실
-    /// 사용자 설정을 건드리게 되므로, 그 백엔드 행을 들일 때 복원 책임을 따로 져야 한다.
+    /// The way to move this CLI's **per-user state directory**. `None` = a backend without such a way → the test bench would touch the real
+    /// user settings, so admitting that backend row means taking on the restore responsibility separately.
     home_redirect: Option<HomeRedirect>,
-    /// Q9 — 호출자가 세션 id 를 정하는 플래그 이름. `None` = "그런 플래그가 없다" 는 주장이고,
-    /// Q9 가 `--help` 텍스트로 [`SESSION_ID_CANDIDATES`] 의 부재를 확인한다.
+    /// Q9 — the flag name with which the caller decides the session id. `None` is the claim "there is no such flag", and
+    /// Q9 confirms the absence of [`SESSION_ID_CANDIDATES`] in the `--help` text.
     session_id_flag: Option<&'static str>,
-    /// Q4 — 컴포저에 넣어 에코를 확인할 한 줄 본문. ★제출되면 모델이 실제로 답한다★ — 무해하고
-    /// 짧은 것만 둔다.
+    /// Q4 — a one-line body put in the composer to check the echo. ★If submitted, the model really answers★ — keep only
+    /// harmless, short ones.
     submit_body: &'static str,
-    /// Q5 — LF 로 이어 붙일 조각들. 조각이 전부 에코되면 여러 줄이 통째로 들어간 것이다.
+    /// Q5 — fragments to join with LF. If all fragments are echoed, multiple lines went in whole.
     multiline_parts: &'static [&'static str],
-    /// 컴포저가 **비어 있을 때** 그 자리에 그려지는 안내 문구.
+    /// The guidance phrase drawn in place of the composer **when it is empty**.
     ///
-    /// ★왜 필요한가★: 제출은 컴포저를 비운다 — 그러니 본문을 넣은 뒤 이 문구가 **다시 그려지면** 그
-    ///   입력은 제출된 것이다. 이 신호가 없으면 Q5 는 "본문 아닌 글자가 왔나" 로 판정할 수밖에 없는데,
-    ///   TUI 는 아무 입력 없이도 배너·모델명·사용량 안내를 다시 그려서 그 글자가 **응답인지 제 화면인지
-    ///   구분되지 않는다**(실측 — 그 잡음이 게이트를 헛발동시켰다).
-    /// `None` = a backend without that signal → Q5 only checks whether the screen
-    /// stays static. ★The startup probe ([`PtySession::pass_startup_modal`]) also
-    /// stands on this signal★ — with `None` that verb sends no key at all.
+    /// ★Why★: submitting empties the composer, so this phrase **drawn again** after putting in the body means the input was submitted.
+    ///   Without it Q5 could only ask "did characters other than the body come", but the TUI redraws banner·model name·usage guidance
+    ///   without input,
+    ///   so those cannot be told from a response (measured — that noise falsely fired the gate).
+    /// `None` = no such signal → Q5 only checks the screen stays static. ★The startup probe ([`PtySession::pass_startup_modal`]) stands on
+    ///   this signal too★ — with `None` that verb sends no key.
     composer_idle_marker: Option<&'static str>,
-    /// The **byte sequence** the CLI emits once startup (loading ·
-    /// first-visit modal) is over and the session is up. It is a control
-    /// sequence, not screen text, so rewording does not affect it.
-    /// `None` = a backend without such a signal → [`PtySession::pass_startup_modal`]
-    /// decides from the probe alone and can miss a modal that appears late, after loading.
+    /// The **byte sequence** the CLI emits once startup (loading · first-visit modal) is over and the session is up — a control sequence,
+    ///   not screen text, so rewording does not affect it.
+    /// `None` = no such signal → [`PtySession::pass_startup_modal`] decides from the probe alone and can miss a modal that appears late,
+    ///   after loading.
     ready_signal: Option<&'static [u8]>,
-    /// Q12 — does this CLI **print its own working-root path on screen**. `false` = it does
-    /// not → Q12 skips the screen-side check and looks only at the file-side evidence.
+    /// Q12 — does this CLI **print its own working-root path on screen**. `false` → Q12 skips the screen-side check and looks only at the
+    ///   file-side evidence.
     ///
-    /// ★Why yes/no instead of a marker string★: the label next to that path is
-    ///   per-version (0.153.4 = a `directory:` line in the header box, 0.163.0 = the
-    ///   bare path with no label — measured). The check was never about the label but
-    ///   about **whether the folder on screen is the one given via `--cd`**, so Q12
-    ///   deliberately runs the process in another folder and compares both leaf names.
+    /// ★Yes/no, not a marker string★: the label next to the path is per-version (0.153.4 `directory:` line in the header box, 0.163.0 bare
+    ///   path — measured). The check asks **whether the folder on screen is the one given via `--cd`**, so Q12 runs the process in another
+    ///   folder and
+    ///   compares both leaf names.
     shows_workspace_root: bool,
-    /// Q6 — `--no-alt-screen` 이 **PTY 바이트를 바꾸는가**. Phase 0 이 실측으로 채우는 칸이고, 테스트는
-    /// 관측이 이 선언과 같은지를 잰다.
+    /// Q6 — does `--no-alt-screen` **change the PTY bytes**. A field Phase 0 fills by measurement; the test measures whether the
+    ///   observation equals this declaration.
     ///
-    /// ★왜 「달라야 한다」로 단언하지 않나★: Q6 은 게이트가 아니라 관측이라 어느 쪽 값이든 정답이다
-    ///   (§3-5 에 이 행이 없는 이유). 값을 여기 적어 두면, 그 값이 바뀌는 날 이 항목이 빨개져 §4-11 의
-    ///   권고를 다시 읽으라고 말해 준다 — 한쪽으로 박아 두면 그건 결정을 테스트에 숨기는 것이다.
+    /// ★Not asserted as 「must differ」★: Q6 is an observation, not a gate (so not in §3-5). A value change turns this item red, telling you
+    ///   to re-read §4-11's recommendation — pinning one way would hide the decision inside the test.
     no_alt_screen_changes_bytes: bool,
 }
 
-/// CLI 의 상태 디렉터리를 임시 홈으로 돌리는 법. 이것이 있어야 시험대가 **개발자의 실 설정을 안 건드린다**.
+/// How to turn the CLI's state directory to a temporary home. With this, the test bench **does not touch the developer's real settings**.
 struct HomeRedirect {
-    /// 상태 디렉터리를 가리키는 환경변수 이름(codex = `CODEX_HOME`, 실측 0.153.4 — 임시 홈으로 돌리면
-    /// `codex mcp list` 가 실 홈의 서버를 못 본다).
+    /// The name of the environment variable that points at the state directory (codex = `CODEX_HOME`, measured 0.153.4 — when turned to a
+    ///   temporary home
+    /// `codex mcp list` does not see the real home's servers).
     env: &'static str,
-    /// 그 변수가 안 걸렸을 때의 기본 위치(사용자 홈 기준 상대 경로). 씨앗 파일을 여기서 퍼 온다.
+    /// The default location when that variable is not set (a relative path from the user home). Seed files are scooped from here.
     default_subdir: &'static str,
-    /// Files that must be **copied into the temp home for the CLI to stay logged in**.
-    /// Without them the TUI shows a login screen instead of the composer and everything
-    /// from Q1 on collapses (measured: empty home = `Not logged in`). ★If even one cannot
-    /// be copied, the harness stops before spawning★ ([`sandbox_home`]) — the login
-    /// screen is a cursor-hidden list, i.e. a screen the startup verb could press CR on.
+    /// Files that must be **copied into the temp home for the CLI to stay logged in**. Without them the TUI shows a login screen instead
+    ///   of the composer and everything from Q1 on collapses (measured: empty home = `Not logged in`). ★If even one cannot be copied the
+    ///   harness stops
+    /// before spawning★ ([`sandbox_home`]) — the login screen is a cursor-hidden list, a screen the startup verb could press CR on.
     ///
-    /// ★The copies are credentials★ — [`Scratch`]'s `Drop` deletes **these copies
-    ///   first**, then the folder. If a child still holds a file it retries up to a
-    ///   limit, and if anything is still left it prints the path to stderr. ★Best
-    ///   effort, not a guarantee★ — if the test process is killed, `Drop` never runs and
-    ///   the copy stays under `%LOCALAPPDATA%\ebc\` (not a place `cargo clean` clears).
+    /// ★The copies are credentials★ — [`Scratch`]'s `Drop` deletes **these copies first**, then the folder, retrying up to a limit and
+    ///   printing any remaining path to stderr. ★Best effort, not a guarantee★: if the test process is killed `Drop` never runs and the
+    ///   copy stays
+    ///   under `%LOCALAPPDATA%\ebc\` (not cleared by `cargo clean`).
     seed_files: &'static [&'static str],
-    /// Files **written fresh** into the temp home —
-    /// `(file name, content)`. Applied after the copies.
+    /// Files **written fresh** into the temp home — `(file name, content)`, applied after the copies.
     ///
-    /// ★Why it is needed — measured 2026-09-07★: starting codex 0.153.4 with an empty home shows
-    ///   **one more modal after** the folder-trust modal (`Set up the Codex agent sandbox …`).
-    ///   Its default choice is `1. Set up default sandbox (requires Administrator permissions)`,
-    ///   ★a screen an automated test must never pass with CR★ — passing it requests an
-    ///   elevation. And while it is up the composer takes no keys, so Q4·Q5 get no echo and die
-    ///   (they really did; that failure is this field's evidence).
-    /// ★So we write "the answer the real home already has"★: the developer's real
-    ///   `config.toml` already holds `[windows] sandbox = "unelevated"`, so that
-    ///   modal does not appear. Production spawns meet that same home, so writing it
-    ///   does not dress up the observation — it **matches production conditions**.
-    ///   ★But no folder-trust entry (`[projects.*]`) is written★ — that modal is a
-    ///   screen production's first-visit tab really meets, so passing it is part of
-    ///   what is observed, and the entry's key is chosen by the CLI itself (measured
-    ///   0.163.0: not the `C:\Users\<user>~1\…` we pass but **the lower-case long path
-    ///   of the repo root**, `c:\users\<user>\…`). Pre-writing it would make this file
-    ///   mimic that normalization and need fixing every time the CLI changes it.
+    /// ★Why★: codex 0.153.4 with an empty home shows **one more modal after** the folder-trust modal (`Set up the Codex agent sandbox …`)
+    ///   whose default is `1. Set up default sandbox (requires Administrator permissions)` — ★a screen an automated test must never pass
+    ///   with CR★
+    ///   (it requests elevation); while it is up the composer takes no keys and Q4·Q5 die (they did — this field's evidence).
+    /// ★So we write "the answer the real home already has"★: the developer's real `config.toml` holds `[windows] sandbox = "unelevated"`,
+    ///   so that modal does not appear. Production spawns meet that same home, so this **matches production conditions** rather than
+    ///   dressing up the observation.
+    ///   ★No folder-trust entry (`[projects.*]`) is written★: that modal is a screen production's first-visit tab really meets, so passing
+    ///   it is part of what is observed, and the CLI chooses the entry's key itself (0.163.0: not the `C:\Users\<user>~1\…` we pass but
+    ///   **the lower-case
+    ///   long path of the repo root**); pre-writing would make this file mimic that normalization.
     seed_writes: &'static [(&'static str, &'static str)],
-    /// Whether the temp home holds the **folder-trust decision** for
-    /// `workspace` — if so, that entry as one human-readable line.
+    /// Whether the temp home holds the **folder-trust decision** for `workspace` — if so, that entry as one human-readable line.
     ///
-    /// ★Why it is needed★: the startup verb ([`PtySession::pass_startup_modal`]) presses
-    ///   CR without reading the modal's wording. So whether the screen passed with CR
-    ///   **really was the folder-trust modal** can only be checked by its result — did a
-    ///   trust entry appear. Searching the files for the path text (`find_text_under`)
-    ///   does not do — it also matches when a warning screen logs that path.
+    /// ★Why★: the startup verb ([`PtySession::pass_startup_modal`]) presses CR without reading the modal's wording, so whether the screen
+    ///   passed **really was the folder-trust modal** can only be checked by its result — a trust entry appearing. Searching the files for
+    ///   the path
+    ///   text (`find_text_under`) does not do: a warning screen logging that path matches too.
     trusted_entry: fn(home: &Path, workspace: &Path) -> Option<String>,
 }
 
 struct BackendRow {
     name: &'static str,
     backend: &'static dyn AgentBackend,
-    /// 선언을 물을 때 넘기는 명령 표본.
+    /// A command sample passed when asking the declarations.
     sample: AgentCommand,
-    /// 같은 백엔드의 **둘째 통로** 표본. `None` = 통로가 하나뿐인 백엔드.
+    /// A sample of the **second link** of the same backend. `None` = only one link.
     ///
-    /// ★행이 아니라 질문이 느는 자리다★ — 둘째 통로는 다른 프로그램이 아니라 같은 프로그램을 다른
-    ///   모양으로 띄우는 것이라, `Declared` 를 한 벌 더 적으면 같은 답을 두 곳에 베끼게 된다. 대신
-    ///   [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 **두 통로의 답이 갈리지
-    ///   않는가**를 묻는다 — 갈려야 하는 축(통로 모양·인코딩·번역기)은 그 아래 질문이 따로 잰다.
+    /// ★Questions grow here, not rows★ — the second link is the same program launched in another shape, so another `Declared` set would
+    ///   copy answers into two places; [`declarations_are_the_same_across_a_backend_s_two_channels`] asks **whether the two answers do not
+    ///   differ**, and
+    /// the axes that must differ (link shape·encoding·translator) are measured by the questions below it.
     alt_sample: Option<AgentCommand>,
     declared: Declared,
-    /// **통로별로** 적는 선언 축 = 「저장된 backend sid 로 이어받을 수 있나」. `.0` =
-    /// [`BackendRow::sample`] 의 답, `.1` = [`BackendRow::alt_sample`] 의 답(`None` = 둘째 통로 없음).
+    /// The declaration axis written **per link** = 「can it resume with the stored backend sid」. `.0` = for [`BackendRow::sample`], `.1` =
+    ///   for [`BackendRow::alt_sample`] (`None` = no second link).
     ///
-    /// ★오늘은 어느 행도 두 통로의 답이 갈리지 않는다 — 그런데도 통로별로 두는 이유★: 이 축은 **갈린 적이
-    ///   있고 또 갈릴 수 있는** 칸이다. codex 행이 한동안 `(false, Some(true))` 였다(터미널 모드에 이어받기
-    ///   배선이 없던 시절). 한 칸으로 접으면 그런 상태가 이 표에서 **아예 안 보이고**, [`Declared`] 로
-    ///   옮기면 그때 [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 거짓이 되어 표를
-    ///   다시 짜야 한다. 지금 두 칸이 같다는 것이 그 대비를 걷을 근거는 아니다.
+    /// ★No row differs today — still per link★: this axis **has differed and can again** (the codex row was `(false, Some(true))` while
+    ///   terminal mode had no resume wiring). One field would hide that state, and moving it to [`Declared`] would make
+    ///   [`declarations_are_the_same_across_a_backend_s_two_channels`] false then, forcing a table redo.
     can_resume_stored_session: (bool, Option<bool>),
-    /// 같은 통로별 모양으로 적는 **caps 신고 칸** = `capabilities(cmd).session.resume`.
+    /// The **caps report field** in the same per-link shape = `capabilities(cmd).session.resume`.
     ///
-    /// ★바로 위 칸과 한 칸으로 접지 말 것★ — 묻는 곳이 다르다: 위는 활성화 입구가 「Resume 으로
-    ///   띄울까」를 판정하는 축이고, 이 칸은 그 결과를 소비자(프론트·wire)에게 신고하는 값이다. 오늘은
-    ///   모든 행에서 둘이 같지만, 갈리면 **이어받지 않는 스폰이 이어받는다고 신고**되거나 그 반대가
-    ///   되므로 그 어긋남이 이 표에서 보여야 한다.
-    /// ★[`Declared`] 에 없는 이유★ — 바로 위 칸과 짝이라 같은 모양으로 둔다. 두 칸이 갈리면 [`Declared`]
-    ///   에 둔 쪽이 [`declarations_are_the_same_across_a_backend_s_two_channels`] 를 거짓으로 만드는데,
-    ///   codex 행에서 실제로 그런 적이 있다(위 칸의 doc). 지금 어느 행도 안 갈린다는 것이 이 배치를
-    ///   되돌릴 근거는 아니다 — 되돌리면 다음에 갈릴 때 표를 다시 짜야 한다.
+    /// ★Do not fold it into the field above★ — they are asked in different places: the one above is the axis on which the activation entry
+    ///   decides 「launch with Resume?」, this one reports the result to consumers (frontend·wire). Same in every row today, but if they differ
+    ///   **a non-resuming spawn is reported as resuming** or the reverse, so that mismatch must be visible in this table.
+    /// ★Why not in [`Declared`]★ — it pairs with the field above; differing values in [`Declared`] would make
+    ///   [`declarations_are_the_same_across_a_backend_s_two_channels`] false, as happened in the codex row (the field above's doc).
     session_resume: (bool, Option<bool>),
     probe: Option<LiveProbe>,
 }
 
-/// Q9 가 `--help` 에서 부재를 확인하는 이름들. 하나라도 나오면 그 백엔드는 호출자가 세션 id 를 정할
-/// 수 있다는 뜻이라 [`LiveProbe::session_id_flag`] 가 `None` 인 것이 거짓이 된다.
+/// The names whose absence Q9 confirms in `--help`. If even one appears, that backend lets the caller decide the session id,
+/// so [`LiveProbe::session_id_flag`] being `None` becomes false.
 const SESSION_ID_CANDIDATES: &[&str] = &["--session-id", "--session", "--resume"];
 
 static CLAUDE_BACKEND: ClaudeBackend = ClaudeBackend;
@@ -348,7 +300,7 @@ fn backend_table() -> Vec<BackendRow> {
                 assigns_session_id: true,
                 supports_control_channel: true,
                 accepts_mcp_config: true,
-                // 이 행만 파일을 **경로로 읽는다**(`--mcp-config <path>`) — 그래서 유일하게 true 다.
+                // Only this row **reads the file by path** (`--mcp-config <path>`) — so it is the only true one.
                 writes_mcp_config_file: true,
                 reads_messages: true,
                 uses_mail: true,
@@ -358,12 +310,11 @@ fn backend_table() -> Vec<BackendRow> {
                 model_temperature: false,
                 model_max_tokens: false,
             },
-            // 두 통로 다 `--resume <sid>` 로 이어받는다(실측).
+            // Both links resume with `--resume <sid>` (measured).
             can_resume_stored_session: (true, Some(true)),
             session_resume: (true, Some(true)),
-            // 실 claude 를 띄우지 않는다: 이 열은 이미 실측으로 채워져 있고, 실 claude 의존 테스트가
-            // CI 에서 **fn 이름으로 `--skip`** 되는 미결이 바로 그 형태다(TRD §3-2). 시험대는 그 목록을
-            // 늘리지 않는다.
+            // The real claude is not launched: this column is already filled by measurement, and the open item where tests depending on
+            //   the real claude are **`--skip`ped by fn name** in CI has exactly that shape (TRD §3-2); the bench does not grow that list.
             probe: None,
         },
         BackendRow {
@@ -378,30 +329,28 @@ fn backend_table() -> Vec<BackendRow> {
                 output_format: AgentOutputFormat::StreamJson,
             }),
             declared: Declared {
-                // ★실측이 도장 찍은 값이다★ — 세션 id 의 발급 주체가 codex 라 호출자가 정할 수 없다
-                //   (`session_id_flag: None` 이 그 짝). 사유의 정본은 `backend/codex/`.
-                //   ★이 칸을 아래 `reads_messages` 와 엮어 읽지 말 것★ — 옛 주석이 여기에 「턴을
-                //   관측할 수 없어 수신자 명단에서 뺀다」를 붙여 뒀었는데, 그 축은 ADR-0116 결정 7 이
-                //   기각한 전제였고 이제 그 칸은 true 다.
+                // ★A value stamped by measurement★ — codex issues the session id, so the caller cannot decide it (`session_id_flag: None`
+                //   is the counterpart); canonical reason: `backend/codex/`.
+                //   ★Do not read this field tied to `reads_messages` below★ — an old comment tied it to 「turns cannot be observed, so
+                //   removed from the recipient list」, a premise ADR-0116 decision 7 rejected; that field is now true.
                 assigns_session_id: false,
                 supports_control_channel: true,
-                // ★이름대로 읽으면 틀린 값이다 — codex 는 우리 mcp-config **파일**을 여전히 못 먹는다★.
-                //   켜 둔 것은 데몬이 이 칸으로 우편 채널까지 파생하기 때문이고, 실제 부착은
-                //   `-c mcp_servers.engram={…}` 한 값이 한다. 사유·대가의 정본은 `backend/codex/`.
+                // ★By its name this is a wrong value — codex still cannot take our mcp-config **file**★. It is on because the daemon
+                //   derives even the mail channel from this field; the actual attaching is the single `-c mcp_servers.engram={…}`.
+                //   Canonical reason·price: `backend/codex/`.
                 accepts_mcp_config: true,
-                // ★위 칸이 true 인데 이 칸은 false — 그 갈림이 이 칸의 존재 이유다★: codex 에는 우리가
-                //   쓴 파일을 가리킬 플래그가 없다(실측 0.155.0). 겸직하던 동안 이 행은 아무도 안 여는
-                //   평문 토큰 파일을 스폰마다 받았고 그 write 실패가 스폰을 끊을 수 있었다. 사유의
-                //   정본은 `backend/codex/` 의 그 메서드 주석.
+                // ★The field above is true, this one false — that split is its reason to exist★: codex has no flag pointing at a file we
+                //   wrote (measured 0.155.0); while doubled up, this row received an unread plaintext token file at every spawn and a
+                //   failed write could cut the
+                //   spawn. Canonical reason: that method's comment in `backend/codex/`.
                 // ADR-0209
                 writes_mcp_config_file: false,
-                // ★false 로 되돌리지 말 것 — 「턴 신호가 없다」는 그 사유를 ADR-0116 결정 7 이
-                //   기각했다★: 터미널 claude 가 같은 자리(신호 0)에서 이미 받는다. 대가(턴 한가운데
-                //   꽂힘 · 모달 위젯이 먹음)는 그 결정이 명시 수용한 것이고, 정본은 `backend/codex/`
-                //   의 `reads_messages` doc.
+                // ★Do not revert to false — ADR-0116 decision 7 rejected 「there is no turn signal」★: terminal claude already receives in
+                //   the same place (0 signals); the price (stuck mid-turn · eaten by a modal widget) was explicitly accepted — canonical:
+                //   `backend/codex/`'s `reads_messages` doc.
                 reads_messages: true,
-                // ★이 행의 두 칸이 **함께 열려 있다**★ — 보내기·받기가 같이 서야 ADR-0209 결정 4 의
-                //   「받기 먼저」 순서를 지킨다. 한쪽만 되돌리면 그 결정이 없애려던 비대칭이 살아난다.
+                // ★The two fields of this row are **open together**★ — sending·receiving must stand together to keep ADR-0209 decision 4's
+                //   「receive first」 order. Reverting only one side revives the asymmetry that decision meant to remove.
                 uses_mail: true,
                 session_snapshot: false,
                 session_cwd_env: true,
@@ -409,21 +358,22 @@ fn backend_table() -> Vec<BackendRow> {
                 model_temperature: false,
                 model_max_tokens: false,
             },
-            // ★두 통로가 같은 답을 낸다 — 이어받는 **수단**만 갈린다★: app-server 는 받아 적은
-            //   thread id 로 `thread/resume` 을 내고, 터미널 모드는 같은 id 를 `codex resume <id>` 로
-            //   실어 띄운다(ADR-0208 — 그 모드의 손잡이는 훅이 제어 평면으로 되돌려 준다).
-            //   두 줄이 **같이** 갈리는 것이 여전히 요점이다: 한쪽만 켜지면 이어받은 적 없는 새 스레드가
-            //   「이어받음」으로 보고된다. 사유의 정본은 `backend/codex/` 의 그 두 메서드 주석.
+            // ★The two links give the same answer — only the **means** differ★: the app-server issues `thread/resume` with the thread id
+            //   it received and wrote down, and terminal mode launches with the same id in `codex resume <id>` (ADR-0208). The two lines
+            //   splitting
+            //   **together** is the point: one side alone would report a never-resumed thread as 「resumed」. Canonical reason: those two
+            //   methods' comments in `backend/codex/`.
             can_resume_stored_session: (true, Some(true)),
             session_resume: (true, Some(true)),
             probe: Some(LiveProbe {
                 program: "codex",
-                // 운영은 `-s workspace-write -a on-request` 로 띄운다(그 argv 를 그대로 받아 온다).
-                // 여기서 바꾸는 것은 그 두 칸의 **값**뿐이다 — `read-only` = 모델이 내는 명령을 읽기 전용
-                // 샌드박스로만 실행 · `never` = 승인을 사람에게 묻지 않는다(물으면 자동 레인이 멈춘다).
-                // 금지 명단은 「값 한 칸을 덮어써도 봉투가 뚫리는」 인자들이다: 샌드박스를 통째로 무르는
-                // 둘, 승인을 workspace-write 샌드박스로 자동 우회시키는 `--approve-for-me`, 그리고 망을
-                // 켜는 `--search`(이 시험대는 망 작업을 하지 않는다). 이름 정본 = `codex --help` 0.153.4.
+                // Operation launches with `-s workspace-write -a on-request` (received as is); only the **values** of those two fields
+                //   change — `read-only` = commands the model issues run only in a read-only sandbox · `never` = no human approval (asking
+                //   would stop the automatic lane).
+                // The deny list is what 「pierces the envelope even with one value field overwritten」: the two that undo the sandbox
+                //   entirely, `--approve-for-me` (automatically bypasses approval via the workspace-write sandbox) and `--search` (turns
+                //   on the network; this bench does no network
+                // work). Names: `codex --help` 0.153.4.
                 safety: SafetySwap {
                     values: &[("-s", "read-only"), ("-a", "never")],
                     forbidden: &[
@@ -435,27 +385,22 @@ fn backend_table() -> Vec<BackendRow> {
                     ],
                 },
                 no_alt_screen_arg: Some("--no-alt-screen"),
-                // 실측 M1(TRD §2) 의 그 문장 그대로. Q3 은 이 말이 나와야 "stdin 이 tty 가 아니라서" 를
-                // 단언할 수 있다.
+                // That sentence of measurement M1 (TRD §2) verbatim. Q3 can assert "because stdin is not a tty" only if these words
+                // appear.
                 stdin_refusal_marker: Some("stdin is not a terminal"),
                 home_redirect: Some(HomeRedirect {
                     env: "CODEX_HOME",
                     default_subdir: ".codex",
-                    // Auth alone brings the logged-in state with it
-                    // (measured: in an empty home with only this file copied,
-                    // `codex login status` = `Logged in using ChatGPT`).
-                    // ★`version.json` is not copied★ — if it names a newer release than the
-                    // installed one, 0.163.0 shows an update modal right at start (measured: a
-                    // home with `latest_version` set to 99.0.0 =
-                    // `1. Update now (runs npm install -g @openai/codex)` as the default choice
-                    // · cursor hidden). A CR on that screen runs a global `npm install`.
+                    // Auth alone brings the logged-in state (measured: empty home with only this file copied → `codex login status` =
+                    //   `Logged in using ChatGPT`).
+                    // ★`version.json` is not copied★ — if it names a newer release than installed, 0.163.0 shows an update modal at start
+                    //   (measured: `latest_version` 99.0.0 = `1. Update now (runs npm install -g @openai/codex)` as default · cursor
+                    //   hidden); CR there runs a global `npm install`.
                     seed_files: &["auth.json"],
-                    // `check_for_update_on_startup = false` turns off the update check and
-                    // its modal (measured 0.163.0: even with a `version.json` naming 99.0.0
-                    // no modal appears and the composer comes straight up · without that
-                    // file none is created). `[windows] sandbox` is the real home's value
-                    // as-is — without it a sandbox-setup modal asking for administrator
-                    // rights follows the trust modal (measured — see the field doc).
+                    // `check_for_update_on_startup = false` turns off the update check and its modal (measured 0.163.0: even with a
+                    //   `version.json` naming 99.0.0 no modal, composer comes straight up). `[windows] sandbox` is the real home's value
+                    //   as-is — without it a
+                    // sandbox-setup modal asking for administrator rights follows the trust modal (see the field doc).
                     seed_writes: &[(
                         "config.toml",
                         "check_for_update_on_startup = false\n\n[windows]\nsandbox = \"unelevated\"\n",
@@ -466,47 +411,43 @@ fn backend_table() -> Vec<BackendRow> {
                 submit_body: "say OK",
                 multiline_parts: &["hi", "there"],
                 composer_idle_marker: Some("Ask Codex to do anything"),
-                // Measured 0.163.0 — once the session is up it announces `state=idle`
-                // via OSC 7501 (both alt-screen and `--no-alt-screen`). Not while the
-                // trust modal is up; it comes after the modal is accepted.
+                // Measured 0.163.0 — once the session is up it announces `state=idle` via OSC 7501 (alt-screen and `--no-alt-screen`
+                //   alike), not while the trust modal is up but after it is accepted.
                 ready_signal: Some(b"\x1b]7501;state=idle"),
-                // The working-root path is printed in the header box and the bottom
-                // line (measured 0.163.0). ★The TUI shortens paths to fit the width, so
-                // Q12 measures with **a short leaf name + a wide PTY**★ — at 80 columns
-                // the front is cut to `…` (measured on a 0.153.4 Q8 screen dump).
+                // The working-root path is printed in the header box and the bottom line (0.163.0). ★The TUI shortens paths to fit the
+                //   width, so Q12 measures with **a short leaf name + a wide PTY**★ — at 80 columns the front is cut to `…`.
                 shows_workspace_root: true,
-                // Measured 0.163.0 — the default mode emits alt-screen entry
-                // (`?1049h`) and mouse tracking (`?1003;1006h`), and `--no-alt-screen`
-                // emits neither. So without the flag this version's TUI is alt-screen.
+                // Measured 0.163.0 — the default mode emits alt-screen entry (`?1049h`) and mouse tracking (`?1003;1006h`);
+                //   `--no-alt-screen` emits neither. So without the flag this version's TUI is alt-screen.
                 no_alt_screen_changes_bytes: true,
             }),
         },
     ]
 }
 
-// ── 선언 항목 (실행 없음 — CI 에서 돈다) ─────────────────────────────────────
+// ── Declaration items (no execution — they run in CI) ─────────────────────────────────────
 
 #[test]
 fn declaration_table_is_filled_for_every_backend() {
     let table = backend_table();
     assert!(
         !table.is_empty(),
-        "질문표가 비었다 — 시험대가 아무것도 안 재고 있다"
+        "the question table is empty — the test bench is measuring nothing"
     );
 
     for row in &table {
         assert_declared(row.name, row.backend, &row.sample, &row.declared);
     }
 
-    // ★`#[ignore]` 레인이 공회전하지 않는다는 것도 여기서 지킨다★: 실 프로브 행이 하나도 없으면
-    //   Q1~Q10 은 빈 순회로 전부 초록이 된다. 그 침묵을 이 항목이 잡는다.
+    // ★This also guards that the `#[ignore]` lane does not idle★: if there is not a single real probe row,
+    //   Q1~Q10 all go green as an empty loop. This item catches that silence.
     assert!(
         table.iter().any(|r| r.probe.is_some()),
-        "실 프로브 행이 하나도 없다 — Q1~Q10 이 빈 순회로 조용히 통과한다"
+        "there is not a single real probe row — Q1~Q10 quietly pass as an empty loop"
     );
 }
 
-/// 한 표본에 대해 선언 열 전부를 대조한다.
+/// Compares every declaration column for one sample.
 fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentCommand, d: &Declared) {
     {
         let row_sample = sample;
@@ -528,7 +469,7 @@ fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentComma
         assert_eq!(
             b.writes_mcp_config_file(),
             d.writes_mcp_config_file,
-            "{name}: writes_mcp_config_file — true 면 스폰마다 평문 토큰 JSON 이 디스크에 쓰인다"
+            "{name}: writes_mcp_config_file — if true, a plaintext token JSON is written to disk at every spawn"
         );
         assert_eq!(b.uses_mail(), d.uses_mail, "{name}: uses_mail");
         assert_eq!(
@@ -537,8 +478,8 @@ fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentComma
             "{name}: reads_messages"
         );
 
-        // ★`session.resume` 은 여기서 안 잰다★ — 통로마다 갈리는 칸이라
-        //   [`resume_eligibility_is_declared_per_channel`] 이 통로별로 잰다.
+        // ★`session.resume` is not measured here★ — it is a field that differs per link, so
+        //   [`resume_eligibility_is_declared_per_channel`] measures it per link.
         let caps = b.capabilities(row_sample);
         assert_eq!(
             caps.session.snapshot, d.session_snapshot,
@@ -560,17 +501,13 @@ fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentComma
     }
 }
 
-/// ★둘째 통로가 선언을 조용히 갈아치우지 않는가★ — 같은 프로그램을 다른 모양으로 띄우는 것이라 우편
-/// 자격·제어 채널·세션 능력은 통로가 바뀌어도 같아야 한다.
+/// ★Does the second link not quietly replace the declarations★ — same program in another shape, so mail eligibility·control
+///   channel·session capabilities must stay the same across links.
 ///
-/// ★이 항목이 실제로 재는 것은 **명령을 받는** getter 뿐이다★ — 인자를 안 받는 getter 는 표본과
-/// 무관하므로 위 [`declaration_table_is_filled_for_every_backend`] 가 잰 것을 되풀이할 뿐이고 여기서
-/// 따로 깨질 수 없다. 오늘 실제로 갈릴 수 있는 칸 = `capabilities(sample)` 와
-/// `assigns_session_id(sample)` 둘.
-///
-/// ★통로마다 갈리는 축은 여기 없다★ — 이 항목의 주장이 「두 통로의 답이 같다」이므로, 갈리는 축을
-///   [`Declared`] 에 넣으면 이 단언이 거짓이 된다. 그쪽은
-///   [`resume_eligibility_is_declared_per_channel`] 이 통로별로 잰다.
+/// ★Measures only the getters that **take a command**★ — a no-argument getter is unrelated to the sample and repeats
+///   [`declaration_table_is_filled_for_every_backend`]. Fields that can differ today: `capabilities(sample)` and `assigns_session_id(sample)`.
+/// ★Per-link axes are not here★ — this item claims 「the two answers are the same」, so a differing axis in [`Declared`] makes it false;
+///   that side is measured per link by [`resume_eligibility_is_declared_per_channel`].
 #[test]
 fn declarations_are_the_same_across_a_backend_s_two_channels() {
     for row in &backend_table() {
@@ -579,27 +516,25 @@ fn declarations_are_the_same_across_a_backend_s_two_channels() {
     }
 }
 
-/// 통로마다 갈리는 축을 **통로별로** 대조한다. ★이 항목이 없으면 둘째 통로의 답은 표에 적혀 있어도 아무
-/// 데서도 안 불린다★ — 위 두 항목은 [`Declared`] 만 보고, 그 열은 두 통로가 같다는 전제로 서 있다.
+/// Compares the per-link axes **per link**. ★Without this item the second link's answer, though written in the table, is called nowhere★ —
+///   the two items above look only at [`Declared`], which assumes the two links are the same.
 ///
-/// ★짝이 안 맞는 것도 여기서 잡는다★: 둘째 통로를 적어 놓고 그 답을 비우면(또는 그 반대) 그 행은 조용히
-///   절반만 재진다.
-/// ★두 칸을 **함께** 잰다★ — 판정 축([`AgentBackend::can_resume_stored_session`])과 신고 칸
-///   (`capabilities().session.resume`). 한쪽만 재면 둘이 갈린 상태가 초록으로 지나가고, 그 상태의 증상은
-///   「이어받지 않는 스폰이 이어받는다고 신고된다」(또는 그 반대)다.
+/// ★It also catches mismatched pairs★: a second link written with its answer left empty (or the reverse) is quietly half measured.
+/// ★It measures the two fields **together**★ — the decision axis ([`AgentBackend::can_resume_stored_session`]) and the report field
+///   (`capabilities().session.resume`); one alone lets the differing state pass green (symptom: 「or the reverse」).
 #[test]
 fn resume_eligibility_is_declared_per_channel() {
     for row in &backend_table() {
         assert_eq!(
             row.backend.can_resume_stored_session(&row.sample),
             row.can_resume_stored_session.0,
-            "{}: 첫째 통로의 이어받기 축 불일치",
+            "{}: resume axis mismatch on the first link",
             row.name
         );
         assert_eq!(
             row.backend.capabilities(&row.sample).session.resume,
             row.session_resume.0,
-            "{}: 첫째 통로의 이어받기 신고 칸 불일치",
+            "{}: resume report field mismatch on the first link",
             row.name
         );
         let alt_expected = (row.can_resume_stored_session.1, row.session_resume.1);
@@ -608,31 +543,29 @@ fn resume_eligibility_is_declared_per_channel() {
                 assert_eq!(
                     row.backend.can_resume_stored_session(alt),
                     axis,
-                    "{}: 둘째 통로의 이어받기 축 불일치 — 이 칸이 그 모드가 이 표에 보이는 유일한 자리다",
+                    "{}: resume axis mismatch on the second link — this field is the only place that mode is visible in this table",
                     row.name
                 );
                 assert_eq!(
                     row.backend.capabilities(alt).session.resume,
                     caps,
-                    "{}: 둘째 통로의 이어받기 신고 칸 불일치 — 축과 갈리면 보고가 거짓이 된다",
+                    "{}: resume report field mismatch on the second link — if it differs from the axis, the report becomes false",
                     row.name
                 );
             }
             (None, (None, None)) => {}
             _ => panic!(
-                "{}: 둘째 통로와 그 답 중 한쪽만 적혔다 — 통로가 있는데 답이 비면 그 모드는 안 재진다",
+                "{}: only one of the second link and its answer is written — if there is a link but the answer is empty, that mode is not measured",
                 row.name
             ),
         }
     }
 }
 
-/// 둘째 통로를 **가진다고 적어 놓고 같은 통로를 적는 것**을 막는다 — 그러면 위 항목이 같은 표본을 두 번
-/// 물어 아무것도 재지 않는다.
+/// Prevents **writing down a second link and then writing the same link** — the item above would ask the same sample twice and measure nothing.
 ///
-/// ★코덱 축(인코더·번역기·통로 모양)의 값 자체는 `backend/mod.rs` 의 선언 표 트립와이어가 잰다★ —
-/// 여기서 그 값을 다시 적으면 같은 사실이 두 집에 살게 된다. 이 항목이 묻는 것은 **두 통로가 실제로
-/// 다른가** 하나다.
+/// ★The codec axis values (encoder·translator·link shape) are measured by the declaration table tripwire in `backend/mod.rs`★ — repeating
+///   them here would put one fact in two houses; this item asks only **are the two links actually different**.
 #[test]
 fn a_second_channel_is_actually_a_different_channel() {
     for row in &backend_table() {
@@ -641,15 +574,14 @@ fn a_second_channel_is_actually_a_different_channel() {
         let second = row.backend.transport_shape(alt);
         assert_ne!(
             first, second,
-            "{}: 둘째 통로가 첫째와 같은 모양({first:?})을 신고한다 — 표본이 같거나 선언이 안 갈렸다",
+            "{}: the second link reports the same shape as the first ({first:?}) — the samples are the same or the declarations did not split",
             row.name
         );
     }
 }
 
-/// 파이프로 뜨는 통로는 번역기를 **반드시** 달고 나와야 한다.
-///
-/// ★없으면 오류도 경고도 없이 바이트가 그대로 화면으로 간다★ — 런타임 증상은 깨진 화면뿐이다.
+/// A link that launches with pipes **must** come with a translator. ★Without it the bytes go to the screen as is with no error or warning★
+///   — the only runtime symptom is a broken screen.
 #[test]
 fn every_pipe_channel_declares_an_output_decoder_and_a_non_raw_encoder() {
     for row in &backend_table() {
@@ -659,13 +591,13 @@ fn every_pipe_channel_declares_an_output_decoder_and_a_non_raw_encoder() {
             }
             assert!(
                 row.backend.output_decoder(sample).is_some(),
-                "{}: 파이프를 신고했는데 번역기가 없다 — 바이트가 그대로 화면으로 간다",
+                "{}: it reported pipes but has no translator — the bytes go to the screen as is",
                 row.name
             );
             assert_ne!(
                 row.backend.input_encoder(sample),
                 InputEncoder::Raw,
-                "{}: 파이프 통로가 `Raw` 인코더를 쓰면 세션이 본문 뒤에 CR 을 한 번 더 낸다",
+                "{}: if a pipe link uses the `Raw` encoder, the session emits CR once more after the body",
                 row.name
             );
         }
@@ -752,35 +684,33 @@ fn trust_record_with_another_value_or_shape_is_none() {
     }
 }
 
-// ── 공용 하네스 ──────────────────────────────────────────────────────────────
+// ── Shared harness ──────────────────────────────────────────────────────────────
 
 const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(30);
 const SETTLE_QUIET: Duration = Duration::from_millis(1500);
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(25);
-/// Q2 · Q8 — "첫 출력 뒤 이만큼은 안 죽는다".
+/// Q2 · Q8 — "it does not die for this long after the first output".
 const ALIVE_WINDOW: Duration = Duration::from_secs(5);
-/// Q4 — 제출 뒤 모델 응답이 시작되기를 기다리는 상한.
+/// Q4 — the bound for waiting for the model response to start after submitting.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
-/// Q4 · Q5 — CR 없이 본문만 넣고 "이미 응답이 시작됐나" 를 보는 창.
+/// Q4 · Q5 — the window that puts in only the body without CR and looks at "has a response already started".
 const PRE_SUBMIT_WINDOW: Duration = Duration::from_secs(6);
-/// Q6 — 두 모드의 초기 출력을 모으는 창.
+/// Q6 — the window that collects the initial output of the two modes.
 const CAPTURE_WINDOW: Duration = Duration::from_secs(8);
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
-/// Budget for getting past the startup screen (loading · modal) until the composer takes
-/// keys; probes repeat within it. ★Not a hard cap★ — it is checked only at the head of
-/// each round, and a round already started (probe windows · waiting for quiet · the
-/// post-CR trust-record wait) runs to its end, so a run can overrun it (~54 s observed with the 45 s budget).
-/// 120 s, not 45 s: codex 0.167 starts its background app server before the composer, and
-/// with several real codex PTYs starting together the screen stayed on "loading" past 45 s
-/// on the baseline too (S25 P4 QA, 2026-11-12). A codex that exits on its own app-server
-/// timeout still fails here — a longer wait does not hide that.
+/// Budget for getting past the startup screen (loading · modal) until the composer takes keys; probes repeat within it. ★Not a hard cap★ —
+///   checked only at the head of each round, and a started round (probe windows · waiting for quiet · post-CR trust-record wait) runs to
+///   its end,
+/// so a run can overrun (~54 s observed with the 45 s budget).
+/// 120 s, not 45 s: codex 0.167 starts its background app server before the composer, and with several real codex PTYs starting
+/// together the screen stayed on "loading" past 45 s on the baseline too (S25 P4 QA, 2026-11-12). A codex that exits on its own
+/// app-server timeout still fails here — a longer wait does not hide that.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 /// Window in which one probe waits for its echo, and then for the idle
 /// hint to reappear. Missing it is not a failure, just the next probe.
 const PROBE_WINDOW: Duration = Duration::from_secs(2);
-/// Probe characters asking whether the composer takes keys. ★Not hex characters★ — they cannot
-/// collide with a temp path (uuid) on screen. ★No digits★ — in a list modal a digit selects that
-/// numbered choice (trust modal `1. … 2. …`).
+/// Probe characters asking whether the composer takes keys. ★Not hex characters★ — cannot collide with a temp path (uuid) on screen. ★No
+///   digits★ — in a list modal a digit selects that numbered choice (trust modal `1. … 2. …`).
 const COMPOSER_PROBE: &str = "xz";
 /// After the startup verb sends its CR, the limit for its result (the folder-trust entry) to be
 /// written into the temp home.
@@ -790,16 +720,18 @@ const TRUST_RECORD_TIMEOUT: Duration = Duration::from_secs(10);
 const SCRATCH_REMOVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Byte limit of a Unix socket path — `sockaddr_un.sun_path`'s 108 bytes minus the trailing NUL.
 const SOCKET_PATH_MAX: usize = 107;
-/// 모달을 지난 뒤 컴포저가 그려지기를 기다리는 상한.
+/// The bound for waiting for the composer to be drawn after passing the modal.
 const COMPOSER_TIMEOUT: Duration = Duration::from_secs(25);
-/// Q4 · Q5 — 넣은 본문이 컴포저에 에코되기를 기다리는 상한. ★고정 sleep 이 아니라 재시도인 이유★:
-/// 첫 프레임 한 번이 느리면 고정 대기는 그 자리에서 오판한다(나머지 대기가 전부 [`wait_until`] 인 것과
-/// 같은 사유). 단 Q4 는 그 뒤에도 [`SUBMIT_PACING`] 만큼의 간격을 반드시 채운다 — 그 간격이 재는 계약이다.
+/// Q4 · Q5 — the bound for waiting for the body put in to be echoed in the composer. ★Retry, not a fixed sleep★: one slow first frame
+///   would misjudge a fixed wait (same reason the other waits are [`wait_until`]). Q4 still always fills an interval of [`SUBMIT_PACING`]
+///   after that —
+/// that interval is the contract being measured.
 const ECHO_TIMEOUT: Duration = Duration::from_secs(10);
-/// [`OutputCore::join_pump`] 에 주는 상한 — ADR-0001 의 그 5초.
+/// The bound given to [`OutputCore::join_pump`] — ADR-0001's 5 seconds.
 const JOIN_PUMP_TIMEOUT: Duration = Duration::from_secs(5);
-/// 파이프 reader 스레드 회수 상한. ★무한 join 금지★ — 직속 자식이 끝나도 **손자가 파이프 쓰기단을 쥐고
-/// 있으면** `read_to_end` 는 영영 안 끝난다(shim 사슬은 늘 손자가 있다).
+/// The bound for reclaiming the pipe reader thread. ★No infinite join★ — even after the direct child ends, **if a grandchild holds the
+///   pipe's write end**
+/// `read_to_end` never ends (the shim chain always has a grandchild).
 const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn live_rows() -> Vec<BackendRow> {
@@ -809,7 +741,7 @@ fn live_rows() -> Vec<BackendRow> {
         .collect();
     assert!(
         !rows.is_empty(),
-        "실 프로브 행이 없다 — 이 레인은 아무것도 재지 않았다"
+        "there is no real probe row — this lane measured nothing"
     );
     rows
 }
@@ -865,13 +797,13 @@ impl StatusSink for NoopStatusSink {
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
 }
 
-// ── 운영 argv — 이 파일이 적지 않고 백엔드에게 받아 온다 ─────────────────────
+// ── Operating argv — this file does not write it but receives it from the backend ─────────────────────
 
-/// `sample` 에 **호출자 패스스루 인자**를 얹은 명령. 그 인자가 argv 의 어디에 붙는지는 백엔드가 정한다 —
-/// 이 함수는 "사용자가 더 적은 인자" 칸을 채울 뿐이다.
+/// A command with **caller passthrough arguments** put on `sample`. The backend decides where they attach in the argv; this function only
+///   fills the "arguments the user wrote additionally" field.
 ///
-/// ★`match` 가 소진형인 것이 계약의 일부다★: 백엔드가 셋째로 늘어 variant 가 하나 더 생기면 컴파일러가
-///   여기서 멈춰 세운다 — 새 행이 패스스루 칸을 어디로 보내는지 사람이 한 번 정하게 된다.
+/// ★The exhaustive `match` is part of the contract★: a third backend adds a variant and the compiler stops here — a person decides once
+///   where the new row sends the passthrough field.
 fn with_extra(sample: &AgentCommand, extra: &[&str]) -> AgentCommand {
     let mut c = sample.clone();
     let add = |v: &mut Vec<String>| v.extend(extra.iter().map(|s| (*s).to_string()));
@@ -883,14 +815,13 @@ fn with_extra(sample: &AgentCommand, extra: &[&str]) -> AgentCommand {
     c
 }
 
-/// **운영이 실제로 띄우는 spec** — 운영과 같은 경로([`AgentBackend::build_spec`])로 뽑는다.
+/// **The spec operation actually launches** — drawn through the same path as operation ([`AgentBackend::build_spec`]).
 ///
-/// ★이 함수가 이 파일이 「운영을 잰다」고 말할 수 있는 유일한 근거다★. 인자를 이 파일에 적어 두면 그
-///   문자열이 운영과 갈리는 날 시험대는 **다른 것**을 재면서 초록이고, 그 어긋남을 잡는 게이트가 아무 데도
-///   없다(실제로 그랬다 — 헤더의 그 문단). 여기서 받아 오면 갈릴 자리가 애초에 없다.
-/// ★덤 — 콘솔 래핑을 손으로 복제하던 자리도 함께 사라졌다★: 그 래핑(platform crate 의
-///   `shell::console_command`)은 `build_spec` 이 **안에서** 이미 적용해 `CommandSpec.program`/`args` 로
-///   돌려준다. 그래서 이 파일은 그 래핑을 알 필요가 없다.
+/// ★The only ground on which this file can say it 「measures operation」★: arguments written in this file would diverge from operation with
+///   the bench green while measuring **something else** and no gate catching it (it happened — that paragraph of the header); receiving
+///   them here leaves no place to diverge.
+/// ★Bonus★: the console wrapping (platform crate `shell::console_command`) is applied **inside** `build_spec` and returned as
+///   `CommandSpec.program`/`args`, so this file need not know it.
 fn production_spec(
     row: &BackendRow,
     cwd: &Path,
@@ -909,39 +840,37 @@ fn production_spec(
     )
 }
 
-/// 운영 spec 에서 **정책 값만** 무해한 것으로 덮어쓴 spec. ★키를 넣는 항목은 전부 이것으로 띄운다★ —
-/// 운영 그대로 띄우는 자리는 [`q11_production_argv_is_accepted_and_reaches_a_composer`] 하나뿐이고,
-/// 그 항목은 프롬프트를 하나도 안 넣는다.
+/// A spec where **only the policy values** of the operating spec are overwritten with harmless ones. ★Every key-sending item launches with
+///   this★ — the only place launching operation as is is [`q11_production_argv_is_accepted_and_reaches_a_composer`], which sends no prompt.
 fn harnessed_spec(
     row: &BackendRow,
     cwd: &Path,
     env: &[(String, String)],
     extra: &[&str],
 ) -> CommandSpec {
-    let probe = row
-        .probe
-        .as_ref()
-        .expect("실 프로브가 없는 행에 실 spec 을 물었다 — live_rows() 가 걸렀어야 한다");
+    let probe = row.probe.as_ref().expect(
+        "asked a real spec for a row without a real probe — live_rows() should have filtered it",
+    );
     let mut spec = production_spec(row, cwd, env, extra);
     spec.args = safe_args(&spec.args, &probe.safety, row.name);
     spec
 }
 
-/// 운영 argv 의 정책 칸을 덮어쓴 사본. 덮어쓸 자리가 없으면 **패닉으로 멈춘다**.
+/// A copy with the policy fields of the operating argv overwritten. If there is no place to overwrite, it **stops with a panic**.
 fn safe_args(args: &[String], swap: &SafetySwap, name: &str) -> Vec<String> {
     let mut out = args.to_vec();
     for (flag, safe) in swap.values {
         let at = out.iter().position(|a| a == flag).unwrap_or_else(|| {
             panic!(
-                "{name}: 운영 argv 에 `{flag}` 가 없다 — 이 시험대는 그 칸의 값을 `{safe}` 로 덮어써야 \
-                 안전 봉투가 서는데 덮어쓸 자리를 못 찾았다. 운영 인자가 바뀌었다는 뜻이므로, 사람이 새 \
-                 argv 의 봉투를 다시 세우기 전에는 실 CLI 를 안 띄운다: {out:?}"
+                "{name}: the operating argv has no `{flag}` — this test bench must overwrite that field's value with `{safe}` for \
+                 the safety envelope to stand, but could not find the place to overwrite. That means the operating arguments changed, so until a person sets up \
+                 the envelope of the new argv again, the real CLI is not launched: {out:?}"
             )
         });
         let value_at = at + 1;
         assert!(
             value_at < out.len(),
-            "{name}: `{flag}` 뒤에 값이 없다 — argv 모양이 바뀌었다: {out:?}"
+            "{name}: no value after `{flag}` — the argv shape changed: {out:?}"
         );
         out[value_at] = (*safe).to_string();
     }
@@ -949,14 +878,14 @@ fn safe_args(args: &[String], swap: &SafetySwap, name: &str) -> Vec<String> {
     out
 }
 
-/// 봉투를 우회하는 인자가 argv 에 없는지. ★[`safe_args`] 안에서도, 운영 argv 를 그대로 띄우는 자리에서도
-/// 부른다★ — 값 한 칸을 덮어쓰는 것만으로는 못 막는 축이라 두 경로가 같은 벽을 지나야 한다.
+/// Whether the argv has no arguments that bypass the envelope. ★Called both inside [`safe_args`] and where the operating argv is
+/// launched as is★ — an axis that overwriting one value field cannot block, so both paths must pass the same wall.
 fn assert_no_forbidden(args: &[String], swap: &SafetySwap, name: &str) {
     for bad in swap.forbidden {
         assert!(
             !args.iter().any(|a| a.contains(bad)),
-            "{name}: 운영 argv 에 `{bad}` 가 들어 있다 — 정책 값을 덮어써도 이 인자가 안전 봉투를 \
-             우회한다. 사람이 확인하기 전에는 실 CLI 를 안 띄운다: {args:?}"
+            "{name}: the operating argv contains `{bad}` — even if the policy values are overwritten, this argument bypasses the safety envelope. \
+             The real CLI is not launched until a person checks: {args:?}"
         );
     }
 }
@@ -970,9 +899,8 @@ struct Captured {
     elapsed: Duration,
 }
 
-/// 파이프로만 이야기하는 자식 실행. **stdin 은 언제나 파이프**다 — Q3 이 재는 조건이 그것이고, 나머지
-/// 호출도 콘솔을 물려받아 사람 입력을 기다리는 일이 없어야 한다. `timeout` 을 넘기면 트리째 죽이고
-/// `timed_out` 을 세운다(반환은 언제나 온다).
+/// Runs a child that talks only through pipes. **stdin is always a pipe** — the condition Q3 measures, and the other calls must not
+///   inherit the console and wait for human input. Past `timeout` it kills the whole tree and sets `timed_out` (always returns).
 fn run_capture(
     program: &str,
     args: &[String],
@@ -992,17 +920,15 @@ fn run_capture(
     }
     let mut child = cmd
         .spawn()
-        .unwrap_or_else(|e| panic!("{program} spawn 실패: {e}"));
+        .unwrap_or_else(|e| panic!("{program} spawn failed: {e}"));
 
     drop(child.stdin.take());
 
-    // ★파이프를 스레드로 빨아낸다★: `--help` 처럼 4KB 를 넘기는 출력은 파이프 버퍼가 차면 자식이
-    //   write 에서 멈춰 종료 폴링이 영영 안 끝난다.
-    //
-    // ★그 스레드를 `join()` 으로 회수하지 않는다★: 직속 자식이 끝나도 **파이프 쓰기단을 물려받은 손자**가
-    //   살아 있으면 `read_to_end` 는 EOF 를 영영 못 본다 — shim 사슬(`cmd.exe → node → codex.exe`)에서는
-    //   늘 손자가 있다. 그래서 결과를 채널로 받아 [`READER_JOIN_TIMEOUT`] 만 기다리고, 안 오면 그 스레드는
-    //   두고 간다(테스트 프로세스가 끝날 때 함께 사라진다).
+    // ★Drain the pipes with threads★: output over 4KB like `--help` fills the pipe buffer, the child stops at write and exit polling never ends.
+    // ★Those threads are not reclaimed with `join()`★: even after the direct child ends, **a grandchild that inherited the pipe's write
+    //   end** keeps `read_to_end` from EOF — the shim chain (`cmd.exe → node → codex.exe`) always has one. So the result comes over a
+    //   channel waited
+    //   only [`READER_JOIN_TIMEOUT`]; a missing one leaves the thread behind (it disappears with the test process).
     let out_reader = child.stdout.take().map(|s| drain_pipe(s));
     let err_reader = child.stderr.take().map(|s| drain_pipe(s));
 
@@ -1025,7 +951,7 @@ fn run_capture(
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(e) => panic!("try_wait 실패: {e}"),
+            Err(e) => panic!("try_wait failed: {e}"),
         }
     }
 
@@ -1045,7 +971,7 @@ fn run_capture(
     }
 }
 
-/// 파이프 한쪽을 스레드로 빨아내고 결과를 채널로 준다. 회수 상한은 부르는 쪽이 진다.
+/// Drains one side of a pipe with a thread and gives the result over a channel. The caller bears the reclaim bound.
 fn drain_pipe<R: std::io::Read + Send + 'static>(mut src: R) -> std::sync::mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -1056,7 +982,7 @@ fn drain_pipe<R: std::io::Read + Send + 'static>(mut src: R) -> std::sync::mpsc:
     rx
 }
 
-/// shim 사슬은 직속 자식보다 깊으므로 PID 하나만 죽이면 손자가 남는다.
+/// The shim chain is deeper than the direct child, so killing just one PID leaves the grandchild.
 fn kill_tree(pid: u32) {
     #[cfg(windows)]
     {
@@ -1076,15 +1002,15 @@ fn kill_tree(pid: u32) {
     }
 }
 
-/// ★바이너리 부재 = 이 레인의 실패★. `cmd.exe /c <prog>` 래핑 때문에 스폰 성공은 유무의 증거가 되지
-/// 못하므로, 스폰보다 먼저 PATH 해석 자체를 묻는다. 해석된 경로는 그대로 증거로 찍는다 — shim 사슬이
-/// 어디서 시작하는지가 Q10 의 전제다.
+/// ★A missing binary = a failure of this lane★. With the `cmd.exe /c <prog>` wrapping a successful spawn is no evidence of presence, so it
+///   asks for the PATH resolution itself before spawning and prints the resolved path as evidence — where the shim chain starts is Q10's
+///   premise.
 ///
 fn assert_program_present(row: &BackendRow) {
     let probe = row
         .probe
         .as_ref()
-        .expect("실 프로브가 없는 행에 유무를 물었다");
+        .expect("asked presence for a row without a real probe");
     let program = probe.program;
 
     #[cfg(windows)]
@@ -1102,11 +1028,11 @@ fn assert_program_present(row: &BackendRow) {
     assert_eq!(
         found.exit_code,
         Some(0),
-        "`{program}` 이 PATH 에 없다 — 이 레인은 재겠다고 부른 레인이라 조용히 넘기지 않는다: {found:?}"
+        "`{program}` is not on PATH — this lane was called to measure, so it does not pass quietly: {found:?}"
     );
     assert!(
         !found.stdout.trim().is_empty(),
-        "`{program}` 해석 결과가 비었다: {found:?}"
+        "the resolution result of `{program}` is empty: {found:?}"
     );
     println!(
         "[presence] {program} -> {}",
@@ -1116,18 +1042,15 @@ fn assert_program_present(row: &BackendRow) {
     record_version_once(row);
 }
 
-/// 이 레인이 **어느 버전을 쟀나**를 로그에 남긴다 — 운영 argv 에 `--version` 을 얹어 묻는다.
+/// Leaves in the log **which version this lane measured** — `--version` on the operating argv.
 ///
-/// ★왜 버전을 남기나★: 이 CLI 는 스스로 업데이트하므로 아래 관측 전부가 버전과 묶여야 뜻이 있다. 운영
-///   argv 로 묻는 이유 = 우리가 실제로 띄우는 그것의 버전이어야 하기 때문이다.
-/// ★값을 단언하지 않는 것은 의도★ — 버전을 박아 두면 업데이트마다 빨개지고 그건 회귀가 아니라 달력이다.
-/// ★프로세스마다 한 번만 묻는다★: 이 레인은 **실 자식 프로세스를 얼마나 많이 만드나**가 그대로 위험이자
-///   비용인 자리다.
-///   항목마다 물으면 codex 프로세스 사슬이 레인 전체에서 두 배가 되는데, 버전은 한 프로세스 안에서
-///   바뀌지 않으므로 그 값은 **한 번 물어도 같다**(실측: 항목마다 묻던 판이 같은 값을 11 번 찍었다).
-/// ★그리고 「운영 argv 를 이 CLI 가 받아들이나」는 이 함수의 일이 아니다★ —
-///   [`q11_production_argv_is_accepted_and_reaches_a_composer`] 가 실 PTY 로 훨씬 세게 잰다. 여기서
-///   같은 것을 또 재면 값이 아니라 스폰 수만 는다.
+/// ★Why★: this CLI self-updates, so every observation below means something only tied to a version; asking with the operating argv gives
+///   the version of exactly what we launch. ★Not asserting the value is intended★ — pinning would go red at every update.
+/// ★Asked only once per process★: **how many real child processes this lane creates** is itself the risk and cost; asking per item would
+///   double the codex process chains while the version cannot change within a process (measured: per-item asking printed the same value 11
+///   times).
+/// ★「Does this CLI accept the operating argv」 is not this function's job★ — [`q11_production_argv_is_accepted_and_reaches_a_composer`]
+///   measures it harder with a real PTY.
 fn record_version_once(row: &BackendRow) {
     static PROBED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
     {
@@ -1141,8 +1064,8 @@ fn record_version_once(row: &BackendRow) {
     let probe = row
         .probe
         .as_ref()
-        .expect("실 프로브가 없는 행에 버전을 물었다");
-    // **임시 홈으로 돌려서** 묻는다 — 업데이트 확인 기록을 실 홈에 남기지 않기 위해서다.
+        .expect("asked the version for a row without a real probe");
+    // Asked **turned to a temporary home** — so as not to leave an update check record in the real home.
     let cwd = Scratch::new("version");
     let (_home, env) = sandbox_home(probe, "version", HomeUse::PrintAndExit);
     let spec = harnessed_spec(row, cwd.path(), &env, &["--version"]);
@@ -1156,11 +1079,14 @@ fn record_version_once(row: &BackendRow) {
     let version = ver.stdout.trim().replace(['\r', '\n'], " ");
     assert!(
         ver.exit_code == Some(0) && !version.is_empty(),
-        "{}: 운영 argv + `--version` 이 버전을 말하지 않았다 — 이 레인의 관측을 어느 버전에 묶을지 \
-         알 수 없다: {ver:?}",
+        "{}: the operating argv + `--version` did not tell the version — it is unknown which version to tie this lane's \
+         observations to: {ver:?}",
         row.name
     );
-    println!("[version] {} = {version} (운영 argv 로 물음)", row.name);
+    println!(
+        "[version] {} = {version} (asked with the operating argv)",
+        row.name
+    );
 }
 
 /// What the CLI will do with a temp home — decides whether [`Scratch::new_home`]
@@ -1170,19 +1096,18 @@ enum HomeUse {
     /// May start the TUI/app-server, which opens a Unix socket under the home. Every spawn not
     /// known to be print-only uses this.
     Session,
-    /// `--version` only — assumed to print and exit without starting the app-server.
-    /// ★Unmeasured★. If it does open the socket, an over-limit home path skips the clear
-    /// socket-limit panic; if codex then fails, that shows up only as [`record_version_once`]'s
-    /// generic "did not report a version" panic (exit code not 0 or empty output), in the first
-    /// item of the run to reach it — later items skip the version probe.
+    /// `--version` only — assumed to print and exit without starting the app-server. ★Unmeasured★: if it does open the socket, an
+    ///   over-limit home path skips the clear socket-limit panic; a codex failure then shows only as [`record_version_once`]'s generic
+    ///   "did not report a version"
+    /// panic, in the first item of the run to reach it (later items skip the version probe).
     PrintAndExit,
 }
 
-/// 임시 폴더 한 칸. ★`Drop` 이 지운다★ — 단언이 패닉으로 끊겨도 남지 않는다.
+/// One temporary folder. ★`Drop` deletes it★ — nothing remains even if an assertion is cut off by a panic.
 ///
-/// ★왜 함수 끝에서 지우는 한 줄로는 안 되나★: 이 파일의 단언은 **실패할 목적**으로 있고, 실패는
-///   unwind 라 그 줄을 건너뛴다. 게이트가 한 번 빨개질 때마다 폴더가 하나씩 남는 구조였다. 임시 홈에는
-///   실 홈에서 복사한 인증 파일이 들어가므로 그 누수는 자격증명 누수이기도 하다.
+/// ★A delete line at the end of the function does not do★: the assertions here exist **to fail** and failure is an unwind that skips it —
+///   the old structure left one folder each time the gate went red. The temp home holds auth files copied from the real home, so that leak is a
+/// credential leak too.
 struct Scratch {
     path: PathBuf,
     /// Credentials copied into this folder — `Drop` deletes them before the folder.
@@ -1190,31 +1115,29 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// ★이 저장소를 cwd 로 실 에이전트를 띄우지 않는다★ — 재는 것과 무관한 위험이 는다. 실 스폰의 cwd 는
-    /// 전부 이 아래에서 만든다. ★항목마다 자기 폴더를 판다★ — 같은 경로를 나눠 쓰면 `-- --test-threads=4`
-    /// 에서 한 항목의 `Drop` 이 **다른 항목이 지금 쓰고 있는 cwd** 를 지운다.
+    /// ★No real agent is launched with this repository as cwd★ — unrelated risks grow. The cwd of real spawns is all made under here.
+    ///   ★Each item digs its own folder★: a shared path would let one item's `Drop` under `-- --test-threads=4` delete **the cwd another
+    ///   item is using**.
     fn new(tag: &str) -> Scratch {
         let path =
             std::env::temp_dir().join(format!("engram-backend-contract-{tag}-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&path).expect("임시 폴더 생성 실패");
+        std::fs::create_dir_all(&path).expect("failed to create the temporary folder");
         Scratch {
             path,
             secrets: Vec::new(),
         }
     }
 
-    /// The test home is never placed under the system temp dir — codex 0.153.4 refuses to
-    /// create its sandbox helper when its home is there and prints a warning (measured).
-    /// ★The path is kept short★ — codex 0.163.0 opens a Unix socket at
-    /// `app-server-control\app-server-control.sock` under its home; if that path exceeds 108 bytes
-    /// (SUN_LEN) the app-server cannot start and neither does codex (measured — the old
-    /// `target/tmp/backend-contract-home-<tag>-<uuid>` gave a 152-char socket path).
-    /// So the home goes to `%LOCALAPPDATA%\ebc\<tag>-<8 chars>` — the parent of temp
-    /// (`%LOCALAPPDATA%\Temp`), hence outside it. On an OS without that variable it is
-    /// `CARGO_TARGET_TMPDIR` (= `target/tmp`).
+    /// The test home is never placed under the system temp dir — codex 0.153.4 refuses to create its sandbox helper there and prints a
+    ///   warning (measured).
+    /// ★The path is kept short★ — codex 0.163.0 opens a Unix socket at `app-server-control\app-server-control.sock` under its home; over
+    ///   108 bytes (SUN_LEN) the app-server cannot start and neither does codex (the old `target/tmp/backend-contract-home-<tag>-<uuid>`
+    ///   gave 152 chars).
+    /// So the home goes to `%LOCALAPPDATA%\ebc\<tag>-<8 chars>` — the parent of temp (`%LOCALAPPDATA%\Temp`), hence outside it; without
+    ///   that variable, `CARGO_TARGET_TMPDIR` (= `target/tmp`).
     ///
-    /// Panics when `use_` is [`HomeUse::Session`] and the socket path would exceed
-    /// [`SOCKET_PATH_MAX`] — such a home would make codex fail to start.
+    /// Panics when `use_` is [`HomeUse::Session`] and the socket path would exceed [`SOCKET_PATH_MAX`] — such a home would make codex fail
+    ///   to start.
     fn new_home(tag: &str, use_: HomeUse) -> Scratch {
         let root = std::env::var_os("LOCALAPPDATA")
             .map(|dir| PathBuf::from(dir).join("ebc"))
@@ -1234,7 +1157,7 @@ impl Scratch {
                 socket.display()
             );
         }
-        std::fs::create_dir_all(&path).expect("임시 홈 생성 실패");
+        std::fs::create_dir_all(&path).expect("failed to create the temporary home");
         Scratch {
             path,
             secrets: Vec::new(),
@@ -1245,8 +1168,8 @@ impl Scratch {
         &self.path
     }
 
-    /// Q8 이 재는 축(cwd 가 git repo 인가)을 다른 질문에 섞지 않으려고, Q8 을 뺀 나머지는 **git repo 인**
-    /// 임시 폴더에서 돈다.
+    /// So as not to mix the axis Q8 measures (is the cwd a git repo) into other questions, everything except Q8 runs in a temporary folder
+    /// **that is a git repo**.
     fn git_init(self) -> Scratch {
         git_init_at(&self.path);
         self
@@ -1264,16 +1187,14 @@ fn git_init_at(dir: &Path) {
     assert_eq!(
         init.exit_code,
         Some(0),
-        "임시 git repo 초기화 실패: {init:?}"
+        "failed to initialize the temporary git repo: {init:?}"
     );
 }
 
 impl Drop for Scratch {
-    /// ★Credential copies go first, and removal is retried up to a limit★: right after
-    /// teardown a grandchild process still holds files in the home, so
-    /// `remove_dir_all` stops midway and leaves the folder half there (measured
-    /// 0.163.0: Q6's temp home stayed behind with its `auth.json`). Whatever is still
-    /// left is not passed over silently — its path is printed, for a person to delete.
+    /// ★Credential copies go first, and removal is retried up to a limit★: right after teardown a grandchild still holds files in the
+    ///   home, so `remove_dir_all` stops midway (0.163.0: Q6's temp home stayed with its `auth.json`). Whatever is left is not passed over
+    ///   silently — its path is printed for a person to delete.
     fn drop(&mut self) {
         let cleared = wait_until(SCRATCH_REMOVE_TIMEOUT, || {
             for f in &self.secrets {
@@ -1296,13 +1217,12 @@ impl Drop for Scratch {
     }
 }
 
-/// 이 백엔드의 상태 디렉터리를 **이 항목 전용 임시 홈**으로 돌리는 환경변수 한 쌍. 홈이 없는 백엔드면
-/// 빈 목록이고, 그때는 실 사용자 설정이 그대로 쓰인다(그 사실이 [`LiveProbe::home_redirect`] 의 경고다).
+/// A pair of environment variables that turns this backend's state directory to **a temporary home just for this item**. For a backend
+///   without a home it is an empty list and the real user settings are used as is (the warning of [`LiveProbe::home_redirect`]).
 ///
-/// 반환의 [`Scratch`] 를 **호출자가 들고 있어야 한다** — 떨어뜨리면 그 자리에서 홈이 지워진다.
-/// 이 CLI 의 **실 사용자 상태 디렉터리** — 변수가 이미 걸려 있으면 그쪽, 아니면 사용자 홈 아래 기본
-/// 위치. ★읽기만 한다★. 씨앗 파일을 퍼 오는 자리와, "실 홈이 안 더러워졌나" 를 확인하는 자리가 같은
-/// 답을 봐야 하므로 한 함수로 둔다.
+/// **The caller must hold** the returned [`Scratch`] — dropping it deletes the home right there.
+/// This CLI's **real user state directory** — the variable's value if set, else the default under the user home. ★Read only★. The place
+///   that scoops the seed files and the place that checks "is the real home not dirtied" must see the same answer, so they are one function.
 fn real_home(redirect: &HomeRedirect) -> Option<PathBuf> {
     std::env::var_os(redirect.env)
         .map(PathBuf::from)
@@ -1325,12 +1245,11 @@ fn sandbox_home(
 
     let mut home = Scratch::new_home(tag, use_);
 
-    // ★If even one seed file cannot be copied, stop before spawning★ — started without it, the CLI
-    //   shows a login screen first, a screen the startup verb could press CR on
-    //   ([`HomeRedirect::seed_files`]).
+    // ★If even one seed file cannot be copied, stop before spawning★ — without it the CLI shows a login screen first, a screen the startup
+    //   verb could press CR on ([`HomeRedirect::seed_files`]).
     let real = real_home(redirect).unwrap_or_else(|| {
         panic!(
-            "실 사용자 상태 디렉터리(`{}` 또는 ~/{})가 없다 — 임시 홈에 옮길 인증이 없다",
+            "the real user state directory (`{}` or ~/{}) does not exist — there is no auth to move into the temporary home",
             redirect.env, redirect.default_subdir
         )
     });
@@ -1338,12 +1257,14 @@ fn sandbox_home(
         let to = home.path().join(f);
         // Registered **before** the attempt, so a half-failed copy's remains are deleted too.
         home.secrets.push(to.clone());
-        std::fs::copy(real.join(f), &to)
-            .unwrap_or_else(|e| panic!("임시 홈에 `{f}` 를 못 옮겼다({e}) — 띄우지 않는다"));
+        std::fs::copy(real.join(f), &to).unwrap_or_else(|e| {
+            panic!("could not move `{f}` into the temporary home ({e}) — not launching")
+        });
     }
-    // 복사보다 나중이라 같은 이름이면 이쪽이 이긴다.
+    // This comes after the copy, so with the same name this side wins.
     for (name, body) in redirect.seed_writes {
-        std::fs::write(home.path().join(name), body).expect("임시 홈 씨앗 파일 쓰기 실패");
+        std::fs::write(home.path().join(name), body)
+            .expect("failed to write a seed file into the temporary home");
     }
 
     let env = vec![(
@@ -1353,24 +1274,21 @@ fn sandbox_home(
     (Some(home), env)
 }
 
-/// codex's folder-trust record for `workspace` in the temp home's `config.toml`
-/// ([`HomeRedirect::trusted_entry`]). Reads the file and resolves `workspace`
-/// to its long canonical form, then defers to [`codex_trust_record`]. `None`
-/// also when the file or the folder cannot be read.
+/// codex's folder-trust record for `workspace` in the temp home's `config.toml` ([`HomeRedirect::trusted_entry`]). Reads the file,
+///   resolves `workspace` to its long canonical form, then defers to [`codex_trust_record`]. `None` also when the file or folder cannot be read.
 fn codex_trusted_entry(home: &Path, workspace: &Path) -> Option<String> {
     let config = std::fs::read_to_string(home.join("config.toml")).ok()?;
     let workspace = dunce::canonicalize(workspace).ok()?;
     codex_trust_record(&config, &workspace.to_string_lossy())
 }
 
-/// The header line of the `[projects.'<path>']` table in `config` whose path equals `workspace` and
-/// that holds `trust_level = "trusted"`; `None` when there is no such table.
+/// The header line of the `[projects.'<path>']` table in `config` whose path equals `workspace` and holds `trust_level = "trusted"`;
+///   `None` when there is no such table.
 ///
-/// ★Paths are compared case-insensitively★ — 0.163.0 writes the lower-case long path
-///   (`c:\users\<user>\…`), not the 8.3 short form we pass (`C:\Users\<user>~1\…`) (measured). The
-///   caller passes the long form.
-/// ★Only this one shape is read★ (the shape 0.163.0 writes — measured). A version that writes
-///   another shape yields `None`, so the startup verb stops loudly instead of passing silently.
+/// ★Paths are compared case-insensitively★ — 0.163.0 writes the lower-case long path (`c:\users\<user>\…`), not the 8.3 short form we pass
+///   (`C:\Users\<user>~1\…`); the caller passes the long form.
+/// ★Only this one shape is read★ (what 0.163.0 writes) — another shape yields `None`, so the startup verb stops loudly instead of passing
+///   silently.
 fn codex_trust_record(config: &str, workspace: &str) -> Option<String> {
     let want = workspace.to_lowercase();
     let project_key = |head: &str| -> Option<String> {
@@ -1398,10 +1316,8 @@ fn codex_trust_record(config: &str, workspace: &str) -> Option<String> {
     None
 }
 
-/// Result of trying to get past the startup screen. ★Why not a `bool`★: "there
-/// was no modal" and "this backend has no way to ask" are not the same value —
-/// the first is an observation, the second means there was nothing to ask.
-/// ★Whether the composer came up is not here★ — [`Startup::composer`] holds that.
+/// Result of trying to get past the startup screen. ★Not a `bool`★: "there was no modal" (an observation) and "this backend has no way to
+///   ask" (nothing to ask) are different values. ★Whether the composer came up is not here★ — [`Startup::composer`] holds that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModalOutcome {
     /// The table has no idle composer hint for this backend —
@@ -1448,21 +1364,19 @@ impl StartupStall {
 /// The result of [`PtySession::pass_startup_modal`].
 struct Startup {
     outcome: ModalOutcome,
-    /// Where the output **without** the consumed modal starts — the accumulated length right before
-    /// the CR if one was sent, else 0. The modal's text also contains the workspace path (measured
-    /// 0.163.0), so matching the workspace folder on screen looks only past this point (Q12).
+    /// Where the output **without** the consumed modal starts — the accumulated length right before the CR if one was sent, else 0. The
+    ///   modal's text also contains the workspace path (0.163.0), so matching the workspace folder on screen looks only past this point (Q12).
     settled_from: usize,
-    /// `Ok` = the composer took keys; the value is the accumulated length right
-    /// before the passing probe wrote its erasure (after it the idle composer
-    /// hint was drawn again). `Err` = not reached in time. When the table has
-    /// no composer hint (`NotDeclared`) it is the end position at that moment.
+    /// `Ok` = the composer took keys; the value is the accumulated length right before the passing probe wrote its erasure (afterwards the
+    ///   idle composer hint is drawn again). `Err` = not reached in time. With no composer hint (`NotDeclared`) it is the end position at
+    ///   that moment.
     composer: Result<usize, StartupStall>,
     /// The folder-trust entry that appeared in the temp home after the CR
     /// ([`HomeRedirect::trusted_entry`]).
     trust_entry: Option<String>,
 }
 
-/// 실 PTY 위의 한 화신. `Drop` 이 teardown 을 진다 — 단언이 패닉으로 끊겨도 자식이 남지 않는다.
+/// One incarnation on a real PTY. `Drop` bears the teardown — no child remains even if an assertion is cut off by a panic.
 struct PtySession {
     transport: Box<dyn AgentTransport>,
     core: Arc<OutputCore>,
@@ -1473,8 +1387,8 @@ struct PtySession {
 
 impl PtySession {
     fn open(spec: &CommandSpec, cols: u16, rows: u16) -> PtySession {
-        let (pty, child_pid) =
-            PtyTransport::open(spec, cols, rows).unwrap_or_else(|e| panic!("PTY open 실패: {e:?}"));
+        let (pty, child_pid) = PtyTransport::open(spec, cols, rows)
+            .unwrap_or_else(|e| panic!("PTY open failed: {e:?}"));
         let status_sink: Arc<dyn StatusSink> = Arc::new(NoopStatusSink);
         let core = Arc::new(OutputCore::new(
             Uuid::new_v4(),
@@ -1498,20 +1412,20 @@ impl PtySession {
     fn write(&self, bytes: &[u8]) {
         self.transport
             .send_input(InputEvent::Raw(bytes.to_vec()))
-            .expect("send_input 실패");
+            .expect("send_input failed");
     }
 
-    /// ADR-0001 의 2동사 그대로: `shutdown()` → `join_pump(5s)`. 멱등이라 `Drop` 과 겹쳐도 된다.
+    /// ADR-0001's two verbs as they are: `shutdown()` → `join_pump(5s)`. Idempotent, so it may overlap with `Drop`.
     fn teardown(&mut self) {
         let _ = self.teardown_measured();
     }
 
-    /// 같은 2동사를 **각각 재면서** 부른다. 반환 = `(shutdown 소요, join_pump 소요)`. 이미 내렸으면 `None`.
+    /// Calls the same two verbs **while timing each**. Returns `(shutdown duration, join_pump duration)`. `None` if already brought down.
     ///
-    /// ★왜 시간을 재나 — 이게 Q10 의 둘째 동사를 관측하는 유일한 창이다★: [`OutputCore::join_pump`] 는
-    ///   `()` 를 돌려주고 안에서 `recv_timeout` 의 결과를 **버린다**(`src/output_core.rs:383-392`). 그래서
-    ///   "pump 가 끝났다" 와 "5초를 그냥 기다렸다" 가 호출자에게 **똑같이 보인다**. 소요 시간만이 둘을
-    ///   가른다 — 상한에 눌어붙었으면 pump 는 안 끝난 것이다.
+    /// ★Why time it — the only window observing Q10's second verb★: [`OutputCore::join_pump`] returns `()` and **discards** the
+    ///   `recv_timeout` result inside (`src/output_core.rs:383-392`), so "the pump ended" and "it just waited 5 seconds" **look the
+    ///   same**; only the
+    /// duration tells them apart — sticking to the bound means the pump did not end.
     fn teardown_measured(&mut self) -> Option<(Duration, Duration)> {
         if self.down {
             return None;
@@ -1529,72 +1443,55 @@ impl PtySession {
         wait_until(FIRST_BYTES_TIMEOUT, || self.sink.len() > 0)
     }
 
-    /// 지금까지 온 바이트 전부를 사람이 읽는 글자로.
+    /// All the bytes that came so far, as human-readable characters.
     fn screen(&self) -> String {
         visible_text(&self.sink.snapshot())
     }
 
-    /// `from` 이후에 온 바이트만 사람이 읽는 글자로.
+    /// Only the bytes that came after `from`, as human-readable characters.
     fn tail_text(&self, from: usize) -> String {
         visible_text(&self.sink.tail_from(from))
     }
 
-    /// `from` 이후 출력에 `needle` 이 나타날 때까지 기다린다. ★[`flatten`] 을 거친다★ — TUI 는 박스 안에서
-    /// 줄을 접고 여백으로 정렬하므로 raw 텍스트에 그대로 대면 접힌 자리에서 어긋난다.
+    /// Waits until `needle` appears in the output after `from`. ★Goes through [`flatten`]★ — the TUI folds lines inside boxes
+    /// and aligns them with padding, so matching against the raw text as is goes off at the folded places.
     fn wait_for_text(&self, from: usize, needle: &str, timeout: Duration) -> bool {
         wait_until(timeout, || mentions(&self.tail_text(from), needle))
     }
 
-    /// Goes past the startup screen (loading · first-visit modal) **until the composer
-    /// takes keys**. If a modal is up, it is passed once with its default choice.
+    /// Goes past the startup screen (loading · first-visit modal) **until the composer takes keys**. If a modal is up, it is passed once
+    ///   with its default choice.
     ///
-    /// ★The modal's wording is never read★: it changed across versions (0.153.4 `Do you trust …`
-    ///   → 0.163.0 `Trust this folder?`) — relying on it would turn this harness red on every
-    ///   update and make a person fix the marker. So only three wording-free signals are used.
-    ///   ① **Is startup over** = [`LiveProbe::ready_signal`]. ★The probe alone
-    ///      cannot tell this★ — the composer takes keys even while loading, and
-    ///      the trust modal appears **after** loading ends (measured 0.163.0: the
-    ///      modal came up after the probe had passed, and Q4's body went into it).
-    ///   ② **Does the composer take keys** = type the probe characters
-    ///      ([`COMPOSER_PROBE`]), see the echo, and check that the idle composer hint is
-    ///      drawn again **after** erasing them. A modal does not draw those characters
-    ///      into the composer, so this holds only when the composer is in front.
-    ///   ③ **Is something covering the composer** = the screen went quiet
-    ///      with the cursor hidden. Measured 0.163.0: loading · composer =
-    ///      cursor shown (`?25h`), folder-trust modal = hidden (`?25l`).
-    /// When ③ holds a CR is sent — the folder-trust modal's default choice is to accept
-    ///   (measured 0.153.4 `1. Yes, continue` · 0.163.0 `1. Trust and continue`). After
-    ///   it, ① is looked for again **in the output after the CR**.
+    /// ★The modal's wording is never read★: it changed across versions (0.153.4 `Do you trust …` → 0.163.0 `Trust this folder?`) and
+    ///   relying on it would turn this harness red on every update. Only three wording-free signals are used.
+    ///   ① **Is startup over** = [`LiveProbe::ready_signal`]. ★The probe alone cannot tell★ — the composer takes keys even while loading
+    ///   and the trust modal appears **after** loading ends (0.163.0: the modal came up after the probe passed and Q4's body went into it).
+    ///   ② **Does the composer take keys** = type the probe characters ([`COMPOSER_PROBE`]), see the echo, and check the idle composer
+    ///   hint is drawn again **after** erasing them; a modal does not draw them into the composer.
+    ///   ③ **Is something covering the composer** = the screen went quiet with the cursor hidden (0.163.0: loading · composer = shown
+    ///   `?25h`, folder-trust modal = hidden `?25l`).
+    /// When ③ holds a CR is sent — the folder-trust modal's default is accept (0.153.4 `1. Yes, continue` · 0.163.0 `1. Trust and
+    ///   continue`); afterwards ① is looked for again **in the output after the CR**.
     ///
-    /// ★What is guarded and what is not★ — the CR is pressed
-    /// **before the screen is recognised**. So:
-    /// - **Guarded (environment)**: the other cursor-hiding first screens we know of are kept
-    ///   from appearing in the temp home at all — the update modal
-    ///   (`check_for_update_on_startup = false` · `version.json` not copied), the administrator
-    ///   sandbox-setup modal (`[windows] sandbox`), the login screen (if the auth copy fails,
-    ///   nothing is spawned). Evidence = the two seed fields of [`HomeRedirect`].
-    /// - **Guarded (post-check)**: within [`TRUST_RECORD_TIMEOUT`] after the CR
-    ///   a folder-trust entry for `workspace` must appear in the temp home
-    ///   ([`HomeRedirect::trusted_entry`]). If not, the run stops right there
-    ///   and says so — every item that calls this verb goes through this check.
-    /// - **Only one CR** — a second covering screen gets no key. The composer does not come up and
-    ///   [`Startup::composer`] comes back `Err`.
-    /// - **Not guarded**: a first screen the environment does not block — the CLI
-    ///   showing a login screen because the copied auth expired, an update check
-    ///   re-enabled under another key, or any **new** screen — gets the CR, and whatever
-    ///   its default choice runs has already happened with that CR. The post-check
-    ///   reports it (stops the run and prints the screen) but cannot undo it.
-    /// ★Cost★: that choice leaves a folder-trust entry in the CLI's config file — so the CR is
-    ///   sent only when there is a temp home (`home`). The real user config is never changed.
+    /// ★What is guarded and what is not★ — the CR is pressed **before the screen is recognised**:
+    /// - **Guarded (environment)**: other cursor-hiding first screens are kept out of the temp home — the update modal
+    ///   (`check_for_update_on_startup = false` · `version.json` not copied), the administrator sandbox-setup modal (`[windows] sandbox`),
+    ///   the login screen (failed auth copy
+    ///   spawns nothing). Evidence: the two seed fields of [`HomeRedirect`].
+    /// - **Guarded (post-check)**: within [`TRUST_RECORD_TIMEOUT`] after the CR a folder-trust entry for `workspace` must appear in the
+    ///   temp home ([`HomeRedirect::trusted_entry`]); if not the run stops and says so — every item calling this verb goes through it.
+    /// - **Only one CR** — a second covering screen gets no key; the composer does not come up and [`Startup::composer`] is `Err`.
+    /// - **Not guarded**: a first screen the environment does not block (expired auth login screen · update check re-enabled under another
+    ///   key · any **new** screen) gets the CR and whatever its default runs has already happened; the post-check reports it but cannot undo it.
+    /// ★Cost★: that choice leaves a folder-trust entry in the CLI's config, so the CR is sent only with a temp home (`home`); the real
+    ///   user config is never changed.
     ///
-    /// `workspace` = the folder the CLI will use as its working root (= the folder
-    /// the trust entry must point at). It can differ from the process cwd (Q12).
+    /// `workspace` = the folder the CLI uses as its working root (= where the trust entry must point); it can differ from the process cwd (Q12).
     ///
-    /// Why the position in [`Startup::composer`] is needed: this TUI draws the modal
-    /// **over** the composer, so the idle composer hint is on screen **before** the
-    /// modal (measured on a 0.153.4 Q8 screen dump). Searching for the hint including
-    /// that earlier stretch would mean "saw the composer hidden behind the modal",
-    /// not "passed the modal and the composer came up" — a check that asks nothing.
+    /// Why [`Startup::composer`] needs the position: this TUI draws the modal **over** the composer, so the idle composer hint is on
+    ///   screen **before** the modal (0.153.4 Q8 dump); searching including that earlier stretch would mean "saw the composer hidden
+    ///   behind the modal", not
+    /// "passed the modal and the composer came up".
     fn pass_startup_modal(
         &self,
         probe: &LiveProbe,
@@ -1631,7 +1528,7 @@ impl PtySession {
             self.wait_quiet();
             if startup.outcome == ModalOutcome::NotShown && cursor_hidden(&self.sink.snapshot()) {
                 let (redirect, home) = probe.home_redirect.as_ref().zip(home).expect(
-                    "임시 홈 없이 시작 화면에 CR 을 보낼 수 없다 — 수락한 화면을 확인할 길이 없다",
+                    "cannot send CR to the start screen without a temporary home — there is no way to check the accepted screen",
                 );
                 startup.settled_from = self.sink.len();
                 self.write(b"\r");
@@ -1658,10 +1555,9 @@ impl PtySession {
         startup
     }
 
-    /// One probe — the accumulated length right before the erasure if the composer
-    /// took the keys, else the missing signal. ★The erasure is always sent, echo or
-    /// not★: if the echo arrives after the window, the characters stay in the
-    /// composer, the next probe's erasure falls short, and the hint never comes back.
+    /// One probe — the accumulated length right before the erasure if the composer took the keys, else the missing signal. ★The erasure is
+    ///   always sent, echo or not★: an echo arriving after the window leaves the characters in the composer, the next probe's erasure
+    ///   falls short and the hint never comes back.
     fn probe_composer(&self, marker: &str) -> Result<usize, StartupStall> {
         let typed_at = self.sink.len();
         self.write(COMPOSER_PROBE.as_bytes());
@@ -1679,8 +1575,10 @@ impl PtySession {
         Ok(erase_at)
     }
 
-    /// 실 TUI 는 뜬 뒤에도 한동안 다시 그린다. 첫 바이트만 보고 입력을 넣으면 컴포저가 아직 없을 수
-    /// 있어, **출력이 멎을 때까지** 기다린 뒤 다음 단계로 간다. 반환 = 멎은 시점의 누적 길이.
+    /// The real TUI keeps redrawing for a while even after it launches. If input is put in after seeing only the first byte, the composer
+    ///   may not
+    /// exist yet, so it waits **until the output stops** before going to the next step. Returns = the cumulative length at the moment it
+    ///   stopped.
     fn wait_quiet(&self) -> usize {
         let deadline = Instant::now() + SETTLE_TIMEOUT;
         let mut last = self.sink.len();
@@ -1705,14 +1603,13 @@ impl Drop for PtySession {
     }
 }
 
-/// Did the startup verb **reach the composer** — if not, stop right here, printing which signal was
-/// missing and the screen. No further waiting (the startup verb's budget already spent it). Returns
-/// `Some(true)` for a backend whose table has a composer hint, else `None`.
+/// Did the startup verb **reach the composer** — if not, stop here printing which signal was missing and the screen (no more waiting — the
+///   verb's budget is spent). `Some(true)` for a backend whose table has a composer hint, else `None`.
 ///
-/// ★컴포저를 묻기 전에 컴포저가 있는지부터 묻는다★: 안 그러면 키 입력은 컴포저가 아닌 무엇(다음 모달·
-///   로딩 화면)으로 가고, 그때 나오는 "에코가 없다" 는 **이 질문의 답이 아니라 하네스의 오작동**인데 둘이
-///   똑같이 빨갛다. 실제로 codex 는 빈 홈에서 모달을 하나 더 띄웠고, 그때 Q5 는 「조각이 컴포저에 안
-///   보인다」고 — 즉 답을 아는 것처럼 — 죽었다. 이 게이트가 그 둘을 갈라 준다.
+/// ★Ask whether there is a composer before asking about it★: otherwise keys go to something else (the next modal·loading screen) and the
+///   resulting "no echo" is **a harness malfunction, not this question's answer**, yet the same red. Codex showed one more modal in an
+///   empty home and
+/// Q5 died saying 「the fragments are not visible in the composer」 as if it knew the answer; this gate tells them apart.
 fn assert_composer(
     s: &PtySession,
     probe: &LiveProbe,
@@ -1722,8 +1619,8 @@ fn assert_composer(
     let marker = probe.composer_idle_marker?;
     if let Err(missing) = startup.composer {
         panic!(
-            "{name}: 시작 화면을 {STARTUP_TIMEOUT:?} 안에 못 지났다(모달={:?}) — {}. 여기서 재는 것은 컴포저 \
-             계약이므로 컴포저가 키를 안 받으면 아래 판정은 전부 무의미하다: {}",
+            "{name}: could not get past the start screen within {STARTUP_TIMEOUT:?} (modal={:?}) — {}. What is measured here is the composer \
+             contract, so if the composer does not take keys, every decision below is meaningless: {}",
             startup.outcome,
             missing.describe(marker),
             excerpt(&s.screen(), 1200)
@@ -1732,7 +1629,7 @@ fn assert_composer(
     Some(true)
 }
 
-/// TUI 출력은 대부분 제어 시퀀스다. "무엇이 새로 왔나" 를 사람이 읽는 글자로만 재려면 먼저 뗀다.
+/// TUI output is mostly control sequences. To measure "what came newly" only in human-readable characters, strip them first.
 fn visible_text(raw: &[u8]) -> String {
     let text = String::from_utf8_lossy(raw);
     let mut chars = text.chars().peekable();
@@ -1745,7 +1642,7 @@ fn visible_text(raw: &[u8]) -> String {
             continue;
         }
         match chars.next() {
-            // CSI — 최종 바이트 `@`..`~` 까지.
+            // CSI — up to the final byte `@`..`~`.
             Some('[') => {
                 for f in chars.by_ref() {
                     if ('\u{40}'..='\u{7e}').contains(&f) {
@@ -1753,7 +1650,7 @@ fn visible_text(raw: &[u8]) -> String {
                     }
                 }
             }
-            // OSC 및 문자열 시퀀스 — BEL 또는 ST(ESC \) 까지.
+            // OSC and string sequences — up to BEL or ST (ESC \).
             Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
                 let mut prev_esc = false;
                 for f in chars.by_ref() {
@@ -1769,8 +1666,8 @@ fn visible_text(raw: &[u8]) -> String {
     out
 }
 
-/// `text` 에서 `needles` 를 걷어내고 남는 **읽을 수 있는 글자**. 비어 있지 않으면 "그 텍스트가 아닌
-/// 새 출력" 이 왔다는 뜻이다(TRD §3-3 의 간접 판정 ②).
+/// The **readable characters** left after removing `needles` from `text`. If not empty, "new output other than that text"
+/// came (indirect decision ② of TRD §3-3).
 fn printable_residue(text: &str, needles: &[&str]) -> String {
     let mut cleaned = text.to_string();
     for n in needles {
@@ -1779,37 +1676,34 @@ fn printable_residue(text: &str, needles: &[&str]) -> String {
     cleaned.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// 화면 텍스트를 줄바꿈·정렬 공백 없는 한 줄로. TUI 는 박스 안에서 줄을 접으므로, 표식을 raw 텍스트에
-/// 그대로 대면 접힌 자리에서 어긋난다.
+/// Screen text as one line without line breaks·alignment spaces. The TUI folds lines inside boxes, so matching a marker against the raw text
+/// as is goes off at the folded places.
 fn flatten(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `parts` 가 **사이에 아무것도 끼지 않고 잇달아** 나타나는 자리. 반환 = 그 앞뒤를 조금 붙인 발췌.
+/// The place where `parts` appear **one after another with nothing between them**. Returns an excerpt with a little context.
 ///
-/// ★Q5 가 재는 것이 정확히 이것이다★: 조각들이 화면 어딘가에 다 보이는 것과 **컴포저에 이어 붙어** 있는
-///   것은 다른 사실이다. 앞쪽은 줄마다 제출돼 응답 사이사이에 흩어져 있어도 참이 되므로, 그 판정으로는
-///   "여러 줄이 통째로 들어갔다" 를 주장할 수 없다 — 쪼개져 제출됐다면 조각 **사이에** 모델 응답·스피너·
-///   프롬프트 표식이 그려져 인접이 깨진다. 실측된 결론(`› hi there`)이 이 술어의 모양이다.
+/// ★This is what Q5 measures★: fragments all visible somewhere on the screen and **joined in the composer** are different facts — the
+///   former holds even if each line was submitted and scattered between responses; had they been submitted split, model
+///   responses·spinners·prompt
+/// markers would be drawn **between** the fragments and break adjacency. The measured conclusion (`› hi there`) is this predicate's shape.
 ///
-/// ★한계를 정직하게 적는다 — 「같은 화면 줄인가」는 이 바이트 스트림으로 못 잰다★: TUI 는 줄바꿈 문자가
-///   아니라 CSI 커서 이동으로 행을 옮기므로 [`visible_text`] 의 `\n` 은 **화면 행과 대응하지 않는다**(실측:
-///   `› hi there` 로 한 줄에 그려진 것이 텍스트에서는 두 줄로 끊겨 있었다). 화면 행을 복원하려면 터미널
-///   에뮬레이터가 있어야 한다. 그래서 이 술어는 「같은 행」이 아니라 **「사이에 다른 것이 없다」**를 잰다.
-/// `haystack` 이 `needle` 을 말하나 — ★공백 배치를 무시하고 본다★. 표식 대조는 전부 이것을 쓴다.
+/// ★Limit★: 「the same screen row」 cannot be measured with this byte stream — the TUI moves rows with CSI cursor moves, not line breaks, so
+///   [`visible_text`]'s `\n` **does not correspond to screen rows** (what was one row `› hi there` was cut into two lines); restoring rows
+///   needs a
+/// terminal emulator. So this measures **「nothing else in between」**.
+/// Does `haystack` say `needle` — ★ignoring the placement of whitespace★. Every marker comparison uses this.
 ///
-/// ★Why [`flatten`] + `contains` is not enough — measured 2026-09-08★: this TUI draws the
-///   same sentence **two ways**. When idle it writes real spaces between words; under load
-///   it **moves the cursor for each word**. In the latter the text left after stripping
-///   control sequences has no spaces at all (`Doyoutrustthecontents…`), so the marker
-///   (`Do you trust`) misses. Back when [`PtySession::pass_startup_modal`] found the modal
-///   by its wording, it then read "no modal", sent no CR, and the next question died on the
-///   screen the modal still held with "the composer never came up" — ★a harness malfunction,
-///   not the question's answer, yet both are the same red★. That is exactly the trap the
-///   [`assert_composer`] comment warned about, and we fell in: the same lane lost 3 items to
-///   it in one run and was all green in another (what varied between runs = machine load).
-/// ★공백을 빼도 표식이 무뎌지지 않는다★: 남는 것은 글자 순서 그대로라, 우연히 걸리려면 공백만 다른 같은
-///   문장이어야 한다. [`contiguous_echo`] 가 이미 같은 이유로 `" "` 와 `""` 두 이음을 다 본다.
+/// ★Why [`flatten`] + `contains` is not enough★: this TUI draws the same sentence **two ways** — idle it writes real spaces, under load it
+///   **moves the cursor for each word**, leaving stripped text with no spaces (`Doyoutrustthecontents…`) so the marker (`Do you trust`)
+///   misses. When
+/// [`PtySession::pass_startup_modal`] found the modal by wording it then read "no modal", sent no CR and the next question died on the
+///   still-held screen with "the composer never came up" — ★a harness malfunction, not the answer, the same red★ (the trap the
+///   [`assert_composer`] comment
+/// warned of; the same lane lost 3 items in one run and was green in another — machine load).
+/// ★Removing whitespace does not blunt the marker★: what remains has the same character order, so an accidental match would need the same
+///   sentence differing only in whitespace ([`contiguous_echo`] looks at both joins `" "` and `""` for the same reason).
 fn mentions(haystack: &str, needle: &str) -> bool {
     let squash = |t: &str| -> String { t.chars().filter(|c| !c.is_whitespace()).collect() };
     squash(haystack).contains(&squash(needle))
@@ -1817,7 +1711,8 @@ fn mentions(haystack: &str, needle: &str) -> bool {
 
 fn contiguous_echo(text: &str, parts: &[&str]) -> Option<String> {
     let flat = flatten(text);
-    // 컴포저가 조각을 공백으로 잇든(줄바꿈이 공백으로 접힌 경우) 붙여 놓든 둘 다 "사이에 아무것도 없다".
+    // Whether the composer joins the fragments with a space (when the line break was folded into a space) or puts them together, both are
+    //   "nothing in between".
     for sep in [" ", ""] {
         let joined = parts.join(sep);
         if joined.is_empty() {
@@ -1858,8 +1753,8 @@ fn cursor_hidden(raw: &[u8]) -> bool {
     }
 }
 
-/// 출력에 든 DEC private mode set/reset(`ESC [ ? <params> <h|l>`) 전부, 중복 없이 나온 순서대로.
-/// Q6 이 "두 모드의 바이트가 어디서 갈리나" 를 사람에게 보여 주는 증거다.
+/// Every DEC private mode set/reset (`ESC [ ? <params> <h|l>`) in the output, in the order they appeared, without duplicates.
+/// The evidence by which Q6 shows a person "where the bytes of the two modes differ".
 fn private_modes(raw: &[u8]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut i = 0usize;
@@ -1887,7 +1782,7 @@ fn private_modes(raw: &[u8]) -> Vec<String> {
     out
 }
 
-/// `root` 아래 살아 있는 후손 PID 전부(root 자신은 뺀다).
+/// Every live descendant PID under `root` (excluding root itself).
 fn descendants(root: u32) -> Vec<u32> {
     let mut out: Vec<u32> = Vec::new();
     let mut frontier = vec![root];
@@ -1906,14 +1801,12 @@ fn pid_alive(pid: u32) -> bool {
     engram_dashboard_platform::process::pid_alive(pid)
 }
 
-/// `known` 과 `root` 중 아직 살아 있는 것 전부 — ★살아 있는 것 아래를 다시 훑어★ 앞선 열거 **뒤에** 생긴
-/// 자손까지 잡는다.
+/// Everything among `known` and `root` that is still alive — ★walks again under what is alive★ to catch descendants born **after** the
+///   preceding enumeration.
 ///
-/// ★왜 스냅샷 재확인으로는 부족한가★: shutdown 직전에 한 번 세어 둔 명단만 다시 보면, 그 열거 뒤에 태어난
-///   손자는 **아무도 안 본 채로 살아남는다**. Q10 이 재는 것이 "트리가 비었나" 인데 그 구멍으로는 안 빈
-///   트리가 초록이 된다.
-/// ★남는 한계는 적어 둔다★: 부모가 이미 죽어 버린 고아는 이 트리 걷기로 못 찾는다 — 이 술어는 사슬이
-///   끊기지 않은 후손만 본다.
+/// ★Re-checking the snapshot is not enough★: a grandchild born after the enumeration just before shutdown **survives with nobody
+///   looking**, and Q10 ("is the tree empty") would go green through that hole.
+/// ★Remaining limit★: an orphan whose parent already died is not found by this walk — it sees only descendants with an unbroken chain.
 fn alive_survivors(root: u32, known: &[u32]) -> Vec<u32> {
     let mut seen: Vec<u32> = std::iter::once(root).chain(known.iter().copied()).collect();
     let mut i = 0usize;
@@ -1933,10 +1826,10 @@ fn alive_survivors(root: u32, known: &[u32]) -> Vec<u32> {
     seen
 }
 
-// ── Q1 — 실 PTY 아래서 뜨는가 (★게이트★) ────────────────────────────────────
+// ── Q1 — does it launch under a real PTY (★gate★) ────────────────────────────────────
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q1_comes_up_under_real_pty() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
@@ -1953,24 +1846,24 @@ fn q1_comes_up_under_real_pty() {
         s.teardown();
 
         println!(
-            "[Q1 {}] 첫 바이트 {}: {:?} 만에 {len} bytes\n  화면: {}",
+            "[Q1 {}] first byte {}: {len} bytes after {:?}\n  screen: {}",
             row.name,
-            if got { "수신" } else { "미수신" },
+            if got { "received" } else { "not received" },
             first_at,
             excerpt(&screen, 400)
         );
         assert!(
             got,
-            "{}: {FIRST_BYTES_TIMEOUT:?} 안에 첫 바이트가 없다 — ★§3-5 게이트★ Phase 1 전체가 무너진다",
+            "{}: no first byte within {FIRST_BYTES_TIMEOUT:?} — ★§3-5 gate★ the whole of Phase 1 collapses",
             row.name
         );
     }
 }
 
-// ── Q2 — 첫 출력 뒤 살아 있는가 ─────────────────────────────────────────────
+// ── Q2 — is it alive after the first output ─────────────────────────────────────────────
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q2_stays_alive_after_first_output() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
@@ -1986,26 +1879,26 @@ fn q2_stays_alive_after_first_output() {
         s.teardown();
 
         println!(
-            "[Q2 {}] 첫 출력 뒤 {ALIVE_WINDOW:?} 시점 status={status:?} · 누적 {len} bytes",
+            "[Q2 {}] status={status:?} at {ALIVE_WINDOW:?} after the first output · cumulative {len} bytes",
             row.name
         );
         assert!(
             got_first,
-            "{}: 첫 바이트가 없어 Q2 를 물을 수 없다",
+            "{}: there is no first byte, so Q2 cannot be asked",
             row.name
         );
         assert!(
             matches!(status, AgentStatus::Running),
-            "{}: 첫 출력 뒤 {ALIVE_WINDOW:?} 안에 종료했다 — status={status:?}",
+            "{}: exited within {ALIVE_WINDOW:?} after the first output — status={status:?}",
             row.name
         );
     }
 }
 
-// ── Q3 — 파이프(비-TTY) stdin ───────────────────────────────────────────────
+// ── Q3 — piped (non-TTY) stdin ───────────────────────────────────────────────
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q3_non_tty_stdin_is_refused() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
@@ -2013,8 +1906,9 @@ fn q3_non_tty_stdin_is_refused() {
 
         let cwd = Scratch::new("q3").git_init();
         let (_home, env) = sandbox_home(probe, "q3", HomeUse::Session);
-        // ★운영 argv 그대로(정책 값만 무해하게) 묻는다★ — 이 질문의 축은 stdin 이지만, 그 답은 우리가
-        //   실제로 띄우는 argv 아래서의 답이어야 한다.
+        // ★Asked with the operating argv as is (only the policy values made harmless)★ — the axis of this question is stdin, but the
+        //   answer must be
+        //   the answer under the argv we actually launch.
         let spec = harnessed_spec(&row, cwd.path(), &env, &[]);
         let out = run_capture(
             &spec.program,
@@ -2036,40 +1930,40 @@ fn q3_non_tty_stdin_is_refused() {
         );
         assert!(
             !out.timed_out,
-            "{}: 비-TTY stdin 인데 {PROCESS_TIMEOUT:?} 안에 끝나지 않았다 — 대화형이 그대로 떴다는 뜻",
+            "{}: stdin is non-TTY, yet it did not end within {PROCESS_TIMEOUT:?} — meaning the interactive mode launched as is",
             row.name
         );
         assert_ne!(
             out.exit_code,
             Some(0),
-            "{}: 비-TTY stdin 을 성공으로 받았다 — PTY 가 유일한 대화형 경로라는 전제가 흔들린다",
+            "{}: it accepted non-TTY stdin as success — the premise that the PTY is the only interactive path wavers",
             row.name
         );
-        // ★종료코드만으로는 이 질문을 못 판정한다★: 우리는 세 fd 를 **전부** 파이프로 주므로, 0 이 아닌
-        //   종료는 "stdin 이 tty 가 아니라서" 일 수도 있고 인증 실패·설정 오류·패닉일 수도 있다. 어느 쪽이든
-        //   똑같이 초록이던 것이 옛 모양이다. 그 CLI 가 직접 하는 말이 둘을 가르는 유일한 증거다.
-        //   ★남는 confound 는 적어 둔다★ — stdout/stderr 도 파이프라, "stdin 만" 을 격리하려면 그 둘을 PTY
-        //   로 주는 하네스가 따로 필요하다. 이 단언은 거기까지 가지 않고 **문구**로 축을 고정한다.
+        // ★The exit code alone cannot decide this question★: all three fds are pipes, so a nonzero exit could be "stdin is not a tty" or
+        //   an auth failure·configuration error·panic (the old shape was green either way); the words that CLI says itself are the only
+        //   evidence.
+        //   ★Remaining confound★ — stdout/stderr are pipes too, so isolating "stdin only" needs a separate harness giving those two as a
+        //   PTY; this assertion pins the axis by the **phrase**.
         if let Some(marker) = probe.stdin_refusal_marker {
             assert!(
                 said.contains(marker),
-                "{}: 0 이 아닌 종료는 했는데 `{marker}` 를 말하지 않았다 — 이 죽음이 stdin 때문이라는 \
-                 증거가 없다(실측 M1 이 바뀌었거나 다른 이유로 죽은 것): {out:?}",
+                "{}: it exited nonzero but did not say `{marker}` — there is no evidence that this death was because of stdin \
+                 (measurement M1 changed or it died for another reason): {out:?}",
                 row.name
             );
         } else {
             println!(
-                "[Q3 {}] ★거부 문구가 표에 없다 — 이 행은 종료코드만 본다(약한 판정)★",
+                "[Q3 {}] ★the refusal phrase is not in the table — this row looks only at the exit code (weak decision)★",
                 row.name
             );
         }
     }
 }
 
-// ── Q4 — 본문 + 간격 + CR 이 제출로 읽히는가 (★게이트★) ────────────────────
+// ── Q4 — is body + interval + CR read as a submission (★gate★) ────────────────────
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q4_body_pause_cr_reads_as_submit() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
@@ -2078,14 +1972,14 @@ fn q4_body_pause_cr_reads_as_submit() {
         let cwd = Scratch::new("q4").git_init();
         let (home, env) = sandbox_home(probe, "q4", HomeUse::Session);
         let mut s = PtySession::open(&harnessed_spec(&row, cwd.path(), &env, &[]), 80, 24);
-        assert!(s.wait_first_bytes(), "{}: 첫 바이트 없음", row.name);
+        assert!(s.wait_first_bytes(), "{}: no first byte", row.name);
         s.wait_quiet();
         let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
         let modal = startup.outcome;
         let composer = assert_composer(&s, probe, &startup, row.name);
 
-        // TUI 는 입력이 없어도 다시 그린다. 그 바닥 소음을 먼저 재 둔다 — **단언 기준이 아니다**(아래 판정은
-        // 「컴포저가 비었나」로 선다). 보고서가 "이 관측이 얼마나 흔들리는 값인가" 를 말하게 하는 숫자다.
+        // The TUI redraws even without input. That floor noise is measured first — **it is not an assertion criterion** (the decision below
+        // stands on 「is the composer empty」). It is a number that lets the report say "how much this observation wavers".
         let idle_mark = s.sink.len();
         std::thread::sleep(PRE_SUBMIT_WINDOW);
         let idle_noise = printable_residue(&s.tail_text(idle_mark), &[]);
@@ -2097,9 +1991,9 @@ fn q4_body_pause_cr_reads_as_submit() {
             mentions(&s.tail_text(body_mark), probe.submit_body)
         });
         let echo_text = s.tail_text(body_mark);
-        // ★운영 계약 그대로 — 본문 write 와 제출 write 사이의 간격★. 위 에코 대기가 그 간격을 이미
-        //   넘겼으면 더 자지 않고, 모자란 만큼만 채운다. 재는 것이 「본문 + **간격** + CR」이라 이 하한은
-        //   못 줄인다(`SUBMIT_PACING` 주석의 실측이 그 근거).
+        // ★The operating contract as is — the interval between the body write and the submit write★. If the echo wait already exceeded it,
+        //   no more sleep, only the shortfall is filled. What is measured is 「body + **interval** + CR」, so this lower bound cannot be reduced
+        //   (ground: the `SUBMIT_PACING` comment).
         if let Some(rest) = SUBMIT_PACING.checked_sub(wrote_at.elapsed()) {
             std::thread::sleep(rest);
         }
@@ -2107,17 +2001,18 @@ fn q4_body_pause_cr_reads_as_submit() {
         let cr_mark = s.sink.len();
         let submit = InputEncoder::Raw
             .submit_sequence()
-            .expect("Raw encoder 의 제출 바이트가 없다");
+            .expect("the Raw encoder has no submit bytes");
         s.write(submit);
 
-        // ★판정은 「컴포저가 비었나」다 — 「뭔가 새로 그려졌나」가 아니다★: TUI 는 아무 입력 없이도 배너·
-        //   모델명·사용량을 다시 그리므로(바로 위 `idle_noise` 가 그 값을 찍는다) 후자는 제출의 증거가 못
-        //   된다. 제출은 컴포저를 비우고, 빈 컴포저 자리에는 안내 문구가 **다시** 그려진다 — 그 문구의
-        //   재등장이 이 질문이 실제로 관측한 사실이고, 기록된 결론("컴포저가 비었다")과 같은 것이다.
+        // ★The decision is 「is the composer empty」, not 「was something newly drawn」★: the TUI redraws banner·model name·usage without
+        //   input (`idle_noise` just above), so the latter is no evidence of submission. A submission empties the composer and the
+        //   guidance phrase is drawn
+        //   **again** in its place — that reappearance is the fact observed and the recorded conclusion ("the composer became empty").
         let cleared = match probe.composer_idle_marker {
             Some(m) => s.wait_for_text(cr_mark, m, RESPONSE_TIMEOUT),
-            // 그 신호가 없는 백엔드는 약한 판정으로 내려간다 — 본문 아닌 글자가 왔나. 위 소음 항목이 말하듯
-            // 이 판정은 흔들리므로, 그 사실을 조용히 넘기지 않고 아래 출력에 적는다.
+            // A backend without that signal falls back to the weak decision — did characters other than the body come. As the noise item
+            //   above says,
+            // this decision wavers, so that fact is not passed over quietly but written in the output below.
             None => wait_until(RESPONSE_TIMEOUT, || {
                 !printable_residue(&s.tail_text(cr_mark), &[probe.submit_body]).is_empty()
             }),
@@ -2127,13 +2022,13 @@ fn q4_body_pause_cr_reads_as_submit() {
         s.teardown();
 
         println!(
-            "[Q4 {}] 모달={modal:?}·컴포저={composer:?} · 에코={echoed} · CR 뒤 컴포저 비움={cleared} \
-             ({after_cr_bytes} bytes 새로 옴, 판정축={})\n  바닥 소음({PRE_SUBMIT_WINDOW:?} 무입력)={} \
-             chars\n  에코 화면: {}\n  CR 뒤 화면: {}",
+            "[Q4 {}] modal={modal:?}·composer={composer:?} · echo={echoed} · composer emptied after CR={cleared} \
+             ({after_cr_bytes} bytes came newly, decision axis={})\n  floor noise ({PRE_SUBMIT_WINDOW:?} no input)={} \
+             chars\n  echo screen: {}\n  screen after CR: {}",
             row.name,
             match probe.composer_idle_marker {
-                Some(m) => format!("빈 컴포저 안내 `{m}` 재등장"),
-                None => "★약한 판정★ 본문 아닌 글자 등장".to_string(),
+                Some(m) => format!("empty composer guidance `{m}` reappeared"),
+                None => "★weak decision★ characters other than the body appeared".to_string(),
             },
             idle_noise.chars().count(),
             excerpt(&echo_text, 300),
@@ -2141,22 +2036,22 @@ fn q4_body_pause_cr_reads_as_submit() {
         );
         assert!(
             echoed,
-            "{}: 본문이 컴포저에 에코되지 않았다 — 판정 ① 실패라 ②③ 을 물을 수 없다",
+            "{}: the body was not echoed in the composer — decision ① failed, so ②③ cannot be asked",
             row.name
         );
         assert!(
             cleared,
-            "{}: CR 뒤 {RESPONSE_TIMEOUT:?} 안에 컴포저가 비지 않았다 — ★§3-5 게이트★ \
-             제출 기제가 백엔드별로 갈린다는 뜻이라 InputEncoder 변형이 하나 더 필요해진다",
+            "{}: the composer did not empty within {RESPONSE_TIMEOUT:?} after CR — ★§3-5 gate★ \
+             meaning the submission mechanism differs per backend, so one more InputEncoder variant becomes necessary",
             row.name
         );
     }
 }
 
-// ── Q5 — 여러 줄 본문이 통째로 들어가는가 (★게이트★) ───────────────────────
+// ── Q5 — does a multi-line body go in whole (★gate★) ───────────────────────
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q5_multiline_body_enters_whole() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
@@ -2166,17 +2061,17 @@ fn q5_multiline_body_enters_whole() {
         let cwd = Scratch::new("q5").git_init();
         let (home, env) = sandbox_home(probe, "q5", HomeUse::Session);
         let mut s = PtySession::open(&harnessed_spec(&row, cwd.path(), &env, &[]), 80, 24);
-        assert!(s.wait_first_bytes(), "{}: 첫 바이트 없음", row.name);
+        assert!(s.wait_first_bytes(), "{}: no first byte", row.name);
         s.wait_quiet();
         let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
         let modal = startup.outcome;
         let composer = assert_composer(&s, probe, &startup, row.name);
 
-        // ★CR 을 보내지 않는다★: 본문에 든 LF 만으로 제출이 일어나는지가 이 질문이다.
+        // ★No CR is sent★: this question is whether the LF in the body alone causes a submission.
         let mark = s.sink.len();
         s.write(body.as_bytes());
-        // 조각이 **사이에 아무것도 없이 이어 붙었나** 를 기다린다 — 고정 sleep 이면 느린 첫 프레임 하나에
-        // 오판한다.
+        // Wait for whether the fragments **joined with nothing between them** — with a fixed sleep a single slow first frame
+        // would cause a misjudgment.
         let joined = wait_until(ECHO_TIMEOUT, || {
             contiguous_echo(&s.tail_text(mark), probe.multiline_parts).is_some()
         });
@@ -2189,21 +2084,21 @@ fn q5_multiline_body_enters_whole() {
             .filter(|p| !mentions(&echo_text, p))
             .collect();
 
-        // 에코를 확인한 **뒤부터** 다시 센다. 앞 구간에는 본문을 넣기 전 TUI 가 그리던 프레임이 섞여
-        // 있어, 그때의 빈 컴포저 안내가 "제출돼서 비었다" 로 오독된다.
+        // Count again **from after** the echo was confirmed. The earlier span mixes in the frames the TUI drew before the body was put in,
+        // so the empty composer guidance from then is misread as "it emptied because it was submitted".
         let after_mark = s.sink.len();
         std::thread::sleep(PRE_SUBMIT_WINDOW);
         let after_bytes = s.sink.len().saturating_sub(after_mark);
         let after = s.tail_text(after_mark);
-        // ★「정적」의 단위는 바이트가 아니라 **읽을 수 있는 글자**다★: 바이트로 재면 커서 깜빡임 같은 순수
-        //   제어 시퀀스가 "화면이 움직였다" 로 잡힌다(실측 — 이 창에서 48 bytes 가 왔는데 그중 글자는 0자).
-        //   제출의 증거가 되는 것은 새로 **그려진 글자**이지 커서가 깜빡였다는 사실이 아니다. 본문 자체는
-        //   needle 로 빼 둔다 — 컴포저를 다시 그리면서 본문이 재등장하는 것은 제출의 반대 증거다.
+        // ★The unit of 「static」 is **readable characters**, not bytes★: in bytes, pure control sequences like cursor blinking count as
+        //   "the screen moved" (48 bytes came in this window, 0 characters). Evidence of submission is newly **drawn characters**; the
+        //   body itself is a needle — it
+        //   reappearing while the composer is redrawn is counter-evidence.
         let after_visible = printable_residue(&after, probe.multiline_parts);
-        // ★약속된 폴백을 실제로 구현한다★: 빈 컴포저 안내가 없는 백엔드는 「화면 정적 여부만 본다」고
-        //   [`LiveProbe::composer_idle_marker`] 의 주석이 약속하는데, `is_some_and` 는 그 경우 **무조건
-        //   false** 라 그 백엔드의 Q5 는 영구 초록이었다. 없는 신호를 없다고 적는 것과, 없을 때 다른 것을
-        //   본다고 적어 놓고 아무것도 안 보는 것은 다르다.
+        // ★The promised fallback is actually implemented★: for a backend without the empty-composer guidance,
+        //   [`LiveProbe::composer_idle_marker`] promises 「it looks only at whether the screen is static」 but `is_some_and` was
+        //   **unconditionally false**, so that backend's Q5 was permanently green.
+        //   Writing that a signal is absent, and that it looks at something else then, then looking at nothing, are different.
         let submitted = match probe.composer_idle_marker {
             Some(m) => mentions(&after, m),
             None => !after_visible.is_empty(),
@@ -2211,42 +2106,42 @@ fn q5_multiline_body_enters_whole() {
         s.teardown();
 
         println!(
-            "[Q5 {}] 모달={modal:?}·컴포저={composer:?} · 미에코 조각={missing:?} · 인접={joined} · \
-             CR 전 제출={submitted}\n  인접 자리: {}\n  에코 화면: {}\n  \
-             이후 화면({PRE_SUBMIT_WINDOW:?}, 새 바이트 {after_bytes} 중 글자 {}자): {}",
+            "[Q5 {}] modal={modal:?}·composer={composer:?} · unechoed fragments={missing:?} · adjacent={joined} · \
+             submitted before CR={submitted}\n  adjacent place: {}\n  echo screen: {}\n  \
+             screen after ({PRE_SUBMIT_WINDOW:?}, {} characters among {after_bytes} new bytes): {}",
             row.name,
-            composer_line.as_deref().unwrap_or("(못 찾음)"),
+            composer_line.as_deref().unwrap_or("(not found)"),
             excerpt(&echo_text, 400),
             after_visible.chars().count(),
             excerpt(&after, 500)
         );
         assert!(
             missing.is_empty(),
-            "{}: 여러 줄 본문의 조각 {missing:?} 가 컴포저에 안 보인다 — 통째로 들어가지 않았다",
+            "{}: fragments {missing:?} of the multi-line body are not visible in the composer — it did not go in whole",
             row.name
         );
         assert!(
             joined,
-            "{}: 조각들이 화면에 다 있긴 한데 **사이에 다른 것이 끼어** 있다 — 흩어져 있으면 '통째로 \
-             들어갔다' 를 주장할 수 없다(줄마다 제출돼 응답 사이에 흩어진 모양도 조각은 다 보인다). \
-             기록된 결론은 조각이 이어 붙은 컴포저 한 줄(`› hi there`)이다",
+            "{}: the fragments are all on the screen, but **something else is between them** — if scattered, 'it went in \
+             whole' cannot be claimed (the shape where each line was submitted and scattered between responses also shows all fragments). \
+             The recorded conclusion is one composer line with the fragments joined (`› hi there`)",
             row.name
         );
         assert!(
             !submitted,
-            "{}: CR 을 보내기 전에 컴포저가 비었다 — LF 가 제출로 읽힌다. ★§3-5 게이트★ \
-             한 봉투가 여러 턴이 되면 Phase 2 우편이 그 위에 설 수 없고, 주입 경로에 \
-             bracketed-paste 표식을 들이는 별건 설계가 선행돼야 한다",
+            "{}: the composer emptied before CR was sent — LF is read as a submission. ★§3-5 gate★ \
+             if one envelope becomes several turns, Phase 2 mail cannot stand on it, and a separate design that brings \
+             bracketed-paste markers into the injection path must come first",
             row.name
         );
-        // ★기록된 결론은 「화면이 정적이었다」이고 그것도 지킨다★ — 바로 위 단언만 남기면 "빈 컴포저 안내가
-        //   안 보였다" 까지만 지켜진다. 그 문구가 안 보여도 **다른** 글자가 새로 그려졌다면 무언가는 일어난
-        //   것이고, 그때 기록된 근거는 더 이상 성립하지 않는다. 여기가 빨개지면 게이트가 뒤집힌 것이 아니라
-        //   결론의 근거가 달라진 것이므로, 사람이 아래 화면을 읽고 §3-3 의 간접 판정을 다시 세워야 한다.
+        // ★The recorded conclusion is 「the screen was static」 — guarded too★: the assertion above guards only "the empty composer guidance
+        //   was not visible"; **other** characters newly drawn mean something happened and the recorded ground no longer holds. If this
+        //   goes red the
+        //   conclusion's ground changed, not the gate: a person must read the screen below and set up §3-3's indirect decision again.
         assert!(
             after_visible.is_empty(),
-            "{}: CR 없이 {PRE_SUBMIT_WINDOW:?} 동안 새 글자 {}자가 그려졌다({after_bytes} bytes). 빈 컴포저 \
-             안내는 아직 안 보이지만 화면이 정적이지도 않다 — 기록된 근거가 더는 성립하지 않는다: {}",
+            "{}: without CR, {} new characters were drawn during {PRE_SUBMIT_WINDOW:?} ({after_bytes} bytes). The empty composer \
+             guidance is not visible yet, but the screen is not static either — the recorded ground no longer holds: {}",
             row.name,
             after_visible.chars().count(),
             excerpt(&after, 400)
@@ -2254,14 +2149,14 @@ fn q5_multiline_body_enters_whole() {
     }
 }
 
-// ── Q6 — `--no-alt-screen` 이 바이트 수준으로 다른가 ────────────────────────
+// ── Q6 — is `--no-alt-screen` different at the byte level ────────────────────────
 
-/// alt-screen 진입 시퀀스 **계열** — xterm 의 1049 · 1047, 그리고 원조 47. 셋 중 하나라도 나오면
-/// 그 모드는 화면을 통째로 바꿔치기하는 쪽이다.
+/// The **family** of alt-screen entry sequences — xterm's 1049 · 1047, and the original 47. If any one of the three appears,
+/// that mode is the one that swaps the whole screen.
 const ALT_SCREEN_ENTERS: &[&[u8]] = &[b"\x1b[?1049h", b"\x1b[?1047h", b"\x1b[?47h"];
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q6_no_alt_screen_changes_the_bytes() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
@@ -2269,17 +2164,17 @@ fn q6_no_alt_screen_changes_the_bytes() {
 
         let Some(flag) = probe.no_alt_screen_arg else {
             println!(
-                "[Q6 {}] alt-screen 을 끄는 인자가 표에 없다 — 이 행은 물을 것이 없다(건너뜀)",
+                "[Q6 {}] the argument that turns alt-screen off is not in the table — this row has nothing to ask (skipped)",
                 row.name
             );
             continue;
         };
 
-        // ★두 포획은 **플래그 하나만** 달라야 한다★: 옛 모양은 두 실행이 같은 고정 경로를 써서 1회차는
-        //   폴더 신뢰 모달을 그리고 2회차는 안 그렸다 — 차가운 PC 에서 그 차이가 통째로 `--no-alt-screen`
-        //   의 효과로 기록된다. 지금은 포획마다 **새 cwd + 새 임시 홈**이라 양쪽 다 첫 방문이고, 모달
-        //   결과가 어긋나면 아래에서 비교 자체를 멈춘다.
-        //   (시작 모달이 떠 있는 동안은 모드 전환이 아직 안 일어났을 수 있으므로 둘 다 지나고 나서 잰다.)
+        // ★The two captures must differ **only by the flag**★: with the old fixed path the first run drew the folder trust modal and the
+        //   second did not, and on a cold PC that was recorded as the effect of `--no-alt-screen`. Now each capture has **a new cwd + a
+        //   new temporary home**,
+        //   so both are first visits and differing modal results stop the comparison below. (While a start modal is up the mode switch may
+        //   not have happened, so it measures after both passed.)
         let mut seen: Vec<(bool, Vec<String>, usize, ModalOutcome)> = Vec::new();
         for extra in [Vec::new(), vec![flag]] {
             let cwd = Scratch::new("q6").git_init();
@@ -2289,19 +2184,21 @@ fn q6_no_alt_screen_changes_the_bytes() {
             s.wait_quiet();
             let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
             let modal = startup.outcome;
-            // ★Both captures must have finished startup for the comparison
-            //   to hold★ — if one is captured still in loading or a modal,
-            //   that difference gets recorded as the effect of `{flag}`.
+            // ★Both captures must have finished startup for the comparison to hold★ — one captured in loading or a modal would record that
+            //   difference as the effect of `{flag}`.
             assert_composer(&s, probe, &startup, &format!("{} {extra:?}", row.name));
             std::thread::sleep(CAPTURE_WINDOW);
             let raw = s.sink.snapshot();
             s.teardown();
 
-            assert!(got, "{}: {extra:?} 조합에서 첫 바이트 없음", row.name);
+            assert!(
+                got,
+                "{}: no first byte with the {extra:?} combination",
+                row.name
+            );
             let alt = ALT_SCREEN_ENTERS.iter().any(|e| contains_seq(&raw, e));
-            // ★집합으로 비교한다★ — `private_modes` 는 나온 **순서대로** 담으므로 `Vec` 을 그대로 대면
-            //   프레임 순서가 바뀐 것만으로 "달라졌다" 가 된다. 이 질문이 묻는 것은 어느 모드를 쓰나이지
-            //   어느 순서로 내나가 아니다.
+            // ★Compared as sets★ — `private_modes` holds them **in order of appearance**, so matching the `Vec` would call a changed frame
+            //   order "different"; the question is which modes it uses, not their order.
             let mut modes = private_modes(&raw);
             modes.sort();
             modes.dedup();
@@ -2309,8 +2206,8 @@ fn q6_no_alt_screen_changes_the_bytes() {
         }
 
         println!(
-            "[Q6 {}] 기본: alt_screen={} ({} bytes) 모달={:?} modes={:?}\n  {flag}: alt_screen={} \
-             ({} bytes) 모달={:?} modes={:?}",
+            "[Q6 {}] default: alt_screen={} ({} bytes) modal={:?} modes={:?}\n  {flag}: alt_screen={} \
+             ({} bytes) modal={:?} modes={:?}",
             row.name,
             seen[0].0,
             seen[0].2,
@@ -2323,30 +2220,30 @@ fn q6_no_alt_screen_changes_the_bytes() {
         );
         assert_eq!(
             seen[0].3, seen[1].3,
-            "{}: 두 포획의 시작 모달 결과가 다르다({:?} vs {:?}) — 플래그 말고 다른 것이 갈렸다는 뜻이라 \
-             아래 비교는 `{flag}` 의 효과를 재는 것이 아니다",
+            "{}: the start modal results of the two captures differ ({:?} vs {:?}) — meaning something other than the flag differed, so \
+             the comparison below does not measure the effect of `{flag}`",
             row.name, seen[0].3, seen[1].3
         );
         let changed = (seen[0].0, &seen[0].1) != (seen[1].0, &seen[1].1);
         assert_eq!(
             changed, probe.no_alt_screen_changes_bytes,
-            "{}: `{flag}` 의 바이트 영향이 표에 적힌 값과 다르다 — 게이트는 아니지만 §4-11 의 권고가 \
-             선 근거가 바뀌었다는 뜻이니 그 절을 다시 읽고 이 칸을 갱신한다",
+            "{}: the byte effect of `{flag}` differs from the value written in the table — not a gate, but it means the ground §4-11's recommendation \
+             stood on changed, so re-read that section and update this field",
             row.name
         );
     }
 }
 
-// ── Q8 — git repo 가 아닌 cwd (★게이트★) ───────────────────────────────────
+// ── Q8 — a cwd that is not a git repo (★gate★) ───────────────────────────────────
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q8_non_git_cwd_is_accepted() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
         assert_program_present(&row);
 
-        // ★git init 을 하지 않는다★ — 그것이 이 질문의 축이다. 전제를 가정하지 않고 먼저 확인한다.
+        // ★No git init★ — that is the axis of this question. The premise is checked first rather than assumed.
         let cwd = Scratch::new("q8-nongit");
         let inside = run_capture(
             "git",
@@ -2358,7 +2255,7 @@ fn q8_non_git_cwd_is_accepted() {
         assert_ne!(
             inside.exit_code,
             Some(0),
-            "임시 폴더가 git work tree 안이다 — Q8 의 전제가 성립하지 않는다: {inside:?}"
+            "the temporary folder is inside a git work tree — Q8's premise does not hold: {inside:?}"
         );
 
         let (home, env) = sandbox_home(probe, "q8", HomeUse::Session);
@@ -2366,15 +2263,14 @@ fn q8_non_git_cwd_is_accepted() {
         let got_first = s.wait_first_bytes();
         s.wait_quiet();
 
-        // ★This is the whole item★: while a modal holds the process, "still Running after 5 s"
-        //   **cannot be false**. Measured in that state, "codex does not refuse a non-git cwd"
-        //   becomes an unfalsifiable claim and this gate row stays green while asking nothing.
-        //   Only checking **that the composer really takes keys** asks about the cwd policy.
-        // ★Acceptance has two shapes★ — the composer directly with no modal, or the composer
-        //   after the folder-trust modal (which version shows which: file header). A refusal or
-        //   warning screen must be neither: if the screen passed with CR was not the folder-trust
-        //   modal (no trust entry for this cwd appears in the temp home), the startup verb stops
-        //   right there, and if the composer is not reached the gate below stops.
+        // ★This is the whole item★: while a modal holds the process "still Running after 5 s" **cannot be false**, so "codex does not
+        //   refuse a non-git cwd" is unfalsifiable and the gate row stays green asking nothing. Only checking **that the composer really
+        //   takes keys** asks about the
+        //   cwd policy.
+        // ★Acceptance has two shapes★ — the composer directly with no modal, or after the folder-trust modal (which version shows which:
+        //   file header). A refusal or warning screen must be neither: if the screen passed with CR was not the folder-trust modal (no
+        //   trust entry for this cwd in the
+        //   temp home) the startup verb stops there, and if the composer is not reached the gate below stops.
         let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
         let modal = startup.outcome;
         let composer_ready = probe.composer_idle_marker.map(|_| startup.composer);
@@ -2385,22 +2281,22 @@ fn q8_non_git_cwd_is_accepted() {
         s.teardown();
 
         println!(
-            "[Q8 {}] 첫 바이트={got_first} · 모달={modal:?} · 컴포저={composer_ready:?} · 신뢰 항목={:?} · \
-             {ALIVE_WINDOW:?} 뒤 status={status:?}\n  화면: {}",
+            "[Q8 {}] first byte={got_first} · modal={modal:?} · composer={composer_ready:?} · trust entry={:?} · \
+             status={status:?} after {ALIVE_WINDOW:?}\n  screen: {}",
             row.name,
             startup.trust_entry,
             excerpt(&screen, 1200)
         );
         assert!(
             got_first,
-            "{}: git repo 아닌 cwd 에서 아무 출력도 없다 — ★§3-5 게이트★",
+            "{}: no output at all in a cwd that is not a git repo — ★§3-5 gate★",
             row.name
         );
         if let (Some(Err(missing)), Some(marker)) = (composer_ready, probe.composer_idle_marker) {
             panic!(
-                "{}: 시작 화면을 지나 컴포저가 키를 받지 않았다(모달={modal:?} · {}) — ★§3-5 게이트★ git repo \
-                 아닌 cwd 를 받아들이지 않았다는 뜻이다(거부·경고·모르는 모달). 우리 스폰 입구는 임의 \
-                 폴더를 받으므로 cwd 정책이 배선보다 먼저 결정돼야 한다: {}",
+                "{}: the composer did not take keys after the start screen (modal={modal:?} · {}) — ★§3-5 gate★ meaning it did not accept a cwd \
+                 that is not a git repo (refusal·warning·unknown modal). Our spawn entry takes arbitrary \
+                 folders, so the cwd policy must be decided before the wiring: {}",
                 row.name,
                 missing.describe(marker),
                 excerpt(&screen, 800)
@@ -2408,17 +2304,17 @@ fn q8_non_git_cwd_is_accepted() {
         }
         assert!(
             matches!(status, AgentStatus::Running),
-            "{}: git repo 아닌 cwd 를 거부했다(status={status:?}) — ★§3-5 게이트★ 우리 스폰 입구는 \
-             임의 폴더를 받으므로 cwd 정책이 배선보다 먼저 결정돼야 한다",
+            "{}: it refused a cwd that is not a git repo (status={status:?}) — ★§3-5 gate★ our spawn entry \
+             takes arbitrary folders, so the cwd policy must be decided before the wiring",
             row.name
         );
     }
 }
 
-// ── Q9 — 호출자가 세션 id 를 정할 수 있는가 ─────────────────────────────────
+// ── Q9 — can the caller decide the session id ─────────────────────────────────
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q9_caller_cannot_choose_the_session_id() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
@@ -2426,8 +2322,9 @@ fn q9_caller_cannot_choose_the_session_id() {
 
         let cwd = Scratch::new("q9");
         let (_home, env) = sandbox_home(probe, "q9", HomeUse::Session);
-        // 운영 argv 에 `--help` 를 얹어 묻는다 — 도움말은 파싱 단계에서 단락하므로 앞 인자들이 그대로
-        // 있어도 같은 텍스트가 나온다(실측 0.153.4). 이 파일이 그 CLI 를 부르는 길을 하나로 두는 값이다.
+        // Asked by putting `--help` on the operating argv — help short-circuits at the parsing stage, so the same text comes out even with
+        //   the preceding
+        // arguments in place (measured 0.153.4). It is the value that keeps this file's way of calling that CLI to one.
         let spec = harnessed_spec(&row, cwd.path(), &env, &["--help"]);
         let help_run = run_capture(
             &spec.program,
@@ -2440,17 +2337,17 @@ fn q9_caller_cannot_choose_the_session_id() {
         assert_eq!(
             help_run.exit_code,
             Some(0),
-            "{}: `--help` 가 실패했다: {help_run:?}",
+            "{}: `--help` failed: {help_run:?}",
             row.name
         );
         let help = format!("{}{}", help_run.stdout, help_run.stderr);
 
         match probe.session_id_flag {
             Some(flag) => {
-                println!("[Q9 {}] 세션 id 플래그 `{flag}` 를 기대", row.name);
+                println!("[Q9 {}] expecting the session id flag `{flag}`", row.name);
                 assert!(
                     help.contains(flag),
-                    "{}: `--help` 에 `{flag}` 가 없다 — 표가 있다고 적은 플래그가 사라졌다",
+                    "{}: `{flag}` is not in `--help` — a flag the table says exists disappeared",
                     row.name
                 );
             }
@@ -2461,14 +2358,14 @@ fn q9_caller_cannot_choose_the_session_id() {
                     .filter(|c| help.contains(c))
                     .collect();
                 println!(
-                    "[Q9 {}] `--help` {} bytes · 세션 id 후보 발견={found:?}",
+                    "[Q9 {}] `--help` {} bytes · session id candidates found={found:?}",
                     row.name,
                     help.len()
                 );
                 assert!(
                     found.is_empty(),
-                    "{}: 세션 id 를 정하는 플래그 {found:?} 가 실제로 있다 — 호출자가 sid 를 못 정한다는 \
-                     판정이 뒤집힌다",
+                    "{}: the flag {found:?} that decides the session id actually exists — the decision that the caller cannot decide the sid \
+                     is overturned",
                     row.name
                 );
             }
@@ -2476,10 +2373,10 @@ fn q9_caller_cannot_choose_the_session_id() {
     }
 }
 
-// ── Q10 — shutdown 뒤 프로세스 트리가 비는가 (★게이트★) ────────────────────
+// ── Q10 — is the process tree empty after shutdown (★gate★) ────────────────────
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q10_shutdown_empties_the_process_tree() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
@@ -2488,14 +2385,14 @@ fn q10_shutdown_empties_the_process_tree() {
         let cwd = Scratch::new("q10").git_init();
         let (_home, env) = sandbox_home(probe, "q10", HomeUse::Session);
         let mut s = PtySession::open(&harnessed_spec(&row, cwd.path(), &env, &[]), 80, 24);
-        assert!(s.wait_first_bytes(), "{}: 첫 바이트 없음", row.name);
+        assert!(s.wait_first_bytes(), "{}: no first byte", row.name);
         s.wait_quiet();
 
-        let root = s.child_pid.expect("PTY 직속 자식 PID 를 못 받았다");
-        // Job Object 에 배정되는 것은 직속 자식(`cmd.exe`)이고 실 CLI 는 그 손자·증손자다. 그 깊이가
-        // 실제로 있는지 먼저 확인해야 "트리가 비었다" 가 공허한 단언이 되지 않는다.
-        // ★본 명단을 **합집합으로 쌓는다**★ — 한 번 찍은 스냅샷만 들고 있으면 그 사이에 태어났다 죽은
-        //   중간 고리가 명단에서 빠지고, 그 고리의 자식이 남아도 아무도 안 본다.
+        let root = s.child_pid.expect("did not get the PTY's direct child PID");
+        // The Job Object is assigned the direct child (`cmd.exe`); the real CLI is its grandchild·great-grandchild. That depth must be
+        //   checked to exist first so "the tree is empty" is not an empty assertion.
+        // ★The seen list is **accumulated as a union**★ — a single snapshot would drop a middle link born and dead in between, and even if
+        //   its child remains nobody looks.
         let mut tree_before: Vec<u32> = Vec::new();
         let deep = wait_until(Duration::from_secs(15), || {
             for p in descendants(root) {
@@ -2509,10 +2406,10 @@ fn q10_shutdown_empties_the_process_tree() {
 
         let (shutdown_took, join_took) = s
             .teardown_measured()
-            .expect("이 항목이 teardown 을 처음 부른다");
+            .expect("this item calls teardown for the first time");
 
-        // ★열거를 다시 한다 — 옛 스냅샷만 재확인하지 않는다★: 위 열거 **뒤에** 태어난 손자는 스냅샷에
-        //   없으므로, 명단만 다시 보면 살아남은 채로 초록이 된다.
+        // ★Enumerate again — do not re-check only the old snapshot★: a grandchild born **after** the enumeration above is not in the snapshot,
+        //   so looking only at the list again goes green with it surviving.
         let mut alive_after: Vec<u32> = Vec::new();
         let gone = wait_until(Duration::from_secs(10), || {
             alive_after = alive_survivors(root, &tree_before);
@@ -2521,54 +2418,53 @@ fn q10_shutdown_empties_the_process_tree() {
         let status_after = s.core.status();
 
         println!(
-            "[Q10 {}] root={root} 후손={tree_before:?} · shutdown {shutdown_took:?} → \
-             join_pump {join_took:?} · 생존={alive_after:?} · status {status_before:?} → {status_after:?}",
+            "[Q10 {}] root={root} descendants={tree_before:?} · shutdown {shutdown_took:?} → \
+             join_pump {join_took:?} · alive={alive_after:?} · status {status_before:?} → {status_after:?}",
             row.name
         );
         assert!(
             deep || !cfg!(windows),
-            "{}: 직속 자식 아래 후손이 하나도 안 보인다 — shim 사슬 전제가 흔들린다",
+            "{}: not a single descendant is visible under the direct child — the shim chain premise wavers",
             row.name
         );
         assert!(
             gone,
-            "{}: shutdown 뒤에도 {alive_after:?} 가 살아 있다 — ★§3-5 게이트★ 이건 회귀가 아니라 \
-             kill 인과(ADR-0001) **첫 동사**의 위반이라 Job Object 배치를 다시 봐야 한다",
+            "{}: {alive_after:?} is still alive after shutdown — ★§3-5 gate★ this is not a regression but \
+             a violation of the **first verb** of the kill causality (ADR-0001), so the Job Object placement must be looked at again",
             row.name
         );
 
-        // ── 여기부터가 둘째 동사다 ──────────────────────────────────────────────────
+        // ── From here on is the second verb ──────────────────────────────────────────────────
         //
-        // ★PID 가 사라졌다는 것은 `shutdown()` 만 잰 것이다★. ADR-0001 의 인과는 거기서 안 끝난다 —
-        //   master drop → reader EOF → pump break → `core.finish` → done_tx 가 그 뒤에 이어지고, terminal
-        //   전이를 발행하는 것은 **pump 단독**이다(ADR-0005 · `docs/reference/architecture.md` 「런타임 불변식」의 finalize 1회 ·
-        //   상태 알림 분담). 그래서 pump 가 실제로 끝났다는 관측 가능한 결과는 **status 가 terminal 로
-        //   넘어갔나**다: 안 넘어갔으면 `finish` 가 안 불렸고 = 루프가 안 깨졌다.
-        // ★`finalized` 를 직접 볼 수는 없다★(공개 접근자가 없다). 하지만 `finish` 는 그 swap 을 통과한
-        //   승자 경로에서만 status 를 쓰므로, terminal status 는 그 플래그가 섰다는 것과 같은 사실이다.
+        // ★The PID disappearing only measured `shutdown()`★. ADR-0001's causality continues: master drop → reader EOF → pump break →
+        //   `core.finish` → done_tx, and what emits the terminal transition is **the pump alone** (ADR-0005 ·
+        //   `docs/reference/architecture.md` 「Runtime invariants」). So the observable result that the pump ended is **did status move to
+        //   terminal** — if not, `finish` was not called = the loop did not break.
+        // ★`finalized` cannot be seen directly★ (no public accessor), but `finish` writes status only on the winner path that passed that
+        //   swap, so a terminal status is the same fact as that flag being set.
         assert!(
             !status_after.is_live(),
-            "{}: 프로세스는 사라졌는데 status 가 아직 {status_after:?} 다 — pump 가 루프를 안 깼거나 \
-             `finish` 가 안 불렸다는 뜻이다(terminal 전이는 pump 단독 — ADR-0005). ★§3-5 게이트★ \
-             kill 인과(ADR-0001)의 **둘째 동사**가 성립하지 않는다",
+            "{}: the process is gone but status is still {status_after:?} — meaning the pump did not break the loop or \
+             `finish` was not called (the terminal transition is the pump alone — ADR-0005). ★§3-5 gate★ \
+             the **second verb** of the kill causality (ADR-0001) does not hold",
             row.name
         );
-        // ★상한에 눌어붙었나★ — `join_pump` 는 `recv_timeout` 의 결과를 버리므로(`output_core.rs:383-392`)
-        //   "기다렸다 실패" 와 "바로 끝났다" 가 호출자에게 같은 `()` 로 보인다. 소요 시간만이 그 둘을 가른다.
-        //   여유를 크게 두는 이유 = 이 단언이 재는 것은 "빠른가" 가 아니라 "상한까지 갔나" 다.
+        // ★Did it stick to the bound★ — `join_pump` discards the `recv_timeout` result (`output_core.rs:383-392`), so "waited and failed"
+        //   and "ended right away" look the same to the caller; only the duration tells. The margin is large because this measures "did it
+        //   go up to the bound", not "is it fast".
         assert!(
             join_took < JOIN_PUMP_TIMEOUT.mul_f32(0.9),
-            "{}: join_pump 가 {join_took:?} 걸렸다 — 상한({JOIN_PUMP_TIMEOUT:?})에 눌어붙었다는 뜻이라 \
-             pump 는 그 안에 안 끝났다. status 가 terminal 로 보이더라도 그건 상한 뒤에 늦게 온 것이다",
+            "{}: join_pump took {join_took:?} — meaning it stuck to the bound ({JOIN_PUMP_TIMEOUT:?}), so \
+             the pump did not end within it. Even if status looks terminal, it came late after the bound",
             row.name
         );
     }
 }
 
-// ── Q11 — 운영 argv 를 그대로 받아들이는가 (★이 파일이 「운영을 잰다」고 말하는 자리★) ──────────
+// ── Q11 — does it accept the operating argv as is (★the place where this file says it 「measures operation」★) ──────────
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q11_production_argv_is_accepted_and_reaches_a_composer() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
@@ -2577,36 +2473,34 @@ fn q11_production_argv_is_accepted_and_reaches_a_composer() {
         let cwd = Scratch::new("q11").git_init();
         let (home, env) = sandbox_home(probe, "q11", HomeUse::Session);
 
-        // ★이 항목만 안전 스왑을 안 건다★ — 나머지 질문은 정책 칸을 무해한 것으로 덮어쓰고 뜨므로,
-        //   「운영이 쓰는 그 값들을 실 CLI 가 받아들이나」를 묻는 자리는 여기뿐이다.
+        // ★Only this item does not apply the safety swap★ — the other questions launch with the policy fields overwritten with harmless ones, so
+        //   this is the only place that asks 「does the real CLI accept those values operation uses」.
         let spec = production_spec(&row, cwd.path(), &env, &[]);
         assert_no_forbidden(&spec.args, &probe.safety, row.name);
 
-        // ★그런데 그 argv 가 스왑된 것과 정말 다른가★: 같다면 이 항목은 위 질문들과 똑같은 것을 재고
-        //   있고, 「운영 정책을 재는 자리」라는 존재 이유가 조용히 사라진다. 그 침묵을 여기서 잡는다.
+        // ★But is that argv really different from the swapped one★: if it is the same, this item measures exactly the same thing as the
+        //   questions above,
+        //   and its reason to exist, 「the place that measures the operating policy」, quietly disappears. That silence is caught here.
         let swapped = safe_args(&spec.args, &probe.safety, row.name);
         assert_ne!(
             spec.args, swapped,
-            "{}: 운영 argv 가 이미 시험대용 정책과 같다 — 그럼 이 항목은 다른 항목들과 같은 것을 재고 \
-             있고, 운영 정책을 따로 재던 자리가 사라졌다는 뜻이다. 안전 봉투를 다시 읽고 이 항목을 \
-             지울지 정한다: {:?}",
+            "{}: the operating argv is already the same as the test-bench policy — then this item measures the same thing as the other items, \
+             meaning the place that separately measured the operating policy is gone. Re-read the safety envelope and decide whether to \
+             delete this item: {:?}",
             row.name, spec.args
         );
 
         println!(
-            "[Q11 {}] 운영 argv: {} {:?}",
+            "[Q11 {}] operating argv: {} {:?}",
             row.name, spec.program, spec.args
         );
 
-        // ★No prompt is ever submitted★ — the only keys sent are the probe characters,
-        //   their erasure and one CR that pass the startup screen
-        //   ([`PtySession::pass_startup_modal`]). Without a model turn the write access
-        //   that policy grants never gets a chance to be used, and that is the only
-        //   reason this item is harmless while running the production policy as-is.
-        // ★That verb also carries the startup-path guarantee★ — if another first
-        //   screen appears under the production policy values, its post-CR check
-        //   (did a folder-trust entry for this cwd appear in the temp home) stops
-        //   the run. That is why this item has no modal assertion of its own.
+        // ★No prompt is ever submitted★ — the only keys sent are the probe characters, their erasure and one CR passing the startup screen
+        //   ([`PtySession::pass_startup_modal`]). Without a model turn the write access that policy grants is never used — the only reason
+        //   this item is harmless
+        //   running the production policy as is.
+        // ★That verb also carries the startup-path guarantee★ — another first screen under the production policy values is stopped by its
+        //   post-CR check (a folder-trust entry for this cwd in the temp home), so this item has no modal assertion of its own.
         let mut s = PtySession::open(&spec, 100, 24);
         let got_first = s.wait_first_bytes();
         s.wait_quiet();
@@ -2619,8 +2513,8 @@ fn q11_production_argv_is_accepted_and_reaches_a_composer() {
         s.teardown();
 
         println!(
-            "[Q11 {}] 첫 바이트={got_first} · 모달={modal:?} · 컴포저={composer:?} · 신뢰 항목={:?} · \
-             {ALIVE_WINDOW:?} 뒤 status={status:?}\n  화면: {}",
+            "[Q11 {}] first byte={got_first} · modal={modal:?} · composer={composer:?} · trust entry={:?} · \
+             status={status:?} after {ALIVE_WINDOW:?}\n  screen: {}",
             row.name,
             startup.trust_entry,
             excerpt(&screen, 900)
@@ -2628,15 +2522,15 @@ fn q11_production_argv_is_accepted_and_reaches_a_composer() {
 
         assert!(
             got_first,
-            "{}: 운영 argv 로 띄우니 첫 바이트가 없다 — 시험대가 재던 argv 는 뜨는데 운영이 띄우는 argv \
-             는 안 뜬다는 뜻이다. 여기가 빨개지면 배선이 아니라 운영 인자가 틀린 것이다",
+            "{}: launching with the operating argv gives no first byte — meaning the argv the test bench measured launches but the argv operation launches \
+             does not. If this goes red, it is not the wiring but the operating arguments that are wrong",
             row.name
         );
         if let (Some(Err(missing)), Some(marker)) = (composer, probe.composer_idle_marker) {
             panic!(
-                "{}: 운영 argv 가 컴포저까지 오지 못했다(모달={modal:?} · {}) — 사람이 쓸 수 있는 \
-                 화면에 도달하지 않는 정책 값이라는 뜻이다(승인 대기·샌드박스 설치 모달 등). 운영 인자를 \
-                 다시 봐야 한다: {}",
+                "{}: the operating argv did not reach the composer (modal={modal:?} · {}) — meaning they are policy values that do not reach a screen \
+                 a person can use (approval waiting·sandbox install modal, etc.). The operating arguments \
+                 must be looked at again: {}",
                 row.name,
                 missing.describe(marker),
                 excerpt(&screen, 900)
@@ -2644,30 +2538,30 @@ fn q11_production_argv_is_accepted_and_reaches_a_composer() {
         }
         assert!(
             matches!(status, AgentStatus::Running),
-            "{}: 운영 argv 로 뜬 프로세스가 {ALIVE_WINDOW:?} 안에 종료했다(status={status:?})",
+            "{}: the process launched with the operating argv exited within {ALIVE_WINDOW:?} (status={status:?})",
             row.name
         );
 
-        // ★여기까지가 이 항목의 전부다 — 남는 칸을 적어 둔다★: 이 정책 아래에서 **모델이 실제로 무엇을
-        //   할 수 있나**는 안 재진다. 재려면 프롬프트를 넣어 턴을 돌려야 하고, 그것은 이 시험대에 쓰기
-        //   권한을 쥔 에이전트를 돌리는 일이다. 시험대의 무해함이 그보다 무거워 맞바꾸지 않았고, 그래서
-        //   그 칸은 **비어 있다**. 이 항목의 초록을 「운영 정책을 전부 검증했다」로 읽지 말 것.
+        // ★This is all of this item — the remaining field is written down★: **what the model can actually do** under this policy is not
+        //   measured (it needs a prompt and a turn, i.e. an agent holding write permission in this bench; the bench's harmlessness weighs
+        //   more), so that field
+        //   **is empty**. Do not read this item's green as 「the whole operating policy was verified」.
     }
 }
 
-// ── Q12 — 작업 루트가 인자에서 오는가 · env 가 프로세스에 닿는가 (= `session_cwd_env` 의 근거) ──
+// ── Q12 — does the work root come from the argument · does env reach the process (= the ground of `session_cwd_env`) ──
 
-/// Q12 가 파는 폴더의 이름표. ★짧게 짓는다★ — TUI 는 폭에 맞춰 경로를 줄이므로 긴 이름은 화면에서
-/// 잘려 판정이 못 선다(실측 0.153.4: 80 열에서 머리 상자가 leaf 를 앞부터 `…` 로 잘랐다).
+/// The name tag of the folder Q12 digs. ★Keep it short★ — the TUI shortens paths to fit the width, so a long name is cut on the screen
+/// and the decision cannot stand (measured 0.153.4: at 80 columns the header box cut the leaf from the front with `…`).
 fn short_tag(prefix: &str) -> String {
     format!("{prefix}-{}", &Uuid::new_v4().to_string()[..8])
 }
 
-/// `root` 아래(재귀) 어느 파일 본문에 `needle` 이 들어 있나 — 첫 자리를 돌려준다.
+/// In which file body under `root` (recursively) does `needle` appear — returns the first place.
 ///
-/// ★파일 이름을 박지 않는 이유★: 그 CLI 가 폴더 신뢰를 **어느 파일에** 적는지는 버전 사정이고, 이
-///   질문이 묻는 것은 「그 결정이 우리가 넘긴 상태 디렉터리 **안에** 적혔나」다. 이름을 박으면 그 CLI 가
-///   파일을 옮기는 날 관측이 조용히 빈 칸이 된다.
+/// ★The file name is not pinned★: **which file** the CLI writes the folder trust in is version-specific, and the question is 「was that
+///   decision written **inside** the state directory we passed」; pinning the name would quietly make the observation an empty field the
+///   day the CLI moves the file.
 fn find_text_under(root: &Path, needle: &str) -> Option<PathBuf> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -2679,7 +2573,7 @@ fn find_text_under(root: &Path, needle: &str) -> Option<PathBuf> {
             match e.file_type() {
                 Ok(t) if t.is_dir() => stack.push(p),
                 Ok(t) if t.is_file() => {
-                    // 큰 파일은 건너뛴다 — 이 질문이 찾는 것은 설정·기록이지 덤프가 아니다.
+                    // Large files are skipped — what this question looks for is settings·records, not dumps.
                     if e.metadata().map(|m| m.len()).unwrap_or(u64::MAX) > 4 * 1024 * 1024 {
                         continue;
                     }
@@ -2697,69 +2591,67 @@ fn find_text_under(root: &Path, needle: &str) -> Option<PathBuf> {
 }
 
 #[test]
-#[ignore = "실 codex 필요 — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
+#[ignore = "needs the real codex — cargo test -p engram-dashboard-agent --test backend_contract -- --ignored"]
 fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() {
     for row in live_rows() {
         let probe = row.probe.as_ref().unwrap();
         assert_program_present(&row);
 
-        // ★선언과 관측을 여기서 묶는다★ — 이 항목이 `session.cwd_env` 칸의 근거로 돈다. 그 칸이 false 로
-        //   뒤집히면 잴 주장 자체가 없어진 것이라, 아래를 그대로 둘 수 없다.
+        // ★The declaration and the observation are tied here★ — this item runs as the ground of the `session.cwd_env` field. If that field
+        //   flips to false,
+        //   the claim to measure itself is gone, so what follows cannot be left as is.
         assert!(
             row.backend.capabilities(&row.sample).session.cwd_env,
-            "{}: `session.cwd_env` 가 false 인데 이 항목이 그 칸의 근거로 돌고 있다 — 표와 관측이 어긋났다",
+            "{}: `session.cwd_env` is false, yet this item runs as the ground of that field — the table and the observation disagree",
             row.name
         );
 
-        // 두 폴더를 판다: 운영 spec 이 인자로 지목할 **작업 루트**와, 프로세스를 실제로 띄울 **다른 폴더**.
+        // Two folders are dug: the **work root** the operating spec designates by argument, and **another folder** to actually launch the
+        //   process in.
         let root_box = Scratch::new("q12r");
         let away_box = Scratch::new("q12a");
         let root_leaf = short_tag("root");
         let away_leaf = short_tag("away");
         let root = root_box.path().join(&root_leaf);
         let away = away_box.path().join(&away_leaf);
-        std::fs::create_dir_all(&root).expect("작업 루트 폴더 생성 실패");
-        std::fs::create_dir_all(&away).expect("프로세스 cwd 폴더 생성 실패");
-        // ★Both folders are made git repos★ — the trust record that is the evidence for
-        //   (나) below is written only by passing the trust modal, and a non-git folder
-        //   gets no modal (file header; measured 0.163.0: such a folder goes straight to
-        //   the composer and its path is written nowhere in the home). The process-cwd
-        //   side must be a repo too, so that "a record appeared for it" is something that
-        //   **can happen** — only then does that absence assertion measure anything.
-        // ★A run where that side wins is usually caught first by the startup
-        //   verb★ — it requires a trust entry for the **working root** after
-        //   the CR, so it stops if the modal offered to trust the process cwd.
-        //   The absence assertion below catches a run where both got written.
+        std::fs::create_dir_all(&root).expect("failed to create the work root folder");
+        std::fs::create_dir_all(&away).expect("failed to create the process cwd folder");
+        // ★Both folders are made git repos★ — the trust record that is evidence for (b) is written only by passing the trust modal, and a
+        //   non-git folder gets no modal (0.163.0: straight to the composer, path written nowhere in the home). The process-cwd side must
+        //   be a repo too so "a record
+        //   appeared for it" **can happen** — only then does the absence assertion measure anything.
+        // ★A run where that side wins is usually caught first by the startup verb★ — it requires a trust entry for the **working root**
+        //   after the CR, so it stops if the modal offered to trust the process cwd; the absence assertion below catches a run where both
+        //   got written.
         git_init_at(&root);
         git_init_at(&away);
 
         let (home, env) = sandbox_home(probe, "q12", HomeUse::Session);
         let mut spec = harnessed_spec(&row, &root, &env, &[]);
-        // ★그 다음 프로세스 cwd 만 딴 데로 돌린다★: 두 칸이 같은 값이면 「작업 루트가 인자에서 왔나」를
-        //   물을 수가 없다 — 그 인자가 통째로 무시돼도 프로세스 cwd 가 **같은 답**을 만들어 주기 때문이다.
-        //   반증 불가능한 관측을 반증 가능하게 만드는 것이 이 한 줄이고, 그것이 이 항목의 전부다.
-        // ★그만큼 이건 운영 모양이 아니다★ — 운영은 둘을 같은 값으로 준다(`build_spec`). 여기서 갈라
-        //   놓는 것은 「어느 칸이 작업 루트를 정하나」를 겪어 보기 위해서고, 그 답이 **인자 쪽**이라는
-        //   것이 운영이 cwd 를 그대로 넘기면 된다는 근거다.
+        // ★Then only the process cwd is turned elsewhere★: with equal values 「did the work root come from the argument」 cannot be asked —
+        //   even if the argument were ignored the process cwd would produce **the same answer**. This line makes an unfalsifiable
+        //   observation falsifiable.
+        // ★Not the operating shape★ — operation gives both the same value (`build_spec`); splitting them shows 「which field decides the
+        //   work root」, and the answer being **the argument side** is the ground that operation can pass the cwd as is.
         spec.cwd = away.clone();
 
         let root_str = root.to_string_lossy().into_owned();
         assert!(
             spec.args.iter().any(|a| a == &root_str),
-            "{}: 운영 argv 에 작업 루트({root_str})가 실리지 않았다 — 이 백엔드는 작업 폴더를 인자로 \
-             넘기지 않는다는 뜻이라, 이 항목이 재려던 것이 argv 에 애초에 없다: {:?}",
+            "{}: the work root ({root_str}) was not put in the operating argv — meaning this backend does not pass the work folder by argument, \
+             so what this item meant to measure is not in the argv in the first place: {:?}",
             row.name,
             spec.args
         );
 
         println!(
-            "[Q12 {}] argv={:?}\n  작업 루트(인자)={root_str}\n  프로세스 cwd={}",
+            "[Q12 {}] argv={:?}\n  work root (argument)={root_str}\n  process cwd={}",
             row.name,
             spec.args,
             away.display()
         );
 
-        // ★넓게 띄운다★ — 이 TUI 는 폭에 맞춰 경로를 줄이므로 80 열에서는 leaf 가 잘려 판정이 못 선다.
+        // ★Launch it wide★ — this TUI shortens paths to fit the width, so at 80 columns the leaf is cut and the decision cannot stand.
         let mut s = PtySession::open(&spec, 140, 24);
         let got_first = s.wait_first_bytes();
         s.wait_quiet();
@@ -2767,16 +2659,15 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
         let modal = startup.outcome;
         let composer = assert_composer(&s, probe, &startup, row.name);
 
-        // ★Only the output after the startup screen is looked at★ — the consumed
-        //   trust modal's text also contains the working-root path (measured
-        //   0.163.0 `Trusting will apply to the repository root: …\root-…`).
-        //   Matching the whole accumulated screen would stay green thanks to
-        //   that sentence even if the working-root display disappeared.
+        // ★Only the output after the startup screen is looked at★ — the consumed trust modal's text also contains the working-root path
+        //   (0.163.0 `Trusting will apply to the repository root: …\root-…`); matching the whole accumulated screen would stay green on
+        //   that sentence even if the
+        //   working-root display disappeared.
         let settled = s.tail_text(startup.settled_from);
         let says_root = mentions(&settled, &root_leaf);
         let says_away = mentions(&settled, &away_leaf);
 
-        // 파일 쪽 증거 — 모달을 지나면 그 결정이 상태 디렉터리에 적힌다. 비동기라 기다린다.
+        // The file-side evidence — after passing the modal, that decision is written into the state directory. Asynchronous, so it waits.
         let home_path = home.as_ref().map(|h| h.path().to_path_buf());
         let mut root_in_home: Option<PathBuf> = None;
         if let Some(hp) = home_path.as_ref() {
@@ -2791,7 +2682,7 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
         let screen = s.screen();
         s.teardown();
 
-        // 실 홈은 안 더러워졌나 — 임시 홈이 정말 그 쓰기를 받았다는 반대편 증거이기도 하다.
+        // Is the real home not dirtied — this is also the counter-evidence that the temporary home really received that write.
         let root_in_real_home = probe
             .home_redirect
             .as_ref()
@@ -2799,9 +2690,9 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
             .and_then(|rh| find_text_under(&rh, &root_leaf));
 
         println!(
-            "[Q12 {}] 첫 바이트={got_first} · 모달={modal:?} · 컴포저={composer:?} · 신뢰 항목={:?}\n  \
-             시작 뒤 화면이 말하는 폴더: 인자쪽(`{root_leaf}`)={says_root} · 프로세스cwd쪽(`{away_leaf}`)={says_away}\n  \
-             임시 홈 기록: 인자쪽={:?} · 프로세스cwd쪽={:?}\n  실 홈 오염: {:?}\n  시작 뒤 화면: {}\n  전체 화면: {}",
+            "[Q12 {}] first byte={got_first} · modal={modal:?} · composer={composer:?} · trust entry={:?}\n  \
+             folder the screen names after start: argument side (`{root_leaf}`)={says_root} · process-cwd side (`{away_leaf}`)={says_away}\n  \
+             temporary home record: argument side={:?} · process-cwd side={:?}\n  real home pollution: {:?}\n  screen after start: {}\n  whole screen: {}",
             row.name,
             startup.trust_entry,
             root_in_home.as_ref().map(|p| p.display().to_string()),
@@ -2811,48 +2702,48 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
             excerpt(&screen, 1000)
         );
 
-        assert!(got_first, "{}: 첫 바이트 없음", row.name);
+        assert!(got_first, "{}: no first byte", row.name);
 
-        // ── (가) cwd 반 — 작업 루트는 **인자**가 정한다 ────────────────────────────────────────
+        // ── (a) the cwd half — the work root is decided by the **argument** ────────────────────────────────────────
         if probe.shows_workspace_root {
             assert!(
                 says_root,
-                "{}: 화면에 인자로 준 작업 루트(`{root_leaf}`)가 없다 — 그 인자가 작업 루트를 정한다는 \
-                 주장이 서지 않는다(작업 루트를 화면에 안 적게 바뀌었거나 화면이 좌폭으로 잘렸다면 표의 \
-                 `shows_workspace_root` 칸부터 다시 잰다): {}",
+                "{}: the work root given as argument (`{root_leaf}`) is not on the screen — the claim that the argument decides the work root \
+                 does not stand (if it changed to not write the work root on the screen, or the screen was cut by the left width, re-measure starting from the table's \
+                 `shows_workspace_root` field): {}",
                 row.name,
                 excerpt(&settled, 900)
             );
             assert!(
                 !says_away,
-                "{}: 화면이 **프로세스 cwd**(`{away_leaf}`)를 작업 폴더로 말한다 — 인자가 무시되고 \
-                 프로세스 cwd 가 이긴다는 뜻이라, 운영이 그 인자로 작업 폴더를 정한다는 전제가 깨진다: {}",
+                "{}: the screen names the **process cwd** (`{away_leaf}`) as the work folder — meaning the argument is ignored and \
+                 the process cwd wins, so the premise that operation decides the work folder by that argument breaks: {}",
                 row.name,
                 excerpt(&settled, 900)
             );
         }
 
-        // ── (나) env 반 — 넘긴 상태 디렉터리를 실제로 쓴다 ─────────────────────────────────────
+        // ── (b) the env half — it actually uses the state directory passed ─────────────────────────────────────
         if probe.home_redirect.is_some() {
             assert!(
                 root_in_home.is_some(),
-                "{}: 임시 홈 어디에도 작업 루트(`{root_leaf}`) 기록이 없다 — 넘긴 env 가 프로세스에 안 \
-                 닿았거나 그 결정이 다른 데 적혔다는 뜻이다. 앞쪽이면 `session.cwd_env` 의 env 반이 \
-                 거짓이고, 뒤쪽이면 이 시험대가 돌 때마다 실 사용자 설정을 더럽힐 수 있다 — 어느 쪽이든 \
-                 멈춘다",
+                "{}: no record of the work root (`{root_leaf}`) anywhere in the temporary home — meaning the env passed did not reach the process \
+                 or that decision was written elsewhere. If the former, the env half of `session.cwd_env` \
+                 is false; if the latter, this test bench may dirty the real user settings every time it runs — either way \
+                 it stops",
                 row.name
             );
             assert!(
                 away_in_home.is_none(),
-                "{}: 임시 홈에 **프로세스 cwd**(`{away_leaf}`) 기록이 생겼다({:?}) — 그 CLI 가 인자가 아닌 \
-                 프로세스 cwd 를 작업 폴더로 잡았다는 뜻이다",
+                "{}: a record of the **process cwd** (`{away_leaf}`) appeared in the temporary home ({:?}) — meaning that CLI took the process cwd, \
+                 not the argument, as the work folder",
                 row.name,
                 away_in_home
             );
             assert!(
                 root_in_real_home.is_none(),
-                "{}: 실 사용자 홈에 이 항목의 임시 경로(`{root_leaf}`)가 적혔다({:?}) — 홈 리다이렉션이 \
-                 새고 있다. 이 시험대가 개발자의 설정을 더럽히지 않는다는 보증이 깨졌다",
+                "{}: this item's temporary path (`{root_leaf}`) was written into the real user home ({:?}) — the home redirection \
+                 is leaking. The guarantee that this test bench does not dirty the developer's settings is broken",
                 row.name,
                 root_in_real_home
             );
@@ -2860,7 +2751,7 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
 
         assert!(
             composer.unwrap_or(true),
-            "{}: 컴포저가 서지 않았다",
+            "{}: the composer did not stand",
             row.name
         );
     }

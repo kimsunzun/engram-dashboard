@@ -1,5 +1,5 @@
 // uiMetricsReport unit test — area frame default metrics report (ADR-0227, TRD §2d). Once per webview · shared while in progress ·
-//   「보냈음」 only after success · bounded retry · if the final failure, the next call tries again.
+//   「sent」 only after success · bounded retry · if the final failure, the next call tries again.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -46,14 +46,14 @@ afterEach(() => {
 })
 
 describe('measureUiMetrics', () => {
-  it('테두리 요소의 계산된 테두리 폭 넷을 소수 그대로 읽고, 최소 칸은 정책 상수를 싣는다', () => {
+  it('reads the four computed border widths of the border element as decimals as is, and the minimum area carries the policy constant', () => {
     expect(measureUiMetrics(borderEl('1.25px', '2px', '3px', '4px'))).toEqual({
       frame_insets: { t: 1.25, r: 2, b: 3, l: 4 },
       min_pane_px: MIN_PANE_PX,
     })
   })
 
-  it('폭이 수로 읽히지 않으면 null', () => {
+  it('null if the width is not read as a number', () => {
     const el = document.createElement('div')
     // If var() is mixed into a shorthand property, jsdom cannot compute the longhand (`medium`).
     el.style.border = '1px solid var(--border)'
@@ -63,20 +63,20 @@ describe('measureUiMetrics', () => {
 })
 
 describe('reportUiMetrics', () => {
-  it('재서 report_ui_metrics 로 보낸다 — 인자 모양은 { metrics: UiMetrics }', async () => {
+  it('measures and sends as report_ui_metrics — the argument shape is { metrics: UiMetrics }', async () => {
     await reportUiMetrics(borderEl('1px', '1px', '1px', '1px'))
     expect(reportCalls()).toEqual([
       ['report_ui_metrics', { metrics: { frame_insets: { t: 1, r: 1, b: 1, l: 1 }, min_pane_px: MIN_PANE_PX } }],
     ])
   })
 
-  it('성공한 뒤로는 웹뷰당 다시 보내지 않는다', async () => {
+  it('after success it does not send again per webview', async () => {
     await reportUiMetrics(borderEl())
     await reportUiMetrics(borderEl('2px', '2px', '2px', '2px'))
     expect(reportCalls()).toHaveLength(1)
   })
 
-  it('보내는 중에 온 호출은 같은 작업을 기다린다(보고는 하나만 나간다)', async () => {
+  it('a call arriving while sending waits for the same work (only one report goes out)', async () => {
     let resolve!: () => void
     invokeMock.mockImplementationOnce(() => new Promise<undefined>(res => (resolve = () => res(undefined))))
     const first = reportUiMetrics(borderEl())
@@ -92,7 +92,7 @@ describe('reportUiMetrics', () => {
     expect(reportCalls()).toHaveLength(1)
   })
 
-  it('실패는 유계 재시도하고, 재시도 안에서 성공하면 그 뒤로 보내지 않는다', async () => {
+  it('failure retries boundedly, and if it succeeds within the retries it does not send afterwards', async () => {
     vi.useFakeTimers()
     invokeMock.mockImplementationOnce(async () => {
       throw new Error('not ready')
@@ -105,7 +105,7 @@ describe('reportUiMetrics', () => {
     expect(reportCalls()).toHaveLength(2)
   })
 
-  it('재시도를 다 써도 실패하면 「보냈음」을 세우지 않고 걸쇠를 풀어 다음 호출이 다시 보낸다', async () => {
+  it('if it fails even after using all retries it does not raise 「sent」 and releases the latch so the next call sends again', async () => {
     vi.useFakeTimers()
     invokeMock.mockImplementation(async () => {
       throw new Error('down')
@@ -124,7 +124,7 @@ describe('reportUiMetrics', () => {
     expect(reportCalls()).toHaveLength(exhausted + 1)
   })
 
-  it('폭을 수로 읽지 못하면 보내지 않고, 다음 호출이 다시 잰다', async () => {
+  it('if the width is not read as a number it does not send, and the next call measures again', async () => {
     const bad = document.createElement('div')
     bad.style.border = '1px solid var(--border)'
     document.body.appendChild(bad)
@@ -135,7 +135,7 @@ describe('reportUiMetrics', () => {
     expect(reportCalls()).toHaveLength(1)
   })
 
-  it('초기화 전에 떠난 작업의 응답은 초기화 뒤 상태를 건드리지 않는다', async () => {
+  it('the response of work that left before initialization does not touch the post-initialization state', async () => {
     let resolve!: () => void
     invokeMock.mockImplementationOnce(() => new Promise<undefined>(res => (resolve = () => res(undefined))))
     const stale = reportUiMetrics(borderEl())

@@ -1,9 +1,7 @@
-//! The WMI call of [`super::spawn_outside_job`] — pairing COM initialization with its release · `Win32_Process.Create`.
-//!
-//! The classification of the initialization result ([`classify_com_init`]) is an OS-independent rule, so it compiles and is tested on every OS. The rest is
-//! Windows only.
-// ADR-0266
-// ADR-0271
+//! The WMI call of [`super::spawn_outside_job`] — pairing COM initialization with its release · `Win32_Process.Create`. The classification
+//!   of the initialization result ([`classify_com_init`]) is an OS-independent rule compiled and tested on
+//! every OS; the rest is Windows only.
+// ADR-0266, ADR-0271
 
 use std::io;
 use std::path::Path;
@@ -34,8 +32,7 @@ fn classify_com_init(hr: i32) -> ComInit {
     }
 }
 
-/// Releases the COM that we initialized exactly once on every exit path — pairing it by hand at each early `?` return of [`create`]
-/// would miss one.
+/// Releases the COM that we initialized exactly once on every exit path — pairing by hand at each early `?` return of [`create`] would miss one.
 #[cfg(windows)]
 struct ComGuard {
     needs_uninit: bool,
@@ -46,15 +43,15 @@ impl Drop for ComGuard {
     fn drop(&mut self) {
         if self.needs_uninit {
             use windows::Win32::System::Com::CoUninitialize;
-            // SAFETY: releases exactly once on the thread where we successfully initialized with CoInitializeEx.
-            // The AlreadyOtherMode path has needs_uninit=false so it does not enter here.
+            // SAFETY: releases exactly once on the thread where CoInitializeEx succeeded; the AlreadyOtherMode path has needs_uninit=false
+            //   and does not enter here.
             unsafe { CoUninitialize() };
         }
     }
 }
 
-/// Returns `ReturnValue` without raising it as an error — deciding on it is the caller's job. If the answer object or that value cannot be obtained, it is
-/// `u32::MAX`. `create_flags` = `None` passes no startup information (`ProcessStartupInformation`) at all.
+/// Returns `ReturnValue` without raising it as an error — deciding on it is the caller's job; `u32::MAX` if the answer object or value
+///   cannot be obtained. `create_flags` = `None` passes no startup information (`ProcessStartupInformation`).
 #[cfg(windows)]
 pub(super) fn create(exe: &Path, create_flags: Option<i32>) -> Result<u32, DetachedSpawnError> {
     // Interface trait — needed for startup_inst.cast::<IUnknown>() (embedding the embedded object as a VARIANT).
@@ -83,7 +80,7 @@ pub(super) fn create(exe: &Path, create_flags: Option<i32>) -> Result<u32, Detac
             },
             ComInit::Failed(code) => {
                 return Err(DetachedSpawnError::Io(io::Error::other(format!(
-                    "CoInitializeEx 실패 HRESULT {:#010x}",
+                    "CoInitializeEx failed HRESULT {:#010x}",
                     code as u32
                 ))));
             }

@@ -1,16 +1,9 @@
-//! Prewarmed window pool (TRD S21-slot-docking §3-9 「풀」) — a pure state machine of one field. It knows nothing of locks · condition variables · the first-paint gate · windows
-//! (that part = [`super::SpareState`]). It is only data and decisions — it neither creates nor touches windows.
-//!
-//! 「예열 창인가」 (is it a prewarmed window) is not a property of the label but the current state, so it is decided by this pool, not by a prefix — an adopted window usually becomes a popout and
-//! its label cannot be changed.
-//!
-//! - A window of the label the field holds (being built · built · handed over · closing) is excluded from tray show · hide · `--hidden` and placement recording
-//!   ([`SparePool::contains`]). After handover and before commit, even if that label is already in the model, the pool's predicate wins.
-//! - The measurement report of that window's webview is recorded here instead of the model ([`SparePool::record`]) — the commit moves it to the model.
-//! - A build is one per field — the place is secured first ([`SparePool::reserve`]) and the popout number is taken after that (I13 — a rejected
-//!   build does not burn a number).
-//! - While there is an adopted window waiting to be shown (`awaiting_reveal`), no build happens — a rebuild is kicked off by the completion of that window's show alone
-//!   (I25).
+//! Prewarmed window pool (TRD S21-slot-docking §3-9 「pool」) — a pure state machine of one field: only data and decisions, it neither creates nor touches windows and knows nothing of locks · condition variables · the first-paint gate (that part = [`super::SpareState`]).
+//! 「Is it a prewarmed window」 is the current state, not a property of the label, so this pool decides it, not a prefix — an adopted window usually becomes a popout and its label cannot change.
+//! - A window of the label the field holds (being built · built · handed over · closing) is excluded from tray show · hide · `--hidden` and placement recording ([`SparePool::contains`]); after handover and before commit, even if that label is already in the model, the pool's predicate wins.
+//! - That window's webview measurement report is recorded here instead of the model ([`SparePool::record`]) — the commit moves it to the model.
+//! - A build is one per field — the place is secured first ([`SparePool::reserve`]) and the popout number taken after (I13 — a rejected build does not burn a number).
+//! - While an adopted window awaits show (`awaiting_reveal`) no build happens — a rebuild is kicked off only by that window's show completion (I25).
 // ADR-0295 · ADR-0299
 
 use std::collections::BTreeSet;
@@ -19,29 +12,24 @@ use std::time::{Duration, Instant};
 use crate::layout::manager::{check_metrics, reported_canvas, WindowLabel};
 use crate::layout::{CanvasPx, LayoutError, SpareClaim, UiMetrics};
 
-/// If listening failures reach this many in a row, the pool is turned off for the whole run (I28).
 pub const LISTEN_FAILURE_LIMIT: u8 = 3;
 
-/// The two measurements the prewarmed window's webview reported — the same shape · same acceptance rule as `canvas` · `metrics` of a model window entry. `None` = no
-/// report yet.
+/// The two measurements the prewarmed window's webview reported — same shape · acceptance rule as `canvas` · `metrics` of a model window entry. `None` = no report yet.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SpareMeasures {
     pub canvas: Option<CanvasPx>,
     pub metrics: Option<UiMetrics>,
 }
 
-/// One measurement the webview sent — the acceptance rule is the same as the model entry (`ViewManager::set_window_canvas` · `set_ui_metrics`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Measure {
     Canvas { w: u32, h: u32 },
     Metrics(UiMetrics),
 }
 
-/// State of one field. The label is taken from the popout number and not reused.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Slot {
     Empty,
-    /// Being built — `label = None` means the place is secured and a number has not been taken yet.
     Building {
         label: Option<WindowLabel>,
         measures: SpareMeasures,
@@ -50,8 +38,7 @@ pub enum Slot {
         label: WindowLabel,
         measures: SpareMeasures,
     },
-    /// Handed over to one caller (before commit · take-back). `activate` = the `open_at` argument of that label — right after handover · `open` is true.
-    /// `opened_at` = when that label was last opened (dropped) — for the log.
+    /// Handed over to one caller (before commit · take-back). `activate` = the `open_at` argument of that label — true right after handover · `open`. `opened_at` = when that label was last opened (dropped) — for the log.
     Claimed {
         label: WindowLabel,
         measures: SpareMeasures,
@@ -59,8 +46,7 @@ pub enum Slot {
         activate: bool,
         opened_at: Option<Instant>,
     },
-    /// A handed-over window that was decided to be closed at commit because it is not in the model — its `Destroyed` removes it and rebuilds. Meanwhile nobody can take it and no
-    /// claim ticket matches (I27 — the only way back to the pool is a take-back).
+    /// A handed-over window decided at commit to be closed because it is not in the model — its `Destroyed` removes it and rebuilds. Meanwhile nobody can take it and no claim ticket matches (I27 — the only way back to the pool is a take-back).
     Closing {
         label: WindowLabel,
         generation: u32,
@@ -90,116 +76,84 @@ impl Slot {
     }
 }
 
-/// Why the build place could not be secured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoBuild {
-    /// The field already has a prewarmed window (including one being built).
     Occupied,
-    /// Waiting for the adopted window to be shown — its completion kicks off a build (I25).
     AwaitingReveal,
     Exiting,
-    /// Turned off by listening failure (I28).
     Disabled,
 }
 
-/// Decision of one step of handover.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimStep {
     Claimed(SpareClaim),
-    /// Being built — wait until built. `build` = the turn of that build — after waking, passed as `awaited` to the next step.
-    Wait {
-        build: u64,
-    },
-    /// There is no window to hand over — the caller builds a new one. `build` = also kicks off building a prewarmed window (I16).
-    Fresh {
-        build: bool,
-    },
+    Wait { build: u64 },
+    Fresh { build: bool },
 }
 
-/// Decision of commit ①.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommitDecision {
-    /// Emptied the field and set `awaiting_reveal` — moves the measurements it held to the model.
     Adopt {
         measures: SpareMeasures,
         activate: bool,
         opened_at: Option<Instant>,
     },
-    /// That label is not in the model — the field became [`Slot::Closing`] and that window is closed.
     Close,
-    /// The claim ticket is not the current handover — nothing was changed.
     Stale,
 }
 
-/// Decision of a window `Destroyed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gone {
     NotOurs,
-    /// It was the field's window — the field was emptied. `claimed` = it was a handed-over window · `closing` = it was a window the commit decided to close (the awaited
-    /// vanishing) · `rebuild` = rebuild.
+    /// The field's window — the field was emptied. `claimed` = it was a handed-over window · `closing` = a window the commit decided to close (the awaited vanishing) · `rebuild` = rebuild.
     Removed {
         claimed: bool,
         closing: bool,
         rebuild: bool,
     },
-    /// It was an adopted window waiting to be shown — a rebuild completion (`build` = build).
     RevealDone {
         build: bool,
     },
 }
 
-/// Decision on the listening result of `window_role` (I28).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Listen {
-    /// Not the field's window — not counted.
     NotPool,
-    /// The field's window set up listening — the count was reset to 0.
     Kept,
-    /// The field's window could not set up listening — the field was emptied (the caller closes that window · its `Destroyed` does not rebuild).
-    /// `disabled_now` = the pool was turned off by this failure.
-    Removed { claimed: bool, disabled_now: bool },
+    /// The field's window could not set up listening — the field was emptied (the caller closes that window; its `Destroyed` does not rebuild). `disabled_now` = the pool was turned off by this failure.
+    Removed {
+        claimed: bool,
+        disabled_now: bool,
+    },
 }
 
-/// Decision when opening (dropping) a handed-over label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opening {
-    /// It is a window handed over now — drop that window without building (`activate` was written into that handover).
     Claimed,
-    /// The handed-over window vanished or is not a handed-over window — it does not build anew with that label and gives `Err` (I20).
     Unavailable,
-    /// A label unrelated to the pool — build anew.
     Fresh,
 }
 
-/// Decision for a prewarmed window label skipped by the predicate when the hidden UI is shown again (TRD §3-9 「숨어 있기」).
+/// TRD §3-9
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayShow {
-    /// A handed-over window — the placement was set again. Commit ③ places it.
     Rehold,
-    /// Meanwhile it left the field by a commit — it is shown at once like a normal window.
     Adopted,
-    /// A prewarmed window that was not handed over — left as it is.
     Untouched,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SparePool {
     slot: Slot,
-    /// Set by commit ① and emptied by the rebuild completion — meanwhile `window_role` carries that number (I26).
     awaiting_reveal: Option<(WindowLabel, u32)>,
-    /// When `awaiting_reveal` was set — the share of [`Self::expire_reveal`]. A wait set outside commit ① (tests) is `None`.
     reveal_since: Option<Instant>,
     exiting: bool,
     disabled: bool,
     listen_failures: u8,
     last_generation: u32,
-    /// Turn of the build that secured the place (one more each time it is secured) — the field's window is always the one built by the build of the last turn.
     last_build: u64,
-    /// Labels that vanished while handed over — so the late open of the one that took it does not build anew with that label (I20).
     lost: BTreeSet<WindowLabel>,
-    /// When a rebuild completion kicked off a build — for the `after_reveal_ms` log of the next build.
     revealed_at: Option<Instant>,
-    /// Number of handovers standing and waiting for a window being built.
     waiting: u32,
 }
 
@@ -244,12 +198,10 @@ impl SparePool {
         self.waiting
     }
 
-    /// Is it a window the field holds — the window that tray · placement recording skip.
     pub fn contains(&self, label: &str) -> bool {
         self.slot.label() == Some(label)
     }
 
-    /// If it is an adopted window waiting to be shown, its adoption number (I26).
     pub fn reveal_generation(&self, label: &str) -> Option<u32> {
         self.awaiting_reveal()
             .and_then(|(l, generation)| (l == label).then_some(generation))
@@ -261,8 +213,7 @@ impl SparePool {
 
     // ── build (I13 · I16 · I25) ──
 
-    /// Secures the build place (a [`Slot::Building`] with no label) — the number is taken after that. On success, passes the time of the previous rebuild completion
-    /// (for the log).
+    /// Secures the build place (a label-less [`Slot::Building`]) — the number is taken after that. On success returns the previous rebuild completion time (for the log).
     // ADR-0299
     pub fn reserve(&mut self) -> Result<Option<Instant>, NoBuild> {
         if self.exiting {
@@ -285,7 +236,6 @@ impl SparePool {
         Ok(self.revealed_at.take())
     }
 
-    /// Writes the label received into the place secured — `false` = the place changed in the meantime.
     pub fn assign(&mut self, label: WindowLabel) -> bool {
         match &mut self.slot {
             Slot::Building { label: slot, .. } if slot.is_none() => {
@@ -296,7 +246,6 @@ impl SparePool {
         }
     }
 
-    /// That window was built — `false` = it vanished during the build and left the field.
     pub fn mark_built(&mut self, label: &str) -> bool {
         match std::mem::replace(&mut self.slot, Slot::Empty) {
             Slot::Building {
@@ -313,7 +262,6 @@ impl SparePool {
         }
     }
 
-    /// Build failure — empties the field (if left, 「예열 창 있음」 (a prewarmed window exists) stays true and it cannot rebuild). `false` = the field is already not that window.
     pub fn build_failed(&mut self, label: &str) -> bool {
         let ours = matches!(&self.slot, Slot::Building { label: Some(l), .. } if l == label);
         if ours {
@@ -329,9 +277,7 @@ impl SparePool {
         self.last_generation
     }
 
-    /// One step of handover. `awaited` = the build this handover started waiting for earlier (the `build` of the [`ClaimStep::Wait`] at that time) — if
-    /// that build failed or vanished and another build took the field, it neither follows it to wait nor takes it and gives `Fresh` (I2 —
-    /// failure · vanishing of the awaited build gives `None` right away).
+    /// One step of handover. `awaited` = the build this handover started waiting for (the `build` of the [`ClaimStep::Wait`] then): if it failed or vanished and another build took the field, neither follow it nor take it — give `Fresh` (I2 — failure · vanishing of the awaited build gives `None` at once).
     // ADR-0299
     pub fn take_built(&mut self, awaited: Option<u64>) -> ClaimStep {
         if self.exiting || self.disabled {
@@ -395,8 +341,7 @@ impl SparePool {
         }
     }
 
-    /// Take-back before commit — only if the claim ticket is the current handover (both label · adoption number), returns it to the field hidden (it can be handed over
-    /// again). The measurements it held stay as they are.
+    /// Take-back before commit — only if the claim ticket is the current handover (label · adoption number), returns it to the field hidden (can be handed over again); the measurements it held stay.
     pub fn release(&mut self, claim: &SpareClaim) -> bool {
         match std::mem::replace(&mut self.slot, Slot::Empty) {
             Slot::Claimed {
@@ -417,8 +362,7 @@ impl SparePool {
 
     // ── commit (I21 · I25 · I27 · I31) ──
 
-    /// Commit ① — if the claim ticket is the current handover, empties the field and sets `awaiting_reveal` in the same place (a second handover after that does not
-    /// kick off a build · I25). `in_model` = whether that label has a model entry, as seen by the caller inside the layout lock.
+    /// Commit ① — if the claim ticket is the current handover, empties the field and sets `awaiting_reveal` in the same place (a second handover then kicks off no build — I25). `in_model` = whether that label has a model entry, as seen by the caller inside the layout lock.
     // ADR-0299
     pub fn commit(&mut self, claim: &SpareClaim, in_model: bool, now: Instant) -> CommitDecision {
         match std::mem::replace(&mut self.slot, Slot::Empty) {
@@ -448,8 +392,7 @@ impl SparePool {
         }
     }
 
-    /// The window the commit decided to close could not be closed either time — empties the field (the next handover builds · I31). `false` = the field is already not that
-    /// window (a `Destroyed` removed it in the meantime).
+    /// The window the commit decided to close could not be closed either time — empties the field (next handover builds — I31). `false` = the field is already not that window (a `Destroyed` removed it meanwhile).
     pub fn close_failed(&mut self, claim: &SpareClaim) -> bool {
         let ours = matches!(&self.slot, Slot::Closing { label, generation }
             if *label == claim.label && *generation == claim.generation);
@@ -461,8 +404,7 @@ impl SparePool {
 
     // ── rebuild completion · `Destroyed` (I8 · I25) ──
 
-    /// Rebuild completion (show · the `Destroyed` of the awaited label · safety deadline) — if the label waiting to be shown is that one, empties it and gives
-    /// `Some(짓나)`, otherwise `None` (the one that came first already finished it). Once per label.
+    /// Rebuild completion (show · the awaited label's `Destroyed` · safety deadline) — if the label awaiting show is that one, empties it and gives `Some(build)`, else `None` (the one that came first already finished it). Once per label.
     // ADR-0299
     pub fn complete_reveal(&mut self, label: &str, now: Instant) -> Option<bool> {
         self.reveal_generation(label)?;
@@ -475,9 +417,7 @@ impl SparePool {
         Some(build)
     }
 
-    /// If a show-wait has stood longer than `older_than`, does that rebuild completion now — a net for a wait that the safety deadline (set on the window side after commit) could not
-    /// end. If left, no build place can be secured for the whole run and prewarming stops. `Some` = the label of the wait that ended ·
-    /// the adoption number (whether to build is the same as [`Self::complete_reveal`] — the `Empty` branch of handover kicks it off next).
+    /// If a show-wait has stood longer than `older_than`, does that rebuild completion now — a net for a wait the safety deadline (set window-side after commit) could not end; left, no build place could be secured for the whole run and prewarming stops. `Some` = the label · adoption number of the wait that ended (whether to build as [`Self::complete_reveal`] — handover's `Empty` branch kicks it off next).
     // ADR-0299
     pub fn expire_reveal(
         &mut self,
@@ -549,8 +489,7 @@ impl SparePool {
 
     // ── measurements ──
 
-    /// Records the measurements the field's window sent — `None` = not the field's window (the caller records it in the model · including a window that is closing). `Some(Err)`
-    /// = rejected because the metrics are out of range, and the previous value is kept. A zero-size canvas is ignored and it is `Some(Ok)`.
+    /// Records the measurements the field's window sent — `None` = not the field's window (the caller records in the model, including a closing window). `Some(Err)` = rejected, metrics out of range (previous value kept). A zero-size canvas is ignored: `Some(Ok)`.
     pub fn record(&mut self, label: &str, measure: Measure) -> Option<Result<(), LayoutError>> {
         if !self.contains(label) {
             return None;
@@ -622,7 +561,7 @@ mod tests {
     fn claimed(label: &str) -> (SparePool, SpareClaim) {
         let mut pool = built(label);
         let ClaimStep::Claimed(claim) = pool.take_built(None) else {
-            panic!("지어진 창을 맡긴다");
+            panic!("hands over the built window");
         };
         (pool, claim)
     }
@@ -644,10 +583,10 @@ mod tests {
                 measures: SpareMeasures::default()
             }
         );
-        assert!(!pool.contains(P1), "label 은 아직 없다");
+        assert!(!pool.contains(P1), "the label does not exist yet");
         assert_eq!(pool.reserve(), Err(NoBuild::Occupied));
         assert!(pool.assign(P1.to_owned()));
-        assert!(!pool.assign(P2.to_owned()), "자리 하나에 label 하나");
+        assert!(!pool.assign(P2.to_owned()), "one label per place");
         assert!(pool.contains(P1));
         assert_eq!(pool.reserve(), Err(NoBuild::Occupied));
     }
@@ -670,7 +609,10 @@ mod tests {
         assert!(!pool.build_failed(P2));
         assert!(pool.build_failed(P1));
         assert_eq!(pool.slot(), &Slot::Empty);
-        assert!(!pool.mark_built(P1), "실패한 짓기는 지어짐을 세우지 못한다");
+        assert!(
+            !pool.mark_built(P1),
+            "a failed build cannot mark it as built"
+        );
     }
 
     // ── handover ──
@@ -687,7 +629,7 @@ mod tests {
         assert_eq!(pool.take_built(None), ClaimStep::Fresh { build: false });
         assert!(pool.release(&first));
         let ClaimStep::Claimed(second) = pool.take_built(None) else {
-            panic!("돌려받은 창을 다시 맡긴다");
+            panic!("hands over the returned window again");
         };
         assert_eq!(second.label, P1);
         assert!(second.generation > first.generation);
@@ -733,7 +675,7 @@ mod tests {
         assert_eq!(
             pool.opening(P1, true, now()),
             Opening::Unavailable,
-            "맡기지 않은 예열 창 label 로는 열지 않는다"
+            "does not open with the label of a prewarmed window that was not handed over"
         );
     }
 
@@ -750,7 +692,10 @@ mod tests {
         assert_eq!(pool.slot(), &Slot::Empty);
         assert_eq!(pool.awaiting_reveal(), Some((P1, claim.generation)));
         assert_eq!(pool.reveal_generation(P1), Some(claim.generation));
-        assert!(!pool.contains(P1), "확정 뒤는 모델 창이다");
+        assert!(
+            !pool.contains(P1),
+            "after confirmation it is a model window"
+        );
         assert_eq!(pool.commit(&claim, true, now()), CommitDecision::Stale);
     }
 
@@ -768,7 +713,10 @@ mod tests {
         assert_eq!(pool.awaiting_reveal(), None);
         assert!(pool.contains(P1));
         assert_eq!(pool.take_built(None), ClaimStep::Fresh { build: false });
-        assert!(!pool.release(&claim), "닫기로 정한 창은 돌아가지 않는다");
+        assert!(
+            !pool.release(&claim),
+            "a window decided to be closed does not go back"
+        );
         assert_eq!(pool.commit(&claim, true, now()), CommitDecision::Stale);
         assert!(pool.close_failed(&claim));
         assert_eq!(pool.slot(), &Slot::Empty);
@@ -796,7 +744,7 @@ mod tests {
         assert_eq!(
             pool.expire_reveal(at + limit, limit),
             None,
-            "상한까지는 둔다"
+            "keeps up to the limit"
         );
         assert_eq!(pool.reserve(), Err(NoBuild::AwaitingReveal));
         let late = at + limit + Duration::from_millis(1);
@@ -808,7 +756,7 @@ mod tests {
         assert_eq!(
             pool.complete_reveal(P1, late),
             None,
-            "끝난 기다림의 늦은 완료는 무동작"
+            "a late completion of a finished wait is a no-op"
         );
         assert_eq!(pool.expire_reveal(late, limit), None);
         assert_eq!(pool.take_built(None), ClaimStep::Fresh { build: true });
@@ -862,7 +810,7 @@ mod tests {
         assert_eq!(
             pool.record(P1, Measure::Canvas { w: 800, h: 600 }),
             None,
-            "닫는 중인 창은 쥘 재기가 없다"
+            "a window being closed has nothing to hold"
         );
     }
 
@@ -879,7 +827,7 @@ mod tests {
             }
         );
         let ClaimStep::Claimed(claim) = pool.take_built(None) else {
-            panic!("맡긴다");
+            panic!("hands over");
         };
         assert_eq!(
             pool.record(P1, Measure::Canvas { w: 1024, h: 768 }),

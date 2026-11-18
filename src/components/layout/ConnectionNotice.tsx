@@ -1,29 +1,10 @@
-// The connection band (TRD S36 §3-4 · ADR-0350 · ADR-0356 · ADR-0134 decision 4) — ① 「연결 안 됨」 or ② 「버전 다름」.
-//
-// ★Why draw it on screen★: a failure where the daemon cannot start because the data folder is not writable reached nowhere
-//   in release — the daemon has no console, and the WebView2 release build has no developer tools, so console.error cannot be
-//   seen by the user. So the user saw only a causeless 'down'.
-//
-// ★The shell decides the band★: this renders `agentClient.connectionBand` as it comes; the start cause
-//   (`connectionError`) is only ①'s cause text and never raises a band on its own (`bandView`).
-//
-// ★「다시 연결」 only with `actions` — the main window★ (ADR-0345 · ADR-0356: on both bands, no stop button): it calls the
-//   existing `DaemonControl.start()`, the same call as boot and the LLM `connection.reconnect` (`connectionCommands`) —
-//   no new control surface. Popouts and the spare show the text only. While the start runs the button shows the busy
-//   label, disabled; afterwards the band follows the shell.
-//
-// ★It does not take its own place★ — the call site puts it on the layer that covers rather than pushes the layout (`NoticeOverlay`) (ADR-0277 — ADR-0180
-//   amendment: the layout is fixed, and a covered area can be closed with ✕). That layer covers the top of the canvas below the title bar (tab bar · window buttons · draggable area)
-//   (user decision 2026-10-26 · T-66 — before that it covered the TabBar).
-// ★The ✕ and the closed memory are load-bearing★ — the area the band covers (the top of the canvas) cannot receive clicks.
-//   - Without the ✕, while the band holds the covered top of the canvas (slot content · split lines) is blocked.
-//   - Without the closed memory the ✕ is powerless — the state surface notifies on every status change, so the same
-//     band would be drawn again right away. The memory is the band kind + the untranslated cause (ADR-0373 — a language
-//     switch must not bring a closed band back): a different band or cause shows again, and `connected` releases it — a
-//     recurrence of the same cause later is the common case, so closing must not mute it for good.
-//
-// ★Not always-on chrome (ADR-0063)★: it draws only when there is a band. With none it is null so the DOM is empty, and this
-//   does not revive the always-on StatusBar that ADR-0063 removed.
+// The connection band (TRD S36 §3-4 · ADR-0350 · ADR-0356 · ADR-0134 decision 4) — ① "not connected" or ② "version mismatch".
+// ★Why on screen★: a daemon that cannot start because the data folder is not writable reached nowhere in release — no daemon console, no WebView2 release devtools — so the user saw only a causeless 'down'.
+// ★The shell decides the band★: this renders `agentClient.connectionBand` as it comes; the start cause (`connectionError`) is only ①'s cause text and never raises a band on its own (`bandView`).
+// ★"Reconnect" only with `actions` — the main window★ (ADR-0345 · ADR-0356: no stop button on either band): it calls the existing `DaemonControl.start()`, same as boot and the LLM `connection.reconnect` (`connectionCommands`) — no new control surface. Popouts and the spare show the text only. While start runs the button shows the busy label, disabled; afterwards the band follows the shell.
+// ★It takes no place of its own★ — the call site puts it on the layer that covers rather than pushes the layout (`NoticeOverlay`; ADR-0277 — ADR-0180 amendment: layout fixed, covered area closable with ✕). That layer covers the top of the canvas below the title bar (T-66).
+// ★The ✕ and the closed memory are load-bearing★ — the area the band covers cannot receive clicks. Without the ✕ the covered top of the canvas (slot content · split lines) is blocked while the band holds; without the closed memory the ✕ is powerless — the state surface notifies on every status change, so the same band would redraw at once. The memory is the band kind + the untranslated cause (ADR-0373 — a language switch must not bring a closed band back): a different band or cause shows again, `connected` releases it, and a later recurrence of the same cause is the common case, so closing must not mute it for good.
+// ★Not always-on chrome (ADR-0063)★: it draws only when there is a band; with none it is null, so the DOM is empty and the StatusBar ADR-0063 removed is not revived.
 
 import { useEffect, useState } from 'react'
 
@@ -35,7 +16,7 @@ function readStatus() {
   return { band: agentClient.connectionBand, error: agentClient.connectionError }
 }
 
-/** `actions` = draw 「다시 연결」 — the main window only. */
+/** `actions` = draw 「reconnect」 — the main window only. */
 export default function ConnectionNotice({ actions = false }: { actions?: boolean }) {
   const [status, setStatus] = useState(readStatus)
   const [dismissed, setDismissed] = useState<string | null>(null)
@@ -63,7 +44,7 @@ export default function ConnectionNotice({ actions = false }: { actions?: boolea
     //   guard drops it and the band itself is the signal.
     getDaemonControl()
       .start()
-      .catch((err: unknown) => console.warn('[ConnectionNotice] 다시 연결 실패:', err))
+      .catch((err: unknown) => console.warn('[ConnectionNotice] reconnect failed:', err))
       .finally(() => setBusy(false))
   }
 

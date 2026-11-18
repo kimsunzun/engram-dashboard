@@ -1,23 +1,18 @@
-// ADR-0237: 채팅 칸(RichSlot) 안의 키 하나가 「도는 턴 끊기」인지 가르는 순수 술어(DOM 0).
-//   발화 조건의 정본 = `docs/process/S21-chat-ux/trd.md` §3-2 — 이 파일은 그 목록을 그대로 옮긴 것이다.
-//   T-42(단축키 시스템 — 보류)이 키바인딩 표를 세우면 칸 조건(`ctx` 쪽)이 그 표 한 줄의 `when` 이 된다. ★술어가
-//   통째로 옮겨 가지는 않는다★ — `when` 은 이벤트를 받지 않는 `() => boolean` 이고(`commands/registry.ts`) 전역
-//   리스너는 편집 대상(입력창)을 건너뛰므로, 키 모양 판정(키 · 수식키 · 반복 · IME · `defaultPrevented` · 대상)은
-//   그 표의 매처나 지금의 지역 capture 에 남는다. 끊는 동작은 명령 `agent.interrupt` 에 있어 따라 옮길 것이 없다.
+// ADR-0237: a pure predicate (zero DOM) deciding whether one key inside the chat area (RichSlot) means "interrupt the running turn". Canonical firing conditions = `docs/process/S21-chat-ux/trd.md` §3-2 — this file carries that list over as is.
+// When T-42 (shortcut system — on hold) sets up a keybinding table, the area condition (the `ctx` side) becomes the `when` of one line there. ★The predicate does not move over wholesale★ — `when` is a `() => boolean` that receives no event (`commands/registry.ts`) and the global listener skips the edit target (the input box), so the key-shape verdict (key · modifier · repeat · IME · `defaultPrevented` · target) stays in that table's matcher or the current local capture. The interrupt action lives in the command `agent.interrupt`, so nothing else carries over.
 
-/** Esc 가 먹히는 범위 — `'slot'` = 칸 안 어디든(입력창 + 대화 본문) · `'input'` = 입력창에 포커스일 때만. */
+/** Scope where Esc takes effect — `'slot'` = anywhere in the area (input box + conversation body) · `'input'` = only when the input box has focus. */
 export type InterruptEscScope = 'slot' | 'input'
 
-/** 사용자 결정 U6 = 칸 안 어디든. */
+/** U6 = anywhere in the area. */
 export const ESC_SCOPE: InterruptEscScope = 'slot'
 
 /**
- * 열려 있는 동안 Esc 가 턴을 끊지 않는 오버레이의 표지. 문서 전역 Esc 로 닫히는 둘(에이전트 고르기 ·
- * 트리 행 메뉴)과 우클릭 메뉴가 뿌리에 단다 — 그 Esc 는 오버레이를 닫는 키다.
+ * Marker of an overlay under which Esc does not interrupt the turn while open. The two closed by a document-global Esc (agent picker · tree row menu) and the right-click menu attach it to their root — that Esc closes the overlay.
  */
 export const OVERLAY_SELECTOR = '[data-engram-overlay]'
 
-/** 술어가 읽는 칸만 — React `KeyboardEvent` 가 그대로 맞는다. */
+/** Only the fields the predicate reads — a React `KeyboardEvent` fits as is. */
 export interface InterruptKeyEvent {
   key: string
   ctrlKey: boolean
@@ -32,21 +27,20 @@ export interface InterruptKeyEvent {
 }
 
 export interface InterruptKeyContext {
-  /** 칸이 응답을 기다리거나 받는 중으로 보인다(RichSlot 의 `streaming`). */
+  /** The area looks like it is waiting for or receiving a response (RichSlot's `streaming`). */
   streaming: boolean
   /**
-   * 끊기를 이미 보내고 그 턴이 끝나기를 기다린다(`store/interruptStore.ts`). ADR-0244: 그동안의 Esc 는 무시한다 — 다시
-   * 보낸 끊기는 대기 중이던 다음 글이 연 턴에 떨어질 수 있다.
+   * An interrupt was already sent and awaits that turn's end (`store/interruptStore.ts`). ADR-0244: an Esc meanwhile is ignored — a resent interrupt could land on the turn opened by the next text that was waiting.
    */
   interrupting: boolean
-  /** 부재 막이 선 조건(종료 · 연결 끊김 · 구독 정지). */
+  /** The condition under which the absence veil stands (exited · disconnected · subscription stopped). */
   agentUnavailable: boolean
-  /** 그 에이전트의 통로가 끊기를 지원한다(`capabilities.control.interrupt`). */
+  /** That agent's channel supports interrupt (`capabilities.control.interrupt`). */
   canInterrupt: boolean
-  /** 문서에 [`OVERLAY_SELECTOR`] 가 있다 — 부르는 쪽이 재서 넘긴다. */
+  /** The document has [`OVERLAY_SELECTOR`] — the caller measures and passes it. */
   overlayOpen: boolean
   scope: InterruptEscScope
-  /** 칸의 입력창 노드 — `scope === 'input'` 일 때만 읽는다. */
+  /** The area's input box node — read only when `scope === 'input'`. */
   textarea: EventTarget | null
 }
 
@@ -54,9 +48,9 @@ export function isInterruptEscape(e: InterruptKeyEvent, ctx: InterruptKeyContext
   if (e.key !== 'Escape') return false
   if (e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) return false
   if (e.repeat) return false
-  // 조합 중 Esc 는 조합만 취소한다 — 입력창 Enter 의 IME 판정과 같은 식이다(WebView2 는 keyCode 229 로 싣는다).
+  // Esc during composition cancels only the composition — the same formula as the IME verdict of the input box Enter (WebView2 carries it as keyCode 229).
   if (e.nativeEvent.isComposing || e.keyCode === 229) return false
-  // Radix 레이어는 문서 capture 에서 먼저 먹는다 — 그 Esc 는 레이어를 닫는 키다.
+  // A Radix layer takes it first in the document capture — that Esc is the key that closes the layer.
   if (e.defaultPrevented) return false
   if (ctx.overlayOpen) return false
   if (!ctx.streaming || ctx.interrupting || ctx.agentUnavailable || !ctx.canInterrupt) return false

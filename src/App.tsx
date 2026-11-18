@@ -7,14 +7,14 @@ import { initEventBus } from './store/eventBus'
 import { agentClient, bootstrapDaemonIfNeeded } from './api/clientFactory'
 import { retryAsync } from './util/retryInvoke'
 import { useAgentStore } from './store/agentStore'
-// ADR-0055/0064: command + 슬롯 메뉴 기여 등록 매니페스트 단일 import — 부팅 시 모든 register(...)·
-//   registerSlotMenu(...) 가 실행돼 레지스트리·슬롯 메뉴 기여부가 채워진다(산발 import 일원화, ADR-0064 §4).
+// ADR-0055/0064: a single import of the command + slot menu contribution registration manifest — at boot every register(...)·
+//   registerSlotMenu(...) runs and fills the registry and the slot menu contributions (scattered imports unified, ADR-0064 §4).
 import './commands/contributions'
 import { installKeybindings } from './commands/keybindings'
-// ADR-0155: 이 창의 command 를 셸에 알리고 셸이 내려보낸 봉투를 같은 registry 로 흘린다(TRD §6 Step 4).
+// ADR-0155: tells the shell about this window's commands and passes the envelopes the shell sends down into the same registry (TRD §6 Step 4).
 import { installViewCommandBridge } from './commands/viewCommandBridge'
-// ADR-0053: seam(ScrollArea) 밖 네이티브 스크롤러(= xterm viewport)에 seam 과 같은 스크롤바 가시성 규칙을
-//   입힌다. 스타일 배선이라 슬롯 컴포넌트가 아니라 앱 루트에서 한 번 설치한다(탭 창마다 이 배선이 뜬다).
+// ADR-0053: applies the same scrollbar visibility rule as the seam to native scrollers outside the seam (ScrollArea) (= the xterm viewport).
+//   It is style wiring, so it is installed once at the app root, not in the slot components (this wiring comes up in every tab window).
 import { installNativeScrollActivity } from './components/ui/nativeScrollActivity'
 import { RootErrorBoundary } from './components/ui/RootErrorBoundary'
 import { useLanguage } from './i18n/react'
@@ -22,11 +22,11 @@ import { useLanguage } from './i18n/react'
 function bootPull<T>(name: string, fetch: () => Promise<T>, apply: (value: T) => void): void {
   retryAsync(fetch, {
     onRetry: (err, attempt) => {
-      console.warn(`[App] ${name} 재시도 #${attempt}:`, err)
+      console.warn(`[App] retrying ${name} #${attempt}:`, err)
     },
   })
     .then(apply)
-    .catch(err => console.warn(`[App] ${name} 최종 실패:`, err))
+    .catch(err => console.warn(`[App] ${name} finally failed:`, err))
 }
 
 function App() {
@@ -34,46 +34,46 @@ function App() {
   //   below that renders `t()` text reads the language itself.
   useLanguage()
 
-  // 테마는 셸이 정한다 — 창 테마(`window.setTheme`) ?? 셸 설정 `theme.default`(ADR-0265). 부팅 조회가 돌아오기
-  // 전까지는 셸이 창을 만들며 박은 그 창의 테마가 보인다(`theme/bootTheme.ts`).
-  // ★값만 갈아끼운다 — 리마운트 없음(ADR-0149)★.
+  // The theme is decided by the shell — the window theme (`window.setTheme`) ?? the shell setting `theme.default` (ADR-0265). Until the boot query
+  // comes back, the theme the shell stamped on the window when creating it shows (`theme/bootTheme.ts`).
+  // ★Only the value is swapped — no remount (ADR-0149)★.
   useEffect(() => installUiSettings(), [])
 
-  // ADR-0055: 반환 disposer 는 언마운트/HMR 시 리스너 중복 누적을 막는다.
+  // ADR-0055: the returned disposer keeps listeners from piling up on unmount/HMR.
   useEffect(() => installKeybindings(), [])
 
-  // ★위 `contributions` import 가 이미 돌아 registry 가 차 있다★(모듈 side-effect 는 이 컴포넌트보다
-  //   먼저 평가된다) — 그래서 여기서 보고하는 목록이 비어 있지 않다. 같은 disposer 규율.
+  // ★The `contributions` import above has already run and the registry is filled★ (module side effects are evaluated before
+  //   this component) — so the list reported here is not empty. The same disposer discipline.
   useEffect(() => installViewCommandBridge(), [])
 
-  // ADR-0053: 위 import 주석 참조. 같은 disposer 규율(HMR 중복 방지).
+  // ADR-0053: see the import comment above. The same disposer discipline (prevents HMR duplicates).
   useEffect(() => installNativeScrollActivity(), [])
 
   useEffect(() => {
-    // ADR-0021 §1: 부팅 시 명시 ensure 1회 — daemon 모드면 데몬을 띄운다(명령의 부수효과가 아니라
-    // 명시 시작). 명령 경로(ensureReady)는 attach-only 라 이게 없으면 부팅 때 데몬이 안 뜬다.
-    // start 가 캐시(host:port)를 채운 뒤에야 이후 getAgents/구독의 attach 가 붙으므로 먼저 await.
+    // ADR-0021 §1: one explicit ensure at boot — in daemon mode it launches the daemon (an explicit start, not a side effect of a
+    // command). The command path (ensureReady) is attach-only, so without this the daemon does not come up at boot.
+    // Only after start fills the cache (host:port) can the later getAgents/subscription attaches connect, so it is awaited first.
     void (async () => {
       await bootstrapDaemonIfNeeded()
       void initEventBus()
-      // ADR-0102: 부팅 pull 을 재시도로 감싼다 — bootstrapDaemonIfNeeded 와 동일 패턴.
-      // 데몬 연결 직후 IPC 가 일시적으로 미준비 상태일 수 있어 one-shot 실패가 그대로 공란이 된다.
-      // ★프로필도 재시도한다★: 트리는 첫 목록을 받기 전엔 비워 두므로(AgentList) 단발 실패가 곧 빈 칸 고착이다.
+      // ADR-0102: the boot pull is wrapped in retries — the same pattern as bootstrapDaemonIfNeeded.
+      // Right after the daemon connects, IPC can be momentarily not ready, so a one-shot failure would turn straight into a blank.
+      // ★Profiles are retried too★: the tree stays empty until it receives the first list (AgentList), so a single failure means a stuck empty area.
       bootPull('getAgents', () => agentClient.getAgents(), agents => useAgentStore.getState().setAgents(agents))
-      // ADR-0018: 트리가 예약(깡통) 노드를 그리려면 필요.
+      // ADR-0018: needed for the tree to draw reserved (empty-shell) nodes.
       bootPull('listProfiles', () => agentClient.listProfiles(), p => useAgentStore.getState().setProfiles(p))
     })()
   }, [])
 
-  // 경계를 이 컴포넌트 안쪽·라우터 바깥에 둔다 — 이 컴포넌트를 감싸면 「다시 그리기」가 재마운트해 위 부팅 effect
-  //   (데몬 ensure·목록·프로필 조회)까지 다시 돈다. 다시 그릴 것은 라우팅된 화면뿐이다.
+  // The boundary sits inside this component and outside the router — wrapping this component would make 「Redraw」 remount it and rerun the boot effect
+  //   above (daemon ensure · list · profile queries). Only the routed screen needs redrawing.
   return (
     <RootErrorBoundary>
       <HashRouter>
         <div style={{ height: '100vh' }}>
           <Routes>
             <Route path="/" element={<AppLayout />} />
-            {/* 런타임 창(팝업 분리·빈 창 생성) — ?window=<label> 의 탭 가진 창(ADR-0057). */}
+            {/* Runtime windows (popout · new empty window) — windows with tabs at ?window=<label> (ADR-0057). */}
             <Route path="/popup" element={<PopoutPage />} />
           </Routes>
         </div>

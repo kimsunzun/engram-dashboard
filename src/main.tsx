@@ -25,7 +25,7 @@ settingsClient.install();
 // ★Do not move this line back into an effect inside App★ (after createRoot is already too late).
 applyBootTheme();
 
-// LLM control surface (CLAUDE.md 「LLM-우선 제어」) — expose store handles on window in development builds only.
+// LLM control surface (CLAUDE.md 「LLM-우선 제어」) — expose store handles on window in development builds only. // hangul-ok
 // From outside (cdp.mjs eval / CDP) one can read state as JSON with window.__engram.<store>.getState() and
 // operate the UI with getState().<action>(). Not exposed in production builds (import.meta.env.DEV=false).
 // ★Layout (slot/view) is not here★ — it is backend authority (ADR-0035), so its control surface is the command registry

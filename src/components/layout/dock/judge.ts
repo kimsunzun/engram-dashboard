@@ -1,6 +1,5 @@
 // TRD S21-slot-docking §4-3: the decision of every root dragover of our windows — a point + that window's context → tab bar position · band · other. Pure.
-// Order of precedence (R6a) = tab bar zone > outer band > area band > other. Bands look only at the effective ones `bands.ts` pre-computed at dragenter — blocked bands are
-//   neither painted nor chosen (R8). The rules · numbers of the tab bar zone · bands are a set with the shell `layout/bands.rs` and the golden ties them (`judge.test.ts`).
+// Precedence (R6a) = tab bar zone > outer band > area band > other. Bands look only at the effective ones `bands.ts` pre-computed at dragenter — blocked bands are neither painted nor chosen (R8). Tab bar zone · band rules and numbers are a set with the shell `layout/bands.rs`, tied by the golden (`judge.test.ts`).
 
 import type { PointCss } from '../../../../src-tauri/bindings/PointCss'
 import {

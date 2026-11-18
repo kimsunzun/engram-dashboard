@@ -31,7 +31,10 @@ fn golden_terminal_frame() {
     expected.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]); // seq BE
     expected.extend_from_slice(b"hi"); // payload
 
-    assert_eq!(frame, expected, "frame 바이트 레이아웃이 golden 과 불일치");
+    assert_eq!(
+        frame, expected,
+        "frame byte layout does not match the golden"
+    );
     assert_eq!(frame.len(), FRAME_HEADER_LEN + 2);
 }
 
@@ -41,7 +44,7 @@ fn roundtrip_terminal_frame() {
     let payload: Vec<u8> = (0u8..=255).cycle().take(5000).collect(); // crosses the 4096 buffer boundary
     let frame = encode_terminal_frame(id, 42, 999_999, &payload);
 
-    let decoded = decode_frame(&frame).expect("decode 성공");
+    let decoded = decode_frame(&frame).expect("decode succeeds");
     assert_eq!(decoded.tag, FRAME_TAG_TERMINAL_BYTES);
     assert_eq!(decoded.agent_id, id);
     assert_eq!(decoded.epoch, 42);
@@ -54,7 +57,7 @@ fn empty_payload_is_valid() {
     let id = Uuid::new_v4();
     let frame = encode_terminal_frame(id, 0, 0, &[]);
     assert_eq!(frame.len(), FRAME_HEADER_LEN);
-    let decoded = decode_frame(&frame).expect("빈 payload 도 유효");
+    let decoded = decode_frame(&frame).expect("an empty payload is valid too");
     assert_eq!(decoded.payload.len(), 0);
     assert_eq!(decoded.seq, 0);
 }
@@ -79,7 +82,7 @@ fn unknown_tag_is_error() {
 
 // ── ADR-0045 tag1 StructuredEvent ─────────────────────────────────────────────
 
-/// tag1 golden: the header layout is the same as tag0 with only the first byte 0x01, and the payload is carried as is, opaque.
+/// tag1 golden: header as tag0 with only the first byte 0x01; the payload is carried as is, opaque.
 #[test]
 fn golden_structured_frame() {
     let id = Uuid::from_bytes([
@@ -105,13 +108,12 @@ fn golden_structured_frame() {
 
     assert_eq!(
         frame, expected,
-        "tag1 frame 바이트 레이아웃이 golden 과 불일치"
+        "tag1 frame byte layout does not match the golden"
     );
     assert_eq!(frame.len(), FRAME_HEADER_LEN + payload.len());
 }
 
-/// tag1 encode→decode round-trip: whether the header (agent_id/epoch/seq) is restored exactly and the payload is preserved
-/// opaque with **not a single byte lost or interpreted**. The core check of the invariant that the codec does not know the schema.
+/// tag1 encode→decode round-trip: header restored exactly, payload opaque with no byte lost or interpreted (the codec does not know the schema).
 #[test]
 fn roundtrip_structured_frame() {
     let id = Uuid::new_v4();
@@ -119,12 +121,16 @@ fn roundtrip_structured_frame() {
     let payload: Vec<u8> = (0u8..=255).cycle().take(5000).collect();
     let frame = encode_structured_frame(id, 42, 999_999, &payload);
 
-    let decoded = decode_frame(&frame).expect("tag1 decode 성공");
+    let decoded = decode_frame(&frame).expect("tag1 decode succeeds");
     assert_eq!(decoded.tag, FRAME_TAG_STRUCTURED_EVENT);
-    assert_eq!(decoded.agent_id, id, "헤더 agent_id 정확 파싱");
-    assert_eq!(decoded.epoch, 42, "헤더 epoch 정확 파싱");
-    assert_eq!(decoded.seq, 999_999, "헤더 seq 정확 파싱");
-    assert_eq!(decoded.payload, &payload[..], "payload opaque 무손실 보존");
+    assert_eq!(decoded.agent_id, id, "header agent_id parsed exactly");
+    assert_eq!(decoded.epoch, 42, "header epoch parsed exactly");
+    assert_eq!(decoded.seq, 999_999, "header seq parsed exactly");
+    assert_eq!(
+        decoded.payload,
+        &payload[..],
+        "payload preserved opaque and lossless"
+    );
 }
 
 /// tag≥2 is still rejected (TRD §5 unknown tag). Checks that letting tag1 through did not open the gate too far.
@@ -137,8 +143,7 @@ fn tag_two_is_still_unknown() {
 
 // ── boundary values · minimum length regression ──────────────────────────────────
 
-/// epoch/seq extreme round-trip: whether the BE conversion is lossless even at the upper bounds (u32::MAX / u64::MAX).
-/// Catches to_be_bytes/from_be_bytes offset and digit mistakes at the boundary (both tag0 and tag1).
+/// epoch/seq extremes (u32::MAX / u64::MAX) round-trip losslessly, for tag0 and tag1.
 #[test]
 fn roundtrip_epoch_seq_max() {
     let id = Uuid::new_v4();
@@ -147,9 +152,9 @@ fn roundtrip_epoch_seq_max() {
         encode_structured_frame,
     ] {
         let frame = encode(id, u32::MAX, u64::MAX, b"edge");
-        let decoded = decode_frame(&frame).expect("경계값 decode 성공");
-        assert_eq!(decoded.epoch, u32::MAX, "epoch=u32::MAX 무손실");
-        assert_eq!(decoded.seq, u64::MAX, "seq=u64::MAX 무손실");
+        let decoded = decode_frame(&frame).expect("boundary value decode succeeds");
+        assert_eq!(decoded.epoch, u32::MAX, "epoch=u32::MAX lossless");
+        assert_eq!(decoded.seq, u64::MAX, "seq=u64::MAX lossless");
         assert_eq!(decoded.agent_id, id);
         assert_eq!(decoded.payload, b"edge");
     }
@@ -163,17 +168,16 @@ fn structured_empty_payload_is_min_valid() {
     assert_eq!(
         frame.len(),
         FRAME_HEADER_LEN,
-        "빈 payload = 정확히 헤더 길이"
+        "empty payload = exactly the header length"
     );
-    let decoded = decode_frame(&frame).expect("29바이트 tag1 decode 성공");
+    let decoded = decode_frame(&frame).expect("29-byte tag1 decode succeeds");
     assert_eq!(decoded.tag, FRAME_TAG_STRUCTURED_EVENT);
     assert_eq!(decoded.epoch, 3);
     assert_eq!(decoded.seq, 5);
     assert_eq!(decoded.payload.len(), 0);
 }
 
-/// Input shorter than the header (0·1·28 bytes) is returned safely as a TooShort error, not a panic.
-/// In particular, slice indexing must not panic at 1 byte (tag only) and 28 bytes (header minus 1).
+/// Input shorter than the header (0·1·28 bytes) returns `TooShort`, not a panic (including slice indexing at 1 and 28 bytes).
 #[test]
 fn short_inputs_return_too_short_not_panic() {
     for len in [0usize, 1, FRAME_HEADER_LEN - 1] {
@@ -181,7 +185,7 @@ fn short_inputs_return_too_short_not_panic() {
         assert_eq!(
             decode_frame(&buf),
             Err(CodecError::TooShort { len }),
-            "{len}바이트 입력은 TooShort"
+            "{len}-byte input is TooShort"
         );
     }
 }
@@ -213,7 +217,7 @@ fn peek_rejects_only_short_inputs() {
         assert_eq!(
             peek_frame_header(&vec![0xFFu8; len]),
             Err(CodecError::TooShort { len }),
-            "{len}바이트 입력은 TooShort"
+            "{len}-byte input is TooShort"
         );
     }
     assert!(peek_frame_header(&[0xFFu8; FRAME_HEADER_LEN]).is_ok());

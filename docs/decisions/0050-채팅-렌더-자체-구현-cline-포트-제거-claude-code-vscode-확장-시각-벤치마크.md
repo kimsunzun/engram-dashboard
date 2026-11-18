@@ -13,12 +13,12 @@ Rewrite chat rendering as **our own implementation with the Cline port removed c
 
 - **New own implementation in `src/components/slot/chat/`:**
   - `Markdown.tsx` — `react-markdown` + `remark-gfm` + `remark-math` + `rehype-highlight` + `rehype-katex` (+ katex css). Sanitizes zero-width characters (U+200B and the like; streaming leaks them before a fence), a single `ReactMarkdown` (no splitting into blocks), language alias normalization, a `pre` hover copy button, wrapper `.chat-markdown`.
-  - `ThoughtRow.tsx` — a collapsed "Thought" label + chevron. **The label row is shown even when the content is empty (encrypted thinking)** (non-interactive, tooltip "내용 비공개"). If there is content it toggles, and it pulses while streaming.
+  - `ThoughtRow.tsx` — a collapsed "Thought" label + chevron. **The label row is shown even when the content is empty (encrypted thinking)** (non-interactive, tooltip "Content hidden"). If there is content it toggles, and it pulses while streaming.
   - `CopyButton.tsx` — lucide Copy→Check. **No dependency** on `ui/button`, cva or radix (a plain button).
   - `chat.css` — first-approximation typography/spacing values (the base before precise matching to the extension).
 - **Cline port and attribution removed completely:** delete `slot/cline/*` (5 files) · `ui/button.tsx` · the three attribution items (`THIRD_PARTY_NOTICES.md` · `LICENSES/cline-Apache-2.0.txt` · headers on copied files).
 - **Add KaTeX math rendering** (remark-math + rehype-katex) — resolves the raw `$$…$$` strings being shown.
-- **Remove the send button → Enter-only.** The RichSlot input bar goes full width, "메시지 입력 (Enter 전송 · Shift+Enter 줄바꿈)".
+- **Remove the send button → Enter-only.** The RichSlot input bar goes full width, "Type a message (Enter to send · Shift+Enter for newline)".
 - **dispatch layout = left dot rail.** `StructuredTextView` groups the assistant-family rows (text, thinking, tool, error) with a left gutter + dot marker like one thread, and puts the user bubble as a full-width box with no rail (the extension look). First approximation — the connector line (vertical thread) comes later.
 - **Process = first approximation, then iterate.** Build and commit the base (engine, features) first, and adjust the precise matching of the extension look afterwards by iterating on user screenshots.
 

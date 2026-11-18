@@ -1,4 +1,4 @@
-//! Resolution — 「실제로 받는 것」: what an agent (or one preset on its own) gets from its attached presets, its
+//! Resolution — 「what it actually gets」: what an agent (or one preset on its own) gets from its attached presets, its
 //! problem list and its notices ([`resolve`]).
 //!
 //! ## Invariants
@@ -1118,7 +1118,7 @@ mod tests {
         assert!(resolution.problems.is_empty(), "{:?}", resolution.problems);
         assert!(resolution.raw_settings.is_empty() && resolution.instructions.is_empty());
         let told = |path: &str| {
-            let args = json!({ "path": path, "why": "기본 제공 폴더 없음" });
+            let args = json!({ "path": path, "why": "no built-in folder" });
             reason(BUILTIN_UNAVAILABLE, args, None)
         };
         assert_eq!(

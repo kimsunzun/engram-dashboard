@@ -4,7 +4,7 @@
 //   are contained first by SlotErrorBoundary, so only errors outside that reach here.
 // ★The fallback display does not lean on the router · store · theme store★ — we do not know which of them was the cause. For color it uses only the CSS variables main.tsx
 //   plants on :root before the first paint.
-// ★The two buttons have no LLM path★ — a 「LLM-우선 제어」 gap (user decision 2026-09-24: record only). In a release build the LLM has
+// ★The two buttons have no LLM path★ — a 「LLM-우선 제어」 gap (user decision 2026-09-24: record only). In a release build the LLM has // hangul-ok
 //   no means to notice this state either, so adding `window.reload` to the existing command list alone does not close it.
 
 import { Component, type ErrorInfo, type ReactNode } from 'react'

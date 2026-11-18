@@ -391,7 +391,7 @@ impl LibraryService {
     /// build); a release build goes on with a fresh launch.
     fn launch_of(&self, scope: &LaunchScope) -> Arc<Launch> {
         scope.get::<Launch>().unwrap_or_else(|| {
-            tracing::warn!("모르는 LaunchScope가 넘어옴, 새 LaunchIo로 진행");
+            tracing::warn!("unknown LaunchScope; using a new LaunchIo");
             debug_assert!(false, "a launch scope this library did not open");
             Arc::new(self.new_launch())
         })
@@ -825,7 +825,7 @@ impl LibraryService {
             other => {
                 tracing::warn!(
                     cwd = %escape_controls(&cwd.to_string_lossy()),
-                    "작업 폴더 canonicalize 응답 없음 또는 실패, 프로필 경로로 진행: {other:?}"
+                    "cwd canonicalize unanswered or failed; using profile path: {other:?}"
                 );
                 None
             }
@@ -898,7 +898,7 @@ impl LibraryService {
                 }
                 other => tracing::warn!(
                     root = %escape_controls(&at.to_string_lossy()),
-                    "스킬 루트 canonicalize 실패, 같은 이름 스킬 검사에서 제외: {other:?}"
+                    "skill root canonicalize failed; left out of the same-name skill check: {other:?}"
                 ),
             }
         }
@@ -929,7 +929,7 @@ impl LibraryService {
         cwd: &Path,
     ) -> Vec<(PathBuf, Vec<(String, PathBuf)>)> {
         let Some(home) = self.values.home.as_deref() else {
-            tracing::warn!("home 경로 없음, native_skill_roots 조회 생략");
+            tracing::warn!("no home path; skipping native_skill_roots");
             return Vec::new();
         };
         let env = |name: &str| {
@@ -990,7 +990,7 @@ impl LibraryService {
                 Some(Err(FolderStatus::Unreadable(why))) => {
                     tracing::warn!(
                         root = %escape_controls(&root.to_string_lossy()),
-                        "native 스킬 루트 목록 읽기 실패, 같은 이름 스킬 검사에서 제외: {}",
+                        "native skill root listing failed; left out of the same-name skill check: {}",
                         escape_controls(&why)
                     );
                     continue;
@@ -1002,7 +1002,7 @@ impl LibraryService {
             if let Some(why) = reads.unanswered.into_inner() {
                 tracing::warn!(
                     root = %escape_controls(&root.to_string_lossy()),
-                    "native 스킬 루트의 파일 읽기 TimedOut, 같은 이름 스킬 검사에서 제외: {}",
+                        "native skill root file read TimedOut; left out of the same-name skill check: {}",
                     escape_controls(&why)
                 );
                 continue;
@@ -1181,7 +1181,7 @@ fn log_left(what: &str, report: &SweepReport) {
             op = what,
             path = %escape_controls(&path.to_string_lossy()),
             count = report.left.len(),
-            "삭제 실패한 항목을 남김: {}",
+            "entries that failed to delete were left: {}",
             escape_controls(error)
         );
     }

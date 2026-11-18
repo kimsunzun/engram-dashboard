@@ -1,6 +1,6 @@
 // TRD S26-window-chrome §7-3: the visible window number badge — text = number only. ★It is not a pressable element★ — `pointer-events: none` so a press goes to
 //   the parent (the title row — draggable area), and it is outside the Tab order (no `tabIndex`). The width grows with the number of digits and is not clipped (`metrics.ts`).
-// It is hidden from screen readers — a bare 「1」 alone is read with no meaning, and the window identity is carried by the OS title (「<탭> - Engram:<n>」 · §4-4).
+// It is hidden from screen readers — a bare 「1」 alone is read with no meaning, and the window identity is carried by the OS title (「<tab> - Engram:<n>」 · §4-4).
 
 import type { CSSProperties, Ref } from 'react'
 

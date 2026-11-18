@@ -1,29 +1,23 @@
 //! Deterministic filler document generator (ADR-0090 Stage 2 pilot).
 //!
 //! ## Role
-//! Makes **natural-language prose** documents for context saturation **deterministically (seed fixed)**. With the same seed ·
-//! same doc number · same target length, a **byte-for-byte identical** document comes out on every run (reproducibility pin = ADR-0088 d5a).
+//! Makes natural-language prose documents for context saturation deterministically (seed fixed): the same seed · doc number · target length gives a byte-for-byte identical document every run (reproducibility pin = ADR-0088 d5a).
 //!
-//! ## ★content-filter safety (pilot finding 2026-07-20)★
-//! The initial xorshift pseudo-prose (words drawn from a vocabulary by random numbers and listed) was caught by claude's content filter as "violates
-//! Usage Policy" and the smoke run was refused. A meaningless run of tokens is presumed to have been caught as a suspicious signal. Replacement:
-//! **template-based natural language** (logistics reports · weather logs · facility inspection notes — grammatical English sentences).
+//! ## ★Content-filter safety★
+//! The initial xorshift pseudo-prose (random words listed from a vocabulary) was refused by claude's content filter as "violates Usage Policy" — a meaningless token run is presumed to read as a suspicious signal. Replacement: template-based natural language (logistics reports · weather logs · facility inspection notes — grammatical English sentences).
 //!
 //! ## Core invariants
-//! - **Determinism**: the only random source is one xorshift64 seeded by the seed — 0 references to external state, clock or env.
-//! - **Grammatical natural language**: every sentence in the body is one of the `SENTENCE_TEMPLATES` with slots filled — content
-//!   filter safety + the "no gibberish" unit test verify this invariant.
-//! - **Approximate length**: `approx_chars` is only a target, not an exact value — it cuts at paragraph boundaries so an error of ±one paragraph
-//!   arises. The saturation loop uses the cumulative character count we sent (under our control) as the progress signal, so this approximation is enough.
+//! - Determinism: the only random source is one xorshift64 seeded by the seed — no external state, clock or env.
+//! - Grammatical natural language: every body sentence is a `SENTENCE_TEMPLATES` entry with slots filled — content-filter safety; the "no gibberish" unit test verifies it.
+//! - Approximate length: `approx_chars` is a target, cut at paragraph boundaries (±one paragraph). The saturation loop uses the cumulative characters we sent as the progress signal, so this suffices.
 
-/// Inline xorshift64 PRNG (seeded with SplitMix-family constants) — statistical quality is not required (only the diversity of slot
-/// selection is needed).
+/// Inline xorshift64 PRNG (SplitMix-family constants) — statistical quality is not required, only diversity of slot selection.
 pub struct Xorshift64 {
     state: u64,
 }
 
 impl Xorshift64 {
-    /// Seeded by the seed. If seed==0, xorshift64 has a fixed point (always 0), so it is replaced with a SplitMix constant to guarantee non-zero.
+    /// Seeded by the seed. xorshift64 has a fixed point at 0, so seed==0 is replaced with a SplitMix constant to stay non-zero.
     pub fn new(seed: u64) -> Self {
         let state = if seed == 0 {
             0x9E37_79B9_7F4A_7C15
@@ -42,7 +36,7 @@ impl Xorshift64 {
         x
     }
 
-    /// The n==0 branch is defensive — the caller passes only non-zero.
+    /// The n==0 branch is defensive — callers pass only non-zero.
     fn below(&mut self, n: usize) -> usize {
         if n == 0 {
             0
@@ -202,11 +196,9 @@ const TITLE_NOUN: &[&str] = &[
     "records",
 ];
 
-/// The **deterministic title** of doc n. A function of `(seed, n)` alone — the driver calls this function as is to reconstruct the probe answer
-/// (doc1_title_recalled), so the title derivation rule exists only here (single source).
+/// The deterministic title of doc n — a function of `(seed, n)` alone; the driver calls it to reconstruct the probe answer (doc1_title_recalled), so the derivation rule exists only here (single source).
 ///
-/// Being three tokens, it is moderately hard for claude to recall exactly (just smearing it into "the document" fails), and grading is clear by
-/// exact match.
+/// Three tokens: moderately hard for claude to recall exactly (smearing it into "the document" fails), and grading is clear by exact match.
 pub fn doc_title(seed: u64, n: u32) -> String {
     let mut rng = Xorshift64::new(seed ^ (0xD1B5_4A32_D192_ED03u64.wrapping_mul(n as u64 + 1)));
     let adj = rng.pick(TITLE_ADJ);
@@ -215,14 +207,11 @@ pub fn doc_title(seed: u64, n: u32) -> String {
     format!("{adj} {noun1} {noun2}")
 }
 
-/// The complete body of doc n — the `DOC-<n>: <제목>\n` (title) header + natural-language paragraphs.
+/// The complete body of doc n — the `DOC-<n>: <title>\n` header + natural-language paragraphs.
 ///
-/// The body PRNG uses a perturbed seed different from the title's, so title and body are independent (the situation of recalling only the title and not the body can be
-/// observed separately).
+/// The body PRNG uses a perturbed seed different from the title's, so title and body are independent (recalling only the title can be observed separately).
 pub fn filler_doc(seed: u64, n: u32, approx_chars: usize) -> String {
-    // ★Defensive cap (finding 7)★: if approx_chars is a runaway value (usize::MAX etc.) the with_capacity reservation and the paragraph loop
-    //   are an immediate OOM/panic. The CLI already clamps, but there are paths that call this pure function directly (tests · future
-    //   callers), so a hard cap is put here too.
+    // ★Defensive cap★: a runaway approx_chars (usize::MAX etc.) makes the with_capacity reservation and the paragraph loop an immediate OOM/panic. The CLI already clamps, but tests and future callers can call this pure function directly, so cap here too.
     let approx_chars = approx_chars.min(super::cli::DOC_CHARS_CLAMP);
     let title = doc_title(seed, n);
     let mut out = String::with_capacity(approx_chars + 256);
@@ -248,11 +237,9 @@ fn paragraph(rng: &mut Xorshift64) -> String {
     p
 }
 
-/// A template that starts with `{role}` needs capitalization because the first letter of the role vocabulary is lowercase ("the ...").
+/// A template starting with `{role}` needs capitalization because role vocabulary starts lowercase ("the ...").
 fn fill_template(rng: &mut Xorshift64) -> String {
-    // ★Fixed slot-filling order★: do not draw in a **fixed order per slot type** (the slot combination differs per sentence so
-    //   the PRNG consumption varies and reproducibility breaks). Scan the template string left→right and draw
-    //   sequentially for each slot as it appears (appearance order = fixed consumption order).
+    // ★Fixed slot-filling order★: do not draw in a fixed order per slot type (slot combinations differ per sentence, so PRNG consumption varies and reproducibility breaks). Scan the template left→right and draw per slot as it appears (appearance order = fixed consumption order).
     let template = rng.pick(SENTENCE_TEMPLATES);
     let mut out = String::with_capacity(template.len() + 64);
     let mut rest = template;
@@ -262,7 +249,7 @@ fn fill_template(rng: &mut Xorshift64) -> String {
         let close = match after.find('}') {
             Some(c) => c,
             None => {
-                // No closing brace — a defense against a template that cannot exist.
+                // No closing brace — defense against a template that cannot exist.
                 out.push_str(&rest[open..]);
                 rest = "";
                 break;
@@ -307,7 +294,11 @@ mod tests {
         let mut a = Xorshift64::new(42);
         let mut b = Xorshift64::new(42);
         for _ in 0..1000 {
-            assert_eq!(a.next_u64(), b.next_u64(), "같은 seed 는 같은 수열");
+            assert_eq!(
+                a.next_u64(),
+                b.next_u64(),
+                "the same seed gives the same sequence"
+            );
         }
     }
 
@@ -317,7 +308,7 @@ mod tests {
         assert_ne!(
             r.next_u64(),
             0,
-            "seed 0 이 0 수열이 되면 안 됨(고정점 회피)"
+            "seed 0 must not become a zero sequence (fixed-point avoidance)"
         );
     }
 
@@ -325,8 +316,8 @@ mod tests {
     fn doc_title_is_deterministic() {
         let t1 = doc_title(7, 3);
         let t2 = doc_title(7, 3);
-        assert_eq!(t1, t2, "같은 (seed, n) → 같은 제목");
-        assert_eq!(t1.split(' ').count(), 3, "제목은 3 토큰: {t1:?}");
+        assert_eq!(t1, t2, "same (seed, n) → same title");
+        assert_eq!(t1.split(' ').count(), 3, "a title is 3 tokens: {t1:?}");
     }
 
     #[test]
@@ -335,7 +326,7 @@ mod tests {
         let distinct: std::collections::HashSet<_> = titles.iter().collect();
         assert!(
             distinct.len() >= 5,
-            "10개 doc 제목 중 최소 5개는 distinct 여야(다양성): {titles:?}"
+            "at least 5 of 10 doc titles must be distinct (variety): {titles:?}"
         );
     }
 
@@ -346,7 +337,7 @@ mod tests {
         let expected_header = format!("DOC-1: {title}");
         assert!(
             doc.starts_with(&expected_header),
-            "헤더가 `DOC-<n>: <제목>` 이어야 하고 제목이 doc_title 과 일치: 첫줄={:?}",
+            "the header must be `DOC-<n>: <title>` and the title must match doc_title: first line={:?}",
             doc.lines().next()
         );
         assert!(doc[expected_header.len()..].starts_with('\n'));
@@ -358,7 +349,7 @@ mod tests {
         let b = filler_doc(0xABCD, 5, 3000);
         assert_eq!(
             a, b,
-            "같은 (seed, n, approx_chars) → 바이트 동일(재현성 핀)"
+            "same (seed, n, approx_chars) → byte-identical (reproducibility pin)"
         );
     }
 
@@ -366,10 +357,14 @@ mod tests {
     fn filler_doc_approx_length_reached() {
         let approx = 4000;
         let doc = filler_doc(1, 2, approx);
-        assert!(doc.len() >= approx, "최소 목표 길이 도달: {}", doc.len());
+        assert!(
+            doc.len() >= approx,
+            "reaches the minimum target length: {}",
+            doc.len()
+        );
         assert!(
             doc.len() < approx + 2000,
-            "초과가 한 문단 규모여야(폭주 아님): {}",
+            "the overshoot must be one paragraph in size (not runaway): {}",
             doc.len()
         );
     }
@@ -378,7 +373,7 @@ mod tests {
     fn filler_docs_differ_across_n() {
         let d1 = filler_doc(5, 1, 2000);
         let d2 = filler_doc(5, 2, 2000);
-        assert_ne!(d1, d2, "다른 doc 번호는 다른 본문");
+        assert_ne!(d1, d2, "different doc numbers give different bodies");
     }
 
     #[test]
@@ -386,20 +381,20 @@ mod tests {
         let doc = filler_doc(1, 1, usize::MAX);
         assert!(
             doc.len() < super::super::cli::DOC_CHARS_CLAMP + 4000,
-            "폭주 길이가 클램프+한 문단 규모로 제한: {}",
+            "runaway length is limited to the clamp + one paragraph: {}",
             doc.len()
         );
         assert!(
             doc.len() >= super::super::cli::DOC_CHARS_CLAMP,
-            "클램프까지는 채움"
+            "fills up to the clamp"
         );
     }
 
     #[test]
     fn filler_doc_is_valid_utf8_prose() {
         let doc = filler_doc(3, 4, 1000);
-        assert!(doc.is_ascii(), "ASCII 만 사용(멀티바이트 이슈 회피)");
-        assert!(doc.contains('.'), "문장 마침표 존재");
+        assert!(doc.is_ascii(), "ASCII only (avoids multibyte issues)");
+        assert!(doc.contains('.'), "sentence periods present");
     }
 
     #[test]
@@ -422,11 +417,11 @@ mod tests {
                 }
             }
         }
-        assert!(sentences.len() > 30, "충분한 표본: {}", sentences.len());
+        assert!(sentences.len() > 30, "enough samples: {}", sentences.len());
         for s in &sentences {
             assert!(
                 sentence_matches_any_template(s),
-                "gibberish 문장(어느 템플릿과도 불일치): {s:?}"
+                "gibberish sentence (matches no template): {s:?}"
             );
         }
     }

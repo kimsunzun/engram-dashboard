@@ -1,7 +1,4 @@
-// useSplitDrag unit test — gesture token, commit, reconcile, pull timer, allowed range, view switch (ADR-0227, TRD §2f).
-// Runs on the real viewStore cache and the real canvas-report module. The only mock that imitates behavior is invoke — commit
-//   (set_split_ratio), pull (get_view) and canvas report (report_window_canvas) all pass through it. The event and window modules
-//   are empty shells, only there to unblock viewStore's imports. Divider callbacks are called directly instead of through Splitter.
+// useSplitDrag unit test — gesture token, commit, reconcile, pull timer, allowed range, view switch (ADR-0227, TRD §2f). Runs on the real viewStore cache and the real canvas-report module; the only behavior-imitating mock is invoke (set_split_ratio · get_view · report_window_canvas). The event and window modules are empty shells to unblock viewStore's imports. Divider callbacks are called directly instead of through Splitter.
 
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { Activity, StrictMode, type ReactNode, type RefObject } from 'react'
@@ -191,8 +188,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('useSplitDrag — 확정과 화해', () => {
-  it.each([false, true])('끌면 미리보기를 그리고, 떼면 한 번 확정하고, Applied(N) 스냅샷이 올 때까지 미리보기를 쥔다 %#', async strict => {
+describe('useSplitDrag — commit and reconciliation', () => {
+  it.each([false, true])('dragging draws a preview, releasing commits once, and the preview is held until an Applied(N) snapshot arrives %#', async strict => {
     const r = mount({ strict })
     act(() => props(r, 'sp-a').onDragStart(0.3))
     expect(slotX1(r, 's1')).toBe(0.3)
@@ -220,7 +217,7 @@ describe('useSplitDrag — 확정과 화해', () => {
     expect(ratioCalls()).toHaveLength(1)
   })
 
-  it.each<SplitRatioOutcome>(['Unchanged', 'TooSmall'])('%s 응답이면 미리보기를 곧바로 버린다', async outcome => {
+  it.each<SplitRatioOutcome>(['Unchanged', 'TooSmall'])('on a %s response the preview is discarded at once', async outcome => {
     vi.useFakeTimers()
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.3))
@@ -235,7 +232,7 @@ describe('useSplitDrag — 확정과 화해', () => {
     expect(getViewCalls()).toBe(0)
   })
 
-  it('명령이 실패하면 미리보기를 버리고 console.error 를 남긴다', async () => {
+  it('if the command fails it discards the preview and leaves console.error', async () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.3))
@@ -249,7 +246,7 @@ describe('useSplitDrag — 확정과 화해', () => {
     expect(err).toHaveBeenCalledWith(expect.stringContaining('set_split_ratio(sp-a, 0.3)'), expect.any(Error))
   })
 
-  it('Applied(N) 스냅샷이 응답보다 먼저 와도 응답 순간 버린다 — 응답 때의 캐시 version 을 읽는다', async () => {
+  it('even if the Applied(N) snapshot comes before the response it is discarded at the response moment — reads the cache version at response time', async () => {
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.4))
     act(() => props(r, 'sp-a').onRelease(0.4))
@@ -262,7 +259,7 @@ describe('useSplitDrag — 확정과 화해', () => {
     expect(r.result.current.slotRects).toBe(cached().slotRects)
   })
 
-  it('끄는 중 스냅샷은 나머지를 전부 반영하고 끌린 분할만 미리보기를 유지한다(규칙 1)', () => {
+  it('a snapshot during dragging reflects everything else and keeps the preview only for the dragged split (rule 1)', () => {
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.3))
     apply(snap(11, { cAt: 0.8 }))
@@ -278,7 +275,7 @@ describe('useSplitDrag — 확정과 화해', () => {
     expect(slotX1(r, 's1')).toBe(0.3)
   })
 
-  it('끌던 분할이 스냅샷에서 사라지면 드래그를 거둔다 — 그 뒤 떼어도 확정하지 않는다', () => {
+  it('if the split being dragged vanishes from the snapshot the drag is reaped — releasing afterwards does not commit', () => {
     const r = mount()
     const c = props(r, 'sp-c')
     act(() => c.onDragStart(0.8))
@@ -295,7 +292,7 @@ describe('useSplitDrag — 확정과 화해', () => {
     expect(ratioCalls()).toEqual([{ viewId: VIEW, splitId: 'sp-a', ratio: 0.3 }])
   })
 
-  it('더블클릭은 미리보기 없이 0.5 를 한 번 보낸다', async () => {
+  it('double-click sends 0.5 once without a preview', async () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
     const r = mount()
     const before = r.result.current.slotRects
@@ -313,8 +310,8 @@ describe('useSplitDrag — 확정과 화해', () => {
   })
 })
 
-describe('useSplitDrag — 제스처 token 은 구분선마다', () => {
-  it('B 의 새 드래그가 미리보기를 가져가면 A 를 떼어도 확정하지 않고, B 는 그대로 돈다', () => {
+describe('useSplitDrag — gesture token per divider', () => {
+  it('if B\'s new drag takes the preview, releasing A does not commit, and B keeps going', () => {
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.3))
     act(() => props(r, 'sp-c').onDragStart(0.8))
@@ -331,7 +328,7 @@ describe('useSplitDrag — 제스처 token 은 구분선마다', () => {
     expect(ratioCalls()).toEqual([{ viewId: VIEW, splitId: 'sp-c', ratio: 0.85 }])
   })
 
-  it('A 의 취소·늦은 미리보기는 B 의 미리보기를 건드리지 않는다', () => {
+  it('A\'s cancel · late preview does not touch B\'s preview', () => {
     const r = mount()
     const a = props(r, 'sp-a')
     act(() => a.onDragStart(0.3))
@@ -346,7 +343,7 @@ describe('useSplitDrag — 제스처 token 은 구분선마다', () => {
     expect(ratioCalls()).toEqual([{ viewId: VIEW, splitId: 'sp-c', ratio: 0.8 }])
   })
 
-  it('확정을 기다리는 중 새 드래그가 시작되면 옛 응답은 무시된다(규칙 5)', async () => {
+  it('if a new drag starts while awaiting commit the old response is ignored (rule 5)', async () => {
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.3))
     act(() => props(r, 'sp-a').onRelease(0.3))
@@ -357,7 +354,7 @@ describe('useSplitDrag — 제스처 token 은 구분선마다', () => {
   })
 
   // The three below are called in one act — ownership must be decided right even with no render between them (a ref synced to render gets it wrong).
-  it('같은 틱에 B 가 미리보기를 가져가고 A 가 떼면 A 는 확정하지 않는다', () => {
+  it('if B takes the preview and A releases in the same tick, A does not commit', () => {
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.3))
     const a = props(r, 'sp-a')
@@ -369,7 +366,7 @@ describe('useSplitDrag — 제스처 token 은 구분선마다', () => {
     expect(ratioCalls()).toEqual([])
   })
 
-  it('같은 틱에 A 가 먼저 떼고 B 가 시작하면 A 는 한 번 확정한다', () => {
+  it('if A releases first and B starts in the same tick, A commits once', () => {
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.3))
     const a = props(r, 'sp-a')
@@ -381,7 +378,7 @@ describe('useSplitDrag — 제스처 token 은 구분선마다', () => {
     expect(ratioCalls()).toEqual([{ viewId: VIEW, splitId: 'sp-a', ratio: 0.3 }])
   })
 
-  it('한 틱 안에서 시작하고 떼도 한 번 확정한다', () => {
+  it('start and release within one tick also commit once', () => {
     const r = mount()
     const p = props(r, 'sp-a')
     act(() => {
@@ -392,8 +389,8 @@ describe('useSplitDrag — 제스처 token 은 구분선마다', () => {
   })
 })
 
-describe('useSplitDrag — 확정 뒤 당김(규칙 6)', () => {
-  it.each([false, true])('Applied 뒤 스냅샷이 안 오면 %#: 500ms 에 get_view 를 정확히 한 번 당긴다', async strict => {
+describe('useSplitDrag — pull after commit (rule 6)', () => {
+  it.each([false, true])('if no snapshot comes after Applied %#: get_view is pulled exactly once at 500ms', async strict => {
     vi.useFakeTimers()
     const r = mount({ strict })
     act(() => props(r, 'sp-a').onDragStart(0.4))
@@ -414,7 +411,7 @@ describe('useSplitDrag — 확정 뒤 당김(규칙 6)', () => {
     expect(getViewCalls()).toBe(1)
   })
 
-  it('기다리는 version 미만의 스냅샷은 타이머를 다시 걸지 않는다 — 응답 뒤 500ms 에 당긴다', async () => {
+  it('a snapshot below the awaited version does not set the timer again — it pulls 500ms after the response', async () => {
     vi.useFakeTimers()
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.4))
@@ -430,7 +427,7 @@ describe('useSplitDrag — 확정 뒤 당김(규칙 6)', () => {
     expect(getViewCalls()).toBe(1)
   })
 
-  it('당김이 날아가는 사이 언마운트되면 그 응답을 캐시에 넣지 않는다', async () => {
+  it('if unmounted while the pull is in flight that response is not put into the cache', async () => {
     vi.useFakeTimers()
     let finish: (s: ViewSnapshot) => void = () => {}
     pullReply = new Promise<ViewSnapshot>(res => {
@@ -451,7 +448,7 @@ describe('useSplitDrag — 확정 뒤 당김(규칙 6)', () => {
     expect(cached().version).toBe(10)
   })
 
-  it('스냅샷이 먼저 오면 당기지 않는다', async () => {
+  it('if the snapshot comes first it does not pull', async () => {
     vi.useFakeTimers()
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.4))
@@ -464,7 +461,7 @@ describe('useSplitDrag — 확정 뒤 당김(규칙 6)', () => {
     expect(getViewCalls()).toBe(0)
   })
 
-  it('언마운트하면 타이머를 걷는다', async () => {
+  it('on unmount the timer is cleared', async () => {
     vi.useFakeTimers()
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.4))
@@ -480,7 +477,7 @@ describe('useSplitDrag — 확정 뒤 당김(규칙 6)', () => {
   })
 
   // The reply is not blocked by unmount state — measures that a dispatch that lands does no harm (does not lean on the guard).
-  it('확정 도중 언마운트돼도 늦은 응답은 해가 없다', async () => {
+  it('even if unmounted mid-commit a late response is harmless', async () => {
     vi.useFakeTimers()
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
     const r = mount()
@@ -496,7 +493,7 @@ describe('useSplitDrag — 확정 뒤 당김(규칙 6)', () => {
     expect(err).not.toHaveBeenCalled()
   })
 
-  it('효과가 끊긴 사이(<Activity hidden>) 온 응답도 받는다 — 다시 보이면 스냅샷으로 미리보기가 풀린다', async () => {
+  it('a response arriving while effects are cut (<Activity hidden>) is also received — when visible again the snapshot releases the preview', async () => {
     let mode: 'visible' | 'hidden' = 'visible'
     const wrapper = ({ children }: { children: ReactNode }) => <Activity mode={mode}>{children}</Activity>
     const r = mount({ wrapper })
@@ -515,12 +512,12 @@ describe('useSplitDrag — 확정 뒤 당김(규칙 6)', () => {
   })
 })
 
-describe('useSplitDrag — 뷰 전환', () => {
+describe('useSplitDrag — view switch', () => {
   beforeEach(() => {
     useViewStore.getState().applyLayoutUpdated(snapV2(5))
   })
 
-  it('viewId 가 바뀌면 미리보기와 진행 중 제스처를 버린다 — 돌아와도 옛 미리보기가 없고, 옛 구분선을 떼도 확정하지 않는다', () => {
+  it('if viewId changes it discards the preview and in-progress gestures — no old preview on return, and releasing the old divider does not commit', () => {
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.3))
     const a = props(r, 'sp-a')
@@ -535,7 +532,7 @@ describe('useSplitDrag — 뷰 전환', () => {
     expect(slotX1(r, 's1')).toBe(0.5)
   })
 
-  it('확정 도중 viewId 가 바뀌면 옛 응답은 새 뷰에 미리보기도 당김도 만들지 않는다', async () => {
+  it('if viewId changes mid-commit the old response makes neither a preview nor a pull on the new view', async () => {
     vi.useFakeTimers()
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.4))
@@ -560,8 +557,8 @@ describe('useSplitDrag — 뷰 전환', () => {
   })
 })
 
-describe('useSplitDrag — 헛 디스패치', () => {
-  it('상태를 바꾸지 않는 이벤트는 렌더를 부르지 않는다', () => {
+describe('useSplitDrag — idle dispatch', () => {
+  it('an event that does not change state does not trigger a render', () => {
     const r = mount()
     const a = props(r, 'sp-a')
     act(() => a.onDragStart(0.3))
@@ -579,8 +576,8 @@ describe('useSplitDrag — 헛 디스패치', () => {
   })
 })
 
-describe('useSplitDrag — 허용 범위', () => {
-  it('보고한 캔버스 × 스냅샷 분할 상자 폭으로 구한다 — 미리보기로 재사상된 상자가 아니다', async () => {
+describe('useSplitDrag — allowed range', () => {
+  it('it is derived from the reported canvas × the snapshot split box width — not the box remapped by the preview', async () => {
     const r = mount()
     await reportCanvas(200, 100)
     expect(props(r, 'sp-a').range).toEqual(rangeFor(200, 1))
@@ -595,7 +592,7 @@ describe('useSplitDrag — 허용 범위', () => {
     expect(rangeFor(200, c.x1 - c.x0)).not.toEqual(rangeFor(200, 0.5))
   })
 
-  it.each([false, true])('캔버스 보고가 바뀌면 %#: 호스트가 다시 그리지 않아도 다시 구한다', async strict => {
+  it.each([false, true])('when the canvas report changes %#: it is derived again even if the host does not redraw', async strict => {
     const r = mount({ strict })
     await reportCanvas(200, 100)
     expect(props(r, 'sp-a').range).toEqual(rangeFor(200, 1))
@@ -604,7 +601,7 @@ describe('useSplitDrag — 허용 범위', () => {
     expect(props(r, 'sp-a').range).toEqual({ lo: 0.1, hi: 0.9 })
   })
 
-  it('보고 전에는 루트 크기를 반올림해 쓰고, 보고가 오면 보고를 쓴다', async () => {
+  it('before a report it uses the root size rounded, and when a report comes it uses the report', async () => {
     const r = mount({ root: rootWithRect(199.6, 100.4) })
     expect(props(r, 'sp-a').range).toEqual(rangeFor(200, 1))
     expect(props(r, 'sp-b').range).toEqual(rangeFor(100, 1))
@@ -613,7 +610,7 @@ describe('useSplitDrag — 허용 범위', () => {
     expect(props(r, 'sp-a').range).toEqual(rangeFor(1000, 1))
   })
 
-  it('L < 2·MIN_PANE_PX 면 잠긴다', async () => {
+  it('it is locked if L < 2·MIN_PANE_PX', async () => {
     const r = mount()
     await reportCanvas(100, 100)
     // L of sp-c = 100 × 0.5 = 50
@@ -621,7 +618,7 @@ describe('useSplitDrag — 허용 범위', () => {
     expect(props(r, 'sp-a').range).toEqual(rangeFor(100, 1))
   })
 
-  it('보고도 루트도 없으면, 루트가 0 크기면, 스냅샷에 없는 split id 면 잠긴다', async () => {
+  it('it is locked if there is neither report nor root, if the root has 0 size, or if the split id is not in the snapshot', async () => {
     const none = mount()
     expect(props(none, 'sp-a').range).toBeNull()
     none.unmount()
@@ -637,8 +634,8 @@ describe('useSplitDrag — 허용 범위', () => {
   })
 })
 
-describe('useSplitDrag — 그릴 사각형의 참조', () => {
-  it('미리보기가 없으면 캐시 배열 그대로, 입력이 같으면 다시 그려도 같은 배열이다', () => {
+describe('useSplitDrag — reference of the rectangles to draw', () => {
+  it('with no preview it is the cache array as is, and with the same input redrawing gives the same array', () => {
     const r = mount()
     expect(r.result.current.slotRects).toBe(cached().slotRects)
     expect(r.result.current.splitRects).toBe(cached().splitRects)
@@ -646,7 +643,7 @@ describe('useSplitDrag — 그릴 사각형의 참조', () => {
     expect(r.result.current.slotRects).toBe(cached().slotRects)
   })
 
-  it('미리보기 상자 밖 사각형은 캐시 객체 그대로다', () => {
+  it('rectangles outside the preview box are the cache objects as is', () => {
     const r = mount()
     act(() => props(r, 'sp-c').onDragStart(0.8))
     const shown = r.result.current.slotRects

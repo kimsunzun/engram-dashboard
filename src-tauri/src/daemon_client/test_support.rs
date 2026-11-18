@@ -26,15 +26,11 @@ use crate::layout::{
 use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
 
-// A fake that writes each firing as one line **in the order it came**. ★A Vec, not a set★ — half of what this harness buys is
-// order (the connection state must go out before the broadcast so the frontend receives the list after it registers the output Channel).
+// A fake writing each firing as one line in the order it came — a Vec, not a set: half of what this harness buys is order (the connection state must go out before the broadcast so the frontend receives the list after it registers the output Channel).
 #[derive(Default)]
 pub(crate) struct RecordingEvents {
     seen: std::sync::Mutex<Vec<String>>,
-    // Hooks run one per `Connected` notice, front first (none left = nothing runs). ★They run synchronously on the
-    //   connection driver's actor★, at the moment `Connected` is shown — the one handle on that moment without a wall
-    //   clock. ★Do not panic inside a hook★ — the actor dies and the test ends on a timeout instead of an assertion;
-    //   hand what you observed out and assert in the test body.
+    // Hooks run one per `Connected` notice, front first (none left = nothing runs). They run synchronously on the connection driver's actor at the moment `Connected` is shown — the one handle on that moment without a wall clock. Do not panic inside a hook: the actor dies and the test ends on a timeout instead of an assertion; hand what you observed out and assert in the test body.
     on_connected: std::sync::Mutex<std::collections::VecDeque<Box<dyn FnOnce() + Send>>>,
 }
 
@@ -58,11 +54,9 @@ impl RecordingEvents {
     }
 }
 
-/// The tag of a connection status line. ★Only those lines carry it★ — an agent's status is an `agent_status:` line.
 const STATUS_TAG: &str = "status:";
 
-/// One emitted status as the record writes it: `status:<state word>:<band>` — the state's serialized word (what the
-/// frontend actually receives) and the band as `none` · `not_connected` · `refused` · `version` · `version_can_stop`.
+/// One emitted status as the record writes it: `status:<state word>:<band>` — the state's serialized word (what the frontend receives) and the band as `none` · `not_connected` · `refused` · `version` · `version_can_stop`.
 pub(crate) fn status_line(status: &ConnectionStatus) -> String {
     let word = serde_json::to_value(status.state).expect("a state word");
     let band = match status.band {
@@ -75,7 +69,6 @@ pub(crate) fn status_line(status: &ConnectionStatus) -> String {
     format!("{STATUS_TAG}{}:{band}", word.as_str().expect("a string"))
 }
 
-/// The connection status lines among recorded lines, in order — one per emit.
 pub(crate) fn status_lines(lines: &[String]) -> Vec<String> {
     lines
         .iter()
@@ -84,7 +77,6 @@ pub(crate) fn status_lines(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// The state edges among recorded lines — `state:<word>` each time the word of a status line changes.
 pub(crate) fn state_edges(lines: &[String]) -> Vec<String> {
     let mut edges: Vec<String> = Vec::new();
     for line in lines {
@@ -203,7 +195,7 @@ pub(crate) fn wire_agent(id: AgentId, name: &str) -> AgentInfo {
     }
 }
 
-// Recomputes the interest for the layout 「main 의 활성 탭 = 사용량 슬롯 하나」 (main's active tab = one usage slot). The nudge is decided by the caller — a spot that does not use the result
+// Recomputes the interest for the layout 「main's active tab = one usage slot」. The nudge is decided by the caller — a spot that does not use the result
 // drops it with `let _ =` (the nudge has nothing to do before connecting, or the test injects the nudge directly).
 pub(crate) fn relayout(
     usage: &SharedUsageInterest,
@@ -257,7 +249,7 @@ impl LayoutEvents for NoLayoutEvents {
 
 struct NoWindows;
 
-const NO_OS_WINDOW: &str = "이 시험에는 OS 창이 없다";
+const NO_OS_WINDOW: &str = "this test has no OS window";
 
 impl WindowHost for NoWindows {
     fn open(&self, _label: &str) -> Result<(), String> {
@@ -307,7 +299,7 @@ impl AgentSpawner for NoSpawner {
         _backend: Option<AgentBackendKind>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<SpawnedAgent, SpawnRefusal>> + Send + 'a>>
     {
-        Box::pin(async { Err("이 시험은 스폰하지 않는다".to_string().into()) })
+        Box::pin(async { Err("this test does not spawn".to_string().into()) })
     }
 }
 
@@ -318,7 +310,7 @@ impl ThemeWindows for NoThemeWindows {
         Vec::new()
     }
     fn send(&self, _label: &str, _payload: UiSettingsPayload) -> Result<(), String> {
-        Err("이 시험에는 웹뷰 창이 없다".to_string())
+        Err("this test has no webview window".to_string())
     }
 }
 
@@ -374,7 +366,7 @@ pub(crate) fn bus_request(name: &str, args: serde_json::Value) -> AgentEvent {
         args,
     };
     AgentEvent::CommandRequest {
-        envelope: serde_json::value::to_raw_value(&envelope).expect("봉투 직렬화"),
+        envelope: serde_json::value::to_raw_value(&envelope).expect("envelope serialization"),
     }
 }
 

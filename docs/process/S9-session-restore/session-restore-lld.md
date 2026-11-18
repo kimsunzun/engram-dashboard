@@ -66,7 +66,7 @@ restore_all():  // auto_restore=true 프로필만, stagger(순차+간격) — sp
 ```
 - **fallback (when resume fails):** re-spawn Fresh with a **new uuid v4** (reusing the same id fails again with already-in-use — 1-b). The old sid → `old_session_ids`. **The claude transcript is preserved in `~/.claude/projects/` → not loss but separation.**
 - **Failure detection:** settle the signal with spike #2/#6/#7 — distinguish a termination with exit/stderr from a hang on the trust·login prompt. (Never mistake a hang for success)
-- **UI signal (no silent, 3 parties unanimous):** emit `agent-restore-result { id, outcome: Resumed | FreshFallback{reason} }` → a tree badge (⚠) + a terminal banner ("이전 대화 복원 실패 — 새 세션. 이전 대화는 보존됨"). **No modals** (N spam).
+- **UI signal (no silent, 3 parties unanimous):** emit `agent-restore-result { id, outcome: Resumed | FreshFallback{reason} }` → a tree badge (⚠) + a terminal banner ("Previous conversation restore failed — new session. The previous conversation is preserved"). **No modals** (N spam).
 
 ## 5. Auto-restart — activate after the spike (3 parties: do not put it in early as a trust feature)
 
@@ -140,7 +140,7 @@ Position-independent AgentId / direct spawn tracking / separated control of the 
 
 ### 11-3. Restore — restart/app start
 - `claude --resume <id>` with the saved `claude_session_id` (latest)
-- Failure (exit 1 `No conversation found`) → **fresh fallback with a new uuid** + the old id history + `agent-restore-result` UI notification ("새 세션, 이전 대화 보존됨")
+- Failure (exit 1 `No conversation found`) → **fresh fallback with a new uuid** + the old id history + `agent-restore-result` UI notification ("New session, previous conversation preserved")
 - After restore, resume 11-2 with the new child PID
 
 ### 11-4. Defense (best-effort)

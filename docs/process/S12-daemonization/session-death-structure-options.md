@@ -2,7 +2,7 @@
 
 > **Conclusion (2026-06-16): the user adopted (A) → finalized as ADR-0017.** Slot = one session of one mode; when it ends, the slot ends too (no backend swap inside a slot, no zombie slot). A terminal (shell) is not saved/restored (no session to resume). The (B) slot-persist container model pushed by the consult was **rejected for domain confusion (in-place mode swap, dead pane).** However, from the consult agreement, "per-backend definition of death + exit-reason classification + KilledByUser excluded from restart + API stream ≠ death" is adopted. The (A)/(B) comparison and the OSS survey below are preserved as history. Details: ADR-0017.
 
-- 상태: **Resolved → ADR-0017 (A adopted)**
+- Status: **Resolved → ADR-0017 (A adopted)**
 - Basis: `/consult` job `20260616-011502-consult-death-abstraction` — GPT, Gemini and Claude (opus) blind + judge. Includes a survey of well-known OSS. Raw material `I:\Engram\agents\web-runner\shared\<job>\`.
 - Link: the "sid instance" of ADR-0016 (agent lifecycle model) corresponds to the **Run** here — a structural correction that adds a **Slot** layer on top of it.
 

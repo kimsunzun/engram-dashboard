@@ -1,29 +1,24 @@
-//! Settings schema table — the canonical source of key · kind · default · description, and the rules that turn input into a canonical string (TRD §5-2) are
-//! here too. Adding one setting = one line in [`SETTINGS`]. It does not know the file (`store`).
+//! Settings schema table — the canonical source of key · kind · default · description, plus the rules turning input into a canonical string (TRD §5-2). Adding one setting = one line in [`SETTINGS`]. It does not know the file (`store`).
 
-/// Kind of value — the accepted input and canonical form differ per kind ([`SettingDef::normalize`]).
 pub(super) enum Kind {
-    /// The spelling in the table is the canonical form. Input is case-insensitive.
     Choice(&'static [&'static str]),
-    /// CSS length. ★The range is separate per unit★ — if a single numeric range is applied regardless of unit, `48rem` passes.
-    /// `px` is always accepted, and only keys where `rem` is `Some` accept rem·em with the same range. Both ends inclusive.
+    /// CSS length. The range is separate per unit — a single numeric range regardless of unit would let `48rem` pass. `px` is always accepted, and only keys where `rem` is `Some` accept rem·em with the same range. Both ends inclusive.
     CssLength {
         px: (f64, f64),
         rem: Option<(f64, f64)>,
     },
-    /// Unitless CSS number. Both ends inclusive.
-    CssNumber { range: (f64, f64) },
+    CssNumber {
+        range: (f64, f64),
+    },
 }
 
 pub(super) struct SettingDef {
     pub key: &'static str,
     pub kind: Kind,
-    /// Write it in canonical form — a test measures 「기본값이 자기 자신으로 정규화된다」(the default normalizes to itself).
     pub default: &'static str,
     pub desc: &'static str,
 }
 
-/// Three sets of px · rem(em) range bundles. A generous line that current values pass, not a refined value (table header below).
 const FONT_PX: (f64, f64) = (8.0, 48.0);
 const FONT_REM: (f64, f64) = (0.5, 3.0);
 const SPACE_PX: (f64, f64) = (0.0, 200.0);
@@ -44,22 +39,15 @@ const fn spacing(key: &'static str, default: &'static str, desc: &'static str) -
 }
 
 /// All settings — this order is the answer order of `get`·`schema`.
-///
-/// ★`chat.style.*` is a temporary namespace (user decision 2026-10-02 · U2)★ — the frontend's 11 keys and defaults were carried over
-/// as they are, and it is due to be replaced by the chat area rewrite and the plugin layout. Key names · bundling · ranges are not refined.
-/// A change that removes these keys from the table also takes on deleting the values left in the file — an unknown key stays in the file and cannot be
-/// deleted by a command (TRD §5-1).
-///
-/// ADR-0051: the `chat.style.*` defaults must equal the `--chat-*` fallback of `:root` in `src/styles/theme.css` —
-/// if only one changes, the first boot frame and the settings application diverge. There is no test that measures that comparison (U2). The numbers are values the user
-/// settled by live tuning — do not 「정리」(tidy up) them arbitrarily.
+/// `chat.style.*` is a temporary namespace (user decision 2026-10-02 · U2): the frontend's 11 keys and defaults were carried over as they are, due to be replaced by the chat area rewrite and the plugin layout; key names · bundling · ranges are not refined. Removing these keys from the table also takes on deleting the values left in the file — an unknown key stays in the file and cannot be deleted by a command (TRD §5-1).
+/// ADR-0051: the `chat.style.*` defaults must equal the `--chat-*` fallback of `:root` in `src/styles/theme.css` — if only one changes, the first boot frame and the settings application diverge. No test measures that comparison (U2). The numbers are values the user settled by live tuning — do not "tidy up" them arbitrarily.
 // ADR-0265
 pub(super) const SETTINGS: &[SettingDef] = &[
     SettingDef {
         key: "theme.default",
         kind: Kind::Choice(&["dark", "light", "e-ink"]),
         default: "dark",
-        desc: "창별 덮어쓰기가 없는 창의 테마",
+        desc: "theme of windows without a per-window override",
     },
     // ADR-0372 — values and default are an LLM-facing contract once shipped
     SettingDef {
@@ -71,25 +59,25 @@ pub(super) const SETTINGS: &[SettingDef] = &[
     spacing(
         "chat.style.railRowPt",
         "0.8rem",
-        "챗 rail 행 위쪽 여백(행간)",
+        "top margin of a chat rail row (row spacing)",
     ),
     spacing(
         "chat.style.plainRowPt",
         "0.7rem",
-        "챗 rail 이 아닌 행(사용자 말풍선·구분선) 위쪽 여백",
+        "top margin of rows that are not chat rail rows (user bubbles · dividers)",
     ),
-    spacing("chat.style.userPy", "7px", "사용자 말풍선 세로 안쪽 여백"),
+    spacing("chat.style.userPy", "7px", "vertical inner padding of a user bubble"),
     spacing(
         "chat.style.userPx",
         "0.9rem",
-        "사용자 말풍선 가로 안쪽 여백",
+        "horizontal inner padding of a user bubble",
     ),
     spacing(
         "chat.style.userMy",
         "0.375rem",
-        "사용자 말풍선 세로 바깥 여백",
+        "vertical outer margin of a user bubble",
     ),
-    spacing("chat.style.railGutter", "1.5rem", "챗 rail 칸 폭"),
+    spacing("chat.style.railGutter", "1.5rem", "chat rail gutter width"),
     SettingDef {
         key: "chat.style.railLineOffset",
         kind: Kind::CssLength {
@@ -97,12 +85,12 @@ pub(super) const SETTINGS: &[SettingDef] = &[
             rem: Some(OFFSET_REM),
         },
         default: "-1rem",
-        desc: "챗 rail 연결선 위쪽 오프셋(보통 음수 — 위 행으로 잇는다)",
+        desc: "top offset of the chat rail connector line (usually negative — it links to the row above)",
     },
     spacing(
         "chat.style.railDotTop",
         "0.5625rem",
-        "챗 rail 점 표식의 위쪽 위치",
+        "top position of the chat rail dot marker",
     ),
     SettingDef {
         key: "chat.style.fontSize",
@@ -111,18 +99,18 @@ pub(super) const SETTINGS: &[SettingDef] = &[
             rem: Some(FONT_REM),
         },
         default: "13px",
-        desc: "챗 기본 글자 크기",
+        desc: "default chat font size",
     },
     SettingDef {
         key: "chat.style.lineHeight",
         kind: Kind::CssNumber { range: (0.5, 4.0) },
         default: "1.45",
-        desc: "챗 기본 줄 높이(글자 크기의 배수)",
+        desc: "default chat line height (a multiple of the font size)",
     },
     spacing(
         "chat.style.waitStripH",
         "1.75rem",
-        "입력창 위 대기 표시 줄 높이",
+        "height of the pending-indicator line above the input box",
     ),
 ];
 
@@ -130,7 +118,7 @@ pub(super) fn find(key: &str) -> Option<&'static SettingDef> {
     SETTINGS.iter().find(|def| def.key == key)
 }
 
-/// One exact key, or all keys covered by a prefix ending in `.` (table order). An empty list if none match.
+/// One exact key, or all keys covered by a prefix ending in `.` (table order); empty if none match.
 pub(super) fn select(selector: &str) -> Vec<&'static SettingDef> {
     if selector.ends_with('.') {
         SETTINGS
@@ -143,45 +131,39 @@ pub(super) fn select(selector: &str) -> Vec<&'static SettingDef> {
 }
 
 impl SettingDef {
-    /// Input → canonical string (TRD §5-2). All kinds accept leading and trailing whitespace.
-    ///
-    /// A number accepts only `[+-]? (숫자+ (. 숫자+)? | . 숫자+)` — exponent notation · `inf` · `NaN` · `5.` are rejected.
-    /// The canonical form is the shortest decimal (no exponent) · no `+` · `-0` becomes `0` · unit in lowercase.
-    ///
-    /// `Err` = a message shown to the caller as is (what is wrong + the expected format). ★The received value is not included★ — the sender
-    /// already knows it, and an unbounded string would spread into the error message and log.
+    /// Input → canonical string (TRD §5-2); all kinds accept leading and trailing whitespace. A number accepts only `[+-]? (digit+ (. digit+)? | . digit+)` — exponent notation · `inf` · `NaN` · `5.` are rejected. Canonical = shortest decimal (no exponent) · no `+` · `-0` becomes `0` · unit lowercase.
+    /// `Err` = a message shown to the caller as is (what is wrong + the expected format). The received value is not included — the sender already knows it, and an unbounded string would spread into the error message and log.
     pub fn normalize(&self, input: &str) -> Result<String, String> {
         let input = input.trim();
-        let refuse = |problem: &str| Err(format!("{problem} — 기대: {}", self.expected()));
+        let refuse = |problem: &str| Err(format!("{problem} — expected: {}", self.expected()));
         match &self.kind {
             Kind::Choice(choices) => match choices.iter().find(|c| c.eq_ignore_ascii_case(input)) {
                 Some(choice) => Ok((*choice).to_string()),
-                None => refuse("선택지에 없다"),
+                None => refuse("not among the choices"),
             },
             Kind::CssLength { px, rem } => {
                 let Some((value, unit)) = split_number(input) else {
-                    return refuse("수가 아니다");
+                    return refuse("not a number");
                 };
                 let unit = unit.to_ascii_lowercase();
                 let range = match (unit.as_str(), rem) {
                     ("px", _) => *px,
                     ("rem" | "em", Some(rem)) => *rem,
-                    _ => return refuse("받지 않는 단위다"),
+                    _ => return refuse("a unit that is not accepted"),
                 };
                 if !within(value, range) {
-                    return refuse("범위 밖이다");
+                    return refuse("out of range");
                 }
                 Ok(format!("{}{unit}", canonical_number(value)))
             }
             Kind::CssNumber { range } => match split_number(input) {
                 Some((value, "")) if within(value, *range) => Ok(canonical_number(value)),
-                Some((_, "")) => refuse("범위 밖이다"),
-                _ => refuse("단위 없는 수가 아니다"),
+                Some((_, "")) => refuse("out of range"),
+                _ => refuse("not a unit-less number"),
             },
         }
     }
 
-    /// Kind name that `settings.schema` carries.
     pub fn kind_name(&self) -> &'static str {
         match self.kind {
             Kind::Choice(_) => "choice",
@@ -197,8 +179,7 @@ impl SettingDef {
         }
     }
 
-    /// (lower bound, upper bound) — canonical form strings. `CssLength` joins one value per accepted unit with `, `
-    /// (`"8px, 0.5rem, 0.5em"`). `Choice` is `None` for both.
+    /// (lower bound, upper bound) — canonical form strings. `CssLength` joins one value per accepted unit with `, ` (`"8px, 0.5rem, 0.5em"`); `Choice` is `None` for both.
     pub fn bounds(&self) -> (Option<String>, Option<String>) {
         match &self.kind {
             Kind::Choice(_) => (None, None),
@@ -222,7 +203,7 @@ impl SettingDef {
 
     fn expected(&self) -> String {
         match &self.kind {
-            Kind::Choice(choices) => format!("{} 중 하나(대소문자 무시)", choices.join(" · ")),
+            Kind::Choice(choices) => format!("one of {} (case-insensitive)", choices.join(" · ")),
             Kind::CssLength { px, rem } => {
                 let ranges = length_units(*px, *rem)
                     .iter()
@@ -232,12 +213,12 @@ impl SettingDef {
                     .collect::<Vec<_>>()
                     .join(" · ");
                 format!(
-                    "수 바로 뒤에 단위, 지수 표기 없이 — {ranges} (예: {})",
+                    "a unit right after the number, no exponent notation — {ranges} (e.g. {})",
                     self.default
                 )
             }
             Kind::CssNumber { range } => format!(
-                "단위 없는 수, 지수 표기 없이 — {}~{} (예: {})",
+                "a unit-less number, no exponent notation — {}..{} (e.g. {})",
                 canonical_number(range.0),
                 canonical_number(range.1),
                 self.default
@@ -259,9 +240,7 @@ fn within(value: f64, (lo, hi): (f64, f64)) -> bool {
     lo <= value && value <= hi
 }
 
-/// The leading number and the rest (the unit place). For the number grammar see the docs of [`SettingDef::normalize`].
-///
-/// It is rejected even without blocking exponents separately — the rest of `1e2px` is `e2px`, which is not a unit.
+/// The leading number and the rest (the unit place); number grammar: the docs of [`SettingDef::normalize`]. Exponents need no separate block — the rest of `1e2px` is `e2px`, not a unit.
 fn split_number(text: &str) -> Option<(f64, &str)> {
     let bytes = text.as_bytes();
     let digits_from = |start: usize| {
@@ -289,9 +268,7 @@ fn split_number(text: &str) -> Option<(f64, &str)> {
     Some((value, &text[end..]))
 }
 
-/// Shortest decimal — `Display` of `f64` gives the shortest round-tripping digits with no exponent.
 fn canonical_number(value: f64) -> String {
-    // `-0` to `0` — otherwise `-0px` stays as `-0px`.
     let value = if value == 0.0 { 0.0 } else { value };
     format!("{value}")
 }
@@ -301,18 +278,18 @@ mod tests {
     use super::*;
 
     fn def(key: &str) -> &'static SettingDef {
-        find(key).expect("표에 있는 키")
+        find(key).expect("a key in the table")
     }
 
     fn ok(key: &str, input: &str) -> String {
         def(key)
             .normalize(input)
-            .unwrap_or_else(|e| panic!("{key} = {input:?} 가 거절됐다: {e}"))
+            .unwrap_or_else(|e| panic!("{key} = {input:?} was rejected: {e}"))
     }
 
     fn refused(key: &str, input: &str) -> String {
         match def(key).normalize(input) {
-            Ok(v) => panic!("{key} = {input:?} 가 {v:?} 로 통과했다"),
+            Ok(v) => panic!("{key} = {input:?} passed as {v:?}"),
             Err(e) => e,
         }
     }
@@ -325,7 +302,7 @@ mod tests {
         let mut keys: Vec<&str> = SETTINGS.iter().map(|d| d.key).collect();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(keys.len(), 13, "키가 겹친다");
+        assert_eq!(keys.len(), 13, "keys overlap");
     }
 
     #[test]
@@ -334,7 +311,7 @@ mod tests {
             assert_eq!(
                 d.normalize(d.default).as_deref(),
                 Ok(d.default),
-                "{} 의 기본값이 정규형이 아니거나 범위 밖이다",
+                "the default of {} is not canonical or is out of range",
                 d.key
             );
         }
@@ -383,13 +360,16 @@ mod tests {
         assert_eq!(select("chat.").len(), 11);
         assert!(
             select("chat.style").is_empty(),
-            "점 없는 접두는 키가 아니다"
+            "a prefix without a dot is not a key"
         );
         assert!(select("theme.").iter().all(|d| d.key == "theme.default"));
         assert!(select("ui.").iter().map(|d| d.key).eq(["ui.language"]));
         assert!(select("").is_empty());
         assert!(select(".").is_empty());
-        assert!(select("THEME.DEFAULT").is_empty(), "키는 대소문자를 가린다");
+        assert!(
+            select("THEME.DEFAULT").is_empty(),
+            "keys are case-sensitive"
+        );
     }
 
     // ── Choice ──
@@ -415,7 +395,11 @@ mod tests {
         assert_eq!(ok(k, " 0.90Rem "), "0.9rem");
         assert_eq!(ok(k, ".5rem"), "0.5rem");
         assert_eq!(ok(k, "1EM"), "1em");
-        assert_eq!(ok(k, "+13px"), "13px", "부호 + 는 받고 정규형에서 뺀다");
+        assert_eq!(
+            ok(k, "+13px"),
+            "13px",
+            "the + sign is accepted and dropped in the canonical form"
+        );
     }
 
     #[test]
@@ -437,7 +421,7 @@ mod tests {
     fn spacing_keys_take_zero_and_reject_negatives() {
         let k = "chat.style.userPy";
         assert_eq!(ok(k, "0px"), "0px");
-        assert_eq!(ok(k, "-0px"), "0px", "-0 은 0 으로 접는다");
+        assert_eq!(ok(k, "-0px"), "0px", "-0 folds to 0");
         assert_eq!(ok(k, "-0.0rem"), "0rem");
         assert_eq!(ok(k, "200px"), "200px");
         assert_eq!(ok(k, "12.5rem"), "12.5rem");
@@ -475,7 +459,7 @@ mod tests {
     fn a_huge_number_is_out_of_range_not_infinite() {
         let huge = format!("1{}px", "0".repeat(400));
         let e = refused("chat.style.fontSize", &huge);
-        assert!(e.contains("범위"), "{e}");
+        assert!(e.contains("range"), "{e}");
     }
 
     #[test]
@@ -483,7 +467,10 @@ mod tests {
         let e = refused("chat.style.fontSize", "secret-token-48rem");
         assert!(e.contains("px 8~48"), "{e}");
         assert!(e.contains("rem 0.5~3"), "{e}");
-        assert!(!e.contains("secret"), "받은 값을 싣지 않는다: {e}");
+        assert!(
+            !e.contains("secret"),
+            "does not echo the received value: {e}"
+        );
         let e = refused("theme.default", "x");
         assert!(e.contains("dark · light · e-ink"), "{e}");
     }

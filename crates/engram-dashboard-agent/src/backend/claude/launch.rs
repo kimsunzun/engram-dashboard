@@ -209,7 +209,7 @@ mod tests {
         kit
     }
 
-    /// Two skills (one name holding `:`) · two raw settings (「기본」 first) · two folder entries in a non-sorted plan
+    /// Two skills (one name holding `:`) · two raw settings (「Default」 first) · two folder entries in a non-sorted plan
     /// order.
     fn real_kit() -> LaunchKit {
         let mut kit = empty_real_kit();
@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(fs.file(&settings).unwrap()).unwrap(),
             format!("{merged:#}"),
-            "pretty JSON of the attach-order merge — a later empty list keeps 「기본」's engram server"
+            "pretty JSON of the attach-order merge — a later empty list keeps 「Default」's engram server"
         );
 
         assert_eq!(

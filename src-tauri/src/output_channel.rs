@@ -1,64 +1,32 @@
-//! window Channel registry + stateless pass-through send helper (ADR-0046 — mirror buffer removed, view-direct replay).
-//!
-//! ## Role
-//! src-tauri no longer mirrors the daemon ring (ADR-0046).
-//!
-//! ## ★raw byte pitfall (spike §7)★
-//! Output frames are carried by `Channel<tauri::ipc::Response>` — `Channel<Vec<u8>>`/`Channel<&[u8]>` get
-//! serialized as a JSON array by the blanket `impl<T:Serialize> IpcResponse` and the bytes leak. Always
-//! carry it with `Response::new(bytes)` and send it raw.
-//!
-//! ## ★Concurrency/lock discipline (ADR-0006, load-bearing)★
-//! It is `std::sync::Mutex` (not tokio Mutex). The connection task (tokio) does registry lock→send on the hot path, and
-//! there is **no** `.await` while the lock is held (`Channel::send` is synchronous). The lock is taken briefly and released at once. With the registry lock
-//! being the only one, the lock-order-inversion deadlock surface is 0.
-//!
-//! ## ★Recover from poison — at all three places that hold the lock (ADR-0231)★
-//! Frame pass-through ([`send_to_windows`]) · window registration ([`register_window`]) · window cleanup ([`unregister_window`]) all
-//! recover the lock with `PoisonError::into_inner`. This registry is a label → Channel handle map, so there is no half state a panic in the middle
-//! could leave. ★Skipping stalls it★ — a view holds behind a seq hole with no deadline, so if the pass-through place drops a frame, that view stalls,
-//! and poison does not clear, so even after re-attaching it skips again from the next frame. If only the pass-through place recovers, frames flow,
-//! but a new window · reopened window cannot register and never receives output (poison stands on the lock, so it stands at
-//! all three). Precedent = the same handling in `view_commands.rs`.
-//! When recovering, it leaves one warn and clears the poison mark ([`lock_registry`]) — the pass-through place is called per frame, so
-//! if the mark were left, the same warning would repeat every frame.
+//! window Channel registry + stateless pass-through send helper (ADR-0046 — mirror buffer removed, view-direct replay). src-tauri no longer mirrors the daemon ring.
+//! Raw bytes (spike §7): output frames ride `Channel<tauri::ipc::Response>` — `Channel<Vec<u8>>`/`Channel<&[u8]>` get serialized as a JSON array by the blanket `impl<T:Serialize> IpcResponse` and the bytes leak. Always carry `Response::new(bytes)` and send raw.
+//! Concurrency/lock discipline (ADR-0006, load-bearing): `std::sync::Mutex` (not tokio's). The connection task does registry lock→send on the hot path with no `.await` while holding the lock (`Channel::send` is synchronous); the lock is taken briefly and released at once. The registry lock being the only one, the lock-order-inversion deadlock surface is 0.
+//! Recover from poison at all three lock-holding places (ADR-0231): frame pass-through ([`send_to_windows`]) · window registration ([`register_window`]) · window cleanup ([`unregister_window`]) all recover with `PoisonError::into_inner`. The registry is a label → Channel handle map, so a panic leaves no half state. Skipping stalls: a view holds behind a seq hole with no deadline, so a dropped frame at the pass-through stalls it, and poison does not clear, so even re-attached it skips again from the next frame. Recovering only at the pass-through lets frames flow but a new · reopened window cannot register and never receives output (poison stands on the lock at all three). Precedent: the same handling in `view_commands.rs`. On recovery it leaves one warn and clears the poison mark ([`lock_registry`]) — the pass-through is called per frame, so a left mark would repeat the warning every frame.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::output_router::WindowLabel;
 
-/// At window mount the `subscribe_output` invoke inserts, and when a dead window (send Err) is detected the connection task
-/// removes it. Shared by both the connection task and the Tauri command through `Arc` → app-level manage.
+/// `subscribe_output` inserts at window mount, and the connection task removes a dead window (send Err). Shared by the connection task and the Tauri command through `Arc` → app-level manage.
 pub type WindowChannelRegistry =
     Arc<Mutex<HashMap<WindowLabel, tauri::ipc::Channel<tauri::ipc::Response>>>>;
 
 type RegistryMap = HashMap<WindowLabel, tauri::ipc::Channel<tauri::ipc::Response>>;
 
-// ADR-0231: recover the poison but warn once per poisoning — `clear_poison` keeps the next call from
-//   repeating the same warning (module header). If two threads see the poison at the same moment there may be two warnings — harmless.
-// ADR-0275: do not use the base `sync` — that one does not clear the poison. This own helper that clears the poison is the contract of ADR-0231.
+// ADR-0231: recover the poison but warn once per poisoning — `clear_poison` keeps the next call from repeating the warning (module header); two threads seeing the poison at once may warn twice — harmless.
+// ADR-0275: do not use the base `sync` — it does not clear the poison; this own helper clearing it is the ADR-0231 contract.
 fn lock_registry(registry: &WindowChannelRegistry) -> MutexGuard<'_, RegistryMap> {
     registry.lock().unwrap_or_else(|e| {
-        tracing::warn!("출력 Channel 명부 락이 poisoned — 되찾아 계속 쓴다");
+        tracing::warn!("output Channel registry lock is poisoned — recovering it and continuing");
         registry.clear_poison();
         e.into_inner()
     })
 }
 
-/// ★Stateless pass-through fan-out (ADR-0046)★. Sends `bytes` (the original binary frame or a replay boundary marker) as they are to the window Channels among `labels`
-/// (= `router.targets(agent)`) that are **actually registered in the registry**. No mirror/cursor
-/// — it passes through exactly what the daemon sent, and all progress/dedup decisions are made per webview view (the only home of progress state = the view).
-///
-/// ## ★ADR-0006 lock discipline (load-bearing)★
-/// Take the registry lock once and (a) `Channel::send` to each registered label (synchronous — `.await` 0) (b) remove, inside the same lock, the
-/// dead labels whose send is Err (send to a destroyed webview is Err — spike §7 D6, never unwrap).
-/// An unregistered label (a window not yet mounted) is silently skipped — when that window mounts, its own view re-requests the replay (view-driven).
-///
-/// ## ★bytes ownership★
-/// `Response::new` needs an owned `Vec<u8>`. A frame is fanned out to several windows, so it is
-/// copied with `to_vec()` per window (usually one window, so one copy). Common path for marker/frame — a marker also flows through **this same
-/// function** as a binary frame to preserve Channel order (no going through app.emit — order collapse, ADR-0046).
+/// Stateless pass-through fan-out (ADR-0046): sends `bytes` (the original binary frame or a replay boundary marker) as they are to the window Channels among `labels` (= `router.targets(agent)`) that are actually registered. No mirror/cursor — it passes through exactly what the daemon sent, and all progress/dedup decisions are per webview view (the only home of progress state).
+/// ADR-0006 lock discipline (load-bearing): take the registry lock once and (a) `Channel::send` to each registered label (synchronous — 0 `.await`) (b) remove inside the same lock the dead labels whose send is Err (a send to a destroyed webview is Err — spike §7 D6, never unwrap). An unregistered label (a window not yet mounted) is silently skipped — when it mounts its own view re-requests the replay (view-driven).
+/// bytes ownership: `Response::new` needs an owned `Vec<u8>`, and a frame fans out to several windows, so it is copied with `to_vec()` per window (usually one). A marker also flows through this same function as a binary frame to preserve Channel order (going through app.emit would collapse order, ADR-0046).
 pub fn send_to_windows(registry: &WindowChannelRegistry, labels: &[WindowLabel], bytes: &[u8]) {
     if labels.is_empty() {
         return;
@@ -82,12 +50,11 @@ pub fn send_to_windows(registry: &WindowChannelRegistry, labels: &[WindowLabel],
         }
     }
     if !dead.is_empty() {
-        tracing::debug!(dead = ?dead, "dead window Channel 제거");
+        tracing::debug!(dead = ?dead, "removed dead window Channels");
     }
 }
 
-/// Registers a window's output Channel. Re-registering the same label (window reload) overwrites (the old Channel is dropped — harmless since it is an already dead
-/// webview). Even if poisoned, it recovers and registers (module header — ADR-0231).
+/// Registers a window's output Channel. Re-registering the same label (window reload) overwrites (the old Channel is dropped — its webview is already dead). Even if poisoned it recovers and registers (module header — ADR-0231).
 pub fn register_window(
     registry: &WindowChannelRegistry,
     label: WindowLabel,
@@ -96,15 +63,14 @@ pub fn register_window(
     lock_registry(registry).insert(label, channel);
 }
 
-/// Removes a window's output Channel (to prevent leaks — so no dead webview Channel remains). Even if poisoned, it recovers and removes (module
-/// header — ADR-0231).
+/// Removes a window's output Channel (no dead webview Channel remains — leak prevention). Even if poisoned it recovers and removes (module header — ADR-0231).
 pub fn unregister_window(registry: &WindowChannelRegistry, label: &str) {
     lock_registry(registry).remove(label);
 }
 
 #[cfg(test)]
 mod tests {
-    //! Poison item of the TRD §7-1 「셸 중계」 row — the three places that hold the lock recover the poison and do their job.
+    // Poison item of the TRD §7-1 「shell relay」 row — the three lock-holding places recover the poison and do their job.
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -130,10 +96,10 @@ mod tests {
         let r = registry.clone();
         let _ = std::thread::spawn(move || {
             let _guard = r.lock().unwrap();
-            panic!("registry 락을 쥔 채 panic — 락을 poison 시킨다");
+            panic!("panic while holding the registry lock — poisons the lock");
         })
         .join();
-        assert!(registry.is_poisoned(), "전제: 락이 poisoned");
+        assert!(registry.is_poisoned(), "precondition: the lock is poisoned");
         registry
     }
 
@@ -146,13 +112,13 @@ mod tests {
         register_window(&registry, main.clone(), channel);
         assert!(
             !registry.is_poisoned(),
-            "되찾은 뒤 poison 표시를 지워 다음 호출이 경고를 되풀이하지 않는다"
+            "after recovering, the poison mark is cleared so the next call does not repeat the warning"
         );
         send_to_windows(&registry, std::slice::from_ref(&main), b"frame");
         assert_eq!(
             got.lock().unwrap().as_slice(),
             &[b"frame".to_vec()],
-            "poison 이어도 등록된 창으로 프레임이 나간다"
+            "even when poisoned, frames go out to the registered window"
         );
 
         unregister_window(&registry, &main);
@@ -160,7 +126,7 @@ mod tests {
         assert_eq!(
             got.lock().unwrap().len(),
             1,
-            "poison 이어도 정리가 Channel 을 뺐다"
+            "even when poisoned, cleanup removed the Channel"
         );
     }
 }

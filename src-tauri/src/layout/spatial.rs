@@ -1,25 +1,10 @@
-//! Slot spatial target derivation (ADR-0068) — pure logic that yields direction · neighbor · order from the layout tree.
-//!
-//! ★Zero Tauri dependency · zero pixels★: it does **not know** measured rects · `getBoundingClientRect` · window size. The basis for turning a spatial
-//! instruction such as "bottom-right" or "right of this slot" into a slot id is computed from the logical drawing (tree structure) alone → a standalone headless
-//! test is possible (ADR-0012 isolation).
-//!
-//! ## Computation outline
-//! 1. The normalized rectangle of a leaf slot takes the boundary form of `geometry::compute` as it is — that is the only
-//!    source of geometry inside the shell (ADR-0227).
-//! 2. From those rectangles it derives **edge adjacency (neighbor)** and **order (ordinal)**.
-//!    - neighbor: two slots are adjacent if they touch on the relevant axis (boundary coordinates are exactly equal) and the overlap of intervals on the orthogonal axis is positive.
-//!    - ordinal: GLOBAL lexicographic sort by the **center point** `(center_y, center_x)` of each leaf rect (top→bottom,
-//!      ties left→right), 0-based. ★Not tree pre-order but a global center sort★ — numbered by position on screen, not by tree structure.
-//!      Comparison is the `f64::total_cmp` total order, and if even the center points are equal, tree pre-order is
-//!      kept (stable sort) → deterministic.
-//!      But row/column cohesion is not guaranteed: in an asymmetric split, a full-height column can slip in between the
-//!      slots of the left column (since order is assigned by center_y alone).
-//!    - A zero-size leaf (`x0 >= x1` or `y0 >= y1` — arises only in a tree deep enough for the f64 boundary to collapse) neither
-//!      has nor becomes a neighbor and is also dropped from corner token candidates. Order is assigned by the same rule, so it is not dropped from the list.
-//!
-//! ★The public surface is only `neighbors`+`ordinal`★ (ADR-0068): the rectangle is just an input to this computation and this module does not
-//! export it.
+//! Slot spatial target derivation (ADR-0068) — pure logic yielding direction · neighbor · order from the layout tree. Zero Tauri dependency · zero pixels: it knows no measured rects · `getBoundingClientRect` · window size; the basis for turning a spatial instruction such as "bottom-right" or "right of this slot" into a slot id comes from the logical drawing (tree structure) alone, so a standalone headless test is possible (ADR-0012).
+//! 1. The normalized rectangle of a leaf slot is `geometry::compute`'s boundary form as is — the only geometry source inside the shell (ADR-0227).
+//! 2. From those rectangles: edge adjacency (neighbor) and order (ordinal).
+//!    - neighbor: two slots are adjacent if they touch on the relevant axis (boundary coordinates exactly equal) and the interval overlap on the orthogonal axis is positive.
+//!    - ordinal: GLOBAL lexicographic sort by each leaf rect's center `(center_y, center_x)` (top→bottom, ties left→right), 0-based — not tree pre-order but a global center sort: numbered by position on screen. Compared by `f64::total_cmp`; equal centers keep tree pre-order (stable sort) → deterministic. Row/column cohesion is not guaranteed: in an asymmetric split a full-height column can slip between the slots of the left column (order is by center_y alone).
+//!    - A zero-size leaf (`x0 >= x1` or `y0 >= y1` — only in a tree deep enough for the f64 boundary to collapse) neither has nor becomes a neighbor and is dropped from corner token candidates; ordering uses the same rule, so it stays in the list.
+//! The public surface is only `neighbors`+`ordinal` (ADR-0068): the rectangle is just this computation's input and is not exported.
 
 use uuid::Uuid;
 
@@ -61,8 +46,7 @@ pub struct SlotSpatial {
     pub ordinal: u32,
 }
 
-/// If there are several candidates (e.g. two slots stacked vertically on the right), pick the one with the largest orthogonal overlap
-/// (one representative neighbor — the natural target of a directional move).
+/// If several candidates exist (e.g. two slots stacked vertically on the right), pick the one with the largest orthogonal overlap (one representative neighbor — the natural target of a directional move).
 fn neighbor_in_dir(rects: &[SlotRect], idx: usize, dir: Dir) -> Option<Uuid> {
     let me = &rects[idx];
     if !has_area(me) {
@@ -73,15 +57,8 @@ fn neighbor_in_dir(rects: &[SlotRect], idx: usize, dir: Dir) -> Option<Uuid> {
         if j == idx || !has_area(other) {
             continue;
         }
-        // ADR-0227: boundaries are compared exactly (`==`) — the boundary of two touching areas is always the `at` of one
-        // split and geometry copies that value to both descendants, so true adjacency is bit-for-bit equal regardless of area size.
-        // Never go back to an absolute tolerance — if an area thinner than the tolerance appears, the area beyond it is
-        // misjudged as adjacent and the thin area is skipped, and an orthogonal overlap with the thin area that falls under the threshold makes the neighbor disappear (it is silently
-        // wrong, without a panic).
-        // An area that only touches at a corner can also enter the candidates with a few ulp overlap (larger the deeper the path) if its two endpoints are computed separately
-        // by different split paths. The opposite side of my edge is fully covered by leaves, so there is a true neighbor with far
-        // larger overlap, which pushes it out under the max-overlap rule below — but if my own area is about to collapse to a few ulp
-        // thickness, this margin vanishes and ties or reversals can occur.
+        // ADR-0227: boundaries are compared exactly (`==`) — the boundary of two touching areas is always one split's `at`, which geometry copies to both descendants, so true adjacency is bit-for-bit equal at any area size. Never go back to an absolute tolerance: an area thinner than it would make the area beyond it look adjacent and skip the thin one, and an orthogonal overlap with the thin area under the threshold would make the neighbor vanish (silently wrong, no panic).
+        // An area touching only at a corner can enter the candidates with a few-ulp overlap (larger the deeper the path) when its two endpoints are computed separately by different split paths. The opposite side of my edge is fully covered by leaves, so a true neighbor with far larger overlap pushes it out under the max-overlap rule below — but if my own area is about to collapse to a few ulp thickness this margin vanishes and ties or reversals can occur.
         let (adjacent, overlap) = match dir {
             Dir::Right => (
                 me.x1 == other.x0,
@@ -110,7 +87,6 @@ fn neighbor_in_dir(rects: &[SlotRect], idx: usize, dir: Dir) -> Option<Uuid> {
     best.map(|(id, _)| id)
 }
 
-/// Overlap length of two intervals (0 or less if apart or touching only at an endpoint — the caller's `> 0.0` filters it out).
 fn overlap_len(a0: f64, a1: f64, b0: f64, b1: f64) -> f64 {
     a1.min(b1) - a0.max(b0)
 }
@@ -151,16 +127,13 @@ pub fn compute_spatial(node: &LayoutNode) -> Vec<SlotSpatial> {
         .collect()
 }
 
-/// Spatial/direction token — the symbolic surface by which an LLM/person passes an instruction such as "bottom-right" or "right of this slot" (ADR-0068).
-/// tmux-style edge tokens (4 corners) + directions relative to the focus slot (4).
+/// Spatial/direction token — the symbolic surface by which an LLM/person passes an instruction such as "bottom-right" or "right of this slot" (ADR-0068): tmux-style edge tokens (4 corners) + directions relative to the focus slot (4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpatialToken {
-    /// Corner (absolute) — the leaf slot in the whole tree closest to that corner.
     TopLeft,
     TopRight,
     BottomLeft,
     BottomRight,
-    /// Neighbor in a direction relative to the focus slot.
     Left,
     Right,
     Up,
@@ -168,7 +141,6 @@ pub enum SpatialToken {
 }
 
 impl SpatialToken {
-    /// Parse from a wire string (kebab). An unknown token is None (caller = Err).
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "top-left" | "topleft" => Some(Self::TopLeft),
@@ -183,7 +155,6 @@ impl SpatialToken {
         }
     }
 
-    /// Wire spelling (kebab) — the representative spelling that [`Self::parse`] accepts.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TopLeft => "top-left",
@@ -198,8 +169,7 @@ impl SpatialToken {
     }
 }
 
-/// ★Does the edge token pick "bottom-right" exactly (ADR-0068 acceptance criterion)★: minimize the distance to the matching corner coordinate of
-/// each slot rect — in an L-shape (one area on the left + two areas top and bottom on the right), bottom-right picks the lower right slot.
+/// The edge token picks "bottom-right" exactly (ADR-0068 acceptance criterion): minimize the distance to the matching corner coordinate of each slot rect — in an L-shape (one area on the left + two areas top and bottom on the right) bottom-right picks the lower right slot.
 pub fn resolve_spatial(
     node: &LayoutNode,
     focused: Option<Uuid>,
@@ -218,9 +188,7 @@ pub fn resolve_spatial(
     }
 }
 
-/// Pick the slot whose rect corner is closest to corner `(cx,cy)` (a corner of the unit square). Take the rect corner in that corner's direction as the
-/// representative point (e.g. bottom-right → the rect's (right,bottom)) and minimize the Euclidean distance to the corner. If distances are equal, the
-/// slot seen first (tree pre-order). A zero-size leaf is not a candidate (same rule as the neighbor exclusion).
+/// Pick the slot whose rect corner is closest to corner `(cx,cy)` (a corner of the unit square): the rect corner in that corner's direction is the representative point (bottom-right → the rect's (right,bottom)), minimizing Euclidean distance. Equal distances → the slot seen first (tree pre-order). A zero-size leaf is not a candidate (same rule as the neighbor exclusion).
 fn corner_slot(rects: &[SlotRect], cx: f64, cy: f64) -> Option<Uuid> {
     let mut best: Option<(Uuid, f64)> = None;
     for r in rects.iter().filter(|r| has_area(r)) {
@@ -235,7 +203,6 @@ fn corner_slot(rects: &[SlotRect], cx: f64, cy: f64) -> Option<Uuid> {
     best.map(|(id, _)| id)
 }
 
-/// Directional neighbor (shared edge) of the focused slot. None if focused is not in the tree or is None.
 fn relative_neighbor(rects: &[SlotRect], focused: Option<Uuid>, dir: Dir) -> Option<Uuid> {
     let fid = focused?;
     let idx = rects.iter().position(|r| r.slot_id == fid)?;
@@ -254,7 +221,9 @@ mod tests {
     }
 
     fn spatial_of(list: &[SlotSpatial], id: Uuid) -> &SlotSpatial {
-        list.iter().find(|s| s.slot_id == id).expect("슬롯 있어야")
+        list.iter()
+            .find(|s| s.slot_id == id)
+            .expect("the slot must exist")
     }
 
     // `split_in_tree` always splits at 0.5, so a tree whose ratio · shape is set directly is built with this helper.
@@ -284,7 +253,7 @@ mod tests {
             .slots
             .into_iter()
             .find(|s| s.slot_id == id(n))
-            .expect("슬롯 있어야")
+            .expect("the slot must exist")
     }
 
     // ── single slot ────────────────────────────────────────────────────────────
@@ -313,7 +282,7 @@ mod tests {
         assert_eq!(
             l.neighbors.right,
             Some(right),
-            "왼쪽 슬롯의 오른쪽 = 오른쪽 슬롯"
+            "right of the left slot = the right slot"
         );
         assert_eq!(l.neighbors.left, None);
         assert_eq!(l.neighbors.up, None);
@@ -321,7 +290,7 @@ mod tests {
         assert_eq!(
             r.neighbors.left,
             Some(left),
-            "오른쪽 슬롯의 왼쪽 = 왼쪽 슬롯"
+            "left of the right slot = the left slot"
         );
         assert_eq!(r.neighbors.right, None);
         assert_eq!(l.ordinal, 0);
@@ -339,10 +308,18 @@ mod tests {
 
         let t = spatial_of(&sp, top);
         let b = spatial_of(&sp, bottom);
-        assert_eq!(t.neighbors.down, Some(bottom), "위 슬롯의 아래 = 아래 슬롯");
+        assert_eq!(
+            t.neighbors.down,
+            Some(bottom),
+            "below the top slot = the bottom slot"
+        );
         assert_eq!(t.neighbors.up, None);
         assert_eq!(t.neighbors.left, None);
-        assert_eq!(b.neighbors.up, Some(top), "아래 슬롯의 위 = 위 슬롯");
+        assert_eq!(
+            b.neighbors.up,
+            Some(top),
+            "above the bottom slot = the top slot"
+        );
         assert_eq!(b.neighbors.down, None);
         assert_eq!(t.ordinal, 0);
         assert_eq!(b.ordinal, 1);
@@ -350,8 +327,7 @@ mod tests {
 
     // ── L-shape (one area on the left + two areas top and bottom on the right) — bottom-right acceptance criterion ────────────────
 
-    /// Tree: Split{LeftRight, a=Slot(left), b=Split{TopBottom, a=Slot(rt), b=Slot(rb)}}.
-    /// left = full height on the left, rt = top right, rb = bottom right.
+    /// Tree: Split{LeftRight, a=Slot(left), b=Split{TopBottom, a=Slot(rt), b=Slot(rb)}} — left = full height on the left, rt = top right, rb = bottom right.
     fn l_shape() -> (LayoutNode, Uuid, Uuid, Uuid) {
         let (mut node, left) = single();
         let rroot =
@@ -366,24 +342,32 @@ mod tests {
         let sp = compute_spatial(&node);
 
         let s_rb = spatial_of(&sp, rb);
-        assert_eq!(s_rb.neighbors.up, Some(rt), "우하단의 위 = 우상단");
+        assert_eq!(
+            s_rb.neighbors.up,
+            Some(rt),
+            "above bottom-right = top-right"
+        );
         assert_eq!(
             s_rb.neighbors.left,
             Some(left),
-            "우하단의 왼쪽 = 좌측(전체높이라 겹침)"
+            "left of bottom-right = left (full height, so it overlaps)"
         );
         assert_eq!(s_rb.neighbors.down, None);
         assert_eq!(s_rb.neighbors.right, None);
 
         let s_rt = spatial_of(&sp, rt);
-        assert_eq!(s_rt.neighbors.down, Some(rb), "우상단의 아래 = 우하단");
-        assert_eq!(s_rt.neighbors.left, Some(left), "우상단의 왼쪽 = 좌측");
+        assert_eq!(
+            s_rt.neighbors.down,
+            Some(rb),
+            "below top-right = bottom-right"
+        );
+        assert_eq!(s_rt.neighbors.left, Some(left), "left of top-right = left");
 
         // left (full left side): on the right both rt/rb are candidates → one of the larger overlap (both equal at 0.5). Only existence is asserted.
         let s_left = spatial_of(&sp, left);
         assert!(
             s_left.neighbors.right == Some(rt) || s_left.neighbors.right == Some(rb),
-            "좌측의 오른쪽은 우측 두 슬롯 중 하나"
+            "right of the left is one of the two right slots"
         );
         assert_eq!(s_left.neighbors.left, None);
     }
@@ -395,36 +379,34 @@ mod tests {
         assert_eq!(
             resolve_spatial(&node, None, SpatialToken::BottomRight),
             Some(rb),
-            "bottom-right → 우하단 슬롯"
+            "bottom-right → the bottom-right slot"
         );
         assert_eq!(
             resolve_spatial(&node, None, SpatialToken::TopRight),
             Some(rt),
-            "top-right → 우상단 슬롯"
+            "top-right → the top-right slot"
         );
         // top-left / bottom-left → left (full height, so the left is closest for both the top and bottom corners).
         assert_eq!(
             resolve_spatial(&node, None, SpatialToken::TopLeft),
             Some(left),
-            "top-left → 좌측 슬롯"
+            "top-left → the left slot"
         );
         assert_eq!(
             resolve_spatial(&node, None, SpatialToken::BottomLeft),
             Some(left),
-            "bottom-left → 좌측 슬롯"
+            "bottom-left → the left slot"
         );
     }
 
     #[test]
     fn l_shape_ordinal_reading_order() {
-        // ordinal = global lexicographic by center point (center_y first): left(center_y=0.5)·rt(0.25)·rb(0.75).
-        //   Sort = rt(0.25) → left(0.5) → rb(0.75). ★The full-height left column slips in between the right rt/rb★
-        //   — living proof that column cohesion is not guaranteed (the cohesion non-guarantee in the module header §Computation outline).
+        // ordinal = global lexicographic by center (center_y first): left(0.5) · rt(0.25) · rb(0.75), sorted rt → left → rb. The full-height left column slips between the right rt/rb — living proof that column cohesion is not guaranteed (module header).
         let (node, left, rt, rb) = l_shape();
         let sp = compute_spatial(&node);
-        assert_eq!(spatial_of(&sp, rt).ordinal, 0, "rt(위) 먼저");
+        assert_eq!(spatial_of(&sp, rt).ordinal, 0, "rt (top) first");
         assert_eq!(spatial_of(&sp, left).ordinal, 1);
-        assert_eq!(spatial_of(&sp, rb).ordinal, 2, "rb(아래) 마지막");
+        assert_eq!(spatial_of(&sp, rb).ordinal, 2, "rb (bottom) last");
     }
 
     // ── relative direction (from focus) ──────────────────────────────────────────
@@ -455,7 +437,7 @@ mod tests {
         assert_eq!(
             resolve_spatial(&node, Some(Uuid::new_v4()), SpatialToken::Left),
             None,
-            "트리에 없는 focused → None"
+            "a focused not in the tree → None"
         );
     }
 
@@ -463,9 +445,7 @@ mod tests {
 
     #[test]
     fn degenerate_ratio_produces_no_zero_area_leaf() {
-        // ★FIX-4 invariant check★: even with ratio=0.0 (extreme), geometry's ratio clamp (`[RATIO_MIN, RATIO_MAX]`) prevents a
-        // zero-area leaf. Without the clamp the a-side leaf would have width 0 and this assertion would break, and since a zero-size leaf drops out of
-        // neighbors, the neighbor assertion below would break too (this test passes only while the guard is alive — load-bearing).
+        // FIX-4 invariant check: even with ratio=0.0 (extreme), geometry's ratio clamp (`[RATIO_MIN, RATIO_MAX]`) prevents a zero-area leaf. Without it the a-side leaf would have width 0 and this assertion break, and since a zero-size leaf drops out of neighbors the neighbor assertion below would break too (load-bearing: passes only while the guard is alive).
         let (mut node, left) = single();
         let right =
             super::super::tree::split_in_tree(&mut node, left, SplitDir::LeftRight).unwrap();
@@ -473,27 +453,26 @@ mod tests {
         if let LayoutNode::Split { ratio, .. } = &mut node {
             *ratio = 0.0;
         } else {
-            panic!("split 후 루트는 Split 이어야");
+            panic!("after split the root must be Split");
         }
 
         for r in geometry::compute(&node).slots {
             assert!(
                 has_area(&r),
-                "leaf {:?} 는 비퇴화 면적이어야 ({r:?}) — ratio 클램프 가드",
+                "leaf {:?} must have a non-degenerate area ({r:?}) — ratio clamp guard",
                 r.slot_id
             );
         }
 
         let sp = compute_spatial(&node);
-        assert_eq!(sp.len(), 2, "두 슬롯 다 산출(패닉 없음)");
+        assert_eq!(sp.len(), 2, "both slots produced (no panic)");
         assert_eq!(spatial_of(&sp, left).neighbors.right, Some(right));
         assert_eq!(spatial_of(&sp, right).neighbors.left, Some(left));
     }
 
     // ── very thin leaf (exact adjacency — no absolute tolerance) ─────────────────────
 
-    /// Top half = a 0.1 LR chain of five levels (ancestor 100 + four levels inside), so the innermost area has width 1e-5, and that area is split
-    /// in half again (1·2). 3 = width 9e-5, 4·5·6·7 = areas growing wider to its right. Bottom half = one full-width area (8).
+    /// Top half = a 0.1 LR chain of five levels (ancestor 100 + four inside), so the innermost area has width 1e-5 and is split in half again (1·2). 3 = width 9e-5, 4·5·6·7 = areas growing wider to its right. Bottom half = one full-width area (8).
     fn thin_tree() -> LayoutNode {
         let lr = SplitDir::LeftRight;
         let chain = split(
@@ -529,7 +508,10 @@ mod tests {
         let tree = thin_tree();
         for n in [1, 2, 3] {
             let r = rect_of(&tree, n);
-            assert!(r.x1 - r.x0 < 1e-4, "잎 {n} 폭이 1e-4 아래여야 — {r:?}");
+            assert!(
+                r.x1 - r.x0 < 1e-4,
+                "the width of leaf {n} must be below 1e-4 — {r:?}"
+            );
         }
 
         let sp = compute_spatial(&tree);
@@ -552,7 +534,7 @@ mod tests {
                 left: some(1),
                 right: some(3),
             },
-            "얇은 칸 너머(3)로 건너뛰지 않고, 아래 칸과의 겹침(5e-6)도 잃지 않는다"
+            "does not jump past the thin area (3), and does not lose the overlap (5e-6) with the area below"
         );
         assert_eq!(
             nb(3),
@@ -564,7 +546,7 @@ mod tests {
             }
         );
         assert_eq!(nb(4).left, some(3));
-        assert_eq!(nb(8).up, some(7), "겹침 최대 = 가장 넓은 칸");
+        assert_eq!(nb(8).up, some(7), "largest overlap = the widest area");
 
         // The top row has the same center_y, so it is split by center_x alone — left→right even at a 1e-6 difference.
         let order: Vec<Uuid> = sp.iter().map(|s| s.slot_id).collect();
@@ -600,20 +582,19 @@ mod tests {
                 };
                 assert!(
                     !all.contains(&Some(diagonal)),
-                    "{root:?}: {:?} 의 대각선 {diagonal:?} 은 이웃이 아니다",
+                    "{root:?}: the diagonal {diagonal:?} of {:?} is not a neighbour",
                     s.slot_id
                 );
                 assert_eq!(
                     all.iter().filter(|x| x.is_some()).count(),
                     2,
-                    "{root:?}: 격자 칸마다 변을 맞댄 이웃은 정확히 둘"
+                    "{root:?}: each grid cell has exactly two neighbours sharing an edge"
                 );
             }
         }
     }
 
-    /// The left column splits horizontally at 0.65, and the right column at 0.3 + (1 − 0.3)·0.5 — the same height in decimal, but
-    /// computed separately, so the right boundary is 1 ulp lower. 1 = top left · 2 = bottom left · 3·4·5 = top·middle·bottom right.
+    /// The left column splits horizontally at 0.65 and the right column at 0.3 + (1 − 0.3)·0.5 — the same height in decimal but computed separately, so the right boundary is 1 ulp lower. 1 = top left · 2 = bottom left · 3·4·5 = top·middle·bottom right.
     fn ulp_tree() -> LayoutNode {
         split(
             100,
@@ -635,21 +616,23 @@ mod tests {
         let tree = ulp_tree();
         let (lt, lb, rb) = (rect_of(&tree, 1), rect_of(&tree, 2), rect_of(&tree, 5));
         // Measure the premise — without the 1 ulp mismatch this test measures nothing.
-        assert_eq!(lt.x1, rb.x0, "같은 루트 경계 — 인접 판정을 통과한다");
+        assert_eq!(
+            lt.x1, rb.x0,
+            "same root boundary — passes the adjacency decision"
+        );
         assert_eq!(
             lt.y1.to_bits() - rb.y0.to_bits(),
             1,
-            "5 의 위 경계가 1 의 아래 경계보다 정확히 1 ulp 낮다 — 모서리 접촉이 겹침 양수로 보인다"
+            "the top boundary of 5 is exactly 1 ulp lower than the bottom boundary of 1 — a corner touch looks like a positive overlap"
         );
         assert!(rb.y0 < lt.y1 && lb.y1 > rb.y0);
 
         let sp = compute_spatial(&tree);
-        // The left candidates of 5 in pre-order are 1 (overlap 1 ulp, false) first and 2 (true) later — if the rule were to
-        // pick the candidate seen first, 1 would be picked.
+        // The left candidates of 5 in pre-order are 1 (overlap 1 ulp, false) first and 2 (true) later — a "pick the first seen" rule would pick 1.
         assert_eq!(
             spatial_of(&sp, id(5)).neighbors.left,
             Some(id(2)),
-            "겹침 최대 규칙 — 1 ulp 후보가 아니라 참 이웃"
+            "largest-overlap rule — the true neighbour, not the 1 ulp candidate"
         );
         // From 1's side too, 5 is only a 1 ulp candidate — the right neighbor is 4, which has the largest overlap.
         assert_eq!(spatial_of(&sp, id(1)).neighbors.right, Some(id(4)));
@@ -658,8 +641,7 @@ mod tests {
 
     // ── zero-size leaf (value planted directly in the tree — defense) ────────────────
 
-    /// An LR chain that always splits the b side at 0.9 — at the 17th level the boundary sticks to 1.0 by rounding and the last b leaf (18) gets width
-    /// exactly 0. Leaves = 1..=17 (a of each level) + 18.
+    /// An LR chain always splitting the b side at 0.9 — at the 17th level the boundary sticks to 1.0 by rounding and the last b leaf (18) gets width exactly 0. Leaves = 1..=17 (a of each level) + 18.
     fn collapsed_chain() -> LayoutNode {
         const DEPTH: u128 = 17;
         let mut node = slot(DEPTH + 1);
@@ -674,23 +656,27 @@ mod tests {
         let tree = collapsed_chain();
         let g = geometry::compute(&tree);
         let z = rect_of(&tree, 18);
-        assert_eq!(z.x0, z.x1, "18 은 폭 0 이어야 — {z:?}");
+        assert_eq!(z.x0, z.x1, "18 must have width 0 — {z:?}");
         assert_eq!(
             g.slots.iter().filter(|r| !has_area(r)).count(),
             1,
-            "면적 0 잎은 18 하나뿐"
+            "18 is the only zero-area leaf"
         );
         // 17 and 18 share boundary 1.0 exactly — without the skipping they would be neighbors.
         assert_eq!(rect_of(&tree, 17).x1, z.x0);
 
         let sp = compute_spatial(&tree);
-        assert_eq!(sp.len(), 18, "면적 0 잎도 명단에 있다(패닉 없음)");
+        assert_eq!(
+            sp.len(),
+            18,
+            "a zero-area leaf is in the list too (no panic)"
+        );
         assert_eq!(spatial_of(&sp, id(18)).neighbors, Neighbors::default_none());
         for s in &sp {
             let n = s.neighbors;
             assert!(
                 ![n.up, n.down, n.left, n.right].contains(&Some(id(18))),
-                "{:?} 의 이웃에 면적 0 잎이 들면 안 된다",
+                "a zero-area leaf must not be a neighbour of {:?}",
                 s.slot_id
             );
         }
@@ -706,14 +692,16 @@ mod tests {
         let order: Vec<Uuid> = sp.iter().map(|s| s.slot_id).collect();
         assert_eq!(order, (1..=18).map(id).collect::<Vec<_>>());
 
-        assert_eq!(compute_spatial(&tree), sp, "두 번 계산해 같은 결과");
+        assert_eq!(
+            compute_spatial(&tree),
+            sp,
+            "computing twice gives the same result"
+        );
     }
 
     #[test]
     fn corner_token_skips_zero_area_leaf() {
-        // A corner token picks the area seen first in pre-order on a distance tie, so for a zero-size leaf to take a corner it must be
-        // first in pre-order — the a area at the origin side. The origin-side boundary does not stick by rounding and becomes 0 only by underflow,
-        // so a 0.1 LR chain of 324 levels is stacked. z(1000) = innermost a leaf · k = b leaf of the k-th level.
+        // A corner token picks the area seen first in pre-order on a distance tie, so for a zero-size leaf to take a corner it must be first in pre-order — the a area at the origin side. The origin-side boundary does not stick by rounding but becomes 0 only by underflow, so a 0.1 LR chain of 324 levels is stacked. z(1000) = innermost a leaf · k = b leaf of the k-th level.
         const DEPTH: u128 = 324;
         let lr = SplitDir::LeftRight;
         let mut node = split(10_000 + DEPTH, lr, 0.1, slot(1000), slot(DEPTH));
@@ -723,19 +711,23 @@ mod tests {
 
         let g = geometry::compute(&node);
         let z = rect_of(&node, 1000);
-        assert_eq!((z.x0, z.x1), (0.0, 0.0), "z 는 원점에서 폭 0 이어야");
-        assert_eq!(g.slots[0].slot_id, id(1000), "z 가 전위 순 맨 앞");
+        assert_eq!(
+            (z.x0, z.x1),
+            (0.0, 0.0),
+            "z must have width 0 at the origin"
+        );
+        assert_eq!(g.slots[0].slot_id, id(1000), "z is first in preorder");
         assert_eq!(
             g.slots.iter().filter(|r| !has_area(r)).count(),
             1,
-            "면적 0 잎은 z 하나뿐"
+            "z is the only zero-area leaf"
         );
 
         for token in [SpatialToken::TopLeft, SpatialToken::BottomLeft] {
             assert_eq!(
                 resolve_spatial(&node, None, token),
                 Some(id(DEPTH)),
-                "{token:?} → z 를 건너뛴 다음 칸"
+                "{token:?} → the next area, skipping z"
             );
         }
         assert_eq!(
@@ -750,9 +742,13 @@ mod tests {
             Neighbors::default_none()
         );
         let inner = spatial_of(&sp, id(DEPTH)).neighbors;
-        assert_eq!(inner.left, None, "z 는 누구의 이웃도 아니다");
+        assert_eq!(inner.left, None, "z is nobody's neighbour");
         assert_eq!(inner.right, Some(id(DEPTH - 1)));
-        assert_eq!(compute_spatial(&node), sp, "두 번 계산해 같은 결과");
+        assert_eq!(
+            compute_spatial(&node),
+            sp,
+            "computing twice gives the same result"
+        );
     }
 
     // ── determinism ──────────────────────────────────────────────────────────────
@@ -768,13 +764,13 @@ mod tests {
         );
         for tree in [thin_tree(), ulp_tree(), collapsed_chain(), nan] {
             let first = compute_spatial(&tree);
-            assert_eq!(compute_spatial(&tree), first, "같은 트리 = 같은 결과");
+            assert_eq!(compute_spatial(&tree), first, "same tree = same result");
             let ordinals: Vec<u32> = first.iter().map(|s| s.ordinal).collect();
             assert_eq!(ordinals, (0..first.len() as u32).collect::<Vec<_>>());
             assert_eq!(
                 first.len(),
                 geometry::compute(&tree).slots.len(),
-                "모든 잎이 명단에"
+                "every leaf is in the list"
             );
         }
     }

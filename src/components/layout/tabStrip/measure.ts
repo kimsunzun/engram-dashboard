@@ -1,7 +1,5 @@
-// TRD S21-slot-docking §4-1 `measure.ts`: the tab bar's single DOM measuring — tab bar row rectangle · width the heads can use · `+` width (+ the base of the tab bar zone
-//   computed from it — `stripZoneArea`).
-//   ★Heads are not measured★ — tab bounds are the accumulation of `layout.ts` widths (ideal bounds): during a drag heads are drawn moved by stepping aside · the dragged tab x,
-//   so the measured head differs from the ideal position.
+// TRD S21-slot-docking §4-1 `measure.ts`: the tab bar's single DOM measuring — tab bar row rectangle · width the heads can use · `+` width (+ the tab bar zone base computed from it — `stripZoneArea`).
+// ★Heads are not measured★ — tab bounds accumulate `layout.ts` widths (ideal bounds); during a drag heads are drawn moved (stepping aside · dragged tab x), so a measured head differs from the ideal position.
 
 import type { RectCss } from '../dock/overlayTypes'
 import { tabStripLayout } from './layout'
@@ -47,13 +45,10 @@ export function tabsEnd(B: StripBounds): number {
 }
 
 /**
- * Base rectangle of the tab bar zone (viewport CSS px — `bands.stripZone` widens it above and below). Horizontal = left of the first tab ~ right end of `+` (if there is no `+`,
- * the right end of the last visible head · if there is no visible head, `+` only) — cut at the right end of the tab bar row (beyond it the tab bar clips horizontally so it is not
- * visible). To its right (empty space · empty draggable area · number badge · window buttons) is not the zone — dropping gives a new window (its own tab is detached).
- * Vertical = from the top to the bottom of `title` (the title row holding the tab bar — including the top margin) if present · otherwise the tab bar row.
+ * Base rectangle of the tab bar zone (viewport CSS px — `bands.stripZone` widens it above and below). Horizontal = first tab left ~ `+` right end (no `+` → right end of the last visible head; no visible head → `+` only), cut at the tab bar row's right end (beyond it the tab bar clips). To its right (empty space · empty draggable area · number badge · window buttons) is not the zone — dropping gives a new window (its own tab is detached).
+ * Vertical = top to bottom of `title` (the title row holding the tab bar, top margin included) if present, otherwise the tab bar row.
  */
-// User decision 2026-10-26 (T-66) — only where tabs are (first tab ~ `+`) is the tab bar zone. Its own tab too, past `+`, is outside the zone (detached) · the top end of the canvas
-//   under the right of `+` is the outer top band.
+// T-66: only where tabs are (first tab ~ `+`) is the tab bar zone; its own tab too, past `+`, is outside (detached), and the canvas top under the right of `+` is the outer top band.
 // ADR-0303 — Chrome-style title bar
 export function stripZoneArea(
   m: StripMeasure,

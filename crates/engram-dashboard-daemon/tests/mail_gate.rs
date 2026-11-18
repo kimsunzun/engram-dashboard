@@ -1,11 +1,8 @@
-//! ADR-0133 결정 3 통합 테스트 — **자격증명으로 우편을 거절하는 게이트**.
+//! ADR-0133 decision 3 integration test — the gate that refuses mail by credential.
 //!
-//! ★여기가 유일한 강제 지점이다★: 에이전트 쪽에는 우편을 막는 것이 하나도 없다 — CLI 는 말이 되는
-//!   우편 호출을 그대로 보낸다. 이 테스트는 HTTP 로 직접 때리므로 그 CLI 조차 거치지 않는 호출자이고,
-//!   그런데도 거절돼야 한다는 것이 이 파일의 요점이다.
+//! ★This is the only enforcement point★: nothing on the agent side blocks mail — the CLI sends a sensible mail call as is. This test hits HTTP directly, a caller that bypasses the CLI, and it must still be refused.
 //!
-//! ★claude 불요·결정적★: 실 에이전트를 띄우지 않는다. 우편 라우트는 messaging 슬롯을 비워 둬 **핸들러가
-//!   503 을 내게** 한다 — 그 503 이 곧 "미들웨어를 통과했다" 는 증거다(거절은 200 + 반려 봉투라 구별된다).
+//! ★No claude needed · deterministic★: no real agent is launched. The mail routes leave the messaging slot empty so the handler gives 503 — that 503 proves "it passed the middleware" (a refusal is 200 + a bounce envelope, so they are distinguishable).
 
 use std::sync::{Arc, Mutex};
 
@@ -29,9 +26,7 @@ use engram_dashboard_daemon::control::mcp_server::{
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
 
-/// 데몬이 우편을 거절할 때 싣는 코드. 데몬 소스의 상수는 crate-private 이라(미들웨어 내부 구현) 여기선
-/// wire 값으로 적는다 — 그래서 이 문자열이 바뀌면 이 테스트가 빨개진다(그게 의도다: 코드 문자열은 CLI 가
-/// 읽는 **wire 계약**이다).
+/// The code the daemon carries when it refuses mail. The daemon constant is crate-private, so it is written here as the wire value — a change to the string turns this test red on purpose (the code string is a wire contract the CLI reads).
 const MAIL_NOT_ALLOWED: &str = "MAIL_NOT_ALLOWED";
 
 struct NoopSink;
@@ -56,19 +51,16 @@ impl ProfileStore for MemProfileStore {
 
 struct Fixture {
     base: String,
-    /// MCP 가능 스폰이 받는 자격증명(우편 거절 대상).
+    /// The credential an MCP-capable spawn receives (mail refused).
     mcp_token: String,
-    /// 비-MCP 스폰이 받는 자격증명(우편 허용).
+    /// The credential a non-MCP spawn receives (mail allowed).
     cli_token: String,
-    /// 서버가 실제로 읽는 **그 한 부** — 중계될 이름을 이 핸들로 심는다.
+    /// The one copy the server actually reads — names to be relayed are planted through this handle.
     bus: CommandBus,
-    /// ★들고 있어야 한다★ — 떨어뜨리면 수거기가 나가는 길에 자리 표를 비우고 **닫아**
-    /// (`CommandDeliveries::drain`) 그 뒤의 모든 중계가 「종료 중」으로 반려된다. 이 파일이 오랫동안 그
-    /// 상태였고 초록이었던 이유는 여기 테스트가 **데몬 자기 이름만** 불러 자리 표를 아예 안 거쳐서다 —
-    /// 그래서 아래 `a_relayed_name_still_reaches_its_owner_through_this_fixture` 가 함께 있어야 한다.
+    /// ★Must be held★ — if dropped, the reaper empties and closes the seat table (`CommandDeliveries::drain`) and every later relay is bounced as 「shutting down」. This file was green in that state because its tests called only the daemon's own names and never went through the seat table — hence `a_relayed_name_still_reaches_its_owner_through_this_fixture` below.
     _relay_sweeper: BusSweeper,
     _handle: McpServerHandle,
-    /// 서버에 주입한 help 본문 폴더([`KNOWN_HELP`]) — 픽스처가 끝나면 지운다.
+    /// The help body folder injected into the server ([`KNOWN_HELP`]) — deleted when the fixture ends.
     help_dir: std::path::PathBuf,
 }
 
@@ -78,30 +70,27 @@ impl Drop for Fixture {
     }
 }
 
-/// 픽스처가 서버에 주입하는 help 본문 — 구획 다섯이 다 있어 원천이 받아들인다. 머리글은 첫 구획 앞이라
-/// 버려진다.
+/// The help body the fixture injects — all five sections, so the source accepts it (the header before the first section is discarded).
 ///
-/// ★저장소 본문 파일을 쓰지 않는다★: 화면 글이 바뀔 때마다 이 파일의 기대값이 따라 바뀌면 게이트 시험이
-///   글 편집에 매인다. 알려진 본문이면 「어느 자격증명이든 이 화면을 글자 그대로 받는다」를 바로 단언할 수
-///   있다.
-const KNOWN_HELP: &str = "# 시험용 머리글 — 버려진다\n\
-## root\n{tool} 목차 화면\n\
-## mail\n{tool} mail 화면\n\
-## agent\n{tool} agent 화면\n\
-## window\n{tool} window 화면\n\
-## settings\n{tool} settings 화면\n";
+/// ★The repository body file is not used★: expected values would change with every screen-text edit. With a known body, 「whichever credential, it gets this screen verbatim」 can be asserted directly.
+const KNOWN_HELP: &str = "# test header — discarded\n\
+## root\n{tool} index screen\n\
+## mail\n{tool} mail screen\n\
+## agent\n{tool} agent screen\n\
+## window\n{tool} window screen\n\
+## settings\n{tool} settings screen\n";
 
-/// [`KNOWN_HELP`] 를 릴리스 모양(`<폴더>\prompts\engram-help.md`)으로 둔 폴더.
+/// A folder with [`KNOWN_HELP`] in the release shape (`<folder>\prompts\engram-help.md`).
 fn known_help_dir(tag: &str) -> std::path::PathBuf {
     let dir =
         std::env::temp_dir().join(format!("engram-mail-gate-help-{tag}-{}", AgentId::new_v4()));
     let prompts = dir.join("prompts");
-    std::fs::create_dir_all(&prompts).expect("prompts 폴더");
-    std::fs::write(prompts.join("engram-help.md"), KNOWN_HELP).expect("help 본문");
+    std::fs::create_dir_all(&prompts).expect("prompts folder");
+    std::fs::write(prompts.join("engram-help.md"), KNOWN_HELP).expect("help body");
     dir
 }
 
-/// 얹은 이름을 **실제로 답하는** 주인 — 대시보드가 창·탭·슬롯 명령에 대해 하는 그 일이다.
+/// The owner that actually answers the names it put up — the job the dashboard does for window · tab · slot commands.
 struct AnsweringSink(engram_dashboard_daemon::command_delivery::CommandDeliveries);
 
 impl engram_dashboard_daemon::conn_port::FrameSink for AnsweringSink {
@@ -115,9 +104,10 @@ impl engram_dashboard_daemon::conn_port::FrameSink for AnsweringSink {
         if let Ok(engram_dashboard_protocol::AgentEvent::CommandRequest { envelope }) =
             serde_json::from_str(&text)
         {
-            // 봉투 칸은 원문 JSON 이다(ADR-0272) — 받는 주인이 푼다.
+            // The envelope field is raw JSON (ADR-0272) — the receiving owner unpacks it.
             let envelope: engram_dashboard_command::CommandEnvelope =
-                serde_json::from_str(envelope.get()).expect("데몬이 싼 봉투는 풀린다");
+                serde_json::from_str(envelope.get())
+                    .expect("an envelope the daemon wrapped unpacks");
             self.0.complete(engram_dashboard_command::CommandReply::ok(
                 envelope.request_id,
                 serde_json::json!({ "ran": envelope.name }),
@@ -138,7 +128,7 @@ impl engram_dashboard_daemon::conn_port::FrameSink for AnsweringSink {
 }
 
 impl Fixture {
-    /// 붙어 있는 클라이언트가 자기 이름을 얹고 **답하는** 상태를 만든다.
+    /// An attached client puts up its own names and answers.
     fn register_answering_owner(
         &self,
         conn_id: engram_dashboard_daemon::conn_port::ConnId,
@@ -158,7 +148,7 @@ impl Fixture {
                     deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
-            .expect("붙어 있는 연결의 등록");
+            .expect("registration of the attached connection");
     }
 
     async fn post(&self, token: &str, route: &str, body: serde_json::Value) -> (u16, String) {
@@ -175,7 +165,7 @@ impl Fixture {
     }
 }
 
-/// 우편 거절인가 — 응답이 200 + 검증된 반려 봉투 + 그 코드일 때만.
+/// A mail refusal — only when the response is 200 + a validated bounce envelope + that code.
 fn is_mail_rejection(status: u16, body: &str) -> bool {
     if status != 200 {
         return false;
@@ -192,11 +182,8 @@ async fn fixture(tag: &str) -> Fixture {
     let manager_slot = Arc::new(ManagerSlot::new());
     let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
     let command_slot = Arc::new(CommandTableSlot::new());
-    // ★수거기를 **픽스처가** 들고 있어야 한다★ — 여기서 `_relay_sweeper` 로 묶어 두고 함수를 빠져나오면
-    //   그 자리에서 자리 표가 닫혀(`CommandDeliveries::drain`) 그 뒤 중계가 전부 「종료 중」이 된다.
-    // ★1단계 표를 **아래 슬롯과 같은 부**로 물린다 — `without_commands()` 로 되돌리지 말 것★: 그러면 판정부는
-    //   `agent.*` 를 자기 이름으로 알아보는데 버스는 모르는 조립이 되어(운영에는 없는 모양) 이 파일의 제어
-    //   라우트 단언이 운영과 다른 경로를 잰다. 운영 조립(`lib.rs`)과 같은 어댑터를 쓴다.
+    // ★The fixture must hold the reaper★ — tied to `_relay_sweeper` and returned from the function, the seat table closes at once (`CommandDeliveries::drain`) and every later relay becomes 「shutting down」.
+    // ★Attach the stage-1 table to the same copy as the slot below — do not revert to `without_commands()`★: the decider would recognize `agent.*` but the bus would not, so control-route assertions would measure a path absent in production. Same adapter as the production assembly (`lib.rs`).
     let (relay_bus, relay_sweeper) = CommandBus::new(
         engram_dashboard_daemon::command_roster::CommandRoster::new(),
         engram_dashboard_daemon::command_delivery::CommandDeliveries::new(),
@@ -210,11 +197,11 @@ async fn fixture(tag: &str) -> Fixture {
     let handle = start_mcp_server_with_help(
         registry.clone(),
         manager_slot.clone(),
-        // ★비워 둔다★: 우편 핸들러가 503 을 내야 "게이트를 통과했다" 가 거절과 구별된다.
+        // ★Left empty★: the mail handler gives 503 so "it passed the gate" is distinguishable from a refusal.
         Arc::new(MessagingSlot::new()),
         command_slot.clone(),
         relay_bus.clone(),
-        // ADR-0285: 운영 조립과 같은 주입판에 알려진 본문 — 시험 exe 의 자리와 무관하게 화면이 정해진다.
+        // ADR-0285: a known body on the same injection board as production — the screen is fixed wherever the test exe is.
         HelpSource::new(help_dir.clone()),
     )
     .await
@@ -234,8 +221,7 @@ async fn fixture(tag: &str) -> Fixture {
         control,
     ));
     manager_slot.set(manager.clone());
-    // ★제어 라우트는 표를 태운다(ADR-0155)★: 여기를 비워 두면 그 라우트가 503 을 내, 아래 「제어는 전원
-    //   개방」 단언이 게이트가 아니라 배선 부재를 재게 된다.
+    // ★The control route exercises the table (ADR-0155)★: left empty it gives 503 and the 「control is open to everyone」 assertion would measure missing wiring instead of the gate.
     command_slot.set(Arc::new(make_daemon_table(
         manager,
         broadcast_slot,
@@ -243,10 +229,7 @@ async fn fixture(tag: &str) -> Fixture {
         Arc::new(NoUsageLimits),
     )));
 
-    // ★판정을 손으로 심는다 — 그래서 이 픽스처만으로는 부족하다★: `provision` 이 판정을 잘못 파생해도
-    //   여기 심은 값은 그대로라 전부 초록으로 남는다. 그 축은 아래
-    //   `a_credential_minted_by_the_real_provision_path_is_refused_end_to_end` 가 운영 경로로 덮는다.
-    //   여기서 심는 이유는 라우트별 게이트 동작을 **판정 파생과 무관하게** 격리해 보기 위해서다.
+    // ★The decision is planted by hand — this fixture alone is not enough★: if `provision` derived it wrongly, the planted value would stay the same and everything stay green. That axis is covered on the production path by `a_credential_minted_by_the_real_provision_path_is_refused_end_to_end`. Planting here isolates per-route gate behavior from the derivation.
     let mcp_token = format!("mcp-cred-{tag}");
     let cli_token = format!("cli-cred-{tag}");
     registry.issue(AgentId::new_v4(), 0, mcp_token.clone(), false);
@@ -268,7 +251,7 @@ async fn fixture(tag: &str) -> Fixture {
     }
 }
 
-/// 우편 라우트 전량 — 발송과 조회가 같은 축으로 갈린다(한쪽만 막으면 다른 쪽으로 장부를 읽는다).
+/// All mail routes — send and query split on the same axis (block one side and the ledger is read through the other).
 const MAIL_ROUTES: [(&str, &str); 3] = [
     ("/control/send", r#"{"to":"bob","body":"hi"}"#),
     ("/control/messages", "{}"),
@@ -283,7 +266,7 @@ async fn an_mcp_capable_credential_is_refused_on_every_mail_route() {
         let (status, text) = f.post(&f.mcp_token, route, payload).await;
         assert!(
             is_mail_rejection(status, &text),
-            "{route} 는 이 자격증명으로 거절돼야: {status} {text}"
+            "{route} must be refused with this credential: {status} {text}"
         );
     }
 }
@@ -296,17 +279,16 @@ async fn a_non_mcp_credential_still_reaches_the_mail_handlers() {
         let (status, text) = f.post(&f.cli_token, route, payload).await;
         assert!(
             !is_mail_rejection(status, &text),
-            "{route} 는 이 자격증명으로 거절되면 안 된다: {status} {text}"
+            "{route} must not be refused with this credential: {status} {text}"
         );
         assert_eq!(
             status, 503,
-            "핸들러까지 갔다는 증거 — messaging 슬롯이 비어 503({route}): {text}"
+            "proof it reached the handler — the messaging slot is empty, so 503 ({route}): {text}"
         );
     }
 }
 
-/// ★제어는 전원 개방이다(ADR-0132 결정 5)★ — 우편이 막힌 자격증명도 제어 라우트에서는 정상 응답을 받는다.
-///   이 단언이 없으면 게이트를 라우터 전체로 넓히는 회귀가 조용히 통과한다.
+/// ★Control is open to everyone (ADR-0132 decision 5)★ — even a mail-blocked credential gets a normal response on the control routes. Without this, a regression widening the gate to the whole router passes silently.
 #[tokio::test]
 async fn the_same_credential_passes_on_the_agent_control_route() {
     let f = fixture("control").await;
@@ -314,19 +296,19 @@ async fn the_same_credential_passes_on_the_agent_control_route() {
         let (status, text) = f
             .post(token, "/control/agent", serde_json::json!({"verb":"list"}))
             .await;
-        assert_eq!(status, 200, "제어 라우트는 통과: {text}");
-        let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
-        assert!(v.get("agents").is_some(), "명부 응답이어야: {text}");
+        assert_eq!(status, 200, "the control route passes: {text}");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("JSON response");
+        assert!(
+            v.get("agents").is_some(),
+            "must be a roster response: {text}"
+        );
         assert!(!is_mail_rejection(status, &text));
     }
 }
 
-/// ★발견과 전체 이름 호출도 제어 평면이다★ — 편지를 못 쓰는 자격증명이 **무엇을 부를 수 있는지조차** 못
-///   배우면, 그 백엔드로 스폰된 에이전트는 자기 도구를 영영 모른다. 그것이 두 라우트를 「우편 아님」으로
-///   분류한 이유 전부이므로, 분류 함수의 단위 시험 말고 **실제 미들웨어를 태운** 단언이 있어야 한다.
+/// ★Discovery and full-name calls are control plane too★ — a credential that cannot write letters but cannot learn what it can call would leave an agent on that backend ignorant of its tools. That is why the two routes are classified 「not mail」; an assertion must exercise the real middleware, not just the classification function.
 ///
-/// ★"거절이 아니다" 만 보지 않는다★: 그것만 보면 라우트가 통째로 사라져도 초록이다 — 응답이 그 라우트의
-///   실제 계약(발견은 `commands` 배열, 호출은 명부 payload)인지까지 본다.
+/// ★Not only "not a refusal"★: that stays green if the route disappears — also check the response is that route's real contract (discovery = the `commands` array, a call = the roster payload).
 #[tokio::test]
 async fn the_same_credential_passes_on_the_catalog_routes() {
     let f = fixture("catalog").await;
@@ -334,14 +316,14 @@ async fn the_same_credential_passes_on_the_catalog_routes() {
         let (status, text) = f
             .post(token, "/control/commands", serde_json::json!({}))
             .await;
-        assert_eq!(status, 200, "발견은 통과: {text}");
+        assert_eq!(status, 200, "discovery passes: {text}");
         assert!(!is_mail_rejection(status, &text));
-        let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("JSON response");
         assert!(
             v.get("commands")
                 .and_then(|c| c.as_array())
                 .is_some_and(|c| !c.is_empty()),
-            "발견 목록이어야: {text}"
+            "must be the discovery list: {text}"
         );
 
         let (status, text) = f
@@ -351,18 +333,18 @@ async fn the_same_credential_passes_on_the_catalog_routes() {
                 serde_json::json!({"name":"agent.list"}),
             )
             .await;
-        assert_eq!(status, 200, "전체 이름 호출은 통과: {text}");
+        assert_eq!(status, 200, "the full-name call passes: {text}");
         assert!(!is_mail_rejection(status, &text));
-        let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
-        assert!(v.get("agents").is_some(), "명부 응답이어야: {text}");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("JSON response");
+        assert!(
+            v.get("agents").is_some(),
+            "must be a roster response: {text}"
+        );
     }
 }
 
-/// ★help 화면도 제어 평면이다★ — 우편이 막힌 자격증명도 우편 화면을 읽어야 그 채널의 계약을 배우고,
-///   화면은 누가 묻든 같다(ADR-0220 결정 4). 라우트를 우편으로 분류하는 회귀는 막힌 자격증명에게 거절을
-///   돌려주고, 호출자로 화면을 고르는 회귀는 두 자격증명의 화면을 가른다.
-/// ★"거절이 아니다" 만 보지 않는다★: 주입한 본문의 **그 화면**이 글자 그대로 오는지 본다 — 라우트가
-///   빠지거나 원천이 서버까지 안 닿으면 여기서 갈린다.
+/// ★The help screen is control plane too★ — a mail-blocked credential must read the mail screen to learn that channel's contract, and the screen is the same whoever asks (ADR-0220 decision 4). Classifying the route as mail would refuse the blocked credential; picking the screen by caller would split the two credentials' screens.
+/// ★Not only "not a refusal"★: check that the injected body arrives verbatim — a missing route or a source not reaching the server diverges here.
 // ADR-0285
 #[tokio::test]
 async fn both_credentials_read_the_same_help_screen() {
@@ -372,10 +354,10 @@ async fn both_credentials_read_the_same_help_screen() {
     let f = fixture("help").await;
     for token in [&f.mcp_token, &f.cli_token] {
         for (word, want) in [
-            (None, format!("{CLI_EXE_NAME} 목차 화면\n")),
+            (None, format!("{CLI_EXE_NAME} index screen\n")),
             (
                 Some(CLI_GROUP_MAIL),
-                format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL} 화면\n"),
+                format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL} screen\n"),
             ),
         ] {
             let (status, text) = f
@@ -385,25 +367,22 @@ async fn both_credentials_read_the_same_help_screen() {
                     serde_json::json!({ CLI_HELP_TOPIC_KEY: word }),
                 )
                 .await;
-            assert_eq!(status, 200, "help 는 통과({word:?}): {text}");
+            assert_eq!(status, 200, "help passes ({word:?}): {text}");
             assert!(!is_mail_rejection(status, &text), "{word:?}: {text}");
-            let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
+            let v: serde_json::Value = serde_json::from_str(&text).expect("JSON response");
             assert_eq!(
                 v[CLI_HELP_SCREEN_KEY].as_str(),
                 Some(want.as_str()),
-                "주입한 본문의 화면이 글자 그대로 와야({word:?}): {text}"
+                "the screen of the injected body must arrive verbatim ({word:?}): {text}"
             );
         }
     }
 }
 
-/// ★이 픽스처의 자리 표가 **열려 있다**는 것을 못박는다★
+/// ★Pins that this fixture's seat table is open★
 ///
-/// 위 형제들은 `agent.list`(데몬 자기 이름)만 부르는데, 그 이름은 판정부가 자기 표에서 답하므로 자리 표를
-/// **아예 안 거친다**. 그래서 조립이 수거기를 떨어뜨려 표가 닫혀 있어도 전부 초록이었다 — 실제로 그
-/// 상태였다. 남의 이름 하나를 중계까지 태워야 그 축이 관측된다.
-/// ★재는 것은 게이트가 아니라 **픽스처의 건강**이다★ — 그래서 우편이 열린 자격증명 하나로만 태운다.
-/// 표가 닫혀 있으면 여기서 `OUTCOME_UNKNOWN`(「종료 중」)이 돌아온다.
+/// The siblings above call only `agent.list` (the daemon's own name), answered from the decider's own table, so they never go through the seat table — everything stayed green with a dropped reaper and a closed table. Only running someone else's name through the relay observes that axis.
+/// ★Measures the fixture's health, not the gate★ — so it runs with one mail-open credential. A closed table returns `OUTCOME_UNKNOWN` (「shutting down」).
 #[tokio::test]
 async fn a_relayed_name_still_reaches_its_owner_through_this_fixture() {
     let f = fixture("relay-open").await;
@@ -417,20 +396,17 @@ async fn a_relayed_name_still_reaches_its_owner_through_this_fixture() {
         )
         .await;
 
-    assert_eq!(status, 200, "봉투로 답한다: {text}");
-    let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
+    assert_eq!(status, 200, "answers with an envelope: {text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("JSON response");
     assert_eq!(
         v["ran"], "tab.create",
-        "주인이 낸 결말이 그대로 돌아와야 한다 — 자리 표가 닫혀 있으면 여기가 반려다: {text}"
+        "the outcome the owner gave must come back as is — if the seat table is closed, this is a bounce: {text}"
     );
 }
 
-/// MCP 라우트는 이 게이트의 대상이 아니다 — 우편을 MCP 로 쓰는 것이 바로 그 자격증명의 채널이기 때문이다.
+/// The MCP route is not subject to this gate — using mail over MCP is exactly that credential's channel.
 ///
-/// ★"거절이 아니다" 만 보면 라우트가 통째로 사라져도 초록이다★: 그래서 **게이트를 통과했다** 를 라우트가
-///   실제로 붙어 있다는 사실과 함께 본다. rmcp 가 handshake 없는 요청에 내는 구체적 상태코드는 판올림에
-///   흔들리므로 거기 묶지 않고, ① 우리 거절 봉투가 아니고 ② 라우트 미존재(404)도 아니며 ③ 인증 실패(401)도
-///   아니라는 세 가지로 좁힌다 — 그 셋이 아니면 요청은 auth·게이트를 지나 rmcp 에 도달한 것이다.
+/// ★"Not a refusal" alone stays green if the route disappears★: so check it passed the gate and the route is really attached. rmcp's status for a request without a handshake wobbles across version bumps, so narrow to three things: ① not our refusal envelope ② not a missing route (404) ③ not an auth failure (401) — otherwise the request passed auth and the gate and reached rmcp.
 #[tokio::test]
 async fn the_mcp_route_is_not_touched_by_the_mail_gate() {
     let f = fixture("mcp").await;
@@ -443,14 +419,17 @@ async fn the_mcp_route_is_not_touched_by_the_mail_gate() {
         .await;
     assert!(
         !is_mail_rejection(status, &text),
-        "MCP 라우트가 우편 게이트에 걸리면 안 된다: {status} {text}"
+        "the MCP route must not be caught by the mail gate: {status} {text}"
     );
-    assert_ne!(status, 404, "MCP 라우트가 붙어 있지 않다: {status} {text}");
+    assert_ne!(
+        status, 404,
+        "the MCP route is not attached: {status} {text}"
+    );
     assert_ne!(
         status, 401,
-        "유효 토큰인데 인증에서 끊겼다: {status} {text}"
+        "a valid token but cut off at auth: {status} {text}"
     );
-    // 대조군 — 같은 자격증명·같은 서버에서 우편 라우트는 거절된다(둘을 가르는 것이 경로뿐임을 고정).
+    // Control group — same credential and server, the mail route is refused (only the path separates the two).
     let (mail_status, mail_text) = f
         .post(
             &f.mcp_token,
@@ -460,14 +439,11 @@ async fn the_mcp_route_is_not_touched_by_the_mail_gate() {
         .await;
     assert!(
         is_mail_rejection(mail_status, &mail_text),
-        "대조군: 같은 자격증명의 우편 라우트는 거절: {mail_status} {mail_text}"
+        "control group: the same credential's mail route is refused: {mail_status} {mail_text}"
     );
 }
 
-/// ★명단 밖 `/control/...` 는 두 방향으로 못박는다★: ① 우편이 막힌 자격증명에겐 **거절**(분류 누락이
-///   조용히 입구를 열지 않는다 — fail-closed) ② 우편이 열린 자격증명에겐 **404**(그 경로가 게이트에
-///   가려진 게 아니라 애초에 라우팅되지 않는다는 증명). ②가 없으면 나중에 누가 실제로 라우트를 붙여도
-///   ①만 보고 초록으로 남는다.
+/// ★`/control/...` outside the list is pinned in two directions★: ① a mail-blocked credential gets a refusal (a classification omission does not silently open an entrance — fail-closed) ② a mail-open credential gets 404 (the path is not hidden by the gate but not routed). Without ②, a later real route would stay green looking only at ①.
 #[tokio::test]
 async fn an_unlisted_control_path_is_refused_when_blocked_and_unrouted_otherwise() {
     let f = fixture("unlisted").await;
@@ -475,34 +451,30 @@ async fn an_unlisted_control_path_is_refused_when_blocked_and_unrouted_otherwise
         let (status, text) = f.post(&f.mcp_token, path, serde_json::json!({})).await;
         assert!(
             is_mail_rejection(status, &text),
-            "명단 밖 제어 경로는 막힌 자격증명에게 거절돼야({path}): {status} {text}"
+            "a control path outside the list must be refused for the blocked credential ({path}): {status} {text}"
         );
         let (status, text) = f.post(&f.cli_token, path, serde_json::json!({})).await;
         assert_eq!(
             status, 404,
-            "그 경로는 실제로 라우팅되지 않아야({path}): {text}"
+            "that path must not actually be routed ({path}): {text}"
         );
     }
-    // 제어 평면 밖은 이 접기의 대상이 아니다 — 막힌 자격증명에게도 404 그대로다. `/controlfoo` 류는
-    //   이름만 비슷할 뿐 이 네임스페이스가 아니므로(세그먼트 경계) 여기 함께 둔다.
+    // Outside the control plane is not folded — still 404 for the blocked credential. `/controlfoo` and the like only look similar by name (segment boundary).
     for path in ["/nope", "/controlfoo", "/control-x"] {
         let (status, text) = f.post(&f.mcp_token, path, serde_json::json!({})).await;
         assert_eq!(
             status, 404,
-            "제어 네임스페이스 밖까지 게이트를 넓히지 않는다({path}): {text}"
+            "the gate is not widened beyond the control namespace ({path}): {text}"
         );
     }
 }
 
-/// ★손으로 심은 판정이 하나도 없는 end-to-end★: 위 픽스처들은 `issue` 에 판정을 직접 넣으므로,
-///   `provision` 이 모든 claude 자격증명을 우편 허용으로 발급하도록 회귀해도 전부 초록으로 남는다.
-///   이 테스트만은 **운영 경로 그대로** 간다 — 실 `DaemonControlChannel::provision` 이 판정을 파생해
-///   레지스트리에 박고, 그 토큰이 실제 HTTP 우편 요청에서 거절되는지 본다.
+/// ★End-to-end with no hand-planted decision★: the fixtures above put the decision directly into `issue`, so a `provision` regression issuing every claude credential as mail-allowed would stay green. This test goes along the production path — the real `DaemonControlChannel::provision` derives the decision and stamps the registry, and the token is checked against a real HTTP mail request.
 #[tokio::test]
 async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() {
     let registry = Arc::new(ControlRegistry::new());
     let manager_slot = Arc::new(ManagerSlot::new());
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★Hold on to the reaper★ — if dropped, the seat table closes on the spot and every round trip after that is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -528,8 +500,7 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
     );
 
-    // claude 백엔드의 실제 capability 를 그대로 넘긴다 — 여기 리터럴을 적으면 그 판정이 다시
-    //   테스트 사본이 된다. 두 축 다 backend dispatch 에서 읽는다(ADR-0133 — 재료가 둘이다).
+    // Pass the claude backend's real capability as is — a literal here would make the decision a test copy again. Both axes are read from the backend dispatch (ADR-0133 — two inputs).
     let command = AgentCommand::Claude {
         extra_args: vec![],
         output_format: AgentOutputFormat::StreamJson,
@@ -541,9 +512,12 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
     };
     assert!(
         needs.accepts_mcp_config,
-        "claude 는 MCP-capable 이어야(전제)"
+        "claude must be MCP-capable (premise)"
     );
-    assert!(needs.uses_mail, "claude 는 우편 평면 안이어야(전제)");
+    assert!(
+        needs.uses_mail,
+        "claude must be inside the mail plane (premise)"
+    );
     let ep = channel
         .provision(AgentId::new_v4(), 0, needs)
         .expect("provision ok")
@@ -560,16 +534,18 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
     let text = resp.text().await.unwrap_or_default();
     assert!(
         is_mail_rejection(status, &text),
-        "실 provision 이 발급한 claude 자격증명은 HTTP 우편에서 거절돼야: {status} {text}"
+        "a claude credential issued by the real provision must be refused on HTTP mail: {status} {text}"
     );
-    // endpoint 의 기록도 같은 판정에서 나왔는지 함께 본다(파생점이 하나다 — ADR-0133 결정 2).
-    assert!(!ep.mail_allowed, "endpoint 기록도 불가여야");
+    // Also check the endpoint's record came from the same decision (one derivation point — ADR-0133 decision 2).
+    assert!(
+        !ep.mail_allowed,
+        "the endpoint record must be disallowed too"
+    );
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
-/// ★우편 평면 **밖**인 backend 는 제어 채널을 받아도 우편 인가를 못 받는다★ — `supports_control_channel`
-/// 을 켠 부수효과로 보내기만 열렸던 상태를 되돌린 자리다(사용자 결정 2026-09-18).
+/// ★A backend outside the mail plane gets no mail authorization even if it receives the control channel★ — reverts the state where only sending had opened as a side effect of `supports_control_channel`.
 ///
 /// ★Two layers are measured together★: ① the credential (do the HTTP mail routes refuse it) ② what the endpoint
 ///   carries (the mail authorization and the send grants). Measuring one layer lets 「refuses, yet grants」 through —
@@ -604,9 +580,7 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
     );
 
-    // ★축을 **합성으로** 세운다 — 오늘 `uses_mail=false` 를 선언하는 backend 가 하나도 없기 때문이다★
-    //   (codex 가 마지막이었고 ADR-0209 의 MCP 배선과 함께 true 로 갔다). 실 backend 를 읽던 옛 형태로
-    //   되돌리면 이 테스트는 **우편 평면 안** 스폰을 재면서 이름만 밖이라고 말하게 된다.
+    // ★The axis is set up synthetically — today no backend declares `uses_mail=false`★ (codex was the last; ADR-0209's MCP wiring made it true). Reading a real backend would measure a spawn inside the mail plane while only its name says outside.
     //   ★Do not delete this axis anyway★: the daemon's derivation and gate show together only in this combination, and
     //   the net must already stand when the next backend arrives with it.
     // ADR-0209
@@ -618,10 +592,10 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
 
     let ep = channel
         .provision(AgentId::new_v4(), 0, needs)
-        .expect("제어 채널은 발급돼야(제어 동사는 전원 개방)")
+        .expect("the control channel must be issued (control verbs are open to everyone)")
         .expect("endpoint");
 
-    // ① 자격증명 — 우편 라우트 전량에서 거절.
+    // ① credential — refused on all mail routes.
     for (route, body) in MAIL_ROUTES {
         let payload: serde_json::Value = serde_json::from_str(body).expect("fixture body");
         let resp = reqwest::Client::new()
@@ -635,28 +609,30 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
         let text = resp.text().await.unwrap_or_default();
         assert!(
             is_mail_rejection(status, &text),
-            "{route} 는 이 자격증명으로 거절돼야: {status} {text}"
+            "{route} must be refused with this credential: {status} {text}"
         );
     }
 
     // ② endpoint — no mail · zero send grants. 「No authorization, and the record says so」.
-    assert!(!ep.mail_allowed, "인가를 안 줬는데 기록은 가능이라 말한다");
+    assert!(
+        !ep.mail_allowed,
+        "no authorization was given but the record says allowed"
+    );
     assert!(
         ep.grants.is_empty(),
-        "발신 입구가 없는데 grant 가 실렸다: {:?}",
+        "there is no send entrance but a grant was carried: {:?}",
         ep.grants
     );
-    // ③ 제어 CLI 입구는 그대로 받는다 — 이 칸이 닫는 것은 우편뿐이다(ADR-0132 결정 5).
-    assert!(ep.send_exe.is_some(), "제어 CLI 배선은 유지돼야");
-    assert!(!ep.token.is_empty(), "제어 토큰은 발급돼야");
+    // ③ the control CLI entrance is received as is — this field closes mail only (ADR-0132 decision 5).
+    assert!(ep.send_exe.is_some(), "the control CLI wiring must stay");
+    assert!(!ep.token.is_empty(), "the control token must be issued");
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
-/// ★codex 의 우편은 MCP 로 나가고 CLI 미러는 **닫힌다**★ — ADR-0209 가 「MCP 가 정식, CLI 는 미러」라고
-/// 못 박은 것이 실 선언에서 그대로 서는지 잰다.
+/// ★codex's mail goes out over MCP and the CLI mirror is closed★ — measures that ADR-0209's 「MCP is canonical, CLI is a mirror」 stands in the real declaration.
 ///
-/// ★실 backend 선언을 읽는 것이 요점이다 — 리터럴을 적으면 그 판정이 테스트 사본이 된다★: 이 조각이
+/// ★Reading the real backend declaration is the point — a literal makes the decision a test copy★:
 ///   the two fields this piece touched (`accepts_mcp_config` · `uses_mail`) must move **together** for both
 ///   assertions below to stand. Revert one and one of them quietly falls — revert `uses_mail` and the grant is gone
 ///   (the tool in hand with no grant); revert `accepts_mcp_config` and the CLI mirror is authorized open.
@@ -684,10 +660,10 @@ fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
         writes_mcp_config_file: writes_mcp_config_file(&command),
         uses_mail: uses_mail(&command),
     };
-    assert!(needs.uses_mail, "전제: codex 는 우편 평면 안이다");
+    assert!(needs.uses_mail, "premise: codex is inside the mail plane");
     assert!(
         needs.accepts_mcp_config,
-        "전제: 데몬은 codex 를 MCP 우편 갈래로 읽는다"
+        "premise: the daemon reads codex as the MCP mail branch"
     );
 
     let ep = channel
@@ -697,7 +673,7 @@ fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
 
     assert!(
         !ep.mail_allowed,
-        "MCP 우편 갈래인데 CLI 미러가 인가됐다 — 두 채널이 동시에 열렸다"
+        "it is the MCP mail branch but the CLI mirror was authorized — both channels opened at once"
     );
     assert_eq!(
         ep.grants,
@@ -705,14 +681,14 @@ fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
             server: MCP_SERVER_NAME.to_string(),
             tool: SEND_MESSAGE_TOOL.to_string(),
         }],
-        "발신 입구 grant 가 MCP send_message 하나여야"
+        "the send entrance grant must be only MCP send_message"
     );
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
-/// ★`engram` 실행파일이 없어도 우편 평면 **밖** 스폰은 끊기지 않는다★ — fail-closed 가 지키는 짝
-/// (데몬이 낸 CLI 우편 인가 `mail_allowed`·[Cli] grant ↔ 부를 실행파일)이 그 스폰에는 애초에 없기
-/// 때문이다. ★Neither side of that pair is priming★ — a non-MCP spawn learns nothing yet still gets the
+/// ★Even without the `engram` executable, a spawn outside the mail plane is not cut off★ — the pair fail-closed guards
+/// (the daemon-given CLI mail authorization `mail_allowed` · [Cli] grant ↔ the executable to call) does not exist for that spawn.
+/// ★Neither side of that pair is priming★ — a non-MCP spawn learns nothing yet still gets the
 /// authorization, so the pair and the verdict stand as they are (ADR-0209 · `control/mod.rs`). Cutting this branch too
 /// would abort, in that install, every spawn of a backend that has nothing to do with mail.
 #[test]
@@ -724,7 +700,7 @@ fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
         registry,
         "http://127.0.0.1:1/mcp".to_string(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
-        None, // ← CLI 실행파일을 못 찾은 데몬
+        None, // ← a daemon that could not find the CLI executable
     );
 
     let no_mail = ControlChannelNeeds {
@@ -734,10 +710,10 @@ fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
     };
     assert!(
         channel.provision(AgentId::new_v4(), 0, no_mail).is_ok(),
-        "우편 평면 밖 스폰이 CLI 부재로 중단되면 안 된다"
+        "a spawn outside the mail plane must not be stopped by the missing CLI"
     );
 
-    // 짝이 성립하는 조합(우편을 쓰는데 CLI 가 없다)은 **여전히** 끊긴다 — 그 규율은 그대로다.
+    // The combination where the pair holds (uses mail but no CLI) is still cut off — that discipline stays.
     let cli_mail = ControlChannelNeeds {
         accepts_mcp_config: false,
         writes_mcp_config_file: false,
@@ -745,7 +721,7 @@ fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
     };
     assert!(
         channel.provision(AgentId::new_v4(), 0, cli_mail).is_err(),
-        "CLI 우편을 쓰는데 실행파일이 없으면 fail-closed 여야"
+        "if it uses CLI mail but has no executable, it must be fail-closed"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);

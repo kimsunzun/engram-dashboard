@@ -1,37 +1,21 @@
-//! The shell's usage interest — a state machine that computes the daemon usage subscription set from the layout and keeps that subscription in line with the daemon
-//! (TRD S21 usage-limit-slot §1-7).
+//! The shell's usage interest — a state machine computing the daemon usage subscription set from the layout and keeping that subscription in line with the daemon (TRD S21 usage-limit-slot §1-7).
 //!
 //! ## What it owns
-//! - **Interest** = the union of the companies turned on by the usage slots of the **active tab** of every window that has no hidden mark
-//!   ([`interest_from_layout`]). Minimize is not tracked by the shell, so it counts as visible (user decision 2026-09-27). A view that is
-//!   not any window's tab (the temporary view of a slot move) is excluded. A window left only in the model (a window left in the model without an OS window — the unresolved issue noted in
-//!   the `WindowHost` doc of `layout::apply`) is counted as visible.
-//! - **Windows to receive broadcasts** = windows that have a usage slot in any tab, hidden windows included ([`usage_slot_windows`]) — when shown again it is
-//!   up to date right away.
-//! - [`UsageInterest`] — the last values of those two · the set last sent on this socket (`sent`) · the reduction delay · the snapshot
-//!   cache received on this socket.
+//! - Interest = the union of companies turned on by the usage slots of the active tab of every window with no hidden mark ([`interest_from_layout`]). Minimize is not tracked by the shell, so it counts as visible (user decision 2026-09-27). A view that is no window's tab (the temporary view of a slot move) is excluded. A window left only in the model without an OS window (the unresolved issue in the `WindowHost` doc of `layout::apply`) counts as visible.
+//! - Windows to receive broadcasts = windows with a usage slot in any tab, hidden ones included ([`usage_slot_windows`]) — up to date right away when shown again.
+//! - [`UsageInterest`] — the last values of those two · the set last sent on this socket (`sent`) · the reduction delay · the snapshot cache received on this socket.
 //!
-//! ## ★Pure — knows nothing of Tauri · sockets · tokio · clocks★
-//! Time is supplied by the caller (`now`). Methods only return results, and socket writes · emit · timer starts are the caller's job —
-//! so tests are deterministic with a fake time (`cargo test -p engram-dashboard --test lib_unit`).
+//! ## Pure — knows nothing of Tauri · sockets · tokio · clocks
+//! Time is supplied by the caller (`now`); methods only return results, and socket writes · emit · timer starts are the caller's job, so tests are deterministic with a fake time (`cargo test -p engram-dashboard --test lib_unit`).
 //!
-//! ## ★One serial path — only the connection task takes out the set to send★
-//! The side that changes interest (layout recompute · hide · reduction timer) puts in only a nudge with no set, and when the connection task takes it out it
-//! reads **the then-current** interest with [`UsageInterest::sync`] and sends — read order = send order, so the last one
-//! on the socket is always the latest interest. The shape where the caller reads the set inside the lock and sends outside the lock lets the old set arrive last if two changes
-//! cross between the read and the send — do not revive it (TRD §3 #74). So [`InterestAction`] does not
-//! carry a set, and the connection-task-only methods (`sync`·`on_socket_open`·`on_socket_lost`·`on_snapshot`) are not opened outside
-//! `daemon_client`.
+//! ## One serial path — only the connection task takes out the set to send
+//! The side changing interest (layout recompute · hide · reduction timer) puts in only a set-less nudge; when the connection task takes it out it reads the then-current interest with [`UsageInterest::sync`] and sends — read order = send order, so the last frame on the socket is always the latest interest. A caller reading the set inside the lock and sending outside lets the old set arrive last when two changes cross between read and send — do not revive it (TRD §3 #74). So [`InterestAction`] carries no set, and the connection-task-only methods (`sync` · `on_socket_open` · `on_socket_lost` · `on_snapshot`) are not opened outside `daemon_client`.
 //!
-//! ## ★Socket epoch guard★
-//! Every method the connection driver calls carries its socket epoch (`socket_epoch` — the transport connection
-//! generation · ADR-0195 · `0` = no socket) and does nothing unless it is the current one (an open does nothing unless
-//! it is greater than the largest seen) — so a late call for an older connection cannot overwrite the new one's
-//! `sent` or cache. Ordering by size means something because generations never rewind (the transport mints them from
-//! one counter per peer name within a registry), so it holds within one shell process.
+//! ## Socket epoch guard
+//! Every method the connection driver calls carries its socket epoch (`socket_epoch` — the transport connection generation · ADR-0195 · `0` = no socket) and does nothing unless it is the current one (an open does nothing unless greater than the largest seen), so a late call for an older connection cannot overwrite the new one's `sent` or cache. Ordering by size is meaningful because generations never rewind (the transport mints them from one counter per peer name within a registry), so it holds within one shell process.
 //!
 //! ## Lock order
-//! The lock around this state comes after `ViewManager` (`super::SharedUsageInterest` doc). This file knows no lock.
+//! The lock around this state comes after `ViewManager` (`super::SharedUsageInterest` doc); this file knows no lock.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -43,14 +27,9 @@ use engram_dashboard_protocol::{
 use crate::layout::manager::WindowLabel;
 use crate::layout::{LayoutNode, SlotContent, ViewManager};
 
-/// The time to wait before sending to the daemon when interest shrinks — a window to avoid sending to the daemon reductions that soon come back (going to another tab and returning · toggling a display switch
-/// off and on · hiding to the tray and reviving · closing a slot·tab and putting it back within 1.5 seconds).
-/// Growth is not waited for. ★Moving a slot to another window does not rely on this delay★ — the source slot
-/// remains until the step that attaches it to the new window and is closed inside the same lock as that attaching, so interest does not shrink in the first place
-/// (`layout::apply::move_slot_to_window`).
+/// Wait before sending a shrink to the daemon — avoids sending reductions that soon come back (switching to another tab and returning · toggling a display switch off and on · hiding to the tray and reviving · closing a slot·tab and putting it back within 1.5 s). Growth is not waited for. Moving a slot to another window does not rely on this delay: the source slot remains until the step that attaches it to the new window and is closed inside the same lock, so interest does not shrink at all (`layout::apply::move_slot_to_window`).
 pub const USAGE_INTEREST_SHRINK_DELAY: Duration = Duration::from_millis(1500);
 
-/// The union of the companies turned on by the usage slots of the **active tab** of every window that has no hidden mark.
 pub fn interest_from_layout(
     mgr: &ViewManager,
     hidden: &BTreeSet<WindowLabel>,
@@ -75,7 +54,6 @@ pub fn interest_from_layout(
     interest
 }
 
-/// Windows that have a usage slot in any tab (inactive tabs · hidden windows included) — slots with no company turned on are included too.
 pub fn usage_slot_windows(mgr: &ViewManager) -> BTreeSet<WindowLabel> {
     mgr.windows
         .iter()
@@ -110,38 +88,33 @@ fn for_each_usage_slot(node: &LayoutNode, visit: &mut dyn FnMut(bool, bool)) {
     }
 }
 
-/// The generation of one reduction delay. If interest changes again during the delay, a new generation stands or the delay becomes invalid, and an old
-/// timer that wakes late gets `false` in [`UsageInterest::deferral_elapsed`].
+/// The generation of one reduction delay. If interest changes again during the delay a new generation stands or the delay becomes invalid, and an old timer waking late gets `false` in [`UsageInterest::deferral_elapsed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShrinkGen(u64);
 
-/// What interest recomputation tells the caller to do — the result of comparing with `sent` (the set last sent on this socket). If discarded, growth does not
-/// reach the daemon or the reduction never does.
+/// What recomputation tells the caller to do — the result of comparing with `sent` (the set last sent on this socket). Discarded, growth never reaches the daemon or the reduction never does.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterestAction {
-    /// Nothing to do — interest = `sent` (a waiting reduction became invalid), or a reduction to the same interest is already waiting
-    /// (its generation · deadline · timer are still valid).
+    /// Nothing to do — interest = `sent` (a waiting reduction became invalid), or a reduction to the same interest is already waiting (its generation · deadline · timer still valid).
     Unchanged,
-    /// Interest has a company outside `sent` — one nudge right away.
     Nudge,
-    /// Interest ⊊ `sent` — call [`UsageInterest::deferral_elapsed`]`(gen)` at `deadline`, and if `true`, one nudge.
-    Defer { gen: ShrinkGen, deadline: Instant },
+    Defer {
+        gen: ShrinkGen,
+        deadline: Instant,
+    },
 }
 
-/// The result of [`UsageInterest::on_snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotOutcome {
-    /// The windows to deliver that snapshot to (= the last value of [`usage_slot_windows`]). It is delivered regardless of revision — telling them apart is
-    /// the webview's job. It is empty if it is not a snapshot of the current socket.
+    /// The windows to deliver that snapshot to (= the last value of [`usage_slot_windows`]), regardless of revision — telling them apart is the webview's job. Empty if it is not a snapshot of the current socket.
     pub labels: Vec<WindowLabel>,
-    /// The `UsageSubscribe` set to write straight to the same socket — it stands only when the subscription set the daemon carried differs from the
-    /// set the shell wants to have on the daemon. It stands every time it differs (no suppression — [`UsageInterest::on_snapshot`]).
+    /// The `UsageSubscribe` set to write straight to the same socket — stands only when the subscription set the daemon carried differs from the set the shell wants on the daemon; it stands every time it differs (no suppression — [`UsageInterest::on_snapshot`]).
     pub resend: Option<BTreeSet<AgentBackendKind>>,
 }
 
-/// What to hand to a webview pull — the whole cache (after handoff correction, in company order) and the current socket marker. If there is no socket, `0` and an empty list.
 #[derive(Debug, Clone, PartialEq)]
+/// What a webview pull gets — the whole cache (after handoff correction, in company order) and the current socket marker; with no socket, `0` and an empty list.
 pub struct WebviewUsageSnapshot {
     pub socket_epoch: u64,
     pub snapshots: Vec<UsageLimitSnapshot>,
@@ -153,11 +126,9 @@ struct Cached {
     received: Instant,
 }
 
-/// The usage interest state of one shell. The shell opens one daemon connection, so the connection field of the cache key (connection, company) is 「지금 소켓」 (the current socket),
-/// that is `socket_epoch` — when the socket changes the cache is emptied.
+/// The usage interest state of one shell. The shell opens one daemon connection, so the connection field of the cache key (connection, company) is "the current socket", i.e. `socket_epoch`; the cache is emptied when the socket changes.
 #[derive(Debug, Default)]
 pub struct UsageInterest {
-    /// Windows the shell hid (tray). The label of a destroyed window is erased by [`UsageInterest::forget_window`].
     hidden: BTreeSet<WindowLabel>,
     interest: BTreeSet<AgentBackendKind>,
     usage_windows: BTreeSet<WindowLabel>,
@@ -166,8 +137,7 @@ pub struct UsageInterest {
     sent: BTreeSet<AgentBackendKind>,
     cache: BTreeMap<AgentBackendKind, Cached>,
     shrink_seq: u64,
-    /// ★Invariant — while standing, `interest ⊊ sent` and `interest` is exactly the interest that set up that reduction★ (setting up a reduction
-    /// and cancelling it are only recompute · send · socket open/close, and any place that changes `sent` in the meantime cancels the reduction).
+    /// Invariant: while standing, `interest ⊊ sent` and `interest` is exactly the interest that set up that reduction (setting up and cancelling a reduction are only recompute · send · socket open/close, and anything changing `sent` meanwhile cancels it).
     shrink_pending: Option<ShrinkGen>,
 }
 
@@ -176,11 +146,7 @@ impl UsageInterest {
         Self::default()
     }
 
-    /// After layout · visibility changes, recompute the interest and the windows to receive broadcasts — called inside the ViewManager lock.
-    ///
-    /// ★The hidden mark is not erased here★ — a mark for a label not yet in the model is also kept: moving a slot to a new window
-    /// opens the OS window first (phase B), releases the lock, and then adds the model window (phase C), so if the tray hide in that gap were erased,
-    /// a hidden pop-out would be counted as visible. Only window destruction erases it ([`Self::forget_window`]).
+    /// After layout · visibility changes, recompute the interest and the windows to receive broadcasts — called inside the ViewManager lock. The hidden mark is not erased here: a mark for a label not yet in the model is kept too — a slot move to a new window opens the OS window first (phase B), releases the lock, then adds the model window (phase C), so erasing the tray hide in that gap would count a hidden pop-out as visible. Only window destruction erases it ([`Self::forget_window`]).
     pub(super) fn recompute(&mut self, mgr: &ViewManager, now: Instant) -> InterestAction {
         let before = std::mem::replace(&mut self.interest, interest_from_layout(mgr, &self.hidden));
         self.usage_windows = usage_slot_windows(mgr);
@@ -188,8 +154,7 @@ impl UsageInterest {
             self.shrink_pending = None;
             InterestAction::Nudge
         } else if self.shrink_pending.is_some() && self.interest == before {
-            // The same reduction is already waiting — leave the generation · deadline as they are so an unrelated recompute cannot postpone the reduction
-            // (TRD §1-7 「recompute」 · §3 #91 — with the same interest a new generation is not drawn).
+            // The same reduction is already waiting — leave the generation · deadline so an unrelated recompute cannot postpone it (TRD §1-7 「recompute」 · §3 #91 — same interest draws no new generation).
             InterestAction::Unchanged
         } else if self.interest != self.sent {
             self.shrink_seq += 1;
@@ -205,8 +170,7 @@ impl UsageInterest {
         }
     }
 
-    /// Window `label` was destroyed (inside the same lock in which popup destruction cleanup erased the window from the model) — erase the hidden mark and
-    /// act the same as [`Self::recompute`]. A label is not reused, so if left it leaks one entry for every pop-out that closed while hidden.
+    /// Window `label` was destroyed (inside the same lock in which popup destruction cleanup erased it from the model) — erase the hidden mark and act as [`Self::recompute`]. A label is not reused, so a left mark leaks one entry per pop-out closed while hidden.
     pub(super) fn forget_window(
         &mut self,
         label: &str,
@@ -217,7 +181,6 @@ impl UsageInterest {
         self.recompute(mgr, now)
     }
 
-    /// After the shell hides (`false`) or re-shows (`true`) window `label` — fix the hidden mark and act the same as [`Self::recompute`].
     pub(super) fn set_visible(
         &mut self,
         label: &str,
@@ -233,10 +196,7 @@ impl UsageInterest {
         self.recompute(mgr, now)
     }
 
-    /// The reduction timer calls it at the deadline. `true` = that reduction was still valid → one nudge.
-    ///
-    /// ★The wait ends at the deadline, not at delivery★ — even if that nudge disappears (command channel saturated), the wait has already ended, so the next
-    /// snapshot's cross-check compares with interest and fixes it ([`Self::on_snapshot`]).
+    /// The reduction timer calls it at the deadline; `true` = that reduction was still valid → one nudge. The wait ends at the deadline, not at delivery — even if that nudge disappears (command channel saturated), the next snapshot's cross-check compares with interest and fixes it ([`Self::on_snapshot`]).
     pub(super) fn deferral_elapsed(&mut self, gen: ShrinkGen) -> bool {
         if self.shrink_pending == Some(gen) {
             self.shrink_pending = None;
@@ -247,15 +207,9 @@ impl UsageInterest {
     }
 
     /// The `UsageSubscribe` set the connection driver writes on connection `socket_epoch` — `None` = nothing to write.
-    ///
-    /// - `force` = right before a ⟳ refresh frame — always gives the interest (the daemon is idempotent for the same
-    ///   set).
-    /// - When a nudge is taken (`force = false`): with a pending shrink, only if the interest has a vendor outside
-    ///   `sent` (a pure shrink is the deadline's job); otherwise only if the interest ≠ `sent`.
-    ///
-    /// `Some` means `sent := interest` and the pending shrink is void. Being based on `sent`, repeated calls give
-    /// `None` from the second on (idempotent — the nudge right after a connection opens relies on it). Not the
-    /// current connection → `None`.
+    /// - `force` = right before a ⟳ refresh frame — always gives the interest (the daemon is idempotent for the same set).
+    /// - When a nudge is taken (`force = false`): with a pending shrink, only if the interest has a vendor outside `sent` (a pure shrink is the deadline's job); otherwise only if interest ≠ `sent`.
+    /// `Some` means `sent := interest` and the pending shrink is void. Based on `sent`, repeated calls give `None` from the second on (idempotent — the nudge right after a connection opens relies on it). Not the current connection → `None`.
     pub(super) fn sync(
         &mut self,
         socket_epoch: u64,
@@ -279,11 +233,7 @@ impl UsageInterest {
         Some(self.interest.clone())
     }
 
-    /// Called after the new socket opened the command endpoint, before reading the command channel — if `Some`, one frame of that set directly to the new socket.
-    ///
-    /// It moves only on a marker larger than the largest one seen (otherwise `None` · nothing changes). When it moves it empties the cache and
-    /// `sent := 관심` · a waiting reduction becomes invalid, and if interest is empty there is nothing to send so `None` (the daemon-side
-    /// subscription of a new connection is the empty set).
+    /// Called after the new socket opened the command endpoint, before reading the command channel — `Some` = one frame of that set directly to the new socket. It moves only on a marker larger than the largest seen (otherwise `None`, nothing changes); then it empties the cache, `sent := interest`, a waiting reduction becomes invalid, and an empty interest sends nothing (`None` — a new connection's daemon-side subscription is the empty set).
     pub(super) fn on_socket_open(
         &mut self,
         socket_epoch: u64,
@@ -292,7 +242,7 @@ impl UsageInterest {
             tracing::debug!(
                 socket_epoch,
                 max_seen = self.max_seen_socket_epoch,
-                "사용량 관심: 본 적 있는 소켓 표식의 열기 — 무시(승계로 밀려난 태스크)"
+                "usage interest: open of an already seen socket marker — ignored (task displaced by succession)"
             );
             return None;
         }
@@ -304,8 +254,7 @@ impl UsageInterest {
         (!self.interest.is_empty()).then(|| self.interest.clone())
     }
 
-    /// Socket `socket_epoch` ended (regardless of reason). Only if it is the current socket, empty the cache and set `sent := ∅` · no socket.
-    /// A waiting reduction is invalid too — the `sent` to reduce is gone, and a new socket sends the interest in full again on open.
+    /// Socket `socket_epoch` ended (any reason). Only if it is the current socket: empty the cache, `sent := ∅`, no socket. A waiting reduction is invalid too — the `sent` to reduce is gone, and a new socket sends the interest in full on open.
     pub(super) fn on_socket_lost(&mut self, socket_epoch: u64) {
         if !self.is_current(socket_epoch) {
             self.log_foreign("on_socket_lost", socket_epoch);
@@ -317,18 +266,10 @@ impl UsageInterest {
         self.socket_epoch = 0;
     }
 
-    /// One snapshot arrived on socket `socket_epoch` — `subscribed` = the subscription set of that connection that the daemon carried in that one snapshot.
-    ///
-    /// - Cache = **highest** revision per company — a smaller revision arriving late does not change it, and an equal or larger one does (receipt
-    ///   time = `now`). The daemon sends the first snapshot outside the registry lock, so the last to arrive may not be the highest.
-    /// - ★Cross-check★: wanted set = `sent` if a reduction is waiting, otherwise interest. If `subscribed` differs from it,
-    ///   `resend` = the wanted set. If a reduction is waiting, the wait · `sent` are left as they are — a stale
-    ///   snapshot arriving inside the 1.5-second window must not pull the reduction forward. Otherwise `sent := 관심`.
-    /// - ★Resend on every mismatch — do not suppress★: in the shape that suppressed the same pair, a stale record left by an earlier toggle round trip and
-    ///   a correction resend the daemon rejected brought the same pair back and blocked a needed resend (TRD §3 #84). The feedback is finite
-    ///   because the daemon's same-set replacement does not emit a first snapshot. One `debug` line per mismatch.
-    ///
-    /// If it is not the current socket, nothing is done (empty result · cache unchanged).
+    /// One snapshot arrived on socket `socket_epoch` — `subscribed` = the subscription set of that connection the daemon carried in that snapshot. Not the current socket → nothing (empty result · cache unchanged).
+    /// - Cache = highest revision per company — a smaller revision arriving late does not change it, an equal or larger one does (receipt time = `now`). The daemon sends the first snapshot outside the registry lock, so the last to arrive may not be the highest.
+    /// - Cross-check: wanted set = `sent` if a reduction is waiting, else interest. If `subscribed` differs, `resend` = the wanted set; with a reduction waiting the wait · `sent` are left alone (a stale snapshot inside the 1.5 s window must not pull the reduction forward), else `sent := interest`.
+    /// - Resend on every mismatch — do not suppress: suppressing the same pair let a stale record from an earlier toggle round trip and a rejected correction resend bring back the same pair and block a needed resend (TRD §3 #84). The feedback is finite because the daemon's same-set replacement emits no first snapshot. One `debug` line per mismatch.
     pub(super) fn on_snapshot(
         &mut self,
         socket_epoch: u64,
@@ -368,7 +309,7 @@ impl UsageInterest {
                 ?desired,
                 shrink_pending,
                 socket_epoch,
-                "사용량 구독 어긋남 — 바라는 집합을 다시 보낸다"
+                "usage subscription mismatch — resending the wanted set"
             );
             if !shrink_pending {
                 self.sent = desired.clone();
@@ -381,11 +322,7 @@ impl UsageInterest {
         }
     }
 
-    /// Called by a webview pull — hands over the whole cache with handoff correction (no daemon round trip).
-    ///
-    /// ★Handoff correction★: shifts relative fields by the whole seconds `d` elapsed since receipt — `age_secs + d` per window (per model included) ·
-    /// `Failed.next_attempt_in_secs` · `Rejected.retry_in_secs` get `− d` (saturating at 0). Without it, an old cache (as long as
-    /// 15 minutes) shows the value that much younger · the wait that much longer.
+    /// Called by a webview pull — the whole cache with handoff correction (no daemon round trip). Handoff correction shifts relative fields by the whole seconds `d` since receipt: `age_secs + d` per window (per model included), `Failed.next_attempt_in_secs` · `Rejected.retry_in_secs` get `− d` (saturating at 0). Without it an old cache (up to 15 minutes) would show values that much younger · waits that much longer.
     pub fn snapshot_for_webview(&self, now: Instant) -> WebviewUsageSnapshot {
         WebviewUsageSnapshot {
             socket_epoch: self.socket_epoch,
@@ -411,7 +348,7 @@ impl UsageInterest {
             call,
             socket_epoch,
             current = self.socket_epoch,
-            "사용량 관심: 지금 소켓이 아닌 표식 — 무시"
+            "usage interest: marker is not the current socket — ignored"
         );
     }
 }
@@ -426,7 +363,7 @@ fn handed_off(snapshot: &UsageLimitSnapshot, elapsed_secs: u64) -> UsageLimitSna
     out.model_scoped
         .iter_mut()
         .for_each(|scoped| age(&mut scoped.window));
-    // No wildcard is kept — if a state that carries relative seconds is added, the compile must break here.
+    // No wildcard arm on purpose — adding a state that carries relative seconds must break the compile here.
     match &mut out.state {
         UsageVendorState::Failed {
             next_attempt_in_secs,
@@ -487,7 +424,6 @@ mod tests {
         mgr.windows[MAIN_WINDOW_LABEL].active
     }
 
-    /// main's active tab = one usage slot (`show_claude` · `show_codex`).
     fn main_with(show_claude: bool, show_codex: bool) -> (ViewManager, Uuid) {
         let mut mgr = ViewManager::new();
         let view = main_active(&mgr);
@@ -521,7 +457,6 @@ mod tests {
         }
     }
 
-    /// A state where socket 1 is open and `sent` = interest (the interest is from `mgr`).
     fn connected(mgr: &ViewManager, t0: Instant) -> UsageInterest {
         let mut ui = UsageInterest::new();
         let _ = ui.recompute(mgr, t0);
@@ -532,7 +467,7 @@ mod tests {
     fn defer_gen(action: InterestAction) -> ShrinkGen {
         match action {
             InterestAction::Defer { gen, .. } => gen,
-            other => panic!("줄임 지연이어야 한다: {other:?}"),
+            other => panic!("should be a deferred reduction: {other:?}"),
         }
     }
 
@@ -549,14 +484,13 @@ mod tests {
         assert_eq!(
             usage_slot_windows(&mgr),
             labels(&[MAIN_WINDOW_LABEL]),
-            "활성 아닌 탭의 사용량 슬롯도 방송은 받는다"
+            "a usage slot in a non-active tab still receives broadcasts"
         );
 
         mgr.switch_tab(MAIN_WINDOW_LABEL, usage_tab).unwrap();
         assert_eq!(interest_from_layout(&mgr, &labels(&[])), set(&[Claude]));
     }
 
-    /// Only the hidden mark is subtracted — the shell does not know minimize, so a window with no hidden mark is visible (even if minimized).
     #[test]
     fn only_the_hidden_mark_drops_a_window() {
         let (mgr, _) = main_with(true, true);
@@ -608,11 +542,10 @@ mod tests {
         assert_eq!(
             usage_slot_windows(&mgr),
             labels(&[MAIN_WINDOW_LABEL]),
-            "둘 다 끈 사용량 슬롯도 사용량 슬롯이다"
+            "a usage slot with both switched off is still a usage slot"
         );
     }
 
-    /// The temporary view of slot move phase A is not any window's tab.
     #[test]
     fn a_view_owned_by_no_window_drops_out() {
         let (mut mgr, slot) = main_with(true, true);
@@ -641,15 +574,20 @@ mod tests {
 
         mgr.close_window(POPUP).unwrap();
         let _ = ui.recompute(&mgr, t0);
-        assert!(ui.hidden.contains(POPUP), "재계산은 숨김 표시를 안 지운다");
+        assert!(
+            ui.hidden.contains(POPUP),
+            "recount does not erase hidden marks"
+        );
         let _ = ui.forget_window(POPUP, &mgr, t0);
-        assert!(ui.hidden.is_empty(), "소멸한 창의 숨김 표시가 남았다");
+        assert!(
+            ui.hidden.is_empty(),
+            "the hidden mark of a destroyed window remained"
+        );
         assert_eq!(ui.interest, set(&[]));
         assert!(ui.usage_windows.is_empty());
     }
 
-    /// Moving to a new window opens the OS window first, releases the lock, and then adds the model window — the tray hide in that gap must survive
-    /// so that the pop-out still counts as a hidden window after the model window stands.
+    /// Moving to a new window opens the OS window first, releases the lock, then adds the model window — the tray hide in that gap must survive so the pop-out still counts as hidden once the model window stands.
     #[test]
     fn a_hide_mark_before_the_model_window_exists_survives_until_forgotten() {
         let t0 = Instant::now();
@@ -663,13 +601,17 @@ mod tests {
         let _ = ui.recompute(&mgr, t0);
         assert!(
             ui.hidden.contains(POPUP),
-            "모델에 없는 label 의 표시가 지워졌다"
+            "the mark of a label not in the model was erased"
         );
 
         let popup_view = mgr.create_window(POPUP).unwrap();
         put(&mut mgr, popup_view, usage(true, true));
         assert_eq!(ui.recompute(&mgr, t0), InterestAction::Unchanged);
-        assert_eq!(ui.interest, set(&[]), "숨긴 팝아웃이 보임으로 셌다");
+        assert_eq!(
+            ui.interest,
+            set(&[]),
+            "a hidden pop-out was counted as visible"
+        );
         assert_eq!(ui.usage_windows, labels(&[POPUP]));
 
         mgr.close_window(POPUP).unwrap();
@@ -684,14 +626,18 @@ mod tests {
         let t0 = Instant::now();
         let mut mgr = ViewManager::new();
         let mut ui = connected(&mgr, t0);
-        assert_eq!(ui.sync(1, false), None, "빈 관심 = 보낼 것 없음");
+        assert_eq!(ui.sync(1, false), None, "empty interest = nothing to send");
 
         let view = main_active(&mgr);
         put(&mut mgr, view, usage(true, false));
         assert_eq!(ui.recompute(&mgr, t0), InterestAction::Nudge);
         assert_eq!(ui.sync(1, false), Some(set(&[Claude])));
         assert_eq!(ui.sent, set(&[Claude]));
-        assert_eq!(ui.sync(1, false), None, "sent 기준이라 둘째부터 없음(멱등)");
+        assert_eq!(
+            ui.sync(1, false),
+            None,
+            "based on sent, so nothing from the second call on (idempotent)"
+        );
     }
 
     #[test]
@@ -705,16 +651,20 @@ mod tests {
             .unwrap();
         let action = ui.recompute(&mgr, t0);
         let InterestAction::Defer { gen, deadline } = action else {
-            panic!("줄임 지연이어야 한다: {action:?}");
+            panic!("should be a deferred reduction: {action:?}");
         };
         assert_eq!(deadline, t0 + USAGE_INTEREST_SHRINK_DELAY);
         assert_eq!(USAGE_INTEREST_SHRINK_DELAY, Duration::from_millis(1500));
-        assert_eq!(ui.sync(1, false), None, "기한 전 = 송신 0");
+        assert_eq!(
+            ui.sync(1, false),
+            None,
+            "before the deadline = nothing sent"
+        );
         assert_eq!(ui.sent, set(&[Claude, Codex]));
 
         assert!(ui.deferral_elapsed(gen));
         assert_eq!(ui.sync(1, false), Some(set(&[Claude])));
-        assert!(!ui.deferral_elapsed(gen), "한 세대는 한 번만 끝난다");
+        assert!(!ui.deferral_elapsed(gen), "a generation ends only once");
         assert_eq!(ui.sync(1, false), None);
     }
 
@@ -732,7 +682,10 @@ mod tests {
             InterestAction::Unchanged
         );
         assert_eq!(ui.shrink_pending, None);
-        assert!(!ui.deferral_elapsed(gen), "무효가 된 대기의 뒤늦은 기한");
+        assert!(
+            !ui.deferral_elapsed(gen),
+            "late deadline of a pending reduction that became invalid"
+        );
         assert_eq!(ui.sync(1, false), None);
 
         // The layout side is the same — if a slot is emptied (reduction) and put back in another window within 1.5 seconds (restored), nothing goes.
@@ -764,7 +717,7 @@ mod tests {
         let rearmed = ui.recompute(&mgr, later);
         assert!(
             matches!(rearmed, InterestAction::Defer { deadline, .. } if deadline == later + USAGE_INTEREST_SHRINK_DELAY),
-            "더 줄면 새 기한으로 다시 선다: {rearmed:?}"
+            "if it shrinks further it re-arms with a new deadline: {rearmed:?}"
         );
         let second = defer_gen(rearmed);
         assert_ne!(first, second);
@@ -773,8 +726,7 @@ mod tests {
         assert_eq!(ui.sync(1, false), Some(set(&[])));
     }
 
-    /// A recompute that yields the same interest as a waiting reduction (an unrelated layout change) leaves the generation · deadline as they are — successive
-    /// recomputes cannot postpone the reduction.
+    /// A recompute yielding the same interest as a waiting reduction (an unrelated layout change) leaves the generation · deadline alone — successive recomputes cannot postpone the reduction.
     #[test]
     fn unrelated_recomputes_during_a_pending_shrink_do_not_postpone_it() {
         let t0 = Instant::now();
@@ -791,11 +743,14 @@ mod tests {
             assert_eq!(
                 ui.recompute(&mgr, t0 + Duration::from_millis(500 * step)),
                 InterestAction::Unchanged,
-                "재계산 {step}"
+                "recount {step}"
             );
         }
         assert_eq!(ui.shrink_pending, Some(gen));
-        assert!(ui.deferral_elapsed(gen), "처음 세대가 그대로 기한에 끝난다");
+        assert!(
+            ui.deferral_elapsed(gen),
+            "the first generation ends at the deadline as is"
+        );
         assert_eq!(ui.sync(1, false), Some(set(&[Claude])));
     }
 
@@ -828,7 +783,7 @@ mod tests {
         assert_eq!(
             out.labels,
             vec![MAIN_WINDOW_LABEL.to_string()],
-            "숨은 창도 방송은 받는다"
+            "a hidden window still receives broadcasts"
         );
         assert!(ui.deferral_elapsed(gen));
         assert_eq!(ui.sync(1, false), Some(set(&[])));
@@ -874,7 +829,7 @@ mod tests {
         let out = ui.on_snapshot(1, &snap(Claude, 1), &[Claude], t0);
         assert_eq!(out.resend, Some(set(&[Claude, Codex])));
         assert_eq!(ui.sent, set(&[Claude, Codex]));
-        assert_eq!(ui.sync(1, false), None, "대조가 이미 보냈다");
+        assert_eq!(ui.sync(1, false), None, "the reconcile already sent it");
     }
 
     #[test]
@@ -885,7 +840,7 @@ mod tests {
         let out = ui.on_snapshot(1, &snap(Codex, 1), &[Codex, Claude], t0);
         assert_eq!(
             out.resend, None,
-            "새로 든 회사의 첫 스냅숏(subscribed = 관심)"
+            "first snapshot of a newly added company (subscribed = interest)"
         );
         assert_eq!(out.labels, vec![MAIN_WINDOW_LABEL.to_string()]);
     }
@@ -918,7 +873,7 @@ mod tests {
 
         let out = ui.on_snapshot(1, &snap(Claude, 1), &[Claude], t0);
         assert_eq!(out.resend, Some(set(&[Claude, Codex])));
-        assert_eq!(ui.shrink_pending, Some(gen), "대기는 그대로");
+        assert_eq!(ui.shrink_pending, Some(gen), "the pending reduction stays");
         assert_eq!(ui.sent, set(&[Claude, Codex]));
         assert!(ui.deferral_elapsed(gen));
         assert_eq!(ui.sync(1, false), Some(set(&[Claude])));
@@ -953,13 +908,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|m| m.contains("사용량 구독 어긋남"))
+                .filter(|m| m.contains("usage subscription mismatch"))
                 .count()
         };
         let resends = tracing::subscriber::with_default(DebugLines(lines.clone()), || {
-            // The callsite interest is a process-global cache — if another test thread is registering the same callsite with the subscriber list from before this subscriber stood,
-            // after that registration ends the cache is left as 「안 받음」 (not received) (measured — 0 lines in a parallel
-            // run). So rebuild the cache and re-poke until one line is caught, and only then start counting.
+            // The callsite interest is a process-global cache: if another test thread registered the same callsite before this subscriber stood, the cache stays "not received" after that registration ends (0 lines in a parallel run). So rebuild the cache and re-poke until one line is caught, then start counting.
             for rev in 1..=100 {
                 tracing::callsite::rebuild_interest_cache();
                 ui.on_snapshot(1, &snap(Claude, rev), &[Claude], t0);
@@ -967,7 +920,7 @@ mod tests {
                     break;
                 }
             }
-            assert!(mismatches(&lines) > 0, "debug 줄을 잡을 수 없다");
+            assert!(mismatches(&lines) > 0, "cannot catch the debug line");
             lines.lock().unwrap().clear();
             // The three counted ones also rebuild the cache each time — the race above can occur again even after one has been caught.
             (101..=103)
@@ -1008,7 +961,11 @@ mod tests {
         assert_eq!(ui.sync(1, true), Some(set(&[Codex])));
         assert_eq!(ui.sent, set(&[Codex]));
         assert!(!ui.deferral_elapsed(gen));
-        assert_eq!(ui.sync(2, true), None, "지금 소켓이 아니면 강제도 없다");
+        assert_eq!(
+            ui.sync(2, true),
+            None,
+            "no force either when it is not the current socket"
+        );
     }
 
     // ── cache · handoff correction ─────────────────────────────────────────────────────
@@ -1026,7 +983,7 @@ mod tests {
         assert_eq!(
             out.labels,
             vec![MAIN_WINDOW_LABEL.to_string()],
-            "전달은 revision 무관"
+            "delivery is independent of revision"
         );
         assert_eq!(ui.snapshot_for_webview(t0).snapshots, vec![newer]);
 
@@ -1037,7 +994,7 @@ mod tests {
         assert_eq!(
             ui.snapshot_for_webview(t1).snapshots,
             vec![same],
-            "같은 revision = 새로 받은 것(받은 시각도 새로)"
+            "same revision = newly received (received time renewed too)"
         );
     }
 
@@ -1063,7 +1020,7 @@ mod tests {
         let pulled = ui.snapshot_for_webview(t0 + Duration::from_millis(90_900));
         assert_eq!(pulled.socket_epoch, 1);
         let [c, x] = pulled.snapshots.as_slice() else {
-            panic!("회사 둘: {pulled:?}");
+            panic!("two companies: {pulled:?}");
         };
         assert_eq!(c.vendor, Claude);
         assert_eq!(c.five_hour.as_ref().unwrap().age_secs, 100);
@@ -1075,7 +1032,7 @@ mod tests {
                 next_attempt_in_secs: 0,
                 detail: None
             },
-            "60 - 90 은 0 으로 포화"
+            "60 - 90 saturates to 0"
         );
         assert_eq!(x.vendor, Codex);
         assert_eq!(
@@ -1092,7 +1049,7 @@ mod tests {
                 .unwrap()
                 .age_secs,
             10,
-            "캐시 원본은 보정에 안 닳는다"
+            "the cache original is not worn down by the correction"
         );
     }
 
@@ -1139,7 +1096,11 @@ mod tests {
         let empty = ViewManager::new();
         let mut idle = UsageInterest::new();
         let _ = idle.recompute(&empty, t0);
-        assert_eq!(idle.on_socket_open(1), None, "빈 관심은 보낼 것이 없다");
+        assert_eq!(
+            idle.on_socket_open(1),
+            None,
+            "empty interest has nothing to send"
+        );
         assert_eq!(idle.socket_epoch, 1);
     }
 
@@ -1157,7 +1118,7 @@ mod tests {
         let sent_before = ui.sent.clone();
 
         for stale in [5, 6, 0] {
-            assert_eq!(ui.on_socket_open(stale), None, "표식 {stale}");
+            assert_eq!(ui.on_socket_open(stale), None, "marker {stale}");
         }
         assert_eq!(ui.socket_epoch, 6);
         assert_eq!(ui.sent, sent_before);
@@ -1198,13 +1159,13 @@ mod tests {
         assert_eq!(ui.socket_epoch, 0);
         assert!(ui.cache.is_empty());
         assert!(ui.sent.is_empty());
-        assert!(!ui.deferral_elapsed(gen), "줄일 sent 가 사라졌다");
+        assert!(!ui.deferral_elapsed(gen), "the sent to reduce vanished");
         assert_eq!(
             ui.recompute(&mgr, t0),
             InterestAction::Nudge,
-            "비연결 중에는 관심이 곧 늘어남이다(넛지는 창구가 닫혀 no-op)"
+            "while disconnected, interest is the increase itself (the nudge is a no-op as the window is closed)"
         );
-        assert_eq!(ui.sync(0, false), None, "소켓 없음(0)과는 맞지 않는다");
+        assert_eq!(ui.sync(0, false), None, "does not match no-socket (0)");
         assert_eq!(ui.on_socket_open(2), Some(set(&[Claude])));
     }
 

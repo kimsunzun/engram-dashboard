@@ -24,9 +24,9 @@ Rounds 6-9 of the adversarial review at the C4 (group fan-out) gate found, one a
 
 ## 거부한 대안
 
-- **Two-tier quota + exemption (the design up to round 5)** — the exemption axis reset the denominator at every incarnation swap, so the queue grew without bound, and undeliverable bound items took up the quota, starving a respawn. It produced only defects for its complexity, and was discarded by user decision (2026-07-26, "정원 단순화" (simplify the quota)).
+- **Two-tier quota + exemption (the design up to round 5)** — the exemption axis reset the denominator at every incarnation swap, so the queue grew without bound, and undeliverable bound items took up the quota, starving a respawn. It produced only defects for its complexity, and was discarded by user decision (2026-07-26, 「정원 단순화」 ("simplify the quota")).
 - **A priority (importance) field** — unclear criteria + starvation and TTL cross bugs (an AMQP practitioner warning) + no LLM framework adopts it. Reconfirms the ADR-0103 rejected alternative — separating only what differs in nature into a lane (notice) is our way.
-- **Reusing visible_to (the visibility filter) in the cap denominator** — coupling the order axis and the capacity axis was the cause of the unbounded growth (맥락 2). Separate order (who is ahead) from capacity (how many).
+- **Reusing visible_to (the visibility filter) in the cap denominator** — coupling the order axis and the capacity axis was the cause of the unbounded growth (Context 2). Separate order (who is ahead) from capacity (how many).
 - **Registering in-flight at drain time** — counting even the share that is restored inside the lock inflates the denominator through an unobservable window, and rejects a normal send unfairly. Register only the batch that really leaves the lock (so the equation holds).
 - **Reinterpreting the deferral marker by name (re-query the roster at settlement)** — an id named by a hint queue that the name cannot resolve (rename, several same-name) would be lost, + it adds a port call to the settlement path. A set that preserves the requested id as it is is smaller and more exact.
 - **Adding a reject branch for notice (removing the +1 temporary overshoot)** — `deliver_notice` discards the park result, so a reject = a silent loss of a notice (half of the reply contract). We accept the +1 temporary overshoot (bounded, self-correcting).

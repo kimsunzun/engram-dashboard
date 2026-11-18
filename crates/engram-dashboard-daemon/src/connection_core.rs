@@ -1,20 +1,12 @@
-//! transport-중립 연결 코어(ConnectionCore) — ADR-0020 Stage 1.
+//! Transport-neutral connection core (ConnectionCore) — ADR-0020 Stage 1.
 //!
-//! carrier(WS/embedded/gRPC) 와 무관한 dispatch 를 소유한다. 입력은 `AgentCommand`, 출력은
-//! `Outbound`(AgentEvent/binary/close)를 `OutboundSink` 로만 흘린다 — TcpStream/tungstenite/frame
-//! codec 을 이 모듈은 모른다. 어댑터(`agent_conn::FrameOutboundSink`)가 `OutboundSink` 를 구현해
-//! 이 코어를 구동한다(미래 carrier 는 sink 만 새로 구현).
+//! Input is `AgentCommand`; output leaves only as `Outbound` through an `OutboundSink`. The module knows nothing of
+//! TcpStream/tungstenite/the frame codec; an adapter (`agent_conn::FrameOutboundSink`) implements the sink.
 //!
-//! ★불변식(R1~R7, ADR-0020) 보존이 절대 원칙★:
-//! - **R1 Ack→replay→ReplayComplete FIFO** — 유지 기전은 `handle_subscribe`.
-//! - **R6 close on saturation**: closing the connection when its queue is full is carrier-specific → the sink
-//!   implementation (the adapter) handles it by interpreting `SinkError`. The core sees only `SinkError` (this module does
-//!   not know how the connection is closed).
+//! ★Invariants R1~R7 (ADR-0020) must hold★: R1 Ack→replay→ReplayComplete FIFO (kept by `handle_subscribe`); R6 close on
+//! saturation is carrier-specific, so the sink implementation interprets `SinkError`.
 //!
-//! ★status fanout(broadcast)도 carrier-중립이다★: lease/profile 변경의 전-연결 브로드캐스트는
-//! per-conn 응답(OutboundSink)이 아니라 `crate::conn_port::FrameFanout`(전-연결
-//! 출구)으로 간다 — 인코딩된 text 하나를 넘길 뿐이라 연결이 몇 개인지도, 누가 등록돼 있는지도
-//! 이 모듈은 모른다(ADR-0129).
+//! The status fanout (lease/profile broadcast) goes through `crate::conn_port::FrameFanout`, not the per-conn reply (ADR-0129).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,8 +26,7 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, CancelError, InputOrigin,
     OutputSink, PtyError, ReplayKind, SinkId, SubscribeReply,
 };
-// 셸 스폰은 테스트 픽스처에만 남는다 — 운영 `SpawnByCwd` 에는 기본 백엔드가 없다(칸이 비면
-// `MISSING_BACKEND` 로 거절한다).
+// Production `SpawnByCwd` has no default backend (an empty field is refused with `MISSING_BACKEND`); only test fixtures spawn a shell.
 #[cfg(test)]
 use engram_dashboard_platform::shell::default_shell;
 
@@ -88,18 +79,14 @@ use engram_dashboard_command::{
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 use serde_json::value::RawValue;
 
-// ── OutboundSink seam(ADR-0003 OutputSink 결을 따름) ──────────────────────────────
+// ── OutboundSink seam (follows the grain of the ADR-0003 OutputSink) ──────────────────────────────
 
-/// carrier-중립 송신 단위. 네트워크 행의 `Frame`(Text/Binary/Close)에 대응하되, control 은 아직
-/// 인코딩 전 `AgentEvent` 라는 점이 다르다(인코딩은 어댑터가 소유).
+/// The carrier-neutral unit of sending (Text/Binary/Close); control is still an unencoded `AgentEvent` — the adapter encodes.
 ///
-/// ★Box<AgentEvent>★: AgentEvent 가 ~272B 라 다른 variant(24B)와 크기 차가 크다(clippy
-/// large_enum_variant). control 경로는 hot path 가 아니므로(출력 binary 는 Binary variant) Box
-/// 1회 할당이 무해하다. 생성은 `Outbound::event()` 헬퍼로 통일해 Box 를 숨긴다.
+/// `Box<AgentEvent>` avoids clippy `large_enum_variant` (~272B vs 24B); the control path is not hot. Build via `Outbound::event()`.
 #[derive(Debug)]
 pub enum Outbound {
     Event(Box<AgentEvent>),
-    /// 이미 인코딩된 출력 frame 바이트(codec).
     Binary(Vec<u8>),
     Close(String),
 }
@@ -110,7 +97,7 @@ impl Outbound {
     }
 }
 
-/// Sink enqueue failure (queue full / closed). The adapter interprets it per carrier (WS = the connection is closed, R6).
+/// Sink enqueue failure (queue full / closed). The adapter interprets it per carrier (WS = close the connection, R6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SinkError;
 
@@ -122,113 +109,82 @@ impl std::fmt::Display for SinkError {
 
 impl std::error::Error for SinkError {}
 
-/// 한 연결의 출력 송신 추상. dispatch 의 모든 응답/이벤트가 이걸 통해 나간다.
 pub trait OutboundSink: Send + Sync {
     fn enqueue(&self, out: Outbound) -> Result<(), SinkError>;
 
-    /// 코어 `subscribe_from` 에 넘길 output sink + replay drop 플래그를 만든다.
+    /// Builds the output sink + replay drop flag to hand to the core `subscribe_from`.
     ///
-    /// carrier(WS/embedded/gRPC)마다 인코딩이 달라(WS=binary frame, embedded=base64 PtyEvent) sink
-    /// 구현이 다르므로, 반환을 trait object 로 두어 carrier-중립으로 만든다. 함께 반환하는
-    /// `Arc<AtomicBool>` 은 replay 구간 중 frame drop(try_send full)이 있었는지다.
+    /// Encoding differs per carrier (WS = binary frame, embedded = base64 PtyEvent). The returned `AtomicBool` says whether a
+    /// frame drop (try_send full) happened during the replay phase.
     fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchFlow {
     Continue,
-    /// 연결 종료 — StopDaemon 수신에서만 난다.
+    /// Close the connection — produced only by `StopDaemon`.
     Close,
 }
 
-// ── 도착순 큐에 남을 것과 떼어 낼 것(head-of-line blocking) ──────────────────────────
+// ── what stays in the arrival-order queue and what is detached (head-of-line blocking) ──────────────────────────
 
-/// 한 명령을 **그 연결의 도착순 줄에서 떼어내** 별도 태스크로 돌려도 되는가.
+/// May one command be detached from the connection's arrival-order lane and run as a separate task?
 ///
-/// ★왜 분류가 필요한가★: 네트워크 행은 연결마다 소비자 하나로 프레임을 도착 순서대로 올린다
-///   (`conn_port::ConnectionHandler` 계약). 그 직렬성이 아래 순서 불변식들을 **공짜로** 지켜 주는
-///   대신, 한 명령이 오래 걸리면 그 연결의 다음 명령도 함께 늦는다. 그래서 「순서가 뜻을 갖지 않는
-///   것」만 골라 줄 밖으로 내보낸다.
-/// ★기본값은 [`DispatchOrder::InOrder`] 다 — 의심스러우면 줄에 남긴다★: 떼어 내는 쪽이 틀리면
-///   조용한 순서 결함이 되고, 남기는 쪽이 틀리면 느릴 뿐이다.
+/// The network layer lifts frames in arrival order, one consumer per connection (`conn_port::ConnectionHandler` contract), which
+/// keeps the ordering invariants for free but lets a slow command delay the next. Only commands whose order has no meaning leave.
+/// ★Default is [`DispatchOrder::InOrder`] — if in doubt, keep it in the lane★: wrongly detaching is a silent ordering defect, wrongly keeping is merely slow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DispatchOrder {
-    /// 도착 순서대로, 앞 명령이 끝난 뒤에 돈다.
     InOrder,
-    /// 줄에서 떼어 별도 태스크로 돈다 — 이 명령이 도는 동안 **뒤에 온 명령이 먼저 끝날 수 있다**.
+    /// Detached and run as a separate task — a later command can finish first.
     Detached,
 }
 
-/// 수신 줄이 **포화일 때만** 쓰는 두 번째 분류 — 그 프레임이 줄을 건너뛰어도 되는가.
+/// A second classification used only when the inbound lane is saturated — may that frame skip the lane?
 ///
-/// ★[`DispatchOrder`] 와 축이 다르다 — 합치지 말 것★: 저쪽은 「오래 걸리는가」이고 이쪽은 「막힌 줄을
-///   풀려는 것인가」다. 실제로 둘은 정반대로 갈린다 — 활성화는 오래 걸리지만 급하지 않고, `Kill` 은
-///   짧지만 급하다.
-/// ★포화가 아니면 이 판정은 **아예 불리지 않는다**★: 즉 평시에 `Kill` 이 앞선 명령을 추월하는 일은
-///   없다. 우선순위는 압력이 있을 때만 생긴다 — 그래야 「빠르게 하려고 순서를 버렸다」가 안 된다.
+/// ★Not the same axis as [`DispatchOrder`] — never merge them★ ("does it take long" vs "is it meant to unblock a blocked lane").
+/// ★When not saturated it is never called★, so `Kill` never overtakes an earlier command in normal times.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InboundLane {
-    /// 도착순 줄에 선다. 줄이 차 있으면 거절된다.
+    /// Stands in the arrival-order lane; refused when the lane is full.
     Ordered,
-    /// 줄을 건너뛴다 — 줄에 이미 든 것들보다 먼저·겹쳐서 돈다.
+    /// Skips the lane — runs before and overlapping with what is already queued.
     Bypass,
 }
 
-/// 수신 줄 포화 거절 문구. ★조용한 유실이 아니라 **말로 하는 거절**이다★ — 받은 쪽이 재시도할지
-/// 포기할지 정할 수 있어야 한다(codex transport 의 `INPUT_QUEUE_LIMIT`/ADR-0190 과 같은 처분).
+/// Wording of the inbound-lane saturation refusal — a spoken refusal, not a silent loss, so the receiver can retry or give up
+/// (same disposition as the codex transport's `INPUT_QUEUE_LIMIT`/ADR-0190).
 pub(crate) const SATURATED_REFUSAL: &str =
     "daemon inbound queue for this connection is saturated; this command was refused, not applied — \
      retry it, or send Kill if an agent is wedged";
 
-/// [`InboundLane`] 판정.
+/// The [`InboundLane`] decision. ★Only `Kill` skips — before growing the list, pass both checks below★:
+/// 1. Is it in no ordering group? `Kill` is in none of the five; it may overtake an earlier `WriteStdin`(X), and the lost bytes are what killing means.
+/// 2. Does it run on a different path from what blocks the lane? In-order lane blockers today: an earlier `Kill` awaiting
+///    `AgentManager::kill_agent` on the blocking pool (shutdown + pump join, 5 s ceiling) and the synchronous file IO of profile CRUD.
+///    A bypassing `Kill` goes down to `child.kill()` + the Job terminate (`PtyTransport::shutdown`). A second `Kill` of an agent whose
+///    kill is still running waits on that transport's master lock, so it does not end the first kill.
 ///
-/// ★★건너뛰는 것은 `Kill` 하나뿐이다 — 이 목록을 늘리기 전에 아래 둘을 먼저 통과시킬 것★★:
-///   ① **어떤 순서 묶음에도 들지 않는가.** `Kill` 은 다섯 묶음 어디에도 없다. 앞서 줄에 든
-///      `WriteStdin`(X) 을 추월해 그 바이트가 유실되지만, 그 에이전트를 죽이라는 것이 이 명령의 뜻이라
-///      그 유실이 곧 요청된 결과다.
-///   ② **Does it run on a different path from what is blocked?** The old line here — "the realistic
-///      cause of a blocked line is `write_stdin`'s blocking PTY write" — **is no longer true**: console
-///      transports have a per-agent input queue, so `send_input` queues and returns at once
-///      (`transport::input_queue`). **The rule still holds**: what holds the in-order line for long today
-///      is (a) an earlier `Kill` — its arm awaits `AgentManager::kill_agent` on the blocking pool, i.e. the
-///      transport shutdown plus the pump join (5 s ceiling; the shutdown has no bound of its own) — and
-///      (b) the synchronous file IO of profile CRUD. A `Kill` on the bypass lane skips both and goes down
-///      to `child.kill()` + the Job terminate (`PtyTransport::shutdown`), so it **runs on a different path
-///      and ends a stuck agent's I/O**; a second Kill of an agent whose kill is still running waits on that
-///      transport's master lock, so it does not end that first kill.
-/// ★`Interrupt` 를 여기 **넣지 않은 것은 의도다** — 둘 다 어긋난다★: ①로는 순서 묶음 ①에 정면으로
-///   들고(`WriteStdin`(X) ↔ `Interrupt`(X)), ②로는 **건너뛰어도 도착 시점이 그대로다**.
-///   ★②의 근거가 갈렸다 — 옛 문장(「`interrupt()` 가 `0x03` 을 **같은 PTY writer 로** 쓰므로 그 writer 에
-///   걸린다」)은 죽었다★(PTY 는 이제 끊기를 거절한다 — ADR-0245). 지금 참인 것: `interrupt()` 는 어느
-///   통로에서도 **즉시 돌아온다** — PTY 는 `Unsupported` 로 거절하고, claude JSON 통로는 끊기 줄을 그
-///   에이전트의 입력 큐에 넣고(큐에 이미 선 것들 뒤에 선다 — ADR-0238), codex 통로는 제어 큐에 넣는다.
-///   그래서 이 명령 자체는 아무것도 막지 않는다. 줄을 건너뛰어 얻는 것은 dispatch 몇 밀리초뿐이고,
-///   **순서를 깨면서 얻는 것이 여전히 없다.**
-/// ★★그 대신 기록해 둘 사실 — `Interrupt` 는 이제 포화에서 **거절된다**★★: 읽기와 처리가 한 줄이던
-///   옛 모양에서는 읽기 루프가 기다렸으므로 모든 명령이 늦게나마 **반드시** 처리됐다. 지금 도착순
-///   줄로 가는 것은 줄이 찬 순간 거절로 답해진다([`SATURATED_REFUSAL`]). 즉 압력이 걸린 순간 사용자가
-///   쥔 손잡이는 `Kill` 하나뿐이고, 그 문구가 `Kill` 을 가리키는 것이 이 변경 뒤에 **더** 맞는 말이 됐다.
-/// ★`StopDaemon` 도 넣지 않는다★: 순서 묶음 ⑤(이 연결의 마지막이어야 한다)에 정면으로 든다.
+/// ★`Interrupt` is deliberately not here★: it falls in ordering group ① (`WriteStdin`(X) ↔ `Interrupt`(X)), and `interrupt()` returns
+/// immediately on every channel (PTY refuses with `Unsupported` — ADR-0245; claude JSON queues behind pending input — ADR-0238;
+/// codex uses the control queue), so skipping gains nothing. It is refused on saturation with [`SATURATED_REFUSAL`]; the user's only
+/// handle under pressure is `Kill`. `StopDaemon` is not here either (ordering group ⑤).
 // ADR-0206
 pub(crate) fn inbound_lane(cmd: &AgentCommand) -> InboundLane {
     match cmd {
         AgentCommand::Kill { .. } => InboundLane::Bypass,
-        // ★여기만 `_ =>` 를 쓴다 — 형제([`dispatch_order`])가 그것을 금하는 것과 모순이 아니다★:
-        //   저쪽은 빠뜨리면 **틀린 쪽(느리거나 조용히 빠짐)**으로 기울지만, 여기서 빠뜨리면 기우는
-        //   곳이 「줄에 선다」 = 순서 보존 = 안전한 쪽이다. 새 variant 가 말없이 이 기본값을 받는 것이
-        //   바로 바라는 동작이라, 컴파일 에러로 묻을 이유가 없다.
+        // ★`_ =>` is allowed only here★ (unlike [`dispatch_order`]): the omission leans to "stand in the lane" = order preserved = the safe
+        // side, so a new variant silently taking this default is the desired behavior.
         _ => InboundLane::Ordered,
     }
 }
 
-/// 받은 명령을 **답 없이 거절할 때** 그 `Error` 에 실을 `request_id`(지금 쓰는 곳 = 수신 줄 포화 거절 —
-/// `agent_conn` 의 `on_inbound_saturated`).
+/// The `request_id` to carry in the `Error` when refusing a received command without a reply (today: inbound lane saturation,
+/// `on_inbound_saturated` in `agent_conn`).
 ///
-/// 갈래가 셸의 짝 맞추기(`daemon_client::protocol_state::command_request_id`)와 같다 — 거절이 보낸 쪽의 대기
-/// 슬롯을 깨우려면 그 슬롯의 키와 같은 번호여야 한다. `None` = 보낸 쪽이 대기 슬롯을 걸지 않는 명령이라 거절은
-/// `Error{request_id: None}` 으로 나간다. 봉투가 깨진 `Command` 도 `None` 이다(ADR-0272 결정 6).
-/// ★`_ =>` 를 두지 않는다★ — 새 variant 가 말없이 `None` 을 받으면 그 명령의 거절이 보낸 쪽을 마감시각까지
-/// 매달아 둔다.
+/// Branches match the shell's pairing (`daemon_client::protocol_state::command_request_id`): the refusal wakes the sender's wait slot
+/// only with that slot's key. `None` = the sender sets no wait slot (`Error{request_id: None}`); a broken envelope is also `None`
+/// (ADR-0272 decision 6). ★No `_ =>`★: a silent `None` for a new variant would hang the sender until the deadline.
 // ADR-0272
 pub(crate) fn command_request_id(
     cmd: &AgentCommand,
@@ -258,7 +214,7 @@ pub(crate) fn command_request_id(
         | AgentCommand::ListQueuedInputs { request_id, .. }
         | AgentCommand::CancelQueuedInput { request_id, .. }
         | AgentCommand::RefreshUsageLimits { request_id, .. } => Some(*request_id),
-        // 상관 키가 봉투 안에 있다 — 풀어서 읽는다(ADR-0272 결정 4).
+        // The correlation key is inside the envelope (ADR-0272 decision 4).
         AgentCommand::Command { envelope } => envelope_from_wire(envelope)
             .ok()
             .map(|envelope| engram_dashboard_protocol::RequestId(envelope.request_id.0)),
@@ -266,67 +222,45 @@ pub(crate) fn command_request_id(
         | AgentCommand::Subscribe { .. }
         | AgentCommand::Unsubscribe { .. }
         | AgentCommand::UsageSubscribe { .. }
-        // 보낸 쪽의 답장이다 — 그 안의 키는 이 데몬이 낸 요청의 것이라 보낸 쪽 대기 슬롯이 없다.
+        // The sender's reply: the key inside belongs to a request this daemon issued, so the sender has no wait slot.
         | AgentCommand::CommandOutcome { .. } => None,
     }
 }
 
-/// [`DispatchOrder`] 판정.
+/// The [`DispatchOrder`] decision.
 ///
-/// **Only the activation three and ⟳ (`RefreshUsageLimits`) are detached**: they wait inside dispatch
-///   **until an outcome** that may take seconds — activation until its result (typically 2 s, backstop
-///   15 s, about 20 s with the teardown on a failure verdict — the reason's source of truth is the
-///   `Spawn` arm comment), ⟳ until the query ends (cap = `usage_service::REPLY_WAIT_MAX`).
-///   In-order commands may await as well — `Kill` awaits its blocking task (transport shutdown + pump
-///   join) and holds the next command on this connection until it has replied. The rest have no await
-///   point (map lookup · input queue push · list encoding) or hand off to their own task (`Command`
-///   delivery · `StopDaemon`'s shutdown).
-/// ★떼어 내도 되는 근거는 「순서가 뜻을 갖지 않는다」 하나다★(⟳ 의 근거는 그 갈래 주석) — 중복 활성화를
-///   막는 것은 dispatch 의 도착 순서가 아니라 manager 의 예약(`SpawnReservation`)과 재활성화 가드(`activation_in_flight`)이고,
-///   그 둘은 연결을 모른다. 즉 이 셋을 줄에서 떼어도 **새로 열리는 창이 없다** — 같은 id 를 동시에
-///   띄우려는 두 요청은 옛날부터 그 가드로만 갈렸다(그 가드가 닫지 못하는 잔여 창 = ADR-0082).
-/// ★★대신 **이것들 사이·이것과 뒤 명령 사이의 순서는 보장되지 않는다**★★: 같은 연결에서
-///   `SpawnProfile(X)` 을 보내고 곧바로 `WriteStdin(X)` 을 보내면 아직 안 뜬 에이전트에 쓰게 되고,
-///   `SpawnProfile(X)` 을 연달아 두 번 보내면 **한 연결에서 온 두 요청이** manager 의 검사/등록 창에
-///   함께 든다(그 창 자체는 선재 — ADR-0082). 그 왕복의 완료 신호는 `Spawned`/`Error`(둘 다
-///   `request_id` 를 되돌려준다)이므로 **보낸 쪽이 그 답을 기다리는 것이 계약**이다.
-/// ★그 계약을 **클라이언트가 읽는 자리에 적었다**★ — 정본은 wire 어휘 쪽
-///   (`engram_dashboard_protocol::AgentCommand` 의 활성화 셋 doc)이고, 여기 되풀어 적지 않는다.
-///   ★「순서에 기대던 클라이언트가 있었다면 그것이 고쳐야 할 쪽이다」를 **점검 없이 쓰지 말 것**★ —
-///   이 저장소의 프론트는 실제로 `request_id` 상관표로 ack 를 기다린 뒤에야 그 id 를 쓴다(실측
-///   2026-09-18 · `src/api/protocolClient.ts` 의 `sendCommand` 대기표 · `slot.createAgentHere` 의
-///   `await spawnAgent(...)`). 즉 이 갈래를 고른 근거는 「계약이니까」가 아니라 **우리 클라이언트가
-///   이미 그 계약대로 돈다**는 관측이다.
-/// ★`_ =>` 로 묶지 않는 이유는 `dispatch` 의 match 와 같다★: variant 가 늘면 여기가 컴파일 에러로
-///   걸려 「이것은 줄에 남아야 하나」를 한 번 묻는다. catch-all 이면 새 variant 가 아무 판단 없이
-///   줄에 들어가거나(느림) 조용히 빠진다.
+/// Only the activation three and ⟳ (`RefreshUsageLimits`) are detached: they wait inside dispatch for an outcome that may take
+/// seconds (activation: typically 2 s, backstop 15 s, ~20 s with teardown on a failure verdict; ⟳: until the query ends, cap
+/// `usage_service::REPLY_WAIT_MAX`). Detaching opens no new window — duplicate activation is blocked by the manager's reservation
+/// (`SpawnReservation`) and `activation_in_flight`, which do not know the connection (residual window = ADR-0082).
+/// ★Order among these and later commands is not guaranteed★ (`SpawnProfile(X)` then `WriteStdin(X)` writes to an agent not
+/// yet up). The sender waits for `Spawned`/`Error` (both carry `request_id`); that contract lives in the activation-set doc of
+/// `engram_dashboard_protocol::AgentCommand`, and our frontend already waits through the `request_id` table (`sendCommand` in
+/// `src/api/protocolClient.ts`).
+/// ★No `_ =>`★: a new variant must be a compile error asking "must this stay in the lane".
 // ADR-0206
 pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
     match cmd {
-        // ── 줄 밖: 활성화가 결말까지 기다리는 셋 ──────────────────────────────────
+        // ── outside the lane: the three where activation waits for the outcome ──────────────────────────────────
         AgentCommand::Spawn { .. }
         | AgentCommand::SpawnProfile { .. }
-        // ★`SpawnByCwd` 도 여기 든다★: 실 프로세스 생성(`spawn_blocking` 뒤)이 끝날 때까지 기다린다. 순서가 뜻을
-        //   갖지 않는다 — 매번 새 uuid 를 만드는 즉석 생성이라 겹칠 짝이 애초에 없다.
+        // `SpawnByCwd` belongs here too: it waits until the real process creation (after `spawn_blocking`) ends. Order carries no meaning —
+        //   it is an ad-hoc creation that makes a new uuid every time, so there is no pair to overlap with.
         | AgentCommand::SpawnByCwd { .. }
-        // ★⟳ 도 줄 밖이다★ — 조회를 띄우면 그 끝을 상한(`usage_service::REPLY_WAIT_MAX`)까지 기다린다. 줄에 두면
-        //   그동안 이 연결의 `WriteStdin` 까지 밀린다. 순서가 뜻을 갖지 않는다: 같은 벤더의 ⟳ 둘은 서비스가 한
-        //   조회로 합류시키고, 구독 교체와의 앞뒤는 값이 어느 쪽이든 방송으로 닿는다.
+        // ⟳ is outside the lane too: a probe launch waits up to the cap (`usage_service::REPLY_WAIT_MAX`). Order has no meaning — two ⟳
+        // of the same vendor are merged by the service into one probe, and a subscription replacement reaches by broadcast either way.
         | AgentCommand::RefreshUsageLimits { .. } => DispatchOrder::Detached,
 
-        // ── 줄 안: 아래 다섯 묶음이 도착 순서에 걸려 있다 ────────────────────────────
-        // ① 같은 에이전트로 가는 입력끼리(`WriteStdin`↔`WriteStdin`/`Interrupt`) — 입력이 통로의 큐로
-        //    곧장 가고 그 밑에 순서를 다시 세우는 것이 없다. `Interrupt` 는 PTY 에선 거절이고(ADR-0245),
-        //    claude JSON 에선 입력과 같은 FIFO 에 서며(ADR-0238), codex 에선 제어 줄이 대기 입력보다 앞서
-        //    나가되 받아들여지는지는 도착 시점의 턴 상태에 달려 있다. 어느 쪽이든 `Interrupt` 는 ②에도
-        //    묶이므로 줄에 남는다(`Ordered`).
-        // ② 입력 lease 획득/반납과 그 뒤의 입력 — `check_input` 이 읽는 표를 이 둘이 쓴다.
-        // ③ 같은 연결의 `Subscribe`↔`Subscribe`/`Unsubscribe` — 등록이 코어 먼저·세션 나중이고
-        //    `ReplayComplete` 는 코어 잠금을 놓은 **뒤** 큐에 드니, 겹치면 Ack/replay/Complete 가
-        //    단일 writer 줄에서 뒤섞인다(R1 위반).
-        // ④ `RegisterCommands`↔`UpdateCommands` — 앞은 전량 교체, 뒤는 그 결과에 대한 차분이다.
-        // ⑤ `StopDaemon` must be this connection's **last** command (the only arm that returns `Close`). Detached,
-        //    its answer to end the connection would come after the next command had already passed.
+        // ── inside the lane: the five groups below hang on arrival order ────────────────────────────
+        // ① Inputs to the same agent (`WriteStdin`↔`WriteStdin`/`Interrupt`) — nothing below the channel queue re-establishes order.
+        //    `Interrupt`: refused on a PTY (ADR-0245), same FIFO as input on claude JSON (ADR-0238), acceptance depends on turn state on codex.
+        //    Either way `Interrupt` is also bound by ②, so it stays in the lane.
+        // ② Input lease acquire/return and the input after it — both write the table `check_input` reads.
+        // ③ `Subscribe`↔`Subscribe`/`Unsubscribe` of one connection — `ReplayComplete` is queued after the core lock is released, so overlap
+        //    would mix Ack/replay/Complete (R1).
+        // ④ `RegisterCommands`↔`UpdateCommands` — full replacement vs a diff against it.
+        // ⑤ `StopDaemon` must be the connection's last command (the only arm returning `Close`); detached, its answer to end the
+        //    connection would come after the next command had already passed.
         AgentCommand::Kill { .. }
         | AgentCommand::Interrupt { .. }
         | AgentCommand::WriteStdin { .. }
@@ -351,37 +285,32 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         | AgentCommand::Command { .. }
         | AgentCommand::CommandOutcome { .. }
         | AgentCommand::ListQueuedInputs { .. }
-        // ADR-0231: 취소는 ① 에 든다 — 같은 연결의 앞선 `WriteStdin` 을 앞지르면 그 글을 명부가 아직 모른다.
+        // ADR-0231: a cancel belongs to ① — overtaking an earlier `WriteStdin` of the same connection, the roster would not yet know that text.
         | AgentCommand::CancelQueuedInput { .. }
-        // 사용량 구독은 전량 교체라 도착순이 곧 뜻이다 — 연달아 온 두 교체는 마지막이 이겨야 한다. 처리에 await 가
-        //   없어 줄을 붙들지 않는다.
+        // A usage subscription is a full replacement: of two in a row the last must win. No await, so it does not hold the lane.
         | AgentCommand::UsageSubscribe { .. } => DispatchOrder::InOrder,
     }
 }
 
-// ── per-conn 수명 상태(ConnectionSession) ─────────────────────────────────────────
+// ── per-conn lifetime state (ConnectionSession) ─────────────────────────────────────────
 
-/// 한 연결의 수명 상태. dispatch(`on_text`)와 정리(`on_disconnect`)가 공유하므로 내부 필드는
-/// `Arc<Mutex<..>>` 다.
+/// The lifetime state of one connection, shared by dispatch (`on_text`) and cleanup (`on_disconnect`).
 pub struct ConnectionSession {
     pub conn_id: ConnId,
-    /// 이 연결이 등록한 (agent_id → sink_id) — cleanup 에서 누수 없이 unsubscribe.
+    /// (agent_id → sink_id) registered by this connection — unsubscribed in cleanup.
     pub subs: Arc<Mutex<HashMap<AgentId, SinkId>>>,
-    /// 이 연결이 등록한 (agent_id, viewport_id) 들 — cleanup 에서 viewport 협상 맵 정리.
+    /// (agent_id, viewport_id) pairs registered by this connection — cleaned from the viewport negotiation map in cleanup.
     pub owned_viewports: Arc<Mutex<Vec<(AgentId, String)>>>,
-    /// 남의 토큰 형식을 적은 등록을 이 연결에서 이미 한 번 남겼나(`note_claimed_owner`).
     claimed_owner_warned: AtomicBool,
-    /// 붙일 왕복이 없는 명령 결말을 이 연결에서 이미 한 번 경고했나(아래 `CommandOutcome` arm).
+    /// Whether this connection already warned once about a command outcome with no round trip to attach to (the `CommandOutcome` arm).
     ///
-    /// ★래치가 필요한 이유★: 이 프레임은 **클라이언트가 몇 번이든 보낼 수 있고** 릴리즈 데몬의 파일 sink 는
-    /// 무조건 켜져 있다(`docs/reference/logging-conventions.md`). 프레임마다 `warn!` 이면 로그 크기가 상대에게
-    /// 통제권을 넘긴다 — 형제 래치(`claimed_owner_warned`)와 같은 이유다.
+    /// The client can send this frame any number of times and the release daemon's file sink is always on
+    /// (`docs/reference/logging-conventions.md`); a per-frame `warn!` would hand log size to the other side. Same as `claimed_owner_warned`.
     stray_outcome_warned: AtomicBool,
-    /// 수신 줄 포화 거절을 이 연결에서 이미 한 번 경고했나(`AgentConnection::on_inbound_saturated`).
+    /// Whether this connection already warned once about an inbound-lane saturation refusal (`AgentConnection::on_inbound_saturated`).
     ///
-    /// ★래치 근거는 형제 둘과 같다★ — 포화는 **프레임마다** 판정되므로, 래치가 없으면 이 한 사건이
-    /// 릴리즈 데몬의 파일 로그를 통째로 덮는다. 다만 취소 계열 통과는 래치 밖에서 매번 남긴다:
-    /// 그건 드물고, 「막힌 줄을 무엇이 풀었나」를 나중에 되짚는 유일한 흔적이다.
+    /// Saturation is decided per frame, so without a latch it would flood the file log. A cancel-family command passed through is
+    /// logged every time outside the latch: rare, and the only trace of what unblocked the lane.
     pub(crate) saturated_warned: AtomicBool,
 }
 
@@ -397,50 +326,33 @@ impl ConnectionSession {
         }
     }
 
-    /// 이 연결이 명령 명부에서 갖는 주인 토큰.
+    /// This connection's owner token in the command roster.
     ///
-    /// ★연결 id 에서 **파생**한다 — 등록 패킷의 `owner` 칸을 신뢰하지 않는다★: 그 칸을 그대로 쓰면 아무
-    /// 연결이나 남의 토큰을 적어 그 이름들을 가져갈 수 있다(등록은 **살아 있는** 주인의 이름도 인수인계로
-    /// 덮는다 — `Roster::register`). 신원이 봉투가 아니라 **그 봉투가 온 연결**이라는 계약은 이미 서 있고
-    /// (TRD §4-⑧ · `CommandEnvelope::owner` 주석), TRD §3-7 은 데몬이 어느 쪽을 쓰는지를 열어 두었다.
-    /// ★오늘은 연결마다 새 토큰이 나는데, 그것은 **설계가 아니라 잠정 상태**다★: 재연결이 새 `ConnId` 를
-    /// 받으므로 데몬 눈에는 남남이고, 옛 연결의 등록은 끊길 때 지워지므로(ADR-0150 결정 3) 물려받을 것도
-    /// 없다 — 이름의 인수인계는 명부의 last-wins 규칙이 한다.
-    /// ★슬라이스 B 가 이 자리를 대체한다★ — 주인 키는 **클라이언트가 만들어 첫 인사에 실어 보낸 식별자**가
-    /// 되고, 그 값은 **재접속을 가로질러 같다**(ADR-0150 결정 1·2 · TRD §3-7 조항 1·5). 명부의 last-wins 가
-    /// 적힌 대로 「덮기」로 서는 것이 그 동일성에 달려 있다 — 매 연결이 남남인 지금은 같은 규칙이 덮기가
-    /// 아니라 **쌓기**로 돌고, 그래서 자취를 버려야 했다(ADR-0150 맥락). 연결 id 파생은 그때 식별자를 안
-    /// 보낸 연결의 fail-open 갈래로만 남는다(그 결정의 영향절).
-    /// ★이 토큰은 wire 에 나가지 않는다★ — 그래서 클라이언트는 자기 토큰을 알 길이 없고, 등록 패킷의
-    /// `owner` 칸이 데몬의 파생값과 다른 것은 위반이 아니라 **정상**이다(그래서 거절이 아니다 —
-    /// `note_claimed_owner`). 그 칸은 식별자가 들어온 뒤에도 계속 무시한다 — 떼는 것도 계약 변경인데 얻는
-    /// 것이 없다(ADR-0150 영향절).
+    /// ★Derived from the connection id — the registration packet's `owner` field is not trusted★: it would let any connection take
+    /// another's names (registration overwrites even a live owner's names — `Roster::register`). Identity is the connection the envelope
+    /// came from (TRD §4-⑧ · `CommandEnvelope::owner`; TRD §3-7).
+    /// Provisional: a reconnect gets a new `ConnId` and the old registration is erased on disconnect (ADR-0150 decision 3). Slice B
+    /// replaces this with a client-made identifier sent in the first greeting, stable across reconnects (ADR-0150 decisions 1·2 · TRD §3-7
+    /// clauses 1·5); this derivation then remains only as the fail-open branch for a connection that sends no identifier.
+    /// The token is not on the wire, so a registration `owner` differing from this is normal, not a refusal (`note_claimed_owner`).
+    /// That field stays ignored even after slice B — removing it is a contract change with nothing to gain (ADR-0150 Impact).
     ///
-    /// 파생 자체는 [`CommandRoster::owner_of`] 하나뿐이다 — 형식을 두 곳에 두지 않는다.
-    ///
-    /// ★이 값이 **권위는 아니다**★: 명부가 실제로 쓰는 주인 토큰은 `attach` 가 그때 계산해 표에 넣어 둔
-    /// 값이고, 그것을 묻는 곳은 [`CommandRoster::attached_owner`] 다(ADR-0154). 오늘 둘이 같은 것은
-    /// 「파생 지점이 하나여서」가 아니라 **`attach` 가 마침 같은 규칙으로 파생하기 때문**이다 — 슬라이스 B
-    /// 가 `attach` 를 클라이언트 자작 식별자로 바꾸면 이 메서드는 그 값을 따라가지 못한다.
-    /// ★그래서 운영 경로에는 이 메서드의 소비자가 없다★ — 클라이언트의 주장을 견주는
-    /// `note_claimed_owner` 도 표의 저장값을 쓴다. 여기 남은 것은 위 정책 서술과, `attach` 가 **무엇을
-    /// 저장하는지**를 무는 테스트의 기대값이다.
+    /// ★Not the authority★: the roster uses the value `attach` stored ([`CommandRoster::attached_owner`], ADR-0154); they agree only
+    /// because `attach` derives by the same rule ([`CommandRoster::owner_of`]). No production consumer remains — only the test that
+    /// checks what `attach` stores.
     // ADR-0150
     pub fn owner_token(&self) -> OwnerToken {
         CommandRoster::owner_of(self.conn_id)
     }
 }
 
-// ── 멀티뷰어 협상 상태(MultiViewState) ───────────────────────────────────────────────
+// ── multi-viewer negotiation state (MultiViewState) ───────────────────────────────────────────────
 //
-// 데몬은 한 agent 를 여러 연결(메인창/팝업/모바일)이 동시 attach 하는 것을 전제한다. 그래서 두
-// 정책을 데몬측에 둔다(코어 무변경 — 코어는 최종 크기·통과 여부만 받는다):
-//  - resize 협상(tmux smallest): 각 viewport 가 자기 크기를 등록하면, agent 의 모든 viewport 중
-//    가장 작은(min cols, min rows) 크기로 PTY 를 맞춘다(작은 화면이 안 깨짐).
-//  - 입력 lease(Zellij 명시 lease): 한 agent 의 입력 권한을 한 연결만 쥘 수 있다(인터리브 방지).
+// Several connections may attach to one agent at once. Two policies live on the daemon side (the core receives only the final size
+// and whether to pass): resize negotiation (tmux smallest: the PTY fits the min cols/rows of all the agent's viewports) and the
+// input lease (Zellij explicit lease: one connection holds one agent's input authority).
 //
-// ★동시성★: 여러 연결 task 가 동시 접근하므로 Arc<Mutex>. **lock 보유 중 manager.resize/await 호출
-//   금지** — lock 을 잡고 짧게 협상값만 계산해 해제한 뒤 그 결과로 manager 를 부른다(코어 §10 락 순서).
+// Concurrency: Arc<Mutex>. ★No manager.resize/await call while holding the lock★ — compute, release, then call the manager (core §10 lock order).
 
 #[derive(Clone, Default)]
 pub struct MultiViewState {
@@ -449,7 +361,6 @@ pub struct MultiViewState {
 
 #[derive(Default)]
 struct MultiViewInner {
-    /// agent_id → (viewport_id → (cols, rows)).
     viewports: HashMap<AgentId, HashMap<String, (u16, u16)>>,
     leases: HashMap<AgentId, ConnId>,
 }
@@ -459,8 +370,8 @@ enum LeasePass {
     Denied,
 }
 
-/// [`LeasePass::Denied`] 의 거절 문구 — 입력에 영향을 주는 WS 명령(`Interrupt`·`WriteStdin`·`CancelQueuedInput`)이
-/// **같은 글자**로 거절한다(비보유자는 어느 동사로 와도 같은 답을 받는다).
+/// Refusal wording of [`LeasePass::Denied`]; the WS commands that affect input (`Interrupt`·`WriteStdin`·`CancelQueuedInput`)
+/// refuse with the same characters.
 // ADR-0231
 pub(crate) const INPUT_LOCKED_REFUSAL: &str = "input locked by another viewer; acquire first";
 
@@ -469,7 +380,7 @@ impl MultiViewState {
         Self::default()
     }
 
-    /// 반환 None = 등록된 viewport 가 없음(이론상 방금 넣었으므로 항상 Some).
+    /// `None` = no registered viewport (theoretically always `Some`, one was just inserted).
     fn set_viewport(
         &self,
         agent_id: AgentId,
@@ -485,7 +396,7 @@ impl MultiViewState {
         smallest(g.viewports.get(&agent_id))
     }
 
-    /// 반환: (agent_id, Some(min) = 남은 viewport 의 smallest / None = 이제 viewport 없음).
+    /// Returns (agent_id, `Some(min)` = smallest of the remaining viewports / `None` = no viewport now).
     pub fn remove_conn_viewports(
         &self,
         owned: &[(AgentId, String)],
@@ -509,7 +420,7 @@ impl MultiViewState {
             .collect()
     }
 
-    /// Ok(true)=새로 획득(상태 변경), Ok(false)=이미 이 conn 보유(멱등), Err=다른 conn 이 보유 중.
+    /// Ok(true)=newly acquired (state change), Ok(false)=this conn already holds (idempotent), Err=another conn holds.
     fn acquire(&self, agent_id: AgentId, conn_id: ConnId) -> Result<bool, ()> {
         let mut g = self.inner.lock().expect("multiview poisoned");
         match g.leases.get(&agent_id) {
@@ -522,8 +433,8 @@ impl MultiViewState {
         }
     }
 
-    /// Ok(true)=해제됨(상태 변경), Ok(false)=원래 비어 있었음, Err=다른 conn 이 보유 중
-    /// (보유자만 해제 가능).
+    /// Ok(true)=released (state change), Ok(false)=it was empty to begin with, Err=another conn holds
+    /// (only the holder can release).
     fn release(&self, agent_id: AgentId, conn_id: ConnId) -> Result<bool, ()> {
         let mut g = self.inner.lock().expect("multiview poisoned");
         match g.leases.get(&agent_id) {
@@ -540,8 +451,8 @@ impl MultiViewState {
         self.lease_pass(agent_id, Some(conn_id))
     }
 
-    /// 입력 임대 판정의 **유일한 자리** — WS(`check_input`)와 버스·CLI(`InputLease`)가 여기로 든다.
-    /// `caller == None` 은 연결 없는 호출자라 보유자일 수 없다(누가 쥐었으면 거절).
+    /// The only place of the input lease decision — WS (`check_input`) and the bus·CLI (`InputLease`) both come here.
+    /// `caller == None` is a caller with no connection, so it cannot be the holder (refused if anyone holds it).
     // ADR-0231
     fn lease_pass(&self, agent_id: AgentId, caller: Option<ConnId>) -> LeasePass {
         let g = self.inner.lock().expect("multiview poisoned");
@@ -552,8 +463,7 @@ impl MultiViewState {
         }
     }
 
-    /// 좀비 lock 방지. 반환된 agent 들은 이제 lease 가 비었으므로 InputLeaseChanged{held:false} 를
-    /// 브로드캐스트할 대상이다.
+    /// Prevents a zombie lock. The returned agents now have an empty lease and are the targets for broadcasting InputLeaseChanged{held:false}.
     pub fn release_all_for_conn(&self, conn_id: ConnId) -> Vec<AgentId> {
         let mut g = self.inner.lock().expect("multiview poisoned");
         let freed: Vec<AgentId> = g
@@ -569,7 +479,7 @@ impl MultiViewState {
     }
 }
 
-// ADR-0231: 명령 표 공통 입구의 임대 포트 — 판정은 WS 와 같은 `lease_pass` 한 자리다.
+// ADR-0231: the lease port of the command table's common entrance — decision is the same `lease_pass` as WS.
 impl crate::control::commands::InputLease for MultiViewState {
     fn permits(&self, agent_id: AgentId, caller: Option<ConnId>) -> bool {
         matches!(self.lease_pass(agent_id, caller), LeasePass::Allow)
@@ -587,14 +497,12 @@ fn smallest(views: Option<&HashMap<String, (u16, u16)>>) -> Option<(u16, u16)> {
     Some((c, r))
 }
 
-// ── 타입 변환(core → wire) ─────────────────────────────────────────────────────
+// ── type conversion (core → wire) ─────────────────────────────────────────────────────
 //
-// ★reflection 왕복 금지(되살리지 말 것)★: serde_json::to_value→from_value 로 core↔wire 를 돌리면
-// 한쪽 필드/태그가 어긋나도 컴파일은 통과하고 런타임에 silent drop(None) 된다. 그래서 필드를 하나씩
-// 명시 매핑한다 — core 에 필드가 추가/개명되면 **컴파일 에러**가 나게.
-//
-// 변환은 데몬 crate 에 둔다(core 는 protocol 무의존 유지 — §1 불변). orphan rule 때문에 외부 두
-// 타입 사이 `impl From` 은 불가하나, 데몬이 양쪽을 다 의존하므로 자유 함수로 직접 필드 접근한다.
+// ★No reflection round trip (do not revive)★: core↔wire through serde_json::to_value→from_value compiles when a field/tag drifts and
+// silently drops (None) at runtime. Fields are mapped explicitly so core changes give a compile error.
+// The conversion lives in the daemon crate (the core stays protocol-free — a §1 invariant); the orphan rule forbids `impl From`
+// between two external types.
 
 fn caps_to_wire(c: &CoreCaps) -> WireCaps {
     WireCaps {
@@ -687,12 +595,11 @@ pub(crate) fn core_agents_to_wire(agents: Vec<CoreAgentInfo>) -> Vec<WireAgentIn
     agents.iter().map(agent_info_to_wire).collect()
 }
 
-/// 스폰 패킷의 backend 칸이 비었을 때 돌려주는 문구. ★어느 칸을 채워야 하는지 말한다★ — 다음 스폰
-/// 입구를 만드는 사람이 이 답장 하나로 고칠 수 있어야 한다(그 사람이 이 문구를 만나는 것이 이 거절의
-/// 목적이다).
-const MISSING_BACKEND: &str = "backend 칸이 비었다 — 스폰 패킷(SpawnByCwd·CreateProfile)의 `backend` 에 \"claude\" 또는 \"codex\" 를 적어라. 기본값은 없다(고르지 않은 것과 claude 를 고른 것을 구별하려는 결정 — 조용히 다른 백엔드가 뜨지 않는다).";
+/// The wording returned when the backend field of a spawn packet is empty. It names the field to fill, so the next spawn entrance
+/// builder can fix it from this one reply.
+const MISSING_BACKEND: &str = "the backend field is empty — write \"claude\" or \"codex\" in `backend` of the spawn packet (SpawnByCwd·CreateProfile). There is no default (a decision to tell apart not choosing from choosing claude — a different backend does not come up quietly).";
 
-/// wire 백엔드 선택 → 코어 실행 명령. `None` = 칸이 비었다(호출자가 [`MISSING_BACKEND`] 로 거절한다).
+/// The wire backend choice → the core run command. `None` = the field is empty (the caller refuses with [`MISSING_BACKEND`]).
 ///
 /// ★Both arms carry the `output_format` they were given — this function fills no default★: filling one here would
 /// split the requested mode from the launched one, unseen until the agent behaves differently. `CreateProfile` passes
@@ -715,7 +622,7 @@ fn spawn_command_for(
     }
 }
 
-/// 백엔드 생성 정책의 꼴 — 낱말 하나를 받아 `None` = 만든다, `Some(사유)` = 안 만든다.
+/// Backend-creation policy shape — takes one word, `None` = create, `Some(reason)` = do not create.
 type BackendPolicyFn = fn(&str) -> Option<&'static str>;
 
 /// The wire backend's word, for the `SpawnByCwd` refusal text only — the policy itself is asked by the creation body
@@ -729,17 +636,15 @@ fn wire_backend_word(kind: WireBackendKind) -> String {
 
 /// The refusal text when the policy closes a `SpawnByCwd` backend — `reason` is the policy's.
 ///
-/// ★문구는 혼자 서야 한다★ — 데몬 `Error` 의 글은 접두 없이 버스 호출자까지 그대로 간다(셸
-/// `agent.spawnInto` 는 그것을 `CONFLICT` 로 싣는다). 앞부분은 `agent.new` 의 정책 거절(agent `verb_new`)
-/// 틀을 그대로 쓰고 끝에 「스폰 안 함.」을 붙인다. 그 형제와 다른 점 셋 — 이쪽 낱말은 wire 직렬화라 늘
-/// lowercase(그쪽은 선언 어휘 `Claude`), 이쪽엔 그 꼬리가 있고 그쪽엔 없다, 그쪽 코드는
-/// `INVALID_ARGUMENT` 고 이쪽은 셸이 `CONFLICT` 로 싣는다. 오탈자 그물의 「를 모른다」와는 갈린다 — 뭉치면
-/// 호출자가 있지도 않은 오탈자를 고치려 든다.
+/// ★Must stand alone★: the daemon `Error` text reaches the bus caller with no prefix (the shell's `agent.spawnInto` carries it as
+/// `CONFLICT`). The front is the `agent.new` policy-refusal frame (agent `verb_new`) plus "Not spawned."; this side's word is the
+/// lowercase wire serialization (that side: `Claude`) and the code is `CONFLICT` here vs `INVALID_ARGUMENT` there. Kept apart from the
+/// typo net's "unknown backend" — lumped, the caller would fix a typo that is not there.
 // ADR-0279
 fn by_cwd_refusal(kind: WireBackendKind, reason: &str) -> String {
     let word = wire_backend_word(kind);
     format!(
-        "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason} 스폰 안 함."
+        "backend '{word}' is a known word, but this surface does not create it now — {reason} Not spawned."
     )
 }
 
@@ -796,7 +701,7 @@ fn profile_to_wire(p: &CoreProfile) -> WireProfile {
         id: p.id,
         name: p.name.clone(),
         display_name: p.display_name.clone(),
-        // core AgentId 와 wire ProfileId 는 같은 Uuid alias 라 변환 없이 복사한다.
+        // The core AgentId and the wire ProfileId are the same Uuid alias, so they are copied without conversion.
         parent_id: p.parent_id,
         command: spawn_command_to_wire(&p.command),
         cwd: p.cwd.to_string_lossy().into_owned(),
@@ -826,12 +731,10 @@ fn snapshot_chunk_to_wire(c: &CoreOutputChunk) -> WireSnapshotChunk {
     }
 }
 
-/// ★반환이 Option 인 이유(TerminalBytes 방어)★: 정상 경로에서 `OutputEvent::TerminalBytes` 는 이 변환에
-/// **오지 않는다** — 콘솔 raw 바이트는 sink 에서 tag0 terminal frame(`OutputPayload::Bytes`)으로 갈리고,
-/// 이 함수는 `OutputPayload::Event` arm(tag1)에서만 불린다. wire `StructuredEvent` 에는 TerminalBytes
-/// variant 가 없으므로(tag1 payload 에 raw 바이트를 안 싣는다 — ADR-0045), 만약 TerminalBytes 가 이 arm 에
-/// 도달하면 매핑 불가다. 그때 패닉 대신 `None` 을 돌린다 — tag0/tag1 오분류는 상류 배선 버그지 이 frame
-/// 하나로 연결을 죽일 사안이 아니다(호출부 처리는 `agent_conn::FrameOutputSink::send`).
+/// Returns `Option` as a TerminalBytes defense: `OutputEvent::TerminalBytes` should never reach this conversion (console raw bytes are
+/// split at the sink into a tag0 frame; only the `OutputPayload::Event` arm calls this) and the wire `StructuredEvent` has no such
+/// variant (ADR-0045). `None` instead of a panic: a tag0/tag1 misclassification is an upstream wiring bug, not worth killing the
+/// connection (call site: `agent_conn::FrameOutputSink::send`).
 pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructuredEvent> {
     match ev {
         CoreOutputEvent::TerminalBytes(_) => None,
@@ -896,8 +799,8 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
     }
 }
 
-/// 명부 사건 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 사건·원인이 늘면 여기가 컴파일 에러로 서야 새 어휘가
-/// 조용히 다른 사건으로 접히지 않는다(프론트 누산기가 명부와 같은 환원을 하려면 사건열이 그대로 건너가야 한다).
+/// A roster-event domain → wire. ★No `_` branch★: new events/causes must be a compile error so none silently folds into another
+/// (the frontend accumulator reduces like the roster only if the event sequence crosses as is).
 // ADR-0231
 fn queued_input_to_wire(op: &CoreQueuedInputEvent) -> WireQueuedInputEvent {
     match op {
@@ -952,8 +855,8 @@ fn drop_cause_to_wire(cause: CoreDropCause) -> WireDropCause {
     }
 }
 
-/// 목록 조회 한 번의 답 → wire. 낱말은 버스 `agent.listQueuedInputs` 가 쓰는 그 `as_str` 들이다(두 표면이 같은
-/// 글자를 싣는다). 구조 분해로 받는 것은 manager 쪽에 칸이 늘면 여기가 컴파일 에러로 서게 하려는 것이다.
+/// The answer of one list lookup → wire, using the `as_str` words of the bus `agent.listQueuedInputs`. Destructured so a new
+/// manager field is a compile error.
 // ADR-0231
 fn queued_listing_to_wire(
     request_id: engram_dashboard_protocol::RequestId,
@@ -994,7 +897,7 @@ fn queued_listing_to_wire(
     }
 }
 
-/// 목록 조회 실패 → `Error` 문구(`CODE: 문구`). manager 의 실패는 「산 세션이 없다」 하나다.
+/// List lookup failure → `Error` wording (`CODE: wording`); the manager's failure is the single "no live session".
 fn list_error_text(agent_id: AgentId, e: PtyError) -> String {
     match e {
         PtyError::NotFound(_) => CommandError::not_found(format!(
@@ -1007,14 +910,14 @@ fn list_error_text(agent_id: AgentId, e: PtyError) -> String {
     .to_string()
 }
 
-/// 취소 실패 → `Error` 문구(`CODE: 문구`) — 코드는 버스 `agent.cancelQueuedInput` 과 같다.
+/// Cancel failure → `Error` wording (`CODE: wording`) — codes match the bus `agent.cancelQueuedInput`.
 fn cancel_error_text(agent_id: AgentId, input_id: &str, e: CancelError) -> String {
     match e {
-        // 「이미 결말이 났다」와 「잠들었다」를 가르지 않는다 — 호출자가 할 일이 같다(목록을 다시 본다).
+        // "Already settled" and "went dormant" are not told apart — the caller does the same thing (re-read the list).
         CancelError::NotFound => CommandError::not_found(format!(
             "agent {agent_id} has no waiting input '{input_id}' — it was already delivered, cancelled or dropped, or the agent is not running; list its queued inputs to see what is still waiting"
         )),
-        // 다시 보내라고 안내하지 않는다 — 항목은 취소 대기 그대로라 재요청은 아무것도 쓰지 않고 `requested` 다.
+        // No resend instruction: the item is still waiting to be cancelled, so a re-request writes nothing and is `requested`.
         CancelError::Write(e) => CommandError::internal(format!(
             "the cancel request for '{input_id}' could not be written to agent {agent_id}: {e} — the item stays in the cancelling state and sending it again will not resend it; its fate now follows the agent's own lifecycle, so watch it in the queued-input list"
         )),
@@ -1022,12 +925,11 @@ fn cancel_error_text(agent_id: AgentId, input_id: &str, e: CancelError) -> Strin
     .to_string()
 }
 
-/// 저장소가 이 요청의 변경을 받지 않았다 → `Error` 문구(`CODE: 문구`). 코드 나눔(거절 = `CONFLICT` · 쓰기 실패 =
-/// `INTERNAL`)과 사유 문구는 명령 버스와 같은 것을 쓴다(agent `store_command_error` · `store_error_reason`). WS 문구는
-/// 재시도 지시를 싣지 않으므로 「조금 뒤 다시」는 그 사유 문구가 나른다. `what` = 무엇이 안 됐나 · `file` = 받지 않은
-/// 파일.
-/// ★거절을 남기는 한 줄이 여기 하나다★(WS 에서 그 요청이 오류가 되는 자리) — 저장소의 로그는 파일 쪽 사실(무엇이
-///   막았나)이고 이 줄은 요청 쪽 사실(어느 요청이 막혔나)이다. 호출자가 보낸 값(이름 · 경로)은 싣지 않는다.
+/// The store did not accept this request's change → `Error` wording (`CODE: wording`). The code split (refusal = `CONFLICT`, write
+/// failure = `INTERNAL`) and reason wording match the command bus (agent `store_command_error` · `store_error_reason`); the WS wording
+/// carries no retry instruction, so "try again shortly" comes from that reason. `what` = what failed · `file` = the file that did not accept.
+/// This is the one line recording the refusal on the request side (the store's log records the file side). Caller-sent values
+/// (name · path) are not carried.
 // ADR-0291 R17
 fn store_error_text(
     conn_id: ConnId,
@@ -1041,7 +943,7 @@ fn store_error_text(
         verb,
         file,
         %error,
-        "저장소가 받지 않아 이 요청을 오류로 돌려준다(WS)"
+        "the store did not accept it; returning this request as an error (WS)"
     );
     store_command_error(
         error,
@@ -1050,8 +952,8 @@ fn store_error_text(
     .to_string()
 }
 
-/// 프로필 쪽 요청(매니저의 `try_` 판 · 활성화)의 실패 → `Error` 문구. 프로필 파일의 저장 `Err` 만
-/// [`store_error_text`] 로 — 나머지는 `PtyError` 의 Display 그대로다.
+/// Failure of a profile-side request (the manager's `try_` version · activation) → `Error` wording. Only the profile file's save `Err`
+/// goes through [`store_error_text`]; the rest is the `PtyError` Display as is.
 // ADR-0291 R17
 fn profile_error_text(conn_id: ConnId, verb: &'static str, what: &str, e: PtyError) -> String {
     match e {
@@ -1101,8 +1003,8 @@ fn delivery_for(deliver_notices: bool) -> NoticeDelivery {
     }
 }
 
-/// 도구 종류 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 종류가 늘면 여기가 컴파일 에러로 서야 새 종류가
-/// 조용히 다른 종류로 접히지 않는다. 데몬은 벤더 도구 이름을 모른다 — 판정은 각 backend 번역기가 끝냈다.
+/// Tool kind domain → wire. ★No `_` branch★: a new kind must be a compile error so it never silently folds into another kind.
+/// The daemon does not know vendor tool names — each backend translator already decided.
 // ADR-0239
 fn tool_category_to_wire(category: CoreToolCategory) -> WireToolCategory {
     match category {
@@ -1118,8 +1020,7 @@ fn tool_category_to_wire(category: CoreToolCategory) -> WireToolCategory {
     }
 }
 
-/// 도구 끝 결말 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 결말이 늘면 여기가 컴파일 에러로 서야 새 결말이
-/// 조용히 다른 결말로 접히지 않는다(거부가 실패로 접히면 「오류 N」이 거짓이 된다).
+/// Tool-end outcome domain → wire. ★No `_` branch★: a denial folded into a failure would make "N errors" false.
 // ADR-0241
 fn tool_outcome_to_wire(outcome: CoreToolOutcome) -> WireToolOutcome {
     match outcome {
@@ -1130,8 +1031,7 @@ fn tool_outcome_to_wire(outcome: CoreToolOutcome) -> WireToolOutcome {
     }
 }
 
-/// 턴 결말 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 어휘가 늘면 여기가 컴파일 에러로 서야 새 결말이
-/// 조용히 `Unknown` 으로 접히지 않는다.
+/// Turn outcome domain → wire. ★No `_` branch★: a new outcome must not silently fold into `Unknown`.
 fn turn_outcome_to_wire(outcome: &CoreTurnOutcome) -> WireTurnOutcome {
     match outcome {
         CoreTurnOutcome::Completed => WireTurnOutcome::Completed,
@@ -1155,22 +1055,21 @@ pub(crate) fn core_status_to_wire(status: CoreStatus) -> engram_dashboard_protoc
     status_to_wire(&status)
 }
 
-// ADR-0310: 등록 패킷의 주인 표지는 protocol 사본이다 — 명부 · 판정이 쓰는 도구 crate 타입으로 여기서 옮긴다.
+// ADR-0310: the owner mark of a registration packet is a protocol copy, moved here into the tool-crate type the roster uses.
 fn owner_from_wire(owner: WireOwnerToken) -> OwnerToken {
     OwnerToken(owner.0)
 }
 
-/// 명령 패킷의 봉투 칸(원문 JSON)을 명부 · 배달이 쓰는 도구 crate 봉투로 푼다(ADR-0272 결정 4).
+/// Unpacks the envelope field (raw JSON) of a command packet into the tool-crate envelope (ADR-0272 decision 4).
 ///
-/// `Err` = 패킷은 풀렸는데 봉투 모양이 틀렸다(ADR-0272 결정 6) — 받는 쪽은 그 명령을 `Error{request_id: None}`
-/// 으로 거절한다(번호를 못 읽었으니 실을 번호가 없다).
+/// `Err` = the envelope shape is wrong (ADR-0272 decision 6) — the receiver refuses with `Error{request_id: None}` (the number could not be read).
 // ADR-0272
 pub(crate) fn envelope_from_wire(raw: &RawValue) -> Result<CommandEnvelope, serde_json::Error> {
     serde_json::from_str(raw.get())
 }
 
-/// 배달할 봉투를 패킷의 원문 칸으로 다시 싼다(ADR-0272 결정 6 의 중계 다시 싸기). 중계가 고친 인자(ADR-0308
-/// `resolve_agent_args`)는 이 바이트에 실린다 — 받은 원문을 그대로 넘기면 그 고침이 사라진다.
+/// Re-wraps the envelope to deliver into the packet's raw field (ADR-0272 decision 6). The arguments the relay fixed (ADR-0308
+/// `resolve_agent_args`) ride in these bytes — passing the received raw as is would lose that fix.
 // ADR-0272
 pub(crate) fn envelope_to_wire(
     envelope: &CommandEnvelope,
@@ -1178,49 +1077,45 @@ pub(crate) fn envelope_to_wire(
     serde_json::value::to_raw_value(envelope)
 }
 
-/// 주인이 돌려준 결말 패킷(`CommandOutcome`)의 답장 칸(원문 JSON)을 배달 표가 쓰는 도구 crate 답장으로
-/// 푼다(ADR-0272 결정 4).
+/// Unpacks the reply field (raw JSON) of the `CommandOutcome` packet into the tool-crate reply (ADR-0272 decision 4).
 ///
-/// `Err` = 패킷은 풀렸는데 답장 모양이 틀렸다(ADR-0272 결정 6) — 받는 쪽은 번호를 못 읽어 왕복에 붙이지 못하고
-/// 그 결말을 `Error{request_id: None}` 으로 거절한다.
+/// `Err` = the reply shape is wrong (ADR-0272 decision 6) — the number cannot be read, so the receiver refuses with `Error{request_id: None}`.
 // ADR-0272
 pub(crate) fn reply_from_wire(raw: &RawValue) -> Result<CommandReply, serde_json::Error> {
     serde_json::from_str(raw.get())
 }
 
-/// 호출자에게 낼 답장을 답장 패킷(`AgentEvent::CommandReply`)의 원문 칸으로 싼다. 중계가 내린 재시도 지시
-/// (`command_delivery::send_reply`)는 이 바이트에 실린다 — 주인이 보낸 원문을 그대로 넘기면 그 지시가 사라진다.
+/// Wraps the reply into the raw field of `AgentEvent::CommandReply`. The retry instruction the relay issued
+/// (`command_delivery::send_reply`) rides in these bytes — passing the owner's raw as is would lose it.
 // ADR-0272
 pub(crate) fn reply_to_wire(reply: &CommandReply) -> Result<Box<RawValue>, serde_json::Error> {
     serde_json::value::to_raw_value(reply)
 }
 
-/// 등록 패킷(`RegisterCommands.decls` · `UpdateCommands.added`)의 항목 목록 칸(원문 JSON)을 명부가 쓰는 도구 crate
-/// 등록 항목으로 푼다(ADR-0272 결정 3). 에이전트 참조 칸(`agent_args`)은 이 풀기로 명부에 얹혀 중계 전 다시 쓰기
-/// (`command_delivery::resolve_agent_args`)가 읽는다 — 칸이 없는 옛 항목은 빈 목록이다(ADR-0308).
+/// Unpacks the item-list field (raw JSON) of a registration packet (`RegisterCommands.decls` · `UpdateCommands.added`) into the
+/// tool-crate registration items (ADR-0272 decision 3). `agent_args` is put on the roster here and read by the pre-relay rewrite
+/// (`command_delivery::resolve_agent_args`); an old item with no such field is an empty list (ADR-0308).
 ///
-/// `Err` = 패킷은 풀렸는데 목록 모양이 틀렸다(ADR-0272 결정 6) — 받는 쪽은 그 패킷을 명부에 손대지 않고 칸 밖의
-/// `request_id` 로 거절한다(`INVALID_ARGUMENT`).
+/// `Err` = the list shape is wrong (ADR-0272 decision 6) — the receiver refuses the packet, roster untouched, with the out-of-field `request_id` (`INVALID_ARGUMENT`).
 // ADR-0272
 // ADR-0308
 pub(crate) fn decls_from_wire(raw: &RawValue) -> Result<Vec<CommandDecl>, serde_json::Error> {
     serde_json::from_str(raw.get())
 }
 
-/// 항목 목록 칸이 깨진 등록 패킷의 거절(ADR-0272 결정 6). ★번호는 칸 밖이라 그 패킷의 `request_id` 로 답한다★ —
-/// 보낸 쪽 대기가 곧바로 깬다(셸의 등록 · 차분 대기는 상한이 없어 `None` 으로 답하면 연결이 끊길 때까지 매달린다).
-/// 봉투 · 답장 칸이 깨지면 `Error{request_id: None}` 인 것은 번호가 그 칸 안이라서다. 코드는 명부가 틀린 패킷에
-/// 쓰는 `INVALID_ARGUMENT` 이고, 패킷 통째로 반려라 명부는 그대로다.
+/// The refusal of a registration packet whose item-list field is broken (ADR-0272 decision 6). ★The number is outside the field, so
+/// it answers with that packet's `request_id`★ and the sender's wait wakes at once (the shell's registration waits have no cap, so `None` would hang it until the connection drops).
+/// Code is `INVALID_ARGUMENT`; the whole packet is rejected, so the roster stays as it was.
 fn broken_decls_refusal(e: &serde_json::Error) -> CommandError {
     CommandError::invalid_argument(format!(
         "invalid command declarations: {e} — this packet was not applied"
     ))
 }
 
-/// wire 벤더 → 사용량 칸의 벤더 키. `None` = 그 벤더의 조회기가 없다.
+/// wire vendor → the vendor key of the usage entry. `None` = that vendor has no probe.
 ///
-/// ★키는 들어온 낱말이 아니라 조회기의 키다★ — 버스 입구(대문자 낱말)와 같은 칸을 치려면 두 입구가 같은 조회기
-///   키로 모여야 한다. 벤더를 match 하지 않고 wire 낱말을 거친다.
+/// The key is the probe's key, not the incoming word: the bus entrance (uppercase word) and this one must converge on the same
+/// probe key, so it goes through the wire word rather than matching the vendor.
 // ADR-0004
 fn usage_vendor_key(vendor: WireBackendKind) -> Option<UsageVendorKey> {
     let word = serde_json::to_value(vendor).ok()?;
@@ -1238,12 +1133,12 @@ fn no_usage_text(vendor: WireBackendKind) -> String {
     .to_string()
 }
 
-/// None = 직렬화 실패(이 함수가 이미 로그를 남겼다).
+/// `None` = serialization failed (already logged here).
 pub(crate) fn event_json(ev: &AgentEvent) -> Option<String> {
     match serde_json::to_string(ev) {
         Ok(s) => Some(s),
         Err(e) => {
-            tracing::error!("AgentEvent 직렬화 실패: {e}");
+            tracing::error!("AgentEvent serialization failed: {e}");
             None
         }
     }
@@ -1259,12 +1154,9 @@ fn kind_to_action(kind: ReplayKind) -> SubscribeAction {
 
 // ── ConnectionCore ────────────────────────────────────────────────────────────────
 
-/// ★이 struct 는 **연결마다 새로 만들어진다**(`agent_conn::AgentConnections::handler_for`)★. 서버 전체에
-/// 하나인 것은 그 공장이고, 여기 든 **필드들이** 전 연결이 공유하는 핸들의 clone 이다 — `llm_policy` 하나만
-/// 빼고 필드 전부가 그렇다(그 칸은 상태 없는 함수 포인터다 — 그 칸 doc).
-/// ★그래서 새 필드를 넣을 때 반드시 확인할 것★: 공유 핸들이 아닌 값을 여기 넣으면 "서버 전체 1개" 로
-/// 읽히는 자리에 조용히 **연결마다 별개**인 상태가 생긴다. 예외는 `llm_policy` 처럼 **상태가 없는** 값뿐이다.
-/// 연결 고유 상태의 자리는 `ConnectionSession`(dispatch 에 주입)이다.
+/// Created anew per connection (`agent_conn::AgentConnections::handler_for`). What is one per server is that factory; every field
+/// here except `llm_policy` (a stateless function pointer) is a clone of a handle shared by all connections.
+/// ★A new field must be a shared handle★, or it quietly becomes per-connection state; connection-specific state belongs in `ConnectionSession`.
 pub struct ConnectionCore {
     manager: Arc<AgentManager>,
     multiview: MultiViewState,
@@ -1272,31 +1164,27 @@ pub struct ConnectionCore {
     fanout: Arc<dyn FrameFanout>,
     // ADR-0096
     control_registry: Arc<ControlRegistry>,
-    /// 빈 슬롯 = 이 조립(실험 bin·일부 테스트)엔 메시징이 아예 없다는 뜻 — `DeleteProfile` 의 삭제
-    ///   정리를 건너뛰어도 정리할 것이 없다.
+    /// An empty slot = this assembly (experiment bin · some tests) has no messaging, so `DeleteProfile` has nothing to clean up.
     // ADR-0116
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
     // ADR-0155
     commands: CommandRoster,
     // ADR-0154
     deliveries: CommandDeliveries,
-    /// 이 데몬이 **스스로 답하는** 명령 — 배달 1단계이자 발견 목록의 한쪽(`command_delivery`).
+    /// The commands this daemon answers by itself — delivery stage 1 and one side of the discovery list (`command_delivery`).
     // ADR-0155
     locals: Arc<dyn LocalCommands>,
     usage: Arc<UsageService>,
     shutdown_tx: watch::Sender<bool>,
-    /// Set by the first `StopDaemon` — the daemon is shutting down; a later `StopDaemon` joins instead of
-    /// running `shutdown_all` again.
+    /// Set by the first `StopDaemon`; a later `StopDaemon` joins instead of running `shutdown_all` again.
     stopping: AtomicBool,
-    /// How many shutdown tasks `StopDaemon` spawned — each runs `shutdown_all` once.
     #[cfg(test)]
     shutdowns_spawned: std::sync::atomic::AtomicUsize,
     /// The backend creation policy the `SpawnByCwd` arm passes to the one creation body (agent
     /// `commands::create_and_start`). Production is always agent `commands::llm_creation_refusal`, filled by
     /// [`ConnectionCore::new`]; only tests swap in a closing fake (today's production table closes nothing, so real
     /// input cannot reach the refusal arm · ADR-0012).
-    /// ★공유 핸들이 아닌데도 여기 앉을 수 있다★ — 상태 없는 순수 함수 포인터라 연결마다 새로 채워도 갈릴
-    /// 상태가 없다.
+    /// A stateless function pointer, so a fresh copy per connection cannot diverge.
     // ADR-0279
     llm_policy: BackendPolicyFn,
 }
@@ -1363,35 +1251,19 @@ impl ConnectionCore {
         &self.manager
     }
 
-    /// 데몬이 **스스로 답하는** 이름은 클라이언트가 등록할 수 없다 — 겹치면 `CONFLICT` 로 반려한다.
+    /// A name the daemon answers by itself cannot be registered by a client — a collision is rejected with `CONFLICT`.
     ///
-    /// ★조용히 받아 주면 성공을 보고하면서 트래픽은 안 준다★: 명부는 데몬 자기 표를 모르므로 그 이름의
-    /// 등록을 그대로 성공시키는데(`Roster::register` 에는 부딪힐 항목이 없다) 배달은 1단계에서 데몬이
-    /// 먼저 답하므로(`command_delivery::deliver`) 그 주인에게는 봉투가 **한 장도** 가지 않는다. 등록한
-    /// 쪽은 자기가 그 이름을 쥐었다고 믿은 채 영영 아무것도 못 받고, 그 사실을 알 방법도 없다. 명부가
-    /// 자기 내부 충돌에 대해 이미 그렇게 판정한다 — 「`added` 를 조용히 무시하면 성공을 보고하면서
-    /// 호출자는 그 이름이 자기 앞으로 온다고 믿는다. 반려는 `CONFLICT` 다」(`Roster::update` doc).
-    /// ★한 이름만 빼고 나머지를 넣지 않는다 — **패킷 통째로** 반려다★: 명부가 자기 충돌·상한에 쓰는
-    /// all-or-nothing 과 같은 계약이고(부분 적용은 「성공했는데 일부가 조용히 없는 상태」를 만든다),
-    /// 판정이 **명부를 건드리기 전에** 끝나므로 실패한 등록이 기존 상태를 바꾸지 않는다.
-    /// ★`CONFLICT` 인 이유★: 패킷이 틀린 것이 아니라(`INVALID_ARGUMENT`) 이 데몬의 **상태**가 그 이름을
-    /// 이미 쥐고 있다는 답이다 — 명부의 형제 판정과 같은 어휘를 쓴다.
+    /// Accepting it would report success while giving no traffic: delivery is answered first by the daemon (stage 1,
+    /// `command_delivery::deliver`), so no envelope reaches that owner. ★The whole packet is rejected, not just the colliding name★
+    /// (all-or-nothing like the roster's own collisions — `Roster::update` doc), decided before touching the roster. `CONFLICT`, not
+    /// `INVALID_ARGUMENT`: the packet is fine, the daemon's state already holds the name.
     // ADR-0155
     fn refuse_names_i_answer(&self, decls: &[CommandDecl]) -> Result<(), CommandError> {
-        // ★겹친 이름을 **전부** 센다★: 첫 하나만 짚으면, 패킷 통째로 반려하는 이 계약에서는 호출자가
-        //   나머지를 알아내려고 등록을 N번 다시 시도해야 한다 — 그런데 등록은 **붙을 때 한 번**이라
-        //   (TRD §3-7 조항 1) 다시 보내려면 연결을 다시 맺어야 한다. 그러면 이름 하나당 재접속 한 번이다.
-        //   (명부가 자기 검문에서 「틀린 칸을 전부 센다」와 같은 논거 — `CommandTable::check_args`.)
-        // ★목적지가 **응답 문구인데도** 로그 손질기를 쓴다 — 그 갈림의 예외이고, 사유가 둘이다★
-        //   (그 갈림의 정본 = `control::agent::preview` doc: 사용자 대면 문구 = `preview` · 로그 필드 =
-        //   `sanitize_for_log`).
-        //   ① 이 문구를 받는 쪽은 **사람이 아니라 프로그램**이고 그 값은 그쪽의 로그·UI 로 그대로 흘러간다.
-        //      제어문자를 원문으로 되돌려주면 위조 항목을 **상대 로그에** 심어 주는 셈이다 — 우리가 우리
-        //      로그에서 막는 그 일이다.
-        //   ② 원문 대조가 필요한 축이 여기 없다: 등록 패킷은 클라이언트 코드가 만든 것이라 「내가 친 값을
-        //      알아본다」는 이유가 서지 않고, 자를 때는 잘렸다고 말한다(`…`).
-        //   ★이름을 인용부호로 감싸는 형태를 함께 고정한다★ — 같은 값이 명부 끊김 로그에도 실리는데
-        //   (`command_roster` 의 `logged_names`) 자리마다 모양이 갈리면 같은 것을 같은 것으로 못 본다.
+        // Count every colliding name: registration is once at attach (TRD §3-7 clause 1), so naming only the first costs one reconnect per name.
+        // The log sanitizer is used though the destination is a response wording (canonical split: `control::agent::preview` doc): the
+        // receiver is a program that flows the value into its logs/UI, so raw control characters would plant a forged entry in its log; there
+        // is no original-value comparison to preserve, and truncation is marked (`…`). The quoted-name shape matches the roster disconnect
+        // log (`logged_names` of `command_roster`).
         let clashing: Vec<String> = decls
             .iter()
             .filter(|decl| self.locals.claim(&decl.name).is_some())
@@ -1409,10 +1281,8 @@ impl ConnectionCore {
         ))
     }
 
-    /// ★sink.enqueue 실패(SinkError)는 무시★: side-effect 명령의 Ack/Error 송신 실패는 삼킨다.
-    /// 어댑터의 enqueue 는 논블록(try_send)이라 큐 포화면 backpressure 로 기다리는 게 아니라 즉시
-    /// drop + close 신호다 — 정상 단일 연결은 큐 여유로 control drop 이 안 나고, 포화 시 종착점
-    /// (연결 종료)은 어느 쪽이든 같다.
+    /// sink.enqueue failure (SinkError) is ignored: the adapter's enqueue is non-blocking (try_send), so on a saturated queue it
+    /// drops and signals close at once; the end point (connection close) is the same either way.
     pub async fn dispatch(
         &self,
         cmd: AgentCommand,
@@ -1441,18 +1311,12 @@ impl ConnectionCore {
             let _ = sink.enqueue(Outbound::event(ev));
         }
 
-        /// 명부 조작의 실패를 답장으로 만든다 — **코드까지 실어 보낸다**.
+        /// Turns a roster-operation failure into a reply, carrying the code too.
         ///
-        /// `Error` 이벤트엔 타입드 칸이 없어 `CommandError` 의 Display(`CODE: 문구`)로 나간다. 코드가
-        /// 빠지면 호출자는 문구를 패턴매칭해 재시도 여부를 정해야 하고, 그 취약함이 타입드 오류 모델이
-        /// 없애려던 것이다(TRD §4-⑦). 실패를 답장 없이 흘리는 것은 더 나쁘다 — 보낸 쪽은 `request_id` 의
-        /// 답을 기다리므로 연결이 끊길 때까지 안 깨는 pending 이 된다.
-        ///
-        /// ★거절은 서버에도 남긴다★: 이름 도둑질을 막은 그물이 발동한 자리인데, 답장만으로는 **그 짓을 한
-        /// 쪽**에만 보이고 운영자에겐 아무 흔적이 없다. 정상 경로는 조용하다(등록은 연결마다 한 번이라
-        /// 거절만 올려도 시끄럽지 않다).
-        /// ★문구는 클라이언트 문자열을 인용한다★ — 명부가 길이를 이미 묶어 두지만(`MAX_NAME_BYTES`)
-        /// 모양은 안 묶으므로 `sanitize_for_log` 를 거쳐 나간다(거기 적힌 위조 항목 문제).
+        /// `Error` has no typed field, so it goes out as the `CommandError` Display (`CODE: wording`); without the code the caller must
+        /// pattern-match wording (TRD §4-⑦). No reply at all would hang the sender's `request_id` wait.
+        /// A refusal is logged on the server too (the reply alone leaves the operator no trace); the normal path is quiet. The wording quotes a
+        /// client string, so it goes through `sanitize_for_log`.
         fn reply_roster(
             sink: &dyn OutboundSink,
             conn_id: ConnId,
@@ -1465,7 +1329,7 @@ impl ConnectionCore {
                     conn = conn_id,
                     verb,
                     code = %e.code(),
-                    "명령 명부 거절: {}",
+                    "command roster refusal: {}",
                     sanitize_for_log(e.message())
                 );
             }
@@ -1477,27 +1341,18 @@ impl ConnectionCore {
                 profile_id,
                 request_id,
             } => {
-                // ★`spawn_agent` 을 직접 부르지 않는다 — 활성화 입구는 하나여야 한다★: 그쪽은
-                //   「마지막 실패」를 기록·지우지 않고(ADR-0172) 재활성화 가드도 없어서, 이 동사로 띄운
-                //   에이전트만 조용히 옛 실패 표시를 들고 있었다. 제어 LLM 이 이 동사를 부를 수 있으므로
-                //   (tauri command + WS) 그 갈림은 「사람 클릭과 LLM 이 같은 핸들을 흔든다」를 깨뜨린다.
-                //   `SpawnProfile` 과 다른 점은 모드 유도가 없다는 것뿐이라(항상 Fresh) 그대로 유지한다.
+                // ★Do not call `spawn_agent` directly — the activation entrance must be one★: it neither records nor clears the "last failure"
+                // (ADR-0172) and has no reactivation guard. Only difference from `SpawnProfile`: no mode derivation (always Fresh).
                 // ADR-0172
                 // The success is an `Ack`, which has no place for launch notices — so `activate_profile` (drops them,
                 //   records nothing). A launch block still answers with its reasons.
                 // TRD S25 §5-2 16
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
-                        // Hand this to the blocking pool — never call it here directly: `activate_profile`
-                        //   blocks **until an outcome** on a transport that declares a connection (backstop
-                        //   15 s), and on a failure verdict it then runs the teardown's `session.kill` (pump
-                        //   join bounded by 5 s) — about 20 s with **no yield point**. Called on an async
-                        //   worker it ties up that whole worker, and N stuck codex activations take N workers
-                        //   (other connections' commands stop too). The `Kill` and `StopDaemon` arms in this
-                        //   file use the blocking pool for the same reason.
-                        //   The command-bus sibling is already protected — the `agent.*` table sits behind
-                        //   `blocking_handler` (the blocking contract of `agent::commands::make_table`).
-                        //   Only this WS surface lacked that protection.
+                        // Hand this to the blocking pool, never call it here: `activate_profile` blocks until an outcome on a connection-declaring transport
+                        // (backstop 15 s) and, on a failure verdict, runs the teardown `session.kill` (pump join bounded by 5 s) — ~20 s with no yield point,
+                        // tying up an async worker (N stuck activations take N workers and stall other connections). `Kill` and `StopDaemon` do the same;
+                        // the bus sibling is covered by `blocking_handler` (`agent::commands::make_table`).
                         let mgr = manager.clone();
                         let started = tokio::task::spawn_blocking(move || {
                             mgr.activate_profile(&profile, SpawnMode::Fresh).map(|_| ())
@@ -1508,8 +1363,7 @@ impl ConnectionCore {
                                 "activation task failed: {e}"
                             )))
                         });
-                        // ★결말과 무관하게 민다 — 저장 거절이어도★: 활성화 실패는 그 항목의 「마지막 실패」를
-                        //   적는다(ADR-0172 · ADR-0291 E2).
+                        // ★Push regardless of the outcome, even a store refusal★: an activation failure records that entry's "last failure" (ADR-0172 · ADR-0291 E2).
                         broadcast_profile_list(fanout, manager);
                         match started {
                             Ok(()) => reply(sink, request_id, Ok(())),
@@ -1536,10 +1390,8 @@ impl ConnectionCore {
                 agent_id,
                 request_id,
             } => {
-                // Off the async worker, like the activation arms: `kill_agent` blocks its thread until the
-                //   transport has shut down, and a blocked worker also starves tasks woken into its
-                //   unstealable LIFO slot — this connection's writer included (T-79). Awaited here, so the
-                //   reply still follows the kill and the next command waits for the reply.
+                // Off the async worker: `kill_agent` blocks until the transport shuts down, and a blocked worker starves tasks in its unstealable
+                // LIFO slot, this connection's writer included (T-79). Awaited, so the reply still follows the kill.
                 let mgr = manager.clone();
                 let result = tokio::task::spawn_blocking(move || mgr.kill_agent(agent_id))
                     .await
@@ -1564,7 +1416,7 @@ impl ConnectionCore {
                 data,
                 request_id,
             } => {
-                // ADR-0231: 뷰어가 친 입력 = 사람의 입력(`User`) — 턴 도중이면 대기 목록에 오를 수 있는 유일한 입구다.
+                // ADR-0231: input typed by a viewer = human input (`User`) — mid-turn the only entrance that can reach the pending list.
                 let result = match multiview.check_input(agent_id, conn_id) {
                     LeasePass::Allow => manager
                         .write_stdin(agent_id, &data, InputOrigin::User)
@@ -1593,7 +1445,7 @@ impl ConnectionCore {
                             .set_viewport(agent_id, v, cols, rows)
                             .unwrap_or((cols, rows))
                     }
-                    // viewport_id 없음(v1 프론트) = 협상 우회, 그 크기로 직접 resize(하위호환).
+                    // No viewport_id (v1 frontend) = bypass negotiation, resize directly to that size.
                     None => (cols, rows),
                 };
                 if let Err(e) = manager.resize(agent_id, target.0, target.1) {
@@ -1664,10 +1516,8 @@ impl ConnectionCore {
                 kill_agents,
                 request_id,
             } => {
-                // ── M4: force 정책 ──────────────────────────────────────────────────
-                // force=false 거부는 실수로 데몬을 내려 살아있는 PTY 세션을 모두 죽이는 사고를 막는다.
-                // ★실활성만 카운트★: 이미 죽은(Exited/Killed/Failed)·종료중(Exiting) 세션은 제외한다 —
-                //   이들 때문에 거부하면 살릴 게 없는데도 데몬을 못 내리는 오작동이 된다.
+                // ── M4: force policy ──────────────────────────────────────────────────
+                // A force=false refusal prevents accidentally killing every live PTY session. Only truly active sessions count (not Exited/Killed/Failed/Exiting).
                 let active_count = manager
                     .list_agents()
                     .iter()
@@ -1684,15 +1534,12 @@ impl ConnectionCore {
                     return DispatchFlow::Continue;
                 }
 
-                // ★kill_agents 는 v1 에서 무시(always-kill)★: 자식 PTY 가 데몬의 KILL_ON_JOB_CLOSE
-                //   Job 에 담기므로 데몬이 죽으면 자식도 **무조건** 함께 죽는다 — detach(데몬만 내리고
-                //   자식 유지)가 현 Job 모델에선 불가능하다. 플래그는 미래 detach 여지로 protocol 에
-                //   남겨두되 v1 동작은 값과 무관하다.
+                // `kill_agents` is ignored in v1 (always kill): children sit in the daemon's KILL_ON_JOB_CLOSE Job and die with it, so detach is
+                // impossible in the current Job model. The flag stays in protocol for a future detach.
                 let _ = kill_agents;
-                // The shutdown runs in its own task, not in this handler: the network layer (`link::server`) aborts this
-                //   connection's dispatch task when the client closes, and an awaited `shutdown_all` would then never reach `shutdown_tx`
-                //   — the daemon survived with its agents killed (TRD S21 trd-3-2-u5 §3-4). A second `StopDaemon`
-                //   while one runs only joins it. The `shutdown_tx` trigger is watched by `run()`'s `select!`.
+                // The shutdown runs in its own task: the network layer (`link::server`) aborts this connection's dispatch task when the client closes,
+                // and an awaited `shutdown_all` would never reach `shutdown_tx` — the daemon survived with its agents killed (TRD S21 trd-3-2-u5 §3-4).
+                // A second `StopDaemon` only joins. `run()`'s `select!` watches `shutdown_tx`.
                 if !self.stopping.swap(true, Ordering::SeqCst) {
                     #[cfg(test)]
                     self.shutdowns_spawned.fetch_add(1, Ordering::SeqCst);
@@ -1704,17 +1551,15 @@ impl ConnectionCore {
                     });
                 }
 
-                // `Close` flushes queued frames before closing (`link::server` → `close_after_flush`), so this Ack goes out first —
-                // still best effort: bounded by the 2 s flush and refused if the outbound queue is already full.
+                // `Close` flushes queued frames before closing (`link::server` → `close_after_flush`), so this Ack goes out first — still best
+                // effort: bounded by the 2 s flush and refused if the outbound queue is full.
                 reply(sink, request_id, Ok(()));
                 return DispatchFlow::Close;
             }
 
-            // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────
-            // ★고르지 않으면 아무것도 안 뜬다(사용자 결정 2026-09-07)★ — 예전엔 이 자리에 claude 가
-            //   박혀 있었고 그것이 곧 「고르지 않았을 때 뜨는 것」이었다. 백엔드가 둘이 된 지금 그 조용한
-            //   기본값은 **요청한 것과 다른 에이전트가 뜨는** 경로라, 부재를 거절로 바꾼다. 거절 문구가
-            //   어느 칸을 채워야 하는지 말해야 다음 스폰 입구를 만드는 사람이 그 자리에서 안다.
+            // ── profile CRUD + ad-hoc spawn (phase4 stage 1) ───────────────────────────────
+            // An unchosen backend is refused, not defaulted: a quiet default would bring up an agent other than the one requested. The wording
+            // names the field to fill.
             AgentCommand::SpawnByCwd {
                 cwd,
                 backend,
@@ -1732,12 +1577,12 @@ impl ConnectionCore {
                 };
                 // The body asks the policy before anything is registered, so a refusal leaves no profile and writes no
                 //   last failure (ADR-0172). The gate does not tell callers apart — the person's path sees the same
-                //   table (ADR-0279 「감수한 대가」).
+                //   table (ADR-0279 "accepted cost").
                 // ADR-0270 · ADR-0279
                 let policy = self.llm_policy;
                 let roster = RosterFanout::new(self.fanout.clone(), manager.clone());
-                // ★blocking 풀로 넘긴다★ — 이 동사도 실행 재료 점검(라이브러리 락을 기다릴 수 있다)과 실 프로세스
-                //   생성을 yield 없이 동기로 한다. 사유의 정본은 위 `Spawn` 갈래의 같은 주석이다.
+                // ★Hand it to the blocking pool★ — this verb also runs the launch-material check (it can wait on the library lock) and the real
+                //   process creation synchronously with no yield. The canonical reason is the same comment on the `Spawn` arm above.
                 // TRD S25 §5-2 4
                 let mgr = manager.clone();
                 // ADR-0348
@@ -1832,12 +1677,12 @@ impl ConnectionCore {
                     env,
                     auto_restore,
                 );
-                // ★부르는 쪽 있는 판이다 — 저장소가 받지 않으면 등록하지 않고 오류다(브로드캐스트 없음)★.
+                // ★A version with a caller — if the store does not accept it, do not register and answer an error (no broadcast)★.
                 // ADR-0291 R17 (D3)
                 match manager.try_create_agent(profile) {
                     Ok(stored) => {
                         let wire = profile_to_wire(&stored);
-                        // Created 하나로 응답한다 — Ack 는 보내지 않는다(중복 resolve 방지).
+                        // Reply with one Created — no Ack (prevents a duplicate resolve).
                         let _ = sink.enqueue(Outbound::event(AgentEvent::Created {
                             request_id,
                             profile: wire,
@@ -1861,16 +1706,14 @@ impl ConnectionCore {
                 profile_id,
                 request_id,
             } => {
-                // ★삭제 정리 훅(ADR-0116 결정 3)★: 여기가 유일한 프로필 제거 지점이라 훅도 여기 하나다.
-                //   호출자 의무(락 순서)와 게이트 축은 `handle_profile_deleted` 가 정본이다. 판정 · 정리는 프로필
-                //   id 하나로 하고, 제거 전에 뽑는 이름은 로그 전용이다(ADR-0309 결정 6).
-                // ★발동 조건(로스터 부재)은 커널이 판정한다★: 로스터는 커널의 DeliveryPort 소유 축이고, 여기서
-                //   미리 보면 조건이 두 곳에 갈린다(그 판정이 곧 정책 — spec §5).
+                // Delete cleanup hook (ADR-0116 decision 3): the only profile removal point. Lock-order obligation and gate axis are canonical in
+                // `handle_profile_deleted`; decision and cleanup are by profile id, the pre-removal name is for logs only (ADR-0309 decision 6).
+                // The trigger (roster absence) is the kernel's DeliveryPort decision; checking here would split it.
                 let deleted_name = manager
                     .agent_snapshot(profile_id)
                     .map(|p| p.canonical_name_when_live());
-                // ★저장소가 받지 않으면 지우지 않았다 — `Ack` · 브로드캐스트 · 정리 훅 없이 오류로 답한다★: 지우지
-                //   못한 프로필의 파킹 우편 · 계약을 정리하면 산 프로필의 메시징이 깨진다.
+                // ★If the store does not accept it nothing was deleted★: answer an error with no `Ack` · broadcast · cleanup hook, or a live profile's
+                // parked mail · contracts would be cleaned.
                 // ADR-0291 R17 (D3)
                 if let Err(e) = manager.try_delete_agent(profile_id) {
                     let message = profile_error_text(
@@ -1885,19 +1728,18 @@ impl ConnectionCore {
                 reply(sink, request_id, Ok(()));
                 broadcast_profile_list(fanout, manager);
                 if let (Some(name), Some(messaging)) = (deleted_name, self.messaging.get()) {
-                    // 이 경로엔 자식 stdin blocking write 가 없다(큐 정리 + 장부 전이 + 짧은 로스터 스냅샷) —
-                    //   그래서 spawn_blocking 없이 이 async 컨텍스트에서 그대로 돈다(ingress 조회 경로와 동형).
+                    // No child stdin blocking write on this path (queue cleanup + ledger transition + a short roster snapshot), so it runs in this
+                    // async context without spawn_blocking.
                     let out = messaging.handle_profile_deleted(profile_id, &name);
                     tracing::debug!(
                         profile = %profile_id,
-                        // 이름은 클라이언트가 정한 문자열이다 — 비어 있지 않은지만 보고 받으므로
-                        //   (core `profile.rs` 의 검증) 모양·길이는 여기서 묶는다([`sanitize_for_log`]).
-                        //   위 훅에 넘긴 값은 원문 그대로다 — 다듬은 것은 이 로그 필드뿐이다.
+                        // The name is a client-chosen string checked only for non-empty (core `profile.rs`), so shape · length are bounded here
+                        // ([`sanitize_for_log`]). The hook above gets the original.
                         name = %sanitize_for_log(&name),
                         skipped_live = out.skipped_live,
                         parked_failed = out.failed_parked,
                         contracts_failed = out.failed_contracts,
-                        "프로필 삭제 — 메시징 삭제 정리 훅 실행(ADR-0116 결정 3)"
+                        "profile deleted — running the messaging delete-cleanup hook (ADR-0116 decision 3)"
                     );
                 }
             }
@@ -1907,23 +1749,15 @@ impl ConnectionCore {
                 resume,
                 request_id,
             } => {
-                // ★모드 = 세션 존재 여부로 유도(ADR-0076)★: 사용자 결정 — "에이전트 활성화 = 기존 세션
-                //   이어받기, 새로 로드할 거면 새 에이전트를 만든다". 그래서 저장된 세션이 있으면 wire
-                //   `resume` 플래그(프론트는 false 로 보낸다)와 무관하게 **항상 Resume** 이다.
-                //   ★resume=true 는 존중★: 세션이 없어도 Resume 으로 넘긴다 — mode = resume-요청 OR
-                //     세션-존재.
-                //   ★단 손잡이 없는 그 요청은 이어받지 않는다(ADR-0226)★: 저장 손잡이로 이어받는
-                //     backend(claude·codex)면 `AgentManager::resume_no_fallback` 머리가 통째로 새 대화
-                //     경로에 맡기고 `RestoreOutcome::Started` 로 보고한다 — 그래서 이 요청의 활성화
-                //     판정·실패 기록은 이어받기가 아니라 새 대화의 것을 탄다. 정본은 그 자리
-                //     (`opens_a_new_conversation`)다. shell 은 옛 길 그대로다.
+                // Mode derives from whether a session exists (ADR-0076): "agent activation = resume the existing session; for fresh, make a new
+                // agent". A stored session means Resume regardless of the wire `resume` flag (the frontend sends false); resume=true is respected even
+                // without a session.
+                // Without a handle that request does not resume (ADR-0226): for backends resuming by stored handle (claude·codex)
+                // `AgentManager::resume_no_fallback` hands it to the new-conversation path and reports `RestoreOutcome::Started` (canonical:
+                // `opens_a_new_conversation`).
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
-                        //   ★sid 갈래는 백엔드에 되묻는다(ADR-0185)★: 저장된 sid 가 그 명령으로
-                        //     **이어받을 수 있는 것인지**를 먼저 묻는다 — 그 판정은 부팅 복원·명령 버스
-                        //     입구와 같은 dispatch 가 소유한다.
-                        //   ★`resume` 명시 요청은 그 술어를 타지 않는다★: 위 「resume=true 는 존중」이
-                        //     그대로다(세션이 없어도 Resume 으로 남긴다).
+                        //   The sid branch asks the backend (ADR-0185) whether the stored sid is resumable by that command; an explicit `resume` does not ride that predicate.
                         let mode = if resume
                             || engram_dashboard_agent::backend::can_resume_profile(&profile)
                         {
@@ -1931,9 +1765,7 @@ impl ConnectionCore {
                         } else {
                             SpawnMode::Fresh
                         };
-                        // ★blocking 풀로 넘긴다★ — 사유의 정본은 위 `Spawn` 갈래의 같은 주석이다.
-                        //   ★Fresh 도 이제 여기 든다★: 연결을 선언하는 통로에서는 모드와 무관하게
-                        //   결말까지 기다린다(ADR-0201 — 예전엔 Fresh 가 즉시 반환이었다).
+                        // Blocking pool — reason as in the `Spawn` branch. Fresh falls here too: a connection-declaring path waits for the outcome regardless of mode (ADR-0201).
                         // `Withheld`: the reply carries the notices, but the webview does not show them yet, so this
                         //   path must not mark the set as seen for the agent (a later delivering caller still gets it).
                         // ADR-0341
@@ -1957,14 +1789,10 @@ impl ConnectionCore {
                                 format!("activation task failed: {e}"),
                             ))
                         });
-                        // ★결말이 어느 쪽이든 프로필 목록을 다시 민다(ADR-0172/0162)★: 활성화는 그
-                        //   항목의 「마지막 실패」를 **성공이면 지우고 실패면 기록**하는데, 그 축은
-                        //   프로필 목록으로만 흐른다(`Spawned` 이벤트·산 명부에는 없다). 성공 쪽을
-                        //   빼면 지워진 실패가 화면에 남고, 실패 쪽을 빼면 기록이 화면에 안 뜬다.
-                        //   ★같은 일을 명령 버스 쪽 `agent.spawn` 도 해야 한다★ — 두 핸들이 같은 것을
-                        //   흔들어야 한다(CLAUDE.md 「LLM-우선 제어」). 그쪽 짝은
-                        //   `core::agent::commands::{wake_existing, create_and_start}`.
-                        //   ★저장 거절도 그 실패다★ — 그대로 민다(ADR-0291 E2).
+                        // ★Push the profile list whichever way the outcome goes★ (ADR-0172/0162): activation clears the entry's "last failure" on success and
+                        //   records it on failure (a store refusal too — ADR-0291 E2), and that axis flows only through the profile list. The bus `agent.spawn`
+                        //   must do the same (CLAUDE.md 「LLM-우선 제어」). // hangul-ok
+                        //   Its pair is `core::agent::commands::{wake_existing, create_and_start}`.
                         match started {
                             Ok(activated) => {
                                 let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
@@ -1993,8 +1821,8 @@ impl ConnectionCore {
                 }
             }
 
-            // ★아래 셋은 부르는 쪽 있는 판이다★ — 저장소가 받지 않으면 바꾸지 않고 오류로 답하며 브로드캐스트를 내지
-            //   않는다(바뀐 것이 없다).
+            // The three below are versions with a caller — if the store does not accept it nothing changes and an
+            //   error is answered with no broadcast.
             // ADR-0291 R17 (D3)
             AgentCommand::SetProfileAutoRestore {
                 profile_id,
@@ -2030,8 +1858,8 @@ impl ConnectionCore {
                 Ok(CoreRenameOutcome::Renamed(_)) => {
                     reply(sink, request_id, Ok(()));
                     broadcast_profile_list(fanout, manager);
-                    // 산 에이전트면 목록 이름(`AgentInfo.name`)도 바뀐다(잠든 프로필이면 목록은 그대로다) — 셸의 탭 자동
-                    //   이름 · 창 제목은 이 목록에서만 이름을 읽는다(다시 짓지 않는다 · TRD S26-window-chrome §4-3).
+                    // For a live agent the list name (`AgentInfo.name`) also changes (a dormant profile's list stays as is) — the shell's tab auto
+                    //   name · window title read the name only from this list (TRD S26-window-chrome §4-3).
                     broadcast_agent_list(fanout, manager);
                 }
                 Ok(CoreRenameOutcome::Unchanged(_)) => {
@@ -2094,7 +1922,7 @@ impl ConnectionCore {
                 agent_id,
                 request_id,
             } => {
-                // Snapshot 하나로 응답한다 — 별도 Ack 는 보내지 않는다(중복 resolve 방지).
+                // Reply with one Snapshot — no separate Ack (prevents a duplicate resolve).
                 match manager.get_snapshot(agent_id) {
                     Ok(chunks) => {
                         let _ = sink.enqueue(Outbound::event(AgentEvent::Snapshot {
@@ -2108,7 +1936,7 @@ impl ConnectionCore {
             }
 
             AgentCommand::SetEnvelopeFormat { format, request_id } => {
-                // broadcast 하지 않는다 — 전역 상태는 다음 메시지에서 관측되지 목록 push 대상이 아니다.
+                // No broadcast — global state is observed on the next message, not a list push target.
                 let core_format = match format {
                     WireEnvelopeFormat::Colon => CoreEnvelopeFormat::Colon,
                     WireEnvelopeFormat::Xml => CoreEnvelopeFormat::Xml,
@@ -2117,22 +1945,19 @@ impl ConnectionCore {
                 reply(sink, request_id, Ok(()));
             }
 
-            // ── 명령 버스 등록 wire(ADR-0155/0156, TRD §3-7) ──────────────────────────────
+            // ── command bus registration wire (ADR-0155/0156, TRD §3-7) ──────────────────────────────
             //
-            // ★`_ =>` 로 묶지 않는 이유★: 이 match 가 exhaustive 라서 variant 를 늘릴 때마다 여기가
-            //   컴파일 에러로 걸린다. 그게 「배선을 빠뜨리지 않았나」를 묻는 유일한 지점이라 catch-all 로
-            //   덮으면 다음 variant 는 아무 신호 없이 조용히 무시된다.
+            // ★No `_ =>`★: this exhaustive match gives a compile error per new variant, the only point asking "was the wiring forgotten".
             AgentCommand::RegisterCommands {
                 owner: claimed,
                 decls,
                 catalog_version,
                 request_id,
             } => {
-                // ★`attached_owner` 를 `session.owner_token()` 으로 되돌리지 마라 — 저장소 어느 테스트도
-                //   안 잡는다★: 오늘은 둘이 같은 값이라 두 구현이 같은 로그를 내고, 둘이 갈리는 상태
-                //   (저장값 ≠ 파생값)를 이 층에서는 만들 수 없다 — 명부의 표는 `command_roster` 사설이다.
-                //   되돌리면 슬라이스 B 에서 사칭이 조용히 통과한다(인과 = `note_claimed_owner` 주석,
-                //   판정 자체를 무는 것 = 그 함수를 직접 부르는 세 테스트).
+                // ★Do not revert `attached_owner` to `session.owner_token()` — no test catches it★: today both give the same log, and a diverging
+                // state (stored ≠ derived) cannot be made at this layer (the roster table is private to `command_roster`). Reverting would
+                // quietly let impersonation through in slice B (cause = the `note_claimed_owner` comment; the three tests calling that function
+                // directly bite the decision).
                 // ADR-0154
                 note_claimed_owner(
                     session,
@@ -2152,13 +1977,13 @@ impl ConnectionCore {
                         return DispatchFlow::Continue;
                     }
                 };
-                // ★`catalog_version` 으로 거절하지 않는다★: 세대 번호는 crate 마다라 받는 쪽이 자기
-                //   번호와 비교해 뜻을 부여하면 틀린다 — 진단용이다(TRD §4-①).
+                // ★Do not refuse by `catalog_version`★: the generation number is per crate, so comparing it with the receiver's own is wrong —
+                // it is for diagnostics (TRD §4-①).
                 tracing::debug!(
                     conn = conn_id,
                     catalog_version,
                     names = decls.len(),
-                    "명령 등록"
+                    "command registration"
                 );
                 reply_roster(
                     sink,
@@ -2176,11 +2001,7 @@ impl ConnectionCore {
                 removed,
                 request_id,
             } => {
-                // ★`attached_owner` 를 `session.owner_token()` 으로 되돌리지 마라 — 저장소 어느 테스트도
-                //   안 잡는다★: 오늘은 둘이 같은 값이라 두 구현이 같은 로그를 내고, 둘이 갈리는 상태
-                //   (저장값 ≠ 파생값)를 이 층에서는 만들 수 없다 — 명부의 표는 `command_roster` 사설이다.
-                //   되돌리면 슬라이스 B 에서 사칭이 조용히 통과한다(인과 = `note_claimed_owner` 주석,
-                //   판정 자체를 무는 것 = 그 함수를 직접 부르는 세 테스트).
+                // Do not revert `attached_owner` to `session.owner_token()` (see the same note in the registration arm).
                 // ADR-0154
                 note_claimed_owner(
                     session,
@@ -2204,7 +2025,7 @@ impl ConnectionCore {
                     conn = conn_id,
                     added = added.len(),
                     removed = removed.len(),
-                    "명령 차분"
+                    "command diff"
                 );
                 reply_roster(
                     sink,
@@ -2217,11 +2038,10 @@ impl ConnectionCore {
             }
 
             AgentCommand::ListCommands { request_id } => {
-                // 주인 토큰은 안 내린다 — 선언처가 주인이라 등급 칸이 없어졌다(TRD §3-7 개정 ㉠).
+                // The owner token is not passed down — the declarer is the owner, so the grade field is gone (TRD §3-7 amendment ㉠).
                 //
-                // ★두 출처를 합치는 규칙은 여기 없다★ — HTTP 발견 라우트(`/control/commands`)와 **같은
-                //   함수**를 태운다. 규칙을 여기 되돌려 적으면 두 표면의 목록이 갈리고, 갈린 순간 발견은
-                //   어느 한쪽에게 거짓말이 된다(규칙과 그 근거의 정본 = `control::catalog::merge`).
+                // The rule for merging the two sources rides the same function as the HTTP discovery route (`/control/commands`); writing it
+                // back here would split the two surfaces' lists (canonical: `control::catalog::merge`).
                 let entries =
                     crate::control::catalog::merge(self.locals.decls(), self.commands.entries());
                 let _ = sink.enqueue(Outbound::event(AgentEvent::CommandList {
@@ -2230,32 +2050,20 @@ impl ConnectionCore {
                 }));
             }
 
-            // ★답장은 이 자리에서 안 낸다 — **왕복이 끝난 뒤** 배달 태스크가 원 연결로 실어 보낸다★
-            //   (`command_delivery::deliver`). 그래서 답장에 여기 `sink` 를 쓰지 않는다: 답장은 이 dispatch 가
-            //   반환한 한참 뒤에 나므로 빌린 `OutboundSink` 로는 닿을 수 없고, 명부가 든 그 연결의 프레임
-            //   출구로 나간다(둘 다 같은 단일 writer 큐에 합류하므로 순서는 보존된다). `sink` 를 쓰는 것은
-            //   왕복이 시작되기 전의 깨진 봉투 거절 하나다(아래).
-            // ★★여기서 왕복을 기다리면 안 된다 — 이유가 **자리를 옮겼을 뿐 살아 있다**★★: 한 연결의
-            //   프레임은 그 연결의 **도착순 소비자 하나**가 한 장씩 끝까지 기다려 처리하므로, 주인이 곧
-            //   이 연결일 때(셸이 자기 이름을 얹고 자기가 부르는 경로가 그렇다) 주인이 돌려줄
-            //   `CommandOutcome` 이 **이 명령 뒤의 수신 큐에 앉은 채** 영영 안 꺼내진다 — 자기 답을
-            //   자기가 못 꺼낸다. ADR-0081 결정 3 개정이 잡아낸 self-deadlock 그대로다.
-            //   ★옛 문구("읽기 루프가 한 장씩 처리한다")를 「읽기와 처리가 갈렸으니 이 spawn 은 이제
-            //   불필요하다」로 읽지 말 것★: 갈린 것은 **소켓에서 꺼내는 일**이고, 처리 줄이 하나라는
-            //   성질은 그대로다(그 직렬성이 순서 불변식의 실물 — [`dispatch_order`]). 막힌 지점이
-            //   소켓에서 큐로 옮겨졌을 뿐 막힌다는 사실은 같다.
-            //   ★이 갈래를 [`DispatchOrder::Detached`] 로 옮기는 것도 답이 아니다★ — 그러면 배달이
-            //   태스크 밖으로 나가는 대신 **분류가** 그 일을 하게 돼 같은 것을 두 곳에서 정하게 된다.
-            //   `spawn` 이 그 회귀를 막는 수단이고, 되돌리면 그 조합에서 마감시각까지 연결 하나가
-            //   통째로 선다(TRD §3-6 — 셸·데몬·웹뷰 공통 규칙).
+            // The reply is not given here: after the round trip the delivery task sends it to the original connection (`command_delivery::deliver`)
+            // through the frame outlet the roster holds (same single-writer queue). `sink` is used only for the broken-envelope refusal below.
+            // ★Waiting for the round trip here is forbidden★: a connection's frames are handled one at a time, so when the owner is this connection
+            // itself the `CommandOutcome` would sit in the inbound queue behind this command and never be taken out (self-deadlock, ADR-0081
+            // decision 3 amendment). Splitting socket reads from handling does not remove it (one handling lane — [`dispatch_order`]), and moving
+            // this to [`DispatchOrder::Detached`] would make classification do delivery's job (TRD §3-6).
             // ADR-0154
             AgentCommand::Command { envelope } => {
-                // ADR-0272 결정 6: 패킷은 풀렸는데 봉투가 깨졌으면 번호를 못 읽는다 — 파싱 실패 갈래와 같은
-                //   모양(`Error{request_id: None}`)으로 답하고 연결은 살린다.
+                // ADR-0272 decision 6: a broken envelope means the number cannot be read — answer like the parse-failure branch
+                //   (`Error{request_id: None}`) and keep the connection alive.
                 let envelope = match envelope_from_wire(&envelope) {
                     Ok(envelope) => envelope,
                     Err(e) => {
-                        tracing::warn!(conn = conn_id, "명령 봉투를 풀 수 없다: {e}");
+                        tracing::warn!(conn = conn_id, "cannot unpack the command envelope: {e}");
                         let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                             request_id: None,
                             message: format!("invalid command envelope: {e}"),
@@ -2269,7 +2077,7 @@ impl ConnectionCore {
                     conn = conn_id,
                     request_id = %envelope.request_id,
                     name = %sanitize_for_log(&envelope.name),
-                    "명령 요청 — 명부에서 주인을 찾아 배달한다"
+                    "command request — looking up the owner in the roster and delivering"
                 );
                 tokio::spawn(crate::command_delivery::deliver(
                     self.commands.clone(),
@@ -2281,26 +2089,22 @@ impl ConnectionCore {
                 ));
             }
 
-            // 주인이 돌려준 결말을 그 왕복에 붙인다 — 붙는 순간 배달 태스크가 깨어나 **원래 물어본 연결**로
-            //   답장을 실어 보낸다(`command_delivery`).
-            // ★붙일 자리가 없어도 **침묵하지 않는다**★: 조용히 버리면 보낸 쪽은 답도 오류도 없이 자기
-            //   마감시각을 다 쓴다 — 이 파일이 다른 자리에서 이미 적어 둔 그 손실(`reply` 헬퍼 주석).
-            // ★그 답은 `Error{request_id: None}` 다★ — 이 프레임에는 **내가 낸 요청의 상관 키가 없으므로**
-            //   (셸의 짝 맞추기 `command_request_id` 가 이 variant 에 `None`) 붙일 pending 이 애초에 없다. 여기서
-            //   `CommandReply` 를 되쏘면 그 키의 답장이 **두 번** 나가고(하나는 이미 원 연결로 갔다), 그것이
-            //   TRD §4-⑤ 위반이다.
-            // ★두 원인을 **가르지 않는다**★: 마감이 지나 자리가 거둬진 늦은 결말과 아무도 안 물은 결말은
-            //   표에 아무것도 없다는 점에서 같다 — 표가 지나간 키를 기억하지 않으므로 가를 근거가 없다
-            //   (자취를 두면 그 목록이 무한히 자란다 — ADR-0150 가 명부에서 자취를 버린 것과 같은 이유).
+            // Attaches the owner's outcome to its round trip; the delivery task then sends the reply to the asking connection (`command_delivery`).
+            // ★With no place to attach it, still do not stay silent★, or the sender burns its whole deadline: answer `Error{request_id: None}` — this frame
+            //   has no correlation key of a request I issued (`command_request_id` gives `None`), and `CommandReply` would send that key's reply twice (TRD §4-⑤).
+            // The two causes (a late outcome whose seat was reaped, an outcome nobody asked for) are not told apart: the table keeps no trace of
+            //   passed keys (a growing list — why ADR-0150 dropped roster traces).
             // ADR-0154
             AgentCommand::CommandOutcome { reply } => {
-                // ADR-0272 결정 6: 패킷은 풀렸는데 답장이 깨졌으면 번호를 못 읽어 어느 왕복에도 못 붙인다 —
-                //   깨진 봉투 갈래와 같은 처분(`Error{request_id: None}` · 연결은 산다). 그 왕복은 자기 마감시각에
-                //   호출자에게 답한다.
+                // ADR-0272 decision 6: a broken reply cannot be attached to any round trip — same disposition as the broken-envelope branch
+                //   (`Error{request_id: None}` · connection lives); that round trip answers the caller at its own deadline.
                 let reply = match reply_from_wire(&reply) {
                     Ok(reply) => reply,
                     Err(e) => {
-                        tracing::warn!(conn = conn_id, "명령 결말의 답장을 풀 수 없다: {e}");
+                        tracing::warn!(
+                            conn = conn_id,
+                            "cannot unpack the reply of the command outcome: {e}"
+                        );
                         let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                             request_id: None,
                             message: format!("invalid command reply: {e}"),
@@ -2311,28 +2115,26 @@ impl ConnectionCore {
                     }
                 };
                 let request_id = reply.request_id;
-                // ★거절 사유가 둘이고 **무게가 다르다**★: 「붙일 자리가 없다」는 흔한 정상 경합(마감이
-                //   먼저 지났다)이고, 「위임한 적 없다」는 **있을 수 없는 프레임**이다 — 그 번호의 왕복은
-                //   아무에게도 안 나갔으므로 결말을 보낼 주인이 존재하지 않는다. 뭉치면 뒤엣것이 앞엣것의
-                //   소음에 묻힌다.
+                // The two causes differ in weight: "no place to attach" is a normal race (deadline passed first); "never delegated" is an impossible
+                //   frame that would drown in the former's noise.
                 let refusal = match self.deliveries.complete(reply) {
                     OutcomeLanding::Attached => {
-                        tracing::debug!(conn = conn_id, %request_id, "명령 결말을 그 왕복에 붙였다");
+                        tracing::debug!(conn = conn_id, %request_id, "attached the command outcome to its round trip");
                         return DispatchFlow::Continue;
                     }
                     OutcomeLanding::NoSeat => "no round trip is waiting for this outcome — it may have passed its deadline, or nothing asked for it",
                     OutcomeLanding::NotDelegated => "this daemon answers that command itself, so it never handed it to anyone and takes no outcome for it",
                 };
-                // 첫 건만 warn — 나머지는 debug(래치 근거는 `stray_outcome_warned` doc).
+                // Only the first is a warn, the rest debug (latch: `stray_outcome_warned` doc).
                 if !session.stray_outcome_warned.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         conn = conn_id,
                         %request_id,
                         refusal,
-                        "명령 결말 거절(이 연결에서 한 번만 남긴다)"
+                        "command outcome refused (logged once per connection)"
                     );
                 } else {
-                    tracing::debug!(conn = conn_id, %request_id, refusal, "명령 결말 거절(반복)");
+                    tracing::debug!(conn = conn_id, %request_id, refusal, "command outcome refused (repeat)");
                 }
                 let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                     request_id: None,
@@ -2342,9 +2144,8 @@ impl ConnectionCore {
                 }));
             }
 
-            // ★두 갈래 모두 버스 `agent.listQueuedInputs`·`agent.cancelQueuedInput` 과 같은 manager 동사를
-            //   부른다★ — 두 표면이 같은 값을 싣는다. 실패는 `Error` 문구 머리에 오류 코드를 싣는다(`CODE: 문구`).
-            // 목록 조회는 읽기라 입력 임대를 보지 않는다.
+            // Both branches call the same manager verbs as the bus `agent.listQueuedInputs` · `agent.cancelQueuedInput`; a failure puts the
+            //   error code at the head of the `Error` wording (`CODE: wording`). A list lookup is a read, so it skips the input lease.
             // ADR-0231
             AgentCommand::ListQueuedInputs {
                 agent_id,
@@ -2358,7 +2159,7 @@ impl ConnectionCore {
                 Err(e) => send_error(sink, Some(request_id), list_error_text(agent_id, e)),
             },
 
-            // ★임대 검사는 `WriteStdin` 과 같다★ — 비보유자는 같은 문구로 거절되고 manager 에 닿지 않는다.
+            // The lease check is the same as `WriteStdin`: a non-holder is refused with the same wording and never reaches the manager.
             // ADR-0231
             AgentCommand::CancelQueuedInput {
                 agent_id,
@@ -2385,14 +2186,14 @@ impl ConnectionCore {
                 },
             },
 
-            // ── 사용량 한도(TRD S21 usage-limit-slot §1-6) ───────────────────────────────────
-            // 첫 한 장은 서비스가 이 연결의 출구로 곧장 보낸다 — 이 줄의 답이 아니다.
+            // ── usage limits (TRD S21 usage-limit-slot §1-6) ───────────────────────────────────
+            // The first sheet is sent by the service straight out this connection's outlet — it is not this line's answer.
             AgentCommand::UsageSubscribe { vendors } => {
                 let vendors = vendors.into_iter().filter_map(usage_vendor_key).collect();
                 self.usage.replace_subscription(conn_id, vendors);
             }
 
-            // ★칸이 없으면 `Ack` 가 아니라 `Error` 다★ — 조용한 `Ack` 는 셸이 「조회했다」로 읽고 값을 영영 기다린다.
+            // ★No entry is an `Error`, not an `Ack`★: a quiet `Ack` would be read by the shell as "looked up" and it would wait forever for a value.
             AgentCommand::RefreshUsageLimits { vendor, request_id } => {
                 let answered = match usage_vendor_key(vendor) {
                     Some(key) => self
@@ -2412,15 +2213,15 @@ impl ConnectionCore {
         DispatchFlow::Continue
     }
 
-    /// ★get_snapshot 으로 SubscribeAck 를 예측하지 말 것★: 예측이 뜬 스냅샷과 subscribe_from 이 실제로
-    /// replay 하는 스냅샷 사이에 evict 가 끼면 Ack.replay_from/latest 가 첫 전송 seq 와 어긋나 클라가
-    /// 손실을 인지하지 못한다. Ack 의 모든 필드는 subscribe_from 의 **단일 스냅샷 outcome** 으로 채운다.
+    /// ★Do not predict SubscribeAck from get_snapshot★: an evict between the predicted snapshot and the one subscribe_from replays would
+    /// make Ack.replay_from/latest diverge from the first sent seq without the client noticing the loss. Every Ack field comes from
+    /// the single snapshot outcome of subscribe_from.
     ///
-    /// ★두 평면★: 코어 subscribe_from 에 넘기는 sink(`agent_conn::FrameOutputSink`)는 출력 frame
-    /// 평면이고, control(Ack/ReplayComplete/Error)만 dispatch 의 `OutboundSink` 로 나간다. 둘 다
-    /// **같은 프레임 출구**(연결당 단일 writer 큐)로 합류하므로 FIFO 가 보존된다 — R1 이 여기 걸려 있다.
+    /// Two planes: the sink handed to subscribe_from (`agent_conn::FrameOutputSink`) is the output frame plane; only control
+    /// (Ack/ReplayComplete/Error) goes through dispatch's `OutboundSink`. Both join the same frame outlet (one single-writer queue per
+    /// connection), so FIFO holds — R1 hangs on this.
     ///
-    /// ★반환 `Close` = 이 연결을 닫으라★ — `ReplayComplete` 를 큐에 못 실은 경우에만 난다(본문 마지막 분기).
+    /// A returned `Close` = close this connection; it arises only when `ReplayComplete` could not be queued.
     fn handle_subscribe(
         &self,
         agent_id: AgentId,
@@ -2433,11 +2234,9 @@ impl ConnectionCore {
 
         let (out_sink, replay_dropped) = sink.make_output_sink();
 
-        // ★Ack 와 `ReplayComplete` 의 화신 표식, Ack 의 이어받기 표식은 `subscribe_from` 의 응답에서만
-        //   꺼낸다 — 따로 조회하지 말 것★: 따로 조회하면 그 조회와 replay 사이에 화신이 갈려, 표식이 replay
-        //   한 것과 다른 화신을 말한다. 응답은 replay 한 그 세션이 스스로 채운다.
-        // enqueue 실패를 삼키는 이유: control 은 작아 보통 성공하고, 큐가 full 이면 어차피 같은 큐를
-        //   쓰는 replay 도 막혀 truncated 로 잡힌다.
+        // The incarnation marker of the Ack and `ReplayComplete`, and the resume marker of the Ack, come only from the `subscribe_from`
+        //   response: a separate lookup lets the incarnation change before the replay, so the marker would name a different incarnation.
+        // An enqueue failure is swallowed: control is small, and if the queue is full the replay using it is blocked and caught as truncated.
         // ADR-0226
         let on_ready = |reply: &SubscribeReply| {
             let outcome = &reply.outcome;
@@ -2462,17 +2261,11 @@ impl ConnectionCore {
         ) {
             Ok(r) => r,
             Err(e) => {
-                // 없는 에이전트가 여기로 온다 — `subscribe_from` 은 세션 조회가 실패하면 `on_ready` 를
-                //   부르지 않으므로 Ack 도 나가지 않는다. 그 순서는 `AgentManager::subscribe_from` 의
-                //   계약이고 코어 테스트가 박는다(`subscribe_from_err_never_invokes_on_ready`).
-                //
-                // ★거절은 `Error` 가 아니라 `SubscribeFailed` 로 낸다(load-bearing)★: `Subscribe` 는
-                //   request_id 가 없는 명령이라 `Error{request_id: None}` 에는 **주인을 식별할 필드가
-                //   없다** — 클라이언트가 어느 에이전트의 구독이 깨졌는지 몰라 자기 single-flight 슬롯을
-                //   못 풀었고, 그 슬롯이 좀비로 남아 그 에이전트의 Subscribe 가 두 번 다시 나가지
-                //   못했다(데몬 재기동 뒤 출력 영구 두절 — 실측 2026-08-19). ★이 거절 지점은 Ack 발행보다
-                //   먼저 return 한다★ — 그래서 "거절엔 Ack/Complete 가 뒤따르지 않는다"는 계약이 성립하고,
-                //   클라이언트는 그에 기대어 슬롯을 즉시 해제한다(AgentEvent 문서 참조).
+                // A nonexistent agent comes here — `subscribe_from` does not call `on_ready` when the session lookup fails, so no Ack goes out
+                //   (contract of `AgentManager::subscribe_from`, pinned by core test `subscribe_from_err_never_invokes_on_ready`).
+                // ★The refusal goes out as `SubscribeFailed`, not `Error` (load-bearing)★: `Subscribe` has no request_id, so `Error{request_id: None}`
+                //   cannot identify the owner and the client's single-flight slot stayed a zombie — that agent's Subscribe never went out again. This
+                //   point returns before the Ack, so "no Ack/Complete follows a refusal" holds and the client relies on it (see the AgentEvent docs).
                 refuse_subscribe(sink, agent_id, format!("subscribe failed: {e}"));
                 return DispatchFlow::Continue;
             }
@@ -2489,8 +2282,8 @@ impl ConnectionCore {
             }
         }
 
-        // Ack 에는 kind 기반 truncated 가 이미 나갔다. 여기서 더 통보하는 것은 kind!=Truncated 인데
-        //   replay 동기 전송 중 실제 drop 이 난 경우뿐이다.
+        // The kind-based truncated already went out in the Ack; this notifies only kind != Truncated with an actual drop during the
+        //   synchronous replay send.
         if outcome.kind != ReplayKind::Truncated && replay_dropped.load(Ordering::Acquire) {
             send_error(
                 sink,
@@ -2499,19 +2292,11 @@ impl ConnectionCore {
             );
         }
 
-        // ★이 한 건은 흘릴 수 없다 — 못 실으면 연결을 닫는다(load-bearing)★: 위 Ack 이 나간 시점에서
-        //   클라이언트의 single-flight 슬롯은 이미 `acked` 다. 그 상태의 슬롯을 푸는 길은 `ReplayComplete`
-        //   아니면 **단절**뿐이다 — 거절은 acked 슬롯을 의도적으로 무시하고(오해제 방어), 만료는 슬롯을
-        //   해제하지 않는다(오귀속 방어). 셋 다 셸의 `daemon_client::replay_flight` 가 내리는 결정이고
-        //   바꿀 것이 아니다.
-        //   그래서 여기서 조용히 흘리면 그 에이전트의 replay 가 **연결이 끊길 때까지 영구 차단**된다
-        //   (새 요청은 전부 그 슬롯에 병합돼 wire 로 나가지 못한다). 닫으면 그 단절이 지금 일어나고
-        //   클라이언트는 재연결 후 전량 재요청한다.
-        // ★왜 큐가 찰 수 있나★: Ack → replay 프레임 전량 → 이 이벤트가 **같은 단일 writer 큐**를 지난다.
-        //   앞의 replay 가 큐를 채우면 이 control 프레임이 마지막에 밀린다(그 경우 replay 프레임도 이미
-        //   drop 돼 바로 위 truncated 통보가 나갔다 — 클라이언트는 어차피 새로고침이 필요한 상태다).
-        // ★대가★: 그 연결의 **다른 에이전트 구독까지** 함께 떨어진다. 그래도 이쪽을 택한 이유는, 반대쪽
-        //   (계속 살려 둠)이 조용한 영구 차단이라 관측 신호조차 남기지 못하기 때문이다.
+        // ★This one cannot slip — if it cannot be queued the connection closes (load-bearing)★: after the Ack the client's single-flight slot is
+        //   `acked`, and only `ReplayComplete` or a disconnect releases it (decisions of the shell's `daemon_client::replay_flight`). Slipping
+        //   would block that agent's replay until the connection drops. Closing forces the disconnect and the client re-requests everything.
+        // The queue can fill because Ack → replay frames → this event share one single-writer queue. Cost: the connection's other agents'
+        //   subscriptions drop together — accepted, since keeping it alive would be a silent permanent block with no signal.
         if sink
             .enqueue(Outbound::event(AgentEvent::ReplayComplete {
                 agent_id,
@@ -2521,7 +2306,7 @@ impl ConnectionCore {
         {
             tracing::error!(
                 %agent_id,
-                "ReplayComplete 를 큐에 못 실었다(포화) — 연결을 닫는다(안 닫으면 그 에이전트의 replay 가 영구 차단)"
+                "could not put ReplayComplete in the queue (saturated) — closing the connection (otherwise that agent's replay is permanently blocked)"
             );
             return DispatchFlow::Close;
         }
@@ -2529,31 +2314,16 @@ impl ConnectionCore {
     }
 }
 
-/// 등록 패킷이 적어 온 주인 토큰은 **광고**일 뿐 권한이 아니다 — 명부의 주인은 그 연결이 붙을 때 명부가
-/// 저장한 값(`actual`)이고, 그 출처는 [`CommandRoster::attached_owner`] 하나다.
+/// The owner token a registration packet writes is only an advertisement, not authority — the roster's owner is the value stored when
+/// that connection attached (`actual`), sourced only from [`CommandRoster::attached_owner`].
 ///
-/// ★`actual` 을 여기서 파생하지 않는 것이 이 함수의 정확성을 좌우한다★: 파생값과 견주면, 저장값이 파생을
-/// 떠나는 날 **정직한 클라이언트가 걸리고 사칭이 통과한다** — 자기 저장 토큰을 그대로 적어 온 연결은
-/// 「다르다」로 갈라지고, 옛 파생형(`conn-<id>`)을 적어 온 연결은 아래 첫 갈래에서 조용히 빠져나간다.
-/// 그 형식을 잡자고 세운 갈래가 정확히 그것을 못 잡게 된다(ADR-0154).
-/// ★`None`(안 붙은 연결) 이면 견줄 값이 없다★ — 어떤 주장도 「같다」로 접지 않고 아래 형식 갈래로 보낸다.
-/// 그 패킷은 어차피 명부가 반려하지만(`CommandRoster::register`), 그 상태에서 우리 형식을 적어 온 것은
-/// 오히려 더 또렷한 사칭 시도다.
-///
-/// ★거절하지 않는 이유★: 연결 id 는 wire 에 나가지 않아 클라이언트가 자기 토큰을 알 수 없다
-/// (`owner_token` 주석). 같지 않다고 거절하면 정상 등록이 **채울 수 없는 칸** 때문에 전부 막힌다.
-/// ★그래서 어긋남 자체는 기본 채널로 올리지 않는다★: 위 이유로 **정상 등록도 어긋난다.** 등록마다
-/// warn 을 한 줄씩 쌓으면 기본 레벨(warn)에서 진짜 경고가 그 밑에 묻힌다.
-/// ★한 갈래만 올린다 — **우리 토큰 형식**을 적어 온 경우★: 그 형식은 데몬 안에서만 나므로(`conn-<id>`),
-/// 남의 연결 앞으로 이름을 얹으려는 시도가 아니고서는 클라이언트가 그 모양을 적을 이유가 없다.
-/// ★빈 칸은 아무것도 남기지 않는다★: `owner` 는 필수 칸이라 빠질 수는 없고, 빈 문자열은 「채울 값을
-/// 모른다」는 뜻이다 — 주장이 아니므로 보고할 것도 없다.
-/// ★그 갈래도 연결당 한 줄뿐이다★: 패킷은 클라이언트가 원하는 만큼 밀 수 있고 그 속도는 우리 손에
-/// 없다. 같은 연결의 두 번째 줄은 운영자에게 새 사실을 주지 않으면서 기본 채널만 채운다.
-/// ★한 줄 제한을 debug 갈래와 **같은 표식으로 묶지 않는다**★ — 묶으면 무해한 패킷 하나를 먼저 보내는
-/// 것만으로 뒤따르는 경고를 잠글 수 있다.
-/// ★찍는 길이를 자른다★: 이 칸은 검증 안 된 클라이언트 문자열이고 프레임 크기 상한이 없어, 통째로
-/// 찍으면 프레임 하나가 메가바이트짜리 로그 줄이 된다.
+/// ★Do not derive `actual` here★: against a derived value, once the stored value leaves the derivation an honest client is caught while
+/// impersonation passes (a connection writing the old derived form `conn-<id>` slips by the format branch; ADR-0154). `None` (not
+/// attached) has nothing to compare and goes to the format branch.
+/// It does not refuse: the client cannot know its token (not on the wire), so refusing on mismatch would block every normal
+/// registration; the mismatch itself is not raised either. Only a client writing our token format (`conn-<id>`, which arises only
+/// inside the daemon) is raised, one line per connection with its own latch (not shared with the debug branch, or one harmless packet
+/// would lock out the later warning). A blank field is not a claim. The printed length is truncated (unverified client string, no frame size cap).
 // ADR-0155
 fn note_claimed_owner(
     session: &ConnectionSession,
@@ -2572,56 +2342,41 @@ fn note_claimed_owner(
             tracing::warn!(
                 conn = conn_id,
                 claimed = %sanitize_for_log(claimed.as_str()),
-                "다른 연결의 주인 토큰을 적은 등록 — 무시하고 이 연결의 토큰으로 얹는다(이 연결에서 한 번만 남긴다)"
+                "registration wrote another connection's owner token — ignoring it and putting it up with this connection's token (logged once per connection)"
             );
         }
     } else {
         tracing::debug!(
             conn = conn_id,
             claimed = %sanitize_for_log(claimed.as_str()),
-            "등록 패킷의 주인 토큰은 쓰지 않는다"
+            "the owner token of a registration packet is not used"
         );
     }
 }
 
-/// 로그에 실을 **클라이언트가 준 문자열**을 다듬는다 — 길이와 **모양** 둘 다.
+/// Trims a client-given string for a log — both length and shape.
 ///
-/// ★길이★: wire 에 프레임 크기 상한이 없어 자르지 않으면 로그 줄 하나가 프레임만큼 커진다. 문자
-/// 경계로 자른다(바이트로 자르면 멀티바이트가 쪼개진다).
-/// ★모양★: 제어문자를 이스케이프한다. 로그 레이어는 Display 값을 **그대로** 쓰므로, 이름에 개행을 넣은
-/// 등록 하나가 줄을 둘로 쪼개고 뒤 줄이 우리가 찍은 것처럼 보이는 **위조 항목**이 된다(타임스탬프·레벨을
-/// 흉내 낸 문자열을 그 자리에 앉힐 수 있다).
-/// 알려진 범위: `char::is_control`(C0/C1)까지다 — U+2028 같은 유니코드 줄 구분자는 그대로 나가고, 지금
-/// 쓰는 fmt 레이어는 그것으로 줄을 쪼개지 않는다.
-/// ★폭은 **이름 한 조각**을 재는 값이다★ — 그보다 긴 것을 실어야 하는 자리는 자기 폭을 정해
-/// [`sanitize_within`] 을 직접 부른다. 이 값을 그런 자리에 맞춰 넓히지 말 것: 여기 붙어 있는 호출자
-/// 대부분은 클라이언트가 준 **이름**이고, 그 폭이 넓어지면 로그 한 줄의 크기를 상대가 정하게 된다.
-/// ★적용 범위 — **이 crate 의 로그 필드**이고, 그 안에서도 예외가 열거돼 있다★
+/// Length: the wire has no frame size cap; cuts at a character boundary. Shape: escapes control characters — the log layer uses the
+/// Display value as is, so a newline in a name would split a line and forge an entry. Range: `char::is_control` (C0/C1); U+2028 passes
+/// and the fmt layer does not split on it.
+/// The width fits one piece of a name; a place carrying more calls [`sanitize_within`] with its own width. ★Do not widen this one★.
 ///
-/// 이 문장을 「전부」로 넓히지 말 것: 세 판 연속 그렇게 적혀 있었고 세 판 다 반례가 있었다(그때 반례는
-/// 명부 끊김 줄과 프로필 이름 줄이었다 — 지금은 둘 다 이 함수를 거친다).
+/// Scope is this crate's log fields; do not widen this to "everything" (three earlier editions did and each had counterexamples):
+/// - Guards: an unverified peer's string in a log field — the socket layer (this file), delivery (`command_delivery::deliver`), roster
+///   disconnect (`logged_names` of `command_roster`), the control routes (`control::mcp_server` · `control::registry`), the messaging host.
+/// - Exception 1, values the daemon made (like the `conn-<id>` owner token, `previous_owner` of `command_roster::CommandRoster::attach`):
+///   that place carries a trigger — the commit changing the stored value must fix that line too.
+/// - Exception 2, typed values (`Uuid` · `ErrorCode` · `http::Method` · `Path`): the type carries the shape.
+/// - Exception 3, outside this crate: the `Origin` · `Host` of a refused WS upgrade are masked by the transport (`AcceptRefusal`, logged by `link::server`).
+/// - Not covered: the `: {e}` interpolation at the end of a message string (the logging convention allows only that).
 ///
-/// - **지키는 것** = `engram-dashboard-daemon` 안에서 **검증 안 된 상대 문자열을 로그 필드에 실을 때**.
-///   소켓 행(이 파일)·배달(`command_delivery::deliver`)·명부 끊김(`command_roster` 의 `logged_names`)·
-///   제어 라우트(`control::mcp_server`·`control::registry`)·메시징 호스트가 같은 함수를 쓴다.
-/// - **예외 ① 데몬이 만든 값** — `conn-<id>` 주인 토큰(`command_roster::CommandRoster::attach` 의
-///   `previous_owner`)처럼 길이·모양이 우리 것인 값은 안 거친다. 그 자리에 「저장하는 값을 바꾸는 커밋이
-///   이 줄을 함께 고쳐야 한다」는 방아쇠가 달려 있다.
-/// - **예외 ② 타입드 값** — `Uuid`·`ErrorCode`·`http::Method`·`Path` 는 문자열이 아니라 타입이 모양을 진다.
-/// - **Exception ③ outside this crate** — the `Origin` · `Host` fields of a refused WS upgrade are masked by the transport
-///   (`AcceptRefusal`, logged by `link::server`) and do not pass through this function. Do not read this function as the
-///   guard of that axis.
-/// - **덮지 않는 축** = 메시지 문자열 끝의 `: {e}` 보간(로깅 컨벤션이 그것만 예외로 허용한다). 이 함수가
-///   묶는 것은 **필드**다.
-///
-/// 형제로 보이는 `control::agent::preview` 는 **응답 문구** 전용이고 제어문자를 흘리므로 로그 자리에 쓰면
-/// 위 위조 항목이 그대로 생긴다(그 함수 doc 이 그 갈림을 적는다).
+/// `control::agent::preview` is for response wording only and lets control characters through.
 pub(crate) fn sanitize_for_log(text: &str) -> String {
     const MAX_CHARS: usize = 64;
     sanitize_within(text, MAX_CHARS)
 }
 
-/// [`sanitize_for_log`] 의 폭을 부르는 쪽이 정하는 갈래 — 다듬는 규칙(길이·모양)은 같다.
+/// The branch where the caller decides the width of [`sanitize_for_log`]; trimming rules are the same.
 pub(crate) fn sanitize_within(text: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for ch in text.chars().take(max_chars) {
@@ -2637,7 +2392,7 @@ pub(crate) fn sanitize_within(text: &str, max_chars: usize) -> String {
     out
 }
 
-/// 팬아웃 포트가 논블록 구현을 요구하므로 pump/cleanup 등 어느 컨텍스트에서 불려도 안전하다.
+/// The fanout port requires a non-blocking implementation, so it is safe to call from any context (pump/cleanup).
 pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentId, held: bool) {
     let ev = AgentEvent::InputLeaseChanged { agent_id, held };
     if let Some(text) = event_json(&ev) {
@@ -2645,19 +2400,15 @@ pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentI
     }
 }
 
-/// `control/agent` 라우트가 부르는 명부 통지 포트의 실물 어댑터(ADR-0132).
+/// The real adapter of the roster notification port the `control/agent` route calls (ADR-0132).
 ///
-/// ★왜 여기 사는가★: 통지의 내용물(어떤 이벤트를 어떤 wire 모양으로 미는가)은 이 모듈이 소유한 지식이고,
-///   `control/` 은 "명부가 바뀌었다" 만 안다. 반대로 두면 제어 라우트가 wire 매핑을 알게 된다.
-///   이 배치를 처음 세운 사유는 ADR-0130 의 잎 성질(`control/` 의 나가는 간선 0)이었고 그 성질은
-///   ADR-0236 이 내려놓았다 — 모양은 그대로 둔다.
+/// It lives here because which event goes in which wire shape is knowledge this module owns; `control/` knows only "the roster changed"
+/// (ADR-0236 dropped the ADR-0130 leaf property).
 /// ★No mismatched pair★: the constructor binds only a fanout and a manager **from one assembly** — the production
 ///   construction points are `DaemonWiring::roster_broadcast` (the rule in that struct's comment) and the WS
 ///   `SpawnByCwd` arm, which builds one from the core's own `fanout` + `manager` (the same assembly).
-/// ★통지 한 번 = `ProfileListUpdated` 다음 `AgentListUpdated`★: 포트는 어느 동사가 불렀는지 모른다 — 버스 · CLI
-///   `agent.rename` 이 산 에이전트의 목록 이름을 바꿔도 셸의 탭 자동 이름이 따라가게 에이전트 목록을 늘 함께 민다.
-///   다른 동사(띄우기 · 만들기 · 옮기기 · 무변경 개명)가 덧붙여 내는 목록은 이름이 그대로면 셸의 이름 장부가 판도 알림도 없이
-///   넘긴다(TRD S26-window-chrome §4-3).
+/// One notification = `ProfileListUpdated` then `AgentListUpdated`: the port does not know which verb called, and the agent list must
+/// always go so a bus · CLI `agent.rename` of a live agent reaches the shell's tab auto name (TRD S26-window-chrome §4-3).
 pub struct RosterFanout {
     fanout: Arc<dyn FrameFanout>,
     manager: Arc<AgentManager>,
@@ -2700,24 +2451,20 @@ fn broadcast_agent_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
     }
 }
 
-/// `Subscribe` 거절 통보([`AgentEvent::SubscribeFailed`])를 낸다 — 부르는 자리는 [`ConnectionCore::handle_subscribe`]
-/// 의 거절 지점 하나, `subscribe_from` 의 `Err` 갈래뿐이다(없는 에이전트도 거기로 온다).
-/// ★그 앞에 에이전트 존재를 따로 묻는 선조회 거절을 되살리지 말 것★ — 선조회는 화신 표식을 replay 와
-/// 다른 조회에서 읽게 만든다(ADR-0226).
-///
-/// ★enqueue 실패를 삼키지 않는다★: 이 한 장이 클라이언트의 single-flight 슬롯을 푸는 유일한 신호다.
-/// 큐 포화로 못 나가면 클라이언트는 거절을 영영 모르고 그 슬롯이 좀비로 남아 **그 에이전트의 Subscribe 가
-/// 두 번 다시 나가지 못한다**(데몬 재기동 뒤 출력 영구 두절 — 실측 2026-08-19). 회복은 어댑터가 R6
-/// 으로 연결을 끊어줄 때뿐이라, 그 사이를 설명할 흔적을 여기서 남긴다.
+/// Emits the `Subscribe` refusal notice ([`AgentEvent::SubscribeFailed`]) — only caller: the `Err` branch of `subscribe_from` in
+/// [`ConnectionCore::handle_subscribe`].
+/// ★Do not add a pre-lookup refusal asking separately whether the agent exists★: the incarnation marker would come from a different
+/// lookup than the replay (ADR-0226). ★Do not swallow an enqueue failure★: this frame is the only signal releasing the client's
+/// single-flight slot; if saturation blocks it, that agent's Subscribe never goes out again until the adapter cuts the connection (R6).
 fn refuse_subscribe(sink: &dyn OutboundSink, agent_id: AgentId, reason: String) {
-    tracing::debug!(agent = %agent_id, %reason, "Subscribe 거절");
+    tracing::debug!(agent = %agent_id, %reason, "Subscribe refused");
     if let Err(e) = sink.enqueue(Outbound::event(AgentEvent::SubscribeFailed {
         agent_id,
         reason,
     })) {
         tracing::warn!(
             agent = %agent_id,
-            "Subscribe 거절 통보를 큐에 못 넣음 — 클라이언트가 구독 슬롯을 못 푼다: {e}"
+            "could not enqueue the Subscribe refusal notice — the client cannot release its subscription slot: {e}"
         );
     }
 }
@@ -2762,8 +2509,8 @@ mod tests {
         RequestId(uuid::Uuid::new_v4())
     }
 
-    /// wire 낱말(소문자)과 버스 낱말(대문자 시작)이 한 칸을 친다 — 칸 키는 들어온 철자가 아니라 조회기의 키다.
-    /// 버스 쪽은 `usage.*` 의 데몬 실물이 실제로 부르는 그 함수(agent `usage_vendor_of`)로 잰다.
+    /// A wire word (lowercase) and a bus word (capitalized) hit one entry — the key is the probe's key, not the incoming spelling.
+    /// The bus side uses the function the real `usage.*` calls (agent `usage_vendor_of`).
     #[test]
     fn wire_and_bus_words_reach_the_same_usage_key() {
         use engram_dashboard_agent::commands::{usage_vendor_of, AgentBackend};
@@ -2771,17 +2518,16 @@ mod tests {
             (WireBackendKind::Claude, AgentBackend::Claude),
             (WireBackendKind::Codex, AgentBackend::Codex),
         ] {
-            let from_wire = usage_vendor_key(wire).expect("wire 벤더마다 조회기가 있다");
-            let from_bus = usage_vendor_of(&bus).expect("버스 낱말마다 조회기가 있다");
+            let from_wire = usage_vendor_key(wire).expect("every wire vendor has a probe");
+            let from_bus = usage_vendor_of(&bus).expect("every bus word has a probe");
             assert_eq!(from_wire, from_bus, "{wire:?}");
         }
     }
 
-    /// ★[`inbound_lane`] 의 판정표★ — 줄이 찼을 때 **무엇이 줄을 건너뛰는가**.
+    /// Decision table of [`inbound_lane`] — what skips a full lane.
     ///
-    /// ★`Interrupt` 가 `Ordered` 인 것이 이 시험의 핵심 단언이다★: 사람의 직관은 「취소니까 당연히
-    /// 건너뛴다」 쪽인데, 그것이 순서 묶음 ①(`WriteStdin`(X) ↔ `Interrupt`(X))을 깬다. 사유의 정본은
-    /// [`inbound_lane`] 주석이고, 여기서는 그 결정이 조용히 뒤집히지 않게 못박기만 한다.
+    /// `Interrupt` being `Ordered` is the core assertion: "it's a cancel so it skips" would break ordering group ① (`WriteStdin`(X) ↔
+    /// `Interrupt`(X)); the reason is in the [`inbound_lane`] comment, here it is only pinned.
     #[test]
     fn only_kill_jumps_the_queue_when_it_is_saturated() {
         let agent_id = uuid::Uuid::new_v4();
@@ -2791,7 +2537,7 @@ mod tests {
                 request_id: rid()
             }),
             InboundLane::Bypass,
-            "Kill 은 막힌 줄을 실제로 푸는 유일한 손잡이다"
+            "Kill is the only handle that actually unblocks a blocked lane"
         );
         let ordered = vec![
             AgentCommand::Interrupt {
@@ -2823,18 +2569,14 @@ mod tests {
             assert_eq!(
                 inbound_lane(cmd),
                 InboundLane::Ordered,
-                "이것이 줄을 건너뛰면 순서 묶음이 깨진다: {cmd:?}"
+                "if this skips the lane the ordering group breaks: {cmd:?}"
             );
         }
     }
 
-    /// ★[`dispatch_order`] 의 판정표★ — 이 분류가 틀리면 **테스트가 아니라 운영에서만** 보인다:
-    /// 잘못 떼어 내면 조용한 순서 결함(입력이 lease 보다 먼저 도착하는 식)이고, 잘못 남기면 그
-    /// 명령이 연결 전체를 다시 세운다. 그래서 양쪽을 다 못박는다.
-    ///
-    /// ★대표만 고른 자리와 전수인 자리를 가른다★: 「떼어 내는 쪽」은 **전수**여야 한다(그 목록이
-    /// 커지는 것이 위험한 방향이다). 「줄에 남는 쪽」은 다섯 순서 묶음의 대표로 충분하다 — 새
-    /// variant 가 빠뜨려지는 것은 이 테스트가 아니라 `dispatch_order` 의 exhaustive match 가 잡는다.
+    /// Decision table of [`dispatch_order`] — a wrong classification shows only in production, so both sides are pinned. The detached
+    /// side must be exhaustive (growth there is the dangerous direction); the in-lane side uses one representative per ordering group,
+    /// since an omitted variant is caught by `dispatch_order`'s exhaustive match.
     #[test]
     fn only_the_activations_and_the_usage_refresh_leave_the_arrival_queue() {
         let detached = vec![
@@ -2862,13 +2604,13 @@ mod tests {
             assert_eq!(
                 dispatch_order(cmd),
                 DispatchOrder::Detached,
-                "끝까지 기다리는 명령은 줄 밖이어야 한다: {cmd:?}"
+                "a command that waits to the end must be outside the lane: {cmd:?}"
             );
         }
 
         let agent_id = uuid::Uuid::new_v4();
         let in_order = vec![
-            // ① 같은 에이전트로 가는 입력
+            // ① input to the same agent
             AgentCommand::WriteStdin {
                 agent_id,
                 data: "x".into(),
@@ -2883,12 +2625,12 @@ mod tests {
                 input_id: "q1".into(),
                 request_id: rid(),
             },
-            // 대기 목록 조회도 줄에 남는다 — 같은 연결의 앞선 입력·취소를 앞질러 읽지 않는다.
+            // A pending-list lookup also stays in the lane — it must not read ahead of earlier input · cancels of the same connection.
             AgentCommand::ListQueuedInputs {
                 agent_id,
                 request_id: rid(),
             },
-            // ② 입력 lease
+            // ② input lease
             AgentCommand::AcquireInput {
                 agent_id,
                 request_id: rid(),
@@ -2897,14 +2639,14 @@ mod tests {
                 agent_id,
                 request_id: rid(),
             },
-            // ③ 구독
+            // ③ subscription
             AgentCommand::Subscribe {
                 agent_id,
                 epoch: None,
                 after_seq: None,
             },
             AgentCommand::Unsubscribe { agent_id },
-            // ④ 명령 명부
+            // ④ command roster
             AgentCommand::RegisterCommands {
                 owner: WireOwnerToken::new("shell"),
                 decls: RawValue::from_string("[]".to_string()).unwrap(),
@@ -2923,7 +2665,7 @@ mod tests {
                 kill_agents: true,
                 request_id: rid(),
             },
-            // 사용량 구독 — 전량 교체라 마지막이 이겨야 한다.
+            // A usage subscription — a full replacement, so the last must win.
             AgentCommand::UsageSubscribe {
                 vendors: vec![WireBackendKind::Claude],
             },
@@ -2932,28 +2674,22 @@ mod tests {
             assert_eq!(
                 dispatch_order(cmd),
                 DispatchOrder::InOrder,
-                "순서가 뜻을 갖는 명령은 줄에 남아야 한다: {cmd:?}"
+                "a command whose order has meaning must stay in the lane: {cmd:?}"
             );
         }
     }
 
-    /// ★★활성화를 async 워커에서 **직접 부르지 않는다**★★ — 그 워커가 최대 20 초 묶인다.
+    /// Do not call activation directly on an async worker — it ties up that worker for up to 20 seconds.
     ///
-    /// `AgentManager::activate_profile` blocks until an outcome on a transport that declares a connection
-    /// (backstop 15 s), and on a failure verdict it then runs the teardown's `session.kill` (pump join
-    /// bounded by 5 s) — with **no** yield point in between. N stuck activations taking N workers stop other
-    /// connections' commands too.
-    /// ★왜 소스에서 재나★: 워커 고갈은 멀티스레드 런타임에 그 수만큼 부하를 걸어야 관측되고, 그
-    ///   시험대는 본질적으로 타이밍 의존이라 이 저장소가 피하는 모양이다(시계 단언 금지). 회귀했을 때
-    ///   나는 것은 빨간 단언이 아니라 **부하 아래서만 보이는 정지**다.
-    /// ★명령 버스 쪽 형제는 `blocking_handler` 가 이미 덮는다★ — 보호가 없던 것은 이 WS 표면뿐이다.
-    /// ★★이 항목이 **못 보는 것 둘**을 적어 둔다★★: ① `include_str!` 가 **자기 파일**이라, 다른 데몬
-    ///   파일에 세 번째 활성화 자리가 생기면 사거리 밖이다 ② 창이 5 줄이라, 인계가 그보다 위에 있는
-    ///   모양은 위 ① 축(`mgr` 수신자)으로만 걸린다. 오늘 둘 다 해당 없음이고, 자리가 늘면 여기를 함께 볼 것.
+    /// `AgentManager::activate_profile` blocks until an outcome on a connection-declaring transport (backstop 15 s) and on a failure verdict
+    /// runs the teardown `session.kill` (pump join bounded by 5 s), with no yield point. Checked from source because worker exhaustion
+    /// shows only under load and this repo avoids clock assertions. The bus sibling is covered by `blocking_handler`.
+    /// Blind spots: `include_str!` is one file, so a third activation place in another daemon file is out of range; the window is 5 lines,
+    /// so a handover further above is caught only by axis 1 (the `mgr` receiver).
     #[test]
     fn both_ws_activation_sites_hand_the_blocking_call_to_the_pool() {
         let src = include_str!("connection_core.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
 
         let lines: Vec<&str> = production.lines().collect();
         let call_sites: Vec<usize> = lines
@@ -2967,22 +2703,20 @@ mod tests {
             .collect();
         assert!(
             !call_sites.is_empty(),
-            "활성화 호출 자리가 사라졌다 — 이 항목의 전제가 낡았다"
+            "the activation call place is gone — the premise of this item is stale"
         );
-        // ★두 축으로 본다 — 한 축만 두면 각각 새는 구멍이 있다★:
-        //   ① 호출 수신자가 **풀로 옮긴 사본**(`mgr`)인가 — 거리와 무관하게 맨몸 호출을 잡는다.
-        //   ② 그 위 몇 줄 안에 인계가 실제로 있나 — 이름만 `mgr` 로 바꾼 위장을 잡는다.
-        //   개수는 세지 않는다(세면 무관한 `spawn_blocking` 이 하나 늘 때마다 헛빨강이 난다).
+        // Two axes, since each alone leaks: (1) the call receiver is the pool-moved copy (`mgr`) — catches a bare call at any distance; (2) a
+        //   handover within a few lines above — catches a disguise that only renamed to `mgr`. No count: an unrelated `spawn_blocking` would false-red.
         for i in call_sites {
             let line = lines[i];
             assert!(
                 line.contains("mgr.activate_profile"),
-                "활성화를 async 워커에서 직접 부른다 — 최대 20 초 동안 그 워커가 묶이고, 막힌 활성화                  N 건이 워커 N 개를 가져가 다른 연결의 명령까지 멈춘다: {line}"
+                "activation is called directly on an async worker — that worker is tied up for up to 20 seconds, and N blocked activations take N workers and stall other connections' commands too: {line}"
             );
             let window = lines[i.saturating_sub(4)..=i].join("\n");
             assert!(
                 window.contains("spawn_blocking"),
-                "수신자만 풀 사본 이름이고 인계가 없다 — 이름은 맞는데 여전히 async 워커에서 돈다:\n{window}"
+                "only the receiver has the pool-copy name and there is no handover — the name is right but it still runs on an async worker:\n{window}"
             );
         }
     }
@@ -2994,7 +2728,7 @@ mod tests {
     #[test]
     fn the_by_cwd_spawn_hands_the_blocking_call_to_the_pool() {
         let src = include_str!("connection_core.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
 
         let lines: Vec<&str> = production.lines().collect();
         let call_sites: Vec<usize> = lines
@@ -3008,7 +2742,7 @@ mod tests {
             .collect();
         assert!(
             !call_sites.is_empty(),
-            "즉석 생성 호출 자리가 사라졌다 — 이 항목의 전제가 낡았다"
+            "the ad-hoc create call site is gone — this item's premise is stale"
         );
         for i in call_sites {
             let line = lines[i];
@@ -3019,13 +2753,12 @@ mod tests {
             let window = lines[i.saturating_sub(4)..=(i + 1).min(lines.len() - 1)].join("\n");
             assert!(
                 window.contains("spawn_blocking") && window.contains("mgr.as_ref()"),
-                "수신자만 풀 사본 이름이고 인계가 없다 — 이름은 맞는데 여전히 async 워커에서 돈다:\n{window}"
+                "only the receiver has the pool-copy name and there is no handover — the name is right but it still runs on an async worker:\n{window}"
             );
         }
     }
 
-    /// ★output 평면은 mock 으로 안 만든다★ — 실 프레임 출구(conn_tx)로 흘려 별도 채널로 받는다
-    /// (그래야 control 과 같은 단일 writer 큐에 실려 FIFO 순서를 관측할 수 있다).
+    /// The output plane is not mocked — it flows to the real frame outlet (conn_tx), riding the same single-writer queue as control so FIFO order is observable.
     struct MockOutboundSink {
         events: Arc<StdMutex<Vec<AgentEvent>>>,
         conn_tx: tokio::sync::mpsc::Sender<frame_port::Frame>,
@@ -3072,9 +2805,8 @@ mod tests {
         }
     }
 
-    /// ★flush 트리거는 꽂지 않는다(의도)★: 운영은 로스터 diff(MessagingFlushSink)가 등장 시 파킹을 비우지만,
-    ///   여기서는 "스폰 후에도 파킹분이 남아 있는" 상태가 필요하다(삭제 정리가 그걸 죽이는지가 검증 대상).
-    ///   그 diff 배선 자체는 messaging_host.rs·control_send 테스트가 지킨다.
+    /// The flush trigger is not plugged in on purpose: production empties the parking on appearance (MessagingFlushSink), but this test needs
+    ///   parked items to remain after the spawn to verify the delete cleanup kills them. The diff wiring is guarded by the messaging_host.rs · control_send tests.
     fn test_core_with_messaging() -> (
         ConnectionCore,
         Arc<engram_dashboard_messaging::service::MessagingService>,
@@ -3093,13 +2825,13 @@ mod tests {
         (core, rx)
     }
 
-    /// 팬아웃 기록을 함께 돌려주는 갈래 — 브로드캐스트를 재는 시험용.
+    /// Also returns the fanout record — for tests measuring the broadcast.
     fn test_core_recording() -> (ConnectionCore, Arc<crate::test_doubles::RecordingFanout>) {
         let (core, _rx, fanout) = test_core_with(CommandDeliveries::new());
         (core, fanout)
     }
 
-    /// 상관 표를 밖에서 꽂는 갈래 — 마감 갈래를 재는 시험이 **손으로 미는 시계**를 넣어야 한다.
+    /// Plugs the correlation table in from outside — a test of the deadline branch needs a clock pushed by hand.
     fn test_core_with(
         deliveries: CommandDeliveries,
     ) -> (
@@ -3112,13 +2844,11 @@ mod tests {
         })
     }
 
-    /// ★데몬이 **자기 `agent.*` 표를 쥔** 조립★ — 배달 1단계와 발견의 자기 몫이 실제로 도는 자리다.
-    ///
-    /// 표는 운영과 같은 조립기(`control::commands::make_daemon_table`)로 만든다 — 여기서 손으로 표를
-    /// 꾸미면 그 사본이 운영과 조용히 어긋난다. 매니저는 디스크도 PTY 도 없는 이 하네스의 것을 그대로 쓴다.
+    /// An assembly where the daemon holds its own `agent.*` table (from `control::commands::make_daemon_table`, the production assembler),
+    /// so delivery stage 1 and discovery's own part really run.
     fn test_core_with_own_agent_table() -> (ConnectionCore, watch::Receiver<bool>) {
-        // 팬아웃 기록은 이 갈래의 검증 대상이 아니라 흘린다 — 재는 쪽은 `test_core_recording`.
-        // 임대 포트는 코어가 쥐는 그 `MultiViewState` 다 — 운영 조립(`lib.rs`)과 같은 모양이다.
+        // The fanout record is not verified here, so it is dropped (see `test_core_recording`). The lease port is the core's `MultiViewState`,
+        // as in the production assembly (`lib.rs`).
         let (core, rx, _fanout) =
             test_core_built(CommandDeliveries::new(), &|manager, multiview| {
                 let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
@@ -3133,8 +2863,8 @@ mod tests {
         (core, rx)
     }
 
-    /// ★표를 **나중에** 채우는 조립★ — 슬롯 주입은 연결 공장 조립보다 늦을 수 있고, 그 창에 도착한 등록은
-    /// 반려할 근거가 없어 명부에 그대로 남는다. 겹침이 실제로 생길 수 있는 상태가 이것 하나다.
+    /// An assembly that fills the table later — slot injection can follow the connection factory assembly, and a registration in that window
+    /// is kept in the roster as is. The one state where an overlap can really occur.
     fn test_core_with_late_agent_table() -> (
         ConnectionCore,
         watch::Receiver<bool>,
@@ -3142,7 +2872,7 @@ mod tests {
     ) {
         let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
         let for_locals = slot.clone();
-        // 팬아웃 기록은 이 갈래의 검증 대상이 아니라 흘린다(위 형제와 같은 이유).
+        // The fanout record is not what this branch verifies so it is dropped (same reason as the sibling above).
         let (core, rx, _fanout) = test_core_built(CommandDeliveries::new(), &move |_, _| {
             Arc::new(crate::control::commands::DaemonLocalCommands::new(
                 for_locals.clone(),
@@ -3151,11 +2881,9 @@ mod tests {
         (core, rx, slot)
     }
 
-    /// 위 세 갈래가 공유하는 조립 본체 — 갈리는 것은 자기 몫 `agent.*` 표를 꽂는 방식뿐이다.
+    /// The assembly body the three branches above share — only the way the own-part `agent.*` table is plugged in differs.
     ///
-    /// ★팬아웃 기록을 세 번째 값으로 함께 돌려준다★: 브로드캐스트가 실제로 나갔는지 재는 시험
-    ///   (`test_core_recording`)이 그 핸들을 여기 말고 얻을 데가 없다 — 조립기가 안에서 만들어 코어에
-    ///   넘기고 끝내면 밖에서는 같은 것을 다시 쥘 수 없다.
+    /// Returns the fanout record as the third value too: `test_core_recording` has no other way to hold that handle.
     fn test_core_built(
         deliveries: CommandDeliveries,
         locals: &dyn Fn(&Arc<AgentManager>, &MultiViewState) -> Arc<dyn LocalCommands>,
@@ -3167,14 +2895,13 @@ mod tests {
         test_core_on_stores(deliveries, locals, Arc::default(), None)
     }
 
-    /// [`test_core_refusable`] 의 저장소 스위치 값 — 받음 · 적재 때 거절(새 판) · 쓰기 실패. 어느 쪽이든 실패면
-    /// 아무것도 안 남긴다.
+    /// The store switch of [`test_core_refusable`] — accept · refuse on load (new version) · write failure; a failure leaves nothing either way.
     const STORE_SAVES: u8 = 0;
     const STORE_REFUSES: u8 = 1;
     const STORE_FAILS_IO: u8 = 2;
 
-    /// 저장소 결말을 바꾸는 조립 — 스위치([`STORE_SAVES`] · [`STORE_REFUSES`] · [`STORE_FAILS_IO`])가 프로필
-    /// 저장소에 걸린다. 팬아웃 기록과 그 스위치를 함께 돌려준다.
+    /// An assembly that changes the store outcome — the switch ([`STORE_SAVES`] · [`STORE_REFUSES`] · [`STORE_FAILS_IO`]) hangs on the
+    /// profile store. Returns the fanout record and the switch.
     // ADR-0291 R17
     fn test_core_refusable() -> (
         ConnectionCore,
@@ -3205,7 +2932,7 @@ mod tests {
         (core, fanout)
     }
 
-    /// [`test_core_built`] 의 본체 — `refusing` 이 [`STORE_SAVES`] 가 아닌 동안 프로필 저장소가 저장에 실패한다.
+    /// The body of [`test_core_built`] — while `refusing` is not [`STORE_SAVES`] the profile store fails to save.
     /// `kits` = the manager's launch-kit source (`None` = the Noop default).
     fn test_core_on_stores(
         deliveries: CommandDeliveries,
@@ -3287,14 +3014,9 @@ mod tests {
         (core, shutdown_rx, recording)
     }
 
-    /// ★사람 클릭(WS)과 LLM(명령 버스)이 같은 것을 흔든다★ — 그 주장의 WS 절반.
-    ///
-    /// 활성화는 그 항목의 「마지막 실패」를 바꾸는데(성공=지움 / 실패=기록, ADR-0172) 그 축은 프로필
-    /// 목록 broadcast 로만 흐른다. 이 통지가 빠지면 WS 로 띄운 결과만 화면에 안 닿고, 명령 버스로는
-    /// 닿아 두 핸들이 갈린다. 버스 절반은 `core::agent::commands` 의 두 시험이 이미 못박고 있다.
-    ///
-    /// 실패 갈래로 잰다 — 실 claude 없이 결정적이고(없는 실행파일), 성공 갈래보다 통지가 더 절실하다
-    /// (그쪽은 화면에 남는 것이 이 통지가 나른 값뿐이다).
+    /// A human click (WS) and the LLM (command bus) shake the same thing — the WS half (the bus half: two tests in `core::agent::commands`).
+    /// Activation changes the entry's "last failure" (ADR-0172), which flows only through the profile list broadcast. Measured on the
+    /// failure branch: deterministic without a real claude, and there the notification is the only thing reaching the screen.
     // ADR-0172
     #[tokio::test]
     async fn ws_spawn_profile_announces_the_profile_list_even_when_activation_fails() {
@@ -3302,7 +3024,7 @@ mod tests {
         let profile = engram_dashboard_agent::profile::AgentProfile::new(
             "ws-parity".into(),
             engram_dashboard_agent::profile::AgentCommand::Shell {
-                // 실재하지 않는 실행파일 — 활성화가 결정적으로 실패한다.
+                // A nonexistent executable — activation fails deterministically.
                 program: format!("engram-not-a-real-program-{}.exe", uuid::Uuid::new_v4()),
                 args: vec![],
             },
@@ -3310,7 +3032,10 @@ mod tests {
             vec![],
             false,
         );
-        let created = core.manager.try_create_agent(profile).expect("등록");
+        let created = core
+            .manager
+            .try_create_agent(profile)
+            .expect("registration");
         let before = fanout.texts().len();
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
@@ -3332,18 +3057,15 @@ mod tests {
             .any(|t| t.contains("ProfileListUpdated"));
         assert!(
             announced,
-            "활성화 결말이 프로필 목록으로 나가야 한다 — 없으면 WS 로 띄운 실패가 화면에 안 뜬다: {:?}",
+            "the activation outcome must go out via the profile list — without it a failure launched via WS does not show on screen: {:?}",
             fanout.texts()
         );
     }
 
-    /// ★저장된 sid 만으로 Resume 을 유도하지 않는다(ADR-0185)★ — 명령 버스 쪽 짝은
-    /// `engram_dashboard_agent::commands` 의 `waking_does_not_resume_a_profile_whose_backend_cannot_resume`
-    /// 다. 두 핸들이 같은 것을 흔들어야 한다(CLAUDE.md 「LLM-우선 제어」).
-    ///
-    /// ★모드를 어떻게 관측하나★: wire 에 「이어받았나」 칸이 없다 — 그것이 이 결함이 조용한 이유다. 그래서
-    ///   **결말**로 가른다. 즉시 끝나는 프로그램을 쓰면 Fresh 는 띄운 즉시 `Spawned` 를 내고, Resume 은
-    ///   `resume_no_fallback` 이 조기종료 창에서 그 종료를 보고 실패로 끊어 `Spawned` 가 없다.
+    /// Do not derive Resume from a stored sid alone (ADR-0185) — bus counterpart:
+    /// `waking_does_not_resume_a_profile_whose_backend_cannot_resume` in `engram_dashboard_agent::commands`.
+    /// The wire has no "did it resume" field, so the mode is told apart by outcome: with a program that ends immediately, Fresh emits
+    /// `Spawned`, while Resume has `resume_no_fallback` see the exit in the early-exit window and fail it, so no `Spawned`.
     // ADR-0185
     #[tokio::test]
     async fn ws_spawn_profile_does_not_resume_a_profile_whose_backend_cannot_resume() {
@@ -3358,15 +3080,18 @@ mod tests {
             vec![],
             false,
         );
-        // 이어받을 수 없는 명령에 sid 가 남아 있는 상태 — 손으로 고친 프로필 파일이 오늘 만든다.
+        // A sid remaining on a command that cannot resume — a hand-edited profile file makes it today.
         profile.backend_session_id = Some(uuid::Uuid::new_v4());
-        let created = core.manager.try_create_agent(profile).expect("등록");
+        let created = core
+            .manager
+            .try_create_agent(profile)
+            .expect("registration");
         assert!(
             core.manager
                 .agent_snapshot(created.id)
                 .and_then(|p| p.backend_session_id)
                 .is_some(),
-            "전제: sid 가 심겨 있어야 이 항목이 그 갈래를 잰다"
+            "premise: the sid must be planted for this item to measure that branch"
         );
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
@@ -3387,17 +3112,14 @@ mod tests {
             mock.events()
                 .iter()
                 .any(|e| matches!(e, AgentEvent::Spawned { .. })),
-            "sid 가 있어도 이어받을 수 없는 명령이면 Fresh 로 떠야 한다: {:?}",
+            "even with a sid, a command that cannot resume must come up Fresh: {:?}",
             mock.events()
         );
         let _ = core.manager.kill_agent(created.id);
     }
 
-    /// ★`resume: true` 가 그 술어를 **일부러** 우회한다 — 이 비대칭을 코드에 못 박는다★: 위 항목의 짝이고,
-    /// 둘의 유일한 차이가 그 플래그다. 프로그램·sid·명령이 전부 같은데 결말이 갈리는 것이 그 우회의 실물.
-    ///
-    /// ★이 항목은 그 우회를 **정당화하지 않는다**★ — 지금 그렇다는 것만 잰다. 규칙을 「조화」시키려는 다음
-    ///   세션이 이 항목을 깨뜨리면, 그건 고장이 아니라 **결정을 바꾸고 있다**는 신호다(그 결정은 미결).
+    /// `resume: true` deliberately bypasses that predicate — this asymmetry is pinned (same program · sid · command, differing only by the
+    /// flag). It does not justify the bypass (that decision is open): a session "harmonizing" the rule and breaking this is changing a decision.
     // ADR-0185
     #[tokio::test]
     async fn ws_spawn_profile_still_honours_an_explicit_resume_request() {
@@ -3413,7 +3135,10 @@ mod tests {
             false,
         );
         profile.backend_session_id = Some(uuid::Uuid::new_v4());
-        let created = core.manager.try_create_agent(profile).expect("등록");
+        let created = core
+            .manager
+            .try_create_agent(profile)
+            .expect("registration");
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
@@ -3429,17 +3154,15 @@ mod tests {
         )
         .await;
 
-        // Resume 으로 갔다는 증거 = 조기종료 창이 그 종료를 보고 활성화를 **실패로** 끊는다(Fresh 면 띄운
-        //   즉시 `Spawned` 가 나간다 — 바로 위 항목이 그쪽을 잰다).
-        // ★「Spawned 가 없다」만으로는 부족하다★ — 무관한 이유로 아무 것도 안 나가도 참이 된다. 그래서
-        //   그 실패가 **resume 갈래에서 왔다는 것**까지 본다.
+        // Evidence of Resume: the early-exit window sees the exit and fails the activation (Fresh emits `Spawned`). "No Spawned" alone also holds
+        //   for unrelated reasons, so it also checks the failure came from the resume branch.
         let events = mock.events();
         assert!(
             events.iter().any(|e| matches!(
                 e,
                 AgentEvent::Error { message, .. } if message.contains("resume")
             )),
-            "명시 resume 요청이 이어받기 축에 막혔다 — 그 우회는 의도된 것이라 바꾸려면 결정이 먼저다: {events:?}"
+            "an explicit resume request was blocked by the resume axis — that bypass is intended so changing it needs a decision first: {events:?}"
         );
         let _ = core.manager.kill_agent(created.id);
     }
@@ -3469,7 +3192,7 @@ mod tests {
             .spawn_agent(&profile, SpawnMode::Fresh)
             .expect("spawn")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+            .expect("this call really launches (not a duplicate request)");
         let agent_id = info.id;
         let mut waited = 0;
         loop {
@@ -3479,7 +3202,7 @@ mod tests {
                 }
             }
             if waited > 50 {
-                break; // 출력 없어도 Ack/Complete 순서는 검증된다.
+                break; // Even with no output the Ack/Complete order is verified.
             }
             tokio::time::sleep(Duration::from_millis(40)).await;
             waited += 1;
@@ -3504,46 +3227,51 @@ mod tests {
         while let Ok(item) = conn_rx.try_recv() {
             items.push(item);
         }
-        assert!(items.len() >= 2, "최소 Ack+ReplayComplete: {}", items.len());
+        assert!(
+            items.len() >= 2,
+            "at least Ack+ReplayComplete: {}",
+            items.len()
+        );
         match &items[0] {
             frame_port::Frame::Text(s) => {
-                assert!(s.contains("SubscribeAck"), "1번째는 SubscribeAck: {s}")
+                assert!(s.contains("SubscribeAck"), "the 1st is SubscribeAck: {s}")
             }
-            other => panic!("1번째는 Text(SubscribeAck) 여야 함: {other:?}"),
+            other => panic!("the 1st must be Text(SubscribeAck): {other:?}"),
         }
         match items.last().unwrap() {
             frame_port::Frame::Text(s) => {
-                assert!(s.contains("ReplayComplete"), "마지막은 ReplayComplete: {s}")
+                assert!(
+                    s.contains("ReplayComplete"),
+                    "the last is ReplayComplete: {s}"
+                )
             }
-            other => panic!("마지막은 Text(ReplayComplete) 여야 함: {other:?}"),
+            other => panic!("the last must be Text(ReplayComplete): {other:?}"),
         }
         for mid in &items[1..items.len() - 1] {
             assert!(
                 matches!(mid, frame_port::Frame::Binary(_)),
-                "Ack 와 ReplayComplete 사이엔 replay Binary 만: {mid:?}"
+                "only replay Binary between Ack and ReplayComplete: {mid:?}"
             );
         }
 
         let evs = mock.events();
         assert!(
             matches!(evs.first(), Some(AgentEvent::SubscribeAck { .. })),
-            "control 첫 이벤트=SubscribeAck"
+            "control first event=SubscribeAck"
         );
         assert!(
             matches!(evs.last(), Some(AgentEvent::ReplayComplete { .. })),
-            "control 마지막=ReplayComplete"
+            "control last=ReplayComplete"
         );
 
         let _ = core.manager.kill_agent(agent_id);
     }
 
-    // ★회귀 대상★: `ReplayComplete` 를 조용히 흘리면 클라이언트의 acked 슬롯을 풀 길이 사라진다(거절은
-    //   acked 를 무시하고 만료는 해제하지 않는다) — 그 에이전트의 replay 가 단절 전까지 영구 차단된다.
-    //   그래서 못 실으면 **연결을 닫아** 그 단절을 지금 만든다. `Close` 가 안 나오면 그 차단이 부활한다.
+    // Regression targeted: slipping `ReplayComplete` leaves the client's acked slot unreleasable (replay blocked until disconnect); if it
+    //   cannot be queued the connection must close.
     #[tokio::test]
     async fn subscribe_closes_the_connection_when_replay_complete_cannot_be_queued() {
-        // Ack·replay 는 통과시키고 ReplayComplete 만 큐 포화로 떨군다(운영에서 나는 순서 그대로 —
-        //   앞의 replay 가 같은 단일 writer 큐를 채워 마지막 control 프레임이 밀린다).
+        // Pass Ack · replay and drop only ReplayComplete by queue saturation (the production order: replay fills the single-writer queue).
         struct DropsReplayComplete(MockOutboundSink);
         impl OutboundSink for DropsReplayComplete {
             fn enqueue(&self, out: Outbound) -> Result<(), SinkError> {
@@ -3574,7 +3302,7 @@ mod tests {
             .spawn_agent(&profile, SpawnMode::Fresh)
             .expect("spawn")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+            .expect("this call really launches (not a duplicate request)");
         let agent_id = info.id;
 
         let (tx, _conn_rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(4608);
@@ -3595,24 +3323,22 @@ mod tests {
         assert_eq!(
             flow,
             DispatchFlow::Close,
-            "ReplayComplete 를 못 실으면 연결을 닫아야(안 닫으면 그 에이전트 replay 가 영구 차단)"
+            "if ReplayComplete cannot be put in the connection must close (otherwise that agent's replay is permanently blocked)"
         );
         assert!(
             matches!(
                 sink.0.events().first(),
                 Some(AgentEvent::SubscribeAck { .. })
             ),
-            "전제: Ack 은 나갔다(그래서 클라 슬롯이 acked 다)"
+            "premise: the Ack went out (so the client slot is acked)"
         );
 
         let _ = core.manager.kill_agent(agent_id);
     }
 
-    // ── Subscribe: 없는 agent ─────────────────────────────────────────────────────
-    // ★거절은 `agent_id` 를 실어 보낸다(회귀 대상 — 실측 2026-08-19)★: 무주공산 `Error{request_id:None}`
-    //   이던 시절엔 클라이언트가 어느 구독이 깨졌는지 몰라 single-flight 슬롯을 못 풀었고, 그 슬롯이
-    //   좀비로 남아 그 에이전트의 Subscribe 가 두 번 다시 나가지 못했다. Ack 부재도 함께 못 박는다 —
-    //   "거절엔 Ack/Complete 가 뒤따르지 않는다" 가 클라이언트 즉시 해제의 전제다.
+    // ── Subscribe: a nonexistent agent ─────────────────────────────────────────────────────
+    // The refusal carries the `agent_id` (regression target): an ownerless `Error{request_id:None}` left the client's single-flight slot a
+    //   zombie. The absence of an Ack is pinned too (the client's immediate release relies on it).
     #[tokio::test]
     async fn subscribe_unknown_agent_emits_subscribe_failed_no_ack() {
         let (core, _rx) = test_core();
@@ -3631,16 +3357,15 @@ mod tests {
         )
         .await;
         let evs = mock.events();
-        assert_eq!(evs.len(), 1, "거절 1건만");
+        assert_eq!(evs.len(), 1, "only 1 refusal");
         match &evs[0] {
             AgentEvent::SubscribeFailed { agent_id, .. } => assert_eq!(*agent_id, missing),
-            other => panic!("SubscribeFailed 여야 함: {other:?}"),
+            other => panic!("must be SubscribeFailed: {other:?}"),
         }
     }
 
-    // ── Subscribe: 거절 통보 본체 ────────────────────────────────────────────────────
-    // 위 dispatch 케이스는 변형과 주인만 본다. 여기서는 본체를 직접 태워 **거절 통보의 내용**(agent_id 동봉 ·
-    //   사유 전달)을 박는다.
+    // ── Subscribe: the refusal notice body ────────────────────────────────────────────────────
+    // The dispatch case above sees only the variant and owner; here the body runs directly to pin the notice content (agent_id · reason).
     #[test]
     fn refuse_subscribe_carries_agent_id_and_reason() {
         let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
@@ -3654,17 +3379,19 @@ mod tests {
             }] => {
                 assert_eq!(
                     *got, agent_id,
-                    "거절엔 주인이 실려야 한다(상관 불가 = 좀비)"
+                    "the refusal must carry the owner (no correlation = a zombie)"
                 );
-                assert!(reason.contains("subscribe failed"), "사유 전달: {reason}");
+                assert!(
+                    reason.contains("subscribe failed"),
+                    "the reason is conveyed: {reason}"
+                );
             }
-            other => panic!("SubscribeFailed 1건이어야: {other:?}"),
+            other => panic!("must be 1 SubscribeFailed: {other:?}"),
         }
     }
 
-    // 큐가 포화라 거절을 못 실어 보내도 dispatch 는 살아남아야 한다(패닉·unwrap 금지). ★로그는 여기서
-    //   단언하지 않는다★ — 구독자 캡처 하네스가 없다. 재는 것은 "실패 경로가 터지지 않는다" 뿐이고,
-    //   경고를 남기는 것 자체는 `refuse_subscribe` 본문이 진다.
+    // Even with a saturated queue and an unsendable refusal, dispatch must survive (no panic · unwrap). The log is not asserted (no
+    //   subscriber-capture harness).
     #[test]
     fn refuse_subscribe_survives_full_queue() {
         struct FullSink;
@@ -3673,68 +3400,65 @@ mod tests {
                 Err(SinkError)
             }
             fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
-                unreachable!("이 테스트는 enqueue 만 태운다")
+                unreachable!("this test runs only the enqueue")
             }
         }
         refuse_subscribe(&FullSink, uuid::Uuid::new_v4(), "full".into());
     }
 
-    /// ★Ack 과 `ReplayComplete` 의 화신 표식은 `subscribe_from` 의 응답 하나에서만 나온다★ — 표식을 따로
-    ///   조회하면 그 조회와 replay 사이에 화신이 갈려, 표식이 replay 한 것과 다른 화신을 말한다.
-    /// ★왜 소스에서 재나★: 그 창은 두 조회 사이의 화신 교체라 dispatch 로 결정론 재현이 안 된다. 짝 =
-    ///   코어의 `subscribe_from_reports_the_incarnation_it_replayed_from`(응답이 replay 한 세션에서 나온다).
+    /// The incarnation marker of the Ack and `ReplayComplete` comes only from the one `subscribe_from` response. Checked from source: the
+    /// window is an incarnation swap between two lookups, not reproducible through dispatch. Pair: core `subscribe_from_reports_the_incarnation_it_replayed_from`.
     // ADR-0226
     #[test]
     fn handle_subscribe_takes_the_incarnation_only_from_the_subscribe_reply() {
-        // 체크아웃의 줄끝(CRLF)과 무관하게 아래 0열 `}` 경계를 찾으려고 LF 로 맞춘다.
+        // Align to LF to find the column-0 `}` boundary below regardless of the checkout's line endings (CRLF).
         let src = include_str!("connection_core.rs").replace("\r\n", "\n");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         assert_eq!(
             production.matches("fn handle_subscribe(").count(),
             1,
-            "`handle_subscribe` 가 운영 구획에 정확히 하나여야 이 항목이 본문을 특정한다"
+            "`handle_subscribe` must be exactly one in the production section for this item to pin down the body"
         );
         let rest = production
             .split("fn handle_subscribe(")
             .nth(1)
-            .expect("`handle_subscribe` 본문");
-        // 이 메서드는 `impl ConnectionCore` 의 마지막이라 impl 을 닫는 첫 0열 `}` 까지가 본문이다.
-        let body = &rest[..rest.find("\n}\n").expect("impl 을 닫는 괄호")];
+            .expect("the body of `handle_subscribe`");
+        // This method is the last of `impl ConnectionCore`, so the body runs to the first column-0 `}` closing the impl.
+        let body = &rest[..rest.find("\n}\n").expect("the brace closing the impl")];
         assert!(
             !body.contains("fn "),
-            "잘라 낸 덩어리에 다른 함수가 들어 있다 — 경계가 넘쳤다"
+            "the cut-out chunk contains another function — the boundary overflowed"
         );
         assert!(
             !body.contains("agent_epoch("),
-            "표식을 따로 조회한다 — replay 와 다른 화신을 말할 수 있다: {body}"
+            "the marker is looked up separately — it can say a different incarnation from the replay: {body}"
         );
         assert_eq!(
             body.matches("reply.incarnation.epoch").count(),
             2,
-            "Ack 와 `ReplayComplete` 두 자리가 모두 응답의 표식을 써야 한다: {body}"
+            "both the Ack and `ReplayComplete` places must use the response's marker: {body}"
         );
         assert_eq!(
             body.matches("continues_conversation: reply.incarnation.continues_conversation")
                 .count(),
             1,
-            "Ack 의 이어받기 표식도 응답에서 와야 한다: {body}"
+            "the Ack's resume marker must also come from the response: {body}"
         );
     }
 
-    /// Ack 의 이어받기 표식은 **그 화신이 스폰될 때 이어받을 손잡이를 실었나**를 그대로 나른다.
-    /// ★셸로 재는 이유★: spawn 은 Resume 이면 backend 와 무관하게 명부의 손잡이를 읽고 셸은 그 값을
-    ///   버린다 — 그래서 실 claude·codex 없이 표식이 참인 화신이 선다.
+    /// The Ack's resume marker carries as is whether the spawn carried a handle to resume with. Measured with a shell: on Resume, spawn
+    /// reads the roster's handle regardless of backend and the shell discards it, so a true-marker incarnation stands up without a real claude·codex.
     // ADR-0226
     #[tokio::test]
     async fn subscribe_ack_carries_whether_the_incarnation_continues_a_conversation() {
         let (core, _rx) = test_core();
 
-        // (Ack 의 이어받기 표식, Ack 의 화신 표식, Complete 의 화신 표식, 비운 binary 프레임들의 화신 표식)
+        // (the Ack's resume marker, the Ack's incarnation marker, the Complete's incarnation marker, the incarnation markers of the drained binary frames)
         async fn subscribe_once(
             core: &ConnectionCore,
             agent_id: AgentId,
         ) -> (bool, u32, u32, Vec<u32>) {
-            // 셸이 뭔가 찍을 때까지 기다린다 — 안 그러면 replay 가 비어 아래 프레임 표식 단언이 헛돈다.
+            // Wait until the shell prints something — otherwise the replay is empty and the frame marker assertion below spins on nothing.
             let mut printed = false;
             for _ in 0..125 {
                 if core
@@ -3749,7 +3473,7 @@ mod tests {
             }
             assert!(
                 printed,
-                "셸 출력이 5초 안에 replay 링에 닿지 않았다 — 시험 전제 실패(셸 기동 지연 또는 출력 경로)이지 구독 replay 결함이 아니다"
+                "the shell output did not reach the replay ring within 5 seconds — a test premise failure (shell startup delay or output path), not a subscription replay defect"
             );
             let (tx, mut conn_rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(4608);
             let mock = MockOutboundSink::new(tx);
@@ -3770,19 +3494,18 @@ mod tests {
                     current_epoch,
                     ..
                 }) => (*continues_conversation, *current_epoch),
-                other => panic!("첫 이벤트는 SubscribeAck 이어야: {other:?}"),
+                other => panic!("the first event must be SubscribeAck: {other:?}"),
             };
             let complete_epoch = match evs.last() {
                 Some(AgentEvent::ReplayComplete { epoch, .. }) => *epoch,
-                other => panic!("마지막 이벤트는 ReplayComplete 여야: {other:?}"),
+                other => panic!("the last event must be ReplayComplete: {other:?}"),
             };
-            // dispatch 뒤 비운 binary 프레임 — replay 에 그새 들어온 live 프레임이 섞일 수 있다. 어느 쪽이든
-            //   그 화신의 표식이어야 한다.
+            // The drained binary frames may include live frames that entered the replay meanwhile; they must carry that incarnation's marker too.
             let mut drained_epochs = Vec::new();
             while let Ok(frame) = conn_rx.try_recv() {
                 if let frame_port::Frame::Binary(bytes) = frame {
                     let decoded = engram_dashboard_protocol::decode_frame(&bytes)
-                        .expect("출력 프레임은 codec 으로 읽힌다");
+                        .expect("the output frame is read with the codec");
                     drained_epochs.push(decoded.epoch);
                 }
             }
@@ -3807,7 +3530,7 @@ mod tests {
             .spawn_agent(&shell(), SpawnMode::Fresh)
             .expect("spawn")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+            .expect("this call really launches (not a duplicate request)");
         let mut resumable = shell();
         resumable.backend_session_id = Some(uuid::Uuid::new_v4());
         let resumed = core
@@ -3815,24 +3538,30 @@ mod tests {
             .spawn_agent(&resumable, SpawnMode::Resume)
             .expect("spawn")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+            .expect("this call really launches (not a duplicate request)");
 
         for (spawned, expect_continues) in [(&fresh, false), (&resumed, true)] {
             let (continues, ack_epoch, complete_epoch, drained_epochs) =
                 subscribe_once(&core, spawned.id).await;
             assert_eq!(
                 continues, expect_continues,
-                "표식 = 스폰이 손잡이를 실었나(Fresh 거짓 · 손잡이 실은 Resume 참)"
+                "marker = whether the spawn carried a handle (Fresh false · Resume with a handle true)"
             );
-            assert_eq!(ack_epoch, spawned.epoch, "Ack 는 스폰된 그 화신을 말한다");
-            assert_eq!(complete_epoch, spawned.epoch, "Complete 도 같은 화신");
+            assert_eq!(
+                ack_epoch, spawned.epoch,
+                "the Ack names the spawned incarnation"
+            );
+            assert_eq!(
+                complete_epoch, spawned.epoch,
+                "Complete is the same incarnation"
+            );
             assert!(
                 !drained_epochs.is_empty(),
-                "셸 출력이 스냅샷에 섰으니 replay 프레임이 하나 이상 와야 한다"
+                "the shell output is in the snapshot so at least one replay frame must come"
             );
             assert!(
                 drained_epochs.iter().all(|e| *e == spawned.epoch),
-                "비운 출력 프레임도 같은 화신: {drained_epochs:?}"
+                "the drained output frames are the same incarnation: {drained_epochs:?}"
             );
         }
 
@@ -3840,7 +3569,7 @@ mod tests {
         let _ = core.manager.kill_agent(resumed.id);
     }
 
-    // ── Spawn: 없는 profile ──────────────────────────────────────────────────────
+    // ── Spawn: a nonexistent profile ──────────────────────────────────────────────────────
     #[tokio::test]
     async fn spawn_missing_profile_errors() {
         let (core, _rx) = test_core();
@@ -3862,14 +3591,13 @@ mod tests {
             [AgentEvent::Error {
                 request_id: Some(r),
                 ..
-            }] => assert_eq!(*r, req, "Error 에 request_id 동봉"),
-            other => panic!("Error(request_id) 1건 기대: {other:?}"),
+            }] => assert_eq!(*r, req, "the request_id is attached to the Error"),
+            other => panic!("expected 1 Error(request_id): {other:?}"),
         }
     }
 
-    // ── ReparentProfile: 거부(false) (ADR-0072) ──────────────────────────────────
-    //    broadcast_profile_list 는 팬아웃 포트로 나가고 mock sink 은 그 포트 뒤에 없다.
-    //    (성공 경로였다면 mock 에 Ack 가 enqueue 된다 — Ack 부재로 broadcast 분기 스킵을 방증.)
+    // ── ReparentProfile: refused (false) (ADR-0072) ──────────────────────────────────
+    //    The mock sink is not behind the fanout port, so the absence of an Ack corroborates that the broadcast branch was skipped.
     #[tokio::test]
     async fn reparent_rejected_emits_error_no_ack_no_broadcast() {
         let (core, _rx) = test_core();
@@ -3884,7 +3612,9 @@ mod tests {
             false,
         );
         let cid = child.id;
-        core.manager.try_create_agent(child).expect("등록 성공");
+        core.manager
+            .try_create_agent(child)
+            .expect("registration succeeded");
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
@@ -3893,7 +3623,7 @@ mod tests {
         core.dispatch(
             AgentCommand::ReparentProfile {
                 child_id: cid,
-                parent_id: Some(uuid::Uuid::new_v4()), // 존재하지 않는 부모 → 거부.
+                parent_id: Some(uuid::Uuid::new_v4()), // a nonexistent parent → refused.
                 request_id: req,
             },
             &session,
@@ -3905,17 +3635,17 @@ mod tests {
             [AgentEvent::Error {
                 request_id: Some(r),
                 ..
-            }] => assert_eq!(*r, req, "거부 Error 에 request_id 동봉"),
-            other => panic!("거부 시 Error 1건만 기대(Ack/broadcast 없음): {other:?}"),
+            }] => assert_eq!(*r, req, "the request_id is attached to the refusal Error"),
+            other => panic!("expected only 1 Error on refusal (no Ack/broadcast): {other:?}"),
         }
         assert_eq!(
             core.manager.agent_snapshot(cid).unwrap().parent_id,
             None,
-            "거부된 reparent 는 상태를 바꾸지 않아야 함"
+            "a refused reparent must not change the state"
         );
     }
 
-    // ── Kill: 없는 agent ─────────────────────────────────────────────────────────
+    // ── Kill: a nonexistent agent ─────────────────────────────────────────────────────────
     #[tokio::test]
     async fn kill_unknown_agent_errors() {
         let (core, _rx) = test_core();
@@ -3933,11 +3663,11 @@ mod tests {
         .await;
         assert!(
             matches!(mock.events().as_slice(), [AgentEvent::Error { .. }]),
-            "없는 agent kill 은 Error"
+            "killing a nonexistent agent is an Error"
         );
     }
 
-    // ── WriteStdin: lease 다른 conn 보유 ─────────────────────────────────────────
+    // ── WriteStdin: the lease held by another conn ─────────────────────────────────────────
     #[tokio::test]
     async fn write_stdin_denied_when_lease_held_by_other() {
         let (core, _rx) = test_core();
@@ -3960,14 +3690,14 @@ mod tests {
             [AgentEvent::Error { message, .. }] => {
                 assert!(
                     message.contains("input locked"),
-                    "lease 거부 메시지: {message}"
+                    "lease refusal message: {message}"
                 )
             }
-            other => panic!("Denied Error 기대: {other:?}"),
+            other => panic!("expected a Denied Error: {other:?}"),
         }
     }
 
-    // ── 대기 입력 목록 WS 두 명령(ADR-0231) ───────────────────────────────────────
+    // ── the two WS commands for the pending input list (ADR-0231) ───────────────────────────────────────
     mod queued_seam {
         use std::sync::atomic::AtomicU8;
         use std::sync::Arc;
@@ -3989,7 +3719,7 @@ mod tests {
             fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
         }
 
-        /// 수락 모름으로 쥔 id 만 답하는 통로 — 쓰기는 삼킨다.
+        /// A channel that answers only ids it holds as acceptance unknown — writes are swallowed.
         struct SeamTransport {
             unconfirmed: Vec<String>,
             /// Runs inside `shutdown()` — lets a test hold the kill path on whichever thread runs it.
@@ -4038,8 +3768,8 @@ mod tests {
             }
         }
 
-        /// 명부를 `events` 로 채운 산 세션을 꽂는다. ★중간 입력 정책은 `None` 이다★ — 주입 세션에 정책을 싣는
-        /// 공개 seam 이 없어, 이 세션의 취소는 오늘의 모든 백엔드처럼 늘 NOT_FOUND 다.
+        /// Plugs in a live session whose roster is filled with `events`. The mid-turn input policy is `None` (no public seam carries a policy
+        /// on an injected session), so cancelling is always NOT_FOUND like every backend today.
         pub(super) fn insert(
             manager: &Arc<AgentManager>,
             epoch: u32,
@@ -4130,13 +3860,9 @@ mod tests {
         mock.events()
     }
 
-    /// A kill must not hold the async worker that runs the connection's dispatch (T-79): while the
-    /// transport's shutdown is still in progress, other tasks on that runtime must run.
-    ///
-    /// The fake shutdown signals "entered" and then waits up to 2 s for a release that only the canary
-    /// task sends. On a current-thread runtime an inline kill blocks the only thread, so the canary cannot
-    /// run until the wait has timed out; the canary waits for "entered" first, so the poll order of
-    /// `join!` does not matter.
+    /// A kill must not hold the async worker running the connection's dispatch (T-79): other tasks on that runtime must run during shutdown.
+    /// The fake shutdown signals "entered" and waits up to 2 s for a release only the canary task sends; an inline kill on a current-thread
+    /// runtime would block the canary until the timeout. The canary waits for "entered" first, so `join!` poll order does not matter.
     #[tokio::test]
     async fn a_kill_in_progress_leaves_the_runtime_free() {
         use engram_dashboard_protocol::RequestId;
@@ -4196,9 +3922,9 @@ mod tests {
         }
     }
 
-    /// ★목록 조회는 임대를 안 본다★ — 남이 임대를 쥔 에이전트도 그대로 읽힌다. 응답은 명부의 환원 상태를 빠짐없이
-    /// 싣는다: 취소 대기 행의 두 칸 · 수락 모름 표지(명부가 `Queued` 인 행에만 — 취소 대기가 이긴다) ·
-    /// `as_of_seq` · 화신 표식 · 턴 관측 표의 멈춤 칸.
+    /// A list lookup does not look at the lease — an agent whose lease another holds is read as is. The response carries the roster's reduced
+    /// state in full (the two fields of a row waiting to be cancelled · the acceptance-unknown mark on `Queued` rows · `as_of_seq` ·
+    /// the incarnation marker · the turn observation table's pause field).
     #[tokio::test]
     async fn list_queued_inputs_skips_the_lease_and_carries_the_whole_listing() {
         use engram_dashboard_agent::turn::{TurnEndKind, TurnSignal};
@@ -4253,7 +3979,7 @@ mod tests {
             stopped_after_error,
         }] = events.as_slice()
         else {
-            panic!("QueuedInputs 1건 기대(임대에 걸리면 안 된다): {events:?}");
+            panic!("expected 1 QueuedInputs (it must not be caught by the lease): {events:?}");
         };
         assert_eq!((*request_id, *answered_for), (req, agent_id));
         let row = |id: &str, text: &str, state: &str, cancel| WireQueuedInputRow {
@@ -4279,10 +4005,19 @@ mod tests {
             ]
         );
         assert_eq!(*epoch, 7);
-        assert!(*stopped_after_error, "턴 관측 표의 오류 끝 그대로");
-        // 버스가 싣는 manager 값과 같은 seq 다(행 = 링 접두 `as_of_seq` 의 환원값).
-        let listing = core.manager.list_queued_inputs(agent_id).expect("산 세션");
-        assert!(as_of_seq.is_some(), "목록 사건을 환원한 화신");
+        assert!(
+            *stopped_after_error,
+            "the error end of the turn observation table as is"
+        );
+        // The same seq as the manager value the bus carries (rows = the reduced value of the ring prefix `as_of_seq`).
+        let listing = core
+            .manager
+            .list_queued_inputs(agent_id)
+            .expect("a live session");
+        assert!(
+            as_of_seq.is_some(),
+            "the incarnation that reduced the list events"
+        );
         assert_eq!(*as_of_seq, listing.as_of_seq);
     }
 
@@ -4308,15 +4043,15 @@ mod tests {
                 assert_eq!(*r, req);
                 assert!(
                     message.starts_with("NOT_FOUND: "),
-                    "코드를 값으로 싣는다: {message}"
+                    "the code is carried as a value: {message}"
                 );
             }
-            other => panic!("상관 키 달린 Error 기대: {other:?}"),
+            other => panic!("expected an Error with a correlation key: {other:?}"),
         }
     }
 
-    /// ★비보유자는 `WriteStdin` 과 같은 글자로 거절된다★ — 같은 에이전트에 두 명령을 보내 답을 맞댄다. 거절은
-    /// manager 에 닿기 전이다(닿았다면 없는 에이전트라 NOT_FOUND 가 났다).
+    /// A non-holder is refused with the same characters as `WriteStdin` — two commands to the same agent, answers compared. The refusal
+    /// comes before the manager (otherwise a nonexistent agent would give NOT_FOUND).
     #[tokio::test]
     async fn cancel_queued_input_refuses_a_non_holder_exactly_like_write_stdin() {
         let (core, _rx) = test_core();
@@ -4357,15 +4092,15 @@ mod tests {
             }],
         ) = (write.as_slice(), cancel.as_slice())
         else {
-            panic!("둘 다 상관 키 달린 Error 기대: {write:?} / {cancel:?}");
+            panic!("expected both to be Errors with a correlation key: {write:?} / {cancel:?}");
         };
         assert_eq!((*w, *c), (write_req, cancel_req));
-        assert_eq!(cancel_message, write_message, "같은 거절 문구");
+        assert_eq!(cancel_message, write_message, "the same refusal wording");
         assert_eq!(cancel_message, INPUT_LOCKED_REFUSAL);
     }
 
-    /// ★오늘은 늘 NOT_FOUND 다★ — 모든 백엔드가 중간 입력 정책 `None` 이라 목록에 선 id 도 취소 대상이 아니다.
-    /// 임대를 쥔 연결(통과)·아무도 안 쥔 에이전트(통과) 모두 manager 의 답까지 가서 NOT_FOUND 를 받는다.
+    /// Today always NOT_FOUND — every backend's mid-turn input policy is `None`, so even a listed id is not a cancel target. The lease
+    /// holder (passes) and an agent nobody holds (passes) both reach the manager's NOT_FOUND.
     #[tokio::test]
     async fn cancel_queued_input_is_not_found_today() {
         use engram_dashboard_agent::types::QueuedInputEvent as Q;
@@ -4402,17 +4137,20 @@ mod tests {
                     assert_eq!(*r, req);
                     assert!(
                         message.starts_with("NOT_FOUND: "),
-                        "임대는 통과하고 manager 가 NOT_FOUND: {message}"
+                        "the lease passes and the manager says NOT_FOUND: {message}"
                     );
                 }
-                other => panic!("상관 키 달린 NOT_FOUND 기대: {other:?}"),
+                other => panic!("expected a NOT_FOUND with a correlation key: {other:?}"),
             }
         }
-        let listing = core.manager.list_queued_inputs(live).expect("산 세션");
+        let listing = core
+            .manager
+            .list_queued_inputs(live)
+            .expect("a live session");
         assert_eq!(
             listing.rows.len(),
             1,
-            "거절된 취소는 명부를 건드리지 않는다"
+            "a refused cancel does not touch the roster"
         );
     }
 
@@ -4436,7 +4174,7 @@ mod tests {
         .await;
         match mock.events().as_slice() {
             [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
-            other => panic!("Ack 기대: {other:?}"),
+            other => panic!("expected an Ack: {other:?}"),
         }
         let (tx2, _r) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock2 = MockOutboundSink::new(tx2);
@@ -4451,7 +4189,7 @@ mod tests {
         .await;
         assert!(
             matches!(mock2.events().as_slice(), [AgentEvent::Ack { .. }]),
-            "재획득은 멱등 Ack"
+            "re-acquiring is an idempotent Ack"
         );
     }
 
@@ -4471,11 +4209,11 @@ mod tests {
         .await;
         match mock.events().as_slice() {
             [AgentEvent::AgentList { request_id, .. }] => assert_eq!(*request_id, req),
-            other => panic!("AgentList 기대: {other:?}"),
+            other => panic!("expected an AgentList: {other:?}"),
         }
     }
 
-    // ── 명령 버스 등록 wire(ADR-0155/0156 · TRD §3-7) ────────────────────────────
+    // ── command bus registration wire (ADR-0155/0156 · TRD §3-7) ────────────────────────────
     use engram_dashboard_command::{CommandDecl, ErrorCode, Roster};
 
     fn decl(name: &str) -> CommandDecl {
@@ -4489,16 +4227,14 @@ mod tests {
 
     use crate::log_capture::capture_levels as capture_logs;
 
-    // ── 주장한 주인 토큰의 판정(ADR-0154) ────────────────────────────────────────
+    // ── judgment of the claimed owner token (ADR-0154) ────────────────────────────────────────
     //
-    // ★셋 다 **명부의 저장값과 견주는가**를 문다★ — 세션에서 다시 파생하는 구현은 셋 다 뒤집힌다.
-    // 저장값을 인자로 받으므로 그 상태를 여기서 그냥 만들 수 있다(명부도 `attach` 도 안 건드린다).
-    // ★판정을 전부 **warn callsite** 로 몬 것은 의도다★: 이 자리를 때리는 테스트가 여기 셋뿐이라
-    // 다른 테스트가 tracing 의 전역 callsite 관심 캐시를 먼저 눌러 놓을 길이 없다. debug 갈래는
-    // 그렇지 않아(등록 wire 테스트들이 구독자 없이 그 자리를 때린다) 판정 근거로 쓰지 않는다.
+    // All three bite whether the comparison uses the roster's stored value (an implementation re-deriving from the session flips all
+    // three); the stored value is an argument, so that state can be made without the roster or `attach`. Every judgment is driven to the
+    // warn callsite on purpose: only these three tests hit it, so no other test can press tracing's global callsite-interest cache first.
+    // The debug branch is not a basis for the judgment: the registration wire tests hit it without a subscriber.
 
-    /// 사칭 — 우리 형식을 적어 왔고 진짜 주인은 그게 아니다. 재파생 구현은 `conn-7` 이 자기 파생값과
-    /// 같아 보여 **조용히 통과시킨다**.
+    /// Impersonation — wrote our format while the real owner is not that. A re-deriving implementation sees `conn-7` equal to its derived value and lets it through.
     #[test]
     fn a_claim_of_our_token_shape_is_warned_when_the_real_owner_is_not_derived() {
         let session = ConnectionSession::new(7);
@@ -4508,19 +4244,21 @@ mod tests {
             note_claimed_owner(&session, &OwnerToken::new("conn-7"), Some(&actual))
         });
 
-        assert_eq!(logged.len(), 1, "한 줄이어야: {logged:?}");
-        assert_eq!(logged[0].0, tracing::Level::WARN, "사칭은 warn: {logged:?}");
+        assert_eq!(logged.len(), 1, "must be one line: {logged:?}");
+        assert_eq!(
+            logged[0].0,
+            tracing::Level::WARN,
+            "impersonation is a warn: {logged:?}"
+        );
         assert!(
             session.claimed_owner_warned.load(Ordering::Relaxed),
-            "연결당 1회 래치가 서야 한다"
+            "the once-per-connection latch must stand"
         );
     }
 
-    /// 정직 — 자기 저장 토큰을 그대로 적어 왔다. 재파생 구현은 그것이 자기 파생값과 달라 **정직한 쪽을
-    /// 사칭으로 경고한다**.
+    /// Honest — wrote its own stored token as is. A re-deriving implementation sees a difference and warns the honest side as an impersonator.
     ///
-    /// 저장 토큰을 우리 형식(`conn-9`)으로 잡은 것은 그 뒤집힘이 warn 으로 나오게 하려는 것이다 —
-    /// `shell-a1` 같은 모양이면 뒤집힘이 debug 로 떨어져 위 「판정 근거」 조건을 못 채운다.
+    /// The stored token is in our format (`conn-9`) so the flip comes out as a warn; a shape like `shell-a1` would fall to debug and fail the basis condition above.
     #[test]
     fn a_claim_that_matches_the_real_owner_is_silent() {
         let session = ConnectionSession::new(7);
@@ -4528,10 +4266,13 @@ mod tests {
 
         let logged = capture_logs(|| note_claimed_owner(&session, &actual, Some(&actual)));
 
-        assert!(logged.is_empty(), "진짜 주인과 같으면 조용하다: {logged:?}");
+        assert!(
+            logged.is_empty(),
+            "silent when it equals the real owner: {logged:?}"
+        );
     }
 
-    /// 안 붙은 연결 — 견줄 값이 아예 없다. 재파생 구현은 여기서도 `conn-7` 을 만들어 내 통과시킨다.
+    /// A connection not attached — no value to compare. A re-deriving implementation makes `conn-7` here too and lets it pass.
     #[test]
     fn a_claim_of_our_token_shape_is_warned_when_nothing_is_attached() {
         let session = ConnectionSession::new(7);
@@ -4539,18 +4280,18 @@ mod tests {
         let logged =
             capture_logs(|| note_claimed_owner(&session, &OwnerToken::new("conn-7"), None));
 
-        assert_eq!(logged.len(), 1, "한 줄이어야: {logged:?}");
+        assert_eq!(logged.len(), 1, "must be one line: {logged:?}");
         assert_eq!(logged[0].0, tracing::Level::WARN, "{logged:?}");
     }
 
-    /// 끝자락 옮겨 담기가 안쪽 문자열을 그대로 나르고, 두 타입의 wire 바이트가 같아 되돌려 풀어도 원래 값이다.
+    /// The tail re-packing carries the inner string as is, and the two types share wire bytes, so unpacking gives the original value.
     #[test]
     fn the_wire_owner_crosses_into_the_bus_type_unchanged() {
         for raw in [
             "",
             "engram-dashboard-shell",
             "conn-7",
-            "주인 \"따옴표\"\n\u{7f}",
+            "owner \"quote\"\n\u{7f}",
         ] {
             let wire = WireOwnerToken::new(raw);
             let owner = owner_from_wire(wire.clone());
@@ -4566,8 +4307,8 @@ mod tests {
         }
     }
 
-    /// ★주인 칸에 파생값이 **아닌** 토큰을 일부러 싣는다★ — 명부의 주인이 패킷이 아니라 연결에서
-    /// 난다는 것이 이 wire 의 계약이다(`ConnectionSession::owner_token`).
+    /// Deliberately carries a token in the owner field that is not the derived value — the wire's contract is that the roster's owner
+    /// comes from the connection, not the packet (`ConnectionSession::owner_token`).
     fn register(decls: Vec<CommandDecl>, request_id: RequestId) -> AgentCommand {
         AgentCommand::RegisterCommands {
             owner: WireOwnerToken::new("whatever-the-client-thinks"),
@@ -4586,21 +4327,19 @@ mod tests {
         }
     }
 
-    /// 등록 항목 목록을 패킷의 원문 칸으로 싼다 — 운영에서 싸는 쪽은 셸이라(데몬은 풀기만 한다) 시험 몫이다.
+    /// Wraps the registration item list into the packet's raw field — production wraps in the shell (the daemon only unpacks).
     fn decls_slot(decls: &[CommandDecl]) -> Box<RawValue> {
-        serde_json::value::to_raw_value(decls).expect("등록 항목 직렬화")
+        serde_json::value::to_raw_value(decls).expect("registration item serialization")
     }
 
-    /// protocol 등록 golden(`messages.rs` 의 `MIXED_DECLS`) · 셸 `protocol_state` 시험과 같은 칸 바이트.
+    /// Same field bytes as the protocol registration golden (`MIXED_DECLS` in `messages.rs`) · the shell `protocol_state` test.
     const MIXED_DECLS: &str = r#"[{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]},{"name":"tab.focus","help":"{}"}]"#;
 
-    /// 연결이 선 상태의 세션 — 명부는 **붙어 있는 연결**의 등록만 받으므로, 명단에 올리는 이 한 줄이
-    /// 운영의 `on_connect` 자리다(`CommandRoster::attach`).
+    /// A session with a connection standing — the roster accepts registrations only from attached connections; this line is production's `on_connect` (`CommandRoster::attach`).
     fn attached(core: &ConnectionCore, conn_id: ConnId) -> ConnectionSession {
-        // 닿는 길은 여기 관심사가 아니라 자리만 채운다 — 그 표를 재는 것은 `command_roster` 쪽이다.
-        // ★받는 쪽이 이 함수와 함께 죽는다★: 여기 든 출구로는 아무것도 못 나간다. 이 파일이 언젠가
-        //   **배달**을 단언하려 들면 그 단언은 조용히 빈손이 되므로, 그때는 받는 쪽을 호출자에게
-        //   돌려주도록 이 헬퍼를 고쳐야 한다.
+        // Only the place is filled (measuring that table is `command_roster`'s side).
+        // The receiving side dies with this function: nothing can go out through the outlet here, so an assertion on delivery would come up
+        //   empty — change this helper to hand the receiver back first.
         let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(1);
         let frames: Arc<dyn frame_port::FrameSink> =
             Arc::new(crate::test_doubles::FakeFrameSink::new(tx));
@@ -4621,7 +4360,7 @@ mod tests {
 
         match mock.events().as_slice() {
             [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
-            other => panic!("등록은 Ack 로 답한다: {other:?}"),
+            other => panic!("a registration is answered with an Ack: {other:?}"),
         }
         let entries = core.commands().entries();
         assert_eq!(entries.len(), 1);
@@ -4629,7 +4368,7 @@ mod tests {
         assert_eq!(
             entries[0].owner,
             session.owner_token(),
-            "주인은 연결에서 파생한다 — 패킷이 적어 온 토큰이 아니다"
+            "the owner is derived from the connection — not the token the packet wrote"
         );
     }
 
@@ -4656,7 +4395,7 @@ mod tests {
 
         match mock.events().as_slice() {
             [_, AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
-            other => panic!("차분도 Ack 로 답한다: {other:?}"),
+            other => panic!("a diff is answered with an Ack too: {other:?}"),
         }
         let names: Vec<String> = core
             .commands()
@@ -4667,12 +4406,12 @@ mod tests {
         assert_eq!(
             names,
             vec!["tab.create".to_string(), "tab.split".to_string()],
-            "내린 이름은 자리째 사라지고(ADR-0150) 차분에 안 실린 이름은 그대로다"
+            "a removed name vanishes with its place (ADR-0150) and a name not in the diff stays as is"
         );
     }
 
-    /// ★에이전트 참조 칸은 원문 등록 칸을 푼 데서 명부로 간다★(ADR-0308 · TRD trd-3 §6-1 U4 의 A4) — 중계 전 다시
-    /// 쓰기(`command_delivery::resolve_agent_args`)가 읽는 표가 이 풀기로 채워진다. 등록 · 차분 둘 다 같은 칸이다.
+    /// The agent reference field goes to the roster from unpacking the raw registration field (ADR-0308 · TRD trd-3 §6-1 U4's A4) — the
+    /// table the pre-relay rewrite (`command_delivery::resolve_agent_args`) reads is filled by this. Registration and diff share it.
     #[tokio::test]
     async fn the_register_slot_hands_agent_args_to_the_roster() {
         let (core, _rx) = test_core();
@@ -4712,13 +4451,13 @@ mod tests {
             [AgentEvent::Ack { request_id: a }, AgentEvent::Ack { request_id: b }] => {
                 assert_eq!((*a, *b), (registered, updated));
             }
-            other => panic!("등록 · 차분 둘 다 Ack: {other:?}"),
+            other => panic!("both registration · diff are an Ack: {other:?}"),
         }
         let commands = core.commands();
         assert_eq!(
             commands.agent_args_of("slot.focus"),
             vec!["agent".to_string(), "after_tab".to_string()],
-            "선언 순서 그대로"
+            "in declaration order"
         );
         assert!(commands.agent_args_of("tab.focus").is_empty());
         assert_eq!(
@@ -4751,22 +4490,24 @@ mod tests {
         assert_eq!(commands.class_of("tab.focus"), DeadlineClass::Ordinary);
     }
 
-    /// ★칸이 빠진 옛 항목은 빈 `agent_args` 로 풀린다★(ADR-0308 — 「바꿀 칸 없음」) · 칸이 든 목록은 선언 그대로
-    /// 풀린다. protocol `decl_agent_args_are_optional_on_the_wire` 가 패킷 쪽(칸 바이트가 그대로 건넌다)을 잰다.
+    /// An old item missing the field unpacks to an empty `agent_args` (ADR-0308); protocol `decl_agent_args_are_optional_on_the_wire` measures the packet side.
     #[test]
     fn an_old_register_slot_unpacks_to_no_agent_args() {
         let old =
             RawValue::from_string(r#"[{"name":"tab.focus","help":"{}"}]"#.to_string()).unwrap();
-        match decls_from_wire(&old).expect("옛 항목도 풀린다").as_slice() {
+        match decls_from_wire(&old)
+            .expect("an old item unpacks too")
+            .as_slice()
+        {
             [decl] => {
                 assert_eq!(decl.name, "tab.focus");
-                assert!(decl.agent_args.is_empty(), "칸이 없으면 빈 목록");
+                assert!(decl.agent_args.is_empty(), "no field means an empty list");
             }
-            other => panic!("항목 하나여야: {other:?}"),
+            other => panic!("must be one item: {other:?}"),
         }
 
         let mixed = RawValue::from_string(MIXED_DECLS.to_string()).unwrap();
-        let decls = decls_from_wire(&mixed).expect("칸이 든 목록");
+        let decls = decls_from_wire(&mixed).expect("a list with the field");
         assert_eq!(
             decls
                 .iter()
@@ -4782,9 +4523,8 @@ mod tests {
         );
     }
 
-    /// ★패킷은 풀렸는데 항목 목록이 깨지면 그 패킷의 번호로 거절한다★(ADR-0272 결정 6 · `broken_decls_refusal`) —
-    /// 번호가 칸 밖이라 읽히므로 보낸 쪽 대기를 곧바로 깨운다. 패킷 통째로 반려라 명부는 그대로고(차분의 `removed`
-    /// 도 적용되지 않는다) 연결은 산다.
+    /// A broken item list is refused with that packet's number (ADR-0272 decision 6 · `broken_decls_refusal`): the whole packet is
+    /// rejected (the diff's `removed` is not applied either) and the connection lives.
     #[tokio::test]
     async fn a_broken_register_slot_is_refused_with_its_request_id_and_applies_nothing() {
         let (core, _rx) = test_core();
@@ -4807,7 +4547,7 @@ mod tests {
                 &mock,
             )
             .await;
-        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+        assert_eq!(flow, DispatchFlow::Continue, "the connection lives");
         let updated = rid();
         let flow = core
             .dispatch(
@@ -4821,7 +4561,7 @@ mod tests {
                 &mock,
             )
             .await;
-        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+        assert_eq!(flow, DispatchFlow::Continue, "the connection lives");
 
         match mock.events().as_slice() {
             [AgentEvent::Ack { .. }, AgentEvent::Error {
@@ -4833,7 +4573,11 @@ mod tests {
                 message: second,
                 ..
             }] => {
-                assert_eq!((*a, *b), (registered, updated), "그 패킷의 번호로 답한다");
+                assert_eq!(
+                    (*a, *b),
+                    (registered, updated),
+                    "answers with that packet's number"
+                );
                 for message in [first, second] {
                     assert!(
                         message.starts_with("INVALID_ARGUMENT: invalid command declarations"),
@@ -4841,7 +4585,9 @@ mod tests {
                     );
                 }
             }
-            other => panic!("깨진 등록 · 차분은 번호 실은 Error: {other:?}"),
+            other => {
+                panic!("a broken registration · diff is an Error carrying the number: {other:?}")
+            }
         }
         let names: Vec<String> = core
             .commands()
@@ -4852,7 +4598,7 @@ mod tests {
         assert_eq!(
             names,
             vec!["tab.create".to_string()],
-            "깨진 패킷은 명부를 건드리지 않는다"
+            "a broken packet does not touch the roster"
         );
     }
 
@@ -4942,15 +4688,15 @@ mod tests {
         );
     }
 
-    /// ★`help` 는 데몬에게 불투명 문자열 한 칸이다★ — JSON 이 아닌 값을 넣어도 등록·조회가 그대로
-    /// 성공해야 한다. 데몬이 파싱·검증을 끼우면 여기서 깨진다(TRD §3-7 하드 제약 · §7 seam 표).
+    /// `help` is one opaque string to the daemon — registration and lookup must succeed even with a non-JSON value; parsing or
+    /// validation here would break it (TRD §3-7 hard constraint · §7 seam table).
     #[tokio::test]
     async fn list_commands_returns_the_roster_projection_with_the_help_bytes_intact() {
         let (core, _rx) = test_core();
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = attached(&core, 1);
-        let opaque = "not json at all — 임의의 바이트 {[(";
+        let opaque = "not json at all — arbitrary bytes {[(";
         core.dispatch(
             register(
                 vec![CommandDecl {
@@ -4989,22 +4735,17 @@ mod tests {
                     }]
                 );
             }
-            other => panic!("조회는 CommandList 로 답한다: {other:?}"),
+            other => panic!("a lookup is answered with a CommandList: {other:?}"),
         }
     }
 
-    /// ★발견 목록은 **두 출처**를 합친다★ — 붙어 있는 주인들의 명부와 **데몬 자기 표**. 자기 표를 빼면
-    /// `agent.*` 는 배달되는데 목록에는 없어서, 부를 수 있는 이름을 물어본 LLM 이 그 목록만 믿고 그 계열을
-    /// 영영 안 부른다(에러도 로그도 없다).
-    ///
-    /// ★같은 이름이 겹치면 **데몬 것이 이긴다**★ — 배달의 단계 순서(내 표 → 명부)가 그렇게 정해져 있으므로
-    /// (`command_delivery::deliver`) 목록도 같은 답을 해야 한다. 반대로 말하면 호출자는 남의 `help` 로
-    /// 인자를 맞춘 뒤 데몬 핸들러에게 반려당한다.
+    /// The discovery list merges two sources — attached owners' roster and the daemon's own table. Leaving out the own table would deliver
+    /// `agent.*` yet hide it, so an LLM trusting the list never calls that family. On overlap the daemon's wins (delivery order own table → roster,
+    /// `command_delivery::deliver`).
     #[tokio::test]
     async fn list_commands_merges_the_daemons_own_names_and_wins_on_a_clash() {
-        // ★조립된 서버에서는 이 상태가 안 난다 — 이 시험은 **포트 계약**을 재는 것이다★: 표를 늦게 꽂는
-        //   조립을 손으로 만든다(운영·테스트 서버는 연결을 받기 전에 채운다). 그 뒤로는 등록 자체가
-        //   `CONFLICT` 로 반려되므로(이웃 시험) 겹침을 만들 다른 길이 없다.
+        // Does not occur in an assembled server — this measures the port contract with an assembly plugging the table in late (production fills
+        //   it before accepting connections); afterwards registration itself is rejected with `CONFLICT`.
         let (core, _rx, slot) = test_core_with_late_agent_table();
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
@@ -5029,7 +4770,7 @@ mod tests {
         assert_eq!(
             core.commands().entries().len(),
             2,
-            "전제: 표가 비어 있던 창이라 그 등록은 통과했다"
+            "premise: the table was in its empty window so that registration passed"
         );
 
         slot.set(Arc::new(crate::control::commands::make_daemon_table(
@@ -5070,31 +4811,29 @@ mod tests {
                         "usage.get",
                         "usage.refresh"
                     ],
-                    "두 출처가 이름순 한 목록으로 합쳐진다"
+                    "the two sources merge into one list in name order"
                 );
                 let clashed = entries
                     .iter()
                     .find(|e| e.name == "agent.list")
-                    .expect("겹친 이름");
+                    .expect("the overlapping name");
                 assert_ne!(
                     clashed.help, "stolen",
-                    "겹친 이름의 모양은 실제로 그것을 실행하는 쪽(데몬)이 낸다"
+                    "the shape of an overlapping name is given by the side that actually runs it (the daemon)"
                 );
                 assert!(
                     serde_json::from_str::<serde_json::Value>(&clashed.help)
                         .is_ok_and(|item| item["name"] == "agent.list"),
-                    "데몬 표의 선언이 그대로 실린다: {}",
+                    "the daemon table's declaration is carried as is: {}",
                     clashed.help
                 );
             }
-            other => panic!("조회는 CommandList 로 답한다: {other:?}"),
+            other => panic!("a lookup is answered with a CommandList: {other:?}"),
         }
     }
 
-    /// ★데몬이 쥔 이름의 등록은 **성공으로 답하면 안 된다**★ — 명부에는 그 이름이 없어 그대로 들어가지만
-    /// (`Roster::register` 에는 부딪힐 항목이 없다) 배달은 1단계에서 데몬이 먼저 답하므로 그 주인에게는
-    /// 봉투가 한 장도 가지 않는다. 성공을 보고하면서 트래픽을 안 주는 그 상태가 `Roster::update` 가 자기
-    /// 충돌에 대해 이미 금지한 형태이고, 여기서도 같은 어휘(`CONFLICT`)로 같은 all-or-nothing 을 쓴다.
+    /// Registering a name the daemon holds must not succeed: the roster has no such entry, but delivery is answered first by the daemon
+    /// (stage 1), so no envelope reaches that owner. Same all-or-nothing and `CONFLICT` as `Roster::update`.
     #[tokio::test]
     async fn registering_a_name_this_daemon_answers_is_refused_as_a_conflict() {
         let (core, _rx) = test_core_with_own_agent_table();
@@ -5115,26 +4854,25 @@ mod tests {
         match mock.events().as_slice() {
             [AgentEvent::Error { message, .. }] => {
                 assert!(message.contains("CONFLICT"), "{message}");
-                // ★겹친 이름을 **전부** 짚는다★ — 패킷 통째로 반려하는데 하나만 알려 주면, 등록이 붙을 때
-                //   한 번뿐이라 나머지를 알아내는 데 이름 하나당 재접속 한 번이 든다.
+                // Point at every colliding name — registration happens once at attach, so finding the rest would cost one reconnect per name.
                 assert!(
                     message.contains("agent.list") && message.contains("agent.new"),
-                    "겹친 이름이 다 실려야: {message}"
+                    "all colliding names must be carried: {message}"
                 );
             }
-            other => panic!("겹친 이름은 반려여야: {other:?}"),
+            other => panic!("a colliding name must be refused: {other:?}"),
         }
         assert!(
             core.commands().entries().is_empty(),
-            "패킷 통째로 반려다 — 겹치지 않은 이름도 들어가면 안 된다"
+            "the whole packet is refused — a non-colliding name must not get in either"
         );
 
-        // 겹치지 않는 패킷은 그대로 통과한다(반려가 계열 전체를 막지 않는다).
+        // A non-colliding packet passes as is (the refusal does not block the whole family).
         core.dispatch(register(vec![decl("tab.create")], rid()), &session, &mock)
             .await;
         assert_eq!(core.commands().entries().len(), 1);
 
-        // 차분도 같은 판정이다 — 한쪽만 막으면 막히지 않은 쪽으로 같은 상태가 들어온다.
+        // A diff is the same decision — blocking only one side lets the same state in through the unblocked side.
         core.dispatch(
             update(vec![decl("agent.new")], vec![], rid()),
             &session,
@@ -5146,27 +4884,21 @@ mod tests {
                 assert!(message.contains("CONFLICT"), "{message}");
                 assert!(message.contains("agent.new"), "{message}");
             }
-            other => panic!("차분도 반려여야: {other:?}"),
+            other => panic!("a diff must be refused too: {other:?}"),
         }
         assert_eq!(
             core.commands().entries().len(),
             1,
-            "반려는 명부를 건드리지 않는다"
+            "a refusal does not touch the roster"
         );
     }
 
-    // ── 명령 배달의 두 arm(ADR-0154) ────────────────────────────────────────────
+    // ── the two arms of command delivery (ADR-0154) ────────────────────────────────────────────
     //
-    // 갈래별 단언(정상 왕복 · 주인 부재 · 찢어진 창 · 마감 · 끊김 정리)은 `command_delivery` 쪽에 있다.
-    // 여기서 보는 것은 **dispatch 가 그 배달로 잇는가**와 두 arm 이 wire 로 내는 답이다.
-    //
-    // ★`CommandOutcome` 의 거절 warn 을 때리는 테스트는 **전부 `capture_logs` 안에서** 돈다 — 하나라도
-    //   밖에서 때리면 그 callsite 의 관심이 구독자 없는 스레드에서 처음 등록돼 **다른 capture 가 빈손**이
-    //   된다★. 그 하자의 정본(무엇이 참이고 무엇이 미신인가 · 실측한 버전)은 `log_capture` 모듈 헤더다 —
-    //   여기 다시 적지 말 것(두 사본이 갈리면 한쪽만 고쳐진다).
-    // ★그렇게 깨지면 고칠 것은 래치가 아니다★ — 래치는 멀쩡하고 깨진 것은 로그 관측 조건이다.
-    // dispatch 가 async 라 현재 스레드 런타임으로 감싼다 — `with_default` 는 스레드 로컬이므로 그래야
-    //   구독자와 같은 스레드에서 돈다.
+    // Per-branch assertions are in `command_delivery`; here: does dispatch connect to that delivery, and the wire answers of the two arms.
+    // Tests hitting the `CommandOutcome` refusal warn run inside `capture_logs`: a hit outside registers that callsite's interest on a thread
+    // with no subscriber and other captures come up empty (canonical: the `log_capture` module header). dispatch is async, so it runs in a
+    // current-thread runtime — `with_default` is thread-local.
 
     fn bus_command(name: &str, request_id: engram_dashboard_command::RequestId) -> AgentCommand {
         bus_command_with(name, serde_json::json!({ "window": "main" }), request_id)
@@ -5177,7 +4909,7 @@ mod tests {
         args: serde_json::Value,
         request_id: engram_dashboard_command::RequestId,
     ) -> AgentCommand {
-        // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬이 자기 명부로 한다(ADR-0154).
+        // The destination field is whatever the caller writes — targeting is the daemon's own roster (ADR-0154).
         let envelope = engram_dashboard_command::CommandEnvelope {
             name: name.to_string(),
             request_id,
@@ -5186,13 +4918,13 @@ mod tests {
             args,
         };
         AgentCommand::Command {
-            envelope: envelope_to_wire(&envelope).expect("봉투 직렬화"),
+            envelope: envelope_to_wire(&envelope).expect("envelope serialization"),
         }
     }
 
     fn bus_outcome(reply: engram_dashboard_command::CommandReply) -> AgentCommand {
         AgentCommand::CommandOutcome {
-            reply: reply_to_wire(&reply).expect("답장 직렬화"),
+            reply: reply_to_wire(&reply).expect("reply serialization"),
         }
     }
 
@@ -5200,7 +4932,7 @@ mod tests {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("현재 스레드 런타임")
+            .expect("current-thread runtime")
             .block_on(body)
     }
 
@@ -5218,13 +4950,11 @@ mod tests {
             .count()
     }
 
-    /// 거절당한 결말의 **첫 경고**만 잡는 조각 — 문구를 고치면 이 상수도 같이 고친다.
-    const STRAY_OUTCOME_WARN: &str = "한 번만 남긴다";
+    /// A fragment catching only the first warning of a refused outcome — fix this constant with the wording.
+    const STRAY_OUTCOME_WARN: &str = "logged once per connection";
 
-    /// 명부에 붙어 있고 **그 연결로 나간 프레임을 받아 볼 수 있는** 세션.
-    ///
-    /// ★배달을 재려면 받는 쪽이 살아 있어야 한다★ — 형제 [`attached`] 는 받는 쪽을 그 자리에서 버리므로
-    /// (그 doc 이 예고한 그대로) 배달 단언이 조용히 빈손이 된다.
+    /// A session attached to the roster that can receive the frames sent out to that connection. [`attached`] drops the receiver at once,
+    /// so delivery assertions would come up empty.
     fn attached_with_inbox(
         core: &ConnectionCore,
         conn_id: ConnId,
@@ -5239,26 +4969,22 @@ mod tests {
         (ConnectionSession::new(conn_id), rx)
     }
 
-    /// ★기다림에 상한을 둔다 — 배달이 엉뚱한 연결로 가면 **hang 이 아니라 실패**여야 한다★
-    /// (상한은 판정 기준이 아니라 「깨졌다」의 관측 수단이다 — `command_delivery` 의 같은 헬퍼).
+    /// Cap the wait so delivery to the wrong connection is a failure, not a hang (the same helper as in `command_delivery`).
     async fn next_frame_event(
         rx: &mut tokio::sync::mpsc::Receiver<frame_port::Frame>,
     ) -> AgentEvent {
         let frame = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
             .await
-            .expect("프레임을 기다리다 상한을 넘겼다 — 배달이 이 연결로 오지 않는다")
-            .expect("프레임 하나");
+            .expect("exceeded the cap waiting for a frame — the delivery does not come to this connection")
+            .expect("one frame");
         match frame {
-            frame_port::Frame::Text(text) => serde_json::from_str(&text).expect("이벤트 디코드"),
-            other => panic!("Text 여야 함: {other:?}"),
+            frame_port::Frame::Text(text) => serde_json::from_str(&text).expect("event decode"),
+            other => panic!("expected Text: {other:?}"),
         }
     }
 
-    /// ★요청은 주인에게, 답장은 **원래 물어본 연결**에게★ — 한 dispatch 쌍으로 그 왕복 전부를 잰다.
-    ///
-    /// ★답장이 `dispatch` 의 반환 경로로 나가지 **않는다**는 것도 함께 못으로 박는다★: 그 경로로 답하려면
-    /// 이 자리에서 왕복을 기다려야 하고, 주인이 곧 이 연결인 경우(셸이 자기 이름을 얹고 자기가 부르는
-    /// 경로) 자기 답을 자기가 못 꺼낸다(TRD §3-6 self-deadlock). 그래서 요청 arm 은 **조용히 반환**한다.
+    /// The request goes to the owner, the reply to the connection that originally asked — one dispatch pair measures the round trip. Also
+    /// pins that the reply does not go out via `dispatch`'s return path (an owner that is this connection could not take its own answer out — TRD §3-6).
     #[tokio::test]
     async fn a_command_is_delivered_to_its_owner_and_its_reply_returns_to_the_caller() {
         let (core, _rx) = test_core();
@@ -5280,20 +5006,21 @@ mod tests {
 
         match next_frame_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => {
-                let envelope = envelope_from_wire(&envelope).expect("데몬이 다시 싼 봉투는 풀린다");
-                assert_eq!(envelope.request_id, req, "id 는 전 구간 동일");
+                let envelope = envelope_from_wire(&envelope)
+                    .expect("the envelope the daemon re-wrapped unpacks");
+                assert_eq!(envelope.request_id, req, "the id is the same throughout");
                 assert_eq!(
                     Some(envelope.owner),
                     core.commands().attached_owner(1),
-                    "명부가 저장한 주인이 겉봉에 실린다 — 부르는 쪽이 적어 온 값이 아니다"
+                    "the owner the roster stored is carried on the outer envelope — not the value the caller wrote"
                 );
                 assert_eq!(
                     envelope.args,
                     serde_json::json!({ "window": "main" }),
-                    "속은 파싱 없이 통과한다"
+                    "the inside passes through without parsing"
                 );
             }
-            other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
+            other => panic!("the owner receives a CommandRequest: {other:?}"),
         }
 
         core.dispatch(
@@ -5308,39 +5035,38 @@ mod tests {
 
         match next_frame_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
-                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
+                let reply = reply_from_wire(&reply).expect("the reply the daemon wrapped unpacks");
                 assert_eq!(reply.request_id, req);
                 assert_eq!(
                     reply.outcome,
                     Ok(serde_json::json!({ "tab": 4 })),
-                    "주인의 결말이 그대로 온다"
+                    "the owner's outcome arrives as is"
                 );
             }
-            other => panic!("물어본 연결은 CommandReply 를 받는다: {other:?}"),
+            other => panic!("the connection that asked receives a CommandReply: {other:?}"),
         }
         assert!(
             owner_inbox.try_recv().is_err(),
-            "답장이 주인 쪽으로 새면 안 된다"
+            "the reply must not leak to the owner side"
         );
         assert!(
             caller_mock.events().is_empty(),
-            "요청 arm 은 동기 답을 내지 않는다: {:?}",
+            "the request arm gives no synchronous answer: {:?}",
             caller_mock.events()
         );
         assert!(
             matches!(owner_mock.events().as_slice(), [AgentEvent::Ack { .. }]),
-            "결말 arm 도 조용하다(등록 Ack 하나뿐): {:?}",
+            "the outcome arm is quiet too (only the one registration Ack): {:?}",
             owner_mock.events()
         );
         assert_eq!(
             core.deliveries().in_flight(),
             0,
-            "끝난 왕복은 표에서 빠진다"
+            "a finished round trip leaves the table"
         );
     }
 
-    /// ★패킷은 풀렸는데 봉투가 깨지면 번호 없는 거절이다★(ADR-0272 결정 6 · 데몬 쪽) — 번호를 못 읽으니
-    /// `Error{request_id: None}` 이고(파싱 실패 갈래와 같은 처분), 왕복을 열지 않고 연결은 산다.
+    /// A broken envelope is a refusal with no number (ADR-0272 decision 6): `Error{request_id: None}` like the parse-failure branch, no round trip, the connection lives.
     #[tokio::test]
     async fn a_broken_envelope_is_refused_without_a_request_id_and_opens_no_round_trip() {
         let (core, _rx) = test_core();
@@ -5362,32 +5088,31 @@ mod tests {
         assert_eq!(
             command_request_id(&broken),
             None,
-            "포화 거절에도 실을 번호가 없다"
+            "a saturation refusal has no number to carry either"
         );
         let flow = core.dispatch(broken, &caller, &caller_mock).await;
 
-        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+        assert_eq!(flow, DispatchFlow::Continue, "the connection lives");
         match caller_mock.events().as_slice() {
             [AgentEvent::Error {
                 request_id: None,
                 message,
                 ..
             }] => assert!(message.starts_with("invalid command envelope"), "{message}"),
-            other => panic!("번호 없는 Error 하나여야: {other:?}"),
+            other => panic!("must be one Error with no number: {other:?}"),
         }
-        // 배달이 spawn 된 태스크로 나가는 회귀라면 그 태스크가 돌 틈을 줘야 아래 부정 단언이 그것을 본다.
+        // If a regression delivered in a spawned task, give it a gap to run so the negative assertion below sees it.
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
         assert!(
             owner_inbox.try_recv().is_err(),
-            "깨진 봉투는 주인에게 가지 않는다"
+            "a broken envelope does not go to the owner"
         );
-        assert_eq!(core.deliveries().in_flight(), 0, "왕복을 열지 않는다");
+        assert_eq!(core.deliveries().in_flight(), 0, "no round trip is opened");
     }
 
-    /// 받은 명령의 거절 번호 — 봉투 안의 uuid 를 그대로 읽고(ADR-0081 결정 4), 보낸 쪽 답장(`CommandOutcome`)엔
-    /// 번호가 없다(그 안의 키는 이 데몬이 낸 요청의 것이다).
+    /// The refusal number of a received command is the uuid inside the envelope (ADR-0081 decision 4); the sender's reply (`CommandOutcome`) has none.
     #[test]
     fn the_refusal_reads_the_request_id_inside_the_envelope() {
         let req = engram_dashboard_command::RequestId::new();
@@ -5404,9 +5129,8 @@ mod tests {
         );
     }
 
-    /// ★중계가 다시 싼 패킷은 protocol golden 과 같은 바이트다★(ADR-0272 결정 6 — protocol
-    /// `command_request_json_golden_and_roundtrip` 의 리터럴) — 다시 싸기가 봉투 모양 · 칸 순서를 바꾸면 주인이
-    /// 받는 바이트가 달라진다. 거꾸로 그 바이트는 같은 봉투로 풀린다.
+    /// The relay-re-wrapped packet has the same bytes as the protocol golden (`command_request_json_golden_and_roundtrip`, ADR-0272
+    /// decision 6): a changed envelope shape · field order would change the bytes the owner receives. Those bytes also unpack to the same envelope.
     #[test]
     fn the_relay_repacks_the_envelope_into_the_golden_bytes() {
         let envelope = engram_dashboard_command::CommandEnvelope {
@@ -5426,15 +5150,14 @@ mod tests {
         );
         let AgentEvent::CommandRequest { envelope: raw } = serde_json::from_str(&packet).unwrap()
         else {
-            panic!("CommandRequest 여야");
+            panic!("must be a CommandRequest");
         };
         assert_eq!(envelope_from_wire(&raw).unwrap(), envelope);
     }
 
-    /// ★패킷은 풀렸는데 답장이 깨지면 번호 없는 거절이다★(ADR-0272 결정 6 · 데몬 쪽 — 깨진 봉투와 같은 처분) —
-    /// 번호를 못 읽으니 어느 왕복에도 붙지 않고 `Error{request_id: None}` 이 결말을 보낸 연결로 간다. 원문에 맞는
-    /// 번호가 적혀 있어도 번호만 골라 읽지 않는다(ADR-0272 「거부한 대안」 — 부분 파싱). 그 왕복은 열린 채 남아 성한
-    /// 결말이 오면 그대로 닫힌다.
+    /// A broken reply is a refusal with no number (ADR-0272 decision 6): `Error{request_id: None}` goes to the connection that sent the
+    /// outcome, attaching to no round trip. A matching number in the raw is not picked out (ADR-0272 "rejected alternatives": partial
+    /// parsing). The round trip stays open until an intact outcome comes.
     #[tokio::test]
     async fn a_broken_outcome_is_refused_without_a_request_id_and_settles_nothing() {
         let (core, _rx) = test_core();
@@ -5462,23 +5185,23 @@ mod tests {
         };
         let flow = core.dispatch(broken, &owner, &owner_mock).await;
 
-        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+        assert_eq!(flow, DispatchFlow::Continue, "the connection lives");
         match owner_mock.events().as_slice() {
             [.., AgentEvent::Error {
                 request_id: None,
                 message,
                 ..
             }] => assert!(message.starts_with("invalid command reply"), "{message}"),
-            other => panic!("결말을 보낸 쪽에 번호 없는 Error 가 마지막이어야: {other:?}"),
+            other => panic!("the last must be an Error with no number to the side that sent the outcome: {other:?}"),
         }
         assert_eq!(
             core.deliveries().in_flight(),
             1,
-            "깨진 답장은 왕복을 닫지 않는다"
+            "a broken reply does not close the round trip"
         );
         assert!(
             caller_inbox.try_recv().is_err(),
-            "물어본 쪽에는 아무것도 안 간다"
+            "nothing goes to the asker"
         );
 
         core.dispatch(
@@ -5493,17 +5216,16 @@ mod tests {
         match next_frame_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => assert_eq!(
                 reply_from_wire(&reply)
-                    .expect("데몬이 싼 답장은 풀린다")
+                    .expect("the reply the daemon wrapped unpacks")
                     .request_id,
                 req
             ),
-            other => panic!("성한 결말은 그 왕복을 닫는다: {other:?}"),
+            other => panic!("an intact outcome closes that round trip: {other:?}"),
         }
     }
 
-    /// ★중계가 싼 답장 패킷은 protocol golden 과 같은 바이트다★(ADR-0272 — protocol
-    /// `command_reply_json_golden_and_roundtrip` 의 리터럴) — 답장 → 원문 칸이 모양 · 칸 순서를 바꾸면 호출자가
-    /// 받는 바이트가 달라진다. 거꾸로 그 바이트는 같은 답장으로 풀린다.
+    /// The relay-wrapped reply packet has the same bytes as the protocol golden (`command_reply_json_golden_and_roundtrip`, ADR-0272);
+    /// those bytes also unpack to the same reply.
     #[test]
     fn the_relay_repacks_the_reply_into_the_golden_bytes() {
         let nil = engram_dashboard_command::RequestId(uuid::Uuid::nil());
@@ -5524,48 +5246,42 @@ mod tests {
             assert_eq!(packet, golden);
             let AgentEvent::CommandReply { reply: raw } = serde_json::from_str(&packet).unwrap()
             else {
-                panic!("CommandReply 여야");
+                panic!("must be a CommandReply");
             };
             assert_eq!(reply_from_wire(&raw).unwrap(), reply);
         }
     }
 
-    /// ★손으로 적은 TS 답장 칸(protocol `AgentCommand::CommandOutcome` · `AgentEvent::CommandReply` 의
-    /// `#[ts(type = …)]`)이 광고하는 **관용**을 답장을 푸는 이 끝자락에 못박는다★ — 원문 칸이라 protocol 은 답장
-    /// 모양을 못 본다(ADR-0272).
-    ///
-    /// 그 칸은 컴파일러가 안 보므로, 답장 타입이 나중에 조여지면(세 칸을 필수로 만들거나 계약 밖 필드를 거부) 광고가
-    /// 조용히 거짓이 된다 — 그때 TS 호출자는 데몬이 받는 값을 타입으로 표현할 수 없게 된다. 위 golden 은 이 클래스를
-    /// 못 잡는다(답장 → 바이트 한 방향만 본다). 그래서 방향을 뒤집어 잰다.
+    /// Pins the tolerance advertised by the hand-written TS reply field (protocol `AgentCommand::CommandOutcome` · `AgentEvent::CommandReply`
+    /// `#[ts(type = …)]`) at this unpacking — protocol cannot see the raw reply shape (ADR-0272). If the reply type is later tightened, the
+    /// advertisement silently becomes false; the golden above sees only reply → bytes, so this reverses the direction.
     #[test]
     fn the_outcome_slot_accepts_everything_its_ts_type_advertises() {
         let nil = "00000000-0000-0000-0000-000000000000";
-        // 세 칸 전부 **부재** + 계약 밖 필드.
+        // All three fields absent + a field outside the contract.
         let sparse = RawValue::from_string(format!(
             r#"{{"request_id":"{nil}","outcome":{{"Err":{{"detail":{{"n":1}}}}}}}}"#
         ))
         .unwrap();
-        let reply =
-            reply_from_wire(&sparse).expect("세 칸이 없어도 받는다(TS 칸이 그렇게 광고한다)");
+        let reply = reply_from_wire(&sparse)
+            .expect("accepted even without the three fields (the TS field advertises so)");
         assert!(reply.outcome.is_err());
-        // ★계약 밖 필드는 되보낼 때 살아 있어야 한다★ — additive 확장이 중계 홉에서 증발하지 않는다는 계약.
+        // A field outside the contract must survive the way back — an additive extension does not evaporate at the relay hop.
         assert!(
             reply_to_wire(&reply).unwrap().get().contains("\"detail\""),
-            "계약 밖 필드가 중계에서 사라졌다"
+            "a field outside the contract vanished in the relay"
         );
 
-        // 세 칸 전부 **`null`**.
+        // All three fields `null`.
         let nulls = RawValue::from_string(format!(
             r#"{{"request_id":"{nil}","outcome":{{"Err":{{"code":null,"message":null,"retry":null}}}}}}"#
         ))
         .unwrap();
-        reply_from_wire(&nulls).expect("null 세 칸도 받는다");
+        reply_from_wire(&nulls).expect("three nulls are accepted too");
     }
 
-    /// ★마감이 지나면 답장이 **정확히 한 번** 나가고, 늦게 온 결말은 두 번째 답장을 만들지 못한다★
-    ///
-    /// 시계를 손으로 밀어 재므로 실시간 대기가 없다. 늦은 결말은 붙을 자리를 못 찾아 형제 arm 의 거절로
-    /// 떨어지고, 그 거절은 **물어본 연결이 아니라 결말을 보낸 연결**에게 간다.
+    /// After the deadline the reply goes out exactly once; a late outcome finds no place to attach, falls to the sibling arm's refusal, and
+    /// that refusal goes to the connection that sent the outcome. The clock is pushed by hand.
     #[test]
     fn a_command_whose_owner_never_answers_is_timed_out_exactly_once() {
         let clock = Arc::new(engram_dashboard_base::time::ManualClock::new());
@@ -5590,10 +5306,10 @@ mod tests {
                 ));
 
                 clock.advance(std::time::Duration::from_secs(11));
-                assert_eq!(deliveries.expire(), 1, "마감이 지나면 거둔다");
+                assert_eq!(deliveries.expire(), 1, "after the deadline it is reaped");
                 let timed_out = next_frame_event(&mut caller_inbox).await;
 
-                // 주인이 뒤늦게 답한다 — 붙을 자리가 없다.
+                // The owner answers late — there is no place to attach.
                 core.dispatch(
                     bus_outcome(engram_dashboard_command::CommandReply::ok(
                         req,
@@ -5613,43 +5329,41 @@ mod tests {
             }));
         });
 
-        let (timed_out, events, caller_quiet, in_flight) = seen.expect("본문이 돌았다");
+        let (timed_out, events, caller_quiet, in_flight) = seen.expect("the body ran");
         match timed_out {
             AgentEvent::CommandReply { reply } => {
-                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
-                let err = reply.outcome.expect_err("마감 초과");
+                let reply = reply_from_wire(&reply).expect("the reply the daemon wrapped unpacks");
+                let err = reply.outcome.expect_err("deadline exceeded");
                 assert_eq!(err.code(), ErrorCode::Timeout);
                 assert_eq!(
                     err.retry(),
                     engram_dashboard_command::RetryMode::Never,
-                    "dedup 저장소가 없어 재질의가 재실행이 된다 — 이 경로는 재시도를 지시하지 않는다\
-                     (근거 = `command_delivery::no_retry`)"
+                    "there is no dedup store so a re-query becomes a re-execution — this path does not instruct a retry\
+                     (basis = `command_delivery::no_retry`)"
                 );
             }
-            other => panic!("마감은 CommandReply 로 답한다: {other:?}"),
+            other => panic!("the deadline answers with a CommandReply: {other:?}"),
         }
         assert!(
             caller_quiet,
-            "늦게 온 결말이 두 번째 답장이 되면 안 된다(TRD §4-⑤)"
+            "a late outcome must not become a second reply (TRD §4-⑤)"
         );
-        assert_eq!(in_flight, 0, "거둔 자리가 남으면 안 된다");
+        assert_eq!(in_flight, 0, "a reaped place must not remain");
         match events.as_slice() {
             [AgentEvent::Ack { .. }, AgentEvent::Error {
                 request_id,
                 message,
                 ..
             }] => {
-                assert_eq!(*request_id, None, "이 프레임엔 상관 키가 없다");
+                assert_eq!(*request_id, None, "this frame has no correlation key");
                 assert!(message.contains("deadline"), "{message}");
             }
-            other => panic!("늦은 결말은 결말을 보낸 연결에게 거절로 답한다: {other:?}"),
+            other => panic!("a late outcome is answered with a refusal to the connection that sent the outcome: {other:?}"),
         }
     }
 
-    /// ★붙일 왕복이 없어도 침묵하지 않는다 — 단 경고는 연결당 한 줄이다★
-    ///
-    /// 이 프레임은 클라이언트가 몇 번이든 보낼 수 있어, 프레임마다 warn 이면 로그 크기의 통제권이 상대에게
-    /// 넘어간다(래치 근거 = `stray_outcome_warned` doc).
+    /// With no round trip to attach to it does not stay silent, but warns once per connection (the client can send this frame any number
+    /// of times; latch = `stray_outcome_warned` doc).
     #[test]
     fn a_stray_outcome_is_refused_and_warns_once_per_connection() {
         let mut seen = None;
@@ -5679,34 +5393,37 @@ mod tests {
             }));
         });
 
-        let (events, latched) = seen.expect("본문이 돌았다");
-        assert!(latched, "첫 거절이 래치를 세워야 한다");
-        assert_eq!(events.len(), 3, "거절도 답이다 — 삼키지 않는다: {events:?}");
+        let (events, latched) = seen.expect("the body ran");
+        assert!(latched, "the first refusal must raise the latch");
+        assert_eq!(
+            events.len(),
+            3,
+            "a refusal is an answer too — not swallowed: {events:?}"
+        );
         for event in &events {
             match event {
                 AgentEvent::Error { request_id, .. } => assert_eq!(*request_id, None),
-                other => panic!("거절은 상관 키 없는 Error 다: {other:?}"),
+                other => panic!("a refusal is an Error with no correlation key: {other:?}"),
             }
         }
-        // 두 단언은 **다른 것**을 잰다. 하나만 남기면 각자의 도피로가 열린다.
-        // ① 문구로 세기 — 경고를 낸 자리가 **이 arm** 임을 박는다.
+        // The two assertions measure different things; with only one each has an escape route.
+        // 1. Counting by wording pins that this arm emitted the warning.
         assert_eq!(
             warns_matching(&logged, STRAY_OUTCOME_WARN),
             2,
-            "연결당 한 줄이라 두 연결이면 둘: {logged:?}"
+            "one line per connection so two for two connections: {logged:?}"
         );
-        // ② 전체로 세기 — 반복 갈래를 `debug!` → `warn!` 로 올리면서 문구까지 갈아도 여기서 걸린다
-        //    (문구로만 세면 갈린 문구가 아무 데도 안 맞아 **공허하게 통과**한다).
+        // 2. Counting in total catches the repeat branch being raised from `debug!` to `warn!` with the wording changed too (a wording-only
+        //    count would pass vacuously).
         assert_eq!(
             total_warns(&logged),
             2,
-            "이 캡처의 WARN 은 첫 경고 둘뿐이어야 한다: {logged:?}"
+            "the WARNs in this capture must be only the two first warnings: {logged:?}"
         );
     }
 
-    /// 정리 뒤에 내려앉는 등록(겹침의 근거 = `CommandRoster` 헤더). 갈래별 단언은 `command_roster` 쪽에
-    /// 있고, **여기서 보는 것은 dispatch 가 그 판정에 연결 id 를 넘기는지 하나**다 — 안 넘기면 이 반려가
-    /// 아예 서지 않는다.
+    /// A registration landing after cleanup (overlap basis = the `CommandRoster` header). Per-branch assertions are on the `command_roster`
+    /// side; this checks that dispatch passes the connection id to that decision — otherwise this refusal never stands.
     #[tokio::test]
     async fn a_registration_dispatched_after_the_disconnect_is_refused() {
         let (core, _rx) = test_core();
@@ -5728,25 +5445,20 @@ mod tests {
                 assert_eq!(*request_id, Some(req));
                 assert!(
                     message.starts_with(ErrorCode::Conflict.as_str()),
-                    "끊긴 연결의 등록은 명부 **상태** 거절이다: {message}"
+                    "the registration of a disconnected connection is a roster **state** refusal: {message}"
                 );
             }
-            other => panic!("거절은 Error 로 답한다: {other:?}"),
+            other => panic!("a refusal is answered with an Error: {other:?}"),
         }
         assert!(
             core.commands().entries().is_empty(),
-            "이름이 하나도 얹히면 안 된다"
+            "not a single name may get on"
         );
     }
 
-    /// ★실패를 삼키지 않는다 — 코드까지 실어 보낸다★
-    ///
-    /// ★그 코드가 **문구 앞자리에 실려** 간다는 것이 이 프레임의 사실이다★: `AgentEvent::Error` 에는 타입드
-    /// 코드 칸이 없어 `CommandError` 의 `Display`(`CODE: 문구`)가 유일한 운반 수단이다. 그러니 이 단언은
-    /// 「호출자가 문구를 파싱하지 않아도 된다」를 지키는 것이 **아니다** — 지키는 것은 「그 자리에서 코드가
-    /// 사라지지 않는다」 하나다(문구 형식을 바꾸는 편집이 코드를 조용히 떨어뜨리는 것을 여기서 잡는다).
-    /// ★파싱해야 한다는 비용은 남아 있다★ — 없애려면 이 프레임에 타입드 칸을 더해야 하고(wire 계약 변경)
-    /// 그건 이 시험이 정할 일이 아니다.
+    /// Do not swallow the failure — carry the code too. The code rides at the front of the wording because `AgentEvent::Error` has no
+    /// typed code field (`CommandError` `Display`, `CODE: wording`); this guards only that the code does not vanish there. Removing the
+    /// parsing cost would need a typed field (a wire contract change).
     #[tokio::test]
     async fn a_refused_registration_replies_with_the_error_code() {
         let (core, _rx) = test_core();
@@ -5773,19 +5485,18 @@ mod tests {
                 assert_eq!(*request_id, Some(req));
                 assert!(
                     message.starts_with(ErrorCode::InvalidArgument.as_str()),
-                    "코드가 문구 앞에 실린다: {message}"
+                    "the code is carried before the wording: {message}"
                 );
             }
-            other => panic!("거절은 Error 로 답한다: {other:?}"),
+            other => panic!("a refusal is answered with an Error: {other:?}"),
         }
         assert!(
             core.commands().entries().is_empty(),
-            "실패한 등록은 명부를 건드리지 않는다"
+            "a failed registration does not touch the roster"
         );
     }
 
-    /// 연결마다 주인이 갈리므로 남의 산 등록은 못 가져간다 — 두 세션이 **같은 명부**를 본다는 것도 함께
-    /// 단언한다(공유가 끊기면 conn 2 는 빈 명부를 보고 성공한다).
+    /// The owner differs per connection, so another's live registration cannot be taken — also asserts two sessions see the same roster (if sharing breaks, conn 2 sees an empty roster and succeeds).
     #[tokio::test]
     async fn an_update_from_another_connection_cannot_take_a_live_name() {
         let (core, _rx) = test_core();
@@ -5814,21 +5525,21 @@ mod tests {
                 assert_eq!(*request_id, Some(req));
                 assert!(
                     message.starts_with(ErrorCode::Conflict.as_str()),
-                    "산 남의 등록을 뺏는 것은 명부 **상태** 거절이다: {message}"
+                    "taking another's live registration is a roster **state** refusal: {message}"
                 );
             }
-            other => panic!("거절은 Error 로 답한다: {other:?}"),
+            other => panic!("a refusal is answered with an Error: {other:?}"),
         }
         let entries = core.commands().entries();
         assert_eq!(
             entries.len(),
             1,
-            "거절이 남의 이름을 지워 놓고 끝나면 산 명령이 조용히 사라진다"
+            "if a refusal ended after erasing another's name a live command would quietly vanish"
         );
         assert_eq!(
             entries[0].owner,
             first.owner_token(),
-            "먼저 붙은 연결이 그대로 주인이다"
+            "the connection attached first remains the owner"
         );
     }
 
@@ -5839,7 +5550,7 @@ mod tests {
         assert_eq!(
             control_registry.envelope_format(),
             CoreEnvelopeFormat::Xml,
-            "초기 봉투 포맷은 xml(기본, ADR-0103)"
+            "the initial envelope format is xml (default, ADR-0103)"
         );
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
@@ -5856,12 +5567,12 @@ mod tests {
         .await;
         match mock.events().as_slice() {
             [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
-            other => panic!("SetEnvelopeFormat 는 Ack 를 돌려줘야: {other:?}"),
+            other => panic!("SetEnvelopeFormat must return an Ack: {other:?}"),
         }
         assert_eq!(
             control_registry.envelope_format(),
             CoreEnvelopeFormat::Colon,
-            "dispatch 후 봉투 포맷 전역 상태가 colon 으로 바뀌어야(send path 가 이 값을 읽음)"
+            "after dispatch the global envelope format state must change to colon (the send path reads this value)"
         );
 
         core.dispatch(
@@ -5876,7 +5587,7 @@ mod tests {
         assert_eq!(
             control_registry.envelope_format(),
             CoreEnvelopeFormat::Xml,
-            "xml 재전환도 반영"
+            "switching back to xml is reflected too"
         );
     }
 
@@ -5905,9 +5616,13 @@ mod tests {
         .await;
         match mock.events().as_slice() {
             [AgentEvent::Created { request_id, .. }] => assert_eq!(*request_id, req),
-            other => panic!("Created 기대: {other:?}"),
+            other => panic!("expected Created: {other:?}"),
         }
-        assert_eq!(core.manager.agent_snapshots().len(), 1, "프로필 1개 등록");
+        assert_eq!(
+            core.manager.agent_snapshots().len(),
+            1,
+            "1 profile registered"
+        );
     }
 
     // ── ADR-0044 M2: CreateProfile(output_format=StreamJson) ─────────────────────
@@ -5933,7 +5648,7 @@ mod tests {
         )
         .await;
         let profiles = core.manager.agent_snapshots();
-        assert_eq!(profiles.len(), 1, "프로필 1개 등록");
+        assert_eq!(profiles.len(), 1, "1 profile registered");
         assert!(
             matches!(
                 &profiles[0].command,
@@ -5942,14 +5657,13 @@ mod tests {
                     ..
                 }
             ),
-            "StreamJson 으로 만든 프로필은 json 모드여야 함"
+            "a profile made as StreamJson must be in json mode"
         );
     }
 
-    // ── 백엔드 선택 칸(사용자 결정 2026-09-07) ────────────────────────────────────
+    // ── backend choice field (user decision 2026-09-07) ────────────────────────────────────
     //
-    // ★부재는 기본값이 아니라 오류다★ — 이 두 항목이 없으면 「고르지 않으면 claude」로 되돌아가는 변경이
-    // 조용히 통과한다(그 회귀는 화면에서 「요청한 것과 다른 에이전트가 떴다」로만 발현한다).
+    // Absence is an error, not a default — without these two items a revert to "claude if not chosen" would pass quietly (it shows only on screen as the wrong agent coming up).
     #[tokio::test]
     async fn create_profile_without_a_backend_is_refused() {
         let (core, _rx) = test_core();
@@ -5979,23 +5693,26 @@ mod tests {
                 ..
             }] => {
                 assert_eq!(*request_id, Some(req));
-                assert!(message.contains("backend"), "어느 칸인지 말해야: {message}");
+                assert!(
+                    message.contains("backend"),
+                    "must say which field: {message}"
+                );
                 assert!(
                     message.contains("claude") && message.contains("codex"),
-                    "무엇을 적어야 하는지 말해야: {message}"
+                    "must say what to write: {message}"
                 );
             }
-            other => panic!("Error 기대: {other:?}"),
+            other => panic!("expected an Error: {other:?}"),
         }
         assert_eq!(
             core.manager.agent_snapshots().len(),
             0,
-            "거절은 등록하지 않는다"
+            "a refusal does not register"
         );
     }
 
-    /// 실재하지 않는 폴더 — 거절 갈래를 재는 시험의 cwd. 거절 갈래는 cwd 를 안 쓰고, 회귀로 열린 갈래에
-    /// 들어가도 실 claude·codex 를 띄우는 대신 OS 오류로 끝나게 하려는 것이다(그 OS 오류 경로는 미검).
+    /// A nonexistent folder as cwd for the refusal-branch tests: that branch ignores cwd, and a regression opening it would end in an OS error instead of launching a real claude·codex
+    /// (that OS-error path is unverified).
     fn missing_cwd() -> String {
         std::env::temp_dir()
             .join(format!("engram-no-such-dir-{}", uuid::Uuid::new_v4()))
@@ -6003,9 +5720,8 @@ mod tests {
             .into_owned()
     }
 
-    /// 빈 칸은 정책에 묻지 않고 [`MISSING_BACKEND`] 그대로 거절된다 — 모든 낱말을 닫으면서 불린 횟수를 세는
-    /// 가짜를 꽂아 **정책 호출 0 회**와 답 문구를 잰다. 빈 칸에도 정책을 묻게 되면 어느 칸을 채우라는 문구가
-    /// 정책 거절에 가려진다.
+    /// An empty field is refused with [`MISSING_BACKEND`] without asking the policy — a counting fake that closes every word measures
+    /// 0 policy calls and the wording; asking the policy would hide the which-field-to-fill wording behind the policy refusal.
     #[tokio::test]
     async fn spawn_by_cwd_without_a_backend_is_refused() {
         // The policy field is a `fn` pointer, so the count lives here — process-global, as in the sibling's `CLOSED`:
@@ -6013,7 +5729,7 @@ mod tests {
         static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         fn counts_and_closes_everything(_: &str) -> Option<&'static str> {
             CALLS.fetch_add(1, Ordering::SeqCst);
-            Some("시험이 모든 낱말을 닫았다.")
+            Some("The test closed every word.")
         }
         let (core, _rx) = test_core();
         let core = core.with_llm_policy(counts_and_closes_everything);
@@ -6041,15 +5757,19 @@ mod tests {
                 assert_eq!(*request_id, Some(req));
                 assert_eq!(message.as_str(), MISSING_BACKEND);
             }
-            other => panic!("Error 기대: {other:?}"),
+            other => panic!("expected an Error: {other:?}"),
         }
-        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "빈 칸에 정책을 물었다");
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            0,
+            "the policy was asked for an empty field"
+        );
         assert_eq!(
             core.manager.list_agents().len(),
             0,
-            "거절은 스폰하지 않는다"
+            "a refusal does not spawn"
         );
-        // 세는 쪽이 실제로 센다 — 이것이 없으면 위 0 회는 늘지 않는 계수기로도 초록이다.
+        // The counting side really counts — without this the 0 above is green even with a counter that never increments.
         assert!((core.llm_policy)("claude").is_some());
         assert_eq!(CALLS.load(Ordering::SeqCst), 1);
     }
@@ -6074,14 +5794,12 @@ mod tests {
                 (kind, wire_backend_word(kind))
             })
             .collect();
-        assert!(seen.iter().all(|s| *s), "슬롯이 빈 채 지나갔다: {seen:?}");
+        assert!(seen.iter().all(|s| *s), "a slot passed by empty: {seen:?}");
         backends
     }
 
-    /// wire 백엔드 전량이 정책 표에 **선언돼** 있다. 빠진 낱말은 fail-closed 로 닫히지만 그건 「아직 안
-    /// 정했다」이지 「닫기로 정했다」가 아니다 — 둘을 구별하지 않으면 표가 조용히 낡는다.
-    /// ★여기서 재는 이유★: 정책 표는 agent 에, wire 어휘는 protocol 에 살고 agent 는 protocol 을 의존하지
-    /// 않는다 — 둘을 다 보는 문이 이 처리부다.
+    /// All wire backends are declared in the policy table. A missing word closes fail-closed, but that is "not yet decided", not "decided
+    /// to close". Measured here because agent (policy table) does not depend on protocol (wire vocabulary) — this handler sees both.
     #[test]
     fn every_wire_backend_declares_an_llm_policy() {
         use engram_dashboard_agent::commands::LLM_BACKEND_POLICY;
@@ -6090,15 +5808,14 @@ mod tests {
                 LLM_BACKEND_POLICY
                     .iter()
                     .any(|policy| policy.word.eq_ignore_ascii_case(&word)),
-                "wire 백엔드 '{word}' 에 정책이 선언되지 않았다"
+                "no policy is declared for the wire backend '{word}'"
             );
         }
     }
 
-    /// ★운영 조립이 실 정책을 꽂는다★ — 배선이 빠지면 벽이 소리 없이 열린다(ADR-0279).
-    /// ★표 밖 낱말을 함께 대는 것이 이 시험의 핵심이다★: 오늘 표는 wire 낱말을 전부 열어(`None`) 그 낱말들로는
-    /// 「늘 연다」 가짜와 실 정책이 구별되지 않는다. 표 밖 낱말은 실 정책이 fail-closed 로 닫으므로(`Some`)
-    /// 거기서 비로소 갈린다.
+    /// The production assembly plugs in the real policy — a missing wiring opens the wall silently (ADR-0279).
+    /// Feeding a word outside the table is the core: today's table opens every wire word (`None`), so an "always open" fake and the real
+    /// policy differ only on a word outside the table (closed fail-closed, `Some`).
     #[test]
     fn the_production_core_asks_the_agent_backend_policy() {
         use engram_dashboard_agent::commands::llm_creation_refusal;
@@ -6106,7 +5823,7 @@ mod tests {
         let outside = "no-such-backend";
         assert!(
             llm_creation_refusal(outside).is_some(),
-            "표 밖 낱말이 닫혀 있어야 이 시험이 「늘 연다」 가짜를 잡는다"
+            "a word outside the table must be closed for this test to catch an 'always open' fake"
         );
         let mut words: Vec<String> = every_wire_backend()
             .into_iter()
@@ -6138,7 +5855,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .eq_ignore_ascii_case(word)
-                .then_some("시험이 닫은 백엔드다.")
+                .then_some("The test closed this backend.")
         }
         for (kind, word) in every_wire_backend() {
             *CLOSED.lock().unwrap() = word.clone();
@@ -6167,33 +5884,32 @@ mod tests {
                 }] => {
                     assert_eq!(*request_id, Some(req), "{word}");
                     assert!(
-                        !message.contains("를 모른다"),
-                        "오탈자 그물의 문구와 갈려야 한다: {message}"
+                        !message.contains("unknown"),
+                        "must differ from the typo net's wording: {message}"
                     );
-                    // 버스 호출자가 받는 글 그대로다 — 데몬 문구는 접두 없이 간다.
+                    // Exactly the text the bus caller receives — daemon wording, no prefix.
                     assert_eq!(
                         message.as_str(),
                         format!(
-                            "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — 시험이 닫은 백엔드다. 스폰 안 함."
+                            "backend '{word}' is a known word, but this surface does not create it now — The test closed this backend. Not spawned."
                         )
                     );
                 }
-                other => panic!("{word}: Error 하나 기대: {other:?}"),
+                other => panic!("{word}: expected one Error: {other:?}"),
             }
             assert!(
                 core.manager.agent_snapshots().is_empty(),
-                "{word}: 거절은 프로필을 등록하지 않는다"
+                "{word}: a refusal does not register a profile"
             );
             assert!(
                 core.manager.list_agents().is_empty(),
-                "{word}: 거절은 스폰하지 않는다"
+                "{word}: a refusal does not spawn"
             );
         }
     }
 
-    /// 고른 낱말이 **디스크에 앉는 실행 명령**까지 간다 — 이 사슬이 끊기면 codex 를 골라도 claude 가 뜬다.
-    /// ★고른 **모드**도 같은 사슬을 탄다★ — 이 경계가 기본값을 채우면 「코덱스 JSON」를 고른 노드
-    /// 뒤에서 대화형 TUI 가 뜨고, 그 어긋남은 에이전트가 떠서 다르게 굴 때까지 안 보인다.
+    /// The chosen word goes all the way to the run command on disk — a break here launches claude when codex was chosen.
+    /// The chosen mode rides the same chain: a default filled at this boundary would bring up an interactive TUI behind a node that chose "codex JSON", invisible until it behaves differently.
     #[tokio::test]
     async fn create_profile_with_codex_stores_the_codex_command() {
         let (core, _rx) = test_core();
@@ -6226,16 +5942,15 @@ mod tests {
                 assert_eq!(
                     *output_format,
                     CoreAgentOutputFormat::StreamJson,
-                    "고른 모드가 그대로 앉아야 한다 — 기본값을 채우면 여기서 Terminal 이 나온다"
+                    "the chosen mode must sit as is — if a default were filled Terminal would come out here"
                 );
             }
-            other => panic!("Codex 기대: {other:?}"),
+            other => panic!("expected Codex: {other:?}"),
         }
     }
 
-    /// 위 항목이 못 재는 절반 — 고르지 않은 `StreamJson` 이 끼어들지 않는다(이 경계가 codex 를 통째로
-    /// app-server 로 올려 버리면 여기가 빨개진다). ★둘이 함께 서야 「고른 값을 그대로 나른다」가 된다★:
-    /// 어느 하나만 있으면 이 경계가 그 한 값을 **고정**해도 초록이다.
+    /// The half the item above cannot measure — an unchosen `StreamJson` does not intervene (red if this boundary raised codex wholesale to
+    /// app-server). Both must stand together, or fixing that one value stays green.
     #[tokio::test]
     async fn create_profile_with_codex_terminal_is_not_upgraded_to_app_server() {
         let (core, _rx) = test_core();
@@ -6263,14 +5978,12 @@ mod tests {
             CoreSpawnCommand::Codex { output_format, .. } => {
                 assert_eq!(*output_format, CoreAgentOutputFormat::Terminal);
             }
-            other => panic!("Codex 기대: {other:?}"),
+            other => panic!("expected Codex: {other:?}"),
         }
     }
 
-    /// 돌아오는 방향 — 명부가 나갈 때 모드가 실린다. ★오늘 이 값을 읽는 프론트 코드는 없다★
-    /// (`profile.command` 를 보는 자리가 하나도 없다 — 2026-09-13 실측). 그래도 떨어뜨리지 않는 것은,
-    /// 여기서 지우면 「코덱스 JSON」으로 만든 노드와 대화형 TUI 노드를 **구별할 방법 자체가** wire 에서
-    /// 사라지기 때문이다.
+    /// The returning direction — the mode is carried when the roster goes out. No frontend code reads it today (nothing looks at
+    /// `profile.command`), but dropping it would remove from the wire the means of telling a "codex JSON" node from an interactive TUI node.
     #[test]
     fn codex_spawn_command_carries_the_mode_back_to_wire() {
         for (core_mode, wire_mode) in [
@@ -6295,12 +6008,12 @@ mod tests {
                     assert_eq!(extra_args, vec!["--foo".to_string()]);
                     assert_eq!(output_format, wire_mode);
                 }
-                other => panic!("Codex 기대: {other:?}"),
+                other => panic!("expected Codex: {other:?}"),
             }
         }
     }
 
-    // ── StopDaemon(force=false, 활성 0) ──────────────────────────────────────────
+    // ── StopDaemon (force=false, 0 active) ──────────────────────────────────────────
     #[tokio::test]
     async fn stop_daemon_no_active_closes_and_signals() {
         let (core, mut rx) = test_core();
@@ -6318,10 +6031,10 @@ mod tests {
                 &mock,
             )
             .await;
-        assert_eq!(flow, DispatchFlow::Close, "활성 0 → Close");
+        assert_eq!(flow, DispatchFlow::Close, "0 active → Close");
         assert!(
             matches!(mock.events().as_slice(), [AgentEvent::Ack { .. }]),
-            "Ack 1건"
+            "1 Ack"
         );
         // The shutdown runs in its own task — the signal follows it, not the handler's return.
         tokio::time::timeout(Duration::from_secs(10), rx.changed())
@@ -6331,8 +6044,8 @@ mod tests {
         assert!(*rx.borrow_and_update());
     }
 
-    /// TRD S21 trd-3-2-u5 §3-4: a client that closes right after `StopDaemon` makes `net` abort the dispatch task —
-    /// the handler is dropped after one poll here. The shutdown still runs and still signals.
+    /// TRD S21 trd-3-2-u5 §3-4: a client closing right after `StopDaemon` makes `net` abort the dispatch task — here the handler is dropped
+    /// after one poll. The shutdown still runs and still signals.
     #[tokio::test]
     async fn stop_daemon_survives_a_dispatch_dropped_after_one_poll() {
         use futures_util::FutureExt;
@@ -6364,8 +6077,7 @@ mod tests {
         assert!(*rx.borrow_and_update());
     }
 
-    /// TRD S21 trd-3-2-u5 §3-4: two `StopDaemon`s back to back — the second arrives before the first shutdown has
-    /// signalled (on this current-thread runtime its task has not even been polled) and starts no second one.
+    /// TRD S21 trd-3-2-u5 §3-4: two back-to-back `StopDaemon`s — the second arrives before the first has signalled and starts no second shutdown.
     #[tokio::test]
     async fn a_stop_daemon_before_the_first_shutdown_signals_joins_it() {
         let (core, mut rx) = test_core();
@@ -6396,9 +6108,8 @@ mod tests {
         assert!(*rx.borrow_and_update());
     }
 
-    /// A `StopDaemon` once the daemon is stopping only joins — it answers and closes its connection but does not run
-    /// `shutdown_all` or signal again. Here it comes after the first shutdown signalled, so the latch is what is
-    /// checked, not an overlap with a running `shutdown_all`.
+    /// A `StopDaemon` once the daemon is stopping only joins — answers and closes but does not run `shutdown_all` or signal again. It comes
+    /// after the first signalled, so this checks the latch, not an overlap with a running `shutdown_all`.
     // Known limit: the negative half waits a bounded real time; a second run slower than that would pass unseen.
     #[tokio::test]
     async fn a_stop_daemon_after_the_shutdown_signalled_only_answers_and_closes() {
@@ -6444,7 +6155,7 @@ mod tests {
         );
     }
 
-    // ── kind_to_action 매핑(3 variant 전수) ──────────────────────────────────────
+    // ── kind_to_action mapping (all 3 variants) ──────────────────────────────────────
     #[test]
     fn kind_to_action_maps_all_variants() {
         assert_eq!(
@@ -6458,7 +6169,7 @@ mod tests {
         assert_eq!(kind_to_action(ReplayKind::Resumed), SubscribeAction::Resume);
     }
 
-    // ── core→wire AgentInfo 변환 roundtrip ───────────────────────────────────────
+    // ── core→wire AgentInfo conversion roundtrip ───────────────────────────────────────
     #[test]
     fn core_agent_info_converts_to_wire() {
         use engram_dashboard_agent::types::{
@@ -6506,12 +6217,12 @@ mod tests {
             reads_messages: true,
         };
         let wire = core_agents_to_wire(vec![core.clone()]);
-        assert_eq!(wire.len(), 1, "변환 성공(JSON 형태 일치)");
+        assert_eq!(wire.len(), 1, "conversion succeeded (JSON shapes match)");
         assert_eq!(wire[0].name, "t");
         assert_eq!(wire[0].epoch, 3);
     }
 
-    // ── (M3) core::AgentStatus 모든 variant 가 wire 로 roundtrip 되는지 ────────────────
+    // ── (M3) does every core::AgentStatus variant roundtrip to wire ────────────────
     #[test]
     fn all_core_status_variants_roundtrip_to_wire() {
         use engram_dashboard_agent::types::{
@@ -6551,7 +6262,7 @@ mod tests {
             },
         };
 
-        // (core status, 기대 wire status) 쌍 — variant 전수(6 케이스).
+        // (core status, expected wire status) pairs — all variants.
         let cases: Vec<(CoreStatus, WireStatus)> = vec![
             (CoreStatus::Running, WireStatus::Running),
             (CoreStatus::Exiting, WireStatus::Exiting),
@@ -6590,18 +6301,21 @@ mod tests {
             assert_eq!(
                 wire.len(),
                 1,
-                "variant {core_status:?} 가 core→wire 에서 drop 됨(태깅/필드 불일치)"
+                "variant {core_status:?} was dropped in core→wire (tag/field mismatch)"
             );
             assert_eq!(
                 wire[0].status, expected_wire,
-                "variant {core_status:?} 가 다른 wire status 로 변환됨"
+                "variant {core_status:?} was converted to a different wire status"
             );
             let direct = core_status_to_wire(core_status.clone());
-            assert_eq!(direct, expected_wire, "직접 변환 경로도 일치해야 함");
+            assert_eq!(
+                direct, expected_wire,
+                "the direct conversion path must match too"
+            );
         }
     }
 
-    // ── (적용1) core::RestoreOutcome 전 variant → wire 명시 변환 ──────────────────────
+    // ── (application 1) every core::RestoreOutcome variant → explicit wire conversion ──────────────────────
     #[test]
     fn all_restore_outcomes_convert_to_wire() {
         use engram_dashboard_agent::profile::RestoreOutcome as Co;
@@ -6627,7 +6341,7 @@ mod tests {
                 assert_eq!(new_sid, new.to_string(), "new_sid Uuid→String");
                 assert_eq!(reason, "r");
             }
-            other => panic!("FreshFallback 기대, got {other:?}"),
+            other => panic!("expected FreshFallback, got {other:?}"),
         }
 
         match restore_outcome_to_wire(&Co::FreshFallback {
@@ -6635,8 +6349,8 @@ mod tests {
             new_sid: new,
             reason: "r2".into(),
         }) {
-            Wo::FreshFallback { old_sid, .. } => assert_eq!(old_sid, None, "None 보존"),
-            other => panic!("FreshFallback 기대, got {other:?}"),
+            Wo::FreshFallback { old_sid, .. } => assert_eq!(old_sid, None, "None preserved"),
+            other => panic!("expected FreshFallback, got {other:?}"),
         }
 
         assert_eq!(
@@ -6746,12 +6460,12 @@ mod tests {
         assert_eq!(
             output_event_to_wire(&CoreOutputEvent::TerminalBytes(vec![1, 2, 3])),
             None,
-            "TerminalBytes(tag0 전용)는 wire StructuredEvent 로 매핑 안 됨"
+            "TerminalBytes (tag0 only) is not mapped to a wire StructuredEvent"
         );
     }
 
-    /// ★도구 종류가 하나도 접히지 않고 건너간다★ — 요약 줄이 종류별로 세므로, 한 종류가 다른 종류로 떨어지면
-    /// 묶음 머리의 개수가 틀린다. 도메인 쪽은 늘 싣고 wire 쪽은 늘 `Some` 이다(칸 없음 = 옛 데몬뿐).
+    /// No tool kind folds, all cross over — the bundle head counts per kind. The domain side always carries and the wire side is always
+    /// `Some` (no field = only an old daemon).
     // ADR-0239
     #[tokio::test]
     async fn tool_call_maps_every_category_one_to_one() {
@@ -6776,13 +6490,13 @@ mod tests {
                 category: core,
             }) {
                 Some(W::ToolCall { category, .. }) => assert_eq!(category, Some(want), "{core:?}"),
-                other => panic!("ToolCall 기대, got {other:?}"),
+                other => panic!("expected ToolCall, got {other:?}"),
             }
         }
     }
 
-    /// ★도구 끝 결말이 하나도 접히지 않고 건너간다★ — 거부가 실패로 떨어지면 묶음 머리의 「오류 N」이 거짓이 되고,
-    /// 우리 거절이 벤더 거부로 떨어지면 사유 줄이 틀린다. `id` 는 그대로 간다(누산기가 그것으로 행을 찾는다).
+    /// No tool-end outcome folds — a denial dropping to a failure falsifies "N errors"; our refusal dropping to a vendor denial makes the
+    /// reason line wrong. `id` goes as is (the accumulator finds the row with it).
     // ADR-0241
     #[tokio::test]
     async fn tool_result_maps_every_outcome_one_to_one() {
@@ -6807,15 +6521,15 @@ mod tests {
         }
     }
 
-    /// ★명부 사건·원인이 하나도 접히지 않고 건너간다★ — 누산기가 명부와 같은 환원을 하려면 사건열이 그대로
-    /// 가야 한다(원인 하나가 다른 원인으로 떨어지면 되살림·말풍선 지우기가 갈린다).
+    /// No roster event · cause folds — the accumulator reduces like the roster only if the event sequence goes as is (one cause dropping
+    /// to another diverges revive and bubble clearing).
     // ADR-0231
     #[tokio::test]
     async fn queued_input_maps_every_event_and_cause_without_collapsing_any() {
         use engram_dashboard_protocol::StructuredEvent as W;
         let wire = |op| match output_event_to_wire(&CoreOutputEvent::QueuedInput(op)) {
             Some(W::QueuedInput { op }) => op,
-            other => panic!("QueuedInput 기대, got {other:?}"),
+            other => panic!("expected QueuedInput, got {other:?}"),
         };
         let id = || "u1".to_owned();
         assert_eq!(
@@ -6865,11 +6579,11 @@ mod tests {
                 delivered: vec![
                     CoreDeliveredCopy {
                         id: "a".into(),
-                        text: "하나".into(),
+                        text: "one".into(),
                     },
                     CoreDeliveredCopy {
                         id: "b".into(),
-                        text: "둘".into(),
+                        text: "two".into(),
                     },
                 ],
             }),
@@ -6877,23 +6591,21 @@ mod tests {
                 delivered: vec![
                     WireDeliveredCopy {
                         id: "a".into(),
-                        text: "하나".into(),
+                        text: "one".into(),
                     },
                     WireDeliveredCopy {
                         id: "b".into(),
-                        text: "둘".into(),
+                        text: "two".into(),
                     },
                 ],
             }
         );
     }
 
-    /// ★결말 네 갈래가 하나도 접히지 않고 건너간다★ — 여기서 둘이 같은 값으로 떨어지면 화면이
-    /// 「중단」과 「완료」를, 또는 「미상」과 「완료」를 구별할 수단을 잃는다.
+    /// No four-way outcome folds — two dropping to one value would lose the means to tell "aborted" from "done", or "unknown" from "done".
     ///
-    /// ★이 항목은 「wire 에 backend 어휘가 안 오른다」를 재지 않는다★ — `detail` 은 상대가 만든 문장을
-    /// 그대로 나르고(그것이 그 칸의 계약이다), 아래 사례도 그 사실을 그대로 통과시킨다. 중립인 것은
-    /// **판별자**뿐이고 그 축을 못 박는 것은 protocol 쪽 golden 이다(ADR-0004).
+    /// This does not measure that no backend vocabulary goes up on the wire: `detail` carries the other side's sentence as is (that field's
+    /// contract). Only the discriminator is neutral, pinned by the protocol golden (ADR-0004).
     #[tokio::test]
     async fn turn_end_maps_every_outcome_without_collapsing_any() {
         use engram_dashboard_protocol::StructuredEvent as W;
@@ -6931,15 +6643,13 @@ mod tests {
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════
-    // 리뷰 fix D1 — `DeleteProfile` 삭제 정리 훅의 **배선** 통합 테스트(ADR-0116 결정 3)
+    // Review fix D1 — the wiring integration test of the `DeleteProfile` delete-cleanup hook (ADR-0116 decision 3)
     // ══════════════════════════════════════════════════════════════════════════════════════════
 
-    /// ★왜 데몬 통합인가(가짜 포트 단위 테스트가 원리적으로 못 잡는다)★: 이 결함은 **두 배선**의 순서·축에
-    /// 있었다 — ① 훅이 프로필 **제거 전에** 그 스냅숏(로그용 이름)을 뜨나(제거 뒤에 뜨면 스냅숏이 없어 훅이
-    /// 아예 안 돈다) ② 발동 게이트를 **id** 로 거나. 커널 단위 테스트는 그 둘을 하네스가 대신 정해 주므로
-    /// (이름·게이트를 테스트가 직접 스크립트한다) 배선이 뒤바뀐 걸 볼 수 없다. 여기서는 실제 프로필·실제
-    /// spawn·실물 `ManagerDeliveryPort` 로 dispatch 를 태운다. 끝에서 잠든 채 개명한 프로필의 삭제가 옛 이름으로
-    /// 쌓인 몫까지 id 로 쓸어 가는지도 본다(ADR-0309 결정 6 — 훅이 넘기는 이름은 새 이름이다).
+    /// Daemon integration, since a fake-port unit test cannot catch it: the defect was in the order · axis of two wirings — (1) the hook must
+    /// take the snapshot (name for logs) before removing the profile, (2) the trigger gate must hang on the id. A kernel unit test scripts
+    /// the name · gate itself. Dispatch runs here with real profiles · spawn · the real `ManagerDeliveryPort`. Also checks that deleting a
+    /// profile renamed while dormant sweeps by id the items piled under the old name (ADR-0309 decision 6).
     #[tokio::test]
     async fn deleting_a_renamed_profile_whose_session_is_live_keeps_its_mail_and_contracts() {
         use engram_dashboard_messaging::envelope::Entrance;
@@ -6951,7 +6661,7 @@ mod tests {
         let sink = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
 
-        // (1) 프로필 2개 — boss(곧 산 세션이 된다) · sleepy(계속 잠들어 있다 = 파킹 수신자).
+        // (1) 2 profiles — boss (soon a live session) · sleepy (stays dormant = the parking recipient).
         let mk = |name: &str| {
             engram_dashboard_agent::profile::AgentProfile::new(
                 name.into(),
@@ -6972,12 +6682,12 @@ mod tests {
         };
         core.manager
             .try_create_agent(boss.clone())
-            .expect("등록 성공");
+            .expect("registration succeeded");
         core.manager
             .try_create_agent(sleepy.clone())
-            .expect("등록 성공");
+            .expect("registration succeeded");
 
-        // (2) ★개명(RenameProfile)★
+        // (2) rename (RenameProfile)
         core.dispatch(
             AgentCommand::RenameProfile {
                 profile_id: boss.id,
@@ -6991,13 +6701,13 @@ mod tests {
         assert_eq!(
             core.manager
                 .agent_snapshot(boss.id)
-                .expect("프로필")
+                .expect("profile")
                 .canonical_name_when_live(),
             "boss",
-            "개명이 canonical 이름을 바꿨다(이 등식이 이 테스트의 전제)"
+            "the rename changed the canonical name (this equation is this test's premise)"
         );
 
-        // (3) boss 가 잠든 동안: ⓐ boss 앞으로 파킹 1건 ⓑ boss 가 **요청자**인 계약 1건.
+        // (3) while boss is dormant: 1 item parked to boss, and 1 contract where boss is the requester.
         let sender = SenderIdentity {
             peer_id: uuid::Uuid::new_v4(),
             epoch: 0,
@@ -7015,15 +6725,15 @@ mod tests {
                 sender,
                 "outsider",
                 &["boss".to_string()],
-                "쌓아둔다",
+                "pile it up",
                 Entrance::Cli,
                 &SendMeta::default(),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rows[0].status,
             engram_dashboard_messaging::service::SendStatus::Pending,
-            "잠든 프로필 이름 앞으로 파킹된다: {rows:?}"
+            "parked to the dormant profile name: {rows:?}"
         );
         assert_eq!(messaging.parked_len(boss.id), 1);
         messaging
@@ -7035,18 +6745,18 @@ mod tests {
                 },
                 "boss",
                 &["sleepy".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Cli,
                 &req,
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             messaging.contract_outcome_for_test("m-out", sleepy.id),
             Some("awaiting_reply"),
-            "boss 가 요청자인 계약이 열렸다"
+            "the contract where boss is the requester opened"
         );
 
-        // (4) boss 스폰 — 이제 **산 세션**이다.
+        // (4) boss spawn — now a live session.
         core.dispatch(
             AgentCommand::Spawn {
                 profile_id: boss.id,
@@ -7058,10 +6768,10 @@ mod tests {
         .await;
         assert!(
             core.manager.list_agents().iter().any(|a| a.id == boss.id),
-            "스폰된 세션이 목록에 있어야(이 테스트의 전제)"
+            "the spawned session must be on the list (this test's premise)"
         );
 
-        // (5) ★DeleteProfile — 실제 dispatch★. 세션은 죽지 않는다(킬은 별도 커맨드).
+        // (5) DeleteProfile — real dispatch. The session does not die (kill is a separate command).
         core.dispatch(
             AgentCommand::DeleteProfile {
                 profile_id: boss.id,
@@ -7072,22 +6782,21 @@ mod tests {
         )
         .await;
 
-        // (6) 보호 단언.
+        // (6) protection assertions.
         assert_eq!(
             messaging.parked_len(boss.id),
             1,
-            "★D1★ 산 세션의 파킹 메일이 삭제 정리에 죽었다(게이트가 이름 축이면 여기서 0이 된다)"
+            "★D1★ the live session's parked mail died in the delete cleanup (if the gate were on the name axis it would be 0 here)"
         );
         assert_eq!(
             messaging.contract_outcome_for_test("m-out", sleepy.id),
             Some("awaiting_reply"),
-            "★D1★ 산 세션이 요청자인 계약이 실패 종결됐다(ADR-0118 결정 2 위반)"
+            "★D1★ the contract where the live session is the requester was terminated as failed (an ADR-0118 decision 2 violation)"
         );
 
-        // (7) ★반대 방향도 못 박는다 — 스냅숏은 **제거 전에** 떠야 훅이 돈다★. 그리고 잠든 채 개명한 프로필:
-        //   sleepy 앞 파킹과 sleepy 가 요청자인 계약을 쌓은 뒤 sleepy 를 drowsy 로 개명하고, 옛 이름 sleepy 는 새
-        //   프로필 heir 가 가져간다. 삭제는 id 로 쓸어 가야 한다 — 훅이 넘기는 이름은 drowsy 라 이름으로 고르면
-        //   sleepy 로 연 계약을 놓치고, 옛 이름으로 고르면 heir 의 몫이 죽는다(ADR-0309 결정 6).
+        // (7) The opposite direction: the snapshot must be taken before removal for the hook to run. Park mail before sleepy and a contract
+        //   where sleepy is the requester, rename sleepy to drowsy, and the new profile heir takes the name sleepy. Deletion must sweep by id —
+        //   the hook passes drowsy, so by-name misses the contract opened as sleepy, and the old name kills heir's part (ADR-0309 decision 6).
         let helper = {
             let mut p = mk("helper-raw");
             p.display_name = Some("helper".into());
@@ -7095,18 +6804,18 @@ mod tests {
         };
         core.manager
             .try_create_agent(helper.clone())
-            .expect("등록 성공");
+            .expect("registration succeeded");
         let rows2 = messaging
             .handle_send(
                 "m-sleep",
                 sender,
                 "outsider",
                 &["sleepy".to_string()],
-                "잠든 상대에게",
+                "to the dormant one",
                 Entrance::Cli,
                 &SendMeta::default(),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rows2[0].status,
             engram_dashboard_messaging::service::SendStatus::Pending
@@ -7120,15 +6829,15 @@ mod tests {
                 },
                 "sleepy",
                 &["helper".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Cli,
                 &req,
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             messaging.contract_outcome_for_test("m-sleep-req", helper.id),
             Some("awaiting_reply"),
-            "sleepy 가 요청자인 계약이 열렸다"
+            "the contract where sleepy is the requester opened"
         );
         core.dispatch(
             AgentCommand::RenameProfile {
@@ -7143,10 +6852,10 @@ mod tests {
         assert_eq!(
             core.manager
                 .agent_snapshot(sleepy.id)
-                .expect("프로필")
+                .expect("profile")
                 .canonical_name_when_live(),
             "drowsy",
-            "잠든 채 개명했다(이 단계의 전제)"
+            "renamed while dormant (this step's premise)"
         );
         let heir = {
             let mut p = mk("heir-raw");
@@ -7155,18 +6864,18 @@ mod tests {
         };
         core.manager
             .try_create_agent(heir.clone())
-            .expect("등록 성공");
+            .expect("registration succeeded");
         let rows3 = messaging
             .handle_send(
                 "m-heir",
                 sender,
                 "outsider",
                 &["sleepy".to_string()],
-                "새 sleepy 에게",
+                "to the new sleepy",
                 Entrance::Cli,
                 &SendMeta::default(),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rows3[0].status,
             engram_dashboard_messaging::service::SendStatus::Pending
@@ -7174,7 +6883,7 @@ mod tests {
         assert_eq!(
             messaging.parked_len(heir.id),
             1,
-            "옛 이름 앞 새 우편은 그 이름의 새 주인에게 맡겨진다"
+            "new mail to the old name is entrusted to that name's new owner"
         );
         core.dispatch(
             AgentCommand::DeleteProfile {
@@ -7188,35 +6897,35 @@ mod tests {
         assert_eq!(
             messaging.parked_len(sleepy.id),
             0,
-            "잠든 프로필 삭제는 정리가 발동해야(스냅숏을 제거 전에 떴다는 증거)"
+            "deleting a dormant profile must trigger the cleanup (evidence that the snapshot was taken before removal)"
         );
         let view = messaging
             .message_state("m-sleep", std::time::Instant::now())
-            .expect("조회");
+            .expect("lookup");
         assert_eq!(
             view.rows[0].code,
             Some("RECIPIENT_DELETED"),
-            "장부 종점 + 사유 코드가 남는다(조용히 버리지 않는다): {view:?}"
+            "the ledger end point + reason code remain (not quietly discarded): {view:?}"
         );
         assert_eq!(
             messaging.contract_outcome_for_test("m-sleep-req", helper.id),
             Some("reply_failed"),
-            "개명 전 이름으로 연 계약도 id 로 닫힌다"
+            "a contract opened under the pre-rename name is also closed by id"
         );
         assert_eq!(
             messaging.parked_len(heir.id),
             1,
-            "옛 이름의 새 주인 몫은 그대로"
+            "the new owner's part under the old name stays as is"
         );
 
         core.manager.kill_agent(boss.id).ok();
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════
-    // 저장 거절 — WS 의 부르는 쪽 변경(ADR-0291 R17 · D3 · E2)
+    // Store refusal — the WS caller-side change (ADR-0291 R17 · D3 · E2)
     // ══════════════════════════════════════════════════════════════════════════════════════════
 
-    /// 실행해도 바로 실패하는 셸 프로필(없는 프로그램) — 저장 거절이 회귀해 띄우기까지 가도 아무것도 안 뜬다.
+    /// A shell profile that fails immediately when run (a nonexistent program) — if the store refusal regressed and reached launching, nothing comes up.
     fn unlaunchable_profile(name: &str) -> CoreProfile {
         let mut profile = CoreProfile::new(
             format!("{name}-raw"),
@@ -7232,10 +6941,9 @@ mod tests {
         profile
     }
 
-    /// ★저장소가 받지 않은 `DeleteProfile` 은 오류로 답하고 정리 훅 · 브로드캐스트를 내지 않는다(D3)★ — 지우지 못한
-    ///   프로필의 파킹 우편 · 계약을 정리하면 산 프로필의 메시징이 깨진다(ADR-0116 결정 3 「유일한 프로필 제거
-    ///   지점」). 훅이 안 돈 것은 파킹 우편이 남은 것으로 보고, 저장되면 같은 요청이 그 우편을 정리하는 것으로 그
-    ///   관측이 헛되지 않음을 함께 잰다.
+    /// A `DeleteProfile` the store did not accept answers an error and emits neither the cleanup hook nor a broadcast (D3) — cleaning up a
+    ///   profile that was not deleted breaks live messaging (ADR-0116 decision 3). The hook not having run shows as the parked mail
+    ///   remaining; the control (saved: the same request cleans that mail) shows the observation is not vacuous.
     // ADR-0291 R17 (D3)
     #[tokio::test]
     async fn a_delete_profile_the_store_refuses_answers_an_error_without_the_hook_or_a_broadcast() {
@@ -7255,7 +6963,7 @@ mod tests {
         let sleepy = unlaunchable_profile("sleepy");
         core.manager
             .try_create_agent(sleepy.clone())
-            .expect("저장되면 등록");
+            .expect("registered when saved");
         let rows = messaging
             .handle_send(
                 "m-park",
@@ -7265,15 +6973,15 @@ mod tests {
                 },
                 "outsider",
                 &["sleepy".to_string()],
-                "쌓아둔다",
+                "pile it up",
                 Entrance::Cli,
                 &SendMeta::default(),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rows[0].status,
             SendStatus::Pending,
-            "전제: 잠든 프로필 앞으로 파킹된다"
+            "premise: parked to the dormant profile"
         );
 
         refusing.store(STORE_REFUSES, Ordering::SeqCst);
@@ -7301,16 +7009,20 @@ mod tests {
                     "{message}"
                 );
             }
-            other => panic!("Ack 가 아니라 Error 1건이어야: {other:?}"),
+            other => panic!("expected 1 Error, not an Ack: {other:?}"),
         }
         assert!(
             core.manager.agent_snapshot(sleepy.id).is_some(),
-            "지우지 않았다"
+            "it was not deleted"
         );
-        assert_eq!(messaging.parked_len(sleepy.id), 1, "정리 훅이 돌지 않았다");
-        assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
+        assert_eq!(
+            messaging.parked_len(sleepy.id),
+            1,
+            "the cleanup hook did not run"
+        );
+        assert_eq!(fanout.texts().len(), before, "broadcast 0");
 
-        // 대조 — 저장되면 같은 요청이 지우고 훅이 그 우편을 정리한다.
+        // Control — when saved the same request deletes and the hook cleans up that mail.
         refusing.store(STORE_SAVES, Ordering::SeqCst);
         core.dispatch(
             AgentCommand::DeleteProfile {
@@ -7326,12 +7038,19 @@ mod tests {
             "{:?}",
             mock.events()
         );
-        assert_eq!(messaging.parked_len(sleepy.id), 0, "저장되면 훅이 돈다");
-        assert!(fanout.texts().len() > before, "저장되면 명부를 민다");
+        assert_eq!(
+            messaging.parked_len(sleepy.id),
+            0,
+            "when saved the hook runs"
+        );
+        assert!(
+            fanout.texts().len() > before,
+            "when saved the roster is pushed"
+        );
     }
 
-    /// ★저장소가 받지 않은 명부 변경은 전부 오류로 답하고 브로드캐스트를 내지 않는다(D3)★ — 바뀐 것이 없다. 문구는
-    ///   코드(`CONFLICT` — 버스와 같은 나눔)와 받지 않은 파일(프로필 파일)을 댄다.
+    /// Every roster change the store did not accept answers with an error and emits no broadcast (D3). The wording names the code
+    ///   (`CONFLICT`, same split as the bus) and the file (the profile file).
     // ADR-0291 R17 (D3)
     #[tokio::test]
     async fn every_ws_roster_change_the_store_refuses_answers_an_error_and_broadcasts_nothing() {
@@ -7341,10 +7060,10 @@ mod tests {
         let lead = unlaunchable_profile("lead");
         core.manager
             .try_create_agent(alpha.clone())
-            .expect("저장되면 등록");
+            .expect("registered when saved");
         core.manager
             .try_create_agent(lead.clone())
-            .expect("저장되면 등록");
+            .expect("registered when saved");
         let profiles = || {
             let mut rows: Vec<_> = core
                 .manager
@@ -7416,16 +7135,16 @@ mod tests {
                     message.starts_with("CONFLICT:") && message.contains(file),
                     "{label}: {message}"
                 ),
-                other => panic!("{label}: Error 1건이어야: {other:?}"),
+                other => panic!("{label}: expected 1 Error: {other:?}"),
             }
         }
 
-        assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
-        assert_eq!(profiles(), profiles_before, "명부 그대로");
+        assert_eq!(fanout.texts().len(), before, "broadcast 0");
+        assert_eq!(profiles(), profiles_before, "roster unchanged");
     }
 
-    /// ★WS 활성화는 저장 거절이어도 프로필 목록을 민다(E2)★ — 활성화 실패가 그 항목의 「마지막 실패」를 적고, 그
-    ///   축은 프로필 목록으로만 화면에 닿는다(ADR-0172). 답은 코드를 실은 오류다.
+    /// WS activation pushes the profile list even on a store refusal (E2) — the "last failure" axis reaches the screen only through
+    ///   the profile list (ADR-0172). The answer is an error carrying the code.
     // ADR-0291 R17 (E2)
     #[tokio::test]
     async fn a_ws_spawn_profile_the_store_refuses_answers_conflict_and_still_announces_the_list() {
@@ -7436,7 +7155,7 @@ mod tests {
         let profile = unlaunchable_profile("waker");
         core.manager
             .try_create_agent(profile.clone())
-            .expect("저장되면 등록");
+            .expect("registered when saved");
         refusing.store(STORE_REFUSES, Ordering::SeqCst);
         let before = fanout.texts().len();
 
@@ -7456,13 +7175,13 @@ mod tests {
                 message.starts_with("CONFLICT:") && message.contains(PROFILES_FILE),
                 "{message}"
             ),
-            other => panic!("Error 1건이어야: {other:?}"),
+            other => panic!("expected 1 Error: {other:?}"),
         }
-        assert!(core.manager.list_agents().is_empty(), "뜬 것이 없다");
+        assert!(core.manager.list_agents().is_empty(), "nothing came up");
         assert_eq!(
             fanout.texts().len(),
             before + 1,
-            "결말과 무관하게 한 번 민다"
+            "pushed once regardless of the outcome"
         );
         assert_eq!(
             core.manager
@@ -7472,8 +7191,7 @@ mod tests {
         );
     }
 
-    /// ★WS `Spawn{profile_id}` 도 저장 거절이면 `CONFLICT` 이고 뜬 것이 없다★ — 같은 활성화 입구를 지나므로
-    ///   `SpawnProfile` 과 같은 답 · 같은 알림이어야 한다(한쪽만 다른 코드면 두 WS 문이 갈린다).
+    /// WS `Spawn{profile_id}` is also `CONFLICT` on a store refusal with nothing coming up — same activation entrance, so same answer · notification as `SpawnProfile`.
     // ADR-0291 R17 (E2)
     #[tokio::test]
     async fn a_ws_spawn_by_profile_id_the_store_refuses_answers_conflict_and_still_announces_the_list(
@@ -7485,7 +7203,7 @@ mod tests {
         let profile = unlaunchable_profile("fresh-waker");
         core.manager
             .try_create_agent(profile.clone())
-            .expect("저장되면 등록");
+            .expect("registered when saved");
         refusing.store(STORE_REFUSES, Ordering::SeqCst);
         let before = fanout.texts().len();
 
@@ -7506,18 +7224,18 @@ mod tests {
                     && message.contains("restart the daemon"),
                 "{message}"
             ),
-            other => panic!("Error 1건이어야: {other:?}"),
+            other => panic!("expected 1 Error: {other:?}"),
         }
-        assert!(core.manager.list_agents().is_empty(), "뜬 것이 없다");
+        assert!(core.manager.list_agents().is_empty(), "nothing came up");
         assert_eq!(
             fanout.texts().len(),
             before + 1,
-            "결말과 무관하게 한 번 민다"
+            "pushed once regardless of the outcome"
         );
     }
 
-    /// ★WS `SpawnByCwd` 는 저장 거절이면 `CONFLICT` 이고 등록도 띄우기도 없다★ — 즉석 프로필은 띄우기 전에 등록되고
-    ///   그 등록이 거절된다. 없는 폴더를 cwd 로 주어, 거절이 회귀해 띄우기까지 가도 프로세스가 서지 않게 한다.
+    /// WS `SpawnByCwd` is `CONFLICT` on a store refusal with neither registration nor launching (an ad-hoc profile is registered before launching).
+    ///   A nonexistent cwd ensures no process stands if the refusal regressed and reached launching.
     // ADR-0291 R17
     #[tokio::test]
     async fn a_ws_spawn_by_cwd_the_store_refuses_answers_conflict_and_registers_nothing() {
@@ -7555,16 +7273,16 @@ mod tests {
                 );
                 assert_eq!(created_agent_id, &None, "nothing was created");
             }
-            other => panic!("Error 1건이어야: {other:?}"),
+            other => panic!("expected 1 Error: {other:?}"),
         }
-        assert!(core.manager.list_agents().is_empty(), "뜬 것이 없다");
+        assert!(core.manager.list_agents().is_empty(), "nothing came up");
         assert!(
             core.manager.agent_snapshots().is_empty(),
-            "명부에 오른 것이 없다"
+            "nothing got onto the roster"
         );
     }
 
-    /// ★WS 의 저장 쓰기 실패는 `INTERNAL:` 이다★ — 거절(`CONFLICT`)과 같은 문구 꼴이되 코드가 다르다(버스와 같은 나눔).
+    /// A WS store write failure is `INTERNAL:` — same wording shape as a refusal (`CONFLICT`) but a different code (same split as the bus).
     // ADR-0291 R17
     #[tokio::test]
     async fn a_ws_change_whose_store_write_fails_answers_internal() {
@@ -7575,7 +7293,7 @@ mod tests {
         let alpha = unlaunchable_profile("alpha");
         core.manager
             .try_create_agent(alpha.clone())
-            .expect("저장되면 등록");
+            .expect("registered when saved");
         refusing.store(STORE_FAILS_IO, Ordering::SeqCst);
         let before = fanout.texts().len();
 
@@ -7596,21 +7314,21 @@ mod tests {
                     && message.contains(&format!("writing {PROFILES_FILE} failed: disk full")),
                 "{message}"
             ),
-            other => panic!("Error 1건이어야: {other:?}"),
+            other => panic!("expected 1 Error: {other:?}"),
         }
-        assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
+        assert_eq!(fanout.texts().len(), before, "broadcast 0");
         assert_eq!(
             core.manager
                 .agent_snapshot(alpha.id)
                 .and_then(|p| p.display_name),
             Some("alpha".to_string()),
-            "이름 그대로"
+            "name as is"
         );
     }
 
-    // ══ 개명 뒤 에이전트 목록(TRD S26-window-chrome §4-3) ══
+    // ══ the agent list after a rename (TRD S26-window-chrome §4-3) ══
 
-    /// `before` 뒤에 나간 브로드캐스트의 꼴 이름(`AgentListUpdated` 등) — 순서대로.
+    /// The form names (`AgentListUpdated` etc.) of broadcasts emitted after `before`, in order.
     fn broadcast_kinds(
         fanout: &crate::test_doubles::RecordingFanout,
         before: usize,
@@ -7618,16 +7336,16 @@ mod tests {
         fanout.texts()[before..]
             .iter()
             .map(|text| {
-                let value: serde_json::Value = serde_json::from_str(text).expect("wire 는 JSON");
+                let value: serde_json::Value = serde_json::from_str(text).expect("wire is JSON");
                 value
                     .as_object()
                     .and_then(|o| o.keys().next().cloned())
-                    .expect("외부 태그 하나")
+                    .expect("one external tag")
             })
             .collect()
     }
 
-    /// `before` 뒤에 나간 `AgentListUpdated` 마다 그 (id, 이름) 목록 — 순서대로.
+    /// The (id, name) list of each `AgentListUpdated` emitted after `before`, in order.
     fn broadcast_agent_lists(
         fanout: &crate::test_doubles::RecordingFanout,
         before: usize,
@@ -7656,8 +7374,7 @@ mod tests {
         )
     }
 
-    /// 산 에이전트를 개명하면 `list_agents` 의 이름이 바뀌고 — 셸의 탭 자동 이름 · 창 제목이 따르는 그 이름 — 개명
-    /// 뒤 `AgentListUpdated` 가 그 이름을 싣고 나간다.
+    /// Renaming a live agent changes the name in `list_agents` (what the shell's tab auto name · window title follow), and `AgentListUpdated` goes out carrying it.
     #[tokio::test]
     async fn renaming_a_live_agent_broadcasts_the_agent_list_with_its_new_name() {
         let (core, fanout) = test_core_recording();
@@ -7667,12 +7384,12 @@ mod tests {
         let profile = live_profile("live-raw");
         core.manager
             .try_create_agent(profile.clone())
-            .expect("등록 성공");
+            .expect("registration succeeded");
         core.manager
             .spawn_agent(&profile, SpawnMode::Fresh)
             .expect("spawn")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+            .expect("this call really launches (not a duplicate request)");
         let before = fanout.texts().len();
 
         core.dispatch(
@@ -7693,24 +7410,27 @@ mod tests {
             .find(|a| a.id == profile.id)
             .map(|a| a.name);
         let lists = broadcast_agent_lists(&fanout, before);
-        // 끄기도 목록을 낸다 — 끄기 전에 뜬다.
+        // Turning off also emits the list — it comes before turning off.
         let kinds: Vec<String> = broadcast_kinds(&fanout, before)
             .into_iter()
             .filter(|kind| kind != "StatusChanged")
             .collect();
         core.manager.kill_agent(profile.id).ok();
 
-        assert_eq!(listed.as_deref(), Some("renamed-live"), "목록 이름의 출처");
+        assert_eq!(
+            listed.as_deref(),
+            Some("renamed-live"),
+            "the source of the list name"
+        );
         assert_eq!(
             lists,
             vec![vec![(profile.id, "renamed-live".to_string())]],
-            "개명 한 번에 에이전트 목록 한 장"
+            "one agent list per rename"
         );
         assert_eq!(kinds, ["ProfileListUpdated", "AgentListUpdated"]);
     }
 
-    /// 버스 · CLI `agent.rename` 은 WS 팔을 지나지 않고 명부 통지 포트(`RosterFanout`)로 알린다 — 그 통지도 프로필 목록
-    /// 뒤에 새 이름을 실은 에이전트 목록을 낸다(셸의 탭 자동 이름이 LLM 의 개명을 따른다).
+    /// The bus · CLI `agent.rename` does not pass the WS arm; the roster notification port (`RosterFanout`) emits the agent list with the new name after the profile list.
     #[tokio::test]
     async fn the_roster_port_broadcasts_the_agent_list_after_the_profile_list() {
         use crate::control::agent::RosterBroadcast;
@@ -7719,12 +7439,12 @@ mod tests {
         let profile = live_profile("bus-raw");
         core.manager
             .try_create_agent(profile.clone())
-            .expect("등록 성공");
+            .expect("registration succeeded");
         core.manager
             .spawn_agent(&profile, SpawnMode::Fresh)
             .expect("spawn")
             .into_started()
-            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+            .expect("this call really launches (not a duplicate request)");
         let port = RosterFanout::new(fanout.clone(), core.manager.clone());
         assert!(
             matches!(
@@ -7732,14 +7452,14 @@ mod tests {
                     .try_rename_agent(profile.id, Some("renamed-by-bus".into())),
                 Ok(CoreRenameOutcome::Renamed(_))
             ),
-            "개명 확정(이 시험의 전제)"
+            "rename confirmed (this test's premise)"
         );
         let before = fanout.texts().len();
 
         port.roster_changed();
 
         let lists = broadcast_agent_lists(&fanout, before);
-        // 끄기도 목록을 낸다 — 끄기 전에 뜬다.
+        // Turning off also emits the list — it comes before turning off.
         let kinds: Vec<String> = broadcast_kinds(&fanout, before)
             .into_iter()
             .filter(|kind| kind != "StatusChanged")
@@ -7749,12 +7469,12 @@ mod tests {
         assert_eq!(
             lists,
             vec![vec![(profile.id, "renamed-by-bus".to_string())]],
-            "통지 한 번에 에이전트 목록 한 장"
+            "one agent list per notification"
         );
         assert_eq!(kinds, ["ProfileListUpdated", "AgentListUpdated"]);
     }
 
-    /// 무변경 개명(남이 그 이름을 쥐어 제 계열 이름을 지킨다)은 프로필 목록만 낸다 — 목록 이름이 그대로다.
+    /// A no-change rename (another holds the name, so the family name stays) emits only the profile list.
     #[tokio::test]
     async fn an_unchanged_rename_does_not_broadcast_the_agent_list() {
         let (core, fanout) = test_core_recording();
@@ -7766,7 +7486,7 @@ mod tests {
         for profile in [&bob, &twin] {
             core.manager
                 .try_create_agent(profile.clone())
-                .expect("등록 성공");
+                .expect("registration succeeded");
         }
         let before = fanout.texts().len();
 
@@ -7786,15 +7506,14 @@ mod tests {
                 .agent_snapshot(twin.id)
                 .and_then(|p| p.display_name),
             Some("bob(1)".to_string()),
-            "무변경(이 시험의 전제)"
+            "no change (this test's premise)"
         );
         assert_eq!(broadcast_kinds(&fanout, before), ["ProfileListUpdated"]);
     }
 
-    // ── 6. Subscribe 시 conn_tx 에 SubscribeAck → ReplayComplete 순서로 들어가는지 ──
-    //    (mock manager 가 없어 실 AgentManager 의 비어있는 snapshot 경로로는 NotFound 가 나므로,
-    //     여기선 control 메시지 순서 로직을 직접 재현해 검증한다. 실 manager subscribe 의 replay
-    //     동기 전송은 output_core.rs 단위테스트가 이미 커버.)
+    // ── 6. does Subscribe put SubscribeAck → ReplayComplete into conn_tx in that order ──
+    //    (no mock manager: the real AgentManager's empty snapshot path gives NotFound, so the control message order logic is reproduced
+    //     directly. The real manager's replay synchronous send is covered by the output_core.rs unit tests.)
     #[tokio::test]
     async fn subscribe_control_order_ack_then_complete() {
         use crate::conn_port::Frame;
@@ -7827,20 +7546,24 @@ mod tests {
 
         match first {
             Frame::Text(s) => assert!(s.contains("SubscribeAck")),
-            _ => panic!("1번째는 SubscribeAck Text 여야 함"),
+            _ => panic!("the 1st must be a SubscribeAck Text"),
         }
-        assert!(matches!(second, Frame::Binary(_)), "2번째는 replay binary");
+        assert!(
+            matches!(second, Frame::Binary(_)),
+            "the 2nd is replay binary"
+        );
         match third {
             Frame::Text(s) => assert!(s.contains("ReplayComplete")),
-            _ => panic!("3번째는 ReplayComplete Text 여야 함"),
+            _ => panic!("the 3rd must be a ReplayComplete Text"),
         }
     }
 
-    // ── 데몬 자기 표가 버스로 답한다(배달 1단계) ──────────────────────────────────
+    // ── the daemon's own table answers by the bus (delivery stage 1) ──────────────────────────────────
 
-    /// ★대화상자 없이 등록되는 길 전체★ — 클라이언트가 버스로 `agent.new` 를 내면 데몬이 **자기 표로**
-    /// 답하고, 그 결과가 곧바로 `agent.list` 에 보인다. 이 왕복이 깨지면 LLM 이 에이전트를 만들 수단은
-    /// 클릭뿐이다(CLAUDE.md 「LLM-우선 제어」).
+    // hangul-ok-begin
+    /// The whole path registered without a dialog: `agent.new` on the bus is answered by the daemon's own table and shows in `agent.list`
+    /// at once. If this breaks, the LLM's only means of creating an agent is a click (CLAUDE.md 「LLM-우선 제어」).
+    // hangul-ok-end
     #[tokio::test]
     async fn the_daemons_own_agent_verbs_answer_over_the_bus() {
         let (core, _rx) = test_core_with_own_agent_table();
@@ -7862,14 +7585,14 @@ mod tests {
 
         let agent_id = match next_frame_event(&mut inbox).await {
             AgentEvent::CommandReply { reply } => {
-                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
+                let reply = reply_from_wire(&reply).expect("the reply the daemon wrapped unpacks");
                 assert_eq!(reply.request_id, made);
-                let ok = reply.outcome.expect("등록 성공");
-                assert_eq!(ok["state"], "sleeping", "만들기는 띄우지 않는다: {ok}");
+                let ok = reply.outcome.expect("registration succeeded");
+                assert_eq!(ok["state"], "sleeping", "creating does not launch: {ok}");
                 assert_eq!(ok["name"], "from-bus", "{ok}");
-                ok["agent_id"].as_str().expect("id 문자열").to_string()
+                ok["agent_id"].as_str().expect("id string").to_string()
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         };
 
         let listed = engram_dashboard_command::RequestId::new();
@@ -7882,20 +7605,19 @@ mod tests {
 
         match next_frame_event(&mut inbox).await {
             AgentEvent::CommandReply { reply } => {
-                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
+                let reply = reply_from_wire(&reply).expect("the reply the daemon wrapped unpacks");
                 assert_eq!(reply.request_id, listed);
-                let ok = reply.outcome.expect("조회 성공");
-                let agents = ok["agents"].as_array().expect("배열");
-                assert_eq!(agents.len(), 1, "방금 만든 것이 명부에 보인다: {ok}");
+                let ok = reply.outcome.expect("lookup succeeded");
+                let agents = ok["agents"].as_array().expect("array");
+                assert_eq!(agents.len(), 1, "the one just made is on the roster: {ok}");
                 assert_eq!(agents[0]["id"], agent_id, "{ok}");
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         }
     }
 
-    /// ★버스 입구도 **같은 검문**을 받는다(ADR-0157)★ — 여기가 검문 없이 돌면 제어 라우트에서 막히는
-    /// 오타가 버스로는 통과해 조용히 다른 동작이 된다(`parnet` 하나가 계층 해제로 실행되는 그 형태).
-    /// 검문 자리가 두 표면에 **하나**라는 것이 그 보장이다(`control::commands::call_daemon_command`).
+    /// The bus entrance gets the same check (ADR-0157): without it a typo blocked at the control route would pass through the bus and become
+    /// a different action (a lone `parnet` running as a hierarchy release). One check place for both (`control::commands::call_daemon_command`).
     #[tokio::test]
     async fn a_typo_in_an_argument_is_refused_on_the_bus_too() {
         let (core, _rx) = test_core_with_own_agent_table();
@@ -7917,30 +7639,30 @@ mod tests {
 
         match next_frame_event(&mut inbox).await {
             AgentEvent::CommandReply { reply } => {
-                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
-                let err = reply.outcome.expect_err("모르는 칸은 반려");
+                let reply = reply_from_wire(&reply).expect("the reply the daemon wrapped unpacks");
+                let err = reply.outcome.expect_err("an unknown field is refused");
                 assert_eq!(
                     err.code(),
                     engram_dashboard_command::ErrorCode::InvalidArgument
                 );
                 assert!(
                     err.message().contains("cwdd"),
-                    "어느 칸인지 짚어야: {}",
+                    "must point at which field: {}",
                     err.message()
                 );
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         }
         assert_eq!(
             core.manager().roster().len(),
             0,
-            "반려는 아무것도 만들지 않는다"
+            "a refusal creates nothing"
         );
     }
 
-    /// ★버스의 취소도 WS 와 **같은 임대 판정**을 받는다(ADR-0231)★ — 운영 임대 상태(`MultiViewState`)가
-    /// 명령 표의 임대 포트로 꽂히고, 배달이 봉투를 낸 연결을 호출자로 넘기는지를 실물 배선으로 잰다.
-    /// 보유자는 임대를 지나 동사 본문의 답을 받는다(오늘은 늘 NOT_FOUND — 중간 입력 정책이 `None`).
+    /// The bus cancel gets the same lease decision as WS (ADR-0231) — with the real wiring: the production lease state (`MultiViewState`) is the
+    /// command table's lease port and delivery passes the sending connection as the caller. The holder passes and gets the verb body's
+    /// answer (today always NOT_FOUND — mid-turn input policy `None`).
     #[tokio::test]
     async fn a_bus_cancel_from_a_non_holder_is_refused_with_the_ws_text() {
         use engram_dashboard_agent::types::QueuedInputEvent as Q;
@@ -7974,12 +7696,16 @@ mod tests {
         .await;
         match next_frame_event(&mut stranger_inbox).await {
             AgentEvent::CommandReply { reply } => {
-                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
-                let err = reply.outcome.expect_err("비보유자는 거절");
+                let reply = reply_from_wire(&reply).expect("the reply the daemon wrapped unpacks");
+                let err = reply.outcome.expect_err("a non-holder is refused");
                 assert_eq!(err.code(), engram_dashboard_command::ErrorCode::Conflict);
-                assert_eq!(err.message(), INPUT_LOCKED_REFUSAL, "WS 와 같은 글자");
+                assert_eq!(
+                    err.message(),
+                    INPUT_LOCKED_REFUSAL,
+                    "the same characters as WS"
+                );
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         }
 
         core.dispatch(
@@ -7994,25 +7720,25 @@ mod tests {
         .await;
         match next_frame_event(&mut holder_inbox).await {
             AgentEvent::CommandReply { reply } => {
-                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
-                let err = reply.outcome.expect_err("오늘은 동사가 NOT_FOUND");
+                let reply = reply_from_wire(&reply).expect("the reply the daemon wrapped unpacks");
+                let err = reply.outcome.expect_err("today the verb is NOT_FOUND");
                 assert_eq!(
                     err.code(),
                     engram_dashboard_command::ErrorCode::NotFound,
-                    "보유자는 임대를 지나 본문에 닿는다: {}",
+                    "the holder passes the lease and reaches the body: {}",
                     err.message()
                 );
             }
-            other => panic!("답장이 와야: {other:?}"),
+            other => panic!("a reply must come: {other:?}"),
         }
         assert_eq!(
             core.manager()
                 .list_queued_inputs(live)
-                .expect("산 세션")
+                .expect("a live session")
                 .rows
                 .len(),
             1,
-            "거절된 취소는 명부를 건드리지 않는다"
+            "a refused cancel does not touch the roster"
         );
     }
 

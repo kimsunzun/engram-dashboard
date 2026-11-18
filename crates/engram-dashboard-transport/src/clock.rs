@@ -1,15 +1,9 @@
-//! Time seam — the axis that lets backoff · keepalive · write deadlines be verified **without actually waiting** (ADR-0177 decision 8).
+//! Time seam — lets backoff · keepalive · write deadlines be verified **without actually waiting** (ADR-0177 decision 8).
 //!
-//! ★Why dyn★ — made generic, it would spread over all four type signatures `Peer` · `Registry` · `Pending` · `Streams`
-//! and even pollute the registry's collection type. There is only one production implementation, so monomorphization gains nothing.
-//!
-//! ★Why not replace it with `tokio::time::pause()`★ — ① it is a **runtime-global** device, so it can be used only by standing up a runtime, and
-//! there is nowhere to apply it in [`crate::machine`] (a pure layer with no future at all) ② with the transport also decided to be swappable,
-//! tying time to tokio would stick the two back together ③ `test-util` is dev-only, so it may not be
-//! enabled in the consumer harness. **But in real-socket tests `pause()` is cheaper, so it is not forbidden.**
-//!
-//! ★Not yet merged with base `time::Clock`★ — at stage 3 (transport attachment) this trait is made a subtrait of it.
-//! Until then this crate does not depend on base (ADR-0275 decision 3).
+//! ★Why dyn★ — generic would spread over `Peer` · `Registry` · `Pending` · `Streams` signatures and the registry's collection type; one production implementation gains nothing from monomorphization.
+//! ★Why not `tokio::time::pause()`★ — ① it is **runtime-global** and cannot apply to [`crate::machine`] (a pure layer with no future) ② transport and time should stay separately swappable ③ `test-util` is dev-only and
+//! may be off in the consumer harness. In real-socket tests `pause()` is cheaper, so it is not forbidden. ★Not yet merged with base `time::Clock`★ — at stage 3 this trait becomes its subtrait; until then this crate does
+//! not depend on base (ADR-0275 decision 3).
 
 // ADR-0275
 use std::future::Future;
@@ -17,17 +11,13 @@ use std::time::{Duration, Instant};
 
 use futures_util::future::{BoxFuture, Either};
 
-/// What time it is and how long to wait.
-///
-/// The sibling that only reads the clock is base's `time::Clock` (just `now()`), and **this crate adds `sleep`
-/// to it** — backoff · keepalive · write deadlines need *waiting*, and `now()` alone cannot make that.
+/// What time it is and how long to wait. Base's `time::Clock` only reads `now()`; **this crate adds `sleep`** (backoff · keepalive · write deadlines need *waiting*).
 pub trait Clock: Send + Sync + 'static {
     fn now(&self) -> Instant;
-    /// The contract is that the returned future is `'static` — after being put in a `select!` arm it must stay alive there.
+    /// The returned future is `'static` — it must stay alive after being put in a `select!` arm.
     fn sleep(&self, d: Duration) -> BoxFuture<'static, ()>;
 }
 
-/// Production implementation.
 pub struct SystemClock;
 
 impl Clock for SystemClock {
@@ -40,7 +30,6 @@ impl Clock for SystemClock {
     }
 }
 
-/// The deadline has passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Elapsed;
 
@@ -52,12 +41,8 @@ impl std::fmt::Display for Elapsed {
 
 impl std::error::Error for Elapsed {}
 
-/// A deadline running on `dyn Clock`.
-///
-/// ★Being a free function rather than a trait method is intended★ — putting a generic method on the trait would make that trait not
-/// dyn-compatible and the whole time axis would collapse.
-///
-/// If `d` is 0, `f` is **polled once** — so that an already-passed deadline does not unconditionally cut off work in progress.
+/// A deadline running on `dyn Clock`. ★A free function on purpose★ — a generic trait method would make the trait not dyn-compatible and collapse the time axis. If `d` is 0, `f` is **polled once**, so an
+/// already-passed deadline does not unconditionally cut off work in progress.
 pub async fn with_deadline<F: Future>(
     clock: &dyn Clock,
     d: Duration,
@@ -90,7 +75,6 @@ mod tests {
         let never = clock.sleep(Duration::from_secs(3600));
         let handle = clock.clone();
         let work = async move {
-            // The side with the deadline never ends.
             never.await;
             0u8
         };

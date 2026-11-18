@@ -65,7 +65,7 @@ $NoticeName      = 'THIRD_PARTY_LICENSES.txt'
 $ExpectedDocs    = @($NoticeName)
 
 function Fail([string]$msg) {
-    Write-Host "[build-release] 실패: $msg" -ForegroundColor Red
+    Write-Host "[build-release] failed: $msg" -ForegroundColor Red
     exit 1
 }
 
@@ -80,14 +80,14 @@ function Invoke-Step([string]$label, [scriptblock]$block) {
     if ($LASTEXITCODE -ne 0) { Fail "$label (exit $LASTEXITCODE)" }
 }
 
-Write-Host "[build-release] ADR-0100 portable release 조립 시작 — root=$ProjectRoot" -ForegroundColor Green
-Write-Host "[build-release] 조립 위치(release dir) = $ReleaseDir" -ForegroundColor Green
+Write-Host "[build-release] ADR-0100 portable release assembly started — root=$ProjectRoot" -ForegroundColor Green
+Write-Host "[build-release] assembly location (release dir) = $ReleaseDir" -ForegroundColor Green
 
 # Safety guard: $ReleaseDir is deleted wholesale with Remove-Item -Recurse -Force in step (b) below — -OutDir is now a
 #   caller-supplied path, so a mistake with a drive root or the project root would blow that folder away. Only catastrophic values (drive
 #   root · ProjectRoot) are rejected and normal subfolders pass through untouched (no friction for trusted local use).
 if ($ReleaseDir -eq [System.IO.Path]::GetPathRoot($ReleaseDir) -or $ReleaseDir -eq $ProjectRoot) {
-    Fail "위험한 -OutDir: '$ReleaseDir' — 드라이브 루트/프로젝트 루트는 clean 재생성(재귀 삭제) 대상이 될 수 없다"
+    Fail "dangerous -OutDir: '$ReleaseDir' — a drive root/the project root cannot be the target of a clean regeneration (recursive delete)"
 }
 
 # ── Measure the cargo output directory (FIX-2: no assuming) ──────────────────────────────────────────────
@@ -96,21 +96,21 @@ if ($ReleaseDir -eq [System.IO.Path]::GetPathRoot($ReleaseDir) -or $ReleaseDir -
 #   the latest build lands elsewhere, and the stale binary is shipped quietly. cargo metadata respects this redirection,
 #   so target_directory is measured and fixed.
 $metaJson = & cargo metadata --format-version 1 --no-deps --manifest-path (Join-Path $ProjectRoot 'Cargo.toml')
-if ($LASTEXITCODE -ne 0) { Fail "cargo metadata 실패 (exit $LASTEXITCODE)" }
+if ($LASTEXITCODE -ne 0) { Fail "cargo metadata failed (exit $LASTEXITCODE)" }
 try {
     $meta = $metaJson | ConvertFrom-Json
 } catch {
-    Fail "cargo metadata 출력 파싱 실패: $($_.Exception.Message)"
+    Fail "failed to parse the cargo metadata output: $($_.Exception.Message)"
 }
 $TargetDir = $meta.target_directory
-if ([string]::IsNullOrWhiteSpace($TargetDir)) { Fail 'cargo metadata 에 target_directory 가 없다' }
+if ([string]::IsNullOrWhiteSpace($TargetDir)) { Fail 'cargo metadata has no target_directory' }
 
 # If CARGO_BUILD_TARGET (a non-host triple) is set, the release directory becomes target/<triple>/release.
 #   The target_directory in metadata does not include this triple segment, so it is inserted explicitly so that a stale binary
 #   is not quietly shipped. (This script does not pass a --target flag, so it looks only at the env.)
 $BuildTargetTriple = $env:CARGO_BUILD_TARGET
 if (-not [string]::IsNullOrWhiteSpace($BuildTargetTriple)) {
-    Write-Host "[build-release] CARGO_BUILD_TARGET=$BuildTargetTriple 감지 — release 경로에 triple 세그먼트 반영" -ForegroundColor Yellow
+    Write-Host "[build-release] CARGO_BUILD_TARGET=$BuildTargetTriple detected — the triple segment is applied to the release path" -ForegroundColor Yellow
     $TargetRel = Join-Path (Join-Path $TargetDir $BuildTargetTriple) 'release'
 } else {
     $TargetRel = Join-Path $TargetDir 'release'
@@ -148,7 +148,7 @@ Invoke-Step 'tauri build UI app (npm run tauri -- build --no-bundle)' {
 # Sanity check that tauri build baked and embedded the frontend via beforeBuildCommand — if dist/index.html is absent it is a sign that
 #   the frontendDist embed did not happen (risk of shipping an exe with an empty frontend).
 if (-not (Test-Path (Join-Path $ProjectRoot 'dist\index.html'))) {
-    Fail 'dist/index.html 부재 — tauri build 의 beforeBuildCommand(프론트 빌드)가 산출물을 안 만들었다(embed 실패 위험)'
+    Fail 'dist/index.html missing — the beforeBuildCommand (frontend build) of tauri build did not produce its output (risk of a failed embed)'
 }
 
 # ── (a) Release binaries: daemon + CLI ─────────────────────────────────────────────────────────
@@ -177,7 +177,7 @@ Invoke-Step 'cargo build cli (engram-dashboard-cli)' {
 # ── Confirm output exe locations (no assuming — check that the actual files exist) ───────────────────────────────────
 foreach ($exe in $ExpectedExes) {
     $p = Join-Path $TargetRel $exe
-    if (-not (Test-Path $p)) { Fail "빌드 산출 exe 부재: $p (빌드가 이 바이너리를 안 만들었다)" }
+    if (-not (Test-Path $p)) { Fail "built exe missing: $p (the build did not produce this binary)" }
 }
 foreach ($md in $ExpectedPrompts) {
     $p = Join-Path $PromptsSrc $md
@@ -189,7 +189,7 @@ foreach ($rel in $ExpectedBuiltins) {
 }
 foreach ($doc in $ExpectedDocs) {
     $p = Join-Path $DocsSrc $doc
-    if (-not (Test-Path $p)) { Fail "고지 산출 부재: $p ((0) 단계가 이 파일을 안 만들었다)" }
+    if (-not (Test-Path $p)) { Fail "notice output missing: $p (stage (0) did not produce this file)" }
 }
 
 # ── (b) release/ clean regeneration ────────────────────────────────────────────────────────────
@@ -226,9 +226,9 @@ if (Test-Path $ReleaseDir) {
         }
     }
     if ($locked.Count -gt 0) {
-        Write-Host "[build-release] 아래 파일을 다른 프로세스가 쓰고 있습니다:" -ForegroundColor Yellow
+        Write-Host "[build-release] another process is using the files below:" -ForegroundColor Yellow
         foreach ($l in $locked) { Write-Host "    $l" -ForegroundColor Yellow }
-        Fail "release 폴더를 통째로 지울 수 없습니다 — 앱(engram-dashboard.exe)과 데몬을 완전히 종료한 뒤 다시 실행하세요. (지우다 만 상태로 데이터만 날리지 않으려고 시작 전에 멈춥니다)"
+        Fail "cannot delete the release folder as a whole — fully quit the app (engram-dashboard.exe) and the daemon, then run again. (It stops before starting so a half-finished delete does not lose only the data)"
     }
     Remove-Item -Recurse -Force $ReleaseDir
 }
@@ -258,17 +258,17 @@ $topDirs  = @(Get-ChildItem -Force -Directory -Path $ReleaseDir | ForEach-Object
 $ExpectedTopFiles = @($ExpectedExes + $ExpectedDocs)
 
 foreach ($top in $ExpectedTopFiles) {
-    if ($topFiles -notcontains $top) { $errors += "누락(top): $top" }
+    if ($topFiles -notcontains $top) { $errors += "missing (top): $top" }
 }
 foreach ($f in $topFiles) {
-    if ($ExpectedTopFiles -notcontains $f) { $errors += "여분(top file): $f" }
+    if ($ExpectedTopFiles -notcontains $f) { $errors += "extra (top file): $f" }
 }
 $ExpectedTopDirs = @('prompts', $BuiltinDirName)
 foreach ($d in $topDirs) {
-    if ($ExpectedTopDirs -notcontains $d) { $errors += "여분(top dir): $d" }
+    if ($ExpectedTopDirs -notcontains $d) { $errors += "extra (top dir): $d" }
 }
 foreach ($d in $ExpectedTopDirs) {
-    if ($topDirs -notcontains $d) { $errors += "누락(top dir): $d/" }
+    if ($topDirs -notcontains $d) { $errors += "missing (top dir): $d/" }
 }
 
 # prompts/: exactly the .md files of $ExpectedPrompts, no subdirectories. ★Do not count them here★ — a number that was counted
@@ -277,12 +277,12 @@ if (Test-Path $ReleasePrompts) {
     $pFiles = @(Get-ChildItem -Force -File      -Path $ReleasePrompts | ForEach-Object Name)
     $pDirs  = @(Get-ChildItem -Force -Directory -Path $ReleasePrompts | ForEach-Object Name)
     foreach ($md in $ExpectedPrompts) {
-        if ($pFiles -notcontains $md) { $errors += "누락(prompts): $md" }
+        if ($pFiles -notcontains $md) { $errors += "missing (prompts): $md" }
     }
     foreach ($f in $pFiles) {
-        if ($ExpectedPrompts -notcontains $f) { $errors += "여분(prompts file): $f" }
+        if ($ExpectedPrompts -notcontains $f) { $errors += "extra (prompts file): $f" }
     }
-    foreach ($d in $pDirs) { $errors += "여분(prompts dir): $d" }
+    foreach ($d in $pDirs) { $errors += "extra (prompts dir): $d" }
 }
 
 # builtin/: exactly the files of $ExpectedBuiltins (compared as '/'-separated relative paths), and no directory that is
@@ -309,15 +309,15 @@ if (Test-Path $ReleaseBuiltin) {
 }
 
 if ($errors.Count -gt 0) {
-    Write-Host "[build-release] manifest 불일치 — 배송 불가:" -ForegroundColor Red
+    Write-Host "[build-release] manifest mismatch — cannot ship:" -ForegroundColor Red
     $errors | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
     exit 1
 }
 
 # ── Success summary ────────────────────────────────────────────────────────────────────────────
 Write-Host ''
-Write-Host "[build-release] OK — release/ manifest 일치 (ADR-0100 co-location 유지)" -ForegroundColor Green
-Write-Host "  위치: $ReleaseDir" -ForegroundColor Green
+Write-Host "[build-release] OK — release/ manifest matches (ADR-0100 co-location kept)" -ForegroundColor Green
+Write-Host "  location: $ReleaseDir" -ForegroundColor Green
 Get-ChildItem -Recurse -File -Path $ReleaseDir | ForEach-Object {
     $rel = $_.FullName.Substring($ReleaseDir.Length + 1)
     $kb  = [math]::Round($_.Length / 1KB, 1)

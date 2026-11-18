@@ -126,7 +126,7 @@ view:list-updated  { views: ViewMeta[], active_view_id }
 ---
 
 ## Policy
-- **close_view:** collect the agentIds but **do not kill the agents** (the daemon survives, AgentTree shows "미배정"). "Kill on close" is a follow-up parameter.
+- **close_view:** collect the agentIds but **do not kill the agents** (the daemon survives, AgentTree shows "unassigned"). "Kill on close" is a follow-up parameter.
 - **Message lock/gating:** policy enforce = **the daemon** (the single choke point). The src-tauri relay only carries, the frontend only displays (ADR-0036).
 - **Swappability guard (FIX — Codex F3):** do not leak routing · window concepts into `agentClient` · the protocol crate. 0 View/Layout/Slot types in the daemon crate (`rg` gate).
 

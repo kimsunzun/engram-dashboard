@@ -1,17 +1,6 @@
-// Regression for PTY size re-propagation after reconnect — once the socket is up, re-emit the resize that was dropped while disconnected.
-//
-// Background (ADR-0195): a command that arrives while there is no socket is not queued but fails on the spot — a decision meant to keep commands
-//   from crossing the connection boundary. resize is fire-and-forget, so that failure is silently swallowed, nobody re-emits it, and the PTY
-//   stays stuck at its pre-disconnect size (reconnect window = 500ms~10s. If the divider is dragged in between,
-//   that size never reaches the agent).
-//
-// ★The two opposite sides this regression guards★
-//   ① Fixing the same symptom by mixing connection state into the subscription trigger (viewId·agentId deps) splits the subscription at every reconnect,
-//      so the screen is wiped before the replay arrives and the incarnation marker is lost too (ADR-0164) — so we also pin that the re-propagation
-//      happened **without resubscribing**.
-//   ② An implementation that fires on the **value**, not the transition (fires whenever the effect runs while connection state is true)
-//      fires overlapping the subscription path at mount and agentId swap — the 'mount' · 'agentId swap' · StrictMode cases below are
-//      built to fail on that implementation.
+// Regression for PTY size re-propagation after reconnect — once the socket is up, re-emit the resize dropped while disconnected.
+// Why (ADR-0195): a command arriving with no socket fails on the spot (not queued); resize is fire-and-forget, so the failure is swallowed and the PTY stays stuck at its pre-disconnect size (reconnect window 500ms~10s; a divider drag in between never reaches the agent).
+// ★Two opposite sides guarded★: ① mixing connection state into the subscription trigger (viewId·agentId deps) would split the subscription on every reconnect — screen wiped before the replay and incarnation marker lost (ADR-0164) — so we also pin that re-propagation happened **without resubscribing**. ② An implementation firing on the **value**, not the transition, overlaps the subscription path at mount and agentId swap — the 'mount' · 'agentId swap' · StrictMode cases below fail on it.
 
 import { StrictMode } from 'react'
 import { act, cleanup, render } from '@testing-library/react'
@@ -19,8 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OutputChunk, ViewPhase } from '../../api/agentClient'
 
-// Two observers jsdom does not provide — no-ops that never fire the callback, so only the connection path remains (so they do not mix with the propagation that size changes ·
-//   visibility transitions produce).
+// Two observers jsdom lacks — no-ops that never fire, leaving only the connection path (no mixing with size-change / visibility propagation).
 globalThis.ResizeObserver = class {
   observe() {}
   unobserve() {}
@@ -36,11 +24,7 @@ globalThis.IntersectionObserver = class {
 } as unknown as typeof IntersectionObserver
 
 // ── Layout stand-in ───────────────────────────────────────────────────────────────────
-// jsdom has no layout, so it returns offsetParent **always** null and getBoundingClientRect **always** 0. Those two are exactly the slot's two
-//   hide-decision branches (ADR-0056), so untouched, the visible-slot branch can never be stepped on in this
-//   harness. ★Why it is planted on the prototype★: if attached after render(), it is still hidden **at the mount commit**,
-//   so even an implementation that fires overlapping at mount is caught by the guard and silently passes (that trap was this file's
-//   earlier edition).
+// jsdom returns offsetParent **always** null and getBoundingClientRect **always** 0 — exactly the slot's two hide-decision branches (ADR-0056), so untouched the visible-slot branch can never run. ★Plant it on the prototype★: attached after render() the slot is still hidden **at the mount commit**, so an implementation firing at mount would be caught by the guard and silently pass.
 const layout = vi.hoisted(() => ({ visible: true, width: 800, height: 400 }))
 Object.defineProperty(HTMLElement.prototype, 'offsetParent', {
   configurable: true,
@@ -106,8 +90,7 @@ vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
 }))
 
-// Size is read through a holder — to tell by value whether it was read after fit() actually reflected a measurement.
-//   Initial value 80×24 = xterm constructor default (must be the same value as the real one — see the fit mock comment below).
+// Size read through a holder — to tell by value whether it was read after fit() reflected a measurement. Initial 80×24 = xterm constructor default (must equal the real one — see the fit mock comment below).
 const xtermDims = vi.hoisted(() => ({ cols: 80, rows: 24 }))
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -176,13 +159,7 @@ beforeEach(() => {
   layout.height = 400
   xtermDims.cols = 80
   xtermDims.rows = 24
-  // ★This is the mock of the fit contract (checked against the `@xterm/addon-fit` source)★. `proposeDimensions()` falls through to undefined
-  //   under only three conditions — no terminal · no `element.parentElement` · **cell metrics are 0**.
-  //   ★The container box size is not among the three★: metrics are measured by xterm from the font, so they stay alive
-  //   regardless of the box, and a collapsed box yields a negative width, clamped to the `Math.max(2,·)`/`Math.max(1,·)` floor 2×1, and **a real resize
-  //   is issued**. The no-op in the display:none branch is the mock's placeholder — the real one is not a no-op (measured 11×6 — TerminalSlot helper comment).
-  //   If the mock breaks this contract the test invents values the library cannot produce, and a guard built on that becomes code that can
-  //   never fire — the earlier edition of this file was exactly that.
+  // ★Mock of the fit contract (checked against the `@xterm/addon-fit` source)★: `proposeDimensions()` returns undefined only with no terminal · no `element.parentElement` · **cell metrics 0**. ★The box size is not among them★: xterm measures metrics from the font, so a collapsed box gives a negative width clamped to the floor 2×1 and **a real resize is issued**. The no-op in the display:none branch is the mock's placeholder — the real one is not a no-op (measured 11×6 — TerminalSlot helper comment). A mock that breaks this contract invents values the library cannot produce, and a guard built on it can never fire.
   fitAddonFit.mockReset()
   fitAddonFit.mockImplementation(() => {
     if (!layout.visible) return
@@ -206,8 +183,8 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
-  it('끊겼다 다시 붙으면 지금 터미널 치수를 PTY 에 다시 밀어 넣는다', async () => {
+describe('TerminalSlot — PTY size repropagation after reconnect', () => {
+  it('after disconnecting and reattaching it pushes the current terminal size to the PTY again', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
@@ -226,7 +203,7 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     expect(subscribeCalls(agentClient)).toBe(subCalls)
   })
 
-  it('끊긴 동안에는 아무것도 보내지 않고, 다시 붙는 순간 정확히 한 번 보낸다', async () => {
+  it('while disconnected it sends nothing, and at the moment of reattaching it sends exactly once', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
@@ -240,11 +217,8 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     expect(agentClient.resizePty).toHaveBeenCalledTimes(1)
   })
 
-  // ★What tells value-watching from transition-watching is the agentId swap block below alone★. Re-notifying the same state is not a
-  //   trigger — setState filters the same value so no render happens and deps stay the same, so an implementation watching only the value does not fire there either.
-  //   The earlier re-notify · re-render assertions record that contract, and the power to tell implementations apart lies only in the swap block
-  //   — ★if that block is deleted as 「중복」 (duplicate) this test can tell nothing apart★.
-  it('붙어 있는 동안에는 발화하지 않는다 — 재통지·리렌더·agentId 교체 어느 것도 계기가 아니다', async () => {
+  // ★Only the agentId swap block below tells value-watching from transition-watching★: re-notifying the same state is no trigger (setState filters the same value, so no render and deps stay the same — a value-watching implementation does not fire there either); the re-notify · re-render assertions record that contract. ★Deleting the swap block as "duplicate" leaves this test unable to tell anything apart★.
+  it('while attached it does not fire — re-notify · re-render · agentId swap are none of them a trigger', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     const { rerender } = render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
@@ -262,7 +236,7 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     expect(agentClient.resizePty).toHaveBeenCalledWith(OTHER_AGENT, 137, 25)
   })
 
-  it('붙은 채 마운트하면 구독 경로 1회뿐 — 이 경로가 겹쳐 쏘지 않는다', async () => {
+  it('mounting attached gives only the one subscription path — this path does not fire twice', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
@@ -271,10 +245,8 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     expect(agentClient.resizePty).toHaveBeenCalledWith(AGENT, 137, 25)
   })
 
-  // The app starts under StrictMode (main.tsx) — the dev double mount runs the effect twice. The transition baseline is a ref, so
-  //   the second run must read as "already attached". ★If you strip out the mount share and measure only reconnect, that claim
-  //   is lost★ — set up the mount assertion first.
-  it('StrictMode 이중 마운트에서도 마운트 0 · 재연결 1 이다', async () => {
+  // The app starts under StrictMode (main.tsx) — the dev double mount runs the effect twice; the transition baseline is a ref, so the second run must read as "already attached". ★Without the mount share, measuring only reconnect loses this claim★ — set up the mount assertion first.
+  it('even under a StrictMode double mount it is mount 0 · reconnect 1', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     render(
       <StrictMode>
@@ -283,8 +255,7 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     )
     await flushSubscribe()
 
-    // Because of the double mount the subscription is made twice, but only the surviving subscription emits a size in .then (the earlier one
-    //   is dropped by the cancelled guard). The total is 1 only if this path emits nothing at mount.
+    // The double mount subscribes twice but only the surviving subscription emits a size in .then (the earlier is dropped by the cancelled guard) — total 1 only if this path emits nothing at mount.
     expect(agentClient.resizePty).toHaveBeenCalledTimes(1)
 
     resizeCalls(agentClient).mockClear()
@@ -294,7 +265,7 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
   })
 
   // Hidden slot (tab keep-alive = display:none). When shown again, the visibility effect emits the same propagation.
-  it('숨은 슬롯은 재연결에서도 치수를 전파하지 않는다', async () => {
+  it('a hidden slot does not propagate the size even on reconnect', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     layout.visible = false
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
@@ -309,12 +280,8 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     expect(agentClient.resizePty).not.toHaveBeenCalled()
   })
 
-  // ★Second branch of the hide decision★: a slot that is displayed (offsetParent alive) but whose box alone collapsed to 0.
-  //   Here fit() is not skipped — cell metrics are fine, so the negative width is clamped to the Math.max floor 2×1 and a real resize
-  //   is issued at that size. If the guard had only the offsetParent branch, that 2×1 would go out to the PTY.
-  //   ★Checking the size cannot block this case★ (2×1 is indistinguishable from a normal size) — what blocks it is
-  //   the "when to send" side, so it must drop out before reaching fit(). So the assertion hangs on fit() not being called too.
-  it('표시됐지만 박스가 붕괴한 슬롯은 fit() 에 닿기 전에 빠진다', async () => {
+  // ★Second branch of the hide decision★: a displayed slot (offsetParent alive) whose box collapsed to 0. fit() is not skipped here (cell metrics are fine), so the negative width clamps to the floor 2×1 and a real resize goes out — an offsetParent-only guard would send 2×1 to the PTY. ★A size check cannot block it★ (2×1 looks like a normal size); the "when to send" side must drop out before fit(), so fit() not being called is asserted too.
+  it('a slot that was shown but whose box collapsed drops out before reaching fit()', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     layout.width = 0
     layout.height = 0

@@ -1,28 +1,18 @@
-// viewStore — 레이아웃 권위(src-tauri ViewManager, ADR-0035/0057)의 프론트 미러 + 제어 표면(§5).
+// viewStore — the frontend mirror of the layout authority (src-tauri ViewManager, ADR-0035/0057) + control surface (§5).
 //
-// ★권위 = 백엔드★: 이 스토어는 레이아웃을 *직접 변형하지 않는다*. 액션은 대응 invoke 만 부르고,
-// 실제 상태 갱신은 백엔드가 emit 하는 layout:updated / window:tabs-updated 를 listen 해서만 한다
-// (낙관적 갱신 X). 그래서 사람 클릭이든 LLM(cdp eval → window.__engramCmd)이든 같은 invoke→emit
-// 루프 한 곳을 지난다 — 두 입력이 같은 단일 control surface 를 흔든다(§5 손발/두뇌 분리).
+// ★Authority = backend★: this store does not mutate the layout directly. Actions only call the matching invoke; state updates only by listening to the layout:updated / window:tabs-updated the backend emits
+// (no optimistic updates), so a human click and the LLM (cdp eval → window.__engramCmd) pass the same invoke→emit loop (§5).
 //
-// ★레이아웃은 agentClient/ProtocolClient seam(ADR-0011)을 거치지 않는다★ — 그건 *에이전트 명령*
-// 전용(데몬 권위)이고, 레이아웃은 src-tauri 권위(ADR-0035)라 @tauri-apps/api invoke/listen 직접 호출.
+// ★The layout does not go through the agentClient/ProtocolClient seam (ADR-0011)★ — that is for agent commands (daemon authority); the layout is src-tauri authority (ADR-0035), so @tauri-apps/api invoke/listen are called directly.
 //
-// ★탭 소유 모델(ADR-0057)★: 옛 전역 activeViewId 는 사라졌다. 한 창(label)이 탭 목록(View 여러 벌)을
-// 소유하고 그 안에서 전환한다. 프론트는 `windows: label → {tabs, active, version}` 로 창별 탭 상태를
-// 미러하고(window:tabs-updated 소비), 렌더는 "이 웹뷰 창의 active 탭"(useCurrentViewId)이 정한다.
-//   - main = windows["main"].active
-//   - 팝업 = ?window=<label> 의 windows[label].active
+// Tab ownership model (ADR-0057): one window (label) owns a tab list (several Views) and switches within it. The frontend mirrors per-window tab state as `windows: label → {tabs, active, version}`
+// (consuming window:tabs-updated), and rendering follows "the active tab of this webview window" (useCurrentViewId): main = windows["main"].active, popup = windows[label].active of ?window=<label>.
 //
-// ★view_id 별 캐시 모델★(핵심 불변식): layout 을 view_id → {layout,focus,기하,version} 캐시로 보유한다.
-// 왜 캐시인가:
-//   - 백엔드 ViewManager.version 은 *전역 단조 카운터*(모든 view 공유, manager.rs bump_version).
-//     모든 snapshot 이 같은 전역 version 을 박는다 → "view_id 가 다르면 무조건 채택"식 가드는 틀렸다.
-//     다른 view 의 늦은 emit(낮은 전역 version)이 stale 로 덮을 수 있다(F1+F4).
-//   - 캐시는 view_id 별 독립 항목이라 다른 view 끼리 version 이 충돌하지 않는다. 같은 view 안에서는
-//     전역 단조라 version 단조 비교가 그대로 성립 → stale emit 폐기가 view 별로 정확하다.
-//   - keep-alive(ADR-0056): 창은 자기 tabs 전부를 마운트하고 활성만 표시한다 → 캐시는 활성 탭뿐 아니라
-//     그 창의 모든 탭 layout 을 담아야 한다(숨은 탭도 렌더 유지). 각 슬롯 캔버스가 자기 view_id 캐시를 본다.
+// ★Per-view_id cache model★ (core invariant): the layout is a view_id → {layout,focus,geometry,version} cache.
+//   - The backend ViewManager.version is a *global monotonic counter* shared by all views (manager.rs bump_version), so "always adopt when the view_id differs" is wrong:
+//     a late emit of another view (lower global version) could overwrite it as stale (F1+F4).
+//   - Independent entries per view_id keep versions of different views from colliding; within a view the version is globally monotonic, so monotonic comparison discards stale emits exactly.
+//   - keep-alive (ADR-0056): a window mounts all its tabs and shows only the active one, so the cache holds the layouts of all tabs of that window; each slot canvas reads its own view_id cache.
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
@@ -44,30 +34,30 @@ import type {
 import { isRenderMode, type RenderMode } from '../components/slot/renderMode'
 import { retryAsync } from '../util/retryInvoke'
 
-/** 메인 창 label(백엔드 MAIN_WINDOW_LABEL 미러). 창 판정 폴백·기본 대상. */
+/** Main window label (mirror of the backend MAIN_WINDOW_LABEL). Window decision fallback · default target. */
 export const MAIN_WINDOW_LABEL = 'main'
 
-/** 사용량 슬롯에 쓸 표시 칸 — 빠진 칸은 셸이 그 슬롯의 지금 값으로 지킨다(`setUsageSlot`). */
+/** Display fields to write on a usage slot — missing fields are kept by the shell at that slot's current value (`setUsageSlot`). */
 export type UsageShows = Partial<Pick<Extract<SlotContent, { type: 'usage' }>, 'show_claude' | 'show_codex'>>
 
-/** window:tabs-updated / list_tabs 페이로드 — layout/apply.rs `WindowTabsPayload` 의 미러. 칸 이름이 wire 계약이다(ADR-0057). */
+/** window:tabs-updated / list_tabs payload — mirror of `WindowTabsPayload` in layout/apply.rs. The field names are the wire contract (ADR-0057). */
 export interface WindowTabsPayload {
   label: string
-  /** 그 창의 영속 신원 — main = `main`, 팝아웃 = UUID. */
+  /** The persistent identity of that window — main = `main`, popout = UUID. */
   window_id: string
-  /** 창 번호 — main = 1, 팝아웃 = 2 이상(TRD S26-window-chrome §4-1). */
+  /** Window number — main = 1, popouts = 2 and up (TRD S26-window-chrome §4-1). */
   number: number
-  /** OS 창 제목 — 셸이 OS 창에 입히는 몫이라 웹은 읽지 않는다(TRD S26-window-chrome §4-4). */
+  /** OS window title — putting it on the OS window is the shell's job, so the web does not read it (TRD S26-window-chrome §4-4). */
   title: string
   tabs: ViewMeta[]
   active: string
   version: number
 }
 
-/** `move_slot_to_window` 의 답 — layout/apply.rs `SlotMove` 의 미러. `tab` = 옮겨 간 창에 생긴 탭. */
+/** The answer of `move_slot_to_window` — mirror of `SlotMove` in layout/apply.rs. `tab` = the tab created in the window moved to. */
 export type SlotMove = NewWindow & { tab: string }
 
-/** 한 창의 탭 상태(프론트 미러). version = 전역 단조(stale emit 폐기용). `windowId` · `number` = 페이로드 그대로. */
+/** Tab state of one window (frontend mirror). version = global monotonic (for discarding stale emits). `windowId` · `number` = as in the payload. */
 export interface WindowTabs {
   windowId: string
   number: number
@@ -79,66 +69,52 @@ export interface WindowTabs {
 export interface CachedView {
   layout: LayoutNode
   focusedSlotId: string | null
-  /** 셸이 계산한 칸·분할 사각형(스냅샷 그대로 — 트리 전위 순). 계약은 `ViewSnapshot.slot_rects`·`split_rects`. */
+  /** Area and split rectangles the shell computed (as in the snapshot — tree pre-order). The contract is `ViewSnapshot.slot_rects`·`split_rects`. */
   slotRects: SlotRect[]
   splitRects: SplitRect[]
-  /** 셸의 분할 비율 한계(`ViewSnapshot.ratio_min`/`ratio_max`) — 화면이 상수를 따로 두지 않게 스냅샷에서 받는다. */
+  /** The shell's split ratio limits (`ViewSnapshot.ratio_min`/`ratio_max`) — taken from the snapshot so the screen does not keep its own constants. */
   ratioMin: number
   ratioMax: number
-  /**
-   * 이 판이 모르는 내용을 쥔 슬롯 id(스냅샷 `foreign_slots` 그대로). 그 슬롯의 `content` 는 `empty` 로 실리지만
-   * 비어 있지 않다 — 빈 슬롯을 고르는 판정은 이 목록의 슬롯을 점유로 본다(셸 `ViewManager::slot_is_free` 와 같은 답).
-   */
+  /** Slot ids holding content this version does not know (the snapshot's `foreign_slots`). Their `content` is carried as `empty` but they are not empty — the empty-slot pick treats them as occupied (same as shell `ViewManager::slot_is_free`). */
   foreignSlots: string[]
-  /** 이 항목을 마지막으로 채택한 전역 version(stale emit 가드 — 같은 view 안에서 단조 비교). */
+  /** The global version that last adopted this entry (stale emit guard — monotonic comparison within the same view). */
   version: number
 }
 
 interface ViewState {
-  /** view_id → 캐시된 레이아웃. 창 캔버스는 자기 창 tabs 의 각 view_id 캐시를 렌더한다(keep-alive). */
+  /** view_id → cached layout. A window canvas renders the cache of each view_id of its own window's tabs (keep-alive). */
   layouts: Record<string, CachedView>
-  /** 창 label → 그 창의 탭 상태(window:tabs-updated 미러). 탭바·useCurrentViewId 의 단일 출처. */
+  /** window label → that window's tab state (window:tabs-updated mirror). The single source for the tab bar and useCurrentViewId. */
   windows: Record<string, WindowTabs>
 
   /**
-   * ★렌더 모드 오버라이드(§5)★: slot node.id → 강제 RenderMode. caps 유도 기본 렌더러
-   * (defaultRenderMode: structured→'rich' / else→'terminal')를 무시하고 지정한 렌더러를 마운트한다.
-   * 미지정 slot 은 여기 키가 없어 기본 유도로 떨어진다(?? defaultRenderMode).
-   * ★프론트 전용★ — 백엔드 wire LayoutNode 는 렌더 모드 개념을 모른다(override라 권위 레이아웃과 무관).
-   * 그래서 이 필드는 invoke→emit 권위 루프를 안 탄다(위 "낙관적 갱신 X" 규칙의 프론트 전용 예외).
+   * ★Render mode override (§5)★: slot node.id → forced RenderMode, overriding the caps-derived default (defaultRenderMode: structured→'rich' / else→'terminal'); an unspecified slot falls to `?? defaultRenderMode`.
+   * ★Frontend only★ — the backend wire LayoutNode does not know render modes, so this field does not ride the invoke→emit loop (a frontend-only exception to "no optimistic updates").
    */
   renderModeOverride: Record<string, RenderMode>
 
-  // ── 탭/창 command ──────────────────────────
-  /** 창 `window` 에 새 빈-슬롯 탭 추가·활성화 → 새 view_id 반환. */
+  // ── tab/window commands ──────────────────────────
+  /** Adds a new empty-slot tab to window `window` and activates it → returns the new view_id. */
   createTab: (window: string, name?: string) => Promise<string>
   closeTab: (window: string, viewId: string) => Promise<void>
-  /** 창 `window` 의 활성 탭 변경(그 창만). */
+  /** Changes the active tab of window `window` (that window only). */
   switchTab: (window: string, viewId: string) => Promise<void>
   /**
-   * 창 `window` 의 활성이 `expect` 일 때만 `viewId` 로 바꾼다 — 바꿨으면 `true`, 활성이 달라 안 바꿨으면 `false`. 오류는
-   * `switchTab` 과 같다. 탭 끌기의 원래 선택 되돌리기 전용(TRD S21-slot-docking §4-6 — 되돌리기가 닿기 전에 사용자 · LLM 이
-   * 고른 탭을 덮지 않는다). ★LLM 표면에 올리지 않는다★ — LLM 은 `tab.switch`(TRD §3-6).
+   * Switches to `viewId` only when the active tab of window `window` is `expect` — `true` if switched, `false` if the active tab differs. Errors as `switchTab`. Only for restoring the original selection of a tab drag
+   * (TRD S21-slot-docking §4-6 — does not overwrite a tab the user or LLM picked before the restore arrives). ★Not put on the LLM surface★ — the LLM uses `tab.switch` (TRD §3-6).
    */
   switchTabIf: (window: string, viewId: string, expect: string) => Promise<boolean>
   /**
-   * 탭(View) 이름 교체. view_id 전역 유니크라 window 는 안 받는다(백엔드 view_owner 파생). 백엔드
-   * rename_tab 을 invoke 하고 실제 이름 반영은 window:tabs-updated emit 으로만(낙관 갱신 X — 이름 권위
-   * = src-tauri, ADR-0035). §5 단일 표면: 사람 더블클릭 인라인 편집(TabBar)·LLM(__engramCmd → tab.rename)이
-   * 같은 이 핸들로 수렴한다. 이름 정규화(trim/공백거부)는 호출부 경계(TabBar·tab.rename)가 담당.
+   * Replaces a tab (View) name. view_id is globally unique, so no window is taken (derived from the backend view_owner). The name updates only through the window:tabs-updated emit (no optimistic update — name authority = src-tauri, ADR-0035).
+   * §5: the TabBar double-click edit and the LLM (tab.rename) converge here; name normalization (trim/blank refusal) is the caller boundary's job (TabBar · tab.rename).
    */
   renameTab: (viewId: string, name: string) => Promise<void>
-  /**
-   * 빈 새 창(빈 탭 1개) 생성(D-6) → 그 창의 `{window, window_id, number}`(뜻 = 바인딩 `NewWindow` — TRD S26-window-chrome
-   * §5-3). 창을 다시 가리킬 땐 `window_id` 를 쓴다 — 번호는 닫힌 창의 것을 다시 쓴다.
-   */
+  /** Creates an empty new window (1 empty tab) (D-6) → its `{window, window_id, number}` (binding `NewWindow` — TRD S26-window-chrome §5-3). Point at the window again with `window_id` — numbers reuse those of closed windows. */
   createWindow: () => Promise<NewWindow>
   /**
-   * 창 상태 동작 하나 — invoke `window_control`(TRD S26-window-chrome §6-4 · 버스 `window.*` 와 같은 서비스). `window` 는
-   * 셸이 푸는 창 인자(window_id 또는 같은 실행 안 label — 번호는 거절)이고, `hide_all` · `show_all` 은 창을 가리지 않는다
-   * (셸은 숫자 거절만 본다). `ifEmpty` 는 `close` 에만 — 그때 `window` 는 그 창의 window_id 다(§5-5). 거절 = 셸 문구
-   * (문자열 — Error 가 아니다)로 reject — 명령 이름은 레지스트리 `window.*` 가 붙인다. ★창 닫기도 이 길이다★ — main 의
-   * `close` 는 모든 창 숨기기다(답 `close: 'hidden_all'`).
+   * One window state action — invoke `window_control` (TRD S26-window-chrome §6-4; same service as the bus `window.*`). `window` is the argument the shell resolves (window_id or a label within the same run — numbers are refused);
+   * `hide_all` · `show_all` pick no window. `ifEmpty` is only for `close` — then `window` is that window's window_id (§5-5). Refusal = rejects with the shell text (a string, not an Error); the registry `window.*` adds the command name.
+   * ★Closing a window also goes this way★ — main's `close` hides all windows (answer `close: 'hidden_all'`).
    */
   controlWindow: (
     window: string,
@@ -146,54 +122,38 @@ interface ViewState {
     ifEmpty?: boolean,
   ) => Promise<WindowControlOutcome>
 
-  // ── View 내부 조작(view_id 전역 유니크라 시그니처 유지 — 소속 창은 백엔드 view_owner 파생) ──
-  /** slot 분할 → 새 slot_id 반환. */
+  // ── operations inside a View (view_id is globally unique, so the signature stays — the owning window is derived from the backend view_owner) ──
+  /** Splits a slot → returns the new slot_id. */
   split: (viewId: string, slotId: string, dir: SplitDir) => Promise<string>
   /**
-   * 분할 비율 쓰기(ADR-0227 — 구분선 확정·더블클릭 50:50). `ratio` = a 쪽(왼쪽/위) 칸의 몫(ADR-0140).
-   * 셸이 클램프한 적용값과 결말을 돌려준다(`version` 은 `Applied` 일 때만 뜻이 있다). 실패하면 셸의 오류 문자열로 reject.
-   * 낙관 갱신 X — 화면은 layout:updated 와 구분선 미리보기 화해(`splitPreview.ts`)로만 바뀐다.
-   * ★프론트 명령 레지스트리(`window.__engramCmd`)에 올리지 않는다★ — LLM 경로는 버스 `split.setRatio` 하나다.
-   *   두 표면에 같은 id 를 두면 받는 것·주는 것이 갈라진다(`slot.popout` 선례).
+   * Writes a split ratio (ADR-0227 — divider confirm · double-click 50:50). `ratio` = the share of the a side (left/top) area (ADR-0140). Returns the shell-clamped applied value and the outcome (`version` is meaningful only for `Applied`);
+   * on failure rejects with the shell's error string. No optimistic update — the screen changes through layout:updated and the divider preview reconciliation (`splitPreview.ts`).
+   * ★Not on the frontend command registry (`window.__engramCmd`)★ — the LLM path is the bus `split.setRatio` alone; the same id on two surfaces makes what they take and give diverge (the `slot.popout` precedent).
    */
   setSplitRatio: (viewId: string, splitId: string, ratio: number) => Promise<SplitRatioApplied>
-  /**
-   * slot 을 포커스로 지정(click-to-focus — ADR-0066 결정 1). 백엔드 focus_slot 을 invoke 하고 실제 링
-   * 갱신은 layout:updated emit 으로만(낙관 갱신 X — focused_slot_id 권위 = src-tauri, ADR-0035/0066).
-   * 사람 클릭·팔레트·키바인딩·LLM(window.__engramCmd → slot.focus)이 같은 이 핸들을 흔든다(§5).
-   */
+  /** Sets a slot as the focus (click-to-focus — ADR-0066). Invokes backend focus_slot; the ring updates only through layout:updated (focused_slot_id authority = src-tauri, ADR-0035/0066). Human clicks, the palette, keybindings and the LLM (slot.focus) share this handle (§5). */
   focusSlot: (viewId: string, slotId: string) => Promise<void>
-  /** slot 닫기(형제 승격). */
+  /** Closes a slot (the sibling is promoted). */
   closeSlot: (viewId: string, slotId: string) => Promise<void>
   assignAgent: (viewId: string, slotId: string, agentId: string) => Promise<void>
   /**
-   * slot 의 콘텐츠를 SlotContent 유니온 어느 것으로도 교체(ADR-0063 배치 제어 표면). 트리(agent_list)·
-   * 사용량(usage)·비우기(empty)를 슬롯에 배치한다. 백엔드 set_slot_content 를 invoke 하고 실제
-   * 반영은 layout:updated emit 으로만(낙관 갱신 X — 레이아웃 권위 = src-tauri, ADR-0035).
-   * §5: `layout.setSlotContent` command 로 LLM 도 호출.
+   * Replaces a slot's content with any of the SlotContent union (ADR-0063): tree (agent_list), usage (usage) or clear (empty). Invokes backend set_slot_content; the update comes only through layout:updated (no optimistic update, ADR-0035).
+   * §5: the LLM also calls it through `layout.setSlotContent`.
    */
   setSlotContent: (viewId: string, slotId: string, content: SlotContent) => Promise<void>
   /**
-   * 사용량 슬롯의 표시 칸을 칸 단위로 쓴다 — 준 칸만 바뀌고 빠진 칸은 셸이 락 안에서 그 슬롯의 지금 값으로 지킨다
-   * (사용량이 아니던 슬롯은 사용량이 되고 빠진 칸은 켬). 반영은 emit 으로만(낙관 갱신 X).
-   * ★한 칸을 바꿀 땐 `setSlotContent` 로 온전한 content 를 짓지 않는다★ — 이 웹뷰가 받아 둔 content 는 방송 전엔
-   * 낡아, 방송 전에 온 다른 칸의 쓰기를 옛 값으로 되돌린다.
+   * Writes the display fields of a usage slot field by field — only given fields change; the shell keeps missing fields at the slot's current value inside the lock (a non-usage slot becomes usage with missing fields on). Reflected only through emit.
+   * ★To change one field, do not build a whole content with `setSlotContent`★ — this webview's content is stale before the broadcast and would revert another field's earlier write.
    */
   setUsageSlot: (viewId: string, slotId: string, shows: UsageShows) => Promise<void>
   /**
-   * slot 의 agent 를 다른 창의 새 탭으로 MOVE(detach, not mirror). 백엔드 move_slot_to_window 가 새 View
-   * 생성 → agent 이전 → 대상 창(미지정 시 새 팝업 창) 새 탭 삽입 → 원본 슬롯 제거를 한다. 원본 슬롯 제거는
-   * emit(layout:updated)으로 반영된다(낙관 갱신 X — 백엔드 권위, ADR-0035). 반환 = {window, tab}(G4) + 옮겨 간 창의
-   * window_id · number(`createWindow` 와 같은 뜻 — 기존 창이면 그 창의 것).
-   * §5: `slot.popout` command 로 LLM 도 호출 — ★그 command 는 toWindow 를 안 넘겨 항상 새 창이다★.
-   * 그래서 `toWindow` 는 프로덕션 호출부가 없고 `viewStore.test.ts` 만 그 갈래를 잰다. 기존 창을 목적지로
-   * 고르는 갈래는 셸의 버스 선언(`slot.popout` 의 `to_window`)이 쥐고 있고, 두 표면이 받는 것도 주는 것도
-   * 다르다는 메모는 `commands/slotCommands.ts` 의 등록 옆에 있다.
+   * MOVEs the slot's agent to a new tab of another window (detach, not mirror). Backend move_slot_to_window creates a new View → moves the agent → inserts a new tab in the target window (a new popup window when unspecified) → removes the source slot,
+   * reflected by layout:updated (no optimistic update, ADR-0035). Returns {window, tab} (G4) + the destination's window_id · number (as `createWindow`).
+   * §5: the LLM calls it through `slot.popout` — ★that command does not pass toWindow, so it is always a new window★; `toWindow` has no production caller and only `viewStore.test.ts` measures it. The existing-window branch is held by the shell's
+   * bus declaration (`to_window` of `slot.popout`); the note that the two surfaces differ in what they take and give is next to the registration in `commands/slotCommands.ts`.
    *
-   * ★command 표에서 빠졌을 뿐 닿지 못하는 것은 아니다★: `withGlobalTauri`(`src-tauri/tauri.conf.json`)라
-   * 릴리스에도 `window.__TAURI__.core.invoke` 가 있다. CDP 호출자는 `list_tabs` 로 view id 를 받고
-   * `move_slot_to_window` 에 `toWindow` 를 직접 넘길 수 있다 — 이 액션이 부르는 바로 그 command 다.
-   * 잃은 것은 능력이 아니라 그 두 갈래가 command 표를 안 지난다는 것뿐이다.
+   * ★Dropped out of the command table, not unreachable★: with `withGlobalTauri` (`src-tauri/tauri.conf.json`) `window.__TAURI__.core.invoke` exists in release too, so a CDP caller can get a view id from `list_tabs` and pass `toWindow`
+   * to `move_slot_to_window` directly. What was lost is only that those branches do not pass the command table.
    */
   moveSlotToWindow: (
     viewId: string,
@@ -201,31 +161,31 @@ interface ViewState {
     toWindow?: string,
   ) => Promise<SlotMove>
 
-  // ── ★렌더 모드 오버라이드(§5)★ 지정/해제(프론트 전용, invoke 안 탐) ──────────────────────────
-  /** slot 의 렌더러를 mode 로 강제(caps 유도 기본을 덮음). */
+  // ── ★render mode override (§5)★ set/clear (frontend only, no invoke) ──────────────────────────
+  /** Forces a slot's renderer to mode (overrides the caps-derived default). */
   setRenderMode: (nodeId: string, mode: RenderMode) => void
-  /** slot 의 오버라이드 해제(caps 유도 기본 렌더러로 복귀). */
+  /** Clears a slot's override (back to the caps-derived default renderer). */
   clearRenderMode: (nodeId: string) => void
 
-  // ── DOM 모드 별칭(§5 관측 — 평문 <pre> 라 CDP innerText 로 출력이 읽힌다) ──────────────────────
-  /** slot 을 DOM 모드로(= setRenderMode(id,'dom')). */
+  // ── DOM mode aliases (§5 observation — plain <pre>, so output is readable with CDP innerText) ──────────────────────
+  /** Puts a slot in DOM mode (= setRenderMode(id,'dom')). */
   enableDomMode: (nodeId: string) => void
-  /** slot 의 DOM 모드 해제(= clearRenderMode(id)). */
+  /** Clears a slot's DOM mode (= clearRenderMode(id)). */
   disableDomMode: (nodeId: string) => void
-  /** slot 의 DOM 모드 토글(dom ↔ 기본). */
+  /** Toggles a slot's DOM mode (dom ↔ default). */
   toggleDomMode: (nodeId: string) => void
 
-  // ── emit 수신 핸들러(eventBus/WindowLayout 이 listen 콜백에서 호출) ───────────────────────────
-  /** layout:updated 수신 — 그 view_id 캐시 항목을 version 가드 통과 시 갱신. */
+  // ── emit receive handlers (called by eventBus/WindowLayout in their listen callbacks) ───────────────────────────
+  /** On layout:updated — updates that view_id cache entry when it passes the version guard. */
   applyLayoutUpdated: (snap: ViewSnapshot) => void
-  /** window:tabs-updated / list_tabs 수신 — 그 창의 탭 목록/active 갱신(version stale 방어). */
+  /** On window:tabs-updated / list_tabs — updates that window's tab list/active (version stale defence). */
   applyWindowTabsUpdated: (payload: WindowTabsPayload) => void
 }
 
 export const useViewStore = create<ViewState>((set, get) => ({
   layouts: {},
   windows: {},
-  renderModeOverride: {}, // 갱신 경로 = set/clearRenderMode(+DOM 별칭)만(계약은 필드 JSDoc).
+  renderModeOverride: {}, // the only update paths = set/clearRenderMode (+DOM aliases) (the contract is the field JSDoc).
 
   createTab: (window, name) => invoke<string>('create_tab', { window, name: name ?? null }),
   closeTab: (window, viewId) => invoke<void>('close_tab', { window, view: viewId }),
@@ -238,35 +198,29 @@ export const useViewStore = create<ViewState>((set, get) => ({
   split: (viewId, slotId, dir) => invoke<string>('split_slot', { viewId, slotId, dir }),
   setSplitRatio: (viewId, splitId, ratio) =>
     invoke<SplitRatioApplied>('set_split_ratio', { viewId, splitId, ratio }),
-  // ADR-0057/0035: 낙관 갱신 X — invoke 만 부르고 이름은 window:tabs-updated emit 으로만 반영(백엔드 권위).
-  //   §5 단일 표면(사람 더블클릭 + LLM tab.rename 이 여기로 수렴). trim/공백거부는 호출부(TabBar·tab.rename).
+  // ADR-0057/0035: no optimistic update — only invoke; the name is reflected through the window:tabs-updated emit. §5: human double-click + LLM tab.rename converge here; trim/blank refusal is the caller's (TabBar · tab.rename).
   renameTab: (viewId, name) => invoke<void>('rename_tab', { viewId, name }),
-  // ADR-0066: 낙관 갱신 X — invoke 만 부르고 링은 layout:updated emit 으로만 갱신(백엔드 권위, ADR-0035).
+  // ADR-0066: no optimistic update — only invoke is called and the ring is updated only through the layout:updated emit (backend authority, ADR-0035).
   focusSlot: (viewId, slotId) => invoke<void>('focus_slot', { viewId, slotId }),
   closeSlot: (viewId, slotId) => {
-    // slot 이 사라지므로 그 slot 의 렌더 오버라이드 엔트리도 즉시 제거(누수 방지 — 프론트 전용 상태인
-    // renderModeOverride 는 invoke→emit 권위 루프를 안 타므로 여기서 낙관적으로 정리한다).
+    // The slot goes away, so its render override entry is removed right away (leak prevention — renderModeOverride is frontend-only state outside the invoke→emit loop).
     get().clearRenderMode(slotId)
     return invoke<void>('close_slot', { viewId, slotId })
   },
   assignAgent: (viewId, slotId, agentId) => {
-    // slot UUID 는 재배정에도 안정(agent_id 만 바뀐다) → 이전 agent 를 위해 건 오버라이드가 새 agent 에
-    // 조용히 적용되면 안 된다. 그래서 assign 시 그 slot 의 오버라이드를 clear 해 새 agent 는 caps 유도
-    // 기본으로 시작하게 한다(프론트 전용 낙관 갱신 — renderModeOverride, 권위 루프 밖).
+    // A slot UUID is stable across reassignment (only agent_id changes) → an override set for the previous agent must not silently apply to the new one; clear it so the new agent starts with the caps-derived default.
     get().clearRenderMode(slotId)
     return invoke<void>('assign_agent', { viewId, slotId, agentId })
   },
   setSlotContent: (viewId, slotId, content) => {
-    // slot 콘텐츠가 통째 바뀌므로(에이전트→트리 등) 그 slot 의 렌더 오버라이드도 즉시 정리(assignAgent 와
-    // 동형 — 프론트 전용 상태라 emit 권위 루프 밖). 실제 콘텐츠 교체는 백엔드 set_slot_content 가 하고
-    // layout:updated emit 으로 반영된다(낙관 갱신 X, ADR-0035).
+    // The slot content changes entirely (agent→tree etc.), so its render override is cleaned up right away (same as assignAgent); the content replacement itself is reflected by the layout:updated emit (ADR-0035).
     get().clearRenderMode(slotId)
     return invoke<void>('set_slot_content', { viewId, slotId, content })
   },
   setUsageSlot: (viewId, slotId, shows) => {
-    // 사용량이 아니던 슬롯이면 여기서 콘텐츠가 바뀐다 — 오버라이드 정리는 setSlotContent 와 같은 까닭.
+    // If the slot was not usage, the content changes here — the override cleanup is for the same reason as setSlotContent.
     get().clearRenderMode(slotId)
-    // 빠진 칸 = null(셸의 `None` — 그 칸은 지금 값).
+    // Missing field = null (the shell's `None` — that field keeps its current value).
     return invoke<void>('set_usage_slot', {
       viewId,
       slotId,
@@ -275,9 +229,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
     })
   },
   moveSlotToWindow: (viewId, slotId, toWindow) => {
-    // slot 이 원본 창에서 사라지므로(MOVE) 그 slot 의 렌더 오버라이드 엔트리도 즉시 정리(누수 방지 —
-    // 프론트 전용 상태라 emit 루프 밖). 실제 슬롯 제거·대상 창 탭 삽입은 백엔드 move_slot_to_window 가
-    // 하고 emit(양 창 window:tabs-updated + 원본 layout:updated)으로 반영된다.
+    // The slot leaves the source window (MOVE), so its render override entry is cleaned up right away (leak prevention). Slot removal and the target tab insertion arrive by emit (window:tabs-updated of both windows + layout:updated of the source).
     get().clearRenderMode(slotId)
     return invoke<SlotMove>('move_slot_to_window', {
       viewId,
@@ -286,14 +238,12 @@ export const useViewStore = create<ViewState>((set, get) => ({
     })
   },
 
-  // ★렌더 모드 오버라이드 = 프론트 전용 예외★: invoke 안 부르고 프론트 상태만 set(override 라 백엔드
-  // 권위 레이아웃과 무관 — 백엔드 wire LayoutNode 는 렌더 모드 개념을 모른다).
+  // ★Render mode override = frontend-only exception★: no invoke, only frontend state (the backend wire LayoutNode does not know render modes).
   setRenderMode: (nodeId, mode) => {
-    // ★타입 밖 진입 가드(FIX-4)★: 무효 mode 가 오버라이드로 새면 LayoutLeaf switch 가 그걸
-    // 조용히 terminal 로 떨어뜨려(default) 의도와 다른 렌더가 된다 — 쓰기 전에 걸러 경고만 남긴다.
-    // 레지스트리 진입점(`slot.renderMode.set`)은 여기 닿기 전에 throw 하므로 이건 그 뒤의 그물이다.
+    // ★Out-of-type entry guard (FIX-4)★: an invalid mode leaked into the override would silently drop to terminal (default) in the LayoutLeaf switch, against the intent — filter before writing, leave only a warning.
+    // The registry entry point (`slot.renderMode.set`) throws before reaching here; this is the net behind it.
     if (!isRenderMode(mode)) {
-      console.warn(`[viewStore] setRenderMode: 무효 mode 무시 — ${JSON.stringify(mode)}`)
+      console.warn(`[viewStore] setRenderMode: ignoring an invalid mode — ${JSON.stringify(mode)}`)
       return
     }
     set(state => ({ renderModeOverride: { ...state.renderModeOverride, [nodeId]: mode } }))
@@ -301,12 +251,11 @@ export const useViewStore = create<ViewState>((set, get) => ({
   clearRenderMode: nodeId =>
     set(state => {
       const next = { ...state.renderModeOverride }
-      delete next[nodeId] // 렌더러가 ?? defaultRenderMode 로 caps 유도 기본으로 복귀.
+      delete next[nodeId] // the renderer goes back to the caps-derived default via ?? defaultRenderMode.
       return { renderModeOverride: next }
     }),
 
-  // ★별칭은 set/clearRenderMode 위 래퍼로만 둔다★ — 자기 상태를 만들면 renderModeOverride 가 렌더 모드의
-  // 유일 출처가 아니게 된다(LayoutLeaf 가 읽는 곳이 둘로 갈린다).
+  // ★Aliases stay wrappers over set/clearRenderMode★ — their own state would split the places LayoutLeaf reads (renderModeOverride must stay the only source).
   enableDomMode: nodeId => get().setRenderMode(nodeId, 'dom'),
   disableDomMode: nodeId => get().clearRenderMode(nodeId),
   toggleDomMode: nodeId =>
@@ -315,10 +264,8 @@ export const useViewStore = create<ViewState>((set, get) => ({
       : get().setRenderMode(nodeId, 'dom'),
 
   applyLayoutUpdated: snap => {
-    // 그 view_id 캐시 항목의 version 보다 클 때만 갱신(전역 단조라 같은 view 내 단조 비교가 성립).
-    // ★다른 view 항목과는 version 을 비교하지 않는다★ — 캐시가 독립 항목이라 충돌이 없고, "view_id 가
-    // 다르면 무조건 채택" 같은 분기가 필요 없다(그 분기가 F1+F4 의 뿌리였다). 첫 수신은 캐시에 항목이
-    // 없어 자동 채택(version === undefined 비교).
+    // Update only when larger than that view_id entry's version (globally monotonic, so within-view comparison holds); first receipt has no entry (version === undefined) and is adopted.
+    // ★Versions are not compared with other view entries★ — entries are independent; an "always adopt when the view_id differs" branch was the root of F1+F4.
     const prev = get().layouts[snap.view_id]
     if (prev && snap.version <= prev.version) return
     set(state => ({
@@ -339,9 +286,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
   },
 
   applyWindowTabsUpdated: payload => {
-    // 그 창의 탭 목록·active 를 미러. ★version stale 방어(G10)★: 같은 창의 낮은/같은 전역 version emit 은
-    // 폐기한다(전역 단조라 창 내 비교가 성립). 첫 수신(prev 없음)은 자동 채택. 다른 창끼리는 version 을
-    // 비교하지 않는다(창별 독립 엔트리 — layout 캐시와 동일 규율).
+    // Mirrors that window's tab list and active. ★version stale defence (G10)★: a lower/equal global version for the same window is discarded; the first receipt is adopted. Versions are not compared between windows (independent entries, same as the layout cache).
     const prev = get().windows[payload.label]
     if (prev && payload.version <= prev.version) return
     set(state => ({
@@ -363,22 +308,18 @@ export function selectView(state: ViewState, viewId: string | null): CachedView 
   return viewId ? (state.layouts[viewId] ?? null) : null
 }
 
-// ── 이 웹뷰가 어느 창인지 판정(§3-3/§3-4, G7) ────────────────────────────────────────────────
+// ── deciding which window this webview is (§3-3/§3-4, G7) ────────────────────────────────────────────────
 /**
- * 이 웹뷰 창의 label 을 URL 해시로 판정한다. 팝업 라우트(`#/popup?window=<label>`)면 그 label,
- * 그 외 hash 면 `"main"`.
+ * Decides this webview window's label from the URL hash: for the popup route (`#/popup?window=<label>`) that label, for any other hash `"main"`.
  *
- * ★왜 URL 인가★: 팝업 출력 Channel 은 getCurrentWindow().label() 로 구독하지만(agent.rs), 프론트가
- * 자기 활성 탭을 알려면 창 label → windows[label].active 경로가 필요하다. label 은 URL(`?window=`)이
- * SSOT 다(§3-3). ★단일 출처★: WindowLayout·useCurrentViewId·SlotContextMenu 가 같은 이 함수를 써
- * "이 창이 어느 창인지"를 한 곳으로 모은다.
+ * ★Why the URL★: the popup output Channel subscribes with getCurrentWindow().label() (agent.rs), but the frontend needs its path window label → windows[label].active to know its own active tab; `?window=` is the SSOT (§3-3).
+ * ★Single source★: WindowLayout, useCurrentViewId and SlotContextMenu use this same function.
  */
 export function readWindowLabelFromHash(): string {
   const hash = window.location.hash
   const qIndex = hash.indexOf('?')
   if (qIndex < 0) return MAIN_WINDOW_LABEL
-  // ★라우트 스코핑★: `?window=` 는 팝업 라우트에서만 신뢰한다. 그 외 hash(메인 `#/?window=x` 같은
-  // 도달불가 상태 포함)는 main 폴백.
+  // ★Route scoping★: `?window=` is trusted only on the popup route; any other hash (even the unreachable main `#/?window=x`) falls back to main.
   const path = hash.slice(0, qIndex)
   if (path !== '#/popup') return MAIN_WINDOW_LABEL
   const params = new URLSearchParams(hash.slice(qIndex + 1))
@@ -386,48 +327,39 @@ export function readWindowLabelFromHash(): string {
 }
 
 /**
- * ★이 웹뷰 창의 현재 active 탭 view id(§3-4, G7).★ 창별 상태에서 파생한다:
- *   - main = windows["main"].active
- *   - 팝업 = ?window=<label> 의 windows[label].active
- * 못 구하면 null(그 창의 탭 상태가 아직 안 도착 — 부팅 직후 pull 전).
- *
- * 사람 클릭(SlotContextMenu)·LLM command 가 같은 이 판정을 공유해 "자기 창 active 탭"으로 동작한다 —
- * 팝업 안 호출이 엉뚱한 main view 를 건드리지 않는다.
+ * ★The current active tab view id of this webview window (§3-4, G7).★ Derived from the per-window state: main = windows["main"].active, popup = windows[label].active of ?window=<label>.
+ * null when it cannot be found (that window's tab state has not arrived yet — right after boot, before the pull).
+ * Human clicks (SlotContextMenu) and LLM commands share this decision and act on "the active tab of their own window" — a call inside a popup does not touch an unrelated main view.
  */
 export function useCurrentViewId(): string | null {
   const label = readWindowLabelFromHash()
   return useViewStore(s => s.windows[label]?.active ?? null)
 }
 
-/** 훅 밖(이벤트 핸들러)에서 현재 창 active 탭 조회. useCurrentViewId 의 non-hook 판. */
+/** Queries the current window's active tab outside hooks (event handlers). The non-hook version of useCurrentViewId. */
 export function currentViewId(): string | null {
   const label = readWindowLabelFromHash()
   return useViewStore.getState().windows[label]?.active ?? null
 }
 
-// ── emit 구독 등록(eventBus 에서 1회 호출, HMR/중복 가드는 eventBus 가 dispose 로 관리) ──────────
-// 반환 = `{ dispose, ready }`(동기). 호출자는 dispose 를 await 없이 *즉시* 손에 쥐고(누수 0 — 아래),
-// ready 를 await 한 뒤에야 init pull 을 돌린다(F-listen). listen() 은 async 라 등록이 끝나기 전 도착한
-// emit 은 핸들러가 없어 누락된다 → 등록 완료를 ready 로 노출해 호출자가 그 뒤에 pull 을 부른다.
+// ── emit subscription registration (called once from eventBus; the HMR/duplicate guard is managed by eventBus with dispose) ──────────
+// Returns `{ dispose, ready }` synchronously: the caller holds dispose *immediately* without await, and runs the init pull only after awaiting ready (F-listen).
+// listen() is async, so an emit arriving before registration finishes has no handler and is lost → ready exposes registration completion so the pull runs after it.
 //
-// ★왜 동기 dispose 인가(dead-branch 누수 방지)★: 등록 await 후 disposer 반환 금지 — 호출자(eventBus)가
-// 그 await 가 pending 인 동안 정리(HMR dispose/재-init)를 돌리면 아직 disposer 를 *못 받아* unlisten 을 못 걸고
-// → 늦게 등록 완료된 리스너가 영구 누수된다. 표준 해법(RxJS Subscription/useSyncExternalStore: teardown 핸들
-// 동기 확보)대로, dispose 를 등록 await 없이 즉시 돌려주고 등록은 백그라운드로 시작한다.
-// 근거: docs/research/async-subscribe-cleanup-race-2026-06-28.md.
+// ★Why a synchronous dispose (prevents the dead-branch leak)★: if the disposer were returned after awaiting registration, a cleanup (HMR dispose/re-init) during that await would not have it yet and could not unlisten
+// → a late-completing listener leaks permanently. Like RxJS Subscription/useSyncExternalStore, the teardown handle is returned synchronously and registration starts in the background.
+// Rationale: docs/research/async-subscribe-cleanup-race-2026-06-28.md.
 //
-// ★탭 소유 모델(ADR-0057)★: 옛 view:list-updated(전역) 대신 window:tabs-updated(창별)를 듣는다.
-// layout:updated 는 그대로. 각 WindowLayout 도 자기 label 필터로 이걸 듣지만, 여기(전역 구독)는
-// main 창의 탭 상태를 store 에 채워 AppLayout/AgentTree 가 즉시 반응하게 한다(모든 label 을 store 에 미러).
+// ★Tab ownership model (ADR-0057)★: listens to window:tabs-updated (per window) instead of the old global view:list-updated; layout:updated stays. Each WindowLayout also listens with its own label filter, but this global
+// subscription fills the store with the main window's tab state so AppLayout/AgentTree react immediately (mirrors every label into the store).
 export function subscribeViewEvents(): { dispose: () => void; ready: Promise<void> } {
   let disposed = false
-  // 등록 완료된 unlisten 핸들들(아직 해제 전인 것만). dispose 는 여기 담긴 것만 호출 → idempotent 보장.
+  // Unlisten handles whose registration completed (only those not released yet). dispose calls only what is held here → idempotent guaranteed.
   const handles: UnlistenFn[] = []
 
   const store = useViewStore.getState()
 
-  // 갓 등록된 핸들을 받는 단일 경로. dispose 가 이미 불렸으면(disposed) 즉시 해제(늦게 도착한 핸들 누수
-  // 가드 — 이 경로가 ready-전 dispose 의 실제 동작 분기), 아니면 handles 에 모아 나중 dispose 가 해제한다.
+  // The single path receiving freshly registered handles. If dispose was already called, release immediately (the real branch of a dispose before ready — guards late handles from leaking); otherwise gather them for dispose.
   const adopt = (fn: UnlistenFn): void => {
     if (disposed) {
       fn()
@@ -436,9 +368,8 @@ export function subscribeViewEvents(): { dispose: () => void; ready: Promise<voi
     }
   }
 
-  // 등록을 백그라운드로 시작 — dispose 는 이 await 를 기다리지 않고 즉시 반환된다(누수 가드의 핵심).
-  // ready 는 두 등록 모두 settle 된 뒤 resolve(F-listen). 한쪽 실패 시: ready = Promise.all 이라 *즉시*
-  // reject 한다(hang 금지). dispose 가 먼저 와도 adopt 가 도착한 핸들을 즉시 해제하므로 ready 는 정상 종료.
+  // Registration starts in the background — dispose returns immediately without waiting (the core of the leak guard). ready resolves after both registrations settle (F-listen); if one fails, Promise.all rejects *immediately* (no hang).
+  //   Even if dispose comes first, adopt releases arriving handles immediately, so ready ends normally.
   const ready = Promise.all([
     listen<ViewSnapshot>('layout:updated', e => {
       store.applyLayoutUpdated(e.payload)
@@ -450,36 +381,28 @@ export function subscribeViewEvents(): { dispose: () => void; ready: Promise<voi
 
   const dispose = (): void => {
     disposed = true
-    // 이미 등록 완료돼 handles 에 담긴 핸들을 모두 해제하고 비운다 → 두 번 불려도(idempotent) 빈 배열이라
-    // noop. ready 전이라 아직 비어 있으면, 늦게 도착할 핸들은 위 adopt 의 disposed 분기가 즉시 해제한다.
+    // Releases and clears all held handles → idempotent (a second call finds an empty array); handles arriving late before ready are released by adopt's disposed branch.
     while (handles.length > 0) handles.pop()!()
   }
 
   return { dispose, ready }
 }
 
-// ── 부팅 init — main 창 탭 상태 + active 탭 레이아웃 pull(read-only) ──────────────────────────
+// ── boot init — main window tab state + active tab layout pull (read-only) ──────────────────────────
 /**
- * 백엔드의 main 창 탭 상태를 pull 해 채우고, active 탭 레이아웃을 캐시에 넣는다.
- * 호출 규약: eventBus 가 구독 등록 직후(ready 후) 1회 호출.
+ * Pulls the backend's main window tab state and puts the active tab layout in the cache. eventBus calls it once right after registering the subscriptions (after ready).
  *
- * 왜 필요한가: ViewManager 는 부팅 시 기본 View 를 자동 생성하지만 그 생성은 *부팅 전*이라 emit 으로
- * 안 닿는다(변경 핸들러는 변경 직후에만 emit). read-only list_tabs("main")/get_view 로 현재 탭+active
- * 레이아웃을 끌어와 화면을 즉시 그린다. ★유령 View 생성 없이★ — pull 만(version 안 올림, broadcast 없음).
- * 구독을 먼저 걸어둔 뒤 호출되므로 init 도중 들어온 emit 이 더 최신이면 캐시/창 version 가드가 pull 을
- * 걸러낸다(옛 pull 이 새 emit 을 덮지 않음).
+ * Why: ViewManager creates the default View at boot *before* anything listens, so it never reaches us by emit. read-only list_tabs("main")/get_view pull current tabs + active layout so the screen draws at once.
+ * ★Without creating a ghost View★ — pull only (no version bump, no broadcast). Called after the subscriptions are set up, so a newer emit that came during init makes the cache/window version guard filter out the (older) pull.
  */
 export async function initMainWindowFromBackend(): Promise<void> {
-  // ADR-0102: 두 부팅 pull 을 유계 재시도로 감싼다 — main 창은 이벤트 복구 경로가 없어(window:tabs-updated 는
-  //   탭 변형 시에만 발화) 이 read-only pull 이 조기 transient 로 한 번 실패하면 화면이 채워지지 않는다.
-  //   재시도 소진 시엔 throw 로 최종 실패를 호출자(eventBus)에게 전파해 console.error 로 표면화한다(조용히
-  //   삼키지 않음).
+  // ADR-0102: both boot pulls use bounded retries — the main window has no event recovery path (window:tabs-updated fires only on tab mutations), so a single transient failure would leave the screen never filled.
+  //   When retries are exhausted it throws to the caller (eventBus), which surfaces it with console.error (not swallowed).
   const payload = await retryAsync(() =>
     invoke<WindowTabsPayload>('list_tabs', { window: MAIN_WINDOW_LABEL }),
   )
   useViewStore.getState().applyWindowTabsUpdated(payload)
-  // active 탭 레이아웃도 pull — 부팅 즉시 캔버스가 그려지게. (keep-alive 라 나머지 탭은 WindowLayout
-  // 이 마운트 시 각자 get_view 로 채운다. main 부팅 렌더엔 active 만 있으면 충분.)
+  // The active tab layout is pulled too so the canvas draws at boot (other tabs are filled by WindowLayout with get_view on mount — keep-alive).
   const snap = await retryAsync(() =>
     invoke<ViewSnapshot>('get_view', { viewId: payload.active }),
   )

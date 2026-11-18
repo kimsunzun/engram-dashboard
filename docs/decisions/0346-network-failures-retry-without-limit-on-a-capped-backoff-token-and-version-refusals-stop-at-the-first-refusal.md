@@ -1,7 +1,7 @@
 # ADR-0346: Network failures retry without limit on a capped backoff; token and version refusals stop at the first refusal
 
-- 상태: 확정 (2026-11-05, 근거: 사용자 결정 2026-11-05 「그냥 계속 재시도하는게 구현적으로 편한거지?」 · 「토큰 거절을 재시도하는건 그냥 버그 수정때문에 땜빵채운다는거잖아」 · 「ㅇㅇ 쭉 진행해」 + 조사 `docs/research/disconnect-banner-dismiss-reconnect-2026-11-05.md` (medium, codex FIX applied) + daemon code read)
-- 관련: Amends ADR-0310 (결정 12 토큰 불일치 재시도와 결정 20 재연결 횟수 주입) · Amends ADR-0345 (결정 4 재시도 3회로 내림) · Amends ADR-0180 (결정 4 재연결 횟수 3회) · ADR-0287 (band stays closable) · ADR-0135 (daemon.json carries port and token) · `crates/engram-dashboard-transport/src/policy.rs` (`max_attempts`) · `crates/engram-dashboard-daemon/src/lib.rs` (`generate_token`, `bind("127.0.0.1:0")`) · `src-tauri/src/daemon_client/link/route.rs` (`refusal_message`) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` D14 · D20 · §6-2 U3–U5 · step-log S21
+- 상태: 확정 (2026-11-05, basis: user decision 2026-11-05 「그냥 계속 재시도하는게 구현적으로 편한거지?」 · 「토큰 거절을 재시도하는건 그냥 버그 수정때문에 땜빵채운다는거잖아」 · 「ㅇㅇ 쭉 진행해」 + survey `docs/research/disconnect-banner-dismiss-reconnect-2026-11-05.md` (medium, codex FIX applied) + daemon code read)
+- 관련: Amends ADR-0310 (decision 12: retry on token mismatch, and decision 20: injecting the reconnect count) · Amends ADR-0345 (decision 4: retries lowered to 3) · Amends ADR-0180 (decision 4: reconnect count 3) · ADR-0287 (band stays closable) · ADR-0135 (daemon.json carries port and token) · `crates/engram-dashboard-transport/src/policy.rs` (`max_attempts`) · `crates/engram-dashboard-daemon/src/lib.rs` (`generate_token`, `bind("127.0.0.1:0")`) · `src-tauri/src/daemon_client/link/route.rs` (`refusal_message`) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` D14 · D20 · §6-2 U3–U5 · step-log S21
 
 ## 맥락
 
@@ -22,9 +22,9 @@ That exposed the token case. ADR-0310 decision 12 made a token mismatch `Retryab
 
 ## 거부한 대안
 
-- **Bounded retries plus 「다시 연결」 in the tray menu as well** (VS Code / JupyterLab shape — bounded retries with a persistent menu action) — keeps a give-up state and adds a second surface; the user chose unbounded retries. 강도: 약함 — 사용자 직접 기각.
-- **Retry a token refusal once after re-reading `daemon.json`** — a workaround for a race; the user rejected it, and the daemon code shows the race yields a connection failure, not a refusal. 강도: 코드.
-- **Keep the token refusal `Retryable` on the budget (ADR-0310 decision 12 as written)** — with unlimited retries a wrong token loops forever; same race argument as above. 강도: 코드.
+- **Bounded retries plus 「다시 연결」 in the tray menu as well** (VS Code / JupyterLab shape — bounded retries with a persistent menu action) — keeps a give-up state and adds a second surface; the user chose unbounded retries. Strength: weak — rejected directly by the user.
+- **Retry a token refusal once after re-reading `daemon.json`** — a workaround for a race; the user rejected it, and the daemon code shows the race yields a connection failure, not a refusal. Strength: code.
+- **Keep the token refusal `Retryable` on the budget (ADR-0310 decision 12 as written)** — with unlimited retries a wrong token loops forever; same race argument as above. Strength: code.
 
 ## 근거
 

@@ -1,7 +1,5 @@
-//! 수동 활성화(activate_profile) 통합테스트 — ADR-0082(fresh-fallback 폐지, 이어받기 전용).
-//!
-//! 실 claude 를 CI/단위에서 못 띄우므로 cmd.exe 배치 프로필로 모사한다(격리). Windows 전용이라
-//! #[cfg(windows)]. 단일 spawn·전역 경합 없음 → default.
+//! Integration tests for manual activation (activate_profile) — ADR-0082 (fresh-fallback removed, resume only). The real claude cannot
+//!   launch in CI, so a cmd.exe batch profile simulates it; Windows only (`#[cfg(windows)]`). Single spawn, no global races.
 
 #![cfg(windows)]
 
@@ -73,7 +71,6 @@ fn make_manager_with_control(
     (manager, sink, profiles)
 }
 
-/// 디스크에 무엇이 남았는지를 보는 항목용 — 명부와 같은 저장소를 함께 돌려준다.
 fn make_manager_with_store(
     tag: &str,
     control: Arc<dyn ControlChannel>,
@@ -100,14 +97,12 @@ fn make_manager_with_store(
     (manager, sink, profiles, store)
 }
 
-/// 반환: (프로필, batch 경로, count 경로).
+/// Returns: (profile, batch path, count path).
 ///
-/// ★run-count 가 ADR-0082 의 증거인 이유★: 이 배치는 실행될 때마다 count 에 한 줄을 남기고
-///   조기종료(exit 1)한다. 옛 fresh-fallback 이 살아 있었다면 둘째 spawn(fresh 자리)이 일어나
-///   count 가 2 가 됐을 것이다 — "정확히 1" 이 fresh-fallback 부재의 결정적 증거다.
-///
-/// ★왜 인라인 복합 cmd 가 아니라 배치 파일인가★: portable-pty CommandBuilder 가 `>`·`&` 를 개별
-///   quoting 해 ConPTY 통과 중 깨뜨린다(옛 test 실측). 배치는 cmd 가 직접 파싱하니 결정적이다.
+/// ★The run-count is the ADR-0082 evidence★: each run appends one line to count and exits early (exit 1); a live old fresh-fallback would
+///   spawn a second time and make count 2 — "exactly 1" proves its absence.
+/// ★A batch file, not an inline compound cmd★: portable-pty `CommandBuilder` quotes `>`·`&` individually and breaks them through ConPTY
+///   (measured); cmd parses a batch directly, deterministically.
 fn always_early_exit_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     let uniq = Uuid::new_v4();
     let count = std::env::temp_dir().join(format!("engram-activate-count-{tag}-{uniq}.tmp"));
@@ -119,9 +114,9 @@ fn always_early_exit_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
          exit /b 1\r\n",
         c = count.display()
     );
-    std::fs::write(&batch, script).expect("배치 파일 write");
+    std::fs::write(&batch, script).expect("write the batch file");
 
-    // 마지막 인자 auto_restore=true — false 로 태어나면 다운그레이드가 no-op 이라 관측할 수 없다.
+    // Last argument auto_restore=true — if it is born false, the downgrade is a no-op and cannot be observed.
     let profile = AgentProfile::new(
         "activate-exit".into(),
         AgentCommand::Shell {
@@ -135,18 +130,17 @@ fn always_early_exit_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     (profile, batch, count)
 }
 
-/// 파일이 없으면 0(아직 한 번도 실행되지 않음).
+/// 0 if the file does not exist (not run even once yet).
 fn run_count(path: &PathBuf) -> usize {
     std::fs::read_to_string(path)
         .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
         .unwrap_or(0)
 }
 
-/// EARLY_EXIT_WINDOW(3s)를 넘겨 사는 배치 — ping 20회로 ≈19s 생존해 조기종료로 오판되지 않는다.
-/// 반환: (프로필, batch 경로, count 경로).
+/// A batch that outlives EARLY_EXIT_WINDOW (3 s) — 20 pings keep it alive ≈19 s so it is not misjudged as an early exit. Returns:
+///   (profile, batch path, count path).
 ///
-/// ★count 를 ping **앞**에 두는 이유★: start 직후 곧바로 1 이 되어야 테스트가 즉시 읽을 수 있다.
-///   kill+replace(같은 epoch 로 위장) 회귀가 있었다면 count 가 2 가 된다.
+/// ★count comes **before** ping★ so it is 1 right after start and readable at once; a kill+replace (same epoch) regression would make it 2.
 fn long_lived_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     let uniq = Uuid::new_v4();
     let count = std::env::temp_dir().join(format!("engram-activate-live-count-{tag}-{uniq}.tmp"));
@@ -157,7 +151,7 @@ fn long_lived_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
          ping -n 20 127.0.0.1 >nul\r\n",
         c = count.display()
     );
-    std::fs::write(&batch, script).expect("배치 write");
+    std::fs::write(&batch, script).expect("write the batch");
     let profile = AgentProfile::new(
         "activate-live".into(),
         AgentCommand::Shell {
@@ -171,14 +165,16 @@ fn long_lived_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     (profile, batch, count)
 }
 
-/// ★ADR-0082 회귀 가드 ①★ — resume 조기종료가 자동 fresh 로 대체되지 않는다.
+/// ★ADR-0082 regression guard ①★ — an early resume exit is not replaced by an automatic fresh.
 #[test]
 fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
     let (manager, _sink, profiles) = make_manager("resume-no-fallback");
 
     let (profile, batch, count) = always_early_exit_profile("resume-no-fallback");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles
+        .try_upsert(profile.clone())
+        .expect("store succeeds");
 
     let sid_before = profiles.get(id).and_then(|p| p.backend_session_id);
     let old_sids_before = profiles
@@ -190,10 +186,9 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
 
     assert!(
         result.is_err(),
-        "resume 조기종료는 fresh-fallback 없이 Err(Failed 시체)여야 함 — got Ok: {result:?}"
+        "an early resume exit must be Err (Failed corpse) without fresh-fallback — got Ok: {result:?}"
     );
 
-    // 수거는 비동기라 기다려만 준다 — 수거 자체는 여기서 단언 대상이 아니다.
     let _ = wait_until(Duration::from_secs(5), || {
         !manager.list_agents().iter().any(|a| a.id == id)
     });
@@ -201,30 +196,30 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
     assert_eq!(
         run_count(&count),
         1,
-        "resume 자리 1회만 실행돼야 함(fresh-fallback 이 없어야 함) — got {}",
+        "the resume place must run only once (there must be no fresh-fallback) — got {}",
         run_count(&count)
     );
 
     assert_eq!(
         profiles.get(id).and_then(|p| p.backend_session_id),
         sid_before,
-        "resume 실패로 새 sid 가 발급되면 안 됨(fresh-fallback 폐지)"
+        "a resume failure must not issue a new sid (fresh-fallback removed)"
     );
     assert_eq!(
         profiles.get(id).map(|p| p.old_session_ids.len()),
         Some(old_sids_before),
-        "resume 실패로 옛 sid 가 이력으로 밀리면 안 됨(Fresh 의 비우기 미호출)"
+        "a resume failure must not push the old sid into history (Fresh's clearing not called)"
     );
 
     assert!(
         profiles.get(id).is_some(),
-        "resume 실패 후 프로필(시체)이 삭제되면 안 됨 — KeepDisableAutoRestore 로 보존돼야 함"
+        "the profile (corpse) must not be deleted after a resume failure — it must be kept via KeepDisableAutoRestore"
     );
 
     assert_eq!(
         profiles.get(id).map(|p| p.auto_restore),
         Some(false),
-        "resume 실패 시체는 auto_restore=false 로 다운그레이드돼야 함(삭제 아님)"
+        "a resume failure corpse must be downgraded to auto_restore=false (not deleted)"
     );
 
     let _ = manager.kill_agent(id);
@@ -233,18 +228,20 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★ADR-0082 회귀 가드 ②★ — 산 에이전트 재활성화가 그 에이전트를 파괴하지 않는다(a4aac1a).
+/// ★ADR-0082 regression guard ②★ — reactivating a live agent does not destroy that agent (a4aac1a).
 #[test]
 fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
     let (manager, _sink, profiles) = make_manager("reactivate-live");
 
     let (profile, batch, count) = long_lived_profile("reactivate-live");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles
+        .try_upsert(profile.clone())
+        .expect("store succeeds");
 
     let first = manager
         .activate_profile(&profile, SpawnMode::Fresh)
-        .expect("최초 활성화는 Ok(살아있는 세션)여야 함");
+        .expect("the first activation must be Ok (a live session)");
     let epoch_after_first = first.epoch;
 
     assert!(
@@ -259,57 +256,60 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
                     )
             })
         }),
-        "최초 활성화 세션이 살아있어야 함"
+        "the first activation's session must be alive"
     );
 
-    // 배치의 append 는 PTY 스폰 프로세스라 지연될 수 있어 1 에 도달할 때까지 기다린다.
+    // The batch's append is a PTY-spawned process and can be delayed, so wait until it reaches 1.
     assert!(
         wait_until(Duration::from_secs(3), || run_count(&count) == 1),
-        "최초 활성화로 배치가 1회 start 돼야 함 — got {}",
+        "the first activation must start the batch once — got {}",
         run_count(&count)
     );
 
-    // 반환된 AgentInfo.epoch 만 보면 레지스트리 맵 교체를 못 잡으므로 레지스트리 값도 따로 떠 둔다.
+    // Looking only at the returned AgentInfo.epoch cannot catch a registry map replacement, so the registry value is copied aside too.
     let reg_epoch_before = profiles.get(id).map(|p| p.epoch);
 
     let reactivated = manager
         .activate_profile(&profile, SpawnMode::Resume)
-        .expect("재활성화는 무해한 Ok(이미 실행 중 AgentInfo)여야 함 — 죽으면 Err/회귀");
+        .expect("reactivation must be a harmless Ok (AgentInfo of the one already running) — dying means Err/regression");
 
-    // 배치 실행(append)은 비동기라 '부재'는 창으로만 확인된다 — 2s 를 주고 count 가 안 오름을 본다.
-    //   결정적 축은 아래 epoch 불변이고, 이 count 는 보조 heuristic 이다.
+    // The batch run (append) is asynchronous, so 'absence' can only be checked by a window — give it 2s and see that count does not go up.
+    //   The decisive axis is the epoch invariance below; this count is an auxiliary heuristic.
     let respawned = wait_until(Duration::from_secs(2), || run_count(&count) >= 2);
     assert!(
         !respawned,
-        "재활성화가 재spawn 을 유발하면 안 됨 — count 가 2로 오름(회귀 신호)"
+        "reactivation must not cause a respawn — count went up to 2 (regression signal)"
     );
     assert_eq!(
         run_count(&count),
         1,
-        "재활성화 후 배치 실행은 정확히 1회여야 함(재spawn 없음)"
+        "after reactivation the batch must have run exactly once (no respawn)"
     );
 
-    assert_eq!(reactivated.id, id, "재활성화는 같은 에이전트를 가리켜야 함");
+    assert_eq!(
+        reactivated.id, id,
+        "reactivation must point at the same agent"
+    );
     assert_eq!(
         reactivated.epoch, epoch_after_first,
-        "산 세션 재활성화는 화신 표식을 갈지 않는다(맵 교체=fresh 없음, a4aac1a 회귀 신호)"
+        "reactivating a live session does not replace the incarnation marker (map replacement = no fresh, a4aac1a regression signal)"
     );
     assert!(
         !matches!(
             reactivated.status,
             AgentStatus::Failed { .. } | AgentStatus::Killed | AgentStatus::Exited { .. }
         ),
-        "재활성화 후 산 에이전트가 종점 상태면 파괴된 것 — 살아있어야 함: {:?}",
+        "if the live agent is in a terminal state after reactivation it was destroyed — it must be alive: {:?}",
         reactivated.status
     );
 
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         reg_epoch_before,
-        "산 세션 재활성화는 레지스트리 표식도 갈지 않는다(맵 교체=fresh 없음)"
+        "reactivating a live session does not replace the registry marker either (map replacement = no fresh)"
     );
 
-    // 300ms 는 비동기 reaper 가 뒤늦게 옛 세션을 수거하는 회귀를 잡기 위한 창이다.
+    // 300ms is a window to catch a regression where the asynchronous reaper reaps the old session late.
     std::thread::sleep(Duration::from_millis(300));
     let live = manager.list_agents();
     let entry = live.iter().find(|a| a.id == id);
@@ -319,13 +319,13 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
                 a.status,
                 AgentStatus::Failed { .. } | AgentStatus::Killed | AgentStatus::Exited { .. }
             )),
-        "재활성화 후 원본 세션이 kill 되거나 epoch 가 바뀌면 안 됨 — got {entry:?}"
+        "after reactivation the original session must not be killed nor its epoch changed — got {entry:?}"
     );
 
     assert_eq!(
         run_count(&count),
         1,
-        "재활성화는 산 에이전트를 재spawn 하면 안 됨(배치 start 는 여전히 1회여야 함) — got {}",
+        "reactivation must not respawn a live agent (the batch start must still be once) — got {}",
         run_count(&count)
     );
 
@@ -335,34 +335,36 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★ADR-0113 배선 가드★ — spawn 이 턴 관측 표에 자기 화신을 **등록**한다.
+/// ★ADR-0113 wiring guard★ — spawn **registers** its incarnation in the turn observation table.
 ///
-/// 이 등록이 그 화신의 첫 출력 신호보다 먼저라는 것이 표의 "표식이 다르면 버린다" 규칙을 안전하게 만든다
-/// (`turn::TurnObservations::register`). 배선이 빠지면 앞 화신의 항목이 남아 있는 동안 새 화신의 신호가
-/// 전부 버려지고, 그 에이전트는 미관측(=턴 아님)으로 답해 턴 중에 우편이 들어간다.
-/// ★셸을 쓰는 것이 판별력의 근거다★: 셸 백엔드는 턴 신호를 하나도 내지 않으므로(분류자 침묵), 여기 항목이
-/// 있다면 그건 오직 등록이 만든 것이다.
-/// ★안 재는 것(정직 범위)★: 등록이 **첫 신호보다 먼저**라는 순서 자체는 여기서 못 잰다 — 그걸 뒤집으려면
-/// 앞 화신의 `finish` 를 막아야 하는데 이 하네스엔 그 손잡이가 없다. 순서는 호출 지점(sessions 맵 insert
-/// 전)이 구조적으로 보장한다.
+/// Registering before the incarnation's first output signal makes the table's "drop if the marker differs" rule safe
+///   (`turn::TurnObservations::register`); missing, the previous entry would drop all of the new incarnation's signals and it would answer
+///   unobserved (= not in a turn),
+/// so mail goes in during a turn.
+/// ★A shell gives the discriminating power★: the shell backend emits no turn signal (silent classifier), so any entry here came from the
+///   registration.
+/// ★Not measured (honest)★: that registration comes **before the first signal** — reversing it needs the previous incarnation's `finish`
+///   blocked, and this harness has no handle; the ordering is structural (before the sessions map insert).
 #[test]
 fn spawn_registers_the_incarnation_in_the_turn_table() {
     let (manager, _sink, profiles) = make_manager("turn-register");
 
     let (profile, batch, count) = long_lived_profile("turn-register");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles
+        .try_upsert(profile.clone())
+        .expect("store succeeds");
 
     let info = manager
         .activate_profile(&profile, SpawnMode::Fresh)
-        .expect("활성화는 Ok");
+        .expect("activation is Ok");
     assert!(
         manager.turns().get(id, info.epoch).is_some(),
-        "spawn 이 이 화신의 자리를 표에 잡아야 한다"
+        "spawn must take this incarnation's place in the table"
     );
     assert!(
         !manager.turns().is_in_turn(id, info.epoch),
-        "등록만으로는 턴 중이 아니다(신호는 라이브 emit 에서만 온다)"
+        "registration alone is not in a turn (signals come only from live emit)"
     );
 
     manager.kill_agent(id).expect("kill_agent failed");
@@ -370,7 +372,7 @@ fn spawn_registers_the_incarnation_in_the_turn_table() {
         wait_until(Duration::from_secs(5), || {
             manager.turns().get(id, info.epoch).is_none()
         }),
-        "종료가 자기 항목을 거둬야(안 거두면 죽은 에이전트 앞 파킹이 안 풀린다)"
+        "termination must withdraw its own entry (if not withdrawn, parking addressed to the dead agent is not released)"
     );
 
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
@@ -378,30 +380,32 @@ fn spawn_registers_the_incarnation_in_the_turn_table() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★ADR-0084 회귀 가드★ — 시체를 같은 슬롯에서 재활성화하면 화신 표식이 달라진다.
+/// ★ADR-0084 regression guard★ — reactivating a corpse in the same slot changes the incarnation marker.
 ///
-/// 셸은 두 세션 축이 모두 false 라 `--resume` 플래그 조립까지는 보지 않는다 — 그건
-///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid` 몫이고,
-///   이 테스트가 겨냥하는 "재활성화 = 맵 교체 = 새 표식" 은 backend 무관하게 성립한다.
-///   ★재는 것은 **다름**뿐이다 — 커진다가 아니다★: 표식은 화신마다 뽑는 난수라 대소에 뜻이 없다
-///   (`ProfileRegistry::epoch_for_spawn`). 단언을 `assert!(new > old)` 로 조이면 절반의 확률로 붉어진다.
+/// A shell has both session axes false, so `--resume` assembly is not reached (that is
+///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid`); "reactivation = map replacement = new marker" holds
+///   for any backend.
+///   ★Measures only **difference**, not growth★: the marker is random per incarnation (`ProfileRegistry::epoch_for_spawn`); `assert!(new >
+///   old)` would be red half the time.
 #[test]
 fn reactivate_after_kill_bumps_epoch() {
     let (manager, _sink, profiles) = make_manager("reactivate-epoch-bump");
 
     let (profile, batch, count) = long_lived_profile("reactivate-epoch-bump");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles
+        .try_upsert(profile.clone())
+        .expect("store succeeds");
 
     let first = manager
         .activate_profile(&profile, SpawnMode::Fresh)
-        .expect("최초 활성화는 Ok(살아있는 세션)여야 함");
+        .expect("the first activation must be Ok (a live session)");
     let epoch_e = first.epoch;
     assert!(
         wait_until(Duration::from_secs(3), || {
             manager.list_agents().iter().any(|a| a.id == id)
         }),
-        "최초 활성화 세션이 살아있어야 함"
+        "the first activation's session must be alive"
     );
 
     manager.kill_agent(id).expect("kill_agent failed");
@@ -409,26 +413,26 @@ fn reactivate_after_kill_bumps_epoch() {
         wait_until(Duration::from_secs(5), || {
             !manager.list_agents().iter().any(|a| a.id == id)
         }),
-        "유저 kill 후 세션이 맵에서 수거돼야 함"
+        "after a user kill the session must be reaped from the map"
     );
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         Some(epoch_e),
-        "kill 만으로는 표식이 갈리지 않는다(재활성화 respawn 이 발급의 주체)"
+        "kill alone does not replace the marker (the reactivation respawn is the issuer)"
     );
 
     let reactivated = manager
         .activate_profile(&profile, SpawnMode::Resume)
-        .expect("재활성화가 resume 경로로 Ok(살아있는 세션)여야 함(셸은 조기종료 안 함)");
+        .expect("reactivation must be Ok (a live session) via the resume path (the shell does not exit early)");
 
     assert_ne!(
         reactivated.epoch, epoch_e,
-        "ADR-0084: 재활성화 세션의 화신 표식이 죽은 세션의 것과 달라야 함(맵 교체 = 새 화신)"
+        "ADR-0084: the reactivated session's incarnation marker must differ from the dead session's (map replacement = new incarnation)"
     );
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         Some(reactivated.epoch),
-        "재활성화 후 레지스트리 표식과 세션 표식이 일치해야 함(발급이 spawn_agent 읽기 전에 반영)"
+        "after reactivation the registry marker and the session marker must match (the issuing is reflected before spawn_agent reads it)"
     );
 
     let _ = manager.kill_agent(id);
@@ -437,11 +441,11 @@ fn reactivate_after_kill_bumps_epoch() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★ADR-0083 회귀 가드★ — 유저 kill 이 프로필을 지우면 재활성화가 "profile not found"(화면엔 "실패")로
-/// 깨진다. 옛 reaper 가 UserKill → DeleteProfile 로 backend_session_id 째 지워 실제로 그랬다.
+/// ★ADR-0083 regression guard★ — a user kill that deleted the profile would break reactivation with "profile not found" (the old reaper
+///   did exactly that via UserKill → DeleteProfile, taking the backend_session_id).
 ///
-/// 여기서 증명되는 건 **프로필 조회 경로가 온전하다**까지다 — 실제 `--resume <sid>` 조립은
-///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid` 가 실증한다.
+/// Proves only that **the profile lookup path is intact**; the `--resume <sid>` assembly is
+///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid`.
 #[test]
 fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let (manager, _sink, profiles) = make_manager("kill-reactivate");
@@ -449,34 +453,29 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let (profile, batch, count) = long_lived_profile("kill-reactivate");
     let id = profile.id;
 
-    // ★seeded 프로필을 spawn/activate/kill 전부에 넘긴다★ — 명부와 인자를 한 값으로 맞춰 이 항목이
-    //   재는 것이 손잡이 보존이 아니라 **이어받기 배선**임을 분명히 한다.
-    //   ★옛 사유(「안 그러면 심어둔 sid 가 덮여 유실된다」)는 낡았다★ — `upsert_preserving_hierarchy` 가
-    //   이제 `backend_session_id` 와 그 이력을 live 에서 보존한다(사용자 결정). 그 보존 자체의 회귀망은
-    //   `profile.rs` 의 `spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot`
-    //   이고 여기서 겸하지 않는다.
-    //   ★**그 보존이 claude 에서도 동작을 바꾼다 — 「claude 는 그대로다」로 읽지 말 것**★: 재활성화가
-    //   쓰는 sid 는 `ensure_position` 이 아니라 spawn 이 **명부에서** 읽어 오는데, 등록이
-    //   더 이상 그 칸을 스냅샷으로 덮지 않으므로 이제 **`SessionTracker` 가 관측한 드리프트 sid** 가
-    //   읽힌다(그 관측기는 `observe_session_id(id, None, ..)` 로 무조건 쓰고, `assigns_sid` 게이트
-    //   뒤에서만 붙으므로 실제 대상이 claude 다). 즉 낡은 스냅샷으로 재활성화해도 드리프트한 쪽을
-    //   이어받는다 — 의도한 개선이지만 **무변화가 아니다**. 이 항목은 명부와 인자가 같아 그 차이를
-    //   재지 않는다(그래서 여기 적어 둔다).
-    //   auto_restore=true 는 kill 수거의 다운그레이드를 관측하기 위함.
+    // ★Pass the seeded profile to spawn/activate/kill alike★ — registry and argument being one value shows this item measures the **resume
+    //   wiring**, not handle preservation (that net: `spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot` in
+    //   `profile.rs`).
+    //   ★That preservation changes claude's behavior too — not 「claude stays as it was」★: reactivation's sid is read by spawn **from the
+    //   registry** (not `ensure_position`), and registration no longer overwrites it with the snapshot, so **the drift sid observed by
+    //   `SessionTracker`**
+    //   (written unconditionally via `observe_session_id(id, None, ..)`, attached only behind the `assigns_sid` gate = claude) is what
+    //   resumes — an intended improvement, **not a no-change**. Here registry = argument, so that difference is not measured.
+    //   auto_restore=true observes the kill reaping's downgrade.
     let sid = Uuid::new_v4();
     let mut seeded = profile.clone();
     seeded.backend_session_id = Some(sid);
     seeded.auto_restore = true;
-    profiles.try_upsert(seeded.clone()).expect("저장 성공");
+    profiles.try_upsert(seeded.clone()).expect("store succeeds");
 
     manager
         .activate_profile(&seeded, SpawnMode::Fresh)
-        .expect("최초 활성화는 Ok(살아있는 세션)여야 함");
+        .expect("the first activation must be Ok (a live session)");
     assert!(
         wait_until(Duration::from_secs(3), || {
             manager.list_agents().iter().any(|a| a.id == id)
         }),
-        "최초 활성화 세션이 살아있어야 함"
+        "the first activation's session must be alive"
     );
 
     manager.kill_agent(id).expect("kill_agent failed");
@@ -484,38 +483,38 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
         wait_until(Duration::from_secs(5), || {
             !manager.list_agents().iter().any(|a| a.id == id)
         }),
-        "유저 kill 후 세션이 맵에서 수거돼야 함"
+        "after a user kill the session must be reaped from the map"
     );
 
     assert!(
         wait_until(Duration::from_secs(2), || {
             profiles.get(id).map(|p| !p.auto_restore).unwrap_or(false)
         }),
-        "유저 kill 시체는 프로필 유지 + auto_restore=false 여야 함(ADR-0083 — 삭제 아님)"
+        "a user kill corpse must keep the profile + auto_restore=false (ADR-0083 — not deleted)"
     );
     assert!(
         profiles.get(id).is_some(),
-        "유저 kill 후 프로필이 삭제됨 — 시체로 보존돼야 함(ADR-0083 회귀)"
+        "the profile was deleted after a user kill — it must be kept as a corpse (ADR-0083 regression)"
     );
     assert_eq!(
         profiles.get(id).and_then(|p| p.backend_session_id),
         Some(sid),
-        "유저 kill 로 backend_session_id 가 유실됨 — 재활성화 resume 불가(ADR-0083 회귀)"
+        "backend_session_id was lost by a user kill — reactivation cannot resume (ADR-0083 regression)"
     );
 
-    let reactivated = manager
-        .activate_profile(&seeded, SpawnMode::Resume)
-        .expect("재활성화가 profile not found 없이 resume 경로로 진입해 Ok 여야 함(ADR-0083)");
+    let reactivated = manager.activate_profile(&seeded, SpawnMode::Resume).expect(
+        "reactivation must enter the resume path without profile not found and be Ok (ADR-0083)",
+    );
     assert_eq!(
         reactivated.id, id,
-        "재활성화는 같은 에이전트(보존된 시체 프로필)를 가리켜야 함"
+        "reactivation must point at the same agent (the preserved corpse profile)"
     );
     assert!(
         !matches!(
             reactivated.status,
             AgentStatus::Failed { .. } | AgentStatus::Killed | AgentStatus::Exited { .. }
         ),
-        "재활성화된 세션이 종점 상태면 resume 진입 실패 — 살아있어야 함: {:?}",
+        "if the reactivated session is in a terminal state, entering resume failed — it must be alive: {:?}",
         reactivated.status
     );
 
@@ -525,34 +524,35 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let _ = std::fs::remove_file(&batch);
 }
 
-// ── 마지막 실패 기록(ADR-0172) ────────────────────────────────────────────────────
+// ── Last failure record (ADR-0172) ────────────────────────────────────────────────────
 
-/// 이어받기가 조기 종료로 실패하면 그 자리에서 종류가 붙는다 — 사전 판정 없이 관측만으로.
+/// If a resume fails with an early exit, the kind is attached right there — by observation alone, without a prior decision.
 ///
-/// ★shell 프로필이라 종류가 「이어받기 직후 조기 종료」다★: 문구를 알아보는 지식은 claude backend 에만
-///   있고(그 단위 테스트가 별도), shell 은 침묵하므로 맥락 기본값으로 떨어진다 — 그 기본값이 재시도
-///   가능이라는 것이 fail-open 의 실물이다.
+/// ★A shell profile yields 「early exit right after resume」★: the phrase-recognizing knowledge is only in the claude backend (separate unit
+///   test) and the shell is silent, so it falls to the context default — retryable, the concrete form of fail-open.
 #[test]
 fn resume_early_exit_records_a_typed_last_failure() {
     let (manager, _sink, profiles) = make_manager("record-early-exit");
 
     let (profile, batch, count) = always_early_exit_profile("record-early-exit");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles
+        .try_upsert(profile.clone())
+        .expect("store succeeds");
     assert_eq!(
         profiles.get(id).and_then(|p| p.last_failure),
         None,
-        "전제: 시도 전에는 기록이 없다(사전 판정을 하지 않는다)"
+        "premise: there is no record before the attempt (no prior decision is made)"
     );
 
     let result = manager.activate_profile(&profile, SpawnMode::Resume);
-    assert!(result.is_err(), "전제: 조기 종료는 Err 로 끝난다");
+    assert!(result.is_err(), "premise: an early exit ends in Err");
 
     let recorded = profiles.get(id).and_then(|p| p.last_failure);
     assert_eq!(
         recorded,
         Some(AgentFailureKind::EarlyExitAfterResume),
-        "실패한 자리에서 종류가 붙어야 한다 — got {recorded:?}"
+        "the kind must be attached at the place of failure — got {recorded:?}"
     );
 
     let _ = manager.kill_agent(id);
@@ -561,7 +561,7 @@ fn resume_early_exit_records_a_typed_last_failure() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// 프로세스를 아예 못 띄운 활성화도 기록한다(Fresh 갈래 — resume 만 덮으면 이쪽이 샌다).
+/// An activation that could not launch the process at all is recorded too (the Fresh branch — covering only resume would leak this side).
 #[test]
 fn an_unspawnable_profile_records_a_spawn_failure() {
     let (manager, _sink, profiles) = make_manager("record-spawn-fail");
@@ -569,7 +569,7 @@ fn an_unspawnable_profile_records_a_spawn_failure() {
     let profile = AgentProfile::new(
         "activate-nonexistent".into(),
         AgentCommand::Shell {
-            // 실재하지 않는 실행파일 — PTY open 이 실패해 spawn 이 Err 로 끝난다.
+            // A nonexistent executable — PTY open fails and spawn ends in Err.
             program: format!("engram-not-a-real-program-{}.exe", Uuid::new_v4()),
             args: vec![],
         },
@@ -578,72 +578,76 @@ fn an_unspawnable_profile_records_a_spawn_failure() {
         false,
     );
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles
+        .try_upsert(profile.clone())
+        .expect("store succeeds");
 
     let result = manager.activate_profile(&profile, SpawnMode::Fresh);
-    assert!(result.is_err(), "전제: 없는 실행파일은 Err 로 끝난다");
+    assert!(result.is_err(), "premise: a missing executable ends in Err");
     assert_eq!(
         profiles.get(id).and_then(|p| p.last_failure),
         Some(AgentFailureKind::SpawnFailed)
     );
 }
 
-/// ★이미 떠 있는 에이전트를 다시 복원해도 실패 도장이 찍히지 않는다★ — 그리고 이 경로는 **결정적**이다.
+/// ★Restoring an agent that is already up does not stamp a failure★ — and this path is **deterministic**.
 ///
-/// `restore_one` 은 `activate_profile` 의 "이미 실행 중" 선제 필터를 지나지 않으므로, 산 에이전트를 두고
-/// 복원을 돌리면 `spawn_agent` 의 이중-spawn 가드에 그대로 부딪힌다 — 스레드 인터리빙을 기다릴 필요 없이
-/// 그 갈래(`SpawnOutcome::Moot`)가 활성화 기록 경로로 들어온다. 옛 형태는 두 스레드를 경쟁시켜 승자·패자를
-/// 기대했는데, 선제 필터 뒤에서 디스케줄만 나면 둘 다 통과해 통과 조건이 흔들렸다(간헐 red) — 되살리지 말 것.
+/// `restore_one` skips `activate_profile`'s "already running" pre-filter, so a restore with a live agent runs straight into
+///   `spawn_agent`'s double-spawn guard (`SpawnOutcome::Moot`) and enters the activation record path with no thread interleaving. The old
+///   form raced two threads
+/// expecting a winner and a loser; a deschedule behind the pre-filter let both pass (intermittent red) — do not revive it.
 ///
-/// ★"두 번째 프로세스가 안 떴다" 를 **시간 창으로 재지 않는다**★: 파일 append 로 세면 부재 단언이
-/// "아직 안 썼다" 와 구분되지 않아, 대기를 얼마로 잡든 경합 아래선 헛통과할 수 있다(그래서 이 파일의 다른
-/// 픽스처가 쓰는 count 대기를 여기선 쓰지 않는다). 대신 **epoch** 을 본다: 두 번째 spawn 은 반드시
-/// `epoch_for_spawn` 을 지나 값을 올리므로, 값이 그대로면 아무것도 안 떴다는 증거가 즉시·확정적으로 선다.
+/// ★"The second process did not launch" is **not measured with a time window**★: file-append counting cannot tell absence from "not
+///   written yet", so any wait can pass falsely under contention. Instead the **epoch**: a second spawn always raises it via
+///   `epoch_for_spawn`, so an
+/// unchanged value is immediate, definitive evidence.
 #[test]
 fn restoring_over_a_live_agent_never_stamps_it_as_failed() {
     let (manager, _sink, profiles) = make_manager("restore-over-live");
 
     let (profile, batch, count) = long_lived_profile("restore-over-live");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles
+        .try_upsert(profile.clone())
+        .expect("store succeeds");
     manager
         .activate_profile(&profile, SpawnMode::Fresh)
-        .expect("최초 활성화는 성공한다");
+        .expect("the first activation succeeds");
     assert!(
         wait_until(Duration::from_secs(5), || {
             manager.list_agents().iter().any(|a| a.id == id)
         }),
-        "전제: 세션이 명부에 올라 살아 있다"
+        "premise: the session is in the registry and alive"
     );
     assert_eq!(
         profiles.get(id).and_then(|p| p.last_failure),
         None,
-        "전제: 성공한 활성화는 기록을 남기지 않는다"
+        "premise: a successful activation leaves no record"
     );
     let epoch_before = profiles.get(id).map(|p| p.epoch);
 
-    // spawn 이 auto_restore 를 true 로 올려 두므로 이 프로필은 복원 대상이다.
+    // spawn raises auto_restore to true, so this profile is a restore target.
     let reports = manager.restore_all();
     let handled = reports.iter().any(|r| r.agent_id == id);
     assert!(
         handled,
-        "전제: 복원이 이 프로필을 훑어야 한다 — got {reports:?}"
+        "premise: the restore must scan this profile — got {reports:?}"
     );
 
     assert_eq!(
         profiles.get(id).and_then(|p| p.last_failure),
         None,
-        "중복 요청은 그 항목의 실패가 아니다 — 산 에이전트에 도장이 찍히면 정상 종료 순간 화면에 뜬다"
+        "a duplicate request is not that item's failure — if the live agent gets stamped, it shows on the screen the moment it exits normally"
     );
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         epoch_before,
-        "epoch 이 올랐다 = 두 번째 화신이 떴다(할 일 없는 요청이 프로세스를 띄우면 안 된다)"
+        "epoch went up = a second incarnation launched (a request with nothing to do must not launch a process)"
     );
     assert_eq!(
         manager.list_agents().iter().filter(|a| a.id == id).count(),
         1,
-        "명부의 화신도 하나뿐이어야 한다"
+        "there must be only one incarnation in the registry too"
     );
 
     let _ = manager.kill_agent(id);
@@ -652,27 +656,27 @@ fn restoring_over_a_live_agent_never_stamps_it_as_failed() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★사용자가 끊은 것은 활성화 실패가 아니다★ — 조기종료 창 안에서 kill 이 와도 기록이 남지 않는다.
+/// ★What the user cut off is not an activation failure★ — a kill inside the early-exit window leaves no record.
 ///
-/// 기록되면 트리에 「이어받은 직후 종료됐습니다」가 남아, 방금 스스로 끈 항목이 고장 난 것처럼 보인다
-/// (그 표시는 다음 활성화가 성립할 때까지 안 지워진다). HEAD 에선 이 경로가 일시적 Err 만 냈다.
-///
-/// ★거짓 red 가 없는 모양★: 단언은 「기록이 없다」 하나이고, 그것은 두 인터리빙 **모두에서** 참이다 —
-/// kill 이 창 안에 들면 이 갈래가(기록 안 함), 창을 넘겨 들면 성립 갈래가(지움) 같은 결과를 만든다.
-/// 어느 쪽을 탔는지는 활성화 반환값으로 구분해 아래에서 보고만 한다.
+/// A record 「exited right after resuming」 would make an item the user just turned off look broken (not cleared until the next activation).
+///   On HEAD this path produced only a transient Err.
+/// ★No false red★: the single assertion 「there is no record」 holds in **both** interleavings — kill inside the window → this branch
+///   (records nothing); past it → the stand branch (clears). Which one ran is told by the activation return value, only reported below.
 #[test]
 fn a_kill_inside_the_resume_window_is_not_recorded_as_a_failure() {
     let (manager, _sink, profiles) = make_manager("kill-in-window");
 
     let (profile, batch, count) = long_lived_profile("kill-in-window");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles
+        .try_upsert(profile.clone())
+        .expect("store succeeds");
 
     let manager = Arc::new(manager);
     let activator = {
         let m = manager.clone();
         let p = profile.clone();
-        // Resume 모드라 조기종료 창(3s)만큼 폴링하며 블록된다 — 그 사이 본 스레드가 끊는다.
+        // In Resume mode it blocks polling for the early-exit window (3s) — meanwhile the main thread cuts it off.
         std::thread::spawn(move || m.activate_profile(&p, SpawnMode::Resume))
     };
 
@@ -680,19 +684,19 @@ fn a_kill_inside_the_resume_window_is_not_recorded_as_a_failure() {
         wait_until(Duration::from_secs(5), || {
             manager.list_agents().iter().any(|a| a.id == id)
         }),
-        "전제: 세션이 명부에 올라야 끊을 수 있다"
+        "premise: the session must be in the registry to be cut off"
     );
     let _ = manager.kill_agent(id);
 
-    let outcome = activator.join().expect("활성화 스레드");
+    let outcome = activator.join().expect("activation thread");
     assert_eq!(
         profiles.get(id).and_then(|p| p.last_failure),
         None,
-        "사용자 종료는 활성화 실패가 아니다 — 도장이 남으면 안 된다(결말: {})",
+        "a user termination is not an activation failure — no stamp may remain (outcome: {})",
         if outcome.is_err() {
-            "창 안에서 관측됨"
+            "observed inside the window"
         } else {
-            "창을 넘겨 성립으로 판정됨"
+            "decided as standing past the window"
         }
     );
 
@@ -701,10 +705,10 @@ fn a_kill_inside_the_resume_window_is_not_recorded_as_a_failure() {
     let _ = std::fs::remove_file(&batch);
 }
 
-// ── 세션 id 발급 축(ADR-0185) ─────────────────────────────────────────────────
+// ── Session id issuing axis (ADR-0185) ─────────────────────────────────────────────────
 
-/// provision 을 떨어뜨려 spawn 을 **통로 생성 전에** 끊는 시험대 장치. 그 중단점이 sid 발급보다 뒤라,
-/// 이 장치를 낀 spawn 은 프로세스를 하나도 안 띄우고도 발급 지점을 실제로 지나간다.
+/// A test-bench device that makes provision fail, cutting spawn off **before the link is created** — after the sid issuing, so the spawn
+///   passes the issuing point without launching a process.
 struct FailingControl;
 
 impl ControlChannel for FailingControl {
@@ -715,37 +719,30 @@ impl ControlChannel for FailingControl {
         _needs: engram_dashboard_agent::types::ControlChannelNeeds,
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         Err(ProvisionError(
-            "시험대: 통로 생성 전에 spawn 을 끊는다".into(),
+            "test bench: cut spawn off before the link is created".into(),
         ))
     }
 
     fn revoke(&self, _id: AgentId, _epoch: u32) {}
 }
 
-/// ★이 항목이 **실제로** 잰다고 주장하는 것 — 두 가지다★:
-///   ① Fresh 스폰은 어느 백엔드든 세션 id 를 **영속하지 않는다**(ADR-0226) — 명부에도 디스크에도 없다.
-///      codex 행이 재는 것도 이것뿐이다(등록됐고 비어 있다).
-///   ② 우리가 발급하는 백엔드(claude)의 옛 손잡이는 지워지지 않고 **이력으로** 간다.
+/// ★What this item **really** measures — two things★:
+///   ① A Fresh spawn **does not persist** the session id for any backend (ADR-0226) — neither in the registry nor on disk (all the codex
+///   row measures: registered and empty).
+///   ② The old handle of a backend we issue for (claude) is not deleted but goes **into history**.
 ///
-/// ★「자기 id 를 발급하는 백엔드(codex)에 우리 uuid 를 건네지 않는다」(ADR-0185)는 여기서
-///   못 잰다★ — 스폰 때는 어느 백엔드도 영속하지 않으므로, 발급 판정이 이어받기 축으로 갈려도 codex 행은
-///   그대로 초록이다. 그 가드는 `manager` 의 `only_a_backend_that_assigns_ids_gets_one_handed_over`(판정)와
-///   `the_first_submission_latch_is_wired_through_the_spawn_path`(spawn 이 그 판정을 쓴다)다.
-/// ★「우리가 뽑아 건넸다」는 대조군도 여기 없다★ — 뽑은 값은 첫 제출 전에는 영속되지 않아 명부로는 안
-///   보인다. 그 짝은 `fresh_claude_spec_carries_the_minted_session_id`(argv 에 실렸다)와
-///   `d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission`(첫 제출 뒤에야 영속)이다.
-/// ★② 가 이 항목의 공회전을 잡는다★ — spawn 이 비우기 **이전**에 죽으면 ① 은 그대로 초록이지만, 옛
-///   값이 이력으로 가지 않는다.
+/// ★「ADR-0185」 cannot be measured here★ — no backend persists at spawn, so a decision split along the resume axis would leave the codex
+///   row green. Those guards: `manager`'s `only_a_backend_that_assigns_ids_gets_one_handed_over` (the decision) and
+///   `the_first_submission_latch_is_wired_through_the_spawn_path` (spawn uses it).
+/// ★No control group for 「we drew it and handed it over」★ — the drawn value is not persisted before the first submission; counterparts:
+///   `fresh_claude_spec_carries_the_minted_session_id` (in argv) and `d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission`.
+/// ★② catches this item idling★ — if spawn dies **before** the clearing, ① stays green but the old value does not enter history.
 ///
-/// ★spawn 은 **프로세스를 하나도 안 띄운 채** 실패하도록 몰아 둔다 — 그래도 비우기 지점은 지난다★:
-///   비우기는 spawn 흐름에서 통로 생성보다 **앞**이라, 뒤에서 끊어도 이 단언은 그 지점을 그대로 잰다.
-/// ★두 행이 서로 다른 자리에서 멈춘다★:
-///   - 제어 채널을 **쓰는** 백엔드는 아래 [`FailingControl`] 이 provision 에서 fail-closed 로 끊는다.
-///   - 제어 채널을 **안 쓰는** 백엔드는 provision 을 아예 안 타므로, 존재하지 않는 cwd 가 통로 생성을
-///     떨어뜨린다.
-/// ★cwd 하나로 두 행을 다 막을 수 없다(실측 2026-09-14 — 되살리지 마라)★: 존재하지 않는 cwd 를 줘도
-///   ConPTY 통로는 그대로 떠서 실 `cmd.exe /c claude` 가 기동했다. 그래서 그 행에는 제어 채널 쪽 장치가
-///   따로 필요하다.
+/// ★spawn is driven to fail **without launching a process** yet still passes the clearing point★ (clearing comes **before** link creation).
+/// ★The rows stop at different places★: a backend that **uses** the control channel is cut at provision fail-closed by [`FailingControl`];
+///   one that does **not** never goes through provision, so a nonexistent cwd makes link creation fail.
+/// ★One cwd cannot block both rows (measured 2026-09-14 — do not revive)★: with a nonexistent cwd the ConPTY link launched anyway and the
+///   real `cmd.exe /c claude` started.
 // ADR-0226
 #[test]
 fn a_fresh_spawn_persists_no_session_id_and_moves_the_old_handle_to_history() {
@@ -781,48 +778,48 @@ fn a_fresh_spawn_persists_no_session_id_and_moves_the_old_handle_to_history() {
             if let Some(info) = outcome.into_started() {
                 let _ = manager.kill_agent(info.id);
                 panic!(
-                    "{:?}: 통로가 실제로 떴다 — 격리 전제(존재하지 않는 cwd 로 spawn 실패)가 깨졌다",
+                    "{:?}: the link actually launched — the isolation premise (spawn fails with a nonexistent cwd) is broken",
                     p.command
                 );
             }
         }
     }
 
-    // ★먼저 명부에 실제로 올랐는지 본다★ — 아래 `None` 은 「영속 안 됨」과 「프로필이 아예 없음」을
-    //   구별하지 못해서, 이 줄이 없으면 등록조차 안 된 경우에도 초록이 된다.
+    // ★First check that it actually got into the registry★ — `None` below cannot tell 「not persisted」 from 「no profile at all」; without
+    //   this line it is green even when never registered.
     assert!(
         profiles.get(codex.id).is_some() && profiles.get(claude.id).is_some(),
-        "프로필이 명부에 없다 — 아래 단언이 영속 여부가 아니라 부재를 재게 된다"
+        "the profile is not in the registry — the assertion below would measure absence rather than persistence"
     );
     assert_eq!(
         profiles.get(codex.id).and_then(|p| p.backend_session_id),
         None,
-        "codex 의 Fresh 스폰이 세션 id 를 명부에 적었다 — 영속은 첫 제출의 몫이다(ADR-0226). 이 시험대는 \
-         spawn 을 통로 생성 전에 끊으므로 수령 경로가 받아 적을 수도 없다 — 그렇다면 격리 전제가 먼저 깨진 것이다"
+        "codex's Fresh spawn wrote a session id into the registry — persisting is the first submission's job (ADR-0226). This test bench \
+         cuts spawn off before the link is created, so the receiving path cannot write it down either — if so, the isolation premise broke first"
     );
 
-    let got = profiles.get(claude.id).expect("claude 프로필");
+    let got = profiles.get(claude.id).expect("claude profile");
     assert_eq!(
         got.backend_session_id, None,
-        "Fresh 스폰이 세션 id 를 명부에 적었다 — 영속은 첫 제출의 몫이다(ADR-0226)"
+        "a Fresh spawn wrote a session id into the registry — persisting is the first submission's job (ADR-0226)"
     );
     assert!(
         got.old_session_ids.contains(&claude_old),
-        "옛 손잡이가 이력으로 가지 않았다 — spawn 이 비우기 지점 이전에 죽어 위 단언이 공회전한다"
+        "the old handle did not go into history — spawn died before the clearing point and the assertion above idles"
     );
     let on_disk = store
         .load()
         .into_iter()
         .find(|p| p.id == claude.id)
-        .expect("claude 프로필이 디스크에 있다");
+        .expect("the claude profile is on disk");
     assert_eq!(
         on_disk.backend_session_id, None,
-        "디스크에 세션 id 가 남았다 — 0턴 세션의 id 가 영속되면 다음 활성화가 그 id 로 이어받기에 실패한다"
+        "a session id remained on disk — if a 0-turn session's id is persisted, the next activation fails to resume with that id"
     );
 }
 
-/// ★발급 지점에 닿는다는 것을 영속 없이 잰다★ — 뽑은 값은 첫 제출 전에는 명부에 없으므로, 「우리가 뽑아
-/// 건넸다」는 argv 에서만 보인다. 순수 함수라 프로세스를 안 띄운다.
+/// ★Measures reaching the issuing point without persistence★ — the drawn value is not in the registry before the first submission, so 「we
+///   drew it and handed it over」 shows only in argv. A pure function; no process.
 // ADR-0226
 #[test]
 fn fresh_claude_spec_carries_the_minted_session_id() {
@@ -846,31 +843,30 @@ fn fresh_claude_spec_carries_the_minted_session_id() {
             .args
             .iter()
             .position(|a| a == "--session-id")
-            .unwrap_or_else(|| panic!("{command:?}: `--session-id` 가 없다: {:?}", spec.args));
+            .unwrap_or_else(|| panic!("{command:?}: no `--session-id`: {:?}", spec.args));
         assert_eq!(
             spec.args.get(at + 1),
             Some(&minted.to_string()),
-            "{command:?}: 뽑은 값이 실리지 않았다: {:?}",
+            "{command:?}: the drawn value was not put in: {:?}",
             spec.args
         );
         assert!(
             !spec.args.iter().any(|a| a == "--resume"),
-            "{command:?}: Fresh 인데 이어받기 플래그가 실렸다: {:?}",
+            "{command:?}: Fresh, yet a resume flag was put in: {:?}",
             spec.args
         );
     }
 }
 
-/// ★손잡이 읽기는 spawn 안에서 한 번이고 그 읽기가 권위다(ADR-0226)★ — 비어 있으면 저장 손잡이로
-/// 이어받는 백엔드는 **프로세스를 띄우기 전에** 거절한다.
+/// ★The handle is read once inside spawn and that read is authoritative (ADR-0226)★ — empty, a backend that resumes with the stored handle
+///   refuses **before launching the process**.
 ///
-/// 입구의 머리 판정을 안 지나는 `spawn_agent(Resume)` 를 직접 불러 「판정과 읽기 사이에 칸이 비었다」를
-/// 결정론으로 재현한다.
-/// ★거절 문구로 가른다★ — 이 시험대는 provision 에서도 끊으므로([`FailingControl`]), 거절이 사라지면 같은
-///   `Err` 라도 문구가 provision 실패로 바뀐다. 운영에서는 그 자리를 지나 claude 가 이어받기 플래그 없이
-///   떠 모르는 id 의 새 대화를 연다.
-/// ★shell 은 옛 길이다★ — 저장 손잡이로 이어받지 않으므로 손잡이 없이도 뜬다(ADR-0082 회귀 시험대가 그
-///   길에 기댄다).
+/// Calls `spawn_agent(Resume)` directly (it skips the entry's head decision) to reproduce 「the field became empty between the decision and
+///   the read」 deterministically.
+/// ★Told apart by the refusal phrase★ — this bench also cuts at provision ([`FailingControl`]), so without the refusal the same `Err`
+///   changes phrase to a provision failure; in operation claude would launch without a resume flag and open a new conversation with an
+///   unknown id.
+/// ★shell is the old way★ — it does not resume with the stored handle and launches without one (the ADR-0082 test bench relies on that).
 // ADR-0226
 #[test]
 fn a_resume_whose_handle_is_gone_is_refused_before_any_process() {
@@ -899,57 +895,57 @@ fn a_resume_whose_handle_is_gone_is_refused_before_any_process() {
             vec![],
             false,
         );
-        profiles.try_upsert(p.clone()).expect("저장 성공");
+        profiles.try_upsert(p.clone()).expect("store succeeds");
         let refusal = match manager.spawn_agent(&p, SpawnMode::Resume) {
             Ok(outcome) => {
                 if let Some(info) = outcome.into_started() {
                     let _ = manager.kill_agent(info.id);
                 }
-                panic!("{:?}: 손잡이 없는 Resume 이 떴다", p.command);
+                panic!("{:?}: a Resume without a handle launched", p.command);
             }
             Err(e) => e.to_string(),
         };
         assert!(
-            refusal.contains("이어받을 손잡이가 spawn 도중 사라졌다"),
-            "{:?}: 띄우기 전 거절이 아니다 — {refusal}",
+            refusal.contains("the resume handle vanished during spawn"),
+            "{:?}: not a refusal before launching — {refusal}",
             p.command
         );
         assert_eq!(
             profiles.get(p.id).and_then(|q| q.backend_session_id),
             None,
-            "{:?}: 거절이 손잡이를 만들어 냈다",
+            "{:?}: the refusal produced a handle",
             p.command
         );
     }
 
     let (shell, batch, count) = always_early_exit_profile("handle-gone-shell");
-    profiles.try_upsert(shell.clone()).expect("저장 성공");
+    profiles.try_upsert(shell.clone()).expect("store succeeds");
     let outcome = manager
         .spawn_agent(&shell, SpawnMode::Resume)
-        .expect("shell 은 손잡이 없이도 옛 길로 뜬다");
+        .expect("shell launches the old way even without a handle");
     assert!(
         outcome.into_started().is_some(),
-        "shell 의 Resume 이 새 화신을 안 만들었다"
+        "shell's Resume did not make a new incarnation"
     );
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
     let _ = std::fs::remove_file(&count);
     let _ = std::fs::remove_file(&batch);
 }
 
-// ── D1 런타임 통합 — 가짜 claude 를 PATH 로 띄운다(ADR-0226) ─────────────────────────
+// ── D1 runtime integration — launch a fake claude via PATH (ADR-0226) ─────────────────────────
 
-/// 가짜 `claude.cmd` 를 담은 폴더를 만든다. 반환: (그 폴더, 인자 기록 파일).
+/// Makes a folder holding a fake `claude.cmd`. Returns: (that folder, argument record file).
 ///
-/// 프로필 env 의 `PATH` 앞에 이 폴더를 붙이면 백엔드의 `cmd.exe /c claude …` 가 이것을 찾는다 — 백엔드는
-/// 띄우기 전에 절대 경로를 찾지 않고 이름만 넘기므로 자식의 `PATH` 로 풀린다(실 claude 를 안 띄운다).
-/// ★받은 인자를 한 줄씩 기록 파일에 남긴다★ — 가짜의 표준출력은 PTY 로 가서 시험이 못 읽는다.
-/// ★`--resume` 이면 실 claude 의 거절 문구를 찍고 exit 1, 아니면 입력을 읽으며 산다★ — 앞엣것의 문구·종료
-///   코드는 실측이다(`backend::claude` 의 그 문구 상수 doc).
-/// ★에이전트 cwd 는 이 폴더와 **다른** 곳이어야 한다★ — cmd 는 현재 폴더를 `PATH` 보다 먼저 찾으므로, 같으면
-///   `PATH` 가 먹었는지 가려진다.
+/// Putting it in front of `PATH` in the profile env makes the backend's `cmd.exe /c claude …` find it (the backend passes only the name,
+///   resolved through the child's `PATH`; real claude is not launched).
+/// ★Records each received argument line in the record file★ — the fake's stdout goes to the PTY and the test cannot read it.
+/// ★With `--resume` it prints the real claude's refusal phrase and exits 1, otherwise lives reading input★ (phrase · exit code: the phrase
+///   constant's doc in `backend::claude`).
+/// ★The agent cwd must **differ** from this folder★ — cmd looks in the current folder before `PATH`, which would hide whether `PATH` took
+///   effect.
 fn fake_claude_dir(tag: &str) -> (PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!("engram-fake-claude-{tag}-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("가짜 폴더");
+    std::fs::create_dir_all(&dir).expect("fake folder");
     let script = "@echo off\r\n\
          >>\"%~dp0args.log\" echo %*\r\n\
          echo %* | findstr /C:\"--resume\" >nul\r\n\
@@ -961,15 +957,15 @@ fn fake_claude_dir(tag: &str) -> (PathBuf, PathBuf) {
          set /p line=\r\n\
          if errorlevel 1 ping -n 2 127.0.0.1 >nul\r\n\
          goto loop\r\n";
-    std::fs::write(dir.join("claude.cmd"), script).expect("가짜 claude.cmd write");
+    std::fs::write(dir.join("claude.cmd"), script).expect("write the fake claude.cmd");
     let args_log = dir.join("args.log");
     (dir, args_log)
 }
 
-/// 가짜 claude 를 `PATH` 앞에 둔 claude 터미널 프로필 — cwd 는 가짜 폴더와 다른 새 폴더다.
+/// A claude terminal profile with the fake claude in front of `PATH` — the cwd is a new folder different from the fake folder.
 fn claude_on_fake_path(name: &str, fake_dir: &std::path::Path) -> (AgentProfile, PathBuf) {
     let cwd = std::env::temp_dir().join(format!("engram-fake-claude-cwd-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&cwd).expect("에이전트 cwd");
+    std::fs::create_dir_all(&cwd).expect("agent cwd");
     let path = format!(
         "{};{}",
         fake_dir.display(),
@@ -988,7 +984,7 @@ fn claude_on_fake_path(name: &str, fake_dir: &std::path::Path) -> (AgentProfile,
     (profile, cwd)
 }
 
-/// 가짜가 받은 인자 줄들(스폰 1회 = 1줄).
+/// The argument lines the fake received (1 spawn = 1 line).
 fn fake_spawns(args_log: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(args_log)
         .map(|s| {
@@ -1001,7 +997,7 @@ fn fake_spawns(args_log: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 인자 줄에서 `flag` 바로 뒤의 uuid.
+/// The uuid right after `flag` in an argument line.
 fn uuid_after(line: &str, flag: &str) -> Option<Uuid> {
     let mut words = line.split_whitespace();
     words.find(|w| *w == flag)?;
@@ -1016,15 +1012,16 @@ fn stored_on_disk(store: &FileProfileStore, id: AgentId) -> Option<Uuid> {
         .and_then(|p| p.backend_session_id)
 }
 
-/// ★D1 을 실 프로세스로 잰다 — 0턴 세션은 id 를 남기지 않고, 첫 제출이 그 id 를 영속한다(ADR-0226)★.
+/// ★Measures D1 with a real process — a 0-turn session leaves no id, and the first submission persists it (ADR-0226)★.
 ///
-/// 스폰 두 번을 차례로 태운다:
-///   1. 대화 없는 옛 id(쓰레기)로 이어받기 — 가짜가 `--resume` 을 받아 거절 문구와 함께 죽는다. Phase A 만
-///      착지한 지금은 새 대화로 넘어가지 않고 실패로 끝나며(ADR-0082), 쓰레기는 명부에 그대로 남는다.
-///   2. 같은 프로필의 Fresh — 쓰레기가 이력으로 가고, 가짜가 `--session-id <뽑은 값>` 으로 떠 산다.
-///      결말은 `Ok`·Running 이고 1 의 실패 기록이 지워진다. 뽑은 값은 **첫 제출(CR) 전에는** 명부에도
-///      디스크에도 없고, CR 이 든 첫 입력 뒤에야 둘 다에 앉는다.
-/// ★가짜가 실제로 떴는지를 인자 기록으로 먼저 본다★ — 안 떴으면 아래 「영속 안 됨」 단언이 공회전한다.
+/// Two spawns in turn:
+///   1. Resume with an old id without a conversation (garbage) — the fake gets `--resume` and dies with the refusal phrase; it now ends in
+///   failure without moving to a new conversation (ADR-0082), the garbage stays in the registry.
+///   2. Fresh on the same profile — the garbage goes into history, the fake launches with `--session-id <drawn value>` and lives:
+///   `Ok`·Running, failure record 1 cleared. The drawn value is in neither registry nor disk **before the first submission (CR)** and
+///   settles in both only after the
+///      first input containing CR.
+/// ★First check via the argument record that the fake launched★ — else the 「not persisted」 assertion idles.
 // ADR-0226
 #[test]
 fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
@@ -1035,45 +1032,45 @@ fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
     let garbage = Uuid::new_v4();
     profile.backend_session_id = Some(garbage);
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles
+        .try_upsert(profile.clone())
+        .expect("store succeeds");
 
-    // 1. 쓰레기 id 로 이어받기 — Phase A 에서는 실패로 끝난다.
     let resumed = manager.activate_profile(&profile, SpawnMode::Resume);
     assert!(
         resumed.is_err(),
-        "대화 없는 id 의 이어받기가 성공으로 보고됐다: {resumed:?}"
+        "resuming an id without a conversation was reported as success: {resumed:?}"
     );
     assert!(
         wait_until(Duration::from_secs(10), || manager.list_agents().is_empty()),
-        "죽은 이어받기 화신이 수거되지 않았다"
+        "the dead resume incarnation was not reaped"
     );
     let spawns = fake_spawns(&args_log);
     assert_eq!(
         spawns.len(),
         1,
-        "가짜 claude 가 정확히 한 번 떴어야 한다(PATH 가 안 먹었으면 0): {spawns:?}"
+        "the fake claude must have launched exactly once (0 if PATH did not take effect): {spawns:?}"
     );
     assert_eq!(
         uuid_after(&spawns[0], "--resume"),
         Some(garbage),
-        "저장된 id 로 이어받지 않았다: {spawns:?}"
+        "it did not resume with the stored id: {spawns:?}"
     );
     assert_eq!(
         profiles.get(id).and_then(|p| p.backend_session_id),
         Some(garbage),
-        "Phase A 의 이어받기 실패는 손잡이를 건드리지 않는다"
+        "Phase A's resume failure does not touch the handle"
     );
 
-    // 2. 같은 프로필의 Fresh.
     let info = manager
         .activate_profile(&profile, SpawnMode::Fresh)
-        .expect("Fresh 활성화");
+        .expect("Fresh activation");
     assert!(
         matches!(info.status, AgentStatus::Running),
-        "Fresh 결말이 Running 이 아니다: {:?}",
+        "the Fresh outcome is not Running: {:?}",
         info.status
     );
-    // 연결 축이 없는 통로의 Fresh 는 자식이 뜬 순간 돌아오므로 가짜가 인자를 남길 때까지 기다린다.
+    // A Fresh on a link without a connection axis returns the moment the child launches, so wait until the fake leaves its arguments.
     wait_until(Duration::from_secs(10), || {
         fake_spawns(&args_log).len() >= 2
     });
@@ -1081,62 +1078,63 @@ fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
     assert_eq!(
         spawns.len(),
         2,
-        "Fresh 가 가짜를 한 번 더 띄웠어야 한다: {spawns:?}"
+        "Fresh must have launched the fake once more: {spawns:?}"
     );
     let minted = uuid_after(&spawns[1], "--session-id")
-        .unwrap_or_else(|| panic!("Fresh 가 `--session-id <uuid>` 로 뜨지 않았다: {spawns:?}"));
-    assert_ne!(minted, garbage, "Fresh 가 옛 id 를 재사용했다(ADR-0076)");
+        .unwrap_or_else(|| panic!("Fresh did not launch with `--session-id <uuid>`: {spawns:?}"));
+    assert_ne!(minted, garbage, "Fresh reused the old id (ADR-0076)");
 
-    let got = profiles.get(id).expect("프로필");
+    let got = profiles.get(id).expect("profile");
     assert_eq!(
         got.backend_session_id, None,
-        "제출 전인데 뽑은 id 가 명부에 적혔다"
+        "the drawn id was written into the registry before submission"
     );
     assert!(
         got.old_session_ids.contains(&garbage),
-        "쓰레기 id 가 이력으로 가지 않았다"
+        "the garbage id did not go into history"
     );
     assert_eq!(
         got.last_failure, None,
-        "Fresh 성립이 앞선 실패 기록을 지우지 않았다"
+        "the Fresh standing did not clear the preceding failure record"
     );
     assert_eq!(
         stored_on_disk(&store, id),
         None,
-        "제출 전인데 디스크에 id 가 있다"
+        "the id is on disk before submission"
     );
 
-    // CR 없는 키 입력은 턴을 열지 않는다.
+    // Key input without CR does not open a turn.
     manager
         .write_stdin(id, b"hello", InputOrigin::User)
-        .expect("키 입력");
+        .expect("key input");
     assert_eq!(
         profiles.get(id).and_then(|p| p.backend_session_id),
         None,
-        "CR 없는 입력이 제출로 세어졌다"
+        "input without CR was counted as a submission"
     );
 
-    // 첫 제출 — 이 호출이 돌아온 뒤에는 명부와 디스크 둘 다에 앉아 있어야 한다.
+    // The first submission — after this call returns it must have settled in both the registry and the disk.
     manager
         .write_stdin(id, b"\r", InputOrigin::User)
-        .expect("제출");
+        .expect("submit");
     assert_eq!(
         profiles.get(id).and_then(|p| p.backend_session_id),
         Some(minted),
-        "첫 제출 뒤에도 뽑은 id 가 명부에 없다 — 래치가 세션에 안 실렸거나 offer 가 빠졌다"
+        "the drawn id is not in the registry even after the first submission — the latch was not put on the session or the offer was missing"
     );
     assert_eq!(
         stored_on_disk(&store, id),
         Some(minted),
-        "첫 제출 뒤에도 뽑은 id 가 디스크에 없다"
+        "the drawn id is not on disk even after the first submission"
     );
-    // 스폰 시점 스냅샷의 Running 은 연결 축 없는 통로에서 늘 참이라, 가짜가 실제로 살아 있는지를 따로 본다.
+    // The spawn-time snapshot's Running is always true on a link without a connection axis, so check separately whether the fake is
+    //   actually alive.
     assert!(
         manager
             .list_agents()
             .iter()
             .any(|a| a.id == id && matches!(a.status, AgentStatus::Running)),
-        "Fresh 화신이 입력 뒤에 살아 있지 않다 — 가짜의 `--session-id` 갈래가 죽었다"
+        "the Fresh incarnation is not alive after the input — the fake's `--session-id` branch died"
     );
 
     let _ = manager.kill_agent(id);
@@ -1145,10 +1143,10 @@ fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
-/// ★손잡이 없는 claude 이어받기 요청은 새 대화로 연다 — 사용자 결정 D1 의 귀결(ADR-0226)★.
+/// ★A claude resume request without a handle opens a new conversation — the consequence of user decision D1 (ADR-0226)★.
 ///
-/// 결말은 `Ok`·Running 이고 가짜는 `--resume` 없이 `--session-id` 로 뜬다. 뽑은 값은 제출 전이라
-/// 영속되지 않는다 — 옛 길(없으면 뽑아 영속하고 `--resume <새 값>` 으로 띄움)은 대화 없는 id 를 남기고 죽었다.
+/// `Ok`·Running, the fake launches with `--session-id` and no `--resume`. The drawn value is not persisted before submission — the old way
+///   (draw and persist, launch `--resume <new value>`) left an id without a conversation and died.
 // ADR-0226
 #[test]
 fn a_handleless_claude_resume_opens_a_new_conversation_without_persisting() {
@@ -1157,14 +1155,16 @@ fn a_handleless_claude_resume_opens_a_new_conversation_without_persisting() {
     let (fake_dir, args_log) = fake_claude_dir("handleless");
     let (profile, cwd) = claude_on_fake_path("handleless-claude", &fake_dir);
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles
+        .try_upsert(profile.clone())
+        .expect("store succeeds");
 
     let info = manager
         .activate_profile(&profile, SpawnMode::Resume)
-        .expect("손잡이 없는 이어받기 요청은 새 대화로 선다");
+        .expect("a resume request without a handle stands as a new conversation");
     assert!(
         matches!(info.status, AgentStatus::Running),
-        "결말이 Running 이 아니다: {:?}",
+        "the outcome is not Running: {:?}",
         info.status
     );
 
@@ -1175,14 +1175,18 @@ fn a_handleless_claude_resume_opens_a_new_conversation_without_persisting() {
     assert_eq!(
         spawns.len(),
         1,
-        "가짜가 정확히 한 번 떴어야 한다: {spawns:?}"
+        "the fake must have launched exactly once: {spawns:?}"
     );
     assert!(
         uuid_after(&spawns[0], "--session-id").is_some() && !spawns[0].contains("--resume"),
-        "새 대화 argv 가 아니다: {spawns:?}"
+        "not a new-conversation argv: {spawns:?}"
     );
     assert_eq!(profiles.get(id).and_then(|p| p.backend_session_id), None);
-    assert_eq!(stored_on_disk(&store, id), None, "대화 없는 id 가 영속됐다");
+    assert_eq!(
+        stored_on_disk(&store, id),
+        None,
+        "an id without a conversation was persisted"
+    );
     assert_eq!(profiles.get(id).and_then(|p| p.last_failure), None);
 
     let _ = manager.kill_agent(id);
@@ -1271,7 +1275,7 @@ fn a_delivered_fresh_start_shows_each_notice_set_once_per_agent() {
     let (manager, kits, profiles) = noticing_manager("notices-fresh");
     let (profile, batch, count) = long_lived_profile("notices-fresh");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles.try_upsert(profile.clone()).expect("save succeeds");
     let x = vec![notice("omitted", json!({ "names": ["a.md"] }), Some(1))];
 
     kits.set(x.clone());
@@ -1332,7 +1336,7 @@ fn a_withheld_or_moot_activation_records_nothing() {
     let (manager, kits, profiles) = noticing_manager("notices-withheld");
     let (profile, batch, count) = long_lived_profile("notices-withheld");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles.try_upsert(profile.clone()).expect("save succeeds");
     let x = vec![notice("omitted", json!({ "names": ["a.md"] }), None)];
     kits.set(x.clone());
 
@@ -1376,7 +1380,7 @@ fn a_caller_resume_records_and_the_next_resume_with_the_same_set_is_empty() {
     let (manager, kits, profiles) = noticing_manager("notices-resume");
     let (profile, batch, count) = long_lived_profile("notices-resume");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles.try_upsert(profile.clone()).expect("save succeeds");
     let x = vec![notice("omitted", json!({ "names": ["s"] }), None)];
     kits.set(x.clone());
 
@@ -1399,7 +1403,7 @@ fn boot_restore_records_no_notice_fingerprint() {
     let (mut profile, batch, count) = long_lived_profile("notices-restore");
     profile.auto_restore = true;
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles.try_upsert(profile.clone()).expect("save succeeds");
     let x = vec![notice("omitted", json!({ "names": ["s"] }), None)];
     kits.set(x.clone());
 
@@ -1430,7 +1434,7 @@ fn a_post_start_failure_records_no_notice_fingerprint() {
     let (manager, kits, profiles) = noticing_manager("notices-early-exit");
     let (profile, batch, count) = always_early_exit_profile("notices-early-exit");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles.try_upsert(profile.clone()).expect("save succeeds");
     kits.set(vec![notice("omitted", json!({ "names": ["s"] }), None)]);
 
     let result =
@@ -1464,7 +1468,7 @@ fn a_handleless_caller_resume_that_opens_a_new_conversation_records_the_notices(
     let (fake_dir, args_log) = fake_claude_dir("notices-handleless");
     let (profile, cwd) = claude_on_fake_path("notices-handleless-claude", &fake_dir);
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles.try_upsert(profile.clone()).expect("save succeeds");
     let x = vec![notice("omitted", json!({ "names": ["s"] }), None)];
     kits.set(x.clone());
 
@@ -1516,7 +1520,7 @@ fn the_bus_spawn_delivers_the_notices_and_answers_a_block_with_its_reasons() {
     let manager = Arc::new(manager);
     let (profile, batch, count) = long_lived_profile("notices-bus");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles.try_upsert(profile.clone()).expect("save succeeds");
     let table = make_table(
         Arc::clone(&manager) as Arc<dyn AgentCommandHost>,
         Arc::new(NoRoster),
@@ -1776,7 +1780,7 @@ fn a_create_of_an_id_already_in_the_roster_is_refused_and_starts_nothing() {
     let (manager, _sink, profiles) = make_manager("create-existing-id");
     let (profile, batch, count) = long_lived_profile("create-existing-id");
     let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    profiles.try_upsert(profile.clone()).expect("save succeeds");
 
     let refused = manager
         .create_and_activate(&profile, NoticeDelivery::Delivered)

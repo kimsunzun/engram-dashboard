@@ -1,12 +1,6 @@
 // viewStore unit test — emit↔invoke loop (ADR-0035/0057 vertical slice, tab ownership model).
-//
-// Mocks invoke('@tauri-apps/api/core') + listen('@tauri-apps/api/event') to verify that actions call the correct invoke
-// + that state updates on receiving the backend emit (layout:updated/window:tabs-updated) + that the version guard discards
-// stale emits + ★per-window active tab decision (useCurrentViewId family)★. Pure logic only, with no real Tauri.
-//
-// ★Invariant verified (tab ownership model, ADR-0057)★: the old global activeViewId is gone. The window (label)
-// owns the tab list, and viewStore.windows[label].active is that window's active tab. layout is a per-view_id cache (global monotonic
-// version guard). window:tabs-updated also discards stale emits with a per-window version guard (G10).
+// Mocks invoke + listen of `@tauri-apps/api` to verify that actions call the correct invoke, that state updates on the backend emit (layout:updated/window:tabs-updated), that the version guard discards stale emits, and ★the per-window active tab decision (useCurrentViewId family)★. Pure logic, no real Tauri.
+// ★Invariant (tab ownership model, ADR-0057)★: no global activeViewId. The window (label) owns the tab list and `viewStore.windows[label].active` is that window's active tab; layout is a per-view_id cache (global monotonic version guard); window:tabs-updated also discards stale emits with a per-window version guard (G10).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -42,7 +36,7 @@ import {
 /** Imitates a backend emit — pours the payload into the handler subscribeViewEvents registered. */
 function emit(event: string, payload: unknown): void {
   const h = listeners.get(event)
-  if (!h) throw new Error(`no listener for ${event} — subscribeViewEvents 호출했나?`)
+  if (!h) throw new Error(`no listener for ${event} — was subscribeViewEvents called?`)
   h({ payload })
 }
 
@@ -91,8 +85,8 @@ afterEach(() => {
   window.location.hash = origHash
 })
 
-describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', () => {
-  it('createTab → create_tab invoke(window,name) + 반환 id 전달', async () => {
+describe('viewStore tab/window actions → invoke (tab ownership model, ADR-0057)', () => {
+  it('createTab → create_tab invoke(window,name) + passes the returned id', async () => {
     invokeMock.mockResolvedValueOnce('new-view-id')
     const id = await useViewStore.getState().createTab('main', 'My Tab')
     expect(invokeMock).toHaveBeenCalledWith('create_tab', { window: 'main', name: 'My Tab' })
@@ -104,7 +98,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(invokeMock).toHaveBeenCalledWith('create_tab', { window: 'main', name: null })
   })
 
-  it('closeTab/switchTab → 대응 invoke(window, view)', async () => {
+  it('closeTab/switchTab → matching invoke(window, view)', async () => {
     const s = useViewStore.getState()
     await s.closeTab('slot-popup-1', 'v9')
     expect(invokeMock).toHaveBeenCalledWith('close_tab', { window: 'slot-popup-1', view: 'v9' })
@@ -112,7 +106,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(invokeMock).toHaveBeenCalledWith('switch_tab', { window: 'main', view: 'v2' })
   })
 
-  it('switchTabIf → switch_tab_if invoke(window, view, expect) · 셸의 bool 을 돌려준다', async () => {
+  it("switchTabIf → switch_tab_if invoke(window, view, expect) · returns the shell's bool", async () => {
     invokeMock.mockResolvedValueOnce(false)
     await expect(useViewStore.getState().switchTabIf('main', 'v1', 'v2')).resolves.toBe(false)
     expect(invokeMock).toHaveBeenCalledWith('switch_tab_if', { window: 'main', view: 'v1', expect: 'v2' })
@@ -123,7 +117,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(invokeMock).toHaveBeenCalledWith('rename_tab', { viewId: 'v1', name: 'New Name' })
   })
 
-  it('createWindow → create_window invoke · {window, window_id, number} 를 그대로 돌려준다', async () => {
+  it('createWindow → create_window invoke · returns {window, window_id, number} as is', async () => {
     const created = { window: 'slot-popup-3', window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b', number: 2 }
     invokeMock.mockResolvedValueOnce(created)
     const answer = await useViewStore.getState().createWindow()
@@ -131,7 +125,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(answer).toEqual(created)
   })
 
-  it('controlWindow → window_control invoke 하나(window · action · ifEmpty) · 셸 답을 그대로 돌려준다', async () => {
+  it('controlWindow → a single window_control invoke (window · action · ifEmpty) · returns the shell answer as is', async () => {
     const outcome = { deferred: false, pending: false, shown_all: false, focused: false, close: 'kept' }
     invokeMock.mockResolvedValueOnce(outcome)
     await expect(useViewStore.getState().controlWindow('w-1', 'close', true)).resolves.toEqual(outcome)
@@ -144,7 +138,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     })
   })
 
-  it('split → split_slot invoke(viewId/slotId/dir) + 새 slot id 반환', async () => {
+  it('split → split_slot invoke(viewId/slotId/dir) + returns the new slot id', async () => {
     invokeMock.mockResolvedValueOnce('new-slot-id')
     const id = await useViewStore.getState().split('v1', 's1', 'top_bottom')
     expect(invokeMock).toHaveBeenCalledWith('split_slot', {
@@ -155,7 +149,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(id).toBe('new-slot-id')
   })
 
-  it('setSplitRatio → set_split_ratio invoke(viewId/splitId/ratio) + 셸 답 그대로 반환', async () => {
+  it('setSplitRatio → set_split_ratio invoke(viewId/splitId/ratio) + returns the shell answer as is', async () => {
     const applied = { ratio: 0.3, outcome: 'Applied', version: 42 }
     invokeMock.mockResolvedValueOnce(applied)
     const res = await useViewStore.getState().setSplitRatio('v1', 'sp1', 0.3)
@@ -168,12 +162,12 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(res).toEqual(applied)
   })
 
-  it('setSplitRatio 실패 → 셸 오류 문자열로 reject', async () => {
+  it('setSplitRatio failure → rejects with the shell error string', async () => {
     invokeMock.mockRejectedValueOnce('split not found')
     await expect(useViewStore.getState().setSplitRatio('v1', 'gone', 0.5)).rejects.toBe('split not found')
   })
 
-  it('closeSlot/assignAgent → 대응 invoke 인자', async () => {
+  it('closeSlot/assignAgent → matching invoke arguments', async () => {
     const s = useViewStore.getState()
     await s.closeSlot('v1', 's2')
     expect(invokeMock).toHaveBeenCalledWith('close_slot', { viewId: 'v1', slotId: 's2' })
@@ -185,7 +179,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     })
   })
 
-  it('setSlotContent → set_slot_content invoke(viewId/slotId/content) (ADR-0063 제네릭 배치)', async () => {
+  it('setSlotContent → set_slot_content invoke(viewId/slotId/content) (ADR-0063 generic placement)', async () => {
     const s = useViewStore.getState()
     await s.setSlotContent('v1', 's1', { type: 'agent_list' })
     expect(invokeMock).toHaveBeenCalledWith('set_slot_content', {
@@ -201,7 +195,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     })
   })
 
-  it('setUsageSlot → set_usage_slot invoke — 준 칸만 값, 빠진 칸은 null(셸이 지금 값으로 지킨다) · 오버라이드 clear', async () => {
+  it('setUsageSlot → set_usage_slot invoke — values only for the given fields, null for missing ones (the shell keeps the current value) · override clear', async () => {
     const s = useViewStore.getState()
     s.setRenderMode('s-usage', 'dom')
     await s.setUsageSlot('v1', 's-usage', { show_codex: true })
@@ -221,7 +215,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     })
   })
 
-  it('moveSlotToWindow → move_slot_to_window invoke(viewId/slotId/toWindow) + {window,tab,window_id,number} 반환', async () => {
+  it('moveSlotToWindow → move_slot_to_window invoke(viewId/slotId/toWindow) + returns {window,tab,window_id,number}', async () => {
     const moved = { window: 'slot-popup-2', tab: 'v-new', window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b', number: 2 }
     invokeMock.mockResolvedValueOnce(moved)
     const res = await useViewStore.getState().moveSlotToWindow('v1', 's1')
@@ -234,7 +228,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(res).toEqual(moved)
   })
 
-  it('moveSlotToWindow(toWindow 지정) → 그 label 을 넘긴다(기존 창 타깃)', async () => {
+  it('moveSlotToWindow (toWindow given) → passes that label (existing window target)', async () => {
     invokeMock.mockResolvedValueOnce({ window: 'main', tab: 'v-new', window_id: 'main', number: 1 })
     await useViewStore.getState().moveSlotToWindow('v1', 's1', 'main')
     expect(invokeMock).toHaveBeenCalledWith('move_slot_to_window', {
@@ -245,8 +239,8 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
   })
 })
 
-describe('viewStore emit 수신 → 상태 갱신', () => {
-  it('layout:updated → 그 view 캐시 항목(layout/focus/version) 채택', async () => {
+describe('viewStore emit receipt → state update', () => {
+  it('layout:updated → adopts that view cache entry (layout/focus/version)', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
@@ -258,7 +252,7 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     expect(cached.layout).toEqual({ type: 'slot', id: 's1', content: { type: 'empty' } })
   })
 
-  it('layout:updated → 셸 기하(slot_rects/split_rects)와 비율 한계를 캐시 항목에 그대로 담는다(ADR-0227)', async () => {
+  it('layout:updated → keeps the shell geometry (slot_rects/split_rects) and the ratio limits in the cache entry as is (ADR-0227)', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
@@ -295,7 +289,7 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
   })
 
   // TRD S21-storage §6-2: unknown-content slots are carried as `empty` — if this field is dropped the frontend picks that slot as an empty area.
-  it('layout:updated → foreign_slots 를 캐시 항목에 싣고, 다음 스냅샷에서 빠지면 함께 빠진다', async () => {
+  it('layout:updated → carries foreign_slots on the cache entry, and drops them when they are gone from the next snapshot', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
@@ -307,7 +301,7 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     expect(useViewStore.getState().layouts['v1'].foreignSlots).toEqual([])
   })
 
-  it('window:tabs-updated → windows[label].{windowId,number,tabs,active,version} 갱신', async () => {
+  it('window:tabs-updated → updates windows[label].{windowId,number,tabs,active,version}', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
@@ -328,7 +322,7 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     expect(win.version).toBe(4)
   })
 
-  it('window:tabs-updated 는 창별 독립 — 다른 label 은 서로 안 건드린다', async () => {
+  it('window:tabs-updated is independent per window — different labels do not touch each other', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
@@ -345,8 +339,8 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
   })
 })
 
-describe('version 가드(전역 단조 version, G10)', () => {
-  it('layout:updated — 같은 view 의 낮은 version emit 은 폐기(순서 역전 방지)', async () => {
+describe('version guard (global monotonic version, G10)', () => {
+  it('layout:updated — a lower version emit of the same view is discarded (prevents order inversion)', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
@@ -358,7 +352,7 @@ describe('version 가드(전역 단조 version, G10)', () => {
     expect(cached.focusedSlotId).toBe('s5')
   })
 
-  it('window:tabs-updated — 같은 창의 낮은/같은 version emit 은 폐기(stale 방어, G10)', async () => {
+  it('window:tabs-updated — a lower/equal version emit of the same window is discarded (stale defence, G10)', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
@@ -369,7 +363,7 @@ describe('version 가드(전역 단조 version, G10)', () => {
     expect(useViewStore.getState().windows['main'].active).toBe('v5')
   })
 
-  it('layout:updated 첫 emit 은 캐시 항목이 없어 항상 채택(version 0 포함)', async () => {
+  it('the first layout:updated emit is always adopted since there is no cache entry (version 0 included)', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
@@ -379,8 +373,8 @@ describe('version 가드(전역 단조 version, G10)', () => {
   })
 })
 
-describe('selectView (창 캔버스 렌더 selector)', () => {
-  it('캐시된 view_id → 그 항목, 없으면 null', () => {
+describe('selectView (window canvas render selector)', () => {
+  it('a cached view_id → that entry, otherwise null', () => {
     emit_seed_layout('v1', { focused_slot_id: 's1', version: 1 })
     const st = useViewStore.getState()
     expect(selectView(st, 'v1')?.focusedSlotId).toBe('s1')
@@ -394,8 +388,8 @@ function emit_seed_layout(viewId: string, over: Partial<ViewSnapshot>): void {
   useViewStore.getState().applyLayoutUpdated(snap({ view_id: viewId, ...over }))
 }
 
-describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
-  it('list_tabs("main") → get_view 순서로 invoke 하고 창 탭+active 레이아웃 캐시를 채운다', async () => {
+describe('initMainWindowFromBackend boot init (read-only pull)', () => {
+  it('invokes in the order list_tabs("main") → get_view and fills the window tabs + active layout cache', async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') {
         expect(args).toEqual({ window: 'main' })
@@ -412,9 +406,8 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
     expect(selectView(st, 'v1')?.focusedSlotId).toBe('s1')
   })
 
-  // ★ADR-0102: even if list_tabs fails a few times with early transients, retry recovers it and fills the window state★.
-  //   main has no event recovery path (window:tabs-updated fires only on tab mutations), so this pull must not be one-shot.
-  it('list_tabs 가 2번 reject 후 resolve → 재시도로 회수해 windows["main"] 이 채워진다(ADR-0102)', async () => {
+  // ★ADR-0102: even if list_tabs fails a few times with early transients, retry recovers it and fills the window state★ — main has no event recovery path (window:tabs-updated fires only on tab mutations), so this pull must not be one-shot.
+  it('list_tabs rejects twice then resolves → collected by retries and windows["main"] is filled (ADR-0102)', async () => {
     let listTabsCalls = 0
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_tabs') {
@@ -432,9 +425,8 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
     expect(selectView(st, 'v1')?.focusedSlotId).toBe('s1')
   }, 10000)
 
-  // ★ADR-0102: if it still fails after retries are exhausted, do not swallow it silently but propagate the final failure with throw★
-  //   (the caller eventBus surfaces it via console.error — if win is never filled and there is no signal, it is a stuck state with unknown cause).
-  it('list_tabs 가 계속 reject → 재시도 소진 후 throw(최종 실패 전파, ADR-0102)', async () => {
+  // ★ADR-0102: if it still fails after retries are exhausted, propagate the final failure with throw rather than swallowing it★ (the caller eventBus surfaces it via console.error — a never-filled win with no signal is a stuck state of unknown cause).
+  it('list_tabs keeps rejecting → throw after the retries are exhausted (final failure propagated, ADR-0102)', async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_tabs') throw new Error('backend down')
       return undefined
@@ -443,7 +435,7 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
     expect(useViewStore.getState().windows['main']).toBeUndefined()
   }, 10000)
 
-  it('init pull 이 더 최신 emit 을 덮지 않는다(역전 방지)', async () => {
+  it('the init pull does not overwrite a newer emit (prevents inversion)', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
@@ -469,8 +461,8 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
   })
 })
 
-describe('subscribeViewEvents 등록/해제', () => {
-  it('listen 2종(layout:updated/window:tabs-updated) 등록', async () => {
+describe('subscribeViewEvents registration/release', () => {
+  it('registers 2 listens (layout:updated/window:tabs-updated)', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
@@ -479,14 +471,14 @@ describe('subscribeViewEvents 등록/해제', () => {
     expect(listenMock).toHaveBeenCalledWith('window:tabs-updated', expect.any(Function))
   })
 
-  it('dispose(등록 완료 후 호출) 시 두 unlisten 모두 해제', async () => {
+  it('dispose (called after registration completes) releases both unlistens', async () => {
     const { dispose, ready } = subscribeViewEvents()
     await ready
     dispose()
     expect(unlistenMock).toHaveBeenCalledTimes(2)
   })
 
-  it('dispose 는 idempotent — 두 번 불러도 unlisten 을 중복 호출하지 않는다', async () => {
+  it('dispose is idempotent — calling it twice does not call unlisten twice', async () => {
     const { dispose, ready } = subscribeViewEvents()
     await ready
     dispose()
@@ -494,10 +486,8 @@ describe('subscribeViewEvents 등록/해제', () => {
     expect(unlistenMock).toHaveBeenCalledTimes(2)
   })
 
-  // ★Leak guard★: if dispose is called while ready is pending (listen registration unfinished), the
-  // unlisten handle that arrives when registration finishes late must be called *immediately* (if not, a permanent leak). Hold listen as deferred to
-  // keep the registration await window open, and reproduce the real race in the order dispose in between → then listen resolve.
-  it('ready pending 중 dispose → 늦게 도착한 unlisten 핸들을 즉시 호출(누수 가드)', async () => {
+  // ★Leak guard★: if dispose is called while ready is pending (listen registration unfinished), the late-arriving unlisten handle must be called *immediately* (else a permanent leak). Hold listen as deferred to keep the registration await window open and reproduce the race: dispose in between → then listen resolve.
+  it('dispose while ready is pending → calls the late-arriving unlisten handle immediately (leak guard)', async () => {
     const resolveListen = new Map<string, (fn: typeof unlistenMock) => void>()
     listenMock.mockImplementation(
       (event: string, handler: (e: { payload: unknown }) => void) => {
@@ -519,7 +509,7 @@ describe('subscribeViewEvents 등록/해제', () => {
     expect(unlistenMock).toHaveBeenCalledTimes(2)
   })
 
-  it('ready 는 한쪽 listen 등록이 실패해도 hang 하지 않고 성공분을 정리한다', async () => {
+  it('ready does not hang even when one listen registration fails, and cleans up the successful one', async () => {
     listenMock.mockImplementation((event: string, handler: (e: { payload: unknown }) => void) => {
       listeners.set(event, handler)
       if (event === 'window:tabs-updated') return Promise.reject(new Error('listen failed'))
@@ -532,7 +522,7 @@ describe('subscribeViewEvents 등록/해제', () => {
     expect(unlistenMock).toHaveBeenCalledTimes(1)
   })
 
-  it('ready reject 후 *나중에* resolve 된 listen 핸들도 호출자 dispose 가 즉시 해제(늦은 성공분 누수 0)', async () => {
+  it('a listen handle that resolves *later* after ready rejected is also released immediately by the caller dispose (0 leaks of late successes)', async () => {
     let resolveLayout: (fn: typeof unlistenMock) => void = () => {}
     let rejectTabs: (err: Error) => void = () => {}
     listenMock.mockImplementation((event: string, handler: (e: { payload: unknown }) => void) => {
@@ -562,12 +552,12 @@ describe('subscribeViewEvents 등록/해제', () => {
 })
 
 // ★Render mode override (§5, frontend-only)★: set/clear + slot lifecycle cleanup (FIX-1) + untyped entry guard (FIX-4).
-describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => {
+describe('renderModeOverride override + lifecycle cleanup (§5)', () => {
   beforeEach(() => {
     useViewStore.setState({ renderModeOverride: {} })
   })
 
-  it('closeSlot 은 그 slot 의 오버라이드를 clear 한다(slot 소멸 → 엔트리 누수 방지, FIX-1)', async () => {
+  it('closeSlot clears that slot\'s override (slot gone → prevents an entry leak, FIX-1)', async () => {
     useViewStore.getState().setRenderMode('s-close', 'dom')
     expect(useViewStore.getState().renderModeOverride['s-close']).toBe('dom')
     await useViewStore.getState().closeSlot('v1', 's-close')
@@ -575,7 +565,7 @@ describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => 
     expect(invokeMock).toHaveBeenCalledWith('close_slot', { viewId: 'v1', slotId: 's-close' })
   })
 
-  it('assignAgent 은 그 slot 의 오버라이드를 clear 한다(이전 agent 오버라이드가 새 agent 에 새지 않게, FIX-1)', async () => {
+  it("assignAgent clears that slot's override (so the previous agent's override does not leak into the new agent, FIX-1)", async () => {
     useViewStore.getState().setRenderMode('s-assign', 'rich')
     expect(useViewStore.getState().renderModeOverride['s-assign']).toBe('rich')
     await useViewStore.getState().assignAgent('v1', 's-assign', 'agent-new')
@@ -587,7 +577,7 @@ describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => 
     })
   })
 
-  it('setSlotContent 은 그 slot 의 오버라이드를 clear 한다(콘텐츠 통째 교체 → 누수 방지, ADR-0063)', async () => {
+  it("setSlotContent clears that slot's override (whole content replaced → prevents a leak, ADR-0063)", async () => {
     useViewStore.getState().setRenderMode('s-set', 'dom')
     expect(useViewStore.getState().renderModeOverride['s-set']).toBe('dom')
     await useViewStore.getState().setSlotContent('v1', 's-set', { type: 'agent_list' })
@@ -599,14 +589,14 @@ describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => 
     })
   })
 
-  it('moveSlotToWindow 는 그 slot 의 오버라이드를 clear 한다(원본 슬롯 소멸 → 누수 방지)', async () => {
+  it("moveSlotToWindow clears that slot's override (source slot gone → prevents a leak)", async () => {
     useViewStore.getState().setRenderMode('s-move', 'dom')
     invokeMock.mockResolvedValueOnce({ window: 'slot-popup-1', tab: 'v-new' })
     await useViewStore.getState().moveSlotToWindow('v1', 's-move')
     expect(useViewStore.getState().renderModeOverride['s-move']).toBeUndefined()
   })
 
-  it('closeSlot 은 다른 slot 의 오버라이드는 건드리지 않는다', async () => {
+  it("closeSlot does not touch other slots' overrides", async () => {
     useViewStore.getState().setRenderMode('s-keep', 'dom')
     useViewStore.getState().setRenderMode('s-gone', 'rich')
     await useViewStore.getState().closeSlot('v1', 's-gone')
@@ -614,7 +604,7 @@ describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => 
     expect(useViewStore.getState().renderModeOverride['s-keep']).toBe('dom')
   })
 
-  it('setRenderMode(무효 mode) → no-op(store 불변) + console.warn(FIX-4)', () => {
+  it('setRenderMode (invalid mode) → no-op (store unchanged) + console.warn (FIX-4)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     ;(useViewStore.getState().setRenderMode as (n: string, m: unknown) => void)('s1', 'bogus')
     expect(useViewStore.getState().renderModeOverride['s1']).toBeUndefined()
@@ -622,41 +612,40 @@ describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => 
     warn.mockRestore()
   })
 
-  it('setRenderMode(유효 mode) → 정상 기록', () => {
+  it('setRenderMode (valid mode) → recorded normally', () => {
     useViewStore.getState().setRenderMode('s1', 'dom')
     expect(useViewStore.getState().renderModeOverride['s1']).toBe('dom')
   })
 })
 
-// ★Window decision (§3-3/§3-4, G7)★: readWindowLabelFromHash · currentViewId decide which window this webview is and what that window's active
-// tab is from the URL + windows state. Covers a popup (?window=) · main · an unknown route (main fallback).
-describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-0057)', () => {
+// ★Window decision (§3-3/§3-4, G7)★: readWindowLabelFromHash · currentViewId decide which window this webview is and its active tab from the URL + windows state. Covers a popup (?window=) · main · an unknown route (main fallback).
+describe('readWindowLabelFromHash + currentViewId (window context resolution, ADR-0057)', () => {
   const origHash2 = window.location.hash
   afterEach(() => {
     window.location.hash = origHash2
   })
 
-  it('readWindowLabelFromHash: 팝업 hash(#/popup?window=<label>)에서 label 파싱', () => {
+  it('readWindowLabelFromHash: parses the label from the popup hash (#/popup?window=<label>)', () => {
     window.location.hash = '#/popup?window=slot-popup-3'
     expect(readWindowLabelFromHash()).toBe('slot-popup-3')
   })
 
-  it('readWindowLabelFromHash: 메인 hash(#/)면 main', () => {
+  it('readWindowLabelFromHash: main for the main hash (#/)', () => {
     window.location.hash = '#/'
     expect(readWindowLabelFromHash()).toBe(MAIN_WINDOW_LABEL)
   })
 
-  it('readWindowLabelFromHash: 모르는 라우트(#/unknown)면 main 폴백', () => {
+  it('readWindowLabelFromHash: falls back to main for an unknown route (#/unknown)', () => {
     window.location.hash = '#/unknown'
     expect(readWindowLabelFromHash()).toBe(MAIN_WINDOW_LABEL)
   })
 
-  it('readWindowLabelFromHash: 메인 라우트의 stray ?window=(#/?window=x)는 무시하고 main', () => {
+  it('readWindowLabelFromHash: ignores a stray ?window= on the main route (#/?window=x) and gives main', () => {
     window.location.hash = '#/?window=x'
     expect(readWindowLabelFromHash()).toBe(MAIN_WINDOW_LABEL)
   })
 
-  it('currentViewId: main 창이면 windows["main"].active', () => {
+  it('currentViewId: windows["main"].active for the main window', () => {
     window.location.hash = '#/'
     useViewStore.setState({
       windows: { main: { windowId: 'main', number: 1, tabs: [{ id: 'v9', name: 'V9', named: true }], active: 'v9', version: 1 } },
@@ -664,7 +653,7 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
     expect(currentViewId()).toBe('v9')
   })
 
-  it('currentViewId: 팝업 창이면 그 label 의 active', () => {
+  it("currentViewId: that label's active for a popup window", () => {
     window.location.hash = '#/popup?window=slot-popup-1'
     useViewStore.setState({
       windows: {
@@ -681,7 +670,7 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
     expect(currentViewId()).toBe('p1')
   })
 
-  it('currentViewId: 모르는 라우트(#/unknown)면 windows["main"].active 폴백', () => {
+  it('currentViewId: falls back to windows["main"].active for an unknown route (#/unknown)', () => {
     window.location.hash = '#/unknown'
     useViewStore.setState({
       windows: {
@@ -691,7 +680,7 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
     expect(currentViewId()).toBe('vmain')
   })
 
-  it('currentViewId: 창 상태 미도착이면 null', () => {
+  it('currentViewId: null when the window state has not arrived', () => {
     window.location.hash = '#/'
     useViewStore.setState({ windows: {} })
     expect(currentViewId()).toBeNull()

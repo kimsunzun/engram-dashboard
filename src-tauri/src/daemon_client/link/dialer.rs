@@ -1,30 +1,11 @@
-//! The dialer the shell's registry uses — resolves a logical daemon address to where that daemon is now
-//! (TRD S21 trd-3 §3-6 · D25 ① · D20 ①).
-//!
-//! The registry dials one fixed address per peer for its whole life; a daemon moves to a new port and token on every
-//! restart. So the registry gets a logical address (`engram-local:<key>#<n>`) and every dial here asks that
-//! registration's [`EndpointSource::current`] — never `ensure`, so a reconnect cannot spawn a daemon (ADR-0021):
-//!
-//! - `Live` → remember it as the last-known endpoint, put its credential in the registration's [`CredentialSlot`],
-//!   dial it.
-//! - `Busy` (sharing violation only) → dial the last-known endpoint with its credential; none known → one failed
-//!   attempt.
+//! The dialer the shell's registry uses — resolves a logical daemon address to where that daemon is now (TRD S21 trd-3 §3-6 · D25 ① · D20 ①). The registry dials one fixed address per peer for its whole life while a daemon moves to a new port and token on every restart, so the registry gets a logical address (`engram-local:<key>#<n>`) and every dial here asks that registration's [`EndpointSource::current`] — never `ensure`, so a reconnect cannot spawn a daemon (ADR-0021):
+//! - `Live` → remember it as the last-known endpoint, put its credential in the registration's [`CredentialSlot`], dial it.
+//! - `Busy` (sharing violation only) → dial the last-known endpoint with its credential; none known → one failed attempt.
 //! - `Absent` · `Unusable` → forget the last-known endpoint, one failed attempt (budget), no dial.
-//! - `VersionMismatch` → forget the last-known endpoint, a terminal refusal (`HANDSHAKE_REJECTED`) without a dial: the
-//!   transport gives up as `Rejected` and spends no budget (ADR-0180 decision 5). Logged here at warn. The refusal is
-//!   recorded in the registration's [`RefusalSlot`] first — the one way routing tells a version refusal from the
-//!   daemon's own refusal, which carries the same close code (TRD S21 trd-3-2-u5 §4-3).
-//!
-//! The last-known endpoint is forgotten on every answer but `Live` and `Busy` because those answers say its daemon is
-//! gone or unusable (TRD §3-6) — a later `Busy` must not send that daemon's token to whoever holds its old port now.
-//!
-//! ★One registration per `Registry::add`★ — the credential slot is written by a dial and read by the handshake of
-//! the same attempt, which the transport runs in that order on one supervisor task. A re-add of the same key starts a
-//! new supervisor while the old one may still finish a dial it began (closing races that dial), so a slot shared by
-//! two supervisors could pair one daemon's token with the other daemon's address. Each registration therefore has its
-//! own address, slot, source and last-known endpoint; never pass one registration's address to two adds.
-// ADR-0021
-// ADR-0310
+//! - `VersionMismatch` → forget the last-known endpoint, a terminal refusal (`HANDSHAKE_REJECTED`) without a dial: the transport gives up as `Rejected` and spends no budget (ADR-0180 decision 5), logged here at warn. The refusal is recorded in the registration's [`RefusalSlot`] first — the one way routing tells a version refusal from the daemon's own refusal, which carries the same close code (TRD S21 trd-3-2-u5 §4-3).
+//! The last-known endpoint is forgotten on every answer but `Live` and `Busy`, since those say its daemon is gone or unusable (TRD §3-6) — a later `Busy` must not send that daemon's token to whoever holds its old port now.
+//! One registration per `Registry::add`: the credential slot is written by a dial and read by the handshake of the same attempt, which the transport runs in that order on one supervisor task. A re-add of the same key starts a new supervisor while the old one may still finish a dial it began (closing races that dial), so a slot shared by two supervisors could pair one daemon's token with the other's address. Each registration therefore has its own address, slot, source and last-known endpoint; never pass one registration's address to two adds.
+// ADR-0021 · ADR-0310
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,9 +21,7 @@ use super::endpoint::{Current, Endpoint, EndpointSource};
 use super::handshake::{CredentialSlot, ShellHandshake};
 use super::DaemonKey;
 
-/// The texts of the failed attempts this dialer makes — routing keys its throttled failure log on them
-/// (`route::UnreachableClass`), and a handle's first answer reads the two that mean "no live daemon"
-/// ([`no_live_daemon_cause`]). Nothing else decides on them.
+/// The texts of the failed attempts this dialer makes — routing keys its throttled failure log on them (`route::UnreachableClass`), and a handle's first answer reads the two meaning "no live daemon" ([`no_live_daemon_cause`]). Nothing else decides on them.
 pub(super) const NOT_REGISTERED: &str = "no daemon registered at";
 pub(super) const READ_FAILED: &str = "reading the daemon endpoint failed";
 pub(super) const BUSY_UNKNOWN: &str =
@@ -50,10 +29,7 @@ pub(super) const BUSY_UNKNOWN: &str =
 pub(super) const NO_RECORD: &str = "no daemon endpoint record — no live daemon";
 pub(super) const UNUSABLE: &str = "the daemon endpoint record is unusable";
 
-/// The cause when a failed attempt's text says there is no live daemon — no endpoint record ([`NO_RECORD`]), or one
-/// that cannot be used ([`UNUSABLE`] — broken · dead pid · unreadable); `None` for any other failure. Only this
-/// dialer writes texts with these openings (the ws dialer's start with `ws connect`, the transport's are fixed
-/// words), and the cause is the endpoint source's local diagnostic — it quotes no file content.
+/// The cause when a failed attempt's text says there is no live daemon — no endpoint record ([`NO_RECORD`]) or an unusable one ([`UNUSABLE`] — broken · dead pid · unreadable); `None` for any other failure. Only this dialer writes texts with these openings (the ws dialer's start with `ws connect`, the transport's are fixed words), and the cause is the endpoint source's local diagnostic — it quotes no file content.
 pub(crate) fn no_live_daemon_cause(failure: &str) -> Option<String> {
     if failure == NO_RECORD {
         return Some("no endpoint record".to_owned());
@@ -64,19 +40,14 @@ pub(crate) fn no_live_daemon_cause(failure: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The daemon a dial refused for its protocol version, as its endpoint record names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VersionRefusal {
-    /// The daemon's protocol version.
     pub daemon: u32,
     pub pid: u32,
-    /// The daemon's process creation time from its record — 0 = the record carries none.
     pub start_time: u64,
 }
 
-/// What the last dial of one registration refused for the protocol version — written before that dial's
-/// `DialFailure::Refused` returns, so the `Rejected` it becomes is routed after the write, and cleared by every other
-/// answer of the endpoint record. Empty = the refusal (if any) did not come from the version check.
+/// What the last dial of one registration refused for the protocol version — written before that dial's `DialFailure::Refused` returns, so the resulting `Rejected` is routed after the write, and cleared by every other answer of the endpoint record. Empty = the refusal (if any) did not come from the version check.
 #[derive(Debug, Default)]
 pub struct RefusalSlot(Mutex<Option<VersionRefusal>>);
 
@@ -113,11 +84,7 @@ impl LocalDaemonDialer {
         }
     }
 
-    /// Registers one `Registry::add` of `key` and returns the logical address and the handshake to pass to it, and the
-    /// registration's [`RefusalSlot`]. Every call makes a new registration, also for a key registered before. `found` =
-    /// the endpoint the daemon search of this connect just returned (`EndpointSource::ensure`) — the registration
-    /// starts with it as its last-known endpoint, so a record held busy right after the search (a daemon it just
-    /// spawned) still dials that daemon. Every dial still reads the record first.
+    /// Registers one `Registry::add` of `key` and returns the logical address, the handshake to pass to it and the registration's [`RefusalSlot`]; every call makes a new registration, also for a key registered before. `found` = the endpoint the daemon search of this connect just returned (`EndpointSource::ensure`) — the registration starts with it as its last-known endpoint, so a record held busy right after the search (a daemon it just spawned) still dials that daemon. Every dial still reads the record first.
     pub fn register(
         &self,
         key: &DaemonKey,
@@ -141,8 +108,7 @@ impl LocalDaemonDialer {
         (address, Arc::new(ShellHandshake::new(credential)), refusal)
     }
 
-    /// Drops a registration once its peer has ended. A dial of it that is still running finishes against what it
-    /// already holds; later dials of the address fail as unreachable.
+    /// Drops a registration once its peer has ended. A dial of it still running finishes against what it already holds; later dials of the address fail as unreachable.
     pub fn unregister(&self, address: &Address) {
         self.registrations
             .lock()
@@ -150,7 +116,6 @@ impl LocalDaemonDialer {
             .remove(address);
     }
 
-    /// How many registrations are held — for tests of the callers' unregistering.
     #[cfg(test)]
     pub(crate) fn registered(&self) -> usize {
         self.registrations
@@ -268,8 +233,7 @@ mod tests {
     const TOKEN_A: &str = "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000";
     const TOKEN_B: &str = "bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111";
 
-    /// Answers `current()` from a script; the last answer repeats. Counts `ensure` calls — dials must make none
-    /// (ADR-0021).
+    /// Answers `current()` from a script; the last answer repeats. Counts `ensure` calls — dials must make none (ADR-0021).
     struct ScriptedSource {
         answers: Mutex<VecDeque<Current>>,
         reads: AtomicUsize,
@@ -311,7 +275,6 @@ mod tests {
         }
     }
 
-    /// Answers one endpoint, but only after the test releases it — holds a dial inside `resolve`.
     struct GatedSource {
         answer: Current,
         entered: Mutex<mpsc::Sender<()>>,
@@ -335,7 +298,6 @@ mod tests {
         }
     }
 
-    /// The memory network behind a recorder of the addresses it was asked to dial.
     struct Recording {
         net: MemoryNetwork,
         dialed: Mutex<Vec<Address>>,
@@ -425,7 +387,6 @@ mod tests {
             self.collect().iter().any(|e| e.kind() == kind)
         }
 
-        /// The next link the supervisor opened, after it wrote its first frame (the Auth).
         async fn next_link(&self) -> (Arc<MemoryEndpoint>, String) {
             wait_for("a link is opened", || self.net.open_endpoints() > 0).await;
             let endpoint = self.net.accept().unwrap();
@@ -446,7 +407,6 @@ mod tests {
             wait_for("live", || self.state() == PeerState::Live).await;
         }
 
-        /// The daemon closes a live link; the clock then passes the first backoff.
         async fn drop_live_link(&self, endpoint: &MemoryEndpoint) {
             endpoint.close();
             wait_for("backoff", || self.state() == PeerState::Backoff).await;
@@ -455,8 +415,7 @@ mod tests {
         }
     }
 
-    /// Polls with real sleeps up to a bound, then panics — a regression fails instead of hanging. `settle_until` does
-    /// not fit here: `current()` runs on the blocking pool, a real thread its yield budget does not wait for.
+    /// Polls with real sleeps up to a bound, then panics — a regression fails instead of hanging. `settle_until` does not fit here: `current()` runs on the blocking pool, a real thread its yield budget does not wait for.
     async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !done() {
@@ -534,8 +493,7 @@ mod tests {
         assert_eq!(source.ensures(), 0);
     }
 
-    /// The dial ends in a terminal refusal after one dial — an `Error` frame (the real daemon then closes without a
-    /// code — ADR-0346) or a bare 4001 close.
+    /// The dial ends in a terminal refusal after one dial — an `Error` frame (the real daemon then closes without a code — ADR-0346) or a bare 4001 close.
     async fn assert_gave_up_rejected_after_one_dial(h: &mut Harness, source: &ScriptedSource) {
         wait_for("gave up", || h.state().is_terminal()).await;
         assert_eq!(h.state(), PeerState::GaveUp(GaveUpReason::Rejected));

@@ -1,13 +1,6 @@
-//! Shell-made UI text in both UI languages — tray menu labels, the command-refusal box, and the words of automatic tab names.
-//! Pure: every function takes the [`Lang`] explicitly and nothing here knows Tauri.
-//!
-//! ★There is no process-global language★ — the layout's language is a `ViewManager` field (changed under the layout lock and
-//! bumping the version when an automatic tab name changes), and the tray and the refusal box read the effective `ui.language`
-//! setting when they need it. A global would make parallel tests share one language and let a late settings hook apply an older
-//! value last.
-//!
-//! The frontend has its own tables (`src/i18n/en.ts` · `ko.ts`) — the shell does not read them. The one word pinned equal on both
-//! sides is the `Foreign` tab-name word, by `layout::tab_name`'s test against `slot.foreignContent`.
+//! Shell-made UI text in both UI languages — tray menu labels, the command-refusal box, and the words of automatic tab names. Pure: every function takes the [`Lang`] explicitly; nothing here knows Tauri.
+//! There is no process-global language: the layout's language is a `ViewManager` field (changed under the layout lock, bumping the version when an automatic tab name changes), and the tray and the refusal box read the effective `ui.language` setting when needed. A global would make parallel tests share one language and let a late settings hook apply an older value last.
+//! The frontend has its own tables (`src/i18n/en.ts` · `ko.ts`) — the shell does not read them; the one word pinned equal on both sides is the `Foreign` tab-name word, by `layout::tab_name`'s test against `slot.foreignContent`.
 // ADR-0372 — the shell keeps its own small en/ko table
 // ADR-0373 — no process-global language
 
@@ -15,7 +8,6 @@ use crate::daemon_client::refusal::RefusalSite;
 use crate::settings::{SettingsService, UI_LANGUAGE};
 use crate::tray::core::MenuAction;
 
-/// A UI language — the values of the `ui.language` setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Lang {
     #[default]
@@ -26,7 +18,6 @@ pub enum Lang {
 impl Lang {
     pub const ALL: [Lang; 2] = [Lang::En, Lang::Ko];
 
-    /// The setting's spelling, which is also the `<html lang>` value the init script plants.
     pub const fn code(self) -> &'static str {
         match self {
             Lang::En => "en",
@@ -34,13 +25,11 @@ impl Lang {
         }
     }
 
-    /// The language of a canonical `ui.language` value — `None` for any other text.
     pub fn from_code(code: &str) -> Option<Lang> {
         Lang::ALL.into_iter().find(|lang| lang.code() == code)
     }
 
-    /// The effective `ui.language` now. The service only holds values from the key's choice list, which equals [`Lang::ALL`] (a
-    /// test pins that), so the default is reached only if that pin is broken.
+    /// The effective `ui.language` now. The service holds only values from the key's choice list, which equals [`Lang::ALL`] (a test pins that), so the default is reached only if that pin breaks.
     pub fn from_settings(settings: &SettingsService) -> Lang {
         settings
             .effective(UI_LANGUAGE)
@@ -49,7 +38,6 @@ impl Lang {
     }
 }
 
-/// The tray menu label of `action`.
 pub(crate) const fn tray_label(lang: Lang, action: MenuAction) -> &'static str {
     match (lang, action) {
         (Lang::En, MenuAction::StartDaemon) => "Start daemon",
@@ -63,7 +51,6 @@ pub(crate) const fn tray_label(lang: Lang, action: MenuAction) -> &'static str {
     }
 }
 
-/// The title of the command-refusal box.
 pub(crate) const fn refusal_title(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "Engram — Command registration refused",
@@ -81,10 +68,10 @@ pub(crate) const fn refusal_lead(lang: Lang, site: RefusalSite) -> &'static str 
             "The daemon refused to update the list of screen commands.\nThe LLM cannot use the changed screen commands. If the shell reconnects before the cause is fixed, the daemon may refuse all of its command registrations."
         }
         (Lang::Ko, RefusalSite::Register) => {
-            "데몬이 이 셸의 명령 등록을 통째로 거절했습니다.\nLLM 이 창 · 탭 · 슬롯 명령을 하나도 쓸 수 없습니다(원인이 고쳐질 때까지)."
+            "데몬이 이 셸의 명령 등록을 통째로 거절했습니다.\nLLM 이 창 · 탭 · 슬롯 명령을 하나도 쓸 수 없습니다(원인이 고쳐질 때까지)." // hangul-ok: the Korean UI table
         }
         (Lang::Ko, RefusalSite::Update) => {
-            "데몬이 화면 명령 명단 갱신을 거절했습니다.\n바뀐 화면 명령을 LLM 이 쓸 수 없고, 원인을 고치지 않은 채 재연결하면 이 셸의 명령 등록 전체가 거절될 수 있습니다."
+            "데몬이 화면 명령 명단 갱신을 거절했습니다.\n바뀐 화면 명령을 LLM 이 쓸 수 없고, 원인을 고치지 않은 채 재연결하면 이 셸의 명령 등록 전체가 거절될 수 있습니다." // hangul-ok: the Korean UI table
         }
     }
 }
@@ -96,16 +83,14 @@ pub(crate) fn refusal_body(lang: Lang, lead: &str, daemon_message: &str) -> Stri
             "{lead}\n\nDaemon reply:\n{daemon_message}\n\nFix the command declaration that caused it, then rebuild."
         ),
         Lang::Ko => format!(
-            "{lead}\n\n데몬 답:\n{daemon_message}\n\n원인이 된 명령 선언을 고친 뒤 다시 빌드하세요."
+            "{lead}\n\n데몬 답:\n{daemon_message}\n\n원인이 된 명령 선언을 고친 뒤 다시 빌드하세요." // hangul-ok: the Korean UI table
         ),
     }
 }
 
-/// A shell word an automatic tab name can be (`layout::tab_name`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabWord {
     EmptySlot,
-    /// An agent slot whose agent is not in the name ledger (or has a blank name).
     AgentUnknown,
     AgentTree,
     Usage,
@@ -177,7 +162,7 @@ mod tests {
             assert_distinct_and_filled(&labels, &format!("{lang:?} tray"));
         }
         assert_eq!(tray_label(Lang::En, MenuAction::QuitApp), "Quit Engram");
-        assert_eq!(tray_label(Lang::Ko, MenuAction::QuitApp), "완전 종료");
+        assert_eq!(tray_label(Lang::Ko, MenuAction::QuitApp), "완전 종료"); // hangul-ok: the Korean UI table
     }
 
     #[test]

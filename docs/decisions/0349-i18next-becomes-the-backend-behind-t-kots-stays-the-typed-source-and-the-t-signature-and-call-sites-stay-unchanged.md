@@ -14,7 +14,7 @@ ADR-0069 centralized UI strings into `src/i18n/` (`ko.ts` table + a typed `t(key
 - Rust-side visible strings (tray labels, native refusal dialog, about 9) are not part of this decision.
 
 ## 거부한 대안
-- **Keep the home-made backend until a second language is scheduled** — the later swap would cost the same, but the user chose to swap now so that the library change and the English addition do not land together. (약함 — 사용자 직접 기각)
+- **Keep the home-made backend until a second language is scheduled** — the later swap would cost the same, but the user chose to swap now so that the library change and the English addition do not land together. (weak — rejected directly by the user)
 - **react-intl / use-intl behind `t()`** — fewer peers in the surveyed React/Tauri apps (sample: i18next 12 of ~15 Tauri apps, 8 of ~35 well-known OSS apps vs react-intl 7), and no parameter-type inference from message text, so our placeholder typing would stay hand-rolled anyway.
 - **Lingui or Paraglide (idiomatic)** — rewrite of about 213 call sites across 33 files, `ko.ts` stops being the source (PO / JSON catalogs), runtime override of labels (ADR-0069 §5) gets hard with compiled message functions. As a shim behind `t()` they lose their main benefits (extraction, tree-shaking).
 - **A Rust i18n crate (rust-i18n, fluent)** — only about 9 fixed user-visible strings originate in Rust; a small table covers them if they are ever localized.

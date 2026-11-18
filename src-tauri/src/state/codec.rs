@@ -1,20 +1,9 @@
-//! `state.json` 의 글 ↔ [`StateFile`] — 읽기 관용과 쓰기 상한(크기 · 중첩 — TRD S21-storage §6-2 · §6-4 I4).
-//! 파일은 열지 않는다 — 읽기 · 쓰기는 부르는 쪽이 base `file` 로 한다. 통째로 읽을 수 있나는 base `file` 의
-//! 판정 하나다 — 이 모듈의 몫은 [`STATE_SPEC`](버전 키 · 판 · 상한 · 머리 모양 검사)과 창 해석이다.
-//!
-//! 읽기는 세 층으로 접는다:
-//! - **통째로 못 쓴다**([`Unusable`]) — 손상(JSON 이 아니다 · 객체가 아니다 · `version` 꼴이 틀리다 · 머리
-//!   (`saved_at_ms` · `clean_exit` · `resolved_crash_copy` · `windows` 배열)를 못 읽는다 · 원문의 상한 초과 ·
-//!   UTF-8 아님) 이거나 이 셸보다 새 `version` 이다. `version` 이 없으면 1 판이다.
-//! - **그 창만 건너뛴다** — 모르는 `kind` · 못 읽는 창 칸(탭 칸 포함).
-//! - **그 탭만 건너뛴다** — 못 읽는 탭(모르는 노드 종류 · 객체가 아닌 슬롯 내용 등).
-//!
-//! 창의 `theme` 이 모르는 값 · `number` 가 `1..=MAX_SAVED_NUMBER` 정수가 아닌 값이면 창은 살리고 그 칸만
-//! `None`(전역 테마 · 번호 없음)으로 접는다. `bounds` · `number` 가 없거나 `null` 이면 `None`(자리를 본 적 없는 창 ·
-//! 번호를 적지 않은 파일)이다 — 경고가 아니다. main 의 `number` 는 복원이 보지 않으므로(D3) 무슨 값이든 경고하지
-//! 않는다. 탭의 `named` 가 없거나 불이 아니면 그 탭은 살리고 `None`(자동 이름)으로 읽는다 — 이것도 경고가 아니다(TRD
-//! S26-window-chrome §3-3 · 판정은 `schema::TabEntry` 의 serde 가 한다). 건너뛰고 접은 것은 [`DecodeWarning`] 으로
-//! 돌려준다 — 로그는 부르는 쪽이 낸다.
+//! The text of `state.json` ↔ [`StateFile`] — read leniency and write caps (size · nesting — TRD S21-storage §6-2 · §6-4 I4). It does not open files — the caller reads · writes with base `file`; whether it can be read whole is base `file`'s one decision, and this module's part is [`STATE_SPEC`] (version key · version · cap · head shape check) and window parsing.
+//! Reads fold into three layers:
+//! - Unusable as a whole ([`Unusable`]) — corrupt (`not JSON` · `not a JSON object` · `` `version` is not an integer of 1 or more `` · the head (`saved_at_ms` · `clean_exit` · `resolved_crash_copy` · the `windows` array) unreadable · `exceeded the {cap} byte cap` · not UTF-8) or a `version` newer than this shell. Without `version` it is version 1.
+//! - Skip only that window — unknown `kind` · an unreadable window field (tab fields included).
+//! - Skip only that tab — an unreadable tab (unknown node kind · slot content that is not an object, etc.).
+//! A window's `theme` unknown or `number` not an integer in `1..=MAX_SAVED_NUMBER` keeps the window and folds only that field to `None` (global theme · no number). `bounds` · `number` absent or `null` are `None` (a window whose position was never seen · a file that wrote no numbers) — not a warning; restore does not look at main's `number` (D3), so a missing one warns not at all. A tab's `named` absent or not a bool keeps the tab and reads `None` (auto name) — not a warning either (TRD S26-window-chrome §3-3; decided by the serde of `schema::TabEntry`). What was skipped and folded is returned as [`DecodeWarning`] — the caller emits the logs.
 
 use std::fmt;
 
@@ -29,12 +18,10 @@ use super::schema::{
 use crate::layout::numbering;
 use crate::theme::UiTheme;
 
-/// 읽기 상한이자 쓰기 상한 — 넘는 글을 쓰면 다음 부팅이 그 파일 전체를 못 쓴다고 접는다(I4). 부르는 쪽은 이
-/// 값으로 `engram_dashboard_base::file::read_file_capped` 한다.
+/// The read cap and also the write cap — text over it makes the next boot fold the whole file as unusable (I4). The caller reads with `engram_dashboard_base::file::read_file_capped` using this value.
 pub const STATE_READ_CAP: u64 = 4 * 1024 * 1024;
 
-/// `state.json` · `state.crash.json` 의 읽기 규칙 — 모양 검사는 머리 해석이다(창 하나하나는 관용이라 보지 않는다).
-/// 부팅 판정 · 기록기의 저장 직전 재판정이 같은 정의를 쓴다.
+/// The read rules of `state.json` · `state.crash.json` — the shape check is head parsing (each window is lenient, so not looked at). The boot decision and the writer's pre-save re-decision use the same definition.
 // ADR-0291 R1~R7
 pub const STATE_SPEC: file::Spec = file::Spec {
     version_key: "version",
@@ -45,87 +32,87 @@ pub const STATE_SPEC: file::Spec = file::Spec {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unusable {
-    /// 손상 — base `file` 판정의 사유 문구 그대로(상한 초과 · UTF-8 아님 · JSON 아님 · 객체 아님 · `version` 꼴 ·
-    /// 머리를 못 읽는다).
+    /// Corrupt — the base `file` decision's reason text as is (`exceeded the {cap} byte cap` · not UTF-8 · `not JSON` · `not a JSON object` · `` `version` is not an integer of 1 or more `` · the head cannot be read).
     #[error("{0}")]
     Corrupt(String),
-    #[error("이 셸보다 새 형식이다(version {found} — 이 셸은 {STATE_VERSION} 까지)")]
+    #[error(
+        "newer format than this shell (version {found} — this shell goes up to {STATE_VERSION})"
+    )]
     NewerVersion { found: u64 },
 }
 
-/// [`encode`] 가 쓰기를 거절한 사유 — 둘 다 그대로 쓰면 다음 부팅이 그 파일 전체를 못 쓴다고 접는다.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EncodeError {
-    #[error("쓸 원문({len} 바이트)이 상한 {STATE_READ_CAP} 바이트를 넘는다")]
+    #[error("the text to write ({len} bytes) exceeds the cap of {STATE_READ_CAP} bytes")]
     TooLarge { len: usize },
-    /// [`decode`] 와 같은 파서로 다시 읽히지 않는다 — 닿는 원인은 serde_json 의 중첩 상한(128 단)이다(같은 슬롯을
-    /// 거듭 나눈 분할 트리). 바이트 상한 검사는 이것을 못 잡는다.
-    #[error("쓸 원문이 다시 읽히지 않는다: {reason}")]
+    /// It does not read back with the same parser as [`decode`] — reached through serde_json's nesting cap (128 levels), e.g. a split tree splitting the same slot again and again. The byte cap check cannot catch this.
+    #[error("the text to write does not read back: {reason}")]
     Unparsable { reason: String },
 }
 
-/// 읽기에서 건너뛰거나 접은 것 하나 — 파일 전체는 쓸 수 있다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeWarning {
-    /// `index` = `windows` 배열 안의 자리. `id` = 읽을 수 있었다면 그 창의 `id`.
     WindowSkipped {
         index: usize,
         id: Option<String>,
         reason: String,
     },
-    /// `index` = 그 창 `tabs` 배열 안의 자리.
     TabSkipped {
         window_id: String,
         index: usize,
         reason: String,
     },
-    /// `raw` = 받은 값의 JSON 원문 — 앞 `WARNING_RAW_MAX_CHARS` 글자까지(넘으면 `…` 로 끝난다).
-    ThemeDropped { window_id: String, raw: String },
-    /// 팝아웃의 창 번호 칸에 값이 있는데 `1..=MAX_SAVED_NUMBER` 정수가 아니다 — 그 칸만 `None` 으로 접고 창은
-    /// 살린다(TRD S26-window-chrome §3-3). 칸 없음 · `null` · main 의 칸은 이 경고를 내지 않는다. `raw` = 받은 값의
-    /// JSON 원문 — `ThemeDropped` 와 같은 상한.
-    // ADR-0300 — 창 번호
-    NumberDropped { window_id: String, raw: String },
+    ThemeDropped {
+        window_id: String,
+        raw: String,
+    },
+    /// A popout's window number field has a value that is not an integer in `1..=MAX_SAVED_NUMBER` — only that field folds to `None` and the window is kept (TRD S26-window-chrome §3-3). Absent · `null` · main's field do not raise this warning. `raw` = the JSON raw text of the received value, with the same cap as `ThemeDropped`.
+    // ADR-0300
+    NumberDropped {
+        window_id: String,
+        raw: String,
+    },
 }
 
 impl fmt::Display for DecodeWarning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DecodeWarning::WindowSkipped { index, id, reason } => match id {
-                Some(id) => write!(f, "창 {index}번({id})을 건너뛴다: {reason}"),
-                None => write!(f, "창 {index}번을 건너뛴다: {reason}"),
+                Some(id) => write!(f, "skipping window #{index} ({id}): {reason}"),
+                None => write!(f, "skipping window #{index}: {reason}"),
             },
             DecodeWarning::TabSkipped {
                 window_id,
                 index,
                 reason,
-            } => write!(f, "창 {window_id} 의 탭 {index}번을 건너뛴다: {reason}"),
+            } => write!(f, "skipping tab #{index} of window {window_id}: {reason}"),
             DecodeWarning::ThemeDropped { window_id, raw } => {
                 write!(
                     f,
-                    "창 {window_id} 의 모르는 테마 {raw} — 전역 테마를 따른다"
+                    "unknown theme {raw} of window {window_id} — following the global theme"
                 )
             }
             DecodeWarning::NumberDropped { window_id, raw } => {
-                write!(f, "창 {window_id} 의 번호 {raw} 를 쓸 수 없다 — 버린다")
+                write!(
+                    f,
+                    "number {raw} of window {window_id} is unusable — discarding it"
+                )
             }
         }
     }
 }
 
-/// 원문 하나를 읽는다 — [`decode_parsed`] 에 base 판정(`file::parse` · [`STATE_SPEC`])을 넣은 것.
 pub fn decode(text: &str) -> Result<(StateFile, Vec<DecodeWarning>), Unusable> {
     decode_parsed(file::parse(text, &STATE_SPEC))
 }
 
-/// base 판정 하나를 상태 파일로 — 쓸 수 있는 판정이면 창 · 탭을 관용으로 읽는다(모듈 헤더).
 pub fn decode_parsed(parsed: Parsed) -> Result<(StateFile, Vec<DecodeWarning>), Unusable> {
     let doc = match parsed {
         Parsed::Usable { doc, .. } => doc,
         Parsed::Unusable(reason) => return Err(Unusable::Corrupt(reason)),
         Parsed::Newer { found } => return Err(Unusable::NewerVersion { found }),
     };
-    // 모양 검사([`head_shape`])를 이미 지난 머리다 — 값을 얻으려고 한 번 더 읽는다.
+    // A head that already passed the shape check ([`head_shape`]) — read once more to get the values.
     let head = Head::deserialize(Value::Object(doc))
         .map_err(|e| Unusable::Corrupt(not_a_state_file(&e)))?;
 
@@ -147,27 +134,26 @@ pub fn decode_parsed(parsed: Parsed) -> Result<(StateFile, Vec<DecodeWarning>), 
 }
 
 pub fn encode(state: &StateFile) -> Result<String, EncodeError> {
-    // 사람 · 에이전트가 열어 보는 파일이라 줄을 나눈다.
+    // A file people · agents open to look at, so lines are broken.
     let mut text = serde_json::to_string_pretty(state)
-        .expect("문자열 키와 실패하지 않는 직렬화기뿐이라 JSON 직렬화가 실패할 수 없다");
+        .expect("only string keys and an infallible serializer, so JSON serialization cannot fail");
     text.push('\n');
     if file::check_cap(text.len(), &STATE_SPEC).is_err() {
         return Err(EncodeError::TooLarge { len: text.len() });
     }
-    // ★다시 읽기는 [`decode`] 와 같은 판정(`file::parse`)으로 한다 — 다른 파서로 바꾸지 말 것★: 중첩 깊이를 재지
-    //   않는 길(`IgnoredAny` 등)로 재면 다시 읽기를 통과한 글을 `decode` 가 못 읽는다.
+    // Read back with the same decision as [`decode`] (`file::parse`) — do not switch to another parser: measuring with a path that does not measure nesting depth (`IgnoredAny` etc.) would let text passing the read-back be unreadable by `decode`.
     if let Parsed::Unusable(reason) = file::parse(&text, &STATE_SPEC) {
         return Err(EncodeError::Unparsable { reason });
     }
     Ok(text)
 }
 
-/// [`STATE_SPEC`] 의 모양 검사 — 머리를 읽을 수 있나. 창 하나하나는 보지 않는다(그 창만 건너뛰는 관용).
+/// The shape check of [`STATE_SPEC`] — whether the head can be read. Each window is not looked at (the leniency of skipping only that window).
 fn head_shape(version: u64, doc: &Map<String, Value>) -> Result<(), String> {
-    // 앞 판을 읽는 리더가 없다 — 앞 판 파일을 이 판으로 읽으면 칸 뜻이 어긋난다(`schema` 머리 「칸 더하기 규칙」).
+    // There is no reader for earlier versions — reading an earlier version's file as this version would misread the meaning of fields (`schema` header 「field addition rules」).
     if version != u64::from(STATE_VERSION) {
         return Err(format!(
-            "version {version} 을 읽는 리더가 없다(이 셸은 {STATE_VERSION})"
+            "no reader for version {version} (this shell is {STATE_VERSION})"
         ));
     }
     Head::deserialize(doc)
@@ -176,17 +162,15 @@ fn head_shape(version: u64, doc: &Map<String, Value>) -> Result<(), String> {
 }
 
 fn not_a_state_file(error: &serde_json::Error) -> String {
-    format!("상태 파일 모양이 아니다: {error}")
+    format!("not a state file shape: {error}")
 }
 
-/// 크래시 사본의 신원 — [`StateFile::resolved_crash_copy`] 에 싣는 값. 읽은 원문 바이트 그대로를 잰다 — 부팅과
-/// 기록기가 모두 이 함수로 재야 같은 사본을 같다고 본다.
+/// The identity of a crash copy — the value for [`StateFile::resolved_crash_copy`], measured over the raw bytes read as is; boot and the writer must both use this function to see the same copy as the same.
 pub fn crash_copy_hash(text: &str) -> String {
     fnv1a_hex(text.as_bytes())
 }
 
-/// 64비트 FNV-1a — 같은 바이트면 빌드 · 실행이 달라도 같은 값이다(std `DefaultHasher` 는 그것을 약속하지
-/// 않는다). 같은 내용인가를 가리는 용도이지 보안용이 아니다 — 일부러 맞춘 충돌은 못 막는다.
+/// 64-bit FNV-1a — the same bytes give the same value across builds · runs (std `DefaultHasher` does not promise that). For telling whether content is the same, not security — a deliberately crafted collision is not prevented.
 fn fnv1a_64(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -195,7 +179,6 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     })
 }
 
-/// [`fnv1a_64`] 를 소문자 16진 16자리로 — 앞자리 0 을 채워 길이가 늘 같다.
 fn fnv1a_hex(bytes: &[u8]) -> String {
     format!("{:016x}", fnv1a_64(bytes))
 }
@@ -208,7 +191,7 @@ struct Head {
     windows: Vec<Value>,
 }
 
-/// [`WindowKind`] 의 `kind` 철자 — 같은 `rename_all` 이라 같은 철자다(왕복 시험이 맞댄다).
+/// The `kind` spelling of [`WindowKind`] — the same `rename_all`, so the same spelling (the round-trip test holds them against each other).
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum KindTag {
@@ -223,8 +206,7 @@ struct WindowHead {
     number: Value,
     #[serde(default)]
     theme: Value,
-    // 없음 · `null` = `None`. 객체가 아니거나 칸이 수가 아니면(유한하지 않은 실수는 `null` 로 나간다) 그 창의 읽기
-    // 실패다 — 이 판의 쓰기는 그런 값을 내지 않는다(`WindowBounds` 가 유한한 값만 쥔다).
+    // Absent · `null` = `None`. Not an object or a non-number field (non-finite floats go out as `null`) is a read failure of that window — this version's writes do not produce such values (`WindowBounds` holds only finite values).
     #[serde(default)]
     bounds: Option<Bounds>,
     maximized: bool,
@@ -251,13 +233,13 @@ fn decode_window(
     };
     let kind = match raw.get("kind") {
         None => {
-            skip("`kind` 가 없다".to_string());
+            skip("`kind` is missing".to_string());
             return None;
         }
         Some(kind) => match KindTag::deserialize(kind) {
             Ok(kind) => kind,
             Err(_) => {
-                skip(format!("모르는 창 종류 {kind}"));
+                skip(format!("unknown window kind {kind}"));
                 return None;
             }
         },
@@ -314,7 +296,7 @@ fn decode_window(
     })
 }
 
-// 경고에 싣는 원문의 상한(글자) — 칸 하나에 큰 값이 들어 있어도 로그 한 줄이 그만큼 커지지 않게 한다.
+// The cap (characters) of the raw text put in a warning — so that even a big value in one field does not make one log line that big.
 const WARNING_RAW_MAX_CHARS: usize = 64;
 
 fn raw_for_warning(value: &Value) -> String {
@@ -325,7 +307,7 @@ fn raw_for_warning(value: &Value) -> String {
     }
 }
 
-/// `Err` = 탭 칸 자체(`active_tab` · `tabs` 배열)를 못 읽는다 — 그 창째 건너뛴다.
+/// `Err` = the tab fields themselves (`active_tab` · the `tabs` array) cannot be read — the whole window is skipped.
 fn decode_strip(
     window_id: &str,
     raw: Value,
@@ -400,7 +382,7 @@ mod tests {
         let focused = Uuid::new_v4();
         let first = TabEntry {
             id: Uuid::new_v4(),
-            name: "빈 칸".to_string(),
+            name: "Empty slot".to_string(),
             named: Some(false),
             focused_slot_id: Some(focused),
             layout: PersistedNode::Split {
@@ -425,7 +407,7 @@ mod tests {
                 }),
             },
         };
-        let second = tab("탭 둘", known(SlotContent::AgentList));
+        let second = tab("Tab two", known(SlotContent::AgentList));
         let popout = tab("View 3", known(SlotContent::AgentList));
         StateFile {
             version: STATE_VERSION,
@@ -462,7 +444,7 @@ mod tests {
     fn main_strip(state: &mut StateFile) -> &mut TabStrip {
         match &mut state.windows[0].kind {
             WindowKind::Main(strip) => strip,
-            other => panic!("main 창이어야 한다: {other:?}"),
+            other => panic!("must be the main window: {other:?}"),
         }
     }
 
@@ -488,7 +470,7 @@ mod tests {
         window
     }
 
-    /// 읽히는 창 — 빈 탭 하나를 든 팝아웃(코덱은 팝아웃 id 가 UUID 인지 보지 않는다).
+    /// A readable window — a popout holding one empty tab (the codec does not check whether the popout id is a UUID).
     fn readable(id: &str) -> Value {
         tabbed(id, "popout", vec![tab_json(json!({ "type": "empty" }))])
     }
@@ -509,12 +491,12 @@ mod tests {
             .iter()
             .map(|w| match w {
                 DecodeWarning::WindowSkipped { index, .. } => *index,
-                other => panic!("창 건너뛰기여야 한다: {other}"),
+                other => panic!("must be a window skip: {other}"),
             })
             .collect()
     }
 
-    // ── 왕복 ──
+    // ── round trip ──
 
     #[test]
     fn a_full_file_round_trips() {
@@ -598,7 +580,7 @@ mod tests {
         assert_eq!(fnv1a_hex(b"foobar"), "85944171f73967e8");
     }
 
-    // ── 모르는 슬롯 내용(ADR-0060) ──
+    // ── unknown slot content (ADR-0060) ──
 
     #[test]
     fn unknown_slot_content_survives_decode_and_encode() {
@@ -616,7 +598,7 @@ mod tests {
         assert_eq!(warnings, vec![]);
         for tab in &main_strip(&mut state).tabs {
             let PersistedNode::Slot { content, .. } = &tab.layout else {
-                panic!("슬롯이어야 한다")
+                panic!("must be a slot")
             };
             assert!(matches!(content, PersistedContent::Unknown(_)));
         }
@@ -654,7 +636,7 @@ mod tests {
         assert_eq!(strip.tabs.len(), 2);
         assert_eq!(strip.tabs[0].focused_slot_id, Some(palette));
         let PersistedNode::Split { a, b, .. } = &strip.tabs[0].layout else {
-            panic!("분할이어야 한다")
+            panic!("must be a split")
         };
         assert_eq!(
             **a,
@@ -673,7 +655,7 @@ mod tests {
             }
         );
         let PersistedNode::Slot { content, .. } = &strip.tabs[1].layout else {
-            panic!("슬롯이어야 한다")
+            panic!("must be a slot")
         };
         assert_eq!(content, &PersistedContent::Known(SlotContent::AgentList));
 
@@ -684,7 +666,7 @@ mod tests {
         );
     }
 
-    // ── 창 · 탭 건너뛰기 ──
+    // ── window · tab skips ──
 
     #[test]
     fn an_unknown_window_kind_skips_only_that_window() {
@@ -707,8 +689,7 @@ mod tests {
         ));
     }
 
-    /// ADR-0225: 걷어 낸 트리 전용 창의 옛 항목(`kind: "tree"`)은 모르는 창 종류로 건너뛰고 나머지는 그대로 읽는다 —
-    /// 옛 파일 하나 때문에 저장된 화면을 잃지 않는다.
+    /// ADR-0225: an old entry of the removed tree-only window (`kind: "tree"`) is skipped as an unknown window kind and the rest read as is — the saved screen is not lost over one old entry.
     #[test]
     fn a_retired_tree_window_entry_is_skipped_and_the_rest_is_kept() {
         let mut tree = window("agent-tree", "tree");
@@ -724,7 +705,7 @@ mod tests {
             matches!(
                 warnings.as_slice(),
                 [DecodeWarning::WindowSkipped { index: 1, id: Some(id), reason }]
-                    if id == "agent-tree" && reason.contains("모르는 창 종류")
+                    if id == "agent-tree" && reason.contains("unknown window kind")
             ),
             "{warnings:?}"
         );
@@ -778,13 +759,13 @@ mod tests {
                 DecodeWarning::TabSkipped {
                     window_id, index, ..
                 } if window_id == "main" => *index,
-                other => panic!("main 의 탭 건너뛰기여야 한다: {other}"),
+                other => panic!("must be a tab skip of main: {other}"),
             })
             .collect();
         assert_eq!(skipped, [0, 2, 3]);
     }
 
-    // TRD S26-window-chrome §3-3 — `named` 가 불이 아니어도 탭은 살리고 `None`(자동 이름)으로 읽는다. 경고하지 않는다.
+    // TRD S26-window-chrome §3-3 — even if `named` is not a bool the tab is kept and read as `None` (auto name). No warning.
     #[test]
     fn a_tab_named_flag_that_is_not_a_bool_reads_as_none_and_keeps_the_tab() {
         let flags = [
@@ -846,7 +827,7 @@ mod tests {
 
     #[test]
     fn a_number_that_is_not_a_saved_number_keeps_the_window_and_drops_the_number() {
-        // 앞 둘(칸 없음 · `null`) = 번호를 적지 않은 파일 — 경고 없이 접는다.
+        // The first two (no field · `null`) = a file that did not write numbers — folded without a warning.
         let bad = [
             None,
             Some(Value::Null),
@@ -874,20 +855,20 @@ mod tests {
             })
             .collect();
         let (state, warnings) = decode_value(&file(windows));
-        assert_eq!(state.windows.len(), bad.len(), "창을 건너뛰지 않는다");
+        assert_eq!(state.windows.len(), bad.len(), "no window is skipped");
         assert!(state.windows.iter().all(|w| w.number.is_none()));
         assert!(
             state
                 .windows
                 .iter()
                 .all(|w| matches!(&w.kind, WindowKind::Popout(strip) if strip.tabs.len() == 1)),
-            "탭도 그대로"
+            "tabs unchanged too"
         );
         let dropped: Vec<(String, String)> = warnings
             .iter()
             .map(|w| match w {
                 DecodeWarning::NumberDropped { window_id, raw } => (window_id.clone(), raw.clone()),
-                other => panic!("번호 버림이어야 한다: {other}"),
+                other => panic!("must be a number discard: {other}"),
             })
             .collect();
         let want: Vec<(String, String)> = bad
@@ -936,7 +917,7 @@ mod tests {
             .map(|w| match w {
                 DecodeWarning::NumberDropped { raw, .. }
                 | DecodeWarning::ThemeDropped { raw, .. } => raw.as_str(),
-                other => panic!("번호 · 테마 버림이어야 한다: {other}"),
+                other => panic!("must be a number · theme discard: {other}"),
             })
             .collect();
         let cut = |c: char| format!("\"{}…", c.to_string().repeat(WARNING_RAW_MAX_CHARS - 1));
@@ -947,7 +928,7 @@ mod tests {
                 cut('y').as_str(),
                 edge_raw.to_string().as_str(),
             ],
-            "상한까지는 그대로 싣는다"
+            "put in as is up to the cap"
         );
     }
 
@@ -957,7 +938,7 @@ mod tests {
         missing.as_object_mut().unwrap().remove("bounds");
         let mut null = readable("w-1");
         null["bounds"] = Value::Null;
-        // 유한하지 않은 실수는 직렬화에서 `null` 이 된다 — 칸 하나가 `null` 인 자리는 못 읽는 창이다.
+        // Non-finite floats become `null` in serialization — a place where one field is `null` is an unreadable window.
         let mut holed = readable("w-2");
         holed["bounds"] = json!({ "x": null, "y": 0, "w": 800, "h": 600 });
         let kept = readable("w-3");
@@ -997,7 +978,7 @@ mod tests {
         assert_eq!(back, state);
     }
 
-    // ── 통째로 못 쓰는 파일 ──
+    // ── files unusable as a whole ──
 
     #[test]
     fn a_newer_version_is_unusable() {
@@ -1007,7 +988,7 @@ mod tests {
             decode(&doc.to_string()),
             Err(Unusable::NewerVersion { found: 2 })
         );
-        // 머리 모양이 달라도 「새 형식」이다.
+        // Even with a different head shape it is a 「newer format」.
         assert_eq!(
             decode(r#"{"version":7,"everything":"else"}"#),
             Err(Unusable::NewerVersion { found: 7 })
@@ -1029,7 +1010,7 @@ mod tests {
         assert_eq!(warnings, vec![]);
     }
 
-    /// ADR-0291 R1: `version` 이 없는 파일은 1 판이다.
+    /// ADR-0291 R1: a file without `version` is version 1.
     #[test]
     fn a_missing_version_reads_as_the_first_version() {
         let mut doc = file(vec![readable("w-0")]);
@@ -1042,14 +1023,14 @@ mod tests {
     fn corrupt_reason(text: &str) -> String {
         match decode(text) {
             Err(Unusable::Corrupt(reason)) => reason,
-            other => panic!("손상이어야 한다: {other:?}"),
+            other => panic!("must be corrupt: {other:?}"),
         }
     }
 
     #[test]
     fn not_json_is_unusable() {
-        assert!(corrupt_reason("{BROKEN").contains("JSON 이 아니다"));
-        assert!(corrupt_reason("").contains("JSON 이 아니다"));
+        assert!(corrupt_reason("{BROKEN").contains("not JSON"));
+        assert!(corrupt_reason("").contains("not JSON"));
     }
 
     #[test]
@@ -1084,8 +1065,8 @@ mod tests {
             );
         }
         assert!(
-            corrupt_reason(&without("windows").to_string()).contains("상태 파일 모양이 아니다"),
-            "머리를 못 읽는 사유는 모양 검사의 문구다"
+            corrupt_reason(&without("windows").to_string()).contains("not a state file shape"),
+            "the reason for an unreadable head is the shape check's text"
         );
     }
 
@@ -1098,7 +1079,7 @@ mod tests {
         );
     }
 
-    // ── 쓰기 상한 ──
+    // ── write cap ──
 
     #[test]
     fn encode_writes_up_to_the_cap_and_refuses_past_it() {
@@ -1119,7 +1100,7 @@ mod tests {
         );
     }
 
-    /// 분할 `depth` 겹(언제나 `a` 쪽을 다시 나눈다) — 창 하나 · 탭 하나의 파일.
+    /// `depth` levels of splits (always splitting the `a` side again) — a file with one window · one tab.
     fn nested_splits(depth: usize) -> StateFile {
         let mut layout = known(SlotContent::Empty);
         for _ in 0..depth {
@@ -1131,7 +1112,7 @@ mod tests {
                 b: Box::new(known(SlotContent::Empty)),
             };
         }
-        let only = tab("깊은 탭", layout);
+        let only = tab("Deep tab", layout);
         StateFile {
             version: STATE_VERSION,
             saved_at_ms: 1,
@@ -1159,7 +1140,7 @@ mod tests {
 
         let too_deep = nested_splits(121);
         let written = serde_json::to_string_pretty(&too_deep).unwrap();
-        assert!(corrupt_reason(&written).contains("JSON 이 아니다"));
+        assert!(corrupt_reason(&written).contains("not JSON"));
         assert!(matches!(
             encode(&too_deep),
             Err(EncodeError::Unparsable { .. })

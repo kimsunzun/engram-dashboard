@@ -23,7 +23,9 @@ impl ProbeSpawner for NoChildren {
         _cmd: &ProbeCommand,
         _deadline: Instant,
     ) -> Result<Box<dyn ProbeChild>, ProbeError> {
-        Err(ProbeError::Spawn("시험 — 자식을 띄우지 않는다".to_owned()))
+        Err(ProbeError::Spawn(
+            "test — does not spawn a child".to_owned(),
+        ))
     }
 }
 
@@ -103,7 +105,7 @@ pub(crate) fn service(
     UsageService::new(parts(probes, clock)).0
 }
 
-/// Same as [`service`] but the test sets the ⟳ reply wait cap — so a test asserting 「답이 아직 없다」 (there is no answer yet) during a blocked query does not
+/// Same as [`service`] but the test sets the ⟳ reply wait cap — so a test asserting 「there is no answer yet」 during a blocked query does not
 /// lean on the production cap (`REPLY_WAIT_MAX`) (on a slow runner, if that cap ended first it would fail falsely).
 pub(crate) fn service_with_wait(
     probes: Vec<&'static dyn UsageProbe>,

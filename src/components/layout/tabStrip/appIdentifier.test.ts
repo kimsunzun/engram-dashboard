@@ -15,7 +15,7 @@ describe('createAppIdentifier', () => {
     vi.restoreAllMocks()
   })
 
-  it('답을 소문자로 쥔다 · 답 전은 null · 묻는 중 · 답 뒤의 거듭 부름은 다시 묻지 않는다', async () => {
+  it('holds the answer in lowercase · null before the answer · while asking · repeated calls after the answer do not ask again', async () => {
     const get = vi.fn(async () => 'com.Engram.App')
     const app = createAppIdentifier(get)
     expect(app.current()).toBeNull()
@@ -27,7 +27,7 @@ describe('createAppIdentifier', () => {
     expect(get).toHaveBeenCalledTimes(1)
   })
 
-  it('실패하면 같은 부름 안에서 다시 묻는다 — 다음 마운트를 기다리지 않는다', async () => {
+  it('on failure it asks again within the same call — it does not wait for the next mount', async () => {
     const get = vi
       .fn<() => Promise<string>>()
       .mockRejectedValueOnce(new Error('not ready'))
@@ -40,7 +40,7 @@ describe('createAppIdentifier', () => {
     expect(app.current()).toBe('com.engram.app')
   })
 
-  it('재시도가 다 실패하면 null 그대로 · 다음 부름은 다시 묻는다', async () => {
+  it('if retries all fail it stays null · the next call asks again', async () => {
     const get = vi.fn<() => Promise<string>>().mockRejectedValue(new Error('down'))
     const app = createAppIdentifier(get)
     app.ask()
@@ -57,7 +57,7 @@ describe('createAppIdentifier', () => {
     expect(app.current()).toBe('com.engram.app')
   })
 
-  it('빈 답 → null 그대로 · 다시 묻지 않는다', async () => {
+  it('an empty answer → null as is · it does not ask again', async () => {
     const get = vi.fn(async () => '')
     const app = createAppIdentifier(get)
     app.ask()

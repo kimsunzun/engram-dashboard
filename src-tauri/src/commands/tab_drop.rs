@@ -1,10 +1,5 @@
-//! Two tab-drop invoke shells (`tab_drop` · `window_frame`) and their Tauri adapter — reading input after a drag ends (platform) ·
-//! window getters · emitting events (`tab_drop:done` · `window:frame`). Processing · decision · ledger are done by `crate::tab_drop`.
-//! `window:frame` is pushed not only for place recording but also on that window's focus event ([`push_window_focus`]), and carries in its body the front-window field (`focused`) and
-//! the caption look (`caption` — platform `caption_style`) (TRD S26-window-chrome §6-5).
-//!
-//! Both are wiring inside the webview, so they are not put in the bus command table — a drop is the end of a mouse release and has a branch that reads input state, so the LLM
-//! must not imitate it. The LLM command for the same action is T-65 `tab.dock` on the same `layout::apply::dock_tab`.
+//! Two tab-drop invoke shells (`tab_drop` · `window_frame`) and their Tauri adapter — reading input after a drag ends (platform) · window getters · emitting events (`tab_drop:done` · `window:frame`). Processing · decision · ledger are `crate::tab_drop`. `window:frame` is pushed not only for place recording but on that window's focus event too ([`push_window_focus`]), carrying the front-window field (`focused`) and the caption look (`caption` — platform `caption_style`) (TRD S26-window-chrome §6-5).
+//! Both are wiring inside the webview, not in the bus command table: a drop is the end of a mouse release with a branch reading input state, which the LLM must not imitate. The LLM command for the same action is T-65 `tab.dock` on the same `layout::apply::dock_tab`.
 // ADR-0296
 // TRD S21-slot-docking §3
 
@@ -26,17 +21,11 @@ use crate::tab_drop::{
     self, Arrival, DropBook, DropPorts, DropShell, FrameBook, FrameGeom, FrameSeen,
 };
 
-/// On each drop handling, only to the source window (the command's `from`) — body = [`TabDropDone`].
 pub const EVT_TAB_DROP_DONE: &str = "tab_drop:done";
-/// Only to that window · only when the value changes — body = [`WindowFrame`].
 pub const EVT_WINDOW_FRAME: &str = "window:frame";
 
-/// Tab drop (async — it may create a new window) — `invoke('tab_drop', { drop })`. The contract of argument · answer is [`TabDrop`] ·
-/// [`TabDropReply`]. Calling window = the window Tauri injects. The result goes, separately from the answer, to the source window as `tab_drop:done` (excluding duplicates of the same
-/// drag · a rejection that yielded its place to a `drop` held in custody — [`TabDropDone`]). It is always `Ok` — failure is also a branch of the answer.
-///
-/// Input is read as soon as it is received, before the lock · ledger — for a command sent by the source dragend: the cursor · primary button · Esc · the topmost window under the cursor;
-/// for a drop in our webview: the cursor only. It is a call after the drag has ended (the drag command only on release — ADR-0296 · ADR-0297).
+/// Tab drop (async — it may create a new window) — `invoke('tab_drop', { drop })`; contract of argument · answer = [`TabDrop`] · [`TabDropReply`]. Calling window = the window Tauri injects. The result goes, separately from the answer, to the source window as `tab_drop:done` (excluding duplicates of the same drag · a rejection that yielded its place to a `drop` held in custody — [`TabDropDone`]). Always `Ok` — failure is also a branch of the answer.
+/// Input is read as soon as received, before the lock · ledger — for a source dragend: cursor · primary button · Esc · the topmost window under the cursor; for a drop in our webview: the cursor only. A call after the drag has ended (the drag command only on release — ADR-0296 · ADR-0297).
 // TRD S21-slot-docking §3-2
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -92,9 +81,7 @@ pub async fn tab_drop(
     ))
 }
 
-/// The calling window's window facts (synchronous) — `invoke('window_frame')`. The webview pulls once at mount, and later changes are pushed by `window:frame`.
-/// Restore size · maximize = model values · frame = value counted by the getters now (rule = `tab_drop::pull_frame`) · front window = the current OS
-/// foreground-window decision. If the window is not in the tab model, `Err`.
+/// The calling window's window facts (synchronous) — `invoke('window_frame')`. The webview pulls once at mount; later changes are pushed by `window:frame`. Restore size · maximize = model values · frame = counted by the getters now (rule = `tab_drop::pull_frame`) · front window = the current OS foreground-window decision. A window not in the tab model → `Err`.
 // TRD S21-slot-docking §3-8 · TRD S26-window-chrome §6-5
 #[tauri::command]
 pub fn window_frame(
@@ -120,18 +107,14 @@ pub fn window_frame(
     Ok(tab_drop::pull_frame(&frames, label, seen))
 }
 
-/// Called after the place-recording path (`state::placement::record`) has written to the model — emits `window:frame` to that window only when that window's window facts changed
-/// (rule = `tab_drop::push_frame`). Front window = the current OS foreground-window decision. ★Called without holding any lock★
-/// — it calls the getters.
+/// Called after the place-recording path (`state::placement::record`) wrote to the model — emits `window:frame` to that window only when its window facts changed (rule = `tab_drop::push_frame`). Front window = the current OS foreground-window decision. Call without holding any lock — it calls the getters.
 // TRD S21-slot-docking §3-8
 pub(crate) fn push_window_frame(window: &Window, minimized: bool, attrs: WindowAttrs) {
     let focused = crate::commands::window_ctl::is_foreground(window);
     push(window, minimized, attrs, focused);
 }
 
-/// Called on that window's focus event (`WindowEvent::Focused(focused)`) — the front-window field is ★the event's value★: when the event fires the OS foreground-window
-/// decision may not have changed yet (order unverified · TRD S26-window-chrome §6-5 「`focused` 값의 출처」 · S12). A window not in the tab
-/// model (a prewarmed window · an event that arrived late after closing) is skipped. ★Called without holding any lock★.
+/// Called on that window's focus event (`WindowEvent::Focused(focused)`) — the front-window field is the event's value: when it fires the OS foreground-window decision may not have changed yet (order unverified · TRD S26-window-chrome §6-5 「source of the `focused` value」 · S12). A window not in the tab model (a prewarmed window · an event arriving late after closing) is skipped. Call without holding any lock.
 pub(crate) fn push_window_focus(window: &Window, focused: bool) {
     let Some(layout) = window.app_handle().try_state::<LayoutState>() else {
         return;
@@ -144,7 +127,7 @@ pub(crate) fn push_window_focus(window: &Window, focused: bool) {
             tracing::debug!(
                 module = "tab_drop",
                 label = window.label(),
-                "레이아웃 락에 독이 들어 창 포커스를 밀지 않는다"
+                "layout lock is poisoned; window focus is not pushed"
             );
             None
         }
@@ -175,7 +158,7 @@ fn push(window: &Window, minimized: bool, attrs: WindowAttrs, focused: bool) {
             tracing::warn!(
                 module = "dock",
                 window = label,
-                "{EVT_WINDOW_FRAME} emit 실패: {e}"
+                "{EVT_WINDOW_FRAME} emit failed: {e}"
             );
         }
     });
@@ -192,7 +175,6 @@ fn caption_chrome() -> CaptionChrome {
     }
 }
 
-/// Called after the window is gone (`Destroyed`) — forget that window's last window facts (rule = `tab_drop::FrameBook::forget`).
 pub(crate) fn forget_window_frame(app: &AppHandle, label: &str) {
     if let Some(frames) = app.try_state::<Arc<FrameBook>>() {
         frames.forget(label);
@@ -209,8 +191,7 @@ struct ReadInput {
     monitor_scale: Option<f64>,
 }
 
-// Order = cursor → primary button → Esc → topmost window under the cursor → monitor scale under the cursor. A drop reads only the cursor (the drop event is the
-//   evidence of the release). `places` = there is a new window place to be counted (reads the monitor scale).
+// Order = cursor → primary button → Esc → topmost window under the cursor → monitor scale under the cursor. A drop reads only the cursor (the drop event is the evidence of the release). `places` = there is a new window place to count (reads the monitor scale).
 fn read_input(app: &AppHandle, arrival: Arrival, places: bool) -> ReadInput {
     let cursor = input::cursor_pos().map(|p| PhysPoint { x: p.x, y: p.y });
     let (primary_down, escape_down, top, top_class) = match arrival {
@@ -231,7 +212,7 @@ fn read_input(app: &AppHandle, arrival: Arrival, places: bool) -> ReadInput {
             .map_err(|e| {
                 tracing::debug!(
                     module = "dock",
-                    "커서 밑 모니터를 못 읽었다 — 출처 창 배율로 센다: {e}"
+                    "could not read the monitor under the cursor — counting with the source window's scale: {e}"
                 )
             })
             .ok()
@@ -249,7 +230,7 @@ fn read_input(app: &AppHandle, arrival: Arrival, places: bool) -> ReadInput {
     }
 }
 
-// The topmost top-level window under a point — if it is our webview window, that label; otherwise another app (with that window's class), and if unreadable, `Unknown`.
+// The topmost top-level window under a point — our webview window's label if it is one; otherwise another app (with that window's class); unreadable → `Unknown`.
 // TRD S21-slot-docking §3-2 · §3-5
 fn top_at(app: &AppHandle, at: PhysPoint) -> (TopAt, Option<String>) {
     let Some(hit) = os::top_level_at(os::PhysPoint { x: at.x, y: at.y }) else {
@@ -287,7 +268,7 @@ fn geom_of(window: &Window) -> Option<FrameGeom> {
             tracing::debug!(
                 module = "dock",
                 window = window.label(),
-                "창 기하를 못 읽었다: {e}"
+                "could not read the window geometry: {e}"
             )
         })
         .ok()
@@ -298,18 +279,17 @@ struct TauriDropShell<'a> {
 }
 
 impl DropShell for TauriDropShell<'_> {
-    // During a drag on this path the key watch does not run — there is no one to read the Alt that `set_focus`
-    //   synthesizes as a release.
+    // During a drag on this path the key watch does not run — nobody reads as a release the Alt that `set_focus` synthesizes.
     fn focus(&self, label: &str) {
         let focused = match self.app.get_webview_window(label) {
             Some(window) => window.set_focus().map_err(|e| e.to_string()),
-            None => Err("창이 없다".to_owned()),
+            None => Err("window not found".to_owned()),
         };
         if let Err(e) = focused {
             tracing::debug!(
                 module = "dock",
                 window = label,
-                "옮긴 탭이 든 창에 포커스를 못 줬다: {e}"
+                "could not focus the window holding the moved tab: {e}"
             );
         }
     }
@@ -321,7 +301,7 @@ impl DropShell for TauriDropShell<'_> {
                 module = "dock",
                 window = source,
                 drag = %done.drag,
-                "출처 창이 없어 {EVT_TAB_DROP_DONE} 을 건너뛴다"
+                "no source window; skipping {EVT_TAB_DROP_DONE}"
             );
             return;
         }
@@ -330,7 +310,7 @@ impl DropShell for TauriDropShell<'_> {
                 module = "dock",
                 window = source,
                 drag = %done.drag,
-                "{EVT_TAB_DROP_DONE} emit 실패: {e}"
+                "{EVT_TAB_DROP_DONE} emit failed: {e}"
             );
         }
     }

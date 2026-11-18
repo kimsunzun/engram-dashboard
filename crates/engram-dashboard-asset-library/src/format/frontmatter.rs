@@ -172,8 +172,8 @@ mod tests {
             (Some("---\nname: yes\n---\n"), "yes"),
             (Some("---\nname: 123\n---\n"), "123"),
             (
-                Some("---\nname: Weird Name.v2 한글\n---\n"),
-                "Weird Name.v2 한글",
+                Some("---\nname: Weird Name.v2 한글\n---\n"), // hangul-ok — non-ASCII name fixture
+                "Weird Name.v2 한글",                         // hangul-ok — non-ASCII name fixture
             ),
             (Some("---\nname: \"  \"\n---\n"), "fold er"),
             (Some("---\nname: ~\n---\n"), "fold er"),
@@ -194,7 +194,7 @@ mod tests {
         let cases = [
             ("C-Case", "c-case"),
             ("c_case-2", "c_case-2"),
-            ("Weird Name.v2 한글", "weird-name-v2---"),
+            ("Weird Name.v2 한글", "weird-name-v2---"), // hangul-ok — non-ASCII name fixture
             ("ns:c-colon", "ns-c-colon"),
             ("", ""),
         ];
@@ -396,8 +396,8 @@ mod tests {
             valid("c-fm-other", "d")
         );
         assert_eq!(
-            skill("---\nname: Weird Name.v2 한글\ndescription: d\n---\n"),
-            valid("Weird Name.v2 한글", "d")
+            skill("---\nname: Weird Name.v2 한글\ndescription: d\n---\n"), // hangul-ok — non-ASCII name fixture
+            valid("Weird Name.v2 한글", "d") // hangul-ok — non-ASCII name fixture
         );
         assert_eq!(
             skill("---\nname: ns:c-colon\ndescription: d\n---\n"),

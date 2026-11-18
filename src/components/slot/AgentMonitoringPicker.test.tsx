@@ -25,8 +25,8 @@ afterEach(() => {
   useMonitoringPickerStore.setState({ target: null })
 })
 
-describe('AgentMonitoringPicker — 오버레이 표지(ADR-0237)', () => {
-  it('닫혀 있으면 표지가 없고, 열면 백드롭이 표지를 단다', () => {
+describe('AgentMonitoringPicker — overlay marker (ADR-0237)', () => {
+  it('when closed there is no marker, and when opened the backdrop carries the marker', () => {
     render(<AgentMonitoringPicker />)
     expect(document.querySelector(OVERLAY_SELECTOR)).toBeNull()
     act(() => useMonitoringPickerStore.getState().open('v1', 's1'))
@@ -34,7 +34,7 @@ describe('AgentMonitoringPicker — 오버레이 표지(ADR-0237)', () => {
     expect(document.querySelector(OVERLAY_SELECTOR)).toBe(backdrop())
   })
 
-  it('문서 Esc 로 닫히면 표지도 함께 사라진다', () => {
+  it('when closed by document Esc the marker also disappears', () => {
     render(<AgentMonitoringPicker />)
     act(() => useMonitoringPickerStore.getState().open('v1', 's1'))
     fireEvent.keyDown(document, { key: 'Escape' })
@@ -42,7 +42,7 @@ describe('AgentMonitoringPicker — 오버레이 표지(ADR-0237)', () => {
     expect(document.querySelector(OVERLAY_SELECTOR)).toBeNull()
   })
 
-  it('백드롭을 눌러 닫혀도 표지가 사라진다', () => {
+  it('when closed by pressing the backdrop the marker also disappears', () => {
     render(<AgentMonitoringPicker />)
     act(() => useMonitoringPickerStore.getState().open('v1', 's1'))
     fireEvent.click(backdrop()!)

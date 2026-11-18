@@ -132,8 +132,8 @@ const up = (clientX: number, clientY = 300, pointerId = 1) =>
     fireEvent.pointerUp(document.body, { clientX, clientY, pointerId })
   })
 
-describe('Splitter — 표식', () => {
-  it('data-split-id·data-dir·방향 커서·user-select 없음을 단다', () => {
+describe('Splitter — markers', () => {
+  it('carries data-split-id · data-dir · a direction cursor · no user-select', () => {
     const { el } = setup(LR)
     expect(el.getAttribute('data-split-id')).toBe('sp-lr')
     expect(el.getAttribute('data-dir')).toBe('left_right')
@@ -147,8 +147,8 @@ describe('Splitter — 표식', () => {
   })
 })
 
-describe('Splitter — 드래그', () => {
-  it('down/move/up → onDragStart(첫 비율) 1·onRelease 정확히 1 회(범위 안 값), onCancel 0', () => {
+describe('Splitter — drag', () => {
+  it('down/move/up → onDragStart (first ratio) 1 · onRelease exactly 1 time (in-range value), onCancel 0', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.7))
@@ -171,7 +171,7 @@ describe('Splitter — 드래그', () => {
     expect(s.onDragStart).toHaveBeenCalledTimes(1)
   })
 
-  it('onDragStart 비율도 범위 안으로 잘리고, 그 값은 onPreview 로 다시 오지 않는다', () => {
+  it('the onDragStart ratio is also clipped into the range, and that value does not come again through onPreview', () => {
     const s = setup(LR, { lo: 0.2, hi: 0.8 })
     down(s.el, at(0.5))
     move(at(0.95))
@@ -184,7 +184,7 @@ describe('Splitter — 드래그', () => {
     expect(s.onRelease).toHaveBeenCalledWith(0.8)
   })
 
-  it('비율은 분할 상자 기준이다(위아래 분할 — y 축·루트 top/height)', () => {
+  it('the ratio is relative to the split box (top/bottom split — y axis · root top/height)', () => {
     // TB box y = [0.2,1] → y normalized 0.84 gives (0.84 − 0.2)/0.8.
     const s = setup(TB)
     fireEvent.pointerDown(s.el, { clientX: 700, clientY: ROOT.top + ROOT.height * 0.6, pointerId: 1, button: 0 })
@@ -194,7 +194,7 @@ describe('Splitter — 드래그', () => {
     expect(s.onRelease.mock.calls[0][0]).toBeCloseTo((0.84 - 0.2) / 0.8, 12)
   })
 
-  it('pointermove 는 프레임당 한 번으로 합쳐지고 마지막 위치를 쓴다', () => {
+  it('pointermove is merged to once per frame and uses the last position', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.55))
@@ -208,7 +208,7 @@ describe('Splitter — 드래그', () => {
     up(at(0.65))
   })
 
-  it('밀린 프레임이 있으면 떼기 전에 그 값을 onPreview 로 먼저 내보낸다', () => {
+  it('if there is a pending frame it is sent out through onPreview first before release', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.4))
@@ -223,7 +223,7 @@ describe('Splitter — 드래그', () => {
     expect(s.onPreview).toHaveBeenCalledTimes(1)
   })
 
-  it('떼는 값은 마지막 pointermove 위치다(pointerup 좌표가 달라도)', () => {
+  it('the released value is the last pointermove position (even if the pointerup coordinates differ)', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.4))
@@ -231,7 +231,7 @@ describe('Splitter — 드래그', () => {
     expect(s.onRelease).toHaveBeenCalledWith(0.4)
   })
 
-  it('드래그 중엔 body 커서·user-select 를 잠그고 뗀 뒤 되돌린다', () => {
+  it('during the drag it locks body cursor · user-select and restores them after release', () => {
     document.body.style.cursor = 'wait'
     const s = setup()
     down(s.el, at(0.5))
@@ -243,7 +243,7 @@ describe('Splitter — 드래그', () => {
     expect(document.body.style.userSelect).toBe('')
   })
 
-  it('다른 pointerId 의 이벤트는 무시한다', () => {
+  it('events of another pointerId are ignored', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.7), 300, 2)
@@ -254,7 +254,7 @@ describe('Splitter — 드래그', () => {
     expect(s.onRelease).toHaveBeenCalledWith(0.7)
   })
 
-  it('주 버튼이 아니면 드래그하지 않는다', () => {
+  it('it does not drag if not the primary button', () => {
     const s = setup()
     down(s.el, at(0.5), 300, { button: 2 })
     move(at(0.7))
@@ -263,7 +263,7 @@ describe('Splitter — 드래그', () => {
     expect(s.called()).toBe(0)
   })
 
-  it('포인터 캡처 소실은 취소가 아니다 — 창 수준 리스너가 떼기까지 받는다', () => {
+  it('losing pointer capture is not a cancel — window-level listeners receive up to release', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.6))
@@ -274,7 +274,7 @@ describe('Splitter — 드래그', () => {
     expect(s.onRelease).toHaveBeenCalledWith(0.65)
   })
 
-  it('StrictMode(이펙트 이중 실행)에서도 드래그 1 회·body 복원', () => {
+  it('even in StrictMode (effect run twice) one drag · body restored', () => {
     const s = setup(LR, RANGE, { strict: true })
     down(s.el, at(0.5))
     move(at(0.6))
@@ -288,14 +288,14 @@ describe('Splitter — 드래그', () => {
   })
 })
 
-describe('Splitter — 기본 동작(텍스트 선택·호환 mousedown)', () => {
-  it('pointerdown 은 기본 동작을 막지 않는다 — 문서 mousedown 으로 닫히는 메뉴가 계속 닫힌다', () => {
+describe('Splitter — default action (text selection · compat mousedown)', () => {
+  it('pointerdown does not prevent the default action — a menu that closes on document mousedown keeps closing', () => {
     const s = setup()
     expect(down(s.el, at(0.5))).toBe(true)
     up(at(0.5))
   })
 
-  it('누른 동안의 pointermove 는 기본 동작을 막는다(움직이기 전 포함), 뗀 뒤는 막지 않는다', () => {
+  it('pointermove during the press prevents the default action (including before moving), and after release it does not', () => {
     const s = setup()
     down(s.el, at(0.5))
     expect(move(at(0.5), 320)).toBe(false)
@@ -305,8 +305,8 @@ describe('Splitter — 기본 동작(텍스트 선택·호환 mousedown)', () =>
   })
 })
 
-describe('Splitter — 클릭·더블클릭', () => {
-  it('움직임 없는 클릭(분할 축 좌표 불변) → 아무 콜백도 없다', () => {
+describe('Splitter — click · double-click', () => {
+  it('a click without movement (split-axis coordinate unchanged) → no callbacks at all', () => {
     const s = setup()
     down(s.el, at(0.5), 300)
     move(at(0.5), 320) // The split axis (x) stays as is, only the orthogonal axis moves
@@ -317,7 +317,7 @@ describe('Splitter — 클릭·더블클릭', () => {
     expect(document.body.style.cursor).toBe('')
   })
 
-  it('더블클릭 → onReset 1 회, 그 사이 클릭 두 번은 아무것도 부르지 않는다', () => {
+  it('double-click → onReset 1 time, and the two clicks in between call nothing', () => {
     const s = setup()
     for (let i = 0; i < 2; i++) {
       down(s.el, at(0.5))
@@ -330,8 +330,8 @@ describe('Splitter — 클릭·더블클릭', () => {
   })
 })
 
-describe('Splitter — 여러 포인터', () => {
-  it('누르는 동안 다른 포인터의 pointerdown 은 무시한다(진행 중 드래그 유지)', () => {
+describe('Splitter — multiple pointers', () => {
+  it('during a press the pointerdown of another pointer is ignored (the drag in progress is kept)', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.6))
@@ -346,7 +346,7 @@ describe('Splitter — 여러 포인터', () => {
     expect(s.onRelease).toHaveBeenCalledWith(0.7)
   })
 
-  it('같은 포인터가 떼지 않고 다시 누르면(pointerup 유실) 앞 드래그를 취소하고 새로 잡는다', () => {
+  it('if the same pointer presses again without releasing (pointerup lost) it cancels the earlier drag and grabs anew', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.6))
@@ -359,7 +359,7 @@ describe('Splitter — 여러 포인터', () => {
     expect(s.onRelease).toHaveBeenCalledWith(0.3)
   })
 
-  it('같은 포인터가 다른 구분선을 누르면 앞 구분선의 드래그를 취소하고, body 잠금은 남은 드래그가 다 끝날 때 풀린다', () => {
+  it('if the same pointer presses another divider it cancels the earlier divider\'s drag, and the body lock is released when all remaining drags end', () => {
     document.body.style.cursor = 'wait'
     const [a, b, c] = setupMany([LR, TB, LR_HALF])
 
@@ -400,7 +400,7 @@ describe('Splitter — 여러 포인터', () => {
     expect(document.body.style.userSelect).toBe('')
   })
 
-  it('두 구분선을 동시에 끌면 body 스타일은 마지막 드래그가 끝날 때 원래 값으로 돌아간다', () => {
+  it('dragging two dividers at once, the body style returns to the original value when the last drag ends', () => {
     document.body.style.cursor = 'wait'
     const a = handlers()
     const b = handlers()
@@ -435,8 +435,8 @@ describe('Splitter — 여러 포인터', () => {
   })
 })
 
-describe('Splitter — 취소', () => {
-  it('pointercancel → onCancel 1 회, onRelease 없음, body 스타일 복원', () => {
+describe('Splitter — cancel', () => {
+  it('pointercancel → onCancel 1 time, no onRelease, body style restored', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.6))
@@ -452,7 +452,7 @@ describe('Splitter — 취소', () => {
     expect(document.body.style.userSelect).toBe('')
   })
 
-  it('주 버튼 없이 온 pointermove(pointerup 유실) → onCancel 1 회, 확정 없음, 리스너·프레임·body 스타일 정리', () => {
+  it('pointermove arriving without the primary button (pointerup lost) → onCancel 1 time, no commit, listeners · frame · body style cleaned up', () => {
     document.body.style.cursor = 'wait'
     const s = setup()
     down(s.el, at(0.5))
@@ -475,7 +475,7 @@ describe('Splitter — 취소', () => {
     expect(s.onCancel).toHaveBeenCalledTimes(1)
   })
 
-  it('움직이기 전 주 버튼 없이 온 pointermove → 아무 콜백 없이 누름이 끝난다', () => {
+  it('pointermove arriving without the primary button before moving → the press ends with no callbacks', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.7), 300, 1, 0)
@@ -486,7 +486,7 @@ describe('Splitter — 취소', () => {
     expect(document.body.style.cursor).toBe('')
   })
 
-  it('창 blur → onCancel 1 회, onRelease 없음', () => {
+  it('window blur → onCancel 1 time, no onRelease', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.6))
@@ -498,7 +498,7 @@ describe('Splitter — 취소', () => {
     expect(s.onRelease).not.toHaveBeenCalled()
   })
 
-  it('창 안 요소의 blur 는 드래그를 끊지 않는다', () => {
+  it('blur of an element inside the window does not cut the drag', () => {
     const s = setup()
     const input = document.createElement('input')
     document.body.appendChild(input)
@@ -514,7 +514,7 @@ describe('Splitter — 취소', () => {
     expect(s.onRelease).toHaveBeenCalledWith(0.6)
   })
 
-  it('움직이기 전의 pointercancel·blur 는 아무 콜백도 부르지 않는다', () => {
+  it('pointercancel · blur before moving call no callbacks', () => {
     const s = setup()
     down(s.el, at(0.5))
     act(() => {
@@ -527,7 +527,7 @@ describe('Splitter — 취소', () => {
     expect(s.called()).toBe(0)
   })
 
-  it('드래그 중 언마운트 → onCancel 1 회, 리스너·프레임·body 스타일 정리', () => {
+  it('unmount during the drag → onCancel 1 time, listeners · frame · body style cleaned up', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.6))
@@ -544,7 +544,7 @@ describe('Splitter — 취소', () => {
     expect(s.onRelease).not.toHaveBeenCalled()
   })
 
-  it('드래그 중 잠기면(range → null) onCancel', () => {
+  it('if locked during the drag (range → null) onCancel', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.6))
@@ -554,7 +554,7 @@ describe('Splitter — 취소', () => {
     expect(s.onRelease).not.toHaveBeenCalled()
   })
 
-  it('드래그 중 같은 split id 의 방향이 바뀌면 onCancel', () => {
+  it('if the direction of the same split id changes during the drag onCancel', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.6))
@@ -564,7 +564,7 @@ describe('Splitter — 취소', () => {
     expect(s.onRelease).not.toHaveBeenCalled()
   })
 
-  it('드래그 중 prop 의 split id 가 바뀌면 onCancel — 다른 분할에 확정하지 않는다', () => {
+  it('if the prop\'s split id changes during the drag onCancel — it does not commit to another split', () => {
     const s = setup()
     down(s.el, at(0.5))
     move(at(0.6))
@@ -576,8 +576,8 @@ describe('Splitter — 취소', () => {
   })
 })
 
-describe('Splitter — 잠김(range null)', () => {
-  it('드래그·더블클릭 모두 아무것도 부르지 않고 방향 커서를 달지 않는다', () => {
+describe('Splitter — locked (range null)', () => {
+  it('neither drag nor double-click calls anything and no direction cursor is attached', () => {
     const s = setup(LR, null)
     down(s.el, at(0.5))
     move(at(0.7))

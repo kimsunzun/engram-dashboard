@@ -4,7 +4,7 @@ Date: 2026-06-14. Method: `/consult` — GPT·Gemini·Claude-Opus three-way blin
 
 ## TL;DR — decision to put implementation on hold
 
-**There is no turnkey library. No mature library can take over the core invariants (replay→live order, seq dedup, epoch resubscribe), so a custom implementation is unavoidable, and the scale is MVP 1~3 weeks + production-ready 3~6+ weeks.** Following the user's instruction ("적당한 성숙 라이브러리가 없어 구현이 커지면 하지 말 것" — if there is no suitably mature library and the implementation grows large, do not do it), **starting is put on hold** — proceed after the user decides the decision points below.
+**There is no turnkey library. No mature library can take over the core invariants (replay→live order, seq dedup, epoch resubscribe), so a custom implementation is unavoidable, and the scale is MVP 1~3 weeks + production-ready 3~6+ weeks.** Following the user's instruction (「적당한 성숙 라이브러리가 없어 구현이 커지면 하지 말 것」 — if there is no suitably mature library and the implementation grows large, do not do it), **starting is put on hold** — proceed after the user decides the decision points below.
 
 The three models + the judge are **unanimous** on this: a library supplies only the "transport"; correctness is the responsibility of the daemon's session core. (Verified by limits that each library's official documentation states — not speculation.)
 
@@ -41,7 +41,7 @@ The three models + the judge are **unanimous** on this: a library supplies only 
 
 ## Second OSS precedent survey (2026-06-14, separate research) — verifying "is there anything shared?"
 
-The user's question ("데몬 예제는 비슷한 부분 많을 텐데 왜 공수가 높나, 오픈소스 데몬 확인해봐" — daemon examples must have a lot in common, so why is the effort high; check open-source daemons). Conclusions of the primary-source survey:
+The user's question (「데몬 예제는 비슷한 부분 많을 텐데 왜 공수가 높나, 오픈소스 데몬 확인해봐」 — daemon examples must have a lot in common, so why is the effort high; check open-source daemons). Conclusions of the primary-source survey:
 - **No turnkey Rust crate (certain).** WezTerm `codec`/`mux`=`publish=false` (internal code), `zellij-server`=Zellij-specific, Eternal Terminal=C++. There is no all-in-one library anywhere that you can plug the daemon body into.
 - **Only reusable "plumbing":** `portable-pty` (already used), `tokio-tungstenite` (WS), `interprocess` (cross-platform IPC, used by zellij). JS: `@xterm/addon-attach` (WS↔terminal pipe, **no reconnect logic**), `@xterm/addon-serialize` (client snapshot; optional for us since we do server replay).
 - **The replay→live algorithm = a universal pattern, which we already have.** Eternal Terminal `BackedWriter`: `재전송량 = serverSeq − clientLastSeq` (resend amount), take the latest N in reverse → resend in reverse again → structurally prevents gaps·dups. **OutputCore is an isomorphic implementation.** ET/VS Code cross-verify that our pattern is the standard. → at the level of copying rather than inventing, de-risked.
@@ -60,13 +60,13 @@ The user's question ("데몬 예제는 비슷한 부분 많을 텐데 왜 공수
 | Add a daemon transport | **The real remaining work** |
 | embedded/daemon two modes | Cheap because sinks are injected |
 
-Note (where the proposal oversimplified and ours is more correct): (1) the proposal's single unified `EventSink` vs our split `OutputSink` (high-throughput)/`StatusSink` (low-frequency) — the throughput characteristics differ, so keep ours. (2) The proposal's `AgentEvent::Output{Vec<u8>}` = fixed to bytes vs our kind-agnostic `OutputEvent` (§2 "터미널 강제 금지" — no forcing terminal) — accepting the proposal would be a regression. To accept: **ts-rs automatic TS type generation** (currently api/types.ts is a manual mirror → less drift; an improvement, not required for the daemon).
+Note (where the proposal oversimplified and ours is more correct): (1) the proposal's single unified `EventSink` vs our split `OutputSink` (high-throughput)/`StatusSink` (low-frequency) — the throughput characteristics differ, so keep ours. (2) The proposal's `AgentEvent::Output{Vec<u8>}` = fixed to bytes vs our kind-agnostic `OutputEvent` (§2 "do not force a terminal") — accepting the proposal would be a regression. To accept: **ts-rs automatic TS type generation** (currently api/types.ts is a manual mirror → less drift; an improvement, not required for the daemon).
 
 ### Two-mode toggle (confirmed direction)
 An `AgentClient` interface on the frontend (canonical `AgentCommand`/`AgentEvent` protocol). The toggle swaps only the implementation:
 - **Embedded:** an in-process adapter → the AgentManager in the same process (zero serialization). = the known-good fallback.
 - **Daemon:** a WebSocket client → socket → the daemon's AgentManager. **B-direct (JS↔WS direct)**, no relay (discarded for being unreachable from mobile + double serialization).
-- The core (AgentManager) is identical in both modes. The toggle is chosen at startup/config (**not a live hot-swap** — the user confirmed "실시간 변경 불요" (no live change needed). Agents restart on a mode switch).
+- The core (AgentManager) is identical in both modes. The toggle is chosen at startup/config (**not a live hot-swap** — the user confirmed 「실시간 변경 불요」 (no live change needed). Agents restart on a mode switch).
 - Benefit: embedded is always a fallback → a daemon bug does not block us (no babysitting needed). However the correctness of the daemon path (lifecycle·reconnect) must be built and verified once — the toggle does not exempt that.
 
 ### Implementation phasing (user's design — boundary-based isolated tests)
@@ -75,7 +75,7 @@ An `AgentClient` interface on the frontend (canonical `AgentCommand`/`AgentEvent
 3. **Keep that harness permanently** — when a daemon bug appears, incubate only that part with a test (nasty cases like reconnect·slow consumer·daemon kill/respawn must be included for phase 4 to be clean).
 4. **Connect only the seam** — swap the frontend `AgentClient` from the embedded-impl to the daemon (WS)-impl. If the phase 2 harness verified the protocol behavior enough, the join is safe.
 
-**linchpin:** what every isolated test verifies = the `engram-protocol` contract. Pinning this contract down exactly first is the precondition for "경계 두면 알아서 깨끗" (put a boundary and it stays clean on its own) to hold. Envelope draft: `subscribe{sessionId,epoch?,afterSeq?}` / `unsubscribe` / `input{sessionId,epoch,data}` / `list` / `spawn{spec}` / `kill{sessionId}` + events `output`/`status`/`exited`/`error`.
+**linchpin:** what every isolated test verifies = the `engram-protocol` contract. Pinning this contract down exactly first is the precondition for "put a boundary and it stays clean on its own" to hold. Envelope draft: `subscribe{sessionId,epoch?,afterSeq?}` / `unsubscribe` / `input{sessionId,epoch,data}` / `list` / `spawn{spec}` / `kill{sessionId}` + events `output`/`status`/`exited`/`error`.
 
 ## Next
 Re-verify the S12 design document (engram-protocol contract + AgentClient interface + ET recover pattern + daemon lifecycle + harness contract) by consult → start phase 1 (low-risk·mechanical, zero-regression gate).

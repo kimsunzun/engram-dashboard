@@ -1,4 +1,4 @@
-//! CodexBackend — codex CLI 전용 CommandSpec 산출.
+//! CodexBackend — produces the codex-CLI-specific CommandSpec.
 //!
 //! ★The rule this folder sets = codex knowledge lives only in here (ADR-0004)★. The rationale, the gates and
 //! what the gates cannot see are written once in the `backend/claude/mod.rs` header — read it with the names
@@ -7,43 +7,27 @@
 //! slots is in that header too) — the session-id recovery polling also runs inside [`thread_lock`], and only this
 //! folder calls that module (ADR-0218 decision 11).
 //!
-//! ★여기 적힌 codex 사실은 실측이다(codex-cli 0.153.4, 이 PC, 인증됨 — 2026-09-08 재확인)★.
-//! ★그 뒤에 잰 것은 **자기 자리에 버전을 달고 있다**★ — 이 한 줄이 파일 전체를 한 버전으로 묶는다고
-//! 읽지 말 것. 상류가 스스로 업데이트하므로 잰 시점이 항목마다 갈린다.
-//! `tests/backend_contract.rs` 가 이 파일의 `build_spec` 이 낸 argv 를 **그대로 띄우므로**, 여기서 인자를
-//! 바꾸면 그 레인이 바뀐 argv 로 실 codex 를 겪는다 — ★단 그 레인은 `#[ignore]` 라 부를 때만 돈다(CI 아님)★.
+//! ★The codex facts here were measured on codex-cli 0.153.4 (this PC, authenticated, 2026-09-08)★; later measurements carry their own version at their spot.
+//! `tests/backend_contract.rs` launches the argv `build_spec` emits as is — but that lane is `#[ignore]` (not CI), so it runs only when called.
 //!
-//! ★시험대가 **다시 재지 않는 것** — 「전부 실측」이라 적던 옛 문장이 거짓이었다(리뷰 적출 2026-09-08)★:
-//!   1. `workspace-write`·`on-request` 정책 **아래의 모델 동작** — 시험대는 그 argv 로 뜨는 것과 컴포저
-//!      기립까지만 잰다(재려면 쓰기 권한을 가진 에이전트를 자동 레인에서 실제로 돌려야 한다).
-//!   2. 우리가 안 쓰는 인자(`-m`) — 이 파일 주석에만 있고 재는 곳이 없다.
-//!      ★MCP `-c mcp_servers.…` 오버라이드는 이제 **우리가 쓴다**★ — 그리고 시험대가 아니라 손으로
-//!      쟀다(2026-09-19 · 0.155.0 · 버리는 `CODEX_HOME`): `--strict-config` 가 그 키를 받아들였고
-//!      (가짜 키 둘은 `unknown configuration field` 로 죽었다), app-server 의 `mcpServerStatus/list` 가
-//!      `engram` 을 그 서버의 발신·조회 툴 둘과 함께 돌려줬으며, 스텁 서버가
-//!      `Authorization: Bearer <ENGRAM_TOKEN 값>` 을 받았다. `cmd.exe /c` 를 지난 갈래도 같았다.
-//!      ★그날 화면에 찍힌 툴 이름은 `send_message`·`messages` 였다 — 오늘 그 이름은 없다★:
-//!      `1b84045` 가 에이전트 내장 도구와의 충돌을 끊으려 `eg_send`·`eg_messages` 로 개명했다. 잰 것은
-//!      그대로 유효하고(개명은 이름뿐이다) 바뀐 것은 부를 이름뿐이다 — 지금 다시 재면 그 목록에
-//!      `eg_send`·`eg_messages` 가 온다.
-//!   2-1. ★`codex resume <id>` 는 이제 **우리가 쓴다** — 그런데도 시험대가 실물로 재지 않는다★:
-//!      [`production_spec`](../../../tests/backend_contract.rs) 이 `SpawnMode::Fresh` 로만 argv 를 뽑아
-//!      이어받기 갈래가 그 레인에 애초에 안 실린다. 자동으로 재려면 그 파일에 살아 있는 스레드 id 를
-//!      공급할 길이 먼저 필요하다.
-//!      ★단 **동작 자체는 손으로 실측됐다(2026-09-19 · 0.155.0)** — 「기립하는 것까지는 아무도 안 본다」로
-//!        적혀 있던 옛 문장은 더 이상 참이 아니다★: 그 argv 로 실제로 떴고, **세션 id 가 보존된다**. 새
-//!        세션이 id S 를 `source:"startup"` 으로 신고하고, 이어받으면 **같은 S** 가 `source:"resume"` 으로
-//!        다시 오며(반복 이어받기에도 안정) 기록은 S 의 원래 rollout 파일에 이어 붙는다. 그래서 이어받은
-//!        세션의 회수는 덮어쓰기든 아니든 **같은 값에 착지하고**, 낡은 id 로 흘러가는 갈래가 없다.
-//!        ★단 이것은 `source` 칸을 내던 **훅 채널**의 관측이고, 그 채널은 걷혔다(ADR-0216)★. 오늘 회수
-//!        경로에는 그 칸이 없어서 — 터미널 모드는 자식이 쥔 writer 락의 이름([`thread_lock`] ·
-//!        ADR-0218), app-server 모드는 `thread/start` 응답 — **재개 시 id 거동은 미측정으로 두고 그 위에서
-//!        덮어쓰기를 골랐다.** 둘이 어긋나 보이면 이 문단이 옛 채널의 기록이다.
-//!        ★터미널 모드의 회수는 이어받기 화신에서 아예 안 돈다★ — 그 화신은 id 를 argv 로 들고
-//!        나가므로 회수할 것이 없다(ADR-0218 결정 5).
-//!   3. 아래 `build_spec` 의 `%VAR%` 한계(그 자리 주석이 정본).
+//! ★What the test bench does NOT measure★:
+//!   1. The model behaviour under the `workspace-write` · `on-request` policies — the bench only proves it comes up with that argv.
+//!   2. Arguments we do not use (`-m`) — only mentioned in comments here.
+//!      The MCP `-c mcp_servers.…` override is used by us and was measured by hand (0.155.0, throwaway `CODEX_HOME`): `--strict-config` accepted the keys,
+//!      `mcpServerStatus/list` returned `engram` with its send/query tools, the stub server received `Authorization: Bearer <ENGRAM_TOKEN value>`, and the
+//!      `cmd.exe /c` branch behaved the same. The tools were later renamed `eg_send` · `eg_messages` (`1b84045`); the measurement stays valid.
+//!   2-1. `codex resume <id>` is used by us but the bench does not measure it: [`production_spec`](../../../tests/backend_contract.rs) draws argv only with
+//!      `SpawnMode::Fresh`, so the resume branch is never carried in that lane (it would need a live thread id).
+//!      Measured by hand (0.155.0): it comes up with that argv and **the session id is preserved** — a new session reports id S with `source:"startup"`, a resume
+//!      reports the same S with `source:"resume"` (stable across repeats), and the record is appended to S's rollout file. So recovery on a resumed
+//!      session lands on the same value whether it overwrites or not.
+//!      ★That observation came from the **hook channel**, which was removed (ADR-0216)★. Today terminal mode recovers via the writer-lock name the child holds
+//!      ([`thread_lock`] · ADR-0218) and app-server mode via the `thread/start` response, so the id behaviour on resume is unmeasured and overwriting was
+//!      chosen on top of that.
+//!      ★Terminal-mode recovery does not run in a resume incarnation★ — it goes out carrying the id as argv (ADR-0218 decision 5).
+//!   3. The `%VAR%` limit of `build_spec` (the comment there is the source of truth).
 //!
-//! capability 선언이 그 표와 어긋나면 시험대의 **비-`#[ignore]`** 항목이 빨개진다.
+//! If the capability declaration disagrees with that table, the bench's **non-`#[ignore]`** items go red.
 //!
 //! tauri import 0.
 
@@ -87,11 +71,10 @@ use crate::types::{
     OutputEvent, PtyError, SessionCaps, TurnOutcome, MCP_SERVER_NAME, TOKEN_ENV,
 };
 
-/// codex 를 대화형 TUI 가 아니라 **상주 JSON 서버**로 띄우나 = 이 폴더 안의 네 축(통로 모양·통로 실물·
-/// 입력 인코딩·출력 decoder)이 함께 갈리는 지점.
+/// Whether codex launches as a **resident JSON server** rather than an interactive TUI — the point where the four axes in this folder (link shape · link object ·
+/// input encoding · output decoder) split together.
 ///
-/// ★이 술어를 `profile` 로 올리지 말 것(ADR-0004)★: 거기 있으면 codex 의 출력 형식 축이 공용 층의 통로
-///   선택을 직접 굴린다. 밖으로 나가는 것은 중립 축의 값뿐이다.
+/// ★Do not lift this predicate into `profile` (ADR-0004)★: codex's output-format axis would then drive the shared layer's link choice. Only the neutral axis value goes outward.
 fn is_app_server(command: &AgentCommand) -> bool {
     matches!(
         command,
@@ -102,31 +85,18 @@ fn is_app_server(command: &AgentCommand) -> bool {
     )
 }
 
-/// 이 spawn 의 **핸드셰이크 둘째 요청**을 고른다 — `resume_session_id` 가 있으면 그 스레드를 이어받고,
-/// 없으면 새 스레드를 연다. 부재 = 이어받을 것이 없다(저장된 값이 없거나 Fresh 로 띄운다).
+/// Picks this spawn's **second handshake request**: `thread/resume` if `resume_session_id` is present, otherwise open a new thread. Absence = nothing to resume
+/// (no stored value, or launched as Fresh).
 ///
-/// ★정책 셋(작업 폴더·승인·샌드박스)을 두 갈래에 **똑같이** 싣는다★: 이어받기에서 빼면 codex 가 그
-///   스레드를 만들 때 저장해 둔 값으로 돈다 — 프로필의 작업 폴더가 그 사이 바뀌었어도 이어받은 세션만
-///   조용히 옛 폴더를 워크스페이스로 믿는다. 그 어긋남은 화면에 아무 표시도 남기지 않는다.
-/// ★**미검인 것의 범위를 정확히 적는다 — 「다른 cwd 를 받아 주나」는 이미 실측됐다**★
-///   (`docs/reference/backend-capabilities.md` §1 「cwd 가 다르면」): **이어진다.** 스레드 정체성은
-///   워크스페이스가 아니라 `CODEX_HOME` 단위라 cwd 가 달라도 거절되지 않는다. 그러니 「거절하면 이어받기
-///   실패로 화면에 오른다」는 있지도 않은 갈래를 대비한 문장이었다.
-///   ★진짜 미검은 **우리가 보낸 cwd 가 기록된 값을 덮나**다★ — 같은 실측이 「응답의 `cwd` 는 **스레드에
-///   기록된 원래 cwd**」라고 적는다. 즉 우리 값이 무시될 가능성이 있고, 그러면 바로 위 문단이 막으려던
-///   그 어긋남(이어받은 세션만 옛 폴더를 믿는다)이 **이 인자를 실어 보내도 그대로 남는다.** 재려면 서로
-///   다른 두 폴더로 같은 스레드를 이어받아 턴이 실제로 어느 쪽에서 도는지 봐야 한다 — 안 재 봤다.
-///   ★그래도 인자는 계속 싣는다★: 무시되면 손해가 없고, 반영되면 의도한 값이 선다.
-/// ★`excludeTurns` 를 켜는 것은 결정이다★ — 우리는 `thread.turns` 를 한 칸도 읽지 않는데(응답 타입에
-///   그 칸이 없다), 채워 받으면 긴 대화 하나가 통로의 줄 상한(`MAX_LINE_BYTES`)을 넘겨 **그 줄만
-///   버려지고** 핸드셰이크가 시한까지 오지 않을 답을 기다린다.
-///   ★**그 결말이 거절과 구별되지 않는다는 것이 이 항목의 요점이다**★ — 상대는 살아 있고 stdout 으로
-///   답을 보냈는데 우리가 그 줄을 버렸으므로, 우리 쪽에서 보이는 것은 「핸드셰이크가 시한으로 실패했고
-///   자식은 멀쩡하다」 하나다. 그것은 `thread/resume` 이 JSON-RPC 오류로 거절당한 경우와 **같은 모양**
-///   이고, 그 모양이 통로의 stdin 을 닫지 않으면 자식·리더·라이터가 통째로 붙들려 아무도 거두지 못하는
-///   wedge 가 된다(그래서 그 닫기가 갈래를 가리지 않는다 — `transport.rs` 의 그 자리).
-///   ★즉 상류가 `excludeTurns` 를 무시하기 시작하면 이 인자는 아무 것도 못 막고, 남는 방어는 그 닫기
-///   하나뿐이다★ — 이 인자를 「막아 뒀다」로 읽지 말 것. 상류가 실제로 존중하는지는 미검이다.
+/// ★The three policies (working folder · approval · sandbox) are carried identically on both branches★: left out of resume, codex runs with the values stored at thread
+///   creation, so a resumed session would quietly trust the old folder with no sign on screen.
+/// ★Unverified: whether the cwd we send overrides the recorded value★ (`docs/reference/backend-capabilities.md` §1): a different cwd is not refused (**it resumes** — thread identity is per
+///   `CODEX_HOME`), but the response's `cwd` is the original recorded one, so our value may be ignored and the old-folder mismatch remains. Not measured (resume the same thread with two folders).
+///   We keep carrying the argument: ignored costs nothing, applied gives the intended value.
+/// ★`excludeTurns` is on by decision★ — we read no field of `thread.turns`; if it came filled, one long conversation would exceed the link's line cap (`MAX_LINE_BYTES`), **only that
+///   line would be dropped**, and the handshake would wait to its deadline. That outcome is indistinguishable from `thread/resume` being refused with a JSON-RPC error — the peer is alive
+///   and answered, we only see 「handshake failed on its deadline, child fine」 — and if that shape does not close the link's stdin, child · reader · writer are held as a wedge nobody reaps
+///   (see that close in `transport.rs`). So if upstream ignores `excludeTurns`, this argument blocks nothing and that close is the only defence. Whether upstream honours it is unverified.
 /// ★`developer_instructions` goes on **both** branches★ — on a resume too, changed or not: codex holds it in the
 ///   resumed process and rebuilds the initial context from it at a compaction there; without it that rebuild has no
 ///   instructions at all (the reason and the version gate: the [`ThreadResumeParams`] field doc). It does not reach
@@ -214,131 +184,95 @@ fn app_server_open(
 // ADR-0337
 const INSTRUCTIONS_CHANGED_PREFACE: &str = "The instructions for this agent changed since its last launch. The current instructions follow and take precedence over earlier instructions in this conversation.";
 
-/// PATH 로 해석되는 이름 그대로 띄운다(사용자 결정 2026-09-07 · TRD §6-H).
+/// Launches the name as resolved through PATH (TRD §6-H).
 ///
-/// ★실 바이너리를 찾아 직접 띄우지 않는 이유★: Windows 에서 PATH 의 `codex` 는
-/// `codex.cmd → node → codex.exe` 사슬이고 그 끝의 실 바이너리는 **버전이 박힌 `node_modules` 벤더
-/// 경로** 아래 있다(실측). codex 는 스스로 자동 업데이트하므로 그 경로는 우리가 모르는 시점에 바뀐다 —
-/// 하드코딩하면 업데이트 한 번에 죽고, 탐색·폴백을 짜면 그 사슬을 우리가 재구현하게 된다.
-/// ★한 겹 더 깊은 shim 이 kill 인과를 바꾸지 않는다 — 단 그 보장의 범위를 정확히 적는다★:
-/// Job 에 **편입된 뒤로는** breakaway 가 막혀 있어(`BREAKAWAY_OK`·`SILENT_BREAKAWAY_OK` 둘 다 안 켠다)
-/// 그 아래 생기는 손자·증손자가 Job 을 벗어날 수 없고, `TerminateJobObject` 가 트리를 통째로 끝낸다
-/// (ADR-0001 의 2 동사).
-/// ★편입은 spawn **뒤**라 그 사이 창은 그 보장 밖이다★ — 그 창에서 태어난 자손은 Job 에 안 들어간다.
-/// 에이전트 통로 셋(`pty`·`stdio`·codex 통로)이 전부 띄운 뒤에 넣는 모양이고 기존 teardown 테스트는 정착
-/// 상태만 재므로, 이 창은 **재 본 적이 없다**. 고치는 것은 세 통로를 함께 건드리는 별건이고, 선례는 사용량 조회
-/// 실행기다 — 멈춘 채 띄워 Job 에 넣은 뒤 깨운다(`usage::process` + OS 층 `spawn::prepare_tree_root` ·
-/// `spawn::TreeRoot`).
+/// ★Why not find the real binary and launch it directly★: on Windows `codex` on PATH is the `codex.cmd → node → codex.exe` chain, and the real binary lives under a **version-stamped
+/// `node_modules` vendor path** (measured). codex self-updates, so hard-coding it dies on one update and a search · fallback reimplements the chain.
+/// ★Another shim layer does not change kill causality★: **once enrolled** in the Job, breakaway is blocked (neither `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK`), so descendants cannot leave and
+/// `TerminateJobObject` ends the tree (the 2 verbs of ADR-0001).
+/// ★Enrolment is **after** spawn, so descendants born in that window never enter the Job★ — all three agent links (`pty` · `stdio` · the codex link) share this and
+/// the teardown tests measure only the settled state, so the window is unmeasured. Fixing it touches all three links; the precedent is the usage query runner (launch suspended, enrol, wake:
+/// `usage::process` + `spawn::prepare_tree_root` · `spawn::TreeRoot`).
 const CODEX_PROGRAM: &str = "codex";
 
-/// 「그 스레드의 기록이 없다」를 뜻하는 상대 문구(소문자 비교). ★실측된 응답에서 그대로 딴다★ —
-/// `-32600` + `no rollout found for thread id`(`docs/reference/backend-capabilities.md` §1).
-/// ★코드가 아니라 이 문구가 판정 기준인 이유★: 같은 코드가 설정 오류·중복 `initialize`·하위 스레드
-/// 이어받기에도 온다. 코드로 가르면 멀쩡한 손잡이가 무관한 실패에서 「이어받을 대화 없음」 도장을 받는다.
+/// The peer wording that means 「there is no record of that thread」 (lower-case comparison), taken verbatim from a measured response: `-32600` + `no rollout found for thread id`
+/// (`docs/reference/backend-capabilities.md` §1). ★The wording, not the code, is the criterion★: the same code also comes for a config error · a duplicate `initialize` · resuming a child
+/// thread, and splitting by code would stamp a sound handle with 「no conversation to resume」 on an unrelated failure.
 const NO_ROLLOUT_MARKER: &str = "no rollout found";
 
-/// codex 가 작업 폴더를 받는 플래그. ★프로세스 cwd 와 별개다★ — `CommandSpec.cwd` 는 우리가 프로세스를
-/// 어디서 띄우나이고, 이 값은 codex 가 **어느 폴더를 워크스페이스로 신뢰·편집하나**다. 둘을 같은 값으로
-/// 주지만 같은 칸이 아니다.
+/// The flag through which codex receives the working folder — ★separate from the process cwd★: `CommandSpec.cwd` is where we launch the process, this is **which folder codex trusts and edits
+/// as its workspace**. We give both the same value, but they are different fields.
 const CD_FLAG: &str = "--cd";
 
-/// 샌드박스 모드 — 모델이 내는 명령을 **작업 폴더 안에서는 쓰기까지** 허용한다.
+/// Sandbox mode — allows the commands the model emits **up to writing, inside the working folder**.
 const SANDBOX_FLAG: &str = "-s";
 const SANDBOX_WORKSPACE_WRITE: &str = "workspace-write";
 
-/// 승인 모드 — 샌드박스 밖으로 나가는 동작만 사람에게 묻는다.
+/// Approval mode — asks a person only about actions that go outside the sandbox.
 const APPROVAL_FLAG: &str = "-a";
 const APPROVAL_ON_REQUEST: &str = "on-request";
 
-/// 저장된 세션을 이어받는 하위 명령. ★플래그가 아니다 — `--resume`·`--session-id` 는 존재하지 않는다★
-/// (실측). 받는 것은 **위치 인자**이고 그 자리는 `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` 의 첫
-/// 위치다(실측 0.155.0 `codex resume --help`).
+/// The subcommand that resumes a stored session. ★It is not a flag — `--resume` · `--session-id` do not exist★ (measured). The id is a **positional argument**, first position of
+/// `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` (0.155.0 `codex resume --help`).
 ///
-/// ★정책 셋(`--cd`·`-s`·`-a`)을 이 하위 명령 **뒤**에 이어도 파싱된다★ — 그 셋은 `resume` 자신의
-///   옵션으로도 선언돼 있다(같은 실측). 위치 인자와 옵션의 앞뒤 순서는 둘 다 통과하는 것을 봤다
-///   (`codex resume <id> --cd . -s <잘못된값>` 과 옵션을 앞에 둔 짝 모두 **샌드박스 값 오류**로 죽었다
-///   = 그 지점까지 파싱이 갔다는 뜻). 그래서 id 를 하위 명령 바로 뒤에 붙여 `codex resume <id>` 라는
-///   한 덩어리가 읽히게 둔다.
-/// ★둘째 위치 인자가 `[PROMPT]` 다★ — 그래서 아래 `extra_args` 에 **플래그가 아닌 맨 낱말**이 들어오면
-///   그것이 첫 프롬프트로 먹힌다. Fresh 갈래(`codex [OPTIONS] [PROMPT]`)도 같은 성질이라 이어받기가
-///   새로 들인 위험이 아니다 — 걸러 내지 않는 사유는 아래 패스스루 주석이 정본이다.
+/// ★The three policies (`--cd` · `-s` · `-a`) still parse **after** this subcommand★ (they are `resume`'s own options too; `codex resume <id> --cd . -s <bad value>` and the options-first order
+///   both died with a **sandbox value error**, i.e. parsing got that far). We put the id right after the subcommand so `codex resume <id>` reads as one chunk.
+/// ★The second positional argument is `[PROMPT]`★ — a bare non-flag word in `extra_args` is consumed as the first prompt. The Fresh branch has the same property, so resume adds no new risk
+///   (the pass-through comment below says why it is not filtered).
 const RESUME_SUBCOMMAND: &str = "resume";
 
-/// codex 설정을 명령줄에서 덮어쓰는 플래그. ★사용자 기기에 파일을 하나도 안 만들고 설정을 얻는 수단이 이것 하나다★
-/// — 사용자 홈(`$CODEX_HOME/config.toml`)에도, 래퍼 스크립트에도 우리는 한 글자도 쓰지 않는다.
+/// The flag that overrides codex settings from the command line. ★It is the only means of getting settings without creating a single file on the user's machine★
+/// — we write not a single character in the user home (`$CODEX_HOME/config.toml`) or in a wrapper script.
 const CONFIG_OVERRIDE_FLAG: &str = "-c";
 
-/// codex 가 세션 기록의 `originator` 칸에 그대로 적는 값을 스폰 단위로 덮어쓰는 env 변수.
+/// The env variable that overrides, per spawn, the value codex writes verbatim into the `originator` field of the session record.
 ///
-/// ★상류가 문서화하지 않은 **내부** 변수다★ — 없어지면 오류가 아니라 조용한 무시이고, 그때 남는 것은
-///   「표식 없는 기록」 하나다(ADR-0217 「미검 셋」 ③). 값이 그대로 기록에 남는 것은 실측이다
-///   (0.155.1 · 임의 문자열 3종 · allowlist 거절 없음 — ADR-0217 Probe B).
-/// ★이 값이 자식과 그 후손에게 보인다 — 재 보고 그대로 둔 결과다★: 담긴 것은 `(agent_id, epoch)`
-///   라는 **식별자**이고 권한을 주는 값이 아니다. 권한을 주는 것은 같은 env 에 이미 실려 있는
-///   [`TOKEN_ENV`] 의 bearer 토큰이고, 그 토큰은 이 쌍을 안다고 해서 만들어지지 않는다. 게다가 이
-///   값은 **애초에 우리 프로세스 밖에 남으라고** 심는 것이다(벤더 기록의 `originator` 칸). 그래서
-///   지우지 않았다. ★이 근거가 죽는 조건 하나 — agent id 자체가 무언가를 여는 열쇠가 되는 날★:
-///   그때는 이 자리가 아니라 그 열쇠 설계를 다시 본다.
+/// ★It is an **internal** upstream variable★ — if it disappears it is a silent ignore, leaving only 「a record without a marker」 (ADR-0217 「three unverified items」 ③). That the value stays in
+///   the record as is was measured (0.155.1 · 3 arbitrary strings · no allowlist refusal — ADR-0217 Probe B).
+/// ★Visible to the child and its descendants — left as is on purpose★: it holds the **identifier** `(agent_id, epoch)`, not a permission; permission is the bearer token of [`TOKEN_ENV`]
+///   in the same env, which cannot be made from this pair. And the value is planted precisely to remain outside our process (the vendor record's `originator`). Revisit only if the
+///   agent id itself becomes a key that opens something — then fix that key design, not this spot.
 // ADR-0217
 const ORIGINATOR_ENV: &str = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
 
-/// 데몬 MCP 서버를 이 스폰에 붙이는 설정 오버라이드의 키 접두. 뒤에 서버 논리명이 붙어
-/// `mcp_servers.engram` 한 키가 된다(정본 = [`MCP_SERVER_NAME`] — 이름을 여기 다시 타이핑하지 말 것).
+/// The key prefix of the config override that attaches the daemon MCP server to this spawn; the server's logical name ([`MCP_SERVER_NAME`], do not retype it) is appended to make the single key
+/// `mcp_servers.engram`.
 ///
-/// ★claude 의 `--mcp-config <파일>` 과 **기제가 다르다**★ — codex 는 파일을 안 먹고 이 오버라이드만
-///   먹는다(실측 0.155.0). 그래서 같은 endpoint 가 두 backend 에서 서로 다른 문법으로 번역된다
-///   (ADR-0004 가 말하는 바로 그 지점).
+/// ★The mechanism **differs** from claude's `--mcp-config <file>`★ — codex takes only this override, no file (measured 0.155.0); the same endpoint is translated into different syntax per
+///   backend (ADR-0004).
 const MCP_SERVER_OVERRIDE_PREFIX: &str = "mcp_servers.";
 
-/// MCP 서버 설정에서 **bearer 토큰의 값이 아니라 그것이 든 env 변수 이름**을 받는 칸.
+/// The MCP server config field that takes **the name of the env variable holding the bearer token**, not its value.
 ///
-/// ★이 칸을 고른 것이 결정이다 — 값 인라인(`bearer_token='…'`)으로 되돌리지 말 것★: 그렇게 하면
-///   토큰이 **명령줄에 박혀** 같은 사용자의 아무 프로세스나 argv 를 읽는 것만으로 새 나간다(Windows 의
-///   프로세스 목록·WMI 가 argv 를 준다 — 이 저장소가 데몬 발견에 쓰는 그 표면이다). 이 칸을 쓰면 토큰은
-///   이미 스폰 env 에 있는 그 한 벌뿐이고([`inject_cli_entrance`] 가 [`TOKEN_ENV`] 로 심는다) argv 에도
-///   디스크에도 사본이 생기지 않는다.
-/// ★codex 가 그 env 를 실제로 읽어 헤더로 싣는 것을 봤다(실측 2026-09-19 · 0.155.0)★ — 스텁 MCP 서버가
-///   `initialize`·`tools/list` 전 요청에서 `Authorization: Bearer <그 값>` 을 받았다.
+/// ★Do not revert to an inline value (`bearer_token='…'`)★: that **embeds the token in the command line**, readable by any same-user process via argv (Windows process list · WMI — the surface this repository
+///   uses for daemon discovery). With this field the token is only the one copy already in the spawn env ([`inject_cli_entrance`] plants it as [`TOKEN_ENV`]); none in argv or on disk.
+/// Measured 0.155.0: codex reads that env and carries it as a header — the stub MCP server received `Authorization: Bearer <that value>` on every request from `initialize` · `tools/list` on.
 const MCP_BEARER_ENV_KEY: &str = "bearer_token_env_var";
 
-/// 이 MCP 서버 항목 하나에 한해 도구 호출 승인 프롬프트를 없애는 칸.
+/// The field that removes the tool-call approval prompt, limited to this one MCP server entry.
 ///
-/// 유효값은 `auto | prompt | writes | approve` 넷이다 — ★`auto` 는 프롬프트를 없애지 않는다.
-///   없애는 것은 `approve` 뿐이다★(실측 2026-09-20). 이 둘을 헷갈려 한 번 잘못된 결론을 냈던
-///   적이 있어 여기 이름을 둘 다 박는다. `approve`가 대화형 TUI · `codex exec`(이 칸 없이는
-///   "MCP tool call requires approval, but approval policy is never"로 그냥 실패한다) ·
-///   `codex app-server --stdio`(이 칸 없이는 게이트가 `mcpServer/elicitation/request`로 온다)
-///   세 경로 전부에서 승인을 없애는 것을 확인했다.
-/// ★이 서버 항목 하나에만 걸린다 — 승인을 전역으로 끈 것이 아니다★: `approvalPolicy: on-request`·
-///   `sandbox: workspace-write`는 손대지 않으므로 일반 셸/실행 승인은 그대로 묻는다.
-/// ★대화상자의 "Always allow"는 디스크에 남지 않는다★(빈 `CODEX_HOME`으로 전/후 스냅샷 대조
-///   실측 — 새 프로세스는 다시 묻는다). 그래서 이 값은 한 번 설정해 두는 것으로 못 대체하고
-///   스폰마다 실어야 한다.
+/// Valid values: `auto | prompt | writes | approve` — ★`auto` does not remove the prompt, only `approve` does★ (measured 2026-09-20), confirmed on all three paths: the interactive TUI ·
+///   `codex exec` (without it: "MCP tool call requires approval, but approval policy is never") · `codex app-server --stdio` (without it the gate comes as `mcpServer/elicitation/request`).
+/// ★Only this one server entry — approval is not turned off globally★: `approvalPolicy: on-request` · `sandbox: workspace-write` are untouched, so ordinary shell/exec approvals are still asked.
+/// ★The dialog's "Always allow" does not persist to disk★ (before/after snapshots with an empty `CODEX_HOME`), so this value must be carried on every spawn.
 const MCP_APPROVAL_MODE_KEY: &str = "default_tools_approval_mode";
 const MCP_APPROVAL_MODE_VALUE: &str = "approve";
 
-/// 프라이밍 지시서를 codex 기본 지시문 **뒤에 덧붙이는** 설정 키.
+/// The config key that **appends** the priming brief **after** codex's default instructions.
 ///
-/// ★`model_instructions_file` 과 바꿔 쓰지 말 것 — 그쪽은 덧붙이기가 아니라 **대체**다(실측 0.155.0)★:
-///   경로를 받는 지시문 키는 그것 하나뿐인데, 프라이밍을 거기 걸면 codex 자신의 운용 지시가 통째로
-///   사라진다.
-/// ★이 키에는 경로를 받는 `*_file` 짝이 **없다**★ — `developer_instructions_file` ·
-///   `experimental_instructions_file` · `instructions_file` 은 전부 `unknown configuration field` 다
-///   (같은 실측). 그래서 이 backend 는 claude 와 달리 경로가 아니라 **내용**을 싣고, 지시서 파일을
-///   **여기서 읽는다**. 그 갈림이 ADR-0004 가 말하는 백엔드별 지식이다.
-/// ★권위는 같은 층이다★ — OpenAI 문서상 `instructions` 파라미터와 `developer` 역할 메시지는 같은 등급
-///   이라, 경로 대신 이 칸을 고른 대가가 「지시 강도」는 아니다.
+/// ★Do not swap it with `model_instructions_file`★ — that one **replaces** instead of appending (measured 0.155.0), so codex's own operating instructions would disappear.
+/// ★This key has **no** `*_file` counterpart★ — `developer_instructions_file` · `experimental_instructions_file` · `instructions_file` are all `unknown configuration field` (same measurement). So unlike
+///   claude, this backend carries the **content** and **reads** the brief file here (the per-backend knowledge of ADR-0004).
+/// Authority is the same layer: per the OpenAI docs the `instructions` parameter and a `developer` message are the same grade, so this field costs no 「instruction strength」.
 // ADR-0004
 // ADR-0215
 const DEVELOPER_INSTRUCTIONS_KEY: &str = "developer_instructions";
 
-/// 명령줄에 실을 때 줄바꿈을 대신하는 두 글자(역슬래시 + `n`).
+/// The two characters (backslash + `n`) that stand in for a newline on the command line.
 ///
-/// ★실제 LF 가 한 글자라도 남으면 `cmd` 가 **그 자리에서 명령줄을 자르고 아무 오류도 내지 않는다**★
-///   (실측) — 뒤따르던 인자가 통째로 사라진 채 codex 가 뜬다. 그 결말은 「프라이밍이 없다」가 아니라
-///   「MCP 부착도 훅 등록도 없다」라, 조용한 절단이 이 값의 가장 비싼 실패 모드다.
-/// ★두 글자로 바꾸는 것이 실측된 선택이다★ — 모델이 이 형태를 그대로 줄바꿈으로 읽었다(같은 실측).
-///   TOML 리터럴 문자열에는 이스케이프가 없으므로 이 두 글자는 파서를 지나 **글자 그대로** 도착한다.
+/// ★If one real LF remains, `cmd` **cuts the command line there without any error**★ (measured) — codex comes up with the following arguments gone, i.e. 「no MCP attachment and no hook registration」,
+///   the most expensive failure of this value.
+/// The model reads this two-character form as a newline (same measurement); a TOML literal string has no escapes, so it arrives **literally**.
 // ADR-0215
 const NEWLINE_REPLACEMENT: &str = "\\n";
 
@@ -349,51 +283,31 @@ const NEWLINE_REPLACEMENT: &str = "\\n";
 // ADR-0215
 const CMD_LINE_LIMIT_UTF16: usize = 8191;
 
-/// 이 스폰에 데몬 MCP 서버를 붙일지의 **단일 판정**. [`AgentBackend::build_spec`](실제 부착)과
-/// [`AgentBackend::precheck_control_endpoint`](fail-closed 게이트)가 **같은 이 값**을 읽는다.
-///
-/// ★두 자리가 각자 판정하면 게이트가 공허해진다★ — 게이트가 「붙일 수 있다」고 통과시킨 스폰이
-///   조립에서는 부착 없이 떠도 아무 신호가 없다. 그래서 판정은 [`mcp_attachment`] 하나뿐이고 이
-///   enum 이 그 결과를 두 읽는 자리에 같은 모양으로 나른다.
+/// The **single decision** of whether to attach the daemon MCP server to this spawn; [`AgentBackend::build_spec`] (the attachment) and [`AgentBackend::precheck_control_endpoint`] (the fail-closed gate) read **this
+/// same value**. ★If each decided, the gate would go hollow★ — a spawn it passed as 「can attach」 could come up unattached with no signal. The one decision is [`mcp_attachment`].
 enum McpAttachment {
-    /// 붙인다 — `-c` 에 실을 값.
+    /// Attach — the value to carry on `-c`.
     Attach(String),
-    /// 붙이지 않는다, 그리고 **그것이 정상 상태다**. 두 갈래가 여기 든다 — 제어 채널이 아예 없는
-    /// 스폰(우편 평면 밖)과, 데몬이 이 스폰에 MCP 발신 입구를 **인가하지 않은** 스폰(운영자가 MCP
-    /// 우편을 껐다 — [`ControlEndpoint::grants_mcp_send`]). 둘 다 스폰을 막지 않는다.
+    /// Do not attach — **the normal state**. Two branches: a spawn with no control channel (outside the mail plane), and one for which the daemon has **not authorized** the MCP send entrance
+    /// (the operator turned off MCP mail — [`ControlEndpoint::grants_mcp_send`]). Neither blocks the spawn.
     NotWanted,
-    /// 붙여야 하는데 **못 만든다**(사유). ★이 값만이 fail-closed 를 낳는다★ — 이 상태로 그냥 뜨면
-    /// 에이전트는 수신 명단(`reads_messages`)에 오른 채 발신 입구가 0 이라(MCP 는 안 붙었고 CLI
-    /// 미러는 `mail_allowed=false` 가 닫는다), 배달된 요청이 전부 아무도 답할 수 없는 계약이 된다.
+    /// Should attach but **cannot build it** (reason). ★Only this value produces fail-closed★ — otherwise the agent would sit on the receiving roster (`reads_messages`) with zero send entrances
+    /// (MCP unattached, CLI mirror closed by `mail_allowed=false`) and every delivered request would be a contract nobody can answer.
     Unrepresentable(String),
 }
 
-/// 위 판정을 내리는 유일한 자리.
+/// The only place that makes the decision above.
 ///
-/// ★환경변수를 여기서 다시 읽지 않는다(ADR-0004)★: MCP 우편을 끄는 노브(`ENGRAM_DISALLOW_MCP_SEND` ·
-///   하네스의 `ENGRAM_FORCE_CLI_ONLY_SEND`)의 주인은 **데몬**이고, 그 결정은 이미 씹혀서
-///   [`ControlEndpoint::grants_mcp_send`] 로 실려 온다. backend 가 같은 변수를 다시 읽으면 권위가
-///   둘이 되고, 갈리는 날 「claude 는 꺼졌는데 codex 만 켜져 있다」가 조용히 난다(그것이 이 갈래를
-///   만든 적출이다).
+/// ★Environment variables are not read again here (ADR-0004)★: the owner of the knobs that turn off MCP mail (`ENGRAM_DISALLOW_MCP_SEND` · the harness's `ENGRAM_FORCE_CLI_ONLY_SEND`) is **the daemon**, and the
+///   decision arrives digested via [`ControlEndpoint::grants_mcp_send`]. A second reader would make two authorities and 「claude off, codex on」 would happen silently.
 ///
-/// ★이 갈래엔 평문 토큰 파일이 없다 — 그러나 그것을 보증하는 것은 이 함수가 아니다★: 여기서 토큰이
-///
-/// ★이 갈래엔 평문 토큰 파일이 없다 — 그러나 그것을 보증하는 것은 이 함수가 아니다★: 여기서 토큰이
-///   argv 에 안 박힌다는 것은 위 [`MCP_BEARER_ENV_KEY`] 가 지키고, **디스크에도 안 쓰인다**는 것은
-///   [`AgentBackend::writes_mcp_config_file`] 가 false 인 것이 지킨다(데몬 `control::provision` 이 그
-///   칸 하나로 `mcp_config::write_config` 를 가른다 — 그 파일의 내용·수명은
-///   `control/mcp_config.rs`). ★한때 이 자리엔 「이 갈래는 그 파일이 애초에 없다」가 적혀 있었고 그것이
-///   거짓이었다★ — 그때 데몬은 `accepts_mcp_config` 를 보고 codex 스폰마다 그 파일을 실제로 썼다.
-///   이 함수가 파일을 안 만든다는 것과 그 스폰에 파일이 안 생긴다는 것은 다른 말이다.
-/// ★TOML 리터럴 문자열(작은따옴표)을 쓴다★ — 이스케이프가 없어 값이 **바이트 그대로** 건너가고, 그
-///   조합이 `cmd.exe /c` + `.cmd` shim 두 겹을 견디는 것이 이미 실측돼 있다(ADR-0210). 대신 작은따옴표
-///   자체는 담을 수 없다.
-/// ★실을 수 없는 문자를 만나면 지어낸 이스케이프로 밀어 넣지 않고 끊는다★ — 작은따옴표·공백문자·
-///   제어문자는 값이나 TOML 줄 자체를 깨고, `%` 는 cmd 가 명령줄에서 **따옴표 안에서도** 환경변수로
-///   펴서(아래 `build_spec` 의 같은 이름 한계 주석이 정본) 다른 주소를 가리키게 만든다. 셋 다 증상이
-///   「우편이 조용히 안 된다」 하나라 여기서 소리를 낸다.
-///   ★그 검사가 오늘 한 번도 안 걸리는 것이 정상이다★ — 이 url 은 데몬이 authoring 하는
-///   `http://127.0.0.1:<port>/mcp` 이고 사용자 입력이 아니다. 검사는 그 형태가 바뀌는 날을 위한 것이다.
+/// ★This branch has no plaintext token file — but this function is not what guarantees it★: the token stays out of argv via [`MCP_BEARER_ENV_KEY`], and out of disk because
+///   [`AgentBackend::writes_mcp_config_file`] is false (the daemon's `control::provision` picks `mcp_config::write_config` by that one field; the file's content and lifetime:
+///   `control/mcp_config.rs`). That this function creates no file and that no file appears for that spawn are different statements.
+/// ★TOML literal string (single quotes)★ — no escapes, byte for byte, measured to survive `cmd.exe /c` + the `.cmd` shim (ADR-0210); a single quote itself cannot be held.
+/// ★A character that cannot be carried stops it instead of inventing an escape★ — a single quote · whitespace · control characters break the value or the TOML line, and `%` is expanded by cmd **even inside
+///   quotes** (`build_spec`'s same-named limit comment), pointing at a different address. All share one symptom, 「mail silently does not work」, so we make noise.
+///   It never trips today (the url is daemon-authored `http://127.0.0.1:<port>/mcp`); the check is for the day that form changes.
 /// ★`"` and `& ^ | < >` are refused as well★ — a `"` flips cmd's quote state for every later argument, and the
 ///   metacharacters act wherever that state is off (the same set as the preset `-c` guard, `cmdline::config_args`).
 // ADR-0004
@@ -404,9 +318,8 @@ fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
     let Some(endpoint) = control else {
         return McpAttachment::NotWanted;
     };
-    // ★이 한 줄이 「운영자가 MCP 우편을 껐다」를 이 backend 에 닿게 하는 전부다★ — 예전에는 제어
-    //   채널의 **존재**만 보고 무조건 붙여서, 노브를 켠 운영자가 claude 는 꺼지고 codex 는 켜진 채로
-    //   남는 상태를 얻었다(`eg_send` 가 그대로 자동 승인으로 호출 가능).
+    // ★This one line is all that makes 「the operator turned off MCP mail」 reach this backend★ — looking only at the control channel's existence would attach unconditionally and leave claude off and
+    //   codex on (`eg_send` still callable with automatic approval).
     if !endpoint.grants_mcp_send() {
         return McpAttachment::NotWanted;
     }
@@ -420,7 +333,7 @@ fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
             || !text_is_cli_safe(c.encode_utf8(&mut [0; 4]))
     }) {
         return McpAttachment::Unrepresentable(format!(
-            "codex MCP 서버를 붙일 수 없다 — 제어 채널 주소에 실을 수 없는 문자가 있다({bad:?}): {url}"
+            "cannot attach the codex MCP server — the control channel address has a character that cannot be carried ({bad:?}): {url}"
         ));
     }
     // ADR-0337: the command-line count holds the URL to this bound.
@@ -446,72 +359,54 @@ fn mcp_override_value(url: &str) -> String {
     )
 }
 
-/// 상주 JSON 서버로 띄우는 하위 명령과 그 전송 선택(실측 0.154.0 — `--stdio` 는 `--listen stdio://` 와
-/// 같고 그것이 기본값이다. 기본값에 기대지 않고 명시한다: 이 통로는 stdio 가 아니면 성립하지 않는데,
-/// 기본값은 상류가 바꿀 수 있고 바뀌어도 우리 argv 는 조용히 그대로다).
+/// The subcommand that launches it as a resident JSON server, and its transport (measured 0.154.0: `--stdio` equals `--listen stdio://` and is the default). Stated explicitly: this link
+/// holds only on stdio, and an upstream default change would silently change our argv.
 const APP_SERVER_SUBCOMMAND: &str = "app-server";
 const APP_SERVER_STDIO_FLAG: &str = "--stdio";
 
-/// 호출자 패스스루가 **우리와 같은 설정 키**를 세우나. `true` = 우리 오버라이드가 그것을 덮는다(뒤에
-/// 실리므로) — 사용자가 일부러 건 값을 말없이 지우지 않도록 그 자리에서 경고하게 한다.
+/// Does the caller pass-through set **the same config key as ours**? `true` = our override wins (carried later), and a warning is given so a deliberately set value is not silently erased.
 ///
-/// ★잡는 모양은 하나뿐 = `-c` **다음 칸**이 `key` 로 시작하는 형태다★(`-c developer_instructions=…`).
-/// ★못 잡는 것 — 알고 두는 구멍이다★: `-c` 와 값을 한 낱말로 붙인 형태 · `-c` 말고 긴 이름의 같은
-///   플래그 · 표 전체를 덮는 상위 키(`-c tui=…` · `-c mcp_servers=…`) · 그 키로 **시작만 하는** 다른
-///   키. 이 목록을 키워 「확실히」 만들려 들지 말 것 — codex 오버라이드 문법의 재구현이 되고 그 재구현은
-///   상류가 바뀔 때마다 조용히 낡는다. 놓쳐서 잃는 것은 **경고뿐이고 동작이 아니다** — 우리 것이 이기는
-///   성질은 아래 `build_spec` 의 순서가 따로 보장한다.
-/// ★키를 인자로 받는 것이 의도다★ — 오버라이드가 여럿이라(MCP 서버 부착 · 지시서) 판정을 키마다
-///   복제하면 한쪽만 고쳐져 경고가 반쪽이 된다.
+/// ★Catches one shape only: the **next slot** after `-c` starts with `key`★ (`-c developer_instructions=…`).
+/// ★Known holes★: `-c` with the value joined in one word · the long-name flag · a higher key overriding a whole table (`-c tui=…` · `-c mcp_servers=…`) · another key that only starts with that key.
+///   Do not grow the list toward 「certain」 — it becomes a reimplementation of codex's override syntax that goes stale. A miss loses **only the warning**; that ours wins is guaranteed by the order in `build_spec`.
+/// Taking the key as an argument is intended: several overrides exist (MCP attachment · the brief) and per-key duplication leaves the warning half-fixed.
 fn passthrough_overrides_key(extra_args: &[String], key: &str) -> bool {
     extra_args
         .windows(2)
         .any(|pair| pair[0] == CONFIG_OVERRIDE_FLAG && pair[1].starts_with(key))
 }
 
-/// `codex resume` 의 위치 인자로 실을 수 있는 모양이면 그 문자열, 아니면 `None`.
+/// The string if it has a shape that can be carried as the positional argument of `codex resume`, otherwise `None`.
 ///
-/// ★왜 게이트가 필요한가 — 이 인자는 **틀려도 실패하지 않는다**★(실측 2026-09-21): codex 는 스레드
-///   id 로 못 읽히는 문자열을 받으면 그것을 **세션 이름**으로 재해석해 **새 세션을 조용히 만들고**
-///   종료 코드 `0` 으로 끝나며 턴이 과금된다. 즉 잘못된 값의 대가가 「오류」가 아니라 「사용자가
-///   이어받았다고 믿는 새 대화」다. ADR-0218 이 세운 실패 모드는 「못 받음」이지 「엉뚱한 대화」가
-///   아니므로, 실을 수 없는 값이면 하위 명령 자체를 안 낸다(새 대화 argv 로 떨어지고, 그 퇴행은
-///   조립점의 `opens_a_new_conversation` 이 신고한다).
-/// ★오늘 그 재해석 경로에 닿을 수 있나 — 타입이 이미 절반을 막는다★: 이 칸은 `Uuid` 라 비-uuid
-///   문자열이 여기까지 올 수 없고, 프로필 역직렬화도 그 앞에서 거절한다. 그래서 이 함수가 실제로
-///   거르는 것은 **nil**(전부 0) 하나다 — 손으로 고친 프로필·초기화 실수에서 나오는 값이고, 그 값은
-///   uuid 모양이라 타입 게이트를 그냥 지난다.
-/// ★claude 와 합치지 말 것★ — 그쪽은 이 실패 모드가 없다(`--resume` 는 모르는 값에 실패한다).
-///   공용 자리로 올리면 한 백엔드의 상류 버그가 전원의 조립 규칙이 된다(ADR-0004).
-/// ★이 함수는 argv 조립만의 것이 **아니다** — 세션 id 회수 게이트도 이것을 본다★
-///   ([`AgentBackend::open_spawn`] 의 터미널 갈래 · [`thread_lock::plan_capture`]). 한쪽만 고치면
-///   「argv 는 새 대화인데 회수는 꺼진」 조합이 생기고 그 화신의 id 는 영영 안 적힌다.
+/// ★The gate is needed because this argument **does not fail even when wrong**★ (measured 2026-09-21): a string codex cannot read as a thread id is reinterpreted as a **session name**,
+///   **a new session is quietly created**, exit code `0`, and the turn is billed — 「a new conversation the user believes they resumed」. ADR-0218's failure mode is 「not received」, not 「the wrong
+///   conversation」, so for an uncarriable value the subcommand is not emitted (falls to new-conversation argv; `opens_a_new_conversation` at the assembly point reports that regression).
+/// ★Reachable today only for **nil**★: the field is `Uuid`, so a non-uuid string never gets here (profile deserialization refuses it earlier); nil (all zeros — hand-edited profile or init mistake)
+///   has the uuid shape and passes the type gate.
+/// ★Do not merge it with claude★ — `--resume` fails on an unknown value there; sharing would make one backend's upstream bug everyone's assembly rule (ADR-0004).
+/// ★Not only for argv assembly — the session id recovery gate looks at it too★ (the terminal branch of [`AgentBackend::open_spawn`] · [`thread_lock::plan_capture`]); fixing only one side
+///   yields 「argv is a new conversation but recovery is off」 and that incarnation's id is never written.
 // ADR-0218
 fn resume_argument(thread_id: Uuid) -> Option<String> {
     (!thread_id.is_nil()).then(|| thread_id.hyphenated().to_string())
 }
 
-/// 이 화신이 만든 세션 기록에 남기는 **진단용** 표식([`ORIGINATOR_ENV`] 의 값).
+/// The **diagnostic** marker left in the session record this incarnation creates (the value of [`ORIGINATOR_ENV`]).
 ///
-/// ★읽는 쪽이 없다 — 「같은 값을 다시 계산해 대조한다」는 계약을 여기 다시 적지 말 것★(ADR-0218
-///   결정 8): 회수는 락 홀더가 지고([`thread_lock`]) 이 표식에 기대지 않는다. 대조 계약을 적으면
-///   지킬 수 없는 약속이 된다 — 표식에는 화신 표식이 들어 있어 **다음 화신은 다른 값을 계산하고**,
-///   그 값으로 옛 기록을 찾으면 오류 없이 0 건이 나온다.
-/// 성질:
-/// - 한 화신 안에서 불변이고, 화신이 바뀌면 다른 값이다(그 구분이 `epoch` 의 몫).
-/// - 돌려주는 문자열은 `[a-z0-9-]` 뿐이다 — 그 밖의 문자는 한 글자당 `-` 하나로 바뀐다.
+/// ★There is no reader — do not write the contract 「recompute the same value and compare」★ (ADR-0218 decision 8): recovery is carried by the lock holder ([`thread_lock`]). The marker contains the
+///   incarnation marker, so **the next incarnation computes a different value** and searching old records with it yields 0 hits without an error.
+/// - Invariant within one incarnation; different when the incarnation changes (`epoch`'s job).
+/// - Only `[a-z0-9-]`: any other character becomes one `-` per character.
 ///
-/// ★오늘 `agent_id` 는 uuid 라 치환이 한 번도 안 도는 것이 정상이다 — 그래도 지우지 말 것★: 이 값은
-///   우리 프로세스 밖(벤더 기록)에 남고, 그 칸이 어떤 문자를 받아 주는지는 상류 소관이다. 치환은 그
-///   미지를 우리 쪽에서 닫는다.
+/// ★Today `agent_id` is a uuid so the substitution never runs — do not remove it★: the value stays outside our process (the vendor record) and which characters that field accepts is upstream's business.
 // ADR-0217
 // ADR-0218
 pub(crate) fn originator_marker(agent_id: AgentId, epoch: u32) -> String {
     sanitise_marker(&format!("engram-{agent_id}-{epoch}"))
 }
 
-/// [`originator_marker`] 의 문자 규칙 — ★따로 있는 이유는 시험 가능성 하나다★: 운영 입력(uuid + u32)
-/// 으로는 치환이 한 번도 안 돌아, 조립을 거쳐 재면 규칙이 지워져도 초록이다.
+/// The character rule of [`originator_marker`] — ★the one reason it stands separately is testability★: with production input (uuid + u32)
+/// the substitution never runs, so measured through the assembly, it stays green even if the rule is erased.
 fn sanitise_marker(raw: &str) -> String {
     raw.chars()
         .map(|c| {
@@ -528,56 +423,37 @@ fn sanitise_marker(raw: &str) -> String {
 pub struct CodexBackend;
 
 impl AgentBackend for CodexBackend {
-    /// ★호출자가 세션 id 를 정할 수 없다(실측)★ — codex 에는 `--session-id` 류 플래그가 없고 id 는
-    /// codex 가 스스로 발급한다. true 로 두면 manager 가 우리 uuid 를 발급해 **프로필에 영속**하는데 그
-    /// 값은 codex 가 한 번도 쓰지 않는다 — 그러고 나면 이어받기 판정이 그 가짜 값을 보고 서서, 실제로는
-    /// 새 대화인 화신을 이어받았다고 믿는다.
-    /// ★app-server 모드라고 켜지 말 것 — 두 모양 다 false 다★: 그 모드의 식별자(thread id)도 발급 주체는
-    ///   codex 다. 그 id 로 **이어받을 수 있나**는 아래 별개 축이 답한다.
+    /// ★The caller cannot decide the session id (measured)★ — codex has no `--session-id`-like flag and issues the id itself. If true, the manager would issue our uuid and **persist it in the profile**,
+    /// codex would never use it, and the resume decision would stand on that fake value, believing a new conversation was resumed.
+    /// ★Do not turn it on for app-server mode — both shapes are false★: that mode's identifier (thread id) is also issued by codex; whether it **can be resumed** is the separate axis below.
     // ADR-0185
     fn assigns_session_id(&self, _command: &AgentCommand) -> bool {
         false
     }
 
-    /// ★두 모드 다 이어받는다 — 수단만 다르다★: app-server 는 저장된 thread id 로 `thread/resume` 을
-    /// 내고([`AgentBackend::open_spawn`] 이 고른다), 터미널 모드는 같은 id 를 하위 명령 + 위치 인자로
-    /// 실어 띄운다([`RESUME_SUBCOMMAND`] · [`AgentBackend::build_spec`] 의 터미널 갈래).
-    /// ★그래서 이 칸은 [`is_app_server`] 를 보지 않는다 — 되돌리지 말 것★: 이 술어가 묻는 것은
-    ///   **저장된 sid 로 이어받을 수 있나**이지 어느 통로로 이어받나가 아니다. 통로로 가르면 터미널
-    ///   모드로 뜬 codex 는 손잡이가 명부에 있어도 활성화 입구가 Fresh 로 띄워, 회수해 적어 둔
-    ///   ([`crate::profile::ProfileRegistry::observe_session_id`]) 그 id 가 영영 안 쓰인다(ADR-0217).
-    /// ★손잡이가 **없을 때**는 이 칸이 답하지 않는다★ — 그 판정은 저장된 sid 존재와 함께 보는
-    ///   [`crate::backend::can_resume_profile`] 이 하고, 그래도 Resume 으로 들어온 spawn 은
-    ///   [`AgentBackend::build_spec`] 이 새 대화 argv 로 떨어뜨린다(그 자리 doc).
-    /// ★아래 [`AgentBackend::capabilities`] 의 `session.resume` 과 **같은 술어로 함께 켠다 — 한쪽만
-    ///   건드리지 말 것**★: 어느 쪽이든 단독으로 켜면 이어받은 적 없는 새 스레드가 「이어받음」으로
-    ///   보고되고, 단독으로 끄면 실제로 이어받는 스폰이 「새 대화」로 보고된다.
+    /// ★Both modes resume — only the means differ★: app-server emits `thread/resume` with the stored thread id ([`AgentBackend::open_spawn`]); terminal mode launches carrying the same id as
+    /// subcommand + positional argument ([`RESUME_SUBCOMMAND`] · the terminal branch of [`AgentBackend::build_spec`]).
+    /// ★Do not make this look at [`is_app_server`]★: the question is **whether it can resume with the stored sid**, not through which link. Splitting by link would make terminal-mode codex launch as Fresh
+    ///   even with a handle in the registry, and the recovered id ([`crate::profile::ProfileRegistry::observe_session_id`]) would never be used (ADR-0217).
+    /// ★With **no** handle this field does not answer★ — [`crate::backend::can_resume_profile`] decides that together with the stored sid, and a spawn that still comes in as Resume is dropped to
+    ///   new-conversation argv by [`AgentBackend::build_spec`].
+    /// ★Turn it on **together with** the same predicate as `session.resume` of [`AgentBackend::capabilities`]★: either alone reports a never-resumed thread as 「resumed」 or a real resume as 「new conversation」.
     // ADR-0185
     // ADR-0208/ADR-0210
     fn can_resume_stored_session(&self, _command: &AgentCommand) -> bool {
         true
     }
 
-    /// ★true 인데 [`AgentBackend::accepts_mcp_config`] 는 false 다 — 두 축은 별개다(ADR-0133)★: 이 칸이
-    /// 묻는 것은 **제어 채널을 소비하나**이고, 그 소비 수단은 MCP 만이 아니라 CLI 입구(크레덴셜 env)도
-    /// 있다. 아래 칸이 묻는 것은 그중 **mcp-config 파일을 먹일 수 있나** 하나뿐이다.
-    /// ★false 로 되돌리면 codex 스폰의 env 에서 `ENGRAM_TOKEN`·`ENGRAM_CONTROL_URL` 이 통째로 사라진다★
-    ///   — 조립점이 이 칸을 보고 provision 자체를 건너뛰므로([`crate::manager::AgentManager`] 의 그
-    ///   자리) endpoint 가 `None` 으로 오고, 아래 `build_spec` 의 주입이 한 줄도 돌지 않는다.
-    /// ★한때 이 env 의 소비자에 **우리 훅 프로세스**가 있었다 — 오늘은 없다★(ADR-0216 이 등록을 걷었다).
-    ///   그때 잰 것은 남긴다: codex 는 훅 프로세스에 자기 env 를 **하나도 덧씌우지 않았다**(순수 상속 —
-    ///   실측 2026-09-18, 0.155.0). 살아 있는 소비자는 codex 가 띄우는 셸 도구와 MCP 우편이고, 공용
-    ///   주입이 「보조 프로세스의 자격증명이기도 하다」고 적은 조건은 [`inject_cli_entrance`] doc 이 진다.
-    /// ★이 칸이 **우편을 열지는 않는다 — 그리고 그것이 공짜가 아니었다**★: 예전 데몬은 우편 가부를
-    ///   `!accepts_mcp_config` 하나로 파생해서, 이 칸을 켜는 것만으로 이 백엔드에 **보내기 인가가 함께
-    ///   열렸다**(받기는 [`AgentBackend::reads_messages`] 가 닫은 채로). 그 비대칭을 없애려고 보내기 축을
-    ///   별도 선언으로 뽑았다 — 아래 [`AgentBackend::uses_mail`] 이 그것이고, 데몬은 두 축에서 한 값을
-    ///   파생한다. ★그 칸을 지우거나 기본값으로 되돌리면 이 부수효과가 그대로 돌아온다★.
-    ///   (오늘 그 칸은 켜져 있다 — 그러나 **선언으로** 켜져 있고, 부수효과로가 아니다.)
-    /// ★`engram` 실행파일이 없는 설치에서도 이 백엔드의 스폰은 **끊기지 않는다**★ — 그 fail-closed 는
-    ///   「CLI 우편을 가르쳤는데 부를 실행파일이 없다」는 짝 위반을 지키는 것이고, 우편 평면 밖 스폰에는
-    ///   그 짝이 없다(그 판정의 정본 = 데몬 `control::provision`). 제어 동사를 못 쓰게 되는 것은 남지만
-    ///   그쪽은 fail-open + warn 이다.
+    /// ★True while [`AgentBackend::accepts_mcp_config`] is false — the two axes are separate (ADR-0133)★: this one asks **does it consume the control channel** (by MCP or the CLI entrance / credential env);
+    /// the field below asks only **can the mcp-config file be fed**.
+    /// ★Reverting it to false makes `ENGRAM_TOKEN` · `ENGRAM_CONTROL_URL` vanish from codex spawn env★ — the assembly point (see [`crate::manager::AgentManager`]) skips provisioning, the endpoint comes as
+    ///   `None`, and none of `build_spec`'s injection runs. Today's live consumers are the shell tools codex launches and MCP mail (the [`inject_cli_entrance`] doc has the credential condition); our hook
+    ///   process is gone (ADR-0216), and codex overlaid none of its own env on it (0.155.0).
+    /// ★This field **does not open mail**★: the daemon once derived mail-allowed from `!accepts_mcp_config` alone, so turning this on also opened send authorization (receiving closed by
+    ///   [`AgentBackend::reads_messages`]). The send axis is now the separate [`AgentBackend::uses_mail`] and the daemon derives one value from both. ★Removing that field or reverting it to the default
+    ///   brings the side effect back★ (it is on today **by declaration**).
+    /// ★Without the `engram` executable the spawn **is not cut**★ — that fail-closed guards the pair 「CLI mail taught but no executable to call」, and a spawn outside the mail plane has no such pair (the daemon's
+    ///   `control::provision` decides). Losing the control verbs remains, fail-open + warn.
     // ADR-0086
     // ADR-0132
     // ADR-0133
@@ -587,23 +463,13 @@ impl AgentBackend for CodexBackend {
         true
     }
 
-    /// ★이 칸의 **이름과 오늘의 뜻이 어긋나 있다 — 알고 켰다**★: 이름과 [`crate::types::ControlChannelNeeds`]
-    /// doc 이 묻는 것은 「우리가 만든 mcp-config **파일**을 먹일 수 있나」이고 codex 의 답은 여전히
-    /// **아니오**다(그 파일을 가리킬 플래그가 없다 — 실측 0.155.0). 그런데 데몬은 이 한 칸으로 **우편
-    /// 채널 판정**까지 파생하므로(`mail_allowed = uses_mail && !accepts_mcp_config`), MCP 로 우편을 쓰는
-    /// 이 백엔드가 false 를 유지하면 **CLI 미러가 열린 채로** 남는다 — ADR-0209 가 「MCP 가 정식, CLI 는
-    /// 미러」라고 못 박은 것의 정반대다.
-    /// ★한때 이 칸을 켜면 **파일까지 딸려 왔고, 그 대가는 갚았다**★: 데몬이 이 한 칸을 보고 mcp-config
-    ///   JSON(평문 Bearer 토큰)과 세션 설정 조각을 실제로 썼고, codex 는 둘 다 안 읽으므로 스폰마다
-    ///   아무도 안 여는 비밀 파일이 하나 생겼다 — 게다가 그 write 는 fail-closed 라 **안 읽는 파일 때문에
-    ///   codex 스폰이 끊길 수 있었다**. 데몬의 파생 축을 둘로 쪼개 해소했다: 파일을 쓸지는 이제 아래
-    ///   [`AgentBackend::writes_mcp_config_file`] 가 단독으로 가르고, 이 칸은 우편 채널 판정만 굴린다.
-    ///   ★그 칸을 지우거나 여기 값으로 파생하면 그 대가가 그대로 돌아온다★.
-    /// ★실제 부착 수단은 [`mcp_server_override`] 다★ — `-c mcp_servers.engram={…}` 한 값. 그 값이 실제로
-    ///   서버를 세우는 것을 봤다(실측 2026-09-19 · 0.155.0: `mcpServerStatus/list` 가 `engram` 을 그
-    ///   서버의 툴 둘과 함께 돌려줬고, 스텁 서버는 `Authorization: Bearer …` 를 받았다).
-    ///   ★그날 찍힌 이름은 `send_message`·`messages` 이고, `1b84045` 가 `eg_send`·`eg_messages` 로
-    ///   개명했다★ — 이 파일 헤더의 같은 실측 항목이 그 사유의 정본이다.
+    /// ★Name and meaning disagree — turned on knowingly★: the name and the [`crate::types::ControlChannelNeeds`] doc ask 「can the mcp-config **file** we made be fed」, and codex's answer is **no** (no flag
+    /// points to that file — measured 0.155.0). But the daemon derives the **mail channel decision** from this field (`mail_allowed = uses_mail && !accepts_mcp_config`), so false here, for a backend using MCP for
+    /// mail, would **leave the CLI mirror open** — the opposite of ADR-0209's 「MCP is the official one, CLI is the mirror」.
+    /// ★Turning it on once brought a file along — paid off★: the daemon wrote the mcp-config JSON (plaintext Bearer token) and the session settings fragment, neither read by codex, and that write is fail-closed,
+    ///   so **a codex spawn could be cut over an unread file**. The derived axis was split: whether to write the file is decided by [`AgentBackend::writes_mcp_config_file`] alone; this field drives only
+    ///   the mail channel decision. ★Removing that field or deriving it from this one brings the cost back★.
+    /// ★The actual means of attachment is [`mcp_server_override`]★ — the single `-c mcp_servers.engram={…}` (measured 0.155.0, see the header).
     // ADR-0099
     // ADR-0128
     // ADR-0209
@@ -611,15 +477,10 @@ impl AgentBackend for CodexBackend {
         true
     }
 
-    /// ★위 칸이 true 인데 이 칸은 false 다 — 그 갈림이 이 칸의 존재 이유다★: codex 에는 우리가 쓴 파일을
-    /// 가리킬 플래그가 **없다**(실측 0.155.0 — `--mcp-config` 도 `--settings` 도, 설정 파일을 가리키는
-    /// `--config <파일>` 도 없다). MCP 부착은 [`mcp_server_override`] 의 `-c mcp_servers.engram={…}`
-    /// 한 값 단독이고, 토큰은 그 값이 이름으로 가리키는 env 로 간다([`MCP_BEARER_ENV_KEY`]) — 디스크에
-    /// 사본을 만들 자리가 아예 없다.
-    /// ★false 를 유지하는 것이 보안 결정이다 — 위 칸에서 파생하지 말 것★: true 로 되돌리면 데몬이
-    ///   스폰마다 평문 Bearer 토큰 JSON 을 기본 ACL 로 데이터 디렉토리에 쓰고(아무도 안 연다), 그
-    ///   write 실패가 **fail-closed** 라 codex 스폰이 그 파일 때문에 끊긴다. 그것이 이 칸이 갈라지기 전의
-    ///   실제 상태였다.
+    /// ★True above, false here — that split is why this field exists★: codex has **no** flag to point to a file we wrote (0.155.0: neither `--mcp-config` nor `--settings` nor a `--config <file>` for settings).
+    /// MCP attachment is only the single `-c mcp_servers.engram={…}` of [`mcp_server_override`] and the token goes to the env it names ([`MCP_BEARER_ENV_KEY`]) — nothing is copied to disk.
+    /// ★False is a security decision — do not derive it from the field above★: true makes the daemon write a plaintext Bearer token JSON with the default ACL to the data directory on every spawn (nobody
+    ///   opens it), and that write is **fail-closed**, cutting the codex spawn over that file.
     // ADR-0086
     // ADR-0099
     // ADR-0209
@@ -640,22 +501,13 @@ impl AgentBackend for CodexBackend {
         launch::materialize(command, kit, cwd, fs, &|path| std::fs::read_to_string(path))
     }
 
-    /// ★한때 false 였다 — 그 사유와 그것을 버린 이유를 **함께** 남긴다(지우지 말 것)★: 옛 값의 근거는
-    /// 「이 메서드가 `command` 를 안 받아 두 모드를 가를 수 없다」였다. app-server 모드는 턴 신호를
-    /// 낸다 — 통로가 `turn/completed` 를 읽고(`turn/started` 는 **일부러** 읽지 않는다. 사유 정본은 그
-    /// 통로의 `TURN_COMPLETED` doc), 번역기가 그 알림을 턴 경계로 옮겨 아래 [`classify_turn`] 이
-    /// `Ended` 를 낸다. 그런데 터미널 모드는 decoder 가 없어 `TerminalBytes` 만 흐르고 신호가 0 이라,
-    /// 여기서 true 를 돌려주면 **그 모드까지 함께 열린다** — 그래서 닫아 뒀었다.
-    /// ★그 사유는 막을 근거가 못 된다 — 터미널 claude 가 **정확히 같은 자리에 있고 이미 받는다**★:
-    ///   구조화 출력이 없는 claude 도 턴 신호가 0 인데 수신자 명단에 있다. 정책 정본은 **ADR-0116
-    ///   결정 7** 이고 그 문장이 「턴 신호 없음 → 게이트 없이 즉시 주입」이다(그 CLI 자신의 입력 큐가
-    ///   게이트라서 우리가 idle 을 관측할 이유가 없다). 같은 ADR 의 거부한 대안이 「관측할 수 없으니
-    ///   배달할 수 없다」를 **명시로** 죽였다 — 그 전제로 되돌리지 말 것.
-    /// ★그래서 대가를 **알고** 받는다★: 터미널 모드에는 바쁨 게이트가 없으므로 봉투가 턴 한가운데
-    ///   꽂힐 수 있고, TUI 가 모달 상태(승인 프롬프트·메뉴·플랜 확인)면 그 위젯이 봉투를 먹을 수 있다.
-    ///   ADR-0116 결정 7 이 그 대가를 이미 명시 수용했다(문제가 실제로 관측되면 그때 좁힌다).
-    /// ★shell 과 같이 열지 말 것★ — 그쪽 false 는 관측 축이 아니라 **입력이 명령으로 실행된다**는 축이라
-    ///   이 변경과 무관하게 그대로 남는다(기본 구현 doc 의 그 문단).
+    /// ★Once false — keep the reason it was dropped★: the old basis was 「this method does not receive `command`, so it cannot tell the two modes apart」. app-server mode emits turn signals (the link reads
+    /// `turn/completed`; `turn/started` is **deliberately** not read — see that link's `TURN_COMPLETED` doc) and [`classify_turn`] emits `Ended`; terminal mode has no decoder, so the signal is 0 and
+    /// true would **open that mode too**.
+    /// ★That is no ground for blocking — terminal claude **already receives from exactly the same place**★ (zero turn signals, on the receiver roster). The policy is **ADR-0116 decision 7**: 「no turn signal →
+    ///   inject immediately without a gate」 (the CLI's own input queue is the gate). Its rejected alternative killed 「it cannot be observed, so it cannot be delivered」 — do not go back to that premise.
+    /// ★The cost is accepted knowingly★: with no busy gate an envelope can land mid-turn, and a TUI modal (approval prompt · menu · plan confirmation) can eat it (ADR-0116 decision 7; narrow it when observed).
+    /// ★Do not open it like shell★ — shell's false is the axis 「**input is executed as a command**」, unaffected by this (the default implementation's doc).
     // ADR-0116
     // ADR-0209
     fn reads_messages(&self) -> bool {
@@ -665,49 +517,32 @@ impl AgentBackend for CodexBackend {
     /// ★What this field buys, exactly★: when it is false the daemon's `build_grants` emits **nothing** (zero
     /// send-entrance grants). Closing it while opening only `accepts_mcp_config` above leaves the agent holding the MCP
     /// tool with no grant for it.
-    /// ★제어 동사와는 별개다★ — 이 칸이 여는 것은 우편이고, CLI 입구(토큰·주소)와 제어 라우트는 위
-    ///   `supports_control_channel` 이 연다.
-    /// ★한때 이 자리에 「미해소 — 보내기만 열렸다」가 적혀 있었다. 해소됐다★: 그 문단이 요구한 근거
-    ///   둘 중 첫째(받기 축이 열렸다)가 섰다 — [`AgentBackend::reads_messages`] 가 true 라 이 백엔드는
-    ///   데몬 `messaging_host` 의 배달 명단에 오르고, 이 에이전트가 보낸 `request` 의 답장이 돌아올
-    ///   곳이 있다. 그래서 ADR-0209 결정 4 의 「받기 먼저」 순서를 이제 어기지 않는다.
-    ///   ★되돌릴 때의 규칙은 그대로다★ — 받기 축을 닫으면서 이 칸만 열어 두면 그 비대칭이 되살아난다.
+    /// ★Separate from the control verbs★ — this opens mail; the CLI entrance (token · address) and control routes are opened by `supports_control_channel` above.
+    /// The receiving axis is open ([`AgentBackend::reads_messages`] is true: on the `messaging_host` delivery roster, so a `request`'s reply has somewhere to return), so ADR-0209 decision 4's 「receive first」 order holds.
+    ///   ★Closing the receiving axis while leaving only this open revives the asymmetry.★
     // ADR-0133
     // ADR-0209
     fn uses_mail(&self) -> bool {
         true
     }
 
-    /// ★app-server 모드에만 세울 연결이 있다★ — 핸드셰이크 왕복을 마쳐야 `turn/start` 가 허용된다.
-    /// 터미널 모드는 PTY 라 프로세스가 뜬 순간부터 쓸 수 있어 이 축이 없다(claude·shell 과 같다).
-    /// ★이 선언과 실제 배달이 **어긋나면 안 된다**★ — true 인데 안 부르면 감독자가 백스톱까지 기다리고,
-    ///   false 인데 부르면 그 배달을 아무도 안 받는다. 그 짝은 시험대가 잰다.
+    /// ★Only app-server mode has a connection to set up★ — `turn/start` is allowed only after the handshake round trip; terminal mode is a PTY usable from process start (same as claude · shell).
+    /// ★This declaration and the actual delivery **must not disagree**★ — true but not called: the supervisor waits until the backstop; false but called: nobody receives it. The test bench measures that pair.
     // ADR-0004
     fn declares_link(&self, command: &AgentCommand) -> bool {
         is_app_server(command)
     }
 
-    /// 이어받기가 왜 실패했나 — ★이 backend 의 증거는 **통로의 연결 사유**로 온다★.
+    /// Why did the resume fail — ★this backend's evidence is **the link's connection reason**★.
     ///
-    /// ★그 사유가 두 꼬리 어디에도 없다는 것이 이 구현의 존재 이유다★: 이어받기 거절은 stdout 의
-    ///   JSON-RPC 오류라, 콘솔 꼬리(`terminal_tail`)는 이 통로에 아예 없고 진단 꼬리
-    ///   (`diagnostic_tail`)는 stderr 만 담는다. 그래서 판정은
-    ///   [`crate::transport::LinkState::Down`] 의 `reason` 을 증거로 넘긴다 — 선언이 없으면 그 문자열이
-    ///   와도 분류가 `None` 으로 떨어져 「이어받기 직후 조기 종료」라는 **틀린 맥락 기본값**이 찍힌다
-    ///   (이 갈래에는 조기 종료가 없다. 프로세스는 멀쩡히 살아 있었다).
-    ///
-    /// ★**오류 코드로 가르지 않는다 — `-32600` 은 뜻이 하나가 아니다**★(실측 0.154.0): 모르는 스레드도,
-    ///   두 번째 `initialize` 도, 설정 오류도, **하위 스레드를 직접 이어받으려 한 경우**도 전부 그 코드로
-    ///   온다. 코드로 「모르는 스레드」를 유도하면 멀쩡한 손잡이가 무관한 실패에서 분류를 잘못 받는다.
-    ///   그래서 보는 것은 **메시지**뿐이다.
-    /// ★선언하는 문구는 **실측된 것 하나**다★ — `no rollout found for thread id`
-    ///   (`docs/reference/backend-capabilities.md` §1 「모르는 id 를 주면」). 나머지 사유들은 실제 응답
-    ///   문구를 우리가 갖고 있지 않으므로 **지어내지 않는다** — `None` 으로 떨어뜨려 호출자가 맥락
-    ///   기본값을 쓰게 두고, 사람이 읽을 사유는 어차피 `reason` 문자열 그대로 결말에 실려 나간다.
-    ///   ★특히 「하위 스레드는 부모를 먼저 이어받아라」 갈래는 문구를 모른다★ — 실물을 재기 전에
-    ///   추측한 문자열을 넣으면 안 맞는 매칭이 조용히 죽은 코드로 남는다.
-    /// ★살아 있는 세션에도 불린다(trait doc 의 조건)★ — 위 문구는 상대가 **요청을 거절할 때만** 내는
-    ///   것이고 대화 본문에 섞일 수 있는 말이 아니라, 그 조건을 만족한다.
+    /// ★Neither tail holds the reason★: a resume refusal is a JSON-RPC error on stdout, so the console tail (`terminal_tail`) does not exist on this link and the diagnostic tail (`diagnostic_tail`) holds only
+    ///   stderr. So the decision takes the `reason` of [`crate::transport::LinkState::Down`] as evidence — without this declaration the classification falls to `None` and the **wrong context default** 「early exit right after
+    ///   resume」 is stamped (this branch has no early exit; the process was alive).
+    /// ★Do not tell apart by error code — `-32600` does not have one meaning★ (0.154.0): an unknown thread, a second `initialize`, a config error and **resuming a child thread directly** all carry it. Only the **message** is looked at.
+    /// ★The declared wording is the one that was measured★ — `no rollout found for thread id` (`docs/reference/backend-capabilities.md` §1). For other reasons we have no real wording and **do not invent it** — it falls
+    ///   to `None`, the caller uses the context default, and the human-readable reason goes out as the outcome's `reason` string anyway. The 「a child thread must resume its parent first」 wording is unknown too;
+    ///   a guessed string would sit as dead code.
+    /// ★Called on a live session too (the trait doc's condition)★ — the wording is emitted by the peer **only when refusing a request**, so it cannot mix into the conversation body.
     // ADR-0004
     // ADR-0082
     // ADR-0172
@@ -718,19 +553,13 @@ impl AgentBackend for CodexBackend {
         None
     }
 
-    /// ★claude 와 같은 자리에 fail-closed 를 세운다★ — 그쪽은 데몬의 `?`(mcp-config write 실패)가
-    /// 끊어 주지만, 이 backend 는 파일을 안 쓰므로(`writes_mcp_config_file` = false) 데몬이 끊을 재료가
-    /// 없다. 조립에서 부착 값을 못 만드는 것은 **여기서만** 보인다.
+    /// ★Fail-closed is set up in the same place as claude★ — there the daemon's `?` (mcp-config write failure) cuts it, but this backend writes no file (`writes_mcp_config_file` = false), so a failure to build the
+    /// attachment value is visible **only here**.
     ///
-    /// ★끊는 조건은 [`McpAttachment::Unrepresentable`] 하나다 — 넓히지 말 것★: 그때의 상태가
-    ///   「배달 명단에는 올라가는데(`reads_messages` = true) 발신 입구가 0」이다. MCP 는 안 붙었고,
-    ///   CLI 미러는 데몬이 `mail_allowed=false` 로 닫아 뒀다(이 backend 는 `accepts_mcp_config` 가
-    ///   true 라 그 파생이 언제나 그렇게 떨어진다) — 그러면 배달된 `request` 가 전부 **아무도 답할 수
-    ///   없는 계약**이 되고, 증상은 오류가 아니라 영원한 무응답이다.
-    /// ★열어 두는 갈래 둘(둘 다 정상 상태다)★: ① 제어 채널이 아예 없는 스폰 — 우편 없이 뜨는 codex 는
-    ///   정당하다 ② 데몬이 MCP 발신 입구를 인가하지 않은 스폰 — 운영자가 MCP 우편을 껐다는 뜻이고,
-    ///   그 스폰은 애초에 우편을 기대하지 않는다. 둘 다 끊으면 `engram` 없이 도는 설치와 노브를 켠
-    ///   하네스에서 codex 스폰이 통째로 죽는다.
+    /// ★The cut condition is [`McpAttachment::Unrepresentable`] alone — do not widen it★: that state is 「on the delivery roster (`reads_messages`) but zero send entrances」 (MCP unattached, CLI mirror closed by
+    ///   `mail_allowed=false` — always, since this backend has `accepts_mcp_config` true), so every delivered `request` becomes **a contract nobody can answer** and the symptom is eternal silence, not an error.
+    /// ★Left open (both normal)★: ① no control channel — codex without mail is legitimate; ② the daemon did not authorize the MCP send entrance (operator turned MCP mail off) — that spawn expects no mail. Cutting both would
+    ///   kill codex spawns in installs without `engram` and in harnesses with the knob on.
     // ADR-0004
     // ADR-0209
     fn precheck_control_endpoint(
@@ -747,23 +576,15 @@ impl AgentBackend for CodexBackend {
         }
     }
 
-    /// ★`session_id` 는 **여전히** 조립하지 않는다 — 되살리지 말 것★: `--session-id` 는 존재하지 않고
-    /// ([`AgentBackend::assigns_session_id`] 가 false 라 이 칸은 언제나 `None` 이다), 그 값을 argv 에
-    /// 실으면 codex 가 한 번도 쓰지 않을 uuid 를 명령줄에 밀어 넣는 것이 된다.
-    /// ★이어받는 것은 그 칸이 아니라 `resume_session_id` 다 — 두 칸을 접지 말 것★: 이어받기는 플래그가
-    ///   아니라 **하위 명령 + 위치 인자**라([`RESUME_SUBCOMMAND`]) 조립 모양부터 다르다. 접으면
-    ///   `assigns_session_id() == false` 의 뜻이 거짓이 된다.
-    /// ★터미널 모드만 조립한다★ — app-server 모드의 이어받기는 argv 가 아니라 핸드셰이크 둘째 요청
-    ///   (`thread/resume`)이고, 그것을 고르는 자리는 [`AgentBackend::open_spawn`] 이다. 같은 값이 두
-    ///   모드에서 서로 다른 수단으로 나가는 것이지 두 번 나가는 것이 아니다.
-    /// ★Resume 인데 손잡이가 없으면 **새 대화 argv 로 떨어진다**★ — `codex resume` 를 id 없이 내면
-    ///   **TUI 피커**가 뜨고(실측 0.155.0 `--help`: "picker by default"), 그 화면은 PTY 에 붙은 에이전트를
-    ///   영원히 첫 화면에 묶어 둔다. 그래서 여기서는 하위 명령 자체를 빼 Fresh 와 **바이트 단위로 같은**
-    ///   argv 를 낸다.
-    ///   ★그 퇴행을 조용히 넘기지 않는다 — 그런데 신고하는 자리는 여기가 아니다★:
-    ///   [`crate::manager::AgentManager`] 의 `resume_no_fallback` 이 spawn 전에 같은 조건
-    ///   (`opens_a_new_conversation`)을 판정해 경고를 남기고 결말을 `Resumed` 가 아니라 `Started` 로
-    ///   낸다. 여기서 또 신고하면 같은 사실이 두 출처에서 갈려 적힌다 — 이 자리는 인자만 만든다.
+    /// ★`session_id` is **still** not assembled — do not revive it★: `--session-id` does not exist ([`AgentBackend::assigns_session_id`] is false, so this field is always `None`); carrying it would push a
+    /// uuid codex never uses onto the command line.
+    /// ★What is resumed is `resume_session_id` — do not fold the two fields★: resume is **a subcommand + positional argument** ([`RESUME_SUBCOMMAND`]), a different assembly shape; folding makes
+    ///   `assigns_session_id() == false` false.
+    /// ★Only terminal mode is assembled★ — app-server's resume is the second handshake request (`thread/resume`, picked by [`AgentBackend::open_spawn`]): the same value by different means, not twice.
+    /// ★Resume without a handle **falls to new-conversation argv**★ — `codex resume` without an id brings up the **TUI picker** (0.155.0 `--help`: "picker by default"), pinning the PTY-attached agent to the first
+    ///   screen forever. So the subcommand is dropped and argv is **byte-identical** to Fresh.
+    ///   ★That regression is reported elsewhere, not here★: `resume_no_fallback` of [`crate::manager::AgentManager`] decides the same condition before spawn (`opens_a_new_conversation`), warns, and emits
+    ///   `Started` instead of `Resumed`; reporting here too would write one fact from two diverging sources.
     // ADR-0004
     // ADR-0185
     // ADR-0208/ADR-0210
@@ -786,11 +607,8 @@ impl AgentBackend for CodexBackend {
                 let mut args = Vec::with_capacity(8 + extra_args.len());
                 match output_format {
                     AgentOutputFormat::Terminal => {
-                        // ★하위 명령과 그 위치 인자가 **맨 앞**이어야 한다★ — 뒤로 밀리면 clap 이
-                        //   `resume` 를 하위 명령이 아니라 루트의 `[PROMPT]` 로 읽는다(app-server 갈래의
-                        //   같은 제약이 `app_server_extra_args_come_last` 로 못 박혀 있다).
-                        // ★둘은 짝이다 — 하나만 내보내지 말 것★: id 없는 `codex resume` 는 TUI 피커라
-                        //   에이전트가 첫 화면에서 멈춘다(위 doc 의 그 갈래).
+                        // ★The subcommand and its positional argument must be **at the very front**★ — pushed back, clap reads `resume` as the root's `[PROMPT]` (the app-server branch's same constraint is
+                        //   pinned by `app_server_extra_args_come_last`). ★Emit them as a pair★: `codex resume` without an id is the TUI picker (the doc above).
                         if let (SpawnMode::Resume, Some(thread_id)) = (mode, resume_session_id) {
                             match resume_argument(thread_id) {
                                 Some(arg) => {
@@ -798,7 +616,7 @@ impl AgentBackend for CodexBackend {
                                     args.push(arg);
                                 }
                                 None => tracing::warn!(
-                                    "codex 이어받기 손잡이가 실을 수 있는 모양이 아니다 — 새 대화로 띄운다"
+                                    "the codex resume handle does not have a carriable shape — launching as a new conversation"
                                 ),
                             }
                         }
@@ -809,40 +627,24 @@ impl AgentBackend for CodexBackend {
                         args.push(APPROVAL_FLAG.to_string());
                         args.push(APPROVAL_ON_REQUEST.to_string());
                     }
-                    // ★정책과 작업 폴더가 여기 안 실리는 것은 의도다★ — app-server 는 그 셋을
-                    //   `thread/start` 파라미터(`cwd`·`sandbox`·`approvalPolicy`)로 받는다(실측 0.154.0).
-                    //   그 값을 만드는 자리는 아래 [`AgentBackend::open_spawn`] 이고, 프로세스 cwd 는
-                    //   `CommandSpec.cwd` 로 남는다 — 둘은 같은 값을 받지만 같은 칸이 아니다.
+                    // ★Not carrying the policies and working folder here is intended★ — app-server takes them as `thread/start` parameters (`cwd` · `sandbox` · `approvalPolicy`, measured 0.154.0), built in
+                    //   [`AgentBackend::open_spawn`]; the process cwd stays `CommandSpec.cwd` (same value, different field).
                     AgentOutputFormat::StreamJson => {
                         args.push(APP_SERVER_SUBCOMMAND.to_string());
                         args.push(APP_SERVER_STDIO_FLAG.to_string());
                     }
                 }
-                // 우리 인자를 먼저 소진하고 호출자 패스스루를 뒤에 잇는다 — 터미널 모드의 셋은 전부 값
-                //   하나짜리라 뒤 인자를 흡수하지 않는다(claude 의 variadic `--allowedTools` 와 다른 점).
-                // ★패스스루는 모드를 안 가린다 — 그리고 두 모드의 옵션 집합은 다르다(실측 0.154.0:
-                //   `codex --help` 와 `codex app-server --help` 가 서로 없는 플래그를 갖는다)★. 즉 대화형
-                //   CLI 를 보고 적은 인자는 app-server 에서 거절될 수 있다. 그래도 모드별로 거르지 않는다:
-                //   무엇이 유효한지는 상류가 버전마다 바꾸므로 우리가 든 명단은 낡고, 낡은 명단은 멀쩡한
-                //   인자를 조용히 지운다.
+                // Our arguments come first and the caller pass-through follows — terminal mode's three flags each take a single value, so they do not absorb following arguments (unlike claude's variadic `--allowedTools`).
+                // ★The pass-through does not tell modes apart, though the two modes' option sets differ★ (0.154.0: `codex --help` and `codex app-server --help` each have flags the other lacks), so an
+                //   argument written for the interactive CLI may be refused by app-server. Still not filtered per mode: upstream changes what is valid per version, and a stale list quietly erases sound arguments.
                 args.extend(extra_args.iter().cloned());
-                // ★알려진 한계 — `%VAR%` 가 든 경로는 shim 을 지나며 치환된다(2026-09-08, 고치지 않기로
-                //   한 결정)★. 아래 `console_command` 가 Windows 에서 `cmd.exe /c` 로 감싸는데, cmd 는
-                //   명령줄의 `%NAME%` 을 **따옴표 안에서도** 환경변수로 편다. 그래서 이름에 `%…%` 가
-                //   들어간 실제 폴더(`C:\x\%USERNAME%\y`)를 받으면 codex 는 **다른 폴더**를 워크스페이스로
-                //   본다. 터미널 모드에서는 위 `CD_FLAG` 값과 `extra_args` 가, app-server 모드에서는
-                //   `extra_args` 만 그 경로를 탄다(그 모드의 작업 폴더는 명령줄이 아니라 `thread/start`
-                //   파라미터로 가므로 cmd 를 지나지 않는다).
-                //   ★왜 안 고치나★ — ① shim 은 걷을 수 없다(사용자 결정 · TRD §6-H: `codex` 를 이름
-                //   그대로 띄운다. PATH 의 `codex` 는 `.cmd` 라 `CreateProcessW` 가 직접 못 띄운다)
-                //   ② 알려진 해법이 **일반적인 이스케이프가 아니다**: rust std 가 `.bat` 을 띄울 때 쓰는
-                //   수법은 `%` 마다 `%%cd:~,%`(no-op 치환)를 끼워 넣는 것이고 `cmd /e:ON` + `/c "한 문자열"`
-                //   형태를 전제한다(RUSTSEC-2024-0006 대응). 우리 경로는 그 형태가 아니고(인자 배열을
-                //   portable-pty 가 직접 조립해 `CreateProcessW` 로 넘긴다 — `%` 처리 0줄), 그 수법을 그
-                //   전제 밖으로 옮기는 것은 검증되지 않은 이식이다 ③ 그 이식은 **claude 와 공용인**
-                //   `console_command` 를 건드리므로, 틀리면 오늘 도는 스폰 전부가 죽는다.
-                //   ★고칠 때 무엇이 필요한가★: 위 셋을 뒤집을 실측(그 형태로 감싼 `cmd` 아래에서 claude·
-                //   codex 가 둘 다 뜨는가)이다. 그 전에는 이 한계를 아는 채로 둔다.
+                // ★Known limit — a path containing `%VAR%` is substituted while passing the shim (decided not to fix)★. `console_command` wraps it in `cmd.exe /c` on Windows and cmd expands `%NAME%` on the command
+                //   line **even inside quotes**, so a real folder like `C:\x\%USERNAME%\y` makes codex see **a different folder** as its workspace. Terminal mode: the `CD_FLAG` value and `extra_args`; app-server
+                //   mode: only `extra_args` (the working folder goes as a `thread/start` parameter, not through cmd).
+                //   ★Why not fixed★: ① the shim cannot be removed (TRD §6-H: `codex` on PATH is a `.cmd`, which `CreateProcessW` cannot launch directly); ② the known fix is **not an ordinary escape** — rust std's
+                //   `.bat` trick (`%%cd:~,%` at every `%`) presumes `cmd /e:ON` + `/c "one string"` (the RUSTSEC-2024-0006 response), while portable-pty hands an argument array to `CreateProcessW` with no `%`
+                //   handling, so moving it is an unverified port; ③ that port touches `console_command`, **shared with claude**, and a mistake kills every running spawn.
+                //   ★To fix it★: measure that claude and codex both come up under a `cmd` wrapped in that form.
                 // On real materials the terminal working folder never holds two `%` (`materialize` refuses it); a single
                 //   `%` passes, so there this limit is left to `extra_args` — a `%…%` of their own, or one `%` in them
                 //   pairing with the folder's lone `%` (tracking T-102).
@@ -854,36 +656,24 @@ impl AgentBackend for CodexBackend {
                 // ADR-0337
                 args.extend(artifacts.config_args.iter().cloned());
 
-                // ★★오버라이드는 전부 패스스루 **뒤**다 — 이 자리가 그 규율의 정본이다★★(형제 블록이
-                //   여기를 가리킨다). 실측(codex-cli 0.155.0 · 2026-09-19): 같은 설정 키를 `-c` 로 두 번
-                //   넘기면 **마지막 것이 이긴다** — 병합도 없고 중복 키 오류도 없다. 그래서 앞에 두면
-                //   사용자 인자 한 줄이 우리 값을 통째로 지우고, 그 결말은 화면에도 로그에도 아무 신호가
-                //   없다. ★그러니 「인자 조립을 정돈」한답시고 이 블록들을 위 터미널 갈래로 되돌리지 말 것★.
-                // ★★사용자 값을 덮으면 **말한다 — 조용한 덮어쓰기는 금지다**★★(ADR-0216 결정 1).
-                //   ★그래도 거르지는 않는다★: 패스스루를 지우는 것은 사용자 인자를 우리가 검열하는
-                //   것이다. 이긴 사실만 남긴다(이 자리도 형제 블록의 정본이다).
-                // ★MCP 서버 부착은 **모드를 가르지 않는다**★: 우편 입구는 두 모드 다 필요하다. 모드를
-                //   가르는 것은 상대가 같은 값을 **다른 수단으로 이미 주는** 축(세션 id · 프라이밍)이고,
-                //   우편은 그 축에 안 든다.
-                // ★이 한 값이 codex 우편의 **유일한 물리 배선**이다★ — claude 는 mcp-config 파일을 읽지만
-                //   codex 는 이 오버라이드만 먹는다(실측 0.155.0). 빠지면 `eg_send` 툴이 아예 없고,
-                //   데몬은 「MCP 로 우편을 쓴다」고 판정해(`mail_allowed=false`) CLI 미러까지 닫으므로
-                //   **발신 입구가 0** 이 된다. 그 결말은 오류가 아니라 침묵이다.
-                // ★우리 것이 뒤에 실리는 성질을 순서로 얻는다★ — 같은 키를 `-c` 로 두 번 넘기면 마지막이
-                //   이긴다(실측 · ADR-0216 이 물려받은 「override 는 passthrough 뒤 · 덮으면 경고」).
+                // ★The overrides are all **after** the pass-through — this place is the source of truth for that discipline★★ (sibling blocks point here). Measured (0.155.0): passing the same config key twice with `-c`,
+                //   **the last one wins** — no merge, no duplicate-key error. In front, one line of user arguments would erase our value with no signal. ★Do not move these blocks back into the terminal branch
+                //   in the name of 「tidying argument assembly」★.
+                // ★If we override a user value, **we say so — silent overriding is forbidden**★ (ADR-0216 decision 1). Still not filtered (that would be us censoring user arguments); only the fact that ours won is left
+                //   (also the source of truth for the sibling blocks).
+                // ★MCP server attachment does not tell modes apart★: the mail entrance is needed in both. What tells modes apart is where the peer **already provides the same value by other means** (session id · priming).
+                // ★This one value is the **only physical wiring** of codex mail★ — claude reads the mcp-config file, codex takes only this override (0.155.0). Without it there is no `eg_send` tool, and the daemon
+                //   (`mail_allowed=false`) closes even the CLI mirror, so **send entrances become 0** — silence, not an error.
                 // ADR-0128
                 // ADR-0209
-                // ★「안 붙인다」의 두 갈래를 여기서 **가르지 않는다**★ — 정당한 부재
-                //   ([`McpAttachment::NotWanted`])든 못 만든 것([`McpAttachment::Unrepresentable`])이든
-                //   이 자리가 하는 일은 같다(인자를 안 싣는다). 못 만든 쪽을 스폰 중단으로 끊는 자리는
-                //   [`AgentBackend::precheck_control_endpoint`] 이고, 이 함수는 인자만 만든다(아래
-                //   지시서 블록이 신고 자리를 조립점으로 미루는 것과 같은 규율).
+                // ★The two 「do not attach」 branches are **not told apart** here★ — [`McpAttachment::NotWanted`] and [`McpAttachment::Unrepresentable`] both mean the argument is not carried; cutting the
+                //   failure-to-build side as a spawn abort is [`AgentBackend::precheck_control_endpoint`]'s job, this function only builds arguments.
                 match mcp_attachment(control.as_ref()) {
                     McpAttachment::Attach(value) => {
                         let key = format!("{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}");
                         if passthrough_overrides_key(extra_args, &key) {
                             tracing::warn!(
-                                "codex 패스스루가 `{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}` 을 직접 세웠다 — 우편 입구를 위해 우리 부착을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
+                                "the codex pass-through set `{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}` directly — carrying our attachment after it for the mail entrance, overriding that value (the last `-c` wins)"
                             );
                         }
                         // ADR-0337
@@ -898,25 +688,15 @@ impl AgentBackend for CodexBackend {
                     McpAttachment::NotWanted | McpAttachment::Unrepresentable(_) => {}
                 }
 
-                // ★`SessionStart` 훅을 여기 되살리지 말 것(ADR-0216/ADR-0218)★ — 회수 경로는 이 자식이
-                //   쥔 writer 락의 이름이고([`thread_lock`]) 훅 기계장치는 저장소에서 걷혔다. 훅이
-                //   **고장 나서**가 아니다(돌았다 — 실측
-                //   0.155.0): 기각 사유는 codex 가 훅 **명령 문자열**을 해싱해 사람 승인을 요구하는데
-                //   그 문자열에 우리 exe 절대경로가 박혀 있다는 것 하나다. 배포가 태그 이름 폴더로
-                //   풀리므로 경로가 릴리스마다 바뀌고, 그래서 릴리스마다 승인 화면이 다시 뜨며
-                //   **그 화면이 떠 있는 동안 터미널 codex 가 아예 안 뜬다.**
+                // ★Do not revive the `SessionStart` hook here (ADR-0216/ADR-0218)★ — recovery is the writer-lock name this child holds ([`thread_lock`]) and the hook machinery was removed. Not because the hook was broken
+                //   (it ran, 0.155.0): codex hashes the hook **command string** and requires human approval, and that string embeds our exe's absolute path, which changes every release (folder named after the tag),
+                //   so the approval screen returns every release and **while it is up, terminal codex does not come up at all.**
 
-                // ★프라이밍 주입 — 터미널 모드만 여기서 조립한다★: app-server 모드는 같은 내용을 명령줄이
-                //   아니라 핸드셰이크 JSON(`thread/start` 의 `developerInstructions`)으로 싣는다
-                //   ([`AgentBackend::open_spawn`]). 같은 값이 두 모드에서 서로 다른 수단으로 나가는
-                //   것이지 두 번 나가는 것이 아니다 — 이어받기(`resume`)가 argv 와 핸드셰이크로 갈리는
-                //   것과 같은 모양이다.
-                // ★왜 모드를 가르나 — 훅과 달리 「중복이라서」가 아니다★: 이 명령줄에는 8191 자 상한이
-                //   있고 지시서가 그 예산을 통째로 먹을 수 있다. JSON 본문에는 그 상한이 없어(8 MB 까지
-                //   받는 것을 실측) 값을 손대지 않고 그대로 보낼 수 있다. 두 모드에 다 명령줄로 실으면
-                //   app-server 쪽이 이유 없이 그 상한과 `%`·줄바꿈 위험을 진다.
-                // ★패스스루 **뒤**다★ — 같은 키를 `-c` 로 두 번 넘기면 마지막이 이긴다. 사유 정본은
-                //   위 MCP 부착 블록의 순서 주석이고 여기 되풀어 적지 않는다.
+                // ★Priming injection — only terminal mode is assembled here★: app-server carries the same content in the handshake JSON (`developerInstructions` of `thread/start`, [`AgentBackend::open_spawn`]) —
+                //   same value, different means per mode, like resume.
+                // ★Why modes are told apart★: this command line has an 8191-character cap the brief can eat whole; the JSON body has no cap (measured up to 8 MB), so carrying it on the command line in both modes
+                //   would burden app-server with the cap and the `%` · newline risks for nothing.
+                // ★It is **after** the pass-through★ (last `-c` wins; reason: the MCP attachment block above).
                 // ★The value is the one `materialize` built from the merged instructions file★ — a value the line
                 //   could not carry already failed the spawn there. Without real materials there is none.
                 // ADR-0004
@@ -928,7 +708,7 @@ impl AgentBackend for CodexBackend {
                     if let Some(value) = artifacts.instructions_override.clone() {
                         if passthrough_overrides_key(extra_args, DEVELOPER_INSTRUCTIONS_KEY) {
                             tracing::warn!(
-                                "codex 패스스루가 `{DEVELOPER_INSTRUCTIONS_KEY}` 을 직접 세웠다 — 수신 계약 프라이밍을 위해 우리 값을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
+                                "the codex pass-through set `{DEVELOPER_INSTRUCTIONS_KEY}` directly — carrying our value after it for the receive-contract priming, overriding that value (the last `-c` wins)"
                             );
                         }
                         if passthrough_overrides_key(
@@ -944,34 +724,20 @@ impl AgentBackend for CodexBackend {
                     }
                 }
 
-                // ADR-0086 스텝 2(CLI 입구) — ★모드를 가르지 않는다★: 심는 것은 env 세 값뿐이고 그
-                //   값을 읽는 것은 codex 가 아니라 **codex 가 띄우는 자식들**(셸 도구 · 사용자 자신의 훅)이다.
-                //   두 모드 다 자식을 띄우므로 갈릴 축이 없다.
-                // ★`config_path` 는 **안 온다 — 그리고 그것이 선언된 결과다**★: claude 가
-                //   **경로로 읽는 파일**이고 codex 에는 그 플래그가 없어서(실측 0.155.0:
-                //   `--mcp-config` 도 `--settings` 도, 설정 파일을 가리키는 `--config <파일>` 도 없다)
-                //   이 폴더가 [`AgentBackend::writes_mcp_config_file`] 를 false 로 선언하고, 데몬이 그
-                //   칸 하나로 write 를 가른다. 이 백엔드의 MCP 부착은 위 `-c` 한 값 단독이다.
-                //   ★그 칸이 갈라지기 전에는 스폰마다 **아무도 안 읽는 평문 토큰 파일이 하나 생겼다**★ —
-                //   데몬의 파생 축이 「MCP 로 우편을 쓰나」와 「우리 mcp-config 파일을 먹나」를 한 칸으로
-                //   겸했기 때문이다. 그 겸직을 되살리면(= 그 칸을 지우거나 `accepts_mcp_config` 로
-                //   파생하면) 낭비도 fail-closed 스폰 중단 위험도 그대로 돌아온다.
-                //   ★그래도 아래 주입은 그 칸이 `Some` 으로 와도 무시한다 — 그 방어를 걷지 말 것★:
-                //   제어 채널은 이 backend 하나만 쓰는 게 아니고, 「Some 이니 뭔가 쓰자」로 claude 의
-                //   플래그를 베껴 붙이면 기동이 죽는다(그 단언 = `the_daemon_written_files_are_still_not_translated_into_argv`).
-                // ★`grants` 도 안 쓴다★ — 그 목록은 권한 프롬프트의 **사전 승인**이지 툴 허용 목록이
-                //   아니고(ADR-0094), codex 설정의 `enabled_tools` 로 번역하면 뜻이 「미리 승인」에서
-                //   「이것만 존재」로 바뀐다. 다른 뜻의 값을 같은 값이라 부르지 않는다.
+                // ADR-0086 step 2 (CLI entrance) — ★does not tell modes apart★: only three env values are planted, and what reads them is **the children codex launches** (shell tools · the user's own hooks) — both modes launch children.
+                // ★`config_path` **does not come — the declared result**★: it is a **file claude reads by path**, and codex has no such flag (0.155.0: no `--mcp-config`, no `--settings`, no `--config <file>`
+                //   for settings), so this folder declares [`AgentBackend::writes_mcp_config_file`] false and the daemon decides the write by that one field. MCP attachment is the single `-c` value above.
+                //   ★Before that field was split off, **a plaintext token file nobody reads appeared** on every spawn★ (the derived axis served both 「uses MCP for mail」 and 「takes our mcp-config file」); reviving that
+                //   dual role (removing the field or deriving it from `accepts_mcp_config`) brings back the waste and the fail-closed abort risk.
+                //   ★The injection below ignores that field even if it comes as `Some` — keep that defence★: the control channel is not used by this backend alone, and copying claude's flags because 「it is Some」
+                //   kills the launch (`the_daemon_written_files_are_still_not_translated_into_argv`).
+                // ★`grants` is not used either★ — it is **pre-approval** of permission prompts, not a tool allow list (ADR-0094); translating it into `enabled_tools` changes 「approved in advance」 into 「only these exist」.
                 // ADR-0086 / ADR-0092 / ADR-0133 / ADR-0209
                 //
-                // ★화신 표식도 같은 문 안이다 — 밖으로 꺼내지 말 것★: endpoint 가 없는 스폰은 우리
-                //   제어 평면과 아무 관계가 없는데, 밖에 두면 그런 스폰의 세션 기록에도 우리 표식이
-                //   남는다(그 단언 = `without_an_endpoint_nothing_is_injected`). 재료인
-                //   `(agent_id, epoch)` 가 endpoint 에 사는 것이 그 조건의 실물이다.
-                // ★모드를 가르지 않는다★ — 표식이 앉는 자리는 argv 가 아니라 codex 가 쓰는 세션 기록
-                //   이고, 두 모드 다 그 기록을 만든다.
-                // ★심기만 한다 — 읽는 쪽이 **없고 생길 예정도 없다**(ADR-0218 결정 8)★: 회수는 락
-                //   홀더가 지므로 이 표식은 진단과 후속 대조용으로만 남는다.
+                // ★The incarnation marker is inside the same door — do not take it outside★: a spawn with no endpoint has nothing to do with our control plane, and outside the door our marker would remain in such
+                //   spawns' session records (`without_an_endpoint_nothing_is_injected`). The material `(agent_id, epoch)` lives in the endpoint.
+                // ★It does not tell modes apart★ — it sits in the session record codex writes, which both modes create.
+                // ★Only planted — **no reader, none planned**★ (ADR-0218 decision 8): recovery is the lock holder; the marker is for diagnostics and later comparison.
                 // ADR-0217
                 // ADR-0218
                 if let Some(endpoint) = &control {
@@ -990,21 +756,16 @@ impl AgentBackend for CodexBackend {
                 }
             }
             AgentCommand::Claude { .. } | AgentCommand::Shell { .. } => {
-                unreachable!("CodexBackend 는 Codex variant 만 처리한다. dispatch 버그.")
+                unreachable!("CodexBackend handles only the Codex variant. dispatch bug.")
             }
         }
     }
 
-    /// `session.resume` 이 켜진 근거는 ★발급 주체와 무관하다★ — 복원은 프로필에 저장된 backend sid
-    /// **단독**에 의존하고 그 sid 를 누가 발급하는지는 백엔드가 정한다. codex 는 받아 쓰는 쪽이고
-    /// (app-server 는 `thread/start` 응답으로, 터미널 모드는 그 자식이 쥔 writer 락의 이름으로 —
-    /// [`thread_lock`] · ADR-0218), 그 값으로 두 모드 다 이어받는다.
-    /// ★그래서 이 칸도 모드를 안 가른다 — 위 [`AgentBackend::can_resume_stored_session`] 과 **같은
-    ///   술어다. 한쪽만 건드리지 말 것**★: 그 축은 활성화 입구가 「Resume 으로 띄울까」를 묻는 자리이고
-    ///   이 칸은 그 결과를 소비자에게 신고하는 자리라, 갈리면 새 스레드가 「이어받음」으로(또는 그
-    ///   반대로) 보고된다.
-    /// `model.select` 는 codex 에 `-m` 이 있는데도 false 다 — 이 칸은 **그 프로그램이 할 수 있는 것**이
-    /// 아니라 **이 스폰이 쓰는 것**을 신고한다. 그 칸을 노출하지 않으므로 신고하지 않는다.
+    /// `session.resume` is ★independent of the issuer★ — restore depends **solely** on the backend sid stored in the profile; codex receives and uses it (app-server via the `thread/start` response, terminal mode via
+    /// the writer-lock name its child holds — [`thread_lock`] · ADR-0218), so both modes resume.
+    /// ★**The same predicate as [`AgentBackend::can_resume_stored_session`] above — do not touch only one side**★: that axis is where the activation entrance asks 「launch as Resume?」 and this field reports the
+    /// result to consumers; a split reports a new thread as 「resumed」 or the reverse.
+    /// `model.select` is false even though codex has `-m` — this field reports **what this spawn uses**, and we do not expose that field.
     // ADR-0185
     // ADR-0208/ADR-0210
     fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
@@ -1022,10 +783,9 @@ impl AgentBackend for CodexBackend {
         }
     }
 
-    /// app-server 모드는 봉투가 **양방향**으로 흐르는 파이프를 요구한다 — 상대가 우리에게도 묻는다.
+    /// app-server mode requires a pipe through which envelopes flow **both ways** — the peer asks us too.
     ///
-    /// ★신고값일 뿐이고 실물은 아래 [`AgentBackend::open_spawn`] 이 만든다★ — 둘 다 [`is_app_server`] 를
-    ///   보므로 한쪽만 고치면 신고와 실물이 어긋난다.
+    /// ★Only the reported value; the real thing is built by [`AgentBackend::open_spawn`]★ — both look at [`is_app_server`], so fixing one side makes them disagree.
     fn transport_shape(&self, command: &AgentCommand) -> TransportShape {
         if is_app_server(command) {
             TransportShape::StdioBidiJson
@@ -1034,27 +794,17 @@ impl AgentBackend for CodexBackend {
         }
     }
 
-    /// app-server 모드는 양방향 JSON 통로를, 터미널 모드는 PTY 를 만든다.
+    /// app-server mode builds a bidirectional JSON link, terminal mode builds a PTY.
     ///
-    /// ★판정은 [`is_app_server`] 단독 — `transport_shape` 신고값을 되읽어 match 하지 않는다(ADR-0191)★:
-    ///   그렇게 하면 모양 값을 가르는 둘째 switch 가 생긴다.
-    /// ★`structured: true` 와 `thread/start` 정책을 주입하는 자리가 여기다(ADR-0044/0030)★: 통로는 자기가
-    ///   나르는 바이트가 무엇인지도, 어느 폴더를 어떤 샌드박스로 열어야 하는지도 모른다. 아는 쪽은 이
-    ///   모드와 정책을 고른 이 backend 다.
-    /// ★`sid_sink` 는 **두 갈래 다 쓴다 — 수단만 다르다**★. app-server 는 `thread/start` 응답으로
-    ///   식별자를 **받아** 통로가 그대로 넘긴다(그 세션으로 무엇을 보내기 전에 나간다 —
-    ///   [`AgentBackend::open_spawn`] 의 순서 계약). 터미널 갈래는 응답이 없으므로 자식이 쥔 writer
-    ///   락을 폴링해 그 파일 이름을 같은 동사에 넣는다([`thread_lock`] · ADR-0218).
-    ///   ★PTY 화면을 읽는 생성자를 여기 되살리지 말 것(ADR-0217)★ — 회수는 화면이 아니라 소유권으로
-    ///   판정한다.
-    ///   ★둘째 쓰기 경로를 만들지 말 것★ — 화신 가드는 조립점이 이 동사에 묶어 놨으므로, 프로필을
-    ///   직접 만지는 갈래를 하나 더 두면 그 가드를 우회한다(ADR-0218 결정 6).
-    /// ★`thread/start` 냐 `thread/resume` 이냐를 고르는 자리도 여기다★ — 조립점이 넘긴
-    ///   `resume_session_id` 하나로 갈린다([`thread_open`]). ★통로에게 다시 묻지 않는다★: 통로가 자기
-    ///   상태를 보고 판정하면 가르는 자리가 둘이 된다.
-    /// ★`resume_session_id` 를 터미널 갈래에서는 쓰지 않는다 — 그런데 사유는 「손잡이가 없어서」가
-    ///   **아니다**★: 그 모드의 이어받기는 이미 argv 에 실려 나갔다([`AgentBackend::build_spec`] 의
-    ///   터미널 갈래). 같은 값을 여기서 또 쓰면 한 spawn 이 두 수단으로 이어받으려 든다.
+    /// ★The decision is [`is_app_server`] alone — do not read back the `transport_shape` report and match on it (ADR-0191)★ (that makes a second switch on the shape value).
+    /// ★This is where `structured: true` and the `thread/start` policies are injected (ADR-0044/0030)★: the link knows neither what its bytes are nor which folder to open with which sandbox; this backend, which picked the
+    ///   mode and policies, does.
+    /// ★`sid_sink` is used by both branches — only the means differ★: app-server **receives** the identifier in the `thread/start` response and the link hands it over as is (before anything is sent with that session —
+    ///   [`AgentBackend::open_spawn`]'s ordering contract); the terminal branch has no response, so it polls the child's writer lock and puts that file name into the same verb ([`thread_lock`] · ADR-0218).
+    ///   ★Do not revive a constructor that reads the PTY screen (ADR-0217)★ — recovery is decided by ownership. ★Do not create a second write path★ — the assembly point tied the incarnation guard to this verb, and
+    ///   another branch touching the profile directly bypasses it (ADR-0218 decision 6).
+    /// ★`thread/start` vs `thread/resume` is also picked here★ by the single `resume_session_id` the assembly point passed ([`thread_open`]); the link is not asked again (two deciding places otherwise).
+    /// ★`resume_session_id` is unused in the terminal branch — **not** because there is no handle★: that mode's resume already went out in argv ([`AgentBackend::build_spec`]); using it here would resume by two means.
     /// ★`artifacts` is read **only on the app-server branch, by the same rule**★ — what comes out of it is the open
     ///   plan ([`app_server_open`]: the instructions — the merged text on a real spawn, none on a Noop one —, the skill
     ///   roots and the first-turn context). The terminal branch already put its instructions and settings on the command
@@ -1083,8 +833,8 @@ impl AgentBackend for CodexBackend {
             MidTurnPolicy,
             Arc<DeliveryAck>,
         ) = if is_app_server(command) {
-            // ★줍기 판정은 여기서 건다 — `output_decoder` 는 스폰 명세(env)를 받지 않아 판정할 수 없다★.
-            //   기본 계정이 아닌 프로필의 관측이 기본 칸에 섞이지 않게 한다(`usage.rs`).
+            // ★The pickup decision is made here — `output_decoder` does not receive the spawn spec (env), so it cannot decide★.
+            //   Keeps observations of a profile that is not the default account from mixing into the default field (`usage.rs`).
             let decoder = self
                 .output_decoder(command)
                 .map(|d| usage::gate_decoder(d, &spec.env));
@@ -1096,29 +846,25 @@ impl AgentBackend for CodexBackend {
                 sid_sink,
                 link_sink,
             )?;
-            // ★`TransportOwned` 와 첫 턴 포트는 짝이다 — 한쪽만 두지 말 것★: 그 모드의 세션은 제출을 세지
-            //   않으므로, 포트가 통로에 안 꽂히면 어느 화신도 thread id 를 영속하지 못한다(오류 없음).
-            // ADR-0226 · ADR-0231: 사용자 결정 — id 는 진짜가 된 때(상대의 첫 유저 메시지 되울림) 영속한다.
+            // ★`TransportOwned` and the first-turn port are a pair — keep both★: that mode's session does not count submissions, so without the port no incarnation can persist the thread id (no error).
+            // ADR-0226 · ADR-0231: the id is persisted when it became real (the peer's first user message echo).
             let t = t.with_first_turn(first_turn_sink);
-            // ADR-0231: 통로가 분류·넘기기·취소를 진다. 받음 가능 여부는 통로의 하한 판정이 채우는 **바로 그**
-            //   Arc 다 — 따로 만들면 세션과 통로가 서로 다른 값을 본다.
+            // ADR-0231: the link carries classification · handover · cancellation. Whether receipt is possible is **the very**
+            //   Arc that the link's floor decision fills — making a separate one would have the session and the link see different values.
             let ack = t.delivery_ack();
             (Box::new(t), pid, MidTurnPolicy::TransportOwned, ack)
         } else {
-            // ★터미널 모드에는 세울 연결이 없다★ — `declares_link()` 가 false 라 포트도 `None` 이다.
-            // ★첫 턴 포트도 버린다★ — 이 모드는 세션이 제출을 센다(ADR-0226 결정 11 — 회수와 제출 중 늦은 쪽).
+            // ★Terminal mode has no connection to set up★ — `declares_link()` is false, so the port is `None` too.
+            // ★The first-turn port is dropped too★ — in this mode the session counts submissions (ADR-0226 decision 11 — the later of recovery and submission).
             drop(first_turn_sink);
             let (t, pid) = PtyTransport::open(spec, cols, rows)?;
-            // ★세션 id 회수는 **여기부터** 시작한다 — 자식이 이미 떠 있어야 락이 생긴다★
-            //   (ADR-0218). 돌릴지와 그 재료는 전부 [`thread_lock::plan_capture`] 가 정하므로
-            //   (조건의 정본 = 그 doc) 이 자리가 하는 일은 자식의 신원 두 칸과 **우리 쪽** 기본
-            //   락 폴더를 건네는 것뿐이다 — 자식이 다른 홈을 받았으면 그쪽이 이긴다.
+            // ★Session id recovery starts **from here** — the lock appears only once the child is up★ (ADR-0218). Whether to run it and its material are decided by [`thread_lock::plan_capture`] (the conditions' source of truth);
+            //   this place only hands over the child's two identity fields and **our side's** default lock folder (a different home the child received wins).
             // ADR-0218
             let child_start =
                 pid.and_then(engram_dashboard_platform::process::process_creation_time);
-            // ★게이트가 보는 사실 = 「이어받기 argv 가 실제로 나갔나」★ — 손잡이의 **존재**가
-            //   아니다. 실을 수 없는 값이면 위 `build_spec` 이 새 대화 argv 를 냈고, 그 화신은
-            //   회수 대상이다. 두 자리가 같은 술어([`resume_argument`])를 본다.
+            // ★The gate looks at 「did the resume argv actually go out」, not the **existence** of the handle★: for an uncarriable value `build_spec` emitted new-conversation argv and that incarnation is a recovery target
+            //   (same predicate: [`resume_argument`]).
             let resumes_by_argv = resume_session_id.and_then(resume_argument).is_some();
             if let Some(plan) = thread_lock::plan_capture(
                 &spec.env,
@@ -1130,7 +876,7 @@ impl AgentBackend for CodexBackend {
             ) {
                 thread_lock::spawn_capture(plan);
             }
-            // 터미널은 오늘 경로 그대로다 — 목록도 받음 알림도 없다.
+            // Terminal is today's path as is — no list and no receipt notification.
             (
                 Box::new(t),
                 pid,
@@ -1150,7 +896,7 @@ impl AgentBackend for CodexBackend {
         })
     }
 
-    /// app-server 모드에서는 봉투를 **통로가** 만든다 — 인코더가 감쌀 것이 없다.
+    /// In app-server mode **the link** builds the envelope — there is nothing for the encoder to wrap.
     fn input_encoder(&self, command: &AgentCommand) -> InputEncoder {
         if is_app_server(command) {
             InputEncoder::TransportFramed
@@ -1163,21 +909,15 @@ impl AgentBackend for CodexBackend {
         classify_turn
     }
 
-    // ★합성 입력 에코를 선언하지 않는다 — 되살리지 말 것★: 이 백엔드는 유저 메시지를 스스로
-    //   `item/*` 의 `userMessage` item 으로 되울리고(실측), 번역기가 그것을 「우리가 보낸 것」으로
-    //   표시해 흘린다. app-server 모드의 한가한 입력 말풍선은 **통로가** 낸다 — 한가냐 턴 도중이냐는
-    //   통로만 알고(턴 도중 글은 목록에 서고 말풍선이 없다), 그 말풍선의 uuid 가 우리 id 라 되울림의
-    //   `clientId` 와 한 벌로 접힌다. 세션 층 에코는 그 가름을 모르므로 이 모드의 세션은 에코를 내지
-    //   않는다(`AgentSession` 의 통로 턴 동사 갈래).
-    //   ★하한 미달 통로는 말풍선을 안 낸다★ — 되울림 말풍선의 `uuid` 는 `clientId` 가 먼저고 없을 때만 codex
-    //   item id 다(번역기의 되울림 중복 기억은 늘 item id 로 센다 — `decoder` 의 유저 메시지 번역). 하한 미달의
-    //   되울림엔 `clientId` 가 없어 그 `uuid` 가 item id 가 되므로, 통로가 우리 id 로 말풍선을 내면 프론트의
-    //   `uuid` dedup 이 둘을 못 접어 같은 질문이 두 벌 남는다. 그 겹침이 ADR-0193 의 「거부한 대안」이 실측을
-    //   근거로 기각한 바로 그것이다. 터미널 모드는 PTY 가 스스로 되울린다.
+    // ★No synthetic input echo is declared — do not revive it★: this backend echoes user messages itself as `userMessage` items of `item/*` (measured), and the translator lets them through as 「what we sent」.
+    //   In app-server mode the idle input bubble is emitted **by the link** (only it knows idle vs mid-turn; mid-turn text goes into the list with no bubble) and the bubble's uuid is our id, folding into one copy with
+    //   the echo's `clientId`. The session-layer echo does not know that split, so it emits none (the link-turn verb branch of `AgentSession`).
+    //   ★A link below the floor does not emit the bubble★: the echo bubble's `uuid` is `clientId` first and the codex item id only when absent; the echo below the floor has no `clientId`, so a bubble with our id
+    //   could not be folded by the frontend's `uuid` dedup and the question would show twice (what ADR-0193's 「rejected alternative」 dismissed on measurement). In terminal mode the PTY echoes on its own.
     // ADR-0193
     // ADR-0231
 
-    /// ★선언하지 않으면 번역기가 조립되지 않고 바이트가 그대로 흘러 화면이 깨진다 — 오류도 경고도 없다★.
+    /// ★If not declared, the translator is not assembled and the bytes flow as is, breaking the screen — no error and no warning★.
     fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
         if is_app_server(command) {
             Some(Box::new(CodexAppServerDecoder::new()))
@@ -1187,41 +927,26 @@ impl AgentBackend for CodexBackend {
     }
 }
 
-/// codex 출력 이벤트 → 턴 신호(ADR-0113).
+/// codex output event → turn signal (ADR-0113).
 ///
-/// ★이 백엔드의 종료 신호는 [`OutputEvent::TurnEnd`] 다★ — 번역기는 `MessageDone` 을 내지 않는다.
-///   그래도 그 갈래를 `Ended` 로 적어 둔다: 뜻이 같은 두 어휘를 여기서 갈라 적으면, 어느 날 이 백엔드가
-///   그것을 내게 됐을 때 종료가 조용히 사라진다.
-/// ★`Structured` 를 진행으로 세는 것이 이 백엔드에서 load-bearing 이다★: 이 갈래로 들어오는 것은
-///   되울린 유저 메시지(`userMessage` item 번역분) 하나뿐이고 — 모르는 알림은 버리므로(이 폴더
-///   `decoder` 헤더) 그 밖엔 없다 — 그것이 「이 턴이 시작됐다」의 첫 관측이다.
-/// ★그래도 「우리가 `turn/start` 를 쓴 순간부터 그 첫 알림이 도착하기까지」는 미관측이다★ — 그 창을
-///   합성 에코로 메우지 않는다(ADR-0193 이 그 대안을 기각했다). 큐 해제의 「지금 보낼 수 있나」는 통로
-///   구현체가 자기 상태로 답하고, 우편 게이트 쪽 미관측은 fail-open 으로 흡수된다(ADR-0104 의 선택).
-/// ★`Usage`/`Error` 가 종료가 아닌 이유★: `Usage`(`thread/tokenUsage/updated`)는 턴 중간에 오고,
-///   `Error`(`error` 알림)는 재시도 가능한 스트림 오류라 턴 경계가 아니다. 실패한 턴도 `turn/completed`
-///   가 내는 `TurnEnd` 로 닫힌다 — 실패 사유는 그 이벤트 **안에** 실린다.
-/// ★`turn/completed` 가 **아예 오지 않는** 포기 경로도 `TurnEnd` 로 닫힌다★(쓰기 실패·응답 해독 실패
-///   ·오류 응답·시한 만료 — 통로의 `end_turn_if`). 그 자리에 `Error` 를 쓰던 시절에는 이 표가 종료를
-///   못 세서 **한가한 에이전트가 턴 중으로 관측된 채 남아** 30 분 fail-open 밸브까지 우편이 막혔다
-///   (ADR-0127). 그래서 이 매핑에서 `Error` 를 종료로 승격시키는 것이 아니라, 그쪽이 경계 어휘를 쓴다.
-/// ★터미널 모드와 공유해도 되는 이유(모드별 분기 불필요)★: 그 모드는 decoder 가 없어 `TerminalBytes` 만
-///   흐르므로 이 매핑을 그대로 써도 신호가 하나도 나오지 않는다.
-/// ★`Ended` 앞에 `Progress` 가 없어도 안전하다(코드 근거)★: 표는 `Ended` 를 `in_turn = false` 로 적을
-///   뿐이라 짝 없는 종료도 턴 중을 켜지 않고(`crate::turn::TurnObservations::observe_at`), `in_turn_snapshot` 은
-///   `in_turn` 인 것만 싣는다. 그래서 「시작 신호」를 지어내 채울 이유가 없다. ★짝 없는 오류 끝은 등록 직후 상태가
-///   아니다★ — `last_end_failed` 를 세운다: `turn/start` 출구는 의도이고(요청 단계 실패도 이상한 끝이다 — 사용자 결정
-///   N11), 연결이 서지 못한 화신의 경계는 그 화신이 곧 끝나 `forget` 이 지운다.
-/// ★오류 끝 = 이 화신의 턴으로 귀속된 `TurnEnd{Failed}`★ — 번역된 `turn/completed(failed)`(이른 종료 풀기 포함)와
-///   통로의 포기 경로(`end_turn_if`). 턴 표가 `last_end_failed` 로 접어 커널이 우편을 붙든다(ADR-0231 — 통로의
-///   `halted` 와 같은 계기지만 그 칸을 쓰는 쪽은 이 분류기 하나다). ★귀속 게이트가 막은 남의 턴 끝과 늦은 받음 뒤의
-///   표시용 경계(`emit_without_turn_observation`)는 여기를 지나지 않는다★ — 멈춤을 세우지도 풀지도 않는다.
-/// ★명부 사건은 `Delivered` 까지 전부 `None` 이다(claude 와 다르다)★: 이 백엔드의 `Delivered` 는 턴 끝
-///   **뒤에도** 온다(턴 끝에서 쥔 자리로 돌아온 글의 늦은 에코 · 되살림). 그것이 「턴 중」을 다시 켜면 그 화신은 30 분
-///   fail-open 밸브까지 우편이 막힌다. 턴 시작의 관측은 되울린 유저 메시지(`Structured`)가 이미 진다.
-/// ★도구 끝 결과(`ToolResult`)는 결말이 무엇이든 `None` 이다★: 끊긴 명령은 계속 돌다 **턴 끝 뒤에** 닫힌다(실측
-///   fixture `interrupt_fail_b5`) — 진행으로 세면 한가한 화신이 「턴 중」으로 되살아나 30 분 fail-open 까지 우편이
-///   막힌다. 그리고 도구 실패는 에이전트의 평범한 한 걸음이라, 오류로 세면 실패한 명령 하나가 오류 뒤 멈춤을 세운다.
+/// ★This backend's end signal is [`OutputEvent::TurnEnd`]★ — the translator does not emit `MessageDone`, yet that branch is also written as `Ended` so the end does not vanish if this backend ever emits it.
+/// ★`Structured` counts as progress — load-bearing★: the only thing entering this branch is the echoed user message (`userMessage` item translation; unknown notifications are dropped — `decoder` header), the first
+///   observation of 「this turn has started」. ★The window from our `turn/start` write to that first notification is unobserved★ — not filled with a synthetic echo (ADR-0193); queue release asks the link
+///   implementation, and the mail gate absorbs the gap as fail-open (ADR-0104).
+/// ★`Usage`/`Error` are not ends★: `Usage` (`thread/tokenUsage/updated`) comes mid-turn; `Error` is a retryable stream error. A failed turn is closed by the `TurnEnd` that `turn/completed` emits (the reason is **inside** it).
+/// ★Give-up paths where `turn/completed` never comes also close with `TurnEnd`★ (write failure · response decode failure · error response · deadline expiry — the link's `end_turn_if`). Writing `Error` there left
+///   **an idle agent observed as mid-turn** and mail blocked until the 30-minute fail-open valve (ADR-0127), so that side uses the boundary vocabulary instead of promoting `Error` here.
+/// ★Shared with terminal mode★: that mode has no decoder, only `TerminalBytes`, so this mapping yields no signal.
+/// ★Safe with no `Progress` before `Ended`★: `Ended` only writes `in_turn = false`, so an unpaired end does not turn on mid-turn (`crate::turn::TurnObservations::observe_at`), and `in_turn_snapshot` carries only `in_turn` ones;
+///   no 「start signal」 is invented. ★An unpaired error end is not the state right after registration★ — it sets `last_end_failed` (the `turn/start` exit is intended: a request-stage failure is also an abnormal end), and a
+///   never-established incarnation's boundary is erased by `forget`.
+/// ★Error end = a `TurnEnd{Failed}` attributed to this incarnation's turn★ — a translated `turn/completed(failed)` (incl. the early-end release) and the link's give-up path (`end_turn_if`); the turn table folds it into
+///   `last_end_failed` and the kernel holds mail (ADR-0231, same trigger as the link's `halted`, which only this classifier uses). ★Someone else's turn end blocked by the attribution gate and the display-only boundary
+///   after a late receipt (`emit_without_turn_observation`) do not pass here★ — they neither set nor clear the halt.
+/// ★Registry events up to `Delivered` are all `None` (unlike claude)★: `Delivered` comes **even after** the turn end (a late echo of text returned to the held place · revival); turning 「mid-turn」 on again would block that
+///   incarnation's mail until the 30-minute valve. Turn start is already carried by the echoed user message (`Structured`).
+/// ★`ToolResult` is `None` whatever its outcome★: an interrupted command keeps running and closes **after the turn end** (fixture `interrupt_fail_b5`) — counted as progress an idle incarnation would revive as 「mid-turn」;
+///   and a tool failure is an ordinary agent step, not an error that sets the halt-after-error.
 // ADR-0113
 // ADR-0004
 // ADR-0231
@@ -1234,10 +959,10 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
         OutputEvent::TurnEnd { outcome, .. } => Some(TurnSignal::Ended(match outcome {
             TurnOutcome::Completed => TurnEndKind::Clean,
             TurnOutcome::Failed { .. } => TurnEndKind::Failed,
-            // 끊긴 끝은 멈춤을 세우지도 풀지도 않는다(ADR-0192 — claude 와 맞춘다). 뜻 모를 결말도 같다.
+            // An interrupted end neither sets nor clears the halt (ADR-0192 — aligned with claude). The same goes for an outcome of unknown meaning.
             TurnOutcome::Interrupted | TurnOutcome::Unknown => TurnEndKind::Other,
         })),
-        // 결말을 싣지 않는 끝이라 오류 뒤 멈춤을 세우지도 풀지도 않는다.
+        // An end that carries no outcome, so it neither sets nor clears the halt-after-error.
         OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended(TurnEndKind::Other)),
         OutputEvent::Usage { .. }
         | OutputEvent::ToolResult { .. }
@@ -1249,25 +974,18 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
 
 #[cfg(test)]
 mod tests {
-    /// 조건이 설 때까지 폴링한다 — ★마감을 넘기면 **무엇을 기다렸는지 말하며** 죽는다★.
-    ///
-    /// ★왜 이 함수가 있나★: 예전엔 마감이 **조용한 fallthrough** 였다. 넘겨도 그냥 빠져나가 아래
-    ///   단언이 「값이 틀렸다」로 죽었고, 실제로 CI 에서 그 모양으로 터졌을 때 **패닉 본문이 비어
-    ///   「시간 초과」와 「값 오류」가 구분되지 않았다**(2026-09-23 · v0.3.1 태그 런에서 이 파일의
-    ///   테스트 둘이 그렇게 실패했고, 같은 트리가 직전 브랜치 런에서는 초록이었다). 여기서 갈라
-    ///   놓아야 다음 실패가 스스로 어느 쪽인지 말한다.
-    /// ★상한은 단언이 아니라 안전망이다 — 줄여서 「빨리 실패하게」 만들지 말 것★: 정상 경로는 1초
-    ///   안에 선다(로컬 실측 0.5초). 혼잡한 러너는 같은 스위트를 **6.7배 느리게** 돌았다(실측: 로컬
-    ///   4.87초 ↔ CI 32.71초). 상한이 재는 것은 「일어났나」이지 「얼마나 빨리 일어났나」가 아니다.
+    /// Polls until the condition holds — ★past the deadline it dies **saying what it was waiting for**★: a silent fallthrough once left an empty panic body that could not tell 「timeout」 from 「value error」 (v0.3.1 tag run).
+    /// ★The cap is a safety net, not an assertion — do not shrink it to 「fail fast」★: the normal path holds within 1 s, a congested CI runner ran the suite **6.7× slower** (local 4.87 s ↔ CI 32.71 s); it measures
+    /// 「did it happen」, not 「how fast」.
     fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !cond() {
             if std::time::Instant::now() >= deadline {
                 let message = format!(
-                    "{what} — 기다리다 마감을 넘겼다. 값이 틀린 게 아니라 **일어나지 않았다**"
+                    "{what} — passed the deadline while waiting. The value is not wrong; **it did not happen**"
                 );
-                // ★패닉하기 전에 캡처를 안 거치는 stderr 에 먼저 쓴다★ — 패닉 본문은 패닉 훅을 타고 나가서,
-                //   조용한 훅 구간 안이거나 바이너리가 abort 하면 사라진다. 이 줄은 둘 다에서 남는다(실측).
+                // ★Before panicking, write first to stderr, which does not go through capture★ — the panic body goes out through the panic hook,
+                //   and disappears inside a quiet-hook span or if the binary aborts. This line remains in both (measured).
                 let thread = std::thread::current();
                 let name = thread.name().unwrap_or("<unnamed>");
                 let _ = std::io::Write::write_all(
@@ -1310,8 +1028,8 @@ mod tests {
         )
     }
 
-    /// `console_command` 래핑을 걷어 낸 codex 자신의 argv. Windows 는 `cmd.exe /c codex …` 로 한 겹
-    /// 감싸이므로(shim 해석) 두 플랫폼의 단언을 하나로 쓰려면 그 겹을 여기서 벗긴다.
+    /// codex's own argv with the `console_command` wrapping stripped. On Windows it is wrapped in one layer as `cmd.exe /c codex …`
+    /// (shim resolution), so to write the assertions of both platforms as one, that layer is peeled off here.
     fn codex_argv(spec: &CommandSpec) -> Vec<String> {
         #[cfg(windows)]
         {
@@ -1327,20 +1045,17 @@ mod tests {
         }
     }
 
-    /// ★이 값은 **언제나 `None`** 이어야 한다 — 훅 등록도 그 빌더도 걷혔다(ADR-0216)★. 남은 쓸모는
-    /// **되살아나지 않았다**를 재는 것 하나다.
-    /// ★키를 리터럴로 적는 것이 의도다★ — 운영 코드에 이 문자열이 한 글자도 없는 것이 지금의 불변식이라,
-    ///   상수를 되살려 참조하면 그 사실이 흐려진다.
-    /// ★`-c` 의 **존재**로는 아무것도 세지 말 것★ — 오늘 그 플래그를 싣는 것이 둘이다(MCP 부착 ·
-    ///   지시서). 플래그만 세던 옛 형태는 둘째가 들어올 때마다 거짓 양성이 됐다.
+    /// ★This value must **always be `None`** — the hook registration and its builder were removed (ADR-0216)★; the test only measures that it has not come back.
+    /// ★The key is a literal on purpose★ — production code must hold none of this string, and a revived constant would blur that.
+    /// ★Do not count by the **existence** of `-c`★ — two things carry it today (MCP attachment · the brief); a flag-only count turned false-positive with each new one.
     fn hook_override_value(argv: &[String]) -> Option<String> {
         argv.windows(2)
             .find(|p| p[0] == CONFIG_OVERRIDE_FLAG && p[1].starts_with("hooks.SessionStart"))
             .map(|p| p[1].clone())
     }
 
-    /// ★endpoint 가 `None` 이면 `-c` 가 한 칸도 안 선다★ — 오늘 그 플래그를 싣는 둘(MCP 부착 · 지시서)이
-    /// 모두 endpoint 에서 재료를 받는다.
+    /// ★If the endpoint is `None`, not a single `-c` stands★ — the two that carry that flag today (MCP attachment · the brief)
+    /// both get their material from the endpoint.
     #[test]
     fn interactive_args_are_the_measured_ones() {
         let s = spec(&codex(vec![]), "C:/workspace");
@@ -1363,8 +1078,8 @@ mod tests {
         assert_eq!(codex_argv(&s), vec!["app-server", "--stdio"]);
     }
 
-    /// ★정책과 작업 폴더는 argv 로 가지 않는다★ — app-server 는 그 셋을 `thread/start` 파라미터로 받는다.
-    /// 여기 실리면 상대가 그 하위 명령에서 모르는 인자를 받아 기동이 실패한다.
+    /// ★The policies and working folder do not go into argv★ — app-server takes those three as `thread/start` parameters.
+    /// If carried here, the peer receives arguments unknown to that subcommand and the launch fails.
     #[test]
     fn app_server_argv_carries_no_policy_and_no_workspace_path() {
         let s = spec(&codex_app_server(vec![]), "C:/workspace");
@@ -1372,12 +1087,12 @@ mod tests {
         for forbidden in [CD_FLAG, SANDBOX_FLAG, APPROVAL_FLAG, "C:/workspace"] {
             assert!(
                 !argv.iter().any(|a| a == forbidden),
-                "`{forbidden}` 가 app-server argv 에 실렸다: {argv:?}"
+                "`{forbidden}` was carried in app-server argv: {argv:?}"
             );
         }
     }
 
-    /// 프로세스 cwd 는 두 모드가 같다 — 워크스페이스 폴더를 어디로 나르든 프로세스는 같은 곳에서 뜬다.
+    /// The process cwd is the same in both modes — wherever the workspace folder is carried, the process comes up in the same place.
     #[test]
     fn process_cwd_is_the_same_in_both_modes() {
         let cwd = PathBuf::from("C:/workspace");
@@ -1385,9 +1100,8 @@ mod tests {
         assert_eq!(spec(&codex_app_server(vec![]), "C:/workspace").cwd, cwd);
     }
 
-    /// ★「맨 뒤」가 아니라 「우리 기본 인자 **뒤**」다 — 옛 이름(`extra_args_come_last`)은 우리
-    /// 오버라이드가 생기기 전의 사실이었다★. 오버라이드가 패스스루보다 뒤에 서야 하는 것은 별개
-    /// 축이고, 그쪽은 `…_follows_the_passthrough` 항목들이 잰다.
+    /// ★「After our default arguments」, not 「at the very end」★ — the old name (`extra_args_come_last`) predates our overrides; that the overrides stand after the pass-through is the separate axis measured by the
+    /// `…_follows_the_passthrough` items.
     #[test]
     fn extra_args_follow_our_base_args() {
         let s = spec(&codex(vec!["-m", "gpt-5"]), "C:/workspace");
@@ -1395,15 +1109,15 @@ mod tests {
         let at = argv
             .iter()
             .position(|a| a == "-m")
-            .expect("패스스루가 사라졌다");
+            .expect("the pass-through disappeared");
         assert_eq!(&argv[at..at + 2], &["-m".to_string(), "gpt-5".to_string()]);
         assert!(
             argv[..at].iter().any(|a| a == APPROVAL_ON_REQUEST),
-            "패스스루가 우리 기본 인자 앞으로 갔다: {argv:?}"
+            "the pass-through went in front of our default arguments: {argv:?}"
         );
     }
 
-    /// ★세션 인자가 조립되면 안 된다★ — 존재하지 않는 문법이라 붙는 순간 codex 가 기동에 실패한다.
+    /// ★Session arguments must not be assembled★ — it is syntax that does not exist, so the moment it is attached codex fails to launch.
     #[test]
     fn session_id_never_reaches_the_command_line() {
         let sid = Uuid::new_v4();
@@ -1419,25 +1133,23 @@ mod tests {
         );
         assert!(
             !s.args.iter().any(|a| a.contains(&sid.to_string())),
-            "sid 가 argv 에 실렸다: {:?}",
+            "the sid was carried in argv: {:?}",
             s.args
         );
         assert!(
             !s.args
                 .iter()
                 .any(|a| a == "--session-id" || a == "--resume" || a == "--session"),
-            "존재하지 않는 세션 플래그가 실렸다: {:?}",
+            "a session flag that does not exist was carried: {:?}",
             s.args
         );
     }
 
-    // ── ADR-0208: 터미널 모드 이어받기(`codex resume <id>`) ──────────────────────
+    // ── ADR-0208: terminal-mode resume (`codex resume <id>`) ──────────────────────
 
-    /// 이어받기 칸을 채워 뽑은 spec — 발급 칸(`session_id`)은 그대로 비워 둔다.
+    /// A spec drawn with the resume field filled — the issued field (`session_id`) is left empty.
     ///
-    /// ★두 칸을 **따로** 넘기는 것이 이 헬퍼의 요점이다★ — 하나로 접으면
-    /// [`AgentBackend::assigns_session_id`] 가 false 인 백엔드의 argv 에 우리가 발급한 값이 실릴 수
-    /// 있고, 아래 항목들은 그 접힘을 못 본다.
+    /// ★The two fields are passed **separately** on purpose★ — folded into one, the value we issued could be carried in the argv of a backend whose [`AgentBackend::assigns_session_id`] is false, and the items below cannot see that.
     fn spec_resuming(
         command: &AgentCommand,
         mode: SpawnMode,
@@ -1456,10 +1168,8 @@ mod tests {
         )
     }
 
-    /// ★하위 명령과 위치 인자가 **맨 앞에 붙어** 나가야 한다★ — `resume` 가 뒤로 밀리면 clap 이 그것을
-    /// 루트의 `[PROMPT]` 로 읽어 이어받기가 조용히 새 대화가 되고, id 가 하위 명령과 떨어지면
-    /// `[SESSION_ID]` 자리를 놓친다.
-    /// 정책 셋은 **그대로** 뒤에 실린다 — `resume` 도 그 셋을 자기 옵션으로 받는다(실측 0.155.0).
+    /// ★The subcommand and positional argument go out **attached at the very front**★ — if `resume` is pushed back clap reads it as the root's `[PROMPT]` and the resume quietly becomes a new conversation; if the id separates from the
+    /// subcommand it misses `[SESSION_ID]`. The three policies follow **as is** (`resume` takes them as its own options too, 0.155.0).
     #[test]
     fn resuming_with_a_stored_handle_emits_the_subcommand_and_the_positional_id() {
         let thread_id = Uuid::new_v4();
@@ -1484,9 +1194,8 @@ mod tests {
         );
     }
 
-    /// ★손잡이가 없으면 **Fresh 와 바이트 단위로 같은** argv 여야 한다★ — id 없는 `codex resume` 는 TUI
-    /// 피커라(실측 0.155.0 `--help`: "picker by default") 그 화면에 붙은 에이전트는 첫 화면에서 영영
-    /// 멈춘다. 그래서 하위 명령만 내보내는 반쪽 조립을 금지한다.
+    /// ★Without a handle, argv must be **byte-identical to Fresh**★ — `codex resume` without an id is the TUI picker (0.155.0 `--help`: "picker by default") and the agent stops on the first screen forever; a half assembly
+    /// emitting only the subcommand is forbidden.
     #[test]
     fn resuming_without_a_stored_handle_falls_back_to_the_fresh_argv() {
         let fresh = codex_argv(&spec(&codex(vec![]), "C:/workspace"));
@@ -1498,35 +1207,30 @@ mod tests {
         ));
         assert_eq!(
             fell_back, fresh,
-            "손잡이 없는 Resume 이 Fresh 와 다른 argv 를 냈다 — 반쪽 조립이면 TUI 피커에 걸린다"
+            "a Resume without a handle emitted argv different from Fresh — a half assembly gets caught in the TUI picker"
         );
         assert!(
             !fell_back.iter().any(|a| a == RESUME_SUBCOMMAND),
-            "id 없이 하위 명령만 실렸다 — 피커가 떠 에이전트가 첫 화면에서 멈춘다: {fell_back:?}"
+            "only the subcommand was carried without an id — the picker comes up and the agent stops on the first screen: {fell_back:?}"
         );
     }
 
-    /// ★그 퇴행의 **신고**는 이 파일이 하지 않는다 — 조립점이 한다★:
-    /// [`crate::manager::AgentManager`] 의 `resume_no_fallback` 이 `opens_a_new_conversation` 을 두 항(이어받기
-    /// 축 ∧ 명부에 손잡이 없음)의 곱으로 판정해 새 대화 경로로 맡기고 결말을 `Resumed` 가 아니라 `Started`
-    /// 로 낸다(ADR-0226). 그중 **이어받기 축이 이 파일의 선언**이라 여기서 못 박는다.
-    /// ★실행 단언으로는 이 회귀가 안 잡힌다★ — 그 축이 뒤집히면 손잡이 없는 요청이 이어받기 경로로 떠도
-    ///   argv 는 위 항목대로 새 대화로 멀쩡히 떨어지고, 거짓이 되는 것은 **보고뿐**이다(새 대화가
-    ///   「이어받음」으로 나간다).
+    /// ★The **reporting** of that regression is the assembly point's, not this file's★: `resume_no_fallback` of [`crate::manager::AgentManager`] decides `opens_a_new_conversation` as (resume axis ∧ no handle in the registry) and
+    /// emits `Started` instead of `Resumed` (ADR-0226). **The resume axis is this file's declaration**, so it is pinned here.
+    /// ★An execution assertion does not catch this regression★ — if the axis flips, a handle-less request on the resume path still falls cleanly to new-conversation argv; only **the report** turns false.
     // ADR-0208
     #[test]
     fn a_handleless_resume_still_trips_the_new_conversation_notice() {
         let terminal = codex(vec![]);
         assert!(
             CodexBackend.can_resume_stored_session(&terminal),
-            "이어받기 축이 꺼지면 그 곱이 언제나 거짓이라, 손잡이 없이 연 새 대화가 조용히 \
-             「이어받음」으로 보고된다"
+            "if the resume axis is off, that product is always false, so a new conversation opened without a handle is quietly \
+             reported as 「resumed」"
         );
     }
 
-    /// ★Fresh 는 손잡이가 있어도 이어받지 않는다★ — 조립점이 Fresh 에서 이 칸을 비워 넘기는 것이 규율이지만
-    /// (`AgentManager::spawn_agent`), 이 파일이 그 규율에 기대면 판정이 두 곳이 된다. 죽은 화신의 스레드로
-    /// 새 대화를 열라는 요청이 바로 그 조합이다.
+    /// ★Fresh does not resume even with a handle★ — the assembly point passes this field empty on Fresh (`AgentManager::spawn_agent`), but leaning on that would put the decision in two places. A request to open a new
+    /// conversation with a dead incarnation's thread is exactly that combination.
     #[test]
     fn a_fresh_spawn_ignores_a_stored_handle() {
         let s = spec_resuming(
@@ -1541,9 +1245,7 @@ mod tests {
         );
     }
 
-    /// ★app-server 모드는 이어받기를 argv 로 내지 않는다★ — 그 모드의 수단은 핸드셰이크 둘째 요청
-    /// (`thread/resume`)이고 [`AgentBackend::open_spawn`] 이 고른다. 여기 실리면 `app-server` 하위 명령이
-    /// 모르는 인자를 받아 기동이 실패한다.
+    /// ★app-server mode does not emit resume as argv★ — its means is the second handshake request (`thread/resume`, [`AgentBackend::open_spawn`]); carried here, the `app-server` subcommand gets an unknown argument and the launch fails.
     #[test]
     fn the_app_server_argv_is_unchanged_by_a_stored_handle() {
         let s = spec_resuming(
@@ -1555,9 +1257,7 @@ mod tests {
         assert_eq!(codex_argv(&s), vec!["app-server", "--stdio"]);
     }
 
-    /// 패스스루는 이어받기 갈래에서도 하위 명령·정책 **뒤**다 — 앞으로 오면 하위 명령과 그 위치 인자를
-    /// 갈라놓는다. (우리 오버라이드는 그 패스스루보다 더 뒤다 — `…_follows_the_passthrough` 항목들이
-    /// 그 축을 잰다.)
+    /// The pass-through is **after** the subcommand · policies on the resume branch too — in front it separates the subcommand and its positional argument (our overrides come even later: `…_follows_the_passthrough`).
     #[test]
     fn resume_argv_still_puts_the_passthrough_after_our_base_args() {
         let s = spec_resuming(
@@ -1571,15 +1271,15 @@ mod tests {
         let at = argv
             .iter()
             .position(|a| a == "-m")
-            .expect("패스스루가 사라졌다");
+            .expect("the pass-through disappeared");
         assert_eq!(&argv[at..at + 2], &["-m".to_string(), "gpt-5".to_string()]);
         assert!(
             argv[..at].iter().any(|a| a == APPROVAL_ON_REQUEST),
-            "패스스루가 우리 기본 인자 앞으로 갔다: {argv:?}"
+            "the pass-through went in front of our default arguments: {argv:?}"
         );
     }
 
-    // ── CLI 입구 주입(ADR-0086 스텝 2 · ADR-0133) ────────────────────────────────
+    // ── CLI entrance injection (ADR-0086 step 2 · ADR-0133) ────────────────────────────────
 
     fn endpoint() -> ControlEndpoint {
         ControlEndpoint {
@@ -1587,37 +1287,27 @@ mod tests {
             epoch: 1,
             url: "http://127.0.0.1:7777/mcp".to_string(),
             token: "deadbeef".to_string(),
-            // ★운영에서 이 칸은 `None` 으로 온다 — 여기 `Some` 은 **일부러** 넣은 최악값이다★:
-            //   `writes_mcp_config_file()` 가 false 라 데몬은 이 backend 에 파일을 안 쓰고 두 칸을 비워
-            //   보낸다. 그래도 fixture 가 `Some` 을 싣는 이유는 아래 시험이 재는 것이 「경로가 오면
-            //   argv 로 새는가」이기 때문이다 — `None` 을 넣으면 그 단언이 공허해지고, 데몬 쪽 게이트가
-            //   무너지는 날 이 backend 가 그 경로를 그대로 받아 쓰는 회귀를 아무도 못 잡는다.
+            // ★In production this field is `None` — the `Some` is a worst-case value on purpose★: `writes_mcp_config_file()` is false so the daemon sends both fields empty, but the test below measures 「if a path comes,
+            //   does it leak into argv」; `None` would make that hollow and a collapsed daemon-side gate would go uncaught.
             config_path: Some(std::path::PathBuf::from("C:/engram/mcp-config.json")),
             send_exe: Some(std::path::PathBuf::from("C:/engram/bin/engram.exe")),
-            // ★이 칸이 「데몬이 이 스폰에 MCP 발신 입구를 인가했다」의 실물이다 — 비워 두지 말 것★:
-            //   빈 목록은 운영자가 MCP 우편을 **끈** 상태이고(그쪽 fixture 는 아래
-            //   [`endpoint_without_mcp_send`]), 그 값으로 기본 fixture 를 만들면 MCP 부착을 재는 시험이
-            //   전부 「안 붙는 게 맞다」쪽을 재게 되어 통째로 공허해진다.
-            //   ★툴 이름을 여기 박는 것은 재타이핑이 아니다★ — 판정은 **서버명만** 본다
-            //   (`ControlEndpoint::grants_mcp_send`). 툴 이름의 정본은 데몬 쪽이고 이 crate 는 그것을
-            //   데이터로만 나른다.
+            // ★This field is the concrete form of 「the daemon authorized the MCP send entrance for this spawn」 — do not leave it empty★: an empty list is the operator-**turned-off** state ([`endpoint_without_mcp_send`]), and every
+            //   MCP-attachment test would measure the 「not attaching is correct」 side and go hollow.
+            //   Pinning tool names here is not retyping — the decision looks **only at the server name** (`ControlEndpoint::grants_mcp_send`); the tool names' source of truth is the daemon side.
             grants: vec![ToolGrant::Mcp {
                 server: MCP_SERVER_NAME.to_string(),
                 tool: "eg_send".to_string(),
             }],
-            // ★운영이 이 백엔드에 싣는 값이 `false` 다★ — 이 폴더가 그렇게 선언하고(`uses_mail`) 데몬이
-            //   그 선언에서 파생한다. 아래 형제 시험이 반대 값도 따라간다는 것을 따로 잰다.
+            // ★The value production carries for this backend is `false`★ — this folder declares it that way (`uses_mail`) and the daemon
+            //   derives from that declaration. The sibling test below separately measures that the opposite value is followed too.
             mail_allowed: false,
         }
     }
 
-    /// 운영자가 MCP 우편을 **끈** 스폰의 endpoint. 데몬은 그때도 제어 채널 자체는 발급하고(제어 동사는
-    /// 전원 개방이다 — ADR-0132 결정 5) 발신 입구 grant 만 뺀다 — 그 결과가 이 모양이다.
+    /// The endpoint of a spawn whose operator **turned off** MCP mail. The daemon still issues the control channel (control verbs are open to all — ADR-0132 decision 5) and only leaves out the send entrance grant.
     ///
-    /// ★`ENGRAM_DISALLOW_MCP_SEND` 와 `ENGRAM_FORCE_CLI_ONLY_SEND` 가 서로 다른 자리를 건드리는데도 이
-    ///   한 fixture 로 둘 다 대표되는 이유★: 전자는 `build_grants` 에서 MCP grant 를 빼고, 후자는
-    ///   `accepts_mcp_config` 를 뒤집어 grant 가 CLI 쪽으로 가게 한다 — **둘 다 「우리 서버의 MCP 발신
-    ///   grant 가 없다」로 착지한다.** backend 가 보는 것은 그 착지점 하나다.
+    /// ★One fixture represents both `ENGRAM_DISALLOW_MCP_SEND` and `ENGRAM_FORCE_CLI_ONLY_SEND`★: the former removes the MCP grant in `build_grants`, the latter flips `accepts_mcp_config` so the grant goes to the CLI side —
+    /// **both land on 「no MCP send grant for our server」**, the one point the backend looks at.
     fn endpoint_without_mcp_send() -> ControlEndpoint {
         ControlEndpoint {
             grants: vec![],
@@ -1645,8 +1335,8 @@ mod tests {
             .map(|(_, v)| v.as_str())
     }
 
-    /// ★터미널 모드·app-server 모드를 **각각** 잰다★ — 한 모드만 재면 다른 모드의 스폰이 자격증명 없이
-    /// 떠도 아무도 모른다. codex 가 띄우는 자식들은 이 env 를 상속으로만 받는다.
+    /// ★Terminal mode and app-server mode are measured **each**★ — measuring only one mode, nobody would know if the other mode's spawn
+    /// came up without credentials. The children codex launches receive this env only by inheritance.
     #[test]
     fn both_modes_carry_the_control_plane_entrance() {
         for (label, command) in [
@@ -1662,17 +1352,17 @@ mod tests {
             assert_eq!(
                 env_value(&s, "ENGRAM_CONTROL_URL"),
                 Some("http://127.0.0.1:7777"),
-                "{label}: ENGRAM_CONTROL_URL = MCP url 에서 /mcp 를 벗긴 base"
+                "{label}: ENGRAM_CONTROL_URL = the base with /mcp stripped from the MCP url"
             );
             assert_eq!(
                 env_value(&s, CLI_EXE_ENV),
                 Some("C:/engram/bin/engram.exe"),
-                "{label}: CLI 절대경로"
+                "{label}: CLI absolute path"
             );
         }
     }
 
-    /// ★`--mcp-config` 는 claude 의 플래그다 — 이쪽으로 새면 codex 가 모르는 인자로 기동에 실패한다★.
+    /// ★`--mcp-config` is claude's flag — if it leaks here, codex fails to launch with an unknown argument★.
     #[test]
     fn no_claude_flag_rides_along_with_the_entrance() {
         for command in [codex(vec![]), codex_app_server(vec![])] {
@@ -1686,30 +1376,28 @@ mod tests {
             ] {
                 assert!(
                     !s.args.iter().any(|a| a == forbidden),
-                    "`{forbidden}` 가 codex argv 에 실렸다: {:?}",
+                    "`{forbidden}` was carried in codex argv: {:?}",
                     s.args
                 );
             }
         }
     }
 
-    /// endpoint 가 없는 스폰(= 제어 채널을 못 받은 경우)은 env 가 **한 줄도 늘지 않는다**.
+    /// A spawn without an endpoint (= the control channel could not be received) does **not grow env by a single line**.
     #[test]
     fn without_an_endpoint_nothing_is_injected() {
         let s = spec_with_control(&codex(vec![]), None);
         assert!(
             s.env.is_empty(),
-            "endpoint 부재인데 env 가 실렸다: {:?}",
+            "env was carried although the endpoint is absent: {:?}",
             s.env
         );
     }
 
-    // ── ADR-0217: 상태줄 채널은 걷혔다 · 화신 표식을 env 로 심는다 ──────────────
+    // ── ADR-0217: the status-line channel was removed · the incarnation marker is planted via env ──────────────
 
-    /// ★argv 에 `tui.` 설정이 한 칸도 없어야 한다★ — 이 부재가 ADR-0217 의 절반이다(나머지 절반 =
-    /// 아래 표식). 되살아나면 회수 1 회의 대가로 세션 내내 화면 한 줄을 내주는 상태로 돌아간다.
-    /// ★endpoint 유무·모드를 모두 돌린다★ — 옛 값은 endpoint 를 안 보고 실렸으므로, 있는 쪽만 재면
-    ///   되살아난 것을 절반만 잡는다.
+    /// ★argv must have not a single `tui.` setting★ — half of ADR-0217 (the other half: the marker below); a return would again give up one screen line for the whole session in exchange for one recovery.
+    /// ★Runs over all of endpoint presence · mode★ — the old value was carried without looking at the endpoint, so measuring only the with-endpoint side would catch half of a revival.
     #[test]
     fn no_spawn_turns_on_a_status_line() {
         for control in [None, Some(endpoint())] {
@@ -1717,16 +1405,14 @@ mod tests {
                 let argv = codex_argv(&spec_with_control(&command, control.clone()));
                 assert!(
                     !argv.iter().any(|a| a.contains("tui.")),
-                    "{command:?}: TUI 설정 오버라이드가 실렸다: {argv:?}"
+                    "{command:?}: a TUI config override was carried: {argv:?}"
                 );
             }
         }
     }
 
-    /// ★실을 수 없는 손잡이면 하위 명령 자체를 안 낸다★ — codex 는 스레드 id 로 못 읽는 값을 받으면
-    /// **세션 이름**으로 재해석해 조용히 새 세션을 만들고 종료 코드 0 으로 끝난다(실측 2026-09-21).
-    /// 그러면 사용자는 이어받았다고 믿는 새 대화를 얻는다 — ADR-0218 이 세운 실패 모드(「못 받음」)와
-    /// 다른 종류의 고장이다. 사유 정본 = [`resume_argument`].
+    /// ★An uncarriable handle emits no subcommand★ — codex reinterprets a value it cannot read as a thread id as a **session name**, quietly creates a new session and exits 0 (measured 2026-09-21): a new conversation the user believes
+    /// they resumed, a different fault from ADR-0218's 「not received」. Reason: [`resume_argument`].
     #[test]
     fn a_degenerate_handle_never_reaches_the_resume_subcommand() {
         assert_eq!(resume_argument(Uuid::nil()), None);
@@ -1746,20 +1432,16 @@ mod tests {
         let argv = codex_argv(&s);
         assert!(
             !argv.iter().any(|a| a == RESUME_SUBCOMMAND),
-            "nil 손잡이가 `resume` 하위 명령으로 나갔다: {argv:?}"
+            "a nil handle went out as the `resume` subcommand: {argv:?}"
         );
         assert!(
             !argv.iter().any(|a| a.contains("00000000-0000")),
-            "nil 손잡이가 위치 인자로 새 나갔다: {argv:?}"
+            "a nil handle leaked out as a positional argument: {argv:?}"
         );
     }
 
-    /// ★실을 수 없는 손잡이는 「이어받기」가 아니라 「새 대화」다 — 그러니 **회수가 돌아야 한다**★.
-    ///
-    /// 이 칸이 실제 결함이었다(적출 2026-09-21): argv 쪽은 G7 가드로 그 값을 거절해 새 대화로 뜨는데,
-    /// 회수 게이트는 「손잡이가 있나」만 봐서 꺼져 있었다. 결과는 **그 화신의 스레드 id 를 아무도 안
-    /// 적는 세션**이고, 다음 활성화는 옛 손잡이(또는 없음)로 간다. 두 결정이 같은 술어
-    /// ([`resume_argument`])를 보게 해서 닫았다.
+    /// ★An uncarriable handle is 「a new conversation」, not 「a resume」 — so **recovery must run**★. A real defect (2026-09-21): the argv side refused the value (G7 guard) and came up as a new conversation, but the recovery gate
+    /// looked only at 「is there a handle」 and was off — **nobody wrote that incarnation's thread id**. Closed by making both decisions look at [`resume_argument`].
     #[test]
     fn a_handle_we_refuse_to_resume_with_is_still_captured() {
         let s = CodexBackend.build_spec(
@@ -1775,7 +1457,7 @@ mod tests {
         let argv = codex_argv(&s);
         assert!(
             !argv.iter().any(|a| a == RESUME_SUBCOMMAND),
-            "전제가 깨졌다 — 이 손잡이는 argv 로 안 나가야 한다: {argv:?}"
+            "the premise broke — this handle must not go out as argv: {argv:?}"
         );
 
         let sink: crate::backend::SessionIdSink = std::sync::Arc::new(|_: &str| {});
@@ -1789,29 +1471,23 @@ mod tests {
         );
         assert!(
             planned.is_some(),
-            "새 대화로 떴는데 회수가 안 돈다 — 이 화신의 스레드 id 는 아무도 안 적는다"
+            "it came up as a new conversation but recovery does not run — nobody writes this incarnation's thread id"
         );
     }
 
-    /// ★이어받기 argv 와 락 회수는 **정확히 하나만** 선다★ — 둘 다 서면 이미 이어받은 id 를 또 찾아
-    /// 적고, 둘 다 안 서면 그 화신의 id 를 **아무도 안 적는다**. 뒤엣것이 실제 결함이었다(적출
-    /// 2026-09-21): 회수 게이트가 「손잡이가 있나」를 보던 동안, argv 쪽은 실을 수 없는 손잡이를
-    /// 거절하고 새 대화로 떴는데 회수는 꺼져 있었다.
+    /// ★Resume argv and lock recovery: **exactly one** stands★ — both: the already resumed id is found and written again; neither: **nobody writes** that incarnation's id (the real defect above, 2026-09-21).
     ///
-    /// 그래서 재는 것은 「둘 다 서지 않는다」가 아니라 **동치**다 — `argv_resumes == !plans_capture`.
-    /// ★`Fresh` 인데 손잡이가 실려 오는 조합은 여기서 만들지 않는다★: 그 조합을 만들 수 있는 자리는
-    ///   조립점 하나뿐이고 `manager::resume_handle_for` 가 거기서 막는다(그쪽 시험 =
-    ///   `manager::tests::fresh_never_carries_a_resume_handle`). 여기서는 그 불변식을 그대로 재현해
-    ///   **실제로 나올 수 있는 여섯 칸**만 돈다 — 없는 조합에 단언을 걸면 그 단언이 무엇을 지키는지
-    ///   알 수 없게 된다.
+    /// So what is measured is **equivalence** — `argv_resumes == !plans_capture`.
+    /// ★`Fresh` with a handle carried in is not built here★: only the assembly point can build it and `manager::resume_handle_for` blocks it (`manager::tests::fresh_never_carries_a_resume_handle`); only
+    ///   **the six cells that can actually occur** run — an assertion on a nonexistent combination leaves unclear what it guards.
     #[test]
     fn exactly_one_of_the_resume_argv_and_the_capture_plan_fires() {
         let sink: crate::backend::SessionIdSink = std::sync::Arc::new(|_: &str| {});
         let lock_dir = Some(PathBuf::from("Z:/locks"));
-        // nil = argv 가 실기를 거절하는 값(`resume_argument`) — 그런데도 저장은 돼 있을 수 있다.
+        // nil = a value the argv refuses to carry (`resume_argument`) — and yet it may be stored.
         for stored in [None, Some(Uuid::new_v4()), Some(Uuid::nil())] {
             for mode in [SpawnMode::Fresh, SpawnMode::Resume] {
-                // 조립점 불변식 재현: Fresh 는 손잡이를 안 싣는다.
+                // Reproducing the assembly-point invariant: Fresh does not carry a handle.
                 let resume = match mode {
                     SpawnMode::Resume => stored,
                     SpawnMode::Fresh => None,
@@ -1829,7 +1505,7 @@ mod tests {
                 let argv_resumes = codex_argv(&s)
                     .first()
                     .is_some_and(|a| a == RESUME_SUBCOMMAND);
-                // 운영 배선과 **같은 식**으로 게이트를 계산한다(`open_spawn` 의 그 줄).
+                // The gate is computed with **the same expression** as the production wiring (that line of `open_spawn`).
                 let plans_capture = thread_lock::plan_capture(
                     &s.env,
                     resume.and_then(resume_argument).is_some(),
@@ -1841,19 +1517,18 @@ mod tests {
                 .is_some();
                 assert_eq!(
                     argv_resumes, !plans_capture,
-                    "{mode:?}/{stored:?}: argv 이어받기({argv_resumes})와 회수({plans_capture})가 \
-                     둘 다 서거나 둘 다 안 섰다"
+                    "{mode:?}/{stored:?}: argv resume ({argv_resumes}) and recovery ({plans_capture}) \
+                     both stood or neither stood"
                 );
             }
         }
     }
 
-    /// ★값을 바이트 단위로 못 박는다 — 표식이 실제로 스폰 env 에 실린다는 것과 그 모양을 함께 잰다★.
-    /// ★「읽는 쪽이 대조한다」로 되돌리지 말 것★ — 대조하는 자리는 없고 생길 예정도 없다(ADR-0218
-    ///   결정 8). 여기서 값을 못 박는 것은 진단이 그 모양에 기대기 때문이지 판정이 기대서가 아니다.
+    /// ★The value is pinned byte for byte — measuring that the marker is carried in the spawn env, and its shape★. ★Do not revert to 「the reader compares」★ — no comparing place exists or is planned (ADR-0218 decision 8);
+    /// diagnostics lean on the shape.
     #[test]
     fn the_spawn_env_carries_the_incarnation_marker() {
-        let id = Uuid::parse_str("2f1c9c0e-1111-4222-8333-444455556666").expect("고정 uuid");
+        let id = Uuid::parse_str("2f1c9c0e-1111-4222-8333-444455556666").expect("fixed uuid");
         for command in [codex(vec![]), codex_app_server(vec![])] {
             let ep = ControlEndpoint {
                 agent_id: id,
@@ -1864,12 +1539,12 @@ mod tests {
             assert_eq!(
                 env_value(&s, "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"),
                 Some("engram-2f1c9c0e-1111-4222-8333-444455556666-7"),
-                "{command:?}: 표식이 어긋났다"
+                "{command:?}: the marker disagrees"
             );
         }
     }
 
-    /// ★화신이 바뀌면 값이 바뀐다★ — 같으면 죽은 화신이 남긴 기록을 산 화신의 것으로 집는다.
+    /// ★When the incarnation changes, the value changes★ — if it were the same, the record a dead incarnation left would be taken as the live incarnation's.
     #[test]
     fn the_marker_changes_with_the_incarnation() {
         let id = Uuid::new_v4();
@@ -1885,46 +1560,48 @@ mod tests {
             )
             .map(str::to_string)
         };
-        assert_ne!(of(1), of(2), "화신이 달라도 표식이 같다");
+        assert_ne!(
+            of(1),
+            of(2),
+            "the marker is the same across different incarnations"
+        );
     }
 
-    /// ★`[a-z0-9-]` 밖은 한 글자당 `-` 하나로 바뀐다★ — 값이 우리 프로세스 밖(벤더 기록)에 남으므로
-    /// 어떤 문자가 받아들여지는지는 상류 소관이고, 그 미지를 우리 쪽에서 닫는다.
+    /// ★Anything outside `[a-z0-9-]` is replaced with one `-` per character★ — the value remains outside our process (the vendor record),
+    /// so which characters are accepted is upstream's business, and we close that unknown on our side.
     #[test]
     fn the_marker_sanitises_everything_outside_the_allowed_class() {
         assert_eq!(
             sanitise_marker("Engram-AB_c.d 7"),
             "engram-ab-c-d-7",
-            "대문자·`_`·`.`·공백이 규칙대로 안 바뀐다"
+            "upper case · `_` · `.` · space are not replaced per the rule"
         );
         let live = originator_marker(Uuid::new_v4(), 0);
         assert!(
             live.chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-            "운영 입력인데 허용 밖 문자가 남았다: {live}"
+            "production input, but a character outside the allowed set remained: {live}"
         );
     }
 
-    // ── ADR-0216: 훅 등록은 걷혔다 ───────────────────────────────────────────────
+    // ── ADR-0216: the hook registration was removed ───────────────────────────────────────────────
     //
-    // ★순서·충돌 경고 축은 살아 있는 오버라이드 쪽이 잰다★ — `the_instructions_override_follows_the_passthrough`
-    //   와 `a_conflicting_mcp_passthrough_loses_to_ours_and_is_not_filtered` 가 그 자리다.
-    //   여기 있던 훅판 둘은 잴 대상(argv 에 실린 훅 값)이 사라져 그쪽으로 승계됐다.
+    // ★The order · conflict-warning axis is measured on the living overrides★ — `the_instructions_override_follows_the_passthrough` and `a_conflicting_mcp_passthrough_loses_to_ours_and_is_not_filtered`.
 
-    /// ★터미널 스폰에 훅이 더는 실리지 않는다★ — 이 한 줄이 ADR-0216 의 회수 경로 교체를 못 박는다.
-    /// 실리면 codex 의 신뢰 심사 화면이 되살아나 **승인 전까지 에이전트가 안 뜬다.**
+    /// ★Terminal spawns no longer carry the hook★ — this one line nails down ADR-0216's replacement of the recovery path.
+    /// If carried, codex's trust review screen comes back and **the agent does not come up until approval.**
     #[test]
     fn the_terminal_spawn_no_longer_registers_the_session_start_hook() {
         let argv = codex_argv(&spec_with_control(&codex(vec![]), Some(endpoint())));
         assert_eq!(hook_override_value(&argv), None, "{argv:?}");
         assert!(
             !argv.iter().any(|a| a.contains("hook session-start")),
-            "훅 명령 문자열이 다른 모양으로 실렸다: {argv:?}"
+            "a hook command string was carried in another shape: {argv:?}"
         );
     }
 
-    /// app-server 모드도 같다. ★한때 이 둘이 갈렸다 — 그 시절 훅은 터미널 전용이었다★(app-server 는
-    /// `thread/start` 응답으로 id 를 직접 받아 왔다). 지금은 두 모드 다 안 건다.
+    /// The same for app-server mode. ★These two once split — back then the hook was terminal-only★ (app-server
+    /// received the id directly in the `thread/start` response). Today neither mode sets it.
     #[test]
     fn the_app_server_spawn_registers_no_hook() {
         let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
@@ -1933,12 +1610,12 @@ mod tests {
         assert_eq!(
             &argv[..2],
             &["app-server".to_string(), APP_SERVER_STDIO_FLAG.to_string()],
-            "하위 명령과 전송 선택은 여전히 맨 앞이어야: {argv:?}"
+            "the subcommand and transport choice must still be at the very front: {argv:?}"
         );
     }
 
-    /// endpoint 자체가 없는 스폰의 argv — ★`-c` 가 **한 칸도** 없어야 한다★: 오늘 그 플래그를 싣는 둘
-    /// (MCP 부착 · 지시서)이 모두 endpoint 에서 재료를 받는다. 훅도 안 실렸다는 뜻이 함께 실린다.
+    /// The argv of a spawn with no endpoint at all — ★there must be **not a single** `-c`★: the two that carry that flag today
+    /// (MCP attachment · the brief) both get their material from the endpoint. It also implies the hook is not carried.
     #[test]
     fn without_an_endpoint_no_config_override_rides() {
         let argv = codex_argv(&spec_with_control(&codex(vec![]), None));
@@ -1946,14 +1623,11 @@ mod tests {
         assert_eq!(
             argv.iter().filter(|a| *a == CONFIG_OVERRIDE_FLAG).count(),
             0,
-            "endpoint 부재인데 `-c` 가 실렸다: {argv:?}"
+            "`-c` was carried although the endpoint is absent: {argv:?}"
         );
     }
 
-    /// 다른 키를 `-c` 로 넘기는 것은 충돌이 아니다 — 경고를 남발하면 아무도 안 읽는다.
-    ///
-    /// ★키를 **살아 있는 쪽**(지시서)으로 잰다★ — 걷어낸 키로 재면 이 헬퍼가 실제로 굴리는 경고와
-    ///   같은 축을 안 밟게 된다.
+    /// Passing another key with `-c` is not a conflict — spammed warnings go unread. ★Measured on the **living** key (the brief)★: a removed key would not tread the axis this helper drives.
     #[test]
     fn an_unrelated_config_passthrough_is_not_a_conflict() {
         assert!(!passthrough_overrides_key(
@@ -1969,7 +1643,7 @@ mod tests {
         ));
     }
 
-    /// 이어받기 갈래에서도 하위 명령은 맨 앞, 우리 오버라이드는 패스스루 뒤 — 둘이 서로를 밀어내지 않는다.
+    /// On the resume branch too, the subcommand is at the very front and our overrides are after the pass-through.
     ///
     /// ★It does not pin 「last」★ — that spot goes to the sibling override (the instructions) when real materials carry
     ///   one, and that is not a regression. The real invariant is only **after the pass-through**.
@@ -1990,11 +1664,11 @@ mod tests {
         let passthrough = argv
             .iter()
             .position(|a| a == "gpt-5")
-            .expect("패스스루가 사라졌다");
+            .expect("the pass-through disappeared");
         let ours = argv
             .iter()
             .position(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX))
-            .expect("MCP 부착이 사라졌다");
+            .expect("the MCP attachment disappeared");
         assert!(passthrough < ours, "{argv:?}");
     }
 
@@ -2005,11 +1679,11 @@ mod tests {
         assert_eq!(
             argv,
             vec!["app-server", "--stdio", "-c", "model=x"],
-            "하위 명령은 맨 앞이어야 한다 — 뒤로 밀리면 인자로 읽힌다"
+            "the subcommand must be at the very front — pushed back, it is read as an argument"
         );
     }
 
-    /// 두 모드가 **다른** 통로 모양을 신고하고, 실물도 그 신고를 따른다.
+    /// The two modes report **different** link shapes, and the real thing follows that report.
     #[test]
     fn the_two_modes_declare_different_transport_shapes() {
         assert_eq!(
@@ -2022,8 +1696,8 @@ mod tests {
         );
     }
 
-    /// ★`Raw` 였다면 세션이 본문 뒤에 CR 을 **별도 호출**로 한 번 더 내고, 봉투를 스스로 만드는 통로는
-    /// 그것을 또 하나의 본문으로 읽어 빈 턴을 연다★.
+    /// ★Had it been `Raw`, the session would emit CR once more after the body as a **separate call**, and a link that builds envelopes itself
+    /// would read it as another body and open an empty turn★.
     #[test]
     fn app_server_encoder_passes_bytes_through_and_asks_for_no_submit_byte() {
         let enc = CodexBackend.input_encoder(&codex_app_server(vec![]));
@@ -2033,29 +1707,24 @@ mod tests {
         assert_eq!(enc.encode(body, Uuid::new_v4()), body.to_vec());
     }
 
-    /// ★되살리지 마라★ — 터미널 모드는 PTY 가 입력을 스스로 되울린다(세션의 합성 에코는 그것이 없는 json
-    /// 모드를 흉내내는 장치다 — ADR-0044). 세션 층은 backend 가 아니라 [`InputEncoder`] 를 들고 dispatch
-    /// 표를 지나므로, 선언만 보고 그 표를 안 보면 되살아난 에코가 초록인 채 지나간다.
+    /// ★Do not revive it★ — in terminal mode the PTY echoes input itself (the session's synthetic echo imitates the json mode that lacks it — ADR-0044). The session layer holds an [`InputEncoder`] and goes through the dispatch
+    /// table, so looking only at the declaration would let a revived echo pass green.
     ///
-    /// app-server 모드의 말풍선은 이 표가 아니라 통로가 낸다(ADR-0231 — 세션은 통로 턴 동사 갈래에서 에코를
-    /// 내지 않고, 하한 미달 통로는 말풍선을 안 낸다 — ADR-0193 「거부한 대안」). ★그 말풍선이 **화면 복원의
-    /// 순서**를 깨지 않는 것은 통로의 한가 조건 덕이다(ADR-0203)★: 이력은 핸드셰이크 **뒤에** 받아 게이트
-    /// (`Link::Ready`) 앞에 올리는데 합성 말풍선은 `Ready` 에서만 서므로, 그 창에 친 글은 말풍선 없이 목록에
-    /// 선다. 그 조건을 풀면 사용자의 새 말이 복원된 옛 대화보다 위에 그려진다.
+    /// app-server's bubble is emitted by the link, not this table (ADR-0231; below-floor links emit none — ADR-0193 「rejected alternative」). ★The bubble does not break **the screen-restore order** thanks to the link's idle
+    /// condition (ADR-0203)★: history is received **after** the handshake and raised before the gate (`Link::Ready`), but the synthetic bubble stands only at `Ready`, so text typed in that window goes into the list without a
+    /// bubble. Lifting the condition would draw the user's new words above the restored old conversation.
     #[test]
     fn the_terminal_mode_makes_no_synthetic_input_echo() {
         let enc = CodexBackend.input_encoder(&codex(vec![]));
         assert!(
-            enc.input_echo_event("안녕 codex".as_bytes(), Uuid::new_v4())
+            enc.input_echo_event("hello codex".as_bytes(), Uuid::new_v4())
                 .is_none(),
-            "{enc:?}: 합성 에코가 되살아났다"
+            "{enc:?}: the synthetic echo came back"
         );
     }
 
-    /// app-server 모드만 목록을 통로에 맡기고, 받음 가능 여부는 통로의 하한 판정이 채우는 **바로 그** Arc 다.
-    /// 통로는 `dyn` 으로 감싸여 나오므로 주인 수로 잰다 — 조립점 몫 하나 + 통로의 판정 칸 하나(그 칸이
-    /// `delivery_ack()` 가 내주는 것이라는 사실은 통로 쪽 시험
-    /// `the_transport_hands_out_the_very_ack_its_verdict_fills` 가 잰다). 따로 만든 Arc 면 1 이다.
+    /// Only app-server mode hands the list to the link, and whether receipt is possible is **the very** Arc the link's floor decision fills. The link comes out as `dyn`, so it is measured by owner count — one share for the
+    /// assembly point + one for the link's decision field (`the_transport_hands_out_the_very_ack_its_verdict_fills` measures that it is what `delivery_ack()` hands out). A separately made Arc would be 1.
     #[cfg(windows)]
     #[test]
     fn only_the_app_server_spawn_hands_the_list_to_the_transport_with_the_transport_s_own_ack() {
@@ -2088,7 +1757,7 @@ mod tests {
         assert_eq!(
             Arc::strong_count(&json.delivery_ack),
             2,
-            "통로의 판정 칸과 나눠 쥔 Arc 가 아니다 — 세션과 통로가 서로 다른 값을 본다"
+            "not an Arc shared with the link's decision field — the session and the link see different values"
         );
         json.transport.shutdown();
 
@@ -2108,8 +1777,8 @@ mod tests {
             }),
             Some(TurnSignal::Ended(TurnEndKind::Clean))
         );
-        // 결말이 무엇이든 턴은 끝난 것이다 — 실패·중단·미상이 여기서 갈리면 그 결말의 대기 표시가 남는다.
-        // 실패는 오류 끝이고(오류 뒤 멈춤 — ADR-0231), 끊김·미상은 「그 밖」이다(멈춤을 세우지도 풀지도 않는다).
+        // Whatever the outcome, the turn has ended — if failure · interruption · unknown split here, the waiting indicator of that outcome remains.
+        // Failure is an error end (halt after error — ADR-0231), and interruption · unknown are 「the rest」 (they neither set nor clear the halt).
         assert_eq!(
             classify(&OutputEvent::TurnEnd {
                 turn_id: None,
@@ -2129,7 +1798,7 @@ mod tests {
                 "{outcome:?}"
             );
         }
-        // 되울린 유저 메시지 — 이 턴이 시작됐다는 첫 관측이다.
+        // The echoed user message — the first observation that this turn has started.
         assert_eq!(
             classify(&OutputEvent::Structured {
                 kind: "user".into(),
@@ -2145,7 +1814,7 @@ mod tests {
             }),
             Some(TurnSignal::Progress)
         );
-        // `error` 알림은 재시도 가능한 스트림 오류라 턴 경계가 아니다.
+        // The `error` notification is a retryable stream error, not a turn boundary.
         assert_eq!(classify(&OutputEvent::Error("boom".into())), None);
         assert_eq!(
             classify(&OutputEvent::Usage {
@@ -2157,8 +1826,7 @@ mod tests {
         );
     }
 
-    /// 이 백엔드의 `Delivered` 는 턴 끝 뒤에도 온다(늦은 에코 · 되살림) — 명부 사건은 하나도 턴 신호가
-    /// 아니다.
+    /// This backend's `Delivered` comes even after the turn end (late echo · revival) — none of the registry events is a turn signal.
     // ADR-0231
     #[test]
     fn no_queued_input_event_is_a_turn_signal() {
@@ -2200,7 +1868,7 @@ mod tests {
         }
     }
 
-    /// 도구 끝 결과는 결말이 무엇이든 턴 신호가 아니다(사유 = [`classify_turn`] doc).
+    /// A tool end result is not a turn signal whatever its outcome (reason = [`classify_turn`] doc).
     // ADR-0241
     #[test]
     fn a_tool_result_is_never_a_turn_signal() {
@@ -2223,9 +1891,8 @@ mod tests {
         }
     }
 
-    /// ★실측(codex-cli 0.156.1 · fixture `interrupt_fail_b5`): 끊긴 명령의 `failed` 끝이 턴 끝 **뒤에** 온다★ — 번역기는
-    /// 그 끝을 `TurnEnd{Interrupted}` 뒤의 `ToolResult{Failed}` 로 내고, 그 사건을 턴 표에 먹여도 한가한 화신이 「턴 중」으로
-    /// 되살아나지 않고 오류 뒤 멈춤도 서지 않는다(진행으로 세면 30 분 fail-open 까지 우편이 막힌다).
+    /// ★Measured (codex-cli 0.156.1 · fixture `interrupt_fail_b5`): the `failed` end of an interrupted command comes **after** the turn end★ — it is emitted as `ToolResult{Failed}` after `TurnEnd{Interrupted}`, and fed to the turn
+    /// table it neither revives an idle incarnation as 「mid-turn」 nor sets halt-after-error.
     // ADR-0241
     #[test]
     fn a_late_tool_failure_after_an_interrupted_turn_does_not_reopen_the_turn() {
@@ -2233,9 +1900,9 @@ mod tests {
         let mut decoder = CodexAppServerDecoder::new();
         let mut events = Vec::new();
         for line in include_str!("fixtures/interrupt_fail_b5.jsonl").lines() {
-            // 통로가 번역기에 넘기는 것은 알림뿐이다 — 응답 줄(`id` 실음)은 거른다.
+            // What the link hands the translator is only notifications — response lines (carrying `id`) are filtered out.
             let v: serde_json::Value =
-                serde_json::from_str(line).expect("fixture 줄이 JSON 이 아니다");
+                serde_json::from_str(line).expect("the fixture line is not JSON");
             if v.get("method").is_some() && v.get("id").is_none() {
                 events.extend(decoder.decode(format!("{line}\n").as_bytes()));
             }
@@ -2251,12 +1918,15 @@ mod tests {
                     }
                 )
             })
-            .expect("끊긴 턴 끝이 없다");
+            .expect("there is no interrupted turn end");
         let late = events
             .iter()
             .position(|e| matches!(e, OutputEvent::ToolResult { .. }))
-            .expect("늦은 도구 끝 결과가 없다");
-        assert!(end < late, "도구 끝이 턴 끝 뒤가 아니다: {events:?}");
+            .expect("there is no late tool end result");
+        assert!(
+            end < late,
+            "the tool end is not after the turn end: {events:?}"
+        );
         assert!(
             matches!(
                 &events[late],
@@ -2276,13 +1946,16 @@ mod tests {
                 table.observe(agent, 1, seq as u64, signal);
             }
         }
-        let seen = table.get(agent, 1).expect("관측이 없다");
-        assert!(!seen.in_turn, "늦은 도구 끝이 턴을 다시 열었다");
-        assert!(!seen.last_end_failed, "도구 실패가 오류 뒤 멈춤을 세웠다");
+        let seen = table.get(agent, 1).expect("no observation");
+        assert!(!seen.in_turn, "a late tool end reopened the turn");
+        assert!(
+            !seen.last_end_failed,
+            "a tool failure set the halt-after-error"
+        );
     }
 
-    /// 터미널 모드는 decoder 가 없어 `TerminalBytes` 만 흐른다 — 그래서 같은 분류자를 모드별 분기 없이
-    /// 공유해도 그 모드에서는 신호가 하나도 나오지 않는다.
+    /// Terminal mode has no decoder, so only `TerminalBytes` flow — so even sharing the same classifier without per-mode branching
+    /// yields no signal at all in that mode.
     #[test]
     fn terminal_bytes_carry_no_turn_signal() {
         assert_eq!(
@@ -2299,71 +1972,59 @@ mod tests {
             .is_some());
     }
 
-    /// 세 선언이 한 항목에 있는 이유 = **함께 봐야 하는 짝**이다. 발급 축은 두 모드 다 꺼져 있고
-    /// (발급 주체가 codex 라 우리가 심을 값이 없다), 이어받기 두 칸은 두 모드 다 켜져 있다 —
-    /// 갈리는 것은 **수단**뿐이고(argv ↔ `thread/resume`) 이 네 칸은 그 수단을 묻지 않는다.
+    /// The three declarations are one item because they are **a pair to look at together**: the issuing axis is off in both modes (codex issues the id) and the two resume fields are on in both — only **the means** (argv ↔
+    /// `thread/resume`) splits, which these four fields do not ask about.
     ///
-    /// ★네 칸을 다 적는 것이 요점이다★ — 이어받기 축과 caps 신고 칸 중 **한쪽만** 갈리면 이어받은 적
-    ///   없는 새 스레드가 「이어받음」으로 보고되거나 그 반대가 되는데, 모드별로 한 칸씩만 재면 그
-    ///   어긋남이 이 파일에서 안 보인다.
-    /// ★터미널 모드의 두 칸을 `false` 로 되돌리려면 argv 조립도 함께 걷어야 한다★ — 선언만 끄면
-    ///   활성화 입구가 Fresh 로 띄우는데 [`AgentBackend::build_spec`] 은 여전히 이어받을 채비를 하고
-    ///   있어, 그 배선이 영영 안 불리는 죽은 코드가 된다.
+    /// ★Writing all four is the point★ — if only one side of the resume axis and the caps report splits, a never-resumed thread is reported as 「resumed」 or the reverse, and measuring one field per mode would hide it.
+    /// ★Reverting terminal mode's two fields to `false` requires removing the argv assembly too★ — otherwise the activation entrance launches as Fresh while [`AgentBackend::build_spec`] stays prepared to resume: dead code.
     #[test]
     fn both_modes_declare_resume_and_neither_claims_to_issue_the_id() {
         for c in [codex(vec![]), codex_app_server(vec![])] {
             assert!(
                 !CodexBackend.assigns_session_id(&c),
-                "{c:?}: 발급 주체는 codex 다 — 우리 uuid 를 심으면 그 값은 영영 안 쓰인다"
+                "{c:?}: the issuer is codex — if we plant our uuid, that value is never used"
             );
             assert!(
                 CodexBackend.can_resume_stored_session(&c),
-                "{c:?}: 이어받기 축을 끄면 손잡이가 명부에 있어도 활성화 입구가 Fresh 로 띄운다"
+                "{c:?}: turning off the resume axis makes the activation entrance launch as Fresh even with a handle in the registry"
             );
             assert!(
                 CodexBackend.capabilities(&c).session.resume,
-                "{c:?}: 축만 켜고 신고를 끄면 실제로 이어받는 스폰이 「새 대화」로 보고된다"
+                "{c:?}: turning on only the axis and off the report makes a spawn that actually resumes be reported as 「new conversation」"
             );
         }
     }
 
-    /// ★선언과 실물이 짝이어야 한다★ — `declares_link()` 가 조립점에서 배달 포트를 **깔지 말지**를
-    /// 가르므로, true 인데 통로가 안 부르면 감독자가 백스톱까지 기다리고 false 인데 부르면 그 배달을
-    /// 아무도 안 받는다.
+    /// ★The declaration and the real thing must be a pair★ — `declares_link()` decides at the assembly point whether to **lay** the delivery port; true but uncalled: the supervisor waits until the backstop; false but called:
+    /// nobody receives it.
     ///
-    /// 여기서 재는 것은 선언 쪽이고, 실물 쪽(app-server 통로가 실제로 배달한다)은
-    /// `a_rejected_resume_does_not_fall_back_and_ends_the_session` 이 실 통로로 잰다.
+    /// This measures the declaration side; the real side (the app-server link delivers) is measured by `a_rejected_resume_does_not_fall_back_and_ends_the_session`.
     #[test]
     fn only_app_server_declares_a_link() {
         assert!(
             CodexBackend.declares_link(&codex_app_server(vec![])),
-            "app-server 는 핸드셰이크를 마쳐야 쓸 수 있다 — 축이 없다고 선언하면 그 결말이 판정에              참여하지 못하고, 거절이 다시 성공으로 보고된다"
+            "app-server is usable only after finishing the handshake — declaring there is no axis keeps that outcome out of the decision, and a refusal is again reported as success"
         );
         assert!(
             !CodexBackend.declares_link(&codex(vec![])),
-            "터미널 모드는 PTY 라 뜬 순간부터 쓸 수 있다 — 축이 있다고 선언하면 아무도 배달하지 않는              채널을 감독자가 백스톱까지 기다린다"
+            "terminal mode is a PTY, usable from the moment it comes up — declaring there is an axis makes the supervisor wait until the backstop for a channel nobody delivers"
         );
     }
 
-    /// ★이 값을 정하는 것은 턴 신호 유무가 아니라 ADR-0116 결정 7 이다★ — 터미널 모드에 신호가 없다는
-    /// 사실은 여기서 false 를 낼 사유가 못 된다(터미널 claude 가 같은 자리에서 이미 받는다). 되돌리려면
-    /// 그 결정부터 뒤집을 것.
+    /// ★This value is decided by ADR-0116 decision 7, not by whether turn signals exist★ — terminal mode having none is no reason for false (terminal claude already receives in the same place); overturn that decision first.
     // ADR-0116
     #[test]
     fn reads_messages_is_true() {
         assert!(CodexBackend.reads_messages());
     }
 
-    // ── ADR-0185: 받아 온 thread id 가 조립점의 기록 동사까지 실제로 간다 ──────────────────
+    // ── ADR-0185: the received thread id actually reaches the assembly point's record verb ──────────────────
 
-    /// 가짜 app-server 의 파일 하나를 지운다 — 지웠으면 `true`. ★한 번 시도하고 마는 모양은 `%TEMP%` 에
-    /// 스크립트를 남겼다★: `shutdown()` 이 돌아온 뒤에도 자식이 그 파일 핸들을 잠깐 더 쥐고 있어 첫
-    /// `remove_file` 이 실패한다. 표식 파일도 같은 문을 탄다 — 가짜는 쓰고 곧바로 닫지만, 새 파일을 잠깐
-    /// 여는 제3자(백신·색인기)가 한 번 시도를 깜빡이로 만들 수 있다(관측된 적은 없다).
-    /// ★결과를 돌려주는 이유 = `eprintln!` 은 **통과한** 항목에서 libtest 가 삼킨다★ — 그 자리에 적으면
-    /// 지우지 못한 사실이 아무 데도 안 남고 찌꺼기만 쌓인다. 호출자가 단언으로 올린다.
+    /// Removes one file of the fake app-server — `true` if removed. ★A try-once-and-give-up shape left scripts in `%TEMP%`★: the child holds the file handle a little longer even after `shutdown()` returns, so the first `remove_file`
+    /// fails; the marker file goes through the same door (a third party that briefly opens new files — antivirus · indexer — can make one attempt flaky; never observed).
+    /// ★It returns the result because `eprintln!` is swallowed by libtest in **passing** items★ — the failure would leave no trace and leftovers would pile up; the caller raises it as an assertion.
     #[cfg(windows)]
-    #[must_use = "지우지 못한 사실을 버리면 찌꺼기가 조용히 쌓인다 — 단언으로 올릴 것"]
+    #[must_use = "dropping the fact that it could not remove quietly piles up leftovers — raise it as an assertion"]
     fn remove_fake_file(path: &std::path::Path) -> bool {
         for _ in 0..40 {
             if std::fs::remove_file(path).is_ok() || !path.exists() {
@@ -2374,27 +2035,22 @@ mod tests {
         false
     }
 
-    /// 가짜가 `thread/resume` 에 무엇으로 답하나.
+    /// What the fake answers to `thread/resume`.
     #[cfg(windows)]
     pub(super) enum FakeResume {
-        /// 받은 `threadId` 에 접두를 붙여 돌려준다 — 우리가 보낸 값과 **다른** 값이 되는 것이 요점이다.
+        /// Returns the received `threadId` with a prefix — the point is that it becomes a value **different** from the one we sent.
         EchoesTheThreadId,
-        /// `-32600` 으로 거절한다. ★이 코드가 「모르는 스레드」 전용이 아니라는 것이 ADR-0082 의 codex 쪽
-        /// 보강 사유다★ — 모르는 메서드도 중복 `initialize` 도 설정 오류도 같은 코드로 오므로(실측
-        /// 0.154.0 — 정본은 이 폴더 `protocol` 과 통로 시험대), 코드로 갈라 새 스레드로 폴백하면 아직
-        /// 멀쩡한 손잡이를 무관한 실패에서 덮어쓴다.
+        /// Refuses with `-32600`. ★That code is not exclusive to 「unknown thread」 (ADR-0082's codex-side addendum)★ — an unknown method, a duplicate `initialize` and a config error come with it too (0.154.0; this folder's `protocol` and the link
+        /// test bench), so splitting by code and falling back to a new thread would overwrite a still sound handle on an unrelated failure.
         Rejects,
     }
 
-    /// [`FakeResume::Rejects`] 가 싣는 거절 문구 — 항목이 배달된 사유에서 이것을 찾아 「거절이 실제로
-    /// 왕복했다」를 가른다.
-    /// ★문구를 실측된 것으로 쓴다★ — 이 가짜가 「모르는 스레드」를 흉내 내는 목적이 분류까지 태우는
-    /// 것인데, 지어낸 문구를 쓰면 `resume_failure_kind` 가 못 알아봐서 그 배선이 시험대를 그냥 통과한다
-    /// (`docs/reference/backend-capabilities.md` §1 「모르는 id 를 주면」).
+    /// The refusal wording [`FakeResume::Rejects`] carries — items find it in the delivered reason to tell 「the refusal made the round trip」. ★The measured wording★ (`docs/reference/backend-capabilities.md` §1): with invented
+    /// wording `resume_failure_kind` would not recognize it and the wiring would pass the bench unclassified.
     #[cfg(windows)]
     const FAKE_RESUME_REJECTION: &str = "no rollout found for thread id";
 
-    /// 가짜가 읽기 루프에 들어서며 만들 빈 파일의 경로를 싣는 환경 변수 이름.
+    /// The name of the environment variable carrying the path of the empty file the fake creates as it enters its read loop.
     #[cfg(windows)]
     const FAKE_READY_ENV: &str = "ENGRAM_FAKE_APP_SERVER_READY";
 
@@ -2402,15 +2058,14 @@ mod tests {
     #[cfg(windows)]
     const FAKE_LOG_ENV: &str = "ENGRAM_FAKE_APP_SERVER_LOG";
 
-    /// 구운 가짜 app-server 한 벌.
+    /// One baked fake app-server.
     ///
-    /// ★두 경로를 함께 드는 것은 계약이다★ — 항목마다 [`FakeAppServer::remove`] 로 지워야 하고, 못 지운
-    /// 사실을 단언으로 올려야 한다.
+    /// ★Holding the two paths together is a contract★ — each item must remove them with [`FakeAppServer::remove`] and raise a failure to remove as an assertion.
     #[cfg(windows)]
     pub(super) struct FakeAppServer {
         pub(super) spec: CommandSpec,
         script: std::path::PathBuf,
-        /// 가짜가 읽기 루프에 들어서며 만드는 빈 파일 — [`wait_for_the_fake_to_listen`] 이 이것을 기다린다.
+        /// The empty file the fake creates as it enters its read loop — [`wait_for_the_fake_to_listen`] waits for it.
         ready: std::path::PathBuf,
         /// Every line the fake received, in order, one per line — [`FakeAppServer::received`] reads it.
         log: std::path::PathBuf,
@@ -2420,7 +2075,7 @@ mod tests {
     impl FakeAppServer {
         /// Removes the script, the marker and the method log, and returns the paths it **could not** remove — empty =
         /// all removed.
-        #[must_use = "지우지 못한 사실을 버리면 찌꺼기가 조용히 쌓인다 — 단언으로 올릴 것"]
+        #[must_use = "dropping the fact that it could not remove quietly piles up leftovers — raise it as an assertion"]
         pub(super) fn remove(&self) -> Vec<&std::path::Path> {
             [
                 self.script.as_path(),
@@ -2476,7 +2131,7 @@ mod tests {
         }
     }
 
-    /// 가짜 app-server 를 임시 파일로 굽는다. `start_thread_id` = 이 가짜가 `thread/start` 에 답할 id.
+    /// Bakes a fake app-server into a temp file. `start_thread_id` = the id this fake answers to `thread/start` with.
     #[cfg(windows)]
     fn bake_fake_app_server(start_thread_id: &str, resume: FakeResume) -> FakeAppServer {
         bake_fake_app_server_with(start_thread_id, resume, FakeOptions::default())
@@ -2547,7 +2202,7 @@ mod tests {
         let script_path = std::env::temp_dir().join(format!("{stem}.ps1"));
         let ready = std::env::temp_dir().join(format!("{stem}.ready"));
         let log = std::env::temp_dir().join(format!("{stem}.log"));
-        std::fs::write(&script_path, script).expect("가짜 app-server 기록");
+        std::fs::write(&script_path, script).expect("write the fake app-server");
 
         let spec = CommandSpec {
             program: "powershell.exe".into(),
@@ -2572,31 +2227,26 @@ mod tests {
         }
     }
 
-    /// 가짜가 읽기 루프에 들어설 때까지 기다린다 — ★`start()` 바로 앞에서 부른다★.
+    /// Waits until the fake enters its read loop — ★call it right before `start()`★.
     ///
-    /// 핸드셰이크 예산(`transport::HANDSHAKE_BUDGET`)의 시계는 `start()` 가 띄우는 라이터가 잡는데, 가짜는
-    /// 그보다 먼저 `open_spawn` 에서 떠 있다. 그 사이의 powershell 기동은 이 가짜를 쓰는 항목들이 재는 것이
-    /// 아니다. CI run 35447034272 attempt 1 에서 이 네 항목이 함께 `initialize` 시한 만료로 실패했다(같은
-    /// 런의 attempt 2 는 초록). ★그 시간이 powershell 기동에 들었다는 것은 가장 그럴듯한 독해이지 확정이
-    /// 아니다★ — 로그에 남은 것은 시한 만료 한 줄뿐이고, 받치는 것은 기동 앞에 12초를 끼운 지연 주입이 같은
-    /// 실패를 재현한다는 사실이다. 기동을 예산 밖으로 빼서 **운영 예산 그대로** 왕복만 잰다.
-    /// ★예산을 늘려 맞추지 않는다★ — 그 값은 운영 동작이다(그 상수의 doc). 시험대용 예산을 주입할
-    /// 손잡이는 `start()` 경로에 없고, 내려면 운영 코드에 seam 을 새로 내야 한다(ADR-0012 — 사용자 결정).
-    /// ★표식이 보증하는 것은 「스크립트가 돌기 시작했다」까지다★ — 요청마다의 응답 경로(정규식·쓰기)가 처음
-    /// 도는 비용은 여전히 예산 안이다. 느린 러너에서 그 값은 미측정이고, 크면 증상은 같은 시한 만료다.
+    /// The handshake budget's clock (`transport::HANDSHAKE_BUDGET`) starts in the writer `start()` launches, but the fake is already up before that, in `open_spawn`; the powershell startup in between is not what these items measure.
+    /// CI run 35447034272 attempt 1 failed four items together with an `initialize` deadline expiry (attempt 2 green). ★Powershell startup is the most plausible cause, not a certainty★ [unverified]: the log has one deadline line,
+    /// and a 12-second delay injected before startup reproduces it. Startup is moved out of the budget and only the round trip is measured **with the production budget**.
+    /// ★The budget is not raised to fit★ — that value is production behaviour; `start()` has no handle to inject a bench budget and adding one needs a new production seam (ADR-0012).
+    /// ★The marker guarantees only 「the script started running」★ — the first-run cost of the per-request response path (regex · write) is still inside the budget and unmeasured on a slow runner; if large, the symptom is the same deadline expiry.
     #[cfg(windows)]
     pub(super) fn wait_for_the_fake_to_listen(fake: &FakeAppServer) {
         wait_until(
             || fake.ready.exists(),
             &format!(
-                "가짜 app-server 가 읽기 루프에 들어서는 것 — powershell 이 못 떴거나(실행 정책) 스크립트가 \
-                 루프 전에 죽었다. 가르려면 손으로 돌려 볼 것: {}",
+                "the fake app-server entering its read loop — either powershell could not come up (execution policy) or the script died \
+                 before the loop. To tell them apart, run it by hand: {}",
                 fake.hand_run()
             ),
         );
     }
 
-    /// 통로가 배달하는 연결 결말을 받아 적는 포트와 그 기록.
+    /// The port that records the connection outcomes the link delivers, and that record.
     #[cfg(windows)]
     fn link_recorder() -> (
         crate::transport::LinkSink,
@@ -2612,14 +2262,11 @@ mod tests {
         (sink, delivered)
     }
 
-    /// 기록 동사가 불릴 때까지 기다린다 — ★그 전에 연결 결말이 배달되면 더 기다리지 않고 그 결말로 무엇이
-    /// 틀어졌는지 말하며 죽는다★.
+    /// Waits until the record verb is called — ★if a connection outcome is delivered first, it stops and dies saying, with that outcome, what went wrong★.
     ///
-    /// 기록 동사는 핸드셰이크 왕복이 선 **뒤에만** 불리고, 결말은 그 자리를 지난 **뒤에만** 배달된다. 그래서
-    /// 기록 없이 온 결말은 둘 중 하나다 — `Failed` 면 왕복이 넘어진 것이고, `Ready` 면 **기록 포트가 통로까지
-    /// 오지 않은 것**이다(포트가 없으면 통로는 기록을 건너뛰고 연결을 세운다 — `record_session_id`). 뒤쪽이
-    /// [`tests::an_app_server_spawn_hands_the_thread_id_to_the_sink`] 가 잡으려는 배선 회귀다. 어느 쪽이든
-    /// 기록만 기다리면 마감까지 헛돌고 「일어나지 않았다」만 남는다 — 사유는 결말에만 실린다.
+    /// The record verb is called **only after** the handshake round trip stands, and the outcome is delivered **only after** that point, so an outcome without a record is either `Failed` (the round trip fell over) or `Ready` (**the record
+    /// port did not reach the link** — without a port the link skips the record and sets up the connection: `record_session_id`), the wiring regression [`tests::an_app_server_spawn_hands_the_thread_id_to_the_sink`] catches.
+    /// Waiting only for the record would spin to the deadline and leave 「it did not happen」; the reason is only in the outcome.
     #[cfg(windows)]
     fn wait_for_recording(
         recorded: impl Fn() -> bool,
@@ -2628,7 +2275,7 @@ mod tests {
     ) {
         wait_until(
             || recorded() || !delivered.lock().unwrap().is_empty(),
-            "기록 동사가 불리거나 연결 결말이 배달되는 것",
+            "the record verb being called or a connection outcome being delivered",
         );
         if recorded() {
             return;
@@ -2636,15 +2283,15 @@ mod tests {
         let resolution = delivered.lock().unwrap().first().cloned();
         match resolution {
             Some(crate::transport::LinkResolution::Ready) => panic!(
-                "기록 동사가 한 번도 안 불렸는데 연결이 섰다 — 배선이 끊겼다: 기록 포트가 통로까지 오지 않았다"
+                "the connection stood without the record verb ever being called — the wiring is broken: the record port did not reach the link"
             ),
             Some(crate::transport::LinkResolution::Failed { reason }) => panic!(
-                "핸드셰이크가 기록 전에 넘어졌다 — 이 항목은 재려던 지점에 닿지 못했다. 배달된 사유: {reason}. \
-                 사유가 시한 만료(「답이 없다」)면 가짜가 핸드셰이크 예산 안에 답하지 못한 것이다. 스크립트는 \
-                 남겨 둔다 — 손으로 돌려 볼 것: {}",
+                "the handshake fell over before the record — this item did not reach the point it meant to measure. Delivered reason: {reason}. \
+                 If the reason is a deadline expiry (「no answer」), the fake could not answer within the handshake budget. The script is \
+                 left in place — run it by hand: {}",
                 fake.hand_run()
             ),
-            None => unreachable!("위 대기는 기록이나 결말 중 하나가 설 때만 돌아온다"),
+            None => unreachable!("the wait above returns only when either the record or the outcome stands"),
         }
     }
 
@@ -2654,23 +2301,16 @@ mod tests {
     /// ([`FakeAppServer::received`]). ★Not the real codex★ — what the tests measure is our side of the wire (the thread
     /// id reaching the verb handed to [`AgentBackend::open_spawn`], what the handshake sends and in which order); the real
     /// CLI does not matter for that (ADR-0012 isolation).
-    /// ★인자로 넘기지 않고 파일로 굽는다★ — 스크립트에 JSON 이 들어 있어 `"` 가 필수인데, 그 문자는
-    /// Rust `Command` 의 인자 이스케이프와 powershell 의 명령줄 해석을 거치며 두 번 씹힌다.
-    /// ★stdout 은 raw 바이트로 쓴다★ — `Write-Output` 은 인코딩·BOM 이 호스트 설정에 딸려 가고, BOM 한
-    /// 바이트가 첫 줄을 JSON 이 아니게 만든다.
+    /// ★Baked into a file, not passed as an argument★ — the script contains JSON `"`, which is chewed twice by Rust `Command` escaping and powershell command-line parsing.
+    /// ★stdout is written as raw bytes★ — `Write-Output` drags encoding · BOM along with host settings, and one BOM byte makes the first line not JSON.
     ///
-    /// ★`thread/resume` 갈래의 답은 [`FakeResume`] 이 채워 넣는다★ — 그 자리에 들어가는 것은 JSON 조각이
-    /// 아니라 **powershell 식**이라, 받은 `threadId` 를 이어 붙이는 답도 쓸 수 있다.
+    /// ★The `thread/resume` answer is filled in by [`FakeResume`]★ — a **powershell expression**, so an answer that appends the received `threadId` can be written.
     ///
-    /// ★**이 가짜는 답한 뒤에도 죽지 않고 stdin 을 계속 읽는다 — 그 성질이 한 항목의 전제다**★.
-    /// [`tests::a_recording_failure_ends_the_session`] 이 재는 것은 「기록이 실패하면 우리가 stdin 을 닫고
-    /// 그 결과로 세션이 끝난다」인데, 이 가짜가 스스로 끝나 버리면 EOF 가 **닫기와 무관하게** 와서 그
-    /// 항목이 배선을 하나도 안 재고 초록이 된다. 실제로 그렇지 않다는 것은 변이로 확인했다 — 닫기를
-    /// 없애면 그 항목에 상태 전이가 **하나도** 관측되지 않는다. ★그러니 아래 while 루프를 「응답 뒤
-    /// exit」 으로 바꾸면 그 항목이 조용히 무력해진다★.
+    /// ★**This fake keeps reading stdin after answering — that is the premise of one item**★: [`tests::a_recording_failure_ends_the_session`] measures 「if the record fails we close stdin and the session ends」; a fake that ended on its own would
+    /// give EOF **regardless of the close**, measure none of the wiring and go green (confirmed by mutation: removing the close made **no** state transition observed in that item). ★Turning the while loop into 「exit after
+    /// responding」 quietly disarms that item★.
     ///
-    /// ★표식 파일은 읽기 루프 **바로 앞**에서 만든다★ — [`wait_for_the_fake_to_listen`] 이 그것을 「답할
-    /// 준비가 됐다」로 읽는다. 답하는 데 쓰는 정의(`$so`·`Send`)보다 앞으로 옮기면 그 뜻이 거짓이 된다.
+    /// ★The marker file is created **right before** the read loop★ — [`wait_for_the_fake_to_listen`] reads it as 「ready to answer」; moving it before the definitions used for answering (`$so` · `Send`) would falsify that.
     #[cfg(windows)]
     const FAKE_APP_SERVER_PS1: &str = r#"
 $ErrorActionPreference = 'Stop'
@@ -2705,8 +2345,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 }
 "#;
 
-    /// ★조립점이 `None` 을 넘기던 시절에는 이 항목이 서지 않았다★ — 배선이 다시 끊기면 여기서 잡힌다.
-    /// 재는 것은 **기록 동사가 불렸나**이고, 그 값이 프로필에 어떻게 앉나는 `manager.rs` 쪽 항목이 잰다.
+    /// ★Back when the assembly point passed `None`, this item did not hold★ — if the wiring breaks again, it is caught here.
+    /// What is measured is **whether the record verb was called**, and how that value sits in the profile is measured by the `manager.rs` side item.
     #[cfg(windows)]
     #[test]
     fn an_app_server_spawn_hands_the_thread_id_to_the_sink() {
@@ -2752,9 +2392,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             TurnWiring::detached(),
         )));
 
-        // ★실패는 네 갈래로 갈려 적힌다★ — 가짜가 안 떴다(위 대기) · 왕복이 넘어졌다(실패 결말의 사유) ·
-        //   기록 없이 연결이 섰다(배선 회귀) · 가짜는 떴는데 기록도 결말도 없다(마감). 어느 갈래든 지우는
-        //   줄 전에 죽으므로 스크립트가 남는다.
+        // ★Failures are split four ways★: the fake did not come up (the wait above) · the round trip fell over (the failure outcome's reason) · the connection stood without a record (wiring regression) · the fake came up but there is neither a record nor an
+        //   outcome (deadline). Each dies before the removing line, so the script remains.
         wait_for_recording(|| !seen.lock().unwrap().is_empty(), &delivered, &fake);
         let got = seen.lock().unwrap().clone();
 
@@ -2764,26 +2403,23 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         assert_eq!(
             got,
             vec![thread_id],
-            "기록 동사가 app-server 가 준 thread id 와 다른 값을 받았다"
+            "the record verb received a value different from the thread id the app-server gave"
         );
         assert!(
             leftover.is_empty(),
-            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
+            "could not remove the fake app-server files: {leftover:?}"
         );
     }
 
-    /// ★조립점이 이어받을 값을 주면 둘째 요청이 `thread/resume` 으로 갈린다 — 그리고 기록되는 것은
-    /// **상대가 답한 id** 다★.
+    /// ★If the assembly point gives a value to resume, the second request splits into `thread/resume` — and what is recorded is **the id the peer answered**★.
     ///
-    /// 단언 하나가 셋을 가른다(가짜의 답이 `resumed-<우리가 보낸 threadId>` 라서):
-    ///   1. 나간 것이 `thread/start` 가 아니다 — 그쪽이었으면 가짜가 `start_only` 를 돌려준다.
-    ///   2. `threadId` 칸이 우리가 넘긴 값을 그대로 실어 갔다(철자 camelCase 포함).
-    ///   3. 기록 동사가 받는 것은 **상대가 준 값**이다. 우리가 보낸 값을 되쓰는 구현이었다면 접두 없는
-    ///      원본이 올라와 여기서 갈린다 — 그 갈래가 중요한 이유는, 상대가 다른 id 를 주는 날 그 값이
-    ///      이 화신이 실제로 말하는 스레드이기 때문이다.
+    /// One assertion tells three things apart (the fake answers `resumed-<the threadId we sent>`):
+    ///   1. What went out is not `thread/start` (the fake would return `start_only`).
+    ///   2. The `threadId` field carried our value as is (including the camelCase spelling).
+    ///   3. The record verb receives **the value the peer gave** — had the implementation rewritten our value, the un-prefixed original would show; it matters because the day the peer gives a different id, that is the thread this
+    ///      incarnation actually talks in.
     ///
-    /// ★`send_input` 을 한 번도 하지 않는다★ — 재는 것은 핸드셰이크 구획뿐이고, 여기서 보내면 상한까지
-    ///   큐가 차는 다른 갈래를 섞게 된다.
+    /// ★`send_input` is never called★ — only the handshake section is measured, and sending would mix in the branch where the queue fills to the cap.
     #[cfg(windows)]
     #[test]
     fn a_resume_target_makes_the_handshake_issue_thread_resume() {
@@ -2829,8 +2465,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             TurnWiring::detached(),
         )));
 
-        // 실패 갈래는 위 항목과 같다. 이어받기 요청이 안 나간 것은 여기서 잡히지 않는다 — 가짜는
-        //   `thread/start` 에도 답하므로 그때도 기록 동사가 불리고, 그 갈림은 아래 값 단언이 한다.
+        // The failure branches are the same as the item above. That the resume request did not go out is not caught here — the fake
+        //   answers `thread/start` too, so the record verb is called then as well, and the value assertion below makes that split.
         wait_for_recording(|| !seen.lock().unwrap().is_empty(), &delivered, &fake);
         let got = seen.lock().unwrap().clone();
 
@@ -2840,47 +2476,31 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         assert_eq!(
             got,
             vec![format!("resumed-{resume_target}")],
-            "이어받기 응답의 id 가 기록되지 않았다 — `start_only` 면 `thread/start` 가 나간 것이고,              접두 없는 원본이면 상대 답 대신 우리가 보낸 값을 되쓴 것이다"
+            "the id of the resume response was not recorded — `start_only` means `thread/start` went out, and an original without the prefix means the value we sent was rewritten instead of the peer's answer"
         );
-        // ★이 가짜가 주는 값은 **uuid 가 아니다** — 그 사실을 여기서 못 박는다★.
-        //   조립점의 기록 동사(`manager::session_id_sink`)는 `Uuid::parse_str` 에 실패한 값을 **조용히
-        //   버리므로**, 이 갈래에서 실제로 일어나는 일은 「기록됨」이 아니라 **갈림**이다: 통로는 이
-        //   문자열을 `thread_id` 로 들고 그 뒤 모든 턴을 그것으로 내보내는데, 디스크의
-        //   `backend_session_id` 는 **옛 값 그대로** 남는다. 그래서 다음 이어받기는 이 화신이 실제로
-        //   말한 스레드가 아닌 곳을 연다.
-        //   ★그 갈림을 재는 짝은 `manager.rs` 쪽 `a_non_uuid_thread_id_leaves_the_stored_one_diverged`
-        //   이고, 여기서 재는 것은 「이 시험대가 그 조건을 실제로 만들어 낸다」 하나다★ — 이 단언이 없으면
-        //   위 `assert_eq!` 가 「기록까지 됐다」로 잘못 읽힌다.
+        // ★The value this fake gives is **not a uuid** — pinned here★. The record verb (`manager::session_id_sink`) **quietly drops** a value failing `Uuid::parse_str`, so this branch is not 「recorded」 but **a split**: the link keeps this
+        //   string as `thread_id` and sends every later turn with it while the on-disk `backend_session_id` stays **old**, and the next resume opens a thread this incarnation never talked in.
+        //   ★The partner measuring the split is `a_non_uuid_thread_id_leaves_the_stored_one_diverged` in `manager.rs`; this only measures that the bench creates that condition★ — otherwise the `assert_eq!` above would read as 「it got recorded」.
         assert!(
             Uuid::parse_str(&got[0]).is_err(),
-            "가짜의 답이 uuid 로 읽힌다 — 이 항목의 전제(조립점이 이 값을 버린다)가 낡았다: {got:?}"
+            "the fake's answer reads as a uuid — the premise of this item (the assembly point drops this value) is stale: {got:?}"
         );
         assert!(
             leftover.is_empty(),
-            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
+            "could not remove the fake app-server files: {leftover:?}"
         );
     }
 
-    /// ★거절당한 이어받기는 **새 스레드로 되돌아가지 않는다**(ADR-0082)★ — 그리고 프로필에 저장된
-    /// 손잡이를 건드리지 않는다.
+    /// ★A refused resume **does not fall back to a new thread** (ADR-0082)★ and does not touch the handle stored in the profile.
     ///
-    /// 결정적 증거는 **기록 동사가 한 번도 안 불린다**는 것이다: 이 가짜는 `thread/start` 에도 답하므로
-    /// (`start_only`), 통로가 거절을 보고 새 스레드를 열었다면 그 id 가 기록 동사로 올라온다. 그 부재가
-    /// 곧 둘째 spawn 부재이고, 기록이 없으니 저장된 sid 도 그대로다.
-    /// ★부재를 시한으로만 재지 않는다★ — 화면에 오르는 실패 경계를 **기다린 뒤에** 부재를 단언한다.
-    ///   그래야 「아직 안 끝났을 뿐」과 「폴백이 없다」가 갈린다.
+    /// Decisive evidence: **the record verb is never called** — this fake also answers `thread/start` (`start_only`), so had the link opened a new thread that id would reach the record verb; no record means no second spawn and the stored sid
+    /// stays. ★Absence is not measured by deadline alone★: it is asserted **after waiting** for the failure boundary that shows on screen, telling 「not ended yet」 from 「no fallback」.
     ///
-    /// ★그리고 **세션이 종점에 닿는 것까지 여기서 잰다**★ — 이것이 이 항목의 두 번째 축이고, 없으면
-    ///   항목 전체가 **깨진 구현 위에서 초록**이다. 이 가짜는 거절을 답한 뒤에도 죽지 않고 stdin 을 계속
-    ///   읽으므로(그 상수의 doc), 통로가 우리 쪽 stdin 을 안 놓으면 자식·리더·라이터가 그대로 살아
-    ///   리더가 EOF 를 못 보고 [`crate::output_core::OutputCore::finish`] 가 영영 안 돈다. 그러면 reaper 로
-    ///   가는 메시지가 아예 만들어지지 않고(그 단독 소비자 — ADR-0019), 매니저의 활성화 판정은 3초 내내
-    ///   `Running` 만 보고 **「이어받기 성공」으로 도장을 찍으며 마지막 실패 기록까지 지운다**.
-    ///   ★한때 이 자리에 「종점은 매니저·reaper 몫이고 그 회귀망은 `tests/activation.rs` 가 진다」고
-    ///   적혀 있었다 — 그 그물은 **없다**(그 파일에 codex 항목은 프로필 배선 하나뿐이고 거절 갈래를 재지
-    ///   않는다). 그래서 이 통로가 stdin 을 놓는 것을 재는 자리는 여기뿐이다.★
-    /// ★`shutdown()` 전에 기다리는 것이 요점이다★ — 우리가 죽여 놓고 「끝났다」를 재면 이 항목이 재려던
-    ///   인과를 우리가 대신 굴린 것이 된다(선례 = [`tests::a_recording_failure_ends_the_session`]).
+    /// ★And **it is measured until the session reaches its end state**★ — the item's second axis; without it the item is **green on a broken implementation**. The fake keeps reading stdin after the refusal (that constant's doc), so if the link
+    /// does not let go of our stdin the child · reader · writer stay alive, the reader never sees EOF, [`crate::output_core::OutputCore::finish`] never runs, no message reaches the reaper (its sole consumer — ADR-0019), and the manager's
+    /// activation decision sees only `Running` for 3 seconds, **stamps 「resume succeeded」 and erases even the last failure record**. ★No other net exists★ — `tests/activation.rs` has one codex item (profile wiring) and does not measure the refusal
+    /// branch, so this is the only place measuring the link letting go of stdin.
+    /// ★Waiting before `shutdown()` is the point★ — killing first would drive the causality this item measures (precedent: [`tests::a_recording_failure_ends_the_session`]).
     #[cfg(windows)]
     #[test]
     fn a_rejected_resume_does_not_fall_back_and_ends_the_session() {
@@ -2891,7 +2511,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         };
         use std::sync::{Arc, Mutex};
 
-        /// 종료 전이를 보는 눈 — 선례·사유는 [`tests::a_recording_failure_ends_the_session`] 과 같다.
+        /// The eye that watches the end transition — precedent · reason are the same as [`tests::a_recording_failure_ends_the_session`].
         struct RecordingStatus(Arc<Mutex<Vec<AgentStatus>>>);
         impl StatusSink for RecordingStatus {
             fn status_changed(&self, _id: Uuid, s: AgentStatus, _e: u32) {
@@ -2924,8 +2544,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             let recorded = recorded.clone();
             Arc::new(move |id: &str| recorded.lock().unwrap().push(id.to_string()))
         };
-        // ★배달을 그대로 받아 적는다★ — 이 항목이 재는 것은 「통로가 결말을 **내보내나**」이고, 그것이
-        //   실 통로에서 확인되는 유일한 자리다(매니저 쪽 항목들은 대역으로 판정 로직만 잰다).
+        // ★Deliveries are recorded as is★ — what this item measures is 「does the link **send out** the outcome」, and this is
+        //   the only place it is confirmed on a real link (the manager-side items measure only the decision logic with stand-ins).
         let (link_sink, delivered) = link_recorder();
 
         let parts = crate::backend::open_spawn(
@@ -2970,33 +2590,30 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         };
         wait_until(
             || failed(&events.lock().unwrap()),
-            "실패 경계(TurnEnd Failed)가 오르는 것",
+            "the failure boundary (TurnEnd Failed) showing up",
         );
         let got = recorded.lock().unwrap().clone();
-        // ★통로가 실제로 「연결 못 섬 + 사유」를 신고하나 — 실물로 재는 자리는 여기뿐이다★:
-        //   매니저 쪽 항목들은 대역 통로로 판정 로직만 재므로, 실 통로가 그 축을 안 채우면 그 배선이
-        //   양쪽 다 초록인 채로 끊긴다. ★종점에 닿기 **전에** 잡는다★ — 그 뒤에는 이 값이 남아 있을
-        //   이유가 없다.
+        // ★Does the link report 「connection could not stand + reason」 — the only real-thing measurement is here★: the manager-side items use a stand-in link, so if the real link does not fill that axis the wiring breaks with both sides green.
+        //   ★Caught **before** the end state★ — afterwards the value has no reason to remain.
         let link_when_failed = match delivered.lock().unwrap().first() {
             Some(crate::transport::LinkResolution::Failed { reason }) => reason.clone(),
             other => panic!(
-                "실패 경계가 올랐는데 통로가 실패 결말을 **배달하지 않았다** — 활성화 판정이 받을 신호가 \
-                 없다(배달된 것: {other:?})"
+                "the failure boundary showed up but the link **did not deliver** the failure outcome — the activation decision has no signal \
+                 to receive (delivered: {other:?})"
             ),
         };
-        // ★아래 무엇보다 먼저 그 사유가 **가짜의 거절**인지부터 가른다★ — 아니면 이 항목 전체(폴백 없음 ·
-        //   종점 · 분류)가 거절 없이 돈 것이고, 분류 단언은 엉뚱한 사유를 「분류 못 함」으로 보고한다.
-        //   종점 대기보다도 앞인 것은 그 대기가 안 끝나는 갈래에서도 이 사유가 인용되게 하려는 것이다.
+        // ★First tell whether that reason is **the fake's refusal**★ — otherwise the whole item (no fallback · end state · classification) ran without a refusal and the classification assertion would blame an unrelated reason. It is before the
+        //   end-state wait so the reason is quoted even when that wait does not finish.
         assert!(
             link_when_failed.contains(FAKE_RESUME_REJECTION),
-            "배달된 사유가 가짜의 거절이 아니다 — 이 항목은 거절 갈래를 재지 못했다. 사유가 시한 \
-             만료(「답이 없다」)면 가짜가 핸드셰이크 예산 안에 답하지 못한 것이다(요청이 안 나갔거나 가짜가 \
-             늦었다). 스크립트는 남겨 둔다 — 손으로 돌려 볼 것: {}. 사유: {link_when_failed}",
+            "the delivered reason is not the fake's refusal — this item could not measure the refusal branch. If the reason is a deadline \
+             expiry (「no answer」), the fake could not answer within the handshake budget (the request did not go out or the fake \
+             was late). The script is left in place — run it by hand: {}. Reason: {link_when_failed}",
             fake.hand_run()
         );
 
-        // 실패 경계가 오른 뒤, 통로가 우리 쪽 stdin 을 놓은 결과로 상대가 EOF 를 보고 끝나기를 기다린다.
-        //   ★`shutdown()` 전이다★ — 위 doc 의 그 사유.
+        // After the failure boundary shows up, wait for the peer to see EOF and end as a result of the link letting go of our stdin.
+        //   ★Before `shutdown()`★ — the reason in the doc above.
         let terminal = || {
             statuses
                 .lock()
@@ -3004,30 +2621,25 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 .iter()
                 .any(|s| !s.is_live())
         };
-        wait_until(|| terminal(), "세션이 종점 상태로 가는 것");
+        wait_until(|| terminal(), "the session going to its end state");
         assert_eq!(
             delivered.lock().unwrap().len(),
             1,
-            "연결 결말이 한 번이 아니다 — 이 포트의 계약은 **정확히 한 번**이다"
+            "the connection outcome is not once — this port's contract is **exactly once**"
         );
-        // 그리고 그 사유가 분류까지 가야 「마지막 실패」에 맥락 기본값(조기 종료)이 아닌 진짜 원인이 남는다.
+        // And only if that reason goes as far as classification does the real cause, not the context default (early exit), remain in 「last failure」.
         assert_eq!(
             CodexBackend.resume_failure_kind(&link_when_failed),
             Some(crate::failure::AgentFailureKind::NoConversationToResume),
-            "연결 사유가 분류되지 않았다 — 이 갈래에는 조기 종료가 없으므로 맥락 기본값이 찍히면 거짓이다: {link_when_failed}"
+            "the connection reason was not classified — this branch has no early exit, so if the context default is stamped it is false: {link_when_failed}"
         );
 
         let reached_terminal = terminal();
         let seen_statuses = statuses.lock().expect("status poisoned").clone();
-        // ★`!is_live()` 로도 `Exited { .. }` 로도 **부족하다**★(리뷰 지적 — 옛 단언은 공허했다):
-        //   리더가 EOF 를 보면 자식의 생사와 무관하게 `Exited { code: None }` 이 서므로, 종류만 보는
-        //   단언은 위 `reached_terminal` 이 참일 때 **거짓이 될 수 없었다** — 즉 아무것도 안 재고 있었다.
-        // ★코드가 실려 있는 것이 자식이 실제로 수거됐다는 유일한 증거다★ — `Some(_)` 은 `try_wait` 가
-        //   성공했다는 뜻이고 그건 프로세스가 끝났을 때만 성공한다(그 값이 경합으로 유실되지 않게
-        //   `reader_loop` 이 유계로 다시 본다 — 그 자리 주석이 정본).
-        // ★어느 경로로 끝났는지는 여기서 가르지 않는다★ — 상대가 EOF 를 보고 스스로 끝났든, 유예를
-        //   넘겨 통로가 직접 끝냈든 둘 다 정당한 결말이고, 가르려면 시간을 재야 해서 깜빡인다.
-        //   이 항목이 막으려는 것은 **아무 결말도 없는 것**이다.
+        // ★Neither `!is_live()` nor `Exited { .. }` is **enough**★ (the old assertion was hollow): when the reader sees EOF, `Exited { code: None }` stands regardless of child liveness, so a kind-only assertion **could not be false** once
+        //   `reached_terminal` was true.
+        // ★A carried code is the only evidence the child was reaped★ — `Some(_)` means `try_wait` succeeded, which only happens when the process has ended (`reader_loop` looks again, bounded — the comment there is the source of truth).
+        // ★Which path it ended by is not told apart★ — the peer seeing EOF or the link ending it past the grace period are both legitimate, and telling them apart needs timing, which flakes. What this prevents is **no outcome at all**.
         let ended_with_a_reaped_child = seen_statuses
             .iter()
             .any(|s| matches!(s, AgentStatus::Exited { code: Some(_) }));
@@ -3037,37 +2649,34 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let leftover = fake.remove();
         assert!(
             got.is_empty(),
-            "거절당한 이어받기 뒤에 기록 동사가 불렸다 — 새 스레드로 폴백했다는 뜻이고(값이              `start_only` 면 확정), 그 값이 프로필의 아직 멀쩡한 손잡이를 덮어쓴다: {got:?}"
+            "the record verb was called after a refused resume — this means it fell back to a new thread (certain if the value is `start_only`), and that value overwrites the still sound handle in the profile: {got:?}"
         );
         assert!(
             reached_terminal,
-            "이어받기가 거절됐는데 세션이 종료 상태에 닿지 않았다 — 통로가 우리 쪽 stdin 을 놓지 않아 \
-             자식·리더·라이터가 그대로 붙들려 있고, pump 가 종결을 못 해 reaper 로 가는 메시지가 아예 \
-             만들어지지 않는다. 그 상태를 매니저는 「이어받기 성공」으로 읽고 마지막 실패 기록까지 \
-             지운다(ADR-0082 가 막으려던 결말). 관측된 상태: {seen_statuses:?}"
+            "the resume was refused but the session did not reach an end state — the link did not let go of our stdin, so \
+             the child · reader · writer are held as is, the pump cannot finish, and the message to the reaper is never \
+             created. The manager reads that state as 「resume succeeded」 and erases even the last failure \
+             record (the outcome ADR-0082 meant to prevent). Observed states: {seen_statuses:?}"
         );
         assert!(
             ended_with_a_reaped_child,
-            "종점에 닿았는데 자식이 수거된 흔적이 없다 — `Failed` 와 `Exited{{code:None}}` 는 자식이 살아 \
-             있어도 서므로, 그것만으로는 「세션만 끝나고 프로세스는 남았다」와 구별되지 않는다(관측: {seen_statuses:?})"
+            "reached the end state but there is no trace of the child being reaped — `Failed` and `Exited{{code:None}}` stand even while the child is \
+             alive, so by themselves they cannot be told apart from 「only the session ended and the process remained」 (observed: {seen_statuses:?})"
         );
         assert!(
             leftover.is_empty(),
-            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
+            "could not remove the fake app-server files: {leftover:?}"
         );
     }
 
-    /// ★기록이 패닉하면 세션이 **끝난다** — 조용히 멈추지도, 영원히 떠 있지도 않는다★.
+    /// ★If the record panics, the session **ends** — it neither stops silently nor stays up forever★.
     ///
-    /// 이 항목이 재는 것은 셋이고 ★셋째가 핵심★이다:
-    ///   1. 기록 동사가 실제로 불렸다(= 핸드셰이크가 섰다. 아니면 아래 둘이 공회전한다).
-    ///   2. 입력이 거절된다 — 링크가 `Connecting` 에 멈춰 큐만 차던 모양이 아니다(ADR-0190).
-    ///   3. ★세션이 **종료 상태에 닿는다**★. 2 만 재던 옛 모양은 **막힌 세션과 구별이 안 됐다** —
-    ///      거절은 되는데 자식·리더·라이터가 그대로 남고 pump 가 영영 안 끝나 수거도 안 되는 상태가
-    ///      2 를 그대로 통과한다. 그 갈래를 가르는 것은 종료 전이 하나뿐이다.
-    /// ★「기록」은 포트에 **건넸다**까지다(ADR-0226)★ — 운영의 포트 뒤는 첫 제출 래치라 영속은 제출에
-    ///   매인다. 「첫 턴 전에 영속」을 지는 시험은 따로 있다(`transport` 의
-    ///   `the_session_id_is_recorded_before_the_gate_opens` doc).
+    /// Three measurements, ★the third is the core★:
+    ///   1. The record verb was called (= the handshake stood; otherwise the two below spin idle).
+    ///   2. Input is refused — not the shape where the link stopped at `Connecting` and only the queue filled (ADR-0190).
+    ///   3. ★The session **reaches an end state**★. Measuring only 2 **could not be told apart from a stuck session** (refusal works but child · reader · writer remain, the pump never ends, nothing is reaped); only the end transition splits that.
+    /// ★「Record」 goes only as far as **handing it** to the port (ADR-0226)★ — behind the production port is the first-submission latch, tying persistence to submission; 「persist before the first turn」 is measured separately
+    /// (`transport`'s `the_session_id_is_recorded_before_the_gate_opens` doc).
     #[cfg(windows)]
     #[test]
     fn a_recording_failure_ends_the_session() {
@@ -3076,7 +2685,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex};
 
-        /// 종료 전이를 보는 눈 — `is_live()` 가 거짓인 상태가 곧 종료다(그 술어가 정본).
+        /// The eye that watches the end transition — a state where `is_live()` is false is the end (that predicate is the source of truth).
         struct RecordingStatus(Arc<Mutex<Vec<AgentStatus>>>);
         impl StatusSink for RecordingStatus {
             fn status_changed(&self, _id: Uuid, s: AgentStatus, _e: u32) {
@@ -3087,9 +2696,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
         let fake = bake_fake_app_server(&Uuid::new_v4().to_string(), FakeResume::EchoesTheThreadId);
 
-        // 불렸다는 사실만 남기고 터진다 — 「패닉이 났다」와 「아예 안 불렸다」를 갈라야 하기 때문.
-        // ★터지기 전에 풀어 줄 때까지 선다★ — 그래야 조용한 훅 구간을 패닉 순간에만 걸 수 있다(아래 구간
-        //   주석). 송신단이 사라지면(테스트가 먼저 죽으면) 대기가 풀려 그대로 터지므로 영구히 서지 않는다.
+        // It blows up leaving only the fact that it was called — 「a panic happened」 and 「it was never called」 must be told apart.
+        // ★It stands until released before blowing up★ — so the quiet-hook span covers only the moment of the panic (the span comment below). If the sender disappears (the test dies first) the wait is released and it blows up, never standing forever.
         let reached = Arc::new(AtomicBool::new(false));
         let (release, released) = std::sync::mpsc::channel::<()>();
         let sink: SessionIdSink = {
@@ -3098,7 +2706,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             Arc::new(move |_: &str| {
                 reached.store(true, Ordering::SeqCst);
                 let _ = released.lock().expect("gate poisoned").recv();
-                panic!("기록 포트가 터졌다");
+                panic!("the record port blew up");
             })
         };
         let (link_sink, delivered) = link_recorder();
@@ -3137,29 +2745,24 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             TurnWiring::detached(),
         )));
 
-        // ★먼저 기록 동사가 불릴 때까지 **아무것도 보내지 않고** 기다린다★ — 핸드셰이크 전의
-        //   `send_input` 은 정상적으로 큐에 서므로(ADR-0190), 여기서 보내면 상한(32)을 채워
-        //   **큐 가득참 오류**가 나고 이 항목이 엉뚱한 이유로 초록이 된다.
+        // ★First wait until the record verb is called **without sending anything**★ — `send_input` before the handshake queues (ADR-0190); sending here would fill the cap (32), raise **a queue-full error** and make this item green for the wrong reason.
         wait_for_recording(|| reached.load(Ordering::SeqCst), &delivered, &fake);
 
-        // ★훅 교체를 맨손으로 하지 않는다★ — 전역이라 같은 바이너리의 다른 항목이 자기 패닉 출력을 잃고,
-        //   중첩되면 조용한 훅이 영구히 남는다. 그 둘을 막는 헬퍼를 쓴다.
-        // ★조용한 훅 구간은 **패닉 순간만** 덮는다★ — 그 훅은 프로세스 전역이라, 구간이 길수록 그 창에
-        //   터진 **무관한** 항목이 자기 패닉 메시지와 위치를 잃고, 헬퍼의 static 뮤텍스 앞에 다른 패닉
-        //   항목이 줄을 선다. 그래서 핸드셰이크 · 종료 대기는 구간 밖에 두고, 라이터를 풀어 터뜨리는 것과
-        //   그 결과(연결 결말 · 입력 거절)를 보는 것만 안에 둔다 — 결말은 라이터가 그 패닉을 잡은 **뒤에**
-        //   배달되므로, 그것을 기다리면 패닉이 반드시 구간 안에서 난다.
+        // ★The hook is not swapped bare-handed★ — it is global: other items in the binary would lose their panic output, and nesting would leave the quiet hook forever. A helper prevents both.
+        // ★The quiet-hook span covers **only the moment of the panic**★ — the hook is process-global, so a longer span makes an **unrelated** item that blew up in the window lose its panic message and location, and other panicking items queue behind
+        //   the helper's static mutex. The handshake · end wait stay outside; only releasing the writer to blow up and watching its result (connection outcome · input refusal) are inside — the outcome is delivered **after** the writer catches the
+        //   panic, so waiting for it puts the panic inside the span.
         let refusal = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
-            release.send(()).expect("기록 포트가 아직 살아 있어야");
+            release
+                .send(())
+                .expect("the record port must still be alive");
 
-            // ★결말이 배달된 뒤에 **한 번만** 보낸다★ — 통로는 `Link::Down` 을 세운 **다음에** 실패 결말을
-            //   배달하므로(`writer_loop` 의 실패 갈래), 그 뒤의 입력은 거절이 확정이다. 고정 횟수·간격으로
-            //   시도하면 라이터가 깨어나 패닉을 잡고 링크를 내리기까지가 그 창 안에 들어와야 해서, 느린
-            //   러너에서 「입력이 계속 받아들여진다」로 거짓 실패한다.
+            // ★Send **only once** after the outcome is delivered★ — the link delivers the failure outcome **after** setting `Link::Down` (the failure branch of `writer_loop`), so input afterwards is certainly refused. A fixed count · interval would need the
+            //   writer to wake, catch the panic and take the link down inside that window, falsely failing with 「input keeps being accepted」 on a slow runner.
             wait_until(
                 || !delivered.lock().unwrap().is_empty(),
-                "기록 실패 뒤 연결 결말이 배달되는 것 — 안 오면 통로가 기록 실패를 결말로 내지 않은 것이다 \
-                 (링크가 `Connecting` 에 멈춘 모양일 수 있다)",
+                "the connection outcome being delivered after the record failure — if it does not come, the link did not emit the record failure as an outcome \
+                 (it may be the shape where the link stopped at `Connecting`)",
             );
             parts
                 .transport
@@ -3167,18 +2770,13 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 .err()
         });
 
-        // stdin 을 놓은 뒤 상대가 스스로 끝나고(실측 41–51ms) 그 EOF 가 pump 를 끝내기까지 기다린다.
-        //   ★`shutdown()` 을 부르지 않고 기다리는 것이 요점이다★ — 우리가 죽여 놓고 「끝났다」를 재면 이
-        //   항목이 재려던 그 인과를 우리가 대신 굴린 것이 된다.
-        wait_until(|| terminal(), "세션이 종점 상태로 가는 것");
+        // Wait for the peer to end on its own after we let go of stdin (measured 41–51ms) and for that EOF to end the pump. ★Wait without calling `shutdown()`★ — killing first would drive the causality this item measures.
+        wait_until(|| terminal(), "the session going to its end state");
 
         let reached_terminal = terminal();
         let seen = statuses.lock().expect("status poisoned").clone();
-        // ★`!is_live()` 로도 `Exited { .. }` 로도 **부족하다**★ — 리더가 EOF 를 보면 자식의 생사와 무관하게
-        //   `Exited { code: None }` 이 서서, 종류만 보는 단언은 위 `reached_terminal` 이 참일 때 거짓이 될
-        //   수 없었다(옛 모양은 공허했다 — 리뷰 지적. 그 복사본이 옆 항목에도 있었고 함께 고쳤다).
-        // ★코드가 실려 있는 것이 자식이 실제로 수거됐다는 유일한 증거다★ — 사유의 정본은
-        //   `a_rejected_resume_does_not_fall_back_and_ends_the_session` 의 같은 자리.
+        // ★Neither `!is_live()` nor `Exited { .. }` is **enough**★ — `Exited { code: None }` stands on reader EOF regardless of child liveness (the neighbouring item had a copy of the hollow shape, fixed together).
+        // ★A carried code is the only evidence the child was reaped★ — reason: the same spot in `a_rejected_resume_does_not_fall_back_and_ends_the_session`.
         let ended_with_a_reaped_child = seen
             .iter()
             .any(|s| matches!(s, AgentStatus::Exited { code: Some(_) }));
@@ -3187,41 +2785,38 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let leftover = fake.remove();
 
         let refusal = refusal.expect(
-            "기록 실패의 결말까지 배달됐는데 입력이 받아들여진다 — 링크가 내려가지 않아 세션이 조용히 벙어리가 됐다",
+            "even the outcome of the record failure was delivered but input is accepted — the link did not go down and the session quietly went mute",
         );
         let PtyError::WriteFailed(reason) = &refusal else {
-            panic!("예상 밖 오류 종류: {refusal:?}");
+            panic!("unexpected error kind: {refusal:?}");
         };
-        // ★큐 가득참만 배제한다★ — 그것만이 「실패 경로가 안 돌았는데 거절됐다」를 뜻한다. 남은 두 사유
-        //   (기록 실패로 내려간 링크 · 그 뒤 stdin 을 닫아 끝난 통로)는 **둘 다 이 경로가 돈 증거**이고,
-        //   결말을 본 뒤에도 어느 쪽이 잡히나는 리더의 EOF 와의 경주라 하나로 못 박으면 그 자체가 깜빡이가 된다.
+        // ★Only queue-full is excluded★ — only it means 「refused although the failure path did not run」. The other two reasons (link taken down by the record failure · link ended after closing stdin) are **both evidence this path ran**, and which one
+        //   is caught after the outcome is a race with the reader's EOF, so pinning one would itself flake.
         assert!(
-            !reason.contains("상한"),
-            "거절 사유가 큐 가득참이다 — 실패 경로가 돈 것을 잰 것이 아니다: {reason}"
+            !reason.contains("the cap"),
+            "the refusal reason is queue-full — it did not measure that the failure path ran: {reason}"
         );
 
         assert!(
             reached_terminal,
-            "기록이 실패했는데 세션이 종료 상태에 닿지 않았다 — 자식·리더·라이터가 그대로 붙들려 있고 pump \
-             도 reaper 도 움직이지 않는다(관측된 상태: {seen:?})"
+            "the record failed but the session did not reach an end state — the child · reader · writer are held as is, and neither the pump \
+             nor the reaper moves (observed states: {seen:?})"
         );
         assert!(
             ended_with_a_reaped_child,
-            "종점에 닿았는데 자식이 수거된 흔적이 없다 — `Failed` 와 `Exited{{code:None}}` 는 자식이 살아 \
-             있어도 서므로, 그것만으로는 「세션만 끝나고 프로세스는 남았다」와 구별되지 않는다(관측: {seen:?})"
+            "reached the end state but there is no trace of the child being reaped — `Failed` and `Exited{{code:None}}` stand even while the child is \
+             alive, so by themselves they cannot be told apart from 「only the session ended and the process remained」 (observed: {seen:?})"
         );
         assert!(
             leftover.is_empty(),
-            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
+            "could not remove the fake app-server files: {leftover:?}"
         );
     }
 
-    /// ★턴을 통로가 지는 모드의 짝 — 첫 턴 포트가 실 통로까지 꽂히고, 핸드셰이크가 아니라 상대의 유저 메시지
-    /// 되울림에서 불린다(ADR-0226 개정 · 사용자 결정 2026-09-26)★.
+    /// ★The pair for the mode where the link carries turns — the first-turn port is plugged into the real link and called not at the handshake but at the echo of the peer's user message (ADR-0226 amendment)★.
     ///
-    /// 기록 포트는 핸드셰이크에서 불렸는데 첫 턴 포트는 아직이다 → 턴 하나를 넘기면 가짜가 `turn/start` 에
-    ///   답하고 유저 메시지를 되울린다 → 첫 턴 포트가 한 번 불린다. 가짜의 판이 하한 미달이라 되울림에
-    ///   `clientId` 가 없다 — 그래도 센다. 세션이 그 모드에서 세지 않는다는 쪽은 `session.rs` 시험이 잰다.
+    /// The record port was called at the handshake, the first-turn port not yet → one turn makes the fake answer `turn/start` and echo the user message → the first-turn port is called once. The fake's edition is below the floor, so the echo has
+    /// no `clientId` — it still counts. That the session does not count in that mode is measured by the `session.rs` test.
     #[cfg(windows)]
     #[test]
     fn an_app_server_spawn_counts_the_first_turn_at_the_echo_not_at_the_handshake() {
@@ -3268,7 +2863,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         .expect("open_spawn");
         assert!(
             matches!(parts.mid_turn, MidTurnPolicy::TransportOwned),
-            "전제: 이 모드가 턴을 통로가 지는 모드다"
+            "premise: this mode is the mode where the link carries turns"
         );
 
         wait_for_the_fake_to_listen(&fake);
@@ -3281,7 +2876,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         wait_for_recording(|| !recorded.lock().unwrap().is_empty(), &delivered, &fake);
         wait_until(
             || !delivered.lock().unwrap().is_empty(),
-            "연결 결말이 배달되는 것",
+            "the connection outcome being delivered",
         );
         let ready = matches!(
             delivered.lock().unwrap().first(),
@@ -3296,30 +2891,34 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 body: b"hi".to_vec(),
                 origin: InputOrigin::User,
             })
-            .expect("받는다");
+            .expect("accepts");
         wait_until(
             || first_turns.load(Ordering::SeqCst) > 0,
-            "가짜의 유저 메시지 되울림에 첫 턴 포트가 불리는 것",
+            "the first-turn port being called on the fake's user message echo",
         );
         parts.transport.shutdown();
 
         let leftover = fake.remove();
-        assert!(ready, "연결이 서지 않았다: {:?}", delivered.lock().unwrap());
+        assert!(
+            ready,
+            "the connection did not stand: {:?}",
+            delivered.lock().unwrap()
+        );
         assert_eq!(
             before_any_turn, 0,
-            "핸드셰이크만으로 첫 턴을 셌다 — 입력 없이 끈 화신의 0턴 id 가 영속된다"
+            "counted the first turn from the handshake alone — the 0-turn id of an incarnation turned off without input gets persisted"
         );
         assert_eq!(first_turns.load(Ordering::SeqCst), 1);
         assert_eq!(*recorded.lock().unwrap(), vec![thread_id]);
         assert!(
             leftover.is_empty(),
-            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
+            "could not remove the fake app-server files: {leftover:?}"
         );
     }
 
-    // ── ADR-0209: MCP 서버 부착(`-c mcp_servers.<name>=…`) — codex 우편의 유일한 물리 배선 ──────────
+    // ── ADR-0209: MCP server attachment (`-c mcp_servers.<name>=…`) — the only physical wiring of codex mail ──────────
 
-    /// `-c` **바로 뒤** 칸들만 모은다 — 순서·인접을 재는 단언이 그 형태에 기댄다.
+    /// Collects only the slots **right after** `-c` — the assertions measuring order · adjacency lean on that form.
     fn config_override_values(argv: &[String]) -> Vec<String> {
         argv.windows(2)
             .filter(|p| p[0] == CONFIG_OVERRIDE_FLAG)
@@ -3327,9 +2926,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             .collect()
     }
 
-    /// ★생성되는 값을 **글자 그대로** 못 박는다★ — 이 문자열은 codex 설정 파서가 읽는 wire 계약이고,
-    /// 조립 중 한 글자만 어긋나도 증상은 오류가 아니라 「우편이 조용히 안 된다」다. 실 codex 로 이
-    /// 모양을 확인했다(2026-09-19 · 0.155.0: `--strict-config` 통과 + `mcpServerStatus/list` 에 등록).
+    /// ★The generated value is pinned **literally**★ — a wire contract the codex config parser reads; one wrong character yields not an error but 「mail silently does not work」. Confirmed with the real codex (0.155.0: passes `--strict-config` +
+    /// registered in `mcpServerStatus/list`).
     #[test]
     fn the_mcp_override_value_is_pinned_byte_for_byte() {
         let s = spec_with_control(&codex(vec![]), Some(endpoint()));
@@ -3338,13 +2936,13 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 &"mcp_servers.engram={url='http://127.0.0.1:7777/mcp',bearer_token_env_var='ENGRAM_TOKEN',default_tools_approval_mode='approve'}"
                     .to_string()
             ),
-            "생성된 `-c` 값들: {:?}",
+            "generated `-c` values: {:?}",
             config_override_values(&codex_argv(&s))
         );
     }
 
-    /// ★토큰이 argv 에 한 글자도 없어야 한다★ — 이 백엔드가 값 인라인 대신 env 변수 **이름**을 싣는
-    /// 이유가 이것이다. 되돌리면 같은 사용자의 아무 프로세스나 argv 를 읽는 것만으로 토큰이 샌다.
+    /// ★The token must have not a single character in argv★ — this is why this backend carries the env variable **name** instead of
+    /// an inline value. Reverted, the token leaks just by any process of the same user reading argv.
     #[test]
     fn the_bearer_token_never_reaches_the_command_line() {
         let ep = endpoint();
@@ -3353,19 +2951,19 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             let s = spec_with_control(&command, Some(ep.clone()));
             assert!(
                 !s.args.iter().any(|a| a.contains(&token)),
-                "토큰이 argv 에 실렸다: {:?}",
+                "the token was carried in argv: {:?}",
                 s.args
             );
             assert_eq!(
                 env_value(&s, TOKEN_ENV),
                 Some(token.as_str()),
-                "토큰은 env 한 벌로만 가야 한다"
+                "the token must go only as one copy in env"
             );
         }
     }
 
-    /// ★모드를 가르지 않는다★ — 우편 입구는 두 모드 다 필요하다. 훅 등록이 터미널에만 걸린 것과
-    /// 혼동해 이 축까지 모드로 가르면 app-server 로 뜬 codex 는 발신 입구가 0 이 된다.
+    /// ★It does not tell modes apart★ — the mail entrance is needed in both modes. Confusing it with the hook registration being terminal-only
+    /// and splitting this axis by mode too would leave codex launched as app-server with zero send entrances.
     #[test]
     fn the_mcp_override_rides_both_output_modes() {
         for command in [codex(vec![]), codex_app_server(vec![])] {
@@ -3376,12 +2974,12 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                     .iter()
                     .any(|v| v
                         .starts_with(&format!("{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}="))),
-                "{command:?} 에 MCP 부착이 빠졌다: {values:?}"
+                "MCP attachment is missing from {command:?}: {values:?}"
             );
         }
     }
 
-    /// 제어 채널이 없는 스폰에는 붙일 것이 없다 — 빈 url 로 값을 지어내면 codex 가 못 뜨는 서버를 들고 뜬다.
+    /// A spawn without a control channel has nothing to attach — inventing a value with an empty url makes codex come up holding a server that cannot come up.
     #[test]
     fn no_control_endpoint_means_no_mcp_override() {
         let s = spec(&codex(vec![]), "C:/workspace");
@@ -3389,19 +2987,15 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             !codex_argv(&s)
                 .iter()
                 .any(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX)),
-            "endpoint 없는 스폰에 MCP 부착이 실렸다: {:?}",
+            "MCP attachment was carried on a spawn without an endpoint: {:?}",
             codex_argv(&s)
         );
     }
 
-    /// ★운영자가 MCP 우편을 끄면 **codex 에서도** 꺼져야 한다(적출 2026-09-20)★: 옛 게이트는 제어
-    /// 채널의 **존재**만 봤다 — 그래서 `ENGRAM_DISALLOW_MCP_SEND=1` 을 건 운영자는 claude 쪽 발신 입구만
-    /// 잃고 codex 쪽은 그대로 열어 둔 상태를 얻었다. 게다가 그 부착은
-    /// `default_tools_approval_mode='approve'` 를 싣고 있어 **자동 승인**된 채로 남는다.
-    /// ★켠 행을 **함께** 재는 것이 요점이다★ — 끈 쪽만 재면 부착을 통째로 지워도 초록이고, 그 순간
-    ///   codex 우편의 유일한 물리 배선이 사라진다(증상은 오류가 아니라 침묵이다).
-    /// ★제어 평면 자체는 끊기지 않는다는 것도 함께 잰다★ — 우편을 끄는 것과 제어 동사를 끊는 것은
-    ///   다른 일이고(ADR-0132 결정 5), 여기서 자격증명까지 사라지면 codex 가 띄우는 자식들이 그것을 잃는다.
+    /// ★If the operator turns off MCP mail it must be off **in codex too**★ (2026-09-20): the old gate looked only at the control channel's **existence**, so `ENGRAM_DISALLOW_MCP_SEND=1` lost only claude's send entrance and codex's stayed open — and that
+    /// attachment carries `default_tools_approval_mode='approve'`, i.e. **auto-approved**.
+    /// ★Measuring the on row **together** is the point★ — an off-only test stays green even if the attachment is erased entirely, removing the only physical wiring of codex mail (silence, not an error).
+    /// ★It also measures that the control plane is not cut★ — turning off mail and cutting control verbs differ (ADR-0132 decision 5); losing credentials would strip them from the children codex launches.
     #[test]
     fn turning_mcp_send_off_takes_the_override_off_codex_too() {
         for command in [codex(vec![]), codex_app_server(vec![])] {
@@ -3410,34 +3004,30 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 !codex_argv(&off)
                     .iter()
                     .any(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX)),
-                "{command:?}: MCP 발신 grant 가 없는데 부착이 실렸다 — 데몬의 차단이 이 backend 만 \
-                 비껴간다: {:?}",
+                "{command:?}: there is no MCP send grant but the attachment was carried — the daemon's block bypasses only this \
+                 backend: {:?}",
                 codex_argv(&off)
             );
             assert_eq!(
                 env_value(&off, TOKEN_ENV),
                 Some("deadbeef"),
-                "{command:?}: 우편을 껐다고 제어 평면 자격증명까지 사라지면 안 된다"
+                "{command:?}: turning off mail must not make the control plane credentials disappear too"
             );
             let on = spec_with_control(&command, Some(endpoint()));
             assert!(
                 codex_argv(&on)
                     .iter()
                     .any(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX)),
-                "{command:?}: 인가된 스폰에 부착이 빠졌다 — 발신 입구가 0 이 된다: {:?}",
+                "{command:?}: the attachment is missing on an authorized spawn — send entrances become 0: {:?}",
                 codex_argv(&on)
             );
         }
     }
 
-    /// ★「배달 명단엔 오르는데 발신 입구가 0」인 스폰을 뜨기 전에 끊는다★: 이 backend 는
-    /// `reads_messages` 가 true 라 배달 명단에 오르고, `accepts_mcp_config` 가 true 라 데몬이
-    /// `mail_allowed=false` 를 실어 CLI 미러를 닫아 둔다 — 그 상태에서 MCP 부착까지 빠지면 도착한
-    /// `request` 가 전부 **아무도 답할 수 없는 계약**이 된다. 그 결말은 오류가 아니라 영원한 무응답이라
-    /// 아무 데도 안 남는다.
-    /// ★claude 는 이 자리를 데몬의 `?`(mcp-config write 실패)가 지킨다 — 이 backend 는 파일을 안 써서
-    ///   데몬에 끊을 재료가 없다★. 그 비대칭을 메우는 것이 이 게이트다.
-    /// ★공개 dispatch 로 부른다★ — impl 에만 걸면 조립점이 부르는 경로가 안 잡힌다.
+    /// ★A spawn 「on the delivery roster with zero send entrances」 is cut before it comes up★: `reads_messages` true puts this backend on the roster and `accepts_mcp_config` true makes the daemon carry `mail_allowed=false` and close the CLI mirror, so without
+    /// the MCP attachment every arriving `request` is **a contract nobody can answer** — eternal silence, no trace.
+    /// ★For claude the daemon's `?` (mcp-config write failure) guards this; this backend writes no file, so the daemon has nothing to cut with★ — this gate fills the asymmetry.
+    /// ★Called through the public dispatch★ — hanging it on the impl only would miss the path the assembly point calls.
     #[test]
     fn an_unbuildable_attachment_fails_the_spawn_closed() {
         let bad = "http://127.0.0.1:1/it's/mcp";
@@ -3447,55 +3037,53 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 ..endpoint()
             };
             let err = crate::backend::precheck_control_endpoint(&command, Some(&ep))
-                .expect_err("부착을 못 만드는데 스폰이 그대로 진행된다 — 발신 입구 0 으로 뜬다");
+                .expect_err("the attachment cannot be built but the spawn proceeds as is — it comes up with zero send entrances");
             assert!(
                 err.contains(bad),
-                "{command:?}: 사유에 원인이 있어야: {err}"
+                "{command:?}: the reason must carry the cause: {err}"
             );
-            // 게이트가 있어도 조립은 **여전히** 인자를 지어내지 않는다 — 두 벽이 각각 선다.
+            // Even with the gate, the assembly **still** does not invent the argument — the two walls each stand.
             let s = spec_with_control(&command, Some(ep));
             assert!(
                 !codex_argv(&s)
                     .iter()
                     .any(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX)),
-                "{command:?}: 못 만드는 값을 억지로 실었다: {:?}",
+                "{command:?}: forced in a value that cannot be built: {:?}",
                 codex_argv(&s)
             );
         }
     }
 
-    /// ★정당한 부재 셋을 **함께** 못 박는다 — 없으면 위 게이트가 멀쩡한 스폰까지 죽이는 쪽으로 자란다★.
-    /// 특히 ②가 load-bearing 이다: 운영자가 MCP 우편을 끈 스폰은 붙일 의사가 애초에 없으므로, 주소가
-    /// 어떻든 끊을 이유가 없다.
+    /// ★The three legitimate absences are pinned **together** — without them the gate grows toward killing sound spawns★. ② is load-bearing: a spawn whose operator turned off MCP mail has no intent to attach, so whatever the address there is no reason to cut it.
     #[test]
     fn the_legitimate_absences_still_spawn() {
         let bad = "http://127.0.0.1:1/it's/mcp";
         for command in [codex(vec![]), codex_app_server(vec![])] {
-            // ① 제어 채널 자체가 없다 — 우편 없이 뜨는 codex 는 정상이다.
+            // ① There is no control channel at all — a codex coming up without mail is normal.
             assert!(
                 crate::backend::precheck_control_endpoint(&command, None).is_ok(),
-                "{command:?}: 제어 채널 없는 스폰을 끊었다"
+                "{command:?}: cut a spawn without a control channel"
             );
-            // ② 데몬이 MCP 발신 입구를 인가하지 않았다(운영자가 껐다) — 주소를 못 실어도 무관하다.
+            // ② The daemon did not authorize the MCP send entrance (the operator turned it off) — it does not matter that the address cannot be carried.
             let off = ControlEndpoint {
                 url: bad.to_string(),
                 ..endpoint_without_mcp_send()
             };
             assert!(
                 crate::backend::precheck_control_endpoint(&command, Some(&off)).is_ok(),
-                "{command:?}: 붙일 의사가 없는 스폰을 부착 불가로 끊었다 — 노브를 켠 하네스에서 codex \
-                 스폰이 통째로 죽는다"
+                "{command:?}: cut a spawn with no intent to attach as unattachable — in a harness with the knob on, codex \
+                 spawns die entirely"
             );
-            // ③ 평범한 운영 스폰.
+            // ③ An ordinary production spawn.
             assert!(
                 crate::backend::precheck_control_endpoint(&command, Some(&endpoint())).is_ok(),
-                "{command:?}: 운영 endpoint 를 끊었다"
+                "{command:?}: cut the production endpoint"
             );
         }
     }
 
-    /// ★TOML 리터럴 문자열에 담을 수 없는 주소는 **싣지 않고 끊는다**★ — 지어낸 이스케이프로 밀어 넣으면
-    /// 값이 파싱에서 죽거나 다른 주소를 가리키고, 둘 다 증상이 「우편이 안 된다」 하나다.
+    /// ★An address that cannot be held in a TOML literal string is **not carried, and the spawn is cut**★ — pushed in with an invented escape,
+    /// the value dies in parsing or points to a different address, and both have one symptom, 「mail does not work」.
     #[test]
     fn an_unrepresentable_control_url_drops_the_attachment_instead_of_mangling_it() {
         for bad in [
@@ -3509,7 +3097,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 !codex_argv(&s)
                     .iter()
                     .any(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX)),
-                "{bad} 로 부착 값을 만들었다: {:?}",
+                "built the attachment value with {bad}: {:?}",
                 codex_argv(&s)
             );
         }
@@ -3564,8 +3152,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         ));
     }
 
-    /// ★패스스루가 같은 키를 세워도 우리 것이 **뒤에** 실린다★ — 마지막 `-c` 가 이기므로 이 순서가
-    /// 곧 우편 입구의 생사다. 그리고 사용자 인자를 지우지 않는다(거르는 것은 검열이다).
+    /// ★Even if the pass-through sets the same key, ours is carried **after** it★ — the last `-c` wins, so this order
+    /// is the life or death of the mail entrance. And user arguments are not erased (filtering is censorship).
     #[test]
     fn a_conflicting_mcp_passthrough_loses_to_ours_and_is_not_filtered() {
         let key = format!("{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}");
@@ -3577,7 +3165,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 ],
                 &key,
             ),
-            "같은 키의 패스스루를 못 알아봤다 — 경고 없이 사용자 설정을 덮는다"
+            "did not recognize a pass-through of the same key — overrides the user setting without a warning"
         );
         let s = spec_with_control(
             &codex(vec![
@@ -3590,14 +3178,14 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let ours = values
             .iter()
             .position(|v| v.contains(MCP_BEARER_ENV_KEY))
-            .expect("우리 부착 값이 없다");
+            .expect("our attachment value is missing");
         let theirs = values
             .iter()
             .position(|v| v.contains("evil"))
-            .expect("패스스루가 걸러졌다 — 사용자 인자를 검열하면 안 된다");
+            .expect("the pass-through was filtered — user arguments must not be censored");
         assert!(
             ours > theirs,
-            "우리 값이 앞에 실렸다(지고 있다): {values:?}"
+            "our value was carried in front (it is losing): {values:?}"
         );
     }
 
@@ -3613,14 +3201,14 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         for forbidden in ["--mcp-config", "--settings", "--append-system-prompt-file"] {
             assert!(
                 !argv.iter().any(|a| a == forbidden),
-                "claude 의 플래그 `{forbidden}` 가 codex argv 에 실렸다: {argv:?}"
+                "claude's flag `{forbidden}` was carried in codex argv: {argv:?}"
             );
         }
         let path = ep.config_path.expect("the fixture fills the config path");
         let path = path.to_string_lossy().into_owned();
         assert!(
             !argv.iter().any(|a| a.contains(&path)),
-            "경로 `{path}` 가 argv 에 실렸다: {argv:?}"
+            "the path `{path}` was carried in argv: {argv:?}"
         );
     }
 
@@ -3662,33 +3250,31 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let ours = values
             .iter()
             .position(|v| v.contains("teach the reply contract"))
-            .expect("우리 값이 없다");
+            .expect("our value is missing");
         let theirs = values
             .iter()
             .position(|v| v.contains("theirs"))
-            .expect("패스스루가 걸러졌다 — 사용자 인자를 검열하면 안 된다");
+            .expect("the pass-through was filtered — user arguments must not be censored");
         assert!(
             ours > theirs,
-            "우리 값이 앞에 실렸다(지고 있다): {values:?}"
+            "our value was carried in front (it is losing): {values:?}"
         );
     }
 
-    /// ★app-server 갈래는 명령줄을 한 글자도 안 쓴다 — 그리고 값을 **손대지 않는다**★: 줄바꿈도,
-    /// 터미널 갈래가 끊어 내는 `'`·`%` 도 JSON 본문에서는 아무 것도 못 깬다. 그쪽 변환을 이리 옮기면
-    /// 아무 위험도 막지 못한 채 에이전트가 읽는 문서만 망가진다.
+    /// ★The app-server branch does not touch the value★ — it uses none of the command line, so neither newlines nor the `'` · `%` the terminal branch cuts can break the JSON body; moving that conversion here would only break the document the agent reads.
     #[test]
     fn the_app_server_handshake_carries_the_document_unmodified() {
         let text = "line one\nyou can't skip 50% of it\n";
         let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
         let params = match thread_open(&s, None, Some(text.to_string())) {
             ThreadOpen::Start(p) => p,
-            ThreadOpen::Resume(_) => panic!("이어받기가 아닌데 resume 이 골라졌다"),
+            ThreadOpen::Resume(_) => panic!("resume was picked although it is not a resume"),
         };
-        let v = serde_json::to_value(&params).expect("직렬화");
+        let v = serde_json::to_value(&params).expect("serialize");
         assert_eq!(
             v.get("developerInstructions").and_then(|v| v.as_str()),
             Some(text),
-            "핸드셰이크 JSON 의 지시문이 원문과 다르다: {v}"
+            "the instructions in the handshake JSON differ from the original: {v}"
         );
     }
 
@@ -3702,9 +3288,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
         let params = match thread_open(&s, Some(Uuid::new_v4()), Some(text.to_string())) {
             ThreadOpen::Resume(p) => p,
-            ThreadOpen::Start(_) => panic!("이어받기인데 start 가 골라졌다"),
+            ThreadOpen::Start(_) => panic!("start was picked although it is a resume"),
         };
-        let v = serde_json::to_value(&params).expect("직렬화");
+        let v = serde_json::to_value(&params).expect("serialize");
         assert_eq!(
             v.get("developerInstructions").and_then(|v| v.as_str()),
             Some(text),
@@ -3921,7 +3507,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let leftover = fake.remove();
         assert!(
             leftover.is_empty(),
-            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
+            "could not remove the fake app-server files: {leftover:?}"
         );
         run
     }
@@ -4201,7 +3787,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         assert_eq!(*reports.lock().unwrap(), [true]);
         assert!(
             leftover.is_empty(),
-            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
+            "could not remove the fake app-server files: {leftover:?}"
         );
     }
 
@@ -4242,14 +3828,12 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     }
 }
 
-// ── ADR-0218: 터미널 갈래의 세션 id 회수 배선(실 프로세스) ────────────────────────────
+// ── ADR-0218: session id recovery wiring of the terminal branch (real process) ────────────────────────────
 //
-// ★여기가 재는 것 = 「터미널 스폰이 회수한 id 를 **건네받은 sink** 로 흘린다」 한 줄이다★ — 매처
-//   단위 시험이 전부 초록인 채로 이 배선만 끊겨 있을 수 있었고(적출 2026-09-21: 대조 상대를 래퍼
-//   PID 로 잡아 일치가 영영 안 났다), 그 결함은 오류도 로그도 남기지 않는다.
-// ★app-server 쪽 짝(`a_resume_target_makes_the_handshake_issue_thread_resume`)과 같은 모양·같은 값어치다★
-//   — 그쪽은 가짜 app-server 를 띄워 핸드셰이크로 받은 id 가 sink 에 닿는 것을 재고, 이쪽은 실제
-//   프로세스 나무를 세워 락 홀더로 찾은 id 가 같은 sink 에 닿는 것을 잰다.
+// ★Measured: 「a terminal spawn flows the recovered id to **the sink it was handed**」★ — this wiring alone could be cut with all matcher unit tests green (2026-09-21: the comparison target was caught as the wrapper PID so a match never
+//   happened), leaving no error or log.
+// ★Same shape and worth as the app-server partner (`a_resume_target_makes_the_handshake_issue_thread_resume`)★ — that one measures that the id received at the handshake reaches the sink; this sets up a real process tree and measures that the id
+//   found via the lock holder reaches the same sink.
 #[cfg(all(test, windows))]
 mod terminal_capture_wiring {
     use super::*;
@@ -4257,28 +3841,21 @@ mod terminal_capture_wiring {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    /// 락을 쥐는 프로세스가 **손자**여야 한다 — 우리가 쥐는 PID 는 `cmd.exe` 래퍼다.
-    /// `cmd.exe /c powershell …` 이 그 모양을 실물로 만든다(powershell 이 파일을 열고 붙들고 있는다).
+    /// The process holding the lock must be a **grandchild** — the PID we hold is the `cmd.exe` wrapper; `cmd.exe /c powershell …` builds that shape (powershell opens the file and holds it).
     ///
-    /// ★이 값은 폴링 시각표에서 나온다 — 임의로 줄이지 말 것★: 회수는 0.5 · 1.5 · 3.5 · 7.5 · 15.5 ·
-    ///   **30.5** 초에 훑는다(그 등비는 `thread_lock` 의 `FIRST_DELAY`·`MAX_DELAY`). 4-way 러너에서 첫
-    ///   적중이 15.5 초를 놓치면 다음 기회가 30.5 초인데, 그때 홀더가 이미 나가 있으면 시험이 **로드에
-    ///   따라** 빨개진다. 그래서 30.5 초 **뒤**까지 쥐고 있어야 한다.
+    /// ★Do not shrink this value arbitrarily — it comes from the polling schedule★: recovery scans at 0.5 · 1.5 · 3.5 · 7.5 · 15.5 · **30.5** seconds (`FIRST_DELAY` · `MAX_DELAY` of `thread_lock`). On a 4-way runner a missed first hit at 15.5 s
+    ///   leaves 30.5 s as the next chance, and a holder that has left by then turns the test red **depending on load**; it must hold until **after** 30.5 s.
     const HOLD_SECONDS: u32 = 45;
-    /// 홀더가 뜨고 첫 폴링 바퀴가 도는 데 드는 시간의 넉넉한 상한 — 시한이 아니라 **시험의 포기선**이다.
-    /// 위 30.5 초 바퀴를 포함해야 하므로 그보다 크다.
+    /// A generous upper bound for the time it takes for the holder to come up and the first polling round to run — not a deadline but **the test's give-up line**.
+    /// It must include the 30.5-second round above, so it is larger than that.
     const WAIT_LIMIT: Duration = Duration::from_secs(50);
     const LOCK_PATH_ENV: &str = "ENGRAM_TEST_LOCK_PATH";
 
-    /// 어떤 프로세스가 그 락을 **지금 쥐고 있는** 상태가 될 때까지 기다린다 — 안 되면 `false`.
+    /// Waits until some process **currently holds** that lock — `false` if not.
     ///
-    /// ★파일 존재(`exists()`)로 재지 말 것 — 그러면 시험이 **헛되이 초록**이 된다★: 도우미가
-    ///   파일을 만들고 곧바로 끝나 버려도 파일은 남으므로, 「홀더가 서 있다」를 한 번도 세우지
-    ///   않은 채 「회수가 안 돌았다」가 통과한다. 죽은 락과 산 락은 홀더 조회로만 갈린다(그 갈림은
-    ///   platform crate `file_holders` 의 시험이 실물로 잰다).
-    /// ★재는 수단이 시험 대상과 겹치는 것은 의도다★ — 여기서 쓰는 것은 홀더 조회 **하나**뿐이고,
-    ///   판정(누가 우리 것인가 · 이름이 id 인가 · 어디에 적나)은 전부 안 쓴다. 그래서 이 전제가
-    ///   서더라도 본 단언은 여전히 독립적으로 깨질 수 있다.
+    /// ★Do not measure by file existence (`exists()`) — the test turns **vainly green**★: a helper that creates the file and ends leaves it behind, so 「recovery did not run」 passes without 「the holder is standing」. A dead and a live lock are told apart only
+    ///   by the holder lookup (measured for real by the platform crate's `file_holders` tests).
+    /// ★The measuring means overlapping the test subject is intended★ — only the holder lookup is used here, none of the decisions (which is ours · is the name an id · where to write it), so the main assertion can still break independently.
     fn wait_for_live_holder(lock_path: &std::path::Path) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
@@ -4302,7 +3879,7 @@ mod terminal_capture_wiring {
         (sink, seen)
     }
 
-    /// `cmd.exe /c codex …` 래핑을 걷어 낸 codex 자신의 argv(이 모듈은 Windows 전용이라 한 갈래뿐이다).
+    /// codex's own argv with the `cmd.exe /c codex …` wrapping stripped (this module is Windows-only, so there is only one branch).
     fn codex_argv(spec: &CommandSpec) -> Vec<String> {
         assert_eq!(spec.program, "cmd.exe");
         assert_eq!(spec.args[0], "/c");
@@ -4310,7 +3887,7 @@ mod terminal_capture_wiring {
         spec.args[2..].to_vec()
     }
 
-    /// 터미널 모드 codex — 회수가 도는 유일한 모양이다.
+    /// Terminal-mode codex — the only shape in which recovery runs.
     fn terminal_codex() -> AgentCommand {
         AgentCommand::Codex {
             extra_args: Vec::new(),
@@ -4327,11 +3904,11 @@ mod terminal_capture_wiring {
             Uuid::new_v4()
         ));
         let lock_dir = thread_lock::lock_dir_under(&codex_home);
-        std::fs::create_dir_all(&lock_dir).expect("락 폴더 생성");
+        std::fs::create_dir_all(&lock_dir).expect("create the lock folder");
         let lock_path = lock_dir.join(format!("{thread_id}.lock"));
 
-        // ★홀더는 래퍼가 아니라 그 아래여야 한다★ — `cmd.exe` 가 powershell 을 띄우고 **powershell 이**
-        //   파일을 연다. 래퍼 PID 만 대조하는 구현은 여기서 아무것도 못 찾는다.
+        // ★The holder must be below the wrapper, not the wrapper★ — `cmd.exe` launches powershell and **powershell**
+        //   opens the file. An implementation that compares only the wrapper PID finds nothing here.
         let spec = CommandSpec {
             program: "cmd.exe".to_string(),
             args: vec![
@@ -4346,7 +3923,7 @@ mod terminal_capture_wiring {
                 ),
             ],
             env: vec![
-                // 회수는 **자식의** 홈에서 락 폴더를 푼다 — 우리 것이 아니다.
+                // Recovery resolves the lock folder from **the child's** home — not ours.
                 ("CODEX_HOME".to_string(), codex_home.display().to_string()),
                 (
                     LOCK_PATH_ENV.to_string(),
@@ -4365,13 +3942,13 @@ mod terminal_capture_wiring {
                 24,
                 Some(sink),
                 None,
-                // ★`None` = fresh 화신★ — 이어받기였다면 회수가 아예 안 돌아야 한다(아래 형제 단언).
+                // ★`None` = a fresh incarnation★ — had it been a resume, recovery must not run at all (the sibling assertion below).
                 None,
                 None,
                 None,
                 &LaunchArtifacts::default(),
             )
-            .expect("터미널 통로 기동");
+            .expect("start the terminal link");
 
         let deadline = Instant::now() + WAIT_LIMIT;
         let mut got: Vec<String> = Vec::new();
@@ -4389,27 +3966,22 @@ mod terminal_capture_wiring {
         assert_eq!(
             got,
             vec![thread_id.to_string()],
-            "락 홀더로 찾은 스레드 id 가 건네받은 sink 로 안 나왔다 — 락 파일은 {} 이고 홀더는 \
-             `cmd.exe` 가 아니라 그 아래 powershell 이다(래퍼 PID 만 대조하면 여기서 빈손이 된다)",
+            "the thread id found via the lock holder did not come out to the sink it was handed — the lock file is {} and the holder is \
+             not `cmd.exe` but the powershell below it (comparing only the wrapper PID comes up empty-handed here)",
             lock_path.display()
         );
     }
 
-    /// ★이어받기 화신은 회수를 **아예 시작하지 않는다**★ — 같은 배선을 같은 실물로 한 번 더 지나되
-    /// `resume_session_id` 만 채운다(ADR-0218 결정 5).
+    /// ★A resume incarnation **does not start recovery at all**★ — the same wiring and real thing once more, filling only `resume_session_id` (ADR-0218 decision 5).
     ///
-    /// ★이 항목이 **재지 못하는 것을 먼저 적는다**★: 여기서 띄우는 것은 실 codex 가 아니라 락을 쥘
-    ///   손자를 만들려고 손으로 조립한 명령이라, **그 spec 의 argv 에는 `resume <id>` 가 없다.**
-    ///   실 codex 를 이어받기 argv 로 띄우려면 살아 있는 스레드 id 와 설치된 codex 가 동시에 필요한데
-    ///   둘 다 이 시험대에 없다(형제 `production_spec` 레인이 `#[ignore]` 인 것과 같은 사유).
-    /// ★그래서 두 반쪽을 **한 항목 안에서 같은 값으로 묶는다**★ — 아래에서 같은 손잡이로
-    ///   `build_spec(Resume, Some(id))` 를 불러 argv 쪽이 실제로 `resume <id>` 를 낸다는 것을 먼저 재고,
-    ///   그다음 `open_spawn` 쪽이 그 손잡이에서 회수를 **안 돌린다**는 것을 잰다. 두 반쪽이 보는 값이
-    ///   같다는 것은 조립점이 지킨다(`manager::resume_handle_for`).
+    /// ★**What this item cannot measure**★: it launches a hand-assembled command that creates a lock-holding grandchild, so **that spec's argv has no `resume <id>`** (launching the real codex with resume argv needs a live thread id and an installed
+    ///   codex, which this bench lacks — why the sibling `production_spec` lane is `#[ignore]`).
+    /// ★So the two halves are **tied with the same value in one item**★: with the same handle, `build_spec(Resume, Some(id))` first measures that argv emits `resume <id>`, then that `open_spawn` **does not run** recovery from that handle. That both halves
+    ///   see the same value is guaranteed by the assembly point (`manager::resume_handle_for`).
     #[test]
     fn a_resume_terminal_spawn_captures_nothing() {
         let thread_id = Uuid::new_v4();
-        // 반쪽 ①: 이 손잡이로 뜨는 **진짜** argv 는 이어받기다.
+        // Half ①: the **real** argv launched with this handle is a resume.
         let resumed = CodexBackend.build_spec(
             &terminal_codex(),
             SpawnMode::Resume,
@@ -4424,7 +3996,7 @@ mod terminal_capture_wiring {
         assert_eq!(
             &argv[..2],
             &[RESUME_SUBCOMMAND.to_string(), thread_id.to_string()],
-            "이 손잡이가 argv 로 이어받지 않는다면 아래 「회수 안 함」에 근거가 없다: {argv:?}"
+            "if this handle does not resume via argv, the 「no recovery」 below has no ground: {argv:?}"
         );
         let codex_home = std::env::temp_dir().join(format!(
             "engram-capture-resume-{}-{}",
@@ -4432,7 +4004,7 @@ mod terminal_capture_wiring {
             Uuid::new_v4()
         ));
         let lock_dir = thread_lock::lock_dir_under(&codex_home);
-        std::fs::create_dir_all(&lock_dir).expect("락 폴더 생성");
+        std::fs::create_dir_all(&lock_dir).expect("create the lock folder");
         let lock_path = lock_dir.join(format!("{thread_id}.lock"));
 
         let spec = CommandSpec {
@@ -4455,7 +4027,7 @@ mod terminal_capture_wiring {
             cwd: std::env::temp_dir(),
         };
 
-        // 반쪽 ②: 같은 손잡이를 들고 뜬 spawn 은 회수를 시작조차 하지 않는다.
+        // Half ②: a spawn launched holding the same handle does not even start recovery.
         let (sink, seen) = recording_sink();
         let parts = CodexBackend
             .open_spawn(
@@ -4470,12 +4042,12 @@ mod terminal_capture_wiring {
                 None,
                 &LaunchArtifacts::default(),
             )
-            .expect("터미널 통로 기동");
+            .expect("start the terminal link");
 
-        // ★홀더가 **살아서 쥐고 있는** 것을 먼저 확인한다★ — 파일 존재만 보면 도우미가 만들고
-        //   곧바로 끝난 경우까지 통과해, 이 항목이 재려던 상태를 한 번도 안 세우고 초록이 된다.
+        // ★First confirm that the holder is **alive and holding**★ — looking only at file existence would pass even when the helper created it
+        //   and ended right away, making this item green without ever setting up the state it meant to measure.
         let holder_up = wait_for_live_holder(&lock_path);
-        // 형제 항목이 잡는 첫 두 바퀴(0.5 · 1.5 초)를 확실히 지나서 본다.
+        // Look after surely passing the first two rounds (0.5 · 1.5 seconds) that the sibling item catches.
         std::thread::sleep(Duration::from_secs(4));
         let got = seen.lock().expect("sink poisoned").clone();
 
@@ -4484,12 +4056,12 @@ mod terminal_capture_wiring {
 
         assert!(
             holder_up,
-            "산 락 홀더가 한 번도 안 섰다 — 이 상태의 「회수 안 함」은 근거가 없다: {}",
+            "a live lock holder never stood — 「no recovery」 in this state has no ground: {}",
             lock_path.display()
         );
         assert!(
             got.is_empty(),
-            "이어받기 화신이 회수를 돌렸다 — argv 로 이미 이어받았는데 또 찾아 적었다: {got:?}"
+            "the resume incarnation ran recovery — it already resumed via argv and found and wrote it again: {got:?}"
         );
     }
 }

@@ -562,7 +562,7 @@ impl BoundedIo {
         if let Err(e) = self.spawn.spawn(WORKER_NAME, job) {
             tracing::warn!(
                 ?path,
-                "folder-io spawn 실패, unanswered(SPAWN_FAILED)로 처리: {e}"
+                "folder-io spawn failed; answering unanswered(SPAWN_FAILED): {e}"
             );
         }
     }
@@ -770,7 +770,7 @@ fn walk(
             ?path,
             count,
             error = %error,
-            "walk: 읽기 실패한 항목을 skipped에 넣고 건너뜀"
+            "walk: unreadable entries added to skipped"
         );
     }
     Ok(FolderListing {

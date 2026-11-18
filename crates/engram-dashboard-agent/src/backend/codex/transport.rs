@@ -1,153 +1,59 @@
-//! CodexAppServerTransport — `codex app-server --stdio` 자식 프로세스용 [`AgentTransport`] 구현.
+//! CodexAppServerTransport — the [`AgentTransport`] implementation for the `codex app-server --stdio` child process.
 //!
-//! ★이 파일이 소유하는 것★: 자식 프로세스 + Job Object · 단일 stdin writer · 리더(pump) · 나간 요청의
-//!   대기표와 id 계수기 · thread id 와 준비 상태 · 게이트되는 입력 큐 · 도는 턴의 도구 끝에 쥔 글을 넘기는
-//!   계기([`State::steer_due`] — ADR-0235). 나가는 봉투의 id·메서드·순서를
-//!   전부 여기서 쥔다 — 그래서 [`AgentTransport::send_input`] 이 받는 바이트는 와이어 프레임이 아니라
-//!   **메시지 본문**이다([`crate::backend::InputEncoder::TransportFramed`]).
+//! Owns the child + Job Object · the single stdin writer · the reader (pump) · the waiting table and id counter · thread id and readiness ·
+//! the gated input queue · the tool-end steer trigger ([`State::steer_due`] — ADR-0235). Id · method · order of outgoing envelopes are
+//! decided here, so [`AgentTransport::send_input`] receives the message body, not a wire frame
+//! ([`crate::backend::InputEncoder::TransportFramed`]).
 //!
-//! ★스레드 셋과 그들 사이의 벽★:
-//!   - **리더**(= pump, [`AgentTransport::start`] 가 띄운다) — decoder 를 `&mut` 로 배타 소유한다. 우리가 거절한
-//!     승인 item 의 기억([`RefusedItems`])도 리더 혼자 쥔다 — 락이 없다(ADR-0241).
-//!     ★stdin 락을 절대 잡지 않고 대기표를 기다리지도 않는다★. 답해야 할 줄이 오면 **outbox 에 넣고
-//!     즉시 돌아간다.** 어기면 읽기가 멈추고, 읽기가 멈추면 상대 큐가 차고, 상대가 stdout write 핸들을
-//!     안 닫아 **EOF 가 영영 안 온다** — 프로세스는 살아 있고 신호는 하나도 없다.
-//!   - **라이터**(자기 자신) — stdin 락을 블로킹 write 내내 쥐는 **유일한** 스레드이고, 제어 큐를 비우는
-//!     **유일한** 스레드이기도 하다. 핸드셰이크도 여기서 돈다(그동안 유저 입력은 큐가 붙든다). ★그
-//!     기다림 중에도 제어 큐는 계속 비운다★ — 통째로 park 하면 리더가 넣은 거절이 못 나가고, 상대가 그
-//!     답을 기다리는 중이었다면 양쪽이 시한까지 서로를 기다린다.
-//!   - **stderr drain** — 파이프가 차서 자식이 멈추는 것을 막는다.
+//! ★Three threads★:
+//!   - **Reader** (pump, launched by [`AgentTransport::start`]) — owns the decoder as `&mut` and [`RefusedItems`], no lock (ADR-0241).
+//!     ★It never takes the stdin lock and never waits on the waiting table★: a line needing an answer goes to the outbox. Otherwise
+//!     reading stops, the peer's queue fills, the peer keeps its stdout open, and **EOF never comes** — alive, no signal.
+//!   - **Writer** — the only holder of the stdin lock across a blocking write and the only drainer of the control queue; the handshake
+//!     runs here. ★It keeps draining control lines while it waits★, else a queued refusal cannot go out and both sides wait for each other.
+//!   - **stderr drain** — keeps the child from blocking on a full pipe.
 //!
-//! ★락 순서 = 상태 → 대기표★(ADR-0006). 역방향은 없다: [`Pending`] 은 자기 락을 쥔 채 밖을 부르지
-//!   않는다. 상태 락을 쥔 채 stdin 락을 잡는 자리도 없다.
+//! ★Lock order = state → waiting table★ (ADR-0006), never reverse; nothing takes the stdin lock while holding the state lock.
 //!
-//! ★teardown 은 오늘 인과 그대로다(ADR-0001 2 동사)★ — [`AgentTransport::shutdown`] 안에 기다림을
-//!   더하지 않고, ★**그 경로에서는** stdin 을 kill 보다 먼저 닫지 않는다★(사유 정본 = `transport/stdio.rs`
-//!   의 같은 자리). ★**이것은 파일 전체 규칙이 아니라 teardown 경로의 규칙이다 — 양방향으로 오해하지 말 것**★:
-//!   ① 핸드셰이크가 실패한 갈래에서는 [`writer_loop`] 이 **kill 없이** stdin 을 닫는다 — ★기록 실패뿐
-//!   아니라 **왕복 실패(거절 포함)에서도** 닫는다★(그 자리 주석이 왜 거기서 안전한지의 정본). 그 존재를
-//!   이 문장으로 되돌리지 말 것. ② 반대로 그 새 자리를 근거로
-//!   `shutdown()` 의 순서를 뒤집지도 말 것 — 두 자리가 안전한 이유가 **다르고**, 그쪽 순서는
-//!   [`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`] 가 지키는 실제 회귀다.
-//!   라이터 스레드는 아무도 join 하지 않고, ★닫힘 표식(`State::closed`)을 보고 스스로 끝난다 — 그 표식을
-//!   세우는 자리가 **둘**이다★: `shutdown()`(우리가 죽였다)과 [`ReaderExit`] 의 `Drop`(상대가 스스로
-//!   끝났거나 리더가 panic 했다 — `Drop` 이라 unwind 도 반드시 지난다). 앞의 경우 자식을 죽이면 파이프가
-//!   깨져 블록된 write 가 에러로 풀린다. ★그 대가 = 큐에 남은 미전송 입력이 조용히 사라진다★.
+//! ★Teardown (ADR-0001 2 verbs)★: no wait inside [`AgentTransport::shutdown`], and **on that path** stdin is not closed before kill
+//! (`transport/stdio.rs`; guarded by [`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`]). [`writer_loop`] does close stdin
+//! **without kill** after a failed handshake — the reasons differ; neither is grounds to change the other. Nobody joins the writer; it ends
+//! on `State::closed`, set by `shutdown()` and by the `Drop` of [`ReaderExit`]. ★Unsent queued input disappears silently★.
 //!
-//! ★알려진 한계 — 이 목록을 줄이지 말고, 고칠 때 같이 지울 것★:
-//!   - **턴 자체에는 시한이 없다.** 시한이 걸리는 것은 `turn/start` **응답**뿐이라, 턴이
-//!     `turn/completed` 없이 `error` 알림만 남기고 끝나면 게이트가 영영 안 풀린다. 그 뒤의
-//!     [`AgentTransport::send_input`] 은 그것을 "큐가 찼다" 로 신고한다 — 사유가 어긋난 신고다.
-//!   - **비-Windows 에는 손자를 거두는 수단이 없다.** Job Object 도 프로세스 그룹도 안 쓴다.
-//!   - [`AgentTransport::interrupt`] 는 닫힘 표식을 안 본다 — 닫히는 찰나에 버려질 줄 하나에 `Ok` 를
-//!     돌려주는 창이 있다.
-//!   - **이력 복원은 통째로 best-effort 다** — 거절·시한·줄 상한 어느 것이든 결말은 「거기까지만
-//!     복원한다」이고 연결은 그대로 선다([`hydrate_history`]). 그래서 **얼마나 복원됐는지는 로그에만
-//!     남고 화면에는 표시가 없다** — 사람은 짧아진 화면을 「원래 이만큼이었다」로 읽는다.
-//!   - ★**복원된 이력과 라이브 줄이 섞일 수 있다 — 그것을 막는 것은 구조가 아니라 실측이다**★:
-//!     리더는 핸드셰이크 중에도 돌고 있어서, 상대가 그 창에서 알림을 흘리면 그 줄이 이력과 섞인다.
-//!     ★★섞이는 축이 **둘**이고 닫힌 것은 하나뿐이다 — 「쪼개짐은 닫혔다」로만 적으면 거짓이다★★:
-//!     ① **링 안의 순서**는 닫혔다 — [`OutputCore::emit_batch_without_turn_observation`] 이 이력 전량을
-//!        한 락 구간에서 싣는다. 그래서 **나중에 붙는** 구독자는 언제나 온전한 이력을 replay 로 받는다.
-//!     ② **이미 붙어 있는 구독자에게 가는 배달 순서는 닫히지 않았다** — 그 문은 링 락을 놓고 나서
-//!        보내므로, 그 사이의 라이브 emit 이 [배치 seq N] → [라이브 seq N+k] → [배치 seq N+1] 로 끼어들
-//!        수 있다. ★그리고 프론트는 그것을 **재정렬이 아니라 폐기**로 처리한다★ — `RichSlot` 의 구독
-//!        콜백이 `chunk.seq <= lastSeq` 를 버리므로, 끼어든 뒤의 이력 프레임이 **화면에서 사라진다**.
-//!     즉 오늘 「앞에 선다」와 「배달 중 쪼개진다」 둘 다 열려 있고, 실제로 그것을 막고 있는 것은
-//!     아래 실측뿐이다. 두 축을 함께 닫는 길은 하나다 — 게이트가 열릴 때까지 **리더가 emit 을 유계로
-//!     붙드는 것**. 그 큐의 상한과 넘쳤을 때의 처분(조용한 유실)을 정하는 것이 선결이라 별건이다.
-//!     ★봉쇄가 무엇인지 정확히 적는다 — 그것이 이 항목의 요점이다★: ADR-0203 이 이어받기 뒤 `item/*`
-//!     알림을 **0 건**으로 실측했고(0.154.0), 턴을 여는 자리가 [`Link::Ready`] 를 요구해 우리 쪽 턴도
-//!     아직 없다. ★즉 **벤더 행동 관측**이지 구조적 보장이 아니다★ — codex 는 스스로 업데이트하고 이
-//!     프로토콜에는 버전 칸이 없어(이 헤더의 다른 항목이 그 사실을 이미 말한다) 그 0 건이 조용히 바뀔 수
-//!     있다. 바뀌면 증상은 「복원된 대화 위에 낯선 줄 하나」이고, 닫으려면 리더가 게이트 전까지 emit 을
-//!     **유계로 붙들어야** 한다 — 그 큐의 상한과 넘쳤을 때의 처분(조용한 유실)을 먼저 정해야 하므로
-//!     별건이다.
-//!     ★그 별건은 **안 만들기로 닫혔다**(ADR-0205) — 이 한계는 열린 채로 남고, 재론 방아쇠도 그 ADR 이 쥔다★.
-//!   - 연결이 서지 못하면 큐에 선 입력이 사라진다. **몇 건이 사라졌는지는 로그와 화면 둘 다에 남는다** —
-//!     실패 결말의 `detail` 이 그 건수를 싣는다([`writer_loop`] 의 그 갈래). ★한때 여기 「로그에만 남는다
-//!     (화면에 오르는 것은 "핸드셰이크 실패" 뿐이다)」로 적혀 있던 것은 낡은 서술이다★ — 건수는 실려 있고,
-//!     머리말도 하나가 아니라 둘이다([`HandshakeFailure::headline`] — 프로토콜 왕복 실패와 세션 id 기록
-//!     실패를 갈라 적는다).
-//!   - pump 는 panic 하는 `thread::spawn` 으로 띄운다(나머지 둘은 실패를 로그로 흡수한다).
-//!   - **한 번의 블로킹 쓰기는 무한히 매달릴 수 있다** — 상대가 우리 stdin 을 안 읽으면 `write_all` 이
-//!     파이프 backpressure 로 멈추고, 거기서 빠져나오는 길은 `shutdown()` 의 kill 뿐이다. 시한도
-//!     조건변수도 그 한 번의 쓰기 안쪽에는 닿지 않는다. ★이것이 이 파일 전체에 걸리는 한계이지
-//!     핸드셰이크만의 것이 아니다★.
-//!   - **codex 라이터([`writer_loop`])는 가두지 않는다(ADR-0292)** — 운영 프로세스에서 라이터 panic 은
-//!     어디서 나든 훅이 프로세스를 끝낸다. 아래는 훅 없는 시험 빌드에서만 서는 모양이다: 봉쇄는 세션 id 기록 호출을 감싼
-//!     [`record_session_id`] 의 `catch_unwind` 한 자리뿐이고, **그 밖의 라이터 코드에는 없다.** 봉쇄 밖에서
-//!     라이터가 panic 하면 그 시점에 이미 선 상태가 남는다: 핸드셰이크 **전**이면 link 는 `Connecting`
-//!     이고 닫힘 표식도 안 서서 [`AgentTransport::send_input`] 이 계속 `Ok` 를 돌려주며 큐를 상한까지
-//!     채우고 그 정지를 "큐가 찼다" 로 신고한다(위 첫 항목과 같은 사유 어긋남). 핸드셰이크 **뒤**면 link
-//!     는 이미 `Ready` 라 같은 증상이 턴 경로에서 난다. ★어느 쪽이든 닫힘 표식은 안 서므로 pump 도
-//!     reaper 도 움직이지 않는다★.
-//!   - **응답보다 먼저 온 종료를 붙들어 두는 칸은 [`EARLY_COMPLETION_SLOTS`] 개다**(그 칸에는 turn id
-//!     와 **그 줄이 만든 턴 경계**가 함께 실린다 — [`EarlyCompletion`]). 한 응답을 기다리는
-//!     동안 그보다 많은 종료가 흘러오면 가장 오래된 것부터 버려지고, 버려진 것이 우리 턴의 것이었다면 그
-//!     턴은 다시 끝낼 것이 없어진다. 열려 있는 턴이 하나뿐이라 정상 운용에서는 칸 하나로 충분하지만,
-//!     상대가 우리가 연 적 없는 턴의 종료를 흘리면 그만큼 잠식된다. ★그 칸은 턴이 `Idle` 로 돌아가는
-//!     자리마다 통째로 비워진다★ — 사유 정본 = [`end_turn_if`] 의 그 줄.
-//!   - **Job Object 편입은 spawn **뒤**라, 그 사이에 만들어진 손자는 Job 밖이다.** 편입된 뒤로는
-//!     breakaway 가 막혀 있어(`BREAKAWAY_OK`·`SILENT_BREAKAWAY_OK` 둘 다 안 켠다) 트리가 통째로 내려가지만,
-//!     그 창에서 태어난 자손은 그 보장 밖이다. ★이 창은 이 통로만의 것이 아니다★ — `pty.rs`·`stdio.rs` 가
-//!     같은 모양이다. 고치는 것은 세 통로를 함께 건드리는 별건이고, 선례는 사용량 조회 실행기다 — 멈춘 채 띄워
-//!     Job 에 넣은 뒤 깨워 그 창을 닫았다(`usage::process` + OS 층 `spawn::prepare_tree_root` ·
-//!     `spawn::TreeRoot`).
-//!   - **핸드셰이크가 실패하면 [`writer_loop`] 이 우리 쪽 stdin 을 놓는다 — 갈래를 가리지 않는다.**
-//!     ★한때 여기 「자식·리더·라이터는 그대로 남고 매니저가 거둘 때까지 상주한다」로 적혀 있었다. 그것은
-//!     낡은 서술을 넘어 **거짓이었다 — 아무도 그 세션을 거두지 않는다**★: 수거를 여는 것은 pump 의
-//!     [`OutputCore::finish`] 가 내는 한 메시지이고 reaper 는 그 단독 소비자라(ADR-0019), 리더가 EOF 를
-//!     못 보면 그 메시지가 **아예 만들어지지 않는다.** 그래서 그 모양은 「거둬질 때까지 상주」가 아니라
-//!     **영구 wedge** 였다 — 화면은 `Running` 인데 입력은 전부 거절, 자식 + Job Object + 스레드 셋이
-//!     데몬 수명 내내 붙들린다. 부팅 복원이면 이어받을 수 있는 codex 프로필 수만큼 한꺼번에 선다.
-//!     ★그래도 이 통로가 kill 을 부르는 것은 아니다★ — 쓰기 끝을 놓을 뿐이고, 종료 전이는 여전히 pump
-//!     단독이다(ADR-0005 그대로, ADR-0001 의 2 동사는 `kill` 핸들러의 것). ★그 wedge 를 실제로 끊는
-//!     것은 매니저의 teardown 이다★(아래 「회수」 항목).
-//!   - ★**상대가 stdout 만 닫고 계속 사는 경우는 아직 주인이 없다**★ — 리더가 EOF 를 보고 `closed` 를
-//!     세워 세션은 수거되는데 자식은 살아 있다. Windows 는 통로가 drop 될 때 Job 핸들이 닫히며
-//!     `KILL_ON_JOB_CLOSE` 가 트리를 거두지만, **비-Windows 에는 그 backstop 이 없어 고아가 남는다**
-//!     (이 헤더가 이미 적는 「비-Windows 에는 손자를 거두는 수단이 없다」의 부모 판이다).
-//!     ★**운영 도달성이 갈래마다 다르다 — 「전부 죽은 코드」로도 「전부 돈다」로도 읽지 말 것**★:
-//!     세션 id **기록** 실패는 [`record_session_id`] 가 잡은 패닉에서만 나오는데 그 자리는 가둠 표시
-//!     밖이라 운영 프로세스에서는 훅이 그 자리에서 프로세스를 끝낸다(ADR-0292) — 그래서
-//!     [`HandshakeFailure::headline`] 의 「세션 id 기록 실패」 머리말과 「이 화신을 쓰지 않는다」 `detail`
-//!     은 훅 없는 시험 빌드에서만 관측된다. **stdin 닫기는 다르다** — 왕복 실패(시한·해독 실패·그리고 상대의
-//!     **거절**)로 운영에서도 닿는다. ★**서수로 가리키지 말 것**★ — 갈래 순서는 바뀐다.
-//!   - **핸드셰이크 실패 뒤의 회수는 첫 고리가 *상대의* 행동이고, 그것이 안 오면 끊는 것은 매니저다** —
-//!     stdin 을 놓은 뒤 실제로 세션을 끝내는 것은 「상대가 EOF 를 보고 스스로 exit 한다」이며(실측
-//!     41–51ms — ★그 수치는 **기록 실패 갈래**에서 잰 것이고 거절 갈래는 미측정★), 그것이 일어나야
-//!     리더 EOF → pump → reaper 가 이어진다.
-//!     ★그 전제가 깨져도 이 통로는 **아무것도 죽이지 않는다**★ — 대신 [`Link::Down`] 이
-//!     [`AgentTransport::link_state`] 로 즉시 밖에 보이고, 활성화 판정이 그것을 실패로 확정한 뒤 이미
-//!     있는 teardown(ADR-0001 2 동사)을 돌린다. ★그 처분을 이 파일로 되가져오지 말 것 — ADR-0199 가
-//!     라이터의 `child.kill()`·`TerminateJobObject` 를 명시적으로 금지한다★(한 번 들어왔다가 걷혔다).
-//!     ★**남는 구멍**: 그 판정이 **걸려 있지 않은** spawn(Fresh 로 띄운 codex)에서는 아무도 그 `Down` 을
-//!     보지 않는다 — 그 갈래는 여전히 주인이 없다.★ codex 는 스스로 업데이트하고 이
-//!     프로토콜에는 버전 칸이 없어(이 헤더의 다른 항목이 그 사실을 이미 말한다) 그 행동이 조용히 바뀔 수
-//!     있다. **이 항목을 줄이지 말 것** — 고치려면 유계 대기와 그 뒤의 처분을 누가 지는지부터 정해야 한다.
-//!   - **세션 id 기록 포트는 라이터 스레드 위에서 동기로 불린다** — 그 콜백이 블록하면 그 스레드가 갇혀
-//!     입력도 제어 줄도 나가지 않는다. ★**이것은 잠재적이 아니라 실재한다**★: 조립점(`manager.rs`)이 모든
-//!     spawn 에 포트를 넘기고, 그 구현은 프로필 레지스트리 락을 잡아 프로필 파일을 통째로 다시 쓴다.
-//!     즉 이 통로는 핸드셰이크 끝에서 **남의 디스크 쓰기만큼** 멈출 수 있다. 그 동안 제어 줄이 슬라이스당
-//!     하나씩만 나가는 위 항목과 곱해져 [`OUTBOX_LIMIT`] 거절 떨굼을 **길게** 만든다.
-//!   - **나간 요청의 실제 상한은 `budget + SWEEP_INTERVAL` 이고, 그 시계는 첫 쓰기 *뒤에* 시작한다.**
-//!     첫 `recv_timeout` 한 슬라이스가 지나야 시한을 처음 읽고, 그 앞의 요청 쓰기 자체는 유계가 아니다.
-//!   - **핸드셰이크 중에는 제어 줄이 슬라이스당 하나씩만 나간다.** 서버 요청이 그보다 빨리 쌓이면
-//!     [`OUTBOX_LIMIT`] 에 닿아 거절을 떨구기 시작한다 — 화면에는 보이고 핸드셰이크 시한으로 끝나지만,
-//!     그 동안의 의무 누락은 실재한다.
-//!   - `turn/completed` 의 귀속은 **상대가 준 turn id 문자열**에 기댄다. 상대가 지금 쓰는 id 를 그대로
-//!     되보내면 엉뚱한 턴이 닫힌다 — 우리가 발급한 값이 아니므로 이 층에서 더 셀 수 있는 것이 없다.
-//!   - **귀속 못 한 `turn/completed` 는 턴 경계를 못 낸다**([`Reader::note_turn`]). 그래서 상대가 turn id
-//!     없는 종료만 보내는 조합에서는 그 턴이 이 통로에서도 사실 계층에서도 열린 채 남는다 — 응답이 이미
-//!     왔다면 시한 backstop 도 없다. ★그래도 두 축이 **같은** 판정을 받는 것이 이 모양의 요점이다★: 큐를
-//!     쥔 이 층이 다음 입력을 안 받는 동안 화면만 「끝났다」로 그리면 그 불일치가 더 나쁘다.
-//!     ★그 「같은 판정」은 **진행 쪽에도 걸려야** 성립한다★ — 종료만 게이트하고 진행을 열어 두면, 열린
-//!     턴이 없는 동안 온 `item/*` 한 줄이 사실 계층만 켜 놓고 그 종료는 위 문장대로 막혀 아무도 못 끈다
-//!     (통로는 `Idle` = 큐 열림인데 사실 계층은 바쁨). 그 가름을 [`Reader::claims_our_turn`] 이 진다 —
-//!     본문은 언제나 화면에 올리되 「턴 중」의 근거로 셀지만 같은 축으로 가른다.
-//!
-//! tauri import 0.
+//! ★Known limits — remove an item only together with its fix★:
+//!   - **The turn has no deadline** (only the `turn/start` response does): a turn ending with only an `error` notification never opens the
+//!     gate, and [`AgentTransport::send_input`] then reports "the queue is full" for the wrong reason.
+//!   - **Non-Windows cannot reap grandchildren** (no Job Object, no process groups); a peer that closes only stdout and lives leaves an
+//!     orphan there (Windows: `KILL_ON_JOB_CLOSE` on link drop).
+//!   - **Job Object enrolment is after spawn** — a grandchild born in between escapes (`pty.rs` · `stdio.rs` the same). Precedent fix:
+//!     `usage::process` + `spawn::prepare_tree_root`.
+//!   - [`AgentTransport::interrupt`] ignores the closed marker and can return `Ok` for one line dropped at closing.
+//!   - **History restore is best-effort** ([`hydrate_history`]): how much was restored is only in the log.
+//!   - ★**Restored history and live lines can mix**★ — prevented by measurement, not structure: ADR-0203 measured `item/*` after resume as
+//!     **0** (0.154.0), and a turn opens only after [`Link::Ready`]; codex self-updates and has no version field. Ring order is closed
+//!     ([`OutputCore::emit_batch_without_turn_observation`]); delivery order to an attached subscriber is open, and the frontend
+//!     **discards** `chunk.seq <= lastSeq` (`RichSlot`), so history after a cut-in vanishes. Closing it needs bounded emit-holding
+//!     (ADR-0205: not to be built; holds the reopening trigger).
+//!   - If the connection cannot stand, queued input disappears; the count is in the failure `detail` ([`HandshakeFailure::headline`]).
+//!   - The pump is launched with a panicking `thread::spawn` (the other two absorb failures into the log).
+//!   - **One blocking write can hang forever** (peer not reading stdin → pipe backpressure); only `shutdown()`'s kill gets out. The whole
+//!     file, not only the handshake.
+//!   - **[`writer_loop`] is not contained (ADR-0292)**: production ends the process on a writer panic; without the hook the only
+//!     containment is [`record_session_id`]'s `catch_unwind`, and a panic elsewhere leaves the link `Connecting`/`Ready` with `closed`
+//!     unset — `send_input` keeps returning `Ok` and reports "the queue is full".
+//!   - **[`EARLY_COMPLETION_SLOTS`]**: more ends than slots before one response drop the oldest; if it was our turn's, nothing ends that
+//!     turn. Emptied at every return to `Idle` ([`end_turn_if`]).
+//!   - **If the handshake fails [`writer_loop`] only lets go of stdin** — it kills nothing (ADR-0199 forbids the writer's `child.kill()` ·
+//!     `TerminateJobObject`). Recovery = the peer exits on EOF, else the manager's teardown via [`Link::Down`]
+//!     ([`AgentTransport::link_state`]); [unverified on the refusal branch]. Where that decision is **not hooked** (codex launched as
+//!     Fresh) nobody looks at `Down`: no owner. Fixing it first needs a decision on who carries the bounded wait.
+//!   - **The session id record port runs synchronously on the writer thread** — it takes the registry lock and rewrites the profile file
+//!     (`manager.rs`), so the handshake end can stall for someone else's disk write, lengthening [`OUTBOX_LIMIT`] refusal dropping.
+//!   - **An outgoing request's real cap is `budget + SWEEP_INTERVAL`**, started *after* the first write.
+//!   - **During the handshake control lines go out one per slice**; faster server requests reach [`OUTBOX_LIMIT`] and refusals drop.
+//!   - `turn/completed` attribution leans on **the turn id string the peer gave**; an unattributed one cannot emit a boundary
+//!     ([`Reader::note_turn`]) — the turn stays open here and in the fact layer with no deadline backstop once the response came. Both
+//!     axes must get **the same** decision, progress included ([`Reader::claims_our_turn`]).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -186,139 +92,95 @@ use crate::types::{
     TransportCaps, TurnInput, TurnOutcome, Withdraw,
 };
 
-// ── 상수 ──────────────────────────────────────────────────────────────────────
+// ── Constants ──────────────────────────────────────────────────────────────────────
 //
-// ★아래 값들은 전부 지어낸 것이다 — 이 축을 실측한 적이 없다★. 각 항목이 자기 근거를 진다.
+// ★The values below are all invented — this axis has never been measured★. Each item carries its own grounds.
 
-/// 나간 요청 하나가 답을 기다리는 상한.
+/// The cap on how long one outgoing request waits for an answer.
 ///
-/// ★모든 요청에 예외 없이 건다★(실측 0.154.0): 서버는 자기가 **해독하지 못한 봉투에는 `id` 가 실려
-/// 있어도 아무 답도 하지 않는다** — 답이 오는 것은 봉투가 읽힌 뒤의 파라미터 오류뿐이다. 시한이 없는
-/// 대기표는 그래서 "언젠가" 가 아니라 **정상 운용 중에** 영구히 매달린다.
-/// ★값의 근거★: 관측된 왕복은 `initialize` ≈130ms · `turn/interrupt` ≈18ms 다. 30 초는 그 중 가장 느린
-/// 것의 200 배가 넘어 정상 왕복을 끊을 여지가 없고, `thread/start` 가 자기 MCP 자식들을 띄우느라
-/// 늦어지는 경우(실측 — 그 자식들은 우리 손자라 Job Object 가 함께 거둔다)도 넉넉히 덮는다. 동시에
-/// 사람이 화면 앞에서 "멈췄다" 고 판단하기 전에 오류가 뜬다.
-/// ★턴의 길이와 무관하다★ — `turn/start` 의 **응답**은 턴이 끝날 때가 아니라 턴이 열릴 때 온다.
+/// ★Applied to every request★ (measured 0.154.0): the server gives **no answer at all to an undecodable envelope, even with an `id`**, so
+/// the waiting table would hang forever. Observed `initialize` ≈130ms · `turn/interrupt` ≈18ms; 30 s covers a slow `thread/start` that
+/// launches MCP children. Unrelated to turn length — the `turn/start` response comes when the turn opens.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 
-/// **연결이 서기까지 전체**의 상한 — 두 왕복 + 기록 호출 + 이력 페이징. ★요청 하나가 아니라 구획
-/// 하나에 건다★.
+/// The cap on **the whole thing until the connection stands** — two round trips + the record call + history paging; ★one section, not one
+/// request★.
 ///
-/// ★★이력 페이징이 이 예산 **안에서** 도는 것이 계약이다(ADR-0203)★★: 그쪽에 따로 예산을 주면
-///   `Ready` 가 최대 두 예산만큼 늦어져 아래 백스톱 계약이 깨지고, 그러면 **화면을 받아 오느라 성공한
-///   이어받기가 실패로 판정된다.** 시계를 잡는 자리가 [`writer_loop`] 하나인 것이 그 실물이고,
-///   [`tests::the_handshake_and_the_history_share_one_budget`] 가 그것을 잰다.
-///   ★대가 = 핸드셰이크가 느렸으면 복원되는 화면이 짧아진다★ — 그 방향으로 기운 것은 의도다.
-///
-/// ★이 값은 이제 **아무 창에도 맞출 필요가 없다**★ — 활성화 판정은 창을 지켜보지 않고 이 통로가 내는
-///   연결 결말을 **그 자리에서** 받는다(사용자 결정 — [`AgentTransport::link_state`]). 즉 상한의 목적이
-///   「판정보다 먼저 결말을 내라」에서 **「답하지 않는 상대를 언젠가는 포기하라」** 로 좁아졌다.
-///   ★한때 여기 「매니저의 판정 창보다 작을 것」이 계약으로 적혀 있었다 — 그 창이 없어졌으므로 낡았다★.
-/// ★그래도 값을 안 올린다★: [`REQUEST_DEADLINE`](30 초)로 되돌리면 두 왕복이 최대 60 초가 되는데,
-///   그만큼 기다려서 얻는 것이 없다 — 관측된 왕복은 `initialize` ≈130ms 이고 거절은 **즉시** 온다
-///   (실측 — 하위 스레드 `thread/resume` 이 `-32600` 을 곧바로 돌려줬다). 10 초는 그 정상 왕복의 70 배가
-///   넘어 느린 기동(npm shim → node)까지 덮으면서, 사람이 「멈췄다」고 느끼기 전에 결말이 난다.
-/// ★남은 계약은 하나뿐이다: 매니저의 liveness 백스톱보다 **작을 것**★
-///   ([`crate::manager::LINK_RESOLUTION_BACKSTOP`]). 그쪽은 판정이 아니라 **포기**라, 이 값이 더 크면
-///   사유 있는 거절이 사유 없는 포기에 덮인다. 그 관계는 같은 crate 안이라 시험대가 직접 잰다.
-/// ★★**이 상한은 「응답 대기」에만 걸린다 — 쓰기에는 안 걸린다**★★: 상대가 우리 stdin 을 읽지 않으면
-///   [`write_line`] 의 `write_all` 이 파이프 backpressure 로 무한히 매달리고, 그 사이 이 예산은 한 번도
-///   평가되지 않는다(핸드셰이크 사이의 `initialized` 알림 쓰기도 같은 자리다). 그 경로에서 링크는
-///   `Connecting` 에 영영 멈추고, **그것을 끊는 것은 이 통로가 아니라 위 백스톱과 그 뒤의 teardown 이다.**
-///   그 사실이 백스톱이 아직 존재하는 유일한 이유다 — 지우려면 쓰기를 유계로 만드는 것이 먼저다.
-/// ★턴 요청은 이 값을 쓰지 않는다★ — [`REQUEST_DEADLINE`] 그대로다.
+/// ★History paging runs **inside** this budget (ADR-0203)★: a separate one could delay `Ready` by two budgets past the backstop and decide a
+/// successful resume a failure (started once in [`writer_loop`]; [`tests::the_handshake_and_the_history_share_one_budget`]). A slow
+/// handshake shortens the restored screen — intended.
+/// It only has to **give up on a silent peer** (a refusal comes immediately); ★it must stay **smaller** than
+/// [`crate::manager::LINK_RESOLUTION_BACKSTOP`]★, which gives up without a reason.
+/// ★It bounds waiting for a response, not writes★: a blocked `write_all` ([`write_line`]) is never evaluated against it; the backstop and
+/// teardown cut that. Turn requests use [`REQUEST_DEADLINE`].
 const HANDSHAKE_BUDGET: Duration = Duration::from_secs(10);
 
-/// 라이터가 **주위를 둘러보는** 주기. 두 곳이 이 값을 쓴다 — 시한 만료 훑기, 그리고 핸드셰이크가 답을
-/// 기다리는 동안 제어 줄을 **한 줄씩** 내보내는 것([`request_blocking`]).
-///
-/// ★둘의 성질이 다르다★: 훑기는 맵 스캔 하나이고, 제어 줄 배수는 **블로킹 쓰기**다. 그래서 이 값은
-/// 「한 슬라이스가 이만큼 걸린다」가 아니라 「**막히지 않는 한** 이 간격으로 다시 판단한다」를 뜻한다.
-/// 한 번의 블로킹 쓰기가 무한히 매달릴 수 있다는 사실은 이 상수가 아니라 모듈 헤더의 「알려진 한계」가 진다.
-/// ★값의 근거★: [`REQUEST_DEADLINE`] 대비 60 분의 1 이라 시한 오차가 판정을 바꾸지 않고, 핸드셰이크 중
-/// 서버 요청 거절이 나가기까지의 지연도 그만큼으로 묶인다.
+/// The period at which the writer **looks around**: the deadline sweep, and sending control lines **one at a time** while the handshake
+/// waits ([`request_blocking`]). A blocking write can still hang (module header). 1/60 of [`REQUEST_DEADLINE`].
 const SWEEP_INTERVAL: Duration = Duration::from_millis(500);
 
-/// 게이트 없이 나가는 제어 줄(서버 요청 거절 · `turn/interrupt`)의 대기 상한.
+/// The queue cap of control lines that go out without the gate (server request refusals · `turn/interrupt`).
 ///
-/// ★근거★: 이 줄들은 턴 상태와 무관하게 바로 나가므로 상대가 stdin 을 읽는 한 쌓이지 않는다. 쌓인다면
-/// 상대가 **읽기를 멈춘 것**이고, 그때 이 상한이 "신호 없는 정지" 를 관측 가능한 거절로 바꾼다. 64 는
-/// 그 정지를 짧은 시간 안에 드러낼 만큼 작고, 승인 요청이 몰리는 순간을 흡수할 만큼 크다.
+/// Grounds: they go out regardless of turn state, so they pile up only if the peer **stopped reading**; this cap turns that silent stop
+/// into an observable refusal. 64 exposes it quickly and still absorbs a rush of approval requests.
 const OUTBOX_LIMIT: usize = 64;
 
-/// 이력 한 페이지에 요청하는 item 수.
+/// The number of items requested per history page.
 ///
-/// ★★이 값은 **줄 크기를 못 잡는다 — 그렇게 읽지 말 것**★★(실측): `limit` 이 자르는 것은 개수이고
-///   한 item 의 바이트는 상대가 정한다. 실측 표본에서 `limit:50` 한 페이지가 1,823,509B 였고,
-///   `limit:1` 에서도 가장 큰 페이지가 437,196B 였다(`commandExecution.aggregatedOutput` 하나).
-///   즉 어떤 `limit` 도 [`MAX_LINE_BYTES`] 아래를 보장하지 못한다.
-/// ★그래서 이 값이 재는 것은 **그 상한을 넘길 확률과 왕복 수의 맞바꿈**이다★ — 25 는 관측된 최대
-///   페이지(1.8MB@50)의 절반쯤이라 줄 상한까지 4 배 남고, 2MiB 링을 몇 왕복 안에 채운다.
-/// ★넘겨서 줄이 버려지면 그 요청은 시한까지 답을 못 받고, 복원은 **거기까지만** 하고 끝난다★ —
-///   조용하고 무해하다(그 갈래의 처분은 [`hydrate_history`] 가 진다).
+/// ★Does **not** bound line size★ (measured): the peer decides bytes per item (one `limit:50` page 1,823,509B; `limit:1` up to 437,196B), so
+/// [`MAX_LINE_BYTES`] can be exceeded at any value; 25 trades that chance against round trips. An over-cap line gets no answer until the
+/// deadline and the restore ends there ([`hydrate_history`]).
 const HISTORY_PAGE_LIMIT: u32 = 25;
 
-/// 이력 페이징이 도는 최대 왕복 수 — **폭주 방지 backstop 이지 정책이 아니다**.
+/// The maximum number of round trips history paging runs — **a runaway backstop, not a policy**.
 ///
-/// ★정상 종료는 셋이다★: 커서 소진 · 링을 채움 · 핸드셰이크 예산 소진. 이 값이 발화하는 것은 상대가
-///   끝나지 않는 커서를 계속 주는 경우뿐이고, 그때도 예산이 먼저 끊는 것이 보통이다.
-/// ★값의 근거★: [`HISTORY_PAGE_LIMIT`] 와 곱하면 6400 item 으로 링의 건수 천장(4096)을 넘는다 —
-///   즉 이 상한 때문에 실을 수 있는 것을 못 싣는 일이 없다.
+/// Normal ends: cursor exhausted · ring filled · handshake budget exhausted. This fires only if the peer keeps giving a cursor that
+/// never ends, and even then the budget usually cuts first. Times [`HISTORY_PAGE_LIMIT`] it is 6400 items, over the ring's count
+/// ceiling (4096), so it never prevents carrying what could be carried.
 const MAX_HISTORY_PAGES: usize = 256;
 
-/// 통로가 쥔 입력(`State::pending`)의 상한. 넘으면 그 호출이 `Err` 로 돌아간다(ADR-0190 — 버리지 않는다).
+/// The cap on the input the link holds (`State::pending`). Over it, that call returns `Err` (ADR-0190 — it does not drop).
 ///
-/// ★근거★: 한 칸이 완결된 유저 턴 하나다. 큐가 서는 창은 핸드셰이크(≈130ms)와 진행 중인 턴 하나뿐이라,
-/// 32 칸이 차 있다는 것은 사람이 답을 하나도 못 본 채 32 턴을 밀어 넣었다는 뜻이다 — 그 지점에서는
-/// 더 받는 것보다 거절하는 쪽이 정직하다.
-/// ★단계를 가리지 않고 전부 센다★ — 넘긴 항목도 받음(에코) 전까지 목록에 보이는 한 칸이다.
+/// Grounds: one entry = one complete user turn; the queue stands only during the handshake (≈130ms) and one ongoing turn, so 32 full
+/// means a person pushed 32 turns without seeing an answer — refusing is more honest than taking more. Everything is counted
+/// regardless of stage (a handed-over item is still one list entry until its echo).
 // ADR-0231
 const INPUT_QUEUE_LIMIT: usize = 32;
 
-/// 리더가 한 번에 읽는 바이트.
 const READ_BUF_BYTES: usize = 4096;
 
-/// 한 줄이 쓸 수 있는 최대 바이트. 넘긴 줄은 **그 줄만** 버리고 다음 개행부터 복구한다.
+/// The maximum bytes one line can use. A line over it is dropped **alone** and recovery starts from the next newline.
 ///
-/// ★이 값은 관측에서 유도한 것이 아니다★ — 관측된 최대치(4KB 대의 오류 본문)는 **하한이 무엇이면
-/// 안 되는지**만 말해 주고 상한을 정해 주지 않는다. 이것이 재는 것은 정상 줄의 크기가 아니라
-/// **개행을 안 보내는 상대가 이 버퍼 하나로 가져갈 수 있는 메모리**이고, 그 축에서 4MiB 는 세션 하나가
-/// 실수로 물 수 있는 양으로는 눈에 띄지 않고 상대가 메모리를 고갈시키기에는 턱없이 작다는 자리다.
-/// ★어긋나면 어느 쪽으로 틀리나★: 너무 크면 그 한 줄이 늦게 잡히고, 너무 작으면 정상 줄이 버려져
-/// 화면이 빈다 — 그래서 관측된 최대치의 천 배 쪽으로 기울였다.
+/// ★Not derived from observation★ — the observed maximum (a 4KB-range error body) only says what the floor must not be. This measures
+/// **the memory a peer that sends no newline can take with this one buffer**: 4MiB is unnoticeable as an amount one session can hold
+/// by mistake and far too small to exhaust memory. Too large → that line is caught late; too small → normal lines are dropped and the
+/// screen goes empty — so it leans to a thousand times the observed maximum.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
-/// 로그·화면으로 옮기는 상대 문자열 상한(문자 수).
+/// The cap (in characters) on peer strings carried into logs and the screen.
 ///
-/// ★근거★: 위 4KB 오류 본문이 자르지 않으면 로그 한 줄을 통째로 덮는다. 512 자면 메서드 이름과 사유
-/// 첫 문장이 남는다.
+/// Grounds: the 4KB error body above would cover a whole log line uncut; 512 keeps the method name and the first sentence of the reason.
 const LOG_STRING_LIMIT: usize = 512;
 
-/// 응답보다 먼저 온 종료 알림의 turn id 를 붙들어 두는 칸 수.
+/// The number of slots holding the turn id of an end notification that came before the response.
 ///
-/// ★근거★: 한 번에 열려 있는 턴은 하나뿐이라 **정상 운용에서 필요한 칸은 하나**다. 나머지는 상대가
-/// 우리가 연 적 없는 턴의 종료를 흘릴 때를 위한 여유이고, 이 값이 그 여유의 상한이다. 넘으면 가장 오래된
-/// 것부터 버린다 — 늦게 온 것일수록 지금 기다리는 턴의 것일 가능성이 높다.
+/// Grounds: only one turn is open, so **one slot suffices in normal operation**; the rest is room for a peer streaming ends of turns we
+/// never opened. Over the cap the oldest are dropped — the later one came, the likelier it belongs to the turn awaited now.
 const EARLY_COMPLETION_SLOTS: usize = 8;
 
-/// 우리가 거절한 승인 요청의 item id 를 기억해 두는 칸 수([`RefusedItems`]).
+/// The number of slots remembering the item ids of approval requests we refused ([`RefusedItems`]).
 ///
-/// ★근거★: 상대는 우리 거절을 받은 그 자리에서 곧바로 그 item 의 끝을 낸다(실측 fixture `refuse_u2a` — 요청 ·
-/// 거절 해소 · 끝이 몇 ms 안에 온다). 그래서 **정상 운용에서 차 있는 칸은 0–1 개**다. 남는 것은 끝이 끝내 안 오는
-/// item(도중에 죽은 상대 · 승인 대기 중 끊긴 턴)뿐이고, 이 값이 그 잔여의 상한이다. 넘으면 가장 오래된 것부터
-/// 버린다 — 밀려난 item 의 늦은 끝은 우리 거절이라는 사유를 잃고 명령은 「오류」, 파일 변경은 `Declined`(이유 모름
-/// — 「거부됨 · 실행되지 않음」)로 보인다.
+/// The peer emits that item's end within a few ms of our refusal (fixture `refuse_u2a`), so 0–1 slots are normally occupied; the rest are
+/// items whose end never comes. Over the cap the oldest drop and that item's late end shows as "error"/`Declined` instead of refused.
 // ADR-0241
 const REFUSED_ITEM_SLOTS: usize = 16;
 
-/// 붙들어 둘 turn id 의 최대 바이트. ★자르지 않고 **거른다**★ — 이 값은 사람이 읽는 관측 키가 아니라
-/// 나중에 **같은지 대조할 토큰**이라, 잘라 보관하면 서로 다른 긴 id 둘이 같은 것으로 읽힐 수 있다.
-/// 관측된 id 는 UUIDv7 문자열(36 바이트)이고 128 은 그 여유분이다.
+/// The maximum bytes of a turn id to hold. ★**Filtered, not truncated**★ — it is a token compared for equality later, and truncating
+/// could make two different long ids read as the same. The observed id is a UUIDv7 string (36 bytes); 128 is room beyond that.
 const MAX_TURN_ID_BYTES: usize = 128;
 
-/// 목록·받음 알림을 쓰는 가장 낮은 codex 판 — `turn/start`·`turn/steer` 의 `clientUserMessageId` 가 이
-/// 판에 들었다(태그 대조 — ADR-0198 의 하한과 같다). 미달이면 오늘 동작 그대로다([`Floor::Below`]).
+/// The lowest codex edition that uses the list · receipt notifications — `clientUserMessageId` of `turn/start` · `turn/steer` came in
+/// with it (tag comparison — same as ADR-0198's floor). Below it, today's behaviour ([`Floor::Below`]).
 // ADR-0231
 const CLIENT_MESSAGE_ID_FLOOR: (u64, u64, u64) = (0, 140, 0);
 
@@ -336,131 +198,105 @@ const RESUME_INSTRUCTIONS_FLOOR: (u64, u64, u64) = (0, 155, 0);
 // ADR-0337
 const CONTEXT_REJECTION_LIMIT: u8 = 2;
 
-// ★오류 코드로 분기하는 자리가 없는 것은 의도다 — 재시도 백오프 상수도 그래서 없다★.
-//   오류 응답은 코드가 무엇이든 그 요청의 대기자를 깨우므로 조용히 멎지 않는다. 그 위에 「특정 코드면
-//   같은 요청을 다시 보낸다」를 얹지 않은 이유는 셋이다: ① 과부하 코드가 실제로 이 봉투로 오는지
-//   미검증이다(스키마에 `-32xxx` 대역이 0 회이고, 과부하·레이트리밋은 `error` **알림**의
-//   `codexErrorInfo` 로 온다) ② 우리가 내는 세 요청은 재시도가 위험하다 — `initialize` 는 한 번만
-//   보낼 수 있고(실측: 두 번째는 오류), `thread/start` 재시도는 스레드를 둘 만들고 `thread/resume`
-//   재시도도 같은 스레드를 두 번 여는 요청이며, `turn/start`
-//   재시도는 상대가 이미 받은 턴을 한 번 더 연다 ③ 그래서 값을 고르려면 실 서버에서 그 코드를 보는 것이
-//   먼저다. ★다시 열 때 필요한 것★ = 어느 요청에 어떤 코드가 언제 오는지의 관측.
+// ★No branching on error codes, hence no retry backoff constant★: an error response wakes its waiter whatever its code. A retry is unsafe
+//   for all three requests (`initialize` works once; `thread/start` creates two threads; `thread/resume`/`turn/start` repeat), and
+//   [unverified — whether an overload code comes in this envelope; observe first].
 
-/// 턴이 끝났다는 알림 — ★이 통로의 상태 기계 입력이다★. 큐 해제는 턴이 끝났다는 사실을 알아야 하므로
-/// 봉투를 분류하는 이 층이 자기 몫으로 읽는다.
+/// The notification that a turn ended — ★the state machine input of this link★.
 ///
-/// ★같은 줄을 번역기도 읽어 턴 경계(`TurnEnd`)로 옮긴다 — 두 독자는 하는 일이 다르다★: 그쪽은
-/// 「이 줄이 무슨 결말을 말하나」를 번역하고(codex 어휘 → 중립 어휘), 이쪽은 「그 결말이 **우리 턴의
-/// 것인가**」를 판정한다. ★번역기에는 그 판정에 쓸 재료가 없다★ — 우리 thread·turn id 는 이 층에만
-/// 있다. 그래서 번역은 무조건 하되 **그 산출을 화면으로 올릴지는 이 층이 정한다**([`Reader::note_turn`]
-/// 의 `boundary` 인자). 그 게이트를 걷으면 남의 턴 종료가 우리 턴을 닫아 이후 출력이 가짜 경계로
-/// 쪼개지고, 사실 계층은 한가함을 관측해 턴 도중에 우편을 꽂는다.
-///
-/// ★`turn/started` 는 **일부러** 읽지 않는다 — 되살리지 말 것★: 그 알림에는 **우리가 발급한 식별자가
-/// 하나도 없어서** 어느 턴의 것인지 원리상 귀속시킬 수 없다. 「지금 턴이 답을 기다리는 중인가」 같은
-/// 정황으로 대신 가르려 하면, 앞 턴의 늦은 알림이 새 턴의 칸에 자기 id 를 적고 그 뒤로는 회복되지
-/// 않는다(그 id 로 온 종료 알림이 살아 있는 턴을 닫고, 큐가 풀려 턴이 겹치고, `interrupt` 가 죽은 턴을
-/// 겨눈다). 턴 id 를 정하는 것은 **우리 요청 id 로 짝지어지는 `turn/start` 응답 하나뿐**이다.
-///
+/// The translator also carries this line as a `TurnEnd` boundary; **whether it belongs to our turn** is decided only here (the `boundary`
+/// argument of [`Reader::note_turn`]), else someone else's end closes our turn and the fact layer plugs mail mid-turn.
+/// ★`turn/started` is deliberately not read — do not revive it★: it carries no identifier we issued, and guessing by circumstance lets a
+/// late notification write its id into the new turn's slot. Only **the `turn/start` response paired by our request id** decides the turn id.
 const TURN_COMPLETED: &str = method::TURN_COMPLETED;
 
-// ── 상태 기계 ─────────────────────────────────────────────────────────────────
+// ── State machine ─────────────────────────────────────────────────────────────────
 
-/// 연결 축. ★끊기면 이 화신에서 되살아나지 않는다(ADR-0192)★ — 재연결도 재`initialize` 도 없다.
+/// The connection axis. ★Once cut, it does not come back in this incarnation (ADR-0192)★ — no reconnect, no re-`initialize`.
 #[derive(Debug)]
 enum Link {
-    /// 핸드셰이크 전 또는 진행 중. 입력은 거절이 아니라 **큐에 선다**.
+    /// Before or during the handshake. Input is not refused but **queues**.
     Connecting,
-    /// 핸드셰이크 둘째 요청(`thread/start` 또는 `thread/resume`)의 응답을 받고 기록 호출이 돌아왔다 —
-    /// `turn/start` 가 여기서부터 허용된다.
+    /// The second handshake response (`thread/start` or `thread/resume`) was received and the record call returned — `turn/start` is
+    /// allowed from here on.
     Ready,
-    /// 끊겼거나 핸드셰이크가 실패했다. 사유는 새 입력을 거절할 때 그대로 인용한다.
+    /// Cut, or the handshake failed. The reason is quoted as is when refusing new input.
     Down(String),
 }
 
-/// 턴 축.
+/// The turn axis.
 ///
-/// ★`turn_id` 를 채우는 것은 `turn/start` **응답** 하나뿐이다★ — 그 응답만이 우리 요청 id 로 짝지어져
-/// 모호함 없이 귀속된다(알림은 안 쓰는 이유 = [`TURN_COMPLETED`] doc).
-/// `seq` = 우리가 턴을 열 때마다 올리는 표식. ★비교는 일치/불일치만★이고, 하는 일은 하나다 — **늦게 온
-/// 것이 그 사이에 열린 다음 턴을 건드리는 것을 막는다.** 이 표식이 없으면 한 스레드 위에서 턴이 겹치고,
-/// 그것을 막으려고 입력 큐가 존재한다(ADR-0193).
+/// ★Only the `turn/start` **response** fills `turn_id`★ — it is the only one paired by our request id (why not notifications:
+/// [`TURN_COMPLETED`] doc). `seq` is a marker raised each time we open a turn; ★comparison is match/mismatch only★ and **prevents
+/// something late from touching the next turn opened in between**. Without it turns overlap on one thread, which the input queue
+/// exists to prevent (ADR-0193).
 #[derive(Debug)]
 enum TurnState {
     Idle,
     Active { seq: u64, turn_id: Option<String> },
 }
 
-/// 하한 판정([`CLIENT_MESSAGE_ID_FLOOR`]) — 핸드셰이크가 한 번 정하고 그 화신 동안 되돌리지 않는다.
+/// The floor decision ([`CLIENT_MESSAGE_ID_FLOOR`]) — decided once by the handshake, never reverted for that incarnation.
 ///
-/// ★`Pending` 동안 든 사용자 항목은 announce 하지 않고 쥔다★ — 판정이 난 쪽이 한꺼번에 정한다
-///   ([`settle_floor`]). 미리 목록에 올리면 미달 판정을 만난 목록 항목이 생긴다(TRD §5-5).
+/// ★User items that came in during `Pending` are held without announcing★ — the side the decision lands on decides them all at once
+/// ([`settle_floor`]); announcing earlier would create list items that meet a below-floor decision (TRD §5-5).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Floor {
     Pending,
-    /// 목록 · 합성 말풍선 · `clientUserMessageId` · 에코 대조가 선다.
+    /// The list · synthetic bubble · `clientUserMessageId` · echo comparison stand.
     Above,
-    /// 오늘 경로 — 항목은 식별자 없이 들고(목록·합성 말풍선·대조 없음) 턴을 여는 순간 빠진다.
+    /// Today's path — items are held without identifiers and leave at the moment the turn opens.
     Below,
 }
 
-/// 한 락 아래 사는 것들. ★"보낼 수 있나" 검사와 "진행 중으로 전이" 가 **같은 임계 구역**이어야 한다★
-/// (ADR-0193): [`AgentTransport::send_input`] 은 `&self` 라 동시 호출이 구조적으로 가능하므로, 둘을
-/// 나누면 두 호출자가 모두 idle 을 보고 각자 턴을 연다. 그 짝짓기가 [`take_turn_locked`] 한 곳에만 있다.
+/// Things living under one lock. ★The "can it send" check and the "transition to in-progress" must be **the same critical section**★
+/// (ADR-0193): [`AgentTransport::send_input`] is `&self`, so concurrent calls are possible and a split would let two callers both see
+/// idle and each open a turn. That pairing exists only in [`take_turn_locked`].
 struct State {
     link: Link,
     turn: TurnState,
     thread_id: Option<String>,
-    /// 턴 게이트를 안 타는 제어 줄. 라이터가 입력보다 **먼저** 집는다 — 거절 응답이 큐에 선 유저 턴
-    /// 뒤에서 기다리면 상대가 그 요청의 답을 영영 못 받는다.
+    /// Control lines that do not go through the turn gate. The writer picks them **before** input — a refusal waiting behind a queued
+    /// user turn would never reach the peer.
     outbox: VecDeque<String>,
-    /// 통로가 쥔 입력 — 도착 순서. 턴은 가장 오래된 `Held` 로 연다. 식별자 없는 항목은 여는 자리에서
-    /// 빠지고, 식별자를 든 항목은 받음(에코)이나 턴 끝 처분까지 `InFlight` 로 남는다([`take_turn_locked`] ·
-    /// [`State::close_turn_items`]).
+    /// The input the link holds, in arrival order. A turn opens with the oldest `Held`. Items without an identifier leave at the opening;
+    /// items carrying one stay `InFlight` until echo or the turn-end disposal ([`take_turn_locked`] · [`State::close_turn_items`]).
     // ADR-0231
     pending: VecDeque<PendingItem>,
     // ADR-0231
     floor: Floor,
-    /// 다음에 열 턴의 표식. 단조 증가만 하고 되감지 않는다.
+    /// The marker of the next turn to open. Only increases, never rewound.
     next_turn_seq: u64,
-    /// ★응답보다 먼저 온 종료 알림★ — 그 시점에는 귀속할 수 없어 붙들어 두고, 뒤이어 오는
-    /// `turn/start` 응답이 **우리 턴의 id 를 권위 있게** 알려 줄 때 대조해 끝낸다.
-    ///
-    /// ★붙드는 것은 「종료가 있었다」가 아니라 **그 id** 다★ — 그 구분이 이 칸이 오귀속이 아닌 이유다.
-    ///   끝내는 판정은 여전히 id 일치 하나뿐이고, 여기 있다는 사실만으로 끝나는 턴은 없다.
+    /// ★An end notification that came before the response★ — it cannot be attributed yet, so it is held and compared when the
+    /// `turn/start` response gives **our turn's id authoritatively**. What is held is that **id**, not "there was an end", which is why
+    /// this is not a misattribution; no turn ends merely by being here.
     early_completions: VecDeque<EarlyCompletion>,
-    /// 이 통로는 더 보낼 것이 없다 — 라이터가 이것을 보고 루프를 끝낸다.
+    /// This link has nothing more to send — the writer sees this and ends its loop.
     ///
-    /// ★세우는 자리가 둘이다★: [`AgentTransport::shutdown`](우리가 죽였다)과 [`ReaderExit`] 의 `Drop`
-    /// (상대가 스스로 끝났거나 **리더가 panic 했다** — `Drop` 이라 unwind 도 반드시 지난다). ★둘째를
-    /// 빠뜨리면 자연 종료한 에이전트마다 라이터 스레드가 영영 남는다★ — 그 스레드가 core·stdin·대기표의
-    /// `Arc` 를 들고 있어 세션 하나치 메모리가 함께 남고, `shutdown()` 은 reaper 경로에서 불리지 않아
-    /// 아무도 그것을 깨우지 않는다.
+    /// ★Set in two places★: [`AgentTransport::shutdown`] (we killed it) and the `Drop` of [`ReaderExit`] (peer ended or the reader
+    /// panicked — `Drop` survives unwinding). ★The second matters: without it the writer thread stays forever for every naturally
+    /// ended agent★, holding the `Arcs` of core · stdin · waiting table (one session's memory), and `shutdown()` is not called on the
+    /// reaper path, so nobody wakes it.
     closed: bool,
-    /// 도구 끝 계기 — 우리 지금 턴의 도구 항목이 끝났다([`Reader::note_tool_item`]) · 또는 턴 id 가 막 온 턴에 쥔 사용자
-    ///   글이 남았다([`Reader::resolve`]). 서 있는 동안 라이터가 쥔 사용자 글을 친 순서대로 하나씩 steer 로 넘기고, 넘길
-    ///   것이 없어지면 내린다([`take_steer_locked`]) — 도구 끝 하나가 쥔 글 전부를 넘긴다(ADR-0235 — 「도구
-    ///   하나 끝나면 슬쩍 끼워 넣는다」). 턴이 닫혀도 내린다([`State::close_turn_items`]). ★세우는 쪽이 같은 락
-    ///   구간에서 `notify_all` 한다★.
+    /// The tool-end trigger — a tool item of our current turn ended ([`Reader::note_tool_item`]) · or user text held for the turn whose
+    /// turn id just came remains ([`Reader::resolve`]). While it stands the writer hands held user texts over as steers one at a time in
+    /// typing order and lowers it when none is left ([`take_steer_locked`]) — one tool end hands over all held text (ADR-0235). Also
+    /// lowered when the turn closes ([`State::close_turn_items`]). ★The setter does `notify_all` in the same lock section★.
     // ADR-0231
     steer_due: bool,
-    /// 오류 뒤 멈춤 — 우리 턴이 이상하게 끝났다(`failed` · `turn/start` 출구 — [`TurnClose`]).
-    ///   ★서 있는 동안 Idle 은 턴을 하나도 열지 않는다★([`State::idle_opening`]) — 쥔 사용자 글 · 우편 모두 저절로 안
-    ///   나간다(TRD §5-5 「오류 뒤 멈춤」 · 사용자 결정 N11).
-    /// 서는 자리 = [`State::close_turn_items`](턴 종류 무관 — 사용자 · Direct · 우편). 풀리는 자리 = 사용자 글이 드는 순간
-    ///   ([`State::push_pending`]) · 통로 닫힘([`ReaderExit`]). 풀린 뒤의 Idle 은 평소 순서라 쥐어 있던 글이 새 글보다 먼저
-    ///   나간다(남은 것이 먼저 — PRD AC24). ★끊기(`interrupted`)는 세우지 않는다★ — 끊긴 뒤 쥔 글은 다음 Idle 에 나간다.
-    ///   ✕ 로 목록이 비는 것 · 시간은 풀지 않는다. ★하한 미달 화신엔 서지 않는다★ — 이 기능 전체와 함께 오늘 경로다.
-    /// ★통로가 스스로 여는 턴만 막는다★ — 우편이 통로에 드는 문은 커널의 `last_end_failed` 이고, 같은 계기의
-    ///   `TurnEnd{Failed}` 를 codex 분류기가 접는다(`classify_turn`). ★[`TurnState`] 밖의 칸이다★ — 멈춤을 `Active` 로
-    ///   표현하면 귀속 게이트가 늦은 에코를 우리 턴으로 세어 턴 표를 다시 켠다(TRD §5-5 「벤더가 보낸 에코」 조건 ①).
-    // ADR-0231: 멈춤 자체와 서는 자리.
-    // ADR-0235: 풀리는 자리 = 사용자 글이 드는 순간(결정 4).
+    /// Halt after error — our turn ended abnormally ([`TurnClose`]). ★While it stands Idle opens no turn★ ([`State::idle_opening`]); neither
+    ///   held user text nor mail goes out on its own (TRD §5-5 「halt after error」 · user decision N11).
+    /// Set in [`State::close_turn_items`]; lifted when user text comes in ([`State::push_pending`]) or the link closes ([`ReaderExit`]) —
+    ///   not by the list emptying through ✕ or time. An interruption does not set it; it does not stand on a below-floor incarnation. It
+    ///   blocks only turns the link opens itself (mail enters through the kernel's `last_end_failed`). ★A field outside [`TurnState`]★ — as
+    ///   `Active` it would make the attribution gate count a late echo as our turn (TRD §5-5 「echo the vendor sent」 condition ①).
+    // ADR-0231
+    // ADR-0235: lifted when user text comes in.
     halted: bool,
-    /// 「steer 거절」 표시 — steer 가 오류 응답을 받았거나 쓰지 못한 턴의 표식([`TurnState::Active`] 의 `seq`). 그 턴
-    ///   동안은 쥔 항목을 하나도 넘기지 않는다([`take_steer_locked`]). 벤더가 그 턴의 창을 닫았으므로(쓰기 실패면 같은
-    ///   쓰기가 또 실패할 것이므로) 같은 턴에 다시 보내는 고리를 만들지 않는다. 다음 턴은 표식이 달라 저절로 풀린다.
+    /// The 「steer refused」 mark — the marker (`seq` of [`TurnState::Active`]) of a turn whose steer got an error response or could not
+    ///   be written. No held item is handed over in that turn ([`take_steer_locked`]): the vendor closed its window (for a write
+    ///   failure the same write would fail again). The next turn has a different marker.
     // ADR-0231
     steer_refused: Option<u64>,
     /// The instructions-change context still to deliver ([`AppServerOpen::first_turn_context`]) — attached to every
@@ -485,23 +321,22 @@ struct State {
     instructions_delivered: bool,
 }
 
-/// 처분 한 번이 낼 것 — 상태 락 아래서 모으고, 호출자가 락을 놓은 뒤 [`Disposal::emit`] 한다(ADR-0006 · 로그도 락
-/// 밖에서 찍는다 — 사유 = [`TurnNoteLog`]).
+/// What one disposal will emit — gathered under the state lock; the caller runs [`Disposal::emit`] after releasing it (ADR-0006; logs
+/// too — reason [`TurnNoteLog`]).
 // ADR-0231
 #[derive(Debug, Default)]
 struct Disposal {
     events: Vec<QueuedInputEvent>,
-    /// 쥔 자리로 되돌린 항목의 계측 줄(`held_again` — [`STEER_TRACE`]).
+    /// Trace lines of items returned to the held place (`held_again` — [`STEER_TRACE`]).
     traces: Vec<SteerTrace>,
-    /// 이번 처분이 낸 멈춤의 전이.
     transitions: Vec<Transition>,
-    /// 쥔 자리로 되돌린 목록 항목의 id — 넘김 표지를 다시 읽어 낸다([`publish_hand_over`]).
+    /// Ids of list items returned to the held place — their handed-over mark is re-emitted ([`publish_hand_over`]).
     handed_back: Vec<String>,
 }
 
 impl Disposal {
-    /// 전이 → 계측 줄 → 목록 사건 → 넘김 표지 순. ★턴 경계보다 먼저 부른다★ — 경계가 깨우는 소비자가 정리된 목록을
-    /// 본다([`end_turn_if`]).
+    /// Order: transition → trace lines → list events → handed-over marks. ★Call it before the turn boundary★ — the consumer the boundary
+    /// wakes must see a tidied list ([`end_turn_if`]).
     fn emit(self, core: &OutputCore, state: &SharedState) {
         write_transitions(core.id(), self.transitions);
         for t in &self.traces {
@@ -516,16 +351,11 @@ impl Disposal {
     }
 }
 
-/// 넘김 표지(`HandedOver`)를 낸다 — ★값은 부르는 쪽이 정하지 않고 항목의 지금 단계에서 읽는다★(`InFlight` = 넘김 ·
-/// `Held` = 쥠). 방출을 마친 목록 항목만 낸다 — Direct · 우편 · 식별자 없는 항목 · 이미 빠진 항목 · 죽음 표시가 달린
-/// 항목은 아무것도 안 낸다(그래서 표지가 링에서 그 `Queued` 보다 앞서지 않는다).
+/// Emits the handed-over mark (`HandedOver`) — ★the value is read from the item's current stage★ (`InFlight` = handed over · `Held` =
+/// held). Only list items that finished announcing emit it (so it never precedes `Queued`).
 ///
-/// ★낸 뒤 다시 읽어 바뀌었으면 또 낸다★ — 넘기는 쪽(라이터 — 쓰기를 마친 뒤)과 되돌리는 쪽(리더 · 턴 끝)은 서로 다른
-///   스레드에서 상태 락을 놓은 뒤에 내므로, 고정값을 내면 늦게 낸 쪽의 낡은 값이 링의 마지막 표지로 남는다(넘긴 글이
-///   「대기」로 · 쥔 글이 ✕ 없는 「보냄」으로). 단계를 바꾼 쪽은 늘 이것을 부르고, 이것은 다시 읽은 값이 마지막으로 낸
-///   값과 같을 때에만 멈추므로 링의 마지막 표지 = 마지막 단계다. 같은 값이 겹쳐 나가는 것은 무해하다(환원기는 표지를
-///   갈아 끼울 뿐이다).
-/// 상태 락은 읽는 동안만 쥔다(ADR-0006 — emit 은 락 밖).
+/// ★It re-reads after emitting and re-emits if changed★: the handing-over side (writer) and the returning side (reader · turn end) emit on
+/// different threads after releasing the state lock, so a fixed value could leave a stale last mark in the ring. A duplicate is harmless.
 // ADR-0231
 // ADR-0235
 fn publish_hand_over(core: &OutputCore, state: &SharedState, id: &str) {
@@ -554,17 +384,17 @@ fn publish_hand_over(core: &OutputCore, state: &SharedState, id: &str) {
     }
 }
 
-/// 오류 뒤 멈춤의 전이 한 건 — 상태 락 아래서 모으고 락을 놓은 뒤 [`write_transitions`] 로 찍는다(사유 =
-/// [`TurnNoteLog`]). ★사용자 글은 싣지 않는다★ — 표식(턴)만 싣는다.
-/// 레벨: 서고 풀림은 info(통로가 스스로 여는 턴이 멈추고 풀리는 운영 사건) · 버림은 debug(통로 닫힘의 뒷정리).
+/// One transition of the halt after error — gathered under the state lock, written by [`write_transitions`] after releasing it
+/// ([`TurnNoteLog`]). ★User text is not carried★, only the turn marker.
+/// Levels: set and lift are info; discard is debug (cleanup on link close).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Transition {
-    /// 턴 `turn` 이 `close` 로 끝나 멈췄다([`State::halted`]).
+    /// Turn `turn` ended with `close` and halted ([`State::halted`]).
     Halted { turn: u64, close: TurnClose },
-    /// 사용자 글이 들어 멈춤이 풀렸다([`State::push_pending`] — 찍는 쪽 = [`AgentTransport::send_turn`]).
+    /// User text came in and the halt was lifted ([`State::push_pending`] — the writer = [`AgentTransport::send_turn`]).
     HaltLifted,
-    /// 통로가 닫히며 서 있던 멈춤을 버렸다([`ReaderExit`]).
+    /// The link closed and discarded the standing halt ([`ReaderExit`]).
     Discarded,
 }
 
@@ -575,70 +405,68 @@ impl Transition {
                 agent = %agent,
                 turn,
                 ?close,
-                "codex app-server: 오류 뒤 멈춤 — 다음 사용자 글까지 턴을 열지 않는다"
+                "codex app-server: halt after error — no turn is opened until the next user text"
             ),
             Transition::HaltLifted => tracing::info!(
                 agent = %agent,
-                "codex app-server: 오류 뒤 멈춤 풀림 — 사용자 글이 들었다"
+                "codex app-server: halt after error lifted — user text came in"
             ),
             Transition::Discarded => tracing::debug!(
                 agent = %agent,
-                "codex app-server: 통로가 닫혀 오류 뒤 멈춤을 버린다"
+                "codex app-server: the link closed, discarding the halt after error"
             ),
         }
     }
 }
 
-/// 모은 전이를 찍는다 — ★상태 락을 놓은 뒤에 부른다★(사유 = [`TurnNoteLog`]).
+/// Writes the gathered transitions — ★call it after releasing the state lock★ ([`TurnNoteLog`]).
 fn write_transitions(agent: AgentId, transitions: Vec<Transition>) {
     for t in transitions {
         t.write(agent);
     }
 }
 
-/// 응답보다 먼저 온 `turn/completed` 한 건 — id 와 **그 줄이 만든 턴 경계**를 함께 붙든다.
+/// One `turn/completed` that came before the response — holds the id together with **the turn boundary that line made**.
 ///
-/// ★경계까지 붙드는 이유★: 이 시점에 그 경계를 화면으로 올리면 아직 귀속되지 않은 종료가 살아 있는
-///   턴을 닫는다([`Boundary`]). 그렇다고 버리면 대조가 성립한 뒤에 올릴 것이 없어져 **그 대화의 대기
-///   표시가 영영 돈다** — 결말을 알고 있었는데도 그렇다. 그래서 미루기만 한다.
+/// ★Why the boundary is held too★: raising it to the screen now would let an unattributed end close a live turn ([`Boundary`]), but
+/// dropping it would leave nothing to raise once the comparison holds and **that conversation's waiting indicator would spin
+/// forever**. So it is only deferred.
 struct EarlyCompletion {
-    /// 대조용 토큰. ★마스킹하지 않고 담는 것은 의도다★ — 변형하면 대조가 깨진다. 대신 길이로 거르고
-    /// ([`MAX_TURN_ID_BYTES`]), 로그·화면으로 나갈 때 [`sanitize`] 를 지난다.
+    /// The comparison token. ★Held unmasked on purpose★ — transforming it would break the comparison; it is filtered by length
+    /// ([`MAX_TURN_ID_BYTES`]) and passes [`sanitize`] when going to the log · screen.
     turn_id: String,
-    /// 그 줄에서 번역기가 낸 턴 경계. `None` = 번역기가 경계를 못 냈다(모양이 깨진 줄·번역기 없음).
+    /// The boundary the translator emitted from that line. `None` = it could not emit one (malformed line · no translator).
     boundary: Option<OutputEvent>,
-    /// 그 줄의 status — 대조가 선 자리에서 그 턴의 항목을 처분한다(TRD §5-5 「이른 종료도 턴 끝이다」).
-    ///   경계에서 되읽지 않는 것은 번역기가 없거나 경계를 못 낸 줄에서도 처분은 서야 해서다.
+    /// That line's status — where the comparison holds, that turn's items are disposed (TRD §5-5 「an early end is a turn end too」). Not
+    /// read back from the boundary because disposal must stand even when no boundary could be emitted.
     // ADR-0231
     close: TurnClose,
 }
 
-/// 우리 턴이 끝난 모양 — 그 턴의 항목 처분([`State::close_turn_items`])을 가른다.
+/// The shape in which our turn ended — splits the disposal of that turn's items ([`State::close_turn_items`]).
 // ADR-0231
 // ADR-0234
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnClose {
-    /// `turn/completed` 의 `completed`.
     Completed,
-    /// `turn/completed` 의 뜻을 모르는 status · status 없음(`inProgress` 포함 — 결말로 옮겨지지 않는 값이다). 처분은
-    ///   `Completed` 와 같되 ★오류 뒤 멈춤을 세우지 않는다★ — 커널 분류기가 같은 줄을 「그 밖의
-    ///   끝」(`TurnOutcome::Unknown` → `TurnEndKind::Other`)으로 접어 `last_end_failed` 를 오류 끝으로 세우지 않는다.
+    /// A `turn/completed` status of unknown meaning · no status (incl. `inProgress`). Disposal same as `Completed` but ★it does not set
+    ///   the halt★ — the kernel classifier folds the same line into `TurnOutcome::Unknown` → `TurnEndKind::Other` and does not set
+    ///   `last_end_failed`.
     Unknown,
-    /// `turn/completed` 의 `failed`. 이것과 `Rejected`·`Unanswered` 가 실패 끝이다 — 그 턴이 실은 에코 없는 사용자 글을
-    ///   쥔 자리로 되돌리고(다른 끝과 같다) 오류 뒤 멈춤을 세운다([`State::close_turn_items`] · [`State::halted`]).
+    /// `failed` of `turn/completed`. With `Rejected` · `Unanswered` it is a failure end: it returns the user text that turn carried without
+    /// an echo to the held place and sets the halt ([`State::close_turn_items`] · [`State::halted`]).
     Failed,
-    /// `turn/completed` 의 `interrupted` — 벤더는 넘긴 것을 에코도 이력도 없이 버린다(M6). 실패 끝이 아니다 — 멈춤을
-    ///   세우지 않고 실은 글을 지우지 않는다: 쥔 글과 쥔 자리로 돌아온 글은 다음 Idle 에 나간다(사용자 결정 2026-09-26).
+    /// `interrupted` of `turn/completed` — the vendor drops what was handed over with neither echo nor history (M6). Not a failure end:
+    /// it neither sets the halt nor erases text; held and returned text go out at the next Idle (user decision 2026-09-26).
     Interrupted,
-    /// `turn/start` 가 벤더에 닿지 않았거나 벤더가 거절했다 — 쓰기 실패 · 오류 응답.
+    /// `turn/start` did not reach the vendor or was refused — write failure · error response.
     Rejected,
-    /// `turn/start` 를 벤더가 받았는지 모른다 — 응답 시한 · 응답 해독 실패 · 상한을 넘은 turn id. 실패 끝이라 처분은
-    ///   `Failed` 와 같다(받혔으면 그 전에 온 에코가 이미 받음으로 닫았다).
+    /// Unknown whether the vendor received `turn/start` — response deadline · decode failure · turn id over the cap. A failure end, disposal
+    ///   same as `Failed` (if it was received, an earlier echo already closed it as received).
     Unanswered,
 }
 
 impl TurnClose {
-    /// `turn/completed` params 의 `turn.status`.
     fn of_completion(params: Option<&Value>) -> Self {
         match params
             .and_then(|p| p.get("turn"))
@@ -653,29 +481,17 @@ impl TurnClose {
     }
 }
 
-// ── 턴 도중 넘기기 계측 (ADR-0235) ─────────────────────────────
+// ── Mid-turn handover trace (ADR-0235) ─────────────────────────────
 
-/// 턴 도중 넘기기 계측 줄의 target — `RUST_LOG=engram::codex_steer=debug` 로 켠다. 꺼져 있으면 재료도 안 모은다
-/// ([`SteerTrace::enabled`] — 기본 레벨 warn 에서는 한 줄도 안 나간다). 줄은 사건마다 하나다.
-///
-/// ★칸 이름은 계약이다★ — QA 가 로그를 이 이름으로 읽는다. 모든 줄이 `agent` · `phase` · `item_id` 를 싣고 `turn_id` 는
-///   그 턴을 알 때만 싣는다. `phase` 가 줄의 종류다([`SteerPhase`]):
-///   - `tool_start` — 우리 지금 턴의 도구 항목 `item/started`(`item_id` = 그 도구의 id).
-///   - `tool_end` — 같은 도구 항목의 `item/completed`. `held` = 그 순간 쥔 사용자 항목 수.
-///   - `steer` — 라이터가 쥔 항목 하나의 `turn/steer` 쓰기를 마쳤다(`item_id` = 그 항목 · `request` = 요청 id).
-///   - `write_failed` — 그 `turn/steer` 를 쓰지 못했다(칸은 `steer` 와 같다) — 벤더에 닿지 않았다.
-///   - `refused` — 그 steer 가 오류 응답을 받았다(`turn_id` 는 그 턴이 아직 돌 때만).
-///   - `echo` — 쥔 목록의 항목이 `userMessage` 되울림으로 받음이 됐다(`turn_id` = 그 항목이 들어간 턴).
-///   - `held_again` — 넘긴 항목이 에코 없이 그 턴이 끝나 쥔 자리로 돌아갔다(`turn_id` = 넘긴 턴 · `close` = 그 끝의 모양
-///     — [`TurnClose`] 이름).
-/// 이 줄로 QA 가 가르는 것 = 도구 하나가 끝난 뒤 넘긴 글이 다음 도구 앞에 들었나(`tool_end` → `steer` → `echo` 가 다음
-///   `tool_start` 보다 먼저인가). ★줄 순서는 스레드 사이에서 보장되지 않는다★ — 리더(`tool_*` · `refused` · `echo`)와
-///   라이터(`steer` · `write_failed`)가 따로 찍으므로 순서는 줄의 시각으로 본다. 줄은 상태 락을 놓은 뒤에 찍는다(사유 =
-///   [`TurnNoteLog`]).
+/// Target of the mid-turn handover trace lines — `RUST_LOG=engram::codex_steer=debug`; when off nothing is gathered
+/// ([`SteerTrace::enabled`]). ★Field names are a contract★ — QA reads the log by them: every line has `agent` · `phase` · `item_id`
+/// (`turn_id` when known); `phase` ([`SteerPhase`]) ∈ `tool_start` · `tool_end` (+`held`) · `steer` (+`request`) · `write_failed` ·
+/// `refused` · `echo` · `held_again` (+`close` = [`TurnClose`] name). ★Order is not guaranteed across threads★ (reader vs writer lines) —
+/// read timestamps. Written after releasing the state lock ([`TurnNoteLog`]).
 // ADR-0231
 const STEER_TRACE: &str = "engram::codex_steer";
 
-/// [`STEER_TRACE`] 줄의 종류 — `phase` 칸의 값([`SteerPhase::name`] · QA 계약이라 바꾸지 않는다)과 한 줄 메시지.
+/// The kinds of [`STEER_TRACE`] lines — the `phase` field value ([`SteerPhase::name`], a QA contract: do not change) and a message.
 // ADR-0235
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SteerPhase {
@@ -703,38 +519,38 @@ impl SteerPhase {
 
     fn message(self) -> &'static str {
         match self {
-            SteerPhase::ToolStart => "codex steer: 도구 시작",
-            SteerPhase::ToolEnd => "codex steer: 도구 끝 — 쥔 사용자 글을 넘길 계기",
-            SteerPhase::Steer => "codex steer: 쥔 글을 turn/steer 로 넘겼다",
+            SteerPhase::ToolStart => "codex steer: tool started",
+            SteerPhase::ToolEnd => "codex steer: tool ended — the trigger to hand over held user text",
+            SteerPhase::Steer => "codex steer: handed held text over with turn/steer",
             SteerPhase::WriteFailed => {
-                "codex steer: turn/steer 를 쓰지 못했다 — 벤더에 닿지 않았다"
+                "codex steer: could not write turn/steer — it did not reach the vendor"
             }
-            SteerPhase::Refused => "codex steer: turn/steer 거절 — 벤더가 그 글을 받지 않았다",
-            SteerPhase::Echo => "codex steer: 되울림 — 쥔 목록의 글이 받음이 됐다",
+            SteerPhase::Refused => "codex steer: turn/steer refused — the vendor did not take that text",
+            SteerPhase::Echo => "codex steer: echo — text in the held list became received",
             SteerPhase::HeldAgain => {
-                "codex steer: 에코 없이 턴이 끝나 넘긴 글을 쥔 자리로 되돌렸다"
+                "codex steer: the turn ended without an echo, returning the handed-over text to the held place"
             }
         }
     }
 }
 
-/// [`STEER_TRACE`] 줄 한 건 — 재료는 상태 락 안에서 모으고 락 밖에서 찍는다.
+/// One [`STEER_TRACE`] line — material gathered inside the state lock, written outside it.
 // ADR-0231
 #[derive(Debug)]
 struct SteerTrace {
     phase: SteerPhase,
     turn_id: Option<String>,
     item_id: String,
-    /// `tool_end` 만 — 그 순간 쥔 사용자 항목 수.
+    /// `tool_end` only — user items held at that moment.
     held: Option<usize>,
-    /// `steer` 만 — 그 `turn/steer` 의 요청 id.
+    /// `steer` only — the request id of that `turn/steer`.
     request: Option<i64>,
-    /// `held_again` 만 — 그 턴이 끝난 모양.
+    /// `held_again` only — the shape in which that turn ended.
     close: Option<TurnClose>,
 }
 
 impl SteerTrace {
-    /// 줄이 꺼져 있으면 재료(id 복사)를 안 만든다.
+    /// If the line is off, the material (id copy) is not built.
     fn enabled() -> bool {
         tracing::enabled!(target: STEER_TRACE, tracing::Level::DEBUG)
     }
@@ -750,8 +566,7 @@ impl SteerTrace {
         }
     }
 
-    /// 턴 id 와 도구 항목 id 는 벤더가 준 문자열이라 [`sanitize`] 를 지나 나간다 — 우리 항목 id 도 같은 문을 지난다(칸마다
-    /// 출처를 가르지 않는다).
+    /// The turn id and tool item id are vendor strings, so they go through [`sanitize`]; our item id goes through the same door.
     fn write(&self, agent: AgentId) {
         let turn_id = self
             .turn_id
@@ -772,24 +587,21 @@ impl SteerTrace {
     }
 }
 
-/// 라이터가 집은 steer 한 건 — 항목은 집는 락 구간에서 이미 `InFlight` 로 옮겼다([`take_steer_locked`]).
+/// One steer the writer picked — the item was already moved to `InFlight` in the picking lock section ([`take_steer_locked`]).
 // ADR-0231
 #[derive(Debug)]
 struct Steer {
-    /// 우리 요청 id — 대기표 키.
     request: i64,
-    /// 넘긴 항목의 id — 응답을 그 항목에 짝짓는다([`Waiter::Steer`]).
+    /// The id of the handed-over item — pairs the response with it ([`Waiter::Steer`]).
     item: String,
-    /// 그 항목이 들어간 턴의 표식 = 그 항목의 `InFlight` 세대.
+    /// The marker of the turn the item went into = its `InFlight` generation.
     gen: u64,
     line: String,
-    /// 넘긴 턴의 id — 계측 줄([`STEER_TRACE`])의 재료.
     turn_id: String,
 }
 
 impl Steer {
-    /// 이 steer 의 계측 줄 — `steer`(라이터가 쓰기를 마친 뒤 · [`writer_loop`]) · `write_failed`([`steer_write_failed`]).
-    /// 줄이 꺼져 있으면 `None`.
+    /// The trace line of this steer — `steer` (after the write · [`writer_loop`]) · `write_failed` ([`steer_write_failed`]). `None` if off.
     fn trace(&self, phase: SteerPhase) -> Option<SteerTrace> {
         SteerTrace::enabled().then(|| SteerTrace {
             request: Some(self.request),
@@ -858,15 +670,13 @@ impl State {
         true
     }
 
-    /// Idle 이 다음에 여는 턴의 쥔 항목 자리 — TRD §5-5 「턴을 여는 순서 = 사용자 먼저」(PRD §3-9 · 사용자 결정 N6).
-    /// ★상태만으로 정한다★. 턴이 열릴 수 있는지(`Ready` · `Idle`)는 부르는 쪽([`take_turn_locked`])이 본다.
-    ///   1. 가장 오래된 사용자 `Held`(Direct · 턴 끝에서 쥔 자리로 돌아온 글 포함). 방출 전이어도 그것이 머리다 — 여는
-    ///      쪽이 방출을 기다린다(건너뛰지 않는다 — 친 순서).
-    ///   2. 없으면 가장 오래된 우편(식별자 없는 항목 포함).
-    /// ★오류 뒤 멈춤 중이면([`State::halted`]) 아무것도 안 연다★ — 다음 사용자 글이 멈춤을 풀면 1 부터 평소대로다(쥐어
-    ///   있던 글이 그 새 글보다 먼저 — 남은 것이 먼저).
-    /// ★하한 판정이 `Above` 가 아니면 오늘 순서 그대로다★(가장 오래된 `Held` · 출처 무관) — 미달 화신은 이 기능 전체와
-    ///   함께 오늘 동작이고, 멈춤도 서지 않는다.
+    /// The held item the next Idle turn opens — TRD §5-5 「the order of opening turns = user first」 (PRD §3-9 · user decision N6).
+    /// ★Decided by state alone★; whether a turn can open (`Ready` · `Idle`) is the caller's check ([`take_turn_locked`]).
+    ///   1. The oldest user `Held` (incl. Direct · text returned at turn end). Even before announcing it is the head — the opening side
+    ///      waits for the announcement (typing order).
+    ///   2. Otherwise the oldest mail (incl. items without an identifier).
+    /// ★During a halt ([`State::halted`]) nothing is opened★ — once the next user text lifts it, order is as above.
+    /// ★If the floor decision is not `Above`★ it is today's order (oldest `Held` · any source) and the halt does not stand either.
     // ADR-0231
     fn idle_opening(&self) -> Option<usize> {
         let held = |p: &PendingItem| matches!(p.stage, Stage::Held);
@@ -882,21 +692,21 @@ impl State {
             .or_else(|| self.pending.iter().position(held))
     }
 
-    /// 항목 하나를 `Held` 로 맨 뒤에 넣고 **무엇을 방출할지 정한다**. 사용자 항목이면 오류 뒤 멈춤을 푼다([`State::halted`]
-    /// — 돌려주는 값 = 이번에 풀었다. 그 전이 로그는 호출자가 락 밖에서 찍는다).
+    /// Puts one item at the end as `Held` and **decides what to announce**. A user item lifts the halt ([`State::halted`]); the returned
+    /// value = it was lifted this time (the caller writes that transition log outside the lock).
     ///
-    /// ★분류는 넣기 **전** 상태로, 넣기와 같은 임계 구역에서 한다★: `Ready ∧ Idle ∧ pending 빔` 이면
-    ///   Direct(합성 말풍선 · 목록 밖), 그 밖의 사용자 항목은 Queued(목록). ★Direct 도 pending 에 넣는다★ —
-    ///   안 넣으면 같은 한가 순간의 둘째 입력도 「빔」을 보고 Direct 가 되고, 목록에도 없는 항목이 쥐여
-    ///   새 글과 우편을 막는 갈래가 생긴다(TRD §5-5 「Direct 항목도 pending 에 둔다」).
-    /// 방출할 것이 있는 항목은 `announced=false` 로 들고, 방출은 락 밖의 [`announce`] 가 한다.
-    /// 우편 · 식별자 없는 항목은 낼 것이 없다. 미달 판정 뒤에는 식별자를 버린다(오늘 경로).
+    /// ★Classification uses the state **before** putting, in the same critical section★: `Ready ∧ Idle ∧ pending empty` → Direct
+    ///   (synthetic bubble · outside the list); other user items are Queued (list). ★Direct is also put into pending★ — otherwise the
+    ///   second input of the same idle moment also sees "empty" and becomes Direct, leaving a held item outside the list that blocks new
+    ///   text and mail (TRD §5-5 「Direct items are kept in pending too」).
+    /// Items with something to announce are held `announced=false`; [`announce`] emits outside the lock. Mail · items without an
+    /// identifier emit nothing. After a below-floor decision the identifier is dropped.
     // ADR-0231
     fn push_pending(&mut self, id: Option<String>, body: Vec<u8>, origin: InputOrigin) -> bool {
         let id = if self.floor == Floor::Below { None } else { id };
         let (listed, announced) = match (&id, origin, self.floor) {
             (None, _, _) | (Some(_), InputOrigin::Mail, _) => (false, true),
-            // 판정 전 — 판정이 난 쪽이 정한다([`settle_floor`]).
+            // Before the decision — the side the decision lands on decides ([`settle_floor`]).
             (Some(_), InputOrigin::User, Floor::Pending) => (false, false),
             (Some(_), InputOrigin::User, _) => {
                 let direct = matches!(self.link, Link::Ready)
@@ -915,15 +725,14 @@ impl State {
             cancel_asked: false,
             death: None,
         });
-        // ADR-0235: 오류 뒤 멈춤은 다음 사용자 글이 푼다 — 그 뒤 ✕ 로 그 글이 빠져도 다시 서지 않는다.
+        // ADR-0235: the next user text lifts the halt — even if that text later leaves by ✕, it does not stand again.
         origin == InputOrigin::User && std::mem::take(&mut self.halted)
     }
 
-    /// 벤더가 그 글을 받았다(`clientId` 에코) — 단계와 무관하게 pending 에서 뺀다. ★받음이 이긴다★:
-    ///   에코는 어느 단계에서 와도 그 글이 이력에 들었다는 사실이라(TRD §5-5 「소비 에코」), 쥔 항목(턴 끝에서 쥔
-    ///   자리로 돌아온 글 포함)이면 다시 나가지 않고 넘긴 항목이면 그 요청의 늦은 응답이
-    ///   [`State::turn_start_carrier`] 대조에서 무동작이 된다(세대 가림). 돌려주는 값 = 뺀 항목(`None` = 통로가
-    ///   모르는 id — 우편 · 이미 결말 · 같은 글의 둘째 에코).
+    /// The vendor received that text (`clientId` echo) — removed from pending regardless of stage. ★Receipt wins★: an echo at any stage
+    ///   means the text is in the history (TRD §5-5 「consumption echo」), so a held item does not go out again, and for a handed-over item
+    ///   the late response becomes a no-op in the [`State::turn_start_carrier`] comparison. Returns the removed item (`None` = id unknown
+    ///   to the link — mail · already resolved · second echo).
     // ADR-0231
     fn take_delivered(&mut self, id: &str) -> Option<PendingItem> {
         let pos = self
@@ -933,12 +742,11 @@ impl State {
         self.pending.remove(pos)
     }
 
-    /// 표식 `gen` 의 `turn/start` 가 실은 항목 중 아직 응답을 기다리는 것 — 그 턴의 `InFlight` 중 턴 id 를
-    /// 모르는 것.
+    /// Among the items the `turn/start` of marker `gen` carried, the one still waiting for a response — the `InFlight` of that turn with
+    /// unknown turn id.
     ///
-    /// ★하나뿐이다★: 한 `turn/start` 에는 한 항목만 싣고(TRD §5-5), steer 는 턴 id 를 안 **뒤에만**
-    ///   나가 자기 항목에 그 id 를 적는다. 단계가 이미 옮겨 갔으면(에코로 빠졌다 · 처분됐다) `None` — 늦은
-    ///   응답은 무동작이다(세대 가림).
+    /// ★There is only one★: a `turn/start` carries one item (TRD §5-5) and a steer goes out only after the turn id is known. If the
+    /// stage moved on (echo · disposed), `None` — the late response is a no-op (generation masking).
     // ADR-0231
     fn turn_start_carrier(&mut self, gen: u64) -> Option<&mut PendingItem> {
         self.pending.iter_mut().find(|p| {
@@ -949,12 +757,11 @@ impl State {
         })
     }
 
-    /// 목록 항목(또는 거절된 Direct) 하나를 이 원인으로 처분한다 — 낼 `Dropped` 를 돌려주고, 호출자가 락
-    /// 밖에서 낸다.
+    /// Disposes one list item (or a refused Direct) for this cause — returns the `Dropped` to emit outside the lock.
     ///
-    /// ★announce 전이면 죽음 표시만 달고 `None`★ — 그 항목의 `Queued` 가 아직 링에 없을 수 있어, 여기서
-    ///   `Dropped` 를 내면 링에서 `Queued` 보다 앞설 수 있다. [`announce`] 가 `Queued` **바로 뒤에** 잇고
-    ///   항목을 뺀다(TRD §5-5 「처분이 announce 전 항목을 만나면」).
+    /// ★Before announce only the death mark is attached and `None` is returned★ — `Queued` may not be in the ring yet, so emitting
+    ///   `Dropped` could precede it. [`announce`] follows **right after** `Queued` and removes the item (TRD §5-5 「when a disposal meets
+    ///   an item before announce」).
     // ADR-0231
     fn drop_listed(&mut self, pos: usize, cause: DropCause) -> Option<QueuedInputEvent> {
         let item = self.pending.get_mut(pos)?;
@@ -966,36 +773,25 @@ impl State {
         item.id.map(|id| QueuedInputEvent::Dropped { id, cause })
     }
 
-    /// 표식 `gen` 의 턴이 `close` 로 끝났다 — 그 턴의 항목을 처분하고 낼 것을 돌려준다(호출자가 락 밖에서
-    /// [`Disposal::emit`] 한다).
+    /// The turn of marker `gen` ended with `close` — disposes that turn's items and returns what to emit (the caller runs
+    /// [`Disposal::emit`] outside the lock).
     ///
-    /// ★턴을 `Idle` 로 되돌리는 **같은 임계 구역**에서 부른다★ — 벌어지면 그 틈에 든 새 글이 결말 없는
-    ///   `InFlight` 를 보고 대기로 분류되고, 턴이 끝나는 길 하나라도 이것을 빠뜨리면 그 항목이 pending 에
-    ///   영영 남아 새 글이 전부 대기로 간다(TRD §5-5 「다섯 출구」 불변식).
+    /// ★Call it in **the same critical section** that returns the turn to `Idle`★ — else new text in the gap sees an outcome-less `InFlight`;
+    /// a missed ending path leaves it in pending forever (TRD §5-5 「five exits」).
     ///
-    /// | 항목 | 어느 끝이든(`Completed` · `Unknown` · `Interrupted` · `Failed` · `Rejected` · `Unanswered`) |
+    /// | Item | Any end (`Completed` · `Unknown` · `Interrupted` · `Failed` · `Rejected` · `Unanswered`) |
     /// |---|---|
-    /// | 그 턴에 넘긴 사용자 항목(목록 · Direct) — 에코 없음 | 쥔 자리로 되돌린다(결말 사건 없음 — 목록 행 · 그린 말풍선 그대로 · 목록 행은 넘김 표지만 다시 낸다) |
-    /// | 그 턴에 넘긴 사용자 항목 — 넘긴 뒤 ✕ 가 닿았다 | `Dropped{Withdrawn}` |
-    /// | 그 턴에 넘긴 우편 | 사건 없이 뺀다 |
-    /// | 쥔 항목 | 그대로 |
+    /// | User item handed over in that turn — no echo | Returned to the held place (no outcome event; only the handed-over mark re-emits) |
+    /// | … ✕ reached it after the handover | `Dropped{Withdrawn}` |
+    /// | Mail handed over in that turn | Removed without an event |
+    /// | Held item | As is |
     ///
-    /// ★받음(에코)만이 넘긴 글을 목록에서 받음으로 뺀다★ — 에코 없이 끝난 턴의 글은 다시 쥐고 다음 턴을 탄다(Idle 순서 —
-    ///   [`State::idle_opening`]). 자리를 안 옮기므로 친 순서가 그대로다. 뒤늦은 에코가 오면 쥔 채로 받음이 된다
-    ///   ([`State::take_delivered`] — 다시 나가지 않는다).
-    /// ★실패 끝도 지우지 않는다★(사용자 결정 2026-09-26 · ADR-0235 — 「실패는 지워」를 대신한다) — 되돌린 글과 쥔 글은 아래
-    ///   멈춤([`State::halted`])이 다음 사용자 글까지 기다리게 한다. 실패 끝과 나머지 끝이 갈리는 것은 그 멈춤뿐이다.
-    /// ✕ 가 닿은 항목을 쥐지 않는 것은 사용자가 이미 뺐기 때문이다 — 되돌리면 다음 턴에 나간다.
-    /// 우편은 다시 쥐지 않는다(오늘 처분 그대로) — 목록 밖이라 그 글의 결말은 커널이 진다.
-    /// ★steer 응답을 기다리지 않는다★ — 받힌 steer 의 에코는 `turn/completed` 보다 먼저 오므로(TRD §3-2 · M10) 이 끝에서
-    ///   에코 없는 글은 안 받혔다. 그 요청의 늦은 응답은 세대 대조가 무동작으로 만든다([`State::hold_refused_steer`]).
-    /// ★오류 뒤 멈춤도 여기서 선다★([`State::halted`]) — 턴이 끝나는 길 전부(`turn/completed` · 이른 종료 풀기 ·
-    ///   `turn/start` 다섯 출구)가 이 함수를 지나므로 계기를 따로 걸 자리가 없다. `Failed`·`Rejected`·`Unanswered` 가
-    ///   세우고(하한 충족 화신만) `Completed` · `Interrupted` · `Unknown` 은 건드리지 않는다(푸는 쪽 = [`State::push_pending`]).
-    /// 멈춤의 전이는 [`Disposal::transitions`] 에, 되돌림의 계측 줄(`held_again`)은 [`Disposal::traces`] 에 싣는다
-    ///   (락 밖에서 찍힌다).
-    /// ★`close` 의 갈래마다 따로 적는다 — `_` 로 묶지 말 것★: 새 끝이 생기면 여기서 컴파일이 멈춰야 그 끝의 처분을
-    ///   정하게 된다.
+    /// Only an echo removes handed-over text as received; a late echo makes it received while held ([`State::take_delivered`]). ★A failure
+    /// end does not erase either★ (user decision 2026-09-26 · ADR-0235): returned and held text wait behind the halt ([`State::halted`]).
+    /// ★No waiting for steer responses★ — an accepted steer's echo precedes `turn/completed` (TRD §3-2 · M10); the late response is a no-op
+    /// by generation ([`State::hold_refused_steer`]).
+    /// ★The halt is set here★: `Failed` · `Rejected` · `Unanswered` (floor-meeting incarnations only); the others do not.
+    /// ★Write each `close` branch separately, no `_`★ — a new end must stop compilation here.
     // ADR-0231
     // ADR-0235
     fn close_turn_items(&mut self, gen: u64, close: TurnClose) -> Disposal {
@@ -1005,9 +801,8 @@ impl State {
             Drop(DropCause),
             Remove,
         }
-        // ADR-0235: 도구 끝 계기는 그 턴의 것이라 턴과 함께 내린다 — 남기면 라이터가 그것을 보기 전에 다음 턴을 연 경우 그
-        //   턴 id 가 온 뒤에 친 글이 도구 끝 없이 steer 로 나간다. 다음 턴에 쥔 글은 턴 id 가 오는 자리가 다시 세운다
-        //   ([`Reader::resolve`]).
+        // ADR-0235: the tool-end trigger belongs to that turn, so it is lowered with it — otherwise text typed after the next turn id came
+        //   would go out as a steer without a tool end. For text held in the next turn, [`Reader::resolve`] sets it again.
         self.steer_due = false;
         let tracing_on = SteerTrace::enabled();
         let mut out = Disposal::default();
@@ -1016,15 +811,15 @@ impl State {
             let carried = item.death.is_none()
                 && matches!(item.stage, Stage::InFlight { gen: g, .. } if g == gen);
             let fate = if !carried {
-                // 쥔 항목 · 앞 턴의 항목 · 이미 처분된 announce 전 항목(죽음 표시 — 그 원인을 덮지 않는다).
+                // Held items · items of the previous turn · already disposed pre-announce items (death mark — its cause is not overwritten).
                 Fate::Keep
             } else if item.origin == InputOrigin::Mail {
                 Fate::Remove
             } else if item.cancel_asked {
                 Fate::Drop(DropCause::Withdrawn)
             } else {
-                // ★끝의 모양과 무관하게 쥔 자리로 되돌린다★(사용자 결정 2026-09-26 · ADR-0235 — 오류에도 지우지 않고 멈춘다):
-                //   실패 끝은 아래에서 멈춤을 세우므로 되돌린 글은 다음 사용자 글까지 기다린다.
+                // ★Returned to the held place whatever the end shape★ (user decision 2026-09-26 · ADR-0235): a failure end sets the halt below, so
+                //   the returned text waits for the next user text.
                 Fate::Held
             };
             match fate {
@@ -1033,7 +828,7 @@ impl State {
                     self.pending.remove(pos);
                 }
                 Fate::Drop(cause) => {
-                    // 넘긴 항목은 방출을 마쳤으므로 곧바로 빠진다([`State::drop_listed`]).
+                    // A handed-over item finished announcing, so it leaves right away ([`State::drop_listed`]).
                     out.events.extend(self.drop_listed(pos, cause));
                     if self.pending.get(pos).is_some_and(|p| p.death.is_some()) {
                         pos += 1;
@@ -1058,9 +853,8 @@ impl State {
                 }
             }
         }
-        // ★오류 뒤 멈춤(TRD §5-5)★ — 다음 사용자 글까지 Idle 이 턴을 안 연다. 끊기는 세우지 않는다(쥔 글은 다음 Idle
-        //   에 나간다 — 사용자 결정 2026-09-26). 뜻 모를 끝도 세우지 않는다 — 커널 분류기가 같은 끝을 「그 밖」으로 접는다
-        //   ([`TurnClose::Unknown`]).
+        // ★Halt after error (TRD §5-5)★ — Idle opens no turn until the next user text. An interruption does not set it, nor does an end of
+        //   unknown meaning ([`TurnClose::Unknown`] — the kernel classifier folds it into "the rest").
         match close {
             TurnClose::Failed | TurnClose::Rejected | TurnClose::Unanswered => {
                 if self.floor == Floor::Above {
@@ -1074,17 +868,13 @@ impl State {
         out
     }
 
-    /// steer 가 오류 응답을 받았거나 쓰지 못했다 — 벤더가 그 글을 안 가졌다(`-32600` 「돌고 있는 턴 없음」 · 리뷰·압축 턴 ·
-    /// id 불일치 · 쓰기 실패 모두 같다 — [`Reader::resolve`] · [`steer_write_failed`]). 돌려주는 값 = 호출자가 락 밖에서 낼
-    /// 것(`None` = 무동작).
+    /// A steer got an error response or could not be written — the vendor does not have that text. Returns what the caller emits outside the
+    /// lock (`None` = no-op).
     ///
-    /// ★(id, 세대)와 **지금 단계**가 맞을 때만 움직인다★(세대 가림 — TRD §5-5): 에코로 이미 빠졌거나 턴 끝이 처분한(쥔
-    ///   자리로 돌려놓았거나 지운) 항목은 늦은 거절이 두 번 움직이지 못한다 — 그 턴에 「steer 거절」 표시도 달지 않는다(받힌 글의 거절은 그
-    ///   턴의 창이 닫혔다는 근거가 못 된다 — 세대 가림 시험이 이것을 잰다).
-    /// 맞으면 항목을 `Held` 로 되돌리고(자리 그대로 — 친 순서) 그 턴에 「steer 거절」 표시를 단다 — 같은 턴에 다시 보내는
-    ///   고리를 안 만들고 다음 Idle 이 연다. 결말 사건은 없다(`Queued` 는 id 하나에 한 번) — 넘김 표지만 다시 낸다
-    ///   ([`Disposal::handed_back`]).
-    ///   ★✕ 가 닿은 항목은 되돌리지 않고 거둔다★(`Dropped{Withdrawn}` — 사용자는 이미 뺐고, 벤더는 그 글을 본 적이 없다).
+    /// ★It moves only when (id, generation) **and the current stage** match★ (generation masking — TRD §5-5): an item already removed by echo or
+    /// disposed by the turn end is not moved twice, and no 「steer refused」 mark is attached. On a match the item returns to `Held` (typing
+    /// order), the turn gets the mark (no resend loop), and only the handed-over mark re-emits ([`Disposal::handed_back`]). ★A ✕-reached item
+    /// is withdrawn instead★ (`Dropped{Withdrawn}`).
     // ADR-0231
     fn hold_refused_steer(&mut self, id: &str, gen: u64) -> Option<Disposal> {
         let pos = self.pending.iter().position(|p| {
@@ -1092,7 +882,7 @@ impl State {
                 && matches!(p.stage, Stage::InFlight { gen: g, turn_id: Some(_) } if g == gen)
         })?;
         let mut out = Disposal::default();
-        // 표시는 ✕ 여부와 무관하다 — 벤더가 이 턴에 넣기를 거절했다는 사실은 같다.
+        // The mark is independent of ✕ — the vendor refused to put it into this turn either way.
         self.steer_refused = Some(gen);
         if self.pending[pos].cancel_asked {
             out.events
@@ -1108,67 +898,63 @@ impl State {
     }
 }
 
-/// 통로가 쥔 입력 하나. ★통로는 명부를 읽지 않고 이 칸들로 판정한다★(ADR-0193).
+/// One input the link holds. ★The link does not read the registry; it decides by these fields★ (ADR-0193).
 // ADR-0231
 struct PendingItem {
-    /// 목록 사건과 에코 대조가 쓰는 식별자(세션 쓰기의 `msg_uuid`). `None` = [`AgentTransport::send_input`]
-    /// 으로 든 항목 — 식별자가 없어 거둘 수도 에코로 대조할 수도 없고, 목록에 오르지 않는다.
+    /// The identifier for list events and the echo comparison (the `msg_uuid` of the session write). `None` = an item from
+    /// [`AgentTransport::send_input`] — it can be neither withdrawn nor compared by echo and does not go into the list.
     id: Option<String>,
-    /// 인코더를 지난 본문 — 봉투는 이 통로가 만든다.
     body: Vec<u8>,
     origin: InputOrigin,
     stage: Stage,
-    /// 목록 항목이냐(`Queued` 를 냈거나 낼 항목). Direct·우편·식별자 없는 항목은 `false`.
+    /// A list item (emitted or will emit `Queued`)? Direct · mail · items without an identifier are `false`.
     listed: bool,
-    /// 방출(Direct 합성 에코 · `Queued`)을 마쳤거나 낼 것이 없다. ★라이터는 이것이 `false` 인 항목을
-    /// 넘기지 않는다★ — 넘기기가 방출을 앞지르면 받음(`Delivered`)이 명부가 모르는 id 로 버려진다.
-    /// ★`listed=false ∧ announced=false` 는 판정 전이면 「아직 안 정함」, 판정(`Above`) 뒤면 Direct 다★ —
-    /// 판정 전 항목은 [`settle_floor`] 가 같은 락 아래서 전부 다시 정하고, Direct 는 판정 뒤에만 선다.
+    /// The announcement (Direct synthetic echo · `Queued`) finished or there is nothing to emit. ★The writer does not hand over an item
+    /// with this `false`★ — a handover outrunning the announcement would drop the receipt (`Delivered`) for an id the registry does not
+    /// know. ★`listed=false ∧ announced=false` = "not decided yet" before the decision, Direct after it (`Above`)★ — pre-decision items
+    /// are all decided again by [`settle_floor`] under the same lock.
     announced: bool,
-    /// 넘긴 뒤에 ✕ 가 왔다([`withdraw_item`] 이 세운다) — 결말은 벤더가 정하고, 통로는 벤더가 안 받았다고
-    /// 판명되면(steer 오류 응답 · 에코 없는 턴 끝) 쥔 자리로 되돌리지 않고 거둔다(`Dropped{Withdrawn}`). 세워져 있으면 겹친 둘째 ✕ 는 사건 없이 `TooLate` 다.
+    /// ✕ came after the handover ([`withdraw_item`] sets it) — the vendor decides the outcome; if it did not take the item (steer error
+    /// response · turn end without echo) the link withdraws it (`Dropped{Withdrawn}`) instead of returning it. An overlapping second ✕ is
+    /// `TooLate` without an event.
     cancel_asked: bool,
-    /// announce 전에 닿은 처분의 원인 — announce 하는 쪽이 `Queued` **바로 뒤에** 이 원인으로 `Dropped` 를
-    /// 잇는다(링에 `Dropped` 가 그 `Queued` 보다 먼저 서지 않게).
+    /// Cause of a disposal that arrived before announce — the announcing side follows `Queued` **right after** with a `Dropped` of this
+    /// cause (so `Dropped` never precedes `Queued` in the ring).
     death: Option<DropCause>,
 }
 
-/// [`PendingItem`] 의 단계.
+/// The stage of a [`PendingItem`].
 // ADR-0231
 enum Stage {
-    /// 아직 안 넘겼다.
     Held,
-    /// `turn/start` 나 steer 를 썼고 에코를 기다린다.
+    /// `turn/start` or a steer was written; waits for the echo.
     ///
-    /// `gen` = 그 요청의 세대 = ★그 요청이 들어간 턴의 표식([`TurnState::Active`] 의 `seq`)★ — 통로가 턴을
-    ///   열 때마다 오르고, 턴 id 는 그 턴의 `turn/start` 응답 하나로만 오므로 「새 활성 턴 id 마다 오르는
-    ///   수」와 같은 값이다. 따로 계수기를 두지 않는 것은 둘이 늘 함께 올라 갈라질 자리가 없어서다. 늦은
-    ///   응답·에코는 (id, gen) 과 **지금 단계**가 맞을 때만 항목을 움직인다(다른 단계로 옮겨 간 항목을 두 번
-    ///   움직이지 않게). `turn_id` = 그 요청이 겨눈 턴(`None` = `turn/start` 가 실었고 그 응답이 턴 id 를 아직 안
-    ///   줬다 — steer 는 턴 id 를 안 뒤에만 나간다).
-    InFlight { gen: u64, turn_id: Option<String> },
+    /// `gen` = ★the marker of the turn that request went into (`seq` of [`TurnState::Active`])★ — it rises with every turn the link
+    ///   opens, and a turn id comes only from that turn's `turn/start` response, so it equals "the number that rises with each new active
+    ///   turn id"; no separate counter exists, so the two cannot diverge. A late response · echo moves the item only when (id, gen) and
+    ///   **the current stage** match. `turn_id` = the turn that request aimed at (`None` = `turn/start` carried it and its response has
+    ///   not given the id yet — a steer goes out only after the turn id is known).
+    InFlight {
+        gen: u64,
+        turn_id: Option<String>,
+    },
 }
 
-/// 상태 + 그것을 기다리는 조건변수. 라이터가 여기서 잔다.
+/// State + the condition variable waiting on it. The writer sleeps here.
 ///
-/// ★조건변수의 `notify` 는 **지연**을 줄이지 정확성을 지지 않는다★ — 라이터는 [`SWEEP_INTERVAL`] 짜리
-/// `wait_timeout` 으로 깨어 같은 조건을 다시 보므로, 모든 `notify_all` 을 지워도 동작은 같고 큐가
-/// 풀리기까지 그만큼 늦어질 뿐이다. 정확성을 지는 것은 그 타임아웃이다. ★그래서 "알림이 없으면 멈춘다"
-/// 로 읽지 말 것★ — 그렇게 읽으면 있지도 않은 보장을 인용하게 된다.
+/// ★`notify` reduces **latency**, it does not carry correctness★: the writer wakes by `wait_timeout` of [`SWEEP_INTERVAL`] and
+/// re-checks the same condition, so without any `notify_all` the behaviour is the same, only the queue opens later. Do not read it as
+/// "without a notification it stops" — that quotes a guarantee that does not exist.
 type SharedState = Arc<(Mutex<State>, Condvar)>;
 
-// ── 목록 방출 · 하한 판정 ─────────────────────────────────────────────────────
+// ── List announcement · floor decision ─────────────────────────────────────────────
 
-/// 방출하는 쪽들의 줄과 이 화신의 받음 알림 가능 여부 — 통로 하나에 하나(라이터와 `Arc` 로 나눈다).
+/// The queue of announcing sides and whether receipt notifications are available — one per link (shared with the writer by `Arc`).
 ///
-/// `order` — ★방출은 상태 락 밖이어야 하는데(ADR-0006) 방출하는 쪽이 둘이다★(항목을 넣은 입력 스레드 ·
-///   판정을 낸 라이터). 이 줄이 없으면 둘이 락을 놓은 사이 서로의 방출을 앞질러 목록이 친 순서와
-///   어긋난다. 줄을 쥔 쪽은 자기 항목만이 아니라 **방출 전 항목 전부**를 도착 순서대로 낸다.
-///   ★락 순서 = `order` → 상태★. ★`order` 를 쥔 채 emit 한다 — ADR-0006 「lock 미보유 send」의 의도된
-///   예외이고, `OutputSink::send` 가 막히지 않는다는 계약이 그것을 받친다★. 리더와 `withdraw` 는 이 줄을 잡지 않는다 — 둘은 방출을 마친 항목만
-///   처분하고, 방출 전 항목에는 죽음 표시만 단다([`State::drop_listed`]).
-/// `ack` — 하한 판정이 채운다(`Above` = `Available` · `Below` = `Unavailable`). 조립점이 세션에 **같은**
-///   `Arc` 를 싣는다([`CodexAppServerTransport::delivery_ack`]).
+/// `order` — ★announcing must be outside the state lock (ADR-0006) and there are two announcing sides★ (input thread · writer); the holder
+///   emits **all pre-announce items** in arrival order so the list keeps typing order. ★Lock order = `order` → state; emitting under
+///   `order` is an intended ADR-0006 exception (`OutputSink::send` does not block)★. The reader and `withdraw` do not take it.
+/// `ack` — filled by the floor decision; the session carries **the same** `Arc` ([`CodexAppServerTransport::delivery_ack`]).
 // ADR-0231
 // ADR-0234
 struct Announcer {
@@ -1176,15 +962,12 @@ struct Announcer {
     ack: Arc<DeliveryAck>,
 }
 
-/// 방출 전 항목을 도착 순서대로 낸다 — 목록 항목 = `Queued`, Direct = 합성 말풍선. 판정(`Above`) 전에는
-/// 아무것도 안 낸다(판정이 난 쪽이 [`settle_floor`] 에서 부른다).
+/// Emits pre-announce items in arrival order — list items = `Queued`, Direct = synthetic bubble; nothing before the decision (`Above`).
 ///
-/// ★두 단계다★: 락 아래서 낼 것을 모으고 → 락을 놓고 emit → 다시 잡아 `announced=true` + 라이터 깨우기.
-///   그 사이 죽음 표시가 달린 항목은 여기서 빼고 `Queued` **바로 뒤에** `Dropped` 를 잇는다.
-/// ★합성 말풍선은 `emit_without_turn_observation` 으로 낸다 — 보통 문으로 바꾸지 말 것★: 분류기가 그것을
-///   진행으로 적어 「턴 중」을 켜고, 그 글의 `turn/start` 가 거절되면 열린 적 없는 턴이 「진행 중」으로 남아
-///   우편이 30 분 fail-open 까지 막힌다(ADR-0127). codex 의 한가 판정은 통로 상태가 진다(ADR-0193).
-/// ★uuid = 항목 id★ — 벤더 되울림이 `clientId` 로 같은 값을 실어 와 누산기가 한 벌로 접는다.
+/// Gather under the lock → release and emit → retake for `announced=true` + waking the writer; an item death-marked in between is removed
+/// here with `Dropped` **right after** `Queued`.
+/// ★The bubble uses `emit_without_turn_observation`, not the ordinary door★: the classifier would count it as progress and a refused
+/// `turn/start` would leave a never-opened turn "in progress", blocking mail until the 30-minute fail-open (ADR-0127).
 // ADR-0231
 // ADR-0234
 fn announce(core: &OutputCore, state: &SharedState, announcer: &Announcer) {
@@ -1240,16 +1023,14 @@ fn announce(core: &OutputCore, state: &SharedState, announcer: &Announcer) {
     }
 }
 
-/// 하한 판정을 적고 판정 전에 쥔 항목의 길을 정한다 — 핸드셰이크가 선 뒤 라이터가 **한 번** 부른다.
-///
-/// `Above` → 판정 전 사용자 항목은 목록 항목이 되어 곧바로 `Queued` 로 방출된다. `Below` → 모든 항목이
-///   식별자를 버리고 오늘 경로로 간다(목록·합성 말풍선 없이 턴 끝까지 붙든다 — 사용자 결정 N1 (a)).
-///   ★그래서 이미 목록에 오른 항목이 미달 판정을 만나는 일이 없다★.
-/// ★세션 id 기록이 돌아온 **뒤에** 부른다 — 앞당기지 말 것★: 그 전에 판정하면 기록 실패 갈래
-///   ([`writer_loop`])가 이미 목록에 오른 항목을 사건 없이 지운다.
+/// Writes the floor decision and decides the path of items held before it — the writer calls it **once** after the handshake stands.
+/// `Above`: pre-decision user items become list items (`Queued`). `Below`: every item drops its identifier and takes today's path (user
+/// decision N1 (a)).
+/// ★Call it **after** the session id record returned★ — earlier, the record failure branch ([`writer_loop`]) would erase list items
+/// without an event.
 // ADR-0231
 fn settle_floor(core: &OutputCore, state: &SharedState, announcer: &Announcer, floor: Floor) {
-    debug_assert_ne!(floor, Floor::Pending, "판정은 둘 중 하나다");
+    debug_assert_ne!(floor, Floor::Pending, "the decision is one of the two");
     {
         let (lock, cv) = &**state;
         let mut s = sync::lock(lock);
@@ -1275,14 +1056,11 @@ fn settle_floor(core: &OutputCore, state: &SharedState, announcer: &Announcer, f
     announce(core, state, announcer);
 }
 
-/// 하한 판정(M8) — `thread.cliVersion` → 없거나 못 읽으면 `initialize` 응답 `userAgent` 의 첫 판 → 둘 다
-/// 실패면 미달.
+/// The floor decision (M8) — `thread.cliVersion`, else the first edition in the `initialize` `userAgent`, else below the floor.
 ///
-/// ★`userAgent` 는 첫 `/` 바로 뒤의 판만 읽는다 — 「마지막 semver」로 바꾸지 말 것★: 앞머리는 우리
-///   `clientInfo.name` 이고 끝 괄호에 **우리** 판이 들어 있다(실측 0.156.1: `engram-dashboard/0.156.1
-///   (Windows …) unknown (engram-dashboard; 0.1.0)`).
-/// ★모르면 미달로 떨어진다★ — 모르는 판에 `clientUserMessageId` 를 실으면 에코 대조가 조용히 깨진다.
-///   하한과 같은 판의 선행판(`0.140.0-alpha`)도 미달이다(semver 순서).
+/// ★`userAgent` reads only the edition right after the first `/`★ — the trailing parenthesis holds **our** edition (0.156.1:
+/// `engram-dashboard/0.156.1 (Windows …) unknown (engram-dashboard; 0.1.0)`). ★Unknown → below the floor★ (an unknown edition quietly
+/// breaks the echo comparison); a floor prerelease (`0.140.0-alpha`) is below too.
 // ADR-0231
 fn floor_verdict(cli_version: Option<&str>, user_agent: &str) -> Floor {
     let version = cli_version
@@ -1310,7 +1088,6 @@ fn reaches(version: Option<((u64, u64, u64), bool)>, floor: (u64, u64, u64)) -> 
     matches!(version, Some((v, prerelease)) if v > floor || (v == floor && !prerelease))
 }
 
-/// 문자열 머리의 `MAJOR.MINOR.PATCH` 와 그 뒤에 선행판 표시(`-`)가 이어지나.
 fn leading_semver(s: &str) -> Option<((u64, u64, u64), bool)> {
     let mut parts = [0u64; 3];
     let mut rest = s;
@@ -1330,22 +1107,21 @@ fn leading_semver(s: &str) -> Option<((u64, u64, u64), bool)> {
     Some(((parts[0], parts[1], parts[2]), rest.starts_with('-')))
 }
 
-// ── 대기표 ────────────────────────────────────────────────────────────────────
+// ── Waiting table ────────────────────────────────────────────────────────────────────
 
-/// 나간 요청 하나의 답을 누가 어떻게 받나.
 enum Waiter {
-    /// 보낸 스레드가 채널에서 기다린다(핸드셰이크 전용 — 그 스레드는 리더가 아니다).
+    /// The sending thread waits on a channel (handshake only — that thread is not the reader).
     Handshake(mpsc::Sender<Result<Value, String>>),
-    /// 기다리는 스레드가 없고 **응답이 턴 id 를 준다** — 리더가 받은 자리에서 반영한다.
+    /// No thread waits and **the response gives a turn id** — the reader applies it where it receives it.
     ///
-    /// ★`seq` 는 이 요청이 연 턴의 표식이다★ — 없으면 늦게 온 답이 **그 사이에 열린 다른 턴**의 칸에
-    /// 자기 id 를 적고, 그 뒤의 `interrupt` 가 엉뚱한 턴을 겨눈다.
+    /// ★`seq` is the marker of the turn this request opened★ — otherwise a late answer would write its id into the slot of **another
+    /// turn opened in between** and the later `interrupt` would aim at the wrong turn.
     TurnStart { seq: u64 },
-    /// 도는 턴에 넘긴 항목 `id` 의 `turn/steer` — 거절만 그 항목에 닿는다([`State::hold_refused_steer`]).
-    /// `gen` = 그 항목의 `InFlight` 세대(= 넘긴 턴의 표식) — 늦은 답이 다른 단계로 옮겨 간 항목을 못 움직이게.
+    /// `turn/steer` of item `id` handed to the running turn — only a refusal reaches that item ([`State::hold_refused_steer`]).
+    /// `gen` = that item's `InFlight` generation (= the turn marker) — a late answer cannot move an item that moved to another stage.
     // ADR-0231
     Steer { id: String, gen: u64 },
-    /// 실패만 로그로 본다.
+    /// Only failures are looked at, in the log.
     Fire,
 }
 
@@ -1355,26 +1131,25 @@ struct PendingEntry {
     method: &'static str,
 }
 
-/// 우리가 낸 요청의 대기표. ★서버가 낸 id 는 여기 절대 들어오지 않는다★(TRD §4-4) — 두 id 공간은
-/// 겹칠 수밖에 없고(서버 id 를 그대로 되돌려 줘야 한다), 가르는 것은 id 값이 아니라 **봉투 모양**이다.
-/// 조회는 `result`/`error` 봉투에서만 한다.
+/// The waiting table of requests we issued. ★An id the server issued never enters here★ (TRD §4-4): the two id spaces overlap (a server
+/// id must be returned as is), so **the envelope shape** tells them apart, not the id value. Lookups happen only on `result`/`error`
+/// envelopes.
 #[derive(Default)]
 struct Pending {
     entries: Mutex<HashMap<i64, PendingEntry>>,
-    /// 더는 답이 올 수 없다 — 새 대기표를 받지 않는다. ★이것이 없으면 통로가 닫힌 **뒤에** 걸린 대기표
-    /// 하나가 시한이 다 찰 때까지 자기 스레드를 붙든다★(핸드셰이크가 두 요청을 잇달아 내므로 그 사이에
-    /// 닫히는 창이 실재한다).
+    /// No more answers can come — no new entries are taken. ★Without this, an entry registered **after** the link closed would hold its
+    /// thread until its deadline★ (the handshake issues two requests back to back, so that window exists).
     closed: AtomicBool,
 }
 
 impl Pending {
-    /// `false` = 이미 닫혀 걸지 못했다.
+    /// `false` = already closed, could not register.
     fn register(&self, id: i64, waiter: Waiter, method: &'static str) -> bool {
         self.register_at(id, waiter, method, Instant::now() + REQUEST_DEADLINE)
     }
 
-    /// 시한을 인자로 받는 갈래 — ★시험대가 [`REQUEST_DEADLINE`] 만큼 실제로 자지 않고 만료를 재기 위한
-    /// seam 이다★(ADR-0012). 운영 호출자는 위 [`Pending::register`] 뿐이다.
+    /// The deadline-as-argument branch — ★a seam so tests measure expiry without sleeping for [`REQUEST_DEADLINE`]★ (ADR-0012). The
+    /// production caller is only [`Pending::register`].
     fn register_at(
         &self,
         id: i64,
@@ -1383,7 +1158,7 @@ impl Pending {
         deadline: Instant,
     ) -> bool {
         let mut g = sync::lock(&self.entries);
-        // ★락을 쥔 채 읽는다★ — 밖에서 읽으면 그 사이에 닫힌 표에 대기표가 들어간다.
+        // ★Read while holding the lock★ — reading outside would let an entry into a table closed in between.
         if self.closed.load(Ordering::Acquire) {
             return false;
         }
@@ -1398,15 +1173,14 @@ impl Pending {
         true
     }
 
-    /// 닫고 남은 것을 전부 돌려준다 — 이후 [`Pending::register`] 는 전부 실패한다.
+    /// Closes and returns everything that remains — after this [`Pending::register`] always fails.
     fn close(&self) -> Vec<PendingEntry> {
         let mut g = sync::lock(&self.entries);
         self.closed.store(true, Ordering::Release);
         g.drain().map(|(_, e)| e).collect()
     }
 
-    /// ★문자열 id 는 우리 것일 수 없다★ — 우리 계수기는 i64 만 낸다. 그래서 여기서 `None` 이 되고
-    /// 호출자가 "모르는 id" 로 버린다.
+    /// ★A string id cannot be ours★ (our counter emits only i64): it becomes `None` and the caller drops it as an "unknown id".
     fn take(&self, id: &RequestId) -> Option<PendingEntry> {
         let key = match id {
             RequestId::Num(n) => *n,
@@ -1437,7 +1211,7 @@ impl Pending {
     }
 }
 
-// ── 통로 ──────────────────────────────────────────────────────────────────────
+// ── Link ──────────────────────────────────────────────────────────────────────
 
 /// What one app-server incarnation opens with — the backend decides all of it (`open_spawn`); the transport sends it as
 /// given, with one exception: it drops a resume's `developerInstructions` unless the codex is known to reach
@@ -1457,59 +1231,56 @@ pub(crate) struct AppServerOpen {
 }
 
 pub(crate) struct CodexAppServerTransport {
-    /// pump(try_wait)와 shutdown(kill+wait)이 공유. std Child 는 wait 후 status 를 캐시하므로 이중 wait
-    /// 이 무해하다.
+    /// Shared by the pump (try_wait) and shutdown (kill+wait). std `Child` caches the status after wait, so a double wait is harmless.
     child: Arc<Mutex<Child>>,
-    /// ★라이터 스레드만 잡는다★ — 리더가 이 락을 잡으면 모듈 헤더의 데드락이 선다.
-    /// [`AgentTransport::shutdown`] 의 마지막 단계만 `try_lock`(블로킹 금지)으로 만진다.
+    /// ★Only the writer thread takes it★ — if the reader took this lock, the module header's deadlock would stand. Only the last step of
+    /// [`AgentTransport::shutdown`] touches it, with `try_lock` (no blocking).
     stdin: Arc<Mutex<Option<ChildStdin>>>,
-    /// `start()` 에서 take 해 리더로 move. None 이면 이미 시작됐다.
+    /// Taken in `start()` and moved to the reader. `None` = already started.
     stdout: Mutex<Option<ChildStdout>>,
     stderr: Mutex<Option<ChildStderr>>,
     decoder: Mutex<Option<Box<dyn OutputDecoder>>>,
-    /// `start()` 에서 take 해 라이터로 move — 핸드셰이크가 이 값대로 나간다([`handshake`]).
+    /// Taken in `start()` and moved to the writer — the handshake goes out per this value ([`handshake`]).
     open_params: Mutex<Option<AppServerOpen>>,
     shutdown: Arc<AtomicBool>,
     state: SharedState,
     pending: Arc<Pending>,
     // ADR-0231
     announcer: Arc<Announcer>,
-    /// `start()` 가 채운다 — 입력 스레드의 방출([`announce`])이 쓴다. ★비어 있을 때 방출할 것은 없다★:
-    ///   방출은 하한 판정 뒤에만 서고, 판정은 `start()` 가 띄운 라이터가 낸다.
+    /// Filled by `start()` — used by the input thread's announcement ([`announce`]). ★While empty there is nothing to announce★: it
+    ///   stands only after the floor decision, made by the writer `start()` launched.
     // ADR-0231
     core: OnceLock<Arc<OutputCore>>,
-    /// 우리 요청 id 계수기. ★서버 id 는 여기 안 들어온다★ — 두 공간은 따로다.
+    /// Our request id counter. ★Server ids do not enter★ — the two spaces are separate.
     next_id: Arc<AtomicI64>,
     sid_sink: Option<SessionIdSink>,
-    /// 상대가 유저 메시지를 처음 되울린 순간 부를 포트([`Reader::witness_first_turn`]). `None` = 알릴 곳이 없다.
+    /// The port called when the peer first echoes a user message ([`Reader::witness_first_turn`]). `None` = nowhere to tell.
     // ADR-0226
     // ADR-0231
     first_turn_sink: Option<FirstTurnSink>,
-    /// 연결의 결말을 **한 번** 배달하는 포트(`None` = 조립점이 안 줬다 = 이 축이 없다).
-    /// ★`start()` 에서 take 해 라이터로 move 한다 — 배달은 그 스레드에서만, 정확히 한 번 일어난다★.
+    /// The port that delivers the connection outcome **once** (`None` = the assembly point gave none = this axis does not exist).
+    /// ★Taken in `start()` and moved to the writer — delivery happens only on that thread, exactly once★.
     link_sink: Mutex<Option<LinkSink>>,
-    /// 라이터 스레드 핸들. ★아무도 join 하지 않는다 — `shutdown()` 안에서 기다리는 것은 계약 위반이다★.
-    ///
-    /// 이 핸들을 드는 이유는 하나다: **그 스레드가 실제로 끝나는지를 밖에서 볼 수 있어야 한다.** 안 끝나면
-    /// 세션 하나치 메모리가 함께 남는데, 그 사실은 관측할 수단이 없으면 어디에도 안 나타난다.
+    /// The writer thread handle. ★Nobody joins it — waiting inside `shutdown()` is a contract violation★. It is held so that **whether
+    /// the thread actually ends is observable** from outside; if it does not end, one session's memory remains and nothing else shows it.
     writer_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// 이 통로가 나르는 출력이 구조화 스트림인가. ★주입값이다(ADR-0044/0030/0191)★ — 통로는 자기가
-    /// 무엇을 나르는지 모르고, 아는 쪽은 이 모드를 고른 backend 다.
+    /// Whether the output this link carries is a structured stream. ★An injected value (ADR-0044/0030/0191)★ — the link does not know
+    /// what it carries; the backend that picked this mode does.
     structured: bool,
-    /// 이 통로가 띄운 프로세스 무리의 주인 — 하나뿐이고 약한 손잡이도 내주지 않는다. ★마지막 칸으로 둔다★ — 칸은
-    /// 선언 순서로 버려지므로 통로가 버려질 때 무리가 닫히는 때가 이 자리로 정해진다. 앞당겨도 되는지는 재 보지
-    /// 않았고, 이 배치를 지키는 시험은 없다.
+    /// The owner of the group of processes this link launched — only one, no weak handle handed out. ★Kept as the last field★: fields
+    /// drop in declaration order, so this place decides when the group closes as the link is dropped. Whether it can move earlier was not
+    /// measured and no test guards this placement.
     group: GroupOwner,
 }
 
 impl CodexAppServerTransport {
-    /// **pump 는 아직 안 띄운다**(`start` 에서). `child_pid` 를 함께 돌려준다.
+    /// **The pump is not launched yet** (in `start`). Returns `child_pid` together.
     ///
     /// `open_params` = what the handshake sends and the first turn carries ([`AppServerOpen`]). ★The transport hard-codes
     ///   neither the policy nor whether to resume★ — which folder to trust as the workspace, under which sandbox and
     ///   approval policy, whether to resume a stored thread, which skill roots and instructions to load: all backend
     ///   knowledge, injected.
-    /// `sid_sink` = codex 가 발급한 thread id 를 기록할 곳. `None` = 기록할 곳이 없다.
+    /// `sid_sink` = where to record the thread id codex issued. `None` = nowhere to record.
     pub(crate) fn open(
         spec: &CommandSpec,
         structured: bool,
@@ -1555,15 +1326,15 @@ impl CodexAppServerTransport {
         Ok((transport, child_pid))
     }
 
-    /// 이 화신의 받음 알림 가능 여부 — 하한 판정이 채우는 **바로 그** `Arc` 다. 조립점이
-    /// `SpawnParts::delivery_ack` 에 싣는다(따로 만들면 세션과 통로가 서로 다른 값을 본다).
+    /// Whether this incarnation's receipt notifications are available — **the very** `Arc` the floor decision fills. The assembly point
+    /// carries it in `SpawnParts::delivery_ack` (a separately made one would give session and link different values).
     // ADR-0231
     pub(crate) fn delivery_ack(&self) -> Arc<DeliveryAck> {
         self.announcer.ack.clone()
     }
 
-    /// 첫 턴 포트를 끼운다 — ★`start()` 전에 부른다★(리더가 그때 가져간다). 이 통로의 세션은 제출을 세지
-    /// 않으므로(`MidTurnPolicy::TransportOwned`) 빠뜨리면 이 화신의 thread id 가 영속되지 않는다.
+    /// Plugs in the first-turn port — ★call it before `start()`★ (the reader takes it then). This link's session does not count
+    /// submissions (`MidTurnPolicy::TransportOwned`), so if missed this incarnation's thread id is not persisted.
     // ADR-0226
     // ADR-0231
     pub(super) fn with_first_turn(mut self, sink: Option<FirstTurnSink>) -> Self {
@@ -1572,7 +1343,7 @@ impl CodexAppServerTransport {
     }
 }
 
-/// pump 스레드가 어디서든 panic 하면 그 agent 가 영구 silent 정지하므로 Failed 로 가시화한다.
+/// If the pump thread panics anywhere, that agent stops silently forever, so it is made visible as Failed.
 fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason {
     match result {
         Ok(reason) => reason,
@@ -1580,26 +1351,25 @@ fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason
     }
 }
 
-/// 문자 경계를 지켜 자른다. 잘렸으면 그 사실을 남긴다.
+/// Cuts keeping character boundaries. If cut, leaves that fact.
 ///
-/// ★[`sanitize`] 말고 이것을 직접 부르지 말 것★ — 상대 문자열이 마스킹을 건너뛰고 로그·화면으로 나간다.
-/// 문이 둘이면 그중 하나는 반드시 잊힌다.
+/// ★Do not call this instead of [`sanitize`]★ — the peer string would skip masking and go to the log · screen. Two doors → one gets forgotten.
 fn clip(s: &str, limit: usize) -> String {
     if s.chars().count() <= limit {
         return s.to_string();
     }
     let head: String = s.chars().take(limit).collect();
-    format!("{head}…(잘림)")
+    format!("{head}…(truncated)")
 }
 
-/// 외부 프로세스 문자열을 로그·화면으로 옮기기 전 거치는 문 — ★마스킹이 절단보다 먼저다★:
-/// `mask_secrets` 의 패턴은 접두 뒤 일정 길이를 요구하므로, 먼저 자르면 경계에 걸친 자격증명이 그
-/// 수량자 밑으로 잘려 마스킹을 빠져나간다.
+/// The door external process strings pass through before reaching the log · screen — ★masking comes before truncation★: the
+/// `mask_secrets` patterns need a certain length after the prefix, so cutting first could cut a credential across the boundary below
+/// that quantifier and let it escape masking.
 fn sanitize(s: &str, limit: usize) -> String {
     clip(&mask_secrets(s), limit)
 }
 
-// ── 라이터 쪽 ─────────────────────────────────────────────────────────────────
+// ── Writer side ─────────────────────────────────────────────────────────────────
 
 fn write_line(stdin: &Mutex<Option<ChildStdin>>, line: &str) -> Result<(), PtyError> {
     let mut guard = sync::lock(stdin);
@@ -1611,11 +1381,11 @@ fn write_line(stdin: &Mutex<Option<ChildStdin>>, line: &str) -> Result<(), PtyEr
     w.flush().map_err(|e| PtyError::WriteFailed(e.to_string()))
 }
 
-/// 제어 큐에 선 줄을 **한 줄만** 내보낸다. 돌려주는 값 = 내보낼 것이 있었나.
+/// Sends **only one line** queued in the control queue. Returns whether there was anything to send.
 ///
-/// ★한 줄씩인 것이 계약이다★ — 이 함수를 부르는 [`request_blocking`] 은 그 사이사이에 시한을 다시
-/// 재야 한다. 전부 비우게 두면 그 한 번의 호출이 무한정 길어져 시한이 **평가되지 않는다**.
-/// ★락을 쥔 채 쓰지 않는다★ — 꺼낸 뒤 놓고 쓴다(ADR-0006).
+/// ★One line at a time is the contract★: [`request_blocking`] calls this and must re-measure the deadline in between; draining
+/// everything would make one call unbounded and the deadline **would not be evaluated**.
+/// ★It does not write while holding the lock★ — takes the line, releases, then writes (ADR-0006).
 fn drain_one_control_line(stdin: &Mutex<Option<ChildStdin>>, state: &SharedState) -> bool {
     let line = {
         let (lock, _) = &**state;
@@ -1625,7 +1395,7 @@ fn drain_one_control_line(stdin: &Mutex<Option<ChildStdin>>, state: &SharedState
     match line {
         Some(l) => {
             if let Err(e) = write_line(stdin, &l) {
-                tracing::debug!("codex app-server 제어 줄 쓰기 실패: {e}");
+                tracing::debug!("codex app-server control line write failed: {e}");
             }
             true
         }
@@ -1633,21 +1403,13 @@ fn drain_one_control_line(stdin: &Mutex<Option<ChildStdin>>, state: &SharedState
     }
 }
 
-/// 요청 하나를 내고 답을 **기다린다**. ★리더 스레드에서 부르면 안 된다★ — 기다리는 동안 읽기가 멈춘다.
+/// Issues one request and **waits** for the answer. ★Never on the reader thread★ — reading stops while waiting.
 ///
-/// ★기다리는 동안에도 제어 줄을 내보낸다★: 이 함수를 부르는 것은 라이터이고, 라이터는 그 큐를 비우는
-///   **유일한** 스레드다. 통째로 park 하면 리더가 넣어 둔 서버 요청 거절이 이 대기가 끝날 때까지 못
-///   나가고, 상대가 그 답을 기다리는 중이었다면 양쪽이 시한까지 서로를 기다린다(그 뒤 연결은 이 화신에서
-///   되살아나지 않는다 — ADR-0192). ★0.154.0 이 실제로 `thread/start` 를 승인 요청 뒤에 두는지는
-///   미확인★ — 막는 것은 그 구조적 창이다.
-/// ★순서가 계약이다 — **시한을 먼저 재고 그 다음에 한 줄을 쓴다**★: 쓰기는 블로킹이라 먼저 쓰면 그
-///   한 번이 매달리는 동안 시한이 평가되지 않는다. 그 순서를 뒤집으면 이 함수는 유계이기를 그만두고,
-///   핸드셰이크가 실패하지도 화면에 오르지도 않은 채 입력만 계속 받아들인다.
-/// ★그래도 남는 한계★: 한 번의 블로킹 쓰기는 여전히 무한히 매달릴 수 있고, 거기서 빠져나오는 길은
-///   `shutdown()` 의 kill 뿐이다(모듈 헤더 「알려진 한계」).
-/// `budget` = 이 요청의 시한. 운영 호출자는 전부 [`REQUEST_DEADLINE`] 을 넘긴다 — 인자로 받는 것은
-///   ★시험대가 그 상한만큼 실제로 자지 않고 유계성을 재기 위한 seam★이다([`Pending::register_at`] 과
-///   같은 사유, ADR-0012).
+/// ★It sends control lines while waiting★ — the writer is the only drainer; parking would deadlock with a peer awaiting our refusal until
+/// the deadline (ADR-0192). [unverified — whether 0.154.0 puts `thread/start` after an approval request].
+/// ★Order is the contract — **measure the deadline first, then write one line**★: the write blocks, so writing first leaves the deadline
+/// unevaluated while one write hangs. One blocking write can still hang forever (module header).
+/// `budget` = this request's deadline (production: [`REQUEST_DEADLINE`]); an argument as a seam for tests ([`Pending::register_at`], ADR-0012).
 fn request_blocking<P: Serialize, R: DeserializeOwned>(
     stdin: &Mutex<Option<ChildStdin>>,
     state: &SharedState,
@@ -1660,19 +1422,19 @@ fn request_blocking<P: Serialize, R: DeserializeOwned>(
     let id = next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel();
     if !pending.register(id, Waiter::Handshake(tx), method_name) {
-        return Err(format!("{method_name}: 통로가 닫혔다"));
+        return Err(format!("{method_name}: the link closed"));
     }
 
     let line = match protocol::request_line(&RequestId::Num(id), method_name, params) {
         Ok(l) => l,
         Err(e) => {
             pending.forget(id);
-            return Err(format!("{method_name} 직렬화 실패: {e}"));
+            return Err(format!("{method_name} serialization failed: {e}"));
         }
     };
     if let Err(e) = write_line(stdin, &line) {
         pending.forget(id);
-        return Err(format!("{method_name} 쓰기 실패: {e}"));
+        return Err(format!("{method_name} write failed: {e}"));
     }
 
     let deadline = Instant::now() + budget;
@@ -1681,7 +1443,7 @@ fn request_blocking<P: Serialize, R: DeserializeOwned>(
             Ok(Ok(v)) => {
                 return serde_json::from_value(v).map_err(|e| {
                     format!(
-                        "{method_name} 응답 해독 실패: {}",
+                        "{method_name} response decode failed: {}",
                         sanitize(&e.to_string(), LOG_STRING_LIMIT)
                     )
                 })
@@ -1689,14 +1451,14 @@ fn request_blocking<P: Serialize, R: DeserializeOwned>(
             Ok(Err(msg)) => return Err(msg),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 pending.forget(id);
-                return Err(format!("{method_name}: 대기표가 닫혔다"));
+                return Err(format!("{method_name}: the waiting table closed"));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // ★쓰기보다 먼저 잰다★ — 위 doc 의 순서 계약.
+                // ★Measure before writing★ — the order contract of the doc above.
                 if Instant::now() >= deadline {
                     pending.forget(id);
                     return Err(format!(
-                        "{method_name}: {}초 안에 답이 없다",
+                        "{method_name}: no answer within {} seconds",
                         budget.as_secs()
                     ));
                 }
@@ -1711,13 +1473,10 @@ fn request_blocking<P: Serialize, R: DeserializeOwned>(
 /// thread sees them — M4) → **the second request the plan chose** (`thread/start` or `thread/resume`; a resume's
 /// `developerInstructions` only for a codex known to reach [`RESUME_INSTRUCTIONS_FLOOR`]).
 ///
-/// ★`initialize` 는 한 번만 보낼 수 있다(실측 0.154.0)★ — 두 번째는 오류로 돌아온다. 그래서 이 함수는
-/// 화신마다 정확히 한 번 돌고, 실패해도 다시 부르지 않는다(ADR-0192).
-/// ★둘째 요청이 거절되면 그대로 `Err` 다 — 새 스레드로 되돌아가지 않는다(ADR-0082)★. codex 쪽 사유가
-/// 하나 더 있다: 이 프로토콜의 `-32600` 은 뜻이 하나가 아니다 — 모르는 메서드도, 두 번째 `initialize`
-/// 도, 설정 오류도 전부 그 코드로 온다(실측 0.154.0 — 앞 둘의 정본은 이 폴더 `protocol`, 셋째는
-/// [`tests::a_peer_error_message_is_masked_before_it_leaves_this_module`] 이 든 실제 응답). 그래서 오류 코드로
-/// 「모르는 스레드」를 갈라 새 스레드로 폴백하면, 아직 멀쩡한 손잡이를 무관한 실패에서 덮어쓴다.
+/// ★`initialize` works only once (measured 0.154.0)★, so this runs once per incarnation, never again even on failure (ADR-0192).
+/// ★A refused second request is `Err` as is — no fallback to a new thread (ADR-0082)★: `-32600` is not specific to "unknown thread"
+/// (unknown method · second `initialize` · config error all use it — [`tests::a_peer_error_message_is_masked_before_it_leaves_this_module`]),
+/// so falling back would overwrite a sound handle on an unrelated failure.
 fn handshake(
     stdin: &Mutex<Option<ChildStdin>>,
     state: &SharedState,
@@ -1726,14 +1485,12 @@ fn handshake(
     open: &AppServerOpen,
     deadline: Instant,
 ) -> Result<Opened, String> {
-    // ★시한은 요청마다가 아니라 **구획 전체**에 건다★ — 요청별로 주면 왕복의 합이 상한의 배수가 되고,
-    //   그 합이 매니저의 백스톱을 넘기는 순간 이 통로의 실패는 판정에 참여하지 못한다
-    //   ([`HANDSHAKE_BUDGET`] 의 doc 이 그 인과의 정본).
-    // ★그래서 시한을 **밖에서 받는다**★ — 이 구획 뒤에 이어 도는 이력 페이징([`hydrate_history`])이
-    //   같은 시한을 나눠 쓴다. 여기서 `Instant::now()` 를 다시 잡으면 그 둘이 각각 10 초를 갖게 되어
-    //   합이 백스톱을 넘고, 이력을 받느라 **성공한 이어받기가 실패로 판정된다.**
-    // ★남은 몫이 0 이면 `request_blocking` 이 곧바로 시한 만료로 돌아온다★ — 거기가 유일한 판정 자리라
-    //   여기서 미리 갈라 두 곳에서 같은 결론을 내지 않는다.
+    // ★The deadline covers **the whole section**, not each request★ — per request the round trips sum to a multiple of the cap and
+    //   can exceed the manager's backstop, so this link's failure could not take part in the decision ([`HANDSHAKE_BUDGET`]).
+    // ★So the deadline is **received from outside**★: the history paging right after ([`hydrate_history`]) shares it. A fresh
+    //   `Instant::now()` here would give each 10 s and a resume that succeeded while fetching history would be decided a failure.
+    // ★With 0 remaining, `request_blocking` returns at once with a deadline expiry★ — the only deciding place, so it is not
+    //   pre-split here.
     let remaining = || deadline.saturating_duration_since(Instant::now());
 
     let init: InitializeResponse = request_blocking(
@@ -1756,18 +1513,17 @@ fn handshake(
         },
         remaining(),
     )?;
-    // ★이 줄이 상류 드리프트를 사후에 가르는 유일한 기록이다★ — 이 프로토콜에는 버전 칸이 없고
-    //   (스키마 전체에 `protocolVersion` 0 회), CLI 는 스스로 업데이트한다.
+    // ★The only record that tells upstream drift apart after the fact★ — the protocol has no version field (`protocolVersion` appears 0
+    //   times in the schema) and the CLI self-updates.
     tracing::info!(
         user_agent = %sanitize(&init.user_agent, LOG_STRING_LIMIT),
         platform = %sanitize(&init.platform_os, LOG_STRING_LIMIT),
-        "codex app-server 연결"
+        "codex app-server connected"
     );
 
-    // 보내는 것이 의무는 아니다(실측 0.154.0 — 안 보내도 `thread/start` 가 성공한다). 해롭지 않아
-    //   핸드셰이크 모양을 맞추는 쪽으로 둔다.
+    // Not an obligation (measured 0.154.0 — `thread/start` succeeds without it); harmless, kept to match the handshake shape.
     write_line(stdin, &protocol::notification_line(method::INITIALIZED))
-        .map_err(|e| format!("initialized 쓰기 실패: {e}"))?;
+        .map_err(|e| format!("initialized write failed: {e}"))?;
 
     // ADR-0337: fail closed — an error response (an old codex without the method — R16) or no answer fails the spawn.
     if !open.extra_roots.is_empty() {
@@ -1784,9 +1540,9 @@ fn handshake(
         )?;
     }
 
-    // ★두 갈래가 같은 `thread` 를 돌려주고, 그래서 이 함수의 반환은 하나다★ — 이어받기에서도 **상대가
-    //   준 id 를 그대로** 올린다. 우리가 보낸 것과 같을 것이라 가정해 되쓰지 않는다: 다르면 그 다른
-    //   값이 이 화신이 실제로 말하는 스레드이고, 기록 동사가 그것을 받아야 다음 이어받기가 맞는 곳을 연다.
+    // ★Both branches return the same `thread`, so one return★ — on resume too **the id the peer gave is raised as is**: if it differs
+    //   from what we sent, that value is the thread this incarnation actually talks in, and the record verb must receive it so the next
+    //   resume opens the right place.
     let mut resume_instructions = false;
     let (thread, items_backwards_cursor): (Thread, Option<String>) = match &open.thread {
         ThreadOpen::Start(params) => {
@@ -1799,7 +1555,7 @@ fn handshake(
                 params,
                 remaining(),
             )?;
-            // ★새 대화에는 되돌아갈 이력이 없다 — 응답에 그 칸 자체가 없다★(스키마 0.154.0).
+            // ★A new conversation has no history — the response does not even have that field★ (schema 0.154.0).
             (started.thread, None)
         }
         ThreadOpen::Resume(params) => {
@@ -1837,7 +1593,7 @@ fn handshake(
         resumed = matches!(open.thread, ThreadOpen::Resume(_)),
         history_cursor = items_backwards_cursor.is_some(),
         above_floor = floor == Floor::Above,
-        "codex thread 개시"
+        "codex thread opened"
     );
     // ADR-0337: counts and flags only — never a path or the text. The live run (§7-3 L2/L3) reads these fields.
     tracing::info!(
@@ -1849,7 +1605,7 @@ fn handshake(
         extra_roots = open.extra_roots.len(),
         resume_instructions,
         first_turn_context = open.first_turn_context.is_some(),
-        "codex 실행 재료 적용"
+        "codex launch materials applied"
     );
     Ok(Opened {
         thread_id: thread.id,
@@ -1858,42 +1614,28 @@ fn handshake(
     })
 }
 
-/// 핸드셰이크가 세운 것 — 이 화신이 말하는 스레드와, 그 스레드의 지난 화면으로 들어가는 문.
+/// What the handshake set up — the thread this incarnation talks in, and the door into its past screen.
 ///
-/// ★두 칸이 **다른 등급**이다★: `thread_id` 가 없으면 이 화신은 아무것도 못 한다(핸드셰이크 실패).
-///   `items_backwards_cursor` 는 없어도 아무것도 안 깨진다 — 복원할 것이 없거나 새 대화라는 뜻이고,
-///   그 부재는 빈 화면으로 시작하는 오늘의 동작 그대로다(ADR-0203: 이력 실패는 조용하고 무해하다).
+/// ★The two fields are of **different grades**★: without `thread_id` nothing works (handshake failure); without
+///   `items_backwards_cursor` nothing breaks — nothing to restore or a new conversation, starting with an empty screen (ADR-0203).
 struct Opened {
     thread_id: String,
     items_backwards_cursor: Option<String>,
-    /// 하한 판정 — 적용은 세션 id 기록이 돌아온 뒤다([`settle_floor`]).
+    /// The floor decision — applied after the session id record returns ([`settle_floor`]).
     // ADR-0231
     floor: Floor,
 }
 
-/// 이어받은 스레드의 지난 화면을 **끝에서부터** 받아 중립 이벤트로 옮긴다(ADR-0203).
+/// Fetches the resumed thread's past screen **from the end** and carries it into neutral events (ADR-0203).
 ///
-/// ★★실패가 실패를 만들지 않는다★★: 이 함수는 **어떤 갈래에서도 `Err` 를 내지 않는다.** 커서가 없어도,
-///   상대가 거절해도, 줄이 상한을 넘어 답이 안 와도, 예산이 떨어져도 — 결말은 언제나 「거기까지의
-///   이벤트」다. 받아 오지 못한 이력은 **빈 화면**이지 실패한 활성화가 아니다(claude 쪽 `.jsonl` 읽기가
-///   파일이 없으면 빈 `Vec` 을 돌리는 것과 같은 등급 — ADR-0079).
-/// ★★그래서 이 호출은 [`HANDSHAKE_BUDGET`] 을 핸드셰이크와 **나눠 쓴다 — 새 시계를 잡지 않는다**★★:
-///   따로 잡으면 `Ready` 가 최대 두 예산만큼 늦어져 매니저의
-///   [`crate::manager::LINK_RESOLUTION_BACKSTOP`] 을 넘고, **성공한 이어받기가 「통로가 결말을 못 냈다」로
-///   판정된다.** 그 회귀는 화면이 조금 짧아지는 것과 등급이 다르다.
-/// ★어디서 멈추나 = 넷★: ① 커서 소진(정상) ② 링을 채웠다 ③ 예산 소진 ④ [`MAX_HISTORY_PAGES`].
-///   ②가 이 함수의 천장인 이유는 [`REPLAY_MAX_BYTES`] 가 진다 — 링이 버릴 것을 더 받아 오는 것은 순
-///   비용이고, 그 판정 축은 링이 실제로 쓰는 [`estimate_cost_bytes`] 여야 한다(다른 축으로 어림잡으면
-///   덜 받아 화면을 잃거나 더 받아 왕복만 버린다).
-/// ★방향★: `sortDirection: desc` + resume 이 준 역방향 커서로 **최신부터** 걷는다(스키마 0.154.0 이
-///   그 칸의 설명에 그 조합을 직접 적는다). 페이지 안의 `data` 도 최신이 앞이라, 모으는 동안은 역순이고
-///   마지막에 한 번 뒤집어 시간순으로 되돌린다(실측 2026-09-16: 첫 페이지 `data[0]` 이 마지막 어시스턴트
-///   응답, 마지막 페이지 끝이 최초 `userMessage`).
-/// ★번역기를 **이 호출 전용으로 하나 만든다**★ — pump 가 든 것은 `Box<dyn OutputDecoder>` 라 trait 밖
-///   문에 닿지 못한다. 갈리는 것은 진단 계수 맵과 되울린 유저 item 의 「먼저 온 쪽」 기억 둘인데,
-///   이력에서는 한 item 이 **정확히 한 번** 오므로 그 기억이 할 일이 없고, 계수는 진단 전용이다.
-///   ★대가 = 이력에서 본 드리프트와 라이브에서 본 드리프트가 서로 다른 맵에 쌓인다★(둘 다 로그로는
-///   나간다 — 관측 키에 메서드 이름이 들어가 어느 쪽인지 구별된다).
+/// ★Failure does not create failure★: **it emits `Err` on no branch** — no cursor, refusal, over-cap line, budget out all end as "the events
+/// up to there"; unfetched history is **an empty screen**, not a failed activation (ADR-0079).
+/// ★It **shares** [`HANDSHAKE_BUDGET`] — no new clock★ (a second one could exceed [`crate::manager::LINK_RESOLUTION_BACKSTOP`]).
+/// Stops: ① cursor exhausted ② ring filled ([`REPLAY_MAX_BYTES`] via the ring's [`estimate_cost_bytes`]) ③ budget ④ [`MAX_HISTORY_PAGES`].
+/// Direction: `sortDirection: desc` + the resume's backward cursor; pages and items are newest first, reversed while gathering and flipped
+/// once at the end.
+/// ★A translator is made **for this call only**★ — the pump's `Box<dyn OutputDecoder>` is out of reach; history yields each item once, so
+/// only the diagnostic count maps split.
 // ADR-0203
 fn hydrate_history(
     stdin: &Mutex<Option<ChildStdin>>,
@@ -1904,7 +1646,7 @@ fn hydrate_history(
     deadline: Instant,
 ) -> Vec<OutputEvent> {
     let Some(cursor) = opened.items_backwards_cursor.clone() else {
-        // 새 대화이거나 상대가 진입점을 주지 않았다 — 오늘까지의 동작(빈 화면) 그대로다.
+        // A new conversation, or the peer gave no entry point — empty screen.
         return Vec::new();
     };
     collect_history(&opened.thread_id, cursor, deadline, |params, budget| {
@@ -1920,11 +1662,10 @@ fn hydrate_history(
     })
 }
 
-/// 위 함수의 **왕복 없는 알맹이** — 페이지를 어떻게 걷고 어디서 멈추고 어떤 순서로 내놓나.
+/// The **round-trip-free core** of the function above — how pages are walked, where it stops, in what order it hands them out.
 ///
-/// ★`fetch` 를 주입받는 이유는 하나다: 이 규칙을 자식 프로세스 없이 단독으로 잴 수 있어야 한다★
-/// (ADR-0012). 운영에서 그 자리에 들어가는 것은 [`request_blocking`] 하나이고, 시험대는 페이지를
-/// 손으로 만들어 넣는다. ★`fetch` 의 `Err` 는 **비-치명**이다★ — 그 지점까지 모은 것을 그대로 낸다.
+/// ★`fetch` is injected so this rule can be measured alone, without a child process★ (ADR-0012); production passes
+/// [`request_blocking`]. ★An `Err` from `fetch` is **non-fatal**★ — what was gathered is emitted as is.
 fn collect_history(
     thread_id: &str,
     entry_cursor: String,
@@ -1933,21 +1674,13 @@ fn collect_history(
 ) -> Vec<OutputEvent> {
     let mut cursor = entry_cursor;
     let mut decoder = CodexAppServerDecoder::new();
-    // 최신 → 과거 순으로 쌓는다. 칸 하나 = item 하나가 낸 이벤트들 + 그 item 이 속한 **묶음 번호**.
-    // ★아무것도 못 옮긴 item 은 칸을 차지하지 않는다★ — 그래야 턴 경계가 **내용이 있는 턴 사이**에만
-    //   서고, 전부 버려진 이력이 경계만 남은 목록이 되지 않는다.
-    // ★★키가 원본 id 가 아니라 **번호**인 것은 메모리 상한이다 — 그런데 거르기만으로는 부족했다★★:
-    //   `turnId` 에는 와이어 상한이 없어서, 긴 id 를 단 item 이 페이지마다 오면 쌓인 원본 문자열만으로
-    //   수백 MiB 가 된다(줄 상한은 페이지 **한 장**에만 걸리고 이 누적에는 안 걸린다). 그렇다고 상한을
-    //   넘긴 id 를 전부 `None` 한 칸으로 접으면 **서로 다른 대화 둘이 한 턴으로 렌더된다** — 잃는 것이
-    //   「대조가 헐거워진다」가 아니라 「화면이 거짓말을 한다」로 등급이 올라간다.
-    //   그래서 축을 둘로 가른다: **구별**은 번호가 지고, **표시**는 거른 id 가 진다.
-    //   - 구별: 직전 항목의 원본 id **하나**하고만 비교한다(`last_raw` — 새 값이 들어오면 앞 것은 버려져
-    //     언제나 O(1) 이다). 그래서 상한을 넘긴 id 들도 서로 다르면 다른 묶음이 된다.
-    //   - 표시: 묶음마다 [`MAX_TURN_ID_BYTES`] 로 **자르지 않고 거른** id 를 하나씩만 든다(`groups`).
-    //     자른 둘이 같아지면 서로 다른 턴이 한 턴으로 접히므로 자르지 않는다(`decoder` 의
-    //     `MAX_ID_BYTES` 와 같은 판정). 묶음 수는 항목 수 이하라 이쪽도 유계다.
-    //   ★남는 대가 = 상한을 넘긴 turn 의 경계에는 **id 가 실리지 않는다**★(경계 자체는 선다).
+    // Piled newest → oldest. One slot = the events one item emitted + the **group number** it belongs to. ★An item that carried nothing
+    //   takes no slot★ — boundaries stand only **between turns with content**.
+    // ★★The key is a **number**, not the original id — a memory cap★★: `turnId` has no wire cap (the line cap bounds one page, not this
+    //   accumulation), so long ids would pile up hundreds of MiB; folding all over-cap ids into one `None` slot would **render two
+    //   conversations as one turn**. So: **distinction** = comparison with the previous item's original id only (`last_raw`, O(1)); **display**
+    //   = one id per group, **filtered, not truncated** ([`MAX_TURN_ID_BYTES`], `groups`; truncation could make different turns equal —
+    //   as `MAX_ID_BYTES` of `decoder`). ★Price: **no id is carried** on the boundary of an over-cap turn★.
     let mut newest_first: Vec<(u32, Vec<OutputEvent>)> = Vec::new();
     let mut groups: Vec<Option<String>> = Vec::new();
     let mut last_raw: Option<String> = None;
@@ -1959,7 +1692,9 @@ fn collect_history(
     while pages < MAX_HISTORY_PAGES {
         let budget = deadline.saturating_duration_since(Instant::now());
         if budget.is_zero() {
-            tracing::info!("codex 이력 복원: 연결 예산을 다 썼다 — 여기까지만 싣는다");
+            tracing::info!(
+                "codex history restore: used up the connection budget — carrying only up to here"
+            );
             break;
         }
         pages += 1;
@@ -1972,15 +1707,13 @@ fn collect_history(
         let page = match fetch(&params, budget) {
             Ok(page) => page,
             Err(reason) => {
-                // ★`warn` 이 아니라 `info` 다★ — 이것은 결함이 아니라 「여기까지만 복원했다」는 사실이고,
-                //   연결은 이 뒤로 정상으로 선다. 사유는 그래도 남긴다(상류 드리프트의 첫 신호가 여기다).
-                // ★★이 갈래가 「연결이 죽었다」를 **삼킨다는 것을 알고 둔다**★★ — 리더가 EOF 를 보면
-                //   대기표가 오류로 깨어나 여기로 오는데, 그 둘을 문자열로 가를 수는 없다. 그래서 그
-                //   판정은 여기가 아니라 게이트를 여는 자리가 진다([`open_gate`]) — 거기서 상태를 직접
-                //   보므로 문자열 추측이 필요 없다.
+                // ★`info`, not `warn`★ — "restored only up to here" is a fact, not a defect, and the connection stands. The reason is still logged
+                //   (first signal of upstream drift).
+                // ★Kept **knowing this branch swallows "the connection died"**★: reader EOF wakes the waiting entry with an error and
+                //   lands here, indistinguishable by string. That decision is made by [`open_gate`], which looks at the state directly.
                 tracing::info!(
                     page = pages,
-                    "codex 이력 복원을 여기서 멈춘다 — 화면만 짧아지고 연결은 그대로다: {}",
+                    "codex history restore stops here — only the screen gets shorter, the connection stays as is: {}",
                     sanitize(&reason, LOG_STRING_LIMIT)
                 );
                 break;
@@ -1995,18 +1728,17 @@ fn collect_history(
             let new_run = last_raw.as_deref() != Some(entry.turn_id.as_str());
             let shown =
                 (entry.turn_id.len() <= MAX_TURN_ID_BYTES).then_some(entry.turn_id.as_str());
-            // ★★천장 판정은 **넣기 전에**, 그리고 **합성할 경계까지 세어서** 한다★★:
-            //   ① 넣고 나서 재면 그 한 건만큼 늘 넘긴다. ② 경계를 안 세면 턴이 많은 이력에서 실제 이벤트
-            //   수가 여기서 센 것의 최대 두 배가 되어(항목마다 턴이 갈리는 극단) 링이 착지하자마자 절반을
-            //   버린다 — 천장을 링 상수에 묶어 둔 이유가 바로 그 어긋남을 없애려던 것이었다.
-            // ★경계는 **새 run 마다 하나**다★ — 시간순으로 되돌렸을 때 run 하나당 닫는 경계가 하나이므로,
-            //   역순으로 걸으며 run 이 바뀔 때마다 하나씩 세면 총수가 정확히 맞는다.
+            // ★Decide the ceiling **before putting**, **counting the boundaries to be synthesized too**★: ① measuring after putting always
+            //   exceeds by one entry ② without boundaries, a history with many turns would hold up to twice the counted events (every item
+            //   splitting a turn) and the ring would drop half on landing — the mismatch tying the ceiling to the ring constant removes.
+            // ★One boundary per new run★ — in time order there is one closing boundary per run, so counting each run change while walking
+            //   in reverse gives the total.
             let boundary = new_run.then(|| history_turn_boundary(shown));
             let add_events = translated.len() + usize::from(boundary.is_some());
             let add_cost = translated.iter().map(estimate_cost_bytes).sum::<usize>()
                 + boundary.as_ref().map(estimate_cost_bytes).unwrap_or(0);
-            // ★첫 항목은 무조건 받는다★ — 한 건이 홀로 천장을 넘어도 빈 화면보다는 그 한 건이 낫고,
-            //   링도 같은 규칙으로 최신 1 건을 지킨다(`Ring::push` 의 `len() > 1` 가드).
+            // ★The first item is always taken★ — even one over the ceiling beats an empty screen, and the ring keeps the newest by the same
+            //   rule (the `len() > 1` guard of `Ring::push`).
             if !newest_first.is_empty()
                 && (cost + add_cost > REPLAY_MAX_BYTES || count + add_events > REPLAY_MAX_EVENTS)
             {
@@ -2017,7 +1749,7 @@ fn collect_history(
             cost += add_cost;
             if new_run {
                 groups.push(shown.map(String::from));
-                // ★원본은 **직전 것 하나**만 든다★ — 이 대입이 앞 값을 버리므로 누적되지 않는다.
+                // ★Only **the previous** original is held★ — this assignment drops the old value, so nothing accumulates.
                 last_raw = Some(entry.turn_id);
             }
             newest_first.push((groups.len() as u32 - 1, translated));
@@ -2026,20 +1758,16 @@ fn collect_history(
             break;
         }
         match next {
-            // ★★같은 커서를 다시 주면 멈춘다★★ — 그렇지 않으면 같은 페이지를 페이지 상한까지 다시 받아
-            //   **같은 대화가 여러 벌** 실리고, 그 중복이 진짜 이력을 링에서 밀어낸다. 상한은 루프를
-            //   묶지만 이 오염은 못 막는다.
-            //   ★★막는 것은 **고정점 하나**뿐이다 — 어떤 순환이 새는지 정확히 적는다★★: 길이 1 인
-            //   순환(A→A)만 잡히고 **길이 2 이상은 전부 샌다**(A→B→A, A→B→C→A, …). 그 경우 멈추는 것은
-            //   페이지 상한·링 천장·예산이고, 그때까지 **같은 대화가 여러 벌** 링에 실린다 — 화면에
-            //   중복이 보이고 활성화가 예산만큼 늦어진다. 「상한이 있으니 무해하다」로 읽지 말 것.
-            //   ★안 고치는 이유는 값이 아니라 **비용의 축**이다★ — 더 긴 순환을 잡으려면 본 커서를
-            //   기억해야 하는데, 커서는 상대가 길이를 정하는 문자열이라 그 기억이 곧 위 `turnId` 와 같은
-            //   누적 비용이 된다. 몇 개를 기억할지에 근거가 없으므로 상수를 지어내지 않는다.
+            // ★The same cursor again stops the walk★ — otherwise the same page is refetched up to the page cap, carrying **several copies of the
+            //   same conversation** that push the real history out of the ring; the cap bounds the loop but not this contamination.
+            //   ★Only **cycles of length 1** (A→A) are caught; **all of length ≥ 2 leak** (A→B→A, …)★ — those are stopped by the page cap ·
+            //   ring ceiling · budget, meanwhile duplicates are visible and activation is delayed by the budget. Not "capped, so harmless".
+            //   ★Not fixed because of **cost**, not value★: catching longer cycles means remembering seen cursors, strings whose length the
+            //   peer decides — the same accumulated cost as `turnId` above — and there are no grounds for how many to remember.
             Some(next) if next == cursor => {
                 tracing::warn!(
                     page = pages,
-                    "codex 이력 복원: 상대가 같은 커서를 되돌려 줬다 — 중복을 싣지 않고 멈춘다"
+                    "codex history restore: the peer returned the same cursor — stopping without carrying duplicates"
                 );
                 break;
             }
@@ -2048,7 +1776,7 @@ fn collect_history(
         }
     }
 
-    // ★여기서 한 번 뒤집어 시간순으로 되돌린다★ — 링은 넣은 순서가 곧 화면 순서다.
+    // ★Flipped once here back to time order★ — in the ring, insertion order is screen order.
     newest_first.reverse();
     let items = newest_first.len();
     let mut events: Vec<OutputEvent> = Vec::with_capacity(count);
@@ -2062,8 +1790,7 @@ fn collect_history(
         }
         events.extend(translated);
     }
-    // ★마지막 턴도 반드시 닫는다★ — 안 닫으면 복원된 슬롯의 대기 표시가 영영 돈다
-    //   ([`history_turn_boundary`] 가 그 인과의 정본).
+    // ★The last turn must be closed too★ — else the restored slot's waiting indicator spins forever ([`history_turn_boundary`]).
     if let Some(last) = open_group {
         events.push(history_turn_boundary(groups[last as usize].as_deref()));
     }
@@ -2071,7 +1798,7 @@ fn collect_history(
     debug_assert_eq!(
         events.len(),
         count,
-        "천장 회계가 실제 이벤트 수와 갈렸다 — 경계를 안 센 회귀"
+        "the ceiling accounting diverged from the actual event count — a regression of not counting boundaries"
     );
     tracing::info!(
         pages,
@@ -2079,22 +1806,17 @@ fn collect_history(
         events = events.len(),
         bytes = cost,
         ring_full = hit_ceiling,
-        "codex 이력 복원"
+        "codex history restored"
     );
     events
 }
 
-/// 게이트를 연다 — ★**이 화신의 연결이 아직 우리 것일 때만**★.
+/// Opens the gate — ★**only while this incarnation's connection is still ours**★.
 ///
-/// ★★없으면 죽은 통로가 `Ready` 로 선다 — 그것이 이 함수의 존재 이유다★★: 핸드셰이크가 성공한 뒤
-///   이력을 받는 동안 상대가 stdout 을 닫으면 [`ReaderExit`] 의 `Drop` 이 `closed`/[`Link::Down`] 을
-///   세우고 대기표를 오류로 깨운다. 이력 쪽은 그 오류를 **부분 성공**으로 처리하도록 되어 있어(그것이
-///   옳다 — 페이지 하나가 안 온 것과 연결이 끊긴 것은 다른 사건이다), 그대로 두면 그 다음 줄이 방금
-///   내려간 상태를 `Ready` 로 덮어쓰고 **이미 죽은 것을 활성화 성공으로 배달한다.**
-/// ★그래서 가르는 축은 「무엇이 실패했나」가 아니라 **「지금 연결이 서 있나」**다★ — 상태를 직접 보므로
-///   오류 문자열을 해석할 필요가 없다. 페이지가 안 왔을 뿐이면 이 검사는 통과한다.
-/// ★`Err` 의 문구는 상태가 들고 있던 사유 그대로다★ — 그 사유는 stdout 의 JSON-RPC 오류나 스트림 종료라
-///   콘솔 꼬리에도 stderr 꼬리에도 없다(`LinkResolution::Failed` 의 doc 이 그 인과의 정본).
+/// Else a dead link stands as `Ready`: if the peer closes stdout during history, [`ReaderExit`] sets `closed`/[`Link::Down`] and wakes
+/// waiters with an error that history treats as **partial success**; the next line would overwrite `Down` with `Ready` and **deliver
+/// something dead as a successful activation.** The split axis is "is the connection standing now" (state read directly), not "what failed".
+/// The `Err` wording is the state's reason as is (a JSON-RPC error on stdout or stream end — in neither console nor stderr tail).
 // ADR-0203
 // ADR-0201
 fn open_gate(state: &SharedState, thread_id: String) -> Result<(), String> {
@@ -2104,7 +1826,7 @@ fn open_gate(state: &SharedState, thread_id: String) -> Result<(), String> {
         return Err(reason.clone());
     }
     if s.closed {
-        return Err("연결이 닫혔다".to_string());
+        return Err("the connection closed".to_string());
     }
     s.thread_id = Some(thread_id);
     s.link = Link::Ready;
@@ -2113,30 +1835,31 @@ fn open_gate(state: &SharedState, thread_id: String) -> Result<(), String> {
 }
 
 enum Job {
-    /// 게이트를 안 타는 제어 줄.
+    /// A control line that does not go through the gate.
     Line(String),
-    /// 큐에서 꺼낸 유저 턴 — 쓰기 전에 대기표를 먼저 건다. `seq` = 이 Job 이 연 턴의 표식. `item` = 실은 목록 항목의
-    /// id(쓴 뒤 넘김 표지를 낸다 — [`publish_hand_over`]) · Direct · 우편 · 식별자 없는 항목이면 `None`.
+    /// A user turn taken out of the queue — the waiting entry is registered before writing. `seq` = the marker of the turn this Job
+    /// opens. `item` = the id of the list item it carried (handed-over mark emitted after writing — [`publish_hand_over`]); `None` for
+    /// Direct · mail · items without an identifier.
     Turn {
         id: i64,
         seq: u64,
         line: String,
         item: Option<String>,
     },
-    /// 이번 깨어남은 시한 훑기뿐이다.
+    /// This wake-up is only the deadline sweep.
     Sweep,
-    /// 도구 끝 계기가 푼 쥔 항목 하나를 도는 턴에 넘긴다 — 쓰기 전에 대기표를 먼저 건다([`issue_steer`]).
+    /// Hands one held item released by the tool-end trigger to the running turn — waiting entry registered before writing ([`issue_steer`]).
     // ADR-0231
     Steer(Steer),
 }
 
-/// ★"보낼 수 있나" 와 "진행 중으로 전이" 가 한 락 아래서 붙는 유일한 자리★(ADR-0193).
+/// ★The only place where "can it send" and "transition to in-progress" are joined under one lock★ (ADR-0193).
 ///
-/// 무엇으로 여는지는 Idle 순서가 정한다([`State::idle_opening`] — 사용자 `Held` → 우편 · 오류 뒤 멈춤 중이면 없음).
-/// 머리가 방출 전이면 기다린다(건너뛰지 않는다 — 친 순서). 식별자를 든 항목(하한 충족)은 `clientUserMessageId` 를 싣고 `InFlight` 로 남아
-/// 에코를 기다린다. ★식별자 없는 항목은 오늘처럼 여는 순간 빠진다 — 대조할 키가 없어 남기면 턴 끝 처분이 영영 못
-/// 닫고 우편을 막는다★. 한 `turn/start` 에는 한 항목이다(PRD §3-8). ★Active 동안은 안 연다★ — 진행 중 `turn/start` 는
-/// 벤더가 steer 로 처리한다(TRD §3-2). 첫 줄의 `Idle` 검사가 그것을 막는다.
+/// What it opens with = the Idle order ([`State::idle_opening`]). A pre-announce head waits (typing order). An item with an identifier
+/// (floor met) carries `clientUserMessageId` and stays `InFlight` for the echo. ★An item without one leaves at opening — it has no
+/// comparison key, so the turn-end disposal could never close it and it would block mail★. One `turn/start` = one item (PRD §3-8).
+/// ★It does not open while Active★ — a `turn/start` during a turn is handled by the vendor as a steer (TRD §3-2); the first-line
+/// `Idle` check prevents it.
 // ADR-0231
 fn take_turn_locked(s: &mut State, next_id: &AtomicI64) -> Option<Job> {
     if !matches!(s.link, Link::Ready) || !matches!(s.turn, TurnState::Idle) {
@@ -2186,27 +1909,23 @@ fn take_turn_locked(s: &mut State, next_id: &AtomicI64) -> Option<Job> {
             })
         }
         Err(e) => {
-            // 우리 타입은 직렬화가 실패할 수 없지만 계약상 열려 있다. 여기서 본문을 버리면 조용한
-            //   유실이라, 큐에 그대로 두고 다음 깨어남에 다시 시도한다.
-            tracing::warn!("turn/start 직렬화 실패 — 이 본문은 큐에 남는다: {e}");
+            // Our types cannot fail to serialize, but by contract it is open; dropping the body would be a silent loss, so it stays queued and
+            //   is retried at the next wake-up.
+            tracing::warn!("turn/start serialization failed — this body stays in the queue: {e}");
             None
         }
     }
 }
 
-/// 도구 끝 계기([`State::steer_due`])가 서 있으면 도는 턴에 넘길 쥔 항목 하나를 집어 `InFlight` 로 옮기고 그
-/// `turn/steer` 를 만든다 — 턴 도중 넘기기의 전부다(ADR-0235). ★턴을 열지 않는다★ — 여는 자리는 여전히
-/// [`take_turn_locked`] 하나다(ADR-0193).
+/// If the tool-end trigger ([`State::steer_due`]) stands, picks one held item for the running turn, moves it to `InFlight` and builds its
+/// `turn/steer` (ADR-0235). ★It does not open a turn★ — only [`take_turn_locked`] does (ADR-0193).
 ///
-/// 후보 = 가장 오래된 `Held` **사용자** 항목. ★우편은 건너뛴다★ — 목록 밖이라 앞지르기 금지에 들지 않고, 턴
-///   끝까지 쥐였다가 Idle 에서 나간다(쥔 우편이 사용자 항목의 steer 를 막지 않는다). 한 요청에 한 항목이다(PRD §3-8)
-///   — 계기가 선 동안 라이터가 차례로 다시 불러 쥔 글을 친 순서대로 전부 넘긴다(항목마다 제 `clientUserMessageId`).
-/// ★넘길 것이 없으면 계기를 내린다★ — 쥔 사용자 글 없음 · 턴 id 를 아는 도는 턴 없음(`expectedTurnId` 가 벤더의
-///   선행조건이다) · 그 턴의 「steer 거절」 표시([`State::steer_refused`]) · 후보가 목록 항목이 아님(Direct 는
-///   `turn/start` 로만 나간다) · 하한 미달(식별자가 없다 — 오늘 경로). 그 뒤에 친 글은 다음 도구 끝이나 턴 끝(Idle
-///   순서)을 기다린다.
-/// ★후보가 방출 전이면 계기를 둔 채 기다린다★ — 건너뛰지 않고(친 순서) 방출이 라이터를 깨운다([`announce`]).
-/// ★✕ 와 같은 락에서 갈린다★ — 여기서 `InFlight` 로 옮긴 뒤에 온 ✕ 는 넘긴 쪽(`TooLate`)이다.
+/// Candidate = the oldest `Held` **user** item; mail is skipped (outside the list, waits for Idle). One request = one item (PRD §3-8);
+/// the writer calls again until all held text is handed over, each with its own `clientUserMessageId`.
+/// ★Nothing to hand over → the trigger is lowered★: no held user text · no running turn with a known id (`expectedTurnId`) · the turn's
+/// 「steer refused」 mark ([`State::steer_refused`]) · candidate not a list item (Direct goes only by `turn/start`) · below the floor.
+/// ★A pre-announce candidate waits with the trigger standing★ ([`announce`] wakes the writer). ★Split from ✕ under the same lock★ — a ✕
+/// after the move to `InFlight` is `TooLate`.
 // ADR-0231
 // ADR-0235
 fn take_steer_locked(s: &mut State, next_id: &AtomicI64) -> Option<Steer> {
@@ -2268,9 +1987,9 @@ fn take_steer_locked(s: &mut State, next_id: &AtomicI64) -> Option<Steer> {
             })
         }
         Err(e) => {
-            // 직렬화가 실패할 수 없는 타입이지만 계약상 열려 있다 — 항목은 쥔 채로 남아 턴 끝에 나간다. 계기를 내려
-            //   깨어날 때마다 같은 실패를 되풀이하지 않는다.
-            tracing::warn!("turn/steer 직렬화 실패 — 이 항목은 쥔 채로 남는다: {e}");
+            // Cannot fail to serialize but by contract it is open — the item stays held and goes out at the turn end; the trigger is lowered so
+            //   the failure is not repeated on every wake-up.
+            tracing::warn!("turn/steer serialization failed — this item stays held: {e}");
             s.steer_due = false;
             None
         }
@@ -2290,7 +2009,7 @@ fn next_job(state: &SharedState, next_id: &AtomicI64) -> Option<Job> {
         if let Some(job) = take_turn_locked(&mut s, next_id) {
             return Some(job);
         }
-        // 도구 끝 계기가 선 동안 쥔 사용자 글을 하나씩 — 넘길 것이 없어지면 그 함수가 계기를 내린다.
+        // While the tool-end trigger stands, held user text one at a time; the function lowers the trigger when nothing is left.
         // ADR-0231
         if let Some(steer) = take_steer_locked(&mut s, next_id) {
             return Some(Job::Steer(steer));
@@ -2303,26 +2022,14 @@ fn next_job(state: &SharedState, next_id: &AtomicI64) -> Option<Job> {
     }
 }
 
-/// `seq` 가 **지금 진행 중인 바로 그 턴**일 때만 끝내고, 그 턴의 항목을 `close` 로 처분하고, 큐를 풀고,
-/// 그 턴의 **경계를 낸다**. 처분의 목록 사건은 경계 **앞에** 낸다 — 경계가 깨우는 소비자가 정리된 목록을
-/// 본다.
+/// Ends the turn only when `seq` is **exactly the turn in progress now**, disposes its items with `close`, releases the queue and **emits
+/// the boundary** (disposal events first). ★Without the marker check a late signal would close the next turn★. Returns whether it ended.
 ///
-/// ★표식을 안 보고 끝내면 늦게 온 신호가 다음 턴을 닫는다★ — 그러면 턴 둘이 동시에 열려 입력 큐가 막고자
-/// 하는 바로 그 상태가 된다. 돌려주는 값 = 실제로 끝냈나.
-///
-/// ★경계를 내는 것이 선택이 아니라 이 함수의 일부인 것이 요점이다★(ADR-0127): 이 경로로 끝나는 턴에는
-///   `turn/completed` 가 **오지 않는다**(쓰기 실패·응답 해독 실패·오류 응답·시한 만료·상한을 넘은 turn id).
-///   항목 처분이 이 함수의 일부인 것도 같은 까닭이다 — 안 하면 그 `InFlight` 가 영영 남는다. 그런데 사실
-///   계층을 「턴 중 아님」으로 되돌리는 유일한 입력이 턴 경계 신호라, 경계 없이 상태만 되돌리면 그
-///   화신은 **한가한데도 턴 중으로 관측된 채** 남아 30 분 fail-open 밸브가 쓸어 갈 때까지 우편이 막힌다.
-///   ★그래서 [`OutputEvent::Error`] 한 줄로 대신하지 않는다★ — 그 어휘는 「종료 아님」이라 분류자가
-///   턴 신호로 세지 않는다(그것이 바로 위 결함의 기전이었다).
-/// ★사유를 경계 **안에** 싣고 따로 오류 줄을 앞세우지 않는다★ — 쪼개면 「턴이 끝났다」와 「어떻게
-///   끝났다」가 두 이벤트로 갈려 소비자에게 순서 계약이 하나 더 생긴다(같은 판정을 번역기의
-///   `turn/completed` 자리가 이미 했다).
-/// ★이 경로의 결말은 언제나 `Failed` 다★ — 다섯 호출자 전부 「우리가 이 턴을 포기한다」이고, 그중 어느
-///   것도 상대가 말해 준 결말이 아니다. 상대가 말해 준 결말은 번역기를 지나 [`Reader::note_turn`] 이
-///   귀속한다. `close` 는 `Rejected`(쓰기 실패 · 오류 응답)거나 `Unanswered`(그 밖)다.
+/// ★Emitting the boundary is part of this function★ (ADR-0127): on these paths `turn/completed` **does not come** (write failure · decode
+/// failure · error response · deadline · turn id over the cap), and only a boundary returns the fact layer to "not mid-turn" — else the
+/// incarnation is **observed mid-turn although idle**, blocking mail until the 30-minute fail-open. An [`OutputEvent::Error`] line cannot
+/// replace it (not a turn signal); the reason rides **inside** the boundary (no extra ordering contract).
+/// The outcome is always `Failed`: `close` = `Rejected` (write failure · error response) or `Unanswered` (the rest).
 fn end_turn_if(
     state: &SharedState,
     core: &OutputCore,
@@ -2337,11 +2044,9 @@ fn end_turn_if(
             TurnState::Active { seq: cur, turn_id } if *cur == seq => {
                 let turn_id = turn_id.clone();
                 s.turn = TurnState::Idle;
-                // ★붙들어 둔 종료는 이 턴과 함께 버린다★: 그 칸은 **열려 있던 그 턴**의 id 를
-                //   기다리는 것뿐이라, 턴이 다른 길로 끝나면 영영 대조될 일이 없다. 남겨 두면 다음
-                //   턴이 그 id 를 재사용하는 순간 [`Reader::resolve`] 가 갓 열린 턴을 그 자리에서
-                //   닫고 낡은 경계를 올린다. 턴은 언제나 `Idle` 에서만 열리므로([`take_turn_locked`])
-                //   idle 자리마다 비우면 어느 칸도 다음 턴으로 넘어가지 않는다.
+                // ★The held end is dropped with this turn★: that slot waits only for the id of **the turn that was open**; left behind, the moment
+                //   the next turn reuses that id [`Reader::resolve`] would close the fresh turn and raise a stale boundary. A turn opens only
+                //   from `Idle` ([`take_turn_locked`]), so emptying at every idle spot keeps any slot from carrying over.
                 s.early_completions.clear();
                 // ADR-0231
                 let drops = s.close_turn_items(seq, close);
@@ -2354,14 +2059,14 @@ fn end_turn_if(
         }
     };
     match ended {
-        // ★락을 놓은 뒤에 emit 한다★(ADR-0006) — 구독자는 이 호출 안에서 임의 코드를 돈다.
+        // ★Emit after releasing the lock★ (ADR-0006) — subscribers run arbitrary code inside this call.
         Some((turn_id, drops, context_dropped)) => {
             let detail = if context_dropped {
                 tracing::warn!(
                     agent = %core.id(),
                     turn = seq,
                     rejections = CONTEXT_REJECTION_LIMIT,
-                    "codex app-server: 바뀐 지시서를 담은 turn/start 가 연달아 거절돼 이번 실행에서는 더 보내지 않는다"
+                    "codex app-server: turn/start carrying changed instructions rejected repeatedly; not sending it again this run"
                 );
                 format!("{detail} — {CONTEXT_DROPPED_NOTE}")
             } else {
@@ -2383,13 +2088,12 @@ fn end_turn_if(
 /// What the failure line of the turn whose rejection hit [`CONTEXT_REJECTION_LIMIT`] adds — shown on the screen.
 // ADR-0337
 const CONTEXT_DROPPED_NOTE: &str =
-    "바뀐 지시서를 알리는 내용이 연달아 거절돼 이번 실행에서는 더 보내지 않는다";
+    "the changed-instructions notice was rejected repeatedly and will not be sent again this run";
 
-/// 라이터가 연 턴의 `turn/start` 를 못 썼다 — 대기표를 거두고 그 턴을 거절(`Rejected`)로 닫는다(벤더에 닿지
-/// 않았다 — 그 글은 쥔 자리로 돌아가 멈춤 뒤에서 기다린다 · [`State::close_turn_items`]).
+/// The `turn/start` of the turn the writer opened could not be written — withdraws the waiting entry and closes that turn as `Rejected`
+/// (the text did not reach the vendor — it returns to the held place behind the halt · [`State::close_turn_items`]).
 ///
-/// ★이 실패는 호출자에게 돌아갈 길이 없다★ — 그 호출은 이미 `Ok` 를 받고 떠났다. 남는 것은 이 턴을 실패로
-///   닫는 것뿐이다(정정 채널을 새로 만들지 않는다).
+/// ★This failure has no way back to the caller★ — the call already returned `Ok`; all that remains is closing the turn as a failure.
 // ADR-0231
 fn turn_write_failed(
     state: &SharedState,
@@ -2404,26 +2108,26 @@ fn turn_write_failed(
         state,
         core,
         seq,
-        format!("codex app-server 입력 전송 실패: {e}"),
+        format!("codex app-server input send failed: {e}"),
         TurnClose::Rejected,
     );
 }
 
-/// [`issue_steer`] 의 결말.
+/// The outcome of [`issue_steer`].
 // ADR-0231
 enum Issued {
-    /// 다 썼다 — 그 항목의 넘김 표지를 냈다.
+    /// Fully written — the handed-over mark was emitted.
     Written,
-    /// 못 썼다 — 그 항목은 쥔 자리로 돌렸다([`steer_write_failed`]).
+    /// Could not write — the item was returned to the held place ([`steer_write_failed`]).
     Failed,
-    /// 대기표가 닫혔다 — 통로가 닫혔다는 뜻이라 라이터가 끝난다.
+    /// The waiting table closed = the link closed, so the writer ends.
     Closed,
 }
 
-/// 라이터가 집은 steer 하나를 낸다. ★대기표를 쓰기 **전에** 건다★ — 뒤에 걸면 빠른 응답이 먼저 도착해 「모르는
-/// id」로 버려지고, 그 항목은 응답을 기다린 채 남는다. `write` = 줄 하나를 상대 stdin 에 쓰는 동작(운영 =
-/// [`write_line`] — 시험대가 쓰기를 바꿔 끼운다).
-/// ★알려진 잔여★: `Closed` 면 방금 옮긴 항목이 `InFlight` 로 남는다 — 통로가 이미 닫혀 코어의 종료 합성이 닫는다.
+/// Emits one steer the writer picked. ★The waiting entry is registered **before** the write★ — after it, a fast response would arrive
+/// first and be dropped as an "unknown id", leaving the item waiting. `write` = writing one line to the peer's stdin (production =
+/// [`write_line`]; tests swap it).
+/// ★Known remainder★: on `Closed` the item just moved stays `InFlight` — the link already closed and the core's end synthesis closes it.
 // ADR-0231
 fn issue_steer(
     state: &SharedState,
@@ -2441,7 +2145,7 @@ fn issue_steer(
     }
     match write(&steer.line) {
         Ok(()) => {
-            // 넘김 표지 — 쓴 **뒤**에 낸다(값은 지금 단계에서 읽는다 — [`publish_hand_over`]).
+            // The handed-over mark — emitted **after** writing (value read from the current stage — [`publish_hand_over`]).
             publish_hand_over(core, state, &steer.item);
             Issued::Written
         }
@@ -2452,11 +2156,12 @@ fn issue_steer(
     }
 }
 
-/// 라이터가 집은 steer 를 못 썼다 — 대기표를 거두고 그 항목을 쥔 자리로 되돌린다(벤더에 닿지 않았다 · 사용자 결정
-/// 2026-09-26 B — 지우지 않는다). 처분은 steer 거절과 같다([`State::hold_refused_steer`]): 그 턴에 「steer 거절」 표시를
-/// 달아 같은 턴의 다음 도구 끝이 같은 글을 곧바로 다시 쓰는 고리를 안 만들고, 다음 Idle 이 연다 · ✕ 가 닿았으면 거둔다.
-/// ★턴은 그대로 둔다★ — steer 는 턴을 열지 않았고 그 턴은 벤더에서 계속 돈다(오류 뒤 멈춤의 계기도 아니다 — TRD §5-5
-/// 다섯 출구). 세대 가림도 거절과 같다 — 턴이 쓰기 전에 끝나 이미 처분된 항목은 안 건드리고 표시도 안 단다.
+/// A steer the writer picked could not be written — withdraws the waiting entry and returns the item to the held place (it did not
+/// reach the vendor · user decision 2026-09-26 B — not erased). Disposal = a steer refusal ([`State::hold_refused_steer`]): the
+/// 「steer refused」 mark stops the next tool end of the same turn from rewriting the same text; the next Idle opens it; a ✕-reached item
+/// is withdrawn.
+/// ★The turn is left as is★ — the steer did not open a turn, it keeps running at the vendor, and it is no halt trigger (TRD §5-5 five
+/// exits). Generation masking as in refusal — an item already disposed by the turn end is untouched and gets no mark.
 // ADR-0231
 fn steer_write_failed(
     state: &SharedState,
@@ -2473,8 +2178,10 @@ fn steer_write_failed(
         cv.notify_all();
         held
     };
-    tracing::warn!("codex app-server turn/steer 전송 실패 — 그 글은 쥔 자리로 돌아간다: {e}");
-    // ADR-0235: 계측만 읽는 QA 에게도 보이도록 같은 사건을 계측 줄로도 남긴다.
+    tracing::warn!(
+        "codex app-server turn/steer send failed — that text returns to the held place: {e}"
+    );
+    // ADR-0235: also left as a trace line so it is visible to QA reading only the trace.
     if let Some(t) = steer.trace(SteerPhase::WriteFailed) {
         t.write(core.id());
     }
@@ -2487,13 +2194,12 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
     let now = Instant::now();
     for entry in pending.expired(now) {
         let reason = format!(
-            "{}: {}초 안에 답이 없다",
+            "{}: no answer within {} seconds",
             entry.method,
             REQUEST_DEADLINE.as_secs()
         );
         match entry.waiter {
-            // ★이 채널은 이미 `recv_timeout` 으로도 깬다★ — 둘 다 서면 먼저 온 쪽이 이기고, 채널이
-            //   닫혀 있으면 send 가 조용히 실패한다.
+            // ★This channel is also woken by `recv_timeout`★ — if both stand the first wins; a closed channel makes send fail quietly.
             Waiter::Handshake(tx) => {
                 let _ = tx.send(Err(reason));
             }
@@ -2506,12 +2212,12 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
                     format!("codex app-server: {reason}"),
                     TurnClose::Unanswered,
                 ) {
-                    tracing::debug!("시한이 지난 turn/start 가 연 턴은 이미 끝났다 — 그대로 둔다");
+                    tracing::debug!("the turn opened by a turn/start past its deadline has already ended — leaving it as is");
                 }
             }
-            // ★성공 응답과 같다 — 항목을 안 옮긴다★(사유 = [`Reader::resolve`] 의 steer 응답 자리): 그 항목은 에코를
-            //   기다리고, 에코 없이 턴이 끝나면 턴 끝이 처분한다([`State::close_turn_items`]). 만료된 steer 가 벤더에서 늦게 처리돼도 이중
-            //   전달은 없다 — `expectedTurnId` 로 그 턴에 묶여 턴이 끝난 뒤에는 거절된다.
+            // ★Same as a success response — the item is not moved★ (reason = the steer response spot of [`Reader::resolve`]): it waits for the
+            //   echo, and a turn ending without one disposes it ([`State::close_turn_items`]). An expired steer processed late at the vendor
+            //   cannot double-deliver — `expectedTurnId` ties it to that turn and it is refused after the turn ends.
             // ADR-0231
             Waiter::Steer { .. } => tracing::warn!("{reason}"),
             Waiter::Fire => tracing::warn!("{reason}"),
@@ -2519,49 +2225,19 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
     }
 }
 
-/// 받은 thread id 를 조립점의 기록 동사에 넘긴다. `Err` = 이 화신의 연결을 세우면 안 된다.
+/// Hands the received thread id to the assembly point's record verb. `Err` = this incarnation's connection must not be set up.
 ///
-/// ★여기서 영속되지 않는다★ — 운영 조립점의 이 포트는 세션 id 래치의 수령이고, 이 통로의 영속은 상대가
-/// 유저 메시지를 처음 되울릴 때 난다([`Reader::witness_first_turn`] · ADR-0226 개정).
-///
-/// ★게이트의 정직한 조건은 「디스크에 있다」가 아니라 「기록 호출이 돌아왔다」다★ — 그 포트는 실패를 자기
-/// 안에서 로그로 삼키고 호출자를 막지 않으므로, 그 위에 영속성을 주장하면 없는 보장을 인용하게 된다.
-/// 포트가 `None` 이면 기록되는 곳도 없다.
-/// ★[`Link::Ready`] 보다 먼저 불린다 — 뒤집지 말 것★: `turn/start` 가 허용되는 선이 `Ready` 라, 순서가
-/// 뒤집히면 기록되기 전에 그 세션으로 턴이 나가고 포트는 「보내기 전에 불린다」는 계약을 잃는다. 그 계약이
-/// 서 있는 덕에 기록됐는지 되묻는 둘째 동사가 없다.
-///
-/// ★닫힘 울타리는 창을 **좁힐 뿐 닫지 못한다 — 「늦은 쓰기를 막는다」로 읽지 말 것**★. 막는 것은 하나다:
-/// **이 스레드가 여기 닿기 전에 이미 관측된 종료**(자식이 답하고 곧장 죽어 리더가 EOF 를 본 경우 ·
-/// [`AgentTransport::shutdown`] 이 먼저 돈 경우).
-///
-/// ★**남는 창을 「몇 개 명령」으로 어림하지 말 것 — 그 크기의 지배항은 락 경합이다**★. 창은 위 상태 락을
-/// 놓는 순간부터 **프로필 맵이 실제로 바뀌는 순간**까지이고, 그 사이에 이 스레드는 프로필 레지스트리 락을
-/// 기다린다. 그 락은 다른 스레드가 **프로필 파일 전체 재기록이 끝날 때까지** 쥐고 있을 수 있다(ADR-0071
-/// 이 저장을 락 안에 둔다). 그래서 이 창 안에 `shutdown()` 도, `join_pump` 의 반환도, reaper 의 수거도
-/// 통째로 들어갈 수 있고, 그 뒤에 도착한 쓰기가 **이미 거둬진 세션의 프로필에 sid 를 적고 옛 sid 를
-/// 이력으로 민다.** 화신 표식 가드도 이 창을 안 덮는다 — 종료 경로 중 어느 것도 `epoch` 을 건드리지 않아
-/// 거둬진 세션과 산 세션의 표식이 **같다**.
-///
-/// 그 창을 닫으려면 「살아 있나」 판정이 기록과 **한 임계구역**에 들어가야 하는데, 그 임계구역은 프로필
-/// 레지스트리 쪽이고 이 통로의 상태 락은 거기까지 들고 갈 수 없다(락 보유 중 디스크 쓰기가 된다 — 모듈
-/// 헤더의 락 순서).
-///
-/// ★`catch_unwind` 가 실제로 사는 값을 부풀리지 말 것 — 「기록이 터져도 안전하다」가 아니다★.
-/// 이 포트 아래의 호출 그래프에는 **우리 코드가 만드는 패닉원이 없다**(해독은 `Result` 로 돌아오고,
-/// base `now_epoch_ms` 는 `unwrap_or(0)` 이며, `normalize_hierarchy` 는 인덱싱을 안 하고, 저장 실패는 `Err` 로
-/// 돌아와 레지스트리가 로그로 끝낸다). 닿을 수 있는 것은 레지스트리 맵 락의 **poison 가드**(`expect`)이고 —
-/// 저장소 상태 칸은 독을 되찾아 패닉하지 않는다 — 그것이 서려면 **먼저 다른 패닉이 그 락을 오염시켜
-/// 놓았어야** 한다. 그러니 이 봉쇄가 사는 것은 딱 하나다:
-/// ★이미 남의 패닉으로 레지스트리가 망가진 상태에서, codex 라이터가 **그 위에 겹쳐 죽지는 않는다**★.
-/// ★**게다가 운영 프로세스에서는 이 갈래가 닿지 않는다**★ — 라이터는 가둠 표시 밖이라 이 안의 패닉은
-/// 훅이 그 자리에서 프로세스를 끝낸다(ADR-0292). 즉 `Err` 로 도는 결말은 훅 없는 시험 빌드에서만 관측된다.
-/// 그래도 두는 이유 둘 — 그 빌드에서는 실제로 서고, 이 자리를 가두게 되면 방어가 저절로 산다.
-///
-/// 훅 없는 빌드에서 이것이 막는 것: 여기서 unwind 가 올라가면 [`Link::Ready`] 도 [`Link::Down`] 도 서지
-/// 않아 링크가 `Connecting` 에 멈추고, 그 상태에서 [`AgentTransport::send_input`] 은 닫힘 표식도 `Down`
-/// 도 못 보고 **`Ok` 를 돌려주며 큐가 상한까지 찬다** — 에이전트는 Running 으로 보이는데 벙어리가 되고
-/// kill 말고는 복구가 없다(ADR-0190 의 「조용히 통과시키지 않는다」가 「조용히 멈춘다」로 무너지는 자리).
+/// Not persisted here — persistence happens at the peer's first user message echo ([`Reader::witness_first_turn`] · ADR-0226). ★The gate's
+/// condition is "the record call returned", not "on disk"★ (the port swallows failures into the log). `None` port = nowhere to record.
+/// ★Called before [`Link::Ready`]★ — a turn must not go out before the session is recorded.
+/// ★The closed fence only narrows the window★: it blocks an end **already observed**. The rest is dominated by registry lock contention
+/// (held **through the whole `agents.json` rewrite** — ADR-0071), so `shutdown()` · `join_pump` · the reaper can fit inside and a late write
+/// records the sid into an already reaped session's profile and pushes the old sid into history; the incarnation marker does not help (no end
+/// path touches `epoch`). Closing it needs one critical section on the registry side.
+/// `catch_unwind` only keeps the codex writer from dying on top of an already broken (poisoned) registry — the graph below has no panic
+/// source of our code. ★Not reached in production★ (the writer is outside the containment marking: the hook ends the process — ADR-0292);
+/// the `Err` outcome is seen only in a hook-less build, where an unwind would leave the link `Connecting` with `send_input` returning `Ok`
+/// while the queue fills (ADR-0190).
 fn record_session_id(
     state: &SharedState,
     shutdown: &AtomicBool,
@@ -2570,81 +2246,70 @@ fn record_session_id(
 ) -> Result<(), String> {
     let Some(sink) = sid_sink else {
         tracing::debug!(
-            "codex thread id 를 받았으나 기록할 곳이 없다 — 조립점이 기록 포트를 주지 않았다"
+            "received the codex thread id but there is nowhere to record it — the assembly point gave no record port"
         );
         return Ok(());
     };
 
-    // ★두 표식을 함께 본다★ — [`AgentTransport::shutdown`] 은 이 원자를 **먼저** 세우고 그 다음에 상태
-    //   락을 잡아 `closed` 를 세운다. 그 사이는 비어 있지 않다(그 순간 락은 `send_input`·[`next_job`]·
-    //   리더의 거절 경로가 쥐고 있을 수 있다). 하나만 보면 그 구간이 통째로 새는데, 둘을 OR 하면 공짜로 닫힌다.
+    // ★Look at both markers together★ — [`AgentTransport::shutdown`] sets this atomic **first**, then takes the state lock to set
+    //   `closed`; the gap is not empty (the lock may be held by `send_input` · [`next_job`] · the reader's refusal path). One marker leaks
+    //   the span; OR-ing both closes it.
     let already_ended = shutdown.load(Ordering::Acquire) || {
         let (lock, _) = &**state;
         let s = sync::lock(lock);
         s.closed
     };
     if already_ended {
-        // ★정상 종료라 실패 결말을 내지 않는다★ — `Err` 로 돌리면 이미 끝난 세션에 오류 경계가 하나 더 선다.
-        tracing::debug!("codex thread id 를 기록하지 않는다 — 이 화신은 이미 끝났다");
+        // ★A normal end, so no failure outcome★ — `Err` would stand one more error boundary on a session that already ended.
+        tracing::debug!("not recording the codex thread id — this incarnation has already ended");
         return Ok(());
     }
 
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(thread_id))).map_err(|_| {
-        tracing::error!("codex 세션 id 기록이 패닉했다 — 이 화신의 연결을 내린다");
-        "세션 id 기록이 패닉했다".to_string()
+        tracing::error!(
+            "the codex session id record panicked — taking down this incarnation's connection"
+        );
+        "the session id record panicked".to_string()
     })
 }
 
-/// 연결이 서지 못한 사유 한 건. ★두 칸이 **다른 질문**에 답한다★ — `reason` 은 무엇이 틀어졌나,
-/// `while_recording` 은 **어느 단계에서 틀어졌나**다. 뒤쪽은 사람에게 뭐라고 말할지(머리말·`detail`)
-/// 만 가른다.
+/// One reason the connection could not stand. ★The two fields answer **different questions**★ — `reason` = what went wrong,
+/// `while_recording` = **at which stage**; the latter only decides what to tell a person (headline · `detail`).
 ///
-/// ★**stdin 처분은 더 이상 이 칸으로 갈리지 않는다**★ — 실패했으면 갈래를 가리지 않고 닫는다
-/// ([`writer_loop`] 의 그 자리가 이유의 정본). 한때 이 칸이 「상대가 살아 있는가」를 뜻하며 그 판정을
-/// 겸했는데, 그 겸직이 **왕복 실패인데 상대는 사는** 조합(codex 의 `thread/resume` 거절)을 통째로
-/// 새게 했다. 그 뜻을 여기에 되돌리지 말 것.
+/// ★**The stdin disposal no longer splits by this field**★ — on failure it is closed on every branch ([`writer_loop`] has the reason).
+/// The field once meant "is the peer alive" and doubled as that decision, which let **round-trip failure but peer alive** (codex's
+/// `thread/resume` refusal) leak entirely. Do not bring that meaning back.
 struct HandshakeFailure {
     reason: String,
-    /// 왕복 둘은 성공했고 기록 단계에서 넘어졌나. 사람에게 내는 문장만 가른다(위 doc).
+    /// Did the two round trips succeed and it fell over at the record stage? Only splits the sentence given to a person.
     while_recording: bool,
 }
 
 impl HandshakeFailure {
-    /// 화면·로그의 머리말. ★두 갈래를 같은 문장으로 신고하지 않는다★ — 기록 실패를 「핸드셰이크 실패」로
-    /// 적으면 프로토콜 왕복을 의심하게 만들어 분류 비용이 엉뚱한 곳으로 간다(왕복은 성공했다).
+    /// The headline for screen · log. ★The two branches get different sentences★ — writing a record failure as "handshake failed" would
+    /// make one suspect the protocol round trip (it succeeded).
     fn headline(&self) -> &'static str {
         if self.while_recording {
-            "codex app-server 세션 id 기록 실패(프로토콜 왕복은 성공했다)"
+            "codex app-server session id record failed (the protocol round trip succeeded)"
         } else {
-            "codex app-server 핸드셰이크 실패"
+            "codex app-server handshake failed"
         }
     }
 }
 
-/// 연결의 결말을 배달한다 — ★**많아야 한 번**(zero-or-once)★. 사용자가 껐으면 배달하지 않는다.
+/// Delivers the connection outcome — ★**at most once**★; not delivered if the user turned it off.
 ///
-/// ★kill 로 풀린 핸드셰이크는 「상대가 답했다」가 아니다★: [`AgentTransport::shutdown`] 은 대기표를 닫아
-///   핸드셰이크를 `Err` 로 깨우는데, 그것을 그대로 배달하면 **사용자의 취소가 이어받기 실패로 기록되고**
-///   그 위에 정리까지 한 번 더 돈다(결함 ③). 그 갈래에서 감독자가 볼 사실은 종점 상태 하나뿐이고,
-///   거기엔 「사용자가 끈 것은 실패가 아니다」 규율이 이미 있다.
-/// ★`shutdown` 원자를 보는 것으로 충분하다★ — 그 표식은 kill 경로에서 **가장 먼저** 서고(그 함수의 첫 줄)
-///   되돌아가지 않는다. 즉 여기서 읽는 것은 래치이지 오가는 셀이 아니다.
-/// ★★「많아야 한 번」을 지키는 것은 **호출 자리의 모양**이지 이 함수가 아니다★★ — 정확히 적는다:
-///   이 함수는 `&Option<LinkSink>` 를 빌려 볼 뿐 소비하지 않고, 불릴 때마다 배달한다. 한 번으로
-///   묶이는 근거는 둘이다 — ① 운영 호출 자리가 [`writer_loop`] 의 **한 `match` 의 두 갈래**뿐이라
-///   실행 경로상 하나만 돈다 ② 포트를 쥔 것이 라이터 스레드 하나이고 [`AgentTransport::start`] 의
-///   `take` 가 그 스레드가 둘 뜨는 것을 막는다.
-///   ★한때 이 자리에 「`take()` 로 포트를 소비한다」로 적혀 있었는데 **그런 줄이 없다**★ — 유일한
-///   `take` 는 `start` 에 있고 그것이 막는 것은 두 번째 **호출**이 아니라 두 번째 **스레드**다.
-///   호출 자리를 늘리면 이 불변식이 그 자리에서 깨지므로, 늘릴 때 여기를 함께 볼 것.
-/// ★★억제되는 것은 **메시지뿐이다 — 채널 소멸은 못 막는다**★★: 이 포트는 라이터 스레드가 단독으로
-///   들고 있어서, 배달을 건너뛰고 [`writer_loop`] 가 돌아가면 보내는 끝이 떨어지고 받는 쪽은
-///   `Disconnected` 로 깨어난다. 그 신호를 「통로가 결말을 못 냈다」로 읽으면 **억제가 무의미해진다**
-///   (사용자의 취소가 도로 이어받기 실패가 된다) — 그래서 받는 쪽이 종료 의도 래치를 **먼저** 본다
-///   ([`crate::manager::AgentManager::link_activation_verdict`]). 이 억제만으로는 절반이다.
+/// A handshake released by kill is not "the peer answered": delivering it would **record the user's cancellation as a resume failure** and
+/// clean up twice (defect ③). The `shutdown` atomic is a latch set **first** on the kill path.
+/// ★"At most once" holds by **the call-site shape**, not this function★ (it delivers every call): the production sites are the two branches
+/// of one `match` in [`writer_loop`], and only the writer holds the port (`take` in [`AgentTransport::start`] prevents a second thread).
+/// ★Only the message is suppressed — the channel still disappears★: the receiver wakes with `Disconnected`, so it checks the end-intent latch
+/// first ([`crate::manager::AgentManager::link_activation_verdict`]).
 fn deliver_link(shutdown: &AtomicBool, sink: &Option<LinkSink>, resolution: LinkResolution) {
     if shutdown.load(Ordering::Acquire) {
-        tracing::debug!("연결 결말을 배달하지 않는다 — 사용자가 이 화신을 껐다");
+        tracing::debug!(
+            "not delivering the connection outcome — the user turned this incarnation off"
+        );
         return;
     }
     if let Some(sink) = sink {
@@ -2665,17 +2330,11 @@ fn writer_loop(
     link_sink: Option<LinkSink>,
     announcer: Arc<Announcer>,
 ) {
-    // ★두 실패를 **갈라서** 든다★ — 이 통로가 말하는 「핸드셰이크」는 왕복 둘만이 아니라 **기록 호출이
-    //   돌아오는 데까지**이므로(위 [`record_session_id`] 의 게이트 조건) 둘 다 `Ready` 를 막고 아래 수습을
-    //   함께 탄다. 그래도 **뭉치면 안 되는 사실이 하나** 있다: 기록에서 넘어진 갈래는 왕복이 이미 성공한
-    //   뒤라 **상대가 살아서 우리 stdin 을 읽고 있는 것이 확정**이다. 왕복 자체가 실패한 갈래에는 그
-    //   확정이 없다 — ★없다는 것이 「죽었다」가 아니다★: 거절(`thread/resume` 이 오류로 돌아온 경우)은
-    //   상대가 멀쩡히 살아서 낸 답이다.
-    //   ★그래서 이 차이가 가르는 것은 **사람에게 뭐라고 말할지 하나뿐**이다★ — stdin 처분은 아래에서
-    //   갈래와 무관하게 같다. 그 둘을 다시 묶지 말 것(사유 정본 = 아래 닫기 자리).
-    // ★★예산 시계는 **여기서 한 번** 잡는다 — 핸드셰이크와 이력 복원이 그것을 나눠 쓴다★★.
-    //   따로 잡으면 연결이 서기까지가 최대 두 예산이 되어 매니저의 백스톱을 넘고, 이력을 받느라
-    //   성공한 이어받기가 실패로 판정된다([`hydrate_history`] 의 doc 이 그 인과의 정본).
+    // ★The two failures are carried **separately**★: the "handshake" runs **up to the record call returning** ([`record_session_id`]), so
+    //   both block `Ready` and ride the cleanup below. Difference: after a record failure the round trip succeeded, so **the peer is
+    //   alive and reading stdin**; after a round-trip failure no certainty — ★no certainty is not "dead"★ (a `thread/resume` refusal
+    //   comes from a live peer). ★This splits **only what to tell a person**★; the stdin disposal below is the same on every branch.
+    // ★★The budget clock starts **here, once** — handshake and history share it★★ ([`hydrate_history`]).
     let link_deadline = Instant::now() + HANDSHAKE_BUDGET;
     let outcome = match handshake(
         &stdin,
@@ -2702,27 +2361,19 @@ fn writer_loop(
 
     match outcome {
         Ok(opened) => {
-            // ★하한 판정은 기록이 돌아온 **뒤**, 이력보다 **먼저** 적는다★(사유 = [`settle_floor`]) — 판정 전
-            //   항목의 목록이 늦게 뜨는 창을 핸드셰이크 왕복으로 묶는다(TRD §5-5). 게이트 전이라 그 항목들은
-            //   아직 못 나간다.
+            // ★Write the floor decision **after** the record returns and **before** the history★ ([`settle_floor`]) — the window in which
+            //   pre-decision list items appear late is bound to the handshake round trip (TRD §5-5). It is before the gate, so they cannot
+            //   go out yet.
             // ADR-0231
             settle_floor(&core, &state, &announcer, opened.floor);
-            // ★★지난 화면을 **게이트를 열기 전에** 올린다 — 순서를 뒤집지 마라★★(ADR-0203):
-            //   게이트가 먼저 열리면 그 순간부터 큐에 선 유저 턴이 나갈 수 있고, 그 턴의 응답이 아직
-            //   안 실린 이력보다 **먼저** 링에 들어간다. 그러면 복원된 대화가 새 답 뒤에 붙는다.
-            //   ★이 순서가 ADR-0079 의 seed-before-publish 가 지키던 것을 대신 진다★ — 그쪽은 이력이
-            //   디스크에 있어서 자식을 띄우기 전에 읽을 수 있었지만, 이쪽 이력은 **핸드셰이크가 선 뒤에야
-            //   존재하는 상대에게 요청해서** 받으므로 세션이 명부에 오르기 전으로 당길 수가 없다.
-            //   그 대신 ⓐ 게이트 앞이라 우리 쪽 턴이 아직 없고 ⓑ 아래 문이 **fanout 까지 한다**.
-            // ★`emit_without_turn_observation` 인 것이 그 ⓑ의 실물이다★ — `seed` 는 링에 넣기만 하고
-            //   fanout 을 안 해서, 세션이 이미 명부에 오른 이 자리에서 쓰면 그 사이 붙은 구독자가 지난
-            //   화면을 **영영 못 본다**(빈 링을 replay 한 뒤라 되받을 길이 없다). 이 문은 링에도 넣고
-            //   붙어 있는 구독자에게도 보내므로 두 부류가 같은 것을 본다.
-            // ★그러면서 관측·상태·finalize 는 건드리지 않는다★ — `seed` 가 지키던 그 규율 그대로다
-            //   (ADR-0005 · ADR-0113 · ADR-0127). 지나간 기록을 진행 신호로 먹이면 그 턴의 종료가
-            //   영영 오지 않아 우편이 30 분 fail-open 까지 막힌다.
-            // ★**한 덩이로** 올린다★ — 낱개로 부르면 그 틈마다 리더의 라이브 줄이 seq 를 가져가
-            //   복원된 대화 한가운데에 새 줄이 박힌다([`OutputCore::emit_batch_without_turn_observation`]).
+            // ★Raise the past screen **before opening the gate** — do not flip the order★ (ADR-0203): gate first, and queued user turns could go
+            //   out and their response enter the ring **before** the unraised history, attaching the restored conversation after the new
+            //   answer. (This replaces ADR-0079's seed-before-publish: here history comes **from a peer that exists only after the
+            //   handshake**, so instead ⓐ it is before the gate — no turn of ours yet — and ⓑ the door below **fans out too**.)
+            // ★`emit_without_turn_observation` is ⓑ★: `seed` only fills the ring without fanout, so a subscriber attached in between
+            //   would **never see** the past screen. ★It touches no observation · state · finalize★ (ADR-0005 · ADR-0113 · ADR-0127) —
+            //   past records as progress would leave that turn's end never coming. ★Raised **as one chunk**★ — item by item, live lines
+            //   would take seqs in the gaps ([`OutputCore::emit_batch_without_turn_observation`]).
             core.emit_batch_without_turn_observation(hydrate_history(
                 &stdin,
                 &state,
@@ -2731,18 +2382,16 @@ fn writer_loop(
                 &opened,
                 link_deadline,
             ));
-            // ★★게이트는 **연결이 아직 서 있을 때만** 열린다★★ — 이력을 받는 동안 스트림이 끝났으면
-            //   여기서 `Ready` 를 세우는 것이 곧 「죽은 것을 활성화 성공으로 배달」이다([`open_gate`]).
+            // ★The gate opens **only while the connection still stands**★ — if the stream ended while fetching history, setting `Ready` would
+            //   deliver something dead as a successful activation ([`open_gate`]).
             match open_gate(&state, opened.thread_id) {
-                // ★게이트를 연 **직후** 배달한다 — 락을 쥔 채로는 부르지 않는다★(ADR-0006: 상태 락 보유
-                //   중 외부 호출 금지. 이 포트는 조립점 코드를 부르고 그쪽은 채널을 만진다).
+                // ★Delivered **right after** opening the gate, not under the lock★ (ADR-0006) — this port calls assembly point code that touches channels.
                 Ok(()) => deliver_link(&shutdown, &link_sink, LinkResolution::Ready),
                 Err(reason) => {
-                    // ★여기서 화면에 오류·경계를 더하지 않는다★ — 스트림이 끝났다는 것은 pump 가 곧
-                    //   종점 전이를 낸다는 뜻이고(ADR-0005 단독 주체), 그 경로가 이미 화면을 닫는다.
-                    //   사용자 kill 이면 이 배달은 `deliver_link` 가 억제한다(그 함수의 래치).
+                    // ★No error · boundary is added to the screen here★ — the stream ending means the pump will soon emit the end transition
+                    //   (ADR-0005 sole actor), which already closes the screen; a user kill makes `deliver_link` suppress this.
                     tracing::warn!(
-                        "codex app-server: 이력을 받는 동안 연결이 끝났다 — 게이트를 열지 않는다: {}",
+                        "codex app-server: the connection ended while fetching history — not opening the gate: {}",
                         sanitize(&reason, LOG_STRING_LIMIT)
                     );
                     deliver_link(&shutdown, &link_sink, LinkResolution::Failed { reason });
@@ -2764,10 +2413,10 @@ fn writer_loop(
                 n
             };
             if dropped > 0 {
-                tracing::warn!("핸드셰이크 실패로 대기 중이던 입력 {dropped}건이 사라졌다");
+                tracing::warn!("{dropped} pending input(s) were lost because the handshake failed");
             }
-            // ★사유를 **들고** 배달한다★ — 이 문구는 stdout 의 JSON-RPC 오류라 콘솔 꼬리에도 stderr
-            //   진단 꼬리에도 없다. 여기서 안 실으면 분류가 닿을 길이 아예 없다.
+            // ★The reason is **carried** in the delivery★ — this wording is a JSON-RPC error on stdout, in neither the console nor the stderr
+            //   diagnostic tail; without carrying it the classification cannot reach it.
             deliver_link(
                 &shutdown,
                 &link_sink,
@@ -2775,23 +2424,14 @@ fn writer_loop(
                     reason: reason.clone(),
                 },
             );
-            // ★이 경계는 통로 쪽 턴에 대응하지 않는다★: 턴을 여는 유일한 자리([`take_turn_locked`])가
-            //   [`Link::Ready`] 를 요구하는데 그 상태는 핸드셰이크가 성공해야 선다. 그래서 큐에 선
-            //   `dropped` 건도 통로 쪽에서 보면 **아직 턴이 아니라 큐에 선 본문**이고, 사실 계층도 이
-            //   화신을 한 번도 「턴 중」으로 관측한 적이 없다(첫 진행 신호는 상대가 되울리는 item 에서
-            //   오고, 합성 입력 에코는 선언하지 않는다 — ADR-0193).
-            // ★그래도 **버린 입력이 있든 없든** 실패 결말 하나를 낸다★ — 화면을 닫는 것이 이것뿐이기
-            //   때문이다. 프론트는 `Error` 를 턴 종료로 읽지 않고(재시도되는 스트림 오류가 그 어휘로 오기
-            //   때문 — [`OutputEvent::Error`] 의 doc), 그래서 오류 하나만 든 슬롯은 **대기 표시가 영영
-            //   돈다**. 링크는 이미 [`Link::Down`] 이라 그 뒤에 도착할 것도 없다.
-            // ★열린 턴이 없어 실을 id 가 없으니 `turn_id` 는 지어내지 않는다★.
-            // ★몇 건을 버렸든 경계는 하나다★ — `dropped` 는 버린 본문 수이지 턴 수가 아니다.
-            // ★두 갈래의 사유 문장이 갈리는 것은 의도다★ — 버린 쪽은 사람이 보낸 본문이 파괴됐다고
-            //   말하고, 안 버린 쪽은 연결이 서지 못했다고만 말한다. 뒤쪽에 입력 손실을 적으면 일어나지
-            //   않은 일을 보고하게 된다.
-            // ★사유가 오류 줄과 경계 안에 겹쳐 실리는 것은 의도다★ — 경계 하나만 읽는 소비자도 무슨 일이
-            //   있었는지 알아야 하기 때문이고([`end_turn_if`] 와 같은 사유), 그래서 둘 사이에 순서 계약이
-            //   새로 생기지는 않는다.
+            // ★This boundary has no link-side turn★: [`take_turn_locked`] requires [`Link::Ready`], so `dropped` inputs are **queued bodies, not
+            //   turns**, and the fact layer never saw this incarnation "mid-turn" (ADR-0193).
+            // ★Still, **whether or not input was dropped**, one failure outcome is emitted★ — the only thing closing the screen: the frontend
+            //   does not read `Error` as a turn end ([`OutputEvent::Error`]), so a slot holding only an error would spin **forever**. No
+            //   open turn, so no `turn_id`; one boundary however many bodies were dropped.
+            // ★Reason sentences differ on purpose★ — the dropping side says bodies a person sent were destroyed, the other only that the
+            //   connection could not stand (claiming loss there would report something that did not happen). ★The reason rides both the error
+            //   line and the boundary★ so a boundary-only consumer knows too (as [`end_turn_if`]).
             for entry in pending.close() {
                 if let Waiter::Handshake(tx) = entry.waiter {
                     let _ = tx.send(Err(reason.clone()));
@@ -2804,20 +2444,20 @@ fn writer_loop(
             )));
             let detail = if dropped > 0 {
                 format!(
-                    "{} — 보낸 입력 {dropped}건이 사라졌다: {}",
+                    "{} — {dropped} sent input(s) were lost: {}",
                     failure.headline(),
                     sanitize(reason, LOG_STRING_LIMIT)
                 )
             } else if *while_recording {
-                // ★여기서는 「연결이 서지 못했다」가 거짓이다★ — 왕복은 섰고, 우리가 안 쓰기로 한 것이다.
+                // ★Here "the connection could not stand" is false★ — the round trip stood and we decided not to use it.
                 format!(
-                    "{} — 이 화신을 쓰지 않는다: {}",
+                    "{} — this incarnation is not used: {}",
                     failure.headline(),
                     sanitize(reason, LOG_STRING_LIMIT)
                 )
             } else {
                 format!(
-                    "{} — 연결이 서지 못했다: {}",
+                    "{} — the connection could not stand: {}",
                     failure.headline(),
                     sanitize(reason, LOG_STRING_LIMIT)
                 )
@@ -2829,90 +2469,39 @@ fn writer_loop(
                 },
             });
 
-            // ★**두 갈래 모두**에서 우리 쪽 stdin 을 닫는다★ — 여기까지 왔다는 것은 「이 화신은 쓰지
-            //   않는다」가 확정됐다는 뜻이고, 그 결론은 상대의 생사와 무관하게 같다. 닫지 않으면 아래
-            //   루프가 `Job::Sweep` 만 물고 영원히 돌면서 자식·리더·라이터를 붙들고, 리더는 EOF 를 못 봐
-            //   [`OutputCore::finish`] 가 영영 안 돌아 **종료 전이도 수거도 일어나지 않는다**
-            //   (화면은 Running 인데 입력은 전부 거절 — 사람이 kill 할 때까지).
-            // ★한때 여기 「기록에서 넘어진 갈래에서만 닫는다 — 그 갈래에만 상대 생존 확정이 있다」로
-            //   적혀 있었다. 전제는 참이었고 **결론이 틀렸다**★: 생존 확정은 닫기의 *전제*가 아니다.
-            //   상대가 이미 죽었으면 `take()` 는 핸들 하나를 떨구는 것뿐이라 no-op 이고(그 뒤의 쓰기는
-            //   어차피 전부 실패한다), 살아 있으면 EOF 를 받는다 — **양쪽 다 안전하다.** 반대로 닫지 않는
-            //   쪽에는 안전한 결말이 없다: 왕복이 실패했는데 상대는 멀쩡히 사는 조합이 실재하고, 그것이
-            //   ★codex 가 `thread/resume` 을 JSON-RPC 오류로 **거절**하는 경우★다(거절은 stdout 으로 오고
-            //   자식은 죽지 않는다). 그 조합이 위 wedge 그대로이며 — ★기록 실패 갈래와 달리 **운영에서
-            //   닿는다**★(그쪽은 표시 밖 패닉이라 운영 프로세스에서는 훅이 먼저 끝낸다 — ADR-0292) — 부팅 복원이면
-            //   이어받을 수 있는 codex 프로필 수만큼 한꺼번에 선다.
-            // ★그래도 **사유 문장은 갈린 채로 둔다**★ — 바뀐 것은 stdin 의 처분이지 진단이 아니다
-            //   ([`HandshakeFailure::headline`] 과 위 `detail`). 왕복 갈래는 연결이 못 섰고, 기록 갈래는
-            //   섰는데 우리가 안 쓰기로 한 것이다.
-            // ★이 통로가 자기 수명을 스스로 끝내는 것이 아니다★ — kill 은 여전히 안 부른다(ADR-0001 의
-            //   2 동사는 kill 핸들러의 것). 여기서 하는 것은 **우리 쪽 쓰기 끝을 놓는 것**뿐이고, 그 다음은
-            //   이미 있는 인과가 굴린다: 상대 exit → 리더 EOF → [`ReaderExit`] 의 `Drop` 이
-            //   `closed`+`Link::Down` → pump 가 종료 전이(ADR-0005 단독) → reaper 수거.
-            //   ★실측 41–51ms 는 **기록 실패 갈래**(턴이 없는 상태에서 닫았을 때)의 수치다 — 거절 갈래에서
-            //   상대가 얼마나 빨리 끝나는지는 재 본 적이 없다★. 인과가 같을 뿐 수치를 옮겨 적지 말 것.
-            // ★여기서 stdin 락을 잡는 것이 안전한 이유(`shutdown` 의 순서 위험과 다르다)★: 그 위험은
-            //   **남의 스레드**가 `write_all` 에 매달린 라이터의 락을 기다리는 모양이다. 여기서 잡는 것은
-            //   라이터 자신이고, 이 지점은 루프에 들어가기 전이라 `write_all` 안이 아니다.
-            //   ★그 판정은 갈래를 가리지 않는다 — 이번에 `if` 를 걷은 것이 이 근거를 건드리지 않는다★:
-            //   근거의 축은 「어느 스레드가 잡나」이지 「어느 실패였나」가 아니고, 취득 **자리**도 하나
-            //   그대로다(아래 한 줄). 그래서 개수도 그대로 둘이다.
-            // ★**그 안전의 범위를 정확히 적는다 — 「파일 전체」가 아니라 「운영 호출 그래프」다**★:
-            //   블로킹으로 이 락을 잡는 자리는 운영 구획에 **둘**뿐이고([`write_line`] 과 바로 아래 이 줄)
-            //   [`write_line`] 을 부르는 것은 라이터뿐이다(`shutdown` 은 `try_lock` 이라 세지 않는다).
-            //   ★단 **시험 구획은 그 그래프 밖에서 같은 락을 블로킹으로 잡는다**★ —
-            //   [`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`] 가 별도 스레드에서
-            //   [`write_line`] 으로 8MiB 를 밀어 넣고 kill 이 올 때까지 락을 쥔다. 그런 채움 스레드와 이
-            //   갈래를 **같은 시험대에서** 돌리면 여기서 영원히 막히고, 그러면 stdin 이 안 닫혀 이 라운드가
-            //   세운 인과가 통째로 사라진다. 오늘 그렇게 조합하는 항목은 없다 — 그 항목은 [`AgentTransport::start`]
-            //   를 부르지 않아 라이터 스레드 자체가 안 뜬다(그 사실이 이 예외를 무해하게 만드는 것이고,
-            //   `start` 를 더하는 순간 무해가 깨진다).
-            //   운영 구획의 그 개수는 [`tests::the_production_blocking_stdin_locks_are_counted`] 가 지킨다 —
-            //   셋째가 생기면 위 판정을 다시 해야 하므로 조용히 늘지 않게 막는다.
+            // ★Our stdin is closed **on both branches**★ — without it the loop below spins on `Job::Sweep`, the reader never sees EOF,
+            //   [`OutputCore::finish`] never runs and **neither the end transition nor reaping happens** (screen Running, all input refused).
+            //   A live peer after a failed round trip exists — ★codex **refusing** `thread/resume`★, **reached in production** (the record
+            //   failure branch is ended by the hook — ADR-0292) — and a boot restore stands up one per resumable codex profile. A dead peer: a
+            //   no-op; a live one: EOF; so survival certainty is not a premise of closing.
+            // ★No kill here★ (ADR-0001's 2 verbs belong to the kill handler): letting go of the write end drives peer exit → reader EOF →
+            //   `Drop` of [`ReaderExit`] (`closed`+`Link::Down`) → pump end transition (ADR-0005) → reaper. [unverified on the refusal branch].
+            // ★Taking the stdin lock here is safe★: the writer itself takes it, before the loop, not inside `write_all` (`shutdown`'s risk is
+            //   **another thread** waiting on a hung writer). Range = **the production call graph**: only [`write_line`] and this line take it
+            //   blocking, and only the writer calls [`write_line`]; the count is guarded by
+            //   [`tests::the_production_blocking_stdin_locks_are_counted`]. ★The test section holds it blocking outside that graph★
+            //   ([`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`]; harmless as it never calls [`AgentTransport::start`]).
             let had_stdin = sync::lock(&stdin).take().is_some();
             tracing::warn!(
                 had_stdin,
                 while_recording = *while_recording,
-                "연결이 서지 못해 codex 쪽 stdin 을 닫는다 — 상대가 EOF 를 보고 끝나면 세션이 수거된다"
+                "the connection could not stand, closing the codex-side stdin — the session is reaped once the peer sees EOF and ends"
             );
 
-            // ★여기서 끝난다 — 이 통로는 **아무것도 죽이지 않는다**★.
-            //   stdin 을 놓으면 상대가 EOF 를 보고 스스로 끝나고(실측 41–51ms, 턴이 없는 상태) 그 EOF 가
-            //   리더를 끝내 [`OutputCore::finish`] → reaper 로 이어진다. ★그 첫 고리가 **우리 것이 아니고**,
-            //   상대가 stdout 을 열어 둔 채 남으면 그 사슬이 통째로 안 돈다★ — 거절 뒤에도 상대가 EOF 로
-            //   끝나는지는 **미검**이다(재 본 것은 기록 실패 갈래뿐).
-            // ★그 처분은 **매니저 몫**이다 — 여기서 kill 하지 말 것★: 위 [`Link::Down`] 은
-            //   [`AgentTransport::link_state`] 로 즉시 밖에 보이고, 활성화 판정이 그것을 실패로 확정한
-            //   뒤 이미 있는 teardown(ADR-0001 의 2 동사)을 돌린다 — 그 kill 이 매달린 리더까지 함께 푼다.
-            //   ★한때 이 자리에서 라이터가 직접 `child.kill()`·`TerminateJobObject` 를 불렀는데, 그것이
-            //   ADR-0199 가 그은 선(라이터가 그 동사들을 부르는 순간 위반)을 넘는 것이라 걷어냈다.
-            //   되살리지 말 것 — 되살리려면 그 ADR 을 먼저 고쳐야 한다.★
-            // ★**한때 남아 있던 구멍 — 지금은 닫혔다**★: 예전에는 Fresh 로 띄운 codex 에 판정이 아예
-            //   안 걸려서(감독자가 배달함을 버렸다) `thread/start` 거절의 `Down` 을 **아무도 보지
-            //   않았다.** 지금은 활성화 입구 둘(`AgentManager::activate_profile` 의 Fresh 갈래 ·
-            //   `AgentManager::restore_one` 의 비-이어받기 갈래)이 같은 판정을 돌므로 두 모드 모두
-            //   주인이 있다(`AgentManager::spawn_fresh_settled`).
-            // ★The ad-hoc create has an owner too (TRD S25 step 20 · ADR-0348)★: the daemon's by-cwd create no
-            //   longer calls `AgentManager::spawn_agent` and drops the delivery box. It goes through the one creation
-            //   body (`commands::create_and_start` → `AgentManager::create_and_activate`), which takes the same Fresh
-            //   activation path as above, so the verdict sees this `Down` whatever output format the codex start
-            //   uses. Pinned by the manager test that reads `create_and_activate`'s body (no `spawn_agent`).
+            // ★This link kills nothing★ — disposal is **the manager's job**: [`Link::Down`] is visible via [`AgentTransport::link_state`] and the
+            //   activation decision runs the existing teardown (ADR-0001 2 verbs), whose kill also releases a hanging reader. Do not bring the
+            //   writer's `child.kill()` / `TerminateJobObject` back here — ADR-0199 forbids it.
+            // Both activation entrances (`AgentManager::activate_profile` Fresh · `restore_one` non-resume) run that decision
+            //   (`spawn_fresh_settled`). ★The ad-hoc create has an owner too (TRD S25 step 20 · ADR-0348)★: the daemon's by-cwd create
+            //   goes through the one creation body (`commands::create_and_start` → `AgentManager::create_and_activate`), the same Fresh
+            //   activation path, so the verdict sees this `Down` whatever output format codex starts with (pinned by the manager test
+            //   reading `create_and_activate`'s body — no `spawn_agent`).
         }
     }
 
-    // ★핸드셰이크가 실패해도 루프는 돈다★ — 나가는 길이 하나여야 하기 때문이다: 리더가 EOF 를 보아
-    //   `closed` 를 세우면 [`next_job`] 이 `None` 을 돌려 스스로 빠져나온다. 여기서 `return` 해 버리면
-    //   그 정리 지점이 둘이 된다.
-    // ★단 **「상대의 요청에 답하려고 돈다」는 이제 사실이 아니다**★ — 바로 위에서 stdin 을 이미 놓았으므로
-    //   그 뒤의 [`write_line`] 은 전부 실패한다. 상대는 답을 기다리는 대신 EOF 를 본다. 옛 문장
-    //   (「상대는 살아 있을 수 있고, 그러면 서버 요청에 답할 자리가 필요하다」)은 닫기가 한 갈래에만
-    //   있던 시절의 것이다.
-    // ★**「상대가 정지하는 일이 없다」를 무조건으로 적지 말 것 — 그만큼은 재 본 적이 없다**★: 재 본 것은
-    //   「턴이 없는 상태에서 stdin 을 닫으면 41–51ms 안에 exit 한다」 하나다. 이 헤더가 따로 적는 조건
-    //   ——핸드셰이크 동안 상대의 요청이 쌓이고 거절이 [`OUTBOX_LIMIT`] 에서 떨어진다——아래에서는, 닫은 뒤
-    //   모든 [`write_line`] 이 실패하므로 **미답 요청이 남은 채로** 상대가 EOF 를 만난다. 그 상태에서도
-    //   상대가 그냥 끝나는지는 **미검**이다. 끝나지 않으면 위 「첫 고리가 상대의 행동」 항목 그대로다.
+    // ★The loop runs even if the handshake failed★ — reader EOF sets `closed`, [`next_job`] returns `None`, one exit. Stdin is already let go,
+    //   so every [`write_line`] fails; ★"the peer never stalls" is unmeasured★ — with unanswered requests ([`OUTBOX_LIMIT`] drops)
+    //   [unverified] whether it ends (else the module header's recovery item).
     loop {
         if shutdown.load(Ordering::Acquire) {
             break;
@@ -2926,7 +2515,7 @@ fn writer_loop(
             Job::Steer(steer) => Some(steer),
             Job::Line(line) => {
                 if let Err(e) = write_line(&stdin, &line) {
-                    tracing::debug!("codex app-server 제어 줄 쓰기 실패: {e}");
+                    tracing::debug!("codex app-server control line write failed: {e}");
                 }
                 None
             }
@@ -2936,16 +2525,15 @@ fn writer_loop(
                 line,
                 item,
             } => {
-                // ★대기표를 쓰기 **전에** 건다★ — 뒤에 걸면 빠른 응답이 먼저 도착해 "모르는 id" 로 버려진다.
-                // ★알려진 잔여★: 여기서 나가면 방금 연 턴이 Active 로 남는다. 대기표가 닫혔다는 것은
-                //   통로가 이미 닫혔다는 뜻이라 그 상태를 읽을 소비자가 없지만, 「나가는 길마다 턴을
-                //   정리한다」가 성립하지는 않는다.
+                // ★The waiting entry is registered **before** writing★ — after it, a fast response would arrive first and be dropped as an "unknown id".
+                // ★Known remainder★: leaving here leaves the turn just opened as Active. The waiting table having closed means the link
+                //   already closed, so nothing reads that state, but "the turn is tidied on every way out" does not hold.
                 if !pending.register(id, Waiter::TurnStart { seq }, method::TURN_START) {
                     break;
                 }
                 match write_line(&stdin, &line) {
                     Err(e) => turn_write_failed(&state, &pending, &core, id, seq, &e),
-                    // ADR-0231: 실은 목록 항목의 넘김 표지 — 쓴 **뒤**에 낸다(값은 지금 단계에서 읽는다).
+                    // ADR-0231: the handed-over mark of the carried list item — emitted **after** writing.
                     Ok(()) => {
                         if let Some(item) = &item {
                             publish_hand_over(&core, &state, item);
@@ -2974,25 +2562,22 @@ fn writer_loop(
     }
 }
 
-// ── 리더 쪽 ───────────────────────────────────────────────────────────────────
+// ── Reader side ───────────────────────────────────────────────────────────────────
 
-/// 리더가 EOF 를 본 뒤 **종료 코드가 잡힐 때까지** 다시 보는 상한.
+/// The cap on looking again **until the exit code is caught** after the reader sees EOF.
 ///
-/// ★EOF 직후의 `try_wait` 한 번으로는 코드를 못 받는다★ — stdout 이 닫히는 것과 프로세스가 수거되는 것은
-/// 같은 순간이 아니라, 그 한 번은 대개 `Ok(None)` 으로 떨어지고 코드가 조용히 **유실**된다. 그 유실은 두 번
-/// 아프다: 화면에 종료 코드가 안 뜨고, `Exited { code: None }` 이 「자식이 아직 살아 있다」와 구별되지 않아
-/// 시험대가 그 둘을 가를 수단을 잃는다.
-/// ★값의 근거★: stdout close 와 프로세스 수거 사이는 밀리초 단위다. 2 초는 그 여유를 크게 잡은 것이고,
-/// 넘기면 그건 「끝나지 않은 상대」다 — 그 처분은 이 통로가 아니라 매니저의 teardown 이 진다.
+/// ★One `try_wait` right after EOF cannot get the code★ — stdout closing and reaping are not the same moment, so it usually falls to
+/// `Ok(None)` and the code is **lost**, and `Exited { code: None }` becomes indistinguishable from "still alive".
+/// Grounds: stdout close to reaping is milliseconds; 2 s is a generous margin, and beyond it the peer "has not ended" — carried by the
+/// manager's teardown, not this link.
 const CHILD_REAP_GRACE: Duration = Duration::from_secs(2);
 
-/// 임의 청크를 줄로 자른다. ★완성 줄이 확정되기 전에는 UTF-8 로 읽지 않는다★ — pump 는 문자 경계를
-/// 모르는 청크로 던지므로 멀티바이트 문자가 경계에서 잘릴 수 있고, 개행(0x0A)은 UTF-8 연속 바이트로
-/// 등장할 수 없어 바이트 레벨 탐색이 안전하다.
+/// Cuts arbitrary chunks into lines. ★It does not read as UTF-8 before a complete line is settled★ — the pump passes chunks with no
+/// character boundaries, and a newline (0x0A) cannot appear as a UTF-8 continuation byte, so a byte-level search is safe.
 struct LineSplitter {
     buf: Vec<u8>,
-    /// 상한을 넘긴 줄의 꼬리를 다음 개행까지 통째 버리는 중인가. ★버퍼만 비우면 그 줄의 남은 바이트가
-    /// 다음 개행까지 "새 줄" 로 파싱돼 가짜 봉투를 만든다★.
+    /// In the middle of dropping the tail of an over-cap line up to the next newline? ★Emptying only the buffer would parse the rest of
+    /// that line as a "new line" and make a fake envelope★.
     discarding: bool,
 }
 
@@ -3022,7 +2607,7 @@ impl LineSplitter {
                 if head.len() > MAX_LINE_BYTES {
                     tracing::warn!(
                         bytes = head.len(),
-                        "codex app-server: 줄 상한 초과 — 버린다"
+                        "codex app-server: line cap exceeded — dropping it"
                     );
                     continue;
                 }
@@ -3032,7 +2617,7 @@ impl LineSplitter {
                 if line.len() + head.len() > MAX_LINE_BYTES {
                     tracing::warn!(
                         bytes = line.len() + head.len(),
-                        "codex app-server: 줄 상한 초과 — 버린다"
+                        "codex app-server: line cap exceeded — dropping it"
                     );
                     continue;
                 }
@@ -3041,11 +2626,10 @@ impl LineSplitter {
             }
         }
         if !rest.is_empty() {
-            // ★붙이기 전에 잰다★ — 붙인 뒤 재면 그 순간 이미 넘긴 뒤다.
             if self.buf.len() + rest.len() > MAX_LINE_BYTES {
                 tracing::warn!(
                     bytes = self.buf.len() + rest.len(),
-                    "codex app-server: 줄 상한 초과 — 다음 개행까지 버린다"
+                    "codex app-server: line cap exceeded — dropping up to the next newline"
                 );
                 self.buf = Vec::new();
                 self.discarding = true;
@@ -3056,82 +2640,73 @@ impl LineSplitter {
     }
 }
 
-/// 리더가 **어떻게 끝나든** 통로를 닫는다 — 정상 EOF 든, `handle_line` 안에서 올라온 panic 이든.
-///
-/// ★`Drop` 이어야 하는 이유★: `contain` 은 리더 루프를 **밖에서** 감싸므로, 루프 꼬리에 적어 둔
-///   정리는 unwind 가 그냥 지나간다. 그 경로는 가정이 아니다 — `core.emit` 안에서 구독자가 panic 하거나
-///   `OutputCore` 의 뮤텍스가 poison 되면(그쪽은 `.expect` 다) 바로 거기로 간다. 그러면 닫힘 표식이 안
-///   서고 라이터 스레드가 core·stdin·대기표를 든 채 영원히 돈다.
-/// ★여기서 하는 일은 「닫는다」뿐이다★ — 디코더 flush 와 종료 사유 산출은 정상 경로의 일이라 루프 안에
-///   남는다(unwind 로 건너뛰어도 잃을 것이 없다).
+/// Closes the link **however the reader ends** — normal EOF or a panic inside `handle_line`. ★It must be `Drop`★: `contain` wraps the loop
+/// from outside, so cleanup at the loop tail is skipped by unwind (a subscriber panic in `core.emit`, a poisoned `OutputCore` mutex), the
+/// closed marker never stands and the writer spins forever. It only closes — decoder flush and the end reason stay in the loop.
 struct ReaderExit {
     state: SharedState,
     pending: Arc<Pending>,
-    /// 버린 멈춤의 전이 로그가 싣는 에이전트([`Transition::Discarded`]).
+    /// The agent the transition log of a discarded halt carries ([`Transition::Discarded`]).
     agent: AgentId,
 }
 
 impl Drop for ReaderExit {
-    /// ★★순서가 계약이다 — **상태를 먼저 쓰고, 그 다음에 깨운다**★★.
-    ///
-    /// ★한때 반대였고 그것이 결함이었다★: 대기표를 먼저 깨우면 **죽음이 스스로 연 창**으로 라이터가
-    ///   돌아온다 — 깨어난 라이터는 아직 `Connecting` 인 상태를 읽고 게이트를 통과해([`open_gate`])
-    ///   **이미 끝난 통로에 `Ready` 를 배달한다.** 그 창은 우연이 아니라 스트림 종료마다 열렸다.
-    /// ★지금 순서가 그것을 **구조적으로** 닫는다★: 상태 쓰기(뮤텍스 release) → `send`(채널) →
-    ///   라이터의 `recv` → 라이터의 상태 읽기(뮤텍스 acquire) 가 happens-before 사슬로 이어져, 이 종료로
-    ///   깨어난 라이터는 [`Link::Down`] 을 **반드시** 본다. 시간 여유가 아니라 메모리 모델이 근거다.
-    /// ★그래도 깨우기를 빼지 말 것★ — 남기면 영구 hang 이고 그 hang 에는 신호가 없다. 바뀐 것은
-    ///   **순서뿐**이다.
-    /// ★락을 겹쳐 쥐지 않는다★(ADR-0006 상태→대기표): 상태 락을 놓은 **뒤에** 대기표를 닫는다.
+    /// ★Order is the contract — **write the state first, then wake**★. Waking first lets the writer return through a window the death itself
+    /// opened, read `Connecting`, pass [`open_gate`] and **deliver `Ready` to an ended link**. The current order closes it **structurally**
+    /// (state write → `send` → writer `recv` → state read chain by happens-before). Do not remove the waking (permanent hang). The waiting
+    /// table closes **after** releasing the state lock (ADR-0006).
     // ADR-0203
     // ADR-0201
     fn drop(&mut self) {
         let discarded = {
             let (lock, cv) = &*self.state;
             let mut s = sync::lock(lock);
-            // 진행 중이던 턴은 결말을 모른다 — ★로그 한 줄이 전부다★. 이 사실을 상태로 남기면 그것을 지울
-            //   세 번째 호출자가 필요해지고(ADR-0127 결정 5), 다음 화신은 이 화신의 통로를 이어받지 않는다
-            //   (ADR-0192)라 읽을 소비자도 없다.
+            // The turn in progress does not know its outcome — ★one log line is all★. As state it would need a third caller to erase it
+            //   (ADR-0127 decision 5), and the next incarnation does not take over this link (ADR-0192), so nothing would read it.
             if matches!(s.turn, TurnState::Active { .. }) {
-                tracing::warn!("codex app-server: 턴 결말을 모른 채 스트림이 끝났다");
+                tracing::warn!(
+                    "codex app-server: the stream ended without knowing the turn outcome"
+                );
             }
-            s.link = Link::Down("스트림이 끝났다".to_string());
+            s.link = Link::Down("the stream ended".to_string());
             s.turn = TurnState::Idle;
-            // 붙들어 둔 종료도 함께 버린다(사유 정본 = [`end_turn_if`]).
+            // The held ends are dropped too ([`end_turn_if`]).
             s.early_completions.clear();
-            // 오류 뒤 멈춤도 버린다 — 닫힌 뒤 턴을 열 일이 없고, 기다리던 항목은 코어의 종료 합성이 닫는다.
+            // The halt is discarded too — after closing no turn opens, and waiting items are closed by the core's end synthesis.
             // ADR-0231
             let halted = std::mem::take(&mut s.halted);
             s.closed = true;
             cv.notify_all();
             halted.then_some(Transition::Discarded)
         };
-        // 락 밖에서 찍는다(사유 = [`TurnNoteLog`]).
+        // Written outside the lock ([`TurnNoteLog`]).
         if let Some(t) = discarded {
             t.write(self.agent);
         }
-        // ★대기 중 RPC 를 전부 오류로 깨운다★ — 남기면 영구 hang 이고, 그 hang 에는 신호가 없다.
+        // ★Wake all pending RPCs with an error★ — leaving them is a permanent hang with no signal.
         for entry in self.pending.close() {
             match entry.waiter {
                 Waiter::Handshake(tx) => {
-                    let _ = tx.send(Err(format!("{}: 스트림이 끝났다", entry.method)));
+                    let _ = tx.send(Err(format!("{}: the stream ended", entry.method)));
                 }
-                // ★steer 의 항목은 손대지 않는다★ — 스트림 끝은 이 화신의 끝이고, 남은 항목은 코어의 종료
-                //   합성이 `Dropped{AgentEnded}` 로 닫는다(끝 처분의 주인은 하나 — TRD §5-5 「시한과 닫힘」).
+                // ★The steer item is not touched★ — the stream end ends this incarnation and the core's end synthesis closes remaining items as
+                //   `Dropped{AgentEnded}` (one owner of end disposal — TRD §5-5 「deadline and close」).
                 Waiter::TurnStart { .. } | Waiter::Steer { .. } | Waiter::Fire => {
-                    tracing::debug!("{}: 답을 받기 전에 스트림이 끝났다", entry.method)
+                    tracing::debug!(
+                        "{}: the stream ended before receiving the answer",
+                        entry.method
+                    )
                 }
             }
         }
     }
 }
 
-/// [`Reader::note_turn`] 이 **락을 놓은 뒤에** 남기는 한 줄.
+/// The one line [`Reader::note_turn`] leaves **after releasing the lock**.
 ///
-/// ★상태 락을 쥔 채 찍지 않는다★: tracing 의 파일 sink 는 이벤트마다 동기 기록이라, 그 락 안에서
-///   찍으면 [`AgentTransport::send_input`] 과 라이터가 그 디스크 쓰기 뒤에 줄을 선다. 그리고
-///   [`Self::Unattributable`] 은 **일상** 경로다 — 포기한 턴의 진짜 `turn/completed` 가 뒤늦게 오면
-///   여기로 온다. 수다스러운 상대 하나가 락 보유 디스크 쓰기를 그만큼 만든다.
+/// ★Not written under the state lock★: tracing's file sink writes synchronously per event, which would line up
+///   [`AgentTransport::send_input`] and the writer behind a disk write. [`Self::Unattributable`] is an **everyday** path (the real
+///   `turn/completed` of an abandoned turn arriving late), so one chatty peer would make that many disk writes under the lock.
 // ADR-0006
 enum TurnNoteLog<'a> {
     ForeignThread(&'a str),
@@ -3145,38 +2720,35 @@ impl TurnNoteLog<'_> {
         match self {
             TurnNoteLog::ForeignThread(thread) => tracing::warn!(
                 thread = %sanitize(thread, LOG_STRING_LIMIT),
-                "codex app-server: 남의 thread 의 turn/completed — 경계를 막는다"
+                "codex app-server: turn/completed of another thread — blocking the boundary"
             ),
             TurnNoteLog::OversizedTurnId(bytes) => tracing::warn!(
                 bytes,
-                "codex app-server: turn id 가 상한을 넘어 붙들지 않는다 — 경계를 막는다"
+                "codex app-server: the turn id exceeds the cap, so it is not held — blocking the boundary"
             ),
             TurnNoteLog::Held(turn) => tracing::debug!(
                 turn = %sanitize(turn, LOG_STRING_LIMIT),
-                "codex app-server: 응답보다 먼저 온 종료 — 대조를 기다린다"
+                "codex app-server: an end that came before the response — waiting for the comparison"
             ),
             TurnNoteLog::Unattributable(turn) => tracing::warn!(
-                // 빈 문자열로 두면 「id 가 없었다」와 「id 가 빈 문자열이었다」가 로그에서 같아진다.
+                // Left empty, "no id" and "the id was an empty string" would look the same in the log.
                 turn = %turn
                     .map(|t| sanitize(t, LOG_STRING_LIMIT))
-                    .unwrap_or_else(|| "(칸 없음)".to_string()),
-                "codex app-server: 귀속할 수 없는 turn/completed — 경계를 막는다"
+                    .unwrap_or_else(|| "(no field)".to_string()),
+                "codex app-server: an unattributable turn/completed — blocking the boundary"
             ),
         }
     }
 }
 
-/// 우리가 거절한 승인 요청의 item id — 그 item 의 라이브 끝을 우리 거절([`ToolOutcome::Refused`])로 귀속하려고
-/// 기억한다.
+/// The item ids of approval requests we refused — remembered to attribute that item's live end to our refusal ([`ToolOutcome::Refused`]).
 ///
-/// ★벤더 끝만으로는 우리 거절을 못 가른다★(실측 fixture `refuse_u2a`): 거절한 명령은 `failed` 로, 거절한 파일 변경은
-///   `declined` 로 닫혀 진짜 실패 · 벤더 스스로의 거부와 모양이 같다. 그래서 거절한 이 층이 id 를 쥐고 있다가 끝에서
-///   바꿔 쓴다. 번역기는 이 기억을 모른다 — 알림 줄만 받는 순수 번역기로 남는다.
-/// ★리더 전용이고 락이 없다★ — 적는 쪽([`Reader::refuse`])과 읽는 쪽(같은 [`Reader::handle_line`] 의 끝 알림)이 둘 다
-///   리더 스레드이고, 상대는 우리 답을 받은 뒤 끝을 내므로 기억이 늘 끝보다 먼저 선다. 상태 락([`State`])에 두면 락
-///   구간만 는다.
-/// ★비우는 자리는 그 item 의 끝 줄 하나다 — 턴 끝에서 비우지 않는다★: 끝이 턴 끝 뒤에도 온다(실측 fixture `steer_m6`
-///   마지막 줄). 턴 끝에서 비우면 그 늦은 끝이 「오류」로 보인다.
+/// ★The vendor end alone cannot tell our refusal apart★ (measured fixture `refuse_u2a`): a refused command closes as `failed`, a refused
+///   file change as `declined`, shaped like a real failure · the vendor's own denial. So this layer holds the id and rewrites it at the end;
+///   the translator stays pure.
+/// ★Reader-only and lock-free★: writer ([`Reader::refuse`]) and consumer (the end in [`Reader::handle_line`]) are both the reader thread,
+///   and the peer emits the end after receiving our answer. ★Emptied only by that item's end line, not at the turn end★: the end can come
+///   after the turn end (fixture `steer_m6` last line); emptying earlier would show it as "error".
 // ADR-0241
 #[derive(Debug, Default)]
 struct RefusedItems {
@@ -3184,9 +2756,8 @@ struct RefusedItems {
 }
 
 impl RefusedItems {
-    /// 거절한 item 하나를 적는다. 차 있으면 가장 오래된 것을 버린다(사유 = [`REFUSED_ITEM_SLOTS`]).
-    /// ★이미 기억한 id 는 다시 넣지 않는다★ — 상대는 승인마다 요청 → 끝을 번갈아 내 한 item 에 거절을 둘 걸지 않지만,
-    ///   그 순서가 바뀌어도 칸이 새지 않게 둔다.
+    /// Writes one refused item. If full, the oldest is dropped ([`REFUSED_ITEM_SLOTS`]). ★An already remembered id is not put in again★ —
+    /// the peer alternates request → end per approval, but even if that changes, slots do not leak.
     fn remember(&mut self, item_id: &str) {
         if self.ids.iter().any(|r| r == item_id) {
             return;
@@ -3196,17 +2767,17 @@ impl RefusedItems {
                 tracing::debug!(
                     cap = REFUSED_ITEM_SLOTS,
                     evicted = %sanitize(&evicted, LOG_STRING_LIMIT),
-                    "codex app-server: 거절한 승인 item 기억이 상한에 찼다 — 가장 오래된 것을 버린다"
+                    "codex app-server: the memory of refused approval items reached its cap — dropping the oldest"
                 );
             }
         }
         self.ids.push_back(item_id.to_string());
     }
 
-    /// 한 알림 줄의 번역 결과를 우리 거절로 귀속한다. 그 줄이 기억한 item 의 `item/completed` 면 기억을 **꺼내고**
-    /// (끝 상태와 무관 — 끝 줄이 곧 비우는 자리다), 번역기가 그 id 로 낸 `Failed` · `Declined` 결과를 `Refused` 로
-    /// 바꾼다. 번역기가 결과를 안 냈으면(`completed` 등) 기억만 지운다.
-    /// ★벤더 끝 상태로 가르지 않는다★ — 벤더가 우리 거절을 `failed` 로 닫든 `declined` 로 닫든 그 사유는 우리 거절이다.
+    /// Attributes the translation result of one notification line to our refusal. On `item/completed` of a remembered item the memory is
+    /// **taken out** (whatever the end status) and the translator's `Failed` · `Declined` results with that id become `Refused`; with
+    /// no result emitted (`completed` etc.) only the memory is erased. ★It does not split by vendor end status★ — `failed` or `declined`,
+    /// the reason is our refusal.
     fn attribute(&mut self, method_name: &str, params: Option<&Value>, events: &mut [OutputEvent]) {
         if method_name != method::ITEM_COMPLETED || self.ids.is_empty() {
             return;
@@ -3232,19 +2803,16 @@ impl RefusedItems {
     }
 }
 
-/// 거절한 서버 요청이 우리 거절로 귀속할 도구 item 을 가리키면 그 id — 아니면 `None`(오늘처럼 거절만 한다).
+/// The id if a refused server request points to a tool item to attribute to our refusal — otherwise `None` (just refusing).
 ///
-/// ★가리키는 요청은 둘뿐이다 — 명령 승인과 파일 변경 승인★. 둘 다 `itemId` 가 앞서 시작한 도구 item 의 id 이고, 상대는
-///   우리 거절에 그 item 을 곧바로 닫는다(실측 fixture `refuse_u2a`). 그 밖의 요청(`item/tool/call` ·
-///   `item/permissions/requestApproval` 등 — 그 item 이 우리가 그리는 도구 행인지 모른다 · 옛 이름의 승인은 칸이
-///   `callId` 다)은 가리키지 않는다.
-/// ★명령 승인이라도 `approvalId` 나 `networkApprovalContext` 가 실려 있으면 가리키지 않는다(없거나 `null` 만)★ — 앞은
-///   하위 명령 승인이라 그 거절이 부모 item 의 실행 거절이 아니고(부모의 끝은 스크립트 전체의 결과다), 뒤는 네트워크
-///   승인이라 상대가 그 item 의 끝을 내지 않는다(업스트림 소스 판독 `rust-v0.156.1` — 가능성 높음 · 실측한 명령 승인은
-///   둘 다 없는 모양뿐이다).
-/// ★id 는 번역기와 같은 상한([`MAX_ID_BYTES`])으로 거른다★ — 넘는 id 에는 번역기가 결과를 안 내 기억이 짝을 못 찾고
-///   칸만 차지한다. 이 거르기가 붙들어 두는 바이트의 상한이기도 하다: 없으면 한 칸이 줄 상한([`MAX_LINE_BYTES`])까지의
-///   id 를 쥐고, 그런 칸이 [`REFUSED_ITEM_SLOTS`] 개까지 쌓인다.
+/// ★Only command approval and file change approval point★: `itemId` is a tool item started earlier and the peer closes it right after our
+///   refusal (fixture `refuse_u2a`). Others (`item/tool/call` · `item/permissions/requestApproval`; unknown whether that item is a tool
+///   row we draw · old-name approval has `callId`) do not.
+/// ★A command approval with `approvalId` or `networkApprovalContext` does not point (only absent or `null`)★: the former is a
+///   sub-command approval (the parent's end is the whole script's result), the latter a network approval whose item end is not emitted
+///   (upstream `rust-v0.156.1` — likely; measured approvals had neither).
+/// ★The id is filtered by the translator's cap ([`MAX_ID_BYTES`])★ — over it the translator emits no result, so the memory would only take
+///   a slot; it also caps held bytes (else up to [`MAX_LINE_BYTES`] per slot × [`REFUSED_ITEM_SLOTS`]).
 // ADR-0241
 fn refused_item_id<'a>(method_name: &str, params: Option<&'a Value>) -> Option<&'a str> {
     let params = params?;
@@ -3284,7 +2852,7 @@ struct Reader {
     decoder: Option<Box<dyn OutputDecoder>>,
     state: SharedState,
     pending: Arc<Pending>,
-    /// 첫 턴 포트 — 부르면서 비운다(화신당 한 번). `None` = 이미 불렀거나 알릴 곳이 없다.
+    /// The first-turn port — emptied as it is called (once per incarnation). `None` = already called or nowhere to tell.
     // ADR-0226
     first_turn: Option<FirstTurnSink>,
     // ADR-0241
@@ -3292,18 +2860,17 @@ struct Reader {
 }
 
 impl Reader {
-    /// 서버 요청을 거절한다. ★답하지 않으면 그 에이전트는 영구 정지한다★ — 그래서 모르는 요청에도
-    /// 반드시 답한다. ★성공을 위장하지 않는다★: 승인 요청에 성공 응답을 돌려주면 그것이 자동 승인이다.
-    /// ★거절한 승인 요청이 도구 item 을 가리키면 그 id 를 기억한다([`RefusedItems`] · 판정 = [`refused_item_id`])★ — 그
-    ///   item 의 끝을 우리 거절로 귀속하려고. 거절 줄이 실제로 제어 큐에 들어갔을 때만 적는다: 닫혔거나 넘쳐 못 넣었으면
-    ///   상대가 답을 못 받아 끝이 안 온다.
+    /// Refuses a server request. ★Unanswered, that agent stops forever★, so even an unknown request is always answered. ★It does not
+    /// disguise success★: a success response to an approval request is an automatic approval.
+    /// ★A refused approval request pointing to a tool item has its id remembered ([`RefusedItems`] · [`refused_item_id`])★ — only when the
+    /// refusal line actually entered the control queue (if closed or overflowing the peer gets no answer and no end).
     // ADR-0241
     fn refuse(&mut self, id: &RequestId, method_name: &str, params: Option<&Value>) {
         let shown = sanitize(method_name, LOG_STRING_LIMIT);
         let line = protocol::error_response_line(
             id,
             METHOD_NOT_FOUND,
-            &format!("engram-dashboard 는 `{shown}` 를 처리하지 않는다"),
+            &format!("engram-dashboard does not handle `{shown}`"),
         );
         let dropped = {
             let (lock, cv) = &*self.state;
@@ -3320,47 +2887,31 @@ impl Reader {
             }
         };
         if dropped {
-            // ★여기서 오류를 돌려줄 호출자가 없다 — 리더 자신이 만든 줄이다★. 그래서 로그로만 두면 이
-            //   사건은 **아무 데도 안 보인다**: 상대는 답을 영영 기다리고 화면에는 신호가 없다. 형제
-            //   사건(turn/start 시한)이 화면에 오르므로 이 자리도 같은 등급으로 올린다.
+            // ★No caller to return an error to — the reader made this line itself★. Logged only, the event **is visible nowhere**: the peer waits
+            //   forever with no signal on screen. The sibling event (turn/start deadline) shows on screen, so this is raised to that grade.
             tracing::warn!(
                 cap = OUTBOX_LIMIT,
-                "codex app-server: 제어 큐가 가득 차 요청 거절을 못 보낸다"
+                "codex app-server: the control queue is full, cannot send the request refusal"
             );
             self.core.emit(OutputEvent::Error(format!(
-                "codex app-server: 제어 큐가 가득 차 `{shown}` 요청에 답하지 못했다 — 그쪽은 그 답을 계속 기다린다"
+                "codex app-server: the control queue is full, could not answer the `{shown}` request — that side keeps waiting for the answer"
             )));
         } else if let Some(item_id) = refused_item_id(method_name, params) {
             self.refused.remember(item_id);
         }
     }
 
-    /// 턴이 끝났다는 알림 하나를 이 상태 기계에 먹이고, ★그 줄에서 번역기가 낸 **턴 경계를 화면으로
-    /// 올릴지**를 정한다★. 돌려주는 값 = 지금 올릴 경계(없으면 `None`). 우리 턴의 끝으로 귀속되면 그 턴의
-    /// 항목 처분 사건은 여기서 낸다(경계보다 먼저 — [`State::close_turn_items`]).
+    /// Feeds one turn-ended notification into this state machine and ★decides **whether to raise the translator's boundary from that line**★.
+    /// Returns the boundary to raise now (`None` if none); if attributed to our turn's end, its item disposal events are emitted here (before
+    /// the boundary — [`State::close_turn_items`]).
     ///
-    /// ★귀속을 아는 것은 이 층뿐이다★ — 번역기는 같은 줄을 보지만 우리 thread·turn id 를 모른다. 그래서
-    ///   번역은 무조건 하되, 그 산출이 **우리 턴의 경계인가**는 여기서 판정한다. 이 게이트가 없으면 남의
-    ///   턴 종료 한 줄이 살아 있는 우리 턴을 화면에서 닫고(이후 출력이 가짜 경계로 쪼개진다) 사실 계층도
-    ///   한가함으로 뒤집혀 턴 도중에 우편이 꽂힌다.
-    /// ★막은 줄은 조용히 사라지지 않는다★ — warn 으로 남는다. 「경계가 안 떴다」의 원인을 로그 없이는
-    ///   이 층과 번역기 중 어디서 찾아야 할지 알 수 없다.
-    ///
-    /// ★끝내는 조건은 둘 다 맞을 때뿐이다★: 우리 thread id 와 같고(알면), **우리가 아는 turn id 와 같다.**
-    ///   thread 만 보고 끝내면 같은 스레드의 다른 턴(이미 끝난 앞 턴의 늦은 신호)이 지금 도는 턴을 닫고,
-    ///   그 자리에서 큐가 풀려 턴이 겹친다.
-    /// ★turn id 를 아직 모르면 아무 것도 안 끝낸다★. 그 무시가 **그 시점에** 정지를 만들지는 않는다:
-    ///   id 가 비어 있다는 것은 그 턴의 `turn/start` 가 아직 답을 못 받았다는 뜻이고(답이 성공이든 오류든
-    ///   해독 실패든 그 세 갈래가 전부 턴을 끝내거나 id 를 채운다), 그 요청에는 [`REQUEST_DEADLINE`] 이
-    ///   걸려 있어 만료가 [`end_turn_if`] 로 그 턴을 끝낸다.
-    /// ★종료가 응답보다 **먼저** 오는 경우는 그 논증이 안 덮는다 — 그래서 따로 닫는다★: 그 알림을 여기서
-    ///   버리기만 하면, 뒤이어 온 응답이 id 를 채우면서 대기표까지 걷어 가 그 턴은 끝낼 것이 아무 것도
-    ///   없이 남는다. 그래서 그 알림의 id **와 경계**를 [`State::early_completions`] 에 붙들어 두고,
-    ///   응답이 우리 턴의 id 를 정하는 자리에서 대조해 그때 올린다([`Reader::resolve`]).
-    /// ★붙드는 것이 「종료가 있었다」가 아니라 **그 id** 인 것이 핵심이다★ — 전자는 무엇이든 끝낼 수 있는
-    ///   근거 없는 기억이라 오귀속 그 자체지만, 후자는 이 함수가 이미 하는 id 대조를 **미루는** 것뿐이다.
-    ///   끝내는 판정은 어느 경로에서도 id 일치 하나뿐이다. ★그 성질을 넓히지 말 것★ — id 대조 없이 턴을
-    ///   끝내는 갈래를 더하는 순간 이 파일이 걷어낸 오귀속이 그대로 돌아온다.
+    /// ★Only this layer knows attribution★ (our thread · turn id): without the gate someone else's end closes our live turn and plugs mail
+    /// mid-turn. A blocked line is logged as warn.
+    /// ★Ends only when both match★: our thread id (if known) and **the turn id we know**.
+    /// ★Unknown turn id → nothing ends★, no stall: that turn's `turn/start` has no answer yet and has [`REQUEST_DEADLINE`] ([`end_turn_if`]).
+    /// ★An end **before** the response★: its id **and boundary** are held in [`State::early_completions`] and compared where the response
+    /// decides our turn's id ([`Reader::resolve`]) — else nothing would end the turn once the waiting entry is removed. ★What is held is that
+    /// **id**, never "there was an end"★; the ending decision is only the id match on every path — do not widen it.
     // ADR-0127
     fn note_turn(
         &self,
@@ -3369,8 +2920,8 @@ impl Reader {
         boundary: Option<OutputEvent>,
     ) -> Option<OutputEvent> {
         if method_name != TURN_COMPLETED {
-            // ★번역기는 이 이름 밖에서 턴 경계를 내지 않는다★ — 그래도 받은 것을 그대로 돌려준다:
-            //   그 전제가 깨지는 날 경계가 조용히 사라지는 것보다 화면에 뜨는 편이 낫다.
+            // ★The translator emits no turn boundary outside this name★ — still what was received is returned as is: if the premise breaks, a
+            //   visible boundary beats a silent one.
             return boundary;
         }
         let incoming_thread = params
@@ -3386,8 +2937,8 @@ impl Reader {
         let (result, log) = {
             let (lock, cv) = &*self.state;
             let mut s = sync::lock(lock);
-            // ★모르는 threadId 는 오류가 아니다★ — 알림이 그 스레드의 id 를 알려 줄 응답보다 먼저
-            //   도착하는 경우가 실측됐다. 우리 id 를 아직 모르면 그 축으로는 거르지 않는다.
+            // ★An unknown threadId is not an error★ — measured: a notification arrives before the response that tells that thread's id. While
+            //   our id is unknown it is not filtered on that axis.
             let foreign_thread = match (s.thread_id.as_deref(), incoming_thread) {
                 (Some(mine), Some(theirs)) if mine != theirs => Some(theirs),
                 _ => None,
@@ -3411,10 +2962,9 @@ impl Reader {
                         cv.notify_all();
                         (boundary, None)
                     }
-                    // ★지금 턴의 id 를 아직 모르는 동안 온 종료★: 이 시점에는 귀속할 수 없으므로 **끝내지
-                    //   않고 경계도 안 올린다**. 대신 그 id 와 경계를 붙들어 두고, 뒤이어 올 `turn/start` 응답이
-                    //   우리 턴의 id 를 권위 있게 알려 줄 때 대조한다([`Reader::resolve`]). 그 대조가 없으면 이
-                    //   턴은 끝낼 것이 아무 것도 없이 남는다 — 응답이 대기표를 걷어 가 시한 backstop 도 사라진다.
+                    // ★An end while the current turn's id is unknown★: it cannot be attributed, so it **neither ends nor raises the boundary**; its id
+                    //   and boundary are held and compared when the following `turn/start` response gives our turn's id ([`Reader::resolve`]).
+                    //   Without that the turn would have nothing to end it — the response removes the waiting entry and the deadline backstop.
                     (TurnState::Active { turn_id: None, .. }, Some(theirs)) => {
                         if theirs.len() > MAX_TURN_ID_BYTES {
                             (None, Some(TurnNoteLog::OversizedTurnId(theirs.len())))
@@ -3432,7 +2982,7 @@ impl Reader {
                             (None, Some(TurnNoteLog::Held(theirs)))
                         }
                     }
-                    // 열린 턴이 없거나, 우리가 아는 id 와 다르거나, 알림에 turn id 가 아예 없다.
+                    // No open turn, or it differs from the id we know, or the notification has no turn id.
                     _ => (None, Some(TurnNoteLog::Unattributable(incoming_turn))),
                 }
             }
@@ -3440,28 +2990,19 @@ impl Reader {
         if let Some(entry) = log {
             entry.write();
         }
-        // ★경계보다 먼저, 락 밖에서 낸다★(사유 = [`end_turn_if`] · ADR-0006) — 경계는 호출자가 낸다.
+        // ★Emitted before the boundary, outside the lock★ ([`end_turn_if`] · ADR-0006) — the caller emits the boundary.
         drops.emit(&self.core, &self.state);
         result
     }
 
-    /// 이 알림이 **우리가 지금 열어 둔 턴의 것으로 셀 수 있나** — 화면에 올릴지가 아니라 ★사실 계층에
-    /// 진행 신호를 적을지★의 판정이다(ADR-0113).
+    /// Can this notification **be counted as belonging to our open turn** — ★whether to write a progress signal into the fact layer★, not
+    /// whether to raise it to the screen (ADR-0113).
     ///
-    /// ★두 판정을 가른 이유★: 경계를 막으면 잃는 것이 「경계 하나」지만 본문을 막으면 **에이전트가 낸
-    ///   말이 화면에서 사라진다**. 그래서 본문은 언제나 올리고, 그 줄이 「이 화신은 턴 중」의 근거가
-    ///   되는지만 여기서 가른다. 이 가름이 없으면 우리가 연 적 없는 턴의 `item/*` 한 줄이 사실 계층을
-    ///   켜고, 그 턴의 종료는 [`Reader::note_turn`] 에 막혀 **아무도 그것을 못 끈다** — 30 분 fail-open
-    ///   밸브가 쓸어 갈 때까지 그 에이전트에는 우편이 안 간다(ADR-0127 이 닫은 그 기전과 같은 모양).
-    /// ★판정은 「모순되지 않는가」다 — 「일치하는가」가 아니다★: `item/*` 는 `turn/start` **응답보다
-    ///   먼저** 오는 것이 정상이라(그 창이 [`State::early_completions`] 가 존재하는 이유다) 그 시점에
-    ///   id 일치를 요구하면 우리 턴의 스트리밍 출력이 통째로 사실 계층 밖으로 나간다. 그래서 열린 턴이
-    ///   있고 그 턴의 id 와 **어긋나지만 않으면** 우리 것으로 센다.
-    /// ★열린 턴이 없으면 무조건 아니다★ — 그 순간 이 통로는 「턴 중 아님」이고, 두 축이 같은 판정을
-    ///   받는 것이 이 모양의 요점이다(모듈 헤더).
-    /// ★이 판정과 emit 사이에는 락이 없다(알려진 잔여)★ — 라이터가 그 틈에 턴을 열거나 닫으면 줄
-    ///   하나가 반대쪽으로 센다. 락을 emit 까지 끌면 ADR-0006 을 어기고, 그 한 줄의 오차는 다음 줄과
-    ///   턴 경계가 덮는다.
+    /// Split from the boundary decision because blocking a body would lose the agent's words; unsplit, one `item/*` line of a turn we never
+    /// opened would turn the fact layer on with its end blocked by [`Reader::note_turn`] — **nobody could turn it off** until the 30-minute
+    /// fail-open (ADR-0127's mechanism). ★"Does not contradict", not "matches"★: `item/*` before the `turn/start` response is normal
+    /// ([`State::early_completions`]); with an open turn and no contradiction it counts, with no open turn it never does.
+    /// ★No lock between this decision and the emit (known remainder)★ — one line may count toward the other side (ADR-0006 forbids holding it).
     // ADR-0113
     fn claims_our_turn(&self, params: Option<&Value>) -> bool {
         let (lock, _) = &*self.state;
@@ -3510,8 +3051,11 @@ impl Reader {
         let entry = match self.pending.take(id) {
             Some(e) => e,
             None => {
-                // 우리가 낸 적 없는 id — 서버 id 공간의 값이거나 이미 시한으로 거둔 자리다.
-                tracing::debug!(?id, "codex app-server: 모르는 id 의 응답 — 버린다");
+                // An id we never issued — a server id-space value, or one already withdrawn by the deadline.
+                tracing::debug!(
+                    ?id,
+                    "codex app-server: response with an unknown id — dropping it"
+                );
                 return;
             }
         };
@@ -3521,22 +3065,21 @@ impl Reader {
             }
             Waiter::TurnStart { seq } => match outcome {
                 Ok(v) => match self.accepted_turn_start(v) {
-                    // ★응답이 정하는 id 에도 길이를 건다★ — 이 값은 그대로 `turn/interrupt` 의 params 와
-                    //   [`OutputEvent::TurnEnd`] 의 칸으로 나가므로, 상한이 없으면 상대가 응답 하나로 replay
-                    //   링의 단일 이벤트 상한을 넘는 경계를 만들고 그 링은 그 한 건으로 나머지를 전부 비운다.
-                    //   ★대조 토큰이라 자르지 않고 거른다★(같은 판단 = [`MAX_TURN_ID_BYTES`]) — 그러면 이
-                    //   턴은 귀속할 재료가 없으므로 아래 오류 갈래와 **같은 등급**으로 여기서 닫는다.
+                    // ★The id the response decides is length-capped too★ — it goes as is into `turn/interrupt` params and [`OutputEvent::TurnEnd`], so
+                    //   uncapped, one response could make a boundary over the replay ring's single-event cap and empty the ring.
+                    //   ★A comparison token, so filtered, not truncated★ ([`MAX_TURN_ID_BYTES`]) — the turn then has no attribution material
+                    //   and is closed here **at the same grade** as the error branch below.
                     Ok(r) if r.turn.id.len() > MAX_TURN_ID_BYTES => {
                         tracing::warn!(
                             bytes = r.turn.id.len(),
-                            "turn/start 응답의 turn id 가 상한을 넘었다"
+                            "the turn id of the turn/start response exceeded the cap"
                         );
                         end_turn_if(
                             &self.state,
                             &self.core,
                             seq,
                             format!(
-                                "codex app-server: turn/start 응답의 turn id 가 상한({MAX_TURN_ID_BYTES}B)을 넘었다"
+                                "codex app-server: the turn id of the turn/start response exceeded the cap ({MAX_TURN_ID_BYTES}B)"
                             ),
                             TurnClose::Unanswered,
                         );
@@ -3545,25 +3088,21 @@ impl Reader {
                         let released = {
                             let (lock, cv) = &*self.state;
                             let mut s = sync::lock(lock);
-                            // ★표식이 안 맞으면 이 답이 연 턴은 이미 끝났다★ — 그 id 를 지금 턴의 칸에
-                            //   적으면 그 뒤의 interrupt 가 엉뚱한 턴을 겨눈다.
+                            // ★A mismatched marker means the turn this answer opened already ended★ — writing its id into the current turn's slot would make
+                            //   a later interrupt aim at the wrong turn.
                             match &mut s.turn {
                                 TurnState::Active { seq: cur, turn_id } if *cur == seq => {
                                     let newly = turn_id.is_none();
                                     if newly {
                                         *turn_id = Some(r.turn.id);
                                     }
-                                    // ★이 응답이 우리 턴의 id 를 권위 있게 정한 자리다★ — 그 id 로 온
-                                    //   종료가 이미 지나갔다면 여기서 끝내고, **그때 붙들어 둔 경계를
-                                    //   지금 올린다**. 이 대조가 없으면 그 턴은 영영 열린 채 남고
-                                    //   (대기표는 방금 걷혔다), 그 뒤의 `send_input` 이 그 정지를 "큐가
-                                    //   찼다" 로 신고한다 — 사유가 어긋난 신고다.
-                                    // ★끝내는 판정은 여전히 id 일치 하나뿐이다★ — 붙들어 둔 목록에
-                                    //   있다는 사실만으로 끝나는 턴은 없다.
+                                    // ★This response decides our turn's id authoritatively★ — if an end with that id already passed, it ends here and **the held
+                                    //   boundary is raised now**. Without it the turn would stay open forever (waiting entry just removed) and `send_input`
+                                    //   would report that stall as "the queue is full" — wrong reason.
+                                    // ★The ending decision is still only the id match★ — no turn ends merely by being in the held list.
                                     let ours = turn_id.clone();
-                                    // ★이 요청이 실은 항목에 턴 id 를 적는다 — (표식, 단계)가 맞을 때만★(세대
-                                    //   가림: 에코로 이미 빠졌으면 무동작). 성공 응답은 수락이지 받음이 아니라
-                                    //   항목은 에코를 계속 기다린다(TRD §5-5).
+                                    // ★Writes the turn id onto the item this request carried — only when (marker, stage) match★ (generation masking: a no-op if
+                                    //   already removed by echo). A success response is acceptance, not receipt — the item keeps waiting for the echo (TRD §5-5).
                                     // ADR-0231
                                     if let Some(item) = s.turn_start_carrier(seq) {
                                         item.stage = Stage::InFlight {
@@ -3581,19 +3120,16 @@ impl Reader {
                                     match hit.and_then(|pos| s.early_completions.remove(pos)) {
                                         Some(held) => {
                                             s.turn = TurnState::Idle;
-                                            // 같은 창에서 붙든 나머지도 이 턴과 함께 버린다
-                                            //   (사유 정본 = [`end_turn_if`]).
+                                            // The rest held in the same window are dropped with this turn ([`end_turn_if`]).
                                             s.early_completions.clear();
-                                            // ★이른 종료도 턴 끝이다★ — 여기서 처분하지 않으면 그 턴의
-                                            //   `InFlight` 가 결말 없이 남는다(TRD §5-5 턴 끝 처분 ②).
+                                            // ★An early end is a turn end too★ — undisposed, that turn's `InFlight` stays without an outcome (TRD §5-5 turn-end disposal ②).
                                             // ADR-0231
                                             let drops = s.close_turn_items(seq, held.close);
                                             cv.notify_all();
                                             (drops, held.boundary)
                                         }
-                                        // ★턴 id 가 막 왔다★ — 이 턴을 여는 동안 쥔 사용자 글(턴 끝에 남은 글 ·
-                                        //   응답 전에 친 글)이 있으면 도구 끝을 기다리지 않고 곧바로 이 턴에 넣는다
-                                        //   — 턴 끝의 남은 글이 한 턴에 모인다(ADR-0235).
+                                        // ★The turn id just came★ — user text held while this turn opened (left at a turn end · typed before the response) goes into this turn
+                                        //   at once without waiting for a tool end, so text left at the turn end gathers into one turn (ADR-0235).
                                         // ADR-0231
                                         None => {
                                             if newly
@@ -3611,42 +3147,41 @@ impl Reader {
                                 }
                                 _ => {
                                     tracing::debug!(
-                                        "codex app-server: 이미 끝난 턴의 turn/start 응답 — 버린다"
+                                        "codex app-server: turn/start response of an already ended turn — dropping it"
                                     );
                                     (Disposal::default(), None)
                                 }
                             }
                         };
-                        // ★락을 놓은 뒤에 올린다★(ADR-0006) — 구독자는 emit 안에서 임의 코드를 돈다.
-                        //   처분 사건이 경계보다 먼저다(사유 = [`end_turn_if`]).
+                        // ★Raised after releasing the lock★ (ADR-0006) — subscribers run arbitrary code inside emit. Disposal events come before the
+                        //   boundary ([`end_turn_if`]).
                         let (drops, boundary) = released;
                         drops.emit(&self.core, &self.state);
                         if let Some(ev) = boundary {
                             self.core.emit(ev);
                         }
                     }
-                    // ★오류 응답과 **같은 등급**이어야 한다★: 대기표는 위에서 이미 걷혔으므로, 여기서
-                    //   턴을 안 끝내면 그 턴은 `turn_id` 없이 남고 만료시킬 대기표도 없다 — `note_turn`
-                    //   은 영영 귀속을 못 하고 게이트가 풀리지 않는다(그 뒤 `send_input` 은 그 정지를
-                    //   "큐가 찼다" 로 신고한다). 해독 못 한 성공은 명시적 오류보다 덜 치명이 아니다.
+                    // ★Must be **the same grade** as an error response★: the waiting entry is already removed, so a turn left open has no `turn_id` and
+                    //   no entry to expire — `note_turn` can never attribute, the gate does not open and `send_input` reports "the queue is
+                    //   full". An undecodable success is as fatal as an explicit error.
                     Err(e) => {
                         let masked = sanitize(&e.to_string(), LOG_STRING_LIMIT);
-                        tracing::warn!("turn/start 응답 해독 실패: {masked}");
+                        tracing::warn!("turn/start response decode failed: {masked}");
                         end_turn_if(
                             &self.state,
                             &self.core,
                             seq,
-                            format!("codex app-server: turn/start 응답을 읽지 못했다: {masked}"),
+                            format!("codex app-server: could not read the turn/start response: {masked}"),
                             TurnClose::Unanswered,
                         );
                     }
                 },
-                // `turn/start` 의 오류 응답은 거절(`Rejected`)이다 — 실은 사용자 글은 턴 끝 처분이 쥔 자리로 되돌리고
-                //   멈춤이 선다([`State::close_turn_items`]).
+                // An error response of `turn/start` is a refusal (`Rejected`) — the disposal returns the carried user text to the held place and the
+                //   halt stands ([`State::close_turn_items`]).
                 // ADR-0231
                 Err(msg) => {
                     let masked = sanitize(&msg, LOG_STRING_LIMIT);
-                    tracing::warn!("turn/start 실패: {masked}");
+                    tracing::warn!("turn/start failed: {masked}");
                     end_turn_if(
                         &self.state,
                         &self.core,
@@ -3656,12 +3191,11 @@ impl Reader {
                     );
                 }
             },
-            // ★응답은 그 항목에만 닿는다 — 턴을 끝내지 않는다★: steer 는 턴을 열지 않았고, 오류 응답이 와도
-            //   그 턴은 벤더에서 계속 돈다(`turn/completed` 가 끝낸다). 오류가 `turn/completed` 보다 먼저 오기도
-            //   한다(M10 — 0.1 ms 앞) — 순서를 가정하지 않는다.
-            // ★성공 응답(과 시한)은 항목을 안 옮긴다 — 받음은 에코뿐이다★: 받힌 steer 의 에코는 같은 stdout 에서
-            //   `turn/completed` 보다 먼저 오므로(TRD §3-2 · M10) 턴 끝까지 에코 없는 글은 안 받혔고 다시 보내도 되며,
-            //   늦은 응답은 세대 대조가 무동작으로 만든다([`State::hold_refused_steer`]).
+            // ★The response reaches only that item — it does not end the turn★: a steer did not open the turn and even on an error response it keeps
+            //   running at the vendor (`turn/completed` ends it; the error sometimes comes first — M10, 0.1 ms ahead — no order is assumed).
+            // ★A success response (and the deadline) does not move the item — receipt is only the echo★: an accepted steer's echo precedes
+            //   `turn/completed` (TRD §3-2 · M10), so text without an echo by the turn end was not accepted and may be sent again; a late
+            //   response is a no-op by generation ([`State::hold_refused_steer`]).
             // ADR-0231
             Waiter::Steer { id: item, gen } => {
                 let Err(msg) = &outcome else {
@@ -3670,7 +3204,7 @@ impl Reader {
                 let (held, trace) = {
                     let (lock, cv) = &*self.state;
                     let mut s = sync::lock(lock);
-                    // ADR-0231: 거절 계측 줄 — 그 턴이 아직 돌면 그 턴 id 를 싣는다.
+                    // ADR-0231: the refusal trace line — carries that turn id if the turn is still running.
                     let trace = SteerTrace::enabled().then(|| {
                         let turn = match &s.turn {
                             TurnState::Active { seq, turn_id } if *seq == gen => turn_id.as_deref(),
@@ -3682,14 +3216,14 @@ impl Reader {
                     cv.notify_all();
                     (held, trace)
                 };
-                // 락 밖에서 찍고 낸다(사유 = [`TurnNoteLog`] · ADR-0006).
-                tracing::warn!("turn/steer 거절: {}", sanitize(msg, LOG_STRING_LIMIT));
+                // Written and emitted outside the lock ([`TurnNoteLog`] · ADR-0006).
+                tracing::warn!("turn/steer refused: {}", sanitize(msg, LOG_STRING_LIMIT));
                 if let Some(t) = trace {
                     t.write(self.core.id());
                 }
                 match held {
                     None => tracing::debug!(
-                        "codex app-server: 이미 받혔거나 턴 끝이 처분한 항목의 turn/steer 거절 — 버린다"
+                        "codex app-server: turn/steer refusal of an item already accepted or disposed by the turn end — dropping it"
                     ),
                     Some(out) => out.emit(&self.core, &self.state),
                 }
@@ -3697,7 +3231,7 @@ impl Reader {
             Waiter::Fire => {
                 if let Err(msg) = outcome {
                     tracing::warn!(
-                        "{} 실패: {}",
+                        "{} failed: {}",
                         entry.method,
                         sanitize(&msg, LOG_STRING_LIMIT)
                     );
@@ -3706,18 +3240,13 @@ impl Reader {
         }
     }
 
-    /// 번역기가 낸 받음(`Delivered`)마다 그 id 를 pending 에서 뺀다 — 단계와 무관하다
-    /// ([`State::take_delivered`]). 돌려주는 값 = 받음 뒤에 턴 경계를 새로 세워야 하나(아래).
+    /// For every receipt (`Delivered`) the translator emitted, removes that id from pending regardless of stage ([`State::take_delivered`]).
+    /// Returns whether a turn boundary must be newly set after the receipt.
     ///
-    /// ★화면에 내기 **전에** 뺀다★: 그 글은 이미 벤더 이력에 있어 다시 나가면 안 되고, 다른 스레드의
-    ///   처분(시한 · 쓰기 실패)이 그 뒤에 그 항목을 만나 두 번 움직이면 안 된다.
-    /// ★우리 턴 밖에서 온 받음(늦은 받음)★ — 턴 끝에서 쥔 자리로 돌아온 글 · 거절로 돌아온 `Held` — 도 받음으로
-    ///   닫는다(그 글은 다음 사용자 턴이 이력에서 본다 — TRD §5-5 「턴 끝 뒤에 받음이 오면」). 쥔 채 빠지므로 다시
-    ///   나가지 않는다. 이미 다시 넘긴 뒤에 옛 요청의 에코가 오면 그것이 받음이고, 새 요청의 에코는 모르는 id 로
-    ///   지나간다(명부는 같은 id 의 둘째 받음을 접는다). 빠지면 라이터를 깨운다.
-    /// ★열린 턴이 없을 때 온 받음은 경계를 새로 세운다(`true`)★ — 그 말풍선은 대화 끝 말풍선이라 프론트가 대기
-    ///   표시를 켜는데, 그것을 끄는 것은 턴 경계뿐이고 그 뒤로 이어지는 턴은 없을 수 있다. 모르는 id(✕ 뒤 되살림 · Direct · 우편)도 같다 — 억눌리지 않은 벤더 에코가 말풍선을 세운다.
-    ///   열린 턴이 있으면 그 턴의 끝이 경계다.
+    /// ★Removed **before** emitting to the screen★ — the text is in the vendor history and must not go out again. ★A late receipt★ (text
+    /// returned to the held place) also closes as received (TRD §5-5 「when a receipt comes after the turn end」); removal wakes the writer.
+    /// ★A receipt with no open turn sets a new boundary (`true`)★ — only a boundary turns off the frontend waiting indicator (unknown ids
+    /// likewise); with an open turn, that turn's end is the boundary.
     // ADR-0231
     fn note_delivered(&self, events: &[OutputEvent]) -> bool {
         let ids: Vec<&str> = events
@@ -3740,7 +3269,7 @@ impl Reader {
                 let Some(item) = s.take_delivered(id) else {
                     continue;
                 };
-                // ADR-0231: 받음 계측 줄 — 그 항목이 들어간 턴의 id 를 싣는다.
+                // ADR-0231: the receipt trace line — carries the id of the turn that item went into.
                 if tracing_on {
                     let turn = match &item.stage {
                         Stage::InFlight { turn_id, .. } => turn_id.as_deref(),
@@ -3758,16 +3287,12 @@ impl Reader {
         idle
     }
 
-    /// 도구 끝 계기(ADR-0235 — t3code 모양): 우리 지금 턴의 도구 항목([`is_tool_item`])이 끝나면
-    /// (`item/completed`) [`State::steer_due`] 를 세우고 라이터를 깨운다 — 그 도구 끝이 쥔 사용자 글을 전부 넘긴다.
-    /// 돌려주는 값 = 도구 항목의 계측 줄([`STEER_TRACE`]의 `tool_start` · `tool_end` — 락 밖에서 찍을 것).
+    /// The tool-end trigger (ADR-0235 — t3code shape): a tool item ([`is_tool_item`]) of our current turn ending (`item/completed`) sets
+    /// [`State::steer_due`] and wakes the writer — that tool end hands over all held user text. Returns the tool item's trace lines.
     ///
-    /// ★세는 것은 우리 thread(알면)의 **지금 턴 id** 줄뿐이다★ — 옛 턴 id 의 늦은 완료(끊긴 턴의 도구 — M6)는 계기가
-    ///   아니다. 턴 id 가 오기 전(`Active{turn_id: None}`)의 줄도 안 센다: 그 전에는 넘길 수단이 없고(`expectedTurnId`),
-    ///   응답이 턴 id 를 주는 자리가 쥔 글을 따로 넘긴다([`Reader::resolve`]).
-    /// ★병렬 도구도 끝마다 계기다★ — 도는 도구를 세지 않는다. 끝난 도구 하나가 곧 끼워 넣을 자리다.
-    /// ★번역보다 **먼저** 부른다★ — 계기가 라이터에 닿는 시각이 반응 지연이고, 번역·emit 은 그 뒤에 해도 걸리는 순서가
-    ///   없다.
+    /// ★Only lines of **the current turn id** count★ — a late completion of an old turn id (M6) and lines before the turn id came
+    /// (`Active{turn_id: None}`; [`Reader::resolve`] hands over there) are no trigger. Parallel tools trigger at every end. ★Called **before**
+    /// translation★ — the trigger's arrival is the reaction latency.
     // ADR-0231
     // ADR-0235
     fn note_tool_item(&self, method_name: &str, params: Option<&Value>) -> Option<SteerTrace> {
@@ -3803,7 +3328,7 @@ impl Reader {
             } if current == incoming_turn => {}
             _ => return None,
         }
-        // 도구 항목의 시작·끝 계측 줄 — id 를 대조할 수 없는 도구(없음 · 넘침)는 안 찍는다(계기는 그래도 선다).
+        // Start · end trace lines of tool items — tools whose id cannot be compared (absent · overflowing) are not written (the trigger still stands).
         let trace = match item_id {
             Some(id) if id.len() <= MAX_TURN_ID_BYTES && SteerTrace::enabled() => {
                 let phase = if started {
@@ -3831,15 +3356,10 @@ impl Reader {
         trace
     }
 
-    /// 상대가 유저 메시지 item 을 **처음** 되울리면 첫 턴 포트를 부른다 — 이 화신의 대화에 턴이 생긴 자리다.
-    ///
-    /// ★라이브 `item/started`·`item/completed` 의 `userMessage` 면 무엇이든 센다★ — `clientId` 가 있든 없든(하한
-    ///   미달 · 우편 턴도), 우리 턴 판정([`Reader::claims_our_turn`])과도 무관하다(턴 끝 뒤의 늦은 되울림도 그
-    ///   글이 벤더 이력에 들어간 사실은 같다). 다른 thread 라고 **밝힌** 줄만 뺀다. 이력 복원은 이 문을 지나지
-    ///   않는다(응답으로 받아 라이터가 싣는다 — [`hydrate_history`]).
-    /// ★락을 하나도 쥐지 않은 채 부른다★ — 포트 너머가 래치 commit(프로필 디스크 쓰기)이다. thread 대조에
-    ///   잡은 상태 락은 그 전에 놓는다. 화면 방출보다 **뒤에** 부른다: 디스크 쓰기가 말풍선을 붙잡지 않게.
-    // ADR-0226 · ADR-0231 · ADR-0233: 사용자 결정 — id 는 진짜가 된 때(상대의 첫 유저 메시지 되울림) 영속한다.
+    /// On the peer's **first** echo of a user message item, calls the first-turn port. ★Any live `userMessage` counts★ — with or without
+    /// `clientId`, regardless of [`Reader::claims_our_turn`]; only lines **declaring** another thread are excluded; history restore does not
+    /// pass here ([`hydrate_history`]). ★Called without any lock, after emitting to the screen★ (the latch commit is a disk write).
+    // ADR-0226 · ADR-0231 · ADR-0233: persisted when the id became real (the peer's first user message echo).
     fn witness_first_turn(&mut self, method_name: &str, params: Option<&Value>) {
         if self.first_turn.is_none() {
             return;
@@ -3862,7 +3382,7 @@ impl Reader {
             return;
         }
         if let Some(sink) = self.first_turn.take() {
-            // ADR-0292 결정 3: 래치 commit 은 여러 에이전트가 쓰는 프로필 표를 고친다 — 펌프의 가둠 안이어도 표시를 끈다.
+            // ADR-0292 decision 3: the latch commit changes the profile table several agents write — even inside the pump's containment, the marking is turned off.
             uncontained(|| sink(delivered));
         }
     }
@@ -3898,7 +3418,7 @@ impl Reader {
             Err(_) => {
                 tracing::debug!(
                     bytes = line.len(),
-                    "codex app-server: UTF-8 이 아닌 줄 — 버린다"
+                    "codex app-server: a line that is not UTF-8 — dropping it"
                 );
                 return;
             }
@@ -3912,56 +3432,52 @@ impl Reader {
             }
             Ok(Inbound::Notification { method, params }) => {
                 // ADR-0231
-                // 계측 줄은 락을 놓은 곧바로 찍는다 — 그 계기가 푼 steer 줄(라이터)보다 앞서도록.
+                // Trace lines are written right after releasing the lock — so they come before the steer line (writer) the trigger released.
                 if let Some(t) = self.note_tool_item(&method, params.as_ref()) {
                     t.write(self.core.id());
                 }
                 // ADR-0337: before the first-turn report below reads what it set.
                 self.note_context_echo(&method, params.as_ref());
-                // ★번역기에는 **원본 줄 바이트**를 그대로 넣는다★ — 두 번째 입구를 만들면 그쪽의 라인
-                //   재조립·상한·마스킹 규율이 배송 경로 밖으로 나간다(사유 정본 = `decoder.rs` 헤더).
-                //   번역기는 개행으로 줄을 가르므로 종단을 함께 준다.
+                // ★The translator gets **the original line bytes** as is★ — a second entrance would move that side's line reassembly · cap · masking
+                //   discipline out of the delivery path (`decoder.rs` header). It splits lines by newline, so the terminator is given too.
                 let mut events = match self.decoder.as_mut() {
                     Some(dec) => {
                         let mut events = dec.decode(line);
                         events.extend(dec.decode(b"\n"));
-                        // 사용량 관측은 이벤트가 아니다 — 귀속 게이트와 무관하게 상태 sink 로 바로 넘긴다.
+                        // Usage observation is not an event — handed straight to the status sink regardless of the attribution gate.
                         self.core.report_usage(dec.take_usage());
                         events
                     }
                     None => Vec::new(),
                 };
-                // ADR-0241: 번역기는 우리 거절을 모른다 — 거절한 item 의 끝은 이 층이 emit 전에 바꿔 쓴다(락 없이).
+                // ADR-0241: the translator does not know our refusals — the end of a refused item is rewritten here before emit (no lock).
                 self.refused
                     .attribute(&method, params.as_ref(), &mut events);
-                // ★턴 경계만 뽑아 **귀속 게이트**를 지난다 — 나머지는 그대로 흐른다★: 번역기는 우리
-                //   thread·turn id 를 몰라 「이 결말이 우리 턴의 것인가」를 답할 수 없고, 이 층은 그것만
-                //   안다(사유 정본 = [`TURN_COMPLETED`] doc).
+                // ★Only the turn boundary is pulled out and passes the **attribution gate** — the rest flows as is★: the translator cannot answer
+                //   "is this outcome our turn's" ([`TURN_COMPLETED`]).
                 let boundary = events
                     .iter()
                     .position(|e| matches!(e, OutputEvent::TurnEnd { .. }))
                     .map(|i| events.remove(i));
                 let boundary_owed = self.note_delivered(&events);
-                // ★본문은 언제나 화면으로 올리되, 그 줄을 「이 화신은 턴 중」의 근거로 셀지는 가른다★
-                //   (사유 정본 = [`Reader::claims_our_turn`]). 이 두 문이 갈리지 않으면 미귀속 줄이
-                //   사실 계층만 켜 놓고 그 종료는 아래 게이트에 막혀 아무도 그것을 못 끈다.
-                // 경계 하나만 나오는 줄(대부분의 `turn/completed`)에서는 이 판정이 필요 없다 — 락을 아낀다.
+                // ★The body always goes to the screen, but whether the line counts as grounds for "mid-turn" is split★ ([`Reader::claims_our_turn`]);
+                //   unsplit, an unattributed line would turn only the fact layer on and its end would be blocked by the gate below.
+                // A line yielding only one boundary (most `turn/completed`) does not need this decision — the lock is saved.
                 let ours = !events.is_empty() && self.claims_our_turn(params.as_ref());
                 for ev in events {
-                    // ★종료 어휘는 그 문으로 보내지 않는다★ — 그 문은 도어벨(`StatusSink::turn_ended`)도
-                    //   건너뛰므로 종료를 기다리는 소비자가 안 깨어난다. 번역기 계약상 한 줄이 내는
-                    //   경계는 하나뿐이라 그것은 위에서 이미 뽑혔지만, 그 계약이 깨지는 날 조용히
-                    //   잃는 것보다 여기서 지키는 편이 싸다.
+                    // ★End vocabulary is not sent through that door★ — it also skips the doorbell (`StatusSink::turn_ended`), so consumers waiting for the
+                    //   end would not wake. By the translator contract one line emits one boundary, already pulled out above; guarding here is
+                    //   cheaper than silently losing it if that breaks.
                     if ours || matches!(ev, OutputEvent::TurnEnd { .. }) {
                         self.core.emit(ev);
                     } else {
                         self.core.emit_without_turn_observation(ev);
                     }
                 }
-                // ★열린 턴 밖의 받음 뒤 경계(사유 = [`Reader::note_delivered`]) — 관측 없는 문으로 낸다★: 턴 표는 이미
-                //   한가라(그 받음도 관측 없이 나갔다) 깨울 소비자가 없고, 보통 문으로 내면 분류기가 깨끗한 끝으로 접어
-                //   앞선 오류 끝(`last_end_failed`)을 지운다 — 멈춰 있어야 할 우편이 흐른다.
-                //   그 사이 새 턴이 열려 받음이 그 턴의 진행으로 세어졌으면(`ours`) 그 턴의 끝이 경계다.
+                // ★The boundary after a receipt outside the open turn ([`Reader::note_delivered`]) goes through the observation-free door★: the turn
+                //   table is already idle (the receipt also went without observation), so no consumer needs waking, and the ordinary door would
+                //   let the classifier fold it into a clean end and erase the preceding error end (`last_end_failed`) — mail that should stay
+                //   halted would flow. If a new turn opened in between and the receipt counted as its progress (`ours`), that turn's end is the boundary.
                 // ADR-0231
                 if boundary_owed && !ours {
                     self.core
@@ -3973,13 +3489,13 @@ impl Reader {
                 if let Some(ev) = self.note_turn(&method, params.as_ref(), boundary) {
                     self.core.emit(ev);
                 }
-                // ADR-0226: 방출과 추적 뒤, 락 밖에서(사유 = 그 함수 doc).
+                // ADR-0226: after emitting and tracing, outside the lock.
                 self.witness_first_turn(&method, params.as_ref());
             }
             Ok(Inbound::Response { id, result }) => self.resolve(&id, Ok(result)),
             Ok(Inbound::Error { id, error }) => {
-                // ★마스킹은 경계가 아니라 **여기**에서 한다★ — 이 문자열은 로그로도 화면으로도 가고,
-                //   호출자에게도 돌아간다. 나가는 문마다 다시 거르면 그중 하나는 반드시 잊힌다.
+                // ★Mask **here**, not at the boundary★ — this string goes to the log, the screen and back to the caller; filtering at every outgoing door
+                //   means one gets forgotten.
                 let msg = format!(
                     "[{}] {}",
                     error.code,
@@ -3988,9 +3504,9 @@ impl Reader {
                 self.resolve(&id, Err(msg))
             }
             Err(e) => {
-                // ★해독 실패를 치명으로 두지 않는다★ — 한 줄로 스트림을 끊으면 에이전트가 죽는다.
+                // ★A decode failure is not made fatal★ — cutting the stream for one line would kill the agent.
                 tracing::debug!(
-                    "codex app-server: 봉투를 못 읽었다({e}) — {}",
+                    "codex app-server: could not read the envelope ({e}) — {}",
                     sanitize(text, LOG_STRING_LIMIT)
                 );
             }
@@ -4004,7 +3520,7 @@ fn reader_loop(
     mut reader: Reader,
     child: Arc<Mutex<Child>>,
 ) -> TerminalReason {
-    // ★이 가드가 서는 자리가 함수 맨 앞인 것이 요점이다★ — 아래 어디서 unwind 가 올라와도 `Drop` 은 돈다.
+    // ★This guard stands at the very top★ — wherever unwind comes from below, `Drop` runs.
     let _exit = ReaderExit {
         state: reader.state.clone(),
         pending: reader.pending.clone(),
@@ -4030,8 +3546,8 @@ fn reader_loop(
         }
     }
 
-    // ★닫는 일은 위 `ReaderExit` 이 진다 — 여기 다시 적지 않는다★(unwind 도 같은 자리를 지나야 한다).
-    // ★kill 경로에서는 flush 하지 않는다★ — 그 꼬리는 우리가 프로세스를 죽여 잘린 조각이다.
+    // ★Closing is carried by `ReaderExit` above — not repeated here★ (unwind must pass the same place).
+    // ★No flush on the kill path★ — that tail is a fragment cut because we killed the process.
     if !shutdown.load(Ordering::Acquire) {
         if let Some(dec) = reader.decoder.as_mut() {
             for ev in dec.flush() {
@@ -4041,15 +3557,11 @@ fn reader_loop(
         }
     }
 
-    // ★EOF 직후의 `try_wait` 한 번으로는 종료 코드를 못 받는다★ — stdout 이 닫히는 것과 프로세스가
-    //   수거되는 것은 같은 순간이 아니라, 그 한 번은 대개 `Ok(None)` 으로 떨어지고 코드가 조용히
-    //   **유실**된다. 그 유실은 두 번 아프다: 화면에 종료 코드가 안 뜨고, `Exited { code: None }` 이
-    //   「자식이 아직 살아 있다」와 구별되지 않아 **시험대가 그 둘을 가를 수단을 잃는다**.
-    // ★그래서 유계로 다시 본다★ — 락은 시도마다 놓는다(쥔 채 자면 `shutdown` 의 kill 이 그만큼 막힌다).
-    // ★kill 경로는 이 루프를 한 바퀴도 안 돈다★ — `shutdown()` 이 이미 `wait()` 했으므로 첫 시도가
-    //   바로 값을 준다.
-    // ★그래도 `None` 이 남을 수 있고 그것이 정직한 결말이다★ — 상대가 stdout 만 닫고 안 끝난 경우가
-    //   그것이고, 그 처분은 [`wait_for_close_or_tear_down`] 이 따로 진다.
+    // ★One `try_wait` right after EOF cannot get the exit code★ — stdout closing and reaping are not the same moment, so it usually falls
+    //   to `Ok(None)` and the code is **lost**, and `Exited { code: None }` becomes indistinguishable from "still alive" for tests.
+    // ★So it retries, bounded★ — the lock is released each attempt (sleeping under it would block `shutdown`'s kill that long).
+    // ★The kill path runs no round of this loop★ — `shutdown()` already did `wait()`, so the first attempt gives the value.
+    // ★`None` can still remain, honestly★: the peer closed only stdout and did not end — carried by [`wait_for_close_or_tear_down`].
     let code = {
         let deadline = Instant::now() + CHILD_REAP_GRACE;
         loop {
@@ -4076,8 +3588,8 @@ fn reader_loop(
     }
 }
 
-/// `send_input`·`send_turn` 의 공통 수령. `Err` 조건은 [`AgentTransport::send_input`] doc 이 정본이다. `Ok(true)` = 이
-/// 항목이 오류 뒤 멈춤을 풀었다([`State::push_pending`] — 그 로그는 호출자가 락 밖에서 찍는다).
+/// The common receipt of `send_input` · `send_turn`; `Err` conditions: [`AgentTransport::send_input`]. `Ok(true)` = this item lifted the
+/// halt after error ([`State::push_pending`] — the caller writes that log outside the lock).
 // ADR-0231
 fn accept_input(
     state: &SharedState,
@@ -4089,18 +3601,18 @@ fn accept_input(
     let mut s = sync::lock(lock);
     if s.closed {
         return Err(PtyError::WriteFailed(
-            "codex app-server: 통로가 닫혔다".into(),
+            "codex app-server: the link closed".into(),
         ));
     }
     if let Link::Down(reason) = &s.link {
         return Err(PtyError::WriteFailed(format!(
-            "codex app-server 연결이 끝났다: {}",
+            "codex app-server connection ended: {}",
             sanitize(reason, LOG_STRING_LIMIT)
         )));
     }
     if s.pending.len() >= INPUT_QUEUE_LIMIT {
         return Err(PtyError::WriteFailed(format!(
-            "codex app-server: 대기 중인 입력이 상한({INPUT_QUEUE_LIMIT})에 찼다"
+            "codex app-server: pending input reached the cap ({INPUT_QUEUE_LIMIT})"
         )));
     }
     let lifted = s.push_pending(id, body, origin);
@@ -4108,8 +3620,8 @@ fn accept_input(
     Ok(lifted)
 }
 
-/// [`AgentTransport::withdraw`] 의 본체 — 계약은 그 doc 이 정본이다. `core` = 낼 곳(`start()` 전이면
-/// `None` — 그때는 방출을 마친 목록 항목이 있을 수 없다).
+/// The body of [`AgentTransport::withdraw`] (contract there). `core` = where to emit (`None` before `start()` — then no list item has
+/// finished announcing).
 // ADR-0231
 fn withdraw_item(state: &SharedState, core: Option<&OutputCore>, id: &str) -> Withdraw {
     let (answer, ops) = {
@@ -4128,11 +3640,11 @@ fn withdraw_item(state: &SharedState, core: Option<&OutputCore>, id: &str) -> Wi
                 cv.notify_all();
                 (Withdraw::Withdrawn, dropped.into_iter().collect())
             }
-            // ★이미 넘겼다 — 거두지 못한다 · 행은 목록에 남는다★(프론트는 넘긴 행처럼 ✕ 없이 그린다): 결말은 벤더가
-            //   정하고(에코 = 받음 · steer 거절이나 에코 없는 턴 끝 = 거둠), 여기서는 취소 접수와 「벤더 큐에서 못
-            //   뺐다」를 곧바로 잇는다(codex 에는 넘긴 글을 거두는 동사가 없다).
-            //   ★겹친 둘째 ✕(창 + LLM — 입력 자물쇠를 안 탄다)는 사건 없이 `TooLate`★ — 명부의
-            //   `Cancelling`+`CancelRequested` 무동작 행이 둘째 방어다.
+            // ★Already handed over — cannot be withdrawn · the row stays in the list★ (the frontend draws it as a handed-over row without ✕): the
+            //   vendor decides the outcome (echo = received · steer refusal or turn end without echo = withdrawn), and the cancellation
+            //   receipt and "could not remove it from the vendor queue" follow immediately (codex has no verb to withdraw handed-over text).
+            //   ★An overlapping second ✕ (window + LLM — not through the input lock) is `TooLate` without an event★ — the registry's
+            //   `Cancelling`+`CancelRequested` no-op row is the second defence.
             // ADR-0231
             Stage::InFlight { .. } if item.cancel_asked => (Withdraw::TooLate, Vec::new()),
             Stage::InFlight { .. } => {
@@ -4148,7 +3660,7 @@ fn withdraw_item(state: &SharedState, core: Option<&OutputCore>, id: &str) -> Wi
             }
         }
     };
-    // ★락을 놓은 뒤에 낸다★(ADR-0006).
+    // ★Emitted after releasing the lock★ (ADR-0006).
     if let Some(core) = core {
         for op in ops {
             core.emit(OutputEvent::QueuedInput(op));
@@ -4160,7 +3672,7 @@ fn withdraw_item(state: &SharedState, core: Option<&OutputCore>, id: &str) -> Wi
 // ── AgentTransport ────────────────────────────────────────────────────────────
 
 impl AgentTransport for CodexAppServerTransport {
-    /// stdout 이 이미 take 됐으면(재호출) 아무것도 안 한다(멱등 방어).
+    /// If stdout was already taken (a repeated call), it does nothing (idempotence defence).
     fn start(&self, core: Arc<OutputCore>) {
         let agent_id = core.id();
 
@@ -4168,20 +3680,19 @@ impl AgentTransport for CodexAppServerTransport {
             Some(s) => s,
             None => return,
         };
-        // ★라이터보다 먼저 채운다★ — 라이터의 하한 판정 뒤로 입력 스레드가 방출하므로, 그 전에 서 있어야 한다.
+        // ★Filled before the writer★ — the input thread announces after the writer's floor decision, so it must stand first.
         let _ = self.core.set(core.clone());
 
         // ── stderr drain ──
-        // 이 스트림에는 상대의 진단 텍스트가 오므로(실측 0.154.0 — 오류는 stdout 이 아니라 이쪽으로 갔다) 활성화
-        //   실패의 유일한 증거다.
+        // The peer's diagnostic text comes on this stream (measured 0.154.0 — errors went here, not stdout), the only evidence of an
+        //   activation failure.
         if let Some(stderr) = sync::lock(&self.stderr).take() {
             drain_stderr(stderr, &core, "engram-codex-stderr", "codex");
         }
 
-        // ── 라이터 ──
-        // ★아무도 join 하지 않는다★ — `core` 는 pump 핸들을 하나만 들고(그 자리를 넓히는 것은 코어
-        //   변경이다), `shutdown()` 안에서 기다리는 것은 계약 위반이다. 이 스레드는 kill 이 파이프를
-        //   깨면 블록된 write 가 풀리고 닫힘 표식을 보아 스스로 끝난다.
+        // ── Writer ──
+        // ★Nobody joins it★ — `core` holds one pump handle (widening it is a core change) and waiting inside `shutdown()` is a contract
+        //   violation. Kill breaks the pipe, releasing the blocked write; the thread sees the closed marker and ends on its own.
         if let Some(params) = sync::lock(&self.open_params).take() {
             let stdin = self.stdin.clone();
             let state = self.state.clone();
@@ -4213,17 +3724,17 @@ impl AgentTransport for CodexAppServerTransport {
                     *sync::lock(&self.writer_handle) = Some(handle);
                 }
                 Err(e) => {
-                    // 라이터가 없으면 핸드셰이크도 입력도 영영 안 나간다 — 조용히 두지 않는다.
-                    tracing::warn!(agent = %agent_id, "codex writer 스레드 기동 실패: {e}");
+                    // Without a writer neither handshake nor input goes out — not left silent.
+                    tracing::warn!(agent = %agent_id, "codex writer thread failed to start: {e}");
                     let (lock, cv) = &*self.state;
                     let mut s = sync::lock(lock);
-                    s.link = Link::Down(format!("writer 스레드 기동 실패: {e}"));
+                    s.link = Link::Down(format!("writer thread failed to start: {e}"));
                     cv.notify_all();
                 }
             }
         }
 
-        // ── 리더(pump) ──
+        // ── Reader (pump) ──
         let (done_tx, done_rx) = mpsc::channel();
         let reader = Reader {
             core: core.clone(),
@@ -4237,7 +3748,7 @@ impl AgentTransport for CodexAppServerTransport {
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
         let handle = std::thread::spawn(move || {
-            // ADR-0292: finish 는 표시 밖이다 — 클로저 안으로 옮기지 말 것(사유 = `transport/pty.rs` 의 같은 자리).
+            // ADR-0292: finish is outside the marking — do not move it into the closure (same spot in `transport/pty.rs`).
             let normal_reason = contain(std::panic::AssertUnwindSafe(|| {
                 reader_loop(stdout, shutdown, reader, child)
             }));
@@ -4248,29 +3759,24 @@ impl AgentTransport for CodexAppServerTransport {
         core.attach_pump(handle, done_rx);
     }
 
-    /// 바이트는 **완결된 유저 턴 본문**이다 — 봉투는 이 통로가 만든다.
+    /// The bytes are **a complete user turn body** — the envelope is built by this link.
     ///
-    /// ★수령 의미는 하나다★: `Ok` = 순서까지 확정해 전량을 받았다, `Err` = 받지 않았다. ★짧은 `Ok` 로
-    ///   축소 보고하지 않는다★.
-    /// ★`Err` 는 "우리가 받겠다" 고 말하기 **전에** 결정되는 것뿐이다★ — ① 큐 상한 초과 ② 이 화신의
-    ///   연결이 이미 끝났다. 핸드셰이크 창에서 큐에 선 입력은 이미 `Ok` 를 받았으므로 ②를 그 지점 뒤로
-    ///   넓히지 않는다.
-    /// ★알려진 한계★: 받아 둔 뒤에 실패한 쓰기는 이 호출자에게 돌아갈 길이 없다. 그때 남는 것은 출력
-    ///   스트림에 오르는 **실패 결말의 턴 경계** 하나이고([`end_turn_if`], 그리고 핸드셰이크가 실패해
-    ///   큐가 통째로 버려지는 갈래는 [`writer_loop`] 가 직접 낸다), 이미 준 `Ok` 는 정정되지 않는다.
+    /// ★`Ok` = all received with order settled, `Err` = not received; no short `Ok`★. `Err` is decided only **before** "we will take it":
+    /// ① queue cap exceeded ② connection already ended. ★Known limit★: a write that fails after accepting has no way back here; the
+    /// failure shows as a **failure turn boundary** on the output ([`end_turn_if`]; [`writer_loop`] for the dropped-queue branch).
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
         let InputEvent::Raw(bytes) = input;
-        // 우편 출처라 멈춤을 풀지 않는다.
+        // From mail, so it does not lift the halt.
         accept_input(&self.state, None, bytes, InputOrigin::Mail).map(|_| ())
     }
 
-    /// [`AgentTransport::send_input`] 과 같은 수령 — 식별자와 출처를 항목에 함께 싣고, 하한 판정 뒤면
-    /// 돌아가기 전에 방출(합성 말풍선 · `Queued`)까지 마친다([`announce`]).
+    /// The same receipt as [`AgentTransport::send_input`] — carries identifier and source on the item, and after the floor decision finishes
+    /// the announcement (synthetic bubble · `Queued`) before returning ([`announce`]).
     // ADR-0231
     fn send_turn(&self, turn: TurnInput) -> Result<(), PtyError> {
         let lifted = accept_input(&self.state, Some(turn.id), turn.body, turn.origin)?;
         if let Some(core) = self.core.get() {
-            // ADR-0231: 락 밖에서 찍는다(사유 = [`TurnNoteLog`]).
+            // ADR-0231: written outside the lock ([`TurnNoteLog`]).
             if lifted {
                 Transition::HaltLifted.write(core.id());
             }
@@ -4279,15 +3785,12 @@ impl AgentTransport for CodexAppServerTransport {
         Ok(())
     }
 
-    /// ✕ — 쥔 목록 항목(턴 끝에서 쥔 자리로 돌아온 글 포함)은 거두고(`Dropped{Withdrawn}` · 벤더 호출 없음), 넘긴 목록
-    /// 항목은 `TooLate` 다(`CancelRequested` 에 곧바로 `CancelAnswered{removed:false}` — 이미 ✕ 가 닿았으면 사건 없이. 그
-    /// 글이 에코 없이 그 턴이 끝나면 그때 `Dropped{Withdrawn}` 으로 거둔다), 목록 밖(Direct · 우편 · 식별자 없음 ·
-    /// 하한 미달)과 모르는 id 는 `NotHeld` 다.
+    /// ✕ — a held list item is withdrawn (`Dropped{Withdrawn}` · no vendor call); a handed-over list item is `TooLate` (`CancelRequested` then
+    /// `CancelAnswered{removed:false}`; withdrawn later if its turn ends without an echo); outside the list (Direct · mail · no identifier ·
+    /// below the floor) and unknown ids are `NotHeld`.
     ///
-    /// ★넘기기와 같은 상태 락에서 순서가 선다★ — 라이터가 `Held` 를 `InFlight` 로 옮긴 뒤에 온 ✕ 는 넘긴
-    ///   쪽이다. ★방출 전 항목은 죽음 표시만 달고 `Withdrawn` 을 답한다★ — `Dropped` 는 방출하는 쪽이
-    ///   `Queued` 바로 뒤에 잇는다([`State::drop_listed`]). 이미 죽음 표시가 있으면 첫 ✕ 가 뺀 것이라
-    ///   `NotHeld` 다.
+    /// ★Ordered under the same state lock as the handover★. ★A pre-announce item gets only a death mark and `Withdrawn` is answered★
+    /// ([`State::drop_listed`]); a death mark already there = the first ✕ removed it: `NotHeld`.
     // ADR-0231
     fn withdraw(&self, id: &str) -> Withdraw {
         withdraw_item(&self.state, self.core.get().map(|c| &**c), id)
@@ -4295,14 +3798,13 @@ impl AgentTransport for CodexAppServerTransport {
 
     fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
-            "CodexAppServerTransport::resize (파이프는 터미널 크기 없음)".into(),
+            "CodexAppServerTransport::resize (a pipe has no terminal size)".into(),
         ))
     }
 
-    /// 진행 중인 턴 하나를 `turn/interrupt` 로 끊는다(≠kill — 프로세스는 살아 있다).
+    /// Interrupts one turn in progress with `turn/interrupt` (≠kill — the process stays alive).
     ///
-    /// ★턴 id 를 아직 모르면 `Err` 다★ — 상대는 그 칸을 필수로 요구하고, 모르는 채 보낸 봉투는 답조차
-    ///   오지 않는다(실측 0.154.0: 해독 못 한 봉투에는 답이 없다).
+    /// ★Unknown turn id → `Err`★: the peer requires that field and an envelope without it gets no answer at all (measured 0.154.0).
     fn interrupt(&self) -> Result<(), PtyError> {
         let (lock, cv) = &*self.state;
         let mut s = sync::lock(lock);
@@ -4316,13 +3818,13 @@ impl AgentTransport for CodexAppServerTransport {
             ) => (t.clone(), turn.clone()),
             _ => {
                 return Err(PtyError::Unsupported(
-                    "CodexAppServerTransport::interrupt (중단할 턴이 없다)".into(),
+                    "CodexAppServerTransport::interrupt (no turn to interrupt)".into(),
                 ))
             }
         };
         if s.outbox.len() >= OUTBOX_LIMIT {
             return Err(PtyError::WriteFailed(format!(
-                "codex app-server: 제어 큐가 상한({OUTBOX_LIMIT})에 찼다"
+                "codex app-server: the control queue reached its cap ({OUTBOX_LIMIT})"
             )));
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -4331,13 +3833,13 @@ impl AgentTransport for CodexAppServerTransport {
             method::TURN_INTERRUPT,
             &TurnInterruptParams { thread_id, turn_id },
         )
-        .map_err(|e| PtyError::WriteFailed(format!("turn/interrupt 직렬화 실패: {e}")))?;
+        .map_err(|e| PtyError::WriteFailed(format!("turn/interrupt serialization failed: {e}")))?;
         if !self
             .pending
             .register(id, Waiter::Fire, method::TURN_INTERRUPT)
         {
             return Err(PtyError::WriteFailed(
-                "codex app-server: 통로가 닫혔다".into(),
+                "codex app-server: the link closed".into(),
             ));
         }
         s.outbox.push_back(line);
@@ -4345,21 +3847,17 @@ impl AgentTransport for CodexAppServerTransport {
         Ok(())
     }
 
-    /// ADR-0001 2 동사의 app-server 판. ★이 안에서 아무것도 기다리지 않는다★(대기는 `core.join_pump` 몫).
+    /// The app-server version of the ADR-0001 2 verbs. ★Nothing is waited for inside★ (`core.join_pump` waits).
     ///
-    /// ★순서 불변 — stdin close 는 kill 보다 절대 먼저 오면 안 된다★: 라이터는 stdin 락을 블로킹
-    ///   `write_all` 내내 쥔다. 상대가 stdin 을 안 읽으면(파이프 backpressure) 그 write 가 영원히 블록해
-    ///   락을 놓지 않으므로, kill 전에 `stdin.lock()` 을 잡으려 하면 kill 에 도달조차 못 하고 pump 가
-    ///   못 깨어나 `join_pump` 가 영구 hang 한다. 자식을 먼저 죽이면 파이프가 깨져 그 write 가 에러로
-    ///   풀리고 락이 해제된다.
-    /// ※stdin 을 닫는 것만으로도 상대가 스스로 exit 하는 것은 실측됐지만(턴이 없는 상태에서 41–51ms),
-    ///   그 관측은 위 순서 불변을 바꾸지 않는다 — 락을 못 잡으면 닫는 자리까지 가지도 못한다.
+    /// ★Order invariant — stdin close must never come before kill★: the writer holds the stdin lock across a blocking `write_all`, so with a
+    /// peer not reading stdin, taking `stdin.lock()` first never reaches kill and `join_pump` hangs. Killing first breaks the pipe and
+    /// releases the lock. (Closing stdin alone also makes the peer exit — 41–51ms — but that does not change the order.)
     // ADR-0001
     fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
 
-        // ★여기서 잡는 것은 상태 락뿐이다★ — 블로킹 write 를 쥔 스레드는 이 락을 갖고 있지 않으므로
-        //   (쓰기 전에 놓는다) 이 단계는 매달릴 수 없다. 아직 못 나간 큐는 여기서 사라진다.
+        // ★Only the state lock is taken here★ — the thread in a blocking write does not hold it (released before writing), so this cannot
+        //   hang. The queue not yet sent disappears here.
         {
             let (lock, cv) = &*self.state;
             let mut s = sync::lock(lock);
@@ -4373,20 +3871,18 @@ impl AgentTransport for CodexAppServerTransport {
             let _ = child.wait();
         }
 
-        // 손자(cmd shim 아래 codex, 그리고 codex 가 thread/start 에서 띄운 MCP 자식들)까지 함께 끝난다. 무리가 없는
-        //   OS 에서는 무동작이다.
+        // Grandchildren (codex under the cmd shim, MCP children launched at thread/start) end together too; a no-op on an OS with no group.
         let _ = self.group.terminate(1);
 
-        // try_lock 을 못 얻으면(아직 write_all 이 안 풀린 찰나) skip — 미정리 ChildStdin 은 drop 시 OS 가
-        //   회수한다. ★블로킹 lock 금지★.
+        // If try_lock fails (write_all not yet released), skip — the OS reclaims an uncleaned `ChildStdin` on drop. ★No blocking lock★.
         if let Ok(mut guard) = self.stdin.try_lock() {
             let _ = guard.take();
         }
 
-        // 대기 중이던 요청은 여기서도 깨운다 — 리더가 EOF 를 못 보고 끝나는 경우에도 남지 않게.
+        // Pending requests are woken here too — so none remain even when the reader ends without seeing EOF.
         for entry in self.pending.close() {
             if let Waiter::Handshake(tx) = entry.waiter {
-                let _ = tx.send(Err(format!("{}: 통로가 닫혔다", entry.method)));
+                let _ = tx.send(Err(format!("{}: the link closed", entry.method)));
             }
         }
     }
@@ -4394,8 +3890,8 @@ impl AgentTransport for CodexAppServerTransport {
     fn capabilities(&self) -> TransportCaps {
         TransportCaps {
             input: InputCaps {
-                // ★`raw` 가 false 인 것은 이 채널이 키 입력을 나르지 않기 때문이다★ — 받는 바이트는
-                //   완결된 메시지 본문이고, 한 글자씩 흘려 넣으면 글자마다 턴이 하나씩 열린다.
+                // ★`raw` is false because this channel does not carry keystrokes★ — received bytes are complete message bodies; streaming them one
+                //   character at a time would open a turn per character.
                 raw: false,
                 message: true,
                 attachment: false,
@@ -4428,7 +3924,7 @@ mod tests {
         SinkId, StatusSink,
     };
 
-    // ── 하네스 ──────────────────────────────────────────────────────────────
+    // ── Harness ──────────────────────────────────────────────────────────────
 
     struct NoopStatus;
     impl StatusSink for NoopStatus {
@@ -4436,8 +3932,7 @@ mod tests {
         fn agent_list_updated(&self, _agents: Vec<crate::types::AgentInfo>) {}
     }
 
-    /// emit 된 이벤트를 그대로 모은다 — `snapshot()` 은 `TerminalBytes` 만 돌려주므로 구조화 이벤트는
-    /// 구독으로만 볼 수 있다.
+    /// Collects emitted events as is — `snapshot()` returns only `TerminalBytes`, so structured events are visible only by subscribing.
     struct EventSink {
         id: SinkId,
         seen: Arc<Mutex<Vec<OutputEvent>>>,
@@ -4454,8 +3949,8 @@ mod tests {
         }
     }
 
-    /// `core.emit` 안에서 panic 하는 구독자 — 리뷰가 이름한 두 unwind 경로 중 하나다(다른 하나는
-    /// `OutputCore` 뮤텍스 poison). `emit` 은 sink 의 panic 을 잡지 않고 그대로 올려 보낸다.
+    /// A subscriber that panics inside `core.emit` — one of the two unwind paths (the other is `OutputCore` mutex poison). `emit` does not
+    /// catch a sink panic.
     struct PanickingSink(SinkId);
     impl OutputSink for PanickingSink {
         fn send(&self, _frame: OutputFrame<'_>) -> Result<(), SinkError> {
@@ -4466,11 +3961,8 @@ mod tests {
         }
     }
 
-    /// 알림 줄을 하나 받으면 이벤트를 낸다 — 그 emit 이 위 구독자를 지나며 **읽기 루프 안에서** 리더를
-    /// unwind 시킨다.
-    ///
-    /// ★flush 가 아니라 `decode` 여야 한다★: 닫기를 루프 꼬리에 적어 두던 옛 모양은 flush **보다 먼저**
-    ///   닫았으므로, flush 에서 터지는 panic 은 그 모양에서도 새지 않았다. 새는 자리는 읽기 루프다.
+    /// On one notification line, emits an event — passing through the subscriber above, so the panic unwinds the reader **inside the
+    /// read loop**. ★It must be `decode`, not flush★: the leaking spot is the read loop (the old tail-of-loop close ran **before** flush).
     struct EmittingDecoder;
     impl OutputDecoder for EmittingDecoder {
         fn decode(&mut self, _chunk: &[u8]) -> Vec<OutputEvent> {
@@ -4481,8 +3973,8 @@ mod tests {
         }
     }
 
-    /// 알림 한 줄을 stdout 으로 흘리는 프로브. ★`echo` 로 만들지 않는다★ — 그 경로는 따옴표가 셸을
-    /// 지나며 바뀌어 봉투가 알림으로 분류되지 않는다.
+    /// A probe that streams one notification line to stdout. ★Not built with `echo`★ — the shell changes the quotes and the envelope is
+    /// not classified as a notification.
     #[cfg(windows)]
     struct NotificationFile(std::path::PathBuf);
 
@@ -4571,14 +4063,13 @@ mod tests {
     }
 
     impl State {
-        /// `send_input` 이 넣는 모양 그대로(식별자 없음 · 우편).
         fn push_legacy(&mut self, body: &[u8]) {
             self.push_pending(None, body.to_vec(), InputOrigin::Mail);
         }
     }
 
-    /// 표식 `seq` 로 턴 하나를 연다. ★표식을 시험대가 직접 고르는 것이 요점이다★ — 늦게 온 신호가 어느
-    /// 턴의 것인지를 그 표식으로만 가르기 때문이다.
+    /// Opens one turn with marker `seq`. ★The test bench picks the marker directly★ — which turn a late signal belongs to is told only by
+    /// that marker.
     fn activate(state: &SharedState, seq: u64, turn_id: Option<&str>) {
         with_state(state, |s| {
             s.turn = TurnState::Active {
@@ -4610,7 +4101,6 @@ mod tests {
         });
     }
 
-    /// 통로가 번역기에 정확히 무엇을 넣었는지 보는 가짜 번역기.
     struct RecordingDecoder {
         chunks: Arc<Mutex<Vec<u8>>>,
     }
@@ -4658,17 +4148,16 @@ mod tests {
         }
     }
 
-    /// 실 번역기를 꽂은 시험대. ★귀속 게이트를 재려면 이쪽이어야 한다★ — [`RecordingDecoder`] 는
-    /// 이벤트를 하나도 내지 않아, 그것으로 재면 「경계를 막았다」가 **막아서가 아니라 애초에 없어서**
-    /// 통과한다.
+    /// The bench with the real translator. ★Attribution-gate tests must use this one★ — [`RecordingDecoder`] emits no events, so "blocked
+    /// the boundary" would pass because there was none to begin with.
     fn harness_with_real_decoder() -> Harness {
         let mut h = harness();
         h.reader.decoder = Some(Box::new(super::super::decoder::CodexAppServerDecoder::new()));
         h
     }
 
-    /// 실 번역기 **와** 실 사실 계층을 함께 꽂은 시험대 — 「화면 경계」와 「이 화신이 턴 중인가」가 같은
-    /// 판정을 받는지를 한 자리에서 잰다. 화신 표식은 1 로 고정한다(이 시험대에 화신은 하나뿐이다).
+    /// The bench with the real translator **and** the real fact layer — measures in one place that "the screen boundary" and "is this
+    /// incarnation mid-turn" get the same decision. The incarnation marker is fixed at 1.
     fn harness_with_facts() -> (Harness, Arc<TurnObservations>, AgentId) {
         let id = AgentId::new_v4();
         let turns = Arc::new(TurnObservations::new());
@@ -4732,7 +4221,6 @@ mod tests {
             .collect()
     }
 
-    /// 한 줄짜리 `turn/completed` — 실 번역기가 읽을 수 있는 모양이다.
     fn completed_line(thread_id: &str, turn_id: &str, status: &str) -> String {
         serde_json::json!({
             "method": "turn/completed",
@@ -4742,7 +4230,7 @@ mod tests {
         .to_string()
     }
 
-    /// 턴 **중간**의 알림 한 줄 — 경계가 아니라 진행 신호가 되는 부류.
+    /// One notification line **in the middle** of a turn — a progress signal, not a boundary.
     fn progress_line(thread_id: &str, turn_id: &str) -> String {
         serde_json::json!({
             "method": "item/agentMessage/delta",
@@ -4751,9 +4239,8 @@ mod tests {
         .to_string()
     }
 
-    // ── 사용량 관측의 운반(`take_usage` → `StatusSink::usage_observed`) ──
+    // ── Carrying usage observations (`take_usage` → `StatusSink::usage_observed`) ──
 
-    /// `usage_observed` 만 모으는 상태 sink.
     struct UsageStatus(Arc<Mutex<Vec<crate::usage::UsageObservation>>>);
     impl StatusSink for UsageStatus {
         fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
@@ -4800,8 +4287,8 @@ mod tests {
         .to_string()
     }
 
-    /// ★관측이 읽기 루프를 지나 상태 sink 까지 닿는다★ — 번역기가 모아 두기만 하고 아무도 안 비우면 오류 없이
-    /// 사라진다. 화면(구독자)에는 아무것도 가지 않는다.
+    /// ★The observation passes the read loop and reaches the status sink★ — if the translator only gathered it and nobody emptied it, it
+    /// would vanish without an error. Nothing goes to the screen.
     #[test]
     fn a_rate_limits_update_reaches_the_status_sink_not_the_screen() {
         let (mut reader, seen, observed) = usage_reader(Box::new(CodexAppServerDecoder::new()));
@@ -4811,11 +4298,11 @@ mod tests {
         assert_eq!(observed[0].five_hour.and_then(|w| w.used_pct), Some(37.0));
         assert!(
             seen.lock().unwrap().is_empty(),
-            "사용량이 화면 이벤트로 새었다"
+            "usage leaked into a screen event"
         );
     }
 
-    /// 감싸개가 막은 번역기(비기본 프로필)는 sink 에 아무것도 안 넘긴다 — 판정 자체는 이 폴더 `usage` 시험이 잰다.
+    /// A translator blocked by the wrapper (non-default profile) hands nothing to the sink — that decision is measured by this folder's `usage` tests.
     #[test]
     fn a_gated_decoder_reports_no_usage() {
         let gated = crate::usage::UsageGate::blocking(Box::new(CodexAppServerDecoder::new()));
@@ -4825,10 +4312,8 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty());
     }
 
-    /// 표 + codex 분류자 + 실 번역기를 꽂은 시험대 — ★사실 계층을 실제로 재는 항목 전용★.
-    ///
-    /// 기본 [`harness`] 는 `TurnWiring::detached()` 라 표가 침묵한다 — 그것으로 재면 「턴 중을 안
-    /// 켰다」가 **안 켜서가 아니라 표가 꺼져 있어서** 통과한다.
+    /// The bench with table + codex classifier + real translator — ★only for items that measure the fact layer★. The default [`harness`] is
+    /// `TurnWiring::detached()` with a silent table, so "did not turn mid-turn on" would pass because the table is off.
     struct FactHarness {
         reader: Reader,
         state: SharedState,
@@ -4870,9 +4355,8 @@ mod tests {
         }
     }
 
-    /// ★열린 턴이 없는 동안 온 줄은 화면에는 오르되 「턴 중」을 켜지 않는다★ — 켜면 그 턴의 종료는
-    /// 귀속 게이트에 막혀 아무도 끄지 못하고, 30 분 fail-open 밸브가 쓸어 갈 때까지 그 에이전트에는
-    /// 우편이 안 간다(통로는 Idle = 큐 열림인데 사실 계층만 바쁨 — 두 축이 갈린다).
+    /// ★A line while no turn is open goes to the screen but does not turn "mid-turn" on★ — otherwise that turn's end would be blocked by
+    /// the attribution gate and nobody could turn it off (no mail for 30 minutes; link Idle but only the fact layer busy).
     #[test]
     fn a_line_that_arrives_with_no_open_turn_is_shown_but_never_marks_the_agent_busy() {
         let mut h = fact_harness();
@@ -4880,28 +4364,30 @@ mod tests {
 
         h.reader
             .handle_line(progress_line("T", "U-OTHER").as_bytes());
-        assert!(!h.table.is_in_turn(h.id, 1), "미귀속 줄이 사실 계층을 켰다");
-        // ★버려서 통과한 것이 아니다★ — 그 줄은 화면에 그대로 올라간다. 가른 것은 사실 계층뿐이다.
+        assert!(
+            !h.table.is_in_turn(h.id, 1),
+            "an unattributed line turned the fact layer on"
+        );
+        // ★Not passed by dropping it★ — the line goes to the screen as is; only the fact layer was split off.
         assert!(
             h.seen
                 .lock()
                 .unwrap()
                 .iter()
                 .any(|e| matches!(e, OutputEvent::TextDelta { .. })),
-            "본문이 화면에서 사라졌다"
+            "the body disappeared from the screen"
         );
 
-        // 그 종료는 귀속 못 해 막힌다 — 그래도 표에는 끌 것이 남아 있지 않다.
+        // That end cannot be attributed and is blocked — still, nothing is left in the table to turn off.
         h.reader
             .handle_line(completed_line("T", "U-OTHER", "completed").as_bytes());
         assert!(!h.table.is_in_turn(h.id, 1));
         assert!(
             boundaries(&h.seen).is_empty(),
-            "미귀속 경계가 화면에 올랐다"
+            "an unattributed boundary showed on screen"
         );
     }
 
-    /// 그 짝 — 우리 턴이 열려 있는 동안 온 같은 줄은 켜고, 그 턴의 종료가 끈다.
     #[test]
     fn a_line_inside_our_open_turn_marks_the_agent_busy_and_its_completion_clears_it() {
         let mut h = fact_harness();
@@ -4916,8 +4402,8 @@ mod tests {
         assert!(!h.table.is_in_turn(h.id, 1));
     }
 
-    /// ★응답보다 먼저 오는 item 알림은 정상이다★ — 그 창을 id 일치로 막으면 우리 턴의 스트리밍이
-    /// 통째로 사실 계층 밖으로 나간다. 그래서 판정은 「일치하나」가 아니라 「어긋나지 않나」다.
+    /// ★Item notifications before the response are normal★ — blocking by id match would push our turn's streaming out of the fact layer;
+    /// the decision is "does not contradict", not "matches".
     #[test]
     fn a_line_that_arrives_before_the_turn_id_is_known_still_counts_as_ours() {
         let mut h = fact_harness();
@@ -4929,8 +4415,8 @@ mod tests {
         assert!(h.table.is_in_turn(h.id, 1));
     }
 
-    /// ★붙들어 둔 종료는 그 턴과 함께 버려진다★ — 남기면 상대가 id 를 재사용하는 순간
-    /// [`Reader::resolve`] 가 **갓 열린 턴**을 그 자리에서 닫고 낡은 경계를 화면에 올린다.
+    /// ★A held end is dropped with that turn★ — otherwise when the peer reuses the id [`Reader::resolve`] closes **the freshly opened
+    /// turn** and raises a stale boundary.
     #[test]
     fn a_held_completion_does_not_survive_the_turn_that_was_open_when_it_arrived() {
         let mut h = harness_with_real_decoder();
@@ -4942,25 +4428,25 @@ mod tests {
         assert_eq!(
             with_state(&h.state, |s| s.early_completions.len()),
             1,
-            "응답보다 먼저 온 종료를 붙들지 않았다"
+            "did not hold the end that came before the response"
         );
 
-        // 그 턴이 다른 길로 끝난다(시한 만료·쓰기 실패·오류 응답 — 전부 end_turn_if 로 온다).
+        // That turn ends by another path (deadline · write failure · error response — all via end_turn_if).
         let core = h.reader.core.clone();
         assert!(end_turn_if(
             &h.state,
             &core,
             0,
-            "포기한다".into(),
+            "giving up".into(),
             TurnClose::Unanswered
         ));
         assert_eq!(
             with_state(&h.state, |s| s.early_completions.len()),
             0,
-            "붙들어 둔 종료가 턴보다 오래 살았다"
+            "the held end lived longer than the turn"
         );
 
-        // 다음 턴이 같은 id 를 받아도 열린 채로 산다.
+        // Even if the next turn receives the same id, it stays open.
         activate(&h.state, 1, None);
         assert!(h
             .pending
@@ -4970,19 +4456,18 @@ mod tests {
         assert_eq!(
             turn_seq(&h.state),
             Some(1),
-            "갓 열린 턴이 낡은 칸으로 닫혔다"
+            "the freshly opened turn was closed by a stale slot"
         );
         assert_eq!(
             boundaries(&h.seen).len(),
             1,
-            "낡은 경계가 화면에 한 번 더 올랐다: {:?}",
+            "the stale boundary showed on screen once more: {:?}",
             boundaries(&h.seen)
         );
     }
 
-    /// ★응답이 정하는 turn id 에도 상한이 걸린다★ — 없으면 그 값이 그대로 경계의 칸으로 나가 replay
-    /// 링의 단일 이벤트 상한을 홀로 넘고, 그 링이 나머지를 전부 쫓아낸다. 대조 토큰이라 자르지 않고
-    /// 거르므로 그 턴은 귀속할 재료가 없다 — 그래서 오류 응답과 같은 등급으로 닫는다.
+    /// ★The turn id the response decides is capped too★ — uncapped it goes into the boundary field and alone exceeds the replay ring's
+    /// single-event cap. Filtered, not truncated, so the turn has no attribution material and closes at the same grade as an error response.
     #[test]
     fn an_oversized_turn_id_in_the_response_closes_the_turn_instead_of_becoming_a_boundary_field() {
         let h = harness();
@@ -4998,14 +4483,16 @@ mod tests {
             Ok(serde_json::json!({"turn": {"id": huge}})),
         );
 
-        assert_eq!(turn_seq(&h.state), None, "턴이 열린 채 남았다");
+        assert_eq!(turn_seq(&h.state), None, "the turn remained open");
         let seen = boundaries(&h.seen);
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert!(matches!(seen[0].1, TurnOutcome::Failed { .. }), "{seen:?}");
-        assert!(seen[0].0.is_none(), "상한을 넘은 id 가 경계에 실렸다");
+        assert!(
+            seen[0].0.is_none(),
+            "an id over the cap was carried on the boundary"
+        );
     }
 
-    /// 남의 턴·남의 thread 는 우리 턴이 열려 있어도 세지 않는다 — 경계 게이트와 같은 축이다.
     #[test]
     fn a_line_from_another_turn_or_thread_does_not_count_even_while_ours_is_open() {
         let mut h = fact_harness();
@@ -5014,25 +4501,31 @@ mod tests {
 
         h.reader
             .handle_line(progress_line("T", "U-OTHER").as_bytes());
-        assert!(!h.table.is_in_turn(h.id, 1), "남의 턴이 켰다");
+        assert!(
+            !h.table.is_in_turn(h.id, 1),
+            "someone else's turn turned it on"
+        );
         h.reader
             .handle_line(progress_line("OTHER", "U-MINE").as_bytes());
-        assert!(!h.table.is_in_turn(h.id, 1), "남의 thread 가 켰다");
+        assert!(
+            !h.table.is_in_turn(h.id, 1),
+            "someone else's thread turned it on"
+        );
     }
 
     fn outbox_lines(state: &SharedState) -> Vec<Value> {
         with_state(state, |s| {
             s.outbox
                 .iter()
-                .map(|l| serde_json::from_str(l).expect("나가는 줄은 JSON 이다"))
+                .map(|l| serde_json::from_str(l).expect("outgoing lines are JSON"))
                 .collect()
         })
     }
 
-    /// 짧은 대기 — "깨지 **않았다**" 를 재는 자리에만 쓴다.
+    /// A short wait — used only where "it did **not** wake" is measured.
     const NOT_WOKEN: Duration = Duration::from_millis(50);
 
-    // ── 봉투 라우팅: 서버 요청 ────────────────────────────────────────────
+    // ── Envelope routing: server requests ────────────────────────────────────────────
 
     #[test]
     fn a_server_request_is_refused_with_its_own_id_and_never_a_success() {
@@ -5041,12 +4534,12 @@ mod tests {
             .handle_line(br#"{"id":7,"method":"item/approval/request","params":{}}"#);
 
         let lines = outbox_lines(&h.state);
-        assert_eq!(lines.len(), 1, "요청 하나에 답 하나: {lines:?}");
-        assert_eq!(lines[0]["id"], 7, "받은 id 를 그대로 되돌려야 한다");
+        assert_eq!(lines.len(), 1, "one answer per request: {lines:?}");
+        assert_eq!(lines[0]["id"], 7, "the received id must be returned as is");
         assert_eq!(lines[0]["error"]["code"], METHOD_NOT_FOUND);
         assert!(
             lines[0].get("result").is_none(),
-            "★성공을 위장하면 그것이 자동 승인이다★: {:?}",
+            "★disguising success is an automatic approval★: {:?}",
             lines[0]
         );
     }
@@ -5058,12 +4551,12 @@ mod tests {
         let lines = outbox_lines(&h.state);
         assert_eq!(
             lines[0]["id"], "srv-1",
-            "문자열 id 를 숫자로 정규화하면 그 요청이 영영 안 풀린다"
+            "normalizing a string id to a number leaves that request unresolved forever"
         );
     }
 
-    /// ★TRD §4-4 의 본체★ — 서버 id 와 우리 id 는 겹칠 수밖에 없다(서버 id 를 그대로 되돌려 주므로).
-    /// 가르는 것은 값이 아니라 **봉투 모양**이다.
+    /// ★The core of TRD §4-4★ — server ids and our ids overlap (server ids are returned as is); **the envelope shape** tells them apart,
+    /// not the value.
     #[test]
     fn a_server_request_whose_id_collides_with_ours_never_touches_the_pending_map() {
         let mut h = harness();
@@ -5075,12 +4568,20 @@ mod tests {
         h.reader
             .handle_line(br#"{"id":0,"method":"item/approval/request"}"#);
 
-        assert_eq!(h.pending.len(), 1, "요청 봉투가 대기표를 건드렸다");
+        assert_eq!(
+            h.pending.len(),
+            1,
+            "a request envelope touched the waiting table"
+        );
         assert!(
             rx.recv_timeout(NOT_WOKEN).is_err(),
-            "승인 요청이 우리 thread/start 대기자에게 배달됐다"
+            "an approval request was delivered to our thread/start waiter"
         );
-        assert_eq!(outbox_lines(&h.state).len(), 1, "그래도 답은 나가야 한다");
+        assert_eq!(
+            outbox_lines(&h.state).len(),
+            1,
+            "an answer must still go out"
+        );
     }
 
     #[test]
@@ -5095,7 +4596,7 @@ mod tests {
         assert_eq!(h.pending.len(), 1);
     }
 
-    // ── 봉투 라우팅: 응답 ─────────────────────────────────────────────────
+    // ── Envelope routing: responses ─────────────────────────────────────────────────
 
     #[test]
     fn two_waiters_do_not_cross() {
@@ -5112,15 +4613,19 @@ mod tests {
         h.reader
             .handle_line(br#"{"id":1,"result":{"thread":{"id":"T-1"}}}"#);
 
-        let got = rx1.recv_timeout(NOT_WOKEN).expect("1번 대기자가 깨야 한다");
+        let got = rx1.recv_timeout(NOT_WOKEN).expect("waiter 1 must wake");
         let parsed: ThreadStartResponse =
-            serde_json::from_value(got.expect("성공 응답")).expect("해독");
+            serde_json::from_value(got.expect("success response")).expect("decode");
         assert_eq!(parsed.thread.id, "T-1");
         assert!(
             rx0.recv_timeout(NOT_WOKEN).is_err(),
-            "0번 대기자가 남의 답을 받았다"
+            "waiter 0 received someone else's answer"
         );
-        assert_eq!(h.pending.len(), 1, "깬 대기표만 걷힌다");
+        assert_eq!(
+            h.pending.len(),
+            1,
+            "only the woken waiting entry is taken away"
+        );
     }
 
     #[test]
@@ -5132,13 +4637,13 @@ mod tests {
             .register(3, Waiter::Handshake(tx), method::INITIALIZE);
         h.reader
             .handle_line(br#"{"id":3,"error":{"code":-32600,"message":"Already initialized"}}"#);
-        let got = rx.recv_timeout(NOT_WOKEN).expect("깨야 한다");
-        let msg = got.expect_err("오류 봉투는 실패다");
+        let got = rx.recv_timeout(NOT_WOKEN).expect("must wake");
+        let msg = got.expect_err("an error envelope is a failure");
         assert!(msg.contains("Already initialized"), "{msg}");
     }
 
-    /// ★상대가 준 오류 본문은 로그·화면·호출자 셋으로 동시에 간다 — 마스킹은 그 셋 앞이 아니라 **만드는
-    /// 자리**에서 한다★. 문이 셋이면 그중 하나는 반드시 잊힌다.
+    /// ★The peer's error body goes to three places — log · screen · caller — so masking is done **where it is made**★, not at the three
+    /// doors (one would be forgotten).
     #[test]
     fn a_peer_error_message_is_masked_before_it_leaves_this_module() {
         let mut h = harness();
@@ -5155,27 +4660,23 @@ mod tests {
         );
         let msg = rx
             .recv_timeout(NOT_WOKEN)
-            .expect("깨야 한다")
-            .expect_err("오류다");
+            .expect("must wake")
+            .expect_err("an error");
         assert!(
             !msg.contains(secret),
-            "자격증명이 그대로 새어 나갔다: {msg}"
+            "the credential leaked out as is: {msg}"
         );
         assert!(msg.contains("***"), "{msg}");
     }
 
-    /// ★[`clip`] 은 [`sanitize`] 안에서만 불려야 한다★ — 다른 자리에서 부르면 그 문자열이 마스킹을
-    /// 건너뛰고 로그·화면으로 나간다. 문이 둘이면 그중 하나는 잊히고, 잊힌 쪽은 **조용히** 샌다.
-    ///
-    /// 이 항목은 그 성질을 **소스에서** 잰다 — 새어 나가는 경로마다 자격증명 항목을 하나씩 두는 것은
-    /// 유지되지 않고, 안 둔 경로가 곧 새는 경로가 되기 때문이다.
+    /// ★[`clip`] must be called only inside [`sanitize`]★ — elsewhere the string skips masking and leaks **quietly**. This item measures
+    /// that property **in the source**; one credential item per leaking path is not maintainable.
     #[test]
     fn clip_is_only_reachable_through_the_masking_door() {
         let src = include_str!("transport.rs");
-        // ★`#[cfg(test)]` 로 가르지 않는다★ — 그 속성은 운영 구획 안에도 있어(시험대 전용 접근자)
-        //   거기서 잘리면 이 항목이 앞쪽만 훑고 **뒤쪽을 안 본다**.
-        // ★줄바꿈이 든 표식도 쓰지 않는다★ — 이 저장소는 CRLF 로 체크아웃되므로 `\n` 이 안 맞는다.
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        // ★Not split by `#[cfg(test)]`★ — that attribute is also inside the production section (test-bench accessors); cutting there would scan only the front part.
+        // ★No marker containing a newline★ — the repository checks out with CRLF, so `\n` would not match.
+        let production = src.split("mod tests {").next().expect("production section");
         let offenders: Vec<&str> = production
             .lines()
             .map(|l| l.trim())
@@ -5185,7 +4686,7 @@ mod tests {
             .collect();
         assert!(
             offenders.is_empty(),
-            "마스킹을 건너뛰는 절단 호출이 있다: {offenders:?}"
+            "there is a truncation call that skips masking: {offenders:?}"
         );
     }
 
@@ -5200,16 +4701,23 @@ mod tests {
         h.reader.handle_line(br#"{"id":9999,"result":{}}"#);
         h.reader.handle_line(br#"{"id":"server-side","result":{}}"#);
 
-        assert_eq!(h.pending.len(), 1, "모르는 id 가 남의 대기표를 걷었다");
+        assert_eq!(
+            h.pending.len(),
+            1,
+            "an unknown id took away someone else's waiting entry"
+        );
         assert!(rx.recv_timeout(NOT_WOKEN).is_err());
-        assert!(outbox_lines(&h.state).is_empty(), "응답에는 답하지 않는다");
+        assert!(
+            outbox_lines(&h.state).is_empty(),
+            "responses are not answered"
+        );
         assert!(
             h.seen.lock().unwrap().is_empty(),
-            "화면에 아무것도 올리지 않는다"
+            "nothing is raised to the screen"
         );
     }
 
-    /// 못 읽는 줄로 스트림이 끊기면 에이전트가 죽는다 — 버리고 계속 간다.
+    /// If the stream were cut by an unreadable line the agent would die — it drops the line and keeps going.
     #[test]
     fn unreadable_lines_are_dropped_and_the_next_line_still_routes() {
         let mut h = harness();
@@ -5219,7 +4727,7 @@ mod tests {
         assert_eq!(outbox_lines(&h.state).len(), 1);
     }
 
-    // ── 알림 → 번역기 ─────────────────────────────────────────────────────
+    // ── Notification → translator ─────────────────────────────────────────────────────
 
     #[test]
     fn a_notification_reaches_the_decoder_as_the_original_line_with_its_newline() {
@@ -5230,7 +4738,10 @@ mod tests {
         let got = h.decoded.lock().unwrap().clone();
         let mut expected = line.to_vec();
         expected.push(b'\n');
-        assert_eq!(got, expected, "번역기에는 원본 줄이 그대로 가야 한다");
+        assert_eq!(
+            got, expected,
+            "the translator must receive the original line as is"
+        );
     }
 
     #[test]
@@ -5240,21 +4751,21 @@ mod tests {
         h.reader.handle_line(br#"{"id":2,"method":"x"}"#);
         assert!(
             h.decoded.lock().unwrap().is_empty(),
-            "번역기가 받는 것은 알림뿐이다"
+            "the translator receives only notifications"
         );
     }
 
-    // ── 턴 상태 기계 ──────────────────────────────────────────────────────
+    // ── Turn state machine ──────────────────────────────────────────────────────
 
-    /// ★`turn/started` 는 신원에 관여하지 않는다 — 되살리지 마라★. 그 알림에는 우리가 발급한 식별자가
-    /// 없어 어느 턴의 것인지 원리상 못 가린다. 「지금 턴이 답을 기다리는 중인가」로 대신 가르면, 앞 턴의
-    /// 늦은 알림이 **새 턴이 자기 요청을 기다리는 동안** 그 조건을 통과해 새 턴의 칸에 자기 id 를 적는다.
+    /// ★`turn/started` takes no part in identity — do not revive it★. It has no identifier we issued; telling it apart by "is the current
+    /// turn waiting for an answer" lets a late notification of the previous turn pass **while the new turn waits for its own request** and
+    /// write its id into the new turn's slot.
     #[test]
     fn a_turn_started_notification_never_sets_the_turn_id() {
         let mut h = harness();
         make_ready(&h.state, "T");
         activate(&h.state, 0, None);
-        // 지금 턴의 요청은 답을 기다리는 중이다 — 옛 정황 게이트가 통과시키던 바로 그 상태.
+        // The current turn's request is waiting for an answer — exactly the state the old circumstantial gate let through.
         let _ = h
             .pending
             .register(9, Waiter::TurnStart { seq: 0 }, method::TURN_START);
@@ -5264,7 +4775,7 @@ mod tests {
         assert_eq!(
             turn_id_of(&h.state),
             None,
-            "알림이 턴 id 를 정했다 — 그 자리에서 앞 턴의 늦은 알림도 같은 길로 들어온다"
+            "a notification decided the turn id — at that spot, a late notification of the previous turn comes in by the same path"
         );
     }
 
@@ -5281,31 +4792,32 @@ mod tests {
         assert_eq!(turn_id_of(&h.state).as_deref(), Some("U-2"));
     }
 
-    /// ★앞 턴의 늦은 응답이 지금 턴의 칸에 자기 id 를 적으면 안 된다★ — 적히면 그 뒤의 `interrupt` 가
-    /// 엉뚱한 턴을 겨눈다. 가르는 것은 표식이고, 표식이 없으면 둘 다 "턴 id 가 비어 있다" 로 보인다.
+    /// ★A late response of the previous turn must not write its id into the current turn's slot★ — a later `interrupt` would aim at the
+    /// wrong turn. Only the marker tells them apart; without it both look like "the turn id is empty".
     #[test]
     fn a_late_response_from_a_finished_turn_never_lands_on_the_next_turn() {
         let mut h = harness();
         make_ready(&h.state, "T");
-        // 0번 턴이 열렸고 그 응답이 아직 안 왔다.
         activate(&h.state, 0, None);
         let _ = h
             .pending
             .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
-        // 그 턴이 끝나고 1번 턴이 열렸다.
         activate(&h.state, 1, None);
-        // 이제 0번 턴의 답이 도착한다.
         h.reader
             .handle_line(br#"{"id":5,"result":{"turn":{"id":"U-OLD"}}}"#);
         assert_eq!(
             turn_id_of(&h.state),
             None,
-            "끝난 턴의 답이 지금 턴의 칸을 채웠다"
+            "the answer of an ended turn filled the current turn's slot"
         );
-        assert_eq!(turn_seq(&h.state), Some(1), "턴 자체는 그대로여야 한다");
+        assert_eq!(
+            turn_seq(&h.state),
+            Some(1),
+            "the turn itself must stay as is"
+        );
     }
 
-    /// ★모르는 threadId 는 오류가 아니다★ — 하지만 **아는데 다른** threadId 는 우리 턴이 아니다.
+    /// ★An unknown threadId is not an error★ — but a **known, different** threadId is not our turn.
     #[test]
     fn a_turn_notification_for_another_thread_does_not_end_our_turn() {
         let mut h = harness();
@@ -5316,12 +4828,12 @@ mod tests {
         );
         assert!(
             turn_seq(&h.state).is_some(),
-            "남의 스레드가 우리 턴을 닫았다"
+            "another thread closed our turn"
         );
     }
 
-    /// ★같은 스레드의 **다른 턴**이 끝났다는 신호도 우리 턴을 닫으면 안 된다★ — 닫으면 다음 턴이 열려
-    /// 한 스레드 위에서 턴 둘이 동시에 돈다. 입력 큐가 존재하는 이유가 정확히 그것을 막는 것이다.
+    /// ★An end of **another turn** of the same thread must not close ours★ — else the next turn opens and two run at once on one thread,
+    /// which the input queue exists to prevent.
     #[test]
     fn a_turn_completed_for_a_different_turn_on_our_thread_does_not_end_ours() {
         let mut h = harness();
@@ -5333,16 +4845,15 @@ mod tests {
         );
         assert!(
             turn_seq(&h.state).is_some(),
-            "남의 턴 종료가 우리 턴을 닫았다"
+            "someone else's turn end closed our turn"
         );
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_none(),
-            "그 바람에 큐가 풀려 턴이 겹쳤다"
+            "because of that the queue opened and turns overlapped"
         );
     }
 
-    /// ★turn id 를 모르는 동안 온 종료는 아무 것도 안 끝낸다★ — 귀속할 수 없는 신호로 살아 있는 턴을
-    /// 닫으면 큐가 풀려 턴이 겹친다.
+    /// ★An end while the turn id is unknown ends nothing★ — closing a live turn on an unattributable signal opens the queue and overlaps turns.
     #[test]
     fn a_turn_completed_we_cannot_attribute_ends_nothing() {
         let mut h = harness();
@@ -5355,19 +4866,17 @@ mod tests {
         assert_eq!(
             turn_seq(&h.state),
             Some(0),
-            "귀속 못 하는 종료가 턴을 닫았다"
+            "an unattributable end closed the turn"
         );
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_none(),
-            "그 바람에 큐가 풀려 턴이 겹쳤다"
+            "because of that the queue opened and turns overlapped"
         );
     }
 
-    /// ★실제로 막히던 순서를 그대로 재는 항목★: 종료가 먼저 오고(귀속 불가 → 무시), **사이에 sweep 없이**
-    /// 응답이 와서 우리 턴의 id 를 정한다. 그 응답이 대기표를 걷어 가므로 여기서 안 끝내면 그 턴은 끝낼
-    /// 것이 영영 없다 — 시한도 없고 두 번째 종료도 오지 않는다.
-    ///
-    /// ★sweep 을 끼우면 이 순서를 안 재게 된다★ — 시한이 대신 끝내 버려 응답 쪽 대조가 한 번도 안 불린다.
+    /// ★Measures exactly the order that used to get stuck★: the end first (unattributable → ignored), and **no sweep in between**, then
+    /// the response decides our turn's id. That response removes the waiting entry, so if the turn is not ended here nothing ever ends it.
+    /// ★A sweep would stop measuring this order★ — the deadline would end it and the response-side comparison would never run.
     #[test]
     fn an_early_completion_is_reconciled_when_the_response_names_it() {
         let mut h = harness();
@@ -5378,37 +4887,35 @@ mod tests {
             .pending
             .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
 
-        // ① 종료가 먼저 온다 — 이 시점에는 우리 턴의 id 를 모르므로 귀속할 수 없다.
         h.reader.handle_line(
             br#"{"method":"turn/completed","params":{"threadId":"T","turn":{"id":"U-EARLY"}}}"#,
         );
         assert_eq!(
             turn_seq(&h.state),
             Some(0),
-            "귀속 못 하는 종료가 그 자리에서 턴을 닫았다"
+            "an unattributable end closed the turn on the spot"
         );
 
-        // ② 그 다음 응답이 온다 — 여기서 우리 턴의 id 가 `U-EARLY` 로 정해진다. sweep 은 끼우지 않는다.
         h.reader
             .handle_line(br#"{"id":5,"result":{"turn":{"id":"U-EARLY"}}}"#);
 
         assert_eq!(
             turn_seq(&h.state),
             None,
-            "응답이 id 를 정했는데 먼저 온 종료와 대조하지 않았다 — 이 턴은 끝낼 것이 영영 없다"
+            "the response decided the id but did not compare it with the end that came first — this turn has nothing to end it forever"
         );
         assert_eq!(
             h.pending.len(),
             0,
-            "응답이 대기표를 걷어 갔다(시한 backstop 없음)"
+            "the response took away the waiting entry (no deadline backstop)"
         );
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some(),
-            "큐가 안 풀렸다"
+            "the queue did not open"
         );
     }
 
-    /// ★대조는 여전히 **id 일치** 하나뿐이다★ — 붙들어 둔 종료가 있다는 사실만으로 끝나는 턴은 없다.
+    /// ★The comparison is still only **the id match**★ — no turn ends merely because a held end exists.
     #[test]
     fn an_early_completion_for_another_turn_does_not_end_ours() {
         let mut h = harness();
@@ -5427,47 +4934,48 @@ mod tests {
         assert_eq!(
             turn_seq(&h.state),
             Some(0),
-            "남의 종료가 붙들려 있다는 이유로 우리 턴이 닫혔다"
+            "our turn was closed because someone else's end is held"
         );
         assert_eq!(turn_id_of(&h.state).as_deref(), Some("U-MINE"));
     }
 
-    // ── 턴 경계 귀속 게이트 ─────────────────────────────────────────────────
+    // ── Turn boundary attribution gate ─────────────────────────────────────────────────
     //
-    // 위 항목들이 재는 것은 **이 통로의 상태 기계**가 남의 종료에 안 속는다는 것이고, 아래 항목들이
-    // 재는 것은 **화면과 사실 계층**이 같은 판정을 받는다는 것이다. 둘이 갈리면 통로는 큐를 닫은 채인데
-    // 화면은 턴이 끝났다고 그리고, 사실 계층은 한가함을 관측해 턴 도중에 우편을 꽂는다.
+    // The items above measure that **this link's state machine** is not fooled by someone else's end; the items below measure that
+    // **the screen and the fact layer** get the same decision.
 
-    /// ★리뷰가 이름한 그 입력 그대로다★: 우리 턴이 `U-MINE` 인데 같은 thread 의 `U-OTHER` 종료가 온다.
-    /// 통로는 그것을 무시하지만, 번역기는 귀속을 몰라 경계를 낸다 — 그 경계가 그대로 흐르면 분류자도
-    /// 프론트도 id 를 안 보므로 **살아 있는 `U-MINE` 이 끝난 것으로 찍힌다.**
+    /// ★Exactly the named input★: our turn is `U-MINE` but an end of `U-OTHER` of the same thread comes. The link ignores it, but the
+    /// translator does not know attribution and emits a boundary — flowing as is, classifier and frontend (neither reads the id) would
+    /// **stamp the live `U-MINE` as ended.**
     #[test]
     fn a_foreign_turn_completed_never_ends_the_live_turn() {
         let (mut h, turns, id) = harness_with_facts();
         make_ready(&h.state, "MINE");
         activate(&h.state, 0, Some("U-MINE"));
-        // 되울린 유저 메시지 = 이 턴이 도는 중이라는 첫 관측.
         h.reader.core.emit(OutputEvent::Structured {
             kind: "user".into(),
             json: "{}".into(),
         });
-        assert!(turns.is_in_turn(id, 1), "전제: 턴 중으로 관측된다");
+        assert!(turns.is_in_turn(id, 1), "premise: observed as mid-turn");
 
         h.reader
             .handle_line(completed_line("MINE", "U-OTHER", "completed").as_bytes());
 
         assert!(
             boundaries(&h.seen).is_empty(),
-            "귀속 안 되는 종료가 화면 경계를 냈다"
+            "an unattributable end emitted a screen boundary"
         );
         assert!(
             turns.is_in_turn(id, 1),
-            "남의 턴 종료가 우리 턴을 한가함으로 뒤집었다 — 턴 도중에 우편이 꽂힌다"
+            "someone else's turn end flipped our turn to idle — mail gets plugged in mid-turn"
         );
-        assert_eq!(turn_seq(&h.state), Some(0), "상태 기계까지 흔들렸다");
+        assert_eq!(
+            turn_seq(&h.state),
+            Some(0),
+            "even the state machine was shaken"
+        );
     }
 
-    /// 다른 thread 의 종료도 같다 — 막되, 로그로는 남는다(사유 = [`Reader::note_turn`] doc).
     #[test]
     fn a_turn_completed_from_another_thread_makes_no_boundary() {
         let mut h = harness_with_real_decoder();
@@ -5478,8 +4986,8 @@ mod tests {
         assert!(boundaries(&h.seen).is_empty(), "{:?}", boundaries(&h.seen));
     }
 
-    /// ★귀속되면 경계는 **그대로** 흐른다 — 결말까지★. 게이트가 「막는 것」만 하고 통과를 못 시키면
-    /// 대기 인디케이터가 영영 돈다.
+    /// ★If attributed, the boundary flows **as is** — including the outcome★; a gate that only blocks would leave the waiting indicator
+    /// spinning forever.
     #[test]
     fn an_attributed_turn_completed_makes_exactly_one_boundary_with_its_outcome() {
         let mut h = harness_with_real_decoder();
@@ -5491,12 +4999,16 @@ mod tests {
             boundaries(&h.seen),
             vec![(Some("U-1".to_string()), TurnOutcome::Interrupted)]
         );
-        assert_eq!(turn_seq(&h.state), None, "상태 기계도 함께 닫혀야 한다");
+        assert_eq!(
+            turn_seq(&h.state),
+            None,
+            "the state machine must close together too"
+        );
     }
 
-    /// ★응답보다 먼저 온 종료의 경계는 **버리지도 흘리지도 않고 미룬다**★ — 그 자리에서 흘리면 아직
-    /// 귀속되지 않은 종료가 살아 있는 턴을 닫고, 버리면 대조가 성립한 뒤에 올릴 것이 없어 대기 표시가
-    /// 영영 돈다. 결말을 알고 있었는데도 그렇다.
+    /// ★The boundary of an end before the response is **deferred**, neither dropped nor let through★ — letting it through would let an
+    /// unattributed end close a live turn; dropping it would leave nothing to raise after the comparison holds, and the waiting indicator
+    /// would spin forever.
     #[test]
     fn an_early_completion_boundary_is_held_until_the_response_names_it() {
         let mut h = harness_with_real_decoder();
@@ -5510,7 +5022,7 @@ mod tests {
             .handle_line(completed_line("T", "U-EARLY", "interrupted").as_bytes());
         assert!(
             boundaries(&h.seen).is_empty(),
-            "귀속 전에 경계가 흘렀다 — 살아 있는 턴이 화면에서 닫힌다"
+            "the boundary flowed before attribution — a live turn closes on screen"
         );
 
         h.reader
@@ -5518,11 +5030,10 @@ mod tests {
         assert_eq!(
             boundaries(&h.seen),
             vec![(Some("U-EARLY".to_string()), TurnOutcome::Interrupted)],
-            "붙들어 둔 결말이 대조 뒤에도 안 올라왔다"
+            "the held outcome did not come up even after the comparison"
         );
     }
 
-    /// 대조는 여전히 **id 일치** 하나뿐이다 — 붙들려 있다는 사실만으로 올라오는 경계는 없다.
     #[test]
     fn an_early_completion_for_another_turn_never_releases_its_boundary() {
         let mut h = harness_with_real_decoder();
@@ -5539,11 +5050,11 @@ mod tests {
         assert!(boundaries(&h.seen).is_empty(), "{:?}", boundaries(&h.seen));
     }
 
-    // ── 결말 없이 죽는 턴(ADR-0127) ─────────────────────────────────────────
+    // ── A turn that dies without an outcome (ADR-0127) ─────────────────────────────────────────
 
-    /// ★턴을 접는 유일한 함수는 **언제나** 경계를 낸다★ — 그것이 이 통로의 포기 경로 넷(쓰기 실패·응답
-    /// 해독 실패·오류 응답·시한 만료)이 사실 계층을 되돌리는 유일한 수단이다. 그리고 표식이 안 맞으면
-    /// 아무 것도 안 끝내고 **경계도 안 낸다** — 늦게 온 신호가 다음 턴의 경계를 지어내면 안 된다.
+    /// ★The only function that folds a turn **always** emits a boundary★ — the only way this link's four give-up paths (write failure ·
+    /// response decode failure · error response · deadline) return the fact layer. On a marker mismatch it ends nothing and **emits no
+    /// boundary either** — a late signal must not invent the next turn's boundary.
     #[test]
     fn ending_a_turn_always_makes_a_failure_boundary_and_a_stale_marker_makes_none() {
         let (core, seen) = core_with_sink();
@@ -5555,18 +5066,21 @@ mod tests {
                 &state,
                 &core,
                 2,
-                "늦게 온 신호".into(),
+                "a late signal".into(),
                 TurnClose::Unanswered
             ),
-            "표식이 다른데 끝냈다"
+            "ended although the marker differs"
         );
-        assert!(boundaries(&seen).is_empty(), "안 끝냈는데 경계를 냈다");
+        assert!(
+            boundaries(&seen).is_empty(),
+            "emitted a boundary although it did not end"
+        );
 
         assert!(end_turn_if(
             &state,
             &core,
             3,
-            "포기한다".into(),
+            "giving up".into(),
             TurnClose::Unanswered
         ));
         assert_eq!(
@@ -5574,17 +5088,16 @@ mod tests {
             vec![(
                 Some("U-3".to_string()),
                 TurnOutcome::Failed {
-                    detail: Some("포기한다".to_string())
+                    detail: Some("giving up".to_string())
                 }
             )],
-            "사유는 경계 **안**에 실린다 — 따로 오류 줄을 앞세우지 않는다"
+            "the reason is carried **inside** the boundary — no separate error line goes in front"
         );
     }
 
-    /// ★이것이 ADR-0127 이 막으려는 결말 그 자체다★: 턴 도중에 통로가 포기했는데 사실 계층이 되돌아가지
-    /// 않으면, 그 화신은 한가한데도 「턴 중」으로 관측된 채 남아 30 분 fail-open 밸브가 쓸어 갈 때까지
-    /// 우편이 막힌다. ★[`OutputEvent::Error`] 한 줄로는 이것이 안 된다★ — 분류자가 그 어휘를 턴 신호로
-    /// 세지 않는다(그것이 이 결함의 기전이었다).
+    /// ★The very outcome ADR-0127 prevents★: a link that gave up mid-turn without returning the fact layer leaves the incarnation observed
+    /// "mid-turn" although idle, mail blocked until the 30-minute fail-open. ★One [`OutputEvent::Error`] line cannot do this★ — the
+    /// classifier does not count that vocabulary as a turn signal.
     #[test]
     fn a_turn_abandoned_without_a_completion_clears_the_fact_layer() {
         let (h, turns, id) = harness_with_facts();
@@ -5594,22 +5107,21 @@ mod tests {
             kind: "user".into(),
             json: "{}".into(),
         });
-        assert!(turns.is_in_turn(id, 1), "전제: 턴 중으로 관측된다");
+        assert!(turns.is_in_turn(id, 1), "premise: observed as mid-turn");
 
         assert!(end_turn_if(
             &h.state,
             &h.reader.core,
             0,
-            "codex app-server 입력 전송 실패".into(),
+            "codex app-server input send failed".into(),
             TurnClose::Rejected
         ));
         assert!(
             !turns.is_in_turn(id, 1),
-            "턴을 접었는데 사실 계층은 여전히 턴 중이다"
+            "folded the turn but the fact layer is still mid-turn"
         );
     }
 
-    /// `turn/start` 에 오류 응답이 오는 경로 — 포기 넷 중 하나. 사유가 경계 안에 실려 나간다.
     #[test]
     fn an_error_response_to_turn_start_ends_the_turn_with_its_reason_inside_the_boundary() {
         let mut h = harness();
@@ -5626,19 +5138,19 @@ mod tests {
         assert_eq!(
             turn_seq(&h.state),
             None,
-            "오류 응답이 턴을 열어 둔 채 남겼다"
+            "the error response left the turn open"
         );
         let failures = failure_boundaries(&h.seen);
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(failures[0].contains("turn refused"), "{failures:?}");
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some(),
-            "큐가 안 풀렸다"
+            "the queue did not open"
         );
     }
 
-    /// ★포기로 닫은 턴에 뒤늦게 진짜 종료가 와도 경계는 **하나**다★ — 둘이 나가면 화면이 같은 턴을 두 번
-    /// 닫고, 사실 계층에는 짝 없는 종료가 한 번 더 쌓인다.
+    /// ★Even if the real end comes late to a turn closed by giving up, there is **one** boundary★ — two would close the same turn twice on
+    /// screen and pile up an unpaired end in the fact layer.
     #[test]
     fn an_abandoned_turn_and_its_late_completion_make_exactly_one_boundary() {
         let mut h = harness_with_real_decoder();
@@ -5656,15 +5168,14 @@ mod tests {
             .handle_line(completed_line("T", "U-1", "completed").as_bytes());
 
         let seen = boundaries(&h.seen);
-        assert_eq!(seen.len(), 1, "같은 턴이 두 번 닫혔다: {seen:?}");
+        assert_eq!(seen.len(), 1, "the same turn was closed twice: {seen:?}");
         assert!(
             matches!(seen[0].1, TurnOutcome::Failed { .. }),
-            "먼저 선 결말이 뒤집혔다: {seen:?}"
+            "the outcome that stood first was overturned: {seen:?}"
         );
     }
 
-    /// stdin 없이 라이터를 한 번 돌려 핸드셰이크를 실패시킨다. `queued` = 그 창에서 이미 `Ok` 를 받고
-    /// 큐에 서 있던 본문.
+    /// Runs the writer once without stdin to make the handshake fail. `queued` = bodies that had already received `Ok` in that window.
     fn run_failed_handshake(queued: &[&str]) -> (SharedState, Arc<Mutex<Vec<OutputEvent>>>) {
         let (core, seen) = core_with_sink();
         let state = shared();
@@ -5675,12 +5186,10 @@ mod tests {
         });
 
         writer_loop(
-            // stdin 이 없어 첫 쓰기에서 핸드셰이크가 실패한다.
             Arc::new(Mutex::new(None)),
             state.clone(),
             Arc::new(Pending::default()),
             Arc::new(AtomicI64::new(0)),
-            // 핸드셰이크 뒤 루프는 첫 검사에서 끝난다 — 이 항목들이 재는 것은 그 앞 구획이다.
             Arc::new(AtomicBool::new(true)),
             core,
             start_open(),
@@ -5692,8 +5201,8 @@ mod tests {
         (state, seen)
     }
 
-    /// 화면에 오른 오류·경계를 **온 순서대로** 뽑는다 — 이 갈래에서 재야 하는 것이 개수만이 아니라
-    /// 「사유가 경계보다 먼저 오르나」이기 때문이다.
+    /// Pulls the errors · boundaries raised to the screen **in arrival order** — this branch must measure "does the reason come before the
+    /// boundary", not just the count.
     fn error_and_boundary_order(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<&'static str> {
         seen.lock()
             .unwrap()
@@ -5706,10 +5215,9 @@ mod tests {
             .collect()
     }
 
-    /// ★버린 입력이 하나도 없어도 실패 결말 **하나**가 나간다★ — 턴을 여는 자리가 [`Link::Ready`] 를
-    /// 요구해 이 화신에 턴이 선 적은 없지만, 프론트는 `Error` 를 턴 종료로 읽지 않으므로 오류 하나만
-    /// 든 슬롯의 **대기 표시가 영영 돈다**(링크는 `Down` 이라 뒤에 도착할 것도 없다).
-    /// ★그 사유는 입력 손실을 주장하지 않는다★ — 버린 것이 없기 때문이다.
+    /// ★Even with no dropped input, **one** failure outcome goes out★ — a turn opens only from [`Link::Ready`], so this incarnation never
+    /// had one, but the frontend does not read `Error` as a turn end, so a slot with only an error spins its waiting indicator **forever**
+    /// (the link is `Down`). ★That reason does not claim input loss★ — nothing was dropped.
     #[test]
     fn a_failed_handshake_with_nothing_queued_still_ends_the_turn_exactly_once() {
         let (state, seen) = run_failed_handshake(&[]);
@@ -5717,28 +5225,27 @@ mod tests {
         assert_eq!(
             error_and_boundary_order(&seen),
             vec!["error", "boundary"],
-            "사유 한 줄 뒤 경계 하나가 아니다: {:?}",
+            "not one reason line followed by one boundary: {:?}",
             error_and_boundary_order(&seen)
         );
         assert_eq!(
             boundaries(&seen)[0].0,
             None,
-            "열린 적 없는 턴의 id 를 지어냈다: {:?}",
+            "invented the id of a turn that never opened: {:?}",
             boundaries(&seen)
         );
         let failures = failure_boundaries(&seen);
-        assert_eq!(failures.len(), 1, "실패 결말이 아니다: {failures:?}");
+        assert_eq!(failures.len(), 1, "not a failure outcome: {failures:?}");
         assert!(
-            !failures[0].contains("사라졌다"),
-            "버린 입력이 없는데 손실을 보고한다: {failures:?}"
+            !failures[0].contains("were lost"),
+            "reports a loss although no input was dropped: {failures:?}"
         );
         assert!(with_state(&state, |s| matches!(s.link, Link::Down(_))));
     }
 
-    /// ★큐에 선 본문을 파괴했으면 실패 결말 **하나**가 나간다★ — 보낸 쪽에는 턴이 있었기 때문이고,
-    /// `dropped` 는 버린 본문 수이지 턴 수가 아니다. ★이 경계가 없으면★ 프론트는 `Error` 를 턴 종료로
-    /// 읽지 않으므로(재시도되는 스트림 오류가 그 어휘로 온다) 오류 하나만 받은 슬롯의 **대기 표시가
-    /// 영영 돈다**.
+    /// ★With queued bodies destroyed, **one** failure outcome goes out★ — `dropped` counts bodies, not turns. ★Without this boundary★ the
+    /// frontend does not read `Error` as a turn end (retried stream errors use that vocabulary), so a slot that received only an error spins
+    /// **forever**.
     #[test]
     fn a_failed_handshake_that_destroyed_queued_input_ends_the_turn_exactly_once() {
         let (state, seen) = run_failed_handshake(&["queued one", "queued two"]);
@@ -5746,30 +5253,28 @@ mod tests {
         assert_eq!(
             error_and_boundary_order(&seen),
             vec!["error", "boundary"],
-            "사유 한 줄 뒤 경계 하나가 아니다: {:?}",
+            "not one reason line followed by one boundary: {:?}",
             error_and_boundary_order(&seen)
         );
         assert_eq!(
             boundaries(&seen)[0].0,
             None,
-            "열린 적 없는 턴의 id 를 지어냈다: {:?}",
+            "invented the id of a turn that never opened: {:?}",
             boundaries(&seen)
         );
         let failures = failure_boundaries(&seen);
-        assert_eq!(failures.len(), 1, "실패 결말이 아니다: {failures:?}");
-        assert!(failures[0].contains("2건"), "{failures:?}");
+        assert_eq!(failures.len(), 1, "not a failure outcome: {failures:?}");
+        assert!(failures[0].contains("2 sent input(s)"), "{failures:?}");
         assert!(with_state(&state, |s| s.pending.is_empty()));
         assert!(with_state(&state, |s| matches!(s.link, Link::Down(_))));
     }
 
-    /// ★턴을 idle 로 되돌리는 자리를 늘리면 여기가 빨개진다★ — 그 자리마다 「경계는 누가 내나」를 답해야
-    /// 하고, 안 답한 자리가 곧 사실 계층이 굳는 자리다(ADR-0127). 오늘 넷 = [`end_turn_if`](경계를
-    /// 스스로 낸다) · [`Reader::note_turn`](번역기 경계를 통과시킨다) · [`Reader::resolve`](붙들어 둔
-    /// 경계를 올린다) · [`ReaderExit::drop`](스트림이 끝났다 — 곧 `OutputCore::finish` 가 표를 거둔다).
+    /// ★If the places that return a turn to idle grow, this goes red★ — each must answer "who emits the boundary" (ADR-0127). Today:
+    /// [`end_turn_if`] · [`Reader::note_turn`] · [`Reader::resolve`] · [`ReaderExit::drop`].
     #[test]
     fn every_place_that_idles_a_turn_is_accounted_for() {
         let src = include_str!("transport.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let sites = production
             .lines()
             .map(|l| l.trim())
@@ -5777,10 +5282,10 @@ mod tests {
             .count();
         assert_eq!(
             sites, 4,
-            "턴을 idle 로 되돌리는 자리가 넷이 아니다 — 새 자리는 자기 턴 경계를 함께 내야 한다"
+            "the places that return a turn to idle are not four — a new place must emit its own turn boundary too"
         );
-        // ★그 자리마다 붙들어 둔 종료도 버려야 한다★ — 안 버리면 그 칸이 다음 턴까지 살아남아,
-        //   상대가 id 를 재사용하는 순간 갓 열린 턴이 낡은 경계로 닫힌다([`end_turn_if`] 의 그 줄).
+        // ★Every such place must also drop the held ends★ — else that slot survives to the next turn and when the peer reuses the id the fresh
+        //   turn is closed by a stale boundary ([`end_turn_if`]).
         let drops = production
             .lines()
             .map(|l| l.trim())
@@ -5788,11 +5293,11 @@ mod tests {
             .count();
         assert_eq!(
             drops, sites,
-            "idle 자리 수와 붙들어 둔 종료를 버리는 자리 수가 다르다"
+            "the number of idle places differs from the number of places dropping held ends"
         );
-        // ★그 자리마다 그 턴의 항목도 처분해야 한다(ADR-0231)★ — 빠뜨린 자리에서 끝난 턴의 `InFlight` 는
-        //   결말 없이 남아 새 글을 전부 대기로 돌린다. 예외는 스트림 닫힘 하나다(목록 항목은
-        //   `OutputCore::finish` 가 `Dropped{AgentEnded}` 로 닫고, 통로는 더 쓰이지 않는다).
+        // ★Every such place must also dispose that turn's items (ADR-0231)★ — a missed place leaves the ended turn's `InFlight` without an
+        //   outcome and turns all new text into waiting. Only exception: the stream closing (`OutputCore::finish` closes list items as
+        //   `Dropped{AgentEnded}`; the link is no longer used).
         let disposals = production
             .lines()
             .map(|l| l.trim())
@@ -5802,14 +5307,13 @@ mod tests {
         assert_eq!(
             disposals,
             sites - 1,
-            "턴을 idle 로 되돌리는 자리(스트림 닫힘 제외)마다 그 턴의 항목을 처분해야 한다"
+            "every place that returns a turn to idle (except the stream closing) must dispose that turn's items"
         );
     }
 
-    /// ★귀속 못 한 종료를 버려도 그 턴의 **시한은 그대로 남아야 한다**★ — 무시하는 김에 대기표까지
-    /// 걷으면 그 턴은 끝낼 것이 아무 것도 없어진다. 이 항목이 재는 것은 그 하나이고, 「귀속 못 한 턴에는
-    /// 언제나 시한이 있다」는 **아니다**(그 일반화는 거짓이다 — 종료가 응답보다 먼저 오는 경우가 있고,
-    /// 그 칸은 모듈 헤더 「알려진 한계」가 진다).
+    /// ★Even if an unattributed end is dropped, that turn's **deadline must remain**★ — removing the waiting entry while ignoring it would
+    /// leave nothing to end the turn. This measures only that, **not** "an unattributable turn always has a deadline" (false — an end before
+    /// the response is carried by the module header's known limits).
     #[test]
     fn an_ignored_completion_leaves_the_turn_s_deadline_intact() {
         let mut h = harness();
@@ -5823,36 +5327,35 @@ mod tests {
             Instant::now(),
         );
 
-        // 귀속 못 하는 종료가 먼저 지나간다 — 아무 것도 끝내지 않고, 아무 것도 걷어 가지 않아야 한다.
+        // An unattributable end passes first — it must end nothing and take nothing away.
         h.reader.handle_line(
             br#"{"method":"turn/completed","params":{"threadId":"T","turn":{"id":"U-?"}}}"#,
         );
         assert_eq!(
             turn_seq(&h.state),
             Some(0),
-            "귀속 못 하는 종료가 턴을 닫았다"
+            "an unattributable end closed the turn"
         );
         assert_eq!(
             h.pending.len(),
             1,
-            "무시하면서 대기표까지 걷었다 — 그러면 끝낼 것이 없어진다"
+            "took away the waiting entry while ignoring it — then there is nothing to end it"
         );
 
         sweep_deadlines(&h.state, &h.pending, &h.reader.core);
         assert_eq!(
             turn_seq(&h.state),
             None,
-            "남아 있던 시한이 그 턴을 안 끝냈다"
+            "the remaining deadline did not end that turn"
         );
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some(),
-            "큐가 안 풀렸다"
+            "the queue did not open"
         );
     }
 
-    /// ★해독 못 한 성공 응답은 명시적 오류와 **같은 등급**이다★ — 대기표는 이미 걷힌 뒤라, 여기서 턴을
-    /// 안 끝내면 그 턴은 `turn_id` 도 시한도 없이 영영 열린 채 남는다(그 뒤 `send_input` 은 그 정지를
-    /// "큐가 찼다" 로 신고한다).
+    /// ★An undecodable success response is **the same grade** as an explicit error★ — the waiting entry is already gone, so a turn left open
+    /// would stay open forever with neither `turn_id` nor a deadline (`send_input` then reports "the queue is full").
     #[test]
     fn a_success_response_we_cannot_read_ends_the_turn_like_an_error_would() {
         let mut h = harness();
@@ -5863,32 +5366,32 @@ mod tests {
             .pending
             .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
 
-        // `turn` 칸이 없는 성공 응답 — 봉투는 멀쩡하고 payload 만 우리 타입으로 안 읽힌다.
+        // A success response without the `turn` field — the envelope is sound, the payload does not read as our type.
         h.reader
             .handle_line(br#"{"id":5,"result":{"not-a-turn":true}}"#);
 
         assert_eq!(
             turn_seq(&h.state),
             None,
-            "해독 못 한 성공이 턴을 열어 둔 채 남겼다"
+            "an undecodable success left the turn open"
         );
         assert_eq!(
             h.pending.len(),
             0,
-            "대기표는 이미 걷혔다 — 시한 backstop 이 없다"
+            "the waiting entry was already taken away — there is no deadline backstop"
         );
         assert_eq!(
             failure_boundaries(&h.seen).len(),
             1,
-            "조용히 접으면 화면에도, 사실 계층에도 신호가 하나도 없다"
+            "folding it quietly leaves not a single signal on the screen or in the fact layer"
         );
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some(),
-            "큐가 안 풀렸다"
+            "the queue did not open"
         );
     }
 
-    /// ★이미 끝난 턴의 시한이 지금 도는 턴을 닫으면 안 된다★ — 같은 겹침이 시한 쪽으로도 열린다.
+    /// ★The deadline of an already ended turn must not close the turn running now★ — the same overlap opens on the deadline side too.
     #[test]
     fn an_expired_deadline_from_a_finished_turn_does_not_end_the_current_turn() {
         let h = harness();
@@ -5904,11 +5407,11 @@ mod tests {
         assert_eq!(
             turn_seq(&h.state),
             Some(1),
-            "끝난 턴의 시한이 지금 턴을 닫았다"
+            "the deadline of an ended turn closed the current turn"
         );
     }
 
-    // ── 입력 큐 ───────────────────────────────────────────────────────────
+    // ── Input queue ───────────────────────────────────────────────────────────
 
     #[test]
     fn queued_input_flushes_in_order_one_turn_at_a_time() {
@@ -5923,9 +5426,9 @@ mod tests {
         let mut bodies = Vec::new();
         for _ in 0..3 {
             let job = with_state(&h.state, |s| take_turn_locked(s, &h.next_id))
-                .expect("idle 이면 한 건이 나간다");
+                .expect("when idle, one goes out");
             let Job::Turn { line, .. } = job else {
-                panic!("turn job 이어야 한다")
+                panic!("must be a turn job")
             };
             let v: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(v["params"]["threadId"], "T");
@@ -5938,7 +5441,7 @@ mod tests {
 
             assert!(
                 with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_none(),
-                "턴이 진행 중인데 두 번째 turn/start 가 나갔다"
+                "a second turn/start went out while a turn is in progress"
             );
             with_state(&h.state, |s| s.turn = TurnState::Idle);
         }
@@ -5975,7 +5478,7 @@ mod tests {
             );
             for p in &s.pending {
                 assert!(matches!(p.stage, Stage::Held));
-                assert!(!p.listed, "판정 전에는 목록 항목이 정해지지 않는다");
+                assert!(!p.listed, "before the decision, list items are not decided");
                 assert!(!p.cancel_asked);
                 assert!(p.death.is_none());
             }
@@ -5983,7 +5486,7 @@ mod tests {
             assert_eq!(
                 announced,
                 vec![false, true, true],
-                "판정 전 사용자 항목만 방출을 기다린다 — 우편·식별자 없는 항목은 낼 것이 없다"
+                "only pre-decision user items wait for the announcement — mail · items without an identifier have nothing to emit"
             );
         });
     }
@@ -5992,7 +5495,7 @@ mod tests {
     fn the_turn_opens_from_the_head_whatever_its_origin() {
         let h = harness();
         make_ready(&h.state, "T");
-        // 하한 미달 — 오늘 경로라 둘 다 여는 순간 빠진다.
+        // Below the floor — today's path, so both leave at the moment of opening.
         with_state(&h.state, |s| s.floor = Floor::Below);
         accept_input(&h.state, None, b"legacy".to_vec(), InputOrigin::Mail).unwrap();
         accept_input(
@@ -6008,7 +5511,7 @@ mod tests {
             let Some(Job::Turn { line, .. }) =
                 with_state(&h.state, |s| take_turn_locked(s, &h.next_id))
             else {
-                panic!("idle 이면 머리가 턴이 된다")
+                panic!("when idle, the head becomes the turn")
             };
             let v: Value = serde_json::from_str(&line).unwrap();
             bodies.push(
@@ -6023,7 +5526,7 @@ mod tests {
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
     }
 
-    /// 넘긴 항목도 한 칸이다 — 받음(에코) 전까지 목록에 보이므로.
+    /// A handed-over item is also one entry — visible in the list until receipt (echo).
     #[test]
     fn the_bound_counts_every_pending_item_whatever_its_stage() {
         let state = shared();
@@ -6036,7 +5539,7 @@ mod tests {
                 turn_id: None,
             };
         });
-        accept_input(&state, None, b"last".to_vec(), InputOrigin::Mail).expect("마지막 한 칸");
+        accept_input(&state, None, b"last".to_vec(), InputOrigin::Mail).expect("the last entry");
         let over = accept_input(
             &state,
             Some("over".into()),
@@ -6047,7 +5550,7 @@ mod tests {
         assert_eq!(
             with_state(&state, |s| s.pending.len()),
             INPUT_QUEUE_LIMIT,
-            "거절한 항목이 들어갔다"
+            "a refused item went in"
         );
     }
 
@@ -6059,22 +5562,20 @@ mod tests {
         with_state(&h.state, |s| s.push_legacy(b"queued"));
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_none(),
-            "턴 중에는 안 나간다"
+            "it does not go out mid-turn"
         );
         h.reader.handle_line(
             br#"{"method":"turn/completed","params":{"threadId":"T","turn":{"id":"U"}}}"#,
         );
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some(),
-            "턴이 끝났는데 큐가 안 풀렸다"
+            "the turn ended but the queue did not open"
         );
     }
 
-    /// ★이 항목은 원자성을 **재지 못한다** — 그 성질은 시그니처가 이미 지고 있다★: [`take_turn_locked`]
-    /// 는 `&mut State` 를 받으므로 배타 접근이 컴파일러 보장이고, 락은 이 파일의 하네스(`with_state`)에
-    /// 있다. 그래서 이 항목을 빨갛게 만들 수 있는 변이는 사실상 없다.
-    /// 그래도 남겨 두는 것은 **회계가 맞는지**(여덟이 달려들어도 큐에서 한 건만 소비된다)를 보기 때문이고,
-    /// 그것 하나가 이 항목이 재는 전부다.
+    /// ★This item **cannot measure** atomicity — the signature already carries it★: [`take_turn_locked`] takes `&mut State` (exclusivity is
+    /// a compiler guarantee; the lock is the harness's `with_state`), so practically no mutation turns this red. It is kept for **whether the
+    /// accounting is right** (with eight rushing in, only one is consumed) — all it measures.
     #[test]
     fn two_concurrent_takers_open_exactly_one_turn() {
         let h = harness();
@@ -6101,18 +5602,21 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
-        assert_eq!(opened.load(Ordering::Relaxed), 1, "턴이 둘 이상 열렸다");
+        assert_eq!(
+            opened.load(Ordering::Relaxed),
+            1,
+            "more than one turn opened"
+        );
         assert_eq!(
             with_state(&h.state, |s| s.pending.len()),
             1,
-            "한 건만 소비돼야 한다"
+            "only one must be consumed"
         );
     }
 
-    /// 이 항목이 재는 것은 **`Ready` 전이 하나**다 — 「그 값이 디스크에 있다」가 아니다(그 보장은 이
-    /// 통로가 지지 않는다: 기록 포트는 실패를 자기 안에서 삼킨다).
-    /// ★`Ready` 를 세우지 않고 thread id 만 채워 재는 것이 요점이다★ — 둘을 함께 채우면 id 부재가 대신
-    /// 막아 주어 **게이트를 지워도 초록이 된다**(변이로 실측).
+    /// Measures **only the `Ready` transition** — not "that value is on disk" (the record port swallows failures inside itself).
+    /// ★The point is filling only the thread id and not `Ready`★ — filling both lets the id's absence block it instead, so **it stays green
+    /// even if the gate is removed** (measured by mutation).
     #[test]
     fn nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known() {
         let h = harness();
@@ -6122,22 +5626,19 @@ mod tests {
         });
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_none(),
-            "기록 호출이 돌아오기 전에 turn/start 가 나갔다"
+            "turn/start went out before the record call returned"
         );
         with_state(&h.state, |s| s.link = Link::Ready);
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some(),
-            "준비됐는데 큐가 안 풀렸다"
+            "ready but the queue did not open"
         );
     }
 
-    // ── 기록 호출의 두 예외 갈래 ──────────────────────────────────────────────
+    // ── The two exceptional branches of the record call ──────────────────────────────────────────────
 
-    /// ★이미 끝난 화신에는 기록하지 않는다★ — 적히면 죽은 세션의 프로필이 남의 대화를 자기 것으로 들고,
-    /// 옛 sid 가 이력으로 밀린다. ★단 이것이 재는 것은 **이미 관측된** 종료뿐이다★ — 그 판정과 실제
-    /// 기록 사이에 끝나는 세션은 이 항목이 재는 범위 밖이고 오늘 통과한다(`record_session_id` doc).
-    /// ★표식 **둘 다** 재는 것이 요점이다★ — `shutdown()` 은 원자를 먼저 세우고 그 다음에 상태 락을 잡아
-    /// `closed` 를 세운다. 그 사이 구간은 비어 있지 않으므로 한쪽만 보는 울타리는 그만큼 샌다.
+    /// ★An already ended incarnation is not recorded★ — else a dead session's profile gets someone else's conversation and the old sid enters
+    /// history. Measures only an end **already observed**; ★both markers★ are needed (`shutdown()` sets the atomic first, then `closed`).
     #[test]
     fn a_session_that_already_ended_is_not_recorded() {
         for (closed, shutting_down) in [(true, false), (false, true), (true, true)] {
@@ -6154,17 +5655,17 @@ mod tests {
             assert!(
                 record_session_id(&state, &AtomicBool::new(shutting_down), Some(&sink), "T")
                     .is_ok(),
-                "정상 종료를 실패 결말로 올렸다 (closed={closed}, shutdown={shutting_down})"
+                "raised a normal end as a failure outcome (closed={closed}, shutdown={shutting_down})"
             );
             assert_eq!(
                 calls.load(Ordering::Relaxed),
                 0,
-                "끝난 세션에 기록했다 (closed={closed}, shutdown={shutting_down})"
+                "recorded into an ended session (closed={closed}, shutdown={shutting_down})"
             );
         }
     }
 
-    /// 짝 방향 — 둘 다 안 섰으면 기록한다. 없으면 위 항목이 「언제나 건너뜀」으로도 초록이다.
+    /// The pair direction — if neither stands, it records. Without it the item above would be green even for "always skip".
     #[test]
     fn a_live_session_is_recorded() {
         let state = shared();
@@ -6180,30 +5681,30 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
-    /// ★기록이 패닉해도 라이터를 데려가지 않는다★ — unwind 가 올라가면 `Ready` 도 `Down` 도 서지 않아
-    /// 링크가 `Connecting` 에 멈추고, 그 상태에서 [`AgentTransport::send_input`] 은 닫힘도 `Down` 도 못
-    /// 보고 `Ok` 를 돌려주며 큐만 찬다(ADR-0190 이 금한 「조용히 멈춤」). `Err` 로 바뀌어야 라이터가
-    /// 실패 갈래로 가 링크를 내린다. 훅 없는 빌드의 갈래다 — 운영 프로세스에서는 훅이 끝낸다(ADR-0292).
+    /// ★Even if the record panics, it does not take the writer with it★ — an unwind would leave the link `Connecting` with `send_input`
+    /// returning `Ok` (ADR-0190); `Err` sends the writer to the failure branch. Hook-less build only; production ends the process (ADR-0292).
     #[test]
     fn a_panicking_sink_becomes_a_failure_instead_of_unwinding() {
         let state = shared();
-        let sink: SessionIdSink = Arc::new(|_| panic!("기록 포트가 터졌다"));
+        let sink: SessionIdSink = Arc::new(|_| panic!("the record port blew up"));
 
-        // ★훅 교체를 맨손으로 하지 않는다★ — 훅은 프로세스 전역이라, 같은 바이너리에서 동시에 도는 다른
-        //   항목이 자기 패닉 출력을 잃거나(진단 불가) 중첩 구간이 조용한 훅을 영구히 남긴다. 그 두 사고를
-        //   막는 헬퍼가 이미 있다.
+        // ★The hook is not swapped bare-handed★ — it is process-global, so concurrent items would lose their own panic output or an overlapping
+        //   span would leave the quiet hook forever; a helper that prevents both already exists.
         let out = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
             record_session_id(&state, &AtomicBool::new(false), Some(&sink), "T")
         });
 
-        assert!(out.is_err(), "패닉이 실패로 바뀌지 않았다: {out:?}");
+        assert!(
+            out.is_err(),
+            "the panic did not turn into a failure: {out:?}"
+        );
         assert!(
             with_state(&state, |s| matches!(s.link, Link::Connecting)),
-            "이 함수가 링크를 직접 옮겼다 — 옮기는 것은 호출자(라이터의 실패 갈래)다"
+            "this function moved the link directly — the one that moves it is the caller (the writer's failure branch)"
         );
     }
 
-    /// 반대 방향의 짝 — `Ready` 인데 thread id 가 없으면 봉투를 만들 수 없다.
+    /// The pair in the opposite direction — `Ready` but without a thread id, the envelope cannot be built.
     #[test]
     fn nothing_is_sent_without_a_thread_id() {
         let h = harness();
@@ -6213,11 +5714,11 @@ mod tests {
         });
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_none(),
-            "thread id 없이 turn/start 가 나갔다"
+            "turn/start went out without a thread id"
         );
     }
 
-    /// 라이터가 제어 줄을 유저 턴보다 **먼저** 집는다 — 거절이 큐 뒤에서 기다리면 상대가 영구 정지한다.
+    /// The writer picks control lines **before** user turns — a refusal waiting behind the queue would stop the peer forever.
     #[test]
     fn the_writer_takes_control_lines_before_queued_input() {
         let h = harness();
@@ -6226,13 +5727,16 @@ mod tests {
             s.push_legacy(b"user turn");
             s.outbox.push_back("{\"id\":1,\"error\":{}}\n".to_string());
         });
-        match next_job(&h.state, &h.next_id).expect("할 일이 있다") {
+        match next_job(&h.state, &h.next_id).expect("there is work") {
             Job::Line(l) => assert!(l.contains("error")),
-            other => panic!("제어 줄이 먼저여야 한다: {}", matches!(other, Job::Sweep)),
+            other => panic!(
+                "the control line must come first: {}",
+                matches!(other, Job::Sweep)
+            ),
         }
     }
 
-    // ── 시한 ──────────────────────────────────────────────────────────────
+    // ── Deadline ──────────────────────────────────────────────────────────────
 
     #[test]
     fn a_request_with_no_answer_wakes_its_waiter_at_the_deadline() {
@@ -6244,10 +5748,10 @@ mod tests {
         sweep_deadlines(&h.state, &h.pending, &h.reader.core);
         let msg = rx
             .recv_timeout(NOT_WOKEN)
-            .expect("시한이 대기자를 깨워야 한다")
-            .expect_err("시한은 실패다");
+            .expect("the deadline must wake the waiter")
+            .expect_err("a deadline is a failure");
         assert!(msg.contains(method::INITIALIZE), "{msg}");
-        assert_eq!(h.pending.len(), 0, "만료된 대기표는 걷힌다");
+        assert_eq!(h.pending.len(), 0, "an expired waiting entry is taken away");
     }
 
     #[test]
@@ -6266,12 +5770,12 @@ mod tests {
 
         assert!(
             with_state(&h.state, |s| matches!(s.turn, TurnState::Idle)),
-            "시한이 지났는데 턴이 영원히 진행 중이다"
+            "the deadline passed but the turn is in progress forever"
         );
         assert_eq!(
             failure_boundaries(&h.seen).len(),
             1,
-            "조용히 접으면 화면에도, 사실 계층에도 신호가 하나도 없다"
+            "folding it quietly leaves not a single signal on the screen or in the fact layer"
         );
         assert!(with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some());
     }
@@ -6288,14 +5792,18 @@ mod tests {
         assert!(rx.recv_timeout(NOT_WOKEN).is_err());
     }
 
-    // ── 라인 재조립 ───────────────────────────────────────────────────────
+    // ── Line reassembly ───────────────────────────────────────────────────────
 
+    // hangul-ok-begin: multi-byte characters are the fixture of these two splitter tests
     #[test]
     fn a_line_split_across_chunks_is_reassembled() {
         let mut sp = LineSplitter::new();
         let mut lines: Vec<Vec<u8>> = Vec::new();
         sp.feed(br#"{"met"#, |l| lines.push(l.to_vec()));
-        assert!(lines.is_empty(), "개행 전에는 줄이 완성되지 않는다");
+        assert!(
+            lines.is_empty(),
+            "the line is not complete before the newline"
+        );
         sp.feed("hod\":\"한글\"}\n{\"a\":1}\n".as_bytes(), |l| {
             lines.push(l.to_vec())
         });
@@ -6317,6 +5825,7 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(String::from_utf8(lines[0].clone()).unwrap(), "가");
     }
+    // hangul-ok-end
 
     #[test]
     fn an_oversize_line_is_dropped_and_the_next_line_survives() {
@@ -6325,7 +5834,7 @@ mod tests {
         let huge = vec![b'x'; MAX_LINE_BYTES + 1];
         sp.feed(&huge, |l| lines.push(l.to_vec()));
         assert!(lines.is_empty());
-        // ★그 줄의 꼬리가 새 줄로 파싱되면 안 된다★ — 다음 개행까지 통째로 버린다.
+        // ★The tail of that line must not be parsed as a new line★ — everything up to the next newline is dropped.
         sp.feed(b"tail-of-the-huge-line\n{\"a\":1}\n", |l| {
             lines.push(l.to_vec())
         });
@@ -6333,7 +5842,7 @@ mod tests {
         assert_eq!(String::from_utf8(lines[0].clone()).unwrap(), "{\"a\":1}");
     }
 
-    // ── 실 프로세스: 수령 의미 · teardown · 자식 누수 ─────────────────────
+    // ── Real process: receipt meaning · teardown · child leaks ─────────────────────
 
     #[cfg(windows)]
     fn probe_spec(args: &[&str]) -> CommandSpec {
@@ -6367,14 +5876,14 @@ mod tests {
     fn capabilities_reflect_the_injected_structured_flag_and_the_real_control_axis() {
         let (json, _) = open_probe(&["/c", "echo caps-probe"]);
         let caps = json.capabilities();
-        assert!(caps.output.structured, "주입값 그대로 신고");
+        assert!(caps.output.structured, "reports the injected value as is");
         assert!(!caps.output.terminal_bytes);
         assert!(!caps.control.resize);
         assert!(
             caps.control.interrupt,
-            "이 통로는 turn/interrupt 를 실제로 낸다"
+            "this link actually emits turn/interrupt"
         );
-        assert!(!caps.input.raw, "키 입력 채널이 아니다");
+        assert!(!caps.input.raw, "not a keystroke channel");
         assert!(caps.input.message);
         json.shutdown();
 
@@ -6389,7 +5898,7 @@ mod tests {
         .expect("open");
         assert!(
             !plain.capabilities().output.structured,
-            "★하드코딩 금지★ — 통로는 자기가 무엇을 나르는지 모른다"
+            "★no hard-coding★ — the link does not know what it carries"
         );
         plain.shutdown();
     }
@@ -6402,18 +5911,18 @@ mod tests {
             assert!(
                 t.send_input(InputEvent::Raw(format!("turn {i}").into_bytes()))
                     .is_ok(),
-                "핸드셰이크 창의 입력은 큐가 받는다(항목 {i})"
+                "input in the handshake window is taken by the queue (item {i})"
             );
         }
         let over = t.send_input(InputEvent::Raw(b"one too many".to_vec()));
         assert!(
             matches!(over, Err(PtyError::WriteFailed(_))),
-            "★상한 초과는 Err 다 — 짧은 Ok 로 축소 보고하지 않는다★: {over:?}"
+            "★over the cap is Err — it does not report a reduction with a short Ok★: {over:?}"
         );
         assert_eq!(
             with_state(&t.state, |s| s.pending.len()),
             INPUT_QUEUE_LIMIT,
-            "거절한 항목이 큐에 들어갔다"
+            "a refused item went into the queue"
         );
         t.shutdown();
     }
@@ -6423,13 +5932,13 @@ mod tests {
     fn send_input_and_send_turn_share_one_queue() {
         let (t, _) = open_probe(&["/c", "ping", "-n", "30", "127.0.0.1"]);
         t.send_input(InputEvent::Raw(b"legacy".to_vec()))
-            .expect("핸드셰이크 창의 입력은 큐가 받는다");
+            .expect("input in the handshake window is taken by the queue");
         t.send_turn(TurnInput {
             id: "u-1".into(),
             body: b"user".to_vec(),
             origin: InputOrigin::User,
         })
-        .expect("같은 큐가 받는다");
+        .expect("the same queue takes it");
         let got = with_state(&t.state, |s| {
             s.pending
                 .iter()
@@ -6442,7 +5951,7 @@ mod tests {
                 (None, InputOrigin::Mail, b"legacy".to_vec()),
                 (Some("u-1".to_string()), InputOrigin::User, b"user".to_vec()),
             ],
-            "send_input 은 식별자 없는 우편 모양으로 든다"
+            "send_input comes in as a mail shape without an identifier"
         );
         t.shutdown();
     }
@@ -6451,7 +5960,7 @@ mod tests {
     #[test]
     fn input_after_the_link_is_down_is_an_error() {
         let (t, _) = open_probe(&["/c", "ping", "-n", "30", "127.0.0.1"]);
-        with_state(&t.state, |s| s.link = Link::Down("핸드셰이크 실패".into()));
+        with_state(&t.state, |s| s.link = Link::Down("handshake failed".into()));
         let out = t.send_input(InputEvent::Raw(b"hi".to_vec()));
         assert!(matches!(out, Err(PtyError::WriteFailed(_))), "{out:?}");
         t.shutdown();
@@ -6463,11 +5972,11 @@ mod tests {
         let (t, _) = open_probe(&["/c", "ping", "-n", "30", "127.0.0.1"]);
         assert!(
             matches!(t.interrupt(), Err(PtyError::Unsupported(_))),
-            "중단할 턴이 없으면 봉투를 만들지 않는다"
+            "no envelope is built if there is no turn to interrupt"
         );
         make_ready(&t.state, "T-9");
         activate(&t.state, 0, Some("U-9"));
-        t.interrupt().expect("턴이 있으면 나간다");
+        t.interrupt().expect("it goes out if there is a turn");
         let lines = outbox_lines(&t.state);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["method"], method::TURN_INTERRUPT);
@@ -6487,20 +5996,18 @@ mod tests {
         t.shutdown();
         assert!(
             !engram_dashboard_platform::process::pid_alive(pid),
-            "shutdown 뒤에도 자식이 살아 있다"
+            "the child is alive even after shutdown"
         );
         assert!(
             t.send_input(InputEvent::Raw(b"x".to_vec())).is_err(),
-            "닫힌 통로가 입력을 받았다"
+            "a closed link accepted input"
         );
     }
 
-    /// ★통로가 닫힌 뒤에 걸린 대기표는 시한이 다 찰 때까지 자기 스레드를 붙든다★ — 핸드셰이크가 두
-    /// 요청을 잇달아 내므로 그 사이에 닫히는 창이 실재한다. 대기표 자체가 닫히면 그 대기가 즉시 끝난다.
-    ///
-    /// ★아래 **시간** 단언은 대기표 닫힘을 재지 못한다★ — `shutdown()` 이 stdin 을 이미 가져가 버려
-    /// 쓰기가 바로 실패하므로, 닫힘 표식을 지워도 이 함수는 빨리 돌아온다. 그 표식을 실제로 재는 것은 위
-    /// 두 단언(새 대기표가 거절되나 · `interrupt` 가 거절되나)뿐이다.
+    /// ★A waiting entry registered after the link closed holds its thread until its deadline★ — the handshake issues two requests back to
+    /// back, so a closing window really exists. If the table itself closes, that wait ends immediately.
+    /// ★The **time** assertion below cannot measure the table closing★ — `shutdown()` already took stdin, so the write fails at once even
+    /// without the closed marker. Only the two assertions above (new entry refused · `interrupt` refused) measure the marker.
     #[cfg(windows)]
     #[test]
     fn after_shutdown_a_request_fails_at_once_instead_of_waiting_out_the_deadline() {
@@ -6511,9 +6018,9 @@ mod tests {
 
         assert!(
             !t.pending.register(77, Waiter::Fire, method::TURN_INTERRUPT),
-            "닫힌 대기표가 새 항목을 받았다"
+            "a closed waiting table took a new entry"
         );
-        assert!(t.interrupt().is_err(), "닫힌 통로가 봉투를 만들었다");
+        assert!(t.interrupt().is_err(), "a closed link built an envelope");
 
         let start = Instant::now();
         let out: Result<Value, String> = request_blocking(
@@ -6531,17 +6038,14 @@ mod tests {
         assert!(out.is_err());
         assert!(
             start.elapsed() < Duration::from_secs(1),
-            "★{}초짜리 시한을 다 기다렸다★ — 아무도 join 하지 않는 스레드가 그만큼 매달린다",
+            "★it waited out the whole {}-second deadline★ — a thread nobody joins hangs that long",
             REQUEST_DEADLINE.as_secs()
         );
     }
 
-    /// ★상대가 스스로 끝나도 라이터 스레드가 끝나야 한다★ — 안 끝나면 그 스레드가 core·stdin·대기표의
-    /// `Arc` 를 든 채 남아 세션 하나치 메모리가 함께 남는다. `shutdown()` 은 이 경로에서 불리지 않는다
-    /// (reaper 는 세션을 명부에서 뺄 뿐이다).
-    ///
-    /// ★이 항목이 두 루프를 **실제로 돌리는 유일한 자리다**★ — 나머지 통로 항목은 `handle_line` ·
-    /// `next_job` · `sweep_deadlines` 를 직접 부른다.
+    /// ★Even if the peer ends on its own, the writer thread must end★ — else it stays holding the `Arc`s of core · stdin · the waiting
+    /// table (one session's memory); `shutdown()` is not called on this path (the reaper only removes the session from the registry).
+    /// ★The only item that actually runs **both** loops★ — the other link items call `handle_line` · `next_job` · `sweep_deadlines` directly.
     #[cfg(windows)]
     #[test]
     fn the_writer_thread_ends_when_the_peer_exits_on_its_own() {
@@ -6549,25 +6053,21 @@ mod tests {
         let (core, _seen) = core_with_sink();
         t.start(core.clone());
 
-        // 리더(pump)는 EOF 로 끝난다.
         core.join_pump(Duration::from_secs(10));
 
         await_writer_end(
             &t,
-            "상대가 스스로 끝났는데 라이터 스레드가 안 끝났다 — 에이전트마다 스레드 하나가 영구히 남는다",
+            "the peer ended on its own but the writer thread did not end — one thread per agent remains forever",
         );
         assert!(
             with_state(&t.state, |s| s.closed),
-            "EOF 처리가 닫힘 표식을 안 세웠다"
+            "EOF handling did not set the closed marker"
         );
     }
 
-    /// ★같은 표식이 리더 **panic** 도 살아남아야 한다★ — `contain` 은 리더 루프를 밖에서 감싸므로,
-    /// 루프 꼬리에 적어 둔 정리는 unwind 가 그냥 지나간다. 그 경로에서 표식이 안 서면 라이터가 core·
-    /// stdin·대기표를 든 채 영원히 돌고, 그것이 정상 EOF 항목이 못 보는 나머지 절반이다.
-    ///
-    /// unwind 는 **구독자가 `core.emit` 안에서 panic** 하게 만들어 낸다 — 리뷰가 이름한 경로 그대로이고,
-    /// 이 파일이 실 codex 없이 그 지점에 닿는 유일한 길이다.
+    /// ★The same marker must survive a reader **panic** too★ — `contain` wraps the loop from outside, so tail cleanup is skipped by unwind;
+    /// without the marker the writer spins forever holding core · stdin · the waiting table (the half the EOF item cannot see). The unwind is
+    /// produced by **a subscriber panicking inside `core.emit`** — the only way this file reaches it without the real codex.
     #[cfg(windows)]
     #[test]
     fn the_closing_mark_survives_a_reader_panic() {
@@ -6587,13 +6087,13 @@ mod tests {
 
         assert!(
             with_state(&t.state, |s| s.closed),
-            "리더가 panic 으로 끝나자 닫힘 표식이 안 섰다"
+            "the reader ended with a panic and the closed marker did not stand"
         );
-        await_writer_end(&t, "리더 panic 뒤 라이터 스레드가 안 끝났다");
+        await_writer_end(&t, "the writer thread did not end after the reader panic");
         drop(probe);
     }
 
-    /// 가둔 리더 panic 은 `Failed` 로 접히고 `finish` 는 표시 밖에서 돈다 — 운영 리더 클로저 그대로.
+    /// A contained reader panic folds into `Failed` and `finish` runs outside the marking — exactly the production reader closure.
     // ADR-0292
     #[cfg(windows)]
     #[test]
@@ -6613,9 +6113,8 @@ mod tests {
         drop(probe);
     }
 
-    /// ★핸드셰이크가 답을 기다리는 동안에도 제어 큐는 나가야 한다★ — 라이터가 그 큐를 비우는 유일한
-    /// 스레드라, 통째로 park 하면 리더가 넣은 서버 요청 거절이 시한이 다 찰 때까지 못 나가고 상대가 그
-    /// 답을 기다리는 중이었다면 양쪽이 서로를 기다린다.
+    /// ★The control queue must go out even while the handshake waits for an answer★ — the writer is the only drainer, so parking entirely
+    /// would hold a refusal the reader queued until the deadline, and a peer waiting for it would deadlock with us.
     #[cfg(windows)]
     #[test]
     fn the_handshake_keeps_draining_the_control_queue_while_it_waits() {
@@ -6637,7 +6136,7 @@ mod tests {
             )
         });
 
-        // 답을 기다리는 중에 리더가 거절 하나를 넣는다.
+        // While waiting for the answer, the reader puts in one refusal.
         with_state(&t.state, |s| {
             s.outbox
                 .push_back("{\"id\":1,\"error\":{\"code\":-32601}}\n".to_string())
@@ -6647,41 +6146,35 @@ mod tests {
         while with_state(&t.state, |s| !s.outbox.is_empty()) {
             assert!(
                 Instant::now() < deadline,
-                "★핸드셰이크가 제어 큐를 막았다★ — 상대는 그 답을 시한까지 못 받는다"
+                "★the handshake blocked the control queue★ — the peer does not receive that answer until the deadline"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        // 답을 줘서 그 스레드를 끝낸다(시한을 다 기다리지 않게).
+        // Ends that thread by giving the answer (so the whole deadline is not waited out).
         let entry = t
             .pending
             .take(&RequestId::Num(0))
-            .expect("우리가 낸 요청의 대기표");
+            .expect("the waiting entry of the request we issued");
         match entry.waiter {
             Waiter::Handshake(tx) => tx.send(Ok(serde_json::json!({}))).expect("send"),
-            _ => panic!("핸드셰이크 대기표여야 한다"),
+            _ => panic!("must be the handshake waiting entry"),
         }
-        waiter.join().expect("waiter thread").expect("응답");
+        waiter.join().expect("waiter thread").expect("response");
         t.shutdown();
     }
 
-    /// ★자른 대기의 순서가 계약이다 — 시한을 **먼저** 재고 그 다음에 한 줄을 쓴다★.
-    ///
-    /// 재는 것은 정확히 그 순서 하나다: 시한이 이미 지난 슬라이스에서 **쓰기를 시도하지 않고 돌아온다.**
-    /// 순서를 뒤집으면 그 한 번의 쓰기가 stdin 락을 못 얻어 매달리고, 시한은 영영 평가되지 않는다.
-    ///
-    /// ★이 항목이 **재지 못하는 것**을 분명히 해 둔다★: 시한이 아직 남은 슬라이스에서 쓰기가 막히면 이
-    /// 대기는 여전히 무한이다. 그것은 이 순서로 못 고치고, 빠져나오는 길은 `shutdown()` 의 kill 뿐이다
-    /// (모듈 헤더 「알려진 한계」). 이 항목을 그 보장으로 인용하지 말 것.
+    /// ★The order of the sliced wait is the contract — measure the deadline **first**, then write one line★: in a slice whose deadline passed
+    /// it returns without attempting a write (flipped, that write hangs on the stdin lock). ★Cannot measure★ a write that blocks in a live
+    /// slice (only `shutdown()`'s kill gets out) — do not quote this as that guarantee.
     #[cfg(windows)]
     #[test]
     fn an_expired_slice_returns_without_attempting_another_write() {
-        // 첫 요청 쓰기는 성공해야 하므로(작은 줄) 시한만 짧게 잡는다. 슬라이스 하나(500ms)가 도는 사이에
-        //   이미 지나 있다.
+        // The first request write must succeed (small line), so only the deadline is short; by the time one slice (500ms) runs it has passed.
         const BUDGET: Duration = Duration::from_millis(50);
         let (t, _) = open_probe(&["/c", "ping", "-n", "30", "127.0.0.1"]);
 
-        // 뒤집힌 순서가 실제로 쓰기를 시도하도록 제어 줄을 하나 세워 둔다.
+        // One control line is put up so that the flipped order actually attempts a write.
         with_state(&t.state, |s| {
             s.outbox
                 .push_back("{\"id\":1,\"error\":{\"code\":-32601}}\n".to_string())
@@ -6703,8 +6196,7 @@ mod tests {
             )
         });
 
-        // 첫 요청 쓰기가 끝난 **뒤에** stdin 을 붙든다 — 상대는 stdin 을 안 읽으므로 이 쓰기는 락을 쥔 채
-        //   영원히 매달린다.
+        // Hold stdin **after** the first request write ends — the peer does not read stdin, so this write hangs forever holding the lock.
         std::thread::sleep(Duration::from_millis(100));
         let filler = t.stdin.clone();
         let filling = std::thread::spawn(move || {
@@ -6715,19 +6207,22 @@ mod tests {
         while !waiter.is_finished() {
             assert!(
                 Instant::now() < hard_stop,
-                "★시한이 지난 슬라이스가 쓰기를 먼저 시도했다★ — 그 락을 못 얻어 시한이 평가되지 않는다"
+                "★a slice past its deadline attempted the write first★ — it cannot get that lock, so the deadline is not evaluated"
             );
             std::thread::sleep(Duration::from_millis(50));
         }
         let out = waiter.join().expect("waiter thread");
-        assert!(out.is_err(), "답이 온 적 없는데 성공으로 끝났다: {out:?}");
+        assert!(
+            out.is_err(),
+            "ended as success although no answer ever came: {out:?}"
+        );
 
         t.shutdown();
         let _ = filling.join();
     }
 
-    /// ★제어 큐가 가득 차 거절을 못 보내는 것은 화면에 올라야 한다★ — 로그로만 두면 상대는 답을 영영
-    /// 기다리고 이쪽에는 아무 신호도 없다. 형제 사건(`turn/start` 시한)이 이미 화면에 오른다.
+    /// ★Failing to send a refusal because the control queue is full must show on screen★ — logged only, the peer waits forever with no
+    /// signal on this side. The sibling event (`turn/start` deadline) already shows on screen.
     #[test]
     fn a_full_control_queue_drops_a_protocol_obligation_visibly() {
         let mut h = harness();
@@ -6742,63 +6237,51 @@ mod tests {
         assert_eq!(
             with_state(&h.state, |s| s.outbox.len()),
             OUTBOX_LIMIT,
-            "상한을 넘겨 밀어 넣었다"
+            "pushed in past the cap"
         );
         let seen = h.seen.lock().unwrap();
         assert!(
             seen.iter()
-                .any(|e| matches!(e, OutputEvent::Error(m) if m.contains("제어 큐"))),
-            "거절을 못 보냈다는 사실이 화면에 안 올랐다: {seen:?}"
+                .any(|e| matches!(e, OutputEvent::Error(m) if m.contains("control queue"))),
+            "the fact that the refusal could not be sent did not show on screen: {seen:?}"
         );
     }
 
-    /// ★기록 호출은 게이트가 열리기 **전에** 나와야 한다★ — 이것이 한 동사 포트의 존재 근거다
-    /// ([`crate::backend::SessionIdSink`]: 「적혔나」를 되묻는 둘째 동사가 없는 이유가 이 순서다).
-    /// 뒤집히면 기록되기 전에 그 세션으로 턴이 나가고, 포트는 **아무것도 보장하지 않는 통보**가 된다.
-    ///
-    /// ★왜 소스에서 재나★ — 포트는 `Fn(&str)` 이라 불린 시점의 링크 상태를 볼 수 없고, 보게 만들려면
-    /// 이 항목이 지키려는 바로 그 한 동사 계약을 깨야 한다. 게이트의 반대쪽 절반(「`Ready` 여야 턴이
-    /// 나간다」)은 [`tests::nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known`]
-    /// 이 실제로 돌려서 잰다 — 둘이 합쳐 「기록 → 게이트 → 전송」 순서를 덮는다.
-    /// 선례·같은 사유 = `crate::transport::spawn` 시험의 `the_guard_is_armed_and_the_child_adopted_first_after_spawn`.
-    /// ★이 항목이 핀하는 것은 「게이트 전에 포트에 **건넸다**」까지다(ADR-0226)★ — 포트 뒤는 첫 제출
-    ///   래치라, 영속은 제출에 매인다. 「첫 턴 전에 영속」은 래치 단위 시험(진행 중 commit 뒤에 줄 서기) ·
-    ///   세션의 제출 세기 순서 시험 · 조립점의 배선 구조 시험(`manager` 의
-    ///   `the_first_submission_latch_is_wired_through_the_spawn_path`)이 함께 진다.
+    /// ★The record call must come **before** the gate opens★ — why the one-verb port exists ([`crate::backend::SessionIdSink`]). Measured in
+    /// the source: the port is `Fn(&str)` and cannot see link state. The other half is
+    /// [`tests::nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known`]. ★Pins only "**handed** to the port before the
+    /// gate" (ADR-0226)★ — persistence-before-first-turn is covered by the latch tests and `manager`'s wiring test.
     #[test]
     fn the_session_id_is_recorded_before_the_gate_opens() {
         let body = writer_loop_code();
 
-        let recorded = body
-            .find("record_session_id(")
-            .expect("`record_session_id(` 호출이 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
-        // ★앵커가 `Link::Ready` 에서 `open_gate(` 로 옮겼다★ — 게이트를 세우는 줄이 그 함수 안으로
-        //   들어가면서, 이 본문에 남은 `Link::Ready` 는 **주석뿐**이 됐다. 그대로 두면 이 항목이 주석
-        //   위치를 재며 조용히 통과한다(실제로 그렇게 통과했다).
+        let recorded = body.find("record_session_id(").expect(
+            "there is no `record_session_id(` call in writer_loop — this item's premise is stale",
+        );
+        // ★The anchor moved from `Link::Ready` to `open_gate(`★ — the line that sets the gate moved into that function, so the `Link::Ready`
+        //   left in this body became **only comments**; left as is the item would measure a comment position and pass quietly.
         let gate_open = body
             .find("open_gate(")
-            .expect("`open_gate(` 호출이 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
+            .expect("there is no `open_gate(` call in writer_loop — this item's premise is stale");
 
         assert!(
             recorded < gate_open,
-            "기록 호출이 게이트(`Link::Ready`)보다 뒤에 선다 — 기록되기 전에 턴이 나갈 수 있고, 그러면 한 \
-             동사 포트가 보장하는 것이 없어진다(둘째 동사가 필요해진다)"
+            "the record call stands after the gate (`Link::Ready`) — a turn can go out before it is recorded, and then the one-\
+             verb port guarantees nothing (a second verb becomes necessary)"
         );
     }
 
-    /// `writer_loop` 본문에서 **주석을 걷어낸** 코드만 — 순서·문 선택을 소스에서 재는 항목들의 공용 렌즈.
+    /// Only the code of the `writer_loop` body **with comments stripped** — the shared lens of the items measuring order · door choice in the source.
     ///
-    /// ★★주석을 걷는 것이 이 헬퍼의 존재 이유다★★: 이 파일의 주석은 자기가 지키는 이름을 그대로
-    ///   인용하므로(그것이 이 저장소의 주석 규약이다), 날것으로 훑으면 **주석 한 줄이 실물 호출 행세를
-    ///   한다.** 실제로 그렇게 통과한 적이 있다 — 게이트를 세우는 줄이 `open_gate` 안으로 들어간 뒤에도
-    ///   `Link::Ready` 를 찾던 두 항목이 본문에 남은 **주석**을 재며 초록이었다.
+    /// ★Stripping comments is why this exists★: this file's comments quote the names they guard, so a raw scan lets **one comment line
+    ///   pose as a real call** — it once did, two items looking for `Link::Ready` were green measuring the **comments** left in the body.
     fn writer_loop_code() -> String {
         let src = include_str!("transport.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         production
             .split("fn writer_loop(")
             .nth(1)
-            .expect("writer_loop 본문")
+            .expect("writer_loop body")
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
@@ -6808,7 +6291,7 @@ mod tests {
             )
     }
 
-    // ── 이력 복원 페이징(ADR-0203) ─────────────────────────────────────────────
+    // ── History restore paging (ADR-0203) ─────────────────────────────────────────────
 
     fn entry(turn: &str, item: Value) -> ThreadItemEntry {
         ThreadItemEntry {
@@ -6832,7 +6315,6 @@ mod tests {
         Instant::now() + Duration::from_secs(60)
     }
 
-    /// 텍스트만 뽑는다 — 순서를 재는 항목들이 쓰는 렌즈.
     fn texts(events: &[OutputEvent]) -> Vec<String> {
         events
             .iter()
@@ -6843,11 +6325,10 @@ mod tests {
             .collect()
     }
 
-    /// ★페이지는 최신부터 오고, 화면에 실리는 것은 **시간순**이어야 한다★ — 그 뒤집기가 이 경로의
-    /// 유일한 순서 계약이다(실측 2026-09-16, 실 0.154.0: `sortDirection: desc` 의 첫 페이지 `data[0]`
-    /// 이 마지막 어시스턴트 응답이고 마지막 페이지 끝이 최초 `userMessage` 다).
-    /// ★같은 항목이 요청 모양도 함께 잰다★ — 방향·커서 이어받기가 틀리면 화면이 거꾸로 서거나 같은
-    /// 페이지를 영원히 다시 받는다.
+    /// ★Pages come newest first and the screen needs **time order**★ — that flip is this path's only order contract (measured 2026-09-16,
+    /// real 0.154.0: the first page's `data[0]` of `sortDirection: desc` is the last assistant response, the last page ends with the first
+    /// `userMessage`). ★Also measures the request shape★ — a wrong direction · cursor continuation stands the screen upside down or refetches
+    /// the same page forever.
     #[test]
     fn history_pages_backwards_and_lands_in_time_order() {
         let mut asked: Vec<(String, Option<String>)> = Vec::new();
@@ -6855,7 +6336,7 @@ mod tests {
             asked.push((params.thread_id.clone(), params.cursor.clone()));
             assert!(
                 matches!(params.sort_direction, Some(SortDirection::Desc)),
-                "역방향이 아니면 최신부터 걷지 못한다"
+                "without the backward direction, it cannot walk from the newest"
             );
             assert_eq!(params.limit, Some(HISTORY_PAGE_LIMIT));
             Ok(match params.cursor.as_deref() {
@@ -6876,13 +6357,13 @@ mod tests {
                 ("th-1".to_string(), Some("c0".to_string())),
                 ("th-1".to_string(), Some("c1".to_string())),
             ],
-            "핸드셰이크가 연 스레드로, 응답이 준 커서를 이어 물어야 한다"
+            "it must keep asking with the cursor the response gave, on the thread the handshake opened"
         );
         assert_eq!(texts(&events), vec!["first", "second", "third"]);
     }
 
-    /// ★턴마다 정확히 하나씩 닫는다★ — 안 닫으면 복원된 슬롯의 대기 표시가 영영 돌고, 겹쳐 닫으면
-    /// 빈 구분선이 쌓인다. 마지막 턴도 닫는 것이 이 항목의 절반이다.
+    /// ★Exactly one close per turn★ — without closing, the restored slot's waiting indicator spins forever; closing twice piles up empty
+    /// separators. Closing the last turn too is half of this item.
     #[test]
     fn every_history_turn_is_closed_exactly_once() {
         let events = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
@@ -6914,12 +6395,12 @@ mod tests {
         assert_eq!(
             closed,
             vec![Some("t1".to_string()), Some("t2".to_string())],
-            "경계는 그 턴의 id 를 달고, 시간순으로 선다"
+            "the boundary carries that turn's id and stands in time order"
         );
     }
 
-    /// ★옮길 것이 하나도 없으면 **아무것도 내지 않는다**★ — 경계만 남은 목록을 만들면 빈 슬롯에
-    /// 구분선이 생긴다. 라이브가 버리는 변형(추론 등)은 이력에서도 같은 판정을 받는다.
+    /// ★If there is nothing to carry over, **nothing is emitted**★ — a list of only boundaries would create separators in an empty slot.
+    /// Variants live drops (reasoning etc.) get the same decision in history.
     #[test]
     fn a_history_of_nothing_translatable_produces_no_events() {
         let events = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
@@ -6934,11 +6415,14 @@ mod tests {
                 None,
             ))
         });
-        assert!(events.is_empty(), "경계만 남은 목록이 나왔다: {events:?}");
+        assert!(
+            events.is_empty(),
+            "a list of only boundaries came out: {events:?}"
+        );
     }
 
-    /// ★★페이지 하나가 실패해도 그것은 **활성화 실패가 아니다**★★ — 그 앞까지 받은 화면을 그대로
-    /// 싣고 정상으로 닫는다(ADR-0203: 이력 실패는 조용하고 무해하다).
+    /// ★★Even if one page fails, it is **not an activation failure**★★ — the screen received so far is carried and closed normally
+    /// (ADR-0203).
     #[test]
     fn a_failed_page_keeps_everything_that_came_before_it() {
         let mut calls = 0;
@@ -6950,22 +6434,21 @@ mod tests {
                     Some("c1"),
                 ))
             } else {
-                Err("상대가 거절했다".to_string())
+                Err("the peer refused".to_string())
             }
         });
         assert_eq!(calls, 2);
         assert_eq!(texts(&events), vec!["kept"]);
         assert!(
             matches!(events.last(), Some(OutputEvent::MessageDone { .. })),
-            "중간에 끊겨도 마지막 턴은 닫아야 한다: {events:?}"
+            "even if cut midway, the last turn must be closed: {events:?}"
         );
     }
 
-    /// ★★천장은 링이다★★(ADR-0203) — 2MiB 를 넘겨 받아 봐야 링이 앞에서부터 버리므로 순 비용이다.
-    /// 그 판정은 링이 실제로 세는 축([`estimate_cost_bytes`])으로 해야 한다.
+    /// ★★The ceiling is the ring★★ (ADR-0203) — receiving beyond 2MiB is pure cost (the ring drops from the front), and the decision must
+    /// use the axis the ring counts ([`estimate_cost_bytes`]).
     #[test]
     fn history_stops_once_the_replay_ring_is_full() {
-        // 한 건이 상한(64Ki 문자)까지 찬 어시스턴트 본문 — 32 건이면 2MiB 다.
         let big = "x".repeat(64 * 1024);
         let mut calls = 0;
         let events = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
@@ -6974,33 +6457,31 @@ mod tests {
                 (0..HISTORY_PAGE_LIMIT)
                     .map(|i| entry("t1", agent_message(&format!("m{calls}-{i}"), &big)))
                     .collect(),
-                // 커서가 끝나지 않는다 — 멈추는 것은 오직 천장이어야 한다.
+                // The cursor does not end — only the ceiling must stop it.
                 Some("more"),
             ))
         });
 
         let weight: usize = events.iter().map(estimate_cost_bytes).sum();
-        // ★★넘기 **전에** 멈춘다 — 「넘고 나서 멈춘다」로 되돌리지 말 것★★: 넣고 나서 재면 언제나 한
-        //   건만큼 넘기고, 그 한 건은 링이 착지하자마자 버린다. 천장을 링 상수에 묶어 둔 이유가 그
-        //   어긋남을 없애려던 것이다.
+        // ★Stops **before** exceeding — do not revert to "stop after exceeding"★: measuring after putting always exceeds by one entry, which
+        //   the ring drops on landing (the mismatch tying the ceiling to the ring constant removes).
         assert!(
             weight <= REPLAY_MAX_BYTES,
-            "천장을 넘겨 받았다: {weight}B > {REPLAY_MAX_BYTES}B"
+            "received past the ceiling: {weight}B > {REPLAY_MAX_BYTES}B"
         );
-        // 그러면서 **거의** 채운다 — 한 건(64KiB)만큼의 여유 안에 들어야 한다.
         assert!(
             weight + 64 * 1024 >= REPLAY_MAX_BYTES,
-            "링을 한참 못 채우고 멈췄다: {weight}B"
+            "stopped far short of filling the ring: {weight}B"
         );
         assert_eq!(
             calls, 2,
-            "링이 찬 뒤로도 페이지를 더 물었다(왕복 낭비) — {calls}회"
+            "kept asking for pages after the ring filled (wasted round trips) — {calls} times"
         );
     }
 
-    /// ★★천장 회계가 **합성한 경계까지** 세야 한다★★ — 안 세면 항목마다 턴이 갈리는 이력에서 실제
-    /// 이벤트 수가 센 것의 두 배가 되고, 링(4096 건)이 착지하자마자 절반을 버린다. 그 절반은 **가장
-    /// 오래된 쪽**이라, 복원된 대화의 머리가 통째로 잘린다.
+    /// ★★The ceiling accounting must count **the synthesized boundaries too**★★ — uncounted, a history where every item splits a turn has
+    /// twice the counted events and the ring (4096 entries) drops half on landing — the **oldest** half, cutting off the head of the
+    /// restored conversation.
     #[test]
     fn the_ceiling_counts_the_boundaries_it_synthesizes() {
         let mut n = 0usize;
@@ -7008,7 +6489,6 @@ mod tests {
             let data = (0..HISTORY_PAGE_LIMIT)
                 .map(|_| {
                     n += 1;
-                    // 항목마다 턴이 다르다 = 항목마다 경계가 하나씩 더 붙는 최악.
                     entry(&format!("t{n}"), agent_message(&format!("m{n}"), "x"))
                 })
                 .collect();
@@ -7017,10 +6497,9 @@ mod tests {
 
         assert!(
             events.len() <= REPLAY_MAX_EVENTS,
-            "링 건수 천장을 넘겨 받았다: {} > {REPLAY_MAX_EVENTS}",
+            "received past the ring count ceiling: {} > {REPLAY_MAX_EVENTS}",
             events.len()
         );
-        // 경계를 안 세던 시절이면 여기서 항목 수가 천장까지 갔을 것이다 — 절반 언저리여야 맞다.
         let texts = events
             .iter()
             .filter(|e| matches!(e, OutputEvent::TextDelta { .. }))
@@ -7029,21 +6508,22 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, OutputEvent::MessageDone { .. }))
             .count();
-        assert_eq!(texts, closes, "턴마다 경계 하나 — 회계의 전제가 깨졌다");
+        assert_eq!(
+            texts, closes,
+            "one boundary per turn — the premise of the accounting broke"
+        );
         assert!(
             events.len() > REPLAY_MAX_EVENTS - 2 * HISTORY_PAGE_LIMIT as usize,
-            "천장을 한참 못 채우고 멈췄다: {}",
+            "stopped far short of filling the ceiling: {}",
             events.len()
         );
     }
 
-    /// ★★`turnId` 에는 와이어 상한이 없다 — 담기 전에 거른다★★: 줄 상한은 페이지 **한 장**에만 걸리고
-    /// 여기 쌓이는 누적에는 안 걸려서, 긴 id 를 단 item 이 페이지마다 오면 원본 문자열만으로 수백 MiB 가
-    /// 된다(25 건 × 160KiB 는 한 장에서 4MiB 를 안 넘는데, 건수 천장까지 모으면 ~650MiB 다).
-    /// ★★그러면서 **서로 다른 턴은 그대로 둘로 남아야 한다**★★ — 상한을 넘긴 id 를 전부 한 칸(`None`)
-    /// 으로 접으면 메모리는 잡히지만 **서로 다른 대화 둘이 한 턴으로 렌더된다.** 그래서 구별은 직전
-    /// 항목과의 원본 비교(O(1))가 지고, 거른 id 는 경계에 **표시**로만 실린다. 이 항목이 재는 것이 그
-    /// 두 축이다 — 경계는 둘인데 실린 id 는 없다.
+    /// ★★`turnId` has no wire cap — it is filtered before holding★★: the line cap bounds **one** page, not the accumulation, so items with
+    /// long ids on every page reach hundreds of MiB (25 × 160KiB fits 4MiB on one page, but up to the count ceiling it is ~650MiB).
+    /// ★★**Different turns must stay two**★★ — folding all over-cap ids into one `None` slot catches the memory but **renders two
+    /// conversations as one turn**. So distinction comes from the original comparison with the previous item (O(1)) and the filtered id is
+    /// only **display**; this measures both axes — two boundaries, no id carried.
     #[test]
     fn an_oversized_turn_id_is_filtered_before_it_is_retained() {
         let huge_a = "a".repeat(MAX_TURN_ID_BYTES + 1);
@@ -7068,14 +6548,13 @@ mod tests {
         assert_eq!(
             closes,
             vec![None, None],
-            "상한 넘긴 turn 둘이 한 턴으로 접혔다 — 서로 다른 대화가 한 덩이로 렌더된다: {events:?}"
+            "two turns over the cap folded into one turn — different conversations render as one chunk: {events:?}"
         );
         assert_eq!(
             texts(&events),
             vec!["earlier", "later"],
-            "내용은 전부 남는다"
+            "all the content remains"
         );
-        // 같은 id 가 이어지면 그때는 한 묶음이다 — 위 분리가 「언제나 쪼갠다」가 아님을 못 박는다.
         let same = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
             Ok(page(
                 vec![
@@ -7090,12 +6569,12 @@ mod tests {
                 .filter(|e| matches!(e, OutputEvent::MessageDone { .. }))
                 .count(),
             1,
-            "같은 turn 인데 둘로 쪼갰다: {same:?}"
+            "split the same turn into two: {same:?}"
         );
     }
 
-    /// ★★같은 커서를 되돌려 주는 상대에게 같은 페이지를 다시 받지 않는다★★ — 받으면 같은 대화가 여러
-    /// 벌 실리고 그 중복이 진짜 이력을 링에서 밀어낸다. 페이지 상한은 루프를 묶지만 이 오염은 못 막는다.
+    /// ★The same page is not refetched from a peer that returns the same cursor★ — else the conversation is carried several times and the
+    /// duplicates push the real history out of the ring; the page cap bounds the loop but not this contamination.
     #[test]
     fn a_repeating_cursor_stops_instead_of_duplicating_history() {
         let mut calls = 0usize;
@@ -7103,20 +6582,22 @@ mod tests {
             calls += 1;
             Ok(page(
                 vec![entry("t1", agent_message("m1", "once"))],
-                // 첫 답이 준 커서를 그 뒤로 계속 되돌려 준다.
                 Some("same"),
             ))
         });
-        assert_eq!(calls, 2, "되풀이되는 커서를 알아보지 못했다 — {calls}회");
+        assert_eq!(
+            calls, 2,
+            "did not recognize the repeating cursor — {calls} times"
+        );
         assert_eq!(
             texts(&events),
             vec!["once", "once"],
-            "첫 커서와 둘째 커서는 서로 다르므로 두 장까지는 정상이다: {events:?}"
+            "the first and second cursors differ, so up to two pages is normal: {events:?}"
         );
     }
 
-    /// ★끝나지 않는 커서에 영원히 매달리지 않는다★ — 예산이 먼저 끊는 것이 보통이지만, 답이 즉시
-    /// 오는 상대에게는 이 backstop 만이 남는다.
+    /// ★It does not hang forever on a cursor that never ends★ — the budget usually cuts first, but for a peer answering immediately only
+    /// this backstop remains.
     #[test]
     fn an_unending_cursor_stops_at_the_page_cap() {
         let mut calls = 0usize;
@@ -7127,8 +6608,7 @@ mod tests {
                     "t1",
                     serde_json::json!({"type": "reasoning", "id": "r"}),
                 )],
-                // ★매번 **다른** 커서다★ — 같은 값을 주면 되풀이 가드가 먼저 끊어, 이 항목이 재려는
-                //   상한이 아니라 그 가드를 재게 된다.
+                // ★A **different** cursor every time★ — the same value would make the repeat guard cut first and the item would measure that guard.
                 Some(&format!("c{calls}")),
             ))
         });
@@ -7136,43 +6616,43 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    /// ★★연결이 이력을 받는 도중에 끝났으면 게이트를 열지 않는다★★ — 이력 쪽은 그 오류를 「페이지가
-    /// 안 왔다」로 처리하므로(그것이 옳다), 게이트가 상태를 안 보면 **이미 죽은 통로가 `Ready` 로 서서
-    /// 활성화 성공으로 배달된다.** 그 뒤엔 매니저가 시체를 산 에이전트로 들고 간다.
+    /// ★★If the connection ended while fetching history, the gate is not opened★★ — history treats that error as "a page did not come"
+    /// (right), so a gate that did not look at the state would let **an already dead link stand as `Ready` and be delivered as a successful
+    /// activation**; the manager would carry a corpse as a live agent.
     #[test]
     fn a_gate_does_not_open_over_a_link_that_died_while_hydrating() {
         let state = shared();
         with_state(&state, |s| {
-            s.link = Link::Down("스트림이 끝났다".to_string());
+            s.link = Link::Down("the stream ended".to_string());
             s.closed = true;
         });
         let verdict = open_gate(&state, "th".to_string());
-        assert_eq!(verdict, Err("스트림이 끝났다".to_string()));
+        assert_eq!(verdict, Err("the stream ended".to_string()));
         with_state(&state, |s| {
-            assert!(matches!(s.link, Link::Down(_)), "내려간 연결을 덮어썼다");
-            assert!(s.thread_id.is_none(), "죽은 통로에 thread id 를 심었다");
+            assert!(
+                matches!(s.link, Link::Down(_)),
+                "overwrote the downed connection"
+            );
+            assert!(
+                s.thread_id.is_none(),
+                "planted a thread id into a dead link"
+            );
         });
     }
 
-    /// ★★스트림 종료는 **상태를 먼저 쓰고 그 다음에 깨운다**★★ — 반대면 죽음이 스스로 연 창으로
-    /// 라이터가 돌아와, 아직 `Connecting` 인 상태를 읽고 게이트를 통과해 **이미 끝난 통로에 `Ready` 를
-    /// 배달한다.** 그 창은 우연이 아니라 스트림 종료마다 열렸다.
-    ///
-    /// ★★왜 **소스 순서**로 재나 — 돌려서 재 봤고 못 잰다★★: 깨우기를 먼저 하는 판을 만들어 관측
-    /// 스레드를 붙여 200 회 돌렸더니 **한 번도 안 걸렸다.** 깨어난 쪽은 스케줄러를 기다려야 하는데
-    /// 깨운 쪽은 곧바로 다음 몇 줄에서 락을 잡으므로, 경합이되 사실상 언제나 깨운 쪽이 이긴다. 즉 그
-    /// 하네스는 **순서가 틀려도 초록**이라 회귀망이 아니었다. 재는 대상이 「두 문장의 순서」인 이상
-    /// 그것을 직접 재는 것이 정직하다(형제 = [`tests::the_history_is_emitted_before_the_gate_opens`]).
-    /// ★그래서 실행으로 재는 몫은 **아래 형제 항목**이 진다★ — 순서가 아니라 「둘 다 일어났나」다.
+    /// ★★The stream end **writes the state first, then wakes**★★ — the reverse lets the writer return through the death's own window and
+    /// **deliver `Ready` to an ended link**. ★Why by **source order**★: a wake-first version run 200 times with an observer thread was **never
+    /// caught** (the waker practically always wins the race), so that harness was green with the wrong order; for "the order of two statements"
+    /// measuring it directly is honest. ★The share measured by running is the sibling below★ — "did both happen".
     // ADR-0203
     #[test]
     fn a_stream_end_writes_the_state_before_it_wakes_the_waiters() {
         let src = include_str!("transport.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let body = production
             .split("impl Drop for ReaderExit {")
             .nth(1)
-            .expect("ReaderExit::drop 본문")
+            .expect("ReaderExit::drop body")
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
@@ -7180,19 +6660,19 @@ mod tests {
 
         let wrote_down = body
             .find("s.closed = true;")
-            .expect("`s.closed = true;` 가 ReaderExit::drop 에 없다 — 이 항목의 전제가 낡았다");
-        let woke = body
-            .find("self.pending.close()")
-            .expect("`self.pending.close()` 가 ReaderExit::drop 에 없다 — 이 항목의 전제가 낡았다");
+            .expect("`s.closed = true;` is not in ReaderExit::drop — this item's premise is stale");
+        let woke = body.find("self.pending.close()").expect(
+            "`self.pending.close()` is not in ReaderExit::drop — this item's premise is stale",
+        );
         assert!(
             wrote_down < woke,
-            "깨우기가 상태 쓰기보다 먼저 선다 — 깨어난 라이터가 살아 있는 상태를 읽고 죽은 통로에 \
-             Ready 를 배달한다"
+            "the waking stands before the state write — the woken writer reads the live state and delivers Ready \
+             to a dead link"
         );
     }
 
-    /// 순서가 아니라 **둘 다 일어났나**를 실행으로 잰다 — 어느 한쪽을 지우면 여기서 걸린다
-    /// (깨우기를 지우면 영구 hang, 상태 쓰기를 지우면 죽은 통로가 살아 있는 것으로 남는다).
+    /// Measures by running **whether both happened** — removing either is caught here (no waking = permanent hang; no state write = a dead
+    /// link stays alive).
     #[test]
     fn a_stream_end_both_wakes_the_waiters_and_marks_the_link_down() {
         let state = shared();
@@ -7208,15 +6688,17 @@ mod tests {
 
         assert!(
             matches!(rx.try_recv(), Ok(Err(_))),
-            "대기표를 오류로 깨우지 않았다 — 영구 hang 이다"
+            "did not wake the waiting entries with an error — a permanent hang"
         );
         with_state(&state, |s| {
-            assert!(matches!(s.link, Link::Down(_)), "연결을 내리지 않았다");
-            assert!(s.closed, "닫힘 표식을 세우지 않았다");
+            assert!(
+                matches!(s.link, Link::Down(_)),
+                "did not take the connection down"
+            );
+            assert!(s.closed, "did not set the closed marker");
         });
     }
 
-    /// 배달 채널이 아니라 **닫힘 표식만** 선 경우도 같다 — 사유 문구가 없을 뿐 결론은 같다.
     #[test]
     fn a_gate_does_not_open_over_a_closed_link() {
         let state = shared();
@@ -7227,7 +6709,6 @@ mod tests {
         });
     }
 
-    /// 멀쩡한 연결에서는 그대로 열리고 손잡이가 실린다 — 위 둘의 반대편.
     #[test]
     fn a_healthy_link_opens_the_gate_and_carries_the_thread_id() {
         let state = shared();
@@ -7238,17 +6719,13 @@ mod tests {
         });
     }
 
-    /// ★한 왕복이 예산을 다 써 버리면 **그 다음은 묻지 않는다**★ — 이 루프가 공유 예산을 실제로 강제하는
-    /// 자리가 여기다. 한 요청 **안**의 초과분(응답 대기 슬라이스 하나, 500ms)은 이 루프가 못 막는다.
+    /// ★If one round trip uses up the budget, **the next is not asked**★ — where this loop enforces the shared budget; the overrun **inside**
+    /// one request (one 500ms slice) it cannot block.
     ///
-    /// ★★한때 여기 「10s + 0.5s」로 적혀 있었고 그 수치는 **틀렸다**★★ — 그 계산은 초과가 한 번뿐이라고
-    /// 보았는데, 초과를 세는 단위는 루프가 아니라 [`request_blocking`] **호출**이다: 성공 갈래는 시한을
-    /// 다시 보지 않고, 예산이 0 이어도 다음 슬라이스를 통째로 기다린다. 그래서 [`handshake`] 의 두
-    /// 왕복이 각각 한 슬라이스씩 넘길 수 있고(첫 왕복이 자기 초과 중에 성공하면 둘째는 잔여 0 으로
-    /// 시작해 또 한 슬라이스를 쓴다), **`Ready` 까지의 상한은 10s + 2×0.5s = 11s** 다.
-    /// ★그 뒤로 더 늘지 않는 이유가 이 항목이 재는 것이다★ — 페이징의 첫 검사가 잔여 0 을 보고 끊으므로
-    /// 세 번째 초과가 없다. ★핸드셰이크에 왕복을 하나 더 들이면 그만큼 는다★(11s → 11.5s).
-    /// 백스톱 15s 는 그대로 위에 있다.
+    /// ★The cap until `Ready` is 10s + 2×0.5s = 11s★: the unit counting overruns is the [`request_blocking`] **call** — the success branch
+    /// does not re-check the deadline and even with budget 0 waits out the next slice, so [`handshake`]'s two round trips can each overrun by
+    /// one slice. Paging's first check sees remainder 0 and cuts (no third overrun) — measured here. ★One more handshake round trip adds
+    /// that much★. The 15s backstop stays above it.
     #[test]
     fn a_page_that_burns_the_budget_is_the_last_one() {
         let mut calls = 0usize;
@@ -7261,12 +6738,19 @@ mod tests {
                 Some("c1"),
             ))
         });
-        assert_eq!(calls, 1, "예산이 끝났는데 또 물었다 — {calls}회");
-        assert_eq!(texts(&events), vec!["only"], "받아 둔 것은 그대로 싣는다");
+        assert_eq!(
+            calls, 1,
+            "asked again after the budget ran out — {calls} times"
+        );
+        assert_eq!(
+            texts(&events),
+            vec!["only"],
+            "what was received is carried as is"
+        );
     }
 
-    /// ★예산이 이미 없으면 **한 번도 묻지 않는다**★ — 핸드셰이크가 예산을 다 쓰고 겨우 성공한 경우가
-    /// 그것이고, 거기서 한 왕복이라도 더 나가면 `Ready` 가 매니저의 백스톱 뒤로 밀린다.
+    /// ★If the budget is already gone, **it never asks**★ — the handshake barely succeeded using it up; one more round trip would push
+    /// `Ready` behind the manager's backstop.
     #[test]
     fn an_exhausted_budget_asks_for_nothing() {
         let mut calls = 0;
@@ -7283,7 +6767,7 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    /// ★이어받을 것이 없으면 왕복 자체가 없다★ — `thread/start`(새 대화)로 뜬 화신이 여기 든다.
+    /// ★With nothing to resume there is no round trip at all★ — an incarnation from `thread/start` (new conversation) falls here.
     #[test]
     fn a_thread_without_a_history_cursor_never_pages() {
         let state = shared();
@@ -7302,74 +6786,65 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    /// ★★이력은 게이트가 열리기 **전에** 링에 올라야 한다 — 이것이 이 경로의 순서 계약이다★★:
-    /// 게이트가 먼저 열리면 큐에 선 유저 턴이 나가고, 그 응답이 아직 안 실린 이력보다 먼저 링에
-    /// 들어가 복원된 대화가 새 답 **뒤에** 붙는다. ADR-0079 의 seed-before-publish 가 지키던 것을
-    /// 이 순서가 대신 진다(그쪽처럼 명부 등록 전으로 당길 수가 없다 — 이력이 핸드셰이크 뒤에야
-    /// 존재하기 때문).
-    ///
-    /// ★소스에서 재는 사유는 형제 항목과 같다★ — 실제로 돌려서 재려면 자식 프로세스와 왕복하는
-    /// 상대가 필요하고, 그 하네스가 재는 것은 순서가 아니라 하네스 자신이 된다.
-    /// 형제 = [`tests::the_session_id_is_recorded_before_the_gate_opens`].
+    /// ★★History must go into the ring **before** the gate opens — this path's order contract★★: gate first, and queued user turns go out
+    /// and their responses enter the ring before the unraised history, attaching the restored conversation **after** the new answer. This
+    /// replaces what ADR-0079's seed-before-publish kept (it cannot be pulled ahead of registry registration — the history exists only after
+    /// the handshake).
+    /// ★Measured in the source for the same reason as the sibling★ — running needs a child and a peer, and the harness would measure itself.
+    /// Sibling = [`tests::the_session_id_is_recorded_before_the_gate_opens`].
     #[test]
     fn the_history_is_emitted_before_the_gate_opens() {
         let body = writer_loop_code();
 
-        let hydrated = body
-            .find("hydrate_history(")
-            .expect("`hydrate_history(` 호출이 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
-        // 앵커를 `open_gate(` 로 두는 사유 = 형제 항목의 같은 자리.
+        let hydrated = body.find("hydrate_history(").expect(
+            "there is no `hydrate_history(` call in writer_loop — this item's premise is stale",
+        );
         let gate_open = body
             .find("open_gate(")
-            .expect("`open_gate(` 호출이 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
+            .expect("there is no `open_gate(` call in writer_loop — this item's premise is stale");
         assert!(
             hydrated < gate_open,
-            "이력 복원이 게이트보다 뒤에 선다 — 복원된 대화가 새 답 뒤에 붙는다"
+            "the history restore stands after the gate — the restored conversation attaches after the new answer"
         );
 
-        // ★★들어가는 문이 **fanout 까지 하는 쪽**이어야 한다★★: 이 자리는 세션이 이미 명부에 오른
-        //   뒤라, `OutputCore::seed`(링에 넣기만 하고 fanout 없음)를 쓰면 그 사이 붙은 구독자가 빈 링을
-        //   replay 한 뒤라서 지난 화면을 **영영 못 본다**. ADR-0079 가 `seed` 로 충분했던 것은 그쪽이
-        //   명부 등록 **전**이었기 때문이고, 이 경로는 그 자리로 당길 수가 없다.
-        // ★요구하는 것은 **덩이 문**이다★ — 낱개 문으로 바꾸면 fanout 은 유지되지만 호출 사이마다
-        //   리더의 라이브 줄이 seq 를 가져가 복원된 대화 한가운데가 쪼개진다
-        //   ([`crate::output_core::OutputCore::emit_batch_without_turn_observation`]).
+        // ★The entry door must **fan out too**★: the session is already in the registry, so with `OutputCore::seed` (ring only, no fanout) a
+        //   subscriber attached in between has replayed the empty ring and **never sees** the past screen (`seed` sufficed for ADR-0079 because
+        //   that was **before** registry registration).
+        // ★It must be **the chunk door**★ — the item-by-item door keeps fanout but lets the reader's live lines take seqs between calls and split
+        //   the restored conversation ([`crate::output_core::OutputCore::emit_batch_without_turn_observation`]).
         assert!(
             body.contains("emit_batch_without_turn_observation"),
-            "이력이 낱개 문으로 들어간다 — fanout 은 되지만 덩이 한가운데가 쪼개진다"
+            "history goes in through the item-by-item door — fanout works but the middle of the chunk is split"
         );
         assert!(
             !body.contains("core.seed("),
-            "`seed` 는 이 자리에서 fanout 을 잃는다(위 doc)"
+            "`seed` loses fanout at this spot (the doc above)"
         );
     }
 
-    /// ★★핸드셰이크와 이력이 **한 예산을 나눠 쓴다**★★ — 각자 잡으면 연결이 서기까지가 최대 두
-    /// 예산이 되어 매니저의 백스톱을 넘고, 이력을 받느라 **성공한 이어받기가 실패로 판정된다.**
-    /// 그 계약의 실물은 「`writer_loop` 이 시계를 한 번만 잡아 둘에게 같은 값을 넘긴다」이다.
+    /// ★★The handshake and the history **share one budget**★★ — separate budgets could reach two budgets before the connection stands,
+    /// exceed the manager's backstop and **decide a successful resume a failure**. Concretely: `writer_loop` starts the clock once and passes
+    /// the same value to both.
     #[test]
     fn the_handshake_and_the_history_share_one_budget() {
         let code = writer_loop_code();
 
-        // ★호출 모양이 아니라 **이름의 등장 횟수**로 잰다★ — 인자 목록의 줄바꿈은 `cargo fmt` 이
-        //   정하므로, 호출 문자열을 통째로 대조하면 서식만 바뀌어도 이 항목이 깨진다(실제로 깨졌다).
+        // ★Measured by **the number of appearances of the name**, not call shape★ — `cargo fmt` decides argument-list line breaks, so whole-call
+        //   comparison would break on a formatting change (it did).
         assert_eq!(
             code.matches("HANDSHAKE_BUDGET").count(),
             1,
-            "writer_loop 이 예산 시계를 한 번만 잡아야 한다 — 둘째 시계는 곧 둘째 예산이다"
+            "writer_loop must start the budget clock only once — a second clock is a second budget"
         );
         assert_eq!(
             code.matches("link_deadline").count(),
             3,
-            "그 시한이 한 번 묶이고 **두 소비자**(핸드셰이크·이력)에게 각각 넘어가야 한다"
+            "that deadline must be bound once and handed to **two consumers** (handshake · history) each"
         );
     }
 
-    /// ★사용자가 껐으면 연결 결말을 **배달하지 않는다**★ — 결함 ③ 의 뿌리.
-    ///
-    /// kill 은 대기표를 닫아 핸드셰이크를 `Err` 로 깨운다. 그것을 그대로 배달하면 **사용자의 취소가
-    /// 이어받기 실패로 기록되고** 그 위에 정리가 한 번 더 돈다. 그 갈래에서 감독자가 볼 사실은 종점 상태
-    /// 하나여야 하고, 거기엔 「사용자가 끈 것은 실패가 아니다」 규율이 이미 있다.
+    /// ★If the user turned it off, **the connection outcome is not delivered**★ — the root of defect ③: kill wakes the handshake with `Err`,
+    /// and delivering that would record the user's cancellation as a resume failure and run cleanup once more.
     #[test]
     fn a_shutdown_suppresses_the_link_delivery() {
         let seen: Arc<Mutex<Vec<LinkResolution>>> = Arc::new(Mutex::new(Vec::new()));
@@ -7385,7 +6860,7 @@ mod tests {
         assert_eq!(
             seen.lock().expect("seen poisoned").len(),
             1,
-            "평소에는 배달돼야 한다 — 이 항목의 대조군이 죽으면 아래 단언이 공허해진다"
+            "normally it must be delivered — if this item's control group dies, the assertion below becomes hollow"
         );
 
         let killed = AtomicBool::new(true);
@@ -7393,51 +6868,40 @@ mod tests {
             &killed,
             &sink,
             LinkResolution::Failed {
-                reason: "대기표가 닫혔다".into(),
+                reason: "the waiting table closed".into(),
             },
         );
         assert_eq!(
             seen.lock().expect("seen poisoned").len(),
             1,
-            "사용자 kill 이 만든 실패가 배달됐다 — 그러면 사용자의 취소가 이어받기 실패로 기록되고 그              위에 정리까지 한 번 더 돈다"
+            "a failure the user's kill made was delivered — then the user's cancellation is recorded as a resume failure and cleanup runs once more on top of that"
         );
     }
 
-    /// ★통로의 핸드셰이크 상한이 매니저의 liveness 백스톱보다 **작아야** 한다★.
-    ///
-    /// 둘은 다른 일을 한다: 상한은 **사유를 만들고**(상대가 답을 안 하면 `Down` 에 그 사실을 적는다),
-    /// 백스톱은 **사유 없이 포기한다**(통로가 결말 자체를 못 내는 경우 — 매달린 쓰기). 백스톱이 더 작으면
-    /// 사유 있는 결말이 사유 없는 포기에 덮여, 화면과 「마지막 실패」에 원인이 안 남는다.
-    /// ★이 관계는 두 파일에 흩어진 두 상수 사이에만 있어 컴파일러가 못 본다★ — 한쪽만 조정하면 아무 것도
-    /// 안 깨지고 결함만 되살아나므로 여기서 잰다.
+    /// ★The link's handshake cap must be **smaller** than the manager's liveness backstop★: the cap **makes a reason** (writes the peer's
+    /// silence into `Down`); the backstop **gives up without one**. A smaller backstop would cover a reasoned outcome with a reasonless one.
+    /// ★Two constants in two files — the compiler cannot see the relation★, so it is measured here.
     #[test]
     fn the_handshake_budget_expires_before_the_managers_backstop() {
         assert!(
             HANDSHAKE_BUDGET < crate::manager::LINK_RESOLUTION_BACKSTOP,
-            "핸드셰이크 상한({HANDSHAKE_BUDGET:?})이 매니저 백스톱({:?}) 이상이다 — 그러면 사유 없는              포기가 사유 있는 거절을 덮어, 원인이 어디에도 안 남는다",
+            "the handshake cap ({HANDSHAKE_BUDGET:?}) is at least the manager backstop ({:?}) — then a give-up without a reason covers a refusal with a reason, and the cause remains nowhere",
             crate::manager::LINK_RESOLUTION_BACKSTOP
         );
     }
 
-    /// ★운영 구획에서 stdin 락을 **블로킹으로** 잡는 자리의 개수를 못 박는다★.
+    /// ★Pins the number of places in the production section that take the stdin lock **blocking**★.
     ///
-    /// 왜 개수인가 = [`writer_loop`] 의 핸드셰이크 실패 갈래가 그 락을 잡는 것이 안전한 근거가 「운영
-    /// 그래프에서 이 락을 블로킹으로 잡는 자리가 저 둘뿐이고, 그중 [`write_line`] 은 라이터만 부른다」이기
-    /// 때문이다. 셋째가 조용히 생기면 그 근거가 말없이 낡는다 — 그때 나는 것은 컴파일 에러가 아니라
-    /// **데드락**이다.
-    ///
-    /// ★이 항목은 자리를 못 박지 않고 개수만 본다★ — 위치를 박으면 줄이 밀릴 때마다 낡는다. 늘었으면
-    /// 새 자리가 어느 스레드에서 불리는지 **직접 판정한 뒤** 이 숫자를 고친다(숫자만 올리지 말 것).
-    /// 세는 규칙은 [`count_blocking_stdin_locks`] 가 갖는다. ★주석 줄은 안 센다★ — 이 파일은 본문에서
-    /// `stdin.lock()` 을 인용한다(줄 끝에 붙은 주석은 안 걸러져 넘게 셀 수 있다 — 그 방향은 빨강이라 괜찮다).
-    /// ★시험 구획은 범위 밖이다★ — 그쪽은 일부러 락을 붙드는 항목을 갖는다
-    /// ([`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`]). 그 항목이 무해한 이유는
-    /// [`AgentTransport::start`] 를 부르지 않아 라이터 스레드 자체가 안 뜬다는 것이고, `start` 를 더하는
-    /// 순간 무해가 깨진다.
+    /// The safety of the handshake failure branch of [`writer_loop`] taking that lock rests on "only those two take it blocking in the
+    /// production graph, and [`write_line`] is called only by the writer"; a quiet third would make that stale — and the result is **a
+    /// deadlock**, not a compile error. ★Counts, not positions★; if it grew, fix the number **after deciding which thread calls the new
+    /// place**. Rule: [`count_blocking_stdin_locks`]. Comment lines are not counted (trailing comments can over-count — red direction, fine).
+    /// ★The test section is out of range★: it holds the lock on purpose in
+    /// [`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`], harmless because it never calls [`AgentTransport::start`].
     #[test]
     fn the_production_blocking_stdin_locks_are_counted() {
         let src = include_str!("transport.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let code: String = production
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
@@ -7447,24 +6911,19 @@ mod tests {
         assert_eq!(
             count_blocking_stdin_locks(&code),
             2,
-            "운영 구획의 블로킹 stdin 락 취득 수가 달라졌다 — `write_line` 과 `writer_loop` 의              **핸드셰이크 실패 갈래**(기록 실패만이 아니라 왕복 실패·거절도 같은 자리를 지난다) 둘이              전부여야 한다. 늘었다면 그 새 자리가 어느 스레드에서 불리는지 먼저 판정할 것: 라이터가              `write_all` 에 매달린 동안 그 락을 블로킹으로 기다리는 자리가 생기면 데드락이다"
+            "the number of blocking stdin lock acquisitions in the production section changed — `write_line` and **the handshake failure branch** of `writer_loop` (not only record failure but round-trip failure · refusal pass the same place) must be all of them. If it grew, first decide on which thread the new place is called: if a place appears that waits for that lock blocking while the writer hangs in `write_all`, it is a deadlock"
         );
     }
 
-    /// 블로킹 stdin 락 취득 자리를 센다 — 두 꼴을 함께 센다.
+    /// Counts blocking stdin lock acquisition places — two forms together.
     ///
-    /// ① `stdin` 뒤에 공백(줄바꿈 포함)을 건너뛰고 `.lock()` 이 오는 자리.
-    /// ② 앞 글자가 식별자 글자(`_` · 영숫자)가 아닌 `lock(` 의 인자에 `stdin` 이 든 자리 — `sync::lock(` ·
-    ///    완전경로 · `use` 뒤의 맨 `lock(` · `Mutex::lock(` 을 다 잡는다. 인자 = 괄호 짝까지이고, 짝이 안
-    ///    맞으면 그 줄과 다음 두 줄이다. 오늘 운영의 두 자리는 ② 꼴이다(ADR-0275).
-    ///
-    /// 안 세는 것 = `try_lock(` 처럼 식별자에 붙은 `lock(`(기다리지 않아 이 위험에 안 든다 —
-    /// [`AgentTransport::shutdown`] 의 자리) · 인자가 빈 `.lock()`(① 몫이라 두 번 세지 않는다).
-    /// ★한 꼴만 세지 말 것★ — 다른 꼴로 쓴 셋째 자리가 개수에 안 잡혀 초록으로 지나간다. ①로 되돌아와도
-    /// 블로킹이다. ★넘게 세는 쪽으로 기운 것은 의도다★ — `stdin_buf` 처럼 이름에 `stdin` 이 든 무관한
-    /// 인자도 센다. 넘게 세면 빨강이 판정을 부르지만, 덜 세면 셋째 자리가 초록으로 지나간다.
-    /// ★못 잡는 꼴이 남아 있다★ — 수신자가 `stdin` 으로 끝나지 않는 메서드 사슬(`stdin.as_ref().lock()` ·
-    /// `(*stdin).lock()`)은 ①도 ②도 안 걸린다.
+    /// ① `.lock()` after `stdin`, skipping whitespace (incl. newlines). ② `stdin` in the argument of a `lock(` whose preceding character is
+    /// not an identifier character — `sync::lock(` · full paths · a bare `lock(` · `Mutex::lock(`; argument = up to the matching
+    /// parenthesis, else that line and the next two. Today's two production places are form ② (ADR-0275).
+    /// Not counted: `try_lock(` (does not wait — [`AgentTransport::shutdown`]) · `.lock()` with an empty argument (① covers it).
+    /// ★Do not count only one form★ (a third place in the other would pass green); ★over-counting is intended★ (`stdin_buf`): red calls
+    /// for a decision, under-counting lets a third pass. ★Uncatchable forms remain★: receivers not ending in `stdin`
+    /// (`stdin.as_ref().lock()` · `(*stdin).lock()`).
     fn count_blocking_stdin_locks(src: &str) -> usize {
         let mut found = 0;
         let mut from = 0;
@@ -7487,7 +6946,7 @@ mod tests {
         found
     }
 
-    /// `rest` = `lock(` 바로 뒤. 짝 닫는 괄호 앞까지를 돌려주고, 짝이 없으면 그 줄과 다음 두 줄을 돌려준다.
+    /// `rest` = right after `lock(`. Returns up to before the matching closing parenthesis, else that line and the next two.
     fn lock_argument(rest: &str) -> &str {
         let mut depth = 1usize;
         for (i, b) in rest.bytes().enumerate() {
@@ -7509,14 +6968,13 @@ mod tests {
         &rest[..end]
     }
 
-    /// [`count_blocking_stdin_locks`] 가 리뷰에서 재현된 거짓 통과 꼴을 하나씩 세는지 잰다.
     #[test]
     fn blocking_stdin_lock_counter_catches_every_shape() {
         let cases: &[(&str, usize)] = &[
-            // ── 오늘 운영의 두 자리 ──
+            // ── Today's two production places ──
             ("let mut guard = sync::lock(stdin);", 1),
             ("let had_stdin = sync::lock(&stdin).take().is_some();", 1),
-            // ── 옛 ② 판정이 놓친 꼴 ──
+            // ── Forms the old ② decision missed ──
             ("let g = sync::lock(stdin.as_ref());", 1),
             ("let g = sync::lock(\n    &self.stdin,\n);", 1),
             (
@@ -7528,10 +6986,10 @@ mod tests {
                 "let g = engram_dashboard_base::sync::lock(&*self.stdin);",
                 1,
             ),
-            // ── ① 꼴 — ②가 두 번 세지 않는다 ──
+            // ── Form ① — ② does not count it twice ──
             ("let g = stdin.lock();", 1),
             ("let g = stdin\n  .lock();", 1),
-            // ── 안 세는 꼴 ──
+            // ── Forms not counted ──
             ("if let Ok(g) = stdin.try_lock() {}", 0),
             ("let g = sync::lock(&self.stdout);", 0),
         ];
@@ -7539,14 +6997,14 @@ mod tests {
             assert_eq!(
                 count_blocking_stdin_locks(snippet),
                 *want,
-                "이 꼴의 개수가 틀렸다: {snippet:?}"
+                "the count for this form is wrong: {snippet:?}"
             );
         }
     }
 
-    // ── 목록 방출 · 하한 판정 · 에코 대조 · ✕ (ADR-0231) ──────────────────────
+    // ── List announcement · floor decision · echo comparison · ✕ (ADR-0231) ──────────────────────
 
-    /// 목록 사건(링 순서). ★넘김 표지(`HandedOver`)는 뺀다★ — 결말이 아니라 행의 표지라 따로 잰다([`handed`]).
+    /// List events (ring order). ★The handed-over mark (`HandedOver`) is excluded★ — a row mark, not an outcome; measured by [`handed`].
     fn list_ops(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<QueuedInputEvent> {
         seen.lock()
             .unwrap()
@@ -7559,7 +7017,6 @@ mod tests {
             .collect()
     }
 
-    /// 유저 말풍선(합성 · 되울림)의 (uuid, 본문).
     fn user_bubbles(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<(Option<String>, String)> {
         seen.lock()
             .unwrap()
@@ -7598,7 +7055,7 @@ mod tests {
     fn turn_line(job: Option<Job>) -> String {
         match job {
             Some(Job::Turn { line, .. }) => line,
-            _ => panic!("turn/start 가 나가지 않았다"),
+            _ => panic!("turn/start did not go out"),
         }
     }
 
@@ -7623,10 +7080,9 @@ mod tests {
             text.as_bytes().to_vec(),
             InputOrigin::User,
         )
-        .expect("받는다");
+        .expect("accepts");
     }
 
-    /// 되울린 유저 메시지 한 줄 — `clientId` 가 우리 id 다.
     fn echo_line(turn: &str, client_id: &str, text: &str) -> String {
         serde_json::json!({
             "method": "item/started",
@@ -7638,8 +7094,8 @@ mod tests {
         .to_string()
     }
 
-    /// ★끝 괄호의 우리 판을 읽지 않는다 · 모르면 미달★ — 모르는 판에 `clientUserMessageId` 를 실으면 에코
-    /// 대조가 조용히 깨진다.
+    /// ★Our edition in the trailing parenthesis is not read · unknown means below the floor★ — `clientUserMessageId` on an unknown edition
+    /// quietly breaks the echo comparison.
     #[test]
     fn floor_verdict_reads_cli_version_first_then_the_agent_s_own_version_and_falls_below_when_unsure(
     ) {
@@ -7647,50 +7103,75 @@ mod tests {
             format!("engram-dashboard/{v} (Windows 10.0.26200; x86_64) unknown (engram-dashboard; 0.200.0)")
         };
         for (cli, agent, want, why) in [
-            (Some("0.156.1"), String::new(), Floor::Above, "실측 판"),
-            (Some("0.140.0"), String::new(), Floor::Above, "하한 그 판"),
-            (Some("1.0.0"), String::new(), Floor::Above, "큰 판"),
+            (
+                Some("0.156.1"),
+                String::new(),
+                Floor::Above,
+                "measured edition",
+            ),
+            (
+                Some("0.140.0"),
+                String::new(),
+                Floor::Above,
+                "the floor edition itself",
+            ),
+            (
+                Some("1.0.0"),
+                String::new(),
+                Floor::Above,
+                "a large edition",
+            ),
             (
                 Some("0.139.9"),
                 ua("0.156.1"),
                 Floor::Below,
-                "cliVersion 이 먼저다",
+                "cliVersion comes first",
             ),
             (
                 Some("0.140.0-alpha.1"),
                 String::new(),
                 Floor::Below,
-                "하한의 선행판은 미달",
+                "a prerelease of the floor is below the floor",
             ),
             (
                 Some("0.141.0-alpha.1"),
                 String::new(),
                 Floor::Above,
-                "하한 위의 선행판",
+                "a prerelease above the floor",
             ),
-            (None, ua("0.156.1"), Floor::Above, "예비 = userAgent 첫 판"),
+            (
+                None,
+                ua("0.156.1"),
+                Floor::Above,
+                "fallback = first edition of userAgent",
+            ),
             (
                 None,
                 ua("0.139.0"),
                 Floor::Below,
-                "끝 괄호의 우리 판(0.200.0)을 읽지 않는다",
+                "our edition in the trailing parenthesis (0.200.0) is not read",
             ),
             (
                 Some("garbage"),
                 ua("0.141.2"),
                 Floor::Above,
-                "못 읽은 cliVersion 은 예비로",
+                "an unreadable cliVersion goes to the fallback",
             ),
-            (None, "no-version-here".into(), Floor::Below, "둘 다 실패"),
-            (None, String::new(), Floor::Below, "빈 값"),
-            (None, "/0.156.1".into(), Floor::Below, "이름 없는 앞머리"),
+            (None, "no-version-here".into(), Floor::Below, "both fail"),
+            (None, String::new(), Floor::Below, "empty value"),
+            (
+                None,
+                "/0.156.1".into(),
+                Floor::Below,
+                "a head without a name",
+            ),
         ] {
             assert_eq!(floor_verdict(cli, &agent), want, "{why}: {cli:?} / {agent}");
         }
     }
 
-    /// ★판정 전 항목은 announce 되지 않고, 판정이 난 쪽이 한꺼번에 낸다★ — 미리 올리면 미달 판정을 만난
-    /// 목록 항목이 생긴다. 연결 중 항목은 합성 말풍선이 아니다(Direct 는 `Ready` 뒤에만 선다).
+    /// ★Pre-decision items are not announced; the side the decision lands on emits them all at once★ — earlier, list items would meet a
+    /// below-floor decision. Items while connecting are not synthetic bubbles (Direct stands only after `Ready`).
     #[test]
     fn user_input_before_the_verdict_is_listed_only_once_the_verdict_is_above() {
         let h = harness();
@@ -7706,14 +7187,17 @@ mod tests {
         accept_user(&h.state, "u-3", "three");
 
         announce(&h.reader.core, &h.state, &ann);
-        assert!(h.seen.lock().unwrap().is_empty(), "판정 전에 방출했다");
+        assert!(
+            h.seen.lock().unwrap().is_empty(),
+            "announced before the decision"
+        );
         assert_eq!(ann.ack.state(), DeliveryAckState::Unknown);
 
         settle_floor(&h.reader.core, &h.state, &ann, Floor::Above);
         assert_eq!(
             list_ops(&h.seen),
             vec![queued("u-1", "one"), queued("u-3", "three")],
-            "친 순서대로 한 번씩"
+            "once each, in typing order"
         );
         assert!(
             user_bubbles(&h.seen).is_empty(),
@@ -7734,16 +7218,16 @@ mod tests {
                     (Some("m-2".to_string()), false, true),
                     (Some("u-3".to_string()), true, true),
                 ],
-                "우편은 목록에 안 오르고 식별자는 든다"
+                "mail does not go into the list but carries the identifier"
             );
         });
 
         announce(&h.reader.core, &h.state, &ann);
-        assert_eq!(list_ops(&h.seen).len(), 2, "재방출 0 건");
+        assert_eq!(list_ops(&h.seen).len(), 2, "0 re-announcements");
     }
 
-    /// ★미달 = 오늘 경로★(사용자 결정 N1 (a)) — 사건 0 건 · 식별자 없음 · `turn/start` 바이트가 이 칸이
-    /// 생기기 전과 같다 · 여는 순간 빠진다.
+    /// ★Below the floor = today's path★ (user decision N1 (a)) — 0 events · no identifier · `turn/start` bytes as before this field existed
+    /// · it leaves at the moment of opening.
     #[test]
     fn a_below_verdict_is_today_s_path_with_no_events_no_ids_and_today_s_bytes() {
         let h = harness();
@@ -7753,7 +7237,10 @@ mod tests {
         accept_user(&h.state, "u-2", "b");
         announce(&h.reader.core, &h.state, &ann);
 
-        assert!(h.seen.lock().unwrap().is_empty(), "미달 판정에 사건이 났다");
+        assert!(
+            h.seen.lock().unwrap().is_empty(),
+            "an event happened on a below-floor decision"
+        );
         assert_eq!(ann.ack.state(), DeliveryAckState::Unavailable);
         with_state(&h.state, |s| {
             for p in &s.pending {
@@ -7781,9 +7268,6 @@ mod tests {
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
     }
 
-    /// `clientUserMessageId` 는 식별자를 든 항목에만 선다 — 식별자 없는 항목의 바이트는 오늘 그대로이고
-    /// 여는 순간 빠지며, 든 항목은 `InFlight` 로 남아 에코를 기다린다. 우편은 방출 없이 id 만 싣는다. 여는 순서는 Idle
-    /// 순서다 — 사용자 글이 먼저 친 우편(식별자 없는 항목 포함)보다 앞선다(N6).
     #[test]
     fn turn_start_carries_the_client_message_id_only_for_id_bearing_items() {
         let h = harness();
@@ -7834,18 +7318,18 @@ mod tests {
         assert_eq!(
             with_state(&h.state, |s| s.pending.len()),
             2,
-            "식별자 없는 항목만 빠진다"
+            "only items without an identifier leave"
         );
         assert_eq!(
             list_ops(&h.seen),
             vec![queued("u-1", "b")],
-            "우편은 방출하지 않는다"
+            "mail is not announced"
         );
         assert!(user_bubbles(&h.seen).is_empty());
     }
 
-    /// ★같은 한가 순간 두 입력 → 첫째 Direct · 둘째 Queued★ — Direct 도 pending 에 들어 둘째가 「빔」을
-    /// 못 본다. Direct id 로는 `Queued` 가 어느 갈래에서도 나가지 않고, 한 `turn/start` 에는 한 항목이다.
+    /// ★Two inputs at the same idle moment → first Direct · second Queued★ — Direct also goes into pending, so the second cannot see "empty".
+    /// With the Direct id `Queued` goes out on no branch, and one `turn/start` is one item.
     #[test]
     fn an_idle_input_is_a_direct_bubble_and_the_next_one_in_the_same_moment_is_queued() {
         let h = harness();
@@ -7869,7 +7353,7 @@ mod tests {
             stage_of(&h.state, "d-1").as_deref(),
             Some("in-flight gen=0 turn=None")
         );
-        assert!(take(&h).is_none(), "한 turn/start 에 한 항목");
+        assert!(take(&h).is_none(), "one item per turn/start");
         assert_eq!(stage_of(&h.state, "q-2").as_deref(), Some("held"));
     }
 
@@ -7887,8 +7371,8 @@ mod tests {
         assert!(take(&h).is_none());
     }
 
-    /// ★통로 합성 말풍선 뒤 턴 표는 한가 그대로★(ADR-0127) — 보통 문으로 내면 분류기가 진행으로 적고,
-    /// 그 `turn/start` 가 거절되면 열린 적 없는 턴이 「진행 중」으로 남아 우편이 막힌다.
+    /// ★After the link's synthetic bubble the turn table stays idle★ (ADR-0127) — the ordinary door would count it as progress, and a
+    /// refused `turn/start` would leave a never-opened turn "in progress", blocking mail.
     #[test]
     fn the_direct_bubble_leaves_the_turn_table_idle() {
         let h = fact_harness();
@@ -7900,12 +7384,12 @@ mod tests {
         assert_eq!(user_bubbles(&h.seen).len(), 1);
         assert!(
             !h.table.is_in_turn(h.id, 1),
-            "합성 말풍선이 「턴 중」을 켰다"
+            "the synthetic bubble turned 「mid-turn」 on"
         );
     }
 
-    /// ★라이터는 방출 전 머리를 건너뛰지 않는다★ — 넘기기가 방출을 앞지르면 받음이 명부가 모르는 id 로
-    /// 버려지고, 건너뛰면 친 순서가 깨진다.
+    /// ★The writer does not skip a pre-announce head★ — a handover outrunning the announcement would drop the receipt for an id the
+    /// registry does not know, and skipping would break typing order.
     #[test]
     fn the_writer_waits_for_an_unannounced_head_instead_of_skipping_it() {
         let h = harness();
@@ -7916,7 +7400,7 @@ mod tests {
         with_state(&h.state, |s| s.push_legacy(b"mail"));
         assert!(
             take(&h).is_none(),
-            "방출 전 머리를 건너뛰고 뒤 항목이 나갔다"
+            "skipped the pre-announce head and a later item went out"
         );
 
         announce(&h.reader.core, &h.state, &ann);
@@ -7925,8 +7409,8 @@ mod tests {
         assert_eq!(v["params"]["input"][0]["text"], "first");
     }
 
-    /// 성공 응답은 실은 항목에 턴 id 를 적고 응답 대기만 푼다(받음이 아니다). ★세대 가림★ — 표식이 다른
-    /// 턴의 늦은 응답은 그 항목을 건드리지 않는다.
+    /// A success response writes the turn id onto its item and only releases the response wait (not receipt). ★Generation masking★ — a late
+    /// response of a turn with a different marker does not touch it.
     #[test]
     fn a_turn_start_reply_marks_its_carrier_and_a_stale_reply_moves_nothing() {
         let mut h = harness();
@@ -7936,7 +7420,7 @@ mod tests {
         accept_user(&h.state, "u-1", "hi");
         announce(&h.reader.core, &h.state, &ann);
         let Some(Job::Turn { id, seq, .. }) = take(&h) else {
-            panic!("turn/start 가 나가지 않았다")
+            panic!("turn/start did not go out")
         };
         assert!(h
             .pending
@@ -7969,12 +7453,12 @@ mod tests {
         assert_eq!(
             stage_of(&h.state, "x").as_deref(),
             Some("in-flight gen=7 turn=None"),
-            "다른 표식의 응답이 항목을 움직였다"
+            "a response of a different marker moved the item"
         );
     }
 
-    /// ★받음은 말풍선 바로 앞이고, 어느 단계에서 왔든 pending 에서 뺀다(받음이 이긴다)★ — 쥔 항목이면
-    /// 다시 나가지 않는다. 열린 턴이 없으니 받음 뒤에 턴 경계가 선다([`Reader::note_delivered`]).
+    /// ★Receipt wins at any stage★ — a held item does not go out again; with no open turn a turn boundary stands after the receipt
+    /// ([`Reader::note_delivered`]).
     #[test]
     fn our_echo_is_delivered_before_its_bubble_and_leaves_pending_whatever_the_stage() {
         for stage in ["held", "in-flight"] {
@@ -8003,20 +7487,18 @@ mod tests {
                     assert_eq!(kind, "user", "{stage}");
                     assert!(json.contains(r#""uuid":"ours-1""#), "{stage}: {json}");
                 }
-                other => panic!("{stage}: 받음 + 말풍선이 아니다: {other:?}"),
+                other => panic!("{stage}: not receipt + bubble: {other:?}"),
             }
             assert!(
                 with_state(&h.state, |s| s.pending.is_empty()),
-                "{stage}: 받은 글이 pending 에 남았다"
+                "{stage}: received text remained in pending"
             );
             if stage == "held" {
-                assert!(take(&h).is_none(), "받은 글이 다시 나갔다");
+                assert!(take(&h).is_none(), "received text went out again");
             }
         }
     }
 
-    /// 통로가 모르는 id 의 받음(우편 · 이미 결말)은 pending 을 건드리지 않는다 — 사건은 그대로 흐른다(명부의
-    /// 묘비가 받는다).
     #[test]
     fn an_echo_for_an_id_we_do_not_hold_leaves_pending_alone() {
         let mut h = harness_with_real_decoder();
@@ -8036,7 +7518,6 @@ mod tests {
         assert_eq!(stage_of(&h.state, "mine").as_deref(), Some("held"));
     }
 
-    /// ✕ on `Held` → `Withdrawn` · `Dropped{Withdrawn}` · 벤더 요청 0 건. 겹친 둘째 ✕ 는 `NotHeld`.
     #[test]
     fn withdrawing_a_held_listed_item_drops_it_and_sends_nothing() {
         let h = harness();
@@ -8057,18 +7538,17 @@ mod tests {
         );
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
         with_state(&h.state, |s| s.turn = TurnState::Idle);
-        assert!(take(&h).is_none(), "거둔 글이 나갔다");
+        assert!(take(&h).is_none(), "withdrawn text went out");
         assert!(outbox_lines(&h.state).is_empty());
         assert_eq!(
             withdraw_item(&h.state, Some(&h.reader.core), "q-1"),
             Withdraw::NotHeld,
-            "겹친 둘째 ✕"
+            "overlapping second ✕"
         );
-        assert_eq!(list_ops(&h.seen).len(), 2, "둘째 ✕ 가 사건을 냈다");
+        assert_eq!(list_ops(&h.seen).len(), 2, "the second ✕ emitted an event");
     }
 
-    /// ★방출 전 항목의 ✕ → 링 순서 `Queued` → `Dropped`★ — 죽음 표시만 달고, 방출하는 쪽이 `Queued` 바로
-    /// 뒤에 잇는다.
+    /// ★✕ on a pre-announce item → ring order `Queued` → `Dropped`★ — only the death mark is attached; the announcing side follows `Queued`.
     #[test]
     fn withdrawing_before_the_announcement_lands_the_drop_right_after_the_queued_line() {
         let h = harness();
@@ -8084,12 +7564,12 @@ mod tests {
         );
         assert!(
             list_ops(&h.seen).is_empty(),
-            "방출 전에 Dropped 가 링에 섰다"
+            "Dropped stood in the ring before the announcement"
         );
         assert_eq!(
             withdraw_item(&h.state, Some(&h.reader.core), "q-1"),
             Withdraw::NotHeld,
-            "첫 ✕ 가 이미 뺐다"
+            "the first ✕ already removed it"
         );
 
         announce(&h.reader.core, &h.state, &ann);
@@ -8100,8 +7580,8 @@ mod tests {
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
     }
 
-    /// 목록 밖(Direct · 우편 · 판정 전)과 모르는 id 는 `NotHeld` 이고 사건이 없다. 넘긴 목록 항목(여기서는
-    /// `turn/start` 가 실은 것)은 거두지 못한다 — `TooLate` 와 취소 접수 · 「못 뺐다」(ADR-0231 · TRD §5-5 「✕」).
+    /// Outside the list (Direct · mail · pre-decision) and unknown ids are `NotHeld` with no event. A handed-over list item cannot be
+    /// withdrawn — `TooLate` with the cancellation receipt (ADR-0231 · TRD §5-5 「✕」).
     #[test]
     fn only_a_listed_held_item_can_be_withdrawn() {
         let before = harness();
@@ -8109,7 +7589,7 @@ mod tests {
         assert_eq!(
             withdraw_item(&before.state, Some(&before.reader.core), "p-1"),
             Withdraw::NotHeld,
-            "판정 전 항목은 목록에 없다"
+            "pre-decision items are not in the list"
         );
 
         let h = harness();
@@ -8145,11 +7625,11 @@ mod tests {
                 "{id}"
             );
         }
-        assert_eq!(list_ops(&h.seen), expected, "NotHeld 가 사건을 냈다");
+        assert_eq!(list_ops(&h.seen), expected, "NotHeld emitted an event");
         assert_eq!(
             withdraw_item(&h.state, Some(&h.reader.core), "q-2"),
             Withdraw::TooLate,
-            "넘긴 항목"
+            "handed-over item"
         );
         expected.extend([
             QueuedInputEvent::CancelRequested { id: "q-2".into() },
@@ -8162,9 +7642,8 @@ mod tests {
         assert_eq!(with_state(&h.state, |s| s.pending.len()), 3);
     }
 
-    // ── 턴 끝 처분 v1 (ADR-0231 · TRD §5-5) ───────────────────────────────
+    // ── Turn-end disposal v1 (ADR-0231 · TRD §5-5) ───────────────────────────────
 
-    /// 판정(`Above`)이 난 연결 — 목록 · 합성 말풍선 · 에코 대조가 선다.
     fn above(h: &Harness) -> Arc<Announcer> {
         make_ready(&h.state, "T");
         let ann = announcer();
@@ -8172,10 +7651,9 @@ mod tests {
         ann
     }
 
-    /// 가장 오래된 `Held` 로 턴을 열고 그 `turn/start` 의 대기표를 건다 — 라이터가 하는 그대로.
     fn open_turn(h: &Harness) -> (i64, u64) {
         let Some(Job::Turn { id, seq, .. }) = take(h) else {
-            panic!("turn/start 가 나가지 않았다")
+            panic!("turn/start did not go out")
         };
         assert!(h
             .pending
@@ -8197,8 +7675,8 @@ mod tests {
         })
     }
 
-    /// 목록 사건 · 말풍선 · 턴 경계를 링 순서대로 — 처분 사건이 경계보다 앞서는지까지 본다. ★넘김 표지(`HandedOver`)는
-    /// 뺀다★ — 결말이 아니라 행의 표지라 따로 잰다([`handed`]).
+    /// List events · bubbles · turn boundaries in ring order — also checks disposal events come before the boundary. ★The handed-over mark
+    /// is excluded★ (a row mark; measured by [`handed`]).
     fn trace(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<String> {
         seen.lock()
             .unwrap()
@@ -8233,7 +7711,6 @@ mod tests {
             .collect()
     }
 
-    /// 넘김 표지만 링 순서대로 — `sent <id>` · `held <id>`.
     fn handed(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<String> {
         seen.lock()
             .unwrap()
@@ -8260,18 +7737,14 @@ mod tests {
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum Whose {
-        /// 턴 중에 친 글 — 목록에 선다.
         Listed,
-        /// 한가할 때 친 글 — 합성 말풍선 · 목록 밖.
         Direct,
         Mail,
     }
 
     #[derive(Debug, Clone, Copy)]
     enum End {
-        /// 응답 뒤 `turn/completed(status)`.
         Completed(&'static str),
-        /// 응답 **앞**의 `turn/completed(status)` — 응답이 푸는 자리에서 끝난다.
         Early(&'static str),
         ErrorReply,
         WriteFailed,
@@ -8280,8 +7753,8 @@ mod tests {
         LongTurnId,
     }
 
-    /// 항목 하나를 넘긴 턴을 `end` 로 끝내고 그 뒤의 흔적(턴을 연 뒤부터)을 돌려준다. ★모든 끝에서 턴은
-    /// 닫히고 pending 에 `InFlight` 가 없어야 한다★(TRD §5-5 불변식).
+    /// Ends a turn that handed over one item with `end` and returns the traces after it. ★At every end the turn must be closed and pending
+    /// must have no `InFlight`★ (TRD §5-5 invariant).
     fn end_a_turn(whose: Whose, end: End) -> (Harness, &'static str, Vec<String>) {
         let mut h = harness_with_real_decoder();
         let ann = above(&h);
@@ -8314,17 +7787,16 @@ mod tests {
         assert_eq!(
             turn_seq(&h.state),
             None,
-            "{whose:?}/{end:?}: 턴이 안 끝났다"
+            "{whose:?}/{end:?}: the turn did not end"
         );
         assert!(
             !in_flight_left(&h.state),
-            "{whose:?}/{end:?}: 끝난 턴의 InFlight 가 남았다"
+            "{whose:?}/{end:?}: the InFlight of the ended turn remained"
         );
         let t = trace(&h.seen);
         (h, id, t)
     }
 
-    /// 표식 `seq` 의 턴(그 `turn/start` 요청 `request`)을 `end` 로 끝낸다 — 라이터·리더가 하는 그대로.
     fn finish_turn(h: &mut Harness, request: i64, seq: u64, end: End) {
         match end {
             End::Completed(status) => {
@@ -8335,7 +7807,7 @@ mod tests {
             End::Early(status) => {
                 h.reader
                     .handle_line(completed_line("T", "U1", status).as_bytes());
-                assert_eq!(turn_seq(&h.state), Some(seq), "응답 전에 끝났다");
+                assert_eq!(turn_seq(&h.state), Some(seq), "ended before the response");
                 reply(h, request, "U1");
             }
             End::ErrorReply => h.reader.handle_line(
@@ -8352,7 +7824,11 @@ mod tests {
                     seq,
                     &PtyError::WriteFailed("broken pipe".into()),
                 );
-                assert_eq!(h.pending.len(), 0, "쓰지 못한 요청의 대기표가 남았다");
+                assert_eq!(
+                    h.pending.len(),
+                    0,
+                    "the waiting entry of the request that could not be written remained"
+                );
             }
             End::Deadline => {
                 h.pending.forget(request);
@@ -8371,76 +7847,76 @@ mod tests {
         }
     }
 
-    /// 목록 밖 항목이 사건 없이 빠졌다 — pending 이 비어 다음 한가 입력이 다시 Direct 가 된다.
     fn assert_left_silently(h: Harness, whose: Whose, end: End, t: &[String], ending: &str) {
         assert_eq!(t, [ending], "{whose:?}/{end:?}");
         assert!(
             with_state(&h.state, |s| s.pending.is_empty()),
-            "{whose:?}/{end:?}: 목록 밖 항목이 pending 에 남았다"
+            "{whose:?}/{end:?}: an item outside the list remained in pending"
         );
         accept_user(&h.state, "next", "again");
         announce(&h.reader.core, &h.state, &announcer());
         assert_eq!(
             trace(&h.seen).last().map(String::as_str),
             Some("bubble next"),
-            "{whose:?}/{end:?}: 뒤 한가 입력이 Direct 가 아니다"
+            "{whose:?}/{end:?}: the following idle input is not Direct"
         );
     }
 
-    /// 넘긴 사용자 글 `id` 가 쥔 자리로 돌아왔다 — 사건 0 건(목록 행 · 그린 말풍선 그대로) · 멈춤 없음 · 다음 턴을
-    /// **한 번** 탄다.
     fn assert_held_again(h: Harness, whose: Whose, end: End, id: &str, t: &[String], ending: &str) {
         let at = format!("{whose:?}/{end:?}");
-        assert_eq!(t, [ending], "{at}: 목록 사건이 났다");
+        assert_eq!(t, [ending], "{at}: a list event happened");
         assert_eq!(stage_of(&h.state, id).as_deref(), Some("held"), "{at}");
         let rows: Vec<String> = match whose {
             Whose::Listed => vec![id.to_string()],
             _ => Vec::new(),
         };
-        assert_eq!(row_ids(&h), rows, "{at}: 목록이 바뀌었다");
-        assert!(!with_state(&h.state, |s| s.halted), "{at}: 멈춤이 섰다");
+        assert_eq!(row_ids(&h), rows, "{at}: the list changed");
+        assert!(!with_state(&h.state, |s| s.halted), "{at}: a halt stood");
         let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
         assert_eq!(
             v["params"]["clientUserMessageId"], id,
-            "{at}: 돌아온 글이 다음 턴을 안 탔다"
+            "{at}: the returned text did not ride the next turn"
         );
-        let seq = turn_seq(&h.state).expect("턴이 열렸다");
+        let seq = turn_seq(&h.state).expect("a turn opened");
         assert_eq!(
             stage_of(&h.state, id),
             Some(format!("in-flight gen={seq} turn=None")),
             "{at}"
         );
-        assert!(take(&h).is_none(), "{at}: 두 번 나갔다");
+        assert!(take(&h).is_none(), "{at}: went out twice");
     }
 
-    /// 넘긴 사용자 글 `id` 가 실패 끝 뒤 쥔 자리로 돌아와 멈춤 뒤에서 기다린다 — 사건 0 건(목록 행 · 그린 말풍선 그대로) ·
-    /// 멈춘 동안 턴 0 건 · 다음 사용자 글이 멈춤을 풀면 돌아온 글이 그 글보다 먼저 다음 턴을 **한 번** 탄다(남은 것이 먼저).
+    /// The handed-over user text `id` returns after a failure end and waits behind the halt — 0 events · 0 turns while halted · when the
+    /// next user text lifts the halt, the returned text rides the next turn **once**, before that text (what remains goes first).
     fn assert_held_behind_the_halt(h: Harness, whose: Whose, end: End, id: &str, t: &[String]) {
         let at = format!("{whose:?}/{end:?}");
-        assert_eq!(t, ["end failed"], "{at}: 목록 사건이 났다");
+        assert_eq!(t, ["end failed"], "{at}: a list event happened");
         assert_eq!(stage_of(&h.state, id).as_deref(), Some("held"), "{at}");
         let rows: Vec<String> = match whose {
             Whose::Listed => vec![id.to_string()],
             _ => Vec::new(),
         };
-        assert_eq!(row_ids(&h), rows, "{at}: 목록이 바뀌었다");
-        assert!(with_state(&h.state, |s| s.halted), "{at}: 멈춤이 안 섰다");
-        assert!(take(&h).is_none(), "{at}: 멈춤 중에 턴이 열렸다");
+        assert_eq!(row_ids(&h), rows, "{at}: the list changed");
+        assert!(
+            with_state(&h.state, |s| s.halted),
+            "{at}: the halt did not stand"
+        );
+        assert!(take(&h).is_none(), "{at}: a turn opened during the halt");
         accept_user(&h.state, "next", "again");
         announce(&h.reader.core, &h.state, &announcer());
         let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
         assert_eq!(
             v["params"]["clientUserMessageId"], id,
-            "{at}: 돌아온 글이 멈춤을 푼 글보다 먼저 안 나갔다"
+            "{at}: the returned text did not go out before the text that lifted the halt"
         );
-        assert!(take(&h).is_none(), "{at}: 두 번 나갔다");
+        assert!(take(&h).is_none(), "{at}: went out twice");
     }
 
-    /// ★에코 없이 끝난 턴의 사용자 글(목록 · Direct)은 끝의 모양과 무관하게 쥔 자리로 돌아간다★(사용자 결정 2026-09-26 · ADR-0235
-    /// — 「실패는 지워」를 대신한다). 결말을 말한 끝(`completed` · 뜻 모를 status)과 끊기는 다음 턴을 곧바로 한 번 태우고
-    /// (멈춤 없음), 실패 끝(`failed` · `turn/start` 의 쓰기 실패 · 오류 응답 · 시한 · 해독 실패 · 긴 turn id)은 멈춤이 서서
-    /// 다음 사용자 글까지 기다린다 — 어느 쪽도 사건이 없다(목록 행 · 그린 말풍선 그대로). 응답 뒤 · 응답 앞(이른 종료 풀기)
-    /// 모두 같다. 우편은 사건 없이 빠진다.
+    /// ★User text of a turn that ended without an echo returns to the held place whatever the end shape★ (user decision 2026-09-26 ·
+    /// ADR-0235 — replaces 「erase on failure」). Outcome-speaking ends (`completed` · unknown status) and interruption let it ride the
+    /// next turn at once (no halt); failure ends (`failed` · `turn/start` write failure · error response · deadline · decode failure · long
+    /// turn id) set the halt and it waits for the next user text. No events either way; before/after the response and early-end release are
+    /// the same. Mail leaves without an event.
     #[test]
     fn a_turn_that_ends_without_our_echo_returns_its_user_item_to_held_whatever_the_close() {
         for (end, ending) in [
@@ -8475,8 +7951,6 @@ mod tests {
         }
     }
 
-    /// 쥔 자리로 돌아간 글마다 `held_again` 계측 줄이 하나다 — 그 끝의 모양과 (알면) 넘긴 턴의 id 를 싣는다. 실패 끝도
-    /// 쥔 자리로 돌리므로 줄이 선다 — 턴 id 를 받기 전에 거절된 `turn/start` 의 글은 `turn_id` 가 없다.
     #[test]
     fn a_return_to_held_writes_one_held_again_line_with_the_close() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -8517,9 +7991,9 @@ mod tests {
         );
     }
 
-    /// ★끊기는 그 턴에 넘긴 목록 항목을 쥔 자리로 되돌리고 쥔 항목은 그대로 둔다★(사용자 결정 2026-09-26 — 끊기 = 쥔
-    /// 글을 곧바로 새 턴으로) — announce 전 항목도 `Queued` 만 서고 버려지지 않는다. 쥔 우편 · 식별자 없는 항목도
-    /// 그대로이고 멈춤은 안 서며, 다음 Idle 은 가장 오래된 사용자 글(되돌린 글)부터 친 순서로 연다.
+    /// ★An interruption returns that turn's handed-over list items to the held place and leaves held items as is★ (user decision
+    /// 2026-09-26 — held text goes right away into a new turn) — pre-announce items only get `Queued`, not dropped. Held mail · items
+    /// without an identifier stay, no halt, and the next Idle opens from the oldest user text in typing order.
     #[test]
     fn an_interrupt_returns_the_handed_over_item_to_held_and_keeps_held_items_for_the_next_idle() {
         let mut h = harness_with_real_decoder();
@@ -8550,7 +8024,7 @@ mod tests {
         assert_eq!(
             trace(&h.seen)[1..],
             ["queued q-3"],
-            "announce 전 쥔 항목이 버려졌다"
+            "a held pre-announce item was dropped"
         );
 
         for id in ["q-1", "q-2", "q-3", "m-1"] {
@@ -8559,15 +8033,17 @@ mod tests {
         assert_eq!(
             with_state(&h.state, |s| s.pending.len()),
             5,
-            "끊기가 항목을 뺐다"
+            "the interruption removed an item"
         );
         assert_eq!(row_ids(&h), ["q-1", "q-2", "q-3"]);
-        assert!(!with_state(&h.state, |s| s.halted), "끊기가 멈춤을 세웠다");
+        assert!(
+            !with_state(&h.state, |s| s.halted),
+            "the interruption set a halt"
+        );
         let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
         assert_eq!(v["params"]["clientUserMessageId"], "q-1");
     }
 
-    /// 에코가 턴 끝보다 먼저 왔으면 처분할 것이 없다 — 받음이 이긴다.
     #[test]
     fn an_echo_before_the_turn_end_leaves_nothing_to_dispose() {
         let mut h = harness_with_real_decoder();
@@ -8594,8 +8070,8 @@ mod tests {
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
     }
 
-    /// ★쥔 자리로 돌아간 글에 옛 요청의 에코가 늦게 오면 받음이다 — 다시 나가지 않는다★(결말을 말한 끝 · 끊기 모두).
-    /// 열린 턴이 없으니 받음 뒤에 경계가 선다.
+    /// ★A late echo for text returned to the held place is receipt — it does not go out again★ (both outcome-speaking ends · interruption).
+    /// No open turn, so a boundary stands after the receipt.
     #[test]
     fn a_late_echo_after_the_return_to_held_delivers_the_item_and_it_is_not_sent_again() {
         for end in [End::Completed("completed"), End::Completed("interrupted")] {
@@ -8610,19 +8086,17 @@ mod tests {
             assert_eq!(
                 trace(&h.seen)[1..],
                 ["delivered q-1", "bubble q-1", "end completed"],
-                "{end:?}: 열린 턴 밖의 받음 뒤에 경계가 안 섰다"
+                "{end:?}: no boundary stood after a receipt outside the open turn"
             );
             assert!(with_state(&h.state, |s| s.pending.is_empty()), "{end:?}");
             assert!(
                 row_ids(&h).is_empty(),
-                "{end:?}: 늦은 받음이 목록을 닫지 않았다"
+                "{end:?}: the late receipt did not close the list"
             );
-            assert!(take(&h).is_none(), "{end:?}: 받은 글이 다시 나갔다");
+            assert!(take(&h).is_none(), "{end:?}: received text went out again");
         }
     }
 
-    /// 이미 다시 넘긴 뒤에 옛 요청의 에코가 오면 그것이 받음이고, 새 요청의 에코는 모르는 id 로 지나간다 — 목록은 한
-    /// 번 닫히고 그 글은 세 번째로 나가지 않는다.
     #[test]
     fn a_late_echo_of_the_old_send_after_the_re_send_delivers_the_item_once() {
         let (mut h, _, _) = end_a_turn(Whose::Listed, End::Completed("completed"));
@@ -8630,7 +8104,7 @@ mod tests {
         assert_eq!(
             stage_of(&h.state, "q-1"),
             Some(format!("in-flight gen={seq} turn=None")),
-            "돌아온 글이 다음 턴을 안 탔다"
+            "the returned text did not ride the next turn"
         );
         reply(&mut h, request, "U2");
         h.reader
@@ -8638,7 +8112,7 @@ mod tests {
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
         assert!(
             row_ids(&h).is_empty(),
-            "옛 요청의 받음이 목록을 닫지 않았다"
+            "the old request's receipt did not close the list"
         );
 
         h.reader
@@ -8648,10 +8122,9 @@ mod tests {
         assert_eq!(turn_seq(&h.state), None);
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
         assert!(row_ids(&h).is_empty());
-        assert!(take(&h).is_none(), "받은 글이 또 나갔다");
+        assert!(take(&h).is_none(), "received text went out once more");
     }
 
-    /// 쥔 자리로 돌아간 동안 커널의 「대기 입력 있음」이 참이다(명부에 서 있다) — 에코가 닫으면 거짓.
     #[test]
     fn an_item_returned_to_held_keeps_the_kernel_s_inputs_pending_true_until_it_leaves() {
         let id = AgentId::new_v4();
@@ -8682,7 +8155,7 @@ mod tests {
         assert_eq!(
             table.get(id, 1),
             Some(true),
-            "쥔 자리로 돌아갔는데 목록이 빈 것으로 적혔다"
+            "it returned to the held place but the list was written as empty"
         );
 
         h.reader
@@ -8690,8 +8163,6 @@ mod tests {
         assert_eq!(table.get(id, 1), Some(false));
     }
 
-    /// 스트림 닫힘은 통로가 처분하지 않는다 — 목록 항목(넘긴 것 · 쥔 것 · 쥔 자리로 돌아온 것)은 코어의 종료 합성이
-    /// `Dropped{AgentEnded}` 로 **한 번씩** 닫는다.
     #[test]
     fn a_stream_end_leaves_the_list_to_the_core_s_synthesis_exactly_once() {
         let (mut h, _, _) = end_a_turn(Whose::Listed, End::Completed("completed"));
@@ -8711,7 +8182,7 @@ mod tests {
         });
         assert!(
             trace(&h.seen).is_empty(),
-            "스트림 닫힘에 통로가 사건을 냈다"
+            "the link emitted an event on stream close"
         );
         h.reader.core.finish(TerminalReason::StreamClosed);
         let mut got = trace(&h.seen);
@@ -8726,28 +8197,26 @@ mod tests {
         );
     }
 
-    /// 하한 판정은 기록이 돌아온 **뒤**, 이력보다 **먼저** 적는다 — 앞당기면 기록 실패 갈래가 이미 목록에
-    /// 오른 항목을 사건 없이 지우고, 이력 뒤로 미루면 목록이 늦게 뜨는 창이 이력 페이징만큼 늘어난다.
+    /// The floor decision is written **after** the record returns and **before** the history — earlier, the record failure branch would
+    /// erase list items without an event; after the history, the late-list window would grow by the paging.
     #[test]
     fn the_floor_is_settled_after_the_session_id_is_recorded_and_before_the_history() {
         let body = writer_loop_code();
         let recorded = body
             .find("record_session_id(")
-            .expect("`record_session_id(` 호출이 writer_loop 에 없다");
+            .expect("there is no `record_session_id(` call in writer_loop");
         let settled = body
             .find("settle_floor(")
-            .expect("`settle_floor(` 호출이 writer_loop 에 없다");
+            .expect("there is no `settle_floor(` call in writer_loop");
         let hydrated = body
             .find("hydrate_history(")
-            .expect("`hydrate_history(` 호출이 writer_loop 에 없다");
+            .expect("there is no `hydrate_history(` call in writer_loop");
         assert!(
             recorded < settled && settled < hydrated,
-            "하한 판정 자리가 기록 뒤 · 이력 앞이 아니다"
+            "the floor decision place is not after the record · before the history"
         );
     }
 
-    /// 조립점이 세션에 실을 `Arc` 는 판정이 채우는 **바로 그것**이다 — 따로 만들면 세션과 통로가 서로 다른
-    /// 값을 본다.
     #[cfg(windows)]
     #[test]
     fn the_transport_hands_out_the_very_ack_its_verdict_fills() {
@@ -8761,8 +8230,6 @@ mod tests {
         t.shutdown();
     }
 
-    /// stdin 락을 블로킹 write 가 쥐고 있어도 `shutdown` 이 완료된다 — 순서를 뒤집으면(stdin 을 kill
-    /// 보다 먼저 닫으려 하면) 이 항목이 타임아웃으로 잡는다.
     #[cfg(windows)]
     #[test]
     fn shutdown_completes_even_if_a_write_blocks_on_a_full_pipe() {
@@ -8783,7 +8250,7 @@ mod tests {
         while !shutdown_thread.is_finished() {
             assert!(
                 Instant::now() < deadline,
-                "shutdown 이 10s 안에 안 끝났다 — stdin 락 데드락 회귀"
+                "shutdown did not end within 10s — stdin lock deadlock regression"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -8791,9 +8258,8 @@ mod tests {
         let _ = writer.join();
     }
 
-    // ── 도구 끝 계기 · 계측 줄 (ADR-0231 · ADR-0235) ─────────────
+    // ── Tool-end trigger · trace lines (ADR-0231 · ADR-0235) ─────────────
 
-    /// item 알림 한 줄 — 우리 thread(`T`)의 `turn` 턴.
     fn item_line(method_name: &str, turn: &str, kind: &str, id: &str) -> String {
         serde_json::json!({
             "method": method_name,
@@ -8813,8 +8279,8 @@ mod tests {
             .handle_line(item_line(method::ITEM_COMPLETED, turn, kind, id).as_bytes());
     }
 
-    /// 우리 턴의 도구가 막 끝난 자리에서 라이터가 집을 steer — 도구 끝 계기를 [`Reader::note_tool_item`] 처럼 세우고
-    /// 집는다(`None` = 넘길 것이 없다). [`next_job`] 의 훑기 대기를 거치지 않는다.
+    /// The steer the writer picks right where our turn's tool just ended — sets the trigger like [`Reader::note_tool_item`] and picks it
+    /// (`None` = nothing to hand over). It does not go through [`next_job`]'s sweep wait.
     fn steer_at_tool_end(h: &Harness) -> Option<Steer> {
         with_state(&h.state, |s| {
             s.steer_due = true;
@@ -8822,7 +8288,7 @@ mod tests {
         })
     }
 
-    /// 라이터가 지금 집을 steer — 계기를 세우지 않고 서 있던 것만 쓴다(`None` = 라이터는 잠든다).
+    /// The steer the writer would pick now — does not set the trigger, uses only what stood (`None` = the writer sleeps).
     fn steer_next(h: &Harness) -> Option<Steer> {
         with_state(&h.state, |s| take_steer_locked(s, &h.next_id))
     }
@@ -8831,7 +8297,7 @@ mod tests {
         with_state(state, |s| s.steer_due)
     }
 
-    /// 라이터가 집는 다음 일이 steer 여야 한다 — 계기가 서 있으면 [`next_job`] 은 기다리지 않고 곧바로 돌아온다.
+    /// The next job the writer picks must be a steer — with the trigger standing, [`next_job`] returns at once without waiting.
     fn next_steer_job(h: &Harness, why: &str) -> Steer {
         match next_job(&h.state, &h.next_id) {
             Some(Job::Steer(s)) => s,
@@ -8839,9 +8305,9 @@ mod tests {
         }
     }
 
-    /// ★우리 지금 턴의 도구 항목 끝만 계기다★ — 도구 아닌 항목의 끝(출력 · 되울림 · 도구인지 근거 없는 아는 변형 · 모르는
-    /// 변형) · 도구의 시작 · 다른 턴 id(끊긴 턴 도구의 늦은 완료 — M6) · 남의 thread 의 도구 끝은 아무것도 안 넘긴다(쥔
-    /// 글은 쥔 채로). 같은 턴의 도구 끝이 오면 그제야 넘긴다.
+    /// ★Only the end of a tool item of our current turn is a trigger★ — a non-tool item end (output · echo · known variant with no grounds
+    /// to be a tool · unknown variant) · a tool start · another turn id (late completion of an interrupted turn's tool — M6) · another
+    /// thread's tool end hand over nothing (held text stays).
     #[test]
     fn only_a_tool_item_ending_in_our_current_turn_arms_the_steer() {
         let mut h = harness();
@@ -8862,31 +8328,34 @@ mod tests {
             item_completed(&mut h, "t1", kind, "o");
             assert!(
                 !steer_due(&h.state),
-                "{kind}: 도구 아닌 항목의 끝이 계기를 세웠다"
+                "{kind}: the end of a non-tool item set the trigger"
             );
         }
         item_started(&mut h, "t1", "commandExecution", "c");
-        assert!(!steer_due(&h.state), "도구의 시작이 계기를 세웠다");
+        assert!(!steer_due(&h.state), "the start of a tool set the trigger");
         item_completed(&mut h, "t0", "commandExecution", "old");
-        assert!(!steer_due(&h.state), "다른 턴 id 의 도구 끝");
+        assert!(!steer_due(&h.state), "a tool end of another turn id");
         let foreign = serde_json::json!({
             "method": method::ITEM_COMPLETED,
             "params": {"threadId": "X", "turnId": "t1", "item": {"type": "commandExecution", "id": "c"}},
         })
         .to_string();
         h.reader.handle_line(foreign.as_bytes());
-        assert!(!steer_due(&h.state), "남의 thread 의 도구 끝");
-        assert!(steer_next(&h).is_none(), "계기 없이 넘겼다");
+        assert!(!steer_due(&h.state), "a tool end of another thread");
+        assert!(steer_next(&h).is_none(), "handed over without a trigger");
         assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
 
         item_completed(&mut h, "t1", "commandExecution", "c");
-        assert!(steer_due(&h.state), "우리 턴의 도구 끝이 계기를 안 세웠다");
-        let s = steer_next(&h).expect("도구 끝이 쥔 글을 안 풀었다");
+        assert!(
+            steer_due(&h.state),
+            "a tool end of our turn did not set the trigger"
+        );
+        let s = steer_next(&h).expect("the tool end did not release the held text");
         assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
     }
 
-    /// ★턴 id 를 알기 전의 도구 끝은 계기가 아니다★ — `expectedTurnId` 없이는 넘길 수단이 없다. 그 턴의 id 로 온 줄이어도
-    /// 응답이 그 id 를 주기 전이면 무시되고, 쥔 글은 응답이 턴 id 를 주는 자리에서 넘어간다([`Reader::resolve`]).
+    /// ★A tool end before the turn id is known is not a trigger★ — no `expectedTurnId`, nothing to hand over; held text is handed over where
+    /// the response gives the turn id ([`Reader::resolve`]).
     #[test]
     fn a_tool_end_before_the_turn_id_is_known_arms_nothing() {
         let mut h = harness();
@@ -8898,18 +8367,21 @@ mod tests {
         announce(&h.reader.core, &h.state, &ann);
         item_started(&mut h, "t1", "commandExecution", "c");
         item_completed(&mut h, "t1", "commandExecution", "c");
-        assert!(!steer_due(&h.state), "턴 id 전의 도구 끝이 계기를 세웠다");
+        assert!(
+            !steer_due(&h.state),
+            "a tool end before the turn id set the trigger"
+        );
         assert!(steer_next(&h).is_none());
         assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
 
         reply(&mut h, request, "t1");
-        let s = next_steer_job(&h, "턴 id 가 쥔 글을 안 넘겼다");
+        let s = next_steer_job(&h, "the turn id did not hand over the held text");
         assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
         assert_eq!(steer_params(&s)["expectedTurnId"], "t1");
     }
 
-    /// 도구 끝은 기다리는 라이터를 곧바로 깨운다 — 깨움이 없으면 라이터는 훑기 간격([`SWEEP_INTERVAL`])이 다 차서야
-    /// 계기를 본다(도구 끝은 라이터가 잠든 뒤에 먹인다).
+    /// A tool end wakes the waiting writer right away — without the wake-up the writer sees the trigger only after [`SWEEP_INTERVAL`] (the
+    /// tool end is fed after the writer fell asleep).
     #[test]
     fn a_tool_end_wakes_a_waiting_writer_at_once() {
         let mut h = harness();
@@ -8929,30 +8401,28 @@ mod tests {
                 }
             })
         };
-        // 라이터가 쥔 글을 보고 잠들 틈.
         std::thread::sleep(Duration::from_millis(50));
         item_started(&mut h, "t1", "commandExecution", "c");
         let fed = Instant::now();
         item_completed(&mut h, "t1", "commandExecution", "c");
         let got = rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("도구 끝인데 안 넘겼다");
+            .expect("a tool end but it did not hand over");
         assert_eq!(got, "q-1");
         assert!(
             fed.elapsed() < SWEEP_INTERVAL / 2,
-            "깨움 없이 훑기로 넘겼다({:?})",
+            "handed over by the sweep without a wake-up ({:?})",
             fed.elapsed()
         );
 
         with_state(&h.state, |s| s.closed = true);
         h.state.1.notify_all();
-        writer.join().expect("라이터");
+        writer.join().expect("writer");
     }
 
-    /// [`STEER_TRACE`] 줄 하나 — 칸 이름 → 값(문자열로).
     type TraceLine = std::collections::BTreeMap<String, String>;
 
-    /// 이 스레드의 계측 줄만 모으는 구독자 — 칸 이름이 QA 와의 계약이라 문서대로 나가는지를 잰다.
+    /// A subscriber collecting only this thread's trace lines — field names are the contract with QA, so it measures they go out as documented.
     struct TraceCapture(Arc<Mutex<Vec<TraceLine>>>);
 
     struct TraceFields<'a>(&'a mut TraceLine);
@@ -8985,9 +8455,6 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    /// 계측 줄의 칸은 문서([`STEER_TRACE`])대로다 — 사건마다 한 줄이고, 모든 줄이 `agent` · `phase` · `item_id` · (그 턴을
-    /// 알면) `turn_id` 를 싣고, `tool_end` 는 `held` 를, `steer` 는 `request` 를 더 싣는다. 메시지는 그 종류의 한 줄이다.
-    /// 도구 아닌 항목은 줄이 없다.
     #[test]
     fn the_steer_trace_lines_carry_the_documented_fields_per_phase() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -9001,12 +8468,11 @@ mod tests {
                 accept_user(&h.state, "q-1", "a");
                 announce(&h.reader.core, &h.state, &ann);
                 item_completed(&mut h, "t1", "commandExecution", "c");
-                let s = steer_next(&h).expect("도구 끝이 쥔 글을 안 풀었다");
+                let s = steer_next(&h).expect("the tool end did not release the held text");
                 let first = s.request;
-                // 라이터가 하는 그대로 — 쓰기를 마친 뒤 찍는다([`writer_loop`]).
                 let trace = s
                     .trace(SteerPhase::Steer)
-                    .expect("줄이 켜져 있는데 재료가 없다");
+                    .expect("the line is on but there is no material");
                 assert!(matches!(issue(&h, s), Issued::Written));
                 trace.write(agent);
                 h.reader.handle_line(echo_line("t1", "q-1", "a").as_bytes());
@@ -9015,7 +8481,7 @@ mod tests {
                 announce(&h.reader.core, &h.state, &ann);
                 item_started(&mut h, "t1", "commandExecution", "c2");
                 item_completed(&mut h, "t1", "commandExecution", "c2");
-                let s = steer_next(&h).expect("둘째 도구 끝이 쥔 글을 안 풀었다");
+                let s = steer_next(&h).expect("the second tool end did not release the held text");
                 let second = s.request;
                 issue(&h, s);
                 steer_refused_reply(&mut h, second);
@@ -9055,8 +8521,8 @@ mod tests {
             ],
             "{lines:?}"
         );
-        assert_eq!(lines[1]["held"], "1", "쥔 사용자 항목 수");
-        assert_eq!(lines[5]["held"], "1", "쥔 사용자 항목 수");
+        assert_eq!(lines[1]["held"], "1", "number of held user items");
+        assert_eq!(lines[5]["held"], "1", "number of held user items");
         assert_eq!(lines[2]["request"], first.to_string());
         assert_ne!(first, second);
         let phases = [
@@ -9073,13 +8539,11 @@ mod tests {
             let phase = phases
                 .iter()
                 .find(|p| p.name() == l["phase"])
-                .expect("모르는 phase");
+                .expect("unknown phase");
             assert_eq!(l["message"], phase.message(), "{l:?}");
         }
     }
 
-    /// steer 쓰기 실패는 기본 target 의 warn 과 별도로 계측 줄 `write_failed` 하나를 남긴다 — 계측만 읽는 QA 가 그 글이
-    /// 벤더에 안 닿은 것을 본다. 칸은 `steer` 줄과 같다(넘긴 턴 id · 그 항목 · 요청 id).
     #[test]
     fn a_steer_that_cannot_be_written_writes_one_write_failed_trace_line() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -9112,12 +8576,11 @@ mod tests {
         assert_eq!(l["agent"], agent);
     }
 
-    // ── steer — 도는 턴에 넘기기 · 응답 짝짓기 · 넘긴 항목의 ✕ (ADR-0231 · TRD §5-5) ──
+    // ── steer — handing over to the running turn · response pairing · ✕ on a handed-over item (ADR-0231 · TRD §5-5) ──
     //
-    // 판정(`Above`)이 난 연결이면 운영 그대로 steer 한다 — 이 구획은 [`above`] 시험대로 잰다. 넘기는 계기는 도구 끝이다
-    // ([`steer_at_tool_end`] — 계기를 세운 자리에서 무엇이 넘어가고 무엇이 안 넘어가나를 잰다).
+    // Measured with the [`above`] bench (decision `Above`), steering exactly as production; the trigger is the tool end
+    // ([`steer_at_tool_end`]).
 
-    /// 그 steer 의 params — 봉투의 메서드와 요청 id 까지 본다.
     fn steer_params(steer: &Steer) -> Value {
         let v: Value = serde_json::from_str(&steer.line).unwrap();
         assert_eq!(v["method"], "turn/steer");
@@ -9125,7 +8588,6 @@ mod tests {
         v["params"].clone()
     }
 
-    /// 라이터가 하는 그대로 대기표를 걸고 쓴다(쓰기는 성공한다).
     fn issue(h: &Harness, steer: Steer) -> Issued {
         issue_steer(&h.state, &h.pending, &h.reader.core, steer, |_| Ok(()))
     }
@@ -9145,10 +8607,10 @@ mod tests {
         );
     }
 
-    /// 한가할 때 친 글 `head` 로 턴을 열고 그 `turn/start` 응답이 턴 id `turn` 을 준 자리 — 그 턴의 표식을
-    /// 돌려준다. 응답이 세운 턴 id 신호는 집지 않고 둔다. `head` 는 받은 뒤다(벤더는 `turn/start` 가 실은 글을 그 턴의
-    /// 첫 항목으로 되울린다) — 안 받은 채면 턴 끝이 그 글을 쥔 자리로 되돌려 다음 턴의 머리가 된다. [`RecordingDecoder`]
-    /// 시험대는 에코 줄로 받음을 못 만들어 통로의 받음 동사를 곧바로 부른다.
+    /// A turn opened with `head`, text typed while idle, and that `turn/start` response gave turn id `turn` — returns that turn's marker.
+    /// The turn id signal the response set is left unpicked. `head` is already received (the vendor echoes the `turn/start` text as the
+    /// turn's first item) — unreceived, the turn end would return it to the held place as the next turn's head. [`RecordingDecoder`] cannot
+    /// make a receipt from an echo line, so it calls the link's receipt verb directly.
     fn running_turn(h: &mut Harness, ann: &Announcer, turn: &str) -> u64 {
         accept_user(&h.state, "head", "first");
         announce(&h.reader.core, &h.state, ann);
@@ -9170,9 +8632,9 @@ mod tests {
         ]
     }
 
-    /// ★턴 id 를 기다리는 동안은 넘기지 않는다 — 도구 끝이 와도 · `turn/started` 로도 안 잡는다★. `turn/start` 응답이
-    /// 턴 id 를 주면 그동안 쥔 글이 도구 끝을 기다리지 않고 머리부터 하나씩 넘어가고(`expectedTurnId` ·
-    /// `clientUserMessageId`), 라이터가 차례로 뒤 항목도 이어서 넘긴다(ADR-0235). 목록 사건은 없다.
+    /// ★Nothing is handed over while waiting for the turn id — neither on a tool end nor by `turn/started`★. When the `turn/start` response
+    /// gives the turn id, text held meanwhile is handed over one at a time from the head without waiting for a tool end (`expectedTurnId`
+    /// · `clientUserMessageId`), and the writer hands over the rest in turn (ADR-0235). No list events.
     #[test]
     fn a_held_item_is_steered_only_once_the_turn_start_reply_names_the_turn() {
         let mut h = harness();
@@ -9185,15 +8647,18 @@ mod tests {
         announce(&h.reader.core, &h.state, &ann);
         assert!(
             steer_at_tool_end(&h).is_none(),
-            "턴 id 전에 steer 가 나갔다"
+            "a steer went out before the turn id"
         );
         h.reader.handle_line(
             br#"{"method":"turn/started","params":{"threadId":"T","turn":{"id":"t1"}}}"#,
         );
-        assert!(steer_next(&h).is_none(), "turn/started 로 턴 id 를 잡았다");
+        assert!(
+            steer_next(&h).is_none(),
+            "caught the turn id from turn/started"
+        );
 
         reply(&mut h, request, "t1");
-        let first = next_steer_job(&h, "턴 id 가 푼 steer 가 없다");
+        let first = next_steer_job(&h, "no steer released by the turn id");
         let p = steer_params(&first);
         assert_eq!(p["threadId"], "T");
         assert_eq!(p["expectedTurnId"], "t1");
@@ -9204,19 +8669,23 @@ mod tests {
             Some(format!("in-flight gen={seq} turn=Some(\"t1\")"))
         );
 
-        let second = next_steer_job(&h, "둘째 항목이 이어서 안 넘어갔다");
+        let second = next_steer_job(&h, "the second item was not handed over next");
         assert_eq!(steer_params(&second)["clientUserMessageId"], "q-2");
-        assert!(steer_next(&h).is_none(), "넘길 것이 없는데 steer 가 나갔다");
-        assert!(!steer_due(&h.state), "다 넘겼는데 계기가 남았다");
+        assert!(
+            steer_next(&h).is_none(),
+            "a steer went out with nothing to hand over"
+        );
+        assert!(
+            !steer_due(&h.state),
+            "everything was handed over but the trigger remained"
+        );
         assert_eq!(
             list_ops(&h.seen),
             vec![queued("q-1", "second"), queued("q-2", "third")],
-            "넘기기가 목록 사건을 냈다"
+            "the handover emitted a list event"
         );
     }
 
-    /// 도구 끝의 방출 전 머리는 건너뛰지 않는다 — 계기를 둔 채 기다리다 방출이 라이터를 깨우면 그 글이 넘어간다. 쥔 우편은
-    /// 넘기지도 막지도 않으며, Direct 는 steer 로 나가지 않는다(계기가 내린다).
     #[test]
     fn a_tool_end_waits_for_an_unannounced_head_and_never_steers_mail_or_a_direct_item() {
         let mut h = harness();
@@ -9230,16 +8699,26 @@ mod tests {
         )
         .unwrap();
         accept_user(&h.state, "q-1", "typed");
-        assert!(steer_at_tool_end(&h).is_none(), "방출 전 머리를 건너뛰었다");
-        assert!(steer_due(&h.state), "방출 전 머리 앞에서 계기가 내렸다");
+        assert!(
+            steer_at_tool_end(&h).is_none(),
+            "skipped the pre-announce head"
+        );
+        assert!(
+            steer_due(&h.state),
+            "the trigger was lowered in front of the pre-announce head"
+        );
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_next(&h).expect("방출된 글이 서 있던 계기로 안 넘어갔다");
+        let s =
+            steer_next(&h).expect("the announced text was not handed over by the standing trigger");
         assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
         assert_eq!(stage_of(&h.state, "m-1").as_deref(), Some("held"));
-        assert!(steer_next(&h).is_none(), "우편이 steer 로 나갔다");
-        assert!(!steer_due(&h.state), "넘길 것이 없는데 계기가 남았다");
+        assert!(steer_next(&h).is_none(), "mail went out as a steer");
+        assert!(
+            !steer_due(&h.state),
+            "nothing to hand over but the trigger remained"
+        );
 
-        // Direct 는 한가한 순간의 머리라 턴 도중 쥐일 일이 없다 — 쥐여 있어도 steer 로 안 나가고 건너뛰지도 않는다.
+        // Direct is the head of an idle moment, so it is never held mid-turn — even if held, it does not go out as a steer and is not skipped.
         let h = harness();
         let ann = above(&h);
         accept_user(&h.state, "d-1", "direct");
@@ -9248,12 +8727,12 @@ mod tests {
         activate(&h.state, 5, Some("t5"));
         assert!(
             steer_at_tool_end(&h).is_none(),
-            "Direct 가 steer 로 나갔거나 건너뛰였다"
+            "Direct went out as a steer or was skipped"
         );
     }
 
-    /// steer 의 성공 응답과 시한 만료는 항목을 안 옮긴다 — 받음이 아니고(에코가 받음이다), 넘긴 단계 그대로 목록에
-    /// 남는다 · 목록 사건도 턴 끝도 없다.
+    /// A steer's success response and deadline expiry do not move the item — not receipt (the echo is); it stays in the list at the
+    /// handed-over stage, no list event, no turn end.
     #[test]
     fn a_steer_reply_or_its_deadline_moves_nothing_and_the_row_stays_listed() {
         for deadline in [false, true] {
@@ -9265,7 +8744,7 @@ mod tests {
             let s = steer_at_tool_end(&h).expect("steer");
             let request = s.request;
             assert!(matches!(issue(&h, s), Issued::Written));
-            assert_eq!(h.pending.len(), 1, "대기표가 안 걸렸다");
+            assert_eq!(h.pending.len(), 1, "the waiting entry was not registered");
             if deadline {
                 h.pending.forget(request);
                 assert!(h.pending.register_at(
@@ -9292,18 +8771,18 @@ mod tests {
                 vec![queued("q-1", "x")],
                 "deadline={deadline}"
             );
-            assert_eq!(row_ids(&h), ["q-1"], "deadline={deadline}: 목록에서 빠졌다");
+            assert_eq!(row_ids(&h), ["q-1"], "deadline={deadline}: left the list");
             assert_eq!(
                 turn_seq(&h.state),
                 Some(seq),
-                "deadline={deadline}: 턴이 끝났다"
+                "deadline={deadline}: the turn ended"
             );
         }
     }
 
-    /// steer 오류 응답 → 그 항목은 `Held` 로 돌아오고(목록 사건 0 건) 그 턴은 「steer 거절」 — 도구 끝이 와도 되돌아온
-    /// 글도 새로 든 글도 쥔다. 턴이 끝나면 되돌아온 글이 친 순서대로 다음 `turn/start` 를 열고, 그 턴 id 가 오면 다시
-    /// 넘긴다.
+    /// Steer error response → the item returns to `Held` (0 list events) and the turn is 「steer refused」 — even on a tool end both returned
+    /// and newly arrived text stay held. At turn end the returned text opens the next `turn/start` in typing order and is handed over again
+    /// when that turn id comes.
     #[test]
     fn a_refused_steer_is_held_again_and_that_turn_steers_nothing_more() {
         let mut h = harness();
@@ -9320,41 +8799,41 @@ mod tests {
         assert_eq!(
             list_ops(&h.seen),
             vec![queued("q-1", "second")],
-            "되돌아온 글이 다시 방출됐다"
+            "the returned text was announced again"
         );
         assert!(
             steer_at_tool_end(&h).is_none(),
-            "「steer 거절」 표시된 턴에 되돌아온 글이 또 나갔다"
+            "the returned text went out again in a turn marked 「steer refused」"
         );
         accept_user(&h.state, "q-2", "third");
         announce(&h.reader.core, &h.state, &ann);
         assert!(
             steer_at_tool_end(&h).is_none(),
-            "거절된 턴에 steer 가 또 나갔다"
+            "a steer went out again in the refused turn"
         );
 
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
         let Some(Job::Turn { id, seq, line, .. }) = take(&h) else {
-            panic!("되돌아온 글의 turn/start 가 안 나갔다")
+            panic!("the turn/start of the returned text did not go out")
         };
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(
             v["params"]["clientUserMessageId"], "q-1",
-            "친 순서가 아니다"
+            "not typing order"
         );
         assert!(h
             .pending
             .register(id, Waiter::TurnStart { seq }, method::TURN_START));
         reply(&mut h, id, "t2");
-        let s = steer_next(&h).expect("다음 턴 id 에 다시 넘긴다");
+        let s = steer_next(&h).expect("hands over again on the next turn id");
         let p = steer_params(&s);
         assert_eq!(p["clientUserMessageId"], "q-2");
         assert_eq!(p["expectedTurnId"], "t2");
     }
 
-    /// ✕ 가 닿은 넘긴 항목의 steer 가 거절되면 다시 쥐지 않고 거둔다(`Dropped{Withdrawn}`) — 벤더는 그 글을 본 적이
-    /// 없고 사용자는 이미 뺐다. 그 턴의 「steer 거절」 표시는 그대로 선다.
+    /// If the steer of a handed-over item ✕ reached is refused, it is withdrawn (`Dropped{Withdrawn}`), not held again — the vendor never
+    /// saw it and the user removed it. The turn's 「steer refused」 mark stands.
     #[test]
     fn a_refused_steer_the_user_already_cancelled_is_withdrawn_instead_of_held() {
         let mut h = harness();
@@ -9378,19 +8857,17 @@ mod tests {
         assert_eq!(
             stage_of(&h.state, "q-1"),
             None,
-            "거둔 글이 pending 에 남았다"
+            "withdrawn text remained in pending"
         );
-        assert!(row_ids(&h).is_empty(), "명부에 남았다");
+        assert!(row_ids(&h).is_empty(), "it remained in the registry");
         accept_user(&h.state, "q-2", "y");
         announce(&h.reader.core, &h.state, &ann);
         assert!(
             steer_at_tool_end(&h).is_none(),
-            "거절된 턴에 steer 가 또 나갔다"
+            "a steer went out again in the refused turn"
         );
     }
 
-    /// 거절의 쓰기 실패 판 — 집은 뒤 ✕ 가 닿은 steer 를 못 쓰면 다시 쥐지 않고 거둔다(`Dropped{Withdrawn}` — 벤더에 닿지
-    /// 않았고 사용자는 이미 뺐다). 쓰지 못했으니 넘김 표지는 없고, 그 턴의 「steer 거절」 표시는 선다.
     #[test]
     fn a_steer_the_user_cancelled_that_cannot_be_written_is_withdrawn_instead_of_held() {
         let mut h = harness();
@@ -9412,24 +8889,31 @@ mod tests {
         want.extend(cancel_ops("q-1"));
         want.push(withdrawn("q-1"));
         assert_eq!(list_ops(&h.seen), want);
-        assert!(handed(&h.seen).is_empty(), "쓰지 못한 steer 에 표지를 냈다");
+        assert!(
+            handed(&h.seen).is_empty(),
+            "emitted a mark for a steer that could not be written"
+        );
         assert_eq!(
             stage_of(&h.state, "q-1"),
             None,
-            "거둔 글이 pending 에 남았다"
+            "withdrawn text remained in pending"
         );
-        assert!(row_ids(&h).is_empty(), "명부에 남았다");
-        assert_eq!(h.pending.len(), 0, "못 쓴 steer 의 대기표가 남았다");
+        assert!(row_ids(&h).is_empty(), "it remained in the registry");
+        assert_eq!(
+            h.pending.len(),
+            0,
+            "the waiting entry of the unwritten steer remained"
+        );
         accept_user(&h.state, "q-2", "y");
         announce(&h.reader.core, &h.state, &ann);
         assert!(
             steer_at_tool_end(&h).is_none(),
-            "쓰기 실패한 턴에 steer 가 또 나갔다"
+            "a steer went out again in the turn whose write failed"
         );
     }
 
-    /// ★세대 가림★ — 에코로 이미 빠진 항목의 늦은 steer 응답은 아무것도 안 움직인다(다시 쥐지 않고 · 표시도 안
-    /// 단다). 다른 세대를 든 대기표의 응답도 그 항목을 못 건드린다.
+    /// ★Generation masking★ — a late steer response for an item already removed by echo moves nothing (not held again · no mark). A
+    /// response of a waiting entry with another generation cannot touch the item either.
     #[test]
     fn a_late_steer_reply_moves_only_the_item_and_stage_it_was_sent_for() {
         let mut h = harness_with_real_decoder();
@@ -9444,20 +8928,20 @@ mod tests {
         assert_eq!(
             stage_of(&h.state, "q-1"),
             None,
-            "받은 글이 pending 에 남았다"
+            "received text remained in pending"
         );
         let before = list_ops(&h.seen);
         steer_refused_reply(&mut h, request);
         assert_eq!(
             stage_of(&h.state, "q-1"),
             None,
-            "늦은 거절이 받은 글을 다시 쥐었다"
+            "a late refusal held the received text again"
         );
-        assert_eq!(list_ops(&h.seen), before, "늦은 거절이 사건을 냈다");
+        assert_eq!(list_ops(&h.seen), before, "a late refusal emitted an event");
 
         accept_user(&h.state, "q-2", "y");
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_at_tool_end(&h).expect("늦은 거절이 그 턴에 표시를 달았다");
+        let s = steer_at_tool_end(&h).expect("a late refusal attached the mark to that turn");
         issue(&h, s);
         assert!(h.pending.register(
             900,
@@ -9471,12 +8955,10 @@ mod tests {
         assert_eq!(
             stage_of(&h.state, "q-2"),
             Some(format!("in-flight gen={seq} turn=Some(\"t1\")")),
-            "다른 세대의 응답이 항목을 움직였다"
+            "a response of another generation moved the item"
         );
     }
 
-    /// 스트림이 닫힐 때 걸려 있던 steer 대기표는 매달리지 않고 걷히고, 그 항목은 통로가 손대지 않는다 — 코어의
-    /// 종료 합성이 `Dropped{AgentEnded}` 로 한 번 닫는다.
     #[test]
     fn a_stream_end_with_a_steer_waiting_hangs_nothing_and_leaves_the_item_to_the_core() {
         let mut h = harness();
@@ -9493,18 +8975,16 @@ mod tests {
             pending: h.pending.clone(),
             agent: h.reader.core.id(),
         });
-        assert_eq!(h.pending.len(), 0, "steer 대기표가 남았다");
+        assert_eq!(h.pending.len(), 0, "the steer waiting entry remained");
         assert!(
             trace(&h.seen).is_empty(),
-            "스트림 닫힘에 통로가 사건을 냈다"
+            "the link emitted an event on stream close"
         );
         assert!(stage_of(&h.state, "q-1").is_some_and(|s| s.starts_with("in-flight")));
         h.reader.core.finish(TerminalReason::StreamClosed);
         assert_eq!(trace(&h.seen), ["dropped q-1 AgentEnded"]);
     }
 
-    /// 넘긴 항목의 ✕ → `TooLate` · `CancelRequested` 에 곧바로 `CancelAnswered{false}` · 다시 보내지 않는다. 겹친
-    /// 둘째 ✕ 는 사건 없이 `TooLate`. 그 뒤 에코가 오면 받음이다(목록에서 빠지고 말풍선).
     #[test]
     fn cancelling_a_handed_over_item_is_too_late_says_so_once_and_its_echo_still_delivers_it() {
         let mut h = harness_with_real_decoder();
@@ -9522,31 +9002,33 @@ mod tests {
         assert_eq!(
             withdraw_item(&h.state, Some(&h.reader.core), "q-1"),
             Withdraw::TooLate,
-            "겹친 둘째 ✕"
+            "overlapping second ✕"
         );
         let mut want = vec![queued("q-1", "x")];
         want.extend(cancel_ops("q-1"));
-        assert_eq!(list_ops(&h.seen), want, "✕ 의 사건이 한 벌이 아니다");
+        assert_eq!(list_ops(&h.seen), want, "the events of ✕ are not one set");
         assert_eq!(
             stage_of(&h.state, "q-1"),
             Some(format!("in-flight gen={seq} turn=Some(\"t1\")")),
-            "✕ 가 넘긴 글을 거뒀다"
+            "✕ withdrew the handed-over text"
         );
-        assert!(steer_at_tool_end(&h).is_none(), "다시 보냈다");
+        assert!(steer_at_tool_end(&h).is_none(), "sent again");
 
         h.reader.handle_line(echo_line("t1", "q-1", "x").as_bytes());
         let t = trace(&h.seen);
         assert_eq!(t[t.len() - 2..], ["delivered q-1", "bubble q-1"]);
-        assert!(row_ids(&h).is_empty(), "받은 글이 명부에 남았다");
+        assert!(
+            row_ids(&h).is_empty(),
+            "received text remained in the registry"
+        );
         assert_eq!(
             withdraw_item(&h.state, Some(&h.reader.core), "q-1"),
             Withdraw::NotHeld
         );
     }
 
-    // ── 넘김 표지 — 넘긴 행은 「보냄」(✕ 숨김) · 되돌린 행은 「대기」 (ADR-0231 · ADR-0235) ──
+    // ── Handed-over mark — a handed-over row is 「sent」 (✕ hidden) · a returned row is 「waiting」 (ADR-0231 · ADR-0235) ──
 
-    /// 명부 행의 (id, 넘김 표지) — 목록 조회·재부착이 읽는 그 값.
     fn sent_marks(h: &Harness) -> Vec<(String, bool)> {
         h.reader
             .core
@@ -9558,8 +9040,6 @@ mod tests {
             .collect()
     }
 
-    /// steer 를 쓰면 그 행에 넘김 표지가 선다(목록에 남는다 — 받음은 에코뿐이다) · 거절되어 쥔 자리로 돌아오면 표지가
-    /// 내린다(행 그대로 · 결말 사건 없음). 목록 조회는 넘긴 행을 `sent` 로 싣는다.
     #[test]
     fn a_written_steer_marks_its_row_sent_and_a_refusal_hands_it_back() {
         let mut h = harness();
@@ -9582,7 +9062,7 @@ mod tests {
         assert_eq!(
             listed[0].state.as_str(),
             "sent",
-            "목록 조회가 넘긴 행을 못 싣는다"
+            "the list query cannot carry the handed-over row"
         );
         assert_eq!(listed[1].state.as_str(), "queued");
 
@@ -9593,11 +9073,12 @@ mod tests {
             sent_marks(&h),
             [("q-1".to_string(), false), ("q-2".to_string(), false)]
         );
-        assert!(list_ops(&h.seen).is_empty(), "되돌림이 결말 사건을 냈다");
+        assert!(
+            list_ops(&h.seen).is_empty(),
+            "the return emitted an outcome event"
+        );
     }
 
-    /// 넘긴 목록 항목이 에코 없이 턴이 끝나면 — 끝의 모양과 무관하게 — 표지가 내린다(`held`). 목록 밖 항목(Direct · 우편)은
-    /// 표지를 내지 않는다. `turn/start` 는 라이터가 쓴 뒤 표지를 내므로 여기서도 그대로 한다.
     #[test]
     fn a_turn_end_without_the_echo_hands_a_listed_row_back_at_every_close() {
         for end in [
@@ -9621,7 +9102,6 @@ mod tests {
             }
         }
 
-        // 라이터가 `turn/start` 를 쓴 뒤 낸 표지 → 에코 없는 끝이 내린다.
         let mut h = harness_with_real_decoder();
         let ann = above(&h);
         activate(&h.state, 0, Some("U0"));
@@ -9629,9 +9109,13 @@ mod tests {
         with_state(&h.state, |s| s.turn = TurnState::Idle);
         announce(&h.reader.core, &h.state, &ann);
         let Some(Job::Turn { id, seq, item, .. }) = take(&h) else {
-            panic!("turn/start 가 나가지 않았다")
+            panic!("turn/start did not go out")
         };
-        assert_eq!(item.as_deref(), Some("q-1"), "실은 목록 항목을 안 들었다");
+        assert_eq!(
+            item.as_deref(),
+            Some("q-1"),
+            "did not hold the list item it carried"
+        );
         assert!(h
             .pending
             .register(id, Waiter::TurnStart { seq }, method::TURN_START));
@@ -9644,21 +9128,24 @@ mod tests {
         assert_eq!(sent_marks(&h), [("q-1".to_string(), false)]);
     }
 
-    /// `turn/start` 가 싣는 표지 대상 — 목록 항목만(Direct · 우편 · 하한 미달의 식별자 없는 항목은 `None`). 표지 값은 부르는
-    /// 쪽이 아니라 지금 단계에서 읽는다 — 이미 빠진 항목 · 목록 밖 항목에는 아무것도 안 낸다.
+    /// The mark target `turn/start` carries — list items only (`None` for Direct · mail · below-floor items without an identifier). The value
+    /// is read from the current stage, not by the caller — nothing is emitted for gone items · items outside the list.
     #[test]
     fn only_a_listed_carrier_is_marked_and_the_mark_is_read_from_the_stage() {
         let item_of = |h: &Harness| match take(h) {
             Some(Job::Turn { item, .. }) => item,
-            _ => panic!("turn/start 가 나가지 않았다"),
+            _ => panic!("turn/start did not go out"),
         };
         let h = harness();
         above(&h);
         accept_user(&h.state, "d-1", "direct");
         announce(&h.reader.core, &h.state, &announcer());
-        assert_eq!(item_of(&h), None, "Direct 에 표지를 달았다");
+        assert_eq!(item_of(&h), None, "attached a mark to Direct");
         publish_hand_over(&h.reader.core, &h.state, "d-1");
-        assert!(handed(&h.seen).is_empty(), "목록 밖 항목에 표지를 냈다");
+        assert!(
+            handed(&h.seen).is_empty(),
+            "emitted a mark for an item outside the list"
+        );
 
         let h = harness();
         above(&h);
@@ -9669,13 +9156,13 @@ mod tests {
             InputOrigin::Mail,
         )
         .unwrap();
-        assert_eq!(item_of(&h), None, "우편에 표지를 달았다");
+        assert_eq!(item_of(&h), None, "attached a mark to mail");
 
         let h = harness();
         make_ready(&h.state, "T");
         settle_floor(&h.reader.core, &h.state, &announcer(), Floor::Below);
         accept_user(&h.state, "q-1", "below");
-        assert_eq!(item_of(&h), None, "하한 미달 항목에 표지를 달았다");
+        assert_eq!(item_of(&h), None, "attached a mark to a below-floor item");
 
         let h = harness();
         let ann = above(&h);
@@ -9683,16 +9170,22 @@ mod tests {
         accept_user(&h.state, "q-1", "listed");
         announce(&h.reader.core, &h.state, &ann);
         publish_hand_over(&h.reader.core, &h.state, "q-1");
-        assert_eq!(handed(&h.seen), ["held q-1"], "쥔 항목의 표지는 held 다");
+        assert_eq!(
+            handed(&h.seen),
+            ["held q-1"],
+            "the mark of a held item is held"
+        );
         with_state(&h.state, |s| {
             s.take_delivered("q-1");
         });
         publish_hand_over(&h.reader.core, &h.state, "q-1");
-        assert_eq!(handed(&h.seen), ["held q-1"], "빠진 항목에 표지를 냈다");
+        assert_eq!(
+            handed(&h.seen),
+            ["held q-1"],
+            "emitted a mark for a removed item"
+        );
     }
 
-    /// ✕ 가 넘기기와 겹쳤다(넘기려고 집은 뒤 쓰기 전에 ✕) — 못 뺐다고 답하고(`TooLate`) 행은 목록에 남아 쓰기 뒤의 표지로
-    /// 「보냄」이 된다. 에코가 오면 받음으로 빠진다.
     #[test]
     fn a_cancel_racing_a_push_is_not_removed_and_the_row_flips_to_sent() {
         let mut h = harness_with_real_decoder();
@@ -9707,8 +9200,8 @@ mod tests {
         );
         assert!(matches!(issue(&h, s), Issued::Written));
         let (rows, _) = h.reader.core.queued_inputs().snapshot();
-        assert_eq!(rows.len(), 1, "✕ 가 넘긴 행을 목록에서 뺐다");
-        assert!(rows[0].sent, "넘긴 행이 「보냄」이 안 됐다");
+        assert_eq!(rows.len(), 1, "✕ removed the handed-over row from the list");
+        assert!(rows[0].sent, "the handed-over row did not become 「sent」");
         assert_eq!(
             rows[0].phase,
             crate::queued_input::RowPhase::Cancelling {
@@ -9717,12 +9210,15 @@ mod tests {
             }
         );
         h.reader.handle_line(echo_line("t1", "q-1", "x").as_bytes());
-        assert!(row_ids(&h).is_empty(), "받은 글이 명부에 남았다");
+        assert!(
+            row_ids(&h).is_empty(),
+            "received text remained in the registry"
+        );
     }
 
-    /// 넘김 표지 `sent` 를 받는 순간 그 항목의 단계를 한 번 뒤집는 구독자 — [`publish_hand_over`] 가 값을 읽고 내는 사이에
-    /// 다른 스레드의 전이(리더의 턴 끝 · 라이터가 다음 턴으로 집음)가 상태 락을 잡은 자리를 흉내 낸다. 내는 쪽은 상태 락을
-    /// 놓고 내므로 여기서 잡아도 된다.
+    /// A subscriber that flips that item's stage once on receiving the handed-over mark `sent` — imitates another thread's transition (the
+    /// reader's turn end · the writer picking it for the next turn) taking the state lock between [`publish_hand_over`]'s read and emit.
+    /// The emitting side releases the state lock before emitting, so taking it here is fine.
     struct FlipOnMark {
         id: SinkId,
         state: SharedState,
@@ -9770,19 +9266,18 @@ mod tests {
         }));
     }
 
-    /// 목록 조회가 그 행에 싣는 상태 낱말.
     fn listed_state(h: &Harness, id: &str) -> String {
         let (rows, _) = h.reader.core.queued_inputs().snapshot();
         crate::queued_input::overlay_unconfirmed(rows, &[])
             .into_iter()
             .find(|r| r.id == id)
             .map(|r| r.state.as_str().to_string())
-            .expect("목록에 없다")
+            .expect("not in the list")
     }
 
-    /// ★표지를 읽고 내는 사이에 턴이 닫혀 쥔 자리로 돌아가면 마지막 표지는 `held` 다★ — 라이터가 steer 를 쓴 뒤 `sent` 를
-    /// 읽었는데 내기 전에 리더가 에코 없는 턴 끝으로 그 글을 되돌린 자리. 다시 읽기가 없으면 낡은 `sent` 가 링의 마지막
-    /// 표지로 남아 쥔 글이 ✕ 없는 「보냄」으로 그려진다.
+    /// ★If the turn closes between reading and emitting the mark and returns it to the held place, the last mark is `held`★ — the writer
+    /// read `sent` after the steer write but before emitting, the reader returned the text at a turn end without an echo. Without re-reading,
+    /// the stale `sent` stays the ring's last mark and held text is drawn 「sent」 without ✕.
     #[test]
     fn a_sent_mark_overtaken_by_a_return_to_held_is_followed_by_held() {
         let mut h = harness();
@@ -9798,9 +9293,9 @@ mod tests {
         assert_eq!(listed_state(&h, "q-1"), "queued");
     }
 
-    /// 거울 — ★표지를 읽고 내는 사이에 라이터가 그 글로 다음 턴을 열면 마지막 표지는 `sent` 다★. 리더가 에코 없는 턴 끝으로
-    /// 되돌려 `held` 를 읽었는데 내기 전에 라이터가 그 글을 `turn/start` 로 집은 자리. 다시 읽기가 없으면 넘긴 글이 ✕ 가
-    /// 다시 선 「대기」로 그려진다.
+    /// Mirror — ★if the writer opens the next turn with that text between reading and emitting, the last mark is `sent`★. The reader read
+    /// `held` after returning it, then before emitting the writer picked it with `turn/start`; without re-reading, handed-over text would
+    /// be drawn 「waiting」 with ✕ again.
     #[test]
     fn a_held_mark_overtaken_by_the_next_turn_start_is_followed_by_sent() {
         let mut h = harness();
@@ -9810,7 +9305,7 @@ mod tests {
         announce(&h.reader.core, &h.state, &ann);
         let s = steer_at_tool_end(&h).expect("steer");
         assert!(matches!(issue(&h, s), Issued::Written));
-        // 다음 턴(표식 1)의 `turn/start` 가 실은 자리 — 표지는 세대를 안 보므로 값은 모양만 맞춘다.
+        // The next turn's (marker 1) `turn/start` carried it — the mark does not look at the generation, so the value only matches the shape.
         flip_on_mark(&h, "q-1", false, || Stage::InFlight {
             gen: 1,
             turn_id: None,
@@ -9822,8 +9317,6 @@ mod tests {
         assert_eq!(listed_state(&h, "q-1"), "sent");
     }
 
-    /// 턴 id 대기 중 쥔 항목의 ✕ 는 글을 거둔다 — 그 뒤 턴 id 가 와도 그 글은 넘어가지 않는다(넘기기와 ✕ 는 같은
-    /// 상태 락에서 순서가 선다 — 반대 순서는 넘긴 항목의 ✕ 다).
     #[test]
     fn a_cancel_while_the_turn_id_is_pending_withdraws_and_nothing_is_steered() {
         let mut h = harness();
@@ -9840,20 +9333,23 @@ mod tests {
         reply(&mut h, request, "t1");
         assert!(
             !steer_due(&h.state),
-            "쥔 글이 없는데 턴 id 가 계기를 세웠다"
+            "the turn id set the trigger although there is no held text"
         );
-        assert!(steer_at_tool_end(&h).is_none(), "거둔 글이 넘어갔다");
+        assert!(
+            steer_at_tool_end(&h).is_none(),
+            "withdrawn text was handed over"
+        );
         assert_eq!(
             list_ops(&h.seen),
             vec![queued("q-1", "x"), withdrawn("q-1")]
         );
     }
 
-    // ── 도구 끝에 넘기기 (ADR-0231 · ADR-0235) ──
+    // ── Handover at a tool end (ADR-0231 · ADR-0235) ──
 
-    /// ★도구 끝 하나가 쥔 사용자 글 전부를 친 순서대로 넘긴다★ — 글마다 `turn/steer` 하나 · 제 `clientUserMessageId` ·
-    /// 지금 턴 id. 우편은 넘기지도 막지도 않는다(턴 끝까지 쥔다). 넘긴 글은 목록에 남고(받음은 에코뿐 — 목록 사건은
-    /// `Queued` 뿐) 다 넘기면 계기가 내린다.
+    /// ★One tool end hands over all held user text in typing order★ — one `turn/steer` per text · its own `clientUserMessageId` · the current
+    /// turn id. Mail neither hands over nor blocks (held until the turn end). Handed-over text stays in the list (receipt is only the echo —
+    /// the only list event is `Queued`) and the trigger is lowered once all is handed over.
     #[test]
     fn a_current_turn_tool_end_steers_every_held_user_item_in_typed_order_and_never_mail() {
         let mut h = harness();
@@ -9871,12 +9367,12 @@ mod tests {
         accept_user(&h.state, "q-2", "b");
         accept_user(&h.state, "q-3", "c");
         announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_next(&h).is_none(), "도구 도중에 넘겼다");
+        assert!(steer_next(&h).is_none(), "handed over during the tool");
 
         item_completed(&mut h, "t1", "commandExecution", "c");
         let mut requests = Vec::new();
         for (id, text) in [("q-1", "a"), ("q-2", "b"), ("q-3", "c")] {
-            let s = next_steer_job(&h, "도구 끝이 쥔 글을 다 안 넘겼다");
+            let s = next_steer_job(&h, "the tool end did not hand over all the held text");
             let p = steer_params(&s);
             assert_eq!(p["clientUserMessageId"], id);
             assert_eq!(p["expectedTurnId"], "t1", "{id}");
@@ -9887,25 +9383,26 @@ mod tests {
         }
         assert!(
             requests.windows(2).all(|w| w[0] < w[1]),
-            "요청 id 가 글마다 따로가 아니다: {requests:?}"
+            "the request ids are not separate per text: {requests:?}"
         );
-        assert!(steer_next(&h).is_none(), "우편이 steer 로 나갔다");
-        assert!(!steer_due(&h.state), "다 넘겼는데 계기가 남았다");
+        assert!(steer_next(&h).is_none(), "mail went out as a steer");
+        assert!(
+            !steer_due(&h.state),
+            "everything was handed over but the trigger remained"
+        );
         assert_eq!(stage_of(&h.state, "m-1").as_deref(), Some("held"));
         assert_eq!(
             row_ids(&h),
             ["q-1", "q-2", "q-3"],
-            "넘긴 글이 목록에서 빠졌다"
+            "handed-over text left the list"
         );
         assert_eq!(
             list_ops(&h.seen),
             vec![queued("q-1", "a"), queued("q-2", "b"), queued("q-3", "c")],
-            "넘기기가 목록 사건을 냈다"
+            "the handover emitted a list event"
         );
     }
 
-    /// 도구 도는 중의 ✕ 는 쥔 글을 거둔다(`Withdrawn` · `Dropped{Withdrawn}` · 벤더 요청 0 건) — 도구 끝이 와도 넘길 것이
-    /// 없어 계기가 곧바로 내린다. 겹친 둘째 ✕ 는 통로가 모르는 id 다.
     #[test]
     fn a_cancel_during_a_tool_withdraws_the_text_and_the_tool_end_steers_nothing() {
         let mut h = harness();
@@ -9924,18 +9421,21 @@ mod tests {
         );
 
         item_completed(&mut h, "t1", "commandExecution", "c");
-        assert!(steer_next(&h).is_none(), "거둔 글이 넘어갔다");
-        assert!(!steer_due(&h.state), "넘길 것이 없는데 계기가 남았다");
-        assert_eq!(h.pending.len(), 0, "벤더 요청이 나갔다");
+        assert!(steer_next(&h).is_none(), "withdrawn text was handed over");
+        assert!(
+            !steer_due(&h.state),
+            "nothing to hand over but the trigger remained"
+        );
+        assert_eq!(h.pending.len(), 0, "a vendor request went out");
         assert_eq!(
             list_ops(&h.seen),
             vec![queued("q-1", "x"), withdrawn("q-1")]
         );
     }
 
-    /// ★도구 끝이 없으면 턴 끝까지 쥔다★ — 도구가 끝난 **뒤에** 친 글은 그 뒤 도구가 없으면(답만 쓰고 끝) 넘어가지 않고
-    /// 목록 사건 0 건으로 남는다. 턴이 끝나면 가장 오래된 글이 `turn/start` 로 다음 턴을 열고, 그 턴 id 가 오는 순간
-    /// 나머지가 곧바로 그 턴에 든다(도구 끝을 기다리지 않는다 — 남은 글이 한 턴에 모인다).
+    /// ★Without a tool end it is held until the turn end★ — text typed **after** the tool ended is not handed over if no tool follows, and
+    /// stays with 0 list events. At turn end the oldest text opens the next turn with `turn/start`, and when that turn id comes the rest go
+    /// into it (no wait for a tool end — remaining text gathers into one turn).
     #[test]
     fn text_typed_with_no_tool_afterwards_waits_for_the_turn_end_and_the_rest_ride_the_next_turn_once_its_id_is_known(
     ) {
@@ -9944,7 +9444,6 @@ mod tests {
         running_turn(&mut h, &ann, "t1");
         item_started(&mut h, "t1", "commandExecution", "c");
         item_completed(&mut h, "t1", "commandExecution", "c");
-        // 라이터가 하는 그대로 — 쥔 글 없는 도구 끝은 계기를 곧바로 내린다.
         assert!(steer_next(&h).is_none());
         assert!(!steer_due(&h.state));
         accept_user(&h.state, "q-1", "a");
@@ -9953,11 +9452,11 @@ mod tests {
         announce(&h.reader.core, &h.state, &ann);
         item_started(&mut h, "t1", "agentMessage", "m");
         item_completed(&mut h, "t1", "agentMessage", "m");
-        assert!(steer_next(&h).is_none(), "도구 끝 없이 넘겼다");
+        assert!(steer_next(&h).is_none(), "handed over without a tool end");
 
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
-        assert_eq!(turn_seq(&h.state), None, "t1 이 안 끝났다");
+        assert_eq!(turn_seq(&h.state), None, "t1 did not end");
         for id in ["q-1", "q-2", "q-3"] {
             assert_eq!(stage_of(&h.state, id).as_deref(), Some("held"), "{id}");
         }
@@ -9966,25 +9465,31 @@ mod tests {
             vec![queued("q-1", "a"), queued("q-2", "b"), queued("q-3", "c")]
         );
 
-        let (request, seq, p) = opens(&h).expect("다음 턴이 안 열렸다");
+        let (request, seq, p) = opens(&h).expect("the next turn did not open");
         assert_eq!(p["clientUserMessageId"], "q-1");
-        assert!(steer_next(&h).is_none(), "턴 id 전에 넘겼다");
+        assert!(steer_next(&h).is_none(), "handed over before the turn id");
         reply(&mut h, request, "t2");
         for id in ["q-2", "q-3"] {
-            let s = next_steer_job(&h, "턴 id 가 남은 글을 안 넘겼다");
+            let s = next_steer_job(&h, "the turn id did not hand over the remaining text");
             let p = steer_params(&s);
             assert_eq!(p["clientUserMessageId"], id);
             assert_eq!(p["expectedTurnId"], "t2", "{id}");
             assert_eq!(stage_of(&h.state, id), steered_stage(seq, "t2"), "{id}");
         }
         assert!(steer_next(&h).is_none());
-        assert!(!steer_due(&h.state), "다 넘겼는데 계기가 남았다");
-        assert!(take(&h).is_none(), "도는 턴에 turn/start 가 또 나갔다");
+        assert!(
+            !steer_due(&h.state),
+            "everything was handed over but the trigger remained"
+        );
+        assert!(
+            take(&h).is_none(),
+            "turn/start went out again on the running turn"
+        );
     }
 
-    /// ★도구 끝 계기는 턴과 함께 내린다★ — 쥔 글 없는 도구 끝이 세운 계기를 라이터가 보기 전에(블로킹 쓰기 중) 턴이
-    /// 끝나고 라이터가 다음 턴부터 열면, 그 턴 id 가 쥔 글 없이 온 뒤에 친 글은 그 턴의 도구 끝을 기다린다 — 앞 턴의
-    /// 계기로 넘어가지 않는다(넘어가면 도구 끝 없이 들고, 기록만 되고 답을 못 받을 수 있다).
+    /// ★The tool-end trigger is lowered with the turn★ — if the turn ends before the writer sees a trigger set by a tool end with no held text
+    /// (during a blocking write) and the writer opens the next turn, text typed after that turn id came waits for that turn's tool end — it is
+    /// not handed over by the previous turn's trigger (it would go in without a tool end, recorded but never answered).
     #[test]
     fn a_tool_end_armed_just_before_its_turn_closes_does_not_steer_text_typed_into_the_next_turn() {
         let mut h = harness();
@@ -9992,33 +9497,39 @@ mod tests {
         running_turn(&mut h, &ann, "t1");
         item_started(&mut h, "t1", "commandExecution", "c");
         item_completed(&mut h, "t1", "commandExecution", "c");
-        assert!(steer_due(&h.state), "쥔 글 없는 도구 끝도 계기는 세운다");
+        assert!(
+            steer_due(&h.state),
+            "a tool end with no held text also sets the trigger"
+        );
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
-        assert!(!steer_due(&h.state), "닫힌 턴의 계기가 남았다");
+        assert!(
+            !steer_due(&h.state),
+            "the trigger of the closed turn remained"
+        );
 
         accept_user(&h.state, "d-1", "next");
         announce(&h.reader.core, &h.state, &ann);
-        let (request, seq, p) = opens(&h).expect("다음 턴이 안 열렸다");
+        let (request, seq, p) = opens(&h).expect("the next turn did not open");
         assert_eq!(p["clientUserMessageId"], "d-1");
         reply(&mut h, request, "t2");
         accept_user(&h.state, "q-1", "typed");
         announce(&h.reader.core, &h.state, &ann);
         assert!(
             steer_next(&h).is_none(),
-            "앞 턴의 계기로 도구 끝 없이 넘겼다"
+            "handed over without a tool end by the previous turn's trigger"
         );
         assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
 
         item_completed(&mut h, "t2", "commandExecution", "c2");
-        let s = next_steer_job(&h, "그 턴의 도구 끝이 쥔 글을 안 넘겼다");
+        let s = next_steer_job(&h, "that turn's tool end did not hand over the held text");
         assert_eq!(steer_params(&s)["expectedTurnId"], "t2");
         assert_eq!(stage_of(&h.state, "q-1"), steered_stage(seq, "t2"));
     }
 
-    /// ★도구 끝 fixture(M7 trial 1 — 실측 codex-cli 0.156.1)★: 도구 도는 중 친 글은 쥐였다가 도구 `item/completed` 에
-    /// 넘어가고(fixture 의 요청 id 3), 벤더는 그 글을 같은 턴에서 되울려 답한다 — 받음(`Delivered`) · 대기표 0.
-    /// 요청 id 는 fixture 의 응답 id 에 맞춘다(`fixtures/README.md`).
+    /// ★The tool-end fixture (M7 trial 1 — measured codex-cli 0.156.1)★: text typed while a tool runs is held and handed over at the tool's
+    /// `item/completed` (request id 3 of the fixture); the vendor echoes it in the same turn and answers — receipt (`Delivered`) · 0 waiting
+    /// entries. Request ids match the fixture's response ids (`fixtures/README.md`).
     #[test]
     fn the_tool_end_fixture_holds_text_typed_during_the_tool_and_delivers_it_in_that_turn() {
         const THREAD: &str = "01a0d4b3-6048-7b41-aa4b-eec199dd1c40";
@@ -10026,7 +9537,6 @@ mod tests {
         const CARRIER: &str = "e53bb68a-aea6-421e-b04f-45caea0fc6f1";
         const TYPED: &str = "d05ef2f8-fa23-4c56-b379-b5aba4dc39e1";
         let lines: Vec<&str> = include_str!("fixtures/tool_end_m7.jsonl").lines().collect();
-        // 1 기반 줄 번호(README 표와 같은 셈).
         let feed = |h: &mut Harness, range: std::ops::RangeInclusive<usize>| {
             for n in range {
                 h.reader.handle_line(lines[n - 1].as_bytes());
@@ -10046,16 +9556,16 @@ mod tests {
 
         accept_user(&h.state, TYPED, "Also reply with the word KIWI1.");
         announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_next(&h).is_none(), "도구 끝 전에 넘겼다");
+        assert!(steer_next(&h).is_none(), "handed over before the tool end");
         h.next_id.store(3, Ordering::Relaxed);
         feed(&mut h, 7..=7);
-        let s = next_steer_job(&h, "도구 끝이 쥔 글을 안 풀었다");
+        let s = next_steer_job(&h, "the tool end did not release the held text");
         assert_eq!(s.request, 3);
         assert_eq!(steer_params(&s)["expectedTurnId"], TURN);
         issue(&h, s);
 
         feed(&mut h, 8..=19);
-        assert_eq!(turn_seq(&h.state), None, "턴이 안 끝났다");
+        assert_eq!(turn_seq(&h.state), None, "the turn did not end");
         let typed: Vec<_> = list_ops(&h.seen)
             .into_iter()
             .filter(|op| {
@@ -10069,14 +9579,21 @@ mod tests {
                 QueuedInputEvent::Delivered { id: TYPED.into() }
             ]
         );
-        assert!(row_ids(&h).is_empty(), "받은 글이 명부에 남았다");
-        assert_eq!(h.pending.len(), 0, "대기표가 남았다");
-        assert!(take(&h).is_none(), "끝난 턴 뒤에 turn/start 가 나갔다");
+        assert!(
+            row_ids(&h).is_empty(),
+            "received text remained in the registry"
+        );
+        assert_eq!(h.pending.len(), 0, "a waiting entry remained");
+        assert!(
+            take(&h).is_none(),
+            "turn/start went out after the ended turn"
+        );
     }
 
-    /// ★steer 를 못 쓰면 그 글은 쥔 자리로 돌아간다★(사용자 결정 2026-09-26 · ADR-0235 — 지우지 않는다) · 목록 사건 0 건 · 대기표는
-    /// 걷히고 턴은 계속 돈다(오류 뒤 멈춤의 계기가 아니다). 그 턴에는 「steer 거절」 표시가 서 같은 턴의 다음 도구 끝이 그
-    /// 글을 곧바로 다시 쓰지 않고(재시도 고리 없음), 턴이 끝난 뒤 다음 Idle 에 `turn/start` 로 **한 번** 나간다.
+    /// ★If the steer cannot be written, the text returns to the held place★ (user decision 2026-09-26 · ADR-0235 — not erased) · 0 list
+    /// events · the waiting entry is removed and the turn keeps running (no halt trigger). The turn gets the 「steer refused」 mark, so the
+    /// next tool end of the turn does not rewrite it (no retry loop), and after the turn ends it goes out **once** with `turn/start` at the
+    /// next Idle.
     #[test]
     fn a_steer_that_cannot_be_written_is_held_not_retried_in_that_turn_and_sent_once_at_the_next_idle(
     ) {
@@ -10090,37 +9607,41 @@ mod tests {
             Err(PtyError::WriteFailed("broken pipe".into()))
         });
         assert!(matches!(issued, Issued::Failed));
-        assert_eq!(h.pending.len(), 0, "못 쓴 steer 의 대기표가 남았다");
+        assert_eq!(
+            h.pending.len(),
+            0,
+            "the waiting entry of the unwritten steer remained"
+        );
         assert_eq!(
             list_ops(&h.seen),
             vec![queued("q-1", "x")],
-            "쓰기 실패가 목록 사건을 냈다"
+            "the write failure emitted a list event"
         );
         assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
-        assert_eq!(row_ids(&h), ["q-1"], "쓰기 실패가 목록을 바꿨다");
+        assert_eq!(row_ids(&h), ["q-1"], "the write failure changed the list");
         assert_eq!(
             turn_seq(&h.state),
             Some(seq),
-            "steer 쓰기 실패가 턴을 끝냈다"
+            "the steer write failure ended the turn"
         );
-        assert!(!halted(&h.state), "steer 쓰기 실패가 멈춤을 세웠다");
+        assert!(!halted(&h.state), "the steer write failure set a halt");
 
         item_started(&mut h, "t1", "commandExecution", "c");
         item_completed(&mut h, "t1", "commandExecution", "c");
         assert!(
             steer_next(&h).is_none(),
-            "같은 턴의 도구 끝이 못 쓴 글을 다시 썼다"
+            "a tool end of the same turn wrote the unwritten text again"
         );
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
         let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
         assert_eq!(v["params"]["clientUserMessageId"], "q-1");
-        assert!(take(&h).is_none(), "두 번 나갔다");
+        assert!(take(&h).is_none(), "went out twice");
     }
 
-    /// ★운영은 도구 끝에 steer 한다★ — 시험 seam 없이 지은 상태(하한 판정 `Above`)에서 도는 턴에 친 글은 쥐였다가, 우리 턴의
-    /// 도구 끝 줄이 리더를 지나면 라이터가 집는 다음 일([`next_job`])이 그 글의 `turn/steer` 다. 하한 미달 화신은 오늘 경로
-    /// 그대로다 — 턴 id 가 와도 · 도구가 끝나도 쥔 채로 남고 턴 끝 뒤 `turn/start` 로 나간다.
+    /// ★Production steers at the tool end★ — in a state built without test seams (decision `Above`), text typed in the running turn is held,
+    /// and when our turn's tool-end line passes the reader the next job the writer picks ([`next_job`]) is that text's `turn/steer`. A
+    /// below-floor incarnation is today's path — it stays held and goes with `turn/start` after the turn end.
     #[test]
     fn production_steers_a_held_item_through_the_writer_after_a_tool_end() {
         let mut h = harness();
@@ -10129,9 +9650,9 @@ mod tests {
         accept_user(&h.state, "q-1", "x");
         announce(&h.reader.core, &h.state, &ann);
         item_started(&mut h, "t1", "commandExecution", "c");
-        assert!(steer_next(&h).is_none(), "도구 끝 전에 넘겼다");
+        assert!(steer_next(&h).is_none(), "handed over before the tool end");
         item_completed(&mut h, "t1", "commandExecution", "c");
-        let s = next_steer_job(&h, "도구 끝이 쥔 글을 안 풀었다");
+        let s = next_steer_job(&h, "the tool end did not release the held text");
         let p = steer_params(&s);
         assert_eq!(p["clientUserMessageId"], "q-1");
         assert_eq!(p["expectedTurnId"], "t1");
@@ -10146,13 +9667,13 @@ mod tests {
         reply(&mut h, request, "t1");
         assert!(
             steer_next(&h).is_none(),
-            "하한 미달 화신이 턴 id 에 steer 했다"
+            "a below-floor incarnation steered on the turn id"
         );
         item_started(&mut h, "t1", "commandExecution", "c");
         item_completed(&mut h, "t1", "commandExecution", "c");
         assert!(
             steer_next(&h).is_none(),
-            "하한 미달 화신이 도구 끝에 steer 했다"
+            "a below-floor incarnation steered at the tool end"
         );
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
@@ -10161,13 +9682,13 @@ mod tests {
         assert!(v["params"].get("clientUserMessageId").is_none());
     }
 
-    // ── 첫 유저 메시지 되울림 → 세션 id 래치(ADR-0226 개정 · 사용자 결정 2026-09-26) ──
+    // ── First user message echo → session id latch (ADR-0226 amendment · user decision 2026-09-26) ──
     //
-    // ★운영과 같은 모양으로 꽂는다★: 핸드셰이크의 기록 포트 = 래치 수령, 리더의 첫 턴 포트 = 같은 래치.
-    //   이 모드의 세션은 제출을 세지 않으므로 commit 은 되울림 한 곳에서만 난다.
+    // ★Plugged in as production★: the handshake's record port = latch receipt, the reader's first-turn port = the same latch. This mode's
+    //   session does not count submissions, so commit happens only at the echo.
 
-    /// 실 번역기 시험대 + 래치 — 핸드셰이크가 하는 일(thread id 를 래치에 넘기고 준비 완료)까지 마친 자리.
-    /// 돌려주는 기록 = commit 포트가 받은 값들.
+    /// Real translator bench + latch — after the handshake finished (thread id handed to the latch, ready). Returns the values the commit
+    /// port received.
     fn harness_with_latch() -> (Harness, Arc<Mutex<Vec<String>>>) {
         let mut h = harness_with_real_decoder();
         let commits = Arc::new(Mutex::new(Vec::new()));
@@ -10182,13 +9703,12 @@ mod tests {
             Some(&latch.offer_sink()),
             "T",
         )
-        .expect("핸드셰이크의 기록");
+        .expect("the handshake's record");
         make_ready(&h.state, "T");
         h.reader.first_turn = Some(latch.first_turn_sink());
         (h, commits)
     }
 
-    /// 되울린 유저 메시지 한 줄 — `clientId` 없이(하한 미달 · 식별자 없는 우편 턴), thread 를 골라서.
     fn anonymous_echo_line(method_name: &str, thread: &str, turn: &str, item_id: &str) -> String {
         serde_json::json!({
             "method": method_name,
@@ -10199,13 +9719,12 @@ mod tests {
         .to_string()
     }
 
-    /// (a)·(b) — 핸드셰이크와 보내기로는 영속하지 않고, 상대의 첫 되울림에서 정확히 한 번 영속한다.
     #[test]
     fn the_thread_id_persists_at_the_first_user_message_echo_and_only_once() {
         let (mut h, commits) = harness_with_latch();
         assert!(
             commits.lock().unwrap().is_empty(),
-            "핸드셰이크만으로 영속했다 — 입력 없이 끈 화신의 0턴 id 가 남는다"
+            "persisted by the handshake alone — the 0-turn id of an incarnation turned off without input remains"
         );
 
         accept_user(&h.state, "u-1", "hi");
@@ -10213,7 +9732,7 @@ mod tests {
         h.reader.handle_line(progress_line("T", "U1").as_bytes());
         assert!(
             commits.lock().unwrap().is_empty(),
-            "되울림 전에 영속했다 — 보냈다는 것만으로는 대화에 턴이 없다"
+            "persisted before the echo — having sent is not enough for the conversation to have a turn"
         );
 
         h.reader
@@ -10228,15 +9747,14 @@ mod tests {
         assert_eq!(
             commits.lock().unwrap().as_slice(),
             ["T"],
-            "같은 item 의 완료 · 다음 턴의 되울림이 다시 commit 했다"
+            "the completion of the same item · the next turn's echo committed again"
         );
     }
 
-    /// (e) — `clientId` 가 없는 되울림도 센다: 하한 미달 화신의 모든 턴 · 식별자 없는 우편 턴.
     #[test]
     fn an_echo_without_our_client_id_persists_the_thread_id_too() {
         let (mut h, commits) = harness_with_latch();
-        accept_input(&h.state, None, b"letter".to_vec(), InputOrigin::Mail).expect("받는다");
+        accept_input(&h.state, None, b"letter".to_vec(), InputOrigin::Mail).expect("accepts");
         activate(&h.state, 1, None);
 
         h.reader.handle_line(
@@ -10246,10 +9764,9 @@ mod tests {
         assert_eq!(commits.lock().unwrap().as_slice(), ["T"]);
     }
 
-    /// (d)·(f) — 라이브 유저 메시지 되울림이 아닌 줄은 무엇도 영속을 열지 않는다: 다른 thread 라고 밝힌
-    ///   되울림 · 에이전트 답 item · 턴 끝(되울림 전에 끝난 턴) · 유저 메시지를 실은 **응답** 줄(이력 복원이
-    ///   타는 문).
-    /// ★마지막 되울림이 그 판정을 비어 있지 않게 한다★ — 같은 리더가 진짜 되울림은 센다.
+    /// (d)·(f) — lines that are not a live user message echo open no persistence: an echo declaring another thread · an agent answer item · a
+    ///   turn end · a **response** line carrying a user message (the door history restore rides).
+    /// ★The last echo keeps that decision from being empty★ — the same reader does count a real echo.
     #[test]
     fn nothing_but_a_live_user_message_echo_of_our_thread_persists_the_thread_id() {
         let (mut h, commits) = harness_with_latch();
@@ -10281,7 +9798,7 @@ mod tests {
         }
         assert!(
             commits.lock().unwrap().is_empty(),
-            "되울림이 아닌 줄이 영속을 열었다: {:?}",
+            "a line that is not an echo opened persistence: {:?}",
             commits.lock().unwrap()
         );
 
@@ -10291,7 +9808,7 @@ mod tests {
         assert_eq!(commits.lock().unwrap().as_slice(), ["T"]);
     }
 
-    /// 첫 턴 포트가 없는 리더(조립점이 안 줬다)도 되울림을 평소대로 처리한다 — 부를 곳이 없을 뿐이다.
+    /// A reader without a first-turn port (none given by the assembly point) handles echoes as usual — there is just nowhere to call.
     #[test]
     fn a_reader_without_a_first_turn_port_handles_the_echo_as_usual() {
         let mut h = harness_with_real_decoder();
@@ -10309,11 +9826,12 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|e| matches!(e, OutputEvent::Structured { .. })),
-            "되울린 말풍선이 올라가지 않았다"
+            "the echoed bubble did not go up"
         );
     }
 
-    /// 첫 턴 포트는 표시 밖에서 불린다 — 리더는 펌프의 가둠 안에서 돌지만 래치 commit 은 공유 프로필 표를 고친다.
+    /// The first-turn port is called outside the marking — the reader runs inside the pump's containment, but the latch commit changes the
+    /// shared profile table.
     // ADR-0292
     #[test]
     fn the_first_turn_port_runs_outside_the_contain_mark() {
@@ -10335,21 +9853,23 @@ mod tests {
             );
             is_contained()
         }))
-        .expect("panic 없음");
+        .expect("no panic");
 
-        assert!(inside, "시험 전제 — 포트를 부른 뒤에도 리더는 표시 안이다");
+        assert!(
+            inside,
+            "test premise — the reader is inside the marking even after calling the port"
+        );
         assert_eq!(*marks.lock().unwrap(), vec![false]);
     }
 
-    // ── 턴 끝에서 쥔 자리로 되돌림 (ADR-0231 · TRD §5-5) ──────────────────────────
+    // ── Returning to the held place at the turn end (ADR-0231 · TRD §5-5) ──────────────────────────
     //
-    // 턴 끝은 steer 응답을 기다리지 않는다 — 판정(`Above`)이 난 시험대([`above`])가 운영 그대로 steer 한다.
+    // The turn end does not wait for the steer response — the [`above`] bench steers exactly as production.
 
-    /// 도는 턴에 `id` 하나를 steer 로 넘기고 대기표까지 건 자리 — 그 steer 의 요청 id.
     fn steer_one(h: &Harness, ann: &Announcer, id: &str, text: &str) -> i64 {
         accept_user(&h.state, id, text);
         announce(&h.reader.core, &h.state, ann);
-        let s = steer_at_tool_end(h).expect("steer 가 안 나갔다");
+        let s = steer_at_tool_end(h).expect("the steer did not go out");
         let request = s.request;
         assert!(matches!(issue(h, s), Issued::Written));
         request
@@ -10359,8 +9879,8 @@ mod tests {
         Some(format!("in-flight gen={seq} turn=Some(\"{turn}\")"))
     }
 
-    /// `act` 가 상태 조건변수에서 자는 쪽을 깨우나. ★자는 쪽은 락을 쥔 채 준비를 알리고 잠들며 락을 놓는다★ — 그래서
-    /// `act` 가 락을 얻는 순간 자는 쪽은 이미 잠들어 있다(깨움을 놓치는 창이 없다).
+    /// Does `act` wake the side sleeping on the state condition variable? ★The sleeper signals readiness while holding the lock and releases
+    /// it as it falls asleep★ — so when `act` gets the lock the sleeper is already asleep (no window to miss the wake-up).
     fn wakes_a_waiter(state: &SharedState, act: impl FnOnce()) -> bool {
         let (ready_tx, ready_rx) = mpsc::channel();
         let waiter = {
@@ -10380,11 +9900,11 @@ mod tests {
         waiter.join().unwrap()
     }
 
-    /// ★턴 끝과 steer 응답 사이의 창★ — −32600(돌고 있는 턴 없음)이 `turn/completed` 뒤에 와도 앞에 와도 그 글은 `Held`
-    /// 로 남아 `turn/start` 로 **정확히 한 번** 나간다(M10 — 순서를 가정하지 않는다) · 목록 사건 0 건 · 턴 끝은 그 응답을
-    /// 기다리지 않고 · 다시 나간 뒤 온 옛 요청의 거절은 무동작(세대 가림). `failed` 끝도 같은 글을 쥔다 — 턴 도중 거절로
-    /// 돌아온 글은 그대로이고, 거절이 오기 전의 글은 끝이 되돌린다(사용자 결정 2026-09-26 · ADR-0235). 그 `turn/start` 는 멈춘 뒤
-    /// 친 글이 닿은 뒤다(오류 뒤 멈춤).
+    /// ★The window between the turn end and the steer response★ — whether −32600 (no turn running) comes after or before `turn/completed`
+    /// (M10 — no order assumed), the text remains `Held` and goes out **exactly once** with `turn/start` · 0 list events · the turn end does
+    /// not wait for that response · a refusal of the old request after it went out again is a no-op (generation masking). `failed` also holds
+    /// the same text — text returned by a mid-turn refusal stays, text before the refusal came is returned by the end (user decision
+    /// 2026-09-26 · ADR-0235). That `turn/start` comes after the text typed after the halt (halt after error).
     #[test]
     fn a_refused_steer_is_held_and_sent_once_whether_its_error_comes_before_or_after_the_turn_end()
     {
@@ -10407,12 +9927,12 @@ mod tests {
             assert_eq!(
                 stage_of(&h.state, "q-1").as_deref(),
                 Some("held"),
-                "{at}: 턴 끝에서 쥔 자리로 안 돌아왔다"
+                "{at}: did not return to the held place at the turn end"
             );
             let mut listed = vec![queued("q-1", "second")];
             if status == "failed" {
-                // 오류 뒤 멈춤 — 멈추기 전부터 쥔 글은 저절로 안 나가고, 멈춘 뒤 친 글의 턴에 머리로 든다(AC24).
-                assert!(take(&h).is_none(), "{at}: 멈춤 중에 턴이 열렸다");
+                // Halt after error — text held before the halt does not go out on its own and enters as the head of the turn of text typed after the halt (AC24).
+                assert!(take(&h).is_none(), "{at}: a turn opened during the halt");
                 accept_user(&h.state, "u-2", "later");
                 announce(&h.reader.core, &h.state, &ann);
                 listed.push(queued("u-2", "later"));
@@ -10425,17 +9945,17 @@ mod tests {
                 assert_eq!(
                     stage_of(&h.state, "q-1"),
                     resent,
-                    "{at}: 옛 요청의 거절이 다시 넘긴 글을 움직였다"
+                    "{at}: the old request's refusal moved the text handed over again"
                 );
             }
-            assert!(take(&h).is_none(), "{at}: turn/start 가 두 번 나갔다");
-            assert_eq!(list_ops(&h.seen), listed, "{at}: 목록 사건이 났다");
+            assert!(take(&h).is_none(), "{at}: turn/start went out twice");
+            assert_eq!(list_ops(&h.seen), listed, "{at}: a list event happened");
         }
     }
 
-    /// 턴 끝까지 응답 못 받은 steer 의 글은 턴 끝에서 쥔 자리로 돌아와(목록 사건 0 건 · 목록에 남는다) 그 응답을
-    /// 기다리지 않고 곧바로 다음 `turn/start` 를 한 번 탄다. 다시 나간 뒤 온 옛 요청의 성공 응답 · 시한 · 거절은 그 글을
-    /// 안 움직인다(세대 가림).
+    /// Text of a steer with no response until the turn end returns to the held place at the turn end (0 list events · stays in the list) and
+    /// rides the next `turn/start` at once without waiting for that response. The old request's success response · deadline · refusal after
+    /// it went out again do not move that text (generation masking).
     #[test]
     fn a_steer_answered_only_after_its_turn_ended_rides_the_next_turn_once() {
         for deadline in [false, true] {
@@ -10449,7 +9969,7 @@ mod tests {
             assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"), "{at}");
             let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
             assert_eq!(v["params"]["clientUserMessageId"], "q-1", "{at}");
-            assert!(take(&h).is_none(), "{at}: 두 번 나갔다");
+            assert!(take(&h).is_none(), "{at}: went out twice");
             let resent = stage_of(&h.state, "q-1");
             if deadline {
                 h.pending.forget(request);
@@ -10469,11 +9989,14 @@ mod tests {
             assert_eq!(
                 stage_of(&h.state, "q-1"),
                 resent,
-                "{at}: 옛 요청의 응답이 다시 넘긴 글을 움직였다"
+                "{at}: the old request's response moved the text handed over again"
             );
             assert_eq!(list_ops(&h.seen), vec![queued("q-1", "x")], "{at}");
-            assert_eq!(row_ids(&h), ["q-1"], "{at}: 목록에서 빠졌다");
-            assert!(take(&h).is_none(), "{at}: 늦은 응답 뒤 또 나갔다");
+            assert_eq!(row_ids(&h), ["q-1"], "{at}: left the list");
+            assert!(
+                take(&h).is_none(),
+                "{at}: went out again after the late response"
+            );
 
             assert!(h.pending.register(
                 900,
@@ -10487,14 +10010,15 @@ mod tests {
             assert_eq!(
                 stage_of(&h.state, "q-1"),
                 resent,
-                "{at}: 옛 세대의 늦은 응답이 다시 넘긴 항목을 움직였다"
+                "{at}: a late response of the old generation moved the item handed over again"
             );
             assert_eq!(list_ops(&h.seen).len(), 1, "{at}");
         }
     }
 
-    /// 끊긴 턴에 steer 로 넘긴 글도 에코가 없으면 쥔 자리로 돌아가 곧바로 다음 턴을 한 번 탄다 — 끊기는 멈춤을 안
-    /// 세운다. 응답을 이미 받았든 아직이든 같고, 뒤늦게 온 옛 요청의 응답은 다시 넘긴 글을 안 움직인다.
+    /// Text handed over as a steer in an interrupted turn also returns to the held place without an echo and rides the next turn at once —
+    /// interruption does not set the halt. Same whether the response was received; a late response of the old request does not move the
+    /// re-handed-over text.
     #[test]
     fn a_steered_item_without_its_echo_returns_to_held_when_the_turn_is_interrupted() {
         for replied in [true, false] {
@@ -10511,26 +10035,24 @@ mod tests {
             assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"), "{at}");
             assert!(
                 !with_state(&h.state, |s| s.halted),
-                "{at}: 끊기가 멈춤을 세웠다"
+                "{at}: the interruption set the halt"
             );
             assert_eq!(list_ops(&h.seen), vec![queued("q-1", "x")], "{at}");
             let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
             assert_eq!(v["params"]["clientUserMessageId"], "q-1", "{at}");
-            assert!(take(&h).is_none(), "{at}: 두 번 나갔다");
+            assert!(take(&h).is_none(), "{at}: went out twice");
             let resent = stage_of(&h.state, "q-1");
             if !replied {
                 steer_refused_reply(&mut h, request);
                 assert_eq!(
                     stage_of(&h.state, "q-1"),
                     resent,
-                    "{at}: 옛 요청의 거절이 다시 넘긴 글을 움직였다"
+                    "{at}: the old request's refusal moved the text handed over again"
                 );
             }
         }
     }
 
-    /// ✕ 가 닿은 steer 의 글이 에코 없이 턴이 끝나면 쥔 자리로 돌아가지 않고 그 턴 끝에서 거둔다(`Dropped{Withdrawn}` —
-    /// 되돌리면 다음 턴에 나간다). 그 뒤의 응답(거절 · 성공)은 사건을 더 내지 않는다.
     #[test]
     fn a_cancelled_steer_whose_turn_ends_without_its_echo_is_withdrawn_at_the_end() {
         for how in ["refused", "accepted"] {
@@ -10547,20 +10069,26 @@ mod tests {
             let mut want = vec![queued("q-1", "x")];
             want.extend(cancel_ops("q-1"));
             want.push(withdrawn("q-1"));
-            assert_eq!(list_ops(&h.seen), want, "{how}: 턴 끝에서 안 거뒀다");
+            assert_eq!(
+                list_ops(&h.seen),
+                want,
+                "{how}: not withdrawn at the turn end"
+            );
             assert_eq!(stage_of(&h.state, "q-1"), None, "{how}");
-            assert!(row_ids(&h).is_empty(), "{how}: 명부에 남았다");
+            assert!(row_ids(&h).is_empty(), "{how}: it remained in the registry");
             match how {
                 "refused" => steer_refused_reply(&mut h, request),
                 _ => steer_accepted_reply(&mut h, request, "t1"),
             }
-            assert_eq!(list_ops(&h.seen), want, "{how}: 응답이 사건을 냈다");
-            assert!(take(&h).is_none(), "{how}: 거둔 글이 나갔다");
+            assert_eq!(
+                list_ops(&h.seen),
+                want,
+                "{how}: the response emitted an event"
+            );
+            assert!(take(&h).is_none(), "{how}: withdrawn text went out");
         }
     }
 
-    /// 턴 끝에서 쥔 자리로 돌아온 steer 글 둘은 응답을 기다리지 않고 친 순서대로 나간다 — 먼저 친 글이 `turn/start` 로,
-    /// 뒤 글은 그 턴 id 가 오는 깨어남에 steer 로. 옛 요청의 뒤늦은 거절들은 어느 글도 안 움직이고 표시도 안 단다.
     #[test]
     fn steers_returned_at_the_close_go_in_typed_order_without_waiting_for_their_replies() {
         let mut h = harness();
@@ -10570,17 +10098,18 @@ mod tests {
         let second = steer_one(&h, &ann, "q-2", "b");
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
-        let (request, _, p) = opens(&h).expect("응답을 기다리느라 턴이 안 열렸다");
+        let (request, _, p) =
+            opens(&h).expect("the turn did not open because it waited for responses");
         assert_eq!(p["clientUserMessageId"], "q-1");
         steer_refused_reply(&mut h, second);
         steer_refused_reply(&mut h, first);
         assert_eq!(
             stage_of(&h.state, "q-2").as_deref(),
             Some("held"),
-            "옛 거절이 쥔 글을 움직였다"
+            "an old refusal moved the held text"
         );
         reply(&mut h, request, "t2");
-        let s = steer_next(&h).expect("턴 id 가 뒤 글을 안 풀었다");
+        let s = steer_next(&h).expect("the turn id did not release the later text");
         assert_eq!(steer_params(&s)["clientUserMessageId"], "q-2");
         assert_eq!(
             list_ops(&h.seen),
@@ -10588,8 +10117,6 @@ mod tests {
         );
     }
 
-    /// 턴이 쓰기 전에 끝난 steer 를 못 써도 턴 끝에서 이미 쥔 자리로 돌아온 글은 안 건드린다 — 거절로 닫지 않고(세대 가림)
-    /// 「steer 거절」 표시도 안 달며, 다음 턴을 한 번 탄다.
     #[test]
     fn a_steer_write_failure_after_its_turn_ended_leaves_the_returned_item_alone() {
         let mut h = harness();
@@ -10612,9 +10139,10 @@ mod tests {
         assert_eq!(v["params"]["clientUserMessageId"], "q-1");
     }
 
-    /// ★턴 끝 뒤에 온 받음★ — 응답 못 받은 steer 의 에코가 `turn/completed` 뒤에 오면(그 글은 쥔 자리로 돌아와 있다)
-    /// 받음으로 닫는다(목록에서 빠지고 벤더 말풍선) · 빈 `turn/start` 0 건. 열린 턴이 없으니 **받음 뒤에 턴 경계**가
-    /// 선다(프론트 대기 표시를 끈다) — 관측 없는 문이라 턴 표는 그대로다. 뒤늦은 성공 응답은 아무것도 안 낸다.
+    /// ★A receipt after the turn end★ — if the echo of a steer with no response comes after `turn/completed` (the text has returned to the
+    /// held place), it closes as received (leaves the list, and the vendor bubble) · 0 empty `turn/start`. No open turn, so **a turn
+    /// boundary after the receipt** stands (turns off the frontend waiting indicator) — through the observation-free door, so the turn
+    /// table stays as is. A late success response emits nothing.
     #[test]
     fn a_late_echo_after_the_close_delivers_the_returned_item_and_its_late_reply_changes_nothing() {
         let (mut h, turns, id) = harness_with_facts();
@@ -10639,26 +10167,26 @@ mod tests {
         assert_eq!(
             turns.get(id, 1),
             facts,
-            "늦은 받음이나 그 뒤 경계가 턴 표를 건드렸다"
+            "the late receipt or the boundary after it touched the turn table"
         );
         assert_eq!(stage_of(&h.state, "q-1"), None);
         assert!(row_ids(&h).is_empty());
         assert!(
             take(&h).is_none(),
-            "받은 글이 다시 나갔거나 빈 turn/start 가 나갔다"
+            "received text went out again, or an empty turn/start went out"
         );
 
         steer_accepted_reply(&mut h, request, "t1");
         assert_eq!(
             trace(&h.seen).len(),
             3,
-            "뒤늦은 성공 응답이 목록 사건이나 경계를 냈다"
+            "the late success response emitted a list event or a boundary"
         );
-        assert!(take(&h).is_none(), "빈 turn/start 가 나갔다");
+        assert!(take(&h).is_none(), "an empty turn/start went out");
     }
 
-    /// ★에코가 steer 응답보다 먼저 왔으면 턴 끝은 그 응답을 기다리지 않는다★ — 받음이 항목을 빼 턴 끝에 처분할 글이
-    /// 없고, 다음 사용자 글의 `turn/start` 가 응답 전에 곧바로 나간다. 뒤늦은 성공 응답은 아무것도 안 낸다.
+    /// ★If the echo came before the steer response, the turn end does not wait for it★ — the receipt removes the item, so there is nothing to
+    /// dispose at the turn end and the next user text's `turn/start` goes out at once before the response. A late success response emits nothing.
     #[test]
     fn an_echoed_steer_whose_reply_is_still_owed_does_not_hold_the_turn_end() {
         let mut h = harness_with_real_decoder();
@@ -10667,22 +10195,29 @@ mod tests {
         let request = steer_one(&h, &ann, "q-1", "second");
         h.reader
             .handle_line(echo_line("t1", "q-1", "second").as_bytes());
-        assert_eq!(stage_of(&h.state, "q-1"), None, "받음이 항목을 안 뺐다");
+        assert_eq!(
+            stage_of(&h.state, "q-1"),
+            None,
+            "the receipt did not remove the item"
+        );
         item_started(&mut h, "t1", "agentMessage", "a-2");
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
 
         accept_user(&h.state, "q-2", "typed after the turn");
         announce(&h.reader.core, &h.state, &ann);
-        let (_, _, p) = opens(&h).expect("steer 응답을 기다리느라 turn/start 가 안 나갔다");
+        let (_, _, p) =
+            opens(&h).expect("turn/start did not go out because it waited for the steer response");
         assert_eq!(p["clientUserMessageId"], "q-2");
         let ops = list_ops(&h.seen);
         steer_accepted_reply(&mut h, request, "t1");
-        assert_eq!(list_ops(&h.seen), ops, "뒤늦은 응답이 목록 사건을 냈다");
+        assert_eq!(
+            list_ops(&h.seen),
+            ops,
+            "the late response emitted a list event"
+        );
     }
 
-    /// 되울려진 steer 에 오류 응답이 오면 항목은 되살리지 않는다(받음이 이긴다) · 목록 사건 0 건 · 「steer 거절」 표시는
-    /// 안 단다 — 턴이 돌 때든 끝난 뒤든.
     #[test]
     fn a_refusal_after_the_echo_never_resurrects_the_item() {
         for after_turn_end in [false, true] {
@@ -10700,18 +10235,16 @@ mod tests {
             }
             let ops = list_ops(&h.seen);
             steer_refused_reply(&mut h, request);
-            assert_eq!(stage_of(&h.state, "q-1"), None, "{at}: 항목이 되살아났다");
-            assert_eq!(list_ops(&h.seen), ops, "{at}: 목록 사건이 났다");
+            assert_eq!(stage_of(&h.state, "q-1"), None, "{at}: the item came back");
+            assert_eq!(list_ops(&h.seen), ops, "{at}: a list event happened");
             assert_eq!(
                 with_state(&h.state, |s| s.steer_refused),
                 None,
-                "{at}: 받힌 글의 거절이 그 턴의 steer 를 멈췄다"
+                "{at}: a refusal of accepted text stopped that turn's steers"
             );
         }
     }
 
-    /// 열린 턴 안에서 온 늦은 받음(앞 턴에서 쥔 자리로 돌아와 이 턴에 다시 넘긴 글의 옛 에코) 뒤에는 경계를 세우지
-    /// 않는다 — 그 턴의 끝이 경계다.
     #[test]
     fn a_late_echo_inside_a_running_turn_adds_no_boundary() {
         let (mut h, _, _) = end_a_turn(Whose::Listed, End::Completed("completed"));
@@ -10728,7 +10261,6 @@ mod tests {
         assert_eq!(stage_of(&h.state, "q-2").as_deref(), Some("held"));
     }
 
-    /// 쥔 자리로 돌아온 글의 늦은 받음은 pending 에서 빠지는 순간 라이터를 깨운다.
     #[test]
     fn a_late_echo_of_an_item_returned_to_held_wakes_the_writer() {
         let (mut h, _, _) = end_a_turn(Whose::Listed, End::Completed("completed"));
@@ -10738,13 +10270,11 @@ mod tests {
             wakes_a_waiter(&state, || h
                 .reader
                 .handle_line(echo_line("U1", "q-1", "hi").as_bytes())),
-            "라이터를 안 깨웠다"
+            "did not wake the writer"
         );
         assert_eq!(stage_of(&h.state, "q-1"), None);
     }
 
-    /// 쥔 자리로 돌아온 글의 ✕ 는 쥔 글과 같다 — `Withdrawn` · `Dropped{Withdrawn}` 곧바로(취소 대기 없음) · pending 에서
-    /// 빠지며 라이터를 깨운다 · 명부가 빈다 · 다시 나가지 않는다. 겹친 둘째 ✕ 는 `NotHeld`.
     #[test]
     fn cancelling_an_item_returned_to_held_withdraws_it_at_once() {
         let (h, _, _) = end_a_turn(Whose::Listed, End::Completed("completed"));
@@ -10754,29 +10284,27 @@ mod tests {
             wakes_a_waiter(&h.state, || {
                 answer = Some(withdraw_item(&h.state, Some(&h.reader.core), "q-1"))
             }),
-            "라이터를 안 깨웠다"
+            "did not wake the writer"
         );
         assert_eq!(answer, Some(Withdraw::Withdrawn));
         assert_eq!(list_ops(&h.seen), vec![withdrawn("q-1")]);
         assert_eq!(stage_of(&h.state, "q-1"), None);
-        assert!(row_ids(&h).is_empty(), "명부에 남았다");
+        assert!(row_ids(&h).is_empty(), "it remained in the registry");
         assert_eq!(
             withdraw_item(&h.state, Some(&h.reader.core), "q-1"),
             Withdraw::NotHeld,
-            "겹친 둘째 ✕"
+            "overlapping second ✕"
         );
-        assert_eq!(list_ops(&h.seen).len(), 1, "둘째 ✕ 가 사건을 냈다");
+        assert_eq!(list_ops(&h.seen).len(), 1, "the second ✕ emitted an event");
         accept_user(&h.state, "next", "typed after");
         announce(&h.reader.core, &h.state, &announcer());
         let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
         assert_eq!(
             v["params"]["clientUserMessageId"], "next",
-            "거둔 글이 나갔다"
+            "withdrawn text went out"
         );
     }
 
-    /// ✕ 가 닿은 넘긴 글(`turn/start` 가 실은 글)이 에코 없이 턴이 끝나면 끝의 모양과 무관하게 쥔 자리로 돌아가지 않고
-    /// 거둔다(`Dropped{Withdrawn}`) — 명부에 취소 대기가 안 남아 우편을 막지 않고, 다음 턴에 나가지 않는다.
     #[test]
     fn a_cancelled_handed_over_item_is_withdrawn_when_its_turn_ends_without_its_echo() {
         for end in [
@@ -10807,14 +10335,16 @@ mod tests {
             finish_turn(&mut h, request, seq, end);
             assert_eq!(list_ops(&h.seen), vec![withdrawn("q-1")], "{end:?}");
             assert_eq!(stage_of(&h.state, "q-1"), None, "{end:?}");
-            assert!(row_ids(&h).is_empty(), "{end:?}: 명부에 남았다");
-            assert!(take(&h).is_none(), "{end:?}: 거둔 글이 나갔다");
+            assert!(
+                row_ids(&h).is_empty(),
+                "{end:?}: it remained in the registry"
+            );
+            assert!(take(&h).is_none(), "{end:?}: withdrawn text went out");
         }
     }
 
-    // ── Idle 순서 (ADR-0231 · TRD §5-5 「턴을 여는 순서」) ─────────────────────────────────────────
+    // ── Idle order (ADR-0231 · TRD §5-5 「the order of opening turns」) ─────────────────────────────────────────
 
-    /// 라이터가 지금 여는 턴 — 대기표까지 건다(라이터가 하는 그대로). (요청 id, 표식, params).
     fn opens(h: &Harness) -> Option<(i64, u64, Value)> {
         let Some(Job::Turn { id, seq, line, .. }) = take(h) else {
             return None;
@@ -10827,8 +10357,6 @@ mod tests {
         Some((id, seq, v["params"].clone()))
     }
 
-    /// 한가할 때 친 글로 턴 `turn` 을 열고, 그 글이 되울려져 모델이 답을 쓰고 마친 자리 — 그 턴의 표식(받힌 머리 ·
-    /// 번역기가 그 턴의 줄을 본 뒤의 자리를 쓰는 시험들의 공통 준비).
     fn answered_turn(h: &mut Harness, ann: &Announcer, turn: &str) -> u64 {
         let seq = running_turn(h, ann, turn);
         h.reader
@@ -10838,16 +10366,15 @@ mod tests {
         seq
     }
 
-    /// 도는 턴 `turn` 에 `id` 를 steer 로 넘겨 성공 응답을 받고 되울려진 자리 — 그 뒤 샘플링 시작은 아직 없다.
     fn steer_recorded(h: &mut Harness, ann: &Announcer, turn: &str, id: &str, text: &str) {
         let request = steer_one(h, ann, id, text);
         steer_accepted_reply(h, request, turn);
         h.reader.handle_line(echo_line(turn, id, text).as_bytes());
     }
 
-    /// ★Idle 순서 = 사용자 먼저 → 우편★(PRD §3-9 · N6) — 쥔 우편과 사용자 글이 함께 있으면 먼저 친 우편보다 사용자 턴이
-    /// 먼저이고, 우편은 그 턴이 끝난 뒤에 열린다. ★받힌 steer 가 답을 못 받고 끝나도 빈 `turn/start` 는 안 나간다★(후속
-    /// 턴 빚은 걷혔다 — ADR-0235).
+    /// ★Idle order = user first → mail★ (PRD §3-9 · N6) — with held mail and user text together, the user turn comes before earlier-typed
+    /// mail, and the mail opens after that turn ends. ★Even if an accepted steer ends without an answer, no empty `turn/start` goes out★
+    /// (the follow-up turn debt was removed — ADR-0235).
     #[test]
     fn the_idle_order_is_user_then_mail() {
         for with_user in [true, false] {
@@ -10868,7 +10395,7 @@ mod tests {
             if with_user {
                 accept_user(&h.state, "u-1", "typed");
                 announce(&h.reader.core, &h.state, &ann);
-                let (request, _, p) = opens(&h).expect("사용자 턴이 안 열렸다");
+                let (request, _, p) = opens(&h).expect("the user turn did not open");
                 assert_eq!(p["clientUserMessageId"], "u-1", "{at}");
                 reply(&mut h, request, "t2");
                 h.reader
@@ -10877,14 +10404,14 @@ mod tests {
                 h.reader
                     .handle_line(completed_line("T", "t2", "completed").as_bytes());
             }
-            let (_, _, p) = opens(&h).expect("우편 turn/start 가 안 나갔다");
+            let (_, _, p) = opens(&h).expect("the mail turn/start did not go out");
             assert_eq!(p["clientUserMessageId"], "m-1", "{at}");
-            assert_ne!(p["input"], serde_json::json!([]), "{at}: 빈 turn/start");
+            assert_ne!(p["input"], serde_json::json!([]), "{at}: empty turn/start");
         }
     }
 
-    /// Idle 에 `[U1, M, U2]`(M = 우편) → U1 의 `turn/start` · 새 턴 id 에 U2 곧바로 steer · M 은 사용자 `Held` 가 빈 뒤의
-    /// Idle 에서만 `turn/start`(TRD §7-1 · AC22 · N6).
+    /// At Idle `[U1, M, U2]` (M = mail) → U1's `turn/start` · U2 steered at once on the new turn id · M gets `turn/start` only at the Idle
+    /// after the user `Held` are empty (TRD §7-1 · AC22 · N6).
     #[test]
     fn mail_between_user_items_waits_until_the_user_items_are_in() {
         let mut h = harness_with_real_decoder();
@@ -10899,29 +10426,29 @@ mod tests {
         .unwrap();
         accept_user(&h.state, "u-2", "two");
         announce(&h.reader.core, &h.state, &ann);
-        let (request, _, p) = opens(&h).expect("U1 의 turn/start");
+        let (request, _, p) = opens(&h).expect("U1's turn/start");
         assert_eq!(p["clientUserMessageId"], "u-1");
         reply(&mut h, request, "t1");
-        let s = next_steer_job(&h, "U2 가 새 턴 id 에 안 넘어갔다");
+        let s = next_steer_job(&h, "U2 was not handed over on the new turn id");
         assert_eq!(steer_params(&s)["clientUserMessageId"], "u-2");
         let steer = s.request;
         assert!(matches!(issue(&h, s), Issued::Written));
-        assert!(steer_next(&h).is_none(), "우편이 steer 로 나갔다");
+        assert!(steer_next(&h).is_none(), "mail went out as a steer");
         steer_accepted_reply(&mut h, steer, "t1");
         h.reader
             .handle_line(echo_line("t1", "u-1", "one").as_bytes());
         h.reader
             .handle_line(echo_line("t1", "u-2", "two").as_bytes());
         item_started(&mut h, "t1", "agentMessage", "a-1");
-        assert!(take(&h).is_none(), "도는 턴에 우편이 나갔다");
+        assert!(take(&h).is_none(), "mail went out on the running turn");
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
-        let (_, _, p) = opens(&h).expect("M 의 turn/start");
+        let (_, _, p) = opens(&h).expect("M's turn/start");
         assert_eq!(p["clientUserMessageId"], "m-1");
     }
 
-    /// ★쥔 자리로 돌아온 사용자 글은 먼저 쥔 우편보다 먼저 나간다★(Idle 순서 = 사용자 먼저 — N6) — 우편은 그 글이 받힌
-    /// 뒤의 Idle 에서 열린다.
+    /// ★User text returned to the held place goes out before earlier-held mail★ (Idle order = user first — N6) — the mail opens at the Idle
+    /// after that text is accepted.
     #[test]
     fn a_user_item_returned_to_held_opens_before_older_held_mail() {
         let mut h = harness_with_real_decoder();
@@ -10937,44 +10464,41 @@ mod tests {
         accept_user(&h.state, "q-1", "hi");
         with_state(&h.state, |s| s.turn = TurnState::Idle);
         announce(&h.reader.core, &h.state, &ann);
-        let (request, _, p) = opens(&h).expect("사용자 턴이 안 열렸다");
+        let (request, _, p) = opens(&h).expect("the user turn did not open");
         assert_eq!(p["clientUserMessageId"], "q-1");
         reply(&mut h, request, "U1");
         h.reader
             .handle_line(completed_line("T", "U1", "completed").as_bytes());
         assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
 
-        let (request, _, p) = opens(&h).expect("돌아온 글의 턴이 안 열렸다");
+        let (request, _, p) = opens(&h).expect("the turn of the returned text did not open");
         assert_eq!(
             p["clientUserMessageId"], "q-1",
-            "우편이 돌아온 글을 앞질렀다"
+            "mail overtook the returned text"
         );
         reply(&mut h, request, "U2");
         h.reader
             .handle_line(echo_line("U2", "q-1", "hi").as_bytes());
         h.reader
             .handle_line(completed_line("T", "U2", "completed").as_bytes());
-        let (_, _, p) = opens(&h).expect("우편 turn/start 가 안 나갔다");
+        let (_, _, p) = opens(&h).expect("the mail turn/start did not go out");
         assert_eq!(p["clientUserMessageId"], "m-1");
     }
 
-    // ── 오류 뒤 멈춤 (ADR-0231 · TRD §5-5 「오류 뒤 멈춤」 · PRD AC24 · AC29) ──────────────────────────
+    // ── Halt after error (ADR-0231 · TRD §5-5 「halt after error」 · PRD AC24 · AC29) ──────────────────────────
 
     fn halted(state: &SharedState) -> bool {
         with_state(state, |s| s.halted)
     }
 
-    /// 멈춤을 세우는 턴의 종류 — 그 `turn/start` 가 무엇을 실었나(TRD §7-1).
+    /// The kind of turn that sets the halt — what its `turn/start` carried (TRD §7-1).
     #[derive(Debug, Clone, Copy)]
     enum Kind {
-        /// 턴 중에 친 목록 항목이 `Held` 로 연 사용자 턴.
         Listed,
-        /// 한가할 때 친 글(합성 말풍선)이 연 턴.
         Direct,
         Mail,
     }
 
-    /// 계기 여섯(`failed` — 이른 종료 풀기 포함 · `turn/start` 다섯 출구).
     const HALTING_ENDS: [End; 7] = [
         End::Completed("failed"),
         End::Early("failed"),
@@ -10985,8 +10509,8 @@ mod tests {
         End::LongTurnId,
     ];
 
-    /// `kind` 의 턴 하나를 열고(대기표까지) 그 턴 도중에 사용자 글 `pre` 와 우편 `m-pre` 가 쥐인 자리 — (요청 id, 표식).
-    /// `pre` 는 턴 id 를 기다리는 동안 들어 쥔 채로 남는다(시험대는 라이터를 돌리지 않는다).
+    /// One turn of `kind` opened (incl. waiting entry) with user text `pre` and mail `m-pre` held during it — (request id, marker). `pre`
+    /// comes in while waiting for the turn id and stays held (the bench does not run the writer).
     fn open_kind(h: &mut Harness, ann: &Announcer, kind: Kind) -> (i64, u64) {
         match kind {
             Kind::Listed => {
@@ -11006,7 +10530,7 @@ mod tests {
             }
         }
         announce(&h.reader.core, &h.state, ann);
-        let (request, seq, _) = opens(h).expect("턴이 안 열렸다");
+        let (request, seq, _) = opens(h).expect("the turn did not open");
         accept_user(&h.state, "pre", "typed before");
         accept_input(
             &h.state,
@@ -11019,14 +10543,13 @@ mod tests {
         (request, seq)
     }
 
-    /// ★계기 여섯 × 종류 셋 — 어느 쪽이든 멈춤이 선다★ · 그 턴이 실은 사용자 글은 지우지 않고 쥔 자리로 돌린다(사용자
-    /// 결정 2026-09-26 B — 우편은 오늘처럼 빠진다) · 멈춘 동안 Idle 이 여는 턴 0 건(돌아온 글 · 멈추기 전부터 쥔 사용자 글 ·
-    /// 쥔 우편) · 다음 사용자 글이 드는 순간 멈춤이 풀리고 남은 글을 머리로 한 `turn/start` 가 열리며 뒤 글은 그 턴 id 에
-    /// steer 로 든다 — 남은 것이 먼저, 친 순서로(AC24).
+    /// ★Six triggers × three kinds — the halt stands either way★ · the user text that turn carried is returned, not erased (user decision
+    /// 2026-09-26 B — mail leaves as today) · 0 turns opened by Idle while halted (returned text · text held before the halt · held mail) ·
+    /// when the next user text comes in the halt lifts and a `turn/start` with the remaining text as head opens, the following text entering
+    /// that turn id as a steer — what remains goes first, in typing order (AC24).
     #[test]
     fn every_abnormal_end_halts_whatever_the_turn_kind_until_the_next_user_item() {
         for kind in [Kind::Listed, Kind::Direct, Kind::Mail] {
-            // 멈춤이 풀린 뒤 여는 턴의 머리와 그 턴에 steer 로 드는 다음 글 — 그 턴이 실은 사용자 글이 쥔 자리로 돌아와 머리다.
             let (head, next) = match kind {
                 Kind::Listed => ("q-1", "pre"),
                 Kind::Direct => ("d-1", "pre"),
@@ -11037,34 +10560,36 @@ mod tests {
                 let mut h = harness_with_real_decoder();
                 let ann = above(&h);
                 let (request, seq) = open_kind(&mut h, &ann, kind);
-                assert!(!halted(&h.state), "{at}: 턴이 끝나기 전에 섰다");
+                assert!(!halted(&h.state), "{at}: stood before the turn ended");
                 finish_turn(&mut h, request, seq, end);
-                assert_eq!(turn_seq(&h.state), None, "{at}: 턴이 안 끝났다");
+                assert_eq!(turn_seq(&h.state), None, "{at}: the turn did not end");
                 assert!(halted(&h.state), "{at}");
-                assert!(take(&h).is_none(), "{at}: 멈춤 중에 턴이 열렸다");
+                assert!(take(&h).is_none(), "{at}: a turn opened during the halt");
                 assert_eq!(
                     stage_of(&h.state, head).as_deref(),
                     Some("held"),
-                    "{at}: 머리가 될 글이 쥔 자리에 없다"
+                    "{at}: the text that should become the head is not in the held place"
                 );
 
                 accept_user(&h.state, "post", "typed after");
-                assert!(!halted(&h.state), "{at}: 사용자 글이 멈춤을 안 풀었다");
+                assert!(!halted(&h.state), "{at}: user text did not lift the halt");
                 announce(&h.reader.core, &h.state, &ann);
-                let (request, _, p) = opens(&h).expect("멈춘 뒤 친 글의 턴이 안 열렸다");
+                let (request, _, p) =
+                    opens(&h).expect("the turn of the text typed after the halt did not open");
                 assert_eq!(
                     p["clientUserMessageId"], head,
-                    "{at}: 남은 글이 머리가 아니다"
+                    "{at}: the remaining text is not the head"
                 );
                 reply(&mut h, request, "t9");
-                let steer = steer_next(&h).expect("다음 글이 그 턴 id 에 안 넘어갔다");
+                let steer =
+                    steer_next(&h).expect("the next text was not handed over on that turn id");
                 assert_eq!(steer_params(&steer)["clientUserMessageId"], next, "{at}");
             }
         }
     }
 
-    /// ★멈춤은 우편으로는 안 풀린다 — 사용자 글이 드는 순간 풀린다★ · 쥔 글을 ✕ 로 다 빼 목록이 비어도 그대로다(쥔 우편
-    /// 0 건). 풀린 뒤 Idle 순서는 평소대로 — 사용자 턴이 끝나면 쥔 우편이 나간다.
+    /// ★The halt is not lifted by mail — only the moment user text comes in★ · it stays even if all held text is removed by ✕ and the list
+    /// empties (0 held mail). Idle order after lifting is as usual — when the user turn ends, held mail goes out.
     #[test]
     fn only_a_user_item_lifts_the_halt_and_the_idle_order_resumes() {
         let mut h = harness_with_real_decoder();
@@ -11083,10 +10608,10 @@ mod tests {
             InputOrigin::Mail,
         );
         assert!(matches!(lifted, Ok(false)), "{lifted:?}");
-        assert!(halted(&h.state), "우편이 멈춤을 풀었다");
-        assert!(take(&h).is_none(), "✕ 로 목록이 비자 우편이 나갔다");
+        assert!(halted(&h.state), "mail lifted the halt");
+        assert!(take(&h).is_none(), "mail went out when ✕ emptied the list");
 
-        // 푼 사실이 호출자에게 돌아간다 — `send_turn` 이 그것으로 풀림 로그를 락 밖에서 찍는다.
+        // The fact that it lifted goes back to the caller — `send_turn` uses it to write the lift log outside the lock.
         let lifted = accept_input(
             &h.state,
             Some("u-1".into()),
@@ -11094,9 +10619,10 @@ mod tests {
             InputOrigin::User,
         );
         assert!(matches!(lifted, Ok(true)), "{lifted:?}");
-        assert!(!halted(&h.state), "사용자 글이 멈춤을 안 풀었다");
+        assert!(!halted(&h.state), "user text did not lift the halt");
         announce(&h.reader.core, &h.state, &ann);
-        let (request, _, p) = opens(&h).expect("멈춘 뒤 친 글의 턴이 안 열렸다");
+        let (request, _, p) =
+            opens(&h).expect("the turn of the text typed after the halt did not open");
         assert_eq!(p["clientUserMessageId"], "u-1");
         reply(&mut h, request, "t2");
         h.reader
@@ -11104,13 +10630,13 @@ mod tests {
         h.reader
             .handle_line(completed_line("T", "t2", "completed").as_bytes());
         assert_eq!(turn_seq(&h.state), None);
-        let (_, _, p) = opens(&h).expect("쥔 우편이 안 나갔다");
+        let (_, _, p) = opens(&h).expect("the held mail did not go out");
         assert_eq!(p["clientUserMessageId"], "m-pre");
     }
 
-    /// ★끊기(`interrupted`)는 멈춤을 세우지 않는다★ — 끊긴 턴이 실은 사용자 글(쥔 자리로 돌아온다)과 그 턴 도중 쥔
-    /// 사용자 글은 버려지지 않고 다음 Idle 부터 친 순서로 곧바로 `turn/start` 로 나가며, 쥔 우편은 그 사용자 턴들이 끝난
-    /// 뒤에 나간다(사용자 결정 2026-09-26 — 끊기 = 쥔 글을 곧바로 새 턴으로).
+    /// ★An interruption (`interrupted`) does not set the halt★ — the interrupted turn's returned user text and the text held during it are
+    /// not dropped and go out at once with `turn/start` from the next Idle in typing order; held mail goes after those user turns end (user
+    /// decision 2026-09-26).
     #[test]
     fn an_interrupted_turn_does_not_halt_and_held_items_go_at_the_next_idle() {
         for kind in [Kind::Listed, Kind::Direct, Kind::Mail] {
@@ -11125,17 +10651,17 @@ mod tests {
             let (request, seq) = open_kind(&mut h, &ann, kind);
             h.seen.lock().unwrap().clear();
             finish_turn(&mut h, request, seq, End::Completed("interrupted"));
-            assert_eq!(turn_seq(&h.state), None, "{at}: 턴이 안 끝났다");
-            assert!(!halted(&h.state), "{at}: 끊기가 멈춤을 세웠다");
+            assert_eq!(turn_seq(&h.state), None, "{at}: the turn did not end");
+            assert!(!halted(&h.state), "{at}: the interruption set the halt");
             assert!(
                 !list_ops(&h.seen)
                     .iter()
                     .any(|op| matches!(op, QueuedInputEvent::Dropped { .. })),
-                "{at}: 사용자 글이 버려졌다"
+                "{at}: user text was dropped"
             );
             for (n, id) in users.iter().enumerate() {
                 assert_eq!(stage_of(&h.state, id).as_deref(), Some("held"), "{at}");
-                let (request, _, p) = opens(&h).expect("쥔 글의 턴이 안 열렸다");
+                let (request, _, p) = opens(&h).expect("the turn of the held text did not open");
                 assert_eq!(p["clientUserMessageId"], *id, "{at}");
                 let turn = format!("t{}", n + 2);
                 reply(&mut h, request, &turn);
@@ -11143,14 +10669,14 @@ mod tests {
                 h.reader
                     .handle_line(completed_line("T", &turn, "completed").as_bytes());
             }
-            let (_, _, p) = opens(&h).expect("쥔 우편이 안 나갔다");
+            let (_, _, p) = opens(&h).expect("the held mail did not go out");
             assert_eq!(p["clientUserMessageId"], "m-pre", "{at}");
         }
     }
 
-    /// ★실패한 턴은 다음 사용자 글까지 쥔다 — 그 글이 들면 쥐어 있던 글이 먼저다★(그 턴이 실은 글이 쥔 자리로 돌아와
-    /// 머리이고, 그 턴 도중 쥔 글이 친 순서로 뒤따른다) · 멈춘 뒤 친 글이 멈춤을 푼 다음 ✕ 로 빠져도 멈춤은 다시 서지
-    /// 않는다 — 남은 쥔 글이 곧바로 나간다(풀림은 도착 사건이다).
+    /// ★A failed turn holds until the next user text — then held text goes first★ (the turn's carried text returns as the head, text held
+    /// during it follows in typing order) · text typed after the halt and then ✕-removed after lifting does not re-stand the halt — the
+    /// remaining held text goes out at once (lifting is an arrival event).
     #[test]
     fn a_failed_turn_holds_until_the_next_user_item_then_the_older_held_items_go_first() {
         let mut h = harness_with_real_decoder();
@@ -11160,7 +10686,7 @@ mod tests {
         announce(&h.reader.core, &h.state, &ann);
         finish_turn(&mut h, request, seq, End::Completed("failed"));
         assert!(halted(&h.state));
-        assert!(take(&h).is_none(), "멈춤 중에 턴이 열렸다");
+        assert!(take(&h).is_none(), "a turn opened during the halt");
 
         accept_user(&h.state, "post", "typed after");
         announce(&h.reader.core, &h.state, &ann);
@@ -11168,78 +10694,84 @@ mod tests {
             withdraw_item(&h.state, Some(&h.reader.core), "post"),
             Withdraw::Withdrawn
         );
-        assert!(!halted(&h.state), "✕ 가 멈춤을 되세웠다");
-        let (request, _, p) = opens(&h).expect("쥐어 있던 글의 턴이 안 열렸다");
+        assert!(!halted(&h.state), "✕ set the halt again");
+        let (request, _, p) = opens(&h).expect("the turn of the held text did not open");
         assert_eq!(
             p["clientUserMessageId"], "d-1",
-            "쥔 자리로 돌아온 글이 머리가 아니다"
+            "the text returned to the held place is not the head"
         );
         reply(&mut h, request, "t9");
         for id in ["pre", "pre-2"] {
-            let steer = next_steer_job(&h, "다음 쥔 글이 그 턴 id 에 안 넘어갔다");
+            let steer =
+                next_steer_job(&h, "the next held text was not handed over on that turn id");
             assert_eq!(steer_params(&steer)["clientUserMessageId"], id);
         }
     }
 
-    /// ★받아들인 결과 (1) — 멈춤을 푼 글의 턴이 끊기면 쥔 글과 통로에 든 우편이 다음 Idle 에 나간다★(ADR-0235 「받아들인
-    /// 결과」 첫 항): 실패 끝이 멈춤을 세우고 → 사용자 글이 드는 순간 풀리고 → 그 뒤 연 턴이 끊겨도 멈춤은 다시 서지 않는다
-    /// → 넘긴 글은 쥔 자리로 돌아와 친 순서로 곧바로 다시 나가고, 그 사용자 턴이 끝나면 쥔 우편이 나간다.
+    /// ★Accepted consequence (1) — if the turn of the text that lifted the halt is interrupted, held text and mail that went into the link go
+    /// out at the next Idle★ (ADR-0235 「accepted consequences」 first item): failure end sets the halt → lifts when user text comes in →
+    /// even if the turn opened after is interrupted, the halt does not stand again → handed-over text returns and goes out again at once in
+    /// typing order, and when that user turn ends, held mail goes out.
     #[test]
     fn an_interrupted_turn_after_the_halt_is_lifted_lets_held_items_and_mail_go_at_the_next_idle() {
         let mut h = harness_with_real_decoder();
         let ann = above(&h);
         let (request, seq) = open_kind(&mut h, &ann, Kind::Mail);
         finish_turn(&mut h, request, seq, End::Completed("failed"));
-        assert!(halted(&h.state), "멈춤이 안 섰다");
-        assert!(take(&h).is_none(), "멈춤 중에 턴이 열렸다");
+        assert!(halted(&h.state), "the halt did not stand");
+        assert!(take(&h).is_none(), "a turn opened during the halt");
 
         accept_user(&h.state, "u-1", "typed after");
-        assert!(!halted(&h.state), "사용자 글이 멈춤을 안 풀었다");
+        assert!(!halted(&h.state), "user text did not lift the halt");
         announce(&h.reader.core, &h.state, &ann);
-        let (request, _, p) = opens(&h).expect("멈춤이 풀린 뒤 턴이 안 열렸다");
+        let (request, _, p) = opens(&h).expect("the turn did not open after the halt lifted");
         assert_eq!(
             p["clientUserMessageId"], "pre",
-            "쥐어 있던 글이 먼저가 아니다"
+            "the held text is not first"
         );
         reply(&mut h, request, "t2");
-        let s = next_steer_job(&h, "멈춤을 푼 글이 그 턴 id 에 안 넘어갔다");
+        let s = next_steer_job(
+            &h,
+            "the text that lifted the halt was not handed over on that turn id",
+        );
         assert_eq!(steer_params(&s)["clientUserMessageId"], "u-1");
         assert!(matches!(issue(&h, s), Issued::Written));
 
         h.seen.lock().unwrap().clear();
         h.reader
             .handle_line(completed_line("T", "t2", "interrupted").as_bytes());
-        assert_eq!(turn_seq(&h.state), None, "끊긴 턴이 안 끝났다");
-        assert!(!halted(&h.state), "끊기가 멈춤을 다시 세웠다");
+        assert_eq!(turn_seq(&h.state), None, "the interrupted turn did not end");
+        assert!(!halted(&h.state), "the interruption set the halt again");
         assert!(
             !list_ops(&h.seen)
                 .iter()
                 .any(|op| matches!(op, QueuedInputEvent::Dropped { .. })),
-            "끊긴 턴의 글이 버려졌다"
+            "the text of the interrupted turn was dropped"
         );
         for id in ["pre", "u-1"] {
             assert_eq!(stage_of(&h.state, id).as_deref(), Some("held"), "{id}");
         }
 
-        let (request, _, p) = opens(&h).expect("끊긴 뒤 쥔 글의 턴이 안 열렸다");
+        let (request, _, p) =
+            opens(&h).expect("the turn of the text held after the interruption did not open");
         assert_eq!(p["clientUserMessageId"], "pre");
         reply(&mut h, request, "t3");
-        let s = next_steer_job(&h, "쥔 글이 다음 턴 id 에 안 넘어갔다");
+        let s = next_steer_job(&h, "the held text was not handed over on the next turn id");
         assert_eq!(steer_params(&s)["clientUserMessageId"], "u-1");
         issue(&h, s);
-        assert!(take(&h).is_none(), "도는 턴에 쥔 우편이 나갔다");
+        assert!(take(&h).is_none(), "held mail went out on the running turn");
         h.reader
             .handle_line(echo_line("t3", "pre", "typed before").as_bytes());
         h.reader
             .handle_line(echo_line("t3", "u-1", "typed after").as_bytes());
         h.reader
             .handle_line(completed_line("T", "t3", "completed").as_bytes());
-        let (_, _, p) = opens(&h).expect("쥔 우편이 안 나갔다");
+        let (_, _, p) = opens(&h).expect("the held mail did not go out");
         assert_eq!(p["clientUserMessageId"], "m-pre");
     }
 
-    /// ★하한 미달 화신엔 멈춤이 서지 않는다★(N1 (a)) — `failed`·출구 뒤에도 쥔 입력이 오늘처럼 곧바로 `turn/start` 로
-    /// 나간다.
+    /// ★The halt does not stand on a below-floor incarnation★ (N1 (a)) — even after `failed` · an exit, held input goes out at once with
+    /// `turn/start` as today.
     #[test]
     fn below_the_floor_no_halt_stands_and_held_input_goes_at_once() {
         for end in [End::Completed("failed"), End::ErrorReply, End::Deadline] {
@@ -11257,10 +10789,10 @@ mod tests {
         }
     }
 
-    /// ★`failed` 턴이 실은 에코 없는 steer 글은 지우지 않고 멈춤 뒤에 쥔다★(사용자 결정 2026-09-26 · ADR-0235 — 「실패는 지워」를
-    /// 대신한다) · 목록 사건 0 건(행 그대로) · 받힌 글은 빠지고 쥔 우편은 그대로 · 멈춤이 선다. 그 steer 의 응답을 기다리지
-    /// 않는다 — 다음 사용자 글이 멈춤을 풀면 돌아온 글이 그 글보다 먼저 `turn/start` 로 곧바로 나가고(쥔 우편보다 먼저),
-    /// 옛 요청의 뒤늦은 성공 응답은 아무것도 안 낸다.
+    /// ★Steer text without an echo carried by a `failed` turn is not erased but held behind the halt★ (user decision 2026-09-26 · ADR-0235
+    /// — replaces 「erase on failure」) · 0 list events · accepted text leaves and held mail stays · the halt stands. It does not wait for
+    /// that steer's response — when the next user text lifts the halt the returned text goes out at once with `turn/start` before that text
+    /// (before held mail); a late success response of the old request emits nothing.
     #[test]
     fn a_failed_turn_keeps_its_unechoed_steer_held_behind_the_halt_and_it_opens_first_without_waiting_for_the_reply(
     ) {
@@ -11279,33 +10811,41 @@ mod tests {
         h.seen.lock().unwrap().clear();
         h.reader
             .handle_line(completed_line("T", "t1", "failed").as_bytes());
-        assert_eq!(list_ops(&h.seen), Vec::new(), "실패 끝이 목록 사건을 냈다");
-        assert_eq!(stage_of(&h.state, "q-1"), None, "받힌 글이 남았다");
+        assert_eq!(
+            list_ops(&h.seen),
+            Vec::new(),
+            "the failure end emitted a list event"
+        );
+        assert_eq!(stage_of(&h.state, "q-1"), None, "accepted text remained");
         assert_eq!(
             stage_of(&h.state, "q-2").as_deref(),
             Some("held"),
-            "실패 끝이 에코 없는 글을 안 쥐었다"
+            "the failure end did not hold the text without an echo"
         );
-        assert_eq!(row_ids(&h), ["q-2"], "명부가 바뀌었다");
+        assert_eq!(row_ids(&h), ["q-2"], "the registry changed");
         assert_eq!(stage_of(&h.state, "m-1").as_deref(), Some("held"));
-        assert!(halted(&h.state), "멈춤이 안 섰다");
-        assert!(take(&h).is_none(), "멈춤 중에 턴이 열렸다");
+        assert!(halted(&h.state), "the halt did not stand");
+        assert!(take(&h).is_none(), "a turn opened during the halt");
 
         accept_user(&h.state, "after", "typed after");
         announce(&h.reader.core, &h.state, &ann);
-        let (_, _, p) = opens(&h).expect("멈춘 뒤 친 글의 턴이 안 열렸다");
+        let (_, _, p) = opens(&h).expect("the turn of the text typed after the halt did not open");
         assert_eq!(
             p["clientUserMessageId"], "q-2",
-            "돌아온 글이 멈춤을 푼 글보다 먼저 안 나갔다"
+            "the returned text did not go out before the text that lifted the halt"
         );
         let ops = list_ops(&h.seen);
         steer_accepted_reply(&mut h, waiting, "t1");
-        assert_eq!(list_ops(&h.seen), ops, "뒤늦은 응답이 목록 사건을 냈다");
+        assert_eq!(
+            list_ops(&h.seen),
+            ops,
+            "the late response emitted a list event"
+        );
     }
 
-    /// ★멈춤 중 늦은 받음★ — 실패 끝이 쥔 자리로 돌린 글의 에코가 늦게 오면 받음 + 벤더 말풍선 + 표시용 경계가 서고 그
-    /// 글은 빠지되(다시 안 나간다) 멈춤은 그대로(우편 턴 0 건)이고, 그 경계는 턴 표를 지나지 않아 커널의 오류
-    /// 끝(`last_end_failed`)도 그대로다(TRD §5-5 「턴 끝 뒤에 받음이 오면」).
+    /// ★A late receipt during the halt★ — if the echo of text a failure end returned comes late, receipt + vendor bubble + display-only
+    /// boundary stand and the text leaves (not sent again), but the halt stays (0 mail turns) and that boundary does not pass the turn
+    /// table, so the kernel's error end (`last_end_failed`) stays too (TRD §5-5 「when a receipt comes after the turn end」).
     #[test]
     fn a_late_echo_while_halted_keeps_the_halt_and_the_kernel_s_error_end() {
         let (mut h, turns, id) = harness_with_facts();
@@ -11319,11 +10859,15 @@ mod tests {
         assert_eq!(
             stage_of(&h.state, "q-1").as_deref(),
             Some("held"),
-            "실패 끝이 실은 글을 쥔 자리로 안 돌렸다"
+            "the failure end did not return the text it carried to the held place"
         );
-        assert!(halted(&h.state), "멈춤이 안 섰다");
+        assert!(halted(&h.state), "the halt did not stand");
         let failed = || turns.get(id, 1).map(|o| o.last_end_failed);
-        assert_eq!(failed(), Some(true), "분류기가 오류 끝을 안 접었다");
+        assert_eq!(
+            failed(),
+            Some(true),
+            "the classifier did not fold the error end"
+        );
 
         h.seen.lock().unwrap().clear();
         h.reader
@@ -11332,19 +10876,25 @@ mod tests {
             trace(&h.seen),
             ["delivered q-1", "bubble q-1", "end completed"]
         );
-        assert!(halted(&h.state), "늦은 받음이 멈춤을 건드렸다");
-        assert_eq!(stage_of(&h.state, "q-1"), None, "받은 글이 남았다");
-        assert!(take(&h).is_none(), "늦은 받음 뒤 우편 턴이 열렸다");
+        assert!(halted(&h.state), "the late receipt touched the halt");
+        assert_eq!(stage_of(&h.state, "q-1"), None, "received text remained");
+        assert!(
+            take(&h).is_none(),
+            "a mail turn opened after the late receipt"
+        );
         assert_eq!(
             failed(),
             Some(true),
-            "표시용 경계가 커널의 오류 끝을 지웠다"
+            "the display-only boundary erased the kernel's error end"
         );
-        assert!(!turns.is_in_turn(id, 1), "늦은 받음이 턴 중을 켰다");
+        assert!(
+            !turns.is_in_turn(id, 1),
+            "the late receipt turned mid-turn on"
+        );
     }
 
-    /// ★codex 분류기의 오류 끝(TRD §5-0)★ — 귀속된 `TurnEnd{Failed}`(번역된 `failed` · 이른 종료 풀기 · 다섯 출구 각각)
-    /// → 턴 표의 `last_end_failed` 참 · 다음 `completed` → 거짓(풀림) · 끊김 → 무변.
+    /// ★The error end of the codex classifier (TRD §5-0)★ — an attributed `TurnEnd{Failed}` (translated `failed` · early-end release · each
+    /// of the five exits) → turn table `last_end_failed` true · next `completed` → false (lifted) · interruption → unchanged.
     #[test]
     fn every_attributed_failed_end_sets_the_kernel_s_error_end_and_only_a_completed_end_lifts_it() {
         for end in HALTING_ENDS {
@@ -11355,24 +10905,36 @@ mod tests {
             finish_turn(&mut h, request, seq, end);
             assert_eq!(failed(), Some(true), "{end:?}");
 
-            assert!(opens(&h).is_none(), "{end:?}: 멈춤 중에 턴이 열렸다");
+            assert!(
+                opens(&h).is_none(),
+                "{end:?}: a turn opened during the halt"
+            );
             accept_user(&h.state, "post", "typed after");
             announce(&h.reader.core, &h.state, &ann);
-            let (request, seq, _) = opens(&h).expect("멈춘 뒤 친 글의 턴이 안 열렸다");
+            let (request, seq, _) =
+                opens(&h).expect("the turn of the text typed after the halt did not open");
             finish_turn(&mut h, request, seq, End::Completed("interrupted"));
-            assert_eq!(failed(), Some(true), "{end:?}: 끊김이 오류 끝을 지웠다");
+            assert_eq!(
+                failed(),
+                Some(true),
+                "{end:?}: the interruption erased the error end"
+            );
 
             accept_user(&h.state, "again", "typed after the interrupt");
             announce(&h.reader.core, &h.state, &ann);
-            let (request, seq, _) = opens(&h).expect("끊긴 뒤 친 글의 턴이 안 열렸다");
+            let (request, seq, _) =
+                opens(&h).expect("the turn of the text typed after the interruption did not open");
             finish_turn(&mut h, request, seq, End::Completed("completed"));
-            assert_eq!(failed(), Some(false), "{end:?}: 성공 끝이 풀지 않았다");
+            assert_eq!(
+                failed(),
+                Some(false),
+                "{end:?}: the success end did not lift it"
+            );
         }
     }
 
-    // ── 뜻 모를 끝 (ADR-0231 · P2 리뷰 doc-aware F2) ─────────────────────────────────────────────
+    // ── Ends of unknown meaning (ADR-0231 · P2 review doc-aware F2) ─────────────────────────────────────────────
 
-    /// status 칸이 없는 `turn/completed`.
     fn statusless_completed_line(thread_id: &str, turn_id: &str) -> String {
         serde_json::json!({
             "method": "turn/completed",
@@ -11381,7 +10943,6 @@ mod tests {
         .to_string()
     }
 
-    /// 뜻 모를 status 셋 — 없음 · 결말로 안 옮겨지는 값 · 드리프트.
     const UNKNOWN_STATUSES: [Option<&str>; 3] =
         [None, Some("inProgress"), Some("quantumCollapsed")];
 
@@ -11409,9 +10970,9 @@ mod tests {
         );
     }
 
-    /// ★뜻 모를 끝은 오류 뒤 멈춤을 세우지 않고 커널의 오류 끝도 풀지 않는다★ — `failed` 뒤 사용자 글이 멈춤을 풀고 연
-    /// 턴이 뜻 모를 status 로 끝나면 통로의 멈춤은 안 서고 커널의 `last_end_failed` 는 그대로다. 항목 처분은 `completed`
-    /// 와 같다 — 에코 없이 끝난 목록 항목은 쥔 자리로 돌아간다.
+    /// ★An end of unknown meaning neither sets the halt nor lifts the kernel's error end★ — if the turn opened after user text lifted the halt
+    /// after `failed` ends with an unknown status, the link's halt does not stand and the kernel's `last_end_failed` stays. Item disposal =
+    /// `completed` — list items ended without an echo return to the held place.
     #[test]
     fn an_unknown_status_after_a_failed_turn_raises_no_halt_and_keeps_the_kernel_s_error_end() {
         for status in UNKNOWN_STATUSES {
@@ -11421,29 +10982,37 @@ mod tests {
             let failed = || turns.get(id, 1).map(|o| o.last_end_failed);
             let (request, seq) = open_kind(&mut h, &ann, Kind::Mail);
             finish_turn(&mut h, request, seq, End::Completed("failed"));
-            assert!(halted(&h.state), "{at}: 멈춤이 안 섰다");
+            assert!(halted(&h.state), "{at}: the halt did not stand");
             assert_eq!(failed(), Some(true), "{at}");
 
             accept_user(&h.state, "u-1", "typed after");
             announce(&h.reader.core, &h.state, &ann);
-            let (request, _, p) = opens(&h).expect("멈춘 뒤 친 글의 턴이 안 열렸다");
+            let (request, _, p) =
+                opens(&h).expect("the turn of the text typed after the halt did not open");
             assert_eq!(p["clientUserMessageId"], "pre", "{at}");
             reply(&mut h, request, "U2");
             h.reader
                 .handle_line(unknown_completed_line("U2", status).as_bytes());
-            assert_eq!(turn_seq(&h.state), None, "{at}: 턴이 안 끝났다");
-            assert!(!halted(&h.state), "{at}: 뜻 모를 끝이 멈춤을 세웠다");
-            assert_eq!(failed(), Some(true), "{at}: 커널의 오류 끝이 풀렸다");
+            assert_eq!(turn_seq(&h.state), None, "{at}: the turn did not end");
+            assert!(
+                !halted(&h.state),
+                "{at}: the end of unknown meaning set the halt"
+            );
+            assert_eq!(
+                failed(),
+                Some(true),
+                "{at}: the kernel's error end was lifted"
+            );
             assert_eq!(
                 stage_of(&h.state, "pre").as_deref(),
                 Some("held"),
-                "{at}: 처분이 completed 와 다르다"
+                "{at}: the disposal differs from completed"
             );
         }
     }
 
-    /// 뜻 모를 끝도 에코 없는 steer 글을 `completed` 처럼 쥔 자리로 돌려 곧바로 다음 턴에 태운다(응답을 기다리지 않는다
-    /// · 쥔 것이 없으면 턴은 열리지 않는다).
+    /// An end of unknown meaning also returns steer text without an echo to the held place like `completed` and lets it ride the next turn at
+    /// once (no wait for the response · if nothing is held, no turn opens).
     #[test]
     fn an_unknown_status_returns_an_unechoed_steer_to_held_like_completed() {
         for status in UNKNOWN_STATUSES {
@@ -11464,15 +11033,17 @@ mod tests {
                     let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
                     assert_eq!(v["params"]["clientUserMessageId"], "q-2", "{at}");
                 } else {
-                    assert!(take(&h).is_none(), "{at}: 쥔 것 없이 turn/start 가 나갔다");
+                    assert!(
+                        take(&h).is_none(),
+                        "{at}: turn/start went out with nothing held"
+                    );
                 }
             }
         }
     }
 
-    // ── 전이 로그 (ADR-0231 · P2 리뷰 doc-aware F1 · logging-conventions 「계측 의무」) ────────────────
+    // ── Transition logs (ADR-0231 · P2 review doc-aware F1 · logging-conventions 「instrumentation duty」) ────────────────
 
-    /// (레벨, 칸 이름 → 값) — 이 스레드의 모든 이벤트.
     type LogLine = (tracing::Level, TraceLine);
 
     struct LogCapture(Arc<Mutex<Vec<LogLine>>>);
@@ -11504,7 +11075,6 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    /// 메시지에 `needle` 이 든 줄들.
     fn logged<'a>(lines: &'a [LogLine], needle: &str) -> Vec<&'a LogLine> {
         lines
             .iter()
@@ -11512,8 +11082,8 @@ mod tests {
             .collect()
     }
 
-    /// ★멈춤의 전이는 로그로 남는다★ — 멈춤이 서고 풀림 = info(끝 종류 · 에이전트). 사용자 글은 어느 줄에도 없다. 풀림
-    /// 줄은 `send_turn` 이 락 밖에서 찍는다 — 시험대는 통로 없이 돌므로 그 줄의 레벨 · 칸만 잰다.
+    /// ★The halt's transitions remain in the log★ — set and lift = info (end kind · agent). User text is in no line. The lift line is
+    /// written by `send_turn` outside the lock — the bench runs without a link, so it measures only that line's level · fields.
     #[test]
     fn halt_transitions_are_logged_at_their_levels() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -11524,14 +11094,14 @@ mod tests {
                 let ann = above(&h);
                 let (request, seq) = open_kind(&mut h, &ann, Kind::Mail);
                 finish_turn(&mut h, request, seq, End::Completed("failed"));
-                assert!(halted(&h.state), "멈춤이 안 섰다");
+                assert!(halted(&h.state), "the halt did not stand");
                 accept_user(&h.state, "u-1", "secret words typed after");
                 Transition::HaltLifted.write(h.reader.core.id());
                 (agent, seq)
             });
 
         let lines = captured.lock().unwrap();
-        let halt = logged(&lines, "오류 뒤 멈춤 —");
+        let halt = logged(&lines, "halt after error —");
         assert_eq!(halt.len(), 1, "{lines:?}");
         let (level, fields) = halt[0];
         assert_eq!(*level, tracing::Level::INFO);
@@ -11539,7 +11109,7 @@ mod tests {
         assert_eq!(fields.get("close").map(String::as_str), Some("Failed"));
         assert_eq!(fields.get("agent"), Some(&agent));
 
-        let lift = logged(&lines, "멈춤 풀림");
+        let lift = logged(&lines, "halt after error lifted");
         assert_eq!(lift.len(), 1, "{lines:?}");
         assert_eq!(lift[0].0, tracing::Level::INFO);
         assert_eq!(lift[0].1.get("agent"), Some(&agent));
@@ -11548,11 +11118,10 @@ mod tests {
             lines
                 .iter()
                 .all(|(_, l)| l.values().all(|v| !v.contains("secret words"))),
-            "사용자 글이 로그에 실렸다"
+            "user text was carried in the log"
         );
     }
 
-    /// 통로가 닫히며 버린 멈춤은 한 줄 남는다(debug · 에이전트) — 멈춤이 없던 통로의 닫힘은 그 줄을 안 남긴다.
     #[test]
     fn a_halt_discarded_at_the_stream_end_is_logged_once() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -11573,29 +11142,28 @@ mod tests {
             answered_turn(&mut h, &ann, "t1");
             h.reader
                 .handle_line(completed_line("T", "t1", "failed").as_bytes());
-            assert!(halted(&h.state), "멈춤이 안 섰다");
+            assert!(halted(&h.state), "the halt did not stand");
             drop(ReaderExit {
                 state: h.state.clone(),
                 pending: h.pending.clone(),
                 agent: h.reader.core.id(),
             });
-            assert!(!halted(&h.state), "닫힘이 멈춤을 안 버렸다");
+            assert!(!halted(&h.state), "the close did not discard the halt");
             h.reader.core.id().to_string()
         });
         let lines = captured.lock().unwrap();
-        let discarded = logged(&lines, "멈춤을 버린다");
+        let discarded = logged(&lines, "discarding the halt after error");
         assert_eq!(discarded.len(), 1, "{lines:?}");
         assert_eq!(discarded[0].0, tracing::Level::DEBUG);
         assert_eq!(discarded[0].1.get("agent"), Some(&agent));
     }
 
-    // ── 우리 거절 귀속 (ADR-0241 · TRD §4-7 ②-2 · ⑨ 「통로 — 거부 귀속」 ①–⑫) ──────────────────────
+    // ── Attributing our refusal (ADR-0241 · TRD §4-7 ②-2 · ⑨ 「link — refusal attribution」 ①–⑫) ──────────────────────
 
     fn server_request(id: i64, method_name: &str, params: Value) -> String {
         serde_json::json!({"id": id, "method": method_name, "params": params}).to_string()
     }
 
-    /// 명령 승인 요청 — 실측 모양(fixture `refuse_u2a`)에서 귀속이 읽는 칸과 그 곁 몇 칸만 남겼다.
     fn command_approval(id: i64, item_id: &str) -> String {
         server_request(
             id,
@@ -11613,7 +11181,6 @@ mod tests {
         )
     }
 
-    /// 도구 item 의 끝 한 줄. 명령은 우리 거절의 실측 모양(`exitCode` · `aggregatedOutput` 이 `null`)이다.
     fn tool_end(kind: &str, item_id: &str, status: &str) -> String {
         let item = match kind {
             "commandExecution" => serde_json::json!({
@@ -11665,7 +11232,6 @@ mod tests {
         (id.to_string(), outcome)
     }
 
-    /// 기억은 한 id 에 한 칸이고, 상한을 넘으면 가장 오래된 것을 버리며 그 사실을 debug 로 남긴다.
     #[test]
     fn refused_items_hold_one_slot_per_id_and_drop_the_oldest_past_the_cap() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -11673,7 +11239,7 @@ mod tests {
             let mut items = RefusedItems::default();
             items.remember("a");
             items.remember("a");
-            assert_eq!(items.ids.len(), 1, "같은 id 가 두 칸을 먹었다");
+            assert_eq!(items.ids.len(), 1, "the same id took two slots");
             for i in 0..REFUSED_ITEM_SLOTS {
                 items.remember(&format!("n-{i}"));
             }
@@ -11682,21 +11248,19 @@ mod tests {
         assert_eq!(items.ids.len(), REFUSED_ITEM_SLOTS);
         assert!(
             !items.ids.iter().any(|r| r == "a"),
-            "가장 오래된 것이 남았다"
+            "the oldest one remained"
         );
         assert_eq!(
             items.ids.back(),
             Some(&format!("n-{}", REFUSED_ITEM_SLOTS - 1))
         );
         let lines = captured.lock().unwrap();
-        let evicted = logged(&lines, "상한에 찼다");
+        let evicted = logged(&lines, "reached its cap");
         assert_eq!(evicted.len(), 1, "{lines:?}");
         assert_eq!(evicted[0].0, tracing::Level::DEBUG);
         assert_eq!(evicted[0].1.get("evicted").map(String::as_str), Some("a"));
     }
 
-    /// 끝 줄 하나가 기억을 꺼내고 그 id 의 `Failed` · `Declined` 결과만 `Refused` 로 바꾼다 — 다른 id · 다른 결말 ·
-    /// 끝이 아닌 줄은 그대로다.
     #[test]
     fn refused_items_rewrite_only_the_failed_or_declined_result_of_the_item_whose_end_this_is() {
         let end_of = |id: &str| serde_json::json!({"item": {"id": id}});
@@ -11709,7 +11273,11 @@ mod tests {
             outcome: ToolOutcome::Failed,
         }];
         items.attribute(method::ITEM_STARTED, Some(&end_of("a")), &mut events);
-        assert_eq!(items.ids.len(), 2, "끝이 아닌 줄이 기억을 꺼냈다");
+        assert_eq!(
+            items.ids.len(),
+            2,
+            "a line that is not an end took out the memory"
+        );
         assert!(matches!(
             events[0],
             OutputEvent::ToolResult {
@@ -11751,7 +11319,6 @@ mod tests {
         assert_eq!(items.ids, VecDeque::from(vec!["b".to_string()]));
     }
 
-    /// id 상한의 경계 — 번역기와 같은 [`MAX_ID_BYTES`] 까지는 가리키고, 한 바이트라도 넘으면 가리키지 않는다(두 승인 모두).
     #[test]
     fn a_refused_item_id_is_bounded_exactly_at_the_decoders_id_limit() {
         for method_name in [
@@ -11764,17 +11331,16 @@ mod tests {
             assert_eq!(
                 refused_item_id(method_name, Some(&params(&at))),
                 Some(at.as_str()),
-                "{method_name}: 상한 안의 id 를 버렸다"
+                "{method_name}: dropped an id within the cap"
             );
             assert_eq!(
                 refused_item_id(method_name, Some(&params(&past))),
                 None,
-                "{method_name}: 상한 밖의 id 를 가리켰다"
+                "{method_name}: pointed to an id outside the cap"
             );
         }
     }
 
-    /// ① 명령 승인(`approvalId` 없음) → 거절 줄 하나 → 같은 `itemId` 의 `failed` 끝(`exitCode: null`) = `Refused`.
     #[test]
     fn a_refused_command_approval_turns_its_failed_end_into_refused() {
         let mut h = harness_with_real_decoder();
@@ -11788,10 +11354,12 @@ mod tests {
             tool_results(&h.seen),
             vec![result("exec-1", ToolOutcome::Refused)]
         );
-        assert!(h.reader.refused.ids.is_empty(), "끝이 기억을 안 꺼냈다");
+        assert!(
+            h.reader.refused.ids.is_empty(),
+            "the end did not take out the memory"
+        );
     }
 
-    /// ② 거절 없이 온 `failed` 끝은 `Failed` 그대로다.
     #[test]
     fn a_failed_end_we_never_refused_stays_failed() {
         let mut h = harness_with_real_decoder();
@@ -11802,8 +11370,6 @@ mod tests {
         );
     }
 
-    /// ③ 두 출처 — 한 리더에서 거절한 id 는 `Refused`, 거절 안 한 id 의 `declined` 는 벤더 거부 `Declined` 다(사유가
-    /// 갈리는 자리).
     #[test]
     fn in_one_reader_our_refusal_and_the_vendors_own_decline_keep_their_own_outcomes() {
         let mut h = harness_with_real_decoder();
@@ -11824,7 +11390,6 @@ mod tests {
         );
     }
 
-    /// ④ 파일 변경 승인 거절 → `declined` 끝(실측 모양) = `Refused` · 같은 거절 뒤 `failed` 끝이어도 `Refused`.
     #[test]
     fn a_refused_file_change_approval_turns_its_end_into_refused_whether_declined_or_failed() {
         let mut h = harness_with_real_decoder();
@@ -11847,7 +11412,6 @@ mod tests {
         );
     }
 
-    /// ⑤ 귀속 없음 — 그 밖의 요청 · 하위 명령 승인 · 네트워크 승인 · `itemId` 없음은 거절만 하고 기억하지 않는다.
     #[test]
     fn requests_that_do_not_point_at_a_drawn_tool_item_are_refused_but_not_remembered() {
         let with_item = |extra: Value| {
@@ -11871,7 +11435,7 @@ mod tests {
                 ),
             ),
             (
-                "하위 명령 승인",
+                "sub-command approval",
                 server_request(
                     0,
                     method::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL,
@@ -11879,7 +11443,7 @@ mod tests {
                 ),
             ),
             (
-                "네트워크 승인",
+                "network approval",
                 server_request(
                     0,
                     method::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL,
@@ -11889,7 +11453,7 @@ mod tests {
                 ),
             ),
             (
-                "itemId 없음",
+                "no itemId",
                 server_request(
                     0,
                     method::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL,
@@ -11897,7 +11461,7 @@ mod tests {
                 ),
             ),
             (
-                "옛 이름의 승인(callId)",
+                "approval under the old name (callId)",
                 server_request(
                     0,
                     "execCommandApproval",
@@ -11907,8 +11471,12 @@ mod tests {
         ] {
             let mut h = harness_with_real_decoder();
             feed(&mut h, &[request, command_end("exec-1", "failed")]);
-            assert_eq!(refusals(&h.state).len(), 1, "{name}: 거절이 하나가 아니다");
-            assert!(h.reader.refused.ids.is_empty(), "{name}: 기억했다");
+            assert_eq!(
+                refusals(&h.state).len(),
+                1,
+                "{name}: not exactly one refusal"
+            );
+            assert!(h.reader.refused.ids.is_empty(), "{name}: remembered it");
             assert_eq!(
                 tool_results(&h.seen),
                 vec![result("exec-1", ToolOutcome::Failed)],
@@ -11917,16 +11485,19 @@ mod tests {
         }
     }
 
-    /// ⑤ 이어서 — 상한(128 B)을 넘는 `itemId` 는 기억하지 않고, 그 끝에는 번역기가 결과를 안 낸다(가리킬 행이 없다).
-    /// ★기억 여부는 끝 줄 **전에** 본다★ — 끝 줄은 기억한 id 를 원래 모양대로 꺼내므로, 뒤에서 보면 거르기가 빠져도
-    ///   비어 보인다.
+    /// ⑤ continued — an `itemId` over the cap (128 B) is not remembered and the translator emits no result for its end (no row to point to).
+    /// ★Whether it is remembered is looked at **before** the end line★ — the end line takes out a remembered id in its original shape, so
+    /// afterwards it would look empty even if the filtering were missing.
     #[test]
     fn an_item_id_past_the_id_bound_is_neither_remembered_nor_given_a_result() {
         let long = "x".repeat(MAX_ID_BYTES + 1);
         let mut h = harness_with_real_decoder();
         feed(&mut h, &[command_approval(0, &long)]);
         assert_eq!(refusals(&h.state).len(), 1);
-        assert!(h.reader.refused.ids.is_empty(), "상한 밖 id 를 기억했다");
+        assert!(
+            h.reader.refused.ids.is_empty(),
+            "remembered an id outside the cap"
+        );
 
         feed(&mut h, &[command_end(&long, "failed")]);
         assert!(
@@ -11936,7 +11507,6 @@ mod tests {
         );
     }
 
-    /// ⑤ 의 경계 — 명령 승인의 `approvalId` · `networkApprovalContext` 가 `null` 이면 없는 것과 같다(기억한다).
     #[test]
     fn a_command_approval_whose_sub_and_network_fields_are_null_is_still_remembered() {
         let mut h = harness_with_real_decoder();
@@ -11958,7 +11528,6 @@ mod tests {
         );
     }
 
-    /// ⑥ 끝 줄이 기억을 꺼낸다 — 같은 id 의 둘째 끝은 벤더 결말 그대로이고, `completed` 끝도 꺼낸다.
     #[test]
     fn the_end_line_takes_the_memory_out_whatever_its_status() {
         let mut h = harness_with_real_decoder();
@@ -11977,7 +11546,7 @@ mod tests {
         );
         assert!(
             h.reader.refused.ids.is_empty(),
-            "`completed` 끝이 기억을 안 꺼냈다"
+            "the `completed` end did not take out the memory"
         );
         feed(&mut h, &[command_end("exec-3", "failed")]);
         assert_eq!(
@@ -11992,7 +11561,6 @@ mod tests {
         );
     }
 
-    /// ⑦ 상한 — 거절 17 개면 첫 id 는 밀려나 그 끝이 `Failed` 이고, 둘째 id 는 `Refused` 다.
     #[test]
     fn past_the_slot_cap_the_oldest_refusal_loses_its_attribution() {
         let mut h = harness_with_real_decoder();
@@ -12019,7 +11587,6 @@ mod tests {
         );
     }
 
-    /// ⑧ 턴 끝에서 비우지 않는다 — 끝이 턴 끝 뒤에 와도(실측 `steer_m6` 마지막 줄 모양) `Refused` 다.
     #[test]
     fn a_turn_end_does_not_clear_the_memory() {
         let mut h = harness_with_real_decoder();
@@ -12028,8 +11595,8 @@ mod tests {
         feed(&mut h, &[command_approval(0, "exec-1")]);
         h.reader
             .handle_line(completed_line("T", "u-1", "completed").as_bytes());
-        assert_eq!(turn_seq(&h.state), None, "전제: 턴이 닫혔다");
-        assert_eq!(boundaries(&h.seen).len(), 1, "전제: 경계가 섰다");
+        assert_eq!(turn_seq(&h.state), None, "premise: the turn closed");
+        assert_eq!(boundaries(&h.seen).len(), 1, "premise: a boundary stood");
 
         feed(&mut h, &[command_end("exec-1", "failed")]);
         assert_eq!(
@@ -12038,7 +11605,6 @@ mod tests {
         );
     }
 
-    /// ⑨ 넘침 · 닫힘 — 거절 줄이 제어 큐에 못 들어갔으면 상대가 답을 못 받으므로 기억하지 않는다.
     #[test]
     fn a_refusal_that_never_reached_the_control_queue_is_not_remembered() {
         let mut full = harness_with_real_decoder();
@@ -12050,7 +11616,7 @@ mod tests {
         let mut closed = harness_with_real_decoder();
         with_state(&closed.state, |s| s.closed = true);
 
-        for (name, h) in [("넘침", &mut full), ("닫힘", &mut closed)] {
+        for (name, h) in [("overflow", &mut full), ("closed", &mut closed)] {
             feed(
                 h,
                 &[
@@ -12058,8 +11624,11 @@ mod tests {
                     command_end("exec-1", "failed"),
                 ],
             );
-            assert!(refusals(&h.state).is_empty(), "{name}: 거절 줄이 들어갔다");
-            assert!(h.reader.refused.ids.is_empty(), "{name}: 기억했다");
+            assert!(
+                refusals(&h.state).is_empty(),
+                "{name}: a refusal line went in"
+            );
+            assert!(h.reader.refused.ids.is_empty(), "{name}: remembered it");
             assert_eq!(
                 tool_results(&h.seen),
                 vec![result("exec-1", ToolOutcome::Failed)],
@@ -12068,7 +11637,7 @@ mod tests {
         }
     }
 
-    /// ⑩ 새 리더 = 빈 기억 — 한 리더의 거절이 다른 리더(= 다음 화신)로 새지 않는다.
+    /// ⑩ New reader = empty memory — one reader's refusals do not leak into another (= the next incarnation).
     #[test]
     fn a_new_reader_starts_with_no_memory() {
         let mut first = harness_with_real_decoder();
@@ -12076,7 +11645,7 @@ mod tests {
         assert_eq!(
             first.reader.refused.ids.len(),
             1,
-            "전제: 첫 리더는 기억했다"
+            "premise: the first reader remembered it"
         );
 
         let mut next = harness_with_real_decoder();
@@ -12088,9 +11657,10 @@ mod tests {
         );
     }
 
-    /// ⑪ ★실측(codex-cli 0.156.1 · fixture `refuse_u2a` — B5 채취 셋째)★: 명령 턴 · 파일 변경 턴 각각 호출 뒤 같은 id 의
-    /// `Refused` 결과가 정확히 하나다. 서버 요청 두 줄에는 거절 줄이 하나씩 나가고(그 답은 fixture 에 없다 — 리더가
-    /// 스스로 짓는다), 사이의 `serverRequest/resolved` · `thread/status/changed` 는 귀속을 흔들지 않는다.
+    /// ⑪ ★Measured (codex-cli 0.156.1 · fixture `refuse_u2a` — third B5 capture)★: after each call of the command turn · the file change
+    /// turn there is exactly one `Refused` result of the same id. One refusal line goes out for each of the two server request lines (those
+    /// answers are not in the fixture — the reader builds them), and the in-between `serverRequest/resolved` · `thread/status/changed` do not
+    /// shake the attribution.
     #[test]
     fn the_refusal_fixture_yields_each_call_then_exactly_one_refused_result() {
         const COMMAND: &str = "exec-e59b2cc3-9cdc-49a5-954d-a9e9ec098636";
@@ -12127,13 +11697,15 @@ mod tests {
         );
         assert!(
             !seen.iter().any(|e| matches!(e, OutputEvent::Error(_))),
-            "거절 경로가 오류를 냈다: {seen:?}"
+            "the refusal path emitted an error: {seen:?}"
         );
         drop(seen);
-        assert!(h.reader.refused.ids.is_empty(), "끝난 뒤 기억이 남았다");
+        assert!(
+            h.reader.refused.ids.is_empty(),
+            "memory remained after the end"
+        );
     }
 
-    /// ⑫ 같은 id 는 한 칸 — 같은 `itemId` 를 두 번 거절해도 기억은 하나라, 첫 끝이 `Refused` 로 꺼내고 둘째 끝은 `Failed`.
     #[test]
     fn the_same_item_refused_twice_takes_one_slot() {
         let mut h = harness_with_real_decoder();
@@ -12141,7 +11713,11 @@ mod tests {
             &mut h,
             &[command_approval(0, "exec-1"), command_approval(1, "exec-1")],
         );
-        assert_eq!(refusals(&h.state).len(), 2, "요청마다 답은 따로 나간다");
+        assert_eq!(
+            refusals(&h.state).len(),
+            2,
+            "an answer goes out separately for every request"
+        );
         assert_eq!(h.reader.refused.ids.len(), 1);
 
         feed(
@@ -12480,7 +12056,7 @@ mod tests {
         assert!(!details[0].contains(CONTEXT_DROPPED_NOTE), "{details:?}");
         assert!(details[1].ends_with(CONTEXT_DROPPED_NOTE), "{details:?}");
         let lines = captured.lock().unwrap();
-        let warned = logged(&lines, "바뀐 지시서를 담은");
+        let warned = logged(&lines, "turn/start carrying changed instructions");
         assert_eq!(warned.len(), 1, "{lines:?}");
         assert_eq!(warned[0].0, tracing::Level::WARN);
         assert_eq!(warned[0].1.get("agent"), Some(&agent));
@@ -12803,7 +12379,7 @@ mod tests {
         for (user_agent, open, [api, roots, resumed, context]) in rows {
             let (opened, lines) = handshake_on_fake(user_agent, &open);
             opened.unwrap_or_else(|e| panic!("{user_agent}: the handshake failed: {e}"));
-            let applied = logged(&lines, "codex 실행 재료 적용");
+            let applied = logged(&lines, "codex launch materials applied");
             assert_eq!(applied.len(), 1, "{user_agent}: {lines:?}");
             let (level, fields) = applied[0];
             assert_eq!(*level, tracing::Level::INFO);

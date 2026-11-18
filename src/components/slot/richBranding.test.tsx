@@ -1,15 +1,7 @@
 // Rich slot backend notation regression — do title · marker · color tone tell claude and codex apart?
-//
-// Background: rich (structured) mode drew the two backends identically, so the screen had no signal of who you are talking to. The basis for telling them apart is
-//   the profile's `command.kind` alone, and the convention is that **with no profile the claude notation stays**
-//   (a regression-free default — ad-hoc sessions and mocks that do not fill the profile really take that path).
-//
-// Observation surface: empty-state title text · the marker's `data-rich-brand` · the root's `data-rich-brand` + tone class.
-//   ★Why the root token is measured separately★: when a conversation starts the title and marker fold away together (ADR-0145) and then the
-//   only DOM that tells the backend is the root attribute.
-//
-// Strategy: stub agentClient (clientFactory) and agentStore with the same pattern as RichSlot.test.tsx,
-//   and fire the restore-complete signal ('live') to open the empty state.
+// Why: rich mode drew the two backends identically, so the screen gave no signal of who you talk to. The basis is the profile's `command.kind` alone, and **with no profile the claude notation stays** (regression-free default — ad-hoc sessions and mocks that do not fill the profile take that path).
+// Observation surface: empty-state title text · the marker's `data-rich-brand` · the root's `data-rich-brand` + tone class. ★The root token is measured separately★: once a conversation starts the title and marker fold away together (ADR-0145) and the root attribute is the only DOM telling the backend.
+// Strategy: stub agentClient (clientFactory) and agentStore as in RichSlot.test.tsx, and fire the restore-complete signal ('live') to open the empty state.
 
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -88,7 +80,7 @@ async function renderEmpty(): Promise<void> {
 
 function root(): HTMLElement {
   const el = document.querySelector('[data-rich-live="1"]')
-  if (!el) throw new Error('RichSlot 루트가 없다')
+  if (!el) throw new Error('the RichSlot root is missing')
   return el as HTMLElement
 }
 
@@ -107,15 +99,15 @@ afterEach(() => {
   cleanup()
 })
 
-describe('richBranding — 순수 매핑', () => {
-  it('Codex 프로필만 codex 표기로 갈린다', () => {
+describe('richBranding — pure mapping', () => {
+  it('only a Codex profile is told apart as codex notation', () => {
     const b = richBranding('Codex')
     expect(b.brand).toBe('codex')
     expect(b.title).toBe('Codex')
     expect(b.tintClass).toBe('rich-tint-codex')
   })
 
-  it('Claude 프로필은 기존 표기 그대로다(제목 문자열 불변 — 제품명이라 i18n 을 타지 않는다)', () => {
+  it('a Claude profile is the existing notation as is (title string unchanged — a product name so it does not go through i18n)', () => {
     const b = richBranding('Claude')
     expect(b.brand).toBe('claude')
     expect(b.title).toBe('Claude Code')
@@ -124,15 +116,15 @@ describe('richBranding — 순수 매핑', () => {
   })
 
   // ★Default convention★: what is not known is not changed to a neutral notation — a screen that changes with nothing learned is worse.
-  it('프로필 부재(null·undefined)와 미지 종류는 claude 표기로 떨어진다', () => {
+  it('profile absence (null·undefined) and unknown kinds fall to claude notation', () => {
     expect(richBranding(null).brand).toBe('claude')
     expect(richBranding(undefined).brand).toBe('claude')
     expect(richBranding('Shell').brand).toBe('claude')
   })
 })
 
-describe('RichSlot — 빈 상태 표기', () => {
-  it('codex 프로필: 제목·표식·색조가 모두 codex 로 간다', async () => {
+describe('RichSlot — empty state notation', () => {
+  it('codex profile: title · marker · tint all go codex', async () => {
     agentStoreState.profiles = [profile('Codex')]
     await renderEmpty()
 
@@ -143,7 +135,7 @@ describe('RichSlot — 빈 상태 표기', () => {
     expect(root().getAttribute('data-rich-brand')).toBe('codex')
   })
 
-  it('claude 프로필: 표기가 하나도 바뀌지 않는다(색조 클래스 없음)', async () => {
+  it('claude profile: no notation changes at all (no tint class)', async () => {
     agentStoreState.profiles = [profile('Claude')]
     await renderEmpty()
 
@@ -153,7 +145,7 @@ describe('RichSlot — 빈 상태 표기', () => {
     expect(root().getAttribute('data-rich-brand')).toBe('claude')
   })
 
-  it('프로필이 없으면 claude 표기 — 색조도 붙지 않는다(현행 모습 유지)', async () => {
+  it('without a profile claude notation — no tint attached either (current look kept)', async () => {
     await renderEmpty() // profiles = undefined (unit test mock · ad-hoc session path)
     expect(screen.getByText('Claude Code')).toBeTruthy()
     expect(mascot()?.getAttribute('data-rich-brand')).toBe('claude')
@@ -161,7 +153,7 @@ describe('RichSlot — 빈 상태 표기', () => {
   })
 
   // The marker is pure decoration so it is hidden from the accessibility tree (ADR-0146 invariant) — the codex marker bears the same discipline as its sibling.
-  it('codex 표식도 aria-hidden 이고 기존 표식 셀렉터에 그대로 걸린다', async () => {
+  it('the codex marker is also aria-hidden and still hits the existing marker selector', async () => {
     agentStoreState.profiles = [profile('Codex')]
     await renderEmpty()
     expect(mascot()).not.toBeNull()
@@ -169,9 +161,9 @@ describe('RichSlot — 빈 상태 표기', () => {
   })
 })
 
-describe('RichSlot — 대화 중에도 백엔드가 관측된다', () => {
+describe('RichSlot — the backend is also observed during a conversation', () => {
   // When the empty state closes the title and marker disappear together — the only basis in that span is the root token.
-  it('빈 상태가 아니어도 루트 토큰·색조는 남는다', async () => {
+  it('even when not the empty state the root token · tint remain', async () => {
     agentStoreState.profiles = [profile('Codex')]
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()

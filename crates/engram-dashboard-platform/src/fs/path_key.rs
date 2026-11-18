@@ -1,26 +1,26 @@
-//! 경로 열쇠 — 대소문자만 OS 처럼 접은 경로. [`same_path`] 는 늘 「두 [`path_key`] 가 같다」 와 같은 답이다.
+//! Path keys — paths with only case folded as the OS does. [`same_path`] always answers the same as "the two [`path_key`]s are equal".
 
 // ADR-0325
 
 use std::ffi::OsString;
 use std::path::Path;
 
-/// [`path_key`] 의 답 — 경로를 열쇠로 쓰는 표의 열쇠다. 열 수 있는 경로가 아니라 경로로 되돌리지 않는다.
+/// [`path_key`]'s answer — a key for tables keyed by path. It is not an openable path and does not turn back into one.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PathKey(OsString);
 
-/// 대소문자만 접은 열쇠 — 철자가 대소문자에서만 다른 두 경로는 같은 열쇠다. 철자의 다른 차이는 접지 않으므로
-/// 같은 파일을 같은 열쇠로 받으려면 부르는 쪽이 먼저 철자를 고른다(구분자 · 상대 꼴 · 접두).
+/// A key with only case folded — two paths whose spelling differs only in case get the same key. Other spelling differences are not
+/// folded, so to get the same key for the same file the caller picks the spelling first (separators · relative form · prefix).
 ///
-/// - Windows = UTF-16 코드 단위마다 OS 대문자 매핑(`LCMapStringEx` invariant 대문자)으로 접는다. 보충 평면
-///   글자(서로게이트 쌍)와 짝 없는 서로게이트는 그대로 둔다 — NTFS 가 그렇다(U+10428 과 U+10400 은 다른 이름).
-///   한 글자를 여러 글자로 펴는 접기(`ß` → `SS`)도 하지 않는다.
-/// - 그 밖 = 그대로(대소문자를 가린다). macOS 의 대소문자 무시 · NFC/NFD 같음은 반영하지 않는다(알려진 갭).
-/// - 구분자(`a/b` 와 `a\b`) · `.` · `..` · 끝 구분자 · `\\?\` 접두 · 상대와 절대는 그대로라, 같은 파일이어도 그
-///   철자가 다르면 다른 열쇠다.
-/// - ★실제 비교는 볼륨마다다★ — NTFS 는 포맷 때의 대문자 표 · exFAT 은 제 표 · SMB 공유는 서버 규칙을 쓴다. 이
-///   열쇠는 OS 표 하나라 그 표와 다른 볼륨의 드문 글자에서 어긋날 수 있다. 폴더마다 대소문자를 가리는 폴더(WSL
-///   `fsutil setCaseSensitiveInfo`)는 지원 밖이다.
+/// - Windows = folds each UTF-16 code unit with the OS uppercase mapping (`LCMapStringEx` invariant uppercase). Supplementary-plane
+///   characters (surrogate pairs) and unpaired surrogates stay as is — NTFS does the same (U+10428 and U+10400 are different names).
+///   No folding that expands one character into several (`ß` → `SS`).
+/// - Elsewhere = as is (case-sensitive). macOS case-insensitivity and NFC/NFD equivalence are not reflected (known gap).
+/// - Separators (`a/b` vs `a\b`) · `.` · `..` · a trailing separator · the `\?\` prefix · relative vs absolute stay as is, so the
+///   same file spelled differently is a different key.
+/// - ★The real comparison is per volume★ — NTFS uses the uppercase table from format time · exFAT its own table · an SMB share the
+///   server's rules. This key uses the one OS table, so it can disagree on rare characters of a volume with a different table.
+///   Per-folder case-sensitive folders (WSL `fsutil setCaseSensitiveInfo`) are unsupported.
 #[cfg(windows)]
 pub fn path_key(path: &Path) -> PathKey {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -37,24 +37,24 @@ pub fn path_key(path: &Path) -> PathKey {
     PathKey(path.as_os_str().to_owned())
 }
 
-/// 두 경로의 철자가 대소문자 말고는 같은가 — `path_key(a) == path_key(b)` 그대로다(규칙 · 부르는 쪽이 고를 철자 =
-/// [`path_key`]). 짝 견주기라 경로를 열쇠로 쓰는 표에는 [`path_key`] 를 쓴다.
+/// Whether two paths are spelled the same except for case — exactly `path_key(a) == path_key(b)` (rules · the spelling the caller
+/// picks = [`path_key`]). It compares a pair; tables keyed by path use [`path_key`].
 pub fn same_path(a: &Path, b: &Path) -> bool {
     path_key(a) == path_key(b)
 }
 
-// 실측 2026-11-01(Windows 11 26200 · 루트 폴더 만든 때(포맷 날짜 대용) 2018-08 · 2019-03 · 2025-08 의 NTFS 볼륨 셋):
-//   이 매핑과 `RtlUpcaseUnicodeChar` 는 서로게이트 아닌 BMP 단위 63,488 개에서 답이 같았고(그것을 고르지 않은 까닭 =
-//   `Cargo.toml` 의 `Win32_Globalization` 주석), 대소문자 짝 후보 2378 쌍에서 NTFS 의 같은 이름 판정과 모두 맞았다.
-//   exFAT · 네트워크 공유는 재지 않았다(이 PC 에 exFAT 볼륨이 없다).
+// Measured 2026-11-01 (Windows 11 26200 · three NTFS volumes whose root folders were created (a proxy for format date) 2018-08 ·
+//   2019-03 · 2025-08): this mapping and `RtlUpcaseUnicodeChar` gave the same answer on all 63,488 non-surrogate BMP units (why
+//   the latter is not used = the `Win32_Globalization` comment in `Cargo.toml`), and matched NTFS's same-name decision on all
+//   2378 case-pair candidates. exFAT and network shares were not measured (no exFAT volume on this PC).
 #[cfg(windows)]
 fn upcase_table() -> &'static [u16] {
     static TABLE: std::sync::OnceLock<Box<[u16]>> = std::sync::OnceLock::new();
     TABLE.get_or_init(|| (0..=u16::MAX).map(upcase_unit).collect())
 }
 
-// 매핑이 실패하거나 한 단위가 아닌 답을 내면 그 단위는 접지 않는다 — 열쇠는 그래도 한 프로세스 안에서 한결같다
-//   (표를 한 번만 짓는다). 실측에서 실패한 단위는 없었다.
+// If the mapping fails or answers with more than one unit, that unit is not folded — the key stays consistent within one process
+//   (the table is built once). No unit failed in the measurement.
 #[cfg(windows)]
 fn upcase_unit(unit: u16) -> u16 {
     use windows::Win32::Foundation::LPARAM;
@@ -63,7 +63,7 @@ fn upcase_unit(unit: u16) -> u16 {
         return unit;
     }
     let mut out = [0u16; 2];
-    // SAFETY: 입력 · 출력 둘 다 길이가 실린 슬라이스이고 나머지 포인터 인자는 비운다.
+    // SAFETY: input and output are both slices with their lengths; the other pointer arguments are empty.
     let written = unsafe {
         LCMapStringEx(
             LOCALE_NAME_INVARIANT,
@@ -86,32 +86,32 @@ fn upcase_unit(unit: u16) -> u16 {
 mod tests {
     use super::*;
 
-    // (a, b, NTFS 가 같은 이름으로 읽나) — 실측 2026-11-01(위 매핑 주석의 볼륨 셋). 그 밖의 OS 에서는 철자가 다르면
-    //   전부 다른 이름이다.
+    // (a, b, does NTFS read them as the same name) — measured 2026-11-01 (the volume set of the mapping comment above). On other
+    //   OSes any spelling difference is a different name.
     const PILOT_PAIRS: &[(&str, &str, bool)] = &[
         ("a", "A", true),
         ("\u{E9}", "\u{C9}", true),     // é · É
         ("\u{FF}", "\u{178}", true),    // ÿ · Ÿ
-        ("\u{3C3}", "\u{3A3}", true),   // 그리스 σ · Σ
-        ("\u{430}", "\u{410}", true),   // 키릴 а · А
-        ("\u{FF41}", "\u{FF21}", true), // 전각 ａ · Ａ
-        ("\u{B5}", "\u{39C}", false),   // 마이크로 기호 · 그리스 대문자 뮤
-        ("\u{DF}", "\u{1E9E}", false),  // ß · 대문자 ẞ
-        ("\u{DF}", "SS", false),        // ß · 두 글자
-        ("\u{3C2}", "\u{3A3}", false),  // 끝 시그마 ς · Σ
-        ("\u{131}", "I", false),        // 점 없는 ı
-        ("\u{130}", "i", false),        // 점 있는 İ
+        ("\u{3C3}", "\u{3A3}", true),   // Greek σ · Σ
+        ("\u{430}", "\u{410}", true),   // Cyrillic а · А
+        ("\u{FF41}", "\u{FF21}", true), // fullwidth ａ · Ａ
+        ("\u{B5}", "\u{39C}", false),   // micro sign · Greek capital mu
+        ("\u{DF}", "\u{1E9E}", false),  // ß · capital ẞ
+        ("\u{DF}", "SS", false),        // ß · two letters
+        ("\u{3C2}", "\u{3A3}", false),  // final sigma ς · Σ
+        ("\u{131}", "I", false),        // dotless ı
+        ("\u{130}", "i", false),        // dotted İ
         ("\u{130}", "I", false),
-        ("\u{17F}", "S", false),  // 긴 ſ
-        ("\u{212A}", "K", false), // 켈빈 기호
+        ("\u{17F}", "S", false),  // long ſ
+        ("\u{212A}", "K", false), // Kelvin sign
         ("\u{212A}", "k", false),
-        ("\u{10D0}", "\u{1C90}", false), // 조지아 므헤드룰리 · 므타브룰리(유니코드 11)
-        ("\u{10D0}", "\u{10A0}", false), // 조지아 므헤드룰리 · 아솜타브룰리
-        ("\u{AB70}", "\u{13A0}", false), // 체로키 소문자 · 대문자(유니코드 8)
+        ("\u{10D0}", "\u{1C90}", false), // Georgian Mkhedruli · Mtavruli (Unicode 11)
+        ("\u{10D0}", "\u{10A0}", false), // Georgian Mkhedruli · Asomtavruli
+        ("\u{AB70}", "\u{13A0}", false), // Cherokee small · capital (Unicode 8)
         ("\u{13F8}", "\u{13F0}", false),
-        ("\u{10428}", "\u{10400}", false), // 데저렛 — 보충 평면
-        ("\u{1E922}", "\u{1E900}", false), // 아들람 — 보충 평면
-        ("\u{104D8}", "\u{104B0}", false), // 오세이지 — 보충 평면
+        ("\u{10428}", "\u{10400}", false), // Deseret — supplementary plane
+        ("\u{1E922}", "\u{1E900}", false), // Adlam — supplementary plane
+        ("\u{104D8}", "\u{104B0}", false), // Osage — supplementary plane
     ];
 
     #[test]
@@ -176,22 +176,22 @@ mod tests {
         assert_eq!(key, [0x41, 0xD801, 0x42]);
     }
 
-    // 표의 답이 이 시험이 도는 볼륨(임시 폴더)과 맞는지 실 파일로 잰다 — 이름 a 의 파일을 둔 채 이름 b 로 새로
-    //   만들기가 「이미 있다」 면 그 볼륨은 둘을 같은 이름으로 읽는다.
+    // Measures with real files whether the table agrees with the volume this test runs on (the temp folder) — if creating name b
+    //   while a file named a exists says "already exists", that volume reads the two as the same name.
     #[cfg(windows)]
     fn volume_reads_same(dir: &Path, a: &str, b: &str) -> bool {
         let first = dir.join(format!("p{a}q"));
-        std::fs::File::create_new(&first).expect("이름 a 로 만들기");
+        std::fs::File::create_new(&first).expect("create with name a");
         let second = dir.join(format!("p{b}q"));
         let same = match std::fs::File::create_new(&second) {
             Ok(_) => {
-                std::fs::remove_file(&second).expect("이름 b 지우기");
+                std::fs::remove_file(&second).expect("remove name b");
                 false
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => true,
-            Err(e) => panic!("이름 b 로 만들기 {a} · {b}: {e}"),
+            Err(e) => panic!("create with name b {a} · {b}: {e}"),
         };
-        std::fs::remove_file(&first).expect("이름 a 지우기");
+        std::fs::remove_file(&first).expect("remove name a");
         same
     }
 
@@ -206,7 +206,7 @@ mod tests {
                 std::process::id(),
                 uuid::Uuid::new_v4()
             ));
-            std::fs::create_dir(&dir).expect("시험 폴더");
+            std::fs::create_dir(&dir).expect("test folder");
             Self(dir)
         }
     }
@@ -218,8 +218,8 @@ mod tests {
         }
     }
 
-    // BMP 의 글자마다 그 글자와 대소문자 짝일 만한 후보를 실 파일로 견준다. Rust 의 대소문자 변환은 후보를 넓히는 데만
-    //   쓴다 — 열쇠에는 쓰지 않는다(보충 평면 이름을 합친다 · ADR-0325).
+    // Compares, with real files, each BMP character against its likely case-pair candidates. Rust's case conversion only widens the
+    //   candidates — it is not used for the key (it would merge supplementary-plane names · ADR-0325).
     #[cfg(windows)]
     #[test]
     fn every_bmp_case_candidate_agrees_with_the_volume_under_temp() {
@@ -241,7 +241,7 @@ mod tests {
         let table = upcase_table();
         let mut compared = 0;
         for unit in (0..=u16::MAX).filter(|&u| name_unit(u)) {
-            let ch = char::from_u32(u32::from(unit)).expect("서로게이트는 걸렀다");
+            let ch = char::from_u32(u32::from(unit)).expect("surrogates were filtered");
             let mut candidates = vec![table[usize::from(unit)]];
             candidates.extend(single_bmp(ch.to_uppercase()));
             candidates.extend(single_bmp(ch.to_lowercase()));
@@ -251,8 +251,8 @@ mod tests {
                 .into_iter()
                 .filter(|&o| o != unit && name_unit(o))
             {
-                let a = String::from_utf16(&[unit]).expect("BMP 한 글자");
-                let b = String::from_utf16(&[other]).expect("BMP 한 글자");
+                let a = String::from_utf16(&[unit]).expect("one BMP character");
+                let b = String::from_utf16(&[other]).expect("one BMP character");
                 assert_eq!(
                     same_path(Path::new(&a), Path::new(&b)),
                     volume_reads_same(&scratch.0, &a, &b),
@@ -261,7 +261,7 @@ mod tests {
                 compared += 1;
             }
         }
-        assert!(compared > 2000, "후보 쌍이 너무 적다: {compared}");
+        assert!(compared > 2000, "too few candidate pairs: {compared}");
     }
 
     #[cfg(windows)]

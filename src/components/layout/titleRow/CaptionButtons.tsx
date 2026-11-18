@@ -1,9 +1,5 @@
-// TRD S26-window-chrome §7-4: three window buttons (minimize · maximize/restore · third). ★Pressing calls the registry `window.*` command — it does not call the Tauri window
-//   API★ (AC10 — `src/__tests__/noWindowControl.test.ts`). A human press and the LLM drive the same command (CLAUDE.md
-//   「LLM-우선 제어」). The third = `window.close` — for main the shell hides all windows, for a popout it closes (TRD §5-4).
-// In a build with the snap layout overlay (TRD §8-4 — shell feature `snap-overlay` · off by default) on, the maximize button rectangle is reported to the shell, and since the
-//   OS child window covering that spot takes the cursor, hover is drawn with the value the shell returns (`data-snap-hover`) (`snapOverlay.ts`). In that
-//   build a mouse press is passed to the OS by the overlay (the same path as a double press on the title row) and a keyboard press is received by this button.
+// TRD S26-window-chrome §7-4: three window buttons (minimize · maximize/restore · third). ★Pressing calls the registry `window.*` command, never the Tauri window API★ (AC10 — `src/__tests__/noWindowControl.test.ts`); a human press and the LLM drive the same command (CLAUDE.md 「LLM-우선 제어」). The third = `window.close` — main: the shell hides all windows; popout: closes (TRD §5-4). // hangul-ok
+// With the snap layout overlay on (TRD §8-4 — shell feature `snap-overlay`, off by default) the maximize button rectangle is reported to the shell, and since the OS child window covering that spot takes the cursor, hover is drawn from the value the shell returns (`data-snap-hover`, `snapOverlay.ts`). In that build a mouse press is passed to the OS by the overlay (same path as a double press on the title row) and a keyboard press is received by this button.
 
 import { useRef, type CSSProperties, type ReactNode, type Ref } from 'react'
 import { Copy, EyeOff, Minus, Square, X } from 'lucide-react'
@@ -15,7 +11,7 @@ import { useSnapOverlay, type SnapOverlayIpc } from './snapOverlay'
 
 interface CaptionButtonsProps {
   label: string
-  /** Is it the main window — the third button is 「모든 창 숨기기」 (eye cover · light hover), otherwise 「창 닫기」 (× · red hover). */
+  /** Is it the main window — the third button is 「eye cover · light hover」, otherwise 「× · red hover」. */
   main: boolean
   maximized: boolean
   /** Is it a build where the shell turned on the snap layout overlay (window fact `caption.snap_overlay`) — the maximize button rectangle is reported only when true. Default `false`. */
@@ -91,14 +87,12 @@ function CaptionButton({
   )
 }
 
-// Glyph size = the value of the spike (2026-10-24) — not compared with the Windows 11 glyphs (untested · S11).
+// Glyph size = the spike value — not compared with the Windows 11 glyphs (untested · S11).
 const GLYPH = 14
 const GLYPH_BOX = 12
 const GLYPH_STROKE = 1.5
 
-// ★Keep class names as whole strings★ — Tailwind scans source text to generate classes, so joining fragments produces none. Do not put color ·
-//   hover background in inline style — inline beats the hover class and the hover disappears. The focus border is drawn inside —
-//   the rightmost button touches the window edge and an outer border is clipped. The `data-snap-hover` hover is attached to the maximize button only (head above).
+// ★Keep class names as whole strings★ — Tailwind scans source text, so joined fragments generate no classes. No color · hover background in inline style — inline beats the hover class and the hover disappears. The focus border is drawn inside (the rightmost button touches the window edge and an outer border is clipped). `data-snap-hover` hover is on the maximize button only.
 const BUTTON_CLASS =
   'bg-transparent text-[color:var(--caption-fg)] hover:bg-[var(--caption-hover-bg)] data-[snap-hover=true]:bg-[var(--caption-hover-bg)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent focus-visible:-outline-offset-2'
 const DANGER_CLASS =

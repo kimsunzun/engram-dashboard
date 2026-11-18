@@ -1,53 +1,23 @@
-//! What one daemon's inbox items become for the shell (TRD S21 trd-3 §3-3 · §6-2 U2): the key filter, connection-state
-//! edges, notice values, and the split between the frontend and the driver.
+//! What one daemon's inbox items become for the shell (TRD S21 trd-3 §3-3 · §6-2 U2): key filter, connection-state edges, notice values, and the split between the frontend and the driver.
 //!
-//! ★Owned by the driver actor★ — [`RouteState`] is `&mut`, never behind a lock, and [`emit_broadcast`] takes no
-//! routing state at all, so no routing lock can be held while a port runs (the real `AgentNamesSink` takes the layout
-//! lock). ★The driver task never awaits anything that waits on an inbox★ (transport invariant 1, transitively) —
-//! `Peer::request`, a `Peer::close_after_flush` future, `Registry::close_all`: when the driver lags, the pump waits on
-//! it, the inbox fills and the transport stops reading that daemon, so a reply (or the end those waits need) could not
-//! arrive. Run them on another task.
-//! ★This module is the only place the link's connection state and lifecycle are logged★ — the transport has no
-//! logging of its own. Lifecycle and refusal logging here never carries the daemon's text, and no daemon text reaches the
-//! UI from here; the one exception is `emit_broadcast`, which warn-logs a daemon `Error` broadcast's message.
+//! Owned by the driver actor: [`RouteState`] is `&mut`, never behind a lock, and [`emit_broadcast`] takes no routing state, so no routing lock is held while a port runs (the real `AgentNamesSink` takes the layout lock). The driver task never awaits anything that waits on an inbox (transport invariant 1, transitively) — `Peer::request`, a `Peer::close_after_flush` future, `Registry::close_all`: when the driver lags the pump waits on it, the inbox fills and the transport stops reading that daemon, so the reply (or end) those waits need could not arrive. Run them on another task.
+//! This is the only place the link's connection state and lifecycle are logged (the transport logs nothing). Lifecycle and refusal logging never carries the daemon's text and no daemon text reaches the UI from here; the one exception is `emit_broadcast`, which warn-logs a daemon `Error` broadcast's message.
 //!
 //! ## Key filter — every item of a key (§3-3, three rules)
-//!
-//! 1. Handle — an item from a handle that is not the key's current one is dropped (the old supervisor's tail after a
-//!    re-add of the key).
-//! 2. Generation — an item that carries a connection generation (messages · `Connected` · `Disconnected` · `Closed` ·
-//!    `DecodeFailed`) older than the newest `Connected` this handle's inbox delivered is dropped. ★The watermark is
-//!    what this inbox showed, never `Peer::generation()`★ — the live counter runs ahead of a lagging inbox and would
-//!    drop in-order messages, including the read-ahead the transport queues just before `Disconnected`.
-//! 3. Generation-less lifecycle events (`ConnectFailed` · `Rejected` · `GaveUp`) of the current handle always pass —
-//!    also for a handle that never connected.
-//!
+//! 1. Handle — an item from a handle that is not the key's current one is dropped (the old supervisor's tail after a re-add).
+//! 2. Generation — an item carrying a connection generation (messages · `Connected` · `Disconnected` · `Closed` · `DecodeFailed`) older than the newest `Connected` this handle's inbox delivered is dropped. The watermark is what this inbox showed, never `Peer::generation()` — the live counter runs ahead of a lagging inbox and would drop in-order messages, including the read-ahead queued just before `Disconnected`.
+//! 3. Generation-less lifecycle events (`ConnectFailed` · `Rejected` · `GaveUp`) of the current handle always pass, also for a handle that never connected.
 //! Dropped items are logged only.
 //!
 //! ## Connection failures
-//!
-//! A handle that has not connected yet shows its first failed attempt as `Down` at once — a first connect has no
-//! `Reconnecting` phase (TRD revision 9 ①); the transport keeps retrying in the background and a later `Connected` is
-//! an edge. Failed attempts are logged throttled (`FailureLog` — ADR-0346 decision 5): retries no longer run out, so
-//! a line per attempt would repeat for as long as the daemon is away.
+//! A handle that has not connected shows its first failed attempt as `Down` at once — no `Reconnecting` phase on a first connect (TRD revision 9 ①); the transport retries in the background and a later `Connected` is an edge. Failed attempts are logged throttled (`FailureLog` — ADR-0346 decision 5): retries never run out, so a line per attempt would repeat as long as the daemon is away.
 //!
 //! ## Bands (TRD S21 trd-3-2-u5 §4 · R7)
-//!
-//! The status routing shows is `(state, band)`, emitted when either part changes. The band comes from the current
-//! handle's last answer: `Connected` · `Disconnected` → none; a failed attempt (`ConnectFailed`) → ① — for a handle
-//! that connected before this is the first failed reconnect, so ① appears while `state` stays `reconnecting` (D1);
-//! `Rejected` → ② when the handle's dial refused the daemon's version (its [`RefusalSlot`]), else ① `refused`; an
-//! explicit frontend close ([`RouteState::close`]) → none for the rest of that handle. Two holds sit on top: while a
-//! cold boot's start has not answered (R20) a never-connected handle shows none; and a re-add keeps the shown band
-//! until the new handle's first answer. A daemon stop holds nothing — the link's own answers show through it.
+//! The shown status is `(state, band)`, emitted when either changes. The band comes from the current handle's last answer: `Connected` · `Disconnected` → none; `ConnectFailed` → ① (for a handle that connected before, the first failed reconnect: ① appears while `state` stays `reconnecting`, D1); `Rejected` → ② when the handle's dial refused the daemon's version ([`RefusalSlot`]), else ① `refused`; an explicit frontend close ([`RouteState::close`]) → none for the rest of that handle. Two holds on top: a never-connected handle shows none while a cold boot's start has not answered (R20); a re-add keeps the shown band until the new handle's first answer. A daemon stop holds nothing.
 //!
 //! ## Replies skip this path (§3-3 B2)
-//!
-//! A reply wakes its `request` inside the transport and never reaches the inbox, so it can resolve before events the
-//! daemon sent ahead of it are routed (pinned by a test below; the caller survey is in the TRD §6-2 U2 C note).
-// ADR-0310
-// ADR-0342
-// ADR-0346
+//! A reply wakes its `request` inside the transport and never reaches the inbox, so it can resolve before events the daemon sent ahead of it are routed (pinned by a test below; caller survey in the TRD §6-2 U2 C note).
+// ADR-0310 · ADR-0342 · ADR-0346
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -76,13 +46,9 @@ use crate::daemon_client::{AgentNamesSink, Band, ConnectionState, ConnectionStat
 pub enum Routed {
     /// Connection `generation` of the current handle is live — the driver opens its per-connection state.
     LinkUp { generation: Generation },
-    /// Connection `generation` ended — the driver drops its per-connection state (replay flights, the usage socket).
-    /// Exactly one per `LinkUp`, also when a re-add ([`RouteState::adopt`]) or an abnormal inbox end ([`route_end`])
-    /// ends it.
+    /// Connection `generation` ended — the driver drops its per-connection state (replay flights, usage socket). Exactly one per `LinkUp`, also when a re-add ([`RouteState::adopt`]) or an abnormal inbox end ([`route_end`]) ends it.
     LinkDown { generation: Generation },
-    /// A status for the frontend and the status watch: emitted only when the shown `(state, band)` changes.
-    /// ★Routing is the only emitter of the link's connection status★ — a driver that also emitted (e.g. `Down` from its
-    /// own `close()`) would double the edges; a close shows `Down` through the `Closed` it produces.
+    /// A status for the frontend and the status watch, emitted only when the shown `(state, band)` changes. Routing is the only emitter of the link's connection status — a driver also emitting (e.g. `Down` from its own `close()`) would double the edges; a close shows `Down` through the `Closed` it produces.
     Status(ConnectionStatus),
     /// A value for the connection-failure surface (`ConnectionNotice` — ADR-0342).
     Notice(LinkNotice),
@@ -103,14 +69,9 @@ pub enum Routed {
 /// What the connection-failure surface gets. A value only — what the UI does with it is wired in 3-2 U4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkNotice {
-    /// The daemon refused for good — `GaveUp(Rejected)` follows for a terminal refusal; for a refusal the transport
-    /// would retry, the driver removes the peer instead (`Closed` follows and the registry no longer holds the peer).
-    /// Log-only: the UI text comes from the band and [`refusal_message`], which also needs the handle's refusal slot
-    /// (token vs version) — never the daemon's own text (ADR-0342).
+    /// The daemon refused for good — `GaveUp(Rejected)` follows for a terminal refusal; for one the transport would retry the driver removes the peer instead (`Closed` follows). Log-only: UI text comes from the band and [`refusal_message`] (needs the handle's refusal slot: token vs version) — never the daemon's own text (ADR-0342).
     Refused { code: CloseCode },
-    /// The reconnect budget ran out (`GaveUp(BudgetExhausted)`). `last` = the cause of the last failed attempt since
-    /// the handle's last `Connected` (`None` = none failed). ★The shell's driver never reaches it★ — it retries network
-    /// failures without limit (ADR-0346); only a registry built with a finite budget produces it.
+    /// The reconnect budget ran out (`GaveUp(BudgetExhausted)`); `last` = cause of the last failed attempt since the handle's last `Connected` (`None` = none failed). The shell's driver never reaches it (it retries network failures without limit, ADR-0346); only a registry built with a finite budget produces it.
     BudgetExhausted { last: Option<FailureCause> },
 }
 
@@ -148,9 +109,7 @@ impl FailureKind {
     }
 }
 
-/// Why a daemon could not be reached, as far as a stable log key goes. ★Read from the failure text and used only to
-/// throttle the log★ — a class is never a decision, and a text no rule knows is `Other`. Not the raw text: it carries
-/// ports and OS detail that can change per attempt and would defeat the throttle.
+/// Why a daemon could not be reached, as far as a stable log key goes. Read from the failure text and used only to throttle the log — a class is never a decision, and unknown text is `Other`. Not the raw text: ports and OS detail change per attempt and would defeat the throttle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnreachableClass {
     /// No `daemon.json` (`link::dialer`).
@@ -197,27 +156,21 @@ impl UnreachableClass {
 }
 
 /// The text for a version refusal — the dial refused the daemon's protocol version (`link::dialer`).
-pub const VERSION_REFUSED: &str = "실행 중인 데몬이 이 앱과 버전이 다릅니다";
+pub const VERSION_REFUSED: &str = "the running daemon's version differs from this app's";
 /// The text for any other 4001 refusal (TRD S21 trd-3-2-u5 U2): the daemon refused this app's handshake — a token
 /// refusal as far as the shell can tell (it never reads the daemon's text — `ShellHandshake`).
-pub const AUTH_REFUSED: &str = "데몬이 이 앱의 인증을 거절했습니다";
+pub const AUTH_REFUSED: &str = "the daemon refused this app's authentication";
 
-/// The fixed local text for a refusal with `code` — ★the one place a refusal becomes UI text★ (ADR-0342). `version`
-/// = the handle's dial refused the daemon's version (its [`RefusalSlot`] holds a record) — decided from what the shell
-/// did, never from the daemon's text (TRD S21 trd-3-2-u5 §4-3). Without it, 4001 is the daemon's refusal of the
-/// handshake and reads as the token text; 3-3 U7's identity refusal will close with 4001 too.
+/// The fixed local text for a refusal with `code` — the one place a refusal becomes UI text (ADR-0342). `version` = the handle's dial refused the daemon's version ([`RefusalSlot`] holds a record), decided from what the shell did, never the daemon's text (TRD S21 trd-3-2-u5 §4-3). Otherwise 4001 is the handshake refusal and reads as the token text; 3-3 U7's identity refusal will close with 4001 too.
 pub fn refusal_message(code: CloseCode, version: bool) -> &'static str {
     match code {
         _ if version => VERSION_REFUSED,
         CloseCode::HANDSHAKE_REJECTED => AUTH_REFUSED,
-        _ => "데몬이 연결을 거절했습니다",
+        _ => "the daemon refused the connection",
     }
 }
 
-/// Whether a stop applies to band ②'s daemon (TRD S21 trd-3-2-u5 §4-2; no frontend reads it since ADR-0356): the
-/// daemon is older than this app and did not start after this app's process (one that did is an old exe run by hand —
-/// `stale_exe`). `own_start` = this app process's creation time; `None` (an OS that gives none) → `false`. A record
-/// without a start time (0) is not stale.
+/// Whether a stop applies to band ②'s daemon (TRD S21 trd-3-2-u5 §4-2; no frontend reads it since ADR-0356): the daemon is older than this app and did not start after this app's process (one that did is an old exe run by hand — `stale_exe`). `own_start` = this process's creation time; `None` (OS gives none) → `false`. A record without start time (0) is not stale.
 pub fn can_stop(refusal: &VersionRefusal, own_start: Option<u64>) -> bool {
     let Some(own_start) = own_start else {
         return false;
@@ -260,16 +213,8 @@ impl RouteState {
         self
     }
 
-    /// `token` is now the key's current handle (one `Registry::add`): every later item of an earlier handle of the key
-    /// is dropped, and the handle's generation watermark and failure memory start over. `refusal` = the slot of the
-    /// handle's dial registration (`LocalDaemonDialer::register`).
-    ///
-    /// ★Call it in the same driver step as the `Registry::add` and its `spawn_pump`, before any item of `token` is
-    /// routed★ — an item routed earlier is dropped as foreign. ★Apply what it returns★: the earlier handle's open
-    /// connection ends here (`LinkDown` — its own `Disconnected` is now foreign and gets dropped; `Registry::add` closes
-    /// the displaced supervisor only after the new one is in the roster), and a shown `Connected` turns `Reconnecting`
-    /// so the new handle's `Connected` is an edge the frontend resyncs on. The shown band stays until the new handle's
-    /// first answer.
+    /// `token` is now the key's current handle (one `Registry::add`): every later item of an earlier handle of the key is dropped, and the handle's generation watermark and failure memory start over. `refusal` = the slot of the handle's dial registration (`LocalDaemonDialer::register`).
+    /// Call in the same driver step as `Registry::add` and its `spawn_pump`, before any item of `token` is routed (an earlier item is dropped as foreign), and apply what it returns: the earlier handle's open connection ends here (`LinkDown` — its own `Disconnected` is now foreign and dropped; `Registry::add` closes the displaced supervisor only after the new one is in the roster), and a shown `Connected` turns `Reconnecting` so the new handle's `Connected` is an edge the frontend resyncs on. The shown band stays until the new handle's first answer.
     #[must_use]
     pub fn adopt(
         &mut self,
@@ -310,13 +255,11 @@ impl RouteState {
         out
     }
 
-    /// Holds every band of a never-connected handle until [`Self::end_boot_start_hold`] (TRD R20). Call it before any
-    /// handle is added.
+    /// Holds every band of a never-connected handle until [`Self::end_boot_start_hold`] (TRD R20). Call before any handle is added.
     pub fn hold_for_boot_start(&mut self) {
         self.view.boot_pending = true;
     }
 
-    /// The hold of [`Self::hold_for_boot_start`] is on.
     pub fn boot_start_held(&self) -> bool {
         self.view.boot_pending
     }
@@ -354,10 +297,8 @@ impl RouteState {
     }
 }
 
-/// The band the handle's last answer calls for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answer {
-    /// No answer yet — the shown band stays (a re-add).
     None,
     Band(Option<Band>),
 }
@@ -366,7 +307,7 @@ const NOT_CONNECTED: Band = Band::NotConnected { refused: false };
 
 struct KeyRoute {
     token: HandleToken,
-    /// The handle's dial registration's version refusal (TRD §4-3).
+    /// TRD §4-3
     refusal: Arc<RefusalSlot>,
     /// The newest `Connected` generation this handle's inbox delivered (rule ②).
     seen: Option<Generation>,
@@ -379,7 +320,6 @@ struct KeyRoute {
     closed_by_user: bool,
     /// What routing last emitted for the key (carried across a re-add); `None` = nothing yet.
     shown: Option<ConnectionStatus>,
-    /// `Closed` was routed — the inbox ends cleanly after it.
     closed: bool,
 }
 
@@ -457,12 +397,7 @@ pub fn route(
     }
 }
 
-/// Routes the end of `key`'s handle `token` inbox (the pump's `Routable::Ended` — after the last item). After `Closed`
-/// that is the clean end and routes nothing. ★Without `Closed` the supervisor ended abnormally★ (transport invariant 5
-/// — cleanup over its bound, a panic, runtime shutdown): the open connection ends (`LinkDown`) and `Down` is shown with
-/// band ① — nothing retries that handle.
-/// The driver unregisters the handle's dial registration on every `Ended` — current or replaced handle — not only when
-/// this returns something (3-2 U3).
+/// Routes the end of `key`'s handle `token` inbox (the pump's `Routable::Ended`, after the last item). After `Closed` that is the clean end and routes nothing; without `Closed` the supervisor ended abnormally (transport invariant 5 — cleanup over its bound, a panic, runtime shutdown): the open connection ends (`LinkDown`) and `Down` shows with band ① — nothing retries that handle. The driver unregisters the handle's dial registration on every `Ended` (current or replaced handle), not only when this returns something (3-2 U3).
 pub fn route_end(st: &mut RouteState, key: &DaemonKey, token: HandleToken) -> Vec<Routed> {
     let RouteState { keys, view, .. } = st;
     let Some(route) = of_current_handle(keys.get_mut(key), token) else {
@@ -603,11 +538,7 @@ impl KeyRoute {
                 out.extend(self.show(ConnectionState::Connected, view));
                 out
             }
-            // Every loss of a live connection shows `Reconnecting`, our own as well (`cause` `Explicit`): after
-            //   `reconnect_now` a redial follows, and after `close` the `Closed` that follows shows `Down` — the
-            //   frontend acts on reaching or leaving `connected`, never on which non-connected state it is
-            //   (`tauriTransport.ts` `applyConnectionState` · `eventBus.ts`
-            //   resync), so the brief `reconnecting` before `down` changes nothing there.
+            // Every loss of a live connection shows `Reconnecting`, our own included (`cause` `Explicit`): after `reconnect_now` a redial follows, after `close` the `Closed` that follows shows `Down` — the frontend acts only on reaching or leaving `connected` (`tauriTransport.ts` `applyConnectionState` · `eventBus.ts` resync), so the brief `reconnecting` before `down` changes nothing there.
             TransportEvent::Disconnected {
                 generation, cause, ..
             } => {
@@ -758,11 +689,8 @@ fn for_driver(event: &AgentEvent) -> bool {
     )
 }
 
-/// Sends the outcome of a daemon's `CommandRequest` back on the connection the request arrived on — `generation` = that
-/// request's `Arrival.generation`. ★Never `notify`★: after a reconnect the outcome would reach a connection that never
-/// sent the request (TRD §3-0 ③ · ADR-0195). An outcome that cannot go is logged and dropped; the daemon reclaims its
-/// slot by its own deadline.
-// ADR-0272: the outcome travels in the raw slot.
+/// Sends the outcome of a daemon `CommandRequest` back on the connection the request arrived on (`generation` = that request's `Arrival.generation`). Never `notify`: after a reconnect the outcome would reach a connection that never sent the request (TRD §3-0 ③ · ADR-0195). An outcome that cannot go is logged and dropped; the daemon reclaims its slot by its own deadline.
+// ADR-0272
 pub fn send_command_outcome(peer: &Peer<ShellWire>, generation: Generation, reply: &BusReply) {
     let raw = match protocol_state::reply_to_wire(reply) {
         Ok(raw) => raw,
@@ -785,13 +713,7 @@ pub fn send_command_outcome(peer: &Peer<ShellWire>, generation: Generation, repl
     }
 }
 
-/// Hands one frontend event to the ports (T7c — a broadcast without `request_id` goes to every webview).
-///
-/// ★Which variant reaches the frontend is decided here, not in the port★ — `events.rs` knows only what happened and
-/// which Tauri event name carries it. The `Error` arm logs instead of emitting, and moving it into the adapter would
-/// lose that trace in the no-op assembly. Variants without a frontend effect are ignored.
-/// ★Names after the frontend event, with no lock held★ (TRD S26-window-chrome §4-3) — the real `AgentNamesSink` takes
-/// the layout lock, and this function takes no state.
+/// Hands one frontend event to the ports (T7c — a broadcast without `request_id` goes to every webview). Which variant reaches the frontend is decided here, not in the port: `events.rs` knows only what happened and which Tauri event name carries it, and the `Error` arm logs instead of emitting — moving it into the adapter would lose that trace in the no-op assembly. Variants without a frontend effect are ignored. Names go after the frontend event with no lock held (TRD S26-window-chrome §4-3) — the real `AgentNamesSink` takes the layout lock and this function takes no state.
 pub(crate) fn emit_broadcast(
     events: &dyn DaemonEvents,
     names: &dyn AgentNamesSink,
@@ -822,7 +744,7 @@ pub(crate) fn emit_broadcast(
             message,
             ..
         } => {
-            tracing::warn!(%message, "데몬 error 이벤트(명령 왕복 밖)");
+            tracing::warn!(%message, "daemon error event (outside a command round trip)");
         }
         _ => {}
     }
@@ -1612,7 +1534,7 @@ mod tests {
         );
         // The text is the local one for the refusal — it names the cause and quotes nothing the daemon sent.
         let text = refusal_message(CloseCode::HANDSHAKE_REJECTED, true);
-        assert!(text.contains("버전"), "{text}");
+        assert!(text.contains("version"), "{text}");
         assert!(!text.contains("999"));
         assert_eq!(
             refusal_message(CloseCode::HANDSHAKE_REJECTED, false),
@@ -1624,7 +1546,6 @@ mod tests {
 
     // ── bands (TRD S21 trd-3-2-u5 §4 · R7) ─────────────────────────────────────────────────────
 
-    // Finding A: a runtime loss used to show nothing once the reconnect failed — `reconnecting` stayed the last word.
     #[test]
     fn a_runtime_loss_shows_band_one_after_the_first_failed_reconnect_with_the_state_unchanged() {
         use ConnectionState::*;

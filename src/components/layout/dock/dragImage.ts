@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §4-2 「그림」 (PRD R29 · VS Code `applyDragImage` · research F): tab drag image = tab name label. Inside dragstart,
+// TRD S21-slot-docking §4-2 「PRD R29 · VS Code `applyDragImage` · research F」: tab drag image = tab name label. Inside dragstart,
 //   attach the label synchronously, pass it to `setDragImage`, then remove it in the next task. The look (translucent · faded) is captured from that element by the engine and drawn by the OS.
 // ★`setDragImage` can only be called inside dragstart and captures the element drawn at that moment★ — so everything here is synchronous.
 // ★Attach it off screen★ — with `display: none` · `visibility: hidden` the engine has no image to capture (measured on the old HTML5 drag image box).
@@ -44,7 +44,7 @@ export function setTabDragImage(
     doc.body.append(el)
     dt.setDragImage(el, DRAG_IMAGE_OFFSET.x, DRAG_IMAGE_OFFSET.y)
   } catch (err) {
-    console.warn('[dragImage] 라벨 그림 실패 — 엔진 기본 그림으로 물러난다:', err)
+    console.warn('[dragImage] label image failed — falling back to the default engine image:', err)
   } finally {
     const placed = el
     if (placed !== null) later(() => placed.remove())
