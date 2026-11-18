@@ -1,8 +1,9 @@
-# Handoff: S38 (internal text → English) — docs + leaf crates + agent crate done; wave B (daemon / src-tauri / frontend) paused mid-translation
+# Handoff: S38 (internal text → English) — docs + leaf crates + agent crate done; wave B paused; user chose cheap setup + comment pruning
 
 ## Read first
 
-- **Cost is the user's main concern now.** The user was upset at token use (「뭔 에이전트를 50개를 스폰을해」, 「내부 번역을 비싸게 쓸 필요있음?」). For the rest: Sonnet translates and runs builds/tests (`worker-scout-sonnet`), ONE Opus reviewer per unit reviews-and-fixes (S33 style), Codex at most once per unit only to confirm "no code change beyond strings", at most 3 workers at once. Do not spawn per-area reviewer trios again. Confirm this plan with the user in one line before spawning (the user agreed the direction but did not answer the final config question).
+- **Cost is the user's main concern now.** The user was upset at token use (「뭔 에이전트를 50개를 스폰을해」, 「내부 번역을 비싸게 쓸 필요있음?」). For the rest: Sonnet translates and runs builds/tests (`worker-scout-sonnet`), ONE Opus reviewer per unit reviews-and-fixes (S33 style), Codex at most once per unit only to confirm "no code change beyond strings", at most 3 workers at once. Do not spawn per-area reviewer trios again. The user confirmed: 「어 싼구성으로 돌리고」.
+- **New scope (user): prune comments while translating U3–U5** to the code-conventions §주석 기준 (only what code/docs cannot say; keep ADR anchors). Already-translated comments in the U3–U5 worktrees get pruned too. If the result is good, prune U1–U2 (already committed, ~20k comment lines) as a follow-up (「A로 해보고 괜찮으면 B도 정리하자」). TRD §2 updated (`f482732e`); `.s38-review/coder-common.md` has the PRUNE rule. The Opus reviewer must check every deleted comment (invariants, "do not bring back" notes).
 - The user wants a remaining-work estimate to plan; give it first when they return (numbers below).
 - S33 had NOT finished code comments and left code strings out by design — that is why S38 grew (~45k code lines + ~11k doc lines). The user thought S33 had done it all.
 - Do not message other sessions; the user syncs other branches after the single master push (「그냥 푸쉬하면 내가 알아서 동기화 하라고 전달함」).
@@ -17,7 +18,7 @@
 
 ## Repo state (measured 2026-11-18 10:27)
 
-- wt2: branch `v0.5.0/chore/english-internal-text`, HEAD `961551a7`, 0 ahead of its remote (this handoff's commit comes after this text). Tracked working tree clean. master unchanged (`36a055da`).
+- wt2: branch `v0.5.0/chore/english-internal-text`, HEAD `f482732e` (TRD pruning decision, after handoff commit `ae2a9c46`), ahead of its remote by the TRD commit until this handoff is pushed (this handoff's commit comes after this text). Tracked working tree clean. master unchanged (`36a055da`).
 - Unit worktrees (all branched from `961551a7`, local branches `s38-u3..u6`, NOT pushed):
   - `I:/Engram/apps/s38-wt/u3` daemon — uncommitted partial translation.
   - `I:/Engram/apps/s38-wt/u4` src-tauri — uncommitted partial translation.
@@ -53,12 +54,13 @@ User decisions (this session):
 - (묻지 않음) hold list · 고른 것 「engram help 그냥 놔두고, 너 스킬같은것도 놔두고,(나중에 내가 볼수도 있어서 일단은 보류라는거)」 · — (priming also held by Claude's reading; `.claude/**`, `CLAUDE.md` held).
 - merge cadence · 상황: hundreds of files conflict with open branches · 선택지 docs/comments first merge ★ / one push at the end · 고른 것 「그냥 다 작업하고 마스터 푸쉬하면 그것들 한번에 동기화 하는게 좋을것같은데」 · 갈림 · 조건: 「다른세션에 얘기하지는마」, 「그냥 푸쉬하면 내가 알아서 동기화 하라고 전달함」.
 - mode · 고른 것 「딱히 이슈 없으면 자율모드로 진행해」, later 「자율로 쭉 진행해」 · —.
-- (묻지 않음) cost · 상황: 50+ workers, mostly Opus · 고른 것 요지: internal translation should not use expensive setups (「내부 번역을 비싸게 쓸 필요있음?」); agreed the direction (「그게 맞기는하는데」) · 선택지 lighter review A ★ / Sonnet coders too B / keep C, then Claude proposed S33 style (Sonnet translate + 1 Opus review) — final config not explicitly confirmed · 조건: 「일단 핸드오프해서 진행하는게맞고」.
+- (묻지 않음) comment pruning · 상황: remaining work is mostly comments (daemon 3/4) · 선택지 U3–U5 only now, U1–U2 later ★ / all now · 고른 것 「주석은 이왕이면 뺄수 있는건 뺏으면 좋겠어 … AI 기준으로 꼭 필요한것만 넣어야되는데」 then 「A로 해보고 괜찮으면 B도 정리하자」 · 같음.
+- (묻지 않음) cost · 상황: 50+ workers, mostly Opus · 고른 것 요지: internal translation should not use expensive setups (「내부 번역을 비싸게 쓸 필요있음?」); agreed the direction (「그게 맞기는하는데」) · 선택지 lighter review A ★ / Sonnet coders too B / keep C, then Claude proposed S33 style (Sonnet translate + 1 Opus review) — then confirmed 「어 싼구성으로 돌리고」 · 조건: 「일단 핸드오프해서 진행하는게맞고」.
 - Pending (asked, no answer yet): keep Korean HTML reports under `docs/` (★ keep — applied); build script output English (★ yes — applied in U6). Confirm before the master push.
 
 Claude decisions: ADR-0383 decisions 1–7 (screen errors = English cause in translated head; CATALOG_VERSION not bumped; units commit regenerated bindings; English placeholder marker + frontend accepts the old Korean one until the next PROTOCOL_VERSION bump; Hangul check over code/config, docs not checked; Korean file names / ADR lint tokens / ADR index / HTML reports kept; frontend tests stay in `ko`). During coding: references to held Korean doc headings keep the Korean heading in 「」 with `hangul-ok`; ADR section names English in comments; 명부 = "roster" (agent roster, ADR-0119) vs "registry" (queued-input `Registry`); old-marker accept moved from U5 to U1 after Codex review; U1/U2 commits not added to `.git-blame-ignore-revs` (they mix in the marker code); one U1 fix round included batched wording via the coder (deviation from implement §3, to avoid a separate main pass).
 
-Open: none blocking besides the two pending user answers and the cost-plan confirmation.
+Open: none blocking besides the two pending user answers.
 
 ## U9 checklist (after wave B)
 
