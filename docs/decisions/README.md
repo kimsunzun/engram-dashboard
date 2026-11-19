@@ -367,7 +367,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0318](0318-서드파티는-목적-포트-부품-경계로-감싼다.md) | Third parties are wrapped at a purpose port and part boundary | 제안 |
 | [0319](0319-실행-전처리는-예약-떠-있음-확인-뒤-세션-파생-앞-명부-변경은-mutate-한-번.md) | Run preprocessing goes after the reservation and the alive check, before the session is derived — a registry change is one mutate | 제안 |
 | [0320](0320-삭제-라이브러리-루트-안-우리-숨은-trash-의-묶음-폴더로-옮긴다.md) | Delete = move to a bundle folder in our hidden `.trash` inside the library root | 제안 |
-| [0321](0321-작업-폴더는-에이전트-값-대화-뒤-떠-있는-동안-잠근다.md) | The working folder is an agent value — locked after a conversation and while running | 제안 |
+| [0321](0321-작업-폴더는-에이전트-값-대화-뒤-떠-있는-동안-잠근다.md) | The working folder is an agent value — locked after a conversation and while running | 제안 (부분 폐기 by ADR-0386: decision 4 create-verb exception) |
 | [0322](0322-휴지통-비우기-영구-삭제는-사람만-셸-전용-버스-명령-os-휴지통엔-묶음째-영구-삭제는-휴지통이-없다고-확정될-때만.md) | Emptying the trash and permanent deletion are human-only — a shell-only bus command · whole bundles to the OS trash · permanent deletion only when it is confirmed that there is no trash | 제안 (부분 폐기 by ADR-0326: title and Decisions 5, 6 and 7) |
 | [0323](0323-daemoncache-다시-만들-수-있는-데이터만-언제-지워도-된다.md) | `daemon\cache\` = only data that can be rebuilt — it may be deleted at any time | 제안 (부분 폐기 by ADR-0359: decisions 2 and 3) |
 | [0324](0324-라이브러리-잠금-규약-rwlock-하나-훑기-세대-번호표fifo-조건부-늦은-합치기-휴지통-잠금은-따로-된-잎에-넘겨주기.md) | Library locking convention — one `RwLock` + scan-generation ticket (FIFO) + conditional late merge · the trash lock is a separate leaf with hand-over | 제안 (부분 폐기 by ADR-0359: decision 8 / ADR-0366: decisions 1, 4, 5 and 7, catalog writes and late merges and refresh folding) |
