@@ -19,7 +19,7 @@ The step-9a TRD fixed the edit, agent-preset, relink and create bodies at the le
    - `stopped` carries the refusal itself and `skipped` the full reason;
    - a reference is re-pointed only in the list `to` goes into; entries in other lists stay;
    - a re-point that would make a preset reach itself is skipped per file with `preset-cycle` `{path, target}`, as add and save refuse it;
-   - a pair counts as `fixed` only after an actual re-point for it (in a preset file or the agent rewrite);
+   - a pair counts as `fixed` only after an actual re-point for it (in a preset file or the agent rewrite); an agent that attached the pair but was deleted by another request before the rewrite still counts — no reference to the old path is left either way (user, 2026-11-19);
    - part (b) runs only when the catalog holds neither an item nor a folder at `from`; each candidate passes link admission and is spelled as the catalog spells it;
    - an IO failure stops the walk (TRD rule kept); rerunning recovers the rest once the failure is cleared.
 9. **Create:**
