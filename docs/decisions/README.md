@@ -358,7 +358,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0309](0309-우편-내부-키는-에이전트-id-가장자리-주소는-이름-그대로.md) | The internal mail key is the agent id — the edge address stays the name | 확정 |
 | [0310](0310-3단계-transport-붙이기-결정-d1d26.md) | Stage 3 attaching transport — decisions D1~D26 | 확정 (부분 폐기 by ADR-0342: decision 12: immediate popup on version mismatch / ADR-0346: decision 12: retry on token mismatch, and decision 20: injecting the reconnect count / ADR-0347: decision 11: auth deadline of 1 second / ADR-0369: decision 21 shared deadline for launch requests) |
 | [0311](0311-라이브러리는-따로-된-얇은-crate-engram-dashboard-asset-library-다-데몬은-배선만.md) | The library is a separate thin crate `engram-dashboard-asset-library` — the daemon only wires it | 제안 (부분 폐기 by ADR-0359: decision 4 schema fetch port) |
-| [0312](0312-라이브러리-루트는-하나다-바깥-내용은-루트-안으로-들인다.md) | There is one library root — outside content is brought inside the root | 제안 (부분 폐기 by ADR-0341: Decision 3 scope / ADR-0375: decision 5 recording the root) |
+| [0312](0312-라이브러리-루트는-하나다-바깥-내용은-루트-안으로-들인다.md) | There is one library root — outside content is brought inside the root | 제안 (부분 폐기 by ADR-0341: Decision 3 scope / ADR-0375: decision 5 recording the root / ADR-0385: decision 1 one root) |
 | [0313](0313-구현은-서버-먼저-데몬-라이브러리-기능은-늘-켜져-있고-화면만-끄고-켠다.md) | Implement the server first — the daemon library feature is always on, and only the screen is toggled | 제안 |
 | [0314](0314-프리셋-라이브러리는-데몬이-소유하는-에셋이고-클라이언트가-요청해-읽는다.md) | Presets and the library are assets owned by the daemon, and the client requests and reads them | 제안 (부분 폐기 by ADR-0359: decision 7 schema errors) |
 | [0315](0315-참조-라이브러리-루트부터의-경로-한-꼴-기본-제공-engram.md) | A reference = one form, the `/` path from the library root + built-in `engram:/` | 제안 (부분 폐기 by ADR-0362: decision 2, the LibPath name rules) |
@@ -431,3 +431,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0382](0382-the-daemon-scans-the-library-in-the-background-after-it-starts.md) | The daemon never walks the library before it is reachable — the first start publishes the root without a walk and a background boot scan walks it on every start; launches do not wait for it | 확정 |
 | [0383](0383-internal-text-is-english-only-screen-text-stays-switchable.md) | Internal text is English-only; screen text stays switchable | 확정 |
 | [0384](0384-library-edit-relink-and-create-rules-set-while-coding-step-9a.md) | Library edit, relink and create rules set while coding step 9a | 확정 |
+| [0385](0385-library-roots-can-be-several-and-independent-added-as-an-s25.md) | Library roots can be several and independent, added as an S25 step between 10a and 9b | 확정 |
