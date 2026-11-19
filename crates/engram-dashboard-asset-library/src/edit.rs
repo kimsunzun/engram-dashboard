@@ -98,6 +98,12 @@ pub const PRESET_FOLDERS_REFUSED: &str = "preset-folders-refused";
 /// The skip reason of an item or folder already in the list (`args` = `{path}`).
 pub const ALREADY_PRESENT: &str = "already-present";
 
+/// The code of a folder preview whose bounded listing gave no answer for the folder it was asked — a broken invariant
+/// of `BoundedIo::list_all` (it answers every path it is asked), answered as an error rather than a panic (`args` =
+/// `{path}`).
+// ADR-0293
+pub const FOLDER_LISTING_UNANSWERED: &str = "folder-listing-unanswered";
+
 /// The code of a `reorder` whose order is not a permutation of the section as `preset.get` shows it (`args` =
 /// `{expected}` — that section).
 pub const REORDER_ORDER_MISMATCH: &str = "reorder-order-mismatch";
@@ -874,7 +880,8 @@ impl LibraryService {
     /// and — when it stat'ed `Ok` — per backend (`backend`, or every registered one) and mode (`mode`, or both), what
     /// the backend loads from it ([`SettingsCheck::folder_load_set`] over one bounded listing and bounded reads). Read
     /// only, on one read budget, no library lock and no catalog. A `backend` word the registry does not know refuses
-    /// `InvalidArgument` · `backend-tag-unknown`.
+    /// `InvalidArgument` · `backend-tag-unknown`; a listing with no answer for the folder `Internal` ·
+    /// [`FOLDER_LISTING_UNANSWERED`].
     // ADR-0341
     pub fn preview_folder(
         &self,
@@ -912,11 +919,17 @@ impl LibraryService {
         let (Some(path), Some(FolderStatus::Ok)) = (verdict.normalized, verdict.status) else {
             return Ok(preview);
         };
-        let listing = self
+        let Some(listing) = self
             .io
             .list_all(&io, &[(path.clone(), Need::Required)])
             .remove(&path_key(&path))
-            .expect("list_all answers every path it is asked");
+        else {
+            return Err(LibraryRefusal::new(
+                RefusalClass::Internal,
+                FOLDER_LISTING_UNANSWERED,
+                json!({ "path": path.to_string_lossy() }),
+            ));
+        };
         let listing = match listing {
             Ok(listing) => listing,
             Err(status) => {

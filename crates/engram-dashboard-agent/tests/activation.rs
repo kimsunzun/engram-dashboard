@@ -12,9 +12,10 @@ use uuid::Uuid;
 
 use engram_dashboard_agent::backend;
 use engram_dashboard_agent::commands::{
-    make_table, AgentBackend, AgentCommandHost, LibraryFoldersOk, LibraryKind, LibraryListOk,
-    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryStatusOk, RosterChanged,
-    UsageCommandHost, UsageVendorRow,
+    make_table, AgentBackend, AgentCommandHost, AgentOutputFormat as DeclaredOutputFormat,
+    LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind, LibraryRefreshOk,
+    LibraryRelinkOk, LibraryStatusOk, PresetAddOk, PresetCheckOk, PresetPreviewFolderOk,
+    PresetSection, PresetSetBackendOk, PresetView, RosterChanged, UsageCommandHost, UsageVendorRow,
 };
 use engram_dashboard_agent::failure::AgentFailureKind;
 use engram_dashboard_agent::launch::{
@@ -22,7 +23,7 @@ use engram_dashboard_agent::launch::{
     LaunchKitSource, LaunchPlan, LaunchPorts, NoopLaunchKits, Notice, PrepareError, Reason,
 };
 use engram_dashboard_agent::library_commands::{
-    LibraryCommandHost, LibraryReadView, PortClass, PortRefusal,
+    LibraryCommandHost, LibraryReadView, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
 };
 use engram_dashboard_agent::manager::{Activated, AgentManager, NoticeDelivery};
 use engram_dashboard_agent::persistence::FileProfileStore;
@@ -1570,6 +1571,66 @@ impl LibraryCommandHost for NoLibrary {
         Self::refused()
     }
     fn relink(&self, _: &str, _: &str, _: Option<u64>) -> Result<LibraryRelinkOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_get(&self, _: &str) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_check(&self, _: &str, _: &PresetDraftInput) -> Result<PresetCheckOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_add(
+        &self,
+        _: &str,
+        _: &PresetEntries,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<u64>,
+    ) -> Result<PresetAddOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_remove(
+        &self,
+        _: &str,
+        _: &PresetEntries,
+        _: Option<u64>,
+    ) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_reorder(
+        &self,
+        _: &str,
+        _: PresetSection,
+        _: &[String],
+        _: &str,
+        _: Option<u64>,
+    ) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_set_backend(
+        &self,
+        _: &str,
+        _: &[String],
+        _: Option<&str>,
+        _: Option<u64>,
+    ) -> Result<PresetSetBackendOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_save(
+        &self,
+        _: &str,
+        _: &PresetDraftInput,
+        _: Option<&str>,
+        _: Option<u64>,
+    ) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preview_folder(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: Option<DeclaredOutputFormat>,
+    ) -> Result<PresetPreviewFolderOk, PortRefusal> {
         Self::refused()
     }
 }

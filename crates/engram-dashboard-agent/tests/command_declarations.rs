@@ -4,8 +4,10 @@ use engram_dashboard_agent::commands::{
     AgentCancelQueuedInputArgs, AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs,
     AgentMoveArgs, AgentNewArgs, AgentRenameArgs, AgentResolveArgs, AgentSpawnArgs,
     LibraryFoldersArgs, LibraryListArgs, LibraryNewFileArgs, LibraryNewFolderArgs, LibraryReadArgs,
-    LibraryRefreshArgs, LibraryRelinkArgs, LibrarySetRootArgs, LibraryStatusArgs, UsageGetArgs,
-    UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
+    LibraryRefreshArgs, LibraryRelinkArgs, LibrarySetRootArgs, LibraryStatusArgs, PresetAddArgs,
+    PresetCheckArgs, PresetGetArgs, PresetPreviewFolderArgs, PresetRemoveArgs, PresetReorderArgs,
+    PresetSaveArgs, PresetSetBackendArgs, UsageGetArgs, UsageRefreshArgs, COMMAND_SPECS,
+    INPUT_AFFECTING,
 };
 use engram_dashboard_command::DeadlineClass;
 use engram_dashboard_command::{
@@ -39,6 +41,14 @@ fn declared_names_are_the_cli_verbs() {
             "library.relink",
             "library.setRoot",
             "library.status",
+            "preset.add",
+            "preset.check",
+            "preset.get",
+            "preset.previewFolder",
+            "preset.remove",
+            "preset.reorder",
+            "preset.save",
+            "preset.setBackend",
             "usage.get",
             "usage.refresh"
         ]
@@ -55,7 +65,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 11 // two were added in v6 — `agent.interrupt` · `usage.refresh`; four in v9 — `library.setRoot` · `newFolder` · `newFile` · `relink`
+            == 16 // two were added in v6 — `agent.interrupt` · `usage.refresh`; nine in v9 — `library.setRoot` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`
     );
 }
 
@@ -117,6 +127,44 @@ fn the_library_verbs_are_declared_in_generation_9_with_their_effect() {
         assert_eq!(spec.since, 9, "{name}");
         assert_eq!(spec.deadline, DeadlineClass::Ordinary, "{name}");
     }
+}
+
+/// The eight preset commands (ADR-0386) — all in catalog 9 and ordinary; the five that rewrite a preset file are
+/// `Write`, the view, the draft check and the folder preview are `Read`.
+#[test]
+fn the_preset_verbs_are_declared_in_generation_9_with_their_effect() {
+    let cases = [
+        ("preset.get", Effect::Read),
+        ("preset.check", Effect::Read),
+        ("preset.add", Effect::Write),
+        ("preset.remove", Effect::Write),
+        ("preset.reorder", Effect::Write),
+        ("preset.setBackend", Effect::Write),
+        ("preset.save", Effect::Write),
+        ("preset.previewFolder", Effect::Read),
+    ];
+    for (name, effect) in cases {
+        let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
+        assert_eq!(spec.effect, effect, "{name}");
+        assert_eq!(spec.since, 9, "{name}");
+        assert_eq!(spec.deadline, DeadlineClass::Ordinary, "{name}");
+    }
+}
+
+/// `preset.reorder` advertises the closed section vocabulary and `preset.previewFolder` the two modes.
+#[test]
+fn the_preset_section_and_preview_mode_are_closed_vocabularies() {
+    let schema = |name: &str| -> serde_json::Value {
+        serde_json::from_str(spec_of(name).expect("declaration").args_schema).expect("args schema")
+    };
+    assert_eq!(
+        schema("preset.reorder")["properties"]["section"]["enum"],
+        json!(["Presets", "Instructions", "Skills", "Settings", "Folders"])
+    );
+    assert_eq!(
+        schema("preset.previewFolder")["properties"]["mode"]["anyOf"][0]["enum"],
+        json!(["Terminal", "StreamJson"])
+    );
 }
 
 /// The library list filter advertises the closed kind vocabulary — `SkillFile` is its own word beside `Skill`.
@@ -212,6 +260,25 @@ fn error_sets_are_golden() {
         assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
     }
     assert_eq!(declared("library.refresh"), vec![]);
+    // A preset view or edit answers NOT_FOUND for a missing preset file; the draft check and the folder preview never
+    //   do (CONFLICT `library-unavailable` only — the preview only from a daemon that runs no library).
+    for name in [
+        "preset.get",
+        "preset.add",
+        "preset.remove",
+        "preset.reorder",
+        "preset.setBackend",
+        "preset.save",
+    ] {
+        assert_eq!(
+            declared(name),
+            vec![ErrorCode::NotFound, ErrorCode::Conflict],
+            "{name}"
+        );
+    }
+    for name in ["preset.check", "preset.previewFolder"] {
+        assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
+    }
     for name in [
         "library.read",
         "library.newFolder",
@@ -360,6 +427,58 @@ fn required_matches_what_deserialization_actually_demands() {
             "library.relink",
             parses::<LibraryRelinkArgs>,
             json!({ "from": "a.md", "to": "b/a.md", "root_generation": 3 }),
+        ),
+        (
+            "preset.get",
+            parses::<PresetGetArgs>,
+            json!({ "path": "p.yaml" }),
+        ),
+        (
+            "preset.check",
+            parses::<PresetCheckArgs>,
+            json!({
+                "path": "p.yaml", "presets": [], "instructions": [{ "path": "a.md", "backend": "codex" }],
+                "skills": [], "settings": [], "folders": ["C:/f"],
+            }),
+        ),
+        (
+            "preset.add",
+            parses::<PresetAddArgs>,
+            json!({
+                "path": "p.yaml", "items": ["a.md"], "backend": "codex", "folders": ["C:/f"],
+                "after": "b.md", "root_generation": 3,
+            }),
+        ),
+        (
+            "preset.remove",
+            parses::<PresetRemoveArgs>,
+            json!({ "path": "p.yaml", "items": ["a.md"], "folders": ["C:/f"], "root_generation": 3 }),
+        ),
+        (
+            "preset.reorder",
+            parses::<PresetReorderArgs>,
+            json!({
+                "path": "p.yaml", "section": "Skills", "order": ["a", "b"], "base_rev": "r",
+                "root_generation": 3,
+            }),
+        ),
+        (
+            "preset.setBackend",
+            parses::<PresetSetBackendArgs>,
+            json!({ "path": "p.yaml", "items": ["a.md"], "backend": "codex", "root_generation": 3 }),
+        ),
+        (
+            "preset.save",
+            parses::<PresetSaveArgs>,
+            json!({
+                "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [],
+                "folders": [], "base_rev": "r", "root_generation": 3,
+            }),
+        ),
+        (
+            "preset.previewFolder",
+            parses::<PresetPreviewFolderArgs>,
+            json!({ "folder": "C:/f", "backend": "codex", "mode": "Terminal" }),
         ),
     ];
 

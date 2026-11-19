@@ -3,7 +3,7 @@
 //! Three surfaces call this table through the one [`call_daemon_command`], so none skips the entrance check (ADR-0157): the family route
 //! (`/control/agent`, `agent.rs`) · the full-name route (`/control/call`, `catalog.rs`) · command bus delivery stage 1 (`command_delivery`).
 //! If the table is not plugged into the slot, the two routes are 503 and delivery is a stage-1 miss.
-//! Declarations are not here: the contracts of `agent.*`·`usage.*`·`library.*` belong to agent (ADR-0155 decision 1); this file plugs the
+//! Declarations are not here: the contracts of `agent.*`·`usage.*`·`library.*`·`preset.*` belong to agent (ADR-0155 decision 1); this file plugs the
 //! daemon's real things (manager · roster notification fanout · usage service · library service) into them. Daemon-own commands (`mail.*`)
 //! would add their declaration block here.
 // ADR-0155
@@ -12,13 +12,16 @@ use std::sync::Arc;
 
 use crate::conn_port::ConnId;
 use engram_dashboard_agent::commands::{
-    make_table, resolve_in, AgentBackend, AgentCommandHost, AgentRosterRow, LibraryCommandHost,
-    LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind, LibraryRefreshOk,
-    LibraryRelinkOk, LibraryStatusOk, RefreshErrorRow, RosterChanged, UsageCommandHost,
-    UsageVendorRow, INPUT_AFFECTING,
+    make_table, resolve_in, AgentBackend, AgentCommandHost, AgentOutputFormat, AgentRosterRow,
+    LibraryCommandHost, LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind,
+    LibraryRefreshOk, LibraryRelinkOk, LibraryStatusOk, PresetAddOk, PresetCheckOk,
+    PresetPreviewFolderOk, PresetSection, PresetSetBackendOk, PresetView, RefreshErrorRow,
+    RosterChanged, UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
 };
 use engram_dashboard_agent::launch::{escape_controls, Reason};
-use engram_dashboard_agent::library_commands::{LibraryReadView, PortClass, PortRefusal};
+use engram_dashboard_agent::library_commands::{
+    LibraryReadView, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
+};
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::types::AgentId;
 use engram_dashboard_asset_library::format::read::ITEM_PATH_INVALID;
@@ -128,9 +131,9 @@ impl UsageCommandHost for NoUsageLimits {
 }
 
 /// The library port of assemblies without a library service (the test server · smoke bins · harnesses): every
-/// `library.*` command answers `CONFLICT` `library-unavailable`, except `library.refresh`, which answers the report
-/// a refresh that could not scan gives (one `errors` row with no path) — a refresh refuses only a `folder` that is not
-/// a library path (`INVALID_ARGUMENT` `item-path-invalid`, as the real service does).
+/// `library.*` and `preset.*` command answers `CONFLICT` `library-unavailable`, except `library.refresh`, which
+/// answers the report a refresh that could not scan gives (one `errors` row with no path) — a refresh refuses only a
+/// `folder` that is not a library path (`INVALID_ARGUMENT` `item-path-invalid`, as the real service does).
 /// Do not plug it into production (it plugs the service the manager launches through — [`make_daemon_table`]).
 // ADR-0386
 pub struct NoLibrary;
@@ -220,6 +223,70 @@ impl LibraryCommandHost for NoLibrary {
         _to: &str,
         _root_generation: Option<u64>,
     ) -> Result<LibraryRelinkOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_get(&self, _path: &str) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_check(
+        &self,
+        _path: &str,
+        _draft: &PresetDraftInput,
+    ) -> Result<PresetCheckOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_add(
+        &self,
+        _path: &str,
+        _entries: &PresetEntries,
+        _backend: Option<&str>,
+        _after: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<PresetAddOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_remove(
+        &self,
+        _path: &str,
+        _entries: &PresetEntries,
+        _root_generation: Option<u64>,
+    ) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_reorder(
+        &self,
+        _path: &str,
+        _section: PresetSection,
+        _order: &[String],
+        _base_rev: &str,
+        _root_generation: Option<u64>,
+    ) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_set_backend(
+        &self,
+        _path: &str,
+        _items: &[String],
+        _backend: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<PresetSetBackendOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_save(
+        &self,
+        _path: &str,
+        _draft: &PresetDraftInput,
+        _base_rev: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preview_folder(
+        &self,
+        _folder: &str,
+        _backend: Option<&str>,
+        _mode: Option<AgentOutputFormat>,
+    ) -> Result<PresetPreviewFolderOk, PortRefusal> {
         Self::refused()
     }
 }
@@ -496,12 +563,12 @@ mod tests {
     /// The expected value is derived from the CLI verb list — hand-written, it would pass the old list when agent gains verbs; a verb without a declaration stays uncallable by the CLI.
     /// Names without a CLI verb are only those listed below: the two pending-list verbs, interrupt (`agent.interrupt` — ADR-0237) and
     /// multi-word resolution (`agent.resolve` — ADR-0307) are outside `CLI_AGENT_VERBS`, called via the bus and generic calls (`engram <name> …`). A
-    /// table name not in the list grew without deciding on a CLI verb, so this stops. `usage.*` and `library.*` are not the `agent` family and never
-    /// reach `/control/agent` (the library commands are reached by full name — ADR-0386).
+    /// table name not in the list grew without deciding on a CLI verb, so this stops. `usage.*`, `library.*` and `preset.*` are not the `agent`
+    /// family and never reach `/control/agent` (the library and preset commands are reached by full name — ADR-0386).
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 15] = [
+        const BUS_ONLY: [&str; 23] = [
             "agent.cancelQueuedInput",
             "agent.interrupt",
             "agent.listQueuedInputs",
@@ -515,6 +582,14 @@ mod tests {
             "library.relink",
             "library.setRoot",
             "library.status",
+            "preset.add",
+            "preset.check",
+            "preset.get",
+            "preset.previewFolder",
+            "preset.remove",
+            "preset.reorder",
+            "preset.save",
+            "preset.setBackend",
             "usage.get",
             "usage.refresh",
         ];
@@ -1217,8 +1292,9 @@ mod tests {
         assert_eq!(row["windows"][0]["left_pct"], 62);
     }
 
-    /// An assembly without a library service answers every `library.*` command `CONFLICT` `library-unavailable` by
-    /// value, and `library.refresh` the report of a refresh that could not scan — one `errors` row with no path.
+    /// An assembly without a library service answers every `library.*` and `preset.*` command `CONFLICT`
+    /// `library-unavailable` by value, and `library.refresh` the report of a refresh that could not scan — one `errors`
+    /// row with no path.
     // ADR-0386
     #[test]
     fn a_table_without_a_library_answers_library_unavailable_and_an_empty_refresh() {
@@ -1241,6 +1317,33 @@ mod tests {
                 json!({ "name": "x", "kind": "Markdown" }),
             ),
             ("library.relink", json!({ "from": "a.md", "to": "b.md" })),
+            ("preset.get", json!({ "path": "p.yaml" })),
+            (
+                "preset.check",
+                json!({
+                    "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [],
+                }),
+            ),
+            ("preset.add", json!({ "path": "p.yaml", "items": ["a.md"] })),
+            (
+                "preset.remove",
+                json!({ "path": "p.yaml", "folders": ["C:/f"] }),
+            ),
+            (
+                "preset.reorder",
+                json!({ "path": "p.yaml", "section": "Skills", "order": [], "base_rev": "r" }),
+            ),
+            (
+                "preset.setBackend",
+                json!({ "path": "p.yaml", "items": ["a.md"] }),
+            ),
+            (
+                "preset.save",
+                json!({
+                    "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [],
+                }),
+            ),
+            ("preset.previewFolder", json!({ "folder": "C:/f" })),
         ];
         for (name, args) in refusing {
             let err = call(&table, name, args).expect_err("no library");

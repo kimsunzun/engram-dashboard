@@ -10,7 +10,7 @@
 //!   (`AgentBackend` word · row types), so the declaration lives here (ADR-0155 decision 1) and the daemon's usage service plugs the real
 //!   thing in through [`UsageCommandHost`] (TRD S21 usage-limit-slot §3 #18).
 //!
-//! ★`library.*` are declared here too — their bodies are asset-library's★: this crate owns the command vocabulary
+//! ★`library.*` and `preset.*` are declared here too — their bodies are asset-library's★: this crate owns the command vocabulary
 //!   (ADR-0155 decision 1 · ADR-0311); the handlers and the third port, [`LibraryCommandHost`], are in
 //!   `library_commands.rs` (one `declare_commands!` block per module, so the declarations stay in this block).
 //!
@@ -47,8 +47,8 @@ declare_commands! {
     //   `store.presets` (TRD S25-preset-library §5-2 1). The same unreleased generation: the `agent.spawn` answer
     //   gains `notices` (TRD S25 step 16), and with `cwd` a launch blocked before the add answers `CONFLICT` with
     //   nothing created (TRD S25 step 20 — the `agent.spawn` summary). Also: `agent.spawn` is declared with the launch
-    //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`). The nine `library.*` commands come
-    //   in this generation too (ADR-0386).
+    //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`). The nine `library.*` and the eight
+    //   `preset.*` commands come in this generation too (ADR-0386).
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -337,6 +337,178 @@ declare_commands! {
         args: Json,
         /// The refusal as one readable line.
         message: String,
+    }
+
+    // ── Preset (`preset.*` — ADR-0386) ────────────────────────────────────────────────────────────────
+
+    /// One entry of a preset list as `preset.save` / `preset.check` take it.
+    struct PresetEntryArg {
+        /// A library path or a built-in (`engram:/…`).
+        path: String,
+        /// The backend word the entry is for (instructions and skills only); `null` = every backend.
+        backend: Option<String>,
+    }
+
+    /// One entry of a preset list as the file holds it, in file order (a duplicate included).
+    struct PresetEntryRow {
+        path: String,
+        /// `null` = every backend.
+        backend: Option<String>,
+        /// Its line in the file.
+        line: u32,
+        /// Why the entry does not read — `not-found`, `path-through-link`, the item's broken reason or a settings
+        /// file's first refusal, `wrong-kind`, `builtin-in-library-preset`, `preset-cycle`; `null` = it reads. What an
+        /// inner preset reaches is in `problems`.
+        state: Option<ReasonRow>,
+    }
+
+    // ADR-0341
+    /// One folder entry of a preset — an absolute folder the backend loads natively (not a library item).
+    struct FolderRow {
+        /// The normalized path; a relative entry (a line problem) as the file spells it.
+        path: String,
+        /// Its line in the file; `null` = a folder of a `preset.check` draft.
+        line: Option<u32>,
+        /// `ok` | `missing` | `not_a_directory` | `unreadable`; `null` = not checked (a relative entry, or the library
+        /// was unavailable).
+        status: Option<String>,
+        /// Why it is `unreadable` (the OS error or a timeout); else `null`.
+        status_why: Option<String>,
+    }
+
+    /// One item of a conflict and the presets it came through.
+    struct ProblemItemRow {
+        item: String,
+        via: Vec<String>,
+    }
+
+    /// What would block or break a launch of the preset — the row `agent.spawn` puts in `args.reasons`, with the
+    /// absent keys as `null`.
+    struct ProblemRow {
+        /// `missing` | `broken` | `conflict` | `library_unavailable`.
+        kind: String,
+        /// The item (`missing` · `broken`); else `null`.
+        item: Option<String>,
+        /// The presets it came through, outermost first (`missing` · `broken`); else `null`.
+        via: Option<Vec<String>>,
+        /// Every item a conflict hits (`conflict`); else `null`.
+        items: Option<Vec<ProblemItemRow>>,
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        line: Option<u32>,
+    }
+
+    /// A preset as `preset.get` shows it — every preset edit answers it after the change.
+    struct PresetView {
+        path: String,
+        /// The preset file's edition — pass it as `base_rev` to `preset.reorder` / `preset.save`.
+        rev: String,
+        description: Option<String>,
+        presets: Vec<PresetEntryRow>,
+        instructions: Vec<PresetEntryRow>,
+        skills: Vec<PresetEntryRow>,
+        settings: Vec<PresetEntryRow>,
+        /// The folder entries, normalized and deduplicated (first place kept).
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        /// Every other problem, inner presets' included.
+        problems: Vec<ProblemRow>,
+        /// How many agents attach it (`engram:/default`: the agents whose default slot is on).
+        agents: u32,
+    }
+
+    /// An item or folder an edit left out, and why.
+    struct SkippedRow {
+        /// As given.
+        item: String,
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        line: Option<u32>,
+    }
+
+    /// A section of a preset file.
+    enum PresetSection {
+        Presets,
+        Instructions,
+        Skills,
+        Settings,
+        Folders,
+    }
+
+    /// What a backend loads a folder file as — `SkillRoot` = a folder it walks for skills by itself.
+    enum FolderLoadKindWord {
+        Instructions,
+        Rule,
+        Skill,
+        Agent,
+        Command,
+        SkillRoot,
+    }
+
+    /// One file (or skill root) of a folder preview.
+    struct PreviewItemRow {
+        /// Relative to the folder, `/`-separated.
+        path: String,
+        kind: FolderLoadKindWord,
+    }
+
+    /// An entry the backend may load whose answer could not be predicted.
+    struct PreviewUnsureRow {
+        /// Relative to the folder, `/`-separated.
+        path: String,
+        /// `null` = the entry could hold items of several kinds.
+        kind: Option<FolderLoadKindWord>,
+        /// `unreadable` | `front_matter` | `link` | `dashes_in_front_matter` | `unclear_paths` | `empty_body` |
+        /// `hook_keys` | `skill_file_in_command_folder`.
+        why: String,
+        /// The read error (`unreadable`) or the parser's message (`front_matter`); else `null`.
+        message: Option<String>,
+        /// The front matter's line in the file (`front_matter`); else `null`.
+        line: Option<u32>,
+    }
+
+    /// The name a backend gives a loaded skill.
+    struct PreviewSkillNameRow {
+        /// The skill's `SKILL.md`, relative to the folder.
+        path: String,
+        name: String,
+    }
+
+    /// What one backend in one mode loads from a folder.
+    struct PreviewSetRow {
+        loads: Vec<PreviewItemRow>,
+        /// What another mode of the same backend loads and this one does not.
+        omitted: Vec<PreviewItemRow>,
+        /// The rows of `loads` the launch carries itself (the rest the backend reads from the folder).
+        carried: Vec<PreviewItemRow>,
+        unsure: Vec<PreviewUnsureRow>,
+        /// Skills that fail the backend's format check — the backend skips them.
+        malformed: Vec<PathReasonRow>,
+        skill_names: Vec<PreviewSkillNameRow>,
+    }
+
+    /// One backend and mode of a folder preview.
+    struct PreviewLoadRow {
+        backend: String,
+        mode: AgentOutputFormat,
+        /// The backend reads the folder itself at launch, so the set is a prediction.
+        predicted: bool,
+        set: PreviewSetRow,
+        /// Why a file read got no answer (e.g. `timeout`, budget spent) — the reason only, not the file; the set may
+        /// lack what that file decides.
+        unread: Option<String>,
+    }
+
+    /// Why `preset.add` would refuse the folder.
+    struct PreviewRefusalRow {
+        /// As given.
+        path: String,
+        /// `folder-path-relative` | `folder-path-cli-unsafe` | `folder-not-found`.
+        code: String,
+        /// For `folder-not-found`: missing, not a folder, the OS error or a timeout.
+        why: Option<String>,
     }
 
     // errors lists only codes **specific to this command** — argument rejection (INVALID_ARGUMENT) and internal failure (INTERNAL)
@@ -728,6 +900,204 @@ declare_commands! {
         skipped: Vec<PathReasonRow>,
         stopped: Option<RelinkStopRow>,
     } errors [NOT_FOUND, CONFLICT];
+
+    // ADR-0358
+    // ADR-0384
+    // ADR-0386
+    // A preset edit rewrites the whole file (hand-written comments and layout are not kept) and answers the preset as
+    //   committed. A path that is not a library path is INVALID_ARGUMENT `item-path-invalid`; a file that is not a
+    //   preset, INVALID_ARGUMENT `wrong-kind` or the reader's code.
+
+    /// A preset's entries with their state, its folder entries, the conflicts and problems a launch of it alone would
+    /// meet, its edition `rev` and how many agents attach it. `path` = a library path or `engram:/default`. NOT_FOUND
+    /// `not-found`; INVALID_ARGUMENT `wrong-kind` (not a preset); CONFLICT `library-unavailable`.
+    #[effect(Read)]
+    #[since(9)]
+    "preset.get" => args PresetGetArgs {
+        path: String,
+    } -> ok PresetGetOk {
+        // ★The fields must not differ by a character from `PresetView`★ — the pairing is `From<PresetView>`
+        //   (destructuring); field meanings: `PresetView`.
+        path: String,
+        rev: String,
+        description: Option<String>,
+        presets: Vec<PresetEntryRow>,
+        instructions: Vec<PresetEntryRow>,
+        skills: Vec<PresetEntryRow>,
+        settings: Vec<PresetEntryRow>,
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        agents: u32,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Judges a draft of the preset's lists as `preset.save` would, without writing: the folders it would list, the
+    /// conflicts and problems a launch of it would meet, and `save_refuses` = a save of this draft would be refused
+    /// (each mismatch is a `broken` problem with `args` `{path, list}`). `folders` omitted = the file's folders stay.
+    /// CONFLICT `library-unavailable`.
+    #[effect(Read)]
+    #[since(9)]
+    "preset.check" => args PresetCheckArgs {
+        path: String,
+        presets: Vec<PresetEntryArg>,
+        instructions: Vec<PresetEntryArg>,
+        skills: Vec<PresetEntryArg>,
+        settings: Vec<PresetEntryArg>,
+        folders: Option<Vec<String>>,
+    } -> ok PresetCheckOk {
+        save_refuses: bool,
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+    } errors [CONFLICT];
+
+    /// Adds `items` (each into the list of its kind, `backend` for all of them) or absolute `folders` — one of the two —
+    /// after the `after` entry (else at the end). Applies what it can: each item it cannot add is in `skipped` with why
+    /// (`not-found`, `wrong-kind`, `already-present`, `preset-cycle`, a backend word it does not take …). A bad folder
+    /// refuses the whole call, INVALID_ARGUMENT `preset-folders-refused` naming each. NOT_FOUND `not-found` = no such
+    /// preset file; CONFLICT `library-unavailable` · `root-generation-stale` · `library-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "preset.add" => args PresetAddArgs {
+        path: String,
+        items: Option<Vec<String>>,
+        /// With `items` only. Unspecified = every backend.
+        backend: Option<String>,
+        folders: Option<Vec<String>>,
+        after: Option<String>,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok PresetAddOk {
+        /// What was added (folders normalized).
+        applied: Vec<String>,
+        skipped: Vec<SkippedRow>,
+        view: PresetView,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Removes `items` (every entry of each, in every list) or `folders` — one of the two; removing what is not there
+    /// changes nothing. Answers the preset after the change. NOT_FOUND `not-found` = no such preset file; CONFLICT
+    /// `library-unavailable` · `root-generation-stale` · `library-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "preset.remove" => args PresetRemoveArgs {
+        path: String,
+        items: Option<Vec<String>>,
+        folders: Option<Vec<String>>,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok PresetRemoveOk {
+        // ★The fields must not differ by a character from `PresetView`★ (`From<PresetView>`).
+        path: String,
+        rev: String,
+        description: Option<String>,
+        presets: Vec<PresetEntryRow>,
+        instructions: Vec<PresetEntryRow>,
+        skills: Vec<PresetEntryRow>,
+        settings: Vec<PresetEntryRow>,
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        agents: u32,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Puts one `section` in `order` — every entry `preset.get` shows in it, each once (a duplicate as often as it is
+    /// listed), else INVALID_ARGUMENT `reorder-order-mismatch` with the expected order in `args`. `base_rev` = the `rev` you
+    /// read; CONFLICT `rev-mismatch` = the file changed since (read it again). NOT_FOUND `not-found`; CONFLICT
+    /// `library-unavailable` · `root-generation-stale` · `library-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "preset.reorder" => args PresetReorderArgs {
+        path: String,
+        section: PresetSection,
+        order: Vec<String>,
+        base_rev: String,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok PresetReorderOk {
+        // ★The fields must not differ by a character from `PresetView`★ (`From<PresetView>`).
+        path: String,
+        rev: String,
+        description: Option<String>,
+        presets: Vec<PresetEntryRow>,
+        instructions: Vec<PresetEntryRow>,
+        skills: Vec<PresetEntryRow>,
+        settings: Vec<PresetEntryRow>,
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        agents: u32,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Sets the backend of `items` in instructions and skills (`backend` unspecified = every backend). Applies what it
+    /// can: an item the preset does not list, or lists only in presets or settings, is in `skipped`. An unknown backend
+    /// word refuses the whole call, INVALID_ARGUMENT `backend-tag-unknown`. NOT_FOUND `not-found`; CONFLICT
+    /// `library-unavailable` · `root-generation-stale` · `library-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "preset.setBackend" => args PresetSetBackendArgs {
+        path: String,
+        items: Vec<String>,
+        backend: Option<String>,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok PresetSetBackendOk {
+        applied: Vec<String>,
+        skipped: Vec<SkippedRow>,
+        view: PresetView,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Replaces the four lists (and `folders`, when given — omitted = they stay) with the draft, all or nothing: any
+    /// mismatch (not a path, an unknown backend word, one item twice in a list, an item of another kind, a cycle, a
+    /// relative folder …) refuses the whole save, INVALID_ARGUMENT `preset-save-refused` listing each. A missing item
+    /// is allowed. `base_rev` (optional) = the `rev` you read; CONFLICT `rev-mismatch` = the file changed since.
+    /// NOT_FOUND `not-found`; CONFLICT `library-unavailable` · `root-generation-stale` · `library-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "preset.save" => args PresetSaveArgs {
+        path: String,
+        presets: Vec<PresetEntryArg>,
+        instructions: Vec<PresetEntryArg>,
+        skills: Vec<PresetEntryArg>,
+        settings: Vec<PresetEntryArg>,
+        folders: Option<Vec<String>>,
+        base_rev: Option<String>,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok PresetSaveOk {
+        // ★The fields must not differ by a character from `PresetView`★ (`From<PresetView>`).
+        path: String,
+        rev: String,
+        description: Option<String>,
+        presets: Vec<PresetEntryRow>,
+        instructions: Vec<PresetEntryRow>,
+        skills: Vec<PresetEntryRow>,
+        settings: Vec<PresetEntryRow>,
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        agents: u32,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// What a folder entry would load: the absolute `folder` normalized (`path`, `null` = not absolute), why
+    /// `preset.add` would refuse it (`refused`), and per backend (`backend`, unspecified = every one) and mode (`mode`,
+    /// unspecified = both) what that backend loads from it. `truncated` = the listing stopped at its cap, `skipped` =
+    /// entries it could not read, `unlisted` = why a folder that exists could not be listed. Reads only.
+    /// INVALID_ARGUMENT `backend-tag-unknown`; CONFLICT `library-unavailable` only from a daemon that runs no library.
+    // ADR-0341
+    #[effect(Read)]
+    #[since(9)]
+    "preset.previewFolder" => args PresetPreviewFolderArgs {
+        folder: String,
+        backend: Option<String>,
+        mode: Option<AgentOutputFormat>,
+    } -> ok PresetPreviewFolderOk {
+        path: Option<String>,
+        refused: Option<PreviewRefusalRow>,
+        loads: Vec<PreviewLoadRow>,
+        truncated: bool,
+        skipped: Vec<String>,
+        unlisted: Option<String>,
+    } errors [CONFLICT];
 }
 
 /// Commands that **move the input** of a live agent — the common entry looks at the input lease (`check_input`) first.
@@ -2737,6 +3107,14 @@ mod tests {
                 "library.relink",
                 "library.setRoot",
                 "library.status",
+                "preset.add",
+                "preset.check",
+                "preset.get",
+                "preset.previewFolder",
+                "preset.remove",
+                "preset.reorder",
+                "preset.save",
+                "preset.setBackend",
                 "usage.get",
                 "usage.refresh"
             ]

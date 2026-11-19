@@ -15,7 +15,10 @@ use engram_dashboard_agent::commands::{
     LibraryListArgs, LibraryListOk, LibraryNewFileArgs, LibraryNewFileOk, LibraryNewFolderArgs,
     LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk,
     LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs, LibrarySetRootOk, LibraryStatusArgs,
-    LibraryStatusOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk, UsageVendorRow,
+    LibraryStatusOk, PresetAddArgs, PresetAddOk, PresetCheckArgs, PresetCheckOk, PresetGetArgs,
+    PresetGetOk, PresetPreviewFolderArgs, PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk,
+    PresetReorderArgs, PresetReorderOk, PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs,
+    PresetSetBackendOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk, UsageVendorRow,
     CATALOG_VERSION,
 };
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
@@ -98,6 +101,26 @@ fn export_typescript_bindings() {
     LibraryNewFileOk::export_all_to(out).expect("failed to export the LibraryNewFileOk bindings");
     LibraryRelinkArgs::export_all_to(out).expect("failed to export the LibraryRelinkArgs bindings");
     LibraryRelinkOk::export_all_to(out).expect("failed to export the LibraryRelinkOk bindings");
+    PresetGetArgs::export_all_to(out).expect("failed to export the PresetGetArgs bindings");
+    PresetGetOk::export_all_to(out).expect("failed to export the PresetGetOk bindings");
+    PresetCheckArgs::export_all_to(out).expect("failed to export the PresetCheckArgs bindings");
+    PresetCheckOk::export_all_to(out).expect("failed to export the PresetCheckOk bindings");
+    PresetAddArgs::export_all_to(out).expect("failed to export the PresetAddArgs bindings");
+    PresetAddOk::export_all_to(out).expect("failed to export the PresetAddOk bindings");
+    PresetRemoveArgs::export_all_to(out).expect("failed to export the PresetRemoveArgs bindings");
+    PresetRemoveOk::export_all_to(out).expect("failed to export the PresetRemoveOk bindings");
+    PresetReorderArgs::export_all_to(out).expect("failed to export the PresetReorderArgs bindings");
+    PresetReorderOk::export_all_to(out).expect("failed to export the PresetReorderOk bindings");
+    PresetSetBackendArgs::export_all_to(out)
+        .expect("failed to export the PresetSetBackendArgs bindings");
+    PresetSetBackendOk::export_all_to(out)
+        .expect("failed to export the PresetSetBackendOk bindings");
+    PresetSaveArgs::export_all_to(out).expect("failed to export the PresetSaveArgs bindings");
+    PresetSaveOk::export_all_to(out).expect("failed to export the PresetSaveOk bindings");
+    PresetPreviewFolderArgs::export_all_to(out)
+        .expect("failed to export the PresetPreviewFolderArgs bindings");
+    PresetPreviewFolderOk::export_all_to(out)
+        .expect("failed to export the PresetPreviewFolderOk bindings");
 
     let produced: Vec<String> = std::fs::read_dir(out)
         .expect("read bindings/")

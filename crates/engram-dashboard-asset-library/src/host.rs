@@ -1,14 +1,15 @@
-//! The library command port — `impl LibraryCommandHost for LibraryService`: the nine `library.*` commands agent
-//! declares, answered by the bodies of this crate.
+//! The library command port — `impl LibraryCommandHost for LibraryService`: the `library.*` and `preset.*` commands
+//! agent declares, answered by the bodies of this crate.
 //!
 //! ## Rules (invariants)
 //!
 //! - **One body per call, mapped as built.** Each method parses its spellings, calls its one body and converts the
 //!   crate-local answer into agent's declared rows; it never calls a second body to rebuild an answer and never reads a
 //!   file back (ADR-0384).
-//! - **Spellings are parsed with the bodies' own rules** (`edit::lib_path`) — here for `refresh` / `list` / `read`, by
-//!   the body for `newFolder` / `newFile` / `relink`: a `path` / `folder` / `parent` that is not a library path refuses
-//!   `InvalidArgument` · `item-path-invalid`, nothing done.
+//! - **Spellings are parsed with the bodies' own rules** (`edit::lib_path` · `edit::parse_ref`) — here for `refresh` /
+//!   `list` / `read` and the preset `path` (`preset.get`: a library path or a built-in), by the body for `newFolder` /
+//!   `newFile` / `relink` and for the items and folders a preset command names: a `path` / `folder` / `parent` that is
+//!   not a library path refuses `InvalidArgument` · `item-path-invalid`, nothing done.
 //! - **Refusals cross 1:1.** [`LibraryRefusal`] becomes agent's `PortRefusal` with the same class and reason (or the
 //!   same store error); agent picks the bus code (ADR-0379). `list`'s bare reason (`library-unavailable`) gets class
 //!   `Unavailable`.
@@ -19,20 +20,33 @@
 
 use std::path::Path;
 
+use engram_dashboard_agent::backend::settings_check::{
+    FolderLoad, FolderLoadKind, FolderLoadSet, FolderUnsure, UnsureWhy,
+};
 use engram_dashboard_agent::commands::{
-    self as declared, LibraryFolderRow, LibraryFoldersOk, LibraryKind, LibraryListOk,
-    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryStatusOk, ListFolderRow,
-    PathReasonRow, ReasonRow, RefreshErrorRow, RelinkPairRow,
+    self as declared, AgentOutputFormat, FolderLoadKindWord, FolderRow, LibraryFolderRow,
+    LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind, LibraryRefreshOk,
+    LibraryRelinkOk, LibraryStatusOk, ListFolderRow, PathReasonRow, PresetAddOk, PresetCheckOk,
+    PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk,
+    PreviewItemRow, PreviewLoadRow, PreviewRefusalRow, PreviewSetRow, PreviewSkillNameRow,
+    PreviewUnsureRow, ReasonRow, RefreshErrorRow, RelinkPairRow, SkippedRow,
 };
 use engram_dashboard_agent::launch::Reason;
 use engram_dashboard_agent::library_commands::{
-    relink_stop_row, LibraryCommandHost, LibraryReadView, PortClass, PortRefusal,
+    problem_row, relink_stop_row, LibraryCommandHost, LibraryReadView, PortClass, PortRefusal,
+    PresetDraftInput, PresetEntries,
 };
+use engram_dashboard_agent::profile::AgentOutputFormat as CoreOutputFormat;
 
 use crate::catalog::ItemKind;
 use crate::config::ConfigHealth;
 use crate::create::NewFileKind;
-use crate::edit::lib_path;
+use crate::edit::{
+    lib_path, parse_ref, AddEntries, CheckAnswer, FolderPreview, NewItem, PartialEdit, PresetDraft,
+    PresetFolder, PresetRow, RemoveEntries, Skipped,
+};
+use crate::folder::{slash_path, FolderStatus};
+use crate::format::ListName;
 use crate::relink::RelinkAnswer;
 use crate::{
     FoldersAnswer, LibraryRefusal, LibraryService, LibraryStatus, ListAnswer, ListFilter, ListRow,
@@ -123,6 +137,151 @@ impl LibraryCommandHost for LibraryService {
     ) -> Result<LibraryRelinkOk, PortRefusal> {
         LibraryService::relink(self, from, to, root_generation)
             .map(relink_ok)
+            .map_err(port)
+    }
+
+    fn preset_get(&self, path: &str) -> Result<declared::PresetView, PortRefusal> {
+        let preset = parse_ref(path).map_err(|reason| PortRefusal::Refused {
+            class: PortClass::InvalidArgument,
+            reason,
+        })?;
+        LibraryService::preset_get(self, &preset)
+            .map(preset_view)
+            .map_err(port)
+    }
+
+    fn preset_check(
+        &self,
+        path: &str,
+        draft: &PresetDraftInput,
+    ) -> Result<PresetCheckOk, PortRefusal> {
+        let preset = lib_path(path).map_err(port)?;
+        LibraryService::preset_check(self, &preset, &preset_draft(draft))
+            .map(check_ok)
+            .map_err(port)
+    }
+
+    fn preset_add(
+        &self,
+        path: &str,
+        entries: &PresetEntries,
+        backend: Option<&str>,
+        after: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<PresetAddOk, PortRefusal> {
+        let preset = lib_path(path).map_err(port)?;
+        let entries = match entries {
+            PresetEntries::Items(items) => AddEntries::Items(
+                items
+                    .iter()
+                    .map(|item| NewItem {
+                        path: item.clone(),
+                        backend: backend.map(str::to_owned),
+                    })
+                    .collect(),
+            ),
+            PresetEntries::Folders(folders) => AddEntries::Folders(folders.clone()),
+        };
+        LibraryService::preset_add(self, &preset, &entries, after, root_generation)
+            .map(|edit| {
+                let (applied, skipped, view) = partial(edit);
+                PresetAddOk {
+                    applied,
+                    skipped,
+                    view,
+                }
+            })
+            .map_err(port)
+    }
+
+    fn preset_remove(
+        &self,
+        path: &str,
+        entries: &PresetEntries,
+        root_generation: Option<u64>,
+    ) -> Result<declared::PresetView, PortRefusal> {
+        let preset = lib_path(path).map_err(port)?;
+        let entries = match entries {
+            PresetEntries::Items(items) => RemoveEntries::Items(items.clone()),
+            PresetEntries::Folders(folders) => RemoveEntries::Folders(folders.clone()),
+        };
+        LibraryService::preset_remove(self, &preset, &entries, root_generation)
+            .map(preset_view)
+            .map_err(port)
+    }
+
+    fn preset_reorder(
+        &self,
+        path: &str,
+        section: PresetSection,
+        order: &[String],
+        base_rev: &str,
+        root_generation: Option<u64>,
+    ) -> Result<declared::PresetView, PortRefusal> {
+        let preset = lib_path(path).map_err(port)?;
+        let section = match section {
+            PresetSection::Presets => ListName::Presets,
+            PresetSection::Instructions => ListName::Instructions,
+            PresetSection::Skills => ListName::Skills,
+            PresetSection::Settings => ListName::Settings,
+            PresetSection::Folders => ListName::Folders,
+        };
+        LibraryService::preset_reorder(self, &preset, section, order, base_rev, root_generation)
+            .map(preset_view)
+            .map_err(port)
+    }
+
+    fn preset_set_backend(
+        &self,
+        path: &str,
+        items: &[String],
+        backend: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<PresetSetBackendOk, PortRefusal> {
+        let preset = lib_path(path).map_err(port)?;
+        LibraryService::preset_set_backend(self, &preset, items, backend, root_generation)
+            .map(|edit| {
+                let (applied, skipped, view) = partial(edit);
+                PresetSetBackendOk {
+                    applied,
+                    skipped,
+                    view,
+                }
+            })
+            .map_err(port)
+    }
+
+    fn preset_save(
+        &self,
+        path: &str,
+        draft: &PresetDraftInput,
+        base_rev: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<declared::PresetView, PortRefusal> {
+        let preset = lib_path(path).map_err(port)?;
+        LibraryService::preset_save(
+            self,
+            &preset,
+            &preset_draft(draft),
+            base_rev,
+            root_generation,
+        )
+        .map(preset_view)
+        .map_err(port)
+    }
+
+    fn preview_folder(
+        &self,
+        folder: &str,
+        backend: Option<&str>,
+        mode: Option<AgentOutputFormat>,
+    ) -> Result<PresetPreviewFolderOk, PortRefusal> {
+        let mode = mode.map(|mode| match mode {
+            AgentOutputFormat::Terminal => CoreOutputFormat::Terminal,
+            AgentOutputFormat::StreamJson => CoreOutputFormat::StreamJson,
+        });
+        LibraryService::preview_folder(self, folder, backend, mode)
+            .map(preview_ok)
             .map_err(port)
     }
 }
@@ -272,6 +431,184 @@ fn relink_ok(answer: RelinkAnswer) -> LibraryRelinkOk {
     }
 }
 
+fn preset_view(view: crate::edit::PresetView) -> declared::PresetView {
+    let entries = |rows: Vec<PresetRow>| rows.into_iter().map(entry_row).collect();
+    declared::PresetView {
+        path: view.path,
+        rev: view.rev,
+        description: view.description,
+        presets: entries(view.presets),
+        instructions: entries(view.instructions),
+        skills: entries(view.skills),
+        settings: entries(view.settings),
+        folders: view.folders.into_iter().map(folder_row).collect(),
+        conflicts: view.conflicts.into_iter().map(problem_row).collect(),
+        problems: view.problems.into_iter().map(problem_row).collect(),
+        agents: count(view.agents),
+    }
+}
+
+fn entry_row(row: PresetRow) -> PresetEntryRow {
+    PresetEntryRow {
+        path: row.path,
+        backend: row.backend,
+        line: row.line,
+        state: row.state.map(reason_row),
+    }
+}
+
+/// The stat as a word, and the reason only `unreadable` carries.
+fn folder_row(folder: PresetFolder) -> FolderRow {
+    let (status, status_why) = match folder.status {
+        None => (None, None),
+        Some(FolderStatus::Ok) => (Some("ok"), None),
+        Some(FolderStatus::Missing) => (Some("missing"), None),
+        Some(FolderStatus::NotADirectory) => (Some("not_a_directory"), None),
+        Some(FolderStatus::Unreadable(why)) => (Some("unreadable"), Some(why)),
+    };
+    FolderRow {
+        path: folder.path,
+        line: folder.line,
+        status: status.map(str::to_owned),
+        status_why,
+    }
+}
+
+/// A partial edit's answer as the declared `{applied, skipped, view}` parts.
+fn partial(edit: PartialEdit) -> (Vec<String>, Vec<SkippedRow>, declared::PresetView) {
+    let skipped = edit
+        .skipped
+        .into_iter()
+        .map(|Skipped { item, reason }| SkippedRow {
+            item,
+            code: reason.code,
+            args: reason.args,
+            line: reason.line,
+        })
+        .collect();
+    (edit.applied, skipped, preset_view(edit.view))
+}
+
+fn check_ok(answer: CheckAnswer) -> PresetCheckOk {
+    PresetCheckOk {
+        save_refuses: answer.save_refuses,
+        folders: answer.folders.into_iter().map(folder_row).collect(),
+        conflicts: answer.conflicts.into_iter().map(problem_row).collect(),
+        problems: answer.problems.into_iter().map(problem_row).collect(),
+    }
+}
+
+fn preset_draft(draft: &PresetDraftInput) -> PresetDraft {
+    let items = |entries: &[PresetEntryArg]| {
+        entries
+            .iter()
+            .map(|entry| NewItem {
+                path: entry.path.clone(),
+                backend: entry.backend.clone(),
+            })
+            .collect()
+    };
+    PresetDraft {
+        presets: items(&draft.presets),
+        instructions: items(&draft.instructions),
+        skills: items(&draft.skills),
+        settings: items(&draft.settings),
+        folders: draft.folders.clone(),
+    }
+}
+
+fn preview_ok(preview: FolderPreview) -> PresetPreviewFolderOk {
+    PresetPreviewFolderOk {
+        path: preview.path.map(|path| path.to_string_lossy().into_owned()),
+        refused: preview.refused.map(|refused| PreviewRefusalRow {
+            path: refused.path,
+            code: refused.code.to_owned(),
+            why: refused.why,
+        }),
+        loads: preview
+            .loads
+            .into_iter()
+            .map(|load| PreviewLoadRow {
+                backend: load.backend.to_owned(),
+                mode: match load.mode {
+                    CoreOutputFormat::Terminal => AgentOutputFormat::Terminal,
+                    CoreOutputFormat::StreamJson => AgentOutputFormat::StreamJson,
+                },
+                predicted: load.predicted,
+                set: preview_set(load.set),
+                unread: load.unread,
+            })
+            .collect(),
+        truncated: preview.truncated,
+        skipped: preview.skipped,
+        unlisted: preview.unlisted,
+    }
+}
+
+/// The agent port's load set as rows — folder-relative paths `/`-separated, as the omission notice spells them.
+fn preview_set(set: FolderLoadSet) -> PreviewSetRow {
+    let items = |loads: Vec<FolderLoad>| -> Vec<PreviewItemRow> {
+        loads
+            .into_iter()
+            .map(|load| PreviewItemRow {
+                path: slash_path(&load.path),
+                kind: load_kind(load.kind),
+            })
+            .collect()
+    };
+    PreviewSetRow {
+        loads: items(set.loads),
+        omitted: items(set.omitted),
+        carried: items(set.carried),
+        unsure: set.unsure.into_iter().map(unsure_row).collect(),
+        malformed: set
+            .malformed
+            .into_iter()
+            .map(|malformed| path_reason(slash_path(&malformed.path), malformed.reason))
+            .collect(),
+        skill_names: set
+            .skill_names
+            .into_iter()
+            .map(|skill| PreviewSkillNameRow {
+                path: slash_path(&skill.path),
+                name: skill.name,
+            })
+            .collect(),
+    }
+}
+
+fn load_kind(kind: FolderLoadKind) -> FolderLoadKindWord {
+    match kind {
+        FolderLoadKind::Instructions => FolderLoadKindWord::Instructions,
+        FolderLoadKind::Rule => FolderLoadKindWord::Rule,
+        FolderLoadKind::Skill => FolderLoadKindWord::Skill,
+        FolderLoadKind::Agent => FolderLoadKindWord::Agent,
+        FolderLoadKind::Command => FolderLoadKindWord::Command,
+        FolderLoadKind::SkillRoot => FolderLoadKindWord::SkillRoot,
+    }
+}
+
+/// The variant as a word; its payload text in `message` and the front matter's line in `line`.
+fn unsure_row(unsure: FolderUnsure) -> PreviewUnsureRow {
+    let (why, message, line) = match unsure.why {
+        UnsureWhy::Unreadable(error) => ("unreadable", Some(error), None),
+        UnsureWhy::FrontMatter(error) => ("front_matter", Some(error.message), error.line),
+        UnsureWhy::Link => ("link", None, None),
+        UnsureWhy::DashesInFrontMatter => ("dashes_in_front_matter", None, None),
+        UnsureWhy::UnclearPaths => ("unclear_paths", None, None),
+        UnsureWhy::EmptyBody => ("empty_body", None, None),
+        UnsureWhy::HookKeys => ("hook_keys", None, None),
+        UnsureWhy::SkillFileInCommandFolder => ("skill_file_in_command_folder", None, None),
+    };
+    PreviewUnsureRow {
+        path: slash_path(&unsure.path),
+        kind: unsure.kind.map(load_kind),
+        why: why.to_owned(),
+        message,
+        line,
+    }
+}
+
 fn list_row(row: ListRow) -> declared::ListRow {
     declared::ListRow {
         path: row.path,
@@ -404,9 +741,25 @@ mod tests {
         }
 
         fn make(profiles: Vec<AgentProfile>, root: bool) -> World {
+            World::build(profiles, root, None)
+        }
+
+        /// A world whose built-in folder holds `engram:/default` as `default_preset` (the other built-ins stand in).
+        fn with_default_preset(profiles: Vec<AgentProfile>, default_preset: &str) -> World {
+            World::build(profiles, true, Some(default_preset))
+        }
+
+        fn build(profiles: Vec<AgentProfile>, root: bool, default_preset: Option<&str>) -> World {
             let temp = tempfile::tempdir().unwrap();
             let base = dunce::canonicalize(temp.path()).unwrap();
             fs::create_dir_all(base.join("lib")).unwrap();
+            if let Some(text) = default_preset {
+                let file = base.join("builtin").join(crate::builtin::file_of(
+                    crate::path::BuiltinId::DefaultPreset,
+                ));
+                fs::create_dir_all(file.parent().unwrap()).unwrap();
+                fs::write(file, text).unwrap();
+            }
             let state = base.join("state");
             fs::create_dir_all(&state).unwrap();
             let config = match root {
@@ -420,7 +773,7 @@ mod tests {
                 default_root: base.join("default-library"),
                 daemon_id: "test-daemon".to_owned(),
                 root_generation_base: 7,
-                builtin_dir: None,
+                builtin_dir: default_preset.map(|_| base.join("builtin")),
                 launch_root: base.join("launch"),
                 home: None,
                 env: Arc::new(|_| None),
@@ -1019,5 +1372,618 @@ mod tests {
             .expect("list");
         assert_eq!(paths(&out.rows), ["team/x.md"]);
         assert_eq!(paths(&out.builtins), ["engram:/default"]);
+    }
+
+    // ── preset.* ──
+
+    fn entry_paths(rows: &[PresetEntryRow]) -> Vec<&str> {
+        rows.iter().map(|row| row.path.as_str()).collect()
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    fn empty_draft() -> PresetDraftInput {
+        PresetDraftInput {
+            presets: Vec::new(),
+            instructions: Vec::new(),
+            skills: Vec::new(),
+            settings: Vec::new(),
+            folders: None,
+        }
+    }
+
+    fn arg(path: &str) -> PresetEntryArg {
+        PresetEntryArg {
+            path: path.to_owned(),
+            backend: None,
+        }
+    }
+
+    /// A preset with a present and a missing instruction, a folder entry, attached by one agent.
+    fn preset_world() -> (World, String) {
+        let w = World::new(vec![agent(&["p.yaml"], false)]);
+        let folder = w.base.join("f");
+        fs::create_dir_all(&folder).unwrap();
+        let folder = folder.to_string_lossy().into_owned();
+        w.put("rules/a.md", "A");
+        w.put(
+            "p.yaml",
+            &format!(
+                "kind: preset\nversion: 1\ndescription: team\ninstructions:\n  - rules/a.md\n  - rules/gone.md\nfolders:\n  - {folder}\n"
+            ),
+        );
+        (w, folder)
+    }
+
+    /// `preset.get` answers the body's view in the declared rows: entries with their lines and states, the folder with
+    /// its stat word, the missing item as a `missing` problem through the preset, the `rev` and the agent count.
+    #[test]
+    fn preset_get_carries_the_body_view_in_declared_rows() {
+        let (w, folder) = preset_world();
+        let body = w
+            .svc
+            .preset_get(&crate::path::AssetRef::parse("p.yaml").unwrap())
+            .expect("body view");
+        let view = w.port().preset_get("p.yaml").expect("view");
+        assert_eq!(view.path, "p.yaml");
+        assert_eq!(view.rev, body.rev);
+        assert_eq!(view.description.as_deref(), Some("team"));
+        assert_eq!(
+            entry_paths(&view.instructions),
+            ["rules/a.md", "rules/gone.md"]
+        );
+        assert_eq!(
+            view.instructions[0],
+            PresetEntryRow {
+                path: "rules/a.md".to_owned(),
+                backend: None,
+                line: 5,
+                state: None,
+            }
+        );
+        let gone = &view.instructions[1];
+        assert_eq!(gone.line, 6);
+        assert_eq!(
+            gone.state.as_ref().map(|state| state.code.as_str()),
+            Some(crate::NOT_FOUND)
+        );
+        assert_eq!(
+            view.folders,
+            [FolderRow {
+                path: folder,
+                line: Some(8),
+                status: Some("ok".to_owned()),
+                status_why: None,
+            }]
+        );
+        let missing = view
+            .problems
+            .iter()
+            .find(|problem| problem.kind == "missing")
+            .expect("the missing item is a problem");
+        assert_eq!(missing.item.as_deref(), Some("rules/gone.md"));
+        assert_eq!(missing.via.as_deref(), Some(&["p.yaml".to_owned()][..]));
+        assert_eq!(missing.items, None);
+        assert!(view.conflicts.is_empty());
+        assert_eq!(view.agents, 1);
+        assert_eq!(
+            (view.problems.len(), view.conflicts.len()),
+            (body.problems.len(), body.conflicts.len())
+        );
+    }
+
+    /// Every preset `path` that is not a library path refuses `InvalidArgument` · `item-path-invalid` before any body
+    /// runs; `preset.get` takes a built-in spelling.
+    #[test]
+    fn every_preset_path_that_is_not_a_library_path_is_refused_item_path_invalid() {
+        let (w, _) = preset_world();
+        let port = w.port();
+        let items = PresetEntries::Items(strings(&["rules/a.md"]));
+        let cases: Vec<(&str, (PortClass, Reason))> = vec![
+            ("get", refused(port.preset_get("../p.yaml"))),
+            (
+                "check",
+                refused(port.preset_check("/p.yaml", &empty_draft())),
+            ),
+            (
+                "check built-in",
+                refused(port.preset_check("engram:/default", &empty_draft())),
+            ),
+            (
+                "add",
+                refused(port.preset_add("a\\p.yaml", &items, None, None, None)),
+            ),
+            (
+                "remove",
+                refused(port.preset_remove("p.yaml/", &items, None)),
+            ),
+            (
+                "reorder",
+                refused(port.preset_reorder("..", PresetSection::Presets, &[], "r", None)),
+            ),
+            (
+                "setBackend",
+                refused(port.preset_set_backend("a:b", &[], None, None)),
+            ),
+            (
+                "save",
+                refused(port.preset_save("engram:/default", &empty_draft(), None, None)),
+            ),
+        ];
+        for (what, (class, reason)) in cases {
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (PortClass::InvalidArgument, ITEM_PATH_INVALID),
+                "{what}"
+            );
+        }
+        let builtin = port.preset_get("engram:/default");
+        assert!(
+            !matches!(&builtin, Err(PortRefusal::Refused { reason, .. }) if reason.code == ITEM_PATH_INVALID),
+            "{builtin:?}"
+        );
+    }
+
+    /// `preset.add` items applies what it can and answers the skips with their full reason beside `item`, and the
+    /// view of the preset as committed.
+    #[test]
+    fn preset_add_answers_applied_skipped_and_the_view() {
+        let (w, _) = preset_world();
+        w.put("rules/b.md", "B");
+        let out = w
+            .port()
+            .preset_add(
+                "p.yaml",
+                &PresetEntries::Items(strings(&["rules/b.md", "rules/none.md"])),
+                Some("codex"),
+                None,
+                None,
+            )
+            .expect("add");
+        assert_eq!(out.applied, ["rules/b.md"]);
+        assert_eq!(
+            out.skipped,
+            [SkippedRow {
+                item: "rules/none.md".to_owned(),
+                code: crate::NOT_FOUND.to_owned(),
+                args: json!({ "path": "rules/none.md" }),
+                line: None,
+            }]
+        );
+        assert_eq!(
+            entry_paths(&out.view.instructions),
+            ["rules/a.md", "rules/gone.md", "rules/b.md"]
+        );
+        assert_eq!(out.view.instructions[2].backend.as_deref(), Some("codex"));
+        let after = w.port().preset_get("p.yaml").expect("view");
+        assert_eq!(out.view.rev, after.rev, "the answer is the committed file");
+    }
+
+    /// A folder `add` adds the folder normalized; a relative folder refuses the whole call.
+    #[test]
+    fn preset_add_folders_applies_or_refuses_whole() {
+        let (w, _) = preset_world();
+        let other = w.base.join("g");
+        fs::create_dir_all(&other).unwrap();
+        let out = w
+            .port()
+            .preset_add(
+                "p.yaml",
+                &PresetEntries::Folders(vec![other.to_string_lossy().into_owned()]),
+                None,
+                None,
+                None,
+            )
+            .expect("add folder");
+        assert_eq!(out.applied, [other.to_string_lossy().into_owned()]);
+        assert_eq!(out.view.folders.len(), 2);
+        let (class, reason) = refused(w.port().preset_add(
+            "p.yaml",
+            &PresetEntries::Folders(strings(&["rel/x"])),
+            None,
+            None,
+            None,
+        ));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (
+                PortClass::InvalidArgument,
+                crate::edit::PRESET_FOLDERS_REFUSED
+            )
+        );
+    }
+
+    /// `preset.remove` answers the view after the change — items or folders.
+    #[test]
+    fn preset_remove_answers_the_view_after_the_change() {
+        let (w, folder) = preset_world();
+        let view = w
+            .port()
+            .preset_remove(
+                "p.yaml",
+                &PresetEntries::Items(strings(&["rules/gone.md"])),
+                None,
+            )
+            .expect("remove");
+        assert_eq!(entry_paths(&view.instructions), ["rules/a.md"]);
+        let view = w
+            .port()
+            .preset_remove("p.yaml", &PresetEntries::Folders(vec![folder]), None)
+            .expect("remove folder");
+        assert!(view.folders.is_empty());
+    }
+
+    /// `preset.reorder` puts the section in order under the right `base_rev` and refuses a stale one.
+    #[test]
+    fn preset_reorder_checks_the_base_rev_and_answers_the_new_order() {
+        let (w, _) = preset_world();
+        let rev = w.port().preset_get("p.yaml").expect("view").rev;
+        let order = strings(&["rules/gone.md", "rules/a.md"]);
+        let (class, reason) = refused(w.port().preset_reorder(
+            "p.yaml",
+            PresetSection::Instructions,
+            &order,
+            "stale",
+            None,
+        ));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (PortClass::Conflict, crate::edit::REV_MISMATCH)
+        );
+        let view = w
+            .port()
+            .preset_reorder("p.yaml", PresetSection::Instructions, &order, &rev, None)
+            .expect("reorder");
+        assert_eq!(
+            entry_paths(&view.instructions),
+            ["rules/gone.md", "rules/a.md"]
+        );
+    }
+
+    /// `preset.setBackend` tags the items it can and skips the rest; an unknown word refuses the whole call.
+    #[test]
+    fn preset_set_backend_tags_skips_and_refuses_an_unknown_word() {
+        let (w, _) = preset_world();
+        let out = w
+            .port()
+            .preset_set_backend(
+                "p.yaml",
+                &strings(&["rules/a.md", "rules/other.md"]),
+                Some("claude"),
+                None,
+            )
+            .expect("set backend");
+        assert_eq!(out.applied, ["rules/a.md"]);
+        assert_eq!(out.skipped.len(), 1);
+        assert_eq!(out.skipped[0].item, "rules/other.md");
+        assert_eq!(out.view.instructions[0].backend.as_deref(), Some("claude"));
+        let (class, reason) = refused(w.port().preset_set_backend(
+            "p.yaml",
+            &strings(&["rules/a.md"]),
+            Some("nobody"),
+            None,
+        ));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (PortClass::InvalidArgument, "backend-tag-unknown")
+        );
+    }
+
+    /// `preset.save` writes the draft and answers the view; a mismatch refuses the whole save and writes nothing.
+    #[test]
+    fn preset_save_writes_the_draft_or_refuses_whole() {
+        let (w, _) = preset_world();
+        let before = fs::read(w.base.join("lib").join("p.yaml")).unwrap();
+        let mut bad = empty_draft();
+        bad.skills = vec![arg("rules/a.md")];
+        let (class, reason) = refused(w.port().preset_save("p.yaml", &bad, None, None));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (PortClass::InvalidArgument, crate::edit::PRESET_SAVE_REFUSED)
+        );
+        assert_eq!(fs::read(w.base.join("lib").join("p.yaml")).unwrap(), before);
+
+        let mut good = empty_draft();
+        good.instructions = vec![arg("rules/a.md")];
+        good.folders = Some(Vec::new());
+        let view = w
+            .port()
+            .preset_save("p.yaml", &good, None, None)
+            .expect("save");
+        assert_eq!(entry_paths(&view.instructions), ["rules/a.md"]);
+        assert!(view.folders.is_empty());
+    }
+
+    /// `preset.check` answers `save_refuses` and each draft mismatch as a `broken` problem row with `args`
+    /// `{path, list}` and no line; the file is not written.
+    #[test]
+    fn preset_check_answers_the_mismatch_as_a_broken_row_and_writes_nothing() {
+        let (w, folder) = preset_world();
+        let before = fs::read(w.base.join("lib").join("p.yaml")).unwrap();
+        let mut draft = empty_draft();
+        draft.skills = vec![arg("rules/a.md")];
+        let out = w.port().preset_check("p.yaml", &draft).expect("check");
+        assert!(out.save_refuses);
+        let mismatch = out
+            .problems
+            .iter()
+            .find(|problem| {
+                problem.kind == "broken" && problem.item.as_deref() == Some("rules/a.md")
+            })
+            .expect("the mismatch row");
+        assert_eq!(mismatch.via.as_deref(), Some(&["p.yaml".to_owned()][..]));
+        assert_eq!(
+            mismatch.args,
+            json!({ "path": "rules/a.md", "list": "skills" })
+        );
+        assert_eq!(mismatch.line, None);
+        assert_eq!(
+            out.folders,
+            [FolderRow {
+                path: folder,
+                line: Some(8),
+                status: Some("ok".to_owned()),
+                status_why: None,
+            }],
+            "an omitted folder list keeps the file's"
+        );
+        assert_eq!(fs::read(w.base.join("lib").join("p.yaml")).unwrap(), before);
+    }
+
+    /// `preset.previewFolder` answers the add verdict and, per backend and mode asked, the load set as typed rows.
+    #[test]
+    fn preview_folder_answers_the_verdict_and_typed_load_rows() {
+        let w = World::new(Vec::new());
+        let good = w.base.join("good");
+        fs::create_dir_all(&good).unwrap();
+        fs::write(good.join("AGENTS.md"), "rules").unwrap();
+        let out = w
+            .port()
+            .preview_folder(&good.to_string_lossy(), Some("codex"), None)
+            .expect("preview");
+        assert_eq!(out.path, Some(good.to_string_lossy().into_owned()));
+        assert_eq!(out.refused, None);
+        let modes: Vec<(&str, &AgentOutputFormat)> = out
+            .loads
+            .iter()
+            .map(|load| (load.backend.as_str(), &load.mode))
+            .collect();
+        assert_eq!(
+            modes,
+            [
+                ("codex", &AgentOutputFormat::Terminal),
+                ("codex", &AgentOutputFormat::StreamJson)
+            ]
+        );
+        let json = &out.loads[1];
+        assert!(!json.predicted);
+        assert!(json.set.loads.contains(&PreviewItemRow {
+            path: "AGENTS.md".to_owned(),
+            kind: FolderLoadKindWord::Instructions,
+        }));
+
+        let one = w
+            .port()
+            .preview_folder(
+                &good.to_string_lossy(),
+                Some("codex"),
+                Some(AgentOutputFormat::StreamJson),
+            )
+            .expect("preview");
+        assert_eq!(one.loads.len(), 1);
+        assert_eq!(one.loads[0].mode, AgentOutputFormat::StreamJson);
+
+        let relative = w
+            .port()
+            .preview_folder("rel/x", None, None)
+            .expect("preview");
+        assert_eq!(relative.path, None);
+        assert_eq!(
+            relative.refused.map(|refused| refused.code),
+            Some("folder-path-relative".to_owned())
+        );
+        assert!(relative.loads.is_empty());
+        let (class, reason) = refused(w.port().preview_folder(
+            &good.to_string_lossy(),
+            Some("nobody"),
+            None,
+        ));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (PortClass::InvalidArgument, "backend-tag-unknown")
+        );
+    }
+
+    /// `preset.reorder` reorders the section it names and no other — each `PresetSection` reaches its own list (a
+    /// section mapped onto another list would refuse the order as a mismatch or reorder the wrong list).
+    #[test]
+    fn preset_reorder_reaches_the_list_of_each_section() {
+        let w = World::new(Vec::new());
+        let (f1, f2) = (w.base.join("f1"), w.base.join("f2"));
+        fs::create_dir_all(&f1).unwrap();
+        fs::create_dir_all(&f2).unwrap();
+        let (f1, f2) = (
+            f1.to_string_lossy().into_owned(),
+            f2.to_string_lossy().into_owned(),
+        );
+        w.put("rules/a.md", "A");
+        w.put("rules/b.md", "B");
+        w.put(
+            "skills/s1/SKILL.md",
+            "---\nname: s1\ndescription: one\n---\n",
+        );
+        w.put(
+            "skills/s2/SKILL.md",
+            "---\nname: s2\ndescription: two\n---\n",
+        );
+        w.put("s1.yaml", "kind: settings\nversion: 1\n");
+        w.put("s2.yaml", "kind: settings\nversion: 1\n");
+        w.put("q.yaml", "kind: preset\nversion: 1\n");
+        w.put("r.yaml", "kind: preset\nversion: 1\n");
+        w.put(
+            "p.yaml",
+            &format!(
+                "kind: preset\nversion: 1\npresets:\n  - q.yaml\n  - r.yaml\ninstructions:\n  - rules/a.md\n  - rules/b.md\nskills:\n  - skills/s1\n  - skills/s2\nsettings:\n  - s1.yaml\n  - s2.yaml\nfolders:\n  - {f1}\n  - {f2}\n"
+            ),
+        );
+        let lists = |view: &declared::PresetView| -> Vec<Vec<String>> {
+            let entries =
+                |rows: &[PresetEntryRow]| rows.iter().map(|row| row.path.clone()).collect();
+            vec![
+                entries(&view.presets),
+                entries(&view.instructions),
+                entries(&view.skills),
+                entries(&view.settings),
+                view.folders.iter().map(|row| row.path.clone()).collect(),
+            ]
+        };
+        let sections = [
+            PresetSection::Presets,
+            PresetSection::Instructions,
+            PresetSection::Skills,
+            PresetSection::Settings,
+            PresetSection::Folders,
+        ];
+        for (index, section) in sections.into_iter().enumerate() {
+            let before = w.port().preset_get("p.yaml").expect("view");
+            let mut expected = lists(&before);
+            expected[index].reverse();
+            let view = w
+                .port()
+                .preset_reorder(
+                    "p.yaml",
+                    section.clone(),
+                    &expected[index],
+                    &before.rev,
+                    None,
+                )
+                .unwrap_or_else(|e| panic!("{section:?}: {e:?}"));
+            assert_eq!(lists(&view), expected, "{section:?}");
+        }
+    }
+
+    /// Each `FolderLoadKind` lands as its own word.
+    #[test]
+    fn every_folder_load_kind_lands_as_its_word() {
+        let cases = [
+            (
+                FolderLoadKind::Instructions,
+                FolderLoadKindWord::Instructions,
+            ),
+            (FolderLoadKind::Rule, FolderLoadKindWord::Rule),
+            (FolderLoadKind::Skill, FolderLoadKindWord::Skill),
+            (FolderLoadKind::Agent, FolderLoadKindWord::Agent),
+            (FolderLoadKind::Command, FolderLoadKindWord::Command),
+            (FolderLoadKind::SkillRoot, FolderLoadKindWord::SkillRoot),
+        ];
+        for (kind, word) in cases {
+            assert_eq!(load_kind(kind), word, "{kind:?}");
+        }
+    }
+
+    /// `preset.get engram:/default` answers the built-in preset as asked: its spelling, the `rev` of the file it was
+    /// read from, and how many agents have the Default slot on.
+    #[test]
+    fn preset_get_answers_the_builtin_default_preset() {
+        let text = "kind: preset\nversion: 1\ndescription: built in\n";
+        let w = World::with_default_preset(
+            vec![
+                agent(&[], true),
+                agent(&[], true),
+                agent(&["p.yaml"], false),
+            ],
+            text,
+        );
+        let view = w.port().preset_get("engram:/default").expect("view");
+        assert_eq!(view.path, "engram:/default");
+        assert_eq!(view.rev, crate::launch::sha256_hex(text.as_bytes()));
+        assert_eq!(view.description.as_deref(), Some("built in"));
+        assert_eq!(view.agents, 2);
+        assert!(
+            view.problems.is_empty() && view.conflicts.is_empty(),
+            "{view:?}"
+        );
+    }
+
+    /// Each folder stat lands as its word, and only `unreadable` carries its reason.
+    #[test]
+    fn every_folder_status_lands_as_its_word() {
+        let row = |status: Option<FolderStatus>| {
+            folder_row(PresetFolder {
+                path: "C:/f".to_owned(),
+                line: None,
+                status,
+            })
+        };
+        let cases = [
+            (None, None, None),
+            (Some(FolderStatus::Ok), Some("ok"), None),
+            (Some(FolderStatus::Missing), Some("missing"), None),
+            (
+                Some(FolderStatus::NotADirectory),
+                Some("not_a_directory"),
+                None,
+            ),
+            (
+                Some(FolderStatus::Unreadable("timed out".to_owned())),
+                Some("unreadable"),
+                Some("timed out"),
+            ),
+        ];
+        for (status, word, why) in cases {
+            let out = row(status.clone());
+            assert_eq!(
+                (out.status.as_deref(), out.status_why.as_deref()),
+                (word, why),
+                "{status:?}"
+            );
+        }
+    }
+
+    /// Each `UnsureWhy` variant lands as its word, its payload text in `message` and the front matter's line in
+    /// `line`; paths are `/`-separated.
+    #[test]
+    fn every_unsure_reason_lands_as_its_word_with_its_payload() {
+        use engram_dashboard_agent::backend::settings_check::FrontMatterError;
+        let cases = [
+            (
+                UnsureWhy::Unreadable("denied".to_owned()),
+                ("unreadable", Some("denied"), None),
+            ),
+            (
+                UnsureWhy::FrontMatter(FrontMatterError {
+                    message: "bad".to_owned(),
+                    line: Some(4),
+                }),
+                ("front_matter", Some("bad"), Some(4)),
+            ),
+            (UnsureWhy::Link, ("link", None, None)),
+            (
+                UnsureWhy::DashesInFrontMatter,
+                ("dashes_in_front_matter", None, None),
+            ),
+            (UnsureWhy::UnclearPaths, ("unclear_paths", None, None)),
+            (UnsureWhy::EmptyBody, ("empty_body", None, None)),
+            (UnsureWhy::HookKeys, ("hook_keys", None, None)),
+            (
+                UnsureWhy::SkillFileInCommandFolder,
+                ("skill_file_in_command_folder", None, None),
+            ),
+        ];
+        for (why, (word, message, line)) in cases {
+            let out = unsure_row(FolderUnsure {
+                path: PathBuf::from("rules").join("x.md"),
+                kind: Some(FolderLoadKind::Rule),
+                why,
+            });
+            assert_eq!(out.path, "rules/x.md");
+            assert_eq!(out.kind, Some(FolderLoadKindWord::Rule));
+            assert_eq!(
+                (out.why.as_str(), out.message.as_deref(), out.line),
+                (word, message, line)
+            );
+        }
     }
 }

@@ -23,7 +23,7 @@ The preset library: instruction, skill, settings and preset files under one libr
 | `agent_edit.rs` | The `agent.presets` view and the agent-preset edits (`attach` · `detach` · `reorder`), written through the profile-edit port |
 | `relink.rs` | Relink: the file picked for one reference takes every reference to the old path, and the other missing lines of the same old folder by name |
 | `create.rs` | New folder and new file (from a template), entered into the catalog |
-| `host.rs` | `LibraryCommandHost` impl: the `library.*` commands agent declares, answered by the bodies above |
+| `host.rs` | `LibraryCommandHost` impl: the `library.*` and `preset.*` commands agent declares, answered by the bodies above |
 | `config.rs` | The root setting: `library.json` in the daemon state folder |
 | `gate.rs` | Library lock, scan tickets, generations, first scan |
 | `catalog.rs` | In-memory item table, per-item writes, reference index |
@@ -121,4 +121,4 @@ The preset library: instruction, skill, settings and preset files under one libr
 - Daemon wiring: daemon `src/lib.rs` `build_library_service` · `LibraryStart` · `build_daemon_wiring`; the default place: daemon `data_dir.rs` `DataLayout::default_library_root` · `DataRootOrigin`; the identity: daemon `identity.rs`
 - Manager side of the launch: agent `launch.rs` `LaunchKitSource` · `manager/prelaunch.rs`
 
-**Not on the command bus yet:** the preset and agent-preset bodies (`edit.rs` · `agent_edit.rs`) — the port carries the nine `library.*` commands only.
+**Not on the command bus yet:** the agent-preset bodies (`agent_edit.rs`) — the port carries the nine `library.*` and the eight `preset.*` commands only.

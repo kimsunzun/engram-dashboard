@@ -5,6 +5,10 @@
 //!
 //! ## Isolation gate (invariant): `rg "^\s*use tauri" src/` → 0 lines. (anchored on import lines — prevents false hits on self-quotes like this comment)
 
+// `declare_commands!` walks the whole `commands.rs` block one type, command and field at a time; with the `preset.*`
+//   declarations (ADR-0386) its depth passed the default limit of 128.
+#![recursion_limit = "256"]
+
 // ADR-0175: the old `agent/` submodules were folded up into the crate root — removes the double `agent` reading of the crate name and
 //   the module name in paths. The first group below is what moved.
 pub mod backend;

@@ -1,6 +1,6 @@
-//! `library.*` handlers — the port asset-library implements ([`LibraryCommandHost`]) and the one mapping of a port
-//! refusal onto a command error ([`refusal_error`]). The declarations are in the one `declare_commands!` block of
-//! `commands.rs` (one block per module).
+//! `library.*` and `preset.*` handlers — the port asset-library implements ([`LibraryCommandHost`]) and the one
+//! mapping of a port refusal onto a command error ([`refusal_error`]). The declarations are in the one
+//! `declare_commands!` block of `commands.rs` (one block per module).
 //!
 //! ## Rules (invariants)
 //!
@@ -11,8 +11,9 @@
 //!   roster no longer holds.
 //! - **Answers are mapped as the bodies built them** — nothing here calls a second body or reads back (ADR-0384).
 //! - **A refusal applied nothing** — except `library-config-write-failed`, which leaves the new root live and unsaved
-//!   (ADR-0381). **It maps onto a code that does not keep the request id**, except the two `INTERNAL` cases:
-//!   `profile-edit-unavailable` and a profile-store write failure (ADR-0379 decisions 3–5).
+//!   (ADR-0381). **It maps onto a code that does not keep the request id**, except the `INTERNAL` cases:
+//!   `profile-edit-unavailable`, a profile-store write failure (ADR-0379 decisions 3–5) and `folder-listing-unanswered`
+//!   (ADR-0386 decision 16 — on a `Read` command, so no id is kept).
 // ADR-0379
 // ADR-0384
 // ADR-0386
@@ -27,13 +28,17 @@ use serde_json::{Map, Value};
 
 use crate::commands::{
     reject_blanks, store_command_error, store_error, store_error_reason, AgentCommandHost,
-    AgentRefRow, Blank, LibraryFoldersArgs, LibraryFoldersOk, LibraryKind, LibraryListArgs,
-    LibraryListOk, LibraryNewFileArgs, LibraryNewFileKind, LibraryNewFileOk, LibraryNewFolderArgs,
-    LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk,
-    LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs, LibrarySetRootOk, LibraryStatusArgs,
-    LibraryStatusOk, ListRow, RelinkStopRow,
+    AgentOutputFormat, AgentRefRow, Blank, LibraryFoldersArgs, LibraryFoldersOk, LibraryKind,
+    LibraryListArgs, LibraryListOk, LibraryNewFileArgs, LibraryNewFileKind, LibraryNewFileOk,
+    LibraryNewFolderArgs, LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs,
+    LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs, LibrarySetRootOk,
+    LibraryStatusArgs, LibraryStatusOk, ListRow, PresetAddArgs, PresetAddOk, PresetCheckArgs,
+    PresetCheckOk, PresetEntryArg, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs,
+    PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk,
+    PresetSaveArgs, PresetSaveOk, PresetSection, PresetSetBackendArgs, PresetSetBackendOk,
+    PresetView, ProblemItemRow, ProblemRow, RelinkStopRow,
 };
-use crate::launch::{escape_controls, put_reason, Reason};
+use crate::launch::{escape_controls, put_reason, BlockReason, Reason};
 use crate::persistence::PROFILES_FILE;
 use crate::profile::StoreError;
 use crate::types::AgentId;
@@ -60,6 +65,11 @@ pub const RETRY_AFTER_CONDITION: &[&str] = &[
     "library-config-write-failed",
 ];
 
+/// The tail of a [`RETRY_AFTER_CONDITION`] refusal's message — the CLI prints the message and not the error's `retry`,
+/// so the directive reaches the LLM as these words.
+// ADR-0386
+const RETRY_AFTER_CONDITION_TAIL: &str = "clear the cause, then repeat the same call";
+
 /// Why a library body refused — the class picks the bus code ([`refusal_error`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortClass {
@@ -68,7 +78,8 @@ pub enum PortClass {
     InvalidArgument,
     /// No library to answer from, or a library file or `library.json` that could not be used — `CONFLICT`.
     Unavailable,
-    /// A wiring bug (`profile-edit-unavailable`) — `INTERNAL`, the one class that keeps the request id.
+    /// A wiring bug (`profile-edit-unavailable`) or a broken body invariant (`folder-listing-unanswered`) —
+    /// `INTERNAL`, the one class that keeps the request id (on a `Write` command; a `Read` keeps none).
     Internal,
 }
 
@@ -97,7 +108,27 @@ pub struct LibraryReadView {
     pub settings_fields: Vec<String>,
 }
 
-/// **Everything** the `library.*` handlers have the library do (a port) — the real thing = asset-library
+/// What `preset.add` / `preset.remove` name — items or folders, never both in one call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PresetEntries {
+    /// Reference spellings (a library path or `engram:/…`), as typed.
+    Items(Vec<String>),
+    /// Folder spellings, as typed.
+    Folders(Vec<String>),
+}
+
+/// A draft of a preset's lists (`preset.save` · `preset.check`), spellings as typed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetDraftInput {
+    pub presets: Vec<PresetEntryArg>,
+    pub instructions: Vec<PresetEntryArg>,
+    pub skills: Vec<PresetEntryArg>,
+    pub settings: Vec<PresetEntryArg>,
+    /// `None` = the file's folder list stays as it is.
+    pub folders: Option<Vec<String>>,
+}
+
+/// **Everything** the `library.*` and `preset.*` handlers have the library do (a port) — the real thing = asset-library
 /// `LibraryService` (`host.rs`); assemblies without a library plug the daemon's `NoLibrary`.
 ///
 /// ★Synchronous, on a blocking pool thread★: the bodies wait at the library's first-scan entrance and on bounded
@@ -143,6 +174,58 @@ pub trait LibraryCommandHost: Send + Sync {
         to: &str,
         root_generation: Option<u64>,
     ) -> Result<LibraryRelinkOk, PortRefusal>;
+    /// `path` = a library path or a built-in (`engram:/…`).
+    fn preset_get(&self, path: &str) -> Result<PresetView, PortRefusal>;
+    fn preset_check(
+        &self,
+        path: &str,
+        draft: &PresetDraftInput,
+    ) -> Result<PresetCheckOk, PortRefusal>;
+    /// `backend` is for every item — the handler never passes one with folders.
+    fn preset_add(
+        &self,
+        path: &str,
+        entries: &PresetEntries,
+        backend: Option<&str>,
+        after: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<PresetAddOk, PortRefusal>;
+    fn preset_remove(
+        &self,
+        path: &str,
+        entries: &PresetEntries,
+        root_generation: Option<u64>,
+    ) -> Result<PresetView, PortRefusal>;
+    fn preset_reorder(
+        &self,
+        path: &str,
+        section: PresetSection,
+        order: &[String],
+        base_rev: &str,
+        root_generation: Option<u64>,
+    ) -> Result<PresetView, PortRefusal>;
+    /// `backend` `None` = every backend.
+    fn preset_set_backend(
+        &self,
+        path: &str,
+        items: &[String],
+        backend: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<PresetSetBackendOk, PortRefusal>;
+    fn preset_save(
+        &self,
+        path: &str,
+        draft: &PresetDraftInput,
+        base_rev: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<PresetView, PortRefusal>;
+    /// `backend` `None` = every registered backend; `mode` `None` = both modes.
+    fn preview_folder(
+        &self,
+        folder: &str,
+        backend: Option<&str>,
+        mode: Option<AgentOutputFormat>,
+    ) -> Result<PresetPreviewFolderOk, PortRefusal>;
 }
 
 /// The return of `library.setRoot` — its fields are the same as [`LibraryStatusOk`]. ★Moved by destructuring
@@ -174,7 +257,79 @@ impl From<LibraryStatusOk> for LibrarySetRootOk {
     }
 }
 
-/// Plugs the nine `library.*` handlers into `table` — the `make_table` line for the library port.
+/// The answers of `preset.get` and of the preset edits that answer the view alone — their fields are the same as
+/// [`PresetView`]. ★Moved by destructuring (without `..`)★ — if either side gains a field, compilation stops here.
+macro_rules! from_preset_view {
+    ($($ok:ident),* $(,)?) => {$(
+        impl From<PresetView> for $ok {
+            fn from(view: PresetView) -> Self {
+                let PresetView {
+                    path,
+                    rev,
+                    description,
+                    presets,
+                    instructions,
+                    skills,
+                    settings,
+                    folders,
+                    conflicts,
+                    problems,
+                    agents,
+                } = view;
+                Self {
+                    path,
+                    rev,
+                    description,
+                    presets,
+                    instructions,
+                    skills,
+                    settings,
+                    folders,
+                    conflicts,
+                    problems,
+                    agents,
+                }
+            }
+        }
+    )*};
+}
+
+from_preset_view!(PresetGetOk, PresetRemoveOk, PresetReorderOk, PresetSaveOk);
+
+/// A launch-block reason as the declared row — the row [`crate::launch::LaunchBlocked::to_args`] builds, with the keys
+/// it leaves out sent as `null` (the command macro's `Option` has no skip).
+// ADR-0386
+pub fn problem_row(reason: BlockReason) -> ProblemRow {
+    let (kind, item, via, items, reason) = match reason {
+        BlockReason::Missing { item, via, reason } => {
+            ("missing", Some(item), Some(via), None, reason)
+        }
+        BlockReason::Broken { item, via, reason } => {
+            ("broken", Some(item), Some(via), None, reason)
+        }
+        BlockReason::Conflict { reason, items } => {
+            let items = items
+                .into_iter()
+                .map(|(item, via)| ProblemItemRow { item, via })
+                .collect();
+            ("conflict", None, None, Some(items), reason)
+        }
+        BlockReason::LibraryUnavailable { reason } => {
+            ("library_unavailable", None, None, None, reason)
+        }
+    };
+    ProblemRow {
+        kind: kind.to_owned(),
+        item,
+        via,
+        items,
+        code: reason.code,
+        args: reason.args,
+        line: reason.line,
+    }
+}
+
+/// Plugs the `library.*` and `preset.*` handlers into `table` — the `make_table` line for the library port.
 pub(crate) fn insert(
     table: &mut CommandTable,
     host: &Arc<dyn AgentCommandHost>,
@@ -245,13 +400,77 @@ pub(crate) fn insert(
             }),
         )
         .expect("could not plug library.newFile into the table");
-    let relink = library;
+    let relink = Arc::clone(&library);
     table
         .insert(
             "library.relink",
             blocking_handler(move |args: LibraryRelinkArgs| verb_relink(relink.as_ref(), args)),
         )
         .expect("could not plug library.relink into the table");
+    let get = Arc::clone(&library);
+    table
+        .insert(
+            "preset.get",
+            blocking_handler(move |args: PresetGetArgs| verb_preset_get(get.as_ref(), args)),
+        )
+        .expect("could not plug preset.get into the table");
+    let check = Arc::clone(&library);
+    table
+        .insert(
+            "preset.check",
+            blocking_handler(move |args: PresetCheckArgs| verb_preset_check(check.as_ref(), args)),
+        )
+        .expect("could not plug preset.check into the table");
+    let add = Arc::clone(&library);
+    table
+        .insert(
+            "preset.add",
+            blocking_handler(move |args: PresetAddArgs| verb_preset_add(add.as_ref(), args)),
+        )
+        .expect("could not plug preset.add into the table");
+    let remove = Arc::clone(&library);
+    table
+        .insert(
+            "preset.remove",
+            blocking_handler(move |args: PresetRemoveArgs| {
+                verb_preset_remove(remove.as_ref(), args)
+            }),
+        )
+        .expect("could not plug preset.remove into the table");
+    let reorder = Arc::clone(&library);
+    table
+        .insert(
+            "preset.reorder",
+            blocking_handler(move |args: PresetReorderArgs| {
+                verb_preset_reorder(reorder.as_ref(), args)
+            }),
+        )
+        .expect("could not plug preset.reorder into the table");
+    let set_backend = Arc::clone(&library);
+    table
+        .insert(
+            "preset.setBackend",
+            blocking_handler(move |args: PresetSetBackendArgs| {
+                verb_preset_set_backend(set_backend.as_ref(), args)
+            }),
+        )
+        .expect("could not plug preset.setBackend into the table");
+    let save = Arc::clone(&library);
+    table
+        .insert(
+            "preset.save",
+            blocking_handler(move |args: PresetSaveArgs| verb_preset_save(save.as_ref(), args)),
+        )
+        .expect("could not plug preset.save into the table");
+    let preview = library;
+    table
+        .insert(
+            "preset.previewFolder",
+            blocking_handler(move |args: PresetPreviewFolderArgs| {
+                verb_preview_folder(preview.as_ref(), args)
+            }),
+        )
+        .expect("could not plug preset.previewFolder into the table");
 }
 
 fn verb_status(library: &dyn LibraryCommandHost) -> Result<LibraryStatusOk, CommandError> {
@@ -388,12 +607,178 @@ fn verb_relink(
         .map_err(|refusal| refusal_error("library.relink", refusal))
 }
 
+fn verb_preset_get(
+    library: &dyn LibraryCommandHost,
+    args: PresetGetArgs,
+) -> Result<PresetGetOk, CommandError> {
+    reject_blanks(&[("path", Some(args.path.as_str()), Blank::NeedsValue)])?;
+    library
+        .preset_get(&args.path)
+        .map(PresetGetOk::from)
+        .map_err(|refusal| refusal_error("preset.get", refusal))
+}
+
+fn verb_preset_check(
+    library: &dyn LibraryCommandHost,
+    args: PresetCheckArgs,
+) -> Result<PresetCheckOk, CommandError> {
+    reject_blanks(&[("path", Some(args.path.as_str()), Blank::NeedsValue)])?;
+    let draft = PresetDraftInput {
+        presets: args.presets,
+        instructions: args.instructions,
+        skills: args.skills,
+        settings: args.settings,
+        folders: args.folders.map(unquoted),
+    };
+    library
+        .preset_check(&args.path, &draft)
+        .map_err(|refusal| refusal_error("preset.check", refusal))
+}
+
+fn verb_preset_add(
+    library: &dyn LibraryCommandHost,
+    args: PresetAddArgs,
+) -> Result<PresetAddOk, CommandError> {
+    let (backend, after) = (args.backend.as_deref(), args.after.as_deref());
+    reject_blanks(&[
+        ("path", Some(args.path.as_str()), Blank::NeedsValue),
+        ("backend", backend, Blank::OrOmit),
+        ("after", after, Blank::OrOmit),
+    ])?;
+    let entries = items_or_folders("preset.add", args.items, args.folders)?;
+    if matches!(entries, PresetEntries::Folders(_)) && backend.is_some() {
+        return Err(CommandError::invalid_argument(
+            "preset.add: `backend` goes with `items` only — a folder entry has no backend; omit it",
+        ));
+    }
+    library
+        .preset_add(&args.path, &entries, backend, after, args.root_generation)
+        .map_err(|refusal| refusal_error("preset.add", refusal))
+}
+
+fn verb_preset_remove(
+    library: &dyn LibraryCommandHost,
+    args: PresetRemoveArgs,
+) -> Result<PresetRemoveOk, CommandError> {
+    reject_blanks(&[("path", Some(args.path.as_str()), Blank::NeedsValue)])?;
+    let entries = items_or_folders("preset.remove", args.items, args.folders)?;
+    library
+        .preset_remove(&args.path, &entries, args.root_generation)
+        .map(PresetRemoveOk::from)
+        .map_err(|refusal| refusal_error("preset.remove", refusal))
+}
+
+fn verb_preset_reorder(
+    library: &dyn LibraryCommandHost,
+    args: PresetReorderArgs,
+) -> Result<PresetReorderOk, CommandError> {
+    reject_blanks(&[
+        ("path", Some(args.path.as_str()), Blank::NeedsValue),
+        ("base_rev", Some(args.base_rev.as_str()), Blank::NeedsValue),
+    ])?;
+    let order = match args.section {
+        PresetSection::Folders => unquoted(args.order),
+        _ => args.order,
+    };
+    library
+        .preset_reorder(
+            &args.path,
+            args.section,
+            &order,
+            &args.base_rev,
+            args.root_generation,
+        )
+        .map(PresetReorderOk::from)
+        .map_err(|refusal| refusal_error("preset.reorder", refusal))
+}
+
+fn verb_preset_set_backend(
+    library: &dyn LibraryCommandHost,
+    args: PresetSetBackendArgs,
+) -> Result<PresetSetBackendOk, CommandError> {
+    let backend = args.backend.as_deref();
+    reject_blanks(&[
+        ("path", Some(args.path.as_str()), Blank::NeedsValue),
+        ("backend", backend, Blank::OrOmit),
+    ])?;
+    library
+        .preset_set_backend(&args.path, &args.items, backend, args.root_generation)
+        .map_err(|refusal| refusal_error("preset.setBackend", refusal))
+}
+
+fn verb_preset_save(
+    library: &dyn LibraryCommandHost,
+    args: PresetSaveArgs,
+) -> Result<PresetSaveOk, CommandError> {
+    let base_rev = args.base_rev.as_deref();
+    reject_blanks(&[
+        ("path", Some(args.path.as_str()), Blank::NeedsValue),
+        ("base_rev", base_rev, Blank::OrOmit),
+    ])?;
+    let draft = PresetDraftInput {
+        presets: args.presets,
+        instructions: args.instructions,
+        skills: args.skills,
+        settings: args.settings,
+        folders: args.folders.map(unquoted),
+    };
+    library
+        .preset_save(&args.path, &draft, base_rev, args.root_generation)
+        .map(PresetSaveOk::from)
+        .map_err(|refusal| refusal_error("preset.save", refusal))
+}
+
+fn verb_preview_folder(
+    library: &dyn LibraryCommandHost,
+    args: PresetPreviewFolderArgs,
+) -> Result<PresetPreviewFolderOk, CommandError> {
+    let backend = args.backend.as_deref();
+    reject_blanks(&[
+        ("folder", Some(args.folder.as_str()), Blank::NeedsValue),
+        ("backend", backend, Blank::OrOmit),
+    ])?;
+    library
+        .preview_folder(unquote(&args.folder), backend, args.mode)
+        .map_err(|refusal| refusal_error("preset.previewFolder", refusal))
+}
+
+/// Folder spellings with one layer of quotes off and nothing else, as `library.setRoot` takes its path — an absolute
+/// folder pasted from a shell often comes quoted, and a quoted spelling would match no listed folder (a remove would
+/// answer success with the folder still listed). Library item spellings are never unquoted.
+fn unquoted(folders: Vec<String>) -> Vec<String> {
+    folders
+        .into_iter()
+        .map(|folder| unquote(&folder).to_owned())
+        .collect()
+}
+
+/// Exactly one of `items` and `folders` — both or neither is an argument error the handler raises itself (no args,
+/// like [`reject_blanks`]).
+fn items_or_folders(
+    command: &str,
+    items: Option<Vec<String>>,
+    folders: Option<Vec<String>>,
+) -> Result<PresetEntries, CommandError> {
+    match (items, folders) {
+        (Some(items), None) => Ok(PresetEntries::Items(items)),
+        (None, Some(folders)) => Ok(PresetEntries::Folders(unquoted(folders))),
+        (Some(_), Some(_)) => Err(CommandError::invalid_argument(format!(
+            "{command}: give `items` or `folders`, not both — make one call for each"
+        ))),
+        (None, None) => Err(CommandError::invalid_argument(format!(
+            "{command}: give `items` (library paths) or `folders` (absolute folders)"
+        ))),
+    }
+}
+
 /// The one mapping of a port refusal onto a command error (ADR-0379 decision 3): `Unavailable` → `CONFLICT`, the
 /// other classes onto their namesakes; `args` = `{code, args, line?}` of the reason — the keys of one `args.reasons`
-/// row; the message names the command and the code. A store error answers as every registry-writing command does,
-/// with no args.
+/// row; the message names the command and the code. A [`RETRY_AFTER_CONDITION`] code answers `AfterCondition`, and its
+/// message ends with [`RETRY_AFTER_CONDITION_TAIL`] — the CLI error body carries no `retry`. A store error answers as
+/// every registry-writing command does, with no args.
 // ADR-0379
 // ADR-0381
+// ADR-0386
 pub(crate) fn refusal_error(command: &'static str, refusal: PortRefusal) -> CommandError {
     match refusal {
         PortRefusal::Refused { class, reason } => {
@@ -407,7 +792,11 @@ pub(crate) fn refusal_error(command: &'static str, refusal: PortRefusal) -> Comm
             put_reason(&mut args, &reason);
             let message = refusal_message(command, &reason);
             let error = match RETRY_AFTER_CONDITION.contains(&reason.code.as_str()) {
-                true => CommandError::with_retry(code, message, RetryMode::AfterCondition),
+                true => CommandError::with_retry(
+                    code,
+                    format!("{message}; {RETRY_AFTER_CONDITION_TAIL}"),
+                    RetryMode::AfterCondition,
+                ),
                 false => CommandError::of(code, message),
             };
             error.with_args(args)
@@ -623,6 +1012,121 @@ pub(crate) mod fake {
                 "relink",
                 serde_json::json!({ "from": from, "to": to, "root_generation": root_generation }),
             )
+        }
+        fn preset_get(&self, path: &str) -> Result<PresetView, PortRefusal> {
+            self.answer("preset_get", serde_json::json!({ "path": path }))
+        }
+        fn preset_check(
+            &self,
+            path: &str,
+            draft: &PresetDraftInput,
+        ) -> Result<PresetCheckOk, PortRefusal> {
+            self.answer(
+                "preset_check",
+                serde_json::json!({ "path": path, "draft": draft_json(draft) }),
+            )
+        }
+        fn preset_add(
+            &self,
+            path: &str,
+            entries: &PresetEntries,
+            backend: Option<&str>,
+            after: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<PresetAddOk, PortRefusal> {
+            self.answer(
+                "preset_add",
+                serde_json::json!({
+                    "path": path, "entries": entries_json(entries), "backend": backend,
+                    "after": after, "root_generation": root_generation,
+                }),
+            )
+        }
+        fn preset_remove(
+            &self,
+            path: &str,
+            entries: &PresetEntries,
+            root_generation: Option<u64>,
+        ) -> Result<PresetView, PortRefusal> {
+            self.answer(
+                "preset_remove",
+                serde_json::json!({
+                    "path": path, "entries": entries_json(entries), "root_generation": root_generation,
+                }),
+            )
+        }
+        fn preset_reorder(
+            &self,
+            path: &str,
+            section: PresetSection,
+            order: &[String],
+            base_rev: &str,
+            root_generation: Option<u64>,
+        ) -> Result<PresetView, PortRefusal> {
+            self.answer(
+                "preset_reorder",
+                serde_json::json!({
+                    "path": path, "section": section, "order": order, "base_rev": base_rev,
+                    "root_generation": root_generation,
+                }),
+            )
+        }
+        fn preset_set_backend(
+            &self,
+            path: &str,
+            items: &[String],
+            backend: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<PresetSetBackendOk, PortRefusal> {
+            self.answer(
+                "preset_set_backend",
+                serde_json::json!({
+                    "path": path, "items": items, "backend": backend,
+                    "root_generation": root_generation,
+                }),
+            )
+        }
+        fn preset_save(
+            &self,
+            path: &str,
+            draft: &PresetDraftInput,
+            base_rev: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<PresetView, PortRefusal> {
+            self.answer(
+                "preset_save",
+                serde_json::json!({
+                    "path": path, "draft": draft_json(draft), "base_rev": base_rev,
+                    "root_generation": root_generation,
+                }),
+            )
+        }
+        fn preview_folder(
+            &self,
+            folder: &str,
+            backend: Option<&str>,
+            mode: Option<AgentOutputFormat>,
+        ) -> Result<PresetPreviewFolderOk, PortRefusal> {
+            self.answer(
+                "preview_folder",
+                serde_json::json!({ "folder": folder, "backend": backend, "mode": mode }),
+            )
+        }
+    }
+
+    /// A draft as the recorded call shows it.
+    fn draft_json(draft: &PresetDraftInput) -> Value {
+        serde_json::json!({
+            "presets": draft.presets, "instructions": draft.instructions, "skills": draft.skills,
+            "settings": draft.settings, "folders": draft.folders,
+        })
+    }
+
+    /// Items or folders as the recorded call shows them.
+    fn entries_json(entries: &PresetEntries) -> Value {
+        match entries {
+            PresetEntries::Items(items) => serde_json::json!({ "items": items }),
+            PresetEntries::Folders(folders) => serde_json::json!({ "folders": folders }),
         }
     }
 }
@@ -1015,8 +1519,52 @@ mod tests {
         );
         assert_eq!(
             err.message(),
-            "library.folders: library-unavailable — message: no root"
+            "library.folders: library-unavailable — message: no root; clear the cause, then repeat the same call"
         );
+    }
+
+    /// The CLI prints a refusal's message and not its `retry`, so every clearable refusal says it in words — and no
+    /// other refusal does (a retry of the same call cannot clear it).
+    #[test]
+    fn a_clearable_refusal_message_tells_the_caller_to_repeat_the_same_call() {
+        for code in RETRY_AFTER_CONDITION {
+            let library = FakeLibrary::answering(Err(refused(
+                PortClass::Unavailable,
+                code,
+                json!({ "path": "p.yaml" }),
+                None,
+            )));
+            let err = call(
+                &table(Vec::new(), library),
+                "preset.remove",
+                json!({ "path": "p.yaml", "items": ["a.md"] }),
+            )
+            .expect_err("refused");
+            assert_eq!(
+                err.message(),
+                format!(
+                    "preset.remove: {code} — path: p.yaml; clear the cause, then repeat the same call"
+                ),
+                "{code}"
+            );
+        }
+        for code in [
+            "root-generation-stale",
+            "rev-mismatch",
+            "name-exists",
+            "library-config-read-only",
+            "profile-edit-unavailable",
+        ] {
+            let library =
+                FakeLibrary::answering(Err(refused(PortClass::Conflict, code, json!({}), None)));
+            let err = call(
+                &table(Vec::new(), library),
+                "preset.get",
+                json!({ "path": "p.yaml" }),
+            )
+            .expect_err("refused");
+            assert_eq!(err.message(), format!("preset.get: {code}"), "{code}");
+        }
     }
 
     /// A store error answers as every registry-writing command (`store_command_error`): the agent picks the code and
@@ -1174,5 +1722,576 @@ mod tests {
             },
         );
         assert_eq!(message, "library.read: not-found — path: a\\nb");
+    }
+
+    // ── preset.* ──
+
+    /// Every field distinct, so a field carried into another's place fails the comparison.
+    fn preset_view() -> Value {
+        let entry = |path: &str, line: u32| json!({ "path": path, "backend": null, "line": line, "state": null });
+        json!({
+            "path": "team/p.yaml",
+            "rev": "r1",
+            "description": "d",
+            "presets": [entry("q.yaml", 3)],
+            "instructions": [{
+                "path": "a.md", "backend": "claude", "line": 5,
+                "state": { "code": "not-found", "args": { "path": "a.md" }, "line": 5 },
+            }],
+            "skills": [entry("s1", 7)],
+            "settings": [entry("s.yaml", 9)],
+            "folders": [{ "path": "C:\\f", "line": 11, "status": "unreadable", "status_why": "timed out" }],
+            "conflicts": [{
+                "kind": "conflict", "item": null, "via": null,
+                "items": [{ "item": "a.md", "via": ["team/p.yaml"] }],
+                "code": "c", "args": {}, "line": null,
+            }],
+            "problems": [{
+                "kind": "missing", "item": "a.md", "via": ["team/p.yaml"], "items": null,
+                "code": "not-found", "args": { "path": "a.md" }, "line": 5,
+            }],
+            "agents": 2,
+        })
+    }
+
+    fn partial_answer() -> Value {
+        json!({
+            "applied": ["a.md"],
+            "skipped": [{ "item": "b.md", "code": "not-found", "args": { "path": "b.md" }, "line": null }],
+            "view": preset_view(),
+        })
+    }
+
+    /// Every preset verb hands the port exactly the values the caller typed — spellings unparsed, `items` or `folders`
+    /// as the one the caller gave, omitted options as `None`, enum words in the declared spelling.
+    #[test]
+    fn each_preset_verb_hands_the_port_the_values_the_caller_typed() {
+        let entry = json!({ "path": "a.md", "backend": "codex" });
+        let draft = json!({
+            "presets": [], "instructions": [entry.clone()], "skills": [], "settings": [], "folders": null,
+        });
+        let check =
+            json!({ "save_refuses": false, "folders": [], "conflicts": [], "problems": [] });
+        let preview = json!({
+            "path": null, "refused": null, "loads": [], "truncated": false, "skipped": [], "unlisted": null,
+        });
+        let cases: Vec<(&str, Value, Value, &str, Value)> = vec![
+            (
+                "preset.get",
+                json!({ "path": "engram:/default" }),
+                preset_view(),
+                "preset_get",
+                json!({ "path": "engram:/default" }),
+            ),
+            (
+                "preset.check",
+                json!({
+                    "path": "p.yaml", "presets": [], "instructions": [entry.clone()], "skills": [],
+                    "settings": [],
+                }),
+                check.clone(),
+                "preset_check",
+                json!({ "path": "p.yaml", "draft": draft }),
+            ),
+            (
+                "preset.check",
+                json!({
+                    "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [],
+                    "folders": ["C:/f"],
+                }),
+                check,
+                "preset_check",
+                json!({ "path": "p.yaml", "draft": {
+                    "presets": [], "instructions": [], "skills": [], "settings": [], "folders": ["C:/f"],
+                } }),
+            ),
+            (
+                "preset.add",
+                json!({ "path": "p.yaml", "items": ["a.md", "s1"], "backend": "claude", "after": "x.md" }),
+                partial_answer(),
+                "preset_add",
+                json!({
+                    "path": "p.yaml", "entries": { "items": ["a.md", "s1"] }, "backend": "claude",
+                    "after": "x.md", "root_generation": null,
+                }),
+            ),
+            (
+                "preset.add",
+                json!({ "path": "p.yaml", "folders": ["C:/f"], "root_generation": 4 }),
+                partial_answer(),
+                "preset_add",
+                json!({
+                    "path": "p.yaml", "entries": { "folders": ["C:/f"] }, "backend": null,
+                    "after": null, "root_generation": 4,
+                }),
+            ),
+            (
+                "preset.remove",
+                json!({ "path": "p.yaml", "folders": ["C:/f"] }),
+                preset_view(),
+                "preset_remove",
+                json!({ "path": "p.yaml", "entries": { "folders": ["C:/f"] }, "root_generation": null }),
+            ),
+            (
+                "preset.remove",
+                json!({ "path": "p.yaml", "items": ["a.md"], "root_generation": 4 }),
+                preset_view(),
+                "preset_remove",
+                json!({ "path": "p.yaml", "entries": { "items": ["a.md"] }, "root_generation": 4 }),
+            ),
+            (
+                "preset.reorder",
+                json!({ "path": "p.yaml", "section": "skills", "order": ["b", "a"], "base_rev": "r1" }),
+                preset_view(),
+                "preset_reorder",
+                json!({
+                    "path": "p.yaml", "section": "Skills", "order": ["b", "a"], "base_rev": "r1",
+                    "root_generation": null,
+                }),
+            ),
+            (
+                "preset.setBackend",
+                json!({ "path": "p.yaml", "items": ["a.md"] }),
+                partial_answer(),
+                "preset_set_backend",
+                json!({ "path": "p.yaml", "items": ["a.md"], "backend": null, "root_generation": null }),
+            ),
+            (
+                "preset.setBackend",
+                json!({ "path": "p.yaml", "items": ["a.md"], "backend": "codex", "root_generation": 4 }),
+                partial_answer(),
+                "preset_set_backend",
+                json!({ "path": "p.yaml", "items": ["a.md"], "backend": "codex", "root_generation": 4 }),
+            ),
+            (
+                "preset.save",
+                json!({
+                    "path": "p.yaml", "presets": [], "instructions": [entry], "skills": [], "settings": [],
+                    "base_rev": "r1", "root_generation": 4,
+                }),
+                preset_view(),
+                "preset_save",
+                json!({
+                    "path": "p.yaml",
+                    "draft": {
+                        "presets": [], "instructions": [{ "path": "a.md", "backend": "codex" }],
+                        "skills": [], "settings": [], "folders": null,
+                    },
+                    "base_rev": "r1", "root_generation": 4,
+                }),
+            ),
+            (
+                "preset.previewFolder",
+                json!({ "folder": "C:/f" }),
+                preview.clone(),
+                "preview_folder",
+                json!({ "folder": "C:/f", "backend": null, "mode": null }),
+            ),
+            (
+                "preset.previewFolder",
+                json!({ "folder": "C:/f", "backend": "codex", "mode": "terminal" }),
+                preview,
+                "preview_folder",
+                json!({ "folder": "C:/f", "backend": "codex", "mode": "Terminal" }),
+            ),
+        ];
+        for (name, args, answer, method, given) in cases {
+            let library = FakeLibrary::answering(Ok(answer));
+            let table = table(Vec::new(), Arc::clone(&library));
+            call(&table, name, args).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(library.calls(), vec![(method, given)], "{name}");
+        }
+    }
+
+    /// Every folder spelling reaches the port with one layer of quotes off and its backslashes kept — a quoted
+    /// `preset.remove` folder would otherwise match no listed folder and answer success with it still listed. Library
+    /// item spellings, and a `reorder` order of an item section, reach it untouched.
+    #[test]
+    fn folder_spellings_reach_the_port_unquoted_and_item_spellings_untouched() {
+        let quoted = "\"C:\\docs\"";
+        let lists = |folders: Value| {
+            json!({
+                "path": "p.yaml", "presets": [], "instructions": [{ "path": "\"a.md\"", "backend": null }],
+                "skills": [], "settings": [], "folders": folders,
+            })
+        };
+        let draft = json!({
+            "presets": [], "instructions": [{ "path": "\"a.md\"", "backend": null }], "skills": [],
+            "settings": [], "folders": ["C:\\docs", "'D:\\x y'"],
+        });
+        let check =
+            json!({ "save_refuses": false, "folders": [], "conflicts": [], "problems": [] });
+        let preview = json!({
+            "path": null, "refused": null, "loads": [], "truncated": false, "skipped": [], "unlisted": null,
+        });
+        let cases: Vec<(&str, Value, Value, &str, Value)> = vec![
+            (
+                "preset.remove",
+                json!({ "path": "p.yaml", "folders": [quoted] }),
+                preset_view(),
+                "preset_remove",
+                json!({ "path": "p.yaml", "entries": { "folders": ["C:\\docs"] }, "root_generation": null }),
+            ),
+            (
+                "preset.remove",
+                json!({ "path": "p.yaml", "items": ["\"a.md\""] }),
+                preset_view(),
+                "preset_remove",
+                json!({ "path": "p.yaml", "entries": { "items": ["\"a.md\""] }, "root_generation": null }),
+            ),
+            (
+                "preset.add",
+                json!({ "path": "p.yaml", "folders": [quoted, "\\\\?\\D:\\lib"] }),
+                partial_answer(),
+                "preset_add",
+                json!({
+                    "path": "p.yaml", "entries": { "folders": ["C:\\docs", "\\\\?\\D:\\lib"] },
+                    "backend": null, "after": null, "root_generation": null,
+                }),
+            ),
+            (
+                "preset.check",
+                lists(json!([quoted, "\"'D:\\x y'\""])),
+                check,
+                "preset_check",
+                json!({ "path": "p.yaml", "draft": draft.clone() }),
+            ),
+            (
+                "preset.save",
+                lists(json!([quoted, "\"'D:\\x y'\""])),
+                preset_view(),
+                "preset_save",
+                json!({ "path": "p.yaml", "draft": draft, "base_rev": null, "root_generation": null }),
+            ),
+            (
+                "preset.reorder",
+                json!({ "path": "p.yaml", "section": "Folders", "order": [quoted, "D:\\y"], "base_rev": "r" }),
+                preset_view(),
+                "preset_reorder",
+                json!({
+                    "path": "p.yaml", "section": "Folders", "order": ["C:\\docs", "D:\\y"],
+                    "base_rev": "r", "root_generation": null,
+                }),
+            ),
+            (
+                "preset.reorder",
+                json!({ "path": "p.yaml", "section": "Instructions", "order": ["\"a.md\""], "base_rev": "r" }),
+                preset_view(),
+                "preset_reorder",
+                json!({
+                    "path": "p.yaml", "section": "Instructions", "order": ["\"a.md\""],
+                    "base_rev": "r", "root_generation": null,
+                }),
+            ),
+            (
+                "preset.previewFolder",
+                json!({ "folder": quoted }),
+                preview,
+                "preview_folder",
+                json!({ "folder": "C:\\docs", "backend": null, "mode": null }),
+            ),
+        ];
+        for (name, args, answer, method, given) in cases {
+            let library = FakeLibrary::answering(Ok(answer));
+            let table = table(Vec::new(), Arc::clone(&library));
+            call(&table, name, args.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(library.calls(), vec![(method, given)], "{name} {args}");
+        }
+    }
+
+    /// `preset.get` and the edits that answer the view alone answer the very view the port built, flat; the partial
+    /// edits answer `{applied, skipped, view}` as built (ADR-0384 decision 5).
+    #[test]
+    fn preset_answers_are_carried_as_the_port_built_them() {
+        let view_cases = [
+            ("preset.get", json!({ "path": "team/p.yaml" })),
+            (
+                "preset.remove",
+                json!({ "path": "team/p.yaml", "items": ["a.md"] }),
+            ),
+            (
+                "preset.reorder",
+                json!({ "path": "team/p.yaml", "section": "Presets", "order": [], "base_rev": "r1" }),
+            ),
+            (
+                "preset.save",
+                json!({
+                    "path": "team/p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [],
+                }),
+            ),
+        ];
+        for (name, args) in view_cases {
+            let library = FakeLibrary::answering(Ok(preset_view()));
+            let out = call(&table(Vec::new(), library), name, args).expect(name);
+            assert_eq!(out, preset_view(), "{name}");
+        }
+        let partial_cases = [
+            (
+                "preset.add",
+                json!({ "path": "team/p.yaml", "items": ["a.md", "b.md"] }),
+            ),
+            (
+                "preset.setBackend",
+                json!({ "path": "team/p.yaml", "items": ["a.md", "b.md"] }),
+            ),
+        ];
+        for (name, args) in partial_cases {
+            let library = FakeLibrary::answering(Ok(partial_answer()));
+            let out = call(&table(Vec::new(), library), name, args).expect(name);
+            assert_eq!(out, partial_answer(), "{name}");
+        }
+
+        let check = json!({
+            "save_refuses": true,
+            "folders": [{ "path": "C:\\f", "line": null, "status": "ok", "status_why": null }],
+            "conflicts": [],
+            "problems": [{
+                "kind": "broken", "item": "x", "via": ["p.yaml"], "items": null,
+                "code": "wrong-kind", "args": { "path": "x", "list": "skills" }, "line": null,
+            }],
+        });
+        let library = FakeLibrary::answering(Ok(check.clone()));
+        let out = call(
+            &table(Vec::new(), library),
+            "preset.check",
+            json!({ "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [] }),
+        )
+        .expect("check");
+        assert_eq!(out, check);
+
+        let preview = json!({
+            "path": "C:\\f",
+            "refused": { "path": "C:/f", "code": "folder-path-cli-unsafe", "why": null },
+            "loads": [{
+                "backend": "codex", "mode": "StreamJson", "predicted": true,
+                "set": {
+                    "loads": [{ "path": "AGENTS.md", "kind": "Instructions" }],
+                    "omitted": [{ "path": ".codex/skills", "kind": "SkillRoot" }],
+                    "carried": [],
+                    "unsure": [{
+                        "path": "x.md", "kind": "Rule", "why": "front_matter", "message": "bad", "line": 2,
+                    }],
+                    "malformed": [{ "path": "s/SKILL.md", "code": "m", "args": {}, "line": null }],
+                    "skill_names": [{ "path": "s/SKILL.md", "name": "s" }],
+                },
+                "unread": "y.md",
+            }],
+            "truncated": true,
+            "skipped": ["deep"],
+            "unlisted": null,
+        });
+        let library = FakeLibrary::answering(Ok(preview.clone()));
+        let out = call(
+            &table(Vec::new(), library),
+            "preset.previewFolder",
+            json!({ "folder": "C:/f" }),
+        )
+        .expect("preview");
+        assert_eq!(out, preview);
+    }
+
+    /// `preset.add` and `preset.remove` take exactly one of `items` and `folders`; `preset.add`'s `backend` goes with
+    /// `items` only. Each mistake is the handler's own argument error — no args, the port never called.
+    #[test]
+    fn preset_items_and_folders_are_one_of_and_backend_goes_with_items() {
+        let cases = [
+            (
+                "preset.add",
+                json!({ "path": "p.yaml", "items": ["a.md"], "folders": ["C:/f"] }),
+            ),
+            ("preset.add", json!({ "path": "p.yaml" })),
+            (
+                "preset.add",
+                json!({ "path": "p.yaml", "folders": ["C:/f"], "backend": "claude" }),
+            ),
+            (
+                "preset.remove",
+                json!({ "path": "p.yaml", "items": [], "folders": [] }),
+            ),
+            ("preset.remove", json!({ "path": "p.yaml" })),
+        ];
+        for (name, args) in cases {
+            let library = Arc::new(FakeLibrary::default());
+            let err = call(&table(Vec::new(), Arc::clone(&library)), name, args.clone())
+                .expect_err("refused");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{name} {args}");
+            assert!(err.args().is_none(), "{name} {args}");
+            assert!(
+                library.calls().is_empty(),
+                "{name} {args}: the port was called"
+            );
+        }
+    }
+
+    /// A blank value is refused before the port is called.
+    #[test]
+    fn blank_preset_values_are_refused_before_the_port_is_called() {
+        let lists = json!({ "presets": [], "instructions": [], "skills": [], "settings": [] });
+        let with_lists = |extra: Value| {
+            let mut args = lists.clone();
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            args
+        };
+        let cases = [
+            ("preset.get", json!({ "path": " " })),
+            ("preset.check", with_lists(json!({ "path": "" }))),
+            ("preset.add", json!({ "path": "", "items": ["a.md"] })),
+            (
+                "preset.add",
+                json!({ "path": "p.yaml", "items": ["a.md"], "backend": " " }),
+            ),
+            (
+                "preset.add",
+                json!({ "path": "p.yaml", "items": ["a.md"], "after": "" }),
+            ),
+            ("preset.remove", json!({ "path": " ", "items": ["a.md"] })),
+            (
+                "preset.reorder",
+                json!({ "path": "p.yaml", "section": "Skills", "order": [], "base_rev": " " }),
+            ),
+            (
+                "preset.setBackend",
+                json!({ "path": "p.yaml", "items": ["a.md"], "backend": "" }),
+            ),
+            (
+                "preset.save",
+                with_lists(json!({ "path": "p.yaml", "base_rev": "" })),
+            ),
+            ("preset.previewFolder", json!({ "folder": " " })),
+            (
+                "preset.previewFolder",
+                json!({ "folder": "C:/f", "backend": "" }),
+            ),
+        ];
+        for (name, args) in cases {
+            let library = Arc::new(FakeLibrary::default());
+            let err = call(&table(Vec::new(), Arc::clone(&library)), name, args.clone())
+                .expect_err("blank refused");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{name} {args}");
+            assert!(
+                library.calls().is_empty(),
+                "{name} {args}: the port was called"
+            );
+        }
+    }
+
+    /// A preset refusal maps as every library refusal: the class's code, the reason as `args`, the command in the
+    /// message.
+    #[test]
+    fn a_preset_refusal_maps_onto_its_code_with_the_reason_as_args() {
+        let cases = [
+            (
+                "preset.reorder",
+                json!({ "path": "p.yaml", "section": "Presets", "order": [], "base_rev": "old" }),
+                refused(
+                    PortClass::Conflict,
+                    "rev-mismatch",
+                    json!({ "rev": "new" }),
+                    None,
+                ),
+                ErrorCode::Conflict,
+            ),
+            (
+                "preset.save",
+                json!({ "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [] }),
+                refused(
+                    PortClass::InvalidArgument,
+                    "preset-save-refused",
+                    json!({ "items": [{ "list": "skills", "path": "x", "code": "wrong-kind" }] }),
+                    None,
+                ),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                "preset.get",
+                json!({ "path": "nope.yaml" }),
+                refused(
+                    PortClass::NotFound,
+                    "not-found",
+                    json!({ "path": "nope.yaml" }),
+                    None,
+                ),
+                ErrorCode::NotFound,
+            ),
+            (
+                "preset.previewFolder",
+                json!({ "folder": "C:/f", "backend": "zzz" }),
+                refused(
+                    PortClass::InvalidArgument,
+                    "backend-tag-unknown",
+                    json!({ "backend": "zzz" }),
+                    None,
+                ),
+                ErrorCode::InvalidArgument,
+            ),
+        ];
+        for (name, args, refusal, code) in cases {
+            let PortRefusal::Refused { reason, .. } = &refusal else {
+                unreachable!("built refused")
+            };
+            let mut expected = Map::new();
+            put_reason(&mut expected, reason);
+            let library = FakeLibrary::answering(Err(refusal));
+            let err = call(&table(Vec::new(), library), name, args).expect_err("refused");
+            assert_eq!(err.code(), code, "{name}");
+            assert_eq!(err.args(), Some(&expected), "{name}");
+            assert!(err.message().starts_with(&format!("{name}: ")), "{name}");
+        }
+    }
+
+    /// A problem row equals the row `agent.spawn` puts in `args.reasons` (`LaunchBlocked::to_args`) for every kind,
+    /// apart from the keys `to_args` leaves out, which the row sends as `null`.
+    #[test]
+    fn a_problem_row_is_the_launch_block_row_with_absent_keys_as_null() {
+        let reason = |line: Option<u32>| Reason {
+            code: "c".to_owned(),
+            args: json!({ "path": "a.md" }),
+            line,
+        };
+        let reasons = vec![
+            BlockReason::Missing {
+                item: "a.md".to_owned(),
+                via: vec!["p.yaml".to_owned()],
+                reason: reason(Some(3)),
+            },
+            BlockReason::Broken {
+                item: "b.md".to_owned(),
+                via: vec!["p.yaml".to_owned(), "q.yaml".to_owned()],
+                reason: reason(None),
+            },
+            BlockReason::Conflict {
+                reason: reason(None),
+                items: vec![
+                    ("a.md".to_owned(), vec!["p.yaml".to_owned()]),
+                    ("b.md".to_owned(), vec![]),
+                ],
+            },
+            BlockReason::LibraryUnavailable {
+                reason: reason(None),
+            },
+        ];
+        let blocked = crate::launch::LaunchBlocked {
+            reasons: reasons.clone(),
+        };
+        let launch_rows = blocked.to_args()["reasons"].clone();
+        let launch_rows = launch_rows.as_array().expect("rows");
+        assert_eq!(launch_rows.len(), reasons.len());
+        for (reason, launch_row) in reasons.into_iter().zip(launch_rows) {
+            let row = serde_json::to_value(problem_row(reason)).expect("row");
+            let mut row = row.as_object().expect("an object").clone();
+            let absent: Vec<String> = row
+                .iter()
+                .filter(|(key, value)| {
+                    value.is_null() && !launch_row.as_object().unwrap().contains_key(*key)
+                })
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in &absent {
+                row.remove(key);
+            }
+            assert_eq!(Value::Object(row), *launch_row);
+        }
     }
 }
