@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-117 | Cross-PC fan-out address `name@*` (send to every trusted PC's agent of that name) | Main | Deferred after S37 (Claude, user left the timing to Claude 2026-11-20) |
 | T-116 | Slots as plugins — the daemon does all behaviour, client slots only refine and present | Main | Not started — revisit with the UI structure work (user 2026-11-19) |
 | T-115 | Agent input layer — urgent vs deferred system inputs (deferred ones ride the next input, no extra turn) | Main | Not started — separate topic (user 2026-11-19) |
 | T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | Main | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
@@ -75,6 +76,11 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-117. Cross-PC fan-out address `name@*`
+- **Status:** deferred after S37 — user 2026-11-20 chose for S37: a bare name found on several PCs is refused with `name@pc` candidates, and an explicit "send to all" form is offered (「ㅇㅇ 그렇게 하면 될듯?」); timing left to Claude (「그거 넣는건 알아서해 더 좋은 방향으로」) → after S37, to keep S37's U3 smaller.
+- **Why explicit:** no precedent fans out implicitly on a name collision; every deliver-to-all is a deliberate form (Reason Network `*` / `person/*` live only, hcom broadcast / `@tag-`, Slack `@channel`, NATS subjects, Erlang `pg`, our `@all` / `@here`).
+- **Shape to start from:** a group source over the directory copies (ADR-0104 group seam); `request` opens one contract per recipient (existing N-contract path); the result names trusted PCs left out because their directory is unknown (fan-out reaches known members only).
 
 ### T-116. Slots as plugins — daemon behaviour, client presentation
 - **Status:** not started — user 2026-11-19 (S37, deciding the PC list panel): 「약간 룰같은건데 슬롯 플러그인? 개념으로 가야지 기본적으로 돌아가는건 데몬에서 다 되고 클라쪽은 정제 및 표현이지. 이건 UI 구조할때 다시 해야될듯」. Earlier the same day: third-party clients / skins (e.g. a game-like client registering commands to drive the LLM).
