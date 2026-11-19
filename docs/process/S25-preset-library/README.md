@@ -13,5 +13,7 @@ Agent presets: a library folder of instructions, skills, settings and preset fil
 | `trd-codex-translation.md` | step 6 — codex launch materials | landed |
 | `trd-asset-library.md` | step 7 — the asset-library crate | Implemented |
 | `trd-daemon-wiring.md` | step 8 — plug the real launch materials into the daemon | Implemented |
+| `trd-library-edit.md` | step 9a — root, edits, create, relink | Implemented |
+| `trd-library-commands.md` | step 10a — library, preset and agent-preset commands, help, priming | Implemented |
 | `trd-old-priming-removal.md` | remove the old priming path and the settings fragment (closes `trd.md` §2-4 item 2 — ADR-0370) | Implemented |
 | `briefing.html` · `trd-asset-library.html` | Korean explainers (made on request; the md files are canonical) | — |
