@@ -32,7 +32,7 @@
 - 바뀐 파일에 `ts(export` 가 있으면 주석만이어도 「Rust 소스」 행이다 — 그 doc 주석이 생성물(`bindings/*.ts`)로 흘러 동기 게이트가 깨진다.
 - 범위 정의:
   - **전체 회귀** = CI 세 잡(`backend` · `gates` · `frontend`)을 로컬에서 도는 것. 절차 = qa-verify 「전체 회귀 — CI 세 잡 로컬 실행」.
-  - **영향 모듈** = 아래 「모듈별 명령」의 그 모듈 줄. 변이 확인 · 재현 명령 · 작은 수정 확인에 쓴다.
+  - **영향 모듈** = 아래 「모듈별 명령」의 그 모듈 줄. 재현 명령 · 작은 수정 확인에 쓴다.
 - 로컬 순서 = 전체 회귀 → (깨지면) 깨진 테스트 가르기 → 로컬 레인 → (레인이 깨지면) 그 실패 가르기 → 변이 확인 → GUI 실측. 로컬 단계끼리 병렬로 돌리지 않는다.
 - 가르기 뒤 라벨 없는 실패가 남으면 거기서 멈춘다 — 토큰 레인(claude · codex)을 돌지 않는다.
 
@@ -63,7 +63,7 @@ git status --porcelain > "$QA_TMP/status.start"
 
 ### 분리 실행
 
-빌드 · 테스트는 전부 이 래퍼로 돈다:
+빌드 · 테스트는 전부 이 래퍼로 돈다(변이 확인은 예외 — 「변이 확인」):
 
 ```bash
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "<명령 한 줄>" -WorkDir "<워크트리 루트>" -LogFile "$QA_TMP/<이름>.log"
@@ -191,27 +191,41 @@ git worktree add --detach "$QA_TMP/base" <기준점>
 
 ## 변이 확인
 
-작업 트리에서 깬다(qa flow §변이 확인 「작업 트리 변이」를 이 프로젝트가 허용한다). 지시서가 「같은 트리를 쓰는 다른 작업자 없음」을 밝히지 않았거나, 진행 중인 rebase · merge · cherry-pick 이 있거나(`git status` — 이어 가는 커밋은 pre-commit 을 건너뛴다), 커밋 차단이 걸려 있지 않으면(`git config core.hooksPath` 가 `scripts/git-hooks` 가 아니거나, `scripts/git-hooks/pre-commit` 이 없거나, `grep -c $'' scripts/git-hooks/pre-commit` 이 0 이 아니면) 「격리 사본 — 대체」로 간다.
+깨기 · 그 테스트 실행 · 원복은 qa flow §변이 확인의 스크립트(`mutate.mjs`)로만 한다 — 파일을 손으로 깨지 않는다. 테스트 명령 = `.claude/skill-bindings/qa-mutate.json` → `node scripts/qa-mutate-test.mjs {pkg} {name}`(빌드 포함 · 셸 없이 돈다 · 쓰는 법은 그 파일 머리).
 
-- 커밋 차단 = `scripts/git-hooks/pre-commit` — 스테이지에 줄 끝 표식이 든 커밋을 거부한다. 설치 = 저장소 루트에서 `git config core.hooksPath scripts/git-hooks` 한 번(모든 워크트리에 걸린다).
+| 시험 | `--pkg` | `--test` |
+|---|---|---|
+| Rust 단위(crate 안 `#[cfg(test)]`) | `<crate>/lib` | crate 안 전체 경로(`writable::tests::<이름>`) |
+| Rust 통합(`tests/<타깃>.rs`) | `<crate>/<타깃>` | 그 파일 안 경로(`real_process::<이름>`) |
+| 셸 lib 단위 | `engram-dashboard/lib_unit` | 〃 |
+| cli bin | `engram-dashboard-cli/bins` | 〃 |
+| 프론트 | `frontend` | 시험 파일(`src/…/<이름>.test.ts`) — 파일 통째 |
 
-- `#[ignore]` 시험은 `--` 뒤에 `--ignored` 를 붙인다 — 안 붙이면 0개가 돈다. `real_wmi` 는 사용자 확인 뒤에만 돈다(「비용 없는 `#[ignore]` 레인」).
+- `<crate>` = 패키지 이름 전체(`engram-dashboard-agent`). 셸 패키지를 타깃 없이 주거나 `/lib` 로 주면 래퍼가 거부한다.
+- 이름은 `--exact` 로 하나만 집는다. 전체 경로를 모르면 `cargo test -p <crate> --lib -- --list`(통합이면 `--lib` 자리에 `--test <타깃>`)로 본다.
+- `#[ignore]` 시험도 이름으로 집으면 돈다 — 래퍼가 `--include-ignored` 를 붙인다. `real_wmi` 는 사용자 확인 뒤에만 집는다(「비용 없는 `#[ignore]` 레인」).
+- 셸 패키지 시험 앞에서 래퍼가 데몬 exe 를 다시 짓는다 — 깬 줄이 데몬 쪽이면 그 시험이 깬 데몬을 띄운다.
+- 프론트는 이름 필터가 없다 — 공백 · 한글이 든 이름은 스크립트가 거부한다.
+- 깨기 전에 같은 `<pkg>` `<name>` 으로 래퍼를 한 번 돌려 `test-passed ran=1` 을 본다 — 이름 오류를 깨기 전에 잡고, 빌드가 데워져 깬 채로 있는 시간이 준다.
+- Bash 호출은 `run_in_background` 로 돌리거나 timeout 을 600000 으로 준다 — 도구 시간 제한이 프로세스를 끊으면 원복을 못 하고 결과 JSON 이 `running` 으로 남는다(flow 「멈추는 때」). 분리 실행으로 감싸지 않는다 — 허용 규칙은 flow 모양 그대로의 명령에만 걸린다.
+- 판정 = 출력 마지막 줄 `qa-mutate-test: <결과> ran=… passed=… failed=…` 에 flow 판정 규칙을 얹는다. 스크립트의 `test-failed` 는 0 아닌 종료 전부다 — 그 줄로 가른다.
+  - `test-failed`(ran ≥ 1 · failed ≥ 1) — 실패가 그 시험의 단언 · 패닉인지 출력에서 본다. 그렇다면 잡힘.
+  - `test-passed` — 그 시험이 깬 줄을 지키지 않는다. 보고한다.
+  - `build-or-run-error` — 컴파일 실패 등이다. 변이 확인이 아니다.
+  - `no-test-ran` — `--pkg` · `--test` 를 고친다.
+- 빌드가 `os error 5` 로 죽으면(떠 있는 앱 · 데몬이 이 트리 `target` 의 exe 를 쥠) 그 프로세스를 끄지 않고 격리 사본으로 다시 돈다 — 래퍼는 `--target-dir` 를 받지 않는다.
 
-### 작업 트리
+### 어느 트리에서 깨나
 
-```bash
-mkdir -p "$QA_TMP/mut" && cp <파일> "$QA_TMP/mut/" && sha256sum <파일> > "$QA_TMP/mut/before.sha"
-```
+작업 트리에서 깬다 — flow §변이 확인의 작업 트리 변이를 이 프로젝트가 허용한다. 아래 중 하나라도 걸리면 「격리 사본」으로 간다:
 
-- 한 번에 한 줄을 깨고, 깬 줄 끝에 `// QA-MUTATION` 을 단다.
-- Rust: 분리 실행(작업 트리 · 기본 target)으로 `cargo test -p <crate> <시험 이름>` — 실패해야 한다. 데몬 exe 를 띄우는 시험(`stop_smoke` · `lib_unit` 의 `real_wmi`)은 그 앞에 `cargo build -p engram-dashboard-daemon` 을 돈다.
-- 프론트: 작업 트리에서 `npx vitest run <시험 파일>`.
-- 원복 전 = `diff "$QA_TMP/mut/<파일 이름>" <파일>` 에 표식 단 한 줄만 나와야 한다 — 아니면 덮어쓰지 않고 멈춘다.
-- 원복 = `cp "$QA_TMP/mut/<파일 이름>" <파일>` 로 덮어쓴다 — 수정 시각이 바뀌어 다음 빌드가 그 crate 를 다시 짓는다.
-- 원복 확인 = `sha256sum -c "$QA_TMP/mut/before.sha"` 가 `OK` 이고 `git grep --untracked -n -E '(//|#)[[:space:]]*QA-MUTATION[[:space:]]*$' -- ':!*.md'` 가 비어야 한다. 아니면 멈춘다.
-- 멈출 때는 `$QA_TMP/mut` 를 「뒷정리」에서 지우지 않고, 그 경로와 깬 줄을 보고에 싣는다.
+- 지시서가 「같은 트리를 쓰는 다른 작업자 없음」을 밝히지 않았다.
+- 진행 중인 rebase · merge · cherry-pick 이 있다(`git status` — 이어 가는 커밋은 pre-commit 을 건너뛴다).
+- 커밋 차단이 안 걸려 있다 — `git config core.hooksPath` 가 `scripts/git-hooks` 가 아니거나, `scripts/git-hooks/pre-commit` 이 없거나, `grep -cU $'\r' scripts/git-hooks/pre-commit` 이 0 이 아니다(`-U` 가 없으면 Git Bash grep 이 줄 끝 CR 을 떼고 세어 늘 0 이다).
 
-### 격리 사본 — 대체
+- 커밋 차단 = `scripts/git-hooks/pre-commit` — 스테이지에 표식(스크립트가 바꾼 토큰 뒤에 다는 블록 주석 · 줄 끝 표식)이 든 커밋을 거부한다. 설치 = 저장소 루트에서 `git config core.hooksPath scripts/git-hooks` 한 번(모든 워크트리에 걸린다).
+
+### 격리 사본
 
 ```bash
 git worktree add --detach "$QA_TMP/wt" HEAD
@@ -219,19 +233,20 @@ git -c core.safecrlf=false diff HEAD --binary | git -C "$QA_TMP/wt" apply --allo
 git ls-files -o --exclude-standard -z | xargs -0 -r cp --parents -t "$QA_TMP/wt"
 ```
 
-- 사본 = HEAD 에 작업 트리의 변경(추적 파일 diff · 무시 안 된 미추적 파일)을 얹은 것이다 — qa 는 커밋 전에 돈다.
+- 사본 = HEAD 에 작업 트리의 변경(추적 파일 diff · 무시 안 된 미추적 파일)을 얹은 것이다 — qa 는 커밋 전에 돈다. `--root "$QA_TMP/wt"` 로 부르고 `--file` 은 사본 기준 경로다.
+- `qa-mutate.json` 은 HEAD 에 커밋된 그대로 건너간다. 이번 변경이 그 파일을 고쳤으면 스크립트가 거부한다 — flow 대로 보고한다.
 - `--allow-empty` 는 추적 파일 변경이 없을 때(미추적 추가뿐 · 커밋 뒤 재실행) 빈 diff 를 통과시킨다 — 빼면 종료코드 128 로 죽는다.
 - 그 밖에 `apply` 가 실패하면 변이 확인을 멈추고 보고한다 — 변경이 빠진 사본으로 재지 않는다.
 - 줄끝만 다른 ` M` 파일은 `git diff` 에 안 나와 사본에 건너가지 않는다 — 내용은 같다. `-c core.safecrlf=false` 는 그 파일마다 찍히는 LF→CRLF 경고만 끈다(오류는 그대로 찍힌다).
-- Rust: 사본 줄을 깬 뒤 분리 실행을 `-WorkDir "$QA_TMP/wt"` 로 `cargo test --target-dir "$QA_TMP/target" -p <crate> <시험 이름>` — 실패해야 한다.
-- 셸 패키지 시험 중 데몬 exe 를 띄우는 것(`stop_smoke` · `lib_unit` 의 `real_wmi`)은 `<target-dir>/<profile>/` 의 데몬을 쓴다 — 그 앞에 같은 사본 · 같은 `--target-dir` 로 `cargo build -p engram-dashboard-daemon` 을 돈다. daemon crate 시험은 cargo 가 데몬을 같이 짓는다.
-- 프론트: 사본에서 `npm ci` 뒤 `npx vitest run <시험 파일>`.
-- 저장소 밖 `--target-dir` 를 쓰면 `builtin\` 을 `<target-dir>/debug/deps/` 옆에 복사한다 — 데몬이 설치 루트 기준으로 찾는다.
+- Rust 는 사본 안 `target/` 에 찬 빌드를 한다(수 GiB) — 짓기 전에 남은 디스크를 보고, 모자라면 멈추고 보고한다. 지워서 공간을 만들지 않는다.
+- 프론트는 사본에서 분리 실행으로 `npm ci` 를 먼저 돈다 — 사본에는 `node_modules` 가 없다.
 - 사본은 뒷정리 때 통째로 지운다. 작업 트리 대조는 「뒷정리」 첫 줄이다.
 
 ## GUI 실측
 
 - 무엇을 어떤 채널로 재나(cdp · 레지스트리 · 탈출구 · 창 조작) = qa-verify 「GUI 조리법」.
+- 설정 · 버스 명령(`settings.set` 등)은 `invoke('forward_daemon_command', …)` 로 보낸다 — 토큰을 안 쓴다(모양 = qa-verify 「셸 invoke」).
+- `engram` CLI 는 에이전트 안에서만 돈다 — `ENGRAM_TOKEN` 이 에이전트에만 주입돼 밖에서는 `NO_TOKEN` 으로 끝난다. 터미널 장면에 쓸 토큰 0 에이전트는 없다(백엔드 = claude · codex) — claude 칸의 `!` 로 CLI 를 돌리면 claude 가 한 턴을 돌아 토큰을 쓴다.
 - 디버그 셸은 화면을 품지 않는다 — 이 워크트리의 dev 서버(1420)에서 받는다.
 
 ### 띄우기 전 점검
@@ -355,7 +370,7 @@ bash ~/.claude/references/recycle.sh '<분리 실행이 찍은 BAT= 경로>'… 
 git worktree prune
 ```
 
-- `rm -rf` 자리는 휴지통 명령으로 한다(`rm -rf` 는 권한이 막는다). 예외는 둘 — 사본을 git 에서 떼는 `git worktree remove --force` 와 아래 `robocopy /MIR` 비우기. 줄마다 `recycled` · `skip (missing)` 이면 된 것이다. 명령이 없거나 막히면 다른 명령으로 돌아가지 않고 남은 경로를 보고한다.
+- 지우는 자리는 휴지통 명령으로 한다 — `rm` 은 전역 PreToolUse 훅이 막는다(Engram 안 캐시 폴더 `target` · `node_modules` · `dist` · `__pycache__` 만 통과). 휴지통 명령을 안 쓰는 자리는 둘 — 사본을 git 에서 떼는 `git worktree remove --force` 와 아래 `robocopy /MIR` 비우기. 줄마다 `recycled` · `skip (missing)` 이면 된 것이다. 명령이 없거나 막히면 다른 명령으로 돌아가지 않고 남은 경로를 보고한다.
 - `BAT=` 경로는 역슬래시 Windows 경로다 — 작은따옴표로 감싼다. 안 감싸면 bash 가 `\` 를 먹어 없는 경로가 되고 `skip (missing)` 이 된 것처럼 보인다.
 - `git worktree prune` 이 휴지통으로 간 사본을 git 에서 뗀다 — `git worktree list` 에 `$QA_TMP` 아래가 남지 않아야 한다.
 - `git worktree remove` 가 긴 경로로 실패하면 그 사본을 빈 폴더로 미러해 비운 뒤 지운다:

@@ -1,8 +1,9 @@
 #!/bin/sh
-# Blocks a commit while a line broken by the QA mutation check (with its end-of-line marker comment) is still there — qa binding 「변이 확인」. # hangul-ok
+# Blocks a commit while a line broken by the QA mutation check is still there — the marker comment is a block comment right after
+# the changed token (mutate.mjs, // languages), or at the end of the line (.py/.rb and the older hand-written form). qa binding 「변이 확인」. # hangul-ok
 # Install = `git config core.hooksPath scripts/git-hooks` once at the repository root (it applies to every worktree).
 m='QA-''MUTATION'
-hits=$(git diff --cached -U0 --no-color --no-ext-diff -- . ':(exclude)*.md' | awk '/^diff --git /{h=0;next} /^@@/{h=1;next} h' | grep -E "^\+.*(//|#|--|/[*])[[:space:]]*${m}[[:space:]]*([*]/)?[[:space:]]*\$")
+hits=$(git diff --cached -U0 --no-color --no-ext-diff -- . ':(exclude)*.md' | awk '/^diff --git /{h=0;next} /^@@/{h=1;next} h' | grep -E "^\+.*(/[*][[:space:]]*${m}[[:space:]]*[*]/|(//|#|--|/[*])[[:space:]]*${m}[[:space:]]*([*]/)?[[:space:]]*\$)")
 if [ -n "$hits" ]; then
 	echo "commit blocked: qa mutation marker ${m} is staged — a broken line was not restored:" >&2
 	echo "$hits" | head -5 >&2
