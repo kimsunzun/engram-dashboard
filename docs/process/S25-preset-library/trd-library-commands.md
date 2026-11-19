@@ -310,4 +310,4 @@ Each unit is green on its own (full regression); U1 already answers through the 
 
 ## 13. Review record
 
-(empty)
+- 2026-11-19 · deep (lead · risk lens: concurrency of setWorkspace / duplicate / agent.new · codex) · PASS at round 2 on draft 2 (`a0646f9b`); draft 3 (`debec111`) folds the round-2 권장 and the user decisions, checked by main.
