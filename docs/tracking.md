@@ -83,6 +83,7 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-98 | An in-flight create can outlive the single-instance guard and write the roster after it is released | Bug | Not started · pre-existing · rare ordering · found by the master-merge review |
 | T-99 | A spawn during daemon stop leaves an asleep agent with a last-failure mark | Bug | Recorded, not planned (「최소한만 막기」) · pre-existing · found by the master-merge review |
 | T-106 | S25 step 7 asset-library — review findings recorded, not fixed (races, edge answers, cost) | Bug | Recorded, not planned (user 2026-11-12 review-fix criterion) · theoretical paths · found by the step-7 code reviews (P5–P9) |
+| T-117 | S25 step 9a library edit — review findings recorded, not fixed | Bug | Recorded, not planned · user 2026-11-19 |
 | T-107 | S25 step 7 asset-library — test names that overclaim, placements no test pins, two log lines not reworded | Minor feature · cleanup | Not started · found by the step-7 code reviews and QA (P4 · P5 · P9) |
 | T-108 | Convert the existing Korean log messages to English (one batch) | Minor feature · cleanup | Not started · user decision 2026-11-13 — the convention changed now, the existing lines later in one batch |
 | T-92 | The codex real-terminal cwd guard repeats `& ^ \| < >` instead of using the platform set | Minor feature · cleanup | Not started · found by S25 step 6 review |
@@ -562,6 +563,14 @@ Full text before the simplification (investigation records · reverted attempts 
   - P8 `lib.rs` · `resolve.rs`: the root status and the catalog are read under two lock takes — a root change in between pairs an older root state with the newer catalog (a read computation only); skill collection is quadratic; `ListRow.state` carries no preset line problems; a file the scan could never read stays ① (not ②) in the read entrances.
   - P9 `launch.rs`: an unanswered project-marker stat reads as "no marker"; `remove_tree` and the sweep root check are path-based (TOCTOU — boot time, Engram's own folder); a source replaced by a folder gives `Failed`, not `Stale`, on Windows.
   - P3 / P5 hand-over, checked 2026-11-13 (`catalog.rs` `yaml_item`): a successful parse wins over `sniff_kind` only for presets — a `kind` the line scan reads as unknown (`!!str preset`, an anchor, a block scalar) is parsed as a preset, so the same spellings of `settings` fail, and a `kind` only inside a flow mapping (`{kind: preset}`) reads as `Absent` (not listed).
+- **Next:** revisit one when a real case shows; otherwise none.
+
+### T-117. S25 step 9a library edit — review findings recorded, not fixed
+- **Status:** recorded, not planned (user 2026-11-19: 「그냥 미뤄.」). Found by the step-9a code reviews; the U3 (`6aae4b76`) and U4 (`bda7d849`) commit messages list them. Step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md`.
+- **Findings** (all in `crates/engram-dashboard-asset-library/src/`; code reading, none reproduced):
+  - U3 `agent_edit.rs` `agent_edit`: every agent-preset edit stats the library root before its change, even when the agent has no library preset (the stat is used only when one is attached). A root on an unresponsive share delays that edit by up to `IO_LIMIT` (5 s); outside every lock, so no other request waits. Fix shape: stat only when a library preset is attached — known only inside the change, so the order changes. Re-judge when step 10a routes the commands.
+  - U3 `lib.rs` `plug_profile_edit`: the second-plug branch (warn, ignore) has no test; production plugs once.
+  - U4 `relink.rs` part (b): the "other missing targets" judgement covers items and folders, the tests only items (coder's note, fix round 1).
 - **Next:** revisit one when a real case shows; otherwise none.
 
 ## Minor feature · cleanup
