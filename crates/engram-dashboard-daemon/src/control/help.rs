@@ -3,19 +3,21 @@
 //! Owns the screen word vocabulary (word → screen · old word aliases), the body file path rule, section parsing, the required-section check, rendering and request body
 //! interpretation; the CLI only sends one word and prints the screen (two copies would diverge).
 //! It reads the file on every request — do not add a cache: the daemon is long-lived, and a once-read body would not change after editing until relaunch (the purpose
-//! of keeping the body outside the binary). Cost: one ~20 KB read per request.
+//! of keeping the body outside the binary). Cost: one ~40 KB read per request.
 //! A failure is a bounce — no built-in copy, no half screen: an unreadable file or missing required section answers `INTERNAL` with a warn; a half screen hides what
 //! was missing and a stale copy hides that the body is broken.
 //! It does not look at the caller: the screen is the same for everyone (per-caller filters withdrawn — ADR-0220 decision 4), so this route is not mail and a
 //! mail-blocked credential reads it too (`mcp_server::ControlRoute::is_mail`).
 //! It does not interpret client text: it only picks a `## <id>` section of the daemon's own distribution file and gives it as is — it touches neither the roster's `help`
-//! blob (ADR-0156) nor UI command payloads (ADR-0081). The words `window` · `settings` are screen names, not UI command names; window command names and arguments exist only in that body's prose.
+//! blob (ADR-0156) nor UI command payloads (ADR-0081). The words `window` · `settings` · `library` are screen names, not UI command names or CLI families; the command names and arguments of those screens exist only in that body's prose.
+//! Six screens, all required (`HelpTopic::ALL`): `library` joined with the library, preset and agent-preset commands (ADR-0386).
 // ADR-0081
 // ADR-0092
 // ADR-0156
 // ADR-0212
 // ADR-0220
 // ADR-0285
+// ADR-0386
 
 use std::path::PathBuf;
 
@@ -46,12 +48,14 @@ const ENV_HELP_FILE: &str = "ENGRAM_HELP_FILE";
 /// A markdown heading, not an HTML comment, on purpose: viewers hide the comment form entirely, so the editor saw no section boundary (7KB read as undivided prose). The header title is level 1 (`# `) and does not match this level-2 pattern.
 const SECTION_OPEN: &str = "## ";
 
-/// The section id of the top-level screen; the other four are the family words as is ([`HelpTopic::section_id`]).
+/// The section id of the top-level screen; the other five are the screen words as is ([`HelpTopic::section_id`]).
 const SECTION_ROOT: &str = "root";
 
-/// The words of the two screens with no family constant (`CLI_GROUP_*`): window and settings are called only by full name (`window.list` · `settings.get`) with no `<family> <verb>` entrance, so family constants would create families the CLI parser does not accept.
+/// The words of the three screens with no family constant (`CLI_GROUP_*`): window, settings and library are called only by full name (`window.list` · `settings.get` · `library.list` · `preset.get`) with no `<family> <verb>` entrance, so family constants would create families the CLI parser does not accept.
 const HELP_TOPIC_WINDOW: &str = "window";
 const HELP_TOPIC_SETTINGS: &str = "settings";
+// ADR-0386
+const HELP_TOPIC_LIBRARY: &str = "library";
 
 /// Old screen word → current screen. Accepted only as a request word, not carried in the bounce wording.
 ///
@@ -67,6 +71,7 @@ enum HelpTopic {
     Agent,
     Window,
     Settings,
+    Library,
 }
 
 impl HelpTopic {
@@ -77,6 +82,7 @@ impl HelpTopic {
         HelpTopic::Agent,
         HelpTopic::Window,
         HelpTopic::Settings,
+        HelpTopic::Library,
     ];
 
     fn section_id(self) -> &'static str {
@@ -86,6 +92,7 @@ impl HelpTopic {
             HelpTopic::Agent => CLI_GROUP_AGENT,
             HelpTopic::Window => HELP_TOPIC_WINDOW,
             HelpTopic::Settings => HELP_TOPIC_SETTINGS,
+            HelpTopic::Library => HELP_TOPIC_LIBRARY,
         }
     }
 
@@ -715,7 +722,137 @@ mod tests {
         }
     }
 
-    /// The four family words each reach their own screen — a word wired to another screen still shows a success envelope, so it checks they differ from each other and the head is its own family.
+    /// The library screen teaches every library, preset and agent-preset command by its full name (full names only —
+    /// the CLI has no `library` family), and the rules no single command summary carries: the file formats with a
+    /// `description:`, the description rule, the folder entry form, the whole-file rewrite (ADR-0358), the two edit
+    /// guards, how to read a refusal, and the check before a creating call is repeated. It never says a missing item
+    /// blocks a launch — that stops being true when launches skip missing items (ADR-0374). The agent screen names the
+    /// two new verbs and `--presets` and points at this screen. A command added to the library port without a line here
+    /// turns this red.
+    // ADR-0358
+    // ADR-0374
+    // ADR-0386
+    #[test]
+    fn the_library_screen_teaches_every_library_command_and_the_edit_rules() {
+        let _env = env_guard();
+        let source = HelpSource::new(repo_root());
+        let root = screen_of(&source, None);
+        let library = screen_of(&source, Some(HELP_TOPIC_LIBRARY));
+        let agent = screen_of(&source, Some(CLI_GROUP_AGENT));
+        assert!(
+            root.contains(&format!("{CLI_EXE_NAME} help {HELP_TOPIC_LIBRARY} ")),
+            "the root screen lists the library screen: {root}"
+        );
+
+        let agent_presets = [
+            "agent.presets",
+            "agent.attachPreset",
+            "agent.detachPreset",
+            "agent.reorderPresets",
+        ];
+        let names: Vec<&str> = engram_dashboard_agent::commands::COMMAND_SPECS
+            .iter()
+            .map(|spec| spec.name)
+            .filter(|name| {
+                name.starts_with("library.")
+                    || name.starts_with("preset.")
+                    || agent_presets.contains(name)
+            })
+            .collect();
+        assert_eq!(
+            names.len(),
+            21,
+            "9 library, 8 preset and 4 agent-preset commands are declared: {names:?}"
+        );
+        for name in names {
+            // A whole word — `agent.presets` must not pass on the strength of `agent.presetsX`.
+            let line = format!("{CLI_EXE_NAME} {name}");
+            assert!(
+                library.contains(&format!("{line} ")) || library.contains(&format!("{line}\n")),
+                "{name} by its full name on the library screen: {library}"
+            );
+        }
+
+        for taught in [
+            "kind: preset",
+            "description:",
+            "folders:",
+            "Write a one-line description when you create or edit a settings or preset file.",
+            "An edit through Engram rewrites the whole preset file",
+            "root_generation",
+            "root-generation-stale",
+            "base_rev",
+            "rev-mismatch",
+            "args.code",
+            "clear the cause, then repeat the same call",
+            "workspace-not-found",
+            "check agent.list before calling again",
+        ] {
+            assert!(
+                library.contains(taught),
+                "the library screen teaches `{taught}`: {library}"
+            );
+        }
+        assert!(
+            !library.contains("block"),
+            "the library screen must not tie a missing item to a blocked launch: {library}"
+        );
+
+        let pointer = format!("{CLI_EXE_NAME} help {HELP_TOPIC_LIBRARY}");
+        for taught in [
+            "agent.new --backend",
+            "--presets",
+            "agent.setWorkspace --target",
+            "agent.duplicate --target",
+            "check agent.list before calling again",
+            pointer.as_str(),
+        ] {
+            assert!(
+                agent.contains(taught),
+                "the agent screen teaches `{taught}`: {agent}"
+            );
+        }
+    }
+
+    /// Every `--flag` on a command line of the library screen (`  engram <name> …`) is a declared argument of that
+    /// command — a flag the LLM learns here and the declaration does not take is refused by the CLI before it is sent.
+    // ADR-0386
+    #[test]
+    fn every_flag_on_the_library_screen_is_a_declared_argument() {
+        let _env = env_guard();
+        let library = screen_of(&HelpSource::new(repo_root()), Some(HELP_TOPIC_LIBRARY));
+        let lead = format!("  {CLI_EXE_NAME} ");
+        let mut checked = 0;
+        for line in library.lines().filter(|l| l.starts_with(&lead)) {
+            let mut tokens = line[lead.len()..].split_whitespace();
+            let name = tokens.next().expect("a command name after the executable");
+            let spec = engram_dashboard_agent::commands::COMMAND_SPECS
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| {
+                    panic!("`{name}` on the library screen is not declared: {line}")
+                });
+            let schema: serde_json::Value =
+                serde_json::from_str(spec.args_schema).expect("an args schema");
+            for flag in tokens.filter_map(|t| {
+                t.trim_start_matches(['(', '['])
+                    .strip_prefix("--")
+                    .map(|f| f.trim_end_matches([')', ']', '|']))
+            }) {
+                assert!(
+                    schema["properties"].get(flag).is_some(),
+                    "--{flag} is not an argument of {name}: {line}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "no flag found on the library screen: {library}"
+        );
+    }
+
+    /// The five screen words each reach their own screen — a word wired to another screen still shows a success envelope, so it checks they differ from each other and the head is its own family.
     #[test]
     fn each_group_word_renders_its_own_screen() {
         let _env = env_guard();
@@ -732,7 +869,7 @@ mod tests {
             );
             seen.push((word, screen));
         }
-        assert_eq!(seen.len(), 4, "the family words are four: {seen:?}");
+        assert_eq!(seen.len(), 5, "the screen words are five: {seen:?}");
         let root = screen_of(&source, None);
         for (word, screen) in &seen {
             assert_ne!(*screen, root, "{word} is the same as the top-level screen");

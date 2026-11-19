@@ -72,6 +72,7 @@ use crate::resolve::{
 use crate::store::{admits, ContentTag};
 use crate::{
     LibraryRefusal, LibraryService, RefusalClass, Want, LIBRARY_READ_CAP, PATH_THROUGH_LINK,
+    STAT_UNANSWERED,
 };
 
 /// The code of a `baseRev` that is not the `rev` of the bytes read inside the change (`args` = `{rev}`, the current
@@ -1459,10 +1460,15 @@ impl LibraryService {
                         judged: refusal(FOLDER_PATH_RELATIVE, None),
                     };
                 };
-                let status = statuses
-                    .get(&path_key(&path))
-                    .cloned()
-                    .expect("stat_all answers every path it is asked");
+                // ADR-0293: `stat_all` answers every path it is asked, but a broken answer is an unreadable folder
+                //   here (the folder is refused), never an abort.
+                let status = statuses.get(&path_key(&path)).cloned().unwrap_or_else(|| {
+                    tracing::error!(
+                        path = %escape_controls(&path.to_string_lossy()),
+                        "the bounded stat gave no answer for the path it was asked"
+                    );
+                    FolderStatus::Unreadable(STAT_UNANSWERED.to_owned())
+                });
                 let judged = if !path_is_cli_safe(&path) {
                     refusal(FOLDER_PATH_CLI_UNSAFE, None)
                 } else if status == FolderStatus::Ok {

@@ -858,8 +858,8 @@ declare_commands! {
         root_generation: u64,
     } errors [CONFLICT];
 
-    /// Moves the library to the absolute folder `path` (`create` makes it first) and saves it in library.json; answers
-    /// the status after the change (as `library.status`). CONFLICT: `library-config-read-only` (nothing done),
+    /// Points the library at the absolute folder `path` (`create` makes the folder first; no file is copied or moved)
+    /// and saves it in library.json; answers the status after the change (as `library.status`). CONFLICT: `library-config-read-only` (nothing done),
     /// `library-root-unusable` (the folder cannot be used — nothing published), `library-config-write-failed` (the new
     /// root is live but not saved). A relative path is INVALID_ARGUMENT `item-path-invalid`.
     #[effect(Write)]

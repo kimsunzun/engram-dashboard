@@ -4399,8 +4399,10 @@ mod tests {
         manager.agent_snapshot(id).and_then(|p| p.last_failure)
     }
 
-    /// An earlier failure the refused launch must leave as it is — neither recorded over nor cleared (ADR-0172).
-    const EARLIER: AgentFailureKind = AgentFailureKind::SpawnFailed;
+    /// An earlier failure the refused launch must leave as it is — neither recorded over nor cleared (ADR-0172). A kind
+    /// only a resume that came up and then exited records: no path that refuses before the spawn writes it, so a record
+    /// site that writes anything for the refusal (`SpawnFailed` from the default arm, or `Other`) changes it.
+    const EARLIER: AgentFailureKind = AgentFailureKind::EarlyExitAfterResume;
 
     fn seed_earlier_failure(manager: &AgentManager, id: AgentId) {
         assert!(manager.profiles.set_last_failure(id, None, Some(EARLIER)));

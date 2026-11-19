@@ -5,7 +5,7 @@ Everything from the first section heading down is text that agents read. Edit it
 Editing rules — break any one and the screen breaks:
 
 - A section opens with a level-2 heading (`## <section-id>`). The whole line must have that form, and the id uses only lowercase letters, dots and underscores. A section runs from the byte after that line up to the line before the next section heading, and whitespace and blank lines are carried as is. This header (above the first section) is discarded, which is also why its heading is level 1.
-- There are five required sections, one per screen — `root` · `mail` · `agent` · `window` · `settings`. Miss any one and this whole file is refused and help answers with a rejection — there is no fallback copy. Unknown sections are ignored — an old binary reading a new file is normal.
+- There are six required sections, one per screen — `root` · `mail` · `agent` · `window` · `settings` · `library`. Miss any one and this whole file is refused and help answers with a rejection — there is no fallback copy. Unknown sections are ignored — an old binary reading a new file is normal.
 - Adding sections is fine. When you rename one, keep a short section under the old name — without it, an engram.exe from 2-3 versions back that reads this file directly refuses the new file and gives its own built-in copy (old content). The `theme` section at the very end is such a section, and the new binary does not show it (`help theme` is the settings screen).
 - Do not write the executable name; write `{tool}`. It is substituted at render time — a hand-written name goes stale the day the executable is renamed, and agents type what they learned and miss.
 - This text is printed to the terminal as is. Do not use markdown emphasis (asterisks) — the asterisks show up literally.
@@ -19,6 +19,7 @@ Editing rules — break any one and the screen breaks:
   {tool} help agent     Agents. Create, start and rearrange them
   {tool} help window    Windows · tabs · splits, placing agents in them · moving tabs · reading the layout (layout.get), usage limits (usage.*), restoring the screen after a crash (restore.*)
   {tool} help settings  Settings. Theme · chat screen style (settings.*) · per-window theme (window.setTheme)
+  {tool} help library   Library. Instruction · skill · settings · preset files and attaching presets to agents
 
 Run a command = `{tool} <name> --flag value`. All names: `{tool} commands`; one command's arguments and return: `{tool} commands <name>`.
 ## mail
@@ -54,8 +55,10 @@ A <notice> with no from was sent by the broker daemon, not a teammate, so do not
   {tool} agent.resolve --targets <JSON array — 1~8 names|ids>
       Resolves names · ids in one go (sleeping ones included). In request order: target, id, name, live(true|false). If any one does not resolve, it stops and names that position (targets[i]).
 
-  {tool} agent.new --backend <claude|codex> --cwd <folder> [--name <name>]
+  {tool} agent.new --backend <claude|codex> --cwd <folder> [--name <name>] [--presets <JSON array of presets>]
       Only creates — the agent joins the registry asleep and agent_id is returned. The backend is chosen at creation; no command changes it.
+      presets are attached as agent.attachPreset attaches them: the agent is created with the ones that can be attached, and each one left out is in skipped with its code and args. A library preset named while the library cannot be read is CONFLICT library-unavailable, and nothing is created.
+      After a timeout or an unknown outcome, check agent.list before calling again — a second call creates a second agent.
 
   {tool} agent.spawn --target <name|id>
       Starts it — fresh the first time, or resuming the previous session if there is one. If the launch is blocked, nothing starts: it returns CONFLICT and args.reasons carries the reasons — fix the listed items and start it again. notices in a success reply are notices about things left out on purpose (the same bundle comes only once per agent).
@@ -66,7 +69,15 @@ A <notice> with no from was sent by the broker daemon, not a teammate, so do not
   {tool} agent.move --target <name|id> --parent <name|none>
       Puts it under another agent. none returns it to the top level.
 
-  Commands that change the registry (agent.new · agent.spawn · agent.rename · agent.move · agent.spawnInto) return CONFLICT when the agents store does not accept the change, and the registry stays as is. What to do depends on the reason, and the message says which — a file not accepted when the daemon started (store's ReadOnly) does not clear by retrying; it clears only after you fix or replace that file and restart the daemon. A file not accepted because it could not be read during the run (Refusing · Unreadable) is usually a briefly held lock; retry a little later. If a newer version wrote that file during the run (Refusing · Newer), retrying gives the same result while the file stays as is. If the store write itself fails it is INTERNAL, and again the registry stays as is. But when the wake-up of agent.spawn --target is blocked, the registry stays as is, yet that agent's last failure is recorded and shows on the dashboard. agent.spawn --cwd and agent.spawnInto check the launch before creating — if blocked there it is CONFLICT, args.reasons carries the reasons, and nothing is created (fix the listed items and try again). If starting after creation is blocked or fails, the code is INTERNAL and the created agent stays asleep (args.agent_id is its id · args.reasons too if blocked) — do not create a new one; start it by the name the message gives (with agent.spawnInto it was not placed in an area either — see agent.spawnInto in {tool} help window). Refusing clears when the file becomes writable again (fixed, or the lock released) and the next change is accepted — no need to restart the daemon.
+  {tool} agent.setWorkspace --target <name|id> --cwd <folder>
+      Changes the working folder; the agent keeps its name. Only an asleep agent that has never conversed: otherwise CONFLICT workspace-locked, and args.args.reason is running · preparing · conversed · changing. A folder that is not absolute, does not exist, is not a folder, could not be read or did not answer in time is INVALID_ARGUMENT workspace-not-found, and args.args.why says which.
+
+  {tool} agent.duplicate --target <name|id>
+      Registers a copy beside it (the same parent), asleep, named with the next number (bob → bob(1)): the same backend, mode, folder, env and presets, without its conversation or history. After a timeout or an unknown outcome, check agent.list before calling again — a second call creates a second copy.
+
+  The presets attached to an agent (agent.presets · agent.attachPreset · agent.detachPreset · agent.reorderPresets) are in {tool} help library.
+
+  Commands that change the registry (agent.new · agent.spawn · agent.rename · agent.move · agent.spawnInto · agent.setWorkspace · agent.duplicate · agent.attachPreset · agent.detachPreset · agent.reorderPresets) return CONFLICT when the agents store does not accept the change, and the registry stays as is. What to do depends on the reason, and the message says which — a file not accepted when the daemon started (store's ReadOnly) does not clear by retrying; it clears only after you fix or replace that file and restart the daemon. A file not accepted because it could not be read during the run (Refusing · Unreadable) is usually a briefly held lock; retry a little later. If a newer version wrote that file during the run (Refusing · Newer), retrying gives the same result while the file stays as is. If the store write itself fails it is INTERNAL, and again the registry stays as is. But when the wake-up of agent.spawn --target is blocked, the registry stays as is, yet that agent's last failure is recorded and shows on the dashboard. agent.spawn --cwd and agent.spawnInto check the launch before creating — if blocked there it is CONFLICT, args.reasons carries the reasons, and nothing is created (fix the listed items and try again). If starting after creation is blocked or fails, the code is INTERNAL and the created agent stays asleep (args.agent_id is its id · args.reasons too if blocked) — do not create a new one; start it by the name the message gives (with agent.spawnInto it was not placed in an area either — see agent.spawnInto in {tool} help window). Refusing clears when the file becomes writable again (fixed, or the lock released) and the next change is accepted — no need to restart the daemon.
 
   {tool} agent.listQueuedInputs --target <name|id>
       Inputs received mid-turn that are not yet confirmed as taken. Each item's id, text, state(queued|unconfirmed|cancelling).
@@ -243,6 +254,95 @@ To give just one window a different theme, use the window commands. window is th
 A window theme is saved with that window in the screen state and survives restarts (a run whose restore.status saves is false does not save it), and goes away when the window closes. If no dashboard window is open the two commands are UNKNOWN_COMMAND, and a missing window is CONFLICT. If window.setTheme is INTERNAL and the message says the theme was set but could not be sent to that window, the value remains (window.getTheme answers the new value). To change all windows at once, use settings.set theme.default.
 
 data_dir is the ENGRAM_DATA_DIR path if that env var is non-empty. Otherwise it is decided from the folder holding the {tool} executable (for an agent, ENGRAM_CLI_EXE in env) — a distribution (release build) uses data/ under that folder; a debug build (target\debug etc.) uses .engram-dev in the first repo root found going up from there (a folder that has .git, or has [workspace] in Cargo.toml), and if there is no root, .engram-dev in that folder.
+## library
+{tool} library — the library: instruction, skill, settings and preset files under the library root folder, and the presets attached to agents. When an agent starts, it gets what its attached presets list.
+
+An item is named by its path from the library root, with / (rules/style.md · skills/review · team/web.yaml). The built-ins are engram:/default (the Default preset — the priming and the default settings, on for every new agent) · engram:/priming · engram:/settings/default; they cannot be edited.
+
+  instruction   a .md file. Its text goes into the agent instructions
+  skill         a folder holding SKILL.md
+  settings      a .yaml file with kind: settings, version: 1, description: and one key per backend (claude · codex) holding that backend's own settings
+  preset        a .yaml file with kind: preset — lists of the items above and of other presets
+
+  kind: preset
+  version: 1
+  description: Rules and review skill for the web team
+  presets:
+    - team/base.yaml
+  instructions:
+    - rules/style.md
+    - {path: rules/codex-only.md, backend: codex}
+  skills:
+    - skills/review
+  settings:
+    - settings/quiet.yaml
+  folders:
+    - D:\work\shared-skills
+
+An entry with backend goes only to that backend (instructions and skills only). folders lists absolute folder paths, inside or outside the library folder — a folder entry is not a library item and is not named by a library path; preset.previewFolder shows what each backend loads from one.
+
+Write a one-line description when you create or edit a settings or preset file.
+
+An edit through Engram rewrites the whole preset file — hand-written comments and layout are not kept.
+
+Where <path> appears below, give a library path; <list> is a JSON array of strings (["rules/style.md"]). One command's arguments and reply: {tool} commands <name>.
+
+  {tool} library.status
+      The library root now (root · state · config) and root_generation
+  {tool} library.setRoot --path <absolute folder> [--create true]
+      Points the library at that folder (create makes the folder first); nothing is copied or moved. Replies like library.status
+  {tool} library.folders
+      Every folder, flat. A skill folder is marked skill
+  {tool} library.list [--folder <path>] [--query <text>] [--kinds <JSON array of Instruction|Skill|SkillFile|Settings|Preset>] [--builtins true]
+      The items in that folder (the root if omitted) and its subfolders, or with query the items below it whose name or description matches. Per row path · kind · name · description · state (why the file is broken, null if it reads)
+  {tool} library.read --path <path>
+      One item: its file on disk, the presets and agents that reach it, an excerpt
+  {tool} library.refresh [--folder <path>]
+      Reads the files again — use it after changing library files outside Engram
+  {tool} library.newFolder --name <name> [--parent <path>]
+  {tool} library.newFile --name <name> --kind <Markdown|Settings|Preset> [--folder <path>]
+      Creates an empty folder, or a file from a template, and replies its path. A taken name is CONFLICT name-exists, nothing replaced
+  {tool} library.relink --from <path> --to <path>
+      Points every preset and agent that names from at to — the fix after an item was moved or renamed outside Engram (when from is missing, the other missing items of its folder found by name in the folder of to are fixed too; more counts them). If stopped comes back, clear its cause and run the same relink again
+
+  {tool} preset.get --path <path|engram:/default>
+      The lists, each entry with its state, folders, conflicts, problems, rev and how many agents attach it
+  {tool} preset.add --path <path> (--items <list> [--backend <claude|codex>] | --folders <list>) [--after <entry>]
+      Adds after that entry (at the end if omitted). Adds what it can: each item it could not add is in skipped with its code and args. One bad folder refuses the whole call
+  {tool} preset.remove --path <path> (--items <list> | --folders <list>)
+  {tool} preset.setBackend --path <path> --items <list> [--backend <claude|codex>]
+      backend omitted = every backend
+  {tool} preset.reorder --path <path> --section <Presets|Instructions|Skills|Settings|Folders> --order <list> --base_rev <rev>
+      order = every entry preset.get shows in that section, each once
+  {tool} preset.save --path <path> --presets <entries> --instructions <entries> --skills <entries> --settings <entries> [--folders <list>] [--base_rev <rev>]
+      Replaces the lists, all or nothing. <entries> = a JSON array of {"path": "…", "backend": "…"} (backend may be left out). folders omitted = they stay
+  {tool} preset.check --path <path> --presets <entries> --instructions <entries> --skills <entries> --settings <entries> [--folders <list>]
+      Judges that draft as preset.save would, without writing
+  {tool} preset.previewFolder --folder <absolute folder> [--backend <claude|codex>]
+      What each backend would load from that folder. Reads only
+
+  {tool} agent.presets --target <name|id>
+      The agent's presets: default_preset (the Default slot), presets in call order, base_rev, and the folders, conflicts, problems and notices a start would meet
+  {tool} agent.attachPreset --target <name|id> --presets <list> [--after <preset>]
+      Attaches what it can; each one it could not attach is in skipped. engram:/default turns the Default slot on
+  {tool} agent.detachPreset --target <name|id> --presets <list> [--yes true]
+      engram:/default turns the Default slot off, only with yes
+  {tool} agent.reorderPresets --target <name|id> --order <list> --base_rev <base_rev>
+      order = every preset agent.presets shows, each once
+  {tool} agent.new --backend <claude|codex> --cwd <folder> --presets <list>
+      Creates the agent with the presets that can be attached; the rest are in skipped ({tool} help agent)
+
+root_generation (optional; every edit above except library.setRoot takes it) = the value library.status replied; the edit refuses with CONFLICT root-generation-stale if the library root changed since, and applies nothing.
+
+base_rev = the rev preset.get replied, or the base_rev agent.presets replied; CONFLICT rev-mismatch means it changed since — read it again and redo the change.
+
+A missing or broken item shows as a row in problems (kind missing · broken · library_unavailable), and items that clash as a row in conflicts (kind conflict), each with code and args. Fix it with a preset edit, or with library.relink when it was moved.
+
+A refusal's code is CONFLICT · NOT_FOUND · INVALID_ARGUMENT · INTERNAL, and args carries the reason: args.code (for example root-generation-stale), args.args (that reason's details) and args.line (the line in the file, when there is one). A refusal of the arguments themselves (a blank value, items and folders both or neither), a target that names no agent or several, and a refusal by the agents store carry no args ({tool} help agent). If the message ends with "clear the cause, then repeat the same call", fix what it names (the folder reachable again, a lock released, library.setRoot) and repeat the call unchanged. Without that clause, repeating the same call does not clear it by itself — change the call, or first do the step the reason names (for example create the missing folder).
+
+agent.setWorkspace answers workspace-not-found also when the folder did not answer in time or could not be read; args.args.why says which ({tool} help agent).
+
+agent.new --presets and agent.duplicate: after a timeout or an unknown outcome, check agent.list before calling again — a second call creates a second agent, and there is no command to remove one.
 ## theme
 {tool} theme — an old word. The current screen is {tool} help settings, and if that screen is reported missing, {tool} commands settings.set gives the arguments.
 

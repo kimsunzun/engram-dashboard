@@ -67,7 +67,9 @@ use crate::resolve::{
     folder_item, resolve, CatalogLookup, ItemView, Looked, Lookup, Resolution, RootState, Target,
 };
 use crate::store::admits;
-use crate::{extra_args, output_format, LibraryService, Want, LIBRARY_READ_CAP};
+use crate::{
+    extra_args, output_format, LibraryService, Want, LIBRARY_READ_CAP, LISTING_UNANSWERED,
+};
 
 /// The code of a library file a launch check reached but could not read (`args` = `{path, why}`) — problem ②: the
 /// launch never runs on what an earlier read held.
@@ -791,9 +793,15 @@ impl LibraryService {
         let (mut listed, mut notices, mut failed) = (Vec::new(), Vec::new(), HashMap::new());
         for (folder, instructions_at) in healthy {
             let folder_key = path_key(&folder);
-            let listing = listings
-                .remove(&folder_key)
-                .expect("list_all answers every path it is asked");
+            // ADR-0293: `list_all` answers every path it is asked, but a broken answer is an unreadable folder here
+            //   (a ① line), never an abort.
+            let listing = listings.remove(&folder_key).unwrap_or_else(|| {
+                tracing::error!(
+                    path = %escape_controls(&folder.to_string_lossy()),
+                    "the bounded listing gave no answer for the path it was asked"
+                );
+                Err(FolderStatus::Unreadable(LISTING_UNANSWERED.to_owned()))
+            });
             let listing = match listing {
                 Ok(listing) => listing,
                 Err(status) => {

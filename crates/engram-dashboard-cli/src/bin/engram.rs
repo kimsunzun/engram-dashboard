@@ -4053,11 +4053,17 @@ mod tests {
     }
 
     /// ★`help <word>` carries the typed word as is★ — if one word is wired to another word, the daemon gives a different screen.
-    ///   That the four screens differ from each other and from the table of contents is measured by the same-named half on the daemon side
+    ///   That the five screens differ from each other and from the table of contents is measured by the same-named half on the daemon side
     ///   (`control::help`).
     #[test]
     fn each_group_word_is_carried_as_typed() {
-        for word in [CLI_GROUP_MAIL, CLI_GROUP_AGENT, "window", "settings"] {
+        for word in [
+            CLI_GROUP_MAIL,
+            CLI_GROUP_AGENT,
+            "window",
+            "settings",
+            "library",
+        ] {
             assert_eq!(help_word(&["help", word]).as_deref(), Some(word));
         }
     }

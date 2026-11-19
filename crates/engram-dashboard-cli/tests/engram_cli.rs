@@ -832,7 +832,7 @@ fn help_fails_the_same_way_as_every_other_command_without_credentials_or_a_daemo
 /// when the LLM typed what it learned.
 #[test]
 fn conventional_help_spellings_render_the_same_screens() {
-    // ★Only the two the parser accepts as families have the `<family> --help` spelling★: `window`·`settings` have no daemon-side `<family>
+    // ★Only the two the parser accepts as families have the `<family> --help` spelling★: `window`·`settings`·`library` have no daemon-side `<family>
     //   <verb>` entrance and are reached only through `engram help <word>`; the old word `theme` is carried as is (alias resolution is the
     //   daemon's).
     for (spellings, body) in [
@@ -861,6 +861,7 @@ fn conventional_help_spellings_render_the_same_screens() {
         ),
         (vec![vec!["help", "window"]], r#"{"topic":"window"}"#),
         (vec![vec!["help", "settings"]], r#"{"topic":"settings"}"#),
+        (vec![vec!["help", "library"]], r#"{"topic":"library"}"#),
         (vec![vec!["help", "theme"]], r#"{"topic":"theme"}"#),
     ] {
         for args in spellings {

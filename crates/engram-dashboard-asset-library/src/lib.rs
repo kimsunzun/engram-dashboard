@@ -183,6 +183,12 @@ pub const LIBRARY_UNAVAILABLE: &str = "library-unavailable";
 // ADR-0386
 pub const STAT_UNANSWERED: &str = "the bounded stat gave no answer";
 
+/// The unreadable reason of a folder listing the bounded IO gave no answer for — never expected
+/// (`BoundedIo::list_all` answers every key it is asked); answered instead of aborting the launch check.
+// ADR-0293
+// ADR-0386
+pub const LISTING_UNANSWERED: &str = "the bounded listing gave no answer";
+
 /// The code of an edit whose root generation is not the current one (`args` = `{given, current}`).
 // ADR-0377
 pub const ROOT_GENERATION_STALE: &str = "root-generation-stale";
