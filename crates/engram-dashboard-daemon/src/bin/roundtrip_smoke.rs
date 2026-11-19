@@ -685,6 +685,10 @@ async fn run() -> i32 {
         ),
     );
     slot.set(manager.clone());
+    // ADR-0380: the production order — the manager goes into the library as its profile-edit port before the table
+    //   that reaches the library is built; weak, as the manager already holds the library as its launch-kit source.
+    let profile_edit: std::sync::Weak<AgentManager> = Arc::downgrade(&manager);
+    library.plug_profile_edit(profile_edit);
     command_slot.set(Arc::new(
         engram_dashboard_daemon::control::commands::make_daemon_table(
             manager.clone(),
@@ -1308,6 +1312,37 @@ mod tests {
             .map(|x| x.to_string())
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    /// ★The run plugs the manager into its library as the profile-edit port before it builds the command table★ — the
+    /// production order (ADR-0380): plugged after, an agent-preset command or a relink would answer
+    /// `profile-edit-unavailable`; left out, every one would. No runtime test of this bin orders the two (a run needs a
+    /// real claude), only this one.
+    #[test]
+    fn the_run_plugs_the_profile_edit_port_before_it_builds_the_command_table() {
+        let source = include_str!("roundtrip_smoke.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("production part");
+        let run = &production[production.find("async fn run()").expect("`run`")..];
+        let built = run
+            .find("AgentManager::new_with_control(")
+            .expect("`run` builds the manager");
+        let plugged = run
+            .find(".plug_profile_edit(")
+            .expect("`run` plugs the profile-edit port");
+        let table = run
+            .find("make_daemon_table(")
+            .expect("`run` builds the command table");
+        assert!(
+            built < plugged,
+            "the port is plugged before the manager exists"
+        );
+        assert!(
+            plugged < table,
+            "the command table is built before the port is plugged"
+        );
     }
 
     #[test]

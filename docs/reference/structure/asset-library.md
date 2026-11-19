@@ -20,10 +20,10 @@ The preset library: instruction, skill, settings and preset files under one libr
 |---|---|
 | `lib.rs` | The service: values, catalog reads (list and its filters, refresh, folders, read), resolution entry points, the root (status, set_root, first start, boot scan), writer entrances (`change` · `change_at` · `change_root` · `late_merge` · `hand_off_merge`), the profile-edit port cell, the refusal type |
 | `edit.rs` | The `preset.get` view, the preset edits (`add` · `remove` · `reorder` · `setBackend` · `save`), the draft check and the folder preview |
-| `agent_edit.rs` | The `agent.presets` view and the agent-preset edits (`attach` · `detach` · `reorder`), written through the profile-edit port |
+| `agent_edit.rs` | The `agent.presets` view and the agent-preset edits (`attach` · `detach` · `reorder`), written through the profile-edit port; the `agent.new {presets}` judgement (no write) |
 | `relink.rs` | Relink: the file picked for one reference takes every reference to the old path, and the other missing lines of the same old folder by name |
 | `create.rs` | New folder and new file (from a template), entered into the catalog |
-| `host.rs` | `LibraryCommandHost` impl: the `library.*` and `preset.*` commands agent declares, answered by the bodies above |
+| `host.rs` | `LibraryCommandHost` impl: the `library.*`, `preset.*` and agent-preset commands agent declares and the `agent.new {presets}` judgement, answered by the bodies above |
 | `config.rs` | The root setting: `library.json` in the daemon state folder |
 | `gate.rs` | Library lock, scan tickets, generations, first scan |
 | `catalog.rs` | In-memory item table, per-item writes, reference index |
@@ -45,7 +45,7 @@ The preset library: instruction, skill, settings and preset files under one libr
 - **First start, then the boot scan.** `build_daemon_wiring` calls `LibraryService::first_start` once, after the service is built and before `run()` sets the command table, and right after it — on every start, whatever the first start answered — `LibraryService::start_boot_scan`, which runs the first scan on a background job and returns at once. Nothing on the boot path before `daemon.json` walks the library or waits for that walk (ADR-0382). The test server builds no service and so runs neither.
 - **The service goes into the manager as its launch-kit source.** `build_daemon_wiring_with_store` passes it via `AgentManager::with_launch_ports(LaunchPorts { kits, … })` and keeps the same service as `DaemonWiring.library` for the library commands. The test server passes no `LaunchInputs` and keeps the Noop kits.
 - **The manager goes into the service as its profile-edit port.** Right after it wraps the manager, `build_daemon_wiring_with_store` plugs it in with `LibraryService::plug_profile_edit` — before `run()` sets the command table. The cell is set once and holds the manager weakly, so the pair makes no cycle; an empty or dead cell answers `profile-edit-unavailable` (ADR-0380). The test server builds no service.
-- **The service answers the library commands.** `run()` and the test server build the command table with `DaemonWiring::library_commands` — the kept service, or the daemon `NoLibrary` port when there is none (the test server; `saturation_pilot` passes `NoLibrary` too), which answers `library-unavailable` and an empty-scan refresh report. `roundtrip_smoke` passes its own service. Every handler is a `blocking_handler` (ADR-0386).
+- **The service answers the library commands.** `run()` and the test server build the command table with `DaemonWiring::library_commands` — the kept service, or the daemon `NoLibrary` port when there is none (the test server; `saturation_pilot` passes `NoLibrary` too), which answers `library-unavailable` and an empty-scan refresh report and judges `agent.new {presets}` by the attach rule (a library preset refused, built-ins judged). `roundtrip_smoke` passes its own service and plugs its manager as that service's profile-edit port before it builds the table (the ADR-0380 order). Every handler is a `blocking_handler` (ADR-0386).
 - **Boot sweep order.** `build_daemon_wiring` runs `launch::sweep_launch_dir` after the instance lock and before the service is plugged in.
 
 **Ports and who fills them**
@@ -115,10 +115,8 @@ The preset library: instruction, skill, settings and preset files under one libr
 - The root setting and status: `config.rs` header · `LibraryService::status` · `LibraryService::set_root` · `LibraryService::first_start` · `LibraryService::start_boot_scan` · `LibraryService::change_at`; refusal type and codes: `LibraryRefusal` · the code consts in `lib.rs`
 - Folder tree and item detail: `LibraryService::folders` · `LibraryService::read`
 - Preset view and edits: `edit.rs` header · `LibraryService::preset_get` · `LibraryService::preset_add` (and its siblings) · `LibraryService::preview_folder` · `LibraryService::admit`; their codes are the consts in `edit.rs`
-- Agent-preset view and edits: `agent_edit.rs` header · `LibraryService::agent_presets` · `LibraryService::attach_preset` (and its siblings) · `LibraryService::plug_profile_edit`; their codes are the consts in `agent_edit.rs`
+- Agent-preset view and edits: `agent_edit.rs` header · `LibraryService::agent_presets` · `LibraryService::attach_preset` (and its siblings) · `LibraryService::plug_profile_edit`; their codes are the consts in `agent_edit.rs`; the `agent.new {presets}` judgement: `LibraryService::judge_new_presets` · `judge_new_presets_without_library` (daemon `NoLibrary`)
 - Relink and create: `relink.rs` header · `LibraryService::relink` · `LibraryService::rewrite_in` · `Catalog::presets_listing`; `create.rs` header · `LibraryService::new_file` · `LibraryService::new_folder` · `Catalog::insert_folder`; their codes are the consts in `relink.rs` and `create.rs`
 - The library commands: `host.rs` header (spelling parse, 1:1 mapping) · `LibraryService::list_with` · `ListFilter` · `ItemKind::listed`; agent `library_commands.rs` (port, handlers, `refusal_error`); the declarations in agent `commands.rs`
 - Daemon wiring: daemon `src/lib.rs` `build_library_service` · `LibraryStart` · `build_daemon_wiring`; the default place: daemon `data_dir.rs` `DataLayout::default_library_root` · `DataRootOrigin`; the identity: daemon `identity.rs`
 - Manager side of the launch: agent `launch.rs` `LaunchKitSource` · `manager/prelaunch.rs`
-
-**Not on the command bus yet:** the agent-preset bodies (`agent_edit.rs`) — the port carries the nine `library.*` and the eight `preset.*` commands only.

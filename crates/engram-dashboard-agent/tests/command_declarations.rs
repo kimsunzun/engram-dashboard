@@ -1,13 +1,13 @@
 //! Declaration golden — pins the name set and the error set so they do not silently diverge (TRD §7 「declaration derivation」).
 
 use engram_dashboard_agent::commands::{
-    AgentCancelQueuedInputArgs, AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs,
-    AgentMoveArgs, AgentNewArgs, AgentRenameArgs, AgentResolveArgs, AgentSpawnArgs,
-    LibraryFoldersArgs, LibraryListArgs, LibraryNewFileArgs, LibraryNewFolderArgs, LibraryReadArgs,
-    LibraryRefreshArgs, LibraryRelinkArgs, LibrarySetRootArgs, LibraryStatusArgs, PresetAddArgs,
-    PresetCheckArgs, PresetGetArgs, PresetPreviewFolderArgs, PresetRemoveArgs, PresetReorderArgs,
-    PresetSaveArgs, PresetSetBackendArgs, UsageGetArgs, UsageRefreshArgs, COMMAND_SPECS,
-    INPUT_AFFECTING,
+    AgentAttachPresetArgs, AgentCancelQueuedInputArgs, AgentDetachPresetArgs, AgentInterruptArgs,
+    AgentListArgs, AgentListQueuedInputsArgs, AgentMoveArgs, AgentNewArgs, AgentPresetsArgs,
+    AgentRenameArgs, AgentReorderPresetsArgs, AgentResolveArgs, AgentSpawnArgs, LibraryFoldersArgs,
+    LibraryListArgs, LibraryNewFileArgs, LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs,
+    LibraryRelinkArgs, LibrarySetRootArgs, LibraryStatusArgs, PresetAddArgs, PresetCheckArgs,
+    PresetGetArgs, PresetPreviewFolderArgs, PresetRemoveArgs, PresetReorderArgs, PresetSaveArgs,
+    PresetSetBackendArgs, UsageGetArgs, UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
 };
 use engram_dashboard_command::DeadlineClass;
 use engram_dashboard_command::{
@@ -23,13 +23,17 @@ fn declared_names_are_the_cli_verbs() {
     assert_eq!(
         names,
         vec![
+            "agent.attachPreset",
             "agent.cancelQueuedInput",
+            "agent.detachPreset",
             "agent.interrupt",
             "agent.list",
             "agent.listQueuedInputs",
             "agent.move",
             "agent.new",
+            "agent.presets",
             "agent.rename",
+            "agent.reorderPresets",
             "agent.resolve",
             "agent.spawn",
             "library.folders",
@@ -65,7 +69,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 16 // two were added in v6 — `agent.interrupt` · `usage.refresh`; nine in v9 — `library.setRoot` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`
+            == 19 // two were added in v6 — `agent.interrupt` · `usage.refresh`; twelve in v9 — `library.setRoot` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`
     );
 }
 
@@ -142,6 +146,24 @@ fn the_preset_verbs_are_declared_in_generation_9_with_their_effect() {
         ("preset.setBackend", Effect::Write),
         ("preset.save", Effect::Write),
         ("preset.previewFolder", Effect::Read),
+    ];
+    for (name, effect) in cases {
+        let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
+        assert_eq!(spec.effect, effect, "{name}");
+        assert_eq!(spec.since, 9, "{name}");
+        assert_eq!(spec.deadline, DeadlineClass::Ordinary, "{name}");
+    }
+}
+
+/// The four agent-preset commands (ADR-0386) — all in catalog 9 and ordinary; the view is `Read`, the three edits
+/// `Write`.
+#[test]
+fn the_agent_preset_verbs_are_declared_in_generation_9_with_their_effect() {
+    let cases = [
+        ("agent.presets", Effect::Read),
+        ("agent.attachPreset", Effect::Write),
+        ("agent.detachPreset", Effect::Write),
+        ("agent.reorderPresets", Effect::Write),
     ];
     for (name, effect) in cases {
         let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
@@ -279,11 +301,17 @@ fn error_sets_are_golden() {
     for name in ["preset.check", "preset.previewFolder"] {
         assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
     }
+    // The agent-preset commands resolve `target` (absent = NOT_FOUND · same name = CONFLICT); their refusals are
+    //   NOT_FOUND (the agent deleted meanwhile) and CONFLICT.
     for name in [
         "library.read",
         "library.newFolder",
         "library.newFile",
         "library.relink",
+        "agent.presets",
+        "agent.attachPreset",
+        "agent.detachPreset",
+        "agent.reorderPresets",
     ] {
         assert_eq!(
             declared(name),
@@ -354,6 +382,8 @@ fn required_matches_what_deserialization_actually_demands() {
                 "name": "beta",
                 "output_format": "StreamJson",
                 "backend": "Claude",
+                "presets": ["p.yaml"],
+                "root_generation": 3,
             }),
         ),
         (
@@ -480,6 +510,26 @@ fn required_matches_what_deserialization_actually_demands() {
             parses::<PresetPreviewFolderArgs>,
             json!({ "folder": "C:/f", "backend": "codex", "mode": "Terminal" }),
         ),
+        (
+            "agent.presets",
+            parses::<AgentPresetsArgs>,
+            json!({ "target": "alpha" }),
+        ),
+        (
+            "agent.attachPreset",
+            parses::<AgentAttachPresetArgs>,
+            json!({ "target": "alpha", "presets": ["p.yaml"], "after": "q.yaml", "root_generation": 3 }),
+        ),
+        (
+            "agent.detachPreset",
+            parses::<AgentDetachPresetArgs>,
+            json!({ "target": "alpha", "presets": ["p.yaml"], "yes": true, "root_generation": 3 }),
+        ),
+        (
+            "agent.reorderPresets",
+            parses::<AgentReorderPresetsArgs>,
+            json!({ "target": "alpha", "order": ["p.yaml"], "base_rev": "r", "root_generation": 3 }),
+        ),
     ];
 
     for (name, parse, full) in cases {
@@ -531,7 +581,14 @@ fn the_create_verb_advertises_its_required_fields_and_closed_vocabularies() {
     fields.sort_unstable();
     assert_eq!(
         fields,
-        vec!["backend", "cwd", "name", "output_format"],
+        vec![
+            "backend",
+            "cwd",
+            "name",
+            "output_format",
+            "presets",
+            "root_generation"
+        ],
         "advertised fields: {schema}"
     );
     let required: Vec<&str> = schema["required"]

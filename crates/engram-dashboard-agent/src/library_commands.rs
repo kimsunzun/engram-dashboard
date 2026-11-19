@@ -1,6 +1,7 @@
-//! `library.*` and `preset.*` handlers — the port asset-library implements ([`LibraryCommandHost`]) and the one
-//! mapping of a port refusal onto a command error ([`refusal_error`]). The declarations are in the one
-//! `declare_commands!` block of `commands.rs` (one block per module).
+//! `library.*`, `preset.*` and agent-preset handlers — the port asset-library implements ([`LibraryCommandHost`]) and
+//! the one mapping of a port refusal onto a command error ([`refusal_error`]). The declarations are in the one
+//! `declare_commands!` block of `commands.rs` (one block per module); `agent.new` judges its `presets` through the
+//! same port ([`LibraryCommandHost::judge_new_presets`]).
 //!
 //! ## Rules (invariants)
 //!
@@ -8,7 +9,8 @@
 //!   rows or a [`PortRefusal`]; asset-library parses the spellings (a path that is not a library path refuses there,
 //!   `item-path-invalid`) and converts its own refusal 1:1. Bus codes are chosen here, never there.
 //! - **The port answers agents by id only.** `library.read` names them from one roster read and drops an id the
-//!   roster no longer holds.
+//!   roster no longer holds; the agent-preset commands name the agent from the `target` resolution (an agent-preset
+//!   edit never renames).
 //! - **Answers are mapped as the bodies built them** — nothing here calls a second body or reads back (ADR-0384).
 //! - **A refusal applied nothing** — except `library-config-write-failed`, which leaves the new root live and unsaved
 //!   (ADR-0381). **It maps onto a code that does not keep the request id**, except the `INTERNAL` cases:
@@ -27,20 +29,24 @@ use engram_dashboard_command::{
 use serde_json::{Map, Value};
 
 use crate::commands::{
-    reject_blanks, store_command_error, store_error, store_error_reason, AgentCommandHost,
-    AgentOutputFormat, AgentRefRow, Blank, LibraryFoldersArgs, LibraryFoldersOk, LibraryKind,
-    LibraryListArgs, LibraryListOk, LibraryNewFileArgs, LibraryNewFileKind, LibraryNewFileOk,
-    LibraryNewFolderArgs, LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs,
-    LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs, LibrarySetRootOk,
-    LibraryStatusArgs, LibraryStatusOk, ListRow, PresetAddArgs, PresetAddOk, PresetCheckArgs,
-    PresetCheckOk, PresetEntryArg, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs,
-    PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk,
-    PresetSaveArgs, PresetSaveOk, PresetSection, PresetSetBackendArgs, PresetSetBackendOk,
-    PresetView, ProblemItemRow, ProblemRow, RelinkStopRow,
+    reject_blanks, resolve, store_command_error, store_error, store_error_reason,
+    AgentAttachPresetArgs, AgentAttachPresetOk, AgentCommandHost, AgentDetachPresetArgs,
+    AgentDetachPresetOk, AgentFolderRow, AgentOutputFormat, AgentPresetsArgs, AgentPresetsOk,
+    AgentPresetsView, AgentRefRow, AgentReorderPresetsArgs, AgentReorderPresetsOk, Blank,
+    LaunchNoticeRow, LibraryFoldersArgs, LibraryFoldersOk, LibraryKind, LibraryListArgs,
+    LibraryListOk, LibraryNewFileArgs, LibraryNewFileKind, LibraryNewFileOk, LibraryNewFolderArgs,
+    LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk,
+    LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs, LibrarySetRootOk, LibraryStatusArgs,
+    LibraryStatusOk, ListRow, PresetAddArgs, PresetAddOk, PresetCheckArgs, PresetCheckOk,
+    PresetEntryArg, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs, PresetPreviewFolderOk,
+    PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk, PresetSaveArgs,
+    PresetSaveOk, PresetSection, PresetSetBackendArgs, PresetSetBackendOk, PresetView,
+    ProblemItemRow, ProblemRow, RelinkStopRow, SkippedRow,
 };
 use crate::launch::{escape_controls, put_reason, BlockReason, Reason};
 use crate::persistence::PROFILES_FILE;
-use crate::profile::StoreError;
+use crate::profile::{AgentProfile, StoreError};
+use crate::profile_edit::Attachments;
 use crate::types::AgentId;
 
 /// The code a relink `stopped` carries when the agents' rewrite met a profile-store error (`args` = `{why}` — which
@@ -128,8 +134,44 @@ pub struct PresetDraftInput {
     pub folders: Option<Vec<String>>,
 }
 
-/// **Everything** the `library.*` and `preset.*` handlers have the library do (a port) — the real thing = asset-library
-/// `LibraryService` (`host.rs`); assemblies without a library plug the daemon's `NoLibrary`.
+/// The `agent.presets` view as the port answers it — [`AgentPresetsView`] without the agent's name, which the handler
+/// adds from its `target` resolution.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+pub struct AgentPresetsPortView {
+    pub agent_id: AgentId,
+    pub default_preset: bool,
+    pub presets: Vec<String>,
+    pub cwd: String,
+    pub workspace_lock: Option<String>,
+    pub backend: String,
+    pub mode: AgentOutputFormat,
+    pub base_rev: String,
+    pub takes_presets: bool,
+    pub folders: Vec<AgentFolderRow>,
+    pub conflicts: Vec<ProblemRow>,
+    pub problems: Vec<ProblemRow>,
+    pub notices: Vec<LaunchNoticeRow>,
+}
+
+/// `agent.attachPreset`'s answer as the port answers it — the view without the agent's name.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+pub struct AgentAttachPortAnswer {
+    pub applied: Vec<String>,
+    pub skipped: Vec<SkippedRow>,
+    pub view: AgentPresetsPortView,
+}
+
+/// The `agent.new {presets}` judgement: the attachments to create the agent with, and the presets left out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewAgentPresets {
+    pub attachments: Attachments,
+    pub skipped: Vec<SkippedRow>,
+}
+
+/// **Everything** the `library.*`, `preset.*` and agent-preset handlers have the library do (a port) — the real thing
+/// = asset-library `LibraryService` (`host.rs`); assemblies without a library plug the daemon's `NoLibrary`.
 ///
 /// ★Synchronous, on a blocking pool thread★: the bodies wait at the library's first-scan entrance and on bounded
 /// folder IO, so every handler is a `blocking_handler`.
@@ -226,6 +268,41 @@ pub trait LibraryCommandHost: Send + Sync {
         backend: Option<&str>,
         mode: Option<AgentOutputFormat>,
     ) -> Result<PresetPreviewFolderOk, PortRefusal>;
+    fn agent_presets(&self, agent: AgentId) -> Result<AgentPresetsPortView, PortRefusal>;
+    /// `presets` spelled as typed; `after` = an attached preset to put them after.
+    fn attach_preset(
+        &self,
+        agent: AgentId,
+        presets: &[String],
+        after: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<AgentAttachPortAnswer, PortRefusal>;
+    /// `yes` confirms turning the Default slot off.
+    fn detach_preset(
+        &self,
+        agent: AgentId,
+        presets: &[String],
+        yes: bool,
+        root_generation: Option<u64>,
+    ) -> Result<AgentPresetsPortView, PortRefusal>;
+    fn reorder_presets(
+        &self,
+        agent: AgentId,
+        order: &[String],
+        base_rev: &str,
+        root_generation: Option<u64>,
+    ) -> Result<AgentPresetsPortView, PortRefusal>;
+    /// The `agent.new {presets}` judgement: `presets` judged over `profile` (not in the registry yet) as
+    /// [`LibraryCommandHost::attach_preset`] judges them, under one library read lock that also compares
+    /// `root_generation` — nothing is written. Refuses as `attach_preset` does when a library preset is named and the
+    /// library cannot be read, and on a stale root generation.
+    // ADR-0386
+    fn judge_new_presets(
+        &self,
+        profile: &AgentProfile,
+        presets: &[String],
+        root_generation: Option<u64>,
+    ) -> Result<NewAgentPresets, PortRefusal>;
 }
 
 /// The return of `library.setRoot` — its fields are the same as [`LibraryStatusOk`]. ★Moved by destructuring
@@ -296,6 +373,89 @@ macro_rules! from_preset_view {
 
 from_preset_view!(PresetGetOk, PresetRemoveOk, PresetReorderOk, PresetSaveOk);
 
+/// The answers of `agent.presets` and of the agent-preset edits that answer the view alone — their fields are the same
+/// as [`AgentPresetsView`]. ★Moved by destructuring (without `..`)★ — if either side gains a field, compilation stops
+/// here.
+macro_rules! from_agent_presets_view {
+    ($($ok:ident),* $(,)?) => {$(
+        impl From<AgentPresetsView> for $ok {
+            fn from(view: AgentPresetsView) -> Self {
+                let AgentPresetsView {
+                    agent_id,
+                    name,
+                    default_preset,
+                    presets,
+                    cwd,
+                    workspace_lock,
+                    backend,
+                    mode,
+                    base_rev,
+                    takes_presets,
+                    folders,
+                    conflicts,
+                    problems,
+                    notices,
+                } = view;
+                Self {
+                    agent_id,
+                    name,
+                    default_preset,
+                    presets,
+                    cwd,
+                    workspace_lock,
+                    backend,
+                    mode,
+                    base_rev,
+                    takes_presets,
+                    folders,
+                    conflicts,
+                    problems,
+                    notices,
+                }
+            }
+        }
+    )*};
+}
+
+from_agent_presets_view!(AgentPresetsOk, AgentDetachPresetOk, AgentReorderPresetsOk);
+
+/// The port's view named — `name` = the agent's name from the `target` resolution (an agent-preset edit never
+/// renames; a rename by another caller in between shows the name as resolved). ★Destructured (without `..`)★ — a field added to the port view stops compilation here.
+// ADR-0386
+fn named(view: AgentPresetsPortView, name: String) -> AgentPresetsView {
+    let AgentPresetsPortView {
+        agent_id,
+        default_preset,
+        presets,
+        cwd,
+        workspace_lock,
+        backend,
+        mode,
+        base_rev,
+        takes_presets,
+        folders,
+        conflicts,
+        problems,
+        notices,
+    } = view;
+    AgentPresetsView {
+        agent_id: agent_id.to_string(),
+        name,
+        default_preset,
+        presets,
+        cwd,
+        workspace_lock,
+        backend,
+        mode,
+        base_rev,
+        takes_presets,
+        folders,
+        conflicts,
+        problems,
+        notices,
+    }
+}
+
 /// A launch-block reason as the declared row — the row [`crate::launch::LaunchBlocked::to_args`] builds, with the keys
 /// it leaves out sent as `null` (the command macro's `Option` has no skip).
 // ADR-0386
@@ -329,7 +489,8 @@ pub fn problem_row(reason: BlockReason) -> ProblemRow {
     }
 }
 
-/// Plugs the `library.*` and `preset.*` handlers into `table` — the `make_table` line for the library port.
+/// Plugs the `library.*`, `preset.*` and agent-preset handlers into `table` — the `make_table` line for the library
+/// port.
 pub(crate) fn insert(
     table: &mut CommandTable,
     host: &Arc<dyn AgentCommandHost>,
@@ -462,7 +623,7 @@ pub(crate) fn insert(
             blocking_handler(move |args: PresetSaveArgs| verb_preset_save(save.as_ref(), args)),
         )
         .expect("could not plug preset.save into the table");
-    let preview = library;
+    let preview = Arc::clone(&library);
     table
         .insert(
             "preset.previewFolder",
@@ -471,6 +632,42 @@ pub(crate) fn insert(
             }),
         )
         .expect("could not plug preset.previewFolder into the table");
+    let agent_presets = (Arc::clone(host), Arc::clone(&library));
+    table
+        .insert(
+            "agent.presets",
+            blocking_handler(move |args: AgentPresetsArgs| {
+                verb_agent_presets(agent_presets.0.as_ref(), agent_presets.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug agent.presets into the table");
+    let attach = (Arc::clone(host), Arc::clone(&library));
+    table
+        .insert(
+            "agent.attachPreset",
+            blocking_handler(move |args: AgentAttachPresetArgs| {
+                verb_attach_preset(attach.0.as_ref(), attach.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug agent.attachPreset into the table");
+    let detach = (Arc::clone(host), Arc::clone(&library));
+    table
+        .insert(
+            "agent.detachPreset",
+            blocking_handler(move |args: AgentDetachPresetArgs| {
+                verb_detach_preset(detach.0.as_ref(), detach.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug agent.detachPreset into the table");
+    let reorder_presets = (Arc::clone(host), library);
+    table
+        .insert(
+            "agent.reorderPresets",
+            blocking_handler(move |args: AgentReorderPresetsArgs| {
+                verb_reorder_presets(reorder_presets.0.as_ref(), reorder_presets.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug agent.reorderPresets into the table");
 }
 
 fn verb_status(library: &dyn LibraryCommandHost) -> Result<LibraryStatusOk, CommandError> {
@@ -651,6 +848,12 @@ fn verb_preset_add(
             "preset.add: `backend` goes with `items` only — a folder entry has no backend; omit it",
         ));
     }
+    // ADR-0386: the anchor of a folder add is a folder spelling too — quoted, it would match no listed folder and the
+    //   folders would land at the end with no word said.
+    let after = match entries {
+        PresetEntries::Folders(_) => after.map(unquote),
+        PresetEntries::Items(_) => after,
+    };
     library
         .preset_add(&args.path, &entries, backend, after, args.root_generation)
         .map_err(|refusal| refusal_error("preset.add", refusal))
@@ -740,6 +943,74 @@ fn verb_preview_folder(
     library
         .preview_folder(unquote(&args.folder), backend, args.mode)
         .map_err(|refusal| refusal_error("preset.previewFolder", refusal))
+}
+
+fn verb_agent_presets(
+    host: &dyn AgentCommandHost,
+    library: &dyn LibraryCommandHost,
+    args: AgentPresetsArgs,
+) -> Result<AgentPresetsOk, CommandError> {
+    reject_blanks(&[("target", Some(args.target.as_str()), Blank::NeedsValue)])?;
+    let agent = resolve(host, &args.target)?;
+    library
+        .agent_presets(agent.id)
+        .map(|view| named(view, agent.name).into())
+        .map_err(|refusal| refusal_error("agent.presets", refusal))
+}
+
+fn verb_attach_preset(
+    host: &dyn AgentCommandHost,
+    library: &dyn LibraryCommandHost,
+    args: AgentAttachPresetArgs,
+) -> Result<AgentAttachPresetOk, CommandError> {
+    let after = args.after.as_deref();
+    reject_blanks(&[
+        ("target", Some(args.target.as_str()), Blank::NeedsValue),
+        ("after", after, Blank::OrOmit),
+    ])?;
+    let agent = resolve(host, &args.target)?;
+    library
+        .attach_preset(agent.id, &args.presets, after, args.root_generation)
+        .map(|answer| AgentAttachPresetOk {
+            applied: answer.applied,
+            skipped: answer.skipped,
+            view: named(answer.view, agent.name),
+        })
+        .map_err(|refusal| refusal_error("agent.attachPreset", refusal))
+}
+
+fn verb_detach_preset(
+    host: &dyn AgentCommandHost,
+    library: &dyn LibraryCommandHost,
+    args: AgentDetachPresetArgs,
+) -> Result<AgentDetachPresetOk, CommandError> {
+    reject_blanks(&[("target", Some(args.target.as_str()), Blank::NeedsValue)])?;
+    let agent = resolve(host, &args.target)?;
+    library
+        .detach_preset(
+            agent.id,
+            &args.presets,
+            args.yes.unwrap_or(false),
+            args.root_generation,
+        )
+        .map(|view| named(view, agent.name).into())
+        .map_err(|refusal| refusal_error("agent.detachPreset", refusal))
+}
+
+fn verb_reorder_presets(
+    host: &dyn AgentCommandHost,
+    library: &dyn LibraryCommandHost,
+    args: AgentReorderPresetsArgs,
+) -> Result<AgentReorderPresetsOk, CommandError> {
+    reject_blanks(&[
+        ("target", Some(args.target.as_str()), Blank::NeedsValue),
+        ("base_rev", Some(args.base_rev.as_str()), Blank::NeedsValue),
+    ])?;
+    let agent = resolve(host, &args.target)?;
+    library
+        .reorder_presets(agent.id, &args.order, &args.base_rev, args.root_generation)
+        .map(|view| named(view, agent.name).into())
+        .map_err(|refusal| refusal_error("agent.reorderPresets", refusal))
 }
 
 /// Folder spellings with one layer of quotes off and nothing else, as `library.setRoot` takes its path — an absolute
@@ -917,6 +1188,14 @@ pub(crate) mod fake {
                 }),
             }
         }
+    }
+
+    /// A judgement as JSON — [`NewAgentPresets`] holds the agent's `Attachments`, so the fake builds it from fields.
+    #[derive(serde::Deserialize)]
+    struct NewWire {
+        default_preset: bool,
+        presets: Vec<String>,
+        skipped: Vec<crate::commands::SkippedRow>,
     }
 
     /// A read view as JSON — [`LibraryReadView`] is not a wire type, so the fake builds it from fields.
@@ -1111,6 +1390,83 @@ pub(crate) mod fake {
                 "preview_folder",
                 serde_json::json!({ "folder": folder, "backend": backend, "mode": mode }),
             )
+        }
+        fn agent_presets(&self, agent: AgentId) -> Result<AgentPresetsPortView, PortRefusal> {
+            self.answer("agent_presets", serde_json::json!({ "agent": agent }))
+        }
+        fn attach_preset(
+            &self,
+            agent: AgentId,
+            presets: &[String],
+            after: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<AgentAttachPortAnswer, PortRefusal> {
+            self.answer(
+                "attach_preset",
+                serde_json::json!({
+                    "agent": agent, "presets": presets, "after": after,
+                    "root_generation": root_generation,
+                }),
+            )
+        }
+        fn detach_preset(
+            &self,
+            agent: AgentId,
+            presets: &[String],
+            yes: bool,
+            root_generation: Option<u64>,
+        ) -> Result<AgentPresetsPortView, PortRefusal> {
+            self.answer(
+                "detach_preset",
+                serde_json::json!({
+                    "agent": agent, "presets": presets, "yes": yes, "root_generation": root_generation,
+                }),
+            )
+        }
+        fn reorder_presets(
+            &self,
+            agent: AgentId,
+            order: &[String],
+            base_rev: &str,
+            root_generation: Option<u64>,
+        ) -> Result<AgentPresetsPortView, PortRefusal> {
+            self.answer(
+                "reorder_presets",
+                serde_json::json!({
+                    "agent": agent, "order": order, "base_rev": base_rev,
+                    "root_generation": root_generation,
+                }),
+            )
+        }
+        fn judge_new_presets(
+            &self,
+            profile: &AgentProfile,
+            presets: &[String],
+            root_generation: Option<u64>,
+        ) -> Result<NewAgentPresets, PortRefusal> {
+            let attached: Vec<&str> = profile
+                .presets
+                .iter()
+                .map(|attached| attached.path.as_str())
+                .collect();
+            let wire: NewWire = self.answer(
+                "judge_new_presets",
+                serde_json::json!({
+                    "profile": { "default_preset": profile.default_preset, "presets": attached },
+                    "presets": presets, "root_generation": root_generation,
+                }),
+            )?;
+            Ok(NewAgentPresets {
+                attachments: Attachments {
+                    default_preset: wire.default_preset,
+                    presets: wire
+                        .presets
+                        .into_iter()
+                        .map(|path| crate::profile::AttachedPreset { path })
+                        .collect(),
+                },
+                skipped: wire.skipped,
+            })
         }
     }
 
@@ -2293,5 +2649,335 @@ mod tests {
             }
             assert_eq!(Value::Object(row), *launch_row);
         }
+    }
+
+    /// A folder add's `after` is a folder spelling, so it reaches the port with one layer of quotes off — a quoted
+    /// anchor would match no listed folder and the folders would land at the end with no word said. An item add's
+    /// `after` is a library item spelling and reaches it untouched.
+    #[test]
+    fn a_folder_adds_anchor_reaches_the_port_unquoted_and_an_item_adds_untouched() {
+        let cases = [
+            (
+                json!({ "path": "p.yaml", "folders": ["D:\\new"], "after": "\"C:\\docs\"" }),
+                json!({
+                    "path": "p.yaml", "entries": { "folders": ["D:\\new"] }, "backend": null,
+                    "after": "C:\\docs", "root_generation": null,
+                }),
+            ),
+            (
+                json!({ "path": "p.yaml", "items": ["a.md"], "after": "\"b.md\"" }),
+                json!({
+                    "path": "p.yaml", "entries": { "items": ["a.md"] }, "backend": null,
+                    "after": "\"b.md\"", "root_generation": null,
+                }),
+            ),
+        ];
+        for (args, given) in cases {
+            let library = FakeLibrary::answering(Ok(partial_answer()));
+            call(
+                &table(Vec::new(), Arc::clone(&library)),
+                "preset.add",
+                args.clone(),
+            )
+            .unwrap_or_else(|e| panic!("{args}: {e:?}"));
+            assert_eq!(library.calls(), vec![("preset_add", given)], "{args}");
+        }
+    }
+
+    // ── agent presets ──
+
+    /// The view as the port answers it — every field distinct, so a field carried into another's place fails.
+    fn port_view(agent: AgentId) -> Value {
+        json!({
+            "agent_id": agent,
+            "default_preset": true,
+            "presets": ["P.yaml", "Q.yaml"],
+            "cwd": "C:/work/bob",
+            "workspace_lock": "conversed",
+            "backend": "claude",
+            "mode": "StreamJson",
+            "base_rev": "b1",
+            "takes_presets": true,
+            "folders": [{
+                "path": "D:\\docs", "via": ["P.yaml"], "line": 4, "status": "unreadable",
+                "status_why": "timed out",
+            }],
+            "conflicts": [{
+                "kind": "conflict", "item": null, "via": null,
+                "items": [{ "item": "a.md", "via": ["P.yaml"] }], "code": "c", "args": {}, "line": null,
+            }],
+            "problems": [{
+                "kind": "missing", "item": "m.md", "via": ["Q.yaml"], "items": null,
+                "code": "not-found", "args": { "path": "m.md" }, "line": 6,
+            }],
+            "notices": [{ "code": "n", "args": { "names": ["x"] }, "line": null, "text": "t" }],
+        })
+    }
+
+    /// The declared view: the port's, with `agent_id` as text and `name` beside it.
+    fn named_view(agent: AgentId, name: &str) -> Value {
+        let mut view = port_view(agent);
+        view["agent_id"] = json!(agent.to_string());
+        view["name"] = json!(name);
+        view
+    }
+
+    /// Every agent-preset verb resolves `target` (a name or an id) and hands the port that agent's id with the values
+    /// the caller typed — spellings unparsed, `yes` unspecified as `false`.
+    #[test]
+    fn each_agent_preset_verb_hands_the_port_the_resolved_id_and_the_values_typed() {
+        let (bob, ann) = (AgentId::new_v4(), AgentId::new_v4());
+        let attach = json!({ "applied": [], "skipped": [], "view": port_view(bob) });
+        let cases: Vec<(&str, Value, Value, &str, Value)> = vec![
+            (
+                "agent.presets",
+                json!({ "target": "bob" }),
+                port_view(bob),
+                "agent_presets",
+                json!({ "agent": bob }),
+            ),
+            (
+                "agent.presets",
+                json!({ "target": ann.to_string() }),
+                port_view(ann),
+                "agent_presets",
+                json!({ "agent": ann }),
+            ),
+            (
+                "agent.attachPreset",
+                json!({ "target": "bob", "presets": ["R.yaml", "\"S.yaml\""], "after": "P.yaml" }),
+                attach.clone(),
+                "attach_preset",
+                json!({
+                    "agent": bob, "presets": ["R.yaml", "\"S.yaml\""], "after": "P.yaml",
+                    "root_generation": null,
+                }),
+            ),
+            (
+                "agent.attachPreset",
+                json!({ "target": "bob", "presets": [], "root_generation": 7 }),
+                attach,
+                "attach_preset",
+                json!({ "agent": bob, "presets": [], "after": null, "root_generation": 7 }),
+            ),
+            (
+                "agent.detachPreset",
+                json!({ "target": "bob", "presets": ["engram:/default"] }),
+                port_view(bob),
+                "detach_preset",
+                json!({
+                    "agent": bob, "presets": ["engram:/default"], "yes": false, "root_generation": null,
+                }),
+            ),
+            (
+                "agent.detachPreset",
+                json!({ "target": "bob", "presets": ["P.yaml"], "yes": true, "root_generation": 7 }),
+                port_view(bob),
+                "detach_preset",
+                json!({ "agent": bob, "presets": ["P.yaml"], "yes": true, "root_generation": 7 }),
+            ),
+            (
+                "agent.reorderPresets",
+                json!({ "target": "bob", "order": ["Q.yaml", "P.yaml"], "base_rev": "b1" }),
+                port_view(bob),
+                "reorder_presets",
+                json!({
+                    "agent": bob, "order": ["Q.yaml", "P.yaml"], "base_rev": "b1", "root_generation": null,
+                }),
+            ),
+        ];
+        for (name, args, answer, method, given) in cases {
+            let library = FakeLibrary::answering(Ok(answer));
+            let table = table(vec![(bob, "bob"), (ann, "ann")], Arc::clone(&library));
+            call(&table, name, args.clone()).unwrap_or_else(|e| panic!("{name} {args}: {e:?}"));
+            assert_eq!(library.calls(), vec![(method, given)], "{name} {args}");
+        }
+    }
+
+    /// The port answers the agent by id only; every agent-preset answer carries the name the `target` resolution found
+    /// — also when the caller pointed by id — beside the view as the port built it (ADR-0386 decision 3).
+    #[test]
+    fn agent_preset_answers_carry_the_name_the_target_resolution_found() {
+        let bob = AgentId::new_v4();
+        let flat = [
+            ("agent.presets", json!({ "target": "bob" })),
+            ("agent.presets", json!({ "target": bob.to_string() })),
+            (
+                "agent.detachPreset",
+                json!({ "target": "bob", "presets": ["P.yaml"] }),
+            ),
+            (
+                "agent.reorderPresets",
+                json!({ "target": bob.to_string(), "order": [], "base_rev": "b1" }),
+            ),
+        ];
+        for (name, args) in flat {
+            let library = FakeLibrary::answering(Ok(port_view(bob)));
+            let out = call(&table(vec![(bob, "bob")], library), name, args.clone())
+                .unwrap_or_else(|e| panic!("{name} {args}: {e:?}"));
+            assert_eq!(out, named_view(bob, "bob"), "{name} {args}");
+        }
+
+        let skipped = json!([{ "item": "M.yaml", "code": "not-found", "args": {}, "line": null }]);
+        let library = FakeLibrary::answering(Ok(json!({
+            "applied": ["R.yaml"], "skipped": skipped, "view": port_view(bob),
+        })));
+        let out = call(
+            &table(vec![(bob, "bob")], library),
+            "agent.attachPreset",
+            json!({ "target": "bob", "presets": ["R.yaml", "M.yaml"] }),
+        )
+        .expect("attach");
+        assert_eq!(
+            out,
+            json!({ "applied": ["R.yaml"], "skipped": skipped, "view": named_view(bob, "bob") })
+        );
+    }
+
+    /// A `target` that points at no agent, or at several, is the resolver's refusal (NOT_FOUND · CONFLICT, the
+    /// candidates in the text); a blank one or a blank `base_rev` / `after` is an argument error — the port is never
+    /// called.
+    #[test]
+    fn an_agent_preset_target_that_resolves_to_no_one_agent_is_refused_before_the_port() {
+        let (bob, twin_a, twin_b) = (AgentId::new_v4(), AgentId::new_v4(), AgentId::new_v4());
+        let roster = vec![(bob, "bob"), (twin_a, "twin"), (twin_b, "twin")];
+        let cases = [
+            (
+                "agent.presets",
+                json!({ "target": "nobody" }),
+                ErrorCode::NotFound,
+            ),
+            (
+                "agent.presets",
+                json!({ "target": "twin" }),
+                ErrorCode::Conflict,
+            ),
+            (
+                "agent.attachPreset",
+                json!({ "target": "nobody", "presets": ["P.yaml"] }),
+                ErrorCode::NotFound,
+            ),
+            (
+                "agent.detachPreset",
+                json!({ "target": "twin", "presets": ["P.yaml"] }),
+                ErrorCode::Conflict,
+            ),
+            (
+                "agent.reorderPresets",
+                json!({ "target": "nobody", "order": [], "base_rev": "b1" }),
+                ErrorCode::NotFound,
+            ),
+            (
+                "agent.presets",
+                json!({ "target": " " }),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                "agent.attachPreset",
+                json!({ "target": "bob", "presets": ["P.yaml"], "after": "" }),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                "agent.detachPreset",
+                json!({ "target": "", "presets": ["P.yaml"] }),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                "agent.reorderPresets",
+                json!({ "target": "bob", "order": [], "base_rev": " " }),
+                ErrorCode::InvalidArgument,
+            ),
+        ];
+        for (name, args, code) in cases {
+            let library = Arc::new(FakeLibrary::default());
+            let err = call(
+                &table(roster.clone(), Arc::clone(&library)),
+                name,
+                args.clone(),
+            )
+            .expect_err("refused");
+            assert_eq!(err.code(), code, "{name} {args}");
+            assert!(
+                library.calls().is_empty(),
+                "{name} {args}: the port was called"
+            );
+        }
+    }
+
+    /// An agent-preset refusal maps as every library refusal: the class's code (`profile-edit-unavailable` the one
+    /// `INTERNAL`), the reason as `args`, the command in the message; a store error as a registry-writing command.
+    #[test]
+    fn an_agent_preset_refusal_maps_onto_its_code_with_the_reason_as_args() {
+        let bob = AgentId::new_v4();
+        let cases = [
+            (
+                "agent.detachPreset",
+                json!({ "target": "bob", "presets": ["engram:/default"] }),
+                refused(
+                    PortClass::Conflict,
+                    "default-preset-detach",
+                    json!({ "agent": bob.to_string() }),
+                    None,
+                ),
+                ErrorCode::Conflict,
+            ),
+            (
+                "agent.reorderPresets",
+                json!({ "target": "bob", "order": [], "base_rev": "old" }),
+                refused(
+                    PortClass::Conflict,
+                    "rev-mismatch",
+                    json!({ "rev": "new" }),
+                    None,
+                ),
+                ErrorCode::Conflict,
+            ),
+            (
+                "agent.attachPreset",
+                json!({ "target": "bob", "presets": ["P.yaml"] }),
+                refused(
+                    PortClass::Internal,
+                    "profile-edit-unavailable",
+                    json!({}),
+                    None,
+                ),
+                ErrorCode::Internal,
+            ),
+            (
+                "agent.presets",
+                json!({ "target": "bob" }),
+                refused(
+                    PortClass::NotFound,
+                    "not-found",
+                    json!({ "agent": bob.to_string() }),
+                    None,
+                ),
+                ErrorCode::NotFound,
+            ),
+        ];
+        for (name, args, refusal, code) in cases {
+            let PortRefusal::Refused { reason, .. } = &refusal else {
+                unreachable!("built refused")
+            };
+            let mut expected = Map::new();
+            put_reason(&mut expected, reason);
+            let library = FakeLibrary::answering(Err(refusal));
+            let err = call(&table(vec![(bob, "bob")], library), name, args).expect_err("refused");
+            assert_eq!(err.code(), code, "{name}");
+            assert_eq!(err.args(), Some(&expected), "{name}");
+            assert!(err.message().starts_with(&format!("{name}: ")), "{name}");
+        }
+
+        let library = FakeLibrary::answering(Err(PortRefusal::Store(StoreError::Io(
+            std::io::Error::other("disk full"),
+        ))));
+        let err = call(
+            &table(vec![(bob, "bob")], library),
+            "agent.attachPreset",
+            json!({ "target": "bob", "presets": ["P.yaml"] }),
+        )
+        .expect_err("refused");
+        assert_eq!(err.code(), ErrorCode::Internal);
+        assert!(err.args().is_none());
     }
 }

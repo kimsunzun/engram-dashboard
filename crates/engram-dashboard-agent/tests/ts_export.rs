@@ -8,18 +8,20 @@
 //! ★Commit the generated files★ — the CI diff gate must watch this directory to catch vocabulary drift.
 
 use engram_dashboard_agent::commands::{
-    AgentCancelQueuedInputArgs, AgentCancelQueuedInputOk, AgentInterruptArgs, AgentInterruptOk,
-    AgentListArgs, AgentListOk, AgentListQueuedInputsArgs, AgentListQueuedInputsOk, AgentMoveArgs,
-    AgentMoveOk, AgentNewArgs, AgentNewOk, AgentRenameArgs, AgentRenameOk, AgentResolveArgs,
-    AgentResolveOk, AgentSpawnArgs, AgentSpawnOk, LibraryFoldersArgs, LibraryFoldersOk,
-    LibraryListArgs, LibraryListOk, LibraryNewFileArgs, LibraryNewFileOk, LibraryNewFolderArgs,
-    LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk,
-    LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs, LibrarySetRootOk, LibraryStatusArgs,
-    LibraryStatusOk, PresetAddArgs, PresetAddOk, PresetCheckArgs, PresetCheckOk, PresetGetArgs,
-    PresetGetOk, PresetPreviewFolderArgs, PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk,
-    PresetReorderArgs, PresetReorderOk, PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs,
-    PresetSetBackendOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk, UsageVendorRow,
-    CATALOG_VERSION,
+    AgentAttachPresetArgs, AgentAttachPresetOk, AgentCancelQueuedInputArgs,
+    AgentCancelQueuedInputOk, AgentDetachPresetArgs, AgentDetachPresetOk, AgentInterruptArgs,
+    AgentInterruptOk, AgentListArgs, AgentListOk, AgentListQueuedInputsArgs,
+    AgentListQueuedInputsOk, AgentMoveArgs, AgentMoveOk, AgentNewArgs, AgentNewOk,
+    AgentPresetsArgs, AgentPresetsOk, AgentRenameArgs, AgentRenameOk, AgentReorderPresetsArgs,
+    AgentReorderPresetsOk, AgentResolveArgs, AgentResolveOk, AgentSpawnArgs, AgentSpawnOk,
+    LibraryFoldersArgs, LibraryFoldersOk, LibraryListArgs, LibraryListOk, LibraryNewFileArgs,
+    LibraryNewFileOk, LibraryNewFolderArgs, LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk,
+    LibraryRefreshArgs, LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs,
+    LibrarySetRootOk, LibraryStatusArgs, LibraryStatusOk, PresetAddArgs, PresetAddOk,
+    PresetCheckArgs, PresetCheckOk, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs,
+    PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk,
+    PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs, PresetSetBackendOk, UsageGetArgs,
+    UsageRefreshArgs, UsageRefreshOk, UsageVendorRow, CATALOG_VERSION,
 };
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
 use ts_rs::TS;
@@ -121,6 +123,20 @@ fn export_typescript_bindings() {
         .expect("failed to export the PresetPreviewFolderArgs bindings");
     PresetPreviewFolderOk::export_all_to(out)
         .expect("failed to export the PresetPreviewFolderOk bindings");
+    AgentPresetsArgs::export_all_to(out).expect("failed to export the AgentPresetsArgs bindings");
+    AgentPresetsOk::export_all_to(out).expect("failed to export the AgentPresetsOk bindings");
+    AgentAttachPresetArgs::export_all_to(out)
+        .expect("failed to export the AgentAttachPresetArgs bindings");
+    AgentAttachPresetOk::export_all_to(out)
+        .expect("failed to export the AgentAttachPresetOk bindings");
+    AgentDetachPresetArgs::export_all_to(out)
+        .expect("failed to export the AgentDetachPresetArgs bindings");
+    AgentDetachPresetOk::export_all_to(out)
+        .expect("failed to export the AgentDetachPresetOk bindings");
+    AgentReorderPresetsArgs::export_all_to(out)
+        .expect("failed to export the AgentReorderPresetsArgs bindings");
+    AgentReorderPresetsOk::export_all_to(out)
+        .expect("failed to export the AgentReorderPresetsOk bindings");
 
     let produced: Vec<String> = std::fs::read_dir(out)
         .expect("read bindings/")

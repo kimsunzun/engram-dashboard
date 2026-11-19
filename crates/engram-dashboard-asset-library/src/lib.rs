@@ -98,7 +98,8 @@
 //! agent declares the commands and owns their vocabulary; `host.rs` implements its `LibraryCommandHost` port: it
 //! parses the spellings with the bodies' own path rules, calls one body per command and converts the answer into
 //! agent's declared rows, with no second body call and no read-back (ADR-0384). Bus codes stay in agent. The port
-//! carries the `library.*` and `preset.*` commands; the daemon plugs this service into the command table.
+//! carries the `library.*`, `preset.*` and agent-preset commands and the `agent.new {presets}` judgement; the daemon
+//! plugs this service into the command table.
 // ADR-0311
 // ADR-0324
 // ADR-0378
@@ -246,6 +247,16 @@ impl LibraryRefusal {
             json!({ "message": why }),
         )
     }
+}
+
+/// The refusal of a root generation that is not the current one — `Conflict` · [`ROOT_GENERATION_STALE`].
+// ADR-0377
+fn stale_root_generation(given: Option<u64>, current: u64) -> LibraryRefusal {
+    LibraryRefusal::new(
+        RefusalClass::Conflict,
+        ROOT_GENERATION_STALE,
+        json!({ "given": given, "current": current }),
+    )
 }
 
 /// What the daemon hands the service.
@@ -922,13 +933,7 @@ impl LibraryService {
     ) -> Result<R, LibraryRefusal> {
         self.gate
             .change_checked(root_generation, f)
-            .map_err(|current| {
-                LibraryRefusal::new(
-                    RefusalClass::Conflict,
-                    ROOT_GENERATION_STALE,
-                    json!({ "given": root_generation, "current": current }),
-                )
-            })
+            .map_err(|current| stale_root_generation(root_generation, current))
     }
 
     /// The root, its setting and `library.json` now. The root is stat'ed on one read budget outside every lock; the

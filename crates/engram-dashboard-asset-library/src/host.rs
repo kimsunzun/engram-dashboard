@@ -1,5 +1,5 @@
-//! The library command port — `impl LibraryCommandHost for LibraryService`: the `library.*` and `preset.*` commands
-//! agent declares, answered by the bodies of this crate.
+//! The library command port — `impl LibraryCommandHost for LibraryService`: the `library.*`, `preset.*` and
+//! agent-preset commands agent declares and the `agent.new {presets}` judgement, answered by the bodies of this crate.
 //!
 //! ## Rules (invariants)
 //!
@@ -13,6 +13,8 @@
 //! - **Refusals cross 1:1.** [`LibraryRefusal`] becomes agent's `PortRefusal` with the same class and reason (or the
 //!   same store error); agent picks the bus code (ADR-0379). `list`'s bare reason (`library-unavailable`) gets class
 //!   `Unavailable`.
+//! - **Agents cross by id.** The agent-preset views carry the agent's id and no name — agent names it from its own
+//!   resolution of `target` (ADR-0386 decision 3).
 // ADR-0311
 // ADR-0379
 // ADR-0384
@@ -24,20 +26,23 @@ use engram_dashboard_agent::backend::settings_check::{
     FolderLoad, FolderLoadKind, FolderLoadSet, FolderUnsure, UnsureWhy,
 };
 use engram_dashboard_agent::commands::{
-    self as declared, AgentOutputFormat, FolderLoadKindWord, FolderRow, LibraryFolderRow,
-    LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind, LibraryRefreshOk,
-    LibraryRelinkOk, LibraryStatusOk, ListFolderRow, PathReasonRow, PresetAddOk, PresetCheckOk,
-    PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk,
-    PreviewItemRow, PreviewLoadRow, PreviewRefusalRow, PreviewSetRow, PreviewSkillNameRow,
-    PreviewUnsureRow, ReasonRow, RefreshErrorRow, RelinkPairRow, SkippedRow,
+    self as declared, launch_notice_row, AgentFolderRow, AgentOutputFormat, FolderLoadKindWord,
+    FolderRow, LibraryFolderRow, LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind,
+    LibraryRefreshOk, LibraryRelinkOk, LibraryStatusOk, ListFolderRow, PathReasonRow, PresetAddOk,
+    PresetCheckOk, PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk, PresetSection,
+    PresetSetBackendOk, PreviewItemRow, PreviewLoadRow, PreviewRefusalRow, PreviewSetRow,
+    PreviewSkillNameRow, PreviewUnsureRow, ReasonRow, RefreshErrorRow, RelinkPairRow, SkippedRow,
 };
 use engram_dashboard_agent::launch::Reason;
 use engram_dashboard_agent::library_commands::{
-    problem_row, relink_stop_row, LibraryCommandHost, LibraryReadView, PortClass, PortRefusal,
-    PresetDraftInput, PresetEntries,
+    problem_row, relink_stop_row, AgentAttachPortAnswer, AgentPresetsPortView, LibraryCommandHost,
+    LibraryReadView, NewAgentPresets, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
 };
-use engram_dashboard_agent::profile::AgentOutputFormat as CoreOutputFormat;
+use engram_dashboard_agent::profile::{AgentOutputFormat as CoreOutputFormat, AgentProfile};
+use engram_dashboard_agent::profile_edit::WorkspaceLock;
+use engram_dashboard_agent::types::AgentId;
 
+use crate::agent_edit::{judge_new_presets_without_library, AgentPresetsView, NewPresets};
 use crate::catalog::ItemKind;
 use crate::config::ConfigHealth;
 use crate::create::NewFileKind;
@@ -48,6 +53,7 @@ use crate::edit::{
 use crate::folder::{slash_path, FolderStatus};
 use crate::format::ListName;
 use crate::relink::RelinkAnswer;
+use crate::resolve::ResolvedFolder;
 use crate::{
     FoldersAnswer, LibraryRefusal, LibraryService, LibraryStatus, ListAnswer, ListFilter, ListRow,
     ReadAnswer, RefreshReport, RefusalClass, RootSettingKind, RootStatus,
@@ -284,6 +290,77 @@ impl LibraryCommandHost for LibraryService {
             .map(preview_ok)
             .map_err(port)
     }
+
+    fn agent_presets(&self, agent: AgentId) -> Result<AgentPresetsPortView, PortRefusal> {
+        LibraryService::agent_presets(self, agent)
+            .map(agent_view)
+            .map_err(port)
+    }
+
+    fn attach_preset(
+        &self,
+        agent: AgentId,
+        presets: &[String],
+        after: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<AgentAttachPortAnswer, PortRefusal> {
+        LibraryService::attach_preset(self, agent, presets, after, root_generation)
+            .map(|attach| AgentAttachPortAnswer {
+                applied: attach.applied,
+                skipped: attach.skipped.into_iter().map(skipped_row).collect(),
+                view: agent_view(attach.view),
+            })
+            .map_err(port)
+    }
+
+    fn detach_preset(
+        &self,
+        agent: AgentId,
+        presets: &[String],
+        yes: bool,
+        root_generation: Option<u64>,
+    ) -> Result<AgentPresetsPortView, PortRefusal> {
+        LibraryService::detach_preset(self, agent, presets, yes, root_generation)
+            .map(agent_view)
+            .map_err(port)
+    }
+
+    fn reorder_presets(
+        &self,
+        agent: AgentId,
+        order: &[String],
+        base_rev: &str,
+        root_generation: Option<u64>,
+    ) -> Result<AgentPresetsPortView, PortRefusal> {
+        LibraryService::reorder_presets(self, agent, order, base_rev, root_generation)
+            .map(agent_view)
+            .map_err(port)
+    }
+
+    fn judge_new_presets(
+        &self,
+        profile: &AgentProfile,
+        presets: &[String],
+        root_generation: Option<u64>,
+    ) -> Result<NewAgentPresets, PortRefusal> {
+        LibraryService::judge_new_presets(self, profile, presets, root_generation)
+            .map(new_presets)
+            .map_err(port)
+    }
+}
+
+/// The `agent.new {presets}` judgement of an assembly that runs no library service (the daemon's `NoLibrary`): the
+/// attach rule with no catalog — a library preset refuses the whole call `Unavailable` · `library-unavailable`
+/// (`message` = `why`); `engram:/default` and the other spellings are judged as the service judges them.
+// ADR-0386
+pub fn judge_new_presets_with_no_library(
+    profile: &AgentProfile,
+    presets: &[String],
+    why: &str,
+) -> Result<NewAgentPresets, PortRefusal> {
+    judge_new_presets_without_library(profile, presets, why)
+        .map(new_presets)
+        .map_err(port)
 }
 
 /// [`LibraryRefusal`] → the port refusal, 1:1.
@@ -457,36 +534,109 @@ fn entry_row(row: PresetRow) -> PresetEntryRow {
     }
 }
 
-/// The stat as a word, and the reason only `unreadable` carries.
 fn folder_row(folder: PresetFolder) -> FolderRow {
-    let (status, status_why) = match folder.status {
-        None => (None, None),
-        Some(FolderStatus::Ok) => (Some("ok"), None),
-        Some(FolderStatus::Missing) => (Some("missing"), None),
-        Some(FolderStatus::NotADirectory) => (Some("not_a_directory"), None),
-        Some(FolderStatus::Unreadable(why)) => (Some("unreadable"), Some(why)),
-    };
+    let (status, status_why) = status_words(folder.status);
     FolderRow {
         path: folder.path,
         line: folder.line,
-        status: status.map(str::to_owned),
+        status,
         status_why,
     }
 }
 
+/// A folder stat as a word, and the reason only `unreadable` carries; `None` = not stat'ed.
+fn status_words(status: Option<FolderStatus>) -> (Option<String>, Option<String>) {
+    let (word, why) = match status {
+        None => return (None, None),
+        Some(FolderStatus::Ok) => ("ok", None),
+        Some(FolderStatus::Missing) => ("missing", None),
+        Some(FolderStatus::NotADirectory) => ("not_a_directory", None),
+        Some(FolderStatus::Unreadable(why)) => ("unreadable", Some(why)),
+    };
+    (Some(word.to_owned()), why)
+}
+
 /// A partial edit's answer as the declared `{applied, skipped, view}` parts.
 fn partial(edit: PartialEdit) -> (Vec<String>, Vec<SkippedRow>, declared::PresetView) {
-    let skipped = edit
-        .skipped
-        .into_iter()
-        .map(|Skipped { item, reason }| SkippedRow {
-            item,
-            code: reason.code,
-            args: reason.args,
-            line: reason.line,
-        })
-        .collect();
+    let skipped = edit.skipped.into_iter().map(skipped_row).collect();
     (edit.applied, skipped, preset_view(edit.view))
+}
+
+/// A skip as the declared row — the reason's `code` · `args` · `line` beside the item.
+fn skipped_row(Skipped { item, reason }: Skipped) -> SkippedRow {
+    SkippedRow {
+        item,
+        code: reason.code,
+        args: reason.args,
+        line: reason.line,
+    }
+}
+
+/// The `agent.presets` view in declared rows, by id. ★Destructured (without `..`)★ — a field added to the body's view
+/// stops compilation here instead of being dropped.
+fn agent_view(view: AgentPresetsView) -> AgentPresetsPortView {
+    let AgentPresetsView {
+        agent,
+        default_preset,
+        presets,
+        cwd,
+        workspace_lock,
+        backend,
+        mode,
+        base_rev,
+        takes_presets,
+        folders,
+        conflicts,
+        problems,
+        notices,
+    } = view;
+    AgentPresetsPortView {
+        agent_id: agent,
+        default_preset,
+        presets,
+        cwd: cwd.to_string_lossy().into_owned(),
+        workspace_lock: workspace_lock.map(|lock| {
+            match lock {
+                WorkspaceLock::Running => "running",
+                WorkspaceLock::Preparing => "preparing",
+                WorkspaceLock::Conversed => "conversed",
+            }
+            .to_owned()
+        }),
+        backend,
+        mode: declared_mode(mode),
+        base_rev,
+        takes_presets,
+        folders: folders.into_iter().map(agent_folder_row).collect(),
+        conflicts: conflicts.into_iter().map(problem_row).collect(),
+        problems: problems.into_iter().map(problem_row).collect(),
+        notices: notices.into_iter().map(launch_notice_row).collect(),
+    }
+}
+
+fn agent_folder_row(folder: ResolvedFolder) -> AgentFolderRow {
+    let (status, status_why) = status_words(folder.status);
+    AgentFolderRow {
+        path: folder.path.to_string_lossy().into_owned(),
+        via: folder.via,
+        line: folder.line,
+        status,
+        status_why,
+    }
+}
+
+fn new_presets(judged: NewPresets) -> NewAgentPresets {
+    NewAgentPresets {
+        attachments: judged.attachments,
+        skipped: judged.skipped.into_iter().map(skipped_row).collect(),
+    }
+}
+
+fn declared_mode(mode: CoreOutputFormat) -> AgentOutputFormat {
+    match mode {
+        CoreOutputFormat::Terminal => AgentOutputFormat::Terminal,
+        CoreOutputFormat::StreamJson => AgentOutputFormat::StreamJson,
+    }
 }
 
 fn check_ok(answer: CheckAnswer) -> PresetCheckOk {
@@ -530,10 +680,7 @@ fn preview_ok(preview: FolderPreview) -> PresetPreviewFolderOk {
             .into_iter()
             .map(|load| PreviewLoadRow {
                 backend: load.backend.to_owned(),
-                mode: match load.mode {
-                    CoreOutputFormat::Terminal => AgentOutputFormat::Terminal,
-                    CoreOutputFormat::StreamJson => AgentOutputFormat::StreamJson,
-                },
+                mode: declared_mode(load.mode),
                 predicted: load.predicted,
                 set: preview_set(load.set),
                 unread: load.unread,
@@ -665,11 +812,14 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use engram_dashboard_agent::launch::BlockReason;
     use engram_dashboard_agent::profile::{
         AgentCommand, AgentProfile, AttachedPreset, ProfileRegistry, ProfileStore, Refusal,
         StoreError,
     };
-    use engram_dashboard_agent::types::AgentId;
+    use engram_dashboard_agent::profile_edit::{
+        Attachments, PresetPathRename, ProfileEditError, ProfileEditPort,
+    };
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -721,6 +871,7 @@ mod tests {
     struct World {
         _temp: TempDir,
         base: PathBuf,
+        registry: Arc<ProfileRegistry>,
         svc: Arc<LibraryService>,
     }
 
@@ -766,8 +917,9 @@ mod tests {
                 true => LibraryConfig::usable(&state, RootSetting::Explicit(base.join("lib"))),
                 false => LibraryConfig::missing(&state),
             };
+            let registry = Arc::new(ProfileRegistry::new(Arc::new(Fixed(profiles))));
             let values = LibraryValues {
-                registry: Arc::new(ProfileRegistry::new(Arc::new(Fixed(profiles)))),
+                registry: Arc::clone(&registry),
                 backends: Arc::new(AgentBackends),
                 config,
                 default_root: base.join("default-library"),
@@ -793,8 +945,17 @@ mod tests {
             World {
                 _temp: temp,
                 base,
+                registry,
                 svc,
             }
+        }
+
+        /// Plugs a profile-edit port over the world's registry — keep the answer alive while the port is needed.
+        fn plug(&self) -> Arc<RegistryPort> {
+            let port = Arc::new(RegistryPort(Arc::clone(&self.registry)));
+            let weak: std::sync::Weak<RegistryPort> = Arc::downgrade(&port);
+            self.svc.plug_profile_edit(weak);
+            port
         }
 
         fn put(&self, rel: &str, text: &str) {
@@ -817,6 +978,41 @@ mod tests {
             self.port()
                 .list(folder, query, kinds, false)
                 .unwrap_or_else(|e| panic!("list: {e:?}"))
+        }
+    }
+
+    /// A profile-edit port that writes the attachments into the registry, as the manager does, and answers no
+    /// working-folder lock.
+    struct RegistryPort(Arc<ProfileRegistry>);
+
+    impl ProfileEditPort for RegistryPort {
+        fn set_attachments(&self, id: AgentId, next: Attachments) -> Result<(), ProfileEditError> {
+            let present = self.0.try_update_with(id, |profile| {
+                profile.default_preset = next.default_preset;
+                profile.presets = next.presets;
+            })?;
+            match present {
+                true => Ok(()),
+                false => Err(ProfileEditError::NotFound(id)),
+            }
+        }
+
+        fn rewrite_preset_paths(
+            &self,
+            _: &[PresetPathRename],
+        ) -> Result<Vec<AgentId>, ProfileEditError> {
+            unreachable!("not an agent-preset command's call")
+        }
+
+        fn remove_preset_paths(&self, _: &[String]) -> Result<Vec<AgentId>, ProfileEditError> {
+            unreachable!("not an agent-preset command's call")
+        }
+
+        fn workspace_lock(&self, id: AgentId) -> Result<Option<WorkspaceLock>, ProfileEditError> {
+            match self.0.get(id) {
+                Some(_) => Ok(None),
+                None => Err(ProfileEditError::NotFound(id)),
+            }
         }
     }
 
@@ -1985,5 +2181,316 @@ mod tests {
                 (word, message, line)
             );
         }
+    }
+
+    // ── agent presets ──
+
+    fn claude_agent(presets: &[&str]) -> AgentProfile {
+        let mut profile = agent(presets, true);
+        profile.command = AgentCommand::Claude {
+            extra_args: Vec::new(),
+            output_format: CoreOutputFormat::Terminal,
+        };
+        profile
+    }
+
+    fn reason(code: &str, path: &str, line: Option<u32>) -> Reason {
+        Reason {
+            code: code.to_owned(),
+            args: json!({ "path": path }),
+            line,
+        }
+    }
+
+    /// The body's `agent.presets` view crosses the port field by field in declared rows, by id: the working folder
+    /// lock as its word, each folder with its stat words and chain, the problem rows, the notices with their text.
+    #[test]
+    fn an_agent_view_crosses_the_port_field_by_field_by_id() {
+        let agent = AgentId::new_v4();
+        let folder = |path: &str, status: Option<FolderStatus>| ResolvedFolder {
+            path: PathBuf::from(path),
+            key: engram_dashboard_platform::fs::path_key(Path::new(path)),
+            via: vec!["P.yaml".to_owned(), "Q.yaml".to_owned()],
+            line: 3,
+            instructions_at: 0,
+            status,
+        };
+        let missing = BlockReason::Missing {
+            item: "m.md".to_owned(),
+            via: vec!["P.yaml".to_owned()],
+            reason: reason("not-found", "m.md", Some(5)),
+        };
+        let conflict = BlockReason::Conflict {
+            reason: reason("c", "x", None),
+            items: vec![("a.md".to_owned(), vec!["P.yaml".to_owned()])],
+        };
+        let notice = reason("omitted", "n.md", Some(2));
+        let view = AgentPresetsView {
+            agent,
+            default_preset: false,
+            presets: vec!["P.yaml".to_owned(), "Q.yaml".to_owned()],
+            cwd: PathBuf::from("C:/work/bob"),
+            workspace_lock: Some(WorkspaceLock::Preparing),
+            backend: "codex".to_owned(),
+            mode: CoreOutputFormat::Terminal,
+            base_rev: "b1".to_owned(),
+            takes_presets: true,
+            folders: vec![
+                folder(
+                    "D:/docs",
+                    Some(FolderStatus::Unreadable("timed out".to_owned())),
+                ),
+                folder("D:/gone", Some(FolderStatus::Missing)),
+                folder("D:/later", None),
+            ],
+            conflicts: vec![conflict.clone()],
+            problems: vec![missing.clone()],
+            notices: vec![notice.clone()],
+        };
+
+        let out = agent_view(view);
+
+        let row = |path: &str, status: Option<&str>, why: Option<&str>| AgentFolderRow {
+            path: path.to_owned(),
+            via: vec!["P.yaml".to_owned(), "Q.yaml".to_owned()],
+            line: 3,
+            status: status.map(str::to_owned),
+            status_why: why.map(str::to_owned),
+        };
+        assert_eq!(
+            out,
+            AgentPresetsPortView {
+                agent_id: agent,
+                default_preset: false,
+                presets: vec!["P.yaml".to_owned(), "Q.yaml".to_owned()],
+                cwd: "C:/work/bob".to_owned(),
+                workspace_lock: Some("preparing".to_owned()),
+                backend: "codex".to_owned(),
+                mode: AgentOutputFormat::Terminal,
+                base_rev: "b1".to_owned(),
+                takes_presets: true,
+                folders: vec![
+                    row("D:/docs", Some("unreadable"), Some("timed out")),
+                    row("D:/gone", Some("missing"), None),
+                    row("D:/later", None, None),
+                ],
+                conflicts: vec![problem_row(conflict)],
+                problems: vec![problem_row(missing)],
+                notices: vec![launch_notice_row(notice)],
+            }
+        );
+    }
+
+    /// Every working-folder lock lands as its own word; no lock is `null`.
+    #[test]
+    fn every_workspace_lock_lands_as_its_word() {
+        let cases = [
+            (None, None),
+            (Some(WorkspaceLock::Running), Some("running")),
+            (Some(WorkspaceLock::Preparing), Some("preparing")),
+            (Some(WorkspaceLock::Conversed), Some("conversed")),
+        ];
+        for (lock, word) in cases {
+            let view = AgentPresetsView {
+                agent: AgentId::new_v4(),
+                default_preset: true,
+                presets: Vec::new(),
+                cwd: PathBuf::from("/work"),
+                workspace_lock: lock,
+                backend: "claude".to_owned(),
+                mode: CoreOutputFormat::StreamJson,
+                base_rev: "b".to_owned(),
+                takes_presets: false,
+                folders: Vec::new(),
+                conflicts: Vec::new(),
+                problems: Vec::new(),
+                notices: Vec::new(),
+            };
+            assert_eq!(agent_view(view).workspace_lock.as_deref(), word, "{lock:?}");
+        }
+    }
+
+    /// Through the port, `agent.presets` answers the body's view and the edits answer what they committed: `attach`
+    /// its applied presets and skips as rows, `reorder` (with the shown `base_rev`) and `detach` the view after the
+    /// change — each the attachments now in the registry.
+    #[test]
+    fn the_agent_preset_commands_answer_the_bodies_answers_in_declared_rows() {
+        let profile = claude_agent(&["p.yaml"]);
+        let id = profile.id;
+        let w = World::new(vec![profile]);
+        let _port = w.plug();
+        w.put("p.yaml", "kind: preset\nversion: 1\n");
+        w.put("q.yaml", "kind: preset\nversion: 1\n");
+
+        let shown = w.port().agent_presets(id).unwrap();
+        assert_eq!(shown, agent_view(w.svc.agent_presets(id).unwrap()));
+        assert_eq!(shown.agent_id, id);
+
+        let attach = w
+            .port()
+            .attach_preset(id, &strings(&["q.yaml", "gone.yaml"]), None, None)
+            .unwrap();
+        assert_eq!(attach.applied, strings(&["q.yaml"]));
+        assert_eq!(
+            attach.skipped,
+            vec![SkippedRow {
+                item: "gone.yaml".to_owned(),
+                code: crate::NOT_FOUND.to_owned(),
+                args: json!({ "path": "gone.yaml" }),
+                line: None,
+            }]
+        );
+        assert_eq!(attach.view.presets, strings(&["p.yaml", "q.yaml"]));
+
+        let reorder = w
+            .port()
+            .reorder_presets(
+                id,
+                &strings(&["q.yaml", "p.yaml"]),
+                &attach.view.base_rev,
+                None,
+            )
+            .unwrap();
+        assert_eq!(reorder.presets, strings(&["q.yaml", "p.yaml"]));
+        let detach = w
+            .port()
+            .detach_preset(id, &strings(&["engram:/default", "q.yaml"]), true, None)
+            .unwrap();
+        assert_eq!(
+            (detach.default_preset, detach.presets.clone()),
+            (false, strings(&["p.yaml"]))
+        );
+        assert_eq!(
+            w.registry.attachments_of(id).expect("the agent"),
+            Attachments {
+                default_preset: false,
+                presets: vec![AttachedPreset {
+                    path: "p.yaml".to_owned()
+                }],
+            }
+        );
+        assert_eq!(detach, agent_view(w.svc.agent_presets(id).unwrap()));
+    }
+
+    /// The agent-preset refusals cross 1:1: a stale `base_rev` `Conflict` `rev-mismatch`, the Default slot without
+    /// `yes` `Conflict` `default-preset-detach`, no port `Internal` `profile-edit-unavailable`.
+    #[test]
+    fn the_agent_preset_refusals_cross_with_their_class() {
+        let profile = claude_agent(&["p.yaml"]);
+        let id = profile.id;
+        let w = World::new(vec![profile]);
+        w.put("p.yaml", "kind: preset\nversion: 1\n");
+        let (class, reason) = refused(w.port().agent_presets(id));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (
+                PortClass::Internal,
+                crate::agent_edit::PROFILE_EDIT_UNAVAILABLE
+            )
+        );
+
+        let _port = w.plug();
+        let (class, reason) =
+            refused(
+                w.port()
+                    .reorder_presets(id, &strings(&["p.yaml"]), "stale", None),
+            );
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (PortClass::Conflict, crate::edit::REV_MISMATCH)
+        );
+        let (class, reason) =
+            refused(
+                w.port()
+                    .detach_preset(id, &strings(&["engram:/default"]), false, None),
+            );
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (
+                PortClass::Conflict,
+                crate::agent_edit::DEFAULT_PRESET_DETACH
+            )
+        );
+    }
+
+    /// The `agent.new {presets}` judgement crosses the port with its attachments as judged and its skips as rows; a
+    /// stale root generation crosses as `Conflict` `root-generation-stale`, and no profile is added either way.
+    #[test]
+    fn the_new_agent_judgement_crosses_the_port_with_its_skips_as_rows() {
+        let w = World::new(Vec::new());
+        w.put("p.yaml", "kind: preset\nversion: 1\n");
+        w.put("rules/a.md", "a");
+        let new = claude_agent(&[]);
+        let current = w.svc.status().root_generation;
+
+        let judged = w
+            .port()
+            .judge_new_presets(
+                &new,
+                &strings(&["p.yaml", "rules/a.md", "engram:/default"]),
+                Some(current),
+            )
+            .unwrap();
+        assert_eq!(
+            judged,
+            NewAgentPresets {
+                attachments: Attachments {
+                    default_preset: true,
+                    presets: vec![AttachedPreset {
+                        path: "p.yaml".to_owned()
+                    }],
+                },
+                skipped: vec![
+                    SkippedRow {
+                        item: "rules/a.md".to_owned(),
+                        code: crate::format::read::WRONG_KIND.to_owned(),
+                        args: json!({ "path": "rules/a.md" }),
+                        line: None,
+                    },
+                    SkippedRow {
+                        item: "engram:/default".to_owned(),
+                        code: crate::edit::ALREADY_PRESENT.to_owned(),
+                        args: json!({ "path": "engram:/default" }),
+                        line: None,
+                    },
+                ],
+            }
+        );
+        let (class, reason) = refused(w.port().judge_new_presets(
+            &new,
+            &strings(&["p.yaml"]),
+            Some(current + 1),
+        ));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (PortClass::Conflict, crate::ROOT_GENERATION_STALE)
+        );
+        assert!(w.registry.get(new.id).is_none());
+    }
+
+    /// With no library service the judgement answers in port types: a library preset `Unavailable`
+    /// `library-unavailable` with the given reason; `engram:/default` alone judged without it.
+    #[test]
+    fn the_judgement_with_no_library_answers_the_attach_rule_in_port_types() {
+        let new = claude_agent(&[]);
+        let (class, reason) = refused(judge_new_presets_with_no_library(
+            &new,
+            &strings(&["p.yaml"]),
+            "none here",
+        ));
+        assert_eq!(
+            (class, reason.code.as_str(), reason.args),
+            (
+                PortClass::Unavailable,
+                LIBRARY_UNAVAILABLE,
+                json!({ "message": "none here" })
+            )
+        );
+        let judged =
+            judge_new_presets_with_no_library(&new, &strings(&["engram:/default"]), "none here")
+                .unwrap();
+        assert_eq!(judged.attachments.presets, Vec::new());
+        assert_eq!(judged.skipped.len(), 1);
+        assert_eq!(judged.skipped[0].code, crate::edit::ALREADY_PRESENT);
     }
 }

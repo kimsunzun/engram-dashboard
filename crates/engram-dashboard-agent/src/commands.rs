@@ -10,9 +10,10 @@
 //!   (`AgentBackend` word · row types), so the declaration lives here (ADR-0155 decision 1) and the daemon's usage service plugs the real
 //!   thing in through [`UsageCommandHost`] (TRD S21 usage-limit-slot §3 #18).
 //!
-//! ★`library.*` and `preset.*` are declared here too — their bodies are asset-library's★: this crate owns the command vocabulary
-//!   (ADR-0155 decision 1 · ADR-0311); the handlers and the third port, [`LibraryCommandHost`], are in
-//!   `library_commands.rs` (one `declare_commands!` block per module, so the declarations stay in this block).
+//! ★`library.*`, `preset.*` and the agent-preset commands are declared here too — their bodies are asset-library's★: this
+//!   crate owns the command vocabulary (ADR-0155 decision 1 · ADR-0311); the handlers and the third port,
+//!   [`LibraryCommandHost`], are in `library_commands.rs` (one `declare_commands!` block per module, so the
+//!   declarations stay in this block). `agent.new`'s `presets` are judged through that port too.
 //!
 //! Entry points: [`make_table`](fn.make_table.html) (assembly) · [`AgentCommandHost`](trait.AgentCommandHost.html) (injection seam) ·
 //!   [`UsageCommandHost`](trait.UsageCommandHost.html) (usage port) · [`LibraryCommandHost`] (library port).
@@ -26,6 +27,7 @@ use engram_dashboard_command::{
 };
 
 use crate::launch::{notice_text, LaunchBlocked, Notice};
+use crate::library_commands::refusal_error;
 pub use crate::library_commands::LibraryCommandHost;
 use crate::manager::{Activated, AgentManager, NotStarted, NoticeDelivery, RenameOutcome};
 use crate::persistence::PROFILES_FILE;
@@ -47,8 +49,9 @@ declare_commands! {
     //   `store.presets` (TRD S25-preset-library §5-2 1). The same unreleased generation: the `agent.spawn` answer
     //   gains `notices` (TRD S25 step 16), and with `cwd` a launch blocked before the add answers `CONFLICT` with
     //   nothing created (TRD S25 step 20 — the `agent.spawn` summary). Also: `agent.spawn` is declared with the launch
-    //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`). The nine `library.*` and the eight
-    //   `preset.*` commands come in this generation too (ADR-0386).
+    //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`). The nine `library.*`, the eight
+    //   `preset.*` and the four agent-preset commands come in this generation too, and `agent.new` gains `presets`,
+    //   `root_generation` and the answer's `skipped` (ADR-0386).
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -511,6 +514,50 @@ declare_commands! {
         why: Option<String>,
     }
 
+    // ── Agent presets (`agent.presets` · `attachPreset` · `detachPreset` · `reorderPresets` — ADR-0386) ─────────────
+
+    // ADR-0341
+    /// A folder entry an agent's presets reach, and the presets it came through.
+    struct AgentFolderRow {
+        /// The normalized absolute path.
+        path: String,
+        /// The presets it came through, outermost first.
+        via: Vec<String>,
+        /// Its line in the last preset of `via`.
+        line: u32,
+        /// `ok` | `missing` | `not_a_directory` | `unreadable`; `null` = not checked.
+        status: Option<String>,
+        /// Why it is `unreadable` (the OS error or a timeout); else `null`.
+        status_why: Option<String>,
+    }
+
+    /// An agent's presets as `agent.presets` shows them — every agent-preset edit answers it after the change.
+    struct AgentPresetsView {
+        agent_id: String,
+        name: String,
+        /// The Default slot (`engram:/default`) is on.
+        default_preset: bool,
+        /// The attached library presets as the agent stores them, in attach order.
+        presets: Vec<String>,
+        cwd: String,
+        /// Why the working folder cannot be changed now — `running` | `preparing` | `conversed`; `null` = it can.
+        workspace_lock: Option<String>,
+        backend: String,
+        mode: AgentOutputFormat,
+        /// The attachments' edition — pass it as `base_rev` to `agent.reorderPresets`.
+        base_rev: String,
+        /// `false` = its backend takes no preset (no settings check): the rows below stay empty and a launch ignores
+        /// the presets.
+        takes_presets: bool,
+        /// The folder entries its presets reach, in expansion order.
+        folders: Vec<AgentFolderRow>,
+        conflicts: Vec<ProblemRow>,
+        /// Every other problem a launch would meet, inner presets' included.
+        problems: Vec<ProblemRow>,
+        /// What a launch would leave out on purpose.
+        notices: Vec<LaunchNoticeRow>,
+    }
+
     // errors lists only codes **specific to this command** — argument rejection (INVALID_ARGUMENT) and internal failure (INTERNAL)
     //   are emitted by the table, so `CommandSpec::advertised_errors` adds them automatically.
 
@@ -570,7 +617,11 @@ declare_commands! {
         notices: Vec<LaunchNoticeRow>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Registers a new agent in the roster (does not launch it — it stays asleep).
+    /// Registers a new agent in the roster (does not launch it — it stays asleep). `presets` are judged as
+    /// `agent.attachPreset` judges them: the agent is created with what can be attached, each one left out is in
+    /// `skipped` with why. CONFLICT `library-unavailable` (a library preset named while the library cannot be read) or
+    /// `root-generation-stale` creates nothing.
+    // ADR-0386
     #[effect(Write)]
     #[since(1)]
     "agent.new" => args AgentNewArgs {
@@ -585,10 +636,19 @@ declare_commands! {
         /// (the `AgentBackendKind` doc of `protocol` · the daemon's `MISSING_BACKEND`), and leaving only this door
         /// would split that decision per entry.
         backend: AgentBackend,
+        /// Library presets to attach — the Default slot (`engram:/default`) is on for every new agent. Unspecified = the
+        /// Default slot only.
+        presets: Option<Vec<String>>,
+        /// With `presets` only — the value `library.status` answered; refuses if the root changed since (checked when
+        /// the presets are judged, just before the create). Unspecified =
+        /// the current root.
+        root_generation: Option<u64>,
     } -> ok AgentNewOk {
         agent_id: String,
         name: String,
         state: String,
+        /// The `presets` not attached, and why; empty without `presets`.
+        skipped: Vec<SkippedRow>,
     } errors [CONFLICT];
 
     /// Changes the display name.
@@ -1098,6 +1158,116 @@ declare_commands! {
         skipped: Vec<String>,
         unlisted: Option<String>,
     } errors [CONFLICT];
+
+    // ADR-0384
+    // ADR-0386
+    // An agent-preset edit answers the agent's presets as committed. `target` = the agent's name or id (NOT_FOUND /
+    //   CONFLICT with candidates when it points at none or several); NOT_FOUND `not-found` `{agent}` = the agent was
+    //   deleted meanwhile; INTERNAL `profile-edit-unavailable` = this daemon cannot write agents' presets.
+
+    /// An agent's presets: the Default slot, the attached presets, its working folder and why it is locked, its backend
+    /// and mode, `base_rev`, and the folders, conflicts, problems and notices a launch would meet.
+    #[effect(Read)]
+    #[since(9)]
+    "agent.presets" => args AgentPresetsArgs {
+        target: String,
+    } -> ok AgentPresetsOk {
+        // ★The fields must not differ by a character from `AgentPresetsView`★ — the pairing is
+        //   `From<AgentPresetsView>` (destructuring); field meanings: `AgentPresetsView`.
+        agent_id: String,
+        name: String,
+        default_preset: bool,
+        presets: Vec<String>,
+        cwd: String,
+        workspace_lock: Option<String>,
+        backend: String,
+        mode: AgentOutputFormat,
+        base_rev: String,
+        takes_presets: bool,
+        folders: Vec<AgentFolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Attaches `presets` (library presets; `engram:/default` turns the Default slot on) after the `after` preset in
+    /// call order (else at the end). Applies what it can: each one it cannot attach is in `skipped` with why
+    /// (`not-found`, `wrong-kind`, `already-present`, `item-path-invalid`). CONFLICT `library-unavailable` (a library
+    /// preset named while the library cannot be read) · `root-generation-stale` applies nothing.
+    #[effect(Write)]
+    #[since(9)]
+    "agent.attachPreset" => args AgentAttachPresetArgs {
+        target: String,
+        presets: Vec<String>,
+        after: Option<String>,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok AgentAttachPresetOk {
+        applied: Vec<String>,
+        skipped: Vec<SkippedRow>,
+        view: AgentPresetsView,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Detaches `presets` (every attached entry of each; `engram:/default` turns the Default slot off — CONFLICT
+    /// `default-preset-detach` unless `yes`). Detaching what is not attached changes nothing; an entry that is not a
+    /// library path is matched by its exact text, and one that matches nothing refuses, INVALID_ARGUMENT
+    /// `item-path-invalid`. CONFLICT `root-generation-stale`.
+    #[effect(Write)]
+    #[since(9)]
+    "agent.detachPreset" => args AgentDetachPresetArgs {
+        target: String,
+        presets: Vec<String>,
+        /// Confirms turning the Default slot off. Unspecified = false.
+        yes: Option<bool>,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok AgentDetachPresetOk {
+        // ★The fields must not differ by a character from `AgentPresetsView`★ (`From<AgentPresetsView>`).
+        agent_id: String,
+        name: String,
+        default_preset: bool,
+        presets: Vec<String>,
+        cwd: String,
+        workspace_lock: Option<String>,
+        backend: String,
+        mode: AgentOutputFormat,
+        base_rev: String,
+        takes_presets: bool,
+        folders: Vec<AgentFolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Puts the attached presets in `order` — every entry `agent.presets` shows, each once (a duplicate as often as it
+    /// is attached), else INVALID_ARGUMENT `reorder-order-mismatch` with the expected order in `args`. `base_rev` = the
+    /// `base_rev` you read; CONFLICT `rev-mismatch` = the attachments changed since (read them again). The Default slot
+    /// is untouched. CONFLICT `root-generation-stale`.
+    #[effect(Write)]
+    #[since(9)]
+    "agent.reorderPresets" => args AgentReorderPresetsArgs {
+        target: String,
+        order: Vec<String>,
+        base_rev: String,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok AgentReorderPresetsOk {
+        // ★The fields must not differ by a character from `AgentPresetsView`★ (`From<AgentPresetsView>`).
+        agent_id: String,
+        name: String,
+        default_preset: bool,
+        presets: Vec<String>,
+        cwd: String,
+        workspace_lock: Option<String>,
+        backend: String,
+        mode: AgentOutputFormat,
+        base_rev: String,
+        takes_presets: bool,
+        folders: Vec<AgentFolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
+    } errors [NOT_FOUND, CONFLICT];
 }
 
 /// Commands that **move the input** of a live agent — the common entry looks at the input lease (`check_input`) first.
@@ -1492,7 +1662,7 @@ pub fn make_table(
     let list = Arc::clone(&host);
     let resolve = Arc::clone(&host);
     let spawn = (Arc::clone(&host), Arc::clone(&notify));
-    let new = (Arc::clone(&host), Arc::clone(&notify));
+    let new = (Arc::clone(&host), Arc::clone(&notify), Arc::clone(&library));
     let rename = (Arc::clone(&host), Arc::clone(&notify));
     let move_ = (Arc::clone(&host), Arc::clone(&notify));
     let list_queued = Arc::clone(&host);
@@ -1528,7 +1698,7 @@ pub fn make_table(
         .insert(
             "agent.new",
             blocking_handler(move |args: AgentNewArgs| {
-                verb_new(new.0.as_ref(), new.1.as_ref(), args)
+                verb_new(new.0.as_ref(), new.1.as_ref(), new.2.as_ref(), args)
             }),
         )
         .expect("could not plug agent.new into the table");
@@ -2015,6 +2185,7 @@ fn policy_refusal(word: &str, reason: &str) -> CommandError {
 fn verb_new(
     host: &dyn AgentCommandHost,
     notify: &dyn RosterChanged,
+    library: &dyn LibraryCommandHost,
     args: AgentNewArgs,
 ) -> Result<AgentNewOk, CommandError> {
     let (cwd, name) = (args.cwd.as_str(), args.name.as_deref());
@@ -2039,17 +2210,33 @@ fn verb_new(
     if let Some(reason) = llm_creation_refusal(&word) {
         return Err(policy_refusal(&word, reason));
     }
-    let stored = register(
-        host,
+    let mut profile = new_profile(
         cwd,
         name.map(str::to_string),
         backend_command(backend, output_format(args.output_format)),
-    )?;
+    );
+    // ADR-0386: judged before the create under one library read lock, released before `create_agent` takes the
+    //   name-allocation gate; the profile is created with the accepted list in one registry write — no profile-edit
+    //   port step after it, so no failure can follow the create. Without `presets` nothing is judged and
+    //   `root_generation` is not read.
+    let skipped = match &args.presets {
+        None => Vec::new(),
+        Some(presets) => {
+            let judged = library
+                .judge_new_presets(&profile, presets, args.root_generation)
+                .map_err(|refusal| refusal_error("agent.new", refusal))?;
+            profile.default_preset = judged.attachments.default_preset;
+            profile.presets = judged.attachments.presets;
+            judged.skipped
+        }
+    };
+    let stored = register(host, profile)?;
     notify.roster_changed();
     Ok(AgentNewOk {
         agent_id: stored.id.to_string(),
         name: stored.canonical_name_when_live(),
         state: AGENT_STATE_SLEEPING.to_string(),
+        skipped,
     })
 }
 
@@ -2058,11 +2245,8 @@ fn verb_new(
 /// ★The settled name can differ from the requested one★: a suffix is attached for global roster uniqueness (ADR-0120/0123), so the response reads the name from **the registered value** — the requested name would diverge from the screen and address.
 fn register(
     host: &dyn AgentCommandHost,
-    cwd: &str,
-    name: Option<String>,
-    command: AgentCommand,
+    profile: AgentProfile,
 ) -> Result<AgentProfile, CommandError> {
-    let profile = new_profile(cwd, name, command);
     let cwd = profile.cwd.to_string_lossy().into_owned();
     host.create_agent(profile)
         .map_err(|e| create_error(e, &cwd))
@@ -2474,16 +2658,17 @@ fn started_payload(started: StartedAgent, created: bool) -> AgentSpawnOk {
         name: started.name,
         state: state_of(Some(&started.status)).to_string(),
         created,
-        notices: started
-            .notices
-            .into_iter()
-            .map(|notice| LaunchNoticeRow {
-                text: notice_text(&notice),
-                code: notice.code,
-                args: notice.args,
-                line: notice.line,
-            })
-            .collect(),
+        notices: started.notices.into_iter().map(launch_notice_row).collect(),
+    }
+}
+
+/// A launch notice as the declared row — its text by [`notice_text`].
+pub fn launch_notice_row(notice: Notice) -> LaunchNoticeRow {
+    LaunchNoticeRow {
+        text: notice_text(&notice),
+        code: notice.code,
+        args: notice.args,
+        line: notice.line,
     }
 }
 
@@ -2520,7 +2705,10 @@ fn state_of(status: Option<&AgentStatus>) -> &'static str {
 /// ★Do not bring in a lenient resolver★: people and LLMs read the mail recipient token and the control pointing token as the same X; diverging resolution would make the agent that got the mail differ from the one renamed — guarded by the daemon crate's cross-check
 /// test running [`resolve_in`].
 // ADR-0132
-fn resolve(host: &dyn AgentCommandHost, token: &str) -> Result<ResolvedAgent, CommandError> {
+pub(crate) fn resolve(
+    host: &dyn AgentCommandHost,
+    token: &str,
+) -> Result<ResolvedAgent, CommandError> {
     resolve_in(&host.roster(), token)
 }
 
@@ -2768,12 +2956,22 @@ mod tests {
     }
 
     fn wiring(host: &Arc<FakeHost>) -> (CommandTable, Arc<FakeNotify>) {
+        wiring_with_library(
+            host,
+            crate::library_commands::fake::FakeLibrary::unplugged(),
+        )
+    }
+
+    fn wiring_with_library(
+        host: &Arc<FakeHost>,
+        library: Arc<dyn LibraryCommandHost>,
+    ) -> (CommandTable, Arc<FakeNotify>) {
         let notify = Arc::new(FakeNotify::default());
         let table = make_table(
             Arc::clone(host) as Arc<dyn AgentCommandHost>,
             Arc::clone(&notify) as Arc<dyn RosterChanged>,
             Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
-            crate::library_commands::fake::FakeLibrary::unplugged(),
+            library,
         );
         (table, notify)
     }
@@ -3089,13 +3287,17 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "agent.attachPreset",
                 "agent.cancelQueuedInput",
+                "agent.detachPreset",
                 "agent.interrupt",
                 "agent.list",
                 "agent.listQueuedInputs",
                 "agent.move",
                 "agent.new",
+                "agent.presets",
                 "agent.rename",
+                "agent.reorderPresets",
                 "agent.resolve",
                 "agent.spawn",
                 "library.folders",
@@ -4047,6 +4249,141 @@ mod tests {
             1,
             "announces the roster change"
         );
+    }
+
+    // ── `agent.new {presets}` (ADR-0386 decision 5) ────────────────────────────────────────────────────
+
+    /// With `presets`, the library judges them over the profile about to be created (the Default slot on, nothing
+    /// attached) with the given root generation, before anything is registered; the agent is created holding exactly
+    /// the attachments the judgement accepted, and the answer carries its skips as judged.
+    #[test]
+    fn new_with_presets_creates_the_agent_with_the_judged_attachments_and_answers_the_skips() {
+        let host = FakeHost::new();
+        let skipped = json!([{ "item": "M.yaml", "code": "not-found", "args": { "path": "M.yaml" }, "line": null }]);
+        let library = crate::library_commands::fake::FakeLibrary::answering(Ok(json!({
+            "default_preset": true, "presets": ["team/P.yaml", "Q.yaml"], "skipped": skipped,
+        })));
+        let (table, notify) =
+            wiring_with_library(&host, Arc::clone(&library) as Arc<dyn LibraryCommandHost>);
+
+        let out = call(
+            &table,
+            "agent.new",
+            json!({
+                "cwd": "C:/work/delta", "backend": "Claude",
+                "presets": ["team/P.yaml", "M.yaml", "Q.yaml"], "root_generation": 41,
+            }),
+        )
+        .expect("register");
+
+        assert_eq!(
+            library.calls(),
+            vec![(
+                "judge_new_presets",
+                json!({
+                    "profile": { "default_preset": true, "presets": [] },
+                    "presets": ["team/P.yaml", "M.yaml", "Q.yaml"], "root_generation": 41,
+                })
+            )]
+        );
+        let id = AgentId::parse_str(out["agent_id"].as_str().expect("an id")).expect("a uuid");
+        let created = host.profiles.lock().unwrap()[&id].clone();
+        let attached: Vec<&str> = created.presets.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(
+            (created.default_preset, attached),
+            (true, vec!["team/P.yaml", "Q.yaml"]),
+            "created with the accepted list"
+        );
+        assert_eq!(out["skipped"], skipped);
+        assert_eq!(out["state"], "sleeping");
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    /// A judgement that refuses — a library preset with no library, a stale root generation — refuses the whole call
+    /// with the library's code and creates nothing: no roster row, no notification.
+    #[test]
+    fn new_whose_presets_the_library_refuses_creates_nothing() {
+        let cases = [
+            (
+                "library-unavailable",
+                json!({ "message": "no root" }),
+                RetryMode::AfterCondition,
+            ),
+            (
+                "root-generation-stale",
+                json!({ "given": 3, "current": 4 }),
+                ErrorCode::Conflict.default_retry(),
+            ),
+        ];
+        for (code, args, retry) in cases {
+            let host = FakeHost::new();
+            let library = crate::library_commands::fake::FakeLibrary::answering(Err(
+                crate::library_commands::PortRefusal::Refused {
+                    class: if code == "library-unavailable" {
+                        crate::library_commands::PortClass::Unavailable
+                    } else {
+                        crate::library_commands::PortClass::Conflict
+                    },
+                    reason: Reason {
+                        code: code.to_owned(),
+                        args: args.clone(),
+                        line: None,
+                    },
+                },
+            ));
+            let (table, notify) = wiring_with_library(&host, library);
+
+            let err = call(
+                &table,
+                "agent.new",
+                json!({
+                    "cwd": "C:/work/delta", "backend": "Claude", "presets": ["P.yaml"],
+                    "root_generation": 3,
+                }),
+            )
+            .expect_err("refused");
+
+            assert_eq!(
+                (err.code(), err.retry()),
+                (ErrorCode::Conflict, retry),
+                "{code}"
+            );
+            assert_eq!(
+                serde_json::Value::Object(err.args().expect("args").clone()),
+                json!({ "code": code, "args": args }),
+                "{code}"
+            );
+            assert!(
+                host.rows.lock().unwrap().is_empty(),
+                "{code}: nothing created"
+            );
+            assert!(host.profiles.lock().unwrap().is_empty(), "{code}");
+            assert_eq!(*notify.calls.lock().unwrap(), 0, "{code}");
+        }
+    }
+
+    /// Without `presets` nothing is judged — the library is never asked, so `root_generation` is not read even when
+    /// given — and the agent is created as before, with the Default slot only and no skips.
+    #[test]
+    fn new_without_presets_asks_the_library_nothing() {
+        let host = FakeHost::new();
+        // Every call to this port refuses: a judgement would fail the create.
+        let library = Arc::new(crate::library_commands::fake::FakeLibrary::default());
+        let (table, _notify) =
+            wiring_with_library(&host, Arc::clone(&library) as Arc<dyn LibraryCommandHost>);
+
+        let out = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/delta", "backend": "Claude", "root_generation": 99 }),
+        )
+        .expect("register");
+
+        assert!(library.calls().is_empty(), "the library was asked");
+        assert_eq!(out["skipped"], json!([]));
+        let id = AgentId::parse_str(out["agent_id"].as_str().expect("an id")).expect("a uuid");
+        let created = host.profiles.lock().unwrap()[&id].clone();
+        assert!(created.default_preset && created.presets.is_empty());
     }
 
     // ── Spelling of hand-typed words ───────────────────────────────────────────────────────────────

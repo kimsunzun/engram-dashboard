@@ -20,11 +20,14 @@ use engram_dashboard_agent::commands::{
 };
 use engram_dashboard_agent::launch::{escape_controls, Reason};
 use engram_dashboard_agent::library_commands::{
-    LibraryReadView, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
+    AgentAttachPortAnswer, AgentPresetsPortView, LibraryReadView, NewAgentPresets, PortClass,
+    PortRefusal, PresetDraftInput, PresetEntries,
 };
 use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::profile::AgentProfile;
 use engram_dashboard_agent::types::AgentId;
 use engram_dashboard_asset_library::format::read::ITEM_PATH_INVALID;
+use engram_dashboard_asset_library::host::judge_new_presets_with_no_library;
 use engram_dashboard_asset_library::path::LibPath;
 use engram_dashboard_asset_library::LIBRARY_UNAVAILABLE;
 use engram_dashboard_command::{
@@ -131,9 +134,11 @@ impl UsageCommandHost for NoUsageLimits {
 }
 
 /// The library port of assemblies without a library service (the test server · smoke bins · harnesses): every
-/// `library.*` and `preset.*` command answers `CONFLICT` `library-unavailable`, except `library.refresh`, which
-/// answers the report a refresh that could not scan gives (one `errors` row with no path) — a refresh refuses only a
-/// `folder` that is not a library path (`INVALID_ARGUMENT` `item-path-invalid`, as the real service does).
+/// `library.*`, `preset.*` and agent-preset command answers `CONFLICT` `library-unavailable`, except
+/// `library.refresh`, which answers the report a refresh that could not scan gives (one `errors` row with no path) — a
+/// refresh refuses only a `folder` that is not a library path (`INVALID_ARGUMENT` `item-path-invalid`, as the real
+/// service does) — and the `agent.new {presets}` judgement, which applies the attach rule with no catalog (a library
+/// preset refuses the whole call `library-unavailable`; a given `root_generation` is not compared — there is no root).
 /// Do not plug it into production (it plugs the service the manager launches through — [`make_daemon_table`]).
 // ADR-0386
 pub struct NoLibrary;
@@ -288,6 +293,45 @@ impl LibraryCommandHost for NoLibrary {
         _mode: Option<AgentOutputFormat>,
     ) -> Result<PresetPreviewFolderOk, PortRefusal> {
         Self::refused()
+    }
+    fn agent_presets(&self, _agent: AgentId) -> Result<AgentPresetsPortView, PortRefusal> {
+        Self::refused()
+    }
+    fn attach_preset(
+        &self,
+        _agent: AgentId,
+        _presets: &[String],
+        _after: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<AgentAttachPortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn detach_preset(
+        &self,
+        _agent: AgentId,
+        _presets: &[String],
+        _yes: bool,
+        _root_generation: Option<u64>,
+    ) -> Result<AgentPresetsPortView, PortRefusal> {
+        Self::refused()
+    }
+    fn reorder_presets(
+        &self,
+        _agent: AgentId,
+        _order: &[String],
+        _base_rev: &str,
+        _root_generation: Option<u64>,
+    ) -> Result<AgentPresetsPortView, PortRefusal> {
+        Self::refused()
+    }
+    // ADR-0386
+    fn judge_new_presets(
+        &self,
+        profile: &AgentProfile,
+        presets: &[String],
+        _root_generation: Option<u64>,
+    ) -> Result<NewAgentPresets, PortRefusal> {
+        judge_new_presets_with_no_library(profile, presets, NO_LIBRARY)
     }
 }
 
@@ -564,14 +608,18 @@ mod tests {
     /// Names without a CLI verb are only those listed below: the two pending-list verbs, interrupt (`agent.interrupt` — ADR-0237) and
     /// multi-word resolution (`agent.resolve` — ADR-0307) are outside `CLI_AGENT_VERBS`, called via the bus and generic calls (`engram <name> …`). A
     /// table name not in the list grew without deciding on a CLI verb, so this stops. `usage.*`, `library.*` and `preset.*` are not the `agent`
-    /// family and never reach `/control/agent` (the library and preset commands are reached by full name — ADR-0386).
+    /// family and never reach `/control/agent`; they and the four agent-preset commands are reached by full name (ADR-0386).
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 23] = [
+        const BUS_ONLY: [&str; 27] = [
+            "agent.attachPreset",
             "agent.cancelQueuedInput",
+            "agent.detachPreset",
             "agent.interrupt",
             "agent.listQueuedInputs",
+            "agent.presets",
+            "agent.reorderPresets",
             "agent.resolve",
             "library.folders",
             "library.list",
@@ -1362,6 +1410,98 @@ mod tests {
             let report = call(&table, "library.refresh", args.clone()).expect("a report");
             assert_eq!(report, empty, "{args}");
         }
+    }
+
+    /// Without a library, an agent-preset command on an agent that exists answers `CONFLICT` `library-unavailable` by
+    /// value, as every library command does.
+    // ADR-0386
+    #[test]
+    fn a_table_without_a_library_refuses_the_agent_preset_commands_library_unavailable() {
+        let table = make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
+        );
+        let created = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/probe", "backend": "Claude" }),
+        )
+        .expect("registration succeeded");
+        let target = created["agent_id"].clone();
+        let refusing = [
+            ("agent.presets", json!({ "target": target })),
+            (
+                "agent.attachPreset",
+                json!({ "target": target, "presets": ["engram:/default"] }),
+            ),
+            (
+                "agent.detachPreset",
+                json!({ "target": target, "presets": ["p.yaml"] }),
+            ),
+            (
+                "agent.reorderPresets",
+                json!({ "target": target, "order": [], "base_rev": "r" }),
+            ),
+        ];
+        for (name, args) in refusing {
+            let err = call(&table, name, args).expect_err("no library");
+            assert_eq!(err.code(), ErrorCode::Conflict, "{name}");
+            assert_eq!(
+                err.args().and_then(|args| args.get("code")),
+                Some(&json!(LIBRARY_UNAVAILABLE)),
+                "{name}"
+            );
+        }
+    }
+
+    /// Without a library, `agent.new {presets}` applies the attach rule with no catalog: a library preset refuses the
+    /// whole call `CONFLICT` `library-unavailable` and creates nothing; `engram:/default` alone creates the agent with
+    /// its skip, and a given `root_generation` is not compared (there is no root).
+    // ADR-0386
+    #[test]
+    fn a_table_without_a_library_judges_new_agent_presets_by_the_attach_rule() {
+        let manager = manager();
+        let table = make_daemon_table(
+            manager.clone(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
+        );
+
+        let err = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/probe", "backend": "Claude", "presets": ["engram:/default", "p.yaml"] }),
+        )
+        .expect_err("a library preset with no library");
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert_eq!(
+            err.args().and_then(|args| args.get("code")),
+            Some(&json!(LIBRARY_UNAVAILABLE))
+        );
+        assert!(manager.roster().is_empty(), "nothing created");
+
+        let created = call(
+            &table,
+            "agent.new",
+            json!({
+                "cwd": "C:/work/probe", "backend": "Claude", "presets": ["engram:/default"],
+                "root_generation": 123_456,
+            }),
+        )
+        .expect("the Default slot alone needs no library");
+        assert_eq!(
+            created["skipped"],
+            json!([{
+                "item": "engram:/default", "code": "already-present",
+                "args": { "path": "engram:/default" }, "line": null,
+            }])
+        );
+        assert_eq!(manager.roster().len(), 1);
     }
 
     /// Without a library, a refresh `folder` that is not a library path is still refused as the real service refuses

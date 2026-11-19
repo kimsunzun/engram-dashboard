@@ -23,7 +23,8 @@ use engram_dashboard_agent::launch::{
     LaunchKitSource, LaunchPlan, LaunchPorts, NoopLaunchKits, Notice, PrepareError, Reason,
 };
 use engram_dashboard_agent::library_commands::{
-    LibraryCommandHost, LibraryReadView, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
+    AgentAttachPortAnswer, AgentPresetsPortView, LibraryCommandHost, LibraryReadView,
+    NewAgentPresets, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
 };
 use engram_dashboard_agent::manager::{Activated, AgentManager, NoticeDelivery};
 use engram_dashboard_agent::persistence::FileProfileStore;
@@ -1631,6 +1632,44 @@ impl LibraryCommandHost for NoLibrary {
         _: Option<&str>,
         _: Option<DeclaredOutputFormat>,
     ) -> Result<PresetPreviewFolderOk, PortRefusal> {
+        Self::refused()
+    }
+    fn agent_presets(&self, _: AgentId) -> Result<AgentPresetsPortView, PortRefusal> {
+        Self::refused()
+    }
+    fn attach_preset(
+        &self,
+        _: AgentId,
+        _: &[String],
+        _: Option<&str>,
+        _: Option<u64>,
+    ) -> Result<AgentAttachPortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn detach_preset(
+        &self,
+        _: AgentId,
+        _: &[String],
+        _: bool,
+        _: Option<u64>,
+    ) -> Result<AgentPresetsPortView, PortRefusal> {
+        Self::refused()
+    }
+    fn reorder_presets(
+        &self,
+        _: AgentId,
+        _: &[String],
+        _: &str,
+        _: Option<u64>,
+    ) -> Result<AgentPresetsPortView, PortRefusal> {
+        Self::refused()
+    }
+    fn judge_new_presets(
+        &self,
+        _: &AgentProfile,
+        _: &[String],
+        _: Option<u64>,
+    ) -> Result<NewAgentPresets, PortRefusal> {
         Self::refused()
     }
 }

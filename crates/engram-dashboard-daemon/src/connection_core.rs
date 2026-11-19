@@ -4800,13 +4800,17 @@ mod tests {
                 assert_eq!(
                     names,
                     vec![
+                        "agent.attachPreset",
                         "agent.cancelQueuedInput",
+                        "agent.detachPreset",
                         "agent.interrupt",
                         "agent.list",
                         "agent.listQueuedInputs",
                         "agent.move",
                         "agent.new",
+                        "agent.presets",
                         "agent.rename",
+                        "agent.reorderPresets",
                         "agent.resolve",
                         "agent.spawn",
                         "library.folders",

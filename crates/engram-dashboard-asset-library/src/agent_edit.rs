@@ -1,5 +1,5 @@
-//! Agent-preset view and edits: the `agent.presets` view and the attachment edits (`attach` · `detach` · `reorder`) —
-//! inherent [`LibraryService`] methods answering crate-local types.
+//! Agent-preset view and edits: the `agent.presets` view, the attachment edits (`attach` · `detach` · `reorder`) and
+//! the `agent.new {presets}` judgement — inherent [`LibraryService`] methods answering crate-local types.
 //!
 //! ## Rules (invariants)
 //!
@@ -16,6 +16,9 @@
 //!   under that root state.
 //! - **Answers are built inside the change.** The answer view is resolved inside the change from the attachments as
 //!   committed; its folder stats and link probes run after it, outside every lock.
+//! - **`agent.new {presets}` is judged, not edited.** The judgement is `attach`'s over the profile to be created
+//!   (outside the registry), under one read lock that also compares the root generation; it writes nothing and needs
+//!   no port — the caller creates the profile with the accepted list in one registry write (ADR-0386 decision 5).
 //!
 //! ## Refusals every edit can answer
 //!
@@ -50,7 +53,7 @@ use crate::resolve::{
     ref_key, resolve, CatalogLookup, Looked, Lookup, Problem, RefKey, Resolution, ResolvedFolder,
     RootState, Target,
 };
-use crate::{output_format, LibraryRefusal, LibraryService, RefusalClass};
+use crate::{output_format, stale_root_generation, LibraryRefusal, LibraryService, RefusalClass};
 
 /// The code of a `detach` of `engram:/default` without `yes` while the agent's Default slot is on (`args` =
 /// `{agent}`).
@@ -96,6 +99,13 @@ pub struct AgentAttach {
     pub applied: Vec<String>,
     pub skipped: Vec<Skipped>,
     pub view: AgentPresetsView,
+}
+
+/// The `agent.new {presets}` judgement: the attachments to create the agent with, and what was skipped and why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewPresets {
+    pub attachments: Attachments,
+    pub skipped: Vec<Skipped>,
 }
 
 /// The answer view as built inside the change; the folder stats and link probes are still to run.
@@ -171,9 +181,7 @@ impl LibraryService {
         after: Option<&str>,
         root_generation: Option<u64>,
     ) -> Result<AgentAttach, LibraryRefusal> {
-        let library = presets
-            .iter()
-            .any(|preset| matches!(AssetRef::parse(preset), Ok(AssetRef::Library(_))));
+        let library = names_library(presets);
         let ((applied, skipped), view) =
             self.agent_edit(agent, root_generation, library, |profile, lookup| {
                 Ok(attach(profile, lookup, presets, after))
@@ -276,6 +284,41 @@ impl LibraryService {
             Ok((next, ()))
         })?;
         Ok(view)
+    }
+
+    /// The `agent.new {presets}` judgement: `presets` judged over `profile` — the profile to be created, not in the
+    /// registry — exactly as [`LibraryService::attach_preset`] judges them (no anchor: in call order at the end), under
+    /// one read lock. Nothing is written and no port is needed. Naming a library preset with no first scan applied
+    /// refuses `Unavailable` · `library-unavailable`; a stale `root_generation`, compared inside the read lock,
+    /// refuses `Conflict` · `root-generation-stale`.
+    // ADR-0386
+    pub fn judge_new_presets(
+        &self,
+        profile: &AgentProfile,
+        presets: &[String],
+        root_generation: Option<u64>,
+    ) -> Result<NewPresets, LibraryRefusal> {
+        // Only a library preset is looked up in the catalog, so only then is the first scan waited for.
+        if names_library(presets) {
+            self.first_scan_join()
+                .map_err(LibraryRefusal::unavailable)?;
+        }
+        self.gate.with_read(|state| {
+            let current = self.gate.numbers().root;
+            if root_generation.is_some_and(|given| given != current) {
+                return Err(stale_root_generation(root_generation, current));
+            }
+            let lookup = CatalogLookup {
+                catalog: &state.catalog,
+                root: state.root.as_deref(),
+                builtins: &self.builtins,
+            };
+            let (attachments, (_, skipped)) = attach(profile, &lookup, presets, None);
+            Ok(NewPresets {
+                attachments,
+                skipped,
+            })
+        })
     }
 
     /// The live profile-edit port, or `Internal` · [`PROFILE_EDIT_UNAVAILABLE`] (empty or dead cell).
@@ -433,11 +476,48 @@ fn view_of(
     }
 }
 
+/// The `agent.new {presets}` judgement where no library service runs (the daemon's `NoLibrary`): the attach rule with
+/// no catalog — a library preset refuses the whole call `Unavailable` · `library-unavailable` (`message` = `why`), and
+/// the rest is judged as [`LibraryService::judge_new_presets`] judges it. No root generation is compared: there is no
+/// root.
+// ADR-0386
+pub fn judge_new_presets_without_library(
+    profile: &AgentProfile,
+    presets: &[String],
+    why: &str,
+) -> Result<NewPresets, LibraryRefusal> {
+    if names_library(presets) {
+        return Err(LibraryRefusal::unavailable(why.to_owned()));
+    }
+    let (attachments, (_, skipped)) = attach(profile, &NoCatalog, presets, None);
+    Ok(NewPresets {
+        attachments,
+        skipped,
+    })
+}
+
+/// A library that holds nothing — the lookup of a judgement with no library service, which refuses a library preset
+/// before anything is looked up.
+struct NoCatalog;
+
+impl Lookup for NoCatalog {
+    fn item(&self, _: &AssetRef) -> Looked<'_> {
+        Looked::Missing
+    }
+}
+
+/// Whether `presets` name a library preset — the one case an attach needs the library for.
+fn names_library(presets: &[String]) -> bool {
+    presets
+        .iter()
+        .any(|preset| matches!(AssetRef::parse(preset), Ok(AssetRef::Library(_))))
+}
+
 /// The attachments `presets` make over `profile`, and what was applied and skipped (see
 /// [`LibraryService::attach_preset`]).
 fn attach(
     profile: &AgentProfile,
-    lookup: &CatalogLookup<'_>,
+    lookup: &dyn Lookup,
     presets: &[String],
     after: Option<&str>,
 ) -> (Attachments, (Vec<String>, Vec<Skipped>)) {
@@ -1514,5 +1594,152 @@ mod tests {
         );
         assert!(shell_view.problems.is_empty());
         assert_eq!(shell_view.presets, strings(&["P.yaml"]));
+    }
+
+    // ── the `agent.new {presets}` judgement ─────────────────────────────────────────────────────────────────
+
+    /// The judgement is `attach`'s over a profile outside the registry: the same attachments and the same skips an
+    /// attach of the same presets to an identical registered agent gives — and it writes nothing (no port write, the
+    /// profile not added to the registry).
+    #[test]
+    fn the_new_agent_judgement_is_attachs_over_a_profile_outside_the_registry() {
+        let presets = strings(&[
+            "R.yaml",
+            "engram:/default",
+            "rules/a.md",
+            "engram:/priming",
+            "M.yaml",
+            "../x.yaml",
+            "S.yaml",
+            "R.yaml",
+        ]);
+        let new = claude(&[], true);
+        let mut twin = new.clone();
+        twin.id = AgentId::new_v4();
+        let w = World::new(vec![twin.clone()]);
+        w.library();
+
+        let judged = w.svc.judge_new_presets(&new, &presets, None).unwrap();
+        assert!(
+            w.port.writes().is_empty(),
+            "the judgement wrote through the port"
+        );
+        assert!(
+            w.registry.get(new.id).is_none(),
+            "the judgement added the profile"
+        );
+        let attach = w.svc.attach_preset(twin.id, &presets, None, None).unwrap();
+
+        assert_eq!(judged.attachments, w.attachments(twin.id));
+        assert_eq!(judged.skipped, attach.skipped);
+        assert_eq!(judged.attachments, attached(true, &["R.yaml", "S.yaml"]));
+    }
+
+    /// With no root, naming a library preset refuses the whole judgement `library-unavailable` — the attach rule —
+    /// while `engram:/default` alone is judged without the library.
+    #[test]
+    fn the_new_agent_judgement_refuses_a_library_preset_with_no_library_and_judges_the_default_alone(
+    ) {
+        let w = World::make(Vec::new(), false, true, true);
+        let new = claude(&[], true);
+
+        let library = w
+            .svc
+            .judge_new_presets(&new, &strings(&["engram:/default", "R.yaml"]), None);
+        assert_eq!(
+            code(library),
+            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE.to_owned())
+        );
+
+        let default = w
+            .svc
+            .judge_new_presets(
+                &new,
+                &strings(&["engram:/default", "engram:/priming"]),
+                None,
+            )
+            .unwrap();
+        assert_eq!(default.attachments, attached(true, &[]));
+        let skips: Vec<(&str, &str)> = default
+            .skipped
+            .iter()
+            .map(|skip| (skip.item.as_str(), skip.reason.code.as_str()))
+            .collect();
+        assert_eq!(
+            skips,
+            [
+                ("engram:/default", ALREADY_PRESENT),
+                ("engram:/priming", WRONG_KIND)
+            ]
+        );
+    }
+
+    /// The root generation is compared inside the judgement's read lock: a stale one refuses `root-generation-stale`
+    /// with `{given, current}`, the current one is judged.
+    #[test]
+    fn the_new_agent_judgement_refuses_a_stale_root_generation() {
+        let w = World::new(Vec::new());
+        w.library();
+        let new = claude(&[], true);
+        let current = w.svc.status().root_generation;
+
+        let (class, reason) = refused(w.svc.judge_new_presets(
+            &new,
+            &strings(&["R.yaml"]),
+            Some(current + 1),
+        ));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::Conflict, ROOT_GENERATION_STALE)
+        );
+        assert_eq!(
+            reason.args,
+            json!({ "given": current + 1, "current": current })
+        );
+        // Without a library preset too — the generation is compared whenever presets are judged.
+        assert_eq!(
+            code(
+                w.svc
+                    .judge_new_presets(&new, &strings(&["engram:/default"]), Some(current + 1))
+            ),
+            (RefusalClass::Conflict, ROOT_GENERATION_STALE.to_owned())
+        );
+        let judged = w
+            .svc
+            .judge_new_presets(&new, &strings(&["R.yaml"]), Some(current))
+            .unwrap();
+        assert_eq!(judged.attachments, attached(true, &["R.yaml"]));
+    }
+
+    /// With no library service, a library preset refuses the whole judgement `library-unavailable` with the given
+    /// reason, and the rest is judged as the service judges it.
+    #[test]
+    fn the_judgement_with_no_library_service_refuses_a_library_preset_and_judges_the_rest() {
+        let new = claude(&[], false);
+
+        let (class, reason) = refused(judge_new_presets_without_library(
+            &new,
+            &strings(&["engram:/default", "R.yaml"]),
+            "no service",
+        ));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE)
+        );
+        assert_eq!(reason.args, json!({ "message": "no service" }));
+
+        let judged = judge_new_presets_without_library(
+            &new,
+            &strings(&["engram:/default", "../x.yaml"]),
+            "no service",
+        )
+        .unwrap();
+        assert_eq!(judged.attachments, attached(true, &[]));
+        let skips: Vec<(&str, &str)> = judged
+            .skipped
+            .iter()
+            .map(|skip| (skip.item.as_str(), skip.reason.code.as_str()))
+            .collect();
+        assert_eq!(skips, [("../x.yaml", ITEM_PATH_INVALID)]);
     }
 }

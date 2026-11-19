@@ -1282,13 +1282,17 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
     assert_eq!(
         names,
         vec![
+            "agent.attachPreset",
             "agent.cancelQueuedInput",
+            "agent.detachPreset",
             "agent.interrupt",
             "agent.list",
             "agent.listQueuedInputs",
             "agent.move",
             "agent.new",
+            "agent.presets",
             "agent.rename",
+            "agent.reorderPresets",
             "agent.resolve",
             "agent.spawn",
             "library.folders",

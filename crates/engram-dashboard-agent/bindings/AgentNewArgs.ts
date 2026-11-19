@@ -15,4 +15,15 @@ output_format?: AgentOutputFormat | null,
  * (the `AgentBackendKind` doc of `protocol` · the daemon's `MISSING_BACKEND`), and leaving only this door
  * would split that decision per entry.
  */
-backend: AgentBackend, };
+backend: AgentBackend, 
+/**
+ * Library presets to attach — the Default slot (`engram:/default`) is on for every new agent. Unspecified = the
+ * Default slot only.
+ */
+presets?: Array<string> | null, 
+/**
+ * With `presets` only — the value `library.status` answered; refuses if the root changed since (checked when
+ * the presets are judged, just before the create). Unspecified =
+ * the current root.
+ */
+root_generation?: bigint | null, };
