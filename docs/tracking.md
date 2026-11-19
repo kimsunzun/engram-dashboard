@@ -88,6 +88,7 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-108 | Convert the existing Korean log messages to English (one batch) | Minor feature · cleanup | Not started · user decision 2026-11-13 — the convention changed now, the existing lines later in one batch |
 | T-92 | The codex real-terminal cwd guard repeats `& ^ \| < >` instead of using the platform set | Minor feature · cleanup | Not started · found by S25 step 6 review |
 | T-93 | The codex live test L5 leaves its temporary folder on every run (os error 32) | Minor feature · cleanup | Not started · found by S25 step 6 QA |
+| T-119 | A JSON array argument from Windows PowerShell 5.1 loses its inner quotes (CLI refuses it) | Bug | Not started · pre-existing · found by the step-10a live check |
 | T-118 | Improve the agent priming's content (10a only translates it) | Minor feature · cleanup | Waiting for trigger — after S25 step 10a · user 2026-11-19 |
 | T-116 | Drop the CI Hangul check (ADR-0383) once the English habit has settled | Minor feature · cleanup | Waiting for trigger — after S25 · user 2026-11-19 |
 | T-100 | CLAUDE.md 「최소한만 막기」 — add 「그 밖의 막기는 실제로 불편이 생기면 그때 더한다.」 | Minor feature · cleanup | Waiting for trigger — the next CLAUDE.md revision |
@@ -572,6 +573,7 @@ Full text before the simplification (investigation records · reverted attempts 
   - U3 `agent_edit.rs` `agent_edit`: every agent-preset edit stats the library root before its change, even when the agent has no library preset (the stat is used only when one is attached). A root on an unresponsive share delays that edit by up to `IO_LIMIT` (5 s); outside every lock, so no other request waits. Fix shape: stat only when a library preset is attached — known only inside the change, so the order changes. Re-judge when step 10a routes the commands.
   - U3 `lib.rs` `plug_profile_edit`: the second-plug branch (warn, ignore) has no test; production plugs once.
   - U4 `relink.rs` part (b): the "other missing targets" judgement covers items and folders, the tests only items (coder's note, fix round 1).
+- **Re-judged at step 10a (2026-11-20):** the root stat on every agent-preset edit stays as is (step-10a TRD B16).
 - **Next:** revisit one when a real case shows; otherwise none.
 
 ## Minor feature · cleanup
@@ -595,6 +597,11 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Status:** not started · found 2026-11-10 by the S25 step 6 QA (main recycled the leftovers by hand).
 - **Problem:** `crates/engram-dashboard-agent/tests/codex_launch_live.rs` L5 cannot remove its temporary folder when the test drops it — os error 32, a codex child process still holds it. Each codex-lane run leaves one folder under the temp directory.
 - **Next:** wait for (or kill) the codex child before the cleanup, or retry the removal briefly.
+
+### T-119. A JSON array argument from Windows PowerShell 5.1 loses its inner quotes
+- **Status:** not started — pre-existing, found by the step-10a live check (2026-11-20).
+- **What:** `engram preset.add --items '["rules/a.md"]'` run from Windows PowerShell 5.1 reaches `engram.exe` as `[rules/a.md]` and the CLI refuses it `BAD_ARGS` ("declared a JSON array"); Git Bash passes it. Every list argument the help teaches is affected, and `agent.resolve --targets` already was. An agent whose shell is PS 5.1 (likely codex on Windows) hits it.
+- **Options then:** the CLI accepts a bracketed list without quotes for string arrays, or the help shows a PS-safe spelling, or arguments from a file / stdin.
 
 ### T-118. Improve the agent priming's content
 - **Status:** waiting for trigger — after S25 step 10a (user 2026-11-19: 「해당 문서도 나중에 개선하긴 해야되는데 어쨋든 현재는 기존 포맷 맞춰서 진행해」).
