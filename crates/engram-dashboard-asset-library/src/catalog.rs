@@ -3,8 +3,9 @@
 //! ## Invariants
 //!
 //! - **Class A — no whole-catalog swap** (TRD S25 step-7 §6): every write goes through the per-item primitives
-//!   ([`Catalog::apply_items`] · [`Catalog::apply_scan`] · [`Catalog::remove`]); per item the later `read_seq` wins,
-//!   and nothing outside a scan's range is touched. [`Catalog::clear`] exists for the root change only.
+//!   ([`Catalog::apply_items`] · [`Catalog::apply_scan`] · [`Catalog::remove`] · [`Catalog::insert_folder`]); per item
+//!   the later `read_seq` wins, and nothing outside a scan's range is touched. [`Catalog::clear`] exists for the root
+//!   change only.
 //! - **Every removal is sequenced**: an item goes only when an absence observed later than its read says so — a
 //!   listing that lacks it (`listed_at` of its nearest listed folder) or a range observed absent. A failed read
 //!   (`kept`) removes nothing.
@@ -438,6 +439,29 @@ impl Catalog {
             .collect();
         presets.sort_by(|a, b| a.path.cmp(&b.path));
         presets
+    }
+
+    /// The presets that list `key` directly (present or missing target), by path.
+    pub fn presets_listing(&self, key: &PathKey) -> Vec<&Item> {
+        let mut presets: Vec<&Item> = self
+            .refs_to
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter_map(|preset| self.get(preset))
+            .collect();
+        presets.sort_by(|a, b| a.path.cmp(&b.path));
+        presets
+    }
+
+    /// Records a folder created inside Engram (`newFolder`) — the only folder write outside a scan's apply. It takes
+    /// this spelling at its key, and every folder the catalog held below it goes: a folder just made holds nothing.
+    /// Items are the caller's (they need a sequenced removal — [`Catalog::remove`]).
+    pub fn insert_folder(&mut self, folder: LibPath) {
+        let at = key(&folder);
+        self.folders
+            .retain(|k, held| *k == at || !within(held, Some(&folder)));
+        self.folders.insert(at, folder);
     }
 
     /// The one write primitive for observations (class A): per item, an item with a later `read_seq` than the

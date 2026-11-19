@@ -103,7 +103,7 @@ pub const ALREADY_PRESENT: &str = "already-present";
 pub const REORDER_ORDER_MISMATCH: &str = "reorder-order-mismatch";
 
 /// The four item lists, in file order.
-const ITEM_LISTS: [ListName; 4] = [
+pub(crate) const ITEM_LISTS: [ListName; 4] = [
     ListName::Presets,
     ListName::Instructions,
     ListName::Skills,
@@ -304,10 +304,19 @@ impl Lookup for DraftLookup<'_> {
 }
 
 /// What an edit's operation sees inside the change: the file as just read and the catalog with it applied.
-struct Edit<'a> {
-    doc: &'a PresetDoc,
-    catalog: &'a Catalog,
-    root: &'a Path,
+pub(crate) struct Edit<'a> {
+    pub(crate) doc: &'a PresetDoc,
+    pub(crate) catalog: &'a Catalog,
+    pub(crate) root: &'a Path,
+}
+
+/// What [`LibraryService::rewrite_in`] committed: `op`'s answer, the preset as committed (the file as read when its
+/// lists came out unchanged) with its `rev`, and whether the file was written.
+pub(crate) struct Rewritten<T> {
+    pub(crate) answer: T,
+    pub(crate) doc: PresetDoc,
+    pub(crate) rev: String,
+    pub(crate) written: bool,
 }
 
 /// What a view takes from the catalog under a library lock — the read lock of `preset.get`, or the write lock of the
@@ -994,6 +1003,26 @@ impl LibraryService {
         op: impl FnOnce(&Edit<'_>) -> Result<(PresetLists, T), LibraryRefusal>,
         touched: &mut Vec<PathKey>,
     ) -> Result<(T, PendingView), LibraryRefusal> {
+        let done = self.rewrite_in(preset, base_rev, catalog, root, seq, op, touched)?;
+        let pending = self.pending_view(catalog, root, preset, &done.doc, &done.rev);
+        Ok((done.answer, pending))
+    }
+
+    /// One preset file's rewrite inside a change (module header, from the link admission to the per-item apply), with
+    /// no answer view — what an edit and each file of a relink run. `touched` gathers every key applied, also when it
+    /// refuses. Refusals: those every edit can answer (module header) but the first two, `base_rev` other than the
+    /// `rev` read `Conflict` · [`REV_MISMATCH`], and `op`'s own.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn rewrite_in<T>(
+        &self,
+        preset: &LibPath,
+        base_rev: Option<&str>,
+        catalog: &mut Catalog,
+        root: &Path,
+        seq: &dyn Fn() -> u64,
+        op: impl FnOnce(&Edit<'_>) -> Result<(PresetLists, T), LibraryRefusal>,
+        touched: &mut Vec<PathKey>,
+    ) -> Result<Rewritten<T>, LibraryRefusal> {
         self.admit(root, preset)?;
         let file = preset.to_path(root);
         let read_seq = seq();
@@ -1041,7 +1070,12 @@ impl LibraryService {
             root,
         })?;
         if same_lists(&as_read(&doc), &lists) {
-            return Ok((answer, self.pending_view(catalog, root, preset, &doc, &rev)));
+            return Ok(Rewritten {
+                answer,
+                doc,
+                rev,
+                written: false,
+            });
         }
         let written = rewrite_lists(text, &lists, backends).map_err(|e| invalid(e.to_reason()))?;
         // The answer describes the written file, so it must read as a preset — checked before the write, a writer
@@ -1061,23 +1095,31 @@ impl LibraryService {
                     json!({ "path": preset.as_str(), "why": e.to_string() }),
                 )
             })?;
-        // The item is applied racy whatever its tag (`Catalog::apply_items`), so a stand-in tag only costs a re-read.
-        let tag = self.store.tag(&file).unwrap_or_else(|e| {
+        let tag = self.tag_after_write(preset, &file, written.len());
+        touched.extend(self.apply_bytes(catalog, preset, written.as_bytes(), tag, written_seq));
+        tracing::info!(preset = preset.as_str(), "preset written");
+        Ok(Rewritten {
+            answer,
+            doc: written_doc,
+            rev: sha256_hex(written.as_bytes()),
+            written: true,
+        })
+    }
+
+    /// The tag of `file` (library path `path`) just written with `len` bytes, or a stand-in when it cannot be read: the
+    /// item is applied racy whatever its tag (`Catalog::apply_items`), so a stand-in only costs a re-read.
+    pub(crate) fn tag_after_write(&self, path: &LibPath, file: &Path, len: usize) -> ContentTag {
+        self.store.tag(file).unwrap_or_else(|e| {
             tracing::debug!(
-                path = preset.as_str(),
+                path = path.as_str(),
                 "tag after write failed; applying a stand-in tag: {e}"
             );
             ContentTag {
                 modified: SystemTime::now(),
-                size: written.len() as u64,
+                size: len as u64,
                 identity: None,
             }
-        });
-        touched.extend(self.apply_bytes(catalog, preset, written.as_bytes(), tag, written_seq));
-        tracing::info!(preset = preset.as_str(), "preset written");
-        let written_rev = sha256_hex(written.as_bytes());
-        let pending = self.pending_view(catalog, root, preset, &written_doc, &written_rev);
-        Ok((answer, pending))
+        })
     }
 
     /// Link admission for a new way into the catalog: `path` must pass [`admits`] (else `InvalidArgument` ·
@@ -1705,7 +1747,7 @@ fn set_backend(
 
 /// The lists of `doc` as read — what every edit starts from: every modeled item with its origin, every folder entry
 /// in its original spelling, nothing dropped.
-fn as_read(doc: &PresetDoc) -> PresetLists {
+pub(crate) fn as_read(doc: &PresetDoc) -> PresetLists {
     PresetLists {
         presets: doc.presets.clone(),
         instructions: doc.instructions.clone(),
@@ -1739,7 +1781,7 @@ fn same_lists(a: &PresetLists, b: &PresetLists) -> bool {
         && a.drop_unmodeled == b.drop_unmodeled
 }
 
-fn doc_list(doc: &PresetDoc, list: ListName) -> &[PresetItem] {
+pub(crate) fn doc_list(doc: &PresetDoc, list: ListName) -> &[PresetItem] {
     match list {
         ListName::Presets => &doc.presets,
         ListName::Instructions => &doc.instructions,
@@ -1760,7 +1802,7 @@ fn lists_ref(lists: &PresetLists, list: ListName) -> &[PresetItem] {
 }
 
 /// The item list `list` of `lists` — one of [`ITEM_LISTS`].
-fn list_mut(lists: &mut PresetLists, list: ListName) -> &mut Vec<PresetItem> {
+pub(crate) fn list_mut(lists: &mut PresetLists, list: ListName) -> &mut Vec<PresetItem> {
     match list {
         ListName::Presets => &mut lists.presets,
         ListName::Instructions => &mut lists.instructions,
@@ -1799,7 +1841,7 @@ pub(crate) fn list_of(kind: &ItemKind) -> Option<ListName> {
 /// Whether listing `target` in `own`'s `presets` closes a cycle: it is `own`, or it reaches `own` through nested
 /// `presets` lists in the catalog — the only lists resolution expands (a preset listed under another list is a
 /// `wrong-kind` row there, not an expansion). Own's own lists are never walked: the walk ends where it reaches `own`.
-fn closes_cycle(catalog: &Catalog, own: &LibPath, target: &AssetRef) -> bool {
+pub(crate) fn closes_cycle(catalog: &Catalog, own: &LibPath, target: &AssetRef) -> bool {
     let AssetRef::Library(target) = target else {
         return false;
     };
@@ -1871,6 +1913,19 @@ pub(crate) fn parse_ref(text: &str) -> Result<AssetRef, Reason> {
     })
 }
 
+/// A library path spelling, or `InvalidArgument` · `item-path-invalid` (`args` = `{path, why}`) — a built-in included.
+pub(crate) fn lib_path(text: &str) -> Result<LibPath, LibraryRefusal> {
+    match parse_ref(text) {
+        Ok(AssetRef::Library(path)) => Ok(path),
+        Ok(AssetRef::BuiltIn(_)) => Err(LibraryRefusal::new(
+            RefusalClass::InvalidArgument,
+            ITEM_PATH_INVALID,
+            json!({ "path": escape_controls(text), "why": "a built-in is not a library path" }),
+        )),
+        Err(reason) => Err(invalid(reason)),
+    }
+}
+
 /// A skip with `code`: `args` = `{backend}` for a tag code (given `backend`), else `{path}`.
 pub(crate) fn skip(item: &str, code: &str, backend: Option<&str>) -> Skipped {
     let args = match (code, backend) {
@@ -1900,7 +1955,7 @@ fn invalid(reason: Reason) -> LibraryRefusal {
     }
 }
 
-fn dot_or_temp(path: &LibPath) -> LibraryRefusal {
+pub(crate) fn dot_or_temp(path: &LibPath) -> LibraryRefusal {
     LibraryRefusal::new(
         RefusalClass::InvalidArgument,
         ITEM_PATH_INVALID,
@@ -1908,7 +1963,7 @@ fn dot_or_temp(path: &LibPath) -> LibraryRefusal {
     )
 }
 
-fn not_found(path: &str) -> LibraryRefusal {
+pub(crate) fn not_found(path: &str) -> LibraryRefusal {
     LibraryRefusal::new(RefusalClass::NotFound, NOT_FOUND, json!({ "path": path }))
 }
 
@@ -2019,6 +2074,9 @@ mod tests {
                 return Err(io::Error::other("injected write failure"));
             }
             FsStore.write_atomic(path, bytes)
+        }
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            FsStore.create_new(path, bytes)
         }
         fn create_dir(&self, path: &Path) -> io::Result<()> {
             FsStore.create_dir(path)

@@ -280,7 +280,9 @@ impl LibraryService {
 
     /// The live profile-edit port, or `Internal` · [`PROFILE_EDIT_UNAVAILABLE`] (empty or dead cell).
     // ADR-0380
-    fn profile_edit(&self) -> Result<std::sync::Arc<dyn ProfileEditPort>, LibraryRefusal> {
+    pub(crate) fn profile_edit(
+        &self,
+    ) -> Result<std::sync::Arc<dyn ProfileEditPort>, LibraryRefusal> {
         self.profile_edit
             .get()
             .and_then(std::sync::Weak::upgrade)
@@ -567,7 +569,7 @@ fn agent_base_rev(default_preset: bool, presets: &[AttachedPreset]) -> String {
 }
 
 /// A port refusal: an agent gone from the registry `NotFound` · `not-found`; a store error passed through unchanged.
-fn port_refused(error: ProfileEditError) -> LibraryRefusal {
+pub(crate) fn port_refused(error: ProfileEditError) -> LibraryRefusal {
     match error {
         ProfileEditError::NotFound(agent) => agent_not_found(agent),
         ProfileEditError::Store(store) => LibraryRefusal::Store(store),
@@ -638,6 +640,9 @@ mod tests {
         }
         fn write_atomic(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             FsStore.write_atomic(path, bytes)
+        }
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            FsStore.create_new(path, bytes)
         }
         fn create_dir(&self, path: &Path) -> std::io::Result<()> {
             FsStore.create_dir(path)

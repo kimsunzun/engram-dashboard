@@ -77,6 +77,15 @@
 //! weak cell); an empty or dead cell refuses `profile-edit-unavailable` (ADR-0380). The rules are in the
 //! `agent_edit.rs` header.
 //!
+//! ## Relink and create
+//!
+//! `relink.rs` holds `relink`: inside one [`LibraryService::change_at`] it rewrites each preset file that lists an old
+//! path through the edits' per-file pipeline, then the agents once through the profile-edit port (ADR-0335); a
+//! per-file refusal skips the file and an IO failure stops the walk. `create.rs` holds `newFolder` · `newFile`: inside
+//! one change, the store's create refusing a taken name (never a replace) or a missing folder, the new item or folder
+//! entered into the catalog.
+//! The rules are in each file's header.
+//!
 //! ## Refusals
 //!
 //! A body refuses with [`LibraryRefusal`]: a [`RefusalClass`] plus an agent `launch::Reason`, or the profile store's
@@ -96,6 +105,7 @@ pub mod backends;
 pub mod builtin;
 pub mod catalog;
 pub mod config;
+pub mod create;
 pub mod edit;
 pub mod excerpt;
 pub mod folder;
@@ -104,6 +114,7 @@ mod gate;
 pub mod launch;
 pub mod path;
 pub mod refs;
+pub mod relink;
 pub mod resolve;
 pub mod store;
 pub mod validate;
@@ -1533,6 +1544,9 @@ mod tests {
             self.holding(path).write_atomic(path, bytes)
         }
 
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.holding(path).create_new(path, bytes)
+        }
         fn create_dir(&self, path: &Path) -> io::Result<()> {
             self.holding(path).create_dir(path)
         }

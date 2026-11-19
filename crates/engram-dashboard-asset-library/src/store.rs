@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -66,6 +66,11 @@ pub trait LibraryStore: Send + Sync {
     /// Atomic write (base `write_atomic`). The parent folder must exist: a missing parent is `NotFound` and nothing
     /// is created (base would create it).
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
+    /// Creates the file at `path` holding `bytes` only if nothing is there — it never replaces. `AlreadyExists` =
+    /// something is at `path`; a missing parent is `NotFound` and nothing is created. A write that fails after the file
+    /// was made leaves it in place and answers an error naming it: it is never removed by name, since another program
+    /// may have put its own file there since. A crash during the write can likewise leave a partial file at `path`.
+    fn create_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     fn create_dir(&self, path: &Path) -> io::Result<()>;
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
     /// Atomic copy (base `copy_atomic`).
@@ -76,7 +81,8 @@ pub trait LibraryStore: Send + Sync {
     /// plain name. `AlreadyExists` = something is already at the destination (a rename would replace a file there).
     /// A destination that appears between that check and the rename is not guarded.
     fn trash(&self, root: &Path, path: &Path, bundle: &TrashBundle) -> io::Result<PathBuf>;
-    /// Whether anything is at `path` (a link counts — it is not followed).
+    /// Whether anything is at `path` (a link counts — it is not followed): only a stat that answers says so, and a stat
+    /// error of any kind answers `false`. A fast path only — `create_new` and `create_dir` decide a collision.
     fn exists(&self, path: &Path) -> bool;
 }
 
@@ -356,6 +362,12 @@ impl LibraryStore for FsStore {
         write_atomic(path, bytes, OS_HOOKS)
     }
 
+    fn create_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        create_new_with(path, |file| {
+            file.write_all(bytes).and_then(|()| file.sync_all())
+        })
+    }
+
     fn create_dir(&self, path: &Path) -> io::Result<()> {
         fs::create_dir(path)
     }
@@ -377,8 +389,39 @@ impl LibraryStore for FsStore {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        fs::symlink_metadata(path).is_ok()
+        present(&fs::symlink_metadata(path))
     }
+}
+
+/// [`FsStore`]'s `create_new`, with `write` filling the file just made.
+fn create_new_with(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    if let Err(e) = write(&mut file) {
+        // Not removed by name: another program may have put its own file there since.
+        tracing::warn!(path = %path.display(), "create_new: write failed; partial file left: {e}");
+        return Err(io::Error::other(format!(
+            "{e}; a partial file may be left at {}",
+            path.display()
+        )));
+    }
+    drop(file);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = (OS_HOOKS.sync_dir)(parent) {
+            tracing::debug!(path = %parent.display(), "create_new: folder sync failed: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// Whether a stat says something is there — only one that answers does.
+fn present<T>(stat: &io::Result<T>) -> bool {
+    stat.is_ok()
 }
 
 fn refuse_unadmitted(under: &LibPath) -> io::Result<()> {
@@ -855,6 +898,24 @@ pub(crate) mod mem {
             Ok(())
         }
 
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            let mut state = self.state.lock().unwrap();
+            if state.nodes.contains_key(path) {
+                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+            }
+            match path.parent().and_then(|parent| state.nodes.get(parent)) {
+                Some(Node::Dir) => {}
+                Some(_) => return Err(io::Error::from(io::ErrorKind::NotADirectory)),
+                None => return Err(not_found()),
+            }
+            let modified = SystemTime::now();
+            let bytes = bytes.to_vec();
+            state
+                .nodes
+                .insert(path.to_path_buf(), Node::File { bytes, modified });
+            Ok(())
+        }
+
         fn create_dir(&self, path: &Path) -> io::Result<()> {
             let mut state = self.state.lock().unwrap();
             if state.nodes.contains_key(path) {
@@ -961,6 +1022,39 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, text).unwrap();
         path
+    }
+
+    #[test]
+    fn a_create_whose_write_fails_leaves_the_file_it_made_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+
+        let answer = create_new_with(&path, |_| Err(io::Error::other("injected write failure")));
+
+        let error = answer.expect_err("the write failed");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("a.md"), "{error}");
+        assert!(path.exists(), "never removed by name");
+        assert_eq!(
+            FsStore.create_new(&path, b"x").unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn exists_answers_present_only_for_a_stat_that_answers() {
+        assert!(present(&Ok(())));
+        for kind in [
+            io::ErrorKind::NotFound,
+            io::ErrorKind::NotADirectory,
+            io::ErrorKind::PermissionDenied,
+        ] {
+            assert!(!present(&Err::<(), _>(io::Error::from(kind))), "{kind:?}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(dir.path(), "a.md", "a");
+        assert!(FsStore.exists(&file));
+        assert!(!FsStore.exists(&dir.path().join("gone.md")));
     }
 
     fn counter() -> impl Fn() -> u64 {

@@ -1620,6 +1620,9 @@ mod tests {
             FsStore.write_atomic(path, bytes)
         }
 
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            FsStore.create_new(path, bytes)
+        }
         fn create_dir(&self, path: &Path) -> io::Result<()> {
             FsStore.create_dir(path)
         }
