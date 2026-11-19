@@ -17,7 +17,9 @@ use engram_dashboard_agent::types::{
     StatusSink,
 };
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus};
-use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases, NoUsageLimits};
+use engram_dashboard_daemon::control::commands::{
+    make_daemon_table, NoInputLeases, NoLibrary, NoUsageLimits,
+};
 use engram_dashboard_daemon::control::help::HelpSource;
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server_with_help, start_mcp_server_without_help, CommandTableSlot, ManagerSlot,
@@ -227,6 +229,7 @@ async fn fixture(tag: &str) -> Fixture {
         broadcast_slot,
         Arc::new(NoInputLeases),
         Arc::new(NoUsageLimits),
+        Arc::new(NoLibrary),
     )));
 
     // ★The decision is planted by hand — this fixture alone is not enough★: if `provision` derived it wrongly, the planted value would stay the same and everything stay green. That axis is covered on the production path by `a_credential_minted_by_the_real_provision_path_is_refused_end_to_end`. Planting here isolates per-route gate behavior from the derivation.

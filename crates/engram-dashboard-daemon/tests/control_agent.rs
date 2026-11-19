@@ -24,7 +24,9 @@ use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus, CommandD
 use engram_dashboard_daemon::command_roster::CommandRoster;
 use engram_dashboard_daemon::conn_port::{ConnId, Frame, FrameError, FrameSink};
 use engram_dashboard_daemon::control::agent::RosterBroadcast;
-use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases, NoUsageLimits};
+use engram_dashboard_daemon::control::commands::{
+    make_daemon_table, NoInputLeases, NoLibrary, NoUsageLimits,
+};
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server_without_help, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
     RosterBroadcastSlot,
@@ -374,6 +376,7 @@ async fn fixture_assembled(tag: &str, with_table: bool, kits: Option<KitsOf>) ->
             broadcast_slot.clone(),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         )));
     }
 
@@ -1288,6 +1291,15 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
             "agent.rename",
             "agent.resolve",
             "agent.spawn",
+            "library.folders",
+            "library.list",
+            "library.newFile",
+            "library.newFolder",
+            "library.read",
+            "library.refresh",
+            "library.relink",
+            "library.setRoot",
+            "library.status",
             "tab.create",
             "usage.get",
             "usage.refresh"

@@ -2857,6 +2857,7 @@ mod tests {
                     Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
                     Arc::new(multiview.clone()),
                     Arc::new(crate::control::commands::NoUsageLimits),
+                    Arc::new(crate::control::commands::NoLibrary),
                 )));
                 Arc::new(crate::control::commands::DaemonLocalCommands::new(slot))
             });
@@ -4778,6 +4779,7 @@ mod tests {
             Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
             Arc::new(core.multiview().clone()),
             Arc::new(crate::control::commands::NoUsageLimits),
+            Arc::new(crate::control::commands::NoLibrary),
         )));
 
         let req = rid();
@@ -4807,6 +4809,15 @@ mod tests {
                         "agent.rename",
                         "agent.resolve",
                         "agent.spawn",
+                        "library.folders",
+                        "library.list",
+                        "library.newFile",
+                        "library.newFolder",
+                        "library.read",
+                        "library.refresh",
+                        "library.relink",
+                        "library.setRoot",
+                        "library.status",
                         "tab.create",
                         "usage.get",
                         "usage.refresh"

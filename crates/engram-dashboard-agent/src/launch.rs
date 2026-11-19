@@ -345,7 +345,7 @@ pub fn notice_row(notice: &Notice) -> Value {
     Value::Object(row)
 }
 
-fn put_reason(row: &mut Map<String, Value>, reason: &Reason) {
+pub(crate) fn put_reason(row: &mut Map<String, Value>, reason: &Reason) {
     row.insert("code".into(), reason.code.as_str().into());
     row.insert("args".into(), reason.args.clone());
     if let Some(line) = reason.line {

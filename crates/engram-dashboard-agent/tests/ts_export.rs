@@ -11,8 +11,12 @@ use engram_dashboard_agent::commands::{
     AgentCancelQueuedInputArgs, AgentCancelQueuedInputOk, AgentInterruptArgs, AgentInterruptOk,
     AgentListArgs, AgentListOk, AgentListQueuedInputsArgs, AgentListQueuedInputsOk, AgentMoveArgs,
     AgentMoveOk, AgentNewArgs, AgentNewOk, AgentRenameArgs, AgentRenameOk, AgentResolveArgs,
-    AgentResolveOk, AgentSpawnArgs, AgentSpawnOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk,
-    UsageVendorRow, CATALOG_VERSION,
+    AgentResolveOk, AgentSpawnArgs, AgentSpawnOk, LibraryFoldersArgs, LibraryFoldersOk,
+    LibraryListArgs, LibraryListOk, LibraryNewFileArgs, LibraryNewFileOk, LibraryNewFolderArgs,
+    LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk,
+    LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs, LibrarySetRootOk, LibraryStatusArgs,
+    LibraryStatusOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk, UsageVendorRow,
+    CATALOG_VERSION,
 };
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
 use ts_rs::TS;
@@ -70,6 +74,30 @@ fn export_typescript_bindings() {
     UsageVendorRow::export_all_to(out).expect("failed to export the UsageVendorRow bindings");
     UsageRefreshArgs::export_all_to(out).expect("failed to export the UsageRefreshArgs bindings");
     UsageRefreshOk::export_all_to(out).expect("failed to export the UsageRefreshOk bindings");
+    LibraryStatusArgs::export_all_to(out).expect("failed to export the LibraryStatusArgs bindings");
+    LibraryStatusOk::export_all_to(out).expect("failed to export the LibraryStatusOk bindings");
+    LibrarySetRootArgs::export_all_to(out)
+        .expect("failed to export the LibrarySetRootArgs bindings");
+    LibrarySetRootOk::export_all_to(out).expect("failed to export the LibrarySetRootOk bindings");
+    LibraryFoldersArgs::export_all_to(out)
+        .expect("failed to export the LibraryFoldersArgs bindings");
+    LibraryFoldersOk::export_all_to(out).expect("failed to export the LibraryFoldersOk bindings");
+    LibraryRefreshArgs::export_all_to(out)
+        .expect("failed to export the LibraryRefreshArgs bindings");
+    LibraryRefreshOk::export_all_to(out).expect("failed to export the LibraryRefreshOk bindings");
+    LibraryListArgs::export_all_to(out).expect("failed to export the LibraryListArgs bindings");
+    LibraryListOk::export_all_to(out).expect("failed to export the LibraryListOk bindings");
+    LibraryReadArgs::export_all_to(out).expect("failed to export the LibraryReadArgs bindings");
+    LibraryReadOk::export_all_to(out).expect("failed to export the LibraryReadOk bindings");
+    LibraryNewFolderArgs::export_all_to(out)
+        .expect("failed to export the LibraryNewFolderArgs bindings");
+    LibraryNewFolderOk::export_all_to(out)
+        .expect("failed to export the LibraryNewFolderOk bindings");
+    LibraryNewFileArgs::export_all_to(out)
+        .expect("failed to export the LibraryNewFileArgs bindings");
+    LibraryNewFileOk::export_all_to(out).expect("failed to export the LibraryNewFileOk bindings");
+    LibraryRelinkArgs::export_all_to(out).expect("failed to export the LibraryRelinkArgs bindings");
+    LibraryRelinkOk::export_all_to(out).expect("failed to export the LibraryRelinkOk bindings");
 
     let produced: Vec<String> = std::fs::read_dir(out)
         .expect("read bindings/")

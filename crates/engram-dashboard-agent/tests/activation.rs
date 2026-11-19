@@ -12,12 +12,17 @@ use uuid::Uuid;
 
 use engram_dashboard_agent::backend;
 use engram_dashboard_agent::commands::{
-    make_table, AgentBackend, AgentCommandHost, RosterChanged, UsageCommandHost, UsageVendorRow,
+    make_table, AgentBackend, AgentCommandHost, LibraryFoldersOk, LibraryKind, LibraryListOk,
+    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryStatusOk, RosterChanged,
+    UsageCommandHost, UsageVendorRow,
 };
 use engram_dashboard_agent::failure::AgentFailureKind;
 use engram_dashboard_agent::launch::{
     notice_fingerprint, notice_row, BlockReason, LaunchArtifacts, LaunchBlocked, LaunchKit,
-    LaunchKitSource, LaunchPlan, LaunchPorts, NoopLaunchKits, Notice, PrepareError,
+    LaunchKitSource, LaunchPlan, LaunchPorts, NoopLaunchKits, Notice, PrepareError, Reason,
+};
+use engram_dashboard_agent::library_commands::{
+    LibraryCommandHost, LibraryReadView, PortClass, PortRefusal,
 };
 use engram_dashboard_agent::manager::{Activated, AgentManager, NoticeDelivery};
 use engram_dashboard_agent::persistence::FileProfileStore;
@@ -1511,6 +1516,64 @@ impl UsageCommandHost for NoUsage {
     }
 }
 
+/// The library port of a table these tests never send a `library.*` command to.
+struct NoLibrary;
+
+impl NoLibrary {
+    fn refused<T>() -> Result<T, PortRefusal> {
+        Err(PortRefusal::Refused {
+            class: PortClass::Unavailable,
+            reason: Reason {
+                code: "library-unavailable".to_owned(),
+                args: json!({ "message": "no library in this test" }),
+                line: None,
+            },
+        })
+    }
+}
+
+impl LibraryCommandHost for NoLibrary {
+    fn status(&self) -> Result<LibraryStatusOk, PortRefusal> {
+        Self::refused()
+    }
+    fn set_root(&self, _: &str, _: bool) -> Result<LibraryStatusOk, PortRefusal> {
+        Self::refused()
+    }
+    fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
+        Self::refused()
+    }
+    fn refresh(&self, _: Option<&str>) -> Result<LibraryRefreshOk, PortRefusal> {
+        Self::refused()
+    }
+    fn list(
+        &self,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[LibraryKind],
+        _: bool,
+    ) -> Result<LibraryListOk, PortRefusal> {
+        Self::refused()
+    }
+    fn read(&self, _: &str) -> Result<LibraryReadView, PortRefusal> {
+        Self::refused()
+    }
+    fn new_folder(&self, _: Option<&str>, _: &str, _: Option<u64>) -> Result<String, PortRefusal> {
+        Self::refused()
+    }
+    fn new_file(
+        &self,
+        _: Option<&str>,
+        _: &str,
+        _: LibraryNewFileKind,
+        _: Option<u64>,
+    ) -> Result<String, PortRefusal> {
+        Self::refused()
+    }
+    fn relink(&self, _: &str, _: &str, _: Option<u64>) -> Result<LibraryRelinkOk, PortRefusal> {
+        Self::refused()
+    }
+}
+
 /// The bus `agent.spawn` is a delivering caller: its success answer carries the notices as rows and marks the set as
 /// shown (the next start with the same set answers an empty list). A blocked launch starts nothing and is a
 /// `CONFLICT` carrying every reason in `args`.
@@ -1525,6 +1588,7 @@ fn the_bus_spawn_delivers_the_notices_and_answers_a_block_with_its_reasons() {
         Arc::clone(&manager) as Arc<dyn AgentCommandHost>,
         Arc::new(NoRoster),
         Arc::new(NoUsage),
+        Arc::new(NoLibrary),
     );
     let spawn = || {
         let mut args = json!({ "target": id.to_string() });

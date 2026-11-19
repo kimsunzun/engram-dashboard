@@ -679,7 +679,7 @@ async fn run() -> i32 {
     let manager = Arc::new(
         AgentManager::new_with_control(sink, profiles, tracker, control).with_launch_ports(
             LaunchPorts {
-                kits: library,
+                kits: library.clone(),
                 fs: Arc::new(StdLaunchFs),
             },
         ),
@@ -691,6 +691,7 @@ async fn run() -> i32 {
             broadcast_slot.clone(),
             Arc::new(engram_dashboard_daemon::control::commands::NoInputLeases),
             Arc::new(engram_dashboard_daemon::control::commands::NoUsageLimits),
+            library,
         ),
     ));
     // MessagingService assembly (3-way send branch · flush), wrapping the manager as a DeliveryPort. No flush sink is wired (NoopStatus), so parking scenarios take only the direct path; the seed goes to a live recipient (delivered).

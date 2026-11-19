@@ -1,8 +1,9 @@
 //! The reusable reference walk: what a preset reaches ([`closure`]), who refers to an item ([`referrers_of`]) and how
 //! many ([`reference_count`] — the `library.list` row).
 //!
-//! - Only library references count. A built-in (`engram:/…`) is not a library item, and a preset's folder entry is not
-//!   an asset reference at all (ADR-0341) — neither is walked or counted.
+//! - Only library references are walked. A built-in (`engram:/…`) is not a library item, and a preset's folder entry is
+//!   not an asset reference at all (ADR-0341) — neither is walked. The one built-in count is [`default_slot_count`]
+//!   (agents with the Default slot on).
 //! - The preset side comes from the catalog (`used_by` — direct and through nested presets); the agent side is read
 //!   from the profile registry each time (agent references are never stored — M5): an agent refers to an item when one
 //!   of its attached preset paths names it by platform `same_path`.
@@ -76,6 +77,16 @@ pub fn referrers_of(
         .collect();
     agents.sort_unstable();
     (presets, agents)
+}
+
+/// The number of agents whose Default slot is on — the agents that take the built-in preset `engram:/default` (an agent
+/// takes it only through that slot; a library preset never lists a built-in).
+pub fn default_slot_count(registry: &ProfileRegistry) -> usize {
+    registry
+        .attachments()
+        .iter()
+        .filter(|(_, attached)| attached.default_preset)
+        .count()
 }
 
 /// The number of presets plus agents that refer to `item` ([`referrers_of`]).

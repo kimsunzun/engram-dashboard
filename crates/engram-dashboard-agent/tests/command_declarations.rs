@@ -2,9 +2,12 @@
 
 use engram_dashboard_agent::commands::{
     AgentCancelQueuedInputArgs, AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs,
-    AgentMoveArgs, AgentNewArgs, AgentRenameArgs, AgentResolveArgs, AgentSpawnArgs, UsageGetArgs,
+    AgentMoveArgs, AgentNewArgs, AgentRenameArgs, AgentResolveArgs, AgentSpawnArgs,
+    LibraryFoldersArgs, LibraryListArgs, LibraryNewFileArgs, LibraryNewFolderArgs, LibraryReadArgs,
+    LibraryRefreshArgs, LibraryRelinkArgs, LibrarySetRootArgs, LibraryStatusArgs, UsageGetArgs,
     UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
 };
+use engram_dashboard_command::DeadlineClass;
 use engram_dashboard_command::{
     command_specs, duplicate_command_names, lint_spec, spec_item_json, spec_of, Effect, ErrorCode,
     COMMON_ERRORS,
@@ -27,6 +30,15 @@ fn declared_names_are_the_cli_verbs() {
             "agent.rename",
             "agent.resolve",
             "agent.spawn",
+            "library.folders",
+            "library.list",
+            "library.newFile",
+            "library.newFolder",
+            "library.read",
+            "library.refresh",
+            "library.relink",
+            "library.setRoot",
+            "library.status",
             "usage.get",
             "usage.refresh"
         ]
@@ -43,7 +55,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 7 // two were added in v6 — `agent.interrupt` · `usage.refresh`
+            == 11 // two were added in v6 — `agent.interrupt` · `usage.refresh`; four in v9 — `library.setRoot` · `newFolder` · `newFile` · `relink`
     );
 }
 
@@ -81,6 +93,44 @@ fn the_resolve_verb_is_a_read_declared_in_generation_8() {
     let resolve = spec_of("agent.resolve").expect("declaration");
     assert_eq!(resolve.effect, Effect::Read);
     assert_eq!(resolve.since, 8);
+}
+
+/// The nine library commands (ADR-0386) — all in catalog 9 and ordinary (no launch deadline); the four that change the
+/// library or `library.json` are `Write`. ★`library.refresh` is `Read`★: it changes only the in-memory catalog and a
+/// rerun is harmless, while a `Write` would make a same-id retry answer `ALREADY_APPLIED` with no report.
+#[test]
+fn the_library_verbs_are_declared_in_generation_9_with_their_effect() {
+    let cases = [
+        ("library.status", Effect::Read),
+        ("library.setRoot", Effect::Write),
+        ("library.folders", Effect::Read),
+        ("library.refresh", Effect::Read),
+        ("library.list", Effect::Read),
+        ("library.read", Effect::Read),
+        ("library.newFolder", Effect::Write),
+        ("library.newFile", Effect::Write),
+        ("library.relink", Effect::Write),
+    ];
+    for (name, effect) in cases {
+        let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
+        assert_eq!(spec.effect, effect, "{name}");
+        assert_eq!(spec.since, 9, "{name}");
+        assert_eq!(spec.deadline, DeadlineClass::Ordinary, "{name}");
+    }
+}
+
+/// The library list filter advertises the closed kind vocabulary — `SkillFile` is its own word beside `Skill`.
+#[test]
+fn the_library_list_advertises_the_five_kinds() {
+    let schema: serde_json::Value =
+        serde_json::from_str(spec_of("library.list").expect("declaration").args_schema)
+            .expect("args schema");
+    let kinds = &schema["properties"]["kinds"]["anyOf"][0]["items"]["enum"];
+    assert_eq!(
+        kinds,
+        &json!(["Instruction", "Skill", "SkillFile", "Settings", "Preset"]),
+        "{schema}"
+    );
 }
 
 /// The generation is 9 now — `agent.new`'s `preset` field and `store.presets` in the `agent.list` reply were removed (TRD
@@ -151,6 +201,29 @@ fn error_sets_are_golden() {
     // A backend without a field = NOT_FOUND (the same code as wire ⟳).
     assert_eq!(declared("usage.get"), vec![ErrorCode::NotFound]);
     assert_eq!(declared("usage.refresh"), vec![ErrorCode::NotFound]);
+    // ADR-0379: `Unavailable` and `Conflict` refusals are CONFLICT; `library.status` refuses only from a daemon with
+    //   no library; a refresh never refuses (a bad spelling is INVALID_ARGUMENT, from the table's set).
+    for name in [
+        "library.status",
+        "library.setRoot",
+        "library.folders",
+        "library.list",
+    ] {
+        assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
+    }
+    assert_eq!(declared("library.refresh"), vec![]);
+    for name in [
+        "library.read",
+        "library.newFolder",
+        "library.newFile",
+        "library.relink",
+    ] {
+        assert_eq!(
+            declared(name),
+            vec![ErrorCode::NotFound, ErrorCode::Conflict],
+            "{name}"
+        );
+    }
 }
 
 /// ★The advertised set must be everything that can actually happen★ — argument rejection and internal failure happen in any command.
@@ -250,6 +323,43 @@ fn required_matches_what_deserialization_actually_demands() {
             "usage.refresh",
             parses::<UsageRefreshArgs>,
             json!({ "backend": "Codex" }),
+        ),
+        ("library.status", parses::<LibraryStatusArgs>, json!({})),
+        (
+            "library.setRoot",
+            parses::<LibrarySetRootArgs>,
+            json!({ "path": "C:/lib", "create": true }),
+        ),
+        ("library.folders", parses::<LibraryFoldersArgs>, json!({})),
+        (
+            "library.refresh",
+            parses::<LibraryRefreshArgs>,
+            json!({ "folder": "rules" }),
+        ),
+        (
+            "library.list",
+            parses::<LibraryListArgs>,
+            json!({ "folder": "rules", "query": "x", "kinds": ["Preset"], "builtins": true }),
+        ),
+        (
+            "library.read",
+            parses::<LibraryReadArgs>,
+            json!({ "path": "rules/a.md" }),
+        ),
+        (
+            "library.newFolder",
+            parses::<LibraryNewFolderArgs>,
+            json!({ "parent": "rules", "name": "team", "root_generation": 3 }),
+        ),
+        (
+            "library.newFile",
+            parses::<LibraryNewFileArgs>,
+            json!({ "folder": "rules", "name": "a", "kind": "Markdown", "root_generation": 3 }),
+        ),
+        (
+            "library.relink",
+            parses::<LibraryRelinkArgs>,
+            json!({ "from": "a.md", "to": "b/a.md", "root_generation": 3 }),
         ),
     ];
 

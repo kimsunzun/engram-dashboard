@@ -10,8 +10,12 @@
 //!   (`AgentBackend` word · row types), so the declaration lives here (ADR-0155 decision 1) and the daemon's usage service plugs the real
 //!   thing in through [`UsageCommandHost`] (TRD S21 usage-limit-slot §3 #18).
 //!
+//! ★`library.*` are declared here too — their bodies are asset-library's★: this crate owns the command vocabulary
+//!   (ADR-0155 decision 1 · ADR-0311); the handlers and the third port, [`LibraryCommandHost`], are in
+//!   `library_commands.rs` (one `declare_commands!` block per module, so the declarations stay in this block).
+//!
 //! Entry points: [`make_table`](fn.make_table.html) (assembly) · [`AgentCommandHost`](trait.AgentCommandHost.html) (injection seam) ·
-//!   [`UsageCommandHost`](trait.UsageCommandHost.html) (usage port).
+//!   [`UsageCommandHost`](trait.UsageCommandHost.html) (usage port) · [`LibraryCommandHost`] (library port).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +26,7 @@ use engram_dashboard_command::{
 };
 
 use crate::launch::{notice_text, LaunchBlocked, Notice};
+pub use crate::library_commands::LibraryCommandHost;
 use crate::manager::{Activated, AgentManager, NotStarted, NoticeDelivery, RenameOutcome};
 use crate::persistence::PROFILES_FILE;
 use crate::queued_input::{ListedState, QueuedListing};
@@ -42,7 +47,8 @@ declare_commands! {
     //   `store.presets` (TRD S25-preset-library §5-2 1). The same unreleased generation: the `agent.spawn` answer
     //   gains `notices` (TRD S25 step 16), and with `cwd` a launch blocked before the add answers `CONFLICT` with
     //   nothing created (TRD S25 step 20 — the `agent.spawn` summary). Also: `agent.spawn` is declared with the launch
-    //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`).
+    //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`). The nine `library.*` commands come
+    //   in this generation too (ADR-0386).
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -231,6 +237,106 @@ declare_commands! {
         line: Option<u32>,
         /// The notice as one readable line.
         text: String,
+    }
+
+    // ── Library (`library.*` — ADR-0386) ──────────────────────────────────────────────────────────────
+    // Every row is typed; `Json` holds only `args`, whose keys depend on `code`. The bodies are asset-library's,
+    //   reached through `library_commands::LibraryCommandHost`.
+
+    /// The kind of a library item — `SkillFile` is a skill folder's `SKILL.md`: it stands in for its skill, is listed
+    /// inside the skill folder, and `kinds` matches it only by `SkillFile`, never by `Skill`.
+    enum LibraryKind {
+        Instruction,
+        Skill,
+        SkillFile,
+        Settings,
+        Preset,
+    }
+
+    /// What `library.newFile` makes — `Markdown` (an instruction, `.md`) | `Settings` | `Preset` (`.yaml`).
+    enum LibraryNewFileKind {
+        Markdown,
+        Settings,
+        Preset,
+    }
+
+    /// A reason — a fixed code, its arguments and the line in the file it names.
+    struct ReasonRow {
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        line: Option<u32>,
+    }
+
+    /// One library item.
+    struct ListRow {
+        /// Library path from the root (a skill: its folder; a built-in: `engram:/…`).
+        path: String,
+        /// `null` = a broken file that claims no preset or settings kind (its reason is in `state`), or the one row of
+        /// a folder behind a link.
+        kind: Option<LibraryKind>,
+        /// A skill's name; a built-in's id; every other item's file name.
+        name: String,
+        /// Why it does not read — a broken file, a settings field refusal, a path through a link, a built-in whose
+        /// files are missing (`builtin-unavailable`). `null` = it reads.
+        state: Option<ReasonRow>,
+        /// Presets that reach it plus agents that attach it.
+        references: u32,
+        /// An instruction's excerpt, a skill's description, a preset's or settings file's `description`; else empty.
+        description: String,
+    }
+
+    /// A plain subfolder line of `library.list`.
+    struct ListFolderRow {
+        path: String,
+        name: String,
+    }
+
+    /// One folder of `library.folders`.
+    struct LibraryFolderRow {
+        path: String,
+        name: String,
+        /// A skill folder (it holds a `SKILL.md`).
+        skill: bool,
+    }
+
+    /// A reason tied to one library path.
+    struct PathReasonRow {
+        path: String,
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        line: Option<u32>,
+    }
+
+    /// Where a refresh could not read — `path` `null` = the root listing, or a folder that is not read (a dot or temp
+    /// name); items already read are kept.
+    struct RefreshErrorRow {
+        path: Option<String>,
+        why: String,
+    }
+
+    /// An agent that refers to a library item.
+    struct AgentRefRow {
+        id: String,
+        name: String,
+    }
+
+    /// One old → new pair a relink re-pointed.
+    struct RelinkPairRow {
+        from: String,
+        to: String,
+    }
+
+    /// Why a relink stopped after it had written something — the refusal it met, as a refusal would carry it.
+    struct RelinkStopRow {
+        /// The preset file whose read or write failed; `null` = the agents' rewrite failed.
+        path: Option<String>,
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        /// The refusal as one readable line.
+        message: String,
     }
 
     // errors lists only codes **specific to this command** — argument rejection (INVALID_ARGUMENT) and internal failure (INTERNAL)
@@ -460,6 +566,168 @@ declare_commands! {
         /// Upstream original text — ★`Debug` prints the original; do not put it into logs with `{:?}`★ (the doc of `UsageVendorRow.upstream`).
         upstream: Option<String>,
     } errors [NOT_FOUND];
+
+    // ADR-0386
+    // A library refusal carries `args` = {code, args, line?}: `code` is the fixed reason, `args` its arguments. Every
+    //   refusal applied nothing (`library-config-write-failed` aside: the new root is live but not saved).
+
+    /// The library root now: `root` (`null` = unset), `root_setting` = `default` | `explicit` (`null` when
+    /// library.json could not be read), `state` = `unset` | `ok` | `missing` (+ `state_why`), `config` (library.json) =
+    /// `ok` | `read_only` | `corrupt` | `unsaved` (+ `config_why`), `suggested_new` = the default place.
+    /// `root_generation` = pass it to an edit, which then refuses if the root changed since (CONFLICT
+    /// `root-generation-stale`). CONFLICT `library-unavailable` only from a daemon that runs no library.
+    #[effect(Read)]
+    #[since(9)]
+    "library.status" => args LibraryStatusArgs {} -> ok LibraryStatusOk {
+        daemon_id: String,
+        root: Option<String>,
+        root_setting: Option<String>,
+        state: String,
+        state_why: Option<String>,
+        config: String,
+        config_why: Option<String>,
+        suggested_new: String,
+        root_generation: u64,
+    } errors [CONFLICT];
+
+    /// Moves the library to the absolute folder `path` (`create` makes it first) and saves it in library.json; answers
+    /// the status after the change (as `library.status`). CONFLICT: `library-config-read-only` (nothing done),
+    /// `library-root-unusable` (the folder cannot be used — nothing published), `library-config-write-failed` (the new
+    /// root is live but not saved). A relative path is INVALID_ARGUMENT `item-path-invalid`.
+    #[effect(Write)]
+    #[since(9)]
+    "library.setRoot" => args LibrarySetRootArgs {
+        path: String,
+        /// Create the folder first. Unspecified = false.
+        create: Option<bool>,
+    } -> ok LibrarySetRootOk {
+        // ★The fields must not differ by a character from `LibraryStatusOk`★ — the pairing is `From<LibraryStatusOk>`
+        //   (destructuring); field meanings: `library.status`.
+        daemon_id: String,
+        root: Option<String>,
+        root_setting: Option<String>,
+        state: String,
+        state_why: Option<String>,
+        config: String,
+        config_why: Option<String>,
+        suggested_new: String,
+        root_generation: u64,
+    } errors [CONFLICT];
+
+    /// Every folder of the library, flat, by path; a skill folder is marked `skill`. CONFLICT `library-unavailable`
+    /// when the library cannot be read (no root, or the root cannot be walked).
+    #[effect(Read)]
+    #[since(9)]
+    "library.folders" => args LibraryFoldersArgs {} -> ok LibraryFoldersOk {
+        folders: Vec<LibraryFolderRow>,
+    } errors [CONFLICT];
+
+    /// Re-reads `folder` (unspecified = the whole library) from disk and reports it: `changed` items, `problems` of the
+    /// files re-read, `no_kind` (yaml files with no `kind` — not listed), `skipped_links` (links not entered) and
+    /// `errors` (where reading failed — those items are kept as they were; a row with no `path` = the root listing or a
+    /// folder that is not read failed). Use it after changing library files outside Engram. It never refuses except for a `folder` that is
+    /// not a library path (INVALID_ARGUMENT `item-path-invalid`).
+    #[effect(Read)]
+    #[since(9)]
+    "library.refresh" => args LibraryRefreshArgs {
+        folder: Option<String>,
+    } -> ok LibraryRefreshOk {
+        changed: u32,
+        problems: Vec<PathReasonRow>,
+        no_kind: Vec<String>,
+        skipped_links: Vec<String>,
+        errors: Vec<RefreshErrorRow>,
+    } errors [];
+
+    /// The items directly in `folder` (unspecified = the root) and its plain subfolders. `query` searches name and
+    /// description (case-insensitive) in every item below `folder` and answers matching rows only (no
+    /// `folders`). `kinds` keeps only those kinds (unspecified or empty = all; a broken file counts as the kind it
+    /// claims; a skill's `SKILL.md` matches only `SkillFile`). `builtins` also answers the built-in preset
+    /// `engram:/default` in `builtins`, under the same filters. A `folder` at or below a link answers one
+    /// `path-through-link` row, which the filters do not apply to. CONFLICT `library-unavailable` when the library
+    /// cannot be read.
+    #[effect(Read)]
+    #[since(9)]
+    "library.list" => args LibraryListArgs {
+        folder: Option<String>,
+        query: Option<String>,
+        kinds: Option<Vec<LibraryKind>>,
+        /// Unspecified = false.
+        builtins: Option<bool>,
+    } -> ok LibraryListOk {
+        folder: Option<String>,
+        rows: Vec<ListRow>,
+        folders: Vec<ListFolderRow>,
+        builtins: Vec<ListRow>,
+    } errors [CONFLICT];
+
+    /// One item's detail: its row, its file on disk (`absolute`), the presets that list it (`presets_direct`) or reach
+    /// it through nested presets (`presets_indirect`), the agents that attach it (`agents_direct` — a preset only) or a
+    /// preset reaching it (`agents_indirect`), an instruction's `excerpt` and a settings file's field names
+    /// (`settings_fields`). NOT_FOUND `not-found` = no such item; CONFLICT `library-unavailable`.
+    #[effect(Read)]
+    #[since(9)]
+    "library.read" => args LibraryReadArgs {
+        path: String,
+    } -> ok LibraryReadOk {
+        row: ListRow,
+        absolute: String,
+        presets_direct: Vec<String>,
+        presets_indirect: Vec<String>,
+        agents_direct: Vec<AgentRefRow>,
+        agents_indirect: Vec<AgentRefRow>,
+        excerpt: Option<String>,
+        settings_fields: Vec<String>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Creates folder `name` in `parent` (unspecified = the root); answers its path. CONFLICT `name-exists` (nothing
+    /// replaced) · `library-unavailable` · `root-generation-stale` · `library-write-failed` (a retry after it may answer
+    /// `name-exists` — the partial file or folder stays); NOT_FOUND `not-found` = the parent is missing.
+    #[effect(Write)]
+    #[since(9)]
+    "library.newFolder" => args LibraryNewFolderArgs {
+        parent: Option<String>,
+        name: String,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok LibraryNewFolderOk {
+        path: String,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Creates file `name` of `kind` in `folder` (unspecified = the root) from an empty template (`.md` or `.yaml` is
+    /// added unless the name ends with it); answers its path. Refusals as `library.newFolder`.
+    #[effect(Write)]
+    #[since(9)]
+    "library.newFile" => args LibraryNewFileArgs {
+        folder: Option<String>,
+        name: String,
+        kind: LibraryNewFileKind,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok LibraryNewFileOk {
+        path: String,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Re-points every reference to `from` (in preset files, then agents) at `to`; when `from` is missing it also
+    /// re-points the other missing items of `from`'s folder whose names are in `to`'s folder (`more` of them). Answers
+    /// the pairs `fixed`, the files `written`, the files `skipped` with why, and `stopped` when an IO failure stopped
+    /// it after a write (run the same relink again once it is cleared). NOT_FOUND `not-found` = `to` is not in the
+    /// library; INVALID_ARGUMENT `relink-kind-mismatch` = `to` is of another kind than its references need; CONFLICT
+    /// `library-unavailable` · `root-generation-stale`.
+    #[effect(Write)]
+    #[since(9)]
+    "library.relink" => args LibraryRelinkArgs {
+        from: String,
+        to: String,
+        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        root_generation: Option<u64>,
+    } -> ok LibraryRelinkOk {
+        fixed: Vec<RelinkPairRow>,
+        more: u32,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        stopped: Option<RelinkStopRow>,
+    } errors [NOT_FOUND, CONFLICT];
 }
 
 /// Commands that **move the input** of a live agent — the common entry looks at the input lease (`check_input`) first.
@@ -838,12 +1106,16 @@ fn output_format(given: Option<AgentOutputFormat>) -> CoreAgentOutputFormat {
 ///   surfaces (the daemon's `/control/agent` route and command bus delivery) come through that one common entry, which sits on the blocking pool.
 /// ★`notify` is an argument★: a roster-changing verb must notify (port doc) but the real thing is the daemon's; passing it makes it **impossible to omit** (a trait default would silently not be called).
 /// ★`usage` is an argument for the same reason★: the daemon owns the real `usage.*`; assemblies outside production (smoke bins · tests) pass a port without fields, where `usage.*` answers `NOT_FOUND`.
+/// ★`library` likewise★: production passes asset-library's service; other assemblies pass a port that answers
+///   `library-unavailable` (daemon `NoLibrary`).
 /// Command growth changes the declaration block and one line here, not the assembly (the executable).
 // ADR-0155
+// ADR-0386
 pub fn make_table(
     host: Arc<dyn AgentCommandHost>,
     notify: Arc<dyn RosterChanged>,
     usage: Arc<dyn UsageCommandHost>,
+    library: Arc<dyn LibraryCommandHost>,
 ) -> CommandTable {
     let mut table = CommandTable::new(COMMAND_SPECS);
 
@@ -947,6 +1219,7 @@ pub fn make_table(
             }),
         )
         .expect("could not plug usage.refresh into the table");
+    crate::library_commands::insert(&mut table, &host, library);
 
     table
 }
@@ -1797,7 +2070,11 @@ fn store_error_cause(file: &str, error: &StoreError) -> String {
 /// Returns the caller error (`failure`) of a change the store did not accept as is, while recording it — ★the one line recording the refusal is here alone★ (where that request becomes an error on this surface). The store's log is the file-side fact (what blocked),
 /// this line the request-side fact (which request). `action` = what it was trying to do. Caller-typed values (names · paths) are not logged.
 // ADR-0291 R17
-fn store_error(action: &'static str, error: &StoreError, failure: CommandError) -> CommandError {
+pub(crate) fn store_error(
+    action: &'static str,
+    error: &StoreError,
+    failure: CommandError,
+) -> CommandError {
     tracing::warn!(
         action,
         file = PROFILES_FILE,
@@ -1989,7 +2266,7 @@ fn not_found_message(token: &str) -> String {
 /// ★Emitted **all gathered**, not cut per field★: cutting at the first would make a caller sending three blanks repeat rejection and fix three times (like the entry's unknown-field check — `CommandTable::check_args`).
 /// ★Guidance differs **per field** (load-bearing)★: a caller (especially an LLM) rejected again after doing as told circles the same place — telling a required field "may be omitted" gets the omitting retry rejected as 「missing」, and telling a field where `null` is an
 /// active instruction only "fill in a value" hides that branch. Each field gets **the way that works for that field** ([`Blank`]).
-fn reject_blanks(fields: &[(&str, Option<&str>, Blank)]) -> Result<(), CommandError> {
+pub(crate) fn reject_blanks(fields: &[(&str, Option<&str>, Blank)]) -> Result<(), CommandError> {
     let advice: Vec<String> = fields
         .iter()
         .filter(|(_, given, _)| is_blank(*given))
@@ -2009,7 +2286,7 @@ fn reject_blanks(fields: &[(&str, Option<&str>, Blank)]) -> Result<(), CommandEr
 }
 
 /// **What actually works** for a field that came blank.
-enum Blank<'a> {
+pub(crate) enum Blank<'a> {
     /// A value is required (omitting it is rejected as 「missing」).
     NeedsValue,
     /// Putting a value in or omitting the field entirely works.
@@ -2126,6 +2403,7 @@ mod tests {
             Arc::clone(host) as Arc<dyn AgentCommandHost>,
             Arc::clone(&notify) as Arc<dyn RosterChanged>,
             Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+            crate::library_commands::fake::FakeLibrary::unplugged(),
         );
         (table, notify)
     }
@@ -2450,6 +2728,15 @@ mod tests {
                 "agent.rename",
                 "agent.resolve",
                 "agent.spawn",
+                "library.folders",
+                "library.list",
+                "library.newFile",
+                "library.newFolder",
+                "library.read",
+                "library.refresh",
+                "library.relink",
+                "library.setRoot",
+                "library.status",
                 "usage.get",
                 "usage.refresh"
             ]
@@ -2576,6 +2863,7 @@ mod tests {
             manager as Arc<dyn AgentCommandHost>,
             Arc::new(FakeNotify::default()) as Arc<dyn RosterChanged>,
             Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+            crate::library_commands::fake::FakeLibrary::unplugged(),
         );
 
         let out = call(&table, "agent.list", json!({})).expect("query succeeds");
@@ -3919,6 +4207,7 @@ mod tests {
                 Arc::new(RefuseOnStart(Arc::clone(&host), refusal)) as Arc<dyn AgentCommandHost>,
                 Arc::clone(&notify) as Arc<dyn RosterChanged>,
                 Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+                crate::library_commands::fake::FakeLibrary::unplugged(),
             );
 
             let err = call(
@@ -4030,6 +4319,7 @@ mod tests {
                 manager.clone() as Arc<dyn AgentCommandHost>,
                 Arc::clone(&notify) as Arc<dyn RosterChanged>,
                 Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+                crate::library_commands::fake::FakeLibrary::unplugged(),
             );
 
             for (name, args) in [
@@ -5790,6 +6080,7 @@ mod tests {
             FakeHost::new() as Arc<dyn AgentCommandHost>,
             Arc::new(FakeNotify::default()) as Arc<dyn RosterChanged>,
             Arc::clone(usage) as Arc<dyn UsageCommandHost>,
+            crate::library_commands::fake::FakeLibrary::unplugged(),
         )
     }
 

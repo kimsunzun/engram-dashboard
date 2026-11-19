@@ -34,6 +34,7 @@ pub mod usage_service;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
+use engram_dashboard_agent::commands::LibraryCommandHost;
 use engram_dashboard_agent::launch::{LaunchPorts, StdLaunchFs};
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::FileProfileStore;
@@ -183,9 +184,10 @@ struct DaemonWiring {
     registry: ConnRegistry,
     /// The service the `manager`'s status sink chain feeds — the connection layer subscribes and ⟳s on the same one.
     usage: Arc<UsageService>,
-    /// The library service plugged in as `manager`'s launch-kit source — the same one, for the library commands —
-    /// with `manager` plugged into it as its profile-edit port. `None` = the Noop kits (the test server). Production
-    /// reads it only for the first-start step and the boot scan ([`build_daemon_wiring`]).
+    /// The library service plugged in as `manager`'s launch-kit source — the same one answers the library commands
+    /// ([`DaemonWiring::library_commands`]) — with `manager` plugged into it as its profile-edit port. `None` = the
+    /// Noop kits (the test server). Production also reads it for the first-start step and the boot scan
+    /// ([`build_daemon_wiring`]).
     // ADR-0311
     library: Option<Arc<LibraryService>>,
 }
@@ -199,6 +201,16 @@ impl DaemonWiring {
             Arc::new(self.registry.clone()),
             self.manager.clone(),
         ))
+    }
+
+    /// The library port of the command table — the service `manager` launches through, so the bus edits the library
+    /// the launches read; with no service (the test server), [`control::commands::NoLibrary`].
+    // ADR-0386
+    fn library_commands(&self) -> Arc<dyn LibraryCommandHost> {
+        match &self.library {
+            Some(library) => library.clone(),
+            None => Arc::new(control::commands::NoLibrary),
+        }
     }
 }
 
@@ -752,6 +764,7 @@ pub async fn run() -> Result<(), i32> {
         roster_broadcast_slot.clone(),
         Arc::new(multiview.clone()),
         wiring.usage.clone(),
+        wiring.library_commands(),
     )));
 
     // 6.4) idle gate assembly — turn observation is loaded directly by the core from the output pump, so nothing to wire here.
@@ -1008,6 +1021,7 @@ async fn start_test_server_inner(
         roster_broadcast_slot,
         Arc::new(multiview.clone()),
         wiring.usage.clone(),
+        wiring.library_commands(),
     )));
     // This server does not wire the MCP control plane (Noop above), so the accept loop is the only consumer of the bus; the assembly uses the same function as production.
     let (command_bus, command_sweeper) = command_delivery::CommandBus::new(
@@ -1268,6 +1282,51 @@ mod tests {
             wiring < table,
             "the command table is set before the wiring is built"
         );
+    }
+
+    /// ★Both assemblies give the command table the wiring's library port★ (ADR-0386): production `run` and the test
+    /// server pass `DaemonWiring::library_commands` — the kept service, or `NoLibrary` when there is none. A table
+    /// built with another port would edit a library the launches do not read; only the source shows which port `run`
+    /// passes (the runtime side is the test below).
+    #[test]
+    fn both_assemblies_give_the_command_table_the_wirings_library_port() {
+        for signature in ["pub async fn run(", "async fn start_test_server_inner("] {
+            let body = body_of(signature);
+            let table = body
+                .find("make_daemon_table(")
+                .unwrap_or_else(|| panic!("`{signature}` builds the command table"));
+            let call = &body[table..table + body[table..].find(")));").expect("the call ends")];
+            assert!(
+                call.contains("wiring.library_commands()"),
+                "`{signature}` passes another library port: {call}"
+            );
+        }
+    }
+
+    /// ★The library port of the production wiring is the kept service★: a root set through the port is the root the
+    /// service the manager launches through reports.
+    #[test]
+    fn the_production_library_port_is_the_kept_service() {
+        let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
+        let layout = DataLayout::new(&temp);
+        let wiring = production_wiring(&layout);
+        let library = wiring
+            .library
+            .clone()
+            .expect("production plugs the library");
+        wait_boot_scan(&library);
+        let moved = temp.join("moved-library");
+
+        let answer = wiring
+            .library_commands()
+            .set_root(&moved.display().to_string(), true)
+            .expect("set root through the port");
+
+        let kept = library.status();
+        assert_eq!(kept.root.as_deref(), Some(moved.as_path()));
+        assert_eq!(answer.root_generation, kept.root_generation);
+        drop(wiring);
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     /// The debug launch-block hook is gone with the real kits (its env vars included).

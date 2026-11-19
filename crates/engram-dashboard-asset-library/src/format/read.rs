@@ -171,9 +171,9 @@ const FIELD_INVALID: &str = "field-invalid";
 pub(crate) const MULTI_DOCUMENT: &str = "preset-multi-document";
 const ITEM_SHAPE_INVALID: &str = "item-shape-invalid";
 /// An item spelling that is not a library reference: the reader answers `args {list, index, path (raw), why}`; an
-/// unparsed attached path (resolve) and a `set_root` path that is not absolute answer `args {path (controls escaped),
-/// why}`.
-pub(crate) const ITEM_PATH_INVALID: &str = "item-path-invalid";
+/// unparsed attached path (resolve), a `set_root` path that is not absolute and a command path argument that does not
+/// parse (`host.rs`, and the daemon's `NoLibrary` refresh) answer `args {path (controls escaped), why}`.
+pub const ITEM_PATH_INVALID: &str = "item-path-invalid";
 pub(crate) const BACKEND_TAG_UNKNOWN: &str = "backend-tag-unknown";
 pub(crate) const BACKEND_TAG_NOT_ALLOWED: &str = "backend-tag-not-allowed";
 pub(crate) const FOLDER_PATH_RELATIVE: &str = "folder-path-relative";

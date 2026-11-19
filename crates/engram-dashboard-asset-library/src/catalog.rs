@@ -85,6 +85,24 @@ pub enum ItemKind {
     },
 }
 
+impl ItemKind {
+    /// The kind a `library.list` row shows and its `kinds` filter matches: a broken file as the preset or settings
+    /// kind it claims, `None` when it claims neither; every other kind as itself (`SkillFile` stays `SkillFile`).
+    // ADR-0386
+    pub fn listed(&self) -> Option<ItemKind> {
+        match self {
+            ItemKind::Broken {
+                claimed: Some(Sniff::Preset),
+            } => Some(ItemKind::Preset),
+            ItemKind::Broken {
+                claimed: Some(Sniff::Settings),
+            } => Some(ItemKind::Settings),
+            ItemKind::Broken { .. } => None,
+            kind => Some(kind.clone()),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ItemContent {
     Instruction {

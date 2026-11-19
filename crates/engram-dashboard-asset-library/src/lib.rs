@@ -89,9 +89,16 @@
 //! ## Refusals
 //!
 //! A body refuses with [`LibraryRefusal`]: a [`RefusalClass`] plus an agent `launch::Reason`, or the profile store's
-//! own error passed through. The command layer maps the class onto the bus code (ADR-0379); a refusal that applied
-//! nothing maps onto a code that does not keep the request id, except the two `INTERNAL` cases of ADR-0379 decision 5
-//! (`profile-edit-unavailable` and a profile-store write failure).
+//! own error passed through. `host.rs` hands it 1:1 to agent as its port refusal, and agent maps the class onto the
+//! bus code (ADR-0379); a refusal that applied nothing maps onto a code that does not keep the request id, except the
+//! two `INTERNAL` cases of ADR-0379 decision 5 (`profile-edit-unavailable` and a profile-store write failure).
+//!
+//! ## Commands
+//!
+//! agent declares the commands and owns their vocabulary; `host.rs` implements its `LibraryCommandHost` port: it
+//! parses the spellings with the bodies' own path rules, calls one body per command and converts the answer into
+//! agent's declared rows, with no second body call and no read-back (ADR-0384). Bus codes stay in agent. The port
+//! carries the `library.*` commands; the daemon plugs this service into the command table.
 // ADR-0311
 // ADR-0324
 // ADR-0378
@@ -99,6 +106,7 @@
 // ADR-0380
 // ADR-0381
 // ADR-0382
+// ADR-0386
 
 pub mod agent_edit;
 pub mod backends;
@@ -111,6 +119,7 @@ pub mod excerpt;
 pub mod folder;
 pub mod format;
 mod gate;
+pub mod host;
 pub mod launch;
 pub mod path;
 pub mod refs;
@@ -124,7 +133,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::SystemTime;
 
-use engram_dashboard_agent::launch::{backend_word, escape_controls, BlockReason, Reason};
+use engram_dashboard_agent::launch::{
+    backend_word, escape_controls, BlockReason, Reason, BUILTIN_UNAVAILABLE,
+};
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, StoreError,
 };
@@ -137,15 +148,15 @@ use serde_json::json;
 use crate::backends::Backends;
 use crate::builtin::Builtins;
 use crate::catalog::{
-    key, preset_refs, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult,
+    key, preset_refs, within, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult,
 };
 use crate::config::{ConfigFile, ConfigHealth, LibraryConfig, RootSetting};
 use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need};
 use crate::format::read::ITEM_PATH_INVALID;
 use crate::gate::{Gate, Tags};
 pub use crate::gate::{Numbers, State, NOT_FOUND};
-use crate::path::{AssetRef, LibPath, PathError};
-use crate::refs::{reference_count, referrers_of};
+use crate::path::{AssetRef, BuiltinId, LibPath, PathError};
+use crate::refs::{default_slot_count, reference_count, referrers_of};
 use crate::resolve::{resolve, CatalogLookup, Lookup, Resolution, RootState, Target};
 use crate::store::LibraryStore;
 
@@ -385,12 +396,40 @@ struct Want {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListAnswer {
     pub folder: Option<LibPath>,
-    /// The items directly in the folder, by path — a skill folder is an item (kind = skill).
+    /// The items directly in the folder, by path — a skill folder is an item (kind = skill); with a query, every
+    /// matching item below it.
     pub rows: Vec<ListRow>,
-    /// The plain folders directly in the folder (not skill folders), by path.
+    /// The plain folders directly in the folder (not skill folders), by path; none with a query.
     pub folders: Vec<FolderRow>,
-    /// The built-in rows — always empty for now; what fills them is not decided here.
+    /// The built-in preset `engram:/default` when [`ListFilter::builtins`] asked for it and the filters keep it.
     pub builtins: Vec<ListRow>,
+}
+
+/// What [`LibraryService::list_with`] keeps. The default keeps everything and adds no built-in row.
+// ADR-0386
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ListFilter {
+    /// A case-insensitive substring of a row's name or description, searched in every item below the folder.
+    pub query: Option<String>,
+    /// The kinds kept, compared with [`ItemKind::listed`]; empty = every kind.
+    pub kinds: Vec<ItemKind>,
+    /// Answer the built-in preset row too.
+    pub builtins: bool,
+}
+
+impl ListFilter {
+    fn keeps(&self, row: &ListRow, query: Option<&str>) -> bool {
+        let kind_kept = self.kinds.is_empty()
+            || row
+                .kind
+                .listed()
+                .is_some_and(|kind| self.kinds.contains(&kind));
+        let query_kept = query.is_none_or(|query| {
+            row.name.to_lowercase().contains(query)
+                || row.description.to_lowercase().contains(query)
+        });
+        kind_kept && query_kept
+    }
 }
 
 /// One plain subfolder line of a [`ListAnswer`].
@@ -720,6 +759,19 @@ impl LibraryService {
     /// a link answers a single [`PATH_THROUGH_LINK`] row; one with a dot or temp name answers no rows. A folder the
     /// catalog does not know answers its items only — its subfolder lines appear after a refresh.
     pub fn list(&self, folder: Option<&LibPath>) -> Result<ListAnswer, Reason> {
+        self.list_with(folder, &ListFilter::default())
+    }
+
+    /// [`LibraryService::list`] through `filter`: with a query, the matching items below `folder` and no folder
+    /// lines; rows outside `filter.kinds` dropped; the built-in preset row in `builtins` when asked for, under the same
+    /// filters. A folder at or below a link still answers its one [`PATH_THROUGH_LINK`] row, unfiltered — it describes
+    /// the folder asked for, not an item — and the built-in row as any other folder does.
+    // ADR-0386
+    pub fn list_with(
+        &self,
+        folder: Option<&LibPath>,
+        filter: &ListFilter,
+    ) -> Result<ListAnswer, Reason> {
         self.first_scan_join().map_err(|why| Reason {
             code: LIBRARY_UNAVAILABLE.to_owned(),
             args: json!({ "message": why }),
@@ -731,7 +783,7 @@ impl LibraryService {
             Some(path) if !is_known(&state.catalog, path) => {
                 Err((path, state.root.clone(), self.gate.numbers()))
             }
-            _ => Ok(self.answer(state, folder)),
+            _ => Ok(self.answer(state, folder, filter)),
         });
         let (path, root, noted) = match known {
             Ok(answer) => return Ok(answer),
@@ -744,7 +796,7 @@ impl LibraryService {
                         folder: folder.cloned(),
                         rows: vec![through_link_row(path)],
                         folders: Vec::new(),
-                        builtins: Vec::new(),
+                        builtins: self.builtin_rows(filter),
                     })
                 }
                 Observed::Items(items) => {
@@ -755,7 +807,9 @@ impl LibraryService {
                 Observed::Refused => {}
             }
         }
-        Ok(self.gate.with_read(|state| self.answer(state, folder)))
+        Ok(self
+            .gate
+            .with_read(|state| self.answer(state, folder, filter)))
     }
 
     /// Re-scans `folder` (`None` = the whole library) on its own ticket, or joins a covering scan queued and not yet
@@ -1231,36 +1285,97 @@ impl LibraryService {
         }
     }
 
-    fn answer(&self, state: &State, folder: Option<&LibPath>) -> ListAnswer {
-        let rows = state
-            .catalog
-            .children(folder)
+    fn answer(&self, state: &State, folder: Option<&LibPath>, filter: &ListFilter) -> ListAnswer {
+        let query = filter.query.as_deref().map(str::to_lowercase);
+        let items = match query {
+            None => state.catalog.children(folder),
+            Some(_) => {
+                // Strictly below: the folder asked for is not a result of its own search.
+                let mut below: Vec<&Item> = state
+                    .catalog
+                    .items()
+                    .filter(|item| within(&item.path, folder))
+                    .filter(|item| folder.is_none_or(|folder| key(&item.path) != key(folder)))
+                    .collect();
+                below.sort_by(|a, b| a.path.cmp(&b.path));
+                below
+            }
+        };
+        // The references are counted only for the rows kept — each count reads the registry.
+        let rows = items
             .into_iter()
-            .map(|item| {
-                let references = reference_count(&state.catalog, &self.values.registry, &item.path);
-                row(item, references)
+            .map(|item| (item, row(item, 0)))
+            .filter(|(_, row)| filter.keeps(row, query.as_deref()))
+            .map(|(item, mut row)| {
+                row.references = reference_count(&state.catalog, &self.values.registry, &item.path);
+                row
             })
             .collect();
-        let want = folder.map(key);
-        let mut subfolders: Vec<&LibPath> = state
-            .catalog
-            .folders()
-            .filter(|sub| sub.parent().as_ref().map(key) == want)
-            .filter(|sub| state.catalog.get(&key(sub)).is_none())
-            .collect();
-        subfolders.sort();
-        let folders = subfolders
-            .into_iter()
-            .map(|sub| FolderRow {
-                path: sub.as_str().to_owned(),
-                name: sub.file_name().to_owned(),
-            })
-            .collect();
+        let folders = match query {
+            Some(_) => Vec::new(),
+            None => {
+                let want = folder.map(key);
+                let mut subfolders: Vec<&LibPath> = state
+                    .catalog
+                    .folders()
+                    .filter(|sub| sub.parent().as_ref().map(key) == want)
+                    .filter(|sub| state.catalog.get(&key(sub)).is_none())
+                    .collect();
+                subfolders.sort();
+                subfolders
+                    .into_iter()
+                    .map(|sub| FolderRow {
+                        path: sub.as_str().to_owned(),
+                        name: sub.file_name().to_owned(),
+                    })
+                    .collect()
+            }
+        };
         ListAnswer {
             folder: folder.cloned(),
             rows,
             folders,
-            builtins: Vec::new(),
+            builtins: self.builtin_rows(filter),
+        }
+    }
+
+    /// The `builtins` of a list answer: the built-in preset row when `filter` asks for it and its query and kinds
+    /// keep it — the same whatever folder was asked for.
+    fn builtin_rows(&self, filter: &ListFilter) -> Vec<ListRow> {
+        if !filter.builtins {
+            return Vec::new();
+        }
+        let query = filter.query.as_deref().map(str::to_lowercase);
+        Some(self.builtin_preset_row())
+            .filter(|row| filter.keeps(row, query.as_deref()))
+            .into_iter()
+            .collect()
+    }
+
+    /// The row of the built-in preset `engram:/default`: named by its id, its `description`, a stand-in's
+    /// `builtin-unavailable` reason as its state, and [`default_slot_count`] as its references.
+    // ADR-0386
+    fn builtin_preset_row(&self) -> ListRow {
+        let id = BuiltinId::DefaultPreset;
+        let view = self.builtins.view(id);
+        let path = AssetRef::BuiltIn(id).spelling();
+        let description = match view.content {
+            ItemContent::Preset { doc, .. } => doc.description.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
+        let state = view.stand_in.map(|why| Reason {
+            code: BUILTIN_UNAVAILABLE.to_owned(),
+            args: json!({ "path": path, "why": why }),
+            line: None,
+        });
+        let references = default_slot_count(&self.values.registry);
+        ListRow {
+            path,
+            kind: view.kind.clone(),
+            name: id.id().to_owned(),
+            state,
+            references,
+            description,
         }
     }
 }

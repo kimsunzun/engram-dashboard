@@ -16,6 +16,8 @@ pub mod failure;
 pub mod inputs_pending;
 // ADR-0334
 pub mod launch;
+// ADR-0386
+pub mod library_commands;
 pub mod manager;
 // ADR-0101
 pub mod name;

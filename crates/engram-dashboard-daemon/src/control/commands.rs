@@ -3,19 +3,27 @@
 //! Three surfaces call this table through the one [`call_daemon_command`], so none skips the entrance check (ADR-0157): the family route
 //! (`/control/agent`, `agent.rs`) · the full-name route (`/control/call`, `catalog.rs`) · command bus delivery stage 1 (`command_delivery`).
 //! If the table is not plugged into the slot, the two routes are 503 and delivery is a stage-1 miss.
-//! Declarations are not here: the contracts of `agent.*`·`usage.*` belong to agent (ADR-0155 decision 1); this file plugs the daemon's real
-//! things (manager · roster notification fanout · usage service) into them. Daemon-own commands (`mail.*`) would add their declaration block here.
+//! Declarations are not here: the contracts of `agent.*`·`usage.*`·`library.*` belong to agent (ADR-0155 decision 1); this file plugs the
+//! daemon's real things (manager · roster notification fanout · usage service · library service) into them. Daemon-own commands (`mail.*`)
+//! would add their declaration block here.
 // ADR-0155
 
 use std::sync::Arc;
 
 use crate::conn_port::ConnId;
 use engram_dashboard_agent::commands::{
-    make_table, resolve_in, AgentBackend, AgentCommandHost, AgentRosterRow, RosterChanged,
-    UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
+    make_table, resolve_in, AgentBackend, AgentCommandHost, AgentRosterRow, LibraryCommandHost,
+    LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind, LibraryRefreshOk,
+    LibraryRelinkOk, LibraryStatusOk, RefreshErrorRow, RosterChanged, UsageCommandHost,
+    UsageVendorRow, INPUT_AFFECTING,
 };
+use engram_dashboard_agent::launch::{escape_controls, Reason};
+use engram_dashboard_agent::library_commands::{LibraryReadView, PortClass, PortRefusal};
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::types::AgentId;
+use engram_dashboard_asset_library::format::read::ITEM_PATH_INVALID;
+use engram_dashboard_asset_library::path::LibPath;
+use engram_dashboard_asset_library::LIBRARY_UNAVAILABLE;
 use engram_dashboard_command::{
     CommandDecl, CommandError, CommandFuture, CommandSpec, CommandTable, DeadlineClass, Effect,
     ErrorCode,
@@ -39,19 +47,24 @@ use super::mcp_server::{CommandTableSlot, RosterBroadcastSlot};
 /// A new `MultiViewState::new()` is wrong — an empty table makes bus and CLI input-affecting commands silently ignore the lease.
 /// `usage` must be the service the connection layer subscribes and ⟳s on (production: `DaemonWiring.usage`), or the bus and the screen read
 /// different books. Non-production assemblies plug in [`NoUsageLimits`].
+/// `library` must be the service `manager` launches through (production: `DaemonWiring.library`), or the bus edits one
+/// library and launches read another. Assemblies without one plug in [`NoLibrary`].
 // ADR-0155
 // ADR-0231
+// ADR-0386
 pub fn make_daemon_table(
     manager: Arc<AgentManager>,
     broadcast: Arc<RosterBroadcastSlot>,
     lease: Arc<dyn InputLease>,
     usage: Arc<dyn UsageCommandHost>,
+    library: Arc<dyn LibraryCommandHost>,
 ) -> DaemonTable {
     DaemonTable {
         table: make_table(
             manager.clone(),
             Arc::new(LateRosterBroadcast(broadcast)),
             usage,
+            library,
         ),
         roster: manager,
         lease,
@@ -111,6 +124,103 @@ impl UsageCommandHost for NoUsageLimits {
 
     fn refresh(&self, _backend: &AgentBackend) -> Option<UsageVendorRow> {
         None
+    }
+}
+
+/// The library port of assemblies without a library service (the test server · smoke bins · harnesses): every
+/// `library.*` command answers `CONFLICT` `library-unavailable`, except `library.refresh`, which answers the report
+/// a refresh that could not scan gives (one `errors` row with no path) — a refresh refuses only a `folder` that is not
+/// a library path (`INVALID_ARGUMENT` `item-path-invalid`, as the real service does).
+/// Do not plug it into production (it plugs the service the manager launches through — [`make_daemon_table`]).
+// ADR-0386
+pub struct NoLibrary;
+
+/// Why [`NoLibrary`] answers nothing.
+const NO_LIBRARY: &str = "this daemon runs no library service";
+
+impl NoLibrary {
+    fn refused<T>() -> Result<T, PortRefusal> {
+        Err(PortRefusal::Refused {
+            class: PortClass::Unavailable,
+            reason: Reason {
+                code: LIBRARY_UNAVAILABLE.to_owned(),
+                args: serde_json::json!({ "message": NO_LIBRARY }),
+                line: None,
+            },
+        })
+    }
+}
+
+impl LibraryCommandHost for NoLibrary {
+    fn status(&self) -> Result<LibraryStatusOk, PortRefusal> {
+        Self::refused()
+    }
+    fn set_root(&self, _path: &str, _create: bool) -> Result<LibraryStatusOk, PortRefusal> {
+        Self::refused()
+    }
+    fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
+        Self::refused()
+    }
+    fn refresh(&self, folder: Option<&str>) -> Result<LibraryRefreshOk, PortRefusal> {
+        if let Some(text) = folder {
+            if let Err(why) = LibPath::parse(text) {
+                return Err(PortRefusal::Refused {
+                    class: PortClass::InvalidArgument,
+                    reason: Reason {
+                        code: ITEM_PATH_INVALID.to_owned(),
+                        args: serde_json::json!({ "path": escape_controls(text), "why": why.to_string() }),
+                        line: None,
+                    },
+                });
+            }
+        }
+        Ok(LibraryRefreshOk {
+            changed: 0,
+            problems: Vec::new(),
+            no_kind: Vec::new(),
+            skipped_links: Vec::new(),
+            errors: vec![RefreshErrorRow {
+                path: None,
+                why: NO_LIBRARY.to_owned(),
+            }],
+        })
+    }
+    fn list(
+        &self,
+        _folder: Option<&str>,
+        _query: Option<&str>,
+        _kinds: &[LibraryKind],
+        _builtins: bool,
+    ) -> Result<LibraryListOk, PortRefusal> {
+        Self::refused()
+    }
+    fn read(&self, _path: &str) -> Result<LibraryReadView, PortRefusal> {
+        Self::refused()
+    }
+    fn new_folder(
+        &self,
+        _parent: Option<&str>,
+        _name: &str,
+        _root_generation: Option<u64>,
+    ) -> Result<String, PortRefusal> {
+        Self::refused()
+    }
+    fn new_file(
+        &self,
+        _folder: Option<&str>,
+        _name: &str,
+        _kind: LibraryNewFileKind,
+        _root_generation: Option<u64>,
+    ) -> Result<String, PortRefusal> {
+        Self::refused()
+    }
+    fn relink(
+        &self,
+        _from: &str,
+        _to: &str,
+        _root_generation: Option<u64>,
+    ) -> Result<LibraryRelinkOk, PortRefusal> {
+        Self::refused()
     }
 }
 
@@ -386,15 +496,25 @@ mod tests {
     /// The expected value is derived from the CLI verb list — hand-written, it would pass the old list when agent gains verbs; a verb without a declaration stays uncallable by the CLI.
     /// Names without a CLI verb are only those listed below: the two pending-list verbs, interrupt (`agent.interrupt` — ADR-0237) and
     /// multi-word resolution (`agent.resolve` — ADR-0307) are outside `CLI_AGENT_VERBS`, called via the bus and generic calls (`engram <name> …`). A
-    /// table name not in the list grew without deciding on a CLI verb, so this stops. `usage.*` is not the `agent` family and never reaches `/control/agent`.
+    /// table name not in the list grew without deciding on a CLI verb, so this stops. `usage.*` and `library.*` are not the `agent` family and never
+    /// reach `/control/agent` (the library commands are reached by full name — ADR-0386).
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 6] = [
+        const BUS_ONLY: [&str; 15] = [
             "agent.cancelQueuedInput",
             "agent.interrupt",
             "agent.listQueuedInputs",
             "agent.resolve",
+            "library.folders",
+            "library.list",
+            "library.newFile",
+            "library.newFolder",
+            "library.read",
+            "library.refresh",
+            "library.relink",
+            "library.setRoot",
+            "library.status",
             "usage.get",
             "usage.refresh",
         ];
@@ -403,6 +523,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
 
         let mut held: Vec<&str> = table.specs().map(|spec| spec.name).collect();
@@ -427,6 +548,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
 
         register_one(&table);
@@ -448,6 +570,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         )));
         slot
     }
@@ -621,6 +744,7 @@ mod tests {
             slot.clone(),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
 
         let broadcast = Arc::new(CountingBroadcast::default());
@@ -687,6 +811,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
         let ids = names
             .iter()
@@ -883,6 +1008,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             lease.clone(),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
 
         for target in [json!("   "), json!(5)] {
@@ -918,6 +1044,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             lease.clone(),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
 
         let listed = call_daemon_command(
@@ -954,6 +1081,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         )));
         let bus = DaemonLocalCommands::new(slot);
 
@@ -992,6 +1120,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
         for name in INPUT_AFFECTING {
             let spec = table
@@ -1021,6 +1150,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             usage,
+            Arc::new(NoLibrary),
         )
     }
 
@@ -1085,6 +1215,74 @@ mod tests {
         assert_eq!(row["windows"][0]["window"], "FiveHour");
         assert_eq!(row["windows"][0]["used_pct"], 37.5);
         assert_eq!(row["windows"][0]["left_pct"], 62);
+    }
+
+    /// An assembly without a library service answers every `library.*` command `CONFLICT` `library-unavailable` by
+    /// value, and `library.refresh` the report of a refresh that could not scan — one `errors` row with no path.
+    // ADR-0386
+    #[test]
+    fn a_table_without_a_library_answers_library_unavailable_and_an_empty_refresh() {
+        let table = make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
+        );
+        let refusing = [
+            ("library.status", json!({})),
+            ("library.setRoot", json!({ "path": "C:/lib" })),
+            ("library.folders", json!({})),
+            ("library.list", json!({})),
+            ("library.read", json!({ "path": "a.md" })),
+            ("library.newFolder", json!({ "name": "x" })),
+            (
+                "library.newFile",
+                json!({ "name": "x", "kind": "Markdown" }),
+            ),
+            ("library.relink", json!({ "from": "a.md", "to": "b.md" })),
+        ];
+        for (name, args) in refusing {
+            let err = call(&table, name, args).expect_err("no library");
+            assert_eq!(err.code(), ErrorCode::Conflict, "{name}");
+            assert_eq!(
+                err.args().and_then(|args| args.get("code")),
+                Some(&json!(LIBRARY_UNAVAILABLE)),
+                "{name}"
+            );
+        }
+        let empty = json!({
+            "changed": 0, "problems": [], "no_kind": [], "skipped_links": [],
+            "errors": [{ "path": null, "why": NO_LIBRARY }],
+        });
+        for args in [json!({}), json!({ "folder": "rules/team" })] {
+            let report = call(&table, "library.refresh", args.clone()).expect("a report");
+            assert_eq!(report, empty, "{args}");
+        }
+    }
+
+    /// Without a library, a refresh `folder` that is not a library path is still refused as the real service refuses
+    /// it — `INVALID_ARGUMENT` `item-path-invalid`, not an empty report.
+    // ADR-0386
+    #[test]
+    fn a_table_without_a_library_refuses_an_unparsable_refresh_folder() {
+        let table = make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
+        );
+        for folder in ["../x", "/abs", "a:b", "rules/"] {
+            let err = call(&table, "library.refresh", json!({ "folder": folder }))
+                .expect_err("not a library path");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{folder}");
+            assert_eq!(
+                err.args().and_then(|args| args.get("code")),
+                Some(&json!(ITEM_PATH_INVALID)),
+                "{folder}"
+            );
+        }
     }
 
     /// An assembly without a usage service fails `usage.*` by value (no panic) — the same code as the same absence on wire ⟳.

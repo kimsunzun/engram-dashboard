@@ -63,7 +63,7 @@ use crate::format::{
 use crate::gate::{State, NOT_FOUND};
 use crate::launch::{sha256_hex, FolderReads, LIBRARY_READ_FAILED};
 use crate::path::{AssetRef, BuiltinId, FolderRef, LibPath, PresetItem};
-use crate::refs::referrers_of;
+use crate::refs::{default_slot_count, referrers_of};
 use crate::resolve::{
     ref_key, resolve, CatalogLookup, ItemView, Looked, Lookup, Problem, RefKey, Resolution,
     RootState, Target, BUILTIN_IN_LIBRARY_PRESET, FOLDER_NOT_FOUND, FOLDER_PATH_CLI_UNSAFE,
@@ -423,11 +423,7 @@ impl LibraryService {
         let registry = &self.values.registry;
         let agents = match preset {
             AssetRef::Library(path) => referrers_of(catalog, registry, path).1.len(),
-            AssetRef::BuiltIn(BuiltinId::DefaultPreset) => registry
-                .attachments()
-                .iter()
-                .filter(|(_, attached)| attached.default_preset)
-                .count(),
+            AssetRef::BuiltIn(BuiltinId::DefaultPreset) => default_slot_count(registry),
             AssetRef::BuiltIn(_) => 0,
         };
         ViewBase {
