@@ -1105,6 +1105,14 @@ pub enum PtyError {
         "launch raced: the agent's launch inputs (presets or their library files, command or env) changed while it was being prepared — try again"
     )]
     LaunchRaced,
+    /// The agent's reservation is held by a working-folder change (`agent.setWorkspace`) — this launch started nothing (no process, no
+    /// control channel) and records no last failure. Retrying after that change starts it. A launch losing to another launch is not
+    /// this (it keeps the double-start answers below).
+    // ADR-0386
+    #[error(
+        "the agent's working folder is being changed (agent.setWorkspace) — nothing was started; start it again once that change is done"
+    )]
+    WorkingFolderChanging,
     // ★Do not turn duplicate spawn requests back into an error★: "already up / already launching" is **a request with nothing to do**,
     //   answered `Ok(manager::SpawnOutcome::Moot)`. As an error, every consumer carried a list of "this error is not a real failure" and
     //   each fix of that list missed one item and stamped a failure marker on a

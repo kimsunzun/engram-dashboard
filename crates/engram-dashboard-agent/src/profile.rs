@@ -182,8 +182,8 @@ pub struct AgentProfile {
     /// `None` = nothing recorded · `Some("")` = an empty set was delivered (X → none → X shows X again).
     /// ★Author = the launch alone★ — written by `ProfileRegistry::record_notice_fingerprint` once a caller that delivers
     ///   notices got a success reply from a launch that started a process; never on boot restore, a moot activation or
-    ///   any failure. `merge_preserving_live` keeps the live value. A duplicated agent must start without it (`None`) —
-    ///   `agent.duplicate` does not exist yet, and `AgentProfile::new` starts at `None`. The creation paths store the
+    ///   any failure. `merge_preserving_live` keeps the live value. A duplicated agent starts without it (`None`) —
+    ///   `agent.duplicate` builds its copy from `AgentProfile::new` and does not carry it. The creation paths store the
     ///   caller copy's value as is, so this holds only while every builder starts from `AgentProfile::new`.
     // ADR-0341
     // TRD S25 §1-5 「Notices once per agent」
@@ -258,6 +258,14 @@ pub struct AgentProfile {
 }
 
 impl AgentProfile {
+    /// The display-name override that names the agent — `None` when unset or blank (a blank one names nothing, as in
+    /// [`Self::canonical_name_when_live`]).
+    pub(crate) fn name_override(&self) -> Option<&str> {
+        self.display_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+    }
+
     /// The session id is created by ProfileRegistry at the first spawn (not made here).
     pub fn new(
         name: String,
@@ -317,10 +325,8 @@ impl AgentProfile {
     pub fn canonical_name_when_live(&self) -> String {
         // **Literally the same** as the first branch of the live session rule (`canonical_name_or_id_fallback`) (if non-blank, no trim
         //   — the original as is is the name).
-        if let Some(n) = self.display_name.as_deref() {
-            if !n.trim().is_empty() {
-                return n.to_string();
-            }
+        if let Some(n) = self.name_override() {
+            return n.to_string();
         }
         // ★Syscalls that cannot change the answer are not made★: if the cwd is empty/whitespace-only, the basename is the placeholder, so
         //   the result is the first 8 characters of the id regardless of canonicalize success/failure (`canonical_name_or_id_fallback` degrade).
@@ -1182,6 +1188,80 @@ impl ProfileRegistry {
         changed.sort_unstable();
         Ok(changed)
     }
+
+    /// `agent.setWorkspace`'s write, in one locked section: the agent still in the roster and never conversed (no stored
+    /// backend session id), then `cwd` written and `display_name` set to `name` only while no override names the agent
+    /// (unset or blank — [`AgentProfile::name_override`]). A refusal (gone ·
+    /// conversed) or a request that changes nothing saves nothing of its own (only a pending dirty change rides — that
+    /// save's failure is not this request's), so a store error never replaces the refusal; a store error of the write
+    /// itself is `Err` with nothing changed.
+    /// ★The conversed check is made here too, not only by the caller★ — the first-submission latch and
+    ///   `observe_session_id` write the session id without the agent's reservation, so a check before this lock can be stale.
+    // ADR-0321
+    // ADR-0386
+    pub(crate) fn try_set_workspace(
+        &self,
+        id: AgentId,
+        cwd: &Path,
+        name: &str,
+    ) -> Result<WorkspaceWrite, StoreError> {
+        let mut outcome = WorkspaceWrite::NotFound;
+        self.try_mutate_if(|m| {
+            let Some(p) = m.get_mut(&id) else {
+                return false;
+            };
+            if p.backend_session_id.is_some() {
+                outcome = WorkspaceWrite::Conversed;
+                return false;
+            }
+            outcome = WorkspaceWrite::Written;
+            let named = p.name_override().is_some();
+            if p.cwd == cwd && named {
+                return false;
+            }
+            p.cwd = cwd.to_path_buf();
+            if !named {
+                p.display_name = Some(name.to_owned());
+            }
+            true
+        })?;
+        Ok(outcome)
+    }
+
+    /// Inserts the copy `build` makes of `original`, reading the original and inserting the copy in one locked section — so
+    /// a copy queues with the attachment rewrites on this lock ([`Self::try_rewrite_preset_paths`] ·
+    /// [`Self::try_remove_preset_paths`]) and cannot slip past one. `Ok(None)` = the original is gone: nothing is saved for
+    /// this request (only a pending dirty change rides), so a store error never masks it. A store error of the insert is
+    /// `Err` with nothing inserted.
+    // ADR-0386
+    pub(crate) fn try_insert_copy(
+        &self,
+        original: AgentId,
+        build: impl FnOnce(&AgentProfile) -> AgentProfile,
+    ) -> Result<Option<AgentProfile>, StoreError> {
+        let mut inserted = None;
+        self.try_mutate_if(|m| {
+            let Some(source) = m.get(&original) else {
+                return false;
+            };
+            let copy = build(source);
+            inserted = Some(copy.clone());
+            m.insert(copy.id, copy);
+            true
+        })?;
+        Ok(inserted)
+    }
+}
+
+/// What [`ProfileRegistry::try_set_workspace`] did.
+// ADR-0386
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceWrite {
+    /// The folder is set (or already was, with the name pinned).
+    Written,
+    NotFound,
+    /// The agent has conversed — nothing was written.
+    Conversed,
 }
 
 fn attachments_of_profile(p: &AgentProfile) -> Attachments {
@@ -1198,7 +1278,7 @@ fn same_attachments(p: &AgentProfile, a: &Attachments) -> bool {
 /// The fields the launch preprocessing checked that the launch uses — attachments · command · env. The launch uses that check's answer
 /// only if these three are unchanged after it.
 ///
-/// ★The working folder is not included★ — a change (`agent.setWorkspace`) takes that agent's launch reservation so it does not cross a
+/// ★The working folder is not included★ — a change (`agent.setWorkspace`) takes that agent's reservation as a working-folder holder so it does not cross a
 ///   launch, and the merge keeps the roster value even when the caller copy's working folder is stale (so including it in the copy comparison would cut off a legitimate launch).
 // TRD S25 §1-5 (ga) 2
 #[derive(Debug, Clone, PartialEq)]

@@ -1,12 +1,13 @@
 //! Declaration golden — pins the name set and the error set so they do not silently diverge (TRD §7 「declaration derivation」).
 
 use engram_dashboard_agent::commands::{
-    AgentAttachPresetArgs, AgentCancelQueuedInputArgs, AgentDetachPresetArgs, AgentInterruptArgs,
-    AgentListArgs, AgentListQueuedInputsArgs, AgentMoveArgs, AgentNewArgs, AgentPresetsArgs,
-    AgentRenameArgs, AgentReorderPresetsArgs, AgentResolveArgs, AgentSpawnArgs, LibraryFoldersArgs,
-    LibraryListArgs, LibraryNewFileArgs, LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs,
-    LibraryRelinkArgs, LibrarySetRootArgs, LibraryStatusArgs, PresetAddArgs, PresetCheckArgs,
-    PresetGetArgs, PresetPreviewFolderArgs, PresetRemoveArgs, PresetReorderArgs, PresetSaveArgs,
+    AgentAttachPresetArgs, AgentCancelQueuedInputArgs, AgentDetachPresetArgs, AgentDuplicateArgs,
+    AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs, AgentMoveArgs, AgentNewArgs,
+    AgentPresetsArgs, AgentRenameArgs, AgentReorderPresetsArgs, AgentResolveArgs,
+    AgentSetWorkspaceArgs, AgentSpawnArgs, LibraryFoldersArgs, LibraryListArgs, LibraryNewFileArgs,
+    LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs, LibraryRelinkArgs,
+    LibrarySetRootArgs, LibraryStatusArgs, PresetAddArgs, PresetCheckArgs, PresetGetArgs,
+    PresetPreviewFolderArgs, PresetRemoveArgs, PresetReorderArgs, PresetSaveArgs,
     PresetSetBackendArgs, UsageGetArgs, UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
 };
 use engram_dashboard_command::DeadlineClass;
@@ -26,6 +27,7 @@ fn declared_names_are_the_cli_verbs() {
             "agent.attachPreset",
             "agent.cancelQueuedInput",
             "agent.detachPreset",
+            "agent.duplicate",
             "agent.interrupt",
             "agent.list",
             "agent.listQueuedInputs",
@@ -35,6 +37,7 @@ fn declared_names_are_the_cli_verbs() {
             "agent.rename",
             "agent.reorderPresets",
             "agent.resolve",
+            "agent.setWorkspace",
             "agent.spawn",
             "library.folders",
             "library.list",
@@ -69,7 +72,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 19 // two were added in v6 — `agent.interrupt` · `usage.refresh`; twelve in v9 — `library.setRoot` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`
+            == 21 // two were added in v6 — `agent.interrupt` · `usage.refresh`; fourteen in v9 — `library.setRoot` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`, `agent.setWorkspace` · `duplicate`
     );
 }
 
@@ -164,6 +167,8 @@ fn the_agent_preset_verbs_are_declared_in_generation_9_with_their_effect() {
         ("agent.attachPreset", Effect::Write),
         ("agent.detachPreset", Effect::Write),
         ("agent.reorderPresets", Effect::Write),
+        ("agent.setWorkspace", Effect::Write),
+        ("agent.duplicate", Effect::Write),
     ];
     for (name, effect) in cases {
         let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
@@ -312,6 +317,9 @@ fn error_sets_are_golden() {
         "agent.attachPreset",
         "agent.detachPreset",
         "agent.reorderPresets",
+        // ADR-0386: the agent not found or deleted meanwhile; `workspace-locked`, the roster ceiling.
+        "agent.setWorkspace",
+        "agent.duplicate",
     ] {
         assert_eq!(
             declared(name),
@@ -395,6 +403,16 @@ fn required_matches_what_deserialization_actually_demands() {
             "agent.move",
             parses::<AgentMoveArgs>,
             json!({ "target": "alpha", "parent": null }),
+        ),
+        (
+            "agent.setWorkspace",
+            parses::<AgentSetWorkspaceArgs>,
+            json!({ "target": "alpha", "cwd": "C:/work/y" }),
+        ),
+        (
+            "agent.duplicate",
+            parses::<AgentDuplicateArgs>,
+            json!({ "target": "alpha" }),
         ),
         (
             "agent.listQueuedInputs",

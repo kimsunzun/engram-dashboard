@@ -1,5 +1,6 @@
 //! Launch materials — the library service as the agent manager's `LaunchKitSource`: the launch check, the materials
-//! a launch gets, and their removal.
+//! a launch gets, and their removal; also the folder stat `agent.setWorkspace` asks outside any launch (one read
+//! budget — ADR-0360 decision 4).
 //!
 //! ## Rules (invariants)
 //!
@@ -381,6 +382,12 @@ impl LaunchKitSource for LibraryService {
                 .canonical_cwd(&launch.io, cwd)
                 .unwrap_or_else(|| cwd.to_path_buf()),
         }
+    }
+
+    // ADR-0360: a folder read outside a launch gets the 5 s read budget (decision 4) — a dead share answers `timeout`.
+    // ADR-0386
+    fn stat_folder(&self, folder: &Path) -> Result<(), String> {
+        self.stat_root(&self.io.begin_read(), folder)
     }
 }
 

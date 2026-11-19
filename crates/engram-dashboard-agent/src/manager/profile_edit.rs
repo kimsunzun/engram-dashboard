@@ -36,8 +36,7 @@ impl ProfileEditPort for AgentManager {
         // Read order = reservations → sessions → roster. A launch releases its reservation **after** raising the session, so a launch
         //   overlapping this call is always caught by one of the two (reading in reverse misses a launch that finished in between). The
         //   session id is written by that launch's first submission, so it is read last.
-        // TODO(TRD S25 10a `agent.setWorkspace`): a change that calls this decision while holding its own reservation sees that
-        //   reservation as `Preparing` — fix together when the reservation table tells holders apart.
+        // ADR-0386: only a launch holder is `Preparing` — `agent.setWorkspace` asks this while holding the reservation itself.
         let preparing = self.activation_in_flight(id);
         // ADR-0116: a corpse (before the reaper reaps it) is not running — the same predicate as the roster.
         let running = self
@@ -68,7 +67,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::tests::{agent_profile, put_live_session, scripted_manager};
-    use super::super::SpawnReservation;
+    use super::super::{ReservationHolder, SpawnReservation};
     use super::*;
     use crate::profile::scripted_store::{Outcome, FAILURES};
     use crate::profile::{AttachedPreset, StoreError};
@@ -210,7 +209,9 @@ mod tests {
         assert_eq!(manager.workspace_lock(id).unwrap(), None);
 
         {
-            let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("reserve");
+            let _held =
+                SpawnReservation::reserve(manager.spawning.clone(), id, ReservationHolder::Launch)
+                    .expect("reserve");
             assert_eq!(
                 manager.workspace_lock(id).unwrap(),
                 Some(WorkspaceLock::Preparing)
@@ -241,7 +242,9 @@ mod tests {
     fn workspace_lock_reports_the_first_of_running_preparing_conversed() {
         let (manager, _store, id) = seeded();
         converse(&manager, id);
-        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("reserve");
+        let _held =
+            SpawnReservation::reserve(manager.spawning.clone(), id, ReservationHolder::Launch)
+                .expect("reserve");
         assert_eq!(
             manager.workspace_lock(id).unwrap(),
             Some(WorkspaceLock::Preparing),
@@ -253,6 +256,25 @@ mod tests {
             manager.workspace_lock(id).unwrap(),
             Some(WorkspaceLock::Running),
             "running > preparing · conversed"
+        );
+    }
+
+    /// A working-folder change holding the reservation is not `Preparing` — `agent.setWorkspace` asks this decision
+    /// while it holds the reservation itself, and `agent.presets` shows the lock as it otherwise is (ADR-0386).
+    #[test]
+    fn a_working_folder_change_holding_the_reservation_is_not_preparing() {
+        let (manager, _store, id) = seeded();
+        let _held = SpawnReservation::reserve(
+            manager.spawning.clone(),
+            id,
+            ReservationHolder::WorkingFolder,
+        )
+        .expect("reserve");
+        assert_eq!(manager.workspace_lock(id).unwrap(), None);
+        converse(&manager, id);
+        assert_eq!(
+            manager.workspace_lock(id).unwrap(),
+            Some(WorkspaceLock::Conversed)
         );
     }
 

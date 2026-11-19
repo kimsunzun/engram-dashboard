@@ -608,19 +608,22 @@ mod tests {
     /// Names without a CLI verb are only those listed below: the two pending-list verbs, interrupt (`agent.interrupt` — ADR-0237) and
     /// multi-word resolution (`agent.resolve` — ADR-0307) are outside `CLI_AGENT_VERBS`, called via the bus and generic calls (`engram <name> …`). A
     /// table name not in the list grew without deciding on a CLI verb, so this stops. `usage.*`, `library.*` and `preset.*` are not the `agent`
-    /// family and never reach `/control/agent`; they and the four agent-preset commands are reached by full name (ADR-0386).
+    /// family and never reach `/control/agent`; they, the four agent-preset commands, `agent.setWorkspace` and
+    /// `agent.duplicate` are reached by full name (ADR-0386).
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 27] = [
+        const BUS_ONLY: [&str; 29] = [
             "agent.attachPreset",
             "agent.cancelQueuedInput",
             "agent.detachPreset",
+            "agent.duplicate",
             "agent.interrupt",
             "agent.listQueuedInputs",
             "agent.presets",
             "agent.reorderPresets",
             "agent.resolve",
+            "agent.setWorkspace",
             "library.folders",
             "library.list",
             "library.newFile",
@@ -661,6 +664,50 @@ mod tests {
             held, wanted,
             "the table's names must be CLI verbs + bus-only names (those written in the list)"
         );
+    }
+
+    /// `agent.setWorkspace` and `agent.duplicate` run on the real manager through the daemon table: the folder changes
+    /// and the name stays; the copy takes the next name of the family and sits asleep beside the original.
+    // ADR-0386
+    #[test]
+    fn the_daemon_table_changes_a_working_folder_and_duplicates_an_agent() {
+        let table = make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
+        );
+        call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/probe", "backend": "Claude" }),
+        )
+        .expect("registration succeeded");
+        // The spelling the manager stores (`normalize_spelling`: `\` → `/`).
+        let folder = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+
+        let set = call(
+            &table,
+            "agent.setWorkspace",
+            json!({ "target": "probe", "cwd": folder }),
+        )
+        .expect("an asleep agent that never conversed");
+        assert_eq!(set["name"], "probe");
+        assert_eq!(set["cwd"], json!(folder));
+
+        let copy = call(&table, "agent.duplicate", json!({ "target": "probe" })).expect("copied");
+        assert_eq!(copy["name"], "probe(1)");
+        assert_eq!(copy["state"], "sleeping");
+
+        let listed = call(&table, "agent.list", json!({})).expect("query succeeded");
+        let cwds: Vec<&serde_json::Value> = listed["agents"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| &row["cwd"])
+            .collect();
+        assert_eq!(cwds, vec![&json!(folder), &json!(folder)], "{listed}");
     }
 
     /// Assemblies with no client to attach exist (smoke bins · harnesses) — a roster-changing verb panicking there would stop the daemon from starting.

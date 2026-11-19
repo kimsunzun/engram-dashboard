@@ -199,7 +199,7 @@ impl AgentManager {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{channel, Receiver};
@@ -213,7 +213,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::tests::{put_live_session, put_live_session_leased};
-    use super::super::{AgentManager, NoticeDelivery, SpawnOutcome, SpawnReservation};
+    use super::super::{
+        AgentManager, NoticeDelivery, ReservationHolder, SpawnOutcome, SpawnReservation,
+    };
     use super::PlanNotices;
     use crate::backend;
     use crate::failure::AgentFailureKind;
@@ -439,7 +441,7 @@ mod tests {
 
     struct Tables {
         profiles: Arc<ProfileRegistry>,
-        spawning: Arc<Mutex<HashSet<AgentId>>>,
+        spawning: super::super::Reservations,
         sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
         names: Arc<Mutex<()>>,
         control: Arc<CountingControl>,
@@ -519,7 +521,7 @@ mod tests {
                 reservations_free,
                 sessions_free,
                 names_free,
-                reserved: reservations_free && sync::lock(&t.spawning).contains(&id),
+                reserved: reservations_free && sync::lock(&t.spawning).contains_key(&id),
                 roster_epoch: if roster_free {
                     t.profiles.get(id).map(|p| p.epoch)
                 } else {
@@ -568,7 +570,7 @@ mod tests {
                 id,
                 epoch,
                 locks_free: roster_free && reservations_free && sessions_free && names_free,
-                reserved: reservations_free && sync::lock(&t.spawning).contains(&id),
+                reserved: reservations_free && sync::lock(&t.spawning).contains_key(&id),
                 roster_epoch: roster.as_ref().map(|p| p.epoch),
                 roster_sid: roster.and_then(|p| p.backend_session_id),
                 provisions: t.control.provisions.load(Ordering::SeqCst),
@@ -1024,8 +1026,12 @@ mod tests {
         rig.manager.profiles.upsert(p.clone());
 
         {
-            let _held =
-                SpawnReservation::reserve(rig.manager.spawning.clone(), p.id).expect("reserve");
+            let _held = SpawnReservation::reserve(
+                rig.manager.spawning.clone(),
+                p.id,
+                ReservationHolder::Launch,
+            )
+            .expect("reserve");
             assert!(matches!(
                 rig.manager.spawn_agent(&p, SpawnMode::Fresh),
                 Ok(SpawnOutcome::Moot(None))
@@ -2040,8 +2046,12 @@ mod tests {
         rig.manager.profiles.upsert(p.clone());
 
         {
-            let _held =
-                SpawnReservation::reserve(rig.manager.spawning.clone(), p.id).expect("reserve");
+            let _held = SpawnReservation::reserve(
+                rig.manager.spawning.clone(),
+                p.id,
+                ReservationHolder::Launch,
+            )
+            .expect("reserve");
             assert!(matches!(
                 rig.manager.spawn_agent(&p, SpawnMode::Fresh),
                 Ok(SpawnOutcome::Moot(None))

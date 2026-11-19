@@ -177,6 +177,12 @@ pub const PATH_THROUGH_LINK: &str = "path-through-link";
 // TRD S25 step-7 B8
 pub const LIBRARY_UNAVAILABLE: &str = "library-unavailable";
 
+/// The unreadable reason of a folder stat the bounded IO gave no answer for — never expected (`BoundedIo::stat_all`
+/// answers every key it is asked); answered instead of aborting the command.
+// ADR-0293
+// ADR-0386
+pub const STAT_UNANSWERED: &str = "the bounded stat gave no answer";
+
 /// The code of an edit whose root generation is not the current one (`args` = `{given, current}`).
 // ADR-0377
 pub const ROOT_GENERATION_STALE: &str = "root-generation-stale";
@@ -671,13 +677,22 @@ impl LibraryService {
         }
     }
 
-    /// The root stat'ed as a required ask on `io`; `Err(why)` = anything but `Ok`.
+    /// The root (or any folder — `LaunchKitSource::stat_folder`) stat'ed as a required ask on `io`; `Err(why)` = anything
+    /// but `Ok`: `missing`, `not a folder`, or the unreadable reason ([`folder::TIMEOUT`] when the stat did not answer,
+    /// [`STAT_UNANSWERED`] if the bounded IO broke its every-key contract).
     fn stat_root(&self, io: &LaunchIo, root: &Path) -> Result<(), String> {
+        // ADR-0293: `stat_all` answers every key it is asked, but a broken answer is a refusal here, never an abort.
         let status = self
             .io
             .stat_all(io, &[(root.to_path_buf(), Need::Required)])
             .remove(&path_key(root))
-            .expect("stat_all answers every path it is asked");
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    path = %escape_controls(&root.to_string_lossy()),
+                    "the bounded stat gave no answer for the path it was asked"
+                );
+                FolderStatus::Unreadable(STAT_UNANSWERED.to_owned())
+            });
         match status {
             FolderStatus::Ok => Ok(()),
             FolderStatus::Missing => Err("missing".to_owned()),
@@ -1489,6 +1504,7 @@ mod tests {
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
+    use engram_dashboard_agent::launch::LaunchKitSource;
     use engram_dashboard_agent::profile::{AgentProfile, AttachedPreset, ProfileStore, StoreError};
     use engram_dashboard_base::sync::wait_timeout;
 
@@ -2783,6 +2799,59 @@ claude: {changed: true}
             2,
             "each folder once"
         );
+    }
+
+    /// `agent.setWorkspace`'s folder stat goes through the bounded IO on a fresh read budget: each status as its word, and
+    /// a stat that does not answer within the budget is `timeout` — the call returns at the budget, not when the stat
+    /// ends.
+    // ADR-0360
+    // ADR-0386
+    #[test]
+    fn the_folder_stat_is_bounded_by_one_read_budget_and_names_a_timeout() {
+        let store = TestStore::new(&["/lib"]);
+        let held = PathBuf::from("/slow");
+        let ops = Arc::new(CountOps {
+            statuses: HashMap::from([
+                (PathBuf::from("/gone"), FolderStatus::Missing),
+                (PathBuf::from("/file"), FolderStatus::NotADirectory),
+                (
+                    PathBuf::from("/locked"),
+                    FolderStatus::Unreadable("access denied".to_owned()),
+                ),
+            ]),
+            held: vec![held.clone()],
+            ..CountOps::default()
+        });
+        let limit = Duration::from_millis(300);
+        let io = BoundedIo::new(
+            limit,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+            Arc::new(ThreadSpawn),
+        );
+        let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
+
+        assert_eq!(svc.stat_folder(Path::new("/work")), Ok(()));
+        assert_eq!(
+            svc.stat_folder(Path::new("/gone")),
+            Err("missing".to_owned())
+        );
+        assert_eq!(
+            svc.stat_folder(Path::new("/file")),
+            Err("not a folder".to_owned())
+        );
+        assert_eq!(
+            svc.stat_folder(Path::new("/locked")),
+            Err("access denied".to_owned())
+        );
+        let started = Instant::now();
+        let slow = svc.stat_folder(&held);
+        let spent = started.elapsed();
+        ops.release();
+        assert_eq!(slow, Err(folder::TIMEOUT.to_owned()));
+        assert!(spent < limit + Duration::from_secs(1), "{spent:?}");
+        assert_eq!(ops.stats_of(&held), 1);
     }
 
     #[test]

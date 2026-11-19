@@ -634,9 +634,11 @@ impl std::error::Error for PrepareError {}
 ///
 /// The four scope methods ([`LaunchKitSource::begin_launch`] · [`LaunchKitSource::check_in`] ·
 /// [`LaunchKitSource::prepare_in`] · [`LaunchKitSource::working_folder`]) are overridden all together or not at all,
-/// and a wrapper forwards all four.
+/// and a wrapper forwards all four. [`LaunchKitSource::stat_folder`] is outside a launch — the manager's working-folder
+/// stat, so the manager owns no bounded IO of its own; a wrapper forwards it too.
 // ADR-0334
 // ADR-0324
+// ADR-0386
 pub trait LaunchKitSource: Send + Sync + 'static {
     /// Whether this profile can be launched — when blocked, every reason hit.
     ///
@@ -712,7 +714,28 @@ pub trait LaunchKitSource: Send + Sync + 'static {
     fn working_folder(&self, _scope: &LaunchScope, cwd: &Path) -> PathBuf {
         dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf())
     }
+
+    /// Whether `folder` is an existing folder — `agent.setWorkspace`'s stat, asked outside any launch and before the
+    /// manager takes a lock. `Err` = why not: `missing`, `not a folder`, or the error the stat met; a source with bounded
+    /// IO answers a stat that did not answer in time with [`STAT_TIMED_OUT`] (the one `why` a retry can clear). The
+    /// default is one std stat, unbounded (the Noop kits — tests and harnesses).
+    // ADR-0360
+    // ADR-0386
+    fn stat_folder(&self, folder: &Path) -> Result<(), String> {
+        match std::fs::metadata(folder) {
+            Ok(meta) if meta.is_dir() => Ok(()),
+            Ok(_) => Err("not a folder".to_owned()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err("missing".to_owned()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
 }
+
+/// The `why` of a [`LaunchKitSource::stat_folder`] that did not answer in time — asset-library's bounded IO answers it
+/// (its `folder::TIMEOUT` is this value, shared by every timed-out folder op there — stat, list, read), and
+/// `agent.setWorkspace` tells the caller to retry on it.
+// ADR-0386
+pub const STAT_TIMED_OUT: &str = "timeout";
 
 /// One launch's shared context, opaque to the manager — a [`LaunchKitSource`] keeps its per-launch state in it
 /// ([`LaunchKitSource::begin_launch`]). The default scope holds nothing.
@@ -2452,6 +2475,26 @@ mod tests {
         assert_eq!(canonical, dunce::canonicalize(&real).unwrap());
         assert!(!canonical.components().any(|c| c == Component::ParentDir));
         assert_eq!(NoopLaunchKits.working_folder(&scope, &gone), gone);
+    }
+
+    /// The default folder stat answers a folder `Ok`, a file `not a folder` and a missing path `missing`.
+    // ADR-0386
+    #[test]
+    fn the_default_folder_stat_tells_a_folder_a_file_and_a_missing_path_apart() {
+        let folder =
+            std::env::temp_dir().join(format!("engram-stat-folder-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&folder).expect("create the sample folder");
+        let file = folder.join("file.txt");
+        std::fs::write(&file, "x").expect("write the sample file");
+        let gone = folder.join("gone");
+
+        assert_eq!(NoopLaunchKits.stat_folder(&folder), Ok(()));
+        assert_eq!(
+            NoopLaunchKits.stat_folder(&file),
+            Err("not a folder".to_owned())
+        );
+        assert_eq!(NoopLaunchKits.stat_folder(&gone), Err("missing".to_owned()));
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

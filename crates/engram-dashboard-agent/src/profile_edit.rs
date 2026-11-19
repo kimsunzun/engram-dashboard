@@ -28,10 +28,22 @@ pub struct PresetPathRename {
 pub enum WorkspaceLock {
     /// Running.
     Running,
-    /// Preparing a launch (a spawn reservation is held).
+    /// Preparing a launch (a launch holds the agent's reservation — a working-folder change holding it does not count).
+    // ADR-0386
     Preparing,
     /// Conversed (a persisted backend session id exists) — never unlocks for that agent.
     Conversed,
+}
+
+impl WorkspaceLock {
+    /// The answer word (`agent.presets` `workspace_lock`, the `workspace-locked` refusal's `reason`).
+    pub fn word(self) -> &'static str {
+        match self {
+            WorkspaceLock::Running => "running",
+            WorkspaceLock::Preparing => "preparing",
+            WorkspaceLock::Conversed => "conversed",
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

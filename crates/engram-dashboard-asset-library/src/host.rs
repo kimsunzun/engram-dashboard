@@ -39,7 +39,6 @@ use engram_dashboard_agent::library_commands::{
     LibraryReadView, NewAgentPresets, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
 };
 use engram_dashboard_agent::profile::{AgentOutputFormat as CoreOutputFormat, AgentProfile};
-use engram_dashboard_agent::profile_edit::WorkspaceLock;
 use engram_dashboard_agent::types::AgentId;
 
 use crate::agent_edit::{judge_new_presets_without_library, AgentPresetsView, NewPresets};
@@ -595,14 +594,7 @@ fn agent_view(view: AgentPresetsView) -> AgentPresetsPortView {
         default_preset,
         presets,
         cwd: cwd.to_string_lossy().into_owned(),
-        workspace_lock: workspace_lock.map(|lock| {
-            match lock {
-                WorkspaceLock::Running => "running",
-                WorkspaceLock::Preparing => "preparing",
-                WorkspaceLock::Conversed => "conversed",
-            }
-            .to_owned()
-        }),
+        workspace_lock: workspace_lock.map(|lock| lock.word().to_owned()),
         backend,
         mode: declared_mode(mode),
         base_rev,
@@ -818,7 +810,7 @@ mod tests {
         StoreError,
     };
     use engram_dashboard_agent::profile_edit::{
-        Attachments, PresetPathRename, ProfileEditError, ProfileEditPort,
+        Attachments, PresetPathRename, ProfileEditError, ProfileEditPort, WorkspaceLock,
     };
     use serde_json::json;
     use tempfile::TempDir;

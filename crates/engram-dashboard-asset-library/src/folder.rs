@@ -69,8 +69,10 @@ pub const LIST_CAP: usize = FOLDER_LISTING_CAP;
 /// The largest folder file [`BoundedIo::read_one`] reads; a longer file is an `InvalidData` error.
 pub const READ_CAP: u64 = 16 * 1024 * 1024;
 
-/// The diagnostic of an op that was started and did not answer before its phase's wait ended.
-pub const TIMEOUT: &str = "timeout";
+/// The diagnostic of an op that was started and did not answer before its phase's wait ended — agent's
+/// `STAT_TIMED_OUT`, the word `agent.setWorkspace` reads as a retryable folder stat.
+// ADR-0386
+pub const TIMEOUT: &str = engram_dashboard_agent::launch::STAT_TIMED_OUT;
 
 /// The diagnostic of a key no worker was started for — the phase's allowance was spent, or an advisory ask found only
 /// a worker older than one limit.

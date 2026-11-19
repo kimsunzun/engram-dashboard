@@ -1053,24 +1053,8 @@ fn items_or_folders(
 pub(crate) fn refusal_error(command: &'static str, refusal: PortRefusal) -> CommandError {
     match refusal {
         PortRefusal::Refused { class, reason } => {
-            let code = match class {
-                PortClass::Conflict | PortClass::Unavailable => ErrorCode::Conflict,
-                PortClass::NotFound => ErrorCode::NotFound,
-                PortClass::InvalidArgument => ErrorCode::InvalidArgument,
-                PortClass::Internal => ErrorCode::Internal,
-            };
-            let mut args = Map::new();
-            put_reason(&mut args, &reason);
-            let message = refusal_message(command, &reason);
-            let error = match RETRY_AFTER_CONDITION.contains(&reason.code.as_str()) {
-                true => CommandError::with_retry(
-                    code,
-                    format!("{message}; {RETRY_AFTER_CONDITION_TAIL}"),
-                    RetryMode::AfterCondition,
-                ),
-                false => CommandError::of(code, message),
-            };
-            error.with_args(args)
+            let clearable = RETRY_AFTER_CONDITION.contains(&reason.code.as_str());
+            coded_error(command, class, &reason, clearable)
         }
         PortRefusal::Store(error) => store_error(
             command,
@@ -1084,6 +1068,37 @@ pub(crate) fn refusal_error(command: &'static str, refusal: PortRefusal) -> Comm
             ),
         ),
     }
+}
+
+/// A coded refusal as a command error — `args` = the reason's `{code, args, line?}`, the message one English line.
+/// `clearable` = a retry of the same call can succeed once the cause clears: [`RetryMode::AfterCondition`] and the
+/// words saying so. [`refusal_error`] decides it by code ([`RETRY_AFTER_CONDITION`]); a caller whose code is clearable
+/// for some arguments only decides it itself (`agent.setWorkspace`).
+// ADR-0386
+pub(crate) fn coded_error(
+    command: &str,
+    class: PortClass,
+    reason: &Reason,
+    clearable: bool,
+) -> CommandError {
+    let code = match class {
+        PortClass::Conflict | PortClass::Unavailable => ErrorCode::Conflict,
+        PortClass::NotFound => ErrorCode::NotFound,
+        PortClass::InvalidArgument => ErrorCode::InvalidArgument,
+        PortClass::Internal => ErrorCode::Internal,
+    };
+    let mut args = Map::new();
+    put_reason(&mut args, reason);
+    let message = refusal_message(command, reason);
+    let error = match clearable {
+        true => CommandError::with_retry(
+            code,
+            format!("{message}; {RETRY_AFTER_CONDITION_TAIL}"),
+            RetryMode::AfterCondition,
+        ),
+        false => CommandError::of(code, message),
+    };
+    error.with_args(args)
 }
 
 /// A relink `stopped` row: the refusal it met, carried as a refusal would carry it — a store error as
@@ -1496,7 +1511,9 @@ mod tests {
     use super::fake::FakeLibrary;
     use super::*;
     use crate::commands::{AgentRosterRow, StartedAgent, COMMAND_SPECS};
-    use crate::manager::{Activated, NotStarted, NoticeDelivery, RenameOutcome};
+    use crate::manager::{
+        Activated, NotStarted, NoticeDelivery, RenameOutcome, WorkspaceRefusal, WorkspaceSet,
+    };
     use crate::profile::{AgentProfile, Refusal, SpawnMode, StoreStatus};
     use crate::queued_input::QueuedListing;
     use crate::types::{CancelError, CancelOutcome, PtyError};
@@ -1544,6 +1561,12 @@ mod tests {
             unreachable!("not a library call")
         }
         fn reparent_agent(&self, _: AgentId, _: Option<AgentId>) -> Result<bool, PtyError> {
+            unreachable!("not a library call")
+        }
+        fn set_workspace(&self, _: AgentId, _: &str) -> Result<WorkspaceSet, WorkspaceRefusal> {
+            unreachable!("not a library call")
+        }
+        fn duplicate_agent(&self, _: AgentId) -> Result<AgentProfile, PtyError> {
             unreachable!("not a library call")
         }
         fn list_queued_inputs(&self, _: AgentId) -> Option<QueuedListing> {

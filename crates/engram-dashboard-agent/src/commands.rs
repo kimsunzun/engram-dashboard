@@ -26,10 +26,13 @@ use engram_dashboard_command::{
     blocking_handler, declare_commands, CommandError, CommandTable, ErrorCode, RetryMode,
 };
 
-use crate::launch::{notice_text, LaunchBlocked, Notice};
-use crate::library_commands::refusal_error;
+use crate::launch::{notice_text, LaunchBlocked, Notice, Reason};
 pub use crate::library_commands::LibraryCommandHost;
-use crate::manager::{Activated, AgentManager, NotStarted, NoticeDelivery, RenameOutcome};
+use crate::library_commands::{coded_error, refusal_error, PortClass, PortRefusal};
+use crate::manager::{
+    Activated, AgentManager, NotStarted, NoticeDelivery, RenameOutcome, WorkspaceRefusal,
+    WorkspaceSet,
+};
 use crate::persistence::PROFILES_FILE;
 use crate::queued_input::{ListedState, QueuedListing};
 // An alias telling the core enum apart from the declaration vocabulary of the same name below.
@@ -50,8 +53,8 @@ declare_commands! {
     //   gains `notices` (TRD S25 step 16), and with `cwd` a launch blocked before the add answers `CONFLICT` with
     //   nothing created (TRD S25 step 20 — the `agent.spawn` summary). Also: `agent.spawn` is declared with the launch
     //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`). The nine `library.*`, the eight
-    //   `preset.*` and the four agent-preset commands come in this generation too, and `agent.new` gains `presets`,
-    //   `root_generation` and the answer's `skipped` (ADR-0386).
+    //   `preset.*` and the four agent-preset commands come in this generation too, as do `agent.setWorkspace` and
+    //   `agent.duplicate`, and `agent.new` gains `presets`, `root_generation` and the answer's `skipped` (ADR-0386).
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -676,6 +679,39 @@ declare_commands! {
         agent_id: String,
         name: String,
         parent: Option<String>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Changes an agent's working folder. `cwd` must be an existing absolute folder, else INVALID_ARGUMENT
+    /// `workspace-not-found` {cwd, why} — `why` also says `not absolute`, or that the folder did not answer in time
+    /// (`timeout`) or could not be read. Only an
+    /// asleep agent that has never conversed can change it: CONFLICT `workspace-locked` {reason: `running` |
+    /// `preparing` | `conversed` | `changing`}. The agent keeps its name.
+    // ADR-0386
+    #[effect(Write)]
+    #[since(9)]
+    "agent.setWorkspace" => args AgentSetWorkspaceArgs {
+        target: String,
+        cwd: String,
+    } -> ok AgentSetWorkspaceOk {
+        agent_id: String,
+        name: String,
+        /// The folder as stored.
+        cwd: String,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Registers a copy of an agent beside it (the same parent), asleep, named after it with the next number
+    /// (`bob` → `bob(1)`): the same backend, mode, folder, env and presets, with no conversation or history.
+    /// INVALID_ARGUMENT when this surface does not create the original's backend; CONFLICT at the roster ceiling.
+    /// After a timeout or an unknown outcome, check `agent.list` before calling again.
+    // ADR-0386
+    #[effect(Write)]
+    #[since(9)]
+    "agent.duplicate" => args AgentDuplicateArgs {
+        target: String,
+    } -> ok AgentDuplicateOk {
+        agent_id: String,
+        name: String,
+        state: String,
     } errors [NOT_FOUND, CONFLICT];
 
     /// The list of inputs a live agent received mid-turn without confirmation yet that they were accepted (non-terminal only). `state` = `queued` (before confirmation —
@@ -1319,10 +1355,11 @@ pub trait AgentCommandHost: Send + Sync {
     // ADR-0291 R17 (D6)
     fn store_status(&self) -> StoreStatus;
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile>;
-    /// ★The roster-changing methods (`create_agent` · `rename_agent` · `reparent_agent` · `create_and_activate`) are
-    ///   changes with a caller★ — if the store refuses the change the roster stays as it was and the answer is
-    ///   [`PtyError::Store`] (the manager's `try_` variants · ADR-0291 R17). `create_and_activate` is partial: a refused
-    ///   add gives `created: false`; a failure after the add gives `created: true` and the row stays.
+    /// ★The roster-changing methods (`create_agent` · `rename_agent` · `reparent_agent` · `create_and_activate` ·
+    ///   `duplicate_agent` · `set_workspace`) are changes with a caller★ — if the store refuses the change the roster
+    ///   stays as it was and the answer is [`PtyError::Store`] (`set_workspace`: [`WorkspaceRefusal::Store`]) (the
+    ///   manager's `try_` variants · ADR-0291 R17). `create_and_activate` is partial: a refused add gives `created:
+    ///   false`; a failure after the add gives `created: true` and the row stays.
     fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError>;
     /// The handler puts the returned notices on its success reply, so the activation counts as delivering them
     /// ([`crate::manager::NoticeDelivery::Delivered`] — a start marks the set as shown for this agent).
@@ -1348,6 +1385,13 @@ pub trait AgentCommandHost: Send + Sync {
     /// ★`Ok(false)` does not tell the reason★ — the manager gives only one bool (`ProfileRegistry::try_reparent`).
     /// Absence and a structural conflict are told apart by the handler **by re-querying the roster** (`verb_move`).
     fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> Result<bool, PtyError>;
+    /// `agent.setWorkspace` ([`AgentManager::try_set_workspace`]) — `cwd` as typed; the manager normalizes and stats it.
+    // ADR-0386
+    fn set_workspace(&self, id: AgentId, cwd: &str) -> Result<WorkspaceSet, WorkspaceRefusal>;
+    /// `agent.duplicate` ([`AgentManager::try_duplicate_agent`]) — the registered copy. The handler asks the backend
+    /// policy before calling.
+    // ADR-0386
+    fn duplicate_agent(&self, id: AgentId) -> Result<AgentProfile, PtyError>;
     /// The waiting list of the live incarnation. `None` = no live session.
     // ADR-0231
     fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing>;
@@ -1487,6 +1531,14 @@ impl AgentCommandHost for AgentManager {
         AgentManager::try_reparent_agent(self, child, parent)
     }
 
+    fn set_workspace(&self, id: AgentId, cwd: &str) -> Result<WorkspaceSet, WorkspaceRefusal> {
+        AgentManager::try_set_workspace(self, id, cwd)
+    }
+
+    fn duplicate_agent(&self, id: AgentId) -> Result<AgentProfile, PtyError> {
+        AgentManager::try_duplicate_agent(self, id)
+    }
+
     fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
         AgentManager::list_queued_inputs(self, id).ok()
     }
@@ -1533,6 +1585,9 @@ pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat
 //      spelling before anything is registered (ADR-0348 decision 4). Pinned by
 //      `tests::the_body_refuses_a_closed_backend_before_calling_the_host` (the body) and
 //      `tests::the_bus_cwd_arm_hands_the_production_policy_to_the_body` (the wiring).
+//   ④ `agent.duplicate` (this file, [`verb_duplicate`]) — asked with the original's backend word (`launch::backend_word`,
+//      lowercase — the table compares ignoring case) before the host is called, so a shell or gemini original is not
+//      copied (the ADR-0279 cost, ADR-0386 decision 8).
 // ★The shell is not a door★ — `agent.spawnInto` carries only a typo net (`parse_backend`, asks the wire enum) and does not depend on this
 //   crate (ADR-0270 decision 1).
 // ★Some create paths do not see this table — do not miss them when counting doors★ (an uncounted door stays open
@@ -1665,6 +1720,8 @@ pub fn make_table(
     let new = (Arc::clone(&host), Arc::clone(&notify), Arc::clone(&library));
     let rename = (Arc::clone(&host), Arc::clone(&notify));
     let move_ = (Arc::clone(&host), Arc::clone(&notify));
+    let set_workspace = (Arc::clone(&host), Arc::clone(&notify));
+    let duplicate = (Arc::clone(&host), Arc::clone(&notify));
     let list_queued = Arc::clone(&host);
     let cancel_queued = Arc::clone(&host);
     let interrupt = Arc::clone(&host);
@@ -1718,6 +1775,23 @@ pub fn make_table(
             }),
         )
         .expect("could not plug agent.move into the table");
+    // ADR-0386: blocking — the folder stat waits on bounded IO (up to the read budget).
+    table
+        .insert(
+            "agent.setWorkspace",
+            blocking_handler(move |args: AgentSetWorkspaceArgs| {
+                verb_set_workspace(set_workspace.0.as_ref(), set_workspace.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug agent.setWorkspace into the table");
+    table
+        .insert(
+            "agent.duplicate",
+            blocking_handler(move |args: AgentDuplicateArgs| {
+                verb_duplicate(duplicate.0.as_ref(), duplicate.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug agent.duplicate into the table");
     table
         .insert(
             "agent.listQueuedInputs",
@@ -2018,6 +2092,14 @@ fn wake_existing(
             ErrorCode::Conflict,
             format!(
                 "{LAUNCH_REFUSAL} for agent '{token}': {LAUNCH_RACED_CAUSE}; nothing was started — try again"
+            ),
+            RetryMode::AfterCondition,
+        ),
+        // ADR-0386: lost the reservation to `agent.setWorkspace` — retryable, so not `INTERNAL` (which keeps the id).
+        PtyError::WorkingFolderChanging => CommandError::with_retry(
+            ErrorCode::Conflict,
+            format!(
+                "{LAUNCH_REFUSAL} for agent '{token}': {WORKING_FOLDER_CHANGING_CAUSE}; nothing was started — start it again once that change is done"
             ),
             RetryMode::AfterCondition,
         ),
@@ -2458,6 +2540,109 @@ fn verb_move(
     })
 }
 
+/// `agent.setWorkspace`'s refusal codes — args `{cwd, why}` and `{reason}`.
+// ADR-0386
+pub const WORKSPACE_NOT_FOUND: &str = "workspace-not-found";
+pub const WORKSPACE_LOCKED: &str = "workspace-locked";
+/// The `workspace-locked` reason when another working-folder change holds the agent.
+pub const WORKSPACE_CHANGING: &str = "changing";
+
+// ADR-0321
+// ADR-0386
+fn verb_set_workspace(
+    host: &dyn AgentCommandHost,
+    notify: &dyn RosterChanged,
+    args: AgentSetWorkspaceArgs,
+) -> Result<AgentSetWorkspaceOk, CommandError> {
+    let (token, cwd) = (args.target.as_str(), args.cwd.as_str());
+    reject_blanks(&[
+        ("target", Some(token), Blank::NeedsValue),
+        ("cwd", Some(cwd), Blank::NeedsValue),
+    ])?;
+    let id = resolve(host, token)?.id;
+    // A refusal changed nothing, so there is nothing to announce.
+    let set = host
+        .set_workspace(id, cwd)
+        .map_err(|refusal| workspace_refusal(token, refusal))?;
+    // ADR-0386: the tree shows the folder.
+    notify.roster_changed();
+    Ok(AgentSetWorkspaceOk {
+        agent_id: id.to_string(),
+        name: set.name,
+        cwd: set.cwd,
+    })
+}
+
+/// A `agent.setWorkspace` refusal as a command error — the coded ones in the `{code, args}` shape every coded refusal
+/// carries ([`coded_error`]), an agent gone as the resolver's `NOT_FOUND`. A refusal that clears by itself — a stat
+/// that timed out, a launch preparing, another change — carries the retry directive; one only a different call or a
+/// different state fixes (not absolute, missing, running, conversed) does not.
+// ADR-0386 decision 14: the clearable ones answer `AfterCondition`, as the library's do.
+fn workspace_refusal(token: &str, refusal: WorkspaceRefusal) -> CommandError {
+    const COMMAND: &str = "agent.setWorkspace";
+    let coded = |class: PortClass, code: &str, args: serde_json::Value, clearable: bool| {
+        let reason = Reason {
+            code: code.to_owned(),
+            args,
+            line: None,
+        };
+        coded_error(COMMAND, class, &reason, clearable)
+    };
+    match refusal {
+        WorkspaceRefusal::FolderNotFound { cwd, why } => {
+            let clearable = why == crate::launch::STAT_TIMED_OUT;
+            coded(
+                PortClass::InvalidArgument,
+                WORKSPACE_NOT_FOUND,
+                serde_json::json!({ "cwd": cwd, "why": why }),
+                clearable,
+            )
+        }
+        WorkspaceRefusal::Locked(lock) => coded(
+            PortClass::Conflict,
+            WORKSPACE_LOCKED,
+            serde_json::json!({ "reason": lock.word() }),
+            lock == crate::profile_edit::WorkspaceLock::Preparing,
+        ),
+        WorkspaceRefusal::Changing => coded(
+            PortClass::Conflict,
+            WORKSPACE_LOCKED,
+            serde_json::json!({ "reason": WORKSPACE_CHANGING }),
+            true,
+        ),
+        WorkspaceRefusal::NotFound => not_found(token),
+        WorkspaceRefusal::Store(error) => refusal_error(COMMAND, PortRefusal::Store(error)),
+    }
+}
+
+/// An LLM creation door (policy header ④): the original's backend must be one this surface creates.
+// ADR-0279
+// ADR-0386
+fn verb_duplicate(
+    host: &dyn AgentCommandHost,
+    notify: &dyn RosterChanged,
+    args: AgentDuplicateArgs,
+) -> Result<AgentDuplicateOk, CommandError> {
+    let token = args.target.as_str();
+    reject_blanks(&[("target", Some(token), Blank::NeedsValue)])?;
+    let id = resolve(host, token)?.id;
+    let original = host.agent_snapshot(id).ok_or_else(|| not_found(token))?;
+    let word = crate::launch::backend_word(&original.command);
+    if let Some(reason) = llm_creation_refusal(&word) {
+        return Err(policy_refusal(&word, reason));
+    }
+    let copy = host.duplicate_agent(id).map_err(|e| match e {
+        PtyError::NotFound(_) => not_found(token),
+        other => create_error(other, &original.cwd.to_string_lossy()),
+    })?;
+    notify.roster_changed();
+    Ok(AgentDuplicateOk {
+        agent_id: copy.id.to_string(),
+        name: copy.canonical_name_when_live(),
+        state: AGENT_STATE_SLEEPING.to_string(),
+    })
+}
+
 // ★The two verbs do not change the roster — they emit no roster notification★ (the waiting list flows through the agent output stream).
 // ADR-0231
 fn verb_list_queued_inputs(
@@ -2678,6 +2863,11 @@ pub const LAUNCH_REFUSAL: &str = "launch refused";
 
 /// Why a launch raced — the cause only; the next step belongs to the message that carries it.
 const LAUNCH_RACED_CAUSE: &str = "its launch inputs (presets or their library files, command or env) changed while it was being prepared";
+
+/// Why a launch lost its reservation to a working-folder change — the cause only, as [`LAUNCH_RACED_CAUSE`].
+// ADR-0386
+const WORKING_FOLDER_CHANGING_CAUSE: &str =
+    "its working folder is being changed (agent.setWorkspace)";
 
 /// The cause of a launch block, without a next step — English, like the rest of this surface. The reasons
 /// themselves travel in the error's args ([`LaunchBlocked::to_args`]), so `LaunchBlocked`'s Korean `Display` is not
@@ -2919,6 +3109,14 @@ mod tests {
         interrupt_answer: Mutex<Option<Result<(), PtyError>>>,
         /// The pointing the interrupt handed to the manager.
         interrupt_calls: Mutex<Vec<AgentId>>,
+        /// The next `set_workspace` answer (taken once). Empty = set: the agent's row name and the folder as given.
+        workspace_answer: Mutex<Option<Result<WorkspaceSet, WorkspaceRefusal>>>,
+        /// What the handler handed `set_workspace` — the resolved id and the folder as typed.
+        workspace_calls: Mutex<Vec<(AgentId, String)>>,
+        /// The next `duplicate_agent` answer (taken once). Empty = a copy named `<name>(1)`, not registered.
+        duplicate_answer: Mutex<Option<Result<AgentProfile, PtyError>>>,
+        /// What the handler handed `duplicate_agent`.
+        duplicate_calls: Mutex<Vec<AgentId>>,
     }
 
     /// Roster notification counter — the watcher of 「renamed but the tree shows the old roster」.
@@ -3187,6 +3385,46 @@ mod tests {
             Ok(ok)
         }
 
+        fn set_workspace(&self, id: AgentId, cwd: &str) -> Result<WorkspaceSet, WorkspaceRefusal> {
+            self.workspace_calls
+                .lock()
+                .unwrap()
+                .push((id, cwd.to_string()));
+            self.workspace_answer
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| {
+                    let name = self
+                        .rows
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|row| row.id == id)
+                        .map(|row| row.canonical_name.clone())
+                        .unwrap_or_default();
+                    Ok(WorkspaceSet {
+                        name,
+                        cwd: cwd.to_string(),
+                    })
+                })
+        }
+
+        fn duplicate_agent(&self, id: AgentId) -> Result<AgentProfile, PtyError> {
+            self.duplicate_calls.lock().unwrap().push(id);
+            self.duplicate_answer
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| {
+                    let original = self.agent_snapshot(id).ok_or(PtyError::NotFound(id))?;
+                    let mut copy = original.clone();
+                    copy.id = uuid::Uuid::new_v4();
+                    copy.display_name = Some(format!("{}(1)", original.canonical_name_when_live()));
+                    Ok(copy)
+                })
+        }
+
         fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
             self.queued_calls.lock().unwrap().push((id, None));
             self.queued_listing.lock().unwrap().clone()
@@ -3290,6 +3528,7 @@ mod tests {
                 "agent.attachPreset",
                 "agent.cancelQueuedInput",
                 "agent.detachPreset",
+                "agent.duplicate",
                 "agent.interrupt",
                 "agent.list",
                 "agent.listQueuedInputs",
@@ -3299,6 +3538,7 @@ mod tests {
                 "agent.rename",
                 "agent.reorderPresets",
                 "agent.resolve",
+                "agent.setWorkspace",
                 "agent.spawn",
                 "library.folders",
                 "library.list",
@@ -3715,6 +3955,286 @@ mod tests {
         );
     }
 
+    /// A wake that lost the reservation to a working-folder change is a retryable `CONFLICT` launch refusal — not
+    /// `INTERNAL`, which would keep the request id and swallow the retry (ADR-0386).
+    #[test]
+    fn a_wake_during_a_working_folder_change_is_a_conflict_to_retry_after_it() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        *host.start_error.lock().unwrap() = Some(PtyError::WorkingFolderChanging);
+        let (table, _notify) = wiring(&host);
+
+        let err = call(&table, "agent.spawn", json!({ "target": "alpha" }))
+            .expect_err("the working folder is being changed");
+
+        let message = err.message();
+        assert_eq!(err.code(), ErrorCode::Conflict, "{message}");
+        assert_eq!(err.retry(), RetryMode::AfterCondition, "{message}");
+        assert_eq!(err.args(), None, "{message}");
+        assert!(
+            message.starts_with(&format!("{LAUNCH_REFUSAL} for agent 'alpha'"))
+                && message.ends_with("start it again once that change is done"),
+            "{message}"
+        );
+    }
+
+    // ── agent.setWorkspace · agent.duplicate (ADR-0386) ──
+
+    #[test]
+    fn set_workspace_hands_the_resolved_id_and_the_typed_folder_and_announces() {
+        let host = FakeHost::new();
+        let id = host.with_agent("alpha", false, false);
+        let (table, notify) = wiring(&host);
+
+        let out = call(
+            &table,
+            "agent.setWorkspace",
+            json!({ "target": "alpha", "cwd": "C:/new" }),
+        )
+        .expect("set");
+
+        assert_eq!(
+            out,
+            json!({ "agent_id": id.to_string(), "name": "alpha", "cwd": "C:/new" })
+        );
+        assert_eq!(
+            *host.workspace_calls.lock().unwrap(),
+            vec![(id, "C:/new".to_string())]
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn set_workspace_refusals_carry_their_code_and_args_and_announce_nothing() {
+        let coded =
+            |code: &str, args: serde_json::Value| Some(json!({ "code": code, "args": args }));
+        let cases = vec![
+            (
+                WorkspaceRefusal::FolderNotFound {
+                    cwd: "C:/gone".into(),
+                    why: "timeout".into(),
+                },
+                ErrorCode::InvalidArgument,
+                coded(
+                    WORKSPACE_NOT_FOUND,
+                    json!({ "cwd": "C:/gone", "why": "timeout" }),
+                ),
+            ),
+            (
+                WorkspaceRefusal::Locked(crate::profile_edit::WorkspaceLock::Running),
+                ErrorCode::Conflict,
+                coded(WORKSPACE_LOCKED, json!({ "reason": "running" })),
+            ),
+            (
+                WorkspaceRefusal::Locked(crate::profile_edit::WorkspaceLock::Preparing),
+                ErrorCode::Conflict,
+                coded(WORKSPACE_LOCKED, json!({ "reason": "preparing" })),
+            ),
+            (
+                WorkspaceRefusal::Locked(crate::profile_edit::WorkspaceLock::Conversed),
+                ErrorCode::Conflict,
+                coded(WORKSPACE_LOCKED, json!({ "reason": "conversed" })),
+            ),
+            (
+                WorkspaceRefusal::Changing,
+                ErrorCode::Conflict,
+                coded(WORKSPACE_LOCKED, json!({ "reason": "changing" })),
+            ),
+            (WorkspaceRefusal::NotFound, ErrorCode::NotFound, None),
+            (
+                WorkspaceRefusal::Store(StoreError::Io(std::io::Error::other("disk full"))),
+                ErrorCode::Internal,
+                None,
+            ),
+            (
+                WorkspaceRefusal::Store(StoreError::ReadOnly(crate::profile::Refusal::Newer {
+                    found: 2,
+                })),
+                ErrorCode::Conflict,
+                None,
+            ),
+        ];
+        for (refusal, code, args) in cases {
+            let label = format!("{refusal:?}");
+            let host = FakeHost::new();
+            host.with_agent("alpha", false, false);
+            *host.workspace_answer.lock().unwrap() = Some(Err(refusal));
+            let (table, notify) = wiring(&host);
+
+            let err = call(
+                &table,
+                "agent.setWorkspace",
+                json!({ "target": "alpha", "cwd": "C:/gone" }),
+            )
+            .expect_err(&label);
+
+            assert_eq!(err.code(), code, "{label}: {}", err.message());
+            assert_eq!(
+                err.args().cloned().map(serde_json::Value::Object),
+                args,
+                "{label}"
+            );
+            assert!(
+                err.message().starts_with("agent.setWorkspace: ") || code == ErrorCode::NotFound,
+                "{label}: {}",
+                err.message()
+            );
+            assert_eq!(*notify.calls.lock().unwrap(), 0, "{label}");
+        }
+    }
+
+    /// The refusals that clear by themselves — a stat that timed out, a launch preparing, another change — carry the
+    /// retry directive and its words; the ones only a different call or state fixes do not (ADR-0386 decision 14).
+    #[test]
+    fn set_workspace_refusals_that_clear_by_themselves_say_retry() {
+        use crate::profile_edit::WorkspaceLock;
+        let folder = |why: &str| WorkspaceRefusal::FolderNotFound {
+            cwd: "C:/w".into(),
+            why: why.into(),
+        };
+        let cases = vec![
+            (folder(crate::launch::STAT_TIMED_OUT), true),
+            (WorkspaceRefusal::Locked(WorkspaceLock::Preparing), true),
+            (WorkspaceRefusal::Changing, true),
+            (folder("missing"), false),
+            (folder("not a folder"), false),
+            (folder("not absolute"), false),
+            (WorkspaceRefusal::Locked(WorkspaceLock::Running), false),
+            (WorkspaceRefusal::Locked(WorkspaceLock::Conversed), false),
+        ];
+        for (refusal, clearable) in cases {
+            let label = format!("{refusal:?}");
+            let host = FakeHost::new();
+            host.with_agent("alpha", false, false);
+            *host.workspace_answer.lock().unwrap() = Some(Err(refusal));
+            let (table, _notify) = wiring(&host);
+
+            let err = call(
+                &table,
+                "agent.setWorkspace",
+                json!({ "target": "alpha", "cwd": "C:/w" }),
+            )
+            .expect_err(&label);
+
+            assert_eq!(
+                err.retry() == RetryMode::AfterCondition,
+                clearable,
+                "{label}: {:?}",
+                err.retry()
+            );
+            assert_eq!(
+                err.message()
+                    .ends_with("clear the cause, then repeat the same call"),
+                clearable,
+                "{label}: {}",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn set_workspace_rejects_blanks_and_resolves_the_target_first() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        let (table, _notify) = wiring(&host);
+        for args in [
+            json!({ "target": "alpha", "cwd": "  " }),
+            json!({ "target": " ", "cwd": "C:/new" }),
+        ] {
+            let err = call(&table, "agent.setWorkspace", args.clone()).expect_err("blank");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
+        }
+        let err = call(
+            &table,
+            "agent.setWorkspace",
+            json!({ "target": "ghost", "cwd": "C:/new" }),
+        )
+        .expect_err("no such agent");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(host.workspace_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn duplicate_registers_through_the_host_and_announces() {
+        let host = FakeHost::new();
+        let id = host.with_agent("alpha", false, false);
+        let (table, notify) = wiring(&host);
+
+        let out = call(&table, "agent.duplicate", json!({ "target": "alpha" })).expect("copied");
+
+        assert_eq!(out["name"], "alpha(1)");
+        assert_eq!(out["state"], AGENT_STATE_SLEEPING);
+        assert_ne!(out["agent_id"], id.to_string());
+        assert_eq!(*host.duplicate_calls.lock().unwrap(), vec![id]);
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    /// A duplicate is an LLM creation door: an original whose backend this surface does not create is refused with the
+    /// policy text naming that backend, before the host is called (ADR-0279 · ADR-0386).
+    #[test]
+    fn duplicate_refuses_an_original_whose_backend_the_policy_closes() {
+        let host = FakeHost::new();
+        host.with_status_command(
+            "sh",
+            None,
+            false,
+            AgentCommand::Shell {
+                program: "sh".into(),
+                args: vec![],
+            },
+        );
+        let (table, notify) = wiring(&host);
+
+        let err = call(&table, "agent.duplicate", json!({ "target": "sh" })).expect_err("closed");
+
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{}", err.message());
+        assert!(
+            err.message().starts_with("backend 'shell' is a known word"),
+            "{}",
+            err.message()
+        );
+        assert!(host.duplicate_calls.lock().unwrap().is_empty());
+        assert_eq!(*notify.calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn duplicate_refusals_map_like_a_create_and_announce_nothing() {
+        let cases = [
+            (
+                PtyError::RosterFull {
+                    current: 512,
+                    limit: 512,
+                },
+                ErrorCode::Conflict,
+            ),
+            (
+                PtyError::Unsupported("name suffix space exhausted".into()),
+                ErrorCode::Conflict,
+            ),
+            (
+                PtyError::NotFound(uuid::Uuid::new_v4()),
+                ErrorCode::NotFound,
+            ),
+            (
+                PtyError::Store(StoreError::Io(std::io::Error::other("disk full"))),
+                ErrorCode::Internal,
+            ),
+        ];
+        for (error, code) in cases {
+            let label = error.to_string();
+            let host = FakeHost::new();
+            host.with_agent("alpha", false, false);
+            *host.duplicate_answer.lock().unwrap() = Some(Err(error));
+            let (table, notify) = wiring(&host);
+
+            let err =
+                call(&table, "agent.duplicate", json!({ "target": "alpha" })).expect_err(&label);
+
+            assert_eq!(err.code(), code, "{label}: {}", err.message());
+            assert_eq!(*notify.calls.lock().unwrap(), 0, "{label}");
+        }
+    }
+
     /// With `cwd` the agent exists before its start fails, so the answer stays `INTERNAL` — a `CONFLICT` would release
     /// the request id and the same id's retry would create a second agent (ADR-0122). Every such answer names the
     /// created agent in `args.agent_id` (a block adds its reasons) so the recovery starts that one. The text carries
@@ -4085,6 +4605,16 @@ mod tests {
                 parent: Option<AgentId>,
             ) -> Result<bool, PtyError> {
                 self.0.reparent_agent(child, parent)
+            }
+            fn set_workspace(
+                &self,
+                id: AgentId,
+                cwd: &str,
+            ) -> Result<WorkspaceSet, WorkspaceRefusal> {
+                self.0.set_workspace(id, cwd)
+            }
+            fn duplicate_agent(&self, id: AgentId) -> Result<AgentProfile, PtyError> {
+                self.0.duplicate_agent(id)
             }
             fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
                 self.0.list_queued_inputs(id)
@@ -4884,6 +5414,16 @@ mod tests {
                 parent: Option<AgentId>,
             ) -> Result<bool, PtyError> {
                 self.0.reparent_agent(child, parent)
+            }
+            fn set_workspace(
+                &self,
+                id: AgentId,
+                cwd: &str,
+            ) -> Result<WorkspaceSet, WorkspaceRefusal> {
+                self.0.set_workspace(id, cwd)
+            }
+            fn duplicate_agent(&self, id: AgentId) -> Result<AgentProfile, PtyError> {
+                self.0.duplicate_agent(id)
             }
             fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
                 self.0.list_queued_inputs(id)

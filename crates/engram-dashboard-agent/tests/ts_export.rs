@@ -9,19 +9,20 @@
 
 use engram_dashboard_agent::commands::{
     AgentAttachPresetArgs, AgentAttachPresetOk, AgentCancelQueuedInputArgs,
-    AgentCancelQueuedInputOk, AgentDetachPresetArgs, AgentDetachPresetOk, AgentInterruptArgs,
-    AgentInterruptOk, AgentListArgs, AgentListOk, AgentListQueuedInputsArgs,
-    AgentListQueuedInputsOk, AgentMoveArgs, AgentMoveOk, AgentNewArgs, AgentNewOk,
-    AgentPresetsArgs, AgentPresetsOk, AgentRenameArgs, AgentRenameOk, AgentReorderPresetsArgs,
-    AgentReorderPresetsOk, AgentResolveArgs, AgentResolveOk, AgentSpawnArgs, AgentSpawnOk,
-    LibraryFoldersArgs, LibraryFoldersOk, LibraryListArgs, LibraryListOk, LibraryNewFileArgs,
-    LibraryNewFileOk, LibraryNewFolderArgs, LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk,
-    LibraryRefreshArgs, LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs,
-    LibrarySetRootOk, LibraryStatusArgs, LibraryStatusOk, PresetAddArgs, PresetAddOk,
-    PresetCheckArgs, PresetCheckOk, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs,
-    PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk,
-    PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs, PresetSetBackendOk, UsageGetArgs,
-    UsageRefreshArgs, UsageRefreshOk, UsageVendorRow, CATALOG_VERSION,
+    AgentCancelQueuedInputOk, AgentDetachPresetArgs, AgentDetachPresetOk, AgentDuplicateArgs,
+    AgentDuplicateOk, AgentInterruptArgs, AgentInterruptOk, AgentListArgs, AgentListOk,
+    AgentListQueuedInputsArgs, AgentListQueuedInputsOk, AgentMoveArgs, AgentMoveOk, AgentNewArgs,
+    AgentNewOk, AgentPresetsArgs, AgentPresetsOk, AgentRenameArgs, AgentRenameOk,
+    AgentReorderPresetsArgs, AgentReorderPresetsOk, AgentResolveArgs, AgentResolveOk,
+    AgentSetWorkspaceArgs, AgentSetWorkspaceOk, AgentSpawnArgs, AgentSpawnOk, LibraryFoldersArgs,
+    LibraryFoldersOk, LibraryListArgs, LibraryListOk, LibraryNewFileArgs, LibraryNewFileOk,
+    LibraryNewFolderArgs, LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs,
+    LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs, LibrarySetRootOk,
+    LibraryStatusArgs, LibraryStatusOk, PresetAddArgs, PresetAddOk, PresetCheckArgs, PresetCheckOk,
+    PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs, PresetPreviewFolderOk, PresetRemoveArgs,
+    PresetRemoveOk, PresetReorderArgs, PresetReorderOk, PresetSaveArgs, PresetSaveOk,
+    PresetSetBackendArgs, PresetSetBackendOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk,
+    UsageVendorRow, CATALOG_VERSION,
 };
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
 use ts_rs::TS;
@@ -137,6 +138,13 @@ fn export_typescript_bindings() {
         .expect("failed to export the AgentReorderPresetsArgs bindings");
     AgentReorderPresetsOk::export_all_to(out)
         .expect("failed to export the AgentReorderPresetsOk bindings");
+    AgentSetWorkspaceArgs::export_all_to(out)
+        .expect("failed to export the AgentSetWorkspaceArgs bindings");
+    AgentSetWorkspaceOk::export_all_to(out)
+        .expect("failed to export the AgentSetWorkspaceOk bindings");
+    AgentDuplicateArgs::export_all_to(out)
+        .expect("failed to export the AgentDuplicateArgs bindings");
+    AgentDuplicateOk::export_all_to(out).expect("failed to export the AgentDuplicateOk bindings");
 
     let produced: Vec<String> = std::fs::read_dir(out)
         .expect("read bindings/")

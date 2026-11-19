@@ -43,6 +43,9 @@ use crate::types::{
 
 mod prelaunch;
 mod profile_edit;
+mod roster_edit;
+
+pub use roster_edit::{WorkspaceRefusal, WorkspaceSet};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -390,25 +393,40 @@ fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
 /// The kind written into 「the last failure」 when the launch ended with `Err` before producing a process. ★A save `Err` · a
 /// launch-material block · a preparation race are 「other」, not `SpawnFailed`★ — none of them tried to open a process, and `SpawnFailed`
 /// (missing executable · permissions etc.) would make the screen and the LLM suspect the execution environment.
+/// ★Every variant is named — no default arm★: a new refusal before the process must be classified here, not fall into `SpawnFailed`.
+/// [`PtyError::WorkingFolderChanging`] is never recorded (both record sites skip it — ADR-0172); it is named so a record site that
+///   misses it still does not write `SpawnFailed`.
 // ADR-0291 R17
 // ADR-0319
+// ADR-0386
 fn spawn_error_kind(e: &PtyError) -> AgentFailureKind {
     match e {
-        PtyError::Store(_) | PtyError::LaunchBlocked(_) | PtyError::LaunchRaced => {
-            AgentFailureKind::Other
-        }
-        _ => AgentFailureKind::SpawnFailed,
+        PtyError::Store(_)
+        | PtyError::LaunchBlocked(_)
+        | PtyError::LaunchRaced
+        | PtyError::WorkingFolderChanging => AgentFailureKind::Other,
+        PtyError::NotFound(_)
+        | PtyError::SpawnFailed(_)
+        | PtyError::WriteFailed(_)
+        | PtyError::CwdDenied
+        | PtyError::Io(_)
+        | PtyError::Unsupported(_)
+        | PtyError::RosterFull { .. } => AgentFailureKind::SpawnFailed,
     }
 }
 
-/// The failures cut before opening a process that the caller must receive **as a kind** — the bus tells a save refusal · launch block from
-/// other failures. The resume verb raises only these as `Err` and folds the rest into the activation outcome text.
+/// The failures cut before opening a process that the caller must receive **as a kind** — the bus tells a save refusal · launch block ·
+/// working-folder change from other failures. The resume verb raises only these as `Err` and folds the rest into the activation outcome text.
 // ADR-0291 R17
 // ADR-0334
+// ADR-0386
 fn refused_before_spawn(e: &PtyError) -> bool {
     matches!(
         e,
-        PtyError::Store(_) | PtyError::LaunchBlocked(_) | PtyError::LaunchRaced
+        PtyError::Store(_)
+            | PtyError::LaunchBlocked(_)
+            | PtyError::LaunchRaced
+            | PtyError::WorkingFolderChanging
     )
 }
 
@@ -645,20 +663,20 @@ pub struct AgentManager {
     /// (`DaemonControlChannel`); the default is `NoopControlChannel` (headless tests · shell-only paths). An `Arc`, shared with the reaper.
     control: Arc<dyn ControlChannel>,
 
-    /// ADR-0086 provision race guard (FIX 6) — the AgentIds being spawned (reservations). Without it, another connection spawning the same id in
+    /// ADR-0086 provision race guard (FIX 6) — the AgentIds being spawned (reservations), each with who holds it. Without it, another connection spawning the same id in
     /// the TOCTOU window between the `contains_key` guard and `sessions.insert` would provision the same (AgentId,epoch) path and one reaper
     /// could delete the other's live session. Entry reserves atomically (immediate `Err` if present); `SpawnReservation` releases on drop.
     /// ★A leaf lock separate from the sessions map★: no sessions/status lock is taken while holding it (ADR-0006).
-    spawning: Arc<Mutex<HashSet<AgentId>>>,
+    spawning: Reservations,
 
     /// The name allocation gate — a stateless serializing lock guarding one invariant: **between observing the roster and committing a name
     /// from it, no other allocation slips in** (else two creations both take the same free name). Derivation · observation · commit all happen inside.
     ///
-    /// ★Lock order = name_allocation → sessions/profiles, one-way★ — `try_create_agent` · `try_rename_agent` · `ensure_registered` touch the
-    /// roster only **after** taking it; no reverse order exists (ADR-0006).
+    /// ★Lock order = name_allocation → sessions/profiles, one-way★ — `try_create_agent` · `try_rename_agent` · `ensure_registered` · `try_set_workspace` ·
+    /// `try_duplicate_agent` touch the roster only **after** taking it; no reverse order exists (ADR-0006).
     /// ★The critical section is not cheap★: the `roster()` observation pays **one `dunce::canonicalize` per asleep agent without an override** and
-    /// the commit writes the whole the profile file (ADR-0071), so creation, rename and new-registration spawn serialize globally — a dead network
-    /// share stalls all three. ★Mail delivery must stay unblocked★: `DeliveryPort` never takes this lock (`roster()` works without it).
+    /// the commit writes the whole the profile file (ADR-0071), so creation, rename, new-registration spawn, working-folder change and duplicate
+    /// serialize globally — a dead network share stalls them all. ★Mail delivery must stay unblocked★: `DeliveryPort` never takes this lock (`roster()` works without it).
     // ADR-0006
     name_allocation: Arc<Mutex<()>>,
 
@@ -686,7 +704,8 @@ pub struct AgentManager {
 }
 
 /// The RAII guard taking the AgentId reservation during spawn and releasing it on drop (ADR-0086 FIX 6), so no early return of `spawn_agent`
-/// leaks it. `reserve` returns `None` for an already-reserved id.
+/// leaks it. `reserve` answers `Err(holder)` for an already-reserved id. `agent.setWorkspace` takes the same guard as a
+/// working-folder holder ([`ReservationHolder::WorkingFolder`]), from its re-check to its registry write.
 ///
 /// ★Two other safeties rest on this guard's **lifetime** — shortening it opens both together★: on a link declaring a connection, [`LinkWatch`]
 /// holds it **until the connection outcome**, so no new incarnation can stand with the same id. Hence ① the mailbox's incarnation-marker
@@ -694,19 +713,39 @@ pub struct AgentManager {
 /// ② the supervisor may pick the session by id alone (`get_session(id)` without a marker comparison). A change narrowing this lifetime
 /// **must re-examine both**; the dependency is written here, at the definition.
 struct SpawnReservation {
-    spawning: Arc<Mutex<HashSet<AgentId>>>,
+    spawning: Reservations,
     id: AgentId,
 }
 
+/// The reservation table — each reserved id with who holds it.
+type Reservations = Arc<Mutex<HashMap<AgentId, ReservationHolder>>>;
+
+/// Who holds an agent's reservation. A launch that loses it to a working-folder change answers
+/// [`PtyError::WorkingFolderChanging`]; one that loses it to another launch keeps the double-start answers.
+// ADR-0386
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReservationHolder {
+    Launch,
+    /// `agent.setWorkspace` — taken after its pre-check and held through its re-check and registry write, never across a
+    /// launch.
+    WorkingFolder,
+}
+
 impl SpawnReservation {
-    fn reserve(spawning: Arc<Mutex<HashSet<AgentId>>>, id: AgentId) -> Option<Self> {
+    /// `Err` = already reserved, with who holds it.
+    fn reserve(
+        spawning: Reservations,
+        id: AgentId,
+        holder: ReservationHolder,
+    ) -> Result<Self, ReservationHolder> {
         {
-            let mut set = spawning.lock().expect("spawning set poisoned");
-            if !set.insert(id) {
-                return None;
+            let mut table = spawning.lock().expect("spawning table poisoned");
+            if let Some(&held) = table.get(&id) {
+                return Err(held);
             }
+            table.insert(id, holder);
         }
-        Some(Self { spawning, id })
+        Ok(Self { spawning, id })
     }
 }
 
@@ -715,7 +754,7 @@ impl Drop for SpawnReservation {
         let _ = self
             .spawning
             .lock()
-            .expect("spawning set poisoned")
+            .expect("spawning table poisoned")
             .remove(&self.id);
     }
 }
@@ -789,7 +828,7 @@ impl AgentManager {
             reaper_tx,
             reaper_handle: Some(reaper_handle),
             control,
-            spawning: Arc::new(Mutex::new(HashSet::new())),
+            spawning: Arc::new(Mutex::new(HashMap::new())),
             name_allocation: Arc::new(Mutex::new(())),
             turns,
             inputs_pending,
@@ -1226,8 +1265,10 @@ impl AgentManager {
     // ── spawn ──────────────────────────────────────────────────────────────
 
     /// ★The two branches' 「nothing to do」 is `Ok(Moot)` — do not revert to `Err`★: an entry already up (double-spawn guard below) or already
-    /// launching (reservation lost) is moot, not a failure (see `SpawnOutcome`).
+    /// launching (reservation lost to another launch) is moot, not a failure (see `SpawnOutcome`). A reservation held by a working-folder
+    /// change is [`PtyError::WorkingFolderChanging`] — nothing was started, and the caller starts it again after that change.
     // ADR-0172
+    // ADR-0386
     /// ★A thin delegation that drops the delivery channel★ — callers waiting for the connection outcome use
     /// [`AgentManager::spawn_agent_watching_link`]. Here the link's delivery silently fails (by design) and nobody waits.
     /// ★So **the connection failure of an incarnation launched with this verb has no owner**★; the activation entries
@@ -1276,14 +1317,23 @@ impl AgentManager {
         //   second request answer `Moot(Some(..))` 「it is up」, and when the first then fails and collects it the second caller **holds as alive an
         //   agent about to die**. Reservation first answers `Moot(None)` (「already launching」). ★On links without a connection axis the order changes
         //   nothing★ (the reservation ends with this function).
-        let Some(reservation) = SpawnReservation::reserve(self.spawning.clone(), profile.id) else {
+        let reservation = match SpawnReservation::reserve(
+            self.spawning.clone(),
+            profile.id,
+            ReservationHolder::Launch,
+        ) {
+            Ok(reservation) => reservation,
             // The winner has not yet put it on the roster, or even if it has, that connection has not produced its outcome yet — either way
             // we have no ground to answer 「it is up」.
-            tracing::info!(
-                agent = %profile.id,
-                "spawn_agent: already launching — this request has nothing to do (moot)"
-            );
-            return Ok((SpawnOutcome::Moot(None), None, None));
+            Err(ReservationHolder::Launch) => {
+                tracing::info!(
+                    agent = %profile.id,
+                    "spawn_agent: already launching — this request has nothing to do (moot)"
+                );
+                return Ok((SpawnOutcome::Moot(None), None, None));
+            }
+            // ADR-0386: a refusal, not moot — no other launch is bringing the agent up.
+            Err(ReservationHolder::WorkingFolder) => return Err(PtyError::WorkingFolderChanging),
         };
 
         // ★Residual race (ADR-0082 unresolved · follow-up)★: this guard reads `contains_key` under a read lock and releases it, while `sessions.insert`
@@ -1666,7 +1716,8 @@ impl AgentManager {
     /// success = [`AgentManager::spawn_agent_watching_link`]); boot restore uses `Entry::Internal`.
     /// A launch-material block = [`PtyError::LaunchBlocked`] · the launch inputs (attachments · command · env) changed both times, the passed
     ///   copy's command · env differ from the roster, or the checked source changed before material preparation = [`PtyError::LaunchRaced`] —
-    ///   the same variant returns for a new conversation or a resume, and the 「last failure」 is 「other」.
+    ///   the same variant returns for a new conversation or a resume, and the 「last failure」 is 「other」. A working-folder
+    ///   change holding the agent's reservation = [`PtyError::WorkingFolderChanging`] — nothing recorded.
     /// Records no notice fingerprint and drops the notices — [`AgentManager::activate_profile_reporting`] with
     ///   [`NoticeDelivery::Withheld`].
     // ADR-0082
@@ -1702,15 +1753,20 @@ impl AgentManager {
         // ★`Err` is honest★: this request did nothing and has no live session to return (the Fresh branch below uses the same text) — extended here until the
         //   connection stands. ★Narrows the window, does not close it★: a few-command window remains before the reservation in
         //   `spawn_agent_watching_link` (ADR-0082 「Open items」 ③); what closed is the long one-handshake window.
-        if self.activation_in_flight(profile.id) {
-            tracing::info!(
-                agent = %profile.id,
-                "activate_profile: another request's activation has not produced its outcome yet — this request has nothing to do"
-            );
-            return Err(PtyError::SpawnFailed(format!(
-                "another request is already activating agent {}; this one did nothing",
-                profile.id
-            )));
+        match self.reservation_holder(profile.id) {
+            Some(ReservationHolder::Launch) => {
+                tracing::info!(
+                    agent = %profile.id,
+                    "activate_profile: another request's activation has not produced its outcome yet — this request has nothing to do"
+                );
+                return Err(PtyError::SpawnFailed(format!(
+                    "another request is already activating agent {}; this one did nothing",
+                    profile.id
+                )));
+            }
+            // ADR-0386
+            Some(ReservationHolder::WorkingFolder) => return Err(PtyError::WorkingFolderChanging),
+            None => {}
         }
 
         if let Ok(session) = self.get_session(profile.id) {
@@ -1839,15 +1895,22 @@ impl AgentManager {
         self.profiles.set_last_failure(id, incarnation, failure);
     }
 
-    /// Whether this entry's activation is **still in progress without an outcome**. ★Reading the reservation set as is suffices — no second state★: its
+    /// Whether this entry's activation is **still in progress without an outcome** — a launch holds its reservation. ★Reading the reservation table as is suffices — no second state★: its
     /// lifetime is already 「someone is launching this entry」 and [`LinkWatch`] extends it **until the connection outcome**; a separate 「establishing」
     /// table would add two set/clear places and revive the shape where the link kept its own state for the supervisor to peek at (root of four defects).
-    /// One `contains` under the lock; no sessions/profiles lock is taken (ADR-0006).
+    /// A working-folder change holding the reservation is not an activation.
+    // ADR-0386
     fn activation_in_flight(&self, id: AgentId) -> bool {
+        self.reservation_holder(id) == Some(ReservationHolder::Launch)
+    }
+
+    /// Who holds this agent's reservation now — one lookup under the leaf lock; no sessions/profiles lock is taken (ADR-0006).
+    fn reservation_holder(&self, id: AgentId) -> Option<ReservationHolder> {
         self.spawning
             .lock()
-            .expect("spawning set poisoned")
-            .contains(&id)
+            .expect("spawning table poisoned")
+            .get(&id)
+            .copied()
     }
 
     /// Create-and-start for a profile whose id is not in the roster — the Fresh activation path
@@ -1886,14 +1949,16 @@ impl AgentManager {
     /// ★Only for [`AgentManager::spawn_fresh_settled`]'s **links without a connection axis**★: on a connection-declaring link `Started` returns before the
     /// outcome exists, and clearing then is the evidence destruction ADR-0202 prevents (that branch writes after seeing the decision).
     /// ★moot writing nothing is the definition★ (nothing done → no failure, no ground to clear; same as `activate_profile`'s "already running" branch).
+    /// A launch that lost the reservation to a working-folder change writes nothing either — it tried nothing.
     /// Resume does not use this — success holds only after the early-exit window, known to `resume_no_fallback`.
     // ADR-0172
+    // ADR-0386
     fn note_spawn_result(&self, id: AgentId, result: &Result<SpawnOutcome, PtyError>) {
         match result {
             Ok(SpawnOutcome::Started(info)) => {
                 self.note_activation_result(id, Some(info.epoch), None)
             }
-            Ok(SpawnOutcome::Moot(_)) => {}
+            Ok(SpawnOutcome::Moot(_)) | Err(PtyError::WorkingFolderChanging) => {}
             // There is no incarnation, so there is no generation to compare (the `None` branch of the `set_last_failure` contract).
             Err(e) => self.note_activation_result(id, None, Some(spawn_error_kind(e))),
         }
@@ -2202,7 +2267,7 @@ impl AgentManager {
         // Boot restore answers no caller, so its launch notices are only logged — never recorded (ADR-0341).
         match self.resume_no_fallback(profile, Entry::Internal) {
             Ok((outcome, _, _)) => outcome,
-            // A refusal before launch (the internal entry gets no save `Err`, only a launch block · preparation race) is folded into the restore report text.
+            // A refusal before launch (the internal entry gets no save `Err`, only a launch block · preparation race · working-folder change) is folded into the restore report text.
             Err(refused) => RestoreOutcome::Failed {
                 reason: format!("resume spawn failed: {refused}"),
             },
@@ -2226,9 +2291,10 @@ impl AgentManager {
     /// process; a moot request (reported as `Resumed` or `Started`) and every `Failed` carry `None`. Do not key the
     /// notice record on the `RestoreOutcome` variant.
     /// `entry` is handed to the shared body as received.
-    /// ★`Err` = refused before launch, not launched — a save `Err` (only the caller entry) · a launch block · a preparation race (those three =
-    ///   [`refused_before_spawn`])★ — do not fold into a `RestoreOutcome::Failed` text: `activate_profile` could then not return that variant
-    ///   and the bus could not tell a save refusal · block from other failures. Record and log stay as when folded.
+    /// ★`Err` = refused before launch, not launched — a save `Err` (only the caller entry) · a launch block · a preparation race · a
+    ///   working-folder change holding the reservation (those four = [`refused_before_spawn`])★ — do not fold into a `RestoreOutcome::Failed`
+    ///   text: `activate_profile` could then not return that variant and the bus could not tell a save refusal · block from other failures.
+    ///   Record and log stay as when folded; the working-folder change records nothing (ADR-0172 · ADR-0386).
     // ADR-0082
     // ADR-0172
     // ADR-0291 R17
@@ -2275,6 +2341,8 @@ impl AgentManager {
 
         let attempt = self.spawn_agent_watching_link(profile, SpawnMode::Resume, entry);
         let (outcome, watch, launched) = match attempt {
+            // ADR-0172 · ADR-0386: lost to a working-folder change — nothing was tried, so nothing is recorded.
+            Err(PtyError::WorkingFolderChanging) => return Err(PtyError::WorkingFolderChanging),
             Err(e) => {
                 // ADR-0172: failure is recorded where attempted — the screen/API-side real thing of ADR-0082's "leave the cause for the control LLM to read" (logs are read only by people).
                 self.note_activation_result(profile.id, None, Some(spawn_error_kind(&e)));
@@ -4270,7 +4338,9 @@ mod tests {
         );
 
         // That interval where the first request waits for the outcome — `LinkWatch` holds the reservation.
-        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("reservation");
+        let _held =
+            SpawnReservation::reserve(manager.spawning.clone(), id, ReservationHolder::Launch)
+                .expect("reservation");
         let during = manager.activate_profile(&profile, SpawnMode::Fresh);
         assert!(
             during.is_err(),
@@ -4301,7 +4371,9 @@ mod tests {
             "premise: an incarnation with an outcome returns that information even if moot"
         );
 
-        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("reservation");
+        let _held =
+            SpawnReservation::reserve(manager.spawning.clone(), id, ReservationHolder::Launch)
+                .expect("reservation");
         let during = manager
             .spawn_agent(&profile, SpawnMode::Fresh)
             .expect("a duplicate request is not an error");
@@ -4309,6 +4381,129 @@ mod tests {
             during.into_info().is_none(),
             "returned an incarnation whose connection has not stood yet as up — this answer comes out if the roster lookup precedes the reservation"
         );
+    }
+
+    // ── A launch that loses the reservation to a working-folder change (ADR-0386) ──
+    // The tests hold the working-folder reservation directly — there is no production test hook.
+
+    fn hold_working_folder(manager: &AgentManager, id: AgentId) -> SpawnReservation {
+        SpawnReservation::reserve(
+            manager.spawning.clone(),
+            id,
+            ReservationHolder::WorkingFolder,
+        )
+        .expect("reserve")
+    }
+
+    fn last_failure_of(manager: &AgentManager, id: AgentId) -> Option<AgentFailureKind> {
+        manager.agent_snapshot(id).and_then(|p| p.last_failure)
+    }
+
+    /// An earlier failure the refused launch must leave as it is — neither recorded over nor cleared (ADR-0172).
+    const EARLIER: AgentFailureKind = AgentFailureKind::SpawnFailed;
+
+    fn seed_earlier_failure(manager: &AgentManager, id: AgentId) {
+        assert!(manager.profiles.set_last_failure(id, None, Some(EARLIER)));
+    }
+
+    /// The caller activation's in-flight check answers the working-folder variant for both modes — nothing launched,
+    /// nothing recorded.
+    #[test]
+    fn an_activation_during_a_working_folder_change_is_refused_and_records_nothing() {
+        let manager = bare_manager();
+        let mut profile = claude_profile_that_cannot_launch();
+        profile.backend_session_id = Some(Uuid::new_v4());
+        manager.profiles.upsert(profile.clone());
+        seed_earlier_failure(&manager, profile.id);
+        let _held = hold_working_folder(&manager, profile.id);
+
+        for mode in [SpawnMode::Fresh, SpawnMode::Resume] {
+            let err = manager
+                .activate_profile(&profile, mode)
+                .expect_err("the working folder is being changed");
+            assert!(
+                matches!(err, PtyError::WorkingFolderChanging),
+                "{mode:?}: {err}"
+            );
+        }
+        assert!(manager.list_agents().is_empty(), "nothing launched");
+        assert_eq!(last_failure_of(&manager, profile.id), Some(EARLIER));
+        let _ = std::fs::remove_dir(&profile.cwd);
+    }
+
+    /// Past the in-flight check (the spawn verbs and boot restore go straight to the reservation) the reserve branch
+    /// answers the variant, and neither record site writes a last failure — Fresh through `spawn_fresh_settled`
+    /// (`note_spawn_result`), Resume through `resume_no_fallback`, which records before it tests `refused_before_spawn`.
+    /// Boot restore reports both as `Failed`.
+    #[test]
+    fn a_launch_losing_the_reservation_to_a_working_folder_change_records_no_last_failure() {
+        let manager = bare_manager();
+        let fresh = claude_profile_that_cannot_launch();
+        manager.profiles.upsert(fresh.clone());
+        let mut resume = claude_profile_that_cannot_launch();
+        resume.backend_session_id = Some(Uuid::new_v4());
+        manager.profiles.upsert(resume.clone());
+        seed_earlier_failure(&manager, fresh.id);
+        seed_earlier_failure(&manager, resume.id);
+        let _fresh_held = hold_working_folder(&manager, fresh.id);
+        let _resume_held = hold_working_folder(&manager, resume.id);
+
+        assert!(matches!(
+            manager.spawn_agent(&fresh, SpawnMode::Fresh),
+            Err(PtyError::WorkingFolderChanging)
+        ));
+        assert!(matches!(
+            manager.spawn_fresh_settled(&fresh, Entry::Caller),
+            Err(PtyError::WorkingFolderChanging)
+        ));
+        assert!(matches!(
+            manager.resume_no_fallback(&resume, Entry::Caller),
+            Err(PtyError::WorkingFolderChanging)
+        ));
+        for p in [&fresh, &resume] {
+            match manager.restore_one(p) {
+                RestoreOutcome::Failed { reason } => assert!(
+                    reason.contains("working folder is being changed"),
+                    "{reason}"
+                ),
+                other => panic!("boot restore reported {other:?}"),
+            }
+            assert_eq!(last_failure_of(&manager, p.id), Some(EARLIER), "{}", p.id);
+        }
+        assert!(manager.list_agents().is_empty(), "nothing launched");
+        let _ = std::fs::remove_dir(&fresh.cwd);
+        let _ = std::fs::remove_dir(&resume.cwd);
+    }
+
+    /// A launch losing to another launch keeps today's answers — the caller activation's in-flight `SpawnFailed`, the
+    /// spawn verb's `Moot(None)`, boot restore's `Started` — and records nothing.
+    #[test]
+    fn a_launch_losing_to_another_launch_keeps_the_double_start_answers() {
+        let manager = bare_manager();
+        let profile = claude_profile_that_cannot_launch();
+        manager.profiles.upsert(profile.clone());
+        seed_earlier_failure(&manager, profile.id);
+        let _held = SpawnReservation::reserve(
+            manager.spawning.clone(),
+            profile.id,
+            ReservationHolder::Launch,
+        )
+        .expect("reserve");
+
+        assert!(matches!(
+            manager.activate_profile(&profile, SpawnMode::Fresh),
+            Err(PtyError::SpawnFailed(_))
+        ));
+        assert!(matches!(
+            manager.spawn_agent(&profile, SpawnMode::Fresh),
+            Ok(SpawnOutcome::Moot(None))
+        ));
+        assert!(matches!(
+            manager.restore_one(&profile),
+            RestoreOutcome::Started
+        ));
+        assert_eq!(last_failure_of(&manager, profile.id), Some(EARLIER));
+        let _ = std::fs::remove_dir(&profile.cwd);
     }
 
     /// ★Measures **the half the two entries above cannot**★ — that the interval lasts **until the connection outcome**: they hold the reservation by hand and stay green even if production releases it where spawn
@@ -5170,7 +5365,7 @@ mod tests {
     // ── Runaway backstop (total roster cap) ──────────────────────────────────────────────────
 
     /// A manager only for cap tests — **memory** profile storage: `bare_manager`'s file storage writes the whole roster per registration (save under lock), making 512 fills O(n²) disk I/O; only the count decision is looked at.
-    fn capacity_manager() -> AgentManager {
+    pub(super) fn capacity_manager() -> AgentManager {
         #[derive(Default)]
         struct MemStore(Mutex<Vec<AgentProfile>>);
         impl crate::profile::ProfileStore for MemStore {
@@ -5196,7 +5391,7 @@ mod tests {
     }
 
     /// Fills up to just below the cap. The uniqueness-bypassing seam is used only for speed (the normal path scans the roster per registration, O(n²)).
-    fn fill_roster_to(manager: &AgentManager, count: usize) {
+    pub(super) fn fill_roster_to(manager: &AgentManager, count: usize) {
         for i in 0..count {
             let mut p = agent_profile(&format!("C:/filler/{i}"), Some(&format!("filler-{i}")));
             p.id = AgentId::new_v4();
@@ -6247,8 +6442,9 @@ mod tests {
         assert!(seeded, "premise: the seed actually changes the value");
 
         // The very situation of another request in progress — held without releasing.
-        let _held = SpawnReservation::reserve(manager.spawning.clone(), id)
-            .expect("the reservation can be taken");
+        let _held =
+            SpawnReservation::reserve(manager.spawning.clone(), id, ReservationHolder::Launch)
+                .expect("the reservation can be taken");
 
         let outcome = manager
             .activate_profile(&profile, SpawnMode::Fresh)
