@@ -1,6 +1,6 @@
 # S37 PRD — daemon↔daemon agent mail between the user's own PCs
 
-- Status: draft 2 · 2026-11-19 · decisions D1–D7 all taken by the user; PRD approval is asked together with the PRD+TRD review.
+- Status: draft 3 · 2026-11-19 (review fixes) · decisions D1–D7 all taken by the user; PRD approval is asked together with the PRD+TRD review. Items still waiting for the user after the review: TRD §8 「Open — waiting for the user」.
 - Research: `../../research/multi-daemon-federation-direction-2026-11-11.md` (GPT draft vs code, peers, Syncthing / hcom / Reason Network source reads) · `../../research/multi-daemon-iroh-link-plan-2026-11-11.md` (iroh vs alternatives, seam fit, weight, build plan).
 
 ## 1. What · why
@@ -47,7 +47,7 @@ Non-goals (v1):
 - R5 — An agent can send mail to an agent on another trusted PC by the agent's bare name, exactly as it names a local agent; `name@pc` names one PC explicitly (D2, decided). A local agent of that name always wins; other PCs are searched only when no local agent has the name. The recipient gets it the way local mail arrives today (delivered now, or held while the recipient is asleep or busy, same as local).
 - R6 — The sender receives a result for each remote mail: delivered · held (recipient asleep/busy) · refused (with a reason) · not delivered (PC offline) · unconfirmed (no answer in time). v1 does not resend automatically.
 - R7 — The recipient can reply with the existing reply contract, and the reply reaches the original sender on the other PC.
-- R8 — Who sent a remote mail is decided only from the authenticated link, never from fields inside the message.
+- R8 — Which PC sent a remote mail is decided only from the authenticated link, never from fields inside the message. The sending agent's name is the sending daemon's claim, shown together with that PC's name.
 - R9 — Inbound remote mail is limited (values = D5). Remote peers can only send mail — no agent start/stop, no input outside mail, no commands.
 - R10 — Helper servers: n0's public relay and address lookup by default; the user can set their own relay and lookup server addresses without code changes. A typed peer address works with no helper server at all.
 - R11 — The daemon's listen port can be fixed in settings so a typed address stays valid across restarts.
@@ -89,23 +89,21 @@ Measured on two PCs (A, B) unless stated.
 
 - D1 — Pairing (decided 2026-11-18): paste the other PC's ID on both PCs (Syncthing device-ID exchange). The user saw the other forms — one paste + accept prompt (Syncthing pending device, KDE Connect), one-time short code (Reason Network, Magic Wormhole), invite link (Reason Network team link) — and noted they all end in registering the ID: 「결국 2,3,4는 1이 되야 가능한거 아냐?」 → 「1먼저 해.」 The others are later conveniences on the same `peer.add`; the accept prompt is the suggested next one.
 - D2 — Remote address seen by agents (decided 2026-11-18, quotes in §1): bare names resolve across the user's trusted PCs through a shared directory; `name@pc` stays as the explicit form (R5 · R16 · R17 · R18). Drafted default was `name@pc` only — dropped because rules would have to name the PC 「어디 서버에 어디 에이전트에게」. Conventions: Reason Network keeps a replicated session directory where a bare session name works when it is unique and otherwise must be qualified `…@machine` (source read: `src/daemon/directory.rs` `resolve` / `pick`, research §8); Erlang `global` registered names (one name → one process anywhere in the cluster); service discovery (Consul catalog, Kubernetes Service) — a name maps to its current location through a directory, not a per-message broadcast. Not copied: Reason Network's full presence broadcast (checked every 2 s, re-sent every 60 s, carries repo / branch / activity — `src/net.rs` `presence_loop`); its pick of the live candidate when one name exists on several machines (here that is ambiguous, so the same rule never switches PC silently).
-- D3 — Other PC off (decided 2026-11-19): fail at once and tell the sender; keeping and sending later (outbox — Reason Network keeps 7 days, SMTP queues for days) is the next unit — user: 「다음 단위로 해야될것같은데? 이득에 비해서 얻는게 적다」. The user asked that a send cut off by a link drop still gets system feedback: an unconfirmed send gets one later notice with the final outcome (TRD §3-4); making such notices ride the next input without a turn is T-115.
+- D3 — Other PC off (decided 2026-11-19): fail at once and tell the sender; keeping and sending later (outbox — Reason Network keeps 7 days, SMTP queues for days) is the next unit — user: 「다음 단위로 해야될것같은데? 이득에 비해서 얻는게 적다」. The user asked that a send cut off by a link drop still gets system feedback: an unconfirmed send gets one later notice with the final outcome, or saying the outcome stayed unknown (TRD §3-4); making such notices ride the next input without a turn is T-115.
 - D4 — Helper servers (decided 2026-11-19): one network setting — n0 public relay + address lookup (default) / a server the user hosts (`iroh-relay` + `iroh-dns-server` URLs) / off — plus an optional address per trusted PC. All paths are tried together and a direct path always wins over the relay; there is no user-set priority. Engram runs no server of its own. User: 「유료로되면 못쓴다는거네」 → 「우리서버는 없어. 상대방이 알아서 서버 구축하는건 있고」 → 「다 입력해도 되는거고 우선순위는 어찌된다는거?」 (answer: automatic, direct first).
 - D5 — Inbound limits (decided 2026-11-19): Reason Network's values — per PC 60 mails/min, per agent pair 12 per 10 min, body 64 KB — held as one limits value the daemon passes in, so a future settings system can expose them; there is no settings module yet, so v1 has no user-facing setting for them. User: 「resason network 에 맞춰서 두던지. 그리고 설정값으로 빼둘 수 있도록. 아직 설정값 자체는 base 모듈에 없어서 나중에 개발하면 수정해야되겠지만」.
 - D6 — Same-LAN discovery (decided 2026-11-19): on by default, kept as a setting (Syncthing local discovery is on by default). It only finds where an already-trusted PC is; connections are still limited to trusted PCs. Side effect: other LAN devices can see this PC's ID. User: 「손해 없음 켬으로해」.
 - D7 — When the feature runs (decided 2026-11-19): only while at least one trusted PC is registered; it starts on the first `peer.add` and stops when the last PC is removed, so users who never pair contact nothing. User: 「pc 하나 이상 등록한 뒤부터」.
 
-### Open
+### Main defaults (internal, reported)
 
-Conventions are named in each line; ★ = main default.
-
-
-Main defaults (internal, reported): iroh 1.x as the link library behind the transport seam; identity = iroh secret key in the daemon state folder; trusted list = a JSON file under the base `file` rules (ADR-0291); request deadline = the existing shared deadline; delivery results map onto the transport request/response correlation.
+iroh 1.x as the link library behind the transport seam; identity = iroh secret key in the daemon state folder; trusted list = a JSON file under the base `file` rules (ADR-0291); the sending agent waits at most 7 s for a remote result — the wait command delivery already uses, so the `engram` CLI does not cut off first (ADR-0161) — while a late answer is still taken for up to 120 s and reported by one notice (TRD §3-4); delivery results map onto the transport request/response correlation.
 
 ## 6. Risks
 
 - Corporate networks may block UDP, multicast or the relay domain; office ↔ home may then not link. Whether running this on a company network is allowed is a company security-policy question, not decided here.
 - Default helper servers are a third party's free service (rate-limited, "can change at any time"); mitigated by R10.
+- What the default helper servers see: n0's lookup server holds a record from this PC's ID to its home relay (no IP address by default), and the relay sees this PC's public IP address, its ID, the IDs it talks to and the traffic timing. Mail content is end-to-end encrypted. Own servers or "off" (R10) remove n0 from the path.
 - Remote mail reaches agents that run with broad permissions; a trusted PC can make an agent act. Trust is limited to the user's own PCs (R4) and to mail (R9).
 - The daemon grows by ~170 crates; the exact exe growth is unmeasured.
 - iroh is maintained by one vendor (n0); the link sits behind the transport seam so it can be replaced.
