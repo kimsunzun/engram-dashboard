@@ -432,3 +432,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0383](0383-internal-text-is-english-only-screen-text-stays-switchable.md) | Internal text is English-only; screen text stays switchable | 확정 |
 | [0384](0384-library-edit-relink-and-create-rules-set-while-coding-step-9a.md) | Library edit, relink and create rules set while coding step 9a | 확정 |
 | [0385](0385-library-roots-can-be-several-and-independent-added-as-an-s25.md) | Library roots can be several and independent, added as an S25 step between 10a and 9b | 확정 |
+| [0386](0386-library-preset-and-agent-preset-commands-surface-rules-set.md) | Library, preset and agent-preset commands: surface rules set by step 10a | 확정 |
