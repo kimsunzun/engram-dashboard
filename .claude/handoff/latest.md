@@ -1,59 +1,52 @@
-# Handoff: S25 step 9a — master S38 merged, U2 and U3 landed; U4 coded and reviewed but stopped at the review-round cap (user question) — next = ask the U4 question, then QA + commit U4 and freeze 9a
+# Handoff: S25 — 9a frozen; ADR-0385 several roots (new step 21); 10a TRD draft 2 re-reviewed PASS by both Claude reviewers — next = fold the round-2 권장, ask the 4 user holds, record review pass, then code 10a
 
 ## Know first
-- **One user question blocks U4** (ask it first, in plain words — what the user sees):
-  - Situation: relink reports each old→new pair it "fixed". If an agent attached to the old preset is deleted by another request at the same moment as the relink, the pair can be reported fixed although no agent changed. Disk and registry stay correct; only the answer's `fixed` list is off, in a rare race. Raised by codex in U4 re-review round 4; the lead reviewer called the same area negligible.
-  - Why it is a question: U4 used all 3 fix rounds (implement flow §3 cap) and the `fixed`-accounting class produced a new case two rounds in a row (review flow §4) — both rules say stop and ask, even in autonomous mode.
-  - Options: **A ★ accept as a known edge** — record it in `docs/tracking.md`, land U4 as is (QA → commit). **B fix** — count a pair's agent half from the port's answer (the changed agent ids ∩ the agents that attached the pair in the in-change registry read); small change in `relink.rs` + a test; then one more codex re-review, QA, commit.
-  - ★ reason: reporting-only, needs a concurrent delete inside a relink; B is cheap but reopens the same accounting area a fourth time.
-- U4 is **uncommitted and gate-unpassed** (code review stopped at the cap; QA not run). Do not commit it before the answer. Files: `crates/engram-dashboard-asset-library/src/{relink.rs,create.rs}` (untracked, new), modified `agent_edit.rs`, `catalog.rs`, `edit.rs`, `launch.rs`, `lib.rs`, `store.rs`, `docs/reference/structure/asset-library.md`. Main's batched wording fixes for U4 are already applied in the tree (relink header order, skip/stop docs, a `relink stopped` warn log, new_file leftover note); `cargo check` + fmt + Hangul clean after them; full test not rerun after the wording edits.
-- Autonomous mode (default); the user went to sleep and said 「자율모드 ㄱㄱ」.
-- Untracked `.claude/explain/` is not ours. `*/bindings/*.ts` line-ending noise — never stage (restore with `git checkout -- <paths>`; content-identical).
-- Worker coder for U4 is at ~460k context — if B is chosen, spawn a fresh coder with `.review-s25-d9/s9a-u4-progress.md` + `fix-r3.md` + the codex round-4 finding instead of resuming.
+- The user's token budget is near its end (account switched once mid-session). Keep turns short.
+- **4 user decisions pending (holds — commit of the review-pass line waits on them)** — ask in plain words, one question ("추천대로 할까요?"), recommendations already written into the TRD as 「provisional — user」:
+  1. Step-8 hand-over live check: only the wake-block scene (G1) now; the "blocked right after create" scene moves to tracking until an entrance creates-and-starts with presets. ★ as stated.
+  2. `preset.previewFolder` answer = typed rows (`PreviewSetRow`, bindings for the screen), not free JSON. ★
+  3. Priming leaves ADR-0383's user-held list (now English) — record by ADR link at the 10a freeze. ★
+  4. NEW (risk lens round 2): `agent.new {presets}` carries no `root_generation` unlike attach — a caller who read paths under root A gets them judged under B after someone's setRoot. Options: add the optional arg (like attach) ★? / leave it. Main has not decided a recommendation yet — check code cost first (likely: add it, same shape as attach, cheap).
+- Asked earlier and answered (2026-11-19): O1 priming = short pointer lines in existing format; O2 translate whole priming to English now (content rewrite later = T-118); O3/O4 taken as recommended on 「진행해」 (refuse whole `agent.new` when library unavailable; duplicate lands beside the original) — tell the user they can still overturn O3/O4.
+- Autonomous mode. `src-tauri/bindings/*.ts` line-ending noise and untracked `.claude/explain/` are not ours — never stage.
 
 ## One-line state · next first action
-Master S38 (English internal text + Hangul CI gate) merged into the branch (`76546226`); 9a U2 (`2fc21c12`) and U3 (`6aae4b76`) committed, pushed, CI green; ADR-0384 (9a coding-time decisions, partially amends ADR-0380 d3) committed and pushed. **Next: ask the U4 question above; then (A) `/engram-qa` for U4 → commit → 9a freeze, or (B) fix → codex re-review → QA → commit → freeze.**
+10a TRD `docs/process/S25-preset-library/trd-library-commands.md` draft 2 (`a0646f9b`) — round 2: risk lens PASS, lead PASS (codex's round-1 must confirmed fixed by both). **Next:** (1) ask the 4 holds; (2) send the round-2 권장 + batched (below) to a fresh TRD editor (old drafter is at ~395k context — use the fix-file pattern `.review-s25-d9/s10a-trd-fix1.md`), main diff-checks (doc-only, no re-review unless a decision/boundary changes); (3) write the review-pass line in TRD §13 (date · deep · PASS · commit); (4) write ADRs for TRD decisions later work relies on (implement binding: before coding); (5) start coding U1 via `/engram-implement` §1–§2 (5 sequential units).
 
-9a freeze commit (implement flow §5, binding): put `Implemented` on the step-9a TRD status line (`docs/process/S25-preset-library/trd-library-edit.md`) and update the parent `trd.md` item 9a status line; do not rewrite TRD bodies. Move any still-open decisions to `docs/tracking.md`. Record U3's unfixed 권장 if the user says "later" (see below). Hand to 10a in the 10a item of the parent TRD: `roundtrip_smoke` does not plug the profile-edit port (needed once 10a routes agent-preset commands there); TRD §3.6 sentence 「`stopped: {code}` with no `path`」 is superseded by ADR-0384 d8.
+Round-2 items to fold (all 권장/batched, no must):
+- Risk lens: G2 window wrong (stat runs before the reservation — use a stalled gate holder or leave to manager tests); "no last failure" must name both record sites (`spawn_fresh_settled`→`note_spawn_result`, `resume_no_fallback` records before `refused_before_spawn`); step-5 `try_update_with` always saves → use a conditional registry method (`try_mutate_if` shape) so a `conversed` refusal writes nothing and is not masked by a store error; R3/§5 "still resolves" over-claim after setRoot/refresh.
+- Lead: `SkillFile` rows in `library.list` have no `LibraryKind` (state word / filter / excluded); setWorkspace should pre-check running + session id before reserving (re-check under reservation) so a doomed call doesn't block launches; batched b1–b9 (wire callers get error text not a bus code; boot restore is dormant in production; relink rerun covers an escaped agent; timeout → `workspace-not-found` why; `PreviewSetRow.unsure` = word + `message?`; port crosses views without `name`; ADR-0321 d4 exception → ADR link at freeze; §11 correction `(2)`→`(1)` + `policy_refusal` text for duplicate; `make_daemon_table` real caller list).
 
 ## Repo state (branch v0.5.0/feat/preset-library · worktree wt1)
-- HEAD `22ff0b21` (ADR link) — 0 ahead / 0 behind origin at save time (this handoff commit will be ahead until pushed).
-- This session's commits: merge `76546226` (master S38 → branch; 150 conflicts resolved, our Korean code text translated, our T-114 → T-115), `fe1ca9ba` (tracking T-116 — drop the CI Hangul check later, user note), U2 `2fc21c12`, U3 `6aae4b76`, ADR-0384 `14de5b4a` / `77dabbaa` / link `22ff0b21`.
-- Uncommitted: U4 (above).
-- Engram (not pushed): feedback commits `8be2347` (handoff: CI-pending claim when a doc-only push starts no CI), `67d97c6` (qa: lock check reads another session's LogonUI), `3727cde` (implement: coding-time decisions committed without the ADR the binding requires before each piece).
-- `.review-s25-d9/` (git-excluded) holds all briefs, diffs and reports: `m38-*` (merge), `s9a-u2-*`, `s9a-u3-*`, `s9a-u4-*` (incl. `s9a-u4-r1/` review rounds, `fix-r1..r3.md`, progress files).
+- HEAD `a0646f9b`; 2 commits ahead of origin (TRD draft 1 `ba8a98d1`, draft 2 `a0646f9b`) — push with this handoff.
+- This session's commits: U4 `bda7d849`, ADR-0384 line `797d1b51`, 9a freeze `4a945160`, ADR-0385 `9154b900`/`0f88a68f`, step 21 inserted `e5848eae`, TRD draft 1 + T-118 `ba8a98d1`, draft 2 `a0646f9b`.
+- Uncommitted: nothing of ours.
+- Engram repo (not pushed): feedback `7b84eb0` (user-facing: expanding review leftovers spelled code names).
+- Branch is 5 behind origin/master (S39 skill bindings + `scripts/qa-mutate-test.mjs`, qa binding mutation procedure changed) — merge master before 10a QA (qa binding changed).
 
 ## Verification state
-- Merge `76546226`: QA PASS (workspace 6300, frontend 2884, gates 34/34, claude + codex lanes, mutation 1/1, GUI smoke); CI green.
-- U2: review deep 3 rounds (round 3 PASS ×2); QA PASS (workspace 6345, lanes, mutation 2/2); CI green.
-- U3: review deep 2 rounds (round 2 PASS ×3); QA PASS (workspace 6364, lanes, mutation 2/2); CI green.
-- U4: coder-run tests asset-library 495 passed, workspace 6401 passed (before main's wording edits). Review: lead PASS (round 3), risk lens PASS (round 2), codex FIX (round 4 — the question above). **QA not run. Gate unpassed.**
-- Rerun: `cargo test --workspace -- --test-threads=4` (detached runner per `.claude/skill-bindings/qa.md`).
-- T-115 (codex Q10 flake) did not fire in any of the three QA runs; the user wants it fixed the next time it fails.
+- U4: QA PASS (workspace 6401, frontend 2884, gates 34/34, claude+codex lanes, mutation 2/2); CI green on `797d1b51`.
+- 10a: no code yet. TRD review deep: round 1 FIX ×3 → draft 2 → round 2 PASS (lead, risk lens). Codex not re-run (its must was also raised by Claude → Claude-only recheck per review flow §4).
+- Rerun: `cargo test --workspace -- --test-threads=4` (detached per `.claude/skill-bindings/qa.md`).
 
 ## Failed approaches (do-not)
-- Writing a heredoc with 「」 / backticks inside `$(...)` in Bash for long docs — it broke (`unexpected EOF`); use the Write tool.
-- `rm -rf` is blocked — use `bash ~/.claude/references/recycle.sh` or a new scratch folder.
-- Counting Hangul on the branch's own files to size the merge — it counted pre-S38 Korean master had already translated; count on the merge-tree result instead (`git archive <merge-tree>` → `node scripts/check-hangul.mjs .`).
+- Python heredoc with `'19\\. '` inside `py - <<'EOF'` prints SyntaxWarning but works; prefer raw strings.
+- `rm -rf` blocked — `bash ~/.claude/references/recycle.sh`.
 
 ## Resume command
-`git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -3 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v bindings`
+`git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -4 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v bindings`
 
 ## Decisions
-User (2026-11-18 ~ 19):
-- master 업데이트 반영 · 상황: master had S38 (57 commits, 937 files), branch behind · 선택지 지금 받기 / 나중 · 고른 것 「업데이트 받고 쭉 진행해. 이번에 저쪽에서 영문번역 한것들 있거든.」 · — .
-- T-115 수정 시점 · 상황: codex Q10 flake (stale parent PID), test-only · 선택지 지금 / 다음에 걸리면 ★ · 고른 것 「다음에 걸리면 수정할꺼 고려하자.」 · 같음.
-- (묻지 않음) CI 한글 검사 · 고른 것 「ci에서 한글을 체크하는건.. 초반에만 좀 적용하다가 나중에 배자.」, 「그냥 나중에 이런게 있었지 빼자. 정도의 느낌」 · — · recorded as tracking T-116.
-- 자율 진행 · (묻지 않음) · 「나 잘테니깐 자율모드 ㄱㄱ」.
-Main:
-- Merge: two workers by file area; our code kept, master English taken in conflicts, our Korean translated + pruned; our T-114 renumbered T-115; `capabilities.json` staged as the generator writes it (trailing newline only).
-- U2 review: a lead-reviewer hold on the check-answer shape resolved by conforming to the parent TRD (reviewer confirmed dissolved). U3: two holds dissolved on re-judgement (detach raw text fixed; shell-backend edits stay applied per 「최소한만 막기」). U4: self-cycle → preset-cycle skip (codex withdrew hold); lasting IO failure keeps the TRD stop rule, wording fixed (lens withdrew hold).
-- ADR-0384 records the 9a coding-time decisions (late — the binding wanted it before each piece's commit; feedback `3727cde`).
-Unfixed 권장 to show the user (ask "고칠 것 있나요?"; "later" → tracking): U3 — every agent-preset edit stats the root even with no library preset (slow share → up to 5 s); the second-plug branch untested; `roundtrip_smoke` does not plug the port (10a). U4 — `create_new` crash residue / leftover file on a failed write (accepted form); part (b)'s missing-target test is item-only.
-Open: the U4 question (user).
+User (2026-11-19):
+- U4 relink `fixed` race · 상황: pair counted fixed when its agent is deleted mid-relink, reporting only · 선택지 기록하고 진행 ★ / 고치기 · 고른 것 「삭제해서 링크가 바뀌든 링크가 바뀌고 삭제하든 상관없는거잖아. 성공이지」 · 같음(더 강하게 — 결함 아님) · 근거: 참조가 사라졌으니 성공.
+- 9a 미수정 권장 · 선택지 전부 미룸 ★ / 고침 · 고른 것 「그냥 미뤄.」 · 같음 → T-117.
+- 여러 라이브러리 루트 · (묻지 않음) · 「여러개 도 될수있으면 좋을것같은데 물론 서로간에 간섭하지 않는다고하고」 · 근거: 샘플 기본 연결 + 별도 git, Engram/회사 git 분리 · 시점 선택지 C 10a 뒤 9b 전 ★ / A S25 뒤 / B 지금 · 고른 것 「ㅇㅇ 너 추천대로해.」 · 같음 → ADR-0385, step 21.
+- 안내문 언어 · 선택지 전체 영어 ★ / 한국어 유지 · 고른 것 「영어로 하고 해당 문서도 나중에 개선하긴 해야되는데 어쨋든 현재는 기존 포맷 맞춰서 진행해.」 · 같음 · 조건: 기존 포맷 → T-118.
+- 10a TRD 브리핑 방식 · 「trd 간단하게 풀어서 브리핑하면 됨 html … 구지 생관없을듯」.
+Main: 10a own step TRD; review deep (public command surface + concurrency); duplicate consults `llm_creation_refusal` (B21, ADR-0279 precedent); typed rows; 5 sequential units.
+Open: the 4 holds above.
 
 ## References
-- TRD `docs/process/S25-preset-library/trd-library-edit.md` (draft 8) §3.3–§3.6, §7, §9; parent `trd.md` items 9a / 10a.
-- ADR-0384 (9a coding-time rules), ADR-0380, ADR-0383 (Hangul gate).
-- U4 review trail `.review-s25-d9/s9a-u4-r1/` (`codex-r1/r2.md`, `lens-r1/r2.md`, `lead-r1.md`, `fix-r1..r3.md`, `fix-r1/r2-report.md`); progress `.review-s25-d9/s9a-u4-progress.md`.
-- Bindings `.claude/skill-bindings/implement.md` (ADR timing, `Implemented`), `review.md`, `qa.md`.
+- 10a TRD `docs/process/S25-preset-library/trd-library-commands.md` (draft 2); parent `trd.md` §5-2 items 10a, 21; ADR-0384, ADR-0385, ADR-0383.
+- Review trail `.review-s25-d9/s10a-*` (brief, common, codex, fix1, rereview-r2, r2.diff).
+- Bindings `.claude/skill-bindings/implement.md`, `review.md`, `qa.md`.
