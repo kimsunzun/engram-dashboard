@@ -274,6 +274,8 @@ Order: U0 → U1 → U2 → U4; U3a can run beside U1/U2 (its code is the messag
 - P-F — liveness from iroh QUIC: §3-2, §4-2, T44, ADR ①, PRD AC6.
 - P-G — one per-PC backstop, no per-agent / per-pair limits (D5 revised): §4-5, T11, ADR ③, PRD D5 · AC10.
 
+- P-H — **Local threat-model scope** — DECIDED 2026-11-20 (user: 「같은계정은 막지 않는게 맞고」 · 「내부는 데몬 하고 앱간의 연결이 다른계정이면 막는다는거잖아」 → yes; Claude's recommendation after a precedent check). The OS account is the boundary: processes of the same account (including agents with a shell) are trusted and not defended against — stated in the docs (as hcom / Reason Network do). Other Windows accounts are blocked on the app↔daemon link: (1) `daemon.json` (the shell token) is written owner-only with an explicit DACL through one platform function (Jupyter `secure_write` precedent); (2) the daemon checks that a connecting client's process runs under the daemon's own account and refuses otherwise with "this daemon belongs to another Windows account — use a separate folder per account" (Tailscale / Windows ssh-agent read the client token) — feasibility over loopback TCP confirmed in U2; if it cannot be done cleanly, (1) alone ships and the gap is documented. Rollback of an older signed trusted list is not defended (no comparable local tool does); the list MAC catches naive edits and other accounts' edits only. Lands in U2.
+
 ### Remaining risks
 
 - Firewall: binding UDP on all interfaces may raise the Windows Firewall prompt; whether it appears for a WMI-launched daemon is unknown — if it never appears, inbound direct paths stay blocked and only outbound / relay paths work (U5 measures).
