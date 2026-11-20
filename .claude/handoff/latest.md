@@ -1,48 +1,48 @@
-# Handoff: S25 step 10a frozen (library / preset / agent-preset commands, help, English priming) — next = T-112 (skip missing items at launch), then step 21
+# Handoff: S25 T-112 frozen (launch skips what is absent, blocks on what exists but cannot be read) — next = step 21 (several library roots)
 
 ## Know first
-- One open question to the user (not blocking): the 10a unfixed 권장 list — (1) `root_generation` is `bigint` in agent TS bindings (client stage); (2) answer-word casing (`PresetSection` / `FolderLoadKindWord` capitalised vs lowercase refusal args) — handed to step 21; (3) `preset.get engram:/default` drops the built-in stand-in notice — handed to step 21; (4) an agent-preset answer shows the name as resolved if renamed concurrently (documented); (5) T-119 PowerShell 5.1 JSON list args. Main recommended leaving all five as recorded; ask "고칠 것 있나요?" once, in plain words.
-- The user wants: autonomous mode, short status answers, plain words (no code names), and only real user-visible decisions asked. Holds on details: main decides and reports (review-skill feedback row 2026-11-19).
-- Handoff: save when the user asks or the auto-handoff hook says so, and before handing the session over (the user expected a save before exit). Do not save on a usage-limit warning on main's own initiative (handoff feedback row 2026-11-20).
+- The user wants: autonomous mode, short answers, plain words. **Progress briefings: a numbered list of the work by name with "now at N of M" — never work labels alone (T-112, 9b …).** The user said this briefing shape is right (「지금이 딱 좋네. 한눈에 볼 수 있어야지」). Minor review items are not shown to the user (「사소한거? 는 내가 알 필요없지?」) — record them in `docs/tracking.md`.
+- Server-stage position (UI 전 18개): 1–15 done. 16 = several library roots (step 21) · 17 = file move/copy/delete/trash (9b) · 18 = their commands (10b) · then the server-stage user check · then the client stage (screen discussion first).
+- Token cost: the local full regression runs 6 real-claude tests (CI skips them). For this task main skipped them per unit and ran them plus the claude/codex lanes once at the end (user agreed). Ask again per task if it matters; the QA binding itself is unchanged.
 - `src-tauri/bindings/*.ts` line-ending noise and untracked `.claude/explain/` are not ours — never stage.
-- QA workers twice had a big preliminary command batch denied by the auto-mode classifier ("[Undermining Oversight]" — the batch held a `Get-CimInstance … engram-dashboard%` process listing); briefs now say run commands one at a time.
+- Workers: foreground Bash moves to background after ~180 s (worker rule says 9 min — feedback row filed); QA uses `pwsh Get-Process` instead of `Get-CimInstance` (classifier denied it before — feedback row filed).
 
 ## One-line state · next first action
-Step 10a is implemented and frozen (`trd-library-commands.md` status Implemented 2026-11-20; parent `trd.md` item 10a child-TRD line; README rows). **Next: T-112** (ADR-0374 — a missing item / unusable library root no longer blocks a launch; skip and notify) via `/engram-implement` — it has no TRD yet: draft one (worker), show the user a plain summary, review, then code. Then step 21 (several roots, built-in as an always-present read-only root), then 9b / 10b, then the server-stage user check, then the client stage (screen discussion first).
+T-112 is implemented, reviewed, QA'd, frozen and pushed; CI green on `d112a558` (backend · frontend · gates success). **Next: step 21 (several library roots, ADR-0385; the built-in becomes an always-present read-only root)** via `/engram-implement` — parent `trd.md` item 21 now carries the T-112 hand-over paragraph (per-root rule, what is inherited). Then 9b / 10b, then the server-stage user check.
 
 ## Repo state (branch v0.5.0/feat/preset-library · worktree wt1)
-- HEAD `835e37c2`, 0 ahead / 0 behind origin at save time (this handoff commit will be ahead until pushed).
-- This session's commits (newest last): U4 9a `bda7d849`, ADR-0384 line `797d1b51`, 9a freeze `4a945160`, ADR-0385 `9154b900`/`0f88a68f`, step 21 `e5848eae`, 10a TRD drafts `ba8a98d1`/`a0646f9b`/`debec111`, review record `a525c0e3`, master merge `6a5317b2`, ADR-0386 `a43e1e57`… `4e9d5024` (+ links 0383/0321/0379), step-21 built-in note `7e991768`, U1 `33db6f86`, U2 `e61f0d68`, U3 `f458aa21`, U4 `77ab3baa`, U5 `19e4a626`, freeze `9c47851d`, tracking `835e37c2`.
+- HEAD `d112a558`, 0 ahead / 0 behind origin at save time (this handoff commit will be ahead until pushed).
+- This session's commits (oldest first): TRD drafts `5cb5a69f` `e01d4dfe` `8c6fecd7` `20a3197b` `edd9fa9a` `7b4db191` `0de9822c` `e24eb277` (review PASS), ADR-0387 `40eced98` + body `c5d4b753`, README row `c5d4fc58`, U1 `d0c251ee`, U2 `ada48af7`, U3 `7ea7441d`, freeze `d112a558`.
 - Uncommitted: nothing of ours.
-- Engram repo (not pushed): feedback `7b84eb0` (user-facing), `8c03a92` (review: detail-level hold), `7e373b4` (handoff: unasked save).
+- Engram repo `I:/Engram` master is 11 ahead of origin (feedback rows; this session: `f53450f`, `c7b527a`) — not pushed.
 
 ## Verification state
-- Every 10a unit: `/engram-review code` deep (lead · risk lens · Codex; U5 full), then `/engram-qa` full regression local + claude/codex lanes + mutation; U4 also GUI (start from tree, double start); U5 also a live check — a real claude agent ran `engram help library`, `library.status/newFolder/newFile/list/read`, a refused `../x`, `preset.add` with a JSON list (Git Bash) and received the English priming. Last full regression: workspace 6526, frontend 2884, gates 34/34. CI green through the 10a freeze commit.
-- Not verified: U4 QA's toolchain assert and CI step cross-check (denied batch; CI covers them); the "answers every path" fallbacks have no test (BoundedIo answers every key — unreachable by fakes).
-- Rerun: `cargo test --workspace -- --test-threads=4` (detached per `.claude/skill-bindings/qa.md`).
+- Ran: TRD review deep (lead · risk lens · Codex), 5 rounds → PASS. Code review per unit: U1 deep PASS, U2 deep (Codex FIX → fixed → all PASS), U3 full (FIX → fixed → PASS). QA: U1 full regression PASS (workspace 6532); U2 PASS (6547, CI skip list); final U2+U3 PASS — workspace 6552 incl. real-claude tests, frontend 2884, gates 34/34, bindings in sync, claude lane (control_send 5, usage 5, launch_kits_live 3 incl. `claude_l5_…`) and codex lane (usage 2, backend_contract 11, codex_launch_live 3, launch_kits_live 2 incl. `codex_l5_…`) PASS; live: CLI end to end in a spawned agent, share probe on unreachable UNC paths (error 53/67 → blocked), GUI double-click (DOM events — session was locked). CI green on `d112a558`.
+- Not verified: a remembered but disconnected mapped drive letter (cannot be created on this PC — `net use` to an unreachable share fails with error 67); whether `GetDriveTypeW` / `WNetGetConnectionW` can stall for such a drive (TRD R12, tracking T-120). GUI double-click with real OS input.
+- Rerun: `cargo test --workspace -- --test-threads=4` (detached per `.claude/skill-bindings/qa.md`); lanes per qa.md 「claude · codex 레인」.
 
 ## Failed approaches (do-not)
-- QA briefs suggesting mutations on lines without an operator token (`==`/`!=`, `<`/`<=`, `true`/`false`, int ±1) — the S39 mutate tool cannot run them; check the token first.
-- A live CLI smoke outside an agent — `engram` needs an agent token (`NO_TOKEN`); run it inside a spawned agent.
-- Python edits without `newline=''` flip CRLF files; edits on `docs/tracking.md` need CRLF-aware matching.
+- Inserting a paragraph after "Handed over by step 7/20 (…)" in `trd.md` by first match — those markers repeat across items; anchor on the target item (use the last match or the item heading).
+- Python here-docs with `\\server` paths in normal strings break (`\U` escapes); write such scripts to a file with raw triple-quoted strings.
+- A coder writing JSON with backslashes through tool arguments lost the escapes (`C:\data` → invalid escape); use the Edit tool.
 
 ## Resume command
 `git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -3 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v bindings`
 
 ## Decisions
-User (2026-11-19 ~ 20):
-- 여러 라이브러리 루트 · (묻지 않음) · 「여러개 도 될수있으면 좋을것같은데 물론 서로간에 간섭하지 않는다고하고」 · 근거: 샘플 기본 연결 + 별도 git, Engram/회사 git 분리 · 시점 C ★ / A / B · 「ㅇㅇ 너 추천대로해.」 · 같음 → ADR-0385, step 21.
-- 「기본」 · 「기본 폴더는 무조건 있으면됨」, 「21에서 하면 하는거지 뭘 넣었다가 다시 뺌?」 → the built-in becomes an always-present read-only root in step 21; nothing patched in 10a.
-- 안내문 언어 · 전체 영어 ★ / 한국어 · 「영어로 하고 … 현재는 기존 포맷 맞춰서 진행해.」 · 같음 · T-118.
-- 검색 범위 · 폴더 자신 빼기 ★ · 「ㅇㅇ」 · 같음 (ADR-0386 d13).
-- 재시도 표시 · 「llm이 알아서 수정해서 시도가 맞지.」 · 같음 (ADR-0386 d14; extended by main to the clearable working-folder refusals).
-- 프리셋 없이도 실행 · 「있든없든 동작은 되야지」 · already true; missing items → T-112 right after 10a (main's order).
-- 루트 확인 옵션(agent.new) · 「그냥 알아서해. 부담없음 넣고.」.
-- 「그냥 미뤄.」 (9a 권장 → T-117); 「자율로 쭉 진행해.」.
-Main: not-found stays out of the retry list (mostly typos); duplicate consults the LLM creation policy; folder spellings unquoted (d16); relative setWorkspace cwd refused; no reachable bounded-IO expect (d16).
-Open: the 10a unfixed 권장 question above.
+User (2026-11-20):
+- 브리핑 모양 · (묻지 않음) 진행 위치 브리핑 · 선택지 없음 · 「T-112는 뭐야? … 몇번째야 도대체」 → 일 이름 번호 목록 + 현재 위치, 「지금이 딱 좋네. 한눈에 볼 수 있어야지 이상한말들하면 어차피 내가 안봐.」 · — · 근거: 라벨로는 못 알아봄.
+- 못 읽는 폴더 항목 · 상황: 네트워크 드라이브 끊김 등, 폴더는 있음 · 막기 ★ / 건너뛰기 · 「ㅇㅇ 막아.」 · 같음.
+- 기준 통일 · 상황: 초안은 못 읽는 라이브러리 폴더만 건너뜀 · 없으면 건너뜀·있는데 못 읽으면 막기(라이브러리 폴더 포함) ★ / 전부 건너뜀 · 「ㅇㅇ 같은 기준으로해.」 · 같음 → ADR-0387.
+- 못 읽는 폴더 표시 · 상황: 화면이 「찾을 수 없음」으로 보임(폴더는 있음) · 별도 구분 ★ / 그대로 · 「ㅇㅇ 별도로 구분해. 너무 디테일하게 원인을 쓰지는 말고.」 · 같음 · 조건: 「너무 디테일하게 원인을 쓰지는 말고」 → `folder-unreadable`, short fixed text.
+- SKILL.md 없는 스킬 폴더 · 상황: 폴더는 있고 스킬 파일만 없음, 라이브러리는 스킬로 안 봄 · 없음(건너뜀) ★ / 깨짐(막기) · 「스킬 폴더는 있는데 스킬이 없으면 없음이지.」 · 같음.
+- 토큰 테스트 · 상황: 로컬 전체 회귀가 실제 claude 테스트 6개를 돌림 · 마지막에 한 번 ★ / 조각마다 · 요지: 「자율모드로 쭉 진행해」 (질문에 직접 답 없이 자율 진행 지시) · 같음.
+- 「쭉쭉 진행해」, 「자율모드로 쭉 진행해」, 「ci 까지 다 끝내고 핸드오프해」.
+Main: drive letter absent → skipped (follows the rule); codex gets no note when Engram has no instruction text (would replace the user's `developer_instructions`); share probe in `BoundedIo::stat_all` with pure platform `share_root` + remembered-connection check; `library.status` word `unreadable`; edit folder refusals follow the rule; link-probe error → ② (NotADirectory absent); notices once per agent, `warn` log every launch; TRD/code-level choices in TRD §11 b/c. Unfixed rare-case recommendations → tracking T-120.
+Open: none.
 
 ## References
-- 10a TRD `docs/process/S25-preset-library/trd-library-commands.md` (Implemented); parent `trd.md` items 10a, 21 (with the built-in and 10a hand-over notes); ADR-0385, ADR-0386, ADR-0374 (T-112).
-- `docs/tracking.md` T-112, T-117, T-118, T-119.
-- Review / QA trail `.review-s25-d9/s10a-*` (git-excluded).
+- TRD `docs/process/S25-preset-library/trd-launch-skip-missing.md` (Implemented); ADR-0387 (amends 0374 / 0341 / 0361 / 0363).
+- Parent `docs/process/S25-preset-library/trd.md` items 21 (T-112 hand-over), 11 (launch notices do not reach the screen), 13 edition 1 (tree / wording / root cases).
+- `docs/tracking.md` T-120; `docs/tracking-archive.md` T-112.
+- Review / QA trail `.review-s25-d9/t112-*` (git-excluded), incl. `t112-trd/coder-brief.md` and `coder-handover.md`.
