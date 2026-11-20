@@ -1,7 +1,7 @@
 # ADR-0101: An agent's canonical name = its display name (display_name ?? cwd basename) — unifying routing · display · sender name (ADR-0087 name addressing, step 1)
 
-- 상태: 확정 (2026-07-23, basis: user decision + a real-code scope survey)
-- 관련: ADR-0087(send-message semantics · name rules — this ADR is step 1 that makes concrete its "human-readable name address") · ADR-0061(display_name tree rename) · `crates/engram-dashboard-core/src/agent/manager.rs::agent_info` · `crates/engram-dashboard-daemon/src/control/ingress.rs::resolve_recipient`·`sender_display_name` · `src/util/basename.ts`
+- 상태: 확정 (2026-07-23, basis: user decision + a real-code scope survey) · 부분 폐기 by ADR-0391 (routing and sender name of the canonical name, extended across PCs with name@pc)
+- 관련: ADR-0087(send-message semantics · name rules — this ADR is step 1 that makes concrete its "human-readable name address") · ADR-0061(display_name tree rename) · `crates/engram-dashboard-core/src/agent/manager.rs::agent_info` · `crates/engram-dashboard-daemon/src/control/ingress.rs::resolve_recipient`·`sender_display_name` · `src/util/basename.ts` · Amended by ADR-0391 (routing and sender name of the canonical name, extended across PCs with name@pc)
 
 ## 맥락
 When an agent sends a message to another agent (`send_message`/`engram-send`), the recipient address did not work with the name shown in the tree (a real-use observation: when ACB sent to "DEF" it got "no live agent", and the roster had 2 names that were cwd paths). The cause = **the "name you see" and the "routing name" are different fields**:
