@@ -1,0 +1,121 @@
+# Cross-platform probe — manual only. Read ADR-0397 (`docs/decisions/0397-*`) before changing this workflow.
+#
+# What it is: the workspace has only ever been built and tested on Windows (`ci.yml`, ADR-0131 decision 1).
+# This workflow builds and tests it on Linux and macOS so the porting work can be sized and tracked.
+# It is a probe, not a gate:
+#   - Trigger = `workflow_dispatch` only. It does not run on push, so it never delays the merge check, which reads
+#     `ci.yml` runs only (`docs/handbook/branch-commit.md` 「Integration」).
+#   - Red is the expected state until Linux and macOS are ported. Nobody merges on its result.
+# Run it: `gh workflow run cross-platform.yml --ref <branch>` (or the Actions tab → "Run workflow").
+# When both OSes are green and stay green, move these jobs into `ci.yml` as a real gate and retire this file (ADR-0397).
+name: Cross-platform probe
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only, same as `ci.yml` — this workflow publishes nothing.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  backend:
+    name: backend (${{ matrix.os }})
+    strategy:
+      # One OS failing must not cancel the other — the point is to see both error lists.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Same assertion as `ci.yml` — without it a missing rust-toolchain.toml would quietly fall back to the runner's stable.
+      - name: Resolve and assert pinned toolchain
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
+          expected=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
+          if [ -z "$expected" ]; then echo "FAIL — could not read channel from rust-toolchain.toml"; exit 1; fi
+          actual=$(rustc --version | awk '{print $2}')
+          if [ "$actual" != "$expected" ]; then
+            echo "FAIL — pinned '$expected' but active rustc is '$actual'"
+            exit 1
+          fi
+          echo "PASS — toolchain $actual matches rust-toolchain.toml"
+
+      # Tauri v2 Linux prerequisites (tauri.app "Prerequisites" → Linux → Debian). macOS needs none beyond Xcode CLT,
+      # which the runner image has.
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libxdo-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: cross-platform-${{ matrix.os }}
+
+      # `--keep-going` = do not stop at the first crate that fails, so one run lists every crate that does not compile.
+      # `--all-targets` compiles tests, examples and benches too — the test step below would otherwise stop at the first
+      # broken test target.
+      - name: cargo build --workspace --all-targets
+        shell: bash
+        run: cargo build --locked --workspace --all-targets --keep-going
+
+      # Same skip list as `ci.yml` (ADR-0131 decision 3): these 6 need the real claude binary, which no runner has.
+      # `--no-fail-fast` = run every test binary even after one fails, so the run lists all failing suites.
+      - name: cargo test --workspace
+        shell: bash
+        run: |
+          cargo test --locked --workspace --no-fail-fast -- \
+            --skip c1_park_then_spawn_auto_delivers \
+            --skip c2_live_mid_turn_send_parks_and_delivers_after_turn_end \
+            --skip control_send_delivery_observation_records_bytes_and_correlated_ids \
+            --skip control_send_relays_wrapped_line_to_json_agent \
+            --skip control_send_revoked_sender_still_delivers_observation \
+            --skip mcp_send_message_tool_happy_and_error
+
+  frontend:
+    name: frontend (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: npm ci
+        shell: bash
+        run: npm ci
+
+      - name: npm test
+        shell: bash
+        run: npm test
+
+      - name: npx tsc --noEmit
+        shell: bash
+        run: npx tsc --noEmit

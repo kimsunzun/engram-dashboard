@@ -371,3 +371,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0372](0372-ui-text-source-becomes-english-and-korean-is-selectable-through-one-llm-only-settings-key-applied-live-to-every-window-the-tray-and-shell-made-names.md) | UI text source becomes English and Korean is selectable through one LLM-only settings key, applied live to every window, the tray and shell-made names | 확정 |
 | [0373](0373-ui-language-runtime-lookup-only-i18next-no-kept-translated-text-layout-held-language-init-script-memory.md) | UI language runtime — lookup-only i18next, no kept translated text, layout-held language, init-script language memory | 확정 |
 | [0383](0383-internal-text-is-english-only-screen-text-stays-switchable.md) | Internal text is English-only; screen text stays switchable | 확정 |
+| [0397](0397-cross-platform-probe-a-manual-only-linux-and-macos-build-and.md) | Cross-platform probe - a manual-only Linux and macOS build and test workflow, separate from ci.yml | 확정 |
