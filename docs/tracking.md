@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-125 | Opt-in to run on a drive without file permissions (FAT / exFAT) | Main | Trigger wait — a user who needs it (user 2026-11-21) |
 | T-124 | CI: a Linux compile-check job for the core crates | Main | Not started — separate topic (user 2026-11-20) |
 | T-123 | Agent-id duplicates when a data folder is copied to another PC | Main | Not started — after S37 (S37 review 2026-11-20) |
 | T-122 | Mail attachments (images / files) for local and remote mail | Main | Not started — after S37 (user 2026-11-20) |
@@ -83,6 +84,11 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-125. Opt-in for drives without file permissions
+- **Status:** trigger wait — a user who needs to run Engram from a FAT / exFAT drive. User 2026-11-21: 「일단 거부로 하고 나중에 필요하면 넣자. 구지 필요없을것같아 요즘 fat 쓰는데가 어딨다고」.
+- **Today (S37 T49):** such a drive is refused before the daemon is spawned, with a band message naming the fix (NTFS).
+- **Shape if needed (designed and reviewed in S37, then dropped):** a shell setting in the data folder's `settings.json` (refuse by default; guards against accidents, not other accounts — anyone who can write the drive can act as the user anyway); the shell refreshes that key through `SettingsService` on every ensure and passes one value both to the pre-check and as a fixed WMI flag; the daemon decides the mode once at start from a volume query and writes the token and control files with the inherited ACL; honoured only if the accept-time account check (S37 T48) ships. Precedent: Jupyter `JUPYTER_ALLOW_INSECURE_WRITES`, git `safe.directory`.
 
 ### T-124. Linux compile-check job in CI
 - **Status:** not started, separate topic — user 2026-11-20 (「별도 주제로 뽑으면 되는데」), asked while discussing Linux / macOS support.
