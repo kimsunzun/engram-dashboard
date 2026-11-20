@@ -112,13 +112,17 @@ pub struct Policy {
     /// The limit wrapping the dial and the handshake **together** (as the old `HANDSHAKE_TIMEOUT`). ★For an accepted peer ([`crate::Registry::attach`]) it is the auth deadline★, measured from the end of the
     /// upgrade ([`crate::Accepted::upgraded_at`], TRD 3 §5 3); an accepted peer does not redial, so it ignores [`Policy::reconnect`] · [`Policy::live_dwell`].
     pub connect_timeout: Duration,
-    /// Limit for pushing one frame. ★Unverified — only industry reference values★ (NATS 10s · nginx 60s · gRPC keepalive 20s). Invariant: `write_deadline < ping_interval`, else one write starves keepalive
-    /// (the deleted `net` crate did).
+    /// Limit for pushing one frame. ★Unverified — only industry reference values★ (NATS 10s · nginx 60s · gRPC keepalive 20s). Invariant while [`Policy::supervisor_keepalive`] is on:
+    /// `write_deadline < ping_interval`, else one write starves keepalive (the deleted `net` crate did).
     pub write_deadline: Duration,
-    /// Active ping interval (current daemon value preserved).
+    /// Active ping interval (current daemon value preserved). Read only while [`Policy::supervisor_keepalive`] is on.
     pub ping_interval: Duration,
-    /// If the peer is this quiet, cut (current daemon value preserved — 2.5 times the ping interval).
+    /// If the peer is this quiet, cut (current daemon value preserved — 2.5 times the ping interval). Read only while [`Policy::supervisor_keepalive`] is on.
     pub idle_timeout: Duration,
+    /// Whether the supervisor runs its own liveness — the [`Policy::ping_interval`] ping and the [`Policy::idle_timeout`] silence cut (default on). ★Off = neither arms★ and
+    /// [`Policy::check`] stops ordering `write_deadline < ping_interval < idle_timeout`; a dead peer is then noticed only when the link itself fails, so turn it off only over a
+    /// link with its own liveness (the iroh adapter: QUIC keepalive and path idle-out, reported as a read error).
+    pub supervisor_keepalive: bool,
     /// ★Only a connection that stayed operating this long refills the reconnect budget★ — without it a peer cut right after attaching reconnects every 500 ms **forever** and the ADR-0180 decision 7 popup
     /// **never appears**. ★Unverified — real reconnect time never measured★; the old shell has no such concept.
     pub live_dwell: Duration,
@@ -161,6 +165,7 @@ impl Default for Policy {
             write_deadline: Duration::from_secs(5),
             ping_interval: Duration::from_secs(20),
             idle_timeout: Duration::from_secs(50),
+            supervisor_keepalive: true,
             live_dwell: Duration::from_secs(30),
             reconnect: ReconnectPolicy::default(),
             outbound_queue: 512,
@@ -181,10 +186,10 @@ impl Policy {
     /// Do the values contradict each other; returns the human-readable name of the offending item. ★The crate does not die without this passing★ ([`ReconnectPolicy::delay`] folds broken values); it exists so
     /// **the consumer fails loudly when reading its settings** — the registry only `debug_assert`s it.
     pub fn check(&self) -> Result<(), &'static str> {
-        if self.write_deadline >= self.ping_interval {
+        if self.supervisor_keepalive && self.write_deadline >= self.ping_interval {
             return Err("write_deadline < ping_interval");
         }
-        if self.idle_timeout <= self.ping_interval {
+        if self.supervisor_keepalive && self.idle_timeout <= self.ping_interval {
             return Err("ping_interval < idle_timeout");
         }
         if self.outbound_queue == 0 || self.inbound_queue == 0 || self.frame_buffer == 0 {
@@ -229,6 +234,7 @@ mod tests {
         assert_eq!(p.write_deadline, Duration::from_secs(5));
         assert_eq!(p.ping_interval, Duration::from_secs(20));
         assert_eq!(p.idle_timeout, Duration::from_secs(50));
+        assert!(p.supervisor_keepalive);
         assert_eq!(p.outbound_queue, 512);
         assert_eq!(p.inbound_queue, 512);
         assert_eq!(p.retired_tags, 256);
@@ -247,6 +253,35 @@ mod tests {
     #[test]
     fn a_zero_flush_timeout_is_rejected() {
         let p = Policy {
+            flush_timeout: Duration::ZERO,
+            ..Policy::default()
+        };
+        assert_eq!(p.check(), Err("flush_timeout must be non-zero"));
+    }
+
+    // ★The two orderings are skipped only with the keepalive off★ — the same values stay rejected with it on (the two tests around this one).
+    #[test]
+    fn with_the_supervisor_keepalive_off_the_keepalive_ordering_is_not_checked() {
+        let p = Policy {
+            supervisor_keepalive: false,
+            write_deadline: Duration::from_secs(120),
+            ping_interval: Duration::from_secs(20),
+            idle_timeout: Duration::from_secs(10),
+            ..Policy::default()
+        };
+        assert_eq!(p.check(), Ok(()));
+        assert!(Policy {
+            supervisor_keepalive: true,
+            ..p.clone()
+        }
+        .check()
+        .is_err());
+    }
+
+    #[test]
+    fn with_the_supervisor_keepalive_off_the_other_checks_still_apply() {
+        let p = Policy {
+            supervisor_keepalive: false,
             flush_timeout: Duration::ZERO,
             ..Policy::default()
         };

@@ -364,10 +364,10 @@ jobs:
 
       # ADR-0177: the reusable transport lib (`transport` — new). Zero workspace crate dependencies is its reason for being, so
       #   it is checked on the same stand-alone axis as the crates above — the canonical expected values are gate ④ of that crate's lib.rs header
-      #   「Isolation gates」, and the three steps below (4a·4b·4d) only call it. 4c calls gate ⑤ of the same header
+      #   「Isolation gates」, and the four steps below (4a·4b·4d·4e) only call it. 4c calls gate ⑤ of the same header
       #   (is the real-socket suite non-empty).
-      # ★Do not replace `--all-features` with a hand-written feature list★ — `--all-features` also compiles the `ws`
-      #   adapter's optional third parties and the real-socket tests. That is the intent.
+      # ★Do not replace `--all-features` with a hand-written feature list★ — `--all-features` also compiles the `ws` and `iroh`
+      #   adapters' optional third parties and the real-socket tests. That is the intent.
       # No `-- --test-threads=4` — CI never uses that flag (qa binding 「전체 회귀 = 로컬」 — the # hangul-ok
       #   security-software condition it targets does not exist on the runner, and lowering it only slows
       #   CI). The local command does not add it for this crate either — it spawns no child process.
@@ -379,10 +379,10 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard-transport --all-features
 
-      # ★4a/4b above only check 「did the command succeed」 — even if the suite is completely empty it stays green★. The four
-      #   real-socket files in `tests/` each live behind a file-level `#![cfg(all(feature = "ws", feature = "test-support"))]`,
-      #   so when that condition turns false (feature name typo · rename · folding into another feature), the four binaries
-      #   **compile with 0 tests and pass.** So this step does not trust the exit code; **CI itself states the names and the
+      # ★4a/4b above only check 「did the command succeed」 — even if the suite is completely empty it stays green★. The five
+      #   real-socket files in `tests/` each live behind a file-level cfg (`ws_*`: `all(feature = "ws", feature = "test-support")`;
+      #   `iroh_link`: `all(feature = "iroh", feature = "test-support")`), so when that condition turns false (feature name typo ·
+      #   rename · folding into another feature), the binaries **compile with 0 tests and pass.** So this step does not trust the exit code; **CI itself states the names and the
       #   minimum count of what it expects** (precedent = the incident where the ts-rs binding gate was vacuous,
       #   ADR-0131 「Rationale — what the adversarial review found」 1). The canonical expected values = gate ⑤ of that crate's lib.rs header.
       # With `-- --list` the harness only prints its own list and runs nothing — one line ending in `: test` is
@@ -396,7 +396,7 @@ jobs:
       - name: 'transport gate 4c: socket suites are not hollowed out (named targets + non-empty)'
         shell: bash
         run: |
-          for t in ws_dial ws_reject ws_write_deadline ws_accept; do
+          for t in ws_dial ws_reject ws_write_deadline ws_accept iroh_link; do
             set +e
             out=$(cargo test --locked -p engram-dashboard-transport --all-features --test "$t" -- --list)
             rc=$?
@@ -414,17 +414,22 @@ jobs:
             if [ "$rgrc" -eq 1 ]; then n=0; fi
             echo "$t: $n test(s) listed"
             if [ "$n" -lt 1 ]; then
-              echo "FAIL — $t compiled with 0 tests — the file-level cfg (feature ws + test-support) is false"
+              echo "FAIL — $t compiled with 0 tests — its file-level cfg (adapter feature + test-support) is false"
               printf '%s\n' "$out"
               exit 1
             fi
           done
-          echo "PASS — the four real-socket suites each listed 1 or more tests"
+          echo "PASS — the five real-socket suites each listed 1 or more tests"
 
       # The canonical expected values and rationale = the third line of gate ④ in 「Isolation gates」 of that crate's lib.rs header.
       - name: 'transport gate 4d: cargo check -p engram-dashboard-transport --features ws (consumer combo)'
         shell: bash
         run: cargo check --locked -p engram-dashboard-transport --features ws
+
+      # The canonical expected values and rationale = the fourth line of gate ④ in 「Isolation gates」 of that crate's lib.rs header.
+      - name: 'transport gate 4e: cargo check -p engram-dashboard-transport --features iroh (iroh adapter alone)'
+        shell: bash
+        run: cargo check --locked -p engram-dashboard-transport --features iroh
 
       # TRD S26-window-chrome §8-4 (user decision Q1 2026-10-24): the snap layout overlay is code kept behind the cargo feature `snap-overlay`,
       #   off by default (the shell feature turns on platform's feature of the same name). No production build turns it on, so without this step nobody

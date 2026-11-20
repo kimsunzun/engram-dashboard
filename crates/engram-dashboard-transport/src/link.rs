@@ -133,6 +133,7 @@ pub trait LinkTx: Send + 'static {
     /// Closes carrying a code and message; no return value (nowhere to report a failure). ★[`Close::reason`] is bounded and truncated on overflow★ — the cap is in **bytes**, not
     /// characters (Hangul · emoji fill it 3×+ faster), and its number is canonical in the adapter (WS: `MAX_CLOSE_REASON_BYTES` in `src/ws.rs`, RFC 6455 §5.5). Truncating beats not:
     /// the receiver cuts an oversize close frame with a read error, so 「connected but rejected」 would arrive as 「could not connect」 and burn budget. Branch only on [`Close::code`].
+    /// ★An implementation may wait for delivery before closing (iroh waits for the peer to acknowledge the tail) and need not bound that wait★ — callers bound it with their own deadline.
     fn close(&mut self, close: Close) -> BoxFuture<'_, ()>;
 }
 
@@ -167,7 +168,8 @@ pub struct LinkInfo {
     pub remote: Option<String>,
     /// The WS upgrade's `Origin` header. ★Peer-made text★ — the decision is the accept policy's (for `ws`, a value that passed `AcceptPolicy::allowed_origins`); not printed as is.
     pub origin: Option<String>,
-    /// The peer's public key confirmed by the transport (TLS key pinning · iroh node id — TRD 3 §3-5 · §4). ★Stage-3 transports are always `None`★ — the field is laid down early.
+    /// The peer's public key confirmed by the transport (TLS key pinning · iroh node id — TRD 3 §3-5 · §4). `ws` and the in-memory harness leave it `None`; the iroh
+    /// adapter fills the 32-byte node key its TLS handshake authenticated.
     pub peer_key: Option<Vec<u8>>,
 }
 
@@ -337,10 +339,11 @@ impl RejectKind {
     }
 
     /// Reads the code the peer carried when it closed during the handshake; `None` = not a rejection (could not connect — spends budget). ★The normal-exit family is not a rejection★ —
-    /// `1000` · `1001` and [`CloseCode::GOING_AWAY`] mean 「I am leaving」; read as rejections the dialer would give up on every clean daemon exit. ★Only
+    /// `1000` · `1001` and [`CloseCode::GOING_AWAY`] mean 「I am leaving」; read as rejections the dialer would give up on every clean daemon exit. `0` is QUIC's close
+    /// without an application code (ADR-0388) — the iroh adapter already reads it as [`LinkRead::Closed`]`(None)`, and it is no rejection here either. ★Only
     /// [`CloseCode::HANDSHAKE_REJECTED`] is [`RejectKind::Terminal`]★; other codes are deliberate peer rejections but giving up on an unknown code would persist until user action, so they redial (spend budget).
     pub fn of(code: CloseCode) -> Option<Self> {
-        if matches!(code.0, 1000 | 1001) || code == CloseCode::GOING_AWAY {
+        if matches!(code.0, 0 | 1000 | 1001) || code == CloseCode::GOING_AWAY {
             return None;
         }
         Some(if code == CloseCode::HANDSHAKE_REJECTED {
@@ -495,7 +498,12 @@ mod tests {
 
     #[test]
     fn only_the_terminal_code_gives_up_and_a_graceful_close_is_no_rejection() {
-        for graceful in [CloseCode(1000), CloseCode(1001), CloseCode::GOING_AWAY] {
+        for graceful in [
+            CloseCode(0),
+            CloseCode(1000),
+            CloseCode(1001),
+            CloseCode::GOING_AWAY,
+        ] {
             assert_eq!(RejectKind::of(graceful), None, "{graceful:?}");
         }
         assert_eq!(

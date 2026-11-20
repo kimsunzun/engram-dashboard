@@ -37,7 +37,7 @@ S37 links Engram daemons on the user's own PCs (same LAN, or home ↔ office acr
 - Plan candidate survey (`gh api`, READMEs, iroh v1 blog, 2026-11-11): iroh is the only candidate that is account- and install-free, key-authenticated and encrypted, with hole punching and a relay fallback, in Rust; v1 is wire-stable within v1 (「An iroh v1 endpoint will be able to communicate with another iroh v1 endpoint, regardless of minor version or language」).
 - Weight, measured in scratch projects (plan §3): +~172 crates against the daemon graph; standalone probes 6.78 MB (iroh) vs 1.25 MB (WS) under the repo release profile; all static (`dumpbin /dependents` — only Windows system DLLs). The real daemon exe delta is unmeasured.
 - Seam fit (plan §2, code read): one connection with one bi-stream implements `Dialer::dial`, `Listener::accept`, `LinkTx`, `LinkRx` without changing trait shapes.
-- QUIC liveness values: heartbeat 5 s, path idle 15 s direct / 30 s relay (`iroh-1.4.1` `socket.rs` `HEARTBEAT_INTERVAL` · `PATH_MAX_IDLE_TIMEOUT` · `RELAY_PATH_MAX_IDLE_TIMEOUT`); Reason Network leaves dead links to the QUIC idle-out and gates before `accept_bi`.
+- QUIC liveness values: heartbeat 5 s, path idle 15 s direct / 30 s relay (`iroh-1.4.1` `socket.rs` `HEARTBEAT_INTERVAL` · `PATH_MAX_IDLE_TIMEOUT` · `RELAY_PATH_MAX_IDLE_TIMEOUT`); Reason Network leaves dead links to the QUIC idle-out and gates before `accept_bi`. Correction (2026-11-20, measured in U1): what ends a link to a frozen peer is the QUIC connection idle timeout, 30 s, which the adapter now sets explicitly (`iroh::QUIC_IDLE_TIMEOUT`); the 15 s path idle does not end the connection.
 - S37 PRD+TRD review, three reviewers, PASS after 4 rounds (2026-11-20).
 
 ## 영향 / 불변식

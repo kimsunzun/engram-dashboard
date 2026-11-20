@@ -1,4 +1,4 @@
-//! Real-socket WS adapter — behind feature `ws`. ★The only real transport implementation in this crate★.
+//! Real-socket WS adapter — behind feature `ws`: the loopback shell link (the other real adapter is `iroh.rs`).
 //!
 //! Owns the dialing side ([`WsDialer`]), the receiving side ([`WsListener`] with [`AcceptPolicy`] · [`AcceptRefusals`]) and the split of one open WS
 //! stream into [`LinkTx`]/[`LinkRx`]. Both directions live here so the crate attaches to itself and measures what memory cannot (ADR-0177 decision 8).

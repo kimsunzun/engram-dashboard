@@ -9,7 +9,8 @@
 //! - ★**Every** branch that drops the connection wakes the waiters★ — table entries, queued requests, and requests arriving after leaving the
 //!   operating phase. One miss and that slot waits forever: the given-up state has no loop to run the deadline, and the waiting caller holds the
 //!   handle, so the channel never closes either.
-//! - ★Every write carries a deadline★ — `write_deadline < ping_interval`, so a write cannot starve keepalive (the deleted `net` crate did).
+//! - ★Every write carries a deadline★ — `write_deadline < ping_interval` while the supervisor keepalive is on ([`Policy::supervisor_keepalive`]), so a write cannot
+//!   starve keepalive (the deleted `net` crate did). With it off the supervisor neither pings nor cuts for silence; the link's own liveness ends a dead link.
 //! - ★The handle is immortal across reconnects★ — a generation boundary shows up as a marker on [`crate::Arrival::generation`].
 //! - ★A command never leaves the generation it is bound to (TRD 3 §3-0 ③)★ — every queued command is stamped with a generation and the supervisor
 //!   compares it with the current one just before writing (`Supervisor::on_cmd`); the handle entry check is only a fast path. The queue survives
@@ -121,13 +122,13 @@ enum Turn {
 /// keeps the frame queue empty, so the later arms get polled whatever `select` does; a mutant reviving `biased` turned no flood test red), so the rule is asserted here.
 fn next_turn(
     now: Instant,
-    wake: Instant,
+    wake: Option<Instant>,
     frames_in_row: usize,
     outbound_len: usize,
     outbound_cap: usize,
 ) -> Turn {
     // TODO(stream-replay-vs-timer): a window deadline passing mid-write closes the window before a replay already in the read-ahead queue (crate header 「known limits」).
-    if wake <= now {
+    if wake.is_some_and(|wake| wake <= now) {
         return Turn::Timer;
     }
     if outbound_len == 0 {
@@ -1335,7 +1336,7 @@ impl<W: Wire> Supervisor<W> {
                         return input;
                     }
                     // ★Check progress★ — a timer that cannot push its deadline spins without `await`; on current_thread nothing else runs (measured: a mutant hung over 10 minutes).
-                    if self.wake_at() <= now {
+                    if self.wake_at().is_some_and(|wake| wake <= now) {
                         debug_assert!(
                             false,
                             "the timer could not push its own deadline — the operating loop spins without await"
@@ -1359,7 +1360,10 @@ impl<W: Wire> Supervisor<W> {
                 Turn::Wait => {}
             }
 
-            let sleep = self.clock.sleep(wake.saturating_duration_since(now));
+            // No timer source (supervisor keepalive off, nothing pending) = no timer arm; every other arm still wakes the loop.
+            let sleep: OptionFuture<_> = wake
+                .map(|wake| self.clock.sleep(wake.saturating_duration_since(now)))
+                .into();
             let backlog = !self.order.is_empty();
             // Wakes when the read gate opens. ★If the turn start saw a hold by the read gate (`paused` · ordering area empty), the arm stands even if it has since cleared★ — it
             //   wakes at once and the next turn writes the clearing; otherwise a quiet peer's clearing waits for the ping. An extra wake-up is not a spin.
@@ -1380,7 +1384,7 @@ impl<W: Wire> Supervisor<W> {
                     open = drain_order(lane, order), if backlog => Wake::Room(open),
                     () = lane.closed() => Wake::Room(false),
                     () = ledger.holder_room(), if over => Wake::Budget,
-                    _ = sleep => Wake::Timer,
+                    Some(()) = sleep => Wake::Timer,
                 }
             };
 
@@ -1442,25 +1446,32 @@ impl<W: Wire> Supervisor<W> {
         None
     }
 
-    /// The next time to wake. ★Every timer source gathers here★ — one missed wakes nobody. ★Deadlines that stop while held (silence · resume window) are masked by `paused`★
-    /// (`on_timer` decides by it; re-looking at backpressure here would break the progress check).
-    fn wake_at(&self) -> Instant {
-        let mut wake = self.last_ping + self.policy.ping_interval;
-        if !self.paused {
-            wake = wake.min(self.last_rx + self.policy.idle_timeout);
+    /// The next time to wake; `None` = no timer source. ★Every timer source gathers here★ — one missed wakes nobody. ★Deadlines that stop while held (silence · resume
+    /// window) are masked by `paused`★ (`on_timer` decides by it; re-looking at backpressure here would break the progress check). ★Ping and silence count only while
+    /// [`Policy::supervisor_keepalive`] is on★ — `on_timer` skips them otherwise, and a deadline here that `on_timer` cannot push would trip the progress check.
+    fn wake_at(&self) -> Option<Instant> {
+        let mut wake: Option<Instant> = None;
+        let mut take = |deadline: Instant| {
+            wake = Some(wake.map_or(deadline, |wake| wake.min(deadline)));
+        };
+        if self.policy.supervisor_keepalive {
+            take(self.last_ping + self.policy.ping_interval);
+            if !self.paused {
+                take(self.last_rx + self.policy.idle_timeout);
+            }
         }
         if let Some(deadline) = self.pending.next_deadline() {
-            wake = wake.min(deadline);
+            take(deadline);
         }
         // ★Without it nobody can close the re-request window★ — a stream that goes quiet after a hole would keep it open forever.
         if !self.paused {
             if let Some(deadline) = self.streams.next_resume_deadline() {
-                wake = wake.min(deadline);
+                take(deadline);
             }
         }
         // ★Unrelated to holding★ — the drain deadline runs even when the receiving line is backed up.
         if let Some(deadline) = self.flush_deadline {
-            wake = wake.min(deadline);
+            take(deadline);
         }
         wake
     }
@@ -1523,7 +1534,11 @@ impl<W: Wire> Supervisor<W> {
             return Some(Input::Close);
         }
         self.track_pause(now);
-        if !self.paused && now.saturating_duration_since(self.last_rx) >= self.policy.idle_timeout {
+        let keepalive = self.policy.supervisor_keepalive;
+        if keepalive
+            && !self.paused
+            && now.saturating_duration_since(self.last_rx) >= self.policy.idle_timeout
+        {
             return Some(Input::LinkLost(DisconnectCause::Idle));
         }
         let after = self.policy.request_timeout;
@@ -1540,7 +1555,7 @@ impl<W: Wire> Supervisor<W> {
             let expired = self.streams.expire_resumes(now);
             self.hand_over_truncations(expired);
         }
-        if now.saturating_duration_since(self.last_ping) >= self.policy.ping_interval {
+        if keepalive && now.saturating_duration_since(self.last_ping) >= self.policy.ping_interval {
             self.last_ping = now;
             if let Err(input) = self.ping().await {
                 return Some(input);
@@ -2534,7 +2549,11 @@ mod tests {
     }
 
     async fn live() -> (Harness, Arc<MemoryEndpoint>) {
-        let mut h = build(Policy::default(), Arc::new(ImmediateHandshake));
+        live_with(Policy::default()).await
+    }
+
+    async fn live_with(policy: Policy) -> (Harness, Arc<MemoryEndpoint>) {
+        let mut h = build(policy, Arc::new(ImmediateHandshake));
         settle_until("first connection", || {
             h.peer.peer_state() == PeerState::Live
         })
@@ -2604,14 +2623,14 @@ mod tests {
         for frames_in_row in [0usize, 1, FRAME_BURST, 10_000] {
             for outbound in [0usize, 1, CAP] {
                 assert_eq!(
-                    next_turn(t0, t0, frames_in_row, outbound, CAP),
+                    next_turn(t0, Some(t0), frames_in_row, outbound, CAP),
                     Turn::Timer,
                     "frames={frames_in_row} outbound={outbound}"
                 );
                 assert_eq!(
                     next_turn(
                         t0 + Duration::from_secs(1),
-                        t0,
+                        Some(t0),
                         frames_in_row,
                         outbound,
                         CAP
@@ -2626,7 +2645,7 @@ mod tests {
     #[test]
     fn a_frame_burst_yields_a_turn_to_the_outbound_queue() {
         let t0 = Instant::now();
-        let future = t0 + Duration::from_secs(1);
+        let future = Some(t0 + Duration::from_secs(1));
         assert_eq!(
             next_turn(t0, future, FRAME_BURST, 1, CAP),
             Turn::Outbound(1)
@@ -2640,7 +2659,7 @@ mod tests {
     #[test]
     fn below_the_burst_and_before_the_deadline_the_loop_just_waits() {
         let t0 = Instant::now();
-        let future = t0 + Duration::from_secs(1);
+        let future = Some(t0 + Duration::from_secs(1));
         assert_eq!(next_turn(t0, future, 0, 1, CAP), Turn::Wait);
         assert_eq!(next_turn(t0, future, FRAME_BURST - 1, 1, CAP), Turn::Wait);
     }
@@ -2648,21 +2667,28 @@ mod tests {
     #[test]
     fn an_empty_outbound_queue_never_takes_a_turn() {
         let t0 = Instant::now();
-        let future = t0 + Duration::from_secs(1);
+        let future = Some(t0 + Duration::from_secs(1));
         assert_eq!(next_turn(t0, future, FRAME_BURST * 10, 0, CAP), Turn::Wait);
+    }
+
+    #[test]
+    fn without_a_timer_source_the_loop_never_takes_the_timer_turn() {
+        let t0 = Instant::now();
+        assert_eq!(next_turn(t0, None, 0, 0, CAP), Turn::Wait);
+        assert_eq!(next_turn(t0, None, FRAME_BURST, 1, CAP), Turn::Outbound(1));
     }
 
     #[test]
     fn the_deadline_outranks_the_burst_when_both_are_due() {
         let t0 = Instant::now();
-        assert_eq!(next_turn(t0, t0, FRAME_BURST, 5, CAP), Turn::Timer);
+        assert_eq!(next_turn(t0, Some(t0), FRAME_BURST, 5, CAP), Turn::Timer);
     }
 
     #[test]
     fn the_burst_bound_is_finite_so_the_outbound_queue_cannot_be_starved() {
         assert!(FRAME_BURST > 0);
         let t0 = Instant::now();
-        let future = t0 + Duration::from_secs(1);
+        let future = Some(t0 + Duration::from_secs(1));
         // ★Search with a limit★ — an unbounded search hangs when the rule is broken.
         let first_yield = (0..FRAME_BURST * 4)
             .find(|n| matches!(next_turn(t0, future, *n, 1, CAP), Turn::Outbound(_)))
@@ -2674,7 +2700,7 @@ mod tests {
     #[test]
     fn a_backlog_past_half_capacity_does_not_wait_for_a_frame_burst() {
         let t0 = Instant::now();
-        let future = t0 + Duration::from_secs(1);
+        let future = Some(t0 + Duration::from_secs(1));
         let half = CAP / 2;
         for outbound in [half, half + 1, CAP] {
             assert_eq!(
@@ -2693,7 +2719,7 @@ mod tests {
     #[test]
     fn a_yield_drains_the_whole_backlog_not_one_item() {
         let t0 = Instant::now();
-        let future = t0 + Duration::from_secs(1);
+        let future = Some(t0 + Duration::from_secs(1));
         for outbound in [1usize, 7, 64, CAP] {
             assert_eq!(
                 next_turn(t0, future, FRAME_BURST, outbound, CAP),
@@ -3421,6 +3447,74 @@ mod tests {
         settle().await;
         assert!(endpoint.drain().contains(&ClientMsg::Ping));
         assert_eq!(h.peer.peer_state(), PeerState::Live);
+    }
+
+    // ★Long past both default windows (ping 20 s · silence 50 s)★ — a supervisor still arming either would ping or cut here.
+    #[tokio::test]
+    async fn with_the_supervisor_keepalive_off_no_ping_goes_out_and_silence_never_cuts() {
+        let (mut h, endpoint) = live_with(Policy {
+            supervisor_keepalive: false,
+            ..Policy::default()
+        })
+        .await;
+        for _ in 0..3 {
+            h.clock.advance(Duration::from_secs(600));
+            settle().await;
+        }
+        assert!(!endpoint.drain().contains(&ClientMsg::Ping));
+        assert_eq!(h.disconnect_cause(), None);
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+        assert!(
+            !h.task.is_finished(),
+            "the supervisor ended (a panic looks the same)"
+        );
+    }
+
+    // ★The timer still wakes for a request, long after both keepalive windows★ — the shape of the peer link (request deadline 120 s, silence 50 s, ping 20 s).
+    //   Waking there must neither ping nor cut for silence: those guards sit in `on_timer`, which this wake-up runs.
+    #[tokio::test]
+    async fn with_the_supervisor_keepalive_off_a_request_deadline_wake_neither_pings_nor_cuts() {
+        let policy = Policy {
+            supervisor_keepalive: false,
+            request_timeout: Duration::from_secs(120),
+            ..Policy::default()
+        };
+        assert!(policy.request_timeout > policy.idle_timeout);
+        assert!(policy.request_timeout > policy.ping_interval);
+        let (mut h, endpoint) = live_with(policy.clone()).await;
+        let asked = spawn_request(&h.peer, 9);
+        settle().await;
+        h.clock.advance(policy.request_timeout);
+        settle().await;
+        assert!(matches!(
+            joined(asked).await,
+            Err(RequestError::TimedOut { .. })
+        ));
+        assert!(!endpoint.drain().contains(&ClientMsg::Ping));
+        assert_eq!(h.disconnect_cause(), None);
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+        assert!(
+            !h.task.is_finished(),
+            "the supervisor ended (a panic looks the same)"
+        );
+    }
+
+    // ★Its request deadline still fires★ — turning keepalive off removes only the ping and silence sources from the timer, not the pending table's.
+    #[tokio::test]
+    async fn with_the_supervisor_keepalive_off_a_request_still_times_out() {
+        let (h, _endpoint) = live_with(Policy {
+            supervisor_keepalive: false,
+            ..Policy::default()
+        })
+        .await;
+        let asked = spawn_request(&h.peer, 9);
+        settle().await;
+        h.clock.advance(Policy::default().request_timeout);
+        settle().await;
+        assert!(matches!(
+            joined(asked).await,
+            Err(RequestError::TimedOut { .. })
+        ));
     }
 
     #[tokio::test]

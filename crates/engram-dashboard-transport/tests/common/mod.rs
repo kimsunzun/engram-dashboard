@@ -3,22 +3,30 @@
 //! first, and the receiving-side task is reaped by `abort()` or runtime shutdown. ★The dialing side has no exceptions★: when adding a wait ask **who decides** — the deciding side gets a cap; only a task whose job is to wait for a
 //! guest goes without. Do not describe that place as 「the Nth test」 (counts go stale). ★The in-memory `settle`/`settle_until` cannot be used here★ — they yield cooperatively, which does not wait for the kernel on a real socket.
 
+#[cfg(feature = "ws")]
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use engram_dashboard_transport::testing::{accepted_ends, TestWire};
-use engram_dashboard_transport::ws::{AcceptPolicy, WsDialer, WsListener};
+use engram_dashboard_transport::testing::TestWire;
 use engram_dashboard_transport::{
-    Dialer, Inbox, Incoming, LinkError, LinkRx, LinkTx, Listener, Peer, PeerState, Policy,
-    Registry, SystemClock,
+    Dialer, Inbox, Incoming, Peer, PeerState, Policy, Registry, SystemClock,
+};
+// The WS pieces are behind `ws` — `iroh_link` builds this module without that feature.
+#[cfg(feature = "ws")]
+use engram_dashboard_transport::{
+    testing::accepted_ends,
+    ws::{AcceptPolicy, WsDialer, WsListener},
+    LinkError, LinkRx, LinkTx, Listener,
 };
 
 /// The byte cap of one message and one frame — the production value (TRD 3 §5 15); the same value goes to [`dialer`] and [`accept_policy`].
+#[cfg(feature = "ws")]
 pub const MAX_MESSAGE: usize = 16 << 20;
 
 /// The accept policy of suites not measuring accepting — production-shaped values (reject upgrades with an Origin · loopback Host · 16 MiB); ★the crate has no allow-everything value★, so tests use real ones.
 /// ★The upgrade deadline is separate from [`PATIENCE`]★ (that constant is not a policy window — its rustdoc).
+#[cfg(feature = "ws")]
 pub fn accept_policy() -> AcceptPolicy {
     AcceptPolicy {
         allowed_origins: Vec::new(),
@@ -30,20 +38,24 @@ pub fn accept_policy() -> AcceptPolicy {
     }
 }
 
+#[cfg(feature = "ws")]
 pub fn loopback() -> SocketAddr {
     "127.0.0.1:0".parse().expect("address syntax")
 }
 
+#[cfg(feature = "ws")]
 pub fn listen() -> WsListener {
     WsListener::bind(loopback(), accept_policy(), Arc::new(SystemClock))
         .expect("bind")
         .0
 }
 
+#[cfg(feature = "ws")]
 pub fn dialer() -> WsDialer {
     WsDialer::new(MAX_MESSAGE)
 }
 
+#[cfg(feature = "ws")]
 pub async fn accept_link(
     listener: &mut WsListener,
 ) -> Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), LinkError> {

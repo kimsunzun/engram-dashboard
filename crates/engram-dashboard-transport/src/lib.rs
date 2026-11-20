@@ -1,7 +1,8 @@
 //! # engram-dashboard-transport — reusable transport lib (ADR-0177)
 //!
 //! ★Owns★: frame boundaries · request/response correlation · role distinction · stream bookkeeping (generation · sequence · resume · duplicate removal ·
-//! hole finding and re-request) · connection setup and the **opaque handshake** · bidirectional keepalive · write deadline · backoff + jitter reconnect · a
+//! hole finding and re-request) · connection setup and the **opaque handshake** · bidirectional keepalive (optional — [`Policy::supervisor_keepalive`]) ·
+//! write deadline · backoff + jitter reconnect · a
 //! registry of N peers with one supervisor per peer · fan-out · bounded queue and backpressure signal · structured connection events (ADR-0182).
 //!
 //! ★Does not know the consumer's packet vocabulary★ — hidden behind the associated types of [`Wire`]. The envelope, pairing-number generation, address
@@ -32,7 +33,7 @@
 //! 1. ★Do not await [`Peer::request`] on the task that drains the [`Inbox`]★ — backpressure blocks the reply too, so it hangs until [`Policy::request_timeout`].
 //! 2. ★While held by backpressure, that peer's silence decision and the resume window's deadline stop★ (we blocked it); the window may close later than the
 //!    held time, never earlier (`Supervisor::track_pause`). ★Exception★: a window deadline passing during a write can close it before a replay already in the
-//!    read-ahead queue (「known limits」). Our ping still goes out.
+//!    read-ahead queue (「known limits」). Our ping still goes out while `Policy::supervisor_keepalive` is on.
 //! 3. Events and messages ride one line per supervisor in produced order (`peer.rs` header); a peer's close follows what preceded it, and is read only after
 //!    those leave the ordering area (and bytes held fall below the read share).
 //! 4. The daemon write deadline ↔ shell backpressure interlock (TRD 3 R7) cannot be measured in-memory (no TCP buffer); a real-socket test covers it (TRD 3 §6-2 U4).
@@ -65,22 +66,25 @@
 //! `.github/workflows/ci.yml`). Known limit: aliases (`use tokio as rt;`), final-segment imports (`use std::net;`) and multi-item groups are not seen
 //! (`docs/todo/observed-only.md`).
 //!
-//! **④ Each of the three feature combinations compiles** (`-p`), decided by **success**, not line count:
-//! `cargo test -p engram-dashboard-transport` (0 features) · `cargo test -p engram-dashboard-transport --all-features` (`test-support` · `ws`) ·
-//! `cargo check -p engram-dashboard-transport --features ws` (the consumer's operating combination).
-//! Code behind a cfg gate gives no error, so do not shrink this to one line. ★The third line measures whether the adapter compiles **without the test-only
-//! harness**★ — `testing` is behind `any(test, feature = "test-support")`, so an adapter reference to `crate::testing` dies only there. It is `check`, not `test`;
-//! ★do not read it as 「0 tests」★ — `cfg(test)` exposes the harness, so `--features ws` runs the unit tests (the zero is only the four real-socket suites).
+//! **④ Each of the four feature combinations compiles** (`-p`), decided by **success**, not line count:
+//! `cargo test -p engram-dashboard-transport` (0 features) · `cargo test -p engram-dashboard-transport --all-features` (`test-support` · `ws` · `iroh`) ·
+//! `cargo check -p engram-dashboard-transport --features ws` (the shell's and daemon's operating combination) ·
+//! `cargo check -p engram-dashboard-transport --features iroh` (the iroh adapter alone).
+//! Code behind a cfg gate gives no error, so do not shrink this to one line. ★The last two lines measure whether each adapter compiles **without the test-only
+//! harness** and without the other adapter★ — `testing` is behind `any(test, feature = "test-support")`, so an adapter reference to `crate::testing` dies only
+//! there. They are `check`, not `test`; ★do not read them as 「0 tests」★ — `cfg(test)` exposes the harness, so `test --features ws` would run the unit tests (the
+//! zero is only the real-socket suites).
 //!
-//! **⑤ The four real-socket suites are not empty** (`tests/`):
-//! `cargo test -p engram-dashboard-transport --all-features --test <ws_dial|ws_reject|ws_write_deadline|ws_accept>`
-//! `-- --list` → each has **at least 1 line ending in `: test`**. ★④ cannot see this axis★ — the four files sit behind the file-level
-//! `#![cfg(all(feature = "ws", feature = "test-support"))]`; if that turns false they compile with 0 tests and succeed. The suite-name list has three copies
-//! (this line · `transport gate 4c` in `ci.yml` · the transport ⑤ line of the qa binding) — change all three together. The minimum stays 1, not the actual count, so
-//! only a completely empty suite or a vanished target is caught.
+//! **⑤ The five real-socket suites are not empty** (`tests/`):
+//! `cargo test -p engram-dashboard-transport --all-features --test <ws_dial|ws_reject|ws_write_deadline|ws_accept|iroh_link>`
+//! `-- --list` → each has **at least 1 line ending in `: test`**. ★④ cannot see this axis★ — the four `ws_*` files sit behind the file-level
+//! `#![cfg(all(feature = "ws", feature = "test-support"))]` and `iroh_link` behind `#![cfg(all(feature = "iroh", feature = "test-support"))]`; if that turns false
+//! they compile with 0 tests and succeed. The suite-name list has three copies (this line · `transport gate 4c` in `ci.yml` · the `--list` lines of the qa
+//! binding's backend block, `.claude/skill-bindings/qa-verify.md`) — change all three together. The minimum stays 1, not the actual count, so only a completely
+//! empty suite or a vanished target is caught.
 //!
 //! **Consumer side — `test-support` stays out of release graphs.** Turn the feature on only in `[dev-dependencies]`; `.github/workflows/ci.yml` `shell gate 5`
-//! holds the shell's release graph at 0 lines of it (the daemon line comes with TRD 3 §6-3 U4).
+//! holds the shell's release graph at 0 lines of it (the daemon line was left out under the 3-3 replace-only scope — that step's comment).
 //!
 //! ## Known limits (do not read as guarantees)
 //!
@@ -92,11 +96,11 @@
 //! - ★**Overlapping live numbers fail both sides**★ — the old waiter gets [`RequestError::Superseded`], the new request [`RequestError::TagRetired`] (the wire
 //!   cannot tell a late reply from the later request's match). ★Differs from 「the new one takes over」 in TRD §4-1★.
 //! - ★**A close code reaches the peer in few places**★ — RFC 6455 §7.4.1 reserves `1006`. Disconnects push to the end to carry the code (`Supervisor::drop_link`), but
-//!   `Policy::write_deadline` cuts that wait on a congested socket. [`Peer::close_after_flush`] gives the close frame only the shorter of `write_deadline` and the
+//!   `Policy::write_deadline` cuts that wait on a congested socket; over iroh the close also waits for the peer to acknowledge the tail, so the same deadline bounds a close to an unresponsive peer — keep it short. [`Peer::close_after_flush`] gives the close frame only the shorter of `write_deadline` and the
 //!   remaining [`Policy::flush_timeout`]; a handshake rejection pushes only within the remaining handshake deadline (`handshake_once`). Delivery is never certain;
 //!   [`LinkRead::Closed`] is the only channel carrying the code.
 //! - ★**[`TransportEvent::Disconnected`] carries only [`DisconnectCause`]★ — neither the link's text nor the peer's close code.
-//! - ★**No `tracing`**★ — the event stream ([`TransportEvent`]) is that place; with no event reader no trace is left.
+//! - ★**No `tracing`**★ from this crate's own code — the event stream ([`TransportEvent`]) is that place; with no event reader no trace is left. With feature `iroh` on, iroh itself logs into the consumer's tracing subscriber.
 //! - ★**Jitter is deterministic under a manual clock**★; its variance is observable only on a real socket.
 //! - ★**`oldest_valid` of [`TransportEvent::StreamTruncated`] is observed, not told by the peer**★ — [`Wire`] has no entrance for it. Out-of-order fragments are
 //!   **held** while a re-request awaits `after + 1`, and on window close (deadline · [`Policy::resume_buffer`] · byte cap · eviction · cleanup) it raises that number
@@ -112,7 +116,7 @@
 //!   gives up; both use [`ReconnectPolicy::max_attempts`].
 //! - ★**The upward line is separate per handle; full = stop reading that peer (no discard, no disconnect)**★ ([`Registry::add`] sets up one line per call;
 //!   [`Policy::inbound_queue`]). A noisy peer cannot push out a quiet one (ADR-0180 decision 8). Bytes per supervisor are bounded by 16 MiB + one message (`budget.rs`);
-//!   the one-message cap is the adapter's job (`ws::AcceptPolicy::max_message_bytes` · `ws::WsDialer::new`; TRD 3 §5 15). On our-side link discard, what the
+//!   the one-message cap is the adapter's job (`ws::AcceptPolicy::max_message_bytes` · `ws::WsDialer::new` · `iroh::IrohConfig::max_payload`; TRD 3 §5 15). On our-side link discard, what the
 //!   read-ahead queue already holds is delivered before the disconnect event, the rest unread is discarded uncounted (`Supervisor::salvage_read_ahead`); under
 //!   backpressure the peer's close may be noticed first as a write failure — the cause is [`DisconnectCause::PeerClosed`] only if it was already read-ahead.
 //! - ★**[`Peer::close`] has no completion signal**★ — to wait use the future [`Peer::close_after_flush`] returns. Re-raising a label overlaps harmlessly via the
@@ -123,22 +127,25 @@
 //!   reader and a clean exit takes priority; [`TransportEvent::Dropped`] there carries only the supervisor-counted share. Reconnect · link drop are unaffected.
 //! - ★**The harness settle family ([`testing::settle`] · [`testing::settle_until`]) is current_thread-only**★ (panics on violation); the other in-memory parts and
 //!   [`PermitPool`] also run on multi_thread with real-time waits.
-//! - ★**The only receiving-side permit is the upgrade permit**★ — [`Registry::attach`] holds it until the operating phase and also bears the auth-wait permit's share
-//!   (TRD 3 §5 14); accepted peers are uncapped while operating. [`Accepted`] comes from `ws::WsListener` and in-memory `testing::MemoryListener`.
-//!   The auth-wait and operating permits do not exist yet (3-3 U4).
+//! - ★**The only receiving-side permit is the upgrade permit**★ (the iroh adapter's accept permit plays the same role) — [`Registry::attach`] holds it until the
+//!   operating phase and also bears the auth-wait permit's share (TRD 3 §5 14); accepted peers are uncapped while operating. [`Accepted`] comes from
+//!   `ws::WsListener`, `iroh::IrohListener` and in-memory `testing::MemoryListener`. The auth-wait and operating permits do not exist.
 //! - ★**An accepted peer's label is assumed not reused**★ — accepted peers stay out of the generation table, so a label never `add`ed and absent from the registry
 //!   restarts at generation 1 on re-attach or [`Registry::add`] ([`Registry::attach_with_policy`] · [`Registry::add_with_policy`]); fine with a new label per
 //!   connection (TRD 3 §3-1 ① `conn-<ConnId>`).
-//! - ★**One adapter**★ — [`ws`] (feature `ws`); its limits are canonical in the `src/ws.rs` header 「known limits」 · 「link properties」, not copied here.
+//! - ★**Two adapters, both opt-in**★ — `ws` (feature `ws`: the loopback shell link) and `iroh` (feature `iroh`: the daemon-to-daemon QUIC link, ADR-0388); their
+//!   limits are canonical in the `src/ws.rs` and `src/iroh.rs` headers 「known limits」 · 「link properties」, not copied here.
 //!
 //! ## Standalone verification (ADR-0012)
 //!
 //! `cargo test -p engram-dashboard-transport --all-features` needs no other crate or process. In-memory suites turn time by hand on [`testing::ManualClock`] and
-//! wait for nothing (ADR-0177 decision 8). ★The four real-socket suites (`ws_dial` · `ws_reject` · `ws_write_deadline` · `ws_accept` in `tests/`) use real time and
-//! real TCP★, behind `all(feature = "ws", feature = "test-support")`, ports requested as 0. `ws_dial` · `ws_write_deadline` measure what memory cannot (e.g.
+//! wait for nothing (ADR-0177 decision 8). ★The five real-socket suites use real time★: `ws_dial` · `ws_reject` · `ws_write_deadline` · `ws_accept` in `tests/` on
+//! real TCP behind `all(feature = "ws", feature = "test-support")`, and `iroh_link` on real QUIC endpoints bound to 127.0.0.1 with every helper server off, behind
+//! `all(feature = "iroh", feature = "test-support")`; ports requested as 0. `ws_dial` · `ws_write_deadline` measure what memory cannot (e.g.
 //! whether the write deadline cuts in front of the kernel buffer); `ws_reject` re-measures that the close code and message cross the kernel (reason in its header);
 //! `ws_accept` measures the accept policy on a real HTTP upgrade (TRD 3 §6-0 U7; header of `tests/ws_accept.rs`). Moving them in-memory removes what they measure.
-//! `ws_dial` · `ws_write_deadline` are the two ADR-0177 decision 8 lists as needing a real socket; `ws_reject` has no decision record yet.
+//! `ws_dial` · `ws_write_deadline` are the two ADR-0177 decision 8 lists as needing a real socket; `ws_reject` has no decision record yet. `iroh_link` measures the
+//! iroh adapter's close codes, key binding, accept gate and QUIC idle-out (ADR-0388; header of `tests/iroh_link.rs`) — one test waits out QUIC's 30 s idle timeout.
 //! ★Do not add `-- --test-threads=4`★ — this crate spawns no child process.
 // hangul-ok-begin
 //! It is exactly the decision rule of `.claude/skill-bindings/qa.md` 「모듈별 명령」, the same situation as `command` · `protocol` · `messaging` · `net`.
@@ -150,6 +157,7 @@
 // ADR-0182
 // ADR-0183
 // ADR-0310
+// ADR-0388
 mod budget;
 pub mod clock;
 pub mod event;
@@ -169,6 +177,9 @@ pub mod testing;
 
 #[cfg(feature = "ws")]
 pub mod ws;
+
+#[cfg(feature = "iroh")]
+pub mod iroh;
 
 pub use clock::{with_deadline, Clock, Elapsed, SystemClock};
 pub use event::{Arrival, Direction, Incoming, PeerId, TransportEvent};

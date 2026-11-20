@@ -94,7 +94,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 | base · command · protocol · messaging | `cargo test -p engram-dashboard-<이름>` |
 | platform · agent · daemon | `cargo test -p engram-dashboard-<이름> -- --test-threads=4` |
 | cli | `cargo test -p engram-dashboard-cli --bins --test engram_cli -- --test-threads=4` |
-| transport | `cargo test -p engram-dashboard-transport` · 그 줄에 `--all-features` · `cargo check -p engram-dashboard-transport --features ws` — 셋 다 |
+| transport | `cargo test -p engram-dashboard-transport` · 그 줄에 `--all-features` · `cargo check -p engram-dashboard-transport --features ws` · `cargo check -p engram-dashboard-transport --features iroh` — 넷 다 |
 | 셸(`src-tauri`) | `cargo test -p engram-dashboard --test <타깃>` — 타깃 = `layout_apply` · `layout_commands` · `daemon_client_pending` · `daemon_client_replay` · `lib_unit` |
 | 프론트 | `npm test` · `npx tsc --noEmit` |
 | 전체(로컬) | `cargo test --workspace -- --test-threads=4` |
