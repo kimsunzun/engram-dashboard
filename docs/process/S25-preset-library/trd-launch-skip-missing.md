@@ -2,7 +2,7 @@
 
 | Item | Value |
 |---|---|
-| **Status** | **Draft 4 · 2026-11-20** — re-review round 2 fixes applied (typed root stat, first-scan root state, `library.status` `unreadable`, network-share probe, link-probe errors, unreadable files below a folder entry, full caller list in §1). The user's rule 「없음 → 건너뜀 / 있는데 못 읽음·깨짐 → 막음」 applies to every kind, the library root included (§11 a2). Canonical ADR: ADR-0374, narrowed by that rule (main records the amendment — §13) (relies on ADR-0361 · ADR-0341 · ADR-0363 · ADR-0357 / ADR-0364 · ADR-0370 · ADR-0215; step-21 context ADR-0385 · ADR-0386) |
+| **Status** | **Draft 5 · 2026-11-20 — reviewed deep, PASS** (§14). Decisions and boundaries only. The user's rule 「없음 → 건너뜀 / 있는데 못 읽음·깨짐 → 막음」 applies to every kind, the library root included (§11 a2). Canonical ADR: ADR-0374, narrowed by that rule (main records the amendment — §13) (relies on ADR-0361 · ADR-0341 · ADR-0363 · ADR-0357 / ADR-0364 · ADR-0370 · ADR-0215; step-21 context ADR-0385 · ADR-0386) |
 | **Parent** | S25 topic ([`trd.md`](trd.md) — §1-3 resolution, §1-5 agent launch). No parent-TRD item of its own: T-112 sits between step 10a and step 21 (`docs/tracking.md` §T-112). What/why = PRD [`prd.md`](prd.md) E4 reasons ① and ④ as amended by ADR-0374 and the user's rule of 2026-11-20. |
 | **Reference files to fix** | `docs/reference/structure/asset-library.md` (the root paragraph 「an agent with a library preset attached is blocked with ④」 · Main flow 4 · 「Problem rows are the block」 · 「④ stands alone」 · Where to look) · `docs/reference/structure/agent-backend.md` (claude argv row: one `--add-dir` per folder entry the launch did not skip) · asset-library `resolve.rs`, `launch.rs` and `folder.rs` module headers · agent `launch.rs` `BlockReason` doc and `notice_text` doc · platform `fs.rs` (the new share probe). `architecture.md` and the crate `lib.rs` heads: none. |
 | **Line-pointer basis** | Code at `290cc33b`. Code is cited by file + symbol; line numbers are hints. |
@@ -67,7 +67,7 @@ Search: `rg` over `crates/`, `src-tauri/src`, `prompts` for each symbol below. `
 | `prelaunch::settle` (agent) | the one accepted check of a launch | **U1**: `warn` for the skip codes |
 | `instructions_append` (new, agent `settings_check.rs`) | asset-library `launch_check` | **U1** (port) · U2 (use) |
 | notice codes (new, agent `launch.rs`) | asset-library `launch_check`; agent `own_wording`, the level helper | U1 (codes, wording) · U2 (emitted) |
-| platform `fs::share_root` (new, pure) | `folder.rs` `BoundedIo::stat_all`; `lib.rs` `stat_root` | **U2** |
+| platform `fs::share_root` (new, pure) | `folder.rs` `BoundedIo::stat_all` (the library root reaches it through `stat_root` → `stat_all`) | **U2** |
 | `library.status` words | agent `commands.rs` `LibraryStatusOk` doc; `prompts/engram-help.md` | **U3** (texts; bindings regenerated) |
 
 ### 1.2 Tests that assert a changed symbol
@@ -131,7 +131,7 @@ Backend knowledge stays in port answers; OS knowledge stays in `platform` (`CLAU
 - `not-found` — a library item (attached preset, nested preset, instruction, skill, settings) not found.
 - `folder-not-found` `{path}` — a folder entry whose folder is not there: `FolderStatus::Missing` or `NotADirectory`. Consequence (main decided, H2): a folder entry on a local drive letter that is not present (unplugged disk, unmapped `subst`) is absent and skipped.
 
-**Share probe (decides "absent" for folder entries and the library root).** A `NotFound` stat is `Missing` only when the volume is there. `BoundedIo::stat_all` runs the probe as a second step of the required phase: for each `Missing` answer on a path with a platform `share_root` (a UNC path, or a drive letter mapped to a network location), it asks `Stat(<share root>)` as an ordinary key on the same `LaunchIo`. The probe step runs over every `Missing` answer the required phase returns, including one already cached in `LaunchIo` by an earlier advisory ask of the same path — an unprobed advisory answer never stands for a required one. If the root does not stat as a folder, the item's answer becomes `Unreadable("share not reachable")` and it blocks (「네트워크 끊김 → 막기」). One key per volume root per launch, so absent entries on one share share one probe answer (less load); each absent entry still costs its own stat, then the probe — two round trips unless the root was already asked in the launch. Advisory asks (project-marker stats in `native_roots`) do not probe: there `Missing` and `Unreadable` both mean "no marker". A slow share is bounded by the same required budget (`timeout` → `Unreadable`). The library root gets the same probe inside `stat_root`'s bounded stat (a second stat of its share root on `Missing`). Not covered: a local-drive path that reaches a share through a directory link (the drive letter is local, so `share_root` is `None`) — R10.
+**Share probe (decides "absent" for folder entries and the library root).** A `NotFound` stat is `Missing` only when the volume is there. `BoundedIo::stat_all` runs the probe as a second step of the required phase: for each `Missing` answer on a path with a platform `share_root` (a UNC path, or a drive letter mapped to a network location), it asks `Stat(<share root>)` as an ordinary key on the same `LaunchIo`. The probe step runs over every `Missing` answer the required phase returns, including one already cached in `LaunchIo` by an earlier advisory ask of the same path — an unprobed advisory answer never stands for a required one. If the root does not stat as a folder, the item's answer becomes `Unreadable("share not reachable")` and it blocks (「네트워크 끊김 → 막기」). One key per volume root per launch, so absent entries on one share share one probe answer (less load); each absent entry still costs its own stat, then the probe — two round trips unless the root was already asked in the launch. Advisory asks (project-marker stats in `native_roots`) do not probe: there `Missing` and `Unreadable` both mean "no marker". A slow share is bounded by the same required budget (`timeout` → `Unreadable`). The library root gets the probe through the same path: `stat_root` already asks `stat_all` with `Need::Required`, so no separate stat is written in `stat_root`. Not covered: a local-drive path that reaches a share through a directory link (the drive letter is local, so `share_root` is `None`) — R10.
 
 Everything else blocks:
 - ② every `Broken` row: YAML syntax, `library-read-failed`, `wrong-kind`, `preset-cycle`, `builtin-in-library-preset`, `item-path-invalid`, settings refusals, skill format and name, `folder-path-cli-unsafe`, `path-through-link`, `command-line:`, `working-folder:`, and the new **`folder-unreadable`**.
@@ -298,7 +298,7 @@ QA rows (`.claude/skill-bindings/qa.md`): 「Rust 소스」 → 전체 회귀 (t
 | `instructions_append`: claude `true`, codex and default `false` | agent backend unit tests | U1 |
 | `share_root`: UNC path and `\\?\UNC\` → its `\\server\share\`; local drive letter, absent drive letter, relative path → `None`; on Windows | platform unit tests (pure) | U2 |
 | `stat_all` probe: a `Missing` entry under a fake share whose root does not answer → `Unreadable("share not reachable")`; whose root is `Ok` → `Missing`; two entries on one share → one root stat; advisory phase → no probe; advisory then required ask of the same path → the required answer is probed | `folder.rs` tests with a fake `FolderOps` and a `share_root` seam | U2 |
-| `StdFolderOps::stat`: a path under an unreachable share → `Unreadable("share not reachable")`; a missing folder on a present drive → `Missing` | `folder.rs` tests | U2 |
+| `StdFolderOps::stat` unchanged: a missing folder on a present drive → `Missing` | `folder.rs` tests (existing) | U2 |
 | Split by kind; ④ row placement by the absent mark; parts equal `problems` | `resolve.rs` tests; rewrite `the_block_is_the_problem_list_ordered_by_kind` (one missing and one unreadable folder beside ② and ③) | U2 |
 | Folder rows: absent → `folder-not-found` `{path}`; unreadable → `folder-unreadable` `{path, why}` | rewrite `a_folder_that_is_not_ok_is_a_missing_line_on_every_backend_and_mode`; `lib.rs` held-folder budget test expects `folder-unreadable` `why: timeout` | U2 |
 | `mark_links` probe error → ② `library-read-failed` | `lib.rs` test with a store whose `first_link` errors | U2 |
@@ -376,7 +376,7 @@ Sequential (U2 uses U1's constants and port answer; U3 edits texts and tests tha
 - c10 — `instructions_append` defaults to `false`; claude overrides.
 - c11 — `RootState::Unavailable` → `Absent` / `Unreadable`; a root path that is a file is absent.
 - c12 — `stat_root` answers `FolderStatus` (no new type); `FolderStatus::why` gives the strings its other callers keep; `RootSeen.stat` holds the typed answer.
-- c13 — the share probe = a pure platform function `fs::share_root` + a second step in `BoundedIo::stat_all`'s required phase asking the share root as an ordinary key (and the same second stat in `stat_root` for the library root); answer `Unreadable("share not reachable")`; `StdFolderOps::stat`, `list` and `status_of` unchanged.
+- c13 — the share probe = a pure platform function `fs::share_root` + a second step in `BoundedIo::stat_all`'s required phase asking the share root as an ordinary key (the library root through `stat_root` → `stat_all` — no separate stat); answer `Unreadable("share not reachable")`; `StdFolderOps::stat`, `list` and `status_of` unchanged.
 
 ## 12. Risks
 
@@ -388,7 +388,7 @@ Sequential (U2 uses U1's constants and port answer; U3 edits texts and tests tha
 - **R6** — a codex agent with no Engram instruction text is not told by the note (b3). Also accepted: a resumed codex JSON thread keeps instructions whose file was since deleted — the text no longer carries it, and with no Engram text at all there is no note and `instructions_changed` stays `false`; the same class as removing an instruction by editing the preset.
 - **R7** — boot restore before a network share is up: an agent whose root or folder entry sits on it is refused (H1, U1, b4), as today; a later start succeeds. An unplugged local disk is skipped (H2).
 - **R8** — tree ⛔ meaning and the screen form of the first-scan difference are left to step 13 (§7).
-- **R9 (unconfirmed)** — what a disconnected mapped network drive letter (`Z:`) answers to a stat (`NotFound` like a UNC path, or error 53 / 67 / 1222), and what a real, existing but offline host answers. The design probes a remote drive letter's root like a UNC share, so either way it is not absent; the QA live check (§9) records what Windows answers.
+- **R9 (unconfirmed)** — what a disconnected mapped network drive letter (`Z:`) answers to a stat (`NotFound` like a UNC path, or error 53 / 67 / 1222), and what a real, existing but offline host answers. The design probes a remote drive letter's root like a UNC share, so either way it is not absent; the QA live check (§9) records what Windows answers, and whether `GetDriveTypeW` (called by `share_root` on the caller's thread, outside a bounded worker) returns without contacting the server for a disconnected mapped drive.
 - **R10 (accepted, rare)** — a local-drive path that reaches a network share through a directory link is not probed (the drive letter is local); if the share is down and Windows answers `NotFound`, the item reads as absent and is skipped. Canonicalising every path to find its real volume costs a resolve per item; not done.
 
 ## 13. Input claims corrected and records for main (code at `290cc33b`)
@@ -406,4 +406,4 @@ Sequential (U2 uses U1's constants and port answer; U3 edits texts and tests tha
 
 ## 14. Review record
 
-_(no review recorded in this file)_
+- 2026-11-20 · deep (lead · risk-axis lens · Codex) · PASS · draft 5 (this commit).
