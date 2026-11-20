@@ -56,7 +56,7 @@ Search: `rg` over `crates/`, `src-tauri/src`, `prompts` for each symbol below. `
 | | `status` (`library.status`) | **U2**: `Unreadable` → `RootStatus::Unreadable { why }` (§3.6) |
 | | `agent_edit.rs` `LibraryService::agent_edit` (`RootSeen.stat`) | **U2**: stores the typed answer; stats whenever a root is set (also when the first scan failed) |
 | `RootStatus` (`lib.rs`) | `status`; `host.rs` `status_ok` (words); `library.setRoot` answer (`LibrarySetRootOk` from `LibraryStatusOk`) | **U2**: new variant `Unreadable { why }`, word `unreadable` |
-| `FolderStatus` producer `folder.rs` `status_of` | `StdFolderOps::stat` (and `list`, via `stat`) | **U2**: on `NotFound`, the share probe decides `Missing` or `Unreadable` (§3.1) |
+| `FolderStatus` producers `folder.rs` `status_of` / `StdFolderOps::stat` | `BoundedIo::stat_all` (required phase) | **U2**: unchanged themselves; `stat_all` adds the share probe as a second step of the required phase (§3.1) |
 | | `IoAnswer::Canonical` mapping (advisory canonicalize) | unchanged (advisory; never a skip decision) |
 | `folder_verdicts` (`edit.rs`) | `preset.add` folders (`edit.rs` ~572), `preset.previewFolder` (`edit.rs` ~910) | **U2**: `Unreadable` → refusal code `folder-unreadable` `{why}`; absent keeps `folder-not-found` `{why: missing \| not a folder}` |
 | `status_why` (`edit.rs`) | `folder_verdicts`; `preview_folder` (when listing fails) | U2: moves to `folder.rs` as `FolderStatus::why`, shared by `stat_root`'s string callers; both edit callers convert, `preview_folder` keeps its `unlisted` diagnostic |
@@ -67,7 +67,7 @@ Search: `rg` over `crates/`, `src-tauri/src`, `prompts` for each symbol below. `
 | `prelaunch::settle` (agent) | the one accepted check of a launch | **U1**: `warn` for the skip codes |
 | `instructions_append` (new, agent `settings_check.rs`) | asset-library `launch_check` | **U1** (port) · U2 (use) |
 | notice codes (new, agent `launch.rs`) | asset-library `launch_check`; agent `own_wording`, the level helper | U1 (codes, wording) · U2 (emitted) |
-| platform `fs::missing_is_absent` (new) | `folder.rs` `StdFolderOps::stat` | **U2** |
+| platform `fs::share_root` (new, pure) | `folder.rs` `BoundedIo::stat_all`; `lib.rs` `stat_root` | **U2** |
 | `library.status` words | agent `commands.rs` `LibraryStatusOk` doc; `prompts/engram-help.md` | **U3** (texts; bindings regenerated) |
 
 ### 1.2 Tests that assert a changed symbol
@@ -103,12 +103,12 @@ New tests are in §9.
 
 | Where | Change |
 |---|---|
-| platform `fs.rs` | New `missing_is_absent(path: &Path) -> bool` — the OS part of the share probe (§3.1). Windows: a UNC path (`\\server\share\…`, `\\?\UNC\…`) and a drive letter whose drive type is remote (`GetDriveTypeW` → `DRIVE_REMOTE`) answer `true` only when the volume root (`\\server\share\` or `Z:\`) stats as a folder; a local drive letter answers `true` (H2); other systems answer `true`. |
+| platform `fs.rs` | New `share_root(path: &Path) -> Option<PathBuf>` — pure, no stat (only the drive-type query): Windows answers the volume root (`\\server\share\` for a UNC path or `\\?\UNC\…`; `Z:\` for a drive letter whose drive type is remote — `GetDriveTypeW` → `DRIVE_REMOTE`); a local drive letter and other systems answer `None`. |
 | agent `launch.rs` | Two notice-code constants and their own wording (§3.3). `BlockReason` doc: a launch never refuses on a `Missing` row; it refuses on a `LibraryUnavailable` row only when the root exists but cannot be read or did not answer; `Missing` = absent, `Broken` = exists but cannot be used. A pure helper telling whether a code reports a launch skip (§3.5). No new type, no `Display` change. |
 | agent `backend/settings_check.rs` | Port answer `instructions_append(mode) -> bool` — Engram's instructions are added to what the CLI loads (`true`) or replace a value the user set (`false`). Default `false`; claude overrides with `true`. (§3.4) |
 | agent `manager/prelaunch.rs` | `settle` logs the two skip codes at `warn` (§3.5). |
 | agent `commands.rs` (+ regenerated `bindings/`) | Doc comments, the `launch_blocked_reason` message, the `library.status` word list (§6). |
-| asset-library `folder.rs` | `StdFolderOps::stat` (and `list` through it): `NotFound` → `Missing` only when the share probe says the volume is there, else `Unreadable("share not reachable")`. `status_of` is unchanged (it takes no path; also the `IoAnswer::Canonical` mapping). `FolderStatus::why` (moved from `edit.rs` `status_why`). |
+| asset-library `folder.rs` | `BoundedIo::stat_all`: after the required stats, for each `Missing` answer whose path has a `share_root`, ask `Stat(share root)` as an ordinary key on the same `LaunchIo` (de-duplicated per launch, same required budget) and combine: root `Ok` → `Missing` stands; root anything else → `Unreadable("share not reachable")`. Advisory phases do not probe. `StdFolderOps::stat`, `list` and `status_of` are unchanged (a folder that vanishes between its stat and its listing is not probed — accepted). `FolderStatus::why` (moved from `edit.rs` `status_why`). |
 | asset-library `resolve.rs` | `RootState::Unavailable` → `Absent(why)` / `Unreadable(why)`; `Resolution` records an absent root; `attach_folder_status` gives `folder-unreadable` (new `FOLDER_UNREADABLE`); `blocked` / `skipped`; `resolve` = ④ guard + expansion step. |
 | asset-library `lib.rs` | `stat_root` answers `FolderStatus`; `root_state` per §3.2; `status` gives `RootStatus::Unreadable`; `mark_links` probe error → ②; `stat_new_root` maps to today's string. |
 | asset-library `agent_edit.rs` | `RootSeen.stat: Option<FolderStatus>`, taken whenever a root is set; `RootSeen::state` = `root_state`'s rule. `AgentPresetsView.problems` doc. |
@@ -131,7 +131,7 @@ Backend knowledge stays in port answers; OS knowledge stays in `platform` (`CLAU
 - `not-found` — a library item (attached preset, nested preset, instruction, skill, settings) not found.
 - `folder-not-found` `{path}` — a folder entry whose folder is not there: `FolderStatus::Missing` or `NotADirectory`. Consequence (main decided, H2): a folder entry on a local drive letter that is not present (unplugged disk, unmapped `subst`) is absent and skipped.
 
-**Share probe (decides "absent" for folder entries and the library root).** `StdFolderOps::stat` maps `NotFound` to `Missing` only when platform `missing_is_absent(path)` says the volume is there. For a UNC path, or a drive letter mapped to a network location, the volume root (`\\server\share\`, `Z:\`) is stat'ed: if it does not stat as a folder, the answer is `Unreadable("share not reachable")` and the item blocks (「네트워크 끊김 → 막기」). The volume-root stat is asked as its own `BoundedIo` key (de-duplicated per launch, same required budget), not as a second stat inside each worker, so many entries on one share pay one probe and a slow-but-alive share does not push an absent entry past the budget. Advisory asks (project-marker stats in `native_roots`) skip the probe: there `Missing` and `Unreadable` both mean "no marker". A slow share is bounded by the same budget (`timeout` → `Unreadable`). Not covered: a local-drive path that reaches a share through a directory link (the drive letter is local, so the probe does not run) — R10.
+**Share probe (decides "absent" for folder entries and the library root).** A `NotFound` stat is `Missing` only when the volume is there. `BoundedIo::stat_all` runs the probe as a second step of the required phase: for each `Missing` answer on a path with a platform `share_root` (a UNC path, or a drive letter mapped to a network location), it asks `Stat(<share root>)` as an ordinary key on the same `LaunchIo`. If the root does not stat as a folder, the item's answer becomes `Unreadable("share not reachable")` and it blocks (「네트워크 끊김 → 막기」). One key per volume root per launch, so absent entries on one share share one probe answer (less load); each absent entry still costs its own stat, then the probe — two round trips unless the root was already asked in the launch. Advisory asks (project-marker stats in `native_roots`) do not probe: there `Missing` and `Unreadable` both mean "no marker". A slow share is bounded by the same required budget (`timeout` → `Unreadable`). The library root gets the same probe inside `stat_root`'s bounded stat (a second stat of its share root on `Missing`). Not covered: a local-drive path that reaches a share through a directory link (the drive letter is local, so `share_root` is `None`) — R10.
 
 Everything else blocks:
 - ② every `Broken` row: YAML syntax, `library-read-failed`, `wrong-kind`, `preset-cycle`, `builtin-in-library-preset`, `item-path-invalid`, settings refusals, skill format and name, `folder-path-cli-unsafe`, `path-through-link`, `command-line:`, `working-folder:`, and the new **`folder-unreadable`**.
@@ -237,7 +237,7 @@ The level choice is a pure agent `launch.rs` helper over agent-owned codes. The 
 
 ## 5. Concurrency
 
-Nothing new. The split and the note are pure computation inside the existing check; the share probe runs inside the existing bounded stat worker. A missing item that appears between check and prepare is not carried; a carried item that disappears is `Stale` → `LaunchRaced`, and the retry skips it. The absent-root path takes the same read locks; the unreadable-root path is today's early return. `RootSeen` stats outside every lock, as today.
+Nothing new. The split and the note are pure computation inside the existing check; the share probe is one more ordinary key in the existing required phase (`BoundedIo::stat_all`). A missing item that appears between check and prepare is not carried; a carried item that disappears is `Stale` → `LaunchRaced`, and the retry skips it. The absent-root path takes the same read locks; the unreadable-root path is today's early return. `RootSeen` stats outside every lock, as today.
 
 ## 6. Texts that promise blocking or need the new words (found and listed)
 
@@ -296,14 +296,14 @@ QA rows (`.claude/skill-bindings/qa.md`): 「Rust 소스」 → 전체 회귀 (t
 | Wording and fallback of the two codes | agent `launch.rs` golden tests | U1 |
 | `warn` for the skip codes, `info` for the rest | agent unit test over the level helper | U1 |
 | `instructions_append`: claude `true`, codex and default `false` | agent backend unit tests | U1 |
-| `missing_is_absent`: local drive letter, absent drive letter, a UNC path whose share root does not answer → `false`, a non-UNC relative case; on Windows | platform unit tests (`\\localhost\<unlikely share>\x` and a fixed unlikely host, as measured) | U2 |
+| `share_root`: UNC path and `\\?\UNC\` → its `\\server\share\`; local drive letter, absent drive letter, relative path → `None`; on Windows | platform unit tests (pure) | U2 |
+| `stat_all` probe: a `Missing` entry under a fake share whose root does not answer → `Unreadable("share not reachable")`; whose root is `Ok` → `Missing`; two entries on one share → one root stat; advisory phase → no probe | `folder.rs` tests with a fake `FolderOps` and a `share_root` seam | U2 |
 | `StdFolderOps::stat`: a path under an unreachable share → `Unreadable("share not reachable")`; a missing folder on a present drive → `Missing` | `folder.rs` tests | U2 |
 | Split by kind; ④ row placement by the absent mark; parts equal `problems` | `resolve.rs` tests; rewrite `the_block_is_the_problem_list_ordered_by_kind` (one missing and one unreadable folder beside ② and ③) | U2 |
 | Folder rows: absent → `folder-not-found` `{path}`; unreadable → `folder-unreadable` `{path, why}` | rewrite `a_folder_that_is_not_ok_is_a_missing_line_on_every_backend_and_mode`; `lib.rs` held-folder budget test expects `folder-unreadable` `why: timeout` | U2 |
 | `mark_links` probe error → ② `library-read-failed` | `lib.rs` test with a store whose `first_link` errors | U2 |
 | `mark_row_link` follows the same rule: probe error → the line is not `not-found`; `NotADirectory` → absent (both entrances agree) | `edit.rs` test with a store whose `first_link` errors / answers `NotADirectory` | U2 |
-| The share probe is one `BoundedIo` key per volume root per launch; advisory marker stats do not probe | `folder.rs` / `launch.rs` test counting stats of the volume root with two entries on one fake share | U2 |
-| `agent.setWorkspace` refusal with `share not reachable` is clearable (`AfterCondition`) | agent `commands.rs` `workspace_refusal` test | U2 |
+| `agent.setWorkspace` refusal with `share not reachable` is clearable (`AfterCondition`) | agent `commands.rs` `workspace_refusal` test | U1 |
 | Root state rule: read entrance with a configured root that does not exist → `Absent`, ④ in `skipped()`; a root that exists but whose first scan failed → `Unreadable`, ④ in `blocked()`; `RootSeen::state` equals `root_state` for both (agent-preset edit answer = `agent.presets`, ADR-0384) | new `lib.rs` and `agent_edit.rs` tests; `resolve.rs` ④ tests move to `Absent` | U2 |
 | `library.status`: denied → `unreadable` + why; missing → `missing` | `lib.rs` status test; `host.rs` `every_status_word_lands_in_its_own_field` with both words | U2 |
 | `stat_folder` and `stat_new_root` keep their strings | `the_folder_stat_is_bounded_by_one_read_budget_and_names_a_timeout` unchanged; one `set_root` refusal test | U2 |
@@ -332,7 +332,7 @@ QA rows (`.claude/skill-bindings/qa.md`): 「Rust 소스」 → 전체 회귀 (t
 Sequential (U2 uses U1's constants and port answer; U3 edits texts and tests that read U2's behaviour). Build and tests green at the end of each.
 
 - **U1 — agent**: `launch.rs` codes, wording, level helper, docs; `backend/settings_check.rs` `instructions_append` and claude's override; `manager/prelaunch.rs` `settle` level; the `share not reachable` constant beside `STAT_TIMED_OUT` and `commands.rs` `workspace_refusal` marking it clearable (+ its test).
-- **U2 — platform + asset-library (+ the daemon wiring test)**: platform `fs::missing_is_absent`; `folder.rs` (`StdFolderOps::stat` share probe as one `BoundedIo` key, `FolderStatus::why`); `resolve.rs` (`RootState`, absent mark, `folder-unreadable`, `blocked` · `skipped`, expansion step, `AbsentRootLookup`); `lib.rs` (typed `stat_root`, `root_state`, `status` / `RootStatus::Unreadable`, `mark_links`, `stat_new_root`); `agent_edit.rs` (`RootSeen`); `edit.rs` (`folder_verdicts`, `preview_folder`, `PresetBodies::mark_row_link`); `host.rs` (`status_ok`); `launch.rs` (`launch_check`, `prepare_in`, `Stamp`, `stat_folder`, unreadable files below a folder entry); `builtin.rs` test; module headers. Every test §1.2 lists as red, **including daemon `src/lib.rs` `the_production_manager_launches_through_the_kept_library_service`**, is rewritten here.
+- **U2 — platform + asset-library (+ the daemon wiring test)**: platform `fs::share_root`; `folder.rs` (`BoundedIo::stat_all` share probe, `FolderStatus::why`); `resolve.rs` (`RootState`, absent mark, `folder-unreadable`, `blocked` · `skipped`, expansion step, `AbsentRootLookup`); `lib.rs` (typed `stat_root`, `root_state`, `status` / `RootStatus::Unreadable`, `mark_links`, `stat_new_root`); `agent_edit.rs` (`RootSeen`); `edit.rs` (`folder_verdicts`, `preview_folder`, `PresetBodies::mark_row_link`); `host.rs` (`status_ok`); `launch.rs` (`launch_check`, `prepare_in`, `Stamp`, `stat_folder`, unreadable files below a folder entry); `builtin.rs` test; module headers. Every test §1.2 lists as red, **including daemon `src/lib.rs` `the_production_manager_launches_through_the_kept_library_service`**, is rewritten here.
 - **U3 — texts and live**: `prompts/engram-help.md`; agent `commands.rs` docs (incl. `PreviewRefusalRow`, `library.status`) and `launch_blocked_reason`, regenerated agent bindings; asset-library `agent_edit.rs` / `edit.rs` / `resolve.rs` / `launch.rs` / `folder.rs` / `lib.rs` doc comments not already rewritten in U2; `control/help.rs` tests; reference files; live scenes.
 
 ## 11. Decisions
@@ -376,7 +376,7 @@ Sequential (U2 uses U1's constants and port answer; U3 edits texts and tests tha
 - c10 — `instructions_append` defaults to `false`; claude overrides.
 - c11 — `RootState::Unavailable` → `Absent` / `Unreadable`; a root path that is a file is absent.
 - c12 — `stat_root` answers `FolderStatus` (no new type); `FolderStatus::why` gives the strings its other callers keep; `RootSeen.stat` holds the typed answer.
-- c13 — the share probe is one platform function `fs::missing_is_absent`; the volume-root stat is its own `BoundedIo` key used by `StdFolderOps::stat` for required asks only; its answer `Unreadable("share not reachable")`; `status_of` unchanged.
+- c13 — the share probe = a pure platform function `fs::share_root` + a second step in `BoundedIo::stat_all`'s required phase asking the share root as an ordinary key (and the same second stat in `stat_root` for the library root); answer `Unreadable("share not reachable")`; `StdFolderOps::stat`, `list` and `status_of` unchanged.
 
 ## 12. Risks
 
