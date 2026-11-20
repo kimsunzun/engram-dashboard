@@ -1,6 +1,6 @@
 # S37 PRD — daemon↔daemon agent mail between the user's own PCs
 
-- Status: draft 6 · 2026-11-20 · decisions D1–D7 all taken by the user (D2 amended and D5 revised on 2026-11-20); PRD approval is asked together with the PRD+TRD review. Where each post-review decision lives: TRD §8 「Decided after review」.
+- Status: draft 7 · 2026-11-20 (round-3 review fixes) · decisions D1–D7 all taken by the user (D2 amended and D5 revised on 2026-11-20); PRD approval is asked together with the PRD+TRD review. Where each post-review decision lives: TRD §8 「Decided after review」.
 - Research: `../../research/multi-daemon-federation-direction-2026-11-11.md` (GPT draft vs code, peers, Syncthing / hcom / Reason Network source reads) · `../../research/multi-daemon-iroh-link-plan-2026-11-11.md` (iroh vs alternatives, seam fit, weight, build plan).
 
 ## 1. What · why
@@ -65,7 +65,7 @@ Non-goals (v1):
 - R18 — Agents (LLM) can list the agents of the other trusted PCs, with each PC's connection state, in one query.
 - R19 — Trust changes need a human: an agent may ask to add a PC, change the network settings or make a new identity key, but the change waits until a human approves it; a human acting in the app applies it directly. Removing a PC, editing its address, and listing stay open to agents; renaming a PC needs approval too (its name is part of `name@pc` addresses). The question goes to the app while its PC list is shown, otherwise to a native OS dialog that shows the other PC's full ID and defaults to deny; on a machine without a display it waits. Whether a call comes from a human or an agent is decided by where it comes from, never by what it says.
 - R20 — If two machines or accounts run with the same identity at once (a cloned disk or VM), a trusted PC that sees both refuses the newer link as a duplicate, and both sides warn in the app and `peer.list` and offer a new identity. Adding this PC's own ID is simply refused.
-- R21 — The OS account is the trust boundary. Processes of the same account, agents with a shell included, are trusted and not defended against, and the docs say so. Other Windows accounts on the same PC cannot use this account's daemon: the file holding the app's connection token is readable only by its owner, and an app running under another account is refused with "this daemon belongs to another Windows account — use a separate folder per account". Going back to an older trusted list file is not defended.
+- R21 — The OS account is the trust boundary. Processes of the same account, agents with a shell included, are trusted and not defended against, and the docs say so. Other Windows accounts on the same PC cannot use this account's daemon: the app's connection token and the agents' control files are readable only by their owner (the shared file that marks a running daemon holds no token, so another account can still see who owns it and take over after a crash), and an app or agent connection from another account is refused with "this daemon belongs to another Windows account — use a separate folder per account". Going back to an older trusted list file is not defended.
 
 ## 4. Acceptance criteria
 
@@ -93,7 +93,7 @@ Measured on two PCs (A, B) unless stated.
 - AC14 — Approval: an agent on A calls `peer.add` for B → it answers "requested" and nothing is added. With the app's PC list shown the request appears there with the agent and B's full ID, and approving adds B; with the app closed a native OS dialog asks the same, with deny as the default. Denying leaves the list unchanged; an agent cannot approve; a human adding B in the app applies at once.
 - AC15 — Renaming B on A (`peer.edit`) keeps the link up and B's agents listed; `tester@<new name>` reaches B and `tester@<old name>` returns "no such agent".
 - AC16 — Identity per OS account: two Windows accounts on A using one data folder at different times each have their own ID and trusted list; A's data folder copied to another PC starts there with a new ID; a trusted list file edited outside Engram stops the feature with "trusted list was changed outside Engram" until a human accepts it; a clone of A's identity running at the same time (a copied disk) is refused by B as a duplicate and both sides warn.
-- AC17 — Other accounts: while account X's daemon runs on A, the app started by account Y on A is refused with "this daemon belongs to another Windows account — use a separate folder per account" and cannot read X's token file.
+- AC17 — Other accounts: while account X's daemon runs on A, the app started by account Y on A shows "this daemon belongs to another Windows account — use a separate folder per account" and cannot read X's token file; after X's daemon exits (cleanly or killed), Y's app starts its own daemon in the same folder, and X can do the same afterwards.
 
 ## 5. Decisions (user)
 
@@ -120,7 +120,9 @@ iroh 1.x as the link library behind the transport seam; identity = iroh secret k
 - Processes of the same OS account are trusted (R21). An agent with a shell can get around the approval and the list check — read the app's token file and connect as the app, drive the app through the WebView debugging port that the developer run scripts open, or open the identity key and re-sign an edited trusted list. The approval stops the common path (an agent talked into a trust change through our commands); a plain edit or another account's edit is detected (R2); going back to an older signed list is not.
 - The check that a connecting app runs under the daemon's own account may not be cleanly doable over the loopback connection; then only the owner-only token file ships, and a token copied out by another account would still connect (documented gap).
 - The OS approval dialog may open behind other windows (Windows foreground rules); whether it shows at all for the background daemon is measured on real PCs.
-- A Windows forced password reset or reinstall makes the sealed identity unreadable; every PC must then be re-paired.
+- A Windows forced password reset makes the sealed identity unreadable; every PC must then be re-paired. A reinstall with a new account SID starts fresh; a hardware or reinstall change that keeps the SID finds the old identity and asks whether to adopt it.
+- The WebView debugging port that the developer run scripts open is an unauthenticated local listener any account on the PC can reach; it is dev-only and not changed in S37.
+- An elevated administrator account is not kept out, and running the app and Engram one elevated and one not makes them refuse each other.
 - The daemon grows by ~170 crates (plus a small native-dialog crate); the exact exe growth is unmeasured.
 - iroh is maintained by one vendor (n0); the link sits behind the transport seam so it can be replaced.
 - The agent names (and ids, live / asleep) of each PC are visible to every trusted PC and to the agents running there (R16 · R18) — limited to the user's own PCs (R4).
