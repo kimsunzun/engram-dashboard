@@ -377,3 +377,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0391](0391-edge-addresses-across-pcs-bare-names-resolve-through.md) | Edge addresses across PCs — bare names resolve through replicated agent directories, name@pc is explicit, a PC with an unknown directory is not counted | 확정 |
 | [0392](0392-product-principle-cross-pc-features-need-no-external-account.md) | Product principle — cross-PC features need no external account and no separate install | 확정 |
 | [0393](0393-remote-mail-rows-in-the-ledger-a-remote-pending-state-with.md) | Remote mail rows in the ledger — a remote-pending state with verdict-only transitions, the reply contract closed at verdict time on the receiving daemon | 확정 |
+| [0394](0394-humans-approve-trust-changes-agents-only-request-human-vs.md) | Humans approve trust changes — agents only request, human vs agent is a typed caller, one shared ask-the-user seam with a native OS dialog | 확정 |
