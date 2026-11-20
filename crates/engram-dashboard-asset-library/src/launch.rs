@@ -600,7 +600,7 @@ impl LibraryService {
             .iter()
             .any(|preset| matches!(preset, AssetRef::Library(_)));
         let attached: Vec<&AssetRef> = want.presets.iter().collect();
-        let root_state = self.root_state(io, &mounts, &attached, Ok(()), library_attached);
+        let root_state = self.root_state(io, &mounts, &attached, None, library_attached);
         let overlay = match &root_state {
             RootState::Ok => self.read_overlay(&mounts, &want),
             _ => Overlay::default(),

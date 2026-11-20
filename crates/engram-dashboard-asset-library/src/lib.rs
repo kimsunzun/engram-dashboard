@@ -62,6 +62,13 @@
 //! The daemon never walks the library before it is reachable (ADR-0382): on every start, after the first-start step,
 //! it calls [`LibraryService::start_boot_scan`], which runs the first scan on a background job and returns at once.
 //! Catalog readers wait for that scan at the first-scan entrance; launch checks skip the entrance and do not wait.
+//! Every scan stats the mounts it would walk in one bounded batch before it draws its ticket; a mount that does not stat
+//! `Ok`, or whose walk fails, is not walked and is kept as that mount's last known state ([`State::seen`]) — the scan
+//! still applies the others. A mount can be read only when walked and `Ok` when last seen — one rule for every reader.
+//! A read or write inside one that cannot be stats it fresh (one not there takes that state without a ticket), walks
+//! it again if it is back, and otherwise refuses [`LIBRARY_UNAVAILABLE`] with `mount` before any change, so a write
+//! never touches its disk under the write lock; a relink skips its files. Whole-tree reads answer from the readable
+//! mounts and name the others (ADR-0400 decisions 6 and 17).
 //!
 //! The root generation starts each run at the base the daemon draws (`LibraryValues::root_generation_base`), so a
 //! generation kept from an earlier run does not match; generations are compared only for equality (ADR-0381).
@@ -158,11 +165,11 @@ use crate::catalog::{
     key, preset_refs, within, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult,
 };
 use crate::config::{ConfigFile, ConfigHealth, LibraryConfig, MountPlace, MountSetting};
-use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need};
+use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need, SPAWN_FAILED};
 use crate::format::read::ITEM_PATH_INVALID;
 use crate::gate::{Gate, Tags};
-pub use crate::gate::{Numbers, State, NOT_FOUND};
-use crate::mounts::{Mount, MountName, MountPath, Mounts};
+pub use crate::gate::{MountSeen, MountState, MountsNow, Numbers, State, NOT_FOUND};
+use crate::mounts::{virtual_path, Mount, MountName, MountPath, Mounts};
 use crate::path::{AssetRef, BuiltinId, LibPath, PathError};
 use crate::refs::{default_slot_count, reference_count, referrers_of};
 use crate::resolve::{resolve, CatalogLookup, Lookup, Resolution, RootState, Target};
@@ -178,10 +185,11 @@ pub const LIBRARY_READ_CAP: u64 = 16 * 1024 * 1024;
 // TRD S25 step-7 B8
 pub const PATH_THROUGH_LINK: &str = "path-through-link";
 
-/// The code of a catalog read that could not be answered because no full scan of the library could be applied — a
-/// mount could not be walked — and of the ④ row, a library preset attached while the root is not
-/// usable (`args` = `{message}`, the reason). A launch leaves that row out for an unset or absent root and refuses on it
-/// for a root that exists but cannot be read (ADR-0387).
+/// The code of a catalog read that could not be answered — no scan of the library could be applied (`args` =
+/// `{message}`), or its range lies in a mount that cannot be read (`args` = `{mount, message}` — ADR-0400 decision 6)
+/// — and of the ④ row, a library preset attached while the root is not usable (`args` = `{message}`, the reason). A
+/// launch leaves that row out for an unset or absent root and refuses on it for a root that exists but cannot be read
+/// (ADR-0387).
 // TRD S25 step-7 B8
 pub const LIBRARY_UNAVAILABLE: &str = "library-unavailable";
 
@@ -396,8 +404,11 @@ pub enum FirstStart {
 /// The answer of [`LibraryService::folders`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FoldersAnswer {
-    /// Every folder of the library, by path; a skill folder is marked.
+    /// Every mount's top, then every folder of the mounts that can be read, by path; a skill folder is marked.
     pub folders: Vec<FolderNode>,
+    /// The mounts whose folders were left out — they cannot be read.
+    // ADR-0400 decision 6
+    pub unavailable: Vec<UnavailableMount>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -405,6 +416,16 @@ pub struct FolderNode {
     pub path: String,
     pub name: String,
     pub skill: bool,
+    /// A mount's top: its last known state (no fresh stat); `None` = a folder inside a mount.
+    // ADR-0400 decision 4
+    pub mount_state: Option<MountState>,
+}
+
+/// A mount a whole-tree answer left out because its items cannot be read, with the state it was last seen in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnavailableMount {
+    pub mount: MountName,
+    pub state: MountState,
 }
 
 /// The answer of [`LibraryService::read`].
@@ -448,6 +469,9 @@ pub struct ListAnswer {
     pub folders: Vec<FolderRow>,
     /// The built-in preset `engram:/default` when [`ListFilter::builtins`] asked for it and the filters keep it.
     pub builtins: Vec<ListRow>,
+    /// With a query and no folder: the mounts whose items were left out — they cannot be read.
+    // ADR-0400 decision 6
+    pub unavailable: Vec<UnavailableMount>,
 }
 
 /// What [`LibraryService::list_with`] keeps. The default keeps everything and adds no built-in row.
@@ -483,6 +507,10 @@ pub struct FolderRow {
     pub path: String,
     /// Its last name.
     pub name: String,
+    /// A mount's top (a row of the virtual root): its last known state (no fresh stat); `None` = a folder inside a
+    /// mount.
+    // ADR-0400 decision 4
+    pub mount_state: Option<MountState>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -633,15 +661,15 @@ impl LibraryService {
         } else {
             Ok(())
         };
-        let mounts = self.gate.with_read(|state| state.mounts.clone());
-        let io = self.io.begin_read();
         let attached: Vec<&AssetRef> = wants.iter().flat_map(|want| &want.presets).collect();
         let library_attached = library
             && attached
                 .iter()
                 .any(|preset| matches!(preset, AssetRef::Library(_)));
+        let mounts = self.gate.with_read(|state| state.mounts.clone());
+        let io = self.io.begin_read();
         let root_state = match library {
-            true => self.root_state(&io, &mounts, &attached, joined, library_attached),
+            true => self.root_state(&io, &mounts, &attached, Some(joined), library_attached),
             false => RootState::Ok,
         };
         let targets: Vec<Target> = wants
@@ -688,22 +716,79 @@ impl LibraryService {
 
     /// The library as block ④ needs it ([`library_state`]): unset with no mount registered; else, when a library preset
     /// is attached (otherwise no mount decides anything and none is asked), the folder of each mount an attached
-    /// library preset in `attached` names stat'ed as a required ask on `io`, judged with `joined` (whether a full scan
-    /// could be applied — a launch passes `Ok`).
+    /// library preset in `attached` names stat'ed as a required ask on `io`. A read entrance passes `Some(joined)`
+    /// (whether a full scan could be applied) and each mount's stat is judged with that mount's first-scan answer
+    /// ([`LibraryService::stat_named`]); a launch passes `None` — it reads the files fresh, so the stat alone decides.
     // ADR-0387
     fn root_state(
         &self,
         io: &LaunchIo,
         mounts: &Mounts,
         attached: &[&AssetRef],
-        joined: Result<(), String>,
+        joined: Option<Result<(), String>>,
         library_attached: bool,
     ) -> RootState {
-        let stats = match library_attached {
-            true => self.stat_mounts(io, &named_folders(mounts, attached)),
+        let folders = match library_attached {
+            true => named_folders(mounts, attached),
             false => Vec::new(),
         };
-        library_state(&joined, mounts, stats)
+        let stats = match (&joined, folders.is_empty()) {
+            (_, true) => Vec::new(),
+            (Some(_), false) => self.stat_named(io, &folders),
+            (None, false) => self.stat_mounts(io, &folders),
+        };
+        library_state(&joined.unwrap_or(Ok(())), mounts, stats)
+    }
+
+    /// [`LibraryService::stat_mounts`] of mount folders, each status then judged with that mount's first-scan answer.
+    /// A mount that stats `Ok` but whose items cannot be read (never walked this run, or not `Ok` when last seen) is
+    /// walked again first — the next reader whose range touches it (ADR-0400 decision 17). One still not readable after
+    /// that answers its last known state, the rule `list` and `read` use: missing (it vanished during the walk) is
+    /// absent; otherwise unreadable, as [`RootState::of`] judges a root whose first scan failed (ADR-0387 per mount). A
+    /// mount that does not stat `Ok` is not walked again — its stat is the answer. A folder that is no registered
+    /// mount's keeps its stat.
+    pub(crate) fn stat_named(&self, io: &LaunchIo, folders: &[PathBuf]) -> Vec<FolderStatus> {
+        let statuses = self.stat_mounts(io, folders);
+        let stale: Vec<MountName> = self.gate.with_read(|state| {
+            folders
+                .iter()
+                .zip(&statuses)
+                .filter(|(_, status)| **status == FolderStatus::Ok)
+                .filter_map(|(folder, _)| {
+                    state
+                        .mounts
+                        .iter()
+                        .find(|mount| same_path(&mount.folder, folder))
+                })
+                .filter(|mount| !state.seen(&mount.name).usable())
+                .map(|mount| mount.name.clone())
+                .collect()
+        });
+        if !stale.is_empty() {
+            self.rewalk_unusable(&stale);
+        }
+        self.gate.with_read(|state| {
+            folders
+                .iter()
+                .zip(statuses)
+                .map(|(folder, status)| {
+                    let mount = state
+                        .mounts
+                        .iter()
+                        .find(|mount| same_path(&mount.folder, folder));
+                    match (status, mount.map(|mount| state.seen(&mount.name))) {
+                        // One rule with `list` and `read`: readable only when walked and `Ok` when last seen.
+                        (FolderStatus::Ok, Some(seen)) if !seen.usable() => match seen.shown() {
+                            // Gone during the walk again: absent, skipped — not a block (ADR-0387).
+                            MountState::Missing { .. } => FolderStatus::Missing,
+                            MountState::Unreadable { why } => FolderStatus::Unreadable(why),
+                            MountState::Ok => FolderStatus::Ok,
+                        },
+                        (status, _) => status,
+                    }
+                })
+                .collect()
+        })
     }
 
     /// Each folder of `folders` stat'ed as a required ask on `io`, all in one batch (with the share probe of
@@ -862,6 +947,10 @@ impl LibraryService {
             args: json!({ "message": why }),
             line: None,
         })?;
+        // ADR-0400 decision 6: a folder inside one mount that cannot be read refuses, naming it.
+        if let Some((name, state)) = folder.and_then(|folder| self.unusable_mount(folder)) {
+            return Err(mount_unavailable(&name, &state));
+        }
         // ADR-0324 decision 5: the numbers are noted in the read lock that reads the mounts the disk read uses, so a
         //   root change published after it moves the root generation and discards the merge.
         let known = self.gate.with_read(|state| match folder {
@@ -881,6 +970,7 @@ impl LibraryService {
                     rows: vec![through_link_row(path)],
                     folders: Vec::new(),
                     builtins: self.builtin_rows(filter),
+                    unavailable: Vec::new(),
                 })
             }
             Observed::Items(items) => {
@@ -901,20 +991,99 @@ impl LibraryService {
     /// before the first scan was raised) is already walking, it waits for it and then scans its folder like any refresh — or, when what it
     /// waited for failed, goes through a full scan once more.
     pub fn refresh(&self, folder: Option<&LibPath>) -> RefreshReport {
-        match self.gate.refresh(folder, &|mount, under, tags| {
-            self.build_scan(mount, under, tags)
-        }) {
+        match self.gate.refresh(
+            folder,
+            &|mounts| self.scan_stats(mounts),
+            &|mount, under, tags| self.build_scan(mount, under, tags),
+        ) {
             Ok(report) => report.share(folder),
             Err(why) => failed(why),
         }
     }
 
     /// The first-scan entrance every method that reads the catalog passes first, before any ticket or lock (ADR-0324
-    /// decision 6). `Err` = no full scan could be applied, with the reason; the catalog then holds only what late
-    /// merges put in. The launch check does not pass it.
+    /// decision 6). `Err` = no full scan could be applied, with the reason (only a scan that ended unanswered); the
+    /// catalog then holds only what late merges put in. A mount the scan could not walk is that mount's state
+    /// ([`State::seen`]), not this answer (ADR-0400 decision 17). The launch check does not pass it.
     pub fn first_scan_join(&self) -> Result<(), String> {
         self.gate
-            .first_scan_join(&|mount, under, tags| self.build_scan(mount, under, tags))
+            .first_scan_join(&|mounts| self.scan_stats(mounts), &|mount, under, tags| {
+                self.build_scan(mount, under, tags)
+            })
+    }
+
+    /// The stat a scan takes before its ticket: the folders of `mounts` in one bounded batch on a fresh read budget,
+    /// with the share probe ([`LibraryService::stat_mounts`]).
+    // ADR-0400 decision 17
+    fn scan_stats(&self, mounts: &[Mount]) -> Vec<FolderStatus> {
+        let folders: Vec<PathBuf> = mounts.iter().map(|mount| mount.folder.clone()).collect();
+        self.stat_mounts(&self.io.begin_read(), &folders)
+            .into_iter()
+            .map(|status| match status {
+                // ADR-0382 decision 4: no thread could be started for the stat — no word on the mount; the walk on the
+                //   caller's thread decides, as the first reader's scan did before stats were taken.
+                FolderStatus::Unreadable(why) if why == SPAWN_FAILED => FolderStatus::Ok,
+                status => status,
+            })
+            .collect()
+    }
+
+    /// Walks each mount of `names` again whose items cannot be read — never walked this run, or not `Ok` when last
+    /// seen (ADR-0400 decision 17: the next reader whose range touches it). Each is stat'ed fresh first, before any
+    /// ticket; one that does not stat `Ok` takes that state without a ticket (nothing queues behind a slow walk), and
+    /// only one that does is walked, by a refresh of its top. A mount still not usable after it stays so; the caller
+    /// answers from [`State::seen`].
+    pub(crate) fn rewalk_unusable(&self, names: &[MountName]) {
+        let stale: Vec<Mount> = self.gate.with_read(|state| {
+            names
+                .iter()
+                .filter_map(|name| state.mounts.get(name.as_str()))
+                .filter(|mount| !state.seen(&mount.name).usable())
+                .cloned()
+                .collect()
+        });
+        if stale.is_empty() {
+            return;
+        }
+        for mount in self.gate.observe(stale, &|mounts| self.scan_stats(mounts)) {
+            let top = virtual_path(&mount.name, None);
+            let report = self.refresh(Some(&top));
+            if !report.errors.is_empty() {
+                tracing::debug!(
+                    mount = top.as_str(),
+                    "library mount walked again for a reader; still not usable"
+                );
+            }
+        }
+    }
+
+    /// The mount `path` lies in when that mount cannot be read after [`LibraryService::rewalk_unusable`]: its name and
+    /// last known state. `None` = usable, or `path` is in no registered mount (the caller answers not found).
+    fn unusable_mount(&self, path: &LibPath) -> Option<(MountName, MountState)> {
+        let name = self.gate.with_read(|state| {
+            state
+                .mounts
+                .locate(path)
+                .map(|(mount, _)| mount.name.clone())
+        })?;
+        self.rewalk_unusable(std::slice::from_ref(&name));
+        let seen = self.gate.with_read(|state| state.seen(&name));
+        (!seen.usable()).then(|| (name, seen.shown()))
+    }
+
+    /// Refuses `Unavailable` · [`LIBRARY_UNAVAILABLE`] `{mount, message}` when `path` lies in a mount that cannot be read
+    /// after [`LibraryService::unusable_mount`] walked it again — before any ticket, lock or disk IO of the caller's,
+    /// so a read or write into a mount that is not there neither answers from a stale catalog nor touches its disk under
+    /// the write lock. A path in no registered mount passes (the caller answers not found).
+    // ADR-0400 decision 6
+    pub(crate) fn refuse_unusable_mount(&self, path: &LibPath) -> Result<(), LibraryRefusal> {
+        match self.unusable_mount(path) {
+            Some((name, state)) => Err(LibraryRefusal::Refused {
+                class: RefusalClass::Unavailable,
+                reason: mount_unavailable(&name, &state),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// `f` over the catalog and the mounts under one read lock. `f` may read the profile registry and call pure backend
@@ -965,7 +1134,7 @@ impl LibraryService {
     /// that notes the numbers after the raise assumes it sees the new disk.
     pub fn change<R>(
         &self,
-        f: impl FnOnce(&mut Catalog, &Mounts, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
+        f: impl FnOnce(&mut Catalog, &MountsNow, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
     ) -> R {
         self.gate.change(f)
     }
@@ -1002,7 +1171,7 @@ impl LibraryService {
     pub fn change_at<R>(
         &self,
         root_generation: Option<u64>,
-        f: impl FnOnce(&mut Catalog, &Mounts, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
+        f: impl FnOnce(&mut Catalog, &MountsNow, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
     ) -> Result<R, LibraryRefusal> {
         self.gate
             .change_checked(root_generation, f)
@@ -1213,11 +1382,22 @@ impl LibraryService {
             tracing::info!(mounts = %names, "library boot scan started");
             let started = std::time::Instant::now();
             match service.first_scan_join() {
-                Ok(()) => tracing::info!(
-                    mounts = %names,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "library boot scan done"
-                ),
+                Ok(()) => {
+                    tracing::info!(
+                        mounts = %names,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "library boot scan done"
+                    );
+                    // ADR-0400 decision 17: a mount the scan could not walk is that mount's state; its next reader
+                    //   walks it again.
+                    for left in service.gate.with_read(unavailable_mounts) {
+                        tracing::warn!(
+                            mount = %escape_controls(left.mount.as_str()),
+                            "library mount not walked at boot: {}",
+                            escape_controls(left.state.why())
+                        );
+                    }
+                }
                 Err(why) => tracing::warn!(
                     mounts = %names,
                     "library boot scan failed; the next reader scans again: {}",
@@ -1242,33 +1422,58 @@ impl LibraryService {
         lock(&self.root_change)
     }
 
-    /// The whole folder tree: every folder the catalog holds plus every skill folder, by path; a skill folder is
-    /// marked; each mount's top is a folder. After the first-scan entrance (its failure `Unavailable` ·
+    /// The whole folder tree, by path: each registered mount's top with its last known state (no fresh stat), and every
+    /// folder the catalog holds plus every skill folder of the mounts that can be read; a skill folder is marked.
+    /// The mounts that cannot be read are named in `unavailable` and their folders left out — the answer is partial,
+    /// never a refusal for them (ADR-0400 decision 6). After the first-scan entrance (its failure `Unavailable` ·
     /// [`LIBRARY_UNAVAILABLE`]), under one read lock; with no mount registered the tree is empty.
     pub fn folders(&self) -> Result<FoldersAnswer, LibraryRefusal> {
         self.first_scan_join()
             .map_err(LibraryRefusal::unavailable)?;
         Ok(self.gate.with_read(|state| {
             let catalog = &state.catalog;
+            let readable = |path: &LibPath| {
+                state
+                    .mounts
+                    .locate(path)
+                    .is_some_and(|(mount, _)| state.seen(&mount.name).usable())
+            };
             let mut seen = std::collections::HashSet::new();
+            let mut folders: Vec<FolderNode> = mount_rows(state)
+                .map(|(top, mount)| {
+                    seen.insert(key(&top));
+                    FolderNode {
+                        path: top.as_str().to_owned(),
+                        name: top.file_name().to_owned(),
+                        skill: false,
+                        mount_state: Some(mount.shown()),
+                    }
+                })
+                .collect();
             let skills = catalog
                 .items()
                 .filter(|item| item.kind == ItemKind::Skill)
                 .map(|item| &item.path);
-            let mut folders: Vec<FolderNode> = catalog
-                .folders()
-                .chain(skills)
-                .filter(|folder| seen.insert(key(folder)))
-                .map(|folder| FolderNode {
-                    path: folder.as_str().to_owned(),
-                    name: folder.file_name().to_owned(),
-                    skill: catalog
-                        .get(&key(folder))
-                        .is_some_and(|item| item.kind == ItemKind::Skill),
-                })
-                .collect();
+            folders.extend(
+                catalog
+                    .folders()
+                    .chain(skills)
+                    .filter(|folder| readable(folder))
+                    .filter(|folder| seen.insert(key(folder)))
+                    .map(|folder| FolderNode {
+                        path: folder.as_str().to_owned(),
+                        name: folder.file_name().to_owned(),
+                        skill: catalog
+                            .get(&key(folder))
+                            .is_some_and(|item| item.kind == ItemKind::Skill),
+                        mount_state: None,
+                    }),
+            );
             folders.sort_by(|a, b| a.path.cmp(&b.path));
-            FoldersAnswer { folders }
+            FoldersAnswer {
+                folders,
+                unavailable: unavailable_mounts(state),
+            }
         }))
     }
 
@@ -1279,15 +1484,21 @@ impl LibraryService {
     pub fn read(&self, path: &LibPath) -> Result<ReadAnswer, LibraryRefusal> {
         self.first_scan_join()
             .map_err(LibraryRefusal::unavailable)?;
+        let not_found = || {
+            LibraryRefusal::new(
+                RefusalClass::NotFound,
+                NOT_FOUND,
+                json!({ "path": path.as_str() }),
+            )
+        };
+        // ADR-0400 decision 4: a mount's top is not an item, whatever its mount's state.
+        if path.parent().is_none() {
+            return Err(not_found());
+        }
+        // ADR-0400 decision 6: an item of a mount that cannot be read refuses, naming it.
+        self.refuse_unusable_mount(path)?;
         self.gate.with_read(|state| {
             let catalog = &state.catalog;
-            let not_found = || {
-                LibraryRefusal::new(
-                    RefusalClass::NotFound,
-                    NOT_FOUND,
-                    json!({ "path": path.as_str() }),
-                )
-            };
             let item = catalog.get(&key(path)).ok_or_else(not_found)?;
             let absolute = state.mounts.disk_path(&item.path).ok_or_else(not_found)?;
             let registry = &self.values.registry;
@@ -1409,8 +1620,17 @@ impl LibraryService {
         }
     }
 
+    /// The list answer from the catalog. A query without a folder answers from the mounts that can be read and names
+    /// the others in `unavailable`; the virtual root's folder rows are the registered mounts with their last known
+    /// state (ADR-0400 decisions 4 and 6).
     fn answer(&self, state: &State, folder: Option<&LibPath>, filter: &ListFilter) -> ListAnswer {
         let query = filter.query.as_deref().map(str::to_lowercase);
+        let readable = |path: &LibPath| {
+            state
+                .mounts
+                .locate(path)
+                .is_some_and(|(mount, _)| state.seen(&mount.name).usable())
+        };
         let items = match query {
             None => state.catalog.children(folder),
             Some(_) => {
@@ -1420,6 +1640,7 @@ impl LibraryService {
                     .items()
                     .filter(|item| within(&item.path, folder))
                     .filter(|item| folder.is_none_or(|folder| key(&item.path) != key(folder)))
+                    .filter(|item| readable(&item.path))
                     .collect();
                 below.sort_by(|a, b| a.path.cmp(&b.path));
                 below
@@ -1435,14 +1656,21 @@ impl LibraryService {
                 row
             })
             .collect();
-        let folders = match query {
-            Some(_) => Vec::new(),
-            None => {
-                let want = folder.map(key);
+        let folders = match (&query, folder) {
+            (Some(_), _) => Vec::new(),
+            (None, None) => mount_rows(state)
+                .map(|(top, seen)| FolderRow {
+                    path: top.as_str().to_owned(),
+                    name: top.file_name().to_owned(),
+                    mount_state: Some(seen.shown()),
+                })
+                .collect(),
+            (None, Some(folder)) => {
+                let want = key(folder);
                 let mut subfolders: Vec<&LibPath> = state
                     .catalog
                     .folders()
-                    .filter(|sub| sub.parent().as_ref().map(key) == want)
+                    .filter(|sub| sub.parent().as_ref().map(key) == Some(want.clone()))
                     .filter(|sub| state.catalog.get(&key(sub)).is_none())
                     .collect();
                 subfolders.sort();
@@ -1451,15 +1679,21 @@ impl LibraryService {
                     .map(|sub| FolderRow {
                         path: sub.as_str().to_owned(),
                         name: sub.file_name().to_owned(),
+                        mount_state: None,
                     })
                     .collect()
             }
+        };
+        let unavailable = match (&query, folder) {
+            (Some(_), None) => unavailable_mounts(state),
+            _ => Vec::new(),
         };
         ListAnswer {
             folder: folder.cloned(),
             rows,
             folders,
             builtins: self.builtin_rows(filter),
+            unavailable,
         }
     }
 
@@ -1534,6 +1768,34 @@ fn merge_from(gate: &Gate, noted: Numbers, slot: &Mutex<Option<Vec<Item>>>) {
     }
 }
 
+/// Each registered mount's top with what the scans know of it, by name.
+fn mount_rows(state: &State) -> impl Iterator<Item = (LibPath, MountSeen)> + '_ {
+    let mut tops: Vec<(LibPath, MountSeen)> = state
+        .mounts
+        .iter()
+        .map(|mount| (virtual_path(&mount.name, None), state.seen(&mount.name)))
+        .collect();
+    tops.sort_by(|a, b| a.0.cmp(&b.0));
+    tops.into_iter()
+}
+
+/// The registered mounts whose items cannot be read, by name, with the state a reader is told.
+// ADR-0400 decision 6
+fn unavailable_mounts(state: &State) -> Vec<UnavailableMount> {
+    let mut unavailable: Vec<UnavailableMount> = state
+        .mounts
+        .iter()
+        .map(|mount| (mount, state.seen(&mount.name)))
+        .filter(|(_, seen)| !seen.usable())
+        .map(|(mount, seen)| UnavailableMount {
+            mount: mount.name.clone(),
+            state: seen.shown(),
+        })
+        .collect();
+    unavailable.sort_by(|a, b| a.mount.as_str().cmp(b.mount.as_str()));
+    unavailable
+}
+
 fn is_known(catalog: &Catalog, path: &LibPath) -> bool {
     let want = key(path);
     catalog.get(&want).is_some() || catalog.folders().any(|folder| key(folder) == want)
@@ -1566,6 +1828,41 @@ pub(crate) fn library_state(
     }
     let first_bad = stats.into_iter().find(|status| *status != FolderStatus::Ok);
     RootState::of(joined, first_bad.as_ref())
+}
+
+/// [`LibraryService::refuse_unusable_mount`] inside a change, under its write lock and before its disk IO: `path`'s
+/// mount judged by its recorded state only — no IO, no walk again. The entrance passed it before the ticket, but a scan
+/// queued ahead of the change may have found the mount gone since. A path in no registered mount passes.
+// ADR-0400 decision 6
+pub(crate) fn refuse_unusable_now(
+    mounts: &MountsNow,
+    path: &LibPath,
+) -> Result<(), LibraryRefusal> {
+    let Some((mount, _)) = mounts.locate(path) else {
+        return Ok(());
+    };
+    let seen = mounts.seen(&mount.name);
+    match seen.usable() {
+        true => Ok(()),
+        false => Err(LibraryRefusal::Refused {
+            class: RefusalClass::Unavailable,
+            reason: mount_unavailable(&mount.name, &seen.shown()),
+        }),
+    }
+}
+
+/// The reason of a read whose range lies in mount `name` that cannot be read — [`LIBRARY_UNAVAILABLE`] with `{mount,
+/// message}`.
+// ADR-0400 decision 6
+pub(crate) fn mount_unavailable(name: &MountName, state: &MountState) -> Reason {
+    Reason {
+        code: LIBRARY_UNAVAILABLE.to_owned(),
+        args: json!({
+            "mount": name.as_str(),
+            "message": format!("the library mount {} cannot be read: {}", name.as_str(), state.why()),
+        }),
+        line: None,
+    }
 }
 
 /// The refusal of a write whose target is the virtual root (`None`) or a mount's top — `InvalidArgument` ·
@@ -1717,8 +2014,12 @@ mod tests {
         read_caps: Mutex<Vec<u64>>,
         /// The next scan parks at `Start` (if armed) and then fails as an unreadable root.
         fail_next_scan: Mutex<bool>,
+        /// Every scan fails as an unreadable root.
+        fail_every_scan: Mutex<bool>,
         /// Every link probe fails with this error kind.
         fail_link: Mutex<Option<io::ErrorKind>>,
+        /// Every path a store call other than a scan was asked about (a link probe logs its mount's folder).
+        touched: Mutex<Vec<PathBuf>>,
         hold: Mutex<Hold>,
         moved: Condvar,
     }
@@ -1733,7 +2034,9 @@ mod tests {
                 scans: Mutex::default(),
                 read_caps: Mutex::default(),
                 fail_next_scan: Mutex::default(),
+                fail_every_scan: Mutex::default(),
                 fail_link: Mutex::default(),
+                touched: Mutex::default(),
                 hold: Mutex::default(),
                 moved: Condvar::new(),
             })
@@ -1761,6 +2064,19 @@ mod tests {
                 .max_by_key(|(root, _)| root.components().count())
                 .expect("a path under a root of the test store")
                 .1
+        }
+
+        /// The store calls other than scans that reached a path at or below `root`.
+        fn touched_under(&self, root: &str) -> Vec<PathBuf> {
+            lock(&self.touched)
+                .iter()
+                .filter(|path| path.starts_with(root))
+                .cloned()
+                .collect()
+        }
+
+        fn note(&self, path: &Path) {
+            lock(&self.touched).push(path.to_path_buf());
         }
 
         fn scans(&self) -> Vec<(String, Option<String>)> {
@@ -1823,7 +2139,7 @@ mod tests {
             seq: &dyn Fn() -> u64,
         ) -> io::Result<ScanListing> {
             lock(&self.scans).push((root.to_path_buf(), under.cloned()));
-            if std::mem::take(&mut *lock(&self.fail_next_scan)) {
+            if std::mem::take(&mut *lock(&self.fail_next_scan)) || *lock(&self.fail_every_scan) {
                 self.park(At::Start, root);
                 return Err(io::Error::from(io::ErrorKind::PermissionDenied));
             }
@@ -1839,6 +2155,7 @@ mod tests {
         }
 
         fn first_link(&self, root: &Path, rel: &MountPath) -> io::Result<Option<MountPath>> {
+            self.note(root);
             if let Some(kind) = *lock(&self.fail_link) {
                 return Err(io::Error::from(kind));
             }
@@ -1847,37 +2164,48 @@ mod tests {
 
         fn read(&self, path: &Path, cap: u64) -> io::Result<Vec<u8>> {
             lock(&self.read_caps).push(cap);
+            self.note(path);
             self.holding(path).read(path, cap)
         }
 
         fn tag(&self, path: &Path) -> io::Result<ContentTag> {
+            self.note(path);
             self.holding(path).tag(path)
         }
 
         fn write_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.note(path);
             self.holding(path).write_atomic(path, bytes)
         }
 
         fn create_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.note(path);
             self.holding(path).create_new(path, bytes)
         }
         fn create_dir(&self, path: &Path) -> io::Result<()> {
+            self.note(path);
             self.holding(path).create_dir(path)
         }
 
         fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.note(from);
+            self.note(to);
             self.holding(from).rename(from, to)
         }
 
         fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.note(from);
+            self.note(to);
             self.holding(from).copy(from, to)
         }
 
         fn trash(&self, root: &Path, path: &Path, bundle: &TrashBundle) -> io::Result<PathBuf> {
+            self.note(path);
             self.at_root(root).trash(root, path, bundle)
         }
 
         fn exists(&self, path: &Path) -> bool {
+            self.note(path);
             self.holding(path).exists(path)
         }
     }
@@ -1924,12 +2252,15 @@ mod tests {
 
     impl JoinSpawn {
         fn join_all(&self) {
-            for handle in std::mem::take(&mut *lock(&self.0)) {
+            // Taken first: a job that spawns (a bounded stat's worker) must not meet this lock held across the joins.
+            let handles = std::mem::take(&mut *lock(&self.0));
+            for handle in handles {
                 join(handle);
             }
         }
     }
 
+    /// Refuses every spawn — the service's own jobs and the bounded IO's workers alike.
     struct FailingSpawn;
 
     impl Spawn for FailingSpawn {
@@ -2023,6 +2354,14 @@ mod tests {
     /// A service over `mounts` (name, folder — each one of the test roots `/lib`, `/team`, `/lib2`), with no agents,
     /// every stat `Ok` and threads for jobs.
     fn mounted(mounts: &[(&str, &str)]) -> (Arc<LibraryService>, Arc<TestStore>) {
+        mounted_with(mounts, Arc::new(StatOps::default()))
+    }
+
+    /// [`mounted`] whose folder ops are `ops`.
+    fn mounted_with(
+        mounts: &[(&str, &str)],
+        ops: Arc<dyn FolderOps>,
+    ) -> (Arc<LibraryService>, Arc<TestStore>) {
         let store = TestStore::new(&["/lib", "/team", "/lib2"]);
         let mount = |(name, folder): &(&str, &str)| MountSetting {
             name: MountName::parse(name).unwrap(),
@@ -2047,7 +2386,7 @@ mod tests {
             IO_LIMIT,
             LaunchWaits::LAUNCH,
             LIST_CAP,
-            Arc::new(StatOps::default()),
+            ops,
             Arc::new(ThreadSpawn),
         );
         let port: Arc<dyn LibraryStore> = Arc::clone(&store) as Arc<dyn LibraryStore>;
@@ -2226,7 +2565,8 @@ mod tests {
             top.folders,
             [FolderRow {
                 path: "library".to_owned(),
-                name: "library".to_owned()
+                name: "library".to_owned(),
+                mount_state: Some(MountState::Ok),
             }],
             "the mounts are its folders"
         );
@@ -2236,7 +2576,8 @@ mod tests {
             root.folders,
             [FolderRow {
                 path: "library/a".to_owned(),
-                name: "a".to_owned()
+                name: "a".to_owned(),
+                mount_state: None,
             }]
         );
         let a = svc.list(Some(&lp("library/a"))).unwrap();
@@ -2367,6 +2708,482 @@ mod tests {
         );
         let read = svc.read(&lp("team/rules/a.md")).unwrap();
         assert_eq!(read.absolute, Path::new("/team").join("rules").join("a.md"));
+    }
+
+    // ADR-0400 decisions 4, 6 and 17: a mount that is not there is not walked and the other one still reads; the
+    //   virtual root carries each mount's last known state, whole-tree reads answer partially and name it, a read
+    //   inside it refuses naming it, and once it is back its next reader walks it.
+    #[test]
+    fn a_mount_that_is_not_there_is_left_out_named_and_walked_again_by_its_next_reader_once_back() {
+        let ops = Arc::new(StatOps::default());
+        lock(&ops.0).insert(PathBuf::from("/team"), FolderStatus::Missing);
+        let (svc, store) = mounted_with(
+            &[("library", "/lib"), ("team", "/team")],
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+        );
+        store.mem("/lib").file("rules/a.md", "mine");
+        store.mem("/team").file("rules/b.md", "theirs");
+        let team = MountName::parse("team").unwrap();
+        let missing = MountState::Missing {
+            why: "missing".to_owned(),
+        };
+        let states = |answer: &ListAnswer| -> Vec<(String, Option<MountState>)> {
+            answer
+                .folders
+                .iter()
+                .map(|row| (row.path.clone(), row.mount_state.clone()))
+                .collect()
+        };
+        let top = svc.list(None).unwrap();
+        assert_eq!(
+            states(&top),
+            [
+                ("library".to_owned(), Some(MountState::Ok)),
+                ("team".to_owned(), Some(missing.clone()))
+            ]
+        );
+        assert!(top.unavailable.is_empty(), "the rows carry the state");
+        assert_eq!(
+            store.scans(),
+            [scan("/lib", None)],
+            "the mount that is not there is not walked"
+        );
+        assert_eq!(
+            paths(&svc.list(Some(&lp("library/rules"))).unwrap()),
+            ["library/rules/a.md"]
+        );
+
+        let unavailable = [UnavailableMount {
+            mount: team.clone(),
+            state: missing.clone(),
+        }];
+        let query = ListFilter {
+            query: Some(".md".to_owned()),
+            ..ListFilter::default()
+        };
+        let found = svc.list_with(None, &query).unwrap();
+        assert_eq!(paths(&found), ["library/rules/a.md"]);
+        assert_eq!(found.unavailable, unavailable);
+        let folders = svc.folders().unwrap();
+        assert_eq!(folders.unavailable, unavailable);
+        assert!(
+            folders
+                .folders
+                .iter()
+                .all(|folder| !folder.path.starts_with("team/")),
+            "{folders:?}"
+        );
+
+        let (class, reason) = refused(svc.read(&lp("team/rules/b.md")).unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str(), &reason.args["mount"]),
+            (
+                RefusalClass::Unavailable,
+                LIBRARY_UNAVAILABLE,
+                &json!("team")
+            )
+        );
+        let listed = svc.list(Some(&lp("team/rules"))).unwrap_err();
+        assert_eq!(
+            (listed.code.as_str(), &listed.args["mount"]),
+            (LIBRARY_UNAVAILABLE, &json!("team"))
+        );
+        assert_eq!(
+            store.scans().len(),
+            1,
+            "stat'ed again, still not there: not walked"
+        );
+
+        lock(&ops.0).clear();
+        assert_eq!(
+            paths(&svc.list(Some(&lp("team/rules"))).unwrap()),
+            ["team/rules/b.md"],
+            "its next reader walked it"
+        );
+        assert_eq!(store.scans(), [scan("/lib", None), scan("/team", None)]);
+        assert_eq!(
+            states(&svc.list(None).unwrap())[1],
+            ("team".to_owned(), Some(MountState::Ok))
+        );
+        assert!(svc.folders().unwrap().unavailable.is_empty());
+    }
+
+    // ADR-0387 per mount · ADR-0400 decision 17: a read entrance stats the mounts its presets name; one that is not
+    //   there or cannot be read is block ④ by its stat alone, and one that is back is walked again before it is judged.
+    #[test]
+    fn a_read_entrance_walks_a_named_mount_again_once_it_is_back() {
+        let ops = Arc::new(StatOps::default());
+        lock(&ops.0).insert(
+            PathBuf::from("/team"),
+            FolderStatus::Unreadable("down".to_owned()),
+        );
+        let (svc, store) = mounted_with(
+            &[("library", "/lib"), ("team", "/team")],
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+        );
+        store.mem("/team").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - team/a.md\n",
+        );
+        store.mem("/team").file("a.md", "a");
+        let down = svc.resolve_preset(&lp("team/P.yaml"));
+        let [BlockReason::LibraryUnavailable { reason }] = down.problems.as_slice() else {
+            panic!("{:?}", down.problems)
+        };
+        assert_eq!(reason.args["message"], json!("down"));
+        assert!(down.blocked().is_some(), "there but unreadable: blocked");
+        assert_eq!(store.scans(), [scan("/lib", None)], "not walked while down");
+
+        lock(&ops.0).clear();
+        let back = svc.resolve_preset(&lp("team/P.yaml"));
+        assert!(back.problems.is_empty(), "{:?}", back.problems);
+        assert_eq!(
+            back.instructions,
+            [("team/a.md".to_owned(), Path::new("/team").join("a.md"))]
+        );
+        assert_eq!(store.scans(), [scan("/lib", None), scan("/team", None)]);
+    }
+
+    /// What a refusal naming mount `team` as not readable answers: its class, code and `mount`.
+    fn team_unreadable() -> (RefusalClass, String, serde_json::Value) {
+        (
+            RefusalClass::Unavailable,
+            LIBRARY_UNAVAILABLE.to_owned(),
+            json!("team"),
+        )
+    }
+
+    fn class_code_mount(refusal: LibraryRefusal) -> (RefusalClass, String, serde_json::Value) {
+        let (class, reason) = refused(refusal);
+        (class, reason.code, reason.args["mount"].clone())
+    }
+
+    // ADR-0400 decision 6: a write into a mount that cannot be read, and `preset.get` of one of its presets, refuse
+    //   naming the mount before any change — its disk is not touched under the write lock, and no stale catalog row
+    //   answers.
+    #[test]
+    fn writes_and_preset_get_in_a_mount_that_cannot_be_read_refuse_naming_it_and_touch_nothing() {
+        let ops = Arc::new(StatOps::default());
+        lock(&ops.0).insert(
+            PathBuf::from("/team"),
+            FolderStatus::Unreadable("down".to_owned()),
+        );
+        let (svc, store) = mounted_with(&[("library", "/lib"), ("team", "/team")], ops);
+        let preset = "kind: preset\nversion: 1\ninstructions: []\n";
+        store.mem("/team").file("P.yaml", preset);
+        store.mem("/lib").file("a.md", "a");
+        svc.first_scan_join().unwrap();
+        let p = lp("team/P.yaml");
+        assert_eq!(
+            class_code_mount(svc.preset_get(&AssetRef::Library(p.clone())).unwrap_err()),
+            team_unreadable(),
+            "preset.get"
+        );
+        let add = edit::AddEntries::Items(vec![edit::NewItem {
+            path: "library/a.md".to_owned(),
+            backend: None,
+        }]);
+        assert_eq!(
+            class_code_mount(svc.preset_add(&p, &add, None, None).unwrap_err()),
+            team_unreadable(),
+            "an edit"
+        );
+        let markdown = create::NewFileKind::Markdown;
+        assert_eq!(
+            class_code_mount(svc.new_file(Some("team"), "x", markdown, None).unwrap_err()),
+            team_unreadable(),
+            "newFile"
+        );
+        assert_eq!(
+            class_code_mount(svc.new_folder(Some("team"), "d", None).unwrap_err()),
+            team_unreadable(),
+            "newFolder"
+        );
+        assert!(
+            store.touched_under("/team").is_empty(),
+            "no probe, read or write of the mount: {:?}",
+            store.touched_under("/team")
+        );
+        let team = Path::new("/team");
+        assert_eq!(
+            store.read(&team.join("P.yaml"), u64::MAX).unwrap(),
+            preset.as_bytes()
+        );
+        assert!(!store.exists(&team.join("x.md")) && !store.exists(&team.join("d")));
+        assert_eq!(store.scans(), [scan("/lib", None)], "never walked");
+    }
+
+    // ADR-0400 decision 6: a relink rewrites no file of a mount that cannot be read — each is skipped naming the mount
+    //   — and refuses a target in one.
+    #[test]
+    fn a_relink_skips_the_files_of_a_mount_that_cannot_be_read_and_refuses_a_target_in_one() {
+        let ops = Arc::new(StatOps::default());
+        let (svc, store) = mounted_with(
+            &[("library", "/lib"), ("team", "/team")],
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+        );
+        let lists_old = "kind: preset\nversion: 1\ninstructions:\n  - library/old.md\n";
+        store.mem("/lib").file("P.yaml", lists_old);
+        store.mem("/lib").file("new.md", "new");
+        store.mem("/team").file("Q.yaml", lists_old);
+        store.mem("/team").file("new.md", "new");
+        svc.first_scan_join().unwrap();
+        lock(&ops.0).insert(
+            PathBuf::from("/team"),
+            FolderStatus::Unreadable("down".to_owned()),
+        );
+        assert_eq!(svc.refresh(Some(&lp("team"))).errors.len(), 1);
+
+        assert_eq!(
+            class_code_mount(
+                svc.relink("library/old.md", "team/new.md", None)
+                    .unwrap_err()
+            ),
+            team_unreadable(),
+            "a target in it"
+        );
+        let answer = svc
+            .relink("library/old.md", "library/new.md", None)
+            .unwrap();
+        assert_eq!(answer.written, ["library/P.yaml"]);
+        let [skip] = answer.skipped.as_slice() else {
+            panic!("{:?}", answer.skipped)
+        };
+        assert_eq!(
+            (
+                skip.path.as_str(),
+                skip.reason.code.as_str(),
+                &skip.reason.args["mount"]
+            ),
+            ("team/Q.yaml", LIBRARY_UNAVAILABLE, &json!("team"))
+        );
+        assert!(
+            answer.fixed.is_empty(),
+            "a file listing the old path is left"
+        );
+        assert_eq!(
+            store
+                .read(&Path::new("/team").join("Q.yaml"), u64::MAX)
+                .unwrap(),
+            lists_old.as_bytes()
+        );
+    }
+
+    // ADR-0400 decision 17: a read into a mount that is not there stats it fresh and refuses without a ticket — it
+    //   does not queue behind a slow walk of another mount.
+    #[test]
+    fn a_read_into_a_mount_that_is_not_there_does_not_queue_behind_a_slow_walk() {
+        let ops = Arc::new(StatOps::default());
+        lock(&ops.0).insert(PathBuf::from("/team"), FolderStatus::Missing);
+        let (svc, store) = mounted_with(&[("library", "/lib"), ("team", "/team")], ops);
+        store.mem("/lib").file("a.md", "a");
+        svc.first_scan_join().unwrap();
+        store.hold_at(At::Start, "/lib");
+        let slow = on_thread(&svc, |svc| svc.refresh(Some(&lp("library"))));
+        store.wait_held();
+        // Joined while the walk is held: a read that drew a ticket would wait behind it and hang here.
+        let read = on_thread(&svc, |svc| svc.read(&lp("team/x.md")).map(drop));
+        assert_eq!(class_code_mount(join(read).unwrap_err()), team_unreadable());
+        store.release();
+        assert!(join(slow).errors.is_empty());
+    }
+
+    // ADR-0400 decision 17 · ADR-0387 per mount: a read entrance judges a mount walked before whose walk again failed
+    //   by that failure — the rule `list` and `read` use — not from the catalog the earlier walk left.
+    #[test]
+    fn a_read_entrance_blocks_on_a_mount_whose_walk_again_failed_though_it_was_walked_before() {
+        let ops = Arc::new(StatOps::default());
+        let (svc, store) = mounted_with(
+            &[("library", "/lib"), ("team", "/team")],
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+        );
+        store.mem("/team").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - team/a.md\n",
+        );
+        store.mem("/team").file("a.md", "a");
+        svc.first_scan_join().unwrap();
+        lock(&ops.0).insert(
+            PathBuf::from("/team"),
+            FolderStatus::Unreadable("down".to_owned()),
+        );
+        svc.refresh(Some(&lp("team")));
+        lock(&ops.0).clear();
+        *lock(&store.fail_next_scan) = true;
+        let resolution = svc.resolve_preset(&lp("team/P.yaml"));
+        let [BlockReason::LibraryUnavailable { reason }] = resolution.problems.as_slice() else {
+            panic!("{:?}", resolution.problems)
+        };
+        assert_eq!(
+            reason.args["message"],
+            json!(io::Error::from(io::ErrorKind::PermissionDenied).to_string())
+        );
+        assert!(resolution.blocked().is_some());
+        assert_eq!(
+            store.scans(),
+            [scan("/lib", None), scan("/team", None), scan("/team", None)],
+            "walked again once, and that walk failed"
+        );
+    }
+
+    // ADR-0387 per mount: a mount that stats `Ok` at the entrance but is gone when walked again is absent — skipped,
+    //   not blocked.
+    #[test]
+    fn a_read_entrance_skips_a_mount_found_gone_when_walked_again() {
+        let ops = Arc::new(CountOps::default());
+        let (svc, store) = mounted_with(
+            &[("library", "/lib"), ("team", "/team")],
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+        );
+        store.mem("/team").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - team/a.md\n",
+        );
+        store.mem("/team").file("a.md", "a");
+        svc.first_scan_join().unwrap();
+        let team = PathBuf::from("/team");
+        lock(&ops.later).insert(team.clone(), FolderStatus::Unreadable("down".to_owned()));
+        svc.refresh(Some(&lp("team")));
+        lock(&ops.later).clear();
+        // The entrance's own stat finds it; the fresh stat before its walk again does not.
+        *lock(&ops.from) = Some((team.clone(), ops.stats_of(&team) + 2, FolderStatus::Missing));
+        let resolution = svc.resolve_preset(&lp("team/P.yaml"));
+        assert!(resolution.root_absent, "{:?}", resolution.problems);
+        assert!(resolution.blocked().is_none());
+    }
+
+    // ADR-0400 decision 6: a relink cannot know what a mount never walked refers to — the mount is one skipped row at
+    //   its top, beside the pairs fixed within the mounts it could read.
+    #[test]
+    fn a_relink_reports_a_mount_never_walked_beside_the_pairs_fixed_in_the_mounts_read() {
+        let ops = Arc::new(StatOps::default());
+        lock(&ops.0).insert(
+            PathBuf::from("/team"),
+            FolderStatus::Unreadable("down".to_owned()),
+        );
+        let (svc, store) = mounted_with(&[("library", "/lib"), ("team", "/team")], ops);
+        let lists_old = "kind: preset\nversion: 1\ninstructions:\n  - library/old.md\n";
+        store.mem("/lib").file("P.yaml", lists_old);
+        store.mem("/lib").file("new.md", "new");
+        store.mem("/team").file("Q.yaml", lists_old);
+        svc.first_scan_join().unwrap();
+        let answer = svc
+            .relink("library/old.md", "library/new.md", None)
+            .unwrap();
+        assert_eq!(answer.written, ["library/P.yaml"]);
+        let [skip] = answer.skipped.as_slice() else {
+            panic!("{:?}", answer.skipped)
+        };
+        assert_eq!(
+            (
+                skip.path.as_str(),
+                skip.reason.code.as_str(),
+                &skip.reason.args["mount"]
+            ),
+            ("team", LIBRARY_UNAVAILABLE, &json!("team"))
+        );
+        assert_eq!(
+            answer.fixed,
+            [("library/old.md".to_owned(), "library/new.md".to_owned())]
+        );
+        assert_eq!(answer.more, 0);
+        assert!(store.touched_under("/team").is_empty());
+    }
+
+    // ADR-0400 decision 6: a write queued behind a scan that finds its mount gone after the entrance passed it judges
+    //   the mount again under the write lock, before any disk IO — it refuses (a relink skips the mount's files), and
+    //   the mount's disk is not touched.
+    #[test]
+    fn writes_queued_behind_a_scan_that_finds_their_mount_gone_refuse_before_any_disk_io() {
+        let (svc, store) = mounted_with(
+            &[("library", "/lib"), ("team", "/team")],
+            Arc::new(StatOps::default()),
+        );
+        let lists_old = "kind: preset\nversion: 1\ninstructions:\n  - library/old.md\n";
+        store.mem("/lib").file("P.yaml", lists_old);
+        store.mem("/lib").file("a.md", "a");
+        store.mem("/lib").file("new.md", "new");
+        store.mem("/team").file("Q.yaml", lists_old);
+        let empty = "kind: preset\nversion: 1\ninstructions: []\n";
+        store.mem("/team").file("E.yaml", empty);
+        svc.first_scan_join().unwrap();
+        lock(&store.touched).clear();
+
+        store.hold_at(At::Start, "/lib");
+        let slow = on_thread(&svc, |svc| svc.refresh(Some(&lp("library"))));
+        store.wait_held();
+        let edit = on_thread(&svc, |svc| {
+            let add = edit::AddEntries::Items(vec![edit::NewItem {
+                path: "library/a.md".to_owned(),
+                backend: None,
+            }]);
+            svc.preset_add(&lp("team/E.yaml"), &add, None, None)
+                .map(drop)
+        });
+        let create = on_thread(&svc, |svc| {
+            svc.new_file(Some("team"), "x", create::NewFileKind::Markdown, None)
+                .map(drop)
+        });
+        let relink = on_thread(&svc, |svc| {
+            svc.relink("library/old.md", "library/new.md", None)
+        });
+        svc.gate
+            .wait_for("the three writes wait behind the walk", |line, _| {
+                line == [
+                    ("scan", true),
+                    ("change", false),
+                    ("change", false),
+                    ("change", false),
+                ]
+            });
+        // The entrances passed; now the mount is found gone, recorded without a ticket.
+        let team = svc.with_read(|state| state.mounts.get("team").cloned().unwrap());
+        svc.gate.observe(vec![team], &|mounts| {
+            vec![FolderStatus::Missing; mounts.len()]
+        });
+        store.release();
+        assert!(join(slow).errors.is_empty());
+        assert_eq!(class_code_mount(join(edit).unwrap_err()), team_unreadable());
+        assert_eq!(
+            class_code_mount(join(create).unwrap_err()),
+            team_unreadable()
+        );
+        let answer = join(relink).unwrap();
+        assert_eq!(answer.written, ["library/P.yaml"]);
+        assert_eq!(
+            answer
+                .skipped
+                .iter()
+                .map(|skip| (skip.path.as_str(), skip.reason.code.as_str()))
+                .collect::<Vec<_>>(),
+            [("team/Q.yaml", LIBRARY_UNAVAILABLE)]
+        );
+        assert!(
+            store.touched_under("/team").is_empty(),
+            "{:?}",
+            store.touched_under("/team")
+        );
+    }
+
+    // ADR-0400 decision 6: `preset.check` of a preset in a mount that cannot be read refuses naming it, as `preset.get`
+    //   does — its current lists would come from a stale catalog.
+    #[test]
+    fn a_preset_check_in_a_mount_that_cannot_be_read_refuses_naming_it() {
+        let ops = Arc::new(StatOps::default());
+        lock(&ops.0).insert(
+            PathBuf::from("/team"),
+            FolderStatus::Unreadable("down".to_owned()),
+        );
+        let (svc, store) = mounted_with(&[("library", "/lib"), ("team", "/team")], ops);
+        store
+            .mem("/team")
+            .file("P.yaml", "kind: preset\nversion: 1\n");
+        svc.first_scan_join().unwrap();
+        let draft = edit::PresetDraft::default();
+        assert_eq!(
+            class_code_mount(svc.preset_check(&lp("team/P.yaml"), &draft).unwrap_err()),
+            team_unreadable()
+        );
     }
 
     // ADR-0400 decision 4: a mount's name is a folder, not an item; a first name that names no mount reads as absent.
@@ -2689,8 +3506,10 @@ mod tests {
         assert_eq!(store.scans(), [scan("/lib", None), scan("/lib", Some("a"))]);
     }
 
+    // ADR-0400 decision 17: the whole first scan raises the first scan even when a mount cannot be walked; a folder
+    //   refresh in that mount walks the whole mount (decision 6 per mount), so no false not-found is reported.
     #[test]
-    fn a_folder_refresh_whose_waited_first_scan_failed_goes_through_a_whole_one() {
+    fn a_folder_refresh_in_a_mount_the_first_scan_could_not_walk_walks_the_whole_mount() {
         let (svc, store) = library();
         store.mem("/lib").file(
             "a/p.yaml",
@@ -2699,18 +3518,18 @@ mod tests {
         store.mem("/lib").file("b/x.md", "x");
         store.mem("/lib").file("c.md", "c");
         *lock(&store.fail_next_scan) = true;
-        store.hold_at(At::Start, "/lib");
-        let first = on_thread(&svc, |svc| svc.list(Some(&lp("library"))));
-        store.wait_held();
-        let refresh = on_thread(&svc, |svc| svc.refresh(Some(&lp("library/a"))));
-        svc.gate
-            .wait_for("the refresh waits for the first scan", |_, waiting| {
-                waiting == 1
-            });
-        store.release();
-        let failed = join(first).expect_err("the failed first scan is the list's answer");
-        assert_eq!(failed.code, LIBRARY_UNAVAILABLE);
-        let report = join(refresh);
+        svc.first_scan_join()
+            .expect("a mount it cannot walk is not the scan's failure");
+        assert_eq!(
+            svc.with_read(|state| state.seen(&MountName::first())),
+            MountSeen {
+                state: MountState::Unreadable {
+                    why: io::Error::from(io::ErrorKind::PermissionDenied).to_string()
+                },
+                walked: false
+            }
+        );
+        let report = svc.refresh(Some(&lp("library/a")));
         assert_eq!(store.scans(), [scan("/lib", None), scan("/lib", None)]);
         assert!(report.problems.is_empty(), "no false not-found: {report:?}");
         assert!(report.errors.is_empty());
@@ -2718,7 +3537,12 @@ mod tests {
         assert_eq!(
             paths(&svc.list(Some(&lp("library"))).unwrap()),
             ["library/c.md"],
-            "the second scan was applied"
+            "the whole mount was applied"
+        );
+        assert_eq!(
+            store.scans().len(),
+            2,
+            "the mount is walked: no reader walks it again"
         );
     }
 
@@ -3130,6 +3954,10 @@ mod tests {
     #[derive(Default)]
     struct CountOps {
         statuses: HashMap<PathBuf, FolderStatus>,
+        /// Statuses set after the setup; they win over `statuses`.
+        later: Mutex<HashMap<PathBuf, FolderStatus>>,
+        /// From the stat number `n` (counted from 1) of `path` on, `path` answers this status; it wins over the others.
+        from: Mutex<Option<(PathBuf, usize, FolderStatus)>>,
         held: Vec<PathBuf>,
         stats: Mutex<HashMap<PathBuf, usize>>,
         released: Mutex<bool>,
@@ -3149,7 +3977,18 @@ mod tests {
 
     impl FolderOps for CountOps {
         fn stat(&self, p: &Path) -> FolderStatus {
-            *lock(&self.stats).entry(p.to_path_buf()).or_default() += 1;
+            let number = {
+                let mut stats = lock(&self.stats);
+                let count = stats.entry(p.to_path_buf()).or_default();
+                *count += 1;
+                *count
+            };
+            if let Some((_, _, status)) = lock(&self.from)
+                .as_ref()
+                .filter(|(path, n, _)| path == p && number >= *n)
+            {
+                return status.clone();
+            }
             if self.held.iter().any(|held| held == p) {
                 let deadline = Instant::now() + Duration::from_secs(20);
                 let mut released = lock(&self.released);
@@ -3157,7 +3996,10 @@ mod tests {
                     released = wait_timeout(&self.moved, released, deadline - Instant::now()).0;
                 }
             }
-            self.statuses.get(p).cloned().unwrap_or(FolderStatus::Ok)
+            let later = lock(&self.later).get(p).cloned();
+            later
+                .or_else(|| self.statuses.get(p).cloned())
+                .unwrap_or(FolderStatus::Ok)
         }
 
         fn list(&self, _: &Path, _: usize) -> Result<FolderListing, FolderStatus> {
@@ -3257,7 +4099,8 @@ mod tests {
         assert!(resolution.problems.is_empty(), "{:?}", resolution.problems);
         assert_eq!(
             (ops.stats_of(Path::new("/lib")), ops.stats_of(&folder)),
-            (1, 1)
+            (2, 1),
+            "the root: the first scan's stat before its ticket, and the resolution's"
         );
         svc.resolve_preset(&lp("library/P.yaml"));
         assert_eq!(store.scans(), [scan("/lib", None)], "no second scan");
@@ -3448,10 +4291,7 @@ claude: {changed: true}
             &format!("kind: preset\nversion: 1\nfolders:\n  - '{spelled}'\n"),
         );
         let ops = Arc::new(CountOps {
-            statuses: HashMap::from([
-                (PathBuf::from("/lib"), FolderStatus::Missing),
-                (folder.clone(), FolderStatus::Missing),
-            ]),
+            statuses: HashMap::from([(folder.clone(), FolderStatus::Missing)]),
             ..CountOps::default()
         });
         let io = BoundedIo::new(
@@ -3470,6 +4310,14 @@ claude: {changed: true}
             None,
             io,
         );
+        svc.first_scan_join().unwrap();
+        assert!(has(&svc, "library/P.yaml"), "a good first scan");
+        assert_eq!(
+            ops.stats_of(Path::new("/lib")),
+            1,
+            "the first scan's stat before its ticket"
+        );
+        lock(&ops.later).insert(PathBuf::from("/lib"), FolderStatus::Missing);
         assert!(svc
             .resolve_agent(builtin_only.id)
             .unwrap()
@@ -3477,7 +4325,7 @@ claude: {changed: true}
             .is_empty());
         assert_eq!(
             ops.stats_of(Path::new("/lib")),
-            0,
+            1,
             "no library preset — not asked"
         );
         let absent = svc.resolve_agent(library.id).unwrap();
@@ -3495,7 +4343,11 @@ claude: {changed: true}
             absent.problems,
             "an absent root is skipped (ADR-0387)"
         );
-        assert_eq!(ops.stats_of(Path::new("/lib")), 1);
+        assert_eq!(
+            ops.stats_of(Path::new("/lib")),
+            2,
+            "stat'ed once more, and not walked again — absent"
+        );
         assert_eq!(
             ops.stats_of(&folder),
             0,
@@ -3508,8 +4360,9 @@ claude: {changed: true}
         assert_eq!(resolution.problems, [library_unavailable(gate::NO_ROOT)]);
         assert!(resolution.root_absent && resolution.blocked().is_none());
 
-        // ADR-0387: a first scan that could not be applied stats the root once — there, it is unreadable: its reason
-        //   alone, blocked; the preset under a link gets no path-through-link row.
+        // ADR-0387: a mount there whose walk keeps failing is unreadable: its reason alone, blocked; the preset under a
+        //   link gets no path-through-link row. Stat'ed by the first scan, by the reader, and twice by the reader's
+        //   walk again — its fresh stat before any ticket, then its scan's (ADR-0400 decision 17).
         let store = TestStore::new(&["/lib"]);
         store.mem("/lib").link("lnk");
         let ops = Arc::new(CountOps::default());
@@ -3521,7 +4374,7 @@ claude: {changed: true}
             Arc::new(ThreadSpawn),
         );
         let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
-        *lock(&store.fail_next_scan) = true;
+        *lock(&store.fail_every_scan) = true;
         let resolution = svc.resolve_preset(&lp("library/lnk/P.yaml"));
         let [BlockReason::LibraryUnavailable { reason }] = resolution.problems.as_slice() else {
             panic!("{:?}", resolution.problems)
@@ -3532,7 +4385,7 @@ claude: {changed: true}
             "{message}"
         );
         assert!(!resolution.root_absent && resolution.blocked().is_some());
-        assert_eq!(ops.stats_of(Path::new("/lib")), 1);
+        assert_eq!(ops.stats_of(Path::new("/lib")), 4);
 
         // A first scan that failed on a root that is not there: absent, skipped.
         let store = TestStore::new(&["/lib"]);
@@ -3552,7 +4405,15 @@ claude: {changed: true}
         let resolution = svc.resolve_preset(&lp("library/P.yaml"));
         assert_eq!(resolution.problems, [library_unavailable("missing")]);
         assert_eq!(resolution.skipped(), resolution.problems);
-        assert_eq!(ops.stats_of(Path::new("/lib")), 1);
+        assert_eq!(
+            ops.stats_of(Path::new("/lib")),
+            2,
+            "the first scan's stat and the reader's; absent, so not walked"
+        );
+        assert!(
+            store.scans().is_empty(),
+            "a mount that is not there is not walked"
+        );
     }
 
     /// A link probe that fails turns a `not-found` row into ② `library-read-failed` — the path could not be checked,
@@ -4519,11 +5380,22 @@ claude: {changed: true}
         );
 
         *lock(&disk.store.fail_next_scan) = true;
-        let (class, reason) = refused(svc.folders().unwrap_err());
+        let refused_list = svc.list(Some(&lp("library"))).unwrap_err();
         assert_eq!(
-            (class, reason.code.as_str()),
-            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE),
+            (refused_list.code.as_str(), &refused_list.args["mount"]),
+            (LIBRARY_UNAVAILABLE, &json!("library")),
             "the reader walked again and that walk failed too"
+        );
+        let partial = svc.folders().unwrap();
+        assert_eq!(
+            partial.unavailable,
+            [UnavailableMount {
+                mount: MountName::first(),
+                state: MountState::Unreadable {
+                    why: io::Error::from(io::ErrorKind::PermissionDenied).to_string()
+                }
+            }],
+            "a whole-tree read answers partially"
         );
         lock(&disk.ops.0).insert(root.clone(), FolderStatus::Missing);
         // A stat worker of the status above may still be in flight, and a required ask joins it (`folder.rs` — one

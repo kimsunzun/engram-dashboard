@@ -91,7 +91,7 @@ pub const NOT_CHECKED: &str = "not checked (budget spent)";
 const READ_ADVISORY_WAIT: Duration = Duration::from_secs(1);
 const WORKER_NAME: &str = "folder-io";
 const WORKER_PANICKED: &str = "worker panicked";
-const SPAWN_FAILED: &str = "spawn failed";
+pub(crate) const SPAWN_FAILED: &str = "spawn failed";
 
 /// One bounded op on one absolute path — the unit of de-duplication and of a stored answer.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -7,4 +7,13 @@ export type LibraryFolderRow = { path: string, name: string,
 /**
  * A skill folder (it holds a `SKILL.md`).
  */
-skill: boolean, };
+skill: boolean, 
+/**
+ * A mount (a top folder): `ok` | `missing` | `unreadable`, as last seen (no fresh check); `null` = a folder
+ * inside a mount.
+ */
+state?: string | null, 
+/**
+ * Why a mount's `state` is not `ok`.
+ */
+state_why?: string | null, };

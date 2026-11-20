@@ -4,8 +4,9 @@
 //!
 //! ## Rules (invariants)
 //!
-//! - **One edit, one change.** An edit passes the first-scan entrance (its failure `library-unavailable`); the
-//!   folders an `add` names are stat'ed before the change, outside every lock; then one
+//! - **One edit, one change.** An edit passes the first-scan entrance (its failure `library-unavailable`) and is
+//!   refused when its preset's mount cannot be read (walked again first — ADR-0400 decision 6), so its disk is never
+//!   touched under the write lock; the folders an `add` names are stat'ed before the change, outside every lock; then one
 //!   [`LibraryService::change_at`] runs, under its write lock and in this order: link admission
 //!   (`LibraryService::admit`) before any read, the store read of the file's current bytes, the parse, the `baseRev`
 //!   check against the `rev` of those bytes, the operation over [`PresetLists`] keeping every kept item's origin, no
@@ -22,7 +23,8 @@
 //!
 //! A path of one name (a mount's top, or a name at the virtual root) `InvalidArgument` · `virtual-root-read-only`,
 //! before anything else about the target (ADR-0400 decision 5); no first scan applied `Unavailable` ·
-//! `library-unavailable`; a stale root generation `Conflict` · `root-generation-stale`; a dot or temp name below the
+//! `library-unavailable`; the preset's mount cannot be read `Unavailable` · `library-unavailable` `{mount, message}`
+//! (ADR-0400 decision 6); a stale root generation `Conflict` · `root-generation-stale`; a dot or temp name below the
 //! mount's top `InvalidArgument` · `item-path-invalid`; a name that is not `.yaml` / `.yml` `InvalidArgument` ·
 //! `wrong-kind`; a path in no registered mount `NotFound` · `not-found`; a link at or above the file `InvalidArgument`
 //! · `path-through-link`; the file or a parent missing `NotFound` · `not-found` (nothing is re-created); another read
@@ -75,8 +77,8 @@ use crate::resolve::{
 };
 use crate::store::ContentTag;
 use crate::{
-    link_verdict, virtual_root_read_only, LibraryRefusal, LibraryService, RefusalClass, Want,
-    LIBRARY_READ_CAP, PATH_THROUGH_LINK, STAT_UNANSWERED,
+    link_verdict, refuse_unusable_now, virtual_root_read_only, LibraryRefusal, LibraryService,
+    RefusalClass, Want, LIBRARY_READ_CAP, PATH_THROUGH_LINK, STAT_UNANSWERED,
 };
 
 /// The code of a `baseRev` that is not the `rev` of the bytes read inside the change (`args` = `{rev}`, the current
@@ -354,14 +356,17 @@ impl LibraryService {
     /// many agents attach it. A library preset passes the first-scan entrance; so does `engram:/default` when its file
     /// lists a library item, though it needs no mount.
     ///
-    /// Refusals: a library preset with no first scan applied `Unavailable` · `library-unavailable`; a path the catalog
+    /// Refusals: a library preset with no first scan applied `Unavailable` · `library-unavailable`; one whose mount
+    /// cannot be read `Unavailable` · `library-unavailable` `{mount, message}` (ADR-0400 decision 6); a path the catalog
     /// does not hold `NotFound` · `not-found`; a file that does not read `InvalidArgument` with its reason; an item
     /// that is not a preset `InvalidArgument` · `wrong-kind`.
     pub fn preset_get(&self, preset: &AssetRef) -> Result<PresetView, LibraryRefusal> {
         let library = match preset {
-            AssetRef::Library(_) => {
+            AssetRef::Library(path) => {
                 self.first_scan_join()
                     .map_err(LibraryRefusal::unavailable)?;
+                // ADR-0400 decision 6: an item of a mount that cannot be read is not answered from a stale catalog.
+                self.refuse_unusable_mount(path)?;
                 true
             }
             AssetRef::BuiltIn(id) => match self.builtins.view(*id).content {
@@ -723,7 +728,9 @@ impl LibraryService {
     /// resolution's, then one `Broken` row per mismatch (`args` = `{path, list}`). A draft item has no file line, so its
     /// rows carry none. A draft listing a library item passes the first-scan entrance (its failure `Unavailable` ·
     /// `library-unavailable`); a built-in-only draft answers whatever the library is, after waiting out a pending first
-    /// scan when it keeps the file's folders.
+    /// scan when it keeps the file's folders. A preset whose mount cannot be read refuses `Unavailable` ·
+    /// `library-unavailable` `{mount, message}` (walked again first), as `preset.get` does — its current lists would come
+    /// from a stale catalog (ADR-0400 decision 6).
     pub fn preset_check(
         &self,
         preset: &LibPath,
@@ -748,6 +755,8 @@ impl LibraryService {
                 tracing::debug!("preset check: first scan not applied; folders unknown: {why}");
             }
         }
+        // ADR-0400 decision 6
+        self.refuse_unusable_mount(preset)?;
         let (overlay, refused, mut folders, folder_keys) = self.gate.with_read(|state| {
             let lookup = CatalogLookup {
                 catalog: &state.catalog,
@@ -967,7 +976,13 @@ impl LibraryService {
         self.refuse_unadmitted_target(preset)?;
         self.first_scan_join()
             .map_err(LibraryRefusal::unavailable)?;
+        // ADR-0400 decision 6: no write into a mount that cannot be read — its disk is not touched under the write lock.
+        self.refuse_unusable_mount(preset)?;
         self.change_at(root_generation, |catalog, mounts, seq| {
+            // ADR-0400 decision 6: judged again from the recorded state, before any disk IO.
+            if let Err(refusal) = refuse_unusable_now(mounts, preset) {
+                return (Err(refusal), Vec::new());
+            }
             let mut touched = Vec::new();
             let answer = self.edit_in(preset, base_rev, catalog, mounts, seq, op, &mut touched);
             (answer, touched)

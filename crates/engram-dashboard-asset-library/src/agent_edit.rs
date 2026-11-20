@@ -436,7 +436,7 @@ impl LibraryService {
             .with_read(|state| named_folders(&state.mounts, &refs));
         let statuses = match folders.is_empty() {
             true => Vec::new(),
-            false => self.stat_mounts(&self.io.begin_read(), &folders),
+            false => self.stat_named(&self.io.begin_read(), &folders),
         };
         let seen = folders
             .iter()
@@ -509,7 +509,7 @@ impl LibraryService {
             unprobed,
         } = pending;
         if !unprobed.is_empty() {
-            let statuses = self.stat_mounts(&self.io.begin_read(), &unprobed);
+            let statuses = self.stat_named(&self.io.begin_read(), &unprobed);
             if statuses.iter().any(|status| *status != FolderStatus::Ok) {
                 let mut seen = before.seen;
                 seen.extend(

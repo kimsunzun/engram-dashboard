@@ -18,7 +18,12 @@
 //!   entries are never touched.
 //! - **A per-file refusal skips the file; an IO failure stops.** A refusal tied to the file's content or name (a reader or
 //!   writer refusal, a link or a dot / temp name, the file gone, a rewrite that would make the preset reach itself —
-//!   `preset-cycle`) is recorded and the walk and the agent rewrite go on. A read or write failure stops the walk, and
+//!   `preset-cycle`) is recorded and the walk and the agent rewrite go on. A file in a mount that cannot be read (each
+//!   unreadable mount walked again first, before the change; inside it the recorded states decide) is skipped the same
+//!   way with `library-unavailable` `{mount, message}` — its disk is not touched under the write lock. A mount that
+//!   cannot be read and was never walked this run is one skipped row at its top: what in it refers to the old paths is
+//!   unknown, so references there may remain; `fixed` and `more` keep meaning the pairs fixed within the mounts read,
+//!   and the same relink run again once the mount is back finishes it (ADR-0400 decision 6). A read or write failure stops the walk, and
 //!   the agents are not rewritten. A stop before any file was written answers that failure's refusal; after one, the
 //!   answer carries it. Once the failure is cleared, running the same relink again recovers the rest — there is no
 //!   journal (ADR-0335).
@@ -43,10 +48,13 @@ use crate::edit::{
     as_read, closes_cycle, doc_list, lib_path, list_mut, list_of, not_found, ITEM_LISTS,
 };
 use crate::format::{ListName, PresetDoc, PresetLists};
-use crate::mounts::Mounts;
+use crate::mounts::MountName;
 use crate::path::{AssetRef, LibPath};
 use crate::resolve::{ref_key, PRESET_CYCLE};
-use crate::{is_known, virtual_root_read_only, LibraryRefusal, LibraryService, RefusalClass};
+use crate::{
+    is_known, mount_unavailable, refuse_unusable_now, virtual_root_read_only, LibraryRefusal,
+    LibraryService, MountsNow, RefusalClass,
+};
 
 /// The code of a relink whose `to` is not of the kind a list referencing `from` needs (`args` = `{from, to, expected,
 /// found}` — `expected` the name of that list, `found` the list `to` goes into, `null` when it goes into none).
@@ -60,7 +68,8 @@ pub struct RelinkAnswer {
     /// was re-pointed for it — in a preset file, in the list its new target goes into, or by the agent rewrite — every
     /// preset file the catalog had listing the old path was rewritten or needed no change, and when agents attached it,
     /// their rewrite succeeded. An agent deleted between the registry read and the rewrite still counts: no reference
-    /// to the old path is left either way.
+    /// to the old path is left either way. Judged within the mounts that could be read: a mount never walked this run
+    /// is not, and stands as a skipped row at its top.
     pub fixed: Vec<(String, String)>,
     /// How many pairs of `fixed` part (b) found by name.
     pub more: usize,
@@ -124,7 +133,8 @@ impl LibraryService {
     /// Refusals, nothing applied: a spelling that is not a library path `InvalidArgument` · `item-path-invalid`; a `to`
     /// of one name (a mount's top, or a name at the virtual root) `InvalidArgument` · `virtual-root-read-only`, before
     /// any lookup — `from` may have one name, a reference written before mounts (ADR-0398); no first scan applied
-    /// `Unavailable` · `library-unavailable`; a stale root generation `Conflict` · `root-generation-stale`; `to` not in
+    /// `Unavailable` · `library-unavailable`; `to`'s mount cannot be read `Unavailable` · `library-unavailable` `{mount,
+    /// message}` (ADR-0400 decision 6); a stale root generation `Conflict` · `root-generation-stale`; `to` not in
     /// the catalog (incl. a dot or temp name, which the catalog never holds) `NotFound` · `not-found`; `to` at or below
     /// a link `InvalidArgument` · `path-through-link` (a probe error `Unavailable` · `library-read-failed`); `to` of
     /// another kind than a list referencing `from` needs `InvalidArgument` · [`RELINK_KIND_MISMATCH`]; agents to
@@ -144,6 +154,17 @@ impl LibraryService {
         }
         self.first_scan_join()
             .map_err(LibraryRefusal::unavailable)?;
+        // ADR-0400 decision 6: nothing is written into a mount that cannot be read. Every mount that cannot be read
+        //   is walked again first, outside every lock; inside the change the recorded states decide.
+        self.refuse_unusable_mount(&to)?;
+        let names: Vec<MountName> = self.gate.with_read(|state| {
+            state
+                .mounts
+                .iter()
+                .map(|mount| mount.name.clone())
+                .collect()
+        });
+        self.rewalk_unusable(&names);
         self.change_at(root_generation, |catalog, mounts, seq| {
             let mut touched = Vec::new();
             let answer = self.relink_in(&from, &to, catalog, mounts, seq, &mut touched);
@@ -157,10 +178,24 @@ impl LibraryService {
         from: &LibPath,
         to: &LibPath,
         catalog: &mut Catalog,
-        mounts: &Mounts,
+        mounts: &MountsNow,
         seq: &dyn Fn() -> u64,
         touched: &mut Vec<PathKey>,
     ) -> Result<RelinkAnswer, LibraryRefusal> {
+        // ADR-0400 decision 6: judged again from the recorded state, before any disk IO — a scan queued ahead of this
+        //   change may have found `to`'s mount gone after the entrance passed it.
+        refuse_unusable_now(mounts, to)?;
+        // The mounts that cannot be read, as recorded under this write lock, with the reason a skip in one carries;
+        //   `true` = walked before, so its files are in the catalog and each is skipped by name.
+        let unreadable: HashMap<PathKey, (Reason, bool)> = mounts
+            .iter()
+            .map(|mount| (mount, mounts.seen(&mount.name)))
+            .filter(|(_, seen)| !seen.usable())
+            .map(|(mount, seen)| {
+                let reason = mount_unavailable(&mount.name, &seen.shown());
+                (mount.name.key(), (reason, seen.walked))
+            })
+            .collect();
         let found = match catalog.get(&key(to)) {
             Some(item) => list_of(&item.kind),
             None => return Err(not_found(to.as_str())),
@@ -240,7 +275,34 @@ impl LibraryService {
         // The files not fixed: skipped, or not reached because the walk stopped.
         let mut unfixed: HashSet<PathKey> = HashSet::new();
         let mut stopped = None;
+        // ADR-0400 decision 6: a mount never walked this run has no files in the catalog — what in it refers to the old
+        //   paths is unknown. It is skipped as one row at its top; `fixed` covers the mounts that were read.
+        let mut unknown: Vec<RelinkSkip> = mounts
+            .iter()
+            .filter_map(|mount| match unreadable.get(&mount.name.key()) {
+                Some((reason, false)) => Some(RelinkSkip {
+                    path: mount.name.as_str().to_owned(),
+                    reason: reason.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        unknown.sort_by(|a, b| a.path.cmp(&b.path));
+        skipped.extend(unknown);
         for (at, file) in files.iter().enumerate() {
+            // ADR-0400 decision 6: a file in a mount that cannot be read is skipped, its disk untouched.
+            let unread = mounts
+                .locate(file)
+                .and_then(|(mount, _)| unreadable.get(&mount.name.key()))
+                .map(|(reason, _)| reason);
+            if let Some(reason) = unread {
+                unfixed.insert(key(file));
+                skipped.push(RelinkSkip {
+                    path: file.as_str().to_owned(),
+                    reason: reason.clone(),
+                });
+                continue;
+            }
             let rewritten = self.rewrite_in(
                 file,
                 None,

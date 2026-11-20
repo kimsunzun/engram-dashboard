@@ -32,6 +32,7 @@ use engram_dashboard_agent::commands::{
     PresetCheckOk, PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk, PresetSection,
     PresetSetBackendOk, PreviewItemRow, PreviewLoadRow, PreviewRefusalRow, PreviewSetRow,
     PreviewSkillNameRow, PreviewUnsureRow, ReasonRow, RefreshErrorRow, RelinkPairRow, SkippedRow,
+    UnavailableMountRow,
 };
 use engram_dashboard_agent::launch::Reason;
 use engram_dashboard_agent::library_commands::{
@@ -55,7 +56,8 @@ use crate::relink::RelinkAnswer;
 use crate::resolve::ResolvedFolder;
 use crate::{
     FoldersAnswer, LibraryRefusal, LibraryService, LibraryStatus, ListAnswer, ListFilter, ListRow,
-    ReadAnswer, RefreshReport, RefusalClass, RootSettingKind, RootStatus,
+    MountState, ReadAnswer, RefreshReport, RefusalClass, RootSettingKind, RootStatus,
+    UnavailableMount,
 };
 
 impl LibraryCommandHost for LibraryService {
@@ -421,12 +423,43 @@ fn folders_ok(answer: FoldersAnswer) -> LibraryFoldersOk {
         folders: answer
             .folders
             .into_iter()
-            .map(|folder| LibraryFolderRow {
-                path: folder.path,
-                name: folder.name,
-                skill: folder.skill,
+            .map(|folder| {
+                let (state, state_why) = mount_state_words(folder.mount_state);
+                LibraryFolderRow {
+                    path: folder.path,
+                    name: folder.name,
+                    skill: folder.skill,
+                    state,
+                    state_why,
+                }
             })
             .collect(),
+        unavailable: answer
+            .unavailable
+            .into_iter()
+            .map(unavailable_row)
+            .collect(),
+    }
+}
+
+/// A mount's state as the wire words of `library.status` (`ok` · `missing` · `unreadable` + why); `None` = not a
+/// mount's row.
+// ADR-0400 decision 4
+fn mount_state_words(state: Option<MountState>) -> (Option<String>, Option<String>) {
+    match state {
+        None => (None, None),
+        Some(MountState::Ok) => (Some("ok".to_owned()), None),
+        Some(MountState::Missing { why }) => (Some("missing".to_owned()), Some(why)),
+        Some(MountState::Unreadable { why }) => (Some("unreadable".to_owned()), Some(why)),
+    }
+}
+
+fn unavailable_row(left: UnavailableMount) -> UnavailableMountRow {
+    let (state, why) = mount_state_words(Some(left.state));
+    UnavailableMountRow {
+        mount: left.mount.as_str().to_owned(),
+        state: state.unwrap_or_default(),
+        why: why.unwrap_or_default(),
     }
 }
 
@@ -466,12 +499,22 @@ fn list_ok(answer: ListAnswer) -> LibraryListOk {
         folders: answer
             .folders
             .into_iter()
-            .map(|folder| ListFolderRow {
-                path: folder.path,
-                name: folder.name,
+            .map(|folder| {
+                let (state, state_why) = mount_state_words(folder.mount_state);
+                ListFolderRow {
+                    path: folder.path,
+                    name: folder.name,
+                    state,
+                    state_why,
+                }
             })
             .collect(),
         builtins: answer.builtins.into_iter().map(list_row).collect(),
+        unavailable: answer
+            .unavailable
+            .into_iter()
+            .map(unavailable_row)
+            .collect(),
     }
 }
 
@@ -1109,30 +1152,65 @@ mod tests {
         );
     }
 
-    /// `list`'s bare reason gets the class `Unavailable`; the other catalog reads answer theirs as the body does.
+    /// `list`'s bare reason gets the class `Unavailable` and names the mount; the whole-tree reads answer partially,
+    /// naming the mount in `unavailable` and carrying its state on its row (ADR-0400 decisions 4 and 6).
     #[test]
-    fn reads_whose_first_scan_failed_refuse_unavailable() {
+    fn reads_in_a_mount_that_cannot_be_read_refuse_unavailable_and_whole_tree_reads_answer_partially(
+    ) {
         let w = World::make(Vec::new(), true);
-        // The mount's folder is gone before the first scan: no full scan can be applied.
+        // The mount's folder is gone before the first scan: it is not walked.
         fs::remove_dir_all(w.base.join("lib")).unwrap();
         let (class, reason) = refused(w.port().list(Some("library"), None, &[], false));
         assert_eq!(
-            (class, reason.code.as_str()),
-            (PortClass::Unavailable, LIBRARY_UNAVAILABLE)
+            (class, reason.code.as_str(), &reason.args["mount"]),
+            (
+                PortClass::Unavailable,
+                LIBRARY_UNAVAILABLE,
+                &json!("library")
+            )
         );
-        let (class, reason) = refused(w.port().folders());
+        let missing = || UnavailableMountRow {
+            mount: "library".to_owned(),
+            state: "missing".to_owned(),
+            why: "missing".to_owned(),
+        };
+        let folders = w.port().folders().expect("a partial answer");
         assert_eq!(
-            (class, reason.code.as_str()),
-            (PortClass::Unavailable, LIBRARY_UNAVAILABLE)
+            folders.folders,
+            [LibraryFolderRow {
+                path: "library".to_owned(),
+                name: "library".to_owned(),
+                skill: false,
+                state: Some("missing".to_owned()),
+                state_why: Some("missing".to_owned()),
+            }]
+        );
+        assert_eq!(folders.unavailable, [missing()]);
+        let found = w
+            .port()
+            .list(None, Some("a"), &[], false)
+            .expect("a partial answer");
+        assert!(found.rows.is_empty());
+        assert_eq!(found.unavailable, [missing()]);
+        let top = w.port().list(None, None, &[], false).expect("the mounts");
+        assert_eq!(
+            (top.folders[0].state.as_deref(), top.unavailable.len()),
+            (Some("missing"), 0),
+            "the virtual root carries the state on the mount's row"
         );
     }
 
-    /// A refresh that cannot scan is a report, never a refusal: one `errors` row with no path.
+    /// A refresh that cannot scan is a report, never a refusal: one `errors` row — naming the mount a whole refresh
+    /// could not walk, or with no path when the folder asked for could not be scanned.
     #[test]
-    fn a_refresh_that_cannot_scan_answers_one_error_row_with_no_path() {
+    fn a_refresh_that_cannot_scan_answers_one_error_row() {
         let w = World::make(Vec::new(), true);
         fs::remove_dir_all(w.base.join("lib")).unwrap();
         let out = w.port().refresh(None).expect("a report");
+        assert_eq!(out.errors.len(), 1, "{out:?}");
+        assert_eq!(out.errors[0].path.as_deref(), Some("library"));
+        assert_eq!((out.changed, out.problems.len()), (0, 0));
+        let out = w.port().refresh(Some("library/a")).expect("a report");
         assert_eq!(out.errors.len(), 1, "{out:?}");
         assert_eq!(out.errors[0].path, None);
         assert_eq!((out.changed, out.problems.len()), (0, 0));

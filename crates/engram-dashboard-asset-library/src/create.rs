@@ -6,7 +6,8 @@
 //! - **Nothing at the top.** A create needs a parent folder: none (the virtual root) refuses `virtual-root-read-only`
 //!   before anything else — a mount's top changes only through the mount commands (ADR-0400 decision 5). A mount's top
 //!   is a parent like any folder.
-//! - **One change, never an overwrite.** After the name rules and the first-scan entrance, one
+//! - **One change, never an overwrite.** After the name rules, the first-scan entrance and the refusal of a mount that
+//!   cannot be read (walked again first — ADR-0400 decision 6; its disk is never touched under the write lock), one
 //!   [`LibraryService::change_at`] write lock holds, in this order: the parent folder's link admission (ADR-0365), the
 //!   existence check, the create and the new item or folder entered into the catalog. The create itself refuses a name
 //!   that is taken (`LibraryStore::create_new` · `create_dir` — the existence check is only a fast path), so a name
@@ -35,7 +36,9 @@ use crate::format::read::ITEM_PATH_INVALID;
 use crate::mounts::{admits_inside, Mount, MountPath, Mounts};
 use crate::path::LibPath;
 use crate::store::{ContentTag, ScanEntry, ScanListing};
-use crate::{virtual_root_read_only, LibraryRefusal, LibraryService, RefusalClass};
+use crate::{
+    refuse_unusable_now, virtual_root_read_only, LibraryRefusal, LibraryService, RefusalClass,
+};
 
 /// The code of a create whose name is already taken (`args` = `{path}`); nothing is replaced.
 pub const NAME_EXISTS: &str = "name-exists";
@@ -84,7 +87,8 @@ impl LibraryService {
     /// Refusals, nothing created: no folder (the virtual root) `InvalidArgument` · `virtual-root-read-only`; a folder
     /// that is not a library path, a name that is not one path segment, a dot or temp name, or a name ending in the
     /// other kinds' extension `InvalidArgument` · `item-path-invalid`; no first scan applied `Unavailable` ·
-    /// `library-unavailable`; a stale root generation `Conflict` · `root-generation-stale`; the parent at or below a
+    /// `library-unavailable`; the new path's mount cannot be read `Unavailable` · `library-unavailable` `{mount,
+    /// message}`; a stale root generation `Conflict` · `root-generation-stale`; the parent at or below a
     /// link `InvalidArgument` · `path-through-link` (a probe error `Unavailable` · `library-read-failed`); the name
     /// taken `Conflict` · [`NAME_EXISTS`]; the parent missing or not a folder, or in no registered mount, `NotFound` ·
     /// `not-found`; another create or write failure `Unavailable` · `library-write-failed` (a failed write can leave a
@@ -115,7 +119,13 @@ impl LibraryService {
         }
         self.first_scan_join()
             .map_err(LibraryRefusal::unavailable)?;
+        // ADR-0400 decision 6: no create in a mount that cannot be read — its disk is not touched under the write lock.
+        self.refuse_unusable_mount(path)?;
         self.change_at(root_generation, |catalog, mounts, seq| {
+            // ADR-0400 decision 6: judged again from the recorded state, before any disk IO.
+            if let Err(refusal) = refuse_unusable_now(mounts, path) {
+                return (Err(refusal), Vec::new());
+            }
             let mut touched = Vec::new();
             let answer = self.create_in(parent, path, template, catalog, mounts, seq, &mut touched);
             (answer, touched)

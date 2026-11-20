@@ -1671,7 +1671,7 @@ mod tests {
             (
                 "library.folders",
                 json!({}),
-                json!({ "folders": [] }),
+                json!({ "folders": [], "unavailable": [] }),
                 "folders",
                 Value::Null,
             ),
@@ -1699,14 +1699,14 @@ mod tests {
             (
                 "library.list",
                 json!({}),
-                json!({ "folder": null, "rows": [], "folders": [], "builtins": [] }),
+                json!({ "folder": null, "rows": [], "folders": [], "builtins": [], "unavailable": [] }),
                 "list",
                 json!({ "folder": null, "query": null, "kinds": [], "builtins": false }),
             ),
             (
                 "library.list",
                 json!({ "folder": "a", "query": "x", "kinds": ["skillfile", "Preset"], "builtins": true }),
-                json!({ "folder": "a", "rows": [], "folders": [], "builtins": [] }),
+                json!({ "folder": "a", "rows": [], "folders": [], "builtins": [], "unavailable": [] }),
                 "list",
                 json!({ "folder": "a", "query": "x", "kinds": ["SkillFile", "Preset"], "builtins": true }),
             ),
@@ -1759,8 +1759,12 @@ mod tests {
         let answer = json!({
             "folder": "a",
             "rows": [list_row("a/p.yaml")],
-            "folders": [{ "path": "a/b", "name": "b" }],
+            "folders": [
+                { "path": "a/b", "name": "b", "state": null, "state_why": null },
+                { "path": "team", "name": "team", "state": "missing", "state_why": "missing" },
+            ],
             "builtins": [list_row("engram:/default")],
+            "unavailable": [{ "mount": "team", "state": "missing", "why": "missing" }],
         });
         let library = FakeLibrary::answering(Ok(answer.clone()));
         let out = call(

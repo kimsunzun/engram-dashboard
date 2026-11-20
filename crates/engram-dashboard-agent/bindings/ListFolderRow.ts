@@ -3,4 +3,13 @@
 /**
  * A plain subfolder line of `library.list`.
  */
-export type ListFolderRow = { path: string, name: string, };
+export type ListFolderRow = { path: string, name: string, 
+/**
+ * A mount (a row of the library's top): `ok` | `missing` | `unreadable`, as last seen (no fresh check);
+ * `null` = a folder inside a mount.
+ */
+state?: string | null, 
+/**
+ * Why a mount's `state` is not `ok`.
+ */
+state_why?: string | null, };

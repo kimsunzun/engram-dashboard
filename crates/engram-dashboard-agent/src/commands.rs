@@ -297,6 +297,11 @@ declare_commands! {
     struct ListFolderRow {
         path: String,
         name: String,
+        /// A mount (a row of the library's top): `ok` | `missing` | `unreadable`, as last seen (no fresh check);
+        /// `null` = a folder inside a mount.
+        state: Option<String>,
+        /// Why a mount's `state` is not `ok`.
+        state_why: Option<String>,
     }
 
     /// One folder of `library.folders`.
@@ -305,6 +310,19 @@ declare_commands! {
         name: String,
         /// A skill folder (it holds a `SKILL.md`).
         skill: bool,
+        /// A mount (a top folder): `ok` | `missing` | `unreadable`, as last seen (no fresh check); `null` = a folder
+        /// inside a mount.
+        state: Option<String>,
+        /// Why a mount's `state` is not `ok`.
+        state_why: Option<String>,
+    }
+
+    /// A mount a whole-library answer left out because it cannot be read.
+    struct UnavailableMountRow {
+        mount: String,
+        /// `missing` | `unreadable`.
+        state: String,
+        why: String,
     }
 
     /// A reason tied to one library path.
@@ -891,18 +909,22 @@ declare_commands! {
         root_generation: u64,
     } errors [CONFLICT];
 
-    /// Every folder of the library, flat, by path; a skill folder is marked `skill`. CONFLICT `library-unavailable`
-    /// when the library cannot be read (no root, or the root cannot be walked).
+    /// Every folder of the library, flat, by path; a skill folder is marked `skill`; each mount (a top folder) carries
+    /// its `state`. The folders of a mount that cannot be read are left out and the mount is named in `unavailable`.
+    /// CONFLICT `library-unavailable` when no scan of the library could be applied.
     #[effect(Read)]
     #[since(9)]
     "library.folders" => args LibraryFoldersArgs {} -> ok LibraryFoldersOk {
         folders: Vec<LibraryFolderRow>,
+        unavailable: Vec<UnavailableMountRow>,
     } errors [CONFLICT];
 
     /// Re-reads `folder` (unspecified = the whole library) from disk and reports it: `changed` items, `problems` of the
     /// files re-read, `no_kind` (yaml files with no `kind` — not listed), `skipped_links` (links not entered) and
-    /// `errors` (where reading failed — those items are kept as they were; a row with no `path` = the root listing or a
-    /// folder that is not read failed). Use it after changing library files outside Engram. It never refuses except for a `folder` that is
+    /// `errors` (where reading failed — those items are kept as they were; a mount that could not be read, or one
+    /// registered or moved during the scan and so not walked by it, is a row with its name as `path`; a row with no
+    /// `path` = the folder asked for could not be read). Use it after changing
+    /// library files outside Engram. It never refuses except for a `folder` that is
     /// not a library path (INVALID_ARGUMENT `item-path-invalid`).
     #[effect(Read)]
     #[since(9)]
@@ -921,8 +943,9 @@ declare_commands! {
     /// `folders`). `kinds` keeps only those kinds (unspecified or empty = all; a broken file counts as the kind it
     /// claims; a skill's `SKILL.md` matches only `SkillFile`). `builtins` also answers the built-in preset
     /// `engram:/default` in `builtins`, under the same filters. A `folder` at or below a link answers one
-    /// `path-through-link` row, which the filters do not apply to. CONFLICT `library-unavailable` when the library
-    /// cannot be read.
+    /// `path-through-link` row, which the filters do not apply to. Unspecified `folder` lists the mounts, each with
+    /// its `state`; a `query` without `folder` searches the mounts that can be read and names the others in
+    /// `unavailable`. CONFLICT `library-unavailable` (with `mount`) when `folder` is in a mount that cannot be read.
     #[effect(Read)]
     #[since(9)]
     "library.list" => args LibraryListArgs {
@@ -936,12 +959,14 @@ declare_commands! {
         rows: Vec<ListRow>,
         folders: Vec<ListFolderRow>,
         builtins: Vec<ListRow>,
+        unavailable: Vec<UnavailableMountRow>,
     } errors [CONFLICT];
 
     /// One item's detail: its row, its file on disk (`absolute`), the presets that list it (`presets_direct`) or reach
     /// it through nested presets (`presets_indirect`), the agents that attach it (`agents_direct` — a preset only) or a
     /// preset reaching it (`agents_indirect`), an instruction's `excerpt` and a settings file's field names
-    /// (`settings_fields`). NOT_FOUND `not-found` = no such item; CONFLICT `library-unavailable`.
+    /// (`settings_fields`). NOT_FOUND `not-found` = no such item (a mount's name is not an item); CONFLICT
+    /// `library-unavailable` (with `mount` when the item's mount cannot be read).
     #[effect(Read)]
     #[since(9)]
     "library.read" => args LibraryReadArgs {
@@ -958,7 +983,8 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     /// Creates folder `name` in `parent` (unspecified = the root); answers its path. CONFLICT `name-exists` (nothing
-    /// replaced) · `library-unavailable` · `root-generation-stale` · `library-write-failed` (a retry after it may answer
+    /// replaced) · `library-unavailable` (with `mount` when the parent's mount cannot be read — nothing is written into
+    /// it) · `root-generation-stale` · `library-write-failed` (a retry after it may answer
     /// `name-exists` — the partial file or folder stays); NOT_FOUND `not-found` = the parent is missing.
     #[effect(Write)]
     #[since(9)]
@@ -990,7 +1016,10 @@ declare_commands! {
     /// the pairs `fixed`, the files `written`, the files `skipped` with why, and `stopped` when an IO failure stopped
     /// it after a write (run the same relink again once it is cleared). NOT_FOUND `not-found` = `to` is not in the
     /// library; INVALID_ARGUMENT `relink-kind-mismatch` = `to` is of another kind than its references need; CONFLICT
-    /// `library-unavailable` · `root-generation-stale`.
+    /// `library-unavailable` (with `mount` when `to`'s mount cannot be read) · `root-generation-stale`. A file in a
+    /// mount that cannot be read is not rewritten: it is in `skipped` with `library-unavailable` and its `mount`. A
+    /// `skipped` row whose `path` is a mount's name means that mount could not be read at all: references inside it
+    /// may remain (`fixed` covers the mounts that were read) — run the same relink again once it is back.
     #[effect(Write)]
     #[since(9)]
     "library.relink" => args LibraryRelinkArgs {
@@ -1011,11 +1040,13 @@ declare_commands! {
     // ADR-0386
     // A preset edit rewrites the whole file (hand-written comments and layout are not kept) and answers the preset as
     //   committed. A path that is not a library path is INVALID_ARGUMENT `item-path-invalid`; a file that is not a
-    //   preset, INVALID_ARGUMENT `wrong-kind` or the reader's code.
+    //   preset, INVALID_ARGUMENT `wrong-kind` or the reader's code; a preset in a mount that cannot be read, CONFLICT
+    //   `library-unavailable` with `mount` (ADR-0400 decision 6).
 
     /// A preset's entries with their state, its folder entries, the conflicts and problems a launch of it alone would
     /// meet, its edition `rev` and how many agents attach it. `path` = a library path or `engram:/default`. NOT_FOUND
-    /// `not-found`; INVALID_ARGUMENT `wrong-kind` (not a preset); CONFLICT `library-unavailable`.
+    /// `not-found`; INVALID_ARGUMENT `wrong-kind` (not a preset); CONFLICT `library-unavailable` (with `mount` when the
+    /// preset's mount cannot be read).
     #[effect(Read)]
     #[since(9)]
     "preset.get" => args PresetGetArgs {
