@@ -1,6 +1,6 @@
 # S37 PRD — daemon↔daemon agent mail between the user's own PCs
 
-- Status: draft 4 · 2026-11-20 (user decisions after review folded in) · decisions D1–D7 all taken by the user (D2 amended and D5 revised on 2026-11-20); PRD approval is asked together with the PRD+TRD review. Where each post-review decision lives: TRD §8 「Decided after review」.
+- Status: draft 5 · 2026-11-20 (round-2 review fixes) · decisions D1–D7 all taken by the user (D2 amended and D5 revised on 2026-11-20); PRD approval is asked together with the PRD+TRD review. Where each post-review decision lives: TRD §8 「Decided after review」.
 - Research: `../../research/multi-daemon-federation-direction-2026-11-11.md` (GPT draft vs code, peers, Syncthing / hcom / Reason Network source reads) · `../../research/multi-daemon-iroh-link-plan-2026-11-11.md` (iroh vs alternatives, seam fit, weight, build plan).
 
 ## 1. What · why
@@ -19,7 +19,7 @@ Shape the user chose (2026-11-11 · 2026-11-15):
 ## 2. Scope / non-goals
 
 In scope (v1):
-- A persistent identity per daemon and OS account (a key pair; its public half is the PC's ID), protected so a copied data folder cannot reuse it.
+- A persistent identity per daemon and OS account (a key pair; its public half is the PC's ID), protected so a data folder copied to another PC does not reuse it.
 - A list of trusted PCs (ID, display name, optional address) managed from the app and from LLM commands; trust changes an agent asks for wait for a human's approval.
 - Links between trusted daemons: same LAN (found automatically), LAN by typed address, and across NAT (helper-server lookup, hole punching, relay fallback).
 - Remote agent mail: send to an agent on another PC (by its bare name, or `name@pc`), the reply path back, and a delivery result to the sender.
@@ -40,11 +40,11 @@ Non-goals (v1):
 - Several people sharing one PC's agents (parked: Anthropic Consumer Terms and tool-execution location — plan doc §6 "Later").
 - Remote command execution of any kind.
 - `@all` / `@here` reaching agents on other PCs (they stay local in v1).
-- Sharing anything about remote agents beyond name, id and live/asleep (no folder, repo, branch, backend or activity).
+- Sharing anything about remote agents beyond name, id and live/asleep (no folder, repo, branch, backend or activity). An agent's name is often the last segment of its working folder, so that segment is visible to the other PCs through the name.
 
 ## 3. Requirements
 
-- R1 — Each daemon has one persistent identity per OS account. It is created on first need, kept across restarts, and its ID can be shown and copied. It is sealed for that account, so a data folder copied to another PC or account does not carry it: there it starts with a new identity, or, for a key it cannot open, says so and offers a new one (re-pairing).
+- R1 — Each daemon has one persistent identity per OS account. It is created on first need, kept across restarts, and its ID can be shown and copied. It is kept per OS account and machine and sealed for that account, so a data folder copied to another PC starts there with a new identity; a key of this account and machine that cannot be opened is reported and a new one offered (re-pairing). A cloned disk or VM carries the identity along; that case is caught by duplicate detection (R20).
 - R2 — The user can add a trusted PC with an ID (required), a display name, and an address (optional), list trusted PCs, edit a PC's display name and address, and remove one. The trusted list is kept per OS account, and a list changed outside Engram is not used until a human accepts it. App screen and LLM commands do the same thing (R19 for the ones that widen trust).
 - R3 — A daemon keeps links to every trusted PC it can reach and shows each one as online or offline. Links come back on their own after a network drop or a restart of either side.
 - R4 — A connection from a PC that is not on the list is refused before any mail is read. Removing a PC drops its live link at once and refuses it from then on.
@@ -62,8 +62,8 @@ Non-goals (v1):
 - R16 — Agent directory sync: each trusted PC keeps a read-only copy of every other trusted PC's agent directory — agent name, id and state (live / asleep) only. Only the PC that owns an agent changes its entry. A copy is refreshed in full when the link comes up and updated when an agent is created, deleted, renamed, or goes live / asleep; there is no periodic polling.
 - R17 — Cross-PC name rules: a bare name not found locally and found on exactly one other PC goes to that PC; found on two or more PCs it is refused as ambiguous and the result lists the candidates as `name@pc`; `name@pc` goes to that PC only. A PC whose agent list is not known since this daemon started is not counted (D2); agents are told to write `name@pc` when one name exists on several PCs. When a PC disconnects, its copy is kept and marked disconnected, so mail to one of its names returns "not delivered (PC offline)" instead of "no such agent". A copy is dropped when that PC is removed from the trusted list.
 - R18 — Agents (LLM) can list the agents of the other trusted PCs, with each PC's connection state, in one query.
-- R19 — Trust changes need a human: an agent may ask to add a PC, change the network settings or make a new identity key, but the change waits until a human approves it; a human acting in the app applies it directly. Removing a PC, editing its name or address, and listing stay open to agents. The question goes to the app when it is open, otherwise to a native OS yes/no dialog that shows the other PC's ID fingerprint; on a machine without a display it waits. Whether a call comes from a human or an agent is decided by where it comes from, never by what it says.
-- R20 — If this PC's identity shows up elsewhere (its own ID offered to add, a peer presenting this PC's key), the app and `peer.list` warn and offer a new identity.
+- R19 — Trust changes need a human: an agent may ask to add a PC, change the network settings or make a new identity key, but the change waits until a human approves it; a human acting in the app applies it directly. Removing a PC, editing its address, and listing stay open to agents; renaming a PC needs approval too (its name is part of `name@pc` addresses). The question goes to the app while its PC list is shown, otherwise to a native OS dialog that shows the other PC's full ID and defaults to deny; on a machine without a display it waits. Whether a call comes from a human or an agent is decided by where it comes from, never by what it says.
+- R20 — If two machines or accounts run with the same identity at once (a cloned disk or VM), a trusted PC that sees both refuses the newer link as a duplicate, and both sides warn in the app and `peer.list` and offer a new identity. Adding this PC's own ID is simply refused.
 
 ## 4. Acceptance criteria
 
@@ -88,9 +88,9 @@ Measured on two PCs (A, B) unless stated.
   - `tester` deleted on B and created on C → the same rule, unchanged, reaches C (within a few seconds of the change, no restart).
   - A `tester` created on A itself → the send goes to A's local `tester`.
   - On A, `peer.list` shows B's and C's agents with live / asleep and each PC's online state; renaming or putting an agent on B to sleep shows on A within a few seconds.
-- AC14 — Approval: an agent on A calls `peer.add` for B → it answers "requested" and nothing is added. With the app open the request shows in the PC list with the agent and B's ID fingerprint, and approving adds B; with the app closed a native OS dialog asks the same. Denying leaves the list unchanged; an agent cannot approve; a human adding B in the app applies at once.
+- AC14 — Approval: an agent on A calls `peer.add` for B → it answers "requested" and nothing is added. With the app's PC list shown the request appears there with the agent and B's full ID, and approving adds B; with the app closed a native OS dialog asks the same, with deny as the default. Denying leaves the list unchanged; an agent cannot approve; a human adding B in the app applies at once.
 - AC15 — Renaming B on A (`peer.edit`) keeps the link up and B's agents listed; `tester@<new name>` reaches B and `tester@<old name>` returns "no such agent".
-- AC16 — Identity per OS account: two Windows accounts on A using one data folder each have their own ID and trusted list; A's data folder copied to another PC starts there with a new ID; a trusted list file edited outside Engram stops the feature with "trusted list was changed outside Engram" until a human accepts it; a PC presenting A's own ID is refused and shown as a duplicate warning.
+- AC16 — Identity per OS account: two Windows accounts on A using one data folder each have their own ID and trusted list; A's data folder copied to another PC starts there with a new ID; a trusted list file edited outside Engram stops the feature with "trusted list was changed outside Engram" until a human accepts it; a clone of A's identity running at the same time (a copied disk) is refused by B as a duplicate and both sides warn.
 
 ## 5. Decisions (user)
 
@@ -106,7 +106,7 @@ Measured on two PCs (A, B) unless stated.
 
 ### Main defaults (internal, reported)
 
-iroh 1.x as the link library behind the transport seam; identity = iroh secret key in the daemon state folder, one per OS account, sealed by the OS (Windows DPAPI); trusted list = a JSON file per OS account under the base `file` rules (ADR-0291), signed with a key derived from the identity; the peer link's liveness comes from iroh's QUIC connection (no extra ping); the sending agent waits at most 7 s for a remote result — the wait command delivery already uses, so the `engram` CLI does not cut off first (ADR-0161) — while a late answer is still taken for up to 120 s and reported by one notice (TRD §3-4); delivery results map onto the transport request/response correlation.
+iroh 1.x as the link library behind the transport seam; identity = iroh secret key in the daemon state folder, one per OS account and machine, sealed by the OS (Windows DPAPI); trusted list = a JSON file per OS account and machine under the base `file` rules (ADR-0291), signed with a key derived from the identity; the peer link's liveness comes from iroh's QUIC connection (no extra ping); the sending agent waits at most 7 s for a remote result — the wait command delivery already uses, so the `engram` CLI does not cut off first (ADR-0161) — while a late answer is still taken for up to 120 s and reported by one notice (TRD §3-4); delivery results map onto the transport request/response correlation.
 
 ## 6. Risks
 
