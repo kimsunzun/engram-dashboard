@@ -1,20 +1,41 @@
 # ADR-0395: Local trust boundary is the OS account — same-account processes are trusted, other accounts are blocked on the app-daemon link
 
-- 상태: 확정 (2026-11-20, 근거: TODO)
-- 관련: Amends ADR-0310 (decision 7 D26 and D22: other OS users outside the threat model, for the app-daemon link measures only) · Amends ADR-0135 (decision 1: the lock file also carries the token) · TODO 나머지 관련
+- 상태: 확정 (2026-11-20, basis: user decision P-H 2026-11-20 (「같은계정은 막지 않는게 맞고」 · 「내부는 데몬 하고 앱간의 연결이 다른계정이면 막는다는거잖아」 → yes) + S37 PRD+TRD review PASS, 4 rounds, 2026-11-20)
+- 관련: Amends ADR-0310 (decision 7 D26 and D22: other OS users outside the threat model, for the app-daemon link measures only) · Amends ADR-0135 (decision 1: the lock file also carries the token) · ADR-0264 (`daemon\run\daemon.json` location) · ADR-0086 (agent control channel, Bearer tokens) · ADR-0389 (the list MAC and its scope) · ADR-0394 (the approval gate) · ADR-0266 (OS code in platform) · ADR-0310 (decision 10 D8: transport `AcceptPolicy`) · `docs/process/S37-multi-daemon/trd.md` (§3-1 · §4-8 · §4-9 · T46 · T47 · T48) · PRD R15 · R21 · AC16 · AC17
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+ADR-0310 decision 7 (D26 ② + D22 ②, user decision 2026-10-31) kept other OS users on the same PC outside the stage-3 threat model and left the matter to the security redesign of the multi-daemon stage. S37 is that stage. Today the shell token sits in `daemon.json` (ADR-0135 decision 1: the lock file also carries the port and the token), a file any account can open, so another Windows account on the same PC can read the token and drive this account's daemon; agent control files (`mcp-config/*.json`, ADR-0086) carry Bearer tokens the same way. S37 also adds a trust gate (ADR-0394) and a trusted-list MAC (ADR-0389), so the review had to say against whom these defend (P-H).
 
 ## 결정
-TODO — 무엇으로 정했나.
+1. **The local trust boundary is the OS account.** Processes of the same account, agents with a shell included, are trusted and not defended against; the docs say so plainly. The approval gate stops the common path (an agent talked into a trust change through our commands), not a same-account process. Rollback to an older correctly signed trusted list is not defended; the list MAC catches naive edits and other accounts' edits only.
+2. **The shell token moves out of `daemon.json` into an owner-only per-account file** `daemon-token.<account>` in the same run folder, created with `CREATE_NEW` and the owner-only DACL passed at create, through one platform function. Each start, under the held lock, the daemon deletes its own token file and creates a fresh one (a new token every run), retrying briefly on a sharing violation; it writes the token before publishing `daemon.json`. An existing token file that is not owner-only or not owned by this account is deleted and recreated; if it cannot be deleted the daemon refuses to start. The shell reads `daemon.json` first, then the token.
+3. **`daemon.json` stays the shared single-instance lock and discovery record**: pid, port, protocol version and the owner account's SID, with no token. Its ACL stays inherited, so any account can open it after a crash (stale-pid rule unchanged) and read who claims a running daemon. The owner SID is only a hint: a spawned daemon's acquire decides who holds the folder. The new protocol `DaemonInfo` field is `#[serde(default)]` and `PROTOCOL_VERSION` changes, so a new app meeting an old daemon takes the version-mismatch path.
+4. **Agent control files** (`daemon/run/mcp-config/*.json`) are written owner-only through the same create function.
+5. **Accept-time account check.** The shell link and the control HTTP listener refuse a client whose process runs under another Windows account, before the handshake, with "this daemon belongs to another Windows account — use a separate folder per account". Mechanism (platform): the TCP-table row whose local endpoint is the observed client address (IPv4) → the owning process → its token user SID, compared with the daemon's own. Fail closed: a lookup that cannot read the client's account refuses with its own message. A typed accessor gives the observed client address (`LinkInfo::remote` stays a diagnostics string). An elevated administrator is not kept out.
+6. **Shell side.** Before sending its token, on its own established connection, the shell looks up the account that owns the server side (same platform lookup) and requires it to equal its own; it fails closed. A live record whose listener belongs to another account → the other-account message; a record nobody holds (dead pid, or a forged foreign-SID record) → the shell spawns its own daemon, whose acquire decides. Applies at the four read sites (`src-tauri/src/discovery/mod.rs` `FileReader::read`, `src-tauri/src/daemon_client/link/endpoint.rs` `judge`, `src-tauri/src/daemon_client/link/stop.rs`, `scripts/engram.mjs`).
+7. **Fallback**: if the accept-time check cannot be done cleanly over loopback TCP (confirmed in U2), the owner-only files alone ship and the gap (a token copied by another account still connects) is documented.
+8. **Scope**: folder-wide ACLs (`agents.json` etc.) stay outside S37. The loopback rule, the token handshake and `ShellWire` / `DaemonWire` stay as they are.
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+- **Defending against same-account processes** — user rejected directly (「같은계정은 막지 않는게 맞고」); a same-account process can read the token file, attach to the WebView debugging port (`--remote-debugging-port=9223` in `scripts/run-*.bat`) or unseal the key anyway; hcom and Reason Network state the same boundary.
+- **Keeping other accounts outside the threat model** (ADR-0310 decision 7 as it was) — user decision P-H: other accounts are blocked on the app↔daemon link.
+- **An owner-only `daemon.json`** (ADR-0310's D22 ① shape) — it is the never-deleted single-instance lock (`instance.rs` `acquire_with`), so other accounts would be locked out for good and could not take over after a crash or read who owns a running daemon.
+- **One shared token file name** — per-account naming lets two accounts take turns in one folder: Y never needs to delete X's owner-only file, which it could not.
+- **The shell trusting `daemon.json`'s owner SID** — other accounts can write `daemon.json` (inherited ACL), and the shell link authenticates only the client, so a forged record could collect X's token.
+- **Using `LinkInfo::remote` for the account lookup** — it is documented as diagnostics only.
+- **Letting a client through when its account cannot be read** — an unreadable account must not pass.
+- **Defending rollback of an older signed trusted list** — no comparable local tool does, and only a same-account process can produce a correctly signed list.
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+- User decision P-H (2026-11-20), quoted above.
+- Precedents: Tailscale and Windows ssh-agent read the client's token to check its account; Jupyter `secure_write` creates secret files owner-only; hcom / Reason Network document the same-account boundary.
+- Code facts from the TRD: `daemon.json` is held by the single-instance guard, written in place and never deleted (`instance.rs` `acquire_with`, `portfile.rs`); `PROTOCOL_VERSION` is 7 today; protocol `discovery.rs` already uses `#[serde(default)]` for `start_time`.
+- S37 PRD+TRD review, PASS after 4 rounds (2026-11-20).
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+- ADR-0310 decision 7 changes only for these app↔daemon link measures (owner-only token and control files, the accept-time and shell-side account checks); the rest stays — folder-wide ACLs remain outside, and decisions 14 (D23) and 15 (D25) are unaffected.
+- ADR-0135 decision 1 changes only in what the lock file carries: it keeps the lock and the connection data (pid, port, version, owner SID) but no token; decisions 2–5 and ADR-0264's location stand.
+- No token is ever written into `daemon.json` again; the token file is created owner-only at create time, never create-then-set.
+- The shell never sends its token before the server-side account check passes.
+- Transport stays policy-free; the account check is daemon / platform code (the `ws` `AcceptPolicy` holds only Origin / Host data).
+- Known limits, documented: an elevated administrator is not kept out, and a mixed elevated / non-elevated app and daemon refuse each other; another account can pre-create this account's file names in a shared folder and block start-up (denial of service only); the WebView debugging port is a dev-only unauthenticated loopback listener, not changed in S37.
