@@ -10,6 +10,9 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-122 | Mail attachments (images / files) for local and remote mail | Main | Not started — after S37 (user 2026-11-20) |
+| T-121 | Agent mail loop detection (two agents replying to each other without end), local and remote | Main | Not started — after S37 (user 2026-11-20) |
+| T-120 | Remote outbox — keep undelivered remote mail and resend on reconnect (also turns over-limit refusals into delays) | Main | Must do, next unit after S37 (user 2026-11-20) |
 | T-119 | macOS support | Main | Not started — tracking only, to be opened in its own session (user 2026-11-20) |
 | T-118 | Linux support (needed for local LLM) — desktop: app + daemon; server: daemon only | Main | Not started — tracking only (user 2026-11-20) |
 | T-117 | Cross-PC fan-out address `name@*` (send to every trusted PC's agent of that name) | Main | Deferred after S37 (Claude, user left the timing to Claude 2026-11-20) |
@@ -78,6 +81,19 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-122. Mail attachments
+- **Status:** after S37 — user 2026-11-20: 「나중에 간단한 이미지라도 보내야될텐데. 그건 다른 루트로 보내면 되나?」 → 「이건 나중에 얘기하고」.
+- **Direction talked through:** the body stays text with its 64 KiB cap (`control/ingress.rs` `MAX_BODY_BYTES` — it is injected into the agent's input); files travel on a separate stream over the same peer connection (iroh multiplexes streams; `iroh-blobs` exists — version fit with iroh 1.4 unverified), are saved into a folder on the receiving PC, and the mail carries the saved path. Local mail has no attachments either. Reason Network sends attachments with mail (`daemon/mail.rs` counts files and their size; transfer mechanism not read).
+
+### T-121. Agent mail loop detection
+- **Status:** after S37 — user 2026-11-20 (S37 P-G): per-minute caps do not catch an LLM ping-pong loop (one turn per mail → a few mails per minute), so per-agent rate limits were dropped from S37.
+- **To design:** detect a pair exchanging mail without end over a longer window, for local and remote mail alike; ground the threshold in measured mail rates from our own usage (daemon logs, if they record sends).
+
+### T-120. Remote outbox
+- **Status:** must do, next unit after S37 — user 2026-11-20: 「이건 나중에 저장하는건 꼭 적용해야될것같은데?」. S37 D3 left it out ("no live link → PEER_OFFLINE at once").
+- **Precedent (read in source):** Reason Network keeps every remote send in a SQLite `outbox` table on the sending PC (`store.rs` `outbox_add` / `outbox_for` / `outbox_done`), sends at once when connected, flushes the outbox right after the handshake on reconnect (`net.rs`), resends what is still there every 30 s (also mail a busy receiver deferred), removes an entry when the receiver answers accepted or rejected, and gives up after 7 days.
+- **Effects for us:** "PC off" and "over the receiver's limit" both become "kept and sent later"; the receiver needs a dedup by mail id (resends); storage choice (we use JSON files via base `file`, no SQLite) is decided in that unit.
 
 ### T-119. macOS support
 - **Status:** not started, tracking only — user 2026-11-20: 「맥에서 띄우는것도 크게 부담 없겠지?」 → 「올려두고 그냥 다른 곳에서 펼치는게 좋겠다」.
