@@ -435,3 +435,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0386](0386-library-preset-and-agent-preset-commands-surface-rules-set.md) | Library, preset and agent-preset commands: surface rules set by step 10a | 확정 |
 | [0387](0387-a-launch-skips-what-is-absent-and-blocks-on-what-exists-but.md) | A launch skips what is absent and blocks on what exists but cannot be read, for every preset item, folder entry and the library root | 확정 |
 | [0396](0396-the-library-is-one-virtual-root-whose-top-level-holds-named.md) | The library is one virtual root whose top level holds named mounts; references and moves cross mounts | 확정 |
+| [0398](0398-before-a-feature-ships-its-data-gets-no-migration-or.md) | Before a feature ships its data gets no migration or compatibility path | 확정 |
