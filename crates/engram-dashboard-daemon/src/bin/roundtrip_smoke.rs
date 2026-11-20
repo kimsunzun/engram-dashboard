@@ -195,12 +195,13 @@ fn resolve_builtin_dir(selector: Option<&str>, repo_root: &Path) -> PathBuf {
 }
 
 /// What the run's library service starts with: `library.json` read from `<data_dir>\state` (none there — the root
-/// stays unset; the run reads the built-ins only and runs no first start), the default place `<data_dir>\library`, a
-/// run-only identity and a root generation base drawn as production draws it.
+/// stays unset; the run reads the built-ins only and runs no first start), the default place `<data_dir>\library`, the
+/// data folder `<data_dir>`, a run-only identity and a root generation base drawn as production draws it.
 fn library_start(data_dir: &Path) -> LibraryStart {
     LibraryStart {
         config: engram_dashboard_asset_library::config::load(&data_dir.join("state")),
         default_root: data_dir.join("library"),
+        data_root: data_dir.to_path_buf(),
         daemon_id: uuid::Uuid::new_v4().to_string(),
         root_generation_base: engram_dashboard_daemon::root_generation_base(),
     }

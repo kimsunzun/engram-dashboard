@@ -389,14 +389,9 @@ impl LibraryService {
             return Err(not_found(&spelling));
         };
         match item.content {
-            ItemContent::Preset { doc, rev } => Ok(self.view_parts(
-                &state.catalog,
-                state.root.as_deref(),
-                lookup,
-                preset,
-                doc,
-                rev,
-            )),
+            ItemContent::Preset { doc, rev } => {
+                Ok(self.view_parts(&state.catalog, state.root(), lookup, preset, doc, rev))
+            }
             ItemContent::Broken { reason } => Err(invalid(reason.clone())),
             _ => Err(LibraryRefusal::new(
                 RefusalClass::InvalidArgument,
@@ -754,7 +749,7 @@ impl LibraryService {
         let (overlay, refused, mut folders, folder_keys) = self.gate.with_read(|state| {
             let lookup = CatalogLookup {
                 catalog: &state.catalog,
-                root: state.root.as_deref(),
+                root: state.root(),
                 builtins: &self.builtins,
             };
             let current = match state.catalog.get(&key(preset)).map(|item| &item.content) {
@@ -2014,7 +2009,7 @@ mod tests {
 
     use super::*;
     use crate::backends::AgentBackends;
-    use crate::config::{LibraryConfig, RootSetting};
+    use crate::config::{LibraryConfig, MountPlace};
     use crate::folder::{
         BoundedIo, FolderListing, FolderOps, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT,
         LIST_CAP,
@@ -2155,6 +2150,9 @@ mod tests {
         }
         fn canonical(&self, p: &Path) -> io::Result<PathBuf> {
             StdFolderOps.canonical(p)
+        }
+        fn identity(&self, p: &Path) -> io::Result<engram_dashboard_platform::fs::FileIdentity> {
+            StdFolderOps.identity(p)
         }
         fn read(&self, p: &Path, cap: u64) -> io::Result<String> {
             StdFolderOps.read(p, cap)
@@ -2331,7 +2329,7 @@ mod tests {
     ) -> Arc<LibraryService> {
         let state = base.join("state");
         let config = match root {
-            true => LibraryConfig::usable(&state, RootSetting::Explicit(base.join("lib"))),
+            true => LibraryConfig::usable(&state, MountPlace::Explicit(base.join("lib"))),
             false => LibraryConfig::missing(&state),
         };
         let values = LibraryValues {
@@ -2339,6 +2337,7 @@ mod tests {
             backends: Arc::new(AgentBackends),
             config,
             default_root: base.join("default-library"),
+            data_root: base.join("data"),
             daemon_id: "test-daemon".to_owned(),
             root_generation_base: 7,
             builtin_dir: builtin.then(|| base.join("builtin")),

@@ -38,21 +38,25 @@
 //!
 //! [`LibraryService`] owns the catalog behind the ADR-0324 gate (`gate.rs` — the lock order and the ticket rules are
 //! there). Library files under the root are read with the store directly (local by assumption). Every stat, list,
-//! canonicalize or read of a folder outside the library — folder entries, native skill roots, the working folder, the
-//! library root itself — goes through [`folder::BoundedIo`], never under the library lock. The built-ins
+//! canonicalize, file identity or read of a folder outside the library — folder entries, native skill roots, the working
+//! folder, the library root itself, a mount folder and its ancestors (`mounts::overlap`) — goes through
+//! [`folder::BoundedIo`], never under the library lock. The built-ins
 //! (`Builtins::new`), the launch folder (`prepare_in`, the sweep, `release`), `library.json` (`config.rs`) and the
 //! folder `set_root {create}` or the first start creates use std `fs`.
 //!
-//! ## The root
+//! ## The mounts and the root
 //!
-//! The root is one setting persisted in `library.json` (`config.rs` — ADR-0375 · ADR-0376), read by the daemon before
-//! [`LibraryService::new`]; `new` does no disk work beyond the built-ins. [`LibraryService::set_root`] and
-//! [`LibraryService::first_start`] are the only writers of the setting. `set_root` publishes the root through
-//! [`LibraryService::change_root`] (stat, then walk); the first start stats the default place and publishes it without a
-//! walk (ADR-0382). Each writes `library.json` only after its publish succeeded (ADR-0381): a refused publish writes
-//! nothing, and a write that fails leaves the new root live and the setting `unsaved` — nothing is undone. One
-//! root-change mutex serializes them across the publish and the write; under it they take only the gate's locks and the
-//! config's state mutex, a leaf held for no IO.
+//! The library is one virtual root whose top holds named mounts, each mapped to a folder (`mounts.rs` — ADR-0396 ·
+//! ADR-0400). The mount list is persisted in `library.json` (`config.rs` — ADR-0375 · ADR-0376), read by the daemon
+//! before [`LibraryService::new`]; `new` does no disk work beyond the built-ins. The service still reads one root: the
+//! first mount's folder ([`State::root`]). [`LibraryService::set_root`] and [`LibraryService::first_start`] are the
+//! only writers of the setting. `set_root` relocates the first mount (or registers `library` when there is none)
+//! through [`LibraryService::change_root`] (stat, then walk); the first start stats the default place and publishes it
+//! as the mount `library` without a walk (ADR-0382). Each writes `library.json` — every published mount, one at the
+//! default place as `"default"` — only after its publish succeeded (ADR-0381): a refused publish writes nothing, and a
+//! write that fails leaves the new mounts live and the setting `unsaved` — nothing is undone. One root-change mutex
+//! serializes them across the publish and the write; under it they take only the gate's locks and the config's state
+//! mutex, a leaf held for no IO.
 //!
 //! The daemon never walks the library before it is reachable (ADR-0382): on every start, after the first-start step,
 //! it calls [`LibraryService::start_boot_scan`], which runs the first scan on a background job and returns at once.
@@ -122,6 +126,7 @@ pub mod format;
 mod gate;
 pub mod host;
 pub mod launch;
+pub mod mounts;
 pub mod path;
 pub mod refs;
 pub mod relink;
@@ -151,11 +156,12 @@ use crate::builtin::Builtins;
 use crate::catalog::{
     key, preset_refs, within, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult,
 };
-use crate::config::{ConfigFile, ConfigHealth, LibraryConfig, RootSetting};
+use crate::config::{ConfigFile, ConfigHealth, LibraryConfig, MountPlace, MountSetting};
 use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need};
 use crate::format::read::ITEM_PATH_INVALID;
 use crate::gate::{Gate, Tags};
 pub use crate::gate::{Numbers, State, NOT_FOUND};
+use crate::mounts::{Mount, MountName};
 use crate::path::{AssetRef, BuiltinId, LibPath, PathError};
 use crate::refs::{default_slot_count, reference_count, referrers_of};
 use crate::resolve::{resolve, CatalogLookup, Lookup, Resolution, RootState, Target};
@@ -279,8 +285,11 @@ pub struct LibraryValues {
     pub backends: Arc<dyn Backends>,
     /// `library.json` as `config::load` read it — read only by `new`; after that the service's own copy is live.
     pub config: LibraryConfig,
-    /// The place the root setting's default value names this run (ADR-0375) — also `status`'s `suggested_new`.
+    /// The place a mount's `"default"` path names this run (ADR-0375) — also `status`'s `suggested_new`.
     pub default_root: PathBuf,
+    /// The daemon data folder — [`mounts::overlap`] refuses a mount folder at or under it, except the default place
+    /// itself (ADR-0400 decision 10); the mount commands call that check.
+    pub data_root: PathBuf,
     /// The daemon identity (`status`), owned by the daemon.
     pub daemon_id: String,
     /// The root generation this run starts at — drawn by the daemon at random below 2^52, so a generation kept from an
@@ -319,10 +328,10 @@ pub struct LibraryService {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryStatus {
     pub daemon_id: String,
-    /// The published root; `None` = unset.
+    /// The published root — the first mount's folder; `None` = no mount.
     pub root: Option<PathBuf>,
-    /// `None` = `library.json` could not be read (`config` is read-only or corrupt); while `config` is unsaved, the
-    /// live root's setting.
+    /// The first mount's stored place; `None` = `library.json` could not be read (`config` is read-only or corrupt) or
+    /// names no mount. While `config` is unsaved, the live mounts' setting.
     pub root_setting: Option<RootSettingKind>,
     pub state: RootStatus,
     pub config: ConfigHealth,
@@ -332,10 +341,10 @@ pub struct LibraryStatus {
     pub root_generation: u64,
 }
 
-/// What the root setting holds.
+/// Where the first mount's stored place is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RootSettingKind {
-    /// The default value — `library.json` says `"default"` or is not written yet.
+    /// The default place — its `path` is `"default"`, or `library.json` is not written yet.
     Default,
     /// A path the user set.
     Explicit,
@@ -363,16 +372,16 @@ pub enum FirstStart {
     /// `library.json` was not missing at load, or the step already published this run — nothing done. A `Failed`
     /// step stays due, so a second call in the same run would retry.
     NotDue,
-    /// The default place was created, stat'ed and published without a walk, and then the setting written at its default
-    /// value; the boot scan walks it ([`LibraryService::start_boot_scan`]).
+    /// The default place was created, stat'ed and published without a walk as the mount `library`, and then
+    /// `library.json` written with it at `"default"`; the boot scan walks it ([`LibraryService::start_boot_scan`]).
     // ADR-0382
     Published,
     /// The default root was published but `library.json` was not written (`why`): live this run, `config: unsaved`;
     /// the next start follows the file that is left (with none left, the first start runs again).
     // ADR-0381
     Unsaved(String),
-    /// The default place could not be created, its root stat did not answer `Ok`, or a root was already published
-    /// (only a test publishes one before the first start): nothing published or written, the root as it was (unset
+    /// The default place could not be created, its root stat did not answer `Ok`, or a mount was already published
+    /// (only a test publishes one before the first start): nothing published or written, the mounts as they were (none
     /// unless already published); the next start tries again.
     Failed(String),
 }
@@ -517,8 +526,8 @@ impl LibraryService {
     /// `io` bounds every folder operation outside the library and spawns the service's jobs (short merge jobs and the boot scan). The built-ins
     /// are read here, once.
     pub fn new(values: LibraryValues, store: Arc<dyn LibraryStore>, io: BoundedIo) -> Self {
-        let root = ConfigFile::initial_root(&values.config, &values.default_root);
-        let gate = Arc::new(Gate::new(root, values.root_generation_base));
+        let mounts = ConfigFile::initial_mounts(&values.config, &values.default_root);
+        let gate = Arc::new(Gate::new(mounts, values.root_generation_base));
         let builtins = Builtins::new(values.builtin_dir.as_deref(), &*values.backends);
         let config = ConfigFile::new(&values.config);
         LibraryService {
@@ -615,7 +624,9 @@ impl LibraryService {
         } else {
             Ok(())
         };
-        let root = self.gate.with_read(|state| state.root.clone());
+        let root = self
+            .gate
+            .with_read(|state| state.root().map(Path::to_path_buf));
         let io = self.io.begin_read();
         let library_attached = library
             && wants
@@ -641,7 +652,7 @@ impl LibraryService {
         let (mut resolved, extra): (Vec<Resolution>, R) = self.gate.with_read(|state| {
             let catalog = CatalogLookup {
                 catalog: &state.catalog,
-                root: state.root.as_deref(),
+                root: state.root(),
                 builtins: &self.builtins,
             };
             let overlaid = draft.map(|draft| draft.over(&catalog));
@@ -809,9 +820,11 @@ impl LibraryService {
         // ADR-0324 decision 5: the numbers are noted in the read lock that reads the root the disk read uses, so a root
         //   change published after it moves the root generation and discards the merge.
         let known = self.gate.with_read(|state| match folder {
-            Some(path) if !is_known(&state.catalog, path) => {
-                Err((path, state.root.clone(), self.gate.numbers()))
-            }
+            Some(path) if !is_known(&state.catalog, path) => Err((
+                path,
+                state.root().map(Path::to_path_buf),
+                self.gate.numbers(),
+            )),
             _ => Ok(self.answer(state, folder, filter)),
         });
         let (path, root, noted) = match known {
@@ -957,9 +970,12 @@ impl LibraryService {
     /// The root, its setting and `library.json` now. The root is stat'ed on one read budget outside every lock; the
     /// root and its generation are read in one read lock.
     pub fn status(&self) -> LibraryStatus {
-        let (root, root_generation) = self
-            .gate
-            .with_read(|state| (state.root.clone(), self.gate.numbers().root));
+        let (root, root_generation) = self.gate.with_read(|state| {
+            (
+                state.root().map(Path::to_path_buf),
+                self.gate.numbers().root,
+            )
+        });
         let state = match &root {
             None => RootStatus::Unset,
             // ADR-0387: the same absent / unreadable split as the launch.
@@ -971,14 +987,17 @@ impl LibraryService {
                 FolderStatus::Unreadable(why) => RootStatus::Unreadable { why },
             },
         };
-        let (setting, config) = self.config.view();
+        let (mounts, config) = self.config.view();
         LibraryStatus {
             daemon_id: self.values.daemon_id.clone(),
             root,
-            root_setting: setting.map(|setting| match setting {
-                RootSetting::Default => RootSettingKind::Default,
-                RootSetting::Explicit(_) => RootSettingKind::Explicit,
-            }),
+            root_setting: mounts
+                .as_deref()
+                .and_then(<[MountSetting]>::first)
+                .map(|first| match first.place {
+                    MountPlace::Default => RootSettingKind::Default,
+                    MountPlace::Explicit(_) => RootSettingKind::Explicit,
+                }),
             state,
             config,
             suggested_new: self.values.default_root.clone(),
@@ -986,10 +1005,11 @@ impl LibraryService {
         }
     }
 
-    /// Moves the library to `path`, creating it first when `create`, and records it: in order the path is normalized
-    /// (it must be absolute), the root-change mutex taken, a read-only `library.json` refused, the folder created, the
-    /// root changed and — only after that succeeded — `library.json` written: the default value when `path` is the
-    /// default place, else the path. Answers the status after the change.
+    /// Moves the library to `path` — the first mount relocated under its name, or `library` registered when there is
+    /// none — creating it first when `create`, and records it: in order the path is normalized (it must be absolute),
+    /// the root-change mutex taken, a read-only `library.json` refused, the folder created, the root changed and — only
+    /// after that succeeded — `library.json` written with every mount (`save_mounts`). Answers the status after the
+    /// change.
     ///
     /// Refusals: a relative path `InvalidArgument` · `item-path-invalid`; a read-only `library.json` `Unavailable` ·
     /// [`LIBRARY_CONFIG_READ_ONLY`] before anything is created; a folder that cannot be created or used `Unavailable` ·
@@ -1024,12 +1044,7 @@ impl LibraryService {
         }
         self.change_root(root.clone())
             .map_err(|why| root_unusable(&root, why))?;
-        let setting = if same_path(&root, &self.default_place()) {
-            RootSetting::Default
-        } else {
-            RootSetting::Explicit(root.clone())
-        };
-        if let Err(why) = self.config.save(&setting) {
+        if let Err(why) = self.save_mounts() {
             return Err(LibraryRefusal::new(
                 RefusalClass::Unavailable,
                 LIBRARY_CONFIG_WRITE_FAILED,
@@ -1051,8 +1066,8 @@ impl LibraryService {
     }
 
     /// The first-start step: when `library.json` was missing at load, creates the default place, stats it as
-    /// [`LibraryService::change_root`] does, publishes it as the root without a walk and only then writes the setting at
-    /// its default value; the boot scan walks it ([`LibraryService::start_boot_scan`]). A failed create or stat writes
+    /// [`LibraryService::change_root`] does, publishes it as the mount `library` without a walk and only then writes it
+    /// with `"default"`; the boot scan walks it ([`LibraryService::start_boot_scan`]). A failed create or stat writes
     /// nothing and leaves the root unset, and the next start tries again; a failed write leaves the default root live this
     /// run (`unsaved`, logged), and the next start follows the file that is left. A walk that fails later leaves the file
     /// written. A configured root that vanished is never re-created (only a missing `library.json` makes the step due).
@@ -1062,6 +1077,7 @@ impl LibraryService {
     // ADR-0375
     // ADR-0381
     // ADR-0382
+    // ADR-0400
     pub fn first_start(&self) -> FirstStart {
         let _serial = self.take_root_change();
         if !self.config.first_start_due() {
@@ -1080,12 +1096,16 @@ impl LibraryService {
         }
         // ADR-0382: not `change_root` with an empty build — that raises the first scan, so a default place that already
         //   holds files (a first start run again after a failed save) would never be walked.
-        if let Err(why) = self.gate.publish_root_unwalked(root.clone()) {
+        let mount = Mount {
+            name: MountName::first(),
+            folder: root.clone(),
+        };
+        if let Err(why) = self.gate.publish_mount_unwalked(mount) {
             return failed(why);
         }
-        match self.config.save(&RootSetting::Default) {
+        match self.save_mounts() {
             Ok(()) => {
-                tracing::info!(root = %root.display(), "library first start: default root published");
+                tracing::info!(root = %root.display(), "library first start: mount `library` published at the default place");
                 FirstStart::Published
             }
             Err(why) => {
@@ -1098,10 +1118,37 @@ impl LibraryService {
         }
     }
 
-    /// The default place spelled as `set_root` compares paths.
+    /// The default place spelled as a mount's folder is compared with it.
     fn default_place(&self) -> PathBuf {
         normalize_folder(&self.values.default_root)
             .unwrap_or_else(|_| self.values.default_root.clone())
+    }
+
+    /// Saves the published mounts to `library.json`: a mount whose folder is the default place (same normalized
+    /// spelling, compared by path key — a junction or short-name spelling of it is saved as a folder) as `"default"`,
+    /// every other one as its folder. Call holding the root-change mutex, after the publish.
+    // ADR-0375
+    // ADR-0400
+    fn save_mounts(&self) -> Result<(), String> {
+        let default_place = self.default_place();
+        let settings: Vec<MountSetting> = self.gate.with_read(|state| {
+            state
+                .mounts
+                .iter()
+                .map(|mount| {
+                    let folder =
+                        normalize_folder(&mount.folder).unwrap_or_else(|_| mount.folder.clone());
+                    MountSetting {
+                        name: mount.name.clone(),
+                        place: match same_path(&folder, &default_place) {
+                            true => MountPlace::Default,
+                            false => MountPlace::Explicit(folder),
+                        },
+                    }
+                })
+                .collect()
+        });
+        self.config.save(&settings)
     }
 
     /// Starts the first scan of the published root as a background job on the service's spawner and returns at once.
@@ -1112,7 +1159,10 @@ impl LibraryService {
     /// first-start step, and never waits for it.
     // ADR-0382
     pub fn start_boot_scan(self: &Arc<Self>) {
-        let Some(root) = self.gate.with_read(|state| state.root.clone()) else {
+        let Some(root) = self
+            .gate
+            .with_read(|state| state.root().map(Path::to_path_buf))
+        else {
             tracing::debug!("library boot scan: no root; not started");
             return;
         };
@@ -1189,7 +1239,7 @@ impl LibraryService {
             .map_err(LibraryRefusal::unavailable)?;
         self.gate.with_read(|state| {
             let catalog = &state.catalog;
-            let Some(root) = state.root.as_deref() else {
+            let Some(root) = state.root() else {
                 return Err(LibraryRefusal::unavailable(gate::NO_ROOT.to_owned()));
             };
             let item = catalog.get(&key(path)).ok_or_else(|| {
@@ -1764,6 +1814,10 @@ mod tests {
             Err(io::Error::other("not modeled"))
         }
 
+        fn identity(&self, _: &Path) -> io::Result<engram_dashboard_platform::fs::FileIdentity> {
+            Err(io::Error::other("not modeled"))
+        }
+
         fn read(&self, _: &Path, _: u64) -> io::Result<String> {
             Err(io::Error::other("not modeled"))
         }
@@ -1853,7 +1907,7 @@ mod tests {
     ) -> Arc<LibraryService> {
         let state = Path::new("/state");
         let config = match root {
-            Some(root) => LibraryConfig::usable(state, RootSetting::Explicit(PathBuf::from(root))),
+            Some(root) => LibraryConfig::usable(state, MountPlace::Explicit(PathBuf::from(root))),
             None => LibraryConfig::missing(state),
         };
         let values = LibraryValues {
@@ -1861,6 +1915,7 @@ mod tests {
             backends: Arc::new(AgentBackends),
             config,
             default_root: PathBuf::from("/default-library"),
+            data_root: PathBuf::from("/data"),
             daemon_id: "test-daemon".to_owned(),
             root_generation_base: ROOT_BASE,
             builtin_dir: builtin_dir.map(Path::to_path_buf),
@@ -1935,7 +1990,18 @@ mod tests {
     }
 
     fn root_of(svc: &LibraryService) -> Option<PathBuf> {
-        svc.with_read(|state| state.root.clone())
+        svc.with_read(|state| state.root().map(Path::to_path_buf))
+    }
+
+    /// The published mounts as (name, folder), in order.
+    fn mounts_of(svc: &LibraryService) -> Vec<(String, PathBuf)> {
+        svc.with_read(|state| {
+            state
+                .mounts
+                .iter()
+                .map(|mount| (mount.name.as_str().to_owned(), mount.folder.clone()))
+                .collect()
+        })
     }
 
     fn paths(answer: &ListAnswer) -> Vec<&str> {
@@ -2629,6 +2695,10 @@ mod tests {
             Err(io::Error::other("not modeled"))
         }
 
+        fn identity(&self, _: &Path) -> io::Result<engram_dashboard_platform::fs::FileIdentity> {
+            Err(io::Error::other("not modeled"))
+        }
+
         fn read(&self, _: &Path, _: u64) -> io::Result<String> {
             Err(io::Error::other("not modeled"))
         }
@@ -3215,7 +3285,8 @@ claude: {changed: true}
         }
 
         fn explicit(&self, name: &str) -> String {
-            json!({ "schema_version": 1, "root": self.at(name).to_str().unwrap() }).to_string()
+            json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": self.at(name).to_str().unwrap() }] })
+                .to_string()
         }
 
         /// A new service over a fresh `config::load` of the state folder — one daemon start, at [`ROOT_BASE`].
@@ -3237,6 +3308,7 @@ claude: {changed: true}
                 backends: Arc::new(AgentBackends),
                 config: config::load(&self.state()),
                 default_root: self.default_root.clone(),
+                data_root: self.temp.path().join("data"),
                 daemon_id: "daemon-1".to_owned(),
                 root_generation_base: base,
                 builtin_dir: None,
@@ -3257,7 +3329,7 @@ claude: {changed: true}
     }
 
     fn word(disk: &OnDisk) -> serde_json::Value {
-        disk.config().expect("library.json")["root"].clone()
+        disk.config().expect("library.json")["mounts"][0]["path"].clone()
     }
 
     #[test]
@@ -3366,6 +3438,45 @@ claude: {changed: true}
         assert_eq!(status.root, Some(disk.at("library")));
     }
 
+    // ADR-0400: until the mount commands, a root change relocates the first mount under its name and saves every mount.
+    #[test]
+    fn set_root_relocates_the_first_mount_under_its_name_and_saves_every_mount() {
+        let disk = OnDisk::new(&["library", "lib", "lib2", "other"], "library", None);
+        let other = disk.at("other");
+        let doc = json!({ "schema_version": 2, "mounts": [
+            { "name": "team", "path": disk.at("lib").to_str().unwrap() },
+            { "name": "extra", "path": other.to_str().unwrap() },
+        ] });
+        std::fs::write(disk.config_path(), doc.to_string()).unwrap();
+        let svc = disk.start();
+        assert_eq!(
+            root_of(&svc),
+            Some(disk.at("lib")),
+            "the first mount is the root"
+        );
+        svc.set_root(&disk.at("lib2"), false).unwrap();
+        assert_eq!(
+            mounts_of(&svc),
+            [
+                ("team".to_owned(), disk.at("lib2")),
+                ("extra".to_owned(), other.clone())
+            ]
+        );
+        assert_eq!(
+            disk.config(),
+            Some(json!({ "schema_version": 2, "mounts": [
+                { "name": "team", "path": disk.at("lib2").to_str().unwrap() },
+                { "name": "extra", "path": other.to_str().unwrap() },
+            ] }))
+        );
+        svc.set_root(&disk.at("library"), false).unwrap();
+        assert_eq!(
+            disk.config().unwrap()["mounts"][0],
+            json!({ "name": "team", "path": "default" }),
+            "the default place is stored as the word"
+        );
+    }
+
     #[test]
     fn set_root_refuses_a_path_that_is_not_absolute_and_writes_nothing() {
         let disk = OnDisk::new(&["lib"], "library", None);
@@ -3381,7 +3492,7 @@ claude: {changed: true}
 
     #[test]
     fn set_root_on_a_read_only_config_refuses_before_creating_anything() {
-        let newer = r#"{"schema_version": 2, "root": "default"}"#;
+        let newer = r#"{"schema_version": 3, "mounts": []}"#;
         for unreadable in [false, true] {
             let disk = OnDisk::new(&["lib", "new"], "library", None);
             match unreadable {
@@ -3519,7 +3630,8 @@ claude: {changed: true}
     #[test]
     fn a_library_json_write_refused_or_failed_after_the_publish_leaves_the_new_root_live_and_unsaved(
     ) {
-        let default_doc = r#"{"schema_version": 1, "root": "default"}"#;
+        let default_doc =
+            r#"{"schema_version": 2, "mounts": [{"name": "library", "path": "default"}]}"#;
         for judged in [true, false] {
             let disk = OnDisk::new(&["library", "lib2"], "library", Some(default_doc));
             disk.mem("lib2").file("b.md", "b");
@@ -3688,8 +3800,15 @@ claude: {changed: true}
         assert!(disk.at("library").is_dir());
         assert_eq!(
             disk.config(),
-            Some(json!({ "schema_version": 1, "root": "default" })),
-            "the default value, not the path"
+            Some(
+                json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+            ),
+            "the mount `library` at the default value, not the path"
+        );
+        assert_eq!(
+            mounts_of(&svc),
+            [("library".to_owned(), disk.at("library"))],
+            "one mount published"
         );
         let status = svc.status();
         assert_eq!(
@@ -3796,7 +3915,9 @@ claude: {changed: true}
         );
         assert_eq!(
             disk.config(),
-            Some(json!({ "schema_version": 1, "root": "default" }))
+            Some(
+                json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+            )
         );
         assert_eq!(next.status().root, Some(disk.at("library")));
     }
@@ -3806,7 +3927,7 @@ claude: {changed: true}
     ) {
         let disk = OnDisk::new(&["library", "lib2"], "library", None);
         let svc = disk.start();
-        let newer = r#"{"schema_version": 9, "root": "default"}"#;
+        let newer = r#"{"schema_version": 9, "mounts": []}"#;
         std::fs::write(disk.config_path(), newer).unwrap();
         assert!(matches!(svc.first_start(), FirstStart::Unsaved(why) if why.contains("newer")));
         assert_eq!(std::fs::read_to_string(disk.config_path()).unwrap(), newer);
@@ -3843,7 +3964,9 @@ claude: {changed: true}
         );
         assert_eq!(
             disk.config(),
-            Some(json!({ "schema_version": 1, "root": "default" }))
+            Some(
+                json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+            )
         );
         assert_eq!(root_of(&svc), Some(root.clone()));
         let numbers = svc.numbers();
@@ -3942,7 +4065,10 @@ claude: {changed: true}
         for root in ["library", "chosen"] {
             let disk = OnDisk::new(&["library", "chosen"], "library", None);
             let config = match root {
-                "library" => r#"{"schema_version": 1, "root": "default"}"#.to_owned(),
+                "library" => {
+                    r#"{"schema_version": 2, "mounts": [{"name": "library", "path": "default"}]}"#
+                        .to_owned()
+                }
                 _ => disk.explicit(root),
             };
             std::fs::write(disk.config_path(), &config).unwrap();

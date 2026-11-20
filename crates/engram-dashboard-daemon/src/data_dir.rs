@@ -274,6 +274,13 @@ impl DataLayout {
         std::path::absolute(&place).unwrap_or(place)
     }
 
+    /// The data folder made absolute against the working folder as [`DataLayout::default_library_root`] is, so the
+    /// library's overlap check compares it with absolute mount folders (a relative `ENGRAM_DATA_DIR`).
+    // ADR-0400
+    pub fn absolute_root(&self) -> PathBuf {
+        std::path::absolute(&self.root).unwrap_or_else(|_| self.root.clone())
+    }
+
     pub fn daemon_state_dir(&self) -> PathBuf {
         self.root.join(DAEMON_DIR).join(STATE_DIR)
     }
@@ -452,6 +459,16 @@ mod tests {
             DataLayout::new(dist.join("data")).origin(),
             DataRootOrigin::Given
         );
+    }
+
+    /// A relative data folder is made absolute for the library's overlap check, as its default place is. Only
+    /// computed.
+    #[test]
+    fn a_relative_data_folder_is_made_absolute_for_the_library() {
+        let got = DataLayout::new("relative-data").absolute_root();
+        assert_eq!(got, std::env::current_dir().unwrap().join("relative-data"));
+        let absolute = std::env::temp_dir().join("engram-data");
+        assert_eq!(DataLayout::new(&absolute).absolute_root(), absolute);
     }
 
     /// A relative data folder (a relative `ENGRAM_DATA_DIR`) gives an absolute default place, against the working

@@ -234,6 +234,7 @@ fn build_daemon_wiring(
     let start = LibraryStart {
         config: engram_dashboard_asset_library::config::load(&state_dir),
         default_root: layout.default_library_root(),
+        data_root: layout.absolute_root(),
         daemon_id: identity::load_or_create(&state_dir),
         root_generation_base: root_generation_base(),
     };
@@ -279,14 +280,16 @@ struct LaunchInputs {
     start: LibraryStart,
 }
 
-/// The root setting, the identity and the root generation base a library service starts with
-/// ([`LibraryValues::config`] · [`LibraryValues::default_root`] · [`LibraryValues::daemon_id`] ·
-/// [`LibraryValues::root_generation_base`]).
+/// The mount setting, the data folder, the identity and the root generation base a library service starts with
+/// ([`LibraryValues::config`] · [`LibraryValues::default_root`] · [`LibraryValues::data_root`] ·
+/// [`LibraryValues::daemon_id`] · [`LibraryValues::root_generation_base`]).
 pub struct LibraryStart {
     /// `asset_library::config::load` over the daemon state folder — read before the service is built.
     pub config: LibraryConfig,
     /// `DataLayout::default_library_root`.
     pub default_root: PathBuf,
+    /// `DataLayout::absolute_root`.
+    pub data_root: PathBuf,
     /// `identity::load_or_create`.
     pub daemon_id: String,
     /// [`root_generation_base`], drawn once per run.
@@ -333,6 +336,7 @@ pub fn build_library_service(
             backends: Arc::new(AgentBackends),
             config: start.config,
             default_root: start.default_root,
+            data_root: start.data_root,
             daemon_id: start.daemon_id,
             root_generation_base: start.root_generation_base,
             builtin_dir,
@@ -1460,7 +1464,7 @@ mod tests {
         assert!(library_made);
         assert_eq!(
             config,
-            serde_json::json!({ "schema_version": 1, "root": "default" })
+            serde_json::json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
         );
         assert_eq!(first.root, Some(temp.join("library")));
         assert_eq!(first.root, Some(layout.default_library_root()));

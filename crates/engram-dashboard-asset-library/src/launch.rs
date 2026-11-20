@@ -592,7 +592,7 @@ impl LibraryService {
         // ADR-0324 decision 5: the numbers are noted in the read lock that reads the root the overlay reads under.
         let (noted, root) = self
             .gate
-            .with_read(|state| (self.gate.numbers(), state.root.clone()));
+            .with_read(|state| (self.gate.numbers(), state.root().map(Path::to_path_buf)));
         let library_attached = want
             .presets
             .iter()
@@ -630,7 +630,7 @@ impl LibraryService {
                     overlay: &overlay,
                     catalog: CatalogLookup {
                         catalog: &state.catalog,
-                        root: state.root.as_deref(),
+                        root: state.root(),
                         builtins: &self.builtins,
                     },
                 };
@@ -1740,6 +1740,11 @@ mod tests {
             StdFolderOps.canonical(p)
         }
 
+        fn identity(&self, p: &Path) -> io::Result<engram_dashboard_platform::fs::FileIdentity> {
+            self.enter("identity", p);
+            StdFolderOps.identity(p)
+        }
+
         fn read(&self, p: &Path, cap: u64) -> io::Result<String> {
             self.enter("read", p);
             if lock(&self.state).unreadable_files.contains(p) {
@@ -1996,11 +2001,12 @@ mod tests {
                 config: match setup.root {
                     true => crate::config::LibraryConfig::usable(
                         &base.join("state"),
-                        crate::config::RootSetting::Explicit(base.join("lib")),
+                        crate::config::MountPlace::Explicit(base.join("lib")),
                     ),
                     false => crate::config::LibraryConfig::missing(&base.join("state")),
                 },
                 default_root: base.join("default-library"),
+                data_root: base.join("data"),
                 daemon_id: "test-daemon".to_owned(),
                 root_generation_base: 7,
                 builtin_dir: setup.priming.map(|_| base.join("builtin")),

@@ -1,6 +1,6 @@
-//! Bounded, concurrent folder IO on a per-launch budget. Every stat, listing, canonicalize and file read on a folder
-//! outside the library (folder entries, native skill roots, the working folder, the library root) goes through
-//! [`BoundedIo`]; library files inside the root are read with the store.
+//! Bounded, concurrent folder IO on a per-launch budget. Every stat, listing, canonicalize, file identity and file read
+//! on a folder outside the library (folder entries, native skill roots, the working folder, the library root, a mount
+//! folder and its ancestors) goes through [`BoundedIo`]; library files inside the root are read with the store.
 //!
 //! ## Rules
 //!
@@ -52,7 +52,7 @@ use engram_dashboard_agent::types::{
 };
 use engram_dashboard_base::file::read_capped;
 use engram_dashboard_base::sync::lock;
-use engram_dashboard_platform::fs::{path_key, PathKey};
+use engram_dashboard_platform::fs::{file_identity, path_key, FileIdentity, PathKey};
 
 use crate::store::OS_HOOKS;
 
@@ -99,13 +99,18 @@ pub enum IoKey {
     Stat(PathKey),
     List(PathKey),
     Canonical(PathKey),
+    Identity(PathKey),
     Read(PathKey),
 }
 
 impl IoKey {
     fn path_key(&self) -> &PathKey {
         match self {
-            IoKey::Stat(key) | IoKey::List(key) | IoKey::Canonical(key) | IoKey::Read(key) => key,
+            IoKey::Stat(key)
+            | IoKey::List(key)
+            | IoKey::Canonical(key)
+            | IoKey::Identity(key)
+            | IoKey::Read(key) => key,
         }
     }
 }
@@ -132,6 +137,9 @@ pub trait FolderOps: Send + Sync {
     fn list(&self, p: &Path, cap: usize) -> Result<FolderListing, FolderStatus>;
     /// The canonical path the agent manager would use for `p` (`dunce::canonicalize` — agent `manager.rs`).
     fn canonical(&self, p: &Path) -> io::Result<PathBuf>;
+    /// The file identity of `p` (platform `fs::file_identity` — links followed; `Unsupported` where the volume gives
+    /// none).
+    fn identity(&self, p: &Path) -> io::Result<FileIdentity>;
     /// The text of file `p`, at most `cap` bytes — longer or not UTF-8 = `InvalidData`.
     fn read(&self, p: &Path, cap: u64) -> io::Result<String>;
 }
@@ -248,6 +256,7 @@ enum IoAnswer {
     Stat(FolderStatus),
     List(Result<FolderListing, FolderStatus>),
     Canonical(Result<PathBuf, FolderStatus>),
+    Identity(Result<Option<FileIdentity>, FolderStatus>),
     Read(Result<String, ReadFail>),
 }
 
@@ -465,6 +474,24 @@ impl BoundedIo {
             .collect()
     }
 
+    /// One answer per distinct path key of `paths` (module rules), on the same budget as [`BoundedIo::canonical_all`].
+    /// `Ok(None)` = the op answered with an OS error — `Unsupported` (the volume gives no identity) or any other: the
+    /// path has no identity to compare. `Err` = no answer ([`TIMEOUT`], [`NOT_CHECKED`] or a failed worker).
+    // ADR-0400 decision 10
+    pub fn identity_all(
+        &self,
+        io: &LaunchIo,
+        paths: &[(PathBuf, Need)],
+    ) -> HashMap<PathKey, Result<Option<FileIdentity>, FolderStatus>> {
+        self.ask(io, IoKey::Identity, paths, false)
+            .into_iter()
+            .map(|(key, answer)| match answer {
+                IoAnswer::Identity(identity) => (key, identity),
+                _ => unreachable!("an identity key holds an identity answer"),
+            })
+            .collect()
+    }
+
     /// The text of the file at the absolute `path`, at most [`READ_CAP`] bytes. `fresh` = ignore a stored answer and
     /// any read in flight — start a new read. A read that gave no answer about the file is `ErrorKind::TimedOut`, its
     /// text saying why: [`TIMEOUT`] (the op did not answer in time), [`NOT_CHECKED`] (the allowance was spent) or a
@@ -644,6 +671,13 @@ fn run_op(ops: &dyn FolderOps, key: &IoKey, path: &Path, list_cap: usize) -> IoA
         IoKey::Stat(_) => IoAnswer::Stat(ops.stat(path)),
         IoKey::List(_) => IoAnswer::List(ops.list(path, list_cap)),
         IoKey::Canonical(_) => IoAnswer::Canonical(ops.canonical(path).map_err(|e| status_of(&e))),
+        IoKey::Identity(_) => IoAnswer::Identity(Ok(match ops.identity(path) {
+            Ok(identity) => Some(identity),
+            Err(e) => {
+                tracing::debug!(?path, "no file identity: {e}");
+                None
+            }
+        })),
         IoKey::Read(_) => IoAnswer::Read(ops.read(path, READ_CAP).map_err(|e| ReadFail {
             kind: e.kind(),
             text: e.to_string(),
@@ -659,6 +693,7 @@ fn unanswered(key: &IoKey, reason: &str) -> IoAnswer {
         IoKey::Stat(_) => IoAnswer::Stat(status),
         IoKey::List(_) => IoAnswer::List(Err(status)),
         IoKey::Canonical(_) => IoAnswer::Canonical(Err(status)),
+        IoKey::Identity(_) => IoAnswer::Identity(Err(status)),
         IoKey::Read(_) => IoAnswer::Read(Err(ReadFail {
             kind: io::ErrorKind::TimedOut,
             text: reason.to_owned(),
@@ -711,6 +746,10 @@ impl FolderOps for StdFolderOps {
 
     fn canonical(&self, p: &Path) -> io::Result<PathBuf> {
         dunce::canonicalize(p)
+    }
+
+    fn identity(&self, p: &Path) -> io::Result<FileIdentity> {
+        file_identity(p)
     }
 
     fn read(&self, p: &Path, cap: u64) -> io::Result<String> {
@@ -1042,6 +1081,11 @@ mod tests {
         fn canonical(&self, path: &Path) -> io::Result<PathBuf> {
             let _state = self.gate(self.enter("canonical", path), path);
             Ok(PathBuf::from(format!("{}#canonical", path.display())))
+        }
+
+        fn identity(&self, path: &Path) -> io::Result<FileIdentity> {
+            let _state = self.gate(self.enter("identity", path), path);
+            Err(io::ErrorKind::Unsupported.into())
         }
 
         fn read(&self, path: &Path, _cap: u64) -> io::Result<String> {
@@ -1421,6 +1465,27 @@ mod tests {
         for path in ["/a", "/b", "/c", "/d"] {
             ops.release(path);
         }
+        assert_inflight_empty(&io);
+    }
+
+    // ADR-0400 decision 10: the overlap check's identities are bounded like its canonical paths.
+    #[test]
+    fn an_identity_that_does_not_answer_times_out_on_the_budget_and_an_os_error_is_no_identity() {
+        let ops = Arc::new(FakeOps::default());
+        ops.hold("/held");
+        let io = bounded(&ops, ms(5_000), waits(ms(1_000), ms(1_000)));
+        let launch = io.begin_launch();
+        let began = Instant::now();
+        let answers = io.identity_all(&launch, &[req("/held"), req("/free")]);
+        let took = began.elapsed();
+        assert_eq!(answers[&k("/held")], Err(unreadable(TIMEOUT)));
+        assert_eq!(
+            answers[&k("/free")],
+            Ok(None),
+            "the fake's `Unsupported` is no identity, not a failure"
+        );
+        assert!(took < ms(2_000), "bounded by the 1 s budget: {took:?}");
+        ops.release("/held");
         assert_inflight_empty(&io);
     }
 

@@ -1,24 +1,32 @@
-//! The library root setting — `library.json` in the daemon state folder the daemon hands in.
+//! The library mount setting — `library.json` in the daemon state folder the daemon hands in.
 //!
-//! - **One setting, with a default value** (ADR-0375): the file holds `"root": "default"` or an absolute normalized
-//!   path. `"default"` is resolved every start to that run's default place (`LibraryValues::default_root`), so it
-//!   follows the data folder when it moves. The folder's existence never changes the setting.
+//! - **The mount list** (ADR-0375 · ADR-0400): `{"schema_version": 2, "mounts": [{"name", "path"}]}`, in the order
+//!   shown. A `path` is `"default"` or an absolute normalized folder; `"default"` is resolved every start to that run's
+//!   default place (`LibraryValues::default_root`), so it follows the data folder when it moves. A mount's folder
+//!   existing or not never changes the setting. The built-in mount is not stored.
+//! - **Schema 2 only** (ADR-0398): a schema-1 file (one `root`, never shipped) has no reader, so it is corrupt like any
+//!   shape this build cannot read. Loosening the name rules or adding a `path` form or an entry key raises
+//!   `schema_version` — an older build would otherwise read the new file as corrupt and replace it, or drop the
+//!   unknown key on its next save.
 //! - **Base data-file rules** (ADR-0291 · ADR-0376): [`load`] runs once before the service is built and changes no
 //!   file (it sweeps only this file's leftover temp files). A newer or unreadable file makes the setting read-only for
 //!   the run; a corrupt one is copied aside to `<name>.corrupt` before the next write; every write is judged again
 //!   right before it.
-//! - **Written only after the root change succeeded** (ADR-0381): `LibraryService` publishes the root first and then
+//! - **Written only after the mount change succeeded** (ADR-0381): `LibraryService` publishes the mounts first and then
 //!   calls [`ConfigFile::save`]; nothing is ever undone. A save that fails leaves the file as it was and the state
-//!   `unsaved` — the live root's setting, not the file's — until a later save succeeds; the next start follows the
+//!   `unsaved` — the live mounts' setting, not the file's — until a later save succeeds; the next start follows the
 //!   file that is left.
-//! - **The caller serializes saves** — `LibraryService` holds its root-change mutex across the root change and
+//! - **The caller serializes saves** — `LibraryService` holds its root-change mutex across the mount change and
 //!   [`ConfigFile::save`]. The state lock here is a leaf taken under that mutex only to read or set the state, never
 //!   across IO.
 // ADR-0291
 // ADR-0375
 // ADR-0376
 // ADR-0381
+// ADR-0398
+// ADR-0400
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -31,37 +39,56 @@ use engram_dashboard_platform::fs::normalize_folder;
 use engram_dashboard_platform::process::pid_alive;
 use serde_json::{json, Map, Value};
 
+use crate::mounts::{Mount, MountName, Mounts};
 use crate::store::OS_HOOKS;
 
 /// The file name, joined onto the state folder the daemon hands in (ADR-0264 decision 4: a file name one store uses
 /// belongs to that store).
 pub const LIBRARY_CONFIG_FILE: &str = "library.json";
 
-/// The word that stores the setting at its default value.
+/// The word that stores a mount's folder at the default place.
 const DEFAULT_WORD: &str = "default";
 
 const SPEC: Spec = Spec {
     version_key: "schema_version",
-    current: 1,
+    current: 2,
     cap: 64 * 1024,
     shape,
 };
 
-/// What the root setting holds.
+/// Where one stored mount's folder is.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RootSetting {
-    /// The default value — the run's default place.
+pub enum MountPlace {
+    /// The default place of the run.
     Default,
-    /// A root the user set: absolute and normalized.
+    /// A folder the user set: absolute and normalized.
     Explicit(PathBuf),
 }
 
-impl RootSetting {
-    /// The root this setting names this run.
+impl MountPlace {
+    /// The folder this place names this run.
     pub fn resolve(&self, default_root: &Path) -> PathBuf {
         match self {
-            RootSetting::Default => default_root.to_path_buf(),
-            RootSetting::Explicit(root) => root.clone(),
+            MountPlace::Default => default_root.to_path_buf(),
+            MountPlace::Explicit(folder) => folder.clone(),
+        }
+    }
+}
+
+/// One stored mount — `{"name", "path"}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountSetting {
+    pub name: MountName,
+    pub place: MountPlace,
+}
+
+impl MountSetting {
+    /// What the first start registers: [`crate::mounts::FIRST_MOUNT`] at the default place.
+    // ADR-0400 decision 3
+    pub fn first_start() -> Self {
+        MountSetting {
+            name: MountName::first(),
+            place: MountPlace::Default,
         }
     }
 }
@@ -77,7 +104,7 @@ pub struct LibraryConfig {
 enum Load {
     /// Never written — the first-start step is due.
     Missing,
-    Usable(RootSetting),
+    Usable(Vec<MountSetting>),
     Corrupt,
     /// Newer or unreadable — `why`.
     ReadOnly(String),
@@ -92,7 +119,7 @@ pub enum ConfigHealth {
     ReadOnly { why: String },
     /// Copied aside to `<name>.corrupt` before the next write.
     Corrupt,
-    /// This run published a root whose save failed (`why`): the live root may differ from the file's setting, and the
+    /// This run published mounts whose save failed (`why`): the live mounts may differ from the file's setting, and the
     /// next start follows the file that is left. Cleared by the next successful save; it wins over `Corrupt`.
     // ADR-0381
     Unsaved { why: String },
@@ -116,8 +143,8 @@ pub fn load(state_dir: &Path) -> LibraryConfig {
     // ADR-0291 R14: a lock left after the long load budget makes the run read-only.
     let load = match file::load(&path, &SPEC, LOAD_HOOKS) {
         Loaded::Missing => Load::Missing,
-        Loaded::Parsed(Parsed::Usable { doc, .. }) => match setting_of(&doc) {
-            Ok(setting) => Load::Usable(setting),
+        Loaded::Parsed(Parsed::Usable { doc, .. }) => match settings_of(&doc) {
+            Ok(mounts) => Load::Usable(mounts),
             Err(why) => corrupt(&path, &why),
         },
         Loaded::Parsed(Parsed::Unusable(why)) => corrupt(&path, &why),
@@ -139,23 +166,48 @@ pub fn load(state_dir: &Path) -> LibraryConfig {
 }
 
 fn corrupt(path: &Path, why: &str) -> Load {
-    tracing::error!(path = %path.display(), "library.json corrupt; root unset until a set_root: {why}");
+    tracing::error!(path = %path.display(), "library.json corrupt; no mount until one is set: {why}");
     Load::Corrupt
 }
 
-fn shape(_version: u64, doc: &Map<String, Value>) -> Result<(), String> {
-    setting_of(doc).map(drop)
+fn shape(version: u64, doc: &Map<String, Value>) -> Result<(), String> {
+    // ADR-0398: schema 1 was never shipped — no reader.
+    if version < SPEC.current {
+        return Err(format!(
+            "schema_version {version} has no reader (this build reads {})",
+            SPEC.current
+        ));
+    }
+    settings_of(doc).map(drop)
 }
 
-fn setting_of(doc: &Map<String, Value>) -> Result<RootSetting, String> {
-    let refused = || "`root` is neither \"default\" nor an absolute path".to_owned();
-    match doc.get("root").and_then(Value::as_str) {
-        Some(DEFAULT_WORD) => Ok(RootSetting::Default),
-        Some(path) => normalize_folder(Path::new(path))
-            .map(RootSetting::Explicit)
-            .map_err(|_| refused()),
-        None => Err(refused()),
+fn settings_of(doc: &Map<String, Value>) -> Result<Vec<MountSetting>, String> {
+    let entries = doc
+        .get("mounts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "`mounts` is not a list".to_owned())?;
+    let mut names = HashSet::new();
+    let mut mounts = Vec::with_capacity(entries.len());
+    for (at, entry) in entries.iter().enumerate() {
+        let field = |key: &str| entry.get(key).and_then(Value::as_str);
+        let name = field("name").ok_or_else(|| format!("mount {at}: `name` is not a string"))?;
+        let name =
+            MountName::parse(name).map_err(|why| format!("mount {at}: name {name:?}: {why}"))?;
+        if !names.insert(name.key()) {
+            return Err(format!("mount {at}: the name {:?} is taken", name.as_str()));
+        }
+        let place = match field("path") {
+            Some(DEFAULT_WORD) => MountPlace::Default,
+            Some(path) => normalize_folder(Path::new(path))
+                .map(MountPlace::Explicit)
+                .map_err(|_| {
+                    format!("mount {at}: `path` is neither \"default\" nor an absolute path")
+                })?,
+            None => return Err(format!("mount {at}: `path` is not a string")),
+        };
+        mounts.push(MountSetting { name, place });
     }
+    Ok(mounts)
 }
 
 /// The live `library.json` of one service (module header).
@@ -168,19 +220,24 @@ pub(crate) struct ConfigFile {
 }
 
 struct FileState {
-    /// `None` = not readable (corrupt or read-only). While `unsaved`, the live root's setting.
-    setting: Option<RootSetting>,
+    /// `None` = not readable (corrupt or read-only). While `unsaved`, the live mounts' setting; while the first start
+    /// is due, what it would write.
+    mounts: Option<Vec<MountSetting>>,
     health: ConfigHealth,
     claim: Claim,
-    /// Loaded as missing, and no root published since.
+    /// Loaded as missing, and no mount published since.
     first_start_due: bool,
 }
 
 impl ConfigFile {
     pub(crate) fn new(config: &LibraryConfig) -> Self {
-        let (setting, health, claim) = match &config.load {
-            Load::Missing => (Some(RootSetting::Default), ConfigHealth::Ok, Claim::NotYet),
-            Load::Usable(setting) => (Some(setting.clone()), ConfigHealth::Ok, Claim::Adopted),
+        let (mounts, health, claim) = match &config.load {
+            Load::Missing => (
+                Some(vec![MountSetting::first_start()]),
+                ConfigHealth::Ok,
+                Claim::NotYet,
+            ),
+            Load::Usable(mounts) => (Some(mounts.clone()), ConfigHealth::Ok, Claim::Adopted),
             Load::Corrupt => (None, ConfigHealth::Corrupt, Claim::NotYet),
             Load::ReadOnly(why) => (
                 None,
@@ -191,7 +248,7 @@ impl ConfigFile {
         ConfigFile {
             path: config.state_dir.join(LIBRARY_CONFIG_FILE),
             state: Mutex::new(FileState {
-                setting,
+                mounts,
                 health,
                 claim,
                 first_start_due: matches!(config.load, Load::Missing),
@@ -201,18 +258,27 @@ impl ConfigFile {
         }
     }
 
-    /// The root the service starts with: the usable setting resolved; `None` when the file is missing (the
-    /// first-start step publishes one), corrupt or read-only.
-    pub(crate) fn initial_root(config: &LibraryConfig, default_root: &Path) -> Option<PathBuf> {
+    /// The mounts the service starts with: the usable setting resolved; none when the file is missing (the first-start
+    /// step publishes one), corrupt or read-only.
+    pub(crate) fn initial_mounts(config: &LibraryConfig, default_root: &Path) -> Mounts {
         match &config.load {
-            Load::Usable(setting) => Some(setting.resolve(default_root)),
-            Load::Missing | Load::Corrupt | Load::ReadOnly(_) => None,
+            Load::Usable(mounts) => Mounts::new(
+                mounts
+                    .iter()
+                    .map(|setting| Mount {
+                        name: setting.name.clone(),
+                        folder: setting.place.resolve(default_root),
+                    })
+                    .collect(),
+            )
+            .expect("the load refuses a taken name"),
+            Load::Missing | Load::Corrupt | Load::ReadOnly(_) => Mounts::default(),
         }
     }
 
-    pub(crate) fn view(&self) -> (Option<RootSetting>, ConfigHealth) {
+    pub(crate) fn view(&self) -> (Option<Vec<MountSetting>>, ConfigHealth) {
         let state = lock(&self.state);
-        (state.setting.clone(), state.health.clone())
+        (state.mounts.clone(), state.health.clone())
     }
 
     /// Why no write is allowed this run; `None` = writes are allowed.
@@ -227,23 +293,23 @@ impl ConfigFile {
         lock(&self.state).first_start_due
     }
 
-    /// Records `setting`, the setting of the root just published: judges the current file (base `judge` rules — a
+    /// Records `mounts`, the setting of the mounts just published: judges the current file (base `judge` rules — a
     /// corrupt file, or one that appeared after a missing load, is copied aside first), then writes it atomically.
-    /// `Ok` = the file holds `setting` and is ours (ADR-0291 R8); `Err(why)` = the file is as it was (a copy aside may
-    /// have been made) and the state is `unsaved`. Either way the state names `setting`, the live one. A read-only
-    /// file is never written and its state is kept. Call only after the root change succeeded, holding the root-change
-    /// mutex.
+    /// `Ok` = the file holds `mounts` and is ours (ADR-0291 R8); `Err(why)` = the file is as it was (a copy aside may
+    /// have been made) and the state is `unsaved`. Either way the state names `mounts`, the live ones. A read-only
+    /// file is never written and its state is kept. Call only after the mount change succeeded, holding the
+    /// root-change mutex.
     // ADR-0381
-    pub(crate) fn save(&self, setting: &RootSetting) -> Result<(), String> {
+    pub(crate) fn save(&self, mounts: &[MountSetting]) -> Result<(), String> {
         if let Some(why) = self.read_only() {
             return Err(format!("library.json is read-only this run: {why}"));
         }
-        let saved = self.write_judged(setting);
+        let saved = self.write_judged(mounts);
         if let Err(why) = &saved {
             tracing::error!(path = %self.path.display(), "library.json not written: {why}");
         }
         let mut state = lock(&self.state);
-        state.setting = Some(setting.clone());
+        state.mounts = Some(mounts.to_vec());
         state.first_start_due = false;
         match &saved {
             Ok(()) => {
@@ -255,16 +321,23 @@ impl ConfigFile {
         saved
     }
 
-    fn write_judged(&self, setting: &RootSetting) -> Result<(), String> {
-        let word = match setting {
-            RootSetting::Default => DEFAULT_WORD,
-            RootSetting::Explicit(root) => root
-                .to_str()
-                .ok_or_else(|| format!("the path is not UTF-8: {}", root.display()))?,
-        };
-        let bytes =
-            serde_json::to_vec_pretty(&json!({ "schema_version": SPEC.current, "root": word }))
-                .map_err(|e| e.to_string())?;
+    fn write_judged(&self, mounts: &[MountSetting]) -> Result<(), String> {
+        let entries = mounts
+            .iter()
+            .map(|mount| {
+                let path = match &mount.place {
+                    MountPlace::Default => DEFAULT_WORD,
+                    MountPlace::Explicit(folder) => folder
+                        .to_str()
+                        .ok_or_else(|| format!("the path is not UTF-8: {}", folder.display()))?,
+                };
+                Ok(json!({ "name": mount.name.as_str(), "path": path }))
+            })
+            .collect::<Result<Vec<Value>, String>>()?;
+        let bytes = serde_json::to_vec_pretty(
+            &json!({ "schema_version": SPEC.current, "mounts": entries }),
+        )
+        .map_err(|e| e.to_string())?;
         file::check_cap(bytes.len(), &SPEC).map_err(|e| e.to_string())?;
         let claim = lock(&self.state).claim;
         let current = file::load(&self.path, &SPEC, OS_HOOKS);
@@ -318,10 +391,14 @@ impl LibraryConfig {
         }
     }
 
-    pub(crate) fn usable(state_dir: &Path, setting: RootSetting) -> Self {
+    /// A usable file holding one mount, [`crate::mounts::FIRST_MOUNT`] at `place`.
+    pub(crate) fn usable(state_dir: &Path, place: MountPlace) -> Self {
         LibraryConfig {
             state_dir: state_dir.to_path_buf(),
-            load: Load::Usable(setting),
+            load: Load::Usable(vec![MountSetting {
+                name: MountName::first(),
+                place,
+            }]),
         }
     }
 
@@ -351,8 +428,30 @@ mod tests {
         Some(serde_json::from_str(&text).unwrap())
     }
 
+    fn setting(name: &str, place: MountPlace) -> MountSetting {
+        MountSetting {
+            name: MountName::parse(name).unwrap(),
+            place,
+        }
+    }
+
+    fn library(place: MountPlace) -> Vec<MountSetting> {
+        vec![setting("library", place)]
+    }
+
+    fn doc(mounts: Value) -> String {
+        json!({ "schema_version": 2, "mounts": mounts }).to_string()
+    }
+
     fn explicit_doc(path: &Path) -> String {
-        json!({ "schema_version": 1, "root": path.to_str().unwrap() }).to_string()
+        doc(json!([{ "name": "library", "path": path.to_str().unwrap() }]))
+    }
+
+    fn mount(name: &str, folder: PathBuf) -> Mount {
+        Mount {
+            name: MountName::parse(name).unwrap(),
+            folder,
+        }
     }
 
     #[test]
@@ -360,30 +459,41 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let config = load(temp.path());
         let file = ConfigFile::new(&config);
-        assert_eq!(file.view(), (Some(RootSetting::Default), ConfigHealth::Ok));
-        assert!(file.first_start_due());
         assert_eq!(
-            ConfigFile::initial_root(&config, &abs(temp.path(), "lib")),
-            None
+            file.view(),
+            (Some(vec![MountSetting::first_start()]), ConfigHealth::Ok),
+            "what the first start would write: `library` at the default place"
         );
+        assert_eq!(
+            MountSetting::first_start(),
+            setting("library", MountPlace::Default)
+        );
+        assert!(file.first_start_due());
+        assert!(ConfigFile::initial_mounts(&config, &abs(temp.path(), "lib")).is_empty());
         assert!(on_disk(temp.path()).is_none(), "a load writes nothing");
     }
 
     #[test]
     fn the_default_value_resolves_to_each_runs_default_place_and_an_explicit_root_stays_put() {
         let (first, moved) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        put(first.path(), r#"{"schema_version": 1, "root": "default"}"#);
+        put(
+            first.path(),
+            &doc(json!([{ "name": "library", "path": "default" }])),
+        );
         std::fs::copy(
             first.path().join(LIBRARY_CONFIG_FILE),
             moved.path().join(LIBRARY_CONFIG_FILE),
         )
         .unwrap();
-        let here = ConfigFile::initial_root(&load(first.path()), &abs(first.path(), "library"));
-        let there = ConfigFile::initial_root(&load(moved.path()), &abs(moved.path(), "library"));
-        assert_eq!(here, Some(abs(first.path(), "library")));
+        let here = ConfigFile::initial_mounts(&load(first.path()), &abs(first.path(), "library"));
+        let there = ConfigFile::initial_mounts(&load(moved.path()), &abs(moved.path(), "library"));
+        assert_eq!(
+            here,
+            Mounts::new(vec![mount("library", abs(first.path(), "library"))]).unwrap()
+        );
         assert_eq!(
             there,
-            Some(abs(moved.path(), "library")),
+            Mounts::new(vec![mount("library", abs(moved.path(), "library"))]).unwrap(),
             "the setting moved with the data"
         );
 
@@ -391,72 +501,181 @@ mod tests {
         put(moved.path(), &explicit_doc(&explicit));
         let config = load(moved.path());
         assert_eq!(
-            ConfigFile::initial_root(&config, &abs(moved.path(), "library")),
-            Some(explicit.clone())
+            ConfigFile::initial_mounts(&config, &abs(moved.path(), "library")),
+            Mounts::new(vec![mount("library", explicit.clone())]).unwrap()
         );
         assert_eq!(
             ConfigFile::new(&config).view().0,
-            Some(RootSetting::Explicit(explicit))
+            Some(library(MountPlace::Explicit(explicit)))
         );
     }
 
     #[test]
     fn a_root_that_is_neither_the_default_word_nor_absolute_is_corrupt() {
-        for doc in [
-            r#"{"schema_version": 1, "root": "relative\\lib"}"#,
-            r#"{"schema_version": 1, "root": "Default"}"#,
-            r#"{"schema_version": 1, "root": 3}"#,
-            r#"{"schema_version": 1}"#,
-            "not json",
+        for text in [
+            doc(json!([{ "name": "library", "path": "relative\\lib" }])),
+            doc(json!([{ "name": "library", "path": "Default" }])),
+            doc(json!([{ "name": "library", "path": 3 }])),
+            doc(json!([{ "name": "library" }])),
+            "not json".to_owned(),
         ] {
             let temp = tempfile::tempdir().unwrap();
-            put(temp.path(), doc);
+            put(temp.path(), &text);
             let config = load(temp.path());
             let file = ConfigFile::new(&config);
-            assert_eq!(file.view(), (None, ConfigHealth::Corrupt), "{doc}");
-            assert!(!file.first_start_due(), "{doc}");
+            assert_eq!(file.view(), (None, ConfigHealth::Corrupt), "{text}");
+            assert!(!file.first_start_due(), "{text}");
+            assert!(
+                ConfigFile::initial_mounts(&config, temp.path()).is_empty(),
+                "{text}"
+            );
+        }
+    }
+
+    // ADR-0398: the unshipped schema 1 has no reader.
+    #[test]
+    fn a_schema_1_file_has_no_reader_so_it_is_corrupt_and_copied_aside_at_the_next_save() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = r#"{"schema_version": 1, "root": "default"}"#;
+        put(temp.path(), old);
+        let config = load(temp.path());
+        let file = ConfigFile::new(&config);
+        assert_eq!(file.view(), (None, ConfigHealth::Corrupt));
+        assert!(!file.first_start_due(), "a file is there: no first start");
+        assert!(ConfigFile::initial_mounts(&config, temp.path()).is_empty());
+        let unversioned = tempfile::tempdir().unwrap();
+        put(unversioned.path(), r#"{"mounts": []}"#);
+        assert_eq!(
+            ConfigFile::new(&load(unversioned.path())).view(),
+            (None, ConfigHealth::Corrupt),
+            "no version reads as schema 1"
+        );
+
+        file.save(&library(MountPlace::Default)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("library.json.corrupt")).unwrap(),
+            old
+        );
+        assert_eq!(
+            on_disk(temp.path()),
+            Some(
+                json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+            )
+        );
+    }
+
+    #[test]
+    fn a_mount_list_with_an_invalid_reserved_or_taken_name_or_no_list_is_corrupt() {
+        let path = "default";
+        let mut texts = vec![
+            json!({ "schema_version": 2 }).to_string(),
+            json!({ "schema_version": 2, "mounts": {} }).to_string(),
+            doc(json!(["library"])),
+            doc(json!([{ "path": path }])),
+            doc(json!([{ "name": 7, "path": path }])),
+            doc(json!([{ "name": "a/b", "path": path }])),
+            doc(json!([{ "name": ".trash", "path": path }])),
+            doc(json!([{ "name": "engram", "path": path }])),
+            doc(json!([{ "name": "Engram", "path": path }])),
+            doc(json!([{ "name": "x".repeat(65), "path": path }])),
+            doc(json!([{ "name": "team", "path": path }, { "name": "team", "path": "default" }])),
+        ];
+        // Taken by the platform path key: only where it folds case are these two one name.
+        if engram_dashboard_platform::fs::same_path(Path::new("team"), Path::new("TEAM")) {
+            texts.push(doc(
+                json!([{ "name": "team", "path": path }, { "name": "TEAM", "path": path }]),
+            ));
+        }
+        for text in texts {
+            let temp = tempfile::tempdir().unwrap();
+            put(temp.path(), &text);
             assert_eq!(
-                ConfigFile::initial_root(&config, temp.path()),
-                None,
-                "{doc}"
+                ConfigFile::new(&load(temp.path())).view(),
+                (None, ConfigHealth::Corrupt),
+                "{text}"
             );
         }
     }
 
     #[test]
+    fn a_schema_2_mount_list_round_trips_in_order_and_an_empty_one_is_usable_with_no_mount() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = ConfigFile::new(&load(temp.path()));
+        let team = abs(temp.path(), "team");
+        let mounts = vec![
+            setting("library", MountPlace::Default),
+            setting("company", MountPlace::Explicit(team.clone())),
+            setting("업무", MountPlace::Explicit(abs(temp.path(), "work"))), // hangul-ok — non-ASCII mount name fixture
+        ];
+        file.save(&mounts).unwrap();
+        assert_eq!(
+            on_disk(temp.path()),
+            Some(json!({ "schema_version": 2, "mounts": [
+                { "name": "library", "path": "default" },
+                { "name": "company", "path": team.to_str().unwrap() },
+                { "name": "업무", "path": abs(temp.path(), "work").to_str().unwrap() }, // hangul-ok — fixture
+            ] }))
+        );
+        let config = load(temp.path());
+        assert_eq!(
+            ConfigFile::new(&config).view(),
+            (Some(mounts), ConfigHealth::Ok)
+        );
+        let names: Vec<String> = ConfigFile::initial_mounts(&config, &abs(temp.path(), "lib"))
+            .iter()
+            .map(|mount| mount.name.as_str().to_owned())
+            .collect();
+        assert_eq!(names, ["library", "company", "업무"], "the order shown"); // hangul-ok — fixture
+
+        file.save(&[]).unwrap();
+        assert_eq!(
+            on_disk(temp.path()),
+            Some(json!({ "schema_version": 2, "mounts": [] }))
+        );
+        let config = load(temp.path());
+        assert_eq!(
+            ConfigFile::new(&config).view(),
+            (Some(Vec::new()), ConfigHealth::Ok)
+        );
+        assert!(ConfigFile::initial_mounts(&config, temp.path()).is_empty());
+        assert!(!ConfigFile::new(&config).first_start_due());
+    }
+
+    #[test]
     fn a_newer_or_unreadable_file_is_read_only_with_why_and_never_written() {
         let newer = tempfile::tempdir().unwrap();
-        put(newer.path(), r#"{"schema_version": 2, "root": "default"}"#);
+        let newer_text = r#"{"schema_version": 3, "mounts": []}"#;
+        put(newer.path(), newer_text);
         let unreadable = tempfile::tempdir().unwrap();
         std::fs::create_dir(unreadable.path().join(LIBRARY_CONFIG_FILE)).unwrap();
         for dir in [newer.path(), unreadable.path()] {
             let config = load(dir);
             let file = ConfigFile::new(&config);
-            let (setting, health) = file.view();
-            assert_eq!(setting, None);
+            let (mounts, health) = file.view();
+            assert_eq!(mounts, None);
             assert!(
                 matches!(&health, ConfigHealth::ReadOnly { why } if !why.is_empty()),
                 "{health:?}"
             );
             assert!(file.read_only().is_some());
-            assert_eq!(ConfigFile::initial_root(&config, dir), None);
+            assert!(ConfigFile::initial_mounts(&config, dir).is_empty());
             assert!(!file.first_start_due());
             assert!(
-                file.save(&RootSetting::Default).is_err(),
+                file.save(&library(MountPlace::Default)).is_err(),
                 "a read-only file is never saved"
             );
-            assert_eq!(file.view(), (setting, health), "the state is kept");
+            assert_eq!(file.view(), (mounts, health), "the state is kept");
         }
         assert_eq!(
             std::fs::read_to_string(newer.path().join(LIBRARY_CONFIG_FILE)).unwrap(),
-            r#"{"schema_version": 2, "root": "default"}"#
+            newer_text
         );
         assert!(unreadable.path().join(LIBRARY_CONFIG_FILE).is_dir());
         assert!(
             load(newer.path())
                 .load_why()
                 .unwrap()
-                .contains("schema_version 2"),
+                .contains("schema_version 3"),
             "the why names the newer version"
         );
     }
@@ -465,17 +684,23 @@ mod tests {
     fn a_save_over_a_missing_file_writes_the_word_and_makes_the_file_ours() {
         let temp = tempfile::tempdir().unwrap();
         let file = ConfigFile::new(&load(temp.path()));
-        file.save(&RootSetting::Default).unwrap();
+        file.save(&[MountSetting::first_start()]).unwrap();
         assert_eq!(
             on_disk(temp.path()),
-            Some(json!({"schema_version": 1, "root": "default"}))
+            Some(
+                json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+            )
         );
-        assert_eq!(file.view(), (Some(RootSetting::Default), ConfigHealth::Ok));
+        assert_eq!(
+            file.view(),
+            (Some(library(MountPlace::Default)), ConfigHealth::Ok)
+        );
         assert!(!file.first_start_due());
         let root = abs(temp.path(), "lib");
-        file.save(&RootSetting::Explicit(root.clone())).unwrap();
+        file.save(&library(MountPlace::Explicit(root.clone())))
+            .unwrap();
         assert_eq!(
-            on_disk(temp.path()).unwrap()["root"],
+            on_disk(temp.path()).unwrap()["mounts"][0]["path"],
             json!(root.to_str().unwrap())
         );
         assert!(
@@ -490,9 +715,10 @@ mod tests {
         put(temp.path(), &explicit_doc(&abs(temp.path(), "old")));
         let file = ConfigFile::new(&load(temp.path()));
         let new = abs(temp.path(), "new");
-        file.save(&RootSetting::Explicit(new.clone())).unwrap();
+        file.save(&library(MountPlace::Explicit(new.clone())))
+            .unwrap();
         assert_eq!(
-            on_disk(temp.path()).unwrap()["root"],
+            on_disk(temp.path()).unwrap()["mounts"][0]["path"],
             json!(new.to_str().unwrap())
         );
         assert!(
@@ -506,16 +732,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         put(temp.path(), "not json");
         let file = ConfigFile::new(&load(temp.path()));
-        file.save(&RootSetting::Default).unwrap();
+        file.save(&library(MountPlace::Default)).unwrap();
         assert_eq!(
             std::fs::read_to_string(temp.path().join("library.json.corrupt")).unwrap(),
             "not json"
         );
         assert_eq!(
             on_disk(temp.path()),
-            Some(json!({"schema_version": 1, "root": "default"}))
+            Some(
+                json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+            )
         );
-        assert_eq!(file.view(), (Some(RootSetting::Default), ConfigHealth::Ok));
+        assert_eq!(
+            file.view(),
+            (Some(library(MountPlace::Default)), ConfigHealth::Ok)
+        );
     }
 
     #[test]
@@ -523,7 +754,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let file = ConfigFile::new(&load(temp.path()));
         put(temp.path(), &explicit_doc(&abs(temp.path(), "theirs")));
-        file.save(&RootSetting::Default).unwrap();
+        file.save(&library(MountPlace::Default)).unwrap();
         assert!(temp.path().join("library.json.corrupt").exists());
     }
 
@@ -531,9 +762,9 @@ mod tests {
     fn a_save_judges_the_file_again_and_refuses_a_newer_one_that_appeared_leaving_it_unsaved() {
         let temp = tempfile::tempdir().unwrap();
         let file = ConfigFile::new(&load(temp.path()));
-        let newer = r#"{"schema_version": 9, "root": "default"}"#;
+        let newer = r#"{"schema_version": 9, "mounts": []}"#;
         put(temp.path(), newer);
-        let why = file.save(&RootSetting::Default).unwrap_err();
+        let why = file.save(&library(MountPlace::Default)).unwrap_err();
         assert!(why.contains("newer"), "{why}");
         assert_eq!(
             std::fs::read_to_string(temp.path().join(LIBRARY_CONFIG_FILE)).unwrap(),
@@ -541,9 +772,12 @@ mod tests {
         );
         assert_eq!(
             file.view(),
-            (Some(RootSetting::Default), ConfigHealth::Unsaved { why })
+            (
+                Some(library(MountPlace::Default)),
+                ConfigHealth::Unsaved { why }
+            )
         );
-        assert!(!file.first_start_due(), "a root was published");
+        assert!(!file.first_start_due(), "a mount was published");
     }
 
     #[test]
@@ -551,9 +785,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         put(temp.path(), "not json");
         let file = ConfigFile::new(&load(temp.path()));
-        let setting = RootSetting::Explicit(abs(temp.path(), "lib"));
+        let mounts = library(MountPlace::Explicit(abs(temp.path(), "lib")));
         file.fail_writes(Some("disk full"));
-        let why = file.save(&setting).unwrap_err();
+        let why = file.save(&mounts).unwrap_err();
         assert!(why.contains("disk full"), "{why}");
         assert_eq!(
             std::fs::read_to_string(temp.path().join(LIBRARY_CONFIG_FILE)).unwrap(),
@@ -562,13 +796,13 @@ mod tests {
         );
         assert_eq!(
             file.view(),
-            (Some(setting.clone()), ConfigHealth::Unsaved { why }),
+            (Some(mounts.clone()), ConfigHealth::Unsaved { why }),
             "unsaved wins over corrupt and names the live setting"
         );
         assert!(file.read_only().is_none(), "the next save may write");
         file.fail_writes(None);
-        file.save(&setting).unwrap();
-        assert_eq!(file.view(), (Some(setting), ConfigHealth::Ok));
+        file.save(&mounts).unwrap();
+        assert_eq!(file.view(), (Some(mounts), ConfigHealth::Ok));
         assert_eq!(
             std::fs::read_to_string(temp.path().join("library.json.corrupt")).unwrap(),
             "not json",

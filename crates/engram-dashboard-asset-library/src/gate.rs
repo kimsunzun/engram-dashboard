@@ -2,7 +2,7 @@
 //!
 //! ## Rules (invariants)
 //!
-//! - **One `RwLock` over [`State`]** (the catalog and the root). A read takes it once ([`Gate::with_read`]). Walking,
+//! - **One `RwLock` over [`State`]** (the catalog and the mounts). A read takes it once ([`Gate::with_read`]). Walking,
 //!   reading and parsing run outside it; the write lock is taken only to apply. The write lock is never taken while
 //!   the read lock is held (std has no upgrade).
 //! - **The turn `Mutex` + `Condvar`** holds the ticket line, the three numbers ([`Numbers`]) and the first-scan state.
@@ -15,7 +15,8 @@
 //!   in one hold of the turn mutex, and released on every exit, a panic included ([`Turn`]).
 //! - **Class A**: every catalog write is per item onto the current catalog — a scan's `Catalog::apply_scan`, a late
 //!   merge's `Catalog::apply_items`, a change's own per-item primitives. The one exception is the root change: a full
-//!   fresh build of the new root, applied after `Catalog::clear` in the write lock that publishes the root.
+//!   fresh build of the new root, applied after `Catalog::clear` in the write lock that publishes the root (the first
+//!   mount relocated — `Mounts::set_root`).
 //! - **Numbers**: a scan's apply raises the swap-in count, a change the change generation, a root change the root
 //!   generation — each inside its write lock. A scan applies only if the change generation has not moved since its
 //!   walk started (else it walks again). A late merge applies only if neither generation moved since the caller noted
@@ -24,8 +25,8 @@
 //!   ([`Gate::change_checked`] — ADR-0377).
 //! - **First scan**: "raised" = one full scan or one walked root change has been applied. A reader starts one or waits
 //!   for one pending; a reader whose waited-for scan was not published goes through once more, and that failure is its
-//!   answer. The first start's publish without a walk ([`Gate::publish_root_unwalked`]) leaves it un-raised and is not
-//!   pending, so the first scan of that root is a real walk — the daemon's boot scan or a reader (ADR-0382).
+//!   answer. The first start's publish without a walk ([`Gate::publish_mount_unwalked`]) leaves it un-raised and is not
+//!   pending, so the first scan of that mount is a real walk — the daemon's boot scan or a reader (ADR-0382).
 //! - **Refresh merging**: a refresh joins a covering scan generation that is queued and not yet walking; a covering
 //!   walk already in progress does not count — the caller may have changed files before calling (PRD R41).
 // ADR-0324
@@ -44,6 +45,7 @@ use engram_dashboard_platform::fs::PathKey;
 use serde_json::json;
 
 use crate::catalog::{key, preset_refs, within, Catalog, Item, ItemContent, ScanItem, ScanResult};
+use crate::mounts::{Mount, Mounts};
 use crate::path::LibPath;
 use crate::store::ContentTag;
 use crate::RefreshReport;
@@ -62,8 +64,16 @@ const ENDED_UNANSWERED: &str = "the scan ended without an answer";
 /// What the library lock guards.
 pub struct State {
     pub catalog: Arc<Catalog>,
-    /// `None` = no library root is set: nothing can be scanned.
-    pub root: Option<PathBuf>,
+    /// The registered mounts; none = nothing can be scanned.
+    // ADR-0400
+    pub mounts: Mounts,
+}
+
+impl State {
+    /// The folder the service reads as its one root — the first mount's (`Mounts::root`); `None` = no mount.
+    pub fn root(&self) -> Option<&Path> {
+        self.mounts.root()
+    }
 }
 
 /// The three numbers a late merge notes before its disk read and compares inside its write lock (ADR-0324 decision
@@ -230,11 +240,11 @@ impl Drop for Turn<'_> {
 
 impl Gate {
     /// `root_generation` = the root generation this run starts at (`Numbers::root`).
-    pub(crate) fn new(root: Option<PathBuf>, root_generation: u64) -> Self {
+    pub(crate) fn new(mounts: Mounts, root_generation: u64) -> Self {
         Gate {
             lib: RwLock::new(State {
                 catalog: Arc::new(Catalog::default()),
-                root,
+                mounts,
             }),
             turns: Mutex::new(Turns {
                 next: 0,
@@ -367,9 +377,9 @@ impl Gate {
             );
             return Err(current);
         }
-        let State { catalog, root } = &mut *state;
+        let State { catalog, mounts } = &mut *state;
         let catalog = Arc::make_mut(catalog);
-        let (answer, touched) = f(catalog, root.as_deref(), &|| self.next_seq());
+        let (answer, touched) = f(catalog, mounts.root(), &|| self.next_seq());
         catalog.recompute_derived(&touched);
         lock(&self.turns).numbers.change += 1;
         Ok(answer)
@@ -391,27 +401,28 @@ impl Gate {
         outcome
     }
 
-    /// Publishes `new_root` as the first root without walking it: a Root ticket, exclusive behind every earlier ticket;
-    /// one write lock sets the root and raises the root generation. The first scan stays un-raised and this ticket is
-    /// not counted as pending, so the first scan of `new_root` is a real walk. `Err` = a root is already published:
-    /// nothing changed. (The stat of the new root is the caller's — before this call.)
+    /// Publishes `mount` as the only mount without walking it: a Root ticket, exclusive behind every earlier ticket;
+    /// one write lock sets the mounts and raises the root generation. The first scan stays un-raised and this ticket is
+    /// not counted as pending, so the first scan of `mount` is a real walk. `Err` = a mount is already published:
+    /// nothing changed. (The stat of the mount's folder is the caller's — before this call.)
     ///
-    /// Unlike [`Gate::change_root`] it does not clear the catalog: it relies on the invariant that while no root is
+    /// Unlike [`Gate::change_root`] it does not clear the catalog: it relies on the invariant that while no mount is
     /// published the catalog is empty — a scan, the list safety net and a launch overlay read under a root, and a merge
     /// noted before this publish is dropped by the raised root generation. No change body may insert a catalog item
-    /// while no root is published (an agent-preset edit runs with no root but writes no item), or it could leave an
-    /// item this publish would carry into the new root.
+    /// while no mount is published (an agent-preset edit runs with no root but writes no item), or it could leave an
+    /// item this publish would carry into the new mount.
     // ADR-0382
-    pub(crate) fn publish_root_unwalked(&self, new_root: PathBuf) -> Result<(), String> {
+    pub(crate) fn publish_mount_unwalked(&self, mount: Mount) -> Result<(), String> {
         let _turn = self.take_turn(Kind::Root { walks: false });
         let mut state = write(&self.lib);
-        if let Some(published) = &state.root {
+        if let Some(published) = state.mounts.iter().next() {
             return Err(format!(
-                "a library root is already published: {}",
-                published.display()
+                "a library mount is already published: {} at {}",
+                published.name.as_str(),
+                published.folder.display()
             ));
         }
-        state.root = Some(new_root);
+        state.mounts = Mounts::new(vec![mount]).expect("one mount takes no name");
         lock(&self.turns).numbers.root += 1;
         Ok(())
     }
@@ -548,8 +559,12 @@ impl Gate {
     fn scan_until_applied(&self, range: Option<&LibPath>, build: Build) -> Outcome {
         loop {
             let started = self.numbers().change;
-            let (root, tags) =
-                self.with_read(|state| (state.root.clone(), state.catalog.tags(range)));
+            let (root, tags) = self.with_read(|state| {
+                (
+                    state.root().map(Path::to_path_buf),
+                    state.catalog.tags(range),
+                )
+            });
             let root = root.ok_or_else(|| NO_ROOT.to_owned())?;
             let result = build(&root, range, &tags).map_err(|e| e.to_string())?;
             let mut state = write(&self.lib);
@@ -583,7 +598,7 @@ impl Gate {
         let catalog = Arc::make_mut(&mut state.catalog);
         catalog.clear();
         let report = Arc::new(apply_reported(catalog, result));
-        state.root = Some(new_root);
+        state.mounts.set_root(new_root);
         let mut turns = lock(&self.turns);
         turns.numbers.root += 1;
         turns.first.raised = true;
@@ -823,8 +838,20 @@ mod tests {
     /// The root generation the test gates start at — not 0, so an absolute value cannot pass by chance.
     const BASE: u64 = 7_000;
 
+    /// The mount the first start registers, at `folder`.
+    fn library_at(folder: &str) -> Mount {
+        Mount {
+            name: crate::mounts::MountName::first(),
+            folder: PathBuf::from(folder),
+        }
+    }
+
+    fn mounts_at(folder: &str) -> Mounts {
+        Mounts::new(vec![library_at(folder)]).unwrap()
+    }
+
     fn gate() -> Arc<Gate> {
-        Arc::new(Gate::new(Some(PathBuf::from("/lib")), BASE))
+        Arc::new(Gate::new(mounts_at("/lib"), BASE))
     }
 
     /// A gate whose first scan is already raised, so a folder refresh scans only its folder.
@@ -980,7 +1007,7 @@ mod tests {
             line == [("root", true), ("change", false)]
         });
         assert_eq!(
-            gate.with_read(|state| state.root.clone()),
+            gate.with_read(|state| state.root().map(Path::to_path_buf)),
             Some(PathBuf::from("/lib")),
             "readers keep the old root during the walk"
         );
@@ -999,7 +1026,7 @@ mod tests {
         });
         assert!(outcome.is_err());
         assert_eq!(
-            gate.with_read(|state| state.root.clone()),
+            gate.with_read(|state| state.root().map(Path::to_path_buf)),
             Some(PathBuf::from("/lib"))
         );
         assert_eq!(gate.numbers().root, BASE);
@@ -1010,13 +1037,13 @@ mod tests {
     #[test]
     fn an_unwalked_first_publish_waits_behind_earlier_tickets_and_leaves_the_first_scan_to_a_real_walk(
     ) {
-        let gate = Arc::new(Gate::new(None, BASE));
+        let gate = Arc::new(Gate::new(Mounts::default(), BASE));
         let (log, door) = (Arc::new(Log::default()), Arc::new(Door::default()));
         let blocker = change_thread(&gate, &log, "blocker", Some(Arc::clone(&door)));
         gate.wait_for("blocker in", |line, _| line == [("change", true)]);
         let publish = {
             let gate = Arc::clone(&gate);
-            thread::spawn(move || gate.publish_root_unwalked(PathBuf::from("/lib")))
+            thread::spawn(move || gate.publish_mount_unwalked(library_at("/lib")))
         };
         gate.wait_for("the publish waits behind the change", |line, _| {
             line == [("change", true), ("root", false)]
@@ -1025,7 +1052,7 @@ mod tests {
         join(blocker);
         join(publish).unwrap();
         assert_eq!(
-            gate.with_read(|state| state.root.clone()),
+            gate.with_read(|state| state.root().map(Path::to_path_buf)),
             Some(PathBuf::from("/lib"))
         );
         assert_eq!(
@@ -1047,11 +1074,11 @@ mod tests {
         gate.first_scan_join(&walk).unwrap();
         assert_eq!(walks.take().len(), 1, "raised by that walk");
 
-        let refused = gate.publish_root_unwalked(PathBuf::from("/other"));
+        let refused = gate.publish_mount_unwalked(library_at("/other"));
         assert!(refused.unwrap_err().contains("already published"));
         assert_eq!(
             (
-                gate.with_read(|state| state.root.clone()),
+                gate.with_read(|state| state.root().map(Path::to_path_buf)),
                 gate.numbers().root
             ),
             (Some(PathBuf::from("/lib")), BASE + 1),
@@ -1068,13 +1095,13 @@ mod tests {
     #[test]
     fn a_reader_arriving_while_an_unwalked_publish_waits_draws_its_own_scan_and_walks_the_new_root()
     {
-        let gate = Arc::new(Gate::new(None, BASE));
+        let gate = Arc::new(Gate::new(Mounts::default(), BASE));
         let (log, door) = (Arc::new(Log::default()), Arc::new(Door::default()));
         let blocker = change_thread(&gate, &log, "blocker", Some(Arc::clone(&door)));
         gate.wait_for("blocker in", |line, _| line == [("change", true)]);
         let publish = {
             let gate = Arc::clone(&gate);
-            thread::spawn(move || gate.publish_root_unwalked(PathBuf::from("/lib")))
+            thread::spawn(move || gate.publish_mount_unwalked(library_at("/lib")))
         };
         gate.wait_for("the publish queued", |line, _| line.len() == 2);
         let reader = {
@@ -1349,7 +1376,7 @@ mod tests {
         join(second).unwrap();
         assert_eq!(log.take(), ["c enters", "/r1 walks", "/r2 walks"]);
         assert_eq!(
-            gate.with_read(|state| state.root.clone()),
+            gate.with_read(|state| state.root().map(Path::to_path_buf)),
             Some(PathBuf::from("/r2"))
         );
     }
@@ -1359,19 +1386,28 @@ mod tests {
         let gate = gate();
         let walks = Arc::new(Log::default());
         let door = Arc::new(Door::default());
+        let walking = Arc::new(Door::default());
         let scan = {
-            let (gate, walks, door) = (Arc::clone(&gate), Arc::clone(&walks), Arc::clone(&door));
+            let (gate, walks, door, walking) = (
+                Arc::clone(&gate),
+                Arc::clone(&walks),
+                Arc::clone(&door),
+                Arc::clone(&walking),
+            );
             thread::spawn(move || {
                 gate.refresh(None, &|_, range, _| {
                     walks.push("walk");
                     if walks.take().len() == 1 {
+                        walking.open();
                         door.wait();
                     }
                     Ok(empty(range))
                 })
             })
         };
-        gate.wait_for("walking", |line, _| line == [("scan", true)]);
+        // Inside the walk, not merely at the ticket's entry: the scan notes the change generation between the two, and
+        //   a change landing before that note is one the walk already sees.
+        walking.wait();
         gate.change_unordered(|_| {});
         door.open();
         join(scan).unwrap();

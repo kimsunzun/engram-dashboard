@@ -487,7 +487,7 @@ mod tests {
     use super::*;
     use crate::agent_edit::PROFILE_EDIT_UNAVAILABLE;
     use crate::backends::AgentBackends;
-    use crate::config::{LibraryConfig, RootSetting};
+    use crate::config::{LibraryConfig, MountPlace};
     use crate::edit::LIBRARY_WRITE_FAILED;
     use crate::folder::{BoundedIo, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT, LIST_CAP};
     use crate::format::read::ITEM_PATH_INVALID;
@@ -671,7 +671,7 @@ mod tests {
             let state = base.join("state");
             fs::create_dir_all(&state).unwrap();
             let config = match root {
-                true => LibraryConfig::usable(&state, RootSetting::Explicit(base.join("lib"))),
+                true => LibraryConfig::usable(&state, MountPlace::Explicit(base.join("lib"))),
                 false => LibraryConfig::missing(&state),
             };
             let values = LibraryValues {
@@ -679,6 +679,7 @@ mod tests {
                 backends: Arc::new(AgentBackends),
                 config,
                 default_root: base.join("default-library"),
+                data_root: base.join("data"),
                 daemon_id: "test-daemon".to_owned(),
                 root_generation_base: 7,
                 builtin_dir: None,

@@ -315,7 +315,7 @@ impl LibraryService {
             }
             let lookup = CatalogLookup {
                 catalog: &state.catalog,
-                root: state.root.as_deref(),
+                root: state.root(),
                 builtins: &self.builtins,
             };
             let (attachments, (_, skipped)) = attach(profile, &lookup, presets, None);
@@ -355,7 +355,9 @@ impl LibraryService {
             return Err(LibraryRefusal::unavailable(why.clone()));
         }
         // The stat runs here, outside every lock.
-        let seen = self.gate.with_read(|state| state.root.clone());
+        let seen = self
+            .gate
+            .with_read(|state| state.root().map(Path::to_path_buf));
         let stat = seen
             .as_deref()
             .map(|root| self.stat_root(&self.io.begin_read(), root));
@@ -686,7 +688,7 @@ mod tests {
 
     use super::*;
     use crate::backends::AgentBackends;
-    use crate::config::{LibraryConfig, RootSetting};
+    use crate::config::{LibraryConfig, MountPlace};
     use crate::folder::{BoundedIo, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT, LIST_CAP};
     use crate::format::read::ITEM_PATH_INVALID;
     use crate::path::LibPath;
@@ -856,7 +858,7 @@ mod tests {
             fs::create_dir_all(&state).unwrap();
             let registry = Arc::new(ProfileRegistry::new(Arc::new(Saves(profiles))));
             let config = match root {
-                true => LibraryConfig::usable(&state, RootSetting::Explicit(base.join("lib"))),
+                true => LibraryConfig::usable(&state, MountPlace::Explicit(base.join("lib"))),
                 false => LibraryConfig::missing(&state),
             };
             let values = LibraryValues {
@@ -864,6 +866,7 @@ mod tests {
                 backends: Arc::new(AgentBackends),
                 config,
                 default_root: base.join("default-library"),
+                data_root: base.join("data"),
                 daemon_id: "test-daemon".to_owned(),
                 root_generation_base: 7,
                 builtin_dir: None,

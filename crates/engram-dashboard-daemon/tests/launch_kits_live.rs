@@ -280,7 +280,10 @@ async fn live(root: &Path, library: Option<PathBuf>) -> Live {
     let state = root.join("state");
     if let Some(library) = &library {
         std::fs::create_dir_all(&state).expect("create the state folder");
-        let config = serde_json::json!({ "schema_version": 1, "root": library.to_str().unwrap() });
+        let config = serde_json::json!({
+            "schema_version": 2,
+            "mounts": [{ "name": "library", "path": library.to_str().unwrap() }],
+        });
         std::fs::write(state.join("library.json"), config.to_string()).expect("write library.json");
     }
     let library = Arc::new(LibraryService::new(
@@ -289,6 +292,7 @@ async fn live(root: &Path, library: Option<PathBuf>) -> Live {
             backends: Arc::new(AgentBackends),
             config: engram_dashboard_asset_library::config::load(&state),
             default_root: root.join("default-library"),
+            data_root: root.to_path_buf(),
             daemon_id: Uuid::new_v4().to_string(),
             root_generation_base: 1,
             builtin_dir: Some(repo_builtin()),
