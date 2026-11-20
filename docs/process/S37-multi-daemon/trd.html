@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>S37 멀티 데몬 구조</title>
+<title>멀티 데몬 구조</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <style>
 /* Layout: one wide column, picture first — whole structure, code map, two runtime flows, then one collapsed detail block.
@@ -102,7 +102,7 @@ svg .ah.m { fill: var(--muted); }
 <main>
 
 <header>
-  <h1>S37 멀티 데몬 구조</h1>
+  <h1>멀티 데몬 구조</h1>
   <p class="lede">다른 PC에 있는 데몬끼리 iroh로 직접 이어서, 한 PC의 에이전트가 다른 PC의 에이전트에게 우편을 보낼 수 있게 한다.</p>
 </header>
 
@@ -180,7 +180,7 @@ svg .ah.m { fill: var(--muted); }
         <text x="500" y="372" text-anchor="middle" class="s tn">relay · 주소 찾기</text>
       </svg>
     </div>
-    <figcaption>PC 안은 앱↔daemon이 WebSocket(loopback), PC 사이는 daemon끼리 iroh(QUIC)로 잇는다. 파란색이 S37에서 생기는 것이다.<br>
+    <figcaption>PC 안은 앱↔daemon이 WebSocket(loopback), PC 사이는 daemon끼리 iroh(QUIC)로 잇는다. 파란색이 이번에 새로 생기는 것이다.<br>
     helper servers는 다른 네트워크일 때 주소 찾기와 중계를 돕는다. 신뢰 PC 변경은 사람이 승인한다.</figcaption>
   </figure>
 </section>
@@ -478,7 +478,7 @@ svg .ah.m { fill: var(--muted); }
       <dt>PeerWire 메시지</dt>
       <dd><code>Hello</code> · <code>Mail</code> · <code>MailVerdict</code> · <code>ReplyOverdue</code> · <code>DirSnapshot</code> · <code>DirDelta</code> · <code>DirResync</code> · <code>Probe</code> / <code>ProbeAck</code> · <code>Duplicate</code></dd>
       <dt>나중으로</dt>
-      <dd>outbox (T-120) · 에이전트 루프 감지 (T-121) · 첨부 (T-122) · 화면 없는 PC의 승인 CLI (T-118) · <code>name@*</code> 여러 PC 동시 전송 (T-117)</dd>
+      <dd>outbox · 에이전트 루프 감지 · 첨부 · 화면 없는 PC의 승인 CLI · <code>name@*</code> 여러 PC 동시 전송</dd>
     </dl>
   </details>
 </section>
