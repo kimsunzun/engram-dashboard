@@ -634,7 +634,7 @@ async fn claude_l4_folder_entries_and_a_library_skill_load() {
     put(
         &lib.join("P.yaml"),
         &format!(
-            "kind: preset\nversion: 1\nskills:\n  - skills/live-lib\nfolders:\n  - '{}'\n  - '{}'\n",
+            "kind: preset\nversion: 1\nskills:\n  - library/skills/live-lib\nfolders:\n  - '{}'\n  - '{}'\n",
             a.display(),
             b.display()
         ),
@@ -644,7 +644,7 @@ async fn claude_l4_folder_entries_and_a_library_skill_load() {
     std::fs::create_dir_all(&work).unwrap();
     let mut profile = agent("live-claude-folders", claude(), &work);
     profile.presets = vec![AttachedPreset {
-        path: "P.yaml".to_string(),
+        path: "library/P.yaml".to_string(),
     }];
     let id = profile.id;
     let (info, events) = live.start(&profile);
@@ -688,12 +688,13 @@ const NAMED_NOTE: &str =
 const COUNT_NOTE_TWO: &str =
     "Engram launch note: 2 items your presets reference were not found and were left out of this launch.";
 
-/// A library under `root` whose preset `P.yaml` lists an instruction (`rules/<stem>-<token>.md`) and a folder entry
-/// that are both missing — the library, the missing instruction's path and the missing folder's unique name. The scene
+/// A library under `root` (the mount `library`) whose preset `P.yaml` lists an instruction
+/// (`library/rules/<stem>-<token>.md`) and a folder entry that are both missing — the library, the missing instruction's
+/// path and the missing folder's unique name. The scene
 /// token keeps a leftover from another run from answering.
 fn missing_items_library(root: &Path, stem: &str) -> (PathBuf, String, String) {
     let n = Uuid::new_v4().simple().to_string()[..8].to_string();
-    let gone = format!("rules/{stem}-{n}.md");
+    let gone = format!("library/rules/{stem}-{n}.md");
     let absent = format!("absent-{n}");
     let lib = root.join("lib");
     put(
@@ -744,7 +745,7 @@ async fn claude_l5_missing_items_are_skipped_and_the_agent_is_told() {
     std::fs::create_dir_all(&work).unwrap();
     let mut profile = agent("live-claude-missing", claude(), &work);
     profile.presets = vec![AttachedPreset {
-        path: "P.yaml".to_string(),
+        path: "library/P.yaml".to_string(),
     }];
     let id = profile.id;
     let (info, notices, events) = live.start_reporting(&profile);
@@ -758,7 +759,7 @@ async fn claude_l5_missing_items_are_skipped_and_the_agent_is_told() {
     );
     assert!(instructions.contains(NAMED_NOTE), "L5: {instructions}");
     assert!(
-        instructions.contains(&format!("- {gone} (listed in P.yaml)")),
+        instructions.contains(&format!("- {gone} (listed in library/P.yaml)")),
         "L5: {instructions}"
     );
     assert!(instructions.contains(&absent), "L5: {instructions}");
@@ -914,7 +915,7 @@ async fn codex_l5_missing_items_reach_codex_as_a_launch_note() {
         std::fs::create_dir_all(&work).unwrap();
         let mut profile = agent("live-codex-missing", codex(mode), &work);
         profile.presets = vec![AttachedPreset {
-            path: "P.yaml".to_string(),
+            path: "library/P.yaml".to_string(),
         }];
         let id = profile.id;
         let (info, notices, events) = live.start_reporting(&profile);

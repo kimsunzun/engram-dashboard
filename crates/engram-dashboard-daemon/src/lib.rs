@@ -1599,7 +1599,7 @@ mod tests {
                 false,
             );
             profile.presets = vec![AttachedPreset {
-                path: "P.yaml".to_string(),
+                path: "library/P.yaml".to_string(),
             }];
             profile
         };
@@ -1643,7 +1643,7 @@ mod tests {
             with_root.iter().any(|reason| matches!(
                 reason,
                 BlockReason::Broken { item, reason, .. }
-                    if item == "P.yaml" && reason.code == "yaml-syntax"
+                    if item == "library/P.yaml" && reason.code == "yaml-syntax"
             )),
             "{with_root:?}"
         );

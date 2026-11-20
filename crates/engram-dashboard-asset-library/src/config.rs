@@ -402,6 +402,14 @@ impl LibraryConfig {
         }
     }
 
+    /// A usable file holding `mounts`, in order.
+    pub(crate) fn mounted(state_dir: &Path, mounts: Vec<MountSetting>) -> Self {
+        LibraryConfig {
+            state_dir: state_dir.to_path_buf(),
+            load: Load::Usable(mounts),
+        }
+    }
+
     /// The read-only reason of the load, if any.
     fn load_why(&self) -> Option<&str> {
         match &self.load {

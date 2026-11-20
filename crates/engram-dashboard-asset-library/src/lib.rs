@@ -1,8 +1,8 @@
 //! # engram-dashboard-asset-library — the preset library
 //!
-//! The library holds instruction, skill, settings and preset files under one root folder. This crate reads, checks and
-//! resolves them and makes the launch materials; the daemon creates the service, plugs its ports in, passes it values and
-//! calls the first start and the boot scan (ADR-0311 · ADR-0382).
+//! The library holds instruction, skill, settings and preset files in the folders of its mounts. This crate reads,
+//! checks and resolves them and makes the launch materials; the daemon creates the service, plugs its ports in, passes
+//! it values and calls the first start and the boot scan (ADR-0311 · ADR-0382).
 //!
 //! ## Dependency rule (invariant)
 //!
@@ -37,26 +37,27 @@
 //! ## The service
 //!
 //! [`LibraryService`] owns the catalog behind the ADR-0324 gate (`gate.rs` — the lock order and the ticket rules are
-//! there). Library files under the root are read with the store directly (local by assumption). Every stat, list,
+//! there). Library files in a mount's folder are read with the store directly (local by assumption). Every stat, list,
 //! canonicalize, file identity or read of a folder outside the library — folder entries, native skill roots, the working
-//! folder, the library root itself, a mount folder and its ancestors (`mounts::overlap`) — goes through
+//! folder, a mount's folder itself and its ancestors (`mounts::overlap`) — goes through
 //! [`folder::BoundedIo`], never under the library lock. The built-ins
 //! (`Builtins::new`), the launch folder (`prepare_in`, the sweep, `release`), `library.json` (`config.rs`) and the
 //! folder `set_root {create}` or the first start creates use std `fs`.
 //!
-//! ## The mounts and the root
+//! ## The mounts
 //!
 //! The library is one virtual root whose top holds named mounts, each mapped to a folder (`mounts.rs` — ADR-0396 ·
-//! ADR-0400). The mount list is persisted in `library.json` (`config.rs` — ADR-0375 · ADR-0376), read by the daemon
-//! before [`LibraryService::new`]; `new` does no disk work beyond the built-ins. The service still reads one root: the
-//! first mount's folder ([`State::root`]). [`LibraryService::set_root`] and [`LibraryService::first_start`] are the
-//! only writers of the setting. `set_root` relocates the first mount (or registers `library` when there is none)
-//! through [`LibraryService::change_root`] (stat, then walk); the first start stats the default place and publishes it
-//! as the mount `library` without a walk (ADR-0382). Each writes `library.json` — every published mount, one at the
-//! default place as `"default"` — only after its publish succeeded (ADR-0381): a refused publish writes nothing, and a
-//! write that fails leaves the new mounts live and the setting `unsaved` — nothing is undone. One root-change mutex
-//! serializes them across the publish and the write; under it they take only the gate's locks and the config's state
-//! mutex, a leaf held for no IO.
+//! ADR-0400). Every path the service takes, keeps or answers is virtual (`<mount>/…`); it is joined to a mount's folder
+//! only at the disk boundary, through `mounts.rs`, and a path whose first name names no registered mount reads as
+//! absent. The mount list is persisted in `library.json` (`config.rs` — ADR-0375 · ADR-0376), read by the daemon before
+//! [`LibraryService::new`]; `new` does no disk work beyond the built-ins. [`LibraryService::set_root`] and
+//! [`LibraryService::first_start`] are the only writers of the setting. `set_root` relocates the first mount (or
+//! registers `library` when there is none) through [`LibraryService::change_root`] (stat, then walk); the first start
+//! stats the default place and publishes it as the mount `library` without a walk (ADR-0382). Each writes
+//! `library.json` — every published mount, one at the default place as `"default"` — only after its publish succeeded
+//! (ADR-0381): a refused publish writes nothing, and a write that fails leaves the new mounts live and the setting
+//! `unsaved` — nothing is undone. One root-change mutex serializes them across the publish and the write; under it they
+//! take only the gate's locks and the config's state mutex, a leaf held for no IO.
 //!
 //! The daemon never walks the library before it is reachable (ADR-0382): on every start, after the first-start step,
 //! it calls [`LibraryService::start_boot_scan`], which runs the first scan on a background job and returns at once.
@@ -161,7 +162,7 @@ use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need};
 use crate::format::read::ITEM_PATH_INVALID;
 use crate::gate::{Gate, Tags};
 pub use crate::gate::{Numbers, State, NOT_FOUND};
-use crate::mounts::{Mount, MountName};
+use crate::mounts::{Mount, MountName, MountPath, Mounts};
 use crate::path::{AssetRef, BuiltinId, LibPath, PathError};
 use crate::refs::{default_slot_count, reference_count, referrers_of};
 use crate::resolve::{resolve, CatalogLookup, Lookup, Resolution, RootState, Target};
@@ -177,8 +178,8 @@ pub const LIBRARY_READ_CAP: u64 = 16 * 1024 * 1024;
 // TRD S25 step-7 B8
 pub const PATH_THROUGH_LINK: &str = "path-through-link";
 
-/// The code of a catalog read that could not be answered because no full scan of the library could be applied — no
-/// root is set, or the root could not be walked — and of the ④ row, a library preset attached while the root is not
+/// The code of a catalog read that could not be answered because no full scan of the library could be applied — a
+/// mount could not be walked — and of the ④ row, a library preset attached while the root is not
 /// usable (`args` = `{message}`, the reason). A launch leaves that row out for an unset or absent root and refuses on it
 /// for a root that exists but cannot be read (ADR-0387).
 // TRD S25 step-7 B8
@@ -199,6 +200,12 @@ pub const LISTING_UNANSWERED: &str = "the bounded listing gave no answer";
 /// The code of an edit whose root generation is not the current one (`args` = `{given, current}`).
 // ADR-0377
 pub const ROOT_GENERATION_STALE: &str = "root-generation-stale";
+
+/// The code of a write whose target is the virtual root or a mount's top — a path of one name, or none (`args` =
+/// `{path}`, absent for none): nothing is created at the top, and a mount's top changes only through the mount
+/// commands.
+// ADR-0400 decision 5
+pub const VIRTUAL_ROOT_READ_ONLY: &str = "virtual-root-read-only";
 
 /// The code of a `set_root` whose folder cannot be used — it could not be created, its stat did not answer `Ok`, or
 /// its walk failed at the root; nothing published, `library.json` not written (`args` = `{path, why}`).
@@ -328,7 +335,7 @@ pub struct LibraryService {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryStatus {
     pub daemon_id: String,
-    /// The published root — the first mount's folder; `None` = no mount.
+    /// The first mount's folder; `None` = no mount.
     pub root: Option<PathBuf>,
     /// The first mount's stored place; `None` = `library.json` could not be read (`config` is read-only or corrupt) or
     /// names no mount. While `config` is unsaved, the live mounts' setting.
@@ -405,7 +412,7 @@ pub struct FolderNode {
 pub struct ReadAnswer {
     /// Kind, name, state, description and reference count as `list` shows it.
     pub row: ListRow,
-    /// The item on disk under the published root.
+    /// The item on disk in its mount's folder.
     pub absolute: PathBuf,
     /// Presets that list it.
     pub presets_direct: Vec<String>,
@@ -503,12 +510,12 @@ pub struct RefreshReport {
     pub problems: Vec<(LibPath, Reason)>,
     /// Re-read `.yaml` / `.yml` files that declare no `kind` — not listed.
     pub no_kind: Vec<LibPath>,
-    /// Links below the root that were not entered.
+    /// Links below a mount's folder that were not entered.
     // ADR-0365
     pub skipped_links: Vec<LibPath>,
-    /// Where the walk or a read failed (`None` = the root), with the error; those items are kept as they were. When
-    /// nothing could be scanned (no root, the root unreadable, or a refresh's own scan of a folder with a dot or temp
-    /// name), the one entry is `(None, why)`.
+    /// Where the walk or a read failed (a mount's top for its folder), with the error; those items are kept as they
+    /// were. When nothing could be scanned (a mount's folder unreadable, a folder in no registered mount, or a
+    /// refresh's own scan of a folder with a dot or temp name), the one entry is `(None, why)`.
     pub errors: Vec<(Option<LibPath>, String)>,
 }
 
@@ -563,9 +570,9 @@ impl LibraryService {
 
     /// One library preset on its own (the edit area — no agent: everything is shown, no format verdict), after the
     /// first-scan entrance, over the catalog under one read lock; its folder entries are stat'ed afterwards, outside
-    /// the lock, on one read-computation budget. A first scan that could not be applied stats the root: a root
-    /// that is not there is a skipped ④ row (`missing` / `not a folder`), one that is there is a blocking ④ row
-    /// with the scan's reason (`RootState::of`).
+    /// the lock, on one read-computation budget. The folder of the mount it names is stat'ed: one that is not there is
+    /// a skipped ④ row (`missing` / `not a folder`); one that is there blocks with a ④ row when the first scan could
+    /// not be applied, with the scan's reason ([`library_state`]).
     pub fn resolve_preset(&self, preset: &LibPath) -> Resolution {
         let want = Want {
             backend: None,
@@ -585,7 +592,8 @@ impl LibraryService {
     }
 
     /// What each agent gets (tree ⛔; `agent.presets` resolves the one profile it read the same way): one first-scan
-    /// entrance, the root stat (when a library preset is attached), one read lock for all of them, then the folder
+    /// entrance, the stats of the mounts attached presets name (when a library preset is attached), one read lock for
+    /// all of them, then the folder
     /// stats — all on one read-computation budget, each distinct folder stat'ed once; then, with no lock, a link probe
     /// for each ① `not-found` library row. `None` = no such agent, or its backend has no settings check (it takes no
     /// preset — B13).
@@ -600,18 +608,19 @@ impl LibraryService {
             .collect()
     }
 
-    /// One resolution per want, in order. Locks: the first-scan entrance, a brief read lock for the root, the root stat
-    /// (only when a library preset is attached somewhere — otherwise it decides nothing) with no lock, one read lock for
-    /// every resolution, the folder stats with no lock, then the link probes of `mark_links` with no lock. A block-④
-    /// resolution has no folder and no `not-found` row, so it is neither stat'ed nor probed.
+    /// One resolution per want, in order. Locks: the first-scan entrance, a brief read lock for the mounts, the stats
+    /// of the mounts attached presets name (only when a library preset is attached somewhere — otherwise they decide
+    /// nothing) with no lock, one read lock for every resolution, the folder stats with no lock, then the link probes
+    /// of `mark_links` with no lock. A block-④ resolution has no folder and no `not-found` row, so it is neither
+    /// stat'ed nor probed.
     fn resolve_wants(&self, wants: &[&Want]) -> Vec<Resolution> {
         self.resolve_over(wants, true, None, |_, _| ()).0
     }
 
     /// [`LibraryService::resolve_wants`] with `draft` standing in for the catalog item at its path (`preset.check`)
     /// and `extra` run over the state and the same lookup inside the read lock that resolves. `library` = the
-    /// computation reads library items; `false` skips the first-scan entrance and the root stat and takes the root as
-    /// usable (only built-ins and `draft` are looked up).
+    /// computation reads library items; `false` skips the first-scan entrance and the mount stats and takes the library
+    /// as usable (only built-ins and `draft` are looked up).
     pub(crate) fn resolve_over<R>(
         &self,
         wants: &[&Want],
@@ -624,17 +633,15 @@ impl LibraryService {
         } else {
             Ok(())
         };
-        let root = self
-            .gate
-            .with_read(|state| state.root().map(Path::to_path_buf));
+        let mounts = self.gate.with_read(|state| state.mounts.clone());
         let io = self.io.begin_read();
+        let attached: Vec<&AssetRef> = wants.iter().flat_map(|want| &want.presets).collect();
         let library_attached = library
-            && wants
+            && attached
                 .iter()
-                .flat_map(|want| &want.presets)
                 .any(|preset| matches!(preset, AssetRef::Library(_)));
         let root_state = match library {
-            true => self.root_state(&io, root.as_deref(), joined, library_attached),
+            true => self.root_state(&io, &mounts, &attached, joined, library_attached),
             false => RootState::Ok,
         };
         let targets: Vec<Target> = wants
@@ -652,7 +659,7 @@ impl LibraryService {
         let (mut resolved, extra): (Vec<Resolution>, R) = self.gate.with_read(|state| {
             let catalog = CatalogLookup {
                 catalog: &state.catalog,
-                root: state.root(),
+                mounts: &state.mounts,
                 builtins: &self.builtins,
             };
             let overlaid = draft.map(|draft| draft.over(&catalog));
@@ -674,29 +681,53 @@ impl LibraryService {
         let statuses = self.io.stat_all(&io, &folders);
         for resolution in &mut resolved {
             resolution.attach_folder_status(&statuses);
-            if let Some(root) = &root {
-                self.mark_links(root, resolution);
-            }
+            self.mark_links(&mounts, resolution);
         }
         (resolved, extra)
     }
 
-    /// The root as block ④ needs it ([`RootState::of`]): unset; or, when a library preset is attached (otherwise the
-    /// root decides nothing and is not asked), stat'ed as a required ask on `io` and judged with `joined` (whether a
-    /// full scan could be applied — a launch passes `Ok`).
+    /// The library as block ④ needs it ([`library_state`]): unset with no mount registered; else, when a library preset
+    /// is attached (otherwise no mount decides anything and none is asked), the folder of each mount an attached
+    /// library preset in `attached` names stat'ed as a required ask on `io`, judged with `joined` (whether a full scan
+    /// could be applied — a launch passes `Ok`).
     // ADR-0387
     fn root_state(
         &self,
         io: &LaunchIo,
-        root: Option<&Path>,
+        mounts: &Mounts,
+        attached: &[&AssetRef],
         joined: Result<(), String>,
         library_attached: bool,
     ) -> RootState {
-        let Some(root) = root else {
-            return RootState::Unset;
+        let stats = match library_attached {
+            true => self.stat_mounts(io, &named_folders(mounts, attached)),
+            false => Vec::new(),
         };
-        let stat = library_attached.then(|| self.stat_root(io, root));
-        RootState::of(&joined, stat.as_ref())
+        library_state(&joined, mounts, stats)
+    }
+
+    /// Each folder of `folders` stat'ed as a required ask on `io`, all in one batch (with the share probe of
+    /// [`BoundedIo::stat_all`]) — one wait for all, so a mount that does not answer cannot spend the budget of the
+    /// others; answered in the order of `folders`. [`STAT_UNANSWERED`] if the bounded IO broke its every-key contract.
+    // ADR-0360
+    pub(crate) fn stat_mounts(&self, io: &LaunchIo, folders: &[PathBuf]) -> Vec<FolderStatus> {
+        let asks: Vec<(PathBuf, Need)> = folders
+            .iter()
+            .map(|folder| (folder.clone(), Need::Required))
+            .collect();
+        let statuses = self.io.stat_all(io, &asks);
+        folders
+            .iter()
+            .map(|folder| {
+                statuses.get(&path_key(folder)).cloned().unwrap_or_else(|| {
+                    tracing::error!(
+                        path = %escape_controls(&folder.to_string_lossy()),
+                        "the bounded stat gave no answer for the path it was asked"
+                    );
+                    FolderStatus::Unreadable(STAT_UNANSWERED.to_owned())
+                })
+            })
+            .collect()
     }
 
     /// The root (or any folder — `LaunchKitSource::stat_folder`) stat'ed as a required ask on `io` (with the share probe
@@ -725,8 +756,8 @@ impl LibraryService {
     }
 
     /// Finishes a resolution built under a library lock, outside every lock: its folders stat'ed on a fresh read budget,
-    /// then the link probes of its `not-found` rows under `root`.
-    pub(crate) fn settle_resolution(&self, resolution: &mut Resolution, root: Option<&Path>) {
+    /// then the link probes of its `not-found` rows in `mounts`.
+    pub(crate) fn settle_resolution(&self, resolution: &mut Resolution, mounts: &Mounts) {
         let asks: Vec<(PathBuf, Need)> = resolution
             .folder_paths()
             .into_iter()
@@ -734,16 +765,15 @@ impl LibraryService {
             .collect();
         let statuses = self.io.stat_all(&self.io.begin_read(), &asks);
         resolution.attach_folder_status(&statuses);
-        if let Some(root) = root {
-            self.mark_links(root, resolution);
-        }
+        self.mark_links(mounts, resolution);
     }
 
     /// Turns each ① `not-found` row of a library reference that lies at or below a link inside the library into ②
     /// [`PATH_THROUGH_LINK`] (R11), or into ② [`launch::LIBRARY_READ_FAILED`] when the probe fails — the rule of
-    /// [`link_verdict`]. Asks the store's `first_link` per row — call it outside every lock.
+    /// [`link_verdict`]. Asks the store's `first_link` per row in its mount's folder (a row of a mount not in `mounts`,
+    /// or of a mount's top, is left as it is) — call it outside every lock.
     // ADR-0387
-    fn mark_links(&self, root: &Path, resolution: &mut Resolution) {
+    pub(crate) fn mark_links(&self, mounts: &Mounts, resolution: &mut Resolution) {
         for problem in &mut resolution.problems {
             let BlockReason::Missing { item, via, reason } = problem else {
                 continue;
@@ -754,9 +784,10 @@ impl LibraryService {
             if reason.code != NOT_FOUND {
                 continue;
             }
-            if let Some(verdict) =
-                link_verdict(self.store.first_link(root, &path), item, reason.line)
-            {
+            let Some(probe) = self.first_link(mounts, &path) else {
+                continue;
+            };
+            if let Some(verdict) = link_verdict(probe, item, reason.line) {
                 *problem = BlockReason::Broken {
                     item: item.clone(),
                     via: via.clone(),
@@ -764,6 +795,19 @@ impl LibraryService {
                 };
             }
         }
+    }
+
+    /// The store's link probe of `path` in its mount's folder (`LibraryStore::first_link`); `None` = nothing to probe —
+    /// its mount is not in `mounts`, or it names a mount's top. A store call — run it outside every lock.
+    pub(crate) fn first_link(
+        &self,
+        mounts: &Mounts,
+        path: &LibPath,
+    ) -> Option<io::Result<Option<MountPath>>> {
+        let (mount, Some(rest)) = mounts.locate(path)? else {
+            return None;
+        };
+        Some(self.store.first_link(&mount.folder, &rest))
     }
 
     /// What agent `id` attaches, read from the registry (outside every library lock).
@@ -792,7 +836,8 @@ impl LibraryService {
         })
     }
 
-    /// The items and plain subfolders directly in `folder` (`None` = the root), after the first-scan entrance, under
+    /// The items and plain subfolders directly in `folder` (`None` = the virtual root, whose subfolders are the mounts'
+    /// tops), after the first-scan entrance, under
     /// one read lock — no scan once the first scan is raised. `Err` = the first scan could not be applied
     /// ([`LIBRARY_UNAVAILABLE`] — ADR-0324 decision 6: that failure is the answer). A `folder` the catalog does not
     /// know is checked on disk alone and merged (the safety net — a late merge, ADR-0324 decision 5); one at or below
@@ -817,37 +862,33 @@ impl LibraryService {
             args: json!({ "message": why }),
             line: None,
         })?;
-        // ADR-0324 decision 5: the numbers are noted in the read lock that reads the root the disk read uses, so a root
-        //   change published after it moves the root generation and discards the merge.
+        // ADR-0324 decision 5: the numbers are noted in the read lock that reads the mounts the disk read uses, so a
+        //   root change published after it moves the root generation and discards the merge.
         let known = self.gate.with_read(|state| match folder {
-            Some(path) if !is_known(&state.catalog, path) => Err((
-                path,
-                state.root().map(Path::to_path_buf),
-                self.gate.numbers(),
-            )),
+            Some(path) if !is_known(&state.catalog, path) => {
+                Err((path, state.mounts.clone(), self.gate.numbers()))
+            }
             _ => Ok(self.answer(state, folder, filter)),
         });
-        let (path, root, noted) = match known {
+        let (path, mounts, noted) = match known {
             Ok(answer) => return Ok(answer),
             Err(unknown) => unknown,
         };
-        if let Some(root) = root {
-            match self.observe(&root, path) {
-                Observed::ThroughLink => {
-                    return Ok(ListAnswer {
-                        folder: folder.cloned(),
-                        rows: vec![through_link_row(path)],
-                        folders: Vec::new(),
-                        builtins: self.builtin_rows(filter),
-                    })
-                }
-                Observed::Items(items) => {
-                    self.gate.late_merge(noted, |catalog, may_insert| {
-                        catalog.apply_items(items, may_insert)
-                    });
-                }
-                Observed::Refused => {}
+        match self.observe(&mounts, path) {
+            Observed::ThroughLink => {
+                return Ok(ListAnswer {
+                    folder: folder.cloned(),
+                    rows: vec![through_link_row(path)],
+                    folders: Vec::new(),
+                    builtins: self.builtin_rows(filter),
+                })
             }
+            Observed::Items(items) => {
+                self.gate.late_merge(noted, |catalog, may_insert| {
+                    catalog.apply_items(items, may_insert)
+                });
+            }
+            Observed::Refused => {}
         }
         Ok(self
             .gate
@@ -860,8 +901,8 @@ impl LibraryService {
     /// before the first scan was raised) is already walking, it waits for it and then scans its folder like any refresh — or, when what it
     /// waited for failed, goes through a full scan once more.
     pub fn refresh(&self, folder: Option<&LibPath>) -> RefreshReport {
-        match self.gate.refresh(folder, &|root, range, tags| {
-            self.build_scan(root, range, tags)
+        match self.gate.refresh(folder, &|mount, under, tags| {
+            self.build_scan(mount, under, tags)
         }) {
             Ok(report) => report.share(folder),
             Err(why) => failed(why),
@@ -873,10 +914,10 @@ impl LibraryService {
     /// merges put in. The launch check does not pass it.
     pub fn first_scan_join(&self) -> Result<(), String> {
         self.gate
-            .first_scan_join(&|root, range, tags| self.build_scan(root, range, tags))
+            .first_scan_join(&|mount, under, tags| self.build_scan(mount, under, tags))
     }
 
-    /// `f` over the catalog and the root under one read lock. `f` may read the profile registry and call pure backend
+    /// `f` over the catalog and the mounts under one read lock. `f` may read the profile registry and call pure backend
     /// port answers (no IO, no lock — TRD S25 step-7 §3-8 step 4) and nothing else outward; it must not call back into
     /// the service.
     pub fn with_read<R>(&self, f: impl FnOnce(&State) -> R) -> R {
@@ -884,8 +925,8 @@ impl LibraryService {
     }
 
     /// The numbers to note before a disk read whose result will be merged late ([`LibraryService::late_merge`]) — and
-    /// before reading the root that disk read uses, or inside the same read lock ([`LibraryService::with_read`]):
-    /// noted after the root was read, they may already include a root change the read does not see.
+    /// before reading the mounts that disk read uses, or inside the same read lock ([`LibraryService::with_read`]):
+    /// noted after the mounts were read, they may already include a root change the read does not see.
     pub fn numbers(&self) -> Numbers {
         self.gate.numbers()
     }
@@ -918,28 +959,29 @@ impl LibraryService {
     }
 
     /// A change inside Engram (TRD S25 step-7 §6 writer 5 — step 9a and 9b edits): its own ticket, then `f` under the
-    /// write lock with the catalog, the root and the sequence; `f` writes per item and returns the touched keys; the
+    /// write lock with the catalog, the mounts and the sequence; `f` writes per item and returns the touched keys; the
     /// change generation is raised before the lock is released. A caller that reads the catalog passes the first-scan
     /// entrance before this call. The change's disk effect must be finished inside `f` (or before the call): a reader
     /// that notes the numbers after the raise assumes it sees the new disk.
     pub fn change<R>(
         &self,
-        f: impl FnOnce(&mut Catalog, Option<&Path>, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
+        f: impl FnOnce(&mut Catalog, &Mounts, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
     ) -> R {
         self.gate.change(f)
     }
 
-    /// Moves the library to `new_root` (TRD S25 step-7 §6 writer 6 — step 9a): the new root is stat'ed first on one
-    /// read-computation budget, outside the gate; then, exclusive behind every earlier ticket, it is walked with empty
-    /// tags and published with a fresh catalog in one write lock. `Err` = refused, nothing published: the stat did not
-    /// answer `Ok`, or the walk failed at the root.
+    /// Moves the first mount to `new_root` (`library` registered there when no mount is — TRD S25 step-7 §6 writer 6,
+    /// step 9a): the folder is stat'ed first on one read-computation budget, outside the gate; then, exclusive behind
+    /// every earlier ticket, it is walked with empty tags and published in one write lock, the mount's range in the
+    /// catalog replaced by that walk. `Err` = refused, nothing published: the stat did not answer `Ok`, or the walk
+    /// failed at the folder.
     ///
     /// It neither records the root in `library.json` nor takes the root-change mutex: every caller outside this crate
     /// goes through [`LibraryService::set_root`] (tests excepted). The first start does not walk: it publishes after the
     /// same stat ([`LibraryService::first_start`]).
     pub fn change_root(&self, new_root: PathBuf) -> Result<RefreshReport, String> {
         self.stat_new_root(&new_root)?;
-        let walk = |root: &Path| self.build_scan(root, None, &Tags::new());
+        let walk = |mount: &Mount| self.build_scan(mount, None, &Tags::new());
         self.gate
             .change_root(new_root, walk)
             .map(|report| report.share(None))
@@ -960,19 +1002,19 @@ impl LibraryService {
     pub fn change_at<R>(
         &self,
         root_generation: Option<u64>,
-        f: impl FnOnce(&mut Catalog, Option<&Path>, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
+        f: impl FnOnce(&mut Catalog, &Mounts, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
     ) -> Result<R, LibraryRefusal> {
         self.gate
             .change_checked(root_generation, f)
             .map_err(|current| stale_root_generation(root_generation, current))
     }
 
-    /// The root, its setting and `library.json` now. The root is stat'ed on one read budget outside every lock; the
-    /// root and its generation are read in one read lock.
+    /// The first mount, its setting and `library.json` now. The first mount's folder is stat'ed on one read budget
+    /// outside every lock; it and the root generation are read in one read lock.
     pub fn status(&self) -> LibraryStatus {
         let (root, root_generation) = self.gate.with_read(|state| {
             (
-                state.root().map(Path::to_path_buf),
+                state.mounts.first().map(|first| first.folder.clone()),
                 self.gate.numbers().root,
             )
         });
@@ -1151,33 +1193,33 @@ impl LibraryService {
         self.config.save(&settings)
     }
 
-    /// Starts the first scan of the published root as a background job on the service's spawner and returns at once.
+    /// Starts the first scan of the published mounts as a background job on the service's spawner and returns at once.
     /// The job passes the first-scan entrance ([`LibraryService::first_scan_join`]), so it joins a first scan a reader
     /// already started instead of walking again, and readers arriving during its walk wait for it there. With no
-    /// published root no job is started; a job that cannot be started is logged, and the first reader starts the scan at
-    /// the entrance. A failed scan is logged; the next reader walks again. The daemon calls it on every start, after the
-    /// first-start step, and never waits for it.
+    /// published mount no job is started; a job that cannot be started is logged, and the first reader starts the scan
+    /// at the entrance. A failed scan is logged; the next reader walks again. The daemon calls it on every start, after
+    /// the first-start step, and never waits for it.
     // ADR-0382
     pub fn start_boot_scan(self: &Arc<Self>) {
-        let Some(root) = self
-            .gate
-            .with_read(|state| state.root().map(Path::to_path_buf))
-        else {
-            tracing::debug!("library boot scan: no root; not started");
+        let mounts = self.gate.with_read(|state| state.mounts.clone());
+        if mounts.is_empty() {
+            tracing::debug!("library boot scan: no mount; not started");
             return;
-        };
+        }
+        let names: Vec<&str> = mounts.iter().map(|mount| mount.name.as_str()).collect();
+        let names = escape_controls(&names.join(", "));
         let service = Arc::clone(self);
         let job = Box::new(move || {
-            tracing::info!(root = %root.display(), "library boot scan started");
+            tracing::info!(mounts = %names, "library boot scan started");
             let started = std::time::Instant::now();
             match service.first_scan_join() {
                 Ok(()) => tracing::info!(
-                    root = %root.display(),
+                    mounts = %names,
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "library boot scan done"
                 ),
                 Err(why) => tracing::warn!(
-                    root = %root.display(),
+                    mounts = %names,
                     "library boot scan failed; the next reader scans again: {}",
                     escape_controls(&why)
                 ),
@@ -1201,8 +1243,8 @@ impl LibraryService {
     }
 
     /// The whole folder tree: every folder the catalog holds plus every skill folder, by path; a skill folder is
-    /// marked. After the first-scan entrance, under one read lock; with no published root `Unavailable` ·
-    /// [`LIBRARY_UNAVAILABLE`].
+    /// marked; each mount's top is a folder. After the first-scan entrance (its failure `Unavailable` ·
+    /// [`LIBRARY_UNAVAILABLE`]), under one read lock; with no mount registered the tree is empty.
     pub fn folders(&self) -> Result<FoldersAnswer, LibraryRefusal> {
         self.first_scan_join()
             .map_err(LibraryRefusal::unavailable)?;
@@ -1230,25 +1272,24 @@ impl LibraryService {
         }))
     }
 
-    /// One item's detail from the catalog (no disk read): its `list` row, its absolute path under the published root,
-    /// who refers to it directly and indirectly, an instruction's excerpt and a settings asset's raw-field names.
-    /// After the first-scan entrance; with no published root `Unavailable` · [`LIBRARY_UNAVAILABLE`]; a path the
-    /// catalog does not hold `NotFound` · `not-found`.
+    /// One item's detail from the catalog (no disk read): its `list` row, its absolute path in its mount's folder, who
+    /// refers to it directly and indirectly, an instruction's excerpt and a settings asset's raw-field names. After the
+    /// first-scan entrance (its failure `Unavailable` · [`LIBRARY_UNAVAILABLE`]); a path the catalog does not hold, or
+    /// whose mount is not registered, `NotFound` · `not-found`.
     pub fn read(&self, path: &LibPath) -> Result<ReadAnswer, LibraryRefusal> {
         self.first_scan_join()
             .map_err(LibraryRefusal::unavailable)?;
         self.gate.with_read(|state| {
             let catalog = &state.catalog;
-            let Some(root) = state.root() else {
-                return Err(LibraryRefusal::unavailable(gate::NO_ROOT.to_owned()));
-            };
-            let item = catalog.get(&key(path)).ok_or_else(|| {
+            let not_found = || {
                 LibraryRefusal::new(
                     RefusalClass::NotFound,
                     NOT_FOUND,
                     json!({ "path": path.as_str() }),
                 )
-            })?;
+            };
+            let item = catalog.get(&key(path)).ok_or_else(not_found)?;
+            let absolute = state.mounts.disk_path(&item.path).ok_or_else(not_found)?;
             let registry = &self.values.registry;
             let (reaching, agents_direct) = referrers_of(catalog, registry, &item.path);
             let lists_it = |preset: &LibPath| match catalog.get(&key(preset)).map(|p| &p.content) {
@@ -1286,7 +1327,7 @@ impl LibraryService {
             };
             Ok(ReadAnswer {
                 row: row(item, reaching.len() + agents_direct.len()),
-                absolute: item.path.to_path(root),
+                absolute,
                 presets_direct: names(direct),
                 presets_indirect: names(indirect),
                 agents_direct,
@@ -1297,31 +1338,34 @@ impl LibraryService {
         })
     }
 
-    /// Walks and reads `range` under `root` outside every lock.
+    /// Walks and reads `under` (`None` = its whole folder) in `mount` outside every lock.
     fn build_scan(
         &self,
-        root: &Path,
-        range: Option<&LibPath>,
+        mount: &Mount,
+        under: Option<&MountPath>,
         tags: &Tags,
     ) -> io::Result<ScanResult> {
         let read = |path: &Path| self.store.read(path, LIBRARY_READ_CAP);
-        self.build_scan_reading(root, range, tags, &read)
+        self.build_scan_reading(mount, under, tags, &read)
     }
 
     /// [`LibraryService::build_scan`] with the file reads going through `read` (the launch overlay keeps the bytes).
     fn build_scan_reading(
         &self,
-        root: &Path,
-        range: Option<&LibPath>,
+        mount: &Mount,
+        under: Option<&MountPath>,
         tags: &Tags,
         read: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
     ) -> io::Result<ScanResult> {
         // The racy rule's reference — taken before the walk (`ScanResult::build`).
         let now = SystemTime::now();
-        let listing = self.store.scan(root, range, &|| self.gate.next_seq())?;
+        let listing = self
+            .store
+            .scan(&mount.folder, under, &|| self.gate.next_seq())?;
         Ok(ScanResult::build(
             listing,
-            range,
+            &mount.name,
+            under,
             tags,
             read,
             &*self.values.backends,
@@ -1330,9 +1374,12 @@ impl LibraryService {
     }
 
     /// One path read through the same partial scan a refresh of it would run — so it admits exactly what the scan
-    /// admits (names, links, kinds), and every read draws its number first.
-    fn observe(&self, root: &Path, path: &LibPath) -> Observed {
-        match self.build_scan(root, Some(path), &Tags::new()) {
+    /// admits (names, links, kinds), and every read draws its number first. A path in no mount of `mounts` is not read.
+    fn observe(&self, mounts: &Mounts, path: &LibPath) -> Observed {
+        let Some((mount, under)) = mounts.locate(path) else {
+            return Observed::Refused;
+        };
+        match self.build_scan(mount, under.as_ref(), &Tags::new()) {
             Err(e) => {
                 tracing::debug!(
                     path = path.as_str(),
@@ -1492,6 +1539,46 @@ fn is_known(catalog: &Catalog, path: &LibPath) -> bool {
     catalog.get(&want).is_some() || catalog.folders().any(|folder| key(folder) == want)
 }
 
+/// The folders of the registered mounts the library presets of `attached` name, each once, in the order first named.
+pub(crate) fn named_folders(mounts: &Mounts, attached: &[&AssetRef]) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    attached
+        .iter()
+        .filter_map(|preset| match preset {
+            AssetRef::Library(path) => mounts.locate(path),
+            AssetRef::BuiltIn(_) => None,
+        })
+        .filter(|(mount, _)| seen.insert(mount.name.key()))
+        .map(|(mount, _)| mount.folder.clone())
+        .collect()
+}
+
+/// The library as block ④ judges it ([`RootState::of`]): unset with no mount registered; else the first status of
+/// `stats` (the mounts an attachment names) that is not `Ok`, judged with `joined` — or none when all are.
+// ADR-0387
+pub(crate) fn library_state(
+    joined: &Result<(), String>,
+    mounts: &Mounts,
+    stats: Vec<FolderStatus>,
+) -> RootState {
+    if mounts.is_empty() {
+        return RootState::Unset;
+    }
+    let first_bad = stats.into_iter().find(|status| *status != FolderStatus::Ok);
+    RootState::of(joined, first_bad.as_ref())
+}
+
+/// The refusal of a write whose target is the virtual root (`None`) or a mount's top — `InvalidArgument` ·
+/// [`VIRTUAL_ROOT_READ_ONLY`].
+// ADR-0400 decision 5
+pub(crate) fn virtual_root_read_only(path: Option<&LibPath>) -> LibraryRefusal {
+    let args = match path {
+        Some(path) => json!({ "path": path.as_str() }),
+        None => json!({}),
+    };
+    LibraryRefusal::new(RefusalClass::InvalidArgument, VIRTUAL_ROOT_READ_ONLY, args)
+}
+
 fn root_unusable(root: &Path, why: String) -> LibraryRefusal {
     LibraryRefusal::new(
         RefusalClass::Unavailable,
@@ -1546,7 +1633,7 @@ fn row(item: &Item, references: usize) -> ListRow {
 /// so the two agree. `path` is the reference as written, `line` its preset line.
 // ADR-0387
 pub(crate) fn link_verdict(
-    probe: io::Result<Option<LibPath>>,
+    probe: io::Result<Option<MountPath>>,
     path: &str,
     line: Option<u32>,
 ) -> Option<Reason> {
@@ -1626,7 +1713,7 @@ mod tests {
 
     struct TestStore {
         roots: Vec<(PathBuf, MemStore)>,
-        scans: Mutex<Vec<(PathBuf, Option<LibPath>)>>,
+        scans: Mutex<Vec<(PathBuf, Option<MountPath>)>>,
         read_caps: Mutex<Vec<u64>>,
         /// The next scan parks at `Start` (if armed) and then fails as an unreadable root.
         fail_next_scan: Mutex<bool>,
@@ -1732,7 +1819,7 @@ mod tests {
         fn scan(
             &self,
             root: &Path,
-            under: Option<&LibPath>,
+            under: Option<&MountPath>,
             seq: &dyn Fn() -> u64,
         ) -> io::Result<ScanListing> {
             lock(&self.scans).push((root.to_path_buf(), under.cloned()));
@@ -1751,7 +1838,7 @@ mod tests {
             listing
         }
 
-        fn first_link(&self, root: &Path, rel: &LibPath) -> io::Result<Option<LibPath>> {
+        fn first_link(&self, root: &Path, rel: &MountPath) -> io::Result<Option<MountPath>> {
             if let Some(kind) = *lock(&self.fail_link) {
                 return Err(io::Error::from(kind));
             }
@@ -1927,6 +2014,46 @@ mod tests {
         Arc::new(LibraryService::new(values, store, io))
     }
 
+    /// A service over two mounts on their own test roots — `library` at `/lib` and `team` at `/team` (and a spare root
+    /// `/lib2`) — with no agents, every stat `Ok` and threads for jobs.
+    fn two_mounts() -> (Arc<LibraryService>, Arc<TestStore>) {
+        mounted(&[("library", "/lib"), ("team", "/team")])
+    }
+
+    /// A service over `mounts` (name, folder — each one of the test roots `/lib`, `/team`, `/lib2`), with no agents,
+    /// every stat `Ok` and threads for jobs.
+    fn mounted(mounts: &[(&str, &str)]) -> (Arc<LibraryService>, Arc<TestStore>) {
+        let store = TestStore::new(&["/lib", "/team", "/lib2"]);
+        let mount = |(name, folder): &(&str, &str)| MountSetting {
+            name: MountName::parse(name).unwrap(),
+            place: MountPlace::Explicit(PathBuf::from(folder)),
+        };
+        let config =
+            LibraryConfig::mounted(Path::new("/state"), mounts.iter().map(mount).collect());
+        let values = LibraryValues {
+            registry: Arc::new(ProfileRegistry::new(Arc::new(Fixed(Vec::new())))),
+            backends: Arc::new(AgentBackends),
+            config,
+            default_root: PathBuf::from("/default-library"),
+            data_root: PathBuf::from("/data"),
+            daemon_id: "test-daemon".to_owned(),
+            root_generation_base: ROOT_BASE,
+            builtin_dir: None,
+            launch_root: PathBuf::from("/launch"),
+            home: None,
+            env: Arc::new(|_| None),
+        };
+        let io = BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::new(StatOps::default()),
+            Arc::new(ThreadSpawn),
+        );
+        let port: Arc<dyn LibraryStore> = Arc::clone(&store) as Arc<dyn LibraryStore>;
+        (Arc::new(LibraryService::new(values, port, io)), store)
+    }
+
     fn service_on(roots: &[&str], root: Option<&str>) -> (Arc<LibraryService>, Arc<TestStore>) {
         let store = TestStore::new(roots);
         let svc = service(
@@ -1965,7 +2092,8 @@ mod tests {
     /// What a launch check's overlay read hands its merge: the numbers noted first, then the items read.
     fn check_read(svc: &LibraryService, rel: &str) -> (Numbers, Vec<Item>) {
         let noted = svc.numbers();
-        match svc.observe(Path::new("/lib"), &lp(rel)) {
+        let mounts = svc.with_read(|state| state.mounts.clone());
+        match svc.observe(&mounts, &lp(rel)) {
             Observed::Items(items) => (noted, items),
             Observed::ThroughLink | Observed::Refused => panic!("{rel} is not readable"),
         }
@@ -1989,8 +2117,9 @@ mod tests {
         })
     }
 
+    /// The first mount's folder.
     fn root_of(svc: &LibraryService) -> Option<PathBuf> {
-        svc.with_read(|state| state.root().map(Path::to_path_buf))
+        svc.with_read(|state| state.mounts.first().map(|first| first.folder.clone()))
     }
 
     /// The published mounts as (name, folder), in order.
@@ -2024,7 +2153,7 @@ mod tests {
         let svc = service(
             Some("/lib"),
             &store,
-            vec![agent(&["top.yaml"])],
+            vec![agent(&["library/top.yaml"])],
             Arc::new(StatOps::default()),
             Arc::new(ThreadSpawn),
         );
@@ -2033,7 +2162,7 @@ mod tests {
         mem.file("rules/a.md", rules);
         mem.file(
             "top.yaml",
-            "kind: preset\nversion: 1\ndescription: the top\ninstructions:\n  - rules/a.md\nskills:\n  - skills/s\n",
+            "kind: preset\nversion: 1\ndescription: the top\ninstructions:\n  - library/rules/a.md\nskills:\n  - library/skills/s\n",
         );
         mem.file(
             "skills/s/SKILL.md",
@@ -2042,9 +2171,9 @@ mod tests {
         mem.file("broken.yaml", "kind: preset\nversion: [\n");
         mem.file("plain.yaml", "a: 1\n");
 
-        let root = svc.list(None).unwrap();
-        assert_eq!(paths(&root), ["broken.yaml", "top.yaml"]);
-        assert_eq!(folder_paths(&root), ["rules", "skills"]);
+        let root = svc.list(Some(&lp("library"))).unwrap();
+        assert_eq!(paths(&root), ["library/broken.yaml", "library/top.yaml"]);
+        assert_eq!(folder_paths(&root), ["library/rules", "library/skills"]);
         let broken = &root.rows[0];
         assert!(matches!(broken.kind, ItemKind::Broken { .. }));
         assert_eq!(broken.state.as_ref().unwrap().code, "yaml-syntax");
@@ -2059,15 +2188,15 @@ mod tests {
         );
         assert_eq!((top.state.clone(), top.references), (None, 1), "the agent");
 
-        let rules_rows = svc.list(Some(&lp("rules"))).unwrap();
-        assert_eq!(paths(&rules_rows), ["rules/a.md"]);
+        let rules_rows = svc.list(Some(&lp("library/rules"))).unwrap();
+        assert_eq!(paths(&rules_rows), ["library/rules/a.md"]);
         let a = &rules_rows.rows[0];
         assert_eq!(a.kind, ItemKind::Instruction);
         assert_eq!(a.description, excerpt(rules));
         assert_eq!(a.references, 1, "the preset");
 
-        let skills = svc.list(Some(&lp("skills"))).unwrap();
-        assert_eq!(paths(&skills), ["skills/s"]);
+        let skills = svc.list(Some(&lp("library/skills"))).unwrap();
+        assert_eq!(paths(&skills), ["library/skills/s"]);
         assert!(
             skills.folders.is_empty(),
             "a skill folder is an item, not a folder line"
@@ -2091,20 +2220,30 @@ mod tests {
         let (svc, store) = library();
         store.mem("/lib").file("a/b/c.md", "c");
         store.mem("/lib").file("a/z/d.md", "d");
-        let root = svc.list(None).unwrap();
+        let top = svc.list(None).unwrap();
+        assert!(top.rows.is_empty(), "the virtual root holds no item");
+        assert_eq!(
+            top.folders,
+            [FolderRow {
+                path: "library".to_owned(),
+                name: "library".to_owned()
+            }],
+            "the mounts are its folders"
+        );
+        let root = svc.list(Some(&lp("library"))).unwrap();
         assert!(root.rows.is_empty());
         assert_eq!(
             root.folders,
             [FolderRow {
-                path: "a".to_owned(),
+                path: "library/a".to_owned(),
                 name: "a".to_owned()
             }]
         );
-        let a = svc.list(Some(&lp("a"))).unwrap();
+        let a = svc.list(Some(&lp("library/a"))).unwrap();
         assert!(a.rows.is_empty());
         assert_eq!(
             folder_paths(&a),
-            ["a/b", "a/z"],
+            ["library/a/b", "library/a/z"],
             "direct children only, by path"
         );
         assert_eq!(a.folders[1].name, "z");
@@ -2117,13 +2256,13 @@ mod tests {
             store.mem("/lib").file("a/x.md", "x");
             store.mem("/lib").file("b/y.md", "y");
             match entrance {
-                0 => drop(svc.list(None).unwrap()),
-                1 => drop(svc.list(Some(&lp("a"))).unwrap()),
-                2 => drop(svc.refresh(Some(&lp("a")))),
+                0 => drop(svc.list(Some(&lp("library"))).unwrap()),
+                1 => drop(svc.list(Some(&lp("library/a"))).unwrap()),
+                2 => drop(svc.refresh(Some(&lp("library/a")))),
                 _ => svc.first_scan_join().unwrap(),
             }
             assert_eq!(store.scans(), [scan("/lib", None)], "entrance {entrance}");
-            assert!(has(&svc, "b/y.md"), "entrance {entrance}");
+            assert!(has(&svc, "library/b/y.md"), "entrance {entrance}");
         }
     }
 
@@ -2132,14 +2271,14 @@ mod tests {
         let (svc, store) = library();
         store.mem("/lib").file("a.md", "a");
         store.hold_at(At::Start, "/lib");
-        let first = on_thread(&svc, |svc| svc.list(None).unwrap());
+        let first = on_thread(&svc, |svc| svc.list(Some(&lp("library"))).unwrap());
         store.wait_held();
-        let second = on_thread(&svc, |svc| svc.list(None).unwrap());
+        let second = on_thread(&svc, |svc| svc.list(Some(&lp("library"))).unwrap());
         svc.gate
             .wait_for("the second reader waits", |_, waiting| waiting == 1);
         store.release();
         let (first, second) = (join(first), join(second));
-        assert_eq!(paths(&first), ["a.md"]);
+        assert_eq!(paths(&first), ["library/a.md"]);
         assert_eq!(first, second);
         assert_eq!(store.scans(), [scan("/lib", None)]);
     }
@@ -2152,39 +2291,360 @@ mod tests {
         mem.link("lnk");
         mem.file(".hidden.md", "h");
         mem.file("x.md.tmp12.0", "t");
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         mem.file("later.md", "l");
         assert!(
-            svc.list(Some(&lp("later.md"))).unwrap().rows.is_empty(),
+            svc.list(Some(&lp("library/later.md")))
+                .unwrap()
+                .rows
+                .is_empty(),
             "a file has no children"
         );
-        assert!(has(&svc, "later.md"), "merged by the safety net");
+        assert!(has(&svc, "library/later.md"), "merged by the safety net");
 
-        let through = svc.list(Some(&lp("lnk/x.md"))).unwrap();
-        assert_eq!(paths(&through), ["lnk/x.md"]);
+        let through = svc.list(Some(&lp("library/lnk/x.md"))).unwrap();
+        assert_eq!(paths(&through), ["library/lnk/x.md"]);
         assert_eq!(
             through.rows[0].state.as_ref().unwrap().code,
             PATH_THROUGH_LINK
         );
-        assert!(!has(&svc, "lnk/x.md"));
+        assert!(!has(&svc, "library/lnk/x.md"));
         for name in [".hidden.md", "x.md.tmp12.0"] {
             assert!(svc.list(Some(&lp(name))).unwrap().rows.is_empty(), "{name}");
             assert!(!has(&svc, name), "{name}");
         }
         // The same admission gates every late merge's read.
-        let root = Path::new("/lib");
+        let root = &svc.with_read(|state| state.mounts.clone());
         assert!(matches!(
-            svc.observe(root, &lp("lnk/x.md")),
+            svc.observe(root, &lp("library/lnk/x.md")),
             Observed::ThroughLink
         ));
         assert!(matches!(
-            svc.observe(root, &lp(".hidden.md")),
+            svc.observe(root, &lp("library/.hidden.md")),
             Observed::Refused
         ));
         assert!(matches!(
-            svc.observe(root, &lp("x.md.tmp12.0")),
+            svc.observe(root, &lp("library/x.md.tmp12.0")),
             Observed::Refused
         ));
+    }
+
+    // ── mounts: the virtual tree over several folders ──────────────────────────────────────────────────────
+
+    // ADR-0396 · ADR-0400 decision 4: the virtual root lists the mounts; each mount's items sit under its name, keyed
+    //   by the virtual path, so one spelling in two mounts is two items.
+    #[test]
+    fn a_whole_scan_walks_every_mount_and_the_catalog_holds_each_under_its_name() {
+        let (svc, store) = two_mounts();
+        store.mem("/lib").file("rules/a.md", "mine");
+        store.mem("/team").file("rules/a.md", "theirs");
+        let top = svc.list(None).unwrap();
+        assert!(top.rows.is_empty());
+        assert_eq!(folder_paths(&top), ["library", "team"]);
+        assert_eq!(
+            store.scans(),
+            [scan("/lib", None), scan("/team", None)],
+            "one whole scan, every mount"
+        );
+        assert_eq!(
+            paths(&svc.list(Some(&lp("team/rules"))).unwrap()),
+            ["team/rules/a.md"]
+        );
+        let excerpt_of = |path: &str| {
+            svc.with_read(
+                |state| match &state.catalog.get(&key(&lp(path))).unwrap().content {
+                    ItemContent::Instruction { excerpt } => excerpt.clone(),
+                    other => panic!("{other:?}"),
+                },
+            )
+        };
+        assert_eq!(
+            (
+                excerpt_of("library/rules/a.md"),
+                excerpt_of("team/rules/a.md")
+            ),
+            ("mine".to_owned(), "theirs".to_owned())
+        );
+        let read = svc.read(&lp("team/rules/a.md")).unwrap();
+        assert_eq!(read.absolute, Path::new("/team").join("rules").join("a.md"));
+    }
+
+    // ADR-0400 decision 4: a mount's name is a folder, not an item; a first name that names no mount reads as absent.
+    #[test]
+    fn a_mount_name_or_a_path_in_no_mount_reads_as_not_found() {
+        let (svc, store) = two_mounts();
+        store.mem("/lib").file("a.md", "a");
+        for path in ["library", "team", "nope/a.md", "a.md"] {
+            let (class, reason) = refused(svc.read(&lp(path)).unwrap_err());
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::NotFound, NOT_FOUND),
+                "{path}"
+            );
+        }
+        let nowhere = svc.list(Some(&lp("nope"))).unwrap();
+        assert!(nowhere.rows.is_empty() && nowhere.folders.is_empty());
+        assert!(has(&svc, "library/a.md"));
+    }
+
+    // ADR-0396 decision 3: a whole scan reports a reference into another mount as missing only when it is.
+    #[test]
+    fn a_whole_scan_reports_no_reference_into_another_mount_as_missing() {
+        let (svc, store) = two_mounts();
+        store.mem("/lib").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - team/rules/a.md\n  - team/gone.md\n",
+        );
+        store.mem("/team").file("rules/a.md", "a");
+        let report = svc.refresh(None);
+        let missing: Vec<(&str, &str)> = report
+            .problems
+            .iter()
+            .filter(|(_, reason)| reason.code == NOT_FOUND)
+            .map(|(preset, reason)| (preset.as_str(), reason.args["path"].as_str().unwrap()))
+            .collect();
+        assert_eq!(missing, [("library/P.yaml", "team/gone.md")]);
+    }
+
+    // A refresh walks only the mount its folder lies in; one in no mount walks nothing and says why.
+    #[test]
+    fn a_folder_refresh_walks_only_its_mount_and_one_in_no_mount_answers_why() {
+        let (svc, store) = two_mounts();
+        store.mem("/team").file("rules/a.md", "a");
+        svc.first_scan_join().unwrap();
+        store.mem("/team").file("rules/b.md", "b");
+        let report = svc.refresh(Some(&lp("team/rules")));
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(has(&svc, "team/rules/b.md"));
+        assert_eq!(
+            store.scans()[2..],
+            [scan("/team", Some("rules"))],
+            "only the team mount's folder"
+        );
+        let nowhere = svc.refresh(Some(&lp("nope/rules")));
+        assert_eq!(nowhere.errors.len(), 1, "{nowhere:?}");
+        assert!(nowhere.errors[0].1.contains("nope"), "{nowhere:?}");
+        assert_eq!(store.scans().len(), 3, "nothing walked");
+    }
+
+    // ADR-0366 as ADR-0400 amends it: moving the first mount replaces only that mount's range; the others' items stay.
+    #[test]
+    fn a_root_change_replaces_only_the_relocated_mounts_range() {
+        let (svc, store) = two_mounts();
+        store.mem("/lib").file("old.md", "old");
+        store.mem("/team").file("t.md", "t");
+        store.mem("/lib2").file("new.md", "new");
+        svc.first_scan_join().unwrap();
+        svc.change_root(PathBuf::from("/lib2")).unwrap();
+        assert!(!has(&svc, "library/old.md"), "the old folder's items went");
+        assert!(has(&svc, "library/new.md"));
+        assert!(has(&svc, "team/t.md"), "the other mount's items stay");
+        assert_eq!(
+            mounts_of(&svc),
+            [
+                ("library".to_owned(), PathBuf::from("/lib2")),
+                ("team".to_owned(), PathBuf::from("/team"))
+            ]
+        );
+    }
+
+    // ADR-0396 decision 3: a reference may name any mount; it resolves to the file in that mount's folder.
+    #[test]
+    fn a_reference_across_mounts_resolves_to_the_other_mounts_folder() {
+        let (svc, store) = two_mounts();
+        store.mem("/lib").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - team/rules/a.md\n  - team/gone.md\n",
+        );
+        store.mem("/team").file("rules/a.md", "a");
+        let resolution = svc.resolve_preset(&lp("library/P.yaml"));
+        assert_eq!(
+            resolution.instructions,
+            [(
+                "team/rules/a.md".to_owned(),
+                Path::new("/team").join("rules").join("a.md")
+            )]
+        );
+        assert_eq!(codes(&resolution), [NOT_FOUND], "team/gone.md is missing");
+    }
+
+    // ADR-0400 decision 2: a valid mount name shaped like a temp file is held by the name rules, not the store's name
+    //   rule, so its items are edited and created like any mount's (the launch side: `launch.rs` tests).
+    #[test]
+    fn a_mount_named_like_a_temp_file_is_edited_and_created_in_like_any_mount() {
+        use crate::create::NewFileKind;
+        use crate::edit::{AddEntries, NewItem};
+        let name = "work.tmp1.2";
+        assert!(
+            engram_dashboard_base::file::is_temp_name(name),
+            "the fixture is temp-shaped"
+        );
+        let (svc, store) = mounted(&[(name, "/lib")]);
+        store
+            .mem("/lib")
+            .file("P.yaml", "kind: preset\nversion: 1\n");
+        store.mem("/lib").file("rules/a.md", "a");
+        svc.first_scan_join().unwrap();
+        assert!(has(&svc, "work.tmp1.2/P.yaml") && has(&svc, "work.tmp1.2/rules/a.md"));
+
+        let added = svc
+            .preset_add(
+                &lp("work.tmp1.2/P.yaml"),
+                &AddEntries::Items(vec![NewItem {
+                    path: "work.tmp1.2/rules/a.md".to_owned(),
+                    backend: None,
+                }]),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(added.applied, ["work.tmp1.2/rules/a.md"]);
+
+        let made = svc
+            .new_file(Some("work.tmp1.2/rules"), "c", NewFileKind::Markdown, None)
+            .unwrap();
+        assert_eq!(made.as_str(), "work.tmp1.2/rules/c.md");
+        assert!(has(&svc, "work.tmp1.2/rules/c.md"));
+        let (class, reason) = refused(
+            svc.new_folder(Some("work.tmp1.2/rules"), "x.tmp1.2", None)
+                .unwrap_err(),
+        );
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::InvalidArgument, ITEM_PATH_INVALID),
+            "a temp name inside the mount is still refused"
+        );
+    }
+
+    // ADR-0400 decision 5: a write whose target has one name is refused before any mount lookup or kind check.
+    #[test]
+    fn every_write_to_a_one_name_target_refuses_virtual_root_read_only_before_any_other_check() {
+        use crate::edit::{AddEntries, NewItem, RemoveEntries};
+        use crate::format::ListName;
+        let (svc, store) = two_mounts();
+        store
+            .mem("/lib")
+            .file("P.yaml", "kind: preset\nversion: 1\n");
+        store.mem("/lib").file("a.md", "a");
+        svc.first_scan_join().unwrap();
+        let item = || {
+            AddEntries::Items(vec![NewItem {
+                path: "library/a.md".to_owned(),
+                backend: None,
+            }])
+        };
+        let want = (RefusalClass::InvalidArgument, VIRTUAL_ROOT_READ_ONLY);
+        // `library` is a mount's top (and no `.yaml`); `P.yaml` names no mount; `.x` would be a dot name.
+        for target in ["library", "P.yaml", "team", ".x"] {
+            let target = lp(target);
+            let answers = [
+                svc.preset_add(&target, &item(), None, None).map(drop),
+                svc.preset_add(
+                    &target,
+                    &AddEntries::Folders(vec!["C:/x".to_owned()]),
+                    None,
+                    None,
+                )
+                .map(drop),
+                svc.preset_remove(&target, &RemoveEntries::Items(Vec::new()), None)
+                    .map(drop),
+                svc.preset_reorder(&target, ListName::Instructions, &[], "rev", None)
+                    .map(drop),
+                svc.preset_set_backend(&target, &[], None, None).map(drop),
+            ];
+            for (at, answer) in answers.into_iter().enumerate() {
+                let (class, reason) = refused(answer.unwrap_err());
+                assert_eq!(
+                    (class, reason.code.as_str()),
+                    want,
+                    "{} write {at}",
+                    target.as_str()
+                );
+                assert_eq!(reason.args["path"], json!(target.as_str()));
+            }
+        }
+        let (class, reason) = refused(svc.relink("library/a.md", "library", None).unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str()),
+            want,
+            "relink to a mount's top"
+        );
+        let (class, reason) = refused(svc.relink("library/a.md", "a.md", None).unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str()),
+            want,
+            "relink to a name at the virtual root"
+        );
+        let unread = String::from_utf8(
+            store
+                .mem("/lib")
+                .read(&Path::new("/lib").join("P.yaml"), u64::MAX)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(unread, "kind: preset\nversion: 1\n", "nothing was written");
+    }
+
+    // ADR-0396 decision 3: an edit, a create and a relink in one mount may name another mount's items.
+    #[test]
+    fn edits_creates_and_relinks_work_across_mounts() {
+        use crate::create::NewFileKind;
+        use crate::edit::{AddEntries, NewItem};
+        let (svc, store) = two_mounts();
+        store
+            .mem("/lib")
+            .file("P.yaml", "kind: preset\nversion: 1\n");
+        store.mem("/team").file("rules/a.md", "a");
+        store.mem("/team").file("rules/b.md", "b");
+        svc.first_scan_join().unwrap();
+
+        let item = |path: &str| NewItem {
+            path: path.to_owned(),
+            backend: None,
+        };
+        let added = svc
+            .preset_add(
+                &lp("library/P.yaml"),
+                &AddEntries::Items(vec![item("team/rules/a.md")]),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(added.applied, ["team/rules/a.md"]);
+        let written = String::from_utf8(
+            store
+                .mem("/lib")
+                .read(&Path::new("/lib").join("P.yaml"), u64::MAX)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(written.contains("- team/rules/a.md"), "{written}");
+
+        let made = svc
+            .new_file(Some("team/rules"), "c", NewFileKind::Markdown, None)
+            .unwrap();
+        assert_eq!(made.as_str(), "team/rules/c.md");
+        assert!(store
+            .mem("/team")
+            .exists(&Path::new("/team").join("rules").join("c.md")));
+        assert!(has(&svc, "team/rules/c.md"));
+
+        let relinked = svc
+            .relink("team/rules/a.md", "team/rules/b.md", None)
+            .unwrap();
+        assert_eq!(
+            relinked.fixed,
+            [("team/rules/a.md".to_owned(), "team/rules/b.md".to_owned())]
+        );
+        assert_eq!(relinked.written, ["library/P.yaml"]);
+        let resolution = svc.resolve_preset(&lp("library/P.yaml"));
+        assert_eq!(
+            resolution.instructions,
+            [(
+                "team/rules/b.md".to_owned(),
+                Path::new("/team").join("rules").join("b.md")
+            )]
+        );
     }
 
     // ── refresh ──────────────────────────────────────────────────────────────────────────────────────────
@@ -2195,19 +2655,19 @@ mod tests {
         let mem = store.mem("/lib");
         mem.file(
             "a/p.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - b/x.md\n  - a/missing.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/b/x.md\n  - library/a/missing.md\n",
         );
         mem.file("b/x.md", "x");
         mem.file("b/broken.yaml", "kind: preset\nversion: [\n");
-        let report = svc.refresh(Some(&lp("a")));
+        let report = svc.refresh(Some(&lp("library/a")));
         assert_eq!(store.scans(), [scan("/lib", None)]);
         let missing = Reason {
             code: NOT_FOUND.to_owned(),
-            args: json!({ "path": "a/missing.md" }),
+            args: json!({ "path": "library/a/missing.md" }),
             line: None,
         };
         // `b/x.md` is found (the whole library was scanned) and `b/broken.yaml` is outside `a`.
-        assert_eq!(report.problems, [(lp("a/p.yaml"), missing)]);
+        assert_eq!(report.problems, [(lp("library/a/p.yaml"), missing)]);
         assert_eq!(report.changed, 1);
     }
 
@@ -2216,9 +2676,9 @@ mod tests {
         let (svc, store) = library();
         store.mem("/lib").file("a/x.md", "x");
         store.hold_at(At::Start, "/lib");
-        let first = on_thread(&svc, |svc| svc.list(None).unwrap());
+        let first = on_thread(&svc, |svc| svc.list(Some(&lp("library"))).unwrap());
         store.wait_held();
-        let refresh = on_thread(&svc, |svc| svc.refresh(Some(&lp("a"))));
+        let refresh = on_thread(&svc, |svc| svc.refresh(Some(&lp("library/a"))));
         svc.gate
             .wait_for("the refresh waits for the first scan", |_, waiting| {
                 waiting == 1
@@ -2234,15 +2694,15 @@ mod tests {
         let (svc, store) = library();
         store.mem("/lib").file(
             "a/p.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - b/x.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/b/x.md\n",
         );
         store.mem("/lib").file("b/x.md", "x");
         store.mem("/lib").file("c.md", "c");
         *lock(&store.fail_next_scan) = true;
         store.hold_at(At::Start, "/lib");
-        let first = on_thread(&svc, |svc| svc.list(None));
+        let first = on_thread(&svc, |svc| svc.list(Some(&lp("library"))));
         store.wait_held();
-        let refresh = on_thread(&svc, |svc| svc.refresh(Some(&lp("a"))));
+        let refresh = on_thread(&svc, |svc| svc.refresh(Some(&lp("library/a"))));
         svc.gate
             .wait_for("the refresh waits for the first scan", |_, waiting| {
                 waiting == 1
@@ -2256,8 +2716,8 @@ mod tests {
         assert!(report.errors.is_empty());
         assert_eq!(report.changed, 1);
         assert_eq!(
-            paths(&svc.list(None).unwrap()),
-            ["c.md"],
+            paths(&svc.list(Some(&lp("library"))).unwrap()),
+            ["library/c.md"],
             "the second scan was applied"
         );
     }
@@ -2266,12 +2726,12 @@ mod tests {
     fn a_refresh_arriving_at_a_walking_covering_scan_scans_again_and_answers_the_new_bytes() {
         let (svc, store) = library();
         store.mem("/lib").file_version("a/x.md", "old", 1);
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         store.hold_at(At::End, "/lib");
         let walking = on_thread(&svc, |svc| svc.refresh(None));
         store.wait_held();
         store.mem("/lib").file_version("a/x.md", "new", 2);
-        let late = on_thread(&svc, |svc| svc.refresh(Some(&lp("a"))));
+        let late = on_thread(&svc, |svc| svc.refresh(Some(&lp("library/a"))));
         svc.gate
             .wait_for("the late refresh has its own ticket", |line, _| {
                 line == [("scan", true), ("scan", false)]
@@ -2279,7 +2739,7 @@ mod tests {
         store.release();
         assert_eq!(join(walking).changed, 0);
         assert_eq!(join(late).changed, 1);
-        assert_eq!(version(&svc, "a/x.md"), 2);
+        assert_eq!(version(&svc, "library/a/x.md"), 2);
         assert_eq!(
             store.scans(),
             [
@@ -2300,26 +2760,24 @@ mod tests {
         mem.link("lnk");
         mem.fail_listing("sub", ListFailure::Open);
         let report = svc.refresh(None);
-        assert_eq!(report.skipped_links, [lp("lnk")]);
+        assert_eq!(report.skipped_links, [lp("library/lnk")]);
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
-        assert_eq!(report.errors[0].0, Some(lp("sub")));
-        assert_eq!(report.no_kind, [lp("plain.yaml")]);
+        assert_eq!(report.errors[0].0, Some(lp("library/sub")));
+        assert_eq!(report.no_kind, [lp("library/plain.yaml")]);
         let caps = lock(&store.read_caps).clone();
         assert!(!caps.is_empty());
         assert!(caps.iter().all(|&cap| cap == LIBRARY_READ_CAP), "{caps:?}");
         assert_eq!(LIBRARY_READ_CAP, 16 * 1024 * 1024);
     }
 
+    // ADR-0400 decision 4: with no mount registered the virtual root still reads — never `library-unavailable`.
     #[test]
-    fn without_a_root_a_refresh_and_a_list_answer_why() {
+    fn without_a_mount_a_refresh_and_a_list_answer_an_empty_virtual_root() {
         let (svc, store) = service_on(&["/lib"], None);
-        assert_eq!(svc.refresh(None).errors, [(None, gate::NO_ROOT.to_owned())]);
-        let unavailable = Reason {
-            code: LIBRARY_UNAVAILABLE.to_owned(),
-            args: json!({ "message": gate::NO_ROOT }),
-            line: None,
-        };
-        assert_eq!(svc.list(None), Err(unavailable));
+        assert_eq!(svc.refresh(None), RefreshReport::default());
+        let top = svc.list(None).unwrap();
+        assert!(top.rows.is_empty() && top.folders.is_empty(), "{top:?}");
+        assert!(svc.list(Some(&lp("library"))).unwrap().rows.is_empty());
         assert!(store.scans().is_empty());
     }
 
@@ -2332,11 +2790,11 @@ mod tests {
             let (svc, store) = library();
             store.mem("/lib").file("d/x.md", "x");
             store.mem("/lib").file("d/y.md", "y");
-            svc.list(None).unwrap();
-            let read = check_read(&svc, "d/x.md");
+            svc.list(Some(&lp("library"))).unwrap();
+            let read = check_read(&svc, "library/d/x.md");
             store.mem("/lib").remove("d/x.md");
             store.hold_at(At::End, "/lib");
-            let scan = on_thread(&svc, |svc| svc.refresh(Some(&lp("d"))));
+            let scan = on_thread(&svc, |svc| svc.refresh(Some(&lp("library/d"))));
             store.wait_held();
             if merge_first {
                 merge(&svc, read);
@@ -2347,8 +2805,8 @@ mod tests {
                 join(scan);
                 merge(&svc, read);
             }
-            assert!(!has(&svc, "d/x.md"), "merge first: {merge_first}");
-            assert!(has(&svc, "d/y.md"));
+            assert!(!has(&svc, "library/d/x.md"), "merge first: {merge_first}");
+            assert!(has(&svc, "library/d/y.md"));
         }
     }
 
@@ -2358,28 +2816,28 @@ mod tests {
         for merge_first in [false, true] {
             let (svc, store) = library();
             store.mem("/lib").file("d/y.md", "y");
-            svc.list(None).unwrap();
+            svc.list(Some(&lp("library"))).unwrap();
             store.hold_at(At::End, "/lib");
-            let scan = on_thread(&svc, |svc| svc.refresh(Some(&lp("d"))));
+            let scan = on_thread(&svc, |svc| svc.refresh(Some(&lp("library/d"))));
             store.wait_held();
             store.mem("/lib").file("d/x.md", "x");
-            let read = check_read(&svc, "d/x.md");
+            let read = check_read(&svc, "library/d/x.md");
             if merge_first {
                 merge(&svc, read);
                 store.release();
                 join(scan);
-                assert!(has(&svc, "d/x.md"), "read after the listing: kept");
+                assert!(has(&svc, "library/d/x.md"), "read after the listing: kept");
             } else {
                 store.release();
                 join(scan);
                 merge(&svc, read);
                 assert!(
-                    !has(&svc, "d/x.md"),
+                    !has(&svc, "library/d/x.md"),
                     "a swap-in landed between: the insert is dropped"
                 );
-                svc.list(Some(&lp("d/x.md"))).unwrap();
+                svc.list(Some(&lp("library/d/x.md"))).unwrap();
                 assert!(
-                    has(&svc, "d/x.md"),
+                    has(&svc, "library/d/x.md"),
                     "the safety net with no swap-in between"
                 );
             }
@@ -2391,49 +2849,49 @@ mod tests {
         let (svc, store) = library();
         store.mem("/lib").file_version("a/x.md", "x", 1);
         store.mem("/lib").file_version("b/y.md", "y", 1);
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         store.mem("/lib").file_version("b/y.md", "y2", 2);
-        let read = check_read(&svc, "b/y.md");
+        let read = check_read(&svc, "library/b/y.md");
         store.hold_at(At::Start, "/lib");
-        let scan = on_thread(&svc, |svc| svc.refresh(Some(&lp("a"))));
+        let scan = on_thread(&svc, |svc| svc.refresh(Some(&lp("library/a"))));
         store.wait_held();
         merge(&svc, read);
         store.release();
         join(scan);
-        assert_eq!(version(&svc, "b/y.md"), 2);
+        assert_eq!(version(&svc, "library/b/y.md"), 2);
     }
 
     #[test]
     fn a_merge_inside_the_range_read_later_survives_the_whole_scan_apply() {
         let (svc, store) = library();
         store.mem("/lib").file_version("x.md", "v1", 1);
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         // The scan lists x at version 2 and reads it only after the hold — by then it holds version 3.
         store.mem("/lib").file_version("x.md", "v2", 2);
         store.hold_at(At::End, "/lib");
         let scan = on_thread(&svc, |svc| svc.refresh(None));
         store.wait_held();
         store.mem("/lib").file_version("x.md", "v3", 3);
-        merge(&svc, check_read(&svc, "x.md"));
+        merge(&svc, check_read(&svc, "library/x.md"));
         store.release();
         join(scan);
-        assert_eq!(version(&svc, "x.md"), 3, "the later read stays");
+        assert_eq!(version(&svc, "library/x.md"), 3, "the later read stays");
     }
 
     #[test]
     fn a_safety_net_insert_landing_during_a_walk_survives_its_apply() {
         let (svc, store) = library();
         store.mem("/lib").file("a.md", "a");
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         store.hold_at(At::End, "/lib");
         let scan = on_thread(&svc, |svc| svc.refresh(None));
         store.wait_held();
         store.mem("/lib").file("n.md", "n");
-        svc.list(Some(&lp("n.md"))).unwrap();
-        assert!(has(&svc, "n.md"));
+        svc.list(Some(&lp("library/n.md"))).unwrap();
+        assert!(has(&svc, "library/n.md"));
         store.release();
         join(scan);
-        assert!(has(&svc, "n.md"), "read after the listing");
+        assert!(has(&svc, "library/n.md"), "read after the listing");
     }
 
     #[test]
@@ -2441,11 +2899,11 @@ mod tests {
         for later_first in [false, true] {
             let (svc, store) = library();
             store.mem("/lib").file_version("x.md", "v1", 1);
-            svc.list(None).unwrap();
+            svc.list(Some(&lp("library"))).unwrap();
             store.mem("/lib").file_version("x.md", "v2", 2);
-            let older = check_read(&svc, "x.md");
+            let older = check_read(&svc, "library/x.md");
             store.mem("/lib").file_version("x.md", "v3", 3);
-            let newer = check_read(&svc, "x.md");
+            let newer = check_read(&svc, "library/x.md");
             if later_first {
                 merge(&svc, newer);
                 merge(&svc, older);
@@ -2453,7 +2911,11 @@ mod tests {
                 merge(&svc, older);
                 merge(&svc, newer);
             }
-            assert_eq!(version(&svc, "x.md"), 3, "later first: {later_first}");
+            assert_eq!(
+                version(&svc, "library/x.md"),
+                3,
+                "later first: {later_first}"
+            );
         }
     }
 
@@ -2461,16 +2923,16 @@ mod tests {
     fn a_merge_read_before_a_change_does_not_revive_what_the_change_removed() {
         let (svc, store) = library();
         store.mem("/lib").file("p.md", "p");
-        svc.list(None).unwrap();
-        let read = check_read(&svc, "p.md");
+        svc.list(Some(&lp("library"))).unwrap();
+        let read = check_read(&svc, "library/p.md");
         svc.change(|catalog, _, seq| {
             store.mem("/lib").remove("p.md");
-            let k = key(&lp("p.md"));
+            let k = key(&lp("library/p.md"));
             let removed = catalog.remove(&k, seq());
             ((), if removed { vec![k] } else { Vec::new() })
         });
         merge(&svc, read);
-        assert!(!has(&svc, "p.md"));
+        assert!(!has(&svc, "library/p.md"));
     }
 
     #[test]
@@ -2485,14 +2947,14 @@ mod tests {
             Arc::clone(&spawn) as Arc<dyn Spawn>,
         );
         store.mem("/lib").file_version("x.md", "v1", 1);
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         store.mem("/lib").file_version("x.md", "v2", 2);
-        let (noted, items) = check_read(&svc, "x.md");
+        let (noted, items) = check_read(&svc, "library/x.md");
         {
             let held = svc.gate.lib().write().unwrap();
             // The hand-off returns while the lock is held (merging in place, it would hang here).
             join(on_thread(&svc, move |svc| svc.hand_off_merge(noted, items)));
-            let still = held.catalog.get(&key(&lp("x.md"))).unwrap().tag;
+            let still = held.catalog.get(&key(&lp("library/x.md"))).unwrap().tag;
             assert_eq!(
                 still.modified,
                 OLD + Duration::from_secs(1),
@@ -2500,7 +2962,7 @@ mod tests {
             );
         }
         spawn.join_all();
-        assert_eq!(version(&svc, "x.md"), 2, "delayed, not dropped");
+        assert_eq!(version(&svc, "library/x.md"), 2, "delayed, not dropped");
     }
 
     #[test]
@@ -2514,11 +2976,11 @@ mod tests {
             Arc::new(FailingSpawn),
         );
         store.mem("/lib").file_version("x.md", "v1", 1);
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         store.mem("/lib").file_version("x.md", "v2", 2);
-        let (noted, items) = check_read(&svc, "x.md");
+        let (noted, items) = check_read(&svc, "library/x.md");
         svc.hand_off_merge(noted, items);
-        assert_eq!(version(&svc, "x.md"), 2);
+        assert_eq!(version(&svc, "library/x.md"), 2);
     }
 
     // ── changes ──────────────────────────────────────────────────────────────────────────────────────────
@@ -2527,7 +2989,7 @@ mod tests {
     fn a_change_drawn_during_a_walk_waits_for_its_apply_and_is_not_undone() {
         let (svc, store) = library();
         store.mem("/lib").file("x.md", "x");
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         store.hold_at(At::Start, "/lib");
         let scan = on_thread(&svc, |svc| svc.refresh(None));
         store.wait_held();
@@ -2535,7 +2997,7 @@ mod tests {
         let change = on_thread(&svc, move |svc| {
             svc.change(|catalog, _, seq| {
                 disk.mem("/lib").remove("x.md");
-                let k = key(&lp("x.md"));
+                let k = key(&lp("library/x.md"));
                 let removed = catalog.remove(&k, seq());
                 (removed, vec![k])
             })
@@ -2547,24 +3009,24 @@ mod tests {
         store.release();
         join(scan);
         assert!(join(change), "the change removed what the scan had applied");
-        assert!(!has(&svc, "x.md"));
+        assert!(!has(&svc, "library/x.md"));
     }
 
     #[test]
     fn a_change_generation_moved_during_a_walk_makes_the_scan_walk_again() {
         let (svc, store) = library();
         store.mem("/lib").file("x.md", "x");
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         store.hold_at(At::Start, "/lib");
         let walking = on_thread(&svc, |svc| svc.refresh(None));
         store.wait_held();
         svc.gate.change_unordered(|catalog| {
             store.mem("/lib").remove("x.md");
-            catalog.remove(&key(&lp("x.md")), svc.gate.next_seq());
+            catalog.remove(&key(&lp("library/x.md")), svc.gate.next_seq());
         });
         store.release();
         join(walking);
-        assert!(!has(&svc, "x.md"));
+        assert!(!has(&svc, "library/x.md"));
         assert_eq!(
             store.scans(),
             [scan("/lib", None), scan("/lib", None), scan("/lib", None)]
@@ -2578,18 +3040,24 @@ mod tests {
         let (svc, store) = service_on(&["/lib", "/lib2"], Some("/lib"));
         store.mem("/lib").file("a.md", "a");
         store.mem("/lib2").file("b.md", "b");
-        assert_eq!(paths(&svc.list(None).unwrap()), ["a.md"]);
+        assert_eq!(
+            paths(&svc.list(Some(&lp("library"))).unwrap()),
+            ["library/a.md"]
+        );
         store.hold_at(At::Start, "/lib2");
         let change = on_thread(&svc, |svc| svc.change_root(PathBuf::from("/lib2")));
         store.wait_held();
         assert_eq!(
-            paths(&svc.list(None).unwrap()),
-            ["a.md"],
+            paths(&svc.list(Some(&lp("library"))).unwrap()),
+            ["library/a.md"],
             "never an empty catalog"
         );
         store.release();
         join(change).unwrap();
-        assert_eq!(paths(&svc.list(None).unwrap()), ["b.md"]);
+        assert_eq!(
+            paths(&svc.list(Some(&lp("library"))).unwrap()),
+            ["library/b.md"]
+        );
         assert_eq!(root_of(&svc), Some(PathBuf::from("/lib2")));
     }
 
@@ -2600,10 +3068,13 @@ mod tests {
         store.mem("/lib").file_version("X.md", "top!", 1);
         store.mem("/lib").file_version("team/X.md", "team", 1);
         store.mem("/lib/team").file_version("X.md", "team", 1);
-        assert_eq!(svc.list(None).unwrap().rows[0].description, excerpt("top!"));
+        assert_eq!(
+            svc.list(Some(&lp("library"))).unwrap().rows[0].description,
+            excerpt("top!")
+        );
         svc.change_root(PathBuf::from("/lib/team")).unwrap();
-        let rows = svc.list(None).unwrap();
-        assert_eq!(paths(&rows), ["X.md"]);
+        let rows = svc.list(Some(&lp("library"))).unwrap();
+        assert_eq!(paths(&rows), ["library/X.md"]);
         assert_eq!(rows.rows[0].description, excerpt("team"));
     }
 
@@ -2614,14 +3085,14 @@ mod tests {
         store.hold_at(At::Start, "/lib");
         let change = on_thread(&svc, |svc| svc.change_root(PathBuf::from("/lib")));
         store.wait_held();
-        let reader = on_thread(&svc, |svc| svc.list(None).unwrap());
+        let reader = on_thread(&svc, |svc| svc.list(Some(&lp("library"))).unwrap());
         svc.gate
             .wait_for("the reader waits for the root walk", |_, waiting| {
                 waiting == 1
             });
         store.release();
         join(change).unwrap();
-        assert_eq!(paths(&join(reader)), ["a.md"]);
+        assert_eq!(paths(&join(reader)), ["library/a.md"]);
         assert_eq!(store.scans(), [scan("/lib", None)], "no second scan");
     }
 
@@ -2629,11 +3100,13 @@ mod tests {
     fn a_root_change_whose_walk_fails_at_the_root_publishes_nothing() {
         let (svc, store) = service_on(&["/lib", "/lib2"], Some("/lib"));
         store.mem("/lib").file("a.md", "a");
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         store.mem("/lib2").fail_listing("", ListFailure::Open);
         assert!(svc.change_root(PathBuf::from("/lib2")).is_err());
-        let answer = join(on_thread(&svc, |svc| svc.list(None).unwrap()));
-        assert_eq!(paths(&answer), ["a.md"]);
+        let answer = join(on_thread(&svc, |svc| {
+            svc.list(Some(&lp("library"))).unwrap()
+        }));
+        assert_eq!(paths(&answer), ["library/a.md"]);
         assert_eq!(root_of(&svc), Some(PathBuf::from("/lib")));
         let report = join(on_thread(&svc, |svc| svc.refresh(None)));
         assert!(report.errors.is_empty(), "the ticket was released");
@@ -2766,11 +3239,11 @@ mod tests {
         mem.file(
             "P.yaml",
             &format!(
-                "kind: preset\nversion: 1\ninstructions:\n  - a.md\nfolders:\n  - '{spelled}'\n"
+                "kind: preset\nversion: 1\ninstructions:\n  - library/a.md\nfolders:\n  - '{spelled}'\n"
             ),
         );
         mem.file("a.md", "a");
-        let resolution = svc.resolve_preset(&lp("P.yaml"));
+        let resolution = svc.resolve_preset(&lp("library/P.yaml"));
         assert_eq!(
             store.scans(),
             [scan("/lib", None)],
@@ -2778,7 +3251,7 @@ mod tests {
         );
         assert_eq!(
             resolution.instructions,
-            [("a.md".to_owned(), Path::new("/lib").join("a.md"))]
+            [("library/a.md".to_owned(), Path::new("/lib").join("a.md"))]
         );
         assert_eq!(resolution.folders[0].status, Some(FolderStatus::Ok));
         assert!(resolution.problems.is_empty(), "{:?}", resolution.problems);
@@ -2786,7 +3259,7 @@ mod tests {
             (ops.stats_of(Path::new("/lib")), ops.stats_of(&folder)),
             (1, 1)
         );
-        svc.resolve_preset(&lp("P.yaml"));
+        svc.resolve_preset(&lp("library/P.yaml"));
         assert_eq!(store.scans(), [scan("/lib", None)], "no second scan");
     }
 
@@ -2796,11 +3269,11 @@ mod tests {
         let store = TestStore::new(&["/lib"]);
         store.mem("/lib").file(
             "P.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - a.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/a.md\n",
         );
         store.mem("/lib").file("a.md", "a");
-        let claude = claude_json(&["P.yaml"]);
-        let shell = agent(&["P.yaml"]);
+        let claude = claude_json(&["library/P.yaml"]);
+        let shell = agent(&["library/P.yaml"]);
         let stranger = agent(&[]);
         let io = BoundedIo::new(
             IO_LIMIT,
@@ -2821,7 +3294,7 @@ mod tests {
             resolution.include_priming,
             "the built-in default is attached"
         );
-        assert_eq!(resolution.instructions[0].0, "a.md");
+        assert_eq!(resolution.instructions[0].0, "library/a.md");
         assert_eq!(
             resolution.raw_settings.len(),
             1,
@@ -2868,9 +3341,9 @@ claude: {changed: true}
             &format!("kind: preset\nversion: 1\nfolders:\n  - '{one}'\n"),
         );
         let agents = [
-            claude_json(&["P.yaml"]),
-            claude_json(&["Q.yaml"]),
-            claude_json(&["Q.yaml", "P.yaml"]),
+            claude_json(&["library/P.yaml"]),
+            claude_json(&["library/Q.yaml"]),
+            claude_json(&["library/Q.yaml", "library/P.yaml"]),
         ];
         let ops = Arc::new(CountOps {
             held: vec![held_one.clone(), held_two.clone()],
@@ -2988,7 +3461,7 @@ claude: {changed: true}
             Arc::clone(&ops) as Arc<dyn FolderOps>,
             Arc::new(ThreadSpawn),
         );
-        let library = claude_json(&["P.yaml"]);
+        let library = claude_json(&["library/P.yaml"]);
         let builtin_only = claude_json(&[]);
         let svc = service_io(
             Some("/lib"),
@@ -3031,7 +3504,7 @@ claude: {changed: true}
 
         // No root at all: block ④ alone — the empty catalog's not-found row for the preset is not shown.
         let (unset, _) = service_on(&["/lib"], None);
-        let resolution = unset.resolve_preset(&lp("P.yaml"));
+        let resolution = unset.resolve_preset(&lp("library/P.yaml"));
         assert_eq!(resolution.problems, [library_unavailable(gate::NO_ROOT)]);
         assert!(resolution.root_absent && resolution.blocked().is_none());
 
@@ -3049,7 +3522,7 @@ claude: {changed: true}
         );
         let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
         *lock(&store.fail_next_scan) = true;
-        let resolution = svc.resolve_preset(&lp("lnk/P.yaml"));
+        let resolution = svc.resolve_preset(&lp("library/lnk/P.yaml"));
         let [BlockReason::LibraryUnavailable { reason }] = resolution.problems.as_slice() else {
             panic!("{:?}", resolution.problems)
         };
@@ -3076,7 +3549,7 @@ claude: {changed: true}
         );
         let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
         *lock(&store.fail_next_scan) = true;
-        let resolution = svc.resolve_preset(&lp("P.yaml"));
+        let resolution = svc.resolve_preset(&lp("library/P.yaml"));
         assert_eq!(resolution.problems, [library_unavailable("missing")]);
         assert_eq!(resolution.skipped(), resolution.problems);
         assert_eq!(ops.stats_of(Path::new("/lib")), 1);
@@ -3089,26 +3562,26 @@ claude: {changed: true}
         let (svc, store) = library();
         store.mem("/lib").file(
             "P.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - gone.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/gone.md\n",
         );
         *lock(&store.fail_link) = Some(io::ErrorKind::PermissionDenied);
-        let resolution = svc.resolve_preset(&lp("P.yaml"));
+        let resolution = svc.resolve_preset(&lp("library/P.yaml"));
         let [BlockReason::Broken { item, via, reason }] = resolution.problems.as_slice() else {
             panic!("{:?}", resolution.problems)
         };
         assert_eq!(
             (item.as_str(), via.as_slice()),
-            ("gone.md", ["P.yaml".to_owned()].as_slice())
+            ("library/gone.md", ["library/P.yaml".to_owned()].as_slice())
         );
         assert_eq!(reason.code, launch::LIBRARY_READ_FAILED);
-        assert_eq!(reason.args["path"], "gone.md");
+        assert_eq!(reason.args["path"], "library/gone.md");
         assert!(reason.args["why"]
             .as_str()
             .is_some_and(|why| !why.is_empty()));
         assert_eq!(reason.line, Some(4));
 
         *lock(&store.fail_link) = Some(io::ErrorKind::NotADirectory);
-        let resolution = svc.resolve_preset(&lp("P.yaml"));
+        let resolution = svc.resolve_preset(&lp("library/P.yaml"));
         assert_eq!(codes(&resolution), [NOT_FOUND]);
         assert_eq!(resolution.skipped(), resolution.problems);
     }
@@ -3120,7 +3593,7 @@ claude: {changed: true}
             "s.yaml",
             "kind: settings\nversion: 1\nclaude: {}\ncodex:\n  - foo\n",
         );
-        let rows = svc.list(None).unwrap().rows;
+        let rows = svc.list(Some(&lp("library"))).unwrap().rows;
         let state = rows[0].state.as_ref().expect("a refusal");
         assert_eq!(
             (state.code.as_str(), state.line),
@@ -3135,27 +3608,27 @@ claude: {changed: true}
         mem.link("lnk");
         mem.file(
             "P.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - lnk/x.md\n  - gone.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/lnk/x.md\n  - library/gone.md\n",
         );
-        let resolution = svc.resolve_preset(&lp("P.yaml"));
+        let resolution = svc.resolve_preset(&lp("library/P.yaml"));
         assert_eq!(
             resolution.problems,
             [
                 BlockReason::Broken {
-                    item: "lnk/x.md".to_owned(),
-                    via: vec!["P.yaml".to_owned()],
+                    item: "library/lnk/x.md".to_owned(),
+                    via: vec!["library/P.yaml".to_owned()],
                     reason: Reason {
                         code: PATH_THROUGH_LINK.to_owned(),
-                        args: json!({ "path": "lnk/x.md" }),
+                        args: json!({ "path": "library/lnk/x.md" }),
                         line: Some(4),
                     },
                 },
                 BlockReason::Missing {
-                    item: "gone.md".to_owned(),
-                    via: vec!["P.yaml".to_owned()],
+                    item: "library/gone.md".to_owned(),
+                    via: vec!["library/P.yaml".to_owned()],
                     reason: Reason {
                         code: NOT_FOUND.to_owned(),
-                        args: json!({ "path": "gone.md" }),
+                        args: json!({ "path": "library/gone.md" }),
                         line: Some(5),
                     },
                 },
@@ -3187,9 +3660,10 @@ claude: {changed: true}
     #[test]
     fn a_codex_agents_mode_decides_whether_its_skills_are_judged() {
         let store = TestStore::new(&["/lib"]);
-        store
-            .mem("/lib")
-            .file("P.yaml", "kind: preset\nversion: 1\nskills:\n  - s\n");
+        store.mem("/lib").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\nskills:\n  - library/s\n",
+        );
         store
             .mem("/lib")
             .file("s/SKILL.md", "---\nname: s\ndescription: \"\"\n---\n");
@@ -3199,7 +3673,7 @@ claude: {changed: true}
                     extra_args: Vec::new(),
                     output_format: mode,
                 },
-                &["P.yaml"],
+                &["library/P.yaml"],
             )
         };
         let json_agent = codex(AgentOutputFormat::StreamJson);
@@ -3418,7 +3892,10 @@ claude: {changed: true}
         assert_eq!(status.root, Some(disk.at("lib2")));
         assert_eq!(status.root_setting, Some(RootSettingKind::Explicit));
         assert_eq!(status.config, ConfigHealth::Ok);
-        assert_eq!(paths(&svc.list(None).unwrap()), ["b.md"]);
+        assert_eq!(
+            paths(&svc.list(Some(&lp("library"))).unwrap()),
+            ["library/b.md"]
+        );
         assert_eq!(
             disk.start().status().root,
             Some(disk.at("lib2")),
@@ -3448,12 +3925,17 @@ claude: {changed: true}
             { "name": "extra", "path": other.to_str().unwrap() },
         ] });
         std::fs::write(disk.config_path(), doc.to_string()).unwrap();
+        disk.mem("lib").file("old.md", "old");
+        disk.mem("lib2").file("new.md", "new");
+        disk.mem("other").file("x.md", "x");
         let svc = disk.start();
         assert_eq!(
             root_of(&svc),
             Some(disk.at("lib")),
             "the first mount is the root"
         );
+        svc.first_scan_join().unwrap();
+        assert!(has(&svc, "team/old.md") && has(&svc, "extra/x.md"));
         svc.set_root(&disk.at("lib2"), false).unwrap();
         assert_eq!(
             mounts_of(&svc),
@@ -3462,6 +3944,11 @@ claude: {changed: true}
                 ("extra".to_owned(), other.clone())
             ]
         );
+        assert!(
+            has(&svc, "team/new.md") && !has(&svc, "team/old.md"),
+            "the first mount's items come from its new folder"
+        );
+        assert!(has(&svc, "extra/x.md"), "the second mount's items survive");
         assert_eq!(
             disk.config(),
             Some(json!({ "schema_version": 2, "mounts": [
@@ -3613,7 +4100,7 @@ claude: {changed: true}
         std::fs::write(disk.config_path(), &old).unwrap();
         disk.mem("lib").file("a.md", "a");
         let svc = disk.start();
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         disk.mem("lib2").fail_listing("", ListFailure::Open);
         let reason = refused(svc.set_root(&disk.at("lib2"), false).unwrap_err()).1;
         assert_eq!(reason.code, LIBRARY_ROOT_UNUSABLE);
@@ -3624,7 +4111,10 @@ claude: {changed: true}
         );
         assert_eq!(svc.status().root, Some(disk.at("lib")));
         assert_eq!(svc.numbers().root, ROOT_BASE);
-        assert_eq!(paths(&svc.list(None).unwrap()), ["a.md"]);
+        assert_eq!(
+            paths(&svc.list(Some(&lp("library"))).unwrap()),
+            ["library/a.md"]
+        );
     }
 
     #[test]
@@ -3679,7 +4169,10 @@ claude: {changed: true}
                 matches!(&status.config, ConfigHealth::Unsaved { why } if !why.is_empty()),
                 "{status:?}"
             );
-            assert_eq!(paths(&svc.list(None).unwrap()), ["b.md"]);
+            assert_eq!(
+                paths(&svc.list(Some(&lp("library"))).unwrap()),
+                ["library/b.md"]
+            );
             if !judged {
                 assert_eq!(
                     disk.start().status().root,
@@ -3748,7 +4241,7 @@ claude: {changed: true}
         let disk = OnDisk::new(&["lib", "a", "b"], "library", None);
         std::fs::write(disk.config_path(), disk.explicit("lib")).unwrap();
         let svc = disk.start();
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         let (a, b) = (disk.at("a"), disk.at("b"));
         disk.store.hold_at(At::Start, a.to_str().unwrap());
         let first = {
@@ -3825,7 +4318,7 @@ claude: {changed: true}
                 ConfigHealth::Ok
             )
         );
-        assert!(svc.list(None).unwrap().rows.is_empty());
+        assert!(svc.list(Some(&lp("library"))).unwrap().rows.is_empty());
         assert_eq!(svc.first_start(), FirstStart::NotDue, "once");
         assert_eq!(
             disk.start().first_start(),
@@ -3975,16 +4468,16 @@ claude: {changed: true}
         svc.start_boot_scan();
         disk.store.wait_held();
         assert!(
-            !has(&svc, "a.md"),
+            !has(&svc, "library/a.md"),
             "the boot-scan method returned with its walk parked"
         );
-        let reader = on_thread(&svc, |svc| svc.list(None).unwrap());
+        let reader = on_thread(&svc, |svc| svc.list(Some(&lp("library"))).unwrap());
         svc.gate.wait_for(
             "the reader waits at the first-scan entrance",
             |_, waiting| waiting == 1,
         );
         disk.store.release();
-        assert_eq!(paths(&join(reader)), ["a.md"]);
+        assert_eq!(paths(&join(reader)), ["library/a.md"]);
         assert_eq!(
             disk.store.scans(),
             [scan(root_text, None)],
@@ -4052,8 +4545,8 @@ claude: {changed: true}
         lock(&disk.ops.0).clear();
 
         assert_eq!(
-            paths(&svc.list(None).unwrap()),
-            ["a.md"],
+            paths(&svc.list(Some(&lp("library"))).unwrap()),
+            ["library/a.md"],
             "a scan succeeded"
         );
         assert_eq!(disk.store.scans().len(), 3);
@@ -4136,8 +4629,11 @@ claude: {changed: true}
         spawn.join_all();
         assert_eq!(store.scans(), [scan("/lib", None)]);
         assert_eq!(svc.numbers().swap_ins, 1);
-        assert!(has(&svc, "a.md"));
-        assert_eq!(paths(&svc.list(None).unwrap()), ["a.md"]);
+        assert!(has(&svc, "library/a.md"));
+        assert_eq!(
+            paths(&svc.list(Some(&lp("library"))).unwrap()),
+            ["library/a.md"]
+        );
         assert_eq!(
             store.scans().len(),
             1,
@@ -4175,7 +4671,10 @@ claude: {changed: true}
         svc.start_boot_scan();
         assert!(store.scans().is_empty(), "not walked in place");
         assert_eq!(svc.numbers().swap_ins, 0);
-        assert_eq!(paths(&svc.list(None).unwrap()), ["a.md"]);
+        assert_eq!(
+            paths(&svc.list(Some(&lp("library"))).unwrap()),
+            ["library/a.md"]
+        );
         assert_eq!(store.scans(), [scan("/lib", None)]);
     }
 
@@ -4192,7 +4691,7 @@ claude: {changed: true}
             Arc::clone(&spawn) as Arc<dyn Spawn>,
         );
         store.hold_at(At::Start, "/lib");
-        let reader = on_thread(&svc, |svc| svc.list(None).unwrap());
+        let reader = on_thread(&svc, |svc| svc.list(Some(&lp("library"))).unwrap());
         store.wait_held();
         svc.start_boot_scan();
         svc.gate.wait_for(
@@ -4200,7 +4699,7 @@ claude: {changed: true}
             |line, waiting| line == [("scan", true)] && waiting == 1,
         );
         store.release();
-        assert_eq!(paths(&join(reader)), ["a.md"]);
+        assert_eq!(paths(&join(reader)), ["library/a.md"]);
         spawn.join_all();
         assert_eq!(store.scans(), [scan("/lib", None)]);
     }
@@ -4211,7 +4710,7 @@ claude: {changed: true}
     fn a_stale_root_generation_is_refused_inside_the_changes_own_lock_take_even_when_queued_behind_a_root_change(
     ) {
         let (svc, store) = service_on(&["/lib", "/lib2"], Some("/lib"));
-        svc.list(None).unwrap();
+        svc.list(Some(&lp("library"))).unwrap();
         let given = svc.status().root_generation;
         store.hold_at(At::Start, "/lib2");
         let root_change = on_thread(&svc, |svc| svc.change_root(PathBuf::from("/lib2")));
@@ -4245,8 +4744,8 @@ claude: {changed: true}
         assert!(!*lock(&ran), "nothing applied");
         assert_eq!(svc.numbers().change, changes, "no generation moved");
         let current = svc.status().root_generation;
-        let root = svc.change_at(Some(current), |_, root, _| {
-            (root.map(Path::to_path_buf), Vec::new())
+        let root = svc.change_at(Some(current), |_, mounts, _| {
+            (mounts.first().map(|first| first.folder.clone()), Vec::new())
         });
         assert_eq!(root.unwrap(), Some(PathBuf::from("/lib2")));
         assert!(svc.change_at(None, |_, _, _| ((), Vec::new())).is_ok());
@@ -4303,36 +4802,34 @@ claude: {changed: true}
         assert_eq!(
             tree,
             [
-                ("deep", "deep", false),
-                ("deep/er", "er", false),
-                ("rules", "rules", false),
-                ("skills", "skills", false),
-                ("skills/s", "s", true),
+                ("library", "library", false),
+                ("library/deep", "deep", false),
+                ("library/deep/er", "er", false),
+                ("library/rules", "rules", false),
+                ("library/skills", "skills", false),
+                ("library/skills/s", "s", true),
             ]
         );
     }
 
+    // ADR-0400 decision 4: with no mount registered the tree is empty and a path names no mount — absent.
     #[test]
-    fn folders_and_read_answer_library_unavailable_with_no_published_root() {
+    fn folders_and_read_with_no_mount_answer_an_empty_tree_and_not_found() {
         let (svc, _store) = service_on(&["/lib"], None);
-        for refusal in [
-            svc.folders().unwrap_err(),
-            svc.read(&lp("a.md")).unwrap_err(),
-        ] {
-            let (class, reason) = refused(refusal);
-            assert_eq!(
-                (class, reason.code.as_str()),
-                (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE)
-            );
-        }
+        assert!(svc.folders().unwrap().folders.is_empty());
+        let (class, reason) = refused(svc.read(&lp("library/a.md")).unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::NotFound, NOT_FOUND)
+        );
     }
 
     #[test]
     fn read_answers_the_row_absolute_path_direct_and_indirect_references_excerpt_and_settings_fields(
     ) {
         let store = TestStore::new(&["/lib"]);
-        let top_agent = agent(&["top.yaml"]);
-        let mut inner_agent = agent(&["inner.yaml"]);
+        let top_agent = agent(&["library/top.yaml"]);
+        let mut inner_agent = agent(&["library/inner.yaml"]);
         inner_agent.name = "b".to_owned();
         let svc = service(
             Some("/lib"),
@@ -4346,26 +4843,26 @@ claude: {changed: true}
         mem.file("rules/a.md", rules);
         mem.file(
             "inner.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - rules/a.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/rules/a.md\n",
         );
         mem.file(
             "top.yaml",
-            "kind: preset\nversion: 1\npresets:\n  - inner.yaml\n",
+            "kind: preset\nversion: 1\npresets:\n  - library/inner.yaml\n",
         );
         mem.file(
             "set.yaml",
             "kind: settings\nversion: 1\nclaude: {}\ncodex: {}\n",
         );
 
-        let a = svc.read(&lp("rules/a.md")).unwrap();
-        assert_eq!(a.row.path, "rules/a.md");
+        let a = svc.read(&lp("library/rules/a.md")).unwrap();
+        assert_eq!(a.row.path, "library/rules/a.md");
         assert_eq!(
             (a.row.kind.clone(), a.row.references),
             (ItemKind::Instruction, 2)
         );
-        assert_eq!(a.absolute, lp("rules/a.md").to_path(Path::new("/lib")));
-        assert_eq!(a.presets_direct, ["inner.yaml"]);
-        assert_eq!(a.presets_indirect, ["top.yaml"]);
+        assert_eq!(a.absolute, Path::new("/lib").join("rules").join("a.md"));
+        assert_eq!(a.presets_direct, ["library/inner.yaml"]);
+        assert_eq!(a.presets_indirect, ["library/top.yaml"]);
         assert!(a.agents_direct.is_empty());
         let mut both = vec![top_agent.id, inner_agent.id];
         both.sort_unstable();
@@ -4373,22 +4870,22 @@ claude: {changed: true}
         assert_eq!(a.excerpt, Some(excerpt(rules)));
         assert!(a.settings_fields.is_empty());
 
-        let inner = svc.read(&lp("inner.yaml")).unwrap();
-        assert_eq!(inner.presets_direct, ["top.yaml"]);
+        let inner = svc.read(&lp("library/inner.yaml")).unwrap();
+        assert_eq!(inner.presets_direct, ["library/top.yaml"]);
         assert!(inner.presets_indirect.is_empty());
         assert_eq!(inner.agents_direct, [inner_agent.id]);
         assert_eq!(inner.agents_indirect, [top_agent.id]);
         assert_eq!(inner.row.references, 2);
         assert_eq!(inner.excerpt, None);
 
-        let settings = svc.read(&lp("set.yaml")).unwrap();
+        let settings = svc.read(&lp("library/set.yaml")).unwrap();
         assert_eq!(settings.settings_fields, ["claude", "codex"]);
 
-        let (class, reason) = refused(svc.read(&lp("missing.md")).unwrap_err());
+        let (class, reason) = refused(svc.read(&lp("library/missing.md")).unwrap_err());
         assert_eq!(
             (class, reason.code.as_str()),
             (RefusalClass::NotFound, NOT_FOUND)
         );
-        assert_eq!(reason.args, json!({ "path": "missing.md" }));
+        assert_eq!(reason.args, json!({ "path": "library/missing.md" }));
     }
 }

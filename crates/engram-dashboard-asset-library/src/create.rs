@@ -3,6 +3,9 @@
 //!
 //! ## Rules (invariants)
 //!
+//! - **Nothing at the top.** A create needs a parent folder: none (the virtual root) refuses `virtual-root-read-only`
+//!   before anything else — a mount's top changes only through the mount commands (ADR-0400 decision 5). A mount's top
+//!   is a parent like any folder.
 //! - **One change, never an overwrite.** After the name rules and the first-scan entrance, one
 //!   [`LibraryService::change_at`] write lock holds, in this order: the parent folder's link admission (ADR-0365), the
 //!   existence check, the create and the new item or folder entered into the catalog. The create itself refuses a name
@@ -15,6 +18,7 @@
 //!   `description`, which the readers accept (a file without `version` does not read).
 // ADR-0365
 // ADR-0366
+// ADR-0400
 
 use std::collections::HashMap;
 use std::io;
@@ -28,10 +32,10 @@ use serde_json::json;
 use crate::catalog::{key, within, Catalog, Item, ScanItem, ScanResult};
 use crate::edit::{dot_or_temp, lib_path, not_found, LIBRARY_WRITE_FAILED};
 use crate::format::read::ITEM_PATH_INVALID;
-use crate::gate::NO_ROOT;
+use crate::mounts::{admits_inside, Mount, MountPath, Mounts};
 use crate::path::LibPath;
-use crate::store::{admits, ContentTag, ScanEntry, ScanListing};
-use crate::{LibraryRefusal, LibraryService, RefusalClass};
+use crate::store::{ContentTag, ScanEntry, ScanListing};
+use crate::{virtual_root_read_only, LibraryRefusal, LibraryService, RefusalClass};
 
 /// The code of a create whose name is already taken (`args` = `{path}`); nothing is replaced.
 pub const NAME_EXISTS: &str = "name-exists";
@@ -57,7 +61,7 @@ impl NewFileKind {
 }
 
 impl LibraryService {
-    /// Creates folder `name` in `parent` (`None` = the root) and enters it into the catalog. Answers its path.
+    /// Creates folder `name` in `parent` and enters it into the catalog. Answers its path.
     ///
     /// Refusals, nothing created: a parent that is not a library path, a name that is not one path segment or is a dot
     /// or temp name `InvalidArgument` · `item-path-invalid`; plus the refusals every create can answer
@@ -68,22 +72,23 @@ impl LibraryService {
         name: &str,
         root_generation: Option<u64>,
     ) -> Result<LibPath, LibraryRefusal> {
-        let parent = parent.map(lib_path).transpose()?;
-        let path = child(parent.as_ref(), name, name)?;
-        self.create(parent.as_ref(), &path, None, root_generation)
+        let parent = parent_of(parent)?;
+        let path = child(&parent, name, name)?;
+        self.create(&parent, &path, None, root_generation)
     }
 
-    /// Creates file `name` of `kind` in `folder` (`None` = the root) from its template and enters its item into the
-    /// catalog. A markdown name takes `.md`, a settings or preset name `.yaml` (`.yml` is kept), each appended unless
-    /// the name already ends with it. Answers its path.
+    /// Creates file `name` of `kind` in `folder` from its template and enters its item into the catalog. A markdown
+    /// name takes `.md`, a settings or preset name `.yaml` (`.yml` is kept), each appended unless the name already ends
+    /// with it. Answers its path.
     ///
-    /// Refusals, nothing created: a folder that is not a library path, a name that is not one path segment, a dot or
-    /// temp name, or a name ending in the other kinds' extension `InvalidArgument` · `item-path-invalid`; no published
-    /// root `Unavailable` · `library-unavailable`; a stale root generation `Conflict` · `root-generation-stale`; the
-    /// parent at or below a link `InvalidArgument` · `path-through-link` (a probe error `Unavailable` ·
-    /// `library-read-failed`); the name taken `Conflict` · [`NAME_EXISTS`]; the parent missing or not a folder
-    /// `NotFound` · `not-found`; another create or write failure `Unavailable` · `library-write-failed` (a failed
-    /// write can leave a partial file at the new name — the store never removes it by name).
+    /// Refusals, nothing created: no folder (the virtual root) `InvalidArgument` · `virtual-root-read-only`; a folder
+    /// that is not a library path, a name that is not one path segment, a dot or temp name, or a name ending in the
+    /// other kinds' extension `InvalidArgument` · `item-path-invalid`; no first scan applied `Unavailable` ·
+    /// `library-unavailable`; a stale root generation `Conflict` · `root-generation-stale`; the parent at or below a
+    /// link `InvalidArgument` · `path-through-link` (a probe error `Unavailable` · `library-read-failed`); the name
+    /// taken `Conflict` · [`NAME_EXISTS`]; the parent missing or not a folder, or in no registered mount, `NotFound` ·
+    /// `not-found`; another create or write failure `Unavailable` · `library-write-failed` (a failed write can leave a
+    /// partial file at the new name — the store never removes it by name).
     pub fn new_file(
         &self,
         folder: Option<&str>,
@@ -91,38 +96,28 @@ impl LibraryService {
         kind: NewFileKind,
         root_generation: Option<u64>,
     ) -> Result<LibPath, LibraryRefusal> {
-        let folder = folder.map(lib_path).transpose()?;
+        let folder = parent_of(folder)?;
         let file_name = with_extension(name, kind)?;
-        let path = child(folder.as_ref(), name, &file_name)?;
-        self.create(
-            folder.as_ref(),
-            &path,
-            Some(kind.template()),
-            root_generation,
-        )
+        let path = child(&folder, name, &file_name)?;
+        self.create(&folder, &path, Some(kind.template()), root_generation)
     }
 
     /// One create (module header): a file from `template`, or a folder when `None`.
     fn create(
         &self,
-        parent: Option<&LibPath>,
+        parent: &LibPath,
         path: &LibPath,
         template: Option<&str>,
         root_generation: Option<u64>,
     ) -> Result<LibPath, LibraryRefusal> {
-        if !admits(path) {
+        if !admits_inside(path) {
             return Err(dot_or_temp(path));
         }
         self.first_scan_join()
             .map_err(LibraryRefusal::unavailable)?;
-        self.change_at(root_generation, |catalog, root, seq| {
+        self.change_at(root_generation, |catalog, mounts, seq| {
             let mut touched = Vec::new();
-            let answer = match root {
-                Some(root) => {
-                    self.create_in(parent, path, template, catalog, root, seq, &mut touched)
-                }
-                None => Err(LibraryRefusal::unavailable(NO_ROOT.to_owned())),
-            };
+            let answer = self.create_in(parent, path, template, catalog, mounts, seq, &mut touched);
             (answer, touched)
         })?
     }
@@ -131,18 +126,23 @@ impl LibraryService {
     #[allow(clippy::too_many_arguments)]
     fn create_in(
         &self,
-        parent: Option<&LibPath>,
+        parent: &LibPath,
         path: &LibPath,
         template: Option<&str>,
         catalog: &mut Catalog,
-        root: &Path,
+        mounts: &Mounts,
         seq: &dyn Fn() -> u64,
         touched: &mut Vec<PathKey>,
     ) -> Result<LibPath, LibraryRefusal> {
-        if let Some(parent) = parent {
-            self.admit(root, parent)?;
+        // `path` is `parent` plus one name, so it lies below its mount's top.
+        let Some((mount, Some(rest))) = mounts.locate(path) else {
+            return Err(not_found(parent.as_str()));
+        };
+        // A mount's top is not admitted (it is no library item); its folder may itself be a link (ADR-0400).
+        if parent.as_str().contains('/') {
+            self.admit(mounts, parent)?;
         }
-        let disk = path.to_path(root);
+        let disk = rest.to_path(&mount.folder);
         if self.store.exists(&disk) {
             return Err(name_exists(path));
         }
@@ -170,7 +170,7 @@ impl LibraryService {
             }
             Some(text) => {
                 let tag = self.tag_after_write(path, &disk, text.len());
-                let items = self.items_of(root, path, text, tag, made_seq);
+                let items = self.items_of(mount, &rest, text, tag, made_seq);
                 touched.extend(catalog.apply_items(items, true));
                 tracing::info!(path = path.as_str(), "library file created");
             }
@@ -178,20 +178,20 @@ impl LibraryService {
         Ok(path.clone())
     }
 
-    /// The items the file `path` holding `text` makes, decided as a scan decides them (`ScanResult::build`) with no
-    /// disk read; their `read_seq` is `made_seq`, drawn before the create.
+    /// The items the file `rest` in `mount` holding `text` makes, decided as a scan decides them (`ScanResult::build`)
+    /// with no disk read; their `read_seq` is `made_seq`, drawn before the create.
     fn items_of(
         &self,
-        root: &Path,
-        path: &LibPath,
+        mount: &Mount,
+        rest: &MountPath,
         text: &str,
         tag: ContentTag,
         made_seq: u64,
     ) -> Vec<Item> {
         let listing = ScanListing {
-            root: root.to_path_buf(),
+            root: mount.folder.clone(),
             files: vec![ScanEntry {
-                rel: path.clone(),
+                rel: rest.clone(),
                 tag,
                 seq: made_seq,
             }],
@@ -200,7 +200,8 @@ impl LibraryService {
         let read = |_: &Path| Ok(text.as_bytes().to_vec());
         ScanResult::build(
             listing,
-            Some(path),
+            &mount.name,
+            Some(rest),
             &HashMap::new(),
             &read,
             &*self.values.backends,
@@ -242,9 +243,18 @@ fn with_extension(name: &str, kind: NewFileKind) -> Result<String, LibraryRefusa
     }
 }
 
-/// The library path of `name` in `parent` (`None` = the root), or `item-path-invalid` naming `given` (the name as
-/// asked) — `name` must be one path segment.
-fn child(parent: Option<&LibPath>, given: &str, name: &str) -> Result<LibPath, LibraryRefusal> {
+/// The folder a create makes its entry in: `parent` as a library path; none (the virtual root) refuses
+/// `virtual-root-read-only` (module header), a spelling that is no library path `item-path-invalid`.
+fn parent_of(parent: Option<&str>) -> Result<LibPath, LibraryRefusal> {
+    match parent {
+        Some(parent) => lib_path(parent),
+        None => Err(virtual_root_read_only(None)),
+    }
+}
+
+/// The library path of `name` in `parent`, or `item-path-invalid` naming `given` (the name as asked) — `name` must be
+/// one path segment.
+fn child(parent: &LibPath, given: &str, name: &str) -> Result<LibPath, LibraryRefusal> {
     let invalid = |why: String| {
         LibraryRefusal::new(
             RefusalClass::InvalidArgument,
@@ -255,11 +265,7 @@ fn child(parent: Option<&LibPath>, given: &str, name: &str) -> Result<LibPath, L
     if name.contains('/') {
         return Err(invalid("a name is one path segment".to_owned()));
     }
-    let text = match parent {
-        Some(parent) => format!("{}/{name}", parent.as_str()),
-        None => name.to_owned(),
-    };
-    LibPath::parse(&text).map_err(|why| invalid(why.to_string()))
+    LibPath::parse(&format!("{}/{name}", parent.as_str())).map_err(|why| invalid(why.to_string()))
 }
 
 fn name_exists(path: &LibPath) -> LibraryRefusal {
@@ -271,13 +277,11 @@ fn name_exists(path: &LibPath) -> LibraryRefusal {
 }
 
 /// A create that failed: the name taken meanwhile `name-exists`, the parent missing or not a folder `not-found`
-/// (naming the parent, or the new path at the root), anything else `library-write-failed`.
-fn create_refused(parent: Option<&LibPath>, path: &LibPath, e: &io::Error) -> LibraryRefusal {
+/// (naming the parent), anything else `library-write-failed`.
+fn create_refused(parent: &LibPath, path: &LibPath, e: &io::Error) -> LibraryRefusal {
     match e.kind() {
         io::ErrorKind::AlreadyExists => name_exists(path),
-        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {
-            not_found(parent.unwrap_or(path).as_str())
-        }
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => not_found(parent.as_str()),
         _ => LibraryRefusal::new(
             RefusalClass::Unavailable,
             LIBRARY_WRITE_FAILED,
@@ -306,8 +310,9 @@ mod tests {
     use crate::config::{LibraryConfig, MountPlace};
     use crate::folder::{BoundedIo, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT, LIST_CAP};
     use crate::gate::NOT_FOUND;
+    use crate::mounts::MountPath;
     use crate::store::{ContentTag, FsStore, LibraryStore, ScanListing, TrashBundle};
-    use crate::{LibraryValues, LIBRARY_UNAVAILABLE, PATH_THROUGH_LINK};
+    use crate::{LibraryValues, PATH_THROUGH_LINK, VIRTUAL_ROOT_READ_ONLY};
 
     /// [`FsStore`] that fails every write and folder create while a test sets `fail`, answers every existence check
     /// "absent" while it sets `blind`, fails every read while it sets `unreadable`, and logs each create with whether
@@ -344,12 +349,12 @@ mod tests {
         fn scan(
             &self,
             root: &Path,
-            under: Option<&LibPath>,
+            under: Option<&MountPath>,
             seq: &dyn Fn() -> u64,
         ) -> io::Result<ScanListing> {
             FsStore.scan(root, under, seq)
         }
-        fn first_link(&self, root: &Path, rel: &LibPath) -> io::Result<Option<LibPath>> {
+        fn first_link(&self, root: &Path, rel: &MountPath) -> io::Result<Option<MountPath>> {
             FsStore.first_link(root, rel)
         }
         fn read(&self, path: &Path, cap: u64) -> io::Result<Vec<u8>> {
@@ -459,7 +464,9 @@ mod tests {
         }
 
         fn lib(&self, rel: &str) -> PathBuf {
-            LibPath::parse(rel).unwrap().to_path(&self.base.join("lib"))
+            MountPath::parse(rel)
+                .unwrap()
+                .to_path(&self.base.join("lib"))
         }
 
         fn put(&self, rel: &str, text: &str) {
@@ -481,7 +488,7 @@ mod tests {
             self.svc.with_read(|state| {
                 state
                     .catalog
-                    .get(&key(&LibPath::parse(rel).unwrap()))
+                    .get(&key(&LibPath::parse(&format!("library/{rel}")).unwrap()))
                     .map(|item| item.kind.clone())
             })
         }
@@ -537,8 +544,8 @@ mod tests {
             ),
         ];
         for (name, kind, path, item) in cases {
-            let made = w.file(Some("rules"), name, kind).unwrap();
-            assert_eq!(made.as_str(), path);
+            let made = w.file(Some("library/rules"), name, kind).unwrap();
+            assert_eq!(made.as_str(), format!("library/{path}"));
             assert_eq!(fs::read_to_string(w.lib(path)).unwrap(), kind.template());
             assert_eq!(
                 w.kind_of(path),
@@ -557,13 +564,19 @@ mod tests {
     fn the_kinds_extension_is_appended_unless_present_and_the_other_kinds_is_refused() {
         let w = World::new();
         let made = |name: &str, kind| {
-            w.file(None, name, kind)
+            w.file(Some("library"), name, kind)
                 .map(|path| path.as_str().to_owned())
         };
-        assert_eq!(made("a.md", NewFileKind::Markdown).unwrap(), "a.md");
-        assert_eq!(made("b.yml", NewFileKind::Settings).unwrap(), "b.yml");
-        assert_eq!(made("c.yaml", NewFileKind::Preset).unwrap(), "c.yaml");
-        assert_eq!(made("d", NewFileKind::Preset).unwrap(), "d.yaml");
+        assert_eq!(made("a.md", NewFileKind::Markdown).unwrap(), "library/a.md");
+        assert_eq!(
+            made("b.yml", NewFileKind::Settings).unwrap(),
+            "library/b.yml"
+        );
+        assert_eq!(
+            made("c.yaml", NewFileKind::Preset).unwrap(),
+            "library/c.yaml"
+        );
+        assert_eq!(made("d", NewFileKind::Preset).unwrap(), "library/d.yaml");
         for (name, kind) in [
             ("e.yaml", NewFileKind::Markdown),
             ("f.yml", NewFileKind::Markdown),
@@ -574,7 +587,7 @@ mod tests {
             ("", NewFileKind::Markdown),
         ] {
             assert_eq!(
-                code(w.file(None, name, kind)),
+                code(w.file(Some("library"), name, kind)),
                 (RefusalClass::InvalidArgument, ITEM_PATH_INVALID.to_owned()),
                 "{name:?}"
             );
@@ -587,9 +600,12 @@ mod tests {
         let w = World::new();
         w.put("rules/a.md", "a");
 
-        let made = w.svc.new_folder(Some("rules"), "team", None).unwrap();
+        let made = w
+            .svc
+            .new_folder(Some("library/rules"), "team", None)
+            .unwrap();
 
-        assert_eq!(made.as_str(), "rules/team");
+        assert_eq!(made.as_str(), "library/rules/team");
         assert!(w.lib("rules/team").is_dir());
         let folders: Vec<String> = w
             .svc
@@ -599,9 +615,12 @@ mod tests {
             .into_iter()
             .map(|node| node.path)
             .collect();
-        assert!(folders.contains(&"rules/team".to_owned()), "{folders:?}");
+        assert!(
+            folders.contains(&"library/rules/team".to_owned()),
+            "{folders:?}"
+        );
         assert_eq!(
-            code(w.svc.new_folder(None, "a/b", None)),
+            code(w.svc.new_folder(Some("library"), "a/b", None)),
             (RefusalClass::InvalidArgument, ITEM_PATH_INVALID.to_owned())
         );
     }
@@ -613,15 +632,15 @@ mod tests {
         w.put("P.yaml", "kind: preset\nversion: 1\n");
 
         assert_eq!(
-            code(w.file(Some("rules"), "a", NewFileKind::Markdown)),
+            code(w.file(Some("library/rules"), "a", NewFileKind::Markdown)),
             (RefusalClass::Conflict, NAME_EXISTS.to_owned())
         );
         assert_eq!(
-            code(w.file(None, "P", NewFileKind::Preset)),
+            code(w.file(Some("library"), "P", NewFileKind::Preset)),
             (RefusalClass::Conflict, NAME_EXISTS.to_owned())
         );
         assert_eq!(
-            code(w.svc.new_folder(None, "rules", None)),
+            code(w.svc.new_folder(Some("library"), "rules", None)),
             (RefusalClass::Conflict, NAME_EXISTS.to_owned())
         );
         assert_eq!(fs::read_to_string(w.lib("rules/a.md")).unwrap(), "mine");
@@ -635,11 +654,11 @@ mod tests {
     fn a_missing_parent_is_refused_not_found_and_never_created() {
         let w = World::new();
         assert_eq!(
-            code(w.file(Some("nope"), "a", NewFileKind::Markdown)),
+            code(w.file(Some("library/nope"), "a", NewFileKind::Markdown)),
             (RefusalClass::NotFound, NOT_FOUND.to_owned())
         );
         assert_eq!(
-            code(w.svc.new_folder(Some("nope/deeper"), "team", None)),
+            code(w.svc.new_folder(Some("library/nope/deeper"), "team", None)),
             (RefusalClass::NotFound, NOT_FOUND.to_owned())
         );
         assert!(!w.lib("nope").exists());
@@ -653,11 +672,11 @@ mod tests {
         link_dir(&outside, &w.lib("team")).unwrap();
 
         assert_eq!(
-            code(w.file(Some("team"), "a", NewFileKind::Markdown)),
+            code(w.file(Some("library/team"), "a", NewFileKind::Markdown)),
             (RefusalClass::InvalidArgument, PATH_THROUGH_LINK.to_owned())
         );
         assert_eq!(
-            code(w.svc.new_folder(Some("team"), "sub", None)),
+            code(w.svc.new_folder(Some("library/team"), "sub", None)),
             (RefusalClass::InvalidArgument, PATH_THROUGH_LINK.to_owned())
         );
         assert_eq!(
@@ -673,27 +692,58 @@ mod tests {
         *lock(&w.disk.fail) = true;
 
         assert_eq!(
-            code(w.file(None, "a", NewFileKind::Markdown)),
+            code(w.file(Some("library"), "a", NewFileKind::Markdown)),
             (RefusalClass::Unavailable, LIBRARY_WRITE_FAILED.to_owned())
         );
         assert_eq!(
-            code(w.svc.new_folder(None, "team", None)),
+            code(w.svc.new_folder(Some("library"), "team", None)),
             (RefusalClass::Unavailable, LIBRARY_WRITE_FAILED.to_owned())
         );
         assert_eq!(w.kind_of("a.md"), None);
     }
 
+    // ADR-0400 decision 4: with no mount registered the folder names no mount — absent.
     #[test]
-    fn with_no_root_a_create_answers_library_unavailable() {
+    fn with_no_mount_a_create_answers_not_found() {
         let w = World::make(false);
         assert_eq!(
-            code(w.file(None, "a", NewFileKind::Markdown)),
-            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE.to_owned())
+            code(w.file(Some("library"), "a", NewFileKind::Markdown)),
+            (RefusalClass::NotFound, NOT_FOUND.to_owned())
         );
         assert_eq!(
-            code(w.svc.new_folder(None, "team", None)),
-            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE.to_owned())
+            code(w.svc.new_folder(Some("library"), "team", None)),
+            (RefusalClass::NotFound, NOT_FOUND.to_owned())
         );
+        assert!(!w.lib("a.md").exists() && !w.lib("team").exists());
+    }
+
+    // ADR-0400 decision 5: nothing is created at the virtual root; a mount's top is a parent like any folder.
+    #[test]
+    fn a_create_with_no_parent_is_refused_at_the_virtual_root_and_a_mounts_top_is_a_parent() {
+        let w = World::new();
+        assert_eq!(
+            code(w.svc.new_folder(None, "team", None)),
+            (
+                RefusalClass::InvalidArgument,
+                VIRTUAL_ROOT_READ_ONLY.to_owned()
+            )
+        );
+        assert_eq!(
+            code(w.file(None, "a", NewFileKind::Markdown)),
+            (
+                RefusalClass::InvalidArgument,
+                VIRTUAL_ROOT_READ_ONLY.to_owned()
+            )
+        );
+        assert!(!w.lib("team").exists() && !w.lib("a.md").exists());
+        assert_eq!(
+            w.svc
+                .new_folder(Some("library"), "team", None)
+                .unwrap()
+                .as_str(),
+            "library/team"
+        );
+        assert!(w.lib("team").is_dir());
     }
 
     // ── FIX round 1 ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -706,11 +756,11 @@ mod tests {
         *lock(&w.disk.blind) = true;
 
         assert_eq!(
-            code(w.file(Some("rules"), "a", NewFileKind::Markdown)),
+            code(w.file(Some("library/rules"), "a", NewFileKind::Markdown)),
             (RefusalClass::Conflict, NAME_EXISTS.to_owned())
         );
         assert_eq!(
-            code(w.svc.new_folder(Some("rules"), "team", None)),
+            code(w.svc.new_folder(Some("library/rules"), "team", None)),
             (RefusalClass::Conflict, NAME_EXISTS.to_owned())
         );
         assert_eq!(fs::read_to_string(w.lib("rules/a.md")).unwrap(), "mine");
@@ -723,8 +773,10 @@ mod tests {
         w.svc.first_scan_join().unwrap();
         *lock(&w.disk.unreadable) = true;
 
-        w.file(None, "base", NewFileKind::Preset).unwrap();
-        w.file(None, "notes", NewFileKind::Markdown).unwrap();
+        w.file(Some("library"), "base", NewFileKind::Preset)
+            .unwrap();
+        w.file(Some("library"), "notes", NewFileKind::Markdown)
+            .unwrap();
 
         assert_eq!(w.kind_of("base.yaml"), Some(ItemKind::Preset));
         assert_eq!(w.kind_of("notes.md"), Some(ItemKind::Instruction));
@@ -740,7 +792,7 @@ mod tests {
         // Deleted outside Engram; the catalog has not seen it.
         fs::remove_dir_all(w.lib("skills/x")).unwrap();
 
-        w.svc.new_folder(Some("skills"), "x", None).unwrap();
+        w.svc.new_folder(Some("library/skills"), "x", None).unwrap();
 
         assert_eq!(w.kind_of("skills/x"), None);
         assert_eq!(w.kind_of("skills/x/SKILL.md"), None);
@@ -748,11 +800,11 @@ mod tests {
         let tree = w.svc.folders().unwrap().folders;
         let node = tree
             .iter()
-            .find(|node| node.path == "skills/x")
+            .find(|node| node.path == "library/skills/x")
             .expect("the new folder is in the tree");
         assert!(!node.skill, "a plain folder, not the old skill");
         assert!(
-            !tree.iter().any(|node| node.path == "skills/x/sub"),
+            !tree.iter().any(|node| node.path == "library/skills/x/sub"),
             "a stale subfolder goes too: {tree:?}"
         );
     }
@@ -763,11 +815,11 @@ mod tests {
         w.put("a.md", "a");
 
         assert_eq!(
-            code(w.file(Some("a.md"), "x", NewFileKind::Markdown)),
+            code(w.file(Some("library/a.md"), "x", NewFileKind::Markdown)),
             (RefusalClass::NotFound, NOT_FOUND.to_owned())
         );
         assert_eq!(
-            code(w.svc.new_folder(Some("a.md"), "sub", None)),
+            code(w.svc.new_folder(Some("library/a.md"), "sub", None)),
             (RefusalClass::NotFound, NOT_FOUND.to_owned())
         );
         assert_eq!(fs::read_to_string(w.lib("a.md")).unwrap(), "a");
@@ -778,8 +830,9 @@ mod tests {
         let w = World::new();
         w.svc.first_scan_join().unwrap();
 
-        w.file(None, "notes", NewFileKind::Markdown).unwrap();
-        w.svc.new_folder(None, "team", None).unwrap();
+        w.file(Some("library"), "notes", NewFileKind::Markdown)
+            .unwrap();
+        w.svc.new_folder(Some("library"), "team", None).unwrap();
 
         let creates = lock(&w.disk.creates).clone();
         assert_eq!(

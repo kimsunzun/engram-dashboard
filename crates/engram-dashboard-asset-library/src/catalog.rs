@@ -4,14 +4,14 @@
 //!
 //! - **Class A — no whole-catalog swap** (TRD S25 step-7 §6): every write goes through the per-item primitives
 //!   ([`Catalog::apply_items`] · [`Catalog::apply_scan`] · [`Catalog::remove`] · [`Catalog::insert_folder`]); per item
-//!   the later `read_seq` wins, and nothing outside a scan's range is touched. [`Catalog::clear`] exists for the root
-//!   change only.
+//!   the later `read_seq` wins, and nothing outside a scan's range is touched. [`Catalog::drop_range`] exists for a
+//!   mount relocation only.
 //! - **Every removal is sequenced**: an item goes only when an absence observed later than its read says so — a
 //!   listing that lacks it (`listed_at` of its nearest listed folder) or a range observed absent. A failed read
 //!   (`kept`) removes nothing.
-//! - **Keys**: an item is keyed by [`key`] — the platform path key of its library path as spelled from the root, so
-//!   two spellings that differ only in case (on Windows) are one item. The root is the same for every item, so the
-//!   key does not include it.
+//! - **Keys**: an item is keyed by [`key`] — the platform path key of its virtual path (`<mount>/…` — ADR-0396), so two
+//!   spellings that differ only in case (on Windows) are one item, the mount name included (the mount lookup's rule).
+//!   [`ScanResult::build`] turns a scan of one mount's folder into virtual paths (`mounts.rs` converts).
 //! - **Derived data** — `refs_to` (target → the presets that list it directly, keeping the keys of missing targets)
 //!   is kept in step with every item write; `used_by` (preset → every key it reaches, directly or through nested
 //!   presets) is recomputed by [`Catalog::recompute_derived`] for the touched keys, walking upward through `refs_to`
@@ -20,6 +20,7 @@
 //! - The catalog holds no IO: [`ScanResult::build`] reads through a closure, outside any lock.
 // ADR-0324
 // ADR-0341
+// ADR-0400
 // TRD S25 step-7 §3-5 · §6
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -39,6 +40,7 @@ use crate::format::{
     ParseError, PresetDoc, SettingsDoc, Sniff, YAML_SYNTAX,
 };
 use crate::launch::sha256_hex;
+use crate::mounts::{virtual_path, MountName, MountPath};
 use crate::path::{AssetRef, LibPath};
 use crate::store::{ContentTag, ScanListing};
 use crate::validate::{check_settings, SettingsVerdict};
@@ -50,9 +52,8 @@ pub const RACY_WINDOW: Duration = Duration::from_secs(2);
 
 const SKILL_FILE: &str = "SKILL.md";
 
-/// The catalog key of a library path (module header): the platform path key of its spelling from the root. Every
-/// [`Catalog`] lookup takes this key — not [`LibPath::key`], which keys the absolute disk path and matches nothing
-/// here.
+/// The catalog key of a library path (module header): the platform path key of its virtual spelling. Every [`Catalog`]
+/// lookup takes this key.
 pub fn key(path: &LibPath) -> PathKey {
     path_key(Path::new(path.as_str()))
 }
@@ -147,16 +148,17 @@ pub enum ScanItem {
 /// A scan's result, built outside the library lock (walk + read + parse). It holds no catalog (class A).
 #[derive(Clone, Debug)]
 pub struct ScanResult {
-    /// `None` = the whole library.
+    /// The virtual range scanned — a mount's top for a whole mount; `None` = the whole library (tests only: a scan is
+    /// built per mount).
     pub range: Option<LibPath>,
     pub entries: Vec<ScanItem>,
-    /// The folders the listing held.
+    /// The folders the listing held, a whole mount's top included.
     pub folders: Vec<LibPath>,
-    /// From the listing — the absence numbers (`None` = the root).
+    /// From the listing — the absence numbers (a mount's top for its folder).
     pub listed_at: HashMap<Option<LibPath>, u64>,
     /// Whole ranges observed absent (a link, or `under` not found), each with the number drawn before the observation.
     pub absent_ranges: Vec<(LibPath, u64)>,
-    /// Folders (`None` = the root) and files whose read failed — their items are left as they are.
+    /// Folders (a mount's top for its folder) and files whose read failed — their items are left as they are.
     pub kept: Vec<Option<LibPath>>,
     pub skipped_links: Vec<LibPath>,
     pub errors: Vec<(Option<LibPath>, String)>,
@@ -167,15 +169,17 @@ pub struct ScanResult {
 }
 
 impl ScanResult {
-    /// Turns a listing into items: a file is re-read only when its tag differs from the one in `tags` (the catalog's
-    /// items of the range, read under a brief read lock) or `tags` marks it racy. Settings verdicts come from
+    /// Turns a listing of the folder of mount `mount` (of the range `under` inside it; `None` = the whole folder) into
+    /// items at virtual paths: a file is re-read only when its tag differs from the one in `tags` (the catalog's items
+    /// of the range, read under a brief read lock) or `tags` marks it racy. Settings verdicts come from
     /// [`check_settings`]. `read` gets the disk path of each file to re-read; a failed read keeps the file's item.
     ///
     /// `now` is the racy rule's reference and must be a time taken no later than the scan's first read — before the
     /// walk. A later time would judge a file rewritten during the scan as settled.
     pub fn build(
         listing: ScanListing,
-        range: Option<&LibPath>,
+        mount: &MountName,
+        under: Option<&MountPath>,
         tags: &HashMap<PathKey, (ContentTag, bool)>,
         read: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
         backends: &dyn Backends,
@@ -188,16 +192,38 @@ impl ScanResult {
             listed_at,
             absent_ranges,
             skipped_links,
-            mut errors,
+            errors,
         } = listing;
+        let at = |rel: &MountPath| virtual_path(mount, Some(rel));
+        // A place of the listing: `None` = the mount's folder, its top in the virtual tree.
+        let place = |rel: Option<MountPath>| Some(virtual_path(mount, rel.as_ref()));
+        let mut errors: Vec<(Option<LibPath>, String)> = errors
+            .into_iter()
+            .map(|(rel, why)| (place(rel), why))
+            .collect();
+        let mut folders: Vec<LibPath> = folders.iter().map(at).collect();
+        if listed_at.contains_key(&None) {
+            folders.push(virtual_path(mount, None));
+        }
+        let listed_at = listed_at
+            .into_iter()
+            .map(|(rel, seq)| (place(rel), seq))
+            .collect();
+        let absent_ranges = absent_ranges
+            .iter()
+            .map(|(rel, seq)| (at(rel), *seq))
+            .collect();
+        let skipped_links = skipped_links.iter().map(at).collect();
         let mut kept: Vec<Option<LibPath>> = errors.iter().map(|(at, _)| at.clone()).collect();
         let mut entries = Vec::new();
         let mut no_kind = Vec::new();
         for file in files {
-            let Some(kind) = FileKind::of(&file.rel) else {
+            let folder = file.rel.parent().map(|folder| at(&folder));
+            let Some(kind) = FileKind::of(file.rel.file_name(), folder) else {
                 continue;
             };
-            let file_key = key(&file.rel);
+            let path = at(&file.rel);
+            let file_key = key(&path);
             let skill_folder = match &kind {
                 FileKind::SkillFile(folder) => Some(folder.clone()),
                 _ => None,
@@ -217,8 +243,8 @@ impl ScanResult {
             let bytes = match read(&file.rel.to_path(&root)) {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    kept.push(Some(file.rel.clone()));
-                    errors.push((Some(file.rel), e.to_string()));
+                    kept.push(Some(path.clone()));
+                    errors.push((Some(path), e.to_string()));
                     continue;
                 }
             };
@@ -237,11 +263,7 @@ impl ScanResult {
                     let content = ItemContent::Instruction {
                         excerpt: excerpt(&text),
                     };
-                    entries.push(ScanItem::Fresh(item(
-                        file.rel,
-                        ItemKind::Instruction,
-                        content,
-                    )));
+                    entries.push(ScanItem::Fresh(item(path, ItemKind::Instruction, content)));
                 }
                 FileKind::SkillFile(folder) => {
                     let text: Arc<str> = Arc::from(String::from_utf8_lossy(&bytes));
@@ -254,21 +276,21 @@ impl ScanResult {
                     };
                     entries.push(ScanItem::Fresh(item(folder, ItemKind::Skill, content)));
                     entries.push(ScanItem::Fresh(item(
-                        file.rel,
+                        path,
                         ItemKind::SkillFile,
                         ItemContent::SkillFile,
                     )));
                 }
                 FileKind::Yaml => match yaml_item(&bytes, backends) {
-                    None => no_kind.push(file.rel),
+                    None => no_kind.push(path),
                     Some((kind, content)) => {
-                        entries.push(ScanItem::Fresh(item(file.rel, kind, content)))
+                        entries.push(ScanItem::Fresh(item(path, kind, content)))
                     }
                 },
             }
         }
         ScanResult {
-            range: range.cloned(),
+            range: Some(virtual_path(mount, under)),
             entries,
             folders,
             listed_at,
@@ -284,24 +306,25 @@ impl ScanResult {
 
 /// Whether `path` names a `.yaml` / `.yml` file — the only files that can hold a preset (or settings) item.
 pub(crate) fn yaml_file(path: &LibPath) -> bool {
-    matches!(FileKind::of(path), Some(FileKind::Yaml))
+    matches!(FileKind::of(path.file_name(), None), Some(FileKind::Yaml))
 }
 
 /// The kind decision by name (TRD S25 §1-2 table); content decides only between the `.yaml` kinds.
 enum FileKind {
     Instruction,
-    /// A `SKILL.md` directly in a folder below the root; carries that folder (the skill's path).
+    /// A `SKILL.md` directly in a folder below a mount's folder; carries that folder (the skill's path).
     SkillFile(LibPath),
     Yaml,
 }
 
 impl FileKind {
+    /// The kind of the file named `name`, in the folder `folder` (its virtual path; `None` = the mount's folder
+    /// itself).
     // Names compare by the OS rule (platform `same_path` — on Windows `skill.md` is a `SKILL.md`). A `SKILL.md`
-    //   directly under the root has no skill folder (the root is not an item), so it is an instruction.
-    fn of(rel: &LibPath) -> Option<FileKind> {
-        let name = rel.file_name();
+    //   directly in a mount's folder has no skill folder (a mount's top is not an item), so it is an instruction.
+    fn of(name: &str, folder: Option<LibPath>) -> Option<FileKind> {
         if same_path(Path::new(name), Path::new(SKILL_FILE)) {
-            if let Some(folder) = rel.parent() {
+            if let Some(folder) = folder {
                 return Some(FileKind::SkillFile(folder));
             }
         }
@@ -405,7 +428,7 @@ impl Default for Catalog {
 }
 
 impl Catalog {
-    /// The item at `key` — a [`key`] (catalog key), not a [`LibPath::key`].
+    /// The item at `key` — a [`key`] (the catalog key of a virtual path), not a disk path's key.
     pub fn get(&self, key: &PathKey) -> Option<&Item> {
         self.items.get(key).map(Arc::as_ref)
     }
@@ -616,14 +639,22 @@ impl Catalog {
         }
     }
 
-    /// Root change only (TRD S25 step-7 §6 writer 6): empties items, folders, tags, racy marks, `used_by` and
-    /// `refs_to`. Called only in the write lock that also applies the new root's fresh build.
-    pub fn clear(&mut self) {
-        self.items.clear();
-        self.folders.clear();
-        self.used_by.clear();
-        self.refs_to.clear();
-        self.racy.clear();
+    /// A mount relocation only (TRD S25 step-7 §6 writer 6, per mount — ADR-0366 as ADR-0400 amends it): every item and
+    /// folder within `range` goes, whatever its number; the references other items hold to them stay (as missing
+    /// targets). Called only in the write lock that also applies the mount's fresh build. Returns the touched keys.
+    pub fn drop_range(&mut self, range: &LibPath) -> Vec<PathKey> {
+        let inside: Vec<PathKey> = self
+            .items
+            .iter()
+            .filter(|(_, item)| within(&item.path, Some(range)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in &inside {
+            self.replace(k, None);
+        }
+        self.folders
+            .retain(|_, folder| !within(folder, Some(range)));
+        inside
     }
 
     /// `read_at` = the racy rule's reference; `None` = unknown, the item is marked racy.
@@ -778,9 +809,17 @@ pub(crate) mod harness {
         LibPath::parse(text).unwrap()
     }
 
-    /// A library on a `MemStore` with a catalog and one increasing sequence, like the service's gate.
+    /// A path inside the test mount's folder.
+    pub(crate) fn mp(text: &str) -> MountPath {
+        MountPath::parse(text).unwrap()
+    }
+
+    /// A library of one mount (`library`) on a `MemStore` with a catalog and one increasing sequence, like the
+    /// service's gate. Store spellings (`store.file`, `build`, `check_reads`) are inside the mount's folder; catalog
+    /// spellings (`item`, `reaching`) are virtual.
     pub(crate) struct Lib {
         pub(crate) root: PathBuf,
+        pub(crate) mount: MountName,
         pub(crate) store: MemStore,
         pub(crate) catalog: Catalog,
         next: Cell<u64>,
@@ -793,6 +832,7 @@ pub(crate) mod harness {
             Self {
                 store: MemStore::new(&root),
                 root,
+                mount: MountName::first(),
                 catalog: Catalog::default(),
                 next: Cell::new(0),
                 backends: Registry::real_and(vec![Scripted::new("gamma")]),
@@ -804,16 +844,19 @@ pub(crate) mod harness {
             self.next.get()
         }
 
-        /// Walk + read + parse, nothing applied.
+        /// Walk + read + parse of `under` (`None` = the whole mount), nothing applied.
         pub(crate) fn build(&self, under: Option<&str>) -> ScanResult {
-            let under = under.map(lp);
+            let under = under.map(mp);
             let listing = self
                 .store
                 .scan(&self.root, under.as_ref(), &|| self.seq())
                 .unwrap();
-            let tags = self.catalog.tags(under.as_ref());
+            let tags = self
+                .catalog
+                .tags(Some(&virtual_path(&self.mount, under.as_ref())));
             ScanResult::build(
                 listing,
+                &self.mount,
                 under.as_ref(),
                 &tags,
                 &self.store.reader(),
@@ -843,8 +886,8 @@ pub(crate) mod harness {
 
         /// An instruction as a launch check's overlay reads it: the number is drawn before the disk is touched.
         pub(crate) fn overlay_read(&self, rel: &str) -> Item {
-            let path = lp(rel);
-            let disk = path.to_path(&self.root);
+            let path = virtual_path(&self.mount, Some(&mp(rel)));
+            let disk = mp(rel).to_path(&self.root);
             let read_seq = self.seq();
             let tag = self.store.tag(&disk).unwrap();
             let text = String::from_utf8(self.store.read(&disk, u64::MAX).unwrap()).unwrap();
@@ -882,7 +925,7 @@ pub(crate) mod harness {
 
 #[cfg(test)]
 mod tests {
-    use super::harness::{lp, now, Lib};
+    use super::harness::{lp, mp, now, Lib};
     use super::*;
     use crate::store::mem::ListFailure;
     use crate::store::LibraryStore;
@@ -922,7 +965,7 @@ mod tests {
             .file("skills/review/notes.md", "Inside a skill.\n");
         lib.store.file(
             "p.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - rules/a.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/rules/a.md\n",
         );
         lib.store
             .file("s.yml", "kind: settings\nversion: 1\ngamma:\n  unsafe: 1\n");
@@ -934,26 +977,32 @@ mod tests {
         lib.store
             .file("SKILL.md", "A root SKILL.md has no skill folder.\n");
         let result = lib.build(None);
-        assert_eq!(result.no_kind, [lp("plain.yaml")]);
+        assert_eq!(result.no_kind, [lp("library/plain.yaml")]);
         lib.apply(result);
 
         let kind = |rel: &str| lib.item(rel).map(|item| item.kind.clone());
-        assert_eq!(kind("rules/a.md"), Some(ItemKind::Instruction));
-        assert_eq!(lib.excerpt_of("rules/a.md"), "First paragraph.");
-        assert_eq!(kind("skills/review"), Some(ItemKind::Skill));
-        assert_eq!(kind("skills/review/SKILL.md"), Some(ItemKind::SkillFile));
-        assert_eq!(kind("skills/review/notes.md"), Some(ItemKind::Instruction));
-        assert_eq!(kind("SKILL.md"), Some(ItemKind::Instruction));
-        assert_eq!(kind("p.yaml"), Some(ItemKind::Preset));
-        assert_eq!(kind("s.yml"), Some(ItemKind::Settings));
+        assert_eq!(kind("library/rules/a.md"), Some(ItemKind::Instruction));
+        assert_eq!(lib.excerpt_of("library/rules/a.md"), "First paragraph.");
+        assert_eq!(kind("library/skills/review"), Some(ItemKind::Skill));
         assert_eq!(
-            kind("bad.yaml"),
+            kind("library/skills/review/SKILL.md"),
+            Some(ItemKind::SkillFile)
+        );
+        assert_eq!(
+            kind("library/skills/review/notes.md"),
+            Some(ItemKind::Instruction)
+        );
+        assert_eq!(kind("library/SKILL.md"), Some(ItemKind::Instruction));
+        assert_eq!(kind("library/p.yaml"), Some(ItemKind::Preset));
+        assert_eq!(kind("library/s.yml"), Some(ItemKind::Settings));
+        assert_eq!(
+            kind("library/bad.yaml"),
             Some(ItemKind::Broken {
                 claimed: Some(Sniff::Preset)
             })
         );
         assert_eq!(
-            kind("typo.yaml"),
+            kind("library/typo.yaml"),
             Some(ItemKind::Broken {
                 claimed: Some(Sniff::Unknown("prest".to_owned()))
             })
@@ -968,7 +1017,7 @@ mod tests {
             file_name,
             folder,
             text,
-        } = &lib.item("skills/review").unwrap().content
+        } = &lib.item("library/skills/review").unwrap().content
         else {
             panic!("not a skill");
         };
@@ -982,7 +1031,8 @@ mod tests {
         );
         assert!(text.starts_with("---\nname:"));
 
-        let ItemContent::Settings { verdict, .. } = &lib.item("s.yml").unwrap().content else {
+        let ItemContent::Settings { verdict, .. } = &lib.item("library/s.yml").unwrap().content
+        else {
             panic!("not settings");
         };
         // The verdict is the P4 hand-over check through the registry — here a fake third backend's refusal.
@@ -991,7 +1041,7 @@ mod tests {
         assert_eq!(verdict.problems[0].1.code, "gamma-line-unsafe");
         assert_eq!(verdict.problems[0].1.line, Some(3));
 
-        let reason = |rel: &str| match &lib.item(rel).unwrap().content {
+        let reason = |rel: &str| match &lib.item(&format!("library/{rel}")).unwrap().content {
             ItemContent::Broken { reason } => reason.code.clone(),
             other => panic!("{rel}: {other:?}"),
         };
@@ -1005,13 +1055,13 @@ mod tests {
         lib.store.file("p.yaml", "kind: preset\nversion: 1\n");
         lib.scan(None);
         // Replace the text by bytes that are not UTF-8 (a Latin-1 'é' in the description).
-        let path = lp("p.yaml").to_path(&lib.root);
+        let path = mp("p.yaml").to_path(&lib.root);
         lib.store.remove("p.yaml");
         lib.store
             .write_atomic(&path, b"kind: preset\nversion: 1\ndescription: caf\xe9\n")
             .unwrap();
         lib.scan(None);
-        let item = lib.item("p.yaml").unwrap();
+        let item = lib.item("library/p.yaml").unwrap();
         assert_eq!(
             item.kind,
             ItemKind::Broken {
@@ -1030,15 +1080,15 @@ mod tests {
         lib.store.file("skills/x/skill.md", "---\nname: x\n---\n");
         lib.scan(None);
         if same_path(Path::new("skill.md"), Path::new("SKILL.md")) {
-            assert_eq!(lib.item("skills/x").unwrap().kind, ItemKind::Skill);
+            assert_eq!(lib.item("library/skills/x").unwrap().kind, ItemKind::Skill);
             assert_eq!(
-                lib.item("skills/x/skill.md").unwrap().kind,
+                lib.item("library/skills/x/skill.md").unwrap().kind,
                 ItemKind::SkillFile
             );
         } else {
-            assert!(lib.item("skills/x").is_none());
+            assert!(lib.item("library/skills/x").is_none());
             assert_eq!(
-                lib.item("skills/x/skill.md").unwrap().kind,
+                lib.item("library/skills/x/skill.md").unwrap().kind,
                 ItemKind::Instruction
             );
         }
@@ -1050,19 +1100,19 @@ mod tests {
         lib.store.file("skills/x/SKILL.md", "---\nname: x\n---\n");
         lib.store.file("skills/x/notes.md", "n");
         lib.scan(None);
-        assert!(lib.item("skills/x").is_some());
+        assert!(lib.item("library/skills/x").is_some());
         lib.store.remove("skills/x/SKILL.md");
         lib.scan(None);
         assert!(
-            lib.item("skills/x").is_none(),
+            lib.item("library/skills/x").is_none(),
             "the folder is no longer a skill"
         );
-        assert!(lib.item("skills/x/SKILL.md").is_none());
-        assert!(lib.item("skills/x/notes.md").is_some());
+        assert!(lib.item("library/skills/x/SKILL.md").is_none());
+        assert!(lib.item("library/skills/x/notes.md").is_some());
         assert!(lib
             .catalog
             .folders()
-            .any(|folder| folder.as_str() == "skills/x"));
+            .any(|folder| folder.as_str() == "library/skills/x"));
     }
 
     // ── re-reads ──────────────────────────────────────────────────────────────────────────────────────────
@@ -1076,17 +1126,25 @@ mod tests {
         let first = lib.build(None);
         assert_eq!(
             fresh_paths(&first),
-            ["rules/a.md", "rules/b.md", "skills/s", "skills/s/SKILL.md"]
+            [
+                "library/rules/a.md",
+                "library/rules/b.md",
+                "library/skills/s",
+                "library/skills/s/SKILL.md"
+            ]
         );
-        assert!(first.listed_at.contains_key(&None));
-        assert!(first.listed_at.contains_key(&Some(lp("rules"))));
+        assert!(
+            first.listed_at.contains_key(&Some(lp("library"))),
+            "the mount's folder"
+        );
+        assert!(first.listed_at.contains_key(&Some(lp("library/rules"))));
         lib.apply(first);
 
         lib.store.file_version("rules/b.md", "b2", 5);
         let second = lib.build(None);
         assert_eq!(
             fresh_paths(&second),
-            ["rules/b.md"],
+            ["library/rules/b.md"],
             "only the changed tag is re-read"
         );
         assert_eq!(
@@ -1105,10 +1163,10 @@ mod tests {
             .file_at("settled.md", "s", now() - Duration::from_secs(3));
         lib.scan(None);
         let tags = lib.catalog.tags(None);
-        assert!(tags[&key(&lp("racy.md"))].1);
-        assert!(!tags[&key(&lp("settled.md"))].1);
+        assert!(tags[&key(&lp("library/racy.md"))].1);
+        assert!(!tags[&key(&lp("library/settled.md"))].1);
         let again = lib.build(None);
-        assert_eq!(fresh_paths(&again), ["racy.md"]);
+        assert_eq!(fresh_paths(&again), ["library/racy.md"]);
         assert_eq!(unchanged_count(&again), 1);
     }
 
@@ -1119,11 +1177,11 @@ mod tests {
         let older = lib.build(None);
         lib.store.file_version("a.md", "new text", 2);
         lib.scan(None);
-        let newer_seq = lib.item("a.md").unwrap().read_seq;
+        let newer_seq = lib.item("library/a.md").unwrap().read_seq;
         let touched = lib.apply(older);
         assert!(touched.is_empty(), "{touched:?}");
-        assert_eq!(lib.excerpt_of("a.md"), "new text");
-        assert_eq!(lib.item("a.md").unwrap().read_seq, newer_seq);
+        assert_eq!(lib.excerpt_of("library/a.md"), "new text");
+        assert_eq!(lib.item("library/a.md").unwrap().read_seq, newer_seq);
     }
 
     #[test]
@@ -1132,20 +1190,20 @@ mod tests {
         lib.store.file("a.md", "on disk");
         lib.scan(None);
         // A later observation with the same tag but other content (a stand-in for a merge the scan must not undo).
-        let mut marker = lib.item("a.md").unwrap().clone();
+        let mut marker = lib.item("library/a.md").unwrap().clone();
         marker.read_seq = 1_000;
         marker.content = ItemContent::Instruction {
             excerpt: "marker".to_owned(),
         };
         lib.catalog.apply_items(vec![marker], false);
         // A merge is marked racy (re-read by the next scan); here it has settled, so the scan may skip it.
-        lib.catalog.racy.remove(&key(&lp("a.md")));
+        lib.catalog.racy.remove(&key(&lp("library/a.md")));
         let result = lib.build(None);
         assert_eq!(unchanged_count(&result), 1);
         let touched = lib.apply(result);
         assert!(touched.is_empty());
-        assert_eq!(lib.excerpt_of("a.md"), "marker");
-        assert_eq!(lib.item("a.md").unwrap().read_seq, 1_000);
+        assert_eq!(lib.excerpt_of("library/a.md"), "marker");
+        assert_eq!(lib.item("library/a.md").unwrap().read_seq, 1_000);
     }
 
     #[test]
@@ -1153,27 +1211,27 @@ mod tests {
         let mut lib = Lib::new();
         lib.store.file("a.md", "a");
         lib.scan(None);
-        let mut older = lib.item("a.md").unwrap().clone();
+        let mut older = lib.item("library/a.md").unwrap().clone();
         older.read_seq = 0;
         older.content = ItemContent::Instruction {
             excerpt: "older".to_owned(),
         };
         assert!(lib.catalog.apply_items(vec![older], true).is_empty());
-        assert_eq!(lib.excerpt_of("a.md"), "a");
+        assert_eq!(lib.excerpt_of("library/a.md"), "a");
 
-        let mut new_path = lib.item("a.md").unwrap().clone();
-        new_path.path = lp("b.md");
+        let mut new_path = lib.item("library/a.md").unwrap().clone();
+        new_path.path = lp("library/b.md");
         new_path.read_seq = 99;
         assert!(lib
             .catalog
             .apply_items(vec![new_path.clone()], false)
             .is_empty());
-        assert!(lib.item("b.md").is_none());
+        assert!(lib.item("library/b.md").is_none());
         assert_eq!(
             lib.catalog.apply_items(vec![new_path], true),
-            [key(&lp("b.md"))]
+            [key(&lp("library/b.md"))]
         );
-        assert!(lib.item("b.md").is_some());
+        assert!(lib.item("library/b.md").is_some());
     }
 
     // ── sequenced absences ────────────────────────────────────────────────────────────────────────────────
@@ -1185,18 +1243,18 @@ mod tests {
         lib.scan(None);
         lib.store.remove("rules/old.md");
         let result = lib.build(None);
-        let listed = result.listed_at[&Some(lp("rules"))];
+        let listed = result.listed_at[&Some(lp("library/rules"))];
         // A file created after the listing, read by a launch check later than the listing.
         lib.store.file("rules/new.md", "n");
         lib.check_reads("rules/new.md");
-        assert!(lib.item("rules/new.md").unwrap().read_seq > listed);
+        assert!(lib.item("library/rules/new.md").unwrap().read_seq > listed);
         lib.apply(result);
         assert!(
-            lib.item("rules/old.md").is_none(),
+            lib.item("library/rules/old.md").is_none(),
             "read before the listing — removed"
         );
         assert!(
-            lib.item("rules/new.md").is_some(),
+            lib.item("library/rules/new.md").is_some(),
             "read after the listing — kept"
         );
     }
@@ -1210,8 +1268,8 @@ mod tests {
         lib.store.remove("b/y.md");
         lib.store.remove("a/x.md");
         lib.scan(Some("a"));
-        assert!(lib.item("a/x.md").is_none());
-        assert!(lib.item("b/y.md").is_some(), "outside the range");
+        assert!(lib.item("library/a/x.md").is_none());
+        assert!(lib.item("library/b/y.md").is_some(), "outside the range");
     }
 
     #[test]
@@ -1223,11 +1281,14 @@ mod tests {
         lib.store.fail_listing("locked", ListFailure::Open);
         lib.store.remove("open/d.md");
         let result = lib.build(None);
-        assert_eq!(result.kept, [Some(lp("locked"))]);
+        assert_eq!(result.kept, [Some(lp("library/locked"))]);
         assert_eq!(result.errors.len(), 1);
         lib.apply(result);
-        assert!(lib.item("locked/c.md").is_some(), "unseen, not absent");
-        assert!(lib.item("open/d.md").is_none());
+        assert!(
+            lib.item("library/locked/c.md").is_some(),
+            "unseen, not absent"
+        );
+        assert!(lib.item("library/open/d.md").is_none());
     }
 
     #[test]
@@ -1242,13 +1303,13 @@ mod tests {
             .fail_listing("half", ListFailure::PartWay { after: 1 });
         lib.scan(None);
         assert_eq!(
-            lib.excerpt_of("half/1.md"),
+            lib.excerpt_of("library/half/1.md"),
             "one again",
             "listed before the failure — taken"
         );
-        assert!(lib.item("half/2.md").is_some(), "not listed — kept");
+        assert!(lib.item("library/half/2.md").is_some(), "not listed — kept");
         assert!(
-            lib.item("half/sub/3.md").is_some(),
+            lib.item("library/half/sub/3.md").is_some(),
             "below the failure — kept"
         );
     }
@@ -1272,21 +1333,25 @@ mod tests {
         assert_eq!(
             kept,
             [
-                Some(lp("meta.md")),
-                Some(lp("read.md")),
-                Some(lp("skills/s/SKILL.md"))
+                Some(lp("library/meta.md")),
+                Some(lp("library/read.md")),
+                Some(lp("library/skills/s/SKILL.md"))
             ]
         );
         lib.apply(result);
-        assert!(lib.item("meta.md").is_some());
-        assert_eq!(lib.excerpt_of("read.md"), "r", "the previous item stays");
-        assert!(lib.item("skills/s/SKILL.md").is_some());
+        assert!(lib.item("library/meta.md").is_some());
+        assert_eq!(
+            lib.excerpt_of("library/read.md"),
+            "r",
+            "the previous item stays"
+        );
+        assert!(lib.item("library/skills/s/SKILL.md").is_some());
         assert!(
-            lib.item("skills/s").is_some(),
+            lib.item("library/skills/s").is_some(),
             "the skill read from that file stays too"
         );
         assert!(
-            lib.item("skills/s/gone.md").is_none(),
+            lib.item("library/skills/s/gone.md").is_none(),
             "its folder was listed — not kept"
         );
     }
@@ -1299,22 +1364,22 @@ mod tests {
         lib.scan(None);
         lib.store.link("team");
         let result = lib.build(Some("team"));
-        assert_eq!(result.skipped_links, [lp("team")]);
+        assert_eq!(result.skipped_links, [lp("library/team")]);
         let (range, absent_at) = result.absent_ranges[0].clone();
-        assert_eq!(range, lp("team"));
+        assert_eq!(range, lp("library/team"));
         // The link is replaced by a real folder again and a launch check reads one of its files — later than the
         //   number drawn before the link check.
         lib.store.remove("team");
         lib.store.file("team/b.md", "b again");
         lib.check_reads("team/b.md");
-        assert!(lib.item("team/b.md").unwrap().read_seq > absent_at);
+        assert!(lib.item("library/team/b.md").unwrap().read_seq > absent_at);
         lib.apply(result);
         assert!(
-            lib.item("team/a.md").is_none(),
+            lib.item("library/team/a.md").is_none(),
             "read before the absence — removed"
         );
         assert_eq!(
-            lib.excerpt_of("team/b.md"),
+            lib.excerpt_of("library/team/b.md"),
             "b again",
             "read after it — kept"
         );
@@ -1331,9 +1396,9 @@ mod tests {
         let result = lib.build(Some("team"));
         assert_eq!(result.absent_ranges.len(), 1);
         lib.apply(result);
-        assert!(lib.item("team/a.md").is_none());
-        assert!(lib.item("team/deep/b.md").is_none());
-        assert!(lib.item("other.md").is_some());
+        assert!(lib.item("library/team/a.md").is_none());
+        assert!(lib.item("library/team/deep/b.md").is_none());
+        assert!(lib.item("library/other.md").is_some());
         assert!(!lib
             .catalog
             .folders()
@@ -1345,8 +1410,8 @@ mod tests {
         let mut lib = Lib::new();
         lib.store.file("a.md", "a");
         lib.scan(None);
-        let k = key(&lp("a.md"));
-        let read = lib.item("a.md").unwrap().read_seq;
+        let k = key(&lp("library/a.md"));
+        let read = lib.item("library/a.md").unwrap().read_seq;
         assert!(!lib.catalog.remove(&k, read));
         assert!(lib.catalog.remove(&k, read + 1));
         assert!(lib.catalog.get(&k).is_none());
@@ -1368,8 +1433,12 @@ mod tests {
                 .map(|item| item.path.as_str().to_owned())
                 .collect()
         };
-        assert_eq!(names(None), ["top.md"]);
-        assert_eq!(names(Some("rules")), ["rules/a.md", "rules/b.md"]);
+        assert!(names(None).is_empty(), "the virtual root holds no item");
+        assert_eq!(names(Some("library")), ["library/top.md"]);
+        assert_eq!(
+            names(Some("library/rules")),
+            ["library/rules/a.md", "library/rules/b.md"]
+        );
     }
 
     // ── derived data ──────────────────────────────────────────────────────────────────────────────────────
@@ -1381,29 +1450,32 @@ mod tests {
         lib.store.file("rules/b.md", "b");
         lib.store.file(
             "top.yaml",
-            "kind: preset\nversion: 1\npresets:\n  - mid.yaml\n",
+            "kind: preset\nversion: 1\npresets:\n  - library/mid.yaml\n",
         );
         lib.store.file(
             "mid.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - rules/a.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/rules/a.md\n",
         );
         lib.scan(None);
-        assert_eq!(lib.reaching("rules/a.md"), ["mid.yaml", "top.yaml"]);
+        assert_eq!(
+            lib.reaching("library/rules/a.md"),
+            ["library/mid.yaml", "library/top.yaml"]
+        );
         lib.store.file_version(
             "mid.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - rules/b.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/rules/b.md\n",
             2,
         );
         let touched = lib.scan(None);
         assert_eq!(
             touched,
-            [key(&lp("mid.yaml"))],
+            [key(&lp("library/mid.yaml"))],
             "top.yaml itself is unchanged"
         );
-        assert!(lib.reaching("rules/a.md").is_empty());
+        assert!(lib.reaching("library/rules/a.md").is_empty());
         assert_eq!(
-            lib.reaching("rules/b.md"),
-            ["mid.yaml", "top.yaml"],
+            lib.reaching("library/rules/b.md"),
+            ["library/mid.yaml", "library/top.yaml"],
             "top reaches the touched mid"
         );
     }
@@ -1412,20 +1484,25 @@ mod tests {
     fn a_preset_cycle_recomputes_without_looping() {
         let mut lib = Lib::new();
         lib.store.file("x.md", "x");
-        lib.store
-            .file("a.yaml", "kind: preset\nversion: 1\npresets:\n  - b.yaml\n");
+        lib.store.file(
+            "a.yaml",
+            "kind: preset\nversion: 1\npresets:\n  - library/b.yaml\n",
+        );
         lib.store.file(
             "b.yaml",
-            "kind: preset\nversion: 1\npresets:\n  - a.yaml\ninstructions:\n  - x.md\n",
+            "kind: preset\nversion: 1\npresets:\n  - library/a.yaml\ninstructions:\n  - library/x.md\n",
         );
         lib.scan(None);
-        assert_eq!(lib.reaching("x.md"), ["a.yaml", "b.yaml"]);
         assert_eq!(
-            lib.reaching("a.yaml"),
-            ["b.yaml"],
+            lib.reaching("library/x.md"),
+            ["library/a.yaml", "library/b.yaml"]
+        );
+        assert_eq!(
+            lib.reaching("library/a.yaml"),
+            ["library/b.yaml"],
             "a preset does not reach itself"
         );
-        assert_eq!(lib.reaching("b.yaml"), ["a.yaml"]);
+        assert_eq!(lib.reaching("library/b.yaml"), ["library/a.yaml"]);
     }
 
     #[test]
@@ -1434,20 +1511,25 @@ mod tests {
         lib.store.file("x.md", "x");
         lib.store.file(
             "top.yaml",
-            "kind: preset\nversion: 1\npresets:\n  - child.yaml\n",
+            "kind: preset\nversion: 1\npresets:\n  - library/child.yaml\n",
         );
         lib.scan(None);
         assert!(
-            lib.catalog.refs_to.contains_key(&key(&lp("child.yaml"))),
+            lib.catalog
+                .refs_to
+                .contains_key(&key(&lp("library/child.yaml"))),
             "missing target kept"
         );
         lib.store.file(
             "child.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - x.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/x.md\n",
         );
         let touched = lib.scan(None);
-        assert_eq!(touched, [key(&lp("child.yaml"))]);
-        assert_eq!(lib.reaching("x.md"), ["child.yaml", "top.yaml"]);
+        assert_eq!(touched, [key(&lp("library/child.yaml"))]);
+        assert_eq!(
+            lib.reaching("library/x.md"),
+            ["library/child.yaml", "library/top.yaml"]
+        );
     }
 
     #[test]
@@ -1455,13 +1537,13 @@ mod tests {
         let mut lib = Lib::new();
         lib.store.file("a.md", "a");
         lib.scan(None);
-        assert!(!lib.catalog.tags(None)[&key(&lp("a.md"))].1);
+        assert!(!lib.catalog.tags(None)[&key(&lp("library/a.md"))].1);
         lib.check_reads("a.md");
         assert!(
-            lib.catalog.tags(None)[&key(&lp("a.md"))].1,
+            lib.catalog.tags(None)[&key(&lp("library/a.md"))].1,
             "an old file, but merged"
         );
-        assert_eq!(fresh_paths(&lib.build(None)), ["a.md"]);
+        assert_eq!(fresh_paths(&lib.build(None)), ["library/a.md"]);
     }
 
     #[test]
@@ -1476,10 +1558,10 @@ mod tests {
         lib.scan(None);
         let tags = lib.catalog.tags(None);
         assert!(
-            tags[&key(&lp("edge.md"))].1,
+            tags[&key(&lp("library/edge.md"))].1,
             "mtime == scan time - 2 s is racy"
         );
-        assert!(!tags[&key(&lp("past.md"))].1);
+        assert!(!tags[&key(&lp("library/past.md"))].1);
     }
 
     #[test]
@@ -1487,12 +1569,12 @@ mod tests {
         let mut lib = Lib::new();
         lib.store.file("a.md", "a");
         lib.scan(None);
-        let mut same = lib.item("a.md").unwrap().clone();
+        let mut same = lib.item("library/a.md").unwrap().clone();
         same.content = ItemContent::Instruction {
             excerpt: "same number".to_owned(),
         };
         assert!(lib.catalog.apply_items(vec![same], true).is_empty());
-        assert_eq!(lib.excerpt_of("a.md"), "a");
+        assert_eq!(lib.excerpt_of("library/a.md"), "a");
     }
 
     #[test]
@@ -1504,12 +1586,13 @@ mod tests {
         let listing = ScanListing {
             root: lib.root.clone(),
             listed_at: HashMap::from([(None, lib.seq())]),
-            errors: vec![(Some(lp("f")), "injected".to_owned())],
+            errors: vec![(Some(mp("f")), "injected".to_owned())],
             ..ScanListing::default()
         };
         let tags = lib.catalog.tags(None);
         let result = ScanResult::build(
             listing,
+            &lib.mount,
             None,
             &tags,
             &lib.store.reader(),
@@ -1517,8 +1600,11 @@ mod tests {
             now(),
         );
         lib.apply(result);
-        assert!(lib.catalog.folders().any(|folder| folder.as_str() == "f"));
-        assert!(lib.item("f/x.md").is_some());
+        assert!(lib
+            .catalog
+            .folders()
+            .any(|folder| folder.as_str() == "library/f"));
+        assert!(lib.item("library/f/x.md").is_some());
     }
 
     #[test]
@@ -1545,6 +1631,7 @@ mod tests {
         let tags = lib.catalog.tags(None);
         let result = ScanResult::build(
             listing,
+            &lib.mount,
             None,
             &tags,
             &lib.store.reader(),
@@ -1553,13 +1640,13 @@ mod tests {
         );
         let check = check.into_inner().unwrap();
         // One number per scan would be the root's — earlier than the check's read, so the check's item would stay.
-        assert!(result.listed_at[&None] < check.read_seq);
-        assert!(result.listed_at[&Some(lp("d"))] > check.read_seq);
+        assert!(result.listed_at[&Some(lp("library"))] < check.read_seq);
+        assert!(result.listed_at[&Some(lp("library/d"))] > check.read_seq);
         // The check's merge lands first, then the scan.
         lib.catalog.apply_items(vec![check], true);
         lib.apply(result);
         assert!(
-            lib.item("d/x.md").is_none(),
+            lib.item("library/d/x.md").is_none(),
             "d was listed after the check's read"
         );
     }
@@ -1570,18 +1657,18 @@ mod tests {
         lib.store.file("x.md", "x");
         lib.store.file(
             "p.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - x.md\n  - engram:/priming\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/x.md\n  - engram:/priming\n",
         );
         lib.scan(None);
         let refs = |lib: &Lib, rel: &str| {
             lib.catalog
                 .refs_to
-                .get(&key(&LibPath::parse(rel).unwrap()))
+                .get(&key(&lp(&format!("library/{rel}"))))
                 .cloned()
         };
         assert_eq!(
             refs(&lib, "x.md"),
-            Some(BTreeSet::from([key(&lp("p.yaml"))]))
+            Some(BTreeSet::from([key(&lp("library/p.yaml"))]))
         );
         assert_eq!(
             lib.catalog.refs_to.len(),
@@ -1591,14 +1678,14 @@ mod tests {
         // An edit that lists another target moves the edge.
         lib.store.file_version(
             "p.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - y.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/y.md\n",
             2,
         );
         lib.scan(None);
         assert_eq!(refs(&lib, "x.md"), None);
         assert_eq!(
             refs(&lib, "y.md"),
-            Some(BTreeSet::from([key(&lp("p.yaml"))])),
+            Some(BTreeSet::from([key(&lp("library/p.yaml"))])),
             "a missing target keeps its edge"
         );
         lib.store.remove("p.yaml");
@@ -1613,23 +1700,43 @@ mod tests {
     }
 
     #[test]
-    fn clear_empties_items_folders_tags_used_by_and_refs_to() {
+    fn drop_range_empties_the_items_folders_tags_used_by_and_refs_to_of_its_range_only() {
         let mut lib = Lib::new();
         lib.store.file_at("rules/racy.md", "r", now());
         lib.store.file(
             "p.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - rules/racy.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/rules/racy.md\n",
         );
         lib.scan(None);
+        // An item of another mount, which the drop leaves alone.
+        let mut other = lib.item("library/rules/racy.md").unwrap().clone();
+        other.path = lp("other/x.md");
+        lib.catalog.apply_items(vec![other], true);
         assert!(!lib.catalog.racy.is_empty());
         assert!(!lib.catalog.used_by.is_empty());
-        lib.catalog.clear();
-        assert!(lib.catalog.items.is_empty());
-        assert!(lib.catalog.tags(None).is_empty());
+        let mut dropped = lib.catalog.drop_range(&lp("library"));
+        dropped.sort();
+        let mut want = vec![
+            key(&lp("library/p.yaml")),
+            key(&lp("library/rules/racy.md")),
+        ];
+        want.sort();
+        assert_eq!(dropped, want);
+        lib.catalog.recompute_derived(&dropped);
+        assert!(lib.catalog.tags(Some(&lp("library"))).is_empty());
+        assert_eq!(
+            lib.catalog.items().count(),
+            1,
+            "the other mount's item stays"
+        );
         assert_eq!(lib.catalog.folders().count(), 0);
         assert!(lib.catalog.used_by.is_empty());
         assert!(lib.catalog.refs_to.is_empty());
-        assert!(lib.catalog.racy.is_empty());
+        assert_eq!(
+            lib.catalog.racy,
+            HashSet::from([key(&lp("other/x.md"))]),
+            "the dropped items' racy marks go"
+        );
     }
 }
 
@@ -1664,7 +1771,7 @@ mod measure {
             }
             for i in 0..10 {
                 let text = format!(
-                    "kind: preset\nversion: 1\ndescription: preset {i}\ninstructions:\n  - f{f:03}/r{i:02}.md\n  - f{f:03}/r{:02}.md\nskills:\n  - f{f:03}/s{:01}\nsettings:\n  - f{f:03}/set{:01}.yaml\n",
+                    "kind: preset\nversion: 1\ndescription: preset {i}\ninstructions:\n  - library/f{f:03}/r{i:02}.md\n  - library/f{f:03}/r{:02}.md\nskills:\n  - library/f{f:03}/s{:01}\nsettings:\n  - library/f{f:03}/set{:01}.yaml\n",
                     i + 10,
                     i % 5,
                     i % 5
@@ -1700,6 +1807,7 @@ mod measure {
         assert_eq!(listing.files.len(), 5_000);
         let result = ScanResult::build(
             listing,
+            &crate::mounts::MountName::first(),
             None,
             &catalog.tags(None),
             &read,
@@ -1722,6 +1830,7 @@ mod measure {
         let rewalked = again.elapsed();
         let result = ScanResult::build(
             listing,
+            &crate::mounts::MountName::first(),
             None,
             &catalog.tags(None),
             &read,
@@ -1743,6 +1852,7 @@ mod measure {
         let listing = FsStore.scan(root, None, &seq).unwrap();
         let result = ScanResult::build(
             listing,
+            &crate::mounts::MountName::first(),
             None,
             &catalog.tags(None),
             &read,

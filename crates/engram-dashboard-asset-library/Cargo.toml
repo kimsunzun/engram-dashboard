@@ -2,7 +2,7 @@
 name = "engram-dashboard-asset-library"
 version = "0.1.0"
 edition = "2021"
-description = "Engram Dashboard asset library — the preset library (instructions · skills · settings · presets) under one root: reference paths, reading and checking assets, resolving what an agent loads, launch materials. The daemon only wires it. Invariants and gates = the lib.rs header (ADR-0311)."
+description = "Engram Dashboard asset library — the preset library (instructions · skills · settings · presets) under one virtual root of named mounts: reference paths, reading and checking assets, resolving what an agent loads, launch materials. The daemon only wires it. Invariants and gates = the lib.rs header (ADR-0311)."
 
 # ADR-0311 decision 2: among workspace crates exactly agent · platform · command · base. The CI dependency-cap gate compares
 #   that name set (`.github/workflows/ci.yml`), so add a later dependency here only with that decision changed.

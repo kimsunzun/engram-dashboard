@@ -11,11 +11,14 @@
 //!   anything is read or written — never a silent no-op.
 //! - **An agent takes presets only**: a library preset, or `engram:/default` for its Default slot.
 //! - **Only an `attach` naming a library preset needs the library.** It refuses `Unavailable` · `library-unavailable`
-//!   when no first scan could be applied, nothing applied. `detach`, `reorder` and an `attach` of `engram:/default`
-//!   alone judge nothing against the catalog and work with no root; their answer view shows the rows resolution gives
-//!   under that root state.
+//!   when no first scan could be applied or the mounts are unknown (`library.json` unusable), nothing applied.
+//!   `detach`, `reorder` and an `attach` of `engram:/default` alone judge nothing against the catalog and work with no
+//!   root; their answer view shows the rows resolution gives under that root state.
 //! - **Answers are built inside the change.** The answer view is resolved inside the change from the attachments as
-//!   committed; its folder stats and link probes run after it, outside every lock.
+//!   committed; its folder stats and link probes run after it, outside every lock. A mount the committed attachments
+//!   name that the edit did not stat (another writer attached it in between) is stat'ed then too, and when it is not
+//!   usable the committed attachments are resolved again under one read lock, so the view still equals
+//!   `agent.presets` (ADR-0384).
 //! - **`agent.new {presets}` is judged, not edited.** The judgement is `attach`'s over the profile to be created
 //!   (outside the registry), under one read lock that also compares the root generation; it writes nothing and needs
 //!   no port — the caller creates the profile with the accepted list in one registry write (ADR-0386 decision 5).
@@ -29,8 +32,8 @@
 // ADR-0379
 // ADR-0380
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use engram_dashboard_agent::launch::{backend_word, BlockReason, Notice, Reason};
 use engram_dashboard_agent::profile::{AgentOutputFormat, AgentProfile, AttachedPreset};
@@ -38,9 +41,11 @@ use engram_dashboard_agent::profile_edit::{
     Attachments, ProfileEditError, ProfileEditPort, WorkspaceLock,
 };
 use engram_dashboard_agent::types::AgentId;
+use engram_dashboard_platform::fs::{path_key, PathKey};
 use serde_json::json;
 
 use crate::catalog::Catalog;
+use crate::config::ConfigHealth;
 use crate::edit::{
     list_of, parse_ref, skip, Skipped, ALREADY_PRESENT, REORDER_ORDER_MISMATCH, REV_MISMATCH,
 };
@@ -49,12 +54,16 @@ use crate::format::read::WRONG_KIND;
 use crate::format::ListName;
 use crate::gate::NOT_FOUND;
 use crate::launch::sha256_hex;
+use crate::mounts::Mounts;
 use crate::path::{AssetRef, BuiltinId};
 use crate::resolve::{
     ref_key, resolve, CatalogLookup, Looked, Lookup, Problem, RefKey, Resolution, ResolvedFolder,
     RootState, Target,
 };
-use crate::{output_format, stale_root_generation, LibraryRefusal, LibraryService, RefusalClass};
+use crate::{
+    library_state, named_folders, output_format, stale_root_generation, LibraryRefusal,
+    LibraryService, RefusalClass,
+};
 
 /// The code of a `detach` of `engram:/default` without `yes` while the agent's Default slot is on (`args` =
 /// `{agent}`).
@@ -115,33 +124,55 @@ struct PendingAgentView {
     profile: AgentProfile,
     workspace_lock: Option<WorkspaceLock>,
     resolution: Option<Resolution>,
-    root: Option<PathBuf>,
+    /// The mounts its link probes run in.
+    mounts: Mounts,
+    /// The folders of the mounts the committed attachments name that the edit did not stat before its change — another
+    /// writer attached them in between; the resolution took them as there until they are stat'ed.
+    unprobed: Vec<PathBuf>,
 }
 
-/// The first-scan entrance's answer and the root stat an edit took before its change, outside every lock.
+/// The first-scan entrance's answer and the mount stats an edit took before its change, outside every lock.
 struct RootSeen {
     joined: Result<(), String>,
-    /// The root the stat was taken of.
-    seen: Option<PathBuf>,
-    /// Taken whenever a root is set, the first scan failed or not.
-    stat: Option<FolderStatus>,
+    /// The folder of each mount the agent's attachments or the request name, as stat'ed, by path key — taken the first
+    /// scan failed or not.
+    seen: HashMap<PathKey, FolderStatus>,
 }
 
 impl RootSeen {
-    /// The root state the answer view resolves under, for `root` as the change found it — the rule of the read path
-    /// (`LibraryService::root_state`, [`RootState::of`]), so the edit's answer equals `agent.presets` (ADR-0384). A
-    /// root published after the stat counts as there: its publish stat'ed it.
+    /// The library state the answer view resolves under, for `mounts` as the change found them and the attached
+    /// presets `attached` — the rule of the read path (`LibraryService::root_state`, [`crate::library_state`]), so the
+    /// edit's answer equals `agent.presets` (ADR-0384). A folder not stat'ed counts as there here; the edit stats it
+    /// after its change and resolves again when it is not ([`LibraryService::settle_agent`]).
     // ADR-0387
-    fn state(&self, root: Option<&Path>, attached_library: bool) -> RootState {
-        let Some(now) = root else {
-            return RootState::Unset;
+    fn state(&self, mounts: &Mounts, attached: &[&AssetRef], attached_library: bool) -> RootState {
+        let stats = match attached_library {
+            false => Vec::new(),
+            true => named_folders(mounts, attached)
+                .iter()
+                .map(|folder| {
+                    self.seen
+                        .get(&path_key(folder))
+                        .cloned()
+                        .unwrap_or(FolderStatus::Ok)
+                })
+                .collect(),
         };
-        let stat = match (&self.seen, &self.stat) {
-            _ if !attached_library => None,
-            (Some(seen), Some(stat)) if seen == now => Some(stat.clone()),
-            _ => Some(FolderStatus::Ok),
-        };
-        RootState::of(&self.joined, stat.as_ref())
+        library_state(&self.joined, mounts, stats)
+    }
+
+    /// The folders of the mounts `profile`'s library attachments name that were not stat'ed before the change.
+    fn unprobed(&self, mounts: &Mounts, profile: &AgentProfile) -> Vec<PathBuf> {
+        let refs: Vec<AssetRef> = profile
+            .presets
+            .iter()
+            .filter_map(|preset| AssetRef::parse(&preset.path).ok())
+            .collect();
+        let refs: Vec<&AssetRef> = refs.iter().collect();
+        named_folders(mounts, &refs)
+            .into_iter()
+            .filter(|folder| !self.seen.contains_key(&path_key(folder)))
+            .collect()
     }
 }
 
@@ -177,7 +208,8 @@ impl LibraryService {
     /// anchor in call order (no anchor in the list = at its end); `engram:/default` turns the Default slot on. Each one
     /// that cannot be attached is skipped with a reason: not a reference (`item-path-invalid`), not in the catalog
     /// (`not-found`), not a preset (`wrong-kind`), already attached ([`ALREADY_PRESENT`], by catalog key). Naming a
-    /// library preset with no first scan applied refuses `Unavailable` · `library-unavailable`, nothing applied. Plus
+    /// library preset with no first scan applied, or while the mounts are unknown (`library.json` unusable), refuses
+    /// `Unavailable` · `library-unavailable`, nothing applied. Plus
     /// the refusals every edit can answer (module header).
     pub fn attach_preset(
         &self,
@@ -187,10 +219,13 @@ impl LibraryService {
         root_generation: Option<u64>,
     ) -> Result<AgentAttach, LibraryRefusal> {
         let library = names_library(presets);
-        let ((applied, skipped), view) =
-            self.agent_edit(agent, root_generation, library, |profile, lookup| {
-                Ok(attach(profile, lookup, presets, after))
-            })?;
+        let ((applied, skipped), view) = self.agent_edit(
+            agent,
+            root_generation,
+            library,
+            presets,
+            |profile, lookup| Ok(attach(profile, lookup, presets, after)),
+        )?;
         Ok(AgentAttach {
             applied,
             skipped,
@@ -228,7 +263,7 @@ impl LibraryService {
                 }
             }
         }
-        let ((), view) = self.agent_edit(agent, root_generation, false, |profile, _| {
+        let ((), view) = self.agent_edit(agent, root_generation, false, &[], |profile, _| {
             if let Some((_, reason)) = unparsed.into_iter().find(|(text, _)| {
                 !profile
                     .presets
@@ -273,7 +308,7 @@ impl LibraryService {
         base_rev: &str,
         root_generation: Option<u64>,
     ) -> Result<AgentPresetsView, LibraryRefusal> {
-        let ((), view) = self.agent_edit(agent, root_generation, false, |profile, _| {
+        let ((), view) = self.agent_edit(agent, root_generation, false, &[], |profile, _| {
             let current = agent_base_rev(profile.default_preset, &profile.presets);
             if base_rev != current {
                 return Err(LibraryRefusal::new(
@@ -293,9 +328,9 @@ impl LibraryService {
 
     /// The `agent.new {presets}` judgement: `presets` judged over `profile` — the profile to be created, not in the
     /// registry — exactly as [`LibraryService::attach_preset`] judges them (no anchor: in call order at the end), under
-    /// one read lock. Nothing is written and no port is needed. Naming a library preset with no first scan applied
-    /// refuses `Unavailable` · `library-unavailable`; a stale `root_generation`, compared inside the read lock,
-    /// refuses `Conflict` · `root-generation-stale`.
+    /// one read lock. Nothing is written and no port is needed. Naming a library preset with no first scan applied, or
+    /// while the mounts are unknown (`library.json` unusable), refuses `Unavailable` · `library-unavailable`; a stale
+    /// `root_generation`, compared inside the read lock, refuses `Conflict` · `root-generation-stale`.
     // ADR-0386
     pub fn judge_new_presets(
         &self,
@@ -305,6 +340,7 @@ impl LibraryService {
     ) -> Result<NewPresets, LibraryRefusal> {
         // Only a library preset is looked up in the catalog, so only then is the first scan waited for.
         if names_library(presets) {
+            self.refuse_unknown_mounts()?;
             self.first_scan_join()
                 .map_err(LibraryRefusal::unavailable)?;
         }
@@ -315,7 +351,7 @@ impl LibraryService {
             }
             let lookup = CatalogLookup {
                 catalog: &state.catalog,
-                root: state.root(),
+                mounts: &state.mounts,
                 builtins: &self.builtins,
             };
             let (attachments, (_, skipped)) = attach(profile, &lookup, presets, None);
@@ -324,6 +360,27 @@ impl LibraryService {
                 skipped,
             })
         })
+    }
+
+    /// While `library.json` could not be read (corrupt, newer or unreadable) the run does not know its mounts, so a
+    /// named library preset cannot be judged: `Unavailable` · `library-unavailable`, nothing applied. A valid file with
+    /// no mount knows its mounts (none), and its presets are judged — and skipped as `not-found`.
+    // ADR-0386 decision 5
+    // ADR-0400
+    fn refuse_unknown_mounts(&self) -> Result<(), LibraryRefusal> {
+        let (mounts, health) = self.config.view();
+        if mounts.is_some() {
+            return Ok(());
+        }
+        let why = match health {
+            ConfigHealth::ReadOnly { why } => {
+                format!("library.json cannot be used this run: {why}")
+            }
+            _ => "library.json is corrupt".to_owned(),
+        };
+        Err(LibraryRefusal::unavailable(format!(
+            "the library mounts are unknown: {why}"
+        )))
     }
 
     /// The live profile-edit port, or `Internal` · [`PROFILE_EDIT_UNAVAILABLE`] (empty or dead cell).
@@ -340,33 +397,58 @@ impl LibraryService {
     }
 
     /// One agent-preset edit (module header): the port, the first-scan entrance (refusing only when `library` — the
-    /// edit judges library presets against the catalog), the root stat for the answer view, then one
-    /// [`LibraryService::change_at`] ([`LibraryService::agent_edit_in`]); the answer view is settled after it.
+    /// edit judges library presets against the catalog), the stats of the mounts the answer view can name — those the
+    /// agent's attachments and the request's `named` spellings name, as `agent.presets` stats the mounts its
+    /// attachments name (ADR-0384) — then one [`LibraryService::change_at`] ([`LibraryService::agent_edit_in`]); the
+    /// answer view is settled after it.
     fn agent_edit<T>(
         &self,
         agent: AgentId,
         root_generation: Option<u64>,
         library: bool,
+        named: &[String],
         op: impl FnOnce(&AgentProfile, &CatalogLookup<'_>) -> Result<(Attachments, T), LibraryRefusal>,
     ) -> Result<(T, AgentPresetsView), LibraryRefusal> {
         let port = self.profile_edit()?;
+        if library {
+            self.refuse_unknown_mounts()?;
+        }
         let joined = self.first_scan_join();
         if let (true, Err(why)) = (library, &joined) {
             return Err(LibraryRefusal::unavailable(why.clone()));
         }
-        // The stat runs here, outside every lock.
-        let seen = self
+        // The stats run here, outside every lock, in one batch.
+        let attached = self
+            .values
+            .registry
+            .get(agent)
+            .map(|profile| profile.presets);
+        let refs: Vec<AssetRef> = attached
+            .iter()
+            .flatten()
+            .map(|preset| preset.path.as_str())
+            .chain(named.iter().map(String::as_str))
+            .filter_map(|text| AssetRef::parse(text).ok())
+            .collect();
+        let refs: Vec<&AssetRef> = refs.iter().collect();
+        let folders = self
             .gate
-            .with_read(|state| state.root().map(Path::to_path_buf));
-        let stat = seen
-            .as_deref()
-            .map(|root| self.stat_root(&self.io.begin_read(), root));
-        let before = RootSeen { joined, seen, stat };
-        let (answer, pending) = self.change_at(root_generation, |catalog, root, _| {
-            let edited = self.agent_edit_in(&*port, agent, catalog, root, &before, op);
+            .with_read(|state| named_folders(&state.mounts, &refs));
+        let statuses = match folders.is_empty() {
+            true => Vec::new(),
+            false => self.stat_mounts(&self.io.begin_read(), &folders),
+        };
+        let seen = folders
+            .iter()
+            .zip(statuses)
+            .map(|(folder, status)| (path_key(folder), status))
+            .collect();
+        let before = RootSeen { joined, seen };
+        let (answer, pending) = self.change_at(root_generation, |catalog, mounts, _| {
+            let edited = self.agent_edit_in(&*port, agent, catalog, mounts, &before, op);
             (edited, Vec::new())
         })??;
-        Ok((answer, self.settle_agent(pending)))
+        Ok((answer, self.settle_agent(pending, before)))
     }
 
     /// The steps of [`LibraryService::agent_edit`] inside the change: the registry read, `op` over the profile and the
@@ -376,13 +458,13 @@ impl LibraryService {
         port: &dyn ProfileEditPort,
         agent: AgentId,
         catalog: &Catalog,
-        root: Option<&Path>,
+        mounts: &Mounts,
         before: &RootSeen,
         op: impl FnOnce(&AgentProfile, &CatalogLookup<'_>) -> Result<(Attachments, T), LibraryRefusal>,
     ) -> Result<(T, PendingAgentView), LibraryRefusal> {
         let lookup = CatalogLookup {
             catalog,
-            root,
+            mounts,
             builtins: &self.builtins,
         };
         let profile = self
@@ -400,42 +482,99 @@ impl LibraryService {
             presets: next.presets,
             ..profile
         };
-        let resolution = self.want_of(&committed).map(|want| {
+        let unprobed = before.unprobed(mounts, &committed);
+        let resolution = self.resolve_profile(&committed, &lookup, before);
+        let pending = PendingAgentView {
+            profile: committed,
+            workspace_lock,
+            resolution,
+            mounts: mounts.clone(),
+            unprobed,
+        };
+        Ok((answer, pending))
+    }
+
+    /// Finishes an edit's answer view outside every lock. The mounts the committed attachments name that the edit did
+    /// not stat before its change (another writer attached them in between) are stat'ed now, in one batch; when one is
+    /// not `Ok` the committed attachments are resolved again under one read lock with those stats, as `agent.presets`
+    /// would resolve them. Nothing new to stat = no extra IO; the edit itself is never retried.
+    // ADR-0384
+    // ADR-0387
+    fn settle_agent(&self, pending: PendingAgentView, before: RootSeen) -> AgentPresetsView {
+        let PendingAgentView {
+            profile,
+            workspace_lock,
+            mut resolution,
+            mut mounts,
+            unprobed,
+        } = pending;
+        if !unprobed.is_empty() {
+            let statuses = self.stat_mounts(&self.io.begin_read(), &unprobed);
+            if statuses.iter().any(|status| *status != FolderStatus::Ok) {
+                let mut seen = before.seen;
+                seen.extend(
+                    unprobed
+                        .iter()
+                        .zip(statuses)
+                        .map(|(folder, status)| (path_key(folder), status)),
+                );
+                let seen = RootSeen {
+                    joined: before.joined,
+                    seen,
+                };
+                (resolution, mounts) = self.resolve_committed(&profile, &seen);
+            }
+        }
+        if let Some(resolution) = &mut resolution {
+            self.settle_resolution(resolution, &mounts);
+        }
+        view_of(&profile, workspace_lock, resolution)
+    }
+
+    /// `profile`'s attachments resolved under one read lock with the mount stats of `seen`, and the mounts it read.
+    fn resolve_committed(
+        &self,
+        profile: &AgentProfile,
+        seen: &RootSeen,
+    ) -> (Option<Resolution>, Mounts) {
+        self.gate.with_read(|state| {
+            let lookup = CatalogLookup {
+                catalog: &state.catalog,
+                mounts: &state.mounts,
+                builtins: &self.builtins,
+            };
+            (
+                self.resolve_profile(profile, &lookup, seen),
+                state.mounts.clone(),
+            )
+        })
+    }
+
+    /// `profile`'s attachments resolved over `lookup` under the library state `seen` gives (`None` = it takes no
+    /// preset) — the answer view's resolution.
+    fn resolve_profile(
+        &self,
+        profile: &AgentProfile,
+        lookup: &CatalogLookup<'_>,
+        seen: &RootSeen,
+    ) -> Option<Resolution> {
+        self.want_of(profile).map(|want| {
             let attached_library = want
                 .presets
                 .iter()
                 .any(|preset| matches!(preset, AssetRef::Library(_)));
+            let attached: Vec<&AssetRef> = want.presets.iter().collect();
+            let root = seen.state(lookup.mounts, &attached, attached_library);
             let target = Target {
                 backend: want.backend,
                 mode: want.mode,
                 default_preset: want.default_preset,
                 presets: want.presets,
                 unparsed: want.unparsed,
-                root: before.state(root, attached_library),
+                root,
             };
-            resolve(&target, &lookup, &*self.values.backends)
-        });
-        let pending = PendingAgentView {
-            profile: committed,
-            workspace_lock,
-            resolution,
-            root: root.map(Path::to_path_buf),
-        };
-        Ok((answer, pending))
-    }
-
-    /// Finishes an edit's answer view outside every lock.
-    fn settle_agent(&self, pending: PendingAgentView) -> AgentPresetsView {
-        let PendingAgentView {
-            profile,
-            workspace_lock,
-            mut resolution,
-            root,
-        } = pending;
-        if let Some(resolution) = &mut resolution {
-            self.settle_resolution(resolution, root.as_deref());
-        }
-        view_of(&profile, workspace_lock, resolution)
+            resolve(&target, lookup, &*self.values.backends)
+        })
     }
 }
 
@@ -686,12 +825,18 @@ mod tests {
     use engram_dashboard_command::{ErrorCode, RetryMode};
     use tempfile::TempDir;
 
+    use std::path::Path;
+
     use super::*;
     use crate::backends::AgentBackends;
-    use crate::config::{LibraryConfig, MountPlace};
-    use crate::folder::{BoundedIo, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT, LIST_CAP};
+    use crate::config::{LibraryConfig, MountPlace, MountSetting};
+    use crate::folder::{
+        BoundedIo, FolderListing, FolderOps, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT,
+        LIST_CAP, TIMEOUT,
+    };
     use crate::format::read::ITEM_PATH_INVALID;
-    use crate::path::LibPath;
+    use crate::mounts::MountName;
+    use crate::mounts::MountPath;
     use crate::store::{ContentTag, FsStore, LibraryStore, ScanListing, TrashBundle};
     use crate::{LibraryValues, LIBRARY_UNAVAILABLE, ROOT_GENERATION_STALE};
 
@@ -707,7 +852,7 @@ mod tests {
         fn scan(
             &self,
             root: &Path,
-            under: Option<&LibPath>,
+            under: Option<&MountPath>,
             seq: &dyn Fn() -> u64,
         ) -> std::io::Result<ScanListing> {
             if self.fail_scans.load(std::sync::atomic::Ordering::SeqCst) {
@@ -720,7 +865,7 @@ mod tests {
             }
             FsStore.scan(root, under, seq)
         }
-        fn first_link(&self, root: &Path, rel: &LibPath) -> std::io::Result<Option<LibPath>> {
+        fn first_link(&self, root: &Path, rel: &MountPath) -> std::io::Result<Option<MountPath>> {
             FsStore.first_link(root, rel)
         }
         fn read(&self, path: &Path, cap: u64) -> std::io::Result<Vec<u8>> {
@@ -851,16 +996,37 @@ mod tests {
         }
 
         fn make(profiles: Vec<AgentProfile>, root: bool, plugged: bool, applies: bool) -> World {
+            let config = move |base: &Path, state: &Path| match root {
+                true => LibraryConfig::usable(state, MountPlace::Explicit(base.join("lib"))),
+                false => LibraryConfig::missing(state),
+            };
+            World::make_with(
+                profiles,
+                config,
+                plugged,
+                applies,
+                Arc::new(StdFolderOps),
+                IO_LIMIT,
+            )
+        }
+
+        /// [`World::make`] with the config built from the temp folder and the state folder, the folder ops and the
+        /// read budget given.
+        fn make_with(
+            profiles: Vec<AgentProfile>,
+            config: impl FnOnce(&Path, &Path) -> LibraryConfig,
+            plugged: bool,
+            applies: bool,
+            ops: Arc<dyn FolderOps>,
+            limit: Duration,
+        ) -> World {
             let temp = tempfile::tempdir().unwrap();
             let base = dunce::canonicalize(temp.path()).unwrap();
             fs::create_dir_all(base.join("lib")).unwrap();
             let state = base.join("state");
             fs::create_dir_all(&state).unwrap();
             let registry = Arc::new(ProfileRegistry::new(Arc::new(Saves(profiles))));
-            let config = match root {
-                true => LibraryConfig::usable(&state, MountPlace::Explicit(base.join("lib"))),
-                false => LibraryConfig::missing(&state),
-            };
+            let config = config(&base, &state);
             let values = LibraryValues {
                 registry: Arc::clone(&registry),
                 backends: Arc::new(AgentBackends),
@@ -875,10 +1041,10 @@ mod tests {
                 env: Arc::new(|_| None),
             };
             let io = BoundedIo::new(
-                IO_LIMIT,
+                limit,
                 LaunchWaits::LAUNCH,
                 LIST_CAP,
-                Arc::new(StdFolderOps),
+                ops,
                 Arc::new(ThreadSpawn),
             );
             let store = Arc::new(Held::default());
@@ -979,11 +1145,357 @@ mod tests {
         sha256_hex(text.as_bytes())
     }
 
+    /// [`StdFolderOps`] whose stat of one folder answers only after `delay` — a mount that does not answer in time.
+    struct SlowStat {
+        slow: PathBuf,
+        delay: Duration,
+    }
+
+    impl FolderOps for SlowStat {
+        fn stat(&self, p: &Path) -> FolderStatus {
+            if p == self.slow {
+                thread::sleep(self.delay);
+            }
+            StdFolderOps.stat(p)
+        }
+        fn list(&self, p: &Path, cap: usize) -> Result<FolderListing, FolderStatus> {
+            StdFolderOps.list(p, cap)
+        }
+        fn canonical(&self, p: &Path) -> std::io::Result<PathBuf> {
+            StdFolderOps.canonical(p)
+        }
+        fn identity(
+            &self,
+            p: &Path,
+        ) -> std::io::Result<engram_dashboard_platform::fs::FileIdentity> {
+            StdFolderOps.identity(p)
+        }
+        fn read(&self, p: &Path, cap: u64) -> std::io::Result<String> {
+            StdFolderOps.read(p, cap)
+        }
+    }
+
+    /// Mounts `team` at `<base>\team` (slow to stat: past the 300 ms read budget) and then `library` at `<base>\lib`.
+    fn slow_team_world(profiles: Vec<AgentProfile>) -> World {
+        let slow = Arc::new(std::sync::OnceLock::<PathBuf>::new());
+        let config = {
+            let slow = Arc::clone(&slow);
+            move |base: &Path, state: &Path| {
+                let team = base.join("team");
+                fs::create_dir_all(&team).unwrap();
+                let _ = slow.set(team.clone());
+                let mount = |name: &str, folder: PathBuf| MountSetting {
+                    name: MountName::parse(name).unwrap(),
+                    place: MountPlace::Explicit(folder),
+                };
+                LibraryConfig::mounted(
+                    state,
+                    vec![mount("team", team), mount("library", base.join("lib"))],
+                )
+            }
+        };
+        let ops = Arc::new(LateSlow(Arc::clone(&slow)));
+        World::make_with(
+            profiles,
+            config,
+            true,
+            true,
+            ops,
+            Duration::from_millis(300),
+        )
+    }
+
+    /// [`SlowStat`] over a folder named after the world is made.
+    struct LateSlow(Arc<std::sync::OnceLock<PathBuf>>);
+
+    impl FolderOps for LateSlow {
+        fn stat(&self, p: &Path) -> FolderStatus {
+            let slow = SlowStat {
+                slow: self.0.get().cloned().unwrap_or_default(),
+                delay: Duration::from_secs(2),
+            };
+            slow.stat(p)
+        }
+        fn list(&self, p: &Path, cap: usize) -> Result<FolderListing, FolderStatus> {
+            StdFolderOps.list(p, cap)
+        }
+        fn canonical(&self, p: &Path) -> std::io::Result<PathBuf> {
+            StdFolderOps.canonical(p)
+        }
+        fn identity(
+            &self,
+            p: &Path,
+        ) -> std::io::Result<engram_dashboard_platform::fs::FileIdentity> {
+            StdFolderOps.identity(p)
+        }
+        fn read(&self, p: &Path, cap: u64) -> std::io::Result<String> {
+            StdFolderOps.read(p, cap)
+        }
+    }
+
+    // ── mount stats ─────────────────────────────────────────────────────────────────────────────────────────
+
+    // ADR-0360: one batch, one wait — a mount that does not answer leaves the others their answers.
+    #[test]
+    fn mount_stats_are_one_batch_so_a_mount_that_does_not_answer_does_not_degrade_another() {
+        let w = slow_team_world(Vec::new());
+        let (team, lib) = (w.base.join("team"), w.base.join("lib"));
+        let began = std::time::Instant::now();
+        let statuses = w.svc.stat_mounts(&w.svc.io.begin_read(), &[team, lib]);
+        assert_eq!(
+            statuses,
+            [
+                FolderStatus::Unreadable(TIMEOUT.to_owned()),
+                FolderStatus::Ok
+            ],
+            "the healthy mount after the slow one is still answered"
+        );
+        assert!(
+            began.elapsed() < Duration::from_millis(1_500),
+            "one wait of the budget: {:?}",
+            began.elapsed()
+        );
+    }
+
+    // ADR-0384: an agent-preset edit stats only the mounts its view names, as `agent.presets` does, so both answer the
+    //   same and an unrelated mount that does not answer neither blocks the view nor delays the edit.
+    #[test]
+    fn an_agent_edit_stats_only_the_mounts_its_view_names_and_answers_as_agent_presets() {
+        let profile = claude(&["library/P.yaml"], false);
+        let agent = profile.id;
+        let w = slow_team_world(vec![profile]);
+        w.library();
+        let began = std::time::Instant::now();
+        let edited = w
+            .svc
+            .attach_preset(agent, &strings(&["library/Q.yaml"]), None, None)
+            .unwrap();
+        assert!(
+            began.elapsed() < Duration::from_millis(1_500),
+            "the slow mount was not stat'ed: {:?}",
+            began.elapsed()
+        );
+        assert_eq!(edited.applied, ["library/Q.yaml"]);
+        let view = w.svc.agent_presets(agent).unwrap();
+        assert_eq!(
+            edited.view, view,
+            "the edit answers what agent.presets answers"
+        );
+        assert!(
+            !view
+                .problems
+                .iter()
+                .any(|problem| matches!(problem, BlockReason::LibraryUnavailable { .. })),
+            "{:?}",
+            view.problems
+        );
+    }
+
+    /// [`StdFolderOps`] whose stat of `team`'s folder answers unreadable and whose stat of `lib`'s folder first runs a
+    /// hook — another writer acting between an edit's probe and its change. The folders are set when the world is made.
+    #[derive(Default)]
+    struct Hooked {
+        lib: std::sync::OnceLock<PathBuf>,
+        team: std::sync::OnceLock<PathBuf>,
+        hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl FolderOps for Hooked {
+        fn stat(&self, p: &Path) -> FolderStatus {
+            if self.team.get().is_some_and(|team| team == p) {
+                return FolderStatus::Unreadable("access denied".to_owned());
+            }
+            if self.lib.get().is_some_and(|lib| lib == p) {
+                if let Some(hook) = lock(&self.hook).take() {
+                    hook();
+                }
+            }
+            StdFolderOps.stat(p)
+        }
+        fn list(&self, p: &Path, cap: usize) -> Result<FolderListing, FolderStatus> {
+            StdFolderOps.list(p, cap)
+        }
+        fn canonical(&self, p: &Path) -> std::io::Result<PathBuf> {
+            StdFolderOps.canonical(p)
+        }
+        fn identity(
+            &self,
+            p: &Path,
+        ) -> std::io::Result<engram_dashboard_platform::fs::FileIdentity> {
+            StdFolderOps.identity(p)
+        }
+        fn read(&self, p: &Path, cap: u64) -> std::io::Result<String> {
+            StdFolderOps.read(p, cap)
+        }
+    }
+
+    // ADR-0384 · ADR-0387: a mount another writer attaches between an edit's probe and its change is stat'ed after the
+    //   change, so the edit's answer shows it unreadable exactly as `agent.presets` does.
+    #[test]
+    fn a_mount_attached_between_an_edits_probe_and_its_change_is_stat_ed_for_the_answer_view() {
+        let profile = claude(&["library/P.yaml"], false);
+        let agent = profile.id;
+        let ops = Arc::new(Hooked::default());
+        let config = {
+            let ops = Arc::clone(&ops);
+            move |base: &Path, state: &Path| {
+                let (lib, team) = (base.join("lib"), base.join("team"));
+                fs::create_dir_all(&team).unwrap();
+                fs::write(team.join("T.yaml"), "kind: preset\nversion: 1\n").unwrap();
+                let _ = ops.lib.set(lib.clone());
+                let _ = ops.team.set(team.clone());
+                let mount = |name: &str, folder: PathBuf| MountSetting {
+                    name: MountName::parse(name).unwrap(),
+                    place: MountPlace::Explicit(folder),
+                };
+                LibraryConfig::mounted(state, vec![mount("library", lib), mount("team", team)])
+            }
+        };
+        let w = World::make_with(
+            vec![profile],
+            config,
+            true,
+            true,
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+            IO_LIMIT,
+        );
+        w.library();
+        w.svc.first_scan_join().unwrap();
+        let registry = Arc::clone(&w.registry);
+        // Edit B: `team/T.yaml` attached after A's probe, before A's change.
+        *lock(&ops.hook) = Some(Box::new(move || {
+            registry
+                .try_update_with(agent, |profile| {
+                    profile.presets.push(AttachedPreset {
+                        path: "team/T.yaml".to_owned(),
+                    });
+                })
+                .unwrap();
+        }));
+        let edited = w
+            .svc
+            .attach_preset(agent, &strings(&["library/Q.yaml"]), None, None)
+            .unwrap();
+        assert!(
+            lock(&ops.hook).is_none(),
+            "B landed between A's probe and its change"
+        );
+        assert_eq!(
+            edited.view.presets,
+            ["library/P.yaml", "team/T.yaml", "library/Q.yaml"]
+        );
+        let unavailable = |view: &AgentPresetsView| {
+            view.problems
+                .iter()
+                .any(|problem| matches!(problem, BlockReason::LibraryUnavailable { .. }))
+        };
+        assert!(unavailable(&edited.view), "{:?}", edited.view.problems);
+        assert_eq!(
+            edited.view,
+            w.svc.agent_presets(agent).unwrap(),
+            "the edit answers what agent.presets answers"
+        );
+    }
+
+    // ── an unknown mount list ───────────────────────────────────────────────────────────────────────────────
+
+    /// A world whose `library.json` holds `text`, read as a daemon start reads it.
+    fn config_world(profiles: Vec<AgentProfile>, text: &'static str) -> World {
+        let config = move |_: &Path, state: &Path| {
+            fs::write(state.join(crate::config::LIBRARY_CONFIG_FILE), text).unwrap();
+            crate::config::load(state)
+        };
+        World::make_with(
+            profiles,
+            config,
+            true,
+            true,
+            Arc::new(StdFolderOps),
+            IO_LIMIT,
+        )
+    }
+
+    // ADR-0386 decision 5 · ADR-0400: with `library.json` unusable the run does not know its mounts, so a named library
+    //   preset refuses the whole call; a valid file naming no mount judges it as not found.
+    #[test]
+    fn attach_and_new_refuse_library_unavailable_while_the_mounts_are_unknown_and_skip_with_an_empty_list(
+    ) {
+        let new_profile = claude(&[], false);
+        for text in ["not json", r#"{"schema_version": 9, "mounts": []}"#] {
+            let profile = claude(&[], false);
+            let agent = profile.id;
+            let w = config_world(vec![profile], text);
+            let (class, reason) =
+                refused(
+                    w.svc
+                        .attach_preset(agent, &strings(&["library/P.yaml"]), None, None),
+                );
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE),
+                "{text}"
+            );
+            assert!(
+                reason.args["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("mounts are unknown"),
+                "{reason:?}"
+            );
+            assert_eq!(
+                w.attachments(agent),
+                attached(false, &[]),
+                "{text}: nothing applied"
+            );
+            assert_eq!(
+                code(
+                    w.svc
+                        .judge_new_presets(&new_profile, &strings(&["library/P.yaml"]), None)
+                ),
+                (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE.to_owned()),
+                "{text}"
+            );
+            let builtin = w
+                .svc
+                .judge_new_presets(&new_profile, &strings(&["engram:/default"]), None)
+                .unwrap();
+            assert!(
+                builtin.attachments.default_preset,
+                "{text}: a built-in alone needs no library"
+            );
+        }
+
+        let profile = claude(&[], false);
+        let agent = profile.id;
+        let w = config_world(vec![profile], r#"{"schema_version": 2, "mounts": []}"#);
+        let attach = w
+            .svc
+            .attach_preset(agent, &strings(&["library/P.yaml"]), None, None)
+            .unwrap();
+        assert!(attach.applied.is_empty());
+        assert_eq!(attach.skipped.len(), 1);
+        assert_eq!(
+            attach.skipped[0].reason.code, NOT_FOUND,
+            "{:?}",
+            attach.skipped
+        );
+        let judged = w
+            .svc
+            .judge_new_presets(&new_profile, &strings(&["library/P.yaml"]), None)
+            .unwrap();
+        assert_eq!(judged.skipped.len(), 1);
+        assert_eq!(
+            judged.skipped[0].reason.code, NOT_FOUND,
+            "{:?}",
+            judged.skipped
+        );
+    }
+
     // ── writes through the port ─────────────────────────────────────────────────────────────────────────────
 
     #[test]
     fn attach_detach_and_reorder_write_only_through_the_port_from_inside_a_change() {
-        let profile = claude(&["P.yaml", "Q.yaml"], true);
+        let profile = claude(&["library/P.yaml", "library/Q.yaml"], true);
         let agent = profile.id;
         // The port logs and does not write: whatever reaches the registry did not come through it.
         let w = World::make(vec![profile], true, true, false);
@@ -992,16 +1504,26 @@ mod tests {
 
         let attach = w
             .svc
-            .attach_preset(agent, &strings(&["R.yaml"]), None, None)
+            .attach_preset(agent, &strings(&["library/R.yaml"]), None, None)
             .unwrap();
         let rev = agent_base_rev(true, &before.presets);
         let reorder = w
             .svc
-            .reorder_presets(agent, &strings(&["Q.yaml", "P.yaml"]), &rev, None)
+            .reorder_presets(
+                agent,
+                &strings(&["library/Q.yaml", "library/P.yaml"]),
+                &rev,
+                None,
+            )
             .unwrap();
         let detach = w
             .svc
-            .detach_preset(agent, &strings(&["engram:/default", "P.yaml"]), true, None)
+            .detach_preset(
+                agent,
+                &strings(&["engram:/default", "library/P.yaml"]),
+                true,
+                None,
+            )
             .unwrap();
 
         assert_eq!(
@@ -1012,22 +1534,36 @@ mod tests {
         assert_eq!(
             w.port.writes(),
             vec![
-                (agent, attached(true, &["P.yaml", "Q.yaml", "R.yaml"]), true),
-                (agent, attached(true, &["Q.yaml", "P.yaml"]), true),
-                (agent, attached(false, &["Q.yaml"]), true),
+                (
+                    agent,
+                    attached(
+                        true,
+                        &["library/P.yaml", "library/Q.yaml", "library/R.yaml"]
+                    ),
+                    true
+                ),
+                (
+                    agent,
+                    attached(true, &["library/Q.yaml", "library/P.yaml"]),
+                    true
+                ),
+                (agent, attached(false, &["library/Q.yaml"]), true),
             ],
             "each write goes through the port, from inside a change"
         );
-        assert_eq!(attach.applied, strings(&["R.yaml"]));
+        assert_eq!(attach.applied, strings(&["library/R.yaml"]));
         assert_eq!(
             attach.view.presets,
-            strings(&["P.yaml", "Q.yaml", "R.yaml"]),
+            strings(&["library/P.yaml", "library/Q.yaml", "library/R.yaml"]),
             "the answer is the attachments as committed"
         );
-        assert_eq!(reorder.presets, strings(&["Q.yaml", "P.yaml"]));
+        assert_eq!(
+            reorder.presets,
+            strings(&["library/Q.yaml", "library/P.yaml"])
+        );
         assert_eq!(
             (detach.default_preset, detach.presets),
-            (false, strings(&["Q.yaml"]))
+            (false, strings(&["library/Q.yaml"]))
         );
     }
 
@@ -1061,7 +1597,7 @@ mod tests {
 
     #[test]
     fn attach_applies_what_fits_skips_the_rest_with_a_reason_and_places_after_the_anchor() {
-        let profile = claude(&["P.yaml", "Q.yaml"], false);
+        let profile = claude(&["library/P.yaml", "library/Q.yaml"], false);
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.library();
@@ -1071,18 +1607,18 @@ mod tests {
             .attach_preset(
                 agent,
                 &strings(&[
-                    "R.yaml",
+                    "library/R.yaml",
                     "engram:/default",
-                    "S.yaml",
-                    "Q.yaml",
-                    "rules/a.md",
+                    "library/S.yaml",
+                    "library/Q.yaml",
+                    "library/rules/a.md",
                     "engram:/priming",
-                    "M.yaml",
+                    "library/M.yaml",
                     "../x.yaml",
                     "engram:/default",
-                    "R.yaml",
+                    "library/R.yaml",
                 ]),
-                Some("P.yaml"),
+                Some("library/P.yaml"),
                 None,
             )
             .unwrap();
@@ -1094,45 +1630,66 @@ mod tests {
             .collect();
         assert_eq!(
             answer.applied,
-            strings(&["R.yaml", "engram:/default", "S.yaml"])
+            strings(&["library/R.yaml", "engram:/default", "library/S.yaml"])
         );
         assert_eq!(
             skips,
             [
-                ("Q.yaml", ALREADY_PRESENT),
-                ("rules/a.md", WRONG_KIND),
+                ("library/Q.yaml", ALREADY_PRESENT),
+                ("library/rules/a.md", WRONG_KIND),
                 ("engram:/priming", WRONG_KIND),
-                ("M.yaml", NOT_FOUND),
+                ("library/M.yaml", NOT_FOUND),
                 ("../x.yaml", ITEM_PATH_INVALID),
                 ("engram:/default", ALREADY_PRESENT),
-                ("R.yaml", ALREADY_PRESENT),
+                ("library/R.yaml", ALREADY_PRESENT),
             ]
         );
         assert_eq!(
             w.attachments(agent),
-            attached(true, &["P.yaml", "R.yaml", "S.yaml", "Q.yaml"]),
+            attached(
+                true,
+                &[
+                    "library/P.yaml",
+                    "library/R.yaml",
+                    "library/S.yaml",
+                    "library/Q.yaml"
+                ]
+            ),
             "placed after the anchor in call order"
         );
         assert_eq!(
             answer.view.presets,
-            strings(&["P.yaml", "R.yaml", "S.yaml", "Q.yaml"])
+            strings(&[
+                "library/P.yaml",
+                "library/R.yaml",
+                "library/S.yaml",
+                "library/Q.yaml"
+            ])
         );
     }
 
     #[test]
     fn attach_without_an_anchor_in_the_list_appends() {
-        let profile = claude(&["P.yaml"], true);
+        let profile = claude(&["library/P.yaml"], true);
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.library();
 
         w.svc
-            .attach_preset(agent, &strings(&["Q.yaml", "R.yaml"]), Some("X.yaml"), None)
+            .attach_preset(
+                agent,
+                &strings(&["library/Q.yaml", "library/R.yaml"]),
+                Some("library/X.yaml"),
+                None,
+            )
             .unwrap();
 
         assert_eq!(
             w.attachments(agent),
-            attached(true, &["P.yaml", "Q.yaml", "R.yaml"])
+            attached(
+                true,
+                &["library/P.yaml", "library/Q.yaml", "library/R.yaml"]
+            )
         );
     }
 
@@ -1140,14 +1697,17 @@ mod tests {
 
     #[test]
     fn detaching_the_default_preset_needs_yes_while_the_slot_is_on() {
-        let profile = claude(&["P.yaml", "Q.yaml"], true);
+        let profile = claude(&["library/P.yaml", "library/Q.yaml"], true);
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.library();
 
-        let without_yes =
-            w.svc
-                .detach_preset(agent, &strings(&["P.yaml", "engram:/default"]), false, None);
+        let without_yes = w.svc.detach_preset(
+            agent,
+            &strings(&["library/P.yaml", "engram:/default"]),
+            false,
+            None,
+        );
         let (class, reason) = refused(without_yes);
         assert_eq!(
             (class, reason.code.as_str()),
@@ -1155,7 +1715,10 @@ mod tests {
         );
         assert_eq!(reason.args, json!({ "agent": agent.to_string() }));
         assert!(w.port.writes().is_empty(), "the refusal applied nothing");
-        assert_eq!(w.attachments(agent), attached(true, &["P.yaml", "Q.yaml"]));
+        assert_eq!(
+            w.attachments(agent),
+            attached(true, &["library/P.yaml", "library/Q.yaml"])
+        );
 
         let with_yes = w
             .svc
@@ -1164,30 +1727,38 @@ mod tests {
         assert!(!with_yes.default_preset);
         let again = w
             .svc
-            .detach_preset(agent, &strings(&["engram:/default", "P.yaml"]), false, None)
+            .detach_preset(
+                agent,
+                &strings(&["engram:/default", "library/P.yaml"]),
+                false,
+                None,
+            )
             .unwrap();
         assert!(
             !again.default_preset,
             "with the slot off there is nothing to confirm"
         );
-        assert_eq!(w.attachments(agent), attached(false, &["Q.yaml"]));
+        assert_eq!(w.attachments(agent), attached(false, &["library/Q.yaml"]));
         let idempotent = w
             .svc
-            .detach_preset(agent, &strings(&["P.yaml"]), false, None)
+            .detach_preset(agent, &strings(&["library/P.yaml"]), false, None)
             .unwrap();
-        assert_eq!(idempotent.presets, strings(&["Q.yaml"]));
+        assert_eq!(idempotent.presets, strings(&["library/Q.yaml"]));
     }
 
     #[test]
     fn detach_with_a_spelling_that_is_not_a_reference_refuses_the_whole_call() {
-        let profile = claude(&["P.yaml"], true);
+        let profile = claude(&["library/P.yaml"], true);
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.library();
 
-        let refusal = w
-            .svc
-            .detach_preset(agent, &strings(&["P.yaml", "../x.yaml"]), true, None);
+        let refusal = w.svc.detach_preset(
+            agent,
+            &strings(&["library/P.yaml", "../x.yaml"]),
+            true,
+            None,
+        );
 
         assert_eq!(
             code(refusal),
@@ -1200,9 +1771,9 @@ mod tests {
 
     #[test]
     fn the_agent_base_rev_is_the_sha256_of_the_canonical_attachments_and_order_sensitive() {
-        let ab = claude(&["A.yaml", "B.yaml"], true);
-        let ba = claude(&["B.yaml", "A.yaml"], true);
-        let ab_off = claude(&["A.yaml", "B.yaml"], false);
+        let ab = claude(&["library/A.yaml", "library/B.yaml"], true);
+        let ba = claude(&["library/B.yaml", "library/A.yaml"], true);
+        let ab_off = claude(&["library/A.yaml", "library/B.yaml"], false);
         let ids = [ab.id, ba.id, ab_off.id];
         let w = World::new(vec![ab, ba, ab_off]);
         let revs: Vec<String> = ids
@@ -1212,21 +1783,21 @@ mod tests {
 
         assert_eq!(
             revs[0],
-            sha256_of(r#"{"default":true,"presets":["A.yaml","B.yaml"]}"#)
+            sha256_of(r#"{"default":true,"presets":["library/A.yaml","library/B.yaml"]}"#)
         );
         assert_eq!(
             revs[1],
-            sha256_of(r#"{"default":true,"presets":["B.yaml","A.yaml"]}"#)
+            sha256_of(r#"{"default":true,"presets":["library/B.yaml","library/A.yaml"]}"#)
         );
         assert_eq!(
             revs[2],
-            sha256_of(r#"{"default":false,"presets":["A.yaml","B.yaml"]}"#)
+            sha256_of(r#"{"default":false,"presets":["library/A.yaml","library/B.yaml"]}"#)
         );
     }
 
     #[test]
     fn reorder_refuses_a_base_rev_the_registry_moved_past() {
-        let profile = claude(&["P.yaml", "Q.yaml"], true);
+        let profile = claude(&["library/P.yaml", "library/Q.yaml"], true);
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.library();
@@ -1234,13 +1805,15 @@ mod tests {
         // Another writer moves the attachments after the view was read.
         assert!(w.registry.update_with(agent, |p| p.default_preset = false));
 
-        let (class, reason) =
-            refused(
-                w.svc
-                    .reorder_presets(agent, &strings(&["Q.yaml", "P.yaml"]), &shown, None),
-            );
+        let (class, reason) = refused(w.svc.reorder_presets(
+            agent,
+            &strings(&["library/Q.yaml", "library/P.yaml"]),
+            &shown,
+            None,
+        ));
 
-        let current = sha256_of(r#"{"default":false,"presets":["P.yaml","Q.yaml"]}"#);
+        let current =
+            sha256_of(r#"{"default":false,"presets":["library/P.yaml","library/Q.yaml"]}"#);
         assert_eq!(
             (class, reason.code.as_str()),
             (RefusalClass::Conflict, REV_MISMATCH)
@@ -1249,23 +1822,31 @@ mod tests {
         assert!(w.port.writes().is_empty());
         let view = w
             .svc
-            .reorder_presets(agent, &strings(&["Q.yaml", "P.yaml"]), &current, None)
+            .reorder_presets(
+                agent,
+                &strings(&["library/Q.yaml", "library/P.yaml"]),
+                &current,
+                None,
+            )
             .unwrap();
-        assert_eq!(view.presets, strings(&["Q.yaml", "P.yaml"]));
+        assert_eq!(view.presets, strings(&["library/Q.yaml", "library/P.yaml"]));
     }
 
     #[test]
     fn reorder_refuses_an_order_that_is_not_a_permutation() {
-        let profile = claude(&["P.yaml", "Q.yaml", "P.yaml"], true);
+        let profile = claude(
+            &["library/P.yaml", "library/Q.yaml", "library/P.yaml"],
+            true,
+        );
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.library();
         let rev = w.svc.agent_presets(agent).unwrap().base_rev;
 
         for order in [
-            &["P.yaml", "Q.yaml"][..],
-            &["P.yaml", "Q.yaml", "Q.yaml"],
-            &["P.yaml", "Q.yaml", "engram:/default"],
+            &["library/P.yaml", "library/Q.yaml"][..],
+            &["library/P.yaml", "library/Q.yaml", "library/Q.yaml"],
+            &["library/P.yaml", "library/Q.yaml", "engram:/default"],
         ] {
             let (class, reason) =
                 refused(w.svc.reorder_presets(agent, &strings(order), &rev, None));
@@ -1276,21 +1857,29 @@ mod tests {
             );
             assert_eq!(
                 reason.args,
-                json!({ "expected": ["P.yaml", "Q.yaml", "P.yaml"] })
+                json!({ "expected": ["library/P.yaml", "library/Q.yaml", "library/P.yaml"] })
             );
         }
         assert!(w.port.writes().is_empty());
         let view = w
             .svc
-            .reorder_presets(agent, &strings(&["Q.yaml", "P.yaml", "P.yaml"]), &rev, None)
+            .reorder_presets(
+                agent,
+                &strings(&["library/Q.yaml", "library/P.yaml", "library/P.yaml"]),
+                &rev,
+                None,
+            )
             .unwrap();
-        assert_eq!(view.presets, strings(&["Q.yaml", "P.yaml", "P.yaml"]));
+        assert_eq!(
+            view.presets,
+            strings(&["library/Q.yaml", "library/P.yaml", "library/P.yaml"])
+        );
         assert!(view.default_preset, "the Default slot is untouched");
     }
 
     #[test]
     fn the_base_rev_is_read_from_the_registry_inside_the_change() {
-        let profile = claude(&["P.yaml", "Q.yaml"], true);
+        let profile = claude(&["library/P.yaml", "library/Q.yaml"], true);
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.library();
@@ -1308,7 +1897,12 @@ mod tests {
         let reorder = {
             let (svc, shown) = (Arc::clone(&w.svc), shown.clone());
             thread::spawn(move || {
-                svc.reorder_presets(agent, &strings(&["Q.yaml", "P.yaml"]), &shown, None)
+                svc.reorder_presets(
+                    agent,
+                    &strings(&["library/Q.yaml", "library/P.yaml"]),
+                    &shown,
+                    None,
+                )
             })
         };
         w.svc
@@ -1322,7 +1916,8 @@ mod tests {
         walker.join().unwrap();
 
         let (class, reason) = refused(reorder.join().unwrap());
-        let current = sha256_of(r#"{"default":false,"presets":["P.yaml","Q.yaml"]}"#);
+        let current =
+            sha256_of(r#"{"default":false,"presets":["library/P.yaml","library/Q.yaml"]}"#);
         assert_eq!(
             (class, reason.code.as_str()),
             (RefusalClass::Conflict, REV_MISMATCH)
@@ -1333,7 +1928,7 @@ mod tests {
 
     #[test]
     fn detach_drops_an_attached_entry_that_is_not_a_reference_by_its_text() {
-        let profile = claude(&["../bad.yaml", "P.yaml"], true);
+        let profile = claude(&["../bad.yaml", "library/P.yaml"], true);
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.library();
@@ -1365,8 +1960,8 @@ mod tests {
             .svc
             .detach_preset(agent, &strings(&["../bad.yaml"]), false, None)
             .unwrap();
-        assert_eq!(view.presets, strings(&["P.yaml"]));
-        assert_eq!(w.attachments(agent), attached(true, &["P.yaml"]));
+        assert_eq!(view.presets, strings(&["library/P.yaml"]));
+        assert_eq!(w.attachments(agent), attached(true, &["library/P.yaml"]));
         assert!(view.problems.is_empty(), "{:?}", view.problems);
     }
 
@@ -1374,8 +1969,8 @@ mod tests {
 
     #[test]
     fn an_empty_or_dead_port_cell_answers_profile_edit_unavailable_and_changes_nothing() {
-        let unplugged = World::make(vec![claude(&["P.yaml"], true)], true, false, true);
-        let mut dead = World::new(vec![claude(&["P.yaml"], true)]);
+        let unplugged = World::make(vec![claude(&["library/P.yaml"], true)], true, false, true);
+        let mut dead = World::new(vec![claude(&["library/P.yaml"], true)]);
         dead.port = Arc::new(Port::default());
 
         for w in [&unplugged, &dead] {
@@ -1386,15 +1981,15 @@ mod tests {
                 code(w.svc.agent_presets(agent)),
                 code(
                     w.svc
-                        .attach_preset(agent, &strings(&["Q.yaml"]), None, None),
+                        .attach_preset(agent, &strings(&["library/Q.yaml"]), None, None),
                 ),
                 code(
                     w.svc
-                        .detach_preset(agent, &strings(&["P.yaml"]), true, None),
+                        .detach_preset(agent, &strings(&["library/P.yaml"]), true, None),
                 ),
                 code(
                     w.svc
-                        .reorder_presets(agent, &strings(&["P.yaml"]), "x", None),
+                        .reorder_presets(agent, &strings(&["library/P.yaml"]), "x", None),
                 ),
             ];
             for answer in answers {
@@ -1409,7 +2004,7 @@ mod tests {
 
     #[test]
     fn a_port_store_error_is_passed_through_and_answers_as_store_command_error() {
-        let profile = claude(&["P.yaml"], true);
+        let profile = claude(&["library/P.yaml"], true);
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.library();
@@ -1436,7 +2031,7 @@ mod tests {
 
             let answer = w
                 .svc
-                .detach_preset(agent, &strings(&["P.yaml"]), true, None);
+                .detach_preset(agent, &strings(&["library/P.yaml"]), true, None);
 
             let Err(LibraryRefusal::Store(store)) = answer else {
                 panic!("not passed through: {answer:?}");
@@ -1444,7 +2039,7 @@ mod tests {
             assert_eq!(store.to_string(), shown, "unchanged");
             let error = store_command_error(&store, String::new());
             assert_eq!((error.code(), error.retry()), (bus, retry), "{shown}");
-            assert_eq!(w.attachments(agent), attached(true, &["P.yaml"]));
+            assert_eq!(w.attachments(agent), attached(true, &["library/P.yaml"]));
         }
     }
 
@@ -1477,25 +2072,29 @@ mod tests {
         );
     }
 
-    // ── no root ─────────────────────────────────────────────────────────────────────────────────────────────
+    // ── no mount ────────────────────────────────────────────────────────────────────────────────────────────
 
+    // ADR-0400 decision 4: with no mount registered a library preset names no mount — absent, so it is skipped
+    //   `not-found`; nothing refuses the call.
     #[test]
-    fn with_no_root_only_an_attach_naming_a_library_preset_is_unavailable() {
-        let profile = claude(&["P.yaml", "Q.yaml"], false);
+    fn with_no_mount_an_attach_skips_a_library_preset_as_not_found_and_the_other_edits_work() {
+        let profile = claude(&["library/P.yaml", "library/Q.yaml"], false);
         let agent = profile.id;
         let w = World::make(vec![profile], false, true, true);
         w.library();
         assert_eq!(w.svc.status().root, None);
 
-        let library =
-            w.svc
-                .attach_preset(agent, &strings(&["engram:/default", "R.yaml"]), None, None);
-        let (class, reason) = refused(library);
-        assert_eq!(
-            (class, reason.code.as_str()),
-            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE)
-        );
-        assert!(w.port.writes().is_empty(), "nothing applied");
+        let library = w
+            .svc
+            .attach_preset(agent, &strings(&["library/R.yaml"]), None, None)
+            .unwrap();
+        assert!(library.applied.is_empty());
+        let skips: Vec<(&str, &str)> = library
+            .skipped
+            .iter()
+            .map(|skip| (skip.item.as_str(), skip.reason.code.as_str()))
+            .collect();
+        assert_eq!(skips, [("library/R.yaml", NOT_FOUND)]);
 
         let default = w
             .svc
@@ -1504,16 +2103,24 @@ mod tests {
         let rev = default.view.base_rev.clone();
         let reorder = w
             .svc
-            .reorder_presets(agent, &strings(&["Q.yaml", "P.yaml"]), &rev, None)
+            .reorder_presets(
+                agent,
+                &strings(&["library/Q.yaml", "library/P.yaml"]),
+                &rev,
+                None,
+            )
             .unwrap();
         let detach = w
             .svc
-            .detach_preset(agent, &strings(&["Q.yaml"]), false, None)
+            .detach_preset(agent, &strings(&["library/Q.yaml"]), false, None)
             .unwrap();
 
         assert_eq!(default.applied, strings(&["engram:/default"]));
-        assert_eq!(reorder.presets, strings(&["Q.yaml", "P.yaml"]));
-        assert_eq!(w.attachments(agent), attached(true, &["P.yaml"]));
+        assert_eq!(
+            reorder.presets,
+            strings(&["library/Q.yaml", "library/P.yaml"])
+        );
+        assert_eq!(w.attachments(agent), attached(true, &["library/P.yaml"]));
         assert!(
             matches!(
                 detach.problems.as_slice(),
@@ -1531,7 +2138,7 @@ mod tests {
 
     #[test]
     fn a_root_that_became_unusable_answers_the_same_block_in_the_edit_and_the_read() {
-        let profile = claude(&["P.yaml"], true);
+        let profile = claude(&["library/P.yaml"], true);
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.library();
@@ -1562,7 +2169,7 @@ mod tests {
     /// — `missing`, skipped.
     #[test]
     fn the_edit_and_the_read_judge_a_root_whose_first_scan_failed_by_one_rule() {
-        let profile = claude(&["P.yaml"], false);
+        let profile = claude(&["library/P.yaml"], false);
         let agent = profile.id;
         let w = World::new(vec![profile]);
         w.store
@@ -1577,7 +2184,7 @@ mod tests {
 
         let edit = w
             .svc
-            .detach_preset(agent, &strings(&["Q.yaml"]), false, None)
+            .detach_preset(agent, &strings(&["library/Q.yaml"]), false, None)
             .unwrap();
         let read = w.svc.agent_presets(agent).unwrap();
         assert_eq!(
@@ -1590,7 +2197,7 @@ mod tests {
         fs::remove_dir_all(w.base.join("lib")).unwrap();
         let edit = w
             .svc
-            .detach_preset(agent, &strings(&["Q.yaml"]), false, None)
+            .detach_preset(agent, &strings(&["library/Q.yaml"]), false, None)
             .unwrap();
         let read = w.svc.agent_presets(agent).unwrap();
         assert_eq!(
@@ -1604,9 +2211,9 @@ mod tests {
 
     #[test]
     fn the_view_carries_the_attachments_the_lock_the_agent_values_and_the_resolution_rows() {
-        let profile = claude(&["P.yaml", "M.yaml"], true);
+        let profile = claude(&["library/P.yaml", "library/M.yaml"], true);
         let agent = profile.id;
-        let mut shell = claude(&["P.yaml"], true);
+        let mut shell = claude(&["library/P.yaml"], true);
         shell.command = AgentCommand::Shell {
             program: "sh".to_owned(),
             args: Vec::new(),
@@ -1624,7 +2231,7 @@ mod tests {
             (
                 agent,
                 true,
-                &strings(&["P.yaml", "M.yaml"]),
+                &strings(&["library/P.yaml", "library/M.yaml"]),
                 &PathBuf::from("/work")
             )
         );
@@ -1637,7 +2244,7 @@ mod tests {
         assert!(
             view.problems.iter().any(|problem| matches!(
                 problem,
-                BlockReason::Missing { item, .. } if item == "M.yaml"
+                BlockReason::Missing { item, .. } if item == "library/M.yaml"
             )),
             "{:?}",
             view.problems
@@ -1648,7 +2255,7 @@ mod tests {
             "a backend with no settings check takes no preset"
         );
         assert!(shell_view.problems.is_empty());
-        assert_eq!(shell_view.presets, strings(&["P.yaml"]));
+        assert_eq!(shell_view.presets, strings(&["library/P.yaml"]));
     }
 
     // ── the `agent.new {presets}` judgement ─────────────────────────────────────────────────────────────────
@@ -1659,13 +2266,13 @@ mod tests {
     #[test]
     fn the_new_agent_judgement_is_attachs_over_a_profile_outside_the_registry() {
         let presets = strings(&[
-            "R.yaml",
+            "library/R.yaml",
             "engram:/default",
-            "rules/a.md",
+            "library/rules/a.md",
             "engram:/priming",
-            "M.yaml",
+            "library/M.yaml",
             "../x.yaml",
-            "S.yaml",
+            "library/S.yaml",
             "R.yaml",
         ]);
         let new = claude(&[], true);
@@ -1687,23 +2294,31 @@ mod tests {
 
         assert_eq!(judged.attachments, w.attachments(twin.id));
         assert_eq!(judged.skipped, attach.skipped);
-        assert_eq!(judged.attachments, attached(true, &["R.yaml", "S.yaml"]));
+        assert_eq!(
+            judged.attachments,
+            attached(true, &["library/R.yaml", "library/S.yaml"])
+        );
     }
 
-    /// With no root, naming a library preset refuses the whole judgement `library-unavailable` — the attach rule —
+    /// With no mount registered, a library preset names no mount — absent, skipped `not-found` (ADR-0400 decision 4) —
     /// while `engram:/default` alone is judged without the library.
     #[test]
-    fn the_new_agent_judgement_refuses_a_library_preset_with_no_library_and_judges_the_default_alone(
-    ) {
+    fn the_new_agent_judgement_with_no_mount_skips_a_library_preset_and_judges_the_default_alone() {
         let w = World::make(Vec::new(), false, true, true);
         let new = claude(&[], true);
 
         let library = w
             .svc
-            .judge_new_presets(&new, &strings(&["engram:/default", "R.yaml"]), None);
+            .judge_new_presets(&new, &strings(&["library/R.yaml"]), None)
+            .unwrap();
+        assert_eq!(library.attachments, attached(true, &[]));
         assert_eq!(
-            code(library),
-            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE.to_owned())
+            library
+                .skipped
+                .iter()
+                .map(|skip| (skip.item.as_str(), skip.reason.code.as_str()))
+                .collect::<Vec<_>>(),
+            [("library/R.yaml", NOT_FOUND)]
         );
 
         let default = w
@@ -1740,7 +2355,7 @@ mod tests {
 
         let (class, reason) = refused(w.svc.judge_new_presets(
             &new,
-            &strings(&["R.yaml"]),
+            &strings(&["library/R.yaml"]),
             Some(current + 1),
         ));
         assert_eq!(
@@ -1761,9 +2376,9 @@ mod tests {
         );
         let judged = w
             .svc
-            .judge_new_presets(&new, &strings(&["R.yaml"]), Some(current))
+            .judge_new_presets(&new, &strings(&["library/R.yaml"]), Some(current))
             .unwrap();
-        assert_eq!(judged.attachments, attached(true, &["R.yaml"]));
+        assert_eq!(judged.attachments, attached(true, &["library/R.yaml"]));
     }
 
     /// With no library service, a library preset refuses the whole judgement `library-unavailable` with the given
@@ -1774,7 +2389,7 @@ mod tests {
 
         let (class, reason) = refused(judge_new_presets_without_library(
             &new,
-            &strings(&["engram:/default", "R.yaml"]),
+            &strings(&["engram:/default", "library/R.yaml"]),
             "no service",
         ));
         assert_eq!(

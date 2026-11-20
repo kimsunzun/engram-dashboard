@@ -4,8 +4,8 @@
 //!
 //! ## Rules (invariants)
 //!
-//! - **One edit, one change.** An edit passes the first-scan entrance and needs a published root (else
-//!   `library-unavailable`); the folders an `add` names are stat'ed before the change, outside every lock; then one
+//! - **One edit, one change.** An edit passes the first-scan entrance (its failure `library-unavailable`); the
+//!   folders an `add` names are stat'ed before the change, outside every lock; then one
 //!   [`LibraryService::change_at`] runs, under its write lock and in this order: link admission
 //!   (`LibraryService::admit`) before any read, the store read of the file's current bytes, the parse, the `baseRev`
 //!   check against the `rev` of those bytes, the operation over [`PresetLists`] keeping every kept item's origin, no
@@ -14,19 +14,21 @@
 //! - **Never re-created.** A file or parent missing at the read answers `not-found` before anything is written.
 //! - **Bytes read are applied also on a refusal.** When the bytes read differ from the catalog item, the item made from
 //!   them is applied before the edit can refuse, so the next edit is judged against them.
-//! - **Views read no preset file.** `preset.get` stats the root, then answers from the catalog (`rev` included) under
-//!   one read lock; an edit's answer view is built inside its own change, from the preset as committed. Their folder
-//!   stats and link probes run after the lock. `previewFolder` reads no catalog and takes no library lock.
+//! - **Views read no preset file.** `preset.get` stats the mounts it names, then answers from the catalog (`rev`
+//!   included) under one read lock; an edit's answer view is built inside its own change, from the preset as committed.
+//!   Their folder stats and link probes run after the lock. `previewFolder` reads no catalog and takes no library lock.
 //!
 //! ## Refusals every edit can answer
 //!
-//! No published root `Unavailable` · `library-unavailable`; a stale root generation `Conflict` ·
-//! `root-generation-stale`; a dot or temp name `InvalidArgument` · `item-path-invalid`; a name that is not `.yaml` /
-//! `.yml` `InvalidArgument` · `wrong-kind`; a link at or above the file `InvalidArgument` · `path-through-link`; the
-//! file or a parent missing `NotFound` · `not-found` (nothing is re-created); another read error or a link probe error
-//! `Unavailable` · `library-read-failed`; a file that does not read as a preset, or one the writer cannot rewrite
-//! exactly, `InvalidArgument` with the reader's or writer's code (`WriteError::to_reason`), the file untouched; a
-//! failed write `Unavailable` · [`LIBRARY_WRITE_FAILED`], the file as it was.
+//! A path of one name (a mount's top, or a name at the virtual root) `InvalidArgument` · `virtual-root-read-only`,
+//! before anything else about the target (ADR-0400 decision 5); no first scan applied `Unavailable` ·
+//! `library-unavailable`; a stale root generation `Conflict` · `root-generation-stale`; a dot or temp name below the
+//! mount's top `InvalidArgument` · `item-path-invalid`; a name that is not `.yaml` / `.yml` `InvalidArgument` ·
+//! `wrong-kind`; a path in no registered mount `NotFound` · `not-found`; a link at or above the file `InvalidArgument`
+//! · `path-through-link`; the file or a parent missing `NotFound` · `not-found` (nothing is re-created); another read
+//! error or a link probe error `Unavailable` · `library-read-failed`; a file that does not read as a preset, or one the
+//! writer cannot rewrite exactly, `InvalidArgument` with the reader's or writer's code (`WriteError::to_reason`), the
+//! file untouched; a failed write `Unavailable` · [`LIBRARY_WRITE_FAILED`], the file as it was.
 // ADR-0324
 // ADR-0338
 // ADR-0341
@@ -34,6 +36,7 @@
 // ADR-0365
 // ADR-0366
 // ADR-0378
+// ADR-0400
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -62,6 +65,7 @@ use crate::format::{
 };
 use crate::gate::{State, NOT_FOUND};
 use crate::launch::{sha256_hex, FolderReads, LIBRARY_READ_FAILED};
+use crate::mounts::{admits_inside, Mounts};
 use crate::path::{AssetRef, BuiltinId, FolderRef, LibPath, PresetItem};
 use crate::refs::{default_slot_count, referrers_of};
 use crate::resolve::{
@@ -69,10 +73,10 @@ use crate::resolve::{
     RootState, Target, BUILTIN_IN_LIBRARY_PRESET, FOLDER_NOT_FOUND, FOLDER_PATH_CLI_UNSAFE,
     FOLDER_UNREADABLE, PRESET_CYCLE,
 };
-use crate::store::{admits, ContentTag};
+use crate::store::ContentTag;
 use crate::{
-    link_verdict, LibraryRefusal, LibraryService, RefusalClass, Want, LIBRARY_READ_CAP,
-    PATH_THROUGH_LINK, STAT_UNANSWERED,
+    link_verdict, virtual_root_read_only, LibraryRefusal, LibraryService, RefusalClass, Want,
+    LIBRARY_READ_CAP, PATH_THROUGH_LINK, STAT_UNANSWERED,
 };
 
 /// The code of a `baseRev` that is not the `rev` of the bytes read inside the change (`args` = `{rev}`, the current
@@ -303,7 +307,7 @@ impl Lookup for DraftLookup<'_> {
             AssetRef::Library(path) if key(path) == self.draft.at => Looked::Present(ItemView {
                 kind: &self.draft.kind,
                 content: &self.draft.content,
-                file: self.inner.root.map(|root| path.to_path(root)),
+                file: self.inner.mounts.disk_path(path),
                 stand_in: None,
             }),
             _ => self.inner.item(r),
@@ -315,7 +319,7 @@ impl Lookup for DraftLookup<'_> {
 pub(crate) struct Edit<'a> {
     pub(crate) doc: &'a PresetDoc,
     pub(crate) catalog: &'a Catalog,
-    pub(crate) root: &'a Path,
+    pub(crate) mounts: &'a Mounts,
 }
 
 /// What [`LibraryService::rewrite_in`] committed: `op`'s answer, the preset as committed (the file as read when its
@@ -333,7 +337,8 @@ struct ViewBase {
     view: PresetView,
     /// The keys of the own folder rows, by row (`None` = a relative entry).
     folder_keys: Vec<Option<PathKey>>,
-    root: Option<PathBuf>,
+    /// The mounts the rows' link probes run in.
+    mounts: Mounts,
 }
 
 /// An edit's answer view as built inside its change: the catalog part and the pure resolution of the preset as
@@ -347,9 +352,9 @@ impl LibraryService {
     /// The `preset.get` view of `preset` from the catalog (no disk read of the preset): its rows with their states, its
     /// folder entries with their stats, the conflict and problem rows of resolving it on its own, its `rev` and how
     /// many agents attach it. A library preset passes the first-scan entrance; so does `engram:/default` when its file
-    /// lists a library item, though it needs no root.
+    /// lists a library item, though it needs no mount.
     ///
-    /// Refusals: a library preset with no published root `Unavailable` · `library-unavailable`; a path the catalog
+    /// Refusals: a library preset with no first scan applied `Unavailable` · `library-unavailable`; a path the catalog
     /// does not hold `NotFound` · `not-found`; a file that does not read `InvalidArgument` with its reason; an item
     /// that is not a preset `InvalidArgument` · `wrong-kind`.
     pub fn preset_get(&self, preset: &AssetRef) -> Result<PresetView, LibraryRefusal> {
@@ -390,7 +395,7 @@ impl LibraryService {
         };
         match item.content {
             ItemContent::Preset { doc, rev } => {
-                Ok(self.view_parts(&state.catalog, state.root(), lookup, preset, doc, rev))
+                Ok(self.view_parts(&state.catalog, &state.mounts, lookup, preset, doc, rev))
             }
             ItemContent::Broken { reason } => Err(invalid(reason.clone())),
             _ => Err(LibraryRefusal::new(
@@ -405,7 +410,7 @@ impl LibraryService {
     fn view_parts(
         &self,
         catalog: &Catalog,
-        root: Option<&Path>,
+        mounts: &Mounts,
         lookup: &dyn Lookup,
         preset: &AssetRef,
         doc: &PresetDoc,
@@ -444,23 +449,23 @@ impl LibraryService {
                 agents,
             },
             folder_keys,
-            root: root.map(Path::to_path_buf),
+            mounts: mounts.clone(),
         }
     }
 
     /// An edit's answer view, built inside its change from `catalog` as the edit left it (the preset as committed:
-    /// `doc` with `rev`) — the resolution is pure, with the root usable (the edit just read the file under it).
+    /// `doc` with `rev`) — the resolution is pure, with the library usable (the edit just read the file in it).
     fn pending_view(
         &self,
         catalog: &Catalog,
-        root: &Path,
+        mounts: &Mounts,
         preset: &LibPath,
         doc: &PresetDoc,
         rev: &str,
     ) -> PendingView {
         let lookup = CatalogLookup {
             catalog,
-            root: Some(root),
+            mounts,
             builtins: &self.builtins,
         };
         let at = AssetRef::Library(preset.clone());
@@ -473,7 +478,7 @@ impl LibraryService {
             root: RootState::Ok,
         };
         PendingView {
-            base: self.view_parts(catalog, Some(root), &lookup, &at, doc, rev),
+            base: self.view_parts(catalog, mounts, &lookup, &at, doc, rev),
             resolution: resolve(&target, &lookup, &*self.values.backends),
         }
     }
@@ -485,7 +490,7 @@ impl LibraryService {
             base,
             mut resolution,
         } = pending;
-        self.settle_resolution(&mut resolution, base.root.as_deref());
+        self.settle_resolution(&mut resolution, &base.mounts);
         self.complete_view(base, resolution)
     }
 
@@ -495,13 +500,11 @@ impl LibraryService {
         let ViewBase {
             mut view,
             folder_keys,
-            root,
+            mounts,
         } = base;
         attach_statuses(&mut view.folders, &folder_keys, &resolution);
-        if let Some(root) = &root {
-            for row in rows_mut(&mut view) {
-                self.mark_row_link(root, row);
-            }
+        for row in rows_mut(&mut view) {
+            self.mark_row_link(&mounts, row);
         }
         (view.conflicts, view.problems) = resolution
             .problems
@@ -513,7 +516,7 @@ impl LibraryService {
     /// A `not-found` library row's link probe, judged by [`link_verdict`] — the rule of `LibraryService::mark_links`, so
     /// a line's state and the answer's problems agree. A store call — run it outside every lock.
     // ADR-0387
-    fn mark_row_link(&self, root: &Path, row: &mut PresetRow) {
+    fn mark_row_link(&self, mounts: &Mounts, row: &mut PresetRow) {
         if row
             .state
             .as_ref()
@@ -524,11 +527,10 @@ impl LibraryService {
         let Ok(AssetRef::Library(path)) = AssetRef::parse(&row.path) else {
             return;
         };
-        if let Some(verdict) = link_verdict(
-            self.store.first_link(root, &path),
-            &row.path,
-            Some(row.line),
-        ) {
+        let Some(probe) = self.first_link(mounts, &path) else {
+            return;
+        };
+        if let Some(verdict) = link_verdict(probe, &row.path, Some(row.line)) {
             row.state = Some(verdict);
         }
     }
@@ -698,7 +700,7 @@ impl LibraryService {
         let ((), pending) = self.edit(preset, root_generation, base_rev, |edit| {
             let lookup = CatalogLookup {
                 catalog: edit.catalog,
-                root: Some(edit.root),
+                mounts: edit.mounts,
                 builtins: &self.builtins,
             };
             let (lists, refused) = self.draft_lists(draft, Some(edit.doc), preset, &lookup);
@@ -719,9 +721,9 @@ impl LibraryService {
     /// catalog overlaid with it, refused items left out, the line problems of the file entries it keeps) — no write; file,
     /// catalog and `rev` unchanged. Answers the folder list with its stats, the conflict rows, and the problem rows: the
     /// resolution's, then one `Broken` row per mismatch (`args` = `{path, list}`). A draft item has no file line, so its
-    /// rows carry none. A draft listing a library item passes the first-scan entrance and needs a published root (else
-    /// `Unavailable` · `library-unavailable`); a built-in-only draft answers with no root, after waiting out a pending
-    /// first scan when it keeps the file's folders.
+    /// rows carry none. A draft listing a library item passes the first-scan entrance (its failure `Unavailable` ·
+    /// `library-unavailable`); a built-in-only draft answers whatever the library is, after waiting out a pending first
+    /// scan when it keeps the file's folders.
     pub fn preset_check(
         &self,
         preset: &LibPath,
@@ -741,7 +743,7 @@ impl LibraryService {
                 .map_err(LibraryRefusal::unavailable)?;
         } else if draft.folders.is_none() {
             // The file's folder list is read from the catalog: wait out a pending first scan. Its failure is not this
-            //   draft's answer — a built-in-only draft answers with no root (the list is then empty).
+            //   draft's answer — a built-in-only draft answers without the library (the list is then empty).
             if let Err(why) = self.first_scan_join() {
                 tracing::debug!("preset check: first scan not applied; folders unknown: {why}");
             }
@@ -749,7 +751,7 @@ impl LibraryService {
         let (overlay, refused, mut folders, folder_keys) = self.gate.with_read(|state| {
             let lookup = CatalogLookup {
                 catalog: &state.catalog,
-                root: state.root(),
+                mounts: &state.mounts,
                 builtins: &self.builtins,
             };
             let current = match state.catalog.get(&key(preset)).map(|item| &item.content) {
@@ -965,20 +967,23 @@ impl LibraryService {
         self.refuse_unadmitted_target(preset)?;
         self.first_scan_join()
             .map_err(LibraryRefusal::unavailable)?;
-        self.change_at(root_generation, |catalog, root, seq| {
+        self.change_at(root_generation, |catalog, mounts, seq| {
             let mut touched = Vec::new();
-            let answer = match root {
-                Some(root) => self.edit_in(preset, base_rev, catalog, root, seq, op, &mut touched),
-                None => Err(LibraryRefusal::unavailable(crate::gate::NO_ROOT.to_owned())),
-            };
+            let answer = self.edit_in(preset, base_rev, catalog, mounts, seq, op, &mut touched);
             (answer, touched)
         })?
     }
 
-    /// The checks of an edit target by name alone: a dot or temp name `item-path-invalid` (as [`LibraryService::admit`]
-    /// refuses it), then a name that is not `.yaml` / `.yml` — the only files that hold presets — `wrong-kind`.
+    /// The checks of an edit target by name alone, before any mount lookup: a path of one name
+    /// `virtual-root-read-only`, a dot or temp name below the mount's top `item-path-invalid` (as
+    /// [`LibraryService::admit`] refuses them), then a name that is not `.yaml` / `.yml` — the only files that hold
+    /// presets — `wrong-kind`.
+    // ADR-0400 decision 5
     fn refuse_unadmitted_target(&self, preset: &LibPath) -> Result<(), LibraryRefusal> {
-        if !admits(preset) {
+        if preset.parent().is_none() {
+            return Err(virtual_root_read_only(Some(preset)));
+        }
+        if !admits_inside(preset) {
             return Err(dot_or_temp(preset));
         }
         match yaml_file(preset) {
@@ -998,13 +1003,13 @@ impl LibraryService {
         preset: &LibPath,
         base_rev: Option<&str>,
         catalog: &mut Catalog,
-        root: &Path,
+        mounts: &Mounts,
         seq: &dyn Fn() -> u64,
         op: impl FnOnce(&Edit<'_>) -> Result<(PresetLists, T), LibraryRefusal>,
         touched: &mut Vec<PathKey>,
     ) -> Result<(T, PendingView), LibraryRefusal> {
-        let done = self.rewrite_in(preset, base_rev, catalog, root, seq, op, touched)?;
-        let pending = self.pending_view(catalog, root, preset, &done.doc, &done.rev);
+        let done = self.rewrite_in(preset, base_rev, catalog, mounts, seq, op, touched)?;
+        let pending = self.pending_view(catalog, mounts, preset, &done.doc, &done.rev);
         Ok((done.answer, pending))
     }
 
@@ -1018,13 +1023,12 @@ impl LibraryService {
         preset: &LibPath,
         base_rev: Option<&str>,
         catalog: &mut Catalog,
-        root: &Path,
+        mounts: &Mounts,
         seq: &dyn Fn() -> u64,
         op: impl FnOnce(&Edit<'_>) -> Result<(PresetLists, T), LibraryRefusal>,
         touched: &mut Vec<PathKey>,
     ) -> Result<Rewritten<T>, LibraryRefusal> {
-        self.admit(root, preset)?;
-        let file = preset.to_path(root);
+        let file = self.admit(mounts, preset)?;
         let read_seq = seq();
         let (tag, bytes) = self
             .store
@@ -1067,7 +1071,7 @@ impl LibraryService {
         let (lists, answer) = op(&Edit {
             doc: &doc,
             catalog,
-            root,
+            mounts,
         })?;
         if same_lists(&as_read(&doc), &lists) {
             return Ok(Rewritten {
@@ -1122,18 +1126,31 @@ impl LibraryService {
         })
     }
 
-    /// Link admission for a new way into the catalog: `path` must pass [`admits`] (else `InvalidArgument` ·
-    /// `item-path-invalid`) and lie below no link inside the library (else `InvalidArgument` · [`PATH_THROUGH_LINK`]; a
-    /// probe error `Unavailable` · `library-read-failed`). A name that is missing or under a file passes: nothing below
-    /// it can be a link, and the read that follows answers it. `LibraryStore` read and write follow links, so it runs
+    /// Link admission for a new way into the catalog, answering `path`'s disk path in its mount's folder: `path` must
+    /// lie below a mount's top (a path of one name `InvalidArgument` · `virtual-root-read-only`, judged first), pass
+    /// [`admits_inside`] (else `InvalidArgument` · `item-path-invalid`), lie in a registered mount (else `NotFound` ·
+    /// `not-found`), and lie below no link inside the mount (else `InvalidArgument` · [`PATH_THROUGH_LINK`]; a probe
+    /// error `Unavailable` · `library-read-failed`). A name that is missing or under a file passes: nothing below it
+    /// can be a link, and the read that follows answers it. `LibraryStore` read and write follow links, so it runs
     /// before any read or write of `path`.
     // ADR-0365
-    pub(crate) fn admit(&self, root: &Path, path: &LibPath) -> Result<(), LibraryRefusal> {
-        if !admits(path) {
+    // ADR-0400
+    pub(crate) fn admit(&self, mounts: &Mounts, path: &LibPath) -> Result<PathBuf, LibraryRefusal> {
+        if path.parent().is_none() {
+            return Err(virtual_root_read_only(Some(path)));
+        }
+        if !admits_inside(path) {
             return Err(dot_or_temp(path));
         }
-        match self.store.first_link(root, path) {
-            Ok(None) => Ok(()),
+        let (mount, Some(rest)) = mounts
+            .locate(path)
+            .ok_or_else(|| not_found(path.as_str()))?
+        else {
+            unreachable!("a path of two names or more has a rest in its mount");
+        };
+        let file = rest.to_path(&mount.folder);
+        match self.store.first_link(&mount.folder, &rest) {
+            Ok(None) => Ok(file),
             Ok(Some(_)) => Err(LibraryRefusal::new(
                 RefusalClass::InvalidArgument,
                 PATH_THROUGH_LINK,
@@ -1145,7 +1162,7 @@ impl LibraryService {
                     io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
                 ) =>
             {
-                Ok(())
+                Ok(file)
             }
             Err(e) => Err(LibraryRefusal::new(
                 RefusalClass::Unavailable,
@@ -1196,7 +1213,7 @@ impl LibraryService {
     ) -> (PresetLists, (Vec<String>, Vec<Skipped>)) {
         let lookup = CatalogLookup {
             catalog: edit.catalog,
-            root: Some(edit.root),
+            mounts: edit.mounts,
             builtins: &self.builtins,
         };
         let anchor = after.and_then(|after| AssetRef::parse(after).ok());
@@ -2014,6 +2031,7 @@ mod tests {
         BoundedIo, FolderListing, FolderOps, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT,
         LIST_CAP,
     };
+    use crate::mounts::MountPath;
     use crate::store::{FsStore, LibraryStore, ScanListing, TrashBundle};
     use crate::{LibraryValues, LIBRARY_UNAVAILABLE};
 
@@ -2038,7 +2056,7 @@ mod tests {
         fn scan(
             &self,
             root: &Path,
-            under: Option<&LibPath>,
+            under: Option<&MountPath>,
             seq: &dyn Fn() -> u64,
         ) -> io::Result<ScanListing> {
             let parked = {
@@ -2054,7 +2072,7 @@ mod tests {
             }
             FsStore.scan(root, under, seq)
         }
-        fn first_link(&self, root: &Path, rel: &LibPath) -> io::Result<Option<LibPath>> {
+        fn first_link(&self, root: &Path, rel: &MountPath) -> io::Result<Option<MountPath>> {
             if let Some(kind) = *lock(&self.fail_link) {
                 return Err(io::Error::from(kind));
             }
@@ -2257,7 +2275,9 @@ mod tests {
         }
 
         fn lib(&self, rel: &str) -> PathBuf {
-            LibPath::parse(rel).unwrap().to_path(&self.base.join("lib"))
+            MountPath::parse(rel)
+                .unwrap()
+                .to_path(&self.base.join("lib"))
         }
 
         fn put(&self, rel: &str, text: &str) -> PathBuf {
@@ -2436,27 +2456,33 @@ mod tests {
     #[test]
     fn rev_is_the_sha256_of_the_exact_bytes_and_equal_across_a_service_rebuild() {
         let w = World::new();
-        let text = format!("\u{feff}{}", preset("instructions:\n- rules/a.md\n"));
+        let text = format!(
+            "\u{feff}{}",
+            preset("instructions:\n- library/rules/a.md\n")
+        );
         w.put("rules/a.md", "a");
         w.put("P.yaml", &text);
-        let view = w.view("P.yaml");
+        let view = w.view("library/P.yaml");
         assert_eq!(view.rev, sha256_hex(text.as_bytes()));
         let rebuilt = w
             .rebuild()
-            .preset_get(&AssetRef::Library(lp("P.yaml")))
+            .preset_get(&AssetRef::Library(lp("library/P.yaml")))
             .unwrap();
         assert_eq!(rebuilt.rev, view.rev);
     }
 
     #[test]
     fn the_view_shows_each_row_with_its_state_and_counts_the_agents() {
-        let w = World::with(vec![agent(&["P.yaml"], false), agent(&[], true)], true);
+        let w = World::with(
+            vec![agent(&["library/P.yaml"], false), agent(&[], true)],
+            true,
+        );
         library(
             &w,
-            "description: team\npresets:\n- P.yaml\ninstructions:\n- rules/a.md\n- gone.md\n- S.yaml\n\
-             skills:\n- skills/s\n",
+            "description: team\npresets:\n- library/P.yaml\ninstructions:\n- library/rules/a.md\n- library/gone.md\n- library/S.yaml\n\
+             skills:\n- library/skills/s\n",
         );
-        let view = w.view("P.yaml");
+        let view = w.view("library/P.yaml");
         assert_eq!(view.description.as_deref(), Some("team"));
         let state = |row: &PresetRow| row.state.as_ref().map(|state| state.code.clone());
         assert_eq!(
@@ -2470,7 +2496,7 @@ mod tests {
         assert_eq!(state(&view.presets[0]).as_deref(), Some(PRESET_CYCLE));
         assert_eq!(state(&view.skills[0]), None);
         assert!(view.problems.iter().any(
-            |problem| matches!(problem, BlockReason::Missing { item, .. } if item == "gone.md")
+            |problem| matches!(problem, BlockReason::Missing { item, .. } if item == "library/gone.md")
         ));
         assert_eq!(view.agents, 1);
         let default = w
@@ -2492,7 +2518,7 @@ mod tests {
                 "folders:\n- '{f1}'\n- '{f1}{sep}'\n- '{f1}{sep}..{sep}f1'\n- rel/x\n- '{gone}'\n"
             )),
         );
-        let view = w.view("P.yaml");
+        let view = w.view("library/P.yaml");
         let shown: Vec<(&str, Option<&FolderStatus>)> = view
             .folders
             .iter()
@@ -2508,6 +2534,7 @@ mod tests {
         );
     }
 
+    // ADR-0400 decision 4: with no mount registered a library path names no mount — absent, not unavailable.
     #[test]
     fn the_builtin_default_answers_with_no_root_while_library_presets_and_edits_do_not() {
         let w = World::with(Vec::new(), false);
@@ -2517,29 +2544,39 @@ mod tests {
             .preset_get(&AssetRef::BuiltIn(BuiltinId::DefaultPreset))
             .unwrap();
         assert_eq!(default.path, "engram:/default");
-        let got = refused(w.svc.preset_get(&AssetRef::Library(lp("P.yaml"))));
-        assert_eq!(code(&got), (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE));
-        let added = refused(
-            w.svc
-                .preset_add(&lp("P.yaml"), &items(&["rules/a.md"]), None, None),
-        );
-        assert_eq!(
-            code(&added),
-            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE)
-        );
+        let got = refused(w.svc.preset_get(&AssetRef::Library(lp("library/P.yaml"))));
+        assert_eq!(code(&got), (RefusalClass::NotFound, NOT_FOUND));
+        let added = refused(w.svc.preset_add(
+            &lp("library/P.yaml"),
+            &items(&["library/rules/a.md"]),
+            None,
+            None,
+        ));
+        assert_eq!(code(&added), (RefusalClass::NotFound, NOT_FOUND));
         let builtin_only = PresetDraft {
             instructions: vec![item("engram:/priming")],
             ..PresetDraft::default()
         };
-        assert!(w.svc.preset_check(&lp("P.yaml"), &builtin_only).is_ok());
+        assert!(w
+            .svc
+            .preset_check(&lp("library/P.yaml"), &builtin_only)
+            .is_ok());
         let library_draft = PresetDraft {
-            instructions: vec![item("rules/a.md")],
+            instructions: vec![item("library/rules/a.md")],
             ..PresetDraft::default()
         };
-        let checked = refused(w.svc.preset_check(&lp("P.yaml"), &library_draft));
-        assert_eq!(
-            code(&checked),
-            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE)
+        let checked = w
+            .svc
+            .preset_check(&lp("library/P.yaml"), &library_draft)
+            .unwrap();
+        // With no mount the check answers; its library item stands behind the block-④ row of an unset library.
+        assert!(
+            matches!(
+                checked.problems.as_slice(),
+                [BlockReason::LibraryUnavailable { reason }] if reason.code == LIBRARY_UNAVAILABLE
+            ),
+            "{:?}",
+            checked.problems
         );
     }
 
@@ -2548,22 +2585,32 @@ mod tests {
     #[test]
     fn add_is_idempotent_and_a_second_add_of_the_same_item_is_skipped() {
         let w = World::new();
-        library(&w, "instructions:\n- rules/a.md\n");
+        library(&w, "instructions:\n- library/rules/a.md\n");
         let added = w
             .svc
-            .preset_add(&lp("P.yaml"), &items(&["rules/b.md"]), None, None)
+            .preset_add(
+                &lp("library/P.yaml"),
+                &items(&["library/rules/b.md"]),
+                None,
+                None,
+            )
             .unwrap();
-        assert_eq!(added.applied, ["rules/b.md"]);
+        assert_eq!(added.applied, ["library/rules/b.md"]);
         assert_eq!(
             paths(&added.view.instructions),
-            ["rules/a.md", "rules/b.md"]
+            ["library/rules/a.md", "library/rules/b.md"]
         );
         let (bytes, writes) = (w.bytes("P.yaml"), w.writes());
         let again = w
             .svc
-            .preset_add(&lp("P.yaml"), &items(&["rules/b.md"]), None, None)
+            .preset_add(
+                &lp("library/P.yaml"),
+                &items(&["library/rules/b.md"]),
+                None,
+                None,
+            )
             .unwrap();
-        assert_eq!(skips(&again), [("rules/b.md", ALREADY_PRESENT)]);
+        assert_eq!(skips(&again), [("library/rules/b.md", ALREADY_PRESENT)]);
         assert_eq!(w.bytes("P.yaml"), bytes);
         assert_eq!(w.writes(), writes);
         assert_eq!(again.view.rev, added.view.rev);
@@ -2573,74 +2620,93 @@ mod tests {
     fn add_skips_each_item_that_cannot_be_listed_with_its_reason_and_applies_the_rest() {
         let w = World::new();
         library(&w, "");
-        w.put("Q.yaml", &preset("presets:\n- P.yaml\n"));
+        w.put("Q.yaml", &preset("presets:\n- library/P.yaml\n"));
         let entries = AddEntries::Items(vec![
-            item("a//b"),
-            item("gone.md"),
-            tagged("rules/a.md", "nobody"),
-            tagged("S.yaml", "claude"),
+            item("library/a//b"),
+            item("library/gone.md"),
+            tagged("library/rules/a.md", "nobody"),
+            tagged("library/S.yaml", "claude"),
             item("engram:/default"),
-            item("Q.yaml"),
-            item("P.yaml"),
-            item("skills/s/SKILL.md"),
-            tagged("rules/b.md", "Codex"),
-            item("skills/s"),
-            item("S.yaml"),
-            item("rules/b.md"),
+            item("library/Q.yaml"),
+            item("library/P.yaml"),
+            item("library/skills/s/SKILL.md"),
+            tagged("library/rules/b.md", "Codex"),
+            item("library/skills/s"),
+            item("library/S.yaml"),
+            item("library/rules/b.md"),
         ]);
         let added = w
             .svc
-            .preset_add(&lp("P.yaml"), &entries, None, None)
+            .preset_add(&lp("library/P.yaml"), &entries, None, None)
             .unwrap();
         assert_eq!(
             skips(&added),
             [
-                ("a//b", ITEM_PATH_INVALID),
-                ("gone.md", NOT_FOUND),
-                ("rules/a.md", BACKEND_TAG_UNKNOWN),
-                ("S.yaml", BACKEND_TAG_NOT_ALLOWED),
+                ("library/a//b", ITEM_PATH_INVALID),
+                ("library/gone.md", NOT_FOUND),
+                ("library/rules/a.md", BACKEND_TAG_UNKNOWN),
+                ("library/S.yaml", BACKEND_TAG_NOT_ALLOWED),
                 ("engram:/default", BUILTIN_IN_LIBRARY_PRESET),
-                ("Q.yaml", PRESET_CYCLE),
-                ("P.yaml", PRESET_CYCLE),
-                ("skills/s/SKILL.md", WRONG_KIND),
-                ("rules/b.md", ALREADY_PRESENT),
+                ("library/Q.yaml", PRESET_CYCLE),
+                ("library/P.yaml", PRESET_CYCLE),
+                ("library/skills/s/SKILL.md", WRONG_KIND),
+                ("library/rules/b.md", ALREADY_PRESENT),
             ]
         );
-        assert_eq!(added.applied, ["rules/b.md", "skills/s", "S.yaml"]);
+        assert_eq!(
+            added.applied,
+            ["library/rules/b.md", "library/skills/s", "library/S.yaml"]
+        );
         let view = added.view;
-        assert_eq!(paths(&view.instructions), ["rules/b.md"]);
+        assert_eq!(paths(&view.instructions), ["library/rules/b.md"]);
         assert_eq!(view.instructions[0].backend.as_deref(), Some("codex"));
-        assert_eq!(paths(&view.skills), ["skills/s"]);
-        assert_eq!(paths(&view.settings), ["S.yaml"]);
+        assert_eq!(paths(&view.skills), ["library/skills/s"]);
+        assert_eq!(paths(&view.settings), ["library/S.yaml"]);
     }
 
     #[test]
     fn add_places_items_after_the_anchor_in_call_order_and_appends_without_one() {
         let w = World::new();
-        library(&w, "instructions:\n- rules/a.md\n- rules/c.md\n");
+        library(
+            &w,
+            "instructions:\n- library/rules/a.md\n- library/rules/c.md\n",
+        );
         w.put("rules/d.md", "d");
         w.put("rules/e.md", "e");
-        let p = lp("P.yaml");
+        let p = lp("library/P.yaml");
         let view = w
             .svc
             .preset_add(
                 &p,
-                &items(&["rules/b.md", "rules/d.md"]),
-                Some("rules/a.md"),
+                &items(&["library/rules/b.md", "library/rules/d.md"]),
+                Some("library/rules/a.md"),
                 None,
             )
             .unwrap()
             .view;
         assert_eq!(
             paths(&view.instructions),
-            ["rules/a.md", "rules/b.md", "rules/d.md", "rules/c.md"]
+            [
+                "library/rules/a.md",
+                "library/rules/b.md",
+                "library/rules/d.md",
+                "library/rules/c.md"
+            ]
         );
         let view = w
             .svc
-            .preset_add(&p, &items(&["rules/e.md"]), Some("rules/zz.md"), None)
+            .preset_add(
+                &p,
+                &items(&["library/rules/e.md"]),
+                Some("library/rules/zz.md"),
+                None,
+            )
             .unwrap()
             .view;
-        assert_eq!(paths(&view.instructions).last(), Some(&"rules/e.md"));
+        assert_eq!(
+            paths(&view.instructions).last(),
+            Some(&"library/rules/e.md")
+        );
     }
 
     #[test]
@@ -2648,13 +2714,19 @@ mod tests {
         let w = World::new();
         library(
             &w,
-            "instructions:\n- rules/a.md\n- rules/b.md\n- path: rules/a.md\n  backend: codex\n",
+            "instructions:\n- library/rules/a.md\n- library/rules/b.md\n- path: library/rules/a.md\n  backend: codex\n",
         );
-        let remove = RemoveEntries::Items(strings(&["rules/a.md"]));
-        let view = w.svc.preset_remove(&lp("P.yaml"), &remove, None).unwrap();
-        assert_eq!(paths(&view.instructions), ["rules/b.md"]);
+        let remove = RemoveEntries::Items(strings(&["library/rules/a.md"]));
+        let view = w
+            .svc
+            .preset_remove(&lp("library/P.yaml"), &remove, None)
+            .unwrap();
+        assert_eq!(paths(&view.instructions), ["library/rules/b.md"]);
         let writes = w.writes();
-        let again = w.svc.preset_remove(&lp("P.yaml"), &remove, None).unwrap();
+        let again = w
+            .svc
+            .preset_remove(&lp("library/P.yaml"), &remove, None)
+            .unwrap();
         assert_eq!(
             w.writes(),
             writes,
@@ -2668,10 +2740,13 @@ mod tests {
     #[test]
     fn reorder_refuses_a_stale_rev_and_an_order_that_is_not_a_permutation() {
         let w = World::new();
-        library(&w, "instructions:\n- rules/a.md\n- rules/b.md\n");
-        let p = lp("P.yaml");
-        let rev = w.view("P.yaml").rev;
-        let swapped = strings(&["rules/b.md", "rules/a.md"]);
+        library(
+            &w,
+            "instructions:\n- library/rules/a.md\n- library/rules/b.md\n",
+        );
+        let p = lp("library/P.yaml");
+        let rev = w.view("library/P.yaml").rev;
+        let swapped = strings(&["library/rules/b.md", "library/rules/a.md"]);
         let stale =
             refused(
                 w.svc
@@ -2679,7 +2754,7 @@ mod tests {
             );
         assert_eq!(code(&stale), (RefusalClass::Conflict, REV_MISMATCH));
         assert_eq!(stale.1.args["rev"], rev);
-        let other = strings(&["rules/b.md", "rules/c.md"]);
+        let other = strings(&["library/rules/b.md", "library/rules/c.md"]);
         let mismatch =
             refused(
                 w.svc
@@ -2691,14 +2766,17 @@ mod tests {
         );
         assert_eq!(
             mismatch.1.args["expected"],
-            json!(["rules/a.md", "rules/b.md"])
+            json!(["library/rules/a.md", "library/rules/b.md"])
         );
         assert_eq!(w.writes(), 0);
         let view = w
             .svc
             .preset_reorder(&p, ListName::Instructions, &swapped, &rev, None)
             .unwrap();
-        assert_eq!(paths(&view.instructions), ["rules/b.md", "rules/a.md"]);
+        assert_eq!(
+            paths(&view.instructions),
+            ["library/rules/b.md", "library/rules/a.md"]
+        );
     }
 
     #[test]
@@ -2710,11 +2788,11 @@ mod tests {
             "P.yaml",
             &preset(&format!("folders:\n- '{f1}{sep}'\n- '{f2}'\n- '{f1}'\n")),
         );
-        let rev = w.view("P.yaml").rev;
+        let rev = w.view("library/P.yaml").rev;
         let order = vec![f2.clone(), format!("{f1}{sep}")];
         let view = w
             .svc
-            .preset_reorder(&lp("P.yaml"), ListName::Folders, &order, &rev, None)
+            .preset_reorder(&lp("library/P.yaml"), ListName::Folders, &order, &rev, None)
             .unwrap();
         assert_eq!(folder_paths(&view), [f2.as_str(), f1.as_str()]);
         let text = w.text("P.yaml");
@@ -2729,29 +2807,38 @@ mod tests {
         let w = World::new();
         library(
             &w,
-            "instructions:\n- path: rules/a.md\n  note: keep me\nskills:\n- skills/s\nsettings:\n- S.yaml\n",
+            "instructions:\n- path: library/rules/a.md\n  note: keep me\nskills:\n- library/skills/s\nsettings:\n- library/S.yaml\n",
         );
-        let p = lp("P.yaml");
-        let named = strings(&["rules/a.md", "skills/s", "S.yaml", "gone.md"]);
+        let p = lp("library/P.yaml");
+        let named = strings(&[
+            "library/rules/a.md",
+            "library/skills/s",
+            "library/S.yaml",
+            "library/gone.md",
+        ]);
         let set = w
             .svc
             .preset_set_backend(&p, &named, Some("codex"), None)
             .unwrap();
-        assert_eq!(set.applied, ["rules/a.md", "skills/s"]);
+        assert_eq!(set.applied, ["library/rules/a.md", "library/skills/s"]);
         assert_eq!(
             skips(&set),
-            [("S.yaml", BACKEND_TAG_NOT_ALLOWED), ("gone.md", NOT_FOUND)]
+            [
+                ("library/S.yaml", BACKEND_TAG_NOT_ALLOWED),
+                ("library/gone.md", NOT_FOUND)
+            ]
         );
         assert_eq!(set.view.instructions[0].backend.as_deref(), Some("codex"));
         assert_eq!(set.view.skills[0].backend.as_deref(), Some("codex"));
         let text = w.text("P.yaml");
         assert!(text.contains("note: keep me"), "{text}");
         let writes = w.writes();
-        let unknown =
-            refused(
-                w.svc
-                    .preset_set_backend(&p, &strings(&["rules/a.md"]), Some("nobody"), None),
-            );
+        let unknown = refused(w.svc.preset_set_backend(
+            &p,
+            &strings(&["library/rules/a.md"]),
+            Some("nobody"),
+            None,
+        ));
         assert_eq!(
             code(&unknown),
             (RefusalClass::InvalidArgument, BACKEND_TAG_UNKNOWN)
@@ -2764,29 +2851,29 @@ mod tests {
     #[test]
     fn save_refuses_every_mismatch_whole_and_leaves_the_file_untouched() {
         let w = World::new();
-        library(&w, "instructions:\n- rules/a.md\n");
-        w.put("Q.yaml", &preset("presets:\n- P.yaml\n"));
+        library(&w, "instructions:\n- library/rules/a.md\n");
+        w.put("Q.yaml", &preset("presets:\n- library/P.yaml\n"));
         w.put("P2.yaml", &preset(""));
         let f1 = w.folder("f1");
         let sep = std::path::MAIN_SEPARATOR;
         let draft = PresetDraft {
             presets: vec![
                 item("engram:/default"),
-                item("Q.yaml"),
-                tagged("P2.yaml", "claude"),
+                item("library/Q.yaml"),
+                tagged("library/P2.yaml", "claude"),
             ],
             instructions: vec![
-                item("a//b"),
-                item("rules/a.md"),
-                tagged("rules/a.md", "codex"),
-                tagged("rules/b.md", "nobody"),
+                item("library/a//b"),
+                item("library/rules/a.md"),
+                tagged("library/rules/a.md", "codex"),
+                tagged("library/rules/b.md", "nobody"),
             ],
-            skills: vec![item("rules/a.md")],
+            skills: vec![item("library/rules/a.md")],
             settings: Vec::new(),
             folders: Some(vec!["rel/x".to_owned(), f1.clone(), format!("{f1}{sep}")]),
         };
         let before = w.bytes("P.yaml");
-        let save = refused(w.svc.preset_save(&lp("P.yaml"), &draft, None, None));
+        let save = refused(w.svc.preset_save(&lp("library/P.yaml"), &draft, None, None));
         assert_eq!(
             code(&save),
             (RefusalClass::InvalidArgument, PRESET_SAVE_REFUSED)
@@ -2825,19 +2912,22 @@ mod tests {
         let w = World::new();
         library(
             &w,
-            "description: team rules\nx-owner: me\ninstructions:\n- rules/a.md\n",
+            "description: team rules\nx-owner: me\ninstructions:\n- library/rules/a.md\n",
         );
         let gone = w.base.join("gone").to_string_lossy().into_owned();
         let draft = PresetDraft {
-            instructions: vec![item("rules/a.md"), item("gone.md")],
+            instructions: vec![item("library/rules/a.md"), item("library/gone.md")],
             folders: Some(vec![gone]),
             ..PresetDraft::default()
         };
         let view = w
             .svc
-            .preset_save(&lp("P.yaml"), &draft, None, None)
+            .preset_save(&lp("library/P.yaml"), &draft, None, None)
             .unwrap();
-        assert_eq!(paths(&view.instructions), ["rules/a.md", "gone.md"]);
+        assert_eq!(
+            paths(&view.instructions),
+            ["library/rules/a.md", "library/gone.md"]
+        );
         assert_eq!(view.instructions[1].state.as_ref().unwrap().code, NOT_FOUND);
         assert_eq!(view.folders[0].status, Some(FolderStatus::Missing));
         let text = w.text("P.yaml");
@@ -2854,17 +2944,20 @@ mod tests {
             return;
         }
         let w = World::new();
-        library(&w, "instructions:\n- path: rules/a.md\n  note: keep me\n");
+        library(
+            &w,
+            "instructions:\n- path: library/rules/a.md\n  note: keep me\n",
+        );
         let draft = PresetDraft {
-            instructions: vec![item("Rules/A.md")],
+            instructions: vec![item("library/Rules/A.md")],
             ..PresetDraft::default()
         };
         w.svc
-            .preset_save(&lp("P.yaml"), &draft, None, None)
+            .preset_save(&lp("library/P.yaml"), &draft, None, None)
             .unwrap();
         let text = w.text("P.yaml");
         assert!(
-            text.contains("path: Rules/A.md") && text.contains("note: keep me"),
+            text.contains("path: library/Rules/A.md") && text.contains("note: keep me"),
             "{text}"
         );
     }
@@ -2874,15 +2967,18 @@ mod tests {
         let w = World::new();
         library(&w, "");
         let draft = PresetDraft {
-            instructions: vec![item("rules/a.md")],
+            instructions: vec![item("library/rules/a.md")],
             ..PresetDraft::default()
         };
-        let stale = refused(w.svc.preset_save(&lp("P.yaml"), &draft, Some("old"), None));
+        let stale = refused(
+            w.svc
+                .preset_save(&lp("library/P.yaml"), &draft, Some("old"), None),
+        );
         assert_eq!(code(&stale), (RefusalClass::Conflict, REV_MISMATCH));
         assert_eq!(w.writes(), 0);
-        let rev = w.view("P.yaml").rev;
+        let rev = w.view("library/P.yaml").rev;
         w.svc
-            .preset_save(&lp("P.yaml"), &draft, Some(&rev), None)
+            .preset_save(&lp("library/P.yaml"), &draft, Some(&rev), None)
             .unwrap();
         assert_eq!(w.writes(), 1);
     }
@@ -2894,20 +2990,26 @@ mod tests {
         let w = World::new();
         library(&w, "");
         w.put("team/T.yaml", &preset(""));
-        w.view("P.yaml");
+        w.view("library/P.yaml");
         fs::remove_file(w.lib("P.yaml")).unwrap();
-        let gone = refused(
-            w.svc
-                .preset_add(&lp("P.yaml"), &items(&["rules/a.md"]), None, None),
-        );
+        let gone = refused(w.svc.preset_add(
+            &lp("library/P.yaml"),
+            &items(&["library/rules/a.md"]),
+            None,
+            None,
+        ));
         assert_eq!(code(&gone), (RefusalClass::NotFound, NOT_FOUND));
         assert!(!w.lib("P.yaml").exists());
         fs::remove_dir_all(w.lib("team")).unwrap();
         let draft = PresetDraft {
-            instructions: vec![item("rules/a.md")],
+            instructions: vec![item("library/rules/a.md")],
             ..PresetDraft::default()
         };
-        let parent_gone = refused(w.svc.preset_save(&lp("team/T.yaml"), &draft, None, None));
+        let parent_gone =
+            refused(
+                w.svc
+                    .preset_save(&lp("library/team/T.yaml"), &draft, None, None),
+            );
         assert_eq!(code(&parent_gone), (RefusalClass::NotFound, NOT_FOUND));
         assert!(!w.lib("team").exists(), "the parent is not re-created");
         assert_eq!(w.writes(), 0);
@@ -2919,34 +3021,38 @@ mod tests {
         library(&w, "big: 1e20\n");
         w.put("B.yaml", "kind: preset\nversion: [\n");
         let before = w.bytes("P.yaml");
-        let writer = refused(
-            w.svc
-                .preset_add(&lp("P.yaml"), &items(&["rules/a.md"]), None, None),
-        );
+        let writer = refused(w.svc.preset_add(
+            &lp("library/P.yaml"),
+            &items(&["library/rules/a.md"]),
+            None,
+            None,
+        ));
         assert_eq!(
             code(&writer),
             (RefusalClass::InvalidArgument, "preset-write-number-range")
         );
         assert_eq!(w.bytes("P.yaml"), before);
-        let reader = refused(
-            w.svc
-                .preset_add(&lp("B.yaml"), &items(&["rules/a.md"]), None, None),
-        );
+        let reader = refused(w.svc.preset_add(
+            &lp("library/B.yaml"),
+            &items(&["library/rules/a.md"]),
+            None,
+            None,
+        ));
         assert_eq!(code(&reader), (RefusalClass::InvalidArgument, YAML_SYNTAX));
         assert_eq!(w.writes(), 0);
-        let view = refused(w.svc.preset_get(&AssetRef::Library(lp("B.yaml"))));
+        let view = refused(w.svc.preset_get(&AssetRef::Library(lp("library/B.yaml"))));
         assert_eq!(code(&view), (RefusalClass::InvalidArgument, YAML_SYNTAX));
     }
 
     #[test]
     fn bytes_read_that_differ_from_the_catalog_are_applied_also_on_a_refusal() {
         let w = World::new();
-        library(&w, "instructions:\n- rules/a.md\n");
-        let old = w.view("P.yaml").rev;
-        let outside = preset("instructions:\n- rules/a.md\n- rules/b.md\n");
+        library(&w, "instructions:\n- library/rules/a.md\n");
+        let old = w.view("library/P.yaml").rev;
+        let outside = preset("instructions:\n- library/rules/a.md\n- library/rules/b.md\n");
         w.put("P.yaml", &outside);
-        let p = lp("P.yaml");
-        let order = strings(&["rules/b.md", "rules/a.md"]);
+        let p = lp("library/P.yaml");
+        let order = strings(&["library/rules/b.md", "library/rules/a.md"]);
         let stale = refused(
             w.svc
                 .preset_reorder(&p, ListName::Instructions, &order, &old, None),
@@ -2955,13 +3061,13 @@ mod tests {
         let new = sha256_hex(outside.as_bytes());
         assert_eq!(stale.1.args["rev"], new);
         assert_eq!(
-            w.catalog_rev("P.yaml"),
+            w.catalog_rev("library/P.yaml"),
             Some(new.clone()),
             "the catalog holds the bytes read"
         );
         assert_eq!(
-            paths(&w.view("P.yaml").instructions),
-            ["rules/a.md", "rules/b.md"]
+            paths(&w.view("library/P.yaml").instructions),
+            ["library/rules/a.md", "library/rules/b.md"]
         );
         w.svc
             .preset_reorder(&p, ListName::Instructions, &order, &new, None)
@@ -2972,17 +3078,19 @@ mod tests {
     fn a_read_error_answers_library_read_failed_and_leaves_the_catalog() {
         let w = World::new();
         library(&w, "");
-        let rev = w.view("P.yaml").rev;
+        let rev = w.view("library/P.yaml").rev;
         *lock(&w.disk.fail_read) = Some(w.lib("P.yaml"));
-        let failed = refused(
-            w.svc
-                .preset_add(&lp("P.yaml"), &items(&["rules/a.md"]), None, None),
-        );
+        let failed = refused(w.svc.preset_add(
+            &lp("library/P.yaml"),
+            &items(&["library/rules/a.md"]),
+            None,
+            None,
+        ));
         assert_eq!(
             code(&failed),
             (RefusalClass::Unavailable, LIBRARY_READ_FAILED)
         );
-        assert_eq!(w.catalog_rev("P.yaml"), Some(rev));
+        assert_eq!(w.catalog_rev("library/P.yaml"), Some(rev));
         assert_eq!(w.writes(), 0);
     }
 
@@ -2990,20 +3098,24 @@ mod tests {
     fn a_write_failure_answers_library_write_failed_and_applies_only_bytes_that_differ() {
         let w = World::new();
         library(&w, "");
-        let rev = w.view("P.yaml").rev;
-        let seq = w.read_seq("P.yaml");
+        let rev = w.view("library/P.yaml").rev;
+        let seq = w.read_seq("library/P.yaml");
         *lock(&w.disk.fail_write) = Some(w.lib("P.yaml"));
         let add = || {
-            w.svc
-                .preset_add(&lp("P.yaml"), &items(&["rules/a.md"]), None, None)
+            w.svc.preset_add(
+                &lp("library/P.yaml"),
+                &items(&["library/rules/a.md"]),
+                None,
+                None,
+            )
         };
         assert_eq!(
             code(&refused(add())),
             (RefusalClass::Unavailable, LIBRARY_WRITE_FAILED)
         );
-        assert_eq!(w.catalog_rev("P.yaml"), Some(rev));
+        assert_eq!(w.catalog_rev("library/P.yaml"), Some(rev));
         assert_eq!(
-            w.read_seq("P.yaml"),
+            w.read_seq("library/P.yaml"),
             seq,
             "bytes equal to the catalog item are not applied"
         );
@@ -3011,7 +3123,7 @@ mod tests {
         w.put("P.yaml", &outside);
         assert_eq!(refused(add()).1.code, LIBRARY_WRITE_FAILED);
         assert_eq!(
-            w.catalog_rev("P.yaml"),
+            w.catalog_rev("library/P.yaml"),
             Some(sha256_hex(outside.as_bytes()))
         );
         assert_eq!(w.text("P.yaml"), outside);
@@ -3024,25 +3136,37 @@ mod tests {
         library(
             &w,
             &format!(
-                "instructions:\n- path: rules/a.md\n  backend: codex\n- rules/b.md\nfolders:\n- '{f1}'\n"
+                "instructions:\n- path: library/rules/a.md\n  backend: codex\n- library/rules/b.md\nfolders:\n- '{f1}'\n"
             ),
         );
-        let view = w.view("P.yaml");
-        let p = lp("P.yaml");
+        let view = w.view("library/P.yaml");
+        let p = lp("library/P.yaml");
         let svc = &w.svc;
-        svc.preset_remove(&p, &RemoveEntries::Items(strings(&["rules/zz.md"])), None)
-            .unwrap();
-        svc.preset_add(&p, &items(&["rules/b.md", "gone.md"]), None, None)
-            .unwrap();
+        svc.preset_remove(
+            &p,
+            &RemoveEntries::Items(strings(&["library/rules/zz.md"])),
+            None,
+        )
+        .unwrap();
+        svc.preset_add(
+            &p,
+            &items(&["library/rules/b.md", "library/gone.md"]),
+            None,
+            None,
+        )
+        .unwrap();
         svc.preset_add(&p, &AddEntries::Folders(vec![f1.clone()]), None, None)
             .unwrap();
-        svc.preset_set_backend(&p, &strings(&["rules/a.md"]), Some("codex"), None)
+        svc.preset_set_backend(&p, &strings(&["library/rules/a.md"]), Some("codex"), None)
             .unwrap();
-        let order = strings(&["rules/a.md", "rules/b.md"]);
+        let order = strings(&["library/rules/a.md", "library/rules/b.md"]);
         svc.preset_reorder(&p, ListName::Instructions, &order, &view.rev, None)
             .unwrap();
         let draft = PresetDraft {
-            instructions: vec![tagged("rules/a.md", "codex"), item("rules/b.md")],
+            instructions: vec![
+                tagged("library/rules/a.md", "codex"),
+                item("library/rules/b.md"),
+            ],
             folders: Some(vec![f1]),
             ..PresetDraft::default()
         };
@@ -3056,7 +3180,7 @@ mod tests {
     #[test]
     fn a_failed_link_probe_marks_the_line_as_the_problems_mark_the_row() {
         let w = World::new();
-        library(&w, "instructions:\n- gone.md\n");
+        library(&w, "instructions:\n- library/gone.md\n");
         let state_and_problem = |view: &PresetView| {
             let state = view.instructions[0].state.clone().expect("a state");
             let [problem] = view.problems.as_slice() else {
@@ -3071,13 +3195,13 @@ mod tests {
             (state, row)
         };
         *lock(&w.disk.fail_link) = Some(io::ErrorKind::PermissionDenied);
-        let (state, row) = state_and_problem(&w.view("P.yaml"));
+        let (state, row) = state_and_problem(&w.view("library/P.yaml"));
         assert_eq!(state.code, LIBRARY_READ_FAILED);
-        assert_eq!(state.args["path"], "gone.md");
+        assert_eq!(state.args["path"], "library/gone.md");
         assert_eq!(row.code, LIBRARY_READ_FAILED);
 
         *lock(&w.disk.fail_link) = Some(io::ErrorKind::NotADirectory);
-        let (state, row) = state_and_problem(&w.view("P.yaml"));
+        let (state, row) = state_and_problem(&w.view("library/P.yaml"));
         assert_eq!(
             (state.code.as_str(), row.code.as_str()),
             (NOT_FOUND, NOT_FOUND)
@@ -3087,23 +3211,24 @@ mod tests {
     #[test]
     fn an_edit_through_a_link_or_on_a_dot_or_temp_name_is_refused_before_any_read() {
         let w = World::new();
-        library(&w, "instructions:\n- team/x.md\n");
+        library(&w, "instructions:\n- library/team/x.md\n");
         let outside = w.base.join("outside");
         fs::create_dir_all(&outside).unwrap();
         let theirs = preset("");
         fs::write(outside.join("T.yaml"), &theirs).unwrap();
         fs::write(outside.join("x.md"), "x").unwrap();
         link_dir(&outside, &w.lib("team")).unwrap();
-        let view = w.view("P.yaml");
+        let view = w.view("library/P.yaml");
         assert_eq!(
             view.instructions[0].state.as_ref().unwrap().code,
             PATH_THROUGH_LINK
         );
-        let through =
-            refused(
-                w.svc
-                    .preset_add(&lp("team/T.yaml"), &items(&["rules/a.md"]), None, None),
-            );
+        let through = refused(w.svc.preset_add(
+            &lp("library/team/T.yaml"),
+            &items(&["library/rules/a.md"]),
+            None,
+            None,
+        ));
         assert_eq!(
             code(&through),
             (RefusalClass::InvalidArgument, PATH_THROUGH_LINK)
@@ -3117,11 +3242,12 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(outside.join("T.yaml")).unwrap(), theirs);
         w.put(".hidden/H.yaml", &preset(""));
-        for name in [".hidden/H.yaml", "P.yaml.tmp12.3"] {
-            let hidden = refused(
-                w.svc
-                    .preset_add(&lp(name), &items(&["rules/a.md"]), None, None),
-            );
+        for name in ["library/.hidden/H.yaml", "library/P.yaml.tmp12.3"] {
+            let hidden =
+                refused(
+                    w.svc
+                        .preset_add(&lp(name), &items(&["library/rules/a.md"]), None, None),
+                );
             assert_eq!(
                 code(&hidden),
                 (RefusalClass::InvalidArgument, ITEM_PATH_INVALID),
@@ -3160,10 +3286,12 @@ mod tests {
             cmd_unsafe.clone(),
             locked.clone(),
         ];
-        let all = refused(
-            w.svc
-                .preset_add(&lp("P.yaml"), &AddEntries::Folders(given), None, None),
-        );
+        let all = refused(w.svc.preset_add(
+            &lp("library/P.yaml"),
+            &AddEntries::Folders(given),
+            None,
+            None,
+        ));
         assert_eq!(
             code(&all),
             (RefusalClass::InvalidArgument, PRESET_FOLDERS_REFUSED)
@@ -3196,7 +3324,7 @@ mod tests {
         let added = w
             .svc
             .preset_add(
-                &lp("P.yaml"),
+                &lp("library/P.yaml"),
                 &AddEntries::Folders(given),
                 Some(&anchor),
                 None,
@@ -3235,7 +3363,10 @@ mod tests {
             &preset(&format!("folders:\n- '{f1}{sep}'\n- '{f2}'\n- '{f1}'\n")),
         );
         let remove = RemoveEntries::Folders(vec![format!("{f1}{sep}.")]);
-        let view = w.svc.preset_remove(&lp("P.yaml"), &remove, None).unwrap();
+        let view = w
+            .svc
+            .preset_remove(&lp("library/P.yaml"), &remove, None)
+            .unwrap();
         assert_eq!(folder_paths(&view), [f2.as_str()]);
         assert!(!w.text("P.yaml").contains(f1.as_str()));
     }
@@ -3245,10 +3376,10 @@ mod tests {
         let w = World::new();
         library(&w, "");
         let f1 = w.folder("f1");
-        w.view("P.yaml");
+        w.view("library/P.yaml");
         w.svc
             .preset_add(
-                &lp("P.yaml"),
+                &lp("library/P.yaml"),
                 &AddEntries::Folders(vec![f1.clone()]),
                 None,
                 None,
@@ -3280,7 +3411,7 @@ mod tests {
         for given in ["rel/x".to_owned(), missing, cmd_unsafe, locked.clone()] {
             let preview = w.svc.preview_folder(&given, None, None).unwrap();
             let add = refused(w.svc.preset_add(
-                &lp("P.yaml"),
+                &lp("library/P.yaml"),
                 &AddEntries::Folders(vec![given.clone()]),
                 None,
                 None,
@@ -3331,44 +3462,46 @@ mod tests {
     #[test]
     fn check_judges_and_resolves_the_draft_and_writes_nothing() {
         let w = World::new();
-        library(&w, "instructions:\n- rules/a.md\n");
-        let view = w.view("P.yaml");
+        library(&w, "instructions:\n- library/rules/a.md\n");
+        let view = w.view("library/P.yaml");
         let draft = PresetDraft {
-            instructions: vec![item("gone.md")],
-            skills: vec![item("rules/a.md")],
+            instructions: vec![item("library/gone.md")],
+            skills: vec![item("library/rules/a.md")],
             ..PresetDraft::default()
         };
-        let checked = w.svc.preset_check(&lp("P.yaml"), &draft).unwrap();
+        let checked = w.svc.preset_check(&lp("library/P.yaml"), &draft).unwrap();
         let mismatch = checked
             .problems
             .iter()
             .find_map(|problem| match problem {
-                BlockReason::Broken { item, via, reason } if item == "rules/a.md" => {
+                BlockReason::Broken { item, via, reason } if item == "library/rules/a.md" => {
                     Some((via.clone(), reason.clone()))
                 }
                 _ => None,
             })
             .expect("the mismatch is a problem row");
-        assert_eq!(mismatch.0, ["P.yaml"]);
+        assert_eq!(mismatch.0, ["library/P.yaml"]);
         assert_eq!(mismatch.1.code, WRONG_KIND);
         assert_eq!(
             mismatch.1.args,
-            json!({ "path": "rules/a.md", "list": "skills" })
+            json!({ "path": "library/rules/a.md", "list": "skills" })
         );
         let missing = checked
             .problems
             .iter()
             .find_map(|problem| match problem {
-                BlockReason::Missing { item, reason, .. } if item == "gone.md" => Some(reason),
+                BlockReason::Missing { item, reason, .. } if item == "library/gone.md" => {
+                    Some(reason)
+                }
                 _ => None,
             })
             .expect("the draft's missing item is a problem row");
         assert_eq!(missing.line, None, "a draft item has no file line");
         assert!(checked.save_refuses);
         assert_eq!(w.writes(), 0);
-        let after = w.view("P.yaml");
+        let after = w.view("library/P.yaml");
         assert_eq!(after.rev, view.rev);
-        assert_eq!(paths(&after.instructions), ["rules/a.md"]);
+        assert_eq!(paths(&after.instructions), ["library/rules/a.md"]);
     }
 
     // ── fix round 1 ─────────────────────────────────────────────────────────────────────────────────────────
@@ -3379,9 +3512,9 @@ mod tests {
         let f = w.folder("f");
         library(
             &w,
-            &format!("instructions:\n- rules/a.md\nfolders:\n- '{f}'\n"),
+            &format!("instructions:\n- library/rules/a.md\nfolders:\n- '{f}'\n"),
         );
-        w.view("P.yaml");
+        w.view("library/P.yaml");
         // At the first stat after the edit's change — the answer's folder stat, or the root stat of a view read again
         //   from the catalog — the written file is kept aside, removed, and a refresh drops the item.
         let written = Arc::new(Mutex::new(None));
@@ -3400,15 +3533,24 @@ mod tests {
         ));
         let added = w
             .svc
-            .preset_add(&lp("P.yaml"), &items(&["rules/b.md"]), None, None)
+            .preset_add(
+                &lp("library/P.yaml"),
+                &items(&["library/rules/b.md"]),
+                None,
+                None,
+            )
             .unwrap();
         let written = lock(&written)
             .clone()
             .expect("the hook ran after the change");
-        assert_eq!(w.catalog_rev("P.yaml"), None, "the catalog moved on");
+        assert_eq!(
+            w.catalog_rev("library/P.yaml"),
+            None,
+            "the catalog moved on"
+        );
         assert_eq!(
             paths(&added.view.instructions),
-            ["rules/a.md", "rules/b.md"]
+            ["library/rules/a.md", "library/rules/b.md"]
         );
         assert_eq!(added.view.rev, sha256_hex(&written), "the committed bytes");
         assert_eq!(folder_paths(&added.view), [f.as_str()]);
@@ -3419,14 +3561,14 @@ mod tests {
         let w = World::new();
         library(
             &w,
-            "instructions:\n- 42\n- rules/a.md\nfolders:\n- {a: b}\n",
+            "instructions:\n- library/42\n- library/rules/a.md\nfolders:\n- {a: b}\n",
         );
         let draft = PresetDraft {
-            instructions: vec![item("rules/a.md")],
+            instructions: vec![item("library/rules/a.md")],
             ..PresetDraft::default()
         };
         w.svc
-            .preset_save(&lp("P.yaml"), &draft, None, None)
+            .preset_save(&lp("library/P.yaml"), &draft, None, None)
             .unwrap();
         let text = w.text("P.yaml");
         assert!(!text.contains("42"), "{text}");
@@ -3434,10 +3576,10 @@ mod tests {
             text.contains("a: b"),
             "an omitted list stays as it is: {text}"
         );
-        w.put("E.yaml", &preset("instructions:\n- 42\n"));
+        w.put("E.yaml", &preset("instructions:\n- library/42\n"));
         let writes = w.writes();
         w.svc
-            .preset_save(&lp("E.yaml"), &PresetDraft::default(), None, None)
+            .preset_save(&lp("library/E.yaml"), &PresetDraft::default(), None, None)
             .unwrap();
         assert_eq!(
             w.writes(),
@@ -3452,10 +3594,10 @@ mod tests {
         let w = World::new();
         library(&w, "folders:\n- rel/x\n");
         let draft = PresetDraft {
-            instructions: vec![item("rules/a.md")],
+            instructions: vec![item("library/rules/a.md")],
             ..PresetDraft::default()
         };
-        let checked = w.svc.preset_check(&lp("P.yaml"), &draft).unwrap();
+        let checked = w.svc.preset_check(&lp("library/P.yaml"), &draft).unwrap();
         let relative = checked
             .problems
             .iter()
@@ -3479,27 +3621,33 @@ mod tests {
     fn a_preset_listed_under_another_list_does_not_close_a_cycle() {
         let w = World::new();
         library(&w, "");
-        w.put("Q.yaml", &preset("instructions:\n- P.yaml\n"));
+        w.put("Q.yaml", &preset("instructions:\n- library/P.yaml\n"));
         let added = w
             .svc
-            .preset_add(&lp("P.yaml"), &items(&["Q.yaml"]), None, None)
+            .preset_add(
+                &lp("library/P.yaml"),
+                &items(&["library/Q.yaml"]),
+                None,
+                None,
+            )
             .unwrap();
-        assert_eq!(added.applied, ["Q.yaml"]);
+        assert_eq!(added.applied, ["library/Q.yaml"]);
         assert!(added.view.problems.iter().any(|problem| matches!(
             problem,
-            BlockReason::Broken { item, reason, .. } if item == "P.yaml" && reason.code == WRONG_KIND
+            BlockReason::Broken { item, reason, .. } if item == "library/P.yaml" && reason.code == WRONG_KIND
         )));
     }
 
     #[test]
     fn the_builtin_default_waits_for_the_first_scan_when_it_lists_a_library_item() {
-        let w = World::with_default("kind: preset\nversion: 1\ninstructions:\n- rules/a.md\n");
+        let w =
+            World::with_default("kind: preset\nversion: 1\ninstructions:\n- library/rules/a.md\n");
         w.put("rules/a.md", "a");
         let view = w
             .svc
             .preset_get(&AssetRef::BuiltIn(BuiltinId::DefaultPreset))
             .unwrap();
-        assert_eq!(paths(&view.instructions), ["rules/a.md"]);
+        assert_eq!(paths(&view.instructions), ["library/rules/a.md"]);
         assert_eq!(view.instructions[0].state, None, "the first scan found it");
     }
 
@@ -3512,7 +3660,7 @@ mod tests {
         let added = w
             .svc
             .preset_add(
-                &lp("P.yaml"),
+                &lp("library/P.yaml"),
                 &AddEntries::Folders(vec![f1.clone(), cmd_unsafe.clone()]),
                 None,
                 None,
@@ -3528,7 +3676,7 @@ mod tests {
         assert_eq!(w.writes(), 0);
         let missing = w.base.join("missing").to_string_lossy().into_owned();
         let refused_add = refused(w.svc.preset_add(
-            &lp("P.yaml"),
+            &lp("library/P.yaml"),
             &AddEntries::Folders(vec![f1, missing.clone()]),
             None,
             None,
@@ -3548,7 +3696,7 @@ mod tests {
             instructions: vec![item("engram:/priming")],
             ..PresetDraft::default()
         };
-        let checked = w.svc.preset_check(&lp("P.yaml"), &draft).unwrap();
+        let checked = w.svc.preset_check(&lp("library/P.yaml"), &draft).unwrap();
         let shown: Vec<&str> = checked
             .folders
             .iter()
@@ -3562,19 +3710,23 @@ mod tests {
     fn a_link_probe_that_finds_no_folder_lets_the_read_answer_not_found() {
         let w = World::new();
         library(&w, "");
-        w.view("P.yaml");
+        w.view("library/P.yaml");
         fs::remove_file(w.lib("P.yaml")).unwrap();
         *lock(&w.disk.fail_link) = Some(io::ErrorKind::NotADirectory);
-        let gone = refused(
-            w.svc
-                .preset_add(&lp("P.yaml"), &items(&["rules/a.md"]), None, None),
-        );
+        let gone = refused(w.svc.preset_add(
+            &lp("library/P.yaml"),
+            &items(&["library/rules/a.md"]),
+            None,
+            None,
+        ));
         assert_eq!(code(&gone), (RefusalClass::NotFound, NOT_FOUND));
         *lock(&w.disk.fail_link) = Some(io::ErrorKind::PermissionDenied);
-        let failed = refused(
-            w.svc
-                .preset_add(&lp("P.yaml"), &items(&["rules/a.md"]), None, None),
-        );
+        let failed = refused(w.svc.preset_add(
+            &lp("library/P.yaml"),
+            &items(&["library/rules/a.md"]),
+            None,
+            None,
+        ));
         assert_eq!(
             code(&failed),
             (RefusalClass::Unavailable, LIBRARY_READ_FAILED)
@@ -3587,12 +3739,12 @@ mod tests {
         let f1 = w.folder("f1");
         library(&w, &format!("folders:\n- '{f1}'\n"));
         let draft = PresetDraft {
-            instructions: vec![item("rules/a.md")],
+            instructions: vec![item("library/rules/a.md")],
             ..PresetDraft::default()
         };
         let view = w
             .svc
-            .preset_save(&lp("P.yaml"), &draft, None, None)
+            .preset_save(&lp("library/P.yaml"), &draft, None, None)
             .unwrap();
         assert_eq!(folder_paths(&view), [f1.as_str()]);
         assert!(w.text("P.yaml").contains(f1.as_str()));
@@ -3602,11 +3754,12 @@ mod tests {
     fn an_edit_of_a_file_that_is_not_yaml_answers_wrong_kind() {
         let w = World::new();
         library(&w, "");
-        let wrong =
-            refused(
-                w.svc
-                    .preset_add(&lp("rules/a.md"), &items(&["rules/b.md"]), None, None),
-            );
+        let wrong = refused(w.svc.preset_add(
+            &lp("library/rules/a.md"),
+            &items(&["library/rules/b.md"]),
+            None,
+            None,
+        ));
         assert_eq!(code(&wrong), (RefusalClass::InvalidArgument, WRONG_KIND));
         assert_eq!(w.writes(), 0);
     }
@@ -3614,26 +3767,37 @@ mod tests {
     #[test]
     fn remove_with_a_spelling_that_is_not_a_reference_refuses_the_whole_call() {
         let w = World::new();
-        library(&w, "instructions:\n- rules/a.md\n");
-        let remove = RemoveEntries::Items(strings(&["rules/a.md", "a//b"]));
-        let invalid = refused(w.svc.preset_remove(&lp("P.yaml"), &remove, None));
+        library(&w, "instructions:\n- library/rules/a.md\n");
+        let remove = RemoveEntries::Items(strings(&["library/rules/a.md", "library/a//b"]));
+        let invalid = refused(w.svc.preset_remove(&lp("library/P.yaml"), &remove, None));
         assert_eq!(
             code(&invalid),
             (RefusalClass::InvalidArgument, ITEM_PATH_INVALID)
         );
         assert_eq!(w.writes(), 0);
-        assert_eq!(paths(&w.view("P.yaml").instructions), ["rules/a.md"]);
+        assert_eq!(
+            paths(&w.view("library/P.yaml").instructions),
+            ["library/rules/a.md"]
+        );
     }
 
     #[test]
     fn set_backend_with_no_backend_clears_the_tag() {
         let w = World::new();
-        library(&w, "instructions:\n- path: rules/a.md\n  backend: codex\n");
+        library(
+            &w,
+            "instructions:\n- path: library/rules/a.md\n  backend: codex\n",
+        );
         let set = w
             .svc
-            .preset_set_backend(&lp("P.yaml"), &strings(&["rules/a.md"]), None, None)
+            .preset_set_backend(
+                &lp("library/P.yaml"),
+                &strings(&["library/rules/a.md"]),
+                None,
+                None,
+            )
             .unwrap();
-        assert_eq!(set.applied, ["rules/a.md"]);
+        assert_eq!(set.applied, ["library/rules/a.md"]);
         assert_eq!(set.view.instructions[0].backend, None);
         assert!(!w.text("P.yaml").contains("codex"));
     }
@@ -3642,7 +3806,10 @@ mod tests {
     fn the_view_of_an_item_that_is_not_a_preset_answers_wrong_kind() {
         let w = World::new();
         library(&w, "");
-        let wrong = refused(w.svc.preset_get(&AssetRef::Library(lp("rules/a.md"))));
+        let wrong = refused(
+            w.svc
+                .preset_get(&AssetRef::Library(lp("library/rules/a.md"))),
+        );
         assert_eq!(code(&wrong), (RefusalClass::InvalidArgument, WRONG_KIND));
     }
 
@@ -3650,7 +3817,7 @@ mod tests {
     fn an_edit_queued_behind_a_root_change_with_the_old_generation_is_stale_and_writes_nothing() {
         let w = World::new();
         library(&w, "");
-        w.view("P.yaml");
+        w.view("library/P.yaml");
         let generation = w.svc.status().root_generation;
         let other = w.base.join("lib2");
         fs::create_dir_all(&other).unwrap();
@@ -3667,8 +3834,13 @@ mod tests {
         let editor = {
             let svc = Arc::clone(&w.svc);
             thread::spawn(move || {
-                svc.preset_add(&lp("P.yaml"), &items(&["a.md"]), None, Some(generation))
-                    .map(drop)
+                svc.preset_add(
+                    &lp("library/P.yaml"),
+                    &items(&["library/a.md"]),
+                    None,
+                    Some(generation),
+                )
+                .map(drop)
             })
         };
         w.svc
@@ -3697,42 +3869,44 @@ mod tests {
         let w = World::new();
         library(&w, "");
         w.put("Q.yaml", &preset(""));
-        w.view("P.yaml");
-        w.put("P.yaml", &preset("presets:\n- Q.yaml\n"));
+        w.view("library/P.yaml");
+        w.put("P.yaml", &preset("presets:\n- library/Q.yaml\n"));
         let order: Vec<String> = Vec::new();
-        let stale =
-            refused(
-                w.svc
-                    .preset_reorder(&lp("P.yaml"), ListName::Presets, &order, "old", None),
-            );
+        let stale = refused(w.svc.preset_reorder(
+            &lp("library/P.yaml"),
+            ListName::Presets,
+            &order,
+            "old",
+            None,
+        ));
         assert_eq!(code(&stale), (RefusalClass::Conflict, REV_MISMATCH));
         let reaching: Vec<String> = w.svc.with_read(|state| {
             state
                 .catalog
-                .presets_reaching(&key(&lp("Q.yaml")))
+                .presets_reaching(&key(&lp("library/Q.yaml")))
                 .iter()
                 .map(|item| item.path.as_str().to_owned())
                 .collect()
         });
-        assert_eq!(reaching, ["P.yaml"]);
+        assert_eq!(reaching, ["library/P.yaml"]);
     }
 
     #[test]
     fn check_shows_the_problem_of_a_tag_the_save_keeps_from_the_file() {
         let w = World::new();
-        library(&w, "settings:\n- path: S.yaml\n  backend: codex\n");
+        library(&w, "settings:\n- path: library/S.yaml\n  backend: codex\n");
         let draft = PresetDraft {
-            settings: vec![item("S.yaml")],
+            settings: vec![item("library/S.yaml")],
             ..PresetDraft::default()
         };
-        let checked = w.svc.preset_check(&lp("P.yaml"), &draft).unwrap();
+        let checked = w.svc.preset_check(&lp("library/P.yaml"), &draft).unwrap();
         assert!(checked.problems.iter().any(|problem| matches!(
             problem,
             BlockReason::Broken { reason, .. } if reason.code == BACKEND_TAG_NOT_ALLOWED
         )));
         assert!(!checked.save_refuses);
         w.svc
-            .preset_save(&lp("P.yaml"), &draft, None, None)
+            .preset_save(&lp("library/P.yaml"), &draft, None, None)
             .unwrap();
         assert!(
             w.text("P.yaml").contains("backend: codex"),
@@ -3745,10 +3919,10 @@ mod tests {
         let w = World::new();
         library(&w, "");
         w.put("F.yaml", "{kind: preset, version: 1}\n");
-        let remove = RemoveEntries::Items(strings(&["rules/a.md"]));
-        let wrong = refused(w.svc.preset_remove(&lp("F.yaml"), &remove, None));
+        let remove = RemoveEntries::Items(strings(&["library/rules/a.md"]));
+        let wrong = refused(w.svc.preset_remove(&lp("library/F.yaml"), &remove, None));
         assert_eq!(code(&wrong), (RefusalClass::InvalidArgument, WRONG_KIND));
-        let gone = refused(w.svc.preset_get(&AssetRef::Library(lp("F.yaml"))));
+        let gone = refused(w.svc.preset_get(&AssetRef::Library(lp("library/F.yaml"))));
         assert_eq!(code(&gone), (RefusalClass::NotFound, NOT_FOUND));
         assert_eq!(w.writes(), 0);
     }

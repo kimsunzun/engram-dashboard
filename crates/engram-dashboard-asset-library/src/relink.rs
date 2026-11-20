@@ -43,10 +43,10 @@ use crate::edit::{
     as_read, closes_cycle, doc_list, lib_path, list_mut, list_of, not_found, ITEM_LISTS,
 };
 use crate::format::{ListName, PresetDoc, PresetLists};
-use crate::gate::NO_ROOT;
+use crate::mounts::Mounts;
 use crate::path::{AssetRef, LibPath};
 use crate::resolve::{ref_key, PRESET_CYCLE};
-use crate::{is_known, LibraryRefusal, LibraryService, RefusalClass};
+use crate::{is_known, virtual_root_read_only, LibraryRefusal, LibraryService, RefusalClass};
 
 /// The code of a relink whose `to` is not of the kind a list referencing `from` needs (`args` = `{from, to, expected,
 /// found}` — `expected` the name of that list, `found` the list `to` goes into, `null` when it goes into none).
@@ -56,11 +56,11 @@ pub const RELINK_KIND_MISMATCH: &str = "relink-kind-mismatch";
 /// The answer of [`LibraryService::relink`].
 #[derive(Debug)]
 pub struct RelinkAnswer {
-    /// The pairs fixed, `(old, new)` as spelled from the root, the picked pair first: at least one reference was
-    /// re-pointed for it — in a preset file, in the list its new target goes into, or by the agent rewrite — every
-    /// preset file the catalog had listing the old path was rewritten or needed no change, and when agents attached
-    /// it, their rewrite succeeded. An agent deleted between the registry read and the rewrite still counts: no
-    /// reference to the old path is left either way.
+    /// The pairs fixed, `(old, new)` as spelled from the virtual root, the picked pair first: at least one reference
+    /// was re-pointed for it — in a preset file, in the list its new target goes into, or by the agent rewrite — every
+    /// preset file the catalog had listing the old path was rewritten or needed no change, and when agents attached it,
+    /// their rewrite succeeded. An agent deleted between the registry read and the rewrite still counts: no reference
+    /// to the old path is left either way.
     pub fixed: Vec<(String, String)>,
     /// How many pairs of `fixed` part (b) found by name.
     pub more: usize,
@@ -119,13 +119,17 @@ impl LibraryService {
     /// `from`'s old folder whose name is in `to`'s folder with the kind its references need (module header). Preset
     /// files first, one at a time, then the agents once. Answers what was fixed, written, skipped and why it stopped.
     ///
-    /// Refusals, nothing applied: a spelling that is not a library path `InvalidArgument` · `item-path-invalid`; no
-    /// published root `Unavailable` · `library-unavailable`; a stale root generation `Conflict` ·
-    /// `root-generation-stale`; `to` not in the catalog (incl. a dot or temp name, which the catalog never holds)
-    /// `NotFound` · `not-found`; `to` at or below a link `InvalidArgument` · `path-through-link` (a probe error `Unavailable` ·
-    /// `library-read-failed`); `to` of another kind than a list referencing `from` needs `InvalidArgument` ·
-    /// [`RELINK_KIND_MISMATCH`]; agents to rewrite while the port cell is empty or dead `Internal` ·
-    /// `profile-edit-unavailable`; a stop before any file was written — its own refusal.
+    /// `from` and `to` may lie in different mounts (ADR-0396 decision 3).
+    ///
+    /// Refusals, nothing applied: a spelling that is not a library path `InvalidArgument` · `item-path-invalid`; a `to`
+    /// of one name (a mount's top, or a name at the virtual root) `InvalidArgument` · `virtual-root-read-only`, before
+    /// any lookup — `from` may have one name, a reference written before mounts (ADR-0398); no first scan applied
+    /// `Unavailable` · `library-unavailable`; a stale root generation `Conflict` · `root-generation-stale`; `to` not in
+    /// the catalog (incl. a dot or temp name, which the catalog never holds) `NotFound` · `not-found`; `to` at or below
+    /// a link `InvalidArgument` · `path-through-link` (a probe error `Unavailable` · `library-read-failed`); `to` of
+    /// another kind than a list referencing `from` needs `InvalidArgument` · [`RELINK_KIND_MISMATCH`]; agents to
+    /// rewrite while the port cell is empty or dead `Internal` · `profile-edit-unavailable`; a stop before any file was
+    /// written — its own refusal.
     pub fn relink(
         &self,
         from: &str,
@@ -134,14 +138,15 @@ impl LibraryService {
     ) -> Result<RelinkAnswer, LibraryRefusal> {
         let from = lib_path(from)?;
         let to = lib_path(to)?;
+        // ADR-0400 decision 5
+        if to.parent().is_none() {
+            return Err(virtual_root_read_only(Some(&to)));
+        }
         self.first_scan_join()
             .map_err(LibraryRefusal::unavailable)?;
-        self.change_at(root_generation, |catalog, root, seq| {
+        self.change_at(root_generation, |catalog, mounts, seq| {
             let mut touched = Vec::new();
-            let answer = match root {
-                Some(root) => self.relink_in(&from, &to, catalog, root, seq, &mut touched),
-                None => Err(LibraryRefusal::unavailable(NO_ROOT.to_owned())),
-            };
+            let answer = self.relink_in(&from, &to, catalog, mounts, seq, &mut touched);
             (answer, touched)
         })?
     }
@@ -152,7 +157,7 @@ impl LibraryService {
         from: &LibPath,
         to: &LibPath,
         catalog: &mut Catalog,
-        root: &Path,
+        mounts: &Mounts,
         seq: &dyn Fn() -> u64,
         touched: &mut Vec<PathKey>,
     ) -> Result<RelinkAnswer, LibraryRefusal> {
@@ -160,7 +165,7 @@ impl LibraryService {
             Some(item) => list_of(&item.kind),
             None => return Err(not_found(to.as_str())),
         };
-        self.admit(root, to)?;
+        self.admit(mounts, to)?;
         let attachments = self.values.registry.attachments();
         let uses = uses_of(catalog, &attachments, from);
         if let Some(expected) = uses.needs.iter().find(|need| Some(**need) != found) {
@@ -193,7 +198,7 @@ impl LibraryService {
                 };
                 let (candidate, fits) = (item.path.clone(), list_of(&item.kind));
                 // ADR-0365
-                if let Err(e) = self.admit(root, &candidate) {
+                if let Err(e) = self.admit(mounts, &candidate) {
                     tracing::debug!(
                         path = candidate.as_str(),
                         "relink candidate not admitted: {e:?}"
@@ -240,7 +245,7 @@ impl LibraryService {
                 file,
                 None,
                 catalog,
-                root,
+                mounts,
                 seq,
                 |edit| renamed(edit.doc, &renames, edit.catalog, file),
                 touched,
@@ -494,8 +499,9 @@ mod tests {
     use crate::format::YAML_SYNTAX;
     use crate::gate::NOT_FOUND;
     use crate::launch::LIBRARY_READ_FAILED;
+    use crate::mounts::MountPath;
     use crate::store::{ContentTag, FsStore, LibraryStore, ScanListing, TrashBundle};
-    use crate::{LibraryValues, LIBRARY_UNAVAILABLE, PATH_THROUGH_LINK, ROOT_GENERATION_STALE};
+    use crate::{LibraryValues, PATH_THROUGH_LINK, ROOT_GENERATION_STALE};
 
     /// The ordered log of preset writes and agent rewrites, each with whether the library write lock was held.
     #[derive(Default)]
@@ -532,12 +538,12 @@ mod tests {
         fn scan(
             &self,
             root: &Path,
-            under: Option<&LibPath>,
+            under: Option<&MountPath>,
             seq: &dyn Fn() -> u64,
         ) -> io::Result<ScanListing> {
             FsStore.scan(root, under, seq)
         }
-        fn first_link(&self, root: &Path, rel: &LibPath) -> io::Result<Option<LibPath>> {
+        fn first_link(&self, root: &Path, rel: &MountPath) -> io::Result<Option<MountPath>> {
             FsStore.first_link(root, rel)
         }
         fn read(&self, path: &Path, cap: u64) -> io::Result<Vec<u8>> {
@@ -550,7 +556,7 @@ mod tests {
             FsStore.tag(path)
         }
         fn write_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-            let rel = LibPath::from_disk(&self.root, path).expect("a library file");
+            let rel = MountPath::from_disk(&self.root, path).expect("a library file");
             self.probe.note(format!("write {}", rel.as_str()));
             if lock(&self.fail_write).as_deref() == Some(path) {
                 return Err(io::Error::other("injected write failure"));
@@ -728,7 +734,9 @@ mod tests {
         }
 
         fn lib(&self, rel: &str) -> PathBuf {
-            LibPath::parse(rel).unwrap().to_path(&self.base.join("lib"))
+            MountPath::parse(rel)
+                .unwrap()
+                .to_path(&self.base.join("lib"))
         }
 
         fn put(&self, rel: &str, text: &str) {
@@ -775,12 +783,12 @@ mod tests {
             outside
         }
 
-        /// The doc of preset `preset` as the catalog holds it.
+        /// The doc of preset `preset` (inside the mount `library`) as the catalog holds it.
         fn doc(&self, preset: &str) -> PresetDoc {
             self.svc.with_read(|state| {
                 match state
                     .catalog
-                    .get(&key(&LibPath::parse(preset).unwrap()))
+                    .get(&key(&LibPath::parse(&format!("library/{preset}")).unwrap()))
                     .map(|item| &item.content)
                 {
                     Some(ItemContent::Preset { doc, .. }) => doc.clone(),
@@ -869,17 +877,25 @@ mod tests {
 
     #[test]
     fn every_reference_is_re_pointed_preset_files_first_then_the_agents_once_inside_the_change() {
-        let w = World::with(vec![agent(&["old/X.yaml"])]);
+        let w = World::with(vec![agent(&["library/old/X.yaml"])]);
         w.put("new/X.yaml", &preset(""));
-        w.put("P.yaml", &preset("presets:\n- old/X.yaml\n"));
-        w.put("Q.yaml", &preset("presets:\n- old/X.yaml\n"));
+        w.put("P.yaml", &preset("presets:\n- library/old/X.yaml\n"));
+        w.put("Q.yaml", &preset("presets:\n- library/old/X.yaml\n"));
 
-        let answer = w.relink("old/X.yaml", "new/X.yaml").unwrap();
+        let answer = w
+            .relink("library/old/X.yaml", "library/new/X.yaml")
+            .unwrap();
 
-        assert_eq!(fixed(&answer), [("old/X.yaml", "new/X.yaml")]);
+        assert_eq!(
+            fixed(&answer),
+            [("library/old/X.yaml", "library/new/X.yaml")]
+        );
         assert_eq!(
             (answer.more, answer.written.as_slice()),
-            (0, ["P.yaml".to_owned(), "Q.yaml".to_owned()].as_slice())
+            (
+                0,
+                ["library/P.yaml".to_owned(), "library/Q.yaml".to_owned()].as_slice()
+            )
         );
         assert!(answer.skipped.is_empty() && answer.stopped.is_none());
         assert_eq!(
@@ -891,12 +907,15 @@ mod tests {
             ],
             "presets first, then the agents once, all inside the change"
         );
-        assert_eq!(w.renames(), [vec![rename("old/X.yaml", "new/X.yaml")]]);
+        assert_eq!(
+            w.renames(),
+            [vec![rename("library/old/X.yaml", "library/new/X.yaml")]]
+        );
         for file in ["P.yaml", "Q.yaml"] {
             assert!(!w.text(file).contains("old/X.yaml"), "{file}");
             assert_eq!(
                 w.listed(file, ListName::Presets),
-                [entry("new/X.yaml")],
+                [entry("library/new/X.yaml")],
                 "the catalog holds the written bytes"
             );
         }
@@ -913,30 +932,33 @@ mod tests {
         w.put(
             "P.yaml",
             &preset(
-                "instructions:\n- old/a.md\n- old/b.md\n- old/c.md\n- other/d.md\nsettings:\n- old/s.yaml\n",
+                "instructions:\n- library/old/a.md\n- library/old/b.md\n- library/old/c.md\n- library/other/d.md\nsettings:\n- library/old/s.yaml\n",
             ),
         );
 
-        let answer = w.relink("old/a.md", "new/a.md").unwrap();
+        let answer = w.relink("library/old/a.md", "library/new/a.md").unwrap();
 
         assert_eq!(
             fixed(&answer),
-            [("old/a.md", "new/a.md"), ("old/b.md", "new/b.md")]
+            [
+                ("library/old/a.md", "library/new/a.md"),
+                ("library/old/b.md", "library/new/b.md")
+            ]
         );
         assert_eq!(answer.more, 1);
         assert_eq!(
             w.listed("P.yaml", ListName::Instructions),
             [
-                entry("new/a.md"),
-                entry("new/b.md"),
-                entry("old/c.md"),
-                entry("other/d.md")
+                entry("library/new/a.md"),
+                entry("library/new/b.md"),
+                entry("library/old/c.md"),
+                entry("library/other/d.md")
             ],
             "no file of that name in the new folder, or another old folder: left as it is"
         );
         assert_eq!(
             w.listed("P.yaml", ListName::Settings),
-            [entry("old/s.yaml")],
+            [entry("library/old/s.yaml")],
             "same name, other kind: left as it is"
         );
     }
@@ -947,15 +969,18 @@ mod tests {
         w.put("old/a.md", "a");
         w.put("new/a.md", "a2");
         w.put("new/b.md", "b");
-        w.put("P.yaml", &preset("instructions:\n- old/a.md\n- old/b.md\n"));
+        w.put(
+            "P.yaml",
+            &preset("instructions:\n- library/old/a.md\n- library/old/b.md\n"),
+        );
 
-        let answer = w.relink("old/a.md", "new/a.md").unwrap();
+        let answer = w.relink("library/old/a.md", "library/new/a.md").unwrap();
 
-        assert_eq!(fixed(&answer), [("old/a.md", "new/a.md")]);
+        assert_eq!(fixed(&answer), [("library/old/a.md", "library/new/a.md")]);
         assert_eq!(answer.more, 0);
         assert_eq!(
             w.listed("P.yaml", ListName::Instructions),
-            [entry("new/a.md"), entry("old/b.md")]
+            [entry("library/new/a.md"), entry("library/old/b.md")]
         );
     }
 
@@ -976,20 +1001,22 @@ mod tests {
         w.put(
             "P.yaml",
             &preset(&format!(
-                "instructions:\n- path: old/a.md\n  backend: codex\n  note: kept\n- new/a.md\nfolders:\n- '{folder}'\n"
+                "instructions:\n- path: library/old/a.md\n  backend: codex\n  note: kept\n- library/new/a.md\nfolders:\n- '{folder}'\n"
             )),
         );
         w.put(
             "Q.yaml",
-            &preset("instructions:\n- new/a.md\n- path: old/a.md\n  backend: codex\n"),
+            &preset(
+                "instructions:\n- library/new/a.md\n- path: library/old/a.md\n  backend: codex\n",
+            ),
         );
 
-        let answer = w.relink("old/a.md", "new/a.md").unwrap();
+        let answer = w.relink("library/old/a.md", "library/new/a.md").unwrap();
 
-        assert_eq!(answer.written, ["P.yaml", "Q.yaml"]);
+        assert_eq!(answer.written, ["library/P.yaml", "library/Q.yaml"]);
         assert_eq!(
             w.listed("P.yaml", ListName::Instructions),
-            [("new/a.md".to_owned(), Some("codex".to_owned()))],
+            [("library/new/a.md".to_owned(), Some("codex".to_owned()))],
             "the re-pointed entry was first: it stays, with its tag"
         );
         assert!(
@@ -998,7 +1025,7 @@ mod tests {
         );
         assert_eq!(
             w.listed("Q.yaml", ListName::Instructions),
-            [entry("new/a.md")],
+            [entry("library/new/a.md")],
             "the entry already there was first: it stays"
         );
         let folders: Vec<String> = w
@@ -1014,25 +1041,25 @@ mod tests {
 
     #[test]
     fn to_must_be_in_the_catalog_and_of_the_kind_every_list_referencing_from_needs() {
-        let w = World::with(vec![agent(&["old/Y.yaml"])]);
+        let w = World::with(vec![agent(&["library/old/Y.yaml"])]);
         w.put("new/a.md", "a");
         w.put("new/X.yaml", &preset(""));
-        w.put("P.yaml", &preset("instructions:\n- old/a.md\n"));
+        w.put("P.yaml", &preset("instructions:\n- library/old/a.md\n"));
 
         assert_eq!(
-            code(w.relink("old/a.md", "new/gone.md")),
+            code(w.relink("library/old/a.md", "library/new/gone.md")),
             (RefusalClass::NotFound, NOT_FOUND.to_owned())
         );
-        let (class, reason) = refused(w.relink("old/a.md", "new/X.yaml"));
+        let (class, reason) = refused(w.relink("library/old/a.md", "library/new/X.yaml"));
         assert_eq!(
             (class, reason.code.as_str()),
             (RefusalClass::InvalidArgument, RELINK_KIND_MISMATCH)
         );
         assert_eq!(
             reason.args,
-            json!({ "from": "old/a.md", "to": "new/X.yaml", "expected": "instructions", "found": "presets" })
+            json!({ "from": "library/old/a.md", "to": "library/new/X.yaml", "expected": "instructions", "found": "presets" })
         );
-        let (_, reason) = refused(w.relink("old/Y.yaml", "new/a.md"));
+        let (_, reason) = refused(w.relink("library/old/Y.yaml", "library/new/a.md"));
         assert_eq!(
             (
                 reason.code.as_str(),
@@ -1057,9 +1084,9 @@ mod tests {
         w.put("new/a.md", "a");
         for (from, to) in [
             ("engram:/default", "new/a.md"),
-            ("old/a.md", "engram:/priming"),
-            ("old//a.md", "new/a.md"),
-            ("old/a.md", "/new/a.md"),
+            ("library/old/a.md", "engram:/priming"),
+            ("library/old//a.md", "library/new/a.md"),
+            ("library/old/a.md", "/new/a.md"),
         ] {
             assert_eq!(
                 code(w.relink(from, to)),
@@ -1073,14 +1100,14 @@ mod tests {
     fn link_admission_on_to_refuses_before_anything_is_written() {
         let w = World::new();
         w.put("team/a.md", "a");
-        w.put("P.yaml", &preset("instructions:\n- old/a.md\n"));
+        w.put("P.yaml", &preset("instructions:\n- library/old/a.md\n"));
         w.scan();
         // The catalog still holds `team/a.md`; the folder is a link now.
         w.swap_for_a_link("team", &[("a.md", "theirs")]);
         let before = w.text("P.yaml");
 
         assert_eq!(
-            code(w.relink("old/a.md", "team/a.md")),
+            code(w.relink("library/old/a.md", "library/team/a.md")),
             (RefusalClass::InvalidArgument, PATH_THROUGH_LINK.to_owned())
         );
         assert_eq!(w.writes(), 0);
@@ -1089,23 +1116,24 @@ mod tests {
 
     #[test]
     fn with_agents_to_rewrite_an_empty_port_cell_refuses_before_any_file_is_written() {
-        let w = World::make(vec![agent(&["old/X.yaml"])], true, false);
+        let w = World::make(vec![agent(&["library/old/X.yaml"])], true, false);
         w.put("new/X.yaml", &preset(""));
-        w.put("P.yaml", &preset("presets:\n- old/X.yaml\n"));
+        w.put("P.yaml", &preset("presets:\n- library/old/X.yaml\n"));
 
         assert_eq!(
-            code(w.relink("old/X.yaml", "new/X.yaml")),
+            code(w.relink("library/old/X.yaml", "library/new/X.yaml")),
             (RefusalClass::Internal, PROFILE_EDIT_UNAVAILABLE.to_owned())
         );
         assert_eq!(w.writes(), 0);
     }
 
+    // ADR-0400 decision 4: with no mount registered `to` names no mount — absent.
     #[test]
-    fn with_no_root_a_relink_answers_library_unavailable() {
+    fn with_no_mount_a_relink_answers_not_found() {
         let w = World::make(Vec::new(), false, true);
         assert_eq!(
-            code(w.relink("old/a.md", "new/a.md")),
-            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE.to_owned())
+            code(w.relink("library/old/a.md", "library/new/a.md")),
+            (RefusalClass::NotFound, NOT_FOUND.to_owned())
         );
     }
 
@@ -1113,17 +1141,24 @@ mod tests {
     fn a_relink_never_crosses_roots_one_carrying_the_old_root_generation_writes_nothing() {
         let w = World::new();
         w.put("new/a.md", "a");
-        w.put("P.yaml", &preset("instructions:\n- old/a.md\n"));
+        w.put("P.yaml", &preset("instructions:\n- library/old/a.md\n"));
         w.scan();
         let generation = w.svc.status().root_generation;
         let other = w.base.join("other");
         fs::create_dir_all(other.join("new")).unwrap();
         fs::write(other.join("new").join("a.md"), "a").unwrap();
-        fs::write(other.join("P.yaml"), preset("instructions:\n- old/a.md\n")).unwrap();
+        fs::write(
+            other.join("P.yaml"),
+            preset("instructions:\n- library/old/a.md\n"),
+        )
+        .unwrap();
         w.svc.set_root(&other, false).unwrap();
 
         assert_eq!(
-            code(w.svc.relink("old/a.md", "new/a.md", Some(generation))),
+            code(
+                w.svc
+                    .relink("library/old/a.md", "library/new/a.md", Some(generation))
+            ),
             (RefusalClass::Conflict, ROOT_GENERATION_STALE.to_owned())
         );
         assert_eq!(w.writes(), 0);
@@ -1137,44 +1172,52 @@ mod tests {
 
     #[test]
     fn a_per_file_refusal_is_skipped_and_the_walk_and_the_agent_rewrite_go_on() {
-        let w = World::with(vec![agent(&["old/X.yaml"])]);
+        let w = World::with(vec![agent(&["library/old/X.yaml"])]);
         w.put("new/X.yaml", &preset(""));
         w.put("new/Y.yaml", &preset(""));
-        let lists_x = preset("presets:\n- old/X.yaml\n");
+        let lists_x = preset("presets:\n- library/old/X.yaml\n");
         for file in ["A.yaml", "B.yaml", "team/T.yaml"] {
             w.put(file, &lists_x);
         }
         // Reads, but the writer cannot write it back exactly.
-        w.put("D.yaml", &preset("big: 1e20\npresets:\n- old/X.yaml\n"));
-        w.put("C.yaml", &preset("presets:\n- old/X.yaml\n- old/Y.yaml\n"));
+        w.put(
+            "D.yaml",
+            &preset("big: 1e20\npresets:\n- library/old/X.yaml\n"),
+        );
+        w.put(
+            "C.yaml",
+            &preset("presets:\n- library/old/X.yaml\n- library/old/Y.yaml\n"),
+        );
         w.scan();
         // After the scan: A is gone, B no longer reads, `team` is a link.
         fs::remove_file(w.lib("A.yaml")).unwrap();
-        let broken = "kind: preset\nversion: 1\npresets: [old/X.yaml\n";
+        let broken = "kind: preset\nversion: 1\npresets: [library/old/X.yaml\n";
         fs::write(w.lib("B.yaml"), broken).unwrap();
         let outside = w.swap_for_a_link("team", &[("T.yaml", &lists_x)]);
 
-        let answer = w.relink("old/X.yaml", "new/X.yaml").unwrap();
+        let answer = w
+            .relink("library/old/X.yaml", "library/new/X.yaml")
+            .unwrap();
 
         assert_eq!(
             skipped(&answer),
             [
-                ("A.yaml", NOT_FOUND),
-                ("B.yaml", YAML_SYNTAX),
-                ("D.yaml", "preset-write-number-range"),
-                ("team/T.yaml", PATH_THROUGH_LINK),
+                ("library/A.yaml", NOT_FOUND),
+                ("library/B.yaml", YAML_SYNTAX),
+                ("library/D.yaml", "preset-write-number-range"),
+                ("library/team/T.yaml", PATH_THROUGH_LINK),
             ]
         );
-        assert_eq!(answer.written, ["C.yaml"], "the walk went on");
+        assert_eq!(answer.written, ["library/C.yaml"], "the walk went on");
         assert_eq!(
             w.renames(),
-            [vec![rename("old/X.yaml", "new/X.yaml")]],
+            [vec![rename("library/old/X.yaml", "library/new/X.yaml")]],
             "the agents were rewritten"
         );
         assert!(answer.stopped.is_none());
         assert_eq!(
             (fixed(&answer), answer.more),
-            (vec![("old/Y.yaml", "new/Y.yaml")], 1),
+            (vec![("library/old/Y.yaml", "library/new/Y.yaml")], 1),
             "a pair counts as fixed only when every file listing it was"
         );
         assert_eq!(w.text("B.yaml"), broken);
@@ -1188,14 +1231,20 @@ mod tests {
     #[test]
     fn an_io_failure_stops_the_walk_skips_the_agent_rewrite_and_answers_what_was_applied() {
         for failure in ["read", "write"] {
-            let w = World::with(vec![agent(&["old/X.yaml"])]);
+            let w = World::with(vec![agent(&["library/old/X.yaml"])]);
             w.put("new/X.yaml", &preset(""));
             w.put("new/Y.yaml", &preset(""));
             w.put("new/Z.yaml", &preset(""));
-            w.put("A.yaml", &preset("presets:\n- old/X.yaml\n- old/Y.yaml\n"));
-            w.put("B.yaml", &preset("presets:\n- old/X.yaml\n"));
+            w.put(
+                "A.yaml",
+                &preset("presets:\n- library/old/X.yaml\n- library/old/Y.yaml\n"),
+            );
+            w.put("B.yaml", &preset("presets:\n- library/old/X.yaml\n"));
             // Z is listed only in a file the walk does not reach.
-            w.put("C.yaml", &preset("presets:\n- old/X.yaml\n- old/Z.yaml\n"));
+            w.put(
+                "C.yaml",
+                &preset("presets:\n- library/old/X.yaml\n- library/old/Z.yaml\n"),
+            );
             w.scan();
             let (slot, expected) = match failure {
                 "read" => (&w.disk.fail_read, LIBRARY_READ_FAILED),
@@ -1203,14 +1252,16 @@ mod tests {
             };
             *lock(slot) = Some(w.lib("B.yaml"));
 
-            let answer = w.relink("old/X.yaml", "new/X.yaml").unwrap();
+            let answer = w
+                .relink("library/old/X.yaml", "library/new/X.yaml")
+                .unwrap();
 
             assert_eq!(
                 stop_code(&answer),
-                (Some("B.yaml"), RefusalClass::Unavailable, expected),
+                (Some("library/B.yaml"), RefusalClass::Unavailable, expected),
                 "{failure}"
             );
-            assert_eq!(answer.written, ["A.yaml"], "{failure}");
+            assert_eq!(answer.written, ["library/A.yaml"], "{failure}");
             assert!(answer.skipped.is_empty(), "{failure}");
             assert!(
                 w.renames().is_empty(),
@@ -1218,7 +1269,7 @@ mod tests {
             );
             assert_eq!(
                 (fixed(&answer), answer.more),
-                (vec![("old/Y.yaml", "new/Y.yaml")], 1),
+                (vec![("library/old/Y.yaml", "library/new/Y.yaml")], 1),
                 "{failure}: only the pair whose every file was written"
             );
             assert!(
@@ -1231,14 +1282,14 @@ mod tests {
 
     #[test]
     fn a_stop_before_any_file_was_written_answers_that_failures_refusal() {
-        let w = World::with(vec![agent(&["old/X.yaml"])]);
+        let w = World::with(vec![agent(&["library/old/X.yaml"])]);
         w.put("new/X.yaml", &preset(""));
-        w.put("P.yaml", &preset("presets:\n- old/X.yaml\n"));
+        w.put("P.yaml", &preset("presets:\n- library/old/X.yaml\n"));
         w.scan();
         *lock(&w.disk.fail_write) = Some(w.lib("P.yaml"));
 
         assert_eq!(
-            code(w.relink("old/X.yaml", "new/X.yaml")),
+            code(w.relink("library/old/X.yaml", "library/new/X.yaml")),
             (RefusalClass::Unavailable, LIBRARY_WRITE_FAILED.to_owned())
         );
         assert!(w.renames().is_empty());
@@ -1247,14 +1298,16 @@ mod tests {
 
     #[test]
     fn a_failed_agent_rewrite_is_a_stop_with_no_path_or_the_refusal_when_no_file_was_written() {
-        let w = World::with(vec![agent(&["old/X.yaml"])]);
+        let w = World::with(vec![agent(&["library/old/X.yaml"])]);
         w.put("new/X.yaml", &preset(""));
-        w.put("P.yaml", &preset("presets:\n- old/X.yaml\n"));
+        w.put("P.yaml", &preset("presets:\n- library/old/X.yaml\n"));
         *lock(&w.port.fail) = Some(store_failure());
 
-        let answer = w.relink("old/X.yaml", "new/X.yaml").unwrap();
+        let answer = w
+            .relink("library/old/X.yaml", "library/new/X.yaml")
+            .unwrap();
 
-        assert_eq!(answer.written, ["P.yaml"]);
+        assert_eq!(answer.written, ["library/P.yaml"]);
         let stop = answer.stopped.as_ref().expect("a stop");
         assert!(stop.path.is_none());
         assert!(
@@ -1263,10 +1316,10 @@ mod tests {
         );
         assert!(answer.fixed.is_empty(), "its agents were not rewritten");
 
-        let agents_only = World::with(vec![agent(&["old/X.yaml"])]);
+        let agents_only = World::with(vec![agent(&["library/old/X.yaml"])]);
         agents_only.put("new/X.yaml", &preset(""));
         *lock(&agents_only.port.fail) = Some(store_failure());
-        let answer = agents_only.relink("old/X.yaml", "new/X.yaml");
+        let answer = agents_only.relink("library/old/X.yaml", "library/new/X.yaml");
         assert!(
             matches!(answer, Err(LibraryRefusal::Store(_))),
             "{answer:?}"
@@ -1280,25 +1333,28 @@ mod tests {
         let w = World::new();
         w.put("new/a.md", "a");
         w.put("new/b.md", "b");
-        w.put("P.yaml", &preset("instructions:\n- old/a.md\n- old/b.md\n"));
+        w.put(
+            "P.yaml",
+            &preset("instructions:\n- library/old/a.md\n- library/old/b.md\n"),
+        );
         w.scan();
         // Edited outside Engram after the scan: both old paths in a list an instruction does not fit too.
         w.put(
             "P.yaml",
-            &preset("instructions:\n- old/a.md\n- old/b.md\nskills:\n- old/a.md\n- old/b.md\n"),
+            &preset("instructions:\n- library/old/a.md\n- library/old/b.md\nskills:\n- library/old/a.md\n- library/old/b.md\n"),
         );
 
-        let answer = w.relink("old/a.md", "new/a.md").unwrap();
+        let answer = w.relink("library/old/a.md", "library/new/a.md").unwrap();
 
-        assert_eq!(answer.written, ["P.yaml"]);
+        assert_eq!(answer.written, ["library/P.yaml"]);
         assert_eq!(answer.more, 1);
         assert_eq!(
             w.listed("P.yaml", ListName::Instructions),
-            [entry("new/a.md"), entry("new/b.md")]
+            [entry("library/new/a.md"), entry("library/new/b.md")]
         );
         assert_eq!(
             w.listed("P.yaml", ListName::Skills),
-            [entry("old/a.md"), entry("old/b.md")],
+            [entry("library/old/a.md"), entry("library/old/b.md")],
             "left as it is, for the picked pair and the part (b) one alike"
         );
     }
@@ -1307,13 +1363,13 @@ mod tests {
     fn a_pair_nothing_was_re_pointed_for_is_not_fixed() {
         let w = World::new();
         w.put("new/a.md", "a");
-        w.put("P.yaml", &preset("instructions:\n- old/a.md\n"));
+        w.put("P.yaml", &preset("instructions:\n- library/old/a.md\n"));
         w.scan();
         // Moved outside Engram after the scan into a list an instruction does not fit.
-        let moved = preset("skills:\n- old/a.md\n");
+        let moved = preset("skills:\n- library/old/a.md\n");
         w.put("P.yaml", &moved);
 
-        let answer = w.relink("old/a.md", "new/a.md").unwrap();
+        let answer = w.relink("library/old/a.md", "library/new/a.md").unwrap();
 
         assert!(answer.fixed.is_empty(), "{:?}", answer.fixed);
         assert!(answer.written.is_empty() && answer.skipped.is_empty());
@@ -1322,29 +1378,29 @@ mod tests {
 
     #[test]
     fn a_rewrite_that_would_make_a_preset_reach_itself_is_skipped_preset_cycle() {
-        let lists_x = preset("presets:\n- old/X.yaml\n");
+        let lists_x = preset("presets:\n- library/old/X.yaml\n");
         // `to` is the file itself.
         let w = World::new();
         w.put("P.yaml", &lists_x);
         w.put("Q.yaml", &lists_x);
 
-        let answer = w.relink("old/X.yaml", "P.yaml").unwrap();
+        let answer = w.relink("library/old/X.yaml", "library/P.yaml").unwrap();
 
-        assert_eq!(skipped(&answer), [("P.yaml", PRESET_CYCLE)]);
-        assert_eq!(answer.written, ["Q.yaml"]);
+        assert_eq!(skipped(&answer), [("library/P.yaml", PRESET_CYCLE)]);
+        assert_eq!(answer.written, ["library/Q.yaml"]);
         assert!(answer.fixed.is_empty());
         assert_eq!(w.text("P.yaml"), lists_x);
 
         // `to` reaches the file.
         let w = World::new();
         w.put("P.yaml", &lists_x);
-        w.put("Q.yaml", &preset("presets:\n- P.yaml\n"));
+        w.put("Q.yaml", &preset("presets:\n- library/P.yaml\n"));
         w.put("S.yaml", &lists_x);
 
-        let answer = w.relink("old/X.yaml", "Q.yaml").unwrap();
+        let answer = w.relink("library/old/X.yaml", "library/Q.yaml").unwrap();
 
-        assert_eq!(skipped(&answer), [("P.yaml", PRESET_CYCLE)]);
-        assert_eq!(answer.written, ["S.yaml"]);
+        assert_eq!(skipped(&answer), [("library/P.yaml", PRESET_CYCLE)]);
+        assert_eq!(answer.written, ["library/S.yaml"]);
         assert_eq!(w.text("P.yaml"), lists_x);
     }
 
@@ -1354,20 +1410,23 @@ mod tests {
         let w = World::new();
         w.put("team/s/SKILL.md", skill);
         w.put("team/t/SKILL.md", skill);
-        w.put("P.yaml", &preset("skills:\n- old/s\n- old/t\n"));
+        w.put(
+            "P.yaml",
+            &preset("skills:\n- library/old/s\n- library/old/t\n"),
+        );
         w.scan();
         // The catalog still holds the skill `team/t`; it is a link now.
         w.swap_for_a_link("team/t", &[("SKILL.md", skill)]);
 
-        let answer = w.relink("old/s", "team/s").unwrap();
+        let answer = w.relink("library/old/s", "library/team/s").unwrap();
 
         assert_eq!(
             (fixed(&answer), answer.more),
-            (vec![("old/s", "team/s")], 0)
+            (vec![("library/old/s", "library/team/s")], 0)
         );
         assert_eq!(
             w.listed("P.yaml", ListName::Skills),
-            [entry("team/s"), entry("old/t")]
+            [entry("library/team/s"), entry("library/old/t")]
         );
     }
 
@@ -1380,18 +1439,18 @@ mod tests {
         w.put("new/b.md", "b");
         w.put(
             "P.yaml",
-            &preset("instructions:\n- old/b.md\nskills:\n- old/sub\n"),
+            &preset("instructions:\n- library/old/b.md\nskills:\n- library/old/sub\n"),
         );
 
-        let answer = w.relink("old/sub", "new/sub").unwrap();
+        let answer = w.relink("library/old/sub", "library/new/sub").unwrap();
 
         assert_eq!(
             (fixed(&answer), answer.more),
-            (vec![("old/sub", "new/sub")], 0)
+            (vec![("library/old/sub", "library/new/sub")], 0)
         );
         assert_eq!(
             w.listed("P.yaml", ListName::Instructions),
-            [entry("old/b.md")]
+            [entry("library/old/b.md")]
         );
     }
 
@@ -1400,9 +1459,12 @@ mod tests {
         let w = World::new();
         w.put("new/a.md", "a");
         w.put("new/b.md", "b");
-        w.put("P.yaml", &preset("instructions:\n- old/a.md\n- old/B.md\n"));
+        w.put(
+            "P.yaml",
+            &preset("instructions:\n- library/old/a.md\n- library/old/B.md\n"),
+        );
 
-        let answer = w.relink("old/a.md", "new/a.md").unwrap();
+        let answer = w.relink("library/old/a.md", "library/new/a.md").unwrap();
 
         // Whether `new/B.md` names `new/b.md` is the platform's key rule.
         let names_it =
@@ -1411,18 +1473,21 @@ mod tests {
             true => {
                 assert_eq!(
                     fixed(&answer),
-                    [("old/a.md", "new/a.md"), ("old/B.md", "new/b.md")]
+                    [
+                        ("library/old/a.md", "library/new/a.md"),
+                        ("library/old/B.md", "library/new/b.md")
+                    ]
                 );
                 assert_eq!(
                     w.listed("P.yaml", ListName::Instructions),
-                    [entry("new/a.md"), entry("new/b.md")]
+                    [entry("library/new/a.md"), entry("library/new/b.md")]
                 );
             }
             false => {
-                assert_eq!(fixed(&answer), [("old/a.md", "new/a.md")]);
+                assert_eq!(fixed(&answer), [("library/old/a.md", "library/new/a.md")]);
                 assert_eq!(
                     w.listed("P.yaml", ListName::Instructions),
-                    [entry("new/a.md"), entry("old/B.md")]
+                    [entry("library/new/a.md"), entry("library/old/B.md")]
                 );
             }
         }
@@ -1430,21 +1495,29 @@ mod tests {
 
     #[test]
     fn part_b_also_links_a_missing_preset_an_agent_attaches() {
-        let w = World::with(vec![agent(&["old/Y.yaml"])]);
+        let w = World::with(vec![agent(&["library/old/Y.yaml"])]);
         w.put("new/X.yaml", &preset(""));
         w.put("new/Y.yaml", &preset(""));
-        w.put("P.yaml", &preset("presets:\n- old/X.yaml\n"));
+        w.put("P.yaml", &preset("presets:\n- library/old/X.yaml\n"));
 
-        let answer = w.relink("old/X.yaml", "new/X.yaml").unwrap();
+        let answer = w
+            .relink("library/old/X.yaml", "library/new/X.yaml")
+            .unwrap();
 
         assert_eq!(
             (fixed(&answer), answer.more),
             (
-                vec![("old/X.yaml", "new/X.yaml"), ("old/Y.yaml", "new/Y.yaml")],
+                vec![
+                    ("library/old/X.yaml", "library/new/X.yaml"),
+                    ("library/old/Y.yaml", "library/new/Y.yaml")
+                ],
                 1
             )
         );
-        assert_eq!(w.renames(), [vec![rename("old/Y.yaml", "new/Y.yaml")]]);
+        assert_eq!(
+            w.renames(),
+            [vec![rename("library/old/Y.yaml", "library/new/Y.yaml")]]
+        );
     }
 
     #[test]
@@ -1454,25 +1527,28 @@ mod tests {
             key(&LibPath::parse("P.yaml").unwrap()) == key(&LibPath::parse("p.yaml").unwrap());
 
         // The agent already holds the target spelling: nothing changes, so nothing is fixed.
-        let w = World::with(vec![agent(&["p.yaml"])]);
+        let w = World::with(vec![agent(&["library/p.yaml"])]);
         w.put("p.yaml", &preset(""));
-        let answer = w.relink("P.yaml", "p.yaml").unwrap();
+        let answer = w.relink("library/P.yaml", "library/p.yaml").unwrap();
         assert!(answer.fixed.is_empty(), "{:?}", answer.fixed);
         let expected_calls = match folds {
-            true => vec![vec![rename("P.yaml", "p.yaml")]],
+            true => vec![vec![rename("library/P.yaml", "library/p.yaml")]],
             false => Vec::new(),
         };
         assert_eq!(w.renames(), expected_calls);
 
         // The agent holds another spelling of the same path: the rewrite normalizes it, so the pair is fixed.
-        let w = World::with(vec![agent(&["P.yaml"])]);
+        let w = World::with(vec![agent(&["library/P.yaml"])]);
         w.put("P.yaml", &preset(""));
-        let answer = w.relink("p.yaml", "p.yaml");
+        let answer = w.relink("library/p.yaml", "library/p.yaml");
         match folds {
             true => {
                 let answer = answer.unwrap();
-                assert_eq!(fixed(&answer), [("p.yaml", "p.yaml")]);
-                assert_eq!(w.renames(), [vec![rename("p.yaml", "p.yaml")]]);
+                assert_eq!(fixed(&answer), [("library/p.yaml", "library/p.yaml")]);
+                assert_eq!(
+                    w.renames(),
+                    [vec![rename("library/p.yaml", "library/p.yaml")]]
+                );
             }
             false => assert_eq!(
                 code(answer),

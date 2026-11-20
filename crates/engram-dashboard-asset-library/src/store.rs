@@ -1,13 +1,15 @@
-//! The storage seam: every disk access to the library root goes through [`LibraryStore`] — [`FsStore`] in production,
-//! `MemStore` (`#[cfg(test)]`) in tests.
+//! The storage seam: every disk access to the library goes through [`LibraryStore`] — [`FsStore`] in production,
+//! `MemStore` (`#[cfg(test)]`) in tests. The store works on one mount's folder at a time (`root` below) and knows no
+//! mount names: it takes and returns [`MountPath`]s, paths inside that folder (ADR-0400 — `mounts.rs` is the only
+//! converter to the virtual paths of the catalog).
 //!
 //! ## Rules every implementation keeps
 //!
-//! - **Link policy (U1 (a))**: only the configured library root may be a link. A walk never enters a link below the root
+//! - **Link policy (U1 (a))**: only a mount's folder itself may be a link. A walk never enters a link below it
 //!   (folder or file) and never lists it; it reports it in [`ScanListing::skipped_links`]. A partial scan whose `under`
 //!   is a link or lies below one walks nothing ([`LibraryStore::first_link`] — the one component test for a path below
-//!   the root).
-//! - **Names**: [`admits`] is the name rule every way into the catalog shares — no name starting with `.` (so the root's
+//!   the folder).
+//! - **Names**: [`admits`] is the name rule every way into the catalog shares — no name starting with `.` (so a mount's
 //!   `.trash` is never walked) and no base temp name. Nothing here deletes or rewrites a leftover temp file
 //!   (ADR-0335); the only temp files touched are base `write_atomic`'s own, whose base naming could truncate a
 //!   leftover only in the rare case of the same pid and counter (base behaviour, not this module's).
@@ -22,6 +24,7 @@
 // ADR-0324
 // ADR-0335
 // ADR-0365
+// ADR-0400
 // TRD S25 step-7 §3-5
 
 use std::collections::HashMap;
@@ -36,13 +39,14 @@ use engram_dashboard_base::file::{
 use engram_dashboard_platform::fs::{file_identity, retry_busy, sync_dir, FileIdentity, Retry};
 use walkdir::WalkDir;
 
+use crate::mounts::MountPath;
 use crate::path::LibPath;
 
-/// The root's Engram trash folder — a fixed name under the root, never walked ([`admits`] refuses dot names).
+/// A mount's Engram trash folder — a fixed name in the mount's folder, never walked ([`admits`] refuses dot names).
 // TRD S25 B8 · G31
 pub const TRASH_DIR: &str = ".trash";
 
-/// Every disk access to the library. Paths are disk paths; `root` is the configured library root.
+/// Every disk access to the library. Paths are disk paths; `root` is one mount's folder.
 pub trait LibraryStore: Send + Sync {
     /// Lists the library under `root` (`under = None`) or the range `under` (a partial scan), drawing `seq()` before
     /// every step of the walk (module header). `Err` = a full scan whose root is missing, not a folder or cannot be
@@ -53,13 +57,13 @@ pub trait LibraryStore: Send + Sync {
     fn scan(
         &self,
         root: &Path,
-        under: Option<&LibPath>,
+        under: Option<&MountPath>,
         seq: &dyn Fn() -> u64,
     ) -> io::Result<ScanListing>;
     /// The first folder or file of `rel`, from the root down, that is a link (U1). The root itself is not counted.
     /// `Ok(None)` = no link, including when a name of `rel` does not exist (nothing below it can be a link).
     // ADR-0365
-    fn first_link(&self, root: &Path, rel: &LibPath) -> io::Result<Option<LibPath>>;
+    fn first_link(&self, root: &Path, rel: &MountPath) -> io::Result<Option<MountPath>>;
     /// The bytes of the file at `path`, at most `cap` bytes — a longer file is `InvalidData` (base `read_capped`'s
     /// rule), read only up to `cap + 1`.
     fn read(&self, path: &Path, cap: u64) -> io::Result<Vec<u8>>;
@@ -90,29 +94,29 @@ pub trait LibraryStore: Send + Sync {
 /// What one scan saw.
 #[derive(Clone, Debug, Default)]
 pub struct ScanListing {
-    /// The library root the scan walked from — the base of every [`LibPath`] here.
+    /// The mount folder the scan walked from — the base of every [`MountPath`] here.
     pub root: PathBuf,
     /// Admitted files, each with its tag and the number drawn before the step that yielded it.
     pub files: Vec<ScanEntry>,
     /// Admitted folders the walk listed (a range's own folder included).
-    pub folders: Vec<LibPath>,
+    pub folders: Vec<MountPath>,
     /// Per listed folder (`None` = the root), the number drawn before the step that yielded it — every read of that
     /// folder's entries comes after it.
-    pub listed_at: HashMap<Option<LibPath>, u64>,
+    pub listed_at: HashMap<Option<MountPath>, u64>,
     /// A whole range observed absent — a partial scan's `under` that is a link or lies below one, or that was not
     /// found — with the number drawn before that observation.
-    pub absent_ranges: Vec<(LibPath, u64)>,
+    pub absent_ranges: Vec<(MountPath, u64)>,
     /// Links below the root that were not entered (and a partial scan's `under` when it lies at or below one).
-    pub skipped_links: Vec<LibPath>,
+    pub skipped_links: Vec<MountPath>,
     /// Where the walk failed: a folder whose listing failed at open or part-way (`None` = the root), or a file whose
     /// metadata failed; with the error text.
-    pub errors: Vec<(Option<LibPath>, String)>,
+    pub errors: Vec<(Option<MountPath>, String)>,
 }
 
 /// One admitted file of a scan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanEntry {
-    pub rel: LibPath,
+    pub rel: MountPath,
     pub tag: ContentTag,
     /// The number drawn before the step that yielded this file. Its tag and bytes are read after it, so it is the
     /// read sequence of an item made from them.
@@ -133,10 +137,12 @@ pub struct ContentTag {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrashBundle(pub String);
 
-/// The name rule every way into the catalog shares (scan, safety net, late merge): no name starting with `.` and no
-/// base temp name (`base::file::is_temp_name` — the shape is base's, not copied here).
-pub fn admits(rel: &LibPath) -> bool {
-    rel.as_str()
+/// The name rule every way into the catalog shares (scan, safety net, late merge), over every name of the `/` path
+/// `names` inside one mount: no name starting with `.` and no base temp name (`base::file::is_temp_name` — the shape
+/// is base's, not copied here). A virtual path is judged through `mounts::admits_inside`, which leaves the mount's own
+/// name out.
+pub fn admits(names: &str) -> bool {
+    names
         .split('/')
         .all(|name| !name.starts_with('.') && !is_temp_name(name))
 }
@@ -165,7 +171,7 @@ impl LibraryStore for FsStore {
     fn scan(
         &self,
         root: &Path,
-        under: Option<&LibPath>,
+        under: Option<&MountPath>,
         seq: &dyn Fn() -> u64,
     ) -> io::Result<ScanListing> {
         let mut listing = ScanListing {
@@ -201,7 +207,7 @@ impl LibraryStore for FsStore {
             .into_iter()
             .filter_entry(|entry| entry.depth() == 0 || admitted_on_disk(root, entry.path()));
         // The folder open at each depth — an entry error without a path belongs to the folder one level up.
-        let mut open: Vec<Option<LibPath>> = Vec::new();
+        let mut open: Vec<Option<MountPath>> = Vec::new();
         loop {
             // Drawn before the step: if it yields folder D, walkdir has opened D inside it and reads D's entries only
             //   in later steps (premise 47) — so this number precedes every read of D.
@@ -214,7 +220,7 @@ impl LibraryStore for FsStore {
                         top.clone()
                     } else {
                         // `filter_entry` admitted it, so the name converts.
-                        LibPath::from_disk(root, entry.path()).ok()
+                        MountPath::from_disk(root, entry.path()).ok()
                     };
                     // Below the root, or a partial scan's `under` that became a link after `first_link`.
                     if entry.path_is_symlink() && (depth > 0 || under.is_some()) {
@@ -304,23 +310,20 @@ impl LibraryStore for FsStore {
         Ok(listing)
     }
 
-    fn first_link(&self, root: &Path, rel: &LibPath) -> io::Result<Option<LibPath>> {
+    fn first_link(&self, root: &Path, rel: &MountPath) -> io::Result<Option<MountPath>> {
         let mut path = root.to_path_buf();
-        let mut end = 0;
         for name in rel.as_str().split('/') {
             path.push(name);
-            end += name.len();
             match fs::symlink_metadata(&path) {
                 Ok(meta) if meta.file_type().is_symlink() => {
-                    let prefix = LibPath::parse(&rel.as_str()[..end])
-                        .expect("a leading run of names of a library path is one");
+                    let prefix = MountPath::from_disk(root, &path)
+                        .expect("a leading run of names of a path inside a mount is one");
                     return Ok(Some(prefix));
                 }
                 Ok(_) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
                 Err(e) => return Err(e),
             }
-            end += 1;
         }
         Ok(None)
     }
@@ -416,8 +419,8 @@ fn present<T>(stat: &io::Result<T>) -> bool {
     stat.is_ok()
 }
 
-fn refuse_unadmitted(under: &LibPath) -> io::Result<()> {
-    if admits(under) {
+fn refuse_unadmitted(under: &MountPath) -> io::Result<()> {
+    if admits(under.as_str()) {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -430,8 +433,8 @@ fn refuse_unadmitted(under: &LibPath) -> io::Result<()> {
 // A name that cannot be a library path (not UTF-8, a trailing '.' or space, a reserved device name) can never be an
 //   item; it is left out like a dot name and logged.
 fn admitted_on_disk(root: &Path, path: &Path) -> bool {
-    match LibPath::from_disk(root, path) {
-        Ok(rel) => admits(&rel),
+    match MountPath::from_disk(root, path) {
+        Ok(rel) => admits(rel.as_str()),
         Err(e) => {
             tracing::warn!(
                 ?path,
@@ -461,8 +464,8 @@ fn followed_folder(entry: &walkdir::DirEntry) -> bool {
 /// failure is an error entry for the range.
 // ADR-0387
 fn range_probe(
-    probe: io::Result<Option<LibPath>>,
-    under: &LibPath,
+    probe: io::Result<Option<MountPath>>,
+    under: &MountPath,
     at: u64,
     listing: &mut ScanListing,
 ) -> bool {
@@ -487,9 +490,9 @@ enum Placement {
     Start { not_found: bool },
     /// An entry (folder or file) that vanished after its parent listed it — as if never listed. The path, when it is a
     /// library path (`None` = it is not one, so nothing of the listing names it).
-    Vanished(Option<LibPath>),
+    Vanished(Option<MountPath>),
     /// A failure charged to this place (`None` = the root): its items are kept.
-    Charged(Option<LibPath>),
+    Charged(Option<MountPath>),
 }
 
 /// The place of one walkdir error. walkdir gives a path for a failure to read or open that path (`depth` = its own
@@ -502,14 +505,14 @@ fn place_error(
     not_found: bool,
     root: &Path,
     start: &Path,
-    top: &Option<LibPath>,
-    open: &[Option<LibPath>],
+    top: &Option<MountPath>,
+    open: &[Option<MountPath>],
 ) -> Placement {
     match path {
         Some(path) if path == start => Placement::Start { not_found },
-        Some(path) if not_found => Placement::Vanished(LibPath::from_disk(root, path).ok()),
+        Some(path) if not_found => Placement::Vanished(MountPath::from_disk(root, path).ok()),
         Some(path) => {
-            Placement::Charged(LibPath::from_disk(root, path).map_or_else(|_| top.clone(), Some))
+            Placement::Charged(MountPath::from_disk(root, path).map_or_else(|_| top.clone(), Some))
         }
         None => Placement::Charged(
             open.get(depth.wrapping_sub(1))
@@ -556,8 +559,8 @@ fn content_tag(
 }
 
 fn trash_path(root: &Path, path: &Path, bundle: &TrashBundle) -> io::Result<PathBuf> {
-    // Through `LibPath`: names only, so `..` cannot leave the root and the root itself is refused.
-    let rel = LibPath::from_disk(root, path).map_err(|e| {
+    // Through `MountPath`: names only, so `..` cannot leave the folder and the folder itself is refused.
+    let rel = MountPath::from_disk(root, path).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("not a library path below the root: {e}"),
@@ -587,7 +590,7 @@ pub(crate) mod mem {
     use super::{
         admits, trash_path, ContentTag, LibraryStore, ScanEntry, ScanListing, TrashBundle,
     };
-    use crate::path::LibPath;
+    use crate::mounts::MountPath;
 
     #[derive(Clone, Debug)]
     enum Node {
@@ -635,7 +638,7 @@ pub(crate) mod mem {
         }
 
         fn at(&self, rel: &str) -> PathBuf {
-            LibPath::parse(rel).unwrap().to_path(&self.root)
+            MountPath::parse(rel).unwrap().to_path(&self.root)
         }
 
         /// A file at `rel` (folders above it are made), modified at [`OLD`] + `version` seconds — a new version
@@ -709,8 +712,8 @@ pub(crate) mod mem {
                 .collect()
         }
 
-        fn rel(&self, path: &Path) -> LibPath {
-            LibPath::from_disk(&self.root, path).unwrap()
+        fn rel(&self, path: &Path) -> MountPath {
+            MountPath::from_disk(&self.root, path).unwrap()
         }
     }
 
@@ -735,7 +738,7 @@ pub(crate) mod mem {
 
     // One folder being listed: what is left to yield, and how its enumeration ends.
     struct Open {
-        rel: Option<LibPath>,
+        rel: Option<MountPath>,
         left: Vec<PathBuf>,
         failure: Option<io::Error>,
     }
@@ -744,7 +747,7 @@ pub(crate) mod mem {
         fn scan(
             &self,
             root: &Path,
-            under: Option<&LibPath>,
+            under: Option<&MountPath>,
             seq: &dyn Fn() -> u64,
         ) -> io::Result<ScanListing> {
             assert_eq!(root, self.root, "MemStore has one root");
@@ -831,7 +834,7 @@ pub(crate) mod mem {
                     continue;
                 };
                 let rel = self.rel(&path);
-                if !admits(&rel) {
+                if !admits(rel.as_str()) {
                     continue;
                 }
                 match node {
@@ -853,15 +856,15 @@ pub(crate) mod mem {
             Ok(listing)
         }
 
-        fn first_link(&self, root: &Path, rel: &LibPath) -> io::Result<Option<LibPath>> {
+        fn first_link(&self, root: &Path, rel: &MountPath) -> io::Result<Option<MountPath>> {
             let state = self.state.lock().unwrap();
             let mut path = root.to_path_buf();
-            let mut names: Vec<&str> = Vec::new();
             for name in rel.as_str().split('/') {
                 path.push(name);
-                names.push(name);
                 match state.nodes.get(&path) {
-                    Some(Node::Link) => return Ok(Some(LibPath::parse(&names.join("/")).unwrap())),
+                    Some(Node::Link) => {
+                        return Ok(Some(MountPath::from_disk(root, &path).unwrap()))
+                    }
                     Some(_) => {}
                     None => return Ok(None),
                 }
@@ -1005,7 +1008,7 @@ pub(crate) mod mem {
         }
     }
 
-    fn open_folder(state: &State, path: &Path, rel: Option<LibPath>) -> Open {
+    fn open_folder(state: &State, path: &Path, rel: Option<MountPath>) -> Open {
         let mut left = MemStore::children(state, path);
         let failure = match state.list_failures.get(path) {
             None => None,
@@ -1031,8 +1034,8 @@ mod tests {
 
     use super::*;
 
-    fn lib(text: &str) -> LibPath {
-        LibPath::parse(text).unwrap()
+    fn lib(text: &str) -> MountPath {
+        MountPath::parse(text).unwrap()
     }
 
     fn write(root: &Path, rel: &str, text: &str) -> PathBuf {
@@ -1090,7 +1093,7 @@ mod tests {
     }
 
     fn folder_names(listing: &ScanListing) -> Vec<&str> {
-        let mut names: Vec<&str> = listing.folders.iter().map(LibPath::as_str).collect();
+        let mut names: Vec<&str> = listing.folders.iter().map(MountPath::as_str).collect();
         names.sort_unstable();
         names
     }
@@ -1100,7 +1103,7 @@ mod tests {
     #[test]
     fn admits_refuses_dot_names_and_base_temp_names_at_any_depth() {
         for good in ["a.md", "rules/a.md", "a.tmp", "a.md.tmp", "x/y.tmp12"] {
-            assert!(admits(&lib(good)), "{good}");
+            assert!(admits(good), "{good}");
         }
         for bad in [
             ".trash",
@@ -1110,7 +1113,7 @@ mod tests {
             "a.md.tmp4120.0",
             "x/p.yaml.tmp1.2/y.md",
         ] {
-            assert!(!admits(&lib(bad)), "{bad}");
+            assert!(!admits(bad), "{bad}");
         }
     }
 
@@ -1389,7 +1392,7 @@ mod tests {
     #[test]
     fn the_range_probe_takes_a_path_below_a_file_as_absent_and_other_failures_as_errors() {
         let under = lib("a/b");
-        let probe = |answer: io::Result<Option<LibPath>>| {
+        let probe = |answer: io::Result<Option<MountPath>>| {
             let mut listing = ScanListing::default();
             let walk = range_probe(answer, &under, 7, &mut listing);
             (walk, listing)
@@ -1637,7 +1640,7 @@ mod tests {
     fn walk_errors_are_placed_by_path_depth_and_kind() {
         let root = Path::new("/lib");
         let start = Path::new("/lib");
-        let top: Option<LibPath> = None;
+        let top: Option<MountPath> = None;
         let open = [None, Some(lib("a")), Some(lib("a/b"))];
         let disk = |rel: &str| lib(rel).to_path(root);
         let table: [(Option<PathBuf>, usize, bool, Placement); 8] = [

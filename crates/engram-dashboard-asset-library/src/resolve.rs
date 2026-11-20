@@ -46,6 +46,7 @@ use crate::folder::FolderStatus;
 use crate::format::read::{ITEM_PATH_INVALID, WRONG_KIND};
 use crate::format::{conflict_key, ListName, PresetDoc};
 use crate::gate::{NOT_FOUND, NO_ROOT};
+use crate::mounts::Mounts;
 use crate::path::{AssetRef, BuiltinId, FolderRef, PathError, PresetItem};
 use crate::validate::check_skill;
 use crate::LIBRARY_UNAVAILABLE;
@@ -369,11 +370,12 @@ pub(crate) fn expand(target: &Target, lookup: &dyn Lookup, backends: &dyn Backen
     walk.finish()
 }
 
-/// The catalog and the built-ins as a [`Lookup`] — a library item is present when the catalog holds it.
+/// The catalog and the built-ins as a [`Lookup`] — a library item is present when the catalog holds it and its mount is
+/// registered.
 pub(crate) struct CatalogLookup<'a> {
     pub(crate) catalog: &'a Catalog,
-    /// The root the catalog was scanned from — library disk paths are taken under it.
-    pub(crate) root: Option<&'a Path>,
+    /// The mounts the catalog was scanned from — a library item's disk path is taken in its mount's folder.
+    pub(crate) mounts: &'a Mounts,
     pub(crate) builtins: &'a Builtins,
 }
 
@@ -381,11 +383,15 @@ impl Lookup for CatalogLookup<'_> {
     fn item(&self, r: &AssetRef) -> Looked<'_> {
         match r {
             AssetRef::BuiltIn(id) => Looked::Present(self.builtins.view(*id)),
-            AssetRef::Library(path) => match self.catalog.get(&key(path)) {
-                Some(item) => Looked::Present(ItemView {
+            AssetRef::Library(path) => match self
+                .catalog
+                .get(&key(path))
+                .and_then(|item| Some((item, self.mounts.disk_path(&item.path)?)))
+            {
+                Some((item, file)) => Looked::Present(ItemView {
                     kind: &item.kind,
                     content: &item.content,
-                    file: self.root.map(|root| item.path.to_path(root)),
+                    file: Some(file),
                     stand_in: None,
                 }),
                 None => Looked::Missing,
@@ -894,6 +900,7 @@ mod tests {
     use super::*;
     use crate::builtin::tests::full;
     use crate::catalog::harness::Lib;
+    use crate::mounts::Mount;
     use engram_dashboard_platform::fs::normalize_folder;
 
     const T: AgentOutputFormat = AgentOutputFormat::Terminal;
@@ -947,9 +954,14 @@ mod tests {
     }
 
     fn resolve_with(lib: &Lib, builtins: &Builtins, target: &Target) -> Resolution {
+        let mounts = Mounts::new(vec![Mount {
+            name: lib.mount.clone(),
+            folder: lib.root.clone(),
+        }])
+        .unwrap();
         let lookup = CatalogLookup {
             catalog: &lib.catalog,
-            root: Some(&lib.root),
+            mounts: &mounts,
             builtins,
         };
         resolve(target, &lookup, &lib.backends)
@@ -1017,20 +1029,31 @@ mod tests {
         let lib = library(&[
             (
                 "A.yaml",
-                &preset("presets:\n  - C.yaml\ninstructions:\n  - a.md\n"),
+                &preset("presets:\n  - library/C.yaml\ninstructions:\n  - library/a.md\n"),
             ),
             (
                 "B.yaml",
-                &preset("presets:\n  - C.yaml\ninstructions:\n  - x.md\n  - b.md\n"),
+                &preset("presets:\n  - library/C.yaml\ninstructions:\n  - library/x.md\n  - library/b.md\n"),
             ),
-            ("C.yaml", &preset("instructions:\n  - x.md\n  - c.md\n")),
+            ("C.yaml", &preset("instructions:\n  - library/x.md\n  - library/c.md\n")),
             ("a.md", "a"),
             ("b.md", "b"),
             ("c.md", "c"),
             ("x.md", "x"),
         ]);
-        let resolution = run(&lib, &agent("claude", J, &["A.yaml", "B.yaml"]));
-        assert_eq!(instructions(&resolution), ["x.md", "c.md", "a.md", "b.md"]);
+        let resolution = run(
+            &lib,
+            &agent("claude", J, &["library/A.yaml", "library/B.yaml"]),
+        );
+        assert_eq!(
+            instructions(&resolution),
+            [
+                "library/x.md",
+                "library/c.md",
+                "library/a.md",
+                "library/b.md"
+            ]
+        );
         assert_eq!(
             resolution.instructions[0].1,
             Path::new("/lib").join("x.md"),
@@ -1039,21 +1062,21 @@ mod tests {
         assert!(resolution.problems.is_empty(), "{:?}", resolution.problems);
     }
 
-    // Parent §1-3 1 (G51): [A, B], A = [common a1 · codex a2], B = [common b1 · codex b2]; A holds C.
+    // Parent §1-3 1 (G51): [library/A, library/B], A = [common a1 · codex a2], B = [common b1 · codex b2]; A holds C.
     #[test]
     fn tagged_items_follow_their_own_presets_common_items() {
         let lib = library(&[
             (
                 "A.yaml",
-                &preset("presets:\n  - C.yaml\ninstructions:\n  - a1.md\n  - {path: a2.md, backend: codex}\n"),
+                &preset("presets:\n  - library/C.yaml\ninstructions:\n  - library/a1.md\n  - {path: library/a2.md, backend: codex}\n"),
             ),
             (
                 "B.yaml",
-                &preset("instructions:\n  - {path: b2.md, backend: codex}\n  - b1.md\n"),
+                &preset("instructions:\n  - {path: library/b2.md, backend: codex}\n  - library/b1.md\n"),
             ),
             (
                 "C.yaml",
-                &preset("instructions:\n  - {path: c2.md, backend: Codex}\n  - c1.md\n"),
+                &preset("instructions:\n  - {path: library/c2.md, backend: Codex}\n  - library/c1.md\n"),
             ),
             ("a1.md", "1"),
             ("a2.md", "2"),
@@ -1062,13 +1085,29 @@ mod tests {
             ("c1.md", "1"),
             ("c2.md", "2"),
         ]);
-        let codex = run(&lib, &agent("codex", J, &["A.yaml", "B.yaml"]));
+        let codex = run(
+            &lib,
+            &agent("codex", J, &["library/A.yaml", "library/B.yaml"]),
+        );
         assert_eq!(
             instructions(&codex),
-            ["c1.md", "c2.md", "a1.md", "a2.md", "b1.md", "b2.md"]
+            [
+                "library/c1.md",
+                "library/c2.md",
+                "library/a1.md",
+                "library/a2.md",
+                "library/b1.md",
+                "library/b2.md"
+            ]
         );
-        let claude = run(&lib, &agent("claude", J, &["A.yaml", "B.yaml"]));
-        assert_eq!(instructions(&claude), ["c1.md", "a1.md", "b1.md"]);
+        let claude = run(
+            &lib,
+            &agent("claude", J, &["library/A.yaml", "library/B.yaml"]),
+        );
+        assert_eq!(
+            instructions(&claude),
+            ["library/c1.md", "library/a1.md", "library/b1.md"]
+        );
     }
 
     #[test]
@@ -1076,23 +1115,27 @@ mod tests {
         let lib = library(&[
             (
                 "A.yaml",
-                &preset("presets:\n  - B.yaml\ninstructions:\n  - a.md\n"),
+                &preset("presets:\n  - library/B.yaml\ninstructions:\n  - library/a.md\n"),
             ),
             (
                 "B.yaml",
-                &preset("instructions:\n  - b.md\npresets:\n  - A.yaml\n"),
+                &preset("instructions:\n  - library/b.md\npresets:\n  - library/A.yaml\n"),
             ),
             ("a.md", "a"),
             ("b.md", "b"),
         ]);
-        let resolution = run(&lib, &agent("claude", J, &["A.yaml"]));
-        assert_eq!(instructions(&resolution), ["b.md", "a.md"], "each once");
+        let resolution = run(&lib, &agent("claude", J, &["library/A.yaml"]));
+        assert_eq!(
+            instructions(&resolution),
+            ["library/b.md", "library/a.md"],
+            "each once"
+        );
         assert_eq!(
             resolution.problems,
             [BlockReason::Broken {
-                item: "A.yaml".to_owned(),
-                via: via(&["A.yaml", "B.yaml"]),
-                reason: reason(PRESET_CYCLE, json!({ "path": "A.yaml" }), Some(6)),
+                item: "library/A.yaml".to_owned(),
+                via: via(&["library/A.yaml", "library/B.yaml"]),
+                reason: reason(PRESET_CYCLE, json!({ "path": "library/A.yaml" }), Some(6)),
             }]
         );
     }
@@ -1102,25 +1145,28 @@ mod tests {
         let lib = library(&[
             (
                 "P.yaml",
-                &preset("presets:\n  - N.yaml\n  - {path: Q.yaml, backend: codex}\n  - bad.yaml\n"),
+                &preset("presets:\n  - library/N.yaml\n  - {path: library/Q.yaml, backend: codex}\n  - library/bad.yaml\n"),
             ),
             (
                 "N.yaml",
-                &preset("instructions:\n  - gone.md\nskills:\n  - a.md\n"),
+                &preset("instructions:\n  - library/gone.md\nskills:\n  - library/a.md\n"),
             ),
             ("Q.yaml", &preset("")),
             ("bad.yaml", "kind: preset\nversion: [\n"),
             ("a.md", "a"),
         ]);
-        let resolution = run(&lib, &agent("claude", J, &["P.yaml", "absent.yaml"]));
+        let resolution = run(
+            &lib,
+            &agent("claude", J, &["library/P.yaml", "library/absent.yaml"]),
+        );
         assert_eq!(
             problems(&resolution.problems),
             [
-                row("P.yaml", "backend-tag-not-allowed"),
-                row("gone.md", NOT_FOUND),
-                row("a.md", WRONG_KIND),
-                row("bad.yaml", "yaml-syntax"),
-                row("absent.yaml", NOT_FOUND),
+                row("library/P.yaml", "backend-tag-not-allowed"),
+                row("library/gone.md", NOT_FOUND),
+                row("library/a.md", WRONG_KIND),
+                row("library/bad.yaml", "yaml-syntax"),
+                row("library/absent.yaml", NOT_FOUND),
             ]
         );
         let BlockReason::Missing {
@@ -1131,8 +1177,8 @@ mod tests {
         else {
             panic!("{:?}", resolution.problems[1])
         };
-        assert_eq!(*chain, via(&["P.yaml", "N.yaml"]));
-        assert_eq!(why.args, json!({ "path": "gone.md" }));
+        assert_eq!(*chain, via(&["library/P.yaml", "library/N.yaml"]));
+        assert_eq!(why.args, json!({ "path": "library/gone.md" }));
         assert_eq!(why.line, Some(4), "the line of the entry that names it");
         let BlockReason::Missing {
             via: chain,
@@ -1151,12 +1197,12 @@ mod tests {
         let dir = full();
         let lib = library(&[("P.yaml", &preset("presets:\n  - engram:/default\n"))]);
         let builtins = Builtins::new(Some(dir.path()), &lib.backends);
-        let resolution = resolve_with(&lib, &builtins, &agent("claude", J, &["P.yaml"]));
+        let resolution = resolve_with(&lib, &builtins, &agent("claude", J, &["library/P.yaml"]));
         assert_eq!(
             resolution.problems,
             [BlockReason::Broken {
                 item: "engram:/default".to_owned(),
-                via: via(&["P.yaml"]),
+                via: via(&["library/P.yaml"]),
                 reason: reason(
                     BUILTIN_IN_LIBRARY_PRESET,
                     json!({ "path": "engram:/default" }),
@@ -1203,7 +1249,7 @@ mod tests {
     #[test]
     fn a_missing_builtin_folder_means_no_priming_and_no_block() {
         let lib = library(&[("P.yaml", &preset("instructions:\n  - engram:/priming\n"))]);
-        let mut target = agent("claude", J, &["P.yaml"]);
+        let mut target = agent("claude", J, &["library/P.yaml"]);
         target.default_preset = true;
         let resolution = run(&lib, &target);
         assert!(!resolution.include_priming);
@@ -1278,7 +1324,7 @@ mod tests {
         let resolution = resolve_with(&lib, &builtins, &unreached);
         assert!(resolution.include_priming);
         assert!(resolution.notices.is_empty() && resolution.problems.is_empty());
-        let twice = resolve_with(&lib, &builtins, &agent("claude", J, &["P.yaml"]));
+        let twice = resolve_with(&lib, &builtins, &agent("claude", J, &["library/P.yaml"]));
         let told: Vec<&Value> = twice.notices.iter().map(|n| &n.args["path"]).collect();
         assert_eq!(told, ["engram:/settings/default"], "reached from two lists");
         assert_eq!(
@@ -1295,34 +1341,40 @@ mod tests {
         let lib = library(&[
             (
                 "P.yaml",
-                &preset("presets:\n  - N.yaml\nskills:\n  - s1\n  - {path: s3, backend: codex}\n  - {path: s4, backend: claude}\n"),
+                &preset("presets:\n  - library/N.yaml\nskills:\n  - library/s1\n  - {path: library/s3, backend: codex}\n  - {path: library/s4, backend: claude}\n"),
             ),
-            ("N.yaml", &preset("skills:\n  - s2\n")),
+            ("N.yaml", &preset("skills:\n  - library/s2\n")),
             ("s1/SKILL.md", &skill("dup", "one")),
             ("s2/SKILL.md", &skill("Dup", "two")),
             ("s3/SKILL.md", &skill("dup", "three")),
             ("s4/SKILL.md", &skill("solo", "four")),
         ]);
-        let claude = run(&lib, &agent("claude", T, &["P.yaml"]));
+        let claude = run(&lib, &agent("claude", T, &["library/P.yaml"]));
         assert_eq!(skill_names(&claude), ["Dup", "dup", "solo"]);
         assert_eq!(
             claude.problems,
             [BlockReason::Conflict {
                 reason: reason(SKILL_NAME_CONFLICT, json!({ "name": "dup" }), None),
                 items: vec![
-                    ("s2".to_owned(), via(&["P.yaml", "N.yaml"])),
-                    ("s1".to_owned(), via(&["P.yaml"])),
+                    (
+                        "library/s2".to_owned(),
+                        via(&["library/P.yaml", "library/N.yaml"])
+                    ),
+                    ("library/s1".to_owned(), via(&["library/P.yaml"])),
                 ],
             }],
             "the codex-tagged s3 is not loaded"
         );
-        let codex_json = run(&lib, &agent("codex", J, &["P.yaml"]));
+        let codex_json = run(&lib, &agent("codex", J, &["library/P.yaml"]));
         let conflicts: Vec<_> = problems(&codex_json.problems)
             .into_iter()
             .filter(|(_, code)| code == SKILL_NAME_CONFLICT)
             .collect();
-        assert_eq!(conflicts, [row("s2+s1+s3", SKILL_NAME_CONFLICT)]);
-        let codex_terminal = run(&lib, &agent("codex", T, &["P.yaml"]));
+        assert_eq!(
+            conflicts,
+            [row("library/s2+library/s1+library/s3", SKILL_NAME_CONFLICT)]
+        );
+        let codex_terminal = run(&lib, &agent("codex", T, &["library/P.yaml"]));
         assert!(
             codex_terminal.skills.is_empty(),
             "the terminal loads no skills"
@@ -1338,7 +1390,7 @@ mod tests {
         let lib = library(&[
             (
                 "P.yaml",
-                &preset("skills:\n  - empty\n  - Upper\n  - {path: odd, backend: gamma}\n"),
+                &preset("skills:\n  - library/empty\n  - library/Upper\n  - {path: library/odd, backend: gamma}\n"),
             ),
             (
                 "empty/SKILL.md",
@@ -1347,23 +1399,23 @@ mod tests {
             ("Upper/SKILL.md", &skill("Upper", "fine")),
             ("odd/SKILL.md", &skill("odd", "please refuse me")),
         ]);
-        let codex = run(&lib, &agent("codex", J, &["P.yaml"]));
+        let codex = run(&lib, &agent("codex", J, &["library/P.yaml"]));
         assert_eq!(
             problems(&codex.problems),
             [
-                row("empty", "codex-skill-description-empty"),
-                row("Upper", SKILL_NAME_INVALID),
+                row("library/empty", "codex-skill-description-empty"),
+                row("library/Upper", SKILL_NAME_INVALID),
             ]
         );
-        let claude = run(&lib, &agent("claude", J, &["P.yaml"]));
+        let claude = run(&lib, &agent("claude", J, &["library/P.yaml"]));
         assert!(claude.problems.is_empty(), "{:?}", claude.problems);
-        let gamma = run(&lib, &agent("gamma", J, &["P.yaml"]));
+        let gamma = run(&lib, &agent("gamma", J, &["library/P.yaml"]));
         assert_eq!(
             problems(&gamma.problems),
-            [row("odd", "gamma-skill-refused")]
+            [row("library/odd", "gamma-skill-refused")]
         );
         assert_eq!(skill_names(&gamma), ["empty", "Upper", "odd"]);
-        let shown = run(&lib, &alone("P.yaml"));
+        let shown = run(&lib, &alone("library/P.yaml"));
         assert!(
             shown.problems.is_empty(),
             "no format verdict without an agent"
@@ -1375,8 +1427,8 @@ mod tests {
     #[test]
     fn alone_a_same_name_pair_collides_only_when_some_backend_loads_both() {
         let item = |path: &str, tag: Option<&str>| match tag {
-            None => format!("  - {path}\n"),
-            Some(tag) => format!("  - {{path: {path}, backend: {tag}}}\n"),
+            None => format!("  - library/{path}\n"),
+            Some(tag) => format!("  - {{path: library/{path}, backend: {tag}}}\n"),
         };
         for (first, second, collides) in [
             (None, None, true),
@@ -1393,9 +1445,9 @@ mod tests {
                 ("one/SKILL.md", &skill("same", "1")),
                 ("two/SKILL.md", &skill("same", "2")),
             ]);
-            let resolution = run(&lib, &alone("P.yaml"));
+            let resolution = run(&lib, &alone("library/P.yaml"));
             let expected = if collides {
-                vec![row("one+two", SKILL_NAME_CONFLICT)]
+                vec![row("library/one+library/two", SKILL_NAME_CONFLICT)]
             } else {
                 Vec::new()
             };
@@ -1412,18 +1464,18 @@ mod tests {
     #[test]
     fn an_agent_loads_only_its_backends_field_and_is_blocked_only_by_its_refusal() {
         let lib = library(&[
-            ("P.yaml", &preset("settings:\n  - s.yaml\n")),
+            ("P.yaml", &preset("settings:\n  - library/s.yaml\n")),
             (
                 "s.yaml",
                 "kind: settings\nversion: 1\nclaude:\n  model: m\ncodex:\n  - foo\ngamma:\n  unsafe: true\n",
             ),
         ]);
-        let claude = run(&lib, &agent("claude", J, &["P.yaml"]));
+        let claude = run(&lib, &agent("claude", J, &["library/P.yaml"]));
         assert_eq!(
             claude.raw_settings,
             [ResolvedSettings {
-                asset: AssetRef::parse("s.yaml").unwrap(),
-                via: via(&["P.yaml"]),
+                asset: AssetRef::parse("library/s.yaml").unwrap(),
+                via: via(&["library/P.yaml"]),
                 value: json!({ "model": "m" }),
             }]
         );
@@ -1431,19 +1483,19 @@ mod tests {
             claude.problems.is_empty(),
             "another backend's refusal does not block"
         );
-        let codex = run(&lib, &agent("codex", T, &["P.yaml"]));
+        let codex = run(&lib, &agent("codex", T, &["library/P.yaml"]));
         assert_eq!(codex.raw_settings[0].value, json!(["foo"]));
         assert_eq!(
             problems(&codex.problems),
-            [row("s.yaml", "codex-config-line-invalid")]
+            [row("library/s.yaml", "codex-config-line-invalid")]
         );
-        let gamma = run(&lib, &agent("gamma", J, &["P.yaml"]));
+        let gamma = run(&lib, &agent("gamma", J, &["library/P.yaml"]));
         assert_eq!(gamma.raw_settings[0].value, json!({ "unsafe": true }));
         assert_eq!(
             problems(&gamma.problems),
-            [row("s.yaml", "gamma-line-unsafe")]
+            [row("library/s.yaml", "gamma-line-unsafe")]
         );
-        let shown = run(&lib, &alone("P.yaml"));
+        let shown = run(&lib, &alone("library/P.yaml"));
         assert_eq!(
             shown.raw_settings[0].value,
             json!({ "claude": { "model": "m" }, "codex": ["foo"], "gamma": { "unsafe": true } })
@@ -1451,8 +1503,8 @@ mod tests {
         assert_eq!(
             problems(&shown.problems),
             [
-                row("s.yaml", "codex-config-line-invalid"),
-                row("s.yaml", "gamma-line-unsafe"),
+                row("library/s.yaml", "codex-config-line-invalid"),
+                row("library/s.yaml", "gamma-line-unsafe"),
             ]
         );
     }
@@ -1463,14 +1515,14 @@ mod tests {
         let lib = library(&[
             (
                 "P.yaml",
-                &preset("instructions:\n  - {path: k.md, backend: codex}\nskills:\n  - {path: s, backend: codex}\nsettings:\n  - c.yaml\n"),
+                &preset("instructions:\n  - {path: library/k.md, backend: codex}\nskills:\n  - {path: library/s, backend: codex}\nsettings:\n  - library/c.yaml\n"),
             ),
             ("k.md", "k"),
             ("s/SKILL.md", &skill("s", "d")),
             ("c.yaml", "kind: settings\nversion: 1\ncodex:\n  - model=o3\n"),
         ]);
         for mode in [T, J] {
-            let claude = run(&lib, &agent("claude", mode, &["P.yaml"]));
+            let claude = run(&lib, &agent("claude", mode, &["library/P.yaml"]));
             assert_eq!(claude, Resolution::default(), "{mode:?}");
         }
     }
@@ -1481,11 +1533,11 @@ mod tests {
         let lib = library(&[
             (
                 "P.yaml",
-                &preset("presets:\n  - N.yaml\ninstructions:\n  - a.md\n  - {path: k.md, backend: codex}\n  - {path: l.md, backend: claude}\nskills:\n  - s\n"),
+                &preset("presets:\n  - library/N.yaml\ninstructions:\n  - library/a.md\n  - {path: library/k.md, backend: codex}\n  - {path: library/l.md, backend: claude}\nskills:\n  - library/s\n"),
             ),
             (
                 "N.yaml",
-                &preset("instructions:\n  - n.md\nskills:\n  - t\n"),
+                &preset("instructions:\n  - library/n.md\nskills:\n  - library/t\n"),
             ),
             ("a.md", "a"),
             ("k.md", "k"),
@@ -1495,7 +1547,7 @@ mod tests {
             ("t/SKILL.md", &skill("t", "d")),
         ]);
         let builtins = Builtins::new(Some(dir.path()), &lib.backends);
-        let mut target = agent("codex", T, &["P.yaml"]);
+        let mut target = agent("codex", T, &["library/P.yaml"]);
         target.default_preset = true;
         let terminal = resolve_with(&lib, &builtins, &target);
         assert!(terminal.include_priming, "the priming still loads");
@@ -1504,13 +1556,16 @@ mod tests {
             terminal.notices,
             [reason(
                 "codex-terminal-omitted",
-                json!({ "instructions": ["n.md", "a.md", "k.md"], "skills": ["t", "s"] }),
+                json!({ "instructions": ["library/n.md", "library/a.md", "library/k.md"], "skills": ["t", "s"] }),
                 None
             )]
         );
         target.backend = Some("claude".to_owned());
         let claude = resolve_with(&lib, &builtins, &target);
-        assert_eq!(instructions(&claude), ["n.md", "a.md", "l.md"]);
+        assert_eq!(
+            instructions(&claude),
+            ["library/n.md", "library/a.md", "library/l.md"]
+        );
         assert!(claude.notices.is_empty());
     }
 
@@ -1519,7 +1574,7 @@ mod tests {
         let lib = library(&[
             (
                 "P.yaml",
-                &preset("instructions:\n  - c.md\n  - {path: g.md, backend: GAMMA}\n  - {path: k.md, backend: claude}\nsettings:\n  - s.yaml\n"),
+                &preset("instructions:\n  - library/c.md\n  - {path: library/g.md, backend: GAMMA}\n  - {path: library/k.md, backend: claude}\nsettings:\n  - library/s.yaml\n"),
             ),
             ("c.md", "c"),
             ("g.md", "g"),
@@ -1529,8 +1584,8 @@ mod tests {
                 "kind: settings\nversion: 1\nclaude: {a: 1}\nGamma: {b: 2}\n",
             ),
         ]);
-        let gamma = run(&lib, &agent("gamma", J, &["P.yaml"]));
-        assert_eq!(instructions(&gamma), ["c.md", "g.md"]);
+        let gamma = run(&lib, &agent("gamma", J, &["library/P.yaml"]));
+        assert_eq!(instructions(&gamma), ["library/c.md", "library/g.md"]);
         assert_eq!(gamma.raw_settings.len(), 1);
         assert_eq!(gamma.raw_settings[0].value, json!({ "b": 2 }));
         assert!(gamma.problems.is_empty() && gamma.notices.is_empty());
@@ -1547,17 +1602,20 @@ mod tests {
             (
                 "P.yaml",
                 &preset(&format!(
-                    "presets:\n  - N.yaml\nfolders:\n  - '{again}'\n  - '{other}'\n"
+                    "presets:\n  - library/N.yaml\nfolders:\n  - '{again}'\n  - '{other}'\n"
                 )),
             ),
             ("N.yaml", &preset(&format!("folders:\n  - '{rules}'\n"))),
         ]);
-        let resolution = run(&lib, &agent("codex", J, &["P.yaml"]));
+        let resolution = run(&lib, &agent("codex", J, &["library/P.yaml"]));
         assert_eq!(
             resolution.folder_paths(),
             [normalized(&rules), normalized(&other)]
         );
-        assert_eq!(resolution.folders[0].via, via(&["P.yaml", "N.yaml"]));
+        assert_eq!(
+            resolution.folders[0].via,
+            via(&["library/P.yaml", "library/N.yaml"])
+        );
         assert_eq!(resolution.folders[0].key, path_key(&normalized(&rules)));
         assert_eq!(resolution.folders[0].status, None);
         assert!(resolution.notices.is_empty() && resolution.problems.is_empty());
@@ -1572,21 +1630,21 @@ mod tests {
         let lib = library(&[("P.yaml", &preset(&format!("folders:\n  - '{folder}'\n")))]);
         let path = normalized(&folder);
         let shown = path.to_string_lossy().into_owned();
-        let mut targets = vec![alone("P.yaml")];
+        let mut targets = vec![alone("library/P.yaml")];
         for word in ["claude", "codex", "gamma"] {
             for mode in [T, J] {
-                targets.push(agent(word, mode, &["P.yaml"]));
+                targets.push(agent(word, mode, &["library/P.yaml"]));
             }
         }
         let item = format!("folder:{shown}");
         let missing = BlockReason::Missing {
             item: item.clone(),
-            via: via(&["P.yaml"]),
+            via: via(&["library/P.yaml"]),
             reason: reason(FOLDER_NOT_FOUND, json!({ "path": shown }), Some(4)),
         };
         let unreadable = |why: &str| BlockReason::Broken {
             item: item.clone(),
-            via: via(&["P.yaml"]),
+            via: via(&["library/P.yaml"]),
             reason: reason(
                 FOLDER_UNREADABLE,
                 json!({ "path": shown, "why": why }),
@@ -1624,20 +1682,20 @@ mod tests {
         let folder = absolute("a%b");
         let lib = library(&[("P.yaml", &preset(&format!("folders:\n  - '{folder}'\n")))]);
         let shown = normalized(&folder).to_string_lossy().into_owned();
-        let claude = run(&lib, &agent("claude", T, &["P.yaml"]));
+        let claude = run(&lib, &agent("claude", T, &["library/P.yaml"]));
         assert_eq!(
             claude.problems,
             [BlockReason::Broken {
                 item: format!("folder:{shown}"),
-                via: via(&["P.yaml"]),
+                via: via(&["library/P.yaml"]),
                 reason: reason(FOLDER_PATH_CLI_UNSAFE, json!({ "path": shown }), Some(4)),
             }]
         );
         assert_eq!(claude.folders.len(), 1, "still a folder entry");
-        assert!(run(&lib, &agent("codex", J, &["P.yaml"]))
+        assert!(run(&lib, &agent("codex", J, &["library/P.yaml"]))
             .problems
             .is_empty());
-        assert!(run(&lib, &alone("P.yaml")).problems.is_empty());
+        assert!(run(&lib, &alone("library/P.yaml")).problems.is_empty());
     }
 
     // ── block ④ and the block ────────────────────────────────────────────────────────────────────────────
@@ -1651,7 +1709,7 @@ mod tests {
             (
                 "Q.yaml",
                 &preset(&format!(
-                    "instructions:\n  - x.yaml\n  - gone.md\n  - ok.md\nskills:\n  - a\n  - b\nfolders:\n  - '{folder}'\n"
+                    "instructions:\n  - library/x.yaml\n  - library/gone.md\n  - library/ok.md\nskills:\n  - library/a\n  - library/b\nfolders:\n  - '{folder}'\n"
                 )),
             ),
             ("x.yaml", "kind: preset\nversion: [\n"),
@@ -1663,21 +1721,21 @@ mod tests {
         let unparsed = vec![(raw.to_owned(), AssetRef::parse(raw).unwrap_err())];
         // With a usable root, Q loads items, a folder and the default preset's notice, and shows ① ② ③ rows; the
         //   attached spelling that is not a reference is a ② row too.
-        let mut usable = agent("claude", J, &["Q.yaml"]);
+        let mut usable = agent("claude", J, &["library/Q.yaml"]);
         usable.default_preset = true;
         usable.unparsed = unparsed.clone();
         let shown = run(&lib, &usable);
         assert_eq!(
             problems(&shown.problems),
             [
-                row("x.yaml", "yaml-syntax"),
-                row("gone.md", NOT_FOUND),
+                row("library/x.yaml", "yaml-syntax"),
+                row("library/gone.md", NOT_FOUND),
                 row(raw, ITEM_PATH_INVALID),
-                row("a+b", SKILL_NAME_CONFLICT),
+                row("library/a+library/b", SKILL_NAME_CONFLICT),
             ],
             "what block ④ stands for"
         );
-        assert_eq!(instructions(&shown), ["ok.md"]);
+        assert_eq!(instructions(&shown), ["library/ok.md"]);
         assert_eq!(skill_names(&shown), ["s", "s"]);
         assert_eq!(shown.folders.len(), 1);
         assert_eq!(shown.notices.len(), 1, "the default preset's stand-in");
@@ -1777,7 +1835,7 @@ mod tests {
     fn without_block_four_a_not_found_row_stays_even_without_a_usable_root() {
         let dir = crate::builtin::tests::folder(&[(
             crate::builtin::file_of(BuiltinId::DefaultPreset),
-            "kind: preset\nversion: 1\ninstructions:\n  - x.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/x.md\n",
         )]);
         let lib = library(&[]);
         let builtins = Builtins::new(Some(dir.path()), &lib.backends);
@@ -1788,9 +1846,9 @@ mod tests {
         assert_eq!(
             resolution.problems,
             [BlockReason::Missing {
-                item: "x.md".to_owned(),
+                item: "library/x.md".to_owned(),
                 via: via(&["engram:/default"]),
-                reason: reason(NOT_FOUND, json!({ "path": "x.md" }), Some(4)),
+                reason: reason(NOT_FOUND, json!({ "path": "library/x.md" }), Some(4)),
             }]
         );
     }
@@ -1805,14 +1863,14 @@ mod tests {
             (
                 "P.yaml",
                 &preset(&format!(
-                    "instructions:\n  - x.yaml\nskills:\n  - a\n  - b\nfolders:\n  - '{first}'\n  - '{second}'\n"
+                    "instructions:\n  - library/x.yaml\nskills:\n  - library/a\n  - library/b\nfolders:\n  - '{first}'\n  - '{second}'\n"
                 )),
             ),
             ("x.yaml", "kind: preset\nversion: [\n"),
             ("a/SKILL.md", &skill("s", "1")),
             ("b/SKILL.md", &skill("s", "2")),
         ]);
-        let mut resolution = run(&lib, &agent("claude", J, &["P.yaml"]));
+        let mut resolution = run(&lib, &agent("claude", J, &["library/P.yaml"]));
         let (first, second) = (normalized(&first), normalized(&second));
         resolution.attach_folder_status(&HashMap::from([
             (path_key(&first), FolderStatus::Missing),
@@ -1825,12 +1883,12 @@ mod tests {
         assert_eq!(
             problems(&blocked.reasons),
             [
-                row("x.yaml", "yaml-syntax"),
+                row("library/x.yaml", "yaml-syntax"),
                 row(
                     &format!("folder:{}", second.to_string_lossy()),
                     FOLDER_UNREADABLE
                 ),
-                row("a+b", SKILL_NAME_CONFLICT),
+                row("library/a+library/b", SKILL_NAME_CONFLICT),
             ],
             "by kind, expansion order kept within a kind"
         );
@@ -1854,10 +1912,10 @@ mod tests {
         assert_eq!(run(&lib, &agent("claude", J, &[])).blocked(), None);
 
         // Only skipped rows: nothing blocks.
-        let only_missing = library(&[("M.yaml", &preset("instructions:\n  - gone.md\n"))]);
+        let only_missing = library(&[("M.yaml", &preset("instructions:\n  - library/gone.md\n"))]);
         let skipped = run(
             &only_missing,
-            &agent("claude", J, &["M.yaml", "absent.yaml"]),
+            &agent("claude", J, &["library/M.yaml", "library/absent.yaml"]),
         );
         assert_eq!(skipped.blocked(), None);
         assert_eq!(skipped.skipped(), skipped.problems);
@@ -1871,31 +1929,34 @@ mod tests {
     #[test]
     fn alone_a_skill_listed_again_keeps_every_backend_it_is_listed_for() {
         let lib = library(&[
-            ("P.yaml", &preset("presets:\n  - A.yaml\n  - B.yaml\n")),
+            (
+                "P.yaml",
+                &preset("presets:\n  - library/A.yaml\n  - library/B.yaml\n"),
+            ),
             (
                 "A.yaml",
-                &preset("skills:\n  - {path: s1, backend: claude}\n"),
+                &preset("skills:\n  - {path: library/s1, backend: claude}\n"),
             ),
             (
                 "B.yaml",
-                &preset("skills:\n  - s1\n  - {path: s2, backend: codex}\n"),
+                &preset("skills:\n  - library/s1\n  - {path: library/s2, backend: codex}\n"),
             ),
             ("s1/SKILL.md", &skill("dup", "1")),
             ("s2/SKILL.md", &skill("dup", "2")),
         ]);
-        let codex = run(&lib, &agent("codex", J, &["P.yaml"]));
+        let codex = run(&lib, &agent("codex", J, &["library/P.yaml"]));
         assert_eq!(
             problems(&codex.problems),
-            [row("s1+s2", SKILL_NAME_CONFLICT)]
+            [row("library/s1+library/s2", SKILL_NAME_CONFLICT)]
         );
-        let shown = run(&lib, &alone("P.yaml"));
+        let shown = run(&lib, &alone("library/P.yaml"));
         assert_eq!(
             problems(&shown.problems),
-            [row("s1+s2", SKILL_NAME_CONFLICT)]
+            [row("library/s1+library/s2", SKILL_NAME_CONFLICT)]
         );
         assert_eq!(
             shown.skills[0].2,
-            via(&["P.yaml", "A.yaml"]),
+            via(&["library/P.yaml", "library/A.yaml"]),
             "first place kept"
         );
     }
@@ -1905,13 +1966,16 @@ mod tests {
         let lib = library(&[
             (
                 "P.yaml",
-                &preset("instructions:\n  - a.md\nskills:\n  - a.md\n"),
+                &preset("instructions:\n  - library/a.md\nskills:\n  - library/a.md\n"),
             ),
             ("a.md", "a"),
         ]);
-        let resolution = run(&lib, &agent("claude", J, &["P.yaml"]));
-        assert_eq!(instructions(&resolution), ["a.md"]);
-        assert_eq!(problems(&resolution.problems), [row("a.md", WRONG_KIND)]);
+        let resolution = run(&lib, &agent("claude", J, &["library/P.yaml"]));
+        assert_eq!(instructions(&resolution), ["library/a.md"]);
+        assert_eq!(
+            problems(&resolution.problems),
+            [row("library/a.md", WRONG_KIND)]
+        );
     }
 
     #[test]
@@ -1944,29 +2008,29 @@ mod tests {
             (
                 "P.yaml",
                 &preset(&format!(
-                    "instructions:\n  - a.md\nskills:\n  - bad-one\n  - {{path: s, backend: gamma}}\nfolders:\n  - '{blocked}'\n"
+                    "instructions:\n  - library/a.md\nskills:\n  - library/bad-one\n  - {{path: library/s, backend: gamma}}\nfolders:\n  - '{blocked}'\n"
                 )),
             ),
             ("a.md", "a"),
             ("bad-one/SKILL.md", &skill("bad-one", "d")),
             ("s/SKILL.md", &skill("s", "d")),
         ]);
-        let terminal = run(&lib, &agent("gamma", T, &["P.yaml"]));
+        let terminal = run(&lib, &agent("gamma", T, &["library/P.yaml"]));
         assert_eq!(
             terminal.notices,
             [reason(
                 "gamma-omitted",
-                json!({ "instructions": ["a.md"], "skills": ["bad-one", "s"] }),
+                json!({ "instructions": ["library/a.md"], "skills": ["bad-one", "s"] }),
                 None
             )]
         );
         assert!(terminal.instructions.is_empty() && terminal.skills.is_empty());
         let shown = normalized(&blocked).to_string_lossy().into_owned();
-        let json_mode = run(&lib, &agent("gamma", J, &["P.yaml"]));
+        let json_mode = run(&lib, &agent("gamma", J, &["library/P.yaml"]));
         assert_eq!(
             problems(&json_mode.problems),
             [
-                row("bad-one", SKILL_NAME_INVALID),
+                row("library/bad-one", SKILL_NAME_INVALID),
                 row(&format!("folder:{shown}"), FOLDER_PATH_CLI_UNSAFE),
             ]
         );
@@ -1975,6 +2039,6 @@ mod tests {
             [row(&format!("folder:{shown}"), FOLDER_PATH_CLI_UNSAFE)]
         );
         assert!(json_mode.notices.is_empty());
-        assert!(run(&lib, &alone("P.yaml")).problems.is_empty());
+        assert!(run(&lib, &alone("library/P.yaml")).problems.is_empty());
     }
 }

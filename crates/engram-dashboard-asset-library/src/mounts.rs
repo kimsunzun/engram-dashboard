@@ -3,22 +3,22 @@
 //!
 //! - **Two path types.** [`LibPath`] is a virtual path from the virtual root, `<mount>/…` — what the catalog,
 //!   references, the wire and the resolver use; a path of one name names a mount. [`MountPath`] is a path inside one
-//!   mount's folder — what the store is to take and return (the store still takes the root until the service reads
-//!   mounts). Only this module turns one into the other
-//!   ([`Mounts::locate`] · [`virtual_path`]), so the store stays mount-unaware and a missed prefix or strip does not
-//!   compile.
+//!   mount's folder — the only path type the store takes and returns. Only this module turns one into the other
+//!   ([`Mounts::locate`] · [`virtual_path`]) and joins a path to a folder on disk ([`MountPath::to_path`] ·
+//!   [`MountPath::from_disk`] · [`Mounts::disk_path`]), so the store stays mount-unaware and a missed prefix or strip
+//!   does not compile.
 //! - **Names** ([`MountName`]): one `LibPath` name, no leading `.`, at most [`NAME_MAX_CHARS`] characters, not the
 //!   built-in's [`BUILTIN_MOUNT`] (matched ASCII case-insensitively on every OS); two names are the same mount when their
 //!   platform path keys are equal. A name need not equal anything on disk.
 //! - **Overlap** ([`overlap`]): judged on canonical final paths (links and junctions resolved) by path key, component
 //!   by component, and on the file identities of the folders and their ancestors where the volume gives one, every ask
-//!   bounded. The folder being added or relocated fails closed: when its canonical path fails (no answer or an OS error)
-//!   or one of its identities gives no answer it is refused, never taken as free. A mount or reserved folder whose canonical path cannot be had is judged on its
-//!   spelling, and an identity that gives no answer is unknown. Known escapes: SMB servers that give no file id, one
-//!   share under several host spellings.
-//! - **The service still reads one root.** Until virtual paths are threaded through the service, it reads the first
-//!   mount's folder as its root ([`Mounts::root`]) and a root change relocates the first mount
-//!   ([`Mounts::set_root`]).
+//!   bounded. The folder being added or relocated fails closed: when its canonical path fails (no answer or an OS
+//!   error) or one of its identities gives no answer it is refused, never taken as free. A mount or reserved folder
+//!   whose canonical path cannot be had is judged on its spelling, and an identity that gives no answer is unknown.
+//!   Known escapes: SMB servers that give no file id, one share under several host spellings.
+//! - **Names inside a mount** ([`admits_inside`]): the store's name rule applies to the names below a mount's top only;
+//!   the mount's own name is held by the name rules above.
+//! - **`library.setRoot`** still relocates the first mount ([`Mounts::set_root`]) until the mount commands replace it.
 // ADR-0396
 // ADR-0400
 
@@ -29,6 +29,7 @@ use engram_dashboard_platform::fs::{path_key, FileIdentity, PathKey};
 
 use crate::folder::{BoundedIo, LaunchIo, Need};
 use crate::path::{LibPath, PathError};
+use crate::store::admits;
 
 /// The reserved name of the built-in mount — never registered, never stored.
 // ADR-0400
@@ -162,12 +163,22 @@ impl Mounts {
         Some((mount, rest))
     }
 
-    /// The folder the service reads as its one root: the first mount's; `None` = no mount is registered.
-    pub(crate) fn root(&self) -> Option<&Path> {
-        self.0.first().map(|mount| mount.folder.as_path())
+    /// The disk path of `path`: the rest of it under its mount's folder, or the folder itself for a one-name path.
+    /// `None` = its first name names no registered mount.
+    pub fn disk_path(&self, path: &LibPath) -> Option<PathBuf> {
+        let (mount, rest) = self.locate(path)?;
+        Some(match rest {
+            Some(rest) => rest.to_path(&mount.folder),
+            None => mount.folder.clone(),
+        })
     }
 
-    /// The service's one-root change: the first mount now maps to `folder`; with no mount registered, `folder` is
+    /// The mount `library.setRoot` relocates: the first one; `None` = no mount is registered.
+    pub(crate) fn first(&self) -> Option<&Mount> {
+        self.0.first()
+    }
+
+    /// `library.setRoot`'s change: the first mount now maps to `folder`; with no mount registered, `folder` is
     /// registered as [`FIRST_MOUNT`].
     pub(crate) fn set_root(&mut self, folder: PathBuf) {
         match self.0.first_mut() {
@@ -180,8 +191,8 @@ impl Mounts {
     }
 }
 
-/// A path inside one mount's folder, relative to it — the store's path type. Made from a virtual path only by
-/// [`Mounts::locate`], and from disk by [`MountPath::from_disk`].
+/// A path inside one mount's folder, relative to it — the store's path type, with the `LibPath` name rules. Made from a
+/// virtual path only by [`Mounts::locate`], and from disk by [`MountPath::from_disk`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MountPath(LibPath);
 
@@ -190,15 +201,59 @@ impl MountPath {
         self.0.as_str()
     }
 
-    /// The disk path of this path under the mount folder `folder` ([`LibPath::to_path`]).
+    /// The disk path of this path under the mount folder `folder`: `folder` with each name pushed in turn, so a folder
+    /// that ends in a separator (`D:\` · `\\nas\lib\` · `/`) gets no second one.
     pub fn to_path(&self, folder: &Path) -> PathBuf {
-        self.0.to_path(folder)
+        let mut path = folder.to_path_buf();
+        for name in self.as_str().split('/') {
+            path.push(name);
+        }
+        path
     }
 
-    /// The path of `path`, a disk path under the mount folder `folder` as a scan builds it ([`LibPath::from_disk`]).
+    /// The path of `path`, a disk path under the mount folder `folder` as a scan builds it (`folder` joined with
+    /// names). `path` must start with `folder` as spelled — the prefix is compared component by component, not by the
+    /// OS rule. `Err(NotUnderRoot)` = not below `folder` (or through `..`); the names must pass [`LibPath::parse`] too,
+    /// so a scanned name ending in `.` or a space is refused.
     pub fn from_disk(folder: &Path, path: &Path) -> Result<Self, PathError> {
-        LibPath::from_disk(folder, path).map(Self)
+        let rest = path
+            .strip_prefix(folder)
+            .map_err(|_| PathError::NotUnderRoot)?;
+        let mut names = Vec::new();
+        for component in rest.components() {
+            match component {
+                Component::Normal(name) => names.push(name.to_str().ok_or(PathError::NotUtf8)?),
+                _ => return Err(PathError::NotUnderRoot),
+            }
+        }
+        LibPath::parse(&names.join("/")).map(Self)
     }
+
+    /// The folder holding this path inside the mount; `None` = it sits directly in the mount's folder.
+    pub fn parent(&self) -> Option<MountPath> {
+        self.0.parent().map(Self)
+    }
+
+    /// The last name.
+    pub fn file_name(&self) -> &str {
+        self.0.file_name()
+    }
+
+    /// A path inside a mount spelled as a test writes it.
+    #[cfg(test)]
+    pub(crate) fn parse(text: &str) -> Result<Self, PathError> {
+        LibPath::parse(text).map(Self)
+    }
+}
+
+/// The store's name rule ([`admits`]) over the names of `path` below its mount's top. The mount's own name is held by
+/// the name rules instead, so a valid name shaped like a temp file (`work.tmp1.2`) does not hide its mount; a one-name
+/// path has no name below a top and passes.
+// ADR-0400 decision 2
+pub fn admits_inside(path: &LibPath) -> bool {
+    path.as_str()
+        .split_once('/')
+        .map_or(true, |(_, rest)| admits(rest))
 }
 
 /// The virtual path of `rest` inside the mount `name`, or of the mount itself when `rest` is `None`.
@@ -536,6 +591,21 @@ mod tests {
     }
 
     #[test]
+    fn a_virtual_path_has_a_disk_path_in_its_mounts_folder_and_none_in_no_mount() {
+        let mounts = Mounts::new(vec![mount("company", "/c")]).unwrap();
+        assert_eq!(
+            mounts.disk_path(&lib("company/skills/review")),
+            Some(Path::new("/c").join("skills").join("review"))
+        );
+        assert_eq!(
+            mounts.disk_path(&lib("company")),
+            Some(PathBuf::from("/c")),
+            "a mount's top is its folder"
+        );
+        assert_eq!(mounts.disk_path(&lib("other/a.md")), None);
+    }
+
+    #[test]
     fn a_mount_path_comes_from_disk_under_its_mount_folder_only() {
         let folder = Path::new("mount-folder");
         let disk = folder.join("a").join("b.md");
@@ -551,12 +621,15 @@ mod tests {
     #[test]
     fn the_one_root_view_is_the_first_mount_and_a_root_change_relocates_it_or_registers_library() {
         let mut mounts = Mounts::default();
-        assert_eq!(mounts.root(), None);
+        assert_eq!(mounts.first(), None);
         mounts.set_root(PathBuf::from("/new"));
         assert_eq!(mounts, Mounts::new(vec![mount("library", "/new")]).unwrap());
         let mut two = Mounts::new(vec![mount("team", "/t"), mount("other", "/o")]).unwrap();
         two.set_root(PathBuf::from("/moved"));
-        assert_eq!(two.root(), Some(Path::new("/moved")));
+        assert_eq!(
+            two.first().map(|first| first.folder.as_path()),
+            Some(Path::new("/moved"))
+        );
         assert_eq!(
             two,
             Mounts::new(vec![mount("team", "/moved"), mount("other", "/o")]).unwrap(),

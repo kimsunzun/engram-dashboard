@@ -1076,7 +1076,10 @@ mod tests {
         let cases: Vec<(&str, (PortClass, Reason))> = vec![
             ("read", refused(port.read("../x.md"))),
             ("read built-in", refused(port.read("engram:/default"))),
-            ("list", refused(port.list(Some("a/../b"), None, &[], false))),
+            (
+                "list",
+                refused(port.list(Some("library/a/../b"), None, &[], false)),
+            ),
             ("refresh", refused(port.refresh(Some("/abs")))),
             (
                 "newFolder",
@@ -1087,7 +1090,10 @@ mod tests {
                 refused(port.new_file(Some(".."), "x", LibraryNewFileKind::Markdown, None)),
             ),
             ("relink from", refused(port.relink("..", "a.md", None))),
-            ("relink to", refused(port.relink("a.md", "b/", None))),
+            (
+                "relink to",
+                refused(port.relink("library/a.md", "b/", None)),
+            ),
         ];
         for (what, (class, reason)) in cases {
             assert_eq!(
@@ -1105,9 +1111,11 @@ mod tests {
 
     /// `list`'s bare reason gets the class `Unavailable`; the other catalog reads answer theirs as the body does.
     #[test]
-    fn reads_without_a_library_refuse_unavailable() {
-        let w = World::make(Vec::new(), false);
-        let (class, reason) = refused(w.port().list(None, None, &[], false));
+    fn reads_whose_first_scan_failed_refuse_unavailable() {
+        let w = World::make(Vec::new(), true);
+        // The mount's folder is gone before the first scan: no full scan can be applied.
+        fs::remove_dir_all(w.base.join("lib")).unwrap();
+        let (class, reason) = refused(w.port().list(Some("library"), None, &[], false));
         assert_eq!(
             (class, reason.code.as_str()),
             (PortClass::Unavailable, LIBRARY_UNAVAILABLE)
@@ -1121,8 +1129,9 @@ mod tests {
 
     /// A refresh that cannot scan is a report, never a refusal: one `errors` row with no path.
     #[test]
-    fn a_refresh_with_no_root_answers_one_error_row_with_no_path() {
-        let w = World::make(Vec::new(), false);
+    fn a_refresh_that_cannot_scan_answers_one_error_row_with_no_path() {
+        let w = World::make(Vec::new(), true);
+        fs::remove_dir_all(w.base.join("lib")).unwrap();
         let out = w.port().refresh(None).expect("a report");
         assert_eq!(out.errors.len(), 1, "{out:?}");
         assert_eq!(out.errors[0].path, None);
@@ -1137,17 +1146,17 @@ mod tests {
         let report = RefreshReport {
             changed: 3,
             problems: vec![(
-                lp("p.yaml"),
+                lp("library/p.yaml"),
                 Reason {
                     code: "yaml-syntax".to_owned(),
                     args: json!({ "message": "m" }),
                     line: Some(2),
                 },
             )],
-            no_kind: vec![lp("n.yaml")],
-            skipped_links: vec![lp("team")],
+            no_kind: vec![lp("library/n.yaml")],
+            skipped_links: vec![lp("library/team")],
             errors: vec![
-                (Some(lp("d")), "denied".to_owned()),
+                (Some(lp("library/d")), "denied".to_owned()),
                 (None, "gone".to_owned()),
             ],
         };
@@ -1156,16 +1165,16 @@ mod tests {
             LibraryRefreshOk {
                 changed: 3,
                 problems: vec![PathReasonRow {
-                    path: "p.yaml".to_owned(),
+                    path: "library/p.yaml".to_owned(),
                     code: "yaml-syntax".to_owned(),
                     args: json!({ "message": "m" }),
                     line: Some(2),
                 }],
-                no_kind: vec!["n.yaml".to_owned()],
-                skipped_links: vec!["team".to_owned()],
+                no_kind: vec!["library/n.yaml".to_owned()],
+                skipped_links: vec!["library/team".to_owned()],
                 errors: vec![
                     RefreshErrorRow {
-                        path: Some("d".to_owned()),
+                        path: Some("library/d".to_owned()),
                         why: "denied".to_owned(),
                     },
                     RefreshErrorRow {
@@ -1183,17 +1192,17 @@ mod tests {
     fn a_skill_file_row_is_matched_only_by_skill_file() {
         let w = World::new(Vec::new());
         w.put("skills/s1/SKILL.md", SKILL);
-        let parent = w.list(Some("skills"), None, &[LibraryKind::Skill]);
-        assert_eq!(paths(&parent.rows), ["skills/s1"]);
+        let parent = w.list(Some("library/skills"), None, &[LibraryKind::Skill]);
+        assert_eq!(paths(&parent.rows), ["library/skills/s1"]);
         assert_eq!(parent.rows[0].kind, Some(LibraryKind::Skill));
         assert_eq!(parent.rows[0].name, "s1");
 
-        let inside = w.list(Some("skills/s1"), None, &[]);
-        assert_eq!(paths(&inside.rows), ["skills/s1/SKILL.md"]);
+        let inside = w.list(Some("library/skills/s1"), None, &[]);
+        assert_eq!(paths(&inside.rows), ["library/skills/s1/SKILL.md"]);
         assert_eq!(inside.rows[0].kind, Some(LibraryKind::SkillFile));
-        let by_file = w.list(Some("skills/s1"), None, &[LibraryKind::SkillFile]);
-        assert_eq!(paths(&by_file.rows), ["skills/s1/SKILL.md"]);
-        let by_skill = w.list(Some("skills/s1"), None, &[LibraryKind::Skill]);
+        let by_file = w.list(Some("library/skills/s1"), None, &[LibraryKind::SkillFile]);
+        assert_eq!(paths(&by_file.rows), ["library/skills/s1/SKILL.md"]);
+        let by_skill = w.list(Some("library/skills/s1"), None, &[LibraryKind::Skill]);
         assert!(by_skill.rows.is_empty(), "{by_skill:?}");
     }
 
@@ -1208,31 +1217,31 @@ mod tests {
         w.put("other.md", "HELLO");
         w.put("skills/s1/SKILL.md", SKILL);
 
-        let all = w.list(None, Some("hello"), &[]);
+        let all = w.list(Some("library"), Some("hello"), &[]);
         assert_eq!(
             paths(&all.rows),
             [
-                "other.md",
-                "rules/a.md",
-                "rules/deep/hello-b.md",
-                "skills/s1"
+                "library/other.md",
+                "library/rules/a.md",
+                "library/rules/deep/hello-b.md",
+                "library/skills/s1"
             ]
         );
         assert!(all.folders.is_empty(), "{all:?}");
 
-        let below = w.list(Some("rules/deep"), Some("HELLO"), &[]);
-        assert_eq!(paths(&below.rows), ["rules/deep/hello-b.md"]);
+        let below = w.list(Some("library/rules/deep"), Some("HELLO"), &[]);
+        assert_eq!(paths(&below.rows), ["library/rules/deep/hello-b.md"]);
 
-        let parent = w.list(Some("skills"), Some("s1"), &[]);
-        assert_eq!(paths(&parent.rows), ["skills/s1"]);
-        let itself = w.list(Some("skills/s1"), Some("s1"), &[]);
+        let parent = w.list(Some("library/skills"), Some("s1"), &[]);
+        assert_eq!(paths(&parent.rows), ["library/skills/s1"]);
+        let itself = w.list(Some("library/skills/s1"), Some("s1"), &[]);
         assert!(
             itself.rows.is_empty(),
             "the folder asked for is not its own result: {itself:?}"
         );
 
-        let plain = w.list(Some("rules"), None, &[]);
-        assert_eq!(paths(&plain.rows), ["rules/a.md"]);
+        let plain = w.list(Some("library/rules"), None, &[]);
+        assert_eq!(paths(&plain.rows), ["library/rules/a.md"]);
         assert_eq!(
             plain.folders.len(),
             1,
@@ -1249,25 +1258,35 @@ mod tests {
         w.put("good.yaml", "kind: preset\nversion: 1\ndescription: fine\n");
         w.put("a.md", "x");
 
-        let every = w.list(None, None, &[]);
+        let every = w.list(Some("library"), None, &[]);
         let bad = every
             .rows
             .iter()
-            .find(|row| row.path == "bad.yaml")
+            .find(|row| row.path == "library/bad.yaml")
             .unwrap();
         assert_eq!(bad.kind, Some(LibraryKind::Preset));
         assert!(bad.state.is_some(), "a broken file carries its reason");
         let odd = every
             .rows
             .iter()
-            .find(|row| row.path == "odd.yaml")
+            .find(|row| row.path == "library/odd.yaml")
             .unwrap();
         assert_eq!(odd.kind, None);
 
-        let presets = w.list(None, None, &[LibraryKind::Preset]);
-        assert_eq!(paths(&presets.rows), ["bad.yaml", "good.yaml"]);
-        let both = w.list(None, None, &[LibraryKind::Preset, LibraryKind::Instruction]);
-        assert_eq!(paths(&both.rows), ["a.md", "bad.yaml", "good.yaml"]);
+        let presets = w.list(Some("library"), None, &[LibraryKind::Preset]);
+        assert_eq!(
+            paths(&presets.rows),
+            ["library/bad.yaml", "library/good.yaml"]
+        );
+        let both = w.list(
+            Some("library"),
+            None,
+            &[LibraryKind::Preset, LibraryKind::Instruction],
+        );
+        assert_eq!(
+            paths(&both.rows),
+            ["library/a.md", "library/bad.yaml", "library/good.yaml"]
+        );
     }
 
     /// `builtins` answers the built-in preset row — its spelling, its id as the name, a stand-in's reason, and the
@@ -1277,12 +1296,15 @@ mod tests {
         let w = World::new(vec![
             agent(&[], true),
             agent(&[], true),
-            agent(&["p.yaml"], false),
+            agent(&["library/p.yaml"], false),
         ]);
-        let none = w.list(None, None, &[]);
+        let none = w.list(Some("library"), None, &[]);
         assert!(none.builtins.is_empty());
 
-        let with = w.port().list(None, None, &[], true).expect("list");
+        let with = w
+            .port()
+            .list(Some("library"), None, &[], true)
+            .expect("list");
         assert_eq!(with.builtins.len(), 1, "{with:?}");
         let row = &with.builtins[0];
         assert_eq!(row.path, "engram:/default");
@@ -1297,44 +1319,46 @@ mod tests {
 
         let kept = w
             .port()
-            .list(None, Some("DEF"), &[LibraryKind::Preset], true);
+            .list(Some("library"), Some("DEF"), &[LibraryKind::Preset], true);
         assert_eq!(kept.expect("list").builtins.len(), 1);
-        let by_kind = w.port().list(None, None, &[LibraryKind::Instruction], true);
+        let by_kind = w
+            .port()
+            .list(Some("library"), None, &[LibraryKind::Instruction], true);
         assert!(by_kind.expect("list").builtins.is_empty());
-        let by_query = w.port().list(None, Some("zzz"), &[], true);
+        let by_query = w.port().list(Some("library"), Some("zzz"), &[], true);
         assert!(by_query.expect("list").builtins.is_empty());
     }
 
     /// `library.read` carries the body's answer field by field, agents by id.
     #[test]
     fn read_carries_the_body_answer_field_by_field() {
-        let attached = agent(&["p.yaml"], false);
+        let attached = agent(&["library/p.yaml"], false);
         let id: AgentId = attached.id;
         let w = World::new(vec![attached]);
         w.put("rules/a.md", "Body text");
         w.put(
             "p.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - rules/a.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/rules/a.md\n",
         );
-        let view = w.port().read("rules/a.md").expect("read");
+        let view = w.port().read("library/rules/a.md").expect("read");
         let body = w
             .svc
-            .read(&crate::path::LibPath::parse("rules/a.md").unwrap())
+            .read(&crate::path::LibPath::parse("library/rules/a.md").unwrap())
             .expect("body read");
         assert_eq!(view.absolute, body.absolute.display().to_string());
-        assert_eq!(view.presets_direct, ["p.yaml"]);
+        assert_eq!(view.presets_direct, ["library/p.yaml"]);
         assert_eq!(view.presets_direct, body.presets_direct);
         assert_eq!(view.presets_indirect, body.presets_indirect);
         assert_eq!(view.agents_direct, body.agents_direct);
         assert_eq!(view.agents_indirect, [id]);
         assert_eq!(view.excerpt, body.excerpt);
         assert_eq!(view.settings_fields, body.settings_fields);
-        assert_eq!(view.row.path, "rules/a.md");
+        assert_eq!(view.row.path, "library/rules/a.md");
         assert_eq!(view.row.kind, Some(LibraryKind::Instruction));
         assert_eq!(view.row.references, 1);
         assert_eq!(view.row.description, body.row.description);
 
-        let (class, reason) = refused(w.port().read("rules/none.md"));
+        let (class, reason) = refused(w.port().read("library/rules/none.md"));
         assert_eq!(
             (class, reason.code.as_str()),
             (PortClass::NotFound, crate::NOT_FOUND)
@@ -1345,20 +1369,23 @@ mod tests {
     #[test]
     fn creates_answer_the_path_the_body_made() {
         let w = World::new(Vec::new());
-        let folder = w.port().new_folder(None, "team", None).expect("folder");
-        assert_eq!(folder, "team");
+        let folder = w
+            .port()
+            .new_folder(Some("library"), "team", None)
+            .expect("folder");
+        assert_eq!(folder, "library/team");
         let file = w
             .port()
-            .new_file(Some("team"), "p", LibraryNewFileKind::Preset, None)
+            .new_file(Some("library/team"), "p", LibraryNewFileKind::Preset, None)
             .expect("file");
-        assert_eq!(file, "team/p.yaml");
+        assert_eq!(file, "library/team/p.yaml");
         assert!(w.base.join("lib").join("team").join("p.yaml").is_file());
-        let (class, reason) = refused(w.port().new_folder(None, "team", None));
+        let (class, reason) = refused(w.port().new_folder(Some("library"), "team", None));
         assert_eq!(
             (class, reason.code.as_str()),
             (PortClass::Conflict, crate::create::NAME_EXISTS)
         );
-        let (class, reason) = refused(w.port().new_folder(None, "x", Some(1)));
+        let (class, reason) = refused(w.port().new_folder(Some("library"), "x", Some(1)));
         assert_eq!(
             (class, reason.code.as_str()),
             (PortClass::Conflict, crate::ROOT_GENERATION_STALE)
@@ -1369,10 +1396,10 @@ mod tests {
     /// `profile-edit-unavailable` — the one class that keeps the request id.
     #[test]
     fn a_relink_with_no_profile_edit_port_refuses_internal() {
-        let w = World::new(vec![agent(&["p.yaml"], false)]);
+        let w = World::new(vec![agent(&["library/p.yaml"], false)]);
         w.put("p.yaml", "kind: preset\nversion: 1\n");
         w.put("q/p.yaml", "kind: preset\nversion: 1\n");
-        let (class, reason) = refused(w.port().relink("p.yaml", "q/p.yaml", None));
+        let (class, reason) = refused(w.port().relink("library/p.yaml", "library/q/p.yaml", None));
         assert_eq!(
             (class, reason.code.as_str()),
             (
@@ -1389,7 +1416,7 @@ mod tests {
         let answer = RelinkAnswer {
             fixed: vec![("a.md".to_owned(), "b/a.md".to_owned())],
             more: 1,
-            written: vec!["p.yaml".to_owned()],
+            written: vec!["library/p.yaml".to_owned()],
             skipped: vec![RelinkSkip {
                 path: "q.yaml".to_owned(),
                 reason: Reason {
@@ -1413,7 +1440,7 @@ mod tests {
         );
         assert_eq!(
             (out.more, out.written.as_slice()),
-            (1, ["p.yaml".to_owned()].as_slice())
+            (1, ["library/p.yaml".to_owned()].as_slice())
         );
         assert_eq!(
             out.skipped,
@@ -1510,15 +1537,15 @@ mod tests {
         let w = World::new(Vec::new());
         w.put("s.yaml", "kind: settings\nversion: 1\ndescription: d\n");
         w.put("p.yaml", "kind: preset\nversion: 1\n");
-        let kept = w.list(None, None, &[LibraryKind::Settings]);
-        assert_eq!(paths(&kept.rows), ["s.yaml"]);
+        let kept = w.list(Some("library"), None, &[LibraryKind::Settings]);
+        assert_eq!(paths(&kept.rows), ["library/s.yaml"]);
         assert_eq!(kept.rows[0].kind, Some(LibraryKind::Settings));
 
         let made = w
             .port()
-            .new_file(None, "fresh", LibraryNewFileKind::Settings, None)
+            .new_file(Some("library"), "fresh", LibraryNewFileKind::Settings, None)
             .expect("file");
-        assert_eq!(made, "fresh.yaml");
+        assert_eq!(made, "library/fresh.yaml");
         let text = fs::read_to_string(w.base.join("lib").join("fresh.yaml")).unwrap();
         assert!(text.starts_with("kind: settings\n"), "{text}");
     }
@@ -1538,9 +1565,10 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("rules", "rules", false),
-                ("skills", "skills", false),
-                ("skills/s1", "s1", true),
+                ("library", "library", false),
+                ("library/rules", "rules", false),
+                ("library/skills", "skills", false),
+                ("library/skills/s1", "s1", true),
             ]
         );
     }
@@ -1557,9 +1585,14 @@ mod tests {
 
         let out = w
             .port()
-            .list(Some("team/x.md"), Some("zzz"), &[LibraryKind::Skill], true)
+            .list(
+                Some("library/team/x.md"),
+                Some("zzz"),
+                &[LibraryKind::Skill],
+                true,
+            )
             .expect("list");
-        assert_eq!(paths(&out.rows), ["team/x.md"]);
+        assert_eq!(paths(&out.rows), ["library/team/x.md"]);
         assert_eq!(
             out.rows[0].state.as_ref().map(|state| state.code.as_str()),
             Some(PATH_THROUGH_LINK)
@@ -1568,9 +1601,9 @@ mod tests {
 
         let out = w
             .port()
-            .list(Some("team/x.md"), None, &[], true)
+            .list(Some("library/team/x.md"), None, &[], true)
             .expect("list");
-        assert_eq!(paths(&out.rows), ["team/x.md"]);
+        assert_eq!(paths(&out.rows), ["library/team/x.md"]);
         assert_eq!(paths(&out.builtins), ["engram:/default"]);
     }
 
@@ -1603,7 +1636,7 @@ mod tests {
 
     /// A preset with a present and a missing instruction, a folder entry, attached by one agent.
     fn preset_world() -> (World, String) {
-        let w = World::new(vec![agent(&["p.yaml"], false)]);
+        let w = World::new(vec![agent(&["library/p.yaml"], false)]);
         let folder = w.base.join("f");
         fs::create_dir_all(&folder).unwrap();
         let folder = folder.to_string_lossy().into_owned();
@@ -1611,7 +1644,7 @@ mod tests {
         w.put(
             "p.yaml",
             &format!(
-                "kind: preset\nversion: 1\ndescription: team\ninstructions:\n  - rules/a.md\n  - rules/gone.md\nfolders:\n  - {folder}\n"
+                "kind: preset\nversion: 1\ndescription: team\ninstructions:\n  - library/rules/a.md\n  - library/rules/gone.md\nfolders:\n  - {folder}\n"
             ),
         );
         (w, folder)
@@ -1624,20 +1657,20 @@ mod tests {
         let (w, folder) = preset_world();
         let body = w
             .svc
-            .preset_get(&crate::path::AssetRef::parse("p.yaml").unwrap())
+            .preset_get(&crate::path::AssetRef::parse("library/p.yaml").unwrap())
             .expect("body view");
-        let view = w.port().preset_get("p.yaml").expect("view");
-        assert_eq!(view.path, "p.yaml");
+        let view = w.port().preset_get("library/p.yaml").expect("view");
+        assert_eq!(view.path, "library/p.yaml");
         assert_eq!(view.rev, body.rev);
         assert_eq!(view.description.as_deref(), Some("team"));
         assert_eq!(
             entry_paths(&view.instructions),
-            ["rules/a.md", "rules/gone.md"]
+            ["library/rules/a.md", "library/rules/gone.md"]
         );
         assert_eq!(
             view.instructions[0],
             PresetEntryRow {
-                path: "rules/a.md".to_owned(),
+                path: "library/rules/a.md".to_owned(),
                 backend: None,
                 line: 5,
                 state: None,
@@ -1663,8 +1696,11 @@ mod tests {
             .iter()
             .find(|problem| problem.kind == "missing")
             .expect("the missing item is a problem");
-        assert_eq!(missing.item.as_deref(), Some("rules/gone.md"));
-        assert_eq!(missing.via.as_deref(), Some(&["p.yaml".to_owned()][..]));
+        assert_eq!(missing.item.as_deref(), Some("library/rules/gone.md"));
+        assert_eq!(
+            missing.via.as_deref(),
+            Some(&["library/p.yaml".to_owned()][..])
+        );
         assert_eq!(missing.items, None);
         assert!(view.conflicts.is_empty());
         assert_eq!(view.agents, 1);
@@ -1680,7 +1716,7 @@ mod tests {
     fn every_preset_path_that_is_not_a_library_path_is_refused_item_path_invalid() {
         let (w, _) = preset_world();
         let port = w.port();
-        let items = PresetEntries::Items(strings(&["rules/a.md"]));
+        let items = PresetEntries::Items(strings(&["library/rules/a.md"]));
         let cases: Vec<(&str, (PortClass, Reason))> = vec![
             ("get", refused(port.preset_get("../p.yaml"))),
             (
@@ -1735,29 +1771,33 @@ mod tests {
         let out = w
             .port()
             .preset_add(
-                "p.yaml",
-                &PresetEntries::Items(strings(&["rules/b.md", "rules/none.md"])),
+                "library/p.yaml",
+                &PresetEntries::Items(strings(&["library/rules/b.md", "library/rules/none.md"])),
                 Some("codex"),
                 None,
                 None,
             )
             .expect("add");
-        assert_eq!(out.applied, ["rules/b.md"]);
+        assert_eq!(out.applied, ["library/rules/b.md"]);
         assert_eq!(
             out.skipped,
             [SkippedRow {
-                item: "rules/none.md".to_owned(),
+                item: "library/rules/none.md".to_owned(),
                 code: crate::NOT_FOUND.to_owned(),
-                args: json!({ "path": "rules/none.md" }),
+                args: json!({ "path": "library/rules/none.md" }),
                 line: None,
             }]
         );
         assert_eq!(
             entry_paths(&out.view.instructions),
-            ["rules/a.md", "rules/gone.md", "rules/b.md"]
+            [
+                "library/rules/a.md",
+                "library/rules/gone.md",
+                "library/rules/b.md"
+            ]
         );
         assert_eq!(out.view.instructions[2].backend.as_deref(), Some("codex"));
-        let after = w.port().preset_get("p.yaml").expect("view");
+        let after = w.port().preset_get("library/p.yaml").expect("view");
         assert_eq!(out.view.rev, after.rev, "the answer is the committed file");
     }
 
@@ -1770,7 +1810,7 @@ mod tests {
         let out = w
             .port()
             .preset_add(
-                "p.yaml",
+                "library/p.yaml",
                 &PresetEntries::Folders(vec![other.to_string_lossy().into_owned()]),
                 None,
                 None,
@@ -1780,8 +1820,8 @@ mod tests {
         assert_eq!(out.applied, [other.to_string_lossy().into_owned()]);
         assert_eq!(out.view.folders.len(), 2);
         let (class, reason) = refused(w.port().preset_add(
-            "p.yaml",
-            &PresetEntries::Folders(strings(&["rel/x"])),
+            "library/p.yaml",
+            &PresetEntries::Folders(strings(&["library/rel/x"])),
             None,
             None,
             None,
@@ -1802,15 +1842,19 @@ mod tests {
         let view = w
             .port()
             .preset_remove(
-                "p.yaml",
-                &PresetEntries::Items(strings(&["rules/gone.md"])),
+                "library/p.yaml",
+                &PresetEntries::Items(strings(&["library/rules/gone.md"])),
                 None,
             )
             .expect("remove");
-        assert_eq!(entry_paths(&view.instructions), ["rules/a.md"]);
+        assert_eq!(entry_paths(&view.instructions), ["library/rules/a.md"]);
         let view = w
             .port()
-            .preset_remove("p.yaml", &PresetEntries::Folders(vec![folder]), None)
+            .preset_remove(
+                "library/p.yaml",
+                &PresetEntries::Folders(vec![folder]),
+                None,
+            )
             .expect("remove folder");
         assert!(view.folders.is_empty());
     }
@@ -1819,10 +1863,10 @@ mod tests {
     #[test]
     fn preset_reorder_checks_the_base_rev_and_answers_the_new_order() {
         let (w, _) = preset_world();
-        let rev = w.port().preset_get("p.yaml").expect("view").rev;
-        let order = strings(&["rules/gone.md", "rules/a.md"]);
+        let rev = w.port().preset_get("library/p.yaml").expect("view").rev;
+        let order = strings(&["library/rules/gone.md", "library/rules/a.md"]);
         let (class, reason) = refused(w.port().preset_reorder(
-            "p.yaml",
+            "library/p.yaml",
             PresetSection::Instructions,
             &order,
             "stale",
@@ -1834,11 +1878,17 @@ mod tests {
         );
         let view = w
             .port()
-            .preset_reorder("p.yaml", PresetSection::Instructions, &order, &rev, None)
+            .preset_reorder(
+                "library/p.yaml",
+                PresetSection::Instructions,
+                &order,
+                &rev,
+                None,
+            )
             .expect("reorder");
         assert_eq!(
             entry_paths(&view.instructions),
-            ["rules/gone.md", "rules/a.md"]
+            ["library/rules/gone.md", "library/rules/a.md"]
         );
     }
 
@@ -1849,19 +1899,19 @@ mod tests {
         let out = w
             .port()
             .preset_set_backend(
-                "p.yaml",
-                &strings(&["rules/a.md", "rules/other.md"]),
+                "library/p.yaml",
+                &strings(&["library/rules/a.md", "library/rules/other.md"]),
                 Some("claude"),
                 None,
             )
             .expect("set backend");
-        assert_eq!(out.applied, ["rules/a.md"]);
+        assert_eq!(out.applied, ["library/rules/a.md"]);
         assert_eq!(out.skipped.len(), 1);
-        assert_eq!(out.skipped[0].item, "rules/other.md");
+        assert_eq!(out.skipped[0].item, "library/rules/other.md");
         assert_eq!(out.view.instructions[0].backend.as_deref(), Some("claude"));
         let (class, reason) = refused(w.port().preset_set_backend(
-            "p.yaml",
-            &strings(&["rules/a.md"]),
+            "library/p.yaml",
+            &strings(&["library/rules/a.md"]),
             Some("nobody"),
             None,
         ));
@@ -1877,8 +1927,8 @@ mod tests {
         let (w, _) = preset_world();
         let before = fs::read(w.base.join("lib").join("p.yaml")).unwrap();
         let mut bad = empty_draft();
-        bad.skills = vec![arg("rules/a.md")];
-        let (class, reason) = refused(w.port().preset_save("p.yaml", &bad, None, None));
+        bad.skills = vec![arg("library/rules/a.md")];
+        let (class, reason) = refused(w.port().preset_save("library/p.yaml", &bad, None, None));
         assert_eq!(
             (class, reason.code.as_str()),
             (PortClass::InvalidArgument, crate::edit::PRESET_SAVE_REFUSED)
@@ -1886,13 +1936,13 @@ mod tests {
         assert_eq!(fs::read(w.base.join("lib").join("p.yaml")).unwrap(), before);
 
         let mut good = empty_draft();
-        good.instructions = vec![arg("rules/a.md")];
+        good.instructions = vec![arg("library/rules/a.md")];
         good.folders = Some(Vec::new());
         let view = w
             .port()
-            .preset_save("p.yaml", &good, None, None)
+            .preset_save("library/p.yaml", &good, None, None)
             .expect("save");
-        assert_eq!(entry_paths(&view.instructions), ["rules/a.md"]);
+        assert_eq!(entry_paths(&view.instructions), ["library/rules/a.md"]);
         assert!(view.folders.is_empty());
     }
 
@@ -1903,20 +1953,26 @@ mod tests {
         let (w, folder) = preset_world();
         let before = fs::read(w.base.join("lib").join("p.yaml")).unwrap();
         let mut draft = empty_draft();
-        draft.skills = vec![arg("rules/a.md")];
-        let out = w.port().preset_check("p.yaml", &draft).expect("check");
+        draft.skills = vec![arg("library/rules/a.md")];
+        let out = w
+            .port()
+            .preset_check("library/p.yaml", &draft)
+            .expect("check");
         assert!(out.save_refuses);
         let mismatch = out
             .problems
             .iter()
             .find(|problem| {
-                problem.kind == "broken" && problem.item.as_deref() == Some("rules/a.md")
+                problem.kind == "broken" && problem.item.as_deref() == Some("library/rules/a.md")
             })
             .expect("the mismatch row");
-        assert_eq!(mismatch.via.as_deref(), Some(&["p.yaml".to_owned()][..]));
+        assert_eq!(
+            mismatch.via.as_deref(),
+            Some(&["library/p.yaml".to_owned()][..])
+        );
         assert_eq!(
             mismatch.args,
-            json!({ "path": "rules/a.md", "list": "skills" })
+            json!({ "path": "library/rules/a.md", "list": "skills" })
         );
         assert_eq!(mismatch.line, None);
         assert_eq!(
@@ -2025,7 +2081,7 @@ mod tests {
         w.put(
             "p.yaml",
             &format!(
-                "kind: preset\nversion: 1\npresets:\n  - q.yaml\n  - r.yaml\ninstructions:\n  - rules/a.md\n  - rules/b.md\nskills:\n  - skills/s1\n  - skills/s2\nsettings:\n  - s1.yaml\n  - s2.yaml\nfolders:\n  - {f1}\n  - {f2}\n"
+                "kind: preset\nversion: 1\npresets:\n  - library/q.yaml\n  - library/r.yaml\ninstructions:\n  - library/rules/a.md\n  - library/rules/b.md\nskills:\n  - library/skills/s1\n  - library/skills/s2\nsettings:\n  - library/s1.yaml\n  - library/s2.yaml\nfolders:\n  - {f1}\n  - {f2}\n"
             ),
         );
         let lists = |view: &declared::PresetView| -> Vec<Vec<String>> {
@@ -2047,13 +2103,13 @@ mod tests {
             PresetSection::Folders,
         ];
         for (index, section) in sections.into_iter().enumerate() {
-            let before = w.port().preset_get("p.yaml").expect("view");
+            let before = w.port().preset_get("library/p.yaml").expect("view");
             let mut expected = lists(&before);
             expected[index].reverse();
             let view = w
                 .port()
                 .preset_reorder(
-                    "p.yaml",
+                    "library/p.yaml",
                     section.clone(),
                     &expected[index],
                     &before.rev,
@@ -2092,7 +2148,7 @@ mod tests {
             vec![
                 agent(&[], true),
                 agent(&[], true),
-                agent(&["p.yaml"], false),
+                agent(&["library/p.yaml"], false),
             ],
             text,
         );
@@ -2214,19 +2270,19 @@ mod tests {
         let folder = |path: &str, status: Option<FolderStatus>| ResolvedFolder {
             path: PathBuf::from(path),
             key: engram_dashboard_platform::fs::path_key(Path::new(path)),
-            via: vec!["P.yaml".to_owned(), "Q.yaml".to_owned()],
+            via: vec!["library/P.yaml".to_owned(), "library/Q.yaml".to_owned()],
             line: 3,
             instructions_at: 0,
             status,
         };
         let missing = BlockReason::Missing {
-            item: "m.md".to_owned(),
-            via: vec!["P.yaml".to_owned()],
+            item: "library/m.md".to_owned(),
+            via: vec!["library/P.yaml".to_owned()],
             reason: reason("not-found", "m.md", Some(5)),
         };
         let conflict = BlockReason::Conflict {
             reason: reason("c", "x", None),
-            items: vec![("a.md".to_owned(), vec!["P.yaml".to_owned()])],
+            items: vec![("a.md".to_owned(), vec!["library/P.yaml".to_owned()])],
         };
         let notice = reason("omitted", "n.md", Some(2));
         let view = AgentPresetsView {
@@ -2256,7 +2312,7 @@ mod tests {
 
         let row = |path: &str, status: Option<&str>, why: Option<&str>| AgentFolderRow {
             path: path.to_owned(),
-            via: vec!["P.yaml".to_owned(), "Q.yaml".to_owned()],
+            via: vec!["library/P.yaml".to_owned(), "library/Q.yaml".to_owned()],
             line: 3,
             status: status.map(str::to_owned),
             status_why: why.map(str::to_owned),
@@ -2319,7 +2375,7 @@ mod tests {
     /// change — each the attachments now in the registry.
     #[test]
     fn the_agent_preset_commands_answer_the_bodies_answers_in_declared_rows() {
-        let profile = claude_agent(&["p.yaml"]);
+        let profile = claude_agent(&["library/p.yaml"]);
         let id = profile.id;
         let w = World::new(vec![profile]);
         let _port = w.plug();
@@ -2332,44 +2388,60 @@ mod tests {
 
         let attach = w
             .port()
-            .attach_preset(id, &strings(&["q.yaml", "gone.yaml"]), None, None)
+            .attach_preset(
+                id,
+                &strings(&["library/q.yaml", "library/gone.yaml"]),
+                None,
+                None,
+            )
             .unwrap();
-        assert_eq!(attach.applied, strings(&["q.yaml"]));
+        assert_eq!(attach.applied, strings(&["library/q.yaml"]));
         assert_eq!(
             attach.skipped,
             vec![SkippedRow {
-                item: "gone.yaml".to_owned(),
+                item: "library/gone.yaml".to_owned(),
                 code: crate::NOT_FOUND.to_owned(),
-                args: json!({ "path": "gone.yaml" }),
+                args: json!({ "path": "library/gone.yaml" }),
                 line: None,
             }]
         );
-        assert_eq!(attach.view.presets, strings(&["p.yaml", "q.yaml"]));
+        assert_eq!(
+            attach.view.presets,
+            strings(&["library/p.yaml", "library/q.yaml"])
+        );
 
         let reorder = w
             .port()
             .reorder_presets(
                 id,
-                &strings(&["q.yaml", "p.yaml"]),
+                &strings(&["library/q.yaml", "library/p.yaml"]),
                 &attach.view.base_rev,
                 None,
             )
             .unwrap();
-        assert_eq!(reorder.presets, strings(&["q.yaml", "p.yaml"]));
+        assert_eq!(
+            reorder.presets,
+            strings(&["library/q.yaml", "library/p.yaml"])
+        );
         let detach = w
             .port()
-            .detach_preset(id, &strings(&["engram:/default", "q.yaml"]), true, None)
+            .detach_preset(
+                id,
+                &strings(&["engram:/default", "library/q.yaml"]),
+                true,
+                None,
+            )
             .unwrap();
         assert_eq!(
             (detach.default_preset, detach.presets.clone()),
-            (false, strings(&["p.yaml"]))
+            (false, strings(&["library/p.yaml"]))
         );
         assert_eq!(
             w.registry.attachments_of(id).expect("the agent"),
             Attachments {
                 default_preset: false,
                 presets: vec![AttachedPreset {
-                    path: "p.yaml".to_owned()
+                    path: "library/p.yaml".to_owned()
                 }],
             }
         );
@@ -2380,7 +2452,7 @@ mod tests {
     /// `yes` `Conflict` `default-preset-detach`, no port `Internal` `profile-edit-unavailable`.
     #[test]
     fn the_agent_preset_refusals_cross_with_their_class() {
-        let profile = claude_agent(&["p.yaml"]);
+        let profile = claude_agent(&["library/p.yaml"]);
         let id = profile.id;
         let w = World::new(vec![profile]);
         w.put("p.yaml", "kind: preset\nversion: 1\n");
@@ -2397,7 +2469,7 @@ mod tests {
         let (class, reason) =
             refused(
                 w.port()
-                    .reorder_presets(id, &strings(&["p.yaml"]), "stale", None),
+                    .reorder_presets(id, &strings(&["library/p.yaml"]), "stale", None),
             );
         assert_eq!(
             (class, reason.code.as_str()),
@@ -2431,7 +2503,7 @@ mod tests {
             .port()
             .judge_new_presets(
                 &new,
-                &strings(&["p.yaml", "rules/a.md", "engram:/default"]),
+                &strings(&["library/p.yaml", "library/rules/a.md", "engram:/default"]),
                 Some(current),
             )
             .unwrap();
@@ -2441,14 +2513,14 @@ mod tests {
                 attachments: Attachments {
                     default_preset: true,
                     presets: vec![AttachedPreset {
-                        path: "p.yaml".to_owned()
+                        path: "library/p.yaml".to_owned()
                     }],
                 },
                 skipped: vec![
                     SkippedRow {
-                        item: "rules/a.md".to_owned(),
+                        item: "library/rules/a.md".to_owned(),
                         code: crate::format::read::WRONG_KIND.to_owned(),
-                        args: json!({ "path": "rules/a.md" }),
+                        args: json!({ "path": "library/rules/a.md" }),
                         line: None,
                     },
                     SkippedRow {
@@ -2462,7 +2534,7 @@ mod tests {
         );
         let (class, reason) = refused(w.port().judge_new_presets(
             &new,
-            &strings(&["p.yaml"]),
+            &strings(&["library/p.yaml"]),
             Some(current + 1),
         ));
         assert_eq!(
@@ -2479,7 +2551,7 @@ mod tests {
         let new = claude_agent(&[]);
         let (class, reason) = refused(judge_new_presets_with_no_library(
             &new,
-            &strings(&["p.yaml"]),
+            &strings(&["library/p.yaml"]),
             "none here",
         ));
         assert_eq!(

@@ -153,40 +153,40 @@ mod tests {
         let mut lib = Lib::new();
         lib.store.file(
             "top.yaml",
-            "kind: preset\nversion: 1\npresets:\n  - mid.yaml\ninstructions:\n  - engram:/priming\n  - rules/a.md\n\
-             skills:\n  - skills/s\nsettings:\n  - s.yaml\nfolders:\n  - /abs/folder\n",
+            "kind: preset\nversion: 1\npresets:\n  - library/mid.yaml\ninstructions:\n  - engram:/priming\n  - library/rules/a.md\n\
+             skills:\n  - library/skills/s\nsettings:\n  - library/s.yaml\nfolders:\n  - /abs/folder\n",
         );
         lib.store.file(
             "mid.yaml",
-            "kind: preset\nversion: 1\npresets:\n  - top.yaml\ninstructions:\n  - rules/b.md\n  - rules/a.md\n  - rules/missing.md\n",
+            "kind: preset\nversion: 1\npresets:\n  - library/top.yaml\ninstructions:\n  - library/rules/b.md\n  - library/rules/a.md\n  - library/rules/missing.md\n",
         );
         lib.store.file("rules/a.md", "a");
         lib.store.file("rules/b.md", "b");
         lib.scan(None);
         assert_eq!(
-            spellings(&closure(&lib.catalog, &lp("top.yaml"))),
+            spellings(&closure(&lib.catalog, &lp("library/top.yaml"))),
             [
-                "mid.yaml",
-                "rules/b.md",
-                "rules/a.md",
-                "rules/missing.md",
-                "skills/s",
-                "s.yaml"
+                "library/mid.yaml",
+                "library/rules/b.md",
+                "library/rules/a.md",
+                "library/rules/missing.md",
+                "library/skills/s",
+                "library/s.yaml"
             ]
         );
         assert_eq!(
-            spellings(&closure(&lib.catalog, &lp("mid.yaml"))),
+            spellings(&closure(&lib.catalog, &lp("library/mid.yaml"))),
             [
-                "top.yaml",
-                "rules/a.md",
-                "skills/s",
-                "s.yaml",
-                "rules/b.md",
-                "rules/missing.md"
+                "library/top.yaml",
+                "library/rules/a.md",
+                "library/skills/s",
+                "library/s.yaml",
+                "library/rules/b.md",
+                "library/rules/missing.md"
             ]
         );
         assert!(
-            closure(&lib.catalog, &lp("rules/a.md")).is_empty(),
+            closure(&lib.catalog, &lp("library/rules/a.md")).is_empty(),
             "not a preset"
         );
     }
@@ -257,16 +257,16 @@ mod tests {
         lib.store.file("rules/a.md", "a");
         lib.store.file(
             "top.yaml",
-            "kind: preset\nversion: 1\npresets:\n  - mid.yaml\n",
+            "kind: preset\nversion: 1\npresets:\n  - library/mid.yaml\n",
         );
         lib.store.file(
             "mid.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - rules/a.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/rules/a.md\n",
         );
         lib.scan(None);
-        let exact = agent(&["mid.yaml"]);
-        let other_case = agent(&["MID.yaml"]);
-        let elsewhere = agent(&["top.yaml", "engram:/default"]);
+        let exact = agent(&["library/mid.yaml"]);
+        let other_case = agent(&["library/MID.yaml"]);
+        let elsewhere = agent(&["library/top.yaml", "engram:/default"]);
         let registry = registry(vec![exact.clone(), other_case.clone(), elsewhere.clone()]);
 
         let mut want_agents = vec![exact.id];
@@ -274,25 +274,28 @@ mod tests {
             want_agents.push(other_case.id);
         }
         want_agents.sort_unstable();
-        let (presets, agents) = referrers_of(&lib.catalog, &registry, &lp("mid.yaml"));
-        assert_eq!(presets, [lp("top.yaml")]);
+        let (presets, agents) = referrers_of(&lib.catalog, &registry, &lp("library/mid.yaml"));
+        assert_eq!(presets, [lp("library/top.yaml")]);
         assert_eq!(agents, want_agents);
         assert_eq!(
-            reference_count(&lib.catalog, &registry, &lp("mid.yaml")),
+            reference_count(&lib.catalog, &registry, &lp("library/mid.yaml")),
             1 + want_agents.len()
         );
 
-        let (presets, agents) = referrers_of(&lib.catalog, &registry, &lp("rules/a.md"));
+        let (presets, agents) = referrers_of(&lib.catalog, &registry, &lp("library/rules/a.md"));
         assert_eq!(
             presets,
-            [lp("mid.yaml"), lp("top.yaml")],
+            [lp("library/mid.yaml"), lp("library/top.yaml")],
             "direct and through a nested preset"
         );
         assert!(
             agents.is_empty(),
             "agents attach presets, not the files they list"
         );
-        assert_eq!(reference_count(&lib.catalog, &registry, &lp("top.yaml")), 1);
+        assert_eq!(
+            reference_count(&lib.catalog, &registry, &lp("library/top.yaml")),
+            1
+        );
     }
 
     #[test]
@@ -301,20 +304,26 @@ mod tests {
         lib.store.file("x.md", "x");
         lib.store.file(
             "parent.yaml",
-            "kind: preset\nversion: 1\npresets:\n  - child.yaml\n",
+            "kind: preset\nversion: 1\npresets:\n  - library/child.yaml\n",
         );
         lib.scan(None);
         let registry = registry(Vec::new());
-        assert_eq!(reference_count(&lib.catalog, &registry, &lp("x.md")), 0);
+        assert_eq!(
+            reference_count(&lib.catalog, &registry, &lp("library/x.md")),
+            0
+        );
 
         lib.store.file(
             "child.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - x.md\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/x.md\n",
         );
         lib.scan(None);
         // The parent reaches x.md only through the child it listed while the child was missing — so the parent was
         //   found again when the child was inserted.
-        let (presets, _) = referrers_of(&lib.catalog, &registry, &lp("x.md"));
-        assert_eq!(presets, [lp("child.yaml"), lp("parent.yaml")]);
+        let (presets, _) = referrers_of(&lib.catalog, &registry, &lp("library/x.md"));
+        assert_eq!(
+            presets,
+            [lp("library/child.yaml"), lp("library/parent.yaml")]
+        );
     }
 }

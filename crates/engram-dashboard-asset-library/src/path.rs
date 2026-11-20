@@ -1,16 +1,18 @@
-//! Reference spellings. A library asset is named by [`LibPath`] (a `/` path from the library root), a built-in asset by
-//! `engram:/<id>` ([`BuiltinId`]); [`AssetRef`] is either. `LibPath` refuses `:`, so the two never mix. A preset's folder
-//! entry is not an asset: [`FolderRef`] holds an absolute folder path as the file spells it and its normalized form.
+//! Reference spellings. A library asset is named by [`LibPath`] (a `/` path from the virtual library root, its first
+//! name a mount — ADR-0396), a built-in asset by `engram:/<id>` ([`BuiltinId`]); [`AssetRef`] is either. `LibPath`
+//! refuses `:`, so the two never mix. A preset's folder entry is not an asset: [`FolderRef`] holds an absolute folder
+//! path as the file spells it and its normalized form.
 //!
-//! Equality on these types is spelling equality. Whether two library paths name the same file is the OS rule:
-//! compare [`LibPath::key`]s.
+//! Equality on these types is spelling equality. Whether two library paths name the same item is the OS rule: compare
+//! their `catalog::key`s. A `LibPath` has no disk path of its own: only `mounts.rs` joins one to a mount's folder
+//! (`MountPath`).
 // ADR-0315
 // TRD S25 step-7 §3-3
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use engram_dashboard_platform::fs::{
-    is_reserved_device_name, normalize_folder, path_key, NotAbsolute, PathKey,
+    is_reserved_device_name, normalize_folder, path_key, NotAbsolute,
 };
 use relative_path::RelativePathBuf;
 
@@ -50,7 +52,7 @@ pub enum PathError {
 /// The trailing `.` / space rule and the reserved-name rule hold on every OS. Win32 trims a trailing `.` or space, so
 /// `rules/a.md.` would open `rules\a.md` and `.. ` would name a different entry than the one spelled; a reserved device
 /// name (platform `fs::is_reserved_device_name` — `rules/CON`, `nul.md`, `COM1.txt`, `COM¹.md`) would make
-/// [`LibPath::to_path`] open a device. Both amend ADR-0315 decision 2 (ADR-0362).
+/// `MountPath::to_path` open a device. Both amend ADR-0315 decision 2 (ADR-0362).
 // ADR-0362
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LibPath(RelativePathBuf);
@@ -90,34 +92,6 @@ impl LibPath {
         self.0.as_str()
     }
 
-    /// The disk path of this asset under `root`: `root` with each name pushed in turn, so a root that ends in a
-    /// separator (`D:\` · `\\nas\lib\` · `/`) gets no second one.
-    pub fn to_path(&self, root: &Path) -> PathBuf {
-        let mut path = root.to_path_buf();
-        for name in self.names() {
-            path.push(name);
-        }
-        path
-    }
-
-    /// The reference spelling of `path`, a disk path under `root` as the scan builds it (`root` joined with names).
-    /// `path` must start with `root` as spelled — the prefix is compared component by component, not by the OS rule.
-    /// `Err(NotUnderRoot)` = not below `root` (or through `..`); the names must pass [`LibPath::parse`] too, so a
-    /// scanned name ending in `.` or a space is refused.
-    pub fn from_disk(root: &Path, path: &Path) -> Result<Self, PathError> {
-        let rest = path
-            .strip_prefix(root)
-            .map_err(|_| PathError::NotUnderRoot)?;
-        let mut names = Vec::new();
-        for component in rest.components() {
-            match component {
-                Component::Normal(name) => names.push(name.to_str().ok_or(PathError::NotUtf8)?),
-                _ => return Err(PathError::NotUnderRoot),
-            }
-        }
-        Self::parse(&names.join("/"))
-    }
-
     /// The folder holding this asset; `None` = it sits directly under the root.
     pub fn parent(&self) -> Option<LibPath> {
         self.as_str()
@@ -130,12 +104,6 @@ impl LibPath {
         self.as_str()
             .rsplit_once('/')
             .map_or(self.as_str(), |(_, name)| name)
-    }
-
-    /// The platform path key of [`LibPath::to_path`] — two references name the same file when their keys are equal.
-    /// Catalog lookups take `catalog::key` (the spelling from the root), not this key.
-    pub fn key(&self, root: &Path) -> PathKey {
-        path_key(&self.to_path(root))
     }
 
     /// This path with the leading names `from` replaced by `to` — a move of `from` to `to` (a file or a folder) carries
@@ -286,9 +254,14 @@ mod tests {
     use engram_dashboard_platform::fs::same_path;
 
     use super::*;
+    use crate::mounts::MountPath;
 
     fn lib(text: &str) -> LibPath {
         LibPath::parse(text).expect(text)
+    }
+
+    fn inside(text: &str) -> MountPath {
+        MountPath::parse(text).expect(text)
     }
 
     fn reserved(name: &str) -> PathError {
@@ -373,10 +346,9 @@ mod tests {
         let root = std::env::temp_dir();
         let root = root.ancestors().last().expect("a root");
         let joined = root.join("a").join("b.md");
-        let path = lib("a/b.md");
+        let path = inside("a/b.md");
         assert_eq!(path.to_path(root).as_os_str(), joined.as_os_str());
-        assert_eq!(path.key(root), path_key(&joined));
-        let back = LibPath::from_disk(root, &joined).expect("below the root");
+        let back = MountPath::from_disk(root, &joined).expect("below the root");
         assert_eq!(back, path);
         assert_eq!(back.to_path(root).as_os_str(), joined.as_os_str());
     }
@@ -387,13 +359,17 @@ mod tests {
         // hangul-ok-begin — non-ASCII path fixture
         for text in ["a.md", "업무/규칙.md", "a/b/c/SKILL.md"] {
             // hangul-ok-end
-            let disk = lib(text).to_path(root);
+            let disk = inside(text).to_path(root);
             assert!(disk.starts_with(root), "{disk:?}");
             let joined = text
                 .split('/')
                 .fold(root.to_path_buf(), |path, name| path.join(name));
             assert_eq!(disk.as_os_str(), joined.as_os_str(), "{text}");
-            assert_eq!(LibPath::from_disk(root, &disk), Ok(lib(text)), "{text}");
+            assert_eq!(
+                MountPath::from_disk(root, &disk),
+                Ok(inside(text)),
+                "{text}"
+            );
         }
     }
 
@@ -401,26 +377,26 @@ mod tests {
     fn from_disk_refuses_what_is_not_a_reference_below_the_root() {
         let root = Path::new("lib-root");
         assert_eq!(
-            LibPath::from_disk(root, Path::new("other/a.md")),
+            MountPath::from_disk(root, Path::new("other/a.md")),
             Err(PathError::NotUnderRoot)
         );
         assert_eq!(
-            LibPath::from_disk(root, &root.join("..").join("a.md")),
+            MountPath::from_disk(root, &root.join("..").join("a.md")),
             Err(PathError::NotUnderRoot)
         );
-        assert_eq!(LibPath::from_disk(root, root), Err(PathError::Empty));
+        assert_eq!(MountPath::from_disk(root, root), Err(PathError::Empty));
         // On Windows `join` replaces the buffer (`a:` is a drive prefix), so the path is not under the root; elsewhere
         //   `:` is a name character the parse refuses.
         assert!(matches!(
-            LibPath::from_disk(root, &root.join("a:b.md")),
+            MountPath::from_disk(root, &root.join("a:b.md")),
             Err(PathError::NotUnderRoot | PathError::ForbiddenChar(':'))
         ));
         assert_eq!(
-            LibPath::from_disk(root, &root.join("rules").join("a.md.")),
+            MountPath::from_disk(root, &root.join("rules").join("a.md.")),
             Err(PathError::NameEndsInDotOrSpace)
         );
         assert_eq!(
-            LibPath::from_disk(root, &root.join("nul.md")),
+            MountPath::from_disk(root, &root.join("nul.md")),
             Err(reserved("nul.md"))
         );
     }
@@ -428,14 +404,14 @@ mod tests {
     #[test]
     fn keys_follow_the_os_rule_and_equality_follows_the_spelling() {
         let root = Path::new("lib-root");
-        let (lower, upper) = (lib("rules/a.md"), lib("Rules/A.md"));
+        let (lower, upper) = (inside("rules/a.md"), inside("Rules/A.md"));
         assert_ne!(lower, upper);
-        assert_eq!(lower.key(root), path_key(&lower.to_path(root)));
+        let key = |path: &MountPath| path_key(&path.to_path(root));
         assert_eq!(
-            lower.key(root) == upper.key(root),
+            key(&lower) == key(&upper),
             same_path(&lower.to_path(root), &upper.to_path(root))
         );
-        assert_ne!(lower.key(root), lib("rules/b.md").key(root));
+        assert_ne!(key(&lower), key(&inside("rules/b.md")));
     }
 
     // TRD S25 step-7 §8-1 P1 path row — prefix swap.

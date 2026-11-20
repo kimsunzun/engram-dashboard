@@ -7,10 +7,11 @@
 //! - **One launch, one scope**: every check, the prepare and the working-folder call of one launch share one
 //!   [`LaunchScope`] — one IO context (one required budget, one advisory allowance, one answer set) and the working
 //!   folder the last check decided.
-//! - **The check** (TRD S25 step-7 §3-8 `check_in`): the library root is stat'ed only when a library preset is
-//!   attached; the library files the profile reaches are read fresh with the store (the overlay — local by
-//!   assumption); two brief read-lock takes — the root and the gate's numbers before the overlay read, then `resolve`
-//!   over the overlay, then the catalog (ADR-0324 decision 5). A root that exists but cannot be read is block ④, the
+//! - **The check** (TRD S25 step-7 §3-8 `check_in`): the folders of the mounts the attached library presets name are
+//!   stat'ed only when a library preset is attached; the library files the profile reaches are read fresh with the
+//!   store, each in its mount's folder (the overlay — local by assumption); two brief read-lock takes — the mounts and
+//!   the gate's numbers before the overlay read, then `resolve` over the overlay, then the catalog (ADR-0324 decision
+//!   5). A root that exists but cannot be read is block ④, the
 //!   whole answer — nothing else is checked. No folder IO runs under the library lock. The required phase
 //!   (folder-entry stats, listings and reads) runs first and alone; the advisory phase (the working-folder
 //!   canonicalize, the backend's own skill roots, root canonicals) runs only when nothing blocks, on its own
@@ -71,12 +72,13 @@ use crate::folder::{slash_path, FolderListing, FolderStatus, LaunchIo, Need};
 use crate::format::YamlFrontMatter;
 use crate::gate::Tags;
 use crate::gate::{NOT_FOUND, NO_ROOT};
+use crate::mounts::{admits_inside, Mounts};
 use crate::path::{AssetRef, BuiltinId, LibPath};
 use crate::resolve::{
     expand, folder_item, resolve, AbsentRootLookup, CatalogLookup, ItemView, Looked, Lookup,
     Resolution, RootState, Target,
 };
-use crate::store::admits;
+
 use crate::{
     extra_args, output_format, LibraryService, Want, LIBRARY_READ_CAP, LISTING_UNANSWERED,
 };
@@ -275,8 +277,8 @@ struct Launch {
 /// The library files one check read fresh (step 3), by catalog key of the path asked.
 #[derive(Default)]
 struct Overlay {
-    /// The root the files were read under.
-    root: PathBuf,
+    /// The mounts the files were read in.
+    mounts: Mounts,
     seen: HashMap<PathKey, Seen>,
     /// Every item the reads made — the late merge's positive observations.
     items: Vec<Item>,
@@ -320,7 +322,7 @@ impl Lookup for OverlayLookup<'_> {
                 Looked::Present(ItemView {
                     kind: &item.kind,
                     content: &item.content,
-                    file: Some(item.path.to_path(&self.overlay.root)),
+                    file: self.overlay.mounts.disk_path(&item.path),
                     stand_in: None,
                 })
             }
@@ -589,17 +591,18 @@ impl LibraryService {
         let codes = check.notice_codes(mode);
         let io = &*launch.io;
 
-        // ADR-0324 decision 5: the numbers are noted in the read lock that reads the root the overlay reads under.
-        let (noted, root) = self
+        // ADR-0324 decision 5: the numbers are noted in the read lock that reads the mounts the overlay reads in.
+        let (noted, mounts) = self
             .gate
-            .with_read(|state| (self.gate.numbers(), state.root().map(Path::to_path_buf)));
+            .with_read(|state| (self.gate.numbers(), state.mounts.clone()));
         let library_attached = want
             .presets
             .iter()
             .any(|preset| matches!(preset, AssetRef::Library(_)));
-        let root_state = self.root_state(io, root.as_deref(), Ok(()), library_attached);
-        let overlay = match (&root, &root_state) {
-            (Some(root), RootState::Ok) => self.read_overlay(root, &want),
+        let attached: Vec<&AssetRef> = want.presets.iter().collect();
+        let root_state = self.root_state(io, &mounts, &attached, Ok(()), library_attached);
+        let overlay = match &root_state {
+            RootState::Ok => self.read_overlay(&mounts, &want),
             _ => Overlay::default(),
         };
         // ADR-0387: an unset or absent root skips every library item — built-ins only, no catalog, no link probe.
@@ -630,7 +633,7 @@ impl LibraryService {
                     overlay: &overlay,
                     catalog: CatalogLookup {
                         catalog: &state.catalog,
-                        root: state.root(),
+                        mounts: &state.mounts,
                         builtins: &self.builtins,
                     },
                 };
@@ -649,8 +652,8 @@ impl LibraryService {
                 reasons: resolution.problems,
             });
         }
-        if let (Some(root), None) = (&root, &absent) {
-            self.mark_links(root, &mut resolution);
+        if absent.is_none() {
+            self.mark_links(&mounts, &mut resolution);
         }
         // ADR-0366
         // B26: the merge needs nothing the later steps find, so it is handed off as soon as the overlay is complete.
@@ -668,16 +671,8 @@ impl LibraryService {
             None
         };
         if let (Some(code), Some(cwd)) = (codes.same_name, &canonical) {
-            let names = self.same_names(
-                io,
-                check,
-                mode,
-                profile,
-                cwd,
-                root.as_deref(),
-                &resolution,
-                &listed,
-            );
+            let names =
+                self.same_names(io, check, mode, profile, cwd, &mounts, &resolution, &listed);
             notices.extend(
                 names
                     .into_iter()
@@ -711,7 +706,10 @@ impl LibraryService {
                     ItemContent::Preset { .. } | ItemContent::Settings { .. }
                 )
             })
-            .filter_map(|item| overlay.read_of(&item.path.to_path(&overlay.root)))
+            .filter_map(|item| {
+                let file = overlay.mounts.disk_path(&item.path)?;
+                overlay.read_of(&file)
+            })
             .chain(
                 resolution
                     .instructions
@@ -902,9 +900,9 @@ impl LibraryService {
     /// fresh with the store through the partial scan a refresh of that path runs — so a path is admitted exactly as
     /// the scan admits it (names, links, kinds) and each read draws its number first.
     // ADR-0365
-    fn read_overlay(&self, root: &Path, want: &Want) -> Overlay {
+    fn read_overlay(&self, mounts: &Mounts, want: &Want) -> Overlay {
         let mut overlay = Overlay {
-            root: root.to_path_buf(),
+            mounts: mounts.clone(),
             ..Overlay::default()
         };
         let mut todo: Vec<LibPath> = want
@@ -937,19 +935,24 @@ impl LibraryService {
         overlay
     }
 
-    /// One library path read for the overlay; the items it makes and their bytes go into `overlay`.
+    /// One library path read for the overlay in its mount's folder; the items it makes and their bytes go into
+    /// `overlay`. A path in no registered mount, or a mount's top, is absent (a mount's top is no item).
     fn overlay_read(&self, path: &LibPath, overlay: &mut Overlay) -> Seen {
         // The scan never admits such a name, so the catalog never holds it either.
-        if !admits(path) {
+        if !admits_inside(path) {
             return Seen::Absent;
         }
+        let Some((mount, Some(under))) = overlay.mounts.locate(path) else {
+            return Seen::Absent;
+        };
+        let mount = mount.clone();
         let bytes = RefCell::new(HashMap::new());
         let read = |file: &Path| {
             let read = self.store.read(file, LIBRARY_READ_CAP)?;
             bytes.borrow_mut().insert(path_key(file), read.clone());
             Ok(read)
         };
-        let result = match self.build_scan_reading(&overlay.root, Some(path), &Tags::new(), &read) {
+        let result = match self.build_scan_reading(&mount, Some(&under), &Tags::new(), &read) {
             Ok(result) => result,
             Err(e) => return Seen::Failed(e.to_string()),
         };
@@ -959,7 +962,9 @@ impl LibraryService {
             let ScanItem::Fresh(item) = entry else {
                 continue;
             };
-            let disk = item.path.to_path(&overlay.root);
+            let Some(disk) = overlay.mounts.disk_path(&item.path) else {
+                continue;
+            };
             let file = match &item.content {
                 ItemContent::Skill { file_name, .. } => disk.join(file_name),
                 _ => disk.clone(),
@@ -1094,7 +1099,7 @@ impl LibraryService {
     /// Step 6 (b) and the same-name comparison of step 7: each skill name found in more than one place, with the
     /// places (canonical skill folders, sorted). The places = the library skills the plan carries, the skills of each
     /// listed folder entry and of each of the backend's own skill roots found from the canonical `cwd` — each root
-    /// (the library root too) by its canonical path, asked on the advisory allowance, and each place counted once by
+    /// (each mount's folder too) by its canonical path, asked on the advisory allowance, and each place counted once by
     /// its path key; a root whose canonical path is unknown is left out (logged), never compared by its spelling
     /// (ADR-0355).
     #[allow(clippy::too_many_arguments)]
@@ -1105,7 +1110,7 @@ impl LibraryService {
         mode: AgentOutputFormat,
         profile: &AgentProfile,
         cwd: &Path,
-        root: Option<&Path>,
+        mounts: &Mounts,
         resolution: &Resolution,
         listed: &[Listed],
     ) -> Vec<(String, Vec<String>)> {
@@ -1122,16 +1127,16 @@ impl LibraryService {
             })
             .collect();
         roots.extend(self.native_roots(io, check, mode, profile, cwd));
-        if let Some(root) = root {
+        for mount in mounts.iter() {
             let names = resolution
                 .skills
                 .iter()
                 .filter_map(|(name, dir, _)| {
-                    let rel = dir.strip_prefix(root).ok()?;
+                    let rel = dir.strip_prefix(&mount.folder).ok()?;
                     Some((name.clone(), rel.to_path_buf()))
                 })
                 .collect();
-            roots.push((root.to_path_buf(), names));
+            roots.push((mount.folder.clone(), names));
         }
         roots.retain(|(_, names)| !names.is_empty());
         let asks: Vec<(PathBuf, Need)> = roots
@@ -1454,6 +1459,7 @@ mod tests {
     use engram_dashboard_platform::fs::link_dir;
 
     use super::*;
+    use crate::mounts::MountPath;
 
     #[test]
     fn merge_instructions_puts_the_priming_first_and_heads_each_source_with_its_path() {
@@ -1851,7 +1857,7 @@ mod tests {
         fn scan(
             &self,
             root: &Path,
-            under: Option<&LibPath>,
+            under: Option<&MountPath>,
             seq: &dyn Fn() -> u64,
         ) -> io::Result<ScanListing> {
             self.probe(root);
@@ -1872,7 +1878,7 @@ mod tests {
             FsStore.scan(root, under, seq)
         }
 
-        fn first_link(&self, root: &Path, rel: &LibPath) -> io::Result<Option<LibPath>> {
+        fn first_link(&self, root: &Path, rel: &MountPath) -> io::Result<Option<MountPath>> {
             self.probe(root);
             self.first_links.fetch_add(1, Ordering::SeqCst);
             FsStore.first_link(root, rel)
@@ -1936,6 +1942,8 @@ mod tests {
         priming: Option<&'static str>,
         /// Whether the library root is set.
         root: bool,
+        /// The name `lib\` is mounted under.
+        mount: &'static str,
     }
 
     impl Default for Setup {
@@ -1947,6 +1955,7 @@ mod tests {
                 merges: Merges::Run,
                 priming: Some("PRIMING"),
                 root: true,
+                mount: "library",
             }
         }
     }
@@ -1999,9 +2008,12 @@ mod tests {
                 registry: Arc::new(ProfileRegistry::new(Arc::new(NoProfiles))),
                 backends: setup.backends,
                 config: match setup.root {
-                    true => crate::config::LibraryConfig::usable(
+                    true => crate::config::LibraryConfig::mounted(
                         &base.join("state"),
-                        crate::config::MountPlace::Explicit(base.join("lib")),
+                        vec![crate::config::MountSetting {
+                            name: crate::mounts::MountName::parse(setup.mount).unwrap(),
+                            place: crate::config::MountPlace::Explicit(base.join("lib")),
+                        }],
                     ),
                     false => crate::config::LibraryConfig::missing(&base.join("state")),
                 },
@@ -2103,6 +2115,31 @@ mod tests {
             }
         }
         text
+    }
+
+    // ADR-0400 decision 2: a valid mount name shaped like a temp file does not make its items absent to a launch.
+    #[test]
+    fn a_launch_reads_the_items_of_a_mount_named_like_a_temp_file() {
+        let w = World::with(Setup {
+            mount: "work.tmp1.2",
+            ..Setup::default()
+        });
+        w.put("lib/rules/a.md", "A");
+        w.put(
+            "lib/P.yaml",
+            &preset(&["work.tmp1.2/rules/a.md"], &[], &[], &[]),
+        );
+        let plan = w
+            .svc
+            .check(&agent(codex(JSON), &["work.tmp1.2/P.yaml"], &w.at("work")))
+            .unwrap();
+        let sources: Vec<&str> = plan
+            .instructions
+            .iter()
+            .map(|source| source.path.as_str())
+            .collect();
+        assert_eq!(sources, ["work.tmp1.2/rules/a.md"]);
+        assert!(plan.notices.is_empty(), "{:?}", plan.notices);
     }
 
     fn skill(name: &str) -> String {
@@ -2207,13 +2244,13 @@ mod tests {
         w.put(
             "lib/P.yaml",
             &preset(
-                &["rules/a.md"],
-                &["skills/alpha"],
-                &["settings/s.yaml"],
+                &["library/rules/a.md"],
+                &["library/skills/alpha"],
+                &["library/settings/s.yaml"],
                 &[&folder],
             ),
         );
-        let profile = with_default(agent(codex(JSON), &["P.yaml"], &w.at("work")));
+        let profile = with_default(agent(codex(JSON), &["library/P.yaml"], &w.at("work")));
 
         let plan = w.svc.check(&profile).unwrap();
         assert!(plan.real);
@@ -2229,7 +2266,7 @@ mod tests {
         assert_eq!(
             sources,
             [
-                ("rules/a.md", a_md.as_path()),
+                ("library/rules/a.md", a_md.as_path()),
                 (folder_source.as_str(), agents_md.as_path())
             ]
         );
@@ -2241,7 +2278,7 @@ mod tests {
             }]
         );
         assert_eq!(plan.raw_settings.len(), 1);
-        assert_eq!(plan.raw_settings[0].preset, "P.yaml");
+        assert_eq!(plan.raw_settings[0].preset, "library/P.yaml");
         assert!(plan.include_priming);
         assert_eq!(plan.folders, [folder.clone()]);
         assert_eq!(
@@ -2264,7 +2301,9 @@ mod tests {
         );
 
         w.spawn.merges_done();
-        assert!(w.has("P.yaml") && w.has("rules/a.md") && w.has("skills/alpha"));
+        assert!(
+            w.has("library/P.yaml") && w.has("library/rules/a.md") && w.has("library/skills/alpha")
+        );
     }
 
     /// A missing item beside broken and conflicting ones: the refusal holds only the blocking rows, in kind order
@@ -2277,11 +2316,16 @@ mod tests {
         w.put("lib/bad.yaml", "kind: settings\nversion: [\n");
         w.put(
             "lib/P.yaml",
-            &preset(&["gone.md"], &["skills/a", "skills/b"], &["bad.yaml"], &[]),
+            &preset(
+                &["library/gone.md"],
+                &["library/skills/a", "library/skills/b"],
+                &["library/bad.yaml"],
+                &[],
+            ),
         );
         let blocked = w
             .svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap_err();
         assert_eq!(
             codes(&blocked),
@@ -2314,31 +2358,35 @@ mod tests {
             w.put(
                 "lib/P.yaml",
                 &format!(
-                    "{}presets:\n  - nested.yaml\n",
+                    "{}presets:\n  - library/nested.yaml\n",
                     preset(
-                        &["rules/a.md", "rules/gone.md"],
-                        &["skills/gone"],
-                        &["settings/gone.yaml"],
+                        &["library/rules/a.md", "library/rules/gone.md"],
+                        &["library/skills/gone"],
+                        &["library/settings/gone.yaml"],
                         &[&kept, &gone],
                     )
                 ),
             );
-            let profile = agent(command.clone(), &["P.yaml", "absent.yaml"], &w.at("work"));
+            let profile = agent(
+                command.clone(),
+                &["library/P.yaml", "library/absent.yaml"],
+                &w.at("work"),
+            );
             let plan = w.svc.check(&profile).unwrap();
             let sources: Vec<&str> = plan.instructions.iter().map(|s| s.path.as_str()).collect();
-            assert_eq!(sources, ["rules/a.md"], "{command:?}");
+            assert_eq!(sources, ["library/rules/a.md"], "{command:?}");
             assert!(plan.skills.is_empty() && plan.raw_settings.is_empty());
             assert_eq!(plan.folders, [kept.clone()], "{command:?}");
             let gone_item = folder_item(&gone);
             assert_eq!(
                 plan.notices,
                 [
-                    skipped_item("nested.yaml", &["P.yaml"], Some(14)),
-                    skipped_item("rules/gone.md", &["P.yaml"], Some(5)),
-                    skipped_item("settings/gone.yaml", &["P.yaml"], Some(9)),
-                    skipped_item("skills/gone", &["P.yaml"], Some(7)),
-                    skipped_item("absent.yaml", &[], None),
-                    skipped_item(&gone_item, &["P.yaml"], Some(12)),
+                    skipped_item("library/nested.yaml", &["library/P.yaml"], Some(14)),
+                    skipped_item("library/rules/gone.md", &["library/P.yaml"], Some(5)),
+                    skipped_item("library/settings/gone.yaml", &["library/P.yaml"], Some(9)),
+                    skipped_item("library/skills/gone", &["library/P.yaml"], Some(7)),
+                    skipped_item("library/absent.yaml", &[], None),
+                    skipped_item(&gone_item, &["library/P.yaml"], Some(12)),
                 ],
                 "{command:?}"
             );
@@ -2352,13 +2400,13 @@ mod tests {
             "lib/skills/e/SKILL.md",
             "---\nname: e\ndescription: ''\n---\nbody\n",
         );
-        w.put("lib/P.yaml", &preset(&[], &["skills/e"], &[], &[]));
+        w.put("lib/P.yaml", &preset(&[], &["library/skills/e"], &[], &[]));
         let blocked = w
             .svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap_err();
         assert!(
-            matches!(&blocked.reasons[..], [BlockReason::Broken { item, .. }] if item == "skills/e"),
+            matches!(&blocked.reasons[..], [BlockReason::Broken { item, .. }] if item == "library/skills/e"),
             "{blocked:?}"
         );
     }
@@ -2384,7 +2432,7 @@ mod tests {
                     lock(&w.ops.state).denied.insert(w.at("lib"));
                 }
             }
-            let profile = with_default(agent(codex(TERMINAL), &["P.yaml"], &unsafe_cwd));
+            let profile = with_default(agent(codex(TERMINAL), &["library/P.yaml"], &unsafe_cwd));
             let blocked = w.svc.check(&profile).unwrap_err();
             let why = if held { TIMEOUT } else { "access denied" };
             assert_eq!(
@@ -2424,7 +2472,11 @@ mod tests {
             (&file, "not a folder"),
             (&unset, crate::gate::NO_ROOT),
         ] {
-            let profile = with_default(agent(codex(JSON), &["P.yaml", "Q.yaml"], &w.at("work")));
+            let profile = with_default(agent(
+                codex(JSON),
+                &["library/P.yaml", "library/Q.yaml"],
+                &w.at("work"),
+            ));
             let plan = w.svc.check(&profile).unwrap();
             assert!(plan.include_priming, "{message}");
             assert!(plan.instructions.is_empty() && plan.skills.is_empty());
@@ -2432,7 +2484,7 @@ mod tests {
                 plan.notices,
                 [notice(
                     LIBRARY_UNAVAILABLE_SKIPPED,
-                    json!({ "message": message, "items": ["P.yaml", "Q.yaml"] })
+                    json!({ "message": message, "items": ["library/P.yaml", "library/Q.yaml"] })
                 )],
                 "{message}"
             );
@@ -2446,7 +2498,7 @@ mod tests {
 
             let unparsed = with_default(agent(
                 codex(JSON),
-                &["P.yaml", "../out.yaml"],
+                &["library/P.yaml", "../out.yaml"],
                 &w.at("work"),
             ));
             let blocked = w.svc.check(&unparsed).unwrap_err();
@@ -2476,16 +2528,20 @@ mod tests {
         let gone = w.at("gone");
         w.put(
             "lib/P.yaml",
-            &preset(&["rules/gone.md"], &[], &[], &[&gone]),
+            &preset(&["library/rules/gone.md"], &[], &[], &[&gone]),
         );
-        let profile = agent(claude(JSON), &["P.yaml", "absent.yaml"], &w.at("work"));
+        let profile = agent(
+            claude(JSON),
+            &["library/P.yaml", "library/absent.yaml"],
+            &w.at("work"),
+        );
         assert_eq!(
             written(&w, &profile).as_deref(),
             Some(
                 format!(
                     "Engram launch note: these items your presets reference were not found and were left out of \
-                     this launch:\n- rules/gone.md (listed in P.yaml)\n- absent.yaml (attached to this agent)\n- \
-                     folder {} (not found or not a folder; listed in P.yaml)\n",
+                     this launch:\n- library/rules/gone.md (listed in library/P.yaml)\n- library/absent.yaml (attached to this agent)\n- \
+                     folder {} (not found or not a folder; listed in library/P.yaml)\n",
                     gone.display()
                 )
                 .as_str()
@@ -2500,12 +2556,16 @@ mod tests {
             root: false,
             ..Setup::default()
         });
-        let profile = with_default(agent(claude(JSON), &["P.yaml", "Q.yaml"], &w.at("work")));
+        let profile = with_default(agent(
+            claude(JSON),
+            &["library/P.yaml", "library/Q.yaml"],
+            &w.at("work"),
+        ));
         assert_eq!(
             written(&w, &profile).as_deref(),
             Some(
                 "PRIMING\n\nEngram launch note: The library folder could not be used (no library root is set), so \
-                 these library items were left out: P.yaml, Q.yaml\n"
+                 these library items were left out: library/P.yaml, library/Q.yaml\n"
             )
         );
     }
@@ -2515,22 +2575,33 @@ mod tests {
     #[test]
     fn a_codex_terminal_note_is_named_when_the_line_carries_the_names_else_counted() {
         let w = World::new();
-        w.put("lib/P.yaml", &preset(&["rules/gone.md"], &[], &[], &[]));
-        w.put("lib/Q.yaml", &preset(&["rules/it's.md"], &[], &[], &[]));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/rules/gone.md"], &[], &[], &[]),
+        );
+        w.put(
+            "lib/Q.yaml",
+            &preset(&["library/rules/it's.md"], &[], &[], &[]),
+        );
         w.put(
             "lib/R.yaml",
-            &preset(&["rules/it's.md", "rules/gone.md"], &[], &[], &[]),
+            &preset(
+                &["library/rules/it's.md", "library/rules/gone.md"],
+                &[],
+                &[],
+                &[],
+            ),
         );
         let cwd = w.at("work");
-        let named = with_default(agent(codex(TERMINAL), &["P.yaml"], &cwd));
+        let named = with_default(agent(codex(TERMINAL), &["library/P.yaml"], &cwd));
         assert_eq!(
             written(&w, &named).as_deref(),
             Some(
                 "PRIMING\n\nEngram launch note: these items your presets reference were not found and were left \
-                 out of this launch:\n- rules/gone.md (listed in P.yaml)\n"
+                 out of this launch:\n- library/rules/gone.md (listed in library/P.yaml)\n"
             )
         );
-        for (attached, count) in [("Q.yaml", 1), ("R.yaml", 2)] {
+        for (attached, count) in [("library/Q.yaml", 1), ("library/R.yaml", 2)] {
             let counted = with_default(agent(codex(TERMINAL), &[attached], &cwd));
             assert_eq!(
                 written(&w, &counted),
@@ -2553,13 +2624,20 @@ mod tests {
     #[test]
     fn codex_with_no_instruction_text_of_its_own_gets_no_note() {
         let w = World::new();
-        w.put("lib/P.yaml", &preset(&["rules/gone.md"], &[], &[], &[]));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/rules/gone.md"], &[], &[], &[]),
+        );
         for mode in [JSON, TERMINAL] {
-            let profile = agent(codex(mode), &["P.yaml"], &w.at("work"));
+            let profile = agent(codex(mode), &["library/P.yaml"], &w.at("work"));
             let plan = w.svc.check(&profile).unwrap();
             assert_eq!(
                 plan.notices,
-                [skipped_item("rules/gone.md", &["P.yaml"], Some(4))]
+                [skipped_item(
+                    "library/rules/gone.md",
+                    &["library/P.yaml"],
+                    Some(4)
+                )]
             );
             assert_eq!(written(&w, &profile), None, "{mode:?}");
         }
@@ -2567,9 +2645,12 @@ mod tests {
             priming: Some("  \n   \n"),
             ..Setup::default()
         });
-        blank.put("lib/P.yaml", &preset(&["rules/gone.md"], &[], &[], &[]));
+        blank.put(
+            "lib/P.yaml",
+            &preset(&["library/rules/gone.md"], &[], &[], &[]),
+        );
         for mode in [JSON, TERMINAL] {
-            let profile = with_default(agent(codex(mode), &["P.yaml"], &blank.at("work")));
+            let profile = with_default(agent(codex(mode), &["library/P.yaml"], &blank.at("work")));
             let text = written(&blank, &profile).expect("the priming is a file");
             assert!(!text.contains("launch note"), "{mode:?}: {text:?}");
         }
@@ -2621,8 +2702,11 @@ mod tests {
             backends: Arc::new(Registry(vec![leaked as &'static dyn SettingsCheck])),
             ..Setup::default()
         });
-        w.put("lib/P.yaml", &preset(&["rules/gone.md"], &[], &[], &[]));
-        let profile = with_default(agent(codex(JSON), &["P.yaml"], &w.at("work")));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/rules/gone.md"], &[], &[], &[]),
+        );
+        let profile = with_default(agent(codex(JSON), &["library/P.yaml"], &w.at("work")));
         let dropped = Arc::new(AtomicUsize::new(0));
         let subscriber = MessageCount(
             "launch note dropped; command line cannot carry it",
@@ -2637,7 +2721,11 @@ mod tests {
             let plan = plans.pop().unwrap();
             assert_eq!(
                 plan.notices,
-                [skipped_item("rules/gone.md", &["P.yaml"], Some(4))]
+                [skipped_item(
+                    "library/rules/gone.md",
+                    &["library/P.yaml"],
+                    Some(4)
+                )]
             );
             w.svc.prepare_in(&scope, plan, profile.id, 1).unwrap()
         });
@@ -2654,12 +2742,15 @@ mod tests {
             backends: Arc::new(Registry(vec![leaked as &'static dyn SettingsCheck])),
             ..Setup::default()
         });
-        w.put("lib/P.yaml", &preset(&["rules/gone.md"], &[], &[], &[]));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/rules/gone.md"], &[], &[], &[]),
+        );
         let blocked = w
             .svc
             .check(&with_default(agent(
                 codex(JSON),
-                &["P.yaml"],
+                &["library/P.yaml"],
                 &w.at("work"),
             )))
             .unwrap_err();
@@ -2682,7 +2773,7 @@ mod tests {
             program: "sh".to_owned(),
             args: Vec::new(),
         };
-        let profile = agent(shell, &["P.yaml"], &w.at("work"));
+        let profile = agent(shell, &["library/P.yaml"], &w.at("work"));
         let plan = w.svc.check(&profile).unwrap();
         assert_eq!(plan, NoopLaunchKits.check(&profile).unwrap());
         let kit = w.svc.prepare(plan, profile.id, 1).unwrap();
@@ -2715,16 +2806,19 @@ mod tests {
         let w = World::new();
         let outside = w.folder("outside", &[("a.md", "A")]);
         link_dir(&outside, &w.at("lib/linked")).unwrap();
-        w.put("lib/P.yaml", &preset(&["linked/a.md"], &[], &[], &[]));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/linked/a.md"], &[], &[], &[]),
+        );
         let blocked = w
             .svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap_err();
         match &blocked.reasons[..] {
             [BlockReason::Broken { item, reason, .. }] => {
                 assert_eq!(
                     (item.as_str(), reason.code.as_str()),
-                    ("linked/a.md", PATH_THROUGH_LINK)
+                    ("library/linked/a.md", PATH_THROUGH_LINK)
                 );
                 assert_eq!(reason.line, Some(4), "the line of the reference");
             }
@@ -2743,9 +2837,9 @@ mod tests {
         w.put("lib/skills/alpha/SKILL.md", &skill("alpha"));
         w.put(
             "lib/P.yaml",
-            &preset(&["rules/a.md"], &["skills/alpha"], &[], &[]),
+            &preset(&["library/rules/a.md"], &["library/skills/alpha"], &[], &[]),
         );
-        let profile = with_default(agent(codex(TERMINAL), &["P.yaml"], &w.at("work")));
+        let profile = with_default(agent(codex(TERMINAL), &["library/P.yaml"], &w.at("work")));
         let plan = w.svc.check(&profile).unwrap();
         assert!(plan.instructions.is_empty() && plan.skills.is_empty());
         assert!(plan.include_priming);
@@ -2753,7 +2847,7 @@ mod tests {
             plan.notices,
             [Reason {
                 code: CODEX_TERMINAL_OMITTED.to_owned(),
-                args: json!({ "instructions": ["rules/a.md"], "skills": ["alpha"] }),
+                args: json!({ "instructions": ["library/rules/a.md"], "skills": ["alpha"] }),
                 line: None,
             }]
         );
@@ -2804,14 +2898,17 @@ mod tests {
         });
         let folder = w.folder("rules", &[("RULES.md", "r")]);
         w.put("lib/rules/a.md", "A");
-        w.put("lib/P.yaml", &preset(&["rules/a.md"], &[], &[], &[&folder]));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/rules/a.md"], &[], &[], &[&folder]),
+        );
         let shell = AgentCommand::Shell {
             program: "sh".to_owned(),
             args: Vec::new(),
         };
         let plan = w
             .svc
-            .check(&agent(shell, &["P.yaml"], &w.at("work")))
+            .check(&agent(shell, &["library/P.yaml"], &w.at("work")))
             .unwrap();
         let told: Vec<(&str, &Value)> = plan
             .notices
@@ -2823,7 +2920,7 @@ mod tests {
             [
                 (
                     "shell-omitted",
-                    &json!({ "instructions": ["rules/a.md"], "skills": [] })
+                    &json!({ "instructions": ["library/rules/a.md"], "skills": [] })
                 ),
                 (
                     "shell-folder-omitted",
@@ -2841,7 +2938,7 @@ mod tests {
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
         let plan = w
             .svc
-            .check(&agent(claude(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(claude(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap();
         assert!(plan.instructions.is_empty(), "{:?}", plan.instructions);
         assert_eq!(plan.folders, [folder.clone()]);
@@ -2864,7 +2961,7 @@ mod tests {
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
         let plan = w
             .svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap();
         assert_eq!(
             plan.notices,
@@ -2892,7 +2989,10 @@ mod tests {
         let scope = w.svc.begin_launch();
         let blocked = w
             .svc
-            .check_in(&scope, &agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check_in(
+                &scope,
+                &agent(codex(JSON), &["library/P.yaml"], &w.at("work")),
+            )
             .unwrap_err();
         match &blocked.reasons[..] {
             [BlockReason::Broken { item, reason, .. }] => {
@@ -2921,7 +3021,7 @@ mod tests {
         let began = Instant::now();
         let blocked = w
             .svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap_err();
         assert!(began.elapsed() < ms(2_000 + 1_000), "{:?}", began.elapsed());
         match &blocked.reasons[..] {
@@ -2942,7 +3042,7 @@ mod tests {
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
         let blocked = w
             .svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap_err();
         match &blocked.reasons[..] {
             [BlockReason::Broken { item, reason, .. }] => {
@@ -2969,7 +3069,7 @@ mod tests {
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
         let plan = w
             .svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap();
         assert_eq!(
             plan.notices,
@@ -3006,13 +3106,20 @@ mod tests {
         let on_store = probe(Arc::downgrade(&w.svc), Arc::clone(&held));
         *lock(&w.store.probe) = Some(Box::new(move |_: &Path| on_store()));
         let folder = w.folder("rules", &[("AGENTS.md", "rules")]);
-        w.put("lib/P.yaml", &preset(&["gone.md"], &[], &[], &[&folder]));
-        let profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/gone.md"], &[], &[], &[&folder]),
+        );
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
         // ADR-0387: the missing instruction is skipped, after its link probe.
         let plan = w.svc.check(&profile).unwrap();
         assert_eq!(
             plan.notices,
-            [skipped_item("gone.md", &["P.yaml"], Some(4))]
+            [skipped_item(
+                "library/gone.md",
+                &["library/P.yaml"],
+                Some(4)
+            )]
         );
         assert!(
             w.store.first_links.load(Ordering::SeqCst) >= 1,
@@ -3054,7 +3161,7 @@ mod tests {
                 lock(&wait_go).recv().unwrap();
             }
         }));
-        let profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
         let scope = w.svc.begin_launch();
         let (svc, in_scope) = (Arc::clone(&w.svc), scope.clone());
         let (answered, answer) = mpsc::channel();
@@ -3093,7 +3200,7 @@ mod tests {
         let refresh = thread::spawn(move || svc.refresh(None));
         w.store.wait_parked();
         w.svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap();
         w.store.hold_whole_scans(false);
         refresh.join().unwrap();
@@ -3111,10 +3218,13 @@ mod tests {
         link_dir(&target, &cwd).unwrap();
         w.ops.hold(&cwd);
         w.put("lib/bad.yaml", "kind: settings\nversion: [\n");
-        w.put("lib/P.yaml", &preset(&["gone.md"], &[], &["bad.yaml"], &[]));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/gone.md"], &[], &["library/bad.yaml"], &[]),
+        );
         let blocked = w
             .svc
-            .check(&agent(codex(TERMINAL), &["P.yaml"], &cwd))
+            .check(&agent(codex(TERMINAL), &["library/P.yaml"], &cwd))
             .unwrap_err();
         assert_eq!(
             codes(&blocked),
@@ -3128,11 +3238,11 @@ mod tests {
         assert_eq!(w.ops.ops("list"), 0);
 
         let skips_only = World::new();
-        skips_only.put("lib/P.yaml", &preset(&["gone.md"], &[], &[], &[]));
+        skips_only.put("lib/P.yaml", &preset(&["library/gone.md"], &[], &[], &[]));
         let cwd = skips_only.at("work");
         skips_only
             .svc
-            .check(&agent(codex(TERMINAL), &["P.yaml"], &cwd))
+            .check(&agent(codex(TERMINAL), &["library/P.yaml"], &cwd))
             .unwrap();
         assert_eq!(
             skips_only.ops.count("canonical", &cwd),
@@ -3156,7 +3266,7 @@ mod tests {
         let scope = w.svc.begin_launch();
         let plan = w
             .svc
-            .check_in(&scope, &agent(codex(JSON), &["P.yaml"], &cwd))
+            .check_in(&scope, &agent(codex(JSON), &["library/P.yaml"], &cwd))
             .unwrap();
         assert!(plan.notices.is_empty(), "{:?}", plan.notices);
         assert_eq!(
@@ -3221,8 +3331,14 @@ mod tests {
         let cwd = w.at("cwd-link");
         link_dir(&sub, &cwd).unwrap();
         w.put("lib/skills/gamma/SKILL.md", &skill("gamma"));
-        w.put("lib/P.yaml", &preset(&[], &["skills/gamma"], &[], &[]));
-        let plan = w.svc.check(&agent(codex(JSON), &["P.yaml"], &cwd)).unwrap();
+        w.put(
+            "lib/P.yaml",
+            &preset(&[], &["library/skills/gamma"], &[], &[]),
+        );
+        let plan = w
+            .svc
+            .check(&agent(codex(JSON), &["library/P.yaml"], &cwd))
+            .unwrap();
         let mut paths = vec![
             lossy(&w.at("lib/skills/gamma")),
             lossy(&w.at("proj/.agents/skills/gamma")),
@@ -3254,7 +3370,7 @@ mod tests {
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&a, &b, &c, &d]));
         let plan = w
             .svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap();
         let paths = [
             lossy(&a.join(".agents").join("skills").join("omega")),
@@ -3282,8 +3398,11 @@ mod tests {
         }
         let w = World::new();
         w.put("lib/skills/alpha/SKILL.md", &skill("alpha"));
-        w.put("lib/P.yaml", &preset(&[], &["skills/ALPHA"], &[], &[]));
-        let mut profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
+        w.put(
+            "lib/P.yaml",
+            &preset(&[], &["library/skills/ALPHA"], &[], &[]),
+        );
+        let mut profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
         // The backend's own fixed root `<CODEX_HOME>/skills` is then the library's `skills` folder.
         profile.env = vec![("CODEX_HOME".to_owned(), lossy(&w.at("lib")))];
         let plan = w.svc.check(&profile).unwrap();
@@ -3310,7 +3429,10 @@ mod tests {
         let w = World::new();
         let cwd = w.folder("work", &[(".agents/skills/SKILL.md", &skill("omega"))]);
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&cwd]));
-        let plan = w.svc.check(&agent(codex(JSON), &["P.yaml"], &cwd)).unwrap();
+        let plan = w
+            .svc
+            .check(&agent(codex(JSON), &["library/P.yaml"], &cwd))
+            .unwrap();
         let native = cwd.join(".agents").join("skills");
         assert_eq!(w.ops.count("list", &native), 1, "the native root was read");
         assert_eq!(w.ops.count("canonical", &native), 1, "and compared");
@@ -3333,7 +3455,7 @@ mod tests {
         w.ops.hold_op("canonical", &b);
         let plan = w
             .svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap();
         assert_eq!(
             (w.ops.count("canonical", &a), w.ops.count("canonical", &b)),
@@ -3354,7 +3476,7 @@ mod tests {
         let folder = w.folder("rules", &[("AGENTS.md", "rules")]);
         w.ops.hold_op("list", &folder);
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
-        let profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
         let scope = w.svc.begin_launch();
         let (svc, in_scope) = (Arc::clone(&w.svc), scope.clone());
         let check = thread::spawn(move || svc.check_in(&in_scope, &profile));
@@ -3399,7 +3521,7 @@ mod tests {
         let w = World::new();
         let folder = w.folder("rules", &[("AGENTS.md", "rules")]);
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
-        let profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
         let scope = w.svc.begin_launch();
         w.svc.check_in(&scope, &profile).unwrap();
         let plan = w.svc.check_in(&scope, &profile).unwrap();
@@ -3431,7 +3553,7 @@ mod tests {
         w.ops.hold(&native);
         let folder = w.folder("rules", &[("AGENTS.md", "rules")]);
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
-        let profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
         let scope = w.svc.begin_launch();
         w.svc.check_in(&scope, &profile).unwrap();
         let plan = w.svc.check_in(&scope, &profile).unwrap();
@@ -3483,9 +3605,9 @@ mod tests {
         });
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[]));
         w.svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap();
-        assert!(w.has("P.yaml"));
+        assert!(w.has("library/P.yaml"));
     }
 
     #[test]
@@ -3497,7 +3619,7 @@ mod tests {
         let folder = w.folder("rules", &[]);
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
         w.ops.hold_op("stat", &folder);
-        let profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
         let svc = Arc::clone(&w.svc);
         let (answered, answer) = mpsc::channel();
         thread::spawn(move || answered.send(svc.check(&profile)));
@@ -3524,7 +3646,7 @@ mod tests {
         );
         drop(guard);
         merge.join().unwrap();
-        assert!(w.has("P.yaml"));
+        assert!(w.has("library/P.yaml"));
     }
 
     #[test]
@@ -3534,17 +3656,20 @@ mod tests {
             ..Setup::default()
         });
         w.put("lib/rules/x.md", "X");
-        w.put("lib/P.yaml", &preset(&["rules/x.md"], &[], &[], &[]));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/rules/x.md"], &[], &[], &[]),
+        );
         w.svc
-            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
             .unwrap();
         fs::remove_file(w.at("lib/rules/x.md")).unwrap();
         for job in w.spawn.take_deferred() {
             job();
         }
-        assert!(w.has("rules/x.md"), "a check never removes (B31)");
+        assert!(w.has("library/rules/x.md"), "a check never removes (B31)");
         w.svc.refresh(None);
-        assert!(!w.has("rules/x.md"));
+        assert!(!w.has("library/rules/x.md"));
     }
 
     // ── prepare ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -3555,8 +3680,11 @@ mod tests {
         let w = World::new();
         let folder = w.folder("rules", &[("AGENTS.md", "rules")]);
         let a_md = w.put("lib/rules/a.md", "AAAA");
-        w.put("lib/P.yaml", &preset(&["rules/a.md"], &[], &[], &[&folder]));
-        let profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/rules/a.md"], &[], &[], &[&folder]),
+        );
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
 
         let plan = w.svc.check(&profile).unwrap();
         fs::remove_file(&a_md).unwrap();
@@ -3595,8 +3723,11 @@ mod tests {
         let w = World::new();
         let native_skill = w.put("home/.agents/skills/zeta/SKILL.md", &skill("zeta"));
         w.put("lib/skills/zeta/SKILL.md", &skill("zeta"));
-        w.put("lib/P.yaml", &preset(&[], &["skills/zeta"], &[], &[]));
-        let profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
+        w.put(
+            "lib/P.yaml",
+            &preset(&[], &["library/skills/zeta"], &[], &[]),
+        );
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
         let plan = w.svc.check(&profile).unwrap();
         assert_eq!(
             plan.notices.len(),
@@ -3611,8 +3742,11 @@ mod tests {
     fn prepare_takes_no_library_lock_and_writes_the_merged_file_with_a_stable_hash() {
         let w = World::new();
         w.put("lib/rules/a.md", "A");
-        w.put("lib/P.yaml", &preset(&["rules/a.md"], &[], &[], &[]));
-        let profile = with_default(agent(codex(JSON), &["P.yaml"], &w.at("work")));
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/rules/a.md"], &[], &[], &[]),
+        );
+        let profile = with_default(agent(codex(JSON), &["library/P.yaml"], &w.at("work")));
         let plan = w.svc.check(&profile).unwrap();
         let guard = write(w.svc.gate.lib());
         let svc = Arc::clone(&w.svc);
@@ -3630,7 +3764,7 @@ mod tests {
         let written = fs::read(&file).unwrap();
         assert_eq!(
             String::from_utf8(written.clone()).unwrap(),
-            merge_instructions(Some("PRIMING"), &[("rules/a.md", "A")])
+            merge_instructions(Some("PRIMING"), &[("library/rules/a.md", "A")])
         );
         assert_eq!(kit.instructions_hash, Some(sha256_hex(&written)));
         assert_eq!(kit.instructions_hash, kit2.instructions_hash);
@@ -3652,9 +3786,19 @@ mod tests {
         let g = w.folder("g", &[("RULES.md", "G rules")]);
         w.put("lib/rules/a.md", "A");
         w.put("lib/rules/b.md", "B");
-        w.put("lib/P1.yaml", &preset(&["rules/a.md"], &[], &[], &[&f, &g]));
-        w.put("lib/P2.yaml", &preset(&["rules/b.md"], &[], &[], &[]));
-        let profile = with_default(agent(codex(JSON), &["P1.yaml", "P2.yaml"], &w.at("work")));
+        w.put(
+            "lib/P1.yaml",
+            &preset(&["library/rules/a.md"], &[], &[], &[&f, &g]),
+        );
+        w.put(
+            "lib/P2.yaml",
+            &preset(&["library/rules/b.md"], &[], &[], &[]),
+        );
+        let profile = with_default(agent(
+            codex(JSON),
+            &["library/P1.yaml", "library/P2.yaml"],
+            &w.at("work"),
+        ));
         let plan = w.svc.check(&profile).unwrap();
         let (f_source, g_source) = (folder_item(&f), folder_item(&g));
         let sources: Vec<&str> = plan
@@ -3664,7 +3808,7 @@ mod tests {
             .collect();
         assert_eq!(
             sources,
-            ["rules/a.md", &f_source, &g_source, "rules/b.md"],
+            ["library/rules/a.md", &f_source, &g_source, "library/rules/b.md"],
             "a folder's instruction file right after its preset's own lines, folders in their order"
         );
         let kit = w.svc.prepare(plan, profile.id, 1).unwrap();
@@ -3676,10 +3820,10 @@ mod tests {
             merge_instructions(
                 Some("PRIMING"),
                 &[
-                    ("rules/a.md", "A"),
+                    ("library/rules/a.md", "A"),
                     (&f_source, "F rules"),
                     (&g_source, "G rules"),
-                    ("rules/b.md", "B")
+                    ("library/rules/b.md", "B")
                 ]
             )
         );
@@ -3693,7 +3837,7 @@ mod tests {
         });
         let folder = w.folder("rules", &[("AGENTS.md", "rules")]);
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
-        let profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
         let plan = w.svc.check(&profile).unwrap();
         w.ops.hold(&folder.join("AGENTS.md"));
         assert_eq!(
@@ -3713,10 +3857,10 @@ mod tests {
             w.put("lib/rules/a.md", "A");
             w.put(
                 "lib/P.yaml",
-                &preset(&["rules/a.md"], &["skills/alpha"], &[], &[]),
+                &preset(&["library/rules/a.md"], &["library/skills/alpha"], &[], &[]),
             );
             let cwd = w.at("work");
-            let profile = with_default(agent(command.clone(), &["P.yaml"], &cwd));
+            let profile = with_default(agent(command.clone(), &["library/P.yaml"], &cwd));
             let plan = w.svc.check(&profile).unwrap();
             let kit = w.svc.prepare(plan, profile.id, 1).unwrap();
             let artifacts = materialize(&command, &kit, &cwd, &StdLaunchFs)
@@ -3803,7 +3947,7 @@ mod tests {
         w.ops.hold_op("stat", &held);
         w.put("lib/P.yaml", &preset(&[], &[], &[], &[&held]));
         let (manager, profiles) = manager_over(&w);
-        let profile = agent(claude(JSON), &["P.yaml"], &w.at("work"));
+        let profile = agent(claude(JSON), &["library/P.yaml"], &w.at("work"));
 
         let not_started = manager
             .create_and_activate(&profile, NoticeDelivery::Withheld)
@@ -3848,7 +3992,7 @@ mod tests {
             }
         }));
         let (manager, profiles) = manager_over(&w);
-        let profile = agent(claude(JSON), &["P.yaml"], &w.at("work"));
+        let profile = agent(claude(JSON), &["library/P.yaml"], &w.at("work"));
 
         let not_started = manager
             .create_and_activate(&profile, NoticeDelivery::Withheld)
