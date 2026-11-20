@@ -1,6 +1,6 @@
 # S37 PRD — daemon↔daemon agent mail between the user's own PCs
 
-- Status: draft 5 · 2026-11-20 (round-2 review fixes) · decisions D1–D7 all taken by the user (D2 amended and D5 revised on 2026-11-20); PRD approval is asked together with the PRD+TRD review. Where each post-review decision lives: TRD §8 「Decided after review」.
+- Status: draft 6 · 2026-11-20 · decisions D1–D7 all taken by the user (D2 amended and D5 revised on 2026-11-20); PRD approval is asked together with the PRD+TRD review. Where each post-review decision lives: TRD §8 「Decided after review」.
 - Research: `../../research/multi-daemon-federation-direction-2026-11-11.md` (GPT draft vs code, peers, Syncthing / hcom / Reason Network source reads) · `../../research/multi-daemon-iroh-link-plan-2026-11-11.md` (iroh vs alternatives, seam fit, weight, build plan).
 
 ## 1. What · why
@@ -26,6 +26,7 @@ In scope (v1):
 - A shared agent directory: each trusted PC keeps a read-only copy of the other trusted PCs' agent names and live/asleep state, and agents can list it.
 - A backstop limit on inbound remote mail; remote peers may only send mail.
 - Settings for the helper servers (relay, address lookup) and a fixed listen port.
+- Keeping other Windows accounts on the same PC off this account's daemon (the app↔daemon link); processes of the same account are trusted.
 
 Non-goals (v1):
 - The app showing or driving agents of another PC's daemon (shell → N daemons, ADR-0179 decision 2) — next stage; v1 lays the permission field and per-relationship protocol names for it.
@@ -45,7 +46,7 @@ Non-goals (v1):
 ## 3. Requirements
 
 - R1 — Each daemon has one persistent identity per OS account. It is created on first need, kept across restarts, and its ID can be shown and copied. It is kept per OS account and machine and sealed for that account, so a data folder copied to another PC starts there with a new identity; a key of this account and machine that cannot be opened is reported and a new one offered (re-pairing). A cloned disk or VM carries the identity along; that case is caught by duplicate detection (R20).
-- R2 — The user can add a trusted PC with an ID (required), a display name, and an address (optional), list trusted PCs, edit a PC's display name and address, and remove one. The trusted list is kept per OS account, and a list changed outside Engram is not used until a human accepts it. App screen and LLM commands do the same thing (R19 for the ones that widen trust).
+- R2 — The user can add a trusted PC with an ID (required), a display name, and an address (optional), list trusted PCs, edit a PC's display name and address, and remove one. The trusted list is kept per OS account, and a list changed by another account or by a plain edit outside Engram is not used until a human accepts it (a process of the same account is trusted, R21). App screen and LLM commands do the same thing (R19 for the ones that widen trust).
 - R3 — A daemon keeps links to every trusted PC it can reach and shows each one as online or offline. Links come back on their own after a network drop or a restart of either side.
 - R4 — A connection from a PC that is not on the list is refused before any mail is read. Removing a PC drops its live link at once and refuses it from then on.
 - R5 — An agent can send mail to an agent on another trusted PC by the agent's bare name, exactly as it names a local agent; `name@pc` names one PC explicitly (D2, decided). A local agent of that name always wins; other PCs are searched only when no local agent has the name. The recipient gets it the way local mail arrives today (delivered now, or held while the recipient is asleep or busy, same as local).
@@ -58,12 +59,13 @@ Non-goals (v1):
 - R12 — Same-LAN PCs find each other automatically (D6).
 - R13 — With no trusted PC registered, nothing changes: no network listener for this feature and no contact with helper servers (D7).
 - R14 — Every new screen action has an LLM command on the existing daemon bus (ADR-0055 · ADR-0307, `docs/reference/llm-command-conventions.md`), except approving a request, which only a human does (R19).
-- R15 — Local behaviour stays as it is: local mail, the shell↔daemon loopback link and its rules are untouched.
+- R15 — Local behaviour stays as it is: local mail and the shell↔daemon loopback link work as today; the only change on that link is that another Windows account is refused (R21).
 - R16 — Agent directory sync: each trusted PC keeps a read-only copy of every other trusted PC's agent directory — agent name, id and state (live / asleep) only. Only the PC that owns an agent changes its entry. A copy is refreshed in full when the link comes up and updated when an agent is created, deleted, renamed, or goes live / asleep; there is no periodic polling.
 - R17 — Cross-PC name rules: a bare name not found locally and found on exactly one other PC goes to that PC; found on two or more PCs it is refused as ambiguous and the result lists the candidates as `name@pc`; `name@pc` goes to that PC only. A PC whose agent list is not known since this daemon started is not counted (D2); agents are told to write `name@pc` when one name exists on several PCs. When a PC disconnects, its copy is kept and marked disconnected, so mail to one of its names returns "not delivered (PC offline)" instead of "no such agent". A copy is dropped when that PC is removed from the trusted list.
 - R18 — Agents (LLM) can list the agents of the other trusted PCs, with each PC's connection state, in one query.
 - R19 — Trust changes need a human: an agent may ask to add a PC, change the network settings or make a new identity key, but the change waits until a human approves it; a human acting in the app applies it directly. Removing a PC, editing its address, and listing stay open to agents; renaming a PC needs approval too (its name is part of `name@pc` addresses). The question goes to the app while its PC list is shown, otherwise to a native OS dialog that shows the other PC's full ID and defaults to deny; on a machine without a display it waits. Whether a call comes from a human or an agent is decided by where it comes from, never by what it says.
 - R20 — If two machines or accounts run with the same identity at once (a cloned disk or VM), a trusted PC that sees both refuses the newer link as a duplicate, and both sides warn in the app and `peer.list` and offer a new identity. Adding this PC's own ID is simply refused.
+- R21 — The OS account is the trust boundary. Processes of the same account, agents with a shell included, are trusted and not defended against, and the docs say so. Other Windows accounts on the same PC cannot use this account's daemon: the file holding the app's connection token is readable only by its owner, and an app running under another account is refused with "this daemon belongs to another Windows account — use a separate folder per account". Going back to an older trusted list file is not defended.
 
 ## 4. Acceptance criteria
 
@@ -90,7 +92,8 @@ Measured on two PCs (A, B) unless stated.
   - On A, `peer.list` shows B's and C's agents with live / asleep and each PC's online state; renaming or putting an agent on B to sleep shows on A within a few seconds.
 - AC14 — Approval: an agent on A calls `peer.add` for B → it answers "requested" and nothing is added. With the app's PC list shown the request appears there with the agent and B's full ID, and approving adds B; with the app closed a native OS dialog asks the same, with deny as the default. Denying leaves the list unchanged; an agent cannot approve; a human adding B in the app applies at once.
 - AC15 — Renaming B on A (`peer.edit`) keeps the link up and B's agents listed; `tester@<new name>` reaches B and `tester@<old name>` returns "no such agent".
-- AC16 — Identity per OS account: two Windows accounts on A using one data folder each have their own ID and trusted list; A's data folder copied to another PC starts there with a new ID; a trusted list file edited outside Engram stops the feature with "trusted list was changed outside Engram" until a human accepts it; a clone of A's identity running at the same time (a copied disk) is refused by B as a duplicate and both sides warn.
+- AC16 — Identity per OS account: two Windows accounts on A using one data folder at different times each have their own ID and trusted list; A's data folder copied to another PC starts there with a new ID; a trusted list file edited outside Engram stops the feature with "trusted list was changed outside Engram" until a human accepts it; a clone of A's identity running at the same time (a copied disk) is refused by B as a duplicate and both sides warn.
+- AC17 — Other accounts: while account X's daemon runs on A, the app started by account Y on A is refused with "this daemon belongs to another Windows account — use a separate folder per account" and cannot read X's token file.
 
 ## 5. Decisions (user)
 
@@ -114,7 +117,8 @@ iroh 1.x as the link library behind the transport seam; identity = iroh secret k
 - Default helper servers are a third party's free service (rate-limited, "can change at any time"); mitigated by R10.
 - What the default helper servers see: n0's lookup server holds a record from this PC's ID to its home relay (no IP address by default), and the relay sees this PC's public IP address, its ID, the IDs it talks to and the traffic timing. Mail content is end-to-end encrypted. Own servers or "off" (R10) remove n0 from the path.
 - Remote mail reaches agents that run with broad permissions; a trusted PC can make an agent act. Trust is limited to the user's own PCs (R4) and to mail (R9), and an agent cannot widen trust without a human (R19).
-- An agent running as the same OS user with a shell can still get around the approval (edit the files, script the dialog); the approval stops the common path, and a list edited outside Engram is detected (R2).
+- Processes of the same OS account are trusted (R21). An agent with a shell can get around the approval and the list check — read the app's token file and connect as the app, drive the app through the WebView debugging port that the developer run scripts open, or open the identity key and re-sign an edited trusted list. The approval stops the common path (an agent talked into a trust change through our commands); a plain edit or another account's edit is detected (R2); going back to an older signed list is not.
+- The check that a connecting app runs under the daemon's own account may not be cleanly doable over the loopback connection; then only the owner-only token file ships, and a token copied out by another account would still connect (documented gap).
 - The OS approval dialog may open behind other windows (Windows foreground rules); whether it shows at all for the background daemon is measured on real PCs.
 - A Windows forced password reset or reinstall makes the sealed identity unreadable; every PC must then be re-paired.
 - The daemon grows by ~170 crates (plus a small native-dialog crate); the exact exe growth is unmeasured.
