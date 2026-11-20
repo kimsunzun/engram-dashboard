@@ -7,7 +7,7 @@
 
 ## 1. Scope and PRD relation
 
-Covers R1–R21 / AC1–AC17. Out: everything in PRD §2 non-goals (shell → N daemons, outbox T-120, agent loop detection T-121, attachments T-122, a headless approval CLI T-118, pairing codes, groups, task delegation, `name@*` fan-out T-117).
+Covers R1–R21 / AC1–AC17. Out: everything in PRD §2 non-goals (shell → N daemons, outbox T-120, agent loop detection T-121, attachments T-122, a headless approval CLI T-118, pairing codes, groups, task delegation, `name@*` fan-out T-117, re-iding agents of a copied data folder T-123).
 
 | Requirement | Unit |
 |---|---|
@@ -230,7 +230,7 @@ At the receiving side's resolution point (messaging remote entrance — policy i
 | T30 | PeerWire frame cap 512 KiB (worst-case JSON escaping of a 64 KiB body); the sender checks the encoded size before sending (over → that PC's rows `BODY_TOO_LARGE`, never a link close); the receiver's body re-check answers `REMOTE_LIMIT`; directory snapshots go in parts above the cap | — | a cap set from the raw body would let a legal body close the link with 4005; one code per cause; R16 needs complete copies |
 | T31 | Key load outcomes (§3-1): no file for this account and machine → fresh identity on first need, no prompt; a file of this account and machine that DPAPI refuses as not-yours / bad data, or that is corrupt, or a missing key while the list names PCs → unreadable (X5 flow); any other unseal error or IO failure → transient, retried, regenerate not offered; the regenerate result tells the user to remove the old ID on the other PCs | — (P-A · P-D) | a copied folder on another machine should just start fresh (no false alarm); a master key not yet available at logon is not a lost key; silent recreation under existing pairings would change the ID, which X5 forbids |
 | T32 | `peer.*` handlers finish on the first poll; an applied `peer.add` / `peer.setNetwork` hands off to the peer module and endpoint results show in `peer.list`; an agent's gated call only records a request | — | daemon-table handlers are blocking — an async one becomes `OUTCOME_UNKNOWN` (`control/commands.rs`); the approval wait must not hold the CLI past its 10 s silence window |
-| T33 | A terminal "not paired" refusal re-arms on a 10-min slow retry besides the existing triggers | — (R3) | one-sided setups (B adds A later) must link without a restart; Syncthing keeps redialing unknown devices |
+| T33 | A terminal "not paired" refusal re-arms on a 10-min slow retry besides the existing triggers | — (R3) | B's own `peer.add` already dials A, so this only matters when B cannot reach A (no typed address, helpers off, mDNS blocked) and only A can dial; Syncthing keeps redialing unknown devices |
 | T34 | The daemon owns the ID text format (from the raw 32 bytes) and the grouped full-ID display used in approval questions; transport takes and returns raw key bytes | — | replacing the adapter must not change stored IDs (PRD §6 vendor risk) |
 | T35 | The dev build (`.engram-dev`) has a different default port from release; U5's second daemon instance sets `network.port` | X1 (decided) | a dev and a release daemon on one PC must not collide on the fixed port |
 | T36 | The gate's refusal log is throttled like the shell link's batched `AcceptRefusal` log | — | ADR-0310 D9 (per-kind time-window batched log); ADR-0346 d5 (repeated identical failures throttled); a redialing stranger must not flood the log |
@@ -263,7 +263,7 @@ Rows of `.claude/skill-bindings/qa.md` 「돌릴 것 표」 unless named otherwi
 
 ## 7. Implementation units
 
-Order: U0 → U1 → U2 → U4; U3a can run beside U1/U2 (its code is the messaging crate only; the one shared file is `docs/reference/architecture.md`, which U2 and U3a both edit in different bullets — whichever commits second rebases that file); U3b after U2 (both edit `crates/engram-dashboard-daemon/src/link/peer/` and assembly) and U3a (it fills U3a's `AddressingSources` fields). Each unit ends with a green build and its rows of §6.
+Order: U0 → U1 → U2 → U4 → U5 (U5 last, after U4 and U3b); U3a can run beside U1/U2 (its code is the messaging crate only; the one shared file is `docs/reference/architecture.md`, which U2 and U3a both edit in different bullets — whichever commits second rebases that file); U3b after U2 (both edit `crates/engram-dashboard-daemon/src/link/peer/` and assembly) and U3a (it fills U3a's `AddressingSources` fields). Each unit ends with a green build and its rows of §6.
 
 - **U0 — ADRs.** Status: done 2026-11-20 — ADR-0388 … ADR-0395 (① ADR-0388 · ② ADR-0389 · ③ ADR-0390 · ④ ADR-0391 · ⑤ ADR-0392 · ⑥ ADR-0393 · ⑦ ADR-0394 · ⑧ ADR-0395). The eight ADRs of §5; README ADR line.
 - **U1 — transport `iroh` adapter.** Status: not started. Feature `iroh` (off by default) with the module of §3-2 (`accept_if` hook, stream-accept timeout, raw-key dial target, no 0-RTT, idle-out → `Err(LinkError)`); `Policy` ping / idle made optional (default on) with `Policy::check` relaxed when off; config struct of plain values; Cargo.toml description and lib.rs head; gate ④ / ⑤ copies; `ci.yml` transport gates. The daemon does not enable the feature yet.
