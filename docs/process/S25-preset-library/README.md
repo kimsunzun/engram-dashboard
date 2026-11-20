@@ -16,5 +16,5 @@ Agent presets: a library folder of instructions, skills, settings and preset fil
 | `trd-library-edit.md` | step 9a — root, edits, create, relink | Implemented |
 | `trd-library-commands.md` | step 10a — library, preset and agent-preset commands, help, priming | Implemented |
 | `trd-old-priming-removal.md` | remove the old priming path and the settings fragment (closes `trd.md` §2-4 item 2 — ADR-0370) | Implemented |
-| `trd-launch-skip-missing.md` | T-112 — a launch skips what is absent and blocks on what exists but cannot be read (ADR-0374 · ADR-0387) | Reviewed (deep, PASS) — coding |
+| `trd-launch-skip-missing.md` | T-112 — a launch skips what is absent and blocks on what exists but cannot be read (ADR-0374 · ADR-0387) | Implemented |
 | `briefing.html` · `trd-asset-library.html` | Korean explainers (made on request; the md files are canonical) | — |

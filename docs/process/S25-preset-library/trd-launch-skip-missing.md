@@ -2,7 +2,7 @@
 
 | Item | Value |
 |---|---|
-| **Status** | **Draft 5 · 2026-11-20 — reviewed deep, PASS** (§14). Decisions and boundaries only. The user's rule 「없음 → 건너뜀 / 있는데 못 읽음·깨짐 → 막음」 applies to every kind, the library root included (§11 a2). Canonical ADR: ADR-0374, narrowed by that rule (main records the amendment — §13) (relies on ADR-0361 · ADR-0341 · ADR-0363 · ADR-0357 / ADR-0364 · ADR-0370 · ADR-0215; step-21 context ADR-0385 · ADR-0386) |
+| **Status** | **Implemented 2026-11-20** — U1 `d0c251ee` · U2 `ada48af7` · U3 `7ea7441d`; rules = ADR-0387; body frozen at draft 5. — **Draft 5 · 2026-11-20 — reviewed deep, PASS** (§14). Decisions and boundaries only. The user's rule 「없음 → 건너뜀 / 있는데 못 읽음·깨짐 → 막음」 applies to every kind, the library root included (§11 a2). Canonical ADR: ADR-0374, narrowed by that rule (main records the amendment — §13) (relies on ADR-0361 · ADR-0341 · ADR-0363 · ADR-0357 / ADR-0364 · ADR-0370 · ADR-0215; step-21 context ADR-0385 · ADR-0386) |
 | **Parent** | S25 topic ([`trd.md`](trd.md) — §1-3 resolution, §1-5 agent launch). No parent-TRD item of its own: T-112 sits between step 10a and step 21 (`docs/tracking.md` §T-112). What/why = PRD [`prd.md`](prd.md) E4 reasons ① and ④ as amended by ADR-0374 and the user's rule of 2026-11-20. |
 | **Reference files to fix** | `docs/reference/structure/asset-library.md` (the root paragraph 「an agent with a library preset attached is blocked with ④」 · Main flow 4 · 「Problem rows are the block」 · 「④ stands alone」 · Where to look) · `docs/reference/structure/agent-backend.md` (claude argv row: one `--add-dir` per folder entry the launch did not skip) · asset-library `resolve.rs`, `launch.rs` and `folder.rs` module headers · agent `launch.rs` `BlockReason` doc and `notice_text` doc · platform `fs.rs` (the new share probe). `architecture.md` and the crate `lib.rs` heads: none. |
 | **Line-pointer basis** | Code at `290cc33b`. Code is cited by file + symbol; line numbers are hints. |
@@ -349,6 +349,7 @@ Sequential (U2 uses U1's constants and port answer; U3 edits texts and tests tha
 - U1 — a folder entry that exists but cannot be read, or did not answer, **keeps blocking**: 「ㅇㅇ 막아.」
 - H1 — a library root that is set but cannot be read or did not answer **blocks** (today's ④ row); only an unset, missing or not-a-folder root skips. 「ㅇㅇ 같은 기준으로해.」
 - H3 — the unreadable folder-entry row is **its own class** (② `folder-unreadable`), with no detailed cause in its user-facing text. 「ㅇㅇ 별도로 구분해. 너무 디테일하게 원인을 쓰지는 말고.」
+- A skill folder whose `SKILL.md` is missing is absent (skipped), not broken — asked during the U2 code review (risk lens hold): 「스킬 폴더는 있는데 스킬이 없으면 없음이지.」 (Claude's recommendation, same.)
 
 ### (b) Main decided (details the user leaves to main — reported)
 - U2 — wording of the two notices (§3.3) and the agent note (§3.4); facts only.
@@ -390,6 +391,8 @@ Sequential (U2 uses U1's constants and port answer; U3 edits texts and tests tha
 - **R8** — tree ⛔ meaning and the screen form of the first-scan difference are left to step 13 (§7).
 - **R9 (unconfirmed)** — what a disconnected mapped network drive letter (`Z:`) answers to a stat (`NotFound` like a UNC path, or error 53 / 67 / 1222), and what a real, existing but offline host answers. The design probes a remote drive letter's root like a UNC share, so either way it is not absent; the QA live check (§9) records what Windows answers, and whether `GetDriveTypeW` (called by `share_root` on the caller's thread, outside a bounded worker) returns without contacting the server for a disconnected mapped drive.
 - **R10 (accepted, rare)** — a local-drive path that reaches a network share through a directory link is not probed (the drive letter is local); if the share is down and Windows answers `NotFound`, the item reads as absent and is skipped. Canonicalising every path to find its real volume costs a resolve per item; not done.
+- **R11 (accepted, rare — found in U2 code review)** — a share that drops after its first answer in a launch: the root stat and its probe are cached in the `LaunchIo` for the launch's checks and prepare, and three later reads take `NotFound` as absent (the overlay's absent range, `first_link` → `Ok(None)`, a codex listing that finds the folder gone), so such an item is skipped, not blocked. The window is milliseconds to seconds; not probed again.
+- **R12 (open — QA live check)** — `share_root` (`GetDriveTypeW`, and `WNetGetConnectionW` for a letter with no volume) runs on the caller's thread outside the `BoundedIo` budget; if either blocks for a disconnected drive, the launch's required phase blocks with it (R9).
 
 ## 13. Input claims corrected and records for main (code at `290cc33b`)
 

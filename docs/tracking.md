@@ -10,7 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
-| T-112 | Launch skips missing items and an unusable library root with a notice (ADR-0374) | Main | Decided, not started — separate task after S25 step 9a (user 2026-11-17) |
+| T-120 | T-112 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched (user 2026-11-20: minor items need not be shown) |
 | T-105 | Launch folder wait as an advanced setting (once file-based settings loading exists) | Main | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
 | T-110 | Launch waiting cue — ADR-0181 decision 5 never built; launch waits grow to 88 s in S25 step 8 | Main | Deferred by the user to the UI work (2026-11-15) |
 | T-109 | The S25 library screen as a plugin-shaped extension (public surfaces only); a plugin system later | Main | Waiting for trigger — S25 client stage (steps 11–13 TRD) · user 2026-11-14 |
@@ -109,11 +109,15 @@ Full text before the simplification (investigation records · reverted attempts 
 
 ## Main
 
-### T-112. Launch skips missing items and an unusable library root with a notice (ADR-0374)
-- **Status:** decided by the user 2026-11-17, not started — its own task after S25 step 9a (9a only notes it in its TRD §6 and K1).
-- **What:** missing instructions, skills, settings, presets and folder entries (block ①) and an unusable library root with library presets attached (block ④) stop blocking a launch; each is named in the launch reply notices, the log and to the launched agent. Settings included (no per-kind exception — accepted risk: a skipped settings file can drop a permission limit).
-- **Open for that task's TRD:** broken items (block ②) stay out of scope unless decided; the notice code and wording (ADR-0357); how the agent is told; a convention check for "a referenced file is missing" was not run.
-
+### T-120. T-112 review recommendations left unfixed (rare cases)
+- **Status:** recorded 2026-11-20 at the T-112 freeze — the user does not need minor review items shown (「사소한거? 는 내가 알 필요없지?」); fix one when its code is touched or it shows up in use.
+- **Items** (TRD `docs/process/S25-preset-library/trd-launch-skip-missing.md`, code at `7ea7441d`):
+  - A spent budget (`NOT_CHECKED`) or an access-denied share root is reported as `share not reachable` by the share probe (`folder.rs` `stat_all`); the launch still blocks, but the `why` is wrong and `agent.setWorkspace` marks a denied share as clearable.
+  - `remembered_connection` (platform `fs.rs`) counts `ERROR_NO_NETWORK` and other query failures as "no connection", so a remembered mapping whose drive type is 0/1 could read as absent when the network stack itself is down — unmeasured.
+  - `share_root` (`GetDriveTypeW`, `WNetGetConnectionW`) runs on the caller's thread outside the `BoundedIo` budget and is not cached (TRD R12) — not measured for a remembered but disconnected mapping (cannot be created on the QA machine); unmapped letters took < 40 ms.
+  - `ProblemRow` / `AgentPresetsView.problems` say a launch refuses on every non-skipped row; a ④ row for a root that exists but whose first scan keeps failing is shown while a launch runs (handed to step 13).
+  - The once-per-agent fingerprint compares `via` as a set (`notice_fingerprint` sorts arrays), so a reversed preset chain for the same missing item is not shown again (documented).
+  - An absent claude folder entry whose path the command line cannot carry still blocks with `folder-path-cli-unsafe` (split by kind — TRD c1).
 ### T-110. Launch waiting cue — ADR-0181 decision 5 never built
 - **Status:** deferred — user 2026-11-15 「일단 나중에 UI할때 함께하고」; the requirement itself: 「뭐가됐건 기다리면 뭔가 기다리는 사인이 있어야되는데 이건 관용으로 확인하고 맞추면 될듯?」 — match the convention.
 - **Fact (code at `5b79b821`):** the only human launch path (double-click a reserved row in `src/components/agent/AgentList.tsx` → `activateReserved` → `spawnProfile`) already shows a row pending state from 0 s until the reply settles (`beginInFlight` / `busyIds`, `statusGlyph.ts` `rowPhase` → `'pending'`, `PENDING_GLYPH` spinning, 「진행 중…」, row dimmed, menu disabled). No ~1 s delay, no elapsed time, no cancel. Command-registry launches (`agent.spawn`, `agent.spawnInto`, `slot.createAgentHere`) show nothing. ADR-0181 decision 5 (a 「기다리는 중」 cue at ~1 s, separate from give-up) has no implementation and no ADR records the row spinner.
