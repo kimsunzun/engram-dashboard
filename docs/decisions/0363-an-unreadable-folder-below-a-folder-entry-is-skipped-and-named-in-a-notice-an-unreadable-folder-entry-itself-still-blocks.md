@@ -1,7 +1,7 @@
 # ADR-0363: An unreadable folder below a folder entry is skipped and named in a notice; an unreadable folder entry itself still blocks
 
-- 상태: 확정 (2026-11-13, 근거: user decision 2026-11-12 (S25 step 7 P6 hold, after a convention survey) · landed `72effa1d` (P6 — the listing and the notice code) · `d445f03e` (P9 — the launch reply carries the notice))
-- 관련: Amends ADR-0341 (decision 6, an unreadable folder below a folder entry) · ADR-0360 (launch folder checks) · ADR-0357 (notice wording) · child TRD `docs/process/S25-preset-library/trd-asset-library.md` §3-8 (folder listing, U2 · B22)
+- 상태: 확정 (2026-11-13, 근거: user decision 2026-11-12 (S25 step 7 P6 hold, after a convention survey) · landed `72effa1d` (P6 — the listing and the notice code) · `d445f03e` (P9 — the launch reply carries the notice)) · 부분 폐기 by ADR-0387 (decision 3 missing half)
+- 관련: Amends ADR-0341 (decision 6, an unreadable folder below a folder entry) · ADR-0360 (launch folder checks) · ADR-0357 (notice wording) · child TRD `docs/process/S25-preset-library/trd-asset-library.md` §3-8 (folder listing, U2 · B22) · Amended by ADR-0387 (decision 3 missing half)
 
 ## 맥락
 ADR-0341 decision 6 blocks a launch when a folder entry is missing or unreadable. To read a folder entry the codex way (instructions and skills — ADR-0341 decision 3), Engram lists the folder below the entry, down several levels (child TRD §3-8). Step 7 P6 met a case the TRD did not cover: the folder entry opens, but a folder (or an entry) below it cannot be read — access denied on one subfolder, an entry whose type cannot be read. Read literally, "unreadable folder" in decision 6 could block the whole launch for one unreadable subfolder of a large rules folder.
