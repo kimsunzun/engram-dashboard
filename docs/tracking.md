@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-118 | Linux support (needed for local LLM) — desktop: app + daemon; server: daemon only | Main | Not started — tracking only (user 2026-11-20) |
 | T-117 | Cross-PC fan-out address `name@*` (send to every trusted PC's agent of that name) | Main | Deferred after S37 (Claude, user left the timing to Claude 2026-11-20) |
 | T-116 | Slots as plugins — the daemon does all behaviour, client slots only refine and present | Main | Not started — revisit with the UI structure work (user 2026-11-19) |
 | T-115 | Agent input layer — urgent vs deferred system inputs (deferred ones ride the next input, no extra turn) | Main | Not started — separate topic (user 2026-11-19) |
@@ -76,6 +77,13 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-118. Linux support
+- **Status:** not started, tracking only — user 2026-11-20: 「로컬 llm 때문에 아직 안하고 있긴한데 최소 리눅스는 지원해야될것같은데」 → 「그냥 트레킹으로 올리고, 지금은 작업 안하고」.
+- **Shape (talked through, not decided):** Ubuntu desktop → the Tauri app + daemon as on Windows; no desktop (server) → daemon only, driven by the CLI and later by a remote app (T-85 · T-86, the reserved `engram/shell/1` link).
+- **Missing today:** a way to start the daemon on its own on a server (on Windows the app starts it on demand, ADR-0021 — e.g. a systemd user unit); a human CLI credential (the `engram` CLI authenticates only with the agent-injected `ENGRAM_TOKEN`), needed for headless approvals (S37 TRD §8 P-C).
+- **Already prepared by S37:** OS-specific code stays in `platform` with Linux behaviour defined — key as an owner-only 0600 file (P-A), native yes/no dialog where a display exists, requests wait when headless (P-C).
+- **Trying it on Windows:** WSL2 + WSLg shows Linux GUI app windows on the Windows desktop; CUDA works in WSL2 for local LLMs (general knowledge, unverified); WSL2 NAT may block mDNS between the WSL and Windows instances (mirrored networking mode or a typed address).
 
 ### T-117. Cross-PC fan-out address `name@*`
 - **Status:** deferred after S37 — user 2026-11-20 chose for S37: a bare name found on several PCs is refused with `name@pc` candidates, and an explicit "send to all" form is offered (「ㅇㅇ 그렇게 하면 될듯?」); timing left to Claude (「그거 넣는건 알아서해 더 좋은 방향으로」) → after S37, to keep S37's U3 smaller.
