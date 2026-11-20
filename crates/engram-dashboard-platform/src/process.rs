@@ -32,10 +32,8 @@ pub enum ProcessStart {
 // ADR-0257
 #[cfg(windows)]
 pub fn process_start(pid: u32) -> ProcessStart {
-    use windows::Win32::Foundation::{CloseHandle, FILETIME};
-    use windows::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     // The System Idle Process is alive but `OpenProcess` fails with 87 like absence — opening it would read as `Gone`.
     if pid == 0 {
@@ -50,21 +48,30 @@ pub fn process_start(pid: u32) -> ProcessStart {
         Err(_) => return ProcessStart::Gone,
     };
 
-    let mut creation = FILETIME::default();
-    let mut exit = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-    // SAFETY: the valid handle just opened + four FILETIME output pointers on the stack.
-    let ok = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) }
-        .is_ok();
+    let created = creation_time_of(handle);
     // SAFETY: close the valid handle once.
     unsafe {
         let _ = CloseHandle(handle);
     }
-    if !ok {
-        return ProcessStart::Unknown;
+    match created {
+        Some(created) => ProcessStart::Known(created),
+        None => ProcessStart::Unknown,
     }
-    ProcessStart::Known(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
+}
+
+/// The creation time (the scale of [`process_creation_time`]) of the process behind an open handle; `None` = it could not be read.
+#[cfg(windows)]
+pub(crate) fn creation_time_of(handle: windows::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetProcessTimes;
+
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: a handle the caller keeps open + four FILETIME output pointers on the stack.
+    unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) }.ok()?;
+    Some(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
 }
 
 /// u64 = the high/low 32 bits of GetProcessTimes lpCreationTime (FILETIME — 100 ns intervals since 1601-01-01 UTC) joined. Invariant for

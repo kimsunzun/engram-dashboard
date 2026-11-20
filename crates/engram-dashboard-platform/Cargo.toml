@@ -60,6 +60,20 @@ raw-window-handle = "0.6"
 # `Win32_Graphics_Dwm` = `window::top_level_at`'s cloaked window decision (`DWMWA_CLOAKED`).
 # `Win32_Graphics_Gdi` = `window::restore_placement`'s monitor work area (`MonitorFromRect` · `GetMonitorInfoW` —
 #   moves screen coordinates to workspace coordinates) and `window::top_level_at`'s window shape (`GetWindowRgn` · `PtInRegion`).
+# `Win32_Security_Cryptography` = `secret`'s DPAPI (`CryptProtectData` · `CryptUnprotectData`).
+# `Win32_Security_Authorization` = SID text (`ConvertSidToStringSidW` — `account`), the owner-only descriptor from SDDL and reading a
+#   file's owner and DACL back (`ConvertStringSecurityDescriptorToSecurityDescriptorW` · `GetNamedSecurityInfoW` — `owner_only`).
+# `Win32_Storage_FileSystem` = `owner_only`'s `CreateFileW` (`CREATE_NEW` with the security attributes passed at create) and the
+#   volume's ACL support (`GetVolumeInformationByHandleW`).
+# `Win32_System_Registry` = `account::machine_id` (`RegGetValueW` on `MachineGuid`).
+# `Win32_NetworkManagement_IpHelper` = the TCP table behind `account::tcp_client_account` / `tcp_server_account` (`GetExtendedTcpTable`,
+#   owner-module rows: owner PID and endpoint creation time).
+# `Win32_UI_Controls` = `approval`'s Task Dialog types (`TASKDIALOGCONFIG` …) — ★only the types★: the function is found at run time
+#   (`approval` module head: a static import of `TaskDialogIndirect` stops a manifestless executable with 0xC0000139).
+# `Win32_System_LibraryLoader` · `Win32_System_ApplicationInstallationAndServicing` = that run-time load (`LoadLibraryW` ·
+#   `GetProcAddress` under a comctl32 v6 activation context — `CreateActCtxW` · `ActivateActCtx`).
+# `Win32_System_StationsAndDesktops` · `Win32_System_RemoteDesktop` = `approval`'s "no desktop" check (window station flags ·
+#   `ProcessIdToSessionId`).
 # ★Not split into per-feature cargo features★ — turns on the union of the binding features used by this one dependency (ADR-0275
 #   decision 13). When moving a module over, add the features that module uses here.
 [target.'cfg(windows)'.dependencies]
@@ -79,8 +93,18 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_UI_Controls",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ApplicationInstallationAndServicing",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_RemoteDesktop",
 ] }
 
-# The `file_holders` · `fs` tests draw temp file names that do not collide — not in the production graph.
+# The `file_holders` · `fs` · `owner_only` tests draw temp file names that do not collide — not in the production graph.
 [dev-dependencies]
 uuid = { version = "1.8", features = ["v4"] }

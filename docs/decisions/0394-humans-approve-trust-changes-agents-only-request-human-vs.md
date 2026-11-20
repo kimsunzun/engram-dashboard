@@ -37,3 +37,5 @@ S37's `peer.*` commands change who this PC trusts. Agents can call commands, and
 - The gate stops the common path — an agent talked into a trust change through our commands — not a same-account process (ADR-0395).
 - The native dialog lives in platform (ADR-0266); the dialog's text lives on the daemon side.
 - Risk carried: whether the dialog shows for the WMI-launched daemon, and where (the foreground lock can put it behind other windows), is measured in U5; if it cannot show, questions wait for the app.
+
+- Correction (2026-11-20, U2 platform piece): the native dialog is the Windows Task Dialog called directly (loaded at run time from comctl32 v6 through an activation context), not a Rust dialog crate — comctl32 v6 needs a manifest, and a static import stops manifest-less executables (the daemon, test binaries) at start with 0xC0000139 (`src-tauri/build.rs` records that failure); `rfd` also lacks a Deny default, topmost and external close.

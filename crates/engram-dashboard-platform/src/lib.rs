@@ -18,8 +18,10 @@
 //!   console shell) · [`env`] (home dir, executable name/sibling path, env var name
 //! comparison) · [`window`] (identity, placement and z-order, restoring placement, topmost window under the cursor, diagnostics,
 //!   foreground checks, title bar chrome, snap overlay behind feature `snap-overlay`) ·
-//! [`input`] (cursor position, primary button, Esc state) · [`pty`] (whether closing a pseudo-terminal waits for its output to be read).
-//!   Module headers and public docs are the source of truth.
+//! [`input`] (cursor position, primary button, Esc state) · [`pty`] (whether closing a pseudo-terminal waits for its output to be read) ·
+//! [`account`] (current account id, machine id, the account owning one end of a local TCP connection) · [`secret`] (sealing a secret
+//!   for the current account — DPAPI) · [`owner_only`] (creating and checking files only the current account can open) · [`approval`]
+//!   (the native approve / deny / deny-and-stop dialog). Module headers and public docs are the source of truth.
 //!
 //! Functions that take a window accept `raw-window-handle`'s `HasWindowHandle`; variant matching happens here too (TRD S21-slot-docking
 //!   revision 6.3 §8, B10, revision 7 §5-1).
@@ -44,7 +46,8 @@
 //! 2. **Interface = functions + handle types, compile-time branching** (ADR-0266 decision 5): no trait object picking the OS; a test fake
 //!   is **the caller's** small trait, so this API has no test seam traits.
 //! 3. **Branches outside Windows are placeholders** (ADR-0266 decision 7): no new implementations for other OSes — the branches that
-//!   existed when moved (an empty answer, a `bash`/`HOME` one-liner) are just gathered.
+//!   existed when moved (an empty answer, a `bash`/`HOME` one-liner) are just gathered, and new functions answer `Unsupported` off Windows
+//!   (their doc states the defined behaviour; built with Linux / macOS support).
 //!    ★`#[cfg]`-split branches get no compile verification here★ (development and CI are Windows only — ADR-0230). `cfg!(windows)`
 //!   branches (`env::env_key_eq`, the three `fs` failure classifications) are type-checked on
 //!    both sides but never run on another OS.
@@ -202,17 +205,23 @@
 
 // ADR-0266, ADR-0275, ADR-0278
 // ADR-0278
+pub mod account;
+pub mod approval;
 pub mod env;
 pub mod file_holders;
 pub mod fs;
 pub mod group;
 pub mod input;
+pub mod owner_only;
 pub mod process;
 pub mod pty;
+pub mod secret;
 pub mod shell;
 pub mod spawn;
 #[cfg(all(test, windows))]
 mod test_window;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
+#[cfg(windows)]
+mod win;
 pub mod window;

@@ -39,16 +39,7 @@ pub struct Holder {
 /// only full paths; what Restart Manager resolves a relative path against is unchecked, and the symptom would be "0 holders", not an error.
 #[cfg(windows)]
 pub fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
-    use std::os::windows::ffi::OsStrExt;
-
-    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-    if wide.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the path contains NUL, so it cannot be passed as a null-terminated string",
-        ));
-    }
-    wide.push(0);
+    let wide = crate::win::to_wide(path.as_os_str())?;
 
     let session = RmSession::start()?;
     let files = [PCWSTR(wide.as_ptr())];
