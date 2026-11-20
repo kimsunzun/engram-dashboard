@@ -765,6 +765,16 @@ mod tests {
         }
     }
 
+    /// codex keeps the trait's default `false` in both modes: `developer_instructions` and `developerInstructions`
+    /// replace the user's own config value (ADR-0215 · ADR-0387). codex does not override the method, so this also
+    /// pins the default.
+    #[test]
+    fn codex_instructions_replace_in_both_modes_by_the_default() {
+        for mode in MODES {
+            assert!(!CODEX_SETTINGS_CHECK.instructions_append(mode), "{mode:?}");
+        }
+    }
+
     #[test]
     fn codex_never_blocks_a_folder_entry() {
         for folder in [r"C:\rules\50%\x", r"C:\a&b", r"C:\plain"] {

@@ -205,25 +205,31 @@ pub struct LaunchKit {
 
 // ── blocks ──────────────────────────────────────────────────────────────────────
 
-/// One reason that blocks a launch. Variant order is display order — `Ord` sorts by it (TRD S25 §1-3 8).
+/// One problem row — what a launch skips or refuses on. Variant order is display order — `Ord` sorts by it (TRD S25
+/// §1-3 8).
 ///
-/// `item` = the blocked item: its library path, or for a folder entry `folder:` + the normalized absolute folder path
-/// (the same third form as [`SourceRef::path`]). A row about no library item names what it is about with a kind tag
-/// in the same way: `command-line:` + the backend word (the command line does not fit) and `working-folder:` + the
-/// working folder's path (the backend refuses that folder). `via` = the presets that reference it (the chain it came
-/// through) — empty for the two tagged rows.
+/// A launch never refuses on a `Missing` row: it leaves the item out and names it ([`MISSING_ITEM_SKIPPED`]). It
+/// refuses on every `Broken` and `Conflict` row, and on a `LibraryUnavailable` row only when the library folder exists
+/// but cannot be read or did not answer.
+///
+/// `item` = the item: its library path, or for a folder entry [`FOLDER_ITEM_PREFIX`] + the normalized absolute folder
+/// path (the same third form as [`SourceRef::path`]). A row about no library item names what it is about with a kind
+/// tag in the same way: `command-line:` + the backend word (the command line does not fit) and `working-folder:` +
+/// the working folder's path (the backend refuses that folder). `via` = the presets that reference it (the chain it
+/// came through) — empty for the two tagged rows.
 // ADR-0341
 // ADR-0361
+// ADR-0387
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BlockReason {
-    /// The attached file is missing.
+    /// Absent — the item is not in the library, or a folder entry's folder is not there (missing or not a folder).
     Missing {
         item: String,
         via: Vec<String>,
         reason: Reason,
     },
-    /// Cannot be read or handed over — YAML syntax · a cycle · a skill codex cannot load · the command-line guard ·
-    /// a command line over its length.
+    /// Not skipped — broken, unreadable or refused: YAML syntax · a cycle · a skill codex cannot load · a folder
+    /// entry that cannot be read or did not answer · the command-line guard · a command line over its length.
     Broken {
         item: String,
         via: Vec<String>,
@@ -234,9 +240,14 @@ pub enum BlockReason {
         reason: Reason,
         items: Vec<(String, Vec<String>)>,
     },
-    /// A library preset is attached while the library folder is unset or missing.
+    /// A library preset is attached while the library folder is unset, absent, or cannot be read. A launch skips
+    /// the library items of an unset or absent folder ([`LIBRARY_UNAVAILABLE_SKIPPED`]) and refuses on this row only
+    /// for a folder that exists but cannot be read or did not answer.
     LibraryUnavailable { reason: Reason },
 }
+
+/// The tag before a folder entry's absolute path in a [`BlockReason`] `item` and a [`SourceRef::path`].
+pub const FOLDER_ITEM_PREFIX: &str = "folder:";
 
 /// [`LaunchKitSource::check`]'s refusal — every reason hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,8 +277,9 @@ impl fmt::Display for LaunchBlocked {
                         items.iter().map(|(p, _)| escape_controls(p)).collect();
                     write!(f, "conflict {} ({})", paths.join(", "), reason.code)?
                 }
+                // ADR-0387: a launch refuses on this row only for a folder that exists but cannot be read.
                 BlockReason::LibraryUnavailable { reason } => {
-                    write!(f, "library folder missing ({})", reason.code)?
+                    write!(f, "library folder cannot be read ({})", reason.code)?
                 }
             }
         }
@@ -392,18 +404,45 @@ const FOLDER_LISTING_SKIPPED_NAMED: usize = 3;
 // ADR-0364
 pub const BUILTIN_UNAVAILABLE: &str = "builtin-unavailable";
 
-/// The wording of a notice for a person or an LLM reading the reply — Korean, factual, recommends no fix (TRD S25
-/// G28 · §2-4 8).
+/// Notice code: an item a preset references was not found, so the launch left it out. `args` = `{item, via}` — the
+/// problem row's item (a library path, or `folder:` + the folder path) and its chain; `line` = the row's line in the
+/// last preset of `via`, when it has one.
+// ADR-0374
+// ADR-0387
+pub const MISSING_ITEM_SKIPPED: &str = "missing-item-skipped";
+
+/// Notice code: a library preset is attached while the library folder is unset or absent, so the launch left out
+/// every library item it reaches. `args` = `{message, items}` — `message` = `no library root is set`, `missing` or
+/// `not a folder`; `items` = the library items left out, in expansion order.
+// ADR-0374
+// ADR-0387
+pub const LIBRARY_UNAVAILABLE_SKIPPED: &str = "library-unavailable-skipped";
+
+/// Whether a notice code reports an item a launch left out because it was absent — the manager logs those at `warn`,
+/// every other notice at `info`.
+// ADR-0387: a skip reaches a release log (default level `warn`).
+pub fn reports_launch_skip(code: &str) -> bool {
+    matches!(code, MISSING_ITEM_SKIPPED | LIBRARY_UNAVAILABLE_SKIPPED)
+}
+
+/// The wording of a notice for a person or an LLM reading the reply — English, facts only, recommends no fix (TRD
+/// S25 G28 · §2-4 8).
 ///
-/// [`CODEX_TERMINAL_OMITTED`], [`CODEX_TERMINAL_FOLDER_OMITTED`] and [`CODEX_SAME_NAME_SKILLS`] have their own
-/// sentence (user wording, exact), filled from `args` with names joined by `, `; in the two terminal codes an empty
-/// list leaves its part out. [`FOLDER_LISTING_PARTIAL`] and [`FOLDER_LISTING_SKIPPED`] have their own sentence too,
-/// naming no backend — the folder (and the skipped paths, the first three named and the rest counted) come from
-/// `args`. [`BUILTIN_UNAVAILABLE`] has its own sentence, naming the built-in and why from `args`. When their `args` do
-/// not have the shape the constant documents (not an object, a missing `folder`, `name`, `path` or `why`, a value
-/// that is not a string, no `paths`), they fall back to the generic wording. Every other
-/// code takes the generic wording — the code and the values listed in `args` (object keys in name order), saying the
-/// omission is intended.
+/// Codes with their own sentence, filled from `args` (names joined by `, `):
+/// - [`CODEX_TERMINAL_OMITTED`], [`CODEX_TERMINAL_FOLDER_OMITTED`], [`CODEX_SAME_NAME_SKILLS`] — user wording, exact;
+///   in the two terminal codes an empty list leaves its part out.
+/// - [`FOLDER_LISTING_PARTIAL`], [`FOLDER_LISTING_SKIPPED`] — name no backend; the folder (and the skipped paths, the
+///   first three named and the rest counted).
+/// - [`BUILTIN_UNAVAILABLE`] — the built-in and why.
+/// - [`MISSING_ITEM_SKIPPED`] — the item (a `folder:` item as its path, worded as a folder) and where it is listed:
+///   the last preset of `via` and the line when there is one, or "attached to this agent" for an empty `via`.
+/// - [`LIBRARY_UNAVAILABLE_SKIPPED`] — the message and the items left out; an empty list ends after the first
+///   sentence.
+///
+/// When their `args` do not have the shape the constant documents (not an object, a string field missing or not
+/// a string, a list that is not a list of strings, an empty `paths`, an absent `via`), they fall back to the generic wording; any other
+/// absent list reads as empty. Every other code takes the generic wording — the code and the values listed in `args` (object keys in name
+/// order), saying the omission is intended.
 /// Control characters in the code and the listed values (file names from the library — outside input) are escaped
 /// (`\n`, `\u{1b}`), so the line stays one line and carries no terminal escape when the CLI prints it.
 // ADR-0364
@@ -429,6 +468,7 @@ pub fn notice_text(notice: &Notice) -> String {
 // ADR-0341
 // ADR-0355
 // ADR-0364
+// ADR-0387
 fn own_wording(notice: &Notice) -> Option<String> {
     let args = notice.args.as_object()?;
     match notice.code.as_str() {
@@ -500,6 +540,39 @@ fn own_wording(notice: &Notice) -> Option<String> {
                 "Notice: could not read built-in {path}; applied it with empty content. Reason: {why}"
             ))
         }
+        MISSING_ITEM_SKIPPED => {
+            let item = args.get("item")?.as_str()?;
+            // `via` carries where the item is listed, so an absent one is another shape (ADR-0364 decision 2).
+            args.get("via")?;
+            let via = text_list(args, "via")?;
+            let place = match via.last() {
+                None => "attached to this agent".to_string(),
+                Some(preset) => match notice.line {
+                    Some(line) => format!("listed in {preset}, line {line}"),
+                    None => format!("listed in {preset}"),
+                },
+            };
+            Some(match item.strip_prefix(FOLDER_ITEM_PREFIX) {
+                Some(path) => format!(
+                    "Notice: folder not found or not a folder, left out of this launch: {} ({place})",
+                    escape_controls(path)
+                ),
+                None => format!(
+                    "Notice: not found, left out of this launch: {} ({place})",
+                    escape_controls(item)
+                ),
+            })
+        }
+        LIBRARY_UNAVAILABLE_SKIPPED => {
+            let message = escape_controls(args.get("message")?.as_str()?);
+            let items = text_list(args, "items")?;
+            let head = format!("Notice: the library folder cannot be used ({message}).");
+            Some(if items.is_empty() {
+                head
+            } else {
+                format!("{head} Left out of this launch: {}", items.join(", "))
+            })
+        }
         _ => None,
     }
 }
@@ -559,7 +632,8 @@ fn collect_listed(value: &Value, out: &mut Vec<String>) {
 /// The omission identity of a notice set — what "the same notices" means for notices once per agent.
 ///
 /// Per notice: `code` and `args` in a canonical form (object keys sorted · array elements sorted, so a reordered name
-/// or path list is the same notice), `line` left out — a moved line or a reordered key does not make a new notice. The
+/// or path list is the same notice; an ordered chain such as `via` is compared as a set too — a reversed chain
+/// is the same notice), `line` left out — a moved line or a reordered key does not make a new notice. The
 /// set: those identities sorted, deduplicated and joined by `\n` (compact JSON escapes every newline in a string, so
 /// the join cannot be forged by an argument). The empty set is the empty string.
 /// The value is persisted as is (no hash — a hash of std is not stable across Rust releases) and only compared for
@@ -717,7 +791,7 @@ pub trait LaunchKitSource: Send + Sync + 'static {
 
     /// Whether `folder` is an existing folder — `agent.setWorkspace`'s stat, asked outside any launch and before the
     /// manager takes a lock. `Err` = why not: `missing`, `not a folder`, or the error the stat met; a source with bounded
-    /// IO answers a stat that did not answer in time with [`STAT_TIMED_OUT`] (the one `why` a retry can clear). The
+    /// IO answers a stat that did not answer in time with [`STAT_TIMED_OUT`] (a `why` a retry can clear, like [`SHARE_NOT_REACHABLE`]). The
     /// default is one std stat, unbounded (the Noop kits — tests and harnesses).
     // ADR-0360
     // ADR-0386
@@ -736,6 +810,13 @@ pub trait LaunchKitSource: Send + Sync + 'static {
 /// `agent.setWorkspace` tells the caller to retry on it.
 // ADR-0386
 pub const STAT_TIMED_OUT: &str = "timeout";
+
+/// The `why` of a folder stat that answered "not found" on a network share whose root does not stat as a folder —
+/// the folder is not known to be absent. `agent.setWorkspace` tells the caller to retry on it, as on
+/// [`STAT_TIMED_OUT`].
+// ADR-0386 decision 14
+// ADR-0387
+pub const SHARE_NOT_REACHABLE: &str = "share not reachable";
 
 /// One launch's shared context, opaque to the manager — a [`LaunchKitSource`] keeps its per-launch state in it
 /// ([`LaunchKitSource::begin_launch`]). The default scope holds nothing.
@@ -1593,13 +1674,13 @@ mod tests {
                     ],
                 },
                 BlockReason::LibraryUnavailable {
-                    reason: reason("root-unset", Value::Null, None),
+                    reason: reason("library-unavailable", Value::Null, None),
                 },
             ],
         };
         assert_eq!(
             blocked.to_string(),
-            "launch blocked: not found team/a.yaml (missing-file) · conflict x/s, y/s (skill-name) · library folder missing (root-unset)"
+            "launch blocked: not found team/a.yaml (missing-file) · conflict x/s, y/s (skill-name) · library folder cannot be read (library-unavailable)"
         );
     }
 
@@ -2394,6 +2475,129 @@ mod tests {
                 text.starts_with("Notice (builtin-unavailable): intended behavior."),
                 "{args} · {text}"
             );
+        }
+    }
+
+    /// The missing-item code names the item and where it is listed — a folder item worded as a folder, the line only
+    /// when there is one, "attached to this agent" for an empty chain — with control characters escaped (ADR-0387);
+    /// `args` of another shape fall back to the generic wording.
+    #[test]
+    fn the_missing_item_notice_names_where_it_is_listed_and_falls_back_on_another_shape() {
+        for (args, line, text) in [
+            (
+                json!({ "item": "team/rules.md", "via": ["base.yaml", "team.yaml"] }),
+                Some(4),
+                "Notice: not found, left out of this launch: team/rules.md (listed in team.yaml, line 4)",
+            ),
+            (
+                json!({ "item": "team/rules.md", "via": ["team.yaml"] }),
+                None,
+                "Notice: not found, left out of this launch: team/rules.md (listed in team.yaml)",
+            ),
+            (
+                json!({ "item": "gone.yaml", "via": [] }),
+                None,
+                "Notice: not found, left out of this launch: gone.yaml (attached to this agent)",
+            ),
+            (
+                json!({ "item": "gone.yaml", "via": [] }),
+                Some(2),
+                "Notice: not found, left out of this launch: gone.yaml (attached to this agent)",
+            ),
+            (
+                json!({ "item": "folder:D:\\rules", "via": ["team.yaml"] }),
+                Some(7),
+                "Notice: folder not found or not a folder, left out of this launch: D:\\rules (listed in team.yaml, line 7)",
+            ),
+            (
+                json!({ "item": "a\nb.md", "via": ["t\u{1b}.yaml"] }),
+                Some(1),
+                "Notice: not found, left out of this launch: a\\nb.md (listed in t\\u{1b}.yaml, line 1)",
+            ),
+            (
+                json!({ "item": "folder:D:\\a\nb", "via": [] }),
+                None,
+                "Notice: folder not found or not a folder, left out of this launch: D:\\a\\nb (attached to this agent)",
+            ),
+        ] {
+            let rendered = notice_text(&reason(MISSING_ITEM_SKIPPED, args.clone(), line));
+            assert!(!rendered.chars().any(char::is_control), "{rendered:?}");
+            assert_eq!(rendered, text, "{args} {line:?}");
+        }
+        for args in [
+            json!({ "via": ["team.yaml"] }),
+            json!({ "item": "gone.yaml" }),
+            json!({ "item": 1, "via": [] }),
+            json!({ "item": "a.md", "via": "team.yaml" }),
+            json!({ "item": "a.md", "via": [1] }),
+            json!("a.md"),
+        ] {
+            let text = notice_text(&reason(MISSING_ITEM_SKIPPED, args.clone(), None));
+            assert!(
+                text.starts_with("Notice (missing-item-skipped): intended behavior."),
+                "{args} · {text}"
+            );
+        }
+    }
+
+    /// The absent-library code names why the folder cannot be used and every item left out; an empty list ends after
+    /// the first sentence; control characters are escaped (ADR-0387). `args` of another shape fall back to the
+    /// generic wording.
+    #[test]
+    fn the_library_unavailable_notice_names_the_items_and_falls_back_on_another_shape() {
+        for (args, text) in [
+            (
+                json!({ "message": "missing", "items": ["team.yaml", "rules/a.md"] }),
+                "Notice: the library folder cannot be used (missing). Left out of this launch: team.yaml, rules/a.md",
+            ),
+            (
+                json!({ "message": "no library root is set", "items": [] }),
+                "Notice: the library folder cannot be used (no library root is set).",
+            ),
+            (
+                json!({ "message": "not a folder" }),
+                "Notice: the library folder cannot be used (not a folder).",
+            ),
+            (
+                json!({ "message": "a\nb", "items": ["x\u{1b}.yaml"] }),
+                "Notice: the library folder cannot be used (a\\nb). Left out of this launch: x\\u{1b}.yaml",
+            ),
+        ] {
+            let rendered = notice_text(&reason(LIBRARY_UNAVAILABLE_SKIPPED, args.clone(), None));
+            assert!(!rendered.chars().any(char::is_control), "{rendered:?}");
+            assert_eq!(rendered, text, "{args}");
+        }
+        for args in [
+            json!({ "items": ["team.yaml"] }),
+            json!({ "message": 1, "items": [] }),
+            json!({ "message": "missing", "items": "team.yaml" }),
+            json!({ "message": "missing", "items": [1] }),
+            json!("missing"),
+        ] {
+            let text = notice_text(&reason(LIBRARY_UNAVAILABLE_SKIPPED, args.clone(), None));
+            assert!(
+                text.starts_with("Notice (library-unavailable-skipped): intended behavior."),
+                "{args} · {text}"
+            );
+        }
+    }
+
+    /// Only the two skip codes are logged at `warn`; every other notice code stays at `info` (ADR-0387).
+    #[test]
+    fn only_the_two_skip_codes_report_a_launch_skip() {
+        assert!(reports_launch_skip(MISSING_ITEM_SKIPPED));
+        assert!(reports_launch_skip(LIBRARY_UNAVAILABLE_SKIPPED));
+        for code in [
+            CODEX_TERMINAL_OMITTED,
+            CODEX_TERMINAL_FOLDER_OMITTED,
+            CODEX_SAME_NAME_SKILLS,
+            FOLDER_LISTING_PARTIAL,
+            FOLDER_LISTING_SKIPPED,
+            BUILTIN_UNAVAILABLE,
+            "missing-item",
+            "",
+        ] {
+            assert!(!reports_launch_skip(code), "{code:?}");
         }
     }
 

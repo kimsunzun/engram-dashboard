@@ -1,7 +1,7 @@
 //! Backend settings-check port — the settings knowledge that differs per backend (what a mode loads · folder-entry
 //! path guard · working-folder guard · launch notice codes · folder load set · skill format · command-line guard and
-//! budget · the backend's own skill folders), in one trait. The registry is
-//! [`super::settings_checks`] / [`super::settings_check_for`].
+//! budget · whether its instructions append or replace · the backend's own skill folders), in one trait. The
+//! registry is [`super::settings_checks`] / [`super::settings_check_for`].
 //!
 //! ★No schema check★: a settings value is handed to the CLI as it is and the CLI judges it by its own rules — the
 //!   port answers only what Engram's own assembly of the launch materials needs.
@@ -96,6 +96,15 @@ pub trait SettingsCheck: Send + Sync {
     /// channel, a resume id) at their upper-bound length. `Err` = over the budget, or an instructions text the
     /// command line cannot carry (problem ②). A backend with no command-line budget answers `Ok(())`.
     fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<(), Reason>;
+
+    /// Whether the merged instructions this backend gets in `mode` are added to what the CLI loads by itself (`true`)
+    /// or replace a value the user set in the CLI's own config (`false`). The default is `false`, the safe answer: a
+    /// launch never opens a replacing channel only to carry its launch note.
+    // ADR-0215
+    // ADR-0387
+    fn instructions_append(&self, _mode: AgentOutputFormat) -> bool {
+        false
+    }
 
     /// The skill folders this backend reads by itself in `mode`, besides the roots Engram passes — the input of the
     /// same-name notice. Pure: candidate paths and rules only; the caller stats and lists them. Empty for a backend

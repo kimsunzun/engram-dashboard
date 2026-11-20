@@ -22,6 +22,8 @@ pub mod inputs_pending;
 pub mod launch;
 // ADR-0386
 pub mod library_commands;
+#[cfg(test)]
+pub(crate) mod log_capture;
 pub mod manager;
 // ADR-0101
 pub mod name;

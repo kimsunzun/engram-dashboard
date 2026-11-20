@@ -2575,9 +2575,10 @@ fn verb_set_workspace(
 
 /// A `agent.setWorkspace` refusal as a command error — the coded ones in the `{code, args}` shape every coded refusal
 /// carries ([`coded_error`]), an agent gone as the resolver's `NOT_FOUND`. A refusal that clears by itself — a stat
-/// that timed out, a launch preparing, another change — carries the retry directive; one only a different call or a
-/// different state fixes (not absolute, missing, running, conversed) does not.
+/// that timed out, a share not reachable, a launch preparing, another change — carries the retry directive; one only
+/// a different call or a different state fixes (not absolute, missing, running, conversed) does not.
 // ADR-0386 decision 14: the clearable ones answer `AfterCondition`, as the library's do.
+// ADR-0387
 fn workspace_refusal(token: &str, refusal: WorkspaceRefusal) -> CommandError {
     const COMMAND: &str = "agent.setWorkspace";
     let coded = |class: PortClass, code: &str, args: serde_json::Value, clearable: bool| {
@@ -2590,7 +2591,8 @@ fn workspace_refusal(token: &str, refusal: WorkspaceRefusal) -> CommandError {
     };
     match refusal {
         WorkspaceRefusal::FolderNotFound { cwd, why } => {
-            let clearable = why == crate::launch::STAT_TIMED_OUT;
+            let clearable =
+                why == crate::launch::STAT_TIMED_OUT || why == crate::launch::SHARE_NOT_REACHABLE;
             coded(
                 PortClass::InvalidArgument,
                 WORKSPACE_NOT_FOUND,
@@ -2870,7 +2872,7 @@ const WORKING_FOLDER_CHANGING_CAUSE: &str =
     "its working folder is being changed (agent.setWorkspace)";
 
 /// The cause of a launch block, without a next step — English, like the rest of this surface. The reasons
-/// themselves travel in the error's args ([`LaunchBlocked::to_args`]), so `LaunchBlocked`'s Korean `Display` is not
+/// themselves travel in the error's args ([`LaunchBlocked::to_args`]), so `LaunchBlocked`'s `Display` is not
 /// used here.
 fn launch_blocked_reason(blocked: &LaunchBlocked) -> String {
     format!(
@@ -4083,8 +4085,9 @@ mod tests {
         }
     }
 
-    /// The refusals that clear by themselves — a stat that timed out, a launch preparing, another change — carry the
-    /// retry directive and its words; the ones only a different call or state fixes do not (ADR-0386 decision 14).
+    /// The refusals that clear by themselves — a stat that timed out, a share not reachable, a launch preparing,
+    /// another change — carry the retry directive and its words; the ones only a different call or state fixes do not
+    /// (ADR-0386 decision 14 · ADR-0387).
     #[test]
     fn set_workspace_refusals_that_clear_by_themselves_say_retry() {
         use crate::profile_edit::WorkspaceLock;
@@ -4094,6 +4097,7 @@ mod tests {
         };
         let cases = vec![
             (folder(crate::launch::STAT_TIMED_OUT), true),
+            (folder(crate::launch::SHARE_NOT_REACHABLE), true),
             (WorkspaceRefusal::Locked(WorkspaceLock::Preparing), true),
             (WorkspaceRefusal::Changing, true),
             (folder("missing"), false),

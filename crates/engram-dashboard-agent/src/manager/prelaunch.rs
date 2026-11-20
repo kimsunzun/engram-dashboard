@@ -17,7 +17,8 @@
 
 use super::{profile_vanished_mid_spawn, AgentManager};
 use crate::launch::{
-    notice_fingerprint, LaunchBlocked, LaunchPlan, LaunchScope, Notice, PrepareError,
+    notice_fingerprint, reports_launch_skip, LaunchBlocked, LaunchPlan, LaunchScope, Notice,
+    PrepareError,
 };
 use crate::profile::{AgentProfile, LaunchInputs};
 use crate::types::{AgentId, PtyError};
@@ -114,13 +115,24 @@ fn settle(
     let plan = checked.map_err(|blocked| launch_blocked(id, blocked))?;
     // Every launch logs its notices, whether or not a reply shows them (ADR-0341).
     for notice in &plan.notices {
-        tracing::info!(
-            agent = %id,
-            code = %notice.code,
-            args = %notice.args,
-            line = ?notice.line,
-            "launch notice"
-        );
+        // ADR-0387: a skipped item is logged at warn, so a release log (default warn) keeps it.
+        if reports_launch_skip(&notice.code) {
+            tracing::warn!(
+                agent = %id,
+                code = %notice.code,
+                args = %notice.args,
+                line = ?notice.line,
+                "launch item skipped"
+            );
+        } else {
+            tracing::info!(
+                agent = %id,
+                code = %notice.code,
+                args = %notice.args,
+                line = ?notice.line,
+                "launch notice"
+            );
+        }
     }
     Ok(plan)
 }
@@ -224,6 +236,7 @@ mod tests {
         LaunchLease, LaunchPlan, LaunchPorts, LaunchScope, MemLaunchFs, NoopLaunchKits,
         PrepareError, Reason,
     };
+    use crate::log_capture::Capture;
     use crate::profile::scripted_store::ScriptedStore;
     use crate::profile::{
         AgentCommand, AgentOutputFormat, AgentProfile, AttachedPreset, ProfileRegistry,
@@ -1384,6 +1397,56 @@ mod tests {
         let none = PlanNotices::against(&plan_with(&roster, Vec::new()), &roster);
         assert_eq!(none.fingerprint, "");
         assert!(none.shown.is_empty());
+    }
+
+    /// ★The accepted check logs each skip notice at `warn` and every other notice at `info`★, once each, in plan
+    /// order (ADR-0387).
+    #[test]
+    fn settle_logs_the_skip_notices_at_warn_and_the_rest_at_info() {
+        let profile = Way::Fresh.profile();
+        let plan = plan_with(
+            &profile,
+            vec![
+                notice(crate::launch::MISSING_ITEM_SKIPPED),
+                notice(crate::launch::LIBRARY_UNAVAILABLE_SKIPPED),
+                notice(crate::launch::FOLDER_LISTING_SKIPPED),
+            ],
+        );
+        let seen = crate::profile::LaunchInputs::of(&profile);
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let settled = tracing::subscriber::with_default(Capture(lines.clone()), || {
+            super::settle(&profile, &seen, Ok(plan.clone()))
+        });
+        assert_eq!(settled.expect("settled"), plan);
+        let field = |fields: &std::collections::BTreeMap<String, String>, key: &str| {
+            fields.get(key).cloned().unwrap_or_default()
+        };
+        let logged: Vec<(tracing::Level, String, String)> = lines
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(level, fields)| (*level, field(fields, "message"), field(fields, "code")))
+            .collect();
+        assert_eq!(
+            logged,
+            vec![
+                (
+                    tracing::Level::WARN,
+                    "launch item skipped".to_string(),
+                    crate::launch::MISSING_ITEM_SKIPPED.to_string(),
+                ),
+                (
+                    tracing::Level::WARN,
+                    "launch item skipped".to_string(),
+                    crate::launch::LIBRARY_UNAVAILABLE_SKIPPED.to_string(),
+                ),
+                (
+                    tracing::Level::INFO,
+                    "launch notice".to_string(),
+                    crate::launch::FOLDER_LISTING_SKIPPED.to_string(),
+                ),
+            ]
+        );
     }
 
     /// The compare reads the roster, not the caller's copy — a copy taken before the last record would re-show the set

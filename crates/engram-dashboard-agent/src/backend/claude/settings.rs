@@ -67,6 +67,12 @@ impl SettingsCheck for ClaudeSettingsCheck {
         false
     }
 
+    /// claude takes the merged instructions with `--append-system-prompt-file`, which appends to its own prompt.
+    // ADR-0387
+    fn instructions_append(&self, _mode: AgentOutputFormat) -> bool {
+        true
+    }
+
     /// A prediction of what claude loads from an `--add-dir` folder with
     /// `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` under its default loading conditions — modelled on claude
     /// 2.1.284 (`docs/research/preset-folder-entry-backend-loading-2026-11-04.md` and its binary), not exact for
@@ -731,6 +737,14 @@ mod tests {
                 !CLAUDE_SETTINGS_CHECK.folder_listing_at_launch(mode),
                 "{mode:?}"
             );
+        }
+    }
+
+    /// claude's instructions are appended (`--append-system-prompt-file`), in both modes (ADR-0387).
+    #[test]
+    fn claude_instructions_append_in_both_modes() {
+        for mode in MODES {
+            assert!(CLAUDE_SETTINGS_CHECK.instructions_append(mode), "{mode:?}");
         }
     }
 

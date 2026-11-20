@@ -34,7 +34,8 @@ impl Backends for AgentBackends {
 }
 
 /// Test registries. [`fake::WordBackends`] — backends that only know their word, for tests whose subject asks the
-/// registry nothing but whether a word is known (every other port method panics). [`fake::Registry`] — agent's real
+/// registry nothing but whether a word is known (every other port method panics, except `instructions_append`,
+/// which answers the trait default `false`). [`fake::Registry`] — agent's real
 /// checks plus [`fake::Scripted`] backends. A fake backend stands for a backend agent registers later.
 #[cfg(test)]
 pub(crate) mod fake {
@@ -186,6 +187,7 @@ pub(crate) mod fake {
     ///   — `StreamJson` loads and carries it, `Terminal` omits it; nothing else.
     /// - `working_folder_blocks`: never. `command_line_fits`: always fits, and records the line's `instructions` in
     ///   [`Scripted::lines`]. No native skill roots; `root_skills` finds nothing.
+    /// - `instructions_append`: the trait default `false` (instructions replace the user's own).
     pub(crate) struct Scripted {
         pub word: &'static str,
         omitted: &'static str,
