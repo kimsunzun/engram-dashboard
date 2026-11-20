@@ -205,7 +205,8 @@ describe('check-hangul', () => {
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
-  })
+    // Spawns git three times plus the checker — ~0.5 s alone, ~9 s under the full parallel suite, past the 5 s default.
+  }, 30_000)
 
   it('reports file:line: text and exits 1 when anything is flagged', () => {
     expect(result.code).toBe(1)
@@ -221,5 +222,6 @@ describe('check-hangul', () => {
     } finally {
       rmSync(clean, { recursive: true, force: true })
     }
-  })
+    // Spawns the checker as a child process — slow under the full parallel suite (see the git ls-files test).
+  }, 30_000)
 })
