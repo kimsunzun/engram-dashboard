@@ -1,7 +1,7 @@
 # ADR-0365: Links inside the library are skipped on every path; only the configured library root may be a link
 
-- 상태: 확정 (2026-11-13, 근거: user decision U1 2026-11-11 (S25 step 7 TRD) · child TRD `docs/process/S25-preset-library/trd-asset-library.md` §10-1 U1 · landed in P5 (store, scan) through P9 (launch overlay))
-- 관련: ADR-0312 (one root — outside content is brought inside; decision 3) · ADR-0320 (trash) · ADR-0324 (catalog writes) · ADR-0336 (walkdir) · ADR-0362 (`LibPath`) · child TRD §10-1 U1 · §6 (admission) · §12 (store row)
+- 상태: 확정 (2026-11-13, 근거: user decision U1 2026-11-11 (S25 step 7 TRD) · child TRD `docs/process/S25-preset-library/trd-asset-library.md` §10-1 U1 · landed in P5 (store, scan) through P9 (launch overlay)) · 부분 폐기 by ADR-0400 (decision 1 only the configured root may be a link)
+- 관련: ADR-0312 (one root — outside content is brought inside; decision 3) · ADR-0320 (trash) · ADR-0324 (catalog writes) · ADR-0336 (walkdir) · ADR-0362 (`LibPath`) · child TRD §10-1 U1 · §6 (admission) · §12 (store row) · Amended by ADR-0400 (decision 1 only the configured root may be a link)
 
 ## 맥락
 ADR-0312 decision 3 keeps outside content out of the library: it is copied in, not used in place. A link (a symlink or a Windows junction) inside the library root still lets outside content in — a link to `~/.claude/skills` placed in the library would make the scan list, the launch read and later moves or deletes reach the far side. The step-7 TRD had to say what the store does with a link below the root on each path into the catalog: the full scan, a partial scan, the `list` safety net, the launch check's fresh-bytes overlay and the late merge. The user's view: 「애초에 바깥폴더를 못넣게 했잖아. 근데 어찌어찌 들어가더라도 건너띄는게 좋지 않음?」.
