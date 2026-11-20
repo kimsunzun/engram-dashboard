@@ -1,6 +1,6 @@
 # S37 PRD — daemon↔daemon agent mail between the user's own PCs
 
-- Status: draft 7 · 2026-11-20 (round-3 review fixes) · decisions D1–D7 all taken by the user (D2 amended and D5 revised on 2026-11-20); PRD approval is asked together with the PRD+TRD review. Where each post-review decision lives: TRD §8 「Decided after review」.
+- Status: draft 8 · 2026-11-20 (round-4 review fixes) · decisions D1–D7 all taken by the user (D2 amended and D5 revised on 2026-11-20); PRD approval is asked together with the PRD+TRD review. Where each post-review decision lives: TRD §8 「Decided after review」.
 - Research: `../../research/multi-daemon-federation-direction-2026-11-11.md` (GPT draft vs code, peers, Syncthing / hcom / Reason Network source reads) · `../../research/multi-daemon-iroh-link-plan-2026-11-11.md` (iroh vs alternatives, seam fit, weight, build plan).
 
 ## 1. What · why
@@ -65,7 +65,7 @@ Non-goals (v1):
 - R18 — Agents (LLM) can list the agents of the other trusted PCs, with each PC's connection state, in one query.
 - R19 — Trust changes need a human: an agent may ask to add a PC, change the network settings or make a new identity key, but the change waits until a human approves it; a human acting in the app applies it directly. Removing a PC, editing its address, and listing stay open to agents; renaming a PC needs approval too (its name is part of `name@pc` addresses). The question goes to the app while its PC list is shown, otherwise to a native OS dialog that shows the other PC's full ID and defaults to deny; on a machine without a display it waits. Whether a call comes from a human or an agent is decided by where it comes from, never by what it says.
 - R20 — If two machines or accounts run with the same identity at once (a cloned disk or VM), a trusted PC that sees both refuses the newer link as a duplicate, and both sides warn in the app and `peer.list` and offer a new identity. Adding this PC's own ID is simply refused.
-- R21 — The OS account is the trust boundary. Processes of the same account, agents with a shell included, are trusted and not defended against, and the docs say so. Other Windows accounts on the same PC cannot use this account's daemon: the app's connection token and the agents' control files are readable only by their owner (the shared file that marks a running daemon holds no token, so another account can still see who owns it and take over after a crash), and an app or agent connection from another account is refused with "this daemon belongs to another Windows account — use a separate folder per account". Going back to an older trusted list file is not defended.
+- R21 — The OS account is the trust boundary. Processes of the same account, agents with a shell included, are trusted and not defended against, and the docs say so. Other Windows accounts on the same PC cannot use this account's daemon: the app's connection token and the agents' control files are readable only by their owner (the shared file that marks a running daemon holds no token, so another account can still see who owns it and take over after a crash), the app checks that the daemon it is about to connect to runs under its own account before it sends its token (a record written by another account cannot collect it), and an app or agent connection from another account is refused with "this daemon belongs to another Windows account — use a separate folder per account". Going back to an older trusted list file is not defended.
 
 ## 4. Acceptance criteria
 
@@ -123,6 +123,7 @@ iroh 1.x as the link library behind the transport seam; identity = iroh secret k
 - A Windows forced password reset makes the sealed identity unreadable; every PC must then be re-paired. A reinstall with a new account SID starts fresh; a hardware or reinstall change that keeps the SID finds the old identity and asks whether to adopt it.
 - The WebView debugging port that the developer run scripts open is an unauthenticated local listener any account on the PC can reach; it is dev-only and not changed in S37.
 - An elevated administrator account is not kept out, and running the app and Engram one elevated and one not makes them refuse each other.
+- Another account can create this account's file names in advance in a shared data folder and so block start-up or a new identity — a denial of service only; folder permissions stay outside S37.
 - The daemon grows by ~170 crates (plus a small native-dialog crate); the exact exe growth is unmeasured.
 - iroh is maintained by one vendor (n0); the link sits behind the transport seam so it can be replaced.
 - The agent names (and ids, live / asleep) of each PC are visible to every trusted PC and to the agents running there (R16 · R18) — limited to the user's own PCs (R4).
