@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-124 | CI: a Linux compile-check job for the core crates | Main | Not started — separate topic (user 2026-11-20) |
 | T-123 | Agent-id duplicates when a data folder is copied to another PC | Main | Not started — after S37 (S37 review 2026-11-20) |
 | T-122 | Mail attachments (images / files) for local and remote mail | Main | Not started — after S37 (user 2026-11-20) |
 | T-121 | Agent mail loop detection (two agents replying to each other without end), local and remote | Main | Not started — after S37 (user 2026-11-20) |
@@ -82,6 +83,11 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-124. Linux compile-check job in CI
+- **Status:** not started, separate topic — user 2026-11-20 (「별도 주제로 뽑으면 되는데」), asked while discussing Linux / macOS support.
+- **Why:** every CI job runs on `windows-latest` (the only Ubuntu job publishes releases), so Windows-only code outside `platform` is never caught; delaying makes T-118 / T-119 harder.
+- **Shape:** an `ubuntu-latest` job running `cargo check` on the core crates (transport, messaging, protocol, base, command, platform, agent, daemon); the Tauri shell later (needs webkit2gtk). New platform functions already answer `Unsupported` off Windows, so they only need to compile.
 
 ### T-123. Agent-id duplicates on a copied data folder
 - **Status:** not started — found by the S37 PRD+TRD review (2026-11-20). S37 handles the PC identity on copy (per account × machine files, duplicate detection) but not the agents: a copied `agents.json` gives every agent the same id on both PCs.
