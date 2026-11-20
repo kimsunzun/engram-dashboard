@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-119 | macOS support | Main | Not started — tracking only, to be opened in its own session (user 2026-11-20) |
 | T-118 | Linux support (needed for local LLM) — desktop: app + daemon; server: daemon only | Main | Not started — tracking only (user 2026-11-20) |
 | T-117 | Cross-PC fan-out address `name@*` (send to every trusted PC's agent of that name) | Main | Deferred after S37 (Claude, user left the timing to Claude 2026-11-20) |
 | T-116 | Slots as plugins — the daemon does all behaviour, client slots only refine and present | Main | Not started — revisit with the UI structure work (user 2026-11-19) |
@@ -77,6 +78,12 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-119. macOS support
+- **Status:** not started, tracking only — user 2026-11-20: 「맥에서 띄우는것도 크게 부담 없겠지?」 → 「올려두고 그냥 다른 곳에서 펼치는게 좋겠다」.
+- **Measured 2026-11-20:** production use of the `windows` crate is only in `platform` (agent uses it in `examples/spike*.rs` only). About 100 `cfg(windows)` / `cfg!(windows)` branches remain outside `platform`, mostly in the agent crate (`backend/codex/transport.rs`, `backend/codex/mod.rs`, `transport/spawn.rs`, `manager.rs`, `transport/stdio.rs`, `usage/process.rs`) and a few in the daemon (`messaging_host.rs`, `portfile.rs`). Not yet sorted into test-only vs production branches; production ones break ADR-0266 and move into `platform` first.
+- **New macOS backends needed in `platform` (estimate):** `window` (Win32 window / tab handling → AppKit — the largest), `group` (Job Object → POSIX process groups), `spawn` (WMI → setsid-style detach), `file_holders` (Restart Manager → an equivalent), S37 key sealing (DPAPI → Keychain); PTY likely works as is (portable-pty). Distribution adds Apple code signing and notarization.
+- Shares most of the work with T-118 (Linux).
 
 ### T-118. Linux support
 - **Status:** not started, tracking only — user 2026-11-20: 「로컬 llm 때문에 아직 안하고 있긴한데 최소 리눅스는 지원해야될것같은데」 → 「그냥 트레킹으로 올리고, 지금은 작업 안하고」.
