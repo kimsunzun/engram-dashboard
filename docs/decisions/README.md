@@ -375,3 +375,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0389](0389-daemon-identity-is-an-iroh-node-key-per-os-account-and.md) | Daemon identity is an iroh node key per OS account and machine, sealed by the OS; the trusted list is MAC'd with it and duplicate identities are detected | 확정 |
 | [0390](0390-remote-peers-may-only-send-mail-pairwise-trust-by-pasted-ids.md) | Remote peers may only send mail — pairwise trust by pasted IDs, a receiver-side per-PC backstop instead of per-pair limits, a sender in-flight cap | 확정 |
 | [0391](0391-edge-addresses-across-pcs-bare-names-resolve-through.md) | Edge addresses across PCs — bare names resolve through replicated agent directories, name@pc is explicit, a PC with an unknown directory is not counted | 확정 |
+| [0392](0392-product-principle-cross-pc-features-need-no-external-account.md) | Product principle — cross-PC features need no external account and no separate install | 확정 |
