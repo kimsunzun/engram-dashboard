@@ -373,3 +373,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0383](0383-internal-text-is-english-only-screen-text-stays-switchable.md) | Internal text is English-only; screen text stays switchable | 확정 |
 | [0388](0388-daemon-to-daemon-link-runs-on-iroh-behind-the-transport-seam.md) | Daemon-to-daemon link runs on iroh behind the transport seam — one QUIC connection and one ordered stream per link, liveness from QUIC | 확정 |
 | [0389](0389-daemon-identity-is-an-iroh-node-key-per-os-account-and.md) | Daemon identity is an iroh node key per OS account and machine, sealed by the OS; the trusted list is MAC'd with it and duplicate identities are detected | 확정 |
+| [0390](0390-remote-peers-may-only-send-mail-pairwise-trust-by-pasted-ids.md) | Remote peers may only send mail — pairwise trust by pasted IDs, a receiver-side per-PC backstop instead of per-pair limits, a sender in-flight cap | 확정 |
