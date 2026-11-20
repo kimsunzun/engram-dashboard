@@ -1,7 +1,8 @@
 //! The OS rules for handling files — opening while denying others' writes and classifying that failure · the verdict
 //! and retry for a failure caused by someone holding the file briefly · folder sync · creating and walking directory
 //! links (`link`) · path keys and path comparison (`path_key`) · folder-path normalization and the Win32
-//! reserved-device-name test (`normalize`) · file identity (`identity`). The opens in this file use std only —
+//! reserved-device-name test (`normalize`) · file identity (`identity`) · the network share a path is on
+//! (`share_root`). The opens in this file use std only —
 //! `OpenOptionsExt::share_mode` goes down as is to `CreateFileW`'s share mode, so the same kernel behaviour comes
 //! without unsafe.
 
@@ -128,6 +129,121 @@ pub fn sync_dir(_dir: &Path) -> io::Result<()> {
 #[cfg(not(windows))]
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
+}
+
+/// The root of the network share `path` is on, or `None`. Windows: `\\server\share\` for a UNC path (`\\server\share\…`
+/// or `\\?\UNC\server\share\…`); `X:\` for a drive letter whose drive type is remote (a mapped network drive), or that
+/// has no volume behind it but a network connection Windows remembers for the letter (a mapped drive that is not
+/// connected — it may answer another drive type than remote); `None` for a relative path (`Z:child` included), any
+/// other drive letter (local, removable, absent) or another prefix. Other systems: `None`.
+/// No stat of `path` — for a drive letter, only the drive-type query and, for a letter with no volume, the remembered
+/// connection query (`WNetGetConnectionW`). Whether these two calls contact the server for a disconnected drive is not
+/// confirmed (TRD R9); this function puts no time bound on them.
+/// A caller stats the answer to tell an absent folder from a share that is not reachable (Windows answers
+/// `NotFound` for both).
+// ADR-0387
+#[cfg(windows)]
+pub fn share_root(path: &Path) -> Option<std::path::PathBuf> {
+    share_root_with(path, |letter, root| {
+        network_drive(drive_type(root), || remembered_connection(letter))
+    })
+}
+#[cfg(not(windows))]
+pub fn share_root(_path: &Path) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// [`share_root`] with the drive-letter question (`network(letter, "X:\")` — whether that drive is a network drive)
+/// passed in, so the path rules are tested without a mapped drive.
+#[cfg(windows)]
+fn share_root_with(
+    path: &Path,
+    network: impl FnOnce(u8, &str) -> bool,
+) -> Option<std::path::PathBuf> {
+    use std::path::{Component, Prefix};
+    // A drive-relative path (`Z:child`) has a `Disk` prefix too — it names no folder of its own.
+    if !path.is_absolute() {
+        return None;
+    }
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return None;
+    };
+    match prefix.kind() {
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            let mut root = std::ffi::OsString::from(r"\\");
+            root.push(server);
+            root.push(r"\");
+            root.push(share);
+            root.push(r"\");
+            Some(root.into())
+        }
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            let root = format!(r"{}:\", char::from(letter));
+            network(letter, &root).then(|| root.into())
+        }
+        _ => None,
+    }
+}
+
+/// `GetDriveTypeW`'s answers this file reads — the constants sit in the `Win32_System_WindowsProgramming` binding
+/// feature, which this crate does not turn on for three numbers.
+#[cfg(windows)]
+const DRIVE_UNKNOWN: u32 = 0;
+#[cfg(windows)]
+const DRIVE_NO_ROOT_DIR: u32 = 1;
+#[cfg(windows)]
+const DRIVE_REMOTE: u32 = 4;
+
+/// Whether a drive letter of drive type `kind` is a network drive: remote, or — with no volume behind the letter
+/// (unknown / no root) — a letter with a remembered network connection (`remembered`, asked only then). A letter with a
+/// local volume is never a mapped one, so it is not asked.
+#[cfg(windows)]
+fn network_drive(kind: u32, remembered: impl FnOnce() -> bool) -> bool {
+    match kind {
+        DRIVE_REMOTE => true,
+        DRIVE_UNKNOWN | DRIVE_NO_ROOT_DIR => remembered(),
+        _ => false,
+    }
+}
+
+/// The drive type of drive root `root` (`X:\`).
+#[cfg(windows)]
+fn drive_type(root: &str) -> u32 {
+    use windows::core::PCWSTR;
+    let wide = wide_nul(root);
+    // SAFETY: `wide` is a NUL-terminated UTF-16 string that outlives the call; the call only reads it.
+    unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(PCWSTR(wide.as_ptr())) }
+}
+
+/// Whether Windows holds a network connection for drive letter `letter` (`X:`), connected or remembered but not
+/// connected (`ERROR_CONNECTION_UNAVAIL`). Any other answer — not redirected, no network provider, a failure — is no.
+#[cfg(windows)]
+fn remembered_connection(letter: u8) -> bool {
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{ERROR_CONNECTION_UNAVAIL, ERROR_MORE_DATA, NO_ERROR};
+    let local = wide_nul(&format!("{}:", char::from(letter)));
+    let mut remote = [0u16; 512];
+    let mut len = remote.len() as u32;
+    // SAFETY: `local` is NUL-terminated and `remote` holds `len` UTF-16 units; both outlive the call, which writes at
+    //   most `len` units into `remote` and the needed size into `len`.
+    let answer = unsafe {
+        windows::Win32::NetworkManagement::WNet::WNetGetConnectionW(
+            PCWSTR(local.as_ptr()),
+            PWSTR(remote.as_mut_ptr()),
+            &mut len,
+        )
+    };
+    answer == NO_ERROR || answer == ERROR_CONNECTION_UNAVAIL || answer == ERROR_MORE_DATA
+}
+
+/// `text` as a NUL-terminated UTF-16 string.
+#[cfg(windows)]
+fn wide_nul(text: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(text)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 // A FACILITY_WIN32 HRESULT (`0x8007xxxx`) turns back into the original Win32 code in its low 16 bits — carrying the HRESULT as the
@@ -394,6 +510,103 @@ mod tests {
         } else {
             assert_eq!(missing.unwrap_err().kind(), io::ErrorKind::NotFound);
         }
+    }
+
+    // ── share root ──
+
+    /// A UNC path (plain or verbatim) answers its `\\server\share\`; a local fixed drive, a drive letter with nothing
+    /// behind it, a relative path (`X:child` included) and a device path answer `None` (ADR-0387). The drive letters
+    /// are picked from this machine: a case with no such letter is skipped with a message.
+    #[cfg(windows)]
+    #[test]
+    fn the_share_root_is_the_unc_volume_and_none_for_a_local_or_absent_drive() {
+        use std::path::PathBuf;
+        /// `GetDriveTypeW`'s answer for a local fixed disk.
+        const DRIVE_FIXED: u32 = 3;
+        for (path, root) in [
+            (r"\\nohost\share\x\y", r"\\nohost\share\"),
+            (r"\\nohost\share", r"\\nohost\share\"),
+            (r"\\?\UNC\nohost\share\x", r"\\nohost\share\"),
+        ] {
+            assert_eq!(
+                share_root(Path::new(path)),
+                Some(PathBuf::from(root)),
+                "{path}"
+            );
+        }
+        assert_eq!(share_root(Path::new(r"rel\x")), None);
+        assert_eq!(share_root(Path::new(r"\\.\D:\x")), None);
+        let letters = || (b'A'..=b'Z').map(|letter| (letter, format!(r"{}:\", char::from(letter))));
+        match letters().find(|(_, root)| drive_type(root) == DRIVE_FIXED) {
+            Some((letter, root)) => {
+                assert_eq!(share_root(&Path::new(&root).join("x")), None, "{root}");
+                let relative = format!("{}:child", char::from(letter));
+                assert_eq!(share_root(Path::new(&relative)), None, "{relative}");
+            }
+            None => eprintln!("skipped: no local fixed drive letter on this machine"),
+        }
+        match letters().find(|(letter, root)| {
+            drive_type(root) == DRIVE_NO_ROOT_DIR && !remembered_connection(*letter)
+        }) {
+            Some((letter, root)) => {
+                assert_eq!(share_root(&Path::new(&root).join("x")), None, "{root}");
+                let relative = format!("{}:child", char::from(letter));
+                assert_eq!(share_root(Path::new(&relative)), None, "{relative}");
+            }
+            None => eprintln!("skipped: every drive letter is in use on this machine"),
+        }
+    }
+
+    /// On a network drive letter, an absolute path answers the drive root and a drive-relative one (`Z:child`, `Z:`)
+    /// answers `None` before the drive is asked (ADR-0387).
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_relative_path_has_no_share_root_even_on_a_network_drive() {
+        use std::path::PathBuf;
+        let network = |letter: u8, root: &str| {
+            assert_eq!((letter, root), (b'Z', r"Z:\"));
+            true
+        };
+        assert_eq!(
+            share_root_with(Path::new(r"Z:\lib\x"), network),
+            Some(PathBuf::from(r"Z:\"))
+        );
+        assert_eq!(
+            share_root_with(Path::new(r"\\?\Z:\lib"), network),
+            Some(PathBuf::from(r"Z:\"))
+        );
+        let never = |_: u8, _: &str| -> bool { panic!("a relative path does not ask the drive") };
+        for relative in ["Z:child", "Z:", r"Z:child\x"] {
+            assert_eq!(
+                share_root_with(Path::new(relative), never),
+                None,
+                "{relative}"
+            );
+        }
+    }
+
+    /// A remote drive type is a network drive; a letter with no volume is one only with a remembered connection; a
+    /// letter with a local volume is not, and its connection is not asked (ADR-0387).
+    #[cfg(windows)]
+    #[test]
+    fn a_letter_with_no_volume_is_a_network_drive_only_with_a_remembered_connection() {
+        let never = || -> bool { panic!("a letter with a local volume is not asked") };
+        assert!(network_drive(DRIVE_REMOTE, never));
+        assert!(network_drive(DRIVE_NO_ROOT_DIR, || true));
+        assert!(network_drive(DRIVE_UNKNOWN, || true));
+        assert!(!network_drive(DRIVE_NO_ROOT_DIR, || false));
+        assert!(!network_drive(DRIVE_UNKNOWN, || false));
+        // Removable · fixed · CD-ROM · RAM disk.
+        for kind in [2, 3, 5, 6] {
+            assert!(!network_drive(kind, never), "{kind}");
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn there_is_no_share_root_outside_windows() {
+        assert_eq!(share_root(Path::new("//server/share/x")), None);
+        assert_eq!(share_root(Path::new("/mnt/x")), None);
     }
 
     // ── carrying windows failures over ──

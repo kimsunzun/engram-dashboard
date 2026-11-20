@@ -185,9 +185,11 @@ pub(crate) mod fake {
     ///   `StreamJson` → `same_name` = `<word>-same-name`.
     /// - `folder_listing_at_launch`: always. `folder_load_set`: a top-level `RULES.md` that reads is an instruction row
     ///   — `StreamJson` loads and carries it, `Terminal` omits it; nothing else.
-    /// - `working_folder_blocks`: never. `command_line_fits`: always fits, and records the line's `instructions` in
+    /// - `working_folder_blocks`: never. `command_line_fits`: fits unless the line's `instructions` hold
+    ///   [`Scripted::refuse_holding`] (`<word>-line-too-long`), and records every line's `instructions` in
     ///   [`Scripted::lines`]. No native skill roots; `root_skills` finds nothing.
-    /// - `instructions_append`: the trait default `false` (instructions replace the user's own).
+    /// - `instructions_append`: [`Scripted::append`] — `false` by default, the trait default (instructions replace the
+    ///   user's own).
     pub(crate) struct Scripted {
         pub word: &'static str,
         omitted: &'static str,
@@ -195,6 +197,9 @@ pub(crate) mod fake {
         same_name: &'static str,
         /// The `instructions` of every line `command_line_fits` was asked about, in order.
         pub lines: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        /// A text whose presence in the instructions makes `command_line_fits` refuse the line.
+        pub refuse_holding: Option<&'static str>,
+        pub append: bool,
     }
 
     impl Scripted {
@@ -208,6 +213,8 @@ pub(crate) mod fake {
                 folder_omitted: code("folder-omitted"),
                 same_name: code("same-name"),
                 lines: Default::default(),
+                refuse_holding: None,
+                append: false,
             }
         }
 
@@ -321,7 +328,15 @@ pub(crate) mod fake {
         fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<(), Reason> {
             let instructions = line.instructions.map(str::to_owned);
             engram_dashboard_base::sync::lock(&self.lines).push(instructions);
-            Ok(())
+            match (line.instructions, self.refuse_holding) {
+                (Some(text), Some(refused)) if text.contains(refused) => {
+                    Err(self.reason("line-too-long", None))
+                }
+                _ => Ok(()),
+            }
+        }
+        fn instructions_append(&self, _: AgentOutputFormat) -> bool {
+            self.append
         }
         fn native_skill_roots(
             &self,

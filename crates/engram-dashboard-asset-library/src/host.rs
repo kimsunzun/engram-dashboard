@@ -389,6 +389,7 @@ fn status_ok(status: LibraryStatus) -> LibraryStatusOk {
         RootStatus::Unset => ("unset", None),
         RootStatus::Ok => ("ok", None),
         RootStatus::Missing { why } => ("missing", Some(why)),
+        RootStatus::Unreadable { why } => ("unreadable", Some(why)),
     };
     let (config, config_why) = match status.config {
         ConfigHealth::Ok => ("ok", None),
@@ -1460,7 +1461,7 @@ mod tests {
             root_generation: 9,
         };
         let out = status_ok(status(
-            RootStatus::Missing {
+            RootStatus::Unreadable {
                 why: "timed out".to_owned(),
             },
             ConfigHealth::ReadOnly {
@@ -1470,7 +1471,17 @@ mod tests {
         assert_eq!(out.root_setting.as_deref(), Some("default"));
         assert_eq!(
             (out.state.as_str(), out.state_why.as_deref()),
-            ("missing", Some("timed out"))
+            ("unreadable", Some("timed out"))
+        );
+        let missing = status_ok(status(
+            RootStatus::Missing {
+                why: "not a folder".to_owned(),
+            },
+            ConfigHealth::Ok,
+        ));
+        assert_eq!(
+            (missing.state.as_str(), missing.state_why.as_deref()),
+            ("missing", Some("not a folder"))
         );
         assert_eq!(
             (out.config.as_str(), out.config_why.as_deref()),

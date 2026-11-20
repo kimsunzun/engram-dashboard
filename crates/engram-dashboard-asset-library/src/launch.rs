@@ -10,11 +10,17 @@
 //! - **The check** (TRD S25 step-7 §3-8 `check_in`): the library root is stat'ed only when a library preset is
 //!   attached; the library files the profile reaches are read fresh with the store (the overlay — local by
 //!   assumption); two brief read-lock takes — the root and the gate's numbers before the overlay read, then `resolve`
-//!   over the overlay, then the catalog (ADR-0324 decision 5). Block ④ is the whole answer — nothing
-//!   else is checked. No folder IO runs under the library lock. The required phase (folder-entry stats, listings and
-//!   reads) runs first and alone; the advisory phase (the working-folder canonicalize, the backend's own skill
-//!   roots, root canonicals) runs only when nothing blocks, on its own allowance; an advisory answer that is missing
-//!   is never substituted (an unknown root is left out, an unknown working folder is the profile's own spelling).
+//!   over the overlay, then the catalog (ADR-0324 decision 5). A root that exists but cannot be read is block ④, the
+//!   whole answer — nothing else is checked. No folder IO runs under the library lock. The required phase
+//!   (folder-entry stats, listings and reads) runs first and alone; the advisory phase (the working-folder
+//!   canonicalize, the backend's own skill roots, root canonicals) runs only when nothing blocks, on its own
+//!   allowance; an advisory answer that is missing is never substituted (an unknown root is left out, an unknown
+//!   working folder is the profile's own spelling).
+//! - **Skips** (ADR-0387): what is absent is left out and the launch runs — a `missing` row (a library item not
+//!   found, a folder entry not there), and with an unset or absent root every library item (the expansion runs over
+//!   the built-ins alone). Each skip is named in the plan's notices and, where the instruction channel allows it, in
+//!   a launch note appended to the merged instructions (named, else counted, else none — measured with the text, so
+//!   it never blocks). What exists but cannot be read or is broken still blocks.
 //! - **The overlay is merged late, never removes**: the items read are handed to a short-lived merge job (the
 //!   service's take-once hand-off), so the check never waits on the write lock.
 //! - **The stamp** records the SHA-256 of every material source the plan uses; `prepare` re-reads exactly those with
@@ -32,6 +38,7 @@
 // ADR-0353
 // ADR-0355
 // ADR-0360
+// ADR-0387
 // TRD S25 step-7 §3-8 · §4 · §6
 
 use std::cell::RefCell;
@@ -42,13 +49,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use engram_dashboard_agent::backend::settings_check::{
-    CommandLine, FolderLoadKind, FolderLoadSet, NativePlaces,
+    CommandLine, FolderLoadKind, FolderLoadSet, NativePlaces, UnsureWhy,
 };
 use engram_dashboard_agent::backend::SettingsCheck;
 use engram_dashboard_agent::launch::{
     backend_word, escape_controls, BlockReason, LaunchBlocked, LaunchFs, LaunchKit,
     LaunchKitSource, LaunchPlan, LaunchScope, NoopLaunchKits, Notice, PrepareError, RawSetting,
-    Reason, SkillRef, SourceRef, StdLaunchFs, FOLDER_LISTING_PARTIAL, FOLDER_LISTING_SKIPPED,
+    Reason, SkillRef, SourceRef, StdLaunchFs, FOLDER_ITEM_PREFIX, FOLDER_LISTING_PARTIAL,
+    FOLDER_LISTING_SKIPPED, LIBRARY_UNAVAILABLE_SKIPPED, MISSING_ITEM_SKIPPED,
 };
 use engram_dashboard_agent::profile::{AgentOutputFormat, AgentProfile};
 use engram_dashboard_agent::types::AgentId;
@@ -62,9 +70,11 @@ use crate::catalog::{key, preset_refs, Item, ItemContent, ScanItem};
 use crate::folder::{slash_path, FolderListing, FolderStatus, LaunchIo, Need};
 use crate::format::YamlFrontMatter;
 use crate::gate::Tags;
+use crate::gate::{NOT_FOUND, NO_ROOT};
 use crate::path::{AssetRef, BuiltinId, LibPath};
 use crate::resolve::{
-    folder_item, resolve, CatalogLookup, ItemView, Looked, Lookup, Resolution, RootState, Target,
+    expand, folder_item, resolve, AbsentRootLookup, CatalogLookup, ItemView, Looked, Lookup,
+    Resolution, RootState, Target,
 };
 use crate::store::admits;
 use crate::{
@@ -108,6 +118,136 @@ pub fn merge_instructions(priming: Option<&str>, sources: &[(&str, &str)]) -> St
         merged.push('\n');
     }
     merged
+}
+
+/// `merged` (the text of [`merge_instructions`]) with the launch note `note` as its last part — after one blank line,
+/// ending with one line break.
+pub(crate) fn with_note(merged: &str, note: &str) -> String {
+    if merged.is_empty() {
+        format!("{note}\n")
+    } else {
+        format!("{merged}\n{note}\n")
+    }
+}
+
+/// What a launch that runs leaves out: the library items of an unset or absent root (with why), and every other
+/// skipped row — a `not-found` library item or a `folder-not-found` folder entry.
+// ADR-0374
+// ADR-0387
+struct Skips {
+    /// (message, library items in expansion order) — the absent-root path only.
+    root: Option<(String, Vec<String>)>,
+    rows: Vec<SkipRow>,
+}
+
+struct SkipRow {
+    item: String,
+    via: Vec<String>,
+    line: Option<u32>,
+}
+
+impl Skips {
+    /// The skip set of `resolution`; `absent` = the absent root's message when the launch took the absent-root path
+    /// — its `not-found` rows fold into the one root notice.
+    fn of(resolution: &Resolution, absent: Option<&str>) -> Skips {
+        let mut library = Vec::new();
+        let mut rows = Vec::new();
+        for problem in resolution.skipped() {
+            let BlockReason::Missing { item, via, reason } = problem else {
+                continue;
+            };
+            if absent.is_some() && reason.code == NOT_FOUND {
+                library.push(item);
+            } else {
+                rows.push(SkipRow {
+                    item,
+                    via,
+                    line: reason.line,
+                });
+            }
+        }
+        Skips {
+            root: absent.map(|message| (message.to_owned(), library)),
+            rows,
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.rows.len() + self.root.as_ref().map_or(0, |(_, items)| items.len())
+    }
+
+    /// The reply notices: the root notice first, then one per row.
+    fn notices(&self) -> Vec<Notice> {
+        let root = self.root.iter().map(|(message, items)| {
+            notice(
+                LIBRARY_UNAVAILABLE_SKIPPED,
+                json!({ "message": message, "items": items }),
+            )
+        });
+        let rows = self.rows.iter().map(|row| Reason {
+            code: MISSING_ITEM_SKIPPED.to_owned(),
+            args: json!({ "item": row.item, "via": row.via }),
+            line: row.line,
+        });
+        root.chain(rows).collect()
+    }
+
+    /// The launch note that names every item; `None` = nothing was skipped.
+    fn named_note(&self) -> Option<String> {
+        if self.count() == 0 {
+            return None;
+        }
+        let mut lines = Vec::new();
+        if !self.rows.is_empty() {
+            lines.push(
+                "Engram launch note: these items your presets reference were not found and were left out of this \
+                 launch:"
+                    .to_owned(),
+            );
+            for row in &self.rows {
+                let at = match row.via.last() {
+                    Some(preset) => format!("listed in {}", escape_controls(preset)),
+                    None => "attached to this agent".to_owned(),
+                };
+                lines.push(match row.item.strip_prefix(FOLDER_ITEM_PREFIX) {
+                    Some(path) => format!(
+                        "- folder {} (not found or not a folder; {at})",
+                        escape_controls(path)
+                    ),
+                    None => format!("- {} ({at})", escape_controls(&row.item)),
+                });
+            }
+        }
+        if let Some((message, items)) = &self.root {
+            let items: Vec<String> = items.iter().map(|item| escape_controls(item)).collect();
+            let sentence = format!(
+                "The library folder could not be used ({}), so these library items were left out: {}",
+                escape_controls(message),
+                items.join(", ")
+            );
+            lines.push(match self.rows.is_empty() {
+                true => format!("Engram launch note: {sentence}"),
+                false => sentence,
+            });
+        }
+        Some(lines.join("\n"))
+    }
+
+    /// The launch note that only counts ([`count_note`]); `None` = nothing was skipped.
+    fn count_note(&self) -> Option<String> {
+        (self.count() > 0).then(|| count_note(self.count()))
+    }
+}
+
+/// The launch note that only counts `n` skipped items — one fixed ASCII sentence, no name.
+pub(crate) fn count_note(n: usize) -> String {
+    match n {
+        1 => "Engram launch note: 1 item your presets reference was not found and was left out of this launch."
+            .to_owned(),
+        n => format!(
+            "Engram launch note: {n} items your presets reference were not found and were left out of this launch."
+        ),
+    }
 }
 
 /// The lowercase hex SHA-256 of `bytes` — the stamp of a source, the instructions hash and a preset's `rev`.
@@ -257,10 +397,18 @@ impl<'a> FolderReads<'a> {
     }
 }
 
-/// What `prepare` re-reads and compares (`LaunchPlan::stamp`, opaque to everyone else).
+/// What `prepare` re-reads and compares (`LaunchPlan::stamp`, opaque to everyone else), and the launch note it writes.
 #[derive(Serialize, Deserialize)]
 struct Stamp {
     files: Vec<StampEntry>,
+    /// The launch note the check measured as the last part of the merged instructions; `None` = no note.
+    // ADR-0387
+    #[serde(default)]
+    note: Option<String>,
+    /// The command-line refusal code that dropped a note the launch would have carried (both forms refused, the
+    /// text without one fits) — `prepare` logs it once.
+    #[serde(default)]
+    dropped_note: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -329,6 +477,15 @@ impl LaunchKitSource for LibraryService {
         })?;
         let stamp: Stamp = serde_json::from_str(stamp)
             .map_err(|e| PrepareError::Failed(format!("the plan's stamp does not read: {e}")))?;
+        // ADR-0387: the reply notice and the log still name the skip; only the agent is not told.
+        if let Some(code) = &stamp.dropped_note {
+            tracing::warn!(
+                agent = %id,
+                epoch,
+                code = %code,
+                "launch note dropped; command line cannot carry it"
+            );
+        }
         let mut texts = HashMap::new();
         for entry in &stamp.files {
             let (sha256, text) = self.reread(&launch.io, entry)?;
@@ -356,8 +513,13 @@ impl LaunchKitSource for LibraryService {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let priming = plan.include_priming.then(|| self.builtins.priming_text());
-        let (instructions_file, instructions_hash) = if priming.is_some() || !sources.is_empty() {
+        let parts = priming.is_some() || !sources.is_empty() || stamp.note.is_some();
+        let (instructions_file, instructions_hash) = if parts {
             let merged = merge_instructions(priming, &sources);
+            let merged = match &stamp.note {
+                Some(note) => with_note(&merged, note),
+                None => merged,
+            };
             let file = dir.join(INSTRUCTIONS_FILE);
             fs::write(&file, &merged)
                 .map_err(|e| PrepareError::Failed(format!("could not write {file:?}: {e}")))?;
@@ -389,7 +551,7 @@ impl LaunchKitSource for LibraryService {
     // ADR-0360: a folder read outside a launch gets the 5 s read budget (decision 4) — a dead share answers `timeout`.
     // ADR-0386
     fn stat_folder(&self, folder: &Path) -> Result<(), String> {
-        self.stat_root(&self.io.begin_read(), folder)
+        self.stat_words(&self.io.begin_read(), folder)
     }
 }
 
@@ -440,6 +602,12 @@ impl LibraryService {
             (Some(root), RootState::Ok) => self.read_overlay(root, &want),
             _ => Overlay::default(),
         };
+        // ADR-0387: an unset or absent root skips every library item — built-ins only, no catalog, no link probe.
+        let absent = match (&root_state, library_attached) {
+            (RootState::Unset, true) => Some(NO_ROOT.to_owned()),
+            (RootState::Absent(why), true) => Some(why.clone()),
+            _ => None,
+        };
 
         let target = Target {
             backend: want.backend,
@@ -449,18 +617,28 @@ impl LibraryService {
             unparsed: want.unparsed,
             root: root_state,
         };
-        let mut resolution = self.gate.with_read(|state| {
-            let lookup = OverlayLookup {
-                overlay: &overlay,
-                catalog: CatalogLookup {
-                    catalog: &state.catalog,
-                    root: state.root.as_deref(),
+        let mut resolution = match &absent {
+            Some(_) => expand(
+                &target,
+                &AbsentRootLookup {
                     builtins: &self.builtins,
                 },
-            };
-            resolve(&target, &lookup, backends)
-        });
+                backends,
+            ),
+            None => self.gate.with_read(|state| {
+                let lookup = OverlayLookup {
+                    overlay: &overlay,
+                    catalog: CatalogLookup {
+                        catalog: &state.catalog,
+                        root: state.root.as_deref(),
+                        builtins: &self.builtins,
+                    },
+                };
+                resolve(&target, &lookup, backends)
+            }),
+        };
         // ADR-0361
+        // ADR-0387: only a root that exists but cannot be read reaches block ④ here.
         // User decision 2026-11-12: block ④ is the whole answer — no folder IO, no command-line judgment.
         if resolution
             .problems
@@ -471,7 +649,7 @@ impl LibraryService {
                 reasons: resolution.problems,
             });
         }
-        if let Some(root) = &root {
+        if let (Some(root), None) = (&root, &absent) {
             self.mark_links(root, &mut resolution);
         }
         // ADR-0366
@@ -482,8 +660,9 @@ impl LibraryService {
 
         let (listed, mut notices) = self.folder_phase(io, check, mode, &mut resolution);
 
-        // B30: a launch already blocked runs no advisory IO; its working folder is the profile's own spelling.
-        let canonical = if resolution.problems.is_empty() {
+        // B30: a launch already blocked runs no advisory IO; its working folder is the profile's own spelling. Skipped
+        //   rows do not block (ADR-0387).
+        let canonical = if resolution.blocked().is_none() {
             self.canonical_cwd(io, &profile.cwd)
         } else {
             None
@@ -609,20 +788,52 @@ impl LibraryService {
             .map(|(source, text)| (source.path.as_str(), text.as_str()))
             .collect();
         let merged = merge_instructions(priming, &pairs);
-        let line = CommandLine {
-            mode,
-            cwd: &cwd,
-            extra_args: &extra_args(&profile.command),
-            config_args: &config_args,
-            instructions: (!merged.is_empty()).then_some(merged.as_str()),
+        let extra = extra_args(&profile.command);
+        let fits = |text: &str| {
+            check.command_line_fits(&CommandLine {
+                mode,
+                cwd: &cwd,
+                extra_args: &extra,
+                config_args: &config_args,
+                instructions: (!text.is_empty()).then_some(text),
+            })
         };
-        // ADR-0361
-        if let Err(reason) = check.command_line_fits(&line) {
-            resolution.problems.push(BlockReason::Broken {
-                item: format!("command-line:{word}"),
-                via: Vec::new(),
-                reason,
-            });
+        let skips = Skips::of(&resolution, absent.as_deref());
+        // ADR-0387: the note is the merged text's last part, measured with it, so it never turns a skip into a block:
+        //   the named form, else the count form, else none. It never opens a replacing channel by itself — with no
+        //   instruction text of Engram's own (blank as codex reads it), a backend whose instructions replace the
+        //   user's own (ADR-0215) gets none.
+        let forms = if merged.trim().is_empty() && !check.instructions_append(mode) {
+            Vec::new()
+        } else {
+            [skips.named_note(), skips.count_note()]
+                .into_iter()
+                .flatten()
+                .collect()
+        };
+        let (mut note, mut refused) = (None, None);
+        for form in forms {
+            match fits(&with_note(&merged, &form)) {
+                Ok(()) => {
+                    note = Some(form);
+                    break;
+                }
+                Err(reason) => {
+                    refused.get_or_insert(reason.code);
+                }
+            }
+        }
+        let mut dropped_note = None;
+        if note.is_none() {
+            // ADR-0361
+            match fits(&merged) {
+                Err(reason) => resolution.problems.push(BlockReason::Broken {
+                    item: format!("command-line:{word}"),
+                    via: Vec::new(),
+                    reason,
+                }),
+                Ok(()) => dropped_note = refused,
+            }
         }
         // ADR-0353: the backend's translation applies the same rule to the folder the spawn gets.
         // ADR-0361
@@ -638,9 +849,21 @@ impl LibraryService {
         if let Some(blocked) = resolution.blocked() {
             return Err(blocked);
         }
-        notices.splice(0..0, resolution.notices);
-        let stamp =
-            serde_json::to_string(&Stamp { files: stamp }).expect("a stamp of strings serializes");
+        // ADR-0387: skip notices first, then the resolution's, then the folder and same-name notices.
+        notices.splice(0..0, skips.notices().into_iter().chain(resolution.notices));
+        // ADR-0387: a folder entry that is not there is left out of the plan; a folder with no status stays.
+        let skipped_folders: Vec<String> = skips
+            .rows
+            .iter()
+            .filter(|row| row.item.starts_with(FOLDER_ITEM_PREFIX))
+            .map(|row| row.item.clone())
+            .collect();
+        let stamp = serde_json::to_string(&Stamp {
+            files: stamp,
+            note,
+            dropped_note,
+        })
+        .expect("a stamp of strings serializes");
         Ok(LaunchPlan {
             backend: word,
             instructions: sources.into_iter().map(|(source, _)| source).collect(),
@@ -667,6 +890,7 @@ impl LibraryService {
             folders: resolution
                 .folders
                 .into_iter()
+                .filter(|folder| !skipped_folders.contains(&folder_item(&folder.path)))
                 .map(|folder| folder.path)
                 .collect(),
             extra_skill_roots,
@@ -762,8 +986,12 @@ impl LibraryService {
     }
 
     /// Step 5 — the required phase: the folder entries' stats, then (when the backend needs them at launch) their
-    /// listings and the port's reads of their files. A folder that is not `Ok`, whose listing fails, or one of whose
-    /// reads gets no answer is a ① line. Answers the folders listed and their listing notices.
+    /// listings and the port's reads of their files. A folder that is missing or not a folder is a ① row (skipped); one
+    /// that cannot be read, whose listing fails for another reason than a missing folder, or one of whose reads gets no
+    /// answer is a ② `folder-unreadable` row; a listing that finds the folder gone is a ① row (skipped).
+    /// A file below a listed folder that the port could not read for another reason is named in that folder's
+    /// `folder-listing-skipped` notice. Answers the folders listed and their listing notices.
+    // ADR-0387
     fn folder_phase(
         &self,
         io: &LaunchIo,
@@ -794,7 +1022,7 @@ impl LibraryService {
         for (folder, instructions_at) in healthy {
             let folder_key = path_key(&folder);
             // ADR-0293: `list_all` answers every path it is asked, but a broken answer is an unreadable folder here
-            //   (a ① line), never an abort.
+            //   (a ② `folder-unreadable` row), never an abort.
             let listing = listings.remove(&folder_key).unwrap_or_else(|| {
                 tracing::error!(
                     path = %escape_controls(&folder.to_string_lossy()),
@@ -809,7 +1037,6 @@ impl LibraryService {
                     continue;
                 }
             };
-            notices.extend(listing_notices(&folder, &listing));
             let reads = FolderReads::new(self, io, &folder, Need::Required);
             let set = check.folder_load_set(
                 &listing.entries,
@@ -817,7 +1044,19 @@ impl LibraryService {
                 &YamlFrontMatter,
                 mode,
             );
-            match reads.unanswered.into_inner() {
+            let unanswered = reads.unanswered.into_inner();
+            // ADR-0387: a file the port could not read (an answer, not a timeout) is skipped and named.
+            let unreadable: Vec<String> = match unanswered {
+                Some(_) => Vec::new(),
+                None => set
+                    .unsure
+                    .iter()
+                    .filter(|unsure| matches!(unsure.why, UnsureWhy::Unreadable(_)))
+                    .map(|unsure| slash_path(&unsure.path))
+                    .collect(),
+            };
+            notices.extend(listing_notices(&folder, &listing, &unreadable));
+            match unanswered {
                 Some(why) => {
                     failed.insert(folder_key, FolderStatus::Unreadable(why));
                 }
@@ -1083,13 +1322,16 @@ impl Overlay {
     }
 }
 
-/// The notices of one folder entry's listing: entries left out, and a listing cut at its cap. Neither blocks.
+/// The notices of one folder entry's listing: entries left out — the listing's skips, then `unreadable` (files the port
+/// could not read) — and a listing cut at its cap. Neither blocks.
 // ADR-0363
-fn listing_notices(folder: &Path, listing: &FolderListing) -> Vec<Notice> {
+// ADR-0387
+fn listing_notices(folder: &Path, listing: &FolderListing, unreadable: &[String]) -> Vec<Notice> {
     let folder = folder.to_string_lossy();
     let mut notices = Vec::new();
-    if !listing.skipped.is_empty() {
-        let args = json!({ "folder": folder, "paths": listing.skipped });
+    let skipped: Vec<&String> = listing.skipped.iter().chain(unreadable).collect();
+    if !skipped.is_empty() {
+        let args = json!({ "folder": folder, "paths": skipped });
         notices.push(notice(FOLDER_LISTING_SKIPPED, args));
     }
     if listing.truncated {
@@ -1386,6 +1628,10 @@ mod tests {
         calls: Vec<(&'static str, PathBuf)>,
         panics: HashSet<PathBuf>,
         skipped: HashMap<PathBuf, Vec<String>>,
+        /// Paths whose stat answers an access error.
+        denied: HashSet<PathBuf>,
+        /// Files whose read answers an access error.
+        unreadable_files: HashSet<PathBuf>,
     }
 
     type Probe = Box<dyn Fn(&Path) + Send + Sync>;
@@ -1474,6 +1720,9 @@ mod tests {
     impl FolderOps for Gated {
         fn stat(&self, p: &Path) -> FolderStatus {
             self.enter("stat", p);
+            if lock(&self.state).denied.contains(p) {
+                return FolderStatus::Unreadable("access denied".to_owned());
+            }
             StdFolderOps.stat(p)
         }
 
@@ -1493,6 +1742,9 @@ mod tests {
 
         fn read(&self, p: &Path, cap: u64) -> io::Result<String> {
             self.enter("read", p);
+            if lock(&self.state).unreadable_files.contains(p) {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
             StdFolderOps.read(p, cap)
         }
     }
@@ -2009,8 +2261,10 @@ mod tests {
         assert!(w.has("P.yaml") && w.has("rules/a.md") && w.has("skills/alpha"));
     }
 
+    /// A missing item beside broken and conflicting ones: the refusal holds only the blocking rows, in kind order
+    /// (ADR-0387).
     #[test]
-    fn a_check_blocks_on_missing_broken_and_conflicting_items_in_that_order() {
+    fn a_check_blocks_on_broken_and_conflicting_items_and_never_on_a_missing_one() {
         let w = World::new();
         w.put("lib/skills/a/SKILL.md", &skill("dup"));
         w.put("lib/skills/b/SKILL.md", &skill("dup"));
@@ -2026,11 +2280,63 @@ mod tests {
         assert_eq!(
             codes(&blocked),
             [
-                ("missing", "not-found"),
                 ("broken", "yaml-syntax"),
                 ("conflict", "skill-name-conflict")
             ]
         );
+    }
+
+    /// The `missing-item-skipped` notice of a skipped row.
+    fn skipped_item(item: &str, via: &[&str], line: Option<u32>) -> Notice {
+        Reason {
+            code: MISSING_ITEM_SKIPPED.to_owned(),
+            args: json!({ "item": item, "via": via }),
+            line,
+        }
+    }
+
+    /// Every kind of missing item — an attached preset, a nested preset, an instruction, a skill, a settings file and
+    /// a folder entry — is left out of the materials and named in one `missing-item-skipped` notice each, on claude
+    /// and codex JSON; the folders the plan carries drop exactly the skipped folder (ADR-0387).
+    #[test]
+    fn missing_items_of_every_kind_are_left_out_and_each_named_once() {
+        for command in [claude(JSON), codex(JSON)] {
+            let w = World::new();
+            let kept = w.folder("kept", &[]);
+            let gone = w.at("gone");
+            w.put("lib/rules/a.md", "A");
+            w.put(
+                "lib/P.yaml",
+                &format!(
+                    "{}presets:\n  - nested.yaml\n",
+                    preset(
+                        &["rules/a.md", "rules/gone.md"],
+                        &["skills/gone"],
+                        &["settings/gone.yaml"],
+                        &[&kept, &gone],
+                    )
+                ),
+            );
+            let profile = agent(command.clone(), &["P.yaml", "absent.yaml"], &w.at("work"));
+            let plan = w.svc.check(&profile).unwrap();
+            let sources: Vec<&str> = plan.instructions.iter().map(|s| s.path.as_str()).collect();
+            assert_eq!(sources, ["rules/a.md"], "{command:?}");
+            assert!(plan.skills.is_empty() && plan.raw_settings.is_empty());
+            assert_eq!(plan.folders, [kept.clone()], "{command:?}");
+            let gone_item = folder_item(&gone);
+            assert_eq!(
+                plan.notices,
+                [
+                    skipped_item("nested.yaml", &["P.yaml"], Some(14)),
+                    skipped_item("rules/gone.md", &["P.yaml"], Some(5)),
+                    skipped_item("settings/gone.yaml", &["P.yaml"], Some(9)),
+                    skipped_item("skills/gone", &["P.yaml"], Some(7)),
+                    skipped_item("absent.yaml", &[], None),
+                    skipped_item(&gone_item, &["P.yaml"], Some(12)),
+                ],
+                "{command:?}"
+            );
+        }
     }
 
     #[test]
@@ -2051,30 +2357,307 @@ mod tests {
         );
     }
 
+    /// A root that exists but cannot be read — an access error, or a stat held past the budget — is block ④, the
+    /// whole answer: no folder IO, no advisory phase, no working-folder row, no library file read (ADR-0361 ·
+    /// ADR-0387).
     #[test]
     fn block_four_is_the_whole_answer_and_asks_nothing_else() {
-        // A codex terminal agent whose working folder the terminal line cannot carry would add a ② row.
-        let w = World::new();
-        let unsafe_cwd = w.at("a&b");
-        fs::create_dir_all(&unsafe_cwd).unwrap();
-        w.put("lib/P.yaml", &preset(&[], &[], &[], &[]));
-        fs::remove_dir_all(w.at("lib")).unwrap();
-        let profile = with_default(agent(codex(TERMINAL), &["P.yaml"], &unsafe_cwd));
-        let blocked = w.svc.check(&profile).unwrap_err();
-        assert_eq!(codes(&blocked), [("library", "library-unavailable")]);
-        assert_eq!(w.ops.count("stat", &w.at("lib")), 1);
-        assert_eq!(w.ops.ops("canonical"), 0, "no advisory phase");
-        assert!(lock(&w.store.reads).is_empty(), "no library file read");
+        for held in [false, true] {
+            // A codex terminal agent whose working folder the terminal line cannot carry would add a ② row.
+            let w = World::with(Setup {
+                waits: waits(500, 300),
+                ..Setup::default()
+            });
+            let unsafe_cwd = w.at("a&b");
+            fs::create_dir_all(&unsafe_cwd).unwrap();
+            let folder = w.folder("rules", &[]);
+            w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
+            match held {
+                true => w.ops.hold_op("stat", &w.at("lib")),
+                false => {
+                    lock(&w.ops.state).denied.insert(w.at("lib"));
+                }
+            }
+            let profile = with_default(agent(codex(TERMINAL), &["P.yaml"], &unsafe_cwd));
+            let blocked = w.svc.check(&profile).unwrap_err();
+            let why = if held { TIMEOUT } else { "access denied" };
+            assert_eq!(
+                blocked.reasons,
+                [BlockReason::LibraryUnavailable {
+                    reason: Reason {
+                        code: crate::LIBRARY_UNAVAILABLE.to_owned(),
+                        args: json!({ "message": why }),
+                        line: None,
+                    }
+                }],
+                "held: {held}"
+            );
+            assert_eq!(w.ops.count("stat", &w.at("lib")), 1);
+            assert_eq!(w.ops.count("stat", &folder), 0, "no folder IO");
+            assert_eq!(w.ops.ops("canonical"), 0, "no advisory phase");
+            assert!(lock(&w.store.reads).is_empty(), "no library file read");
+        }
+    }
 
+    /// An unset root, a removed root and a root path that is a file skip every library item: the launch runs on the
+    /// built-ins alone, with one `library-unavailable-skipped` notice naming the library items, no library file read
+    /// and no link probe; an attached spelling that is not a reference still blocks (ADR-0387).
+    #[test]
+    fn an_absent_root_skips_every_library_item_and_launches_on_the_built_ins() {
+        let removed = World::new();
+        fs::remove_dir_all(removed.at("lib")).unwrap();
+        let file = World::new();
+        fs::remove_dir_all(file.at("lib")).unwrap();
+        file.put("lib", "not a folder");
         let unset = World::with(Setup {
             root: false,
             ..Setup::default()
         });
-        let blocked = unset
+        for (w, message) in [
+            (&removed, "missing"),
+            (&file, "not a folder"),
+            (&unset, crate::gate::NO_ROOT),
+        ] {
+            let profile = with_default(agent(codex(JSON), &["P.yaml", "Q.yaml"], &w.at("work")));
+            let plan = w.svc.check(&profile).unwrap();
+            assert!(plan.include_priming, "{message}");
+            assert!(plan.instructions.is_empty() && plan.skills.is_empty());
+            assert_eq!(
+                plan.notices,
+                [notice(
+                    LIBRARY_UNAVAILABLE_SKIPPED,
+                    json!({ "message": message, "items": ["P.yaml", "Q.yaml"] })
+                )],
+                "{message}"
+            );
+            assert!(lock(&w.store.reads).is_empty(), "no library file read");
+            assert_eq!(
+                w.store.first_links.load(Ordering::SeqCst),
+                0,
+                "no link probe"
+            );
+            assert!(w.ops.ops("canonical") > 0, "the advisory phase ran");
+
+            let unparsed = with_default(agent(
+                codex(JSON),
+                &["P.yaml", "../out.yaml"],
+                &w.at("work"),
+            ));
+            let blocked = w.svc.check(&unparsed).unwrap_err();
+            assert_eq!(
+                codes(&blocked),
+                [("broken", "item-path-invalid")],
+                "{message}"
+            );
+        }
+    }
+
+    // ── the launch note (ADR-0387) ──────────────────────────────────────────────────────────────────────────────
+
+    /// The merged instructions file `prepare` writes for `profile` (checked first), or `None`.
+    fn written(w: &World, profile: &AgentProfile) -> Option<String> {
+        let plan = w.svc.check(profile).unwrap();
+        let kit = w.svc.prepare(plan, profile.id, 1).unwrap();
+        kit.instructions_file
+            .map(|file| fs::read_to_string(file).unwrap())
+    }
+
+    /// claude appends: with no instruction text of Engram's own, the note alone is written (and carried) — the named
+    /// form, one line per skipped item, the folder as a folder, an attached preset as attached.
+    #[test]
+    fn a_claude_note_names_every_skipped_item_and_a_note_alone_is_written() {
+        let w = World::new();
+        let gone = w.at("gone");
+        w.put(
+            "lib/P.yaml",
+            &preset(&["rules/gone.md"], &[], &[], &[&gone]),
+        );
+        let profile = agent(claude(JSON), &["P.yaml", "absent.yaml"], &w.at("work"));
+        assert_eq!(
+            written(&w, &profile).as_deref(),
+            Some(
+                format!(
+                    "Engram launch note: these items your presets reference were not found and were left out of \
+                     this launch:\n- rules/gone.md (listed in P.yaml)\n- absent.yaml (attached to this agent)\n- \
+                     folder {} (not found or not a folder; listed in P.yaml)\n",
+                    gone.display()
+                )
+                .as_str()
+            )
+        );
+    }
+
+    /// With an unset root the note says why the library could not be used and names the library items there.
+    #[test]
+    fn an_absent_root_note_names_the_library_items_in_its_sentence() {
+        let w = World::with(Setup {
+            root: false,
+            ..Setup::default()
+        });
+        let profile = with_default(agent(claude(JSON), &["P.yaml", "Q.yaml"], &w.at("work")));
+        assert_eq!(
+            written(&w, &profile).as_deref(),
+            Some(
+                "PRIMING\n\nEngram launch note: The library folder could not be used (no library root is set), so \
+                 these library items were left out: P.yaml, Q.yaml\n"
+            )
+        );
+    }
+
+    /// codex terminal: the names go on its line when they can (named form); a name its line cannot carry gives the
+    /// count form — singular and plural.
+    #[test]
+    fn a_codex_terminal_note_is_named_when_the_line_carries_the_names_else_counted() {
+        let w = World::new();
+        w.put("lib/P.yaml", &preset(&["rules/gone.md"], &[], &[], &[]));
+        w.put("lib/Q.yaml", &preset(&["rules/it's.md"], &[], &[], &[]));
+        w.put(
+            "lib/R.yaml",
+            &preset(&["rules/it's.md", "rules/gone.md"], &[], &[], &[]),
+        );
+        let cwd = w.at("work");
+        let named = with_default(agent(codex(TERMINAL), &["P.yaml"], &cwd));
+        assert_eq!(
+            written(&w, &named).as_deref(),
+            Some(
+                "PRIMING\n\nEngram launch note: these items your presets reference were not found and were left \
+                 out of this launch:\n- rules/gone.md (listed in P.yaml)\n"
+            )
+        );
+        for (attached, count) in [("Q.yaml", 1), ("R.yaml", 2)] {
+            let counted = with_default(agent(codex(TERMINAL), &[attached], &cwd));
+            assert_eq!(
+                written(&w, &counted),
+                Some(format!("PRIMING\n\n{}\n", count_note(count))),
+                "{attached}"
+            );
+        }
+        assert_eq!(
+            count_note(1),
+            "Engram launch note: 1 item your presets reference was not found and was left out of this launch."
+        );
+        assert_eq!(
+            count_note(2),
+            "Engram launch note: 2 items your presets reference were not found and were left out of this launch."
+        );
+    }
+
+    /// codex replaces the user's own instructions, so a codex agent with no instruction text of Engram's own gets no
+    /// note — none at all, or a whitespace-only priming (blank as codex reads it); the notice still names the skip.
+    #[test]
+    fn codex_with_no_instruction_text_of_its_own_gets_no_note() {
+        let w = World::new();
+        w.put("lib/P.yaml", &preset(&["rules/gone.md"], &[], &[], &[]));
+        for mode in [JSON, TERMINAL] {
+            let profile = agent(codex(mode), &["P.yaml"], &w.at("work"));
+            let plan = w.svc.check(&profile).unwrap();
+            assert_eq!(
+                plan.notices,
+                [skipped_item("rules/gone.md", &["P.yaml"], Some(4))]
+            );
+            assert_eq!(written(&w, &profile), None, "{mode:?}");
+        }
+        let blank = World::with(Setup {
+            priming: Some("  \n   \n"),
+            ..Setup::default()
+        });
+        blank.put("lib/P.yaml", &preset(&["rules/gone.md"], &[], &[], &[]));
+        for mode in [JSON, TERMINAL] {
+            let profile = with_default(agent(codex(mode), &["P.yaml"], &blank.at("work")));
+            let text = written(&blank, &profile).expect("the priming is a file");
+            assert!(!text.contains("launch note"), "{mode:?}: {text:?}");
+        }
+    }
+
+    /// Counts the events whose message is `message`.
+    struct MessageCount(&'static str, Arc<AtomicUsize>);
+
+    impl tracing::Subscriber for MessageCount {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            if message.0 == self.0 && *event.metadata().level() == tracing::Level::WARN {
+                self.1.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Both forms refused while the text without a note fits: the launch runs with no note, the checks (as many as a
+    /// launch runs) log nothing about it, and `prepare` logs it once at `warn`; the reply notice still names the skip.
+    #[test]
+    fn a_dropped_note_never_blocks_and_prepare_logs_it_once() {
+        let mut fake = Scripted::new("codex");
+        fake.refuse_holding = Some("Engram launch note");
+        let leaked: &'static Scripted = Box::leak(Box::new(fake));
+        let w = World::with(Setup {
+            backends: Arc::new(Registry(vec![leaked as &'static dyn SettingsCheck])),
+            ..Setup::default()
+        });
+        w.put("lib/P.yaml", &preset(&["rules/gone.md"], &[], &[], &[]));
+        let profile = with_default(agent(codex(JSON), &["P.yaml"], &w.at("work")));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let subscriber = MessageCount(
+            "launch note dropped; command line cannot carry it",
+            Arc::clone(&dropped),
+        );
+        let kit = tracing::subscriber::with_default(subscriber, || {
+            let scope = w.svc.begin_launch();
+            let mut plans: Vec<LaunchPlan> = (0..3)
+                .map(|_| w.svc.check_in(&scope, &profile).unwrap())
+                .collect();
+            assert_eq!(dropped.load(Ordering::SeqCst), 0, "the checks log nothing");
+            let plan = plans.pop().unwrap();
+            assert_eq!(
+                plan.notices,
+                [skipped_item("rules/gone.md", &["P.yaml"], Some(4))]
+            );
+            w.svc.prepare_in(&scope, plan, profile.id, 1).unwrap()
+        });
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        let text = fs::read_to_string(kit.instructions_file.unwrap()).unwrap();
+        assert_eq!(text, "PRIMING\n", "no note");
+
+        // The text without a note refused too: the launch blocks on the command line as before, and no note is
+        //   dropped.
+        let mut fake = Scripted::new("codex");
+        fake.refuse_holding = Some("PRIMING");
+        let leaked: &'static Scripted = Box::leak(Box::new(fake));
+        let w = World::with(Setup {
+            backends: Arc::new(Registry(vec![leaked as &'static dyn SettingsCheck])),
+            ..Setup::default()
+        });
+        w.put("lib/P.yaml", &preset(&["rules/gone.md"], &[], &[], &[]));
+        let blocked = w
             .svc
-            .check(&agent(codex(TERMINAL), &["P.yaml"], &unsafe_cwd))
+            .check(&with_default(agent(
+                codex(JSON),
+                &["P.yaml"],
+                &w.at("work"),
+            )))
             .unwrap_err();
-        assert_eq!(codes(&blocked), [("library", "library-unavailable")]);
+        assert_eq!(codes(&blocked), [("broken", "codex-line-too-long")]);
     }
 
     #[test]
@@ -2306,9 +2889,9 @@ mod tests {
             .check_in(&scope, &agent(codex(JSON), &["P.yaml"], &w.at("work")))
             .unwrap_err();
         match &blocked.reasons[..] {
-            [BlockReason::Missing { item, reason, .. }] => {
+            [BlockReason::Broken { item, reason, .. }] => {
                 assert_eq!(item, &folder_item(&folder));
-                assert_eq!(reason.code, "folder-not-found");
+                assert_eq!(reason.code, "folder-unreadable");
                 assert_eq!(reason.args["why"], TIMEOUT);
             }
             other => panic!("{other:?}"),
@@ -2336,8 +2919,9 @@ mod tests {
             .unwrap_err();
         assert!(began.elapsed() < ms(2_000 + 1_000), "{:?}", began.elapsed());
         match &blocked.reasons[..] {
-            [BlockReason::Missing { item, reason, .. }] => {
+            [BlockReason::Broken { item, reason, .. }] => {
                 assert_eq!(item, &folder_item(&folder));
+                assert_eq!(reason.code, "folder-unreadable");
                 assert_eq!(reason.args["why"], TIMEOUT);
             }
             other => panic!("{other:?}"),
@@ -2355,12 +2939,44 @@ mod tests {
             .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
             .unwrap_err();
         match &blocked.reasons[..] {
-            [BlockReason::Missing { item, reason, .. }] => {
+            [BlockReason::Broken { item, reason, .. }] => {
                 assert_eq!(item, &folder_item(&folder));
+                assert_eq!(reason.code, "folder-unreadable");
                 assert_eq!(reason.args["why"], "worker panicked");
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A file below a codex folder entry that the port cannot read (an access error, not a timeout) is named in that
+    /// folder's `folder-listing-skipped` notice after the listing's own skips, and the launch goes on (ADR-0387).
+    #[test]
+    fn an_unreadable_file_below_a_folder_entry_is_named_and_the_launch_goes_on() {
+        let w = World::new();
+        let folder = w.folder("rules", &[("AGENTS.md", "rules")]);
+        lock(&w.ops.state)
+            .unreadable_files
+            .insert(folder.join("AGENTS.md"));
+        lock(&w.ops.state)
+            .skipped
+            .insert(folder.clone(), vec!["sub".to_owned()]);
+        w.put("lib/P.yaml", &preset(&[], &[], &[], &[&folder]));
+        let plan = w
+            .svc
+            .check(&agent(codex(JSON), &["P.yaml"], &w.at("work")))
+            .unwrap();
+        assert_eq!(
+            plan.notices,
+            [notice(
+                FOLDER_LISTING_SKIPPED,
+                json!({ "folder": lossy(&folder), "paths": ["sub", "AGENTS.md"] })
+            )]
+        );
+        assert_eq!(plan.folders, [folder]);
+        assert!(
+            plan.instructions.is_empty(),
+            "the unread file is not carried"
+        );
     }
 
     #[test]
@@ -2386,16 +3002,21 @@ mod tests {
         let folder = w.folder("rules", &[("AGENTS.md", "rules")]);
         w.put("lib/P.yaml", &preset(&["gone.md"], &[], &[], &[&folder]));
         let profile = agent(codex(JSON), &["P.yaml"], &w.at("work"));
-        let blocked = w.svc.check(&profile).unwrap_err();
-        assert_eq!(codes(&blocked), [("missing", "not-found")]);
+        // ADR-0387: the missing instruction is skipped, after its link probe.
+        let plan = w.svc.check(&profile).unwrap();
+        assert_eq!(
+            plan.notices,
+            [skipped_item("gone.md", &["P.yaml"], Some(4))]
+        );
         assert!(
             w.store.first_links.load(Ordering::SeqCst) >= 1,
             "the link probe ran"
         );
-        // A passing check runs the advisory phase under the probe too.
-        w.put("lib/gone.md", "back");
-        w.svc.check(&profile).unwrap();
         assert!(w.ops.ops("canonical") > 0, "the advisory phase ran");
+        // With the file back, the check carries it, under the probe too.
+        w.put("lib/gone.md", "back");
+        let plan = w.svc.check(&profile).unwrap();
+        assert!(plan.notices.is_empty(), "{:?}", plan.notices);
         assert!(w.ops.ops("stat") > 0 && w.ops.ops("list") > 0 && w.ops.ops("read") > 0);
         assert!(
             w.store.read_any(&w.at("lib/P.yaml")),
@@ -2474,6 +3095,8 @@ mod tests {
 
     // ── the advisory phase ──────────────────────────────────────────────────────────────────────────────────────
 
+    /// B30: a check a ② row already blocks runs no advisory IO and judges the working folder as spelled; a skipped row
+    /// does not block, so with only that the advisory phase runs (ADR-0387).
     #[test]
     fn a_blocked_check_runs_no_advisory_io_and_judges_the_working_folder_as_spelled() {
         let w = World::new();
@@ -2481,7 +3104,8 @@ mod tests {
         let cwd = w.at("x&y");
         link_dir(&target, &cwd).unwrap();
         w.ops.hold(&cwd);
-        w.put("lib/P.yaml", &preset(&["gone.md"], &[], &[], &[]));
+        w.put("lib/bad.yaml", "kind: settings\nversion: [\n");
+        w.put("lib/P.yaml", &preset(&["gone.md"], &[], &["bad.yaml"], &[]));
         let blocked = w
             .svc
             .check(&agent(codex(TERMINAL), &["P.yaml"], &cwd))
@@ -2489,13 +3113,26 @@ mod tests {
         assert_eq!(
             codes(&blocked),
             [
-                ("missing", "not-found"),
+                ("broken", "yaml-syntax"),
                 ("broken", "codex-working-folder-unsafe")
             ],
             "the canonical folder would pass the rule"
         );
         assert_eq!(w.ops.ops("canonical"), 0);
         assert_eq!(w.ops.ops("list"), 0);
+
+        let skips_only = World::new();
+        skips_only.put("lib/P.yaml", &preset(&["gone.md"], &[], &[], &[]));
+        let cwd = skips_only.at("work");
+        skips_only
+            .svc
+            .check(&agent(codex(TERMINAL), &["P.yaml"], &cwd))
+            .unwrap();
+        assert_eq!(
+            skips_only.ops.count("canonical", &cwd),
+            1,
+            "the advisory phase ran"
+        );
     }
 
     #[test]
@@ -3130,31 +3767,35 @@ mod tests {
         (manager, profiles)
     }
 
-    /// The one missing-folder reason of a blocked create, as (item, code).
+    /// The one unreadable-folder reason of a blocked create, as (item, code).
     fn blocked_folder(error: &engram_dashboard_agent::types::PtyError) -> (String, String) {
         match error {
             engram_dashboard_agent::types::PtyError::LaunchBlocked(blocked) => {
                 match blocked.reasons.as_slice() {
-                    [BlockReason::Missing { item, reason, .. }] => {
+                    [BlockReason::Broken { item, reason, .. }] => {
                         (item.clone(), reason.code.clone())
                     }
-                    other => panic!("one missing reason expected: {other:?}"),
+                    other => panic!("one broken reason expected: {other:?}"),
                 }
             }
             other => panic!("a launch block expected: {other:?}"),
         }
     }
 
-    /// R4 — a create whose library preset names a folder entry that is missing is blocked by the pre-create check:
-    /// nothing is added to the roster and nothing starts.
+    /// R4 — a create whose library preset names a folder entry that does not answer is blocked by the pre-create
+    /// check: nothing is added to the roster and nothing starts (a missing folder is skipped — ADR-0387).
     // ADR-0348
     #[test]
-    fn a_create_with_a_missing_folder_entry_is_blocked_before_the_add() {
+    fn a_create_with_an_unreadable_folder_entry_is_blocked_before_the_add() {
         use engram_dashboard_agent::manager::NoticeDelivery;
 
-        let w = World::new();
-        let gone = w.at("gone");
-        w.put("lib/P.yaml", &preset(&[], &[], &[], &[&gone]));
+        let w = World::with(Setup {
+            waits: waits(500, 300),
+            ..Setup::default()
+        });
+        let held = w.folder("held", &[]);
+        w.ops.hold_op("stat", &held);
+        w.put("lib/P.yaml", &preset(&[], &[], &[], &[&held]));
         let (manager, profiles) = manager_over(&w);
         let profile = agent(claude(JSON), &["P.yaml"], &w.at("work"));
 
@@ -3165,8 +3806,8 @@ mod tests {
         assert_eq!(
             blocked_folder(&not_started.error),
             (
-                folder_item(&gone),
-                crate::resolve::FOLDER_NOT_FOUND.to_owned()
+                folder_item(&held),
+                crate::resolve::FOLDER_UNREADABLE.to_owned()
             )
         );
         assert!(!not_started.created, "nothing was added");
@@ -3175,18 +3816,22 @@ mod tests {
     }
 
     /// R4b — the check after the add asks a folder key the pre-create check did not: the first answer about folder `a`
-    /// rewrites the preset to add a missing folder `b` (the overlay re-reads presets on every check), so the
-    /// prelaunch blocks after the add. The agent stays registered and asleep; `a` was asked once in the whole launch
-    /// (one launch scope keeps its answer).
+    /// rewrites the preset to add a folder `b` that does not answer (the overlay re-reads presets on every check), so
+    /// the prelaunch blocks after the add. The agent stays registered and asleep; `a` was asked once in the whole
+    /// launch (one launch scope keeps its answer).
     // ADR-0348
     // ADR-0360
     #[test]
     fn a_folder_entry_added_between_the_checks_blocks_after_the_add() {
         use engram_dashboard_agent::manager::NoticeDelivery;
 
-        let w = World::new();
+        let w = World::with(Setup {
+            waits: waits(500, 300),
+            ..Setup::default()
+        });
         let a = w.folder("a", &[]);
-        let b = w.at("b");
+        let b = w.folder("b", &[]);
+        w.ops.hold_op("stat", &b);
         let preset_file = w.put("lib/P.yaml", &preset(&[], &[], &[], &[&a]));
         let rewritten = preset(&[], &[], &[], &[&a, &b]);
         let done = AtomicBool::new(false);
@@ -3205,7 +3850,10 @@ mod tests {
 
         assert_eq!(
             blocked_folder(&not_started.error),
-            (folder_item(&b), crate::resolve::FOLDER_NOT_FOUND.to_owned())
+            (
+                folder_item(&b),
+                crate::resolve::FOLDER_UNREADABLE.to_owned()
+            )
         );
         assert!(not_started.created, "created asleep");
         assert!(profiles.get(profile.id).is_some());

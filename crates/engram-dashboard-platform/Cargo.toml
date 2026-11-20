@@ -62,10 +62,12 @@ raw-window-handle = "0.6"
 #   moves screen coordinates to workspace coordinates) and `window::top_level_at`'s window shape (`GetWindowRgn` · `PtInRegion`).
 # `Win32_Storage_FileSystem` = `fs`'s file identity (`GetFileInformationByHandleEx` `FileIdInfo` · the fallback's
 #   `GetFileInformationByHandle`) and junction walking (`FileAttributeTagInfo` — non-following reparse tag · the delete mark
-#   on the same handle via `SetFileInformationByHandle`). ADR-0325
+#   on the same handle via `SetFileInformationByHandle`) and `fs::share_root`'s drive type (`GetDriveTypeW`). ADR-0325
 # `Win32_Globalization` = `fs::path_key`'s OS uppercase mapping (`LCMapStringEx` invariant `LCMAP_UPPERCASE`).
 #   ★Do not switch to `RtlUpcaseUnicodeChar`★ — it is documented for kernel mode only and its binding feature
 #   (`Wdk_System_SystemServices`) is twice this module (the measurement that both answer the same is in `src/fs/path_key.rs`).
+# `Win32_NetworkManagement_WNet` = `fs::share_root`'s remembered network connection of a drive letter with no volume
+#   (`WNetGetConnectionW`) — a mapped drive that is not connected (ADR-0387).
 # ★Not split into per-feature cargo features★ — turns on the union of the binding features used by this one dependency (ADR-0275
 #   decision 13). When moving a module over, add the features that module uses here.
 [target.'cfg(windows)'.dependencies]
@@ -93,6 +95,7 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
     "Win32_Globalization",
+    "Win32_NetworkManagement_WNet",
 ] }
 
 # The `file_holders` · `fs` tests draw temp file names that do not collide — not in the production graph.

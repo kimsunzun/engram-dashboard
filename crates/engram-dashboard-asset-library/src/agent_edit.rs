@@ -44,6 +44,7 @@ use crate::catalog::Catalog;
 use crate::edit::{
     list_of, parse_ref, skip, Skipped, ALREADY_PRESENT, REORDER_ORDER_MISMATCH, REV_MISMATCH,
 };
+use crate::folder::FolderStatus;
 use crate::format::read::WRONG_KIND;
 use crate::format::ListName;
 use crate::gate::NOT_FOUND;
@@ -87,7 +88,8 @@ pub struct AgentPresetsView {
     /// The folder entries its presets reach, in expansion order, each with its stat.
     pub folders: Vec<ResolvedFolder>,
     pub conflicts: Vec<Problem>,
-    /// Every other problem row — the rows that would block a launch, inner presets' with their `via`.
+    /// Every other problem row, inner presets' with their `via` — a launch leaves out the `missing` rows (and the
+    /// library row of an unset or absent root) and refuses on the others.
     pub problems: Vec<Problem>,
     pub notices: Vec<Notice>,
 }
@@ -121,22 +123,25 @@ struct RootSeen {
     joined: Result<(), String>,
     /// The root the stat was taken of.
     seen: Option<PathBuf>,
-    stat: Option<Result<(), String>>,
+    /// Taken whenever a root is set, the first scan failed or not.
+    stat: Option<FolderStatus>,
 }
 
 impl RootSeen {
-    /// The root state the answer view resolves under, for `root` as the change found it (as the read path decides it
-    /// — `LibraryService::root_state`). A root published after the stat counts as usable: its publish stat'ed it.
+    /// The root state the answer view resolves under, for `root` as the change found it — the rule of the read path
+    /// (`LibraryService::root_state`, [`RootState::of`]), so the edit's answer equals `agent.presets` (ADR-0384). A
+    /// root published after the stat counts as there: its publish stat'ed it.
+    // ADR-0387
     fn state(&self, root: Option<&Path>, attached_library: bool) -> RootState {
-        match (root, &self.joined) {
-            (None, _) => RootState::Unset,
-            (Some(_), Err(why)) => RootState::Unavailable(why.clone()),
-            (Some(now), Ok(())) if attached_library => match (&self.seen, &self.stat) {
-                (Some(seen), Some(Err(why))) if seen == now => RootState::Unavailable(why.clone()),
-                _ => RootState::Ok,
-            },
-            (Some(_), Ok(())) => RootState::Ok,
-        }
+        let Some(now) = root else {
+            return RootState::Unset;
+        };
+        let stat = match (&self.seen, &self.stat) {
+            _ if !attached_library => None,
+            (Some(seen), Some(stat)) if seen == now => Some(stat.clone()),
+            _ => Some(FolderStatus::Ok),
+        };
+        RootState::of(&self.joined, stat.as_ref())
     }
 }
 
@@ -351,10 +356,9 @@ impl LibraryService {
         }
         // The stat runs here, outside every lock.
         let seen = self.gate.with_read(|state| state.root.clone());
-        let stat = match (&seen, &joined) {
-            (Some(root), Ok(())) => Some(self.stat_root(&self.io.begin_read(), root)),
-            _ => None,
-        };
+        let stat = seen
+            .as_deref()
+            .map(|root| self.stat_root(&self.io.begin_read(), root));
         let before = RootSeen { joined, seen, stat };
         let (answer, pending) = self.change_at(root_generation, |catalog, root, _| {
             let edited = self.agent_edit_in(&*port, agent, catalog, root, &before, op);
@@ -693,6 +697,8 @@ mod tests {
     #[derive(Default)]
     struct Held {
         hold: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+        /// Every scan fails as an unreadable root.
+        fail_scans: std::sync::atomic::AtomicBool,
     }
 
     impl LibraryStore for Held {
@@ -702,6 +708,9 @@ mod tests {
             under: Option<&LibPath>,
             seq: &dyn Fn() -> u64,
         ) -> std::io::Result<ScanListing> {
+            if self.fail_scans.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
             let parked = lock(&self.hold).take();
             if let Some((arrived, go)) = parked {
                 arrived.send(()).unwrap();
@@ -1543,6 +1552,49 @@ mod tests {
             w.svc.agent_presets(agent).unwrap().problems,
             detach.problems
         );
+    }
+
+    /// With no first scan applied, the edit's answer and `agent.presets` judge the root by one rule (ADR-0384 ·
+    /// ADR-0387): a root that is there is unreadable — the scan's reason, blocking; a root that is not there is absent
+    /// — `missing`, skipped.
+    #[test]
+    fn the_edit_and_the_read_judge_a_root_whose_first_scan_failed_by_one_rule() {
+        let profile = claude(&["P.yaml"], false);
+        let agent = profile.id;
+        let w = World::new(vec![profile]);
+        w.store
+            .fail_scans
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let message = |problems: &[Problem]| match problems {
+            [BlockReason::LibraryUnavailable { reason }] => {
+                reason.args["message"].as_str().unwrap().to_owned()
+            }
+            other => panic!("{other:?}"),
+        };
+
+        let edit = w
+            .svc
+            .detach_preset(agent, &strings(&["Q.yaml"]), false, None)
+            .unwrap();
+        let read = w.svc.agent_presets(agent).unwrap();
+        assert_eq!(
+            edit.problems, read.problems,
+            "the edit's view is the read's view"
+        );
+        let why = message(&read.problems);
+        assert!(!why.is_empty() && why != "missing", "unreadable: {why}");
+
+        fs::remove_dir_all(w.base.join("lib")).unwrap();
+        let edit = w
+            .svc
+            .detach_preset(agent, &strings(&["Q.yaml"]), false, None)
+            .unwrap();
+        let read = w.svc.agent_presets(agent).unwrap();
+        assert_eq!(
+            edit.problems, read.problems,
+            "the edit's view is the read's view"
+        );
+        assert_eq!(message(&read.problems), "missing", "absent");
     }
 
     // ── the view ────────────────────────────────────────────────────────────────────────────────────────────

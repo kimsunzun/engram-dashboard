@@ -345,8 +345,13 @@ pub enum RootStatus {
     /// No root is published.
     Unset,
     Ok,
-    /// The root's stat answered anything but `Ok` — missing, not a folder, unreadable, timed out.
+    /// The root is absent — its stat answered missing or not a folder.
     Missing {
+        why: String,
+    },
+    /// The root exists but cannot be read or did not answer — the OS error, a timeout, a share not reachable.
+    // ADR-0387
+    Unreadable {
         why: String,
     },
 }
@@ -548,7 +553,9 @@ impl LibraryService {
 
     /// One library preset on its own (the edit area — no agent: everything is shown, no format verdict), after the
     /// first-scan entrance, over the catalog under one read lock; its folder entries are stat'ed afterwards, outside
-    /// the lock, on one read-computation budget. A first scan that could not be applied is block ④ with its reason.
+    /// the lock, on one read-computation budget. A first scan that could not be applied stats the root: a root
+    /// that is not there is a skipped ④ row (`missing` / `not a folder`), one that is there is a blocking ④ row
+    /// with the scan's reason (`RootState::of`).
     pub fn resolve_preset(&self, preset: &LibPath) -> Resolution {
         let want = Want {
             backend: None,
@@ -662,9 +669,10 @@ impl LibraryService {
         (resolved, extra)
     }
 
-    /// The root as block ④ needs it: unset; unusable because no full scan could be applied (`joined`); or, when a
-    /// library preset is attached (otherwise the root decides nothing and is not asked), stat'ed as a required ask on
-    /// `io`.
+    /// The root as block ④ needs it ([`RootState::of`]): unset; or, when a library preset is attached (otherwise the
+    /// root decides nothing and is not asked), stat'ed as a required ask on `io` and judged with `joined` (whether a
+    /// full scan could be applied — a launch passes `Ok`).
+    // ADR-0387
     fn root_state(
         &self,
         io: &LaunchIo,
@@ -672,24 +680,18 @@ impl LibraryService {
         joined: Result<(), String>,
         library_attached: bool,
     ) -> RootState {
-        match (root, joined) {
-            (None, _) => RootState::Unset,
-            (Some(_), Err(why)) => RootState::Unavailable(why),
-            (Some(root), Ok(())) if library_attached => match self.stat_root(io, root) {
-                Ok(()) => RootState::Ok,
-                Err(why) => RootState::Unavailable(why),
-            },
-            (Some(_), Ok(())) => RootState::Ok,
-        }
+        let Some(root) = root else {
+            return RootState::Unset;
+        };
+        let stat = library_attached.then(|| self.stat_root(io, root));
+        RootState::of(&joined, stat.as_ref())
     }
 
-    /// The root (or any folder — `LaunchKitSource::stat_folder`) stat'ed as a required ask on `io`; `Err(why)` = anything
-    /// but `Ok`: `missing`, `not a folder`, or the unreadable reason ([`folder::TIMEOUT`] when the stat did not answer,
-    /// [`STAT_UNANSWERED`] if the bounded IO broke its every-key contract).
-    fn stat_root(&self, io: &LaunchIo, root: &Path) -> Result<(), String> {
+    /// The root (or any folder — `LaunchKitSource::stat_folder`) stat'ed as a required ask on `io` (with the share probe
+    /// of [`BoundedIo::stat_all`]); [`STAT_UNANSWERED`] if the bounded IO broke its every-key contract.
+    fn stat_root(&self, io: &LaunchIo, root: &Path) -> FolderStatus {
         // ADR-0293: `stat_all` answers every key it is asked, but a broken answer is a refusal here, never an abort.
-        let status = self
-            .io
+        self.io
             .stat_all(io, &[(root.to_path_buf(), Need::Required)])
             .remove(&path_key(root))
             .unwrap_or_else(|| {
@@ -698,12 +700,15 @@ impl LibraryService {
                     "the bounded stat gave no answer for the path it was asked"
                 );
                 FolderStatus::Unreadable(STAT_UNANSWERED.to_owned())
-            });
-        match status {
+            })
+    }
+
+    /// [`LibraryService::stat_root`] as the string answer of a folder stat: `Err(why)` = anything but `Ok` — `missing`,
+    /// `not a folder`, or the unreadable reason ([`FolderStatus::why`]).
+    pub(crate) fn stat_words(&self, io: &LaunchIo, folder: &Path) -> Result<(), String> {
+        match self.stat_root(io, folder) {
             FolderStatus::Ok => Ok(()),
-            FolderStatus::Missing => Err("missing".to_owned()),
-            FolderStatus::NotADirectory => Err("not a folder".to_owned()),
-            FolderStatus::Unreadable(why) => Err(why),
+            other => Err(other.why()),
         }
     }
 
@@ -723,8 +728,9 @@ impl LibraryService {
     }
 
     /// Turns each ① `not-found` row of a library reference that lies at or below a link inside the library into ②
-    /// [`PATH_THROUGH_LINK`] (R11): the scan never enters such a link, so the catalog lacks the item. Asks the store's
-    /// `first_link` per row — call it outside every lock.
+    /// [`PATH_THROUGH_LINK`] (R11), or into ② [`launch::LIBRARY_READ_FAILED`] when the probe fails — the rule of
+    /// [`link_verdict`]. Asks the store's `first_link` per row — call it outside every lock.
+    // ADR-0387
     fn mark_links(&self, root: &Path, resolution: &mut Resolution) {
         for problem in &mut resolution.problems {
             let BlockReason::Missing { item, via, reason } = problem else {
@@ -736,24 +742,14 @@ impl LibraryService {
             if reason.code != NOT_FOUND {
                 continue;
             }
-            match self.store.first_link(root, &path) {
-                Ok(Some(_)) => {
-                    let through = BlockReason::Broken {
-                        item: item.clone(),
-                        via: via.clone(),
-                        reason: Reason {
-                            code: PATH_THROUGH_LINK.to_owned(),
-                            args: json!({ "path": item }),
-                            line: reason.line,
-                        },
-                    };
-                    *problem = through;
-                }
-                Ok(None) => {}
-                Err(e) => tracing::debug!(
-                    path = path.as_str(),
-                    "first_link failed; keeping the not-found row: {e}"
-                ),
+            if let Some(verdict) =
+                link_verdict(self.store.first_link(root, &path), item, reason.line)
+            {
+                *problem = BlockReason::Broken {
+                    item: item.clone(),
+                    via: via.clone(),
+                    reason: verdict,
+                };
             }
         }
     }
@@ -938,7 +934,7 @@ impl LibraryService {
     /// The stat a new root must pass before it is published: one read budget, outside the gate. `Err(why)` = it did not
     /// answer `Ok`.
     fn stat_new_root(&self, root: &Path) -> Result<(), String> {
-        self.stat_root(&self.io.begin_read(), root)
+        self.stat_words(&self.io.begin_read(), root)
             .map_err(|why| format!("the new library root cannot be used: {why}"))
     }
 
@@ -965,9 +961,13 @@ impl LibraryService {
             .with_read(|state| (state.root.clone(), self.gate.numbers().root));
         let state = match &root {
             None => RootStatus::Unset,
+            // ADR-0387: the same absent / unreadable split as the launch.
             Some(root) => match self.stat_root(&self.io.begin_read(), root) {
-                Ok(()) => RootStatus::Ok,
-                Err(why) => RootStatus::Missing { why },
+                FolderStatus::Ok => RootStatus::Ok,
+                status @ (FolderStatus::Missing | FolderStatus::NotADirectory) => {
+                    RootStatus::Missing { why: status.why() }
+                }
+                FolderStatus::Unreadable(why) => RootStatus::Unreadable { why },
             },
         };
         let (setting, config) = self.config.view();
@@ -1487,6 +1487,34 @@ fn row(item: &Item, references: usize) -> ListRow {
     }
 }
 
+/// What a link probe of a `not-found` library reference makes of it (ADR-0387): `Ok(Some)` — the path lies at or below
+/// a link inside the library, which the scan never enters — is [`PATH_THROUGH_LINK`]; a path under a file
+/// (`NotADirectory`) is absent, so `None` (the row stays `not-found`), as is `Ok(None)`; any other failure is
+/// [`launch::LIBRARY_READ_FAILED`] — the path could not be checked, so it is not known to be absent. The one rule of
+/// `LibraryService::mark_links` (the launch's and the answer's problems) and `mark_row_link` (a preset line's state),
+/// so the two agree. `path` is the reference as written, `line` its preset line.
+// ADR-0387
+pub(crate) fn link_verdict(
+    probe: io::Result<Option<LibPath>>,
+    path: &str,
+    line: Option<u32>,
+) -> Option<Reason> {
+    match probe {
+        Ok(None) => None,
+        Err(e) if e.kind() == io::ErrorKind::NotADirectory => None,
+        Ok(Some(_)) => Some(Reason {
+            code: PATH_THROUGH_LINK.to_owned(),
+            args: json!({ "path": path }),
+            line,
+        }),
+        Err(e) => Some(Reason {
+            code: launch::LIBRARY_READ_FAILED.to_owned(),
+            args: json!({ "path": path, "why": e.to_string() }),
+            line,
+        }),
+    }
+}
+
 fn through_link_row(path: &LibPath) -> ListRow {
     ListRow {
         path: path.as_str().to_owned(),
@@ -1551,6 +1579,8 @@ mod tests {
         read_caps: Mutex<Vec<u64>>,
         /// The next scan parks at `Start` (if armed) and then fails as an unreadable root.
         fail_next_scan: Mutex<bool>,
+        /// Every link probe fails with this error kind.
+        fail_link: Mutex<Option<io::ErrorKind>>,
         hold: Mutex<Hold>,
         moved: Condvar,
     }
@@ -1565,6 +1595,7 @@ mod tests {
                 scans: Mutex::default(),
                 read_caps: Mutex::default(),
                 fail_next_scan: Mutex::default(),
+                fail_link: Mutex::default(),
                 hold: Mutex::default(),
                 moved: Condvar::new(),
             })
@@ -1670,6 +1701,9 @@ mod tests {
         }
 
         fn first_link(&self, root: &Path, rel: &LibPath) -> io::Result<Option<LibPath>> {
+            if let Some(kind) = *lock(&self.fail_link) {
+                return Err(io::Error::from(kind));
+            }
             self.at_root(root).first_link(root, rel)
         }
 
@@ -2793,10 +2827,10 @@ claude: {changed: true}
             let resolution = resolution.as_ref().expect("a claude agent");
             assert!(!resolution.problems.is_empty(), "{id}");
             for problem in &resolution.problems {
-                let BlockReason::Missing { reason, .. } = problem else {
+                let BlockReason::Broken { reason, .. } = problem else {
                     panic!("{problem:?}")
                 };
-                assert_eq!(reason.code, resolve::FOLDER_NOT_FOUND);
+                assert_eq!(reason.code, resolve::FOLDER_UNREADABLE);
                 assert_eq!(reason.args["why"], folder::TIMEOUT);
             }
         }
@@ -2902,13 +2936,20 @@ claude: {changed: true}
             0,
             "no library preset — not asked"
         );
+        let absent = svc.resolve_agent(library.id).unwrap();
         assert_eq!(
-            svc.resolve_agent(library.id).unwrap(),
+            absent,
             Resolution {
                 problems: vec![library_unavailable("missing")],
+                root_absent: true,
                 ..Resolution::default()
             },
             "block ④ alone — no folder, no folder row"
+        );
+        assert_eq!(
+            absent.skipped(),
+            absent.problems,
+            "an absent root is skipped (ADR-0387)"
         );
         assert_eq!(ops.stats_of(Path::new("/lib")), 1);
         assert_eq!(
@@ -2921,9 +2962,10 @@ claude: {changed: true}
         let (unset, _) = service_on(&["/lib"], None);
         let resolution = unset.resolve_preset(&lp("P.yaml"));
         assert_eq!(resolution.problems, [library_unavailable(gate::NO_ROOT)]);
+        assert!(resolution.root_absent && resolution.blocked().is_none());
 
-        // A first scan that could not be applied answers its reason alone, with no root stat; the preset under a link
-        //   gets no path-through-link row.
+        // ADR-0387: a first scan that could not be applied stats the root once — there, it is unreadable: its reason
+        //   alone, blocked; the preset under a link gets no path-through-link row.
         let store = TestStore::new(&["/lib"]);
         store.mem("/lib").link("lnk");
         let ops = Arc::new(CountOps::default());
@@ -2941,8 +2983,63 @@ claude: {changed: true}
             panic!("{:?}", resolution.problems)
         };
         let message = reason.args["message"].as_str().unwrap();
-        assert!(!message.is_empty() && message != gate::NO_ROOT, "{message}");
-        assert_eq!(ops.stats_of(Path::new("/lib")), 0);
+        assert!(
+            !message.is_empty() && message != gate::NO_ROOT && message != "missing",
+            "{message}"
+        );
+        assert!(!resolution.root_absent && resolution.blocked().is_some());
+        assert_eq!(ops.stats_of(Path::new("/lib")), 1);
+
+        // A first scan that failed on a root that is not there: absent, skipped.
+        let store = TestStore::new(&["/lib"]);
+        let ops = Arc::new(CountOps {
+            statuses: HashMap::from([(PathBuf::from("/lib"), FolderStatus::Missing)]),
+            ..CountOps::default()
+        });
+        let io = BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+            Arc::new(ThreadSpawn),
+        );
+        let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
+        *lock(&store.fail_next_scan) = true;
+        let resolution = svc.resolve_preset(&lp("P.yaml"));
+        assert_eq!(resolution.problems, [library_unavailable("missing")]);
+        assert_eq!(resolution.skipped(), resolution.problems);
+        assert_eq!(ops.stats_of(Path::new("/lib")), 1);
+    }
+
+    /// A link probe that fails turns a `not-found` row into ② `library-read-failed` — the path could not be checked,
+    /// so it is not known to be absent; a path under a file (`NotADirectory`) stays `not-found` (ADR-0387).
+    #[test]
+    fn a_failed_link_probe_is_a_read_failure_except_under_a_file() {
+        let (svc, store) = library();
+        store.mem("/lib").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - gone.md\n",
+        );
+        *lock(&store.fail_link) = Some(io::ErrorKind::PermissionDenied);
+        let resolution = svc.resolve_preset(&lp("P.yaml"));
+        let [BlockReason::Broken { item, via, reason }] = resolution.problems.as_slice() else {
+            panic!("{:?}", resolution.problems)
+        };
+        assert_eq!(
+            (item.as_str(), via.as_slice()),
+            ("gone.md", ["P.yaml".to_owned()].as_slice())
+        );
+        assert_eq!(reason.code, launch::LIBRARY_READ_FAILED);
+        assert_eq!(reason.args["path"], "gone.md");
+        assert!(reason.args["why"]
+            .as_str()
+            .is_some_and(|why| !why.is_empty()));
+        assert_eq!(reason.line, Some(4));
+
+        *lock(&store.fail_link) = Some(io::ErrorKind::NotADirectory);
+        let resolution = svc.resolve_preset(&lp("P.yaml"));
+        assert_eq!(codes(&resolution), [NOT_FOUND]);
+        assert_eq!(resolution.skipped(), resolution.problems);
     }
 
     #[test]
@@ -3184,6 +3281,10 @@ claude: {changed: true}
         lock(&disk.ops.0).insert(disk.at("lib"), FolderStatus::NotADirectory);
         let refusal = refused(svc.set_root(&disk.at("lib"), false).unwrap_err()).1;
         assert_eq!(refusal.code, LIBRARY_ROOT_UNUSABLE);
+        assert_eq!(
+            refusal.args["why"], "the new library root cannot be used: not a folder",
+            "a new root's refusal keeps the stat's words"
+        );
         lock(&disk.ops.0).clear();
         let status = svc.set_root(&disk.at("lib"), false).unwrap();
         assert_eq!(
@@ -3206,20 +3307,31 @@ claude: {changed: true}
         );
         // The stat worker of the status `set_root` answered may still be in flight, and a required ask joins it
         //   (`folder.rs` — one worker per key): ask until it has ended.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let state = loop {
-            let state = svc.status().state;
-            if state != RootStatus::Ok || Instant::now() > deadline {
-                break state;
+        let settled = |from: RootStatus| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let state = svc.status().state;
+                if state != from || Instant::now() > deadline {
+                    break state;
+                }
+                thread::sleep(Duration::from_millis(2));
             }
-            thread::sleep(Duration::from_millis(2));
+        };
+        let unreadable = RootStatus::Unreadable {
+            why: "denied".to_owned(),
         };
         assert_eq!(
-            state,
+            settled(RootStatus::Ok),
+            unreadable,
+            "a root that exists but cannot be read is unreadable, with why (ADR-0387)"
+        );
+        lock(&disk.ops.0).insert(disk.at("lib"), FolderStatus::Missing);
+        assert_eq!(
+            settled(unreadable),
             RootStatus::Missing {
-                why: "denied".to_owned()
+                why: "missing".to_owned()
             },
-            "every stat answer but Ok is missing, with why"
+            "an absent root is missing, with why"
         );
     }
 

@@ -1563,9 +1563,10 @@ mod tests {
 
     /// ★The production manager launches through the very library service the wiring keeps★ (the Noop kits, or a
     /// second service, would pass every other non-ignored test): a claude agent with a library preset and no library
-    /// root (a corrupt `library.json` leaves it unset) is refused by the manager with the library's block, before the
-    /// add; once the kept service moves to a root without that preset, the manager's refusal follows it. A cwd that
-    /// does not exist — no process is spawned.
+    /// root (a corrupt `library.json` leaves it unset) is not refused by the library — the preset is skipped (ADR-0387)
+    /// and the launch gets as far as the spawn, which fails on the working folder; once the kept service moves to a
+    /// root whose copy of that preset is broken, the manager's refusal is the library's row for it. A cwd that does
+    /// not exist — no process is spawned.
     #[test]
     fn the_production_manager_launches_through_the_kept_library_service() {
         use engram_dashboard_agent::launch::BlockReason;
@@ -1580,56 +1581,66 @@ mod tests {
         std::fs::create_dir_all(&library_root).unwrap();
         std::fs::create_dir_all(layout.daemon_state_dir()).unwrap();
         std::fs::write(layout.daemon_state_dir().join("library.json"), "not json").unwrap();
+        std::fs::write(library_root.join("P.yaml"), "kind: preset\nversion: [\n").unwrap();
         let wiring = production_wiring(&layout);
-        let mut profile = AgentProfile::new(
-            "wired-preset".into(),
-            AgentCommand::Claude {
-                extra_args: Vec::new(),
-                output_format: AgentOutputFormat::StreamJson,
-            },
-            temp.join("no-such-folder"),
-            Vec::new(),
-            false,
-        );
-        profile.presets = vec![AttachedPreset {
-            path: "P.yaml".to_string(),
-        }];
-        let reasons_of = |profile: &AgentProfile| {
-            let refused = wiring
-                .manager
-                .create_and_activate(profile, NoticeDelivery::Withheld)
-                .expect_err("the launch is refused");
-            assert!(!refused.created, "the refused launch was added");
-            match refused.error {
-                engram_dashboard_agent::types::PtyError::LaunchBlocked(blocked) => blocked.reasons,
-                other => panic!("not the library's block: {other:?}"),
-            }
+        let profile = || {
+            let mut profile = AgentProfile::new(
+                "wired-preset".into(),
+                AgentCommand::Claude {
+                    extra_args: Vec::new(),
+                    output_format: AgentOutputFormat::StreamJson,
+                },
+                temp.join("no-such-folder"),
+                Vec::new(),
+                false,
+            );
+            profile.presets = vec![AttachedPreset {
+                path: "P.yaml".to_string(),
+            }];
+            profile
         };
 
-        let without_root = reasons_of(&profile);
+        let without_root = wiring
+            .manager
+            .create_and_activate(&profile(), NoticeDelivery::Withheld)
+            .expect_err("the spawn fails on the working folder");
         let moved = wiring
             .library
             .as_ref()
             .map(|l| l.change_root(library_root.clone()));
-        let with_root = reasons_of(&profile);
+        let refused = wiring
+            .manager
+            .create_and_activate(&profile(), NoticeDelivery::Withheld)
+            .expect_err("the launch is refused");
+        let listed = wiring.manager.list_agents().len();
         wiring.manager.shutdown_all();
         let _ = std::fs::remove_dir_all(&temp);
 
+        // The spawn is the first step that needs the working folder (Windows answers `ERROR_DIRECTORY`, os error 267).
         assert!(
             matches!(
-                without_root.as_slice(),
-                [BlockReason::LibraryUnavailable { .. }]
+                without_root.error,
+                engram_dashboard_agent::types::PtyError::SpawnFailed(_)
             ),
-            "{without_root:?}"
+            "an unset root does not block; the spawn fails on the missing working folder: {:?}",
+            without_root.error
         );
+        assert_eq!(listed, 0, "no process was spawned");
         assert!(
             matches!(moved, Some(Ok(_))),
             "the kept service did not move: {moved:?}"
         );
+        assert!(!refused.created, "the refused launch was added");
+        let with_root = match refused.error {
+            engram_dashboard_agent::types::PtyError::LaunchBlocked(blocked) => blocked.reasons,
+            other => panic!("not the library's block: {other:?}"),
+        };
         assert!(
-            with_root.iter().any(
-                |reason| matches!(reason, BlockReason::Missing { item, .. } if item.contains("P.yaml"))
-            ),
+            with_root.iter().any(|reason| matches!(
+                reason,
+                BlockReason::Broken { item, reason, .. }
+                    if item == "P.yaml" && reason.code == "yaml-syntax"
+            )),
             "{with_root:?}"
         );
         assert!(

@@ -67,12 +67,12 @@ use crate::refs::{default_slot_count, referrers_of};
 use crate::resolve::{
     ref_key, resolve, CatalogLookup, ItemView, Looked, Lookup, Problem, RefKey, Resolution,
     RootState, Target, BUILTIN_IN_LIBRARY_PRESET, FOLDER_NOT_FOUND, FOLDER_PATH_CLI_UNSAFE,
-    PRESET_CYCLE,
+    FOLDER_UNREADABLE, PRESET_CYCLE,
 };
 use crate::store::{admits, ContentTag};
 use crate::{
-    LibraryRefusal, LibraryService, RefusalClass, Want, LIBRARY_READ_CAP, PATH_THROUGH_LINK,
-    STAT_UNANSWERED,
+    link_verdict, LibraryRefusal, LibraryService, RefusalClass, Want, LIBRARY_READ_CAP,
+    PATH_THROUGH_LINK, STAT_UNANSWERED,
 };
 
 /// The code of a `baseRev` that is not the `rev` of the bytes read inside the change (`args` = `{rev}`, the current
@@ -244,9 +244,10 @@ pub struct CheckAnswer {
 pub struct FolderRefusal {
     /// As given.
     pub path: String,
-    /// `folder-path-relative` · [`FOLDER_PATH_CLI_UNSAFE`] · [`FOLDER_NOT_FOUND`].
+    /// `folder-path-relative` · [`FOLDER_PATH_CLI_UNSAFE`] · [`FOLDER_NOT_FOUND`] · [`FOLDER_UNREADABLE`].
     pub code: &'static str,
-    /// For `folder-not-found`: missing · not a folder · the OS error · a timeout.
+    /// For `folder-not-found`: missing · not a folder. For `folder-unreadable`: the OS error · a timeout · a share
+    /// not reachable.
     pub why: Option<String>,
 }
 
@@ -514,8 +515,9 @@ impl LibraryService {
         view
     }
 
-    /// A `not-found` library row at or below a link inside the library becomes [`PATH_THROUGH_LINK`] (the scan never
-    /// enters a link, so the catalog lacks the item). A store call — run it outside every lock.
+    /// A `not-found` library row's link probe, judged by [`link_verdict`] — the rule of `LibraryService::mark_links`, so
+    /// a line's state and the answer's problems agree. A store call — run it outside every lock.
+    // ADR-0387
     fn mark_row_link(&self, root: &Path, row: &mut PresetRow) {
         if row
             .state
@@ -527,19 +529,12 @@ impl LibraryService {
         let Ok(AssetRef::Library(path)) = AssetRef::parse(&row.path) else {
             return;
         };
-        match self.store.first_link(root, &path) {
-            Ok(Some(_)) => {
-                row.state = Some(Reason {
-                    code: PATH_THROUGH_LINK.to_owned(),
-                    args: json!({ "path": row.path }),
-                    line: Some(row.line),
-                });
-            }
-            Ok(None) => {}
-            Err(e) => tracing::debug!(
-                path = path.as_str(),
-                "first_link failed; keeping the not-found row: {e}"
-            ),
+        if let Some(verdict) = link_verdict(
+            self.store.first_link(root, &path),
+            &row.path,
+            Some(row.line),
+        ) {
+            row.state = Some(verdict);
         }
     }
 
@@ -934,7 +929,7 @@ impl LibraryService {
         let listing = match listing {
             Ok(listing) => listing,
             Err(status) => {
-                preview.unlisted = Some(status_why(&status));
+                preview.unlisted = Some(status.why());
                 return Ok(preview);
             }
         };
@@ -1471,10 +1466,17 @@ impl LibraryService {
                 });
                 let judged = if !path_is_cli_safe(&path) {
                     refusal(FOLDER_PATH_CLI_UNSAFE, None)
-                } else if status == FolderStatus::Ok {
-                    Ok(path.clone())
                 } else {
-                    refusal(FOLDER_NOT_FOUND, Some(status_why(&status)))
+                    // ADR-0387: absent and unreadable folders refuse with their own codes, as at launch.
+                    match &status {
+                        FolderStatus::Ok => Ok(path.clone()),
+                        FolderStatus::Missing | FolderStatus::NotADirectory => {
+                            refusal(FOLDER_NOT_FOUND, Some(status.why()))
+                        }
+                        FolderStatus::Unreadable(why) => {
+                            refusal(FOLDER_UNREADABLE, Some(why.clone()))
+                        }
+                    }
                 };
                 FolderVerdict {
                     normalized: Some(path),
@@ -1992,16 +1994,6 @@ fn read_refused(path: &LibPath, e: &io::Error) -> LibraryRefusal {
             LIBRARY_READ_FAILED,
             json!({ "path": path.as_str(), "why": e.to_string() }),
         ),
-    }
-}
-
-/// The `why` of a folder that is not `Ok`, in the words of the root stat (`stat_root`).
-fn status_why(status: &FolderStatus) -> String {
-    match status {
-        FolderStatus::Ok => "ok".to_owned(),
-        FolderStatus::Missing => "missing".to_owned(),
-        FolderStatus::NotADirectory => "not a folder".to_owned(),
-        FolderStatus::Unreadable(why) => why.clone(),
     }
 }
 
@@ -3060,6 +3052,39 @@ mod tests {
         assert_eq!(after.rev, view.rev);
     }
 
+    /// A line whose link probe fails is not `not-found` but `library-read-failed`, and a path under a file stays
+    /// `not-found` — the rule of the answer's problems, so the two agree (ADR-0387).
+    #[test]
+    fn a_failed_link_probe_marks_the_line_as_the_problems_mark_the_row() {
+        let w = World::new();
+        library(&w, "instructions:\n- gone.md\n");
+        let state_and_problem = |view: &PresetView| {
+            let state = view.instructions[0].state.clone().expect("a state");
+            let [problem] = view.problems.as_slice() else {
+                panic!("{:?}", view.problems)
+            };
+            let row = match problem {
+                BlockReason::Missing { reason, .. } | BlockReason::Broken { reason, .. } => {
+                    reason.clone()
+                }
+                other => panic!("{other:?}"),
+            };
+            (state, row)
+        };
+        *lock(&w.disk.fail_link) = Some(io::ErrorKind::PermissionDenied);
+        let (state, row) = state_and_problem(&w.view("P.yaml"));
+        assert_eq!(state.code, LIBRARY_READ_FAILED);
+        assert_eq!(state.args["path"], "gone.md");
+        assert_eq!(row.code, LIBRARY_READ_FAILED);
+
+        *lock(&w.disk.fail_link) = Some(io::ErrorKind::NotADirectory);
+        let (state, row) = state_and_problem(&w.view("P.yaml"));
+        assert_eq!(
+            (state.code.as_str(), row.code.as_str()),
+            (NOT_FOUND, NOT_FOUND)
+        );
+    }
+
     #[test]
     fn an_edit_through_a_link_or_on_a_dot_or_temp_name_is_refused_before_any_read() {
         let w = World::new();
@@ -3151,7 +3176,7 @@ mod tests {
                 { "path": missing, "code": FOLDER_NOT_FOUND, "why": "missing" },
                 { "path": file, "code": FOLDER_NOT_FOUND, "why": "not a folder" },
                 { "path": cmd_unsafe, "code": FOLDER_PATH_CLI_UNSAFE },
-                { "path": locked, "code": FOLDER_NOT_FOUND, "why": "denied" },
+                { "path": locked, "code": FOLDER_UNREADABLE, "why": "denied" },
             ])
         );
         assert_eq!(w.writes(), 0);
@@ -3248,7 +3273,12 @@ mod tests {
         fs::write(Path::new(&good).join("AGENTS.md"), "rules").unwrap();
         let cmd_unsafe = w.folder("a&b");
         let missing = w.base.join("missing").to_string_lossy().into_owned();
-        for given in ["rel/x".to_owned(), missing, cmd_unsafe] {
+        let locked = w.folder("locked");
+        lock(&w.ops.fixed).insert(
+            PathBuf::from(&locked),
+            FolderStatus::Unreadable("denied".to_owned()),
+        );
+        for given in ["rel/x".to_owned(), missing, cmd_unsafe, locked.clone()] {
             let preview = w.svc.preview_folder(&given, None, None).unwrap();
             let add = refused(w.svc.preset_add(
                 &lp("P.yaml"),
@@ -3263,6 +3293,13 @@ mod tests {
             }
             assert_eq!(add.1.args["folders"], json!([entry]), "{given}");
         }
+        let unreadable = w.svc.preview_folder(&locked, None, None).unwrap();
+        let refusal = unreadable.refused.expect("refused");
+        assert_eq!(
+            (refusal.code, refusal.why.as_deref()),
+            (FOLDER_UNREADABLE, Some("denied")),
+            "ADR-0387"
+        );
         let preview = w.svc.preview_folder(&good, None, None).unwrap();
         assert_eq!(preview.refused, None);
         assert_eq!(preview.path.as_deref(), Some(Path::new(&good)));

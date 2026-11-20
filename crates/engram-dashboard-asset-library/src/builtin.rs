@@ -354,6 +354,16 @@ pub(crate) mod tests {
             instructions: Some(&merged),
         };
         assert_eq!(check.command_line_fits(&line), Ok(()));
+        // ADR-0387: the count form of the launch note fits after the shipped priming, so a codex terminal agent is
+        //   told how many items were left out even when no name can go on its line.
+        for n in [1, 10_000] {
+            let noted = crate::launch::with_note(&merged, &crate::launch::count_note(n));
+            let line = CommandLine {
+                instructions: Some(&noted),
+                ..line
+            };
+            assert_eq!(check.command_line_fits(&line), Ok(()), "{n}");
+        }
     }
 
     /// The release manifest (`$ExpectedBuiltins` in `scripts/build-release.ps1`) lists exactly the files of

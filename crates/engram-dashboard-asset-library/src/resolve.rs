@@ -17,10 +17,13 @@
 //! - **Skipped silently** (D2): an item tagged for another backend and a settings field of another backend are neither
 //!   loaded nor told about.
 //! - The problem rows are the launch block rows (`agent::launch::BlockReason`): the problem list, the tree ⛔ and the
-//!   launch block come from the same rows.
+//!   launch block come from the same rows. The split is by row kind: a launch leaves out every ① row (absent) and the
+//!   ④ row of an unset or absent root ([`Resolution::skipped`]) and refuses on every other row
+//!   ([`Resolution::blocked`]).
 // ADR-0315
 // ADR-0341
 // ADR-0359
+// ADR-0387
 // TRD S25 step-7 §3-7
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -30,6 +33,7 @@ use engram_dashboard_agent::backend::settings_check::{InstructionLoad, ModeLoads
 use engram_dashboard_agent::backend::SettingsCheck;
 use engram_dashboard_agent::launch::{
     escape_controls, BlockReason, LaunchBlocked, Notice, Reason, BUILTIN_UNAVAILABLE,
+    FOLDER_ITEM_PREFIX,
 };
 use engram_dashboard_agent::profile::AgentOutputFormat;
 use engram_dashboard_platform::fs::{path_key, PathKey};
@@ -63,12 +67,19 @@ pub const SKILL_NAME_INVALID: &str = "skill-name-invalid";
 // TRD S25 step-7 B8
 pub const SKILL_NAME_CONFLICT: &str = "skill-name-conflict";
 
-/// The code of a folder entry that is missing, not a folder or could not be checked (`args` = `{path}`, plus `why` —
-/// the OS error, [`crate::folder::TIMEOUT`], [`crate::folder::NOT_CHECKED`] (never stat'ed — the budget was spent), or
-/// a failed worker ("spawn failed", "worker panicked") — when it was not found to be a folder for another reason).
+/// The code of a folder entry whose folder is not there — missing or not a folder (`args` = `{path}`). A ① row: a
+/// launch leaves the folder out.
 // ADR-0341
+// ADR-0387
 // TRD S25 step-7 B8
 pub const FOLDER_NOT_FOUND: &str = "folder-not-found";
+
+/// The code of a folder entry whose folder exists but cannot be read or did not answer (`args` = `{path, why}` —
+/// `why` = the OS error, [`crate::folder::TIMEOUT`], [`crate::folder::NOT_CHECKED`] (never stat'ed — the budget was
+/// spent), [`crate::folder::SHARE_NOT_REACHABLE`], or a failed worker ("spawn failed", "worker panicked")). A ② row:
+/// it blocks a launch. Its user-facing wording names no cause; `why` is for the log and an LLM caller.
+// ADR-0387
+pub const FOLDER_UNREADABLE: &str = "folder-unreadable";
 
 /// The code of a folder entry the agent's command line cannot carry (`args` = `{path}`).
 // TRD S25 step-7 B8
@@ -104,14 +115,33 @@ pub struct Target {
     pub root: RootState,
 }
 
-/// The library root as a computation found it.
+/// The library root as a computation found it — one rule for every producer ([`RootState::of`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootState {
     Unset,
-    /// The root is set but cannot be used — why: `missing`, `not a folder`, the stat's diagnostic, or why the first
-    /// scan could not be applied.
-    Unavailable(String),
+    /// The root is set but not there — why: `missing` or `not a folder`. A launch skips its library items.
+    Absent(String),
+    /// The root is set and there but cannot be used — why: the stat's diagnostic, or why the first scan could not be
+    /// applied. A launch refuses (block ④).
+    Unreadable(String),
     Ok,
+}
+
+impl RootState {
+    /// The state of a set root from the first-scan entrance's answer (`joined`; a launch passes `Ok`) and the root's
+    /// stat (`None` = not taken — the root decides nothing): absent when the stat says missing or not a folder;
+    /// unreadable when the stat says so, or — the root being there — when the first scan failed; else `Ok`.
+    // ADR-0387
+    pub(crate) fn of(joined: &Result<(), String>, stat: Option<&FolderStatus>) -> RootState {
+        match (stat, joined) {
+            (Some(status @ (FolderStatus::Missing | FolderStatus::NotADirectory)), _) => {
+                RootState::Absent(status.why())
+            }
+            (_, Err(why)) => RootState::Unreadable(why.clone()),
+            (Some(FolderStatus::Unreadable(why)), Ok(())) => RootState::Unreadable(why.clone()),
+            (Some(FolderStatus::Ok) | None, Ok(())) => RootState::Ok,
+        }
+    }
 }
 
 /// Finds the items a resolution reaches. Every built-in is present ([`Looked::Present`] — a stand-in when it cannot
@@ -138,7 +168,8 @@ pub struct ItemView<'a> {
     pub stand_in: Option<&'a str>,
 }
 
-/// What [`resolve`] answers. A block-④ resolution holds that one problem and nothing else (every other field empty).
+/// What [`resolve`] answers. A block-④ resolution holds that one problem and nothing else (every other field empty but
+/// `root_absent`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Resolution {
     /// (source path as the preset spells it, disk path) of each instruction loaded, in expansion order — the priming
@@ -151,10 +182,13 @@ pub struct Resolution {
     pub folders: Vec<ResolvedFolder>,
     /// The built-in priming was reached and its file exists — it goes first in the merged instructions.
     pub include_priming: bool,
-    /// In expansion order; rows for unparsed attached paths after the rows of the expansion, then conflicts, folder ①
-    /// lines (phase 2) last.
+    /// In expansion order; rows for unparsed attached paths after the rows of the expansion, then conflicts, folder rows
+    /// (phase 2 — ① `folder-not-found` or ② `folder-unreadable`) last.
     pub problems: Vec<Problem>,
     pub notices: Vec<Notice>,
+    /// The block-④ row stands for a root that is unset or absent (a launch skips it), not one that cannot be read.
+    // ADR-0387
+    pub root_absent: bool,
 }
 
 /// One settings value loaded.
@@ -192,9 +226,11 @@ impl Resolution {
             .collect()
     }
 
-    /// Phase 2: records each folder's status from `statuses` (by key) and adds a ① line for every folder that is not
-    /// `Ok` — on every backend and mode (ADR-0341 decision 6: one that exists but cannot be read is ① too). A folder
-    /// `statuses` lacks keeps `None` and gets no line.
+    /// Phase 2: records each folder's status from `statuses` (by key) and adds a row for every folder that is not
+    /// `Ok` — on every backend and mode: ① [`FOLDER_NOT_FOUND`] for one that is missing or not a folder, ②
+    /// [`FOLDER_UNREADABLE`] for one that exists but cannot be read or did not answer. A folder `statuses` lacks keeps
+    /// `None` and gets no row.
+    // ADR-0387
     pub fn attach_folder_status(&mut self, statuses: &HashMap<PathKey, FolderStatus>) {
         for folder in &mut self.folders {
             let Some(status) = statuses.get(&folder.key) else {
@@ -202,26 +238,56 @@ impl Resolution {
             };
             folder.status = Some(status.clone());
             let path = folder.path.to_string_lossy();
-            let args = match status {
+            let line = Some(folder.line);
+            let (item, via) = (folder_item(&folder.path), folder.via.clone());
+            self.problems.push(match status {
                 FolderStatus::Ok => continue,
-                FolderStatus::Missing | FolderStatus::NotADirectory => json!({ "path": path }),
-                FolderStatus::Unreadable(why) => json!({ "path": path, "why": why }),
-            };
-            self.problems.push(BlockReason::Missing {
-                item: folder_item(&folder.path),
-                via: folder.via.clone(),
-                reason: reason(FOLDER_NOT_FOUND, args, Some(folder.line)),
+                FolderStatus::Missing | FolderStatus::NotADirectory => BlockReason::Missing {
+                    item,
+                    via,
+                    reason: reason(FOLDER_NOT_FOUND, json!({ "path": path }), line),
+                },
+                FolderStatus::Unreadable(why) => BlockReason::Broken {
+                    item,
+                    via,
+                    reason: reason(FOLDER_UNREADABLE, json!({ "path": path, "why": why }), line),
+                },
             });
         }
     }
 
-    /// The launch block: every problem, ordered by reason kind (① ② ③ ④ — TRD S25 §1-3 8), expansion order kept within
-    /// a kind. `None` = no problem.
+    /// Whether a launch leaves `problem` out instead of refusing on it: every ① row, and the block-④ row of an unset
+    /// or absent root. The split reads only the row's kind and [`Resolution::root_absent`].
+    // ADR-0387
+    fn skips(&self, problem: &Problem) -> bool {
+        match problem {
+            BlockReason::Missing { .. } => true,
+            BlockReason::LibraryUnavailable { .. } => self.root_absent,
+            BlockReason::Broken { .. } | BlockReason::Conflict { .. } => false,
+        }
+    }
+
+    /// The rows a launch leaves out, in problem order. With [`Resolution::blocked`] they are exactly `problems`.
+    pub fn skipped(&self) -> Vec<Problem> {
+        self.problems
+            .iter()
+            .filter(|problem| self.skips(problem))
+            .cloned()
+            .collect()
+    }
+
+    /// The launch block: every problem a launch refuses on (all but [`Resolution::skipped`]), ordered by reason kind
+    /// (② ③ ④ — TRD S25 §1-3 8), expansion order kept within a kind. `None` = nothing blocks.
     pub fn blocked(&self) -> Option<LaunchBlocked> {
-        if self.problems.is_empty() {
+        let mut reasons: Vec<Problem> = self
+            .problems
+            .iter()
+            .filter(|problem| !self.skips(problem))
+            .cloned()
+            .collect();
+        if reasons.is_empty() {
             return None;
         }
-        let mut reasons = self.problems.clone();
         reasons.sort_by_key(|problem| match problem {
             BlockReason::Missing { .. } => 0,
             BlockReason::Broken { .. } => 1,
@@ -232,30 +298,39 @@ impl Resolution {
     }
 }
 
-/// Resolves `target` over `lookup` (module header). Block ④ = a library preset attached while `target.root` is not
-/// `Ok`; the resolution is then block ④ alone — no expansion, no item, no notice: while the root is unusable the
-/// catalog cannot be trusted, so nothing computed from it is in the answer. The rows of unparsed attached paths (from
-/// the profile) and the built-in stand-in notice go too: while the root is unusable the block is one line (user
-/// decision 2026-11-12).
+/// Resolves `target` over `lookup` (module header): the block-④ guard, then [`expand`]. Block ④ = a library preset
+/// attached while `target.root` is not `Ok`; the resolution is then block ④ alone — no expansion, no item, no notice:
+/// while the root is unusable the catalog cannot be trusted, so nothing computed from it is in the answer. The rows of
+/// unparsed attached paths (from the profile) and the built-in stand-in notice go too: while the root is unusable the
+/// block is one line (user decision 2026-11-12). The row is marked [`Resolution::root_absent`] for an unset or absent
+/// root; a launch does not call this for such a root but expands over [`AbsentRootLookup`].
 // ADR-0361
+// ADR-0387
 pub fn resolve(target: &Target, lookup: &dyn Lookup, backends: &dyn Backends) -> Resolution {
     let library_attached = target
         .presets
         .iter()
         .any(|preset| matches!(preset, AssetRef::Library(_)));
-    let unavailable = match &target.root {
-        RootState::Ok => None,
-        RootState::Unset => Some(NO_ROOT),
-        RootState::Unavailable(why) => Some(why.as_str()),
+    let (unavailable, root_absent) = match &target.root {
+        RootState::Ok => (None, false),
+        RootState::Unset => (Some(NO_ROOT), true),
+        RootState::Absent(why) => (Some(why.as_str()), true),
+        RootState::Unreadable(why) => (Some(why.as_str()), false),
     };
     if let (true, Some(message)) = (library_attached, unavailable) {
         return Resolution {
             problems: vec![BlockReason::LibraryUnavailable {
                 reason: reason(LIBRARY_UNAVAILABLE, json!({ "message": message }), None),
             }],
+            root_absent,
             ..Resolution::default()
         };
     }
+    expand(target, lookup, backends)
+}
+
+/// The expansion step of [`resolve`] without its block-④ guard — `target.root` is not read.
+pub(crate) fn expand(target: &Target, lookup: &dyn Lookup, backends: &dyn Backends) -> Resolution {
     let agent = match (&target.backend, target.mode) {
         (Some(word), Some(mode)) => backends.for_word(word).map(|check| Agent {
             check,
@@ -314,6 +389,22 @@ impl Lookup for CatalogLookup<'_> {
                 }),
                 None => Looked::Missing,
             },
+        }
+    }
+}
+
+/// The built-ins alone as a [`Lookup`] — every library item is missing. A launch whose library root is unset or absent
+/// expands over it (no catalog, no overlay).
+// ADR-0387
+pub(crate) struct AbsentRootLookup<'a> {
+    pub(crate) builtins: &'a Builtins,
+}
+
+impl Lookup for AbsentRootLookup<'_> {
+    fn item(&self, r: &AssetRef) -> Looked<'_> {
+        match r {
+            AssetRef::BuiltIn(id) => Looked::Present(self.builtins.view(*id)),
+            AssetRef::Library(_) => Looked::Missing,
         }
     }
 }
@@ -794,7 +885,7 @@ fn reason(code: &str, args: Value, line: Option<u32>) -> Reason {
 
 /// The `item` of a folder entry's problem, and the `path` of its instruction source (`agent::launch::SourceRef`).
 pub(crate) fn folder_item(path: &Path) -> String {
-    format!("folder:{}", path.to_string_lossy())
+    format!("{FOLDER_ITEM_PREFIX}{}", path.to_string_lossy())
 }
 
 #[cfg(test)]
@@ -1471,8 +1562,11 @@ mod tests {
         assert!(resolution.notices.is_empty() && resolution.problems.is_empty());
     }
 
+    /// An absent folder (missing, not a folder) is a ① `folder-not-found` row with `{path}`; one that exists but
+    /// cannot be read or did not answer is a ② `folder-unreadable` row with `{path, why}` — on every backend and mode
+    /// (ADR-0387).
     #[test]
-    fn a_folder_that_is_not_ok_is_a_missing_line_on_every_backend_and_mode() {
+    fn a_folder_that_is_not_ok_is_a_missing_or_unreadable_row_on_every_backend_and_mode() {
         let folder = absolute("f");
         let lib = library(&[("P.yaml", &preset(&format!("folders:\n  - '{folder}'\n")))]);
         let path = normalized(&folder);
@@ -1483,28 +1577,39 @@ mod tests {
                 targets.push(agent(word, mode, &["P.yaml"]));
             }
         }
+        let item = format!("folder:{shown}");
+        let missing = BlockReason::Missing {
+            item: item.clone(),
+            via: via(&["P.yaml"]),
+            reason: reason(FOLDER_NOT_FOUND, json!({ "path": shown }), Some(4)),
+        };
+        let unreadable = |why: &str| BlockReason::Broken {
+            item: item.clone(),
+            via: via(&["P.yaml"]),
+            reason: reason(
+                FOLDER_UNREADABLE,
+                json!({ "path": shown, "why": why }),
+                Some(4),
+            ),
+        };
         for target in &targets {
-            for (status, args) in [
-                (FolderStatus::Missing, json!({ "path": shown })),
-                (FolderStatus::NotADirectory, json!({ "path": shown })),
+            for (status, row) in [
+                (FolderStatus::Missing, missing.clone()),
+                (FolderStatus::NotADirectory, missing.clone()),
                 (
                     FolderStatus::Unreadable("timeout".to_owned()),
-                    json!({ "path": shown, "why": "timeout" }),
+                    unreadable("timeout"),
+                ),
+                (
+                    FolderStatus::Unreadable(crate::folder::SHARE_NOT_REACHABLE.to_owned()),
+                    unreadable(crate::folder::SHARE_NOT_REACHABLE),
                 ),
             ] {
                 let mut resolution = run(&lib, target);
                 resolution
                     .attach_folder_status(&HashMap::from([(path_key(&path), status.clone())]));
                 assert_eq!(resolution.folders[0].status, Some(status));
-                assert_eq!(
-                    resolution.problems,
-                    [BlockReason::Missing {
-                        item: format!("folder:{shown}"),
-                        via: via(&["P.yaml"]),
-                        reason: reason(FOLDER_NOT_FOUND, args, Some(4)),
-                    }],
-                    "{target:?}"
-                );
+                assert_eq!(resolution.problems, [row], "{target:?}");
             }
             let mut healthy = run(&lib, target);
             healthy.attach_folder_status(&HashMap::from([(path_key(&path), FolderStatus::Ok)]));
@@ -1575,24 +1680,37 @@ mod tests {
         assert_eq!(skill_names(&shown), ["s", "s"]);
         assert_eq!(shown.folders.len(), 1);
         assert_eq!(shown.notices.len(), 1, "the default preset's stand-in");
-        for (root, message) in [
-            (RootState::Unset, NO_ROOT),
-            (RootState::Unavailable("missing".to_owned()), "missing"),
+        for (root, message, root_absent) in [
+            (RootState::Unset, NO_ROOT, true),
+            (RootState::Absent("missing".to_owned()), "missing", true),
+            (
+                RootState::Unreadable("access denied".to_owned()),
+                "access denied",
+                false,
+            ),
         ] {
             let alone = Resolution {
                 problems: vec![BlockReason::LibraryUnavailable {
                     reason: reason(LIBRARY_UNAVAILABLE, json!({ "message": message }), None),
                 }],
+                root_absent,
                 ..Resolution::default()
             };
             // Every pass runs over one catalog holding these files: with `Unset` it stands for the empty catalog of an
-            //   unset root (`absent.yaml` is not found), and with `Unavailable` it is the stale case.
+            //   unset root (`absent.yaml` is not found), and with `Absent` and `Unreadable` it is the stale case.
             for attached in ["P.yaml", "absent.yaml", "Q.yaml"] {
                 let mut stale = agent("claude", J, &[attached]);
                 stale.default_preset = true;
                 stale.unparsed = unparsed.clone();
                 stale.root = root.clone();
-                assert_eq!(run(&lib, &stale), alone, "{root:?}: {attached}");
+                let resolution = run(&lib, &stale);
+                assert_eq!(resolution, alone, "{root:?}: {attached}");
+                // ADR-0387: the ④ row of an unset or absent root is skipped; of an unreadable one it blocks.
+                assert_eq!(
+                    (resolution.skipped().len(), resolution.blocked().is_some()),
+                    (usize::from(root_absent), !root_absent),
+                    "{root:?}"
+                );
             }
             let mut only_builtin = agent("claude", J, &[]);
             only_builtin.default_preset = true;
@@ -1600,6 +1718,54 @@ mod tests {
             assert!(
                 run(&lib, &only_builtin).problems.is_empty(),
                 "no library preset"
+            );
+        }
+    }
+
+    /// One rule for a set root (ADR-0387): a stat that says missing or not a folder is absent whatever the first scan
+    /// did; a failed first scan or an unreadable stat is unreadable; no stat and a good scan is `Ok`.
+    #[test]
+    fn the_root_state_rule_tells_absent_from_unreadable() {
+        let failed: Result<(), String> = Err("scan failed".to_owned());
+        let unreadable = FolderStatus::Unreadable("denied".to_owned());
+        for (joined, stat, state) in [
+            (Ok(()), Some(FolderStatus::Ok), RootState::Ok),
+            (Ok(()), None, RootState::Ok),
+            (
+                Ok(()),
+                Some(FolderStatus::Missing),
+                RootState::Absent("missing".to_owned()),
+            ),
+            (
+                failed.clone(),
+                Some(FolderStatus::NotADirectory),
+                RootState::Absent("not a folder".to_owned()),
+            ),
+            (
+                Ok(()),
+                Some(unreadable.clone()),
+                RootState::Unreadable("denied".to_owned()),
+            ),
+            (
+                failed.clone(),
+                Some(unreadable),
+                RootState::Unreadable("scan failed".to_owned()),
+            ),
+            (
+                failed.clone(),
+                Some(FolderStatus::Ok),
+                RootState::Unreadable("scan failed".to_owned()),
+            ),
+            (
+                failed,
+                None,
+                RootState::Unreadable("scan failed".to_owned()),
+            ),
+        ] {
+            assert_eq!(
+                RootState::of(&joined, stat.as_ref()),
+                state,
+                "{joined:?} {stat:?}"
             );
         }
     }
@@ -1628,10 +1794,11 @@ mod tests {
         );
     }
 
-    // TRD S25 §1-3 8: the block is the problem list itself — the same rows whoever launches, ordered ① ② ③ (block ④
-    //   never shares the list — a_library_preset_attached_without_a_usable_root_is_block_four).
+    // TRD S25 §1-3 8: the block is the problem list less the skipped rows — the same rows whoever launches, ordered ②
+    //   ③ (block ④ never shares the list — a_library_preset_attached_without_a_usable_root_is_block_four). ADR-0387:
+    //   the ① rows are skipped, an unreadable folder blocks; the two parts are exactly the problems.
     #[test]
-    fn the_block_is_the_problem_list_ordered_by_kind() {
+    fn the_block_is_the_problem_list_less_the_skipped_rows_ordered_by_kind() {
         let (first, second) = (absolute("z-gone"), absolute("a-gone"));
         let lib = library(&[
             (
@@ -1648,31 +1815,52 @@ mod tests {
         let (first, second) = (normalized(&first), normalized(&second));
         resolution.attach_folder_status(&HashMap::from([
             (path_key(&first), FolderStatus::Missing),
-            (path_key(&second), FolderStatus::Missing),
+            (
+                path_key(&second),
+                FolderStatus::Unreadable("denied".to_owned()),
+            ),
         ]));
         let blocked = resolution.blocked().expect("blocked");
         assert_eq!(
             problems(&blocked.reasons),
             [
-                row(
-                    &format!("folder:{}", first.to_string_lossy()),
-                    FOLDER_NOT_FOUND
-                ),
+                row("x.yaml", "yaml-syntax"),
                 row(
                     &format!("folder:{}", second.to_string_lossy()),
-                    FOLDER_NOT_FOUND
+                    FOLDER_UNREADABLE
                 ),
-                row("x.yaml", "yaml-syntax"),
                 row("a+b", SKILL_NAME_CONFLICT),
             ],
             "by kind, expansion order kept within a kind"
         );
+        assert_eq!(
+            problems(&resolution.skipped()),
+            [row(
+                &format!("folder:{}", first.to_string_lossy()),
+                FOLDER_NOT_FOUND
+            )],
+            "the absent folder is skipped"
+        );
         let mut rows = blocked.reasons.clone();
+        rows.extend(resolution.skipped());
         rows.sort();
         let mut found = resolution.problems.clone();
         found.sort();
-        assert_eq!(rows, found, "every problem row and nothing else");
+        assert_eq!(
+            rows, found,
+            "the two parts are every problem row and nothing else"
+        );
         assert_eq!(run(&lib, &agent("claude", J, &[])).blocked(), None);
+
+        // Only skipped rows: nothing blocks.
+        let only_missing = library(&[("M.yaml", &preset("instructions:\n  - gone.md\n"))]);
+        let skipped = run(
+            &only_missing,
+            &agent("claude", J, &["M.yaml", "absent.yaml"]),
+        );
+        assert_eq!(skipped.blocked(), None);
+        assert_eq!(skipped.skipped(), skipped.problems);
+        assert_eq!(skipped.problems.len(), 2);
     }
 
     // ── review round 1 ───────────────────────────────────────────────────────────────────────────────────

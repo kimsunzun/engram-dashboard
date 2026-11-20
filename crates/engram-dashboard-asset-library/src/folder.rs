@@ -10,7 +10,9 @@
 //!   call here spends waiting on IO — never by lock waits, parsing or other work between calls.
 //! - **Class B**: required and advisory asks never share a batch or a wait. A call holding both runs its required
 //!   asks first and alone, then its advisory asks on the advisory allowance. A key asked both ways is required. This
-//!   holds for every `*_all` call — a caller that must skip advisory work after a block splits its calls.
+//!   holds for every `*_all` call — a caller that must skip advisory work after a block splits its calls. One
+//!   exception: `stat_all`'s share probe is a second required batch that runs after the advisory batch of a mixed
+//!   call (every production `stat_all` call asks one need only).
 //! - **Nothing left = no worker**: once a phase's allowance is spent, a key without an answer in the [`LaunchIo`]
 //!   answers [`NOT_CHECKED`] at once — distinct from [`TIMEOUT`] (an op that started and did not answer in time).
 //! - **One worker per key**: a call starts a worker only for a key with no call in flight. A required ask joins a
@@ -30,7 +32,7 @@
 //!   asking on one `LaunchIo` at once could each wait up to the same `left`.
 //! - **Leaf locks**: the in-flight mutex, each pending call's answer mutex and a `LaunchIo`'s mutexes are never held
 //!   while taking another lock, running an op or waiting.
-//! - No OS branch here: OS behaviour comes from std, `dunce` and platform (the busy-file retry).
+//! - No OS branch here: OS behaviour comes from std, `dunce` and platform (the busy-file retry, the share a path is on).
 // ADR-0341
 // ADR-0360
 // TRD S25 step-7 §3-8 · §6
@@ -70,9 +72,16 @@ pub const LIST_CAP: usize = FOLDER_LISTING_CAP;
 pub const READ_CAP: u64 = 16 * 1024 * 1024;
 
 /// The diagnostic of an op that was started and did not answer before its phase's wait ended — agent's
-/// `STAT_TIMED_OUT`, the word `agent.setWorkspace` reads as a retryable folder stat.
+/// `STAT_TIMED_OUT`, one of the words `agent.setWorkspace` reads as a retryable folder stat (with
+/// [`SHARE_NOT_REACHABLE`]).
 // ADR-0386
 pub const TIMEOUT: &str = engram_dashboard_agent::launch::STAT_TIMED_OUT;
+
+/// The diagnostic of a required stat that answered `Missing` on a network share whose root does not stat as a folder
+/// — agent's `SHARE_NOT_REACHABLE`, the other retryable word of `agent.setWorkspace`. The folder is not known to be
+/// absent, so it is unreadable.
+// ADR-0387
+pub const SHARE_NOT_REACHABLE: &str = engram_dashboard_agent::launch::SHARE_NOT_REACHABLE;
 
 /// The diagnostic of a key no worker was started for — the phase's allowance was spent, or an advisory ask found only
 /// a worker older than one limit.
@@ -136,9 +145,22 @@ pub enum FolderStatus {
     Ok,
     Missing,
     NotADirectory,
-    /// An OS error, [`TIMEOUT`], [`NOT_CHECKED`] or a failed worker ("worker panicked", "spawn failed") — all count
-    /// as unreadable.
+    /// An OS error, [`TIMEOUT`], [`NOT_CHECKED`], [`SHARE_NOT_REACHABLE`] or a failed worker ("worker panicked",
+    /// "spawn failed") — all count as unreadable.
     Unreadable(String),
+}
+
+impl FolderStatus {
+    /// The status in words: `ok`, `missing`, `not a folder`, or the unreadable reason — the `why` a folder stat's
+    /// string answers carry (`agent.setWorkspace`, a new root's refusal, a folder refusal of an edit).
+    pub fn why(&self) -> String {
+        match self {
+            FolderStatus::Ok => "ok".to_owned(),
+            FolderStatus::Missing => "missing".to_owned(),
+            FolderStatus::NotADirectory => "not a folder".to_owned(),
+            FolderStatus::Unreadable(why) => why.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -312,6 +334,8 @@ pub struct BoundedIo {
     inflight: Inflight,
     ops: Arc<dyn FolderOps>,
     spawn: Arc<dyn Spawn>,
+    /// The network share a path is on — production platform `fs::share_root`; tests put a fake share in its place.
+    share_root: fn(&Path) -> Option<PathBuf>,
 }
 
 impl BoundedIo {
@@ -331,7 +355,15 @@ impl BoundedIo {
             inflight: Arc::new(Mutex::new(HashMap::new())),
             ops,
             spawn,
+            share_root: engram_dashboard_platform::fs::share_root,
         }
+    }
+
+    /// The same IO with `share_root` deciding which paths sit on a network share (tests only).
+    #[cfg(test)]
+    pub(crate) fn with_share_root(mut self, share_root: fn(&Path) -> Option<PathBuf>) -> Self {
+        self.share_root = share_root;
+        self
     }
 
     /// The spawner of the workers — the library service starts its short-lived merge jobs and its boot scan (a whole
@@ -351,18 +383,52 @@ impl BoundedIo {
     }
 
     /// One answer per distinct path key of `paths` (module rules).
+    ///
+    /// The share probe — a second step of the required phase: every required path that answered `Missing` and sits
+    /// on a network share (platform `share_root`) has its share root stat'ed as an ordinary required key on `io` (so
+    /// one per volume root per launch, on the same budget); a root that does not stat as a folder turns the path's
+    /// answer into `Unreadable(`[`SHARE_NOT_REACHABLE`]`)`. A `Missing` answer stored by an earlier advisory ask of
+    /// the same path is probed too. Advisory paths are never probed — there `Missing` and `Unreadable` mean the same.
+    // ADR-0387: Windows answers `NotFound` for a path on a share that does not answer, so `Missing` alone is not absent.
     pub fn stat_all(
         &self,
         io: &LaunchIo,
         paths: &[(PathBuf, Need)],
     ) -> HashMap<PathKey, FolderStatus> {
-        self.ask(io, IoKey::Stat, paths, false)
+        let mut statuses: HashMap<PathKey, FolderStatus> = self
+            .ask(io, IoKey::Stat, paths, false)
             .into_iter()
             .map(|(key, answer)| match answer {
                 IoAnswer::Stat(status) => (key, status),
                 _ => unreachable!("a stat key holds a stat answer"),
             })
-            .collect()
+            .collect();
+        let mut probed: Vec<(PathKey, PathKey)> = Vec::new();
+        let mut roots: Vec<(PathBuf, Need)> = Vec::new();
+        for (path, need) in paths {
+            let key = path_key(path);
+            if *need != Need::Required || statuses.get(&key) != Some(&FolderStatus::Missing) {
+                continue;
+            }
+            let Some(root) = (self.share_root)(path) else {
+                continue;
+            };
+            probed.push((key, path_key(&root)));
+            roots.push((root, Need::Required));
+        }
+        if roots.is_empty() {
+            return statuses;
+        }
+        let answers = self.ask(io, IoKey::Stat, &roots, false);
+        for (key, root) in probed {
+            if !matches!(answers.get(&root), Some(IoAnswer::Stat(FolderStatus::Ok))) {
+                statuses.insert(
+                    key,
+                    FolderStatus::Unreadable(SHARE_NOT_REACHABLE.to_owned()),
+                );
+            }
+        }
+        statuses
     }
 
     /// One answer per distinct path key of `paths` (module rules).
@@ -597,6 +663,8 @@ fn unanswered(key: &IoKey, reason: &str) -> IoAnswer {
     }
 }
 
+/// `NotFound` is `Missing` — on a network path Windows answers it for a share that does not answer too; the share probe
+/// of [`BoundedIo::stat_all`] tells the two apart for a required stat.
 fn status_of(error: &io::Error) -> FolderStatus {
     if error.kind() == io::ErrorKind::NotFound {
         FolderStatus::Missing
@@ -1139,6 +1207,115 @@ mod tests {
         let next = io.begin_launch();
         assert_eq!(io.stat_all(&next, &[req("/f")])[&k("/f")], FolderStatus::Ok);
         assert_eq!(ops.count("stat", "/f"), 2);
+        assert_inflight_empty(&io);
+    }
+
+    // ── the share probe ───────────────────────────────────────────────────────────────────────────────────
+
+    /// A fake share layout: a path under `/share`, `/down` or `/slow` sits on that share; nothing else is on one.
+    fn fake_share(path: &Path) -> Option<PathBuf> {
+        ["/share", "/down", "/slow"]
+            .into_iter()
+            .map(p)
+            .find(|root| path.starts_with(root))
+    }
+
+    fn shared(ops: &Arc<FakeOps>, required: Duration) -> Arc<BoundedIo> {
+        let ops: Arc<dyn FolderOps> = Arc::clone(ops) as Arc<dyn FolderOps>;
+        Arc::new(
+            BoundedIo::new(
+                ms(5_000),
+                waits(required, ms(1_000)),
+                LIST_CAP,
+                ops,
+                Arc::new(ThreadSpawn),
+            )
+            .with_share_root(fake_share),
+        )
+    }
+
+    /// A required `Missing` on a share whose root does not stat as a folder (missing, or held past the budget) is
+    /// unreadable — `share not reachable`; on a share whose root is there it stays `Missing`; off a share it is not
+    /// probed (ADR-0387).
+    #[test]
+    fn a_missing_path_is_unreadable_only_when_its_share_root_is_not_there() {
+        let ops = Arc::new(FakeOps::default());
+        for path in ["/share/a", "/down/a", "/down", "/slow/a", "/local/a"] {
+            lock(&ops.state).missing.insert(p(path));
+        }
+        ops.hold("/slow");
+        let io = shared(&ops, ms(500));
+        let launch = io.begin_launch();
+        let answers = io.stat_all(
+            &launch,
+            &[
+                req("/share/a"),
+                req("/down/a"),
+                req("/slow/a"),
+                req("/local/a"),
+            ],
+        );
+        ops.release("/slow");
+        assert_eq!(answers[&k("/share/a")], FolderStatus::Missing);
+        assert_eq!(answers[&k("/down/a")], unreadable(SHARE_NOT_REACHABLE));
+        assert_eq!(answers[&k("/slow/a")], unreadable(SHARE_NOT_REACHABLE));
+        assert_eq!(answers[&k("/local/a")], FolderStatus::Missing);
+        assert_eq!(
+            (ops.count("stat", "/share"), ops.count("stat", "/down")),
+            (1, 1)
+        );
+        assert_eq!(
+            answers.len(),
+            4,
+            "the share roots are not answered as paths"
+        );
+        assert_inflight_empty(&io);
+    }
+
+    /// Two missing paths on one share ask its root once, and a later stat in the same launch reuses that answer.
+    #[test]
+    fn missing_paths_on_one_share_ask_its_root_once_per_launch() {
+        let ops = Arc::new(FakeOps::default());
+        for path in ["/down/a", "/down/b", "/down"] {
+            lock(&ops.state).missing.insert(p(path));
+        }
+        let io = shared(&ops, ms(5_000));
+        let launch = io.begin_launch();
+        let answers = io.stat_all(&launch, &[req("/down/a"), req("/down/b")]);
+        assert_eq!(answers[&k("/down/a")], unreadable(SHARE_NOT_REACHABLE));
+        assert_eq!(answers[&k("/down/b")], unreadable(SHARE_NOT_REACHABLE));
+        let again = io.stat_all(&launch, &[req("/down/a")]);
+        assert_eq!(again[&k("/down/a")], unreadable(SHARE_NOT_REACHABLE));
+        assert_eq!(ops.count("stat", "/down"), 1);
+        assert_eq!(ops.count("stat", "/down/a"), 1);
+        assert_inflight_empty(&io);
+    }
+
+    /// An advisory ask is never probed; a later required ask of the same path, answered from the stored advisory
+    /// `Missing`, is.
+    #[test]
+    fn an_advisory_missing_is_not_probed_and_a_required_ask_of_it_is() {
+        let ops = Arc::new(FakeOps::default());
+        for path in ["/down/a", "/down"] {
+            lock(&ops.state).missing.insert(p(path));
+        }
+        let io = shared(&ops, ms(5_000));
+        let launch = io.begin_launch();
+        assert_eq!(
+            io.stat_all(&launch, &[adv("/down/a")])[&k("/down/a")],
+            FolderStatus::Missing
+        );
+        assert_eq!(ops.count("stat", "/down"), 0, "advisory — no probe");
+        assert_eq!(
+            io.stat_all(&launch, &[req("/down/a")])[&k("/down/a")],
+            unreadable(SHARE_NOT_REACHABLE)
+        );
+        assert_eq!(
+            ops.count("stat", "/down/a"),
+            1,
+            "the stored answer is reused"
+        );
+        assert_eq!(ops.count("stat", "/down"), 1);
         assert_inflight_empty(&io);
     }
 

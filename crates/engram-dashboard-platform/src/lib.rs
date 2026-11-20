@@ -14,7 +14,7 @@
 //!   (processes holding a file open — Restart Manager) · [`fs`] (opening while denying
 //! others' writes, classifying that failure, verdict and retry for a brief-holder failure, folder sync, creating and walking directory
 //!   links — Windows junction, path keys and path comparison, folder-path normalization, the Win32 reserved-device-name test, file
-//!   identity) · [`spawn`] (windowless spawn,
+//!   identity, the network share a path is on) · [`spawn`] (windowless spawn,
 //!   tree-root spawn with a kill handle — Windows = suspended, put in the group, resume;
 //! "program not found" verdict; spawning outside this process's Job — WMI) · [`shell`] (interactive default shell, wrapping a CLI in a
 //!   console shell) · [`env`] (home dir, executable name/sibling path, env var name

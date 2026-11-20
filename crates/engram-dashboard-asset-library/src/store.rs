@@ -47,8 +47,9 @@ pub trait LibraryStore: Send + Sync {
     /// Lists the library under `root` (`under = None`) or the range `under` (a partial scan), drawing `seq()` before
     /// every step of the walk (module header). `Err` = a full scan whose root is missing, not a folder or cannot be
     /// listed at all — nothing of it may be applied (a missing root removes nothing). A partial scan never answers
-    /// `Err` for its range: a link or a missing `under` is a sequenced absence ([`ScanListing::absent_ranges`]), any
-    /// other failure is an error entry. `under` must pass [`admits`] (else `InvalidInput`).
+    /// `Err` for its range: a link or a missing `under` (or one below a file) is a sequenced absence
+    /// ([`ScanListing::absent_ranges`]), any other failure is an error entry. `under` must pass [`admits`] (else
+    /// `InvalidInput`).
     fn scan(
         &self,
         root: &Path,
@@ -185,17 +186,8 @@ impl LibraryStore for FsStore {
             Some(under) => {
                 refuse_unadmitted(under)?;
                 let at = seq();
-                match self.first_link(root, under) {
-                    Ok(None) => {}
-                    Ok(Some(_)) => {
-                        listing.skipped_links.push(under.clone());
-                        listing.absent_ranges.push((under.clone(), at));
-                        return Ok(listing);
-                    }
-                    Err(e) => {
-                        listing.errors.push((Some(under.clone()), e.to_string()));
-                        return Ok(listing);
-                    }
+                if !range_probe(self.first_link(root, under), under, at, &mut listing) {
+                    return Ok(listing);
                 }
                 under.to_path(root)
             }
@@ -460,6 +452,32 @@ fn into_io(error: walkdir::Error) -> io::Error {
 /// A depth-0 entry that is a link walkdir followed: a link whose target is a folder.
 fn followed_folder(entry: &walkdir::DirEntry) -> bool {
     entry.path_is_symlink() && fs::metadata(entry.path()).is_ok_and(|meta| meta.is_dir())
+}
+
+/// What a partial scan makes of the link probe of its range `under` (`at` = the number drawn before the probe):
+/// `true` = walk the range. A link at or above it is a skipped link and a sequenced absence; a range below a file
+/// (`NotADirectory`) is a sequenced absence too — absent, as `link_verdict` judges it, so a launch's overlay read
+/// and the problems agree (Windows answers `NotFound` there, which `first_link` already takes as no link); any other
+/// failure is an error entry for the range.
+// ADR-0387
+fn range_probe(
+    probe: io::Result<Option<LibPath>>,
+    under: &LibPath,
+    at: u64,
+    listing: &mut ScanListing,
+) -> bool {
+    match probe {
+        Ok(None) => return true,
+        Ok(Some(_)) => {
+            listing.skipped_links.push(under.clone());
+            listing.absent_ranges.push((under.clone(), at));
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotADirectory => {
+            listing.absent_ranges.push((under.clone(), at));
+        }
+        Err(e) => listing.errors.push((Some(under.clone()), e.to_string())),
+    }
+    false
 }
 
 /// Where a walk error lands.
@@ -1343,6 +1361,58 @@ mod tests {
         // Draw 1 = before the link check, draw 2 = before the step that opens `gone`.
         assert_eq!(listing.absent_ranges, [(lib("gone"), 2)]);
         assert!(listing.errors.is_empty() && listing.files.is_empty());
+    }
+
+    /// A range below a file is absent on every system — Windows answers `NotFound` there, others `NotADirectory`,
+    /// which the link probe turns into the same sequenced absence instead of an error entry (ADR-0387).
+    #[test]
+    fn a_partial_scan_below_a_file_is_a_sequenced_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "afile.md", "a");
+        let listing = FsStore
+            .scan(root, Some(&lib("afile.md/child")), &counter())
+            .unwrap();
+        assert_eq!(
+            listing.absent_ranges.len(),
+            1,
+            "{:?}",
+            listing.absent_ranges
+        );
+        assert_eq!(listing.absent_ranges[0].0, lib("afile.md/child"));
+        assert!(listing.errors.is_empty(), "{:?}", listing.errors);
+        assert!(listing.files.is_empty() && listing.folders.is_empty());
+    }
+
+    /// The link probe of a partial scan's range: no link walks it; a link skips it; `NotADirectory` (below a file) is
+    /// a plain absence; any other failure is an error entry (ADR-0387).
+    #[test]
+    fn the_range_probe_takes_a_path_below_a_file_as_absent_and_other_failures_as_errors() {
+        let under = lib("a/b");
+        let probe = |answer: io::Result<Option<LibPath>>| {
+            let mut listing = ScanListing::default();
+            let walk = range_probe(answer, &under, 7, &mut listing);
+            (walk, listing)
+        };
+        let (walk, listing) = probe(Ok(None));
+        assert!(walk);
+        assert!(listing.absent_ranges.is_empty() && listing.errors.is_empty());
+
+        let (walk, listing) = probe(Ok(Some(lib("a"))));
+        assert!(!walk);
+        assert_eq!(listing.skipped_links, [under.clone()]);
+        assert_eq!(listing.absent_ranges, [(under.clone(), 7)]);
+
+        let (walk, listing) = probe(Err(io::Error::from(io::ErrorKind::NotADirectory)));
+        assert!(!walk);
+        assert_eq!(listing.absent_ranges, [(under.clone(), 7)]);
+        assert!(listing.skipped_links.is_empty() && listing.errors.is_empty());
+
+        let (walk, listing) = probe(Err(io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert!(!walk);
+        assert!(listing.absent_ranges.is_empty());
+        assert_eq!(listing.errors.len(), 1);
+        assert_eq!(listing.errors[0].0, Some(under.clone()));
     }
 
     #[test]
