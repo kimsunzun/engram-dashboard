@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-123 | Agent-id duplicates when a data folder is copied to another PC | Main | Not started — after S37 (S37 review 2026-11-20) |
 | T-122 | Mail attachments (images / files) for local and remote mail | Main | Not started — after S37 (user 2026-11-20) |
 | T-121 | Agent mail loop detection (two agents replying to each other without end), local and remote | Main | Not started — after S37 (user 2026-11-20) |
 | T-120 | Remote outbox — keep undelivered remote mail and resend on reconnect (also turns over-limit refusals into delays) | Main | Must do, next unit after S37 (user 2026-11-20) |
@@ -81,6 +82,11 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-123. Agent-id duplicates on a copied data folder
+- **Status:** not started — found by the S37 PRD+TRD review (2026-11-20). S37 handles the PC identity on copy (per account × machine files, duplicate detection) but not the agents: a copied `agents.json` gives every agent the same id on both PCs.
+- **Effect today with S37:** mail between such agents across the two PCs is refused by the receiver's R8 check (a remote frame may not carry a local agent id) — S37 gives that refusal the hint "this agent id also exists on this PC — copied data folder?" — and their directory rows are dropped. ADR-0309 already says a profile copied to another PC must get a new id (not checked).
+- **To decide:** detect and re-id copied profiles (when / how, keeping sessions resumable) or keep the refusal + hint.
 
 ### T-122. Mail attachments
 - **Status:** after S37 — user 2026-11-20: 「나중에 간단한 이미지라도 보내야될텐데. 그건 다른 루트로 보내면 되나?」 → 「이건 나중에 얘기하고」.
