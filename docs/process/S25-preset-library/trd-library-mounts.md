@@ -128,7 +128,9 @@ reference "company/skills/review" → D:\git\company-presets\skills\review
 | `builtin/` presets, tests, priming | `engram:/` → `engram/` (UD5 B); priming has no `engram:/` today. |
 | `docs/reference/structure/asset-library.md` | Header line. |
 
-## 7. User decisions (open)
+## 7. User decisions
+
+**Decided 2026-11-21: every ★ below (UD1 a · UD2 a · UD3 a · UD4 a · UD5 B · UD6 a · UD7 a · UD8 a · UD9 a)** — user 「ㅇㅇ 진행해.」 to 「추천대로 전부 갈까요?」. UD6 a reverses ADR-0312 decision 3.
 
 **UD1 — today's single root and the paths already written.**
 - Name of the mount it becomes: ★ (a) the folder's own disk name (the default place → `library`), adjusted to avoid a top-level entry of the same name; (b) a fixed word (`main`); (c) asked once through the CLI. Precedent: VS Code multi-root names a workspace folder after its disk folder and lets a `name` override it (`docs/research/multi-library-reference-paths-survey-2026-10-15.md` — `name` property, collector report). The name can be renamed later (§3.2).
