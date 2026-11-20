@@ -61,7 +61,7 @@ A <notice> with no from was sent by the broker daemon, not a teammate, so do not
       After a timeout or an unknown outcome, check agent.list before calling again — a second call creates a second agent.
 
   {tool} agent.spawn --target <name|id>
-      Starts it — fresh the first time, or resuming the previous session if there is one. If the launch is blocked, nothing starts: it returns CONFLICT and args.reasons carries the reasons — fix the listed items and start it again. notices in a success reply are notices about things left out on purpose (the same bundle comes only once per agent).
+      Starts it — fresh the first time, or resuming the previous session if there is one. If the launch is blocked, nothing starts: it returns CONFLICT and args.reasons carries the reasons — fix the listed items and start it again. A preset item that is not found, or a library folder that is not set or not there, does not stop the start: it is left out and named in notices. notices in a success reply name what the start left out — on purpose, or because it was not found (the same bundle comes only once per agent).
 
   {tool} agent.rename --target <name|id> --name <new name>
       If the same name exists, a number is appended, and the name actually assigned comes back with outcome.
@@ -70,7 +70,7 @@ A <notice> with no from was sent by the broker daemon, not a teammate, so do not
       Puts it under another agent. none returns it to the top level.
 
   {tool} agent.setWorkspace --target <name|id> --cwd <folder>
-      Changes the working folder; the agent keeps its name. Only an asleep agent that has never conversed: otherwise CONFLICT workspace-locked, and args.args.reason is running · preparing · conversed · changing. A folder that is not absolute, does not exist, is not a folder, could not be read or did not answer in time is INVALID_ARGUMENT workspace-not-found, and args.args.why says which.
+      Changes the working folder; the agent keeps its name. Only an asleep agent that has never conversed: otherwise CONFLICT workspace-locked, and args.args.reason is running · preparing · conversed · changing. A folder that is not absolute, does not exist, is not a folder, could not be read, did not answer in time or is on a network share that is not reachable is INVALID_ARGUMENT workspace-not-found, and args.args.why says which.
 
   {tool} agent.duplicate --target <name|id>
       Registers a copy beside it (the same parent), asleep, named with the next number (bob → bob(1)): the same backend, mode, folder, env and presets, without its conversation or history. After a timeout or an unknown outcome, check agent.list before calling again — a second call creates a second copy.
@@ -288,7 +288,7 @@ An edit through Engram rewrites the whole preset file — hand-written comments 
 Where <path> appears below, give a library path; <list> is a JSON array of strings (["rules/style.md"]). One command's arguments and reply: {tool} commands <name>.
 
   {tool} library.status
-      The library root now (root · state · config) and root_generation
+      The library root now (root · state · config) and root_generation. state is unset · ok · missing (not there, or not a folder) · unreadable (there but could not be read or did not answer); state_why says why
   {tool} library.setRoot --path <absolute folder> [--create true]
       Points the library at that folder (create makes the folder first); nothing is copied or moved. Replies like library.status
   {tool} library.folders
@@ -322,7 +322,7 @@ Where <path> appears below, give a library path; <list> is a JSON array of strin
       What each backend would load from that folder. Reads only
 
   {tool} agent.presets --target <name|id>
-      The agent's presets: default_preset (the Default slot), presets in call order, base_rev, and the folders, conflicts, problems and notices a start would meet
+      The agent's presets: default_preset (the Default slot), presets in call order, base_rev, and the folders, conflicts, problems and notices a start would meet. A start leaves out the items that are not found; a folder entry or a library folder it cannot read stops it
   {tool} agent.attachPreset --target <name|id> --presets <list> [--after <preset>]
       Attaches what it can; each one it could not attach is in skipped. engram:/default turns the Default slot on
   {tool} agent.detachPreset --target <name|id> --presets <list> [--yes true]
@@ -336,11 +336,11 @@ root_generation (optional; every edit above except library.setRoot takes it) = t
 
 base_rev = the rev preset.get replied, or the base_rev agent.presets replied; CONFLICT rev-mismatch means it changed since — read it again and redo the change.
 
-A missing or broken item shows as a row in problems (kind missing · broken · library_unavailable), and items that clash as a row in conflicts (kind conflict), each with code and args. Fix it with a preset edit, or with library.relink when it was moved.
+A missing or broken item shows as a row in problems (kind missing · broken · library_unavailable), and items that clash as a row in conflicts (kind conflict), each with code and args. A start leaves a missing item out and names it in notices; it does the same with library_unavailable when the library folder is not set or not there (library.status state unset · missing). A folder entry that exists but cannot be read is broken (folder-unreadable); it stops a start like every other broken row, every conflict and a library folder that cannot be read (state unreadable). Fix it with a preset edit, or with library.relink when it was moved.
 
 A refusal's code is CONFLICT · NOT_FOUND · INVALID_ARGUMENT · INTERNAL, and args carries the reason: args.code (for example root-generation-stale), args.args (that reason's details) and args.line (the line in the file, when there is one). A refusal of the arguments themselves (a blank value, items and folders both or neither), a target that names no agent or several, and a refusal by the agents store carry no args ({tool} help agent). If the message ends with "clear the cause, then repeat the same call", fix what it names (the folder reachable again, a lock released, library.setRoot) and repeat the call unchanged. Without that clause, repeating the same call does not clear it by itself — change the call, or first do the step the reason names (for example create the missing folder).
 
-agent.setWorkspace answers workspace-not-found also when the folder did not answer in time or could not be read; args.args.why says which ({tool} help agent).
+agent.setWorkspace answers workspace-not-found also when the folder did not answer in time, could not be read or is on a network share that is not reachable; args.args.why says which ({tool} help agent).
 
 agent.new --presets and agent.duplicate: after a timeout or an unknown outcome, check agent.list before calling again — a second call creates a second agent, and there is no command to remove one.
 ## theme

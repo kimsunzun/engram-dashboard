@@ -488,7 +488,7 @@ fn engram_agent_spawn_prints_launch_blocks_and_notices_as_received() {
     let cases: [(&[&str], &str, i32); 3] = [
         (
             &["agent", "spawn", "worker"],
-            r#"{"status":"error","code":"CONFLICT","hint":"could not start agent 'worker': its launch is blocked — 1 reason(s) in args.reasons","args":{"reasons":[{"kind":"missing","item":"rules/a.md","via":["team.yaml"],"code":"not-found","args":{"path":"rules/a.md"},"line":3}]}}"#,
+            r#"{"status":"error","code":"CONFLICT","hint":"could not start agent 'worker': its launch is blocked — 1 reason(s) in args.reasons (a broken or unreadable item, a conflict, or a library folder that cannot be read)","args":{"reasons":[{"kind":"broken","item":"folder:C:\\data\\shared","via":["team.yaml"],"code":"folder-unreadable","args":{"path":"C:\\data\\shared","why":"timeout"},"line":3}]}}"#,
             1,
         ),
         (

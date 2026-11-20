@@ -172,8 +172,9 @@ pub const LIBRARY_READ_CAP: u64 = 16 * 1024 * 1024;
 pub const PATH_THROUGH_LINK: &str = "path-through-link";
 
 /// The code of a catalog read that could not be answered because no full scan of the library could be applied — no
-/// root is set, or the root could not be walked — and of block ④, a library preset attached while the root is unset or
-/// cannot be used (`args` = `{message}`, the reason).
+/// root is set, or the root could not be walked — and of the ④ row, a library preset attached while the root is not
+/// usable (`args` = `{message}`, the reason). A launch leaves that row out for an unset or absent root and refuses on it
+/// for a root that exists but cannot be read (ADR-0387).
 // TRD S25 step-7 B8
 pub const LIBRARY_UNAVAILABLE: &str = "library-unavailable";
 

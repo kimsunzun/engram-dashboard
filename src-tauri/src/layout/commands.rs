@@ -203,8 +203,8 @@ declare_commands! {
         agent_id: Option<String>,
     }
 
-    /// A launch notice (`agent.spawnInto`) — something the launch leaves out on purpose; not an error, nothing to fix.
-    /// The same row as the agent block's `agent.spawn` notices (ADR-0348).
+    /// A launch notice (`agent.spawnInto`) — something the launch left out, on purpose or because it was not found.
+    /// Not a refusal: the launch went ahead. The same row as the agent block's `agent.spawn` notices (ADR-0348).
     struct LaunchNoticeRow {
         /// Fixed notice code.
         code: String,

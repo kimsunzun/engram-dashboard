@@ -85,7 +85,8 @@ pub const FOLDER_UNREADABLE: &str = "folder-unreadable";
 // TRD S25 step-7 B8
 pub const FOLDER_PATH_CLI_UNSAFE: &str = "folder-path-cli-unsafe";
 
-/// One problem row — the launch block row itself, so the problem list and the block are the same rows. `item` = a
+/// One problem row — the row a launch refuses on or leaves out, so the problem list and the launch block come from the
+/// same rows. `item` = a
 /// library path, `engram:/…` or `folder:<normalized path>` (the launch check adds `command-line:<backend word>` and
 /// `working-folder:<path>` rows — `agent::launch::BlockReason`); `via` = the presets from the expansion start (for an
 /// agent, the attached preset) down to the one that lists the item — empty for an attached preset itself. A conflict

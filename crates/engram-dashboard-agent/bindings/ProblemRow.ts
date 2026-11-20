@@ -2,8 +2,9 @@
 import type { ProblemItemRow } from "./ProblemItemRow";
 
 /**
- * What would block or break a launch of the preset — the row `agent.spawn` puts in `args.reasons`, with the
- * absent keys as `null`.
+ * A problem of a preset's launch materials, with the absent keys as `null`. A launch leaves out the `missing`
+ * rows (and a `library_unavailable` row for a library folder that is not set or not there) and refuses on the
+ * others — the rows `agent.spawn` puts in `args.reasons`.
  */
 export type ProblemRow = { 
 /**

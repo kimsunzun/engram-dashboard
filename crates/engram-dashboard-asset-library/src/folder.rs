@@ -110,8 +110,11 @@ impl IoKey {
     }
 }
 
-/// Which phase an ask belongs to (class B). `Required` = its failure blocks the launch; `Advisory` = it only feeds a
-/// notice or a best-effort value and is skipped when it does not answer.
+/// Which phase an ask belongs to (class B). `Required` = its answer counts (at a launch and in read computations):
+/// for a stat or a listing, an unreadable or unanswered one blocks a launch and a missing one (after the share probe
+/// of [`BoundedIo::stat_all`]) is left out; a required read of a file below a folder entry that fails with an error
+/// other than a timeout is named in `folder-listing-skipped` instead. `Advisory` = it only feeds a notice or a
+/// best-effort value and is skipped when it does not answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Need {
     Required,

@@ -9,10 +9,11 @@ export type PreviewRefusalRow = {
  */
 path: string, 
 /**
- * `folder-path-relative` | `folder-path-cli-unsafe` | `folder-not-found`.
+ * `folder-path-relative` | `folder-path-cli-unsafe` | `folder-not-found` | `folder-unreadable`.
  */
 code: string, 
 /**
- * For `folder-not-found`: missing, not a folder, the OS error or a timeout.
+ * For `folder-not-found`: missing or not a folder. For `folder-unreadable`: the OS error, a timeout or a share
+ * not reachable.
  */
 why?: string | null, };

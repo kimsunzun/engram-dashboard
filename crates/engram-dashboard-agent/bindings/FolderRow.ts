@@ -18,6 +18,6 @@ line?: number | null,
  */
 status?: string | null, 
 /**
- * Why it is `unreadable` (the OS error or a timeout); else `null`.
+ * Why it is `unreadable` (the OS error, a timeout or a share not reachable); else `null`.
  */
 status_why?: string | null, };

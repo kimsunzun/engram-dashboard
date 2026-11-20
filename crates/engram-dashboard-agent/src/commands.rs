@@ -233,7 +233,8 @@ declare_commands! {
         Rejected,
     }
 
-    /// A launch notice (`agent.spawn`) — something the launch leaves out on purpose; not an error, nothing to fix.
+    /// A launch notice (`agent.spawn`) — something the launch left out, on purpose or because it was not found
+    /// (`missing-item-skipped`, `library-unavailable-skipped`). Not a refusal: the launch went ahead.
     struct LaunchNoticeRow {
         /// Fixed notice code.
         code: String,
@@ -378,7 +379,7 @@ declare_commands! {
         /// `ok` | `missing` | `not_a_directory` | `unreadable`; `null` = not checked (a relative entry, or the library
         /// was unavailable).
         status: Option<String>,
-        /// Why it is `unreadable` (the OS error or a timeout); else `null`.
+        /// Why it is `unreadable` (the OS error, a timeout or a share not reachable); else `null`.
         status_why: Option<String>,
     }
 
@@ -388,8 +389,10 @@ declare_commands! {
         via: Vec<String>,
     }
 
-    /// What would block or break a launch of the preset — the row `agent.spawn` puts in `args.reasons`, with the
-    /// absent keys as `null`.
+    /// A problem of a preset's launch materials, with the absent keys as `null`. A launch leaves out the `missing`
+    /// rows (and a `library_unavailable` row for a library folder that is not set or not there) and refuses on the
+    /// others — the rows `agent.spawn` puts in `args.reasons`.
+    // ADR-0387
     struct ProblemRow {
         /// `missing` | `broken` | `conflict` | `library_unavailable`.
         kind: String,
@@ -511,9 +514,10 @@ declare_commands! {
     struct PreviewRefusalRow {
         /// As given.
         path: String,
-        /// `folder-path-relative` | `folder-path-cli-unsafe` | `folder-not-found`.
+        /// `folder-path-relative` | `folder-path-cli-unsafe` | `folder-not-found` | `folder-unreadable`.
         code: String,
-        /// For `folder-not-found`: missing, not a folder, the OS error or a timeout.
+        /// For `folder-not-found`: missing or not a folder. For `folder-unreadable`: the OS error, a timeout or a share
+        /// not reachable.
         why: Option<String>,
     }
 
@@ -530,7 +534,7 @@ declare_commands! {
         line: u32,
         /// `ok` | `missing` | `not_a_directory` | `unreadable`; `null` = not checked.
         status: Option<String>,
-        /// Why it is `unreadable` (the OS error or a timeout); else `null`.
+        /// Why it is `unreadable` (the OS error, a timeout or a share not reachable); else `null`.
         status_why: Option<String>,
     }
 
@@ -555,9 +559,10 @@ declare_commands! {
         /// The folder entries its presets reach, in expansion order.
         folders: Vec<AgentFolderRow>,
         conflicts: Vec<ProblemRow>,
-        /// Every other problem a launch would meet, inner presets' included.
+        /// Every other problem, inner presets' included. A launch leaves out the `missing` rows (and a
+        /// `library_unavailable` row for a library folder that is not set or not there) and refuses on the others.
         problems: Vec<ProblemRow>,
-        /// What a launch would leave out on purpose.
+        /// What a launch would leave out on purpose. What it leaves out because it was not found is in `problems`.
         notices: Vec<LaunchNoticeRow>,
     }
 
@@ -593,13 +598,16 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     /// Starts an agent: wakes an existing one (`target`) or creates one in `cwd` and starts it.
-    /// A blocked launch starts nothing and is `CONFLICT` with `args.reasons`, one row per reason by `kind`:
-    /// `missing`|`broken` {kind, item, via, code, args, line?} · `conflict` {kind, items: [{item, via}], code, args,
-    /// line?} · `library_unavailable` {kind, code, args, line?}. Fix the listed items, then start again.
+    /// A preset item that is not found, or a library folder that is not set or not there, does not block: it is left
+    /// out and named in `notices`. A blocked launch starts nothing and is `CONFLICT` with `args.reasons`, one row per
+    /// reason by `kind`: `broken` {kind, item, via, code, args, line?} (a folder entry that cannot be read included)
+    /// · `conflict` {kind, items: [{item, via}], code, args, line?} · `library_unavailable` {kind, code, args, line?}
+    /// (a library folder that exists but cannot be read). Fix the listed items, then start again.
     /// With `cwd`, a launch blocked before the agent is added answers `CONFLICT` with `args.reasons` and creates
     /// nothing; a start failure after the add is `INTERNAL` with `args.agent_id` (plus `args.reasons` when blocked) —
     /// start that agent by target, do not create another.
     // ADR-0369
+    // ADR-0387
     #[effect(Write)]
     #[since(1)]
     #[deadline(Launch)]
@@ -683,7 +691,7 @@ declare_commands! {
 
     /// Changes an agent's working folder. `cwd` must be an existing absolute folder, else INVALID_ARGUMENT
     /// `workspace-not-found` {cwd, why} — `why` also says `not absolute`, or that the folder did not answer in time
-    /// (`timeout`) or could not be read. Only an
+    /// (`timeout`), could not be read, or is on a network share that is not reachable (`share not reachable`). Only an
     /// asleep agent that has never conversed can change it: CONFLICT `workspace-locked` {reason: `running` |
     /// `preparing` | `conversed` | `changing`}. The agent keeps its name.
     // ADR-0386
@@ -840,7 +848,8 @@ declare_commands! {
     //   refusal applied nothing (`library-config-write-failed` aside: the new root is live but not saved).
 
     /// The library root now: `root` (`null` = unset), `root_setting` = `default` | `explicit` (`null` when
-    /// library.json could not be read), `state` = `unset` | `ok` | `missing` (+ `state_why`), `config` (library.json) =
+    /// library.json could not be read), `state` = `unset` | `ok` | `missing` (not there or not a folder) | `unreadable`
+    /// (there but cannot be read or did not answer) (+ `state_why`), `config` (library.json) =
     /// `ok` | `read_only` | `corrupt` | `unsaved` (+ `config_why`), `suggested_new` = the default place.
     /// `root_generation` = pass it to an edit, which then refuses if the root changed since (CONFLICT
     /// `root-generation-stale`). CONFLICT `library-unavailable` only from a daemon that runs no library.
@@ -1202,7 +1211,9 @@ declare_commands! {
     //   deleted meanwhile; INTERNAL `profile-edit-unavailable` = this daemon cannot write agents' presets.
 
     /// An agent's presets: the Default slot, the attached presets, its working folder and why it is locked, its backend
-    /// and mode, `base_rev`, and the folders, conflicts, problems and notices a launch would meet.
+    /// and mode, `base_rev`, and the folders, conflicts, problems and notices a launch would meet — it leaves out the
+    /// `missing` problem rows (and a `library_unavailable` row for a library folder that is not set or not there) and
+    /// refuses on the others.
     #[effect(Read)]
     #[since(9)]
     "agent.presets" => args AgentPresetsArgs {
@@ -2876,7 +2887,7 @@ const WORKING_FOLDER_CHANGING_CAUSE: &str =
 /// used here.
 fn launch_blocked_reason(blocked: &LaunchBlocked) -> String {
     format!(
-        "its launch is blocked — {} reason(s) in args.reasons (a missing or broken item, a conflict, or no library folder)",
+        "its launch is blocked — {} reason(s) in args.reasons (a broken or unreadable item, a conflict, or a library folder that cannot be read)",
         blocked.reasons.len()
     )
 }

@@ -725,13 +725,15 @@ mod tests {
     /// The library screen teaches every library, preset and agent-preset command by its full name (full names only —
     /// the CLI has no `library` family), and the rules no single command summary carries: the file formats with a
     /// `description:`, the description rule, the folder entry form, the whole-file rewrite (ADR-0358), the two edit
-    /// guards, how to read a refusal, and the check before a creating call is repeated. It never says a missing item
-    /// blocks a launch — that stops being true when launches skip missing items (ADR-0374). The agent screen names the
-    /// two new verbs and `--presets` and points at this screen. A command added to the library port without a line here
-    /// turns this red.
+    /// guards, how to read a refusal, the check before a creating call is repeated, and the `library.status` state
+    /// words. It says a start leaves a missing item out and stops on a folder entry it cannot read (`folder-unreadable`),
+    /// and never says a missing item blocks a launch — a launch skips missing items (ADR-0374, ADR-0387). The agent
+    /// screen names the two new verbs and `--presets`, points at this screen, and says a start leaves a missing item
+    /// out and names it in `notices`. A command added to the library port without a line here turns this red.
     // ADR-0358
     // ADR-0374
     // ADR-0386
+    // ADR-0387
     #[test]
     fn the_library_screen_teaches_every_library_command_and_the_edit_rules() {
         let _env = env_guard();
@@ -787,6 +789,9 @@ mod tests {
             "clear the cause, then repeat the same call",
             "workspace-not-found",
             "check agent.list before calling again",
+            "unset · ok · missing (not there, or not a folder) · unreadable",
+            "A start leaves a missing item out and names it in notices",
+            "folder-unreadable",
         ] {
             assert!(
                 library.contains(taught),
@@ -805,6 +810,7 @@ mod tests {
             "agent.setWorkspace --target",
             "agent.duplicate --target",
             "check agent.list before calling again",
+            "does not stop the start: it is left out and named in notices",
             pointer.as_str(),
         ] {
             assert!(

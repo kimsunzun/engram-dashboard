@@ -34,10 +34,11 @@ takes_presets: boolean,
  */
 folders: Array<AgentFolderRow>, conflicts: Array<ProblemRow>, 
 /**
- * Every other problem a launch would meet, inner presets' included.
+ * Every other problem, inner presets' included. A launch leaves out the `missing` rows (and a
+ * `library_unavailable` row for a library folder that is not set or not there) and refuses on the others.
  */
 problems: Array<ProblemRow>, 
 /**
- * What a launch would leave out on purpose.
+ * What a launch would leave out on purpose. What it leaves out because it was not found is in `problems`.
  */
 notices: Array<LaunchNoticeRow>, };

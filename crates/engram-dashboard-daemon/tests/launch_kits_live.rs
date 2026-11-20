@@ -1,16 +1,18 @@
 //! Real launch materials, live — the library service as the manager's launch-kit source, over the repo `builtin\`,
-//! with real claude and codex (scenes L1–L4).
+//! with real claude and codex (scenes L1–L5).
 //!
-//! ★Every scene is `#[ignore]`★ — the claude and codex lanes run them (`.claude/skill-bindings/qa.md`). L1, L2 and L4
-//!   spend **one real claude turn each**; L3 spawns codex twice (JSON and terminal) and spends **one real model turn**
-//!   on the JSON one. Auth needed.
+//! ★Every scene is `#[ignore]`★ — the claude and codex lanes run them (`.claude/skill-bindings/qa.md`). L1, L2, L4 and
+//!   claude L5 spend **one real claude turn each** (claude L5 also spawns claude a second time, with no turn); L3 and
+//!   codex L5 each spawn codex twice (JSON and terminal) and spend **one real model turn** on the JSON one. Auth
+//!   needed.
 //! ★The service is built here, not through the daemon assembly★ — the same values as production (the repo built-in
 //!   folder, the production folder waits), but a temporary launch root, home and profile store under one scene root
 //!   (removed on drop), so the launch writes nothing outside it and codex's own skill roots under the home are empty.
-//!   L4 adds a temporary library root. A real MCP server and control channel stand behind the agents, so claude's
+//!   L4 and L5 add a temporary library root. A real MCP server and control channel stand behind the agents, so claude's
 //!   engram tools are really attached.
 //! ★The CLIs still keep their own records outside it★ — each claude turn leaves a session transcript under the real
-//!   `~/.claude/projects/`, and L3's JSON turn leaves one thread in the real `~/.codex` (its id is printed). Removing
+//!   `~/.claude/projects/`, and each codex JSON turn (L3, codex L5) leaves one thread in the real `~/.codex` (its id
+//!   is printed). Removing
 //!   them is the user's call.
 //!
 //! Run: `cargo test -p engram-dashboard-daemon --test launch_kits_live -- --ignored --test-threads=1 --nocapture`
@@ -21,6 +23,7 @@
 // ADR-0328
 // ADR-0337
 // ADR-0341
+// ADR-0387
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -29,8 +32,8 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use engram_dashboard_agent::launch::{LaunchPorts, StdLaunchFs};
-use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::launch::{LaunchPorts, Notice, StdLaunchFs};
+use engram_dashboard_agent::manager::{AgentManager, NoticeDelivery};
 use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, AttachedPreset, ProfileRegistry, SpawnMode,
@@ -342,6 +345,30 @@ impl Live {
         (info, events)
     }
 
+    /// Saves `profile` and starts it fresh as a caller that shows the launch notices ([`Live::restart_reporting`]).
+    fn start_reporting(&self, profile: &AgentProfile) -> (AgentInfo, Vec<Notice>, Events) {
+        self.profiles
+            .try_upsert(profile.clone())
+            .expect("save the profile");
+        self.restart_reporting(profile.id)
+    }
+
+    /// Starts the stored agent `id` fresh as a caller that shows the launch notices — the incarnation and the notices
+    /// of that start (empty when this agent was already shown the same set). The stored copy carries the notice
+    /// fingerprint an earlier start recorded; saving the scene's own copy again would reset it.
+    fn restart_reporting(&self, id: AgentId) -> (AgentInfo, Vec<Notice>, Events) {
+        let profile = self.profiles.get(id).expect("the stored profile");
+        let activated = self
+            .manager
+            .activate_profile_reporting(&profile, SpawnMode::Fresh, NoticeDelivery::Delivered)
+            .expect("activation");
+        let events = Events::new();
+        self.manager
+            .subscribe(id, Arc::new(events.clone()))
+            .expect("subscribe");
+        (activated.info, activated.notices, events)
+    }
+
     /// Sends one user turn and waits for its end — the events from before the send.
     fn one_turn(&self, id: AgentId, events: &Events, prompt: &str) -> usize {
         let from = events.len();
@@ -647,6 +674,130 @@ async fn claude_l4_folder_entries_and_a_library_skill_load() {
     );
 }
 
+// ── L5 — a launch skips what is missing and tells the agent ───────────────────────────────────
+
+/// The launch note's opening line in its named form (asset-library `launch.rs` `Skips::named_note`).
+const NAMED_NOTE: &str =
+    "Engram launch note: these items your presets reference were not found and were left out of this launch:";
+
+/// The launch note in its count form for two items (asset-library `launch.rs` `count_note`).
+const COUNT_NOTE_TWO: &str =
+    "Engram launch note: 2 items your presets reference were not found and were left out of this launch.";
+
+/// A library under `root` whose preset `P.yaml` lists an instruction (`rules/<stem>-<token>.md`) and a folder entry
+/// that are both missing — the library, the missing instruction's path and the missing folder's unique name. The scene
+/// token keeps a leftover from another run from answering.
+fn missing_items_library(root: &Path, stem: &str) -> (PathBuf, String, String) {
+    let n = Uuid::new_v4().simple().to_string()[..8].to_string();
+    let gone = format!("rules/{stem}-{n}.md");
+    let absent = format!("absent-{n}");
+    let lib = root.join("lib");
+    put(
+        &lib.join("P.yaml"),
+        &format!(
+            "kind: preset\nversion: 1\ninstructions:\n  - {gone}\nfolders:\n  - '{}'\n",
+            root.join(&absent).display()
+        ),
+    );
+    (lib, gone, absent)
+}
+
+/// The start's notices are one `missing-item-skipped` per missing item — the instruction, then the folder entry.
+fn assert_skip_notices(notices: &[Notice], gone: &str, absent: &str, scene: &str) {
+    let skipped: Vec<(&str, String)> = notices
+        .iter()
+        .map(|n| {
+            (
+                n.code.as_str(),
+                n.args["item"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(skipped.len(), 2, "{scene}: {notices:?}");
+    assert_eq!(
+        skipped[0],
+        ("missing-item-skipped", gone.to_owned()),
+        "{scene}"
+    );
+    assert_eq!(skipped[1].0, "missing-item-skipped", "{scene}");
+    assert!(
+        skipped[1].1.starts_with("folder:") && skipped[1].1.contains(absent),
+        "{scene}: {notices:?}"
+    );
+}
+
+/// Claude L5 — a library preset lists an instruction and a folder entry that are both missing: the launch starts
+///   (not blocked), the start's notices name both (`missing-item-skipped`), `instructions.md` is the merged priming
+///   followed by the named launch note, the command line carries no `--add-dir`, and one turn has the model repeat
+///   what was left out. A second start of the same agent shows no notices (once per agent) and still writes the note.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real claude — 1 model turn, 2 spawns"]
+async fn claude_l5_missing_items_are_skipped_and_the_agent_is_told() {
+    let root = scene_root("claude-missing");
+    let (lib, gone, absent) = missing_items_library(&root, "gone");
+    let live = live(&root, Some(lib)).await;
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut profile = agent("live-claude-missing", claude(), &work);
+    profile.presets = vec![AttachedPreset {
+        path: "P.yaml".to_string(),
+    }];
+    let id = profile.id;
+    let (info, notices, events) = live.start_reporting(&profile);
+    assert_skip_notices(&notices, &gone, &absent, "L5");
+    let vol = root.join("launch").join(format!("{id}-{}", info.epoch));
+    let instructions =
+        std::fs::read_to_string(vol.join("instructions.md")).expect("L5: instructions.md");
+    assert!(
+        instructions.starts_with(&merged_priming()),
+        "L5: the priming comes first: {instructions}"
+    );
+    assert!(instructions.contains(NAMED_NOTE), "L5: {instructions}");
+    assert!(
+        instructions.contains(&format!("- {gone} (listed in P.yaml)")),
+        "L5: {instructions}"
+    );
+    assert!(instructions.contains(&absent), "L5: {instructions}");
+    #[cfg(windows)]
+    {
+        let line = command_line_holding(&vol).expect("L5: the claude command line was not found");
+        println!("L5 command line: {line}");
+        assert!(
+            !line.contains("--add-dir "),
+            "L5: a skipped folder was passed: {line}"
+        );
+    }
+    let from = live.one_turn(
+        id,
+        &events,
+        "Without using a tool: which items did Engram leave out of this launch? Print each one exactly as your instructions name it, one per line, and nothing else.",
+    );
+    let answer = events.text_after(from);
+    println!("L5 answer: {answer}");
+    live.kill_and_reap(id);
+
+    let (info, notices, _events) = live.restart_reporting(id);
+    let vol = root.join("launch").join(format!("{id}-{}", info.epoch));
+    let again =
+        std::fs::read_to_string(vol.join("instructions.md")).expect("L5 again: instructions.md");
+    live.kill_and_reap(id);
+    live.end().await;
+
+    assert!(
+        answer.contains(&gone),
+        "L5: the missing instruction: {answer}"
+    );
+    assert!(answer.contains(&absent), "L5: the missing folder: {answer}");
+    assert!(
+        notices.is_empty(),
+        "L5 again: notices once per agent: {notices:?}"
+    );
+    assert!(
+        again.contains(NAMED_NOTE),
+        "L5 again: the note is on every launch: {again}"
+    );
+}
+
 // ── L3 — codex JSON and terminal ──────────────────────────────────────────────────────────────
 
 /// L3 — codex JSON and codex terminal, one fresh launch each with real kits and no library root: each comes up (a
@@ -729,6 +880,91 @@ async fn codex_l3_real_kits_carry_the_builtin_priming() {
             work_before,
             "{scene}: something was written in the working folder"
         );
+        assert!(
+            wait_until(Duration::from_secs(10), || !vol.exists()),
+            "{scene}: the volatile folder outlived the reap"
+        );
+    }
+    live.end().await;
+}
+
+/// Codex L5 — the claude L5 library on codex JSON and codex terminal, one fresh launch each (the Default preset on, so
+///   Engram has instruction text): each starts and names both items in its notices. JSON: `instructions.md` holds the
+///   named launch note and codex received it — a `developer` message of the thread's rollout holds the note and the
+///   missing instruction's path (one model turn). Terminal: the missing instruction's name holds `'`, which the codex
+///   command line refuses on every system, so `instructions.md` holds the count form and `-c developer_instructions=…`
+///   on the command line (read on Windows only) carries it, naming no item.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real codex — 1 model turn, one thread left in ~/.codex"]
+async fn codex_l5_missing_items_reach_codex_as_a_launch_note() {
+    let root = scene_root("codex-missing");
+    // `'` is refused by the codex terminal command line (agent `backend/codex/cmdline.rs`), so the named note cannot
+    //   go there whatever the folder path's separator.
+    let (lib, gone, absent) = missing_items_library(&root, "it's-gone");
+    let live = live(&root, Some(lib)).await;
+    for (scene, folder, mode) in [
+        ("L5 JSON", "work-json", AgentOutputFormat::StreamJson),
+        ("L5 terminal", "work-terminal", AgentOutputFormat::Terminal),
+    ] {
+        let work = root.join(folder);
+        std::fs::create_dir_all(&work).unwrap();
+        let mut profile = agent("live-codex-missing", codex(mode), &work);
+        profile.presets = vec![AttachedPreset {
+            path: "P.yaml".to_string(),
+        }];
+        let id = profile.id;
+        let (info, notices, events) = live.start_reporting(&profile);
+        assert_skip_notices(&notices, &gone, &absent, scene);
+        let vol = root.join("launch").join(format!("{id}-{}", info.epoch));
+        let instructions = std::fs::read_to_string(vol.join("instructions.md"))
+            .unwrap_or_else(|e| panic!("{scene}: instructions.md: {e}"));
+        if mode == AgentOutputFormat::Terminal {
+            assert!(
+                instructions.contains(COUNT_NOTE_TWO),
+                "{scene}: {instructions}"
+            );
+            assert!(!instructions.contains(&gone), "{scene}: {instructions}");
+            let ready = wait_until(Duration::from_secs(90), || {
+                events.saw_bytes(b"\x1b]7501;state=idle")
+            });
+            #[cfg(windows)]
+            let line = command_line_holding(
+                &dunce::canonicalize(&work).expect("canonicalize the working folder"),
+            );
+            live.kill_and_reap(id);
+            assert!(ready, "{scene}: the TUI did not come up (no OSC 7501 idle)");
+            #[cfg(windows)]
+            {
+                let line = line.expect("L5 terminal: the cmd.exe command line was not found");
+                println!("{scene} command line: {line}");
+                assert!(line.contains("developer_instructions="), "{scene}: {line}");
+                assert!(line.contains(COUNT_NOTE_TWO), "{scene}: {line}");
+                assert!(!line.contains(&gone), "{scene}: {line}");
+            }
+        } else {
+            assert!(instructions.contains(NAMED_NOTE), "{scene}: {instructions}");
+            assert!(instructions.contains(&gone), "{scene}: {instructions}");
+            live.one_turn(id, &events, "Reply with the single word OK.");
+            let thread = live
+                .profiles
+                .get(id)
+                .and_then(|p| p.backend_session_id)
+                .expect("L5 JSON: the codex thread id was not recorded");
+            println!("L5 JSON created codex thread {thread} in ~/.codex — removing it is the user's call");
+            live.kill_and_reap(id);
+            let developer = rollout_developer_texts(&thread.to_string());
+            assert!(
+                developer
+                    .iter()
+                    .any(|text| text.contains(NAMED_NOTE) && text.contains(&gone)),
+                "{scene}: codex did not receive the launch note as developer instructions — the developer texts \
+                 begin: {:?}",
+                developer
+                    .iter()
+                    .map(|text| text.chars().take(120).collect::<String>())
+                    .collect::<Vec<_>>()
+            );
+        }
         assert!(
             wait_until(Duration::from_secs(10), || !vol.exists()),
             "{scene}: the volatile folder outlived the reap"
