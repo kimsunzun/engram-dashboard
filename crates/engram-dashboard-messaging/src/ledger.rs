@@ -45,9 +45,9 @@ const HISTORY_CAPACITY: usize = 4096;
 /// which the sender should see as a bounce. Tuning target like HISTORY_CAPACITY.
 const MAX_OPEN_REQUESTS: usize = 512;
 
-/// State of one message delivery (spec §5·§6 state vocabulary — do not invent new vocabulary).
+/// State of one message delivery (spec §5·§6 state vocabulary, plus the two remote states of ADR-0393 — do not invent new vocabulary).
 /// ★Transitions (load-bearing)★: `Pending → Delivered → Replied` (request only) / `Expired` (TTL) / `Skipped` (notice lane retirement) /
-///   `Failed`.
+///   `Failed`; a remote row `RemotePending → Delivered | RemoteHeld | Failed` by its verdict only.
 /// Each leaves a timestamp (spec §5). Busy waiting, injection-failure parking and **sleep parking** (ADR-0116 decision 1) are all `Pending`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryStatus {
@@ -71,6 +71,16 @@ pub enum DeliveryStatus {
     /// deletion cleanup closes an *already parked* record after the fact, via the one edge `Pending → Failed`.
     // ADR-0111, ADR-0116
     Failed,
+    /// ★A row addressed to an agent on another PC, still without its outcome★ — recorded with no recipient id; it leaves only through the
+    ///   verdict entry (`settle_remote`): to `Delivered`, `RemoteHeld` or `Failed`. An unconfirmed row (no verdict in time, or the link
+    /// dropped after the mail was handed over) stays here for good. ★Not `Pending`★: no mailbox item backs it, and the expiry sweep, the wake
+    ///   flush and deletion cleanup act on `Pending` only.
+    // ADR-0393
+    RemotePending,
+    /// ★Parked on the other PC★ (its recipient asleep or busy) — terminal on this side: no later receipt comes (ADR-0393 decision 8).
+    ///   ★Not `Pending`★ for the same reason as `RemotePending`.
+    // ADR-0393
+    RemoteHeld,
 }
 
 impl DeliveryStatus {
@@ -104,6 +114,200 @@ impl DeliveryStatus {
     fn can_fail_by_cleanup(self) -> bool {
         matches!(self, DeliveryStatus::Pending)
     }
+
+    /// ★Verdict-only edges (`RemotePending → Delivered | RemoteHeld | Failed`)★ — a third predicate beside the general graph and the
+    ///   cleanup edge, so no other verb can move a remote row and the verdict entry cannot move a local one.
+    // ADR-0393
+    fn can_settle_remote(self, next: DeliveryStatus) -> bool {
+        use DeliveryStatus::*;
+        self == RemotePending && matches!(next, Delivered | RemoteHeld | Failed)
+    }
+}
+
+/// ★Marks a history row as addressed to another PC (ADR-0393)★ — display only: the row's correlation (verdict, answer, overdue) lives in
+///   the ledger's remote store (`RemoteEntry`), which history eviction does not touch. Local verbs (`transition`, `fail_pending`) never
+/// pick a row that carries this mark, and its `to_id` stays `None` — the peer-reported recipient id is not a local key.
+// ADR-0393
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteRef {
+    pub node: crate::NodeRef,
+    /// The row index of the send, frozen at send time — verdicts match on it, never on the notation.
+    pub tag: u32,
+}
+
+/// What the sender records for one remote row (`Ledger::record_remote`).
+// ADR-0393
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSend {
+    pub node: crate::NodeRef,
+    /// This PC's name for that PC at send time — hints and notices name it.
+    pub pc_name: String,
+    pub tag: u32,
+    /// The token sent to that PC (`@pc` stripped) — matched against an inbound reply's sender (`mark_remote_replied`).
+    pub sent_to: String,
+    /// A request with a deadline: (parsed, as written). `ReplyOverdue` is accepted only for such a row, and not before the deadline.
+    pub reply_by: Option<(Duration, String)>,
+    /// The mail was a reply: the request id whose contract (on this PC) the verdict closes.
+    pub closes: Option<String>,
+}
+
+/// ★The remote store entry — one remote row's live correlation, independent of the history ring★. Kept while it has a purpose: a verdict or
+///   the answer is still due (at most `REMOTE_VERDICT_HORIZON`), or an overdue report may still come (a deadline-bearing request row, until
+/// reported, answered by a reply, failed, or its deadline + `REMOTE_OVERDUE_GRACE`); at most `MAX_REMOTE_ENTRIES` (oldest dropped first).
+// ADR-0393
+#[derive(Debug, Clone)]
+struct RemoteEntry {
+    msg_id: String,
+    send: RemoteSend,
+    from_id: PeerId,
+    from: String,
+    /// The notation the sender wrote (the history row's `to`).
+    to: String,
+    created_at: Instant,
+    status: DeliveryStatus,
+    fail_code: Option<&'static str>,
+    /// The peer's refusal reason (capped, control characters escaped) — tool results only, never a notice.
+    reason: Option<String>,
+    /// The peer-reported recipient id — never written to the history row's `to_id` (not a local key).
+    recipient_id: Option<PeerId>,
+    /// A verdict (possibly "unconfirmed") was applied — later verdicts for the row are ignored.
+    settled: bool,
+    /// Reported in the sending agent's answer — a verdict after this goes out as a notice instead.
+    answered: bool,
+    /// A reply from that recipient reached this PC — no overdue report is accepted for the row.
+    replied: bool,
+    overdue_reported: bool,
+}
+
+impl RemoteEntry {
+    fn deadline(&self) -> Option<Instant> {
+        let (by, _) = self.send.reply_by.as_ref()?;
+        self.created_at.checked_add(*by)
+    }
+
+    /// Can an overdue report still be accepted for this row (ignoring the "not before the deadline" check).
+    fn awaits_overdue(&self) -> bool {
+        self.send.reply_by.is_some()
+            && self.status != DeliveryStatus::Failed
+            && !self.replied
+            && !self.overdue_reported
+    }
+
+    fn alive(&self, now: Instant) -> bool {
+        let verdict_or_answer = (!self.settled || !self.answered)
+            && now.saturating_duration_since(self.created_at) <= REMOTE_VERDICT_HORIZON;
+        let overdue = self.awaits_overdue()
+            && self
+                .deadline()
+                .and_then(|d| d.checked_add(REMOTE_OVERDUE_GRACE))
+                .is_none_or(|end| now <= end);
+        verdict_or_answer || overdue
+    }
+}
+
+/// How long a remote row waits for its verdict and answer — well above the host's transport deadline (120 s) and agent-facing wait (7 s).
+// ADR-0393
+pub const REMOTE_VERDICT_HORIZON: Duration = Duration::from_secs(10 * 60);
+
+/// ★The host's transport deadline for one remote mail★ — a bound the kernel relies on: the host gives up on a verdict after it, and drops an
+///   inbound mail whose deadline has passed instead of running it late (`handle_remote_mail` caller duty), so a request's contract on the
+/// receiving PC opens at most this long after it was sent.
+// ADR-0388, ADR-0393
+pub const REMOTE_TRANSPORT_DEADLINE: Duration = Duration::from_secs(120);
+
+/// The receiving PC's sweep period — how late after its deadline a contract is found overdue there. Mirrors the daemon's `SWEEP_INTERVAL`
+/// (daemon `lib.rs`); change both together or the overdue grace drifts.
+// ADR-0393
+const RECEIVER_SWEEP_PERIOD: Duration = Duration::from_secs(60);
+
+/// ★How long after a remote request's deadline (on this PC's clock) its overdue report is still accepted★ = the receiving contract may open
+///   that much later (`REMOTE_TRANSPORT_DEADLINE`) + its report may be held back (`REPLY_HOLD_MAX`) + found only on the next sweep
+/// (`RECEIVER_SWEEP_PERIOD`) + a margin for the link (4 min) = 10 min.
+// ADR-0393
+pub const REMOTE_OVERDUE_GRACE: Duration = Duration::from_secs(
+    REMOTE_TRANSPORT_DEADLINE.as_secs()
+        + REPLY_HOLD_MAX.as_secs()
+        + RECEIVER_SWEEP_PERIOD.as_secs()
+        + 240,
+);
+
+/// Cap of the remote store — beyond it the oldest entry is dropped (its late verdict or overdue report is then ignored).
+// ADR-0393
+pub const MAX_REMOTE_ENTRIES: usize = 4096;
+
+/// ★How long a reply hold keeps a contract's overdue report back★ — the host's transport deadline plus a 60 s margin, so a lost verdict
+///   cannot hold a contract for good.
+// ADR-0393
+pub const REPLY_HOLD_MAX: Duration = Duration::from_secs(REMOTE_TRANSPORT_DEADLINE.as_secs() + 60);
+
+/// The outcome the verdict entry applies to one remote row.
+// ADR-0393
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteSettlement {
+    Delivered {
+        to_id: PeerId,
+    },
+    Held {
+        to_id: PeerId,
+    },
+    Failed {
+        code: &'static str,
+        reason: Option<String>,
+    },
+    /// No outcome will come (transport deadline, or the link dropped after sending) — the row stays `RemotePending`.
+    Unconfirmed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteSettleError {
+    /// No remote entry (mail id, tag) — never sent, or already dropped from the remote store.
+    NotFound,
+    /// The row was sent to another PC — a verdict names only rows of its own mail.
+    OtherNode,
+    AlreadySettled,
+}
+
+/// What `settle_remote` hands back for the caller's reply close and late notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettledRemoteRow {
+    pub tag: u32,
+    pub from_id: PeerId,
+    pub from: String,
+    pub to: String,
+    pub pc_name: String,
+    /// Already reported in the agent's answer before this verdict.
+    pub answered: bool,
+    pub closes: Option<String>,
+}
+
+/// One remote row as the sealed answer renders it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRowView {
+    pub tag: u32,
+    pub to: String,
+    pub status: DeliveryStatus,
+    pub fail_code: Option<&'static str>,
+    pub pc_name: String,
+    pub reason: Option<String>,
+}
+
+/// An accepted `ReplyOverdue` — the requester's notice is rendered from it. `agents` = the unanswered rows it covers (`name@pc` each).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverdueReport {
+    pub from_id: PeerId,
+    pub from: String,
+    pub pc_name: String,
+    pub reply_by_raw: String,
+    pub agents: Vec<String>,
+}
+
+/// Why a `ReplyOverdue` was not accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverdueRefusal {
+    /// No unanswered, unreported deadline-bearing row of that request went to that node.
+    NoCandidate,
+    /// The request's deadline has not passed on this PC's clock.
+    BeforeDeadline,
 }
 
 /// One history record — the delivery history of one (message, recipient) pair.
@@ -147,6 +351,10 @@ pub struct MessageRecord {
     /// service's enum). ★Only deletion cleanup fills it★: entry-bounce `failed` rows already delivered code/hint in the send response (`None`).
     // ADR-0116
     pub fail_code: Option<&'static str>,
+    /// `Some` = a row addressed to an agent on another PC (`RemotePending` until its verdict) — display only; local verbs skip it and its
+    ///   correlation lives in the remote store. A settled refusal also fills `fail_code`.
+    // ADR-0393
+    pub remote: Option<RemoteRef>,
 }
 
 /// One open-request tracking entry (spec §3) — a **separate map** from history, so ring evict does not affect it.
@@ -219,6 +427,16 @@ struct RequestEntry {
     ///   nobody will settle that would permanently shrink the cap denominator.
     // R1
     reservation_token: Option<Weak<()>>,
+    /// ★The requester's PC when the request came through the remote entrance★ (`None` = a local requester). Taken from the link at request
+    ///   time; the overdue report goes to this node, never by resolving the requester id.
+    // ADR-0393
+    sender_node: Option<crate::NodeRef>,
+    /// ★Replies to this contract on their way to a remote requester whose verdicts have not come back★ — while > 0 and the latest hold
+    ///   (`hold_at`) is younger than `REPLY_HOLD_MAX`, the overdue report waits (`due_timeouts` skips the entry, as it skips a provisional
+    /// one: delayed, not lost). Each verdict, or the drop of that reply's remote entry, releases one.
+    // ADR-0393
+    reply_holds: u32,
+    hold_at: Option<Instant>,
 }
 
 impl RequestEntry {
@@ -414,6 +632,9 @@ pub struct DueTimeout {
     /// ★Original spelling of the exceeded deadline (C3 review fix 6)★: the spec §1 notice template exposes `deadline ({reply_by})` as
     ///   written (`"60m"`).
     pub reply_by_raw: String,
+    /// `Some` = the requester is on another PC: the overdue report goes to that node (`ReplyOverdue`), not into a local notice.
+    // ADR-0393
+    pub sender_node: Option<crate::NodeRef>,
 }
 
 /// ★Lookup view of one unreplied request (`eg_messages` no-argument "my pending")★. ★`RequestEntry` is not exposed★: it holds internal
@@ -444,6 +665,8 @@ pub struct Ledger {
     ///   only "it may have been truncated".
     // review B2
     evicted_any: bool,
+    /// ★The remote store (ADR-0393)★ — live correlation of remote rows, independent of the history ring (bounds: `RemoteEntry`).
+    remote: VecDeque<RemoteEntry>,
 }
 
 impl Default for Ledger {
@@ -465,6 +688,7 @@ impl Ledger {
             // capacity 0 would always evict at once — raised to 1 (defensive).
             capacity: capacity.max(1),
             evicted_any: false,
+            remote: VecDeque::new(),
         }
     }
 
@@ -506,7 +730,7 @@ impl Ledger {
         now: Instant,
         expected_rows: u16,
     ) {
-        self.history.push_back(MessageRecord {
+        self.push_record(MessageRecord {
             msg_id: msg_id.to_string(),
             from: from.to_string(),
             from_id,
@@ -519,7 +743,12 @@ impl Ledger {
             // 0 is meaningless (every send has ≥1 row) — raised to 1 so `rows < expected` cannot be contradictory ("rows exist but expected 0").
             expected_rows: expected_rows.max(1),
             fail_code: None,
+            remote: None,
         });
+    }
+
+    fn push_record(&mut self, record: MessageRecord) {
+        self.history.push_back(record);
         let mut evicted_now = false;
         while self.history.len() > self.capacity {
             if self.history.pop_front().is_some() {
@@ -559,8 +788,9 @@ impl Ledger {
 
     /// ★Pick by (msg_id, recipient id)★: a group broadcast has N records per msg_id, so the recipient is needed to transition exactly one
     ///   (1:N accounting, spec §4); the axis is the id, so a renamed
-    /// recipient still matches (ADR-0309).
-    // ADR-0309
+    /// recipient still matches (ADR-0309). ★A remote row is never picked★ — it moves only by its verdict (`settle_remote`), so a local
+    ///   transition of the same (msg_id, id) cannot land on it.
+    // ADR-0309, ADR-0393
     pub fn transition(
         &mut self,
         msg_id: &str,
@@ -571,7 +801,7 @@ impl Ledger {
         let Some(rec) = self
             .history
             .iter_mut()
-            .find(|r| r.msg_id == msg_id && r.to_id == Some(to_id))
+            .find(|r| r.msg_id == msg_id && r.to_id == Some(to_id) && r.remote.is_none())
         else {
             return Err(TransitionError::NotFound);
         };
@@ -588,8 +818,9 @@ impl Ledger {
 
     /// ★Deletion-cleanup-only close (`Pending → Failed` + reason code — spec §5·§6)★. ★The reason code is a required argument★ so a lookup
     ///   never sees a codeless `failed`.
-    /// ★`NotFound` (record pushed out of the ring)★ is logged at debug by the caller outside the lock — no silent loss.
-    // ADR-0116
+    /// ★`NotFound` (record pushed out of the ring)★ is logged at debug by the caller outside the lock — no silent loss. Remote rows are
+    ///   never picked (as `transition`).
+    // ADR-0116, ADR-0393
     pub fn fail_pending(
         &mut self,
         msg_id: &str,
@@ -600,7 +831,7 @@ impl Ledger {
         let Some(rec) = self
             .history
             .iter_mut()
-            .find(|r| r.msg_id == msg_id && r.to_id == Some(to_id))
+            .find(|r| r.msg_id == msg_id && r.to_id == Some(to_id) && r.remote.is_none())
         else {
             return Err(TransitionError::NotFound);
         };
@@ -701,6 +932,9 @@ impl Ledger {
                 .as_ref()
                 .map(|r: &RetiredContract| (r.request_id.clone(), r.recipient_id)),
             reservation_token: None,
+            sender_node: None,
+            reply_holds: 0,
+            hold_at: None,
         });
         match retired {
             Some(r) => OpenOutcome::OpenedAfterMarking(r),
@@ -725,6 +959,331 @@ impl Ledger {
         {
             e.reservation_token = Some(watch);
         }
+    }
+
+    /// Records the requester's PC on a contract just opened for a request that came through the remote entrance — same lock span as
+    ///   `open_request`.
+    // ADR-0393
+    pub fn attach_requester_node(
+        &mut self,
+        request_id: &str,
+        recipient_id: PeerId,
+        node: crate::NodeRef,
+    ) {
+        if let Some(e) = self
+            .requests
+            .iter_mut()
+            .find(|r| r.request_id == request_id && r.recipient_id == recipient_id)
+        {
+            e.sender_node = Some(node);
+        }
+    }
+
+    /// The requester's PC of the replier's contract (`None` = local requester, or no such contract).
+    // ADR-0393
+    pub fn requester_node(&self, in_reply_to: &str, replier_id: PeerId) -> Option<crate::NodeRef> {
+        self.match_contract_for_replier(in_reply_to, replier_id)
+            .and_then(|i| self.requests[i].sender_node)
+    }
+
+    /// ★Holds the overdue report of the replier's contract while one more reply to a remote requester waits for its verdict★ — a count, so
+    ///   two replies in flight need two releases; the hold lapses `REPLY_HOLD_MAX` after the latest one (a lost verdict cannot hold it for
+    /// good). Picks the contract by the same rule as a reply close (`match_contract_for_replier`); no contract = no-op.
+    // ADR-0393
+    pub fn hold_reply(&mut self, in_reply_to: &str, replier_id: PeerId, now: Instant) {
+        if let Some(idx) = self.match_contract_for_replier(in_reply_to, replier_id) {
+            let e = &mut self.requests[idx];
+            e.reply_holds += 1;
+            e.hold_at = Some(now);
+        }
+    }
+
+    /// Releases one hold taken by `hold_reply` (its verdict came, or its remote entry was dropped).
+    // ADR-0393
+    pub fn release_reply(&mut self, in_reply_to: &str, replier_id: PeerId) {
+        if let Some(idx) = self.match_contract_for_replier(in_reply_to, replier_id) {
+            let e = &mut self.requests[idx];
+            e.reply_holds = e.reply_holds.saturating_sub(1);
+        }
+    }
+
+    /// ★Records one row addressed to another PC in `RemotePending`★ — the history row (display, `to_id` = `None`) plus its remote-store entry;
+    ///   no contract on this side (the contract lives on the receiving PC). `to` = the notation the sender wrote. The caller prunes the
+    ///   remote store once per send (`prune_remote`).
+    // ADR-0393
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_remote(
+        &mut self,
+        msg_id: &str,
+        from: &str,
+        from_id: PeerId,
+        to: &str,
+        body: &str,
+        now: Instant,
+        expected_rows: u16,
+        send: RemoteSend,
+    ) {
+        self.push_record(MessageRecord {
+            msg_id: msg_id.to_string(),
+            from: from.to_string(),
+            from_id,
+            to: to.to_string(),
+            to_id: None,
+            body: body.to_string(),
+            status: DeliveryStatus::RemotePending,
+            created_at: now,
+            transitioned_at: now,
+            expected_rows: expected_rows.max(1),
+            fail_code: None,
+            remote: Some(RemoteRef {
+                node: send.node,
+                tag: send.tag,
+            }),
+        });
+        self.remote.push_back(RemoteEntry {
+            msg_id: msg_id.to_string(),
+            send,
+            from_id,
+            from: from.to_string(),
+            to: to.to_string(),
+            created_at: now,
+            status: DeliveryStatus::RemotePending,
+            fail_code: None,
+            reason: None,
+            recipient_id: None,
+            settled: false,
+            answered: false,
+            replied: false,
+            overdue_reported: false,
+        });
+    }
+
+    /// ★Drops remote entries with no purpose left, then the oldest beyond `MAX_REMOTE_ENTRIES`★ (`RemoteEntry` lists the purposes). A dropped
+    ///   reply that never got its verdict releases its contract hold. Returns how many were dropped by the cap (the caller logs them).
+    // ADR-0393
+    pub fn prune_remote(&mut self, now: Instant) -> usize {
+        // Holds of replies dropped before their verdict, released after the store is settled.
+        let mut holds: Vec<(String, PeerId)> = Vec::new();
+        let mut note = |e: &RemoteEntry| {
+            if let (Some(request_id), false) = (&e.send.closes, e.settled) {
+                holds.push((request_id.clone(), e.from_id));
+            }
+        };
+        self.remote.retain(|e| {
+            let keep = e.alive(now);
+            if !keep {
+                note(e);
+            }
+            keep
+        });
+        let mut capped = 0;
+        while self.remote.len() > MAX_REMOTE_ENTRIES {
+            if let Some(e) = self.remote.pop_front() {
+                note(&e);
+                capped += 1;
+            }
+        }
+        for (request_id, replier) in holds {
+            self.release_reply(&request_id, replier);
+        }
+        capped
+    }
+
+    /// ★The verdict entry's only edge out of `RemotePending` (ADR-0393 decision 1)★ — picks the entry by (mail id, tag) and checks it was
+    ///   sent to `node`; mirrors the state onto the history row if that row is still in the ring (never its `to_id`). Releases the hold of
+    /// the contract a reply closes (the reply close itself is the caller's, by ADR-0116 decision 2's rule, in the same lock span).
+    // ADR-0393
+    pub fn settle_remote(
+        &mut self,
+        msg_id: &str,
+        node: crate::NodeRef,
+        tag: u32,
+        settlement: RemoteSettlement,
+        now: Instant,
+    ) -> Result<SettledRemoteRow, RemoteSettleError> {
+        let Some(entry) = self
+            .remote
+            .iter_mut()
+            .find(|e| e.msg_id == msg_id && e.send.tag == tag)
+        else {
+            return Err(RemoteSettleError::NotFound);
+        };
+        if entry.send.node != node {
+            return Err(RemoteSettleError::OtherNode);
+        }
+        if entry.settled {
+            return Err(RemoteSettleError::AlreadySettled);
+        }
+        let next = match &settlement {
+            RemoteSettlement::Delivered { to_id } => {
+                entry.recipient_id = Some(*to_id);
+                Some(DeliveryStatus::Delivered)
+            }
+            RemoteSettlement::Held { to_id } => {
+                entry.recipient_id = Some(*to_id);
+                Some(DeliveryStatus::RemoteHeld)
+            }
+            RemoteSettlement::Failed { .. } => Some(DeliveryStatus::Failed),
+            RemoteSettlement::Unconfirmed => None,
+        };
+        // An unsettled entry is always `RemotePending`: nothing else moves it, so the edge is legal here.
+        let next = next.filter(|n| entry.status.can_settle_remote(*n));
+        if let Some(next) = next {
+            entry.status = next;
+        }
+        if let RemoteSettlement::Failed { code, reason } = settlement {
+            entry.fail_code = Some(code);
+            entry.reason = reason;
+        }
+        entry.settled = true;
+        let out = SettledRemoteRow {
+            tag,
+            from_id: entry.from_id,
+            from: entry.from.clone(),
+            to: entry.to.clone(),
+            pc_name: entry.send.pc_name.clone(),
+            answered: entry.answered,
+            closes: entry.send.closes.clone(),
+        };
+        let fail_code = entry.fail_code;
+        if let Some(rec) = self
+            .history
+            .iter_mut()
+            .find(|r| r.msg_id == msg_id && r.remote == Some(RemoteRef { node, tag }))
+        {
+            if let Some(next) = next {
+                rec.status = next;
+                rec.transitioned_at = now;
+            }
+            rec.fail_code = fail_code;
+        }
+        if let Some(request_id) = &out.closes {
+            self.release_reply(request_id, out.from_id);
+        }
+        Ok(out)
+    }
+
+    /// The unsettled tags of this mail to `node` — the verdict entry settles them `Unconfirmed` after a mail's final verdict call.
+    // ADR-0393
+    pub fn unsettled_remote_tags(&self, msg_id: &str, node: crate::NodeRef) -> Vec<u32> {
+        self.remote
+            .iter()
+            .filter(|e| e.msg_id == msg_id && e.send.node == node && !e.settled)
+            .map(|e| e.send.tag)
+            .collect()
+    }
+
+    /// `None` = the mail has no remote entry; `Some(true)` = every remote entry has a verdict (possibly "unconfirmed").
+    // ADR-0393
+    pub fn remote_rows_settled(&self, msg_id: &str) -> Option<bool> {
+        let mut any = false;
+        for e in self.remote.iter().filter(|e| e.msg_id == msg_id) {
+            any = true;
+            if !e.settled {
+                return Some(false);
+            }
+        }
+        any.then_some(true)
+    }
+
+    /// ★Seals the sending agent's answer for this mail's remote rows★ — marks each answered and returns them, so a verdict after this
+    ///   point goes out as a notice and one before it is in the answer: each row is reported exactly once (the caller holds the
+    /// messaging lock, which every verdict also takes).
+    // ADR-0393
+    pub fn seal_remote_answer(&mut self, msg_id: &str) -> Vec<RemoteRowView> {
+        let mut out = Vec::new();
+        for e in self.remote.iter_mut().filter(|e| e.msg_id == msg_id) {
+            e.answered = true;
+            out.push(RemoteRowView {
+                tag: e.send.tag,
+                to: e.to.clone(),
+                status: e.status,
+                fail_code: e.fail_code,
+                pc_name: e.send.pc_name.clone(),
+                reason: e.reason.clone(),
+            });
+        }
+        out
+    }
+
+    /// ★A reply to this PC's request `request_id` arrived from `node`★ — marks that request's rows to `node` whose recipient is the replier
+    ///   (by the verdict's recipient id, else by the token sent) as replied, so no overdue report names them.
+    // ADR-0393
+    pub fn mark_remote_replied(
+        &mut self,
+        request_id: &str,
+        node: crate::NodeRef,
+        replier_id: PeerId,
+        replier_name: &str,
+    ) {
+        for e in self
+            .remote
+            .iter_mut()
+            .filter(|e| e.msg_id == request_id && e.send.node == node)
+        {
+            let by_id = e.recipient_id == Some(replier_id);
+            // The token may be an id in any form `resolve_token` accepts (braced, simple, urn) — compared as an id, not as text.
+            let by_token = e.recipient_id.is_none()
+                && (e.send.sent_to == replier_name
+                    || PeerId::parse_str(&e.send.sent_to).ok() == Some(replier_id));
+            if by_id || by_token {
+                e.replied = true;
+            }
+        }
+    }
+
+    /// ★Accepts a `ReplyOverdue` for request `request_id` from `node` (ADR-0393 decision 6)★ — candidates = that request's deadline-bearing rows
+    ///   to `node`, not failed, not answered by a reply, not already reported. All candidates are covered by one report and marked reported
+    /// (a later report finds none); a report before the deadline on this PC's clock is refused. Rows that reached one recipient (aliases: a
+    /// name and an id) are listed once.
+    // ADR-0393
+    pub fn accept_reply_overdue(
+        &mut self,
+        request_id: &str,
+        node: crate::NodeRef,
+        now: Instant,
+    ) -> Result<OverdueReport, OverdueRefusal> {
+        let candidates: Vec<usize> = self
+            .remote
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.msg_id == request_id && e.send.node == node && e.awaits_overdue())
+            .map(|(i, _)| i)
+            .collect();
+        let Some(&first) = candidates.first() else {
+            return Err(OverdueRefusal::NoCandidate);
+        };
+        if self.remote[first].deadline().is_none_or(|d| now <= d) {
+            return Err(OverdueRefusal::BeforeDeadline);
+        }
+        let head = &self.remote[first];
+        let mut report = OverdueReport {
+            from_id: head.from_id,
+            from: head.from.clone(),
+            pc_name: head.send.pc_name.clone(),
+            reply_by_raw: head
+                .send
+                .reply_by
+                .as_ref()
+                .map(|(_, raw)| raw.clone())
+                .unwrap_or_default(),
+            agents: Vec::new(),
+        };
+        let mut seen: Vec<PeerId> = Vec::new();
+        for i in candidates {
+            let e = &mut self.remote[i];
+            e.overdue_reported = true;
+            if let Some(id) = e.recipient_id {
+                if seen.contains(&id) {
+                    continue;
+                }
+                seen.push(id);
+            }
+            report
+                .agents
+                .push(format!("{}@{}", e.send.sent_to, e.send.pc_name));
+        }
+        Ok(report)
     }
 
     /// ★Reservation confirm (commit) — physically remove the marked victim and clear the provisional mark (round-5)★. A victim closed by a
@@ -810,6 +1369,8 @@ impl Ledger {
             // ★Retirement-marked and provisional contracts are right here (round-5)★ — physical removal was dropped, so the ordinary
             //   tracking lookup suffices (no separate `reserved_ids`).
             || self.requests.iter().any(|r| r.request_id == msg_id)
+            // ADR-0393: a remote request's id stays in use while its entry lives, even after its history rows left the ring.
+            || self.remote.iter().any(|e| e.msg_id == msg_id)
     }
 
     /// ★Use (C3 review fix 5 — narrowing the timeout↔reply race)★: the upper layer re-checks just before parking the notice — if a reply
@@ -1026,7 +1587,11 @@ impl Ledger {
     pub fn due_timeouts(&mut self, now: Instant) -> Vec<DueTimeout> {
         let mut due = Vec::new();
         for r in self.requests.iter_mut() {
-            if r.closed || r.notified || r.provisional {
+            // ADR-0393: a reply verdict in flight holds the overdue report back (delayed, not lost — like a provisional entry), for at most REPLY_HOLD_MAX.
+            let held = r.reply_holds > 0
+                && r.hold_at
+                    .is_some_and(|t| now.saturating_duration_since(t) <= REPLY_HOLD_MAX);
+            if r.closed || r.notified || r.provisional || held {
                 continue;
             }
             let Some((reply_by, reply_by_raw)) = r.reply_by.clone() else {
@@ -1042,6 +1607,7 @@ impl Ledger {
                     recipient: r.recipient.clone(),
                     recipient_id: r.recipient_id,
                     reply_by_raw,
+                    sender_node: r.sender_node,
                 });
             }
         }
@@ -3591,6 +4157,475 @@ mod tests {
             l.occupied_slots(),
             3,
             "only m-prov (provisional) + m-other + m-namesake take spots"
+        );
+    }
+
+    // ── Remote rows (S37 U3a — ADR-0393) ──
+
+    fn node_of(b: u8) -> crate::NodeRef {
+        crate::NodeRef::from_bytes([b; 32])
+    }
+
+    fn remote_send(node: u8, tag: u32, closes: Option<&str>) -> RemoteSend {
+        RemoteSend {
+            node: node_of(node),
+            pc_name: "home".to_string(),
+            tag,
+            sent_to: "bob".to_string(),
+            reply_by: None,
+            closes: closes.map(str::to_string),
+        }
+    }
+
+    fn remote_request(tag: u32, sent_to: &str, by: Duration) -> RemoteSend {
+        RemoteSend {
+            sent_to: sent_to.to_string(),
+            reply_by: Some((by, format!("{}s", by.as_secs()))),
+            ..remote_send(1, tag, None)
+        }
+    }
+
+    #[test]
+    fn only_the_verdict_verb_moves_a_remote_row_and_never_backwards() {
+        let mut l = Ledger::new();
+        let now = t0();
+        let n = node_of(1);
+        l.record_remote(
+            "m-1",
+            "alice",
+            tid("alice"),
+            "bob@home",
+            "hi",
+            now,
+            1,
+            remote_send(1, 0, None),
+        );
+
+        // Neither the general graph nor the cleanup edge reaches it.
+        assert_eq!(
+            l.transition("m-1", tid("bob"), DeliveryStatus::Delivered, now),
+            Err(TransitionError::NotFound)
+        );
+        for next in [
+            DeliveryStatus::Pending,
+            DeliveryStatus::Delivered,
+            DeliveryStatus::RemoteHeld,
+            DeliveryStatus::Failed,
+        ] {
+            assert!(!DeliveryStatus::RemotePending.can_transition_to(next));
+            assert!(!next.can_transition_to(DeliveryStatus::RemotePending));
+        }
+        assert!(!DeliveryStatus::RemotePending.can_fail_by_cleanup());
+        assert!(!DeliveryStatus::RemoteHeld.can_settle_remote(DeliveryStatus::Delivered));
+        assert!(!DeliveryStatus::Pending.can_settle_remote(DeliveryStatus::Delivered));
+
+        assert_eq!(
+            l.settle_remote("m-1", n, 1, RemoteSettlement::Unconfirmed, now),
+            Err(RemoteSettleError::NotFound)
+        );
+        assert_eq!(
+            l.settle_remote("m-1", node_of(2), 0, RemoteSettlement::Unconfirmed, now),
+            Err(RemoteSettleError::OtherNode)
+        );
+        let settled = l
+            .settle_remote(
+                "m-1",
+                n,
+                0,
+                RemoteSettlement::Held { to_id: tid("bob") },
+                now,
+            )
+            .unwrap();
+        assert!(!settled.answered);
+        assert_eq!(l.records_for("m-1")[0].status, DeliveryStatus::RemoteHeld);
+        assert_eq!(
+            l.records_for("m-1")[0].to_id,
+            None,
+            "the peer-reported id is not a local key"
+        );
+        assert_eq!(
+            l.settle_remote(
+                "m-1",
+                n,
+                0,
+                RemoteSettlement::Delivered { to_id: tid("bob") },
+                now
+            ),
+            Err(RemoteSettleError::AlreadySettled)
+        );
+        // Settled, the row still cannot be moved by a local verb keyed on that id.
+        assert_eq!(
+            l.transition("m-1", tid("bob"), DeliveryStatus::Replied, now),
+            Err(TransitionError::NotFound)
+        );
+    }
+
+    #[test]
+    fn seal_marks_rows_answered_so_a_later_verdict_reports_it() {
+        let mut l = Ledger::new();
+        let now = t0();
+        let n = node_of(1);
+        l.record_remote(
+            "m-1",
+            "alice",
+            tid("alice"),
+            "bob",
+            "hi",
+            now,
+            2,
+            remote_send(1, 0, None),
+        );
+        l.record_remote(
+            "m-1",
+            "alice",
+            tid("alice"),
+            "dan",
+            "hi",
+            now,
+            2,
+            remote_send(1, 1, None),
+        );
+        assert_eq!(l.remote_rows_settled("m-1"), Some(false));
+        assert_eq!(l.remote_rows_settled("m-none"), None);
+
+        let before = l
+            .settle_remote(
+                "m-1",
+                n,
+                0,
+                RemoteSettlement::Delivered { to_id: tid("bob") },
+                now,
+            )
+            .unwrap();
+        let sealed = l.seal_remote_answer("m-1");
+        let after = l
+            .settle_remote("m-1", n, 1, RemoteSettlement::Unconfirmed, now)
+            .unwrap();
+
+        assert!(!before.answered);
+        assert!(after.answered);
+        assert_eq!(sealed.len(), 2);
+        assert_eq!(sealed[1].status, DeliveryStatus::RemotePending);
+        assert_eq!(l.remote_rows_settled("m-1"), Some(true));
+        assert_eq!(
+            l.records_for("m-1")[1].status,
+            DeliveryStatus::RemotePending
+        );
+    }
+
+    #[test]
+    fn remote_correlation_survives_history_eviction() {
+        // A ring of one row: every later record pushes the remote rows out of history.
+        let mut l = Ledger::with_capacity(1);
+        let now = t0();
+        let n = node_of(1);
+        l.record_remote(
+            "m-1",
+            "alice",
+            tid("alice"),
+            "bob",
+            "hi",
+            now,
+            1,
+            remote_send(1, 0, None),
+        );
+        l.record_remote(
+            "m-req",
+            "alice",
+            tid("alice"),
+            "dan",
+            "hi",
+            now,
+            1,
+            remote_request(0, "dan", Duration::from_secs(60)),
+        );
+        l.record(
+            "m-x",
+            "x",
+            tid("x"),
+            "y",
+            Some(tid("y")),
+            "b",
+            DeliveryStatus::Pending,
+            now,
+        );
+        assert!(l.records_for("m-1").is_empty() && l.records_for("m-req").is_empty());
+
+        // The verdict and the answer still find the row.
+        assert!(l
+            .settle_remote(
+                "m-1",
+                n,
+                0,
+                RemoteSettlement::Delivered { to_id: tid("bob") },
+                now
+            )
+            .is_ok());
+        assert_eq!(
+            l.seal_remote_answer("m-1")[0].status,
+            DeliveryStatus::Delivered
+        );
+        // The overdue report still finds the request row.
+        let report = l
+            .accept_reply_overdue("m-req", n, now + Duration::from_secs(61))
+            .expect("accepted");
+        assert_eq!(report.agents, vec!["dan@home".to_string()]);
+    }
+
+    #[test]
+    fn the_remote_store_drops_rows_with_no_purpose_left_and_keeps_requests_until_deadline_and_grace(
+    ) {
+        let mut l = Ledger::new();
+        let t = t0();
+        let n = node_of(1);
+        l.record_remote(
+            "m-1",
+            "a",
+            tid("a"),
+            "bob",
+            "hi",
+            t,
+            1,
+            remote_send(1, 0, None),
+        );
+        l.record_remote(
+            "m-req",
+            "a",
+            tid("a"),
+            "dan",
+            "hi",
+            t,
+            1,
+            remote_request(0, "dan", Duration::from_secs(3600)),
+        );
+        l.settle_remote("m-1", n, 0, RemoteSettlement::Unconfirmed, t)
+            .unwrap();
+        l.seal_remote_answer("m-1");
+        l.settle_remote(
+            "m-req",
+            n,
+            0,
+            RemoteSettlement::Delivered { to_id: tid("dan") },
+            t,
+        )
+        .unwrap();
+        l.seal_remote_answer("m-req");
+
+        l.prune_remote(t);
+        assert_eq!(
+            l.remote_rows_settled("m-1"),
+            None,
+            "settled and answered: gone"
+        );
+        assert_eq!(
+            l.remote_rows_settled("m-req"),
+            Some(true),
+            "kept for its overdue report"
+        );
+        l.prune_remote(
+            t + Duration::from_secs(3600) + REMOTE_OVERDUE_GRACE + Duration::from_secs(1),
+        );
+        assert_eq!(
+            l.remote_rows_settled("m-req"),
+            None,
+            "past deadline + grace: gone"
+        );
+
+        // An unsettled row lives until the verdict horizon.
+        l.record_remote(
+            "m-2",
+            "a",
+            tid("a"),
+            "bob",
+            "hi",
+            t,
+            1,
+            remote_send(1, 0, None),
+        );
+        l.prune_remote(t + REMOTE_VERDICT_HORIZON);
+        assert_eq!(l.remote_rows_settled("m-2"), Some(false));
+        l.prune_remote(t + REMOTE_VERDICT_HORIZON + Duration::from_secs(1));
+        assert_eq!(l.remote_rows_settled("m-2"), None);
+    }
+
+    #[test]
+    fn the_remote_store_is_capped_oldest_first() {
+        let mut l = Ledger::new();
+        let t = t0();
+        for i in 0..=MAX_REMOTE_ENTRIES {
+            l.record_remote(
+                &format!("m-{i}"),
+                "a",
+                tid("a"),
+                "bob",
+                "hi",
+                t,
+                1,
+                remote_send(1, 0, None),
+            );
+        }
+        assert_eq!(l.prune_remote(t), 1);
+        assert_eq!(l.remote_rows_settled("m-0"), None);
+        assert_eq!(
+            l.remote_rows_settled(&format!("m-{MAX_REMOTE_ENTRIES}")),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn reply_holds_count_each_reply_and_lapse_after_reply_hold_max() {
+        let deadline = Duration::from_secs(60);
+        let now = t0();
+        let late = now + deadline + Duration::from_secs(1);
+        let bob = tid("bob");
+        let n = node_of(1);
+
+        // Two replies in flight: the first verdict does not release the contract.
+        let mut l = Ledger::new();
+        open_committed(&mut l, "r-1", rb(deadline), now);
+        l.hold_reply("r-1", bob, now);
+        l.record_remote(
+            "m-r1",
+            "bob",
+            bob,
+            "alice@away",
+            "re",
+            now,
+            1,
+            remote_send(1, 0, Some("r-1")),
+        );
+        l.hold_reply("r-1", bob, now);
+        l.record_remote(
+            "m-r2",
+            "bob",
+            bob,
+            "alice@away",
+            "re",
+            now,
+            1,
+            remote_send(1, 0, Some("r-1")),
+        );
+        assert!(l.due_timeouts(late).is_empty());
+        l.settle_remote("m-r1", n, 0, RemoteSettlement::Unconfirmed, now)
+            .unwrap();
+        assert!(
+            l.due_timeouts(late).is_empty(),
+            "the second reply still holds it"
+        );
+        l.settle_remote("m-r2", n, 0, RemoteSettlement::Unconfirmed, now)
+            .unwrap();
+        assert_eq!(l.due_timeouts(late).len(), 1, "delayed, not lost");
+
+        // A hold whose verdict never comes lapses after REPLY_HOLD_MAX.
+        let mut l = Ledger::new();
+        open_committed(&mut l, "r-1", rb(deadline), now);
+        l.hold_reply("r-1", bob, now);
+        assert!(l.due_timeouts(now + REPLY_HOLD_MAX).is_empty());
+        assert_eq!(
+            l.due_timeouts(now + REPLY_HOLD_MAX + Duration::from_secs(1))
+                .len(),
+            1
+        );
+
+        // A reply's remote entry dropped before its verdict releases its hold.
+        let mut l = Ledger::new();
+        open_committed(&mut l, "r-1", rb(deadline), now);
+        l.hold_reply("r-1", bob, now);
+        l.record_remote(
+            "m-r",
+            "bob",
+            bob,
+            "alice@away",
+            "re",
+            now,
+            1,
+            remote_send(1, 0, Some("r-1")),
+        );
+        l.prune_remote(now + REMOTE_VERDICT_HORIZON + Duration::from_secs(1));
+        assert_eq!(l.due_timeouts(late).len(), 1);
+    }
+
+    #[test]
+    fn requester_node_rides_the_due_timeout() {
+        let mut l = Ledger::new();
+        let now = t0();
+        let n = node_of(4);
+        open_committed(&mut l, "r-1", rb(Duration::from_secs(60)), now);
+        l.attach_requester_node("r-1", tid("bob"), n);
+        open_committed(&mut l, "r-2", rb(Duration::from_secs(60)), now);
+
+        let due = l.due_timeouts(now + Duration::from_secs(61));
+
+        assert_eq!(due.len(), 2);
+        assert_eq!(due[0].sender_node, Some(n));
+        assert_eq!(due[1].sender_node, None);
+        assert_eq!(l.requester_node("r-1", tid("bob")), Some(n));
+    }
+
+    #[test]
+    fn an_overdue_report_covers_only_unanswered_unreported_rows_after_the_deadline() {
+        let mut l = Ledger::new();
+        let t = t0();
+        let n = node_of(1);
+        let by = Duration::from_secs(60);
+        l.record_remote(
+            "m-req",
+            "a",
+            tid("a"),
+            "bob@home",
+            "q",
+            t,
+            3,
+            remote_request(0, "bob", by),
+        );
+        l.record_remote(
+            "m-req",
+            "a",
+            tid("a"),
+            "dan@home",
+            "q",
+            t,
+            3,
+            remote_request(1, "dan", by),
+        );
+        l.record_remote(
+            "m-req",
+            "a",
+            tid("a"),
+            "eve@home",
+            "q",
+            t,
+            3,
+            remote_request(2, "eve", by),
+        );
+        l.settle_remote(
+            "m-req",
+            n,
+            2,
+            RemoteSettlement::Failed {
+                code: "MAILBOX_FULL",
+                reason: None,
+            },
+            t,
+        )
+        .unwrap();
+        // bob replied (matched by token — no recipient id known yet).
+        l.mark_remote_replied("m-req", n, tid("bob"), "bob");
+
+        assert_eq!(
+            l.accept_reply_overdue("m-req", n, t + by),
+            Err(OverdueRefusal::BeforeDeadline)
+        );
+        assert_eq!(
+            l.accept_reply_overdue("m-req", node_of(2), t + by * 2),
+            Err(OverdueRefusal::NoCandidate)
+        );
+        let report = l.accept_reply_overdue("m-req", n, t + by * 2).unwrap();
+        assert_eq!(report.agents, vec!["dan@home".to_string()]);
+        assert_eq!(
+            l.accept_reply_overdue("m-req", n, t + by * 2),
+            Err(OverdueRefusal::NoCandidate),
+            "reported once"
         );
     }
 }

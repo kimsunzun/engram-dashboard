@@ -166,7 +166,12 @@ impl DeliveryPort for ManagerDeliveryPort {
         }
         roster.sort_by(sort_key);
         dormant.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
-        AddressingSources { roster, dormant }
+        // ADR-0391: no other PC in the snapshot yet — the peer module does not feed messaging, so every address resolves locally.
+        AddressingSources {
+            roster,
+            dormant,
+            pcs: Vec::new(),
+        }
     }
 
     fn is_agent_live(&self, id: PeerId) -> bool {
@@ -1680,7 +1685,11 @@ mod tests {
             } else {
                 Vec::new()
             };
-            AddressingSources { roster, dormant }
+            AddressingSources {
+                roster,
+                dormant,
+                pcs: Vec::new(),
+            }
         }
         fn is_agent_live(&self, id: PeerId) -> bool {
             self.agents().iter().any(|a| a.id == id)
@@ -1706,6 +1715,7 @@ mod tests {
                     SenderIdentity {
                         peer_id: PeerId::new_v4(),
                         epoch: 0,
+                        node: None,
                     },
                     "sender",
                     &[name.to_string()],

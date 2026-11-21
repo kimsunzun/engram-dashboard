@@ -42,6 +42,8 @@ impl From<BoundIdentity> for engram_dashboard_messaging::SenderIdentity {
         Self {
             peer_id: b.agent_id,
             epoch: b.epoch,
+            // A control-channel caller is an agent of this PC.
+            node: None,
         }
     }
 }

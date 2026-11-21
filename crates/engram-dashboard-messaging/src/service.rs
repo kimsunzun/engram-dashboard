@@ -27,11 +27,18 @@
 //! ★Envelope = assembled at injection time (single wrap point, ADR-0096)★: parking stores the unwrapped body + sender name + `SendMeta` (`ParkPayload`);
 //! `wrap_message`/`wrap_notice` (`envelope.rs`) build it at injection so a flush uses the *current* format (colon/xml switch); immediate and late delivery must match.
 //!
+//! ★Remote rows (ADR-0391, ADR-0393)★: a token resolved to an agent on another PC is recorded `RemotePending` (no contract here) and handed to
+//! `RemoteDeliveryPort::enqueue` after the lock is released, one mail per PC; its outcome arrives later through `handle_remote_verdict`, the
+//! only path out of `RemotePending`. The control entrance answers the agent through `await_remote_answer`, which seals the answer under the
+//! lock so each row is reported exactly once — in the answer, or by a later notice. Inbound mail enters through `handle_remote_mail` and is
+//! resolved against local agents only (`ResolveScope::LocalOnly` — no forwarding to a third PC).
+//!
 //! Workspace crate imports: 0 (ADR-0110 — enforced by the compiler).
 // ADR-0103, ADR-0104, ADR-0111, ADR-0112, ADR-0114, ADR-0116, ADR-0118, ADR-0121, ADR-0125, ADR-0309
+// ADR-0390, ADR-0391, ADR-0393
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::busy::{AlwaysIdleGate, BusyGate, BusyReason};
@@ -43,11 +50,12 @@ use super::groups::{
     normalize_group_name, BuiltinGroups, GroupError, GroupMember, GroupSource, MemberPools,
 };
 use super::ledger::{
-    DeliveryStatus, DueTimeout, Ledger, OpenOutcome, ReplyFailOutcome, ReplyOutcome,
-    ReservationLiveness, RetiredContract, TransitionError,
+    DeliveryStatus, DueTimeout, Ledger, OpenOutcome, RemoteRowView, RemoteSend, RemoteSettleError,
+    RemoteSettlement, ReplyFailOutcome, ReplyOutcome, ReservationLiveness, RetiredContract,
+    TransitionError,
 };
 use super::mailbox::{FlightTicket, Mailbox, ParkError, ParkKind, ParkedMessage};
-use crate::{PeerId, SenderIdentity};
+use crate::{NodeRef, PeerId, SenderIdentity};
 
 /// Ledger sender label for a notice — a notice has no real sender but the ledger record requires `from`. ★Not an address★: nothing can be sent to it
 /// and it is never rendered in an envelope (a notice envelope has no from attribute — ADR-0103).
@@ -143,9 +151,38 @@ pub enum FailCode {
     /// the sender must tell "wrote the name wrong" from "waited and the peer was deleted" (different resend decision).
     // ADR-0116
     RecipientDeleted,
+    /// ★The recipient's PC has no live link★ (also: the link dropped before the mail was handed to it) — nothing was sent; there is no outbox,
+    ///   so the sender resends when the PC is back.
+    // ADR-0390, ADR-0393
+    PeerOffline,
+    /// A limit on the way to another PC: the receiver's per-PC backstop or body re-check, or this PC's in-flight cap to that PC.
+    // ADR-0390
+    RemoteLimit,
+    /// The other PC refused the mail (validation, permission, id collision) — also any verdict code outside the closed set.
+    // ADR-0390
+    RemoteRefused,
+    /// ★The sending agent's own name breaks the remote name rule★ (`remote_name_ok`) — the receiver would refuse it, so nothing is sent.
+    // ADR-0390
+    NameTooLong,
+    /// The encoded mail to that PC would exceed the link's frame cap — that PC's rows fail, the link stays up.
+    // ADR-0390
+    BodyTooLarge,
 }
 
 impl FailCode {
+    const ALL: [FailCode; 10] = [
+        FailCode::RecipientNotFound,
+        FailCode::RecipientAmbiguous,
+        FailCode::MailboxFull,
+        FailCode::RequestCapacity,
+        FailCode::RecipientDeleted,
+        FailCode::PeerOffline,
+        FailCode::RemoteLimit,
+        FailCode::RemoteRefused,
+        FailCode::NameTooLong,
+        FailCode::BodyTooLarge,
+    ];
+
     /// The wire code string (stable contract — the sending LLM branches on it, spec §6).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -154,8 +191,220 @@ impl FailCode {
             FailCode::MailboxFull => "MAILBOX_FULL",
             FailCode::RequestCapacity => "REQUEST_CAPACITY",
             FailCode::RecipientDeleted => "RECIPIENT_DELETED",
+            FailCode::PeerOffline => "PEER_OFFLINE",
+            FailCode::RemoteLimit => "REMOTE_LIMIT",
+            FailCode::RemoteRefused => "REMOTE_REFUSED",
+            FailCode::NameTooLong => "NAME_TOO_LONG",
+            FailCode::BodyTooLarge => "BODY_TOO_LARGE",
         }
     }
+
+    fn from_wire(code: &str) -> Option<FailCode> {
+        Self::ALL.into_iter().find(|c| c.as_str() == code)
+    }
+
+    /// ★A refused row's code from another PC, mapped onto the closed set★ — anything else (or none) becomes `REMOTE_REFUSED`, so a peer
+    ///   cannot make this daemon report a code it never defined for that case.
+    // ADR-0390
+    pub fn from_remote_code(code: Option<&str>) -> FailCode {
+        match code.and_then(Self::from_wire) {
+            Some(
+                c @ (FailCode::RemoteLimit
+                | FailCode::RecipientAmbiguous
+                | FailCode::MailboxFull
+                | FailCode::RequestCapacity
+                | FailCode::RemoteRefused),
+            ) => c,
+            _ => FailCode::RemoteRefused,
+        }
+    }
+}
+
+/// ★Remote name rule★ — an agent name that may travel to another PC: non-empty, at most `REMOTE_NAME_MAX_BYTES`, no control characters.
+///   Agent names have no local cap, so the sender checks its own name (`NAME_TOO_LONG`), the receiver checks the frame's, and the host's
+/// directory publisher omits names that break it.
+// ADR-0390
+pub fn remote_name_ok(name: &str) -> bool {
+    !name.is_empty() && name.len() <= REMOTE_NAME_MAX_BYTES && !name.chars().any(char::is_control)
+}
+
+pub const REMOTE_NAME_MAX_BYTES: usize = 256;
+
+/// Rows per inbound mail (`InboundMail::rows`).
+// ADR-0390
+pub const MAX_REMOTE_ROWS: usize = 64;
+
+/// Cap of a peer's refusal reason as this PC shows it.
+// ADR-0390
+pub const REMOTE_REASON_MAX_BYTES: usize = 512;
+
+/// ★Which addresses a send may resolve to★ — `All` for this PC's own entrances; `LocalOnly` for mail that came from another PC, so the
+///   listed PCs and directory copies are ignored and nothing is forwarded to a third PC (a name not here is `RECIPIENT_NOT_FOUND`).
+///   A named argument because `send_pipeline` takes its own snapshot — the caller cannot hand it an emptied one.
+// ADR-0390
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveScope {
+    All,
+    LocalOnly,
+}
+
+/// ★One PC this daemon lists (trusted)★, as the host's peer module sees it at snapshot time.
+// ADR-0391
+#[derive(Debug, Clone)]
+pub struct RemotePc {
+    pub node: NodeRef,
+    /// This PC's name for it — unique ignoring case, no `@`; matched by `name@pc`.
+    pub name: String,
+    pub link: PcLink,
+    /// ★The read-only copy of its agent directory★ — `None` = unknown this run (no copy since this daemon started): such a PC is not
+    ///   counted for bare names (write `name@pc` to reach it). `Some` (possibly empty) = known, connected or not.
+    pub directory: Option<Vec<DirectoryEntry>>,
+}
+
+/// One row of a directory copy (live or asleep — resolution treats them alike; the PC resolves its own layers).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    pub id: PeerId,
+    pub name: String,
+}
+
+/// The link state of a listed PC — anything but `Connected` makes its rows `PEER_OFFLINE` at once, with a hint naming the cause.
+// ADR-0390
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PcLink {
+    Connected,
+    Offline,
+    /// That PC refuses this PC's link — it does not list this PC's ID.
+    Refused,
+    VersionMismatch,
+}
+
+/// ★Host port for mail to and from other PCs (the daemon's peer module)★. ★Out-of-lock call contract★ like `DeliveryPort`.
+// ADR-0390, ADR-0393
+pub trait RemoteDeliveryPort: Send + Sync {
+    /// ★Non-blocking★: hands one mail to one PC (its rows only) and returns. ★Verdict contract★: exactly one final
+    ///   `MessagingService::handle_remote_verdict` call per mail — including "not sent" (`RemoteOutcome::NotSent`) and "no answer"
+    /// (`RemoteOutcome::Unconfirmed`); tags that call leaves out are settled `Unconfirmed` by the kernel, and a mail with no call at all stays
+    /// unconfirmed until its remote entry ages out (`ledger::REMOTE_VERDICT_HORIZON`). The host's transport deadline is
+    /// `ledger::REMOTE_TRANSPORT_DEADLINE`; on the receiving side it drops an inbound mail past that deadline instead of running it late,
+    /// counted from the mail's arrival on the receiving PC (the PCs share no clock; transit sits inside the overdue grace margin).
+    fn enqueue(&self, mail: OutboundMail);
+    /// Best-effort and ★non-blocking★ (called from the sweep task; a blocking adapter stalls the TTL / BUSY sweep): tells `node` that its
+    /// request `request_id` is overdue here (lost if the link is down).
+    fn send_reply_overdue(&self, node: NodeRef, request_id: &str);
+    /// ★Is this id an agent of this PC★ — every profile and live session, live shells included (not the mail-eligible set): an inbound
+    ///   sender id that is also local is refused (a copied data folder).
+    fn is_local_agent_id(&self, id: PeerId) -> bool;
+}
+
+/// One mail to one PC — what `RemoteDeliveryPort::enqueue` receives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundMail {
+    pub id: String,
+    pub node: NodeRef,
+    pub from: SenderIdentity,
+    pub sender_name: String,
+    pub rows: Vec<OutboundRow>,
+    pub body: String,
+    /// `request` / `reply_by_raw` / `reply_to` as validated by the sender's entrance (`to_attr` is never set).
+    pub meta: SendMeta,
+}
+
+/// ★`tag` = the row index of the send, frozen on the ledger row★ — the verdict is matched by it, never by the notation. `to` = the name or
+///   id on that PC (`@pc` stripped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundRow {
+    pub tag: u32,
+    pub to: String,
+}
+
+/// One row's outcome reported by the host for a mail it was handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRowVerdict {
+    pub tag: u32,
+    pub outcome: RemoteOutcome,
+}
+
+// ADR-0393
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteOutcome {
+    Delivered {
+        recipient_id: PeerId,
+    },
+    /// Parked on that PC (recipient asleep or busy).
+    Held {
+        recipient_id: PeerId,
+    },
+    /// Refused by that PC; `code` is mapped onto the closed set (`FailCode::from_remote_code`), `reason` is capped.
+    Refused {
+        code: Option<String>,
+        reason: Option<String>,
+    },
+    UnknownRecipient,
+    /// ★Not handed to that PC★ — `PEER_OFFLINE` (no live link, or dropped before sending), `REMOTE_LIMIT` (in-flight cap), `BODY_TOO_LARGE`.
+    NotSent(FailCode),
+    /// ★No outcome will come★ — the transport deadline passed, or the link dropped after the mail was handed over (it may have arrived).
+    Unconfirmed,
+}
+
+/// One inbound mail, decoded by the host (the sender's node is the link's, not a frame field).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundMail {
+    pub id: String,
+    pub from_agent_id: PeerId,
+    /// The sending daemon's claim — the link authenticates the PC, not the agent name.
+    pub from_name: String,
+    pub rows: Vec<InboundRow>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundRow {
+    pub tag: u32,
+    pub to: String,
+}
+
+/// ★Per-row result of the remote entrance★ — `tag` echoes the request row; two rows that resolve to one local agent (an id and a name)
+///   share one delivery and the same outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRowResult {
+    pub tag: u32,
+    pub outcome: InboundOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboundOutcome {
+    Delivered {
+        recipient_id: PeerId,
+    },
+    Held {
+        recipient_id: PeerId,
+    },
+    /// `RECIPIENT_AMBIGUOUS` · `MAILBOX_FULL` · `REQUEST_CAPACITY` (the receiver's own row codes).
+    Refused(FailCode),
+    UnknownRecipient,
+}
+
+/// ★Whole-frame refusal by the remote entrance★ — `code` is `REMOTE_REFUSED` (validation, a local sender id, id collision) or `REMOTE_LIMIT`
+///   (backstop, body cap); `reason` is this daemon's text, at most `REMOTE_REASON_MAX_BYTES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRefusal {
+    pub code: FailCode,
+    pub reason: String,
+}
+
+/// ★Inbound limits, one value injected by the host★ (ready for a later settings system): the per-PC backstop against a broken peer daemon
+///   and the body re-check. No per-agent or per-pair limit.
+// ADR-0390
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteLimits {
+    pub mails_per_minute: usize,
+    pub max_body_bytes: usize,
+}
+
+struct RemoteWiring {
+    port: Arc<dyn RemoteDeliveryPort>,
+    limits: RemoteLimits,
 }
 
 /// ★Send-level bounce (spec §5·§6 `{status:"error", code, hint}`)★ — only problems that cannot be split per recipient. ★Layering (ADR-0114 decision 3)★:
@@ -261,6 +510,10 @@ pub struct AddressingSources {
     /// ★Duplicates are not folded★ — input of the duplicate-name decision (a shared name → `RECIPIENT_AMBIGUOUS`). `@all` expands by id, so each gets its own row
     /// (ADR-0309, TRD S29 §4 X1).
     pub dormant: Vec<DormantAgent>,
+    /// ★The listed PCs and their directory copies, from the host's peer module in the same snapshot call★ — read only by `ResolveScope::All`.
+    ///   Empty = no other PC (every resolution stays local). `@all` / `@here` never expand to these.
+    // ADR-0391
+    pub pcs: Vec<RemotePc>,
 }
 
 /// ★Flush doorbell seam (C2 review fix 11)★ — hands "flush this agent's parking queue now" to another thread. Production = a non-blocking enqueue onto the
@@ -322,6 +575,9 @@ struct MessagingState {
     /// panic before unwind, so this is reachable only in test builds without it (ADR-0292).
     // ADR-0142
     deferred_by_target: HashMap<PeerId, Vec<PeerId>>,
+    /// ★Per-PC backstop window★ — arrival instants of the inbound mails accepted in the last minute, per node (at most the limit each).
+    // ADR-0390
+    backstop: HashMap<NodeRef, VecDeque<Instant>>,
 }
 
 /// ★Shared★: built as an `Arc<MessagingService>` at daemon boot; ingress (handle_send), the flush observer and the sweep task share one instance (lib.rs run()).
@@ -335,12 +591,22 @@ pub struct MessagingService {
     busy: Arc<dyn BusyGate>,
     /// `None` = unwired → inline drain fallback (FlushTrigger comment).
     trigger: Option<Arc<dyn FlushTrigger>>,
+    /// `None` = no remote mail: remote rows fail `PEER_OFFLINE`, inbound mail is refused.
+    // ADR-0390
+    remote: Option<RemoteWiring>,
+    /// ★Woken on every verdict★ — `await_remote_answer` waits on it (with the messaging lock) until its rows are settled or its deadline.
+    // ADR-0393
+    remote_settled: Condvar,
     /// ★Test-only acceptance critical-section hook (review fix D2)★: shows the ledger **while still holding the lock that recorded the acceptance**, fired once just
     /// before leaving the `handle_send` main critical section. Needed because "acceptance and contract closing in one critical section" cannot be asserted from final
     /// state (two locks give the same result without a race); if closing slips to another lock the observation reads `awaiting_reply` and goes red (no sleep, no thread).
     /// ★Contract★: reads only the ledger handed to it — does not re-take the service lock (non-reentrant std Mutex). ★`OnceLock`★: reads need no lock.
     #[cfg(any(test, feature = "test-harness"))]
     accept_hook: std::sync::OnceLock<Arc<dyn Fn(&Ledger) + Send + Sync>>,
+    /// ★Test-only seam: fired inside `await_remote_answer` right before each wait★ — while the messaging lock is held, so it must not take it;
+    ///   a test uses it to send a verdict only after the wait has started.
+    #[cfg(test)]
+    wait_hook: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl MessagingService {
@@ -361,14 +627,19 @@ impl MessagingService {
                 deferred_flush: HashMap::new(),
                 in_flight_targets: std::collections::HashSet::new(),
                 deferred_by_target: HashMap::new(),
+                backstop: HashMap::new(),
             }),
             groups: BuiltinGroups,
             port,
             registry,
             busy,
             trigger: None,
+            remote: None,
+            remote_settled: Condvar::new(),
             #[cfg(any(test, feature = "test-harness"))]
             accept_hook: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            wait_hook: std::sync::OnceLock::new(),
         }
     }
 
@@ -389,6 +660,13 @@ impl MessagingService {
     /// (fallback = inline flush).
     pub fn with_flush_trigger(mut self, trigger: Arc<dyn FlushTrigger>) -> Self {
         self.trigger = Some(trigger);
+        self
+    }
+
+    /// Wires mail to and from other PCs. Not a constructor argument for the same reason as the doorbell: assemblies without peers work as before.
+    // ADR-0390
+    pub fn with_remote(mut self, port: Arc<dyn RemoteDeliveryPort>, limits: RemoteLimits) -> Self {
+        self.remote = Some(RemoteWiring { port, limits });
         self
     }
 
@@ -418,6 +696,9 @@ impl MessagingService {
     /// ★Reply contract (spec §3, ADR-0111 decision 5)★: with `meta.request`, a contract opens for each accepted recipient (key `(msg_id, recipient id)`; asleep uses its profile
     /// id, ADR-0309) **before enqueue** — deferring would deliver an untracked request (spec §3 item 5). With `meta.reply_to`, the contract is closed by strict replier match
     /// once accepted (delivery unaffected if that fails).
+    /// ★Remote rows (ADR-0393)★: a row for an agent on another PC comes back `pending` with an "awaiting" hint; the entrance then calls
+    ///   `await_remote_answer` to replace it with the outcome or "unconfirmed". This entrance resolves with `ResolveScope::All` and is for this
+    /// PC's own agents only — never `Entrance::Remote` (mail from another PC goes through `handle_remote_mail`).
     // ADR-0111, ADR-0114, ADR-0125
     #[allow(clippy::too_many_arguments)]
     pub fn handle_send(
@@ -430,8 +711,40 @@ impl MessagingService {
         entrance: Entrance,
         meta: &SendMeta,
     ) -> Result<Vec<RecipientResult>, SendReject> {
+        debug_assert!(
+            entrance != Entrance::Remote,
+            "mail from another PC enters only through handle_remote_mail (validation, backstop, local-only resolution — ADR-0390)"
+        );
+        self.send_pipeline(
+            msg_id,
+            from,
+            sender_name,
+            to,
+            body,
+            entrance,
+            meta,
+            ResolveScope::All,
+        )
+        .map(|o| o.results)
+    }
+
+    /// The send pipeline behind `handle_send` and the remote entrance — `scope` is the only difference (no forwarding, ADR-0390).
+    // ADR-0111, ADR-0114, ADR-0125, ADR-0390, ADR-0393
+    #[allow(clippy::too_many_arguments)]
+    fn send_pipeline(
+        &self,
+        msg_id: &str,
+        from: SenderIdentity,
+        sender_name: &str,
+        to: &[String],
+        body: &str,
+        entrance: Entrance,
+        meta: &SendMeta,
+        scope: ResolveScope,
+    ) -> Result<SendOutcome, SendReject> {
         // ★Ingress is the only validator★: this function and `SendMeta` are pub, so another assembly could pass request+reply_to together (opens one contract while closing
-        //   another's). Validation is not duplicated so bounce wording does not diverge per entrance; a debug build blows up wiring mistakes instead.
+        //   another's). Local validation is not duplicated so bounce wording does not diverge per entrance; a debug build blows up wiring mistakes
+        //   instead. Mail from another PC is the exception: `validate_inbound` re-checks the pure contract rules before it gets here.
         debug_assert!(
             !(meta.request && meta.reply_to.is_some()),
             "ingress is the only validator — request and reply_to are mutually exclusive (spec §6)"
@@ -459,16 +772,25 @@ impl MessagingService {
         };
 
         // 2) Address resolution (pure).
-        let addressing = resolve_addressing(&self.groups, to, from, &sources)?;
+        let addressing = resolve_addressing(&self.groups, to, from, &sources, scope)?;
         // Delivery records this send leaves = recipient count including failure rows (spec §5); the lookup's `may_be_truncated` compares it with remaining rows.
         let expected_rows = u16::try_from(addressing.recipients.len()).unwrap_or(u16::MAX);
         let roster_names = live_names_hint(&sources.roster);
+        let unknown_pcs = match scope {
+            ResolveScope::All => unknown_directory_pcs(&sources.pcs),
+            ResolveScope::LocalOnly => Vec::new(),
+        };
+        // ADR-0390: the receiver refuses a whole mail whose contract fields break its rules, so remote rows of such a send fail here instead.
+        let remote_meta_refusal = validate_inbound_contract(meta).err().map(|r| r.reason);
 
         let now = Instant::now();
         let mut plans: Vec<RecipientPlan> = Vec::with_capacity(addressing.recipients.len());
         let mut park_effects = ParkSideEffects::default();
         let mut retirements = RetirementLog::default();
         let mut duplicate_contracts: Vec<String> = Vec::new();
+        // One mail per PC, rows in send order (ADR-0393).
+        let mut outbound: Vec<OutboundMail> = Vec::new();
+        let mut remote_capped = 0usize;
 
         {
             let mut st = self.state.lock().expect("messaging state poisoned");
@@ -479,11 +801,118 @@ impl MessagingService {
             }
 
             // ── pass A: per-recipient acceptance decision ────────────────
-            for r in &addressing.recipients {
+            for (i, r) in addressing.recipients.iter().enumerate() {
                 // 2-a) Entrance branches (spec §5, ADR-0116 decision 1). ★Asleep = accepted★ — no doorbell; the re-appearance flush picks it up.
-                let (recipient_id, live) = match admission(r, &roster_names) {
-                    Ok(admitted) => admitted,
-                    Err((code, hint)) => {
+                let (recipient_id, live) = match admission(r, &roster_names, &unknown_pcs) {
+                    Admission::Local { id, live } => (id, live),
+                    Admission::Remote {
+                        node,
+                        pc_name,
+                        name,
+                        link,
+                    } => {
+                        // ★Remote row (ADR-0393 decision 1)★: no contract here, recorded `RemotePending` with its tag (the row index), handed to the port after the lock.
+                        //   Not sent: a PC without a live link (`PEER_OFFLINE`, ADR-0391 decision 1-5), a sender name the receiver would refuse (`NAME_TOO_LONG`), a token or
+                        //   contract fields the receiver would refuse — which would sink the other rows of that PC's mail (ADR-0390), no remote wiring.
+                        let refusal = match link {
+                            PcLink::Connected => None,
+                            other => Some((
+                                FailCode::PeerOffline,
+                                peer_offline_hint(&r.display, pc_name, other),
+                            )),
+                        }
+                        .or_else(|| {
+                            (!remote_name_ok(sender_name))
+                                .then(|| (FailCode::NameTooLong, name_too_long_hint(&r.display)))
+                        })
+                        .or_else(|| {
+                            (name.len() > REMOTE_NAME_MAX_BYTES).then(|| {
+                                (
+                                    FailCode::RecipientNotFound,
+                                    remote_token_too_long_hint(&r.display, pc_name),
+                                )
+                            })
+                        })
+                        .or_else(|| {
+                            remote_meta_refusal.as_deref().map(|why| {
+                                (
+                                    FailCode::RemoteRefused,
+                                    remote_meta_hint(&r.display, pc_name, why),
+                                )
+                            })
+                        })
+                        .or_else(|| {
+                            self.remote.is_none().then(|| {
+                                (
+                                    FailCode::PeerOffline,
+                                    peer_offline_hint(&r.display, pc_name, PcLink::Offline),
+                                )
+                            })
+                        });
+                        if let Some((code, hint)) = refusal {
+                            st.ledger.record_with_expected(
+                                msg_id,
+                                sender_name,
+                                from.peer_id,
+                                r.name(),
+                                None,
+                                body,
+                                DeliveryStatus::Failed,
+                                now,
+                                expected_rows,
+                            );
+                            plans.push(RecipientPlan::Failed { code, hint });
+                            continue;
+                        }
+                        // The row index fits: a send's rows are bounded by its request size, far below `u32::MAX`.
+                        let tag = i as u32;
+                        st.ledger.record_remote(
+                            msg_id,
+                            sender_name,
+                            from.peer_id,
+                            r.name(),
+                            body,
+                            now,
+                            expected_rows,
+                            RemoteSend {
+                                node,
+                                pc_name: pc_name.to_string(),
+                                tag,
+                                sent_to: name.to_string(),
+                                reply_by: if meta.request {
+                                    meta.reply_by.zip(meta.reply_by_raw.clone())
+                                } else {
+                                    None
+                                },
+                                closes: meta.reply_to.clone(),
+                            },
+                        );
+                        // ADR-0393 decision 5: a reply to a remote requester closes its contract at verdict time; until then no overdue report.
+                        if let Some(in_reply_to) = &meta.reply_to {
+                            st.ledger.hold_reply(in_reply_to, from.peer_id, now);
+                        }
+                        let row = OutboundRow {
+                            tag,
+                            to: name.to_string(),
+                        };
+                        match outbound.iter_mut().find(|m| m.node == node) {
+                            Some(m) => m.rows.push(row),
+                            None => outbound.push(OutboundMail {
+                                id: msg_id.to_string(),
+                                node,
+                                from,
+                                sender_name: sender_name.to_string(),
+                                rows: vec![row],
+                                body: body.to_string(),
+                                meta: meta.clone(),
+                            }),
+                        }
+                        plans.push(RecipientPlan::Remote {
+                            pc_name: pc_name.to_string(),
+                        });
+                        continue;
+                    }
+                    Admission::Reject(code, hint) => {
                         // ★A failed recipient stays in the ledger too (spec §5)★ — it is a terminal row, so it moves no further.
                         st.ledger.record_with_expected(
                             msg_id,
@@ -553,6 +982,10 @@ impl MessagingService {
                             continue;
                         }
                     }
+                    // ADR-0393 decision 4: a request from another PC keeps the requester's node (from the link) for the overdue report.
+                    if let (Some(node), Some(_)) = (from.node, &contract) {
+                        st.ledger.attach_requester_node(msg_id, recipient_id, node);
+                    }
                 }
 
                 // 2-c) ★Enqueue is unconditional (ADR-0125, spec §5 — load-bearing)★: the entrance checks neither busy nor what is ahead; it puts the item on the queue tail.
@@ -585,6 +1018,11 @@ impl MessagingService {
                     code: FailCode::MailboxFull,
                     hint: mailbox_full_hint(&r.display),
                 });
+            }
+
+            // ADR-0393: the remote store is pruned once per send that added to it.
+            if !outbound.is_empty() {
+                remote_capped = st.ledger.prune_remote(now);
             }
 
             // ── Envelope `to` freeze (spec §1) ─────────────────────
@@ -668,6 +1106,7 @@ impl MessagingService {
             drop(st);
 
             park_effects.log("send");
+            log_remote_capped(remote_capped);
             for name in &duplicate_contracts {
                 tracing::error!(
                     msg_id = %msg_id,
@@ -676,17 +1115,34 @@ impl MessagingService {
                 );
             }
 
+            // 2-d) Remote mail goes out before the local drains (outside the lock; the port is non-blocking — ADR-0393). A verdict the port reports at once
+            //      lands in the ledger and is picked up by `await_remote_answer`.
+            if let Some(wiring) = &self.remote {
+                for mail in outbound {
+                    wiring.port.enqueue(mail);
+                }
+            }
+
             // 3) Synchronous drain (outside the lock — ADR-0125 decision 1).
             let mut deferred_inline: Vec<PeerId> = Vec::new();
             let mut results: Vec<RecipientResult> = Vec::with_capacity(plans.len());
+            let mut remote_rows: Vec<bool> = Vec::with_capacity(plans.len());
             for (i, plan) in plans.into_iter().enumerate() {
                 let display = addressing.recipients[i].display.clone();
+                remote_rows.push(matches!(plan, RecipientPlan::Remote { .. }));
                 let result = match plan {
                     RecipientPlan::Failed { code, hint } => RecipientResult {
                         to: display,
                         status: SendStatus::Failed,
                         code: Some(code),
                         hint: Some(hint),
+                    },
+                    // Placeholder until `await_remote_answer` seals the answer.
+                    RecipientPlan::Remote { pc_name } => RecipientResult {
+                        hint: Some(awaiting_hint(&display, &pc_name)),
+                        to: display,
+                        status: SendStatus::Pending,
+                        code: None,
                     },
                     RecipientPlan::Park { live: false, .. } => RecipientResult {
                         to: display.clone(),
@@ -754,11 +1210,28 @@ impl MessagingService {
             //     requester name is nowhere (`RECIPIENT_NOT_FOUND`) does it close as a failure. Mailbox full, duplicate name and unreachable are the environment of that moment
             //     and a retry may succeed, so no-op (closing would leave "reply failed" forever even if the retry delivered).
             // ★Codes that cannot occur on the reply path★: `REQUEST_CAPACITY` (reply opens no contract; `reply_to`↔`request` are exclusive) and `RECIPIENT_DELETED` (lookup-time only) — no branch.
-            // ADR-0116, ADR-0118
-            if let Some(in_reply_to) = &meta.reply_to {
-                match (closing.done, reply_disposition(&results)) {
+            // ★Remote rows are left out★: their outcome is not known yet, so the verdict entry closes by the same rule (ADR-0393 decision 5). A reply whose only
+            //   row is remote has nothing to decide here.
+            // ADR-0116, ADR-0118, ADR-0393
+            let local_results: Vec<RecipientResult> = results
+                .iter()
+                .zip(&remote_rows)
+                .filter(|(_, remote)| !**remote)
+                .map(|(r, _)| r.clone())
+                .collect();
+            if let (Some(in_reply_to), false) = (&meta.reply_to, local_results.is_empty()) {
+                match (closing.done, reply_disposition(&local_results)) {
                     // Accepted → already closed in-lock. Only the result is logged outside the lock.
                     (Some(outcome), _) => log_reply_close(outcome, in_reply_to, sender_name),
+                    // ADR-0391: a requester on another PC whose directory is unknown this run was not searched — "not found" is not "gone".
+                    (None, ReplyDisposition::RequesterGone)
+                        if self.requester_pc_unsearched(in_reply_to, from.peer_id, &sources) =>
+                    {
+                        tracing::debug!(
+                            in_reply_to,
+                            "reply not delivered — the requester's PC has an unknown directory this run, so the contract stays open (no-op)"
+                        )
+                    }
                     (None, ReplyDisposition::RequesterGone) => {
                         self.fail_reply_contract(in_reply_to, sender_name, from.peer_id)
                     }
@@ -775,7 +1248,18 @@ impl MessagingService {
                     ),
                 }
             }
-            Ok(results)
+            Ok(SendOutcome {
+                results,
+                token_rows: addressing
+                    .tokens
+                    .iter()
+                    .map(|t| match t {
+                        AddressToken::Name { row } => Some(*row),
+                        AddressToken::Group { .. } => None,
+                    })
+                    .collect(),
+                row_ids: addressing.recipients.iter().map(|r| r.id()).collect(),
+            })
         }
     }
 
@@ -806,28 +1290,27 @@ impl MessagingService {
             st.ledger
                 .fail_on_undeliverable_reply(in_reply_to, replier_id)
         };
-        match outcome {
-            ReplyFailOutcome::Failed => tracing::info!(
-                in_reply_to,
-                replier = %replier_name,
-                "reply confirmed unreachable (the requester name exists nowhere) — contract terminated as failed with reply_failed (removed from the open list · deadline sweep · 512 count, history kept — ADR-0116 decision 2)"
-            ),
-            ReplyFailOutcome::NoMatch => tracing::debug!(
-                in_reply_to,
-                replier = %replier_name,
-                "reply_to does not point to an open contract of this replier — no contract to terminate (normal path, spec §3 item 7-②)"
-            ),
-            ReplyFailOutcome::AlreadyClosed => tracing::debug!(
-                in_reply_to,
-                replier = %replier_name,
-                "contract already terminated — not reverted (no-op, spec §3 items 7-③/7-④)"
-            ),
-            ReplyFailOutcome::GuardHeld => tracing::debug!(
-                in_reply_to,
-                replier = %replier_name,
-                "contract marked provisional·retiring, so failure termination is not applied — its lifetime is owned by that guard (ADR-0118 decision 3, no-op)"
-            ),
-        }
+        log_reply_fail(outcome, in_reply_to, replier_name);
+    }
+
+    /// Is the replier's contract owed to a requester on a listed PC whose directory is unknown this run (so a bare-name reply could not find it).
+    // ADR-0391
+    fn requester_pc_unsearched(
+        &self,
+        in_reply_to: &str,
+        replier_id: PeerId,
+        sources: &AddressingSources,
+    ) -> bool {
+        let node = {
+            let st = self.state.lock().expect("messaging state poisoned");
+            st.ledger.requester_node(in_reply_to, replier_id)
+        };
+        node.is_some_and(|n| {
+            sources
+                .pcs
+                .iter()
+                .any(|pc| pc.node == n && pc.directory.is_none())
+        })
     }
 
     /// ★Bulk cleanup on profile deletion (spec §5, ADR-0116 decision 3, ADR-0309 decision 6)★ — called by the host right after it deletes a profile.
@@ -1290,6 +1773,7 @@ impl MessagingService {
         }
 
         let mut evicted_transitions: Vec<EvictedTransition> = Vec::new();
+        let remote_capped: usize;
         let due: Vec<DueTimeout> = {
             let mut st = self.state.lock().expect("messaging state poisoned");
             let expired = st.mailbox.sweep_expired(now);
@@ -1305,14 +1789,20 @@ impl MessagingService {
                     &mut evicted_transitions,
                 );
             }
+            remote_capped = st.ledger.prune_remote(now);
             st.ledger.due_timeouts(now)
         };
+        log_remote_capped(remote_capped);
         // Logged first, regardless of whether anything is due.
         log_evicted_transitions(&evicted_transitions);
         if due.is_empty() {
             return;
         }
         for d in due {
+            if let Some(node) = d.sender_node {
+                self.report_remote_overdue(&d, node);
+                continue;
+            }
             // The spec §1 notice template (English since ADR-0383; the S18 spec example keeps the old wording). The deadline notation is the sender's original (fix 6 — matches envelope `reply-by`).
             // ★The `[engram]` prefix marks the sender origin★: `<notice>` has no `from`, which alone can leave the receiving LLM unsure who sent it (priming unread or envelope summarized), so the
             //   first token states system origin. ★Not a parsing contract★: a readability label; machine decisions use the tag shape (`<notice>`, no `from`) and never read it back.
@@ -1347,7 +1837,11 @@ impl MessagingService {
             );
             return;
         }
+        self.send_daemon_notice(due.sender_id, &due.sender, body);
+    }
 
+    /// Draws a notice id, parks the `<notice>` for `recipient` and rings its doorbell — shared by the overdue, late-verdict and remote-overdue notices.
+    fn send_daemon_notice(&self, recipient: PeerId, recipient_name: &str, body: &str) {
         let drawn = self.draw_daemon_msg_id();
         if let Some(collided) = &drawn.collided {
             tracing::error!(
@@ -1358,8 +1852,29 @@ impl MessagingService {
             );
         }
         let notice_id = drawn.id;
-        self.park_notice(&notice_id, due.sender_id, &due.sender, body);
-        self.request_flush(due.sender_id);
+        self.park_notice(&notice_id, recipient, recipient_name, body);
+        self.request_flush(recipient);
+    }
+
+    /// ★Overdue report to a requester on another PC (ADR-0393 decision 6)★ — sent to the node recorded at request time, best-effort; never a local
+    ///   notice (the requester is not here). Same "closed meanwhile" re-check as `deliver_notice`.
+    // ADR-0393
+    fn report_remote_overdue(&self, due: &DueTimeout, node: NodeRef) {
+        let closed_since_collection = {
+            let st = self.state.lock().expect("messaging state poisoned");
+            st.ledger
+                .is_request_closed(&due.request_id, due.recipient_id)
+        };
+        if closed_since_collection {
+            return;
+        }
+        match &self.remote {
+            Some(wiring) => wiring.port.send_reply_overdue(node, &due.request_id),
+            None => tracing::warn!(
+                request_id = %due.request_id,
+                "a request from another PC is overdue but remote mail is not wired — the requester is not told (ADR-0393)"
+            ),
+        }
     }
 
     /// ★Draws the msg_id of a daemon-sent (`<notice>`) message with the same collision check as a send (round-final fix 2)★. A notice is checked too (load-bearing): msg_id is the history key
@@ -1717,6 +2232,567 @@ impl MessagingService {
         });
         items
     }
+
+    // ── Remote mail (ADR-0390 · ADR-0391 · ADR-0393) ──────────────────────────────────────
+
+    /// ★The agent's answer for the remote rows of a send (ADR-0393 decision 3)★ — waits (blocking, on the messaging lock's condition variable) until
+    ///   every remote row of `msg_id` has a verdict or `deadline` passes, then **seals** the answer under the lock and writes each remote row into
+    /// `results` at its tag (the row index `handle_send` returned it at). A row still without a verdict is reported `pending` + unconfirmed; a
+    /// verdict after the seal goes to the sender as one notice instead. A send with no remote row returns at once.
+    /// ★Caller duty★: call once per send that `handle_send` answered, with the deadline counted from the control request's arrival (the host's
+    ///   agent-facing wait); not under the messaging lock. Local rows are not touched.
+    // ADR-0393
+    pub fn await_remote_answer(
+        &self,
+        msg_id: &str,
+        results: &mut [RecipientResult],
+        deadline: Instant,
+    ) {
+        let mut st = self.state.lock().expect("messaging state poisoned");
+        loop {
+            match st.ledger.remote_rows_settled(msg_id) {
+                None => return,
+                Some(true) => break,
+                Some(false) => {}
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            #[cfg(test)]
+            if let Some(hook) = self.wait_hook.get() {
+                hook();
+            }
+            st = self
+                .remote_settled
+                .wait_timeout(st, deadline - now)
+                .expect("messaging state poisoned")
+                .0;
+        }
+        let rows = st.ledger.seal_remote_answer(msg_id);
+        drop(st);
+        for row in rows {
+            if let Some(slot) = results.get_mut(row.tag as usize) {
+                *slot = remote_answer_row(&row);
+            }
+        }
+    }
+
+    /// ★The verdict entry — the only path out of `RemotePending` (ADR-0393 decisions 1 · 3 · 5)★. Applies each row's outcome by (mail id, tag) for a
+    ///   mail sent to `node`; a reply to a remote requester closes its contract here by ADR-0116 decision 2's rule (delivered or held → replied,
+    /// `RECIPIENT_NOT_FOUND` → reply_failed, anything else → stays open). Rows already in the agent's answer get one `<notice>` with the outcome and
+    /// code only — a peer's reason never enters the daemon's notice voice. A second verdict for a row, an unknown tag or another node's row is
+    /// ignored (logged).
+    /// ★One final call per mail★ (`msg_id` to `node`): every tag of that mail still unsettled after `rows` is settled `Unconfirmed` here, so a
+    ///   verdict that leaves a tag out cannot strand it.
+    // ADR-0393
+    pub fn handle_remote_verdict(&self, msg_id: &str, node: NodeRef, rows: &[RemoteRowVerdict]) {
+        let now = Instant::now();
+        let mut acc = VerdictEffects::default();
+        {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            for v in rows {
+                settle_one(
+                    &mut st.ledger,
+                    msg_id,
+                    node,
+                    v.tag,
+                    &v.outcome,
+                    now,
+                    &mut acc,
+                );
+            }
+            for tag in st.ledger.unsettled_remote_tags(msg_id, node) {
+                settle_one(
+                    &mut st.ledger,
+                    msg_id,
+                    node,
+                    tag,
+                    &RemoteOutcome::Unconfirmed,
+                    now,
+                    &mut acc,
+                );
+            }
+        }
+        self.remote_settled.notify_all();
+
+        if !acc.second_call.is_empty() {
+            tracing::warn!(
+                msg_id,
+                tags = ?acc.second_call,
+                "a second verdict call for one mail — those tags were already settled and this outcome is dropped; the host must make one final call per mail (ADR-0393)"
+            );
+        }
+        for (tag, e) in acc.ignored {
+            tracing::debug!(msg_id, tag, error = ?e, "remote verdict row ignored — no such remote row of this PC's mail, or already settled (ADR-0393)");
+        }
+        for (in_reply_to, replier, close) in acc.closes {
+            match close {
+                ReplyClose::Replied(outcome) => log_reply_close(outcome, &in_reply_to, &replier),
+                ReplyClose::Failed(outcome) => log_reply_fail(outcome, &in_reply_to, &replier),
+            }
+        }
+        if let Some((sender_id, sender)) = acc.notice_to {
+            // ★`[engram]` origin label, outcome + code only★ (same lane and shape as the overdue notice — ADR-0104).
+            let body = format!("[engram] mail {msg_id}: {}", acc.late.join("; "));
+            self.send_daemon_notice(sender_id, &sender, &body);
+        }
+    }
+
+    /// ★The remote entrance (ADR-0390)★ — mail from an agent on PC `node` (this PC's name for it: `pc_name`), decoded by the host. Order: validation
+    ///   (`REMOTE_REFUSED`, `validate_inbound`: the mail id, 1–`MAX_REMOTE_ROWS` rows with unique tags, no empty, oversized or `@` token, a reply names
+    /// one row, the sender name within the remote name rule, no nil id, and the pure contract rules on `meta`) → a sender id that is also local is
+    /// refused (copied data folder) → backstop (`REMOTE_LIMIT`: body over the cap, or over the per-PC mails per minute) → the send pipeline with
+    /// `ResolveScope::LocalOnly`, `Entrance::Remote`, the sender shown as `"<name>@<pc_name>"` and its node from the link. Per-row results answer
+    /// every tag. An accepted reply to one of this PC's requests (delivered, parked, or its requester gone — the rule the replier's PC closes its
+    /// contract by) also marks that request's rows to `node` for the replier as answered (no overdue report names them); a refused one does not.
+    /// ★Caller duty★: run this PC's own contract checks on `meta` too (reply_by notation, envelope support) — the kernel re-checks only the pure
+    ///   rules, as defence in depth. Drop a mail whose transport deadline (`ledger::REMOTE_TRANSPORT_DEADLINE`) has passed instead of running it
+    /// late — the overdue grace on the sending PC relies on it. `now` = the arrival instant (backstop clock).
+    // ADR-0390, ADR-0393
+    pub fn handle_remote_mail(
+        &self,
+        node: NodeRef,
+        pc_name: &str,
+        mail: &InboundMail,
+        meta: &SendMeta,
+        now: Instant,
+    ) -> Result<Vec<RemoteRowResult>, RemoteRefusal> {
+        let Some(wiring) = &self.remote else {
+            return Err(remote_refused("remote mail is not enabled on this PC"));
+        };
+        validate_inbound(mail, meta)?;
+        if wiring.port.is_local_agent_id(mail.from_agent_id) {
+            return Err(remote_refused(
+                "this agent id also exists on this PC — copied data folder?",
+            ));
+        }
+        if mail.body.len() > wiring.limits.max_body_bytes {
+            return Err(RemoteRefusal {
+                code: FailCode::RemoteLimit,
+                reason: format!("body over the {}-byte limit", wiring.limits.max_body_bytes),
+            });
+        }
+        {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            let window = st.backstop.entry(node).or_default();
+            while window
+                .front()
+                .is_some_and(|t| now.saturating_duration_since(*t) >= BACKSTOP_WINDOW)
+            {
+                window.pop_front();
+            }
+            if window.len() >= wiring.limits.mails_per_minute {
+                return Err(RemoteRefusal {
+                    code: FailCode::RemoteLimit,
+                    reason: format!(
+                        "over {} mails per minute from this PC",
+                        wiring.limits.mails_per_minute
+                    ),
+                });
+            }
+            window.push_back(now);
+        }
+
+        let from = SenderIdentity {
+            peer_id: mail.from_agent_id,
+            epoch: 0,
+            node: Some(node),
+        };
+        let sender_name = format!("{}@{pc_name}", mail.from_name);
+        let tokens: Vec<String> = mail.rows.iter().map(|r| r.to.clone()).collect();
+        let outcome = self
+            .send_pipeline(
+                &mail.id,
+                from,
+                &sender_name,
+                &tokens,
+                &mail.body,
+                Entrance::Remote,
+                meta,
+                ResolveScope::LocalOnly,
+            )
+            .map_err(|e| match e {
+                SendReject::IdCollision => {
+                    remote_refused("this mail id is already used on this PC — send it again")
+                }
+                // Unreachable after validation (no `@` token) — still a refusal, never a panic.
+                SendReject::GroupNotFound { .. } | SendReject::GroupEmpty => {
+                    remote_refused("group addresses are local only")
+                }
+            })?;
+        // ADR-0393 decision 5: the replier's PC closes its contract by ADR-0116 decision 2's rule on this verdict — accepted → replied, requester
+        //   gone → reply_failed, else open (it may still report overdue). Mark the rows by the same rule.
+        if let (Some(request_id), false) = (
+            &meta.reply_to,
+            reply_disposition(&outcome.results) == ReplyDisposition::NoOp,
+        ) {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            st.ledger
+                .mark_remote_replied(request_id, node, mail.from_agent_id, &mail.from_name);
+        }
+
+        Ok(mail
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(k, row)| {
+                let at = outcome.token_rows.get(k).copied().flatten();
+                let result = at.and_then(|i| outcome.results.get(i));
+                let id = at.and_then(|i| outcome.row_ids.get(i).copied().flatten());
+                let outcome = match (result, id) {
+                    (Some(r), Some(recipient_id)) if r.status == SendStatus::Delivered => {
+                        InboundOutcome::Delivered { recipient_id }
+                    }
+                    (Some(r), Some(recipient_id)) if r.status == SendStatus::Pending => {
+                        InboundOutcome::Held { recipient_id }
+                    }
+                    (Some(r), _) if r.code == Some(FailCode::RecipientNotFound) => {
+                        InboundOutcome::UnknownRecipient
+                    }
+                    (Some(r), _) => {
+                        InboundOutcome::Refused(r.code.unwrap_or(FailCode::RemoteRefused))
+                    }
+                    (None, _) => InboundOutcome::Refused(FailCode::RemoteRefused),
+                };
+                RemoteRowResult {
+                    tag: row.tag,
+                    outcome,
+                }
+            })
+            .collect())
+    }
+
+    /// ★`ReplyOverdue` from PC `node` for this PC's request `request_id` (ADR-0393 decision 6)★ — covers that request's deadline-bearing rows to `node`
+    ///   that are not failed, not answered by a reply from their recipient, and not reported yet; refused before the deadline on this PC's clock
+    /// (`now`). One notice per accepted report, from this daemon's own template: one such row → it names that agent; several → it names the PC and
+    /// lists them (the report carries no recipient). `false` = not accepted. Never peer text.
+    // ADR-0393
+    pub fn handle_reply_overdue(&self, node: NodeRef, request_id: &str, now: Instant) -> bool {
+        let report = {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            st.ledger.accept_reply_overdue(request_id, node, now)
+        };
+        let report = match report {
+            Ok(r) => r,
+            Err(why) => {
+                tracing::debug!(
+                    request_id,
+                    refusal = ?why,
+                    "ReplyOverdue not accepted — no unanswered, unreported request row of this PC to that node, or before its deadline (ADR-0393)"
+                );
+                return false;
+            }
+        };
+        let who = match report.agents.as_slice() {
+            [one] => format!("no reply from {one}"),
+            many => format!(
+                "an agent on {} has not replied — not answered yet: {}",
+                report.pc_name,
+                many.join(", ")
+            ),
+        };
+        let body = format!(
+            "[engram] request {request_id} deadline ({}) exceeded — {who}",
+            report.reply_by_raw
+        );
+        self.send_daemon_notice(report.from_id, &report.from, &body);
+        true
+    }
+}
+
+/// The per-PC backstop window (mails per minute).
+// ADR-0390
+const BACKSTOP_WINDOW: Duration = Duration::from_secs(60);
+
+/// What the send pipeline knows beyond the response rows — the remote entrance maps its rows back through it (the per-row kernel result:
+///   each input token's row index and the row's resolved id).
+// ADR-0393
+struct SendOutcome {
+    results: Vec<RecipientResult>,
+    /// Per input token: its row (`None` for an `@` token).
+    token_rows: Vec<Option<usize>>,
+    /// Per row: the resolved agent id (`None` = unresolved or remote).
+    row_ids: Vec<Option<PeerId>>,
+}
+
+enum ReplyClose {
+    Replied(ReplyOutcome),
+    Failed(ReplyFailOutcome),
+}
+
+/// What one verdict call collected under the lock, for logging and the late notice outside it.
+#[derive(Default)]
+struct VerdictEffects {
+    late: Vec<String>,
+    notice_to: Option<(PeerId, String)>,
+    closes: Vec<(String, String, ReplyClose)>,
+    ignored: Vec<(u32, RemoteSettleError)>,
+    /// Tags settled by this call — an `AlreadySettled` tag outside it was settled by an earlier call for the same mail.
+    settled_here: Vec<u32>,
+    /// Tags an earlier call had already settled (one final call per mail is the contract).
+    second_call: Vec<u32>,
+}
+
+/// Settles one remote row and applies the reply close of a reply row (ADR-0116 decision 2's rule at verdict time) — under the messaging lock.
+// ADR-0393
+fn settle_one(
+    ledger: &mut Ledger,
+    msg_id: &str,
+    node: NodeRef,
+    tag: u32,
+    outcome: &RemoteOutcome,
+    now: Instant,
+    acc: &mut VerdictEffects,
+) {
+    let settlement = settlement_of(outcome);
+    let row = match ledger.settle_remote(msg_id, node, tag, settlement.clone(), now) {
+        Ok(row) => row,
+        Err(RemoteSettleError::AlreadySettled) if !acc.settled_here.contains(&tag) => {
+            acc.second_call.push(tag);
+            return;
+        }
+        Err(e) => {
+            acc.ignored.push((tag, e));
+            return;
+        }
+    };
+    acc.settled_here.push(tag);
+    if let Some(in_reply_to) = &row.closes {
+        let close = match outcome {
+            RemoteOutcome::Delivered { .. } | RemoteOutcome::Held { .. } => Some(
+                ReplyClose::Replied(ledger.close_on_reply(in_reply_to, row.from_id, now)),
+            ),
+            RemoteOutcome::UnknownRecipient => Some(ReplyClose::Failed(
+                ledger.fail_on_undeliverable_reply(in_reply_to, row.from_id),
+            )),
+            _ => None,
+        };
+        if let Some(close) = close {
+            acc.closes
+                .push((in_reply_to.clone(), row.from.clone(), close));
+        }
+    }
+    if row.answered {
+        acc.late.push(format!(
+            "{} — {}",
+            row.to,
+            notice_phrase(&settlement, &row.pc_name)
+        ));
+        acc.notice_to = Some((row.from_id, row.from.clone()));
+    }
+}
+
+fn log_remote_capped(count: usize) {
+    if count > 0 {
+        tracing::warn!(
+            count,
+            "remote store over its cap (MAX_REMOTE_ENTRIES) — dropped the oldest entries; their late verdicts or overdue reports will be ignored (ADR-0393)"
+        );
+    }
+}
+
+/// ★A mail id another PC may use★ — 1–`MAX_REMOTE_MSG_ID_BYTES` bytes of `[A-Za-z0-9_-]` (the `new_msg_id` family, `m-` + base36). It is logged and
+///   stored per row, so its size and characters are bounded.
+// ADR-0390
+pub fn remote_msg_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_REMOTE_MSG_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+pub const MAX_REMOTE_MSG_ID_BYTES: usize = 64;
+
+/// The longest reply deadline accepted from another PC — the same 30 days as this PC's own entrance (`created_at + reply_by` must not overflow).
+// ADR-0390
+pub const MAX_REMOTE_REPLY_BY: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+fn remote_refused(reason: &str) -> RemoteRefusal {
+    RemoteRefusal {
+        code: FailCode::RemoteRefused,
+        reason: reason.to_string(),
+    }
+}
+
+/// Validation of an inbound mail before anything is recorded (`handle_remote_mail` doc lists the rules).
+// ADR-0390
+fn validate_inbound(mail: &InboundMail, meta: &SendMeta) -> Result<(), RemoteRefusal> {
+    if !remote_msg_id_ok(&mail.id) {
+        return Err(remote_refused(
+            "mail id is empty, over 64 bytes, or not made of [A-Za-z0-9_-]",
+        ));
+    }
+    if mail.rows.is_empty() {
+        return Err(remote_refused("no recipients"));
+    }
+    if mail.rows.len() > MAX_REMOTE_ROWS {
+        return Err(remote_refused("more than 64 recipients in one mail"));
+    }
+    let mut tags = std::collections::HashSet::new();
+    for row in &mail.rows {
+        if !tags.insert(row.tag) {
+            return Err(remote_refused("duplicate row tag"));
+        }
+        let to = row.to.trim();
+        if to.is_empty() {
+            return Err(remote_refused("empty recipient"));
+        }
+        if row.to.len() > REMOTE_NAME_MAX_BYTES {
+            return Err(remote_refused("recipient over 256 bytes"));
+        }
+        if to.starts_with('@') {
+            return Err(remote_refused(
+                "group addresses (@all, @here) reach only the sender's own PC",
+            ));
+        }
+    }
+    if meta.reply_to.is_some() && mail.rows.len() != 1 {
+        return Err(remote_refused("a reply names exactly one recipient"));
+    }
+    if !remote_name_ok(&mail.from_name) {
+        return Err(remote_refused(
+            "sender name is empty, over 256 bytes, or has control characters",
+        ));
+    }
+    if mail.from_agent_id.is_nil() {
+        return Err(remote_refused("nil sender id"));
+    }
+    validate_inbound_contract(meta)
+}
+
+/// ★The pure contract rules, re-checked on mail from another PC (defence in depth)★ — the host runs its own entrance checks too, but no peer
+///   value may reach the pipeline's debug asserts or an unbounded `created_at + reply_by`.
+// ADR-0390
+fn validate_inbound_contract(meta: &SendMeta) -> Result<(), RemoteRefusal> {
+    if meta.request && meta.reply_to.is_some() {
+        return Err(remote_refused("request and reply_to together"));
+    }
+    if meta.reply_by.is_some() != meta.reply_by_raw.is_some() {
+        return Err(remote_refused("reply_by without its notation"));
+    }
+    if meta.reply_by.is_some() && !meta.request {
+        return Err(remote_refused("reply_by without request"));
+    }
+    if meta.reply_by.is_some_and(|d| d > MAX_REMOTE_REPLY_BY) {
+        return Err(remote_refused("reply_by over 30 days"));
+    }
+    if meta.reply_by_raw.as_deref().is_some_and(|raw| {
+        raw.is_empty() || raw.len() > 16 || !raw.bytes().all(|b| b.is_ascii_alphanumeric())
+    }) {
+        return Err(remote_refused("reply_by notation is not a short duration"));
+    }
+    if meta
+        .reply_to
+        .as_deref()
+        .is_some_and(|r| !remote_msg_id_ok(r))
+    {
+        return Err(remote_refused("reply_to is not a mail id"));
+    }
+    if meta.to_attr.is_some() {
+        return Err(remote_refused(
+            "to_attr is set by the receiver, not the sender",
+        ));
+    }
+    Ok(())
+}
+
+/// A verdict outcome → the ledger settlement (codes mapped onto the closed set, the peer's reason capped and escaped).
+// ADR-0390, ADR-0393
+fn settlement_of(outcome: &RemoteOutcome) -> RemoteSettlement {
+    match outcome {
+        RemoteOutcome::Delivered { recipient_id } => RemoteSettlement::Delivered {
+            to_id: *recipient_id,
+        },
+        RemoteOutcome::Held { recipient_id } => RemoteSettlement::Held {
+            to_id: *recipient_id,
+        },
+        RemoteOutcome::Refused { code, reason } => RemoteSettlement::Failed {
+            code: FailCode::from_remote_code(code.as_deref()).as_str(),
+            reason: reason.as_deref().map(clip_reason),
+        },
+        RemoteOutcome::UnknownRecipient => RemoteSettlement::Failed {
+            code: FailCode::RecipientNotFound.as_str(),
+            reason: None,
+        },
+        RemoteOutcome::NotSent(code) => RemoteSettlement::Failed {
+            code: code.as_str(),
+            reason: None,
+        },
+        RemoteOutcome::Unconfirmed => RemoteSettlement::Unconfirmed,
+    }
+}
+
+/// ★Peer text shown to the sending agent★ — control characters escaped, then cut to `REMOTE_REASON_MAX_BYTES` on a character boundary.
+// ADR-0390
+fn clip_reason(raw: &str) -> String {
+    let mut out = String::new();
+    for c in raw.chars() {
+        let piece: String = if c.is_control() {
+            c.escape_default().collect()
+        } else {
+            c.to_string()
+        };
+        if out.len() + piece.len() > REMOTE_REASON_MAX_BYTES {
+            break;
+        }
+        out.push_str(&piece);
+    }
+    out
+}
+
+/// A late verdict as one notice line — outcome and code only (ADR-0393 decision 3).
+fn notice_phrase(settlement: &RemoteSettlement, pc: &str) -> String {
+    match settlement {
+        RemoteSettlement::Delivered { .. } => "delivered".to_string(),
+        RemoteSettlement::Held { .. } => {
+            format!("held on {pc} (recipient asleep or busy)")
+        }
+        RemoteSettlement::Failed { code, .. } => format!("failed ({code})"),
+        RemoteSettlement::Unconfirmed => {
+            format!("outcome unknown — no answer from {pc}; it may or may not have arrived")
+        }
+    }
+}
+
+/// One sealed remote row → the agent's answer row: delivered → `delivered`, held → `pending`, refused / not found / not sent → `failed` + code,
+///   unconfirmed → `pending`, never `failed` (ADR-0393 decision 2).
+// ADR-0393
+fn remote_answer_row(row: &RemoteRowView) -> RecipientResult {
+    let pending = |hint: String| RecipientResult {
+        to: row.to.clone(),
+        status: SendStatus::Pending,
+        code: None,
+        hint: Some(hint),
+    };
+    match row.status {
+        DeliveryStatus::Delivered => RecipientResult {
+            to: row.to.clone(),
+            status: SendStatus::Delivered,
+            code: None,
+            hint: None,
+        },
+        DeliveryStatus::RemoteHeld => pending(held_hint(&row.to, &row.pc_name)),
+        DeliveryStatus::Failed => {
+            let code = row
+                .fail_code
+                .and_then(FailCode::from_wire)
+                .unwrap_or(FailCode::RemoteRefused);
+            RecipientResult {
+                to: row.to.clone(),
+                status: SendStatus::Failed,
+                code: Some(code),
+                hint: Some(remote_failure_hint(
+                    &row.to,
+                    &row.pc_name,
+                    code,
+                    row.reason.as_deref(),
+                )),
+            }
+        }
+        _ => pending(unconfirmed_hint(&row.to, &row.pc_name)),
+    }
 }
 
 /// The elapsed seconds between two `Instant`s (never negative; 0 if `now` is in the past — a test pushing `now` by hand would otherwise panic).
@@ -1733,6 +2809,8 @@ fn status_label(s: DeliveryStatus) -> &'static str {
         DeliveryStatus::Expired => "expired",
         DeliveryStatus::Skipped => "skipped",
         DeliveryStatus::Failed => "failed",
+        // ADR-0393: held on the other PC and unconfirmed both read `pending` (the three-word vocabulary stays).
+        DeliveryStatus::RemotePending | DeliveryStatus::RemoteHeld => "pending",
     }
 }
 
@@ -1814,6 +2892,8 @@ enum RecipientPlan<'a> {
     },
     /// Failure for this recipient only (ledger terminal recorded) — nothing to do outside the lock; the others go through.
     Failed { code: FailCode, hint: String },
+    /// Recorded `RemotePending` and handed to the remote port — its answer row comes from `await_remote_answer` (ADR-0393).
+    Remote { pc_name: String },
 }
 
 /// ★What one drain did (ADR-0125)★ — how a synchronous drain's caller (`handle_send`) reads **the outcome of its own letter**; an async occasion (`flush_for`) discards it.
@@ -2004,6 +3084,21 @@ enum Resolution {
     },
     /// Not anywhere → `RECIPIENT_NOT_FOUND` (no parking — ADR-0116 decision 1).
     NotFound,
+    /// ★An agent on another PC★ — `name` = what goes to that PC (the token with `@pc` stripped, or the id). `link` decides at admission
+    ///   whether it is sent or fails `PEER_OFFLINE`.
+    // ADR-0391
+    Remote {
+        node: NodeRef,
+        pc_name: String,
+        name: String,
+        link: PcLink,
+    },
+    /// ★Not local, and on two or more PCs★ (a bare name in 2+ copies, or an id listed by 2+ copies) → `RECIPIENT_AMBIGUOUS` with the
+    ///   `name@pc` candidates, sorted.
+    // ADR-0391
+    RemoteAmbiguous {
+        candidates: Vec<String>,
+    },
 }
 
 /// The layer where the duplicate name was caught — the hint's count and label must point at the same layer (`ambiguous_hint`).
@@ -2029,30 +3124,48 @@ struct ResolvedRecipient {
 }
 
 impl ResolvedRecipient {
-    /// The receiving id — session id if alive, profile id if asleep. `None` if unresolved.
+    /// The receiving id — session id if alive, profile id if asleep. `None` if unresolved or on another PC (its id comes with the verdict).
     fn id(&self) -> Option<PeerId> {
         match &self.to {
             Resolution::Live(a) => Some(a.id),
             Resolution::Dormant { id, .. } => Some(*id),
-            Resolution::Ambiguous { .. } | Resolution::NotFound => None,
+            Resolution::Ambiguous { .. }
+            | Resolution::NotFound
+            | Resolution::Remote { .. }
+            | Resolution::RemoteAmbiguous { .. } => None,
         }
     }
 
-    /// The name for the ledger row, parked item and envelope `to` — the registry name if resolved (kept even when targeted by id), else the notation.
+    /// The name for the ledger row, parked item and envelope `to` — the registry name if resolved locally (kept even when targeted by id), else the notation.
     fn name(&self) -> &str {
         match &self.to {
             Resolution::Live(a) => &a.name,
             Resolution::Dormant { name, .. } => name,
-            Resolution::Ambiguous { .. } | Resolution::NotFound => &self.display,
+            Resolution::Ambiguous { .. }
+            | Resolution::NotFound
+            | Resolution::Remote { .. }
+            | Resolution::RemoteAmbiguous { .. } => &self.display,
         }
     }
 
-    /// Is it the same row — the same id if resolved, the same notation if not (`push_recipient`).
+    /// Is it the same row — the same id if resolved, the same (PC, stripped token) if remote (ADR-0393: one row per PC and token), the same notation if
+    ///   unresolved (`push_recipient`).
     fn same_row(&self, other: &ResolvedRecipient) -> bool {
-        match (self.id(), other.id()) {
-            (Some(a), Some(b)) => a == b,
-            (None, None) => self.display == other.display,
-            _ => false,
+        match (&self.to, &other.to) {
+            (
+                Resolution::Remote {
+                    node: a, name: an, ..
+                },
+                Resolution::Remote {
+                    node: b, name: bn, ..
+                },
+            ) => a == b && an == bn,
+            (Resolution::Remote { .. }, _) | (_, Resolution::Remote { .. }) => false,
+            _ => match (self.id(), other.id()) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => self.display == other.display,
+                _ => false,
+            },
         }
     }
 }
@@ -2086,6 +3199,7 @@ fn resolve_addressing(
     to: &[String],
     from: SenderIdentity,
     sources: &AddressingSources,
+    scope: ResolveScope,
 ) -> Result<Addressing, SendReject> {
     // ★Which vocabulary reads which pool is decided by the source (`groups::MemberPools`)★ — here only build the pool and remove the sender (ADR-0121 decision 1).
     // ★The sender is removed by id only (ADR-0309, TRD S29 §4 X3)★: by name would also drop another agent sharing the name (live twin, asleep profile), and an asleep same-name could
@@ -2137,7 +3251,7 @@ fn resolve_addressing(
                 &mut recipients,
                 ResolvedRecipient {
                     display: token.to_string(),
-                    to: resolve_token(token, sources),
+                    to: resolve_token(token, sources, scope),
                 },
             );
             tokens.push(AddressToken::Name { row });
@@ -2176,13 +3290,111 @@ fn resolve_addressing(
 ///    means the asleep layer is not looked at (spec §5 branch order)★ — "1 live + 1 asleep same name → the live one".
 /// ★If the two entrances diverge, the agent that got the letter and the one the control command reached differ★ — guarded by the daemon crate's `tests/control_agent.rs` `resolver_alignment`,
 ///   which runs this function through `handle_send`. Domains differ: control sees live and asleep as one registry, mail has live beat asleep.
-// ADR-0116, ADR-0120, ADR-0309
-fn resolve_token(token: &str, sources: &AddressingSources) -> Resolution {
-    if let Ok(id) = PeerId::parse_str(token) {
-        if let Some(found) = resolve_id(id, sources) {
+/// ★Across PCs (`ResolveScope::All` only — ADR-0391 decision 1)★: ⓪ before everything, `name@pc` (the text after the last `@` is a listed PC name,
+///   ignoring case) goes to that PC without consulting its copy — it wins over a local agent literally named the whole token; then ①② as above —
+///   anything found here ends here (a local agent always wins); ③ a UUID-shaped token listed by a copy → that PC (2+ copies → ambiguous);
+///   ④ a bare name in the copies (connected or not, live or asleep) counted per PC: one → that PC, 2+ → ambiguous with `name@pc` candidates; a PC
+///   whose directory is unknown this run is not counted. Whether the chosen PC is reachable is admission's (`PEER_OFFLINE`).
+// ADR-0116, ADR-0120, ADR-0309, ADR-0391
+fn resolve_token(token: &str, sources: &AddressingSources, scope: ResolveScope) -> Resolution {
+    let remote = scope == ResolveScope::All;
+    if remote {
+        if let Some(found) = resolve_at_pc(token, sources) {
             return found;
         }
     }
+    let as_id = PeerId::parse_str(token).ok();
+    if let Some(found) = as_id.and_then(|id| resolve_id(id, sources)) {
+        return found;
+    }
+    let local = resolve_local_name(token, sources);
+    if !remote || !matches!(local, Resolution::NotFound) {
+        return local;
+    }
+    if let Some(found) = as_id.and_then(|id| resolve_remote_id(id, token, sources)) {
+        return found;
+    }
+    resolve_remote_name(token, sources)
+}
+
+/// Step ⓪ of `resolve_token` — `name@pc`. `None` = the text after the last `@` names no listed PC (the token is then an ordinary name).
+// ADR-0391
+fn resolve_at_pc(token: &str, sources: &AddressingSources) -> Option<Resolution> {
+    let (name, pc) = token.rsplit_once('@')?;
+    let pc = pc.to_lowercase();
+    let target = sources.pcs.iter().find(|p| p.name.to_lowercase() == pc)?;
+    Some(remote_to(target, name))
+}
+
+/// Step ③ — an id no local agent has, looked up in the known copies.
+// ADR-0391
+fn resolve_remote_id(id: PeerId, token: &str, sources: &AddressingSources) -> Option<Resolution> {
+    let hits: Vec<(&RemotePc, &str)> = sources
+        .pcs
+        .iter()
+        .filter_map(|pc| {
+            let entry = pc.directory.as_ref()?.iter().find(|e| e.id == id)?;
+            Some((pc, entry.name.as_str()))
+        })
+        .collect();
+    match hits.as_slice() {
+        [] => None,
+        [(pc, _)] => Some(remote_to(pc, token)),
+        many => Some(Resolution::RemoteAmbiguous {
+            candidates: sorted_candidates(many.iter().map(|(pc, name)| (*name, *pc))),
+        }),
+    }
+}
+
+/// Step ④ — a bare name, exact and case-sensitive, counted per PC over the known copies only (ADR-0391 decision 1-4).
+// ADR-0391
+fn resolve_remote_name(token: &str, sources: &AddressingSources) -> Resolution {
+    let hits: Vec<&RemotePc> = sources
+        .pcs
+        .iter()
+        .filter(|pc| {
+            pc.directory
+                .as_ref()
+                .is_some_and(|d| d.iter().any(|e| e.name == token))
+        })
+        .collect();
+    match hits.as_slice() {
+        [] => Resolution::NotFound,
+        [pc] => remote_to(pc, token),
+        many => Resolution::RemoteAmbiguous {
+            candidates: sorted_candidates(many.iter().map(|pc| (token, *pc))),
+        },
+    }
+}
+
+fn remote_to(pc: &RemotePc, name: &str) -> Resolution {
+    Resolution::Remote {
+        node: pc.node,
+        pc_name: pc.name.clone(),
+        name: name.to_string(),
+        link: pc.link,
+    }
+}
+
+fn sorted_candidates<'a>(hits: impl Iterator<Item = (&'a str, &'a RemotePc)>) -> Vec<String> {
+    let mut out: Vec<String> = hits
+        .map(|(name, pc)| format!("{name}@{}", pc.name))
+        .collect();
+    out.sort();
+    out
+}
+
+/// The listed PCs whose directory is unknown this run — named in the not-found hint (they were not searched).
+// ADR-0391
+fn unknown_directory_pcs(pcs: &[RemotePc]) -> Vec<String> {
+    pcs.iter()
+        .filter(|p| p.directory.is_none())
+        .map(|p| p.name.clone())
+        .collect()
+}
+
+/// Step ② of `resolve_token` — the local name rule, unchanged by the remote branch.
+fn resolve_local_name(token: &str, sources: &AddressingSources) -> Resolution {
     let live: Vec<&LiveAgent> = sources.roster.iter().filter(|a| a.name == token).collect();
     match live.as_slice() {
         [] => {}
@@ -2283,26 +3495,70 @@ fn live_names_hint(roster: &[LiveAgent]) -> String {
 
 /// ★The single decision point of the entrance 3 branches (spec §5, ADR-0116 decision 1)★ — accepted → (receiving id, alive?), failed → (code, hint). Alive = delivery target; asleep = parking
 /// (accepted); duplicate names = `RECIPIENT_AMBIGUOUS`; not found = `RECIPIENT_NOT_FOUND` (no parking). ★A live session is a delivery target even with no turn signal (decision 7)★ — do not revive `RECIPIENT_UNREACHABLE`.
-// ADR-0116
-fn admission(
-    r: &ResolvedRecipient,
+/// ★Remote (ADR-0391)★: an agent on another PC is a fourth branch; whether it is sent is the caller's (link, sender name). Not found also names the
+///   listed PCs whose directory is unknown this run (`unknown_pcs`), since those were not searched.
+// ADR-0116, ADR-0391
+fn admission<'r>(
+    r: &'r ResolvedRecipient,
     roster_names: &str,
-) -> Result<(PeerId, bool), (FailCode, String)> {
+    unknown_pcs: &[String],
+) -> Admission<'r> {
     match &r.to {
-        Resolution::Live(a) => Ok((a.id, true)),
-        Resolution::Dormant { id, .. } => Ok((*id, false)),
-        Resolution::Ambiguous { count, layer } => Err((
+        Resolution::Live(a) => Admission::Local {
+            id: a.id,
+            live: true,
+        },
+        Resolution::Dormant { id, .. } => Admission::Local {
+            id: *id,
+            live: false,
+        },
+        Resolution::Remote {
+            node,
+            pc_name,
+            name,
+            link,
+        } => Admission::Remote {
+            node: *node,
+            pc_name,
+            name,
+            link: *link,
+        },
+        Resolution::Ambiguous { count, layer } => Admission::Reject(
             FailCode::RecipientAmbiguous,
             ambiguous_hint(&r.display, *count, layer.label()),
-        )),
-        Resolution::NotFound => Err((
-            FailCode::RecipientNotFound,
-            format!(
+        ),
+        Resolution::RemoteAmbiguous { candidates } => Admission::Reject(
+            FailCode::RecipientAmbiguous,
+            cross_pc_ambiguous_hint(&r.display, candidates),
+        ),
+        Resolution::NotFound => {
+            let mut hint = format!(
                 "No agent named '{}' exists right now — not running and no saved agent by that name, so nothing was queued for it (fix the name, or create/spawn it and send again). Live agents: {roster_names}.",
                 r.display
-            ),
-        )),
+            );
+            if !unknown_pcs.is_empty() {
+                hint.push_str(&format!(
+                    " Not searched — PCs whose agent list is not known yet (not linked since this daemon started): {}; to reach an agent there, write name@pc.",
+                    unknown_pcs.join(", ")
+                ));
+            }
+            Admission::Reject(FailCode::RecipientNotFound, hint)
+        }
     }
+}
+
+enum Admission<'r> {
+    Local {
+        id: PeerId,
+        live: bool,
+    },
+    Remote {
+        node: NodeRef,
+        pc_name: &'r str,
+        name: &'r str,
+        link: PcLink,
+    },
+    Reject(FailCode, String),
 }
 
 /// ★The contract-handling branch of a reply send (spec §3 item 7-④)★ — `handle_send` step 5 branches on it.
@@ -2312,7 +3568,9 @@ enum ReplyDisposition {
     Accepted,
     /// The requester name is nowhere (`RECIPIENT_NOT_FOUND`) → `reply_failed` failure close.
     RequesterGone,
-    /// Any other failure (`MAILBOX_FULL`·`RECIPIENT_AMBIGUOUS`) → **no-op** (stays open).
+    /// Any other failure (`MAILBOX_FULL`·`RECIPIENT_AMBIGUOUS`, and the remote codes that fail at send time: `PEER_OFFLINE`·`NAME_TOO_LONG`·
+    /// `REMOTE_REFUSED` for contract fields refused before sending) → **no-op** (stays open). An over-long remote token fails at send time as
+    /// `RECIPIENT_NOT_FOUND` and so counts as `RequesterGone`.
     NoOp,
 }
 
@@ -2414,6 +3672,91 @@ fn mailbox_full_hint(display: &str) -> String {
     format!(
         "'{display}' mailbox is full (100 parked messages) — nothing was queued for it; its oldest messages expire by TTL, so retry later. Other recipients were unaffected."
     )
+}
+
+/// ★Cross-PC duplicate (ADR-0391 decision 1-4)★ — unlike the local duplicate hint, the sender can fix this in one resend, so it lists the candidates.
+fn cross_pc_ambiguous_hint(display: &str, candidates: &[String]) -> String {
+    format!(
+        "'{display}' matches agents on several PCs ({}) — nothing was sent. Resend to exactly one of these addresses.",
+        candidates.join(", ")
+    )
+}
+
+/// `PEER_OFFLINE` — names the PC and the cause; there is no outbox (ADR-0390), so nothing waits to be resent.
+fn peer_offline_hint(display: &str, pc: &str, link: PcLink) -> String {
+    match link {
+        PcLink::Refused => format!(
+            "PC '{pc}' does not list this PC's ID, so it refuses the link — nothing was sent to '{display}'. Add this PC's ID on '{pc}' (peer.add there), then send again."
+        ),
+        PcLink::VersionMismatch => format!(
+            "PC '{pc}' runs an incompatible Engram version, so there is no link — nothing was sent to '{display}'. Update Engram on one side, then send again."
+        ),
+        PcLink::Connected | PcLink::Offline => format!(
+            "PC '{pc}' is offline (no live link) — nothing was sent to '{display}' and nothing is queued. Send again when it is back (check peer.list)."
+        ),
+    }
+}
+
+fn name_too_long_hint(display: &str) -> String {
+    format!(
+        "Your agent name cannot be used for mail to another PC (empty, over {REMOTE_NAME_MAX_BYTES} bytes, or with control characters) — nothing was sent to '{display}'. Rename the agent, then send again."
+    )
+}
+
+/// A remote token no agent can carry — the other PC publishes and accepts names of at most `REMOTE_NAME_MAX_BYTES`.
+fn remote_token_too_long_hint(display: &str, pc: &str) -> String {
+    format!(
+        "No agent on PC '{pc}' can be addressed as '{display}' (over {REMOTE_NAME_MAX_BYTES} bytes) — nothing was sent for it."
+    )
+}
+
+/// Contract fields the other PC would refuse — refused here, per row, so the other rows to that PC still go.
+fn remote_meta_hint(display: &str, pc: &str, why: &str) -> String {
+    format!(
+        "This mail cannot go to PC '{pc}' ({why}) — nothing was sent to '{display}'. Fix the request / reply fields and send again."
+    )
+}
+
+/// The placeholder `handle_send` returns for a remote row before `await_remote_answer` seals the answer.
+fn awaiting_hint(display: &str, pc: &str) -> String {
+    format!("'{display}' is on PC '{pc}' — waiting for that PC's answer.")
+}
+
+fn held_hint(display: &str, pc: &str) -> String {
+    format!(
+        "Held on PC '{pc}': '{display}' is asleep or busy there — parked on that PC, to be delivered when it can take it. Nobody is notified if it expires there first (24h TTL) and no receipt follows. Ask later if it matters; resend only once it could have expired (24h), or the agent gets it twice."
+    )
+}
+
+/// ★Unconfirmed (ADR-0393 decision 2)★ — must not read as "failed": the mail may have arrived.
+fn unconfirmed_hint(display: &str, pc: &str) -> String {
+    format!(
+        "Unconfirmed: no answer from PC '{pc}' yet for '{display}' — it may or may not have arrived. Do not resend blindly; a later notice reports the outcome if one comes, or check `eg_messages`."
+    )
+}
+
+/// A failed remote row — the code's own wording; a peer's reason is shown labelled with its PC (never in a notice).
+// ADR-0390
+fn remote_failure_hint(display: &str, pc: &str, code: FailCode, reason: Option<&str>) -> String {
+    let said = reason
+        .map(|r| format!(" PC '{pc}' says: \"{r}\"."))
+        .unwrap_or_default();
+    match code {
+        FailCode::RecipientNotFound => format!(
+            "No agent named '{display}' on PC '{pc}' — nothing was delivered. Its agent list here may be stale; check peer.list."
+        ),
+        FailCode::PeerOffline => peer_offline_hint(display, pc, PcLink::Offline),
+        FailCode::BodyTooLarge => format!(
+            "The message is too large to send to PC '{pc}' — nothing was sent to '{display}'. Shorten it and send again."
+        ),
+        FailCode::RemoteLimit => format!(
+            "A limit on the way to PC '{pc}' was reached — '{display}' was not delivered. Retry later.{said}"
+        ),
+        _ => format!(
+            "PC '{pc}' refused the mail for '{display}' ({}).{said}",
+            code.as_str()
+        ),
+    }
 }
 
 /// ★The retirement facts one send gathered (R2)★ — what happened and what was planned but did not happen, separately (one bin pollutes metering — `Reservation::commit`); logged at different levels outside the lock.
@@ -2537,6 +3880,32 @@ fn log_reply_close(outcome: ReplyOutcome, in_reply_to: &str, replier_name: &str)
             in_reply_to,
             replier = %replier_name,
             "an additional reply to an already closed contract — message delivered normally, no-op (spec §3 item 7-③)"
+        ),
+    }
+}
+
+/// Logging a reply-failure close result (outside the lock) — `fail_reply_contract` and the verdict entry's close share it.
+fn log_reply_fail(outcome: ReplyFailOutcome, in_reply_to: &str, replier_name: &str) {
+    match outcome {
+        ReplyFailOutcome::Failed => tracing::info!(
+            in_reply_to,
+            replier = %replier_name,
+            "reply confirmed unreachable (the requester name exists nowhere) — contract terminated as failed with reply_failed (removed from the open list · deadline sweep · 512 count, history kept — ADR-0116 decision 2)"
+        ),
+        ReplyFailOutcome::NoMatch => tracing::debug!(
+            in_reply_to,
+            replier = %replier_name,
+            "reply_to does not point to an open contract of this replier — no contract to terminate (normal path, spec §3 item 7-②)"
+        ),
+        ReplyFailOutcome::AlreadyClosed => tracing::debug!(
+            in_reply_to,
+            replier = %replier_name,
+            "contract already terminated — not reverted (no-op, spec §3 items 7-③/7-④)"
+        ),
+        ReplyFailOutcome::GuardHeld => tracing::debug!(
+            in_reply_to,
+            replier = %replier_name,
+            "contract marked provisional·retiring, so failure termination is not applied — its lifetime is owned by that guard (ADR-0118 decision 3, no-op)"
         ),
     }
 }
@@ -2741,14 +4110,15 @@ fn park_into(
 }
 
 /// ★Encoding (version header since C3 review fix 4)★:
-///   `<ver>\n<sender_len>\n<reply_by_len>\n<reply_to_len>\n<group_len>\n<from_agent_id>\n<from_epoch>\n`
+///   `<ver>\n<sender_len>\n<reply_by_len>\n<reply_to_len>\n<group_len>\n<from_agent_id>\n<from_epoch>\n<from_node>\n`
 ///   `<entrance>\n<flags>\n<sender><reply_by><reply_to><group><body>`
-///   The first 9 lines are newline-free fields (numbers/uuid/short literals); the first 4 variable strings are bounded by a **length prefix** (body = the remainder, safe with newlines in body or in `reply_to`,
+///   `<from_node>` = 64 hex digits, or `-` for this PC (ADR-0393 — the observation keeps the sender's node across parking).
+///   The first 10 lines are newline-free fields (numbers/uuid/hex/short literals); the first 4 variable strings are bounded by a **length prefix** (body = the remainder, safe with newlines in body or in `reply_to`,
 ///   which is agent input). Length 0 = `None` (`Some("")` is already bounced by entrance validation).
 /// ★Why a version tag★: used only inside the process (parking is in-memory), but an old payload meeting a changed decode could be silently misread (length field shifted, body cut). With the 1-character tag an
 /// unknown version = immediate fallback → a visible degradation ("attributes lost, body only"), not misinterpretation. If v2 persists parking to disk the tag is the migration branch point.
 /// ★If you change the layout, bump this value★: same-layout-different-version collapses the tag's meaning (= the layout contract of this string).
-const PARK_PAYLOAD_VERSION: &str = "3";
+const PARK_PAYLOAD_VERSION: &str = "4";
 
 /// Parking payload — the minimum meta at flush injection time to assemble the envelope and emit the observation record (sender name, sender identity, entrance, raw body): an internal encoding carrying raw
 /// values around the `ParkedMessage.envelope` contract. At flush it decodes → `wrap_now` assembles in the **current** format (single wrap point) and emits the observation with the sender identity (ADR-0088).
@@ -2770,14 +4140,19 @@ impl ParkPayload {
             Entrance::Mcp => "mcp",
             Entrance::Cli => "cli",
             Entrance::Daemon => "daemon",
+            Entrance::Remote => "remote",
         };
         let reply_by = self.meta.reply_by_raw.as_deref().unwrap_or("");
         let reply_to = self.meta.reply_to.as_deref().unwrap_or("");
         // The envelope `to` (frozen value) — carried so a late-delivered parked item keeps the send-moment notation (spec §1).
         let group = self.meta.to_attr.as_deref().unwrap_or("");
         let flags = if self.meta.request { "r" } else { "-" };
+        let node = self
+            .from
+            .node
+            .map_or_else(|| "-".to_string(), NodeRef::to_hex);
         format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}{}{}{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}{}{}{}",
             PARK_PAYLOAD_VERSION,
             self.sender_name.len(),
             reply_by.len(),
@@ -2785,6 +4160,7 @@ impl ParkPayload {
             group.len(),
             self.from.peer_id,
             self.from.epoch,
+            node,
             ent,
             flags,
             self.sender_name,
@@ -2800,13 +4176,14 @@ impl ParkPayload {
     /// healthy messages. Every failure path ends in an **item-level fallback**: a false length field (sum exceeds the remainder), a cut **not on a char boundary** (where `split_at` panics), or an unknown version
     /// loses the envelope attributes but sends the original as body; the batch's other items deliver normally (test: one corrupt item does not abort the batch).
     fn decode(s: &str) -> Self {
-        // splitn(10) — the last piece is not cut, so newlines inside body are preserved.
-        let mut it = s.splitn(10, '\n');
+        // splitn(11) — the last piece is not cut, so newlines inside body are preserved.
+        let mut it = s.splitn(11, '\n');
         let fallback = || Self {
             sender_name: String::new(),
             from: SenderIdentity {
                 peer_id: PeerId::nil(),
                 epoch: 0,
+                node: None,
             },
             entrance: Entrance::Cli,
             body: s.to_string(),
@@ -2820,10 +4197,12 @@ impl ParkPayload {
             Some(grp_len),
             Some(id_str),
             Some(ep_str),
+            Some(node_str),
             Some(ent_str),
             Some(flags),
             Some(rest),
         ) = (
+            it.next(),
             it.next(),
             it.next(),
             it.next(),
@@ -2841,6 +4220,13 @@ impl ParkPayload {
         if ver != PARK_PAYLOAD_VERSION {
             return fallback();
         }
+        let node = match node_str {
+            "-" => None,
+            hex => match NodeRef::from_hex(hex) {
+                Some(n) => Some(n),
+                None => return fallback(),
+            },
+        };
         // ★Enums are parsed **strictly** (round-final fix 3, load-bearing)★: an unknown entrance string used to fall silently to `Cli` and an unknown flag to "not a request" — arbitrary reinterpretation (not a fallback):
         //   the observation records a different entrance, or a request arrives plain without id/reply-by (contract break). A value outside the vocabulary is evidence of damage → the same item-level fallback as length damage.
         let (Some(entrance), Some(request)) = (parse_entrance(ent_str), parse_request_flag(flags))
@@ -2887,6 +4273,7 @@ impl ParkPayload {
             from: SenderIdentity {
                 peer_id: agent_id,
                 epoch,
+                node,
             },
             entrance,
             body: body.to_string(),
@@ -2907,6 +4294,7 @@ fn parse_entrance(s: &str) -> Option<Entrance> {
         "mcp" => Some(Entrance::Mcp),
         "cli" => Some(Entrance::Cli),
         "daemon" => Some(Entrance::Daemon),
+        "remote" => Some(Entrance::Remote),
         _ => None,
     }
 }
@@ -2925,6 +4313,7 @@ fn daemon_identity() -> SenderIdentity {
     SenderIdentity {
         peer_id: PeerId::nil(),
         epoch: 0,
+        node: None,
     }
 }
 
@@ -2983,6 +4372,8 @@ mod tests {
         /// ★The ids for which `is_agent_live` returns true (delete-cleanup gate scenario — review fix D1)★: simulates cases not caught by name (terminal-mode session, renamed profile).
         /// ★Scripted separately from the roster (intended)★: the gate asks with that narrow verb; deriving it from the roster would make the fake build the wiring itself and hide the real one.
         live_ids: StdMutex<Vec<PeerId>>,
+        /// The listed PCs and their directory copies handed out in the snapshot (S37 remote branch).
+        pcs: StdMutex<Vec<RemotePc>>,
     }
 
     impl FakeDeliveryPort {
@@ -2998,7 +4389,11 @@ mod tests {
                 on_roster: StdMutex::new(None),
                 dormant: StdMutex::new(Vec::new()),
                 live_ids: StdMutex::new(Vec::new()),
+                pcs: StdMutex::new(Vec::new()),
             }
+        }
+        fn set_pcs(&self, pcs: Vec<RemotePc>) {
+            *self.pcs.lock().unwrap() = pcs;
         }
         /// Puts `tid(name)` as the id per name — launching `live` with the same name means that agent woke up.
         fn set_dormant(&self, names: &[&str]) {
@@ -3138,6 +4533,7 @@ mod tests {
             AddressingSources {
                 roster: self.live_agents(),
                 dormant: self.dormant.lock().unwrap().clone(),
+                pcs: self.pcs.lock().unwrap().clone(),
             }
         }
 
@@ -3152,6 +4548,7 @@ mod tests {
         SenderIdentity {
             peer_id: id,
             epoch: 0,
+            node: None,
         }
     }
 
@@ -3162,6 +4559,7 @@ mod tests {
             SenderIdentity {
                 peer_id: id,
                 epoch: agent.epoch,
+                node: None,
             },
             agent,
         )
@@ -3247,8 +4645,12 @@ mod tests {
             let live_only = AddressingSources {
                 roster: self.port.live_agents(),
                 dormant: Vec::new(),
+                pcs: Vec::new(),
             };
-            let absent = !matches!(resolve_token(to, &live_only), Resolution::Live(_));
+            let absent = !matches!(
+                resolve_token(to, &live_only, ResolveScope::All),
+                Resolution::Live(_)
+            );
             match absent {
                 true => {
                     // The id collision check is at the production place (first side-effect point) — the bypass is also a zero-side-effect bounce.
@@ -3335,6 +4737,7 @@ mod tests {
         SenderIdentity {
             peer_id: PeerId::new_v4(),
             epoch: 0,
+            node: None,
         }
     }
 
@@ -3368,6 +4771,7 @@ mod tests {
             SenderIdentity {
                 peer_id: id,
                 epoch: agent.epoch,
+                node: None,
             },
             agent,
         )
@@ -4295,6 +5699,7 @@ mod tests {
         let from = SenderIdentity {
             peer_id: PeerId::new_v4(),
             epoch: 3,
+            node: None,
         };
         let p = ParkPayload {
             sender_name: "qa-alpha".to_string(),
@@ -4322,6 +5727,7 @@ mod tests {
         let from = SenderIdentity {
             peer_id: PeerId::new_v4(),
             epoch: 7,
+            node: None,
         };
         let meta = SendMeta {
             request: true,
@@ -6219,6 +7625,7 @@ mod tests {
             SenderIdentity {
                 peer_id: alice_id,
                 epoch: 0,
+                node: None,
             },
             "alice",
             "ghost",
@@ -6446,6 +7853,7 @@ mod tests {
             from: SenderIdentity {
                 peer_id: PeerId::new_v4(),
                 epoch: 3,
+                node: None,
             },
             entrance: Entrance::Mcp,
             body: "hi\nsecond line".to_string(),
@@ -7662,6 +9070,7 @@ mod tests {
         let bob_from = SenderIdentity {
             peer_id: b_id,
             epoch: 0,
+            node: None,
         };
         svc.handle_send(
             "m-rep",
@@ -7888,6 +9297,7 @@ mod tests {
         let worker_from = SenderIdentity {
             peer_id: w_id,
             epoch: 0,
+            node: None,
         };
         let rows_out = svc
             .handle_send(
@@ -7964,6 +9374,7 @@ mod tests {
         let worker_from = SenderIdentity {
             peer_id: w_id,
             epoch: 0,
+            node: None,
         };
         let rows_out = svc
             .handle_send(
@@ -8036,6 +9447,7 @@ mod tests {
         let worker_from = SenderIdentity {
             peer_id: w_id,
             epoch: 0,
+            node: None,
         };
         let rows_out = svc
             .handle_send(
@@ -9679,6 +11091,7 @@ mod tests {
         let worker_from = SenderIdentity {
             peer_id: w_id,
             epoch: 0,
+            node: None,
         };
         let rep = svc
             .handle_send(
@@ -9727,6 +11140,7 @@ mod tests {
         let worker_from = SenderIdentity {
             peer_id: w_id,
             epoch: 0,
+            node: None,
         };
 
         svc.handle_send(
@@ -9893,6 +11307,7 @@ mod tests {
             SenderIdentity {
                 peer_id: p,
                 epoch: 0,
+                node: None,
             },
             "boss",
             &["alice".to_string()],
@@ -9928,6 +11343,7 @@ mod tests {
             SenderIdentity {
                 peer_id: q,
                 epoch: 0,
+                node: None,
             },
             "boss",
             &["alice".to_string()],
@@ -10012,6 +11428,7 @@ mod tests {
             SenderIdentity {
                 peer_id: x,
                 epoch: 0,
+                node: None,
             },
             "a",
             &["carol".to_string()],
@@ -10047,6 +11464,7 @@ mod tests {
             SenderIdentity {
                 peer_id: y,
                 epoch: 0,
+                node: None,
             },
             "a",
             &["carol".to_string()],
@@ -10150,6 +11568,7 @@ mod tests {
                 SenderIdentity {
                     peer_id: w_id,
                     epoch: 0,
+                    node: None,
                 },
                 "worker",
                 &["boss".to_string()],
@@ -10218,6 +11637,7 @@ mod tests {
                 SenderIdentity {
                     peer_id: w_id,
                     epoch: 0,
+                    node: None,
                 },
                 "worker",
                 &["boss".to_string()],
@@ -10325,6 +11745,7 @@ mod tests {
                 SenderIdentity {
                     peer_id: twin_a,
                     epoch: 0,
+                    node: None,
                 },
                 "twin",
                 &["boss".to_string()],
@@ -10370,6 +11791,7 @@ mod tests {
             SenderIdentity {
                 peer_id: solo,
                 epoch: 0,
+                node: None,
             },
             "twin",
             &["boss".to_string()],
@@ -10394,6 +11816,11 @@ mod tests {
             (FailCode::MailboxFull, "MAILBOX_FULL"),
             (FailCode::RequestCapacity, "REQUEST_CAPACITY"),
             (FailCode::RecipientDeleted, "RECIPIENT_DELETED"),
+            (FailCode::PeerOffline, "PEER_OFFLINE"),
+            (FailCode::RemoteLimit, "REMOTE_LIMIT"),
+            (FailCode::RemoteRefused, "REMOTE_REFUSED"),
+            (FailCode::NameTooLong, "NAME_TOO_LONG"),
+            (FailCode::BodyTooLarge, "BODY_TOO_LARGE"),
         ] {
             assert_eq!(code.as_str(), wire, "the wire string of {code:?} changed");
             // Lets the compiler catch a missing variant (when a new code comes, this match breaks).
@@ -10402,8 +11829,1883 @@ mod tests {
                 | FailCode::RecipientAmbiguous
                 | FailCode::MailboxFull
                 | FailCode::RequestCapacity
-                | FailCode::RecipientDeleted => {}
+                | FailCode::RecipientDeleted
+                | FailCode::PeerOffline
+                | FailCode::RemoteLimit
+                | FailCode::RemoteRefused
+                | FailCode::NameTooLong
+                | FailCode::BodyTooLarge => {}
             }
         }
+        // `FailCode::ALL` (used to read a stored code back) must list every variant once.
+        assert_eq!(FailCode::ALL.len(), 10);
+        for c in FailCode::ALL {
+            assert_eq!(FailCode::from_wire(c.as_str()), Some(c));
+        }
+    }
+
+    // ── Remote mail (S37 U3a — ADR-0390 · ADR-0391 · ADR-0393) ──────────────────────────────
+
+    #[derive(Default)]
+    struct FakeRemote {
+        sent: StdMutex<Vec<OutboundMail>>,
+        overdue: StdMutex<Vec<(NodeRef, String)>>,
+        local_ids: StdMutex<Vec<PeerId>>,
+    }
+
+    impl RemoteDeliveryPort for FakeRemote {
+        fn enqueue(&self, mail: OutboundMail) {
+            self.sent.lock().unwrap().push(mail);
+        }
+        fn send_reply_overdue(&self, node: NodeRef, request_id: &str) {
+            self.overdue
+                .lock()
+                .unwrap()
+                .push((node, request_id.to_string()));
+        }
+        fn is_local_agent_id(&self, id: PeerId) -> bool {
+            self.local_ids.lock().unwrap().contains(&id)
+        }
+    }
+
+    impl FakeRemote {
+        fn sent(&self) -> Vec<OutboundMail> {
+            self.sent.lock().unwrap().clone()
+        }
+    }
+
+    const LIMITS: RemoteLimits = RemoteLimits {
+        mails_per_minute: 600,
+        max_body_bytes: 64 * 1024,
+    };
+
+    fn svc_remote_with(
+        limits: RemoteLimits,
+    ) -> (
+        Arc<MessagingService>,
+        Arc<FakeDeliveryPort>,
+        Arc<FakeRemote>,
+    ) {
+        let port = Arc::new(FakeDeliveryPort::new());
+        let remote = Arc::new(FakeRemote::default());
+        let svc = Arc::new(
+            MessagingService::new(port.clone(), Arc::new(FakeControlPlane))
+                .with_remote(remote.clone(), limits),
+        );
+        (svc, port, remote)
+    }
+
+    fn svc_remote() -> (
+        Arc<MessagingService>,
+        Arc<FakeDeliveryPort>,
+        Arc<FakeRemote>,
+    ) {
+        svc_remote_with(LIMITS)
+    }
+
+    fn node(b: u8) -> NodeRef {
+        NodeRef::from_bytes([b; 32])
+    }
+
+    /// The id an agent `agent` on PC `pc` carries in that PC's directory copy.
+    fn rid(pc: &str, agent: &str) -> PeerId {
+        tid(&format!("{pc}/{agent}"))
+    }
+
+    /// A listed PC; `dir = None` = its directory is unknown this run.
+    fn pc(b: u8, name: &str, link: PcLink, dir: Option<&[&str]>) -> RemotePc {
+        RemotePc {
+            node: node(b),
+            name: name.to_string(),
+            link,
+            directory: dir.map(|agents| {
+                agents
+                    .iter()
+                    .map(|a| DirectoryEntry {
+                        id: rid(name, a),
+                        name: a.to_string(),
+                    })
+                    .collect()
+            }),
+        }
+    }
+
+    fn send_as(
+        svc: &MessagingService,
+        from: SenderIdentity,
+        sender: &str,
+        id: &str,
+        to: &[&str],
+        meta: &SendMeta,
+    ) -> Vec<RecipientResult> {
+        let to: Vec<String> = to.iter().map(|s| s.to_string()).collect();
+        svc.handle_send(id, from, sender, &to, "hi", Entrance::Mcp, meta)
+            .expect("no bounce")
+    }
+
+    /// A live sender `alice` in the roster plus `extra` live agents; returns alice's identity.
+    fn with_alice(port: &FakeDeliveryPort, extra: Vec<LiveAgent>) -> SenderIdentity {
+        let (alice, alice_agent) = live_sender("alice");
+        let mut roster = vec![alice_agent];
+        roster.extend(extra);
+        port.set_roster(roster);
+        alice
+    }
+
+    fn inbound(id: &str, from_name: &str, rows: &[(u32, &str)]) -> InboundMail {
+        InboundMail {
+            id: id.to_string(),
+            from_agent_id: rid("away", from_name),
+            from_name: from_name.to_string(),
+            rows: rows
+                .iter()
+                .map(|(tag, to)| InboundRow {
+                    tag: *tag,
+                    to: to.to_string(),
+                })
+                .collect(),
+            body: "hello from away".to_string(),
+        }
+    }
+
+    fn refusal_code(r: Result<Vec<RemoteRowResult>, RemoteRefusal>) -> (FailCode, String) {
+        let e = r.expect_err("the frame must be refused");
+        (e.code, e.reason)
+    }
+
+    #[test]
+    fn name_at_pc_wins_over_a_local_agent_literally_named_that_token_and_does_not_consult_the_copy()
+    {
+        let (svc, port, remote) = svc_remote();
+        let (_, literal) = live("bob@home");
+        let alice = with_alice(&port, vec![literal]);
+        // The copy of "Home" does not list bob — `name@pc` goes there anyway (the receiver answers authoritatively); the PC name matches ignoring case.
+        port.set_pcs(vec![pc(1, "Home", PcLink::Connected, Some(&[]))]);
+
+        let rows = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["bob@home"],
+            &SendMeta::default(),
+        );
+
+        assert_eq!(rows[0].status, SendStatus::Pending);
+        assert!(
+            port.injected_bodies().is_empty(),
+            "the local literal namesake must not get it"
+        );
+        let sent = remote.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].node, node(1));
+        assert_eq!(
+            sent[0].rows,
+            vec![OutboundRow {
+                tag: 0,
+                to: "bob".to_string()
+            }]
+        );
+        assert_eq!(
+            svc.ledger_statuses("m-1"),
+            vec![DeliveryStatus::RemotePending]
+        );
+    }
+
+    #[test]
+    fn a_local_name_or_id_wins_over_a_remote_agent_of_the_same_name() {
+        let (svc, port, remote) = svc_remote();
+        let (bob_id, bob) = live("bob");
+        let alice = with_alice(&port, vec![bob]);
+        // The copy lists a "bob" and even lists the local bob's id.
+        let mut home = pc(1, "home", PcLink::Connected, Some(&["bob"]));
+        home.directory.as_mut().unwrap().push(DirectoryEntry {
+            id: bob_id,
+            name: "bob".to_string(),
+        });
+        port.set_pcs(vec![home]);
+
+        let by_name = send_as(&svc, alice, "alice", "m-1", &["bob"], &SendMeta::default());
+        let by_id = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-2",
+            &[&bob_id.to_string()],
+            &SendMeta::default(),
+        );
+
+        assert_eq!(by_name[0].status, SendStatus::Delivered);
+        assert_eq!(by_id[0].status, SendStatus::Delivered);
+        assert!(remote.sent().is_empty());
+    }
+
+    #[test]
+    fn a_remote_id_goes_to_the_copy_that_lists_it_and_two_copies_listing_it_are_ambiguous() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        let shared = PeerId::new_v4();
+        let mut work = pc(2, "work", PcLink::Connected, Some(&["carol"]));
+        let mut lab = pc(3, "lab", PcLink::Connected, Some(&[]));
+        port.set_pcs(vec![
+            pc(1, "home", PcLink::Connected, Some(&["bob"])),
+            work.clone(),
+            lab.clone(),
+        ]);
+
+        let one = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &[&rid("home", "bob").to_string()],
+            &SendMeta::default(),
+        );
+        assert_eq!(one[0].status, SendStatus::Pending);
+        assert_eq!(remote.sent()[0].node, node(1));
+        assert_eq!(remote.sent()[0].rows[0].to, rid("home", "bob").to_string());
+
+        for (copy, name) in [(&mut work, "dave"), (&mut lab, "eve")] {
+            copy.directory.as_mut().unwrap().push(DirectoryEntry {
+                id: shared,
+                name: name.to_string(),
+            });
+        }
+        port.set_pcs(vec![work, lab]);
+        let two = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-2",
+            &[&shared.to_string()],
+            &SendMeta::default(),
+        );
+        assert_eq!(two[0].code, Some(FailCode::RecipientAmbiguous));
+        assert!(two[0]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("dave@work, eve@lab"));
+        assert_eq!(remote.sent().len(), 1, "an ambiguous id sends nothing");
+    }
+
+    #[test]
+    fn a_bare_name_in_one_connected_copy_goes_to_that_pc() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![
+            pc(1, "home", PcLink::Connected, Some(&["bob"])),
+            pc(2, "work", PcLink::Connected, Some(&["carol"])),
+        ]);
+
+        let rows = send_as(&svc, alice, "alice", "m-1", &["bob"], &SendMeta::default());
+
+        assert_eq!(rows[0].status, SendStatus::Pending);
+        let sent = remote.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].node, node(1));
+        assert_eq!(sent[0].rows[0].to, "bob");
+        assert_eq!(sent[0].sender_name, "alice");
+        assert_eq!(sent[0].from, alice);
+    }
+
+    #[test]
+    fn a_pc_without_a_live_link_fails_peer_offline_at_once_with_the_cause_and_sends_nothing() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![
+            pc(1, "home", PcLink::Offline, Some(&["bob"])),
+            pc(2, "work", PcLink::Refused, Some(&[])),
+            pc(3, "lab", PcLink::VersionMismatch, None),
+        ]);
+
+        let rows = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["bob", "carol@work", "eve@lab"],
+            &SendMeta::default(),
+        );
+
+        assert!(rows.iter().all(|r| r.code == Some(FailCode::PeerOffline)));
+        assert!(rows[0]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("'home' is offline"));
+        assert!(rows[1]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("does not list this PC's ID"));
+        assert!(rows[2]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("incompatible Engram version"));
+        assert!(remote.sent().is_empty());
+        assert_eq!(svc.ledger_statuses("m-1"), vec![DeliveryStatus::Failed; 3]);
+    }
+
+    #[test]
+    fn a_bare_name_on_two_pcs_is_ambiguous_with_sorted_candidates_even_when_one_is_disconnected() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![
+            pc(1, "work", PcLink::Connected, Some(&["bob"])),
+            pc(2, "home", PcLink::Offline, Some(&["bob"])),
+        ]);
+
+        let rows = send_as(&svc, alice, "alice", "m-1", &["bob"], &SendMeta::default());
+
+        assert_eq!(rows[0].status, SendStatus::Failed);
+        assert_eq!(rows[0].code, Some(FailCode::RecipientAmbiguous));
+        assert!(rows[0]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("(bob@home, bob@work)"));
+        assert!(remote.sent().is_empty());
+    }
+
+    #[test]
+    fn a_pc_whose_directory_is_unknown_is_not_counted_so_the_bare_name_goes_to_the_known_pc() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![
+            pc(1, "home", PcLink::Connected, Some(&["bob"])),
+            pc(2, "work", PcLink::Connected, None),
+        ]);
+
+        let rows = send_as(&svc, alice, "alice", "m-1", &["bob"], &SendMeta::default());
+
+        assert_eq!(rows[0].status, SendStatus::Pending);
+        assert_eq!(remote.sent()[0].node, node(1));
+    }
+
+    #[test]
+    fn not_found_anywhere_names_the_pcs_whose_directory_is_unknown() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![
+            pc(1, "home", PcLink::Connected, Some(&["bob"])),
+            pc(2, "work", PcLink::Offline, None),
+        ]);
+
+        let rows = send_as(&svc, alice, "alice", "m-1", &["zed"], &SendMeta::default());
+
+        assert_eq!(rows[0].code, Some(FailCode::RecipientNotFound));
+        let hint = rows[0].hint.as_deref().unwrap();
+        assert!(
+            hint.contains("not known yet") && hint.contains("work"),
+            "{hint}"
+        );
+        assert!(!hint.contains("home"), "a known PC was searched: {hint}");
+        assert!(remote.sent().is_empty());
+    }
+
+    #[test]
+    fn group_addresses_never_expand_to_remote_agents() {
+        let (svc, port, remote) = svc_remote();
+        let (_, carol) = live("carol");
+        let alice = with_alice(&port, vec![carol]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+
+        let rows = send_as(&svc, alice, "alice", "m-1", &["@all"], &SendMeta::default());
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].to, "carol");
+        assert!(remote.sent().is_empty());
+    }
+
+    #[test]
+    fn rows_naming_one_pc_and_token_fold_into_one_and_one_mail_goes_per_pc() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![
+            pc(1, "home", PcLink::Connected, Some(&["bob", "dan"])),
+            pc(2, "work", PcLink::Connected, Some(&["carol"])),
+        ]);
+
+        let rows = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["bob", "carol", "bob@home", "dan"],
+            &SendMeta::default(),
+        );
+
+        assert_eq!(rows.len(), 3, "bob and bob@home are one row");
+        let sent = remote.sent();
+        assert_eq!(sent.len(), 2);
+        let home = sent.iter().find(|m| m.node == node(1)).unwrap();
+        assert_eq!(
+            home.rows,
+            vec![
+                OutboundRow {
+                    tag: 0,
+                    to: "bob".to_string()
+                },
+                OutboundRow {
+                    tag: 2,
+                    to: "dan".to_string()
+                },
+            ]
+        );
+        let work = sent.iter().find(|m| m.node == node(2)).unwrap();
+        assert_eq!(work.rows[0].tag, 1);
+    }
+
+    #[test]
+    fn a_sender_whose_name_breaks_the_remote_name_rule_fails_name_too_long_and_sends_nothing() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        let long = "a".repeat(REMOTE_NAME_MAX_BYTES + 1);
+
+        let rows = send_as(&svc, alice, &long, "m-1", &["bob"], &SendMeta::default());
+        let ctrl = send_as(
+            &svc,
+            alice,
+            "al\u{7}ice",
+            "m-2",
+            &["bob"],
+            &SendMeta::default(),
+        );
+
+        assert_eq!(rows[0].code, Some(FailCode::NameTooLong));
+        assert_eq!(ctrl[0].code, Some(FailCode::NameTooLong));
+        assert!(remote.sent().is_empty());
+        assert!(remote_name_ok(&"a".repeat(REMOTE_NAME_MAX_BYTES)));
+    }
+
+    #[test]
+    fn verdicts_move_remote_pending_rows_only_by_tag_and_node() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(
+            1,
+            "home",
+            PcLink::Connected,
+            Some(&["bob", "dan", "eve", "fay"]),
+        )]);
+        send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["bob", "dan", "eve", "fay"],
+            &SendMeta::default(),
+        );
+        assert_eq!(
+            svc.ledger_statuses("m-1"),
+            vec![DeliveryStatus::RemotePending; 4]
+        );
+        // The local sweep never moves a remote row (swept inside the verdict horizon, so the rows can still take their verdict).
+        svc.sweep(Instant::now() + Duration::from_secs(5 * 60));
+        assert_eq!(
+            svc.ledger_statuses("m-1"),
+            vec![DeliveryStatus::RemotePending; 4]
+        );
+
+        // Another node's verdict for the same tag is ignored.
+        svc.handle_remote_verdict(
+            "m-1",
+            node(9),
+            &[RemoteRowVerdict {
+                tag: 0,
+                outcome: RemoteOutcome::UnknownRecipient,
+            }],
+        );
+        assert_eq!(svc.ledger_statuses("m-1")[0], DeliveryStatus::RemotePending);
+
+        svc.handle_remote_verdict(
+            "m-1",
+            node(1),
+            &[
+                RemoteRowVerdict {
+                    tag: 0,
+                    outcome: RemoteOutcome::Delivered {
+                        recipient_id: rid("home", "bob"),
+                    },
+                },
+                RemoteRowVerdict {
+                    tag: 1,
+                    outcome: RemoteOutcome::Held {
+                        recipient_id: rid("home", "dan"),
+                    },
+                },
+                RemoteRowVerdict {
+                    tag: 2,
+                    outcome: RemoteOutcome::Refused {
+                        code: Some("NOT_A_CODE".to_string()),
+                        reason: None,
+                    },
+                },
+                RemoteRowVerdict {
+                    tag: 3,
+                    outcome: RemoteOutcome::Unconfirmed,
+                },
+            ],
+        );
+        assert_eq!(
+            svc.ledger_statuses("m-1"),
+            vec![
+                DeliveryStatus::Delivered,
+                DeliveryStatus::RemoteHeld,
+                DeliveryStatus::Failed,
+                DeliveryStatus::RemotePending,
+            ]
+        );
+        let view = svc.message_state("m-1", Instant::now()).unwrap();
+        assert_eq!(
+            view.rows[2].code,
+            Some("REMOTE_REFUSED"),
+            "an unknown verdict code maps to REMOTE_REFUSED"
+        );
+        assert_eq!(view.rows[1].status, "pending");
+        assert_eq!(view.rows[3].status, "pending");
+
+        // A second verdict for a settled row changes nothing.
+        svc.handle_remote_verdict(
+            "m-1",
+            node(1),
+            &[RemoteRowVerdict {
+                tag: 0,
+                outcome: RemoteOutcome::UnknownRecipient,
+            }],
+        );
+        assert_eq!(svc.ledger_statuses("m-1")[0], DeliveryStatus::Delivered);
+        assert!(remote.sent().len() == 1);
+    }
+
+    #[test]
+    fn a_verdict_is_matched_by_tag_after_the_pc_is_renamed_mid_request() {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["bob@home"],
+            &SendMeta::default(),
+        );
+        port.set_pcs(vec![pc(1, "attic", PcLink::Connected, Some(&["bob"]))]);
+
+        svc.handle_remote_verdict(
+            "m-1",
+            node(1),
+            &[RemoteRowVerdict {
+                tag: 0,
+                outcome: RemoteOutcome::Delivered {
+                    recipient_id: rid("home", "bob"),
+                },
+            }],
+        );
+
+        assert_eq!(svc.ledger_statuses("m-1"), vec![DeliveryStatus::Delivered]);
+    }
+
+    #[test]
+    fn a_verdict_before_the_seal_is_in_the_answer_and_gives_no_notice() {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(
+            1,
+            "home",
+            PcLink::Connected,
+            Some(&["bob", "dan", "eve"]),
+        )]);
+        let mut rows = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["bob", "dan", "eve"],
+            &SendMeta::default(),
+        );
+        svc.handle_remote_verdict(
+            "m-1",
+            node(1),
+            &[
+                RemoteRowVerdict {
+                    tag: 0,
+                    outcome: RemoteOutcome::Held {
+                        recipient_id: rid("home", "bob"),
+                    },
+                },
+                RemoteRowVerdict {
+                    tag: 1,
+                    outcome: RemoteOutcome::Refused {
+                        code: Some("REMOTE_LIMIT".to_string()),
+                        reason: Some("too\nmany".to_string()),
+                    },
+                },
+                RemoteRowVerdict {
+                    tag: 2,
+                    outcome: RemoteOutcome::NotSent(FailCode::PeerOffline),
+                },
+            ],
+        );
+
+        // Every row settled: returns without waiting even with a far deadline.
+        svc.await_remote_answer("m-1", &mut rows, Instant::now() + Duration::from_secs(3600));
+
+        assert_eq!(rows[0].status, SendStatus::Pending);
+        assert!(rows[0]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("Held on PC 'home'"));
+        assert_eq!(rows[1].code, Some(FailCode::RemoteLimit));
+        let hint = rows[1].hint.as_deref().unwrap();
+        assert!(
+            hint.contains("PC 'home' says: \"too\\nmany\""),
+            "reason labelled with the PC, control characters escaped: {hint}"
+        );
+        assert_eq!(rows[2].code, Some(FailCode::PeerOffline));
+        assert!(
+            port.injected_bodies().is_empty(),
+            "no notice for rows already in the answer"
+        );
+        assert_eq!(svc.parked_len(alice.peer_id), 0);
+    }
+
+    #[test]
+    fn a_row_without_a_verdict_at_the_deadline_is_unconfirmed_and_a_later_verdict_comes_as_exactly_one_notice(
+    ) {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(
+            1,
+            "home",
+            PcLink::Connected,
+            Some(&["bob", "dan"]),
+        )]);
+        let mut rows = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["bob", "dan"],
+            &SendMeta::default(),
+        );
+
+        // The deadline has passed: seal at once.
+        svc.await_remote_answer("m-1", &mut rows, Instant::now());
+        for r in &rows {
+            assert_eq!(r.status, SendStatus::Pending, "unconfirmed is never failed");
+            assert!(r
+                .hint
+                .as_deref()
+                .unwrap()
+                .contains("may or may not have arrived"));
+        }
+
+        svc.handle_remote_verdict(
+            "m-1",
+            node(1),
+            &[
+                RemoteRowVerdict {
+                    tag: 0,
+                    outcome: RemoteOutcome::Refused {
+                        code: Some("MAILBOX_FULL".to_string()),
+                        reason: Some("secret peer words".to_string()),
+                    },
+                },
+                RemoteRowVerdict {
+                    tag: 1,
+                    outcome: RemoteOutcome::Unconfirmed,
+                },
+            ],
+        );
+
+        assert_eq!(
+            svc.ledger_statuses("m-1"),
+            vec![DeliveryStatus::Failed, DeliveryStatus::RemotePending]
+        );
+        let notices = port.injected_bodies();
+        assert_eq!(
+            notices.len(),
+            1,
+            "one notice for the late verdict: {notices:?}"
+        );
+        assert!(notices[0].contains("[engram] mail m-1"));
+        assert!(notices[0].contains("bob — failed (MAILBOX_FULL)"));
+        assert!(notices[0].contains("dan — outcome unknown"));
+        assert!(
+            !notices[0].contains("secret peer words"),
+            "a peer's reason never enters a notice"
+        );
+
+        // A repeated verdict produces no second notice.
+        svc.handle_remote_verdict(
+            "m-1",
+            node(1),
+            &[RemoteRowVerdict {
+                tag: 0,
+                outcome: RemoteOutcome::Delivered {
+                    recipient_id: rid("home", "bob"),
+                },
+            }],
+        );
+        assert_eq!(port.injected_bodies().len(), 1);
+    }
+
+    #[test]
+    fn the_answer_waits_for_a_verdict_that_arrives_after_the_wait_started() {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        let mut rows = send_as(&svc, alice, "alice", "m-1", &["bob"], &SendMeta::default());
+        // The hook fires inside the wait (lock held) — the verdict thread starts only then, so it can only be seen through the wake-up.
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let started_tx = StdMutex::new(started_tx);
+        assert!(svc
+            .wait_hook
+            .set(Box::new(move || {
+                let _ = started_tx.lock().unwrap().send(());
+            }))
+            .is_ok());
+
+        let svc2 = svc.clone();
+        let verdict = std::thread::spawn(move || {
+            started_rx.recv().unwrap();
+            svc2.handle_remote_verdict(
+                "m-1",
+                node(1),
+                &[RemoteRowVerdict {
+                    tag: 0,
+                    outcome: RemoteOutcome::Delivered {
+                        recipient_id: rid("home", "bob"),
+                    },
+                }],
+            );
+        });
+        let started = Instant::now();
+        svc.await_remote_answer("m-1", &mut rows, started + Duration::from_secs(30));
+        let waited = started.elapsed();
+        verdict.join().unwrap();
+
+        assert_eq!(rows[0].status, SendStatus::Delivered);
+        assert!(
+            waited < Duration::from_secs(10),
+            "woken by the verdict, not by the deadline: {waited:?}"
+        );
+        assert!(port.injected_bodies().is_empty());
+    }
+
+    #[test]
+    fn a_send_without_remote_rows_is_left_alone_by_the_answer_wait() {
+        let (svc, port, _remote) = svc_remote();
+        let (_, bob) = live("bob");
+        let alice = with_alice(&port, vec![bob]);
+        let mut rows = send_as(&svc, alice, "alice", "m-1", &["bob"], &SendMeta::default());
+        let before = rows.clone();
+
+        svc.await_remote_answer("m-1", &mut rows, Instant::now() + Duration::from_secs(600));
+
+        assert_eq!(rows, before);
+    }
+
+    #[test]
+    fn remote_rows_without_remote_wiring_fail_peer_offline() {
+        let (svc, port) = svc();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+
+        let rows = send_as(&svc, alice, "alice", "m-1", &["bob"], &SendMeta::default());
+
+        assert_eq!(rows[0].code, Some(FailCode::PeerOffline));
+    }
+
+    #[test]
+    fn remote_codes_map_onto_the_closed_set() {
+        for (wire, code) in [
+            (Some("REMOTE_LIMIT"), FailCode::RemoteLimit),
+            (Some("RECIPIENT_AMBIGUOUS"), FailCode::RecipientAmbiguous),
+            (Some("MAILBOX_FULL"), FailCode::MailboxFull),
+            (Some("REQUEST_CAPACITY"), FailCode::RequestCapacity),
+            (Some("REMOTE_REFUSED"), FailCode::RemoteRefused),
+            (Some("RECIPIENT_DELETED"), FailCode::RemoteRefused),
+            (Some("PEER_OFFLINE"), FailCode::RemoteRefused),
+            (Some("whatever"), FailCode::RemoteRefused),
+            (None, FailCode::RemoteRefused),
+        ] {
+            assert_eq!(FailCode::from_remote_code(wire), code, "{wire:?}");
+        }
+    }
+
+    #[test]
+    fn the_peer_reason_is_capped_on_a_character_boundary() {
+        let long = "é".repeat(REMOTE_REASON_MAX_BYTES);
+        let clipped = clip_reason(&long);
+        assert!(clipped.len() <= REMOTE_REASON_MAX_BYTES);
+        assert_eq!(clipped.len(), REMOTE_REASON_MAX_BYTES);
+        assert_eq!(clip_reason("a\u{1b}b"), "a\\u{1b}b");
+    }
+
+    // ── Remote entrance (receiving side) ──
+
+    #[test]
+    fn the_remote_entrance_answers_every_tag_and_folds_an_id_and_a_name_of_one_agent() {
+        let (svc, port, _remote) = svc_remote();
+        let (bob_id, bob) = live("bob");
+        port.set_roster(vec![bob]);
+        port.set_dormant(&["sleepy"]);
+        let mail = inbound(
+            "r-1",
+            "alice",
+            &[
+                (7, "bob"),
+                (3, &bob_id.to_string()),
+                (5, "sleepy"),
+                (9, "nobody"),
+            ],
+        );
+
+        let rows = svc
+            .handle_remote_mail(node(4), "away", &mail, &SendMeta::default(), Instant::now())
+            .expect("accepted");
+
+        assert_eq!(
+            rows,
+            vec![
+                RemoteRowResult {
+                    tag: 7,
+                    outcome: InboundOutcome::Delivered {
+                        recipient_id: bob_id
+                    }
+                },
+                RemoteRowResult {
+                    tag: 3,
+                    outcome: InboundOutcome::Delivered {
+                        recipient_id: bob_id
+                    }
+                },
+                RemoteRowResult {
+                    tag: 5,
+                    outcome: InboundOutcome::Held {
+                        recipient_id: tid("sleepy")
+                    }
+                },
+                RemoteRowResult {
+                    tag: 9,
+                    outcome: InboundOutcome::UnknownRecipient
+                },
+            ]
+        );
+        let bodies = port.injected_bodies();
+        assert_eq!(bodies.len(), 1, "two rows naming one agent deliver once");
+        assert!(
+            bodies[0].contains("alice@away"),
+            "the sender shows as name@pc: {}",
+            bodies[0]
+        );
+    }
+
+    #[test]
+    fn the_remote_entrance_resolves_locally_only_and_never_forwards() {
+        let (svc, port, remote) = svc_remote();
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        let mail = inbound(
+            "r-1",
+            "alice",
+            &[
+                (0, "bob"),
+                (1, "bob@home"),
+                (2, &rid("home", "bob").to_string()),
+            ],
+        );
+
+        let rows = svc
+            .handle_remote_mail(node(4), "away", &mail, &SendMeta::default(), Instant::now())
+            .expect("accepted");
+
+        assert!(rows
+            .iter()
+            .all(|r| r.outcome == InboundOutcome::UnknownRecipient));
+        assert!(remote.sent().is_empty());
+    }
+
+    #[test]
+    fn the_remote_entrance_refuses_an_invalid_frame_whole() {
+        let (svc, port, remote) = svc_remote();
+        let (bob_id, bob) = live("bob");
+        port.set_roster(vec![bob]);
+        let now = Instant::now();
+        let ok_meta = SendMeta::default();
+        let check = |mail: InboundMail, meta: &SendMeta, needle: &str| {
+            let (code, reason) =
+                refusal_code(svc.handle_remote_mail(node(4), "away", &mail, meta, now));
+            assert_eq!(code, FailCode::RemoteRefused, "{needle}");
+            assert!(reason.contains(needle), "{reason} should mention {needle}");
+        };
+
+        check(inbound("r-1", "alice", &[]), &ok_meta, "no recipients");
+        let many: Vec<(u32, &str)> = (0..=MAX_REMOTE_ROWS as u32).map(|t| (t, "bob")).collect();
+        check(inbound("r-2", "alice", &many), &ok_meta, "more than 64");
+        check(
+            inbound("r-3", "alice", &[(1, "bob"), (1, "bob")]),
+            &ok_meta,
+            "duplicate row tag",
+        );
+        check(
+            inbound("r-4", "alice", &[(1, " @all")]),
+            &ok_meta,
+            "group addresses",
+        );
+        check(
+            inbound("r-5", "alice", &[(1, "@here")]),
+            &ok_meta,
+            "group addresses",
+        );
+        check(
+            inbound("r-6", "alice", &[(1, "  ")]),
+            &ok_meta,
+            "empty recipient",
+        );
+        check(
+            inbound("r-7", "alice", &[(1, "bob"), (2, &bob_id.to_string())]),
+            &reply_meta("m-x"),
+            "exactly one recipient",
+        );
+        check(inbound("r-8", "", &[(1, "bob")]), &ok_meta, "sender name");
+        check(
+            inbound("r-9", &"a".repeat(REMOTE_NAME_MAX_BYTES + 1), &[(1, "bob")]),
+            &ok_meta,
+            "sender name",
+        );
+        check(
+            inbound("r-10", "al\nice", &[(1, "bob")]),
+            &ok_meta,
+            "sender name",
+        );
+        let mut nil = inbound("r-11", "alice", &[(1, "bob")]);
+        nil.from_agent_id = PeerId::nil();
+        check(nil, &ok_meta, "nil sender id");
+
+        // R8: a sender id that is also an agent of this PC.
+        let copied = inbound("r-12", "alice", &[(1, "bob")]);
+        remote.local_ids.lock().unwrap().push(copied.from_agent_id);
+        check(copied, &ok_meta, "copied data folder");
+
+        assert!(
+            port.injected_bodies().is_empty(),
+            "a refused frame delivers nothing"
+        );
+        assert!(
+            svc.ledger_snapshot().is_empty(),
+            "a refused frame records nothing"
+        );
+    }
+
+    #[test]
+    fn a_colliding_mail_id_is_refused_by_the_remote_entrance() {
+        let (svc, port, _remote) = svc_remote();
+        let (_, bob) = live("bob");
+        let alice = with_alice(&port, vec![bob]);
+        send_as(
+            &svc,
+            alice,
+            "alice",
+            "same-id",
+            &["bob"],
+            &SendMeta::default(),
+        );
+
+        let (code, _) = refusal_code(svc.handle_remote_mail(
+            node(4),
+            "away",
+            &inbound("same-id", "carl", &[(0, "bob")]),
+            &SendMeta::default(),
+            Instant::now(),
+        ));
+
+        assert_eq!(code, FailCode::RemoteRefused);
+    }
+
+    #[test]
+    fn the_per_pc_backstop_refuses_over_the_limit_and_the_body_cap_with_remote_limit() {
+        let (svc, port, _remote) = svc_remote_with(RemoteLimits {
+            mails_per_minute: 3,
+            max_body_bytes: 10,
+        });
+        let (_, bob) = live("bob");
+        port.set_roster(vec![bob]);
+        let t0 = Instant::now();
+        let mail = |i: usize, from: &str| {
+            let mut m = inbound(&format!("r-{i}"), from, &[(0, "bob")]);
+            m.body = "short".to_string();
+            m
+        };
+        // Different senders on the same PC share the PC's budget — no per-agent or per-pair limit below it.
+        for (i, from) in ["alice", "carl", "dora"].iter().enumerate() {
+            assert!(svc
+                .handle_remote_mail(node(4), "away", &mail(i, from), &SendMeta::default(), t0)
+                .is_ok());
+        }
+        let (code, reason) = refusal_code(svc.handle_remote_mail(
+            node(4),
+            "away",
+            &mail(3, "alice"),
+            &SendMeta::default(),
+            t0 + Duration::from_secs(59),
+        ));
+        assert_eq!(code, FailCode::RemoteLimit);
+        assert!(reason.contains("3 mails per minute"));
+        // Another PC has its own budget; the window slides.
+        assert!(svc
+            .handle_remote_mail(node(5), "lab", &mail(4, "alice"), &SendMeta::default(), t0)
+            .is_ok());
+        assert!(svc
+            .handle_remote_mail(
+                node(4),
+                "away",
+                &mail(5, "alice"),
+                &SendMeta::default(),
+                t0 + Duration::from_secs(60)
+            )
+            .is_ok());
+
+        let mut big = mail(6, "alice");
+        big.body = "x".repeat(11);
+        let (code, _) =
+            refusal_code(svc.handle_remote_mail(node(6), "far", &big, &SendMeta::default(), t0));
+        assert_eq!(code, FailCode::RemoteLimit);
+    }
+
+    #[test]
+    fn a_request_from_another_pc_keeps_the_requester_node_and_reports_overdue_to_it() {
+        let (svc, port, remote) = svc_remote();
+        let (bob_id, bob) = live("bob");
+        port.set_roster(vec![bob]);
+        let mail = inbound("r-1", "alice", &[(0, "bob")]);
+
+        svc.handle_remote_mail(node(4), "away", &mail, &req_meta("5m", 300), Instant::now())
+            .expect("accepted");
+        assert_eq!(
+            svc.contract_outcome_for_test("r-1", bob_id),
+            Some("awaiting_reply")
+        );
+        svc.sweep(Instant::now() + Duration::from_secs(301));
+
+        assert_eq!(
+            *remote.overdue.lock().unwrap(),
+            vec![(node(4), "r-1".to_string())]
+        );
+        // No local notice: the requester is not on this PC (only bob's request was injected).
+        assert_eq!(port.injected_bodies().len(), 1);
+    }
+
+    /// B's side of a reply to a request from PC A: the contract closes at verdict time by ADR-0116 decision 2's rule, and no overdue report goes out
+    ///   while the reply's verdict is in flight.
+    fn reply_to_remote_requester(
+        outcome: RemoteOutcome,
+    ) -> (Arc<MessagingService>, Arc<FakeRemote>, PeerId) {
+        let (svc, port, remote) = svc_remote();
+        let (bob, bob_agent) = live_sender("bob");
+        port.set_roster(vec![bob_agent]);
+        port.set_pcs(vec![pc(4, "away", PcLink::Connected, Some(&["alice"]))]);
+        svc.handle_remote_mail(
+            node(4),
+            "away",
+            &inbound("r-1", "alice", &[(0, "bob")]),
+            &req_meta("1m", 60),
+            Instant::now(),
+        )
+        .expect("accepted");
+
+        let rows = send_as(
+            &svc,
+            bob,
+            "bob",
+            "m-reply",
+            &["alice@away"],
+            &reply_meta("r-1"),
+        );
+        assert_eq!(rows[0].status, SendStatus::Pending);
+        assert_eq!(remote.sent()[0].meta.reply_to.as_deref(), Some("r-1"));
+        assert_eq!(
+            svc.contract_outcome_for_test("r-1", bob.peer_id),
+            Some("awaiting_reply")
+        );
+
+        // Past the deadline while the reply's verdict is in flight: no overdue report.
+        svc.sweep(Instant::now() + Duration::from_secs(61));
+        assert!(remote.overdue.lock().unwrap().is_empty());
+
+        svc.handle_remote_verdict("m-reply", node(4), &[RemoteRowVerdict { tag: 0, outcome }]);
+        (svc, remote, bob.peer_id)
+    }
+
+    #[test]
+    fn a_reply_to_a_remote_requester_closes_as_replied_when_delivered_or_held() {
+        let (svc, _, bob) = reply_to_remote_requester(RemoteOutcome::Delivered {
+            recipient_id: rid("away", "alice"),
+        });
+        assert_eq!(svc.contract_outcome_for_test("r-1", bob), Some("replied"));
+        let (svc, _, bob) = reply_to_remote_requester(RemoteOutcome::Held {
+            recipient_id: rid("away", "alice"),
+        });
+        assert_eq!(svc.contract_outcome_for_test("r-1", bob), Some("replied"));
+    }
+
+    #[test]
+    fn a_reply_to_a_remote_requester_closes_as_reply_failed_on_unknown_recipient() {
+        let (svc, _, bob) = reply_to_remote_requester(RemoteOutcome::UnknownRecipient);
+        assert_eq!(
+            svc.contract_outcome_for_test("r-1", bob),
+            Some("reply_failed")
+        );
+    }
+
+    #[test]
+    fn a_reply_to_a_remote_requester_stays_open_on_any_other_outcome_and_the_overdue_report_resumes(
+    ) {
+        let (svc, remote, bob) = reply_to_remote_requester(RemoteOutcome::Refused {
+            code: Some("MAILBOX_FULL".to_string()),
+            reason: None,
+        });
+        assert_eq!(
+            svc.contract_outcome_for_test("r-1", bob),
+            Some("awaiting_reply")
+        );
+        svc.sweep(Instant::now() + Duration::from_secs(62));
+        assert_eq!(
+            *remote.overdue.lock().unwrap(),
+            vec![(node(4), "r-1".to_string())]
+        );
+    }
+
+    #[test]
+    fn reply_overdue_is_rendered_by_the_requester_naming_the_pc_once_and_only_for_its_own_request_to_that_node(
+    ) {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![
+            pc(1, "home", PcLink::Connected, Some(&["bob"])),
+            pc(2, "work", PcLink::Connected, Some(&["carol"])),
+        ]);
+        send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-req",
+            &["bob"],
+            &req_meta("10m", 600),
+        );
+        send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-plain",
+            &["bob"],
+            &SendMeta::default(),
+        );
+        svc.handle_remote_verdict(
+            "m-req",
+            node(1),
+            &[RemoteRowVerdict {
+                tag: 0,
+                outcome: RemoteOutcome::Delivered {
+                    recipient_id: rid("home", "bob"),
+                },
+            }],
+        );
+
+        let late = Instant::now() + Duration::from_secs(601);
+        assert!(
+            !svc.handle_reply_overdue(node(2), "m-req", late),
+            "another node's report"
+        );
+        assert!(
+            !svc.handle_reply_overdue(node(1), "m-plain", late),
+            "not a request"
+        );
+        assert!(!svc.handle_reply_overdue(node(1), "m-unknown", late));
+        assert!(svc.handle_reply_overdue(node(1), "m-req", late));
+        assert!(
+            !svc.handle_reply_overdue(node(1), "m-req", late),
+            "only once"
+        );
+
+        let notices = port.injected_bodies();
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("request m-req deadline (10m) exceeded — no reply from bob@home"),
+            "{}",
+            notices[0]
+        );
+    }
+
+    #[test]
+    fn park_payload_roundtrip_keeps_the_remote_sender_node_and_entrance() {
+        let from = SenderIdentity {
+            peer_id: PeerId::new_v4(),
+            epoch: 0,
+            node: Some(node(0xab)),
+        };
+        let p = ParkPayload {
+            sender_name: "alice@away".to_string(),
+            from,
+            entrance: Entrance::Remote,
+            body: "b\nody".to_string(),
+            meta: SendMeta::default(),
+        };
+        let back = ParkPayload::decode(&p.encode());
+        assert_eq!(back.from, from);
+        assert_eq!(back.entrance, Entrance::Remote);
+        assert_eq!(back.sender_name, "alice@away");
+        assert_eq!(back.body, "b\nody");
+        assert_eq!(NodeRef::from_hex(&node(0xab).to_hex()), Some(node(0xab)));
+        assert_eq!(NodeRef::from_hex("zz"), None);
+    }
+
+    // ── Review round 1 (U3a) ──
+
+    #[test]
+    fn a_settled_remote_row_never_takes_a_local_rows_transition() {
+        let (svc, port, _remote) = svc_remote();
+        let (carol_id, carol) = live("carol");
+        let alice = with_alice(&port, vec![carol]);
+        port.set_pcs(vec![pc(2, "pc2", PcLink::Connected, Some(&["carol"]))]);
+        // carol's first injection fails, so her local row stays pending in the queue.
+        port.fail_at(&[0]);
+        let rows = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["carol", "carol@pc2"],
+            &SendMeta::default(),
+        );
+        assert_eq!(rows[0].status, SendStatus::Pending);
+        // PC2 reports the same agent id (a copied data folder, or a lying peer).
+        svc.handle_remote_verdict(
+            "m-1",
+            node(2),
+            &[RemoteRowVerdict {
+                tag: 1,
+                outcome: RemoteOutcome::Held {
+                    recipient_id: carol_id,
+                },
+            }],
+        );
+
+        svc.flush_for(carol_id);
+
+        assert_eq!(
+            svc.ledger_statuses("m-1"),
+            vec![DeliveryStatus::RemoteHeld, DeliveryStatus::Delivered],
+            "carol's local row reaches delivered; the remote row is untouched"
+        );
+    }
+
+    fn reply_from_home(svc: &MessagingService, agent: &str, request_id: &str) {
+        let mail = InboundMail {
+            id: format!("m-re-{agent}"),
+            from_agent_id: rid("home", agent),
+            from_name: agent.to_string(),
+            rows: vec![InboundRow {
+                tag: 0,
+                to: "alice".to_string(),
+            }],
+            body: "answer".to_string(),
+        };
+        svc.handle_remote_mail(
+            node(1),
+            "home",
+            &mail,
+            &reply_meta(request_id),
+            Instant::now(),
+        )
+        .expect("accepted");
+    }
+
+    fn overdue_notices(port: &FakeDeliveryPort) -> Vec<String> {
+        port.injected_bodies()
+            .into_iter()
+            .filter(|b| b.contains("[engram] request"))
+            .collect()
+    }
+
+    /// alice requests from bob@home and dan@home (10 min deadline).
+    fn request_to_bob_and_dan() -> (Arc<MessagingService>, Arc<FakeDeliveryPort>) {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(
+            1,
+            "home",
+            PcLink::Connected,
+            Some(&["bob", "dan"]),
+        )]);
+        send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-req",
+            &["bob@home", "dan@home"],
+            &req_meta("10m", 600),
+        );
+        (svc, port)
+    }
+
+    #[test]
+    fn an_overdue_report_names_only_the_agent_that_did_not_reply_once_and_not_before_the_deadline()
+    {
+        let (svc, port) = request_to_bob_and_dan();
+        svc.handle_remote_verdict(
+            "m-req",
+            node(1),
+            &[
+                RemoteRowVerdict {
+                    tag: 0,
+                    outcome: RemoteOutcome::Delivered {
+                        recipient_id: rid("home", "bob"),
+                    },
+                },
+                RemoteRowVerdict {
+                    tag: 1,
+                    outcome: RemoteOutcome::Delivered {
+                        recipient_id: rid("home", "dan"),
+                    },
+                },
+            ],
+        );
+        reply_from_home(&svc, "bob", "m-req");
+        let t = Instant::now();
+
+        assert!(
+            !svc.handle_reply_overdue(node(1), "m-req", t + Duration::from_secs(590)),
+            "before the deadline"
+        );
+        assert!(svc.handle_reply_overdue(node(1), "m-req", t + Duration::from_secs(601)));
+        assert!(
+            !svc.handle_reply_overdue(node(1), "m-req", t + Duration::from_secs(601)),
+            "a repeated report gives no second notice"
+        );
+
+        let notices = overdue_notices(&port);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("no reply from dan@home"),
+            "{}",
+            notices[0]
+        );
+        assert!(!notices[0].contains("bob"), "bob replied: {}", notices[0]);
+    }
+
+    #[test]
+    fn an_overdue_report_with_several_unanswered_rows_names_the_pc_and_lists_them() {
+        let (svc, port) = request_to_bob_and_dan();
+
+        assert!(svc.handle_reply_overdue(
+            node(1),
+            "m-req",
+            Instant::now() + Duration::from_secs(601)
+        ));
+
+        let notices = overdue_notices(&port);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains(
+                "an agent on home has not replied — not answered yet: bob@home, dan@home"
+            ),
+            "{}",
+            notices[0]
+        );
+    }
+
+    #[test]
+    fn a_reply_that_arrived_for_an_unconfirmed_row_refuses_a_later_overdue_report() {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-req",
+            &["bob@home"],
+            &req_meta("10m", 600),
+        );
+        // No recipient id comes back: the final verdict call settles the row unconfirmed.
+        svc.handle_remote_verdict("m-req", node(1), &[]);
+        reply_from_home(&svc, "bob", "m-req");
+
+        assert!(!svc.handle_reply_overdue(
+            node(1),
+            "m-req",
+            Instant::now() + Duration::from_secs(601)
+        ));
+        assert!(overdue_notices(&port).is_empty());
+    }
+
+    #[test]
+    fn a_late_verdict_still_gives_its_notice_after_the_history_ring_rolled_over() {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        let mut rows = send_as(&svc, alice, "alice", "m-1", &["bob"], &SendMeta::default());
+        svc.await_remote_answer("m-1", &mut rows, Instant::now());
+        // More rows than the history ring holds (unknown names — one failed row each).
+        for i in 0..4100 {
+            send_as(
+                &svc,
+                alice,
+                "alice",
+                &format!("m-f{i}"),
+                &["zed"],
+                &SendMeta::default(),
+            );
+        }
+        assert!(
+            svc.ledger_statuses("m-1").is_empty(),
+            "the row left the ring"
+        );
+
+        svc.handle_remote_verdict(
+            "m-1",
+            node(1),
+            &[RemoteRowVerdict {
+                tag: 0,
+                outcome: RemoteOutcome::Delivered {
+                    recipient_id: rid("home", "bob"),
+                },
+            }],
+        );
+
+        let notices = port.injected_bodies();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("bob — delivered"), "{}", notices[0]);
+    }
+
+    #[test]
+    fn the_final_verdict_call_settles_every_tag_it_left_out_as_unconfirmed() {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(
+            1,
+            "home",
+            PcLink::Connected,
+            Some(&["bob", "dan"]),
+        )]);
+        let mut rows = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["bob", "dan"],
+            &SendMeta::default(),
+        );
+
+        svc.handle_remote_verdict(
+            "m-1",
+            node(1),
+            &[RemoteRowVerdict {
+                tag: 0,
+                outcome: RemoteOutcome::Delivered {
+                    recipient_id: rid("home", "bob"),
+                },
+            }],
+        );
+        // Every row is settled, so the answer does not wait for the far deadline.
+        let started = Instant::now();
+        svc.await_remote_answer("m-1", &mut rows, started + Duration::from_secs(30));
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(rows[0].status, SendStatus::Delivered);
+        assert_eq!(rows[1].status, SendStatus::Pending);
+        assert!(rows[1]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("may or may not have arrived"));
+        // A verdict for the left-out tag after that is ignored.
+        svc.handle_remote_verdict(
+            "m-1",
+            node(1),
+            &[RemoteRowVerdict {
+                tag: 1,
+                outcome: RemoteOutcome::UnknownRecipient,
+            }],
+        );
+        assert_eq!(svc.ledger_statuses("m-1")[1], DeliveryStatus::RemotePending);
+    }
+
+    #[test]
+    fn a_mixed_send_keeps_the_local_row_and_tags_the_remote_one_by_its_row_index() {
+        let (svc, port, remote) = svc_remote();
+        let (_, carol) = live("carol");
+        let alice = with_alice(&port, vec![carol]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        let mut rows = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["carol", "bob"],
+            &SendMeta::default(),
+        );
+        let carol_row = rows[0].clone();
+        assert_eq!(remote.sent()[0].rows[0].tag, 1);
+
+        svc.handle_remote_verdict(
+            "m-1",
+            node(1),
+            &[RemoteRowVerdict {
+                tag: 1,
+                outcome: RemoteOutcome::Held {
+                    recipient_id: rid("home", "bob"),
+                },
+            }],
+        );
+        svc.await_remote_answer("m-1", &mut rows, Instant::now());
+
+        assert_eq!(rows[0], carol_row);
+        assert_eq!(rows[0].status, SendStatus::Delivered);
+        assert_eq!(rows[1].to, "bob");
+        assert!(rows[1]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("Held on PC 'home'"));
+    }
+
+    /// bob owes alice@away an answer and replies with the bare name "alice" while away's directory is `dir`.
+    fn bare_reply_to_remote_requester(dir: Option<&[&str]>) -> Option<&'static str> {
+        let (svc, port, _remote) = svc_remote();
+        let (bob, bob_agent) = live_sender("bob");
+        port.set_roster(vec![bob_agent]);
+        port.set_pcs(vec![pc(4, "away", PcLink::Connected, dir)]);
+        svc.handle_remote_mail(
+            node(4),
+            "away",
+            &inbound("r-1", "alice", &[(0, "bob")]),
+            &req_meta("10m", 600),
+            Instant::now(),
+        )
+        .expect("accepted");
+
+        let rows = send_as(&svc, bob, "bob", "m-reply", &["alice"], &reply_meta("r-1"));
+        assert_eq!(rows[0].code, Some(FailCode::RecipientNotFound));
+        svc.contract_outcome_for_test("r-1", bob.peer_id)
+    }
+
+    #[test]
+    fn a_bare_name_reply_to_a_requester_on_a_pc_with_an_unknown_directory_leaves_the_contract_open()
+    {
+        assert_eq!(bare_reply_to_remote_requester(None), Some("awaiting_reply"));
+        // With that PC's directory known, "not found" is real.
+        assert_eq!(
+            bare_reply_to_remote_requester(Some(&[])),
+            Some("reply_failed")
+        );
+    }
+
+    #[test]
+    fn the_remote_entrance_refuses_a_bad_mail_id_an_oversized_token_and_broken_contract_fields() {
+        let (svc, port, _remote) = svc_remote();
+        let (_, bob) = live("bob");
+        port.set_roster(vec![bob]);
+        let now = Instant::now();
+        let refused = |mail: InboundMail, meta: SendMeta, needle: &str| {
+            let (code, reason) =
+                refusal_code(svc.handle_remote_mail(node(4), "away", &mail, &meta, now));
+            assert_eq!(code, FailCode::RemoteRefused, "{needle}");
+            assert!(reason.contains(needle), "{reason} should mention {needle}");
+        };
+        let ok = SendMeta::default();
+
+        refused(inbound("", "alice", &[(0, "bob")]), ok.clone(), "mail id");
+        let long_id = "m".repeat(MAX_REMOTE_MSG_ID_BYTES + 1);
+        refused(
+            inbound(&long_id, "alice", &[(0, "bob")]),
+            ok.clone(),
+            "mail id",
+        );
+        refused(
+            inbound("m-1\nfake log line", "alice", &[(0, "bob")]),
+            ok.clone(),
+            "mail id",
+        );
+        let long_to = "b".repeat(REMOTE_NAME_MAX_BYTES + 1);
+        refused(
+            inbound("m-2", "alice", &[(0, &long_to)]),
+            ok.clone(),
+            "over 256 bytes",
+        );
+
+        let row = &[(0u32, "bob")][..];
+        let mut both = req_meta("10m", 600);
+        both.reply_to = Some("m-x".to_string());
+        refused(inbound("m-3", "alice", row), both, "request and reply_to");
+        let mut no_raw = req_meta("10m", 600);
+        no_raw.reply_by_raw = None;
+        refused(inbound("m-4", "alice", row), no_raw, "without its notation");
+        let mut no_request = req_meta("10m", 600);
+        no_request.request = false;
+        refused(inbound("m-5", "alice", row), no_request, "without request");
+        let too_long = req_meta("31d", 31 * 24 * 3600);
+        refused(inbound("m-6", "alice", row), too_long, "over 30 days");
+        let odd_raw = req_meta("1 0m\n", 600);
+        refused(inbound("m-7", "alice", row), odd_raw, "short duration");
+        refused(
+            inbound("m-8", "alice", row),
+            reply_meta("not an id!"),
+            "reply_to",
+        );
+        let mut with_to = SendMeta::default();
+        with_to.to_attr = Some("bob,carol".to_string());
+        refused(inbound("m-9", "alice", row), with_to, "to_attr");
+
+        assert!(port.injected_bodies().is_empty());
+        assert!(svc.ledger_snapshot().is_empty());
+        // The ordinary id family passes.
+        assert!(remote_msg_id_ok("m-7f3k9q2d") && remote_msg_id_ok("r_1-X"));
+    }
+
+    // ── Review round 2 (U3a) ──
+
+    #[test]
+    fn a_reply_refused_here_does_not_count_as_answered_so_the_later_overdue_names_its_agent() {
+        let (svc, port, _remote) = svc_remote();
+        // alice is asleep, so mail parks for her; her mailbox is then filled.
+        port.set_dormant(&["alice"]);
+        let alice = SenderIdentity {
+            peer_id: tid("alice"),
+            epoch: 0,
+            node: None,
+        };
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-req",
+            &["bob@home"],
+            &req_meta("10m", 600),
+        );
+        svc.handle_remote_verdict(
+            "m-req",
+            node(1),
+            &[RemoteRowVerdict {
+                tag: 0,
+                outcome: RemoteOutcome::Delivered {
+                    recipient_id: rid("home", "bob"),
+                },
+            }],
+        );
+        let carl = ident();
+        for i in 0..100 {
+            send_as(
+                &svc,
+                carl,
+                "carl",
+                &format!("m-fill{i}"),
+                &["alice"],
+                &SendMeta::default(),
+            );
+        }
+
+        let mail = InboundMail {
+            id: "m-re-bob".to_string(),
+            from_agent_id: rid("home", "bob"),
+            from_name: "bob".to_string(),
+            rows: vec![InboundRow {
+                tag: 0,
+                to: "alice".to_string(),
+            }],
+            body: "answer".to_string(),
+        };
+        let rows = svc
+            .handle_remote_mail(node(1), "home", &mail, &reply_meta("m-req"), Instant::now())
+            .expect("frame accepted");
+        assert_eq!(
+            rows[0].outcome,
+            InboundOutcome::Refused(FailCode::MailboxFull)
+        );
+
+        // bob's PC keeps its contract open and reports overdue: accepted, and it can only be about bob.
+        assert!(svc.handle_reply_overdue(
+            node(1),
+            "m-req",
+            Instant::now() + Duration::from_secs(601)
+        ));
+    }
+
+    #[test]
+    fn the_local_sweep_never_moves_a_remote_history_row_even_past_the_park_ttl() {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        send_as(&svc, alice, "alice", "m-1", &["bob"], &SendMeta::default());
+
+        svc.sweep(Instant::now() + Duration::from_secs(48 * 3600));
+
+        assert_eq!(
+            svc.ledger_statuses("m-1"),
+            vec![DeliveryStatus::RemotePending]
+        );
+    }
+
+    #[test]
+    fn a_reply_from_an_agent_addressed_by_a_braced_id_is_recognised_and_aliases_are_listed_once() {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(
+            1,
+            "home",
+            PcLink::Connected,
+            Some(&["bob", "dan"]),
+        )]);
+        let bob = rid("home", "bob");
+        let braced = format!("{{{bob}}}");
+        let dan = rid("home", "dan");
+        send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-req",
+            &[&braced, "dan@home", &format!("{dan}@home")],
+            &req_meta("10m", 600),
+        );
+        svc.handle_remote_verdict(
+            "m-req",
+            node(1),
+            &[
+                RemoteRowVerdict {
+                    tag: 1,
+                    outcome: RemoteOutcome::Delivered { recipient_id: dan },
+                },
+                RemoteRowVerdict {
+                    tag: 2,
+                    outcome: RemoteOutcome::Delivered { recipient_id: dan },
+                },
+            ],
+        );
+        // bob's row stays unconfirmed (no recipient id): his reply is matched by the braced id token.
+        let mail = InboundMail {
+            id: "m-re-bob".to_string(),
+            from_agent_id: bob,
+            from_name: "bob".to_string(),
+            rows: vec![InboundRow {
+                tag: 0,
+                to: "alice".to_string(),
+            }],
+            body: "answer".to_string(),
+        };
+        svc.handle_remote_mail(node(1), "home", &mail, &reply_meta("m-req"), Instant::now())
+            .expect("accepted");
+
+        assert!(svc.handle_reply_overdue(
+            node(1),
+            "m-req",
+            Instant::now() + Duration::from_secs(601)
+        ));
+        let notices = overdue_notices(&port);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("no reply from dan@home"),
+            "{}",
+            notices[0]
+        );
+        assert!(
+            !notices[0].contains(&bob.to_string()),
+            "bob replied: {}",
+            notices[0]
+        );
+    }
+
+    #[test]
+    fn a_row_the_receiver_would_refuse_fails_alone_and_the_other_rows_to_that_pc_still_go() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        let long = format!("{}@home", "x".repeat(REMOTE_NAME_MAX_BYTES + 1));
+
+        let rows = send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-1",
+            &["bob@home", &long],
+            &SendMeta::default(),
+        );
+
+        assert_eq!(rows[0].status, SendStatus::Pending);
+        assert_eq!(rows[1].code, Some(FailCode::RecipientNotFound));
+        let sent = remote.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].rows,
+            vec![OutboundRow {
+                tag: 0,
+                to: "bob".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn contract_fields_the_receiver_would_refuse_fail_the_remote_rows_here_and_leave_local_rows_alone(
+    ) {
+        let (svc, port, remote) = svc_remote();
+        let (_, carol) = live("carol");
+        let alice = with_alice(&port, vec![carol]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        // A notation the local entrance accepts (leading zeros) but over the remote cap.
+        let odd = req_meta("0000000000000000010m", 600);
+
+        let rows = send_as(&svc, alice, "alice", "m-1", &["carol", "bob@home"], &odd);
+
+        assert_eq!(rows[0].status, SendStatus::Delivered);
+        assert_eq!(rows[1].code, Some(FailCode::RemoteRefused));
+        assert!(rows[1]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("cannot go to PC 'home'"));
+        assert!(remote.sent().is_empty());
+    }
+
+    #[test]
+    fn an_inbound_mail_reusing_a_remote_request_id_after_its_history_left_the_ring_is_refused() {
+        let (svc, port, _remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![pc(1, "home", PcLink::Connected, Some(&["bob"]))]);
+        send_as(
+            &svc,
+            alice,
+            "alice",
+            "m-req",
+            &["bob"],
+            &req_meta("10m", 600),
+        );
+        for i in 0..4100 {
+            send_as(
+                &svc,
+                alice,
+                "alice",
+                &format!("m-f{i}"),
+                &["zed"],
+                &SendMeta::default(),
+            );
+        }
+        assert!(svc.ledger_statuses("m-req").is_empty());
+
+        let (code, _) = refusal_code(svc.handle_remote_mail(
+            node(1),
+            "home",
+            &inbound("m-req", "carl", &[(0, "alice")]),
+            &SendMeta::default(),
+            Instant::now(),
+        ));
+
+        assert_eq!(code, FailCode::RemoteRefused);
     }
 }

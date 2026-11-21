@@ -141,6 +141,9 @@ pub enum Entrance {
     ///   4). A separate value lets an observation record tell "infrastructure notice,
     ///   not a peer send" by label alone (only created inside the daemon).
     Daemon,
+    /// Mail from an agent on another PC, through the kernel's remote entrance (`MessagingService::handle_remote_mail`).
+    // ADR-0390
+    Remote,
 }
 
 impl Entrance {
@@ -149,6 +152,7 @@ impl Entrance {
             Entrance::Mcp => "mcp",
             Entrance::Cli => "cli",
             Entrance::Daemon => "daemon",
+            Entrance::Remote => "remote",
         }
     }
 }

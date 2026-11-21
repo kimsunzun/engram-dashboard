@@ -783,6 +783,7 @@ fn entrance_str(e: Entrance) -> &'static str {
         Entrance::Mcp => "mcp",
         Entrance::Cli => "cli",
         Entrance::Daemon => "daemon",
+        Entrance::Remote => "remote",
     }
 }
 

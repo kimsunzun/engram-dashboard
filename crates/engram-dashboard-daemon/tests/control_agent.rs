@@ -1858,6 +1858,7 @@ mod resolver_alignment {
                 roster: self.live_agents(),
                 // Empty the dormant layer to align the two resolvers' domains (module comment above).
                 dormant: vec![],
+                pcs: vec![],
             }
         }
         fn is_agent_live(&self, id: PeerId) -> bool {
@@ -1892,6 +1893,7 @@ mod resolver_alignment {
         let from = SenderIdentity {
             peer_id: uuid::Uuid::new_v4(),
             epoch: 0,
+            node: None,
         };
         let rows = service
             .handle_send(

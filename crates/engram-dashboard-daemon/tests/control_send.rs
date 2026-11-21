@@ -403,6 +403,7 @@ async fn roster_excludes_a_terminal_session_still_in_the_map() {
             engram_dashboard_messaging::SenderIdentity {
                 peer_id: AgentId::new_v4(),
                 epoch: 0,
+                node: None,
             },
             "outsider",
             &["corpse".to_string()],

@@ -6557,6 +6557,7 @@ mod tests {
         let sender = SenderIdentity {
             peer_id: uuid::Uuid::new_v4(),
             epoch: 0,
+            node: None,
         };
         let req = SendMeta {
             request: true,
@@ -6588,6 +6589,7 @@ mod tests {
                 SenderIdentity {
                     peer_id: boss.id,
                     epoch: 0,
+                    node: None,
                 },
                 "boss",
                 &["sleepy".to_string()],
@@ -6672,6 +6674,7 @@ mod tests {
                 SenderIdentity {
                     peer_id: sleepy.id,
                     epoch: 0,
+                    node: None,
                 },
                 "sleepy",
                 &["helper".to_string()],
@@ -6816,6 +6819,7 @@ mod tests {
                 SenderIdentity {
                     peer_id: uuid::Uuid::new_v4(),
                     epoch: 0,
+                    node: None,
                 },
                 "outsider",
                 &["sleepy".to_string()],
