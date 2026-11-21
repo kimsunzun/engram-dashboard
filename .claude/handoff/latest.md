@@ -1,61 +1,53 @@
-# Handoff: multi-daemon (S37) — PRD/TRD approved, U1 (iroh adapter) and U2 piece A (platform OS functions) committed; next = U2 piece B (other-account measures), one user question first
+# Handoff: multi-daemon (S37) — U2 pieces B (other accounts, FAT refusal) and C1 (peer identity + trusted list storage) committed; next = C2 (PeerWire + peer link over iroh)
 
 ## Know first
-- Mode: autonomous (user: 「자율모드 시동이다」 · 「쭉 진행해」). The user is a game programmer learning networking: big picture first, short, plain words; **no work / tracking numbers in user-facing text** (user 2026-11-20: 「번호 필요없어」 — call things by name, e.g. "멀티데몬", "iroh 통로"); explain with timelines and data movement when asked; do not ask about small scope / order choices (「개발순서 관련해서는 큰 볼륨아니면 나한테 물어보지말고 알아서」) — decide and report.
-- Explain format (user criterion, to be turned into an engram-explain format via skill-factory later): first explanation = overall structure picture + block-level code structure + main runtime flows, picture-first, minimal text, details collapsed at the bottom; no decision lists. `docs/process/S37-multi-daemon/trd.html` is the first try of that format.
-- Agent cap: at most 5 new subagents per user instruction (codex and SendMessage-continued workers not counted).
-- `566fef91` (checkHangul test 30 s timeouts) is a small-fix commit marked "review pending" — batch it into a later review.
-- Untracked `.claude/explain/` is old research HTML, not part of this work — leave it.
+- Mode: autonomous. The user is a game programmer; big picture first, short, plain words.
+- **Never use coined labels in user-facing text** — no "piece C1", "trusted list", "U2", "T49", work numbers. Use real file / command names or describe what happens. The user was angry about this repeatedly (2026-11-21, recorded in `~/.claude/references/global-feedback.md`). Before asking a decision, check every noun is a word the user used, a real file/command name, or a general term.
+- Do not stop for minor races / display-only issues; decide and report (user 2026-11-21 「멈출정도는 아니지 않나?」). Small scope / order choices are Claude's.
+- Agent cap: at most 5 subagents running at the same time (global-rules, changed 2026-11-21).
+- Untracked `.claude/explain/` is old research HTML — leave it. `.claude/review-tmp/` (git-excluded) holds this session's briefs, diffs and TRD extracts (`trd-U2C-extract.md` is reusable for C2/C3).
+- Company PC: Engram is a personal project; the user asked about using the peer link between the company PC (Cato Client) and home — Claude said it cannot judge company policy; check with security. Do not decide it.
 
 ## One-line state · next first action
-PRD approved; TRD draft 8 reviewed (4 rounds, all PASS); 8 ADRs (0388–0395); U1 iroh adapter done (`83c4098e`); U2 piece A platform OS functions done (`72a10e88`). U2 has two more pieces.
-**Next first action:** ask the user the exFAT question below (one question, plain words), then run `/engram-implement` for U2 piece B — other-account measures (TRD §4-9 / T47 / T48): token split (`daemon.json` = shared lock + owner SID, `daemon-token.<account>` owner-only via `platform::owner_only::create_owner_only`), `mcp-config/*.json` owner-only, daemon accept-time account check in `link/server.rs` and the control listener (`platform::account::tcp_client_account`), shell-side check at the four `daemon.json` read sites (`src-tauri/src/discovery/mod.rs` `FileReader::read`, `src-tauri/src/daemon_client/link/endpoint.rs` `judge`, `src-tauri/src/daemon_client/link/stop.rs`, `scripts/engram.mjs`) using `tcp_server_account` after connecting, `DaemonInfo` owner-SID field with `#[serde(default)]` + `PROTOCOL_VERSION` bump, `docs/reference/structure/daemon-link.md`. Then piece C (link/peer/ core + `peer.*` + ask_user seam + identity named lock, which piece A did not include).
+S37 U2: platform OS functions, other-accounts measures (`632e1678`), FAT/exFAT refusal (same commit), identity + trusted list + local identity lock (`6cfc5618`) are done. U2 still needs **C2 = PeerWire + peer link over iroh** (§3-2, §3-3, §4-1, §4-2: accept gate, dial, tie-break, re-arm, duplicate detection, state, lifecycle, endpoint only while ≥1 trusted PC) and **C3 = approvals / ask-the-user seam + `peer.*` commands + typed caller** (§4-8, T18 · T19 · T29 · T32 · T38 · T41–T43), then U3a/U3b (remote mail), U4 (app UI), U5 (two-PC check).
+**Next first action:** run `/engram-implement` for C2 with `.claude/review-tmp/trd-U2C-extract.md` (or regenerate from the TRD). Carry into the C2 brief: call `PeerStore` operations off the async workers; wire `identity::sweep_temps` at daemon start (ADR-0291 R12); run `NetworkSettings::check_for_endpoint` at endpoint build — a refused stored helper URL is an endpoint error, never a fallback to n0 defaults; a `set_network` that changes only the port is refused while a stored helper URL fails the adapter check.
 
-## Open — ask the user (one at a time)
-- **exFAT / no-ACL volume (needed by piece B):** `create_owner_only` now returns `Unsupported` on volumes without persistent ACLs (FAT/exFAT USB). The token file then cannot be protected. Options: (a) the daemon refuses to start there with a clear message; (b) continue with a warning and rely only on the accept-time account check (works once the platform lookup is used). Claude has no recommendation recorded yet — weigh: (b) keeps portable-USB use working, (a) is strict. Also note: if TEMP is on FAT the approval dialog returns Unsupported (manifest goes through `create_owner_only`) → caller treats it as "dialog unavailable".
-
-## Repo state (measured 2026-11-20 22:51)
-- Branch `v0.5.0/feat/multi-daemon` @ `38fd7670`, in sync with origin (0/0); 70 commits ahead of origin/master, 0 behind (origin/master merged at `e21258f5` this session to get `qa-mutate.json`).
+## Repo state (measured 2026-11-21 21:15)
+- Branch `v0.5.0/feat/multi-daemon` @ `6cfc5618`, in sync with origin (0/0). Against origin/master: 78 ahead, **4 behind** (master moved; merge origin/master before integration or when a binding seems missing).
 - Untracked: `.claude/explain/` only. This handoff commit comes after these numbers.
 
 ## Verification state
-- U1 (`83c4098e`): deep review (lead + link-lifetime lens + codex), 2 fix rounds, PASS. QA PASS: workspace 5519, transport --all-features 478 (iroh_link 28 incl. a 30 s real idle-out), gates 32/32, frontend 2928, GUI smoke (app↔daemon link, claude reply), mutation 2/2.
-- U2 piece A (`72a10e88`): deep review (lead + Win32-security lens with measured probes + codex), 2 fix rounds, PASS. QA PASS: workspace 5556, platform 122, gates 32/32, frontend 2928, codex lane (CLI 0.171.0, lanes.tsv updated), GUI smoke (daemon start_time = process start; codex reply), mutation 2/2, real dialog open/dismiss, TaskDialog load ×3.
-- Re-run: `cargo test -p engram-dashboard-transport --all-features` · `cargo test -p engram-dashboard-platform -- --test-threads=4` (through `scripts/run-detached.ps1` per the qa binding).
-- Not verified / not tested: a dial cancelled mid-connect (U1); delete-by-path cleanup on a no-ACL volume and in-process repeated TaskDialog load (piece A); iroh_link tests cannot be mutation-checked (wrapper passes no cargo features); TaskDialog `&` rendering (manual); elevated-process lookup, real session 0, second-account cases (need U5 / real accounts).
-- Measured facts now in docs: a dead peer is detected at the QUIC connection idle timeout, 30 s (`iroh::QUIC_IDLE_TIMEOUT`), not 15 s; TCP table rows of a dead creator keep its PID and are dated at socket creation (lens probes, cases A–D).
+- B (`632e1678`): review B1 deep 3 rounds PASS, B2 full 4 rounds PASS; QA full regression + shell real-daemon lane (incl. v0.3.2 cross-version stop) + claude/codex lanes + mutation 2/2 + GUI (connect, token file DACL, codex `engram` CLI and claude MCP pass the account check, +~1 ms per control request, graceful stop) — PARTIAL items (tray click, volume band in GUI) moved to `docs/unverified-tests.md`.
+- C1 (`6cfc5618`): review deep 4 rounds + corrupt-list delta PASS; QA full regression (backend 5731, gates 32/32, frontend 2948), claude lane, mutation 2/2; real measurement n/a (module unwired).
+- Re-run: `cargo test -p engram-dashboard-daemon -- --test-threads=4`, `cargo test -p engram-dashboard-platform -- --test-threads=4`, `node scripts/gen-third-party-licenses.mjs "$TEMP/tpl.txt"` (through `scripts/run-detached.ps1` per the qa binding).
+- Not verified (all listed in `docs/unverified-tests.md`): tray Stop click; real exFAT drive; mixed elevation; a second Windows account; the identity lock across sessions / accounts / elevation; two PCs on one router (mDNS); two networks (user will use phone tethering, or a non-corporate VPN).
 
 ## Do-not / lessons
-- Do not assume a binding file is missing — first check whether this branch is behind master (`qa-mutate.json` existed on master; merging origin/master fixed it).
-- Reviewer contexts grew large (the PRD/TRD lead reached ~534k); start fresh reviewers per topic.
-- Codex `--resume-last` fails across session restarts ("No previous Codex task thread") — pass earlier findings in a brief file and run fresh.
-- The TCP owner lookup must not be trusted from the PID alone (stale/reused PIDs): use the timestamp rule in `platform::account`; do not add a clock tolerance (reopens PID reuse).
+- License gate: any change that makes a shipped crate pull new deps must run `node scripts/gen-third-party-licenses.mjs` early; iroh needed CDLA-Permissive-2.0 (user-approved) and upstream MIT texts for 8 crates.
+- Do not put Korean in code/config comments (the Hangul gate fails) — quote user approvals in English.
+- Before QA, any new per-test `#[cfg(windows)]` outside `platform` must be added to `OS_CFG_FILES` in `.github/workflows/ci.yml`.
+- The auto-mode classifier once blocked a SendMessage to a coder right after the user's angry interrupt; resending after the user said 「진행 해」 worked.
 
 ## Resume command
-`git -C I:/Engram/apps/engram-dashboard log --oneline -4 && git -C I:/Engram/apps/engram-dashboard status -sb | head -3`
+`git -C I:/Engram/apps/engram-dashboard log --oneline -6 && git -C I:/Engram/apps/engram-dashboard status -sb | head -3`
 
 ## Decisions (this session)
 User-decided:
-- PRD approval · 상황: every PRD item came from the user's decisions, review closed · 선택지 approve / — · 고른 것 「prd는 얘기 다 한거 아님? 나하고?」 · — .
-- Portable copy identity (P-A) · 선택지 A+B ★ (seal per OS account + duplicate detection) / B / C · 고른 것 「ㅇㅇ A+B로 가」 · 같음 · 근거(Claude): Tailscale TPM / Chromium DPAPI precedent; detection covers roaming/Linux.
-- Bare name on several PCs (P-B0) · 선택지 refuse + `name@*` form ★ / auto fan-out / refuse only · 고른 것 「ㅇㅇ 그렇게 하면 될듯?」, `name@*` timing 「알아서해」 → deferred T-117 · 같음.
-- Unknown directory not counted (P-B) · 선택지 persist copies ★ / refuse / keep · 고른 것 「그냥 놔두면 되지 않아? 유저 잘못이지」 → keep, amend D2 · 갈림.
-- Trust-changing commands (P-C) · 선택지 human approves ★ / approve + bypass switch / agent direct · 고른 것 「사람이 승인 하는게 맞다」; UI: app if open, else native OS dialog 「디폴트 쓰자」, 「플랫폼으로 분리되서 실행되는 공용」 · 같음 (terminal yes/no rejected after precedent check).
-- Identity per OS account (P-D) · 선택지 per account ★ / per PC · 고른 것 「계정단위로해줘」 + per-account SID files 「ㅇㅋㅇㅋ」 · 같음.
-- `peer.edit` (P-E) · Claude decided under the user's scope rule.
-- Liveness (P-F) · 선택지 align ping/idle ★ / defaults / shorter · 고른 것 「우리 감지를 빼면 안됨? iroh 피드백 받으면」 → rely on iroh only · 갈림.
-- Inbound limits (P-G) · 선택지 refuse ★ / defer → reframed → per-agent caps dropped, one per-PC backstop · 고른 것 「1개 에이전트가 60개 한꺼번에 보낼일은 없을테니 그냥 의미없는 수치」 → 「ㅇㅇ 일단 넘어가고」 · 같음 (final proposal).
-- Local threat model (P-H) · 선택지 (a′) OS account = boundary, block other accounts on app↔daemon ★ / (b) full same-PC isolation · 고른 것 「같은계정은 막지 않는게 맞고」 · 「다른계정이면 막는다는거잖아」 · 같음.
-- One more fix round past the cap (PRD/TRD round 4) · 고른 것 「ㅇㅇ 고치고 진행해」.
-- Briefing format · (묻지 않음) · 「전체구조 + 코드 구조 대략적으로」, 「그림 위주」, 「블럭으로 표현될 수 있는 범위」, 「스킬 팩토리 쪽에 얘기하면 될듯」.
-- Tracking only: Linux T-118, macOS T-119 (「다른 곳에서 펼치는게」), outbox T-120 (「꼭 적용」), loop detection T-121, attachments T-122, agent-id duplicates T-123, Linux CI compile job T-124 (「별도 주제로」).
-Claude-decided: all internal TRD fixes of review rounds 2–4 (draft 3–8: late verdicts 120 s / 7 s, row tags, instance nonce + probe duplicate rule, account × machine file names, lock/token split, typed caller + `humanOnly`, receive queue bounds, in-flight cap 256, dialog Deny default / full ID / cooldown, etc.); U1 internals (`supervisor_keepalive`, acknowledged-before-close, handshake timeout, explicit 30 s idle); piece A internals (direct Task Dialog instead of a crate, Unsupported off Windows, timestamp-proven TCP owner, LOCAL_MACHINE blob refusal); merged origin/master into the branch; small-fix test timeouts `566fef91`.
-Open: exFAT policy (above).
+- FAT/exFAT policy · 상황: token / control files cannot be owner-only there, FAT rare, opt-in design was reviewed · 선택지 opt-in setting / refuse with no opt-in ★ · 고른 것 「ㅇㅇ 일단 거부로 하고 나중에 필요하면 넣자. 구지 필요없을것같아 요즘 fat 쓰는데가 어딨다고」 · 같음 (Claude had recommended refusal after the precedent check) · 근거: FAT rare → ADR-0399, opt-in parked T-125.
+- Setting location (while the opt-in existed) · 선택지 data folder ★ / AppData · 고른 것 「ㅇㅇ A로 가. 어차피 파일 접근할 수 있는권한 있으면 뭔들 못할까」 · 같음 (moot after the opt-in was dropped).
+- Settings screen · (묻지 않음) · 「설정화면은 나중에 하고 일단 파일에서 수정」.
+- Prove the listener is the Engram daemon (PID match) · 선택지 add ★ / document · 고른 것 「리서치 간단하게 한다음에 다른데도 하면 하고 아니면 말고」 → precedent check found no tool doing it → not added, accepted risk recorded (TRD remaining risks, daemon-link.md) · 갈림 (outcome differs from Claude's first recommendation, by the research).
+- PARTIAL QA items · 고른 것 「함수로만 확인하면 일단은 되지. Fat 관련해서는 그냥 놔둬」 → recorded in a new `docs/unverified-tests.md` (name chosen with the user: 「ㅇㅇ 그렇게해」).
+- CDLA-Permissive-2.0 · 상황: webpki-roots, not optional in iroh 1.x · 선택지 accept / fork / wait · 고른 것 「이게 뭔지 보고 허용목로에 추가해」 · — .
+- Corrupt `peers.<account>.<machine>.json` · 선택지 reset to defaults / feature off until accepted ★ · user did not pick explicitly; Claude took ★ and the user said 「진행 해」 · 같음 → TRD §8 P-J.
+- Two-PC test approach · 「테더링으로 할게 나중에 내가 한다고 할때 하면되니깐 나중확인으로 남겨두면 될듯」.
+- TRD first-explanation format · 「S37-multi-daemon/trd.html 적당히 괜찮아 보이는데 … 밑에는 … 펼쳐볼 수 있도록 핵심 내용들 추가해도됨. trd 최초 기본? 으로 일단 피드백 올려」 → recorded in engram-explain feedback.
+Claude-decided: shell pre-check + typed band cause for FAT; start answers ordered by attempt (latest-started wins); account check: access denied on opening the process = other account; vanished listener retryable (3 in a row → refusal); no kill after an account-refused stop; `scripts/engram.mjs` PowerShell probe (SID + start time vs socket creation, whole seconds); identity lock = private namespace (ADR-0401); create-without-replace via `MoveFileExW`; daemon enables `iroh` early; gate 4d stays `ws`; default ports 47120/47121; no short fingerprint; adapter URL check only on writes; PC names refuse Cf ∪ Default_Ignorable; exceeded the 3-round fix cap once (B2 round 4, a one-line move — reported, feedback recorded).
+Open: none blocking. Later: T-125 (FAT opt-in) on trigger.
 
 ## References
-- `docs/process/S37-multi-daemon/` — prd.md (approved), trd.md (draft 8; §7 U1 done, U2 pending; §8 decided-after-review list), trd.html (structure briefing), README.
-- ADRs `docs/decisions/0388`–`0395` (0388 and 0394 carry dated corrections).
-- Reference docs: `docs/reference/structure/{transport,messaging,daemon-link,command-bus}.md` (transport updated with the iroh module).
-- Code: `crates/engram-dashboard-transport/src/iroh.rs` (`IrohEndpoint`, `IrohConfig`, `IrohAcceptPolicy`, `QUIC_IDLE_TIMEOUT`); `crates/engram-dashboard-platform/src/{secret,account,owner_only,approval}.rs` (`seal`/`unseal`, `current_account_id`, `machine_id`, `tcp_client_account`/`tcp_server_account`, `create_owner_only`/`is_owner_only`, `ask_approval`/`DialogCloser`).
-- Tracking: `docs/tracking.md` T-115…T-124.
-- Feedback recorded this session: `~/.claude/references/global-feedback.md` (small scope/order choices = Claude's; no numbers in user text), `engram-explain/feedback.md` (structure-first first explanation), `engram-qa/feedback.md` (mutate wrapper features; fingerprint vs untracked folders).
+- `docs/process/S37-multi-daemon/trd.md` (§4-9 T47–T49, §7 U2 status line with C1 differences, §8 P-I · P-J, remaining risks), `prd.md` (R15 · R21 · AC17 · AC18).
+- ADRs 0395, 0399, 0401 (and 0389 amended by 0401).
+- Code: daemon `src/account_gate.rs`, `src/link/peer/{id,identity,mac,os,store,trusted}.rs`; shell `src-tauri/src/daemon_client/link/{account,route}.rs`, `src-tauri/src/discovery/mod.rs` (`pre_spawn_checks`); platform `src/{account,account_lock,owner_only,fs}.rs`; `scripts/engram-account.mjs`.
+- Reference docs: `docs/reference/structure/{daemon-link,peer-link,transport}.md`; `docs/unverified-tests.md`.
+- Feedback recorded this session: engram-review (same-class rule stopped autonomous work), engram-qa (fingerprint/untracked, artefact count, env to detached runs), engram-implement (fix-round cap), engram-explain (TRD first-explanation format), global (coined names).
