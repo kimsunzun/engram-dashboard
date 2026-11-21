@@ -1,48 +1,59 @@
-# Handoff: S25 T-112 frozen (launch skips what is absent, blocks on what exists but cannot be read) — next = step 21 (several library roots)
+# Handoff: S25 step 21 (library mounts) — U1, U2a, U2b, U3 committed and pushed; next = U4 mount commands
 
 ## Know first
-- The user wants: autonomous mode, short answers, plain words. **Progress briefings: a numbered list of the work by name with "now at N of M" — never work labels alone (T-112, 9b …).** The user said this briefing shape is right (「지금이 딱 좋네. 한눈에 볼 수 있어야지」). Minor review items are not shown to the user (「사소한거? 는 내가 알 필요없지?」) — record them in `docs/tracking.md`.
-- Server-stage position (UI 전 18개): 1–15 done. 16 = several library roots (step 21) · 17 = file move/copy/delete/trash (9b) · 18 = their commands (10b) · then the server-stage user check · then the client stage (screen discussion first).
-- Token cost: the local full regression runs 6 real-claude tests (CI skips them). For this task main skipped them per unit and ran them plus the claude/codex lanes once at the end (user agreed). Ask again per task if it matters; the QA binding itself is unchanged.
+- The user wants: short answers, plain words, progress as a numbered list of the work by name with "now at N of M" (never bare labels). Minor review items are not shown one by one — record them (commit messages / `docs/tracking.md`).
+- **Subagent cap = at most 5 running at once, all families combined (Codex counts).** The user corrected main's earlier misreading ("5 per instruction") and rewrote `global-rules` (core `6ae16b7`). Replace a worker once its context passes ~500k; spawning fresh is fine.
+- **Unshipped data gets no migration (ADR-0398)** — the library never shipped (not in `v0.4.0`); do not design old-shape readers or rewrites. The user said this keeps coming up.
+- Server-stage position (UI 전 18개): 1–15 done; **16 = library mounts (step 21) in progress — 3 of 5 pieces done** (1 mount model + `library.json` schema 2 ✅ · 2 virtual paths through the service ✅ (2a + 2b) · 3 launch per mount + built-in mount `engram` ✅ · 4 mount commands ⏳ · 5 help texts / reference / live scenes ⏳); then 17 = file move/copy/trash (9b) · 18 = their commands (10b) · server-stage user check · client stage.
 - `src-tauri/bindings/*.ts` line-ending noise and untracked `.claude/explain/` are not ours — never stage.
-- Workers: foreground Bash moves to background after ~180 s (worker rule says 9 min — feedback row filed); QA uses `pwsh Get-Process` instead of `Get-CimInstance` (classifier denied it before — feedback row filed).
+- Real-claude tests (CI skip list, 6) and the claude / codex lanes were skipped per unit (same arrangement the user agreed for T-112) — run them ONCE at the end of step 21, before the freeze.
 
 ## One-line state · next first action
-T-112 is implemented, reviewed, QA'd, frozen and pushed; CI green on `d112a558` (backend · frontend · gates success). **Next: step 21 (several library roots, ADR-0385; the built-in becomes an always-present read-only root)** via `/engram-implement` — parent `trd.md` item 21 now carries the T-112 hand-over paragraph (per-root rule, what is inherited). Then 9b / 10b, then the server-stage user check.
+Step 21 TRD `docs/process/S25-preset-library/trd-library-mounts.md` is reviewed (deep, PASS); ADR-0396 (one virtual root of named mounts), ADR-0398 (no migration), ADR-0400 (step-21 rules, amends 14 ADRs) are written. U1 `ac5d7414`, U2a `faf4cfac`, U2b `151cc7e8`, U3 `fe183347` are committed and pushed; CI green through U2b, U3's CI was running at save time. **Next: U4 (mount commands) per TRD §10 U4** via the same per-unit loop (fresh coder → deep code review: lead + risk axis + Codex → QA full regression + mutation → commit), then U5, then the real-claude lanes and the freeze.
+
+## Carried into U4 (from reviews / handovers — put these in the U4 coder brief)
+- Overlap wiring (`mounts.rs` `overlap`, `Place::candidate` / `known`, `BoundedIo::identity_all` exist but are unused in production): judge reserved local folders before mounts; batch each folder's ancestor identity asks in one `identity_all`; a known side that answers TIMEOUT / NOT_CHECKED should refuse the candidate (fail closed), OS error → spelling fallback; warn-log any spelling fallback; one shared `LaunchIo` budget per judgement — size it.
+- `Gate::write_mounts` is the ONLY writer of mounts / `seen` / `stamps`; remove / rename / relocate must clear `seen` and `stamps` and sync the view (`gate.rs` header rule) — otherwise `first_scan_join` can spin.
+- `resolve_over` now judges states inside the resolving lock (U3) — the rename/remove race tests become possible in U4.
+- `library.status` doc (`root_setting` null now also for an empty list), status reshape (per-mount `MountState`, retire `RootStatus`), `setRoot` removal, `PresetSection` lowercase words (host-checked `String`, `ProblemRow.kind` precedent; help `--section <Presets|…>`), catalog_version comment for any new declaration change.
+- Remaining agent `commands.rs` wire docs from U2a: `newFolder` / `newFile` "unspecified = the root", `list` "unspecified = the root", `folders` "no root" — check what U2b/U3 already fixed.
+- Rename primitive per TRD §3.2 / ADR-0400: presets → generation (root generation AND change number) → agents → re-key → registration in one write-lock hold under a Root ticket; plan with `yes` + required `root_generation`; repeat-after-failed-save rules; refuse when the mount is unusable or the profile store is `ReadOnly`; `agent.new` re-check uses `Numbers.change` (already implemented in U2a? — `agent.new` currently re-checks via the U2a / U3 paths; confirm against code).
 
 ## Repo state (branch v0.5.0/feat/preset-library · worktree wt1)
-- HEAD `d112a558`, 0 ahead / 0 behind origin at save time (this handoff commit will be ahead until pushed).
-- This session's commits (oldest first): TRD drafts `5cb5a69f` `e01d4dfe` `8c6fecd7` `20a3197b` `edd9fa9a` `7b4db191` `0de9822c` `e24eb277` (review PASS), ADR-0387 `40eced98` + body `c5d4b753`, README row `c5d4fc58`, U1 `d0c251ee`, U2 `ada48af7`, U3 `7ea7441d`, freeze `d112a558`.
+- HEAD `fe183347`, 0 ahead / 0 behind origin at save time (this handoff commit will be ahead until pushed).
+- This session's commits (oldest first): ADR-0396 `494a6452` + body `727590ae`; TRD drafts `c051da1d` `25817a70` `d8faf60a` `7aebc97c` `a6c28534` `61395f4a`; ADR-0398 `100d3f82` + body `4f19ab12`; TRD reviewed `2c617ed1`; ADR-0400 `b642ce3d` + body `5dd6e70a`; 9b hand-over note `aa61ee89`; U1 `ac5d7414`; U2a `faf4cfac`; U2b `151cc7e8`; U3 `fe183347`.
 - Uncommitted: nothing of ours.
-- Engram repo `I:/Engram` master is 11 ahead of origin (feedback rows; this session: `f53450f`, `c7b527a`) — not pushed.
+- Engram core repo `I:/Engram/core`: feedback rows this session `fc2bb24` (implement: unshipped data no migration — 미반영), `1015716` (subagent cap — since reflected by `6ae16b7`). Not pushed by main.
 
 ## Verification state
-- Ran: TRD review deep (lead · risk lens · Codex), 5 rounds → PASS. Code review per unit: U1 deep PASS, U2 deep (Codex FIX → fixed → all PASS), U3 full (FIX → fixed → PASS). QA: U1 full regression PASS (workspace 6532); U2 PASS (6547, CI skip list); final U2+U3 PASS — workspace 6552 incl. real-claude tests, frontend 2884, gates 34/34, bindings in sync, claude lane (control_send 5, usage 5, launch_kits_live 3 incl. `claude_l5_…`) and codex lane (usage 2, backend_contract 11, codex_launch_live 3, launch_kits_live 2 incl. `codex_l5_…`) PASS; live: CLI end to end in a spawned agent, share probe on unreachable UNC paths (error 53/67 → blocked), GUI double-click (DOM events — session was locked). CI green on `d112a558`.
-- Not verified: a remembered but disconnected mapped drive letter (cannot be created on this PC — `net use` to an unreachable share fails with error 67); whether `GetDriveTypeW` / `WNetGetConnectionW` can stall for such a drive (TRD R12, tracking T-120). GUI double-click with real OS input.
+- Ran per unit: deep code review (lead · risk axis · Codex) until PASS; QA = full local regression (CI's three jobs) + bindings drift + test-name comparison + mutation. Last QA (U3, tree `95bb289e`): workspace 6625 passed, frontend 2884, gates 34/34, bindings no drift, mutation 2/2 caught (incl. the U2b survivor). CI green on U2a `faf4cfac` and U2b `151cc7e8`.
+- Not verified: U3's CI (running at save); the 6 real-claude tests and the claude / codex lanes for all of step 21; live CLI scenes (U5); `cargo clippy` (not installed for toolchain 1.95.0).
 - Rerun: `cargo test --workspace -- --test-threads=4` (detached per `.claude/skill-bindings/qa.md`); lanes per qa.md 「claude · codex 레인」.
 
 ## Failed approaches (do-not)
-- Inserting a paragraph after "Handed over by step 7/20 (…)" in `trd.md` by first match — those markers repeat across items; anchor on the target item (use the last match or the item heading).
-- Python here-docs with `\\server` paths in normal strings break (`\U` escapes); write such scripts to a file with raw triple-quoted strings.
-- A coder writing JSON with backslashes through tool arguments lost the escapes (`C:\data` → invalid escape); use the Edit tool.
+- Codex re-reviews via a "resume the same thread" prompt return `WRONG THREAD` — start a fresh Codex task and give it the earlier findings in the prompt.
+- Python one-liners via `python` hit the Windows Store stub — use `py`, and write scripts to a file (heredocs swallow backslashes).
+- `mutate.mjs` has no operator swap for method-call guards (`is_none` / `split_once`); pick a nearby operator or report "not mutable".
+- Holding the library read lock across `agent.new`'s registry write (draft 3) put IO and the name gate under the library lock — rejected; the re-check compares the change number inside the registry insert and re-judges outside both locks.
 
 ## Resume command
-`git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -3 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v bindings`
+`git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -5 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v bindings && gh run list --branch v0.5.0/feat/preset-library --limit 1`
 
 ## Decisions
-User (2026-11-20):
-- 브리핑 모양 · (묻지 않음) 진행 위치 브리핑 · 선택지 없음 · 「T-112는 뭐야? … 몇번째야 도대체」 → 일 이름 번호 목록 + 현재 위치, 「지금이 딱 좋네. 한눈에 볼 수 있어야지 이상한말들하면 어차피 내가 안봐.」 · — · 근거: 라벨로는 못 알아봄.
-- 못 읽는 폴더 항목 · 상황: 네트워크 드라이브 끊김 등, 폴더는 있음 · 막기 ★ / 건너뛰기 · 「ㅇㅇ 막아.」 · 같음.
-- 기준 통일 · 상황: 초안은 못 읽는 라이브러리 폴더만 건너뜀 · 없으면 건너뜀·있는데 못 읽으면 막기(라이브러리 폴더 포함) ★ / 전부 건너뜀 · 「ㅇㅇ 같은 기준으로해.」 · 같음 → ADR-0387.
-- 못 읽는 폴더 표시 · 상황: 화면이 「찾을 수 없음」으로 보임(폴더는 있음) · 별도 구분 ★ / 그대로 · 「ㅇㅇ 별도로 구분해. 너무 디테일하게 원인을 쓰지는 말고.」 · 같음 · 조건: 「너무 디테일하게 원인을 쓰지는 말고」 → `folder-unreadable`, short fixed text.
-- SKILL.md 없는 스킬 폴더 · 상황: 폴더는 있고 스킬 파일만 없음, 라이브러리는 스킬로 안 봄 · 없음(건너뜀) ★ / 깨짐(막기) · 「스킬 폴더는 있는데 스킬이 없으면 없음이지.」 · 같음.
-- 토큰 테스트 · 상황: 로컬 전체 회귀가 실제 claude 테스트 6개를 돌림 · 마지막에 한 번 ★ / 조각마다 · 요지: 「자율모드로 쭉 진행해」 (질문에 직접 답 없이 자율 진행 지시) · 같음.
-- 「쭉쭉 진행해」, 「자율모드로 쭉 진행해」, 「ci 까지 다 끝내고 핸드오프해」.
-Main: drive letter absent → skipped (follows the rule); codex gets no note when Engram has no instruction text (would replace the user's `developer_instructions`); share probe in `BoundedIo::stat_all` with pure platform `share_root` + remembered-connection check; `library.status` word `unreadable`; edit folder refusals follow the rule; link-probe error → ② (NotADirectory absent); notices once per agent, `warn` log every launch; TRD/code-level choices in TRD §11 b/c. Unfixed rare-case recommendations → tracking T-120.
-Open: none.
+User (2026-11-21):
+- 16번 TRD 분리 · 상황: 16(라이브러리 루트 여러 개)과 17(파일 조작)을 한 TRD로 합칠지 · 따로 + 맞물림만 16에서 ★ / 합치기 · 「그냥 따로해 그럼.」 · 같음.
+- 루트 모델 · 상황: 여러 독립 루트(ADR-0385)는 3~5천 줄 · 하나로 관리 ★ / 여러 루트 / (사용자 제안) 가상 루트 + 이름 붙은 마운트 · 「루트는 가상루트로 최상단 루트고(트리에서는 관리되고 실물은 없는?), 그 밑에는 특정 이름이 있고 근데 그 이름은 나중에 실제 펼칠때 대체되는거고」 · 갈림 · 조건: 「그럼 그 폴더간의 레퍼 참조 이동도 되겠네」 · 「이대로 문제는 없는거잖아. 가상이니깐. 만약에 연결 끊기면 수동으로 맞추거나 해당 폴더 되돌린다음에 어떻게 어떻게 하면 되는거고.」 → ADR-0396.
+- UD1–UD9 · 상황: TRD 사용자 결정 9건 · 전부 ★ · 「ㅇㅇ 진행해.」 · 같음 (UD1 was later replaced by ADR-0398).
+- 옛 경로 이전 · 상황: 자동 고쳐 쓰기에서 must 5건, 라이브러리 미배포 · 이전 안 함 ★ / 유지 · 「지금까지 저장된 경로가 없잖아. 이거 되게 자주 나오는데 배포되고 고려하라니깐 그런건.」 · 같음 → ADR-0398.
+- 자율 진행 · (묻지 않음) · 선택지 없음 · 「자율모드로 진행해 나 자러간다.」 · —.
+- 서브에이전트 상한 해석 · (묻지 않음) · 선택지 없음 · 「뭔소리야 새로 띄울수 있는 5개라니? 5개를 한꺼번에 띄우지 말라는 말이었는데?」 · — → global-rules rewritten (동시에 5개, family 합산).
+- 마무리 · 「마무리 지으면 핸드오프 하자.」 · 「하던거는 다 마무리 짓고 핸드오프 하면될듯?」 → finished U3, then this save.
+Main (reported): mount id dropped (T-72 decides identity); one library lock + one generation; 9b move/copy mechanics handed over as rules (TRD §3.6 「9b must also」 + parent trd.md 9b hand-over); U2 split into U2a / U2b; holds resolved by restoring pre-change behaviour (arrival order via lock-free `MountView`, spawn-failed stat walks) or by following decided rules (O3 / ADR-0386 d5 for unknown mounts, ADR-0400 d5 one-segment writes); relink keeps `fixed` for readable mounts and reports never-walked unusable mounts as mount-top skip rows; `engram` row unreadable when the built-in folder cannot be read; built-in reference counts documented as Default-slot only.
+Open (asked, no answer yet):
+- 「손으로 고친 `library.json`에서 마운트 항목 하나만 잘못돼도 목록 전체를 손상으로 본다」(ADR-0291 그대로) — 괜찮은지.
+- 안 고친 권장 목록 (commit messages of U1–U3 list them): spelling fallback for an existing mount whose canonical gets no answer (U4 wiring); after a failed first start an attach skips a library preset as `not-found`; a refusal inside a change still bumps the change generation; the `ListFolderRow` / `LibraryFolderRow` `state` doc sentence; no test for "a built-in that reads but does not parse keeps the mount Ok".
 
 ## References
-- TRD `docs/process/S25-preset-library/trd-launch-skip-missing.md` (Implemented); ADR-0387 (amends 0374 / 0341 / 0361 / 0363).
-- Parent `docs/process/S25-preset-library/trd.md` items 21 (T-112 hand-over), 11 (launch notices do not reach the screen), 13 edition 1 (tree / wording / root cases).
-- `docs/tracking.md` T-120; `docs/tracking-archive.md` T-112.
-- Review / QA trail `.review-s25-d9/t112-*` (git-excluded), incl. `t112-trd/coder-brief.md` and `coder-handover.md`.
+- TRD `docs/process/S25-preset-library/trd-library-mounts.md` (reviewed; §10 units, §9 test plan, §3.6 9b rules); ADR-0396 · ADR-0398 · ADR-0400.
+- Code briefs / handovers (git-excluded): `.review-s25-d9/s21-code/coder-brief.md`, `handover-u1.md`, `handover-u2a.md`, `handover-u2b.md`, review briefs `u*-review-brief.md`, findings `u*-round*.md`.
+- Reference doc `docs/reference/structure/asset-library.md` (kept current per unit).
