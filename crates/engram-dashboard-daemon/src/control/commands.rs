@@ -198,7 +198,6 @@ impl LibraryCommandHost for NoLibrary {
         _folder: Option<&str>,
         _query: Option<&str>,
         _kinds: &[LibraryKind],
-        _builtins: bool,
     ) -> Result<LibraryListOk, PortRefusal> {
         Self::refused()
     }
@@ -1482,7 +1481,7 @@ mod tests {
             ("agent.presets", json!({ "target": target })),
             (
                 "agent.attachPreset",
-                json!({ "target": target, "presets": ["engram:/default"] }),
+                json!({ "target": target, "presets": ["engram/default"] }),
             ),
             (
                 "agent.detachPreset",
@@ -1505,7 +1504,7 @@ mod tests {
     }
 
     /// Without a library, `agent.new {presets}` applies the attach rule with no catalog: a library preset refuses the
-    /// whole call `CONFLICT` `library-unavailable` and creates nothing; `engram:/default` alone creates the agent with
+    /// whole call `CONFLICT` `library-unavailable` and creates nothing; `engram/default` alone creates the agent with
     /// its skip, and a given `root_generation` is not compared (there is no root).
     // ADR-0386
     #[test]
@@ -1522,7 +1521,7 @@ mod tests {
         let err = call(
             &table,
             "agent.new",
-            json!({ "cwd": "C:/work/probe", "backend": "Claude", "presets": ["engram:/default", "p.yaml"] }),
+            json!({ "cwd": "C:/work/probe", "backend": "Claude", "presets": ["engram/default", "p.yaml"] }),
         )
         .expect_err("a library preset with no library");
         assert_eq!(err.code(), ErrorCode::Conflict);
@@ -1536,7 +1535,7 @@ mod tests {
             &table,
             "agent.new",
             json!({
-                "cwd": "C:/work/probe", "backend": "Claude", "presets": ["engram:/default"],
+                "cwd": "C:/work/probe", "backend": "Claude", "presets": ["engram/default"],
                 "root_generation": 123_456,
             }),
         )
@@ -1544,8 +1543,8 @@ mod tests {
         assert_eq!(
             created["skipped"],
             json!([{
-                "item": "engram:/default", "code": "already-present",
-                "args": { "path": "engram:/default" }, "line": null,
+                "item": "engram/default", "code": "already-present",
+                "args": { "path": "engram/default" }, "line": null,
             }])
         );
         assert_eq!(manager.roster().len(), 1);

@@ -1,4 +1,4 @@
-//! The built-in assets: `engram:/…` → files of the same shape as the library under the distribution's `builtin\`
+//! The built-in assets: `engram/…` → files of the same shape as the library under the distribution's `builtin\`
 //! folder (a constructor value), read once when the service is made.
 //!
 //! - The id set is closed ([`BuiltinId`] — B23); file names per [`file_of`] (B14).
@@ -40,6 +40,9 @@ pub struct Builtins {
     default_preset: Entry,
     priming: Entry,
     default_settings: Entry,
+    /// Why the built-in folder cannot be read: there is none, or no built-in file in it could be read (every one
+    /// stands in for a read failure, not for its content); `None` = it can.
+    folder_unreadable: Option<String>,
 }
 
 struct Entry {
@@ -49,6 +52,9 @@ struct Entry {
     file: Result<PathBuf, String>,
     /// The file's text as read (not UTF-8 → U+FFFD) — empty for a stand-in.
     text: String,
+    /// It stands in because its file could not be read (a missing folder or file, an access error) — not for what the
+    /// file holds.
+    unread: bool,
 }
 
 impl Builtins {
@@ -59,30 +65,60 @@ impl Builtins {
             tracing::warn!("no built-in folder; all built-ins start as stand-ins");
         }
         let entry = |id| match dir.map(|dir| dir.join(file_of(id))) {
-            None => stand_in(id, NO_FOLDER.to_owned()),
+            None => stand_in(id, NO_FOLDER.to_owned(), true),
             Some(path) => match load(id, &path, backends) {
                 Ok((kind, content, text)) => Entry {
                     kind,
                     content,
                     file: Ok(path),
                     text,
+                    unread: false,
                 },
-                Err(why) => {
+                Err(failed) => {
+                    let (why, unread) = match failed {
+                        LoadError::Read(why) => (why, true),
+                        LoadError::Content(why) => (why, false),
+                    };
                     tracing::warn!(
                         builtin = id.id(),
                         path = ?path,
                         "built-in load failed; using a stand-in: {}",
                         escape_controls(&why)
                     );
-                    stand_in(id, why)
+                    stand_in(id, why, unread)
                 }
             },
         };
+        let (default_preset, priming, default_settings) = (
+            entry(BuiltinId::DefaultPreset),
+            entry(BuiltinId::Priming),
+            entry(BuiltinId::DefaultSettings),
+        );
+        let folder_unreadable = match dir {
+            None => Some(NO_FOLDER.to_owned()),
+            Some(_)
+                if [&default_preset, &priming, &default_settings]
+                    .iter()
+                    .all(|entry| entry.unread) =>
+            {
+                Some(FOLDER_UNREADABLE.to_owned())
+            }
+            Some(_) => None,
+        };
         Builtins {
-            default_preset: entry(BuiltinId::DefaultPreset),
-            priming: entry(BuiltinId::Priming),
-            default_settings: entry(BuiltinId::DefaultSettings),
+            default_preset,
+            priming,
+            default_settings,
+            folder_unreadable,
         }
+    }
+
+    /// Why the built-in folder cannot be read — there is none ([`NO_FOLDER`]), or not one built-in file in it could
+    /// be read ([`FOLDER_UNREADABLE`]) — as read once when the service was made; `None` = it can (a built-in may still
+    /// stand in on its own).
+    // ADR-0400 decision 20
+    pub(crate) fn folder_unreadable(&self) -> Option<&str> {
+        self.folder_unreadable.as_deref()
     }
 
     /// The priming's text as read when the service was made — what the merged instructions start with when a
@@ -106,8 +142,17 @@ impl Builtins {
     }
 }
 
-/// Why every built-in stands in when there is no built-in folder.
-const NO_FOLDER: &str = "no built-in folder";
+/// Why every built-in stands in when there is no built-in folder — and why the built-in mount cannot be read.
+pub(crate) const NO_FOLDER: &str = "no built-in folder";
+
+/// Why the built-in mount cannot be read when there is a built-in folder but not one of its files could be read.
+pub(crate) const FOLDER_UNREADABLE: &str = "the built-in folder cannot be read";
+
+/// Why a built-in file could not be used: it could not be read at all, or what it holds is not that built-in.
+enum LoadError {
+    Read(String),
+    Content(String),
+}
 
 /// Why a built-in YAML file that declares no `kind` stands in.
 const NO_KIND: &str = "no `kind`";
@@ -118,8 +163,8 @@ fn load(
     id: BuiltinId,
     path: &Path,
     backends: &dyn Backends,
-) -> Result<(ItemKind, ItemContent, String), String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+) -> Result<(ItemKind, ItemContent, String), LoadError> {
+    let bytes = std::fs::read(path).map_err(|e| LoadError::Read(e.to_string()))?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     match id {
         BuiltinId::Priming => {
@@ -130,11 +175,11 @@ fn load(
         }
         BuiltinId::DefaultPreset | BuiltinId::DefaultSettings => {
             match yaml_item(&bytes, backends) {
-                None => Err(NO_KIND.to_owned()),
+                None => Err(LoadError::Content(NO_KIND.to_owned())),
                 Some((_, ItemContent::Broken { reason })) => {
                     // `ParseError::to_reason` always writes `message` as a string.
                     let message = reason.args["message"].as_str().unwrap_or_default();
-                    Err(format!("{}: {message}", reason.code))
+                    Err(LoadError::Content(format!("{}: {message}", reason.code)))
                 }
                 Some((kind, content)) => Ok((kind, content, text)),
             }
@@ -142,7 +187,7 @@ fn load(
     }
 }
 
-fn stand_in(id: BuiltinId, why: String) -> Entry {
+fn stand_in(id: BuiltinId, why: String, unread: bool) -> Entry {
     let (kind, content) = match id {
         BuiltinId::DefaultPreset => (
             ItemKind::Preset,
@@ -184,6 +229,7 @@ fn stand_in(id: BuiltinId, why: String) -> Entry {
         content,
         file: Err(why),
         text: String::new(),
+        unread,
     }
 }
 
@@ -199,7 +245,7 @@ pub(crate) mod tests {
     use crate::backends::AgentBackends;
     use crate::path::{AssetRef, PresetItem};
 
-    pub(crate) const DEFAULT_PRESET: &str = "kind: preset\nversion: 1\ndescription: the default\ninstructions:\n  - engram:/priming\nsettings:\n  - engram:/settings/default\n";
+    pub(crate) const DEFAULT_PRESET: &str = "kind: preset\nversion: 1\ndescription: the default\ninstructions:\n  - engram/priming\nsettings:\n  - engram/settings/default\n";
     pub(crate) const PRIMING: &str = "# Engram\n\nYou run inside Engram.\n";
     pub(crate) const DEFAULT_SETTINGS: &str =
         "kind: settings\nversion: 1\nclaude:\n  env:\n    DISABLE_AUTOUPDATER: \"1\"\n";

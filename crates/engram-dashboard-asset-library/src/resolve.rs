@@ -6,7 +6,7 @@
 //! - **Pure** — no disk, no lock, no clock. Items come through [`Lookup`] (the catalog plus the built-ins, or a launch's
 //!   overlay); folder entries are only collected here, and their disk status arrives later through
 //!   [`Resolution::attach_folder_status`] (phase 2 — the caller stats [`Resolution::folder_paths`] outside every lock).
-//! - **Expansion** — for an agent, `engram:/default` (when attached) and then the attached presets in order; one preset =
+//! - **Expansion** — for an agent, `engram/default` (when attached) and then the attached presets in order; one preset =
 //!   its nested `presets` first, depth first (D1), then its own instructions · settings · skills, each list's common
 //!   items followed by the items tagged for the agent's backend (per preset — G51). An item reached a second time stays
 //!   at its first place; a preset reached again while it is being expanded is a cycle.
@@ -18,12 +18,16 @@
 //!   loaded nor told about.
 //! - The problem rows are the launch block rows (`agent::launch::BlockReason`): the problem list, the tree ⛔ and the
 //!   launch block come from the same rows. The split is by row kind: a launch leaves out every ① row (absent) and the
-//!   ④ row of an unset or absent root ([`Resolution::skipped`]) and refuses on every other row
-//!   ([`Resolution::blocked`]).
+//!   ④ row of an absent mount ([`Resolution::skipped`]) and refuses on every other row ([`Resolution::blocked`]).
+//! - **Per mount** (ADR-0400 decision 19): a library item is looked up only when its mount is usable
+//!   ([`MountStates`]). A mount that is not registered or not there is absent — its items are skipped; one that exists
+//!   but cannot be used stands one ④ row naming it for every item reached in it, and blocks. Other mounts expand
+//!   normally; a built-in never depends on a mount.
 // ADR-0315
 // ADR-0341
 // ADR-0359
 // ADR-0387
+// ADR-0400
 // TRD S25 step-7 §3-7
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -45,9 +49,9 @@ use crate::catalog::{key, Catalog, ItemContent, ItemKind};
 use crate::folder::FolderStatus;
 use crate::format::read::{ITEM_PATH_INVALID, WRONG_KIND};
 use crate::format::{conflict_key, ListName, PresetDoc};
-use crate::gate::{NOT_FOUND, NO_ROOT};
-use crate::mounts::Mounts;
-use crate::path::{AssetRef, BuiltinId, FolderRef, PathError, PresetItem};
+use crate::gate::NOT_FOUND;
+use crate::mounts::{MountName, Mounts};
+use crate::path::{AssetRef, BuiltinId, FolderRef, LibPath, PathError, PresetItem};
 use crate::validate::check_skill;
 use crate::LIBRARY_UNAVAILABLE;
 
@@ -86,16 +90,21 @@ pub const FOLDER_UNREADABLE: &str = "folder-unreadable";
 // TRD S25 step-7 B8
 pub const FOLDER_PATH_CLI_UNSAFE: &str = "folder-path-cli-unsafe";
 
+/// Why a mount a reference names is absent when no mount of that name is registered.
+// ADR-0400 decision 19
+pub const NOT_REGISTERED: &str = "not registered";
+
 /// One problem row — the row a launch refuses on or leaves out, so the problem list and the launch block come from the
 /// same rows. `item` = a
-/// library path, `engram:/…` or `folder:<normalized path>` (the launch check adds `command-line:<backend word>` and
+/// library path, `engram/…` or `folder:<normalized path>` (the launch check adds `command-line:<backend word>` and
 /// `working-folder:<path>` rows — `agent::launch::BlockReason`); `via` = the presets from the expansion start (for an
 /// agent, the attached preset) down to the one that lists the item — empty for an attached preset itself. A conflict
 /// carries every skill involved with its own chain. `reason.line` is a line of the referencing preset (`via.last()`; a row
 /// for an attached preset itself has `None`) for a row about a reference — `not-found`, `wrong-kind`, `preset-cycle`,
 /// `builtin-in-library-preset`, `path-through-link`, a folder entry — and a line of the item's own file for a row about
 /// its content when the content gives one (line problems, `yaml-syntax`, settings refusals, skill format). Rows
-/// with no line: skill-name checks and conflicts, block ④, an unparsed attached path.
+/// with no line: skill-name checks and conflicts, block ④ (`args` = `{mount, message}`, one per mount), an unparsed
+/// attached path.
 // The TRD's `Problem { kind, item, reason, via }` cannot carry a conflict's several items (parent §1-3 5).
 pub type Problem = BlockReason;
 
@@ -106,34 +115,35 @@ pub struct Target {
     pub backend: Option<String>,
     /// The agent's mode; `None` with `backend: None`.
     pub mode: Option<AgentOutputFormat>,
-    /// Whether `engram:/default` is attached (it expands first).
+    /// Whether `engram/default` is attached (it expands first).
     pub default_preset: bool,
     /// The attached presets, in attach order.
     pub presets: Vec<AssetRef>,
     /// Attached preset spellings that are not references, with why — each is a ② row (an attached part is
     /// required — TRD S25 §1-3 8).
     pub unparsed: Vec<(String, PathError)>,
-    /// Decides block ④ when a library preset is attached.
-    pub root: RootState,
+    /// The state of each mount — decides the rows of the library items reached in a mount that cannot be used.
+    pub mounts: MountStates,
 }
 
-/// The library root as a computation found it — one rule for every producer ([`RootState::of`]).
+/// A library mount's state as a computation found it — one rule for every producer ([`RootState::of`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootState {
-    Unset,
-    /// The root is set but not there — why: `missing` or `not a folder`. A launch skips its library items.
+    /// Not registered ([`NOT_REGISTERED`]), or registered but not there — why: `missing` or `not a folder`. A launch
+    /// skips its items.
     Absent(String),
-    /// The root is set and there but cannot be used — why: the stat's diagnostic, or why the first scan could not be
-    /// applied. A launch refuses (block ④).
+    /// Registered and there but cannot be used — why: the stat's diagnostic, or why its items cannot be read. A launch
+    /// refuses (block ④).
     Unreadable(String),
     Ok,
 }
 
 impl RootState {
-    /// The state of a set root from the first-scan entrance's answer (`joined`; a launch passes `Ok`) and the root's
-    /// stat (`None` = not taken — the root decides nothing): absent when the stat says missing or not a folder;
-    /// unreadable when the stat says so, or — the root being there — when the first scan failed; else `Ok`.
+    /// The state of a registered mount from the first-scan entrance's answer (`joined`; a launch passes `Ok`) and the
+    /// mount folder's stat (`None` = not taken — the folder decides nothing): absent when the stat says missing or not a
+    /// folder; unreadable when the stat says so, or — the folder being there — when the first scan failed; else `Ok`.
     // ADR-0387
+    // ADR-0400 decision 19
     pub(crate) fn of(joined: &Result<(), String>, stat: Option<&FolderStatus>) -> RootState {
         match (stat, joined) {
             (Some(status @ (FolderStatus::Missing | FolderStatus::NotADirectory)), _) => {
@@ -142,6 +152,53 @@ impl RootState {
             (_, Err(why)) => RootState::Unreadable(why.clone()),
             (Some(FolderStatus::Unreadable(why)), Ok(())) => RootState::Unreadable(why.clone()),
             (Some(FolderStatus::Ok) | None, Ok(())) => RootState::Ok,
+        }
+    }
+}
+
+/// What a resolution knows of the library mounts: the registered mounts and the [`RootState`] of each one judged (a
+/// registered mount not judged is usable). A first name of no registered mount is absent, [`NOT_REGISTERED`].
+// ADR-0400 decision 19
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MountStates {
+    mounts: Mounts,
+    /// By name key.
+    states: HashMap<PathKey, RootState>,
+    /// How the items of an absent mount appear: `true` (a launch) — each as a ① `not-found` row, which the launch
+    /// folds into one notice per mount; `false` (a read entrance) — one skipped ④ row stands for them.
+    pub absent_items: bool,
+}
+
+impl MountStates {
+    /// `mounts` registered, none judged yet — each usable until [`MountStates::set`].
+    pub(crate) fn new(mounts: &Mounts, absent_items: bool) -> Self {
+        MountStates {
+            mounts: mounts.clone(),
+            states: HashMap::new(),
+            absent_items,
+        }
+    }
+
+    /// Records the state of the registered mount `name`.
+    pub(crate) fn set(&mut self, name: &MountName, state: RootState) {
+        self.states.insert(name.key(), state);
+    }
+
+    /// The mount `path` lies in, as named (its registered name, or the path's first name), and its state.
+    pub(crate) fn of(&self, path: &LibPath) -> (String, RootState) {
+        match self.mounts.locate(path) {
+            Some((mount, _)) => {
+                let state = self.states.get(&mount.name.key());
+                let state = state.cloned().unwrap_or(RootState::Ok);
+                (mount.name.as_str().to_owned(), state)
+            }
+            None => {
+                let first = path.as_str().split('/').next().unwrap_or_default();
+                (
+                    first.to_owned(),
+                    RootState::Absent(NOT_REGISTERED.to_owned()),
+                )
+            }
         }
     }
 }
@@ -170,8 +227,7 @@ pub struct ItemView<'a> {
     pub stand_in: Option<&'a str>,
 }
 
-/// What [`resolve`] answers. A block-④ resolution holds that one problem and nothing else (every other field empty but
-/// `root_absent`).
+/// What [`resolve`] answers.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Resolution {
     /// (source path as the preset spells it, disk path) of each instruction loaded, in expansion order — the priming
@@ -188,9 +244,11 @@ pub struct Resolution {
     /// (phase 2 — ① `folder-not-found` or ② `folder-unreadable`) last.
     pub problems: Vec<Problem>,
     pub notices: Vec<Notice>,
-    /// The block-④ row stands for a root that is unset or absent (a launch skips it), not one that cannot be read.
+    /// The absent mounts items were reached in, in first-reach order: (the mount as named, why — [`NOT_REGISTERED`],
+    /// `missing` or `not a folder`). Each one's ④ row, or its items' ① rows ([`MountStates::absent_items`]), are skipped.
     // ADR-0387
-    pub root_absent: bool,
+    // ADR-0400 decision 19
+    pub absent_mounts: Vec<(String, String)>,
 }
 
 /// One settings value loaded.
@@ -258,13 +316,17 @@ impl Resolution {
         }
     }
 
-    /// Whether a launch leaves `problem` out instead of refusing on it: every ① row, and the block-④ row of an unset
-    /// or absent root. The split reads only the row's kind and [`Resolution::root_absent`].
+    /// Whether a launch leaves `problem` out instead of refusing on it: every ① row, and the block-④ row of an absent
+    /// mount. The split reads only the row's kind and, for a ④ row, whether its `mount` is in
+    /// [`Resolution::absent_mounts`].
     // ADR-0387
     fn skips(&self, problem: &Problem) -> bool {
         match problem {
             BlockReason::Missing { .. } => true,
-            BlockReason::LibraryUnavailable { .. } => self.root_absent,
+            BlockReason::LibraryUnavailable { reason } => {
+                let mount = reason.args.get("mount").and_then(Value::as_str);
+                mount.is_some_and(|mount| self.absent_mounts.iter().any(|(name, _)| name == mount))
+            }
             BlockReason::Broken { .. } | BlockReason::Conflict { .. } => false,
         }
     }
@@ -300,39 +362,14 @@ impl Resolution {
     }
 }
 
-/// Resolves `target` over `lookup` (module header): the block-④ guard, then [`expand`]. Block ④ = a library preset
-/// attached while `target.root` is not `Ok`; the resolution is then block ④ alone — no expansion, no item, no notice:
-/// while the root is unusable the catalog cannot be trusted, so nothing computed from it is in the answer. The rows of
-/// unparsed attached paths (from the profile) and the built-in stand-in notice go too: while the root is unusable the
-/// block is one line (user decision 2026-11-12). The row is marked [`Resolution::root_absent`] for an unset or absent
-/// root; a launch does not call this for such a root but expands over [`AbsentRootLookup`].
+/// Resolves `target` over `lookup` (module header). A library item in a mount `target.mounts` does not hold usable is
+/// not looked up — while a mount cannot be used its part of the catalog cannot be trusted: an absent mount's items are
+/// skipped (one ④ row for the mount, or one ① row per item for a launch — [`MountStates::absent_items`]), and a mount
+/// that exists but cannot be used is one ④ row naming it, which blocks.
 // ADR-0361
 // ADR-0387
+// ADR-0400 decision 19
 pub fn resolve(target: &Target, lookup: &dyn Lookup, backends: &dyn Backends) -> Resolution {
-    let library_attached = target
-        .presets
-        .iter()
-        .any(|preset| matches!(preset, AssetRef::Library(_)));
-    let (unavailable, root_absent) = match &target.root {
-        RootState::Ok => (None, false),
-        RootState::Unset => (Some(NO_ROOT), true),
-        RootState::Absent(why) => (Some(why.as_str()), true),
-        RootState::Unreadable(why) => (Some(why.as_str()), false),
-    };
-    if let (true, Some(message)) = (library_attached, unavailable) {
-        return Resolution {
-            problems: vec![BlockReason::LibraryUnavailable {
-                reason: reason(LIBRARY_UNAVAILABLE, json!({ "message": message }), None),
-            }],
-            root_absent,
-            ..Resolution::default()
-        };
-    }
-    expand(target, lookup, backends)
-}
-
-/// The expansion step of [`resolve`] without its block-④ guard — `target.root` is not read.
-pub(crate) fn expand(target: &Target, lookup: &dyn Lookup, backends: &dyn Backends) -> Resolution {
     let agent = match (&target.backend, target.mode) {
         (Some(word), Some(mode)) => backends.for_word(word).map(|check| Agent {
             check,
@@ -345,6 +382,8 @@ pub(crate) fn expand(target: &Target, lookup: &dyn Lookup, backends: &dyn Backen
         lookup,
         backends,
         agent,
+        states: &target.mounts,
+        unusable: HashSet::new(),
         seen: HashSet::new(),
         seen_folders: HashSet::new(),
         loaded: Vec::new(),
@@ -400,19 +439,57 @@ impl Lookup for CatalogLookup<'_> {
     }
 }
 
-/// The built-ins alone as a [`Lookup`] — every library item is missing. A launch whose library root is unset or absent
-/// expands over it (no catalog, no overlay).
-// ADR-0387
-pub(crate) struct AbsentRootLookup<'a> {
-    pub(crate) builtins: &'a Builtins,
+/// Which backend tags a resolution takes — one rule for the resolution and for what is read or stat'ed ahead of it
+/// (a launch's overlay, a read entrance's mount stats), so neither follows an entry the resolution leaves out: one
+/// preset on its own takes every tag; an agent only its backend's.
+#[derive(Clone, Copy)]
+pub(crate) struct TagRule<'l> {
+    backends: &'l dyn Backends,
+    /// The agent's backend; `None` = one preset on its own.
+    backend: Option<&'static str>,
 }
 
-impl Lookup for AbsentRootLookup<'_> {
-    fn item(&self, r: &AssetRef) -> Looked<'_> {
-        match r {
-            AssetRef::BuiltIn(id) => Looked::Present(self.builtins.view(*id)),
-            AssetRef::Library(_) => Looked::Missing,
+impl<'l> TagRule<'l> {
+    /// The rule of a resolution for `backend` in `mode`, as [`resolve`] reads its target: an agent when both are given
+    /// and the backend has a settings check; else one preset on its own.
+    pub(crate) fn of(
+        backends: &'l dyn Backends,
+        backend: Option<&str>,
+        mode: Option<AgentOutputFormat>,
+    ) -> Self {
+        let backend = match (backend, mode) {
+            (Some(word), Some(_)) => backends.for_word(word).map(|check| check.backend()),
+            _ => None,
+        };
+        TagRule { backends, backend }
+    }
+
+    /// Whether a tag or raw field named `word` belongs to this resolution.
+    pub(crate) fn takes(&self, word: &str) -> bool {
+        match self.backend {
+            None => true,
+            Some(backend) => self
+                .backends
+                .for_word(word)
+                .is_some_and(|check| check.backend() == backend),
         }
+    }
+
+    /// The library references of `doc` a resolution under this rule follows, in [`crate::catalog::preset_refs`] order: every
+    /// `presets` and `settings` entry (a tag in `settings` is a line problem — the item reads as common), and each
+    /// `instructions` and `skills` entry that is common or carries a tag this rule takes.
+    pub(crate) fn refs<'d>(&self, doc: &'d PresetDoc) -> Vec<&'d LibPath> {
+        let taken = |item: &&PresetItem| item.backend.as_deref().is_none_or(|tag| self.takes(tag));
+        doc.presets
+            .iter()
+            .chain(doc.instructions.iter().filter(taken))
+            .chain(doc.skills.iter().filter(taken))
+            .chain(&doc.settings)
+            .filter_map(|item| match &item.target {
+                AssetRef::Library(path) => Some(path),
+                AssetRef::BuiltIn(_) => None,
+            })
+            .collect()
     }
 }
 
@@ -436,6 +513,16 @@ pub(crate) fn ref_key(r: &AssetRef) -> RefKey {
         AssetRef::Library(path) => RefKey::Library(key(path)),
         AssetRef::BuiltIn(id) => RefKey::BuiltIn(*id),
     }
+}
+
+/// How a resolution may use a library item's mount ([`MountStates`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MountUse {
+    Usable,
+    /// Not registered or not there — its items are skipped.
+    Absent,
+    /// There but cannot be read — its items block.
+    Unusable,
 }
 
 /// A preset being expanded.
@@ -466,6 +553,9 @@ struct Walk<'l> {
     lookup: &'l dyn Lookup,
     backends: &'l dyn Backends,
     agent: Option<Agent<'l>>,
+    states: &'l MountStates,
+    /// The mounts whose ④ row is recorded, by name key.
+    unusable: HashSet<PathKey>,
     /// Per list: an item listed again in the same list stays at its first place; in another list it is judged there.
     seen: HashSet<(ListName, RefKey)>,
     seen_folders: HashSet<PathKey>,
@@ -563,15 +653,20 @@ impl<'l> Walk<'l> {
             return None;
         }
         let spelling = at.spelling();
+        if let AssetRef::Library(path) = at {
+            match self.mount_use(path) {
+                MountUse::Usable => {}
+                MountUse::Absent if self.states.absent_items => {
+                    self.not_found(spelling, via, line);
+                    return None;
+                }
+                MountUse::Absent | MountUse::Unusable => return None,
+            }
+        }
         let lookup: &'l dyn Lookup = self.lookup;
         match lookup.item(at) {
             Looked::Missing => {
-                let args = json!({ "path": spelling });
-                self.out.problems.push(BlockReason::Missing {
-                    item: spelling,
-                    via: via.to_vec(),
-                    reason: reason(NOT_FOUND, args, line),
-                });
+                self.not_found(spelling, via, line);
                 None
             }
             Looked::Unreadable(why) => {
@@ -597,6 +692,43 @@ impl<'l> Walk<'l> {
                 }
             }
         }
+    }
+
+    /// How `path`'s mount may be used. On the first reach of a mount that cannot be, its state is recorded: an absent
+    /// mount in [`Resolution::absent_mounts`], and — but for an absent mount of a launch, whose items are ① rows — one
+    /// ④ row naming it (`args` = `{mount, message}`).
+    // ADR-0400 decision 19
+    fn mount_use(&mut self, path: &LibPath) -> MountUse {
+        let (mount, state) = self.states.of(path);
+        let (why, used) = match state {
+            RootState::Ok => return MountUse::Usable,
+            RootState::Absent(why) => (why, MountUse::Absent),
+            RootState::Unreadable(why) => (why, MountUse::Unusable),
+        };
+        if !self.unusable.insert(path_key(Path::new(&mount))) {
+            return used;
+        }
+        if used == MountUse::Absent {
+            self.out.absent_mounts.push((mount.clone(), why.clone()));
+            if self.states.absent_items {
+                return used;
+            }
+        }
+        let args = json!({ "mount": mount, "message": why });
+        self.out.problems.push(BlockReason::LibraryUnavailable {
+            reason: reason(LIBRARY_UNAVAILABLE, args, None),
+        });
+        used
+    }
+
+    /// A ① `not-found` row for the reference `spelling` (`args` = `{path}`).
+    fn not_found(&mut self, spelling: String, via: &[String], line: Option<u32>) {
+        let args = json!({ "path": spelling });
+        self.out.problems.push(BlockReason::Missing {
+            item: spelling,
+            via: via.to_vec(),
+            reason: reason(NOT_FOUND, args, line),
+        });
     }
 
     fn own_lists(&mut self, frame: &Frame<'l>) {
@@ -627,16 +759,13 @@ impl<'l> Walk<'l> {
         common.chain(tagged).collect()
     }
 
-    /// Whether a tag or raw field named `word` belongs to this resolution: one preset on its own takes every word; an
-    /// agent only its backend's.
+    /// Whether a tag or raw field named `word` belongs to this resolution ([`TagRule::takes`]).
     fn takes_backend(&self, word: &str) -> bool {
-        match self.agent {
-            None => true,
-            Some(agent) => self
-                .backends
-                .for_word(word)
-                .is_some_and(|check| check.backend() == agent.check.backend()),
+        TagRule {
+            backends: self.backends,
+            backend: self.agent.map(|agent| agent.check.backend()),
         }
+        .takes(word)
     }
 
     fn instruction(&mut self, entry: &PresetItem, via: &[String]) {
@@ -900,7 +1029,7 @@ mod tests {
     use super::*;
     use crate::builtin::tests::full;
     use crate::catalog::harness::Lib;
-    use crate::mounts::Mount;
+    use crate::mounts::{Mount, MountName};
     use engram_dashboard_platform::fs::normalize_folder;
 
     const T: AgentOutputFormat = AgentOutputFormat::Terminal;
@@ -928,7 +1057,7 @@ mod tests {
             default_preset: false,
             presets: refs(presets),
             unparsed: Vec::new(),
-            root: RootState::Ok,
+            mounts: usable(),
         }
     }
 
@@ -939,7 +1068,52 @@ mod tests {
             default_preset: false,
             presets: refs(&[preset]),
             unparsed: Vec::new(),
-            root: RootState::Ok,
+            mounts: usable(),
+        }
+    }
+
+    /// The mount `library` (the harness's — `/lib`) and `team` (`/team`, no item in the catalog) registered, each in
+    /// the state given (`None` = not judged: usable); `absent_items` as a launch resolves.
+    fn states(
+        library: Option<RootState>,
+        team: Option<RootState>,
+        absent_items: bool,
+    ) -> MountStates {
+        let team_name = MountName::parse("team").unwrap();
+        let mounts = Mounts::new(vec![
+            Mount {
+                name: MountName::first(),
+                folder: PathBuf::from("/lib"),
+            },
+            Mount {
+                name: team_name.clone(),
+                folder: PathBuf::from("/team"),
+            },
+        ])
+        .unwrap();
+        let mut states = MountStates::new(&mounts, absent_items);
+        if let Some(state) = library {
+            states.set(&MountName::first(), state);
+        }
+        if let Some(state) = team {
+            states.set(&team_name, state);
+        }
+        states
+    }
+
+    /// Every registered mount usable, as a read entrance.
+    fn usable() -> MountStates {
+        states(None, None, false)
+    }
+
+    /// The ④ row of `mount` (`args` = `{mount, message}`).
+    fn block_four(mount: &str, message: &str) -> BlockReason {
+        BlockReason::LibraryUnavailable {
+            reason: reason(
+                LIBRARY_UNAVAILABLE,
+                json!({ "mount": mount, "message": message }),
+                None,
+            ),
         }
     }
 
@@ -1195,23 +1369,23 @@ mod tests {
     #[test]
     fn a_builtin_in_a_library_presets_presets_is_broken_but_an_agent_may_attach_it() {
         let dir = full();
-        let lib = library(&[("P.yaml", &preset("presets:\n  - engram:/default\n"))]);
+        let lib = library(&[("P.yaml", &preset("presets:\n  - engram/default\n"))]);
         let builtins = Builtins::new(Some(dir.path()), &lib.backends);
         let resolution = resolve_with(&lib, &builtins, &agent("claude", J, &["library/P.yaml"]));
         assert_eq!(
             resolution.problems,
             [BlockReason::Broken {
-                item: "engram:/default".to_owned(),
+                item: "engram/default".to_owned(),
                 via: via(&["library/P.yaml"]),
                 reason: reason(
                     BUILTIN_IN_LIBRARY_PRESET,
-                    json!({ "path": "engram:/default" }),
+                    json!({ "path": "engram/default" }),
                     Some(4)
                 ),
             }]
         );
         assert!(!resolution.include_priming);
-        let attached = resolve_with(&lib, &builtins, &agent("claude", J, &["engram:/default"]));
+        let attached = resolve_with(&lib, &builtins, &agent("claude", J, &["engram/default"]));
         assert!(attached.problems.is_empty(), "{:?}", attached.problems);
         assert!(attached.include_priming);
     }
@@ -1235,7 +1409,7 @@ mod tests {
             claude.raw_settings,
             [ResolvedSettings {
                 asset: AssetRef::BuiltIn(BuiltinId::DefaultSettings),
-                via: via(&["engram:/default"]),
+                via: via(&["engram/default"]),
                 value: json!({ "env": { "DISABLE_AUTOUPDATER": "1" } }),
             }]
         );
@@ -1248,7 +1422,7 @@ mod tests {
 
     #[test]
     fn a_missing_builtin_folder_means_no_priming_and_no_block() {
-        let lib = library(&[("P.yaml", &preset("instructions:\n  - engram:/priming\n"))]);
+        let lib = library(&[("P.yaml", &preset("instructions:\n  - engram/priming\n"))]);
         let mut target = agent("claude", J, &["library/P.yaml"]);
         target.default_preset = true;
         let resolution = run(&lib, &target);
@@ -1261,7 +1435,7 @@ mod tests {
         };
         assert_eq!(
             resolution.notices,
-            [told("engram:/default"), told("engram:/priming")],
+            [told("engram/default"), told("engram/priming")],
             "each built-in reached, in expansion order"
         );
     }
@@ -1293,7 +1467,7 @@ mod tests {
             panic!("{:?}", resolution.notices)
         };
         assert_eq!(notice.code, BUILTIN_UNAVAILABLE);
-        assert_eq!(notice.args["path"], "engram:/default");
+        assert_eq!(notice.args["path"], "engram/default");
         let why = notice.args["why"].as_str().unwrap();
         assert!(why.starts_with("yaml-syntax: "), "{why}");
     }
@@ -1303,7 +1477,7 @@ mod tests {
         let dir = crate::builtin::tests::folder(&[
             (
                 crate::builtin::file_of(BuiltinId::DefaultPreset),
-                "kind: preset\nversion: 1\ninstructions:\n  - engram:/priming\n",
+                "kind: preset\nversion: 1\ninstructions:\n  - engram/priming\n",
             ),
             (
                 crate::builtin::file_of(BuiltinId::Priming),
@@ -1316,7 +1490,7 @@ mod tests {
         ]);
         let lib = library(&[(
             "P.yaml",
-            &preset("settings:\n  - engram:/settings/default\ninstructions:\n  - engram:/settings/default\n"),
+            &preset("settings:\n  - engram/settings/default\ninstructions:\n  - engram/settings/default\n"),
         )]);
         let builtins = Builtins::new(Some(dir.path()), &lib.backends);
         let mut unreached = agent("claude", J, &[]);
@@ -1326,10 +1500,10 @@ mod tests {
         assert!(resolution.notices.is_empty() && resolution.problems.is_empty());
         let twice = resolve_with(&lib, &builtins, &agent("claude", J, &["library/P.yaml"]));
         let told: Vec<&Value> = twice.notices.iter().map(|n| &n.args["path"]).collect();
-        assert_eq!(told, ["engram:/settings/default"], "reached from two lists");
+        assert_eq!(told, ["engram/settings/default"], "reached from two lists");
         assert_eq!(
             problems(&twice.problems),
-            [row("engram:/settings/default", WRONG_KIND)],
+            [row("engram/settings/default", WRONG_KIND)],
             "the stand-in is a settings item, not an instruction"
         );
     }
@@ -1700,9 +1874,121 @@ mod tests {
 
     // ── block ④ and the block ────────────────────────────────────────────────────────────────────────────
 
-    // Block ④ stands alone: the whole resolution is that one row — no item, folder or notice computed from the catalog.
+    // ADR-0400 decision 19: block ④ stands per mount — the items reached in a mount that cannot be used are one row
+    //   naming it (none of them looked up), and every other mount, the built-ins and the attached spellings resolve
+    //   as they would. A launch sees an absent mount's items as ① rows instead.
     #[test]
-    fn a_library_preset_attached_without_a_usable_root_is_block_four() {
+    fn a_mount_that_cannot_be_used_is_one_block_four_row_naming_it_and_other_mounts_expand() {
+        let lib = library(&[
+            (
+                "Q.yaml",
+                &preset(
+                    "instructions:\n  - library/ok.md\n  - team/a.md\n  - team/b.md\n  - old/c.md\n  - library/gone.md\n",
+                ),
+            ),
+            ("ok.md", "ok"),
+        ]);
+        let raw = "../out.yaml";
+        let unparsed = vec![(raw.to_owned(), AssetRef::parse(raw).unwrap_err())];
+        let mut target = agent("claude", J, &["library/Q.yaml", "team/T.yaml"]);
+        target.default_preset = true;
+        target.unparsed = unparsed;
+        let not_registered = block_four("old", NOT_REGISTERED);
+        for (team, row_of_team, absent) in [
+            (
+                RootState::Unreadable("access denied".to_owned()),
+                block_four("team", "access denied"),
+                false,
+            ),
+            (
+                RootState::Absent("missing".to_owned()),
+                block_four("team", "missing"),
+                true,
+            ),
+        ] {
+            target.mounts = states(None, Some(team.clone()), false);
+            let resolution = run(&lib, &target);
+            assert_eq!(instructions(&resolution), ["library/ok.md"], "{team:?}");
+            assert_eq!(resolution.notices.len(), 1, "the default preset's stand-in");
+            assert_eq!(
+                resolution.problems,
+                [
+                    row_of_team.clone(),
+                    not_registered.clone(),
+                    BlockReason::Missing {
+                        item: "library/gone.md".to_owned(),
+                        via: via(&["library/Q.yaml"]),
+                        reason: reason(NOT_FOUND, json!({ "path": "library/gone.md" }), Some(8)),
+                    },
+                    BlockReason::Broken {
+                        item: raw.to_owned(),
+                        via: Vec::new(),
+                        reason: reason(
+                            ITEM_PATH_INVALID,
+                            json!({ "path": raw, "why": PathError::DotName.to_string() }),
+                            None,
+                        ),
+                    },
+                ],
+                "{team:?}: one row for team (its attached preset and both items), one for the name no mount has"
+            );
+            let mut absent_mounts = vec![("old".to_owned(), NOT_REGISTERED.to_owned())];
+            if absent {
+                absent_mounts.insert(0, ("team".to_owned(), "missing".to_owned()));
+            }
+            assert_eq!(resolution.absent_mounts, absent_mounts, "{team:?}");
+            // ADR-0387: an absent mount's ④ row is skipped; an unreadable one's blocks.
+            let blocked = resolution.blocked().expect("the unparsed spelling blocks");
+            assert_eq!(blocked.reasons.contains(&row_of_team), !absent, "{team:?}");
+            assert!(!blocked.reasons.contains(&not_registered));
+        }
+
+        // A launch: an absent mount's items are ① rows, its folder named once in `absent_mounts`; an unreadable
+        //   mount's ④ row is the same.
+        target.mounts = states(None, Some(RootState::Absent("missing".to_owned())), true);
+        let launch = run(&lib, &target);
+        let missing = |item: &str, via_q: bool, line: Option<u32>| BlockReason::Missing {
+            item: item.to_owned(),
+            via: if via_q {
+                via(&["library/Q.yaml"])
+            } else {
+                Vec::new()
+            },
+            reason: reason(NOT_FOUND, json!({ "path": item }), line),
+        };
+        assert_eq!(
+            launch.problems[..5],
+            [
+                missing("team/a.md", true, Some(5)),
+                missing("team/b.md", true, Some(6)),
+                missing("old/c.md", true, Some(7)),
+                missing("library/gone.md", true, Some(8)),
+                missing("team/T.yaml", false, None),
+            ][..]
+        );
+        assert_eq!(
+            launch.absent_mounts,
+            [
+                ("team".to_owned(), "missing".to_owned()),
+                ("old".to_owned(), NOT_REGISTERED.to_owned())
+            ]
+        );
+        target.mounts = states(None, Some(RootState::Unreadable("denied".to_owned())), true);
+        assert_eq!(run(&lib, &target).problems[0], block_four("team", "denied"));
+
+        // With its own mount unusable, the attached library preset is that one row; the built-ins still resolve.
+        let mut only = agent("claude", J, &["library/Q.yaml"]);
+        only.default_preset = true;
+        only.mounts = states(Some(RootState::Unreadable("x".to_owned())), None, false);
+        let resolution = run(&lib, &only);
+        assert_eq!(resolution.problems, [block_four("library", "x")]);
+        assert!(resolution.instructions.is_empty() && resolution.notices.len() == 1);
+    }
+
+    // A usable mount shows its ① ② ③ rows; with no mount registered every library preset is one skipped ④ row for its
+    //   first name (ADR-0400 decision 19 — not registered is absent).
+    #[test]
+    fn with_no_mount_registered_a_library_preset_is_one_skipped_block_four_row() {
         let folder = absolute("f");
         let lib = library(&[
             ("P.yaml", &preset("")),
@@ -1719,7 +2005,7 @@ mod tests {
         ]);
         let raw = "../out.yaml";
         let unparsed = vec![(raw.to_owned(), AssetRef::parse(raw).unwrap_err())];
-        // With a usable root, Q loads items, a folder and the default preset's notice, and shows ① ② ③ rows; the
+        // With its mount usable, Q loads items, a folder and the default preset's notice, and shows ① ② ③ rows; the
         //   attached spelling that is not a reference is a ② row too.
         let mut usable = agent("claude", J, &["library/Q.yaml"]);
         usable.default_preset = true;
@@ -1733,55 +2019,32 @@ mod tests {
                 row(raw, ITEM_PATH_INVALID),
                 row("library/a+library/b", SKILL_NAME_CONFLICT),
             ],
-            "what block ④ stands for"
+            "the rows of a usable mount"
         );
         assert_eq!(instructions(&shown), ["library/ok.md"]);
         assert_eq!(skill_names(&shown), ["s", "s"]);
         assert_eq!(shown.folders.len(), 1);
         assert_eq!(shown.notices.len(), 1, "the default preset's stand-in");
-        for (root, message, root_absent) in [
-            (RootState::Unset, NO_ROOT, true),
-            (RootState::Absent("missing".to_owned()), "missing", true),
-            (
-                RootState::Unreadable("access denied".to_owned()),
-                "access denied",
-                false,
-            ),
-        ] {
-            let alone = Resolution {
-                problems: vec![BlockReason::LibraryUnavailable {
-                    reason: reason(LIBRARY_UNAVAILABLE, json!({ "message": message }), None),
-                }],
-                root_absent,
-                ..Resolution::default()
-            };
-            // Every pass runs over one catalog holding these files: with `Unset` it stands for the empty catalog of an
-            //   unset root (`absent.yaml` is not found), and with `Absent` and `Unreadable` it is the stale case.
-            for attached in ["P.yaml", "absent.yaml", "Q.yaml"] {
-                let mut stale = agent("claude", J, &[attached]);
-                stale.default_preset = true;
-                stale.unparsed = unparsed.clone();
-                stale.root = root.clone();
-                let resolution = run(&lib, &stale);
-                assert_eq!(resolution, alone, "{root:?}: {attached}");
-                // ADR-0387: the ④ row of an unset or absent root is skipped; of an unreadable one it blocks.
-                assert_eq!(
-                    (resolution.skipped().len(), resolution.blocked().is_some()),
-                    (usize::from(root_absent), !root_absent),
-                    "{root:?}"
-                );
-            }
-            let mut only_builtin = agent("claude", J, &[]);
-            only_builtin.default_preset = true;
-            only_builtin.root = root;
-            assert!(
-                run(&lib, &only_builtin).problems.is_empty(),
-                "no library preset"
-            );
-        }
+        // With no mount registered, every library preset is one ④ row for its first name, skipped; the built-ins
+        //   alone resolve.
+        let mut stale = agent("claude", J, &["library/Q.yaml", "library/P.yaml"]);
+        stale.mounts = MountStates::new(&Mounts::default(), false);
+        let resolution = run(&lib, &stale);
+        assert_eq!(resolution.problems, [block_four("library", NOT_REGISTERED)]);
+        assert_eq!(
+            (resolution.skipped().len(), resolution.blocked()),
+            (1, None)
+        );
+        let mut only_builtin = agent("claude", J, &[]);
+        only_builtin.default_preset = true;
+        only_builtin.mounts = MountStates::new(&Mounts::default(), false);
+        assert!(
+            run(&lib, &only_builtin).problems.is_empty(),
+            "no library item reached"
+        );
     }
 
-    /// One rule for a set root (ADR-0387): a stat that says missing or not a folder is absent whatever the first scan
+    /// One rule for a registered mount (ADR-0387): a stat that says missing or not a folder is absent whatever the first scan
     /// did; a failed first scan or an unreadable stat is unreadable; no stat and a good scan is `Ok`.
     #[test]
     fn the_root_state_rule_tells_absent_from_unreadable() {
@@ -1829,10 +2092,10 @@ mod tests {
         }
     }
 
-    // Rows are left out only for block ④: with no library preset attached there is no block ④, so a library path the
-    //   built-in default lists stays a not-found row.
+    // ADR-0400 decision 19: a library item the built-in default lists is judged by its mount like any other — not found
+    //   in a usable mount, one ④ row for a mount that cannot be used.
     #[test]
-    fn without_block_four_a_not_found_row_stays_even_without_a_usable_root() {
+    fn a_library_item_the_builtin_default_lists_is_judged_by_its_mount() {
         let dir = crate::builtin::tests::folder(&[(
             crate::builtin::file_of(BuiltinId::DefaultPreset),
             "kind: preset\nversion: 1\ninstructions:\n  - library/x.md\n",
@@ -1841,21 +2104,24 @@ mod tests {
         let builtins = Builtins::new(Some(dir.path()), &lib.backends);
         let mut target = agent("claude", J, &[]);
         target.default_preset = true;
-        target.root = RootState::Unset;
         let resolution = resolve_with(&lib, &builtins, &target);
         assert_eq!(
             resolution.problems,
             [BlockReason::Missing {
                 item: "library/x.md".to_owned(),
-                via: via(&["engram:/default"]),
+                via: via(&["engram/default"]),
                 reason: reason(NOT_FOUND, json!({ "path": "library/x.md" }), Some(4)),
             }]
         );
+        target.mounts = states(Some(RootState::Absent("missing".to_owned())), None, false);
+        let resolution = resolve_with(&lib, &builtins, &target);
+        assert_eq!(resolution.problems, [block_four("library", "missing")]);
+        assert_eq!(resolution.blocked(), None);
     }
 
     // TRD S25 §1-3 8: the block is the problem list less the skipped rows — the same rows whoever launches, ordered ②
-    //   ③ (block ④ never shares the list — a_library_preset_attached_without_a_usable_root_is_block_four). ADR-0387:
-    //   the ① rows are skipped, an unreadable folder blocks; the two parts are exactly the problems.
+    //   ③ ④ (block ④ per mount — a_mount_that_cannot_be_used_is_one_block_four_row_naming_it_and_other_mounts_expand).
+    //   ADR-0387: the ① rows are skipped, an unreadable folder blocks; the two parts are exactly the problems.
     #[test]
     fn the_block_is_the_problem_list_less_the_skipped_rows_ordered_by_kind() {
         let (first, second) = (absolute("z-gone"), absolute("a-gone"));

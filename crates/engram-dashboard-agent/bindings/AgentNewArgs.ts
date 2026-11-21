@@ -17,7 +17,7 @@ output_format?: AgentOutputFormat | null,
  */
 backend: AgentBackend, 
 /**
- * Library presets to attach — the Default slot (`engram:/default`) is on for every new agent. Unspecified = the
+ * Library presets to attach — the Default slot (`engram/default`) is on for every new agent. Unspecified = the
  * Default slot only.
  */
 presets?: Array<string> | null, 

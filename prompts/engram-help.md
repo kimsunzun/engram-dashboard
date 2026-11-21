@@ -293,7 +293,7 @@ Where <path> appears below, give a library path; <list> is a JSON array of strin
       Points the library at that folder (create makes the folder first); nothing is copied or moved. Replies like library.status
   {tool} library.folders
       Every folder, flat. A skill folder is marked skill
-  {tool} library.list [--folder <path>] [--query <text>] [--kinds <JSON array of Instruction|Skill|SkillFile|Settings|Preset>] [--builtins true]
+  {tool} library.list [--folder <path>] [--query <text>] [--kinds <JSON array of Instruction|Skill|SkillFile|Settings|Preset>]
       The items in that folder (the root if omitted) and its subfolders, or with query the items below it whose name or description matches. Per row path · kind · name · description · state (why the file is broken, null if it reads)
   {tool} library.read --path <path>
       One item: its file on disk, the presets and agents that reach it, an excerpt

@@ -5,7 +5,7 @@
  */
 export type PresetEntryArg = { 
 /**
- * A library path or a built-in (`engram:/…`).
+ * A library path or a built-in (`engram/…`).
  */
 path: string, 
 /**

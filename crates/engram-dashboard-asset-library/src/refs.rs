@@ -1,7 +1,7 @@
 //! The reusable reference walk: what a preset reaches ([`closure`]), who refers to an item ([`referrers_of`]) and how
 //! many ([`reference_count`] — the `library.list` row).
 //!
-//! - Only library references are walked. A built-in (`engram:/…`) is not a library item, and a preset's folder entry is
+//! - Only library references are walked. A built-in (`engram/…`) is not a library item, and a preset's folder entry is
 //!   not an asset reference at all (ADR-0341) — neither is walked. The one built-in count is [`default_slot_count`]
 //!   (agents with the Default slot on).
 //! - The preset side comes from the catalog (`used_by` — direct and through nested presets); the agent side is read
@@ -18,6 +18,7 @@ use engram_dashboard_agent::types::AgentId;
 use engram_dashboard_platform::fs::same_path;
 
 use crate::catalog::{key, preset_refs, Catalog, ItemContent};
+use crate::format::PresetDoc;
 use crate::path::{AssetRef, LibPath};
 
 /// Every library reference `preset` reaches, each once (by catalog key) as the first referencing preset spells it:
@@ -27,27 +28,41 @@ use crate::path::{AssetRef, LibPath};
 // An explicit stack, not recursion: a long chain of nested presets would overflow the thread's stack, which aborts the
 //   process.
 pub fn closure(catalog: &Catalog, preset: &LibPath) -> Vec<AssetRef> {
+    closure_by(catalog, preset, |doc| preset_refs(doc).collect())
+}
+
+/// [`closure`] following, in each preset, only the references `refs` picks from its document (in its order) — a
+/// resolution's tag rule (`resolve::TagRule::refs`).
+pub(crate) fn closure_by(
+    catalog: &Catalog,
+    preset: &LibPath,
+    refs: impl Fn(&PresetDoc) -> Vec<&LibPath>,
+) -> Vec<AssetRef> {
     let mut reached = Vec::new();
     let mut seen = HashSet::from([key(preset)]);
     // Per preset being walked, its references not yet visited.
-    let mut stack = vec![direct_refs(catalog, preset).into_iter()];
-    while let Some(refs) = stack.last_mut() {
-        let Some(target) = refs.next() else {
+    let mut stack = vec![direct_refs(catalog, preset, &refs).into_iter()];
+    while let Some(next) = stack.last_mut() {
+        let Some(target) = next.next() else {
             stack.pop();
             continue;
         };
         if seen.insert(key(&target)) {
             reached.push(AssetRef::Library(target.clone()));
-            stack.push(direct_refs(catalog, &target).into_iter());
+            stack.push(direct_refs(catalog, &target, &refs).into_iter());
         }
     }
     reached
 }
 
-/// The library references `preset` lists, in list order; empty when it is not a preset in the catalog.
-fn direct_refs(catalog: &Catalog, preset: &LibPath) -> Vec<LibPath> {
+/// The library references `refs` picks from `preset`; empty when it is not a preset in the catalog.
+fn direct_refs(
+    catalog: &Catalog,
+    preset: &LibPath,
+    refs: &impl Fn(&PresetDoc) -> Vec<&LibPath>,
+) -> Vec<LibPath> {
     match catalog.get(&key(preset)).map(|item| &item.content) {
-        Some(ItemContent::Preset { doc, .. }) => preset_refs(doc).cloned().collect(),
+        Some(ItemContent::Preset { doc, .. }) => refs(doc).into_iter().cloned().collect(),
         _ => Vec::new(),
     }
 }
@@ -79,7 +94,7 @@ pub fn referrers_of(
     (presets, agents)
 }
 
-/// The number of agents whose Default slot is on — the agents that take the built-in preset `engram:/default` (an agent
+/// The number of agents whose Default slot is on — the agents that take the built-in preset `engram/default` (an agent
 /// takes it only through that slot; a library preset never lists a built-in).
 pub fn default_slot_count(registry: &ProfileRegistry) -> usize {
     registry
@@ -153,7 +168,7 @@ mod tests {
         let mut lib = Lib::new();
         lib.store.file(
             "top.yaml",
-            "kind: preset\nversion: 1\npresets:\n  - library/mid.yaml\ninstructions:\n  - engram:/priming\n  - library/rules/a.md\n\
+            "kind: preset\nversion: 1\npresets:\n  - library/mid.yaml\ninstructions:\n  - engram/priming\n  - library/rules/a.md\n\
              skills:\n  - library/skills/s\nsettings:\n  - library/s.yaml\nfolders:\n  - /abs/folder\n",
         );
         lib.store.file(
@@ -266,7 +281,7 @@ mod tests {
         lib.scan(None);
         let exact = agent(&["library/mid.yaml"]);
         let other_case = agent(&["library/MID.yaml"]);
-        let elsewhere = agent(&["library/top.yaml", "engram:/default"]);
+        let elsewhere = agent(&["library/top.yaml", "engram/default"]);
         let registry = registry(vec![exact.clone(), other_case.clone(), elsewhere.clone()]);
 
         let mut want_agents = vec![exact.id];

@@ -234,7 +234,7 @@ fn repo_builtin() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../builtin")
 }
 
-/// The built-in default preset's (`engram:/default`) instructions file as a launch writes it: the shipped priming, merged on its own.
+/// The built-in default preset's (`engram/default`) instructions file as a launch writes it: the shipped priming, merged on its own.
 fn merged_priming() -> String {
     let priming = std::fs::read_to_string(repo_builtin().join("instructions/priming.md"))
         .expect("read builtin/instructions/priming.md");
@@ -517,7 +517,7 @@ fn assert_engram_tools(live: &Live, id: AgentId, events: &Events, scene: &str) {
     );
 }
 
-// ── L1 · L2 — claude: the `engram:/default` materials, and the `allowedMcpServers` merge ─────────────────────
+// ── L1 · L2 — claude: the `engram/default` materials, and the `allowedMcpServers` merge ─────────────────────
 
 /// L1 — a fresh claude (stream-json) launch with real kits and no library root: the volatile folder holds the merged
 ///   priming as `instructions.md` and the merged built-in settings as `settings.json`; the command line loads them

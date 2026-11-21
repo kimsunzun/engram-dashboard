@@ -100,6 +100,22 @@ pub fn is_builtin(name: &str) -> bool {
     name.eq_ignore_ascii_case(BUILTIN_MOUNT)
 }
 
+/// Whether `path` lies in the built-in mount — its first name is [`BUILTIN_MOUNT`] (its top included).
+// ADR-0400 decision 20
+pub fn in_builtin(path: &LibPath) -> bool {
+    builtin_rest(path).is_some()
+}
+
+/// `path`'s path inside the built-in mount — what follows its first name when that name is the built-in's
+/// ([`is_builtin`]: ASCII case-insensitive on every OS), `""` for the mount's top; `None` = not in the built-in mount.
+/// The one place the mount segment is matched: what follows it (an id, the folder `settings`) is matched exactly by
+/// every reader, `list` and `read` alike.
+// ADR-0400 decision 20
+pub fn builtin_rest(path: &LibPath) -> Option<&str> {
+    let (first, rest) = path.as_str().split_once('/').unwrap_or((path.as_str(), ""));
+    is_builtin(first).then_some(rest)
+}
+
 fn name_key(name: &str) -> PathKey {
     path_key(Path::new(name))
 }

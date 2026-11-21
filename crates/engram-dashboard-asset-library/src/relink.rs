@@ -130,7 +130,8 @@ impl LibraryService {
     ///
     /// `from` and `to` may lie in different mounts (ADR-0396 decision 3).
     ///
-    /// Refusals, nothing applied: a spelling that is not a library path `InvalidArgument` · `item-path-invalid`; a `to`
+    /// Refusals, nothing applied: a spelling that is not a library path `InvalidArgument` · `item-path-invalid`; `from`
+    /// or `to` in the built-in mount `Conflict` · `mount-read-only` (ADR-0400 decision 20); a `to`
     /// of one name (a mount's top, or a name at the virtual root) `InvalidArgument` · `virtual-root-read-only`, before
     /// any lookup — `from` may have one name, a reference written before mounts (ADR-0398); no first scan applied
     /// `Unavailable` · `library-unavailable`; `to`'s mount cannot be read `Unavailable` · `library-unavailable` `{mount,
@@ -1140,12 +1141,14 @@ mod tests {
         assert!(w.text("P.yaml").contains("old/a.md"));
     }
 
+    // ADR-0400 decision 20: a path in the built-in mount is a library path, but it is read-only — `from` or `to` there
+    //   refuses `mount-read-only`.
     #[test]
     fn from_and_to_must_be_library_paths() {
         let w = World::new();
         w.put("new/a.md", "a");
         for (from, to) in [
-            ("engram:/default", "new/a.md"),
+            ("engram:/default", "library/new/a.md"),
             ("library/old/a.md", "engram:/priming"),
             ("library/old//a.md", "library/new/a.md"),
             ("library/old/a.md", "/new/a.md"),
@@ -1153,6 +1156,17 @@ mod tests {
             assert_eq!(
                 code(w.relink(from, to)),
                 (RefusalClass::InvalidArgument, ITEM_PATH_INVALID.to_owned()),
+                "{from} -> {to}"
+            );
+        }
+        for (from, to) in [
+            ("engram/default", "library/new/a.md"),
+            ("library/old/a.md", "engram/priming"),
+            ("library/old/a.md", "engram/settings/x.md"),
+        ] {
+            assert_eq!(
+                code(w.relink(from, to)),
+                (RefusalClass::Conflict, crate::MOUNT_READ_ONLY.to_owned()),
                 "{from} -> {to}"
             );
         }

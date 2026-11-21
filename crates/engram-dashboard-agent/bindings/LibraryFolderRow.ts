@@ -10,7 +10,7 @@ export type LibraryFolderRow = { path: string, name: string,
 skill: boolean, 
 /**
  * A mount (a top folder): `ok` | `missing` | `unreadable`, as last seen (no fresh check); `null` = a folder
- * inside a mount.
+ * inside a mount. Exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
  */
 state?: string | null, 
 /**

@@ -13,7 +13,7 @@
 #       clean target/release, so if an exe with the old name is left over and you fix only the manifest below to that old name,
 #       both the existence check and the tripwire pass and **that stale binary gets packaged as is** (even though the build did not
 #       update that file). When you fix the manifest, check the output directory too.
-#     - builtin/ is the asset library's built-in folder (engram:/…, the priming builtin/instructions/priming.md included),
+#     - builtin/ is the asset library's built-in folder (engram/…, the priming builtin/instructions/priming.md included),
 #       found relative to find_install_root (data_dir::find_builtin_dir — ADR-0327 · ADR-0370). The file list is $ExpectedBuiltins below,
 #       which tests keep equal to the code's set (asset-library builtin.rs · daemon data_dir.rs). A missing built-in will not
 #       block a launch (it is stood in for — ADR-0361), so the tripwire below is what keeps a release from shipping without one.

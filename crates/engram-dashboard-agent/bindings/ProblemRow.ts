@@ -3,8 +3,9 @@ import type { ProblemItemRow } from "./ProblemItemRow";
 
 /**
  * A problem of a preset's launch materials, with the absent keys as `null`. A launch leaves out the `missing`
- * rows (and a `library_unavailable` row for a library folder that is not set or not there) and refuses on the
- * others — the rows `agent.spawn` puts in `args.reasons`.
+ * rows (and the `library_unavailable` row of a library mount that is not registered or not there) and refuses on
+ * the others — the rows `agent.spawn` puts in `args.reasons`. A `library_unavailable` row stands for the items of
+ * one mount: `args` = `{mount, message}`.
  */
 export type ProblemRow = { 
 /**

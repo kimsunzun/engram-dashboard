@@ -219,7 +219,7 @@ fn priming_file(builtin_dir: &Path) -> PathBuf {
 ///
 /// `Err` when `kits` blocks any of `profiles`; when a plan carries a `builtin-unavailable` notice (a built-in the
 /// library stood in for — ADR-0361: a missing or unreadable priming file, a missing default preset or settings); or
-/// when a plan is not real or does not include the priming (a default preset that does not list `engram:/priming`
+/// when a plan is not real or does not include the priming (a default preset that does not list `engram/priming`
 /// tells nothing). An empty priming file passes.
 fn check_builtin(kits: &dyn LaunchKitSource, profiles: &[&AgentProfile]) -> Result<(), String> {
     for profile in profiles {
@@ -1548,7 +1548,7 @@ mod tests {
             .err()
             .expect("a missing priming fails");
         assert!(err.contains(BUILTIN_UNAVAILABLE), "{err}");
-        assert!(err.contains("engram:/priming"), "{err}");
+        assert!(err.contains("engram/priming"), "{err}");
     }
 
     #[test]
@@ -1563,7 +1563,7 @@ mod tests {
             .err()
             .expect("a stood-in default preset fails");
         assert!(err.contains(BUILTIN_UNAVAILABLE), "{err}");
-        assert!(err.contains("engram:/default"), "{err}");
+        assert!(err.contains("engram/default"), "{err}");
     }
 
     #[test]
@@ -1577,7 +1577,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("presets")).expect("create presets");
         std::fs::write(
             dir.join("presets").join("default.yaml"),
-            "kind: preset\nversion: 1\nsettings:\n  - engram:/settings/default\n",
+            "kind: preset\nversion: 1\nsettings:\n  - engram/settings/default\n",
         )
         .expect("write the preset");
         let err = check_with(&root.0, &library_over(&root.0, &dir))

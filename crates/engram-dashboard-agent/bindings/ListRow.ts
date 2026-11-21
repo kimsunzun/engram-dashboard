@@ -7,7 +7,7 @@ import type { ReasonRow } from "./ReasonRow";
  */
 export type ListRow = { 
 /**
- * Library path from the root (a skill: its folder; a built-in: `engram:/…`).
+ * Library path from the root (a skill: its folder; a built-in: `engram/…`).
  */
 path: string, 
 /**
@@ -25,7 +25,8 @@ name: string,
  */
 state?: ReasonRow | null, 
 /**
- * Presets that reach it plus agents that attach it.
+ * Presets that reach it plus agents that attach it. A built-in counts only the Default slot: the agents whose
+ * Default slot is on for `engram/default`, 0 for every other built-in.
  */
 references: number, 
 /**

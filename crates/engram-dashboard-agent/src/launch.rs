@@ -127,7 +127,7 @@ fn cmp_number(a: &Number, b: &Number) -> Ordering {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRef {
     /// Where the source comes from, in one of three forms: a library path from the root (`/`-separated), a built-in
-    /// `engram:/…` reference, or for a folder entry `folder:` + the normalized absolute folder path (e.g.
+    /// `engram/…` reference, or for a folder entry `folder:` + the normalized absolute folder path (e.g.
     /// `folder:D:\rules\company`) — then [`SourceRef::file`] is the instruction file chosen inside that folder.
     /// A `folder:` string must not be matched against a library path (a folder inside the library is still a folder).
     // ADR-0341
@@ -240,9 +240,11 @@ pub enum BlockReason {
         reason: Reason,
         items: Vec<(String, Vec<String>)>,
     },
-    /// A library preset is attached while the library folder is unset, absent, or cannot be read. A launch skips
-    /// the library items of an unset or absent folder ([`LIBRARY_UNAVAILABLE_SKIPPED`]) and refuses on this row only
-    /// for a folder that exists but cannot be read or did not answer.
+    /// Library items reached in a mount that is not registered, absent, or cannot be read — one row per mount
+    /// (`reason.args` = `{mount, message}`). A launch skips the items of a mount that is not registered or absent
+    /// ([`LIBRARY_UNAVAILABLE_SKIPPED`]) and refuses on this row only for a mount that exists but cannot be read or
+    /// did not answer.
+    // ADR-0400 decision 19
     LibraryUnavailable { reason: Reason },
 }
 
@@ -277,9 +279,17 @@ impl fmt::Display for LaunchBlocked {
                         items.iter().map(|(p, _)| escape_controls(p)).collect();
                     write!(f, "conflict {} ({})", paths.join(", "), reason.code)?
                 }
-                // ADR-0387: a launch refuses on this row only for a folder that exists but cannot be read.
+                // ADR-0387: a launch refuses on this row only for a mount that exists but cannot be read.
                 BlockReason::LibraryUnavailable { reason } => {
-                    write!(f, "library folder cannot be read ({})", reason.code)?
+                    match reason.args.get("mount").and_then(Value::as_str) {
+                        Some(mount) => write!(
+                            f,
+                            "library mount {} cannot be read ({})",
+                            escape_controls(mount),
+                            reason.code
+                        )?,
+                        None => write!(f, "library folder cannot be read ({})", reason.code)?,
+                    }
                 }
             }
         }
@@ -399,7 +409,7 @@ pub const FOLDER_LISTING_SKIPPED: &str = "folder-listing-skipped";
 const FOLDER_LISTING_SKIPPED_NAMED: usize = 3;
 
 /// Notice code: a built-in asset could not be read, so the resolution applied an empty stand-in for it. `args` =
-/// `{path, why}` — `path` = the built-in's spelling (`engram:/default`), `why` = why it could not be read.
+/// `{path, why}` — `path` = the built-in's spelling (`engram/default`), `why` = why it could not be read.
 // ADR-0361
 // ADR-0364
 pub const BUILTIN_UNAVAILABLE: &str = "builtin-unavailable";
@@ -411,11 +421,13 @@ pub const BUILTIN_UNAVAILABLE: &str = "builtin-unavailable";
 // ADR-0387
 pub const MISSING_ITEM_SKIPPED: &str = "missing-item-skipped";
 
-/// Notice code: a library preset is attached while the library folder is unset or absent, so the launch left out
-/// every library item it reaches. `args` = `{message, items}` — `message` = `no library root is set`, `missing` or
-/// `not a folder`; `items` = the library items left out, in expansion order.
+/// Notice code: library items were reached in a mount that is not registered or not there, so the launch left them
+/// out — one notice per mount. `args` = `{mount, message, items}` — `mount` = the mount's name (as the references
+/// spell it when it is not registered); `message` = `not registered`, `missing` or `not a folder`; `items` = that
+/// mount's library items left out, in expansion order.
 // ADR-0374
 // ADR-0387
+// ADR-0400 decision 19
 pub const LIBRARY_UNAVAILABLE_SKIPPED: &str = "library-unavailable-skipped";
 
 /// Whether a notice code reports an item a launch left out because it was absent — the manager logs those at `warn`,
@@ -436,8 +448,8 @@ pub fn reports_launch_skip(code: &str) -> bool {
 /// - [`BUILTIN_UNAVAILABLE`] — the built-in and why.
 /// - [`MISSING_ITEM_SKIPPED`] — the item (a `folder:` item as its path, worded as a folder) and where it is listed:
 ///   the last preset of `via` and the line when there is one, or "attached to this agent" for an empty `via`.
-/// - [`LIBRARY_UNAVAILABLE_SKIPPED`] — the message and the items left out; an empty list ends after the first
-///   sentence.
+/// - [`LIBRARY_UNAVAILABLE_SKIPPED`] — the mount, the message and the items left out; an empty list ends after the
+///   first sentence.
 ///
 /// When their `args` do not have the shape the constant documents (not an object, a string field missing or not
 /// a string, a list that is not a list of strings, an empty `paths`, an absent `via`), they fall back to the generic wording; any other
@@ -564,9 +576,10 @@ fn own_wording(notice: &Notice) -> Option<String> {
             })
         }
         LIBRARY_UNAVAILABLE_SKIPPED => {
+            let mount = escape_controls(args.get("mount")?.as_str()?);
             let message = escape_controls(args.get("message")?.as_str()?);
             let items = text_list(args, "items")?;
-            let head = format!("Notice: the library folder cannot be used ({message}).");
+            let head = format!("Notice: the library mount {mount} cannot be used ({message}).");
             Some(if items.is_empty() {
                 head
             } else {
@@ -1674,13 +1687,20 @@ mod tests {
                     ],
                 },
                 BlockReason::LibraryUnavailable {
+                    reason: reason(
+                        "library-unavailable",
+                        json!({ "mount": "team", "message": "denied" }),
+                        None,
+                    ),
+                },
+                BlockReason::LibraryUnavailable {
                     reason: reason("library-unavailable", Value::Null, None),
                 },
             ],
         };
         assert_eq!(
             blocked.to_string(),
-            "launch blocked: not found team/a.yaml (missing-file) · conflict x/s, y/s (skill-name) · library folder cannot be read (library-unavailable)"
+            "launch blocked: not found team/a.yaml (missing-file) · conflict x/s, y/s (skill-name) · library mount team cannot be read (library-unavailable) · library folder cannot be read (library-unavailable)"
         );
     }
 
@@ -2451,12 +2471,12 @@ mod tests {
     fn the_builtin_unavailable_notice_gives_its_own_wording_and_falls_back_on_another_shape() {
         for (args, text) in [
             (
-                json!({ "path": "engram:/default", "why": "yaml-syntax: bad" }),
-                "Notice: could not read built-in engram:/default; applied it with empty content. Reason: yaml-syntax: bad",
+                json!({ "path": "engram/default", "why": "yaml-syntax: bad" }),
+                "Notice: could not read built-in engram/default; applied it with empty content. Reason: yaml-syntax: bad",
             ),
             (
-                json!({ "path": "engram:/priming", "why": "a\nb\u{1b}" }),
-                "Notice: could not read built-in engram:/priming; applied it with empty content. Reason: a\\nb\\u{1b}",
+                json!({ "path": "engram/priming", "why": "a\nb\u{1b}" }),
+                "Notice: could not read built-in engram/priming; applied it with empty content. Reason: a\\nb\\u{1b}",
             ),
         ] {
             let rendered = notice_text(&reason(BUILTIN_UNAVAILABLE, args.clone(), None));
@@ -2464,11 +2484,11 @@ mod tests {
             assert_eq!(rendered, text, "{args}");
         }
         for args in [
-            json!({ "path": "engram:/default" }),
+            json!({ "path": "engram/default" }),
             json!({ "why": "no `kind`" }),
-            json!({ "path": "engram:/default", "why": 1 }),
-            json!({ "path": ["engram:/default"], "why": "x" }),
-            json!("engram:/default"),
+            json!({ "path": "engram/default", "why": 1 }),
+            json!({ "path": ["engram/default"], "why": "x" }),
+            json!("engram/default"),
         ] {
             let text = notice_text(&reason(BUILTIN_UNAVAILABLE, args.clone(), None));
             assert!(
@@ -2540,27 +2560,28 @@ mod tests {
         }
     }
 
-    /// The absent-library code names why the folder cannot be used and every item left out; an empty list ends after
-    /// the first sentence; control characters are escaped (ADR-0387). `args` of another shape fall back to the
-    /// generic wording.
+    /// The absent-mount code names the mount, why it cannot be used and every item left out; an empty list ends after
+    /// the first sentence; control characters are escaped (ADR-0387 · ADR-0400 decision 19). `args` of another shape
+    /// fall back to the generic wording.
     #[test]
-    fn the_library_unavailable_notice_names_the_items_and_falls_back_on_another_shape() {
+    fn the_library_unavailable_notice_names_the_mount_and_items_and_falls_back_on_another_shape() {
         for (args, text) in [
             (
-                json!({ "message": "missing", "items": ["team.yaml", "rules/a.md"] }),
-                "Notice: the library folder cannot be used (missing). Left out of this launch: team.yaml, rules/a.md",
+                json!({ "mount": "team", "message": "missing", "items": ["team/web.yaml", "team/rules/a.md"] }),
+                "Notice: the library mount team cannot be used (missing). Left out of this launch: team/web.yaml, \
+                 team/rules/a.md",
             ),
             (
-                json!({ "message": "no library root is set", "items": [] }),
-                "Notice: the library folder cannot be used (no library root is set).",
+                json!({ "mount": "old", "message": "not registered", "items": [] }),
+                "Notice: the library mount old cannot be used (not registered).",
             ),
             (
-                json!({ "message": "not a folder" }),
-                "Notice: the library folder cannot be used (not a folder).",
+                json!({ "mount": "team", "message": "not a folder" }),
+                "Notice: the library mount team cannot be used (not a folder).",
             ),
             (
-                json!({ "message": "a\nb", "items": ["x\u{1b}.yaml"] }),
-                "Notice: the library folder cannot be used (a\\nb). Left out of this launch: x\\u{1b}.yaml",
+                json!({ "mount": "t\u{7}", "message": "a\nb", "items": ["x\u{1b}.yaml"] }),
+                "Notice: the library mount t\\u{7} cannot be used (a\\nb). Left out of this launch: x\\u{1b}.yaml",
             ),
         ] {
             let rendered = notice_text(&reason(LIBRARY_UNAVAILABLE_SKIPPED, args.clone(), None));
@@ -2568,10 +2589,12 @@ mod tests {
             assert_eq!(rendered, text, "{args}");
         }
         for args in [
-            json!({ "items": ["team.yaml"] }),
-            json!({ "message": 1, "items": [] }),
-            json!({ "message": "missing", "items": "team.yaml" }),
-            json!({ "message": "missing", "items": [1] }),
+            json!({ "mount": "team", "items": ["team/a.yaml"] }),
+            json!({ "message": "missing", "items": ["team/a.yaml"] }),
+            json!({ "mount": 1, "message": "missing", "items": [] }),
+            json!({ "mount": "team", "message": 1, "items": [] }),
+            json!({ "mount": "team", "message": "missing", "items": "team/a.yaml" }),
+            json!({ "mount": "team", "message": "missing", "items": [1] }),
             json!("missing"),
         ] {
             let text = notice_text(&reason(LIBRARY_UNAVAILABLE_SKIPPED, args.clone(), None));

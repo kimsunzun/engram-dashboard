@@ -93,9 +93,6 @@ use crate::RefreshReport;
 // TRD S25 step-7 B8
 pub const NOT_FOUND: &str = "not-found";
 
-/// Why a library item could not be had with no mount registered (block ④ of an unset library).
-pub(crate) const NO_ROOT: &str = "no library root is set";
-
 /// The answer of a scan or root change whose ticket was released without one (it panicked).
 const ENDED_UNANSWERED: &str = "the scan ended without an answer";
 
@@ -126,6 +123,14 @@ impl State {
     /// [`NOT_WALKED`], and not walked.
     pub fn seen(&self, name: &MountName) -> MountSeen {
         seen_in(&self.seen, name)
+    }
+
+    /// The mounts with what the scans know of each, as a reader under this lock judges them — the view a change gets.
+    pub(crate) fn mounts_now(&self) -> MountsNow<'_> {
+        MountsNow {
+            mounts: &self.mounts,
+            seen: &self.seen,
+        }
     }
 }
 
@@ -2336,6 +2341,143 @@ mod tests {
         );
         door.open();
         join(walking).unwrap();
+    }
+
+    /// A root change of the first mount to `to` whose walk waits on `door` and then fails — a pending first scan that
+    ///   ends without an apply.
+    fn failing_root_change(
+        gate: &Arc<Gate>,
+        to: &'static str,
+        door: &Arc<Door>,
+    ) -> thread::JoinHandle<Outcome> {
+        let (gate, door) = (Arc::clone(gate), Arc::clone(door));
+        thread::spawn(move || {
+            gate.change_root(PathBuf::from(to), |_| {
+                door.wait();
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            })
+        })
+    }
+
+    // A waiter's two failed tries answer the failure: the first-scan entrance goes through once more after one waited
+    //   first scan failed, and a second waited failure is its answer.
+    #[test]
+    fn a_reader_whose_two_waited_first_scans_failed_answers_the_failure() {
+        let gate = gate();
+        let log = Arc::new(Log::default());
+        let (blocker_door, first_door, second_door) = (
+            Arc::new(Door::default()),
+            Arc::new(Door::default()),
+            Arc::new(Door::default()),
+        );
+        let blocker = change_thread(&gate, &log, "blocker", Some(Arc::clone(&blocker_door)));
+        gate.wait_for("blocker in", |line, _| line == [("change", true)]);
+        let first = failing_root_change(&gate, "/new1", &first_door);
+        gate.wait_for("the first failing try queued", |line, _| line.len() == 2);
+        let reader = {
+            let gate = Arc::clone(&gate);
+            thread::spawn(move || {
+                gate.first_scan_join(&ok, &|_, _, _| panic!("the reader never walks"))
+            })
+        };
+        gate.wait_for("the reader waits on it", |_, waiting| waiting == 1);
+        let second = failing_root_change(&gate, "/new2", &second_door);
+        gate.wait_for("the second failing try queued", |line, _| line.len() == 3);
+        blocker_door.open();
+        join(blocker);
+        first_door.open();
+        assert!(join(first).is_err());
+        gate.wait_for("the reader waits on the second", |line, waiting| {
+            line == [("root", true)] && waiting == 1
+        });
+        second_door.open();
+        assert!(join(second).is_err());
+        let answer = join(reader);
+        assert_eq!(
+            answer,
+            Err(io::Error::from(io::ErrorKind::PermissionDenied).to_string()),
+            "the second waited failure is the answer"
+        );
+    }
+
+    /// A stat that first registers `name` (folder `/<name>`) unless it is registered — as if a mount were added after
+    ///   the scan read the mounts it stats — and then answers `Ok` for the mounts it was given.
+    fn registering(gate: &Arc<Gate>, name: &'static str) -> impl Fn(&[Mount]) -> Vec<FolderStatus> {
+        let gate = Arc::clone(gate);
+        move |mounts| {
+            let mut state = write(&gate.lib);
+            if state.mounts.get(name).is_some() {
+                return ok(mounts);
+            }
+            gate.write_mounts(&mut state, |state| {
+                let mut all: Vec<Mount> = state.mounts.iter().cloned().collect();
+                all.push(Mount {
+                    name: MountName::parse(name).unwrap(),
+                    folder: PathBuf::from(format!("/{name}")),
+                });
+                state.mounts = Mounts::new(all).unwrap();
+            });
+            ok(mounts)
+        }
+    }
+
+    /// A walk that waits on `door`.
+    fn held_walk(
+        door: &Arc<Door>,
+    ) -> impl Fn(&Mount, Option<&MountPath>, &Tags) -> io::Result<ScanResult> {
+        let door = Arc::clone(door);
+        move |mount, under, _| {
+            door.wait();
+            Ok(walked(mount, under))
+        }
+    }
+
+    // Two waited whole scans that applied but left the first scan un-raised (each found a mount registered after its
+    //   stats) are no failed tries: the waiter goes round again each time and answers its own scan, not a failure.
+    #[test]
+    fn a_reader_whose_two_waited_first_scans_applied_without_raising_answers_ok() {
+        let gate = gate();
+        let (first_door, second_door) = (Arc::new(Door::default()), Arc::new(Door::default()));
+        let first = {
+            let gate2 = Arc::clone(&gate);
+            let (stat, walk) = (registering(&gate, "t1"), held_walk(&first_door));
+            thread::spawn(move || gate2.first_scan_join(&stat, &walk))
+        };
+        gate.wait_for("the first walking", |line, _| line == [("scan", true)]);
+        let reader = {
+            let gate = Arc::clone(&gate);
+            thread::spawn(move || gate.first_scan_join(&ok, &walk_empty))
+        };
+        gate.wait_for("the reader waits on it", |_, waiting| waiting == 1);
+        let second = {
+            let gate2 = Arc::clone(&gate);
+            let (stat, walk) = (registering(&gate, "t2"), held_walk(&second_door));
+            thread::spawn(move || gate2.refresh(None, &stat, &walk))
+        };
+        gate.wait_for("the second queued behind it", |line, _| {
+            line == [("scan", true), ("scan", false)]
+        });
+        first_door.open();
+        // The first's own caller goes round again too, so both wait on the second.
+        gate.wait_for("the reader waits on the second", |line, waiting| {
+            line == [("scan", true)] && waiting == 2
+        });
+        assert!(
+            !lock(&gate.turns).first.raised,
+            "the first applied un-raised"
+        );
+        second_door.open();
+        join(second).unwrap();
+        assert_eq!(
+            join(reader),
+            Ok(()),
+            "un-raised applies are no failed tries"
+        );
+        join(first).unwrap();
+        assert!(
+            lock(&gate.turns).first.raised,
+            "the reader's own scan raised it"
+        );
     }
 
     // A first scan that applied but left the first scan un-raised (a mount was published in its window) is not a

@@ -168,7 +168,7 @@ fn install_root_of(exe: &Path) -> Option<PathBuf> {
     exe.parent().map(|p| p.to_path_buf())
 }
 
-/// The distribution's built-in asset folder (`engram:/…` — the asset library's `builtin_dir` value):
+/// The distribution's built-in asset folder (`engram/…` — the asset library's `builtin_dir` value):
 /// `<install root>\builtin`, on the same anchor as [`find_install_root`] — the repo root for a dev build, the exe's
 /// folder for a release (the release zip puts `builtin\` beside the exes). An install resource, not data, so
 /// `ENGRAM_DATA_DIR` does not move it. `None` = the exe path cannot be read; whether the folder exists is not checked

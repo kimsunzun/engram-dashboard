@@ -7,19 +7,22 @@
 //! - **One launch, one scope**: every check, the prepare and the working-folder call of one launch share one
 //!   [`LaunchScope`] — one IO context (one required budget, one advisory allowance, one answer set) and the working
 //!   folder the last check decided.
-//! - **The check** (TRD S25 step-7 §3-8 `check_in`): the folders of the mounts the attached library presets name are
-//!   stat'ed only when a library preset is attached; the library files the profile reaches are read fresh with the
-//!   store, each in its mount's folder (the overlay — local by assumption); two brief read-lock takes — the mounts and
-//!   the gate's numbers before the overlay read, then `resolve` over the overlay, then the catalog (ADR-0324 decision
-//!   5). A root that exists but cannot be read is block ④, the
-//!   whole answer — nothing else is checked. No folder IO runs under the library lock. The required phase
+//! - **The check** (TRD S25 step-7 §3-8 `check_in`): each mount the profile's library items reach is stat'ed once per
+//!   launch before anything in it is read (the attached presets' mounts in one batch, then each wave of mounts their
+//!   references reach), and only a mount that stats `Ok` is read; the library files the profile reaches are read
+//!   fresh with the store, each in its mount's folder (the overlay — local by assumption); two brief read-lock takes —
+//!   the mounts and the gate's numbers before the overlay read, then `resolve` over the overlay, then the catalog
+//!   (ADR-0324 decision 5). A mount that exists but cannot be read is block ④ naming it: the launch is refused with the
+//!   rows found so far — no folder IO, no command-line check (ADR-0400 decision 19). No folder IO runs under the
+//!   library lock. The required phase
 //!   (folder-entry stats, listings and reads) runs first and alone; the advisory phase (the working-folder
 //!   canonicalize, the backend's own skill roots, root canonicals) runs only when nothing blocks, on its own
 //!   allowance; an advisory answer that is missing is never substituted (an unknown root is left out, an unknown
 //!   working folder is the profile's own spelling).
 //! - **Skips** (ADR-0387): what is absent is left out and the launch runs — a `missing` row (a library item not
-//!   found, a folder entry not there), and with an unset or absent root every library item (the expansion runs over
-//!   the built-ins alone). Each skip is named in the plan's notices and, where the instruction channel allows it, in
+//!   found, a folder entry not there), and every library item reached in a mount that is not registered or not there
+//!   (its folder untouched), told as one notice per mount (ADR-0400 decision 19). Each skip is named in the plan's
+//!   notices and, where the instruction channel allows it, in
 //!   a launch note appended to the merged instructions (named, else counted, else none — measured with the text, so
 //!   it never blocks). What exists but cannot be read or is broken still blocks.
 //! - **The overlay is merged late, never removes**: the items read are handed to a short-lived merge job (the
@@ -40,6 +43,7 @@
 // ADR-0355
 // ADR-0360
 // ADR-0387
+// ADR-0400
 // TRD S25 step-7 §3-8 · §4 · §6
 
 use std::cell::RefCell;
@@ -67,16 +71,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{key, preset_refs, Item, ItemContent, ScanItem};
+use crate::catalog::{key, Item, ItemContent, ScanItem};
 use crate::folder::{slash_path, FolderListing, FolderStatus, LaunchIo, Need};
 use crate::format::YamlFrontMatter;
 use crate::gate::Tags;
-use crate::gate::{NOT_FOUND, NO_ROOT};
-use crate::mounts::{admits_inside, Mounts};
+use crate::gate::NOT_FOUND;
+use crate::mounts::{admits_inside, Mount, MountName, Mounts};
 use crate::path::{AssetRef, BuiltinId, LibPath};
 use crate::resolve::{
-    expand, folder_item, resolve, AbsentRootLookup, CatalogLookup, ItemView, Looked, Lookup,
-    Resolution, RootState, Target,
+    folder_item, resolve, CatalogLookup, ItemView, Looked, Lookup, MountStates, Resolution,
+    RootState, TagRule, Target,
 };
 
 use crate::{
@@ -132,13 +136,14 @@ pub(crate) fn with_note(merged: &str, note: &str) -> String {
     }
 }
 
-/// What a launch that runs leaves out: the library items of an unset or absent root (with why), and every other
-/// skipped row — a `not-found` library item or a `folder-not-found` folder entry.
+/// What a launch that runs leaves out: the library items of each absent mount (with why), and every other skipped row
+/// — a `not-found` library item or a `folder-not-found` folder entry.
 // ADR-0374
 // ADR-0387
+// ADR-0400 decision 19
 struct Skips {
-    /// (message, library items in expansion order) — the absent-root path only.
-    root: Option<(String, Vec<String>)>,
+    /// Per absent mount, in first-reach order: (mount, message, its items in expansion order).
+    mounts: Vec<(String, String, Vec<String>)>,
     rows: Vec<SkipRow>,
 }
 
@@ -149,41 +154,49 @@ struct SkipRow {
 }
 
 impl Skips {
-    /// The skip set of `resolution`; `absent` = the absent root's message when the launch took the absent-root path
-    /// — its `not-found` rows fold into the one root notice.
-    fn of(resolution: &Resolution, absent: Option<&str>) -> Skips {
-        let mut library = Vec::new();
+    /// The skip set of `resolution`: the `not-found` rows of a mount it found absent fold into that mount's one notice.
+    fn of(resolution: &Resolution) -> Skips {
+        let mut mounts: Vec<(String, String, Vec<String>)> = resolution
+            .absent_mounts
+            .iter()
+            .map(|(mount, message)| (mount.clone(), message.clone(), Vec::new()))
+            .collect();
         let mut rows = Vec::new();
         for problem in resolution.skipped() {
             let BlockReason::Missing { item, via, reason } = problem else {
                 continue;
             };
-            if absent.is_some() && reason.code == NOT_FOUND {
-                library.push(item);
-            } else {
-                rows.push(SkipRow {
+            let first = item.split('/').next().unwrap_or_default();
+            let absent = mounts
+                .iter_mut()
+                .find(|(mount, _, _)| path_key(Path::new(mount)) == path_key(Path::new(first)));
+            match absent {
+                Some((_, _, items)) if reason.code == NOT_FOUND => items.push(item),
+                _ => rows.push(SkipRow {
                     item,
                     via,
                     line: reason.line,
-                });
+                }),
             }
         }
-        Skips {
-            root: absent.map(|message| (message.to_owned(), library)),
-            rows,
-        }
+        Skips { mounts, rows }
     }
 
     fn count(&self) -> usize {
-        self.rows.len() + self.root.as_ref().map_or(0, |(_, items)| items.len())
+        self.rows.len()
+            + self
+                .mounts
+                .iter()
+                .map(|(_, _, items)| items.len())
+                .sum::<usize>()
     }
 
-    /// The reply notices: the root notice first, then one per row.
+    /// The reply notices: one per absent mount first, then one per row.
     fn notices(&self) -> Vec<Notice> {
-        let root = self.root.iter().map(|(message, items)| {
+        let root = self.mounts.iter().map(|(mount, message, items)| {
             notice(
                 LIBRARY_UNAVAILABLE_SKIPPED,
-                json!({ "message": message, "items": items }),
+                json!({ "mount": mount, "message": message, "items": items }),
             )
         });
         let rows = self.rows.iter().map(|row| Reason {
@@ -220,14 +233,15 @@ impl Skips {
                 });
             }
         }
-        if let Some((message, items)) = &self.root {
+        for (mount, message, items) in &self.mounts {
             let items: Vec<String> = items.iter().map(|item| escape_controls(item)).collect();
             let sentence = format!(
-                "The library folder could not be used ({}), so these library items were left out: {}",
+                "The library mount {} could not be used ({}), so these library items were left out: {}",
+                escape_controls(mount),
                 escape_controls(message),
                 items.join(", ")
             );
-            lines.push(match self.rows.is_empty() {
+            lines.push(match lines.is_empty() {
                 true => format!("Engram launch note: {sentence}"),
                 false => sentence,
             });
@@ -284,6 +298,32 @@ struct Overlay {
     items: Vec<Item>,
     /// The bytes behind each item read, by the path key of the item's disk path (a skill: its folder).
     files: HashMap<PathKey, FileRead>,
+}
+
+/// The stat of each mount a launch reached, by name key — taken once per launch, before anything in it is read.
+#[derive(Default)]
+struct MountStats(HashMap<PathKey, (MountName, FolderStatus)>);
+
+impl MountStats {
+    /// `Some(true)` = `mount` stat'ed `Ok`; `Some(false)` = stat'ed, not `Ok`; `None` = not stat'ed yet.
+    fn status(&self, mount: &Mount) -> Option<bool> {
+        self.0
+            .get(&mount.name.key())
+            .map(|(_, status)| *status == FolderStatus::Ok)
+    }
+
+    /// The mount states a launch resolves under: each mount stat'ed judged by its stat alone ([`RootState::of`] — a
+    /// launch reads the files fresh, so no first-scan answer decides), an absent one's items as ① rows
+    /// ([`MountStates::absent_items`]).
+    // ADR-0387
+    // ADR-0400 decision 19
+    fn states(&self, mounts: &Mounts) -> MountStates {
+        let mut states = MountStates::new(mounts, true);
+        for (name, status) in self.0.values() {
+            states.set(name, RootState::of(&Ok(()), Some(status)));
+        }
+        states
+    }
 }
 
 /// What one library path asked by the overlay turned out to be.
@@ -595,66 +635,41 @@ impl LibraryService {
         let (noted, mounts) = self
             .gate
             .with_read(|state| (self.gate.numbers(), state.mounts.clone()));
-        let library_attached = want
-            .presets
-            .iter()
-            .any(|preset| matches!(preset, AssetRef::Library(_)));
-        let attached: Vec<&AssetRef> = want.presets.iter().collect();
-        let root_state = self.root_state(io, &mounts, &attached, None, library_attached);
-        let overlay = match &root_state {
-            RootState::Ok => self.read_overlay(&mounts, &want),
-            _ => Overlay::default(),
-        };
-        // ADR-0387: an unset or absent root skips every library item — built-ins only, no catalog, no link probe.
-        let absent = match (&root_state, library_attached) {
-            (RootState::Unset, true) => Some(NO_ROOT.to_owned()),
-            (RootState::Absent(why), true) => Some(why.clone()),
-            _ => None,
-        };
-
+        let mut stats = MountStats::default();
+        let overlay = self.read_overlay(io, &mounts, &want, &mut stats);
         let target = Target {
             backend: want.backend,
             mode: want.mode,
             default_preset: want.default_preset,
             presets: want.presets,
             unparsed: want.unparsed,
-            root: root_state,
+            mounts: stats.states(&mounts),
         };
-        let mut resolution = match &absent {
-            Some(_) => expand(
-                &target,
-                &AbsentRootLookup {
+        let mut resolution = self.gate.with_read(|state| {
+            let lookup = OverlayLookup {
+                overlay: &overlay,
+                catalog: CatalogLookup {
+                    catalog: &state.catalog,
+                    mounts: &state.mounts,
                     builtins: &self.builtins,
                 },
-                backends,
-            ),
-            None => self.gate.with_read(|state| {
-                let lookup = OverlayLookup {
-                    overlay: &overlay,
-                    catalog: CatalogLookup {
-                        catalog: &state.catalog,
-                        mounts: &state.mounts,
-                        builtins: &self.builtins,
-                    },
-                };
-                resolve(&target, &lookup, backends)
-            }),
-        };
+            };
+            resolve(&target, &lookup, backends)
+        });
         // ADR-0361
-        // ADR-0387: only a root that exists but cannot be read reaches block ④ here.
-        // User decision 2026-11-12: block ④ is the whole answer — no folder IO, no command-line judgment.
+        // ADR-0387 · ADR-0400 decision 19: a launch's ④ rows are mounts that exist but cannot be read (an absent
+        //   mount's items are skipped rows). User decision 2026-11-12: a launch reaching one runs no folder IO and no
+        //   command-line judgment.
         if resolution
             .problems
             .iter()
             .any(|problem| matches!(problem, BlockReason::LibraryUnavailable { .. }))
         {
-            return Err(LaunchBlocked {
-                reasons: resolution.problems,
-            });
+            if let Some(blocked) = resolution.blocked() {
+                return Err(blocked);
+            }
         }
-        if absent.is_none() {
-            self.mark_links(&mounts, &mut resolution);
-        }
+        self.mark_links(&mounts, &mut resolution);
         // ADR-0366
         // B26: the merge needs nothing the later steps find, so it is handed off as soon as the overlay is complete.
         if !overlay.items.is_empty() {
@@ -796,7 +811,7 @@ impl LibraryService {
                 instructions: (!text.is_empty()).then_some(text),
             })
         };
-        let skips = Skips::of(&resolution, absent.as_deref());
+        let skips = Skips::of(&resolution);
         // ADR-0387: the note is the merged text's last part, measured with it, so it never turns a skip into a block:
         //   the named form, else the count form, else none. It never opens a replacing channel by itself — with no
         //   instruction text of Engram's own (blank as codex reads it), a backend whose instructions replace the
@@ -898,13 +913,26 @@ impl LibraryService {
 
     /// Step 3's library half: every library preset `want` reaches and every library file those presets list, read
     /// fresh with the store through the partial scan a refresh of that path runs — so a path is admitted exactly as
-    /// the scan admits it (names, links, kinds) and each read draws its number first.
+    /// the scan admits it (names, links, kinds) and each read draws its number first. References are followed by the
+    /// resolution's tag rule ([`TagRule::refs`]): an entry only another backend's tag lists is neither read nor its
+    /// mount stat'ed. A path is read only once its mount stats `Ok` in `stats`: the mounts not stat'ed yet are stat'ed
+    /// in one batch per wave (first the attached presets', then those their references reach), and nothing in a mount
+    /// that does not stat `Ok`, or in no registered mount, is read — resolution judges its items by the mount
+    /// ([`MountStats::states`]).
     // ADR-0365
-    fn read_overlay(&self, mounts: &Mounts, want: &Want) -> Overlay {
+    // ADR-0400 decision 19
+    fn read_overlay(
+        &self,
+        io: &LaunchIo,
+        mounts: &Mounts,
+        want: &Want,
+        stats: &mut MountStats,
+    ) -> Overlay {
         let mut overlay = Overlay {
             mounts: mounts.clone(),
             ..Overlay::default()
         };
+        let rule = TagRule::of(&*self.values.backends, want.backend.as_deref(), want.mode);
         let mut todo: Vec<LibPath> = want
             .presets
             .iter()
@@ -917,22 +945,59 @@ impl LibraryService {
             if let ItemContent::Preset { doc, .. } =
                 self.builtins.view(BuiltinId::DefaultPreset).content
             {
-                todo.extend(preset_refs(doc).cloned());
+                todo.extend(rule.refs(doc).into_iter().cloned());
             }
         }
-        while let Some(path) = todo.pop() {
-            if overlay.seen.contains_key(&key(&path)) {
-                continue;
-            }
-            let seen = self.overlay_read(&path, &mut overlay);
-            if let Seen::Item(i) = &seen {
-                if let ItemContent::Preset { doc, .. } = &overlay.items[*i].content {
-                    todo.extend(preset_refs(doc).cloned());
+        loop {
+            let mut waiting: Vec<LibPath> = Vec::new();
+            while let Some(path) = todo.pop() {
+                if overlay.seen.contains_key(&key(&path)) {
+                    continue;
                 }
+                match mounts.locate(&path).map(|(mount, _)| stats.status(mount)) {
+                    // Resolution looks nothing up there: a mount not registered, or one that cannot be used.
+                    None | Some(Some(false)) => continue,
+                    Some(None) => {
+                        waiting.push(path);
+                        continue;
+                    }
+                    Some(Some(true)) => {}
+                }
+                let seen = self.overlay_read(&path, &mut overlay);
+                if let Seen::Item(i) = &seen {
+                    if let ItemContent::Preset { doc, .. } = &overlay.items[*i].content {
+                        todo.extend(rule.refs(doc).into_iter().cloned());
+                    }
+                }
+                overlay.seen.insert(key(&path), seen);
             }
-            overlay.seen.insert(key(&path), seen);
+            if waiting.is_empty() {
+                return overlay;
+            }
+            let wave: Vec<Mount> = waiting
+                .iter()
+                .filter_map(|path| mounts.locate(path).map(|(mount, _)| mount.clone()))
+                .collect();
+            self.stat_wave(io, &wave, stats);
+            todo = waiting;
         }
-        overlay
+    }
+
+    /// Stats the folders of `wave` (each mount once) as required asks on `io`, in one batch, into `stats`.
+    // ADR-0360
+    fn stat_wave(&self, io: &LaunchIo, wave: &[Mount], stats: &mut MountStats) {
+        let mut seen = std::collections::HashSet::new();
+        let wave: Vec<&Mount> = wave
+            .iter()
+            .filter(|mount| seen.insert(mount.name.key()))
+            .collect();
+        let folders: Vec<PathBuf> = wave.iter().map(|mount| mount.folder.clone()).collect();
+        let statuses = self.stat_mounts(io, &folders);
+        for (mount, status) in wave.into_iter().zip(statuses) {
+            stats
+                .0
+                .insert(mount.name.key(), (mount.name.clone(), status));
+        }
     }
 
     /// One library path read for the overlay in its mount's folder; the items it makes and their bytes go into
@@ -1944,6 +2009,8 @@ mod tests {
         root: bool,
         /// The name `lib\` is mounted under.
         mount: &'static str,
+        /// Whether `team\` is mounted too, as `team` (with `root`).
+        team: bool,
     }
 
     impl Default for Setup {
@@ -1956,6 +2023,7 @@ mod tests {
                 priming: Some("PRIMING"),
                 root: true,
                 mount: "library",
+                team: false,
             }
         }
     }
@@ -1986,7 +2054,7 @@ mod tests {
         fn with(setup: Setup) -> World {
             let temp = tempfile::tempdir().unwrap();
             let base = dunce::canonicalize(temp.path()).unwrap();
-            for folder in ["lib", "work", "home"] {
+            for folder in ["lib", "team", "work", "home"] {
                 fs::create_dir_all(base.join(folder)).unwrap();
             }
             if let Some(priming) = setup.priming {
@@ -1994,7 +2062,7 @@ mod tests {
                 put(
                     &base,
                     "builtin/presets/default.yaml",
-                    "kind: preset\nversion: 1\ninstructions:\n  - engram:/priming\n",
+                    "kind: preset\nversion: 1\ninstructions:\n  - engram/priming\n",
                 );
             }
             let ops = Arc::new(Gated::default());
@@ -2010,10 +2078,14 @@ mod tests {
                 config: match setup.root {
                     true => crate::config::LibraryConfig::mounted(
                         &base.join("state"),
-                        vec![crate::config::MountSetting {
-                            name: crate::mounts::MountName::parse(setup.mount).unwrap(),
-                            place: crate::config::MountPlace::Explicit(base.join("lib")),
-                        }],
+                        [(setup.mount, "lib", true), ("team", "team", setup.team)]
+                            .into_iter()
+                            .filter(|(_, _, mounted)| *mounted)
+                            .map(|(name, folder, _)| crate::config::MountSetting {
+                                name: crate::mounts::MountName::parse(name).unwrap(),
+                                place: crate::config::MountPlace::Explicit(base.join(folder)),
+                            })
+                            .collect(),
                     ),
                     false => crate::config::LibraryConfig::missing(&base.join("state")),
                 },
@@ -2140,6 +2212,338 @@ mod tests {
             .collect();
         assert_eq!(sources, ["work.tmp1.2/rules/a.md"]);
         assert!(plan.notices.is_empty(), "{:?}", plan.notices);
+    }
+
+    // ── two mounts (ADR-0400 decision 19) ──────────────────────────────────────────────────────────────────────
+
+    fn two_mounts() -> World {
+        World::with(Setup {
+            team: true,
+            ..Setup::default()
+        })
+    }
+
+    fn sources(plan: &LaunchPlan) -> Vec<(&str, PathBuf)> {
+        plan.instructions
+            .iter()
+            .map(|source| (source.path.as_str(), source.file.clone()))
+            .collect()
+    }
+
+    /// A preset in one mount reaches items in another: each file is read fresh in its own mount's folder, stamped there,
+    /// and a reference at or below a link inside the other mount is probed in that mount's folder.
+    #[test]
+    fn a_launch_reads_each_mounts_files_in_its_own_folder_and_probes_its_links_there() {
+        let w = two_mounts();
+        w.put("team/rules/t.md", "T");
+        w.put("team/skills/gamma/SKILL.md", &skill("gamma"));
+        w.put("lib/rules/a.md", "A");
+        w.put(
+            "lib/P.yaml",
+            &preset(
+                &["team/rules/t.md", "library/rules/a.md"],
+                &["team/skills/gamma"],
+                &[],
+                &[],
+            ),
+        );
+        let plan = w
+            .svc
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
+            .unwrap();
+        assert_eq!(
+            sources(&plan),
+            [
+                ("team/rules/t.md", w.at("team/rules/t.md")),
+                ("library/rules/a.md", w.at("lib/rules/a.md")),
+            ]
+        );
+        assert_eq!(plan.skills.len(), 1);
+        assert_eq!(plan.skills[0].dir, w.at("team/skills/gamma"));
+        let mut stamped = vec![
+            lossy(&w.at("lib/P.yaml")),
+            lossy(&w.at("lib/rules/a.md")),
+            lossy(&w.at("team/rules/t.md")),
+            lossy(&w.at("team/skills/gamma/SKILL.md")),
+        ];
+        stamped.sort();
+        assert_eq!(stamp_files(&plan), stamped);
+        assert!(plan.notices.is_empty(), "{:?}", plan.notices);
+        assert_eq!(
+            w.ops.count("stat", &w.at("team")),
+            1,
+            "one stat per mount per launch"
+        );
+
+        let outside = w.folder("outside", &[("x.md", "X")]);
+        link_dir(&outside, &w.at("team/linked")).unwrap();
+        w.put("lib/P.yaml", &preset(&["team/linked/x.md"], &[], &[], &[]));
+        let blocked = w
+            .svc
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
+            .unwrap_err();
+        assert_eq!(codes(&blocked), [("broken", PATH_THROUGH_LINK)]);
+        assert!(!w.store.read_any(&outside.join("x.md")));
+    }
+
+    /// A mount that is not there leaves out only its own items, told once with `mount`; the other mount's items load,
+    /// and its own missing item keeps its own notice. Nothing in the absent mount is read or probed.
+    #[test]
+    fn an_absent_mount_skips_only_its_own_items_with_one_notice_and_the_other_mount_launches() {
+        let w = two_mounts();
+        fs::remove_dir_all(w.at("team")).unwrap();
+        w.put("lib/rules/a.md", "A");
+        w.put(
+            "lib/P.yaml",
+            &preset(
+                &[
+                    "library/rules/a.md",
+                    "team/a.md",
+                    "team/b.md",
+                    "library/gone.md",
+                ],
+                &["team/skills/x"],
+                &[],
+                &[],
+            ),
+        );
+        let plan = w
+            .svc
+            .check(&agent(
+                codex(JSON),
+                &["library/P.yaml", "team/T.yaml"],
+                &w.at("work"),
+            ))
+            .unwrap();
+        assert_eq!(
+            sources(&plan),
+            [("library/rules/a.md", w.at("lib/rules/a.md"))]
+        );
+        assert_eq!(
+            plan.notices,
+            [
+                notice(
+                    LIBRARY_UNAVAILABLE_SKIPPED,
+                    json!({
+                        "mount": "team",
+                        "message": "missing",
+                        "items": ["team/a.md", "team/b.md", "team/skills/x", "team/T.yaml"],
+                    })
+                ),
+                skipped_item("library/gone.md", &["library/P.yaml"], Some(7)),
+            ]
+        );
+        assert_eq!(w.ops.count("stat", &w.at("team")), 1);
+        assert_eq!(
+            w.store.first_links.load(Ordering::SeqCst),
+            1,
+            "the other mount's not-found row only"
+        );
+        assert!(!w.store.read_any(&w.at("team/T.yaml")));
+    }
+
+    /// A mount that exists but cannot be read is its ④ row naming it, beside the rows the other mounts give — the
+    /// launch is refused before any folder IO or advisory step, and nothing in that mount is read.
+    #[test]
+    fn an_unreadable_mount_blocks_with_its_row_beside_the_other_mounts_rows_and_no_folder_io() {
+        let w = two_mounts();
+        lock(&w.ops.state).denied.insert(w.at("team"));
+        let folder = w.folder("rules", &[]);
+        w.put("team/T.yaml", &preset(&[], &[], &[], &[]));
+        w.put("lib/bad.yaml", "kind: preset\nversion: [\n");
+        w.put("lib/P.yaml", &preset(&["team/a.md"], &[], &[], &[&folder]));
+        let blocked = w
+            .svc
+            .check(&agent(
+                codex(JSON),
+                &["library/P.yaml", "library/bad.yaml", "team/T.yaml"],
+                &w.at("work"),
+            ))
+            .unwrap_err();
+        assert_eq!(
+            blocked.reasons,
+            [
+                BlockReason::Broken {
+                    item: "library/bad.yaml".to_owned(),
+                    via: Vec::new(),
+                    reason: match &blocked.reasons[0] {
+                        BlockReason::Broken { reason, .. } if reason.code == "yaml-syntax" => {
+                            reason.clone()
+                        }
+                        other => panic!("{other:?}"),
+                    },
+                },
+                BlockReason::LibraryUnavailable {
+                    reason: Reason {
+                        code: crate::LIBRARY_UNAVAILABLE.to_owned(),
+                        args: json!({ "mount": "team", "message": "access denied" }),
+                        line: None,
+                    }
+                },
+            ]
+        );
+        assert_eq!(w.ops.count("stat", &folder), 0, "no folder IO");
+        assert_eq!(w.ops.ops("canonical"), 0, "no advisory phase");
+        assert!(!w.store.read_any(&w.at("team/T.yaml")));
+    }
+
+    /// A mount first reached through a nested reference — the second wave of stats — is judged by its own stat as one
+    /// an agent attaches directly: one that is not there skips its items with one notice, one that cannot be read
+    /// blocks with its row; each mount is stat'ed once.
+    #[test]
+    fn a_mount_first_reached_in_a_later_wave_is_judged_by_its_own_stat() {
+        for absent in [true, false] {
+            let w = two_mounts();
+            match absent {
+                true => fs::remove_dir_all(w.at("team")).unwrap(),
+                false => {
+                    lock(&w.ops.state).denied.insert(w.at("team"));
+                }
+            }
+            w.put("lib/rules/a.md", "A");
+            w.put(
+                "lib/P.yaml",
+                &preset(&["library/rules/a.md", "team/t.md"], &[], &[], &[]),
+            );
+            let checked = w
+                .svc
+                .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")));
+            match absent {
+                true => {
+                    let plan = checked.unwrap();
+                    assert_eq!(
+                        sources(&plan),
+                        [("library/rules/a.md", w.at("lib/rules/a.md"))]
+                    );
+                    assert_eq!(
+                        plan.notices,
+                        [notice(
+                            LIBRARY_UNAVAILABLE_SKIPPED,
+                            json!({ "mount": "team", "message": "missing", "items": ["team/t.md"] })
+                        )]
+                    );
+                }
+                false => assert_eq!(
+                    checked.unwrap_err().reasons,
+                    [BlockReason::LibraryUnavailable {
+                        reason: Reason {
+                            code: crate::LIBRARY_UNAVAILABLE.to_owned(),
+                            args: json!({ "mount": "team", "message": "access denied" }),
+                            line: None,
+                        }
+                    }]
+                ),
+            }
+            assert_eq!(
+                (
+                    w.ops.count("stat", &w.at("lib")),
+                    w.ops.count("stat", &w.at("team"))
+                ),
+                (1, 1),
+                "absent: {absent}"
+            );
+        }
+    }
+
+    /// A first name that names no mount, beside a healthy mount, is skipped as an unregistered mount — one notice with
+    /// its items — and the healthy mount's items load.
+    #[test]
+    fn an_unregistered_name_beside_a_healthy_mount_skips_only_its_items() {
+        let w = two_mounts();
+        w.put("lib/rules/a.md", "A");
+        w.put(
+            "lib/P.yaml",
+            &preset(&["library/rules/a.md", "nowhere/x.md"], &[], &[], &[]),
+        );
+        let plan = w
+            .svc
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
+            .unwrap();
+        assert_eq!(
+            sources(&plan),
+            [("library/rules/a.md", w.at("lib/rules/a.md"))]
+        );
+        assert_eq!(
+            plan.notices,
+            [notice(
+                LIBRARY_UNAVAILABLE_SKIPPED,
+                json!({
+                    "mount": "nowhere",
+                    "message": crate::resolve::NOT_REGISTERED,
+                    "items": ["nowhere/x.md"],
+                })
+            )]
+        );
+        assert_eq!(
+            w.ops.count("stat", &w.at("team")),
+            0,
+            "no reference reaches team"
+        );
+    }
+
+    /// The overlay follows references by the resolution's tag rule: a mount only another backend's entry reaches is
+    /// never stat'ed — its dead share neither spends the launch's required budget nor leaves the folder entries
+    /// unchecked — and nothing in it is read (ADR-0400 decision 19).
+    #[test]
+    fn a_mount_only_another_backends_entry_reaches_is_not_stat_ed_by_a_launch() {
+        let w = World::with(Setup {
+            team: true,
+            waits: waits(500, 300),
+            ..Setup::default()
+        });
+        w.ops.hold_op("stat", &w.at("team"));
+        let folder = w.folder("rules", &[]);
+        w.put("lib/rules/a.md", "A");
+        w.put(
+            "lib/P.yaml",
+            &format!(
+                "kind: preset\nversion: 1\ninstructions:\n  - library/rules/a.md\n  - {{path: team/a.md, backend: \
+                 claude}}\nskills:\n  - {{path: team/skills/x, backend: claude}}\nfolders:\n  - '{}'\n",
+                folder.display()
+            ),
+        );
+        let plan = w
+            .svc
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
+            .unwrap();
+        assert_eq!(
+            sources(&plan),
+            [("library/rules/a.md", w.at("lib/rules/a.md"))]
+        );
+        assert_eq!(plan.folders.len(), 1, "the folder entry was checked");
+        assert!(plan.notices.is_empty(), "{:?}", plan.notices);
+        assert_eq!(w.ops.count("stat", &w.at("team")), 0);
+        assert!(!w.store.read_any(&w.at("team/a.md")));
+    }
+
+    /// The same-name skill check takes a loaded library skill at its own mount's folder: only a mount with a loaded
+    /// skill is canonicalized.
+    #[test]
+    fn the_same_name_check_places_a_skill_in_its_own_mounts_folder() {
+        let w = two_mounts();
+        fs::create_dir_all(w.at("proj/.git")).unwrap();
+        w.put("proj/.agents/skills/gamma/SKILL.md", &skill("gamma"));
+        let cwd = w.folder("proj/sub", &[]);
+        w.put("team/skills/gamma/SKILL.md", &skill("gamma"));
+        w.put("lib/P.yaml", &preset(&[], &["team/skills/gamma"], &[], &[]));
+        let plan = w
+            .svc
+            .check(&agent(codex(JSON), &["library/P.yaml"], &cwd))
+            .unwrap();
+        let mut paths = vec![
+            lossy(&w.at("team/skills/gamma")),
+            lossy(&w.at("proj/.agents/skills/gamma")),
+        ];
+        paths.sort();
+        assert_eq!(
+            plan.notices,
+            [notice(
+                CODEX_SAME_NAME_SKILLS,
+                json!({ "name": "gamma", "paths": paths })
+            )]
+        );
+        assert_eq!(w.ops.count("canonical", &w.at("team")), 1);
+        assert_eq!(w.ops.count("canonical", &w.at("lib")), 0);
     }
 
     fn skill(name: &str) -> String {
@@ -2411,9 +2815,9 @@ mod tests {
         );
     }
 
-    /// A root that exists but cannot be read — an access error, or a stat held past the budget — is block ④, the
-    /// whole answer: no folder IO, no advisory phase, no working-folder row, no library file read (ADR-0361 ·
-    /// ADR-0387).
+    /// A mount that exists but cannot be read — an access error, or a stat held past the budget — is block ④ naming it,
+    /// here the whole answer: no folder IO, no advisory phase, no working-folder row, no library file read (ADR-0361 ·
+    /// ADR-0387 · ADR-0400 decision 19).
     #[test]
     fn block_four_is_the_whole_answer_and_asks_nothing_else() {
         for held in [false, true] {
@@ -2440,7 +2844,7 @@ mod tests {
                 [BlockReason::LibraryUnavailable {
                     reason: Reason {
                         code: crate::LIBRARY_UNAVAILABLE.to_owned(),
-                        args: json!({ "message": why }),
+                        args: json!({ "mount": "library", "message": why }),
                         line: None,
                     }
                 }],
@@ -2453,11 +2857,12 @@ mod tests {
         }
     }
 
-    /// An unset root, a removed root and a root path that is a file skip every library item: the launch runs on the
-    /// built-ins alone, with one `library-unavailable-skipped` notice naming the library items, no library file read
-    /// and no link probe; an attached spelling that is not a reference still blocks (ADR-0387).
+    /// A mount not registered, a removed mount folder and a mount path that is a file skip every library item in it:
+    /// the launch runs on the built-ins alone, with one `library-unavailable-skipped` notice naming the mount and its
+    /// items, no library file read and no link probe; an attached spelling that is not a reference still blocks
+    /// (ADR-0387 · ADR-0400 decision 19).
     #[test]
-    fn an_absent_root_skips_every_library_item_and_launches_on_the_built_ins() {
+    fn an_absent_or_unregistered_mount_skips_its_library_items_and_launches_on_the_built_ins() {
         let removed = World::new();
         fs::remove_dir_all(removed.at("lib")).unwrap();
         let file = World::new();
@@ -2470,7 +2875,7 @@ mod tests {
         for (w, message) in [
             (&removed, "missing"),
             (&file, "not a folder"),
-            (&unset, crate::gate::NO_ROOT),
+            (&unset, crate::resolve::NOT_REGISTERED),
         ] {
             let profile = with_default(agent(
                 codex(JSON),
@@ -2484,7 +2889,11 @@ mod tests {
                 plan.notices,
                 [notice(
                     LIBRARY_UNAVAILABLE_SKIPPED,
-                    json!({ "message": message, "items": ["library/P.yaml", "library/Q.yaml"] })
+                    json!({
+                        "mount": "library",
+                        "message": message,
+                        "items": ["library/P.yaml", "library/Q.yaml"],
+                    })
                 )],
                 "{message}"
             );
@@ -2549,9 +2958,9 @@ mod tests {
         );
     }
 
-    /// With an unset root the note says why the library could not be used and names the library items there.
+    /// With its mount not registered the note names the mount, why it could not be used and the library items there.
     #[test]
-    fn an_absent_root_note_names_the_library_items_in_its_sentence() {
+    fn an_absent_mount_note_names_the_mount_and_its_items_in_its_sentence() {
         let w = World::with(Setup {
             root: false,
             ..Setup::default()
@@ -2564,7 +2973,7 @@ mod tests {
         assert_eq!(
             written(&w, &profile).as_deref(),
             Some(
-                "PRIMING\n\nEngram launch note: The library folder could not be used (no library root is set), so \
+                "PRIMING\n\nEngram launch note: The library mount library could not be used (not registered), so \
                  these library items were left out: library/P.yaml, library/Q.yaml\n"
             )
         );
@@ -2798,7 +3207,7 @@ mod tests {
             .filter(|notice| notice.code == BUILTIN_UNAVAILABLE)
             .collect();
         assert_eq!(told.len(), 1, "{:?}", plan.notices);
-        assert_eq!(told[0].args["path"], "engram:/default");
+        assert_eq!(told[0].args["path"], "engram/default");
     }
 
     #[test]

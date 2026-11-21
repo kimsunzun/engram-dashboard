@@ -33,11 +33,12 @@ use serde_json::json;
 use crate::catalog::{key, within, Catalog, Item, ScanItem, ScanResult};
 use crate::edit::{dot_or_temp, lib_path, not_found, LIBRARY_WRITE_FAILED};
 use crate::format::read::ITEM_PATH_INVALID;
-use crate::mounts::{admits_inside, Mount, MountPath, Mounts};
+use crate::mounts::{admits_inside, in_builtin, Mount, MountPath, Mounts};
 use crate::path::LibPath;
 use crate::store::{ContentTag, ScanEntry, ScanListing};
 use crate::{
-    refuse_unusable_now, virtual_root_read_only, LibraryRefusal, LibraryService, RefusalClass,
+    mount_read_only, refuse_unusable_now, virtual_root_read_only, LibraryRefusal, LibraryService,
+    RefusalClass,
 };
 
 /// The code of a create whose name is already taken (`args` = `{path}`); nothing is replaced.
@@ -86,7 +87,8 @@ impl LibraryService {
     ///
     /// Refusals, nothing created: no folder (the virtual root) `InvalidArgument` · `virtual-root-read-only`; a folder
     /// that is not a library path, a name that is not one path segment, a dot or temp name, or a name ending in the
-    /// other kinds' extension `InvalidArgument` · `item-path-invalid`; no first scan applied `Unavailable` ·
+    /// other kinds' extension `InvalidArgument` · `item-path-invalid`; a folder in the built-in mount `Conflict` ·
+    /// `mount-read-only`; no first scan applied `Unavailable` ·
     /// `library-unavailable`; the new path's mount cannot be read `Unavailable` · `library-unavailable` `{mount,
     /// message}`; a stale root generation `Conflict` · `root-generation-stale`; the parent at or below a
     /// link `InvalidArgument` · `path-through-link` (a probe error `Unavailable` · `library-read-failed`); the name
@@ -114,6 +116,10 @@ impl LibraryService {
         template: Option<&str>,
         root_generation: Option<u64>,
     ) -> Result<LibPath, LibraryRefusal> {
+        // ADR-0400 decision 20: nothing is created in the built-in mount.
+        if in_builtin(path) {
+            return Err(mount_read_only(path.as_str()));
+        }
         if !admits_inside(path) {
             return Err(dot_or_temp(path));
         }

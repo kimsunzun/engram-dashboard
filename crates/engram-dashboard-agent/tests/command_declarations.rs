@@ -454,7 +454,7 @@ fn required_matches_what_deserialization_actually_demands() {
         (
             "library.list",
             parses::<LibraryListArgs>,
-            json!({ "folder": "rules", "query": "x", "kinds": ["Preset"], "builtins": true }),
+            json!({ "folder": "rules", "query": "x", "kinds": ["Preset"] }),
         ),
         (
             "library.read",

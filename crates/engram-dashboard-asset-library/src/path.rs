@@ -1,7 +1,8 @@
 //! Reference spellings. A library asset is named by [`LibPath`] (a `/` path from the virtual library root, its first
-//! name a mount — ADR-0396), a built-in asset by `engram:/<id>` ([`BuiltinId`]); [`AssetRef`] is either. `LibPath`
-//! refuses `:`, so the two never mix. A preset's folder entry is not an asset: [`FolderRef`] holds an absolute folder
-//! path as the file spells it and its normalized form.
+//! name a mount — ADR-0396), a built-in asset by `engram/<id>` ([`BuiltinId`]) — a path in the reserved read-only mount
+//! `engram` (ADR-0400 decision 20); [`AssetRef`] is either. The spelling before that mount, `engram:/<id>`, is refused
+//! with a clue, never rewritten (ADR-0398). A preset's folder entry is not an asset: [`FolderRef`] holds an absolute
+//! folder path as the file spells it and its normalized form.
 //!
 //! Equality on these types is spelling equality. Whether two library paths name the same item is the OS rule: compare
 //! their `catalog::key`s. A `LibPath` has no disk path of its own: only `mounts.rs` joins one to a mount's folder
@@ -16,7 +17,10 @@ use engram_dashboard_platform::fs::{
 };
 use relative_path::RelativePathBuf;
 
-const BUILTIN_SCHEME: &str = "engram:/";
+use crate::mounts::{builtin_rest, BUILTIN_MOUNT};
+
+/// The built-in spelling before the `engram` mount — refused with a clue (ADR-0400 decision 20).
+const OLD_BUILTIN_SCHEME: &str = "engram:/";
 
 /// Why a reference spelling was refused.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -37,8 +41,11 @@ pub enum PathError {
     ReservedDeviceName(String),
     #[error("character {0:?} is not allowed")]
     ForbiddenChar(char),
-    #[error("unknown built-in asset id {0:?} (after 'engram:/')")]
+    #[error("unknown built-in asset id {0:?} (after 'engram/')")]
     UnknownBuiltin(String),
+    /// `engram:/<id>` — the payload is the spelling to write instead (`engram/<id>`).
+    #[error("'engram:/' is the old built-in spelling; write {0:?}")]
+    OldBuiltinSpelling(String),
     #[error("path is not under the library root")]
     NotUnderRoot,
     #[error("path is not valid UTF-8")]
@@ -132,14 +139,14 @@ impl LibPath {
     }
 }
 
-/// A built-in asset — the closed set of `engram:/…` ids, backed by files of the distribution's `builtin\` folder.
+/// A built-in asset — the closed set of `engram/…` ids, backed by files of the distribution's `builtin\` folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BuiltinId {
-    /// `engram:/default` — the built-in preset 「Default」.
+    /// `engram/default` — the built-in preset 「Default」.
     DefaultPreset,
-    /// `engram:/priming` — the priming instruction.
+    /// `engram/priming` — the priming instruction.
     Priming,
-    /// `engram:/settings/default` — the built-in settings.
+    /// `engram/settings/default` — the built-in settings.
     DefaultSettings,
 }
 
@@ -150,7 +157,7 @@ impl BuiltinId {
         BuiltinId::DefaultSettings,
     ];
 
-    /// The id after `engram:/`.
+    /// The id after `engram/` — the built-in's path inside the mount.
     pub fn id(self) -> &'static str {
         match self {
             BuiltinId::DefaultPreset => "default",
@@ -162,6 +169,14 @@ impl BuiltinId {
     fn from_id(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|builtin| builtin.id() == id)
     }
+
+    /// Its path in the virtual library: `engram/<id>` — where `list` and `read` find it (ADR-0400 decision 20).
+    pub fn path(self) -> LibPath {
+        LibPath(RelativePathBuf::from(format!(
+            "{BUILTIN_MOUNT}/{}",
+            self.id()
+        )))
+    }
 }
 
 /// What a preset item or an attached preset points at.
@@ -172,21 +187,30 @@ pub enum AssetRef {
 }
 
 impl AssetRef {
-    /// `engram:/<id>` = a built-in (an id outside [`BuiltinId`] = `UnknownBuiltin`); anything else = a [`LibPath`].
+    /// A [`LibPath`] whose first name is the mount `engram` (ASCII case-insensitive on every OS) = a built-in: the rest
+    /// must be a [`BuiltinId`] id, spelled exactly (else `UnknownBuiltin`, the mount's top and its folder `settings`
+    /// included); any other `LibPath` = a library reference. `engram:/<id>` = `OldBuiltinSpelling` naming `engram/<id>`.
+    // ADR-0400 decision 20
     pub fn parse(text: &str) -> Result<Self, PathError> {
-        match text.strip_prefix(BUILTIN_SCHEME) {
-            Some(id) => BuiltinId::from_id(id)
-                .map(AssetRef::BuiltIn)
-                .ok_or_else(|| PathError::UnknownBuiltin(id.to_owned())),
-            None => LibPath::parse(text).map(AssetRef::Library),
+        if let Some(rest) = text.strip_prefix(OLD_BUILTIN_SCHEME) {
+            return Err(PathError::OldBuiltinSpelling(format!(
+                "{BUILTIN_MOUNT}/{rest}"
+            )));
         }
+        let path = LibPath::parse(text)?;
+        let Some(rest) = builtin_rest(&path) else {
+            return Ok(AssetRef::Library(path));
+        };
+        BuiltinId::from_id(rest)
+            .map(AssetRef::BuiltIn)
+            .ok_or_else(|| PathError::UnknownBuiltin(rest.to_owned()))
     }
 
-    /// The text [`AssetRef::parse`] reads back to `self`.
+    /// The text [`AssetRef::parse`] reads back to `self` — a built-in as `engram/<id>`.
     pub fn spelling(&self) -> String {
         match self {
             AssetRef::Library(path) => path.as_str().to_owned(),
-            AssetRef::BuiltIn(builtin) => format!("{BUILTIN_SCHEME}{}", builtin.id()),
+            AssetRef::BuiltIn(builtin) => format!("{BUILTIN_MOUNT}/{}", builtin.id()),
         }
     }
 }
@@ -459,41 +483,61 @@ mod tests {
         assert_eq!(lib("Team/RULES2/a.md").replace_prefix(&from, &to), None);
     }
 
-    // TRD S25 step-7 §8-1 P1 path row — `engram:/…` vs library; unknown built-in.
+    // ADR-0400 decision 20: the first name `engram` (any ASCII case, on every OS) is the built-in mount; the old
+    //   spelling `engram:/…` is refused with the new one in its message, not rewritten (ADR-0398).
     #[test]
-    fn asset_ref_parse_decides_by_the_builtin_scheme() {
-        assert_eq!(
-            AssetRef::parse("engram:/default"),
-            Ok(AssetRef::BuiltIn(BuiltinId::DefaultPreset))
-        );
-        assert_eq!(
-            AssetRef::parse("engram:/priming"),
-            Ok(AssetRef::BuiltIn(BuiltinId::Priming))
-        );
-        assert_eq!(
-            AssetRef::parse("engram:/settings/default"),
-            Ok(AssetRef::BuiltIn(BuiltinId::DefaultSettings))
-        );
-        assert_eq!(
-            AssetRef::parse("rules/a.md"),
-            Ok(AssetRef::Library(lib("rules/a.md")))
-        );
-        for unknown in [
-            "engram:/",
-            "engram:/nope",
-            "engram:/settings",
-            "engram:/Default",
+    fn asset_ref_parse_maps_the_engram_mount_to_the_builtins_and_refuses_the_old_spelling_with_a_clue(
+    ) {
+        for (text, id) in [
+            ("engram/default", BuiltinId::DefaultPreset),
+            ("engram/priming", BuiltinId::Priming),
+            ("engram/settings/default", BuiltinId::DefaultSettings),
+            ("Engram/default", BuiltinId::DefaultPreset),
+            ("ENGRAM/settings/default", BuiltinId::DefaultSettings),
         ] {
-            let id = unknown.strip_prefix(BUILTIN_SCHEME).unwrap();
+            assert_eq!(AssetRef::parse(text), Ok(AssetRef::BuiltIn(id)), "{text}");
+        }
+        assert_eq!(
+            AssetRef::parse("library/rules/a.md"),
+            Ok(AssetRef::Library(lib("library/rules/a.md")))
+        );
+        assert_eq!(
+            AssetRef::parse("engramx/default"),
+            Ok(AssetRef::Library(lib("engramx/default")))
+        );
+        for (unknown, id) in [
+            ("engram", ""),
+            ("engram/nope", "nope"),
+            ("engram/settings", "settings"),
+            ("engram/Default", "Default"),
+            ("engram/default/x", "default/x"),
+        ] {
             assert_eq!(
                 AssetRef::parse(unknown),
                 Err(PathError::UnknownBuiltin(id.to_owned())),
                 "{unknown}"
             );
         }
+        let old = AssetRef::parse("engram:/settings/default").unwrap_err();
+        assert_eq!(
+            old,
+            PathError::OldBuiltinSpelling("engram/settings/default".to_owned())
+        );
+        assert!(
+            old.to_string().contains("\"engram/settings/default\""),
+            "the clue names the new spelling: {old}"
+        );
+        assert_eq!(
+            AssetRef::parse("engram:/"),
+            Err(PathError::OldBuiltinSpelling("engram/".to_owned()))
+        );
         assert_eq!(
             AssetRef::parse("engram:default"),
             Err(PathError::ForbiddenChar(':'))
+        );
+        assert_eq!(
+            AssetRef::parse("engram//default"),
+            Err(PathError::EmptyName)
         );
         assert_eq!(AssetRef::parse("/rules/a.md"), Err(PathError::LeadingSlash));
     }
@@ -513,7 +557,7 @@ mod tests {
         }
         assert_eq!(
             AssetRef::BuiltIn(BuiltinId::DefaultSettings).spelling(),
-            "engram:/settings/default"
+            "engram/settings/default"
         );
     }
 

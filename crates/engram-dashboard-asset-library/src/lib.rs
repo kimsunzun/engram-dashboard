@@ -49,8 +49,12 @@
 //! The library is one virtual root whose top holds named mounts, each mapped to a folder (`mounts.rs` — ADR-0396 ·
 //! ADR-0400). Every path the service takes, keeps or answers is virtual (`<mount>/…`); it is joined to a mount's folder
 //! only at the disk boundary, through `mounts.rs`, and a path whose first name names no registered mount reads as
-//! absent. The mount list is persisted in `library.json` (`config.rs` — ADR-0375 · ADR-0376), read by the daemon before
-//! [`LibraryService::new`]; `new` does no disk work beyond the built-ins. [`LibraryService::set_root`] and
+//! absent. The built-in mount `engram` is always present and read-only: `list`, `folders` and `read` answer it from the
+//! built-ins (`builtin.rs`), never from the catalog or a walk, and a write into it refuses [`MOUNT_READ_ONLY`]
+//! (ADR-0400 decision 20). A computation that resolves judges each mount it reaches on its own (`resolve.rs` ·
+//! `read_states` — ADR-0400 decision 19); what it stats or reads ahead of resolving follows references by the
+//! resolution's own tag rule (`resolve::TagRule`). The mount list is persisted in `library.json` (`config.rs` — ADR-0375 ·
+//! ADR-0376), read by the daemon before [`LibraryService::new`]; `new` does no disk work beyond the built-ins. [`LibraryService::set_root`] and
 //! [`LibraryService::first_start`] are the only writers of the setting. `set_root` relocates the first mount (or
 //! registers `library` when there is none) through [`LibraryService::change_root`] (stat, then walk); the first start
 //! stats the default place and publishes it as the mount `library` without a walk (ADR-0382). Each writes
@@ -160,6 +164,7 @@ use engram_dashboard_platform::fs::{normalize_folder, path_key, same_path, PathK
 use serde_json::json;
 
 use crate::backends::Backends;
+use crate::builtin::file_of;
 use crate::builtin::Builtins;
 use crate::catalog::{
     key, preset_refs, within, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult,
@@ -169,10 +174,14 @@ use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need, SPAWN_FAILED};
 use crate::format::read::ITEM_PATH_INVALID;
 use crate::gate::{Gate, Tags};
 pub use crate::gate::{MountSeen, MountState, MountsNow, Numbers, State, NOT_FOUND};
-use crate::mounts::{virtual_path, Mount, MountName, MountPath, Mounts};
+use crate::mounts::{
+    builtin_rest, in_builtin, virtual_path, Mount, MountName, MountPath, Mounts, BUILTIN_MOUNT,
+};
 use crate::path::{AssetRef, BuiltinId, LibPath, PathError};
-use crate::refs::{default_slot_count, reference_count, referrers_of};
-use crate::resolve::{resolve, CatalogLookup, Lookup, Resolution, RootState, Target};
+use crate::refs::{closure_by, default_slot_count, reference_count, referrers_of};
+use crate::resolve::{
+    resolve, CatalogLookup, Lookup, MountStates, Resolution, RootState, TagRule, Target,
+};
 use crate::store::LibraryStore;
 
 /// The largest library file a scan or the list safety net reads. A longer file is a failed read: its item is kept as
@@ -187,9 +196,9 @@ pub const PATH_THROUGH_LINK: &str = "path-through-link";
 
 /// The code of a catalog read that could not be answered — no scan of the library could be applied (`args` =
 /// `{message}`), or its range lies in a mount that cannot be read (`args` = `{mount, message}` — ADR-0400 decision 6)
-/// — and of the ④ row, a library preset attached while the root is not usable (`args` = `{message}`, the reason). A
-/// launch leaves that row out for an unset or absent root and refuses on it for a root that exists but cannot be read
-/// (ADR-0387).
+/// — and of the ④ row, a library item reached in a mount that cannot be used (`args` = `{mount, message}`, one row per
+/// mount). A launch leaves that row out for an absent mount and refuses on it for one that exists but cannot be read
+/// (ADR-0387 · ADR-0400 decision 19).
 // TRD S25 step-7 B8
 pub const LIBRARY_UNAVAILABLE: &str = "library-unavailable";
 
@@ -208,6 +217,10 @@ pub const LISTING_UNANSWERED: &str = "the bounded listing gave no answer";
 /// The code of an edit whose root generation is not the current one (`args` = `{given, current}`).
 // ADR-0377
 pub const ROOT_GENERATION_STALE: &str = "root-generation-stale";
+
+/// The code of a write into the built-in mount `engram` — it is read-only (`args` = `{mount, path}`).
+// ADR-0400 decision 20
+pub const MOUNT_READ_ONLY: &str = "mount-read-only";
 
 /// The code of a write whose target is the virtual root or a mount's top — a path of one name, or none (`args` =
 /// `{path}`, absent for none): nothing is created at the top, and a mount's top changes only through the mount
@@ -404,9 +417,11 @@ pub enum FirstStart {
 /// The answer of [`LibraryService::folders`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FoldersAnswer {
-    /// Every mount's top, then every folder of the mounts that can be read, by path; a skill folder is marked.
+    /// Every mount's top (the built-in `engram` included), then every folder of the mounts that can be read and the
+    /// built-in's virtual folders, by path; a skill folder is marked.
     pub folders: Vec<FolderNode>,
-    /// The mounts whose folders were left out — they cannot be read.
+    /// The mounts that cannot be read: a library mount's folders were left out; the built-in mount keeps its virtual
+    /// folders.
     // ADR-0400 decision 6
     pub unavailable: Vec<UnavailableMount>,
 }
@@ -421,10 +436,12 @@ pub struct FolderNode {
     pub mount_state: Option<MountState>,
 }
 
-/// A mount a whole-tree answer left out because its items cannot be read, with the state it was last seen in.
+/// A mount a whole-tree answer names because its items cannot be read, with the state it was last seen in — a library
+/// mount (its items left out) or the built-in mount `engram` with no built-in folder (its rows stay, as stand-ins).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnavailableMount {
-    pub mount: MountName,
+    /// The mount's name — [`BUILTIN_MOUNT`] for the built-in, which no [`MountName`] can hold.
+    pub mount: String,
     pub state: MountState,
 }
 
@@ -433,7 +450,7 @@ pub struct UnavailableMount {
 pub struct ReadAnswer {
     /// Kind, name, state, description and reference count as `list` shows it.
     pub row: ListRow,
-    /// The item on disk in its mount's folder.
+    /// The item on disk in its mount's folder; a built-in's file in the built-in folder.
     pub absolute: PathBuf,
     /// Presets that list it.
     pub presets_direct: Vec<String>,
@@ -462,19 +479,18 @@ struct Want {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListAnswer {
     pub folder: Option<LibPath>,
-    /// The items directly in the folder, by path — a skill folder is an item (kind = skill); with a query, every
-    /// matching item below it.
+    /// The items directly in the folder, by path — a skill folder is an item (kind = skill), a built-in is an item of
+    /// the mount `engram`; with a query, every matching item below it.
     pub rows: Vec<ListRow>,
     /// The plain folders directly in the folder (not skill folders), by path; none with a query.
     pub folders: Vec<FolderRow>,
-    /// The built-in preset `engram:/default` when [`ListFilter::builtins`] asked for it and the filters keep it.
-    pub builtins: Vec<ListRow>,
-    /// With a query and no folder: the mounts whose items were left out — they cannot be read.
+    /// With a query and no folder: the mounts that cannot be read — a library mount's items were left out; the
+    /// built-in mount's rows stay, as stand-ins.
     // ADR-0400 decision 6
     pub unavailable: Vec<UnavailableMount>,
 }
 
-/// What [`LibraryService::list_with`] keeps. The default keeps everything and adds no built-in row.
+/// What [`LibraryService::list_with`] keeps. The default keeps everything.
 // ADR-0386
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ListFilter {
@@ -482,8 +498,6 @@ pub struct ListFilter {
     pub query: Option<String>,
     /// The kinds kept, compared with [`ItemKind::listed`]; empty = every kind.
     pub kinds: Vec<ItemKind>,
-    /// Answer the built-in preset row too.
-    pub builtins: bool,
 }
 
 impl ListFilter {
@@ -591,16 +605,16 @@ impl LibraryService {
 
     /// The built-in priming text read when the service was made — what a launch whose plan includes the priming merges
     /// in first. Empty for its stand-in; then no plan includes it, and the launch check tells `builtin-unavailable` when
-    /// the preset reaches `engram:/priming` (a preset that does not list it includes no priming and tells nothing).
+    /// the preset reaches `engram/priming` (a preset that does not list it includes no priming and tells nothing).
     pub fn builtin_priming_text(&self) -> &str {
         self.builtins.priming_text()
     }
 
     /// One library preset on its own (the edit area — no agent: everything is shown, no format verdict), after the
     /// first-scan entrance, over the catalog under one read lock; its folder entries are stat'ed afterwards, outside
-    /// the lock, on one read-computation budget. The folder of the mount it names is stat'ed: one that is not there is
-    /// a skipped ④ row (`missing` / `not a folder`); one that is there blocks with a ④ row when the first scan could
-    /// not be applied, with the scan's reason ([`library_state`]).
+    /// the lock, on one read-computation budget. The folders of the mounts it reaches are stat'ed: one that is not there
+    /// is a skipped ④ row (`missing` / `not a folder`); one that is there but cannot be read blocks with a ④ row
+    /// ([`read_states`]).
     pub fn resolve_preset(&self, preset: &LibPath) -> Resolution {
         let want = Want {
             backend: None,
@@ -620,8 +634,8 @@ impl LibraryService {
     }
 
     /// What each agent gets (tree ⛔; `agent.presets` resolves the one profile it read the same way): one first-scan
-    /// entrance, the stats of the mounts attached presets name (when a library preset is attached), one read lock for
-    /// all of them, then the folder
+    /// entrance, the stats of the mounts the attached library presets reach ([`reached_mounts`]), one read lock for all
+    /// of them, then the folder
     /// stats — all on one read-computation budget, each distinct folder stat'ed once; then, with no lock, a link probe
     /// for each ① `not-found` library row. `None` = no such agent, or its backend has no settings check (it takes no
     /// preset — B13).
@@ -636,55 +650,53 @@ impl LibraryService {
             .collect()
     }
 
-    /// One resolution per want, in order. Locks: the first-scan entrance, a brief read lock for the mounts, the stats
-    /// of the mounts attached presets name (only when a library preset is attached somewhere — otherwise they decide
-    /// nothing) with no lock, one read lock for every resolution, the folder stats with no lock, then the link probes
-    /// of `mark_links` with no lock. A block-④ resolution has no folder and no `not-found` row, so it is neither
-    /// stat'ed nor probed.
+    /// One resolution per want, in order. Locks: the first-scan entrance, a brief read lock for the mounts the attached
+    /// library presets reach, their stats with no lock, one read lock that judges the mounts and resolves every want,
+    /// the folder stats with no lock, then the link probes of `mark_links` with no lock. The items of a mount that
+    /// cannot be used are not looked up, so they are neither stat'ed nor probed.
     fn resolve_wants(&self, wants: &[&Want]) -> Vec<Resolution> {
-        self.resolve_over(wants, true, None, |_, _| ()).0
+        self.resolve_over(wants, true, None, |_, _, _| ()).0
     }
 
     /// [`LibraryService::resolve_wants`] with `draft` standing in for the catalog item at its path (`preset.check`)
-    /// and `extra` run over the state and the same lookup inside the read lock that resolves. `library` = the
-    /// computation reads library items; `false` skips the first-scan entrance and the mount stats and takes the library
-    /// as usable (only built-ins and `draft` are looked up).
+    /// and `extra` run over the state, the same lookup and the same mount states inside the read lock that resolves.
+    /// `library` = the computation reads library items; `false` skips the first-scan entrance and the mount stats and
+    /// takes every mount as usable (only built-ins and `draft` are looked up).
     pub(crate) fn resolve_over<R>(
         &self,
         wants: &[&Want],
         library: bool,
         draft: Option<&edit::Draft>,
-        extra: impl FnOnce(&State, &dyn Lookup) -> R,
+        extra: impl FnOnce(&State, &dyn Lookup, &MountStates) -> R,
     ) -> (Vec<Resolution>, R) {
         let joined = if library {
             self.first_scan_join()
         } else {
             Ok(())
         };
-        let attached: Vec<&AssetRef> = wants.iter().flat_map(|want| &want.presets).collect();
-        let library_attached = library
-            && attached
-                .iter()
-                .any(|preset| matches!(preset, AssetRef::Library(_)));
-        let mounts = self.gate.with_read(|state| state.mounts.clone());
-        let io = self.io.begin_read();
-        let root_state = match library {
-            true => self.root_state(&io, &mounts, &attached, Some(joined), library_attached),
-            false => RootState::Ok,
-        };
-        let targets: Vec<Target> = wants
+        let backends = &*self.values.backends;
+        let attached: Vec<(TagRule, &AssetRef)> = wants
             .iter()
-            .map(|want| Target {
-                backend: want.backend.clone(),
-                mode: want.mode,
-                default_preset: want.default_preset,
-                presets: want.presets.clone(),
-                unparsed: want.unparsed.clone(),
-                root: root_state.clone(),
+            .flat_map(|want| {
+                let rule = TagRule::of(backends, want.backend.as_deref(), want.mode);
+                want.presets.iter().map(move |preset| (rule, preset))
             })
             .collect();
-        let backends = &*self.values.backends;
-        let (mut resolved, extra): (Vec<Resolution>, R) = self.gate.with_read(|state| {
+        let reached = match library {
+            true => self
+                .gate
+                .with_read(|state| reached_mounts(&state.catalog, &state.mounts, &attached)),
+            false => Vec::new(),
+        };
+        let io = self.io.begin_read();
+        let stats = self.stat_reached(&io, &reached);
+        let (mounts, mut resolved, extra) = self.gate.with_read(|state| {
+            // The states are judged over the mounts this lock resolves with: a mount renamed or removed after the
+            //   stats is not judged under a name the lookup no longer knows.
+            let states = match library {
+                true => read_states(&state.mounts, |name| state.seen(name), &stats, &joined),
+                false => MountStates::new(&state.mounts, false),
+            };
             let catalog = CatalogLookup {
                 catalog: &state.catalog,
                 mounts: &state.mounts,
@@ -695,11 +707,20 @@ impl LibraryService {
                 Some(overlaid) => overlaid,
                 None => &catalog,
             };
-            let resolved = targets
+            let resolved: Vec<Resolution> = wants
                 .iter()
-                .map(|target| resolve(target, lookup, backends))
+                .map(|want| Target {
+                    backend: want.backend.clone(),
+                    mode: want.mode,
+                    default_preset: want.default_preset,
+                    presets: want.presets.clone(),
+                    unparsed: want.unparsed.clone(),
+                    mounts: states.clone(),
+                })
+                .map(|target| resolve(&target, lookup, backends))
                 .collect();
-            (resolved, extra(state, lookup))
+            let extra = extra(state, lookup, &states);
+            (state.mounts.clone(), resolved, extra)
         });
         let folders: Vec<(PathBuf, Need)> = resolved
             .iter()
@@ -714,30 +735,24 @@ impl LibraryService {
         (resolved, extra)
     }
 
-    /// The library as block ④ needs it ([`library_state`]): unset with no mount registered; else, when a library preset
-    /// is attached (otherwise no mount decides anything and none is asked), the folder of each mount an attached
-    /// library preset in `attached` names stat'ed as a required ask on `io`. A read entrance passes `Some(joined)`
-    /// (whether a full scan could be applied) and each mount's stat is judged with that mount's first-scan answer
-    /// ([`LibraryService::stat_named`]); a launch passes `None` — it reads the files fresh, so the stat alone decides.
+    /// The folder of each mount of `reached` stat'ed as a required ask on `io` and judged with that mount's first-scan
+    /// answer ([`LibraryService::stat_named`]), by the folder's path key — what [`read_states`] judges them by.
     // ADR-0387
-    fn root_state(
+    pub(crate) fn stat_reached(
         &self,
         io: &LaunchIo,
-        mounts: &Mounts,
-        attached: &[&AssetRef],
-        joined: Option<Result<(), String>>,
-        library_attached: bool,
-    ) -> RootState {
-        let folders = match library_attached {
-            true => named_folders(mounts, attached),
-            false => Vec::new(),
-        };
-        let stats = match (&joined, folders.is_empty()) {
-            (_, true) => Vec::new(),
-            (Some(_), false) => self.stat_named(io, &folders),
-            (None, false) => self.stat_mounts(io, &folders),
-        };
-        library_state(&joined.unwrap_or(Ok(())), mounts, stats)
+        reached: &[Mount],
+    ) -> std::collections::HashMap<PathKey, FolderStatus> {
+        let folders: Vec<PathBuf> = reached.iter().map(|mount| mount.folder.clone()).collect();
+        if folders.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        let statuses = self.stat_named(io, &folders);
+        folders
+            .iter()
+            .map(|folder| path_key(folder))
+            .zip(statuses)
+            .collect()
     }
 
     /// [`LibraryService::stat_mounts`] of mount folders, each status then judged with that mount's first-scan answer.
@@ -856,9 +871,15 @@ impl LibraryService {
     /// Turns each ① `not-found` row of a library reference that lies at or below a link inside the library into ②
     /// [`PATH_THROUGH_LINK`] (R11), or into ② [`launch::LIBRARY_READ_FAILED`] when the probe fails — the rule of
     /// [`link_verdict`]. Asks the store's `first_link` per row in its mount's folder (a row of a mount not in `mounts`,
-    /// or of a mount's top, is left as it is) — call it outside every lock.
+    /// of a mount's top, or of a mount the resolution found absent is left as it is) — call it outside every lock.
     // ADR-0387
+    // ADR-0400 decision 19: an absent mount's folder is not touched.
     pub(crate) fn mark_links(&self, mounts: &Mounts, resolution: &mut Resolution) {
+        let absent: Vec<PathKey> = resolution
+            .absent_mounts
+            .iter()
+            .map(|(name, _)| path_key(Path::new(name)))
+            .collect();
         for problem in &mut resolution.problems {
             let BlockReason::Missing { item, via, reason } = problem else {
                 continue;
@@ -867,6 +888,10 @@ impl LibraryService {
                 continue;
             };
             if reason.code != NOT_FOUND {
+                continue;
+            }
+            let first = path.as_str().split('/').next().unwrap_or_default();
+            if absent.contains(&path_key(Path::new(first))) {
                 continue;
             }
             let Some(probe) = self.first_link(mounts, &path) else {
@@ -898,6 +923,16 @@ impl LibraryService {
     /// What agent `id` attaches, read from the registry (outside every library lock).
     fn agent_want(&self, id: AgentId) -> Option<Want> {
         self.want_of(&self.values.registry.get(id)?)
+    }
+
+    /// The tag rule `profile`'s resolution follows references by ([`TagRule::of`] over what
+    /// [`LibraryService::want_of`] reads).
+    pub(crate) fn tag_rule(&self, profile: &AgentProfile) -> TagRule<'_> {
+        TagRule::of(
+            &*self.values.backends,
+            Some(&backend_word(&profile.command)),
+            Some(output_format(&profile.command)),
+        )
     }
 
     /// What `profile` attaches; `None` = its backend has no settings check (it takes no preset — B13).
@@ -933,15 +968,19 @@ impl LibraryService {
     }
 
     /// [`LibraryService::list`] through `filter`: with a query, the matching items below `folder` and no folder
-    /// lines; rows outside `filter.kinds` dropped; the built-in preset row in `builtins` when asked for, under the same
-    /// filters. A folder at or below a link still answers its one [`PATH_THROUGH_LINK`] row, unfiltered — it describes
-    /// the folder asked for, not an item — and the built-in row as any other folder does.
+    /// lines; rows outside `filter.kinds` dropped. A folder at or below a link still answers its one
+    /// [`PATH_THROUGH_LINK`] row, unfiltered — it describes the folder asked for, not an item. A folder in the built-in
+    /// mount answers from the built-ins, with no first-scan entrance ([`LibraryService::builtin_answer`]).
     // ADR-0386
+    // ADR-0400 decision 20
     pub fn list_with(
         &self,
         folder: Option<&LibPath>,
         filter: &ListFilter,
     ) -> Result<ListAnswer, Reason> {
+        if let Some(folder) = folder.filter(|folder| in_builtin(folder)) {
+            return Ok(self.builtin_answer(folder, filter));
+        }
         self.first_scan_join().map_err(|why| Reason {
             code: LIBRARY_UNAVAILABLE.to_owned(),
             args: json!({ "message": why }),
@@ -969,7 +1008,6 @@ impl LibraryService {
                     folder: folder.cloned(),
                     rows: vec![through_link_row(path)],
                     folders: Vec::new(),
-                    builtins: self.builtin_rows(filter),
                     unavailable: Vec::new(),
                 })
             }
@@ -989,8 +1027,14 @@ impl LibraryService {
     /// walking (ADR-0324 decision 7). Before the first scan is raised a folder refresh passes through a full scan
     /// (decision 6): it joins a queued one or runs its own and takes its share; if a full scan (or a root change drawn
     /// before the first scan was raised) is already walking, it waits for it and then scans its folder like any refresh — or, when what it
-    /// waited for failed, goes through a full scan once more.
+    /// waited for failed, goes through a full scan once more. A folder in the built-in mount is not scanned — its files
+    /// are read once at start — and answers that as its one error, with nothing walked (ADR-0400 decision 20).
     pub fn refresh(&self, folder: Option<&LibPath>) -> RefreshReport {
+        if folder.is_some_and(in_builtin) {
+            return failed(format!(
+                "the built-in mount {BUILTIN_MOUNT} is not scanned: its files are read once at start"
+            ));
+        }
         match self.gate.refresh(
             folder,
             &|mounts| self.scan_stats(mounts),
@@ -1392,7 +1436,7 @@ impl LibraryService {
                     //   walks it again.
                     for left in service.gate.with_read(unavailable_mounts) {
                         tracing::warn!(
-                            mount = %escape_controls(left.mount.as_str()),
+                            mount = %escape_controls(&left.mount),
                             "library mount not walked at boot: {}",
                             escape_controls(left.state.why())
                         );
@@ -1422,8 +1466,9 @@ impl LibraryService {
         lock(&self.root_change)
     }
 
-    /// The whole folder tree, by path: each registered mount's top with its last known state (no fresh stat), and every
-    /// folder the catalog holds plus every skill folder of the mounts that can be read; a skill folder is marked.
+    /// The whole folder tree, by path: each registered mount's top with its last known state (no fresh stat) and the
+    /// built-in mount `engram` (always `Ok`), every folder the catalog holds plus every skill folder of the mounts that
+    /// can be read, and the built-in's virtual folders; a skill folder is marked.
     /// The mounts that cannot be read are named in `unavailable` and their folders left out — the answer is partial,
     /// never a refusal for them (ADR-0400 decision 6). After the first-scan entrance (its failure `Unavailable` ·
     /// [`LIBRARY_UNAVAILABLE`]), under one read lock; with no mount registered the tree is empty.
@@ -1469,10 +1514,23 @@ impl LibraryService {
                         mount_state: None,
                     }),
             );
+            // ADR-0400 decision 20: the built-in mount is always present, with its virtual folders.
+            folders.push(FolderNode {
+                path: BUILTIN_MOUNT.to_owned(),
+                name: BUILTIN_MOUNT.to_owned(),
+                skill: false,
+                mount_state: Some(self.builtin_mount_state()),
+            });
+            folders.extend(builtin_folders().into_iter().map(|folder| FolderNode {
+                path: folder.as_str().to_owned(),
+                name: folder.file_name().to_owned(),
+                skill: false,
+                mount_state: None,
+            }));
             folders.sort_by(|a, b| a.path.cmp(&b.path));
             FoldersAnswer {
                 folders,
-                unavailable: unavailable_mounts(state),
+                unavailable: self.whole_tree_unavailable(state),
             }
         }))
     }
@@ -1480,10 +1538,9 @@ impl LibraryService {
     /// One item's detail from the catalog (no disk read): its `list` row, its absolute path in its mount's folder, who
     /// refers to it directly and indirectly, an instruction's excerpt and a settings asset's raw-field names. After the
     /// first-scan entrance (its failure `Unavailable` · [`LIBRARY_UNAVAILABLE`]); a path the catalog does not hold, or
-    /// whose mount is not registered, `NotFound` · `not-found`.
+    /// whose mount is not registered, `NotFound` · `not-found`. A built-in answers from the built-ins with no entrance
+    /// ([`LibraryService::read_builtin`]).
     pub fn read(&self, path: &LibPath) -> Result<ReadAnswer, LibraryRefusal> {
-        self.first_scan_join()
-            .map_err(LibraryRefusal::unavailable)?;
         let not_found = || {
             LibraryRefusal::new(
                 RefusalClass::NotFound,
@@ -1495,6 +1552,14 @@ impl LibraryService {
         if path.parent().is_none() {
             return Err(not_found());
         }
+        if in_builtin(path) {
+            return match AssetRef::parse(path.as_str()) {
+                Ok(AssetRef::BuiltIn(id)) => self.read_builtin(id),
+                _ => Err(not_found()),
+            };
+        }
+        self.first_scan_join()
+            .map_err(LibraryRefusal::unavailable)?;
         // ADR-0400 decision 6: an item of a mount that cannot be read refuses, naming it.
         self.refuse_unusable_mount(path)?;
         self.gate.with_read(|state| {
@@ -1631,7 +1696,7 @@ impl LibraryService {
                 .locate(path)
                 .is_some_and(|(mount, _)| state.seen(&mount.name).usable())
         };
-        let items = match query {
+        let items = match &query {
             None => state.catalog.children(folder),
             Some(_) => {
                 // Strictly below: the folder asked for is not a result of its own search.
@@ -1647,7 +1712,7 @@ impl LibraryService {
             }
         };
         // The references are counted only for the rows kept — each count reads the registry.
-        let rows = items
+        let mut rows: Vec<ListRow> = items
             .into_iter()
             .map(|item| (item, row(item, 0)))
             .filter(|(_, row)| filter.keeps(row, query.as_deref()))
@@ -1656,15 +1721,30 @@ impl LibraryService {
                 row
             })
             .collect();
+        // ADR-0400 decision 20: a search of the whole tree searches the built-in mount too.
+        if let (Some(_), None) = (&query, folder) {
+            rows.extend(self.builtin_rows(None, filter));
+            rows.sort_by(|a, b| a.path.cmp(&b.path));
+        }
         let folders = match (&query, folder) {
             (Some(_), _) => Vec::new(),
-            (None, None) => mount_rows(state)
-                .map(|(top, seen)| FolderRow {
-                    path: top.as_str().to_owned(),
-                    name: top.file_name().to_owned(),
-                    mount_state: Some(seen.shown()),
-                })
-                .collect(),
+            (None, None) => {
+                let mut tops: Vec<FolderRow> = mount_rows(state)
+                    .map(|(top, seen)| FolderRow {
+                        path: top.as_str().to_owned(),
+                        name: top.file_name().to_owned(),
+                        mount_state: Some(seen.shown()),
+                    })
+                    .collect();
+                // ADR-0400 decision 20: the built-in mount is always present.
+                tops.push(FolderRow {
+                    path: BUILTIN_MOUNT.to_owned(),
+                    name: BUILTIN_MOUNT.to_owned(),
+                    mount_state: Some(self.builtin_mount_state()),
+                });
+                tops.sort_by(|a, b| a.path.cmp(&b.path));
+                tops
+            }
             (None, Some(folder)) => {
                 let want = key(folder);
                 let mut subfolders: Vec<&LibPath> = state
@@ -1685,57 +1765,212 @@ impl LibraryService {
             }
         };
         let unavailable = match (&query, folder) {
-            (Some(_), None) => unavailable_mounts(state),
+            (Some(_), None) => self.whole_tree_unavailable(state),
             _ => Vec::new(),
         };
         ListAnswer {
             folder: folder.cloned(),
             rows,
             folders,
-            builtins: self.builtin_rows(filter),
             unavailable,
         }
     }
 
-    /// The `builtins` of a list answer: the built-in preset row when `filter` asks for it and its query and kinds
-    /// keep it — the same whatever folder was asked for.
-    fn builtin_rows(&self, filter: &ListFilter) -> Vec<ListRow> {
-        if !filter.builtins {
-            return Vec::new();
+    /// The built-in mount's state, judged from the built-ins read once at start ([`Builtins::folder_unreadable`]):
+    /// unreadable when the run has no built-in folder or not one built-in file in it could be read — `read` of a
+    /// built-in then refuses — else `Ok`. Its `list` / `folders` row and a whole-tree read's `unavailable` carry it;
+    /// its item rows stay, as stand-ins with their `builtin-unavailable` state.
+    // ADR-0400 decision 20
+    fn builtin_mount_state(&self) -> MountState {
+        match self.builtins.folder_unreadable() {
+            None => MountState::Ok,
+            Some(why) => MountState::Unreadable {
+                why: why.to_owned(),
+            },
         }
+    }
+
+    /// A whole-tree read's `unavailable`: the library mounts that cannot be read ([`unavailable_mounts`]) and the
+    /// built-in mount when it cannot be ([`LibraryService::builtin_mount_state`]), by name.
+    fn whole_tree_unavailable(&self, state: &State) -> Vec<UnavailableMount> {
+        let mut unavailable = unavailable_mounts(state);
+        if let state @ MountState::Unreadable { .. } = self.builtin_mount_state() {
+            unavailable.push(UnavailableMount {
+                mount: BUILTIN_MOUNT.to_owned(),
+                state,
+            });
+            unavailable.sort_by(|a, b| a.mount.cmp(&b.mount));
+        }
+        unavailable
+    }
+
+    /// The list answer of `folder` in the built-in mount (ADR-0400 decision 20): the built-ins directly in it — with a
+    /// query, every matching one below it — kept by `filter`, and its virtual folders directly in it (none with a
+    /// query). Its mount segment is matched as [`builtin_rest`] matches it, what follows exactly — the rule `read`
+    /// uses. A folder that holds no built-in answers nothing.
+    fn builtin_answer(&self, folder: &LibPath, filter: &ListFilter) -> ListAnswer {
+        let inside = builtin_rest(folder).unwrap_or_default();
+        let folders = match filter.query {
+            Some(_) => Vec::new(),
+            None => builtin_folders()
+                .into_iter()
+                .filter(|sub| builtin_rest(sub).map(parent_of) == Some(inside))
+                .map(|sub| FolderRow {
+                    path: sub.as_str().to_owned(),
+                    name: sub.file_name().to_owned(),
+                    mount_state: None,
+                })
+                .collect(),
+        };
+        ListAnswer {
+            folder: Some(folder.clone()),
+            rows: self.builtin_rows(Some(inside), filter),
+            folders,
+            unavailable: Vec::new(),
+        }
+    }
+
+    /// The rows of the built-ins directly in the built-in mount's folder `inside` (its path inside the mount, `""` =
+    /// its top; `None` = the virtual root: none) — with a query, of every built-in strictly below it that matches, as a
+    /// library folder answers — kept by `filter`, by path. `inside` is matched exactly, as `read` matches an id.
+    fn builtin_rows(&self, inside: Option<&str>, filter: &ListFilter) -> Vec<ListRow> {
         let query = filter.query.as_deref().map(str::to_lowercase);
-        Some(self.builtin_preset_row())
-            .filter(|row| filter.keeps(row, query.as_deref()))
+        BuiltinId::ALL
             .into_iter()
+            .filter(|id| {
+                let id = id.id();
+                match (&query, inside) {
+                    (None, None) => false,
+                    (None, Some(inside)) => parent_of(id) == inside,
+                    (Some(_), None) => true,
+                    (Some(_), Some(inside)) => {
+                        inside.is_empty()
+                            || id
+                                .strip_prefix(inside)
+                                .is_some_and(|tail| tail.starts_with('/'))
+                    }
+                }
+            })
+            .map(|id| self.builtin_row(id))
+            .filter(|row| filter.keeps(row, query.as_deref()))
             .collect()
     }
 
-    /// The row of the built-in preset `engram:/default`: named by its id, its `description`, a stand-in's
-    /// `builtin-unavailable` reason as its state, and [`default_slot_count`] as its references.
+    /// The row of the built-in `id`: named by the last name of its path, its `description` (the priming: its
+    /// excerpt), a stand-in's `builtin-unavailable` reason as its state, and as references the agents whose Default
+    /// slot is on for the built-in preset ([`default_slot_count`]); a library preset that lists a built-in is not
+    /// counted — the catalog indexes library references only.
     // ADR-0386
-    fn builtin_preset_row(&self) -> ListRow {
-        let id = BuiltinId::DefaultPreset;
+    // ADR-0400 decision 20
+    fn builtin_row(&self, id: BuiltinId) -> ListRow {
         let view = self.builtins.view(id);
-        let path = AssetRef::BuiltIn(id).spelling();
+        let path = id.path();
         let description = match view.content {
             ItemContent::Preset { doc, .. } => doc.description.clone().unwrap_or_default(),
+            ItemContent::Settings { doc, .. } => doc.description.clone().unwrap_or_default(),
+            ItemContent::Instruction { excerpt } => excerpt.clone(),
             _ => String::new(),
         };
         let state = view.stand_in.map(|why| Reason {
             code: BUILTIN_UNAVAILABLE.to_owned(),
-            args: json!({ "path": path, "why": why }),
+            args: json!({ "path": path.as_str(), "why": why }),
             line: None,
         });
-        let references = default_slot_count(&self.values.registry);
+        let references = match id {
+            BuiltinId::DefaultPreset => default_slot_count(&self.values.registry),
+            BuiltinId::Priming | BuiltinId::DefaultSettings => 0,
+        };
         ListRow {
-            path,
+            path: path.as_str().to_owned(),
             kind: view.kind.clone(),
-            name: id.id().to_owned(),
+            name: path.file_name().to_owned(),
             state,
             references,
             description,
         }
     }
+
+    /// `library.read` of the built-in `id`: its row, its file in the built-in folder (`<builtin>\presets\default.yaml`
+    /// — where it was read from, or would have been for a stand-in), the agents whose Default slot is on for the
+    /// built-in preset, the priming's excerpt and the settings' raw-field names. A built-in mount that cannot be read
+    /// ([`LibraryService::builtin_mount_state`]) refuses `Unavailable` · [`LIBRARY_UNAVAILABLE`] `{mount, message}`.
+    // ADR-0400 decision 20
+    fn read_builtin(&self, id: BuiltinId) -> Result<ReadAnswer, LibraryRefusal> {
+        let state = self.builtin_mount_state();
+        let (MountState::Ok, Some(dir)) = (&state, &self.values.builtin_dir) else {
+            let why = state.why();
+            return Err(LibraryRefusal::new(
+                RefusalClass::Unavailable,
+                LIBRARY_UNAVAILABLE,
+                json!({
+                    "mount": BUILTIN_MOUNT,
+                    "message": format!("the library mount {BUILTIN_MOUNT} cannot be read: {why}"),
+                }),
+            ));
+        };
+        let view = self.builtins.view(id);
+        let mut agents_direct: Vec<AgentId> = match id {
+            BuiltinId::DefaultPreset => self
+                .values
+                .registry
+                .attachments()
+                .into_iter()
+                .filter(|(_, attached)| attached.default_preset)
+                .map(|(agent, _)| agent)
+                .collect(),
+            BuiltinId::Priming | BuiltinId::DefaultSettings => Vec::new(),
+        };
+        agents_direct.sort_unstable();
+        let (excerpt, settings_fields) = match view.content {
+            ItemContent::Instruction { excerpt } => (Some(excerpt.clone()), Vec::new()),
+            ItemContent::Settings { doc, .. } => (
+                None,
+                doc.raw.iter().map(|field| field.name.clone()).collect(),
+            ),
+            _ => (None, Vec::new()),
+        };
+        Ok(ReadAnswer {
+            row: self.builtin_row(id),
+            absolute: file_of(id)
+                .split('/')
+                .fold(dir.clone(), |at, name| at.join(name)),
+            presets_direct: Vec::new(),
+            presets_indirect: Vec::new(),
+            agents_direct,
+            agents_indirect: Vec::new(),
+            excerpt,
+            settings_fields,
+        })
+    }
+}
+
+/// The parent of a path inside the built-in mount (`""` = the mount's top).
+fn parent_of(inside: &str) -> &str {
+    inside.rsplit_once('/').map_or("", |(parent, _)| parent)
+}
+
+/// The built-in mount's virtual folders below its top (`engram/settings`), each once, by path — the folders the
+/// built-ins' paths lie in.
+// ADR-0400 decision 20
+fn builtin_folders() -> Vec<LibPath> {
+    let mut folders: Vec<LibPath> = BuiltinId::ALL
+        .into_iter()
+        .filter_map(|id| id.path().parent())
+        .filter(|folder| folder.parent().is_some())
+        .collect();
+    folders.sort();
+    folders.dedup();
+    folders
+}
+
+/// The refusal of a write into the built-in mount — `Conflict` · [`MOUNT_READ_ONLY`] (`args` = `{mount, path}`).
+// ADR-0400 decision 20
+pub(crate) fn mount_read_only(path: &str) -> LibraryRefusal {
+    LibraryRefusal::new(
+        RefusalClass::Conflict,
+        MOUNT_READ_ONLY,
+        json!({ "mount": BUILTIN_MOUNT, "path": escape_controls(path) }),
+    )
 }
 
 /// The mode of an agent command (`command_field`). A command without one is `Terminal`, as the profile reads an
@@ -1788,11 +2023,11 @@ fn unavailable_mounts(state: &State) -> Vec<UnavailableMount> {
         .map(|mount| (mount, state.seen(&mount.name)))
         .filter(|(_, seen)| !seen.usable())
         .map(|(mount, seen)| UnavailableMount {
-            mount: mount.name.clone(),
+            mount: mount.name.as_str().to_owned(),
             state: seen.shown(),
         })
         .collect();
-    unavailable.sort_by(|a, b| a.mount.as_str().cmp(b.mount.as_str()));
+    unavailable.sort_by(|a, b| a.mount.cmp(&b.mount));
     unavailable
 }
 
@@ -1801,33 +2036,65 @@ fn is_known(catalog: &Catalog, path: &LibPath) -> bool {
     catalog.get(&want).is_some() || catalog.folders().any(|folder| key(folder) == want)
 }
 
-/// The folders of the registered mounts the library presets of `attached` name, each once, in the order first named.
-pub(crate) fn named_folders(mounts: &Mounts, attached: &[&AssetRef]) -> Vec<PathBuf> {
+/// The registered mounts a computation over the presets `attached` reaches in `catalog`: the mount of each attached
+/// library preset and of every library reference it reaches there by its want's tag rule ([`closure_by`] ·
+/// [`TagRule::refs`]), each once, in first-reach order — the mounts a read computation stats (ADR-0400 decision 19).
+/// A reference only another backend's tag lists is not followed: the resolution never looks it up.
+pub(crate) fn reached_mounts(
+    catalog: &Catalog,
+    mounts: &Mounts,
+    attached: &[(TagRule, &AssetRef)],
+) -> Vec<Mount> {
     let mut seen = std::collections::HashSet::new();
-    attached
-        .iter()
-        .filter_map(|preset| match preset {
-            AssetRef::Library(path) => mounts.locate(path),
+    let mut reached = Vec::new();
+    for (rule, preset) in attached {
+        let AssetRef::Library(path) = preset else {
+            continue;
+        };
+        let refs = closure_by(catalog, path, |doc| rule.refs(doc));
+        let paths = std::iter::once(path).chain(refs.iter().filter_map(|r| match r {
+            AssetRef::Library(path) => Some(path),
             AssetRef::BuiltIn(_) => None,
-        })
-        .filter(|(mount, _)| seen.insert(mount.name.key()))
-        .map(|(mount, _)| mount.folder.clone())
-        .collect()
+        }));
+        for path in paths {
+            if let Some((mount, _)) = mounts.locate(path) {
+                if seen.insert(mount.name.key()) {
+                    reached.push(mount.clone());
+                }
+            }
+        }
+    }
+    reached
 }
 
-/// The library as block ④ judges it ([`RootState::of`]): unset with no mount registered; else the first status of
-/// `stats` (the mounts an attachment names) that is not `Ok`, judged with `joined` — or none when all are.
+/// The mount states of a read computation over `mounts`: a mount whose folder `stats` holds (by path key) judged by
+/// [`RootState::of`] with the first-scan answer `joined`; every other registered mount by its last known state
+/// (`seen`) — usable when walked and `Ok`, else absent when last seen missing and unreadable otherwise, the rule
+/// `list` and `read` use (ADR-0400 decision 17).
 // ADR-0387
-pub(crate) fn library_state(
-    joined: &Result<(), String>,
+// ADR-0400 decision 19
+pub(crate) fn read_states(
     mounts: &Mounts,
-    stats: Vec<FolderStatus>,
-) -> RootState {
-    if mounts.is_empty() {
-        return RootState::Unset;
+    seen: impl Fn(&MountName) -> MountSeen,
+    stats: &std::collections::HashMap<PathKey, FolderStatus>,
+    joined: &Result<(), String>,
+) -> MountStates {
+    let mut states = MountStates::new(mounts, false);
+    for mount in mounts.iter() {
+        let state = match stats.get(&path_key(&mount.folder)) {
+            Some(stat) => RootState::of(joined, Some(stat)),
+            None => {
+                let seen = seen(&mount.name);
+                match (seen.usable(), seen.shown()) {
+                    (false, MountState::Missing { why }) => RootState::Absent(why),
+                    (false, MountState::Unreadable { why }) => RootState::Unreadable(why),
+                    _ => RootState::of(joined, None),
+                }
+            }
+        };
+        states.set(&mount.name, state);
     }
-    let first_bad = stats.into_iter().find(|status| *status != FolderStatus::Ok);
-    RootState::of(joined, first_bad.as_ref())
+    states
 }
 
 /// [`LibraryService::refuse_unusable_mount`] inside a change, under its write lock and before its disk IO: `path`'s
@@ -2362,6 +2629,15 @@ mod tests {
         mounts: &[(&str, &str)],
         ops: Arc<dyn FolderOps>,
     ) -> (Arc<LibraryService>, Arc<TestStore>) {
+        mounted_agents(mounts, ops, Vec::new())
+    }
+
+    /// [`mounted_with`] whose registry holds `profiles`.
+    fn mounted_agents(
+        mounts: &[(&str, &str)],
+        ops: Arc<dyn FolderOps>,
+        profiles: Vec<AgentProfile>,
+    ) -> (Arc<LibraryService>, Arc<TestStore>) {
         let store = TestStore::new(&["/lib", "/team", "/lib2"]);
         let mount = |(name, folder): &(&str, &str)| MountSetting {
             name: MountName::parse(name).unwrap(),
@@ -2370,7 +2646,7 @@ mod tests {
         let config =
             LibraryConfig::mounted(Path::new("/state"), mounts.iter().map(mount).collect());
         let values = LibraryValues {
-            registry: Arc::new(ProfileRegistry::new(Arc::new(Fixed(Vec::new())))),
+            registry: Arc::new(ProfileRegistry::new(Arc::new(Fixed(profiles)))),
             backends: Arc::new(AgentBackends),
             config,
             default_root: PathBuf::from("/default-library"),
@@ -2550,7 +2826,6 @@ mod tests {
             ),
             (ItemKind::Skill, "s", "does s", 1)
         );
-        assert!(root.builtins.is_empty());
         assert_eq!(store.scans(), [scan("/lib", None)], "only the first scan");
     }
 
@@ -2563,12 +2838,19 @@ mod tests {
         assert!(top.rows.is_empty(), "the virtual root holds no item");
         assert_eq!(
             top.folders,
-            [FolderRow {
-                path: "library".to_owned(),
-                name: "library".to_owned(),
-                mount_state: Some(MountState::Ok),
-            }],
-            "the mounts are its folders"
+            [
+                FolderRow {
+                    path: "engram".to_owned(),
+                    name: "engram".to_owned(),
+                    mount_state: Some(no_builtin_folder()),
+                },
+                FolderRow {
+                    path: "library".to_owned(),
+                    name: "library".to_owned(),
+                    mount_state: Some(MountState::Ok),
+                }
+            ],
+            "the mounts are its folders, the built-in among them"
         );
         let root = svc.list(Some(&lp("library"))).unwrap();
         assert!(root.rows.is_empty());
@@ -2681,7 +2963,7 @@ mod tests {
         store.mem("/team").file("rules/a.md", "theirs");
         let top = svc.list(None).unwrap();
         assert!(top.rows.is_empty());
-        assert_eq!(folder_paths(&top), ["library", "team"]);
+        assert_eq!(folder_paths(&top), ["engram", "library", "team"]);
         assert_eq!(
             store.scans(),
             [scan("/lib", None), scan("/team", None)],
@@ -2738,6 +3020,7 @@ mod tests {
         assert_eq!(
             states(&top),
             [
+                ("engram".to_owned(), Some(no_builtin_folder())),
                 ("library".to_owned(), Some(MountState::Ok)),
                 ("team".to_owned(), Some(missing.clone()))
             ]
@@ -2753,10 +3036,17 @@ mod tests {
             ["library/rules/a.md"]
         );
 
-        let unavailable = [UnavailableMount {
-            mount: team.clone(),
-            state: missing.clone(),
-        }];
+        let builtin = UnavailableMount {
+            mount: BUILTIN_MOUNT.to_owned(),
+            state: no_builtin_folder(),
+        };
+        let unavailable = [
+            builtin.clone(),
+            UnavailableMount {
+                mount: team.as_str().to_owned(),
+                state: missing.clone(),
+            },
+        ];
         let query = ListFilter {
             query: Some(".md".to_owned()),
             ..ListFilter::default()
@@ -2802,10 +3092,10 @@ mod tests {
         );
         assert_eq!(store.scans(), [scan("/lib", None), scan("/team", None)]);
         assert_eq!(
-            states(&svc.list(None).unwrap())[1],
+            states(&svc.list(None).unwrap())[2],
             ("team".to_owned(), Some(MountState::Ok))
         );
-        assert!(svc.folders().unwrap().unavailable.is_empty());
+        assert_eq!(svc.folders().unwrap().unavailable, [builtin]);
     }
 
     // ADR-0387 per mount · ADR-0400 decision 17: a read entrance stats the mounts its presets name; one that is not
@@ -3048,8 +3338,147 @@ mod tests {
         // The entrance's own stat finds it; the fresh stat before its walk again does not.
         *lock(&ops.from) = Some((team.clone(), ops.stats_of(&team) + 2, FolderStatus::Missing));
         let resolution = svc.resolve_preset(&lp("team/P.yaml"));
-        assert!(resolution.root_absent, "{:?}", resolution.problems);
+        assert_eq!(
+            resolution.absent_mounts,
+            absent("team", "missing"),
+            "{:?}",
+            resolution.problems
+        );
+        assert_eq!(
+            resolution.problems,
+            [library_unavailable("team", "missing")]
+        );
         assert!(resolution.blocked().is_none());
+    }
+
+    // ADR-0400 decision 19: a read entrance stats the mount a library preset's reference reaches, though that mount's
+    //   last walk was `Ok`: its fresh stat is the answer — one that cannot be read blocks with its ④ row, one that is
+    //   gone is a skipped ④ row — and the mount is stat'ed once.
+    #[test]
+    fn a_read_entrance_judges_a_walked_mount_its_presets_reach_by_its_fresh_stat() {
+        for (status, blocks) in [
+            (FolderStatus::Unreadable("down".to_owned()), true),
+            (FolderStatus::Missing, false),
+        ] {
+            let ops = Arc::new(CountOps::default());
+            let (svc, store) = mounted_with(
+                &[("library", "/lib"), ("team", "/team")],
+                Arc::clone(&ops) as Arc<dyn FolderOps>,
+            );
+            store.mem("/lib").file(
+                "P.yaml",
+                "kind: preset\nversion: 1\ninstructions:\n  - team/a.md\n",
+            );
+            store.mem("/team").file("a.md", "a");
+            svc.first_scan_join().unwrap();
+            let team = PathBuf::from("/team");
+            assert!(svc.with_read(|state| state.seen(&MountName::parse("team").unwrap()).usable()));
+            let before = ops.stats_of(&team);
+            lock(&ops.later).insert(team.clone(), status.clone());
+            let resolution = svc.resolve_preset(&lp("library/P.yaml"));
+            assert_eq!(
+                resolution.problems,
+                [library_unavailable("team", &status.why())],
+                "{status:?}"
+            );
+            assert_eq!(resolution.blocked().is_some(), blocks, "{status:?}");
+            assert_eq!(
+                ops.stats_of(&team) - before,
+                1,
+                "{status:?}: one stat of /team"
+            );
+        }
+    }
+
+    // ADR-0400 decision 19: a read entrance follows references by its want's tag rule, as resolution takes them — a
+    //   mount only another backend's entry reaches is not stat'ed for the agent, so its dead share costs that agent's
+    //   folder stats nothing; one preset on its own takes every tag and stats it.
+    #[test]
+    fn a_read_entrance_does_not_stat_a_mount_only_another_backends_entry_reaches() {
+        let codex = coded(
+            AgentCommand::Codex {
+                extra_args: Vec::new(),
+                output_format: AgentOutputFormat::StreamJson,
+            },
+            &["library/P.yaml"],
+        );
+        let ops = Arc::new(CountOps::default());
+        let team = PathBuf::from("/team");
+        lock(&ops.later).insert(team.clone(), FolderStatus::Unreadable("down".to_owned()));
+        let (svc, store) = mounted_agents(
+            &[("library", "/lib"), ("team", "/team")],
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+            vec![codex.clone()],
+        );
+        store.mem("/lib").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/a.md\n  - {path: team/a.md, backend: claude}\n",
+        );
+        store.mem("/lib").file("a.md", "a");
+        svc.first_scan_join().unwrap();
+        let before = ops.stats_of(&team);
+        let resolution = svc.resolve_agent(codex.id).expect("a codex agent");
+        assert_eq!(
+            ops.stats_of(&team),
+            before,
+            "the agent's entrance stats no team"
+        );
+        assert!(resolution.problems.is_empty(), "{:?}", resolution.problems);
+        assert_eq!(resolution.instructions[0].0, "library/a.md");
+
+        let alone = svc.resolve_preset(&lp("library/P.yaml"));
+        assert_eq!(
+            ops.stats_of(&team),
+            before + 1,
+            "a preset alone takes every tag"
+        );
+        assert_eq!(alone.problems, [library_unavailable("team", "down")]);
+    }
+
+    // ADR-0400 decision 19: a `preset.get` row in a mount that cannot be used is not looked up in a catalog the mount
+    //   cannot vouch for — one that cannot be read answers `library-unavailable` with the mount, an absent one
+    //   `not-found` — and no row in it is link-probed: nothing in its folder is touched.
+    #[test]
+    fn preset_get_rows_in_a_mount_that_cannot_be_used_are_not_looked_up_or_probed() {
+        for (status, want) in [
+            (
+                FolderStatus::Unreadable("down".to_owned()),
+                json!({ "code": LIBRARY_UNAVAILABLE, "args": { "mount": "team", "message": "down" } }),
+            ),
+            (FolderStatus::Missing, json!({ "code": NOT_FOUND })),
+        ] {
+            let ops = Arc::new(StatOps::default());
+            let (svc, store) = mounted_with(
+                &[("library", "/lib"), ("team", "/team")],
+                Arc::clone(&ops) as Arc<dyn FolderOps>,
+            );
+            store.mem("/lib").file(
+                "P.yaml",
+                "kind: preset\nversion: 1\ninstructions:\n  - team/a.md\n  - team/x.md\n",
+            );
+            store.mem("/team").file("a.md", "a");
+            svc.first_scan_join().unwrap();
+            lock(&ops.0).insert(PathBuf::from("/team"), status.clone());
+            lock(&store.touched).clear();
+            let view = svc
+                .preset_get(&AssetRef::Library(lp("library/P.yaml")))
+                .unwrap();
+            for row in &view.instructions {
+                let state = row
+                    .state
+                    .as_ref()
+                    .expect("a row in a mount that cannot be used");
+                assert_eq!(state.code, want["code"], "{status:?} {}", row.path);
+                if let Some(args) = want.get("args") {
+                    assert_eq!(&state.args, args, "{status:?} {}", row.path);
+                }
+            }
+            assert!(
+                store.touched_under("/team").is_empty(),
+                "{status:?}: {:?}",
+                store.touched_under("/team")
+            );
+        }
     }
 
     // ADR-0400 decision 6: a relink cannot know what a mount never walked refers to — the mount is one skipped row at
@@ -3594,13 +4023,207 @@ mod tests {
         assert_eq!(LIBRARY_READ_CAP, 16 * 1024 * 1024);
     }
 
-    // ADR-0400 decision 4: with no mount registered the virtual root still reads — never `library-unavailable`.
+    // ADR-0400 decision 20: the built-in mount's name is matched ASCII case-insensitively on every OS, and what follows
+    //   it — an id, the folder `settings` — exactly, by `list` (with and without a query) and `read` alike.
     #[test]
-    fn without_a_mount_a_refresh_and_a_list_answer_an_empty_virtual_root() {
+    fn the_builtin_mount_name_matches_in_any_case_and_what_follows_it_exactly() {
+        let dir = crate::builtin::tests::full();
+        let store = TestStore::new(&["/lib"]);
+        let io = BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::new(StatOps::default()),
+            Arc::new(ThreadSpawn),
+        );
+        let svc = service_io(Some("/lib"), &store, Vec::new(), Some(dir.path()), io);
+        let query = |text: &str| ListFilter {
+            query: Some(text.to_owned()),
+            ..ListFilter::default()
+        };
+        for top in ["engram", "Engram", "ENGRAM"] {
+            let listed = svc.list(Some(&lp(top))).unwrap();
+            assert_eq!(
+                paths(&listed),
+                ["engram/default", "engram/priming"],
+                "{top}"
+            );
+            assert_eq!(folder_paths(&listed), ["engram/settings"], "{top}");
+            let settings = svc.list(Some(&lp(&format!("{top}/settings")))).unwrap();
+            assert_eq!(paths(&settings), ["engram/settings/default"], "{top}");
+            let found = svc.list_with(Some(&lp(top)), &query("default")).unwrap();
+            assert_eq!(
+                paths(&found),
+                ["engram/default", "engram/settings/default"],
+                "{top}"
+            );
+            let below = svc
+                .list_with(Some(&lp(&format!("{top}/settings"))), &query("default"))
+                .unwrap();
+            assert_eq!(paths(&below), ["engram/settings/default"], "{top}");
+            let read = svc.read(&lp(&format!("{top}/settings/default"))).unwrap();
+            assert_eq!(read.row.path, "engram/settings/default", "{top}");
+        }
+        // A query answers strictly below the folder asked, as in a library mount: a built-in's own path holds nothing.
+        let own = svc
+            .list_with(Some(&lp("engram/default")), &query("default"))
+            .unwrap();
+        assert!(own.rows.is_empty(), "{:?}", own.rows);
+        for folder in ["engram/SETTINGS", "Engram/Settings"] {
+            assert!(
+                svc.list(Some(&lp(folder))).unwrap().rows.is_empty(),
+                "{folder}"
+            );
+            let found = svc.list_with(Some(&lp(folder)), &query("default")).unwrap();
+            assert!(found.rows.is_empty(), "{folder}");
+        }
+        for path in [
+            "engram/SETTINGS/default",
+            "engram/Default",
+            "ENGRAM/Priming",
+        ] {
+            let (class, reason) = refused(svc.read(&lp(path)).unwrap_err());
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::NotFound, NOT_FOUND),
+                "{path}"
+            );
+        }
+    }
+
+    // ADR-0400 decision 20: the built-in mount's row tells what its `read` does — with no built-in folder, or one none of
+    //   whose files can be read (here missing), its `list` and `folders` row is unreadable, a whole-tree read names it
+    //   in `unavailable` and `read engram/…` refuses naming it, while its items stay listed as stand-ins; with the
+    //   folder it is `Ok` and named nowhere.
+    #[test]
+    fn the_builtin_mount_row_is_unreadable_exactly_when_its_read_refuses() {
+        let full = crate::builtin::tests::full();
+        let empty = tempfile::tempdir().unwrap();
+        let missing = empty.path().join("builtin");
+        let unreadable = MountState::Unreadable {
+            why: crate::builtin::FOLDER_UNREADABLE.to_owned(),
+        };
+        for (dir, state) in [
+            (None, no_builtin_folder()),
+            (Some(missing.as_path()), unreadable),
+            (Some(full.path()), MountState::Ok),
+        ] {
+            let store = TestStore::new(&["/lib"]);
+            let io = BoundedIo::new(
+                IO_LIMIT,
+                LaunchWaits::LAUNCH,
+                LIST_CAP,
+                Arc::new(StatOps::default()),
+                Arc::new(ThreadSpawn),
+            );
+            let svc = service_io(Some("/lib"), &store, Vec::new(), dir, io);
+            let readable = state == MountState::Ok;
+            let unavailable = match readable {
+                false => vec![UnavailableMount {
+                    mount: BUILTIN_MOUNT.to_owned(),
+                    state: state.clone(),
+                }],
+                true => Vec::new(),
+            };
+            let top = svc.list(None).unwrap();
+            assert_eq!(top.folders[0].path, BUILTIN_MOUNT);
+            assert_eq!(top.folders[0].mount_state, Some(state.clone()));
+            let folders = svc.folders().unwrap();
+            assert_eq!(folders.folders[0].path, BUILTIN_MOUNT);
+            assert_eq!(folders.folders[0].mount_state, Some(state.clone()));
+            assert_eq!(folders.unavailable, unavailable);
+            let found = svc
+                .list_with(
+                    None,
+                    &ListFilter {
+                        query: Some("default".to_owned()),
+                        ..ListFilter::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(paths(&found), ["engram/default", "engram/settings/default"]);
+            assert_eq!(found.unavailable, unavailable);
+            let rows = svc.list(Some(&lp("engram"))).unwrap().rows;
+            assert_eq!(rows.len(), 2);
+            assert_eq!(
+                rows.iter().all(|row| row.state.is_some()),
+                !readable,
+                "stand-ins exactly when the built-in folder cannot be read: {rows:?}"
+            );
+            let read = svc.read(&lp("engram/priming"));
+            match readable {
+                false => {
+                    let (class, reason) = refused(read.unwrap_err());
+                    assert_eq!(
+                        (class, reason.code.as_str(), &reason.args["mount"]),
+                        (
+                            RefusalClass::Unavailable,
+                            LIBRARY_UNAVAILABLE,
+                            &json!(BUILTIN_MOUNT)
+                        )
+                    );
+                    assert!(
+                        reason.args["message"]
+                            .as_str()
+                            .unwrap()
+                            .ends_with(&state.why()),
+                        "{reason:?}"
+                    );
+                }
+                true => assert_eq!(read.unwrap().row.path, "engram/priming"),
+            }
+        }
+    }
+
+    // A built-in folder some of whose files read is readable: only the missing built-in stands in.
+    #[test]
+    fn a_builtin_folder_with_one_file_missing_is_readable() {
+        let dir = crate::builtin::tests::full();
+        std::fs::remove_file(dir.path().join(crate::builtin::file_of(BuiltinId::Priming))).unwrap();
+        let store = TestStore::new(&["/lib"]);
+        let io = BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::new(StatOps::default()),
+            Arc::new(ThreadSpawn),
+        );
+        let svc = service_io(Some("/lib"), &store, Vec::new(), Some(dir.path()), io);
+        let top = svc.list(None).unwrap();
+        assert_eq!(top.folders[0].mount_state, Some(MountState::Ok));
+        let read = svc.read(&lp("engram/priming")).unwrap();
+        assert!(read.row.state.is_some(), "the priming stands in");
+    }
+
+    // ADR-0400 decision 20: the built-in mount is never scanned — a refresh of it walks nothing and says so.
+    #[test]
+    fn a_refresh_of_the_builtin_mount_walks_nothing_and_says_it_is_not_scanned() {
+        let (svc, store) = library();
+        svc.first_scan_join().unwrap();
+        let walked = store.scans().len();
+        for folder in ["engram", "Engram/settings"] {
+            let report = svc.refresh(Some(&lp(folder)));
+            let [(None, why)] = report.errors.as_slice() else {
+                panic!("{report:?}")
+            };
+            assert!(
+                why.contains("built-in mount engram is not scanned"),
+                "{why}"
+            );
+            assert_eq!(report.changed, 0);
+        }
+        assert_eq!(store.scans().len(), walked, "nothing walked");
+    }
+
+    // ADR-0400 decision 4: with no mount registered the virtual root still reads — only the built-in mount, never
+    //   `library-unavailable`.
+    #[test]
+    fn without_a_mount_a_refresh_and_a_list_answer_only_the_builtin_mount() {
         let (svc, store) = service_on(&["/lib"], None);
         assert_eq!(svc.refresh(None), RefreshReport::default());
         let top = svc.list(None).unwrap();
-        assert!(top.rows.is_empty() && top.folders.is_empty(), "{top:?}");
+        assert!(top.rows.is_empty(), "{top:?}");
+        assert_eq!(folder_paths(&top), ["engram"]);
         assert!(svc.list(Some(&lp("library"))).unwrap().rows.is_empty());
         assert!(store.scans().is_empty());
     }
@@ -4054,14 +4677,26 @@ mod tests {
             .collect()
     }
 
-    fn library_unavailable(message: &str) -> BlockReason {
+    /// The built-in mount's state in a service with no built-in folder.
+    fn no_builtin_folder() -> MountState {
+        MountState::Unreadable {
+            why: crate::builtin::NO_FOLDER.to_owned(),
+        }
+    }
+
+    /// The ④ row of `mount`.
+    fn library_unavailable(mount: &str, message: &str) -> BlockReason {
         BlockReason::LibraryUnavailable {
             reason: Reason {
                 code: LIBRARY_UNAVAILABLE.to_owned(),
-                args: json!({ "message": message }),
+                args: json!({ "mount": mount, "message": message }),
                 line: None,
             },
         }
+    }
+
+    fn absent(mount: &str, why: &str) -> Vec<(String, String)> {
+        vec![(mount.to_owned(), why.to_owned())]
     }
 
     #[test]
@@ -4329,19 +4964,24 @@ claude: {changed: true}
             "no library preset — not asked"
         );
         let absent = svc.resolve_agent(library.id).unwrap();
+        // ADR-0400 decision 19: block ④ stands for the mount's items only — the built-in default still resolves (its
+        //   stand-in notice here: no built-in folder).
+        let notices: Vec<&str> = absent.notices.iter().map(|n| n.code.as_str()).collect();
+        assert_eq!(notices, [BUILTIN_UNAVAILABLE]);
         assert_eq!(
             absent,
             Resolution {
-                problems: vec![library_unavailable("missing")],
-                root_absent: true,
+                problems: vec![library_unavailable("library", "missing")],
+                notices: absent.notices.clone(),
+                absent_mounts: self::absent("library", "missing"),
                 ..Resolution::default()
             },
-            "block ④ alone — no folder, no folder row"
+            "one block ④ row for the mount — no folder, no folder row"
         );
         assert_eq!(
             absent.skipped(),
             absent.problems,
-            "an absent root is skipped (ADR-0387)"
+            "an absent mount is skipped (ADR-0387)"
         );
         assert_eq!(
             ops.stats_of(Path::new("/lib")),
@@ -4354,11 +4994,18 @@ claude: {changed: true}
             "block ④'s folders are not stat'ed"
         );
 
-        // No root at all: block ④ alone — the empty catalog's not-found row for the preset is not shown.
+        // No mount at all: the preset's first name is not registered — absent, block ④ alone, skipped.
         let (unset, _) = service_on(&["/lib"], None);
         let resolution = unset.resolve_preset(&lp("library/P.yaml"));
-        assert_eq!(resolution.problems, [library_unavailable(gate::NO_ROOT)]);
-        assert!(resolution.root_absent && resolution.blocked().is_none());
+        assert_eq!(
+            resolution.problems,
+            [library_unavailable("library", resolve::NOT_REGISTERED)]
+        );
+        assert_eq!(
+            resolution.absent_mounts,
+            self::absent("library", resolve::NOT_REGISTERED)
+        );
+        assert!(resolution.blocked().is_none());
 
         // ADR-0387: a mount there whose walk keeps failing is unreadable: its reason alone, blocked; the preset under a
         //   link gets no path-through-link row. Stat'ed by the first scan, by the reader, and twice by the reader's
@@ -4381,10 +5028,11 @@ claude: {changed: true}
         };
         let message = reason.args["message"].as_str().unwrap();
         assert!(
-            !message.is_empty() && message != gate::NO_ROOT && message != "missing",
+            !message.is_empty() && message != resolve::NOT_REGISTERED && message != "missing",
             "{message}"
         );
-        assert!(!resolution.root_absent && resolution.blocked().is_some());
+        assert_eq!(reason.args["mount"], "library");
+        assert!(resolution.absent_mounts.is_empty() && resolution.blocked().is_some());
         assert_eq!(ops.stats_of(Path::new("/lib")), 4);
 
         // A first scan that failed on a root that is not there: absent, skipped.
@@ -4403,7 +5051,10 @@ claude: {changed: true}
         let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
         *lock(&store.fail_next_scan) = true;
         let resolution = svc.resolve_preset(&lp("library/P.yaml"));
-        assert_eq!(resolution.problems, [library_unavailable("missing")]);
+        assert_eq!(
+            resolution.problems,
+            [library_unavailable("library", "missing")]
+        );
         assert_eq!(resolution.skipped(), resolution.problems);
         assert_eq!(
             ops.stats_of(Path::new("/lib")),
@@ -5389,12 +6040,18 @@ claude: {changed: true}
         let partial = svc.folders().unwrap();
         assert_eq!(
             partial.unavailable,
-            [UnavailableMount {
-                mount: MountName::first(),
-                state: MountState::Unreadable {
-                    why: io::Error::from(io::ErrorKind::PermissionDenied).to_string()
-                }
-            }],
+            [
+                UnavailableMount {
+                    mount: BUILTIN_MOUNT.to_owned(),
+                    state: no_builtin_folder(),
+                },
+                UnavailableMount {
+                    mount: MountName::first().as_str().to_owned(),
+                    state: MountState::Unreadable {
+                        why: io::Error::from(io::ErrorKind::PermissionDenied).to_string()
+                    }
+                },
+            ],
             "a whole-tree read answers partially"
         );
         lock(&disk.ops.0).insert(root.clone(), FolderStatus::Missing);
@@ -5674,6 +6331,8 @@ claude: {changed: true}
         assert_eq!(
             tree,
             [
+                ("engram", "engram", false),
+                ("engram/settings", "settings", false),
                 ("library", "library", false),
                 ("library/deep", "deep", false),
                 ("library/deep/er", "er", false),
@@ -5684,11 +6343,19 @@ claude: {changed: true}
         );
     }
 
-    // ADR-0400 decision 4: with no mount registered the tree is empty and a path names no mount — absent.
+    // ADR-0400 decision 4: with no mount registered the tree holds only the built-in mount and a path names no mount —
+    //   absent.
     #[test]
-    fn folders_and_read_with_no_mount_answer_an_empty_tree_and_not_found() {
+    fn folders_and_read_with_no_mount_answer_only_the_builtin_mount_and_not_found() {
         let (svc, _store) = service_on(&["/lib"], None);
-        assert!(svc.folders().unwrap().folders.is_empty());
+        let tree: Vec<String> = svc
+            .folders()
+            .unwrap()
+            .folders
+            .into_iter()
+            .map(|node| node.path)
+            .collect();
+        assert_eq!(tree, ["engram", "engram/settings"]);
         let (class, reason) = refused(svc.read(&lp("library/a.md")).unwrap_err());
         assert_eq!(
             (class, reason.code.as_str()),

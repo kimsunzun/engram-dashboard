@@ -9,7 +9,7 @@ import type { ProblemRow } from "./ProblemRow";
  */
 export type AgentPresetsView = { agent_id: string, name: string, 
 /**
- * The Default slot (`engram:/default`) is on.
+ * The Default slot (`engram/default`) is on.
  */
 default_preset: boolean, 
 /**
@@ -34,8 +34,8 @@ takes_presets: boolean,
  */
 folders: Array<AgentFolderRow>, conflicts: Array<ProblemRow>, 
 /**
- * Every other problem, inner presets' included. A launch leaves out the `missing` rows (and a
- * `library_unavailable` row for a library folder that is not set or not there) and refuses on the others.
+ * Every other problem, inner presets' included. A launch leaves out the `missing` rows (and the
+ * `library_unavailable` row of a library mount that is not registered or not there) and refuses on the others.
  */
 problems: Array<ProblemRow>, 
 /**

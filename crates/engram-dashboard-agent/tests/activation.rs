@@ -1552,7 +1552,6 @@ impl LibraryCommandHost for NoLibrary {
         _: Option<&str>,
         _: Option<&str>,
         _: &[LibraryKind],
-        _: bool,
     ) -> Result<LibraryListOk, PortRefusal> {
         Self::refused()
     }

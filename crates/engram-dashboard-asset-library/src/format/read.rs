@@ -752,7 +752,7 @@ mod tests {
     fn a_whole_preset_reads_every_list_with_lines_and_origins() {
         let folder = abs_folder();
         let text = format!(
-            "kind: preset\nversion: 3\ndescription: team rules\npresets:\n- base.yaml\n- engram:/default\n\
+            "kind: preset\nversion: 3\ndescription: team rules\npresets:\n- base.yaml\n- engram/default\n\
              instructions:\n- rules/a.md\n- path: rules/b.md\n  backend: codex\n  note: kept\nskills:\n- {{path: \
              skills/x, backend: Claude}}\nsettings:\n- settings/s.yaml\nfolders:\n- '{folder}'\nother: 1\n"
         );
@@ -763,7 +763,7 @@ mod tests {
             doc.presets,
             vec![
                 item("base.yaml", None, 5, 0),
-                item("engram:/default", None, 6, 1)
+                item("engram/default", None, 6, 1)
             ]
         );
         assert_eq!(
@@ -964,7 +964,7 @@ mod tests {
     fn entries_the_reader_cannot_model_are_line_problems_and_unmodeled() {
         let text = preset(
             "instructions:\n- 7\n- true\n- ~\n- [a.md]\n- {backend: codex}\n- {path: 3}\n- {path: a.md, backend: 1}\n\
-             - {path: a.md, backend: null}\n- /abs.md\n- a\\b.md\n- engram:/nope\n- ok.md\n",
+             - {path: a.md, backend: null}\n- /abs.md\n- a\\b.md\n- engram/nope\n- ok.md\n",
         );
         let doc = parse_preset(&text, &two()).unwrap();
         assert_eq!(doc.instructions, vec![item("ok.md", None, 15, 11)]);

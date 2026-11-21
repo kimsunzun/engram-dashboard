@@ -55,6 +55,9 @@ declare_commands! {
     //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`). The nine `library.*`, the eight
     //   `preset.*` and the four agent-preset commands come in this generation too, as do `agent.setWorkspace` and
     //   `agent.duplicate`, and `agent.new` gains `presets`, `root_generation` and the answer's `skipped` (ADR-0386).
+    //   Library mounts (ADR-0400 decision 20) land in it too: `library.list` lost its `builtins` argument and the
+    //   answer's `builtins` rows (the built-in mount `engram` is listed as a mount), and every preset view (`preset.get`
+    //   and the preset edits' answers) gains `notices`.
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -277,7 +280,7 @@ declare_commands! {
 
     /// One library item.
     struct ListRow {
-        /// Library path from the root (a skill: its folder; a built-in: `engram:/…`).
+        /// Library path from the root (a skill: its folder; a built-in: `engram/…`).
         path: String,
         /// `null` = a broken file that claims no preset or settings kind (its reason is in `state`), or the one row of
         /// a folder behind a link.
@@ -287,7 +290,8 @@ declare_commands! {
         /// Why it does not read — a broken file, a settings field refusal, a path through a link, a built-in whose
         /// files are missing (`builtin-unavailable`). `null` = it reads.
         state: Option<ReasonRow>,
-        /// Presets that reach it plus agents that attach it.
+        /// Presets that reach it plus agents that attach it. A built-in counts only the Default slot: the agents whose
+        /// Default slot is on for `engram/default`, 0 for every other built-in.
         references: u32,
         /// An instruction's excerpt, a skill's description, a preset's or settings file's `description`; else empty.
         description: String,
@@ -298,7 +302,7 @@ declare_commands! {
         path: String,
         name: String,
         /// A mount (a row of the library's top): `ok` | `missing` | `unreadable`, as last seen (no fresh check);
-        /// `null` = a folder inside a mount.
+        /// `null` = a folder inside a mount. Exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
         state: Option<String>,
         /// Why a mount's `state` is not `ok`.
         state_why: Option<String>,
@@ -311,13 +315,13 @@ declare_commands! {
         /// A skill folder (it holds a `SKILL.md`).
         skill: bool,
         /// A mount (a top folder): `ok` | `missing` | `unreadable`, as last seen (no fresh check); `null` = a folder
-        /// inside a mount.
+        /// inside a mount. Exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
         state: Option<String>,
         /// Why a mount's `state` is not `ok`.
         state_why: Option<String>,
     }
 
-    /// A mount a whole-library answer left out because it cannot be read.
+    /// A mount a whole-library answer left out because it cannot be read. Exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
     struct UnavailableMountRow {
         mount: String,
         /// `missing` | `unreadable`.
@@ -368,7 +372,7 @@ declare_commands! {
 
     /// One entry of a preset list as `preset.save` / `preset.check` take it.
     struct PresetEntryArg {
-        /// A library path or a built-in (`engram:/…`).
+        /// A library path or a built-in (`engram/…`).
         path: String,
         /// The backend word the entry is for (instructions and skills only); `null` = every backend.
         backend: Option<String>,
@@ -381,9 +385,11 @@ declare_commands! {
         backend: Option<String>,
         /// Its line in the file.
         line: u32,
-        /// Why the entry does not read — `not-found`, `path-through-link`, the item's broken reason or a settings
-        /// file's first refusal, `wrong-kind`, `builtin-in-library-preset`, `preset-cycle`; `null` = it reads. What an
-        /// inner preset reaches is in `problems`.
+        /// Why the entry does not read — `not-found` (also for an item in a mount that is not there),
+        /// `library-unavailable` `{mount, message}` (its mount cannot be read — the item was not looked up),
+        /// `path-through-link`, the item's broken reason or a settings file's first refusal, `wrong-kind`,
+        /// `builtin-in-library-preset`, `preset-cycle`; `null` = it reads. What an inner preset reaches is in
+        /// `problems`.
         state: Option<ReasonRow>,
     }
 
@@ -408,9 +414,11 @@ declare_commands! {
     }
 
     /// A problem of a preset's launch materials, with the absent keys as `null`. A launch leaves out the `missing`
-    /// rows (and a `library_unavailable` row for a library folder that is not set or not there) and refuses on the
-    /// others — the rows `agent.spawn` puts in `args.reasons`.
+    /// rows (and the `library_unavailable` row of a library mount that is not registered or not there) and refuses on
+    /// the others — the rows `agent.spawn` puts in `args.reasons`. A `library_unavailable` row stands for the items of
+    /// one mount: `args` = `{mount, message}`.
     // ADR-0387
+    // ADR-0400 decision 19
     struct ProblemRow {
         /// `missing` | `broken` | `conflict` | `library_unavailable`.
         kind: String,
@@ -441,7 +449,10 @@ declare_commands! {
         conflicts: Vec<ProblemRow>,
         /// Every other problem, inner presets' included.
         problems: Vec<ProblemRow>,
-        /// How many agents attach it (`engram:/default`: the agents whose default slot is on).
+        /// What resolving it on its own tells — a built-in it reaches (itself included) that could not be read and
+        /// stands in empty (`builtin-unavailable`).
+        notices: Vec<LaunchNoticeRow>,
+        /// How many agents attach it (`engram/default`: the agents whose default slot is on).
         agents: u32,
     }
 
@@ -560,7 +571,7 @@ declare_commands! {
     struct AgentPresetsView {
         agent_id: String,
         name: String,
-        /// The Default slot (`engram:/default`) is on.
+        /// The Default slot (`engram/default`) is on.
         default_preset: bool,
         /// The attached library presets as the agent stores them, in attach order.
         presets: Vec<String>,
@@ -577,8 +588,8 @@ declare_commands! {
         /// The folder entries its presets reach, in expansion order.
         folders: Vec<AgentFolderRow>,
         conflicts: Vec<ProblemRow>,
-        /// Every other problem, inner presets' included. A launch leaves out the `missing` rows (and a
-        /// `library_unavailable` row for a library folder that is not set or not there) and refuses on the others.
+        /// Every other problem, inner presets' included. A launch leaves out the `missing` rows (and the
+        /// `library_unavailable` row of a library mount that is not registered or not there) and refuses on the others.
         problems: Vec<ProblemRow>,
         /// What a launch would leave out on purpose. What it leaves out because it was not found is in `problems`.
         notices: Vec<LaunchNoticeRow>,
@@ -616,11 +627,12 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     /// Starts an agent: wakes an existing one (`target`) or creates one in `cwd` and starts it.
-    /// A preset item that is not found, or a library folder that is not set or not there, does not block: it is left
-    /// out and named in `notices`. A blocked launch starts nothing and is `CONFLICT` with `args.reasons`, one row per
-    /// reason by `kind`: `broken` {kind, item, via, code, args, line?} (a folder entry that cannot be read included)
-    /// · `conflict` {kind, items: [{item, via}], code, args, line?} · `library_unavailable` {kind, code, args, line?}
-    /// (a library folder that exists but cannot be read). Fix the listed items, then start again.
+    /// A preset item that is not found, or the items of a library mount that is not registered or not there, do not
+    /// block: they are left out and named in `notices` (one notice per mount, with `mount`). A blocked launch starts
+    /// nothing and is `CONFLICT` with `args.reasons`, one row per reason by `kind`: `broken` {kind, item, via, code,
+    /// args, line?} (a folder entry that cannot be read included) · `conflict` {kind, items: [{item, via}], code, args,
+    /// line?} · `library_unavailable` {kind, code, args: {mount, message}, line?} (a library mount that exists but
+    /// cannot be read). Fix the listed items, then start again.
     /// With `cwd`, a launch blocked before the agent is added answers `CONFLICT` with `args.reasons` and creates
     /// nothing; a start failure after the add is `INTERNAL` with `args.agent_id` (plus `args.reasons` when blocked) —
     /// start that agent by target, do not create another.
@@ -648,8 +660,8 @@ declare_commands! {
 
     /// Registers a new agent in the roster (does not launch it — it stays asleep). `presets` are judged as
     /// `agent.attachPreset` judges them: the agent is created with what can be attached, each one left out is in
-    /// `skipped` with why. CONFLICT `library-unavailable` (a library preset named while the library cannot be read) or
-    /// `root-generation-stale` creates nothing.
+    /// `skipped` with why. CONFLICT `library-unavailable` (a library preset named while the library cannot be read —
+    /// with `mount` when that preset's mount cannot be read) or `root-generation-stale` creates nothing.
     // ADR-0386
     #[effect(Write)]
     #[since(1)]
@@ -665,7 +677,7 @@ declare_commands! {
         /// (the `AgentBackendKind` doc of `protocol` · the daemon's `MISSING_BACKEND`), and leaving only this door
         /// would split that decision per entry.
         backend: AgentBackend,
-        /// Library presets to attach — the Default slot (`engram:/default`) is on for every new agent. Unspecified = the
+        /// Library presets to attach — the Default slot (`engram/default`) is on for every new agent. Unspecified = the
         /// Default slot only.
         presets: Option<Vec<String>>,
         /// With `presets` only — the value `library.status` answered; refuses if the root changed since (checked when
@@ -910,8 +922,8 @@ declare_commands! {
     } errors [CONFLICT];
 
     /// Every folder of the library, flat, by path; a skill folder is marked `skill`; each mount (a top folder) carries
-    /// its `state`. The folders of a mount that cannot be read are left out and the mount is named in `unavailable`.
-    /// CONFLICT `library-unavailable` when no scan of the library could be applied.
+    /// its `state`. The folders of a mount that cannot be read are left out and the mount is named in `unavailable`
+    /// (exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`). CONFLICT `library-unavailable` when no scan of the library could be applied.
     #[effect(Read)]
     #[since(9)]
     "library.folders" => args LibraryFoldersArgs {} -> ok LibraryFoldersOk {
@@ -923,7 +935,8 @@ declare_commands! {
     /// files re-read, `no_kind` (yaml files with no `kind` — not listed), `skipped_links` (links not entered) and
     /// `errors` (where reading failed — those items are kept as they were; a mount that could not be read, or one
     /// registered or moved during the scan and so not walked by it, is a row with its name as `path`; a row with no
-    /// `path` = the folder asked for could not be read). Use it after changing
+    /// `path` = the folder asked for could not be read — or is in the built-in mount `engram`, which is never scanned).
+    /// Use it after changing
     /// library files outside Engram. It never refuses except for a `folder` that is
     /// not a library path (INVALID_ARGUMENT `item-path-invalid`).
     #[effect(Read)]
@@ -941,32 +954,32 @@ declare_commands! {
     /// The items directly in `folder` (unspecified = the root) and its plain subfolders. `query` searches name and
     /// description (case-insensitive) in every item below `folder` and answers matching rows only (no
     /// `folders`). `kinds` keeps only those kinds (unspecified or empty = all; a broken file counts as the kind it
-    /// claims; a skill's `SKILL.md` matches only `SkillFile`). `builtins` also answers the built-in preset
-    /// `engram:/default` in `builtins`, under the same filters. A `folder` at or below a link answers one
+    /// claims; a skill's `SKILL.md` matches only `SkillFile`). A `folder` at or below a link answers one
     /// `path-through-link` row, which the filters do not apply to. Unspecified `folder` lists the mounts, each with
-    /// its `state`; a `query` without `folder` searches the mounts that can be read and names the others in
-    /// `unavailable`. CONFLICT `library-unavailable` (with `mount`) when `folder` is in a mount that cannot be read.
+    /// its `state` — the built-in read-only mount `engram` among them (`engram/default`, `engram/priming`, folder
+    /// `engram/settings`); a `query` without `folder` searches the mounts that can be read and names the others in
+    /// `unavailable` (exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`). CONFLICT `library-unavailable` (with `mount`) when `folder` is in a
+    /// mount that cannot be read.
     #[effect(Read)]
     #[since(9)]
     "library.list" => args LibraryListArgs {
         folder: Option<String>,
         query: Option<String>,
         kinds: Option<Vec<LibraryKind>>,
-        /// Unspecified = false.
-        builtins: Option<bool>,
     } -> ok LibraryListOk {
         folder: Option<String>,
         rows: Vec<ListRow>,
         folders: Vec<ListFolderRow>,
-        builtins: Vec<ListRow>,
         unavailable: Vec<UnavailableMountRow>,
     } errors [CONFLICT];
 
     /// One item's detail: its row, its file on disk (`absolute`), the presets that list it (`presets_direct`) or reach
     /// it through nested presets (`presets_indirect`), the agents that attach it (`agents_direct` — a preset only) or a
     /// preset reaching it (`agents_indirect`), an instruction's `excerpt` and a settings file's field names
-    /// (`settings_fields`). NOT_FOUND `not-found` = no such item (a mount's name is not an item); CONFLICT
-    /// `library-unavailable` (with `mount` when the item's mount cannot be read).
+    /// (`settings_fields`). A built-in (`engram/…`) counts only the Default slot: `agents_direct` = the agents whose
+    /// Default slot is on for `engram/default`, and the preset and indirect lists are empty (every other built-in: all
+    /// empty). NOT_FOUND `not-found` = no such item (a mount's name is not an item); CONFLICT `library-unavailable` (with
+    /// `mount` when the item's mount cannot be read).
     #[effect(Read)]
     #[since(9)]
     "library.read" => args LibraryReadArgs {
@@ -984,8 +997,9 @@ declare_commands! {
 
     /// Creates folder `name` in `parent` (unspecified = the root); answers its path. CONFLICT `name-exists` (nothing
     /// replaced) · `library-unavailable` (with `mount` when the parent's mount cannot be read — nothing is written into
-    /// it) · `root-generation-stale` · `library-write-failed` (a retry after it may answer
-    /// `name-exists` — the partial file or folder stays); NOT_FOUND `not-found` = the parent is missing.
+    /// it) · `mount-read-only` (`{mount, path}` — the parent is in the built-in mount `engram`) ·
+    /// `root-generation-stale` · `library-write-failed` (a retry after it may answer `name-exists` — the partial file
+    /// or folder stays); NOT_FOUND `not-found` = the parent is missing.
     #[effect(Write)]
     #[since(9)]
     "library.newFolder" => args LibraryNewFolderArgs {
@@ -1016,7 +1030,8 @@ declare_commands! {
     /// the pairs `fixed`, the files `written`, the files `skipped` with why, and `stopped` when an IO failure stopped
     /// it after a write (run the same relink again once it is cleared). NOT_FOUND `not-found` = `to` is not in the
     /// library; INVALID_ARGUMENT `relink-kind-mismatch` = `to` is of another kind than its references need; CONFLICT
-    /// `library-unavailable` (with `mount` when `to`'s mount cannot be read) · `root-generation-stale`. A file in a
+    /// `library-unavailable` (with `mount` when `to`'s mount cannot be read) · `mount-read-only` (`{mount, path}` —
+    /// `from` or `to` is in the built-in mount `engram`) · `root-generation-stale`. A file in a
     /// mount that cannot be read is not rewritten: it is in `skipped` with `library-unavailable` and its `mount`. A
     /// `skipped` row whose `path` is a mount's name means that mount could not be read at all: references inside it
     /// may remain (`fixed` covers the mounts that were read) — run the same relink again once it is back.
@@ -1041,10 +1056,11 @@ declare_commands! {
     // A preset edit rewrites the whole file (hand-written comments and layout are not kept) and answers the preset as
     //   committed. A path that is not a library path is INVALID_ARGUMENT `item-path-invalid`; a file that is not a
     //   preset, INVALID_ARGUMENT `wrong-kind` or the reader's code; a preset in a mount that cannot be read, CONFLICT
-    //   `library-unavailable` with `mount` (ADR-0400 decision 6).
+    //   `library-unavailable` with `mount` (ADR-0400 decision 6); a check or edit of a path in the built-in mount
+    //   `engram`, CONFLICT `mount-read-only` with `mount` and `path` (ADR-0400 decision 20).
 
     /// A preset's entries with their state, its folder entries, the conflicts and problems a launch of it alone would
-    /// meet, its edition `rev` and how many agents attach it. `path` = a library path or `engram:/default`. NOT_FOUND
+    /// meet, its edition `rev` and how many agents attach it. `path` = a library path or `engram/default`. NOT_FOUND
     /// `not-found`; INVALID_ARGUMENT `wrong-kind` (not a preset); CONFLICT `library-unavailable` (with `mount` when the
     /// preset's mount cannot be read).
     #[effect(Read)]
@@ -1064,13 +1080,15 @@ declare_commands! {
         folders: Vec<FolderRow>,
         conflicts: Vec<ProblemRow>,
         problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
         agents: u32,
     } errors [NOT_FOUND, CONFLICT];
 
     /// Judges a draft of the preset's lists as `preset.save` would, without writing: the folders it would list, the
     /// conflicts and problems a launch of it would meet, and `save_refuses` = a save of this draft would be refused
     /// (each mismatch is a `broken` problem with `args` `{path, list}`). `folders` omitted = the file's folders stay.
-    /// CONFLICT `library-unavailable`.
+    /// CONFLICT `library-unavailable` (with `mount` when the preset's mount cannot be read) · `mount-read-only` (a
+    /// path in the built-in mount `engram`).
     #[effect(Read)]
     #[since(9)]
     "preset.check" => args PresetCheckArgs {
@@ -1091,7 +1109,8 @@ declare_commands! {
     /// after the `after` entry (else at the end). Applies what it can: each item it cannot add is in `skipped` with why
     /// (`not-found`, `wrong-kind`, `already-present`, `preset-cycle`, a backend word it does not take …). A bad folder
     /// refuses the whole call, INVALID_ARGUMENT `preset-folders-refused` naming each. NOT_FOUND `not-found` = no such
-    /// preset file; CONFLICT `library-unavailable` · `root-generation-stale` · `library-write-failed`.
+    /// preset file; CONFLICT `library-unavailable` · `mount-read-only` · `root-generation-stale` ·
+    /// `library-write-failed`.
     #[effect(Write)]
     #[since(9)]
     "preset.add" => args PresetAddArgs {
@@ -1112,7 +1131,7 @@ declare_commands! {
 
     /// Removes `items` (every entry of each, in every list) or `folders` — one of the two; removing what is not there
     /// changes nothing. Answers the preset after the change. NOT_FOUND `not-found` = no such preset file; CONFLICT
-    /// `library-unavailable` · `root-generation-stale` · `library-write-failed`.
+    /// `library-unavailable` · `mount-read-only` · `root-generation-stale` · `library-write-failed`.
     #[effect(Write)]
     #[since(9)]
     "preset.remove" => args PresetRemoveArgs {
@@ -1133,13 +1152,14 @@ declare_commands! {
         folders: Vec<FolderRow>,
         conflicts: Vec<ProblemRow>,
         problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
         agents: u32,
     } errors [NOT_FOUND, CONFLICT];
 
     /// Puts one `section` in `order` — every entry `preset.get` shows in it, each once (a duplicate as often as it is
     /// listed), else INVALID_ARGUMENT `reorder-order-mismatch` with the expected order in `args`. `base_rev` = the `rev` you
     /// read; CONFLICT `rev-mismatch` = the file changed since (read it again). NOT_FOUND `not-found`; CONFLICT
-    /// `library-unavailable` · `root-generation-stale` · `library-write-failed`.
+    /// `library-unavailable` · `mount-read-only` · `root-generation-stale` · `library-write-failed`.
     #[effect(Write)]
     #[since(9)]
     "preset.reorder" => args PresetReorderArgs {
@@ -1161,13 +1181,14 @@ declare_commands! {
         folders: Vec<FolderRow>,
         conflicts: Vec<ProblemRow>,
         problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
         agents: u32,
     } errors [NOT_FOUND, CONFLICT];
 
     /// Sets the backend of `items` in instructions and skills (`backend` unspecified = every backend). Applies what it
     /// can: an item the preset does not list, or lists only in presets or settings, is in `skipped`. An unknown backend
     /// word refuses the whole call, INVALID_ARGUMENT `backend-tag-unknown`. NOT_FOUND `not-found`; CONFLICT
-    /// `library-unavailable` · `root-generation-stale` · `library-write-failed`.
+    /// `library-unavailable` · `mount-read-only` · `root-generation-stale` · `library-write-failed`.
     #[effect(Write)]
     #[since(9)]
     "preset.setBackend" => args PresetSetBackendArgs {
@@ -1186,7 +1207,8 @@ declare_commands! {
     /// mismatch (not a path, an unknown backend word, one item twice in a list, an item of another kind, a cycle, a
     /// relative folder …) refuses the whole save, INVALID_ARGUMENT `preset-save-refused` listing each. A missing item
     /// is allowed. `base_rev` (optional) = the `rev` you read; CONFLICT `rev-mismatch` = the file changed since.
-    /// NOT_FOUND `not-found`; CONFLICT `library-unavailable` · `root-generation-stale` · `library-write-failed`.
+    /// NOT_FOUND `not-found`; CONFLICT `library-unavailable` · `mount-read-only` · `root-generation-stale` ·
+    /// `library-write-failed`.
     #[effect(Write)]
     #[since(9)]
     "preset.save" => args PresetSaveArgs {
@@ -1211,6 +1233,7 @@ declare_commands! {
         folders: Vec<FolderRow>,
         conflicts: Vec<ProblemRow>,
         problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
         agents: u32,
     } errors [NOT_FOUND, CONFLICT];
 
@@ -1243,8 +1266,8 @@ declare_commands! {
 
     /// An agent's presets: the Default slot, the attached presets, its working folder and why it is locked, its backend
     /// and mode, `base_rev`, and the folders, conflicts, problems and notices a launch would meet — it leaves out the
-    /// `missing` problem rows (and a `library_unavailable` row for a library folder that is not set or not there) and
-    /// refuses on the others.
+    /// `missing` problem rows (and the `library_unavailable` row of a library mount that is not registered or not
+    /// there) and refuses on the others.
     #[effect(Read)]
     #[since(9)]
     "agent.presets" => args AgentPresetsArgs {
@@ -1268,10 +1291,11 @@ declare_commands! {
         notices: Vec<LaunchNoticeRow>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Attaches `presets` (library presets; `engram:/default` turns the Default slot on) after the `after` preset in
+    /// Attaches `presets` (library presets; `engram/default` turns the Default slot on) after the `after` preset in
     /// call order (else at the end). Applies what it can: each one it cannot attach is in `skipped` with why
     /// (`not-found`, `wrong-kind`, `already-present`, `item-path-invalid`). CONFLICT `library-unavailable` (a library
-    /// preset named while the library cannot be read) · `root-generation-stale` applies nothing.
+    /// preset named while the library cannot be read — with `mount` when that preset's mount cannot be read) ·
+    /// `root-generation-stale` applies nothing.
     #[effect(Write)]
     #[since(9)]
     "agent.attachPreset" => args AgentAttachPresetArgs {
@@ -1286,7 +1310,7 @@ declare_commands! {
         view: AgentPresetsView,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Detaches `presets` (every attached entry of each; `engram:/default` turns the Default slot off — CONFLICT
+    /// Detaches `presets` (every attached entry of each; `engram/default` turns the Default slot off — CONFLICT
     /// `default-preset-detach` unless `yes`). Detaching what is not attached changes nothing; an entry that is not a
     /// library path is matched by its exact text, and one that matches nothing refuses, INVALID_ARGUMENT
     /// `item-path-invalid`. CONFLICT `root-generation-stale`.
@@ -2918,7 +2942,7 @@ const WORKING_FOLDER_CHANGING_CAUSE: &str =
 /// used here.
 fn launch_blocked_reason(blocked: &LaunchBlocked) -> String {
     format!(
-        "its launch is blocked — {} reason(s) in args.reasons (a broken or unreadable item, a conflict, or a library folder that cannot be read)",
+        "its launch is blocked — {} reason(s) in args.reasons (a broken or unreadable item, a conflict, or a library mount that cannot be read)",
         blocked.reasons.len()
     )
 }

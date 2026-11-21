@@ -117,7 +117,7 @@ pub struct LibraryReadView {
 /// What `preset.add` / `preset.remove` name — items or folders, never both in one call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresetEntries {
-    /// Reference spellings (a library path or `engram:/…`), as typed.
+    /// Reference spellings (a library path or `engram/…`), as typed.
     Items(Vec<String>),
     /// Folder spellings, as typed.
     Folders(Vec<String>),
@@ -192,7 +192,6 @@ pub trait LibraryCommandHost: Send + Sync {
         folder: Option<&str>,
         query: Option<&str>,
         kinds: &[LibraryKind],
-        builtins: bool,
     ) -> Result<LibraryListOk, PortRefusal>;
     fn read(&self, path: &str) -> Result<LibraryReadView, PortRefusal>;
     /// Answers the new folder's path.
@@ -216,7 +215,7 @@ pub trait LibraryCommandHost: Send + Sync {
         to: &str,
         root_generation: Option<u64>,
     ) -> Result<LibraryRelinkOk, PortRefusal>;
-    /// `path` = a library path or a built-in (`engram:/…`).
+    /// `path` = a library path or a built-in (`engram/…`).
     fn preset_get(&self, path: &str) -> Result<PresetView, PortRefusal>;
     fn preset_check(
         &self,
@@ -351,6 +350,7 @@ macro_rules! from_preset_view {
                     folders,
                     conflicts,
                     problems,
+                    notices,
                     agents,
                 } = view;
                 Self {
@@ -364,6 +364,7 @@ macro_rules! from_preset_view {
                     folders,
                     conflicts,
                     problems,
+                    notices,
                     agents,
                 }
             }
@@ -716,12 +717,7 @@ fn verb_list(
         ("query", query, Blank::OrOmit),
     ])?;
     library
-        .list(
-            folder,
-            query,
-            args.kinds.as_deref().unwrap_or_default(),
-            args.builtins.unwrap_or(false),
-        )
+        .list(folder, query, args.kinds.as_deref().unwrap_or_default())
         .map_err(|refusal| refusal_error("library.list", refusal))
 }
 
@@ -1247,13 +1243,10 @@ pub(crate) mod fake {
             folder: Option<&str>,
             query: Option<&str>,
             kinds: &[LibraryKind],
-            builtins: bool,
         ) -> Result<LibraryListOk, PortRefusal> {
             self.answer(
                 "list",
-                serde_json::json!({
-                    "folder": folder, "query": query, "kinds": kinds, "builtins": builtins,
-                }),
+                serde_json::json!({ "folder": folder, "query": query, "kinds": kinds }),
             )
         }
         fn read(&self, path: &str) -> Result<LibraryReadView, PortRefusal> {
@@ -1699,16 +1692,16 @@ mod tests {
             (
                 "library.list",
                 json!({}),
-                json!({ "folder": null, "rows": [], "folders": [], "builtins": [], "unavailable": [] }),
+                json!({ "folder": null, "rows": [], "folders": [], "unavailable": [] }),
                 "list",
-                json!({ "folder": null, "query": null, "kinds": [], "builtins": false }),
+                json!({ "folder": null, "query": null, "kinds": [] }),
             ),
             (
                 "library.list",
-                json!({ "folder": "a", "query": "x", "kinds": ["skillfile", "Preset"], "builtins": true }),
-                json!({ "folder": "a", "rows": [], "folders": [], "builtins": [], "unavailable": [] }),
+                json!({ "folder": "a", "query": "x", "kinds": ["skillfile", "Preset"] }),
+                json!({ "folder": "a", "rows": [], "folders": [], "unavailable": [] }),
                 "list",
-                json!({ "folder": "a", "query": "x", "kinds": ["SkillFile", "Preset"], "builtins": true }),
+                json!({ "folder": "a", "query": "x", "kinds": ["SkillFile", "Preset"] }),
             ),
             (
                 "library.newFolder",
@@ -1763,7 +1756,6 @@ mod tests {
                 { "path": "a/b", "name": "b", "state": null, "state_why": null },
                 { "path": "team", "name": "team", "state": "missing", "state_why": "missing" },
             ],
-            "builtins": [list_row("engram:/default")],
             "unavailable": [{ "mount": "team", "state": "missing", "why": "missing" }],
         });
         let library = FakeLibrary::answering(Ok(answer.clone()));
@@ -2133,6 +2125,12 @@ mod tests {
                 "kind": "missing", "item": "a.md", "via": ["team/p.yaml"], "items": null,
                 "code": "not-found", "args": { "path": "a.md" }, "line": 5,
             }],
+            "notices": [{
+                "code": "builtin-unavailable",
+                "args": { "path": "engram/default", "why": "w" },
+                "line": null,
+                "text": "t",
+            }],
             "agents": 2,
         })
     }
@@ -2161,10 +2159,10 @@ mod tests {
         let cases: Vec<(&str, Value, Value, &str, Value)> = vec![
             (
                 "preset.get",
-                json!({ "path": "engram:/default" }),
+                json!({ "path": "engram/default" }),
                 preset_view(),
                 "preset_get",
-                json!({ "path": "engram:/default" }),
+                json!({ "path": "engram/default" }),
             ),
             (
                 "preset.check",
@@ -2789,11 +2787,11 @@ mod tests {
             ),
             (
                 "agent.detachPreset",
-                json!({ "target": "bob", "presets": ["engram:/default"] }),
+                json!({ "target": "bob", "presets": ["engram/default"] }),
                 port_view(bob),
                 "detach_preset",
                 json!({
-                    "agent": bob, "presets": ["engram:/default"], "yes": false, "root_generation": null,
+                    "agent": bob, "presets": ["engram/default"], "yes": false, "root_generation": null,
                 }),
             ),
             (
@@ -2939,7 +2937,7 @@ mod tests {
         let cases = [
             (
                 "agent.detachPreset",
-                json!({ "target": "bob", "presets": ["engram:/default"] }),
+                json!({ "target": "bob", "presets": ["engram/default"] }),
                 refused(
                     PortClass::Conflict,
                     "default-preset-detach",

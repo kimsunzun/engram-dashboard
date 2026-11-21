@@ -1657,7 +1657,7 @@ mod tests {
         lib.store.file("x.md", "x");
         lib.store.file(
             "p.yaml",
-            "kind: preset\nversion: 1\ninstructions:\n  - library/x.md\n  - engram:/priming\n",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/x.md\n  - engram/priming\n",
         );
         lib.scan(None);
         let refs = |lib: &Lib, rel: &str| {

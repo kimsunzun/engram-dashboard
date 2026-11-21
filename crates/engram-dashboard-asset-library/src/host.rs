@@ -47,8 +47,8 @@ use crate::catalog::ItemKind;
 use crate::config::ConfigHealth;
 use crate::create::NewFileKind;
 use crate::edit::{
-    lib_path, parse_ref, AddEntries, CheckAnswer, FolderPreview, NewItem, PartialEdit, PresetDraft,
-    PresetFolder, PresetRow, RemoveEntries, Skipped,
+    lib_path, parse_ref, read_path, AddEntries, CheckAnswer, FolderPreview, NewItem, PartialEdit,
+    PresetDraft, PresetFolder, PresetRow, RemoveEntries, Skipped,
 };
 use crate::folder::{slash_path, FolderStatus};
 use crate::format::ListName;
@@ -76,7 +76,7 @@ impl LibraryCommandHost for LibraryService {
     }
 
     fn refresh(&self, folder: Option<&str>) -> Result<LibraryRefreshOk, PortRefusal> {
-        let folder = folder.map(lib_path).transpose().map_err(port)?;
+        let folder = folder.map(read_path).transpose().map_err(port)?;
         Ok(refresh_ok(LibraryService::refresh(self, folder.as_ref())))
     }
 
@@ -85,13 +85,11 @@ impl LibraryCommandHost for LibraryService {
         folder: Option<&str>,
         query: Option<&str>,
         kinds: &[LibraryKind],
-        builtins: bool,
     ) -> Result<LibraryListOk, PortRefusal> {
-        let folder = folder.map(lib_path).transpose().map_err(port)?;
+        let folder = folder.map(read_path).transpose().map_err(port)?;
         let filter = ListFilter {
             query: query.map(str::to_owned),
             kinds: kinds.iter().map(item_kind).collect(),
-            builtins,
         };
         self.list_with(folder.as_ref(), &filter)
             .map(list_ok)
@@ -102,7 +100,7 @@ impl LibraryCommandHost for LibraryService {
     }
 
     fn read(&self, path: &str) -> Result<LibraryReadView, PortRefusal> {
-        let path = lib_path(path).map_err(port)?;
+        let path = read_path(path).map_err(port)?;
         LibraryService::read(self, &path)
             .map(read_view)
             .map_err(port)
@@ -352,7 +350,7 @@ impl LibraryCommandHost for LibraryService {
 
 /// The `agent.new {presets}` judgement of an assembly that runs no library service (the daemon's `NoLibrary`): the
 /// attach rule with no catalog — a library preset refuses the whole call `Unavailable` · `library-unavailable`
-/// (`message` = `why`); `engram:/default` and the other spellings are judged as the service judges them.
+/// (`message` = `why`); `engram/default` and the other spellings are judged as the service judges them.
 // ADR-0386
 pub fn judge_new_presets_with_no_library(
     profile: &AgentProfile,
@@ -457,7 +455,7 @@ fn mount_state_words(state: Option<MountState>) -> (Option<String>, Option<Strin
 fn unavailable_row(left: UnavailableMount) -> UnavailableMountRow {
     let (state, why) = mount_state_words(Some(left.state));
     UnavailableMountRow {
-        mount: left.mount.as_str().to_owned(),
+        mount: left.mount,
         state: state.unwrap_or_default(),
         why: why.unwrap_or_default(),
     }
@@ -509,7 +507,6 @@ fn list_ok(answer: ListAnswer) -> LibraryListOk {
                 }
             })
             .collect(),
-        builtins: answer.builtins.into_iter().map(list_row).collect(),
         unavailable: answer
             .unavailable
             .into_iter()
@@ -564,6 +561,7 @@ fn preset_view(view: crate::edit::PresetView) -> declared::PresetView {
         folders: view.folders.into_iter().map(folder_row).collect(),
         conflicts: view.conflicts.into_iter().map(problem_row).collect(),
         problems: view.problems.into_iter().map(problem_row).collect(),
+        notices: view.notices.into_iter().map(launch_notice_row).collect(),
         agents: count(view.agents),
     }
 }
@@ -931,7 +929,7 @@ mod tests {
             World::build(profiles, root, None)
         }
 
-        /// A world whose built-in folder holds `engram:/default` as `default_preset` (the other built-ins stand in).
+        /// A world whose built-in folder holds `engram/default` as `default_preset` (the other built-ins stand in).
         fn with_default_preset(profiles: Vec<AgentProfile>, default_preset: &str) -> World {
             World::build(profiles, true, Some(default_preset))
         }
@@ -1013,7 +1011,7 @@ mod tests {
             kinds: &[LibraryKind],
         ) -> LibraryListOk {
             self.port()
-                .list(folder, query, kinds, false)
+                .list(folder, query, kinds)
                 .unwrap_or_else(|e| panic!("list: {e:?}"))
         }
     }
@@ -1111,17 +1109,29 @@ mod tests {
     }
 
     /// Every path argument that is not a library path refuses `InvalidArgument` · `item-path-invalid` with nothing
-    /// done — a built-in spelling included (it is not a library path).
+    /// done — the old built-in spelling included, its `why` naming the new one (ADR-0400 decision 20).
     #[test]
     fn every_path_argument_that_is_not_a_library_path_is_refused_item_path_invalid() {
         let w = World::new(Vec::new());
         let port = w.port();
+        let (_, old) = refused(port.read("engram:/default"));
+        assert!(
+            old.args["why"]
+                .as_str()
+                .unwrap()
+                .contains("\"engram/default\""),
+            "{old:?}"
+        );
         let cases: Vec<(&str, (PortClass, Reason))> = vec![
             ("read", refused(port.read("../x.md"))),
-            ("read built-in", refused(port.read("engram:/default"))),
+            ("read old built-in", (PortClass::InvalidArgument, old)),
+            (
+                "list old built-in",
+                refused(port.list(Some("engram:/default"), None, &[])),
+            ),
             (
                 "list",
-                refused(port.list(Some("library/a/../b"), None, &[], false)),
+                refused(port.list(Some("library/a/../b"), None, &[])),
             ),
             ("refresh", refused(port.refresh(Some("/abs")))),
             (
@@ -1160,7 +1170,7 @@ mod tests {
         let w = World::make(Vec::new(), true);
         // The mount's folder is gone before the first scan: it is not walked.
         fs::remove_dir_all(w.base.join("lib")).unwrap();
-        let (class, reason) = refused(w.port().list(Some("library"), None, &[], false));
+        let (class, reason) = refused(w.port().list(Some("library"), None, &[]));
         assert_eq!(
             (class, reason.code.as_str(), &reason.args["mount"]),
             (
@@ -1169,32 +1179,49 @@ mod tests {
                 &json!("library")
             )
         );
-        let missing = || UnavailableMountRow {
-            mount: "library".to_owned(),
-            state: "missing".to_owned(),
-            why: "missing".to_owned(),
+        let missing = || {
+            vec![
+                // No built-in folder in this world: the built-in mount is named too.
+                UnavailableMountRow {
+                    mount: "engram".to_owned(),
+                    state: "unreadable".to_owned(),
+                    why: crate::builtin::NO_FOLDER.to_owned(),
+                },
+                UnavailableMountRow {
+                    mount: "library".to_owned(),
+                    state: "missing".to_owned(),
+                    why: "missing".to_owned(),
+                },
+            ]
         };
         let folders = w.port().folders().expect("a partial answer");
         assert_eq!(
-            folders.folders,
-            [LibraryFolderRow {
+            folders.folders.last(),
+            Some(&LibraryFolderRow {
                 path: "library".to_owned(),
                 name: "library".to_owned(),
                 skill: false,
                 state: Some("missing".to_owned()),
                 state_why: Some("missing".to_owned()),
-            }]
+            })
         );
-        assert_eq!(folders.unavailable, [missing()]);
+        let paths: Vec<&str> = folders
+            .folders
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect();
+        assert_eq!(paths, ["engram", "engram/settings", "library"]);
+        assert_eq!(folders.unavailable, missing());
         let found = w
             .port()
-            .list(None, Some("a"), &[], false)
+            .list(None, Some("a.md"), &[])
             .expect("a partial answer");
         assert!(found.rows.is_empty());
-        assert_eq!(found.unavailable, [missing()]);
-        let top = w.port().list(None, None, &[], false).expect("the mounts");
+        assert_eq!(found.unavailable, missing());
+        let top = w.port().list(None, None, &[]).expect("the mounts");
+        assert_eq!(top.folders[1].path, "library");
         assert_eq!(
-            (top.folders[0].state.as_deref(), top.unavailable.len()),
+            (top.folders[1].state.as_deref(), top.unavailable.len()),
             (Some("missing"), 0),
             "the virtual root carries the state on the mount's row"
         );
@@ -1367,44 +1394,69 @@ mod tests {
         );
     }
 
-    /// `builtins` answers the built-in preset row — its spelling, its id as the name, a stand-in's reason, and the
-    /// agents whose Default slot is on — under the same query and kinds; without it, none.
+    /// ADR-0400 decision 20: the built-in is the read-only mount `engram`, listed like any mount — its row at the
+    /// virtual root, its items (spelling, last name, kind, a stand-in's reason, the agents whose Default slot is on)
+    /// and its virtual folder `settings`, under the same query and kinds; a search of the whole tree finds them too.
     #[test]
-    fn builtins_answer_the_default_preset_row_under_the_same_filters() {
+    fn the_builtin_mount_lists_its_items_and_folder_like_any_mount_under_the_same_filters() {
         let w = World::new(vec![
             agent(&[], true),
             agent(&[], true),
             agent(&["library/p.yaml"], false),
         ]);
-        let none = w.list(Some("library"), None, &[]);
-        assert!(none.builtins.is_empty());
+        w.put("default-notes.md", "x");
+        let top = w.list(None, None, &[]);
+        let tops: Vec<(&str, Option<&str>)> = top
+            .folders
+            .iter()
+            .map(|row| (row.path.as_str(), row.state.as_deref()))
+            .collect();
+        // ADR-0400 decision 20: with no built-in folder the mount row says so; its items stand in.
+        assert_eq!(
+            tops,
+            [("engram", Some("unreadable")), ("library", Some("ok"))]
+        );
 
-        let with = w
-            .port()
-            .list(Some("library"), None, &[], true)
-            .expect("list");
-        assert_eq!(with.builtins.len(), 1, "{with:?}");
-        let row = &with.builtins[0];
-        assert_eq!(row.path, "engram:/default");
-        assert_eq!(row.name, "default");
-        assert_eq!(row.kind, Some(LibraryKind::Preset));
-        assert_eq!(row.references, 2);
+        let engram = w.list(Some("engram"), None, &[]);
+        assert_eq!(paths(&engram.rows), ["engram/default", "engram/priming"]);
+        let row = &engram.rows[0];
+        assert_eq!(
+            (row.name.as_str(), row.kind.clone(), row.references),
+            ("default", Some(LibraryKind::Preset), 2)
+        );
         let state = row.state.as_ref().expect("no built-in folder: a stand-in");
         assert_eq!(
             state.code,
             engram_dashboard_agent::launch::BUILTIN_UNAVAILABLE
         );
+        assert_eq!(engram.rows[1].kind, Some(LibraryKind::Instruction));
+        let folders: Vec<(&str, Option<&str>)> = engram
+            .folders
+            .iter()
+            .map(|row| (row.path.as_str(), row.state.as_deref()))
+            .collect();
+        assert_eq!(folders, [("engram/settings", None)]);
+        let settings = w.list(Some("engram/settings"), None, &[]);
+        assert_eq!(paths(&settings.rows), ["engram/settings/default"]);
+        assert_eq!(settings.rows[0].kind, Some(LibraryKind::Settings));
+        assert!(settings.folders.is_empty());
 
-        let kept = w
-            .port()
-            .list(Some("library"), Some("DEF"), &[LibraryKind::Preset], true);
-        assert_eq!(kept.expect("list").builtins.len(), 1);
-        let by_kind = w
-            .port()
-            .list(Some("library"), None, &[LibraryKind::Instruction], true);
-        assert!(by_kind.expect("list").builtins.is_empty());
-        let by_query = w.port().list(Some("library"), Some("zzz"), &[], true);
-        assert!(by_query.expect("list").builtins.is_empty());
+        let kept = w.list(Some("engram"), Some("DEF"), &[LibraryKind::Preset]);
+        assert_eq!(paths(&kept.rows), ["engram/default"]);
+        assert!(kept.folders.is_empty(), "no folder lines with a query");
+        let by_kind = w.list(Some("engram"), None, &[LibraryKind::Instruction]);
+        assert_eq!(paths(&by_kind.rows), ["engram/priming"]);
+        assert!(w.list(Some("engram"), Some("zzz"), &[]).rows.is_empty());
+        let whole = w.list(None, Some("default"), &[]);
+        assert_eq!(
+            paths(&whole.rows),
+            [
+                "engram/default",
+                "engram/settings/default",
+                "library/default-notes.md"
+            ]
+        );
+        assert!(w.list(Some("engram/nope"), None, &[]).rows.is_empty());
     }
 
     /// `library.read` carries the body's answer field by field, agents by id.
@@ -1643,6 +1695,8 @@ mod tests {
         assert_eq!(
             rows,
             [
+                ("engram", "engram", false),
+                ("engram/settings", "settings", false),
                 ("library", "library", false),
                 ("library/rules", "rules", false),
                 ("library/skills", "skills", false),
@@ -1654,7 +1708,7 @@ mod tests {
     /// A folder behind a link answers its one `path-through-link` row whatever the filters say, and still the
     /// built-in row the filters keep.
     #[test]
-    fn a_folder_behind_a_link_answers_its_link_row_and_the_builtin_row() {
+    fn a_folder_behind_a_link_answers_its_link_row_under_any_filter() {
         let w = World::new(Vec::new());
         let outside = w.base.join("outside");
         fs::create_dir_all(&outside).unwrap();
@@ -1667,7 +1721,6 @@ mod tests {
                 Some("library/team/x.md"),
                 Some("zzz"),
                 &[LibraryKind::Skill],
-                true,
             )
             .expect("list");
         assert_eq!(paths(&out.rows), ["library/team/x.md"]);
@@ -1675,14 +1728,12 @@ mod tests {
             out.rows[0].state.as_ref().map(|state| state.code.as_str()),
             Some(PATH_THROUGH_LINK)
         );
-        assert!(out.builtins.is_empty(), "the query drops the built-in row");
 
         let out = w
             .port()
-            .list(Some("library/team/x.md"), None, &[], true)
+            .list(Some("library/team/x.md"), None, &[])
             .expect("list");
         assert_eq!(paths(&out.rows), ["library/team/x.md"]);
-        assert_eq!(paths(&out.builtins), ["engram:/default"]);
     }
 
     // ── preset.* ──
@@ -1833,11 +1884,79 @@ mod tests {
                 "{what}"
             );
         }
-        let builtin = port.preset_get("engram:/default");
+        let builtin = port.preset_get("engram/default");
         assert!(
             !matches!(&builtin, Err(PortRefusal::Refused { reason, .. }) if reason.code == ITEM_PATH_INVALID),
             "{builtin:?}"
         );
+    }
+
+    /// ADR-0400 decision 20: nothing is written into the built-in mount — a preset edit or check of a built-in or any
+    /// other path under `engram`, a create in it, a relink to or from it refuse `Conflict` · `mount-read-only`
+    /// `{mount, path}`, nothing done; a write whose target is `engram` alone is still the top of a mount (decision 5).
+    #[test]
+    fn every_write_into_the_builtin_mount_refuses_mount_read_only() {
+        let (w, _) = preset_world();
+        let port = w.port();
+        let items = PresetEntries::Items(strings(&["library/rules/a.md"]));
+        let cases: Vec<(&str, (PortClass, Reason))> = vec![
+            (
+                "check",
+                refused(port.preset_check("engram/default", &empty_draft())),
+            ),
+            (
+                "save",
+                refused(port.preset_save("Engram/default", &empty_draft(), None, None)),
+            ),
+            (
+                "add",
+                refused(port.preset_add("engram/settings/x.yaml", &items, None, None, None)),
+            ),
+            (
+                "reorder",
+                refused(port.preset_reorder(
+                    "engram/default",
+                    PresetSection::Presets,
+                    &[],
+                    "r",
+                    None,
+                )),
+            ),
+            (
+                "newFolder",
+                refused(port.new_folder(Some("engram"), "x", None)),
+            ),
+            (
+                "newFile",
+                refused(port.new_file(
+                    Some("engram/settings"),
+                    "x",
+                    LibraryNewFileKind::Markdown,
+                    None,
+                )),
+            ),
+            (
+                "relink to",
+                refused(port.relink("library/p.yaml", "engram/priming", None)),
+            ),
+        ];
+        for (what, (class, reason)) in cases {
+            assert_eq!(
+                (class, reason.code.as_str(), &reason.args["mount"]),
+                (
+                    PortClass::Conflict,
+                    crate::MOUNT_READ_ONLY,
+                    &json!("engram")
+                ),
+                "{what}"
+            );
+        }
+        let (class, reason) = refused(port.preset_save("engram", &empty_draft(), None, None));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (PortClass::InvalidArgument, crate::VIRTUAL_ROOT_READ_ONLY)
+        );
+        assert!(!w.base.join("engram").exists(), "nothing created");
     }
 
     /// `preset.add` items applies what it can and answers the skips with their full reason beside `item`, and the
@@ -2217,7 +2336,7 @@ mod tests {
         }
     }
 
-    /// `preset.get engram:/default` answers the built-in preset as asked: its spelling, the `rev` of the file it was
+    /// `preset.get engram/default` answers the built-in preset as asked: its spelling, the `rev` of the file it was
     /// read from, and how many agents have the Default slot on.
     #[test]
     fn preset_get_answers_the_builtin_default_preset() {
@@ -2230,15 +2349,93 @@ mod tests {
             ],
             text,
         );
-        let view = w.port().preset_get("engram:/default").expect("view");
-        assert_eq!(view.path, "engram:/default");
+        let view = w.port().preset_get("engram/default").expect("view");
+        assert_eq!(view.path, "engram/default");
         assert_eq!(view.rev, crate::launch::sha256_hex(text.as_bytes()));
         assert_eq!(view.description.as_deref(), Some("built in"));
         assert_eq!(view.agents, 2);
         assert!(
-            view.problems.is_empty() && view.conflicts.is_empty(),
+            view.problems.is_empty() && view.conflicts.is_empty() && view.notices.is_empty(),
             "{view:?}"
         );
+    }
+
+    /// ADR-0400 decision 20: `library.read` of a built-in answers its real file in the built-in folder as `absolute`,
+    /// its row and the agents whose Default slot is on; the mount's top and its virtual folder are no items; with no
+    /// built-in folder at all the mount cannot be read.
+    #[test]
+    fn read_answers_a_builtin_at_its_file_in_the_builtin_folder() {
+        let (on, off) = (agent(&[], true), agent(&[], false));
+        let w = World::with_default_preset(
+            vec![on.clone(), off],
+            "kind: preset\nversion: 1\ndescription: built in\n",
+        );
+        for spelled in ["engram/default", "Engram/default"] {
+            let view = w.port().read(spelled).expect(spelled);
+            let file = w.base.join("builtin").join("presets").join("default.yaml");
+            assert_eq!(view.absolute, file.to_string_lossy(), "{spelled}");
+            assert_eq!(view.row.path, "engram/default");
+            assert_eq!(
+                (
+                    view.row.kind,
+                    view.row.description.as_str(),
+                    view.row.references
+                ),
+                (Some(LibraryKind::Preset), "built in", 1)
+            );
+            assert_eq!(view.agents_direct, [on.id]);
+            assert!(view.presets_direct.is_empty() && view.agents_indirect.is_empty());
+        }
+        let priming = w.port().read("engram/priming").expect("priming");
+        assert_eq!(
+            priming.absolute,
+            w.base
+                .join("builtin")
+                .join("instructions")
+                .join("priming.md")
+                .to_string_lossy()
+        );
+        assert_eq!(priming.row.kind, Some(LibraryKind::Instruction));
+        for folder in ["engram", "engram/settings", "engram/nope"] {
+            let (class, reason) = refused(w.port().read(folder));
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (PortClass::NotFound, crate::NOT_FOUND),
+                "{folder}"
+            );
+        }
+
+        let none = World::new(Vec::new());
+        let (class, reason) = refused(none.port().read("engram/default"));
+        assert_eq!(
+            (class, reason.code.as_str(), &reason.args["mount"]),
+            (
+                PortClass::Unavailable,
+                LIBRARY_UNAVAILABLE,
+                &json!("engram")
+            )
+        );
+    }
+
+    /// 10a hand-over: `preset.get engram/default` tells a built-in that stands in — here no built-in folder — as a
+    /// `builtin-unavailable` notice (ADR-0361 · ADR-0400 decision 20).
+    #[test]
+    fn preset_get_of_a_builtin_that_stands_in_carries_its_notice() {
+        let w = World::new(Vec::new());
+        let view = w.port().preset_get("engram/default").expect("view");
+        let notices: Vec<(&str, &serde_json::Value)> = view
+            .notices
+            .iter()
+            .map(|notice| (notice.code.as_str(), &notice.args))
+            .collect();
+        assert_eq!(
+            notices,
+            [(
+                engram_dashboard_agent::launch::BUILTIN_UNAVAILABLE,
+                &json!({ "path": "engram/default", "why": "no built-in folder" })
+            )]
+        );
+        assert!(!view.notices[0].text.is_empty());
     }
 
     /// Each folder stat lands as its word, and only `unreadable` carries its reason.
@@ -2505,7 +2702,7 @@ mod tests {
             .port()
             .detach_preset(
                 id,
-                &strings(&["engram:/default", "library/q.yaml"]),
+                &strings(&["engram/default", "library/q.yaml"]),
                 true,
                 None,
             )
@@ -2556,7 +2753,7 @@ mod tests {
         let (class, reason) =
             refused(
                 w.port()
-                    .detach_preset(id, &strings(&["engram:/default"]), false, None),
+                    .detach_preset(id, &strings(&["engram/default"]), false, None),
             );
         assert_eq!(
             (class, reason.code.as_str()),
@@ -2581,7 +2778,7 @@ mod tests {
             .port()
             .judge_new_presets(
                 &new,
-                &strings(&["library/p.yaml", "library/rules/a.md", "engram:/default"]),
+                &strings(&["library/p.yaml", "library/rules/a.md", "engram/default"]),
                 Some(current),
             )
             .unwrap();
@@ -2602,9 +2799,9 @@ mod tests {
                         line: None,
                     },
                     SkippedRow {
-                        item: "engram:/default".to_owned(),
+                        item: "engram/default".to_owned(),
                         code: crate::edit::ALREADY_PRESENT.to_owned(),
-                        args: json!({ "path": "engram:/default" }),
+                        args: json!({ "path": "engram/default" }),
                         line: None,
                     },
                 ],
@@ -2623,7 +2820,7 @@ mod tests {
     }
 
     /// With no library service the judgement answers in port types: a library preset `Unavailable`
-    /// `library-unavailable` with the given reason; `engram:/default` alone judged without it.
+    /// `library-unavailable` with the given reason; `engram/default` alone judged without it.
     #[test]
     fn the_judgement_with_no_library_answers_the_attach_rule_in_port_types() {
         let new = claude_agent(&[]);
@@ -2641,7 +2838,7 @@ mod tests {
             )
         );
         let judged =
-            judge_new_presets_with_no_library(&new, &strings(&["engram:/default"]), "none here")
+            judge_new_presets_with_no_library(&new, &strings(&["engram/default"]), "none here")
                 .unwrap();
         assert_eq!(judged.attachments.presets, Vec::new());
         assert_eq!(judged.skipped.len(), 1);

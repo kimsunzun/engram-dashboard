@@ -3,4 +3,4 @@ import type { ListFolderRow } from "./ListFolderRow";
 import type { ListRow } from "./ListRow";
 import type { UnavailableMountRow } from "./UnavailableMountRow";
 
-export type LibraryListOk = { folder?: string | null, rows: Array<ListRow>, folders: Array<ListFolderRow>, builtins: Array<ListRow>, unavailable: Array<UnavailableMountRow>, };
+export type LibraryListOk = { folder?: string | null, rows: Array<ListRow>, folders: Array<ListFolderRow>, unavailable: Array<UnavailableMountRow>, };

@@ -1344,7 +1344,7 @@ mod tests {
 
     /// ★The production assembly plugs the real kits★ (WS tests run the Noop kits, so nothing else sees this): built
     /// over a temp data folder, it sweeps what an earlier daemon left in the launch folder, and the plugged service
-    /// launches a plain claude agent with the built-in default preset (`engram:/default`) from the repo `builtin\` — a real plan whose merged instructions file,
+    /// launches a plain claude agent with the built-in default preset (`engram/default`) from the repo `builtin\` — a real plan whose merged instructions file,
     /// in this launch's volatile folder, is the shipped priming. No process is spawned.
     #[test]
     fn the_production_wiring_plugs_the_library_with_the_builtin_priming() {
@@ -1524,7 +1524,7 @@ mod tests {
             .agent_snapshot(created.id)
             .map(|p| p.default_preset);
         let detached =
-            library.detach_preset(created.id, &["engram:/default".to_owned()], true, None);
+            library.detach_preset(created.id, &["engram/default".to_owned()], true, None);
         let after = wiring
             .manager
             .agent_snapshot(created.id)
@@ -1566,9 +1566,9 @@ mod tests {
     }
 
     /// ★The production manager launches through the very library service the wiring keeps★ (the Noop kits, or a
-    /// second service, would pass every other non-ignored test): a claude agent with a library preset and no library
-    /// root (a corrupt `library.json` leaves it unset) is not refused by the library — the preset is skipped (ADR-0387)
-    /// and the launch gets as far as the spawn, which fails on the working folder; once the kept service moves to a
+    /// second service, would pass every other non-ignored test): a claude agent with a library preset whose mount is
+    /// not registered (a corrupt `library.json` leaves the mounts unknown) is not refused by the library — the preset
+    /// is skipped (ADR-0387 · ADR-0400 decision 19) and the launch gets as far as the spawn, which fails on the working folder; once the kept service moves to a
     /// root whose copy of that preset is broken, the manager's refusal is the library's row for it. A cwd that does
     /// not exist — no process is spawned.
     #[test]
@@ -1626,7 +1626,7 @@ mod tests {
                 without_root.error,
                 engram_dashboard_agent::types::PtyError::SpawnFailed(_)
             ),
-            "an unset root does not block; the spawn fails on the missing working folder: {:?}",
+            "a preset in no known mount does not block (its items are skipped); the spawn fails on the missing working folder: {:?}",
             without_root.error
         );
         assert_eq!(listed, 0, "no process was spawned");

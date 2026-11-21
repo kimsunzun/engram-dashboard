@@ -22,7 +22,8 @@
 //! ## Refusals every edit can answer
 //!
 //! A path of one name (a mount's top, or a name at the virtual root) `InvalidArgument` · `virtual-root-read-only`,
-//! before anything else about the target (ADR-0400 decision 5); no first scan applied `Unavailable` ·
+//! before anything else about the target (ADR-0400 decision 5); a path in the built-in mount `engram` `Conflict` ·
+//! `mount-read-only` (ADR-0400 decision 20); no first scan applied `Unavailable` ·
 //! `library-unavailable`; the preset's mount cannot be read `Unavailable` · `library-unavailable` `{mount, message}`
 //! (ADR-0400 decision 6); a stale root generation `Conflict` · `root-generation-stale`; a dot or temp name below the
 //! mount's top `InvalidArgument` · `item-path-invalid`; a name that is not `.yaml` / `.yml` `InvalidArgument` ·
@@ -47,7 +48,7 @@ use std::time::SystemTime;
 
 use engram_dashboard_agent::backend::settings_check::FolderLoadSet;
 use engram_dashboard_agent::backend::SettingsCheck;
-use engram_dashboard_agent::launch::{escape_controls, BlockReason, Reason};
+use engram_dashboard_agent::launch::{escape_controls, BlockReason, Notice, Reason};
 use engram_dashboard_agent::profile::AgentOutputFormat;
 use engram_dashboard_platform::fs::{normalize_folder, path_key, PathKey};
 use engram_dashboard_platform::shell::path_is_cli_safe;
@@ -67,18 +68,19 @@ use crate::format::{
 };
 use crate::gate::{State, NOT_FOUND};
 use crate::launch::{sha256_hex, FolderReads, LIBRARY_READ_FAILED};
-use crate::mounts::{admits_inside, Mounts};
+use crate::mounts::{admits_inside, in_builtin, Mounts};
 use crate::path::{AssetRef, BuiltinId, FolderRef, LibPath, PresetItem};
 use crate::refs::{default_slot_count, referrers_of};
 use crate::resolve::{
-    ref_key, resolve, CatalogLookup, ItemView, Looked, Lookup, Problem, RefKey, Resolution,
-    RootState, Target, BUILTIN_IN_LIBRARY_PRESET, FOLDER_NOT_FOUND, FOLDER_PATH_CLI_UNSAFE,
-    FOLDER_UNREADABLE, PRESET_CYCLE,
+    ref_key, resolve, CatalogLookup, ItemView, Looked, Lookup, MountStates, Problem, RefKey,
+    Resolution, RootState, Target, BUILTIN_IN_LIBRARY_PRESET, FOLDER_NOT_FOUND,
+    FOLDER_PATH_CLI_UNSAFE, FOLDER_UNREADABLE, PRESET_CYCLE,
 };
 use crate::store::ContentTag;
 use crate::{
-    link_verdict, refuse_unusable_now, virtual_root_read_only, LibraryRefusal, LibraryService,
-    RefusalClass, Want, LIBRARY_READ_CAP, PATH_THROUGH_LINK, STAT_UNANSWERED,
+    link_verdict, mount_read_only, read_states, refuse_unusable_now, virtual_root_read_only,
+    LibraryRefusal, LibraryService, MountsNow, RefusalClass, Want, LIBRARY_READ_CAP,
+    LIBRARY_UNAVAILABLE, PATH_THROUGH_LINK, STAT_UNANSWERED,
 };
 
 /// The code of a `baseRev` that is not the `rev` of the bytes read inside the change (`args` = `{rev}`, the current
@@ -123,7 +125,7 @@ pub(crate) const ITEM_LISTS: [ListName; 4] = [
     ListName::Settings,
 ];
 
-/// One item an edit names: a reference spelling (a library path or `engram:/…`) and its backend tag (`None` =
+/// One item an edit names: a reference spelling (a library path or `engram/…`) and its backend tag (`None` =
 /// common).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewItem {
@@ -179,7 +181,10 @@ pub struct PresetView {
     pub conflicts: Vec<Problem>,
     /// Every other problem row, inner presets' included (each with its `via`).
     pub problems: Vec<Problem>,
-    /// The agents that attach it (`engram:/default`: the agents whose default slot is on).
+    /// The notices of resolving the preset on its own — a built-in it reaches (itself included) that stands in, as
+    /// `builtin-unavailable` (ADR-0361).
+    pub notices: Vec<Notice>,
+    /// The agents that attach it (`engram/default`: the agents whose default slot is on).
     pub agents: usize,
 }
 
@@ -190,9 +195,10 @@ pub struct PresetRow {
     pub backend: Option<String>,
     /// Its line in the file.
     pub line: u32,
-    /// The entry's own state: `not-found`, [`PATH_THROUGH_LINK`], the item's broken reason or a settings asset's
-    /// first refusal, `wrong-kind`, `builtin-in-library-preset`, `preset-cycle` (it lists itself); `None` = it reads.
-    /// What an inner preset reaches is in the view's problem rows.
+    /// The entry's own state: `not-found` (an absent or unregistered mount's item included), [`LIBRARY_UNAVAILABLE`]
+    /// `{mount, message}` (its mount cannot be read — not looked up), [`PATH_THROUGH_LINK`], the item's broken reason
+    /// or a settings asset's first refusal, `wrong-kind`, `builtin-in-library-preset`, `preset-cycle` (it lists
+    /// itself); `None` = it reads. What an inner preset reaches is in the view's problem rows.
     pub state: Option<Reason>,
 }
 
@@ -341,6 +347,8 @@ struct ViewBase {
     folder_keys: Vec<Option<PathKey>>,
     /// The mounts the rows' link probes run in.
     mounts: Mounts,
+    /// The mount states the rows were judged under — a row in a mount that cannot be used is not probed.
+    states: MountStates,
 }
 
 /// An edit's answer view as built inside its change: the catalog part and the pure resolution of the preset as
@@ -353,7 +361,7 @@ struct PendingView {
 impl LibraryService {
     /// The `preset.get` view of `preset` from the catalog (no disk read of the preset): its rows with their states, its
     /// folder entries with their stats, the conflict and problem rows of resolving it on its own, its `rev` and how
-    /// many agents attach it. A library preset passes the first-scan entrance; so does `engram:/default` when its file
+    /// many agents attach it. A library preset passes the first-scan entrance; so does `engram/default` when its file
     /// lists a library item, though it needs no mount.
     ///
     /// Refusals: a library preset with no first scan applied `Unavailable` · `library-unavailable`; one whose mount
@@ -381,17 +389,19 @@ impl LibraryService {
             presets: vec![preset.clone()],
             unparsed: Vec::new(),
         };
-        let (mut resolved, base) = self.resolve_over(&[&want], library, None, |state, lookup| {
-            self.view_base(state, lookup, preset)
-        });
+        let (mut resolved, base) =
+            self.resolve_over(&[&want], library, None, |state, lookup, states| {
+                self.view_base(state, lookup, states, preset)
+            });
         Ok(self.complete_view(base?, resolved.remove(0)))
     }
 
-    /// The view's catalog part for the item `lookup` finds at `preset`.
+    /// The view's catalog part for the item `lookup` finds at `preset`, its rows judged under `states`.
     fn view_base(
         &self,
         state: &State,
         lookup: &dyn Lookup,
+        states: &MountStates,
         preset: &AssetRef,
     ) -> Result<ViewBase, LibraryRefusal> {
         let spelling = preset.spelling();
@@ -399,9 +409,15 @@ impl LibraryService {
             return Err(not_found(&spelling));
         };
         match item.content {
-            ItemContent::Preset { doc, rev } => {
-                Ok(self.view_parts(&state.catalog, &state.mounts, lookup, preset, doc, rev))
-            }
+            ItemContent::Preset { doc, rev } => Ok(self.view_parts(
+                &state.catalog,
+                &state.mounts,
+                lookup,
+                states,
+                preset,
+                doc,
+                rev,
+            )),
             ItemContent::Broken { reason } => Err(invalid(reason.clone())),
             _ => Err(LibraryRefusal::new(
                 RefusalClass::InvalidArgument,
@@ -411,12 +427,15 @@ impl LibraryService {
         }
     }
 
-    /// The view's catalog part for preset `preset` read as `doc` with `rev`.
+    /// The view's catalog part for preset `preset` read as `doc` with `rev`, its rows judged under `states` — the mount
+    /// states its resolution uses.
+    #[allow(clippy::too_many_arguments)]
     fn view_parts(
         &self,
         catalog: &Catalog,
         mounts: &Mounts,
         lookup: &dyn Lookup,
+        states: &MountStates,
         preset: &AssetRef,
         doc: &PresetDoc,
         rev: &str,
@@ -428,7 +447,7 @@ impl LibraryService {
                     path: item.target.spelling(),
                     backend: item.backend.clone(),
                     line: item.line,
-                    state: row_state(lookup, list, item, preset),
+                    state: row_state(lookup, states, list, item, preset),
                 })
                 .collect()
         };
@@ -451,19 +470,23 @@ impl LibraryService {
                 folders,
                 conflicts: Vec::new(),
                 problems: Vec::new(),
+                notices: Vec::new(),
                 agents,
             },
             folder_keys,
             mounts: mounts.clone(),
+            states: states.clone(),
         }
     }
 
     /// An edit's answer view, built inside its change from `catalog` as the edit left it (the preset as committed:
-    /// `doc` with `rev`) — the resolution is pure, with the library usable (the edit just read the file in it).
+    /// `doc` with `rev`) — the resolution is pure, each mount judged by its recorded state (the edit's own mount is
+    /// usable: the change refused it otherwise).
+    // ADR-0400 decision 19
     fn pending_view(
         &self,
         catalog: &Catalog,
-        mounts: &Mounts,
+        mounts: &MountsNow,
         preset: &LibPath,
         doc: &PresetDoc,
         rev: &str,
@@ -474,16 +497,18 @@ impl LibraryService {
             builtins: &self.builtins,
         };
         let at = AssetRef::Library(preset.clone());
+        let states = read_states(mounts, |name| mounts.seen(name), &HashMap::new(), &Ok(()));
+        let base = self.view_parts(catalog, mounts, &lookup, &states, &at, doc, rev);
         let target = Target {
             backend: None,
             mode: None,
             default_preset: false,
-            presets: vec![at.clone()],
+            presets: vec![at],
             unparsed: Vec::new(),
-            root: RootState::Ok,
+            mounts: states,
         };
         PendingView {
-            base: self.view_parts(catalog, mounts, &lookup, &at, doc, rev),
+            base,
             resolution: resolve(&target, &lookup, &*self.values.backends),
         }
     }
@@ -500,28 +525,35 @@ impl LibraryService {
     }
 
     /// The view from its catalog part and its resolution (folders stat'ed, links marked): each own folder takes its
-    /// status, each `not-found` row its link probe, and the problems split into conflicts and the rest.
+    /// status, each `not-found` row its link probe, the problems split into conflicts and the rest, and the notices
+    /// kept.
     fn complete_view(&self, base: ViewBase, resolution: Resolution) -> PresetView {
         let ViewBase {
             mut view,
             folder_keys,
             mounts,
+            states,
         } = base;
         attach_statuses(&mut view.folders, &folder_keys, &resolution);
         for row in rows_mut(&mut view) {
-            self.mark_row_link(&mounts, row);
+            self.mark_row_link(&mounts, &states, row);
         }
         (view.conflicts, view.problems) = resolution
             .problems
             .into_iter()
             .partition(|problem| matches!(problem, BlockReason::Conflict { .. }));
+        // ADR-0400 decision 20: `preset.get engram/default` tells a built-in that stands in.
+        view.notices = resolution.notices;
         view
     }
 
     /// A `not-found` library row's link probe, judged by [`link_verdict`] — the rule of `LibraryService::mark_links`, so
-    /// a line's state and the answer's problems agree. A store call — run it outside every lock.
+    /// a line's state and the answer's problems agree. A row in a mount `states` does not hold usable (absent, not
+    /// registered, or one that cannot be read) is not probed: its folder is not touched. A store call — run it outside
+    /// every lock.
     // ADR-0387
-    fn mark_row_link(&self, mounts: &Mounts, row: &mut PresetRow) {
+    // ADR-0400 decision 19
+    fn mark_row_link(&self, mounts: &Mounts, states: &MountStates, row: &mut PresetRow) {
         if row
             .state
             .as_ref()
@@ -532,6 +564,9 @@ impl LibraryService {
         let Ok(AssetRef::Library(path)) = AssetRef::parse(&row.path) else {
             return;
         };
+        if states.of(&path).1 != RootState::Ok {
+            return;
+        }
         let Some(probe) = self.first_link(mounts, &path) else {
             return;
         };
@@ -841,7 +876,7 @@ impl LibraryService {
             presets: vec![AssetRef::Library(preset.clone())],
             unparsed: Vec::new(),
         };
-        let (mut resolved, ()) = self.resolve_over(&[&want], library, Some(&overlay), |_, _| ());
+        let (mut resolved, ()) = self.resolve_over(&[&want], library, Some(&overlay), |_, _, _| ());
         let resolution = resolved.remove(0);
         attach_statuses(&mut folders, &folder_keys, &resolution);
         let mut problems = resolution.problems;
@@ -1018,7 +1053,7 @@ impl LibraryService {
         preset: &LibPath,
         base_rev: Option<&str>,
         catalog: &mut Catalog,
-        mounts: &Mounts,
+        mounts: &MountsNow,
         seq: &dyn Fn() -> u64,
         op: impl FnOnce(&Edit<'_>) -> Result<(PresetLists, T), LibraryRefusal>,
         touched: &mut Vec<PathKey>,
@@ -1142,9 +1177,10 @@ impl LibraryService {
     }
 
     /// Link admission for a new way into the catalog, answering `path`'s disk path in its mount's folder: `path` must
-    /// lie below a mount's top (a path of one name `InvalidArgument` · `virtual-root-read-only`, judged first), pass
-    /// [`admits_inside`] (else `InvalidArgument` · `item-path-invalid`), lie in a registered mount (else `NotFound` ·
-    /// `not-found`), and lie below no link inside the mount (else `InvalidArgument` · [`PATH_THROUGH_LINK`]; a probe
+    /// lie below a mount's top (a path of one name `InvalidArgument` · `virtual-root-read-only`, judged first), lie
+    /// outside the built-in mount (else `Conflict` · `mount-read-only`), pass [`admits_inside`] (else
+    /// `InvalidArgument` · `item-path-invalid`), lie in a registered mount (else `NotFound` · `not-found`), and lie
+    /// below no link inside the mount (else `InvalidArgument` · [`PATH_THROUGH_LINK`]; a probe
     /// error `Unavailable` · `library-read-failed`). A name that is missing or under a file passes: nothing below it
     /// can be a link, and the read that follows answers it. `LibraryStore` read and write follow links, so it runs
     /// before any read or write of `path`.
@@ -1153,6 +1189,9 @@ impl LibraryService {
     pub(crate) fn admit(&self, mounts: &Mounts, path: &LibPath) -> Result<PathBuf, LibraryRefusal> {
         if path.parent().is_none() {
             return Err(virtual_root_read_only(Some(path)));
+        }
+        if in_builtin(path) {
+            return Err(mount_read_only(path.as_str()));
         }
         if !admits_inside(path) {
             return Err(dot_or_temp(path));
@@ -1909,9 +1948,13 @@ pub(crate) fn closes_cycle(catalog: &Catalog, own: &LibPath, target: &AssetRef) 
     false
 }
 
-/// The state of one entry of `own`'s `list` (see [`PresetRow::state`]).
+/// The state of one entry of `own`'s `list` (see [`PresetRow::state`]), under the mount states `states`: an item in a
+/// mount that exists but cannot be used is not looked up — its catalog part cannot be trusted — and answers
+/// [`LIBRARY_UNAVAILABLE`] `{mount, message}`; one in an absent or unregistered mount reads as `not-found`.
+// ADR-0400 decision 19
 fn row_state(
     lookup: &dyn Lookup,
+    states: &MountStates,
     list: ListName,
     item: &PresetItem,
     own: &AssetRef,
@@ -1930,6 +1973,18 @@ fn row_state(
         }
         if matches!(own, AssetRef::Library(_)) && matches!(item.target, AssetRef::BuiltIn(_)) {
             return reason(BUILTIN_IN_LIBRARY_PRESET, json!({ "path": path }));
+        }
+    }
+    if let AssetRef::Library(at) = &item.target {
+        match states.of(at) {
+            (mount, RootState::Unreadable(why)) => {
+                return reason(
+                    LIBRARY_UNAVAILABLE,
+                    json!({ "mount": mount, "message": why }),
+                );
+            }
+            (_, RootState::Absent(_)) => return reason(NOT_FOUND, json!({ "path": path })),
+            (_, RootState::Ok) => {}
         }
     }
     match lookup.item(&item.target) {
@@ -1957,17 +2012,35 @@ pub(crate) fn parse_ref(text: &str) -> Result<AssetRef, Reason> {
     })
 }
 
-/// A library path spelling, or `InvalidArgument` · `item-path-invalid` (`args` = `{path, why}`) — a built-in included.
+/// A library path spelling a write may target, or `InvalidArgument` · `item-path-invalid` (`args` = `{path, why}`). A
+/// path inside the built-in mount — a built-in or any other name under `engram` — refuses `Conflict` ·
+/// `mount-read-only`; `engram` alone passes, and the caller refuses it as any mount's top (ADR-0400 decision 5).
+// ADR-0400 decision 20
 pub(crate) fn lib_path(text: &str) -> Result<LibPath, LibraryRefusal> {
     match parse_ref(text) {
         Ok(AssetRef::Library(path)) => Ok(path),
-        Ok(AssetRef::BuiltIn(_)) => Err(LibraryRefusal::new(
-            RefusalClass::InvalidArgument,
-            ITEM_PATH_INVALID,
-            json!({ "path": escape_controls(text), "why": "a built-in is not a library path" }),
-        )),
-        Err(reason) => Err(invalid(reason)),
+        Ok(AssetRef::BuiltIn(id)) => Err(mount_read_only(id.path().as_str())),
+        Err(reason) => match LibPath::parse(text) {
+            Ok(path) if in_builtin(&path) && path.parent().is_none() => Ok(path),
+            Ok(path) if in_builtin(&path) => Err(mount_read_only(path.as_str())),
+            _ => Err(invalid(reason)),
+        },
     }
+}
+
+/// A library path spelling a read may name — a built-in's included — or `InvalidArgument` · `item-path-invalid`
+/// (`args` = `{path, why}`; the old built-in spelling `engram:/…` with its clue).
+// ADR-0400 decision 20
+pub(crate) fn read_path(text: &str) -> Result<LibPath, LibraryRefusal> {
+    LibPath::parse(text).map_err(|why| {
+        // A spelling `LibPath` refuses is no reference either; `AssetRef` names the old built-in spelling.
+        let why = AssetRef::parse(text).err().unwrap_or(why);
+        invalid(Reason {
+            code: ITEM_PATH_INVALID.to_owned(),
+            args: json!({ "path": escape_controls(text), "why": why.to_string() }),
+            line: None,
+        })
+    })
 }
 
 /// A skip with `code`: `args` = `{backend}` for a tag code (given `backend`), else `{path}`.
@@ -2048,7 +2121,7 @@ mod tests {
     };
     use crate::mounts::MountPath;
     use crate::store::{FsStore, LibraryStore, ScanListing, TrashBundle};
-    use crate::{LibraryValues, LIBRARY_UNAVAILABLE};
+    use crate::LibraryValues;
 
     // ── the world: a real library folder, a logging store, folder ops that watch the library lock ──────────────
 
@@ -2246,7 +2319,7 @@ mod tests {
             World::make(profiles, root, None)
         }
 
-        /// A world whose built-in folder holds `engram:/default` as `default_preset` (the other built-ins stand in).
+        /// A world whose built-in folder holds `engram/default` as `default_preset` (the other built-ins stand in).
         fn with_default(default_preset: &str) -> World {
             World::make(Vec::new(), true, Some(default_preset))
         }
@@ -2558,7 +2631,7 @@ mod tests {
             .svc
             .preset_get(&AssetRef::BuiltIn(BuiltinId::DefaultPreset))
             .unwrap();
-        assert_eq!(default.path, "engram:/default");
+        assert_eq!(default.path, "engram/default");
         let got = refused(w.svc.preset_get(&AssetRef::Library(lp("library/P.yaml"))));
         assert_eq!(code(&got), (RefusalClass::NotFound, NOT_FOUND));
         let added = refused(w.svc.preset_add(
@@ -2569,7 +2642,7 @@ mod tests {
         ));
         assert_eq!(code(&added), (RefusalClass::NotFound, NOT_FOUND));
         let builtin_only = PresetDraft {
-            instructions: vec![item("engram:/priming")],
+            instructions: vec![item("engram/priming")],
             ..PresetDraft::default()
         };
         assert!(w
@@ -2641,7 +2714,7 @@ mod tests {
             item("library/gone.md"),
             tagged("library/rules/a.md", "nobody"),
             tagged("library/S.yaml", "claude"),
-            item("engram:/default"),
+            item("engram/default"),
             item("library/Q.yaml"),
             item("library/P.yaml"),
             item("library/skills/s/SKILL.md"),
@@ -2661,7 +2734,7 @@ mod tests {
                 ("library/gone.md", NOT_FOUND),
                 ("library/rules/a.md", BACKEND_TAG_UNKNOWN),
                 ("library/S.yaml", BACKEND_TAG_NOT_ALLOWED),
-                ("engram:/default", BUILTIN_IN_LIBRARY_PRESET),
+                ("engram/default", BUILTIN_IN_LIBRARY_PRESET),
                 ("library/Q.yaml", PRESET_CYCLE),
                 ("library/P.yaml", PRESET_CYCLE),
                 ("library/skills/s/SKILL.md", WRONG_KIND),
@@ -2873,7 +2946,7 @@ mod tests {
         let sep = std::path::MAIN_SEPARATOR;
         let draft = PresetDraft {
             presets: vec![
-                item("engram:/default"),
+                item("engram/default"),
                 item("library/Q.yaml"),
                 tagged("library/P2.yaml", "claude"),
             ],
@@ -3708,7 +3781,7 @@ mod tests {
         let f1 = w.folder("f1");
         w.put("P.yaml", &preset(&format!("folders:\n- '{f1}'\n")));
         let draft = PresetDraft {
-            instructions: vec![item("engram:/priming")],
+            instructions: vec![item("engram/priming")],
             ..PresetDraft::default()
         };
         let checked = w.svc.preset_check(&lp("library/P.yaml"), &draft).unwrap();

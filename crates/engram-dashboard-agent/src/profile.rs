@@ -119,7 +119,7 @@ pub enum RestoreOutcome {
 
 // ── Persistent profiles ────────────────────────────────────────────────────────────────
 
-/// One preset attached to an agent — a library reference (a `/` path from the root, or a built-in `engram:/…`).
+/// One preset attached to an agent — a library reference (a `/` path from the root, or a built-in `engram/…`).
 /// The 「Default」 preset is not in here — the [`AgentProfile::default_preset`] field carries it separately.
 // ADR-0315
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3513,7 +3513,7 @@ mod tests {
     #[test]
     fn attachment_reads_mirror_the_profile_fields() {
         let (reg, _store, id) = scripted();
-        let other = seed_with(&reg, &["/a.md", "engram:/default"]);
+        let other = seed_with(&reg, &["/a.md", "engram/default"]);
 
         assert_eq!(
             reg.attachments_of(id),
@@ -3523,7 +3523,7 @@ mod tests {
             }),
             "just created = 「Default」 only"
         );
-        assert_eq!(paths_of(&reg, other), ["/a.md", "engram:/default"]);
+        assert_eq!(paths_of(&reg, other), ["/a.md", "engram/default"]);
         assert_eq!(reg.attachments_of(Uuid::new_v4()), None);
 
         let mut all = reg.attachments();
