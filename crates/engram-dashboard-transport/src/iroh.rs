@@ -21,7 +21,8 @@
 //!
 //! ## Close mapping (ADR-0388 decision 5)
 //!
-//! [`CloseCode`] ↔ the QUIC application error code; the reason is cut to [`MAX_CLOSE_REASON_BYTES`]. ★[`LinkTx::close`] delivers what was written first★: it
+//! [`CloseCode`] ↔ the QUIC application error code; the reason is cut to [`MAX_CLOSE_REASON_BYTES`]. [`LinkTx::abort`] closes the connection at once with the
+//! code — no FIN, no wait; an unacknowledged tail is lost (`Peer::abort`, for a peer that must be cut now). ★[`LinkTx::close`] delivers what was written first★: it
 //! ends the stream (FIN), waits until the peer has acknowledged every byte, then sends the close — QUIC stops sending stream data at `CONNECTION_CLOSE`, so
 //! closing at once would drop an unsent or unacknowledged tail (a [`crate::Peer::close_after_flush`] burst, a handshake `Reject { last }`). The wait is bounded
 //! by the caller's deadline (the supervisor wraps every close in one); if that cuts it, the close still goes out. After a send that was cut mid-frame it closes
@@ -872,6 +873,15 @@ impl LinkTx for IrohTx {
                 }
             }
         })
+    }
+
+    /// Closes the QUIC connection at once with the code — no FIN, no wait for acknowledgements; what the peer has not acknowledged is lost.
+    fn abort(&mut self, close: Close) -> BoxFuture<'_, ()> {
+        self.shared.conn.close(
+            close_code(close.code),
+            clamp_close_reason(&close.reason).as_bytes(),
+        );
+        Box::pin(async {})
     }
 }
 

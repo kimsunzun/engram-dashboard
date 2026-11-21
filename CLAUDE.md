@@ -50,14 +50,14 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 - **프론트**(`src/`, React) — 렌더링만 한다. 에이전트·데몬 통신은 `agentClient` 하나로 셸을 거친다(Tauri invoke · event · Channel). 셸이 주인인 상태(레이아웃 · 창 · 설정)는 셸 명령을 직접 부른다. 조작 표면 = `window.__engramCmd` 레지스트리.
 - **셸**(`src-tauri`) — 데몬의 상주 클라이언트. 창 · 트레이 · 레이아웃 권위 · 화면 상태 영속 · 데몬 찾기/띄우기/끄기. 데몬과 WS 연결 하나로 말하고 출력을 창마다 중계한다. 에이전트를 소유하지 않고 agent crate 를 의존하지 않는다. 창은 main 하나, 팝아웃은 실행 중 생성.
-- **daemon** — `AgentManager` 소유. WS 로 셸을 받고 명령 버스 배달 · 우편 호스트 · 제어 평면(HTTP 하나에 MCP `/mcp` + CLI `/control/*`, 신원 = Bearer 토큰)을 돈다.
+- **daemon** — `AgentManager` 소유. WS 로 셸을 받고 명령 버스 배달 · 우편 호스트 · 제어 평면(HTTP 하나에 MCP `/mcp` + CLI `/control/*`, 신원 = Bearer 토큰)을 돈다. 다른 PC 의 데몬과는 피어 링크(`link/peer/`, transport `iroh`)로 잇는다.
 - **agent** — 에이전트 런타임(Tauri 0). 세션 · 펌프 · transport(PTY · stdio) · backend(claude · codex · 셸).
 - **cli** — `engram.exe`. 스폰된 에이전트가 HTTP 로 데몬 제어 라우트에 붙는다(인증 + 배송만).
 - **protocol** — 셸 ↔ 데몬 wire 계약 + codec + ts-rs 바인딩(워크스페이스 의존 0).
 - **command** — 명령 버스 도구(명령 0개 — 명령은 생산자 옆에서 선언).
 - **messaging** — 에이전트 간 우편 커널(워크스페이스 의존 0, 포트 trait 로만 접합).
 - **base** · **platform** — 잎 crate. 범용 도우미 · OS 에 따라 갈리는 운영 코드.
-- **transport** — 재사용 전송 lib. 셸의 데몬 연결(`daemon_client/link/` · 구동 = `daemon_client/connection.rs`)과 데몬의 접속 받기(`daemon/src/link/` · 연결 포트 = `daemon/src/conn_port.rs`)가 그 위에서 돈다.
+- **transport** — 재사용 전송 lib. 셸의 데몬 연결(`daemon_client/link/` · 구동 = `daemon_client/connection.rs`)과 데몬의 접속 받기(`daemon/src/link/` · 연결 포트 = `daemon/src/conn_port.rs`), 데몬 ↔ 데몬 피어 링크(`daemon/src/link/peer/` · `iroh` 어댑터)가 그 위에서 돈다.
 
 크레이트·패키지를 더하거나 바꾸면 사용자에게 보고한다.
 

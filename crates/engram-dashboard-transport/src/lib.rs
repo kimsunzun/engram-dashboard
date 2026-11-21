@@ -98,7 +98,8 @@
 //!   cannot tell a late reply from the later request's match). ★Differs from 「the new one takes over」 in TRD §4-1★.
 //! - ★**A close code reaches the peer in few places**★ — RFC 6455 §7.4.1 reserves `1006`. Disconnects push to the end to carry the code (`Supervisor::drop_link`), but
 //!   `Policy::write_deadline` cuts that wait on a congested socket; over iroh the close also waits for the peer to acknowledge the tail, so the same deadline bounds a close to an unresponsive peer — keep it short. [`Peer::close_after_flush`] gives the close frame only the shorter of `write_deadline` and the
-//!   remaining [`Policy::flush_timeout`]; a handshake rejection pushes only within the remaining handshake deadline (`handshake_once`). Delivery is never certain;
+//!   remaining [`Policy::flush_timeout`]; a handshake rejection pushes only within the remaining handshake deadline (`handshake_once`); [`Peer::abort`]
+//!   closes at once without waiting for the tail (also cutting a close already waiting). Delivery is never certain;
 //!   [`LinkRead::Closed`] is the only channel carrying the code.
 //! - ★**[`TransportEvent::Disconnected`] carries only [`DisconnectCause`]★ — neither the link's text nor the peer's close code.
 //! - ★**No `tracing`**★ from this crate's own code — the event stream ([`TransportEvent`]) is that place; with no event reader no trace is left. With feature `iroh` on, iroh itself logs into the consumer's tracing subscriber.

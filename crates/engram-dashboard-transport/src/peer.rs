@@ -201,6 +201,32 @@ enum Ctl {
     Close,
 }
 
+/// [`Peer::abort`]'s signal: the flag the supervisor reads where it drops the link, and a wake for a close already waiting for delivery.
+#[derive(Default)]
+struct AbortSignal {
+    set: AtomicBool,
+    wake: Notify,
+}
+
+impl AbortSignal {
+    fn raise(&self) {
+        self.set.store(true, Ordering::Release);
+        // A stored permit: a close wait that starts later still sees it.
+        self.wake.notify_one();
+    }
+
+    fn raised(&self) -> bool {
+        self.set.load(Ordering::Acquire)
+    }
+}
+
+/// What ended one turn of [`Supervisor::drop_link`]'s wait.
+enum CloseWait {
+    Done,
+    Abort,
+    Flush,
+}
+
 fn cause_code(cause: DisconnectCause) -> u8 {
     match cause {
         DisconnectCause::PeerClosed => 0,
@@ -251,6 +277,8 @@ struct PeerInner<W: Wire> {
     goodbye: Arc<OnceLock<Close>>,
     /// Wakes the supervisor when `goodbye` is written, for places that do not read the data queue.
     flush_wake: Arc<Notify>,
+    /// [`Peer::abort`] was called — the link is dropped with [`LinkTx::abort`], not [`LinkTx::close`] (the same field of `Supervisor`).
+    abort: Arc<AbortSignal>,
     /// It is an accepted peer (`Origin::Accepted`) — it does not reconnect.
     accepted: bool,
     /// The counter from which this supervisor draws generations (`PeerConfig::generations`) — whoever replaces the same name tag inherits it.
@@ -429,6 +457,18 @@ impl<W: Wire> Peer<W> {
     /// called, this loads its close without waiting for the marker). ★No completion signal★ — the supervisor may still be closing and may issue **one more generation**;
     /// the per-name-tag shared counter (`Registry::add_with_policy`) keeps numbers from clashing.
     pub fn close(&self) {
+        self.inner.close_requested.store(true, Ordering::Release);
+        let _ = self.inner.ctl_tx.send(Ctl::Close);
+    }
+
+    /// Cuts the link now, carrying `code` · `reason` — like [`Peer::close`] (no re-attach, the queue is not waited for), and ★the link
+    ///   itself is dropped with [`LinkTx::abort`]★: no wait for what was written to be delivered (iroh closes the QUIC connection at once
+    ///   instead of waiting for the peer to acknowledge the tail), so a peer that stopped reading cannot hold the link open. For a peer the
+    ///   consumer no longer trusts; a graceful close keeps [`Peer::close_after_flush`]. A [`Peer::close_after_flush`] called earlier keeps
+    ///   its code; sends after this are rejected as after that call. ★No completion signal★ (as [`Peer::close`]).
+    pub fn abort(&self, code: CloseCode, reason: impl Into<String>) {
+        let _ = self.inner.goodbye.set(Close::new(code, reason));
+        self.inner.abort.raise();
         self.inner.close_requested.store(true, Ordering::Release);
         let _ = self.inner.ctl_tx.send(Ctl::Close);
     }
@@ -656,6 +696,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
     let last_cause = Arc::new(AtomicU8::new(cause_code(DisconnectCause::WriteFailed)));
     let goodbye = Arc::new(OnceLock::new());
     let flush_wake = Arc::new(Notify::new());
+    let abort = Arc::new(AbortSignal::default());
     let ledger = Ledger::new(cfg.byte_budget, cfg.clock.clone());
     let (mode, link, admission, leave) = match cfg.origin {
         Origin::Dial { addr, dialer } => (Mode::Dial { addr, dialer }, None, None, None),
@@ -704,6 +745,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
             close_requested: AtomicBool::new(false),
             goodbye: goodbye.clone(),
             flush_wake: flush_wake.clone(),
+            abort: abort.clone(),
             accepted,
             generations: cfg.generations.clone(),
             #[cfg(test)]
@@ -737,6 +779,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
         last_cause,
         goodbye,
         flush_wake,
+        abort,
         flush_deadline: None,
         tx,
         rx_raw,
@@ -872,6 +915,8 @@ struct Supervisor<W: Wire> {
     /// The close that [`Peer::close_after_flush`] wrote (the same field of `PeerInner`) — if standing, do not reconnect.
     goodbye: Arc<OnceLock<Close>>,
     flush_wake: Arc<Notify>,
+    /// [`Peer::abort`] asked to cut the link without waiting for delivery (the same field of `PeerInner`).
+    abort: Arc<AbortSignal>,
     /// The pre-close flush deadline — set when the supervisor first notices `goodbye` ([`Policy::flush_timeout`]).
     flush_deadline: Option<Instant>,
     tx: Option<Box<dyn LinkTx>>,
@@ -1885,8 +1930,9 @@ impl<W: Wire> Supervisor<W> {
     /// ★Do not revert★ — the consumer branches on it: a sent close reads 「said goodbye and left」, otherwise 「link error」. When congested the code is still lost
     /// (`write_deadline`; `lib.rs` 「known limits」).
     ///
-    /// ★The only thing listened for is the start of the pre-close flush★ — then the wait is the shorter of `write_deadline` and the flush deadline's remainder
-    /// ([`Peer::close_after_flush`]); the close future is held, not dropped.
+    /// ★Two things are listened for★: the start of the pre-close flush — then the wait is the shorter of `write_deadline` and the flush deadline's
+    /// remainder ([`Peer::close_after_flush`]) — and a [`Peer::abort`], which drops the pending close and closes at once (`LinkTx::abort`). Otherwise the
+    /// close future is held, not dropped.
     ///
     /// ★Known limit — this wait is tied to the clock★: in a hand-advanced harness a channel dropped during a blocked write keeps the supervisor here until the clock
     /// advances by `write_deadline` or the stall is released (`testing::MemoryEndpoint::stall_writes`); the real clock always flows.
@@ -1902,28 +1948,49 @@ impl<W: Wire> Supervisor<W> {
                 Some(goodbye) if !lost => goodbye.clone(),
                 _ => Close::new(code, "closing"),
             };
-            let closing = with_deadline(&*clock, self.policy.write_deadline, tx.close(close));
-            tokio::pin!(closing);
-            loop {
+            if self.abort.raised() {
+                // [`Peer::abort`]: no flush and no wait for delivery — the adapter cuts at once (the deadline only bounds a slow adapter).
+                let _ = with_deadline(&*clock, self.policy.write_deadline, tx.abort(close)).await;
+                return self.forget_link().await;
+            }
+            let mut closing = Box::pin(with_deadline(
+                &*clock,
+                self.policy.write_deadline,
+                tx.close(close.clone()),
+            ));
+            let aborted = loop {
                 let flush_deadline = self.flush_deadline;
                 let flush_due =
                     OptionFuture::from(flush_deadline.map(|deadline| {
                         clock.sleep(deadline.saturating_duration_since(clock.now()))
                     }));
                 let flush = &self.flush_wake;
+                let abort = &self.abort.wake;
                 // ★The close arm is first and `biased`★ — even past the flush deadline the close is pushed once (0 in `with_deadline`).
-                let started = tokio::select! {
+                // ★A [`Peer::abort`] arriving during the wait for delivery preempts it★ — a graceful close must not hold a link the consumer cut.
+                let next = tokio::select! {
                     biased;
-                    _ = &mut closing => false,
-                    () = flush.notified(), if flush_deadline.is_none() => true,
-                    _ = flush_due, if flush_deadline.is_some() => false,
+                    _ = &mut closing => CloseWait::Done,
+                    () = abort.notified() => CloseWait::Abort,
+                    () = flush.notified(), if flush_deadline.is_none() => CloseWait::Flush,
+                    _ = flush_due, if flush_deadline.is_some() => CloseWait::Done,
                 };
-                if !started {
-                    break;
+                match next {
+                    CloseWait::Done => break false,
+                    CloseWait::Abort => break true,
+                    CloseWait::Flush => self.note_flush(),
                 }
-                self.note_flush();
+            };
+            if aborted {
+                drop(closing);
+                let _ = with_deadline(&*clock, self.policy.write_deadline, tx.abort(close)).await;
             }
         }
+        self.forget_link().await;
+    }
+
+    /// The rest of [`Supervisor::drop_link`] once the write side is closed: the reading side goes.
+    async fn forget_link(&mut self) {
         self.rx_raw = None;
         // A branch that left the operating phase was already folded by `salvage_read_ahead`; what is left is a gone receiver.
         self.frames_rx = None;

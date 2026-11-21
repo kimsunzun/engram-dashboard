@@ -1007,6 +1007,165 @@ async fn close_after_flush_delivers_every_frame_and_then_the_close_code() {
     drain.await.expect("drain");
 }
 
+// ── Aborting cuts at once ──
+
+/// Reads until the close, skipping frames still in flight; the close code. Panics: no close within [`common::PATIENCE`].
+async fn close_code_after_frames(rx: &mut Box<dyn LinkRx>) -> CloseCode {
+    loop {
+        match recv(rx).await {
+            Ok(LinkRead::Frame(_)) => continue,
+            Ok(LinkRead::Closed(Some(close))) => return close.code,
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// ★The peer stops reading★: once QUIC flow control holds our writes, `close` would wait for acknowledgements that never come (bounded
+/// only by the caller's deadline); `abort` closes the connection at once and the code still reaches the peer.
+#[tokio::test]
+async fn abort_closes_at_once_while_the_peer_does_not_read() {
+    let (a, _a_listener) = node(61, open_gate()).await;
+    let (b, mut b_listener) = node(62, open_gate()).await;
+    let (mut tx, _rx) = dial(&a, &address_of(&b)).await.expect("dial");
+    let (_b_tx, mut b_rx) = accepted_ends(accept(&mut b_listener).await);
+    let big = "x".repeat(MAX_PAYLOAD);
+    let mut stalled = false;
+    for _ in 0..1000 {
+        if tokio::time::timeout(
+            Duration::from_millis(300),
+            tx.send(Frame::Text(big.clone())),
+        )
+        .await
+        .is_err()
+        {
+            stalled = true;
+            break;
+        }
+    }
+    assert!(stalled, "flow control never held the writes");
+    let started = Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tx.abort(Close::new(CloseCode::HANDSHAKE_REJECTED, "cut")),
+    )
+    .await
+    .expect("abort returns at once");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        close_code_after_frames(&mut b_rx).await,
+        CloseCode::HANDSHAKE_REJECTED
+    );
+}
+
+/// A live attached peer whose other end's QUIC stack stopped answering (its runtime's only thread blocked, as in the idle-out test
+/// above), with a tail written that it never acknowledges — a flushing close waits out the flush deadline (2 s by default) for that
+/// acknowledgement.
+struct FrozenLink {
+    /// Held for the test — a dropped endpoint stalls its own links.
+    _endpoint: (IrohEndpoint, IrohListener),
+    peer: engram_dashboard_transport::Peer<engram_dashboard_transport::testing::TestWire>,
+    /// When the supervisor ended — its inbox's `None` (its state reads `Closed` before the link is dropped).
+    ended: tokio::sync::oneshot::Receiver<Instant>,
+    drain: tokio::task::JoinHandle<()>,
+    thaw: std::sync::mpsc::Sender<()>,
+    frozen: std::thread::JoinHandle<()>,
+}
+
+async fn frozen_link(seed_a: u8, seed_b: u8) -> FrozenLink {
+    let (a, mut a_listener) = node(seed_a, open_gate()).await;
+    let a_address = address_of(&a);
+    let (dialed_tx, dialed_rx) = std::sync::mpsc::channel::<()>();
+    let (frozen_tx, frozen_rx) = std::sync::mpsc::channel::<()>();
+    let (thaw, thaw_rx) = std::sync::mpsc::channel::<()>();
+    let frozen = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let (b, _b_listener) = node(seed_b, open_gate()).await;
+            let (tx, mut rx) = dial(&b, &a_address).await.expect("dial");
+            dialed_tx.send(()).expect("signal");
+            assert!(matches!(recv(&mut rx).await, Ok(LinkRead::Frame(_))));
+            frozen_tx.send(()).expect("signal");
+            thaw_rx.recv().expect("thaw");
+            drop((tx, rx));
+            b.close().await;
+        });
+    });
+    tokio::task::spawn_blocking(move || dialed_rx.recv().expect("dialed"))
+        .await
+        .expect("join");
+    let registry = common::registry(Arc::new(a.dialer()), Policy::default());
+    let (peer, mut inbox) = registry.attach(
+        PeerId::new("conn-1"),
+        accept(&mut a_listener).await,
+        Arc::new(ImmediateHandshake),
+    );
+    common::wait_state(&peer, "live", |s| s == PeerState::Live).await;
+    let (ended_tx, ended) = tokio::sync::oneshot::channel::<Instant>();
+    let drain = tokio::spawn(async move {
+        while inbox.recv().await.is_some() {}
+        let _ = ended_tx.send(Instant::now());
+    });
+    peer.notify(TestOut::Notice("freeze".into()))
+        .expect("notify");
+    tokio::task::spawn_blocking(move || frozen_rx.recv().expect("frozen"))
+        .await
+        .expect("join");
+    // A tail the frozen peer never acknowledges.
+    peer.notify(TestOut::Notice("unacknowledged".into()))
+        .expect("notify");
+    tokio::task::yield_now().await;
+    FrozenLink {
+        _endpoint: (a, a_listener),
+        peer,
+        ended,
+        drain,
+        thaw,
+        frozen,
+    }
+}
+
+impl FrozenLink {
+    /// How long after `from` the supervisor ended; thaws and joins the frozen peer.
+    async fn ended_after(self, from: Instant) -> Duration {
+        let ended = tokio::time::timeout(common::PATIENCE, self.ended)
+            .await
+            .expect("the supervisor did not end")
+            .expect("ended");
+        self.thaw.send(()).expect("thaw");
+        self.frozen.join().expect("frozen peer thread");
+        self.drain.await.expect("drain");
+        ended.duration_since(from)
+    }
+}
+
+/// [`engram_dashboard_transport::Peer::abort`] ends the handle at once although its peer acknowledges nothing.
+#[tokio::test]
+async fn a_peer_abort_ends_the_link_at_once_while_the_peer_does_not_answer() {
+    let link = frozen_link(63, 64).await;
+    let started = Instant::now();
+    link.peer.abort(CloseCode::HANDSHAKE_REJECTED, "cut");
+    let took = link.ended_after(started).await;
+    assert!(took < Duration::from_secs(1), "ended after {took:?}");
+}
+
+/// ★An abort preempts a graceful close already waiting for delivery★ — the consumer cut the peer, so the flush deadline is not waited out.
+#[tokio::test]
+async fn an_abort_cuts_a_graceful_close_that_is_waiting_for_delivery() {
+    let link = frozen_link(65, 66).await;
+    drop(link.peer.close_after_flush(CloseCode::GOING_AWAY, "bye"));
+    // The close is in its wait for the frozen peer's acknowledgement once the supervisor left the operating phase.
+    common::wait_state(&link.peer, "closing", |s| s == PeerState::Closed).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let started = Instant::now();
+    link.peer.abort(CloseCode::HANDSHAKE_REJECTED, "cut");
+    let took = link.ended_after(started).await;
+    // Without the preemption it ends at the flush deadline, about 1.8 s after this abort.
+    assert!(took < Duration::from_secs(1), "ended after {took:?}");
+}
+
 /// Rejects at once, with a last frame for the dialer to read.
 struct RejectWithLast;
 

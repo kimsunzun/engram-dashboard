@@ -10,6 +10,11 @@
 //! Other OS accounts (ADR-0395): the shell token is written to this account's owner-only `daemon-token.<account>` under the held lock and
 //! before `daemon.json` (which carries the owner account but no token); the shell link and the control listener refuse a client of another
 //! account before any handshake (`account_gate`).
+//!
+//! The peer link to this user's daemons on other PCs (`link::peer`, ADR-0389) starts on its own task after `daemon.json` is published —
+//! loading this account's identity and trusted list (disk, DPAPI, the identity lock) never holds up the accept loop — and stops first at
+//! shutdown, within its own deadline. It runs its endpoint only while a PC is listed; a failure to start it leaves the daemon running
+//! without it.
 
 mod account_gate;
 pub mod agent_conn;
@@ -708,6 +713,32 @@ pub async fn run() -> Result<(), i32> {
     // Do not revive a periodic job that republishes a vanished file (ADR-0135 decision 4): the file cannot be deleted while we hold it, and an app
     //   silently rewriting a file the user just deleted is reported as a bug in every precedent.
 
+    // 8.5) The peer link (daemon ↔ daemon): this account's identity and trusted list, loaded on the blocking pool; the endpoint comes up only
+    //   while a PC is listed and the identity allows it. Started on its own task so a slow load (disk, DPAPI) never holds up the accept loop;
+    //   the started link lands in `peer_slot`. Its failure does not stop the daemon — this PC then has no links to other PCs.
+    // ADR-0389
+    let peer_slot: Arc<std::sync::OnceLock<link::peer::runtime::PeerLink>> =
+        Arc::new(std::sync::OnceLock::new());
+    let peer_start = {
+        let slot = peer_slot.clone();
+        let state_dir = layout.daemon_state_dir();
+        tokio::spawn(async move {
+            match link::peer::runtime::PeerLink::start(
+                state_dir,
+                link::peer::runtime::LinkSettings::daemon(),
+            )
+            .await
+            {
+                Ok(peer_link) => {
+                    let _ = slot.set(peer_link);
+                }
+                Err(e) => tracing::error!(
+                    "the peer link could not start — this PC runs without links to other PCs: {e}"
+                ),
+            }
+        })
+    };
+
     // 9) Automatic boot resume default OFF (2026-07-09, user decision): `mgr.restore_all()`, which revived every auto_restore=true profile at boot,
     //   is not called. The auto_restore field · reaper disposition · restore_all() implementation stay; event-driven restore of specific agents will
     //   call restore_all() from an explicit command in the future. `handle` is a no-op kept for the abort/await contract below.
@@ -736,7 +767,14 @@ pub async fn run() -> Result<(), i32> {
     )
     .await;
 
-    // 12) graceful shutdown.
+    // 12) graceful shutdown. The peer links close first — they tell the other PCs this one is going away. A start still loading is
+    //   aborted (its actor never spawned; the blocking load itself cannot be cancelled and finishes on its own — a hung load can delay
+    //   process exit, which the shell's graceful window bounds); a started link stops within its own deadline (`PeerLink::stop`).
+    peer_start.abort();
+    let _ = peer_start.await;
+    if let Some(peer_link) = peer_slot.get() {
+        peer_link.stop().await;
+    }
     restore_handle.abort();
     let _ = restore_handle.await;
 

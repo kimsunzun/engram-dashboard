@@ -137,6 +137,15 @@ pub trait LinkTx: Send + 'static {
     /// ★An implementation may wait for delivery before closing (iroh waits for the peer to acknowledge the tail) and need not bound that wait★ — callers bound it with their own deadline.
     fn close(&mut self, close: Close) -> BoxFuture<'_, ()>;
 
+    /// Closes at once carrying a code — ★without waiting for what was written to be delivered★ (a queued or unacknowledged tail may be
+    ///   lost). For a link the consumer must cut now ([`crate::Peer::abort`]). Same calling rules as [`LinkTx::close`]. ★May follow a
+    ///   [`LinkTx::close`] that was cancelled mid-wait★ — an implementation must tolerate a second close. The default is [`LinkTx::close`] —
+    ///   right for an adapter whose close does not wait for delivery (`ws` waits only for the close frame to be written, bounded by
+    ///   `write_deadline`; the in-memory harness); iroh overrides it.
+    fn abort(&mut self, close: Close) -> BoxFuture<'_, ()> {
+        self.close(close)
+    }
+
     /// The TCP ends of this link as the transport observed them when it opened the link — `None` = not a TCP link or not known (the
     ///   in-memory harness, iroh). ★A fact, not a decision★: a consumer that must know who is at the other end before it sends anything
     ///   (the shell's account check, ADR-0395) reads it between [`Dialer::dial`] and its handshake.

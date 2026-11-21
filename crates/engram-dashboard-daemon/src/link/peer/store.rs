@@ -35,7 +35,8 @@ use engram_dashboard_base::file::{self, Claim, Refused, WritePolicy};
 
 use super::id::PeerId;
 use super::identity::{
-    create_key, load_key, read_capped_bytes, replace_key, KeyLoad, PeerFiles, Secret, Unreadable,
+    create_key, load_key, read_capped_bytes, replace_key, sweep_temps, KeyLoad, PeerFiles, Secret,
+    Unreadable,
 };
 use super::mac;
 use super::os::{LockAttempt, OsPeer, PeerOs};
@@ -293,6 +294,16 @@ impl PeerStore {
                 ) => PeerStatus::ListCorrupt(why.clone()),
                 _ => PeerStatus::Ready,
             },
+        }
+    }
+
+    /// Removes the temp files a crashed write of this account's key or list left (`identity::sweep_temps`) — for the daemon to call at
+    ///   start, before any write. Nothing when the files cannot be named.
+    // ADR-0291 R12
+    pub(crate) fn sweep_temps(&self) -> io::Result<Vec<(PathBuf, io::Result<()>)>> {
+        match &self.files {
+            Some(files) => sweep_temps(files),
+            None => Ok(Vec::new()),
         }
     }
 

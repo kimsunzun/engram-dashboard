@@ -22,7 +22,7 @@ const GROUP: usize = 4;
 pub(crate) struct PeerId([u8; 32]);
 
 impl PeerId {
-    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(crate) const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 

@@ -469,8 +469,9 @@ mod tests {
     fn names_follow_the_rules() {
         assert!(check_name("office-pc").is_ok());
         assert!(check_name(&"n".repeat(MAX_NAME_BYTES)).is_ok());
+        // A Korean name, written as escapes (source text stays free of Hangul): letters of any script are fine.
         assert!(
-            check_name("사무실-pc").is_ok(),
+            check_name("\u{C0AC}\u{BB34}\u{C2E4}-pc").is_ok(),
             "letters of any script are fine"
         );
         for bad in [

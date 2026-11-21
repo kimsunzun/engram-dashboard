@@ -95,9 +95,10 @@ engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
 # ADR-0310 (TRD S21 trd-3 §6-3 U4): the reusable transport — the daemon's accepting side (`src/link/`) runs on its
 #   registry, accepted-peer supervisors and real-socket listener (`ws`). The test harness (`test-support`) is not turned on:
 #   the adapter's tests drive it over synthetic inbox items and a real loopback listener.
-#   `iroh` (ADR-0389): the daemon-to-daemon link adapter. So far only its raw-bytes key derivation (`iroh::public_key` — a PC's ID
-#   from its identity secret) and its helper-URL checks (`iroh::check_relay_url` / `check_lookup_url` — when network settings are
-#   saved) are used, both from `src/link/peer/`; no iroh type enters this crate.
+#   `iroh` (ADR-0388, ADR-0389): the daemon-to-daemon link adapter — the peer link's endpoint, dialer and key-gated listener
+#   (`src/link/peer/runtime.rs`), its raw-bytes key derivation (`iroh::public_key` — a PC's ID from its identity secret) and its
+#   helper-URL checks (`iroh::check_relay_url` / `check_lookup_url`); the endpoint is built from plain values and no iroh type enters
+#   this crate.
 engram-dashboard-transport = { path = "../engram-dashboard-transport", features = ["ws", "iroh"] }
 # ADR-0155: command bus tools (envelope · error · declaration macro · table · routing). This crate uses the tools **only for table assembly** —
 #   it does not declare its own commands, so `ts-rs` is not added (only the declaring crate emits bindings).
