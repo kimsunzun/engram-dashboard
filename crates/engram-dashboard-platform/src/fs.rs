@@ -1,6 +1,7 @@
 //! OS rules for handling files — opening while blocking others' writes and classifying its failures · deciding failures caused by someone
-//!   briefly holding a file and retrying · folder sync. Uses only std —
-//! `OpenOptionsExt::share_mode` goes straight to `CreateFileW`'s share mode, so no `windows` bindings or unsafe.
+//!   briefly holding a file and retrying · folder sync · a rename that never replaces. All but [`rename_no_replace`] use only std —
+//! `OpenOptionsExt::share_mode` goes straight to `CreateFileW`'s share mode; the no-replace rename is `MoveFileExW` (std's `rename`
+//!   always replaces on Windows).
 
 // ADR-0266, ADR-0291
 
@@ -104,6 +105,32 @@ pub fn retry_busy_with<T>(
     }
 }
 
+/// Renames `from` to `to` only if nothing is at `to` — otherwise `AlreadyExists` and both stay as they were. Windows = `MoveFileExW`
+///   without `MOVEFILE_REPLACE_EXISTING` (with `MOVEFILE_WRITE_THROUGH`). A briefly held file fails as [`is_busy`] — retrying is the
+///   caller's. Outside Windows = `Unsupported` without trying (defined: `renameat2` with `RENAME_NOREPLACE` — T-118 / T-119).
+// ADR-0266, ADR-0389
+#[cfg(windows)]
+pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    let from = crate::win::to_wide(from.as_os_str())?;
+    let to = crate::win::to_wide(to.as_os_str())?;
+    // SAFETY: two null-terminated wide paths alive for the call.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(from.as_ptr()),
+            PCWSTR(to.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(crate::win::io_error)
+}
+#[cfg(not(windows))]
+pub fn rename_no_replace(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
 /// Persists one rename inside a folder to disk — called after an atomic write's rename. Outside Windows = opens the folder and `sync_all`
 ///   (missing folder = `NotFound`); Windows = nothing, `Ok` even if the folder is missing.
 // ADR-0291
@@ -120,6 +147,31 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rename_never_replaces_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!("engram-fs-rename-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let e = rename_no_replace(&a, &b).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&a).unwrap(), b"a");
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        rename_no_replace(&a, &c).unwrap();
+        assert!(!a.exists());
+        assert_eq!(std::fs::read(&c).unwrap(), b"a");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_no_replace_rename_is_unsupported_off_windows() {
+        let e = rename_no_replace(Path::new("a"), Path::new("b")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::Unsupported);
+    }
 
     #[test]
     fn raw_codes_are_classified_only_on_windows() {

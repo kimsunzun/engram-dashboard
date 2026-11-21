@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use engram_dashboard_transport::iroh::{
-    dial_address, Helper, IrohAcceptPolicy, IrohConfig, IrohEndpoint, IrohListener,
+    dial_address, public_key, Helper, IrohAcceptPolicy, IrohConfig, IrohEndpoint, IrohListener,
     FIN_CLOSE_GRACE, PREAMBLE, QUIC_IDLE_TIMEOUT,
 };
 use engram_dashboard_transport::policy::MIN_BACKOFF;
@@ -240,6 +240,13 @@ async fn an_accepted_link_attaches_and_frames_cross_both_ways() {
         common::wait_incoming(&mut a_inbox, "b's notice", notice).await,
         "from-b"
     );
+}
+
+#[tokio::test]
+async fn the_public_key_of_a_secret_is_the_id_its_endpoint_binds_with() {
+    let (a, _a_listener) = node(7, open_gate()).await;
+    assert_eq!(public_key(&[7; 32]), a.id());
+    assert_ne!(public_key(&[8; 32]), a.id());
 }
 
 #[tokio::test]

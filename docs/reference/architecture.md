@@ -26,7 +26,7 @@ Crate dependencies (arrow = depends on, the production graph):
 
 ```text
 src-tauri ─▶ protocol · command · base · platform · transport(ws)      (agent 는 의존하지 않는다)
-daemon    ─▶ agent · protocol · transport(ws) · messaging · command · base · platform
+daemon    ─▶ agent · protocol · transport(ws · iroh) · messaging · command · base · platform
 cli       ─▶ agent · command
 agent     ─▶ command · base · platform
 base · platform · command · messaging · transport · protocol ─▶ 워크스페이스 의존 0
@@ -40,6 +40,7 @@ base · platform · command · messaging · transport · protocol ─▶ 워크�
 - **Shell (`src-tauri`)** — the daemon's resident client. It holds the window · tray · layout (the authority for windows · tabs · slots) · shell settings · screen state persistence · finding/launching/shutting down the daemon (`discovery`). It does not own agents. It talks to the daemon over one WS connection (`daemon_client` — one however many windows there are) and relays output frames to a Channel per window (`output_router`). It is registered on the daemon command bus as the owner of the layout commands (`window/tab/slot`). The only window is main, and pop-outs are created at run time.
 - **daemon** — the agent host that owns `AgentManager`, and the assembly room. It accepts shell connections on the transport (`link` — the WS accept loop and the connection port `conn_port` its upper layers see), runs the command bus registry and delivery (`command_roster` · `command_delivery`), and plugs the real adapters into the messaging kernel (`messaging_host`). The control plane (`control`) = one HTTP server carrying MCP (`/mcp`) and the CLI route (`/control/*`) — an agent's identity comes only from the Bearer token. Data folder layout (`data_dir`) · single-instance guard (`instance`) · `daemon.json` (`portfile` — no token; the shell token is an owner-only per-account file, and both listeners refuse a client of another OS account — ADR-0395) · usage query (`usage_service`) are here too.
   - Shell ↔ daemon link (daemon side) = `docs/reference/structure/daemon-link.md`.
+  - Daemon ↔ daemon peer link (identity, trusted list) = `docs/reference/structure/peer-link.md`.
 - **agent** — the agent runtime (Tauri import 0). Session lifetime · output pump · `transport` (PTY · stdio) · `backend` (claude · codex · shell · a gemini stub — backend-specific knowledge lives only here) · turn observation · waiting input · profile persistence · `agent.*` command declarations. Output and state go out only through the `OutputSink`/`StatusSink` traits.
 - **cli** — `engram.exe`. A spawned agent attaches to the daemon control route over HTTP with `ENGRAM_TOKEN` · `ENGRAM_CONTROL_URL`. It only authenticates and delivers, and the daemon also produces the help screen. bin name = agent `CLI_EXE_NAME`.
 - **protocol** — the shell ↔ daemon wire contract (messages · output binary frame codec · ts-rs bindings). No domain logic.

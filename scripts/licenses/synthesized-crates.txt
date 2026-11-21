@@ -5,3 +5,5 @@
 #   a rust/<crate>.txt replacement file. Add it here only when neither exists.
 # As of: cargo-about 0.9.2 · the Cargo.lock of 2026-10-15.
 siphasher            # upstream has only COPYING (a declaration) too — the script carries that declaration after the standard text.
+acto                 # rkuhn/acto has no license file at all (checked at the 0.8.2 commit bfe9c141 and at HEAD); README has no license section either.
+enum-assoc           # Eolu/enum-assoc has no license file at all (checked at the 1.4.2 commit 5d732f47 and at HEAD); README has no license section either.

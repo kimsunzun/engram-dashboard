@@ -2705,6 +2705,13 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
     handle.shutdown().await;
 }
 
+/// The rmcp client builds a reqwest 0.13 client, and the daemon's graph turns on reqwest's `rustls-no-provider` (through transport's
+///   `iroh`), so building one without an installed rustls provider panics. Installs ring's for the process; a later call answers `Err`
+///   (already installed), which is the state wanted.
+fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 // ── MCP eg_send tool: happy path + corrective errors (rmcp client) ─────────────────────────────
 #[tokio::test]
 async fn mcp_send_message_tool_happy_and_error() {
@@ -2723,6 +2730,7 @@ async fn mcp_send_message_tool_happy_and_error() {
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "mcp-sender-tok".to_string(), true);
 
+    install_tls_provider();
     let config = StreamableHttpClientTransportConfig::with_uri(handle.url.clone())
         .auth_header("mcp-sender-tok");
     let transport = StreamableHttpClientTransport::from_config(config);
@@ -3603,6 +3611,7 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
     registry.issue(caller, 0, "d-parity-tok".to_string(), true);
     let tok = Some("d-parity-tok");
 
+    install_tls_provider();
     let config = StreamableHttpClientTransportConfig::with_uri(handle.url.clone())
         .auth_header("d-parity-tok");
     let transport = StreamableHttpClientTransport::from_config(config);

@@ -68,7 +68,8 @@
 //!
 //! **④ Each of the four feature combinations compiles** (`-p`), decided by **success**, not line count:
 //! `cargo test -p engram-dashboard-transport` (0 features) · `cargo test -p engram-dashboard-transport --all-features` (`test-support` · `ws` · `iroh`) ·
-//! `cargo check -p engram-dashboard-transport --features ws` (the shell's and daemon's operating combination) ·
+//! `cargo check -p engram-dashboard-transport --features ws` (the shell's operating combination; the daemon's `ws` + `iroh` is built without
+//! the harness by the daemon's own build) ·
 //! `cargo check -p engram-dashboard-transport --features iroh` (the iroh adapter alone).
 //! Code behind a cfg gate gives no error, so do not shrink this to one line. ★The last two lines measure whether each adapter compiles **without the test-only
 //! harness** and without the other adapter★ — `testing` is behind `any(test, feature = "test-support")`, so an adapter reference to `crate::testing` dies only

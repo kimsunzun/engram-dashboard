@@ -1,6 +1,7 @@
 //! Shared rules for data files — read decisions ([`parse`] · [`classify`] · [`load`]) · write decisions ([`Loaded::write_policy`] ·
 //!   [`judge`] · [`check_cap`]) · capped reads ([`read_capped`] · [`read_file_capped`]) ·
-//! atomic writes ([`write_atomic`] · [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp
+//! atomic writes ([`write_atomic`] · [`write_atomic_unless`] · [`write_atomic_new`]) · atomic copies ([`copy_atomic`] · [`copy_atomic_new`] ·
+//!   [`copy_aside`]) · sweeping leftover temp
 //!   files ([`sweep_temps`]).
 //!
 //! It knows no file names · locations · schemas · version key names — each owner (store) owns those and hands the read-rule part over as a
@@ -438,6 +439,57 @@ fn copy_atomic_with(
     .map(drop)
 }
 
+/// The shape of a rename that never replaces — `AlreadyExists` when anything is at the target, the source left in place. The caller passes
+///   the OS layer's (`engram-dashboard-platform`'s `fs::rename_no_replace`); this crate cannot call it (tenancy condition ②).
+pub type RenameNew = fn(&Path, &Path) -> io::Result<()>;
+
+/// [`write_atomic`] that ★never replaces★: the filled temp file is moved into place with `rename_new`, so a file already at `path` (or one
+///   that appears before the rename) fails the write with `AlreadyExists` and stays as it is. The temp file is created new — a file
+///   already at its name fails the write too and is left alone. The temp file is removed on any failure;
+///   folders are created and synced as for [`write_atomic`]; a rename that hits a lock is retried via [`OsHooks::retry`].
+// ADR-0291 R10 · R11 · R12: same temp name, folder creation and folder sync as every atomic write here.
+pub fn write_atomic_new(
+    path: &Path,
+    bytes: &[u8],
+    os: OsHooks,
+    rename_new: RenameNew,
+) -> io::Result<()> {
+    use std::io::Write;
+
+    replace_with_temp(
+        path,
+        TempOpen::CreateNew,
+        |file| file.write_all(bytes),
+        || false,
+        rename_new,
+        &mut |attempt| (os.retry)(attempt),
+        &mut |dir| (os.sync_dir)(dir),
+    )
+    .map(drop)
+}
+
+/// [`copy_atomic`] that ★never replaces★ — `to` must not exist ([`write_atomic_new`]'s rule); `from` is opened (lock-retried) before
+///   anything is created.
+pub fn copy_atomic_new(
+    from: &Path,
+    to: &Path,
+    os: OsHooks,
+    rename_new: RenameNew,
+) -> io::Result<()> {
+    let mut retry = |attempt: &mut dyn FnMut() -> io::Result<()>| (os.retry)(attempt);
+    let mut source = retrying(&mut retry, || std::fs::File::open(from))?;
+    replace_with_temp(
+        to,
+        TempOpen::CreateNew,
+        |file| io::copy(&mut source, file).map(drop),
+        || false,
+        rename_new,
+        &mut retry,
+        &mut |dir| (os.sync_dir)(dir),
+    )
+    .map(drop)
+}
+
 /// Sets aside an unusable file with [`copy_atomic`] at the neighboring name `<name>.corrupt` — the original stays in place.
 /// Return value = the copy's location. On `Err`, a copy set aside earlier stays as it was.
 ///
@@ -470,6 +522,37 @@ fn replace_with(
     path: &Path,
     stage: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
     skip: impl Fn() -> bool,
+    rename: impl FnMut(&Path, &Path) -> io::Result<()>,
+    retry: RetryHook,
+    sync_dir: SyncDirHook,
+) -> io::Result<WriteOutcome> {
+    replace_with_temp(
+        path,
+        TempOpen::Truncate,
+        stage,
+        skip,
+        rename,
+        retry,
+        sync_dir,
+    )
+}
+
+/// How [`replace_with_temp`] opens its temp file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TempOpen {
+    /// `File::create` — a file already at the temp name is emptied and reused.
+    Truncate,
+    /// Create-new — a file already at the temp name fails the write with `AlreadyExists` and is left alone (the no-replace writers: a
+    ///   pre-placed temp must not become the content swapped in).
+    CreateNew,
+}
+
+/// [`replace_with`] with the temp file's open chosen.
+fn replace_with_temp(
+    path: &Path,
+    open: TempOpen,
+    stage: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+    skip: impl Fn() -> bool,
     mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
     retry: RetryHook,
     sync_dir: SyncDirHook,
@@ -477,10 +560,19 @@ fn replace_with(
     let tmp = temp_path(path)?;
     let dir = folder_of(path);
 
+    // Whether the temp file is ours to remove — not a file that was already at the name when create-new refused it.
+    let mut created = false;
     let staged = (|| {
         // Loading does not create the folder, so the first write creates it — a folder deleted during the run is set up again here too.
         std::fs::create_dir_all(dir)?;
-        let mut file = std::fs::File::create(&tmp)?;
+        let mut file = match open {
+            TempOpen::Truncate => std::fs::File::create(&tmp)?,
+            TempOpen::CreateNew => std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?,
+        };
+        created = true;
         stage(&mut file)?;
         // ★flush is not enough★ — it only empties the process buffer. The content that rename will point to must actually be
         //   on disk for 「no half file is left」 to hold.
@@ -496,7 +588,7 @@ fn replace_with(
     });
     if matches!(outcome, Ok(WriteOutcome::Written)) {
         let _ = sync_dir(dir);
-    } else {
+    } else if created || open == TempOpen::Truncate {
         let _ = std::fs::remove_file(&tmp);
     }
     outcome
@@ -647,6 +739,76 @@ mod tests {
 
     fn denied() -> io::Error {
         io::Error::from(io::ErrorKind::PermissionDenied)
+    }
+
+    /// A no-replace rename for the tests — portable stand-in for the OS layer's (check, then rename; the tests do not race it).
+    fn rename_new_fake(from: &Path, to: &Path) -> io::Result<()> {
+        if to.exists() {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        std::fs::rename(from, to)
+    }
+
+    #[test]
+    fn write_atomic_new_creates_and_never_replaces_and_leaves_no_temp() {
+        let dir = temp_dir("write-new");
+        let path = dir.join("sub").join("key");
+        write_atomic_new(&path, b"first", ONCE, rename_new_fake).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        let e = write_atomic_new(&path, b"second", ONCE, rename_new_fake).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        assert_eq!(names_in(&dir.join("sub")), ["key"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file pre-placed at the next temp name is neither reused nor removed — the write fails.
+    #[test]
+    fn write_atomic_new_does_not_reuse_a_pre_placed_temp_file() {
+        let dir = temp_dir("write-new-temp");
+        let path = dir.join("key");
+        // The next number `temp_path` hands out is not known in advance, so pre-place a run of them.
+        let first = temp_path(&path).unwrap();
+        let (stem, n) = first
+            .to_str()
+            .unwrap()
+            .rsplit_once('.')
+            .map(|(s, n)| (s.to_string(), n.parse::<u64>().unwrap()))
+            .unwrap();
+        for k in n + 1..n + 1000 {
+            std::fs::write(format!("{stem}.{k}"), b"planted").unwrap();
+        }
+        let outcome = write_atomic_new(&path, b"real", ONCE, rename_new_fake);
+        assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read(format!("{stem}.{}", n + 1)).unwrap(),
+            b"planted"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_atomic_new_copies_and_never_replaces() {
+        let dir = temp_dir("copy-new");
+        let from = dir.join("from");
+        let to = dir.join("to");
+        std::fs::write(&from, b"source").unwrap();
+        copy_atomic_new(&from, &to, ONCE, rename_new_fake).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"source");
+        std::fs::write(&from, b"changed").unwrap();
+        let e = copy_atomic_new(&from, &to, ONCE, rename_new_fake).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&to).unwrap(), b"source");
+        assert_eq!(names_in(&dir), ["from", "to"]);
+        let missing = copy_atomic_new(&dir.join("absent"), &dir.join("x"), ONCE, rename_new_fake);
+        assert_eq!(missing.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            names_in(&dir),
+            ["from", "to"],
+            "nothing made before the source opened"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn temp_dir(tag: &str) -> PathBuf {

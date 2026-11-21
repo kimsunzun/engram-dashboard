@@ -21,7 +21,8 @@
 //! [`input`] (cursor position, primary button, Esc state) · [`pty`] (whether closing a pseudo-terminal waits for its output to be read) ·
 //! [`account`] (current account id, machine id, the account owning one end of a local TCP connection) · [`secret`] (sealing a secret
 //!   for the current account — DPAPI) · [`owner_only`] (creating and checking files only the current account can open, whether a folder's
-//!   volume stores file ACLs) · [`approval`] (the native approve / deny / deny-and-stop dialog). Module headers and public docs are the
+//!   volume stores file ACLs) · [`approval`] (the native approve / deny / deny-and-stop dialog) · [`account_lock`] (a lock only the current
+//!   account can take, shared by its sessions — a private namespace bounded by its SID). Module headers and public docs are the
 //!   source of truth.
 //!
 //! Functions that take a window accept `raw-window-handle`'s `HasWindowHandle`; variant matching happens here too (TRD S21-slot-docking
@@ -207,6 +208,7 @@
 // ADR-0266, ADR-0275, ADR-0278
 // ADR-0278
 pub mod account;
+pub mod account_lock;
 pub mod approval;
 pub mod env;
 pub mod file_holders;

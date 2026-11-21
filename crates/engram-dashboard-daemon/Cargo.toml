@@ -95,7 +95,10 @@ engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
 # ADR-0310 (TRD S21 trd-3 §6-3 U4): the reusable transport — the daemon's accepting side (`src/link/`) runs on its
 #   registry, accepted-peer supervisors and real-socket listener (`ws`). The test harness (`test-support`) is not turned on:
 #   the adapter's tests drive it over synthetic inbox items and a real loopback listener.
-engram-dashboard-transport = { path = "../engram-dashboard-transport", features = ["ws"] }
+#   `iroh` (ADR-0389): the daemon-to-daemon link adapter. So far only its raw-bytes key derivation (`iroh::public_key` — a PC's ID
+#   from its identity secret) and its helper-URL checks (`iroh::check_relay_url` / `check_lookup_url` — when network settings are
+#   saved) are used, both from `src/link/peer/`; no iroh type enters this crate.
+engram-dashboard-transport = { path = "../engram-dashboard-transport", features = ["ws", "iroh"] }
 # ADR-0155: command bus tools (envelope · error · declaration macro · table · routing). This crate uses the tools **only for table assembly** —
 #   it does not declare its own commands, so `ts-rs` is not added (only the declaring crate emits bindings).
 engram-dashboard-command = { path = "../engram-dashboard-command" }
@@ -128,6 +131,9 @@ serde_json = { version = "1", features = ["raw_value"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
+# ADR-0389: the trusted list's MAC (`src/link/peer/mac.rs` — HKDF-SHA256 key derivation, HMAC-SHA256, constant-time verify). Already in
+#   the graph through transport's `iroh` (rustls / QUIC), so `Cargo.lock` gains no package.
+ring = { version = "0.17", default-features = false }
 # Token randomness: 256-bit (32B) → 64 hex chars. getrandom instead of rand — lighter dependency (OS CSPRNG directly).
 getrandom = "0.2"
 # sink_id generation for output sinks + AgentId parsing. Same 1.x as agent/protocol (AgentId=Uuid).
@@ -201,3 +207,7 @@ engram-dashboard-base = { path = "../engram-dashboard-base", features = ["test-s
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # The happy-path handshake (initialize + tools/list + tools/call) is verified honestly with the rmcp client role.
 rmcp = { version = "2.2.0", features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+# The rmcp client's reqwest 0.13 is built with `rustls-no-provider` once transport's `iroh` is in the graph (feature unification), so the
+#   tests that build it install ring's provider first (`install_tls_provider` in `tests/control_send.rs` · `tests/mcp_control.rs`).
+#   Already in the graph through iroh — no new package.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

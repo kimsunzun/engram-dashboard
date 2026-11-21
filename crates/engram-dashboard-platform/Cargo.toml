@@ -32,7 +32,9 @@ raw-window-handle = "0.6"
 # Foundation = shared by `process` (CloseHandle·FILETIME) · `file_holders` (Win32 error codes) · `group` ·
 #   Threading = OpenProcess/GetProcessTimes/GetExitCodeProcess · `group`'s TerminateProcess/WaitForSingleObject/
 #   ResumeThread · `spawn`'s CREATE_NO_WINDOW · CREATE_SUSPENDED · `window::snap`'s parent window thread guard
-#   (GetCurrentThreadId — behind the feature `snap-overlay`) · ToolHelp = process_parent_table's process
+#   (GetCurrentThreadId — behind the feature `snap-overlay`) · `account_lock`'s private namespace (CreateBoundaryDescriptorW ·
+#   AddSIDToBoundaryDescriptor · CreatePrivateNamespaceW · ClosePrivateNamespace; its SID from text via `Win32_Security_Authorization`'s
+#   ConvertStringSidToSidW) · ToolHelp = process_parent_table's process
 #   table (child_pids stands on it) and `group`'s thread snapshot (finds the first thread of a child launched suspended — std does not hand out that
 #   handle).
 # `Win32_System_RestartManager` = for `file_holders` — the four that ask 「who has this file open」,
@@ -74,6 +76,7 @@ raw-window-handle = "0.6"
 #   `GetProcAddress` under a comctl32 v6 activation context — `CreateActCtxW` · `ActivateActCtx`).
 # `Win32_System_StationsAndDesktops` · `Win32_System_RemoteDesktop` = `approval`'s "no desktop" check (window station flags ·
 #   `ProcessIdToSessionId`).
+# `Win32_Storage_FileSystem` also carries `fs::rename_no_replace` (`MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`).
 # ★Not split into per-feature cargo features★ — turns on the union of the binding features used by this one dependency (ADR-0275
 #   decision 13). When moving a module over, add the features that module uses here.
 [target.'cfg(windows)'.dependencies]

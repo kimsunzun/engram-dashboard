@@ -152,6 +152,13 @@ async fn post_tools_list_with_padding(
         .map(|r| r.status())
 }
 
+/// The rmcp client builds a reqwest 0.13 client, and the daemon's graph turns on reqwest's `rustls-no-provider` (through transport's
+///   `iroh`), so building one without an installed rustls provider panics. Installs ring's for the process; a later call answers `Err`
+///   (already installed), which is the state wanted.
+fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[tokio::test]
 async fn missing_unknown_stale_tokens_are_rejected_before_session() {
     let registry = Arc::new(ControlRegistry::new());
@@ -223,6 +230,7 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
     .await
     .expect("start mcp server");
 
+    install_tls_provider();
     // auth_header is the raw token — the rmcp client prepends "Bearer " via reqwest .bearer_auth.
     let config =
         StreamableHttpClientTransportConfig::with_uri(handle.url.clone()).auth_header("good-token");

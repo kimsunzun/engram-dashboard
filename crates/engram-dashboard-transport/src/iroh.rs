@@ -216,6 +216,12 @@ impl fmt::Debug for IrohAcceptPolicy {
     }
 }
 
+/// The 32-byte public half of `secret_key` — the node id an endpoint built from that key gets ([`IrohEndpoint::id`]), without building
+/// one (nothing is bound or contacted). Any 32 bytes are a valid secret key.
+pub fn public_key(secret_key: &[u8; 32]) -> [u8; 32] {
+    *SecretKey::from_bytes(secret_key).public().as_bytes()
+}
+
 /// The address [`IrohDialer`] reads: the remote's 32-byte key and optional direct socket addresses. ★An adapter-private encoding★ — build it here, never
 /// parse or store it; the key's text form is the consumer's.
 pub fn dial_address(peer_key: &[u8; 32], direct: &[SocketAddr]) -> Address {
@@ -351,6 +357,26 @@ impl fmt::Debug for IrohEndpoint {
     }
 }
 
+/// Whether `url` is accepted as a relay server by the endpoint build ([`IrohEndpoint::bind`]) — the same parse, so a consumer that checks
+///   its settings with this never stores one the build would refuse. The text is the error.
+pub fn check_relay_url(url: &str) -> Result<(), String> {
+    parse_relay_url(url).map(drop).map_err(|e| e.to_string())
+}
+
+/// Whether `url` is accepted as an address-lookup (pkarr) server by the endpoint build — the same parse as [`check_relay_url`]'s rule.
+pub fn check_lookup_url(url: &str) -> Result<(), String> {
+    parse_lookup_url(url).map(drop).map_err(|e| e.to_string())
+}
+
+fn parse_relay_url(url: &str) -> Result<RelayUrl, LinkError> {
+    RelayUrl::from_str(url)
+        .map_err(|e| LinkError::new(format!("iroh relay URL {url:?}: {}", chain(&e))))
+}
+
+fn parse_lookup_url(url: &str) -> Result<url::Url, LinkError> {
+    url::Url::parse(url).map_err(|e| LinkError::new(format!("iroh lookup URL {url:?}: {e}")))
+}
+
 /// The endpoint builder for `config` — presets per ADR-0388: `N0` only when relay and lookup are both n0's; otherwise `Minimal` plus the chosen pieces.
 fn builder(config: &IrohConfig) -> Result<Builder, LinkError> {
     let mut builder = if config.relay == Helper::Default && config.address_lookup == Helper::Default
@@ -361,12 +387,7 @@ fn builder(config: &IrohConfig) -> Result<Builder, LinkError> {
         builder = match &config.relay {
             Helper::Default => builder.relay_mode(RelayMode::Default),
             Helper::Disabled => builder.relay_mode(RelayMode::Disabled),
-            Helper::Url(url) => {
-                let url = RelayUrl::from_str(url).map_err(|e| {
-                    LinkError::new(format!("iroh relay URL {url:?}: {}", chain(&e)))
-                })?;
-                builder.relay_mode(RelayMode::custom([url]))
-            }
+            Helper::Url(url) => builder.relay_mode(RelayMode::custom([parse_relay_url(url)?])),
         };
         match &config.address_lookup {
             Helper::Default => builder
@@ -375,8 +396,7 @@ fn builder(config: &IrohConfig) -> Result<Builder, LinkError> {
                 .address_lookup(DnsAddressLookup::n0_dns()),
             Helper::Disabled => builder,
             Helper::Url(url) => {
-                let url = url::Url::parse(url)
-                    .map_err(|e| LinkError::new(format!("iroh lookup URL {url:?}: {e}")))?;
+                let url = parse_lookup_url(url)?;
                 builder
                     .address_lookup(PkarrPublisher::builder(url.clone()))
                     .address_lookup(PkarrResolver::builder(url))
@@ -1110,6 +1130,24 @@ mod tests {
         let cut = clamp_close_reason(&long);
         assert_eq!(cut.len(), MAX_CLOSE_REASON_BYTES - 1);
         assert!(cut.chars().all(|c| c == 'x'));
+    }
+
+    #[test]
+    fn helper_urls_are_checked_as_the_endpoint_build_parses_them() {
+        for good in ["https://relay.example.net", "http://10.0.0.1:8080/x"] {
+            assert!(check_relay_url(good).is_ok(), "{good}");
+            assert!(check_lookup_url(good).is_ok(), "{good}");
+        }
+        // `xn--a` is not valid punycode — refused by the URL parser's IDNA step, though its characters look like a plain DNS label.
+        for bad in [
+            "https://999.999.999.999",
+            "not a url",
+            "https://",
+            "https://xn--a.example",
+        ] {
+            assert!(check_relay_url(bad).is_err(), "{bad}");
+            assert!(check_lookup_url(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -7,9 +7,15 @@
 //!
 //! ★Vocabulary wall★ — the agent vocabulary reaches this module only through the `conn_port` contract
 //! (`ConnectionHandlerFactory::handshake_error_frame` · the handler calls); nothing here decodes a command.
-// ADR-0310
+//!
+//! [`peer`] is the separate daemon ↔ daemon link (its own head; so far identity and trusted list only) — it shares nothing with the
+//! shell link above.
+// ADR-0310, ADR-0389
 
 mod auth;
 mod handshake;
+// Nothing outside its tests calls it yet — the peer link's endpoint and commands are the next pieces to use it.
+#[allow(dead_code)]
+pub(crate) mod peer;
 pub(crate) mod server;
 mod wire;

@@ -1,0 +1,29 @@
+// The crates.io package of iroh-mdns-address-lookup 0.6.1 has no license text file — the file from the upstream repository was moved over unchanged.
+// Source: https://github.com/n0-computer/iroh-address-lookups/blob/0f5f547cc65514e4537d4e66f776319ea8e30a2e/LICENSE-MIT
+//   commit = the sha1 in that version's .cargo_vcs_info.json. The crate lives in iroh-mdns-address-lookup/ (path_in_vcs), which has no license file of its own — the workspace root's file is used (MIT of Cargo.toml's MIT OR Apache-2.0).
+// crate: iroh-mdns-address-lookup 0.6.1
+Copyright 2023 N0, INC.
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.

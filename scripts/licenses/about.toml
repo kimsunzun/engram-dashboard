@@ -35,4 +35,8 @@ accepted = [
     "CC0-1.0",
     "Unlicense",
     "MPL-2.0",
+    # CDLA-Permissive-2.0 (Linux Foundation permissive data license; obligation = ship its text with the data) — added because the
+    #   distribution graph requires it: webpki-roots (the CA root data) ← iroh-relay / iroh-dns (n0-dns-resolver) ← transport `iroh`
+    #   ← daemon, not optional in iroh 1.x. Approved by the user 2026-11-21 after reviewing what the license is.
+    "CDLA-Permissive-2.0",
 ]
