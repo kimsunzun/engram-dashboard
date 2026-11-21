@@ -26,6 +26,15 @@ impl RecordReader for OneRead {
     fn read(&self) -> RecordRead {
         self.0.lock().unwrap().take().expect("read once")
     }
+
+    /// This account's token file — read only after the record ([`OneRead::read`] panics on a second read, so the order is checked).
+    fn read_token(&self) -> Option<Secret> {
+        assert!(
+            self.0.lock().unwrap().is_none(),
+            "the token is read after the record"
+        );
+        Some(Secret::new("t".repeat(64)))
+    }
 }
 
 fn record(pid: u32, version: u32) -> RecordRead {
@@ -41,7 +50,7 @@ fn alive() -> FakeLiveness {
 fn target(version: u32) -> StopTarget {
     StopTarget {
         address: Address::new("ws://127.0.0.1:5999"),
-        token: Secret::new(TOKEN),
+        token: Some(Secret::new(TOKEN)),
         protocol_version: version,
         pid: 4242,
         start_time: 77,
@@ -73,7 +82,52 @@ fn a_live_daemon_of_this_version_is_the_target_with_its_identity() {
         (1001, 77, PROTOCOL_VERSION)
     );
     assert_eq!(t.address, Address::new("ws://127.0.0.1:12345"));
-    assert_eq!(t.token.expose(), "t".repeat(64));
+    assert_eq!(
+        t.token.as_ref().map(Secret::expose),
+        Some("t".repeat(64).as_str())
+    );
+}
+
+/// A pre-S37 daemon (protocol 7) kept its token inside `daemon.json` and wrote no token file — its stop authenticates with that token;
+///   a daemon of this version never takes a `token` field from the record (ADR-0395).
+#[test]
+fn an_older_daemons_token_comes_from_its_record_and_a_current_ones_from_the_token_file() {
+    let old = br#"{"pid":1006,"host":"127.0.0.1","port":5,"token":"legacy-token","protocol_version":7,"start_time":77}"#;
+    let got = resolve_stop_target(&OneRead::new(RecordRead::Bytes(old.to_vec())), &alive());
+    let Resolved::Target(t) = got else {
+        panic!("expected a target, got {got:?}")
+    };
+    assert_eq!(t.token, Some(Secret::new("legacy-token")));
+
+    let current = format!(
+        r#"{{"pid":1007,"host":"127.0.0.1","port":5,"token":"planted","protocol_version":{PROTOCOL_VERSION},"start_time":77}}"#
+    );
+    let got = resolve_stop_target(
+        &OneRead::new(RecordRead::Bytes(current.into_bytes())),
+        &alive(),
+    );
+    let Resolved::Target(t) = got else {
+        panic!("expected a target, got {got:?}")
+    };
+    assert_eq!(t.token, Some(Secret::new("t".repeat(64))), "the token file");
+}
+
+/// No token could be read: the stop handshake sends nothing and refuses itself (terminal).
+#[test]
+fn a_target_without_a_token_sends_nothing() {
+    let mut t = target(PROTOCOL_VERSION);
+    t.token = None;
+    assert!(
+        matches!(
+            StopHandshake::new(&t).start(),
+            HandshakeStep::Reject {
+                kind: RejectKind::Terminal,
+                last: None,
+                ..
+            }
+        ),
+        "no Auth frame without a token"
+    );
 }
 
 #[test]

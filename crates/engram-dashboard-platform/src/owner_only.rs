@@ -1,11 +1,12 @@
 //! Files only the current OS account can open — creating one with that protection in place from the first instant
-//!   ([`create_owner_only`]), and checking whether an existing file is still like that ([`is_owner_only`]). Jupyter `secure_write`
-//!   precedent: the protection is passed to the create call itself, never set after it.
+//!   ([`create_owner_only`]), checking whether an existing file is still like that ([`is_owner_only`]), and whether a folder's volume
+//!   can keep that protection at all ([`volume_stores_acls`]). Jupyter `secure_write` precedent: the protection is passed to the create
+//!   call itself, never set after it.
 //!
-//! Windows only for now: outside Windows both are `Unsupported` without trying (no OS code); the behaviour defined for other OSes (mode
-//!   0600 at create, owner uid checked) is built with T-118 / T-119.
+//! Windows only for now: outside Windows all three are `Unsupported` without trying (no OS code); the behaviour defined for other OSes
+//!   (mode 0600 at create, owner uid checked) is built with T-118 / T-119.
 
-// ADR-0266, ADR-0395
+// ADR-0266, ADR-0395, ADR-0399
 
 use std::fs::File;
 use std::io;
@@ -34,7 +35,7 @@ use windows::Win32::Security::{
 #[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, GetVolumeInformationByHandleW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 #[cfg(windows)]
@@ -47,6 +48,11 @@ use crate::win::{io_error, to_wide, LocalMem};
 const SYSTEM_SID: &str = "S-1-5-18";
 #[cfg(windows)]
 const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
+
+/// The literal of `FILE_PERSISTENT_ACLS` — set when the volume keeps a file's DACL (not on FAT, exFAT). Its windows-rs constant lives
+///   behind `Win32_System_SystemServices`, not turned on (Cargo.toml).
+#[cfg(windows)]
+const FILE_PERSISTENT_ACLS: u32 = 0x8;
 
 /// Creates `path` as a new file — `AlreadyExists` if anything is there (`CREATE_NEW`) — whose security goes into the create call
 ///   itself, so the file never exists with the folder's inherited access: owner = the current account, DACL protected (nothing inherited)
@@ -148,12 +154,9 @@ fn volume_flags(file: &File) -> io::Result<u32> {
     Ok(flags)
 }
 
-/// `FILE_PERSISTENT_ACLS` must be set — without it the volume (FAT, exFAT) does not keep the DACL passed at create.
+/// [`FILE_PERSISTENT_ACLS`] must be set — without it the volume (FAT, exFAT) does not keep the DACL passed at create.
 #[cfg(windows)]
 fn require_persistent_acls(volume_flags: u32) -> io::Result<()> {
-    // The literal of FILE_PERSISTENT_ACLS — its windows-rs constant lives behind `Win32_System_SystemServices`, not turned on
-    //   (Cargo.toml).
-    const FILE_PERSISTENT_ACLS: u32 = 0x8;
     if volume_flags & FILE_PERSISTENT_ACLS == 0 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -161,6 +164,25 @@ fn require_persistent_acls(volume_flags: u32) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Whether the volume `folder` is on keeps file ACLs ([`FILE_PERSISTENT_ACLS`]) — where it does not (FAT, exFAT), [`create_owner_only`]
+///   cannot succeed. `Ok(true)` / `Ok(false)` only when the volume's flags were read; `Err` when the folder could not be opened or the
+///   flags could not be read (a missing folder = `NotFound`) — never read as either answer. A file path works too.
+/// Outside Windows = `Unsupported` (defined: T-118 / T-119).
+#[cfg(windows)]
+pub fn volume_stores_acls(folder: &Path) -> io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_FLAG_BACKUP_SEMANTICS lets a folder be opened; no access right is asked — reading the volume's flags needs none.
+    let handle = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(folder)?;
+    Ok(volume_flags(&handle)? & FILE_PERSISTENT_ACLS != 0)
+}
+#[cfg(not(windows))]
+pub fn volume_stores_acls(_folder: &Path) -> io::Result<bool> {
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 /// Is the existing file at `path` owner-only in the sense of [`create_owner_only`]: owned by the current account, its DACL present and
@@ -323,7 +345,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn both_are_unsupported_off_windows() {
+    fn all_three_are_unsupported_off_windows() {
         let path = fresh_path();
         assert_eq!(
             create_owner_only(&path).unwrap_err().kind(),
@@ -333,6 +355,31 @@ mod tests {
             is_owner_only(&path).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
+        assert_eq!(
+            volume_stores_acls(&std::env::temp_dir())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+    }
+
+    /// The temp folder is on NTFS here (the same volume every create above passes on); a FAT / exFAT volume is not at hand, so the
+    ///   `false` answer rests on the flag rule tested below and the shell's fake.
+    #[cfg(windows)]
+    #[test]
+    fn the_volume_query_reads_an_ntfs_folder_as_storing_acls() {
+        assert!(volume_stores_acls(&std::env::temp_dir()).expect("the temp folder's volume"));
+        let file = fresh_path();
+        std::fs::write(&file, b"").expect("ordinary create");
+        assert!(volume_stores_acls(&file).expect("a file path works too"));
+        std::fs::remove_file(&file).expect("clean up");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_volume_query_of_a_missing_folder_is_an_error_not_an_answer() {
+        let e = volume_stores_acls(&fresh_path()).expect_err("nothing to open");
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e:?}");
     }
 
     #[cfg(windows)]

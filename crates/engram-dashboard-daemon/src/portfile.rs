@@ -2,7 +2,8 @@
 //!
 //! Only the file name · the daemon-side write/read · the stale decision live here. The side that holds the file is [`crate::instance`], and writes from outside the crate must pass through its guard.
 //!
-//! ★That [`read`]'s log does not leak the token is guarded only by this comment (known gap)★: on a parse failure it prints the serde error's `Display`, which holds only position · expected type, and `token` is a `String`, so there is no value echo of the `invalid type` kind. Changing the field type breaks that premise. `link/auth.rs` blocks the same trap with a regression test; there is none here.
+//! [`read`]'s parse-failure log prints the serde error's `Display` (position · expected type only). The record holds no secret — the token
+//!   is in the owner-only per-account file ([`crate::instance::InstanceGuard::write_token_file`]).
 //!
 //! ★Do not revive atomic replacement (temp file + rename)★: the daemon holds this file without delete sharing, so rename is refused (`ERROR_SHARING_VIOLATION`). [`write_in_place`] writes in place to the held handle.
 //!
@@ -10,7 +11,7 @@
 //!
 //! ★Do not periodically re-emit a vanished file (do not revive it)★: a running app silently rewriting a file the user just deleted is reported as a bug in every surveyed precedent (ADR-0135 rejected alternative 1). It cannot be deleted after the merge anyway.
 //!
-//! Security: the token is kept in this file only (no logging).
+//! Security: this file keeps its inherited ACL and carries no token; its owner-account field is a hint only (ADR-0395).
 
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom, Write};
@@ -85,9 +86,9 @@ mod tests {
             pid: 1234,
             host: "127.0.0.1".into(),
             port: 54321,
-            token: engram_dashboard_protocol::Secret::new("a".repeat(64)),
             protocol_version: 1,
             start_time: 0,
+            owner_account: "S-1-5-21-1-2-3-1001".into(),
         }
     }
 
@@ -119,7 +120,7 @@ mod tests {
         let dir = temp_dir("no-tail");
         let path = dir.join(DAEMON_FILE);
         let mut long = sample();
-        long.token = engram_dashboard_protocol::Secret::new("b".repeat(4096));
+        long.owner_account = "b".repeat(4096);
         let mut f = open_held(&path);
         write_in_place(&mut f, &long).unwrap();
 

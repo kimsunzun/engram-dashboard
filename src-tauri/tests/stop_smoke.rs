@@ -257,17 +257,19 @@ fn diag_send_with_close_mode(mode: &str) -> bool {
     let spawn_pid = child.id();
 
     let daemon_pid = wait_published(&data_dir, Duration::from_secs(15)).expect("published");
-    let info = engram_dashboard_protocol::DaemonInfo::parse(
-        &std::fs::read(engram_dashboard_lib::discovery::DataLayout::new(&data_dir).daemon_file())
-            .unwrap(),
-    )
-    .unwrap();
+    let layout = engram_dashboard_lib::discovery::DataLayout::new(&data_dir);
+    let info =
+        engram_dashboard_protocol::DaemonInfo::parse(&std::fs::read(layout.daemon_file()).unwrap())
+            .unwrap();
+    // ADR-0395: the token is in this account's owner-only file, read after the record.
+    let account = engram_dashboard_platform::account::current_account_id().unwrap();
+    let token = std::fs::read_to_string(layout.token_file(&account)).unwrap();
 
     let url = format!("ws://{}:{}", info.host, info.port);
     let stream = TcpStream::connect(format!("{}:{}", info.host, info.port)).unwrap();
     let (mut ws, _r) = tungstenite::client(&url, stream).unwrap();
     let auth = serde_json::to_string(&engram_dashboard_protocol::handshake::AuthFrame::Auth {
-        token: info.token.clone(),
+        token: engram_dashboard_protocol::Secret::new(token),
         protocol_version: engram_dashboard_protocol::PROTOCOL_VERSION,
     })
     .unwrap();

@@ -2340,6 +2340,12 @@ mod real_process {
     use engram_dashboard_daemon::data_dir::DataLayout;
     use engram_dashboard_protocol::DaemonInfo;
 
+    /// This account's token file in `data_dir` (ADR-0395) — `None` if it cannot be read.
+    fn read_token_file(data_dir: &Path) -> Option<String> {
+        let account = engram_dashboard_platform::account::current_account_id().ok()?;
+        std::fs::read_to_string(DataLayout::new(data_dir).token_file(&account)).ok()
+    }
+
     const DAEMON_EXE: &str = env!("CARGO_BIN_EXE_engram-dashboard-daemon");
 
     /// A unique isolation context per test. A unique data_dir (ENGRAM_DATA_DIR) suffices: since ADR-0134 the single-instance lock scope is the data folder, so different folders diverge both roster and lock.
@@ -2537,6 +2543,7 @@ mod real_process {
             }
         };
 
+        let token_a = read_token_file(&data_dir);
         let mut daemon_b = spawn_daemon_in(&data_dir);
         let exited_fast = wait_until(std::time::Duration::from_secs(3), || {
             matches!(daemon_b.try_wait(), Ok(Some(_)))
@@ -2545,6 +2552,7 @@ mod real_process {
         let b_status = daemon_b.try_wait().ok().flatten();
 
         let info_after = poll_daemon_json(&data_dir, std::time::Duration::from_secs(2));
+        let token_after = read_token_file(&data_dir);
 
         kill_daemon(&mut daemon_a);
         if b_status.is_none() {
@@ -2571,9 +2579,10 @@ mod real_process {
             info_after.pid, info_a.pid,
             "the second daemon must not overwrite daemon.json (pid unchanged)"
         );
+        assert!(token_a.is_some(), "A must write its token file");
         assert_eq!(
-            info_after.token, info_a.token,
-            "the daemon.json token too is unchanged (B must not issue a new token)"
+            token_after, token_a,
+            "the token file too is unchanged (B must not issue a new token)"
         );
     }
 
@@ -2600,25 +2609,38 @@ mod real_process {
             pid: dead_pid,
             host: "127.0.0.1".into(),
             port: 59999,
-            token: Secret::new("d".repeat(64)),
             protocol_version: PROTOCOL_VERSION,
             // After ADR-0134 the stale judgment is for diagnostic logs, so this value does not decide whether to start — the right to overwrite comes from the folder lock. The value stays to keep the realistic "dead pid + mismatched creation time" combination.
             start_time: 0xDEAD_BEEF,
+            owner_account: String::new(),
         };
         let stale_json = serde_json::to_vec_pretty(&stale).expect("stale serialization");
         let record_path = DataLayout::new(&data_dir).daemon_file();
         std::fs::create_dir_all(record_path.parent().expect("run folder"))
             .expect("run folder creation");
         std::fs::write(&record_path, &stale_json).expect("stale daemon.json write");
+        // The stale run's token file, with the folder's inherited ACL (as a pre-S37 folder or a planted file would have).
+        let account = engram_dashboard_platform::account::current_account_id().expect("account");
+        let token_path = DataLayout::new(&data_dir).token_file(&account);
+        std::fs::write(&token_path, "d".repeat(64)).expect("stale token file write");
 
         let mut daemon = spawn_daemon_iso(&ctx);
 
         let mut latest: Option<DaemonInfo> = None;
+        // ADR-0395: the token file is replaced before the record is published — read the token the moment the new record is first seen.
+        //   (Probabilistic pin: with the order reversed, this read could land in the window where the stale token is still in place.)
+        let mut fresh_token = None;
         let overwritten = wait_until(std::time::Duration::from_secs(15), || {
             latest = poll_daemon_json(&data_dir, std::time::Duration::from_millis(100));
-            matches!(&latest, Some(i) if i.pid != dead_pid)
+            let seen = matches!(&latest, Some(i) if i.pid != dead_pid);
+            if seen {
+                fresh_token = read_token_file(&data_dir);
+            }
+            seen
         });
 
+        let token_owner_only =
+            engram_dashboard_platform::owner_only::is_owner_only(&token_path).ok();
         kill_daemon(&mut daemon);
         let err = drain_logs(&mut daemon);
         let _ = std::fs::remove_dir_all(&data_dir);
@@ -2636,10 +2658,18 @@ mod real_process {
             fresh.start_time != 0,
             "the new daemon must record a valid start_time"
         );
+        let fresh_token =
+            fresh_token.expect("the new daemon's token file, there when its record first appears");
         assert_ne!(
-            fresh.token.expose(),
+            fresh_token,
             "d".repeat(64),
-            "the new daemon must issue a new token (keeping the stale token is forbidden)"
+            "the new daemon must issue a new token before it publishes its record (keeping the stale token is forbidden)"
+        );
+        assert_eq!(fresh_token.len(), 64);
+        assert_eq!(
+            token_owner_only,
+            Some(true),
+            "the wider stale file is replaced by an owner-only one"
         );
         assert!(fresh.port != 0, "the new daemon must record a valid port");
     }

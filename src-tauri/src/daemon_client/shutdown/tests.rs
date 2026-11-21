@@ -11,6 +11,7 @@ use engram_dashboard_transport::testing::{ClientMsg, ManualClock, MemoryEndpoint
 use engram_dashboard_transport::{Address, Frame};
 use tokio::task::JoinHandle;
 
+use crate::daemon_client::link::account::{AccountCheckedDialer, AccountRefusalRecord, Accounts};
 use crate::daemon_client::link::endpoint::{Current, Endpoint, EndpointSource};
 use crate::daemon_client::link::stop::RecordRead;
 use crate::daemon_client::link::DaemonKey;
@@ -51,6 +52,11 @@ impl Record {
 }
 
 impl RecordReader for Record {
+    /// The token every scripted record pairs with (what `discovery::tests::info` records carried before the token file).
+    fn read_token(&self) -> Option<Secret> {
+        Some(Secret::new("t".repeat(64)))
+    }
+
     fn read(&self) -> RecordRead {
         self.reads.fetch_add(1, Ordering::SeqCst);
         let held = self.hold.lock().unwrap().take();
@@ -138,12 +144,12 @@ impl LinkSource {
 }
 
 impl EndpointSource for LinkSource {
-    fn ensure(&self, _timeout: Duration) -> Result<Endpoint, String> {
+    fn ensure(&self, _timeout: Duration) -> Result<Endpoint, crate::discovery::StartFailure> {
         self.found
             .lock()
             .unwrap()
             .clone()
-            .ok_or_else(|| "no daemon in this test".to_owned())
+            .ok_or_else(|| crate::discovery::StartFailure::other("no daemon in this test"))
     }
 
     fn current(&self) -> Current {
@@ -155,6 +161,13 @@ impl EndpointSource for LinkSource {
             Some(endpoint) => Current::Live(endpoint),
             None => Current::Absent,
         }
+    }
+
+    fn verify_server(
+        &self,
+        _ends: Option<engram_dashboard_transport::SocketEnds>,
+    ) -> Result<(), crate::daemon_client::link::account::CheckFailure> {
+        Ok(())
     }
 }
 
@@ -177,6 +190,20 @@ impl Stage {
     }
 
     fn with_target(record: Arc<Record>, presence: Presence, after_kill: Presence) -> Self {
+        Self::build(record, presence, after_kill, None)
+    }
+
+    /// A live daemon whose stop dial goes through the account check, with `accounts` naming the listener's account (ADR-0395).
+    fn account_checked(record: Arc<Record>, accounts: Arc<dyn Accounts>) -> Self {
+        Self::build(record, Presence::Alive, Presence::Gone, Some(accounts))
+    }
+
+    fn build(
+        record: Arc<Record>,
+        presence: Presence,
+        after_kill: Presence,
+        accounts: Option<Arc<dyn Accounts>>,
+    ) -> Self {
         let clock = ManualClock::new();
         let started = clock.now();
         let daemons = MemoryNetwork::new();
@@ -197,6 +224,15 @@ impl Stage {
             current: Mutex::new(None),
         });
         let events = Arc::new(RecordingEvents::default());
+        let account_refusals = Arc::new(AccountRefusalRecord::default());
+        let dialer: Arc<dyn Dialer> = match accounts {
+            Some(accounts) => Arc::new(AccountCheckedDialer::new(
+                daemons.dialer(),
+                accounts,
+                account_refusals.clone(),
+            )),
+            None => daemons.dialer(),
+        };
         let client = Arc::new(DaemonClient::new_on_link_with_stop(
             Handle::current(),
             link_net.dialer(),
@@ -209,7 +245,8 @@ impl Stage {
                 reader: record.clone(),
                 liveness: Arc::new(FakeLiveness { dead: vec![] }),
                 process: target.clone(),
-                dialer: daemons.dialer(),
+                dialer,
+                account_refusals,
             },
         ));
         Self {
@@ -306,7 +343,7 @@ async fn connected_link(s: &Stage) -> Arc<MemoryEndpoint> {
     *s.source.found.lock().unwrap() = Some(Endpoint {
         key: DaemonKey::new("local"),
         address: Address::new("ws://127.0.0.1:5123"),
-        credential: Secret::new("t".repeat(64)),
+        credential: Some(Secret::new("t".repeat(64))),
     });
     let connect = {
         let client = s.client.clone();
@@ -359,6 +396,67 @@ async fn nothing_sent_to_a_live_daemon_kills_it_at_once_with_the_flight_start_id
     );
     assert_eq!(s.record.reads(), 1, "one read per flight");
     assert_eq!(s.daemons.dials(), 1, "one dial");
+}
+
+/// ADR-0395: the stop dial is refused for the listener's OS account (another account's, or unverifiable — a memory link has no TCP
+///   ends) → the flight ends `no_target` / `account_refused`: nothing sent, and the recorded pid is never killed, though a plain
+///   "nothing sent" would kill it at once.
+#[tokio::test]
+async fn a_stop_refused_for_the_listeners_account_sends_nothing_and_kills_nothing() {
+    use crate::daemon_client::link::account::fakes::{FixedAccounts, OTHER};
+    let s = Stage::account_checked(
+        Record::new([our_daemon()]),
+        Arc::new(FixedAccounts(Some(OTHER))),
+    );
+    let result = joined("stop", s.stop_with_reason(StopPlan::User)).await;
+    assert_eq!(
+        result,
+        StopResult {
+            outcome: StopOutcome::NoTarget,
+            reason: Some(StopReason::AccountRefused),
+        }
+    );
+    assert!(s.target.kills().is_empty(), "nothing killed");
+    assert_eq!(s.daemons.dials(), 1, "the listener was dialed once");
+    let far = s.daemons.accept().expect("the dialed link's far end");
+    assert!(far.frames().is_empty(), "nothing sent");
+}
+
+/// Production's stop ports dial through the account check and share its refusal record — a real ws listener that the account seam names
+///   as another account's is refused and recorded (dropping the checked dialer from `StopPorts::local` fails this).
+#[tokio::test]
+async fn the_local_stop_ports_dial_through_the_account_check() {
+    use crate::daemon_client::link::account::fakes::{FixedAccounts, OTHER};
+    use crate::daemon_client::link::account::AccountRefusal;
+    use engram_dashboard_transport::{CloseCode, DialFailure};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepting = tokio::spawn(async move {
+        let mut kept = Vec::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            kept.push(tokio_tungstenite::accept_async(stream).await.unwrap());
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let ports = StopPorts::local_with(dir.path(), Arc::new(FixedAccounts(Some(OTHER))));
+    let failure = ports
+        .dialer
+        .dial(&Address::new(format!("ws://127.0.0.1:{port}/")))
+        .await
+        .err();
+    assert!(
+        matches!(
+            &failure,
+            Some(DialFailure::Refused { code, .. }) if *code == CloseCode::HANDSHAKE_REJECTED
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(
+        ports.account_refusals.take(),
+        Some(AccountRefusal::OtherAccount)
+    );
+    accepting.abort();
 }
 
 #[tokio::test]
@@ -863,7 +961,7 @@ async fn version_band_then_a_live_daemon_for_the_re_add(s: &Stage) {
     *s.source.found.lock().unwrap() = Some(Endpoint {
         key: DaemonKey::new("local"),
         address: Address::new("ws://127.0.0.1:5123"),
-        credential: Secret::new("t".repeat(64)),
+        credential: Some(Secret::new("t".repeat(64))),
     });
 }
 

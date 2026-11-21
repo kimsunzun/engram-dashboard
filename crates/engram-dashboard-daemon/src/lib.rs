@@ -6,7 +6,12 @@
 //! Scope of this crate (ADR-0130): the application layer, assembly (`run()` decides the call order of the parts), and process
 //! housekeeping — the single-instance guard (`instance`) and `daemon.json` (`portfile`). The accepting side runs on the transport crate
 //! (`link`) and meets the upper layers through the connection port contract (`conn_port`).
+//!
+//! Other OS accounts (ADR-0395): the shell token is written to this account's owner-only `daemon-token.<account>` under the held lock and
+//! before `daemon.json` (which carries the owner account but no token); the shell link and the control listener refuse a client of another
+//! account before any handshake (`account_gate`).
 
+mod account_gate;
 pub mod agent_conn;
 pub mod command_delivery;
 pub mod command_roster;
@@ -73,7 +78,7 @@ fn resolve_data_dir() -> PathBuf {
     data_dir::default_data_dir()
 }
 
-/// Security: do not print the return value to logs (it is written only to daemon.json).
+/// Security: do not print the return value to logs (it is written only to the owner-only token file — ADR-0395).
 pub fn generate_token() -> Result<String, getrandom::Error> {
     let mut buf = [0u8; 32];
     getrandom::getrandom(&mut buf)?;
@@ -317,6 +322,8 @@ async fn run_accept_loop(
     mut shutdown_rx: watch::Receiver<bool>,
     enable_ctrl_c: bool,
     keepalive: KeepaliveConfig,
+    // The accept-time account check of the shell link (ADR-0395).
+    gate: account_gate::AccountGate,
 ) {
     // The fanout port is pulled from the very value the accept branch below registers, so "broadcast target ≠ registration target" cannot be
     //   written inside this function (ADR-0129); remaining representable places and the rule are in the `DaemonWiring` comment.
@@ -346,6 +353,7 @@ async fn run_accept_loop(
         &expected_token,
         PROTOCOL_VERSION,
         keepalive,
+        gate,
     );
 
     let stop = async move {
@@ -477,6 +485,18 @@ pub async fn run() -> Result<(), i32> {
         );
     }
 
+    // 2.6) The OS account this daemon runs under — names the token file, goes into daemon.json as the owner hint, and is what the two
+    //   listeners compare a client's account with (ADR-0395). Without it none of those can be done, so the start is refused.
+    let own_account = match engram_dashboard_platform::account::current_account_id() {
+        Ok(account) => account,
+        Err(e) => {
+            tracing::error!(
+                "cannot start because this process's OS account could not be read: {e}"
+            );
+            return Err(1);
+        }
+    };
+
     // 3) bind → get the actual port.
     let listening = match Listening::bind_loopback() {
         Ok(l) => l,
@@ -495,8 +515,20 @@ pub async fn run() -> Result<(), i32> {
             return Err(1);
         }
     };
+    // 4.1) Replace this account's token file — under the held lock (only the guard can) and before daemon.json is published in 8), so a
+    //   reader that takes the record first never pairs it with an older token. A failure refuses the start: an undeletable previous file
+    //   (another account's) or a file that cannot be made owner-only (a volume without file ACLs — ADR-0399).
+    // ADR-0395
+    let token_path = layout.token_file(&own_account);
+    if let Err(e) = guard.write_token_file(&token_path, &token) {
+        tracing::error!(
+            path = %token_path.display(),
+            "cannot start because the shell-token file could not be written owner-only: {e}"
+        );
+        return Err(1);
+    }
 
-    // ADR-0086: control channel token registry — a different concern from the daemon.json WS token in 4) (no mixing — ADR-0086 §Context).
+    // ADR-0086: control channel token registry — a different concern from the shell token in 4) (no mixing — ADR-0086 §Context).
     let control_registry = Arc::new(control::registry::ControlRegistry::new());
 
     // 5b) Multi-viewer negotiation state — shared by all connections.
@@ -537,7 +569,7 @@ pub async fn run() -> Result<(), i32> {
     let (control, mut mcp_server_handle): (
         Arc<dyn engram_dashboard_agent::types::ControlChannel>,
         Option<control::mcp_server::McpServerHandle>,
-    ) = match control::mcp_server::start_mcp_server_with_help(
+    ) = match control::mcp_server::start_mcp_server_gated(
         control_registry.clone(),
         manager_slot.clone(),
         messaging_slot.clone(),
@@ -545,6 +577,7 @@ pub async fn run() -> Result<(), i32> {
         command_bus.clone(),
         // ADR-0285: the help body source is the same anchor (install location) as the priming below; built here so the server does not build it inside (tests put in a known body).
         control::help::HelpSource::from_install_root(),
+        account_gate::AccountGate::os(&own_account),
     )
     .await
     {
@@ -645,18 +678,18 @@ pub async fn run() -> Result<(), i32> {
         },
     );
 
-    // 7) Keep the token for auth comparison in an Arc (the token moves into daemon.json, so a shared copy is taken first).
-    let expected_token = Arc::new(token.clone());
+    // 7) Keep the token for auth comparison in an Arc.
+    let expected_token = Arc::new(token);
 
-    // 8) Write daemon.json.
+    // 8) Write daemon.json — no token (it is in the token file of 4.1); the owner account is a hint only (ADR-0395).
     let start_time = engram_dashboard_platform::process::current_process_start_time().unwrap_or(0);
     let info = crate::portfile::DaemonInfo {
         pid: std::process::id(),
         host: "127.0.0.1".to_string(),
         port,
-        token: engram_dashboard_protocol::Secret::new(token),
         protocol_version: PROTOCOL_VERSION,
         start_time,
+        owner_account: own_account.clone(),
     };
     // Write with the handle obtained in 2) (ADR-0135): a temp file + rename is refused because we hold the file with delete sharing closed, and
     //   writing before acquisition would mix two daemons' writes.
@@ -699,6 +732,7 @@ pub async fn run() -> Result<(), i32> {
         shutdown_rx,
         true, // production: Ctrl-C graceful shutdown enabled
         KeepaliveConfig::default(),
+        account_gate::AccountGate::os(&own_account),
     )
     .await;
 
@@ -801,6 +835,9 @@ async fn start_test_server_inner(
 ) -> std::io::Result<TestServerHandle> {
     let listening = Listening::bind_loopback().map_err(std::io::Error::other)?;
     let port = listening.port();
+    // The same account check as production: the harness's clients are this test process, so the real lookup admits them.
+    let gate =
+        account_gate::AccountGate::os(&engram_dashboard_platform::account::current_account_id()?);
 
     // getrandom::Error does not implement std::error::Error, so it is converted to a message and wrapped in io::Error.
     let token =
@@ -900,6 +937,7 @@ async fn start_test_server_inner(
                 shutdown_rx,
                 false, // test: Ctrl-C not installed (shutdown only via watch)
                 keepalive,
+                gate,
             )
             .await;
         })

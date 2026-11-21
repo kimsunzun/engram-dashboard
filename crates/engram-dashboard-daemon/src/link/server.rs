@@ -22,17 +22,18 @@ use std::time::Duration;
 
 use engram_dashboard_transport::ws::{AcceptPolicy, AcceptRefusal, AcceptRefusals, WsListener};
 use engram_dashboard_transport::{
-    Accepted, Address, Clock, CloseCode, DialFailure, Dialer, DisconnectCause, Generation, Inbox,
-    Incoming, LinkError, LinkRx, LinkTx, Listener, Peer, PeerId, Policy, QueueFullPolicy, Registry,
-    SendError, SystemClock, TransportEvent,
+    Accepted, Address, Clock, CloseCode, DialFailure, Dialer, DisconnectCause, Generation,
+    Handshake, Inbox, Incoming, LinkError, LinkRx, LinkTx, Listener, Peer, PeerId, Policy,
+    QueueFullPolicy, Registry, SendError, SystemClock, TransportEvent,
 };
 use futures_util::future::BoxFuture;
 use futures_util::{Stream, StreamExt};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use super::auth::AuthCheck;
-use super::handshake::DaemonHandshake;
+use super::handshake::{DaemonHandshake, RefusedHandshake};
 use super::wire::{DaemonWire, RawIn, RawOut};
+use crate::account_gate::AccountGate;
 use crate::conn_port::{
     ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameError, FrameFanout,
     FrameSink, Saturated,
@@ -371,6 +372,8 @@ pub(crate) struct Server {
     conns: ConnRegistry,
     handlers: Arc<dyn ConnectionHandlerFactory>,
     auth: Arc<AuthCheck>,
+    /// The accept-time account check — a client of another OS account is refused before its first frame is read (ADR-0395).
+    gate: AccountGate,
     policy: Policy,
     /// The read-end wait ([`Server::run_connection`]) — after the read side ends, dispatch gets at most one ping interval.
     ping_interval: Duration,
@@ -388,9 +391,9 @@ fn inbox_stream(inbox: Inbox<DaemonWire>) -> InboxStream {
 }
 
 impl Server {
-    /// `expected_token` is the token from daemon.json and `expected_protocol_version` the version to accept — both injected,
-    /// so this layer reads neither. `conns` must be the registry the upper layer's fan-out sends through
-    /// (`DaemonWiring`). `clock` = [`Listening::clock`].
+    /// `expected_token` is this run's token (the one written to the owner-only token file) and `expected_protocol_version` the
+    /// version to accept — both injected, so this layer reads neither. `conns` must be the registry the upper layer's fan-out sends
+    /// through (`DaemonWiring`). `clock` = [`Listening::clock`]. `gate` = the daemon's own account and the client-account lookup.
     pub(crate) fn new(
         clock: Arc<dyn Clock>,
         conns: ConnRegistry,
@@ -398,6 +401,7 @@ impl Server {
         expected_token: &str,
         expected_protocol_version: u32,
         keepalive: KeepaliveConfig,
+        gate: AccountGate,
     ) -> Arc<Self> {
         let policy = accepted_policy(keepalive);
         Arc::new(Self {
@@ -413,6 +417,7 @@ impl Server {
                 expected_token.to_string(),
                 expected_protocol_version,
             )),
+            gate,
             policy,
             ping_interval: keepalive.ping_interval,
             labels: AtomicU64::new(1),
@@ -464,21 +469,38 @@ impl Server {
         }
     }
 
-    /// Puts one accepted link on the registry and returns the connection's whole life — handshake, operation, cleanup.
+    /// Checks the client's OS account, puts the accepted link on the registry and returns the connection's whole life — handshake,
+    ///   operation, cleanup. A refused client still goes through the registry, with a handshake that only sends the refusal and closes, so
+    ///   the auth deadline, the permit and the close follow the one path every link takes.
+    // ADR-0395
     fn serve(self: &Arc<Self>, accepted: Accepted) -> impl Future<Output = ()> + Send + 'static {
         let remote = accepted.info().remote.clone().unwrap_or_else(|| "?".into());
         let label = PeerId::new(format!(
             "accepted-{}",
             self.labels.fetch_add(1, Ordering::Relaxed)
         ));
-        let handshake = Arc::new(DaemonHandshake::new(
-            self.auth.clone(),
-            self.handlers.clone(),
-            remote.clone(),
-        ));
-        let (peer, inbox) = self.registry.attach(label, accepted, handshake);
+        let ends = accepted.info().socket_ends;
         let this = Arc::clone(self);
-        async move { this.run_connection(peer, inbox, remote).await }
+        async move {
+            // No ends (not a TCP link) cannot be verified — the gate refuses and logs it, throttled like every refusal.
+            let admitted = this
+                .gate
+                .admit(ends.map(|e| e.peer), ends.map(|e| e.local))
+                .await;
+            let handshake: Arc<dyn Handshake> = match admitted {
+                Ok(()) => Arc::new(DaemonHandshake::new(
+                    this.auth.clone(),
+                    this.handlers.clone(),
+                    remote.clone(),
+                )),
+                Err(refusal) => Arc::new(RefusedHandshake::new(
+                    this.handlers.as_ref(),
+                    refusal.message(),
+                )),
+            };
+            let (peer, inbox) = this.registry.attach(label, accepted, handshake);
+            this.run_connection(peer, inbox, remote).await
+        }
     }
 
     async fn run_connection(

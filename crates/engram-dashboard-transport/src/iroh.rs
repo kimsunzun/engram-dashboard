@@ -679,6 +679,7 @@ async fn admit(incoming: Incoming, gate: Arc<Gate>, ready: mpsc::Sender<Accepted
         remote: remote.map(|text| mask_reason(&text)),
         origin: None,
         peer_key: Some(key.to_vec()),
+        socket_ends: None,
     };
     let (tx, rx) = split_link(conn, send, recv, gate.max_payload);
     let accepted = Accepted::new(tx, rx, info, upgraded_at, permit);

@@ -19,7 +19,8 @@
 //! ## Guarantees / left to the consumer
 //!
 //! Guaranteed: the [`Frame`]↔`Message` round trip · close code and message in both directions (so 「connected but rejected」 crosses as [`LinkRead::Closed`],
-//! ADR-0180 decision 5) · Ping/Pong raised as [`Frame::Keepalive`]. The translation table is unit-tested (`to_message`/`from_message` are pure); the socket
+//! ADR-0180 decision 5) · Ping/Pong raised as [`Frame::Keepalive`] · the TCP ends of every link, typed (accepted: [`LinkInfo::socket_ends`];
+//! dialed: [`LinkTx::socket_ends`]) — facts for a consumer's own check, never a decision here (ADR-0395). The translation table is unit-tested (`to_message`/`from_message` are pure); the socket
 //! round trip is in `tests/`, and nothing measures the keepalive round trip. Left to the consumer: address syntax · reconnect/deadline/keepalive timing
 //! ([`crate::Policy`]; ★the dialer applies no deadline of its own★ — only the upgrade deadline, a pre-supervisor phase, lives in [`AcceptPolicy`]) ·
 //! auth and version negotiation ([`crate::Handshake`]) · the accept loop and registry ([`Listener::accept`] → [`crate::Registry::attach`]).
@@ -89,7 +90,7 @@ use crate::clock::{with_deadline, Clock, Elapsed};
 use crate::frame::{Close, CloseCode, Frame};
 use crate::link::{
     Accepted, Address, ConnPermit, DialFailure, Dialer, LinkError, LinkInfo, LinkRead, LinkRx,
-    LinkTx, Listener, PermitPool,
+    LinkTx, Listener, PermitPool, SocketEnds,
 };
 use crate::mask::mask_reason;
 
@@ -177,8 +178,22 @@ impl Dialer for WsDialer {
             )
             .await
             .map_err(|e| LinkError::new(format!("ws connect {url}: {e}")))?;
-            Ok(split_link(ws, max))
+            let ends = dialed_ends(ws.get_ref());
+            Ok(split_link(ws, max, ends))
         })
+    }
+}
+
+/// The TCP ends of a dialed stream — `None` for a TLS stream (TLS is off in this crate's features) or when the OS will not tell.
+fn dialed_ends(
+    stream: &tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+) -> Option<SocketEnds> {
+    match stream {
+        tokio_tungstenite::MaybeTlsStream::Plain(tcp) => Some(SocketEnds {
+            local: tcp.local_addr().ok()?,
+            peer: tcp.peer_addr().ok()?,
+        }),
+        _ => None,
     }
 }
 
@@ -441,9 +456,11 @@ async fn drive(tcp: TcpListener, shared: Arc<Shared>, ready: mpsc::Sender<Accept
                     Some(permit) => {
                         // ★Stamp the deadline reference before spawning★ — inside the task, spawn delay would escape the deadline (TRD 3 §5 12).
                         let accepted_at = shared.clock.now();
+                        let ends = stream.local_addr().ok().map(|local| SocketEnds { local, peer: remote });
                         upgrades.spawn(upgrade(
                             stream,
                             remote,
+                            ends,
                             accepted_at,
                             permit,
                             shared.clone(),
@@ -485,6 +502,7 @@ struct Screened {
 async fn upgrade<S: WsStream>(
     stream: S,
     remote: SocketAddr,
+    ends: Option<SocketEnds>,
     accepted_at: Instant,
     permit: ConnPermit,
     shared: Arc<Shared>,
@@ -553,11 +571,12 @@ async fn upgrade<S: WsStream>(
         Some(Ok(origin)) => origin,
         _ => None,
     };
-    let (tx, rx) = split_link(ws, policy.max_message_bytes);
+    let (tx, rx) = split_link(ws, policy.max_message_bytes, ends);
     let info = LinkInfo {
         remote: Some(remote.to_string()),
         origin,
         peer_key: None,
+        socket_ends: ends,
     };
     let accepted = Accepted::new(tx, rx, info, upgraded_at, permit);
     match ready.try_send(accepted) {
@@ -680,10 +699,15 @@ fn host_matches(value: &str, names: &[String], local_port: u16) -> bool {
 pub(crate) fn split_link<S: WsStream>(
     ws: WebSocketStream<S>,
     max_payload: usize,
+    ends: Option<SocketEnds>,
 ) -> (Box<dyn LinkTx>, Box<dyn LinkRx>) {
     let (sink, stream) = ws.split();
     (
-        Box::new(WsTx { sink, max_payload }),
+        Box::new(WsTx {
+            sink,
+            max_payload,
+            ends,
+        }),
         Box::new(WsRx {
             stream,
             failed: false,
@@ -697,6 +721,8 @@ struct WsTx<S: WsStream> {
     sink: SplitSink<WebSocketStream<S>, Message>,
     /// Outgoing frame payload cap — the size cap received by the side that opened this link ([`split_link`]).
     max_payload: usize,
+    /// [`LinkTx::socket_ends`].
+    ends: Option<SocketEnds>,
 }
 
 impl<S: WsStream> LinkTx for WsTx<S> {
@@ -742,6 +768,10 @@ impl<S: WsStream> LinkTx for WsTx<S> {
             let _ = self.sink.send(message).await;
             let _ = self.sink.close().await;
         })
+    }
+
+    fn socket_ends(&self) -> Option<SocketEnds> {
+        self.ends
     }
 }
 
@@ -958,7 +988,7 @@ mod tests {
             None,
         )
         .await;
-        let (mut tx, _rx) = split_link(ws, usize::MAX);
+        let (mut tx, _rx) = split_link(ws, usize::MAX, None);
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             tx.close(Close::new(CloseCode(4001), "긴".repeat(200))), // hangul-ok
@@ -1005,7 +1035,7 @@ mod tests {
                 None,
             )
             .await;
-            let (mut tx, _rx) = split_link(ws, limit);
+            let (mut tx, _rx) = split_link(ws, limit, None);
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 tx.close(Close::new(CloseCode(4001), "a".repeat(200))),
@@ -1042,7 +1072,7 @@ mod tests {
             None,
         )
         .await;
-        let (mut tx, _rx) = split_link(ws, 8);
+        let (mut tx, _rx) = split_link(ws, 8, None);
         let over = tx.send(Frame::Binary(vec![0; 9])).await;
         assert!(over.is_err(), "cap + 1 went out");
         assert!(
@@ -1172,6 +1202,7 @@ mod tests {
             upgrade(
                 stream,
                 "127.0.0.1:5555".parse().unwrap(),
+                None,
                 self.clock.now(),
                 self.permits.try_take().expect("permit"),
                 self.shared.clone(),

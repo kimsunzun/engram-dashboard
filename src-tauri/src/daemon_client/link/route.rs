@@ -13,7 +13,8 @@
 //! A handle that has not connected shows its first failed attempt as `Down` at once — no `Reconnecting` phase on a first connect (TRD revision 9 ①); the transport retries in the background and a later `Connected` is an edge. Failed attempts are logged throttled (`FailureLog` — ADR-0346 decision 5): retries never run out, so a line per attempt would repeat as long as the daemon is away.
 //!
 //! ## Bands (TRD S21 trd-3-2-u5 §4 · R7)
-//! The shown status is `(state, band)`, emitted when either changes. The band comes from the current handle's last answer: `Connected` · `Disconnected` → none; `ConnectFailed` → ① (for a handle that connected before, the first failed reconnect: ① appears while `state` stays `reconnecting`, D1); `Rejected` → ② when the handle's dial refused the daemon's version ([`RefusalSlot`]), else ① `refused`; an explicit frontend close ([`RouteState::close`]) → none for the rest of that handle. Two holds on top: a never-connected handle shows none while a cold boot's start has not answered (R20); a re-add keeps the shown band until the new handle's first answer. A daemon stop holds nothing.
+//! The shown status is `(state, band)`, emitted when either changes. The band comes from the current handle's last answer: `Connected` · `Disconnected` → none; `ConnectFailed` → ① (for a handle that connected before, the first failed reconnect: ① appears while `state` stays `reconnecting`, D1); `Rejected` → ② when the handle's dial refused the daemon's version ([`RefusalSlot`]), the account band when it refused the listener's OS account (ADR-0395), else ① `refused`; an explicit frontend close ([`RouteState::close`]) → none for the rest of that handle. Two holds on top: a never-connected handle shows none while a cold boot's start has not answered (R20); a re-add keeps the shown band until the new handle's first answer. A daemon stop holds nothing.
+//! The volume band (ADR-0399) is no handle's answer: an ensure attempt refused before a spawn ([`RouteState::set_start_refusal`]) holds it on the key — over every handle answer except an explicit close, across re-adds and the background retries' `ConnectFailed`, and through the boot hold (it is the start's own answer) — until a later ensure attempt's answer, a `Connected` or a `Rejected` replaces it or an explicit close drops it. One ordering rule decides between start answers: the latest-started attempt wins — each answer carries the place its attempt took in the client's start-attempt order when it began, a close takes a place too, and an answer older than the newest answer or close applied is ignored. Cleared before any handle answer, it leaves ① as that route's answer (held by the boot hold like any answer), never the old volume band. A refusal while the connection is open is ignored. A key with no handle yet gets a handle-less route to show it.
 //!
 //! ## Replies skip this path (§3-3 B2)
 //! A reply wakes its `request` inside the transport and never reaches the inbox, so it can resolve before events the daemon sent ahead of it are routed (pinned by a test below; caller survey in the TRD §6-2 U2 C note).
@@ -32,14 +33,17 @@ use engram_dashboard_transport::{
 
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
+use super::account::{AccountRefusal, LISTENER_GONE};
 use super::dialer::{
-    RefusalSlot, VersionRefusal, BUSY_UNKNOWN, NOT_REGISTERED, NO_RECORD, READ_FAILED, UNUSABLE,
+    RefusalSlot, VersionRefusal, BUSY_UNKNOWN, NOT_REGISTERED, NO_RECORD, NO_TOKEN, READ_FAILED,
+    UNUSABLE,
 };
 use super::wire::{ShellIn, ShellWire};
 use super::{DaemonKey, HandleToken};
 use crate::daemon_client::events::DaemonEvents;
 use crate::daemon_client::protocol_state;
 use crate::daemon_client::{AgentNamesSink, Band, ConnectionState, ConnectionStatus};
+use crate::discovery::VolumeRefusal;
 
 /// One routed result, in the order the driver applies them.
 #[cfg_attr(test, derive(Debug))]
@@ -118,6 +122,10 @@ enum UnreachableClass {
     RecordUnusable,
     /// The record is held by another process and no address is known (`link::dialer`).
     RecordBusy,
+    /// This account's token file could not be read (`link::dialer`).
+    TokenUnreadable,
+    /// The listener went away during its account check (`link::account`).
+    ListenerGone,
     /// The registration or its endpoint read is gone (`link::dialer`).
     Registration,
     /// The dial or the handshake ran out of time (the transport's texts).
@@ -138,6 +146,10 @@ impl UnreachableClass {
             UnreachableClass::RecordUnusable
         } else if starts(BUSY_UNKNOWN) {
             UnreachableClass::RecordBusy
+        } else if starts(NO_TOKEN) {
+            UnreachableClass::TokenUnreadable
+        } else if starts(LISTENER_GONE) {
+            UnreachableClass::ListenerGone
         } else if starts(NOT_REGISTERED) || starts(READ_FAILED) {
             UnreachableClass::Registration
         } else if matches!(
@@ -184,6 +196,9 @@ pub struct RouteState {
     keys: HashMap<DaemonKey, KeyRoute>,
     clock: Arc<dyn Clock>,
     view: BandView,
+    /// Per key, the start-attempt order of the newest start answer or close taken (ADR-0399) — a refusal ignored because the link is
+    ///   open is recorded too. Kept even with no route, so a close before any handle still orders the answers after it.
+    start_order: HashMap<DaemonKey, u64>,
 }
 
 /// What a band depends on besides the handle's own answers.
@@ -203,7 +218,18 @@ impl RouteState {
                 boot_pending: false,
                 own_start: engram_dashboard_platform::process::current_process_start_time(),
             },
+            start_order: HashMap::new(),
         }
+    }
+
+    /// Whether a start answer or close at `order` is no older than what `key` reflects; records it when it is.
+    fn start_order_takes(&mut self, key: &DaemonKey, order: u64) -> bool {
+        let reflected = self.start_order.entry(key.clone()).or_insert(0);
+        if order < *reflected {
+            return false;
+        }
+        *reflected = order;
+        true
     }
 
     /// [`can_stop`] measured against `own_start` instead of this process's creation time.
@@ -224,12 +250,18 @@ impl RouteState {
     ) -> Vec<Routed> {
         let mut out = Vec::new();
         let mut shown = None;
+        let mut start_refusal = None;
         if let Some(old) = self.keys.remove(&key) {
-            tracing::info!(peer = %key.peer_id(), "a new handle replaces the daemon link");
+            if old.token.is_some() {
+                tracing::info!(peer = %key.peer_id(), "a new handle replaces the daemon link");
+            } else {
+                tracing::info!(peer = %key.peer_id(), "the daemon link's first handle takes over the shown start refusal");
+            }
             if let Some(generation) = old.open {
                 out.push(Routed::LinkDown { generation });
             }
             shown = old.shown;
+            start_refusal = old.start_refusal;
             if let Some(status) = shown.as_mut() {
                 if status.state == ConnectionState::Connected {
                     status.state = ConnectionState::Reconnecting;
@@ -240,8 +272,9 @@ impl RouteState {
         self.keys.insert(
             key,
             KeyRoute {
-                token,
+                token: Some(token),
                 refusal,
+                start_refusal,
                 seen: None,
                 open: None,
                 last_failure: None,
@@ -253,6 +286,73 @@ impl RouteState {
             },
         );
         out
+    }
+
+    /// The answer of the ensure attempt at `order` in the start-attempt order about the data folder's drive (ADR-0399): `Some` = refused
+    ///   before a spawn — `key` shows the volume band (module doc); `None` = the hold ends and the handle's own answer shows again (①
+    ///   when it has none yet). The latest-started attempt wins: an answer older than the newest answer or close applied is ignored. A
+    ///   key with no route yet gets a handle-less one showing `Down` with the band; with nothing held there is nothing to clear. A
+    ///   refusal while the key's connection is open is ignored — a daemon is up, so it cannot describe the link.
+    #[must_use]
+    pub fn set_start_refusal(
+        &mut self,
+        key: &DaemonKey,
+        order: u64,
+        refusal: Option<VolumeRefusal>,
+    ) -> Vec<Routed> {
+        if !self.start_order_takes(key, order) {
+            tracing::info!(
+                peer = %key.peer_id(),
+                ?refusal,
+                "an answer of a start attempt older than a later attempt or close — ignored"
+            );
+            return Vec::new();
+        }
+        if refusal.is_some() && self.keys.get(key).is_some_and(|route| route.open.is_some()) {
+            tracing::info!(
+                peer = %key.peer_id(),
+                ?refusal,
+                "a start refusal came while the daemon link is open — not shown"
+            );
+            return Vec::new();
+        }
+        let route = match (self.keys.get_mut(key), refusal) {
+            (Some(route), _) => route,
+            (None, None) => return Vec::new(),
+            (None, Some(_)) => self.keys.entry(key.clone()).or_insert(KeyRoute {
+                token: None,
+                refusal: Arc::default(),
+                start_refusal: None,
+                seen: None,
+                open: None,
+                last_failure: None,
+                failures: FailureLog::default(),
+                answer: Answer::None,
+                closed_by_user: false,
+                shown: None,
+                closed: false,
+            }),
+        };
+        if route.start_refusal != refusal {
+            match refusal {
+                Some(refusal) => tracing::warn!(
+                    peer = %key.peer_id(),
+                    ?refusal,
+                    "the daemon start was refused for the data folder's drive — showing the volume band"
+                ),
+                None => {
+                    tracing::info!(peer = %key.peer_id(), "a new daemon start attempt cleared the volume band")
+                }
+            }
+        }
+        // ADR-0399: a cleared refusal on a route no handle has answered yet leaves ① as its answer — a band of its own, so the boot
+        //   hold and its end derive it like any answer instead of falling back to what was shown.
+        if refusal.is_none() && route.start_refusal.is_some() && route.answer == Answer::None {
+            route.answered(Some(NOT_CONNECTED));
+        }
+        route.start_refusal = refusal;
+        let state = route.shown.map_or(ConnectionState::Down, |s| s.state);
+        route.show(state, &self.view).into_iter().collect()
     }
 
     /// Holds every band of a never-connected handle until [`Self::end_boot_start_hold`] (TRD R20). Call before any handle is added.
@@ -280,12 +380,15 @@ impl RouteState {
     }
 
     /// An explicit frontend close of `key`'s link (`daemon_close`): its current handle shows no band from now on,
-    /// whatever else of it is still routed.
+    /// whatever else of it is still routed. `order` = the close's place in the start-attempt order: a held start refusal is dropped and
+    /// no attempt that began before the close shows one later (ADR-0399).
     #[must_use]
-    pub fn close(&mut self, key: &DaemonKey) -> Vec<Routed> {
+    pub fn close(&mut self, key: &DaemonKey, order: u64) -> Vec<Routed> {
+        self.start_order_takes(key, order);
         let Some(route) = self.keys.get_mut(key) else {
             return Vec::new();
         };
+        route.start_refusal = None;
         route.answer = Answer::Band(None);
         route.closed_by_user = true;
         route.refresh(&self.view).into_iter().collect()
@@ -294,6 +397,11 @@ impl RouteState {
     /// The version refusal `token`'s dial recorded, when `token` is `key`'s current handle.
     pub fn version_refusal(&self, key: &DaemonKey, token: HandleToken) -> Option<VersionRefusal> {
         of_current_handle(self.keys.get(key), token).and_then(|route| route.refusal.get())
+    }
+
+    /// The account refusal `token`'s dial recorded (ADR-0395), when `token` is `key`'s current handle.
+    pub fn account_refusal(&self, key: &DaemonKey, token: HandleToken) -> Option<AccountRefusal> {
+        of_current_handle(self.keys.get(key), token).and_then(|route| route.refusal.account())
     }
 }
 
@@ -306,9 +414,12 @@ enum Answer {
 const NOT_CONNECTED: Band = Band::NotConnected { refused: false };
 
 struct KeyRoute {
-    token: HandleToken,
+    /// The key's current handle; `None` = none yet — a route made only to show a start refusal ([`RouteState::set_start_refusal`]).
+    token: Option<HandleToken>,
     /// TRD §4-3
     refusal: Arc<RefusalSlot>,
+    /// The last ensure attempt's refusal before a spawn (ADR-0399) — the key's, carried across re-adds; see the module doc.
+    start_refusal: Option<VolumeRefusal>,
     /// The newest `Connected` generation this handle's inbox delivered (rule ②).
     seen: Option<Generation>,
     /// The connection given to the driver as `LinkUp` and not yet as `LinkDown`.
@@ -382,7 +493,9 @@ pub fn route(
     token: HandleToken,
     item: Incoming<ShellWire>,
 ) -> Vec<Routed> {
-    let RouteState { keys, clock, view } = st;
+    let RouteState {
+        keys, clock, view, ..
+    } = st;
     let Some(route) = of_current_handle(keys.get_mut(key), token) else {
         tracing::debug!(
             peer = %key.peer_id(),
@@ -431,7 +544,7 @@ fn of_current_handle<R: std::borrow::Borrow<KeyRoute>>(
     route: Option<R>,
     token: HandleToken,
 ) -> Option<R> {
-    route.filter(|r| r.borrow().token == token)
+    route.filter(|r| r.borrow().token == Some(token))
 }
 
 fn item_kind(item: &Incoming<ShellWire>) -> &'static str {
@@ -466,11 +579,16 @@ impl KeyRoute {
 
     /// The band to show now (module doc).
     fn band(&self, view: &BandView) -> Option<Band> {
+        if let (Some(refusal), false) = (self.start_refusal, self.closed_by_user) {
+            return Some(Band::Volume {
+                unreadable: refusal == VolumeRefusal::Unreadable,
+            });
+        }
         let shown = self.shown.and_then(|status| status.band);
         match self.answer {
-            Answer::None => shown,
             Answer::Band(_) if view.boot_pending && self.seen.is_none() => None,
             Answer::Band(band) => band,
+            Answer::None => shown,
         }
     }
 
@@ -533,6 +651,7 @@ impl KeyRoute {
                 self.seen = Some(generation);
                 self.open = Some(generation);
                 self.last_failure = None;
+                self.start_refusal = None;
                 self.answered(None);
                 let mut out = vec![Routed::LinkUp { generation }];
                 out.extend(self.show(ConnectionState::Connected, view));
@@ -599,19 +718,27 @@ impl KeyRoute {
             // The band shows with the `Down` of the `GaveUp(Rejected)` that follows.
             TransportEvent::Rejected { code, reason, .. } => {
                 let version = self.refusal.get();
+                let account = self.refusal.account();
                 // The daemon's text can echo what we sent (the Auth token) — its length only.
                 tracing::warn!(
                     %peer,
                     code = code.0,
                     reason_bytes = reason.len(),
                     ?version,
+                    ?account,
                     "the daemon refused the connection for good"
                 );
-                self.answered(Some(match version {
-                    Some(refusal) => Band::Version {
+                // ADR-0399: a daemon answered — its refusal replaces an earlier start refusal.
+                self.start_refusal = None;
+                self.answered(Some(match (version, account) {
+                    (Some(refusal), _) => Band::Version {
                         can_stop: can_stop(&refusal, view.own_start),
                     },
-                    None => Band::NotConnected { refused: true },
+                    // ADR-0395: the shell refused the listener's OS account itself.
+                    (None, Some(account)) => Band::Account {
+                        unverified: account == AccountRefusal::Unverified,
+                    },
+                    (None, None) => Band::NotConnected { refused: true },
                 }));
                 vec![Routed::Notice(LinkNotice::Refused { code })]
             }
@@ -1547,6 +1674,37 @@ mod tests {
         assert_ne!(AUTH_REFUSED, refusal_message(CloseCode(4100), false));
     }
 
+    /// ADR-0395: a dial that refused the listener's OS account shows the account band (each refusal its own flag), not the token
+    ///   refusal band.
+    #[test]
+    fn an_account_refusal_shows_the_account_band() {
+        for (refusal, unverified) in [
+            (AccountRefusal::OtherAccount, false),
+            (AccountRefusal::Unverified, true),
+        ] {
+            let mut st = route_state();
+            let token = HandleToken::mint();
+            let refusals = slot();
+            let _ = st.adopt(key(), token, refusals.clone());
+            refusals.set_account(Some(refusal));
+            let out = run(
+                &mut st,
+                token,
+                [
+                    rejected("this daemon belongs to another Windows account"),
+                    gave_up(GaveUpReason::Rejected),
+                ],
+            );
+            assert_eq!(
+                statuses(&out).last().and_then(|s| s.band),
+                Some(Band::Account { unverified }),
+                "{refusal:?}"
+            );
+            assert_eq!(st.account_refusal(&key(), token), Some(refusal));
+            assert_eq!(st.account_refusal(&key(), HandleToken::mint()), None);
+        }
+    }
+
     // ── bands (TRD S21 trd-3-2-u5 §4 · R7) ─────────────────────────────────────────────────────
 
     #[test]
@@ -1651,7 +1809,7 @@ mod tests {
         use ConnectionState::*;
         let (mut st, token) = adopted();
         run(&mut st, token, [connect_failed(unreachable())]);
-        assert_eq!(statuses(&st.close(&key())), [status(Down, None)]);
+        assert_eq!(statuses(&st.close(&key(), 1)), [status(Down, None)]);
         // A failure of that handle still in its inbox, and its `Closed`, change nothing.
         let late = run(&mut st, token, [connect_failed(unreachable()), closed(0)]);
         assert!(statuses(&late).is_empty(), "{late:?}");
@@ -1659,7 +1817,7 @@ mod tests {
         // From connected: the close's own `Disconnected` · `Closed` show no band.
         let (mut st, token) = adopted();
         run(&mut st, token, [connected(1)]);
-        assert!(st.close(&key()).is_empty(), "nothing to change yet");
+        assert!(st.close(&key(), 1).is_empty(), "nothing to change yet");
         let out = run(
             &mut st,
             token,

@@ -1,6 +1,6 @@
 //! The first-frame auth decision — token (constant time) and protocol version.
 //!
-//! Both expected values are injected by the assembly (`run_accept_loop`): this module only decides whether the stated token and version equal the ones it was given — it reads neither daemon.json nor the protocol version constant.
+//! Both expected values are injected by the assembly (`run_accept_loop`): this module only decides whether the stated token and version equal the ones it was given — it reads neither the token file nor the protocol version constant.
 //!
 //! ★The refusal text never quotes the frame★ — the frame can carry the token, so logs carry only serde's error class and position (`docs/reference/logging-conventions.md`).
 // ADR-0310

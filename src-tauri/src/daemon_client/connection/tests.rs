@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 
 use engram_dashboard_command::{CommandDecl, CommandTable, OwnerLookup, OwnerToken};
 
+use crate::commands::discovery::answer_start;
 use crate::commands::discovery::BootStartWatch;
 use crate::commands::layout::RouterSubs;
 use crate::commands::popout::{close_requested_popup_window, drop_window_in_model, PopupCounter};
@@ -37,10 +38,13 @@ use crate::daemon_client::test_support::{
 };
 use crate::daemon_client::usage_interest::{InterestAction, USAGE_INTEREST_SHRINK_DELAY};
 use crate::daemon_client::{Band, ConnectionState, ConnectionStatus, DaemonClient};
+use crate::discovery::tests::FakeVolume;
+use crate::discovery::{check_data_dir_volume, StartFailure};
 use crate::layout::commands::CATALOG_VERSION;
 use crate::layout::{apply, LayoutState, MAIN_WINDOW_LABEL};
 use crate::output_channel::register_window;
 use crate::output_router::DropCause;
+use crate::tray::actions::TrayDaemonClient;
 use crate::tray::actions::{for_each_ui_window, LayoutUsageVisibility, UsageVisibility};
 
 const TOKEN: &str = "cccc2222cccc2222cccc2222cccc2222cccc2222cccc2222cccc2222cccc2222";
@@ -49,7 +53,9 @@ const TOKEN: &str = "cccc2222cccc2222cccc2222cccc2222cccc2222cccc2222cccc2222ccc
 /// unless the test made it fail, and counts its calls.
 struct Record {
     now: Mutex<Current>,
-    search_fails: Mutex<Option<String>>,
+    search_fails: Mutex<Option<StartFailure>>,
+    /// Set: the search first runs the real drive check (ADR-0399) on this fake volume answer.
+    drive: Mutex<Option<Result<bool, std::io::ErrorKind>>>,
     /// Set: the search answers this endpoint whatever the record says.
     search_finds: Mutex<Option<Endpoint>>,
     /// Set: the search reports that it started and waits for the release.
@@ -63,6 +69,7 @@ impl Record {
         Arc::new(Self {
             now: Mutex::new(now),
             search_fails: Mutex::new(None),
+            drive: Mutex::new(None),
             search_finds: Mutex::new(None),
             search_gate: Mutex::new(None),
             reads: AtomicUsize::new(0),
@@ -75,7 +82,11 @@ impl Record {
     }
 
     fn fail_search(&self, why: &str) {
-        *self.search_fails.lock().unwrap() = Some(why.to_owned());
+        *self.search_fails.lock().unwrap() = Some(StartFailure::other(why));
+    }
+
+    fn drive_answers(&self, answer: Result<bool, std::io::ErrorKind>) {
+        *self.drive.lock().unwrap() = Some(answer);
     }
 
     fn search_finds(&self, endpoint: Endpoint) {
@@ -100,12 +111,15 @@ impl Record {
 }
 
 impl EndpointSource for Record {
-    fn ensure(&self, _timeout: Duration) -> Result<Endpoint, String> {
+    fn ensure(&self, _timeout: Duration) -> Result<Endpoint, StartFailure> {
         self.searches.fetch_add(1, Ordering::SeqCst);
         if let Some((entered, release)) = self.search_gate.lock().unwrap().take() {
             let _ = entered.send(());
             // Bounded, so a failing test does not leave a blocked pool thread behind.
             let _ = release.recv_timeout(Duration::from_secs(10));
+        }
+        if let Some(answer) = *self.drive.lock().unwrap() {
+            check_data_dir_volume(std::path::Path::new(DRIVE_ROOT), &FakeVolume::new(answer))?;
         }
         if let Some(why) = self.search_fails.lock().unwrap().clone() {
             return Err(why);
@@ -115,7 +129,7 @@ impl EndpointSource for Record {
         }
         match self.now.lock().unwrap().clone() {
             Current::Live(endpoint) => Ok(endpoint),
-            other => Err(format!("no live daemon: {other:?}")),
+            other => Err(StartFailure::other(format!("no live daemon: {other:?}"))),
         }
     }
 
@@ -123,13 +137,20 @@ impl EndpointSource for Record {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.now.lock().unwrap().clone()
     }
+
+    fn verify_server(
+        &self,
+        _ends: Option<engram_dashboard_transport::SocketEnds>,
+    ) -> Result<(), crate::daemon_client::link::account::CheckFailure> {
+        Ok(())
+    }
 }
 
 fn live() -> Current {
     Current::Live(Endpoint {
         key: DaemonKey::new(DAEMON),
         address: Address::new("ws://127.0.0.1:5123"),
-        credential: Secret::new(TOKEN),
+        credential: Some(Secret::new(TOKEN)),
     })
 }
 
@@ -2914,17 +2935,21 @@ async fn within<F: std::future::Future>(what: &str, wait: F) -> F::Output {
         .unwrap_or_else(|_| panic!("not within 10 s: {what}"))
 }
 
-/// Writes the daemon's endpoint record into `dir` — this test process's pid stands for a live daemon.
+/// Writes what a daemon publishes into `dir`, in its order — this account's token file, then the endpoint record (ADR-0395); this test
+///   process's pid stands for a live daemon, and its listener (this process too) passes the real account check.
 fn write_daemon_record(dir: &std::path::Path, port: u16, token: &str) {
-    let path = crate::discovery::DataLayout::new(dir).daemon_file();
+    let layout = crate::discovery::DataLayout::new(dir);
+    let path = layout.daemon_file();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let account = engram_dashboard_platform::account::current_account_id().expect("account");
+    std::fs::write(layout.token_file(&account), token).unwrap();
     let record = engram_dashboard_protocol::DaemonInfo {
         pid: std::process::id(),
         host: "127.0.0.1".into(),
         port,
-        token: Secret::new(token),
         protocol_version: PROTOCOL_VERSION,
         start_time: 0,
+        owner_account: account,
     };
     std::fs::write(path, record.to_json_pretty().unwrap()).unwrap();
 }
@@ -2990,9 +3015,9 @@ async fn round_trip(what: &str, client: &Arc<DaemonClient>, ws: &mut DaemonSocke
     );
 }
 
-// Production's transport (`DaemonClient::on_local_daemon`: ws dialer · the folder's `daemon.json` · system clock) on a
-// real socket: attach, one round trip, the daemon's link drops, and the retry alone reaches a daemon on a new port and
-// token written to `daemon.json`.
+// Production's transport (`DaemonClient::on_local_daemon`: ws dialer · the folder's `daemon.json` and token file · the real
+// listener account check · system clock) on a real socket: attach, one round trip, the daemon's link drops, and the retry
+// alone reaches a daemon on a new port and token.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_production_transport_attaches_answers_and_follows_the_daemon_to_a_new_port() {
     const TOKEN_B: &str = "eeee4444eeee4444eeee4444eeee4444eeee4444eeee4444eeee4444eeee4444";
@@ -3058,12 +3083,19 @@ async fn connect_idempotent_when_already_connected() {
 struct PanickingSearch;
 
 impl EndpointSource for PanickingSearch {
-    fn ensure(&self, _timeout: Duration) -> Result<Endpoint, String> {
+    fn ensure(&self, _timeout: Duration) -> Result<Endpoint, StartFailure> {
         panic!("the daemon search panicked (test)");
     }
 
     fn current(&self) -> Current {
         Current::Absent
+    }
+
+    fn verify_server(
+        &self,
+        _ends: Option<engram_dashboard_transport::SocketEnds>,
+    ) -> Result<(), crate::daemon_client::link::account::CheckFailure> {
+        Ok(())
     }
 }
 
@@ -3084,7 +3116,7 @@ async fn connect_discovery_join_failure_tells_every_window_down() {
     );
     let err = client.connect().await.expect_err("the search died");
     assert!(
-        matches!(&err, HandshakeError::Discovery(m) if m.contains("the daemon search task failed")),
+        matches!(&err, HandshakeError::Discovery(m) if m.message.contains("the daemon search task failed")),
         "{err:?}"
     );
     wait_for("Down", || client.state() == ConnectionState::Down).await;
@@ -3380,6 +3412,7 @@ fn kinds(cmds: &[DriverCmd]) -> Vec<&'static str> {
             DriverCmd::IsLive { .. } => "IsLive",
             DriverCmd::Add { .. } => "Add",
             DriverCmd::Close { .. } => "Close",
+            DriverCmd::StartRefusal { .. } => "StartRefusal",
             DriverCmd::Unsubscribe { .. } => "Unsubscribe",
             DriverCmd::RequestReplay { .. } => "RequestReplay",
             DriverCmd::UsageNudge => "UsageNudge",
@@ -4054,7 +4087,7 @@ async fn a_cold_boot_shows_no_band_until_the_main_windows_start_answers() {
     assert!(h.boot_start_held().await);
     assert_eq!(h.statuses(), ["status:down:none"]);
 
-    main_window(&h).start_answered::<()>(&Err("no daemon exe".into()));
+    main_window(&h).start_answered::<()>(&Err(StartFailure::other("no daemon exe")));
     wait_for("band ①", || h.client.status().band == BAND_ONE).await;
     assert!(!h.boot_start_held().await);
 }
@@ -4070,7 +4103,7 @@ async fn a_refusal_while_the_boot_hold_is_on_shows_when_it_ends() {
     wait_for("down", || h.states() == ["state:down"]).await;
     assert!(h.boot_start_held().await);
     assert_eq!(h.client.status().band, None);
-    main_window(&h).start_answered::<()>(&Err("version mismatch".into()));
+    main_window(&h).start_answered::<()>(&Err(StartFailure::other("version mismatch")));
     wait_for("band ②", || {
         matches!(h.client.status().band, Some(Band::Version { .. }))
     })
@@ -4083,6 +4116,415 @@ fn main_window(h: &Harness) -> BootStartWatch<'_> {
 
 fn popout(h: &Harness) -> BootStartWatch<'_> {
     BootStartWatch::of(POPUP, Some(&h.client))
+}
+
+// ── the volume band (ADR-0399) ─────────────────────────────────────────────────────────────────────
+
+/// The data root the fake drive check names — no file system is touched.
+const DRIVE_ROOT: &str = "E:/Engram/data";
+
+const UNPROTECTED: Band = Band::Volume { unreadable: false };
+const UNREADABLE: Band = Band::Volume { unreadable: true };
+
+/// The two drive answers that refuse, the band each shows and its status line.
+const REFUSING_DRIVES: [(Result<bool, std::io::ErrorKind>, Band, &str); 2] = [
+    (Ok(false), UNPROTECTED, "status:down:unprotected_volume"),
+    (
+        Err(std::io::ErrorKind::PermissionDenied),
+        UNREADABLE,
+        "status:down:volume_unreadable",
+    ),
+];
+
+/// A `daemon_start` refused by the drive check on `answer` — what `ensure_internal` returns for it.
+fn refused_start(answer: Result<bool, std::io::ErrorKind>) -> Result<(), StartFailure> {
+    let refused = check_data_dir_volume(std::path::Path::new(DRIVE_ROOT), &FakeVolume::new(answer))
+        .expect_err("a refusing drive");
+    Err(refused.into())
+}
+
+impl Harness {
+    /// A `daemon_start` beginning now: the client and the attempt's place in the start-attempt order.
+    fn start_now(&self) -> Option<(&DaemonClient, crate::daemon_client::StartAttempt)> {
+        Some((&self.client, self.client.begin_start_attempt()))
+    }
+
+    /// The background retries of the current handle fail `n` more times (no daemon record).
+    async fn background_failures(&self, n: usize) {
+        let from = self.record.reads();
+        self.advance_until("background failed attempts", || {
+            self.record.reads() >= from + n
+        })
+        .await;
+    }
+
+    /// A Reconnect whose search finds the daemon now — the link connects.
+    async fn reconnect_to_a_live_daemon(&self) {
+        let task = self.connect();
+        let (endpoint, _) = self.next_link().await;
+        endpoint.push(hello());
+        joined("the reconnect", task).await.expect("connected");
+    }
+}
+
+// The link's own search (`EndpointSource::ensure`) refused by the drive: the volume band, held through the background retries'
+//   failures (each answered as ①), then cleared by a Reconnect whose search passes — ① for that attempt, then the connect.
+#[tokio::test]
+async fn a_link_search_refused_by_the_drive_shows_its_cause_through_the_background_retries_until_a_search_passes(
+) {
+    for (answer, band, line) in REFUSING_DRIVES {
+        let h = Harness::new(Current::Absent);
+        h.record.drive_answers(answer);
+        let err = joined("connect", h.connect())
+            .await
+            .expect_err("refused before a spawn");
+        assert!(
+            matches!(&err, HandshakeError::Discovery(f) if f.refusal.is_some() && f.message.contains("NTFS drive")),
+            "the typed cause and the English text for the log: {err:?}"
+        );
+        wait_for("the volume band", || h.client.status().band == Some(band)).await;
+        h.background_failures(5).await;
+        assert_eq!(
+            h.client.status(),
+            ConnectionStatus {
+                state: ConnectionState::Down,
+                band: Some(band),
+            }
+        );
+        assert_eq!(h.statuses(), [line], "no background failure replaced it");
+
+        // The Engram folder moved to an NTFS drive: the next ensure attempt passes and the link connects.
+        h.record.drive_answers(Ok(true));
+        h.record.set(live());
+        h.reconnect_to_a_live_daemon().await;
+        wait_for("connected", || {
+            h.client.state() == ConnectionState::Connected
+        })
+        .await;
+        assert_eq!(
+            h.statuses(),
+            [line, "status:down:not_connected", "status:connected:none"],
+            "the passing ensure attempt cleared it, the connect followed"
+        );
+    }
+}
+
+// `daemon_start` (the main window's boot start here, under the boot hold) refused by the drive: the band shows its cause — no
+//   handle exists yet, and the boot hold does not hold it — and keeps it through the boot pulls' attach-only ensure and its
+//   background retries; the next `daemon_start` that passes clears it.
+#[tokio::test]
+async fn a_daemon_start_refused_by_the_drive_shows_its_cause_without_a_handle_and_keeps_it_through_attaches(
+) {
+    for (answer, band, line) in REFUSING_DRIVES {
+        let h = Harness::held(Current::Absent);
+        let started = refused_start(answer);
+        answer_start(h.start_now(), &started);
+        wait_for("the volume band", || h.client.status().band == Some(band)).await;
+        assert!(
+            h.boot_start_held().await,
+            "shown while the boot hold is still on"
+        );
+        main_window(&h).start_answered(&started);
+        assert!(!h.boot_start_held().await);
+        assert_eq!(h.client.state(), ConnectionState::Down);
+
+        assert!(joined("the boot pulls' attach", h.ensure()).await.is_err());
+        h.background_failures(5).await;
+        assert_eq!(h.client.status().band, Some(band));
+        assert_eq!(h.statuses(), [line]);
+
+        // A popout's `daemon_start` that passes is an ensure attempt too.
+        h.record.set(live());
+        answer_start(h.start_now(), &Ok(()));
+        wait_for("the cause cleared", || h.client.status().band == BAND_ONE).await;
+        h.reconnect_to_a_live_daemon().await;
+        wait_for("connected", || {
+            h.client.state() == ConnectionState::Connected
+        })
+        .await;
+        assert_eq!(h.client.status().band, None);
+    }
+}
+
+// The tray's Start refused by the drive: the cause goes to the band through the real `TrayDaemonClient` (the setter, then the
+//   attach), and stays through that attach's background retries.
+#[tokio::test]
+async fn a_tray_start_refused_by_the_drive_shows_its_cause_through_its_attach() {
+    for (answer, band, line) in REFUSING_DRIVES {
+        let h = Harness::new(Current::Absent);
+        let refusal = refused_start(answer).unwrap_err().refusal;
+        let attempt = h.client.begin_start();
+        h.client.answer_start(attempt, refusal);
+        h.client.attach_in_background();
+        wait_for("the volume band", || h.client.status().band == Some(band)).await;
+        h.background_failures(5).await;
+        assert_eq!(h.client.status().band, Some(band));
+        assert_eq!(h.statuses(), [line]);
+
+        // A tray Start that passes clears it.
+        let attempt = h.client.begin_start();
+        h.client.answer_start(attempt, None);
+        wait_for("the cause cleared", || h.client.status().band == BAND_ONE).await;
+    }
+}
+
+// A refusal cleared by an ensure attempt that fails otherwise (here a timeout), before any handle answered: the band leaves the
+//   volume cause for ①, so the new attempt's untyped cause can show again (`refusesCause` drops it under the volume band).
+#[tokio::test]
+async fn a_refusal_cleared_before_any_handle_answered_falls_back_to_band_one() {
+    let h = Harness::new(Current::Absent);
+    answer_start(h.start_now(), &refused_start(Ok(false)));
+    wait_for("the volume band", || {
+        h.client.status().band == Some(UNPROTECTED)
+    })
+    .await;
+    answer_start::<()>(
+        h.start_now(),
+        &Err(StartFailure::other(
+            "timed out waiting for the daemon to start",
+        )),
+    );
+    wait_for("band ①", || h.client.status().band == BAND_ONE).await;
+    assert_eq!(
+        h.statuses(),
+        [
+            "status:down:unprotected_volume",
+            "status:down:not_connected"
+        ]
+    );
+}
+
+// A popout's start refused under the boot hold (handle-less route), then main's start fails for another reason: the cleared
+//   refusal leaves ① as the route's answer, held by the boot hold and shown when main's failure ends it — not lost.
+#[tokio::test]
+async fn a_refusal_cleared_under_the_boot_hold_shows_band_one_when_the_hold_ends() {
+    let h = Harness::held(Current::Absent);
+    // `answer_start` takes no window: a popout's start answers the same way.
+    answer_start(h.start_now(), &refused_start(Ok(false)));
+    wait_for("the volume band", || {
+        h.client.status().band == Some(UNPROTECTED)
+    })
+    .await;
+    let started: Result<(), StartFailure> = Err(StartFailure::other(
+        "timed out waiting for the daemon to start",
+    ));
+    answer_start(h.start_now(), &started);
+    main_window(&h).start_answered(&started);
+    wait_for("band ①", || h.client.status().band == BAND_ONE).await;
+    assert!(!h.boot_start_held().await);
+    assert_eq!(
+        h.statuses(),
+        [
+            "status:down:unprotected_volume",
+            "status:down:none",
+            "status:down:not_connected"
+        ]
+    );
+}
+
+// A close drops the held refusal, so the next re-add shows ①, not the old volume band; the clear of the search the close overtook
+//   is ignored as older than the close and changes nothing.
+#[tokio::test]
+async fn a_close_drops_the_held_refusal_so_a_re_add_shows_band_one() {
+    let h = Harness::new(Current::Absent);
+    answer_start(h.start_now(), &refused_start(Ok(false)));
+    wait_for("the volume band", || {
+        h.client.status().band == Some(UNPROTECTED)
+    })
+    .await;
+    let Current::Live(endpoint) = live() else {
+        unreachable!("live() is a live record")
+    };
+    h.record.search_finds(endpoint);
+    let (entered, release) = h.record.hold_search();
+    let task = h.connect();
+    wait_for("the search started", || entered.try_recv().is_ok()).await;
+    h.client.close();
+    release.send(()).expect("the search waits");
+    let _ = joined("connect", task).await;
+    wait_for("no band after the close", || {
+        h.client.status().band.is_none()
+    })
+    .await;
+
+    assert!(joined("re-attach", h.ensure()).await.is_err());
+    wait_for("band ①, not the old volume band", || {
+        h.client.status().band == BAND_ONE
+    })
+    .await;
+}
+
+// The latest-started attempt wins (ADR-0399), with a close in the same order. The link's search A begins, a close comes (no route
+//   yet), then a newer `daemon_start` is refused and shows its cause; A then passes — its stale clear must not erase the newer cause.
+#[tokio::test]
+async fn a_newer_starts_refusal_survives_an_older_searchs_stale_clear() {
+    let h = Harness::new(Current::Absent);
+    let Current::Live(endpoint) = live() else {
+        unreachable!("live() is a live record")
+    };
+    h.record.search_finds(endpoint);
+    let (entered, release) = h.record.hold_search();
+    let task = h.connect();
+    wait_for("search A started", || entered.try_recv().is_ok()).await;
+    h.client.close();
+    answer_start(h.start_now(), &refused_start(Ok(false)));
+    wait_for("the newer start's volume band", || {
+        h.client.status().band == Some(UNPROTECTED)
+    })
+    .await;
+    release.send(()).expect("search A waits");
+    let _ = joined("connect", task).await;
+    let_the_actor_run().await;
+    assert_eq!(h.client.status().band, Some(UNPROTECTED));
+}
+
+// An older attempt's refusal that arrives after a newer attempt's clear is ignored.
+#[tokio::test]
+async fn an_older_attempts_refusal_after_a_newer_clear_is_ignored() {
+    let h = Harness::new(Current::Absent);
+    answer_start(h.start_now(), &refused_start(Ok(false)));
+    wait_for("the volume band", || {
+        h.client.status().band == Some(UNPROTECTED)
+    })
+    .await;
+    let older = h.start_now();
+    let newer = h.start_now();
+    answer_start(newer, &Ok(()));
+    wait_for("band ①", || h.client.status().band == BAND_ONE).await;
+    answer_start(
+        older,
+        &refused_start(Err(std::io::ErrorKind::PermissionDenied)),
+    );
+    let_the_actor_run().await;
+    assert_eq!(h.client.status().band, BAND_ONE);
+}
+
+// A close while `connect` waits on its `is_live` check, before the search: the attempt's place must already be taken, so the close
+//   orders after it and the search's refusal is ignored as older (the ordering rule's own tests show that), as the close also
+//   overtakes this connect's add. Driven on an idle actor so the close lands inside that await for certain.
+#[tokio::test]
+async fn connect_takes_its_start_place_before_the_is_live_check() {
+    let mut idle = idle_client();
+    let connect = idle.client.connect();
+    tokio::pin!(connect);
+    tokio::select! {
+        biased;
+        _ = &mut connect => panic!("connect waits for the IsLive answer"),
+        () = tokio::task::yield_now() => {}
+    }
+    idle.client.close();
+    let Some(DriverCmd::IsLive { reply }) = idle.cmds.recv().await else {
+        panic!("connect asked IsLive first")
+    };
+    let Some(DriverCmd::Close { start: close }) = idle.cmds.recv().await else {
+        panic!("then the close")
+    };
+    reply.send(false).expect("connect waits");
+    // The idle record has no daemon: the search fails, so connect returns without waiting for its add.
+    assert!(connect.await.is_err());
+    let attempt = loop {
+        match idle.cmds.try_recv() {
+            Ok(DriverCmd::StartRefusal { attempt, .. }) => break attempt,
+            Ok(_) => {}
+            Err(e) => panic!("connect sent its start answer: {e:?}"),
+        }
+    };
+    assert!(
+        attempt.0 < close.0,
+        "the search's attempt ({attempt:?}) began before the close ({close:?})"
+    );
+}
+
+// A close while the link's search runs: the search's refusal comes after the close and shows nothing, as its add builds nothing.
+#[tokio::test]
+async fn a_refusal_from_a_search_a_close_overtook_shows_no_band() {
+    let h = Harness::new(Current::Absent);
+    h.record.drive_answers(Ok(false));
+    let (entered, release) = h.record.hold_search();
+    let task = h.connect();
+    wait_for("the search started", || entered.try_recv().is_ok()).await;
+    h.client.close();
+    release.send(()).expect("the search waits");
+    assert!(joined("connect", task).await.is_err());
+    let_the_actor_run().await;
+    assert_eq!(h.client.status().band, None);
+    assert!(
+        !h.statuses().iter().any(|line| line.ends_with("volume")),
+        "{:?}",
+        h.statuses()
+    );
+}
+
+// A refusal while the link is open cannot describe it — a daemon is up.
+#[tokio::test]
+async fn a_start_refusal_while_connected_is_not_shown() {
+    let h = Harness::new(live());
+    let _endpoint = h.connected().await;
+    answer_start(h.start_now(), &refused_start(Ok(false)));
+    let_the_actor_run().await;
+    assert_eq!(
+        h.client.status(),
+        ConnectionStatus {
+            state: ConnectionState::Connected,
+            band: None,
+        }
+    );
+}
+
+// A connect clears the refusal by itself: no ensure attempt here — the attach's background retry finds a daemon and connects.
+#[tokio::test]
+async fn a_connect_clears_the_drive_cause_without_a_new_attempt() {
+    let h = Harness::new(Current::Absent);
+    answer_start(h.start_now(), &refused_start(Ok(false)));
+    assert!(joined("attach", h.ensure()).await.is_err());
+    wait_for("the volume band", || {
+        h.client.status().band == Some(UNPROTECTED)
+    })
+    .await;
+    h.record.set(live());
+    h.advance_until("a dial to the new daemon", || h.net.open_endpoints() > 0)
+        .await;
+    let (endpoint, _) = h.next_link().await;
+    endpoint.push(hello());
+    wait_for("connected", || {
+        h.client.state() == ConnectionState::Connected
+    })
+    .await;
+    assert_eq!(h.client.status().band, None);
+}
+
+// An explicit close hides the volume band like any other.
+#[tokio::test]
+async fn an_explicit_close_takes_the_volume_band_away() {
+    let h = Harness::new(Current::Absent);
+    answer_start(h.start_now(), &refused_start(Ok(false)));
+    wait_for("the volume band", || {
+        h.client.status().band == Some(UNPROTECTED)
+    })
+    .await;
+    h.client.close();
+    wait_for("no band", || h.client.status().band.is_none()).await;
+}
+
+// A daemon's refusal is newer than the start refusal and replaces it.
+#[tokio::test]
+async fn a_daemons_version_refusal_replaces_the_drive_cause() {
+    let h = Harness::new(Current::Absent);
+    answer_start(h.start_now(), &refused_start(Ok(false)));
+    wait_for("the volume band", || {
+        h.client.status().band == Some(UNPROTECTED)
+    })
+    .await;
+    h.record.set(Current::VersionMismatch {
+        daemon: PROTOCOL_VERSION - 1,
+        pid: 9,
+        start_time: 0,
+    });
+    assert!(joined("attach", h.ensure()).await.is_err());
+    wait_for("band ②", || {
+        matches!(h.client.status().band, Some(Band::Version { .. }))
+    })
+    .await;
 }
 
 // M1 — only the main window's boot start answers for the cold boot: a popout's (or the spare's) failed connect keeps
@@ -4121,7 +4563,7 @@ async fn only_the_main_windows_boot_start_steps_reach_the_hold() {
     let_the_actor_run().await;
     assert!(h.boot_start_held().await, "no bound armed by a popout");
     // A popout's failure, and main's success, end nothing.
-    popout(&h).start_answered::<()>(&Err("x".into()));
+    popout(&h).start_answered::<()>(&Err(StartFailure::other("x")));
     main_window(&h).start_answered(&Ok(()));
     assert!(h.boot_start_held().await);
     // No client — nothing to tell, nothing breaks.

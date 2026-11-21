@@ -8,11 +8,12 @@
 //!
 //! ★No ts-rs export★: a Rust-only file between the two backend processes; serde only.
 //!
-//! **Security:** `token` is kept in this file only.
+//! **Security:** `daemon.json` keeps its inherited ACL (any account on the PC can read it — that is how another account sees who holds
+//!   the folder and takes over after a crash), so it carries no token. The shell token lives in the owner-only per-account file
+//!   [`token_file_name`]; a reader takes `daemon.json` first and the token after it, so a new record is never paired with an old token.
+// ADR-0395
 
 use serde::{Deserialize, Serialize};
-
-use crate::Secret;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonInfo {
@@ -21,8 +22,6 @@ pub struct DaemonInfo {
     pub host: String,
     /// The port the daemon actually bound (random).
     pub port: u16,
-    /// Connection token (256-bit, 64 hex chars). No logging — `Debug` masks it, but a value taken out with [`Secret::expose`] cannot be masked.
-    pub token: Secret,
     pub protocol_version: u32,
     /// The daemon process's start time (Windows GetProcessTimes creation FILETIME: 100-ns intervals since 1601-01-01 UTC). It tells PID reuse
     /// apart (PID alive AND creation time matches). 0 = unknown.
@@ -31,6 +30,13 @@ pub struct DaemonInfo {
     /// liveness decide by PID survival alone, so a live daemon is not wrongly declared stale.
     #[serde(default)]
     pub start_time: u64,
+    /// The OS account the daemon runs under (Windows: the SID text of `platform::account::current_account_id`). ★Only a hint★ — any account
+    ///   can write this file, so nobody decides trust on it: the shell checks the listener's account on its own connection before sending
+    ///   a token, and a spawned daemon's lock acquire decides who holds the folder. Empty = a record written before the field existed
+    ///   (`#[serde(default)]`; such a record also carries an older `protocol_version`, so a reader takes the version-mismatch path).
+    // ADR-0395
+    #[serde(default)]
+    pub owner_account: String,
 }
 
 impl DaemonInfo {
@@ -44,6 +50,15 @@ impl DaemonInfo {
     }
 }
 
+/// The name of the shell-token file of `account` (the text of `platform::account::current_account_id`), next to `daemon.json` in the
+///   daemon's run folder. ★The one place the name is built★ — the daemon writes it and the shell reads it; `scripts/engram.mjs` keeps a
+///   hand copy. Per account, so two accounts sharing one data folder take turns without ever needing to delete each other's owner-only
+///   file.
+// ADR-0395
+pub fn token_file_name(account: &str) -> String {
+    format!("daemon-token.{account}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,9 +68,9 @@ mod tests {
             pid: 4242,
             host: "127.0.0.1".into(),
             port: 51234,
-            token: Secret::new("b".repeat(64)),
             protocol_version: 1,
             start_time: 133_000_000_000_000_000,
+            owner_account: "S-1-5-21-1-2-3-1001".into(),
         }
     }
 
@@ -69,34 +84,33 @@ mod tests {
 
     #[test]
     fn parse_valid_json_succeeds() {
-        let json =
-            br#"{"pid":7,"host":"127.0.0.1","port":9,"token":"deadbeef","protocol_version":1}"#;
+        let json = br#"{"pid":7,"host":"127.0.0.1","port":9,"protocol_version":1,"owner_account":"S-1-5-18"}"#;
         let info = DaemonInfo::parse(json).expect("valid json should parse");
         assert_eq!(info.pid, 7);
         assert_eq!(info.port, 9);
-        assert_eq!(info.token.expose(), "deadbeef");
+        assert_eq!(info.owner_account, "S-1-5-18");
     }
 
     #[test]
-    fn token_is_written_as_a_bare_string() {
+    fn the_record_is_written_without_a_token_and_with_the_owner_account() {
         let json = serde_json::to_string(&sample()).unwrap();
-        let want = format!(
-            r#"{{"pid":4242,"host":"127.0.0.1","port":51234,"token":"{}","protocol_version":1,"start_time":133000000000000000}}"#,
-            "b".repeat(64)
+        assert_eq!(
+            json,
+            r#"{"pid":4242,"host":"127.0.0.1","port":51234,"protocol_version":1,"start_time":133000000000000000,"owner_account":"S-1-5-21-1-2-3-1001"}"#
         );
-        assert_eq!(json, want);
+        assert!(!json.contains("token"), "{json}");
     }
 
+    /// A pre-S37 daemon's record (token inside, no owner) still parses — so a new app meeting an old running daemon sees its older
+    ///   `protocol_version` and takes the version-mismatch path instead of failing to parse; the old token is not kept.
     #[test]
-    fn debug_does_not_carry_the_token() {
-        let info = sample();
-        for shown in [format!("{info:?}"), format!("{info:#?}")] {
-            assert!(
-                !shown.contains(info.token.expose()),
-                "Debug printed the token: {shown}"
-            );
-            assert!(shown.contains("51234"), "only the token is masked: {shown}");
-        }
+    fn an_old_daemons_record_parses_with_its_version_and_drops_the_token() {
+        let json = br#"{"pid":7,"host":"127.0.0.1","port":9,"token":"deadbeef","protocol_version":7,"start_time":5}"#;
+        let info = DaemonInfo::parse(json).expect("an old record must parse");
+        assert_eq!(info.protocol_version, 7);
+        assert_ne!(info.protocol_version, crate::PROTOCOL_VERSION);
+        assert_eq!(info.owner_account, "", "default when missing");
+        assert!(!format!("{info:?}").contains("deadbeef"));
     }
 
     #[test]
@@ -106,7 +120,7 @@ mod tests {
 
     #[test]
     fn parse_missing_field_errors() {
-        let json = br#"{"pid":1,"host":"127.0.0.1","port":2,"protocol_version":1}"#;
+        let json = br#"{"pid":1,"host":"127.0.0.1","port":2}"#;
         assert!(DaemonInfo::parse(json).is_err());
     }
 
@@ -117,9 +131,9 @@ mod tests {
             "pid",
             "host",
             "port",
-            "token",
             "protocol_version",
             "start_time",
+            "owner_account",
         ] {
             assert!(json.contains(&format!("\"{f}\"")), "field {f} missing");
         }
@@ -127,8 +141,7 @@ mod tests {
 
     #[test]
     fn parse_old_json_without_start_time_defaults_to_zero() {
-        let json =
-            br#"{"pid":7,"host":"127.0.0.1","port":9,"token":"deadbeef","protocol_version":1}"#;
+        let json = br#"{"pid":7,"host":"127.0.0.1","port":9,"protocol_version":1}"#;
         let info = DaemonInfo::parse(json).expect("an old file (no start_time) must parse too");
         assert_eq!(info.start_time, 0, "default=0 (unknown) when missing");
         assert_eq!(info.pid, 7);
@@ -139,5 +152,14 @@ mod tests {
         let info = sample();
         let back = DaemonInfo::parse(&info.to_json_pretty().unwrap()).unwrap();
         assert_eq!(back.start_time, info.start_time);
+    }
+
+    #[test]
+    fn the_token_file_is_named_by_the_account() {
+        assert_eq!(
+            token_file_name("S-1-5-21-1-2-3-1001"),
+            "daemon-token.S-1-5-21-1-2-3-1001"
+        );
+        assert_ne!(token_file_name("S-1-5-18"), token_file_name("S-1-5-19"));
     }
 }

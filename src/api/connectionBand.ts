@@ -8,8 +8,15 @@ import { t } from '../i18n'
 
 export type BandKind = Band['kind']
 
-/** Why there is a band, untranslated: our own refusal or version words, or the raw start error. */
-export type BandCause = { kind: 'refused' } | { kind: 'version' } | { kind: 'error'; message: string }
+/** Why there is a band, untranslated: our own refusal, version, account or drive words, or the raw start error. */
+export type BandCause =
+  | { kind: 'refused' }
+  | { kind: 'version' }
+  | { kind: 'other_account' }
+  | { kind: 'account_unverified' }
+  | { kind: 'unprotected_volume' }
+  | { kind: 'volume_unreadable' }
+  | { kind: 'error'; message: string }
 
 export interface BandView {
   kind: BandKind
@@ -19,11 +26,20 @@ export interface BandView {
 
 /**
  * The band to show, or null for none. The shell decides whether there is a band (ADR-0350); `connectionError` is only
- * band ①'s cause, and only when ① carries no `refused` cause — never under ②. ②'s `can_stop` is not read (ADR-0356).
+ * band ①'s cause, and only when ① carries no `refused` cause — never under ②, the account band or the volume band. ②'s
+ * `can_stop` is not read (ADR-0356). The account band (ADR-0395) = the daemon's listener runs under another OS account, or its
+ * account could not be read; the app sent nothing. The volume band (ADR-0399) = the last start was refused before a spawn: the
+ * data folder's drive does not keep file permissions (FAT / exFAT), or that could not be read.
  */
 export function bandView(band: Band | null, connectionError: string | null): BandView | null {
   if (band === null) return null
   if (band.kind === 'version') return { kind: 'version', cause: { kind: 'version' } }
+  if (band.kind === 'account') {
+    return { kind: 'account', cause: { kind: band.unverified ? 'account_unverified' : 'other_account' } }
+  }
+  if (band.kind === 'volume') {
+    return { kind: 'volume', cause: { kind: band.unreadable ? 'volume_unreadable' : 'unprotected_volume' } }
+  }
   if (band.refused) return { kind: 'not_connected', cause: { kind: 'refused' } }
   return { kind: 'not_connected', cause: connectionError ? { kind: 'error', message: connectionError } : null }
 }
@@ -35,6 +51,14 @@ export function causeText(cause: BandCause): string {
       return t('connection.refusedCause')
     case 'version':
       return t('connection.versionCause')
+    case 'other_account':
+      return t('connection.otherAccountCause')
+    case 'account_unverified':
+      return t('connection.accountUnverifiedCause')
+    case 'unprotected_volume':
+      return t('connection.unprotectedVolumeCause')
+    case 'volume_unreadable':
+      return t('connection.volumeUnreadableCause')
     case 'error':
       return cause.message
   }

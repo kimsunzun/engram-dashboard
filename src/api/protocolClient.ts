@@ -121,9 +121,9 @@ interface Pending {
 
 type WireEvent = Record<string, unknown>
 
-/** Band ② or ① `refused` — the bands a start attempt's cause never shows under (TRD S21 trd-3-2-u5 R21). */
+/** Band ②, the account band (ADR-0395), the volume band (ADR-0399) or ① `refused` — the bands a start attempt's cause never shows under (TRD S21 trd-3-2-u5 R21). */
 function refusesCause(band: Band | null): boolean {
-  return band !== null && (band.kind === 'version' || band.refused)
+  return band !== null && (band.kind !== 'not_connected' || band.refused)
 }
 
 // ViewOutputState (§5 LLM control surface — ADR-0046): the type lives in agentClient.ts (the LLM discovers it by type).
@@ -170,7 +170,7 @@ export class ProtocolClient implements AgentClient {
         this.pending.clear()
         this.detachAllViews()
       }
-      // TRD S21 trd-3-2-u5 R21: a cause never shows under band ② or ① `refused` — drop it when one arrives.
+      // TRD S21 trd-3-2-u5 R21: a cause never shows under band ②, the account band, the volume band or ① `refused` — drop it when one arrives.
       if (refusesCause(transport.connectionBand)) this.connError = null
       this.notifyState()
     })
@@ -190,7 +190,7 @@ export class ProtocolClient implements AgentClient {
   }
 
   reportConnectionError(reason: string | null): void {
-    // ★Not recorded while connected, under ② or under ① `refused` (load-bearing)★: the clears are transitions into those states, so a cause written while one holds would wait for a clear that never comes
+    // ★Not recorded while connected, under ②, the account band, the volume band or ① `refused` (load-bearing)★: the clears are transitions into those states, so a cause written while one holds would wait for a clear that never comes
     //   (contract on `AgentClient.reportConnectionError`).
     const blocked = this.transport.connectionState === 'connected' || refusesCause(this.transport.connectionBand)
     const next = blocked ? null : reason

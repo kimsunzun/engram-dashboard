@@ -815,6 +815,20 @@ fn test_server(
     version: u32,
     keepalive: KeepaliveConfig,
 ) -> (Listening, Arc<Server>, ConnRegistry) {
+    test_server_with_gate(fake, version, keepalive, own_account_gate())
+}
+
+/// The account check passes every client — these tests measure what follows it (the check itself: the `account` tests below).
+fn own_account_gate() -> AccountGate {
+    crate::account_gate::fakes::gate(Some(crate::account_gate::fakes::OWN))
+}
+
+fn test_server_with_gate(
+    fake: Arc<FakeHandler>,
+    version: u32,
+    keepalive: KeepaliveConfig,
+    gate: AccountGate,
+) -> (Listening, Arc<Server>, ConnRegistry) {
     let listening = Listening::bind_loopback().expect("bind");
     let conns = ConnRegistry::new();
     let factory: Arc<dyn ConnectionHandlerFactory> = Arc::new(FakeFactory { handler: fake });
@@ -825,6 +839,7 @@ fn test_server(
         "tok",
         version,
         keepalive,
+        gate,
     );
     (listening, server, conns)
 }
@@ -937,6 +952,55 @@ async fn wait_disconnected(fake: &FakeHandler) {
     panic!("on_disconnect did not run: {:?}", fake.calls());
 }
 
+/// A client of another OS account (lookup faked) and a client whose account cannot be read are refused before their first frame is
+///   read — each with its own `Error` text, then a close; the handler is never attached and nothing is registered (ADR-0395).
+#[tokio::test]
+async fn a_client_of_another_account_or_an_unverifiable_one_is_refused_before_auth() {
+    use crate::account_gate::fakes::{gate, OTHER};
+    use crate::account_gate::{OTHER_ACCOUNT, UNVERIFIED};
+
+    for (client_account, want) in [(Some(OTHER), OTHER_ACCOUNT), (None, UNVERIFIED)] {
+        let fake = Arc::new(FakeHandler::new(None));
+        let (listening, server, conns) = test_server_with_gate(
+            fake.clone(),
+            TEST_WIRE_VERSION,
+            KeepaliveConfig::default(),
+            gate(client_account),
+        );
+        let port = listening.port();
+        let Listening {
+            mut listener,
+            refusals,
+            clock: _,
+        } = listening;
+        let task = tokio::spawn(async move {
+            let _refusals = refusals;
+            let accepted = listener.accept().await.expect("accept");
+            server.serve(accepted).await;
+        });
+        // No auth frame is sent: the refusal must come without reading one.
+        let mut client = connect(port).await;
+        let refusal = text_of(next_data(&mut client, Duration::from_secs(5)).await);
+        assert_eq!(refusal, want, "{client_account:?}");
+        assert!(
+            next_data(&mut client, Duration::from_secs(5))
+                .await
+                .is_none(),
+            "must close after the refusal"
+        );
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the refused connection's life must end")
+            .unwrap();
+        assert!(!conns.contains(1), "a refused connection is not registered");
+        assert_eq!(
+            fake.calls(),
+            Vec::<String>::new(),
+            "no handler for a refused client"
+        );
+    }
+}
+
 #[tokio::test]
 async fn auth_rejects_version_mismatch_using_the_injected_expectation() {
     let fake = Arc::new(FakeHandler::new(None));
@@ -1002,6 +1066,7 @@ async fn connect_comes_before_the_tasks_and_cleanup_before_unregister() {
         "tok",
         TEST_WIRE_VERSION,
         KeepaliveConfig::default(),
+        own_account_gate(),
     );
     let port = listening.port();
     let Listening {

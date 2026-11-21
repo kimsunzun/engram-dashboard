@@ -1,4 +1,4 @@
-// The connection band (TRD S36 §3-4 · ADR-0350 · ADR-0356 · ADR-0134 decision 4) — ① "not connected" or ② "version mismatch".
+// The connection band (TRD S36 §3-4 · ADR-0350 · ADR-0356 · ADR-0134 decision 4) — ① "not connected", ② "version mismatch", the account band (ADR-0395) or the volume band (ADR-0399).
 // ★Why on screen★: a daemon that cannot start because the data folder is not writable reached nowhere in release — no daemon console, no WebView2 release devtools — so the user saw only a causeless 'down'.
 // ★The shell decides the band★: this renders `agentClient.connectionBand` as it comes; the start cause (`connectionError`) is only ①'s cause text and never raises a band on its own (`bandView`).
 // ★"Reconnect" only with `actions` — the main window★ (ADR-0345 · ADR-0356: no stop button on either band): it calls the existing `DaemonControl.start()`, same as boot and the LLM `connection.reconnect` (`connectionCommands`) — no new control surface. Popouts and the spare show the text only. While start runs the button shows the busy label, disabled; afterwards the band follows the shell.
@@ -40,8 +40,8 @@ export default function ConnectionNotice({ actions = false }: { actions?: boolea
 
   const reconnect = (): void => {
     setBusy(true)
-    // `start()` records the cause on `connectionError`, which shows only under a plain ①; under ② or ① `refused` the
-    //   guard drops it and the band itself is the signal.
+    // `start()` records the cause on `connectionError`, which shows only under a plain ①; under ②, the account band, the volume band or
+    //   ① `refused` the guard drops it and the band itself is the signal.
     getDaemonControl()
       .start()
       .catch((err: unknown) => console.warn('[ConnectionNotice] reconnect failed:', err))

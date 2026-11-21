@@ -8,7 +8,7 @@
 //! - ★Retries never run out★: network failures retry without limit on the capped backoff ([`link_policy`], ADR-0346). ★No refusal is retried★: terminal ones stop in the transport (the dialer's version check · `ShellHandshake`), and a refusal the transport would retry (a refusal close code other than 4001 — `RejectKind::of`; 0 · 1000 · 1001 · 4000 are not refusals) stops here: the actor removes the peer when it routes that `ConnectFailed`. Best effort: the transport has already scheduled its next attempt, so an actor delayed past the first backoff lets one more dial out before the stop lands. A first connect shows its first failure as `Down` at once and keeps retrying in the background (`link::route`).
 //! - ★Every decision that a close must order runs on the actor★: "already connected" and "was this connect overtaken by a close" are answered there, in channel order after any earlier `Close`. A close bumps the close epoch at once; a connect / ensure carries the epoch it began under, and an add older than the last close builds nothing (a close during `connect`'s daemon search wins).
 //! - `connect` / `ensure` resolve on their handle's first answer: `Connected` (once shown: status watch and frontend event first — the frontend relies on that order), or its first failure; no live daemon (no or an unusable record) answers `NoLiveDaemon`. A connect that a re-add overtakes gets the new handle's answer; a close before the answer ends it with `ClosedBeforeHello`.
-//! - ★The boot hold★: the production client holds every band of a never-connected handle from its construction until the main window's boot start answers (its failed `daemon_start`, or its `daemon_connect` returning — `commands::discovery` gates both on the window), or any handle connects, or a bound passes: 60 s from construction until main's daemon search begins, then that search's timeout + [`BOOT_START_MARGIN`] from its start. Its end is an actor step that shows what each current handle's last answer calls for (`RouteState::end_boot_start_hold`).
+//! - ★The boot hold★: the production client holds every band of a never-connected handle from its construction until the main window's boot start answers (its failed `daemon_start`, or its `daemon_connect` returning — `commands::discovery` gates both on the window), or any handle connects, or a bound passes: 60 s from construction until main's daemon search begins, then that search's timeout + [`BOOT_START_MARGIN`] from its start. Its end is an actor step that shows what each current handle's last answer calls for (`RouteState::end_boot_start_hold`). The volume band (a start refused for the data folder's drive, ADR-0399) is not held: it is a start's own answer (`link::route`).
 //! - ★Subscribe · Unsubscribe · RequestReplay go through this one actor, in order, onto one peer queue★. A replay request checks the window routing when the actor takes it, so an `Unsubscribe` queued before it is written first and the check sees the routing that `Unsubscribe` came from; the `Subscribe` of a merged request is checked again when the one before it resolves.
 //! - ★Replay flights belong to the routed connection★ (`LinkUp` … `LinkDown`): every write goes out with `notify_in` on that connection only, and `LinkDown` clears the flights. A replay `Subscribe` that cannot be written, or an output frame too short to read, drops that connection (`Peer::drop_link_in`, back to the backoff); the actor clears its flights at once and handles none of its later output frames or driver events (its broadcasts and lifecycle events still pass).
 //! - ★A connection is opened by the actor before any caller writes on it★: on `LinkUp` the actor queues the usage subscribe and the command registration (`RegisterCommands`, every connect), then publishes the generation as opened, with the close epoch of its handle. Callers bind their writes to the connection live when they were called and write only once it is published, never on "the peer is live" alone: a round trip that comes while that connection is live but not yet opened waits for the publish (bounded by the request timeout) and fails if the connection ends meanwhile — it never moves on to a later connection (ADR-0195); a fire-and-forget waits in the gate's pending list, which the actor writes out when that connection opens (older ones dropped). So a command sent while a connection opens goes out after that connection's on-open writes, and a publish older than a close the caller saw counts as closed, so `close()` followed by a write fails at once.
@@ -66,14 +66,16 @@ use super::{
     AgentNamesSink, ConnectionStatus, SharedUsageInterest, CHANNEL_GONE, DEFAULT_CONNECT_TIMEOUT,
     NOT_CONNECTED, NO_REQUEST_ID, REPLAY_UNSENT,
 };
+use crate::discovery::{StartFailure, VolumeRefusal};
 use crate::output_channel::{send_to_windows, WindowChannelRegistry};
 use crate::output_router::{OutputRouter, WindowLabel};
 
 /// Why a `connect` / `ensure` failed — its `Display` is the text callers get.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandshakeError {
-    /// `connect`'s daemon search (which may start a daemon) failed — carries its error (no token).
-    Discovery(String),
+    /// `connect`'s daemon search (which may start a daemon) failed — carries its error (no token) and, for a refusal before a spawn,
+    ///   its typed cause, which the band already shows (ADR-0399).
+    Discovery(StartFailure),
     /// No live daemon to attach to — no endpoint record, or one that cannot be used. Carries a local diagnostic cause (no file content). The text names the cause and asks whether the daemon runs; it does not tell the caller to start one (ADR-0021: attaching never spawns).
     NoLiveDaemon(String),
     /// The daemon could not be reached (a network-class failure).
@@ -117,6 +119,18 @@ const BOOT_START_MARGIN: Duration = Duration::from_secs(5);
 
 /// Fire-and-forget commands pending in the gate for a connection not opened yet; past it the caller drops the command (logged).
 const QUEUED_FIRES_MAX: usize = 512;
+
+/// One ensure attempt's place in the client's start-attempt order (ADR-0399: the latest-started attempt's answer wins) — taken when the
+///   attempt begins ([`LinkClient::begin_start_attempt`], `DaemonClient::begin_start_attempt`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartAttempt(u64);
+
+#[cfg(test)]
+impl StartAttempt {
+    pub(crate) fn for_test(order: u64) -> Self {
+        Self(order)
+    }
+}
 
 /// A connection the actor opened, and the close epoch its handle was added under; a caller that read a later epoch (a close came since) does not write on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +193,9 @@ pub(crate) struct LinkClient {
     routable_tx: mpsc::Sender<Routable>,
     /// Bumped by every `close` before it queues `Close`.
     closes: Arc<AtomicU64>,
+    /// The start-attempt order (ADR-0399): every ensure attempt takes the next number when it begins ([`Self::begin_start_attempt`]),
+    ///   and so does every `close`; the route applies only start answers no older than what it reflects.
+    start_attempts: Arc<AtomicU64>,
     cmd_tx: mpsc::UnboundedSender<DriverCmd>,
     status_rx: watch::Receiver<ConnectionStatus>,
     gate: Arc<Mutex<Gate>>,
@@ -237,8 +254,17 @@ enum DriverCmd {
         found: Option<Endpoint>,
         first: oneshot::Sender<Result<(), HandshakeError>>,
     },
-    /// The explicit close (`daemon_close`): no band for the rest of the handle.
-    Close,
+    /// The explicit close (`daemon_close`): no band for the rest of the handle. `start` = the close's place in the start-attempt order —
+    ///   no attempt that began before it shows a refusal.
+    Close {
+        start: StartAttempt,
+    },
+    /// An ensure attempt's answer about the data folder's drive ([`LinkClient::set_start_refusal`]), applied only when no newer attempt
+    ///   or close is reflected yet.
+    StartRefusal {
+        attempt: StartAttempt,
+        refusal: Option<VolumeRefusal>,
+    },
     /// Write `Unsubscribe` on the open connection; with none open there is nothing to undo (the daemon drops a connection's subscriptions with it).
     Unsubscribe {
         agent_id: AgentId,
@@ -330,6 +356,7 @@ impl LinkClient {
             #[cfg(test)]
             routable_tx: routable_tx.clone(),
             closes: closes.clone(),
+            start_attempts: Arc::new(AtomicU64::new(0)),
             cmd_tx,
             status_rx,
             gate: gate.clone(),
@@ -413,7 +440,10 @@ impl LinkClient {
 
     /// Explicit connect (ADR-0021 — may start a daemon). A failed search still starts the handle unless a close overtook this connect (then nothing is built): it reads `daemon.json` on every attempt and connects once a daemon is there, and the caller gets the search's error.
     pub(crate) async fn connect(&self) -> Result<(), HandshakeError> {
+        // ADR-0399: the start-attempt place is taken with the close epoch, before any await — a close during `is_live` must order
+        //   after this attempt, as it overtakes this connect's add. A place an early return leaves unused costs nothing.
         let closes = self.closes.load(Ordering::SeqCst);
+        let attempt = self.begin_start_attempt();
         if self.is_live().await {
             return Ok(());
         }
@@ -425,8 +455,13 @@ impl LinkClient {
             .await
         {
             Ok(found) => found,
-            Err(e) => Err(format!("the daemon search task failed: {e}")),
+            Err(e) => Err(StartFailure::other(format!(
+                "the daemon search task failed: {e}"
+            ))),
         };
+        // ADR-0399: every search is an ensure attempt — its answer replaces the start refusal the band holds, before the add so the
+        //   new handle carries it.
+        self.set_start_refusal(attempt, searched.as_ref().err().and_then(|e| e.refusal));
         let first = self.add(closes, searched.as_ref().ok().cloned());
         match searched {
             Ok(_) => first.await,
@@ -439,6 +474,21 @@ impl LinkClient {
                 Err(HandshakeError::Discovery(e))
             }
         }
+    }
+
+    /// An ensure attempt begins: its place in the start-attempt order. Take it before the search, so an attempt that started later — or a
+    ///   close that came later — wins over this one's answer (ADR-0399).
+    pub(crate) fn begin_start_attempt(&self) -> StartAttempt {
+        StartAttempt(self.start_attempts.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    /// What ensure attempt `attempt` said about the data folder's drive (ADR-0399): `Some` = refused before a spawn — the band shows that
+    ///   cause until a later-started attempt answers, a connect or a daemon's refusal replaces it, or a close; `None` = clears it. An
+    ///   answer older than what the route reflects is ignored. An attach-only add leaves it.
+    pub(crate) fn set_start_refusal(&self, attempt: StartAttempt, refusal: Option<VolumeRefusal>) {
+        let _ = self
+            .cmd_tx
+            .send(DriverCmd::StartRefusal { attempt, refusal });
     }
 
     /// Attach-only connect (ADR-0021 — never starts a daemon).
@@ -483,7 +533,8 @@ impl LinkClient {
     pub(crate) fn close(&self) {
         tracing::info!(peer = %self.key.peer_id(), "closing the daemon link");
         self.closes.fetch_add(1, Ordering::SeqCst);
-        let _ = self.cmd_tx.send(DriverCmd::Close);
+        let start = self.begin_start_attempt();
+        let _ = self.cmd_tx.send(DriverCmd::Close { start });
     }
 
     /// One command round trip on the caller's task, on the opened connection ([`Self::opened_generation`]); failure texts are `link::errors`', plus one for a connection that did not open in time.
@@ -751,7 +802,11 @@ impl Driver {
                         found,
                         first,
                     }) => self.add(closes, found, first),
-                    Some(DriverCmd::Close) => self.close_explicitly(),
+                    Some(DriverCmd::Close { start }) => self.close_explicitly(start),
+                    Some(DriverCmd::StartRefusal { attempt, refusal }) => {
+                        let out = self.route.set_start_refusal(&self.key, attempt.0, refusal);
+                        self.apply(out);
+                    }
                     Some(DriverCmd::Unsubscribe { agent_id }) => self.unsubscribe(agent_id),
                     Some(DriverCmd::RequestReplay { agent_id, reply }) => {
                         let _ = reply.send(self.request_replay(agent_id));
@@ -835,8 +890,8 @@ impl Driver {
     }
 
     /// A queued explicit close. ★Routing hears it before the peer goes★ — what the removal routes later shows no band.
-    fn close_explicitly(&mut self) {
-        let out = self.route.close(&self.key);
+    fn close_explicitly(&mut self, start: StartAttempt) {
+        let out = self.route.close(&self.key, start.0);
         self.close();
         self.apply(out);
     }
@@ -997,9 +1052,12 @@ impl Driver {
             )),
             TransportEvent::Rejected { code, .. } => {
                 let version = self.route.version_refusal(&self.key, token).is_some();
-                Err(HandshakeError::AuthRejected(
-                    refusal_message(*code, version).to_owned(),
-                ))
+                // ADR-0395: the shell's own refusal of the listener's OS account names that cause.
+                let text = match self.route.account_refusal(&self.key, token) {
+                    Some(account) if !version => account.message(),
+                    _ => refusal_message(*code, version),
+                };
+                Err(HandshakeError::AuthRejected(text.to_owned()))
             }
             TransportEvent::GaveUp { .. } | TransportEvent::Closed { .. } => {
                 Err(HandshakeError::ClosedBeforeHello)

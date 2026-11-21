@@ -44,6 +44,28 @@ describe('DaemonDaemonControl (daemon mode)', () => {
     )
   })
 
+  // The shell's real rejection: a `StartFailure` — with no typed refusal its English message is the cause.
+  it('start failure without a typed refusal → records its message', async () => {
+    const report = vi.fn(() => undefined)
+    const ctrl = new DaemonDaemonControl(fakeClient('down', { reportConnectionError: report }))
+    const failure = { refusal: null, message: 'timed out waiting for the daemon to start (over 5s)' }
+    invokeMock.mockRejectedValueOnce(failure)
+    await expect(ctrl.start()).rejects.toBe(failure)
+    expect(report).toHaveBeenLastCalledWith('timed out waiting for the daemon to start (over 5s)')
+  })
+
+  // ADR-0399 · ADR-0373: a refusal before a spawn is shown by the shell's volume band, translated there — no text is stored here.
+  it.each(['unprotected', 'unreadable'] as const)('a start refused by the drive (%s) stores no cause text', async (refusal) => {
+    const report = vi.fn((_reason: string | null) => undefined)
+    const connect = vi.fn(async () => undefined)
+    const ctrl = new DaemonDaemonControl(fakeClient('down', { connect, reportConnectionError: report }))
+    const failure = { refusal, message: 'the data folder (E:/x) is on a drive that does not store file permissions (FAT or exFAT)' }
+    invokeMock.mockRejectedValueOnce(failure)
+    await expect(ctrl.start()).rejects.toBe(failure)
+    expect(report.mock.calls.map(([reason]) => reason)).toEqual([null, null])
+    expect(connect).not.toHaveBeenCalled()
+  })
+
   it('start success → clears the reason left behind', async () => {
     const report = vi.fn((_reason: string | null) => undefined)
     // A cause written while this start was connecting (e.g. a concurrent attempt that failed) — the success clears it.

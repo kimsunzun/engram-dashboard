@@ -37,7 +37,7 @@ use engram_dashboard_transport::SystemClock;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
-pub use connection::HandshakeError;
+pub use connection::{HandshakeError, StartAttempt};
 use events::{DaemonEvents, TauriEmitter};
 // The assembly that discards notifications is harness-only (`events::NoDaemonEvents` doc) — it does not exist in production builds at all.
 #[cfg(test)]
@@ -88,7 +88,7 @@ impl ConnectionStatus {
     };
 }
 
-/// The two connection bands (TRD S21 trd-3-2-u5 §4-1). A reader that meets a `kind` it does not know treats it as
+/// The connection bands (TRD S21 trd-3-2-u5 §4-1 · ADR-0395 · ADR-0399). A reader that meets a `kind` it does not know treats it as
 /// `not_connected` without a cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -100,6 +100,12 @@ pub enum Band {
     /// ② The running daemon speaks another protocol version. `can_stop` = a stop applies: the daemon is older than
     /// this app and did not start after this app's process. No frontend reads it since ADR-0356.
     Version { can_stop: bool },
+    /// The daemon's listener runs under another OS account, so this app sent nothing (ADR-0395); `unverified` = its account could not be
+    /// read at all (the app and Engram not run the same way — elevated vs not).
+    Account { unverified: bool },
+    /// The last daemon start was refused before a spawn: the data folder's drive does not store file ACLs (FAT / exFAT), or
+    /// `unreadable` = whether it does could not be read (ADR-0399).
+    Volume { unreadable: bool },
 }
 
 /// The shared handle to one shell's usage interest ([`UsageInterest`]) — held by the connection driver, the side that changes the interest (layout recompute · hide · shrink timer) and the webview pull (TRD S21 usage-limit-slot §1-7).
@@ -136,12 +142,26 @@ struct NoDaemonAnywhere;
 
 #[cfg(test)]
 impl link::endpoint::EndpointSource for NoDaemonAnywhere {
-    fn ensure(&self, _timeout: Duration) -> Result<link::endpoint::Endpoint, String> {
-        Err("this test client never finds a daemon".to_owned())
+    fn ensure(
+        &self,
+        _timeout: Duration,
+    ) -> Result<link::endpoint::Endpoint, crate::discovery::StartFailure> {
+        Err(crate::discovery::StartFailure::other(
+            "this test client never finds a daemon",
+        ))
     }
 
     fn current(&self) -> link::endpoint::Current {
         link::endpoint::Current::Absent
+    }
+
+    fn verify_server(
+        &self,
+        _ends: Option<engram_dashboard_transport::SocketEnds>,
+    ) -> Result<(), link::account::CheckFailure> {
+        Err(link::account::CheckFailure::Refused(
+            link::account::AccountRefusal::Unverified,
+        ))
     }
 }
 
@@ -425,6 +445,25 @@ impl DaemonClient {
     /// The main window's boot start answered (`daemon_start` failed or `daemon_connect` returned): the cold-boot band hold ends (TRD S21 trd-3-2-u5 R20). Call before the answer reaches the frontend, so an attach the frontend then makes routes after the hold ended.
     pub fn boot_start_answered(&self, why: &'static str) {
         self.link.end_boot_start_hold(why);
+    }
+
+    /// An ensure attempt made outside the link — `daemon_start` (every window's, boot and popout runs included) or the tray's Start —
+    ///   begins: its place in the start-attempt order. Take it before the search; hand it back with the answer
+    ///   ([`Self::set_start_refusal`]). ADR-0399: the latest-started attempt's answer wins.
+    pub fn begin_start_attempt(&self) -> StartAttempt {
+        self.link.begin_start_attempt()
+    }
+
+    /// The answer of ensure attempt `attempt` about the data folder's drive: `Some` = refused before a spawn, so the band shows that
+    ///   cause until a later-started attempt answers, a connect or a daemon's refusal replaces it, or a close; `None` = clears it
+    ///   (ADR-0399). Ignored when a later-started attempt or a close was applied already. The link's own search sets it itself
+    ///   (`LinkClient::connect`).
+    pub fn set_start_refusal(
+        &self,
+        attempt: StartAttempt,
+        refusal: Option<crate::discovery::VolumeRefusal>,
+    ) {
+        self.link.set_start_refusal(attempt, refusal);
     }
 
     /// Usage-interest state — the webview pull reads the cache. The side that changes the interest calls the recompute set ([`Self::usage_layout_changed`] · [`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`]) instead, where result handling (nudge · shrink timer) lives. Lock order: [`SharedUsageInterest`].

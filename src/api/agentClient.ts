@@ -126,7 +126,7 @@ export interface AgentClient {
   /**
    * Cause text of one failed start attempt (human-readable, e.g. the unwritable data folder of ADR-0134), or null. Only a cause shown under band ① (TRD S21 trd-3-2-u5 R14): it never raises a band.
    * It rides the connection state surface because a daemon that cannot start (data folder not writable) is otherwise indistinguishable from a causeless timeout (ADR-0134; §5 one control surface).
-   * Cleared on `connected`, when band ② (`version`) or band ① `refused` arrives, and when a new start attempt begins.
+   * Cleared on `connected`, when band ② (`version`), the account band (ADR-0395), the volume band (ADR-0399) or band ① `refused` arrives, and when a new start attempt begins.
    */
   readonly connectionError: string | null
   /**
@@ -134,7 +134,7 @@ export interface AgentClient {
    */
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void
   /**
-   * Records the cause of a failed start (null = clear). Ignored while connected, under band ② and under band ① `refused` (TRD S21 trd-3-2-u5 R21): those arrivals are the automatic clears, so a cause written
+   * Records the cause of a failed start (null = clear). Ignored while connected, under band ②, the account band, the volume band and band ① `refused` (TRD S21 trd-3-2-u5 R21): those arrivals are the automatic clears, so a cause written
    * while one holds would never be cleared and would surface later as a stale cause of an unrelated ① (e.g. after a tray stop). Public on `window.__ENGRAM_AGENT__`, so the LLM and cdp reach it too.
    *
    * Exactly one writer — `DaemonControl.start()` (boot bootstrap, `window.__ENGRAM_DAEMON__.start()`, the band's 「Reconnect」 and the LLM `connection.reconnect` all go through it).

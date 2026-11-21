@@ -130,6 +130,35 @@ async fn a_listener_opens_only_on_loopback() {
     assert!(refused.message.contains("loopback"), "{refused}");
 }
 
+// ── Typed socket ends (ADR-0395 — a consumer looks the connection up by them) ──
+
+/// The accepted link's [`engram_dashboard_transport::LinkInfo::socket_ends`] and the dialed link's [`LinkTx::socket_ends`] name the same TCP
+///   connection from both sides: the accepting side's `peer` is the dialer's `local`, and the reverse.
+#[tokio::test]
+async fn both_ends_of_one_link_report_the_same_tcp_connection_typed() {
+    let (mut listener, _refusals) = bind(common::accept_policy());
+    let addr = listener.dial_address();
+    let dialing = tokio::spawn(async move {
+        let dialer = common::dialer();
+        let (tx, rx) = tokio::time::timeout(common::PATIENCE, dialer.dial(&addr))
+            .await
+            .expect("dial cap")
+            .expect("dial");
+        let ends = tx.socket_ends();
+        (ends, tx, rx)
+    });
+    let accepted = accept(&mut listener).await;
+    let (dialed, _tx, _rx) = dialing.await.unwrap();
+    let dialed = dialed.expect("a dialed ws link knows its TCP ends");
+    let observed = accepted
+        .info()
+        .socket_ends
+        .expect("an accepted ws link knows its TCP ends");
+    assert_eq!(observed.peer, dialed.local, "the observed client address");
+    assert_eq!(observed.local, dialed.peer);
+    assert_eq!(observed.local, listener.local_addr());
+}
+
 // ── Origin (§5 2) ──
 
 #[tokio::test]

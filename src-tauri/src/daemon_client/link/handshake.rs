@@ -13,8 +13,9 @@ use engram_dashboard_transport::{mask_reason, Frame, Handshake, HandshakeStep, R
 pub struct CredentialSlot(Mutex<Option<Secret>>);
 
 impl CredentialSlot {
-    pub(super) fn set(&self, credential: Secret) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(credential);
+    /// `None` = the endpoint had no credential — the dialer then hands out no link, so the handshake never starts with an empty slot.
+    pub(super) fn set(&self, credential: Option<Secret>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = credential;
     }
 
     fn get(&self) -> Option<Secret> {
@@ -125,7 +126,7 @@ mod tests {
 
     fn handshake_with(token: &str) -> ShellHandshake {
         let slot = Arc::new(CredentialSlot::default());
-        slot.set(Secret::new(token));
+        slot.set(Some(Secret::new(token)));
         ShellHandshake::new(slot)
     }
 
@@ -166,9 +167,9 @@ mod tests {
     #[test]
     fn start_reads_the_slot_at_call_time() {
         let slot = Arc::new(CredentialSlot::default());
-        slot.set(Secret::new("first"));
+        slot.set(Some(Secret::new("first")));
         let handshake = ShellHandshake::new(slot.clone());
-        slot.set(Secret::new("second"));
+        slot.set(Some(Secret::new("second")));
         match handshake.start() {
             HandshakeStep::Send(Frame::Text(sent)) => {
                 assert!(sent.contains(r#""token":"second""#), "{sent}")

@@ -7,8 +7,8 @@ use tauri::async_runtime::Mutex;
 use tauri::Manager;
 
 use crate::daemon_client::shutdown::{StopOrigin, StopOutcome, StopPlan, StopReason, StopResult};
-use crate::daemon_client::{ConnectionStatus, DaemonClient};
-use crate::discovery::{self, locate_daemon_exe};
+use crate::daemon_client::{ConnectionStatus, DaemonClient, StartAttempt};
+use crate::discovery::{self, locate_daemon_exe, StartFailure};
 
 // The ensure (spawn included) serialization lock — process-global (OnceLock + tokio async Mutex).
 // Why: a window's WebView calls discover_daemon/daemon_start (=ensure_internal) at boot, and StrictMode calls it twice, so calls overlap (more with several windows). With no daemon.json yet each call WMI-spawns a daemon on its own → the daemon lock keeps only 1 alive and the rest exit at once; a debug daemon is a console app, so the losers flash several console windows. Serialized by this lock, only the first call spawns + publishes daemon.json and later calls find it in `ensure_daemon` and attach without spawning. The result (1 live daemon) is the same; only the multiple WMI spawns disappear. If one is already alive, ensure returns attach at once so the lock is held briefly (an async Mutex, so awaiting `spawn_blocking` inside it does not block the executor).
@@ -21,8 +21,8 @@ fn ensure_lock() -> &'static Mutex<()> {
 /// The daemon's address as handed to the WebView by `discover_daemon` · `daemon_start` · `read_daemon_info`.
 ///
 /// Never carries the daemon token: any script in the WebView (`csp: null`) can read a command's result, and the token
-/// would let it leave the WebView (another process · a direct socket). The shell reads the token from `daemon.json`
-/// for its own link; the WebView never needs it.
+/// would let it leave the WebView (another process · a direct socket). The shell reads the token from this account's token
+/// file (ADR-0395) for its own link; the WebView never needs it.
 // ADR-0310: D23 ① — the token stays out of this DTO; do not add it back.
 #[derive(serde::Serialize)]
 pub struct DaemonInfoDto {
@@ -44,9 +44,12 @@ impl From<engram_dashboard_protocol::DaemonInfo> for DaemonInfoDto {
 }
 
 // Discovers the daemon (WMI spawn if absent) and returns the connection info; 5 s if timeout_ms is unspecified. Console visibility is daemon_start (console=true).
+// Dev-only and windowless: it sets no band, so its failure stays the English text (ADR-0399).
 #[tauri::command]
 pub async fn discover_daemon(timeout_ms: Option<u64>) -> Result<DaemonInfoDto, String> {
-    ensure_internal(timeout_ms, false, || {}).await
+    ensure_internal(timeout_ms, false, || {})
+        .await
+        .map_err(|e| e.message)
 }
 
 // Decided by daemon.json + PID liveness.
@@ -58,20 +61,38 @@ pub struct DaemonStatusDto {
 }
 
 // ADR-0021 §5: explicit daemon start (ensure): attach (return its connection info) if alive, else spawn; `console=true` spawns with a console window (debug logs visible). Separated from reconnect: only this command triggers a spawn — the frontend reconnect loop does not call it. From the main window it is also the boot start the shell's band hold waits for (`BootStartWatch`).
+// ADR-0399: a rejection carries the typed refusal (`StartFailure::refusal`) when the data folder's drive refused the start — the band
+//   shows that cause (every window's start sets it, `answer_start`), so the frontend stores no text for it. The attempt takes its place
+//   in the start-attempt order before it waits for the ensure lock, so the latest-started start's answer wins.
 #[tauri::command]
 pub async fn daemon_start(
     window: tauri::Window,
     timeout_ms: Option<u64>,
     console: Option<bool>,
-) -> Result<DaemonInfoDto, String> {
+) -> Result<DaemonInfoDto, StartFailure> {
     let client = window.app_handle().try_state::<Arc<DaemonClient>>();
-    let watch = BootStartWatch::of(window.label(), client.as_deref().map(Arc::as_ref));
+    let client = client.as_deref().map(Arc::as_ref);
+    let watch = BootStartWatch::of(window.label(), client);
+    let attempt = client.map(|client| (client, client.begin_start_attempt()));
     let started = ensure_internal(timeout_ms, console.unwrap_or(false), || {
         watch.search_began(search_timeout(timeout_ms))
     })
     .await;
+    answer_start(attempt, &started);
     watch.start_answered(&started);
     started
+}
+
+/// Hands a `daemon_start`'s answer to the band before the boot hold can end on it, with the attempt's place taken when it began: a
+///   refusal before a spawn shows its cause, any other answer clears an earlier one — unless a later-started attempt or a close was
+///   applied already (ADR-0399).
+pub(crate) fn answer_start<T>(
+    attempt: Option<(&DaemonClient, StartAttempt)>,
+    started: &Result<T, StartFailure>,
+) {
+    if let Some((client, attempt)) = attempt {
+        client.set_start_refusal(attempt, started.as_ref().err().and_then(|e| e.refusal));
+    }
 }
 
 /// What a window's boot start tells the shell's band hold (TRD S21 trd-3-2-u5 R20 · R24) — only the main window's: a popout's or the spare's start says nothing about the cold boot. The search's start bounds the hold; a failed `daemon_start` or a returned `daemon_connect` ends it, before the answer reaches the window.
@@ -88,7 +109,7 @@ impl<'a> BootStartWatch<'a> {
         }
     }
 
-    pub(crate) fn start_answered<T>(&self, started: &Result<T, String>) {
+    pub(crate) fn start_answered<T>(&self, started: &Result<T, StartFailure>) {
         if let (Some(client), Err(_)) = (self.0, started) {
             client.boot_start_answered("the main window's daemon_start failed");
         }
@@ -188,11 +209,11 @@ async fn ensure_internal(
     timeout_ms: Option<u64>,
     console: bool,
     on_search: impl FnOnce(),
-) -> Result<DaemonInfoDto, String> {
+) -> Result<DaemonInfoDto, StartFailure> {
     let data_dir = discovery::default_data_dir();
     let exe = locate_daemon_exe().map_err(|e| {
         tracing::error!("daemon executable not found: {e}");
-        e.to_string()
+        StartFailure::from(e)
     })?;
     let timeout = search_timeout(timeout_ms);
 
@@ -205,12 +226,12 @@ async fn ensure_internal(
         discovery::ensure_daemon(&data_dir, &exe, timeout, console)
     })
     .await
-    .map_err(|e| format!("discover_daemon join failed: {e}"))?
+    .map_err(|e| StartFailure::other(format!("discover_daemon join failed: {e}")))?
     .map(DaemonInfoDto::from)
     // Security: the error message has no token (DiscoveryError does not include it). Do not stop at passing only a string to the frontend: in release the cause would exist only as a banner and vanish when the banner closes — leave it at the default level so the log file explains the banner.
     .map_err(|e| {
-        tracing::warn!("daemon ensure failed — passing the string to the frontend: {e}");
-        e.to_string()
+        tracing::warn!("daemon ensure failed — passing the failure to the frontend: {e}");
+        StartFailure::from(e)
     })
 }
 
@@ -225,9 +246,9 @@ mod tests {
             pid: 4321,
             host: "127.0.0.1".into(),
             port: 51000,
-            token: engram_dashboard_protocol::Secret::new("c".repeat(64)),
             protocol_version: 7,
             start_time: 999,
+            owner_account: "S-1-5-21-1-2-3-1001".into(),
         };
         let dto = DaemonInfoDto::from(info);
         assert_eq!(dto.pid, 4321);
@@ -245,11 +266,11 @@ mod tests {
         {
         }
         returns_dto(|timeout_ms, ()| discover_daemon(timeout_ms));
-        // `daemon_start` takes the calling window first.
+        // `daemon_start` takes the calling window first and rejects with the typed failure (ADR-0399).
         fn returns_dto_from_a_window<Fut>(
             _: impl Fn(tauri::Window, Option<u64>, Option<bool>) -> Fut,
         ) where
-            Fut: std::future::Future<Output = Result<DaemonInfoDto, String>>,
+            Fut: std::future::Future<Output = Result<DaemonInfoDto, StartFailure>>,
         {
         }
         returns_dto_from_a_window(daemon_start);
@@ -285,6 +306,7 @@ mod tests {
             (StopReason::StillRunning, "still_running"),
             (StopReason::FlightExpired, "flight_expired"),
             (StopReason::StopFailed, "stop_failed"),
+            (StopReason::AccountRefused, "account_refused"),
         ] {
             let reply = DaemonShutdownReply::from(StopResult {
                 outcome: StopOutcome::Timeout,
@@ -295,24 +317,22 @@ mod tests {
     }
 
     // ADR-0310: D23 ① — all three commands (`discover_daemon` · `daemon_start` · `read_daemon_info`) return this DTO, so its serialized form is what the WebView receives.
+    //   The record itself has no token since ADR-0395; the DTO stays these four fields (the owner account does not reach the WebView either).
     #[test]
     fn serialized_dto_carries_no_token() {
-        let token = "c".repeat(64);
+        let owner = "S-1-5-21-1-2-3-1001";
         let info = engram_dashboard_protocol::DaemonInfo {
             pid: 4321,
             host: "127.0.0.1".into(),
             port: 51000,
-            token: engram_dashboard_protocol::Secret::new(token.clone()),
             protocol_version: 7,
             start_time: 999,
+            owner_account: owner.into(),
         };
         let json = serde_json::to_value(DaemonInfoDto::from(info)).expect("DTO serializes");
         let fields = json.as_object().expect("DTO serializes to an object");
         assert!(!fields.contains_key("token"), "token field leaked: {json}");
-        assert!(
-            !json.to_string().contains(&token),
-            "token value leaked: {json}"
-        );
+        assert!(!json.to_string().contains(owner), "owner leaked: {json}");
         let mut keys: Vec<&str> = fields.keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(keys, ["host", "pid", "port", "protocol_version"]);

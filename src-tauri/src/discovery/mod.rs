@@ -1,4 +1,4 @@
-//! Daemon discovery — the shell finds the daemon and, if there is none, launches it via WMI and retrieves the port/token. Includes status query · stop fallback.
+//! Daemon discovery — the shell finds the daemon and, if there is none, launches it via WMI and retrieves its port from `daemon.json`. Includes status query · stop fallback.
 //!
 //! ADR-0029: daemon-only (embedded removed). The app is a resident client of the daemon so it always attaches to the daemon (WS is phase4).
 //!
@@ -11,14 +11,19 @@
 //! The data folder root, the `daemon.json` location and `logs\` are copies of the daemon's authority ([`layout`]). The shell's stop path is [`crate::daemon_client::shutdown`].
 //!
 //! ## Security
-//! `DaemonInfo.token` is never printed to logs (flows only in the local IPC file).
+//! `daemon.json` carries no token (ADR-0395): the shell token is in this account's owner-only `daemon-token.<account>` ([`read_token`]),
+//! read after `daemon.json` so a new record is never paired with an old token, and never printed to logs. The record's owner account is
+//! only a hint — the shell checks the listener's account on its own connection before sending the token (`daemon_client::link::account`).
+//! A data folder on a drive that cannot keep owner-only files (FAT / exFAT) is refused before any spawn ([`check_data_dir_volume`],
+//! ADR-0399): the WMI-launched daemon refuses it too, but its refusal reaches the shell only as a discovery timeout.
 // ADR-0271
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use engram_dashboard_base::writable::{probe_write_in, retry_if_vanished};
-use engram_dashboard_protocol::{DaemonInfo, PROTOCOL_VERSION};
+use engram_dashboard_protocol::{DaemonInfo, Secret, PROTOCOL_VERSION};
 
 pub mod layout;
 #[cfg(test)]
@@ -116,6 +121,40 @@ fn check_data_dir_writable_once(dir: &Path) -> std::io::Result<()> {
     outcome
 }
 
+/// Refuses a data folder whose drive does not keep file ACLs (FAT / exFAT), and one whose drive's properties cannot be read — the
+///   token file and the agent control files could not be made owner-only there (no opt-in). `dir` must exist: the volume is read
+///   through it.
+// ADR-0399: unreadable flags refuse too — reading them as "has ACLs" would fail open on exactly the drives this guards.
+pub fn check_data_dir_volume(dir: &Path, volume: &dyn VolumeAcls) -> Result<(), DiscoveryError> {
+    match volume.stores_acls(dir) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(DiscoveryError::UnprotectedVolume {
+            path: dir.display().to_string(),
+        }),
+        Err(e) => Err(DiscoveryError::VolumeUnreadable {
+            path: dir.display().to_string(),
+            reason: e.to_string(),
+        }),
+    }
+}
+
+/// [`ensure_daemon`]'s gate just before a spawn: the data folder must be writable (ADR-0134 decision 4) and on a drive that keeps file
+///   ACLs (ADR-0399). `env_override` = `ENGRAM_DATA_DIR` is set — then nothing is checked (why: [`ensure_daemon`]).
+pub(crate) fn pre_spawn_checks(
+    data_dir: &Path,
+    env_override: bool,
+    volume: &dyn VolumeAcls,
+) -> Result<(), DiscoveryError> {
+    if env_override {
+        tracing::debug!(
+            "ENGRAM_DATA_DIR is set — the WMI daemon does not inherit this value, so the data folder pre-checks are skipped"
+        );
+        return Ok(());
+    }
+    check_data_dir_writable(data_dir)?;
+    check_data_dir_volume(data_dir, volume)
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -133,8 +172,72 @@ pub enum DiscoveryError {
     /// ★The message carries the remedy (ADR-0134 decision 4)★: this string rises as is to the frontend's failure surface; replacing a cause-less connection timeout is why this variant exists.
     #[error("cannot write to the data folder ({path}): {reason} — please extract to a writable location")]
     DataDirUnwritable { path: String, reason: String },
+    /// The log text; the band shows its own translated text from [`VolumeRefusal`] (ADR-0399 · ADR-0373).
+    #[error("the data folder ({path}) is on a drive that does not store file permissions (FAT or exFAT), so Engram's private files cannot be protected — exit Engram, move the Engram folder (for a portable copy, the whole folder with the exe) to an NTFS drive and start it again")]
+    UnprotectedVolume { path: String },
+    /// The log text; the band shows its own translated text from [`VolumeRefusal`] (ADR-0399 · ADR-0373).
+    #[error("could not read the properties of the drive holding the data folder ({path}): {reason} — exit Engram, move the Engram folder (for a portable copy, the whole folder with the exe) to an NTFS drive and start it again")]
+    VolumeUnreadable { path: String, reason: String },
     #[error("io: {0}")]
     Io(String),
+}
+
+impl DiscoveryError {
+    /// The typed band cause this failure is, if it is one (ADR-0399).
+    pub fn volume_refusal(&self) -> Option<VolumeRefusal> {
+        match self {
+            DiscoveryError::UnprotectedVolume { .. } => Some(VolumeRefusal::Unprotected),
+            DiscoveryError::VolumeUnreadable { .. } => Some(VolumeRefusal::Unreadable),
+            _ => None,
+        }
+    }
+}
+
+/// Why the data folder's drive refused Engram before a spawn (ADR-0399) — the typed cause the shell band shows, translated where shown
+///   (ADR-0372 · ADR-0373).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum VolumeRefusal {
+    /// The drive does not store file ACLs (FAT, exFAT).
+    Unprotected,
+    /// Whether the drive stores file ACLs could not be read.
+    Unreadable,
+}
+
+/// A failed daemon search as its callers carry it — `daemon_start`'s rejection and `EndpointSource::ensure`'s error. `refusal` = the
+///   typed band cause when the failure is one (ADR-0399), `null` otherwise; `message` = the English text for the log, and band ①'s cause
+///   when there is no `refusal`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct StartFailure {
+    pub refusal: Option<VolumeRefusal>,
+    pub message: String,
+}
+
+impl StartFailure {
+    /// A failure that is no typed refusal.
+    pub fn other(message: impl Into<String>) -> Self {
+        Self {
+            refusal: None,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<DiscoveryError> for StartFailure {
+    fn from(e: DiscoveryError) -> Self {
+        Self {
+            refusal: e.volume_refusal(),
+            message: e.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for StartFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 // ── injection boundary (trait) ─────────────────────────────────────────────────────────────
@@ -152,6 +255,11 @@ pub trait DaemonReader {
 pub trait Spawner {
     /// Spawn an absolute-path exe.
     fn spawn(&self, exe: &Path) -> Result<(), DiscoveryError>;
+}
+
+/// Whether a folder's drive keeps file ACLs — `Ok` only when that was read (ADR-0399). Real = [`PlatformVolume`].
+pub trait VolumeAcls {
+    fn stores_acls(&self, dir: &Path) -> io::Result<bool>;
 }
 
 /// Polling clock: the current time is the base clock plus a sleep that **blocks the thread** (this module is synchronous).
@@ -350,7 +458,7 @@ pub fn daemon_status(data_dir: &Path) -> DaemonStatus {
     status_with(&reader, &RealLiveness)
 }
 
-/// ★Differs from daemon_status★: daemon_status is a lifecycle probe giving pid/port only; this returns the full record (token included) — see [`read_live_daemon`] for who receives it.
+/// ★Differs from daemon_status★: daemon_status is a lifecycle probe giving pid/port only; this returns the full record — see [`read_live_daemon`] for who receives it.
 fn read_live_with(reader: &dyn DaemonReader, liveness: &dyn PidLiveness) -> Option<DaemonInfo> {
     match reader.read() {
         Ok(Some(info)) => match check_acceptable(&info, liveness) {
@@ -361,18 +469,35 @@ fn read_live_with(reader: &dyn DaemonReader, liveness: &dyn PidLiveness) -> Opti
     }
 }
 
-/// Reads the live daemon's record (the token included) from `daemon.json` (real entry point).
+/// Reads the live daemon's record from `daemon.json` (real entry point). The record carries no token (ADR-0395).
 ///
 /// ★How the direct-path reconnect follows a moved daemon (ADR-0021)★: after a hot swap (stop → start) or a
 /// crash respawn the daemon comes up on a new port; the dev `wsTransport` reconnect re-reads the **current
-/// `daemon.json`** through this (via the `read_daemon_info` command, its only caller, which strips the token before it
-/// reaches the WebView — ADR-0310 D23 ①) instead of a cached address. The shell's own link reads `daemon.json` itself
+/// `daemon.json`** through this (via the `read_daemon_info` command, its only caller — the WebView never gets a token,
+/// ADR-0310 D23 ①) instead of a cached address. The shell's own link reads `daemon.json` and the token file itself
 /// (`daemon_client/link/endpoint.rs`). ★It never spawns★ — it follows a daemon that is up, it does not wake one.
 pub fn read_live_daemon(data_dir: &Path) -> Option<DaemonInfo> {
     let reader = FileReader {
         path: DataLayout::new(data_dir).daemon_file(),
     };
     read_live_with(&reader, &RealLiveness)
+}
+
+/// This account's shell token from `data_dir` (`daemon-token.<account>` next to `daemon.json`; `account` = platform
+///   `account::current_account_id`). ★Read it after `daemon.json`, never before★ — the daemon writes the token file before it publishes
+///   the record, so a token read after the record is never older than it (ADR-0395). The content is sent as it is; the file is the
+///   daemon's, and a wrong one is the daemon's refusal to make. A file held briefly (antivirus) is read again within the shell's lock
+///   budget (`file_hooks::OS_HOOKS`), as other data files are — otherwise a briefly held token turns a graceful stop into a kill.
+// ADR-0395
+pub(crate) fn read_token(data_dir: &Path, account: &str) -> std::io::Result<Secret> {
+    let path = DataLayout::new(data_dir).token_file(account);
+    let mut text = None;
+    (crate::file_hooks::OS_HOOKS.retry)(&mut || {
+        text = Some(std::fs::read_to_string(&path)?);
+        Ok(())
+    })?;
+    text.map(Secret::new)
+        .ok_or_else(|| std::io::Error::other("the retry never called the read"))
 }
 
 // ── public entry points ─────────────────────────────────────────────────────────
@@ -396,23 +521,16 @@ pub fn ensure_daemon(
     let spawner = WmiSpawner { console };
     let liveness = RealLiveness;
     let clock = engram_dashboard_base::time::SystemClock;
-    // ADR-0134 decision 4: check the data folder on our side **before** launching the daemon. If the folder is unwritable the
-    // daemon dies as soon as it starts and the client is left with only a cause-less connection timeout, so the cause is attached here
-    // and raised as is into the existing failure path (command Err / DaemonClient Err).
+    // ADR-0134 decision 4 · ADR-0399: check the data folder on our side **before** launching the daemon — writable, and on a drive
+    // that keeps file ACLs. Otherwise the daemon dies as soon as it starts and the client is left with only a cause-less connection
+    // timeout, so the cause is attached here and raised as is into the existing failure path (command Err / DaemonClient Err).
     //
     // ★If the override is on, do not assert (load-bearing)★: a daemon launched via WMI **does not inherit the parent env**
     // (the override comment at the top of this file), so it cannot see `ENGRAM_DATA_DIR` — the folder we look at and the folder
     // the daemon will write differ. Checking our folder in that state would declare pass/fail **about the wrong folder**,
     // so saying nothing is right (it stays the existing behavior of a polling timeout).
-    let mut pre_spawn = || {
-        if data_dir_env_override().is_some() {
-            tracing::debug!(
-                "ENGRAM_DATA_DIR is set — the WMI daemon does not inherit this value, so the data folder pre-check is skipped"
-            );
-            return Ok(());
-        }
-        check_data_dir_writable(data_dir)
-    };
+    let mut pre_spawn =
+        || pre_spawn_checks(data_dir, data_dir_env_override().is_some(), &PlatformVolume);
 
     ensure_with(
         &reader,
@@ -484,6 +602,15 @@ impl PidLiveness for RealLiveness {
     }
 }
 
+/// The OS layer's volume query (platform `owner_only::volume_stores_acls`).
+struct PlatformVolume;
+
+impl VolumeAcls for PlatformVolume {
+    fn stores_acls(&self, dir: &Path) -> io::Result<bool> {
+        engram_dashboard_platform::owner_only::volume_stores_acls(dir)
+    }
+}
+
 impl Clock for engram_dashboard_base::time::SystemClock {
     fn sleep(&self, dur: Duration) {
         std::thread::sleep(dur);
@@ -494,8 +621,8 @@ impl Clock for engram_dashboard_base::time::SystemClock {
 
 /// Launches the daemon outside the Job the shell holds (platform `spawn::spawn_outside_job` — WMI). ★Why outside the Job★: even if the shell (Tauri) is
 /// inside a `KILL_ON_JOB_CLOSE` Job the daemon must survive. That mechanism cannot pass environment variables, so the token flows only through
-/// daemon.json (ACL) (design settled), and the pid · port are also retrieved by polling that file. The exe it receives is an absolute path
-/// ([`ensure_daemon`] canonicalizes it).
+/// the files the daemon writes — the owner-only token file ([`read_token`], ADR-0395) — and the pid · port are retrieved by polling
+/// `daemon.json`. The exe it receives is an absolute path ([`ensure_daemon`] canonicalizes it).
 // ADR-0021
 // ADR-0266
 struct WmiSpawner {

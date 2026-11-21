@@ -38,6 +38,7 @@ const PLAIN: Band = { kind: 'not_connected', refused: false }
 const REFUSED: Band = { kind: 'not_connected', refused: true }
 const VERSION: Band = { kind: 'version', can_stop: true }
 const VERSION_FIXED: Band = { kind: 'version', can_stop: false }
+const VOLUME: Band = { kind: 'volume', unreadable: false }
 
 // Subscription notifications come from outside React, so they are wrapped in act (the Tauri event callback has the same shape in production).
 function emit(state: ConnectionState, band: Band | null, error: string | null = null) {
@@ -273,6 +274,21 @@ describe('ConnectionNotice — language switch', () => {
     emit('reconnecting', band, error)
 
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  // ADR-0399: the volume band is typed, so the open band follows the switch; the start's English text never shows under it.
+  it('the volume band follows the switch and never shows the start cause', () => {
+    render(<Root />)
+    emit('down', VOLUME, 'the data folder (E:/x) is on a drive that does not store file permissions (FAT or exFAT)')
+    const alert = screen.getByRole('alert')
+    expect(alert.getAttribute('data-band')).toBe('volume')
+    expect(alert.firstElementChild?.textContent).toBe('데몬에 연결하지 못했습니다. Engram 폴더가 파일 권한을 저장하지 못하는 드라이브(FAT 또는 exFAT)에 있습니다. Engram을 종료하고 Engram 폴더(포터블 사본이면 exe가 든 폴더 전체)를 NTFS 드라이브로 옮긴 뒤 다시 시작하세요')
+
+    act(() => {
+      setLanguage('en')
+    })
+
+    expect(screen.getByRole('alert').firstElementChild?.textContent).toBe('Could not connect to the daemon. The Engram folder is on a drive that cannot keep file permissions (FAT or exFAT). Exit Engram, move the Engram folder (for a portable copy, the whole folder with the exe) to an NTFS drive, then start it again.')
   })
 
   it('a band left open follows the switch', () => {

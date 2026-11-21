@@ -5,6 +5,7 @@
 import { invoke } from '@tauri-apps/api/core'
 
 import type { DaemonShutdownReply } from '../../src-tauri/bindings/DaemonShutdownReply'
+import type { StartFailure } from '../../src-tauri/bindings/StartFailure'
 import type { AgentClient } from './agentClient'
 
 /** daemon_status Tauri command return (mirror of DaemonStatusDto). */
@@ -28,8 +29,18 @@ export interface DaemonControl {
   status(): Promise<DaemonStatus>
 }
 
-/** An invoke rejection arrives as a string (Rust `Err(String)`) but may also be an Error instance — unfold both into a sentence. */
-function describeError(err: unknown): string {
+function isStartFailure(err: unknown): err is StartFailure {
+  return typeof err === 'object' && err !== null && typeof (err as { message?: unknown }).message === 'string' && 'refusal' in err
+}
+
+/**
+ * The start cause to record for a failed start, or null for none. A `daemon_start` rejection is a `StartFailure`: with a typed
+ * `refusal` the shell's volume band shows the cause in the current language, so no text is stored (ADR-0399 · ADR-0373);
+ * otherwise its English `message`. Other rejections (a string from another command step, an Error instance) are unfolded into a
+ * sentence.
+ */
+function startCause(err: unknown): string | null {
+  if (isStartFailure(err)) return err.refusal === null ? err.message : null
   if (typeof err === 'string') return err
   if (err instanceof Error) return err.message
   return String(err)
@@ -58,7 +69,7 @@ export class DaemonDaemonControl implements DaemonControl {
       return info
     } catch (err) {
       // Carry Rust's cause (e.g. cannot write to the data folder) onto the connection state surface; the throw continues so the caller's retry and logging do not change.
-      this.client.reportConnectionError(describeError(err))
+      this.client.reportConnectionError(startCause(err))
       throw err
     }
   }

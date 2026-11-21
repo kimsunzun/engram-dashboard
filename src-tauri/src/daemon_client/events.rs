@@ -202,6 +202,20 @@ mod tests {
                 },
                 r#"{"state":"down","band":{"kind":"version","can_stop":true}}"#,
             ),
+            (
+                ConnectionStatus {
+                    state: ConnectionState::Down,
+                    band: Some(Band::Account { unverified: false }),
+                },
+                r#"{"state":"down","band":{"kind":"account","unverified":false}}"#,
+            ),
+            (
+                ConnectionStatus {
+                    state: ConnectionState::Down,
+                    band: Some(Band::Volume { unreadable: true }),
+                },
+                r#"{"state":"down","band":{"kind":"volume","unreadable":true}}"#,
+            ),
         ];
         for (status, wire) in golden {
             assert_eq!(serde_json::to_string(&status).unwrap(), wire);

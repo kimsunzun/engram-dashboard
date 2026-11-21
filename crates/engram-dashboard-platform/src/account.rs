@@ -15,7 +15,9 @@ use std::net::SocketAddrV4;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE, NO_ERROR};
+use windows::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE, NO_ERROR,
+};
 #[cfg(windows)]
 use windows::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, MIB_TCPROW_OWNER_MODULE, MIB_TCPTABLE_OWNER_MODULE, MIB_TCP_STATE_ESTAB,
@@ -124,9 +126,29 @@ pub enum TcpOwnerError {
     ///   was reused); or a server end has no listening row that predates it; or the end asked about as a client is a server end (its
     ///   owner listens on that port — the two addresses were passed the wrong way round).
     OwnerUnproven,
-    /// The TCP table could not be read, or the owning process could not be opened or its creation time or token read (it exited, or
-    ///   access was denied — e.g. an elevated process asked about by a non-elevated one). Outside Windows = `Unsupported`.
+    /// Opening the owning process was refused (access denied) — what a process of another account gives: a standard account's process
+    ///   cannot be opened by another account at all, while this account's own processes (elevated ones included) open for the query
+    ///   this lookup needs. The account is not read, so this is still not a proof — callers word it as "another account" and refuse.
+    ProcessAccessDenied,
+    /// The TCP table could not be read, or the owning process could not be opened for another reason, or its creation time or token
+    ///   could not be read (it exited, or access was denied after opening — e.g. an elevated process's token asked about by a
+    ///   non-elevated one). Outside Windows = `Unsupported`.
     Os(io::Error),
+}
+
+impl TcpOwnerError {
+    /// The connection or its owning process went away during the lookup — no such connection (any more), or the owner PID names no
+    ///   process now (Windows `ERROR_INVALID_PARAMETER` from opening it). A later attempt can answer differently, so a caller may treat
+    ///   it as one failed attempt; it is still never a pass. Access denied (e.g. elevation) and an unproven owner are not gone.
+    pub fn is_gone(&self) -> bool {
+        // The OS code of a PID that no longer names a process, as `OpenProcess` reports it.
+        const ERROR_INVALID_PARAMETER: i32 = 87;
+        match self {
+            Self::NoSuchConnection => true,
+            Self::Os(e) => cfg!(windows) && e.raw_os_error() == Some(ERROR_INVALID_PARAMETER),
+            Self::OwnerUnproven | Self::ProcessAccessDenied => false,
+        }
+    }
 }
 
 impl fmt::Display for TcpOwnerError {
@@ -138,6 +160,9 @@ impl fmt::Display for TcpOwnerError {
             Self::OwnerUnproven => {
                 f.write_str("the process owning this end of the connection could not be confirmed")
             }
+            Self::ProcessAccessDenied => f.write_str(
+                "the process owning this end of the connection may not be opened (another account's process)",
+            ),
             Self::Os(e) => write!(f, "could not read the connection's owning account: {e}"),
         }
     }
@@ -146,7 +171,7 @@ impl fmt::Display for TcpOwnerError {
 impl std::error::Error for TcpOwnerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NoSuchConnection | Self::OwnerUnproven => None,
+            Self::NoSuchConnection | Self::OwnerUnproven | Self::ProcessAccessDenied => None,
             Self::Os(e) => Some(e),
         }
     }
@@ -228,7 +253,7 @@ fn owner(
     //   closes it.
     let process = unsafe {
         let raw = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, first.pid)
-            .map_err(|e| TcpOwnerError::Os(io_error(e)))?;
+            .map_err(|e| denied_or_os(io_error(e)))?;
         OwnedHandle::from_raw_handle(raw.0)
     };
     let held = match endpoint(local, remote, end)? {
@@ -252,6 +277,17 @@ fn owner(
     };
     let account = token_user_sid(&token).map_err(TcpOwnerError::Os)?;
     Ok((first.pid, account))
+}
+
+/// An `OpenProcess` failure as a [`TcpOwnerError`]: access denied is [`TcpOwnerError::ProcessAccessDenied`] (another account's process);
+///   anything else stays an OS error.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn denied_or_os(e: io::Error) -> TcpOwnerError {
+    #[cfg(windows)]
+    if e.raw_os_error() == Some(ERROR_ACCESS_DENIED.0 as i32) {
+        return TcpOwnerError::ProcessAccessDenied;
+    }
+    TcpOwnerError::Os(e)
 }
 
 /// One end as the table reports it: the owner PID and the endpoint's time (FILETIME scale).
@@ -447,6 +483,40 @@ pub(crate) fn sid_to_string(sid: PSID) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_the_owner_refused_is_typed_and_other_failures_stay_os_errors() {
+        let denied = denied_or_os(io::Error::from_raw_os_error(5));
+        if cfg!(windows) {
+            assert!(
+                matches!(denied, TcpOwnerError::ProcessAccessDenied),
+                "{denied:?}"
+            );
+        } else {
+            assert!(matches!(denied, TcpOwnerError::Os(_)), "{denied:?}");
+        }
+        assert!(matches!(
+            denied_or_os(io::Error::from_raw_os_error(87)),
+            TcpOwnerError::Os(_)
+        ));
+    }
+
+    #[test]
+    fn only_a_vanished_connection_or_process_is_gone() {
+        assert!(TcpOwnerError::NoSuchConnection.is_gone());
+        assert!(!TcpOwnerError::OwnerUnproven.is_gone());
+        assert!(!TcpOwnerError::ProcessAccessDenied.is_gone());
+        assert!(
+            !TcpOwnerError::Os(io::Error::from_raw_os_error(5)).is_gone(),
+            "access denied"
+        );
+        assert!(!TcpOwnerError::Os(io::ErrorKind::Unsupported.into()).is_gone());
+        assert_eq!(
+            TcpOwnerError::Os(io::Error::from_raw_os_error(87)).is_gone(),
+            cfg!(windows),
+            "a PID that names no process"
+        );
+    }
 
     #[test]
     fn account_id_is_a_stable_non_empty_sid_on_windows() {

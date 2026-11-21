@@ -304,11 +304,22 @@ export const en = {
       'The previous session, which did not end normally, could not be kept aside, so this session is not being saved. You will be asked again the next time the app starts.',
     dismissNotice: 'Dismiss session notice',
   },
-  // The two connection bands, their "Reconnect" and the LLM command titles (ADR-0356).
+  // The connection bands, their "Reconnect" and the LLM command titles (ADR-0356 · ADR-0395 · ADR-0399).
   connection: {
     head: 'Could not connect to the daemon.',
     refusedCause: 'The daemon refused authentication from this app.',
     versionCause: 'The running daemon is a different version from this app. Stop the daemon, then reconnect.',
+    // ADR-0395: the daemon's listener runs under another Windows account (the app sent nothing), or its account could not be read.
+    otherAccountCause:
+      'This daemon belongs to another Windows account — use a separate data folder for each account.',
+    accountUnverifiedCause:
+      "Could not verify the daemon's account — run the app and Engram the same way, both elevated or both not.",
+    // ADR-0399: the last start was refused before a spawn — the data folder's drive cannot keep owner-only files, or its properties
+    //   could not be read. Both name the fix; the data folder is found from the exe at start, so the whole folder moves.
+    unprotectedVolumeCause:
+      'The Engram folder is on a drive that cannot keep file permissions (FAT or exFAT). Exit Engram, move the Engram folder (for a portable copy, the whole folder with the exe) to an NTFS drive, then start it again.',
+    volumeUnreadableCause:
+      'Could not read the properties of the drive the Engram folder is on. Exit Engram, move the Engram folder (for a portable copy, the whole folder with the exe) to an NTFS drive, then start it again.',
     reconnect: 'Reconnect',
     reconnecting: 'Reconnecting…',
     dismiss: 'Dismiss notice',

@@ -8,7 +8,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import net from 'node:net'
+import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { OTHER_ACCOUNT, listenerAccountProblem } from './engram-account.mjs'
 
 // Resolves the daemon.json location — covers both dev (repo <root>/.engram-dev) and release (<exe folder>/data).
 // This candidate search is the core of "release-safe": whichever build it is, if a daemon is up, it attaches through the portfile.
@@ -33,7 +35,7 @@ function readPortfile(p, attempts = PORTFILE_READ_ATTEMPTS) {
   for (let i = 0; i < attempts; i++) {
     try {
       const info = JSON.parse(fs.readFileSync(p, 'utf8'))
-      if (info && typeof info.port === 'number' && typeof info.token === 'string') return info
+      if (info && typeof info.port === 'number') return info
     } catch {}
     if (i < attempts - 1) sleepSync(PORTFILE_READ_DELAY_MS)
   }
@@ -162,6 +164,29 @@ async function describeWsError(e, host, port) {
 
 const rid = () => crypto.randomUUID()
 
+// ADR-0395: daemon.json carries no token — it is in this account's owner-only `daemon-token.<SID>` next to it, read after
+//   daemon.json (the daemon writes the token file first). ★The name is a hand copy of protocol `token_file_name`★ (no test ties it).
+// Before the token goes out, `connect` checks that the process listening at the recorded port runs under this account
+//   (`engram-account.mjs` — refuses anything else, sending nothing).
+function currentAccountSid() {
+  // `whoami /user /fo csv /nh` prints `"DOMAIN\user","S-1-5-…"` — the SID is the last field. ★By its System32 path★: a Git for
+  //   Windows shell puts coreutils' `whoami` (no `/user`) first on PATH.
+  const whoami = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'whoami.exe')
+  const out = execFileSync(whoami, ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' }).trim()
+  const sid = out.split(',').pop()?.replace(/"/g, '')
+  if (!sid || !sid.startsWith('S-')) throw new Error(`could not read this account's SID from whoami: ${out}`)
+  return sid
+}
+
+function readTokenFile(portfile) {
+  const tokenPath = path.join(path.dirname(portfile), `daemon-token.${currentAccountSid()}`)
+  try {
+    return fs.readFileSync(tokenPath, 'utf8')
+  } catch (e) {
+    throw new Error(`could not read this account's daemon token file ${tokenPath} (${e.code || e.message}) — a daemon of another Windows account, or one older than this script, holds this folder`)
+  }
+}
+
 // Connect + Auth (first frame) → returns {send, waitFor}. Throws on failure (token mismatch/version).
 async function connect() {
   const chosen = findPortfile() // Named chosen so it does not collide with the local found inside waitFor.
@@ -173,6 +198,11 @@ async function connect() {
       chosen,
     ))
   }
+  // ADR-0395: only this machine's loopback listener can have its account checked — another host never gets the token.
+  if (info.host !== '127.0.0.1') {
+    throw new Error(`daemon.json names host ${JSON.stringify(info.host)}, not 127.0.0.1 — refusing to send this account's token`)
+  }
+  const token = readTokenFile(portfile)
   const endpoint = `ws://${info.host}:${info.port}/`
   const ws = new WebSocket(endpoint)
   ws.binaryType = 'arraybuffer'
@@ -207,8 +237,14 @@ async function connect() {
   // ★Detach onerror after open★: otherwise a later socket reset fires this handler again, rejecting in vain on the already
   //   settled promise above and also running probeTcpReason (up to 800ms) again, which only delays the Hello wait.
   ws.onerror = null
+  // ADR-0395: the listener must run under this account before the token is sent — anything else refuses, sending nothing.
+  const problem = listenerAccountProblem(info.port)
+  if (problem !== null) {
+    ws.close()
+    throw new Error(`${OTHER_ACCOUNT} (${problem}) — nothing was sent`)
+  }
   // First frame = Auth. The daemon drops the connection if Auth does not arrive within its AUTH_TIMEOUT (daemon link/server.rs).
-  ws.send(JSON.stringify({ Auth: { token: info.token, protocol_version: info.protocol_version } }))
+  ws.send(JSON.stringify({ Auth: { token, protocol_version: info.protocol_version } }))
   const waitFor = (match, ms = 5000) => new Promise((res, rej) => {
     const found = texts.find(match)
     if (found) return res(found)

@@ -1178,6 +1178,8 @@ describe('connection band and the start cause', () => {
   const plain: Band = { kind: 'not_connected', refused: false }
   const refused: Band = { kind: 'not_connected', refused: true }
   const version: Band = { kind: 'version', can_stop: true }
+  const account: Band = { kind: 'account', unverified: false }
+  const volume: Band = { kind: 'volume', unreadable: false }
 
   it('notifies listeners on a band change with the same state word and reads the band through', () => {
     const t = new MockTransport('down')
@@ -1204,6 +1206,8 @@ describe('connection band and the start cause', () => {
   it.each([
     ['band ②', version],
     ['band ① refused', refused],
+    ['the account band', account],
+    ['the volume band', volume],
   ])('clears the cause when %s arrives', (_name, band) => {
     const t = new MockTransport('down')
     const c = new ProtocolClient(t)
@@ -1215,6 +1219,8 @@ describe('connection band and the start cause', () => {
   it.each([
     ['band ②', version],
     ['band ① refused', refused],
+    ['the account band', account],
+    ['the volume band', volume],
   ])('ignores a cause set while %s holds', (_name, band) => {
     const t = new MockTransport('down')
     const c = new ProtocolClient(t)

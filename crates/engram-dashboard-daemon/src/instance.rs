@@ -29,10 +29,14 @@
 //!
 //! ★The reach goes beyond one computer — only when the filesystem does its part★: SMB redirectors propagate ShareAccess and the server arbitrates, so a daemon on another computer is excluded too (measured). But on third-party redirectors · user-mode filesystems (WebDAV · Windows NFS client · Dokan/WinFsp-based rclone·sshfs-win · Google Drive virtual drive) the implementer may ignore it and both daemons acquire. With `try_lock` gone there is no second line of defense — do not put the data folder in such places.
 //!
+//! ★The shell token is not in the held file (ADR-0395)★: `daemon.json` keeps its inherited ACL so another account can read who holds the
+//!   folder and take over after a crash; the token goes to this account's owner-only `daemon-token.<account>`, replaced under the held
+//!   lock before the record is published ([`InstanceGuard::write_token_file`]).
+//!
 //! ★Lifetime rule★: the acquired file must be held as long as the daemon process lives; dropping the guard closes the file and breaks singleness, so `run()` keeps the guard until the process ends. On abnormal exit the OS closes the handle but not immediately (release depends on system resources; on SMB the server keeps the open until session · durable-handle timers expire) — do not assume "it can restart immediately after it dies".
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -65,6 +69,82 @@ impl InstanceGuard {
     pub fn publish(&mut self, info: &DaemonInfo) -> io::Result<()> {
         portfile::write_in_place(&mut self.file, info)
     }
+
+    /// Replaces this account's shell-token file `path` with a new one holding `token`: the previous file is deleted, a new one created
+    ///   `CREATE_NEW` with the owner-only DACL passed at create (platform `owner_only`), then the token written and synced. Both steps
+    ///   retry briefly on a held file (antivirus), like base's rename retries. `Err` = start refused: the previous file could not be
+    ///   deleted (e.g. another account owns it), or the new one could not be made owner-only (a volume without file ACLs — ADR-0399).
+    ///
+    /// ★Order is the contract★: call it before [`Self::publish`] — a reader takes `daemon.json` first and the token after, so a token
+    ///   written first is never older than the record it pairs with. ★Under the held lock★ — only a guard can call it, so two daemons of one
+    ///   folder never write the file at once. The previous file is deleted every start (a new token every run), whatever it is; one that was
+    ///   not owner-only or not this account's is reported (tampering or a pre-S37 folder).
+    // ADR-0395
+    pub fn write_token_file(&self, path: &Path, token: &str) -> io::Result<()> {
+        write_token_file_with(path, token, &OsTokenFiles)
+    }
+}
+
+/// The OS calls [`InstanceGuard::write_token_file`] makes — a seam so the tests drive a foreign-owned or undeletable file.
+trait TokenFiles {
+    fn is_owner_only(&self, path: &Path) -> io::Result<bool>;
+    fn remove(&self, path: &Path) -> io::Result<()>;
+    fn create_owner_only(&self, path: &Path) -> io::Result<File>;
+}
+
+struct OsTokenFiles;
+
+impl TokenFiles for OsTokenFiles {
+    fn is_owner_only(&self, path: &Path) -> io::Result<bool> {
+        engram_dashboard_platform::owner_only::is_owner_only(path)
+    }
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_file(path)
+    }
+    fn create_owner_only(&self, path: &Path) -> io::Result<File> {
+        engram_dashboard_platform::owner_only::create_owner_only(path)
+    }
+}
+
+fn write_token_file_with(path: &Path, token: &str, os: &dyn TokenFiles) -> io::Result<()> {
+    let retry = crate::file_hooks::OS_HOOKS.retry;
+    match os.is_owner_only(path) {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            path = %path.display(),
+            "the previous shell-token file was not owner-only or not this account's — replacing it"
+        ),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        // Only the report above depends on it — the file is replaced either way.
+        Err(e) => tracing::debug!(
+            path = %path.display(),
+            "the previous shell-token file's security could not be read — replacing it: {e}"
+        ),
+    }
+    match retry(&mut || os.remove(path)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("the previous shell-token file could not be deleted: {e}"),
+            ))
+        }
+    }
+    let mut created = None;
+    retry(&mut || {
+        created = Some(os.create_owner_only(path)?);
+        Ok(())
+    })
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("the shell-token file could not be created owner-only: {e}"),
+        )
+    })?;
+    let mut file = created.ok_or_else(|| io::Error::other("the retry never called the create"))?;
+    file.write_all(token.as_bytes())?;
+    file.sync_all()
 }
 
 /// The two normal outcomes of [`acquire`]. Neither means "the system is broken".
@@ -251,9 +331,9 @@ mod tests {
             pid: std::process::id(),
             host: "127.0.0.1".into(),
             port: 54321,
-            token: engram_dashboard_protocol::Secret::new("a".repeat(64)),
             protocol_version: 1,
             start_time: 0,
+            owner_account: String::new(),
         }
     }
 
@@ -515,5 +595,196 @@ mod tests {
             "deletable after releasing the guard"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── the shell-token file (ADR-0395) — real DACLs ──
+
+    fn held_guard(dir: &Path) -> super::InstanceGuard {
+        match acquire(&lock_in(dir)).expect("acquire") {
+            Acquired::Held(g) => g,
+            Acquired::AlreadyRunning { .. } => panic!("an empty folder must be acquired"),
+        }
+    }
+
+    #[test]
+    fn the_token_file_is_created_owner_only_and_reads_back() {
+        use engram_dashboard_platform::owner_only::is_owner_only;
+        let dir = fresh_dir("token-create");
+        let guard = held_guard(&dir);
+        let path = dir.join("daemon-token.S-1-5-21-test");
+        guard.write_token_file(&path, "first").expect("write");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        assert!(is_owner_only(&path).unwrap(), "created owner-only");
+        // Every start replaces it: a new token, still owner-only.
+        guard.write_token_file(&path, "second").expect("rewrite");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert!(is_owner_only(&path).unwrap());
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file with the folder's inherited ACL (a pre-S37 folder, or one someone placed) is deleted and recreated owner-only.
+    #[test]
+    fn a_wider_token_file_is_deleted_and_recreated_owner_only() {
+        use engram_dashboard_platform::owner_only::is_owner_only;
+        let dir = fresh_dir("token-wider");
+        let guard = held_guard(&dir);
+        let path = dir.join("daemon-token.S-1-5-21-test");
+        std::fs::write(&path, "planted").unwrap();
+        assert!(!is_owner_only(&path).unwrap(), "the setup file is wider");
+        guard.write_token_file(&path, "fresh").expect("write");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
+        assert!(is_owner_only(&path).unwrap());
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A previous file that cannot be deleted (held without delete sharing here) refuses the start and is left as it was.
+    #[test]
+    fn a_token_file_that_cannot_be_deleted_refuses_the_start() {
+        let dir = fresh_dir("token-undeletable");
+        let guard = held_guard(&dir);
+        let path = dir.join("daemon-token.S-1-5-21-test");
+        std::fs::write(&path, "old").unwrap();
+        let holder = engram_dashboard_platform::fs::open_deny_write(&path).expect("hold");
+        let err = guard
+            .write_token_file(&path, "new")
+            .expect_err("an undeletable file must refuse the start");
+        assert!(err.to_string().contains("could not be deleted"), "{err}");
+        drop(holder);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `daemon.json` stays a plain file with the folder's ACL (another account must still read it and take over after a crash) and
+    ///   carries the owner account but no token.
+    #[test]
+    fn the_record_keeps_its_inherited_acl_and_carries_no_token() {
+        use engram_dashboard_platform::owner_only::is_owner_only;
+        let dir = fresh_dir("record-acl");
+        let mut guard = held_guard(&dir);
+        let mut record = record_of_this_process();
+        record.owner_account = "S-1-5-21-owner".into();
+        guard.publish(&record).expect("publish");
+        let path = dir.join(DAEMON_FILE);
+        assert!(!is_owner_only(&path).unwrap(), "not owner-only");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("token"), "{text}");
+        assert!(text.contains("S-1-5-21-owner"), "{text}");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// ── the shell-token file's steps against fake OS calls (any OS) ──
+#[cfg(test)]
+mod token_file_tests {
+    use super::{write_token_file_with, TokenFiles};
+    use std::cell::RefCell;
+    use std::fs::File;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    /// Scripted OS: `owner_only` = the previous file's verdict (`None` = no file); `remove` = what deleting answers; `create_ok` = whether
+    ///   creating works. Records the calls in order.
+    struct Script {
+        owner_only: Option<bool>,
+        remove: fn() -> io::Result<()>,
+        create_ok: bool,
+        dir: PathBuf,
+        calls: RefCell<Vec<&'static str>>,
+    }
+
+    impl TokenFiles for Script {
+        fn is_owner_only(&self, _path: &Path) -> io::Result<bool> {
+            self.calls.borrow_mut().push("check");
+            self.owner_only
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+        }
+        fn remove(&self, _path: &Path) -> io::Result<()> {
+            self.calls.borrow_mut().push("remove");
+            (self.remove)()
+        }
+        fn create_owner_only(&self, _path: &Path) -> io::Result<File> {
+            self.calls.borrow_mut().push("create");
+            if self.create_ok {
+                File::create(self.dir.join("created"))
+            } else {
+                Err(io::Error::new(io::ErrorKind::Unsupported, "no file ACLs"))
+            }
+        }
+    }
+
+    /// A fresh folder per call — the created stand-in file goes there.
+    fn script(owner_only: Option<bool>, remove: fn() -> io::Result<()>, create_ok: bool) -> Script {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("engram-token-steps-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Script {
+            owner_only,
+            remove,
+            create_ok,
+            dir,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn removed() -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Not a lock (`is_busy` would retry it), so the attempt count stays one.
+    fn undeletable() -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a foreign owner denies delete",
+        ))
+    }
+
+    fn absent() -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::NotFound))
+    }
+
+    #[test]
+    fn a_foreign_or_wider_previous_file_is_deleted_then_recreated() {
+        let os = script(Some(false), removed, true);
+        write_token_file_with(Path::new("t"), "tok", &os).expect("replaced");
+        assert_eq!(*os.calls.borrow(), ["check", "remove", "create"]);
+        assert_eq!(
+            std::fs::read_to_string(os.dir.join("created")).unwrap(),
+            "tok"
+        );
+    }
+
+    #[test]
+    fn an_owner_only_previous_file_is_still_replaced_with_a_new_token() {
+        let os = script(Some(true), removed, true);
+        write_token_file_with(Path::new("t"), "tok", &os).expect("replaced");
+        assert_eq!(*os.calls.borrow(), ["check", "remove", "create"]);
+    }
+
+    #[test]
+    fn a_previous_file_that_cannot_be_deleted_refuses_without_creating() {
+        let os = script(Some(false), undeletable, true);
+        let err = write_token_file_with(Path::new("t"), "tok", &os).expect_err("refused");
+        assert!(err.to_string().contains("could not be deleted"), "{err}");
+        assert!(
+            !os.calls.borrow().contains(&"create"),
+            "{:?}",
+            os.calls.borrow()
+        );
+    }
+
+    #[test]
+    fn a_token_file_that_cannot_be_made_owner_only_refuses_the_start() {
+        let os = script(None, absent, false);
+        let err = write_token_file_with(Path::new("t"), "tok", &os).expect_err("refused");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("owner-only"), "{err}");
     }
 }

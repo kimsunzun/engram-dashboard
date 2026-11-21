@@ -186,7 +186,7 @@ pub use event::{Arrival, Direction, Incoming, PeerId, TransportEvent};
 pub use frame::{Close, CloseCode, Frame};
 pub use link::{
     Accepted, Address, ConnPermit, DialFailure, Dialer, Handshake, HandshakeStep, LinkError,
-    LinkInfo, LinkRead, LinkRx, LinkTx, Listener, PermitPool, RejectKind,
+    LinkInfo, LinkRead, LinkRx, LinkTx, Listener, PermitPool, RejectKind, SocketEnds,
 };
 pub use machine::{
     Action, ConnectFailure, DisconnectCause, GaveUpReason, Generation, Input, Machine,

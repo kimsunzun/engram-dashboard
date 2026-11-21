@@ -204,6 +204,14 @@ impl DataLayout {
         self.daemon_run_dir().join(DAEMON_FILE)
     }
 
+    /// This account's shell-token file (`account` = platform `account::current_account_id`), next to [`Self::daemon_file`]; the name is
+    ///   protocol's [`engram_dashboard_protocol::token_file_name`], which the shell builds too.
+    // ADR-0395
+    pub fn token_file(&self, account: &str) -> PathBuf {
+        self.daemon_run_dir()
+            .join(engram_dashboard_protocol::token_file_name(account))
+    }
+
     pub fn mcp_config_dir(&self) -> PathBuf {
         self.daemon_run_dir().join(MCP_CONFIG_DIR)
     }
@@ -481,6 +489,12 @@ mod tests {
         assert_eq!(
             l.daemon_file(),
             root.join("daemon").join("run").join("daemon.json")
+        );
+        assert_eq!(
+            l.token_file("S-1-5-21-9"),
+            root.join("daemon")
+                .join("run")
+                .join("daemon-token.S-1-5-21-9")
         );
         assert_eq!(
             l.mcp_config_dir(),

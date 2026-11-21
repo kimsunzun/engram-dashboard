@@ -3,4 +3,4 @@
 /**
  * Why a stop ended `no_target` or `timeout` — the `daemon_shutdown` reply's `reason`. Serialized snake_case.
  */
-export type StopReason = "no_record" | "record_unreadable" | "record_broken" | "record_busy" | "dead_pid" | "newer_daemon" | "no_identity" | "still_running" | "flight_expired" | "stop_failed";
+export type StopReason = "no_record" | "record_unreadable" | "record_broken" | "record_busy" | "dead_pid" | "newer_daemon" | "no_identity" | "still_running" | "flight_expired" | "stop_failed" | "account_refused";

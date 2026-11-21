@@ -16,6 +16,8 @@
 //!   This is the common mcp-config format, not knowledge of claude CLI flags — the flag (`--mcp-config`) belongs to backend/claude/ alone (ADR-0004). The token and endpoint are owned by the daemon, so generating the content lives here; the backend only points `--mcp-config` at the file path.
 //!
 //! ★Security (ADR-0086 §Secrets)★: the file holds the token in plaintext → put it under `run` in the data folder and always delete it on revoke; never log the token (only path and AgentId).
+//!   Both files are created owner-only (platform `owner_only::create_owner_only` — the DACL passed at create), so another OS account cannot read
+//!   them (ADR-0395); a failure fails only that agent's provision.
 
 use std::path::{Path, PathBuf};
 
@@ -85,10 +87,38 @@ pub fn render_config(url: &str, token: &str) -> String {
     serde_json::to_string_pretty(&root).unwrap_or_default()
 }
 
-/// (A new data root has no folder — the atomic write creates it.)
-// ADR-0291: the atomic write's temp file is in the same folder, so the token is briefly there — same ACL; leftovers from a power-off or failed delete are swept by the boot sweep.
+/// Writes one attachment file owner-only: the folder is created if missing (a new data root), a file already at `path` is deleted first
+///   (the same (id, epoch) provisioned again), then the file is created `CREATE_NEW` with the owner-only DACL, written and synced. The
+///   delete and the create retry briefly on a held file (antivirus) within the daemon's lock budget (`file_hooks::OS_HOOKS`), as the old
+///   atomic write's rename did.
+///
+/// ★No temp file + rename (do not revive)★: the base atomic write creates its temp file with the folder's inherited ACL, so the token would
+///   sit readable by other accounts until the rename; creating the final file owner-only from the first instant closes that. Atomicity is
+///   not needed here: the only reader (the agent CLI) opens the file after provision returns, and a file cut by a crash is removed by the
+///   boot sweep. A file another account placed at the name and this account cannot delete fails this provision (denial of service only).
+// ADR-0395
 fn write_attached(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    engram_dashboard_base::file::write_atomic(path, bytes, crate::file_hooks::OS_HOOKS)
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let retry = crate::file_hooks::OS_HOOKS.retry;
+    match retry(&mut || std::fs::remove_file(path)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut created = None;
+    retry(&mut || {
+        created = Some(engram_dashboard_platform::owner_only::create_owner_only(
+            path,
+        )?);
+        Ok(())
+    })?;
+    let mut file =
+        created.ok_or_else(|| std::io::Error::other("the retry never called the create"))?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 pub fn write_config(
@@ -235,6 +265,8 @@ mod tests {
         );
     }
 
+    // The writes are owner-only (platform `owner_only`, Windows only — T-118 / T-119 elsewhere).
+    #[cfg(windows)]
     #[test]
     fn write_then_remove_roundtrip() {
         let root = std::env::temp_dir().join(format!("engram-mcpcfg-test-{}", AgentId::new_v4()));
@@ -252,6 +284,8 @@ mod tests {
     }
 
     /// A new data root has no folder yet — the write must create up to the root for the first spawn (ADR-0291 R11).
+    // The writes are owner-only (platform `owner_only`, Windows only — T-118 / T-119 elsewhere).
+    #[cfg(windows)]
     #[test]
     fn writes_into_a_folder_that_does_not_exist_yet() {
         let root = std::env::temp_dir().join(format!("engram-mcpcfg-fresh-{}", AgentId::new_v4()));
@@ -268,7 +302,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Atomic-write temp files left by a power-off (a token may be in them) are also swept by the boot sweep.
+    /// Atomic-write temp files an older build left behind at a power-off (a token may be in them) are also swept by the boot sweep.
     #[test]
     fn boot_sweep_collects_a_leftover_atomic_write_temp() {
         let root = std::env::temp_dir().join(format!("engram-mcpcfg-tmp-{}", AgentId::new_v4()));
@@ -284,6 +318,29 @@ mod tests {
             !temp.exists(),
             "a temp file carrying the token was left behind"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Both attachment files are created owner-only (another OS account cannot read the token — ADR-0395), and provisioning the same
+    ///   (id, epoch) again replaces the file, still owner-only.
+    // The writes are owner-only (platform `owner_only`, Windows only — T-118 / T-119 elsewhere).
+    #[cfg(windows)]
+    #[test]
+    fn both_attachment_files_are_owner_only_and_a_rewrite_replaces_the_file() {
+        use engram_dashboard_platform::owner_only::is_owner_only;
+        let root = std::env::temp_dir().join(format!("engram-mcpcfg-owner-{}", AgentId::new_v4()));
+        let dir = McpDir::new(root.join("mcp"));
+        let id = AgentId::new_v4();
+        let url = "http://127.0.0.1:6000/mcp";
+        let cfg = write_config(&dir, id, 0, url, "tok-first").expect("config");
+        let set = write_settings(&dir, id, 0).expect("settings");
+        assert!(is_owner_only(&cfg).unwrap(), "mcp-config owner-only");
+        assert!(is_owner_only(&set).unwrap(), "settings fragment owner-only");
+        let again = write_config(&dir, id, 0, url, "tok-second").expect("rewrite");
+        assert_eq!(again, cfg);
+        let content = std::fs::read_to_string(&again).unwrap();
+        assert!(content.contains("tok-second") && !content.contains("tok-first"));
+        assert!(is_owner_only(&again).unwrap());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -323,6 +380,8 @@ mod tests {
         assert!(set.to_string_lossy().ends_with("-3.settings.json"));
     }
 
+    // The writes are owner-only (platform `owner_only`, Windows only — T-118 / T-119 elsewhere).
+    #[cfg(windows)]
     #[test]
     fn write_then_remove_settings_roundtrip_and_boot_sweep_cleans_it() {
         let root = std::env::temp_dir().join(format!("engram-settings-test-{}", AgentId::new_v4()));

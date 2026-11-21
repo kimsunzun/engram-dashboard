@@ -56,6 +56,8 @@ function parseBand(raw: unknown): Band | null {
   const band = isRecord(raw) ? raw : {}
   if (band.kind === 'not_connected') return { kind: 'not_connected', refused: band.refused === true }
   if (band.kind === 'version') return { kind: 'version', can_stop: band.can_stop === true }
+  if (band.kind === 'account') return { kind: 'account', unverified: band.unverified === true }
+  if (band.kind === 'volume') return { kind: 'volume', unreadable: band.unreadable === true }
   console.warn(`[TauriTransport] unknown connection band '${String(band.kind)}' — treated as not connected`)
   return { kind: 'not_connected', refused: false }
 }
@@ -68,6 +70,8 @@ function sameBand(a: Band | null, b: Band | null): boolean {
   if (a === null || b === null) return a === b
   if (a.kind === 'not_connected' && b.kind === 'not_connected') return a.refused === b.refused
   if (a.kind === 'version' && b.kind === 'version') return a.can_stop === b.can_stop
+  if (a.kind === 'account' && b.kind === 'account') return a.unverified === b.unverified
+  if (a.kind === 'volume' && b.kind === 'volume') return a.unreadable === b.unreadable
   return false
 }
 

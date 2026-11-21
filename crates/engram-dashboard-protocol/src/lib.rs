@@ -37,7 +37,7 @@ pub use codec::{
     DecodedFrame, FrameHeader, FRAME_HEADER_LEN, FRAME_TAG_STRUCTURED_EVENT,
     FRAME_TAG_TERMINAL_BYTES,
 };
-pub use discovery::DaemonInfo;
+pub use discovery::{token_file_name, DaemonInfo};
 pub use domain::{
     AgentBackendKind, AgentFailureKind, AgentInfo, AgentOutputFormat, AgentProfile,
     AgentSpawnCommand, AgentStatus, Capabilities, ControlCaps, EnvelopeFormat, InputCaps,
@@ -76,6 +76,11 @@ pub use secret::Secret;
 /// - v7: usage limit slot (TRD S21 usage-limit-slot §1-6) — `AgentCommand::UsageSubscribe` (replaces the whole subscription set, no answer)·`RefreshUsageLimits` (answer = `Ack`)
 ///   + `AgentEvent::UsageLimitsUpdated`. Command axis: an old daemon's uncorrelated parse-failure `Error` leaves a subscribe failure invisible and ⟳ hanging.
 ///   Not a reason: the snapshot shape (`UsageLimitSnapshot`'s `revision` · `detail`) and `subscribed`.
+/// - v8: the shell token left `daemon.json` for the owner-only per-account file ([`token_file_name`]) and the record gained the
+///   owner account (ADR-0395). Discovery axis: a new shell reading an old daemon's record finds no token file — the bump makes it take
+///   the version-mismatch path instead (the old record still parses: the new type ignores its `token`). The other direction is not
+///   covered by the bump: an old shell's `DaemonInfo` requires `token` (no `#[serde(default)]`), so a new record does not parse for it
+///   and it takes its "not ready yet" path until its discovery times out.
 ///
 /// Measured against this criterion and **not bumped**: [`StructuredEvent::TurnEnd`] — the analysis lives in that variant's doc.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;

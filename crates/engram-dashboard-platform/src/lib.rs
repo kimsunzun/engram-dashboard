@@ -20,8 +20,9 @@
 //!   foreground checks, title bar chrome, snap overlay behind feature `snap-overlay`) ·
 //! [`input`] (cursor position, primary button, Esc state) · [`pty`] (whether closing a pseudo-terminal waits for its output to be read) ·
 //! [`account`] (current account id, machine id, the account owning one end of a local TCP connection) · [`secret`] (sealing a secret
-//!   for the current account — DPAPI) · [`owner_only`] (creating and checking files only the current account can open) · [`approval`]
-//!   (the native approve / deny / deny-and-stop dialog). Module headers and public docs are the source of truth.
+//!   for the current account — DPAPI) · [`owner_only`] (creating and checking files only the current account can open, whether a folder's
+//!   volume stores file ACLs) · [`approval`] (the native approve / deny / deny-and-stop dialog). Module headers and public docs are the
+//!   source of truth.
 //!
 //! Functions that take a window accept `raw-window-handle`'s `HasWindowHandle`; variant matching happens here too (TRD S21-slot-docking
 //!   revision 6.3 §8, B10, revision 7 §5-1).

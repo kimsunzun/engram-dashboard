@@ -4,6 +4,9 @@
 //! the `Error` text frame the upper layer encodes (`ConnectionHandlerFactory::handshake_error_frame`) then a close. The
 //! auth deadline is the transport's (`Policy::connect_timeout`, measured from the end of the upgrade). `Hello` is not sent
 //! here — after a `Send` the transport always awaits a reply, so the upper layer puts `Hello` in from `on_connect`.
+//!
+//! A client the accept-time account check refused gets [`RefusedHandshake`] instead: the same `Error` frame and a terminal close, before
+//! its first frame is read — its token is never looked at (ADR-0395).
 // ADR-0310
 
 use std::sync::Arc;
@@ -43,6 +46,35 @@ impl DaemonHandshake {
                 .map(Frame::Text),
             reason: refusal.message,
         }
+    }
+}
+
+/// The handshake of a link refused before auth — sends the refusal and closes, terminal (redialing gives the same answer).
+pub(crate) struct RefusedHandshake {
+    last: Option<Frame>,
+    reason: &'static str,
+}
+
+impl RefusedHandshake {
+    pub(crate) fn new(handlers: &dyn ConnectionHandlerFactory, reason: &'static str) -> Self {
+        Self {
+            last: handlers.handshake_error_frame(reason).map(Frame::Text),
+            reason,
+        }
+    }
+}
+
+impl Handshake for RefusedHandshake {
+    fn start(&self) -> HandshakeStep {
+        HandshakeStep::Reject {
+            kind: engram_dashboard_transport::RejectKind::Terminal,
+            last: self.last.clone(),
+            reason: self.reason.to_owned(),
+        }
+    }
+
+    fn on_frame(&self, _frame: &Frame) -> HandshakeStep {
+        self.start()
     }
 }
 
@@ -106,6 +138,19 @@ mod tests {
     #[test]
     fn the_daemon_waits_for_the_client_first() {
         assert!(matches!(handshake().start(), HandshakeStep::Await));
+    }
+
+    #[test]
+    fn a_refused_link_gets_the_error_frame_and_a_terminal_close_before_any_frame() {
+        let refused = RefusedHandshake::new(&EchoFactory, "not yours");
+        match refused.start() {
+            HandshakeStep::Reject { kind, last, reason } => {
+                assert_eq!(kind, RejectKind::Terminal);
+                assert_eq!(last, Some(Frame::Text("error:not yours".into())));
+                assert_eq!(reason, "not yours");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

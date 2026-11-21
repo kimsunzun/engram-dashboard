@@ -21,7 +21,7 @@ const DAEMON_DIR: &str = "daemon";
 const SHELL_DIR: &str = "shell";
 const CONFIG_DIR: &str = "config";
 const STATE_DIR: &str = "state";
-/// Disposable contents: the lock + connection file · the spawn attachment file carrying the token · the temp folder.
+/// Disposable contents: the lock + connection file · the per-account shell-token file · the spawn attachment files carrying agent tokens · the temp folder.
 const RUN_DIR: &str = "run";
 const WEBVIEW_DIR: &str = "webview";
 const LOGS_DIR: &str = "logs";
@@ -130,6 +130,14 @@ impl DataLayout {
         self.root.join(DAEMON_DIR).join(RUN_DIR).join(DAEMON_FILE)
     }
 
+    /// `account`'s shell-token file next to [`Self::daemon_file`] — the name is protocol's, shared with the daemon (ADR-0395).
+    pub fn token_file(&self, account: &str) -> PathBuf {
+        self.root
+            .join(DAEMON_DIR)
+            .join(RUN_DIR)
+            .join(engram_dashboard_protocol::token_file_name(account))
+    }
+
     pub fn shell_config_dir(&self) -> PathBuf {
         self.root.join(SHELL_DIR).join(CONFIG_DIR)
     }
@@ -167,6 +175,12 @@ mod tests {
         assert_eq!(
             l.daemon_file(),
             root.join("daemon").join("run").join("daemon.json")
+        );
+        assert_eq!(
+            l.token_file("S-1-5-21-9"),
+            root.join("daemon")
+                .join("run")
+                .join("daemon-token.S-1-5-21-9")
         );
         assert_eq!(l.shell_config_dir(), root.join("shell").join("config"));
         assert_eq!(l.shell_state_dir(), root.join("shell").join("state"));
@@ -235,6 +249,11 @@ mod tests {
                 ours.daemon_file(),
                 theirs.daemon_file(),
                 "{label}: daemon.json location must be the same"
+            );
+            assert_eq!(
+                ours.token_file("S-1-5-21-9"),
+                theirs.token_file("S-1-5-21-9"),
+                "{label}: the token file location must be the same"
             );
             assert_eq!(
                 ours.logs_dir(),

@@ -55,7 +55,7 @@ impl RecordingEvents {
 
 const STATUS_TAG: &str = "status:";
 
-/// One emitted status as the record writes it: `status:<state word>:<band>` — the state's serialized word (what the frontend receives) and the band as `none` · `not_connected` · `refused` · `version` · `version_can_stop`.
+/// One emitted status as the record writes it: `status:<state word>:<band>` — the state's serialized word (what the frontend receives) and the band as `none` · `not_connected` · `refused` · `version` · `version_can_stop` · `other_account` · `account_unverified` · `unprotected_volume` · `volume_unreadable`.
 pub(crate) fn status_line(status: &ConnectionStatus) -> String {
     let word = serde_json::to_value(status.state).expect("a state word");
     let band = match status.band {
@@ -64,6 +64,10 @@ pub(crate) fn status_line(status: &ConnectionStatus) -> String {
         Some(Band::NotConnected { refused: true }) => "refused",
         Some(Band::Version { can_stop: false }) => "version",
         Some(Band::Version { can_stop: true }) => "version_can_stop",
+        Some(Band::Account { unverified: false }) => "other_account",
+        Some(Band::Account { unverified: true }) => "account_unverified",
+        Some(Band::Volume { unreadable: false }) => "unprotected_volume",
+        Some(Band::Volume { unreadable: true }) => "volume_unreadable",
     };
     format!("{STATUS_TAG}{}:{band}", word.as_str().expect("a string"))
 }

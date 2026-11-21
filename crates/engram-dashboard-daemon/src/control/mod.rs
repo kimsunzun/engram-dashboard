@@ -119,7 +119,7 @@ impl DaemonControlChannel {
         false
     }
 
-    /// The same method as lib.rs `generate_token`, but that one is the WS client token (daemon.json) — do not share them (ADR-0086 §Context).
+    /// The same method as lib.rs `generate_token`, but that one is the shell link token (the owner-only token file — ADR-0395) — do not share them (ADR-0086 §Context).
     fn gen_token() -> Option<String> {
         let mut buf = [0u8; 32];
         getrandom::getrandom(&mut buf).ok()?;

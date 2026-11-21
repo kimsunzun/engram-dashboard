@@ -1,11 +1,12 @@
 //! The dialer the shell's registry uses — resolves a logical daemon address to where that daemon is now (TRD S21 trd-3 §3-6 · D25 ① · D20 ①). The registry dials one fixed address per peer for its whole life while a daemon moves to a new port and token on every restart, so the registry gets a logical address (`engram-local:<key>#<n>`) and every dial here asks that registration's [`EndpointSource::current`] — never `ensure`, so a reconnect cannot spawn a daemon (ADR-0021):
 //! - `Live` → remember it as the last-known endpoint, put its credential in the registration's [`CredentialSlot`], dial it.
+//! After every dial, before the link is handed out (so before the handshake sends the token), the source checks that the listener runs under this app's OS account ([`EndpointSource::verify_server`], ADR-0395): another account or an unreadable one → the link is dropped unsent, the refusal recorded in the registration's [`RefusalSlot`] and returned as a terminal refusal (no redial, no budget); a listener that went away during the check → dropped unsent, one failed attempt (the daemon may be restarting) — but [`VANISHED_LIMIT`] of those in a row at one address end as the terminal "could not verify" refusal, so a listener that always vanishes (security software intercepting loopback, a listener closing right after accept) does not retry forever with no cause on the band. A dial that passes but has no credential (the token file was unreadable) fails that attempt without sending anything.
 //! - `Busy` (sharing violation only) → dial the last-known endpoint with its credential; none known → one failed attempt.
 //! - `Absent` · `Unusable` → forget the last-known endpoint, one failed attempt (budget), no dial.
 //! - `VersionMismatch` → forget the last-known endpoint, a terminal refusal (`HANDSHAKE_REJECTED`) without a dial: the transport gives up as `Rejected` and spends no budget (ADR-0180 decision 5), logged here at warn. The refusal is recorded in the registration's [`RefusalSlot`] first — the one way routing tells a version refusal from the daemon's own refusal, which carries the same close code (TRD S21 trd-3-2-u5 §4-3).
 //! The last-known endpoint is forgotten on every answer but `Live` and `Busy`, since those say its daemon is gone or unusable (TRD §3-6) — a later `Busy` must not send that daemon's token to whoever holds its old port now.
 //! One registration per `Registry::add`: the credential slot is written by a dial and read by the handshake of the same attempt, which the transport runs in that order on one supervisor task. A re-add of the same key starts a new supervisor while the old one may still finish a dial it began (closing races that dial), so a slot shared by two supervisors could pair one daemon's token with the other's address. Each registration therefore has its own address, slot, source and last-known endpoint; never pass one registration's address to two adds.
-// ADR-0021 · ADR-0310
+// ADR-0021 · ADR-0310 · ADR-0395
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +18,7 @@ use engram_dashboard_transport::{
 };
 use futures_util::future::BoxFuture;
 
+use super::account::{dial_failure, AccountRefusal, CheckFailure};
 use super::endpoint::{Current, Endpoint, EndpointSource};
 use super::handshake::{CredentialSlot, ShellHandshake};
 use super::DaemonKey;
@@ -28,6 +30,7 @@ pub(super) const BUSY_UNKNOWN: &str =
     "the daemon endpoint record is busy and no earlier address is known";
 pub(super) const NO_RECORD: &str = "no daemon endpoint record — no live daemon";
 pub(super) const UNUSABLE: &str = "the daemon endpoint record is unusable";
+pub(super) const NO_TOKEN: &str = "this account's daemon token file could not be read";
 
 /// The cause when a failed attempt's text says there is no live daemon — no endpoint record ([`NO_RECORD`]) or an unusable one ([`UNUSABLE`] — broken · dead pid · unreadable); `None` for any other failure. Only this dialer writes texts with these openings (the ws dialer's start with `ws connect`, the transport's are fixed words), and the cause is the endpoint source's local diagnostic — it quotes no file content.
 pub(crate) fn no_live_daemon_cause(failure: &str) -> Option<String> {
@@ -47,25 +50,60 @@ pub struct VersionRefusal {
     pub start_time: u64,
 }
 
-/// What the last dial of one registration refused for the protocol version — written before that dial's `DialFailure::Refused` returns, so the resulting `Rejected` is routed after the write, and cleared by every other answer of the endpoint record. Empty = the refusal (if any) did not come from the version check.
+/// What the last dial of one registration refused, decided by the shell — the protocol version ([`Self::get`]) or the listener's OS account ([`Self::account`], ADR-0395). Written before that dial's `DialFailure::Refused` returns, so the resulting `Rejected` is routed after the write; the version part is cleared by every other answer of the endpoint record, the account part by every new dial. Empty = the refusal (if any) came from the daemon.
 #[derive(Debug, Default)]
-pub struct RefusalSlot(Mutex<Option<VersionRefusal>>);
+pub struct RefusalSlot {
+    version: Mutex<Option<VersionRefusal>>,
+    account: Mutex<Option<AccountRefusal>>,
+}
 
 impl RefusalSlot {
     pub fn get(&self) -> Option<VersionRefusal> {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        *self.version.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub(super) fn set(&self, refusal: Option<VersionRefusal>) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = refusal;
+        *self.version.lock().unwrap_or_else(PoisonError::into_inner) = refusal;
+    }
+
+    pub fn account(&self) -> Option<AccountRefusal> {
+        *self.account.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn set_account(&self, refusal: Option<AccountRefusal>) {
+        *self.account.lock().unwrap_or_else(PoisonError::into_inner) = refusal;
     }
 }
+
+/// Consecutive dials whose listener vanished during its account check at one address, after which the next such dial is refused as
+///   unverifiable (ADR-0395). Three: one restart of the daemon between a dial and its check is one vanish; three in a row at the same
+///   address is a listener that never stays.
+pub(super) const VANISHED_LIMIT: u32 = 3;
 
 struct Registration {
     source: Arc<dyn EndpointSource>,
     credential: Arc<CredentialSlot>,
     refusal: Arc<RefusalSlot>,
     last_known: Mutex<Option<Endpoint>>,
+    /// The address of the last dials whose listener vanished, and how many in a row; any other outcome clears it.
+    vanished: Mutex<Option<(Address, u32)>>,
+}
+
+impl Registration {
+    /// Counts one vanished listener at `address`; true when that makes [`VANISHED_LIMIT`] in a row there.
+    fn vanished_at(&self, address: &Address) -> bool {
+        let mut vanished = self.vanished.lock().unwrap_or_else(PoisonError::into_inner);
+        let count = match vanished.as_ref() {
+            Some((at, n)) if at == address => n + 1,
+            _ => 1,
+        };
+        *vanished = Some((address.clone(), count));
+        count >= VANISHED_LIMIT
+    }
+
+    fn clear_vanished(&self) {
+        *self.vanished.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
 }
 
 /// See the module doc. `inner` dials the resolved address — the transport's ws dialer in production.
@@ -100,6 +138,7 @@ impl LocalDaemonDialer {
             credential: credential.clone(),
             refusal: refusal.clone(),
             last_known: Mutex::new(found),
+            vanished: Mutex::new(None),
         });
         self.registrations
             .lock()
@@ -124,14 +163,18 @@ impl LocalDaemonDialer {
             .len()
     }
 
-    async fn resolve(&self, addr: &Address) -> Result<Address, DialFailure> {
-        let registration = self
+    fn registration(&self, addr: &Address) -> Result<Arc<Registration>, DialFailure> {
+        Ok(self
             .registrations
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(addr)
             .cloned()
-            .ok_or_else(|| LinkError::new(format!("{NOT_REGISTERED} {addr}")))?;
+            .ok_or_else(|| LinkError::new(format!("{NOT_REGISTERED} {addr}")))?)
+    }
+
+    async fn resolve(&self, registration: &Registration) -> Result<Endpoint, DialFailure> {
+        registration.refusal.set_account(None);
         let source = registration.source.clone();
         // Blocking file I/O. A dial dropped mid-read leaves the read to finish on its own — it has no side effect.
         let current = tokio::task::spawn_blocking(move || source.current())
@@ -191,8 +234,8 @@ impl LocalDaemonDialer {
                 });
             }
         };
-        registration.credential.set(endpoint.credential);
-        Ok(endpoint.address)
+        registration.credential.set(endpoint.credential.clone());
+        Ok(endpoint)
     }
 }
 
@@ -203,8 +246,54 @@ impl Dialer for LocalDaemonDialer {
     ) -> BoxFuture<'_, Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), DialFailure>> {
         let addr = addr.clone();
         Box::pin(async move {
-            let real = self.resolve(&addr).await?;
-            self.inner.dial(&real).await
+            let registration = self.registration(&addr)?;
+            let dialed = match self.resolve(&registration).await {
+                Ok(endpoint) => self
+                    .inner
+                    .dial(&endpoint.address)
+                    .await
+                    .map(|link| (endpoint, link)),
+                Err(failure) => Err(failure),
+            };
+            let (endpoint, (tx, rx)) = match dialed {
+                Ok(dialed) => dialed,
+                Err(failure) => {
+                    registration.clear_vanished();
+                    return Err(failure);
+                }
+            };
+            // ADR-0395: the listener's account is checked on this connection before the link goes to the handshake that sends the token.
+            //   Blocking (OS tables). A dial dropped mid-check leaves the check to finish on its own — it has no side effect.
+            let source = registration.source.clone();
+            let ends = tx.socket_ends();
+            let verdict = tokio::task::spawn_blocking(move || source.verify_server(ends))
+                .await
+                .unwrap_or(Err(CheckFailure::Refused(AccountRefusal::Unverified)));
+            let verdict = match verdict {
+                Err(CheckFailure::Vanished) if registration.vanished_at(&endpoint.address) => {
+                    tracing::warn!(
+                        limit = VANISHED_LIMIT,
+                        "the daemon listener vanished during its account check on every recent dial — refusing it as unverifiable"
+                    );
+                    Err(CheckFailure::Refused(AccountRefusal::Unverified))
+                }
+                Err(CheckFailure::Vanished) => Err(CheckFailure::Vanished),
+                other => {
+                    registration.clear_vanished();
+                    other
+                }
+            };
+            if let Err(failure) = verdict {
+                if let CheckFailure::Refused(refusal) = failure {
+                    registration.refusal.set_account(Some(refusal));
+                }
+                // Dropping both ends closes the link with nothing sent.
+                return Err(dial_failure(failure));
+            }
+            if endpoint.credential.is_none() {
+                return Err(LinkError::new(NO_TOKEN).into());
+            }
+            Ok((tx, rx))
         })
     }
 }
@@ -238,6 +327,8 @@ mod tests {
         answers: Mutex<VecDeque<Current>>,
         reads: AtomicUsize,
         ensures: AtomicUsize,
+        /// The listener check's answer — `None` = this account's listener.
+        listener: Mutex<Option<CheckFailure>>,
     }
 
     impl ScriptedSource {
@@ -246,7 +337,16 @@ mod tests {
                 answers: Mutex::new(answers.into_iter().collect()),
                 reads: AtomicUsize::new(0),
                 ensures: AtomicUsize::new(0),
+                listener: Mutex::new(None),
             })
+        }
+
+        fn listener_refuses(&self, refusal: Option<AccountRefusal>) {
+            *self.listener.lock().unwrap() = refusal.map(CheckFailure::Refused);
+        }
+
+        fn listener_vanishes(&self) {
+            *self.listener.lock().unwrap() = Some(CheckFailure::Vanished);
         }
 
         fn reads(&self) -> usize {
@@ -259,9 +359,21 @@ mod tests {
     }
 
     impl EndpointSource for ScriptedSource {
-        fn ensure(&self, _timeout: Duration) -> Result<Endpoint, String> {
+        fn ensure(&self, _timeout: Duration) -> Result<Endpoint, crate::discovery::StartFailure> {
             self.ensures.fetch_add(1, Ordering::SeqCst);
-            Err("dials never call ensure".into())
+            Err(crate::discovery::StartFailure::other(
+                "dials never call ensure",
+            ))
+        }
+
+        fn verify_server(
+            &self,
+            _ends: Option<engram_dashboard_transport::SocketEnds>,
+        ) -> Result<(), CheckFailure> {
+            match *self.listener.lock().unwrap() {
+                Some(failure) => Err(failure),
+                None => Ok(()),
+            }
         }
 
         fn current(&self) -> Current {
@@ -282,8 +394,17 @@ mod tests {
     }
 
     impl EndpointSource for GatedSource {
-        fn ensure(&self, _timeout: Duration) -> Result<Endpoint, String> {
-            Err("dials never call ensure".into())
+        fn ensure(&self, _timeout: Duration) -> Result<Endpoint, crate::discovery::StartFailure> {
+            Err(crate::discovery::StartFailure::other(
+                "dials never call ensure",
+            ))
+        }
+
+        fn verify_server(
+            &self,
+            _ends: Option<engram_dashboard_transport::SocketEnds>,
+        ) -> Result<(), CheckFailure> {
+            Ok(())
         }
 
         fn current(&self) -> Current {
@@ -428,7 +549,15 @@ mod tests {
         Current::Live(Endpoint {
             key: DaemonKey::new("local"),
             address: ws(port),
-            credential: Secret::new(token),
+            credential: Some(Secret::new(token)),
+        })
+    }
+
+    fn live_without_token(port: u16) -> Current {
+        Current::Live(Endpoint {
+            key: DaemonKey::new("local"),
+            address: ws(port),
+            credential: None,
         })
     }
 
@@ -597,9 +726,9 @@ mod tests {
             pid: 4242,
             host: "127.0.0.1".into(),
             port: 5123,
-            token: Secret::new(TOKEN_A),
             protocol_version: PROTOCOL_VERSION,
             start_time: 0,
+            owner_account: String::new(),
         }
         .to_json_pretty()
         .unwrap();
@@ -615,6 +744,9 @@ mod tests {
                 DaemonKey::new("local"),
                 dir.path().to_path_buf(),
                 Dead,
+                Arc::new(super::super::account::fakes::FixedAccounts(Some(
+                    super::super::account::fakes::OWN,
+                ))),
             ));
             let mut h = Harness::start(source);
             wait_for("backoff", || h.state() == PeerState::Backoff).await;
@@ -778,6 +910,167 @@ mod tests {
         }
         assert_eq!(net.dials(), 0);
         assert_eq!(source.reads(), 0);
+    }
+
+    /// ADR-0395: a listener of another account (or one whose account cannot be read) is dialed, refused before the handshake — no
+    ///   Auth frame ever goes out — and the link gives up `Rejected` without budget or redial; the refusal is in the slot first.
+    #[tokio::test]
+    async fn a_listener_of_another_account_never_gets_the_token() {
+        for refusal in [AccountRefusal::OtherAccount, AccountRefusal::Unverified] {
+            let source = ScriptedSource::new([live(5123, TOKEN_A)]);
+            source.listener_refuses(Some(refusal));
+            let net = MemoryNetwork::new();
+            let recording = Arc::new(Recording {
+                net: net.clone(),
+                dialed: Mutex::new(Vec::new()),
+            });
+            let dialer = Arc::new(LocalDaemonDialer::new(recording.clone()));
+            let key = DaemonKey::new("local");
+            let (address, handshake, slot) = dialer.register(&key, source.clone(), None);
+            let clock = ManualClock::new();
+            let registry = Registry::new(
+                Arc::new(ShellWire),
+                dialer,
+                clock.handle(),
+                Policy::default(),
+            );
+            let (peer, mut inbox) = registry.add(key.peer_id().clone(), address, handshake);
+            wait_for("gave up", || peer.peer_state().is_terminal()).await;
+            assert_eq!(
+                peer.peer_state(),
+                PeerState::GaveUp(GaveUpReason::Rejected),
+                "{refusal:?}"
+            );
+            assert_eq!(slot.account(), Some(refusal));
+            assert_eq!(slot.get(), None, "not a version refusal");
+            assert_eq!(net.dials(), 1, "the listener was dialed once");
+            let endpoint = net.accept().expect("the dialed link's far end");
+            assert!(
+                endpoint.frames().is_empty(),
+                "{refusal:?}: nothing was sent"
+            );
+            let mut events = Vec::new();
+            while let Some(Incoming::Event(ev)) = inbox.try_recv() {
+                events.push(ev);
+            }
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    TransportEvent::Rejected { code, .. } if *code == CloseCode::HANDSHAKE_REJECTED
+                )),
+                "{events:?}"
+            );
+            assert!(
+                !events.iter().any(|e| e.kind() == "ConnectFailed"),
+                "no budget spent"
+            );
+            clock.advance(Duration::from_secs(60));
+            settle().await;
+            assert_eq!(net.dials(), 1, "never re-dialed");
+        }
+    }
+
+    /// The account check passes but this account's token file could not be read: the attempt fails (budget, redial) with nothing sent.
+    #[tokio::test]
+    async fn a_dial_without_a_credential_sends_nothing_and_fails_the_attempt() {
+        let net = MemoryNetwork::new();
+        let dialer = LocalDaemonDialer::new(net.dialer());
+        let source = ScriptedSource::new([live_without_token(5123), live(5123, TOKEN_A)]);
+        let (address, handshake, slot) =
+            dialer.register(&DaemonKey::new("local"), source.clone(), None);
+        let failure = dialer.dial(&address).await.err();
+        assert!(
+            matches!(&failure, Some(DialFailure::Unreachable(e)) if e.message == NO_TOKEN),
+            "{failure:?}"
+        );
+        assert_eq!(slot.account(), None);
+        // The next dial reads the record and the token again.
+        assert!(dialer.dial(&address).await.is_ok());
+        assert_eq!(sent_auth(&handshake), auth(TOKEN_A));
+    }
+
+    /// A listener that went away between the dial and its account check (the daemon exiting) is one failed attempt that spends budget
+    ///   and redials — not a refusal, nothing recorded — and nothing was sent on it.
+    #[tokio::test]
+    async fn a_listener_gone_during_its_check_fails_one_attempt_and_is_redialed() {
+        let source = ScriptedSource::new([live(5123, TOKEN_A)]);
+        source.listener_vanishes();
+        let mut h = Harness::start(source.clone());
+        wait_for("backoff", || h.state() == PeerState::Backoff).await;
+        assert!(
+            matches!(
+                h.connect_failures().as_slice(),
+                [ConnectFailure::Unreachable(e)] if e.message == super::super::account::LISTENER_GONE
+            ),
+            "{:?}",
+            h.connect_failures()
+        );
+        let endpoint = h.net.accept().expect("the dialed link's far end");
+        assert!(endpoint.frames().is_empty(), "nothing was sent");
+        // The daemon is back: the redial goes through.
+        source.listener_refuses(None);
+        h.clock.advance(Duration::from_secs(60));
+        let (_, auth_text) = h.next_link().await;
+        assert_eq!(auth_text, auth(TOKEN_A));
+    }
+
+    /// A listener that vanishes during its check on every dial at one address: the first [`VANISHED_LIMIT`] − 1 dials are failed
+    ///   attempts, the next is the terminal "could not verify" refusal (in the slot). Another address, or a dial with any other outcome,
+    ///   starts the count again.
+    #[tokio::test]
+    async fn a_listener_that_vanishes_on_every_dial_ends_as_an_unverified_refusal() {
+        let net = MemoryNetwork::new();
+        let dialer = LocalDaemonDialer::new(net.dialer());
+        let source = ScriptedSource::new([
+            live(5123, TOKEN_A),
+            live(5123, TOKEN_A),
+            live(6234, TOKEN_A),
+            live(6234, TOKEN_A),
+            live(6234, TOKEN_A),
+            live(6234, TOKEN_A),
+        ]);
+        source.listener_vanishes();
+        let (address, _, slot) = dialer.register(&DaemonKey::new("local"), source.clone(), None);
+        let gone = |f: Option<DialFailure>| matches!(f, Some(DialFailure::Unreachable(e)) if e.message == super::super::account::LISTENER_GONE);
+        // Two at 5123, then the address moves: the count starts over at 6234.
+        assert!(gone(dialer.dial(&address).await.err()));
+        assert!(gone(dialer.dial(&address).await.err()));
+        assert!(gone(dialer.dial(&address).await.err()));
+        // A passing check in between clears it too.
+        source.listener_refuses(None);
+        assert!(dialer.dial(&address).await.is_ok());
+        source.listener_vanishes();
+        assert!(gone(dialer.dial(&address).await.err()));
+        assert_eq!(slot.account(), None);
+        // ... until VANISHED_LIMIT in a row at one address.
+        let mut last = None;
+        for _ in 1..VANISHED_LIMIT {
+            last = dialer.dial(&address).await.err();
+        }
+        assert!(
+            matches!(
+                &last,
+                Some(DialFailure::Refused { code, reason })
+                    if *code == CloseCode::HANDSHAKE_REJECTED && reason == super::super::account::UNVERIFIED
+            ),
+            "{last:?}"
+        );
+        assert_eq!(slot.account(), Some(AccountRefusal::Unverified));
+    }
+
+    /// A new dial clears an earlier account refusal from the slot — the band follows the latest listener.
+    #[tokio::test]
+    async fn every_dial_clears_an_earlier_account_refusal() {
+        let net = MemoryNetwork::new();
+        let dialer = LocalDaemonDialer::new(net.dialer());
+        let source = ScriptedSource::new([live(5123, TOKEN_A)]);
+        let (address, _, slot) = dialer.register(&DaemonKey::new("local"), source.clone(), None);
+        source.listener_refuses(Some(AccountRefusal::OtherAccount));
+        assert!(dialer.dial(&address).await.is_err());
+        assert_eq!(slot.account(), Some(AccountRefusal::OtherAccount));
+        source.listener_refuses(None);
+        assert!(dialer.dial(&address).await.is_ok());
+        assert_eq!(slot.account(), None);
     }
 
     // TRD S21 trd-3-2-u5 §4-3 (D4): the slot is how routing tells a version refusal from the daemon's own refusal.

@@ -268,11 +268,21 @@ export const ko = {
       '정상적으로 종료되지 않은 이전 실행의 화면을 따로 보관하지 못해 이번 실행에서는 화면 상태를 저장하지 않습니다. 다음 실행 때 다시 묻습니다.',
     dismissNotice: '화면 상태 알림 닫기',
   },
-  // The two connection bands, their 「Reconnect」 and the LLM command titles (TRD S36 §3-3 · ADR-0356).
+  // The connection bands, their 「Reconnect」 and the LLM command titles (TRD S36 §3-3 · ADR-0356 · ADR-0395 · ADR-0399).
   connection: {
     head: '데몬에 연결하지 못했습니다.',
     refusedCause: '데몬이 이 앱의 인증을 거절했습니다',
     versionCause: '실행 중인 데몬이 이 앱과 버전이 다릅니다. 데몬을 끈 뒤 다시 연결하세요',
+    // ADR-0395: the daemon's listener runs under another Windows account (the app sent nothing), or its account could not be read.
+    otherAccountCause: '이 데몬은 다른 Windows 계정의 것입니다. 계정마다 데이터 폴더를 따로 쓰세요',
+    accountUnverifiedCause:
+      '데몬의 계정을 확인하지 못했습니다. 앱과 Engram을 같은 방식으로(둘 다 관리자 권한 또는 둘 다 일반 권한) 실행하세요',
+    // ADR-0399: the last start was refused before a spawn — the data folder's drive cannot keep owner-only files, or its properties
+    //   could not be read. Both name the fix.
+    unprotectedVolumeCause:
+      'Engram 폴더가 파일 권한을 저장하지 못하는 드라이브(FAT 또는 exFAT)에 있습니다. Engram을 종료하고 Engram 폴더(포터블 사본이면 exe가 든 폴더 전체)를 NTFS 드라이브로 옮긴 뒤 다시 시작하세요',
+    volumeUnreadableCause:
+      'Engram 폴더가 있는 드라이브의 속성을 읽지 못했습니다. Engram을 종료하고 Engram 폴더(포터블 사본이면 exe가 든 폴더 전체)를 NTFS 드라이브로 옮긴 뒤 다시 시작하세요',
     reconnect: '다시 연결',
     reconnecting: '연결 중…',
     dismiss: '알림 닫기',

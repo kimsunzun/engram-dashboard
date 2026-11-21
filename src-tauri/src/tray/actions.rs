@@ -19,7 +19,7 @@ use crate::commands::popout::is_popup_label;
 use crate::commands::spare::is_spare_window;
 use crate::commands::window_ctl::TauriOps;
 use crate::daemon_client::shutdown::{StopOrigin, StopOutcome, StopPlan};
-use crate::daemon_client::DaemonClient;
+use crate::daemon_client::{DaemonClient, StartAttempt};
 use crate::layout::window_ctl::{self, Activation, WindowOps};
 use crate::layout::{LayoutState, MAIN_WINDOW_LABEL};
 use crate::spare::pool::TrayShow;
@@ -275,12 +275,28 @@ pub fn quit_app(app: &AppHandle) {
 /// What the tray's daemon on / off and quit ask of the daemon client — a seam so their order is tested without a runtime or a daemon (ADR-0012); the real one is the `Arc<DaemonClient>` impl, each call blocking or firing as the [`DaemonClient`] method it names.
 pub(crate) trait TrayDaemonClient {
     fn stop(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome;
+    /// The tray Start begins: its place in the start-attempt order ([`DaemonClient::begin_start_attempt`], ADR-0399).
+    fn begin_start(&self) -> StartAttempt;
+    /// The tray Start's answer about the data folder's drive ([`DaemonClient::set_start_refusal`], ADR-0399).
+    fn answer_start(&self, attempt: StartAttempt, refusal: Option<crate::discovery::VolumeRefusal>);
     fn attach_in_background(&self);
 }
 
 impl TrayDaemonClient for Arc<DaemonClient> {
     fn stop(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome {
         self.stop_daemon_blocking(plan, origin)
+    }
+
+    fn begin_start(&self) -> StartAttempt {
+        self.begin_start_attempt()
+    }
+
+    fn answer_start(
+        &self,
+        attempt: StartAttempt,
+        refusal: Option<crate::discovery::VolumeRefusal>,
+    ) {
+        self.set_start_refusal(attempt, refusal);
     }
 
     fn attach_in_background(&self) {

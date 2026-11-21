@@ -4,6 +4,7 @@
 //! frame is noise next to a syscall (ADR-0177 decision 7). ★No `async fn` in trait★ — not dyn-compatible, so futures are boxed (`BoxFuture`, as the daemon's `conn_port`).
 
 use std::fmt;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -135,6 +136,21 @@ pub trait LinkTx: Send + 'static {
     /// the receiver cuts an oversize close frame with a read error, so 「connected but rejected」 would arrive as 「could not connect」 and burn budget. Branch only on [`Close::code`].
     /// ★An implementation may wait for delivery before closing (iroh waits for the peer to acknowledge the tail) and need not bound that wait★ — callers bound it with their own deadline.
     fn close(&mut self, close: Close) -> BoxFuture<'_, ()>;
+
+    /// The TCP ends of this link as the transport observed them when it opened the link — `None` = not a TCP link or not known (the
+    ///   in-memory harness, iroh). ★A fact, not a decision★: a consumer that must know who is at the other end before it sends anything
+    ///   (the shell's account check, ADR-0395) reads it between [`Dialer::dial`] and its handshake.
+    fn socket_ends(&self) -> Option<SocketEnds> {
+        None
+    }
+}
+
+/// The two TCP ends of one link — `local` = this process's socket, `peer` = the other end. Typed so a consumer can look the connection
+///   up (e.g. the account that owns the other end) without parsing [`LinkInfo::remote`], which is diagnostics text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SocketEnds {
+    pub local: SocketAddr,
+    pub peer: SocketAddr,
 }
 
 /// The link's incoming side — ★a pair with [`LinkTx`]: the link closes only when both ends are dropped★.
@@ -171,6 +187,9 @@ pub struct LinkInfo {
     /// The peer's public key confirmed by the transport (TLS key pinning · iroh node id — TRD 3 §3-5 · §4). `ws` and the in-memory harness leave it `None`; the iroh
     /// adapter fills the 32-byte node key its TLS handshake authenticated.
     pub peer_key: Option<Vec<u8>>,
+    /// The TCP ends of the accepted connection (`peer` = the observed client address) — the typed accessor for a consumer that looks the
+    ///   connection up, e.g. the account owning the client process (ADR-0395). `ws` fills it; iroh and the in-memory harness leave it `None`.
+    pub socket_ends: Option<SocketEnds>,
 }
 
 impl fmt::Debug for LinkInfo {
@@ -182,6 +201,7 @@ impl fmt::Debug for LinkInfo {
                 "peer_key",
                 &self.peer_key.as_ref().map(|k| format!("{} bytes", k.len())),
             )
+            .field("socket_ends", &self.socket_ends)
             .finish()
     }
 }
@@ -569,14 +589,18 @@ mod tests {
             remote: Some("127.0.0.1:5\u{1b}[2J".into()),
             origin: Some("http://evil\r\n\u{202e}x".into()),
             peer_key: Some(vec![7; 32]),
+            socket_ends: Some(SocketEnds {
+                local: "127.0.0.1:80".parse().unwrap(),
+                peer: "127.0.0.1:5".parse().unwrap(),
+            }),
         };
         assert_eq!(
             format!("{info:?}"),
-            r#"LinkInfo { remote: Some("127.0.0.1:5[2J"), origin: Some("http://evilx"), peer_key: Some("32 bytes") }"#
+            r#"LinkInfo { remote: Some("127.0.0.1:5[2J"), origin: Some("http://evilx"), peer_key: Some("32 bytes"), socket_ends: Some(SocketEnds { local: 127.0.0.1:80, peer: 127.0.0.1:5 }) }"#
         );
         assert_eq!(
             format!("{:?}", LinkInfo::default()),
-            "LinkInfo { remote: None, origin: None, peer_key: None }"
+            "LinkInfo { remote: None, origin: None, peer_key: None, socket_ends: None }"
         );
     }
 

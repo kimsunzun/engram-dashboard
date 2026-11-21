@@ -1284,6 +1284,7 @@ jobs:
           crates/engram-dashboard-agent/src/usage/process.rs
           crates/engram-dashboard-agent/src/usage/scratch.rs
           crates/engram-dashboard-base/src/logging/mod.rs
+          crates/engram-dashboard-daemon/src/control/mcp_config.rs
           crates/engram-dashboard-daemon/src/instance.rs
           crates/engram-dashboard-daemon/src/messaging_host.rs
           crates/engram-dashboard-daemon/src/portfile.rs

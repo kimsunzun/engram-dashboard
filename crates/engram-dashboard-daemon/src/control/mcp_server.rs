@@ -6,6 +6,9 @@
 //!
 //! OAuth metadata is not advertised (load-bearing, #59467): StreamableHttpService creates no `.well-known/*` routes and we add none — when a server advertises
 //! OAuth metadata, claude ignores the static Authorization header (claude-code #59467); without it the static Bearer is sent as is (ADR-0086 §rationale).
+//!
+//! The outermost layer is the accept-time account check (ADR-0395): a request from a process of another OS account, or one whose account cannot be read,
+//! gets 403 with the refusal text before the bearer check or any route sees it ([`account_check`]).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -30,6 +33,7 @@ use engram_dashboard_messaging::envelope::Entrance; // ADR-0110: the entrance la
 
 use super::ingress::{handle_messages, handle_send, ControlCommand, SendContract};
 use super::registry::{BoundIdentity, ControlRegistry};
+use crate::account_gate::AccountGate;
 // Caller strings going into log fields pass through this function, not `agent::preview`: the split is canonical in the [`super::agent::preview`] and [`sanitize_for_log`] docs.
 use crate::connection_core::sanitize_for_log;
 
@@ -679,6 +683,40 @@ where
     response
 }
 
+/// The listener's account check (ADR-0395) — the outermost layer, so it runs before the bearer check reads a token. The observed client
+///   address comes from axum's connection info ([`axum::serve`] with `into_make_service_with_connect_info`); a request without it cannot be
+///   verified and is refused. Refusal = 403 with the refusal text as the body (no token or identity in it).
+// ADR-0395
+async fn account_check<B>(
+    State(gate): State<AccountCheckState>,
+    request: Request<B>,
+    next: Next,
+) -> Response
+where
+    B: Send + 'static,
+    Request<B>: Into<Request<axum::body::Body>>,
+{
+    let client = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+    match gate.gate.admit(client, Some(gate.server)).await {
+        Ok(()) => next.run(request.into()).await,
+        Err(refusal) => Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(axum::body::Body::from(refusal.message()))
+            .expect("valid 403 response"),
+    }
+}
+
+/// The account check's state: the gate and this listener's own address (the server end the client lookup pairs with).
+#[derive(Clone)]
+struct AccountCheckState {
+    gate: AccountGate,
+    server: SocketAddr,
+}
+
 /// 401 response (empty body). WWW-Authenticate is deliberately omitted (static Bearer, no challenge needed).
 fn unauthorized() -> Response {
     Response::builder()
@@ -1092,6 +1130,9 @@ pub async fn start_mcp_server_without_help(
 /// The registry must be the same Arc shared by the auth middleware (verification) and provision (issuing).
 ///
 /// Local only + DNS rebinding defense: bind is 127.0.0.1:0 (OS-assigned port); StreamableHttpServerConfig allows only local Hosts with the default allowed_hosts=[localhost,127.0.0.1,::1] (rmcp default); stateful_mode=true (default), so the session is kept by Mcp-Session-Id.
+///
+/// The account check admits clients of this process's own OS account (ADR-0395); a process whose account cannot be read cannot start the
+///   server (`Err`). The production assembly passes the daemon's account it already read ([`start_mcp_server_gated`]).
 pub async fn start_mcp_server_with_help(
     registry: Arc<ControlRegistry>,
     manager: Arc<ManagerSlot>,
@@ -1104,6 +1145,31 @@ pub async fn start_mcp_server_with_help(
     // The help source is built by the assembly: built inside from the install location, a test could not inject a known body and the screen would be tied to the test exe's location · `CARGO_TARGET_DIR`.
     // ADR-0285
     help: super::help::HelpSource,
+) -> std::io::Result<McpServerHandle> {
+    let own = engram_dashboard_platform::account::current_account_id()?;
+    start_mcp_server_gated(
+        registry,
+        manager,
+        messaging,
+        commands,
+        bus,
+        help,
+        AccountGate::os(&own),
+    )
+    .await
+}
+
+/// [`start_mcp_server_with_help`] with the account check given — the production assembly passes the daemon's own account, tests a faked
+///   lookup.
+// ADR-0395
+pub(crate) async fn start_mcp_server_gated(
+    registry: Arc<ControlRegistry>,
+    manager: Arc<ManagerSlot>,
+    messaging: Arc<MessagingSlot>,
+    commands: Arc<CommandTableSlot>,
+    bus: crate::command_delivery::CommandBus,
+    help: super::help::HelpSource,
+    gate: AccountGate,
 ) -> std::io::Result<McpServerHandle> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr: SocketAddr = listener.local_addr()?;
@@ -1132,7 +1198,8 @@ pub async fn start_mcp_server_with_help(
     // nest_service: StreamableHttpService is a Tower service and sits on the axum router as is.
     // Body limit = RequestBodyLimitLayer (round-2 F4): bodies on the local control channel are small; the limit is stated explicitly so malicious/runaway bodies cannot swallow memory. axum `DefaultBodyLimit` applies only to extractors (Json/Bytes),
     //   while rmcp `StreamableHttpService` consumes the raw body directly, so it does not work; `RequestBodyLimitLayer` wraps the body itself and cuts with 413 on overrun, covering rmcp too. 1MB suffices for initialize/tools/call and send POSTs.
-    // Layer order: body-limit → auth → route from outer to inner (in axum the later-written layer is outer), so the limit applies before auth or inner reads the body.
+    // Layer order: account check → body-limit → auth → route from outer to inner (in axum the later-written layer is outer), so a client of another OS account is refused
+    //   before anything reads its request, and the limit applies before auth or inner reads the body.
     const MAX_BODY_BYTES: usize = 1024 * 1024;
     let send_state = ControlSendState {
         manager: manager.clone(),
@@ -1183,11 +1250,20 @@ pub async fn start_mcp_server_with_help(
         ))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             MAX_BODY_BYTES,
+        ))
+        // Outermost: the account check runs before the body limit, the bearer check and any route (ADR-0395).
+        .layer(axum::middleware::from_fn_with_state(
+            AccountCheckState { gate, server: addr },
+            account_check,
         ));
 
     let serve_cancel = cancel.clone();
     let serve_handle = tokio::spawn(async move {
-        let server = axum::serve(listener, app.into_make_service());
+        // The connection info carries the observed client address the account check reads.
+        let server = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        );
         let graceful = server.with_graceful_shutdown(async move {
             serve_cancel.cancelled().await;
         });
@@ -1586,6 +1662,58 @@ mod tests {
             handle.url
         );
         handle.shutdown().await;
+    }
+
+    // ── ADR-0395: the account check ─────────────────────────────────────────────────
+
+    /// A request from a process of another account (lookup faked) and one whose account cannot be read are refused with 403 and their own
+    ///   text before the bearer check (a request without a token would otherwise get 401); a client of the daemon's account reaches it.
+    #[tokio::test]
+    async fn the_listener_refuses_another_account_and_an_unverifiable_one_before_the_bearer_check()
+    {
+        use crate::account_gate::fakes::{gate, OTHER, OWN};
+        use crate::account_gate::{OTHER_ACCOUNT, UNVERIFIED};
+
+        for (client_account, status, body) in [
+            (Some(OTHER), StatusCode::FORBIDDEN, OTHER_ACCOUNT),
+            (None, StatusCode::FORBIDDEN, UNVERIFIED),
+            (Some(OWN), StatusCode::UNAUTHORIZED, ""),
+        ] {
+            let (relay_bus, _relay_sweeper) =
+                crate::command_delivery::CommandBus::without_commands();
+            let handle = start_mcp_server_gated(
+                Arc::new(ControlRegistry::new()),
+                empty_slot(),
+                empty_messaging_slot(),
+                empty_commands_slot(),
+                relay_bus,
+                super::super::help::HelpSource::not_configured(),
+                gate(client_account),
+            )
+            .await
+            .expect("start mcp server");
+            let base = handle.url.trim_end_matches(MCP_PATH).to_string();
+            let resp = reqwest::Client::new()
+                .post(format!("{base}{CONTROL_SEND_PATH}"))
+                .body("{}")
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(resp.status(), status, "{client_account:?}");
+            assert_eq!(resp.text().await.unwrap(), body, "{client_account:?}");
+            // The nested MCP service sits behind the same outermost layer.
+            if status == StatusCode::FORBIDDEN {
+                let resp = reqwest::Client::new()
+                    .post(handle.url.clone())
+                    .body("{}")
+                    .send()
+                    .await
+                    .expect("request");
+                assert_eq!(resp.status(), status, "/mcp {client_account:?}");
+                assert_eq!(resp.text().await.unwrap(), body, "/mcp {client_account:?}");
+            }
+            handle.shutdown().await;
+        }
     }
 
     // ── round-2 F5 ──────────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ use core::{IconState, MenuAction};
 
 use crate::daemon_client::shutdown::{StopOrigin, StopOutcome, StopPlan};
 use crate::daemon_client::DaemonClient;
+use crate::discovery::StartFailure;
 use crate::ui_language::TrayMenuText;
 use crate::ui_text::{tray_label, Lang};
 
@@ -247,29 +248,39 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
     });
 }
 
-/// Tray 「Start daemon」 (R10): `launch`, then the attach even if the launch failed or timed out — a daemon that comes up later is found by the link's background retries. A stop in flight is not waited out (`daemon_client::shutdown`).
+/// Tray 「Start daemon」 (R10): `launch`, hand its answer to the band (a refusal before a spawn shows its cause, any other answer clears an earlier one — ADR-0399), then the attach even if the launch failed or timed out — a daemon that comes up later is found by the link's background retries. The answer goes first so the attach's handle carries it. A stop in flight is not waited out (`daemon_client::shutdown`).
 fn start_daemon(
     client: Option<&dyn TrayDaemonClient>,
-    launch: impl FnOnce() -> Result<DaemonInfo, String>,
+    launch: impl FnOnce() -> Result<DaemonInfo, StartFailure>,
 ) {
-    match launch() {
-        Ok(info) => tracing::info!(
-            pid = info.pid,
-            port = info.port,
-            "[tray] daemon ensure done"
-        ),
-        Err(e) => tracing::warn!("[tray] {e}"),
-    }
-    match client {
-        Some(client) => client.attach_in_background(),
+    let attempt = client.map(|client| client.begin_start());
+    let refusal = match launch() {
+        Ok(info) => {
+            tracing::info!(
+                pid = info.pid,
+                port = info.port,
+                "[tray] daemon ensure done"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!("[tray] {e}");
+            e.refusal
+        }
+    };
+    match client.zip(attempt) {
+        Some((client, attempt)) => {
+            client.answer_start(attempt, refusal);
+            client.attach_in_background();
+        }
         None => tracing::warn!("[tray] no daemon client — not attaching after the start"),
     }
 }
 
-/// Finds the daemon exe and starts it if none runs — blocks up to [`ENSURE_TIMEOUT`]. `Err` = the log text. Never spawn the daemon directly with `std::process::Command` (ADR-0024 C1): `ensure_daemon` spawns only via WMI (`Win32_Process.Create`), as a child of WmiPrvSE that does not inherit the app Job (KILL_ON_JOB_CLOSE) — the detached/breakaway requirement is met automatically; a direct spawn would kill the daemon with the app on exit.
-fn launch_daemon() -> Result<DaemonInfo, String> {
+/// Finds the daemon exe and starts it if none runs — blocks up to [`ENSURE_TIMEOUT`]. `Err` = the log text and the typed refusal, if any. Never spawn the daemon directly with `std::process::Command` (ADR-0024 C1): `ensure_daemon` spawns only via WMI (`Win32_Process.Create`), as a child of WmiPrvSE that does not inherit the app Job (KILL_ON_JOB_CLOSE) — the detached/breakaway requirement is met automatically; a direct spawn would kill the daemon with the app on exit.
+fn launch_daemon() -> Result<DaemonInfo, StartFailure> {
     let exe = crate::discovery::locate_daemon_exe()
-        .map_err(|e| format!("daemon exe lookup failed: {e}"))?;
+        .map_err(|e| StartFailure::other(format!("daemon exe lookup failed: {e}")))?;
     // console=false: windowless. Never log the token (discovery guarantees it).
     crate::discovery::ensure_daemon(
         &crate::discovery::default_data_dir(),
@@ -277,7 +288,10 @@ fn launch_daemon() -> Result<DaemonInfo, String> {
         ENSURE_TIMEOUT,
         false,
     )
-    .map_err(|e| format!("daemon ensure failed: {e}"))
+    .map_err(|e| StartFailure {
+        refusal: e.volume_refusal(),
+        message: format!("daemon ensure failed: {e}"),
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -323,6 +337,8 @@ mod tests {
     use engram_dashboard_protocol::PROTOCOL_VERSION;
 
     use super::*;
+    use crate::daemon_client::StartAttempt;
+    use crate::discovery::VolumeRefusal;
 
     pub(super) struct FakeClient {
         calls: Arc<Mutex<Vec<String>>>,
@@ -352,6 +368,20 @@ mod tests {
             self.outcome
         }
 
+        fn begin_start(&self) -> StartAttempt {
+            self.note("begin".into());
+            StartAttempt::for_test(7)
+        }
+
+        fn answer_start(&self, attempt: StartAttempt, refusal: Option<VolumeRefusal>) {
+            assert_eq!(
+                attempt,
+                StartAttempt::for_test(7),
+                "the answer carries the attempt begun before the launch"
+            );
+            self.note(format!("answer:{refusal:?}"));
+        }
+
         fn attach_in_background(&self) {
             self.note("attach".into());
         }
@@ -359,9 +389,9 @@ mod tests {
 
     #[test]
     fn start_launches_then_attaches_even_after_a_failed_launch() {
-        let launched: [Result<DaemonInfo, String>; 2] = [
+        let launched: [Result<DaemonInfo, StartFailure>; 2] = [
             Ok(crate::discovery::tests::info(1001, PROTOCOL_VERSION)),
-            Err("daemon ensure failed: timed out".into()),
+            Err(StartFailure::other("daemon ensure failed: timed out")),
         ];
         for launch in launched {
             let client = FakeClient::new(StopOutcome::NoTarget);
@@ -370,7 +400,29 @@ mod tests {
                 calls.lock().unwrap().push("launch".into());
                 launch
             });
-            assert_eq!(client.calls(), ["launch", "attach"]);
+            assert_eq!(client.calls(), ["begin", "launch", "answer:None", "attach"]);
+        }
+    }
+
+    // ADR-0399: the band gets the launch's typed refusal before the attach adds its handle, so that handle carries the cause.
+    #[test]
+    fn a_start_refused_for_the_drive_hands_its_cause_to_the_band_before_the_attach() {
+        for refusal in [VolumeRefusal::Unprotected, VolumeRefusal::Unreadable] {
+            let client = FakeClient::new(StopOutcome::NoTarget);
+            start_daemon(Some(&client), || {
+                Err(StartFailure {
+                    refusal: Some(refusal),
+                    message: "daemon ensure failed: the data folder is on FAT".into(),
+                })
+            });
+            assert_eq!(
+                client.calls(),
+                [
+                    "begin".to_owned(),
+                    format!("answer:Some({refusal:?})"),
+                    "attach".to_owned()
+                ]
+            );
         }
     }
 
@@ -379,7 +431,7 @@ mod tests {
         let mut launched = false;
         start_daemon(None, || {
             launched = true;
-            Err("daemon exe lookup failed: none".into())
+            Err(StartFailure::other("daemon exe lookup failed: none"))
         });
         assert!(launched);
     }

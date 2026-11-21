@@ -230,14 +230,186 @@ fn public_entry_points_read_the_record_from_the_layout_daemon_file() {
     assert_eq!(live.map(|i| i.pid), Some(std::process::id()));
 }
 
+// ── data-folder volume check (ADR-0399) ─────────────────────────────────────────────────
+
+/// The volume query's answer, fixed — `Err` carries the kind of the read failure. Counts its calls and records the folder asked.
+pub(crate) struct FakeVolume {
+    answer: Result<bool, io::ErrorKind>,
+    asked: Mutex<Vec<PathBuf>>,
+}
+
+impl FakeVolume {
+    pub(crate) fn new(answer: Result<bool, io::ErrorKind>) -> Self {
+        Self {
+            answer,
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn asked(&self) -> Vec<PathBuf> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+impl VolumeAcls for FakeVolume {
+    fn stores_acls(&self, dir: &Path) -> io::Result<bool> {
+        self.asked.lock().unwrap().push(dir.to_path_buf());
+        self.answer.map_err(io::Error::from)
+    }
+}
+
+#[test]
+fn the_volume_check_passes_only_a_drive_that_stores_acls() {
+    let dir = Path::new("E:/Engram/data");
+    check_data_dir_volume(dir, &FakeVolume::new(Ok(true))).expect("NTFS passes");
+
+    let e = check_data_dir_volume(dir, &FakeVolume::new(Ok(false))).expect_err("FAT / exFAT");
+    assert!(
+        matches!(&e, DiscoveryError::UnprotectedVolume { path } if path == &dir.display().to_string()),
+        "{e:?}"
+    );
+    assert_eq!(e.volume_refusal(), Some(VolumeRefusal::Unprotected));
+    assert!(
+        e.to_string().contains("NTFS drive"),
+        "the log text names the fix: {e}"
+    );
+
+    // Unreadable flags refuse too — never read as "has ACLs".
+    let e = check_data_dir_volume(dir, &FakeVolume::new(Err(io::ErrorKind::PermissionDenied)))
+        .expect_err("unreadable");
+    assert!(
+        matches!(&e, DiscoveryError::VolumeUnreadable { .. }),
+        "{e:?}"
+    );
+    assert_eq!(e.volume_refusal(), Some(VolumeRefusal::Unreadable));
+    assert!(
+        e.to_string().contains("NTFS drive"),
+        "the log text names the fix: {e}"
+    );
+}
+
+#[test]
+fn only_the_two_volume_failures_are_typed_refusals() {
+    let others = [
+        DiscoveryError::DataDirUnwritable {
+            path: "X".into(),
+            reason: "denied".into(),
+        },
+        DiscoveryError::Timeout(Duration::from_secs(5)),
+        DiscoveryError::ExeNotFound("x".into()),
+        DiscoveryError::Io("x".into()),
+    ];
+    for e in others {
+        assert_eq!(e.volume_refusal(), None, "{e:?}");
+        let failure = StartFailure::from(e);
+        assert_eq!(failure.refusal, None);
+    }
+    let failure = StartFailure::from(DiscoveryError::UnprotectedVolume {
+        path: "E:/x".into(),
+    });
+    assert_eq!(failure.refusal, Some(VolumeRefusal::Unprotected));
+    assert!(
+        failure.message.contains("E:/x"),
+        "the English text stays for the log: {failure}"
+    );
+}
+
+// The rejection `daemon_start` hands the frontend (`src/api/daemonControl.ts` reads these keys and words).
+#[test]
+fn a_start_failure_serializes_as_the_typed_refusal_and_the_english_text() {
+    let refused = StartFailure {
+        refusal: Some(VolumeRefusal::Unreadable),
+        message: "m".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(refused).unwrap(),
+        serde_json::json!({"refusal": "unreadable", "message": "m"})
+    );
+    assert_eq!(
+        serde_json::to_value(StartFailure::other("timed out")).unwrap(),
+        serde_json::json!({"refusal": null, "message": "timed out"})
+    );
+    assert_eq!(
+        serde_json::to_value(VolumeRefusal::Unprotected).unwrap(),
+        "unprotected"
+    );
+}
+
+#[test]
+fn the_pre_spawn_checks_refuse_a_drive_without_acls_after_the_writable_check() {
+    let dir = fresh_probe_dir("volume-refused");
+    std::fs::create_dir_all(&dir).expect("create folder");
+    for (answer, refusal) in [
+        (Ok(false), VolumeRefusal::Unprotected),
+        (Err(io::ErrorKind::Other), VolumeRefusal::Unreadable),
+    ] {
+        let volume = FakeVolume::new(answer);
+        let e = pre_spawn_checks(&dir, false, &volume).expect_err("refused");
+        assert_eq!(e.volume_refusal(), Some(refusal), "{e:?}");
+        assert_eq!(
+            volume.asked(),
+            [dir.clone()],
+            "the data root is the folder asked"
+        );
+    }
+    pre_spawn_checks(&dir, false, &FakeVolume::new(Ok(true))).expect("NTFS passes");
+    std::fs::remove_dir_all(&dir).expect("clean up");
+
+    // An unwritable folder fails the writable check first; the drive is not asked.
+    let file = fresh_probe_dir("volume-after-writable");
+    std::fs::write(&file, b"").expect("a file where the folder should be");
+    let volume = FakeVolume::new(Ok(false));
+    let e = pre_spawn_checks(&file, false, &volume).expect_err("not a folder");
+    assert!(
+        matches!(e, DiscoveryError::DataDirUnwritable { .. }),
+        "{e:?}"
+    );
+    assert!(volume.asked().is_empty());
+    std::fs::remove_file(&file).expect("clean up");
+}
+
+/// `ENGRAM_DATA_DIR` set: the WMI daemon would not see it, so neither check speaks about the folder (`ensure_daemon`).
+#[test]
+fn the_pre_spawn_checks_are_skipped_under_the_data_dir_override() {
+    let volume = FakeVolume::new(Ok(false));
+    pre_spawn_checks(Path::new("Z:/no/such/folder"), true, &volume)
+        .expect("nothing is checked under the override");
+    assert!(volume.asked().is_empty(), "the drive is not asked");
+}
+
+#[test]
+fn a_refused_drive_blocks_the_spawn() {
+    let dir = fresh_probe_dir("volume-no-spawn");
+    std::fs::create_dir_all(&dir).expect("create folder");
+    for answer in [Ok(false), Err(io::ErrorKind::PermissionDenied)] {
+        let reader = FakeReader::new(vec![Ok(None)]);
+        let spawner = CountingSpawner::ok();
+        let volume = FakeVolume::new(answer);
+        let mut pre_spawn = || pre_spawn_checks(&dir, false, &volume);
+        let e = ensure_with(
+            &reader,
+            &spawner,
+            &FakeLiveness { dead: vec![] },
+            &FakeClock::new(),
+            Path::new("daemon.exe"),
+            &mut pre_spawn,
+            Duration::from_secs(5),
+        )
+        .expect_err("refused before the spawn");
+        assert!(e.volume_refusal().is_some(), "{e:?}");
+        assert_eq!(spawner.count.get(), 0, "nothing spawned ({answer:?})");
+    }
+    std::fs::remove_dir_all(&dir).expect("clean up");
+}
+
 pub(crate) fn info(pid: u32, version: u32) -> DaemonInfo {
     DaemonInfo {
         pid,
         host: "127.0.0.1".into(),
         port: 12345,
-        token: engram_dashboard_protocol::Secret::new("t".repeat(64)),
         protocol_version: version,
         start_time: 0,
+        owner_account: "S-1-5-21-1-2-3-1001".into(),
     }
 }
 
@@ -616,6 +788,59 @@ fn dead_pid_with_old_protocol_spawns_instead_of_erroring() {
     assert_eq!(spawner.count.get(), 1);
 }
 
+/// ADR-0395: the record's owner account is only a hint — a forged record naming another account's SID that nobody holds (its pid is
+///   dead) does not keep this app from starting its own daemon; the spawned daemon's lock acquire decides who holds the folder.
+#[test]
+fn a_forged_foreign_owner_record_nobody_holds_spawns_our_own_daemon() {
+    let mut forged = info(620, PROTOCOL_VERSION);
+    forged.owner_account = "S-1-5-21-9-9-9-2002".into();
+    let reader = FakeReader::new(vec![
+        Ok(Some(forged)),
+        Ok(Some(info(621, PROTOCOL_VERSION))),
+    ]);
+    let spawner = CountingSpawner::ok();
+    let liveness = FakeLiveness { dead: vec![620] };
+    let clock = FakeClock::new();
+
+    let got = ensure_with(
+        &reader,
+        &spawner,
+        &liveness,
+        &clock,
+        Path::new("daemon.exe"),
+        &mut noop_pre_spawn(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert_eq!(got.pid, 621);
+    assert_eq!(spawner.count.get(), 1);
+}
+
+/// ADR-0395: nor does a foreign owner on a live record decide anything here — the record is returned, and the dial's listener account
+///   check on the connection decides (the shell never trusts the hint either way).
+#[test]
+fn a_live_record_is_attached_whatever_owner_it_names() {
+    let mut foreign = info(630, PROTOCOL_VERSION);
+    foreign.owner_account = "S-1-5-21-9-9-9-2002".into();
+    let reader = FakeReader::new(vec![Ok(Some(foreign.clone()))]);
+    let spawner = CountingSpawner::ok();
+    let liveness = FakeLiveness { dead: vec![] };
+    let clock = FakeClock::new();
+
+    let got = ensure_with(
+        &reader,
+        &spawner,
+        &liveness,
+        &clock,
+        Path::new("daemon.exe"),
+        &mut noop_pre_spawn(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert_eq!(got, foreign);
+    assert_eq!(spawner.count.get(), 0);
+}
+
 #[test]
 fn dead_pid_with_newer_protocol_also_spawns_instead_of_erroring() {
     let reader = FakeReader::new(vec![
@@ -897,20 +1122,33 @@ fn status_missing_file_is_not_alive_no_pid() {
     assert_eq!(s.port, None);
 }
 
-// ── read_live_daemon (attach info including token, no-spawn) — ADR-0021 hot-swap tracking ──────
+// ── read_live_daemon (the full record, no-spawn) — ADR-0021 hot-swap tracking ──────
 
 #[test]
-fn read_live_returns_full_info_with_token() {
+fn read_live_returns_the_full_record() {
     let reader = FakeReader::new(vec![Ok(Some(info(666, PROTOCOL_VERSION)))]);
     let liveness = FakeLiveness { dead: vec![] };
     let got = read_live_with(&reader, &liveness).expect("Some when the daemon is live");
-    assert_eq!(got.pid, 666);
-    assert_eq!(got.host, "127.0.0.1");
-    assert_eq!(got.port, 12345);
+    assert_eq!(got, info(666, PROTOCOL_VERSION));
+}
+
+/// The token is read from this account's file next to `daemon.json`, as written (ADR-0395); another account's file is not read.
+#[test]
+fn the_token_is_read_from_this_accounts_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = DataLayout::new(dir.path());
+    std::fs::create_dir_all(layout.daemon_file().parent().unwrap()).unwrap();
+    std::fs::write(layout.token_file("S-1-5-21-mine"), "my-token").unwrap();
+    std::fs::write(layout.token_file("S-1-5-21-theirs"), "their-token").unwrap();
     assert_eq!(
-        got.token.expose(),
-        "t".repeat(64),
-        "the reconnect attach must carry the token"
+        read_token(dir.path(), "S-1-5-21-mine").unwrap(),
+        engram_dashboard_protocol::Secret::new("my-token")
+    );
+    assert_eq!(
+        read_token(dir.path(), "S-1-5-21-nobody")
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
     );
 }
 

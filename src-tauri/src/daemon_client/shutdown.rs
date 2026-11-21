@@ -2,6 +2,7 @@
 //! - One flight per client (R2): a stop while one runs joins it and gets its outcome; the first caller's plan rules. A [`StopPlan::Exit`] joiner waits only its own bound.
 //! - One absolute clock (R13): every deadline is measured from flight start (the instant the starting caller asked — the blocking wrapper takes it before its spawn) on the client's one clock, the `daemon.json` read and its retries included. [`StopPlan::User`] = 10 s graceful + 3 s margin, [`StopPlan::Exit`] = 3 s + 1 s.
 //! - Order (R1): target resolved once (the kill uses this identity, never a re-read) → the stop client → "gone" polled → the identity-checked kill (`User` only: at once when nothing was sent, at the graceful deadline when it was; never without a start time) → the attach-only re-add fired, not awaited (not for `Exit`).
+//! - A stop dial refused for the listener's OS account (ADR-0395 — another account's, or one whose account could not be read) ends the flight there: nothing sent, nothing killed (`no_target` · `account_refused`). The record that named it can be another account's forgery, and its pid is not ours to end.
 //! - The shell's link is left alone (user decision 2026-11-10): it stays open through the flight so the daemon's own shutdown broadcasts (agents exiting, the emptied agent list) reach the frontend; when the daemon exits the link sees a normal disconnect and reconnects as always, its first failed reconnect showing band ①. Do not close it at flight start — those broadcasts would be lost and the agent tree keep showing running agents. Accepted: a redial during the flight may reach the exiting daemon, and an attach or tray 「Start daemon」 during the flight is not held back (a failed redial just shows ①).
 //! - The re-add is for a link parked by a terminal refusal (band ② — a version refusal never redials): without it ② would stay after the old daemon is gone. With a live link it does nothing; with no daemon it fails and the link keeps retrying in the background (U4 — no "intended stop" latch).
 //! - Expiry (R19): a timer outside the flight task aborts it at the flight deadline. Every side effect (dial · `StopDaemon` · kill) checks that deadline first, a still-running `daemon.json` read is discarded, and the supervisor fires the re-add. Joiners and the blocking wrapper get `Timeout`, never a dropped sender.
@@ -22,6 +23,7 @@ use tokio::runtime::Handle;
 use tokio::sync::watch;
 
 use super::connection::LinkControl;
+use super::link::account::{AccountCheckedDialer, AccountRefusalRecord, Accounts, OsAccounts};
 use super::link::stop::{
     resolve_stop_target, send_stop, DaemonFileReader, RecordReader, Resolved, StopDial, StopSend,
     StopTarget,
@@ -95,6 +97,9 @@ pub enum StopReason {
     StillRunning,
     FlightExpired,
     StopFailed,
+    /// `no_target`: the recorded daemon's listener runs under another OS account, or its account could not be verified — nothing was sent
+    /// and nothing killed (ADR-0395).
+    AccountRefused,
 }
 
 /// How one flight ended — `reason` is `None` where the outcome says it all (`closed` · `killed`).
@@ -145,15 +150,30 @@ pub struct StopPorts {
     pub liveness: Arc<dyn PidLiveness + Send + Sync>,
     pub process: Arc<dyn TargetProcess>,
     pub dialer: Arc<dyn Dialer>,
+    /// Where `dialer` records a refusal of the listener's OS account (`account::AccountCheckedDialer`) — read after a dial that sent
+    ///   nothing, so such a dial ends the flight without a kill (ADR-0395). A dialer that checks no account never writes it.
+    pub account_refusals: Arc<AccountRefusalRecord>,
 }
 
 impl StopPorts {
+    /// The local daemon of `data_dir`. The dial checks the listener's OS account before the stop handshake sends the token (ADR-0395).
     pub fn local(data_dir: &Path) -> Self {
+        Self::local_with(data_dir, Arc::new(OsAccounts))
+    }
+
+    /// [`Self::local`] with the account seam given — the tests name another account for a real listener.
+    fn local_with(data_dir: &Path, accounts: Arc<dyn Accounts>) -> Self {
+        let account_refusals = Arc::new(AccountRefusalRecord::default());
         Self {
             reader: Arc::new(DaemonFileReader::new(data_dir)),
             liveness: Arc::new(RealLiveness),
             process: Arc::new(OsProcess),
-            dialer: Arc::new(WsDialer::new(DAEMON_MESSAGE_MAX_BYTES)),
+            dialer: Arc::new(AccountCheckedDialer::new(
+                Arc::new(WsDialer::new(DAEMON_MESSAGE_MAX_BYTES)),
+                accounts,
+                account_refusals.clone(),
+            )),
+            account_refusals,
         }
     }
 }
@@ -181,11 +201,27 @@ pub async fn stop_flight(
             }
         }
     };
+    // A refusal left by an earlier flight's dial must not end this one.
+    let _ = ports.account_refusals.take();
     let presence = match dial(ports, clock, &target, graceful, deadline).await {
         // Finish as soon as it is gone; the kill waits for the graceful deadline.
         StopSend::Sent { .. } => wait_gone(ports, clock.as_ref(), &target, graceful).await,
-        // Nothing graceful is in progress — no reason to wait.
-        StopSend::NothingSent => ports.process.presence(target.pid, target.start_time),
+        StopSend::NothingSent => {
+            // ADR-0395: the listener is not this account's (or unverifiable) — not ours to stop, and never killed.
+            if let Some(refusal) = ports.account_refusals.take() {
+                tracing::warn!(
+                    pid = target.pid,
+                    ?refusal,
+                    "stop: the daemon's listener is not this account's — nothing sent, nothing killed"
+                );
+                return StopResult {
+                    outcome: StopOutcome::NoTarget,
+                    reason: Some(StopReason::AccountRefused),
+                };
+            }
+            // Nothing graceful is in progress — no reason to wait.
+            ports.process.presence(target.pid, target.start_time)
+        }
     };
     if presence == Presence::Gone {
         tracing::info!(pid = target.pid, "the daemon stopped");
@@ -553,6 +589,9 @@ pub(crate) fn inert_ports(dialer: Arc<dyn Dialer>) -> StopPorts {
         fn read(&self) -> RecordRead {
             RecordRead::Absent
         }
+        fn read_token(&self) -> Option<engram_dashboard_protocol::Secret> {
+            None
+        }
     }
     struct NeverDead;
     impl PidLiveness for NeverDead {
@@ -574,6 +613,7 @@ pub(crate) fn inert_ports(dialer: Arc<dyn Dialer>) -> StopPorts {
         liveness: Arc::new(NeverDead),
         process: Arc::new(NoProcess),
         dialer,
+        account_refusals: Arc::default(),
     }
 }
 
