@@ -3,6 +3,6 @@ import type { PresetEntryArg } from "./PresetEntryArg";
 
 export type PresetSaveArgs = { path: string, presets: Array<PresetEntryArg>, instructions: Array<PresetEntryArg>, skills: Array<PresetEntryArg>, settings: Array<PresetEntryArg>, folders?: Array<string> | null, base_rev?: string | null, 
 /**
- * The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+ * The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
  */
 root_generation?: bigint | null, };

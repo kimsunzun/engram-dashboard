@@ -288,9 +288,13 @@ An edit through Engram rewrites the whole preset file — hand-written comments 
 Where <path> appears below, give a library path; <list> is a JSON array of strings (["rules/style.md"]). One command's arguments and reply: {tool} commands <name>.
 
   {tool} library.status
-      The library root now (root · state · config) and root_generation. state is unset · ok · missing (not there, or not a folder) · unreadable (there but could not be read or did not answer); state_why says why
-  {tool} library.setRoot --path <absolute folder> [--create true]
-      Points the library at that folder (create makes the folder first); nothing is copied or moved. Replies like library.status
+      The library's mounts now (name · path · state each, the built-in engram last), config and root_generation. A mount's state is ok · missing (not there, or not a folder) · unreadable (there but could not be read, did not answer, or overlaps another mount); state_why says why
+  {tool} library.addMount --name <mount name> --path <absolute folder> [--create true]
+      Registers that folder as a mount (create makes the folder first); nothing is copied or moved. Replies like library.status plus already_pointing
+  {tool} library.removeMount --mount <mount name>
+      Unregisters a mount; no file is touched. Replies like library.status plus now_absent and outcome
+  {tool} library.relocateMount --mount <mount name> --path <absolute folder> [--create true]
+      Points a mount at another folder under the same name. Replies like library.status
   {tool} library.folders
       Every folder, flat. A skill folder is marked skill
   {tool} library.list [--folder <path>] [--query <text>] [--kinds <JSON array of Instruction|Skill|SkillFile|Settings|Preset>]
@@ -312,7 +316,7 @@ Where <path> appears below, give a library path; <list> is a JSON array of strin
   {tool} preset.remove --path <path> (--items <list> | --folders <list>)
   {tool} preset.setBackend --path <path> --items <list> [--backend <claude|codex>]
       backend omitted = every backend
-  {tool} preset.reorder --path <path> --section <Presets|Instructions|Skills|Settings|Folders> --order <list> --base_rev <rev>
+  {tool} preset.reorder --path <path> --section <presets|instructions|skills|settings|folders> --order <list> --base_rev <rev>
       order = every entry preset.get shows in that section, each once
   {tool} preset.save --path <path> --presets <entries> --instructions <entries> --skills <entries> --settings <entries> [--folders <list>] [--base_rev <rev>]
       Replaces the lists, all or nothing. <entries> = a JSON array of {"path": "…", "backend": "…"} (backend may be left out). folders omitted = they stay
@@ -332,13 +336,13 @@ Where <path> appears below, give a library path; <list> is a JSON array of strin
   {tool} agent.new --backend <claude|codex> --cwd <folder> --presets <list>
       Creates the agent with the presets that can be attached; the rest are in skipped ({tool} help agent)
 
-root_generation (optional; every edit above except library.setRoot takes it) = the value library.status replied; the edit refuses with CONFLICT root-generation-stale if the library root changed since, and applies nothing.
+root_generation (optional; every edit above except the mount commands takes it) = the value library.status replied; the edit refuses with CONFLICT root-generation-stale if a mount changed since, and applies nothing.
 
 base_rev = the rev preset.get replied, or the base_rev agent.presets replied; CONFLICT rev-mismatch means it changed since — read it again and redo the change.
 
-A missing or broken item shows as a row in problems (kind missing · broken · library_unavailable), and items that clash as a row in conflicts (kind conflict), each with code and args. A start leaves a missing item out and names it in notices; it does the same with library_unavailable when the library folder is not set or not there (library.status state unset · missing). A folder entry that exists but cannot be read is broken (folder-unreadable); it stops a start like every other broken row, every conflict and a library folder that cannot be read (state unreadable). Fix it with a preset edit, or with library.relink when it was moved.
+A missing or broken item shows as a row in problems (kind missing · broken · library_unavailable), and items that clash as a row in conflicts (kind conflict), each with code and args. A start leaves a missing item out and names it in notices; it does the same with library_unavailable when its mount is not registered or not there (library.status mount state missing). A folder entry that exists but cannot be read is broken (folder-unreadable); it stops a start like every other broken row, every conflict and a mount that cannot be read (mount state unreadable). Fix it with a preset edit, or with library.relink when it was moved.
 
-A refusal's code is CONFLICT · NOT_FOUND · INVALID_ARGUMENT · INTERNAL, and args carries the reason: args.code (for example root-generation-stale), args.args (that reason's details) and args.line (the line in the file, when there is one). A refusal of the arguments themselves (a blank value, items and folders both or neither), a target that names no agent or several, and a refusal by the agents store carry no args ({tool} help agent). If the message ends with "clear the cause, then repeat the same call", fix what it names (the folder reachable again, a lock released, library.setRoot) and repeat the call unchanged. Without that clause, repeating the same call does not clear it by itself — change the call, or first do the step the reason names (for example create the missing folder).
+A refusal's code is CONFLICT · NOT_FOUND · INVALID_ARGUMENT · INTERNAL, and args carries the reason: args.code (for example root-generation-stale), args.args (that reason's details) and args.line (the line in the file, when there is one). A refusal of the arguments themselves (a blank value, items and folders both or neither), a target that names no agent or several, and a refusal by the agents store carry no args ({tool} help agent). If the message ends with "clear the cause, then repeat the same call", fix what it names (the folder reachable again, a lock released, a mount command) and repeat the call unchanged. Without that clause, repeating the same call does not clear it by itself — change the call, or first do the step the reason names (for example create the missing folder).
 
 agent.setWorkspace answers workspace-not-found also when the folder did not answer in time, could not be read or is on a network share that is not reachable; args.args.why says which ({tool} help agent).
 

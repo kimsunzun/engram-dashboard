@@ -27,8 +27,8 @@ use engram_dashboard_command::{
 };
 
 use crate::launch::{notice_text, LaunchBlocked, Notice, Reason};
-pub use crate::library_commands::LibraryCommandHost;
 use crate::library_commands::{coded_error, refusal_error, PortClass, PortRefusal};
+pub use crate::library_commands::{LibraryCommandHost, PresetSection};
 use crate::manager::{
     Activated, AgentManager, NotStarted, NoticeDelivery, RenameOutcome, WorkspaceRefusal,
     WorkspaceSet,
@@ -57,7 +57,10 @@ declare_commands! {
     //   `agent.duplicate`, and `agent.new` gains `presets`, `root_generation` and the answer's `skipped` (ADR-0386).
     //   Library mounts (ADR-0400 decision 20) land in it too: `library.list` lost its `builtins` argument and the
     //   answer's `builtins` rows (the built-in mount `engram` is listed as a mount), and every preset view (`preset.get`
-    //   and the preset edits' answers) gains `notices`.
+    //   and the preset edits' answers) gains `notices`. Then the mount commands: `library.status` answers `mounts` (its
+    //   `root`, `root_setting`, `state` and `state_why` left), `library.addMount` · `removeMount` · `relocateMount` are
+    //   added and `library.setRoot` is removed (ADR-0400 decision 7), and `preset.reorder`'s `section` became a
+    //   lowercase word (ADR-0400 decision 22).
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -280,7 +283,7 @@ declare_commands! {
 
     /// One library item.
     struct ListRow {
-        /// Library path from the root (a skill: its folder; a built-in: `engram/…`).
+        /// Library path, starting with its mount's name (a skill: its folder; a built-in: `engram/…`).
         path: String,
         /// `null` = a broken file that claims no preset or settings kind (its reason is in `state`), or the one row of
         /// a folder behind a link.
@@ -302,7 +305,8 @@ declare_commands! {
         path: String,
         name: String,
         /// A mount (a row of the library's top): `ok` | `missing` | `unreadable`, as last seen (no fresh check);
-        /// `null` = a folder inside a mount. Exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
+        /// `null` = a folder inside a mount. The built-in mount `engram` is `unreadable` when its folder cannot be
+        /// read, yet its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
         state: Option<String>,
         /// Why a mount's `state` is not `ok`.
         state_why: Option<String>,
@@ -315,13 +319,15 @@ declare_commands! {
         /// A skill folder (it holds a `SKILL.md`).
         skill: bool,
         /// A mount (a top folder): `ok` | `missing` | `unreadable`, as last seen (no fresh check); `null` = a folder
-        /// inside a mount. Exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
+        /// inside a mount. The built-in mount `engram` is `unreadable` when its folder cannot be read, yet its rows
+        /// stay as stand-ins and a launch goes on with `builtin-unavailable`.
         state: Option<String>,
         /// Why a mount's `state` is not `ok`.
         state_why: Option<String>,
     }
 
-    /// A mount a whole-library answer left out because it cannot be read. Exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
+    /// A mount a whole-library answer left out because it cannot be read. The built-in mount `engram` is named when its
+    /// folder cannot be read, yet its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
     struct UnavailableMountRow {
         mount: String,
         /// `missing` | `unreadable`.
@@ -338,8 +344,8 @@ declare_commands! {
         line: Option<u32>,
     }
 
-    /// Where a refresh could not read — `path` `null` = the root listing, or a folder that is not read (a dot or temp
-    /// name); items already read are kept.
+    /// Where a refresh could not read — `path` `null` = the folder asked for could not be scanned at all (in no mount,
+    /// in the built-in mount, or a dot or temp name); items already read are kept.
     struct RefreshErrorRow {
         path: Option<String>,
         why: String,
@@ -466,13 +472,28 @@ declare_commands! {
         line: Option<u32>,
     }
 
-    /// A section of a preset file.
-    enum PresetSection {
-        Presets,
-        Instructions,
-        Skills,
-        Settings,
-        Folders,
+    /// One mount of `library.status`.
+    struct MountStatusRow {
+        name: String,
+        /// The folder it maps to (the built-in `engram`: the install's built-in folder, empty when there is none).
+        path: String,
+        /// Its folder is the default place (saved as `default`).
+        default: bool,
+        /// The built-in read-only mount `engram`.
+        builtin: bool,
+        /// `ok` | `missing` (not there or not a folder — its items read as absent) | `unreadable` (there but cannot be
+        /// read, did not answer, or overlaps an earlier mount — a launch reaching it is refused); a user mount's is
+        /// checked now, the built-in's is the one read at start.
+        state: String,
+        /// Why `state` is not `ok`.
+        state_why: Option<String>,
+    }
+
+    /// What points at a mount's name from outside it: references in the preset files of the other mounts (each listed
+    /// entry counts) and agents with an attachment in it.
+    struct PointingRow {
+        presets: u32,
+        agents: u32,
     }
 
     /// What a backend loads a folder file as — `SkillRoot` = a folder it walks for skills by itself.
@@ -680,9 +701,8 @@ declare_commands! {
         /// Library presets to attach — the Default slot (`engram/default`) is on for every new agent. Unspecified = the
         /// Default slot only.
         presets: Option<Vec<String>>,
-        /// With `presets` only — the value `library.status` answered; refuses if the root changed since (checked when
-        /// the presets are judged, just before the create). Unspecified =
-        /// the current root.
+        /// With `presets` only — the value `library.status` answered; refuses if a mount changed since (checked when
+        /// the presets are judged, just before the create). Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok AgentNewOk {
         agent_id: String,
@@ -875,55 +895,109 @@ declare_commands! {
 
     // ADR-0386
     // A library refusal carries `args` = {code, args, line?}: `code` is the fixed reason, `args` its arguments. Every
-    //   refusal applied nothing (`library-config-write-failed` aside: the new root is live but not saved).
+    //   refusal applied nothing (`library-config-write-failed` aside: the mount change is live but not saved, and
+    //   repeating the same call saves again — ADR-0381 · ADR-0400 decision 14).
 
-    /// The library root now: `root` (`null` = unset), `root_setting` = `default` | `explicit` (`null` when
-    /// library.json could not be read), `state` = `unset` | `ok` | `missing` (not there or not a folder) | `unreadable`
-    /// (there but cannot be read or did not answer) (+ `state_why`), `config` (library.json) =
-    /// `ok` | `read_only` | `corrupt` | `unsaved` (+ `config_why`), `suggested_new` = the default place.
-    /// `root_generation` = pass it to an edit, which then refuses if the root changed since (CONFLICT
-    /// `root-generation-stale`). CONFLICT `library-unavailable` only from a daemon that runs no library.
+    /// The library's mounts now, in order — each with its `name`, its folder `path`, `default` (at the default place),
+    /// `builtin` (the read-only mount `engram`, always last) and `state` (+ `state_why`; checked now, the built-in's
+    /// read at start); `config`
+    /// (library.json) = `ok` | `read_only` | `corrupt` | `unsaved` (+ `config_why`; `unsaved` = a mount change is live
+    /// but not saved), `suggested_new` = the default place. `root_generation` = pass it to an edit, which then refuses
+    /// if a mount changed since (CONFLICT `root-generation-stale`). CONFLICT `library-unavailable` only from a daemon
+    /// that runs no library.
     #[effect(Read)]
     #[since(9)]
     "library.status" => args LibraryStatusArgs {} -> ok LibraryStatusOk {
         daemon_id: String,
-        root: Option<String>,
-        root_setting: Option<String>,
-        state: String,
-        state_why: Option<String>,
+        mounts: Vec<MountStatusRow>,
         config: String,
         config_why: Option<String>,
         suggested_new: String,
         root_generation: u64,
     } errors [CONFLICT];
 
-    /// Points the library at the absolute folder `path` (`create` makes the folder first; no file is copied or moved)
-    /// and saves it in library.json; answers the status after the change (as `library.status`). CONFLICT: `library-config-read-only` (nothing done),
-    /// `library-root-unusable` (the folder cannot be used — nothing published), `library-config-write-failed` (the new
-    /// root is live but not saved). A relative path is INVALID_ARGUMENT `item-path-invalid`.
+    // ADR-0400
+    // The mount commands answer the status after the change. A failed save (CONFLICT `library-config-write-failed`)
+    //   leaves the change live: repeat the same call to save it — a repeat whose change is already live answers
+    //   success. After a timeout, read `library.status` before repeating.
+
+    /// Registers the absolute folder `path` as the mount `name` (`create` makes the folder once the overlap check passed — a
+    /// refused check creates nothing; no file is copied or moved) and saves it in library.json; answers the status and `already_pointing` — references that already named
+    /// `name` and now resolve into the folder. The same name already at the same folder only saves again.
+    /// INVALID_ARGUMENT `mount-name-invalid` (one name: no `/ \ :`, no leading `.`, at most 64 characters, not
+    /// `engram`) · `item-path-invalid` (a relative path); CONFLICT `mount-name-taken` · `mount-overlaps` (`with` =
+    /// `mount` + `mount` — another mount's folder, inside or holding it; only mounts are judged) ·
+    /// `library-config-read-only` (nothing done) · `library-root-unusable` (the folder cannot be used, or whether it
+    /// overlaps could not be told — nothing published) · `library-unavailable` (the run's first overlap check of the
+    /// saved mounts has not finished — nothing done; repeat the call) · `library-config-write-failed`.
     #[effect(Write)]
     #[since(9)]
-    "library.setRoot" => args LibrarySetRootArgs {
+    "library.addMount" => args LibraryAddMountArgs {
+        name: String,
         path: String,
         /// Create the folder first. Unspecified = false.
         create: Option<bool>,
-    } -> ok LibrarySetRootOk {
-        // ★The fields must not differ by a character from `LibraryStatusOk`★ — the pairing is `From<LibraryStatusOk>`
-        //   (destructuring); field meanings: `library.status`.
+    } -> ok LibraryAddMountOk {
+        // ★The status fields must not differ by a character from `LibraryStatusOk`★ — the pairing destructures it
+        //   (`library_commands.rs`); field meanings: `library.status`.
         daemon_id: String,
-        root: Option<String>,
-        root_setting: Option<String>,
-        state: String,
-        state_why: Option<String>,
+        mounts: Vec<MountStatusRow>,
         config: String,
         config_why: Option<String>,
         suggested_new: String,
         root_generation: u64,
+        already_pointing: PointingRow,
     } errors [CONFLICT];
+
+    /// Unregisters the mount `mount` — no file is touched, ever; adding it back restores every reference. Answers the
+    /// status, `now_absent` — references that name it and now read as absent (a launch skips them with one notice) —
+    /// and `outcome` = `removed`, or `saved_only` when the mount was already gone because an earlier removal's save
+    /// failed (only library.json was written). NOT_FOUND `mount-not-found`; CONFLICT `mount-read-only` (`engram`) ·
+    /// `library-config-read-only` · `library-unavailable` (as `library.addMount`) · `library-config-write-failed`;
+    /// INVALID_ARGUMENT `mount-name-invalid`.
+    #[effect(Write)]
+    #[since(9)]
+    "library.removeMount" => args LibraryRemoveMountArgs {
+        mount: String,
+    } -> ok LibraryRemoveMountOk {
+        // ★The status fields must not differ by a character from `LibraryStatusOk`★ — the pairing destructures it
+        //   (`library_commands.rs`); field meanings: `library.status`.
+        daemon_id: String,
+        mounts: Vec<MountStatusRow>,
+        config: String,
+        config_why: Option<String>,
+        suggested_new: String,
+        root_generation: u64,
+        now_absent: PointingRow,
+        outcome: String,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Points the mount `mount` at the absolute folder `path` under the same name (`create` makes it first; no file is
+    /// copied or moved; references do not change) and saves it in library.json; answers the status. Pointing it at the
+    /// folder it already has only saves again. Refusals as `library.addMount` except `mount-name-taken`, judged against
+    /// every other mount, plus NOT_FOUND `mount-not-found` and CONFLICT `mount-read-only` (`engram`).
+    #[effect(Write)]
+    #[since(9)]
+    "library.relocateMount" => args LibraryRelocateMountArgs {
+        mount: String,
+        path: String,
+        /// Create the folder first. Unspecified = false.
+        create: Option<bool>,
+    } -> ok LibraryRelocateMountOk {
+        // ★The status fields must not differ by a character from `LibraryStatusOk`★ — the pairing destructures it
+        //   (`library_commands.rs`); field meanings: `library.status`.
+        daemon_id: String,
+        mounts: Vec<MountStatusRow>,
+        config: String,
+        config_why: Option<String>,
+        suggested_new: String,
+        root_generation: u64,
+    } errors [NOT_FOUND, CONFLICT];
 
     /// Every folder of the library, flat, by path; a skill folder is marked `skill`; each mount (a top folder) carries
     /// its `state`. The folders of a mount that cannot be read are left out and the mount is named in `unavailable`
-    /// (exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`). CONFLICT `library-unavailable` when no scan of the library could be applied.
+    /// (the built-in mount `engram` too when its folder cannot be read, though its rows stay as stand-ins and a launch
+    /// goes on with `builtin-unavailable`). CONFLICT `library-unavailable` when no scan of the library could be applied.
     #[effect(Read)]
     #[since(9)]
     "library.folders" => args LibraryFoldersArgs {} -> ok LibraryFoldersOk {
@@ -951,14 +1025,17 @@ declare_commands! {
         errors: Vec<RefreshErrorRow>,
     } errors [];
 
-    /// The items directly in `folder` (unspecified = the root) and its plain subfolders. `query` searches name and
+    /// The items directly in `folder` (unspecified = the library's top, which holds only the mounts) and its plain
+    /// subfolders. `query` searches name and
     /// description (case-insensitive) in every item below `folder` and answers matching rows only (no
     /// `folders`). `kinds` keeps only those kinds (unspecified or empty = all; a broken file counts as the kind it
     /// claims; a skill's `SKILL.md` matches only `SkillFile`). A `folder` at or below a link answers one
     /// `path-through-link` row, which the filters do not apply to. Unspecified `folder` lists the mounts, each with
     /// its `state` — the built-in read-only mount `engram` among them (`engram/default`, `engram/priming`, folder
     /// `engram/settings`); a `query` without `folder` searches the mounts that can be read and names the others in
-    /// `unavailable` (exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`). CONFLICT `library-unavailable` (with `mount`) when `folder` is in a
+    /// `unavailable` (the built-in mount `engram` too when its folder cannot be read, though its rows stay as
+    /// stand-ins and a launch goes on with `builtin-unavailable`). CONFLICT `library-unavailable` (with `mount`) when
+    /// `folder` is in a
     /// mount that cannot be read.
     #[effect(Read)]
     #[since(9)]
@@ -995,7 +1072,8 @@ declare_commands! {
         settings_fields: Vec<String>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Creates folder `name` in `parent` (unspecified = the root); answers its path. CONFLICT `name-exists` (nothing
+    /// Creates folder `name` in `parent` (unspecified or a mount's name alone: INVALID_ARGUMENT
+    /// `virtual-root-read-only` — nothing is created at the library's top); answers its path. CONFLICT `name-exists` (nothing
     /// replaced) · `library-unavailable` (with `mount` when the parent's mount cannot be read — nothing is written into
     /// it) · `mount-read-only` (`{mount, path}` — the parent is in the built-in mount `engram`) ·
     /// `root-generation-stale` · `library-write-failed` (a retry after it may answer `name-exists` — the partial file
@@ -1005,13 +1083,13 @@ declare_commands! {
     "library.newFolder" => args LibraryNewFolderArgs {
         parent: Option<String>,
         name: String,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok LibraryNewFolderOk {
         path: String,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Creates file `name` of `kind` in `folder` (unspecified = the root) from an empty template (`.md` or `.yaml` is
+    /// Creates file `name` of `kind` in `folder` (unspecified: refused as `library.newFolder`) from an empty template (`.md` or `.yaml` is
     /// added unless the name ends with it); answers its path. Refusals as `library.newFolder`.
     #[effect(Write)]
     #[since(9)]
@@ -1019,7 +1097,7 @@ declare_commands! {
         folder: Option<String>,
         name: String,
         kind: LibraryNewFileKind,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok LibraryNewFileOk {
         path: String,
@@ -1040,7 +1118,7 @@ declare_commands! {
     "library.relink" => args LibraryRelinkArgs {
         from: String,
         to: String,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok LibraryRelinkOk {
         fixed: Vec<RelinkPairRow>,
@@ -1120,7 +1198,7 @@ declare_commands! {
         backend: Option<String>,
         folders: Option<Vec<String>>,
         after: Option<String>,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok PresetAddOk {
         /// What was added (folders normalized).
@@ -1138,7 +1216,7 @@ declare_commands! {
         path: String,
         items: Option<Vec<String>>,
         folders: Option<Vec<String>>,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok PresetRemoveOk {
         // ★The fields must not differ by a character from `PresetView`★ (`From<PresetView>`).
@@ -1156,7 +1234,8 @@ declare_commands! {
         agents: u32,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Puts one `section` in `order` — every entry `preset.get` shows in it, each once (a duplicate as often as it is
+    /// Puts one `section` (`presets` | `instructions` | `skills` | `settings` | `folders` — another word is
+    /// INVALID_ARGUMENT) in `order` — every entry `preset.get` shows in it, each once (a duplicate as often as it is
     /// listed), else INVALID_ARGUMENT `reorder-order-mismatch` with the expected order in `args`. `base_rev` = the `rev` you
     /// read; CONFLICT `rev-mismatch` = the file changed since (read it again). NOT_FOUND `not-found`; CONFLICT
     /// `library-unavailable` · `mount-read-only` · `root-generation-stale` · `library-write-failed`.
@@ -1164,10 +1243,12 @@ declare_commands! {
     #[since(9)]
     "preset.reorder" => args PresetReorderArgs {
         path: String,
-        section: PresetSection,
+        /// `presets` | `instructions` | `skills` | `settings` | `folders` — the preset file's own keys; another word is
+        /// INVALID_ARGUMENT.
+        section: String,
         order: Vec<String>,
         base_rev: String,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok PresetReorderOk {
         // ★The fields must not differ by a character from `PresetView`★ (`From<PresetView>`).
@@ -1195,7 +1276,7 @@ declare_commands! {
         path: String,
         items: Vec<String>,
         backend: Option<String>,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok PresetSetBackendOk {
         applied: Vec<String>,
@@ -1219,7 +1300,7 @@ declare_commands! {
         settings: Vec<PresetEntryArg>,
         folders: Option<Vec<String>>,
         base_rev: Option<String>,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok PresetSaveOk {
         // ★The fields must not differ by a character from `PresetView`★ (`From<PresetView>`).
@@ -1302,7 +1383,7 @@ declare_commands! {
         target: String,
         presets: Vec<String>,
         after: Option<String>,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok AgentAttachPresetOk {
         applied: Vec<String>,
@@ -1321,7 +1402,7 @@ declare_commands! {
         presets: Vec<String>,
         /// Confirms turning the Default slot off. Unspecified = false.
         yes: Option<bool>,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok AgentDetachPresetOk {
         // ★The fields must not differ by a character from `AgentPresetsView`★ (`From<AgentPresetsView>`).
@@ -1351,7 +1432,7 @@ declare_commands! {
         target: String,
         order: Vec<String>,
         base_rev: String,
-        /// The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
         root_generation: Option<u64>,
     } -> ok AgentReorderPresetsOk {
         // ★The fields must not differ by a character from `AgentPresetsView`★ (`From<AgentPresetsView>`).
@@ -3608,6 +3689,7 @@ mod tests {
                 "agent.resolve",
                 "agent.setWorkspace",
                 "agent.spawn",
+                "library.addMount",
                 "library.folders",
                 "library.list",
                 "library.newFile",
@@ -3615,7 +3697,8 @@ mod tests {
                 "library.read",
                 "library.refresh",
                 "library.relink",
-                "library.setRoot",
+                "library.relocateMount",
+                "library.removeMount",
                 "library.status",
                 "preset.add",
                 "preset.check",

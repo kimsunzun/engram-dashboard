@@ -22,8 +22,7 @@ backend: AgentBackend,
  */
 presets?: Array<string> | null, 
 /**
- * With `presets` only — the value `library.status` answered; refuses if the root changed since (checked when
- * the presets are judged, just before the create). Unspecified =
- * the current root.
+ * With `presets` only — the value `library.status` answered; refuses if a mount changed since (checked when
+ * the presets are judged, just before the create). Unspecified = the current mounts.
  */
 root_generation?: bigint | null, };

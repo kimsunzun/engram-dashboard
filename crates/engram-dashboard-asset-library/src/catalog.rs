@@ -832,7 +832,7 @@ pub(crate) mod harness {
             Self {
                 store: MemStore::new(&root),
                 root,
-                mount: MountName::first(),
+                mount: MountName::library(),
                 catalog: Catalog::default(),
                 next: Cell::new(0),
                 backends: Registry::real_and(vec![Scripted::new("gamma")]),
@@ -1807,7 +1807,7 @@ mod measure {
         assert_eq!(listing.files.len(), 5_000);
         let result = ScanResult::build(
             listing,
-            &crate::mounts::MountName::first(),
+            &crate::mounts::MountName::library(),
             None,
             &catalog.tags(None),
             &read,
@@ -1830,7 +1830,7 @@ mod measure {
         let rewalked = again.elapsed();
         let result = ScanResult::build(
             listing,
-            &crate::mounts::MountName::first(),
+            &crate::mounts::MountName::library(),
             None,
             &catalog.tags(None),
             &read,
@@ -1852,7 +1852,7 @@ mod measure {
         let listing = FsStore.scan(root, None, &seq).unwrap();
         let result = ScanResult::build(
             listing,
-            &crate::mounts::MountName::first(),
+            &crate::mounts::MountName::library(),
             None,
             &catalog.tags(None),
             &read,

@@ -42,7 +42,7 @@
 //! folder, a mount's folder itself and its ancestors (`mounts::overlap`) — goes through
 //! [`folder::BoundedIo`], never under the library lock. The built-ins
 //! (`Builtins::new`), the launch folder (`prepare_in`, the sweep, `release`), `library.json` (`config.rs`) and the
-//! folder `set_root {create}` or the first start creates use std `fs`.
+//! folder a mount command's `create` or the first start creates use std `fs`.
 //!
 //! ## The mounts
 //!
@@ -54,18 +54,29 @@
 //! (ADR-0400 decision 20). A computation that resolves judges each mount it reaches on its own (`resolve.rs` ·
 //! `read_states` — ADR-0400 decision 19); what it stats or reads ahead of resolving follows references by the
 //! resolution's own tag rule (`resolve::TagRule`). The mount list is persisted in `library.json` (`config.rs` — ADR-0375 ·
-//! ADR-0376), read by the daemon before [`LibraryService::new`]; `new` does no disk work beyond the built-ins. [`LibraryService::set_root`] and
-//! [`LibraryService::first_start`] are the only writers of the setting. `set_root` relocates the first mount (or
-//! registers `library` when there is none) through [`LibraryService::change_root`] (stat, then walk); the first start
-//! stats the default place and publishes it as the mount `library` without a walk (ADR-0382). Each writes
-//! `library.json` — every published mount, one at the default place as `"default"` — only after its publish succeeded
-//! (ADR-0381): a refused publish writes nothing, and a write that fails leaves the new mounts live and the setting
-//! `unsaved` — nothing is undone. One root-change mutex serializes them across the publish and the write; under it they
-//! take only the gate's locks and the config's state mutex, a leaf held for no IO.
+//! ADR-0376), read by the daemon before [`LibraryService::new`]; `new` does no disk work beyond the built-ins. The
+//! mount commands ([`LibraryService::add_mount`] · [`LibraryService::remove_mount`] ·
+//! [`LibraryService::relocate_mount`]) and [`LibraryService::first_start`] are the only writers of the setting. Add and
+//! relocate judge the folder's overlap with the other mounts — only mounts — and stat it on one read budget
+//! (`mounts::overlap` — fail closed; a folder `create` makes is made only after the judgement passed), then walk it and
+//! publish it under a `Root` ticket (`gate.rs` `Gate::change_mount`); remove drops the mount and its range, touching no
+//! file; each raises the one root generation (ADR-0400 decisions 9–16). The first start stats the default place and
+//! publishes it as the mount `default_library` without a walk (ADR-0382). Each writes `library.json` — every published
+//! mount, one at the default place as `"default"` — only after its publish succeeded (ADR-0381): a refused publish
+//! writes nothing, and a write that fails leaves the new mounts live and the setting `unsaved` — nothing is undone, and
+//! repeating the same command saves again (the list last saved tells a repeat from a mistake — ADR-0400 decision 14).
+//! One mount-change mutex serializes them across the publish and the write; under it they take the gate's locks, the
+//! leaf mutexes (the config's state, the held overlaps, the load judgement's state — each held for no IO), the
+//! registry's read lock under the library read lock for the reference counts, and do bounded folder IO (the new
+//! folder's checks, the final status). A read-only `library.json` refuses every mount command first.
 //!
 //! The daemon never walks the library before it is reachable (ADR-0382): on every start, after the first-start step,
 //! it calls [`LibraryService::start_boot_scan`], which runs the first scan on a background job and returns at once.
-//! Catalog readers wait for that scan at the first-scan entrance; launch checks skip the entrance and do not wait.
+//! Once per run, before any mount is stat'ed or changed — by that job, a reader, a launch, `status` or a mount command,
+//! whichever comes first, the others waiting for it — the mounts are judged against each other: a mount overlapping an
+//! earlier one is held — registered, never walked, read as unreadable naming the other — until it is relocated or
+//! removed (ADR-0400 decision 10). Catalog readers wait for the scan at the first-scan entrance; launch checks skip the
+//! entrance and do not wait.
 //! Every scan stats the mounts it would walk in one bounded batch before it draws its ticket; a mount that does not stat
 //! `Ok`, or whose walk fails, is not walked and is kept as that mount's last known state ([`State::seen`]) — the scan
 //! still applies the others. A mount can be read only when walked and `Ok` when last seen — one rule for every reader.
@@ -148,7 +159,7 @@ pub mod validate;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::SystemTime;
 
 use engram_dashboard_agent::launch::{
@@ -159,7 +170,7 @@ use engram_dashboard_agent::profile::{
 };
 use engram_dashboard_agent::profile_edit::ProfileEditPort;
 use engram_dashboard_agent::types::AgentId;
-use engram_dashboard_base::sync::lock;
+use engram_dashboard_base::sync::{lock, wait_timeout};
 use engram_dashboard_platform::fs::{normalize_folder, path_key, same_path, PathKey};
 use serde_json::json;
 
@@ -170,12 +181,13 @@ use crate::catalog::{
     key, preset_refs, within, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult,
 };
 use crate::config::{ConfigFile, ConfigHealth, LibraryConfig, MountPlace, MountSetting};
-use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need, SPAWN_FAILED};
+use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need, NOT_CHECKED, SPAWN_FAILED};
 use crate::format::read::ITEM_PATH_INVALID;
-use crate::gate::{Gate, Tags};
-pub use crate::gate::{MountSeen, MountState, MountsNow, Numbers, State, NOT_FOUND};
+pub use crate::gate::{ChangeAnswer, MountSeen, MountState, MountsNow, Numbers, State, NOT_FOUND};
+use crate::gate::{Gate, MountChange, Tags};
 use crate::mounts::{
-    builtin_rest, in_builtin, virtual_path, Mount, MountName, MountPath, Mounts, BUILTIN_MOUNT,
+    builtin_rest, in_builtin, is_builtin, overlap, overlapping, virtual_path, DiskProbe, Mount,
+    MountName, MountNameError, MountPath, Mounts, BUILTIN_MOUNT,
 };
 use crate::path::{AssetRef, BuiltinId, LibPath, PathError};
 use crate::refs::{closure_by, default_slot_count, reference_count, referrers_of};
@@ -228,23 +240,45 @@ pub const MOUNT_READ_ONLY: &str = "mount-read-only";
 // ADR-0400 decision 5
 pub const VIRTUAL_ROOT_READ_ONLY: &str = "virtual-root-read-only";
 
-/// The code of a `set_root` whose folder cannot be used — it could not be created, its stat did not answer `Ok`, or
-/// its walk failed at the root; nothing published, `library.json` not written (`args` = `{path, why}`).
+/// The code of an `addMount` or `relocateMount` whose folder cannot be used — it could not be created, its stat did
+/// not answer `Ok`, whether it overlaps could not be judged (an ask gave no answer — fail closed), or its walk failed
+/// at the folder; nothing published, `library.json` not written (`args` = `{path, why}`).
 // ADR-0379
 // ADR-0381
+// ADR-0400 decision 10
 pub const LIBRARY_ROOT_UNUSABLE: &str = "library-root-unusable";
 
-/// The code of a `set_root` while `library.json` is read-only for the run — newer or unreadable at load (`args` =
+/// The code of a mount command while `library.json` is read-only for the run — newer or unreadable at load (`args` =
 /// `{why}`).
 // ADR-0376
+// ADR-0400 decision 15
 pub const LIBRARY_CONFIG_READ_ONLY: &str = "library-config-read-only";
 
-/// The code of a `set_root` whose `library.json` write was refused or failed after the new root was published —
-/// published but not saved: the root stays live this run, the file keeps its setting, and the next start follows the
-/// file that is left (`args` = `{why}`, which says so).
+/// The code of a mount command whose `library.json` write was refused or failed after the change was published —
+/// published but not saved: the change stays live this run, the file keeps its setting, the next start follows the
+/// file that is left, and repeating the same call saves again (`args` = `{why}`, which says so).
 // ADR-0379
 // ADR-0381
+// ADR-0400 decision 14
 pub const LIBRARY_CONFIG_WRITE_FAILED: &str = "library-config-write-failed";
+
+/// The code of a mount name the name rules refuse (`args` = `{name, why}`).
+// ADR-0400 decision 2
+pub const MOUNT_NAME_INVALID: &str = "mount-name-invalid";
+
+/// The code of an `addMount` whose name is registered at another folder (`args` = `{name}` — the registered
+/// spelling).
+// ADR-0400 decision 7
+pub const MOUNT_NAME_TAKEN: &str = "mount-name-taken";
+
+/// The code of an `addMount` or `relocateMount` whose folder is another mount's, holds one or lies inside one (`args` =
+/// `{path, with, mount}`: `with` = `mount`, `mount` names it). Only mounts are judged.
+// ADR-0400 decision 10
+pub const MOUNT_OVERLAPS: &str = "mount-overlaps";
+
+/// The code of a mount command naming a mount that is not registered (`args` = `{mount}`).
+// ADR-0400 decision 7
+pub const MOUNT_NOT_FOUND: &str = "mount-not-found";
 
 const MERGE_JOB: &str = "library-merge";
 const BOOT_SCAN_JOB: &str = "library-boot-scan";
@@ -260,10 +294,10 @@ pub enum RefusalClass {
     Internal,
 }
 
-/// Why a body refused. A refusal applied nothing to the library or the registry — folders a `set_root {create}` made
-/// before it refused [`LIBRARY_ROOT_UNUSABLE`] do not count as applied (ADR-0379 decision 4) — except
-/// [`LIBRARY_CONFIG_WRITE_FAILED`], which comes after the new root was published and still maps onto a code that does
-/// not keep the request id, so a retry saves again (ADR-0381).
+/// Why a body refused. A refusal applied nothing to the library or the registry — folders a mount command's `create`
+/// made before it refused [`LIBRARY_ROOT_UNUSABLE`] do not count as applied (ADR-0379 decision 4) — except
+/// [`LIBRARY_CONFIG_WRITE_FAILED`], which comes after the mount change was published and still maps onto a code that
+/// does not keep the request id, so a retry saves again (ADR-0381).
 #[derive(Debug)]
 pub enum LibraryRefusal {
     Refused {
@@ -315,9 +349,6 @@ pub struct LibraryValues {
     pub config: LibraryConfig,
     /// The place a mount's `"default"` path names this run (ADR-0375) — also `status`'s `suggested_new`.
     pub default_root: PathBuf,
-    /// The daemon data folder — [`mounts::overlap`] refuses a mount folder at or under it, except the default place
-    /// itself (ADR-0400 decision 10); the mount commands call that check.
-    pub data_root: PathBuf,
     /// The daemon identity (`status`), owned by the daemon.
     pub daemon_id: String,
     /// The root generation this run starts at — drawn by the daemon at random below 2^52, so a generation kept from an
@@ -341,57 +372,121 @@ pub struct LibraryService {
     gate: Arc<Gate>,
     builtins: Builtins,
     config: ConfigFile,
-    /// Serializes `set_root` and the first start (module header).
-    root_change: Mutex<()>,
+    /// Serializes the mount commands and the first start, each across its change and its save (module header).
+    mount_change: Mutex<()>,
+    /// The mounts held as overlapping an earlier one at load, each with the `why` it is read as unreadable by — never
+    /// walked until relocated or removed (ADR-0400 decision 10). A leaf lock: nothing else is taken while it is held.
+    overlapping: Mutex<Vec<(Mount, String)>>,
+    /// How far the load-time overlap judgement is ([`LibraryService::judge_at_load`]); `load_judged` wakes its waiters.
+    /// A leaf held for no IO: the judgement runs outside it, never under a library lock or a ticket, and is run only
+    /// before the mount-change mutex — under it (a mount command's final status) the judgement is already done.
+    load_judgement: Mutex<Judgement>,
+    load_judged: Condvar,
     /// The profile-edit port, plugged in once by the daemon ([`LibraryService::plug_profile_edit`]); weak, so the
     /// manager, which holds this service as its launch-kit source, makes no cycle.
     // ADR-0380
     profile_edit: OnceLock<Weak<dyn ProfileEditPort>>,
-    /// How many root-change takes found it held — tests observe a waiter.
+    /// How many mount-change takes found it held — tests observe a waiter.
     #[cfg(test)]
-    root_change_blocked: std::sync::atomic::AtomicUsize,
+    mount_change_blocked: std::sync::atomic::AtomicUsize,
+    /// How many callers found the load judgement running and waited for it — tests observe the waiters.
+    #[cfg(test)]
+    load_judge_blocked: std::sync::atomic::AtomicUsize,
+}
+
+/// How far the load-time overlap judgement of one run is ([`LibraryService::judge_at_load`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Judgement {
+    NotStarted,
+    Running,
+    Done,
+}
+
+/// The run of the load-time judgement by one caller: [`JudgementRun::finish`] marks it done; dropped unfinished (a
+/// panic), it is marked not started again so the next caller runs it. Either way its waiters are woken.
+struct JudgementRun<'s> {
+    service: &'s LibraryService,
+    done: bool,
+}
+
+impl JudgementRun<'_> {
+    fn finish(mut self) {
+        self.done = true;
+    }
+}
+
+impl Drop for JudgementRun<'_> {
+    fn drop(&mut self) {
+        *lock(&self.service.load_judgement) = match self.done {
+            true => Judgement::Done,
+            false => Judgement::NotStarted,
+        };
+        self.service.load_judged.notify_all();
+    }
 }
 
 /// The answer of [`LibraryService::status`].
+// ADR-0400 decision 7
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryStatus {
     pub daemon_id: String,
-    /// The first mount's folder; `None` = no mount.
-    pub root: Option<PathBuf>,
-    /// The first mount's stored place; `None` = `library.json` could not be read (`config` is read-only or corrupt) or
-    /// names no mount. While `config` is unsaved, the live mounts' setting.
-    pub root_setting: Option<RootSettingKind>,
-    pub state: RootStatus,
+    /// Every mount: the registered ones in list order, then the built-in `engram`.
+    pub mounts: Vec<MountRow>,
     pub config: ConfigHealth,
     /// The default place.
     pub suggested_new: PathBuf,
-    /// The value an edit may carry ([`LibraryService::change_at`]).
+    /// The value an edit may carry ([`LibraryService::change_at`]); every mount change raises it.
     pub root_generation: u64,
 }
 
-/// Where the first mount's stored place is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RootSettingKind {
-    /// The default place — its `path` is `"default"`, or `library.json` is not written yet.
-    Default,
-    /// A path the user set.
-    Explicit,
+/// One mount of [`LibraryStatus`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountRow {
+    pub name: String,
+    /// The folder it maps to — the built-in's: the install's built-in folder, empty when there is none.
+    pub folder: PathBuf,
+    /// Its folder is the default place — stored as `"default"`.
+    pub default: bool,
+    /// The built-in mount `engram`.
+    pub builtin: bool,
+    /// Its folder's stat now (a mount held as overlapping another: unreadable, naming it); the built-in's as read at
+    /// start.
+    pub state: MountState,
 }
 
+/// What a mount command answers besides the status: what points at the mount's name from outside it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pointing {
+    /// References listed in the preset files of the other mounts.
+    pub presets: usize,
+    /// Agents with an attachment in the mount.
+    pub agents: usize,
+}
+
+/// The answer of [`LibraryService::add_mount`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RootStatus {
-    /// No root is published.
-    Unset,
-    Ok,
-    /// The root is absent — its stat answered missing or not a folder.
-    Missing {
-        why: String,
-    },
-    /// The root exists but cannot be read or did not answer — the OS error, a timeout, a share not reachable.
-    // ADR-0387
-    Unreadable {
-        why: String,
-    },
+pub struct MountAnswer {
+    pub status: LibraryStatus,
+    /// What already pointed at the name — it now resolves into the new folder.
+    pub pointing: Pointing,
+}
+
+/// The answer of [`LibraryService::remove_mount`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoveAnswer {
+    pub status: LibraryStatus,
+    /// What now points at a mount that is not registered — it reads absent.
+    pub now_absent: Pointing,
+    pub outcome: Removal,
+}
+
+/// What a `removeMount` did.
+// ADR-0400 decision 14
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    Removed,
+    /// The mount was not registered: a repeat of a removal whose save failed — only `library.json` was written.
+    SavedOnly,
 }
 
 /// The answer of [`LibraryService::first_start`].
@@ -400,15 +495,15 @@ pub enum FirstStart {
     /// `library.json` was not missing at load, or the step already published this run — nothing done. A `Failed`
     /// step stays due, so a second call in the same run would retry.
     NotDue,
-    /// The default place was created, stat'ed and published without a walk as the mount `library`, and then
+    /// The default place was created, stat'ed and published without a walk as the mount `default_library`, and then
     /// `library.json` written with it at `"default"`; the boot scan walks it ([`LibraryService::start_boot_scan`]).
     // ADR-0382
     Published,
-    /// The default root was published but `library.json` was not written (`why`): live this run, `config: unsaved`;
+    /// The default mount was published but `library.json` was not written (`why`): live this run, `config: unsaved`;
     /// the next start follows the file that is left (with none left, the first start runs again).
     // ADR-0381
     Unsaved(String),
-    /// The default place could not be created, its root stat did not answer `Ok`, or a mount was already published
+    /// The default place could not be created, its stat did not answer `Ok`, or a mount was already published
     /// (only a test publishes one before the first start): nothing published or written, the mounts as they were (none
     /// unless already published); the next start tries again.
     Failed(String),
@@ -586,10 +681,15 @@ impl LibraryService {
             gate,
             builtins,
             config,
-            root_change: Mutex::new(()),
+            mount_change: Mutex::new(()),
+            overlapping: Mutex::new(Vec::new()),
+            load_judgement: Mutex::new(Judgement::NotStarted),
+            load_judged: Condvar::new(),
             profile_edit: OnceLock::new(),
             #[cfg(test)]
-            root_change_blocked: std::sync::atomic::AtomicUsize::new(0),
+            mount_change_blocked: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            load_judge_blocked: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -736,62 +836,51 @@ impl LibraryService {
     }
 
     /// The folder of each mount of `reached` stat'ed as a required ask on `io` and judged with that mount's first-scan
-    /// answer ([`LibraryService::stat_named`]), by the folder's path key — what [`read_states`] judges them by.
+    /// answer ([`LibraryService::stat_named`]), by [`mount_key`] — what [`read_states`] judges them by.
     // ADR-0387
-    pub(crate) fn stat_reached(
-        &self,
-        io: &LaunchIo,
-        reached: &[Mount],
-    ) -> std::collections::HashMap<PathKey, FolderStatus> {
-        let folders: Vec<PathBuf> = reached.iter().map(|mount| mount.folder.clone()).collect();
-        if folders.is_empty() {
-            return std::collections::HashMap::new();
+    pub(crate) fn stat_reached(&self, io: &LaunchIo, reached: &[Mount]) -> ReadStats {
+        if reached.is_empty() {
+            return ReadStats::new();
         }
-        let statuses = self.stat_named(io, &folders);
-        folders
-            .iter()
-            .map(|folder| path_key(folder))
-            .zip(statuses)
-            .collect()
+        let statuses = self.stat_named(io, reached);
+        reached.iter().map(mount_key).zip(statuses).collect()
     }
 
-    /// [`LibraryService::stat_mounts`] of mount folders, each status then judged with that mount's first-scan answer.
+    /// [`LibraryService::stat_mount_list`] of `mounts`, each status then judged with that mount's first-scan answer.
     /// A mount that stats `Ok` but whose items cannot be read (never walked this run, or not `Ok` when last seen) is
     /// walked again first — the next reader whose range touches it (ADR-0400 decision 17). One still not readable after
     /// that answers its last known state, the rule `list` and `read` use: missing (it vanished during the walk) is
     /// absent; otherwise unreadable, as [`RootState::of`] judges a root whose first scan failed (ADR-0387 per mount). A
-    /// mount that does not stat `Ok` is not walked again — its stat is the answer. A folder that is no registered
-    /// mount's keeps its stat.
-    pub(crate) fn stat_named(&self, io: &LaunchIo, folders: &[PathBuf]) -> Vec<FolderStatus> {
-        let statuses = self.stat_mounts(io, folders);
+    /// mount that does not stat `Ok` is not walked again — its stat is the answer. A mount no longer registered at its
+    /// folder keeps its stat. Each mount is judged as itself, so two mounts on one folder keep their own answers.
+    pub(crate) fn stat_named(&self, io: &LaunchIo, mounts: &[Mount]) -> Vec<FolderStatus> {
+        let statuses = self.stat_mount_list(io, mounts);
+        let registered = |state: &State, mount: &Mount| {
+            state
+                .mounts
+                .get(mount.name.as_str())
+                .is_some_and(|live| same_path(&live.folder, &mount.folder))
+        };
         let stale: Vec<MountName> = self.gate.with_read(|state| {
-            folders
+            mounts
                 .iter()
                 .zip(&statuses)
                 .filter(|(_, status)| **status == FolderStatus::Ok)
-                .filter_map(|(folder, _)| {
-                    state
-                        .mounts
-                        .iter()
-                        .find(|mount| same_path(&mount.folder, folder))
-                })
-                .filter(|mount| !state.seen(&mount.name).usable())
-                .map(|mount| mount.name.clone())
+                .filter(|(mount, _)| registered(state, mount))
+                .filter(|(mount, _)| !state.seen(&mount.name).usable())
+                .map(|(mount, _)| mount.name.clone())
                 .collect()
         });
         if !stale.is_empty() {
             self.rewalk_unusable(&stale);
         }
         self.gate.with_read(|state| {
-            folders
+            mounts
                 .iter()
                 .zip(statuses)
-                .map(|(folder, status)| {
-                    let mount = state
-                        .mounts
-                        .iter()
-                        .find(|mount| same_path(&mount.folder, folder));
-                    match (status, mount.map(|mount| state.seen(&mount.name))) {
+                .map(|(mount, status)| {
+                    let seen = registered(state, mount).then(|| state.seen(&mount.name));
+                    match (status, seen) {
                         // One rule with `list` and `read`: readable only when walked and `Ok` when last seen.
                         (FolderStatus::Ok, Some(seen)) if !seen.usable() => match seen.shown() {
                             // Gone during the walk again: absent, skipped — not a block (ADR-0387).
@@ -826,6 +915,44 @@ impl LibraryService {
                     );
                     FolderStatus::Unreadable(STAT_UNANSWERED.to_owned())
                 })
+            })
+            .collect()
+    }
+
+    /// [`LibraryService::stat_mounts`] of the folders of `mounts` after the load-time overlap judgement
+    /// ([`LibraryService::judge_at_load`]), a mount held as overlapping another answering `Unreadable` with that `why`
+    /// where its folder stats `Ok` — the one stat every read entrance, launch and `status` takes of a mount (a scan's
+    /// is [`LibraryService::scan_stats`]), so a held mount is never walked or read (ADR-0400 decision 10). A new caller
+    /// that stats a mount's folder goes through one of the two.
+    pub(crate) fn stat_mount_list(&self, io: &LaunchIo, mounts: &[Mount]) -> Vec<FolderStatus> {
+        self.stat_held(io, mounts, |status| status)
+    }
+
+    /// The load-time judgement, then the folders of `mounts` stat'ed on `io`, each status passed through `adjust`, and
+    /// then a held mount's `Ok` turned into `Unreadable` with its hold's `why` — after `adjust`, so nothing `adjust`
+    /// reads as `Ok` walks a held mount.
+    // ADR-0400 decision 10
+    fn stat_held(
+        &self,
+        io: &LaunchIo,
+        mounts: &[Mount],
+        adjust: impl Fn(FolderStatus) -> FolderStatus,
+    ) -> Vec<FolderStatus> {
+        if !self.judge_at_load(io) {
+            // Its budget is spent waiting for the judgement: no ask, and no mount taken as `Ok`.
+            return mounts
+                .iter()
+                .map(|_| FolderStatus::Unreadable(NOT_CHECKED.to_owned()))
+                .collect();
+        }
+        let folders: Vec<PathBuf> = mounts.iter().map(|mount| mount.folder.clone()).collect();
+        self.stat_mounts(io, &folders)
+            .into_iter()
+            .map(adjust)
+            .zip(mounts)
+            .map(|(status, mount)| match (status, self.held_overlap(mount)) {
+                (FolderStatus::Ok, Some(why)) => FolderStatus::Unreadable(why),
+                (status, _) => status,
             })
             .collect()
     }
@@ -991,7 +1118,7 @@ impl LibraryService {
             return Err(mount_unavailable(&name, &state));
         }
         // ADR-0324 decision 5: the numbers are noted in the read lock that reads the mounts the disk read uses, so a
-        //   root change published after it moves the root generation and discards the merge.
+        //   mount change published after it moves the root generation and discards the merge.
         let known = self.gate.with_read(|state| match folder {
             Some(path) if !is_known(&state.catalog, path) => {
                 Err((path, state.mounts.clone(), self.gate.numbers()))
@@ -1025,9 +1152,9 @@ impl LibraryService {
 
     /// Re-scans `folder` (`None` = the whole library) on its own ticket, or joins a covering scan queued and not yet
     /// walking (ADR-0324 decision 7). Before the first scan is raised a folder refresh passes through a full scan
-    /// (decision 6): it joins a queued one or runs its own and takes its share; if a full scan (or a root change drawn
-    /// before the first scan was raised) is already walking, it waits for it and then scans its folder like any refresh — or, when what it
-    /// waited for failed, goes through a full scan once more. A folder in the built-in mount is not scanned — its files
+    /// (decision 6): it joins a queued one or runs its own and takes its share; if a full scan is already walking, it
+    /// waits for it and then scans its folder like any refresh — or, when what it waited for failed, goes through a full
+    /// scan once more. A folder in the built-in mount is not scanned — its files
     /// are read once at start — and answers that as its one error, with nothing walked (ADR-0400 decision 20).
     pub fn refresh(&self, folder: Option<&LibPath>) -> RefreshReport {
         if folder.is_some_and(in_builtin) {
@@ -1056,20 +1183,31 @@ impl LibraryService {
             })
     }
 
-    /// The stat a scan takes before its ticket: the folders of `mounts` in one bounded batch on a fresh read budget,
-    /// with the share probe ([`LibraryService::stat_mounts`]).
-    // ADR-0400 decision 17
-    fn scan_stats(&self, mounts: &[Mount]) -> Vec<FolderStatus> {
-        let folders: Vec<PathBuf> = mounts.iter().map(|mount| mount.folder.clone()).collect();
-        self.stat_mounts(&self.io.begin_read(), &folders)
-            .into_iter()
-            .map(|status| match status {
-                // ADR-0382 decision 4: no thread could be started for the stat — no word on the mount; the walk on the
-                //   caller's thread decides, as the first reader's scan did before stats were taken.
-                FolderStatus::Unreadable(why) if why == SPAWN_FAILED => FolderStatus::Ok,
-                status => status,
-            })
-            .collect()
+    /// The stat a scan takes before its ticket: the load-time judgement ([`LibraryService::judge_at_load`]) on a read
+    /// budget of its own, then the folders of `mounts` in one bounded batch, with the share probe
+    /// ([`LibraryService::stat_mounts`]), on a fresh read budget the judgement charged nothing to — so every answer is
+    /// the mount's own, a timeout included, and is its state; a held mount answers its hold even when its stat worker
+    /// could not be started ([`LibraryService::stat_held`]). When the judgement is still running once its budget is
+    /// spent, no mount is stated (`None` for each): the scan records nothing, walks nothing and does not raise the first
+    /// scan on them, and its caller goes round to a fresh scan. That never spins: each such answer is a wait of one
+    /// whole budget, and the rounds end once the judgement does (a done judgement stays done and states every mount;
+    /// its IO is bounded by one budget, its wait for the library read lock is not). Cost: the first scan that
+    /// runs or waits for the judgement spends up to one budget on it before its own stat, once per run.
+    // ADR-0400 decisions 10 and 17
+    // ADR-0402 decisions 4 and 5
+    fn scan_stats(&self, mounts: &[Mount]) -> Vec<Option<FolderStatus>> {
+        if !self.judge_at_load(&self.io.begin_read()) {
+            return mounts.iter().map(|_| None).collect();
+        }
+        self.stat_held(&self.io.begin_read(), mounts, |status| match status {
+            // ADR-0382 decision 4: no thread could be started for the stat — no word on the mount; the walk on the
+            //   caller's thread decides, as the first reader's scan did before stats were taken.
+            FolderStatus::Unreadable(why) if why == SPAWN_FAILED => FolderStatus::Ok,
+            status => status,
+        })
+        .into_iter()
+        .map(Some)
+        .collect()
     }
 
     /// Walks each mount of `names` again whose items cannot be read — never walked this run, or not `Ok` when last
@@ -1139,7 +1277,7 @@ impl LibraryService {
 
     /// The numbers to note before a disk read whose result will be merged late ([`LibraryService::late_merge`]) — and
     /// before reading the mounts that disk read uses, or inside the same read lock ([`LibraryService::with_read`]):
-    /// noted after the mounts were read, they may already include a root change the read does not see.
+    /// noted after the mounts were read, they may already include a mount change the read does not see.
     pub fn numbers(&self) -> Numbers {
         self.gate.numbers()
     }
@@ -1183,36 +1321,19 @@ impl LibraryService {
         self.gate.change(f)
     }
 
-    /// Moves the first mount to `new_root` (`library` registered there when no mount is — TRD S25 step-7 §6 writer 6,
-    /// step 9a): the folder is stat'ed first on one read-computation budget, outside the gate; then, exclusive behind
-    /// every earlier ticket, it is walked with empty tags and published in one write lock, the mount's range in the
-    /// catalog replaced by that walk. `Err` = refused, nothing published: the stat did not answer `Ok`, or the walk
-    /// failed at the folder.
-    ///
-    /// It neither records the root in `library.json` nor takes the root-change mutex: every caller outside this crate
-    /// goes through [`LibraryService::set_root`] (tests excepted). The first start does not walk: it publishes after the
-    /// same stat ([`LibraryService::first_start`]).
-    pub fn change_root(&self, new_root: PathBuf) -> Result<RefreshReport, String> {
-        self.stat_new_root(&new_root)?;
-        let walk = |mount: &Mount| self.build_scan(mount, None, &Tags::new());
-        self.gate
-            .change_root(new_root, walk)
-            .map(|report| report.share(None))
-    }
-
-    /// The stat a new root must pass before it is published: one read budget, outside the gate. `Err(why)` = it did not
-    /// answer `Ok`.
-    fn stat_new_root(&self, root: &Path) -> Result<(), String> {
-        self.stat_words(&self.io.begin_read(), root)
-            .map_err(|why| format!("the new library root cannot be used: {why}"))
+    /// The stat a folder must pass before it is published as a mount (the first start, add, relocate): one stat on `io`,
+    /// outside the gate. `Err(why)` = it did not answer `Ok`.
+    fn stat_new_mount(&self, io: &LaunchIo, folder: &Path) -> Result<(), String> {
+        self.stat_words(io, folder)
+            .map_err(|why| format!("the folder cannot be used as a library mount: {why}"))
     }
 
     /// [`LibraryService::change`] for an edit that carries the root generation it read from `status` (`None` = the
-    /// current root). The generation is compared inside the change's own write-lock take, so an edit queued behind a
-    /// root change sees it: a stale one refuses `Conflict` · [`ROOT_GENERATION_STALE`] before `f` runs, nothing
-    /// applied.
+    /// current mounts). The generation is compared inside the change's own write-lock take, so an edit queued behind a
+    /// mount change sees it: a stale one refuses `Conflict` · [`ROOT_GENERATION_STALE`] before `f` runs, nothing
+    /// applied. A body that refuses (`Err`) and applied no catalog item moves no generation ([`ChangeAnswer`]).
     // ADR-0377
-    pub fn change_at<R>(
+    pub fn change_at<R: ChangeAnswer>(
         &self,
         root_generation: Option<u64>,
         f: impl FnOnce(&mut Catalog, &MountsNow, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
@@ -1222,111 +1343,357 @@ impl LibraryService {
             .map_err(|current| stale_root_generation(root_generation, current))
     }
 
-    /// The first mount, its setting and `library.json` now. The first mount's folder is stat'ed on one read budget
-    /// outside every lock; it and the root generation are read in one read lock.
+    /// Every mount now — the registered ones in list order, then the built-in `engram` — with `library.json`'s state
+    /// and the root generation. The registered mounts' folders are stat'ed in one batch on one read budget outside every
+    /// lock (a mount held as overlapping answers that); they and the root generation are read in one read lock.
+    // ADR-0400 decision 7
     pub fn status(&self) -> LibraryStatus {
-        let (root, root_generation) = self.gate.with_read(|state| {
-            (
-                state.mounts.first().map(|first| first.folder.clone()),
-                self.gate.numbers().root,
-            )
+        let (mounts, root_generation) = self.gate.with_read(|state| {
+            let mounts: Vec<Mount> = state.mounts.iter().cloned().collect();
+            (mounts, self.gate.numbers().root)
         });
-        let state = match &root {
-            None => RootStatus::Unset,
-            // ADR-0387: the same absent / unreadable split as the launch.
-            Some(root) => match self.stat_root(&self.io.begin_read(), root) {
-                FolderStatus::Ok => RootStatus::Ok,
-                status @ (FolderStatus::Missing | FolderStatus::NotADirectory) => {
-                    RootStatus::Missing { why: status.why() }
-                }
-                FolderStatus::Unreadable(why) => RootStatus::Unreadable { why },
-            },
-        };
-        let (mounts, config) = self.config.view();
+        let statuses = self.stat_mount_list(&self.io.begin_read(), &mounts);
+        let mut rows: Vec<MountRow> = mounts
+            .into_iter()
+            .zip(statuses)
+            .map(|(mount, status)| MountRow {
+                name: mount.name.as_str().to_owned(),
+                default: self.is_default_place(&mount.folder),
+                folder: mount.folder,
+                builtin: false,
+                state: MountState::of(&status),
+            })
+            .collect();
+        rows.push(MountRow {
+            name: BUILTIN_MOUNT.to_owned(),
+            folder: self.values.builtin_dir.clone().unwrap_or_default(),
+            default: false,
+            builtin: true,
+            state: self.builtin_mount_state(),
+        });
+        let (_, config) = self.config.view();
         LibraryStatus {
             daemon_id: self.values.daemon_id.clone(),
-            root,
-            root_setting: mounts
-                .as_deref()
-                .and_then(<[MountSetting]>::first)
-                .map(|first| match first.place {
-                    MountPlace::Default => RootSettingKind::Default,
-                    MountPlace::Explicit(_) => RootSettingKind::Explicit,
-                }),
-            state,
+            mounts: rows,
             config,
             suggested_new: self.values.default_root.clone(),
             root_generation,
         }
     }
 
-    /// Moves the library to `path` — the first mount relocated under its name, or `library` registered when there is
-    /// none — creating it first when `create`, and records it: in order the path is normalized (it must be absolute),
-    /// the root-change mutex taken, a read-only `library.json` refused, the folder created, the root changed and — only
-    /// after that succeeded — `library.json` written with every mount (`save_mounts`). Answers the status after the
-    /// change.
+    /// Registers the folder `path` as the mount `name` (ADR-0400 decision 9), creating it first when `create`, and
+    /// records it; answers the status after the change and what already points at `name`. In order: the name checked,
+    /// the path normalized (it must be absolute), the mount-change mutex taken, a read-only `library.json` refused, the
+    /// name looked up — the same name already at the same folder is a repeat (ADR-0400 decision 14): nothing changes
+    /// but the save —, then on one read budget the overlap judgement against every mount ([`mounts::overlap`]), the
+    /// folder created and its stat ([`LibraryService::judge_new_folder`] has the order), then the mount walked and
+    /// published under a `Root` ticket ([`Gate::change_mount`]) and — only after that — `library.json` written with
+    /// every mount.
     ///
-    /// Refusals: a relative path `InvalidArgument` · `item-path-invalid`; a read-only `library.json` `Unavailable` ·
-    /// [`LIBRARY_CONFIG_READ_ONLY`] before anything is created; a folder that cannot be created or used `Unavailable` ·
-    /// [`LIBRARY_ROOT_UNUSABLE`] — nothing published or written, folders `create` made stay; a write refused or failed
-    /// after the publish `Unavailable` · [`LIBRARY_CONFIG_WRITE_FAILED`] — the new root stays live, the file keeps its
-    /// setting and `status` says `unsaved`.
-    // ADR-0366
-    // ADR-0375
-    // ADR-0376
+    /// Refusals: a name the rules refuse `InvalidArgument` · [`MOUNT_NAME_INVALID`]; a relative path `InvalidArgument`
+    /// · `item-path-invalid`; a read-only `library.json` `Unavailable` · [`LIBRARY_CONFIG_READ_ONLY`] before anything
+    /// is created; a name registered at another folder `Conflict` · [`MOUNT_NAME_TAKEN`]; a folder overlapping a mount
+    /// `Conflict` · [`MOUNT_OVERLAPS`] — nothing created; a folder whose overlap cannot be judged (an ask gave no
+    /// answer), that cannot be created, does not stat as a folder or whose walk fails `Unavailable` ·
+    /// [`LIBRARY_ROOT_UNUSABLE`] — nothing published or written, folders `create` made before the stat or the walk
+    /// refused stay; a save refused or failed
+    /// after the publish `Unavailable` · [`LIBRARY_CONFIG_WRITE_FAILED`] — the mount stays live, `status` says
+    /// `unsaved`, and repeating the call saves again; the load-time overlap judgement still running when the command's
+    /// read budget is spent `Unavailable` · [`LIBRARY_UNAVAILABLE`] before anything
+    /// ([`LibraryService::take_mount_change`]).
     // ADR-0381
-    pub fn set_root(&self, path: &Path, create: bool) -> Result<LibraryStatus, LibraryRefusal> {
-        let root = normalize_folder(path).map_err(|why| {
-            LibraryRefusal::new(
-                RefusalClass::InvalidArgument,
-                ITEM_PATH_INVALID,
-                json!({
-                    "path": escape_controls(&path.display().to_string()),
-                    "why": why.to_string(),
-                }),
-            )
-        })?;
-        let _serial = self.take_root_change();
-        if let Some(why) = self.config.read_only() {
-            return Err(LibraryRefusal::new(
+    // ADR-0400 decisions 9, 10, 14 and 15
+    pub fn add_mount(
+        &self,
+        name: &str,
+        path: &Path,
+        create: bool,
+    ) -> Result<MountAnswer, LibraryRefusal> {
+        let name = MountName::parse(name).map_err(|why| mount_name_invalid(name, &why))?;
+        let folder = absolute_folder(path)?;
+        // ADR-0360: the load-time judgement and the folder's own checks share one read budget.
+        let read = self.io.begin_read();
+        let _serial = self.take_mount_change(&read)?;
+        self.refuse_read_only_config()?;
+        let live = self
+            .gate
+            .with_read(|state| state.mounts.get(name.as_str()).cloned());
+        match live {
+            Some(live) if same_folder(&live.folder, &folder) => {
+                self.save_after(&name, &live.folder, "added")?;
+            }
+            Some(live) => return Err(mount_name_taken(&live.name)),
+            None => {
+                self.judge_new_folder(&read, &folder, None, create)?;
+                let mount = Mount {
+                    name: name.clone(),
+                    folder: folder.clone(),
+                };
+                self.gate
+                    .change_mount(MountChange::Add(mount), |mount| {
+                        self.build_scan(mount, None, &Tags::new())
+                    })
+                    .map_err(|why| root_unusable(&folder, why))?;
+                tracing::info!(
+                    mount = name.as_str(),
+                    path = %escape_controls(&folder.to_string_lossy()),
+                    "library mount added"
+                );
+                self.save_after(&name, &folder, "added")?;
+            }
+        }
+        Ok(MountAnswer {
+            pointing: self.pointing_at(&name),
+            status: self.status(),
+        })
+    }
+
+    /// Drops the registration of the mount `mount` (ADR-0400 decision 11): its range leaves the catalog and no file is
+    /// touched, ever; references to it read absent from then on. Answers the status after the change, what now points
+    /// at the name, and whether it was removed now or only saved — a name not registered while `library.json` is
+    /// `unsaved` and its last saved list still names it repeats a removal whose save failed (ADR-0400 decision 14). The
+    /// mount-change mutex is held across the change and the save that follows it.
+    ///
+    /// Refusals: the built-in `engram` `Conflict` · [`MOUNT_READ_ONLY`]; another name the rules refuse `InvalidArgument`
+    /// · [`MOUNT_NAME_INVALID`]; a read-only `library.json` `Unavailable` · [`LIBRARY_CONFIG_READ_ONLY`]; a name not
+    /// registered (outside that repeat) `NotFound` · [`MOUNT_NOT_FOUND`]; a save refused or failed after the change
+    /// `Unavailable` · [`LIBRARY_CONFIG_WRITE_FAILED`]; the load-time judgement unfinished as for
+    /// [`LibraryService::add_mount`].
+    // ADR-0381
+    // ADR-0400 decisions 11, 14 and 15
+    pub fn remove_mount(&self, mount: &str) -> Result<RemoveAnswer, LibraryRefusal> {
+        let name = self.named_mount(mount)?;
+        let _serial = self.take_mount_change(&self.io.begin_read())?;
+        self.refuse_read_only_config()?;
+        let live = self
+            .gate
+            .with_read(|state| state.mounts.get(name.as_str()).cloned());
+        let outcome = match live {
+            Some(live) => {
+                self.gate
+                    .change_mount(MountChange::Remove(live.name.clone()), |_| {
+                        unreachable!("a removal walks nothing")
+                    })
+                    .map_err(|_| mount_not_found(&name))?;
+                self.release_overlap(&live.name);
+                tracing::info!(
+                    mount = live.name.as_str(),
+                    path = %escape_controls(&live.folder.to_string_lossy()),
+                    "library mount removed"
+                );
+                self.save_mounts_or_refuse(&format!(
+                    "the library mount {} is removed but not saved",
+                    live.name.as_str()
+                ))?;
+                Removal::Removed
+            }
+            None if self.config.unsaved_removal(&name) => {
+                self.save_mounts_or_refuse(&format!(
+                    "the library mount {} is removed but not saved",
+                    name.as_str()
+                ))?;
+                tracing::info!(
+                    mount = name.as_str(),
+                    "library mount removal saved on a repeat"
+                );
+                Removal::SavedOnly
+            }
+            None => return Err(mount_not_found(&name)),
+        };
+        Ok(RemoveAnswer {
+            now_absent: self.pointing_at(&name),
+            outcome,
+            status: self.status(),
+        })
+    }
+
+    /// Re-points the mount `mount` at the folder `path` under the same name (ADR-0400 decision 13), creating it first
+    /// when `create`; references do not change. The order and the refusals are [`LibraryService::add_mount`]'s, except
+    /// that the mount must be registered (`NotFound` · [`MOUNT_NOT_FOUND`]), the built-in `engram` refuses `Conflict` ·
+    /// [`MOUNT_READ_ONLY`], the overlap is judged against every other mount, and the mount
+    /// already at that folder is a repeat (nothing changes but the save) unless it is held as overlapping another one
+    /// at load — then it is judged and walked again. The relocated mount is walked and replaces its range.
+    // ADR-0381
+    // ADR-0400 decisions 10, 13, 14 and 15
+    pub fn relocate_mount(
+        &self,
+        mount: &str,
+        path: &Path,
+        create: bool,
+    ) -> Result<LibraryStatus, LibraryRefusal> {
+        let name = self.named_mount(mount)?;
+        let folder = absolute_folder(path)?;
+        // ADR-0360: the load-time judgement and the folder's own checks share one read budget.
+        let read = self.io.begin_read();
+        let _serial = self.take_mount_change(&read)?;
+        self.refuse_read_only_config()?;
+        let Some(live) = self
+            .gate
+            .with_read(|state| state.mounts.get(name.as_str()).cloned())
+        else {
+            return Err(mount_not_found(&name));
+        };
+        let in_place = same_folder(&live.folder, &folder);
+        if in_place && self.held_overlap(&live).is_none() {
+            self.save_after(&live.name, &folder, "relocated")?;
+            return Ok(self.status());
+        }
+        self.judge_new_folder(&read, &folder, Some(&live.name), create)?;
+        // ADR-0400 decision 10: a held mount judged free at the folder it is registered at is no longer held — ended
+        //   before the walk, so a reader's stat during the walk is not told the stale hold and cannot record it over
+        //   the walk's state; should the walk fail, the mount stays registered there, judged free.
+        if in_place {
+            self.release_overlap(&live.name);
+        }
+        let change = MountChange::Relocate {
+            name: live.name.clone(),
+            folder: folder.clone(),
+        };
+        self.gate
+            .change_mount(change, |mount| self.build_scan(mount, None, &Tags::new()))
+            .map_err(|why| root_unusable(&folder, why))?;
+        self.release_overlap(&live.name);
+        tracing::info!(
+            mount = live.name.as_str(),
+            path = %escape_controls(&folder.to_string_lossy()),
+            "library mount relocated"
+        );
+        self.save_after(&live.name, &folder, "relocated")?;
+        Ok(self.status())
+    }
+
+    /// The mount name a remove or relocate names: the built-in `engram` refuses `Conflict` · [`MOUNT_READ_ONLY`]
+    /// (ADR-0400 decision 20), another name the rules refuse `InvalidArgument` · [`MOUNT_NAME_INVALID`].
+    fn named_mount(&self, text: &str) -> Result<MountName, LibraryRefusal> {
+        if is_builtin(text) {
+            return Err(mount_read_only(text));
+        }
+        MountName::parse(text).map_err(|why| mount_name_invalid(text, &why))
+    }
+
+    /// `Unavailable` · [`LIBRARY_CONFIG_READ_ONLY`] while `library.json` is read-only for the run — every mount command
+    /// refuses so before anything (ADR-0400 decision 15).
+    fn refuse_read_only_config(&self) -> Result<(), LibraryRefusal> {
+        match self.config.read_only() {
+            Some(why) => Err(LibraryRefusal::new(
                 RefusalClass::Unavailable,
                 LIBRARY_CONFIG_READ_ONLY,
                 json!({ "why": why }),
-            ));
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// The checks a folder passes before it is published as a mount, on the command's read budget `read` (the load-time
+    /// judgement charged it first; the stat and every ask of the overlap judgement share the rest), and its `create`:
+    /// [`mounts::overlap`] against every mount but `except` (the mount a relocate moves), then the folder created when
+    /// `create`, then its stat. Without `create` the stat comes first (a missing folder answers its stat's words). With
+    /// it the judgement comes first, on the folder as it will be (its nearest ancestor with a canonical path), and the
+    /// folder is created only once it passed, so a refused judgement leaves nothing on disk. `Conflict` · [`MOUNT_OVERLAPS`]
+    /// when it overlaps; `Unavailable` · [`LIBRARY_ROOT_UNUSABLE`] when the judgement cannot be made (fail closed —
+    /// never taken as free), it cannot be created, or it does not stat as a folder. Holds no library lock.
+    // ADR-0400 decision 10
+    fn judge_new_folder(
+        &self,
+        read: &LaunchIo,
+        folder: &Path,
+        except: Option<&MountName>,
+        create: bool,
+    ) -> Result<(), LibraryRefusal> {
+        if !create {
+            self.stat_new_mount(read, folder)
+                .map_err(|why| root_unusable(folder, why))?;
+        }
+        let others: Vec<Mount> = self.gate.with_read(|state| {
+            state
+                .mounts
+                .iter()
+                .filter(|mount| except.is_none_or(|except| mount.name.key() != except.key()))
+                .cloned()
+                .collect()
+        });
+        let probe = DiskProbe { io: &self.io, read };
+        match overlap(folder, create, &others, &probe) {
+            Ok(None) => {}
+            Ok(Some(mount)) => return Err(mount_overlaps(folder, &mount)),
+            Err(why) => return Err(root_unusable(folder, why)),
         }
         if create {
-            std::fs::create_dir_all(&root).map_err(|e| root_unusable(&root, e.to_string()))?;
+            std::fs::create_dir_all(folder).map_err(|e| root_unusable(folder, e.to_string()))?;
+            self.stat_new_mount(read, folder)
+                .map_err(|why| root_unusable(folder, why))?;
         }
-        self.change_root(root.clone())
-            .map_err(|why| root_unusable(&root, why))?;
-        if let Err(why) = self.save_mounts() {
-            return Err(LibraryRefusal::new(
+        Ok(())
+    }
+
+    /// Saves every mount after a mount change of `name` to `folder` (`did` says which), or refuses `Unavailable` ·
+    /// [`LIBRARY_CONFIG_WRITE_FAILED`] — the change stays live and a repeat saves again.
+    fn save_after(&self, name: &MountName, folder: &Path, did: &str) -> Result<(), LibraryRefusal> {
+        self.save_mounts_or_refuse(&format!(
+            "the library mount {} {did} at {} is live but not saved",
+            name.as_str(),
+            folder.display()
+        ))
+    }
+
+    /// [`LibraryService::save_mounts`], its failure as `Unavailable` · [`LIBRARY_CONFIG_WRITE_FAILED`] whose `why`
+    /// starts with `live` and says the next start follows the file left.
+    // ADR-0381
+    fn save_mounts_or_refuse(&self, live: &str) -> Result<(), LibraryRefusal> {
+        self.save_mounts().map_err(|why| {
+            LibraryRefusal::new(
                 RefusalClass::Unavailable,
                 LIBRARY_CONFIG_WRITE_FAILED,
                 json!({
                     "why": format!(
-                        "the library root {} is live but not saved; the next start follows library.json as it is: {why}",
-                        root.display()
+                        "{live}; the next start follows library.json as it is; repeat the call to save: {why}"
                     )
                 }),
-            ));
-        }
-        let status = self.status();
-        tracing::info!(
-            root = %root.display(),
-            setting = ?status.root_setting,
-            "library root set"
-        );
-        Ok(status)
+            )
+        })
     }
 
-    /// The first-start step: when `library.json` was missing at load, creates the default place, stats it as
-    /// [`LibraryService::change_root`] does, publishes it as the mount `library` without a walk and only then writes it
-    /// with `"default"`; the boot scan walks it ([`LibraryService::start_boot_scan`]). A failed create or stat writes
-    /// nothing and leaves the root unset, and the next start tries again; a failed write leaves the default root live this
-    /// run (`unsaved`, logged), and the next start follows the file that is left. A walk that fails later leaves the file
-    /// written. A configured root that vanished is never re-created (only a missing `library.json` makes the step due).
-    /// The daemon calls it once, before the commands are served.
+    /// What points at the mount `name` from outside it: the references in the preset files of the other mounts (each
+    /// listed entry counts) and the agents with an attachment in it. A removed mount's references now read absent; an
+    /// added one's now resolve into its folder (ADR-0400 decisions 9 and 11). The registry is read under the library
+    /// read lock.
+    fn pointing_at(&self, name: &MountName) -> Pointing {
+        let inside = |path: &LibPath| {
+            let first = path.as_str().split('/').next().unwrap_or_default();
+            path_key(Path::new(first)) == name.key()
+        };
+        self.gate.with_read(|state| {
+            let presets = state
+                .catalog
+                .items()
+                .filter(|item| !inside(&item.path))
+                .filter_map(|item| match &item.content {
+                    ItemContent::Preset { doc, .. } => Some(preset_refs(doc).filter(|r| inside(r)).count()),
+                    _ => None,
+                })
+                .sum();
+            let agents = self
+                .values
+                .registry
+                .list()
+                .iter()
+                .filter(|profile| {
+                    profile.presets.iter().any(|attached| {
+                        matches!(AssetRef::parse(&attached.path), Ok(AssetRef::Library(path)) if inside(&path))
+                    })
+                })
+                .count();
+            Pointing { presets, agents }
+        })
+    }
+
+    /// The first-start step: when `library.json` was missing at load, creates the default place, stats it as a new
+    /// mount is stat'ed, publishes it as the mount `default_library` without a walk and only then writes it with
+    /// `"default"`; the boot scan walks it ([`LibraryService::start_boot_scan`]). A failed create or stat writes
+    /// nothing and leaves no mount, and the next start tries again; a failed write leaves the default mount live this
+    /// run (`unsaved`, logged), and the next start follows the file that is left. A walk that fails later leaves the
+    /// file written. A configured mount folder that vanished is never re-created (only a missing `library.json` makes
+    /// the step due). The daemon calls it once, before the commands are served.
     // ADR-0312
     // ADR-0366
     // ADR-0375
@@ -1334,7 +1701,9 @@ impl LibraryService {
     // ADR-0382
     // ADR-0400
     pub fn first_start(&self) -> FirstStart {
-        let _serial = self.take_root_change();
+        // ADR-0382 decision 1: not `take_mount_change` — the load-time judgement must not run before the daemon
+        //   answers; the first start publishes into an empty list, where nothing overlaps.
+        let _serial = self.lock_mount_change();
         if !self.config.first_start_due() {
             return FirstStart::NotDue;
         }
@@ -1346,11 +1715,11 @@ impl LibraryService {
         if let Err(e) = std::fs::create_dir_all(&root) {
             return failed(format!("create failed: {e}"));
         }
-        if let Err(why) = self.stat_new_root(&root) {
+        if let Err(why) = self.stat_new_mount(&self.io.begin_read(), &root) {
             return failed(why);
         }
-        // ADR-0382: not `change_root` with an empty build — that raises the first scan, so a default place that already
-        //   holds files (a first start run again after a failed save) would never be walked.
+        // ADR-0382: not a walked mount change — the default place may already hold files (a first start run again
+        //   after a failed save), and the first scan must walk them.
         let mount = Mount {
             name: MountName::first(),
             folder: root.clone(),
@@ -1360,13 +1729,16 @@ impl LibraryService {
         }
         match self.save_mounts() {
             Ok(()) => {
-                tracing::info!(root = %root.display(), "library first start: mount `library` published at the default place");
+                tracing::info!(
+                    root = %root.display(),
+                    "library first start: mount `default_library` published at the default place"
+                );
                 FirstStart::Published
             }
             Err(why) => {
                 tracing::warn!(
                     root = %root.display(),
-                    "library first start: default root live but not saved: {why}"
+                    "library first start: default mount live but not saved: {why}"
                 );
                 FirstStart::Unsaved(why)
             }
@@ -1379,40 +1751,48 @@ impl LibraryService {
             .unwrap_or_else(|_| self.values.default_root.clone())
     }
 
-    /// Saves the published mounts to `library.json`: a mount whose folder is the default place (same normalized
-    /// spelling, compared by path key — a junction or short-name spelling of it is saved as a folder) as `"default"`,
-    /// every other one as its folder. Call holding the root-change mutex, after the publish.
+    /// Whether `folder` is the default place — the same normalized spelling, compared by path key (a junction or
+    /// short-name spelling of it is not): such a mount is saved as `"default"`.
+    // ADR-0375
+    fn is_default_place(&self, folder: &Path) -> bool {
+        let folder = normalize_folder(folder).unwrap_or_else(|_| folder.to_path_buf());
+        same_path(&folder, &self.default_place())
+    }
+
+    /// Saves the published mounts to `library.json`: a mount at the default place ([`LibraryService::is_default_place`])
+    /// as `"default"`, every other one as its folder. Call holding the mount-change mutex, after the publish.
     // ADR-0375
     // ADR-0400
     fn save_mounts(&self) -> Result<(), String> {
-        let default_place = self.default_place();
         let settings: Vec<MountSetting> = self.gate.with_read(|state| {
             state
                 .mounts
                 .iter()
-                .map(|mount| {
-                    let folder =
-                        normalize_folder(&mount.folder).unwrap_or_else(|_| mount.folder.clone());
-                    MountSetting {
-                        name: mount.name.clone(),
-                        place: match same_path(&folder, &default_place) {
-                            true => MountPlace::Default,
-                            false => MountPlace::Explicit(folder),
-                        },
-                    }
+                .map(|mount| MountSetting {
+                    name: mount.name.clone(),
+                    place: match self.is_default_place(&mount.folder) {
+                        true => MountPlace::Default,
+                        false => MountPlace::Explicit(
+                            normalize_folder(&mount.folder)
+                                .unwrap_or_else(|_| mount.folder.clone()),
+                        ),
+                    },
                 })
                 .collect()
         });
         self.config.save(&settings)
     }
 
-    /// Starts the first scan of the published mounts as a background job on the service's spawner and returns at once.
-    /// The job passes the first-scan entrance ([`LibraryService::first_scan_join`]), so it joins a first scan a reader
-    /// already started instead of walking again, and readers arriving during its walk wait for it there. With no
-    /// published mount no job is started; a job that cannot be started is logged, and the first reader starts the scan
-    /// at the entrance. A failed scan is logged; the next reader walks again. The daemon calls it on every start, after
-    /// the first-start step, and never waits for it.
+    /// Starts the boot scan of the published mounts as a background job on the service's spawner and returns at once.
+    /// The job first runs the load-time overlap judgement ([`LibraryService::judge_at_load`]) unless a reader, a
+    /// launch, `status` or a mount command already ran it, then passes the first-scan entrance
+    /// ([`LibraryService::first_scan_join`]), so it joins a first scan a reader already started instead of walking
+    /// again, and readers arriving during its walk wait for it there. With no published mount no job is started; a job
+    /// that cannot be started is logged, and the first stat of a mount runs the judgement and the first reader the
+    /// scan. A failed scan is logged; the next reader walks again. The daemon calls it on every start, after the
+    /// first-start step, and never waits for it.
     // ADR-0382
+    // ADR-0400 decision 10
     pub fn start_boot_scan(self: &Arc<Self>) {
         let mounts = self.gate.with_read(|state| state.mounts.clone());
         if mounts.is_empty() {
@@ -1425,6 +1805,7 @@ impl LibraryService {
         let job = Box::new(move || {
             tracing::info!(mounts = %names, "library boot scan started");
             let started = std::time::Instant::now();
+            service.judge_at_load(&service.io.begin_read());
             match service.first_scan_join() {
                 Ok(()) => {
                     tracing::info!(
@@ -1454,16 +1835,126 @@ impl LibraryService {
         }
     }
 
-    fn take_root_change(&self) -> MutexGuard<'_, ()> {
+    /// The load-time overlap check, once per run (ADR-0400 decision 10): the registered mounts judged against each
+    /// other ([`mounts::overlapping`], holding no library lock); each one overlapping an earlier one is held — kept
+    /// registered, never walked, `unreadable` with a `why` naming the other ([`LibraryService::held_overlap`]) — until
+    /// it is relocated or removed. Every stat of a mount ([`LibraryService::stat_held`]) and every mount command
+    /// ([`LibraryService::take_mount_change`]) calls it first, so whoever comes first — the boot scan's job, a reader's
+    /// scan, a read entrance, a launch, `status`, a mount command — runs it, and the others wait for that one: no mount
+    /// is walked or read before it was judged, and no mount command changes the list between the judgement and its
+    /// holds. Only the daemon's requests and the boot job reach it, never the boot path itself (ADR-0382 decision 1).
+    ///
+    /// It costs no caller more than its own budget (ADR-0360): the one that runs it spends at most what is left of
+    /// `io`'s required budget (and at most one limit) on it, one that finds it running waits at most that much, and
+    /// either is charged the time ([`LaunchIo::charge_required`]), so its own asks get only the rest. `false` = it is
+    /// still running when `io`'s budget is spent — the caller must not take any mount as `Ok`. Call it holding no
+    /// library lock and no ticket; under the mount-change mutex only once it is done (it then returns at once).
+    // ADR-0360
+    // ADR-0382 decision 1
+    // ADR-0400 decision 10
+    fn judge_at_load(&self, io: &LaunchIo) -> bool {
+        let began = std::time::Instant::now();
+        let mut state = lock(&self.load_judgement);
+        if *state == Judgement::Done {
+            return true;
+        }
+        #[cfg(test)]
+        let mut counted = false;
+        let judged = loop {
+            let left = io.required_left().saturating_sub(began.elapsed());
+            match *state {
+                Judgement::Done => break true,
+                Judgement::NotStarted => {
+                    *state = Judgement::Running;
+                    drop(state);
+                    let run = JudgementRun {
+                        service: self,
+                        done: false,
+                    };
+                    self.hold_overlapping(&self.io.begin_read_within(left));
+                    run.finish();
+                    state = lock(&self.load_judgement);
+                }
+                Judgement::Running if left.is_zero() => break false,
+                Judgement::Running => {
+                    #[cfg(test)]
+                    if !std::mem::replace(&mut counted, true) {
+                        self.load_judge_blocked
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    state = wait_timeout(&self.load_judged, state, left).0;
+                }
+            }
+        };
+        drop(state);
+        io.charge_required(began.elapsed());
+        judged
+    }
+
+    /// The body of [`LibraryService::judge_at_load`], its asks on `read`. No mount is walked before it: nothing to
+    /// record in the gate.
+    fn hold_overlapping(&self, read: &LaunchIo) {
+        let mounts = self.gate.with_read(|state| state.mounts.clone());
+        if mounts.iter().nth(1).is_none() {
+            return;
+        }
+        let found = overlapping(&mounts, &DiskProbe { io: &self.io, read });
+        let mut overlapping = lock(&self.overlapping);
+        for (name, other) in found {
+            let Some(mount) = mounts.get(name.as_str()) else {
+                continue;
+            };
+            let why = format!(
+                "overlaps the library mount {}; relocate or remove it",
+                other.as_str()
+            );
+            tracing::warn!(
+                mount = name.as_str(),
+                with = other.as_str(),
+                "library mount overlaps an earlier one; not walked"
+            );
+            overlapping.push((mount.clone(), why));
+        }
+    }
+
+    /// Why `mount` is held as overlapping another mount at load, if it is (the same name at the same folder).
+    fn held_overlap(&self, mount: &Mount) -> Option<String> {
+        lock(&self.overlapping)
+            .iter()
+            .find(|(held, _)| {
+                held.name.key() == mount.name.key() && same_path(&held.folder, &mount.folder)
+            })
+            .map(|(_, why)| why.clone())
+    }
+
+    /// Ends the hold of the mount `name` — it was removed or relocated. (An add never needs it: a hold is set only on
+    /// a registered mount, before any mount command, and a removal ends it.)
+    fn release_overlap(&self, name: &MountName) {
+        lock(&self.overlapping).retain(|(held, _)| held.name.key() != name.key());
+    }
+
+    /// The mount-change mutex of a mount command, taken after the load-time judgement
+    /// ([`LibraryService::judge_at_load`] on `io`, the command's read budget). `Unavailable` · [`LIBRARY_UNAVAILABLE`]
+    /// when the judgement is still running once that budget is spent — nothing done; a repeat waits again.
+    fn take_mount_change(&self, io: &LaunchIo) -> Result<MutexGuard<'_, ()>, LibraryRefusal> {
+        if !self.judge_at_load(io) {
+            return Err(LibraryRefusal::unavailable(
+                "the load-time overlap check of the library mounts has not finished; repeat the call".to_owned(),
+            ));
+        }
+        Ok(self.lock_mount_change())
+    }
+
+    fn lock_mount_change(&self) -> MutexGuard<'_, ()> {
         #[cfg(test)]
         if matches!(
-            self.root_change.try_lock(),
+            self.mount_change.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
         ) {
-            self.root_change_blocked
+            self.mount_change_blocked
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        lock(&self.root_change)
+        lock(&self.mount_change)
     }
 
     /// The whole folder tree, by path: each registered mount's top with its last known state (no fresh stat) and the
@@ -2067,7 +2558,17 @@ pub(crate) fn reached_mounts(
     reached
 }
 
-/// The mount states of a read computation over `mounts`: a mount whose folder `stats` holds (by path key) judged by
+/// What a read computation keeps a mount's stat by ([`mount_key`]).
+pub(crate) type ReadStats = std::collections::HashMap<(PathKey, PathKey), FolderStatus>;
+
+/// The key of `mount`'s stat in [`ReadStats`]: its name key and its folder's path key — two mounts on one folder keep
+/// their own answers (one may be held as overlapping the other), and a mount moved after its stat is not judged by it.
+// ADR-0400 decision 10
+pub(crate) fn mount_key(mount: &Mount) -> (PathKey, PathKey) {
+    (mount.name.key(), path_key(&mount.folder))
+}
+
+/// The mount states of a read computation over `mounts`: a mount `stats` holds ([`mount_key`]) judged by
 /// [`RootState::of`] with the first-scan answer `joined`; every other registered mount by its last known state
 /// (`seen`) — usable when walked and `Ok`, else absent when last seen missing and unreadable otherwise, the rule
 /// `list` and `read` use (ADR-0400 decision 17).
@@ -2076,12 +2577,12 @@ pub(crate) fn reached_mounts(
 pub(crate) fn read_states(
     mounts: &Mounts,
     seen: impl Fn(&MountName) -> MountSeen,
-    stats: &std::collections::HashMap<PathKey, FolderStatus>,
+    stats: &ReadStats,
     joined: &Result<(), String>,
 ) -> MountStates {
     let mut states = MountStates::new(mounts, false);
     for mount in mounts.iter() {
-        let state = match stats.get(&path_key(&mount.folder)) {
+        let state = match stats.get(&mount_key(mount)) {
             Some(stat) => RootState::of(joined, Some(stat)),
             None => {
                 let seen = seen(&mount.name);
@@ -2149,6 +2650,61 @@ fn root_unusable(root: &Path, why: String) -> LibraryRefusal {
         LIBRARY_ROOT_UNUSABLE,
         json!({ "path": root.display().to_string(), "why": why }),
     )
+}
+
+/// `path` normalized as a mount's folder; a path that is not absolute refuses `InvalidArgument` ·
+/// `item-path-invalid` `{path, why}`.
+fn absolute_folder(path: &Path) -> Result<PathBuf, LibraryRefusal> {
+    normalize_folder(path).map_err(|why| {
+        LibraryRefusal::new(
+            RefusalClass::InvalidArgument,
+            ITEM_PATH_INVALID,
+            json!({
+                "path": escape_controls(&path.display().to_string()),
+                "why": why.to_string(),
+            }),
+        )
+    })
+}
+
+/// Whether two mount folders are one: their normalized spellings compared by path key.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let normalized = |path: &Path| normalize_folder(path).unwrap_or_else(|_| path.to_path_buf());
+    same_path(&normalized(a), &normalized(b))
+}
+
+/// `InvalidArgument` · [`MOUNT_NAME_INVALID`] `{name, why}`.
+fn mount_name_invalid(text: &str, why: &MountNameError) -> LibraryRefusal {
+    LibraryRefusal::new(
+        RefusalClass::InvalidArgument,
+        MOUNT_NAME_INVALID,
+        json!({ "name": escape_controls(text), "why": why.to_string() }),
+    )
+}
+
+/// `Conflict` · [`MOUNT_NAME_TAKEN`] `{name}`.
+fn mount_name_taken(name: &MountName) -> LibraryRefusal {
+    LibraryRefusal::new(
+        RefusalClass::Conflict,
+        MOUNT_NAME_TAKEN,
+        json!({ "name": name.as_str() }),
+    )
+}
+
+/// `NotFound` · [`MOUNT_NOT_FOUND`] `{mount}`.
+fn mount_not_found(name: &MountName) -> LibraryRefusal {
+    LibraryRefusal::new(
+        RefusalClass::NotFound,
+        MOUNT_NOT_FOUND,
+        json!({ "mount": name.as_str() }),
+    )
+}
+
+/// `Conflict` · [`MOUNT_OVERLAPS`] `{path, with: "mount", mount}`.
+fn mount_overlaps(folder: &Path, mount: &MountName) -> LibraryRefusal {
+    let path = escape_controls(&folder.display().to_string());
+    let args = json!({ "path": path, "with": "mount", "mount": mount.as_str() });
+    LibraryRefusal::new(RefusalClass::Conflict, MOUNT_OVERLAPS, args)
 }
 
 fn failed(why: String) -> RefreshReport {
@@ -2479,9 +3035,63 @@ mod tests {
 
     // ── folder ops, spawners, the registry ───────────────────────────────────────────────────────────────
 
-    /// Folder ops whose stat answers from a table (default `Ok`); nothing else is modeled.
+    /// Folder ops whose stat answers from a table (default `Ok`); a folder's canonical path is its spelling except for
+    /// the folders listed in the second table (an OS error), and no folder has an identity (`Unsupported`); nothing
+    /// else is modeled. The canonicalize of the folder at the door (the third field) waits until the door opens.
     #[derive(Default)]
-    struct StatOps(Mutex<HashMap<PathBuf, FolderStatus>>);
+    struct StatOps(
+        Mutex<HashMap<PathBuf, FolderStatus>>,
+        Mutex<Vec<PathBuf>>,
+        CanonicalDoor,
+    );
+
+    /// A folder whose canonicalize waits (at most 60 s) until [`CanonicalDoor::open`]; `parked` = one is waiting.
+    /// `passed` counts every canonicalize.
+    #[derive(Default)]
+    struct CanonicalDoor {
+        at: Mutex<Option<(PathBuf, bool)>>,
+        moved: Condvar,
+        passed: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CanonicalDoor {
+        fn close_at(&self, folder: PathBuf) {
+            *lock(&self.at) = Some((folder, false));
+        }
+
+        fn wait_parked(&self) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut at = lock(&self.at);
+            while !at.as_ref().is_some_and(|(_, parked)| *parked) {
+                let now = Instant::now();
+                assert!(now < deadline, "no canonicalize reached the door");
+                at = wait_timeout(&self.moved, at, deadline - now).0;
+            }
+        }
+
+        fn open(&self) {
+            *lock(&self.at) = None;
+            self.moved.notify_all();
+        }
+
+        fn pass(&self, p: &Path) {
+            self.passed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let mut at = lock(&self.at);
+            if let Some((_, parked)) = at.as_mut().filter(|(folder, _)| folder == p) {
+                *parked = true;
+                self.moved.notify_all();
+            }
+            while at.as_ref().is_some_and(|(folder, _)| folder == p) {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                at = wait_timeout(&self.moved, at, deadline - now).0;
+            }
+        }
+    }
 
     impl FolderOps for StatOps {
         fn stat(&self, p: &Path) -> FolderStatus {
@@ -2492,12 +3102,16 @@ mod tests {
             Err(FolderStatus::Unreadable("not modeled".to_owned()))
         }
 
-        fn canonical(&self, _: &Path) -> io::Result<PathBuf> {
-            Err(io::Error::other("not modeled"))
+        fn canonical(&self, p: &Path) -> io::Result<PathBuf> {
+            self.2.pass(p);
+            match lock(&self.1).iter().any(|listed| listed == p) {
+                true => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+                false => Ok(p.to_path_buf()),
+            }
         }
 
         fn identity(&self, _: &Path) -> io::Result<engram_dashboard_platform::fs::FileIdentity> {
-            Err(io::Error::other("not modeled"))
+            Err(io::Error::from(io::ErrorKind::Unsupported))
         }
 
         fn read(&self, _: &Path, _: u64) -> io::Result<String> {
@@ -2600,7 +3214,6 @@ mod tests {
             backends: Arc::new(AgentBackends),
             config,
             default_root: PathBuf::from("/default-library"),
-            data_root: PathBuf::from("/data"),
             daemon_id: "test-daemon".to_owned(),
             root_generation_base: ROOT_BASE,
             builtin_dir: builtin_dir.map(Path::to_path_buf),
@@ -2638,6 +3251,26 @@ mod tests {
         ops: Arc<dyn FolderOps>,
         profiles: Vec<AgentProfile>,
     ) -> (Arc<LibraryService>, Arc<TestStore>) {
+        mounted_spawn(mounts, ops, profiles, Arc::new(ThreadSpawn))
+    }
+
+    /// [`mounted_agents`] whose jobs and bounded IO workers are spawned by `spawn`.
+    fn mounted_spawn(
+        mounts: &[(&str, &str)],
+        ops: Arc<dyn FolderOps>,
+        profiles: Vec<AgentProfile>,
+        spawn: Arc<dyn Spawn>,
+    ) -> (Arc<LibraryService>, Arc<TestStore>) {
+        let io = BoundedIo::new(IO_LIMIT, LaunchWaits::LAUNCH, LIST_CAP, ops, spawn);
+        mounted_io(mounts, profiles, io)
+    }
+
+    /// [`mounted_agents`] over the bounded IO `io`.
+    fn mounted_io(
+        mounts: &[(&str, &str)],
+        profiles: Vec<AgentProfile>,
+        io: BoundedIo,
+    ) -> (Arc<LibraryService>, Arc<TestStore>) {
         let store = TestStore::new(&["/lib", "/team", "/lib2"]);
         let mount = |(name, folder): &(&str, &str)| MountSetting {
             name: MountName::parse(name).unwrap(),
@@ -2650,7 +3283,6 @@ mod tests {
             backends: Arc::new(AgentBackends),
             config,
             default_root: PathBuf::from("/default-library"),
-            data_root: PathBuf::from("/data"),
             daemon_id: "test-daemon".to_owned(),
             root_generation_base: ROOT_BASE,
             builtin_dir: None,
@@ -2658,13 +3290,6 @@ mod tests {
             home: None,
             env: Arc::new(|_| None),
         };
-        let io = BoundedIo::new(
-            IO_LIMIT,
-            LaunchWaits::LAUNCH,
-            LIST_CAP,
-            ops,
-            Arc::new(ThreadSpawn),
-        );
         let port: Arc<dyn LibraryStore> = Arc::clone(&store) as Arc<dyn LibraryStore>;
         (Arc::new(LibraryService::new(values, port, io)), store)
     }
@@ -2732,9 +3357,21 @@ mod tests {
         })
     }
 
+    /// Relocates the mount `name` to `folder` through the gate's mount change with the service's walk — what
+    /// `relocate_mount` publishes, without its normalized-path, stat and overlap checks (the test roots are not absolute
+    /// paths on every OS).
+    fn relocate(svc: &LibraryService, name: &str, folder: &str) -> Result<RefreshReport, String> {
+        let change = MountChange::Relocate {
+            name: MountName::parse(name).unwrap(),
+            folder: PathBuf::from(folder),
+        };
+        svc.gate
+            .change_mount(change, |mount| svc.build_scan(mount, None, &Tags::new()))
+    }
+
     /// The first mount's folder.
     fn root_of(svc: &LibraryService) -> Option<PathBuf> {
-        svc.with_read(|state| state.mounts.first().map(|first| first.folder.clone()))
+        svc.with_read(|state| state.mounts.iter().next().map(|first| first.folder.clone()))
     }
 
     /// The published mounts as (name, folder), in order.
@@ -3568,7 +4205,7 @@ mod tests {
         // The entrances passed; now the mount is found gone, recorded without a ticket.
         let team = svc.with_read(|state| state.mounts.get("team").cloned().unwrap());
         svc.gate.observe(vec![team], &|mounts| {
-            vec![FolderStatus::Missing; mounts.len()]
+            vec![Some(FolderStatus::Missing); mounts.len()]
         });
         store.release();
         assert!(join(slow).errors.is_empty());
@@ -3673,15 +4310,15 @@ mod tests {
         assert_eq!(store.scans().len(), 3, "nothing walked");
     }
 
-    // ADR-0366 as ADR-0400 amends it: moving the first mount replaces only that mount's range; the others' items stay.
+    // ADR-0366 as ADR-0400 decision 16 amends it: relocating a mount replaces only its range; the others' items stay.
     #[test]
-    fn a_root_change_replaces_only_the_relocated_mounts_range() {
+    fn a_mount_relocation_replaces_only_the_relocated_mounts_range() {
         let (svc, store) = two_mounts();
         store.mem("/lib").file("old.md", "old");
         store.mem("/team").file("t.md", "t");
         store.mem("/lib2").file("new.md", "new");
         svc.first_scan_join().unwrap();
-        svc.change_root(PathBuf::from("/lib2")).unwrap();
+        relocate(&svc, "library", "/lib2").unwrap();
         assert!(!has(&svc, "library/old.md"), "the old folder's items went");
         assert!(has(&svc, "library/new.md"));
         assert!(has(&svc, "team/t.md"), "the other mount's items stay");
@@ -3950,7 +4587,7 @@ mod tests {
         svc.first_scan_join()
             .expect("a mount it cannot walk is not the scan's failure");
         assert_eq!(
-            svc.with_read(|state| state.seen(&MountName::first())),
+            svc.with_read(|state| state.seen(&MountName::library())),
             MountSeen {
                 state: MountState::Unreadable {
                     why: io::Error::from(io::ErrorKind::PermissionDenied).to_string()
@@ -4193,6 +4830,45 @@ mod tests {
         assert_eq!(top.folders[0].mount_state, Some(MountState::Ok));
         let read = svc.read(&lp("engram/priming")).unwrap();
         assert!(read.row.state.is_some(), "the priming stands in");
+    }
+
+    // ADR-0400 decision 20: a built-in file that reads but does not parse is that item's state, not the mount's.
+    #[test]
+    fn a_builtin_file_that_reads_but_does_not_parse_keeps_the_builtin_mount_ok() {
+        let dir = crate::builtin::tests::full();
+        let preset = dir
+            .path()
+            .join(crate::builtin::file_of(BuiltinId::DefaultPreset));
+        std::fs::write(&preset, "kind: preset\nversion: [\n").unwrap();
+        let store = TestStore::new(&["/lib"]);
+        let io = BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::new(StatOps::default()),
+            Arc::new(ThreadSpawn),
+        );
+        let svc = service_io(Some("/lib"), &store, Vec::new(), Some(dir.path()), io);
+        let top = svc.list(None).unwrap();
+        let engram = top
+            .folders
+            .iter()
+            .find(|row| row.path == BUILTIN_MOUNT)
+            .expect("the built-in mount row");
+        assert_eq!(engram.mount_state, Some(MountState::Ok));
+        assert_eq!(
+            mount_row(&svc.status(), BUILTIN_MOUNT).state,
+            MountState::Ok
+        );
+        let read = svc.read(&lp("engram/default")).unwrap();
+        assert!(
+            read.row.state.is_some(),
+            "the preset that does not parse shows its state"
+        );
+        assert!(
+            svc.folders().unwrap().unavailable.is_empty(),
+            "a whole-tree read names no unusable mount"
+        );
     }
 
     // ADR-0400 decision 20: the built-in mount is never scanned — a refresh of it walks nothing and says so.
@@ -4480,10 +5156,10 @@ mod tests {
         );
     }
 
-    // ── root change ──────────────────────────────────────────────────────────────────────────────────────
+    // ── mount change ─────────────────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn readers_see_the_old_root_during_the_new_roots_walk() {
+    fn readers_see_the_old_folder_during_a_relocated_mounts_walk() {
         let (svc, store) = service_on(&["/lib", "/lib2"], Some("/lib"));
         store.mem("/lib").file("a.md", "a");
         store.mem("/lib2").file("b.md", "b");
@@ -4492,7 +5168,7 @@ mod tests {
             ["library/a.md"]
         );
         store.hold_at(At::Start, "/lib2");
-        let change = on_thread(&svc, |svc| svc.change_root(PathBuf::from("/lib2")));
+        let change = on_thread(&svc, |svc| relocate(svc, "library", "/lib2"));
         store.wait_held();
         assert_eq!(
             paths(&svc.list(Some(&lp("library"))).unwrap()),
@@ -4509,7 +5185,7 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_root_change_keeps_a_file_whose_tag_equals_an_old_item_of_the_same_key() {
+    fn a_nested_relocation_keeps_a_file_whose_tag_equals_an_old_item_of_the_same_key() {
         let (svc, store) = service_on(&["/lib", "/lib/team"], Some("/lib"));
         // `X.md` under the old root and `team/X.md` (the new root's `X.md`) have equal tags: same size, same time.
         store.mem("/lib").file_version("X.md", "top!", 1);
@@ -4519,37 +5195,51 @@ mod tests {
             svc.list(Some(&lp("library"))).unwrap().rows[0].description,
             excerpt("top!")
         );
-        svc.change_root(PathBuf::from("/lib/team")).unwrap();
+        relocate(&svc, "library", "/lib/team").unwrap();
         let rows = svc.list(Some(&lp("library"))).unwrap();
         assert_eq!(paths(&rows), ["library/X.md"]);
         assert_eq!(rows.rows[0].description, excerpt("team"));
     }
 
+    // ADR-0400 decision 16: a mount change walks one mount, not the library — the first scan stays a whole scan.
     #[test]
-    fn a_root_change_on_an_unset_root_raises_the_first_scan_for_the_readers_waiting_on_it() {
+    fn a_mount_added_before_the_first_scan_leaves_the_first_scan_to_a_whole_walk() {
         let (svc, store) = service_on(&["/lib"], None);
         store.mem("/lib").file("a.md", "a");
-        store.hold_at(At::Start, "/lib");
-        let change = on_thread(&svc, |svc| svc.change_root(PathBuf::from("/lib")));
-        store.wait_held();
-        let reader = on_thread(&svc, |svc| svc.list(Some(&lp("library"))).unwrap());
+        let mount = Mount {
+            name: MountName::library(),
+            folder: PathBuf::from("/lib"),
+        };
         svc.gate
-            .wait_for("the reader waits for the root walk", |_, waiting| {
-                waiting == 1
-            });
-        store.release();
-        join(change).unwrap();
-        assert_eq!(paths(&join(reader)), ["library/a.md"]);
-        assert_eq!(store.scans(), [scan("/lib", None)], "no second scan");
+            .change_mount(MountChange::Add(mount), |mount| {
+                svc.build_scan(mount, None, &Tags::new())
+            })
+            .unwrap();
+        assert!(
+            has(&svc, "library/a.md"),
+            "the added mount was walked and applied"
+        );
+        assert_eq!(svc.numbers().swap_ins, 0, "no scan was applied");
+        assert_eq!(
+            paths(&svc.list(Some(&lp("library"))).unwrap()),
+            ["library/a.md"]
+        );
+        assert_eq!(
+            store.scans(),
+            [scan("/lib", None), scan("/lib", None)],
+            "the reader's first scan walked the library"
+        );
     }
 
     #[test]
-    fn a_root_change_whose_walk_fails_at_the_root_publishes_nothing() {
+    fn a_mount_relocation_whose_walk_fails_at_the_folder_publishes_nothing() {
         let (svc, store) = service_on(&["/lib", "/lib2"], Some("/lib"));
         store.mem("/lib").file("a.md", "a");
         svc.list(Some(&lp("library"))).unwrap();
         store.mem("/lib2").fail_listing("", ListFailure::Open);
-        assert!(svc.change_root(PathBuf::from("/lib2")).is_err());
+        let before = svc.numbers();
+        assert!(relocate(&svc, "library", "/lib2").is_err());
+        assert_eq!(svc.numbers(), before, "no number moved");
         let answer = join(on_thread(&svc, |svc| {
             svc.list(Some(&lp("library"))).unwrap()
         }));
@@ -4557,17 +5247,6 @@ mod tests {
         assert_eq!(root_of(&svc), Some(PathBuf::from("/lib")));
         let report = join(on_thread(&svc, |svc| svc.refresh(None)));
         assert!(report.errors.is_empty(), "the ticket was released");
-    }
-
-    #[test]
-    fn a_new_root_that_does_not_stat_as_a_folder_is_refused_before_any_walk() {
-        let store = TestStore::new(&["/lib", "/lib2"]);
-        let ops = Arc::new(StatOps::default());
-        lock(&ops.0).insert(PathBuf::from("/lib2"), FolderStatus::Missing);
-        let svc = service(Some("/lib"), &store, Vec::new(), ops, Arc::new(ThreadSpawn));
-        assert!(svc.change_root(PathBuf::from("/lib2")).is_err());
-        assert!(store.scans().is_empty());
-        assert_eq!(root_of(&svc), Some(PathBuf::from("/lib")));
     }
 
     // ── resolution entrances ─────────────────────────────────────────────────────────────────────────────
@@ -5212,11 +5891,11 @@ claude: {changed: true}
         );
     }
 
-    // ── the root setting: status · set_root · first start ────────────────────────────────────────────────
+    // ── the mount setting: status · the mount commands · first start ─────────────────────────────────────
 
     /// A service whose `library.json` lives in a real temp folder (`<temp>/state`). The test store's roots are
     /// absolute paths under the temp folder (named by [`OnDisk::at`]); nothing of them is on disk unless a test makes
-    /// it, and their stats answer from `ops` (default `Ok`).
+    /// it, and their stats answer from `ops` (default `Ok`; canonical paths are the spellings).
     struct OnDisk {
         temp: tempfile::TempDir,
         store: Arc<TestStore>,
@@ -5270,31 +5949,60 @@ claude: {changed: true}
             Some(serde_json::from_str(&text).unwrap())
         }
 
+        /// A `library.json` holding `mounts` (name, folder name — `default` = the word), in order.
+        fn mounts_doc(&self, mounts: &[(&str, &str)]) -> String {
+            let entries: Vec<serde_json::Value> = mounts
+                .iter()
+                .map(|(name, folder)| match *folder {
+                    "default" => json!({ "name": name, "path": "default" }),
+                    folder => json!({ "name": name, "path": self.at(folder).to_str().unwrap() }),
+                })
+                .collect();
+            json!({ "schema_version": 2, "mounts": entries }).to_string()
+        }
+
         fn explicit(&self, name: &str) -> String {
-            json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": self.at(name).to_str().unwrap() }] })
-                .to_string()
+            self.mounts_doc(&[("library", name)])
         }
 
         /// A new service over a fresh `config::load` of the state folder — one daemon start, at [`ROOT_BASE`].
         fn start(&self) -> Arc<LibraryService> {
-            self.start_at(ROOT_BASE)
+            self.start_with(ROOT_BASE, Vec::new())
         }
 
         /// [`OnDisk::start`] at the root generation base `base`.
         fn start_at(&self, base: u64) -> Arc<LibraryService> {
+            self.start_with(base, Vec::new())
+        }
+
+        /// [`OnDisk::start`] at `base`, its registry holding `profiles`.
+        fn start_with(&self, base: u64, profiles: Vec<AgentProfile>) -> Arc<LibraryService> {
+            self.start_on(base, profiles, IO_LIMIT)
+        }
+
+        /// [`OnDisk::start`] whose read budget is `limit`.
+        fn start_limited(&self, limit: Duration) -> Arc<LibraryService> {
+            self.start_on(ROOT_BASE, Vec::new(), limit)
+        }
+
+        fn start_on(
+            &self,
+            base: u64,
+            profiles: Vec<AgentProfile>,
+            limit: Duration,
+        ) -> Arc<LibraryService> {
             let io = BoundedIo::new(
-                IO_LIMIT,
+                limit,
                 LaunchWaits::LAUNCH,
                 LIST_CAP,
                 Arc::clone(&self.ops) as Arc<dyn FolderOps>,
                 Arc::new(ThreadSpawn),
             );
             let values = LibraryValues {
-                registry: Arc::new(ProfileRegistry::new(Arc::new(Fixed(Vec::new())))),
+                registry: Arc::new(ProfileRegistry::new(Arc::new(Fixed(profiles)))),
                 backends: Arc::new(AgentBackends),
                 config: config::load(&self.state()),
                 default_root: self.default_root.clone(),
-                data_root: self.temp.path().join("data"),
                 daemon_id: "daemon-1".to_owned(),
                 root_generation_base: base,
                 builtin_dir: None,
@@ -5314,13 +6022,69 @@ claude: {changed: true}
         }
     }
 
+    /// The first stored mount's `path`.
     fn word(disk: &OnDisk) -> serde_json::Value {
         disk.config().expect("library.json")["mounts"][0]["path"].clone()
     }
 
+    /// The stored mounts as (name, path word).
+    fn stored(disk: &OnDisk) -> Vec<(String, String)> {
+        let doc = disk.config().expect("library.json");
+        doc["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mount| {
+                (
+                    mount["name"].as_str().unwrap().to_owned(),
+                    mount["path"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// The status row of the mount `name`.
+    fn mount_row<'s>(status: &'s LibraryStatus, name: &str) -> &'s MountRow {
+        status
+            .mounts
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("no row {name}: {status:?}"))
+    }
+
+    /// The names of the status rows, in order.
+    fn row_names(status: &LibraryStatus) -> Vec<&str> {
+        status.mounts.iter().map(|row| row.name.as_str()).collect()
+    }
+
+    /// The built-in row of a test service (no built-in folder).
+    fn builtin_row() -> MountRow {
+        MountRow {
+            name: BUILTIN_MOUNT.to_owned(),
+            folder: PathBuf::new(),
+            default: false,
+            builtin: true,
+            state: no_builtin_folder(),
+        }
+    }
+
+    /// `svc.status()` asked until the row of `name` is no longer in `from` — a stat worker of an earlier status may
+    /// still be in flight, and a required ask joins it (`folder.rs` — one worker per key).
+    fn settled(svc: &LibraryService, name: &str, from: &MountState) -> MountState {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let state = mount_row(&svc.status(), name).state.clone();
+            if state != *from || Instant::now() > deadline {
+                break state;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    // ADR-0400 decision 7
     #[test]
-    fn a_status_answers_the_daemon_id_root_setting_state_config_suggestion_and_generation() {
-        let disk = OnDisk::new(&["lib"], "library", None);
+    fn a_status_answers_every_mount_in_order_then_the_builtin_with_its_place_and_a_fresh_state() {
+        let disk = OnDisk::new(&["library", "lib"], "library", None);
         let svc = disk.start();
         let base = svc.numbers().root;
         assert_eq!(base, ROOT_BASE, "the run starts at the base it was given");
@@ -5328,169 +6092,329 @@ claude: {changed: true}
             svc.status(),
             LibraryStatus {
                 daemon_id: "daemon-1".to_owned(),
-                root: None,
-                root_setting: Some(RootSettingKind::Default),
-                state: RootStatus::Unset,
+                mounts: vec![builtin_row()],
                 config: ConfigHealth::Ok,
                 suggested_new: disk.default_root.clone(),
                 root_generation: base,
             },
-            "a missing library.json holds the default value, with no root before the first start"
+            "before the first start only the built-in is a mount"
         );
+        std::fs::write(
+            disk.config_path(),
+            disk.mounts_doc(&[("team", "lib"), ("library", "default")]),
+        )
+        .unwrap();
+        let svc = disk.start();
         lock(&disk.ops.0).insert(disk.at("lib"), FolderStatus::NotADirectory);
-        let refusal = refused(svc.set_root(&disk.at("lib"), false).unwrap_err()).1;
-        assert_eq!(refusal.code, LIBRARY_ROOT_UNUSABLE);
+        let status = svc.status();
         assert_eq!(
-            refusal.args["why"], "the new library root cannot be used: not a folder",
-            "a new root's refusal keeps the stat's words"
-        );
-        lock(&disk.ops.0).clear();
-        let status = svc.set_root(&disk.at("lib"), false).unwrap();
-        assert_eq!(
-            (
-                status.root,
-                status.root_setting,
-                status.state,
-                status.root_generation
-            ),
-            (
-                Some(disk.at("lib")),
-                Some(RootSettingKind::Explicit),
-                RootStatus::Ok,
-                base + 1
-            )
+            status.mounts,
+            [
+                MountRow {
+                    name: "team".to_owned(),
+                    folder: disk.at("lib"),
+                    default: false,
+                    builtin: false,
+                    state: MountState::Missing {
+                        why: "not a folder".to_owned()
+                    },
+                },
+                MountRow {
+                    name: "library".to_owned(),
+                    folder: disk.at("library"),
+                    default: true,
+                    builtin: false,
+                    state: MountState::Ok,
+                },
+                builtin_row(),
+            ],
+            "list order, the default place told, each folder stat'ed now"
         );
         lock(&disk.ops.0).insert(
             disk.at("lib"),
             FolderStatus::Unreadable("denied".to_owned()),
         );
-        // The stat worker of the status `set_root` answered may still be in flight, and a required ask joins it
-        //   (`folder.rs` — one worker per key): ask until it has ended.
-        let settled = |from: RootStatus| {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
-                let state = svc.status().state;
-                if state != from || Instant::now() > deadline {
-                    break state;
-                }
-                thread::sleep(Duration::from_millis(2));
-            }
-        };
-        let unreadable = RootStatus::Unreadable {
-            why: "denied".to_owned(),
+        let missing = MountState::Missing {
+            why: "not a folder".to_owned(),
         };
         assert_eq!(
-            settled(RootStatus::Ok),
-            unreadable,
-            "a root that exists but cannot be read is unreadable, with why (ADR-0387)"
-        );
-        lock(&disk.ops.0).insert(disk.at("lib"), FolderStatus::Missing);
-        assert_eq!(
-            settled(unreadable),
-            RootStatus::Missing {
-                why: "missing".to_owned()
+            settled(&svc, "team", &missing),
+            MountState::Unreadable {
+                why: "denied".to_owned()
             },
-            "an absent root is missing, with why"
+            "a mount that exists but cannot be read is unreadable, with why (ADR-0387)"
         );
     }
 
+    // ADR-0400 decision 9
     #[test]
-    fn set_root_writes_an_explicit_path_publishes_it_and_answers_the_status_after() {
-        let disk = OnDisk::new(&["lib", "lib2"], "library", None);
-        disk.mem("lib2").file("b.md", "b");
-        let svc = disk.start();
-        let status = svc.set_root(&disk.at("lib2"), false).unwrap();
-        assert_eq!(word(&disk), json!(disk.at("lib2").to_str().unwrap()));
-        assert_eq!(status.root, Some(disk.at("lib2")));
-        assert_eq!(status.root_setting, Some(RootSettingKind::Explicit));
-        assert_eq!(status.config, ConfigHealth::Ok);
+    fn add_mount_registers_a_folder_walks_it_saves_every_mount_and_counts_what_already_pointed_at_it(
+    ) {
+        let disk = OnDisk::new(&["library", "lib2"], "library", None);
+        std::fs::write(
+            disk.config_path(),
+            disk.mounts_doc(&[("library", "default")]),
+        )
+        .unwrap();
+        disk.mem("library").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - team/x.md\n  - team/gone.md\n  - library/a.md\n",
+        );
+        disk.mem("library").file("a.md", "a");
+        disk.mem("lib2").file("x.md", "x");
+        disk.mem("lib2").file(
+            "Q.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - team/x.md\n",
+        );
+        let pointing = agent(&["team/Q.yaml"]);
+        let elsewhere = agent(&["library/P.yaml"]);
+        let svc = disk.start_with(ROOT_BASE, vec![pointing, elsewhere]);
+        svc.first_scan_join().unwrap();
+        let changes = svc.numbers().change;
+
+        let added = svc.add_mount("team", &disk.at("lib2"), false).unwrap();
+
         assert_eq!(
-            paths(&svc.list(Some(&lp("library"))).unwrap()),
-            ["library/b.md"]
+            added.pointing,
+            Pointing {
+                presets: 2,
+                agents: 1
+            },
+            "the references already naming `team` outside it — `team`'s own preset does not count"
+        );
+        assert_eq!(row_names(&added.status), ["library", "team", "engram"]);
+        assert_eq!(mount_row(&added.status, "team").state, MountState::Ok);
+        assert_eq!(added.status.root_generation, ROOT_BASE + 1);
+        assert_eq!(
+            svc.numbers().change,
+            changes + 1,
+            "the change number moves too"
         );
         assert_eq!(
-            disk.start().status().root,
-            Some(disk.at("lib2")),
+            paths(&svc.list(Some(&lp("team"))).unwrap()),
+            ["team/Q.yaml", "team/x.md"],
+            "walked under its name"
+        );
+        assert!(has(&svc, "library/P.yaml"), "the other mount's items stay");
+        assert_eq!(
+            stored(&disk),
+            [
+                ("library".to_owned(), "default".to_owned()),
+                ("team".to_owned(), disk.at("lib2").display().to_string())
+            ]
+        );
+        assert_eq!(
+            row_names(&disk.start().status()),
+            ["library", "team", "engram"],
             "the next start reads it"
         );
     }
 
+    // ADR-0400 decisions 2 and 7
     #[test]
-    fn set_root_to_the_default_place_stores_the_default_value_however_it_is_spelled() {
+    fn add_mount_refuses_an_invalid_name_a_relative_path_and_a_taken_name_with_nothing_done() {
         let disk = OnDisk::new(&["library", "lib2"], "library", None);
+        let doc = disk.mounts_doc(&[("library", "default")]);
+        std::fs::write(disk.config_path(), &doc).unwrap();
         let svc = disk.start();
-        svc.set_root(&disk.at("lib2"), false).unwrap();
-        let spelled = disk.temp.path().join("state").join("..").join("library");
-        let status = svc.set_root(&spelled, false).unwrap();
-        assert_eq!(word(&disk), json!("default"), "not the absolute path");
-        assert_eq!(status.root_setting, Some(RootSettingKind::Default));
-        assert_eq!(status.root, Some(disk.at("library")));
-    }
-
-    // ADR-0400: until the mount commands, a root change relocates the first mount under its name and saves every mount.
-    #[test]
-    fn set_root_relocates_the_first_mount_under_its_name_and_saves_every_mount() {
-        let disk = OnDisk::new(&["library", "lib", "lib2", "other"], "library", None);
-        let other = disk.at("other");
-        let doc = json!({ "schema_version": 2, "mounts": [
-            { "name": "team", "path": disk.at("lib").to_str().unwrap() },
-            { "name": "extra", "path": other.to_str().unwrap() },
-        ] });
-        std::fs::write(disk.config_path(), doc.to_string()).unwrap();
-        disk.mem("lib").file("old.md", "old");
-        disk.mem("lib2").file("new.md", "new");
-        disk.mem("other").file("x.md", "x");
-        let svc = disk.start();
-        assert_eq!(
-            root_of(&svc),
-            Some(disk.at("lib")),
-            "the first mount is the root"
+        for name in ["", "a/b", ".hidden", "engram", "Engram", "CON"] {
+            let (class, reason) =
+                refused(svc.add_mount(name, &disk.at("lib2"), false).unwrap_err());
+            assert_eq!(
+                (class, reason.code.as_str(), &reason.args["name"]),
+                (
+                    RefusalClass::InvalidArgument,
+                    MOUNT_NAME_INVALID,
+                    &json!(name)
+                ),
+                "{name:?}"
+            );
+        }
+        let (class, reason) = refused(
+            svc.add_mount("team", Path::new("relative/lib"), true)
+                .unwrap_err(),
         );
-        svc.first_scan_join().unwrap();
-        assert!(has(&svc, "team/old.md") && has(&svc, "extra/x.md"));
-        svc.set_root(&disk.at("lib2"), false).unwrap();
-        assert_eq!(
-            mounts_of(&svc),
-            [
-                ("team".to_owned(), disk.at("lib2")),
-                ("extra".to_owned(), other.clone())
-            ]
-        );
-        assert!(
-            has(&svc, "team/new.md") && !has(&svc, "team/old.md"),
-            "the first mount's items come from its new folder"
-        );
-        assert!(has(&svc, "extra/x.md"), "the second mount's items survive");
-        assert_eq!(
-            disk.config(),
-            Some(json!({ "schema_version": 2, "mounts": [
-                { "name": "team", "path": disk.at("lib2").to_str().unwrap() },
-                { "name": "extra", "path": other.to_str().unwrap() },
-            ] }))
-        );
-        svc.set_root(&disk.at("library"), false).unwrap();
-        assert_eq!(
-            disk.config().unwrap()["mounts"][0],
-            json!({ "name": "team", "path": "default" }),
-            "the default place is stored as the word"
-        );
-    }
-
-    #[test]
-    fn set_root_refuses_a_path_that_is_not_absolute_and_writes_nothing() {
-        let disk = OnDisk::new(&["lib"], "library", None);
-        let svc = disk.start();
-        let (class, reason) = refused(svc.set_root(Path::new("relative/lib"), true).unwrap_err());
         assert_eq!(
             (class, reason.code.as_str()),
-            (RefusalClass::InvalidArgument, "item-path-invalid")
+            (RefusalClass::InvalidArgument, ITEM_PATH_INVALID)
         );
-        assert!(disk.config().is_none());
         assert!(!Path::new("relative").exists());
+        let taken = if same_path(Path::new("a"), Path::new("A")) {
+            "LIBRARY"
+        } else {
+            "library"
+        };
+        let (class, reason) = refused(svc.add_mount(taken, &disk.at("lib2"), false).unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str(), reason.args),
+            (
+                RefusalClass::Conflict,
+                MOUNT_NAME_TAKEN,
+                json!({ "name": "library" })
+            ),
+            "a name taken by path key, at another folder"
+        );
+        assert_eq!(std::fs::read_to_string(disk.config_path()).unwrap(), doc);
+        assert_eq!(svc.numbers().root, ROOT_BASE, "no mount change ran");
+    }
+
+    // ADR-0400 decision 10 (as amended): only mounts are judged; a refused `create` leaves nothing on disk.
+    #[test]
+    fn add_and_relocate_refuse_a_folder_overlapping_a_mount_only_create_nothing_when_refused_and_relocate_skips_itself(
+    ) {
+        let disk = OnDisk::new(
+            &["lib", "lib/sub", "lib2", "lib2/sub", "data/x"],
+            "library",
+            None,
+        );
+        std::fs::write(
+            disk.config_path(),
+            disk.mounts_doc(&[("library", "lib"), ("team", "lib2")]),
+        )
+        .unwrap();
+        let svc = disk.start();
+        let overlaps = |refusal: LibraryRefusal| {
+            let (class, reason) = refused(refusal);
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::Conflict, MOUNT_OVERLAPS)
+            );
+            reason.args
+        };
+        assert_eq!(
+            overlaps(
+                svc.add_mount("inner", &disk.at("lib/sub"), false)
+                    .unwrap_err()
+            ),
+            json!({ "path": disk.at("lib/sub").display().to_string(), "with": "mount", "mount": "library" }),
+            "inside a mount"
+        );
+        assert_eq!(
+            overlaps(svc.add_mount("outer", disk.temp.path(), false).unwrap_err())["mount"],
+            json!("library"),
+            "holding the mounts (and the data folder): judged by the mounts alone"
+        );
+        let fresh = disk.at("lib/sub/fresh");
+        assert_eq!(
+            overlaps(svc.add_mount("fresh", &fresh, true).unwrap_err())["mount"],
+            json!("library"),
+            "a folder to be created is judged before it is made"
+        );
+        assert!(!fresh.exists(), "a refused add created nothing");
+        let moved_in = disk.at("lib/moved");
+        assert_eq!(
+            overlaps(svc.relocate_mount("team", &moved_in, true).unwrap_err())["mount"],
+            json!("library")
+        );
+        assert!(!moved_in.exists(), "a refused relocate created nothing");
+        svc.add_mount("in-data", &disk.at("data/x"), false)
+            .expect("a folder inside the data folder is a mount like any other");
+        assert_eq!(
+            overlaps(
+                svc.relocate_mount("team", &disk.at("lib/sub"), false)
+                    .unwrap_err()
+            )["mount"],
+            json!("library"),
+            "a relocate is judged against every other mount"
+        );
+        let moved = svc
+            .relocate_mount("team", &disk.at("lib2/sub"), false)
+            .unwrap();
+        assert_eq!(
+            mount_row(&moved, "team").folder,
+            disk.at("lib2/sub"),
+            "a move into its own subfolder does not overlap itself"
+        );
+        assert_eq!(
+            svc.numbers().root,
+            ROOT_BASE + 2,
+            "only the `in-data` add and the relocate ran"
+        );
+    }
+
+    // ADR-0400 decision 10: a folder whose overlap cannot be judged is refused, never taken as free.
+    #[test]
+    fn a_folder_whose_canonical_path_cannot_be_had_is_refused_as_unusable_with_nothing_published() {
+        let disk = OnDisk::new(&["library", "lib2"], "library", None);
+        std::fs::write(
+            disk.config_path(),
+            disk.mounts_doc(&[("library", "default")]),
+        )
+        .unwrap();
+        let svc = disk.start();
+        lock(&disk.ops.1).push(disk.at("lib2"));
+        let (class, reason) = refused(svc.add_mount("team", &disk.at("lib2"), false).unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::Unavailable, LIBRARY_ROOT_UNUSABLE)
+        );
+        let why = reason.args["why"].as_str().unwrap();
+        assert!(why.contains("canonical path"), "{why}");
+        assert_eq!(row_names(&svc.status()), ["library", "engram"]);
+        assert_eq!(svc.numbers().root, ROOT_BASE);
     }
 
     #[test]
-    fn set_root_on_a_read_only_config_refuses_before_creating_anything() {
+    fn add_with_create_makes_the_folder_and_a_failed_create_stat_or_walk_publishes_and_writes_nothing(
+    ) {
+        let disk = OnDisk::new(
+            &["library", "a/b/c", "blocker/lib", "gone", "broken"],
+            "library",
+            None,
+        );
+        let doc = disk.mounts_doc(&[("library", "default")]);
+        std::fs::write(disk.config_path(), &doc).unwrap();
+        std::fs::write(disk.temp.path().join("blocker"), "a file").unwrap();
+        let svc = disk.start();
+        svc.first_scan_join().unwrap();
+        let unusable = |refusal: LibraryRefusal, path: PathBuf| {
+            let (class, reason) = refused(refusal);
+            assert_eq!(
+                (class, reason.code.as_str(), &reason.args["path"]),
+                (
+                    RefusalClass::Unavailable,
+                    LIBRARY_ROOT_UNUSABLE,
+                    &json!(path.display().to_string())
+                )
+            );
+            reason.args["why"].as_str().unwrap().to_owned()
+        };
+        unusable(
+            svc.add_mount("x", &disk.at("blocker/lib"), true)
+                .unwrap_err(),
+            disk.at("blocker/lib"),
+        );
+        lock(&disk.ops.0).insert(disk.at("gone"), FolderStatus::Missing);
+        let why = unusable(
+            svc.add_mount("x", &disk.at("gone"), false).unwrap_err(),
+            disk.at("gone"),
+        );
+        assert!(why.contains("missing"), "the stat's words: {why}");
+        disk.mem("broken").fail_listing("", ListFailure::Open);
+        unusable(
+            svc.add_mount("x", &disk.at("broken"), false).unwrap_err(),
+            disk.at("broken"),
+        );
+        assert_eq!(
+            std::fs::read_to_string(disk.config_path()).unwrap(),
+            doc,
+            "nothing written"
+        );
+        assert_eq!(
+            row_names(&svc.status()),
+            ["library", "engram"],
+            "nothing published"
+        );
+        assert_eq!(svc.numbers().root, ROOT_BASE, "no mount change ran");
+
+        svc.add_mount("deep", &disk.at("a/b/c"), true).unwrap();
+        assert!(disk.at("a/b/c").is_dir());
+        assert_eq!(mount_row(&svc.status(), "deep").folder, disk.at("a/b/c"));
+    }
+
+    // ADR-0400 decision 15
+    #[test]
+    fn every_mount_command_on_a_read_only_config_refuses_before_anything() {
         let newer = r#"{"schema_version": 3, "mounts": []}"#;
         for unreadable in [false, true] {
             let disk = OnDisk::new(&["lib", "new"], "library", None);
@@ -5499,16 +6423,23 @@ claude: {changed: true}
                 true => std::fs::create_dir(disk.config_path()).unwrap(),
             }
             let svc = disk.start();
-            let (class, reason) = refused(svc.set_root(&disk.at("new"), true).unwrap_err());
-            assert_eq!(
-                (class, reason.code.as_str()),
-                (RefusalClass::Unavailable, LIBRARY_CONFIG_READ_ONLY),
-                "unreadable: {unreadable}"
-            );
-            assert!(
-                unreadable || reason.args["why"].as_str().unwrap().contains("newer"),
-                "{reason:?}"
-            );
+            let refusals = [
+                svc.add_mount("team", &disk.at("new"), true).map(drop),
+                svc.remove_mount("team").map(drop),
+                svc.relocate_mount("team", &disk.at("new"), true).map(drop),
+            ];
+            for refusal in refusals {
+                let (class, reason) = refused(refusal.unwrap_err());
+                assert_eq!(
+                    (class, reason.code.as_str()),
+                    (RefusalClass::Unavailable, LIBRARY_CONFIG_READ_ONLY),
+                    "unreadable: {unreadable}"
+                );
+                assert!(
+                    unreadable || reason.args["why"].as_str().unwrap().contains("newer"),
+                    "{reason:?}"
+                );
+            }
             assert!(!disk.at("new").exists(), "nothing was created");
             match unreadable {
                 false => assert_eq!(std::fs::read_to_string(disk.config_path()).unwrap(), newer),
@@ -5519,188 +6450,268 @@ claude: {changed: true}
                 matches!(status.config, ConfigHealth::ReadOnly { .. }),
                 "{status:?}"
             );
-            assert_eq!((status.root_setting, status.root), (None, None));
+            assert_eq!(status.mounts, [builtin_row()]);
             assert_eq!(svc.first_start(), FirstStart::NotDue);
         }
     }
 
+    // ADR-0400 decision 11
     #[test]
-    fn set_root_with_create_makes_the_folder_and_its_ancestors() {
-        let disk = OnDisk::new(&["a/b/c"], "library", None);
-        let svc = disk.start();
-        svc.set_root(&disk.at("a/b/c"), true).unwrap();
-        assert!(disk.at("a/b/c").is_dir());
-        assert_eq!(svc.status().root, Some(disk.at("a/b/c")));
-    }
-
-    #[test]
-    fn a_set_root_with_create_whose_create_fails_is_root_unusable_with_nothing_published_or_written(
+    fn remove_mount_drops_the_registration_and_its_range_touches_no_file_and_adding_it_back_restores_it(
     ) {
-        let disk = OnDisk::new(&["blocker/lib"], "library", None);
-        std::fs::write(disk.temp.path().join("blocker"), "a file").unwrap();
-        let svc = disk.start();
-        let (class, reason) = refused(svc.set_root(&disk.at("blocker/lib"), true).unwrap_err());
+        let disk = OnDisk::new(&["library", "lib2"], "library", None);
+        std::fs::write(
+            disk.config_path(),
+            disk.mounts_doc(&[("library", "default"), ("team", "lib2")]),
+        )
+        .unwrap();
+        disk.mem("library").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - team/x.md\n",
+        );
+        disk.mem("lib2").file("x.md", "x");
+        let svc = disk.start_with(ROOT_BASE, vec![agent(&["team/x.md"])]);
+        svc.first_scan_join().unwrap();
+        assert!(has(&svc, "team/x.md"));
+        let changes = svc.numbers().change;
+
+        let removed = svc.remove_mount("team").unwrap();
+
+        assert_eq!(removed.outcome, Removal::Removed);
         assert_eq!(
-            (class, reason.code.as_str()),
-            (RefusalClass::Unavailable, LIBRARY_ROOT_UNUSABLE)
+            removed.now_absent,
+            Pointing {
+                presets: 1,
+                agents: 1
+            }
+        );
+        assert_eq!(row_names(&removed.status), ["library", "engram"]);
+        assert_eq!(removed.status.root_generation, ROOT_BASE + 1);
+        assert_eq!(svc.numbers().change, changes + 1);
+        assert!(!has(&svc, "team/x.md"), "its range left the catalog");
+        assert!(
+            disk.store.exists(&disk.at("lib2").join("x.md")),
+            "no file is touched"
         );
         assert_eq!(
-            reason.args["path"],
-            json!(disk.at("blocker/lib").display().to_string())
+            stored(&disk),
+            [("library".to_owned(), "default".to_owned())]
         );
-        assert!(disk.config().is_none(), "nothing written");
-        assert_eq!(svc.status().root, None, "nothing published");
-        assert_eq!(svc.numbers().root, ROOT_BASE, "no root change ran");
+        assert!(
+            svc.list(Some(&lp("team")))
+                .is_ok_and(|answer| answer.rows.is_empty()),
+            "a path in a mount not registered reads as absent"
+        );
+
+        let back = svc.add_mount("team", &disk.at("lib2"), false).unwrap();
+        assert_eq!(
+            back.pointing,
+            Pointing {
+                presets: 1,
+                agents: 1
+            },
+            "every reference resolves again"
+        );
+        assert!(has(&svc, "team/x.md"));
     }
 
+    // ADR-0400 decisions 7 and 20
     #[test]
-    fn a_set_root_whose_stat_is_refused_publishes_nothing_and_writes_nothing() {
-        for old in [None, Some("lib")] {
-            let disk = OnDisk::new(&["lib", "gone"], "library", None);
-            if let Some(old) = old {
-                std::fs::write(disk.config_path(), disk.explicit(old)).unwrap();
-            }
-            let svc = disk.start();
-            let before = svc.status();
-            lock(&disk.ops.0).insert(disk.at("gone"), FolderStatus::Missing);
-            let (class, reason) = refused(svc.set_root(&disk.at("gone"), false).unwrap_err());
+    fn remove_and_relocate_refuse_the_builtin_an_invalid_name_and_a_mount_not_registered() {
+        let disk = OnDisk::new(&["library", "lib2"], "library", None);
+        std::fs::write(
+            disk.config_path(),
+            disk.mounts_doc(&[("library", "default")]),
+        )
+        .unwrap();
+        let svc = disk.start();
+        for answer in [
+            svc.remove_mount("Engram").map(drop),
+            svc.relocate_mount("engram", &disk.at("lib2"), false)
+                .map(drop),
+        ] {
+            let (class, reason) = refused(answer.unwrap_err());
             assert_eq!(
                 (class, reason.code.as_str()),
-                (RefusalClass::Unavailable, LIBRARY_ROOT_UNUSABLE),
-                "{old:?}"
-            );
-            assert_eq!(
-                reason.args,
-                json!({ "path": disk.at("gone").display().to_string(), "why": reason.args["why"] }),
-                "{old:?}: path and why only"
-            );
-            assert!(
-                reason.args["why"].as_str().unwrap().contains("missing"),
-                "{old:?}: {reason:?}"
-            );
-            match old {
-                None => assert!(disk.config().is_none(), "no file is written"),
-                Some(old) => assert_eq!(
-                    std::fs::read_to_string(disk.config_path()).unwrap(),
-                    disk.explicit(old),
-                    "the file keeps its setting"
-                ),
-            }
-            let after = svc.status();
-            assert_eq!(
-                (
-                    after.root,
-                    after.root_setting,
-                    after.config,
-                    after.root_generation
-                ),
-                (
-                    before.root,
-                    before.root_setting,
-                    before.config,
-                    before.root_generation
-                ),
-                "{old:?}: nothing published, the state as before"
+                (RefusalClass::Conflict, MOUNT_READ_ONLY)
             );
         }
+        for answer in [
+            svc.remove_mount("a/b").map(drop),
+            svc.relocate_mount(".x", &disk.at("lib2"), false).map(drop),
+        ] {
+            let (class, reason) = refused(answer.unwrap_err());
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::InvalidArgument, MOUNT_NAME_INVALID)
+            );
+        }
+        for answer in [
+            svc.remove_mount("nope").map(drop),
+            svc.relocate_mount("nope", &disk.at("lib2"), false)
+                .map(drop),
+        ] {
+            let (class, reason) = refused(answer.unwrap_err());
+            assert_eq!(
+                (class, reason.code.as_str(), reason.args),
+                (
+                    RefusalClass::NotFound,
+                    MOUNT_NOT_FOUND,
+                    json!({ "mount": "nope" })
+                )
+            );
+        }
+        assert_eq!(svc.numbers().root, ROOT_BASE);
     }
 
+    // ADR-0400 decision 13
     #[test]
-    fn a_set_root_whose_walk_fails_at_the_root_leaves_library_json_as_it_was() {
-        let disk = OnDisk::new(&["lib", "lib2"], "library", None);
-        let old = disk.explicit("lib");
-        std::fs::write(disk.config_path(), &old).unwrap();
-        disk.mem("lib").file("a.md", "a");
+    fn relocate_mount_re_points_a_mount_under_its_name_replacing_only_its_range_and_saves_it() {
+        let disk = OnDisk::new(&["library", "lib", "lib2", "other"], "library", None);
+        std::fs::write(
+            disk.config_path(),
+            disk.mounts_doc(&[("team", "lib"), ("extra", "other")]),
+        )
+        .unwrap();
+        disk.mem("lib").file("old.md", "old");
+        disk.mem("lib2").file("new.md", "new");
+        disk.mem("other").file("x.md", "x");
         let svc = disk.start();
-        svc.list(Some(&lp("library"))).unwrap();
-        disk.mem("lib2").fail_listing("", ListFailure::Open);
-        let reason = refused(svc.set_root(&disk.at("lib2"), false).unwrap_err()).1;
-        assert_eq!(reason.code, LIBRARY_ROOT_UNUSABLE);
+        svc.first_scan_join().unwrap();
+        assert!(has(&svc, "team/old.md") && has(&svc, "extra/x.md"));
+        let status = svc.relocate_mount("team", &disk.at("lib2"), false).unwrap();
+        assert_eq!(
+            mounts_of(&svc),
+            [
+                ("team".to_owned(), disk.at("lib2")),
+                ("extra".to_owned(), disk.at("other"))
+            ],
+            "the name and its place in the list stay"
+        );
+        assert_eq!(status.root_generation, ROOT_BASE + 1);
+        assert!(
+            has(&svc, "team/new.md") && !has(&svc, "team/old.md"),
+            "the mount's items come from its new folder"
+        );
+        assert!(has(&svc, "extra/x.md"), "the other mount's items stay");
+        assert_eq!(
+            stored(&disk),
+            [
+                ("team".to_owned(), disk.at("lib2").display().to_string()),
+                ("extra".to_owned(), disk.at("other").display().to_string())
+            ]
+        );
+        let spelled = disk.temp.path().join("state").join("..").join("library");
+        let status = svc.relocate_mount("team", &spelled, false).unwrap();
+        assert_eq!(
+            word(&disk),
+            json!("default"),
+            "the default place is stored as the word"
+        );
+        assert!(mount_row(&status, "team").default);
+    }
+
+    // ADR-0381 · ADR-0400 decision 14
+    #[test]
+    fn a_failed_save_leaves_each_mount_change_live_and_unsaved_and_repeating_the_call_saves_it() {
+        let disk = OnDisk::new(&["library", "lib2", "lib3"], "library", None);
+        let doc = disk.mounts_doc(&[("library", "default")]);
+        std::fs::write(disk.config_path(), &doc).unwrap();
+        let svc = disk.start();
+        let write_failed = |refusal: LibraryRefusal| {
+            let (class, reason) = refused(refusal);
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::Unavailable, LIBRARY_CONFIG_WRITE_FAILED)
+            );
+            let why = reason.args["why"].as_str().unwrap().to_owned();
+            assert!(
+                why.contains("live but not saved") || why.contains("removed but not saved"),
+                "{why}"
+            );
+            assert!(why.contains("disk full"), "{why}");
+        };
+        let unsaved =
+            |svc: &LibraryService| matches!(svc.status().config, ConfigHealth::Unsaved { .. });
+
+        svc.config.fail_writes(Some("disk full"));
+        write_failed(svc.add_mount("team", &disk.at("lib2"), false).unwrap_err());
+        assert_eq!(
+            row_names(&svc.status()),
+            ["library", "team", "engram"],
+            "the add is live"
+        );
+        assert!(unsaved(&svc));
         assert_eq!(
             std::fs::read_to_string(disk.config_path()).unwrap(),
-            old,
-            "the exact old bytes"
+            doc,
+            "the file keeps its setting"
         );
-        assert_eq!(svc.status().root, Some(disk.at("lib")));
-        assert_eq!(svc.numbers().root, ROOT_BASE);
         assert_eq!(
-            paths(&svc.list(Some(&lp("library"))).unwrap()),
-            ["library/a.md"]
+            row_names(&disk.start().status()),
+            ["library", "engram"],
+            "the next start follows the file that is left"
         );
-    }
+        svc.config.fail_writes(None);
+        let generation = svc.numbers().root;
+        let repeated = svc.add_mount("team", &disk.at("lib2"), false).unwrap();
+        assert_eq!(
+            repeated.status.config,
+            ConfigHealth::Ok,
+            "a repeat saves and clears unsaved"
+        );
+        assert_eq!(
+            repeated.status.root_generation, generation,
+            "nothing changed but the save"
+        );
+        assert_eq!(stored(&disk).len(), 2);
 
-    #[test]
-    fn a_library_json_write_refused_or_failed_after_the_publish_leaves_the_new_root_live_and_unsaved(
-    ) {
-        let default_doc =
-            r#"{"schema_version": 2, "mounts": [{"name": "library", "path": "default"}]}"#;
-        for judged in [true, false] {
-            let disk = OnDisk::new(&["library", "lib2"], "library", Some(default_doc));
-            disk.mem("lib2").file("b.md", "b");
-            let svc = disk.start();
-            match judged {
-                // Unreadable now (a folder in its place): the judge before the write refuses.
-                true => {
-                    std::fs::remove_file(disk.config_path()).unwrap();
-                    std::fs::create_dir(disk.config_path()).unwrap();
-                }
-                false => svc.config.fail_writes(Some("disk full")),
-            }
-            let (class, reason) = refused(svc.set_root(&disk.at("lib2"), false).unwrap_err());
-            assert_eq!(
-                (class, reason.code.as_str()),
-                (RefusalClass::Unavailable, LIBRARY_CONFIG_WRITE_FAILED),
-                "judged: {judged}"
-            );
-            let why = reason.args["why"].as_str().unwrap();
-            assert!(why.contains("live but not saved"), "{why}");
-            assert!(judged || why.contains("disk full"), "{why}");
-            match judged {
-                true => assert!(disk.config_path().is_dir(), "left as it was"),
-                false => assert_eq!(
-                    std::fs::read_to_string(disk.config_path()).unwrap(),
-                    default_doc,
-                    "the file keeps its setting"
-                ),
-            }
-            let status = svc.status();
-            assert_eq!(
-                (
-                    status.root.clone(),
-                    status.root_setting,
-                    status.root_generation
-                ),
-                (
-                    Some(disk.at("lib2")),
-                    Some(RootSettingKind::Explicit),
-                    ROOT_BASE + 1
-                ),
-                "judged: {judged}: the new root is live and nothing was undone"
-            );
-            assert!(
-                matches!(&status.config, ConfigHealth::Unsaved { why } if !why.is_empty()),
-                "{status:?}"
-            );
-            assert_eq!(
-                paths(&svc.list(Some(&lp("library"))).unwrap()),
-                ["library/b.md"]
-            );
-            if !judged {
-                assert_eq!(
-                    disk.start().status().root,
-                    Some(disk.at("library")),
-                    "the next start follows the file that is left"
-                );
-                svc.config.fail_writes(None);
-                let status = svc.set_root(&disk.at("lib2"), false).unwrap();
-                assert_eq!(
-                    status.config,
-                    ConfigHealth::Ok,
-                    "a later save clears unsaved"
-                );
-                assert_eq!(word(&disk), json!(disk.at("lib2").to_str().unwrap()));
-            }
-        }
+        svc.config.fail_writes(Some("disk full"));
+        write_failed(
+            svc.relocate_mount("team", &disk.at("lib3"), false)
+                .unwrap_err(),
+        );
+        assert_eq!(mount_row(&svc.status(), "team").folder, disk.at("lib3"));
+        svc.config.fail_writes(None);
+        let generation = svc.numbers().root;
+        let repeated = svc.relocate_mount("team", &disk.at("lib3"), false).unwrap();
+        assert_eq!(
+            (repeated.config, repeated.root_generation),
+            (ConfigHealth::Ok, generation)
+        );
+        assert_eq!(stored(&disk)[1].1, disk.at("lib3").display().to_string());
+
+        svc.config.fail_writes(Some("disk full"));
+        write_failed(svc.remove_mount("team").unwrap_err());
+        assert_eq!(
+            row_names(&svc.status()),
+            ["library", "engram"],
+            "the removal is live"
+        );
+        let (class, reason) = refused(svc.remove_mount("teem").unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::NotFound, MOUNT_NOT_FOUND),
+            "a mistyped name is still refused while unsaved"
+        );
+        svc.config.fail_writes(None);
+        let repeated = svc.remove_mount("team").unwrap();
+        assert_eq!(
+            repeated.outcome,
+            Removal::SavedOnly,
+            "not registered — saved only"
+        );
+        assert_eq!(repeated.status.config, ConfigHealth::Ok);
+        assert_eq!(
+            stored(&disk),
+            [("library".to_owned(), "default".to_owned())]
+        );
+        let (class, reason) = refused(svc.remove_mount("team").unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::NotFound, MOUNT_NOT_FOUND),
+            "once saved, a repeat is a mount that is not registered"
+        );
     }
 
     #[test]
@@ -5709,7 +6720,7 @@ claude: {changed: true}
         let disk = OnDisk::new(&["library", "lib2"], "library", Some("not json"));
         let svc = disk.start();
         svc.config.fail_writes(Some("disk full"));
-        let reason = refused(svc.set_root(&disk.at("lib2"), false).unwrap_err()).1;
+        let reason = refused(svc.add_mount("team", &disk.at("lib2"), false).unwrap_err()).1;
         assert_eq!(reason.code, LIBRARY_CONFIG_WRITE_FAILED);
         assert_eq!(
             std::fs::read_to_string(disk.config_path()).unwrap(),
@@ -5720,36 +6731,33 @@ claude: {changed: true}
             matches!(&status.config, ConfigHealth::Unsaved { .. }),
             "the live state wins: {status:?}"
         );
-        assert_eq!(
-            (status.root, status.root_setting),
-            (Some(disk.at("lib2")), Some(RootSettingKind::Explicit)),
-            "root and setting describe the live root"
-        );
+        assert_eq!(row_names(&status), ["team", "engram"], "the live mounts");
         let next = disk.start().status();
         assert_eq!(
-            (next.root, next.root_setting, next.config),
-            (None, None, ConfigHealth::Corrupt)
+            (next.mounts, next.config),
+            (vec![builtin_row()], ConfigHealth::Corrupt)
         );
     }
 
-    /// Waits (at most 10 s) until a root-change take has found the mutex held.
+    /// Waits (at most 10 s) until a mount-change take has found the mutex held.
     fn wait_blocked(svc: &LibraryService) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while svc
-            .root_change_blocked
+            .mount_change_blocked
             .load(std::sync::atomic::Ordering::SeqCst)
             == 0
         {
             assert!(
                 Instant::now() < deadline,
-                "no set_root waited on the root-change mutex"
+                "no mount command waited on the mount-change mutex"
             );
             thread::sleep(Duration::from_millis(2));
         }
     }
 
+    // ADR-0381 · ADR-0400 decision 16
     #[test]
-    fn set_root_calls_serialize_across_the_root_change_and_the_library_json_write() {
+    fn mount_commands_serialize_across_the_mount_change_and_the_library_json_write() {
         let disk = OnDisk::new(&["lib", "a", "b"], "library", None);
         std::fs::write(disk.config_path(), disk.explicit("lib")).unwrap();
         let svc = disk.start();
@@ -5758,17 +6766,17 @@ claude: {changed: true}
         disk.store.hold_at(At::Start, a.to_str().unwrap());
         let first = {
             let a = a.clone();
-            on_thread(&svc, move |svc| svc.set_root(&a, false))
+            on_thread(&svc, move |svc| svc.relocate_mount("library", &a, false))
         };
         disk.store.wait_held();
         disk.store.hold_at(At::Start, b.to_str().unwrap());
         let second = {
             let b = b.clone();
-            on_thread(&svc, move |svc| svc.set_root(&b, false))
+            on_thread(&svc, move |svc| svc.add_mount("team", &b, false))
         };
         wait_blocked(&svc);
         svc.gate
-            .wait_for("only the first root change is in line", |line, _| {
+            .wait_for("only the first mount change is in line", |line, _| {
                 line == [("root", true)]
             });
         assert_eq!(
@@ -5785,52 +6793,733 @@ claude: {changed: true}
         );
         disk.store.wait_held();
         assert_eq!(
-            word(&disk),
-            json!(a.to_str().unwrap()),
+            stored(&disk).len(),
+            1,
             "the second walks only after the first's write"
         );
         disk.store.release();
         join(second).unwrap();
-        assert_eq!(word(&disk), json!(b.to_str().unwrap()));
-        assert_eq!(svc.status().root, Some(b));
+        assert_eq!(stored(&disk).len(), 2);
+        assert_eq!(mount_row(&svc.status(), "team").folder, b);
+    }
+
+    // ADR-0400 decision 10: at load the saved mounts are judged against each other in the boot-scan job.
+    #[test]
+    fn a_saved_mount_overlapping_an_earlier_one_is_held_unreadable_never_walked_and_blocks_a_launch_until_relocated(
+    ) {
+        let disk = OnDisk::new(&["lib", "lib/sub", "lib2"], "library", None);
+        std::fs::write(
+            disk.config_path(),
+            disk.mounts_doc(&[("library", "lib"), ("inner", "lib/sub")]),
+        )
+        .unwrap();
+        disk.mem("lib").file("a.md", "a");
+        disk.mem("lib/sub")
+            .file("P.yaml", "kind: preset\nversion: 1\n");
+        disk.mem("lib2")
+            .file("P.yaml", "kind: preset\nversion: 1\n");
+        let svc = disk.start();
+        svc.start_boot_scan();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while svc.numbers().swap_ins == 0 {
+            assert!(Instant::now() < deadline, "the boot scan never applied");
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        let lib = disk.at("lib");
+        assert_eq!(
+            disk.store.scans(),
+            [scan(lib.to_str().unwrap(), None)],
+            "the overlapping mount is not walked"
+        );
+        let status = svc.status();
+        assert_eq!(
+            row_names(&status),
+            ["library", "inner", "engram"],
+            "kept registered"
+        );
+        let held = &mount_row(&status, "inner").state;
+        assert!(
+            matches!(held, MountState::Unreadable { why } if why.contains("overlaps the library mount library")),
+            "{held:?}"
+        );
+        assert_eq!(mount_row(&status, "library").state, MountState::Ok);
+        let refused_list = svc.list(Some(&lp("inner"))).unwrap_err();
+        assert_eq!(
+            (refused_list.code.as_str(), &refused_list.args["mount"]),
+            (LIBRARY_UNAVAILABLE, &json!("inner")),
+            "a reader does not walk it either"
+        );
+        assert!(
+            !svc.refresh(Some(&lp("inner"))).errors.is_empty(),
+            "nor a refresh"
+        );
+        assert_eq!(disk.store.scans().len(), 1);
+        let scope = svc.begin_launch();
+        let blocked = svc
+            .check_in(&scope, &claude_json(&["inner/P.yaml"]))
+            .expect_err("a launch reaching it is refused");
+        assert!(
+            blocked.reasons.iter().any(|reason| matches!(
+                reason,
+                BlockReason::LibraryUnavailable { reason } if reason.args["mount"] == json!("inner")
+            )),
+            "{blocked:?}"
+        );
+
+        svc.relocate_mount("inner", &disk.at("lib2"), false)
+            .unwrap();
+        assert_eq!(
+            mount_row(&svc.status(), "inner").state,
+            MountState::Ok,
+            "relocated: no longer held"
+        );
+        assert!(has(&svc, "inner/P.yaml"));
+    }
+
+    /// A disk whose `library.json` saves `library` at `lib` and `inner` at `lib/sub` — `inner` overlaps `library` —
+    /// with a preset in each folder and a spare folder `lib2`.
+    fn overlapping_disk() -> OnDisk {
+        let disk = OnDisk::new(&["lib", "lib/sub", "lib2"], "library", None);
+        std::fs::write(
+            disk.config_path(),
+            disk.mounts_doc(&[("library", "lib"), ("inner", "lib/sub")]),
+        )
+        .unwrap();
+        disk.mem("lib").file("a.md", "a");
+        disk.mem("lib/sub")
+            .file("P.yaml", "kind: preset\nversion: 1\n");
+        disk.mem("lib2")
+            .file("P.yaml", "kind: preset\nversion: 1\n");
+        disk
+    }
+
+    fn is_held(state: &MountState) -> bool {
+        matches!(state, MountState::Unreadable { why } if why.contains("overlaps the library mount library"))
+    }
+
+    // ADR-0400 decision 10: the load-time judgement runs before the first stat of a mount, whoever takes it —
+    //   a launch or a reader before the boot scan's job (here: no job at all) neither walks nor reads the held mount.
+    #[test]
+    fn a_launch_or_a_reader_before_the_boot_job_judges_the_overlap_first_and_never_walks_the_held_mount(
+    ) {
+        for launch_first in [true, false] {
+            let disk = overlapping_disk();
+            let svc = disk.start();
+            let launch = |svc: &LibraryService| {
+                let scope = svc.begin_launch();
+                let blocked = svc
+                    .check_in(&scope, &claude_json(&["inner/P.yaml"]))
+                    .expect_err("a launch reaching the held mount is refused");
+                assert!(
+                    blocked.reasons.iter().any(|reason| matches!(
+                        reason,
+                        BlockReason::LibraryUnavailable { reason }
+                            if reason.args["mount"] == json!("inner")
+                    )),
+                    "launch first: {launch_first}: {blocked:?}"
+                );
+            };
+            if launch_first {
+                launch(&svc);
+                assert!(
+                    disk.store
+                        .touched_under(disk.at("lib/sub").to_str().unwrap())
+                        .is_empty(),
+                    "nothing in the held mount is read"
+                );
+            }
+            let refused = svc.list(Some(&lp("inner"))).unwrap_err();
+            assert_eq!(
+                refused.args["mount"],
+                json!("inner"),
+                "launch first: {launch_first}"
+            );
+            assert_eq!(
+                disk.store.scans(),
+                [scan(disk.at("lib").to_str().unwrap(), None)],
+                "launch first: {launch_first}: the first scan walks only the earlier mount"
+            );
+            if !launch_first {
+                launch(&svc);
+            }
+            assert!(is_held(&mount_row(&svc.status(), "inner").state));
+            assert!(
+                disk.store
+                    .touched_under(disk.at("lib/sub").to_str().unwrap())
+                    .is_empty(),
+                "launch first: {launch_first}: nothing in the held mount is read"
+            );
+        }
+    }
+
+    /// Waits (at most 10 s) until `n` callers found the load judgement running and wait for it.
+    fn wait_judge_waiters(svc: &LibraryService, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while svc
+            .load_judge_blocked
+            .load(std::sync::atomic::Ordering::SeqCst)
+            < n
+        {
+            assert!(
+                Instant::now() < deadline,
+                "fewer than {n} callers waited on the judgement"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    // ADR-0400 decision 10: launches, readers and mount commands arriving while the load-time judgement runs wait for
+    //   it — no store access before it ends — and a mount command's change lands after the holds, so a mount removed
+    //   and added back meanwhile is not left held. The budgets are long and the door opens only on the test's signal,
+    //   so no wall clock decides the order.
+    #[test]
+    fn launches_readers_and_mount_commands_wait_for_a_running_load_judgement_and_a_mount_added_back_is_not_held(
+    ) {
+        let disk = overlapping_disk();
+        let svc = disk.start_limited(Duration::from_secs(120));
+        disk.ops.2.close_at(disk.at("lib/sub"));
+        svc.start_boot_scan();
+        disk.ops.2.wait_parked();
+        let launch = on_thread(&svc, |svc| {
+            let scope = svc.begin_launch();
+            svc.check_in(&scope, &claude_json(&["library/P.yaml"]))
+                .is_ok()
+        });
+        let reader = on_thread(&svc, |svc| svc.list(Some(&lp("library"))).is_ok());
+        wait_judge_waiters(&svc, 2);
+        assert!(
+            disk.store.scans().is_empty(),
+            "nothing walked before the judgement"
+        );
+        assert!(
+            disk.store
+                .touched_under(disk.at("lib").to_str().unwrap())
+                .is_empty(),
+            "nothing read before the judgement"
+        );
+        let commands = {
+            let inner = disk.at("lib/sub");
+            on_thread(&svc, move |svc| {
+                svc.remove_mount("library")?;
+                svc.remove_mount("inner")?;
+                svc.add_mount("inner", &inner, false)
+            })
+        };
+        wait_judge_waiters(&svc, 3);
+        let names: Vec<String> = mounts_of(&svc).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(
+            names,
+            ["library", "inner"],
+            "nothing changed while the judgement runs"
+        );
+        assert!(disk.store.scans().is_empty());
+        disk.ops.2.open();
+        let added = join(commands).unwrap();
+        join(launch);
+        join(reader);
+        assert_eq!(row_names(&added.status), ["inner", "engram"]);
+        assert_eq!(
+            mount_row(&added.status, "inner").state,
+            MountState::Ok,
+            "added back after its hold was ended: not held"
+        );
+        assert!(has(&svc, "inner/P.yaml"), "walked");
+    }
+
+    /// Folder ops on which every ask about a folder at or below `dead` — a share that does not answer — answers only
+    /// after `delay`, far past any budget; other folders stat `Ok`, canonicalize to their spelling and have no
+    /// identity.
+    struct DeadShare {
+        dead: PathBuf,
+        delay: Duration,
+    }
+
+    impl DeadShare {
+        fn wait(&self, p: &Path) {
+            if p.starts_with(&self.dead) {
+                thread::sleep(self.delay);
+            }
+        }
+    }
+
+    impl FolderOps for DeadShare {
+        fn stat(&self, p: &Path) -> FolderStatus {
+            self.wait(p);
+            FolderStatus::Ok
+        }
+
+        fn list(&self, _: &Path, _: usize) -> Result<FolderListing, FolderStatus> {
+            Err(FolderStatus::Unreadable("not modeled".to_owned()))
+        }
+
+        fn canonical(&self, p: &Path) -> io::Result<PathBuf> {
+            self.wait(p);
+            Ok(p.to_path_buf())
+        }
+
+        fn identity(&self, p: &Path) -> io::Result<engram_dashboard_platform::fs::FileIdentity> {
+            self.wait(p);
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+
+        fn read(&self, _: &Path, _: u64) -> io::Result<String> {
+            Err(io::Error::other("not modeled"))
+        }
+    }
+
+    // ADR-0360: the load-time judgement costs the first `status` and the first launch no more than their own budget —
+    //   with a dead share among the mounts, each answers within its one budget (before, the judgement's wait came on
+    //   top of the caller's own stat: two budgets). The launch's budget is shorter than a read's, so a judgement given
+    //   a whole read budget would overrun it. The budgets are long enough that a wrong cost (a second budget, or a
+    //   whole read budget for the launch) lies half a budget or more past the bound — scheduling noise does not reach
+    //   it.
+    #[test]
+    fn the_load_judgement_keeps_the_first_status_and_launch_within_their_own_budget() {
+        let limit = Duration::from_secs(2);
+        for launch_first in [false, true] {
+            let ops = DeadShare {
+                dead: PathBuf::from("/team"),
+                delay: limit * 4,
+            };
+            let waits = LaunchWaits {
+                required: limit / 2,
+                advisory: limit / 2,
+            };
+            let budget = match launch_first {
+                false => limit,
+                true => waits.required,
+            };
+            let io = BoundedIo::new(limit, waits, LIST_CAP, Arc::new(ops), Arc::new(ThreadSpawn));
+            let (svc, _store) =
+                mounted_io(&[("library", "/lib"), ("team", "/team")], Vec::new(), io);
+            let began = Instant::now();
+            let team = match launch_first {
+                false => mount_row(&svc.status(), "team").state.clone(),
+                true => {
+                    let scope = svc.begin_launch();
+                    let blocked = svc
+                        .check_in(&scope, &claude_json(&["team/P.yaml"]))
+                        .expect_err("the dead mount blocks");
+                    let [BlockReason::LibraryUnavailable { reason }] = blocked.reasons.as_slice()
+                    else {
+                        panic!("{blocked:?}")
+                    };
+                    MountState::Unreadable {
+                        why: reason.args["message"].as_str().unwrap().to_owned(),
+                    }
+                }
+            };
+            let took = began.elapsed();
+            assert!(
+                took < budget + budget / 2,
+                "launch first: {launch_first}: one budget ({budget:?}), not more: {took:?}"
+            );
+            assert!(
+                matches!(team, MountState::Unreadable { .. }),
+                "launch first: {launch_first}: {team:?}"
+            );
+        }
+    }
+
+    // ADR-0402 decision 5: a first scan that runs the load-time judgement itself, which a dead share makes take its
+    //   whole budget, stats its mounts on a fresh budget the judgement charged nothing to, so the healthy mount is
+    //   walked and readable and only the dead one — which gave no answer to its own ask — is recorded unreadable.
+    #[test]
+    fn a_first_scan_starved_by_the_load_judgement_records_nothing_and_walks_the_healthy_mount_on_a_fresh_budget(
+    ) {
+        let limit = Duration::from_millis(800);
+        let ops = DeadShare {
+            dead: PathBuf::from("/team"),
+            delay: limit * 4,
+        };
+        let io = BoundedIo::new(
+            limit,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::new(ops),
+            Arc::new(ThreadSpawn),
+        );
+        let (svc, store) = mounted_io(&[("library", "/lib"), ("team", "/team")], Vec::new(), io);
+        store.mem("/lib").file("a.md", "a");
+        svc.first_scan_join().unwrap();
+        let library = MountName::parse("library").unwrap();
+        let seen = svc.with_read(|state| state.seen(&library));
+        assert!(seen.usable(), "the healthy mount is walked: {seen:?}");
+        assert!(has(&svc, "library/a.md"));
+        let unavailable: Vec<(String, MountState)> = svc
+            .folders()
+            .unwrap()
+            .unavailable
+            .into_iter()
+            .filter(|left| left.mount != BUILTIN_MOUNT)
+            .map(|left| (left.mount, left.state))
+            .collect();
+        assert_eq!(
+            unavailable,
+            [(
+                "team".to_owned(),
+                MountState::Unreadable {
+                    why: crate::folder::TIMEOUT.to_owned()
+                }
+            )],
+            "of the library mounts, only the dead one, by its own timeout (the test has no built-in folder)"
+        );
+        assert_eq!(
+            store.scans(),
+            [scan("/lib", None)],
+            "walked once; the dead mount never"
+        );
+    }
+
+    /// Folder ops whose stat of a folder listed in `slow` answers `Ok` only after its delay (any other at once); a
+    /// folder's canonical path is its spelling, the folder at the door waiting until the door opens; no folder has an
+    /// identity.
+    struct SlowStats {
+        slow: Vec<(PathBuf, Duration)>,
+        door: CanonicalDoor,
+    }
+
+    impl FolderOps for SlowStats {
+        fn stat(&self, p: &Path) -> FolderStatus {
+            if let Some((_, delay)) = self.slow.iter().find(|(folder, _)| folder == p) {
+                thread::sleep(*delay);
+            }
+            FolderStatus::Ok
+        }
+
+        fn list(&self, _: &Path, _: usize) -> Result<FolderListing, FolderStatus> {
+            Err(FolderStatus::Unreadable("not modeled".to_owned()))
+        }
+
+        fn canonical(&self, p: &Path) -> io::Result<PathBuf> {
+            self.door.pass(p);
+            Ok(p.to_path_buf())
+        }
+
+        fn identity(&self, _: &Path) -> io::Result<engram_dashboard_platform::fs::FileIdentity> {
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+
+        fn read(&self, _: &Path, _: u64) -> io::Result<String> {
+            Err(io::Error::other("not modeled"))
+        }
+    }
+
+    // ADR-0402 decision 5: a reader's first scan that waits for a running load-time judgement (the boot job's, begun
+    //   just before) and wakes with a small part of its budget left still stats its mounts on a fresh budget — the slow
+    //   but healthy mount, which answers within one budget and not within that remainder, is walked and readable, and
+    //   only the dead one is recorded unreadable, by its own timeout. The remainder is set by the door: it opens about
+    //   300 ms before the waiter's budget ends (or the judgement ends on its own budget, which began first), far less
+    //   than the healthy mount's 1 s.
+    #[test]
+    fn a_first_scan_waking_from_the_load_judgement_with_little_budget_left_stats_on_a_fresh_budget()
+    {
+        let limit = Duration::from_secs(2);
+        let ops = Arc::new(SlowStats {
+            slow: vec![
+                (PathBuf::from("/lib"), limit / 2),
+                (PathBuf::from("/team"), limit * 4),
+            ],
+            door: CanonicalDoor::default(),
+        });
+        ops.door.close_at(PathBuf::from("/lib"));
+        let io = BoundedIo::new(
+            limit,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+            Arc::new(ThreadSpawn),
+        );
+        let (svc, store) = mounted_io(&[("library", "/lib"), ("team", "/team")], Vec::new(), io);
+        store.mem("/lib").file("a.md", "a");
+        // What the boot scan's job runs first, on its own read budget.
+        let judge = on_thread(&svc, |svc| svc.judge_at_load(&svc.io.begin_read()));
+        ops.door.wait_parked();
+        let reader = on_thread(&svc, |svc| svc.first_scan_join());
+        wait_judge_waiters(&svc, 1);
+        thread::sleep(limit - Duration::from_millis(300));
+        ops.door.open();
+        assert!(join(judge));
+        join(reader).unwrap();
+        let library = MountName::parse("library").unwrap();
+        let seen = svc.with_read(|state| state.seen(&library));
+        assert!(
+            seen.usable(),
+            "the slow but healthy mount is walked: {seen:?}"
+        );
+        assert!(has(&svc, "library/a.md"));
+        let unavailable: Vec<(String, MountState)> = svc
+            .folders()
+            .unwrap()
+            .unavailable
+            .into_iter()
+            .filter(|left| left.mount != BUILTIN_MOUNT)
+            .map(|left| (left.mount, left.state))
+            .collect();
+        assert_eq!(
+            unavailable,
+            [(
+                "team".to_owned(),
+                MountState::Unreadable {
+                    why: crate::folder::TIMEOUT.to_owned()
+                }
+            )],
+            "of the library mounts, only the dead one, by its own timeout"
+        );
+        assert_eq!(store.scans(), [scan("/lib", None)], "walked once");
+    }
+
+    // ADR-0402 decision 5: a first scan whose whole wait for the load-time judgement runs out (here the judgement is
+    //   held up by the library lock, not by IO) states no mount — it records nothing, walks nothing and does not raise
+    //   the first scan — and goes round to a fresh scan once the judgement is done, which walks both mounts.
+    #[test]
+    fn a_first_scan_whose_wait_for_the_load_judgement_runs_out_records_nothing_and_goes_round() {
+        let limit = Duration::from_millis(300);
+        let io = BoundedIo::new(
+            limit,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::new(StatOps::default()),
+            Arc::new(ThreadSpawn),
+        );
+        let (svc, store) = mounted_io(&[("library", "/lib"), ("team", "/team")], Vec::new(), io);
+        store.mem("/lib").file("a.md", "a");
+        let held = svc.gate.lib().write().unwrap();
+        let judge = on_thread(&svc, |svc| svc.judge_at_load(&svc.io.begin_read()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while *lock(&svc.load_judgement) != Judgement::Running {
+            assert!(Instant::now() < deadline, "the judgement never started");
+            thread::sleep(Duration::from_millis(2));
+        }
+        let reader = on_thread(&svc, |svc| svc.first_scan_join());
+        // The reader's wait ran out: it drew its scan's ticket with nothing stated, and its walk waits for the lock.
+        svc.gate.wait_for("the reader's scan entered", |line, _| {
+            line == [("scan", true)]
+        });
+        assert_eq!(
+            svc.load_judge_blocked
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        drop(held);
+        assert!(join(judge));
+        join(reader).unwrap();
+        for name in ["library", "team"] {
+            let mount = MountName::parse(name).unwrap();
+            let seen = svc.with_read(|state| state.seen(&mount));
+            assert!(seen.usable(), "{name}: walked on the next round: {seen:?}");
+        }
+        assert!(has(&svc, "library/a.md"));
+        let lib_walks = store
+            .scans()
+            .into_iter()
+            .filter(|walk| *walk == scan("/lib", None))
+            .count();
+        assert_eq!(
+            lib_walks, 1,
+            "walked once, on the round after the judgement"
+        );
+    }
+
+    // ADR-0400 decision 10: a held mount relocated to its own folder and judged free is no longer held during its
+    //   walk — a scan whose stat falls in that walk is not told the stale hold, so its newer stamp does not record the
+    //   hold over the walk: the mount is usable right after, with no read walking it again.
+    #[test]
+    fn a_scan_during_a_held_mounts_relocation_in_place_does_not_record_the_hold_over_the_walk() {
+        let disk = overlapping_disk();
+        let svc = disk.start();
+        assert!(is_held(&mount_row(&svc.status(), "inner").state));
+        svc.remove_mount("library").unwrap();
+        let sub = disk.at("lib/sub");
+        disk.store.hold_at(At::Start, sub.to_str().unwrap());
+        let relocate = {
+            let sub = sub.clone();
+            on_thread(&svc, move |svc| svc.relocate_mount("inner", &sub, false))
+        };
+        disk.store.wait_held();
+        let scan = on_thread(&svc, |svc| svc.first_scan_join());
+        svc.gate.wait_for(
+            "the scan stat'ed and queued behind the relocation",
+            |line, _| line == [("root", true), ("scan", false)],
+        );
+        disk.store.release();
+        let status = join(relocate).unwrap();
+        assert_eq!(mount_row(&status, "inner").state, MountState::Ok);
+        join(scan).unwrap();
+        let inner = MountName::parse("inner").unwrap();
+        let seen = svc.with_read(|state| state.seen(&inner));
+        assert!(seen.usable(), "{seen:?}");
+    }
+
+    // ADR-0382 decision 1: the first start runs before the daemon answers, so it runs no load-time judgement — not
+    //   even over a saved list of overlapping mounts, where it is not due.
+    #[test]
+    fn the_first_start_runs_no_load_judgement() {
+        let disk = overlapping_disk();
+        let svc = disk.start();
+        assert_eq!(svc.first_start(), FirstStart::NotDue);
+        assert_eq!(*lock(&svc.load_judgement), Judgement::NotStarted);
+        assert!(lock(&svc.overlapping).is_empty(), "nothing judged or held");
+        assert_eq!(
+            disk.ops.2.passed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no folder canonicalized"
+        );
+    }
+
+    // ADR-0400 decisions 10 and 14: a held mount relocated to its own folder is not a repeat — it is judged
+    //   again (still overlapping: refused) and, once free, walked and published.
+    #[test]
+    fn a_held_mount_relocated_to_its_own_folder_is_judged_again_and_walked_once_free() {
+        let disk = overlapping_disk();
+        let svc = disk.start();
+        assert!(is_held(&mount_row(&svc.status(), "inner").state));
+        let (class, reason) = refused(
+            svc.relocate_mount("inner", &disk.at("lib/sub"), false)
+                .unwrap_err(),
+        );
+        assert_eq!(
+            (class, reason.code.as_str(), &reason.args["mount"]),
+            (RefusalClass::Conflict, MOUNT_OVERLAPS, &json!("library")),
+            "judged again, not saved as a repeat"
+        );
+        svc.remove_mount("library").unwrap();
+        let root = svc.numbers().root;
+        let status = svc
+            .relocate_mount("inner", &disk.at("lib/sub"), false)
+            .unwrap();
+        assert_eq!(mount_row(&status, "inner").state, MountState::Ok);
+        assert_eq!(status.root_generation, root + 1, "a mount change ran");
+        assert!(has(&svc, "inner/P.yaml"), "walked");
+    }
+
+    // ADR-0400 decision 10: a hold ends when its mount is removed or relocated — the same name registered
+    //   at the same folder again later is not held.
+    #[test]
+    fn a_hold_ends_when_its_mount_is_removed_or_relocated() {
+        let disk = overlapping_disk();
+        let svc = disk.start();
+        assert!(is_held(&mount_row(&svc.status(), "inner").state));
+        svc.remove_mount("inner").unwrap();
+        svc.remove_mount("library").unwrap();
+        let added = svc.add_mount("inner", &disk.at("lib/sub"), false).unwrap();
+        assert_eq!(
+            mount_row(&added.status, "inner").state,
+            MountState::Ok,
+            "removed: the hold ended"
+        );
+
+        let disk = overlapping_disk();
+        let svc = disk.start();
+        assert!(is_held(&mount_row(&svc.status(), "inner").state));
+        svc.relocate_mount("inner", &disk.at("lib2"), false)
+            .unwrap();
+        svc.remove_mount("library").unwrap();
+        let status = svc
+            .relocate_mount("inner", &disk.at("lib/sub"), false)
+            .unwrap();
+        assert_eq!(
+            mount_row(&status, "inner").state,
+            MountState::Ok,
+            "relocated away and back: the hold ended"
+        );
+    }
+
+    // ADR-0400 decision 10 · ADR-0382 decision 4: a scan walks a mount whose stat worker could not be started,
+    //   but never a held one.
+    #[test]
+    fn a_held_mount_is_not_walked_when_its_stat_worker_cannot_be_started() {
+        let (svc, store) = mounted_spawn(
+            &[("library", "/lib"), ("inner", "/lib")],
+            Arc::new(StatOps::default()),
+            Vec::new(),
+            Arc::new(FailingSpawn),
+        );
+        svc.first_scan_join().unwrap();
+        assert_eq!(
+            store.scans(),
+            [scan("/lib", None)],
+            "the earlier mount walked on the caller's thread, the held one not"
+        );
+        let inner = MountName::parse("inner").unwrap();
+        assert!(is_held(&svc.with_read(|state| state.seen(&inner).shown())));
+    }
+
+    // ADR-0400 decision 10: two mounts on one folder keep their own stat in a read computation — the held one
+    //   blocks with its row and the other resolves, in either order.
+    #[test]
+    fn two_mounts_on_one_folder_are_judged_each_as_itself_in_either_order() {
+        for presets in [
+            ["library/P.yaml", "inner/P.yaml"],
+            ["inner/P.yaml", "library/P.yaml"],
+        ] {
+            let profile = claude_json(&presets);
+            let (svc, store) = mounted_agents(
+                &[("library", "/lib"), ("inner", "/lib")],
+                Arc::new(StatOps::default()),
+                vec![profile.clone()],
+            );
+            store.mem("/lib").file(
+                "P.yaml",
+                "kind: preset\nversion: 1\ninstructions:\n  - library/a.md\n",
+            );
+            store.mem("/lib").file("a.md", "a");
+            let resolution = svc.resolve_agent(profile.id).expect("a claude agent");
+            assert_eq!(
+                resolution.problems,
+                [library_unavailable(
+                    "inner",
+                    "overlaps the library mount library; relocate or remove it"
+                )],
+                "{presets:?}"
+            );
+            assert_eq!(resolution.instructions[0].0, "library/a.md", "{presets:?}");
+        }
     }
 
     // ── first start ──────────────────────────────────────────────────────────────────────────────────────
 
     #[test]
     fn the_first_start_creates_the_default_place_writes_the_default_value_and_publishes_it() {
-        let disk = OnDisk::new(&["library"], "library", None);
+        let disk = OnDisk::new(&["default_library"], "default_library", None);
         let svc = disk.start();
         assert_eq!(svc.first_start(), FirstStart::Published);
-        assert!(disk.at("library").is_dir());
+        assert!(disk.at("default_library").is_dir());
         assert_eq!(
             disk.config(),
             Some(
-                json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+                json!({ "schema_version": 2, "mounts": [{ "name": "default_library", "path": "default" }] })
             ),
-            "the mount `library` at the default value, not the path"
+            "the mount `default_library` at the default value, not the path"
         );
         assert_eq!(
             mounts_of(&svc),
-            [("library".to_owned(), disk.at("library"))],
+            [("default_library".to_owned(), disk.at("default_library"))],
             "one mount published"
         );
         let status = svc.status();
         assert_eq!(
+            (status.mounts, status.config),
             (
-                status.root,
-                status.root_setting,
-                status.state,
-                status.config
-            ),
-            (
-                Some(disk.at("library")),
-                Some(RootSettingKind::Default),
-                RootStatus::Ok,
+                vec![
+                    MountRow {
+                        name: "default_library".to_owned(),
+                        folder: disk.at("default_library"),
+                        default: true,
+                        builtin: false,
+                        state: MountState::Ok,
+                    },
+                    builtin_row(),
+                ],
                 ConfigHealth::Ok
             )
         );
-        assert!(svc.list(Some(&lp("library"))).unwrap().rows.is_empty());
+        assert!(svc
+            .list(Some(&lp("default_library")))
+            .unwrap()
+            .rows
+            .is_empty());
         assert_eq!(svc.first_start(), FirstStart::NotDue, "once");
         assert_eq!(
             disk.start().first_start(),
@@ -5840,36 +7529,33 @@ claude: {changed: true}
     }
 
     #[test]
-    fn an_uncreatable_default_place_leaves_the_root_unset_and_no_file_and_the_next_start_retries() {
-        let disk = OnDisk::new(&["blocker/library"], "blocker/library", None);
+    fn an_uncreatable_default_place_leaves_no_mount_and_no_file_and_the_next_start_retries() {
+        let disk = OnDisk::new(
+            &["blocker/default_library"],
+            "blocker/default_library",
+            None,
+        );
         std::fs::write(disk.temp.path().join("blocker"), "a file").unwrap();
         let svc = disk.start();
         assert!(matches!(svc.first_start(), FirstStart::Failed(_)));
         assert!(disk.config().is_none());
         let status = svc.status();
         assert_eq!(
-            (
-                status.root,
-                status.root_setting,
-                status.state,
-                status.config
-            ),
-            (
-                None,
-                Some(RootSettingKind::Default),
-                RootStatus::Unset,
-                ConfigHealth::Ok
-            )
+            (status.mounts, status.config),
+            (vec![builtin_row()], ConfigHealth::Ok)
         );
         std::fs::remove_file(disk.temp.path().join("blocker")).unwrap();
         let next = disk.start();
         assert_eq!(next.first_start(), FirstStart::Published);
-        assert_eq!(next.status().root, Some(disk.at("blocker/library")));
+        assert_eq!(
+            mount_row(&next.status(), "default_library").folder,
+            disk.at("blocker/default_library")
+        );
     }
 
     #[test]
-    fn a_first_start_whose_root_stat_is_refused_publishes_and_writes_nothing_and_the_next_start_retries(
-    ) {
+    fn a_first_start_whose_stat_is_refused_publishes_and_writes_nothing_and_the_next_start_retries()
+    {
         let disk = OnDisk::new(&["library"], "library", None);
         lock(&disk.ops.0).insert(
             disk.at("library"),
@@ -5878,7 +7564,7 @@ claude: {changed: true}
         let svc = disk.start();
         assert!(matches!(svc.first_start(), FirstStart::Failed(why) if why.contains("denied")));
         assert!(disk.config().is_none());
-        assert_eq!(svc.status().root, None);
+        assert_eq!(svc.status().mounts, [builtin_row()]);
         assert_eq!(svc.numbers().root, ROOT_BASE);
         assert!(disk.store.scans().is_empty(), "nothing walked");
         lock(&disk.ops.0).clear();
@@ -5886,26 +7572,19 @@ claude: {changed: true}
     }
 
     #[test]
-    fn a_first_start_whose_write_fails_keeps_the_default_root_live_unsaved_and_the_next_start_runs_it_again(
+    fn a_first_start_whose_write_fails_keeps_the_default_mount_live_unsaved_and_the_next_start_runs_it_again(
     ) {
-        let disk = OnDisk::new(&["library"], "library", None);
+        let disk = OnDisk::new(&["default_library"], "default_library", None);
         let svc = disk.start();
         svc.config.fail_writes(Some("disk full"));
         assert!(matches!(svc.first_start(), FirstStart::Unsaved(why) if why.contains("disk full")));
         assert!(disk.config().is_none(), "no file");
         let status = svc.status();
+        let library = mount_row(&status, "default_library");
         assert_eq!(
-            (
-                status.root.clone(),
-                status.root_setting,
-                status.state.clone()
-            ),
-            (
-                Some(disk.at("library")),
-                Some(RootSettingKind::Default),
-                RootStatus::Ok
-            ),
-            "the default root is live this run"
+            (&library.folder, library.default, &library.state),
+            (&disk.at("default_library"), true, &MountState::Ok),
+            "the default mount is live this run"
         );
         assert!(
             matches!(&status.config, ConfigHealth::Unsaved { .. }),
@@ -5921,40 +7600,46 @@ claude: {changed: true}
         assert_eq!(
             disk.config(),
             Some(
-                json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+                json!({ "schema_version": 2, "mounts": [{ "name": "default_library", "path": "default" }] })
             )
         );
-        assert_eq!(next.status().root, Some(disk.at("library")));
+        assert_eq!(
+            mount_row(&next.status(), "default_library").folder,
+            disk.at("default_library")
+        );
     }
 
     #[test]
     fn a_first_start_that_finds_a_newer_file_at_its_write_stays_live_and_the_next_start_is_read_only(
     ) {
-        let disk = OnDisk::new(&["library", "lib2"], "library", None);
+        let disk = OnDisk::new(&["default_library", "lib2"], "default_library", None);
         let svc = disk.start();
         let newer = r#"{"schema_version": 9, "mounts": []}"#;
         std::fs::write(disk.config_path(), newer).unwrap();
         assert!(matches!(svc.first_start(), FirstStart::Unsaved(why) if why.contains("newer")));
         assert_eq!(std::fs::read_to_string(disk.config_path()).unwrap(), newer);
-        assert_eq!(svc.status().root, Some(disk.at("library")));
+        assert_eq!(
+            mount_row(&svc.status(), "default_library").folder,
+            disk.at("default_library")
+        );
         let next = disk.start();
         assert_eq!(next.first_start(), FirstStart::NotDue);
         let status = next.status();
-        assert_eq!(status.root, None);
+        assert_eq!(status.mounts, [builtin_row()]);
         assert!(
             matches!(&status.config, ConfigHealth::ReadOnly { .. }),
             "{status:?}"
         );
-        let reason = refused(next.set_root(&disk.at("lib2"), false).unwrap_err()).1;
+        let reason = refused(next.add_mount("team", &disk.at("lib2"), false).unwrap_err()).1;
         assert_eq!(reason.code, LIBRARY_CONFIG_READ_ONLY);
     }
 
     #[test]
     fn a_first_start_over_files_already_in_the_default_place_publishes_without_a_walk_and_the_boot_scan_fills_the_catalog(
     ) {
-        let disk = OnDisk::new(&["library"], "library", None);
-        disk.mem("library").file("a.md", "a");
-        let root = disk.at("library");
+        let disk = OnDisk::new(&["default_library"], "default_library", None);
+        disk.mem("default_library").file("a.md", "a");
+        let root = disk.at("default_library");
         let root_text = root.to_str().unwrap();
         disk.store.hold_at(At::Start, root_text);
         let svc = disk.start();
@@ -5970,7 +7655,7 @@ claude: {changed: true}
         assert_eq!(
             disk.config(),
             Some(
-                json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+                json!({ "schema_version": 2, "mounts": [{ "name": "default_library", "path": "default" }] })
             )
         );
         assert_eq!(root_of(&svc), Some(root.clone()));
@@ -5980,16 +7665,16 @@ claude: {changed: true}
         svc.start_boot_scan();
         disk.store.wait_held();
         assert!(
-            !has(&svc, "library/a.md"),
+            !has(&svc, "default_library/a.md"),
             "the boot-scan method returned with its walk parked"
         );
-        let reader = on_thread(&svc, |svc| svc.list(Some(&lp("library"))).unwrap());
+        let reader = on_thread(&svc, |svc| svc.list(Some(&lp("default_library"))).unwrap());
         svc.gate.wait_for(
             "the reader waits at the first-scan entrance",
             |_, waiting| waiting == 1,
         );
         disk.store.release();
-        assert_eq!(paths(&join(reader)), ["library/a.md"]);
+        assert_eq!(paths(&join(reader)), ["default_library/a.md"]);
         assert_eq!(
             disk.store.scans(),
             [scan(root_text, None)],
@@ -6001,9 +7686,9 @@ claude: {changed: true}
     #[test]
     fn a_walk_that_fails_after_a_published_first_start_leaves_library_json_written_and_readers_unavailable_until_a_scan_succeeds(
     ) {
-        let disk = OnDisk::new(&["library"], "library", None);
-        disk.mem("library").file("a.md", "a");
-        let root = disk.at("library");
+        let disk = OnDisk::new(&["default_library"], "default_library", None);
+        disk.mem("default_library").file("a.md", "a");
+        let root = disk.at("default_library");
         let svc = disk.start();
         assert_eq!(svc.first_start(), FirstStart::Published);
         let written = disk.config();
@@ -6022,19 +7707,19 @@ claude: {changed: true}
         assert_eq!(
             root_of(&svc),
             Some(root.clone()),
-            "the root stays published"
+            "the mount stays published"
         );
         assert_eq!(
-            svc.status().state,
-            RootStatus::Ok,
-            "status answers the root stat"
+            mount_row(&svc.status(), "default_library").state,
+            MountState::Ok,
+            "status answers the mount's stat"
         );
 
         *lock(&disk.store.fail_next_scan) = true;
-        let refused_list = svc.list(Some(&lp("library"))).unwrap_err();
+        let refused_list = svc.list(Some(&lp("default_library"))).unwrap_err();
         assert_eq!(
             (refused_list.code.as_str(), &refused_list.args["mount"]),
-            (LIBRARY_UNAVAILABLE, &json!("library")),
+            (LIBRARY_UNAVAILABLE, &json!("default_library")),
             "the reader walked again and that walk failed too"
         );
         let partial = svc.folders().unwrap();
@@ -6042,40 +7727,30 @@ claude: {changed: true}
             partial.unavailable,
             [
                 UnavailableMount {
-                    mount: BUILTIN_MOUNT.to_owned(),
-                    state: no_builtin_folder(),
-                },
-                UnavailableMount {
                     mount: MountName::first().as_str().to_owned(),
                     state: MountState::Unreadable {
                         why: io::Error::from(io::ErrorKind::PermissionDenied).to_string()
                     }
                 },
+                UnavailableMount {
+                    mount: BUILTIN_MOUNT.to_owned(),
+                    state: no_builtin_folder(),
+                },
             ],
             "a whole-tree read answers partially"
         );
         lock(&disk.ops.0).insert(root.clone(), FolderStatus::Missing);
-        // A stat worker of the status above may still be in flight, and a required ask joins it (`folder.rs` — one
-        //   worker per key): ask until it has ended.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let state = loop {
-            let state = svc.status().state;
-            if state != RootStatus::Ok || Instant::now() > deadline {
-                break state;
-            }
-            thread::sleep(Duration::from_millis(2));
-        };
         assert_eq!(
-            state,
-            RootStatus::Missing {
+            settled(&svc, "default_library", &MountState::Ok),
+            MountState::Missing {
                 why: "missing".to_owned()
             }
         );
         lock(&disk.ops.0).clear();
 
         assert_eq!(
-            paths(&svc.list(Some(&lp("library"))).unwrap()),
-            ["library/a.md"],
+            paths(&svc.list(Some(&lp("default_library"))).unwrap()),
+            ["default_library/a.md"],
             "a scan succeeded"
         );
         assert_eq!(disk.store.scans().len(), 3);
@@ -6083,7 +7758,8 @@ claude: {changed: true}
     }
 
     #[test]
-    fn a_configured_root_that_vanished_is_missing_not_recreated_and_the_setting_is_unchanged() {
+    fn a_configured_mount_folder_that_vanished_is_missing_not_recreated_and_the_setting_is_unchanged(
+    ) {
         for root in ["library", "chosen"] {
             let disk = OnDisk::new(&["library", "chosen"], "library", None);
             let config = match root {
@@ -6098,11 +7774,16 @@ claude: {changed: true}
             let svc = disk.start();
             assert_eq!(svc.first_start(), FirstStart::NotDue, "{root}");
             let status = svc.status();
-            assert_eq!(status.root, Some(disk.at(root)), "{root}");
             assert_eq!(
-                status.state,
-                RootStatus::Missing {
-                    why: "missing".to_owned()
+                mount_row(&status, "library"),
+                &MountRow {
+                    name: "library".to_owned(),
+                    folder: disk.at(root),
+                    default: root == "library",
+                    builtin: false,
+                    state: MountState::Missing {
+                        why: "missing".to_owned()
+                    },
                 },
                 "{root}"
             );
@@ -6112,30 +7793,29 @@ claude: {changed: true}
                 config,
                 "{root}"
             );
-            let setting = match root {
-                "library" => RootSettingKind::Default,
-                _ => RootSettingKind::Explicit,
-            };
-            assert_eq!(status.root_setting, Some(setting), "{root}");
         }
     }
 
     #[test]
-    fn a_corrupt_config_is_no_first_start_and_a_set_root_over_it_copies_it_aside_and_makes_it_ok() {
+    fn a_corrupt_config_is_no_first_start_and_a_mount_added_over_it_copies_it_aside_and_makes_it_ok(
+    ) {
         let disk = OnDisk::new(&["library", "lib2"], "library", Some("not json"));
         let svc = disk.start();
         assert_eq!(svc.first_start(), FirstStart::NotDue);
         let status = svc.status();
         assert_eq!(
-            (status.root, status.root_setting, status.config),
-            (None, None, ConfigHealth::Corrupt)
+            (status.mounts, status.config),
+            (vec![builtin_row()], ConfigHealth::Corrupt)
         );
-        let status = svc.set_root(&disk.at("lib2"), false).unwrap();
-        assert_eq!(status.config, ConfigHealth::Ok);
-        assert_eq!(status.root_setting, Some(RootSettingKind::Explicit));
+        let added = svc.add_mount("library", &disk.at("lib2"), false).unwrap();
+        assert_eq!(added.status.config, ConfigHealth::Ok);
         assert_eq!(
             std::fs::read_to_string(disk.state().join("library.json.corrupt")).unwrap(),
             "not json"
+        );
+        assert_eq!(
+            stored(&disk),
+            [("library".to_owned(), disk.at("lib2").display().to_string())]
         );
     }
 
@@ -6236,13 +7916,13 @@ claude: {changed: true}
     // ── the root generation on a change ──────────────────────────────────────────────────────────────────
 
     #[test]
-    fn a_stale_root_generation_is_refused_inside_the_changes_own_lock_take_even_when_queued_behind_a_root_change(
+    fn a_stale_root_generation_is_refused_inside_the_changes_own_lock_take_even_when_queued_behind_a_mount_change(
     ) {
         let (svc, store) = service_on(&["/lib", "/lib2"], Some("/lib"));
         svc.list(Some(&lp("library"))).unwrap();
         let given = svc.status().root_generation;
         store.hold_at(At::Start, "/lib2");
-        let root_change = on_thread(&svc, |svc| svc.change_root(PathBuf::from("/lib2")));
+        let root_change = on_thread(&svc, |svc| relocate(svc, "library", "/lib2"));
         store.wait_held();
         let ran = Arc::new(Mutex::new(false));
         let edit = {
@@ -6255,7 +7935,7 @@ claude: {changed: true}
             })
         };
         svc.gate
-            .wait_for("the edit is queued behind the root change", |line, _| {
+            .wait_for("the edit is queued behind the mount change", |line, _| {
                 line == [("root", true), ("change", false)]
             });
         store.release();
@@ -6274,9 +7954,10 @@ claude: {changed: true}
         assert_eq!(svc.numbers().change, changes, "no generation moved");
         let current = svc.status().root_generation;
         let root = svc.change_at(Some(current), |_, mounts, _| {
-            (mounts.first().map(|first| first.folder.clone()), Vec::new())
+            let first = mounts.iter().next().map(|first| first.folder.clone());
+            (Ok::<_, LibraryRefusal>(first), Vec::new())
         });
-        assert_eq!(root.unwrap(), Some(PathBuf::from("/lib2")));
+        assert_eq!(root.unwrap().unwrap(), Some(PathBuf::from("/lib2")));
         assert!(svc.change_at(None, |_, _, _| ((), Vec::new())).is_ok());
         assert_eq!(svc.numbers().change, changes + 2);
     }
@@ -6284,18 +7965,19 @@ claude: {changed: true}
     #[test]
     fn a_generation_kept_from_an_earlier_run_with_another_base_is_refused() {
         let disk = OnDisk::new(&["lib", "lib2"], "library", None);
+        std::fs::write(disk.config_path(), disk.explicit("lib")).unwrap();
         let first = disk.start_at(ROOT_BASE);
         let kept = first
-            .set_root(&disk.at("lib"), false)
+            .relocate_mount("library", &disk.at("lib2"), false)
             .unwrap()
             .root_generation;
         let next = disk.start_at(ROOT_BASE + 50_000);
         assert_eq!(next.status().root_generation, ROOT_BASE + 50_000);
         let moved = next
-            .set_root(&disk.at("lib2"), false)
+            .relocate_mount("library", &disk.at("lib"), false)
             .unwrap()
             .root_generation;
-        assert_eq!(moved, ROOT_BASE + 50_001, "one root change in each run");
+        assert_eq!(moved, ROOT_BASE + 50_001, "one mount change in each run");
         let (class, reason) = refused(
             next.change_at(Some(kept), |_, _, _| ((), Vec::new()))
                 .unwrap_err(),
@@ -6308,6 +7990,51 @@ claude: {changed: true}
         assert!(next
             .change_at(Some(moved), |_, _, _| ((), Vec::new()))
             .is_ok());
+    }
+
+    // A change refused inside its body applied nothing, so it moves no number; one that applied a catalog item does.
+    #[test]
+    fn a_change_refused_inside_its_body_moves_no_number_unless_it_applied_a_catalog_item() {
+        let (svc, store) = library();
+        store.mem("/lib").file("a.md", "a");
+        svc.first_scan_join().unwrap();
+        let before = svc.numbers();
+        let refused_change = svc.change_at(None, |_, _, _| {
+            (
+                Err::<(), _>(LibraryRefusal::unavailable("no".to_owned())),
+                Vec::new(),
+            )
+        });
+        assert!(refused_change.unwrap().is_err());
+        assert_eq!(
+            svc.numbers(),
+            before,
+            "a refusal that applied nothing moves nothing"
+        );
+        let touched = svc.change_at(None, |_, _, _| {
+            (
+                Err::<(), _>(LibraryRefusal::unavailable("no".to_owned())),
+                vec![key(&lp("library/a.md"))],
+            )
+        });
+        assert!(touched.unwrap().is_err());
+        assert_eq!(
+            svc.numbers().change,
+            before.change + 1,
+            "it applied an item"
+        );
+        let applied = svc.change_at(None, |_, _, _| (Ok::<(), LibraryRefusal>(()), Vec::new()));
+        assert!(applied.unwrap().is_ok());
+        assert_eq!(
+            svc.numbers().change,
+            before.change + 2,
+            "an answer that is not a refusal moves it"
+        );
+        assert_eq!(
+            svc.numbers().root,
+            before.root,
+            "a change never moves the root generation"
+        );
     }
 
     // ── folders · read ───────────────────────────────────────────────────────────────────────────────────

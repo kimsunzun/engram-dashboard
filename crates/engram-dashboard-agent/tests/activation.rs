@@ -13,9 +13,10 @@ use uuid::Uuid;
 use engram_dashboard_agent::backend;
 use engram_dashboard_agent::commands::{
     make_table, AgentBackend, AgentCommandHost, AgentOutputFormat as DeclaredOutputFormat,
-    LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind, LibraryRefreshOk,
-    LibraryRelinkOk, LibraryStatusOk, PresetAddOk, PresetCheckOk, PresetPreviewFolderOk,
-    PresetSection, PresetSetBackendOk, PresetView, RosterChanged, UsageCommandHost, UsageVendorRow,
+    LibraryAddMountOk, LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind,
+    LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryStatusOk, PresetAddOk,
+    PresetCheckOk, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk, PresetView,
+    RosterChanged, UsageCommandHost, UsageVendorRow,
 };
 use engram_dashboard_agent::failure::AgentFailureKind;
 use engram_dashboard_agent::launch::{
@@ -1538,7 +1539,13 @@ impl LibraryCommandHost for NoLibrary {
     fn status(&self) -> Result<LibraryStatusOk, PortRefusal> {
         Self::refused()
     }
-    fn set_root(&self, _: &str, _: bool) -> Result<LibraryStatusOk, PortRefusal> {
+    fn add_mount(&self, _: &str, _: &str, _: bool) -> Result<LibraryAddMountOk, PortRefusal> {
+        Self::refused()
+    }
+    fn remove_mount(&self, _: &str) -> Result<LibraryRemoveMountOk, PortRefusal> {
+        Self::refused()
+    }
+    fn relocate_mount(&self, _: &str, _: &str, _: bool) -> Result<LibraryStatusOk, PortRefusal> {
         Self::refused()
     }
     fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {

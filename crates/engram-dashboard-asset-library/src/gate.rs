@@ -9,15 +9,15 @@
 //!   and the view of the mounts a scan prepares from ([`MountView`]). It is a leaf: nothing else is taken while it is held, and nobody waits on its `Condvar` while holding the library
 //!   lock. It is taken briefly inside the library write lock, where every number is raised, so numbers read there agree
 //!   with the catalog. Lock order: library lock → turn mutex, never the reverse.
-//! - **Tickets, FIFO**: a scan or a root change enters when every earlier ticket has finished; a change enters when
-//!   every earlier ticket has entered and is a change (changes drawn in a row enter together and then meet at the write
-//!   lock). A root change therefore stays exclusive from its ticket to its publish. A ticket is drawn and first checked
-//!   in one hold of the turn mutex, and released on every exit, a panic included ([`Turn`]).
+//! - **Tickets, FIFO**: a scan or a mount change (a `Root` ticket) enters when every earlier ticket has finished; a
+//!   change enters when every earlier ticket has entered and is a change (changes drawn in a row enter together and then
+//!   meet at the write lock). A mount change therefore stays exclusive from its ticket to its publish. A ticket is drawn
+//!   and first checked in one hold of the turn mutex, and released on every exit, a panic included ([`Turn`]).
 //! - **Class A**: every catalog write is per item onto the current catalog — a scan's `Catalog::apply_scan`, a late
-//!   merge's `Catalog::apply_items`, a change's own per-item primitives. The one exception is the root change: a full
-//!   fresh build of the relocated mount's new folder, applied after `Catalog::drop_range` of that mount in the write
-//!   lock that publishes it (the first mount relocated — `Mounts::set_root`); other mounts' items stay (ADR-0366 as
-//!   ADR-0400 amends it).
+//!   merge's `Catalog::apply_items`, a change's own per-item primitives. The one exception is a mount change
+//!   ([`Gate::change_mount`]): an added or relocated mount's fresh walk, applied after `Catalog::drop_range` of that
+//!   mount in the write lock that publishes it, and a removed mount's range dropped; other mounts' items stay (ADR-0366
+//!   as ADR-0400 decision 16 amends it).
 //! - **Scans walk per mount**: one scan walks each mount its range touches (every mount for the whole library), one
 //!   after the other under its one ticket, and applies them all in one write lock. A range in no registered mount
 //!   walks nothing and answers why. With no mount registered a whole scan applies nothing and still raises the first
@@ -28,7 +28,11 @@
 //!   the library lock: a change drawn after a waiting scan holds the write lock across its body, and a scan that needed
 //!   that lock to prepare would be overtaken (ADR-0324 decision 4). No stat is taken under a ticket: a mount registered
 //!   or moved after the stats were taken is not walked by that scan (nothing is recorded for it), and a whole scan that
-//!   left one out does not raise the first scan — its next reader or refresh walks it after a fresh stat.
+//!   left one out does not raise the first scan — its next reader or refresh walks it after a fresh stat. So does a
+//!   mount the stat left unstated (`None` — the service's load-time overlap check was still running when the stat's
+//!   wait for it ran out): nothing is recorded for it and the whole scan does not raise the first scan on it, so its
+//!   waiters go round again on a fresh stat; only an answer of the mount's own (`Some` — a timeout included) is its
+//!   state.
 //!   Each mount's last known state and first-scan answer ([`MountSeen`]) is kept in [`State`], stamped with the
 //!   sequence number drawn before its stat, and written in the apply's write lock; an older observation never replaces
 //!   a newer state (a scan whose stat is older than the recorded state goes by the recorded one). A whole scan's mount
@@ -43,26 +47,27 @@
 //! - **One writer of the mounts**: every write of `mounts`, `seen` or `stamps` goes through [`Gate::write_mounts`],
 //!   which refreshes the [`MountView`] in the same write-lock hold; debug builds check the view at the end of every
 //!   change and late merge. A scan matches its stats to the mounts it walks by that view, so a writer that bypassed it
-//!   would send a reader round its first scan forever. The mount commands (add, remove, rename, relocate) go through
-//!   it too: a mount removed, renamed or relocated clears its `seen` and `stamps` entries (as
-//!   [`Gate::publish_mount_unwalked`] does) in that same call.
+//!   would send a reader round its first scan forever. The mount commands go through it too ([`Gate::change_mount`]): a
+//!   mount added, removed or relocated has its `seen` and `stamps` entries cleared (as
+//!   [`Gate::publish_mount_unwalked`] does) in that same call — an added or relocated one then recorded walked.
 //! - **A change judges its mount again under the write lock**: a write's entrance walks an unusable mount again and
 //!   refuses before the ticket, but a scan queued ahead of the change may record the mount gone after that; a change
 //!   gets the recorded states ([`MountsNow`]) and judges its target's mount there, before any disk IO — no IO and no
 //!   walk inside the lock (ADR-0400 decision 6).
-//! - **Numbers**: a scan's apply raises the swap-in count, a change the change generation, a root change the root
-//!   generation — each inside its write lock. A scan applies only if the change generation has not moved since its
-//!   walk started (else it walks again). A late merge applies only if neither generation moved since the caller noted
-//!   them before its disk read; if only the swap-in count moved it may update items but not insert paths. A change
-//!   given a root generation compares it inside its own write-lock take; a stale one writes and raises nothing
-//!   ([`Gate::change_checked`] — ADR-0377).
-//! - **First scan**: "raised" = one full scan or one walked root change has been applied. A reader starts one or waits
-//!   for one pending; a reader whose waited-for scan was not published goes through once more, and that failure is its
-//!   answer; only a scan that ended without an apply is a failed try — one that applied but left the first scan
-//!   un-raised (a mount was published after its stats were taken) sends its waiters round again. The first start's
-//!   publish without a walk ([`Gate::publish_mount_unwalked`]) is not pending and lowers it
-//!   again (a reader before it may have raised it over no mount), so the first scan of that mount is a real walk — the
-//!   daemon's boot scan or a reader (ADR-0382).
+//! - **Numbers**: a scan's apply raises the swap-in count, a change the change generation, a mount change the root
+//!   generation and the change generation — each inside its write lock. A change refused inside its body that applied
+//!   no catalog item raises nothing (its refusal applied nothing, so a walk or a late merge has nothing to miss). A
+//!   scan applies only if the change generation has not moved since its walk started (else it walks again). A late
+//!   merge applies only if neither generation moved since the caller noted them before its disk read; if only the
+//!   swap-in count moved it may update items but not insert paths. A change given a root generation compares it inside
+//!   its own write-lock take; a stale one writes and raises nothing ([`Gate::change_checked`] — ADR-0377).
+//! - **First scan**: "raised" = one full scan has been applied. A reader starts one or waits for one pending; a reader
+//!   whose waited-for scan was not published goes through once more, and that failure is its answer; only a scan that
+//!   ended without an apply is a failed try — one that applied but left the first scan un-raised (a mount was published
+//!   after its stats were taken, or its stat left one unstated) sends its waiters round again. A mount change is never
+//!   pending and leaves it as it is (it walks one mount, not the library). The first start's publish without a walk
+//!   ([`Gate::publish_mount_unwalked`]) lowers it again (a reader before it may have raised it over no mount), so the
+//!   first scan of that mount is a real walk — the daemon's boot scan or a reader (ADR-0382).
 //! - **Refresh merging**: a refresh joins a covering scan generation that is queued and not yet walking; a covering
 //!   walk already in progress does not count — the caller may have changed files before calling (PRD R41).
 // ADR-0324
@@ -93,7 +98,7 @@ use crate::RefreshReport;
 // TRD S25 step-7 B8
 pub const NOT_FOUND: &str = "not-found";
 
-/// The answer of a scan or root change whose ticket was released without one (it panicked).
+/// The answer of a scan whose ticket was released without one (it panicked).
 const ENDED_UNANSWERED: &str = "the scan ended without an answer";
 
 /// The `why` of a registered mount no scan has stat'ed or walked yet.
@@ -102,6 +107,10 @@ pub const NOT_WALKED: &str = "not scanned yet";
 /// Why a scan did not walk a mount registered or moved after it took its stats: its next reader or refresh walks it
 /// after a fresh stat.
 const NOT_STATED: &str = "registered or moved after this scan's stat; not walked by it";
+
+/// Why a scan did not walk a mount its stat left unstated (`None` from the [`Stat`]): the next scan stats it fresh.
+const STAT_STARVED: &str =
+    "the load-time overlap check had not finished within this scan's wait; not walked by this scan";
 
 /// What the library lock guards.
 pub struct State {
@@ -232,10 +241,12 @@ impl MountSeen {
 /// 5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Numbers {
-    /// Raised by every change, inside its write lock.
+    /// Raised by every change that applied something (a change refused inside its body with no catalog item applied
+    /// raises nothing) and by every mount change, inside its write lock.
     pub change: u64,
-    /// Raised by every root change, inside the write lock that publishes the new root; starts at the per-run base
-    /// the daemon passes (`Gate::new`), not 0, and is compared only for equality (ADR-0381).
+    /// Raised by every mount change, inside the write lock that publishes it — one generation for the whole tree;
+    /// starts at the per-run base the daemon passes (`Gate::new`), not 0, and is compared only for equality (ADR-0381 ·
+    /// ADR-0400 decision 16).
     pub root: u64,
     /// Raised by every scan's apply.
     pub swap_ins: u64,
@@ -249,15 +260,77 @@ pub(crate) type Tags = HashMap<PathKey, (ContentTag, bool)>;
 pub(crate) type Build<'a> = &'a dyn Fn(&Mount, Option<&MountPath>, &Tags) -> io::Result<ScanResult>;
 
 /// Stats the folders of `mounts` in one bounded batch, outside every lock, answering one status per mount in order —
-/// the service's `BoundedIo` stat with its share probe.
-// ADR-0400 decision 17
-pub(crate) type Stat<'a> = &'a dyn Fn(&[Mount]) -> Vec<FolderStatus>;
+/// the service's `BoundedIo` stat with its share probe. `None` = not stated: the stat asked nothing (the load-time
+/// overlap check was still running when its wait for it ran out), so it says nothing about the mount — nothing is
+/// recorded for it and it is not walked; the next stat asks again.
+// ADR-0400 decisions 10 and 17
+// ADR-0402 decision 5
+pub(crate) type Stat<'a> = &'a dyn Fn(&[Mount]) -> Vec<Option<FolderStatus>>;
 
-/// What a scan stat'ed before its ticket: each mount it would walk and that mount's status, observed at sequence number
-/// `at` (drawn before the stat).
+/// What a change's body answered, as the gate reads it to decide whether the change generation moves: a refusal that
+/// applied no catalog item moves nothing ([`Gate::change_checked`]).
+pub trait ChangeAnswer {
+    /// The body refused — and so, by the refusal rule, applied nothing outside the catalog keys it touched.
+    fn refused(&self) -> bool;
+}
+
+impl<T, E> ChangeAnswer for Result<T, E> {
+    fn refused(&self) -> bool {
+        self.is_err()
+    }
+}
+
+impl ChangeAnswer for () {
+    fn refused(&self) -> bool {
+        false
+    }
+}
+
+/// What one mount change does ([`Gate::change_mount`] — ADR-0400 decisions 9, 11 and 13).
+pub(crate) enum MountChange {
+    /// Registers the mount at the end of the list; its folder is walked.
+    Add(Mount),
+    /// Re-points the mount named `name` at `folder`, keeping its name and place; the new folder is walked.
+    Relocate { name: MountName, folder: PathBuf },
+    /// Drops the mount named so; nothing is walked and no file is touched.
+    Remove(MountName),
+}
+
+impl MountChange {
+    fn name(&self) -> &MountName {
+        match self {
+            MountChange::Add(mount) => &mount.name,
+            MountChange::Relocate { name, .. } | MountChange::Remove(name) => name,
+        }
+    }
+
+    /// Whether the change fits `mounts`: `Ok(Some(mount))` = the mount to walk (as it will be registered), `Ok(None)` =
+    /// nothing to walk; `Err(why)` = it does not fit.
+    fn fits(&self, mounts: &Mounts) -> Result<Option<Mount>, String> {
+        let registered = mounts.get(self.name().as_str());
+        match (self, registered) {
+            (MountChange::Add(mount), None) => Ok(Some(mount.clone())),
+            (MountChange::Add(mount), Some(_)) => Err(format!(
+                "the library mount name {:?} is taken",
+                mount.name.as_str()
+            )),
+            (MountChange::Relocate { folder, .. }, Some(registered)) => Ok(Some(Mount {
+                name: registered.name.clone(),
+                folder: folder.clone(),
+            })),
+            (MountChange::Remove(_), Some(_)) => Ok(None),
+            (MountChange::Relocate { name, .. } | MountChange::Remove(name), None) => {
+                Err(format!("no library mount is named {:?}", name.as_str()))
+            }
+        }
+    }
+}
+
+/// What a scan stat'ed before its ticket: each mount it would walk and that mount's status (`None` = not stated),
+/// observed at sequence number `at` (drawn before the stat).
 struct Stats {
     at: u64,
-    of: Vec<(Mount, FolderStatus)>,
+    of: Vec<(Mount, Option<FolderStatus>)>,
 }
 
 /// The mounts as a scan prepares from them before its ticket, kept under the turn mutex so the preparation takes no
@@ -286,7 +359,7 @@ impl MountView {
     }
 }
 
-/// A scan's or root change's answer, shared by everyone who joined it. `Err` = nothing was applied, with the reason.
+/// A scan's answer, shared by everyone who joined it. `Err` = nothing was applied, with the reason.
 pub(crate) type Outcome = Result<Arc<ScanReport>, String>;
 
 /// What one applied scan did, over its whole range.
@@ -363,14 +436,14 @@ struct Turns {
 #[derive(Default)]
 struct First {
     raised: bool,
-    /// Full scans and walked root changes drawn before the first scan was raised that have not ended.
+    /// Full scans drawn before the first scan was raised that have not ended.
     pending: usize,
     /// How many of those have ended — a waiter wakes when it moves.
     ended: u64,
     /// Why the last of them that ended without an apply failed.
     failure: Option<String>,
     /// How many of them ended without an apply — a waiter's failed try is one that moved it; one that applied but
-    /// left the first scan un-raised (a mount published in its window) is not.
+    /// left the first scan un-raised (a mount published in its window, or left unstated) is not.
     failed: u64,
     /// Callers waiting at the first-scan entrance or on a joined generation (tests observe it).
     #[cfg(test)]
@@ -388,10 +461,8 @@ struct Ticket {
 enum Kind {
     Scan(Arc<Generation>),
     Change,
-    /// `walks` = a root change that walks the new root; one that does not is never a pending first scan.
-    Root {
-        walks: bool,
-    },
+    /// A mount change or the first start's publish — exclusive, and never a pending first scan.
+    Root,
 }
 
 /// One scan generation: its range and, once its ticket is released, its answer.
@@ -404,7 +475,7 @@ struct Generation {
 struct Turn<'g> {
     gate: &'g Gate,
     no: u64,
-    /// A scan's or root change's answer, handed to its generation and to the first-scan state on release.
+    /// A scan's answer, handed to its generation and to the first-scan state on release.
     outcome: Option<Outcome>,
 }
 
@@ -482,11 +553,11 @@ impl Gate {
     }
 
     /// The first-scan entrance (ADR-0324 decisions 6 · 7): returns at once once raised; else waits for a pending full
-    /// scan or root change (queued or walking), or runs a full scan itself — its mounts stat'ed with `stat` before its
-    /// ticket. A waited-for one that was not published sends the caller through once more; `Err` = that second try
-    /// failed too, or the caller's own scan failed. A whole scan fails only when it ended unanswered (it panicked): a
-    /// mount it cannot walk is that mount's state, not the scan's failure (ADR-0400 decision 17). A whole scan that
-    /// applied but left the first scan un-raised (a mount was published after its stats were taken) is prepared and
+    /// scan (queued or walking), or runs a full scan itself — its mounts stat'ed with `stat` before its ticket. A
+    /// waited-for one that was not published sends the caller through once more; `Err` = that second try failed too, or
+    /// the caller's own scan failed. A whole scan fails only when it ended unanswered (it panicked): a mount it cannot
+    /// walk is that mount's state, not the scan's failure (ADR-0400 decision 17). A whole scan that applied but left
+    /// the first scan un-raised (a mount was published after its stats were taken, or left unstated) is prepared and
     /// run again.
     pub(crate) fn first_scan_join(&self, stat: Stat, build: Build) -> Result<(), String> {
         let mut turns = lock(&self.turns);
@@ -531,8 +602,8 @@ impl Gate {
     /// A ticketed scan of `range` (ADR-0324 decision 7 — refresh merging). Joins a covering generation that is queued
     /// and not walking; otherwise stats the mounts its range touches with `stat`, holding no lock, and then draws its
     /// own ticket. A folder refresh before the first scan is raised joins a queued full scan or runs one itself and
-    /// takes its share (decision 6); one that finds a full scan (or a root change drawn before the first scan was
-    /// raised) already walking waits for it and then scans its folder like any refresh. A range in a mount not walked
+    /// takes its share (decision 6); one that finds a full scan already walking waits for it and then scans its folder
+    /// like any refresh. A range in a mount not walked
     /// yet widens to that mount's top (decision 6 per mount — ADR-0400 decision 17). When the one it joined or waited
     /// for is not published it goes through a full scan once more.
     // ADR-0366
@@ -616,15 +687,21 @@ impl Gate {
 
     /// Stats `mounts` outside every lock and before any ticket, and records each that is not `Ok` as its last known
     /// state under a brief write lock, without a ticket — nothing to walk, so nothing to queue behind a slow walk.
-    /// Answers the mounts that stat `Ok`; the caller walks them. A mount removed or moved since is not recorded.
+    /// Answers the mounts that stat `Ok`; the caller walks them. A mount removed or moved since is not recorded, nor
+    /// one the stat left unstated (neither recorded nor answered).
     // ADR-0400 decision 17
     pub(crate) fn observe(&self, mounts: Vec<Mount>, stat: Stat) -> Vec<Mount> {
         let at = self.next_seq();
         let statuses = stat(&mounts);
-        let (back, gone): (Vec<_>, Vec<_>) = mounts
-            .into_iter()
-            .zip(statuses)
-            .partition(|(_, status)| *status == FolderStatus::Ok);
+        let mut back = Vec::new();
+        let mut gone = Vec::new();
+        for (mount, status) in mounts.into_iter().zip(statuses) {
+            match status {
+                Some(FolderStatus::Ok) => back.push(mount),
+                Some(status) => gone.push((mount, status)),
+                None => {}
+            }
+        }
         if !gone.is_empty() {
             let mut state = write(&self.lib);
             let seen: Vec<Observed> = gone
@@ -639,7 +716,7 @@ impl Gate {
                 .collect();
             self.write_mounts(&mut state, |state| record_seen(state, seen));
         }
-        back.into_iter().map(|(mount, _)| mount).collect()
+        back
     }
 
     /// The one way to write the mounts or what the scans know of them (`seen`, `stamps`): `f` under the caller's write
@@ -672,20 +749,31 @@ impl Gate {
         &self,
         f: impl FnOnce(&mut Catalog, &MountsNow, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
     ) -> R {
-        match self.change_checked(None, f) {
+        match self.change_in(None, f, |_| false) {
             Ok(answer) => answer,
             Err(_) => unreachable!("a change given no root generation is never stale"),
         }
     }
 
     /// [`Gate::change`] that first compares `given` (`None` = any) with the root generation inside the same write-lock
-    /// take, so a root change queued before it is seen. `Err(current)` = stale: `f` is not called and no generation
+    /// take, so a mount change queued before it is seen, and that raises nothing when `f` refused
+    /// ([`ChangeAnswer::refused`]) and touched no key. `Err(current)` = stale: `f` is not called and no generation
     /// moves.
     // ADR-0377
-    pub(crate) fn change_checked<R>(
+    pub(crate) fn change_checked<R: ChangeAnswer>(
         &self,
         given: Option<u64>,
         f: impl FnOnce(&mut Catalog, &MountsNow, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
+    ) -> Result<R, u64> {
+        self.change_in(given, f, R::refused)
+    }
+
+    /// The body of [`Gate::change`] and [`Gate::change_checked`]; `refused` reads `f`'s answer.
+    fn change_in<R>(
+        &self,
+        given: Option<u64>,
+        f: impl FnOnce(&mut Catalog, &MountsNow, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
+        refused: impl FnOnce(&R) -> bool,
     ) -> Result<R, u64> {
         let _turn = self.take_turn(Kind::Change);
         let mut state = write(&self.lib);
@@ -709,26 +797,69 @@ impl Gate {
         let now = MountsNow { mounts, seen };
         let (answer, touched) = f(catalog, &now, &|| self.next_seq());
         catalog.recompute_derived(&touched);
-        lock(&self.turns).numbers.change += 1;
+        // A refusal applied nothing: a scan walking meanwhile need not walk again, nor a late merge be dropped.
+        if !refused(&answer) || !touched.is_empty() {
+            lock(&self.turns).numbers.change += 1;
+        }
         self.debug_check_view(&state);
         Ok(answer)
     }
 
-    /// The root change (TRD S25 step-7 §6 writer 6, steps 1–4): the first mount moved to `new_root` (`library`
-    /// registered there when no mount is). Exclusive from its ticket to its publish; `walk` builds the mount at its new
-    /// folder outside every lock with empty tags; one write lock drops that mount's range, applies that build,
-    /// publishes the mount, raises the root generation and marks the first scan raised. A walk that fails at the folder
-    /// publishes nothing. (Step 0, the stat of the new folder, is the caller's — before this call.)
-    // ADR-0366
-    pub(crate) fn change_root(
+    /// A mount change (ADR-0400 decisions 9, 11, 13 and 16): a `Root` ticket, exclusive behind every earlier ticket and
+    /// until its publish; an added or relocated mount is walked by `walk` at its new folder outside every lock with
+    /// empty tags; then one write lock drops that mount's range from the catalog, applies the walk, writes the mounts
+    /// ([`Gate::write_mounts`] — the mount's `seen` and `stamps` cleared, an added or relocated mount then recorded `Ok`
+    /// and walked) and raises the root generation and the change generation. It leaves the first scan as it is. `Err` =
+    /// nothing published and no number moved: the walk failed at the folder, or the change does not fit the mounts (a
+    /// name taken, a mount not registered — the caller judged it under the mount-change mutex first). (The stat and the
+    /// overlap judgement of the folder are the caller's — before this call.)
+    // ADR-0400 decision 16
+    pub(crate) fn change_mount(
         &self,
-        new_root: PathBuf,
+        change: MountChange,
         walk: impl FnOnce(&Mount) -> io::Result<ScanResult>,
-    ) -> Outcome {
-        let mut turn = self.take_turn(Kind::Root { walks: true });
-        let outcome = self.publish_root(new_root, walk);
-        turn.outcome = Some(outcome.clone());
-        outcome
+    ) -> Result<RefreshReport, String> {
+        let _turn = self.take_turn(Kind::Root);
+        // The ticket is exclusive: the mounts read here are the ones the publish changes.
+        let walked = self.with_read(|state| change.fits(&state.mounts))?;
+        // ADR-0400 decision 17: an observation is stamped with a number drawn before it, as a scan's before its stat.
+        let at = self.next_seq();
+        let result = match &walked {
+            Some(mount) => Some(walk(mount).map_err(|e| e.to_string())?),
+            None => None,
+        };
+        let mut state = write(&self.lib);
+        let catalog = Arc::make_mut(&mut state.catalog);
+        let dropped = catalog.drop_range(&virtual_path(change.name(), None));
+        catalog.recompute_derived(&dropped);
+        let report = apply_reported(catalog, result.into_iter().collect());
+        self.write_mounts(&mut state, |state| {
+            let name = change.name().clone();
+            state.seen.remove(&name.key());
+            state.stamps.remove(&name.key());
+            match change {
+                MountChange::Add(mount) => state
+                    .mounts
+                    .push(mount)
+                    .expect("fits() judged the name free under the exclusive ticket"),
+                MountChange::Relocate { name, folder } => {
+                    let moved = state.mounts.relocate(&name, folder);
+                    debug_assert!(moved, "fits() found the mount under the exclusive ticket");
+                }
+                MountChange::Remove(name) => {
+                    state.mounts.remove(&name);
+                }
+            }
+            if walked.is_some() {
+                record_seen(state, vec![(name, MountState::Ok, true, at)]);
+            }
+        });
+        let mut turns = lock(&self.turns);
+        turns.numbers.root += 1;
+        turns.numbers.change += 1;
+        self.moved.notify_all();
+        drop(turns);
+        Ok(report.share(None))
     }
 
     /// Publishes `mount` as the only mount without walking it: a Root ticket, exclusive behind every earlier ticket;
@@ -737,14 +868,14 @@ impl Gate {
     /// the first scan of `mount` is a real walk. `Err` = a mount is already published: nothing changed. (The stat of
     /// the mount's folder is the caller's — before this call.)
     ///
-    /// Unlike [`Gate::change_root`] it does not clear the catalog: it relies on the invariant that while no mount is
+    /// Unlike a mount change ([`Gate::change_mount`]) it drops no range: it relies on the invariant that while no mount is
     /// published the catalog is empty — a scan, the list safety net and a launch overlay read under a mount, and a
     /// merge noted before this publish is dropped by the raised root generation. No change body may insert a catalog
     /// item while no mount is published (an agent-preset edit runs with no root but writes no item), or it could leave
     /// an item this publish would carry into the new mount.
     // ADR-0382
     pub(crate) fn publish_mount_unwalked(&self, mount: Mount) -> Result<(), String> {
-        let _turn = self.take_turn(Kind::Root { walks: false });
+        let _turn = self.take_turn(Kind::Root);
         let mut state = write(&self.lib);
         if let Some(published) = state.mounts.iter().next() {
             return Err(format!(
@@ -805,8 +936,7 @@ impl Gate {
         let pending_first = !turns.first.raised
             && match &kind {
                 Kind::Scan(generation) => generation.range.is_none(),
-                Kind::Root { walks } => *walks,
-                Kind::Change => false,
+                Kind::Root | Kind::Change => false,
             };
         if pending_first {
             turns.first.pending += 1;
@@ -934,10 +1064,19 @@ impl Gate {
             let mut unstated = false;
             for (mount, under) in walks {
                 let top = virtual_path(&mount.name, None);
-                let Some(status) = status_in(stats, &mount) else {
-                    unstated = true;
-                    unusable.push((top, NOT_STATED.to_owned()));
-                    continue;
+                // ADR-0402 decision 5: not stated — nothing recorded, the first scan not raised on it.
+                let status = match status_in(stats, &mount) {
+                    None => {
+                        unstated = true;
+                        unusable.push((top, NOT_STATED.to_owned()));
+                        continue;
+                    }
+                    Some(None) => {
+                        unstated = true;
+                        unusable.push((top, STAT_STARVED.to_owned()));
+                        continue;
+                    }
+                    Some(Some(status)) => status,
                 };
                 // ADR-0400 decision 17: an observation recorded after this scan's stat is newer than it.
                 let (mount_state, at) = match recorded.get(&mount.name.key()) {
@@ -996,40 +1135,6 @@ impl Gate {
             return Ok(Arc::new(report));
         }
     }
-
-    fn publish_root(
-        &self,
-        new_root: PathBuf,
-        walk: impl FnOnce(&Mount) -> io::Result<ScanResult>,
-    ) -> Outcome {
-        // The ticket is exclusive: the mounts read here are the ones the publish replaces.
-        let name = self.with_read(|state| {
-            state
-                .mounts
-                .first()
-                .map_or_else(MountName::first, |first| first.name.clone())
-        });
-        let moved = Mount {
-            name,
-            folder: new_root.clone(),
-        };
-        let result = walk(&moved).map_err(|e| e.to_string())?;
-        let mut state = write(&self.lib);
-        let catalog = Arc::make_mut(&mut state.catalog);
-        let dropped = catalog.drop_range(&virtual_path(&moved.name, None));
-        catalog.recompute_derived(&dropped);
-        let report = Arc::new(apply_reported(catalog, vec![result]));
-        let walked = vec![(moved.name, MountState::Ok, true, self.next_seq())];
-        self.write_mounts(&mut state, |state| {
-            state.mounts.set_root(new_root);
-            record_seen(state, walked);
-        });
-        let mut turns = lock(&self.turns);
-        turns.numbers.root += 1;
-        turns.first.raised = true;
-        self.moved.notify_all();
-        Ok(report)
-    }
 }
 
 impl Generation {
@@ -1060,8 +1165,8 @@ fn walks(
 }
 
 /// The status `stats` holds for `mount` — the same name, at the same folder; `None` = not stat'ed (registered or moved
-/// after the stat).
-fn status_in(stats: &Stats, mount: &Mount) -> Option<FolderStatus> {
+/// after the stat), `Some(None)` = stat'ed but left unstated.
+fn status_in(stats: &Stats, mount: &Mount) -> Option<Option<FolderStatus>> {
     stats
         .of
         .iter()
@@ -1114,7 +1219,7 @@ fn may_enter(line: &VecDeque<Ticket>, no: u64) -> bool {
             .iter()
             .take(at)
             .all(|ticket| ticket.entered && matches!(ticket.kind, Kind::Change)),
-        Kind::Scan(_) | Kind::Root { .. } => at == 0,
+        Kind::Scan(_) | Kind::Root => at == 0,
     }
 }
 
@@ -1236,7 +1341,7 @@ impl Gate {
                     let kind = match ticket.kind {
                         Kind::Scan(_) => "scan",
                         Kind::Change => "change",
-                        Kind::Root { .. } => "root",
+                        Kind::Root => "root",
                     };
                     (kind, ticket.entered)
                 })
@@ -1307,8 +1412,8 @@ mod tests {
     }
 
     /// A stat that finds every mount there.
-    fn ok(mounts: &[Mount]) -> Vec<FolderStatus> {
-        vec![FolderStatus::Ok; mounts.len()]
+    fn ok(mounts: &[Mount]) -> Vec<Option<FolderStatus>> {
+        vec![Some(FolderStatus::Ok); mounts.len()]
     }
 
     /// The empty result of a walk of `under` in `mount` (`None` = its whole folder).
@@ -1318,7 +1423,20 @@ mod tests {
 
     /// The first mount's folder.
     fn root_of(state: &State) -> Option<PathBuf> {
-        state.mounts.first().map(|first| first.folder.clone())
+        state.mounts.iter().next().map(|first| first.folder.clone())
+    }
+
+    /// The mount `library` relocated to `to` by a mount change whose walk is `walk`.
+    fn relocate(
+        gate: &Gate,
+        to: &str,
+        walk: impl FnOnce(&Mount) -> io::Result<ScanResult>,
+    ) -> Result<RefreshReport, String> {
+        let change = MountChange::Relocate {
+            name: MountName::library(),
+            folder: PathBuf::from(to),
+        };
+        gate.change_mount(change, walk)
     }
 
     fn empty(range: Option<&LibPath>) -> ScanResult {
@@ -1342,7 +1460,7 @@ mod tests {
     /// The mount the first start registers, at `folder`.
     fn library_at(folder: &str) -> Mount {
         Mount {
-            name: crate::mounts::MountName::first(),
+            name: crate::mounts::MountName::library(),
             folder: PathBuf::from(folder),
         }
     }
@@ -1421,7 +1539,10 @@ mod tests {
                 if let Some(door) = &door {
                     door.wait();
                 }
-                (mounts.first().map(|first| first.folder.clone()), Vec::new())
+                (
+                    mounts.iter().next().map(|first| first.folder.clone()),
+                    Vec::new(),
+                )
             })
         })
     }
@@ -1490,16 +1611,16 @@ mod tests {
     }
 
     #[test]
-    fn a_change_drawn_during_a_root_change_enters_after_the_publish_and_sees_the_new_root() {
+    fn a_change_drawn_during_a_mount_change_enters_after_the_publish_and_sees_the_new_folder() {
         let (gate, log) = (gate(), Arc::new(Log::default()));
         let door = Arc::new(Door::default());
         let root_change = {
             let (gate, log, door) = (Arc::clone(&gate), Arc::clone(&log), Arc::clone(&door));
             thread::spawn(move || {
-                gate.change_root(PathBuf::from("/new"), |_| {
+                relocate(&gate, "/new", |mount| {
                     door.wait();
                     log.push("root walked");
-                    Ok(empty(None))
+                    Ok(walked(mount, None))
                 })
             })
         };
@@ -1521,14 +1642,18 @@ mod tests {
     }
 
     #[test]
-    fn a_root_walk_that_fails_publishes_nothing_and_releases_its_ticket() {
+    fn a_mount_change_whose_walk_fails_publishes_nothing_and_releases_its_ticket() {
         let (gate, log) = (gate(), Arc::new(Log::default()));
-        let outcome = gate.change_root(PathBuf::from("/new"), |_| {
+        let outcome = relocate(&gate, "/new", |_| {
             Err(io::Error::from(io::ErrorKind::PermissionDenied))
         });
         assert!(outcome.is_err());
         assert_eq!(gate.with_read(root_of), Some(PathBuf::from("/lib")));
-        assert_eq!(gate.numbers().root, BASE);
+        assert_eq!(
+            (gate.numbers().root, gate.numbers().change),
+            (BASE, 0),
+            "no number moved"
+        );
         join(change_thread(&gate, &log, "c", None));
         assert_eq!(log.take(), ["c enters"]);
     }
@@ -1680,9 +1805,7 @@ mod tests {
             let gate = Arc::clone(&gate);
             thread::spawn(move || {
                 catch_unwind(AssertUnwindSafe(|| {
-                    gate.change_root(PathBuf::from("/new"), |_| {
-                        panic!("a root walk panics on purpose")
-                    })
+                    relocate(&gate, "/new", |_| panic!("a mount walk panics on purpose"))
                 }))
                 .is_err()
             })
@@ -1874,17 +1997,17 @@ mod tests {
     }
 
     #[test]
-    fn a_root_change_enters_only_when_every_earlier_ticket_has_finished() {
+    fn a_mount_change_enters_only_when_every_earlier_ticket_has_finished() {
         let (gate, log) = (raised_gate(), Arc::new(Log::default()));
         let root_thread = |door: Option<Arc<Door>>, to: &'static str| {
             let (gate, log) = (Arc::clone(&gate), Arc::clone(&log));
             thread::spawn(move || {
-                gate.change_root(PathBuf::from(to), |_| {
+                relocate(&gate, to, |mount| {
                     log.push(format!("{to} walks"));
                     if let Some(door) = &door {
                         door.wait();
                     }
-                    Ok(empty(None))
+                    Ok(walked(mount, None))
                 })
             })
         };
@@ -2000,8 +2123,7 @@ mod tests {
         gate.change(|_, _, _| ((), Vec::new()));
         assert_eq!(calls(&gate, noted), None, "the change generation moved");
         let noted = gate.numbers();
-        gate.change_root(PathBuf::from("/new"), |_| Ok(empty(None)))
-            .unwrap();
+        relocate(&gate, "/new", |mount| Ok(walked(mount, None))).unwrap();
         assert_eq!(calls(&gate, noted), None, "the root generation moved");
     }
 
@@ -2101,12 +2223,12 @@ mod tests {
     fn a_whole_scan_applies_the_mounts_it_can_walk_and_records_the_others() {
         let gate = Gate::new(three_mounts(), BASE);
         let walks = Log::default();
-        let stat = |mounts: &[Mount]| -> Vec<FolderStatus> {
+        let stat = |mounts: &[Mount]| -> Vec<Option<FolderStatus>> {
             mounts
                 .iter()
                 .map(|mount| match mount.name.as_str() {
-                    "team" => FolderStatus::Missing,
-                    _ => FolderStatus::Ok,
+                    "team" => Some(FolderStatus::Missing),
+                    _ => Some(FolderStatus::Ok),
                 })
                 .collect()
         };
@@ -2166,13 +2288,13 @@ mod tests {
     fn a_folder_scan_widens_to_a_mount_not_walked_yet_and_fails_on_one_not_there() {
         let gate = Gate::new(three_mounts(), BASE);
         let gone = std::sync::atomic::AtomicBool::new(true);
-        let stat = |mounts: &[Mount]| -> Vec<FolderStatus> {
+        let stat = |mounts: &[Mount]| -> Vec<Option<FolderStatus>> {
             mounts
                 .iter()
                 .map(
                     |mount| match (mount.name.as_str(), gone.load(Ordering::SeqCst)) {
-                        ("team", true) => FolderStatus::Missing,
-                        _ => FolderStatus::Ok,
+                        ("team", true) => Some(FolderStatus::Missing),
+                        _ => Some(FolderStatus::Ok),
                     },
                 )
                 .collect()
@@ -2207,12 +2329,12 @@ mod tests {
     }
 
     /// A stat that finds every mount there but `team`.
-    fn team_missing(mounts: &[Mount]) -> Vec<FolderStatus> {
+    fn team_missing(mounts: &[Mount]) -> Vec<Option<FolderStatus>> {
         mounts
             .iter()
             .map(|mount| match mount.name.as_str() {
-                "team" => FolderStatus::Missing,
-                _ => FolderStatus::Ok,
+                "team" => Some(FolderStatus::Missing),
+                _ => Some(FolderStatus::Ok),
             })
             .collect()
     }
@@ -2343,19 +2465,18 @@ mod tests {
         join(walking).unwrap();
     }
 
-    /// A root change of the first mount to `to` whose walk waits on `door` and then fails — a pending first scan that
-    ///   ends without an apply.
-    fn failing_root_change(
-        gate: &Arc<Gate>,
-        to: &'static str,
-        door: &Arc<Door>,
-    ) -> thread::JoinHandle<Outcome> {
+    /// A whole refresh whose walk waits on `door` and then panics — a pending first scan that ends without an apply
+    ///   (`ENDED_UNANSWERED`); its thread answers whether it panicked.
+    fn failing_whole_scan(gate: &Arc<Gate>, door: &Arc<Door>) -> thread::JoinHandle<bool> {
         let (gate, door) = (Arc::clone(gate), Arc::clone(door));
         thread::spawn(move || {
-            gate.change_root(PathBuf::from(to), |_| {
-                door.wait();
-                Err(io::Error::from(io::ErrorKind::PermissionDenied))
-            })
+            catch_unwind(AssertUnwindSafe(|| {
+                gate.refresh(None, &ok, &|_, _, _| {
+                    door.wait();
+                    panic!("a whole scan fails on purpose")
+                })
+            }))
+            .is_err()
         })
     }
 
@@ -2372,7 +2493,7 @@ mod tests {
         );
         let blocker = change_thread(&gate, &log, "blocker", Some(Arc::clone(&blocker_door)));
         gate.wait_for("blocker in", |line, _| line == [("change", true)]);
-        let first = failing_root_change(&gate, "/new1", &first_door);
+        let first = failing_whole_scan(&gate, &first_door);
         gate.wait_for("the first failing try queued", |line, _| line.len() == 2);
         let reader = {
             let gate = Arc::clone(&gate);
@@ -2381,28 +2502,32 @@ mod tests {
             })
         };
         gate.wait_for("the reader waits on it", |_, waiting| waiting == 1);
-        let second = failing_root_change(&gate, "/new2", &second_door);
-        gate.wait_for("the second failing try queued", |line, _| line.len() == 3);
         blocker_door.open();
         join(blocker);
+        // Drawn once the first walks: a whole refresh joins only a covering scan not yet walking.
+        gate.wait_for("the first walks", |line, _| line == [("scan", true)]);
+        let second = failing_whole_scan(&gate, &second_door);
+        gate.wait_for("the second failing try queued", |line, _| line.len() == 2);
         first_door.open();
-        assert!(join(first).is_err());
+        assert!(join(first));
         gate.wait_for("the reader waits on the second", |line, waiting| {
-            line == [("root", true)] && waiting == 1
+            line == [("scan", true)] && waiting == 1
         });
         second_door.open();
-        assert!(join(second).is_err());
-        let answer = join(reader);
+        assert!(join(second));
         assert_eq!(
-            answer,
-            Err(io::Error::from(io::ErrorKind::PermissionDenied).to_string()),
+            join(reader),
+            Err(ENDED_UNANSWERED.to_owned()),
             "the second waited failure is the answer"
         );
     }
 
     /// A stat that first registers `name` (folder `/<name>`) unless it is registered — as if a mount were added after
     ///   the scan read the mounts it stats — and then answers `Ok` for the mounts it was given.
-    fn registering(gate: &Arc<Gate>, name: &'static str) -> impl Fn(&[Mount]) -> Vec<FolderStatus> {
+    fn registering(
+        gate: &Arc<Gate>,
+        name: &'static str,
+    ) -> impl Fn(&[Mount]) -> Vec<Option<FolderStatus>> {
         let gate = Arc::clone(gate);
         move |mounts| {
             let mut state = write(&gate.lib);
@@ -2480,54 +2605,68 @@ mod tests {
         );
     }
 
-    // A first scan that applied but left the first scan un-raised (a mount was published in its window) is not a
+    // A first scan that applied but left the first scan un-raised (a mount was registered in its window) is not a
     //   failed try for its waiters: only a scan that ended without an apply counts, so one such apply and one failure
     //   send a waiter round again instead of answering the failure.
     #[test]
     fn a_first_scan_that_applied_without_raising_is_not_a_failed_try_for_its_waiters() {
-        let gate = Arc::new(Gate::new(Mounts::default(), BASE));
+        let gate = gate();
         let log = Arc::new(Log::default());
-        let (door1, door2) = (Arc::new(Door::default()), Arc::new(Door::default()));
+        let (door1, door2, door3) = (
+            Arc::new(Door::default()),
+            Arc::new(Door::default()),
+            Arc::new(Door::default()),
+        );
         let blocker1 = change_thread(&gate, &log, "blocker1", Some(Arc::clone(&door1)));
         gate.wait_for("blocker1 in", |line, _| line == [("change", true)]);
-        let publish = {
-            let gate = Arc::clone(&gate);
-            thread::spawn(move || gate.publish_mount_unwalked(library_at("/lib")))
+        let team = Mount {
+            name: MountName::parse("team").unwrap(),
+            folder: PathBuf::from("/team"),
         };
-        gate.wait_for("the publish queued", |line, _| line.len() == 2);
+        let add = {
+            let gate = Arc::clone(&gate);
+            thread::spawn(move || {
+                gate.change_mount(MountChange::Add(team), |mount| Ok(walked(mount, None)))
+            })
+        };
+        gate.wait_for("the add queued", |line, _| line.len() == 2);
         let blocker2 = change_thread(&gate, &log, "blocker2", Some(Arc::clone(&door2)));
         gate.wait_for("blocker2 queued", |line, _| line.len() == 3);
-        // Prepared before the publish: its scan finds the published mount unstated — applied, the first scan un-raised.
+        // Prepared before the add: its scan finds `team` unstated — applied, the first scan un-raised. Its walks wait
+        //   on `door3`, so the failing try below is drawn while it walks.
+        let walk = {
+            let door3 = Arc::clone(&door3);
+            move |mount: &Mount, under: Option<&MountPath>, tags: &Tags| {
+                door3.wait();
+                walk_empty(mount, under, tags)
+            }
+        };
         let starter = {
-            let gate = Arc::clone(&gate);
-            thread::spawn(move || gate.first_scan_join(&ok, &walk_empty))
+            let (gate, walk) = (Arc::clone(&gate), walk.clone());
+            thread::spawn(move || gate.first_scan_join(&ok, &walk))
         };
         gate.wait_for("the starter's scan queued", |line, _| line.len() == 4);
         let waiter = {
             let gate = Arc::clone(&gate);
-            thread::spawn(move || gate.first_scan_join(&ok, &walk_empty))
+            thread::spawn(move || gate.first_scan_join(&ok, &walk))
         };
         gate.wait_for("the waiter waits on it", |_, waiting| waiting == 1);
         door1.open();
         join(blocker1);
-        join(publish).unwrap();
-        gate.wait_for("blocker2 in, the starter's scan behind it", |line, _| {
-            line == [("change", true), ("scan", false)]
-        });
-        // Then a pending first scan that fails, queued behind the un-raised one: a root change whose walk fails (a
-        //   whole refresh would join the queued scan instead of drawing its own).
-        let failing = {
-            let gate = Arc::clone(&gate);
-            thread::spawn(move || {
-                gate.change_root(PathBuf::from("/new"), |_| {
-                    Err(io::Error::from(io::ErrorKind::PermissionDenied))
-                })
-            })
-        };
-        gate.wait_for("the failing root change queued", |line, _| line.len() == 3);
+        join(add).unwrap();
         door2.open();
         join(blocker2);
-        assert!(join(failing).is_err());
+        gate.wait_for("the starter's scan walks", |line, _| {
+            line == [("scan", true)]
+        });
+        // Then a pending first scan that fails, queued behind the un-raised one (drawn while it walks: one drawn while
+        //   it is queued would join it instead of drawing its own).
+        let fail_door = Arc::new(Door::default());
+        let failing = failing_whole_scan(&gate, &fail_door);
+        gate.wait_for("the failing scan queued", |line, _| line.len() == 2);
+        fail_door.open();
+        door3.open();
+        assert!(join(failing));
         join(starter).unwrap();
         assert!(
             join(waiter).is_ok(),
@@ -2553,11 +2692,47 @@ mod tests {
         assert!(view_matches(&gate), "an unwalked publish");
         gate.refresh(None, &ok, &walk_empty).unwrap();
         assert!(view_matches(&gate), "a scan's apply");
-        gate.change_root(PathBuf::from("/new"), |mount| Ok(walked(mount, None)))
-            .unwrap();
-        assert!(view_matches(&gate), "a root change");
+        let team = Mount {
+            name: MountName::parse("team").unwrap(),
+            folder: PathBuf::from("/team"),
+        };
+        gate.change_mount(MountChange::Add(team.clone()), |mount| {
+            Ok(walked(mount, None))
+        })
+        .unwrap();
+        assert!(view_matches(&gate), "an added mount");
+        let walked_ok = MountSeen {
+            state: MountState::Ok,
+            walked: true,
+        };
+        assert_eq!(gate.with_read(|state| state.seen(&team.name)), walked_ok);
+        gate.observe(vec![team.clone()], &|mounts| {
+            vec![Some(FolderStatus::Missing); mounts.len()]
+        });
+        relocate(&gate, "/new", |mount| Ok(walked(mount, None))).unwrap();
+        assert!(view_matches(&gate), "a relocated mount");
+        assert_eq!(
+            gate.with_read(|state| state.seen(&MountName::library())),
+            walked_ok,
+            "relocated: its state is its new walk's"
+        );
+        gate.change_mount(MountChange::Remove(team.name.clone()), |_| {
+            unreachable!("a removal walks nothing")
+        })
+        .unwrap();
+        assert!(view_matches(&gate), "a removed mount");
+        assert_eq!(
+            gate.with_read(|state| (
+                state.seen.get(&team.name.key()).is_none(),
+                state.stamps.get(&team.name.key()).is_none()
+            )),
+            (true, true),
+            "a removed mount's state and stamp are gone"
+        );
         let mounts: Vec<Mount> = gate.with_read(|state| state.mounts.iter().cloned().collect());
-        gate.observe(mounts, &|mounts| vec![FolderStatus::Missing; mounts.len()]);
+        gate.observe(mounts, &|mounts| {
+            vec![Some(FolderStatus::Missing); mounts.len()]
+        });
         assert!(view_matches(&gate), "an observation");
         assert!(gate
             .refresh(Some(&lp("library/a")), &team_missing, &walk_empty)
@@ -2565,7 +2740,7 @@ mod tests {
         assert!(view_matches(&gate), "a range scan's apply");
         let failed = gate.refresh(
             Some(&lp("library/a")),
-            &|mounts| vec![FolderStatus::Missing; mounts.len()],
+            &|mounts| vec![Some(FolderStatus::Missing); mounts.len()],
             &walk_empty,
         );
         assert_eq!(failed.unwrap_err(), "missing");

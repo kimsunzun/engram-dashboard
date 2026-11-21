@@ -991,8 +991,8 @@ impl LibraryService {
             .iter()
             .filter(|mount| seen.insert(mount.name.key()))
             .collect();
-        let folders: Vec<PathBuf> = wave.iter().map(|mount| mount.folder.clone()).collect();
-        let statuses = self.stat_mounts(io, &folders);
+        let wave: Vec<Mount> = wave.into_iter().cloned().collect();
+        let statuses = self.stat_mount_list(io, &wave);
         for (mount, status) in wave.into_iter().zip(statuses) {
             stats
                 .0
@@ -2090,7 +2090,6 @@ mod tests {
                     false => crate::config::LibraryConfig::missing(&base.join("state")),
                 },
                 default_root: base.join("default-library"),
-                data_root: base.join("data"),
                 daemon_id: "test-daemon".to_owned(),
                 root_generation_base: 7,
                 builtin_dir: setup.priming.map(|_| base.join("builtin")),
@@ -2352,6 +2351,9 @@ mod tests {
         w.put("team/T.yaml", &preset(&[], &[], &[], &[]));
         w.put("lib/bad.yaml", "kind: preset\nversion: [\n");
         w.put("lib/P.yaml", &preset(&["team/a.md"], &[], &[], &[&folder]));
+        // ADR-0400 decision 10: the load-time judgement canonicalizes the mount folders first; not the check's IO.
+        w.svc.judge_at_load(&w.svc.io.begin_read());
+        let judged = w.ops.ops("canonical");
         let blocked = w
             .svc
             .check(&agent(
@@ -2383,7 +2385,7 @@ mod tests {
             ]
         );
         assert_eq!(w.ops.count("stat", &folder), 0, "no folder IO");
-        assert_eq!(w.ops.ops("canonical"), 0, "no advisory phase");
+        assert_eq!(w.ops.ops("canonical"), judged, "no advisory phase");
         assert!(!w.store.read_any(&w.at("team/T.yaml")));
     }
 
@@ -2526,6 +2528,12 @@ mod tests {
         let cwd = w.folder("proj/sub", &[]);
         w.put("team/skills/gamma/SKILL.md", &skill("gamma"));
         w.put("lib/P.yaml", &preset(&[], &["team/skills/gamma"], &[], &[]));
+        // ADR-0400 decision 10: the load-time judgement canonicalizes each mount folder once first; not the check's.
+        w.svc.judge_at_load(&w.svc.io.begin_read());
+        let (team, lib) = (
+            w.ops.count("canonical", &w.at("team")),
+            w.ops.count("canonical", &w.at("lib")),
+        );
         let plan = w
             .svc
             .check(&agent(codex(JSON), &["library/P.yaml"], &cwd))
@@ -2542,8 +2550,8 @@ mod tests {
                 json!({ "name": "gamma", "paths": paths })
             )]
         );
-        assert_eq!(w.ops.count("canonical", &w.at("team")), 1);
-        assert_eq!(w.ops.count("canonical", &w.at("lib")), 0);
+        assert_eq!(w.ops.count("canonical", &w.at("team")) - team, 1);
+        assert_eq!(w.ops.count("canonical", &w.at("lib")) - lib, 0);
     }
 
     fn skill(name: &str) -> String {

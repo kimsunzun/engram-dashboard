@@ -6,7 +6,8 @@
 export type ListFolderRow = { path: string, name: string, 
 /**
  * A mount (a row of the library's top): `ok` | `missing` | `unreadable`, as last seen (no fresh check);
- * `null` = a folder inside a mount. Exception: the built-in mount `engram` is named when its folder cannot be read, but its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
+ * `null` = a folder inside a mount. The built-in mount `engram` is `unreadable` when its folder cannot be
+ * read, yet its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
  */
 state?: string | null, 
 /**

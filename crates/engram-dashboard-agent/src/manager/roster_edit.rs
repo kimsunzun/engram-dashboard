@@ -29,8 +29,8 @@ use crate::profile::{AgentProfile, StoreError, WorkspaceWrite};
 use crate::profile_edit::{ProfileEditError, ProfileEditPort, WorkspaceLock};
 use crate::types::{AgentId, PtyError};
 
-/// The `why` of a `cwd` that is not an absolute path — refused before the stat, as `library.setRoot` refuses a
-/// relative root (a relative working folder would follow whatever folder the daemon runs in).
+/// The `why` of a `cwd` that is not an absolute path — refused before the stat, as `library.addMount` refuses a
+/// relative folder (a relative working folder would follow whatever folder the daemon runs in).
 // ADR-0386
 pub const NOT_ABSOLUTE: &str = "not absolute";
 

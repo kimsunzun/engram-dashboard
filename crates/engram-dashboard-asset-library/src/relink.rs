@@ -748,7 +748,6 @@ mod tests {
                 backends: Arc::new(AgentBackends),
                 config,
                 default_root: base.join("default-library"),
-                data_root: base.join("data"),
                 daemon_id: "test-daemon".to_owned(),
                 root_generation_base: 7,
                 builtin_dir: None,
@@ -1228,7 +1227,7 @@ mod tests {
             preset("instructions:\n- library/old/a.md\n"),
         )
         .unwrap();
-        w.svc.set_root(&other, false).unwrap();
+        w.svc.relocate_mount("library", &other, false).unwrap();
 
         assert_eq!(
             code(

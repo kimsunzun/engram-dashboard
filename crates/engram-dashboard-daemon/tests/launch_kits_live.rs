@@ -292,7 +292,6 @@ async fn live(root: &Path, library: Option<PathBuf>) -> Live {
             backends: Arc::new(AgentBackends),
             config: engram_dashboard_asset_library::config::load(&state),
             default_root: root.join("default-library"),
-            data_root: root.to_path_buf(),
             daemon_id: Uuid::new_v4().to_string(),
             root_generation_base: 1,
             builtin_dir: Some(repo_builtin()),

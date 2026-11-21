@@ -7,7 +7,7 @@ import type { ReasonRow } from "./ReasonRow";
  */
 export type ListRow = { 
 /**
- * Library path from the root (a skill: its folder; a built-in: `engram/…`).
+ * Library path, starting with its mount's name (a skill: its folder; a built-in: `engram/…`).
  */
 path: string, 
 /**

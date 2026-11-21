@@ -449,7 +449,6 @@ mod tests {
                 backends: Arc::new(AgentBackends),
                 config,
                 default_root: base.join("default-library"),
-                data_root: base.join("data"),
                 daemon_id: "test-daemon".to_owned(),
                 root_generation_base: 7,
                 builtin_dir: None,

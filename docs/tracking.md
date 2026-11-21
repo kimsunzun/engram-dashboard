@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-121 | Step-21 U4a review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-120 | T-112 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched (user 2026-11-20: minor items need not be shown) |
 | T-105 | Launch folder wait as an advanced setting (once file-based settings loading exists) | Main | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
 | T-110 | Launch waiting cue — ADR-0181 decision 5 never built; launch waits grow to 88 s in S25 step 8 | Main | Deferred by the user to the UI work (2026-11-15) |
@@ -109,6 +110,17 @@ Full text before the simplification (investigation records · reverted attempts 
 
 ## Main
 
+### T-121. Step-21 U4a review recommendations left unfixed (rare cases)
+- **Status:** recorded 2026-11-22 at the U4a commit — minor items, fixed when their code is touched or they show up in use. Decisions of the unit: ADR-0402.
+- **Items** (TRD `docs/process/S25-preset-library/trd-library-mounts.md`, asset-library):
+  - A launch blocked by a needed dead mount also lists later healthy mounts as "not checked" (it stopped before checking them).
+  - `unreadable_mounts` re-stats every unusable mount on each relink; `preset_add`'s folders branch stats before its entrance refusal.
+  - The read budget is shared across agents in a tree view (U2b design — by intent).
+  - A caller with no budget left can start the run's only load-time overlap judgement; every ask answers `not checked`, so mounts are judged on spelling for the whole run (junction overlaps missed until restart). One-line guard: do not start the judgement with zero left. User 2026-11-22: not worth fixing now.
+  - Right after start, a row's `why` says "not checked (budget spent)" while the load-time check is still running; an add / relocate whose budget the check ate refuses `library-root-unusable` about the new folder instead of naming the dead mount.
+  - No test for a short-budget waiter timing out on the load judgement or for recovery after a panicked judgement (exactly one replacement runner).
+  - Every mount stat locks the judgement state mutex to read a flag; an `AtomicBool` / `OnceLock` fast path would avoid it (negligible today).
+  - The test `a_first_scan_starved_by_the_load_judgement_records_nothing_and_walks_the_healthy_mount_on_a_fresh_budget` no longer exercises a starved scan (name over-promises); no gate-level test pins that a `None` stat records nothing in `seen` (a mutant recording it survives). Handed to the U4b coder.
 ### T-120. T-112 review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-20 at the T-112 freeze — the user does not need minor review items shown (「사소한거? 는 내가 알 필요없지?」); fix one when its code is touched or it shows up in use.
 - **Items** (TRD `docs/process/S25-preset-library/trd-launch-skip-missing.md`, code at `7ea7441d`):

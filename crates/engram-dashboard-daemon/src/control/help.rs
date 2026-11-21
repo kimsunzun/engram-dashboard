@@ -763,8 +763,8 @@ mod tests {
             .collect();
         assert_eq!(
             names.len(),
-            21,
-            "9 library, 8 preset and 4 agent-preset commands are declared: {names:?}"
+            23,
+            "11 library, 8 preset and 4 agent-preset commands are declared: {names:?}"
         );
         for name in names {
             // A whole word — `agent.presets` must not pass on the strength of `agent.presetsX`.
@@ -789,7 +789,7 @@ mod tests {
             "clear the cause, then repeat the same call",
             "workspace-not-found",
             "check agent.list before calling again",
-            "unset · ok · missing (not there, or not a folder) · unreadable",
+            "ok · missing (not there, or not a folder) · unreadable (there but could not be read, did not answer, or overlaps",
             "A start leaves a missing item out and names it in notices",
             "folder-unreadable",
         ] {

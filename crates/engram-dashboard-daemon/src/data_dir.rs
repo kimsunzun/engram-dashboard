@@ -41,7 +41,7 @@ const LOGS_DIR: &str = "logs";
 const MCP_CONFIG_DIR: &str = "mcp-config";
 const USAGE_PROBE_DIR: &str = "usage-probe";
 const LAUNCH_DIR: &str = "launch";
-const LIBRARY_DIR: &str = "library";
+const LIBRARY_DIR: &str = "default_library";
 
 /// The data folder [`default_data_root`] finds — the path only.
 pub fn default_data_dir() -> PathBuf {
@@ -259,9 +259,9 @@ impl DataLayout {
         self.origin
     }
 
-    /// The library root setting's default place (the asset library's `default_root`): beside the data folder for the
-    /// release rule (`<dist>\library`), inside it otherwise. Decided by the rule that found the folder, never by its
-    /// name.
+    /// The library root setting's default place (the asset library's `default_root`), the folder `default_library`:
+    /// beside the data folder for the release rule (`<dist>\default_library`), inside it otherwise. Decided by the rule
+    /// that found the folder, never by its name.
     // ADR-0312
     // ADR-0375
     pub fn default_library_root(&self) -> PathBuf {
@@ -270,15 +270,8 @@ impl DataLayout {
             _ => self.root.join(LIBRARY_DIR),
         };
         // A relative data folder (a relative `ENGRAM_DATA_DIR`) is made absolute against the working folder, so a
-        //   `set_root` to the default place compares equal and the first start never publishes a relative root.
+        //   mount at the default place compares equal and the first start never publishes a relative folder.
         std::path::absolute(&place).unwrap_or(place)
-    }
-
-    /// The data folder made absolute against the working folder as [`DataLayout::default_library_root`] is, so the
-    /// library's overlap check compares it with absolute mount folders (a relative `ENGRAM_DATA_DIR`).
-    // ADR-0400
-    pub fn absolute_root(&self) -> PathBuf {
-        std::path::absolute(&self.root).unwrap_or_else(|_| self.root.clone())
     }
 
     pub fn daemon_state_dir(&self) -> PathBuf {
@@ -416,11 +409,11 @@ mod tests {
             "with ENGRAM_DATA_DIR set, it must be isolated to that path"
         );
         assert_eq!(got.origin(), DataRootOrigin::Given);
-        assert_eq!(got.default_library_root(), want.join("library"));
+        assert_eq!(got.default_library_root(), want.join("default_library"));
     }
 
     /// The debug rule is the branch a test build takes with no override; its default library place is inside the
-    /// data folder (`<repo>\.engram-dev\library`). Only computed — the real folder is never touched.
+    /// data folder (`<repo>\.engram-dev\default_library`). Only computed — the real folder is never touched.
     #[test]
     fn the_debug_rule_puts_the_default_library_inside_the_data_folder() {
         let _g = ENV_LOCK
@@ -433,7 +426,10 @@ mod tests {
             std::env::set_var(DATA_DIR_ENV, v);
         }
         assert_eq!(got.origin(), DataRootOrigin::Dev);
-        assert_eq!(got.default_library_root(), got.root().join("library"));
+        assert_eq!(
+            got.default_library_root(),
+            got.root().join("default_library")
+        );
     }
 
     /// The default place follows the rule that found the data folder, not the folder's name: a release `data` folder
@@ -444,14 +440,14 @@ mod tests {
         // An absolute place on every OS, so the comparisons below are not made absolute against the working folder.
         let dist = &std::env::temp_dir().join("portable").join("engram");
         let release = DataLayout::with_origin(release_data_dir(dist), DataRootOrigin::Release);
-        assert_eq!(release.default_library_root(), dist.join("library"));
+        assert_eq!(release.default_library_root(), dist.join("default_library"));
         let renamed = DataLayout::with_origin(dist.join("elsewhere"), DataRootOrigin::Release);
-        assert_eq!(renamed.default_library_root(), dist.join("library"));
+        assert_eq!(renamed.default_library_root(), dist.join("default_library"));
         for origin in [DataRootOrigin::Given, DataRootOrigin::Dev] {
             let named_data = DataLayout::with_origin(dist.join("data"), origin);
             assert_eq!(
                 named_data.default_library_root(),
-                dist.join("data").join("library"),
+                dist.join("data").join("default_library"),
                 "{origin:?}"
             );
         }
@@ -459,16 +455,6 @@ mod tests {
             DataLayout::new(dist.join("data")).origin(),
             DataRootOrigin::Given
         );
-    }
-
-    /// A relative data folder is made absolute for the library's overlap check, as its default place is. Only
-    /// computed.
-    #[test]
-    fn a_relative_data_folder_is_made_absolute_for_the_library() {
-        let got = DataLayout::new("relative-data").absolute_root();
-        assert_eq!(got, std::env::current_dir().unwrap().join("relative-data"));
-        let absolute = std::env::temp_dir().join("engram-data");
-        assert_eq!(DataLayout::new(&absolute).absolute_root(), absolute);
     }
 
     /// A relative data folder (a relative `ENGRAM_DATA_DIR`) gives an absolute default place, against the working
@@ -482,7 +468,7 @@ mod tests {
             std::env::current_dir()
                 .unwrap()
                 .join("relative-data")
-                .join("library")
+                .join("default_library")
         );
     }
 

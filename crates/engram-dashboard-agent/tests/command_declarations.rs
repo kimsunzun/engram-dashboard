@@ -4,11 +4,12 @@ use engram_dashboard_agent::commands::{
     AgentAttachPresetArgs, AgentCancelQueuedInputArgs, AgentDetachPresetArgs, AgentDuplicateArgs,
     AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs, AgentMoveArgs, AgentNewArgs,
     AgentPresetsArgs, AgentRenameArgs, AgentReorderPresetsArgs, AgentResolveArgs,
-    AgentSetWorkspaceArgs, AgentSpawnArgs, LibraryFoldersArgs, LibraryListArgs, LibraryNewFileArgs,
-    LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs, LibraryRelinkArgs,
-    LibrarySetRootArgs, LibraryStatusArgs, PresetAddArgs, PresetCheckArgs, PresetGetArgs,
-    PresetPreviewFolderArgs, PresetRemoveArgs, PresetReorderArgs, PresetSaveArgs,
-    PresetSetBackendArgs, UsageGetArgs, UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
+    AgentSetWorkspaceArgs, AgentSpawnArgs, LibraryAddMountArgs, LibraryFoldersArgs,
+    LibraryListArgs, LibraryNewFileArgs, LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs,
+    LibraryRelinkArgs, LibraryRelocateMountArgs, LibraryRemoveMountArgs, LibraryStatusArgs,
+    PresetAddArgs, PresetCheckArgs, PresetGetArgs, PresetPreviewFolderArgs, PresetRemoveArgs,
+    PresetReorderArgs, PresetSaveArgs, PresetSetBackendArgs, UsageGetArgs, UsageRefreshArgs,
+    COMMAND_SPECS, INPUT_AFFECTING,
 };
 use engram_dashboard_command::DeadlineClass;
 use engram_dashboard_command::{
@@ -39,6 +40,7 @@ fn declared_names_are_the_cli_verbs() {
             "agent.resolve",
             "agent.setWorkspace",
             "agent.spawn",
+            "library.addMount",
             "library.folders",
             "library.list",
             "library.newFile",
@@ -46,7 +48,8 @@ fn declared_names_are_the_cli_verbs() {
             "library.read",
             "library.refresh",
             "library.relink",
-            "library.setRoot",
+            "library.relocateMount",
+            "library.removeMount",
             "library.status",
             "preset.add",
             "preset.check",
@@ -72,7 +75,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 21 // two were added in v6 — `agent.interrupt` · `usage.refresh`; fourteen in v9 — `library.setRoot` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`, `agent.setWorkspace` · `duplicate`
+            == 23 // two were added in v6 — `agent.interrupt` · `usage.refresh`; sixteen in v9 — `library.addMount` · `removeMount` · `relocateMount` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`, `agent.setWorkspace` · `duplicate`
     );
 }
 
@@ -112,14 +115,16 @@ fn the_resolve_verb_is_a_read_declared_in_generation_8() {
     assert_eq!(resolve.since, 8);
 }
 
-/// The nine library commands (ADR-0386) — all in catalog 9 and ordinary (no launch deadline); the four that change the
-/// library or `library.json` are `Write`. ★`library.refresh` is `Read`★: it changes only the in-memory catalog and a
+/// The eleven library commands (ADR-0386 · ADR-0400 decision 7) — all in catalog 9 and ordinary (no launch deadline);
+/// the six that change the library or `library.json` are `Write`. ★`library.refresh` is `Read`★: it changes only the in-memory catalog and a
 /// rerun is harmless, while a `Write` would make a same-id retry answer `ALREADY_APPLIED` with no report.
 #[test]
 fn the_library_verbs_are_declared_in_generation_9_with_their_effect() {
     let cases = [
         ("library.status", Effect::Read),
-        ("library.setRoot", Effect::Write),
+        ("library.addMount", Effect::Write),
+        ("library.removeMount", Effect::Write),
+        ("library.relocateMount", Effect::Write),
         ("library.folders", Effect::Read),
         ("library.refresh", Effect::Read),
         ("library.list", Effect::Read),
@@ -178,16 +183,23 @@ fn the_agent_preset_verbs_are_declared_in_generation_9_with_their_effect() {
     }
 }
 
-/// `preset.reorder` advertises the closed section vocabulary and `preset.previewFolder` the two modes.
+/// `preset.reorder`'s `section` is a plain string — the handler checks the word (ADR-0400 decision 22) — so the
+/// command's summary lists the five lowercase words; `preset.previewFolder` advertises the two modes.
 #[test]
-fn the_preset_section_and_preview_mode_are_closed_vocabularies() {
+fn the_preset_section_words_are_documented_and_the_preview_mode_is_a_closed_vocabulary() {
     let schema = |name: &str| -> serde_json::Value {
         serde_json::from_str(spec_of(name).expect("declaration").args_schema).expect("args schema")
     };
-    assert_eq!(
-        schema("preset.reorder")["properties"]["section"]["enum"],
-        json!(["Presets", "Instructions", "Skills", "Settings", "Folders"])
-    );
+    let section = &schema("preset.reorder")["properties"]["section"];
+    assert_eq!(section["type"], json!("string"), "{section}");
+    assert!(section.get("enum").is_none(), "{section}");
+    let summary = spec_of("preset.reorder").expect("declaration").summary;
+    for word in ["presets", "instructions", "skills", "settings", "folders"] {
+        assert!(
+            summary.contains(&format!("`{word}`")),
+            "{word} missing from: {summary}"
+        );
+    }
     assert_eq!(
         schema("preset.previewFolder")["properties"]["mode"]["anyOf"][0]["enum"],
         json!(["Terminal", "StreamJson"])
@@ -280,11 +292,19 @@ fn error_sets_are_golden() {
     //   no library; a refresh never refuses (a bad spelling is INVALID_ARGUMENT, from the table's set).
     for name in [
         "library.status",
-        "library.setRoot",
+        "library.addMount",
         "library.folders",
         "library.list",
     ] {
         assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
+    }
+    // ADR-0400 decision 7: removing or relocating a mount that is not registered is NOT_FOUND `mount-not-found`.
+    for name in ["library.removeMount", "library.relocateMount"] {
+        assert_eq!(
+            declared(name),
+            vec![ErrorCode::NotFound, ErrorCode::Conflict],
+            "{name}"
+        );
     }
     assert_eq!(declared("library.refresh"), vec![]);
     // A preset view or edit answers NOT_FOUND for a missing preset file; the draft check and the folder preview never
@@ -441,9 +461,19 @@ fn required_matches_what_deserialization_actually_demands() {
         ),
         ("library.status", parses::<LibraryStatusArgs>, json!({})),
         (
-            "library.setRoot",
-            parses::<LibrarySetRootArgs>,
-            json!({ "path": "C:/lib", "create": true }),
+            "library.addMount",
+            parses::<LibraryAddMountArgs>,
+            json!({ "name": "team", "path": "C:/lib", "create": true }),
+        ),
+        (
+            "library.removeMount",
+            parses::<LibraryRemoveMountArgs>,
+            json!({ "mount": "team" }),
+        ),
+        (
+            "library.relocateMount",
+            parses::<LibraryRelocateMountArgs>,
+            json!({ "mount": "team", "path": "C:/lib", "create": true }),
         ),
         ("library.folders", parses::<LibraryFoldersArgs>, json!({})),
         (
@@ -506,7 +536,7 @@ fn required_matches_what_deserialization_actually_demands() {
             "preset.reorder",
             parses::<PresetReorderArgs>,
             json!({
-                "path": "p.yaml", "section": "Skills", "order": ["a", "b"], "base_rev": "r",
+                "path": "p.yaml", "section": "skills", "order": ["a", "b"], "base_rev": "r",
                 "root_generation": 3,
             }),
         ),

@@ -14,15 +14,16 @@ use engram_dashboard_agent::commands::{
     AgentListQueuedInputsArgs, AgentListQueuedInputsOk, AgentMoveArgs, AgentMoveOk, AgentNewArgs,
     AgentNewOk, AgentPresetsArgs, AgentPresetsOk, AgentRenameArgs, AgentRenameOk,
     AgentReorderPresetsArgs, AgentReorderPresetsOk, AgentResolveArgs, AgentResolveOk,
-    AgentSetWorkspaceArgs, AgentSetWorkspaceOk, AgentSpawnArgs, AgentSpawnOk, LibraryFoldersArgs,
-    LibraryFoldersOk, LibraryListArgs, LibraryListOk, LibraryNewFileArgs, LibraryNewFileOk,
-    LibraryNewFolderArgs, LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs,
-    LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs, LibrarySetRootOk,
-    LibraryStatusArgs, LibraryStatusOk, PresetAddArgs, PresetAddOk, PresetCheckArgs, PresetCheckOk,
-    PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs, PresetPreviewFolderOk, PresetRemoveArgs,
-    PresetRemoveOk, PresetReorderArgs, PresetReorderOk, PresetSaveArgs, PresetSaveOk,
-    PresetSetBackendArgs, PresetSetBackendOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk,
-    UsageVendorRow, CATALOG_VERSION,
+    AgentSetWorkspaceArgs, AgentSetWorkspaceOk, AgentSpawnArgs, AgentSpawnOk, LibraryAddMountArgs,
+    LibraryAddMountOk, LibraryFoldersArgs, LibraryFoldersOk, LibraryListArgs, LibraryListOk,
+    LibraryNewFileArgs, LibraryNewFileOk, LibraryNewFolderArgs, LibraryNewFolderOk,
+    LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk, LibraryRelinkArgs,
+    LibraryRelinkOk, LibraryRelocateMountArgs, LibraryRelocateMountOk, LibraryRemoveMountArgs,
+    LibraryRemoveMountOk, LibraryStatusArgs, LibraryStatusOk, PresetAddArgs, PresetAddOk,
+    PresetCheckArgs, PresetCheckOk, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs,
+    PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk,
+    PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs, PresetSetBackendOk, UsageGetArgs,
+    UsageRefreshArgs, UsageRefreshOk, UsageVendorRow, CATALOG_VERSION,
 };
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
 use ts_rs::TS;
@@ -82,9 +83,17 @@ fn export_typescript_bindings() {
     UsageRefreshOk::export_all_to(out).expect("failed to export the UsageRefreshOk bindings");
     LibraryStatusArgs::export_all_to(out).expect("failed to export the LibraryStatusArgs bindings");
     LibraryStatusOk::export_all_to(out).expect("failed to export the LibraryStatusOk bindings");
-    LibrarySetRootArgs::export_all_to(out)
-        .expect("failed to export the LibrarySetRootArgs bindings");
-    LibrarySetRootOk::export_all_to(out).expect("failed to export the LibrarySetRootOk bindings");
+    LibraryAddMountArgs::export_all_to(out)
+        .expect("failed to export the LibraryAddMountArgs bindings");
+    LibraryAddMountOk::export_all_to(out).expect("failed to export the LibraryAddMountOk bindings");
+    LibraryRemoveMountArgs::export_all_to(out)
+        .expect("failed to export the LibraryRemoveMountArgs bindings");
+    LibraryRemoveMountOk::export_all_to(out)
+        .expect("failed to export the LibraryRemoveMountOk bindings");
+    LibraryRelocateMountArgs::export_all_to(out)
+        .expect("failed to export the LibraryRelocateMountArgs bindings");
+    LibraryRelocateMountOk::export_all_to(out)
+        .expect("failed to export the LibraryRelocateMountOk bindings");
     LibraryFoldersArgs::export_all_to(out)
         .expect("failed to export the LibraryFoldersArgs bindings");
     LibraryFoldersOk::export_all_to(out).expect("failed to export the LibraryFoldersOk bindings");

@@ -2445,7 +2445,6 @@ mod tests {
             backends: Arc::new(AgentBackends),
             config,
             default_root: base.join("default-library"),
-            data_root: base.join("data"),
             daemon_id: "test-daemon".to_owned(),
             root_generation_base: 7,
             builtin_dir: builtin.then(|| base.join("builtin")),
@@ -3916,7 +3915,7 @@ mod tests {
         *lock(&w.disk.hold) = Some((other.clone(), arrived, wait_go));
         let mover = {
             let (svc, other) = (Arc::clone(&w.svc), other.clone());
-            thread::spawn(move || svc.set_root(&other, false).map(drop))
+            thread::spawn(move || svc.relocate_mount("library", &other, false).map(drop))
         };
         at_walk.recv_timeout(Duration::from_secs(10)).unwrap();
         let editor = {
@@ -3933,7 +3932,7 @@ mod tests {
         };
         w.svc
             .gate
-            .wait_for("the edit queued behind the root change", |line, _| {
+            .wait_for("the edit queued behind the mount change", |line, _| {
                 line.iter()
                     .any(|(kind, entered)| *kind == "change" && !entered)
             });

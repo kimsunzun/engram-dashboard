@@ -2,6 +2,6 @@
 
 export type LibraryNewFolderArgs = { parent?: string | null, name: string, 
 /**
- * The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+ * The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
  */
 root_generation?: bigint | null, };

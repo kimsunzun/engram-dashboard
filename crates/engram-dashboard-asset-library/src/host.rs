@@ -27,17 +27,18 @@ use engram_dashboard_agent::backend::settings_check::{
 };
 use engram_dashboard_agent::commands::{
     self as declared, launch_notice_row, AgentFolderRow, AgentOutputFormat, FolderLoadKindWord,
-    FolderRow, LibraryFolderRow, LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind,
-    LibraryRefreshOk, LibraryRelinkOk, LibraryStatusOk, ListFolderRow, PathReasonRow, PresetAddOk,
-    PresetCheckOk, PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk, PresetSection,
-    PresetSetBackendOk, PreviewItemRow, PreviewLoadRow, PreviewRefusalRow, PreviewSetRow,
-    PreviewSkillNameRow, PreviewUnsureRow, ReasonRow, RefreshErrorRow, RelinkPairRow, SkippedRow,
-    UnavailableMountRow,
+    FolderRow, LibraryAddMountOk, LibraryFolderRow, LibraryFoldersOk, LibraryKind, LibraryListOk,
+    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryStatusOk,
+    ListFolderRow, MountStatusRow, PathReasonRow, PointingRow, PresetAddOk, PresetCheckOk,
+    PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk,
+    PreviewItemRow, PreviewLoadRow, PreviewRefusalRow, PreviewSetRow, PreviewSkillNameRow,
+    PreviewUnsureRow, ReasonRow, RefreshErrorRow, RelinkPairRow, SkippedRow, UnavailableMountRow,
 };
 use engram_dashboard_agent::launch::Reason;
 use engram_dashboard_agent::library_commands::{
     problem_row, relink_stop_row, AgentAttachPortAnswer, AgentPresetsPortView, LibraryCommandHost,
     LibraryReadView, NewAgentPresets, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
+    REMOVE_OUTCOME_REMOVED, REMOVE_OUTCOME_SAVED_ONLY,
 };
 use engram_dashboard_agent::profile::{AgentOutputFormat as CoreOutputFormat, AgentProfile};
 use engram_dashboard_agent::types::AgentId;
@@ -56,8 +57,7 @@ use crate::relink::RelinkAnswer;
 use crate::resolve::ResolvedFolder;
 use crate::{
     FoldersAnswer, LibraryRefusal, LibraryService, LibraryStatus, ListAnswer, ListFilter, ListRow,
-    MountState, ReadAnswer, RefreshReport, RefusalClass, RootSettingKind, RootStatus,
-    UnavailableMount,
+    MountState, Pointing, ReadAnswer, RefreshReport, RefusalClass, Removal, UnavailableMount,
 };
 
 impl LibraryCommandHost for LibraryService {
@@ -65,8 +65,42 @@ impl LibraryCommandHost for LibraryService {
         Ok(status_ok(LibraryService::status(self)))
     }
 
-    fn set_root(&self, path: &str, create: bool) -> Result<LibraryStatusOk, PortRefusal> {
-        LibraryService::set_root(self, Path::new(path), create)
+    fn add_mount(
+        &self,
+        name: &str,
+        path: &str,
+        create: bool,
+    ) -> Result<LibraryAddMountOk, PortRefusal> {
+        LibraryService::add_mount(self, name, Path::new(path), create)
+            .map(|added| {
+                LibraryAddMountOk::of(status_ok(added.status), pointing_row(added.pointing))
+            })
+            .map_err(port)
+    }
+
+    fn remove_mount(&self, mount: &str) -> Result<LibraryRemoveMountOk, PortRefusal> {
+        LibraryService::remove_mount(self, mount)
+            .map(|removed| {
+                let outcome = match removed.outcome {
+                    Removal::Removed => REMOVE_OUTCOME_REMOVED,
+                    Removal::SavedOnly => REMOVE_OUTCOME_SAVED_ONLY,
+                };
+                LibraryRemoveMountOk::of(
+                    status_ok(removed.status),
+                    pointing_row(removed.now_absent),
+                    outcome,
+                )
+            })
+            .map_err(port)
+    }
+
+    fn relocate_mount(
+        &self,
+        mount: &str,
+        path: &str,
+        create: bool,
+    ) -> Result<LibraryStatusOk, PortRefusal> {
+        LibraryService::relocate_mount(self, mount, Path::new(path), create)
             .map(status_ok)
             .map_err(port)
     }
@@ -385,12 +419,6 @@ fn count(n: usize) -> u32 {
 }
 
 fn status_ok(status: LibraryStatus) -> LibraryStatusOk {
-    let (state, state_why) = match status.state {
-        RootStatus::Unset => ("unset", None),
-        RootStatus::Ok => ("ok", None),
-        RootStatus::Missing { why } => ("missing", Some(why)),
-        RootStatus::Unreadable { why } => ("unreadable", Some(why)),
-    };
     let (config, config_why) = match status.config {
         ConfigHealth::Ok => ("ok", None),
         ConfigHealth::ReadOnly { why } => ("read_only", Some(why)),
@@ -399,20 +427,32 @@ fn status_ok(status: LibraryStatus) -> LibraryStatusOk {
     };
     LibraryStatusOk {
         daemon_id: status.daemon_id,
-        root: status.root.map(|root| root.display().to_string()),
-        root_setting: status.root_setting.map(|setting| {
-            match setting {
-                RootSettingKind::Default => "default",
-                RootSettingKind::Explicit => "explicit",
-            }
-            .to_owned()
-        }),
-        state: state.to_owned(),
-        state_why,
+        mounts: status
+            .mounts
+            .into_iter()
+            .map(|mount| {
+                let (state, state_why) = mount_state_words(Some(mount.state));
+                MountStatusRow {
+                    name: mount.name,
+                    path: mount.folder.display().to_string(),
+                    default: mount.default,
+                    builtin: mount.builtin,
+                    state: state.unwrap_or_default(),
+                    state_why,
+                }
+            })
+            .collect(),
         config: config.to_owned(),
         config_why,
         suggested_new: status.suggested_new.display().to_string(),
         root_generation: status.root_generation,
+    }
+}
+
+fn pointing_row(pointing: Pointing) -> PointingRow {
+    PointingRow {
+        presets: count(pointing.presets),
+        agents: count(pointing.agents),
     }
 }
 
@@ -865,6 +905,8 @@ mod tests {
     use crate::relink::{RelinkSkip, RelinkStop};
     use crate::store::{FsStore, LibraryStore};
     use crate::{LibraryValues, LIBRARY_UNAVAILABLE, PATH_THROUGH_LINK};
+    use engram_dashboard_agent::commands::{MountStatusRow, PointingRow};
+    use engram_dashboard_agent::library_commands::REMOVE_OUTCOME_REMOVED;
     use engram_dashboard_platform::fs::{link_dir, unlink_dir};
 
     struct Fixed(Vec<AgentProfile>);
@@ -957,7 +999,6 @@ mod tests {
                 backends: Arc::new(AgentBackends),
                 config,
                 default_root: base.join("default-library"),
-                data_root: base.join("data"),
                 daemon_id: "test-daemon".to_owned(),
                 root_generation_base: 7,
                 builtin_dir: default_preset.map(|_| base.join("builtin")),
@@ -1064,20 +1105,38 @@ mod tests {
 
     const SKILL: &str = "---\nname: s1\ndescription: Says hello\n---\n";
 
-    /// `library.status` and `library.setRoot` carry the body's status field by field, in the declared words.
+    /// The row of the built-in mount in a world with no built-in folder.
+    fn builtin_status_row() -> MountStatusRow {
+        MountStatusRow {
+            name: "engram".to_owned(),
+            path: String::new(),
+            default: false,
+            builtin: true,
+            state: "unreadable".to_owned(),
+            state_why: Some(crate::builtin::NO_FOLDER.to_owned()),
+        }
+    }
+
+    /// `library.status` and the mount commands carry the bodies' answers field by field, in the declared words
+    /// (ADR-0400 decision 7).
     #[test]
-    fn status_and_set_root_carry_the_body_status_field_by_field() {
-        let w = World::new(Vec::new());
+    fn status_and_the_mount_commands_carry_the_body_answer_field_by_field() {
+        let w = World::new(vec![agent(&["team/P.yaml"], false)]);
         let body = w.svc.status();
         let out = w.port().status().expect("status");
+        let library = MountStatusRow {
+            name: "library".to_owned(),
+            path: w.base.join("lib").display().to_string(),
+            default: false,
+            builtin: false,
+            state: "ok".to_owned(),
+            state_why: None,
+        };
         assert_eq!(
             out,
             LibraryStatusOk {
                 daemon_id: "test-daemon".to_owned(),
-                root: Some(w.base.join("lib").display().to_string()),
-                root_setting: Some("explicit".to_owned()),
-                state: "ok".to_owned(),
-                state_why: None,
+                mounts: vec![library.clone(), builtin_status_row()],
                 config: "ok".to_owned(),
                 config_why: None,
                 suggested_new: w.base.join("default-library").display().to_string(),
@@ -1086,26 +1145,54 @@ mod tests {
         );
 
         let other = w.base.join("other");
+        let added = w
+            .port()
+            .add_mount("team", &other.display().to_string(), true)
+            .expect("add");
+        assert_eq!(
+            added.already_pointing,
+            PointingRow {
+                presets: 0,
+                agents: 1
+            }
+        );
+        let team = MountStatusRow {
+            name: "team".to_owned(),
+            path: other.display().to_string(),
+            ..library.clone()
+        };
+        assert_eq!(added.mounts, [library.clone(), team, builtin_status_row()]);
+        assert_eq!(added.root_generation, w.svc.status().root_generation);
+        assert_ne!(added.root_generation, body.root_generation);
+
+        let removed = w.port().remove_mount("team").expect("remove");
+        assert_eq!(
+            (removed.outcome.as_str(), removed.now_absent),
+            (
+                REMOVE_OUTCOME_REMOVED,
+                PointingRow {
+                    presets: 0,
+                    agents: 1
+                }
+            )
+        );
+        assert_eq!(removed.mounts, [library.clone(), builtin_status_row()]);
+
+        let moved_to = w.base.join("lib2");
         let moved = w
             .port()
-            .set_root(&other.display().to_string(), true)
-            .expect("set root");
-        let after = w.svc.status();
-        assert_eq!(moved.root, Some(other.display().to_string()));
-        assert_eq!(moved.state, "ok");
-        assert_eq!(moved.root_generation, after.root_generation);
-        assert_ne!(moved.root_generation, body.root_generation);
+            .relocate_mount("library", &moved_to.display().to_string(), true)
+            .expect("relocate");
+        assert_eq!(moved.mounts[0].path, moved_to.display().to_string());
+        assert_eq!(moved.root_generation, w.svc.status().root_generation);
     }
 
-    /// With no root the status says `unset` with no root and no reason.
+    /// With no mount registered the status lists only the built-in.
     #[test]
-    fn an_unset_root_reads_unset() {
+    fn with_no_mount_the_status_lists_only_the_builtin() {
         let w = World::make(Vec::new(), false);
         let out = w.port().status().expect("status");
-        assert_eq!(
-            (out.root, out.state.as_str(), out.state_why),
-            (None, "unset", None)
-        );
+        assert_eq!(out.mounts, [builtin_status_row()]);
     }
 
     /// Every path argument that is not a library path refuses `InvalidArgument` · `item-path-invalid` with nothing
@@ -1155,11 +1242,15 @@ mod tests {
                 "{what}"
             );
         }
-        let (class, reason) = refused(port.set_root("relative/lib", false));
-        assert_eq!(
-            (class, reason.code.as_str()),
-            (PortClass::InvalidArgument, ITEM_PATH_INVALID)
-        );
+        for (class, reason) in [
+            refused(port.add_mount("team", "relative/lib", false)),
+            refused(port.relocate_mount("library", "relative/lib", false)),
+        ] {
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (PortClass::InvalidArgument, ITEM_PATH_INVALID)
+            );
+        }
     }
 
     /// `list`'s bare reason gets the class `Unavailable` and names the mount; the whole-tree reads answer partially,
@@ -1605,58 +1696,75 @@ mod tests {
         assert_eq!(RETRY_AFTER_CONDITION.len(), 5);
     }
 
-    /// Every status word and reason lands in its own field: `missing` + `state_why`, each `config` word with its
-    /// `config_why` (`corrupt` has none), and `root_setting` `default`.
+    /// Every status word and reason lands in its own field: each mount's state word with its `state_why` (`ok` has
+    /// none), its flags and folder, and each `config` word with its `config_why` (`corrupt` has none).
     #[test]
     fn every_status_word_lands_in_its_own_field() {
-        let status = |state: RootStatus, config: ConfigHealth| LibraryStatus {
-            daemon_id: "d".to_owned(),
-            root: Some(PathBuf::from("C:/lib")),
-            root_setting: Some(RootSettingKind::Default),
+        let row = |name: &str, state: MountState| crate::MountRow {
+            name: name.to_owned(),
+            folder: PathBuf::from(format!("C:/{name}")),
+            default: name == "a",
+            builtin: name == "engram",
             state,
+        };
+        let status = |config: ConfigHealth| LibraryStatus {
+            daemon_id: "d".to_owned(),
+            mounts: vec![
+                row(
+                    "a",
+                    MountState::Unreadable {
+                        why: "timed out".to_owned(),
+                    },
+                ),
+                row(
+                    "b",
+                    MountState::Missing {
+                        why: "not a folder".to_owned(),
+                    },
+                ),
+                row("engram", MountState::Ok),
+            ],
             config,
             suggested_new: PathBuf::from("C:/data/library"),
             root_generation: 9,
         };
-        let out = status_ok(status(
-            RootStatus::Unreadable {
-                why: "timed out".to_owned(),
-            },
-            ConfigHealth::ReadOnly {
-                why: "newer".to_owned(),
-            },
-        ));
-        assert_eq!(out.root_setting.as_deref(), Some("default"));
+        let out = status_ok(status(ConfigHealth::ReadOnly {
+            why: "newer".to_owned(),
+        }));
+        let words: Vec<(&str, &str, bool, bool, &str, Option<&str>)> = out
+            .mounts
+            .iter()
+            .map(|row| {
+                (
+                    row.name.as_str(),
+                    row.path.as_str(),
+                    row.default,
+                    row.builtin,
+                    row.state.as_str(),
+                    row.state_why.as_deref(),
+                )
+            })
+            .collect();
         assert_eq!(
-            (out.state.as_str(), out.state_why.as_deref()),
-            ("unreadable", Some("timed out"))
-        );
-        let missing = status_ok(status(
-            RootStatus::Missing {
-                why: "not a folder".to_owned(),
-            },
-            ConfigHealth::Ok,
-        ));
-        assert_eq!(
-            (missing.state.as_str(), missing.state_why.as_deref()),
-            ("missing", Some("not a folder"))
+            words,
+            [
+                ("a", "C:/a", true, false, "unreadable", Some("timed out")),
+                ("b", "C:/b", false, false, "missing", Some("not a folder")),
+                ("engram", "C:/engram", false, true, "ok", None),
+            ]
         );
         assert_eq!(
             (out.config.as_str(), out.config_why.as_deref()),
             ("read_only", Some("newer"))
         );
-        let out = status_ok(status(
-            RootStatus::Ok,
-            ConfigHealth::Unsaved {
-                why: "write failed".to_owned(),
-            },
-        ));
+        let out = status_ok(status(ConfigHealth::Unsaved {
+            why: "write failed".to_owned(),
+        }));
         assert_eq!(
             (out.config.as_str(), out.config_why.as_deref()),
             ("unsaved", Some("write failed"))
         );
-        assert_eq!((out.state.as_str(), out.state_why), ("ok", None));
-        let out = status_ok(status(RootStatus::Ok, ConfigHealth::Corrupt));
+        let out = status_ok(status(ConfigHealth::Corrupt));
         assert_eq!((out.config.as_str(), out.config_why), ("corrupt", None));
     }
 

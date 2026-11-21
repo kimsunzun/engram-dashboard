@@ -15,8 +15,9 @@
 //! - **Written only after the mount change succeeded** (ADR-0381): `LibraryService` publishes the mounts first and then
 //!   calls [`ConfigFile::save`]; nothing is ever undone. A save that fails leaves the file as it was and the state
 //!   `unsaved` — the live mounts' setting, not the file's — until a later save succeeds; the next start follows the
-//!   file that is left.
-//! - **The caller serializes saves** — `LibraryService` holds its root-change mutex across the mount change and
+//!   file that is left. The list the file last held (as loaded, or as last saved) is kept, so a mount command repeated
+//!   after a failed save can tell a repeat from a mistake ([`ConfigFile::unsaved_removal`] — ADR-0400 decision 14).
+//! - **The caller serializes saves** — `LibraryService` holds its mount-change mutex across the mount change and
 //!   [`ConfigFile::save`]. The state lock here is a leaf taken under that mutex only to read or set the state, never
 //!   across IO.
 // ADR-0291
@@ -227,6 +228,9 @@ struct FileState {
     claim: Claim,
     /// Loaded as missing, and no mount published since.
     first_start_due: bool,
+    /// The list the file holds as this run knows it: as loaded (usable), then as last saved; `None` = it holds no
+    /// list this run could read (missing, corrupt or read-only at load, and nothing saved since).
+    saved: Option<Vec<MountSetting>>,
 }
 
 impl ConfigFile {
@@ -252,6 +256,10 @@ impl ConfigFile {
                 health,
                 claim,
                 first_start_due: matches!(config.load, Load::Missing),
+                saved: match &config.load {
+                    Load::Usable(mounts) => Some(mounts.clone()),
+                    Load::Missing | Load::Corrupt | Load::ReadOnly(_) => None,
+                },
             }),
             #[cfg(test)]
             fail_writes: Mutex::new(None),
@@ -293,12 +301,25 @@ impl ConfigFile {
         lock(&self.state).first_start_due
     }
 
+    /// Whether a `removeMount` of `name`, not registered now, repeats one whose save failed: the setting is `unsaved`
+    /// and the list the file last held still names `name` (by path key) — so the removal is live but not saved.
+    // ADR-0400 decision 14
+    pub(crate) fn unsaved_removal(&self, name: &MountName) -> bool {
+        let state = lock(&self.state);
+        matches!(state.health, ConfigHealth::Unsaved { .. })
+            && state
+                .saved
+                .iter()
+                .flatten()
+                .any(|saved| saved.name.key() == name.key())
+    }
+
     /// Records `mounts`, the setting of the mounts just published: judges the current file (base `judge` rules — a
     /// corrupt file, or one that appeared after a missing load, is copied aside first), then writes it atomically.
     /// `Ok` = the file holds `mounts` and is ours (ADR-0291 R8); `Err(why)` = the file is as it was (a copy aside may
     /// have been made) and the state is `unsaved`. Either way the state names `mounts`, the live ones. A read-only
     /// file is never written and its state is kept. Call only after the mount change succeeded, holding the
-    /// root-change mutex.
+    /// mount-change mutex.
     // ADR-0381
     pub(crate) fn save(&self, mounts: &[MountSetting]) -> Result<(), String> {
         if let Some(why) = self.read_only() {
@@ -315,6 +336,7 @@ impl ConfigFile {
             Ok(()) => {
                 state.health = ConfigHealth::Ok;
                 state.claim = Claim::Adopted;
+                state.saved = Some(mounts.to_vec());
             }
             Err(why) => state.health = ConfigHealth::Unsaved { why: why.clone() },
         }
@@ -391,12 +413,12 @@ impl LibraryConfig {
         }
     }
 
-    /// A usable file holding one mount, [`crate::mounts::FIRST_MOUNT`] at `place`.
+    /// A usable file holding one mount, the test mount `library` ([`MountName::library`]) at `place`.
     pub(crate) fn usable(state_dir: &Path, place: MountPlace) -> Self {
         LibraryConfig {
             state_dir: state_dir.to_path_buf(),
             load: Load::Usable(vec![MountSetting {
-                name: MountName::first(),
+                name: MountName::library(),
                 place,
             }]),
         }
@@ -470,11 +492,11 @@ mod tests {
         assert_eq!(
             file.view(),
             (Some(vec![MountSetting::first_start()]), ConfigHealth::Ok),
-            "what the first start would write: `library` at the default place"
+            "what the first start would write: `default_library` at the default place"
         );
         assert_eq!(
             MountSetting::first_start(),
-            setting("library", MountPlace::Default)
+            setting("default_library", MountPlace::Default)
         );
         assert!(file.first_start_due());
         assert!(ConfigFile::initial_mounts(&config, &abs(temp.path(), "lib")).is_empty());
@@ -696,12 +718,12 @@ mod tests {
         assert_eq!(
             on_disk(temp.path()),
             Some(
-                json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+                json!({ "schema_version": 2, "mounts": [{ "name": "default_library", "path": "default" }] })
             )
         );
         assert_eq!(
             file.view(),
-            (Some(library(MountPlace::Default)), ConfigHealth::Ok)
+            (Some(vec![MountSetting::first_start()]), ConfigHealth::Ok)
         );
         assert!(!file.first_start_due());
         let root = abs(temp.path(), "lib");

@@ -12,22 +12,26 @@
 //!   platform path keys are equal. A name need not equal anything on disk.
 //! - **Overlap** ([`overlap`]): judged on canonical final paths (links and junctions resolved) by path key, component
 //!   by component, and on the file identities of the folders and their ancestors where the volume gives one, every ask
-//!   bounded. The folder being added or relocated fails closed: when its canonical path fails (no answer or an OS
-//!   error) or one of its identities gives no answer it is refused, never taken as free. A mount or reserved folder
-//!   whose canonical path cannot be had is judged on its spelling, and an identity that gives no answer is unknown.
-//!   Known escapes: SMB servers that give no file id, one share under several host spellings.
+//!   bounded and batched. Only mounts are compared — a mount may lie anywhere else, the daemon's own folders included.
+//!   A folder being added or relocated fails closed: when its own canonical path fails (no answer or an OS error — one
+//!   a `create` will make is judged by its nearest ancestor that has one), or an ask about it or about a mount it is
+//!   compared with gives no answer, it is refused, never taken as free. A mount whose canonical path the OS refuses (an
+//!   offline mount) is judged on its spelling, logged. At load the saved mounts are judged against each other
+//!   ([`overlapping`]), where nothing fails closed: a canonical path that cannot be had falls back to the spelling, and
+//!   an identity that gives no answer is left unknown while the canonical path still judges — each logged. Known
+//!   escapes: SMB servers that give no file id, one share under several host spellings.
 //! - **Names inside a mount** ([`admits_inside`]): the store's name rule applies to the names below a mount's top only;
 //!   the mount's own name is held by the name rules above.
-//! - **`library.setRoot`** still relocates the first mount ([`Mounts::set_root`]) until the mount commands replace it.
 // ADR-0396
 // ADR-0400
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
+use engram_dashboard_agent::launch::escape_controls;
 use engram_dashboard_platform::fs::{path_key, FileIdentity, PathKey};
 
-use crate::folder::{BoundedIo, LaunchIo, Need};
+use crate::folder::{gave_no_answer, BoundedIo, LaunchIo, Need};
 use crate::path::{LibPath, PathError};
 use crate::store::admits;
 
@@ -37,7 +41,7 @@ pub const BUILTIN_MOUNT: &str = "engram";
 
 /// The name of the mount the first start registers at the default place.
 // ADR-0400 decision 3
-pub const FIRST_MOUNT: &str = "library";
+pub const FIRST_MOUNT: &str = "default_library";
 
 /// The longest mount name, in characters.
 pub const NAME_MAX_CHARS: usize = 64;
@@ -82,6 +86,12 @@ impl MountName {
     /// The name the first start registers ([`FIRST_MOUNT`]).
     pub fn first() -> Self {
         Self(FIRST_MOUNT.to_owned())
+    }
+
+    /// The mount name the test fixtures use — `library`, not the first start's name.
+    #[cfg(test)]
+    pub(crate) fn library() -> Self {
+        Self("library".to_owned())
     }
 
     pub fn as_str(&self) -> &str {
@@ -189,20 +199,37 @@ impl Mounts {
         })
     }
 
-    /// The mount `library.setRoot` relocates: the first one; `None` = no mount is registered.
-    pub(crate) fn first(&self) -> Option<&Mount> {
-        self.0.first()
+    /// Registers `mount` at the end of the list (ADR-0400 decision 9). `Err` = its name is taken, nothing changed.
+    pub(crate) fn push(&mut self, mount: Mount) -> Result<(), NameTaken> {
+        if self.get(mount.name.as_str()).is_some() {
+            return Err(NameTaken(mount.name.as_str().to_owned()));
+        }
+        self.0.push(mount);
+        Ok(())
     }
 
-    /// `library.setRoot`'s change: the first mount now maps to `folder`; with no mount registered, `folder` is
-    /// registered as [`FIRST_MOUNT`].
-    pub(crate) fn set_root(&mut self, folder: PathBuf) {
-        match self.0.first_mut() {
-            Some(first) => first.folder = folder,
-            None => self.0.push(Mount {
-                name: MountName::first(),
-                folder,
-            }),
+    /// Drops the mount named `name` (by path key) and answers it; `None` = not registered.
+    pub(crate) fn remove(&mut self, name: &MountName) -> Option<Mount> {
+        let at = self
+            .0
+            .iter()
+            .position(|mount| mount.name.key() == name.key())?;
+        Some(self.0.remove(at))
+    }
+
+    /// Re-points the mount named `name` (by path key) at `folder`, keeping its name and place in the list; `false` = not
+    /// registered.
+    pub(crate) fn relocate(&mut self, name: &MountName, folder: PathBuf) -> bool {
+        match self
+            .0
+            .iter_mut()
+            .find(|mount| mount.name.key() == name.key())
+        {
+            Some(mount) => {
+                mount.folder = folder;
+                true
+            }
+            None => false,
         }
     }
 }
@@ -281,38 +308,29 @@ pub fn virtual_path(name: &MountName, rest: Option<&MountPath>) -> LibPath {
     LibPath::parse(&text).expect("a mount name followed by a valid path is a valid path")
 }
 
-/// The folders a mount may not overlap besides the other mounts (ADR-0400 decision 10).
-pub struct Reserved<'a> {
-    /// The data folder — every part of it (`daemon\`, `shell\`, `logs\` …).
-    pub data_root: &'a Path,
-    /// The default place: only this folder itself is exempt from the data-root rule.
-    pub default_place: &'a Path,
-    pub launch_root: &'a Path,
-    /// `None` = there is no built-in folder.
-    pub builtin_dir: Option<&'a Path>,
-}
-
-/// What a folder overlaps — the `with` of a `mount-overlaps` refusal.
+/// Why a folder's canonical path could not be had.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Overlap {
-    Mount(MountName),
-    DataRoot,
-    LaunchFolder,
-    BuiltinFolder,
+pub enum NoCanonical {
+    /// The OS answered with an error (the folder is missing, access was refused …): a mount is then judged on its
+    /// spelling.
+    Os(String),
+    /// The ask gave no answer — it timed out, was not checked (the budget was spent) or its worker failed.
+    Unanswered(String),
 }
 
-/// What [`overlap`] asks of the disk. Production = [`DiskProbe`].
+/// What [`overlap`] asks of the disk, one batch per call. Production = [`DiskProbe`].
 pub trait FolderProbe {
-    type Id: PartialEq;
-    /// The canonical final path of `folder`, links and junctions resolved; `Err(why)` = none could be had.
-    fn canonical(&self, folder: &Path) -> Result<PathBuf, String>;
-    /// The file identity of `folder`: `Ok(None)` = it has none to compare (`Unsupported`, or the OS refused);
-    /// `Err(why)` = the ask gave no answer (timed out, not checked, a failed worker).
-    fn identity(&self, folder: &Path) -> Result<Option<Self::Id>, String>;
+    type Id: PartialEq + Clone;
+    /// The canonical final path of each of `folders`, links and junctions resolved — one answer per folder, in order.
+    fn canonical_all(&self, folders: &[PathBuf]) -> Vec<Result<PathBuf, NoCanonical>>;
+    /// The file identity of each of `folders`, one answer per folder in order: `Ok(None)` = it has none to compare
+    /// (`Unsupported`, or the OS refused); `Err(why)` = the ask gave no answer (timed out, not checked, a failed
+    /// worker).
+    fn identity_all(&self, folders: &[PathBuf]) -> Vec<Result<Option<Self::Id>, String>>;
 }
 
-/// The production probe: the canonical path and the identity through the bounded IO, as required asks on `read` —
-/// so every ask of one judgement shares that read's budget.
+/// The production probe: canonical paths and identities through the bounded IO, as required asks on `read` — so every
+/// ask of one judgement shares that read's budget (the caller opens one per judgement).
 pub struct DiskProbe<'a> {
     pub io: &'a BoundedIo,
     pub read: &'a LaunchIo,
@@ -321,113 +339,279 @@ pub struct DiskProbe<'a> {
 impl FolderProbe for DiskProbe<'_> {
     type Id = FileIdentity;
 
-    fn canonical(&self, folder: &Path) -> Result<PathBuf, String> {
-        match self
-            .io
-            .canonical_all(self.read, &[(folder.to_path_buf(), Need::Required)])
-            .remove(&path_key(folder))
-        {
-            Some(Ok(canonical)) => Ok(canonical),
-            Some(Err(status)) => Err(status.why()),
-            None => Err("the bounded canonicalize gave no answer".to_owned()),
-        }
+    fn canonical_all(&self, folders: &[PathBuf]) -> Vec<Result<PathBuf, NoCanonical>> {
+        // One answer per path key: a folder asked twice reads the same answer.
+        let answers = self.io.canonical_all(self.read, &required(folders));
+        folders
+            .iter()
+            .map(|folder| match answers.get(&path_key(folder)).cloned() {
+                Some(Ok(canonical)) => Ok(canonical),
+                Some(Err(status)) if gave_no_answer(&status) => {
+                    Err(NoCanonical::Unanswered(status.why()))
+                }
+                Some(Err(status)) => Err(NoCanonical::Os(status.why())),
+                None => Err(NoCanonical::Unanswered(
+                    "the bounded canonicalize gave no answer".to_owned(),
+                )),
+            })
+            .collect()
     }
 
-    fn identity(&self, folder: &Path) -> Result<Option<FileIdentity>, String> {
-        match self
-            .io
-            .identity_all(self.read, &[(folder.to_path_buf(), Need::Required)])
-            .remove(&path_key(folder))
-        {
-            Some(Ok(identity)) => Ok(identity),
-            Some(Err(status)) => Err(status.why()),
-            None => Err("the bounded identity gave no answer".to_owned()),
+    fn identity_all(&self, folders: &[PathBuf]) -> Vec<Result<Option<FileIdentity>, String>> {
+        let answers = self.io.identity_all(self.read, &required(folders));
+        folders
+            .iter()
+            .map(|folder| match answers.get(&path_key(folder)).cloned() {
+                Some(Ok(identity)) => Ok(identity),
+                Some(Err(status)) => Err(status.why()),
+                None => Err("the bounded identity gave no answer".to_owned()),
+            })
+            .collect()
+    }
+}
+
+fn required(folders: &[PathBuf]) -> Vec<(PathBuf, Need)> {
+    folders
+        .iter()
+        .map(|folder| (folder.clone(), Need::Required))
+        .collect()
+}
+
+/// The first of `mounts` (in order) that `folder` — a folder being added or relocated — is the same as, holds or lies
+/// inside, if any. `mounts` = every mount to judge against — a relocate leaves the mount itself out (module header for
+/// how folders compare). Only mounts are judged: a mount may lie anywhere else, the daemon's own folders included
+/// (ADR-0400 decision 10 as amended). The canonical paths of `folder` and of every mount are asked in one batch, then
+/// the identities of every folder and ancestor they name in one batch, all on the probe's one budget.
+///
+/// `missing` = `folder` may not exist yet (a command's `create` makes it only after this judgement): every ancestor of
+/// it is asked in the same canonical batch, and it is judged by the nearest one whose canonical path the OS gives, with
+/// the spelling of the names below that one appended (those names have no identity).
+///
+/// `Err(why)` = the judgement cannot be made, so the caller refuses `folder` as a folder that cannot be used
+/// (`library-root-unusable`), never as free: `folder`'s own canonical path failed — with `missing`, no ancestor's
+/// canonical path was had, or one nearer than the first had gave no answer — or an identity of it, or the canonical
+/// path or an identity of a mount, gave no answer. A mount whose canonical path the OS refused (an offline mount) is
+/// judged on its spelling, with a `warn` log.
+// ADR-0400 decision 10
+pub fn overlap<'m, P: FolderProbe>(
+    folder: &Path,
+    missing: bool,
+    mounts: impl IntoIterator<Item = &'m Mount>,
+    probe: &P,
+) -> Result<Option<MountName>, String> {
+    let chain: Vec<PathBuf> = match missing {
+        true => folder.ancestors().map(Path::to_path_buf).collect(),
+        false => vec![folder.to_path_buf()],
+    };
+    let mounts: Vec<&Mount> = mounts.into_iter().collect();
+    let mut asked = chain.clone();
+    asked.extend(mounts.iter().map(|mount| mount.folder.clone()));
+    let mut placed = places(&asked, probe);
+    let sides = placed.split_off(chain.len());
+    let it = candidate(folder, &chain, placed)?;
+    for (mount, place) in mounts.into_iter().zip(sides) {
+        let side = format!("mount {:?}", mount.name.as_str());
+        if it.overlaps(&known(place, &mount.folder, &side)?) {
+            return Ok(Some(mount.name.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// The place [`overlap`] judges `folder` by, from the places of `chain` — `folder`, then (when it may be missing) each
+/// ancestor up to the root: the first one placed, with the names of `folder` below it appended and unknown identities
+/// for them. An OS refusal moves on to the next one of `chain`; an ask that gave no answer, or nothing placed, is
+/// `Err`.
+fn candidate<I: PartialEq>(
+    folder: &Path,
+    chain: &[PathBuf],
+    placed: Vec<Result<Place<I>, Unplaced<I>>>,
+) -> Result<Place<I>, String> {
+    let mut refused = None;
+    for (at, place) in chain.iter().zip(placed) {
+        match place {
+            Ok(mut place) => {
+                let below = folder.strip_prefix(at).map(names_of).unwrap_or_default();
+                for _ in &below {
+                    place.ids.insert(0, None);
+                }
+                place.names.extend(below);
+                return Ok(place);
+            }
+            Err(Unplaced::Os(why)) => refused = Some(why),
+            Err(Unplaced::Unanswered(why) | Unplaced::Unidentified { why, .. }) => return Err(why),
+        }
+    }
+    Err(refused.unwrap_or_else(|| {
+        format!(
+            "the canonical path of {} could not be had",
+            folder.display()
+        )
+    }))
+}
+
+/// The saved mounts that overlap an earlier one in the list — each such mount with the first earlier mount it
+/// overlaps, in list order (ADR-0400 decision 10: once per run). Unlike [`overlap`] nothing fails closed here: a folder
+/// whose canonical path cannot be had (an OS error or no answer) is judged on its spelling, and an identity that gives
+/// no answer is unknown while its canonical path still judges — each logged `warn`; a mount that does not answer is not
+/// walked anyway (its bounded stat).
+// ADR-0400 decision 10
+pub fn overlapping<P: FolderProbe>(mounts: &Mounts, probe: &P) -> Vec<(MountName, MountName)> {
+    let folders: Vec<PathBuf> = mounts.iter().map(|mount| mount.folder.clone()).collect();
+    let placed: Vec<Place<P::Id>> = places(&folders, probe)
+        .into_iter()
+        .zip(&folders)
+        .map(|(place, folder)| match place {
+            Ok(place) => place,
+            Err(Unplaced::Unidentified { place, why }) => {
+                tracing::warn!(
+                    folder = %escape_controls(&folder.to_string_lossy()),
+                    "library overlap check: an identity gave no answer; judged without it: {}",
+                    escape_controls(&why)
+                );
+                place
+            }
+            Err(Unplaced::Os(why) | Unplaced::Unanswered(why)) => {
+                spelling_fallback(folder, &why);
+                Place::spelled(folder)
+            }
+        })
+        .collect();
+    let list: Vec<&Mount> = mounts.iter().collect();
+    let mut found = Vec::new();
+    for (at, place) in placed.iter().enumerate() {
+        if let Some(earlier) = (0..at).find(|&earlier| place.overlaps(&placed[earlier])) {
+            found.push((list[at].name.clone(), list[earlier].name.clone()));
+        }
+    }
+    found
+}
+
+/// Why a folder could not be placed whole for a comparison.
+enum Unplaced<I> {
+    /// Its canonical path failed with an OS error (`why` says so).
+    Os(String),
+    /// Its canonical path gave no answer (`why` says so).
+    Unanswered(String),
+    /// Its canonical path was had but an identity of it or of an ancestor gave no answer (`why` says which): `place`
+    /// keeps the canonical names, with each such identity unknown.
+    Unidentified { place: Place<I>, why: String },
+}
+
+/// A known side of a comparison — a mount (`side` names it in a refusal): judged on its spelling
+/// when the OS refused its canonical path (logged), refused when an ask gave no answer.
+fn known<I: PartialEq>(
+    placed: Result<Place<I>, Unplaced<I>>,
+    folder: &Path,
+    side: &str,
+) -> Result<Place<I>, String> {
+    match placed {
+        Ok(place) => Ok(place),
+        Err(Unplaced::Os(why)) => {
+            spelling_fallback(folder, &why);
+            Ok(Place::spelled(folder))
+        }
+        Err(Unplaced::Unanswered(why) | Unplaced::Unidentified { why, .. }) => {
+            Err(format!("could not tell whether it overlaps {side}: {why}"))
         }
     }
 }
 
-/// What `folder` — a folder being added or relocated — overlaps, if anything: the first of `mounts` (in order) that is
-/// the same folder, holds it or lies inside it; then the data folder (unless `folder` is the default place itself),
-/// the launch folder and the built-in folder. `mounts` = every mount to judge against — a relocate leaves the mount
-/// itself out (module header for how folders compare).
-///
-/// `Err(why)` = `folder` itself could not be judged — its canonical path, or the identity of it or of an ancestor, gave
-/// no answer: the caller refuses it as a folder that cannot be used (`library-root-unusable`), never as free. A mount or
-/// reserved folder that cannot be had is judged on its spelling (an offline mount) and an identity that does not answer
-/// counts as unknown.
-// ADR-0400 decision 10
-pub fn overlap<'m, P: FolderProbe>(
-    folder: &Path,
-    mounts: impl IntoIterator<Item = &'m Mount>,
-    reserved: &Reserved,
+fn spelling_fallback(folder: &Path, why: &str) {
+    tracing::warn!(
+        folder = %escape_controls(&folder.to_string_lossy()),
+        "library overlap check: no canonical path; judged on its spelling: {}",
+        escape_controls(why)
+    );
+}
+
+/// Each of `folders` as [`overlap`] compares it: the canonical paths in one batch, then the identities of every folder
+/// and ancestor of those paths in one batch.
+fn places<P: FolderProbe>(
+    folders: &[PathBuf],
     probe: &P,
-) -> Result<Option<Overlap>, String> {
-    let it = Place::candidate(folder, probe)?;
-    for mount in mounts {
-        if it.overlaps(&Place::known(&mount.folder, probe)) {
-            return Ok(Some(Overlap::Mount(mount.name.clone())));
+) -> Vec<Result<Place<P::Id>, Unplaced<P::Id>>> {
+    if folders.is_empty() {
+        return Vec::new();
+    }
+    let canonical = probe.canonical_all(folders);
+    let mut asked: Vec<PathBuf> = Vec::new();
+    for path in canonical.iter().flatten() {
+        for at in path.ancestors() {
+            if !asked.iter().any(|seen| seen.as_path() == at) {
+                asked.push(at.to_path_buf());
+            }
         }
     }
-    if it.overlaps(&Place::known(reserved.data_root, probe))
-        && !it.is(&Place::known(reserved.default_place, probe))
-    {
-        return Ok(Some(Overlap::DataRoot));
-    }
-    if it.overlaps(&Place::known(reserved.launch_root, probe)) {
-        return Ok(Some(Overlap::LaunchFolder));
-    }
-    if let Some(builtin) = reserved.builtin_dir {
-        if it.overlaps(&Place::known(builtin, probe)) {
-            return Ok(Some(Overlap::BuiltinFolder));
+    let identities: Vec<(PathBuf, Result<Option<P::Id>, String>)> = match asked.is_empty() {
+        true => Vec::new(),
+        false => {
+            let answers = probe.identity_all(&asked);
+            asked.into_iter().zip(answers).collect()
         }
-    }
-    Ok(None)
+    };
+    canonical
+        .into_iter()
+        .zip(folders)
+        .map(|(canonical, folder)| {
+            let canonical = match canonical {
+                Ok(canonical) => canonical,
+                Err(NoCanonical::Os(why)) => {
+                    return Err(Unplaced::Os(format!(
+                        "the canonical path of {} could not be had: {why}",
+                        folder.display()
+                    )))
+                }
+                Err(NoCanonical::Unanswered(why)) => {
+                    return Err(Unplaced::Unanswered(format!(
+                        "the canonical path of {} gave no answer: {why}",
+                        folder.display()
+                    )))
+                }
+            };
+            let mut unanswered: Option<String> = None;
+            let ids = canonical
+                .ancestors()
+                .map(
+                    |at| match identities.iter().find(|(asked, _)| asked.as_path() == at) {
+                        Some((_, Ok(id))) => id.clone(),
+                        Some((_, Err(why))) => {
+                            unanswered.get_or_insert_with(|| {
+                                format!("the identity of {} gave no answer: {why}", at.display())
+                            });
+                            None
+                        }
+                        None => None,
+                    },
+                )
+                .collect();
+            let place = Place {
+                names: names_of(&canonical),
+                ids,
+            };
+            match unanswered {
+                None => Ok(place),
+                Some(why) => Err(Unplaced::Unidentified { place, why }),
+            }
+        })
+        .collect()
 }
 
 /// One folder as [`overlap`] compares it.
 struct Place<I> {
     /// The path key of each component of the canonical path (or of the spelling).
     names: Vec<PathKey>,
-    /// The identity of the folder and of each ancestor, the folder first (`None` = unknown); empty when the canonical
-    /// path did not answer.
+    /// The identity of the folder and of each ancestor, the folder first (`None` = unknown); empty when judged on its
+    /// spelling.
     ids: Vec<Option<I>>,
 }
 
 impl<I: PartialEq> Place<I> {
-    /// The folder being judged: fails closed when its canonical path fails (no answer or an OS error) or any identity
-    /// gives no answer.
-    fn candidate<P: FolderProbe<Id = I>>(folder: &Path, probe: &P) -> Result<Self, String> {
-        let canonical = probe
-            .canonical(folder)
-            .map_err(|why| format!("its canonical path could not be had: {why}"))?;
-        let ids = canonical
-            .ancestors()
-            .map(|at| {
-                probe.identity(at).map_err(|why| {
-                    format!("the identity of {} gave no answer: {why}", at.display())
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(Place {
-            names: names_of(&canonical),
-            ids,
-        })
-    }
-
-    /// A folder judged against: its spelling when the canonical path cannot be had, unknown identities skipped.
-    fn known<P: FolderProbe<Id = I>>(folder: &Path, probe: &P) -> Self {
-        match probe.canonical(folder) {
-            Ok(canonical) => Place {
-                names: names_of(&canonical),
-                ids: canonical
-                    .ancestors()
-                    .map(|at| probe.identity(at).ok().flatten())
-                    .collect(),
-            },
-            Err(_) => Place {
-                names: names_of(folder),
-                ids: Vec::new(),
-            },
+    /// A folder judged on its spelling alone.
+    fn spelled(folder: &Path) -> Self {
+        Place {
+            names: names_of(folder),
+            ids: Vec::new(),
         }
     }
 
@@ -440,14 +624,6 @@ impl<I: PartialEq> Place<I> {
             Some(Some(id)) => self.ids.iter().flatten().any(|have| have == id),
             _ => false,
         }
-    }
-
-    /// `self` is the same folder as `other`.
-    fn is(&self, other: &Place<I>) -> bool {
-        if self.names == other.names {
-            return true;
-        }
-        matches!((self.ids.first(), other.ids.first()), (Some(Some(a)), Some(Some(b))) if a == b)
     }
 
     fn overlaps(&self, other: &Place<I>) -> bool {
@@ -635,76 +811,97 @@ mod tests {
     }
 
     #[test]
-    fn the_one_root_view_is_the_first_mount_and_a_root_change_relocates_it_or_registers_library() {
-        let mut mounts = Mounts::default();
-        assert_eq!(mounts.first(), None);
-        mounts.set_root(PathBuf::from("/new"));
-        assert_eq!(mounts, Mounts::new(vec![mount("library", "/new")]).unwrap());
-        let mut two = Mounts::new(vec![mount("team", "/t"), mount("other", "/o")]).unwrap();
-        two.set_root(PathBuf::from("/moved"));
+    fn a_mount_is_pushed_at_the_end_removed_and_relocated_by_name_key_and_a_taken_name_is_refused()
+    {
+        let mut mounts = Mounts::new(vec![mount("team", "/t")]).unwrap();
+        assert_eq!(mounts.push(mount("other", "/o")), Ok(()));
         assert_eq!(
-            two.first().map(|first| first.folder.as_path()),
-            Some(Path::new("/moved"))
+            mounts.push(mount("team", "/x")),
+            Err(NameTaken("team".to_owned()))
         );
         assert_eq!(
-            two,
+            mounts,
+            Mounts::new(vec![mount("team", "/t"), mount("other", "/o")]).unwrap(),
+            "pushed at the end; a taken name changes nothing"
+        );
+        assert!(mounts.relocate(&name("team"), PathBuf::from("/moved")));
+        assert!(!mounts.relocate(&name("nope"), PathBuf::from("/x")));
+        assert_eq!(
+            mounts,
             Mounts::new(vec![mount("team", "/moved"), mount("other", "/o")]).unwrap(),
-            "the name and the other mounts stay"
+            "the name and its place in the list stay"
         );
+        assert_eq!(mounts.remove(&name("nope")), None);
+        assert_eq!(mounts.remove(&name("other")), Some(mount("other", "/o")));
+        assert_eq!(mounts, Mounts::new(vec![mount("team", "/moved")]).unwrap());
+        if folds_case() {
+            assert!(mounts.relocate(&name("TEAM"), PathBuf::from("/again")));
+            assert_eq!(mounts.remove(&name("Team")), Some(mount("team", "/again")));
+        }
     }
 
     // ── overlap ──────────────────────────────────────────────────────────────────────────────────────────
 
     /// A fake disk: `links` maps a spelled folder to its canonical path (by prefix — `links["/j"] = "/real"` makes
     /// `/j/x` canonical `/real/x`); `ids` gives a folder's identity by its canonical path (none listed = no identity);
-    /// `gone` folders (exactly these) do not canonicalize; `silent` folders' identities give no answer; with `no_ids` no folder has an
-    /// identity.
+    /// `gone` folders (exactly these) give no canonical answer, `refused` ones get an OS error for it; `silent` folders'
+    /// identities give no answer; with `no_ids` no folder has an identity. `asked` records each batch, in order.
     #[derive(Default)]
     struct Fake {
         links: Vec<(PathBuf, PathBuf)>,
         ids: HashMap<PathBuf, u32>,
         gone: Vec<PathBuf>,
+        refused: Vec<PathBuf>,
         silent: Vec<PathBuf>,
         no_ids: bool,
+        asked: std::cell::RefCell<Vec<(&'static str, Vec<PathBuf>)>>,
     }
 
     impl FolderProbe for Fake {
         type Id = u32;
 
-        fn canonical(&self, folder: &Path) -> Result<PathBuf, String> {
-            if self.gone.iter().any(|gone| gone == folder) {
-                return Err("timed out".to_owned());
-            }
-            for (link, target) in &self.links {
-                if let Ok(rest) = folder.strip_prefix(link) {
-                    return Ok(target.join(rest));
-                }
-            }
-            Ok(folder.to_path_buf())
+        fn canonical_all(&self, folders: &[PathBuf]) -> Vec<Result<PathBuf, NoCanonical>> {
+            self.asked
+                .borrow_mut()
+                .push(("canonical", folders.to_vec()));
+            folders
+                .iter()
+                .map(|folder| {
+                    if self.gone.contains(folder) {
+                        return Err(NoCanonical::Unanswered("timed out".to_owned()));
+                    }
+                    if self.refused.contains(folder) {
+                        return Err(NoCanonical::Os("access denied".to_owned()));
+                    }
+                    for (link, target) in &self.links {
+                        if let Ok(rest) = folder.strip_prefix(link) {
+                            return Ok(target.join(rest));
+                        }
+                    }
+                    Ok(folder.clone())
+                })
+                .collect()
         }
 
-        fn identity(&self, folder: &Path) -> Result<Option<u32>, String> {
-            if self.silent.iter().any(|silent| silent == folder) {
-                return Err("timed out".to_owned());
-            }
-            if self.no_ids {
-                return Ok(None);
-            }
-            Ok(self.ids.get(folder).copied())
+        fn identity_all(&self, folders: &[PathBuf]) -> Vec<Result<Option<u32>, String>> {
+            self.asked.borrow_mut().push(("identity", folders.to_vec()));
+            folders
+                .iter()
+                .map(|folder| {
+                    if self.silent.contains(folder) {
+                        return Err("timed out".to_owned());
+                    }
+                    if self.no_ids {
+                        return Ok(None);
+                    }
+                    Ok(self.ids.get(folder).copied())
+                })
+                .collect()
         }
     }
 
-    fn reserved() -> Reserved<'static> {
-        Reserved {
-            data_root: Path::new("/data"),
-            default_place: Path::new("/data/library"),
-            launch_root: Path::new("/data/launch"),
-            builtin_dir: Some(Path::new("/dist/builtin")),
-        }
-    }
-
-    fn judged(folder: &str, mounts: &[Mount], fake: &Fake) -> Option<Overlap> {
-        overlap(Path::new(folder), mounts, &reserved(), fake).expect("the candidate is judged")
+    fn judged(folder: &str, mounts: &[Mount], fake: &Fake) -> Option<MountName> {
+        overlap(Path::new(folder), false, mounts, fake).expect("the candidate is judged")
     }
 
     #[test]
@@ -712,7 +909,7 @@ mod tests {
     ) {
         let mounts = [mount("team", "/m/team"), mount("other", "/m/other")];
         let fake = Fake::default();
-        let team = Some(Overlap::Mount(name("team")));
+        let team = Some(name("team"));
         assert_eq!(judged("/m/team", &mounts, &fake), team, "the same folder");
         assert_eq!(judged("/m/team/sub", &mounts, &fake), team, "inside");
         assert_eq!(
@@ -728,7 +925,7 @@ mod tests {
         assert_eq!(judged("/elsewhere", &mounts, &fake), None);
         assert_eq!(
             judged("/M/Team", &mounts, &fake),
-            folds_case().then_some(Overlap::Mount(name("team"))),
+            folds_case().then_some(name("team")),
             "compared by the platform path key"
         );
     }
@@ -740,7 +937,7 @@ mod tests {
             links: vec![(PathBuf::from("/j"), PathBuf::from("/m/team"))],
             ..Fake::default()
         };
-        let team = Some(Overlap::Mount(name("team")));
+        let team = Some(name("team"));
         assert_eq!(judged("/j", &mounts, &fake), team);
         assert_eq!(judged("/j/sub", &mounts, &fake), team);
         let up = Fake {
@@ -768,7 +965,7 @@ mod tests {
             ids: ids.clone(),
             ..Fake::default()
         };
-        let team = Some(Overlap::Mount(name("team")));
+        let team = Some(name("team"));
         assert_eq!(judged("/z/x", &mounts, &fake), team, "the same identity");
         assert_eq!(
             judged("/z/x/sub", &mounts, &fake),
@@ -809,7 +1006,7 @@ mod tests {
             gone: vec![PathBuf::from("/z/x")],
             ..Fake::default()
         };
-        let why = overlap(Path::new("/z/x"), &mounts, &reserved(), &gone).unwrap_err();
+        let why = overlap(Path::new("/z/x"), false, &mounts, &gone).unwrap_err();
         assert!(
             why.contains("canonical") && why.contains("timed out"),
             "{why}"
@@ -818,29 +1015,30 @@ mod tests {
             silent: vec![PathBuf::from("/z")],
             ..Fake::default()
         };
-        let why = overlap(Path::new("/z/x"), &mounts, &reserved(), &silent_ancestor).unwrap_err();
+        let why = overlap(Path::new("/z/x"), false, &mounts, &silent_ancestor).unwrap_err();
         assert!(
             why.contains("identity") && why.contains("timed out"),
             "{why}"
         );
         assert!(
-            overlap(Path::new("/z/x"), &[], &reserved(), &silent_ancestor).is_err(),
+            overlap(Path::new("/z/x"), false, &[], &silent_ancestor).is_err(),
             "refused with no mount to judge against too"
         );
     }
 
+    // ADR-0400 decision 10: a known side that gives no answer cannot be judged free; an OS refusal is judged on spelling.
     #[test]
-    fn an_offline_mount_is_judged_on_its_spelling_and_an_identity_that_does_not_answer_is_unknown()
-    {
+    fn a_mount_the_os_refuses_is_judged_on_its_spelling_and_one_that_does_not_answer_refuses_the_candidate(
+    ) {
         let mounts = [mount("team", "/m/team")];
         let offline = Fake {
-            gone: vec![PathBuf::from("/m/team")],
+            refused: vec![PathBuf::from("/m/team")],
             ids: HashMap::from([(PathBuf::from("/m/team"), 1), (PathBuf::from("/other"), 1)]),
             ..Fake::default()
         };
         assert_eq!(
             judged("/m/team/sub", &mounts, &offline),
-            Some(Overlap::Mount(name("team"))),
+            Some(name("team")),
             "the offline mount's spelling"
         );
         assert_eq!(
@@ -848,78 +1046,154 @@ mod tests {
             None,
             "the offline mount's identity is not asked"
         );
-        let silent_mount = Fake {
-            ids: HashMap::from([(PathBuf::from("/m/team"), 1), (PathBuf::from("/other"), 1)]),
-            silent: vec![PathBuf::from("/m/team")],
-            ..Fake::default()
-        };
+        for (fake, asked) in [
+            (
+                Fake {
+                    gone: vec![PathBuf::from("/m/team")],
+                    ..Fake::default()
+                },
+                "canonical",
+            ),
+            (
+                Fake {
+                    silent: vec![PathBuf::from("/m/team")],
+                    ..Fake::default()
+                },
+                "identity",
+            ),
+        ] {
+            let why = overlap(Path::new("/other"), false, &mounts, &fake).unwrap_err();
+            assert!(
+                why.contains("\"team\"") && why.contains(asked) && why.contains("timed out"),
+                "{why}"
+            );
+        }
+    }
+
+    // ADR-0400 decision 10 (as amended): only mounts are judged — the daemon's own folders are no side — and one
+    //   judgement asks one canonical batch and one identity batch.
+    #[test]
+    fn only_mounts_are_judged_in_one_canonical_and_one_identity_batch() {
+        let mounts = [mount("team", "/x"), mount("other", "/o")];
+        let fake = Fake::default();
+        assert_eq!(judged("/elsewhere", &mounts, &fake), None);
+        let asked = fake.asked.take();
+        let kinds: Vec<&str> = asked.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, ["canonical", "identity"]);
         assert_eq!(
-            judged("/other", &mounts, &silent_mount),
-            None,
-            "the mount's silent identity is unknown, not a match"
+            asked[0].1,
+            [
+                PathBuf::from("/elsewhere"),
+                PathBuf::from("/x"),
+                PathBuf::from("/o")
+            ]
         );
         assert_eq!(
-            judged("/m", &mounts, &silent_mount),
-            Some(Overlap::Mount(name("team"))),
-            "its path still judges a folder holding it"
+            asked[1].1.len(),
+            4,
+            "each ancestor once — `/elsewhere`, `/`, `/x`, `/o`: {:?}",
+            asked[1].1
+        );
+        for folder in [
+            "/data",
+            "/data/daemon",
+            "/data/launch",
+            "/dist/builtin",
+            "/",
+        ] {
+            assert_eq!(
+                judged(folder, &[], &fake),
+                None,
+                "{folder}: nothing but a mount is a side"
+            );
+        }
+    }
+
+    // ADR-0400 decision 10: a folder a `create` will make is judged before it exists — by its nearest ancestor whose
+    //   canonical path the OS gives, with the names below it spelled; an ancestor nearer than that which gives no
+    //   answer, or no ancestor at all, refuses it.
+    #[test]
+    fn a_folder_that_does_not_exist_yet_is_judged_by_its_nearest_ancestor_with_a_canonical_path() {
+        let mounts = [mount("team", "/m/team")];
+        let fake = Fake {
+            links: vec![(PathBuf::from("/j"), PathBuf::from("/m"))],
+            refused: vec![
+                PathBuf::from("/j/team/new"),
+                PathBuf::from("/j/other/new"),
+                PathBuf::from("/j/other"),
+            ],
+            ..Fake::default()
+        };
+        let missing = |folder: &str, fake: &Fake| overlap(Path::new(folder), true, &mounts, fake);
+        assert_eq!(
+            missing("/j/team/new", &fake),
+            Ok(Some(name("team"))),
+            "`/j/team` canonicalizes to `/m/team`; `new` below it lies inside the mount"
+        );
+        assert_eq!(
+            missing("/j/other/new", &fake),
+            Ok(None),
+            "`/m` + `other/new`"
+        );
+        assert!(
+            overlap(Path::new("/j/team/new"), false, &mounts, &fake).is_err(),
+            "without `create` a folder must canonicalize itself"
+        );
+        let silent = Fake {
+            refused: vec![PathBuf::from("/j/new")],
+            gone: vec![PathBuf::from("/j")],
+            ..Fake::default()
+        };
+        let why = missing("/j/new", &silent).unwrap_err();
+        assert!(
+            why.contains("timed out"),
+            "a nearer ancestor that gives no answer: {why}"
         );
     }
 
-    // ADR-0400 decision 10: only the default place itself is exempt from the data-root rule.
     #[test]
-    fn the_data_launch_and_built_in_folders_are_refused_but_the_default_place_itself_is_not() {
-        let fake = Fake::default();
-        for (folder, want) in [
-            ("/data", Some(Overlap::DataRoot)),
-            ("/data/daemon", Some(Overlap::DataRoot)),
-            ("/data/logs/x", Some(Overlap::DataRoot)),
-            ("/", Some(Overlap::DataRoot)),
-            ("/data/library", None),
-            ("/data/library/sub", Some(Overlap::DataRoot)),
-            ("/data/launch", Some(Overlap::DataRoot)),
-            ("/dist/builtin", Some(Overlap::BuiltinFolder)),
-            ("/dist/builtin/presets", Some(Overlap::BuiltinFolder)),
-            ("/dist", Some(Overlap::BuiltinFolder)),
-            ("/dist/library", None),
-        ] {
-            assert_eq!(judged(folder, &[], &fake), want, "{folder}");
-        }
-        // `/z` is the data folder and `/z/lib` the default place under other spellings, told by their identities.
-        let same_by_id = Fake {
-            ids: HashMap::from([
-                (PathBuf::from("/data"), 9),
-                (PathBuf::from("/z"), 9),
-                (PathBuf::from("/data/library"), 5),
-                (PathBuf::from("/z/lib"), 5),
-            ]),
+    fn saved_mounts_overlapping_an_earlier_one_are_named_with_it_and_nothing_fails_closed() {
+        let mounts = Mounts::new(vec![
+            mount("a", "/m/a"),
+            mount("inner", "/m/a/sub"),
+            mount("b", "/m/b"),
+            mount("outer", "/m"),
+            mount("gone", "/g"),
+            mount("under-gone", "/g/x"),
+        ])
+        .unwrap();
+        let fake = Fake {
+            gone: vec![PathBuf::from("/g")],
+            silent: vec![PathBuf::from("/m/b")],
             ..Fake::default()
         };
         assert_eq!(
-            judged("/z/lib", &[], &same_by_id),
-            None,
-            "the default place itself"
+            overlapping(&mounts, &fake),
+            vec![
+                (name("inner"), name("a")),
+                (name("outer"), name("a")),
+                (name("under-gone"), name("gone")),
+            ],
+            "the first earlier mount; an unanswered side is judged on its spelling"
         );
-        assert_eq!(
-            judged("/z/other", &[], &same_by_id),
-            Some(Overlap::DataRoot),
-            "inside the data folder by identity"
-        );
-        let release = Reserved {
-            data_root: Path::new("/dist/data"),
-            default_place: Path::new("/dist/library"),
-            launch_root: Path::new("/tmp/launch"),
-            builtin_dir: None,
+        assert!(overlapping(&Mounts::default(), &fake).is_empty());
+    }
+
+    // ADR-0400 decision 10: at load an identity that gives no answer is unknown, not a reason to drop the canonical
+    //   path — a junction alias of an earlier mount is still found by it.
+    #[test]
+    fn at_load_an_identity_without_an_answer_leaves_the_canonical_path_to_judge() {
+        let mounts = Mounts::new(vec![mount("a", "/m/a"), mount("alias", "/j")]).unwrap();
+        let fake = Fake {
+            links: vec![(PathBuf::from("/j"), PathBuf::from("/m/a"))],
+            silent: vec![PathBuf::from("/m")],
+            ..Fake::default()
         };
-        let at = |folder: &str| overlap(Path::new(folder), &[], &release, &fake).unwrap();
-        assert_eq!(at("/tmp/launch/a"), Some(Overlap::LaunchFolder));
-        assert_eq!(at("/tmp"), Some(Overlap::LaunchFolder));
         assert_eq!(
-            at("/dist/library"),
-            None,
-            "a default place beside the data folder"
+            overlapping(&mounts, &fake),
+            vec![(name("alias"), name("a"))],
+            "both canonical paths are `/m/a`; the silent ancestor `/m` only leaves its identity unknown"
         );
-        assert_eq!(at("/dist/library/sub"), None, "outside the data folder");
-        assert_eq!(at("/dist"), Some(Overlap::DataRoot));
     }
 
     #[test]
@@ -930,24 +1204,13 @@ mod tests {
             .iter()
             .filter(|m| m.name.as_str() != "library")
             .collect();
-        let relocated = |folder: &str| {
-            overlap(
-                Path::new(folder),
-                others.iter().copied(),
-                &reserved(),
-                &fake,
-            )
-        };
+        let relocated =
+            |folder: &str| overlap(Path::new(folder), false, others.iter().copied(), &fake);
         assert_eq!(relocated("/lib/sub"), Ok(None));
-        assert_eq!(relocated("/t/sub"), Ok(Some(Overlap::Mount(name("team")))));
+        assert_eq!(relocated("/t/sub"), Ok(Some(name("team"))));
         assert_eq!(
-            relocated("/data/library/sub"),
-            Ok(Some(Overlap::DataRoot)),
-            "below the default place is inside the data folder"
-        );
-        assert_eq!(
-            overlap(Path::new("/lib/sub"), &mounts, &reserved(), &fake),
-            Ok(Some(Overlap::Mount(name("library")))),
+            overlap(Path::new("/lib/sub"), false, &mounts, &fake),
+            Ok(Some(name("library"))),
             "judged with itself it would overlap"
         );
     }
@@ -988,23 +1251,25 @@ mod tests {
             name: name("team"),
             folder: real.clone(),
         }];
-        let elsewhere = base.join("elsewhere");
-        let reserved = Reserved {
-            data_root: &elsewhere,
-            default_place: &elsewhere,
-            launch_root: &elsewhere,
-            builtin_dir: None,
-        };
-        let team = Ok(Some(Overlap::Mount(name("team"))));
-        assert_eq!(overlap(&link, &mounts, &reserved, &probe), team);
-        assert_eq!(overlap(&link.join("sub"), &mounts, &reserved, &probe), team);
+        let team = Ok(Some(name("team")));
+        assert_eq!(overlap(&link, false, &mounts, &probe), team);
+        assert_eq!(overlap(&link.join("sub"), false, &mounts, &probe), team);
         assert_eq!(
-            overlap(&base.join("apart"), &mounts, &reserved, &probe),
+            overlap(&base.join("apart"), false, &mounts, &probe),
             Ok(None)
         );
         assert!(
-            overlap(&base.join("missing"), &mounts, &reserved, &probe).is_err(),
+            overlap(&base.join("missing"), false, &mounts, &probe).is_err(),
             "a candidate that does not canonicalize is refused"
+        );
+        assert_eq!(
+            overlap(&link.join("new").join("deeper"), true, &mounts, &probe),
+            team,
+            "a folder to be created, judged through the junction above it"
+        );
+        assert_eq!(
+            overlap(&base.join("new").join("deeper"), true, &mounts, &probe),
+            Ok(None)
         );
     }
 }

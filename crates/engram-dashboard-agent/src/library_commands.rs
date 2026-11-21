@@ -12,8 +12,8 @@
 //!   roster no longer holds; the agent-preset commands name the agent from the `target` resolution (an agent-preset
 //!   edit never renames).
 //! - **Answers are mapped as the bodies built them** — nothing here calls a second body or reads back (ADR-0384).
-//! - **A refusal applied nothing** — except `library-config-write-failed`, which leaves the new root live and unsaved
-//!   (ADR-0381). **It maps onto a code that does not keep the request id**, except the `INTERNAL` cases:
+//! - **A refusal applied nothing** — except `library-config-write-failed`, which leaves the mount change live and
+//!   unsaved; repeating the same call saves it (ADR-0381 · ADR-0400 decision 14). **It maps onto a code that does not keep the request id**, except the `INTERNAL` cases:
 //!   `profile-edit-unavailable`, a profile-store write failure (ADR-0379 decisions 3–5) and `folder-listing-unanswered`
 //!   (ADR-0386 decision 16 — on a `Read` command, so no id is kept).
 // ADR-0379
@@ -33,15 +33,16 @@ use crate::commands::{
     AgentAttachPresetArgs, AgentAttachPresetOk, AgentCommandHost, AgentDetachPresetArgs,
     AgentDetachPresetOk, AgentFolderRow, AgentOutputFormat, AgentPresetsArgs, AgentPresetsOk,
     AgentPresetsView, AgentRefRow, AgentReorderPresetsArgs, AgentReorderPresetsOk, Blank,
-    LaunchNoticeRow, LibraryFoldersArgs, LibraryFoldersOk, LibraryKind, LibraryListArgs,
-    LibraryListOk, LibraryNewFileArgs, LibraryNewFileKind, LibraryNewFileOk, LibraryNewFolderArgs,
-    LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk,
-    LibraryRelinkArgs, LibraryRelinkOk, LibrarySetRootArgs, LibrarySetRootOk, LibraryStatusArgs,
-    LibraryStatusOk, ListRow, PresetAddArgs, PresetAddOk, PresetCheckArgs, PresetCheckOk,
-    PresetEntryArg, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs, PresetPreviewFolderOk,
-    PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk, PresetSaveArgs,
-    PresetSaveOk, PresetSection, PresetSetBackendArgs, PresetSetBackendOk, PresetView,
-    ProblemItemRow, ProblemRow, RelinkStopRow, SkippedRow,
+    LaunchNoticeRow, LibraryAddMountArgs, LibraryAddMountOk, LibraryFoldersArgs, LibraryFoldersOk,
+    LibraryKind, LibraryListArgs, LibraryListOk, LibraryNewFileArgs, LibraryNewFileKind,
+    LibraryNewFileOk, LibraryNewFolderArgs, LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk,
+    LibraryRefreshArgs, LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk,
+    LibraryRelocateMountArgs, LibraryRelocateMountOk, LibraryRemoveMountArgs, LibraryRemoveMountOk,
+    LibraryStatusArgs, LibraryStatusOk, ListRow, PointingRow, PresetAddArgs, PresetAddOk,
+    PresetCheckArgs, PresetCheckOk, PresetEntryArg, PresetGetArgs, PresetGetOk,
+    PresetPreviewFolderArgs, PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk,
+    PresetReorderArgs, PresetReorderOk, PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs,
+    PresetSetBackendOk, PresetView, ProblemItemRow, ProblemRow, RelinkStopRow, SkippedRow,
 };
 use crate::launch::{escape_controls, put_reason, BlockReason, Reason};
 use crate::persistence::PROFILES_FILE;
@@ -56,8 +57,8 @@ use crate::types::AgentId;
 pub const PROFILE_STORE_REFUSED: &str = "profile-store-refused";
 
 /// The refusal codes a caller can clear and then repeat with the same request — an IO or write failure on a library
-/// file, the library root or `library.json` (the share comes back, the lock or permission is released), and no usable
-/// library (`library.setRoot` or an IO fix clears it; the daemon's `NoLibrary` is test and harness only): they answer
+/// file, a mount folder or `library.json` (the share comes back, the lock or permission is released), and no usable
+/// library (a mount command or an IO fix clears it; the daemon's `NoLibrary` is test and harness only): they answer
 /// [`RetryMode::AfterCondition`], as an unreadable profile store does (`store_command_error`). Every other refusal
 /// keeps its code's default — a retry cannot fix it until the caller changes the request (a stale root generation, a
 /// taken name) or the daemon restarts (a read-only `library.json`). asset-library's tests pin its consts to this list.
@@ -89,7 +90,7 @@ pub enum PortClass {
     Internal,
 }
 
-/// A refusal crossing the port: nothing was applied, except `library-config-write-failed` (the new root is live but
+/// A refusal crossing the port: nothing was applied, except `library-config-write-failed` (the mount change is live but
 /// not saved — ADR-0381).
 #[derive(Debug)]
 pub enum PortRefusal {
@@ -170,6 +171,54 @@ pub struct NewAgentPresets {
     pub skipped: Vec<SkippedRow>,
 }
 
+/// A section of a preset file — `preset.reorder`'s `section`, a lowercase word checked here (the preset file's own
+/// keys and the refusal arg `list`): the declaration carries a plain string, so another word is refused by the handler
+/// as INVALID_ARGUMENT.
+// ADR-0400 decision 22
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresetSection {
+    Presets,
+    Instructions,
+    Skills,
+    Settings,
+    Folders,
+}
+
+impl PresetSection {
+    /// Every section, in the order the words are listed.
+    pub const ALL: [PresetSection; 5] = [
+        PresetSection::Presets,
+        PresetSection::Instructions,
+        PresetSection::Skills,
+        PresetSection::Settings,
+        PresetSection::Folders,
+    ];
+
+    /// Its word.
+    pub fn word(self) -> &'static str {
+        match self {
+            PresetSection::Presets => "presets",
+            PresetSection::Instructions => "instructions",
+            PresetSection::Skills => "skills",
+            PresetSection::Settings => "settings",
+            PresetSection::Folders => "folders",
+        }
+    }
+
+    /// The section `word` names, exactly; `None` = another word.
+    pub fn parse(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|section| section.word() == word)
+    }
+}
+
+/// `library.removeMount`'s `outcome` when the mount was removed now.
+// ADR-0400 decision 14
+pub const REMOVE_OUTCOME_REMOVED: &str = "removed";
+/// `library.removeMount`'s `outcome` when the mount was already gone — a repeat of a removal whose save failed: only
+/// library.json was written.
+// ADR-0400 decision 14
+pub const REMOVE_OUTCOME_SAVED_ONLY: &str = "saved_only";
+
 /// **Everything** the `library.*`, `preset.*` and agent-preset handlers have the library do (a port) — the real thing
 /// = asset-library `LibraryService` (`host.rs`); assemblies without a library plug the daemon's `NoLibrary`.
 ///
@@ -181,8 +230,23 @@ pub struct NewAgentPresets {
 // ADR-0386
 pub trait LibraryCommandHost: Send + Sync {
     fn status(&self) -> Result<LibraryStatusOk, PortRefusal>;
+    /// `path` = an absolute folder; answers the status after the change and what already points at `name`.
+    fn add_mount(
+        &self,
+        name: &str,
+        path: &str,
+        create: bool,
+    ) -> Result<LibraryAddMountOk, PortRefusal>;
+    /// Answers the status after the change, what now points at `mount`, and [`REMOVE_OUTCOME_REMOVED`] or
+    /// [`REMOVE_OUTCOME_SAVED_ONLY`].
+    fn remove_mount(&self, mount: &str) -> Result<LibraryRemoveMountOk, PortRefusal>;
     /// `path` = an absolute folder; answers the status after the change.
-    fn set_root(&self, path: &str, create: bool) -> Result<LibraryStatusOk, PortRefusal>;
+    fn relocate_mount(
+        &self,
+        mount: &str,
+        path: &str,
+        create: bool,
+    ) -> Result<LibraryStatusOk, PortRefusal>;
     fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal>;
     /// Refuses only a `folder` that is not a library path — a failed scan is the report.
     fn refresh(&self, folder: Option<&str>) -> Result<LibraryRefreshOk, PortRefusal>;
@@ -304,16 +368,14 @@ pub trait LibraryCommandHost: Send + Sync {
     ) -> Result<NewAgentPresets, PortRefusal>;
 }
 
-/// The return of `library.setRoot` — its fields are the same as [`LibraryStatusOk`]. ★Moved by destructuring
-/// (without `..`)★ — if either side gains a field, compilation stops here.
-impl From<LibraryStatusOk> for LibrarySetRootOk {
+/// The answers of the mount commands carry [`LibraryStatusOk`]'s fields. ★Moved by destructuring (without `..`)★ — if
+/// either side gains a field, compilation stops here.
+// ADR-0400 decision 7
+impl From<LibraryStatusOk> for LibraryRelocateMountOk {
     fn from(status: LibraryStatusOk) -> Self {
         let LibraryStatusOk {
             daemon_id,
-            root,
-            root_setting,
-            state,
-            state_why,
+            mounts,
             config,
             config_why,
             suggested_new,
@@ -321,14 +383,59 @@ impl From<LibraryStatusOk> for LibrarySetRootOk {
         } = status;
         Self {
             daemon_id,
-            root,
-            root_setting,
-            state,
-            state_why,
+            mounts,
             config,
             config_why,
             suggested_new,
             root_generation,
+        }
+    }
+}
+
+impl LibraryAddMountOk {
+    /// The status after the add and what already points at the name (see [`LibraryRelocateMountOk`]'s `From`).
+    pub fn of(status: LibraryStatusOk, already_pointing: PointingRow) -> Self {
+        let LibraryStatusOk {
+            daemon_id,
+            mounts,
+            config,
+            config_why,
+            suggested_new,
+            root_generation,
+        } = status;
+        Self {
+            daemon_id,
+            mounts,
+            config,
+            config_why,
+            suggested_new,
+            root_generation,
+            already_pointing,
+        }
+    }
+}
+
+impl LibraryRemoveMountOk {
+    /// The status after the removal, what now points at the name and the outcome word (see
+    /// [`LibraryRelocateMountOk`]'s `From`).
+    pub fn of(status: LibraryStatusOk, now_absent: PointingRow, outcome: &str) -> Self {
+        let LibraryStatusOk {
+            daemon_id,
+            mounts,
+            config,
+            config_why,
+            suggested_new,
+            root_generation,
+        } = status;
+        Self {
+            daemon_id,
+            mounts,
+            config,
+            config_why,
+            suggested_new,
+            root_generation,
+            now_absent,
+            outcome: outcome.to_owned(),
         }
     }
 }
@@ -505,15 +612,33 @@ pub(crate) fn insert(
             blocking_handler(move |_: LibraryStatusArgs| verb_status(status.as_ref())),
         )
         .expect("could not plug library.status into the table");
-    let set_root = Arc::clone(&library);
+    let add_mount = Arc::clone(&library);
     table
         .insert(
-            "library.setRoot",
-            blocking_handler(move |args: LibrarySetRootArgs| {
-                verb_set_root(set_root.as_ref(), args)
+            "library.addMount",
+            blocking_handler(move |args: LibraryAddMountArgs| {
+                verb_add_mount(add_mount.as_ref(), args)
             }),
         )
-        .expect("could not plug library.setRoot into the table");
+        .expect("could not plug library.addMount into the table");
+    let remove_mount = Arc::clone(&library);
+    table
+        .insert(
+            "library.removeMount",
+            blocking_handler(move |args: LibraryRemoveMountArgs| {
+                verb_remove_mount(remove_mount.as_ref(), args)
+            }),
+        )
+        .expect("could not plug library.removeMount into the table");
+    let relocate_mount = Arc::clone(&library);
+    table
+        .insert(
+            "library.relocateMount",
+            blocking_handler(move |args: LibraryRelocateMountArgs| {
+                verb_relocate_mount(relocate_mount.as_ref(), args)
+            }),
+        )
+        .expect("could not plug library.relocateMount into the table");
     let folders = Arc::clone(&library);
     table
         .insert(
@@ -677,17 +802,52 @@ fn verb_status(library: &dyn LibraryCommandHost) -> Result<LibraryStatusOk, Comm
         .map_err(|refusal| refusal_error("library.status", refusal))
 }
 
-fn verb_set_root(
+fn verb_add_mount(
     library: &dyn LibraryCommandHost,
-    args: LibrarySetRootArgs,
-) -> Result<LibrarySetRootOk, CommandError> {
-    reject_blanks(&[("path", Some(args.path.as_str()), Blank::NeedsValue)])?;
-    // One layer of quotes off and nothing else: the host's folder reader takes `\`, and `\` → `/` would turn a verbatim
-    //   root (`\\?\D:\lib`, as `library.status` can answer it) into a UNC server named `?`.
+    args: LibraryAddMountArgs,
+) -> Result<LibraryAddMountOk, CommandError> {
+    reject_blanks(&[
+        ("name", Some(args.name.as_str()), Blank::NeedsValue),
+        ("path", Some(args.path.as_str()), Blank::NeedsValue),
+    ])?;
+    // One layer of quotes off the path and nothing else: the host's folder reader takes `\`, and `\` → `/` would turn a
+    //   verbatim folder (`\\?\D:\lib`, as `library.status` can answer it) into a UNC server named `?`.
     library
-        .set_root(unquote(&args.path), args.create.unwrap_or(false))
-        .map(LibrarySetRootOk::from)
-        .map_err(|refusal| refusal_error("library.setRoot", refusal))
+        .add_mount(
+            &args.name,
+            unquote(&args.path),
+            args.create.unwrap_or(false),
+        )
+        .map_err(|refusal| refusal_error("library.addMount", refusal))
+}
+
+fn verb_remove_mount(
+    library: &dyn LibraryCommandHost,
+    args: LibraryRemoveMountArgs,
+) -> Result<LibraryRemoveMountOk, CommandError> {
+    reject_blanks(&[("mount", Some(args.mount.as_str()), Blank::NeedsValue)])?;
+    library
+        .remove_mount(&args.mount)
+        .map_err(|refusal| refusal_error("library.removeMount", refusal))
+}
+
+fn verb_relocate_mount(
+    library: &dyn LibraryCommandHost,
+    args: LibraryRelocateMountArgs,
+) -> Result<LibraryRelocateMountOk, CommandError> {
+    reject_blanks(&[
+        ("mount", Some(args.mount.as_str()), Blank::NeedsValue),
+        ("path", Some(args.path.as_str()), Blank::NeedsValue),
+    ])?;
+    // The path's quotes: as `verb_add_mount`.
+    library
+        .relocate_mount(
+            &args.mount,
+            unquote(&args.path),
+            args.create.unwrap_or(false),
+        )
+        .map(LibraryRelocateMountOk::from)
+        .map_err(|refusal| refusal_error("library.relocateMount", refusal))
 }
 
 fn verb_folders(library: &dyn LibraryCommandHost) -> Result<LibraryFoldersOk, CommandError> {
@@ -875,14 +1035,23 @@ fn verb_preset_reorder(
         ("path", Some(args.path.as_str()), Blank::NeedsValue),
         ("base_rev", Some(args.base_rev.as_str()), Blank::NeedsValue),
     ])?;
-    let order = match args.section {
+    // ADR-0400 decision 22: a plain string in the declaration, so the word is checked here.
+    let Some(section) = PresetSection::parse(&args.section) else {
+        let words: Vec<&str> = PresetSection::ALL.iter().map(|s| s.word()).collect();
+        return Err(CommandError::invalid_argument(format!(
+            "preset.reorder: section {:?} is not one of {}",
+            escape_controls(&args.section),
+            words.join(", ")
+        )));
+    };
+    let order = match section {
         PresetSection::Folders => unquoted(args.order),
         _ => args.order,
     };
     library
         .preset_reorder(
             &args.path,
-            args.section,
+            section,
             &order,
             &args.base_rev,
             args.root_generation,
@@ -1009,7 +1178,7 @@ fn verb_reorder_presets(
         .map_err(|refusal| refusal_error("agent.reorderPresets", refusal))
 }
 
-/// Folder spellings with one layer of quotes off and nothing else, as `library.setRoot` takes its path — an absolute
+/// Folder spellings with one layer of quotes off and nothing else, as `library.addMount` takes its path — an absolute
 /// folder pasted from a shell often comes quoted, and a quoted spelling would match no listed folder (a remove would
 /// answer success with the folder still listed). Library item spellings are never unquoted.
 fn unquoted(folders: Vec<String>) -> Vec<String> {
@@ -1226,10 +1395,29 @@ pub(crate) mod fake {
         fn status(&self) -> Result<LibraryStatusOk, PortRefusal> {
             self.answer("status", Value::Null)
         }
-        fn set_root(&self, path: &str, create: bool) -> Result<LibraryStatusOk, PortRefusal> {
+        fn add_mount(
+            &self,
+            name: &str,
+            path: &str,
+            create: bool,
+        ) -> Result<LibraryAddMountOk, PortRefusal> {
             self.answer(
-                "set_root",
-                serde_json::json!({ "path": path, "create": create }),
+                "add_mount",
+                serde_json::json!({ "name": name, "path": path, "create": create }),
+            )
+        }
+        fn remove_mount(&self, mount: &str) -> Result<LibraryRemoveMountOk, PortRefusal> {
+            self.answer("remove_mount", serde_json::json!({ "mount": mount }))
+        }
+        fn relocate_mount(
+            &self,
+            mount: &str,
+            path: &str,
+            create: bool,
+        ) -> Result<LibraryStatusOk, PortRefusal> {
+            self.answer(
+                "relocate_mount",
+                serde_json::json!({ "mount": mount, "path": path, "create": create }),
             )
         }
         fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
@@ -1353,7 +1541,7 @@ pub(crate) mod fake {
             self.answer(
                 "preset_reorder",
                 serde_json::json!({
-                    "path": path, "section": section, "order": order, "base_rev": base_rev,
+                    "path": path, "section": section.word(), "order": order, "base_rev": base_rev,
                     "root_generation": root_generation,
                 }),
             )
@@ -1598,10 +1786,30 @@ mod tests {
     /// Every field distinct, so a field carried into another's place fails the comparison.
     fn status_row() -> Value {
         json!({
-            "daemon_id": "d1", "root": "C:/lib", "root_setting": "default", "state": "missing",
-            "state_why": "the stat timed out", "config": "unsaved", "config_why": "the write failed",
+            "daemon_id": "d1",
+            "mounts": [
+                {
+                    "name": "library", "path": "C:/lib", "default": true, "builtin": false,
+                    "state": "missing", "state_why": "the stat timed out",
+                },
+                {
+                    "name": "engram", "path": "C:/dist/builtin", "default": false, "builtin": true,
+                    "state": "ok", "state_why": null,
+                },
+            ],
+            "config": "unsaved", "config_why": "the write failed",
             "suggested_new": "C:/data/library", "root_generation": 41,
         })
+    }
+
+    /// `status_row()` with `extra`'s fields added — a mount command's answer.
+    fn status_with(extra: Value) -> Value {
+        let mut row = status_row();
+        let fields = row.as_object_mut().expect("an object");
+        for (key, value) in extra.as_object().expect("an object") {
+            fields.insert(key.clone(), value.clone());
+        }
+        row
     }
 
     fn read_view(path: &str) -> Value {
@@ -1634,32 +1842,41 @@ mod tests {
                 Value::Null,
             ),
             (
-                "library.setRoot",
-                json!({ "path": "C:/lib" }),
-                status_row(),
-                "set_root",
-                json!({ "path": "C:/lib", "create": false }),
+                "library.addMount",
+                json!({ "name": "team", "path": "C:/lib" }),
+                status_with(json!({ "already_pointing": { "presets": 3, "agents": 1 } })),
+                "add_mount",
+                json!({ "name": "team", "path": "C:/lib", "create": false }),
             ),
             (
-                "library.setRoot",
-                json!({ "path": "C:/lib", "create": true }),
-                status_row(),
-                "set_root",
-                json!({ "path": "C:/lib", "create": true }),
+                "library.addMount",
+                json!({ "name": "team", "path": "\"C:\\data\\lib\"", "create": true }),
+                status_with(json!({ "already_pointing": { "presets": 0, "agents": 0 } })),
+                "add_mount",
+                json!({ "name": "team", "path": "C:\\data\\lib", "create": true }),
             ),
             (
-                "library.setRoot",
-                json!({ "path": "\"C:\\data\\lib\"" }),
-                status_row(),
-                "set_root",
-                json!({ "path": "C:\\data\\lib", "create": false }),
+                "library.removeMount",
+                json!({ "mount": "team" }),
+                status_with(json!({
+                    "now_absent": { "presets": 2, "agents": 5 }, "outcome": REMOVE_OUTCOME_SAVED_ONLY,
+                })),
+                "remove_mount",
+                json!({ "mount": "team" }),
             ),
             (
-                "library.setRoot",
-                json!({ "path": "\\\\?\\D:\\lib." }),
+                "library.relocateMount",
+                json!({ "mount": "team", "path": "\\\\?\\D:\\lib." }),
                 status_row(),
-                "set_root",
-                json!({ "path": "\\\\?\\D:\\lib.", "create": false }),
+                "relocate_mount",
+                json!({ "mount": "team", "path": "\\\\?\\D:\\lib.", "create": false }),
+            ),
+            (
+                "library.relocateMount",
+                json!({ "mount": "team", "path": "C:/lib", "create": true }),
+                status_row(),
+                "relocate_mount",
+                json!({ "mount": "team", "path": "C:/lib", "create": true }),
             ),
             (
                 "library.folders",
@@ -1787,17 +2004,42 @@ mod tests {
         assert_eq!(out, relinked);
     }
 
-    /// `library.setRoot` answers the very status row the port answered (the two declarations are one shape).
+    /// `library.relocateMount` answers the very status row the port answered (the two declarations are one shape).
     #[test]
-    fn set_root_answers_the_status_row_the_port_answered() {
+    fn relocate_mount_answers_the_status_row_the_port_answered() {
         let library = FakeLibrary::answering(Ok(status_row()));
         let out = call(
             &table(Vec::new(), library),
-            "library.setRoot",
-            json!({ "path": "C:/lib" }),
+            "library.relocateMount",
+            json!({ "mount": "team", "path": "C:/lib" }),
         )
-        .expect("set root");
+        .expect("relocate");
         assert_eq!(out, status_row());
+    }
+
+    /// `preset.reorder` takes the five lowercase section words only — another spelling (a capitalized one included) is
+    /// INVALID_ARGUMENT before the port is called (ADR-0400 decision 22).
+    #[test]
+    fn a_section_word_outside_the_five_is_refused_before_the_port_is_called() {
+        for word in ["Presets", "skill", "", "folders "] {
+            let library = Arc::new(FakeLibrary::default());
+            let err = call(
+                &table(Vec::new(), Arc::clone(&library)),
+                "preset.reorder",
+                json!({ "path": "p.yaml", "section": word, "order": [], "base_rev": "r" }),
+            )
+            .expect_err("an unknown section word");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{word:?}");
+            assert!(
+                err.message()
+                    .contains("presets, instructions, skills, settings, folders"),
+                "{word:?}"
+            );
+            assert!(library.calls().is_empty(), "{word:?}: the port was called");
+        }
+        for section in PresetSection::ALL {
+            assert_eq!(PresetSection::parse(section.word()), Some(section));
+        }
     }
 
     /// Each class lands on its ADR-0379 code with the reason as `{code, args, line?}` and a message naming the
@@ -2021,7 +2263,17 @@ mod tests {
     #[test]
     fn blank_values_are_refused_before_the_port_is_called() {
         let cases = [
-            ("library.setRoot", json!({ "path": " " })),
+            ("library.addMount", json!({ "name": "team", "path": " " })),
+            ("library.addMount", json!({ "name": " ", "path": "C:/lib" })),
+            ("library.removeMount", json!({ "mount": "" })),
+            (
+                "library.relocateMount",
+                json!({ "mount": "team", "path": "" }),
+            ),
+            (
+                "library.relocateMount",
+                json!({ "mount": " ", "path": "C:/lib" }),
+            ),
             ("library.refresh", json!({ "folder": "" })),
             ("library.list", json!({ "query": "  " })),
             ("library.list", json!({ "folder": "" })),
@@ -2226,7 +2478,7 @@ mod tests {
                 preset_view(),
                 "preset_reorder",
                 json!({
-                    "path": "p.yaml", "section": "Skills", "order": ["b", "a"], "base_rev": "r1",
+                    "path": "p.yaml", "section": "skills", "order": ["b", "a"], "base_rev": "r1",
                     "root_generation": null,
                 }),
             ),
@@ -2346,21 +2598,21 @@ mod tests {
             ),
             (
                 "preset.reorder",
-                json!({ "path": "p.yaml", "section": "Folders", "order": [quoted, "D:\\y"], "base_rev": "r" }),
+                json!({ "path": "p.yaml", "section": "folders", "order": [quoted, "D:\\y"], "base_rev": "r" }),
                 preset_view(),
                 "preset_reorder",
                 json!({
-                    "path": "p.yaml", "section": "Folders", "order": ["C:\\docs", "D:\\y"],
+                    "path": "p.yaml", "section": "folders", "order": ["C:\\docs", "D:\\y"],
                     "base_rev": "r", "root_generation": null,
                 }),
             ),
             (
                 "preset.reorder",
-                json!({ "path": "p.yaml", "section": "Instructions", "order": ["\"a.md\""], "base_rev": "r" }),
+                json!({ "path": "p.yaml", "section": "instructions", "order": ["\"a.md\""], "base_rev": "r" }),
                 preset_view(),
                 "preset_reorder",
                 json!({
-                    "path": "p.yaml", "section": "Instructions", "order": ["\"a.md\""],
+                    "path": "p.yaml", "section": "instructions", "order": ["\"a.md\""],
                     "base_rev": "r", "root_generation": null,
                 }),
             ),
@@ -2392,7 +2644,7 @@ mod tests {
             ),
             (
                 "preset.reorder",
-                json!({ "path": "team/p.yaml", "section": "Presets", "order": [], "base_rev": "r1" }),
+                json!({ "path": "team/p.yaml", "section": "presets", "order": [], "base_rev": "r1" }),
             ),
             (
                 "preset.save",
@@ -2530,7 +2782,7 @@ mod tests {
             ("preset.remove", json!({ "path": " ", "items": ["a.md"] })),
             (
                 "preset.reorder",
-                json!({ "path": "p.yaml", "section": "Skills", "order": [], "base_rev": " " }),
+                json!({ "path": "p.yaml", "section": "skills", "order": [], "base_rev": " " }),
             ),
             (
                 "preset.setBackend",
@@ -2565,7 +2817,7 @@ mod tests {
         let cases = [
             (
                 "preset.reorder",
-                json!({ "path": "p.yaml", "section": "Presets", "order": [], "base_rev": "old" }),
+                json!({ "path": "p.yaml", "section": "presets", "order": [], "base_rev": "old" }),
                 refused(
                     PortClass::Conflict,
                     "rev-mismatch",

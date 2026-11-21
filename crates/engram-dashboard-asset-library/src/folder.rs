@@ -7,7 +7,9 @@
 //! - **Budgets** (ADR-0360): a launch ([`BoundedIo::begin_launch`]) waits at most [`LaunchWaits::required`] for
 //!   required IO and, on a separate allowance never taken from it, [`LaunchWaits::advisory`] for advisory IO; a read
 //!   computation outside a launch ([`BoundedIo::begin_read`]) gets one limit. A budget is charged only by the time a
-//!   call here spends waiting on IO — never by lock waits, parsing or other work between calls.
+//!   call here spends waiting on IO — never by lock waits, parsing or other work between calls — and by
+//!   [`LaunchIo::charge_required`]: the time its caller waited for IO run on its behalf on another budget (the
+//!   library's load-time overlap judgement, the wait for it included).
 //! - **Class B**: required and advisory asks never share a batch or a wait. A call holding both runs its required
 //!   asks first and alone, then its advisory asks on the advisory allowance. A key asked both ways is required. This
 //!   holds for every `*_all` call — a caller that must skip advisory work after a block splits its calls. One
@@ -92,6 +94,14 @@ const READ_ADVISORY_WAIT: Duration = Duration::from_secs(1);
 const WORKER_NAME: &str = "folder-io";
 const WORKER_PANICKED: &str = "worker panicked";
 pub(crate) const SPAWN_FAILED: &str = "spawn failed";
+
+/// Whether `status` is no answer about the folder — the op timed out ([`TIMEOUT`]), was not checked ([`NOT_CHECKED`])
+/// or its worker failed — rather than what the OS answered. Only this module writes these words.
+// ADR-0400 decision 10
+pub(crate) fn gave_no_answer(status: &FolderStatus) -> bool {
+    matches!(status, FolderStatus::Unreadable(why)
+        if [TIMEOUT, NOT_CHECKED, WORKER_PANICKED, SPAWN_FAILED].contains(&why.as_str()))
+}
 
 /// One bounded op on one absolute path — the unit of de-duplication and of a stored answer.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -238,6 +248,18 @@ impl LaunchIo {
             budget: IoBudget::new(required, advisory),
             answers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The required budget left.
+    pub(crate) fn required_left(&self) -> Duration {
+        *lock(&self.budget.left)
+    }
+
+    /// Charges `waited` to the required budget — the time the caller waited for bounded IO run on its behalf through
+    /// another [`LaunchIo`] (module rules), so its own later asks get only what is left of its one budget.
+    pub(crate) fn charge_required(&self, waited: Duration) {
+        let mut left = lock(&self.budget.left);
+        *left = left.saturating_sub(waited);
     }
 }
 
@@ -392,6 +414,18 @@ impl BoundedIo {
     /// A read computation outside a launch: one limit required plus a 1 s advisory allowance, no answers.
     pub fn begin_read(&self) -> Arc<LaunchIo> {
         Arc::new(LaunchIo::new(self.limit, READ_ADVISORY_WAIT))
+    }
+
+    /// [`BoundedIo::begin_read`] whose required budget is at most `left` — IO run on behalf of a caller with `left` of
+    /// its own budget, which it charges the time spent ([`LaunchIo::charge_required`]).
+    pub(crate) fn begin_read_within(&self, left: Duration) -> Arc<LaunchIo> {
+        Arc::new(LaunchIo::new(self.limit.min(left), READ_ADVISORY_WAIT))
+    }
+
+    /// Whether a stat of `path` is in flight — its worker has not finished (tests only).
+    #[cfg(test)]
+    pub(crate) fn stat_in_flight(&self, path: &Path) -> bool {
+        lock(&self.inflight).contains_key(&IoKey::Stat(path_key(path)))
     }
 
     /// One answer per distinct path key of `paths` (module rules).
@@ -1487,6 +1521,23 @@ mod tests {
         assert!(took < ms(2_000), "bounded by the 1 s budget: {took:?}");
         ops.release("/held");
         assert_inflight_empty(&io);
+    }
+
+    // ADR-0400 decision 10: the overlap check refuses on no answer and judges an OS error on the spelling.
+    #[test]
+    fn no_answer_is_a_timeout_a_spent_budget_or_a_failed_worker_and_never_an_os_error() {
+        for why in [TIMEOUT, NOT_CHECKED, WORKER_PANICKED, SPAWN_FAILED] {
+            assert!(gave_no_answer(&unreadable(why)), "{why}");
+        }
+        for status in [
+            FolderStatus::Ok,
+            FolderStatus::Missing,
+            FolderStatus::NotADirectory,
+            unreadable("Access is denied. (os error 5)"),
+            unreadable(SHARE_NOT_REACHABLE),
+        ] {
+            assert!(!gave_no_answer(&status), "{status:?}");
+        }
     }
 
     #[test]

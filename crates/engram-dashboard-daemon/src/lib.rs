@@ -86,7 +86,7 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
 }
 
 /// The root generation a run's library service starts at ([`LibraryStart::root_generation_base`]): random below 2^52,
-/// so the base plus a run's root changes stays an exact JSON number and a generation kept from an earlier run does not
+/// so the base plus a run's mount changes stays an exact JSON number and a generation kept from an earlier run does not
 /// match. Should the OS source fail (the boot token draws from it first and stops the daemon then), std's per-process
 /// random hash keys stand in — never the clock.
 // ADR-0381
@@ -234,7 +234,6 @@ fn build_daemon_wiring(
     let start = LibraryStart {
         config: engram_dashboard_asset_library::config::load(&state_dir),
         default_root: layout.default_library_root(),
-        data_root: layout.absolute_root(),
         daemon_id: identity::load_or_create(&state_dir),
         root_generation_base: root_generation_base(),
     };
@@ -280,16 +279,14 @@ struct LaunchInputs {
     start: LibraryStart,
 }
 
-/// The mount setting, the data folder, the identity and the root generation base a library service starts with
-/// ([`LibraryValues::config`] · [`LibraryValues::default_root`] · [`LibraryValues::data_root`] ·
-/// [`LibraryValues::daemon_id`] · [`LibraryValues::root_generation_base`]).
+/// The mount setting, the default place, the identity and the root generation base a library service starts with
+/// ([`LibraryValues::config`] · [`LibraryValues::default_root`] · [`LibraryValues::daemon_id`] ·
+/// [`LibraryValues::root_generation_base`]).
 pub struct LibraryStart {
     /// `asset_library::config::load` over the daemon state folder — read before the service is built.
     pub config: LibraryConfig,
     /// `DataLayout::default_library_root`.
     pub default_root: PathBuf,
-    /// `DataLayout::absolute_root`.
-    pub data_root: PathBuf,
     /// `identity::load_or_create`.
     pub daemon_id: String,
     /// [`root_generation_base`], drawn once per run.
@@ -336,7 +333,6 @@ pub fn build_library_service(
             backends: Arc::new(AgentBackends),
             config: start.config,
             default_root: start.default_root,
-            data_root: start.data_root,
             daemon_id: start.daemon_id,
             root_generation_base: start.root_generation_base,
             builtin_dir,
@@ -1307,8 +1303,9 @@ mod tests {
         }
     }
 
-    /// ★The library port of the production wiring is the kept service★: a root set through the port is the root the
-    /// service the manager launches through reports.
+    /// ★The library port of the production wiring is the kept service★: a mount added through the port is a mount the
+    /// service the manager launches through reports. Only mounts are judged for overlap, so a folder inside the data
+    /// folder is a mount like any other (ADR-0400 decision 10).
     #[test]
     fn the_production_library_port_is_the_kept_service() {
         let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
@@ -1319,18 +1316,28 @@ mod tests {
             .clone()
             .expect("production plugs the library");
         wait_boot_scan(&library);
-        let moved = temp.join("moved-library");
+        let team = std::env::temp_dir().join(format!("engram-team-{}", uuid::Uuid::new_v4()));
+        let port = wiring.library_commands();
 
-        let answer = wiring
-            .library_commands()
-            .set_root(&moved.display().to_string(), true)
-            .expect("set root through the port");
+        let answer = port
+            .add_mount("team", &team.display().to_string(), true)
+            .expect("add a mount through the port");
+        let inside = temp.join("inside");
+        port.add_mount("inside", &inside.display().to_string(), true)
+            .expect("a folder inside the data folder is a mount like any other");
 
         let kept = library.status();
-        assert_eq!(kept.root.as_deref(), Some(moved.as_path()));
-        assert_eq!(answer.root_generation, kept.root_generation);
         drop(wiring);
         let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&team);
+        let named: Vec<(&str, &std::path::Path)> = kept
+            .mounts
+            .iter()
+            .map(|mount| (mount.name.as_str(), mount.folder.as_path()))
+            .collect();
+        assert!(named.contains(&("team", team.as_path())), "{named:?}");
+        assert!(named.iter().any(|(name, _)| *name == "inside"), "{named:?}");
+        assert_eq!(answer.root_generation + 1, kept.root_generation);
     }
 
     /// The debug launch-block hook is gone with the real kits (its env vars included).
@@ -1416,19 +1423,20 @@ mod tests {
         assert!(kit.instructions_hash.is_some());
     }
 
-    /// ★The production assembly reads the root setting and the identity from the state folder and runs the first
-    /// start★: over a fresh data folder the default place `<data>\library` is created, `library.json` holds the
-    /// setting at its default value, the kept service publishes that root, and its status carries the id
+    /// ★The production assembly reads the mount setting and the identity from the state folder and runs the first
+    /// start★: over a fresh data folder the default place `<data>\default_library` is created, `library.json` holds the
+    /// mount `default_library` at `default`, the kept service publishes it, and its status carries the id
     /// `identity.json` holds. A second assembly over the same folder keeps both, and starts at another root generation
-    /// base: after the same number of root changes, the first run's generation is stale.
+    /// base: after the same number of mount changes, the first run's generation is stale.
     #[test]
     fn the_production_wiring_runs_the_first_start_over_the_state_folder() {
-        use engram_dashboard_asset_library::{RootSettingKind, RootStatus};
+        use engram_dashboard_asset_library::{MountRow, MountState};
 
         let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
         let layout = DataLayout::new(&temp);
         let state = layout.daemon_state_dir();
-        // `kept` = a generation from an earlier run, tried after one root change of this run (the first run's
+        let extra = std::env::temp_dir().join(format!("engram-extra-{}", uuid::Uuid::new_v4()));
+        // `kept` = a generation from an earlier run, tried after one mount change of this run (the first run's
         //   first start made one).
         let status_of = |layout: &DataLayout, kept: Option<u64>| {
             let wiring = production_wiring(layout);
@@ -1440,8 +1448,8 @@ mod tests {
             wait_boot_scan(library);
             let kept_accepted = kept.map(|kept| {
                 library
-                    .set_root(&layout.default_library_root(), false)
-                    .expect("re-set the same root");
+                    .add_mount("extra", &extra, true)
+                    .expect("add a mount");
                 library
                     .change_at(Some(kept), |_, _, _| ((), Vec::new()))
                     .is_ok()
@@ -1457,20 +1465,33 @@ mod tests {
         let identity: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(state.join("identity.json")).unwrap())
                 .unwrap();
-        let library_made = temp.join("library").is_dir();
+        let library_made = temp.join("default_library").is_dir();
         let (second, kept_accepted) = status_of(&layout, Some(first.root_generation));
         let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&extra);
 
         assert!(library_made);
         assert_eq!(
             config,
-            serde_json::json!({ "schema_version": 2, "mounts": [{ "name": "library", "path": "default" }] })
+            serde_json::json!({ "schema_version": 2, "mounts": [{ "name": "default_library", "path": "default" }] })
         );
-        assert_eq!(first.root, Some(temp.join("library")));
-        assert_eq!(first.root, Some(layout.default_library_root()));
+        assert_eq!(layout.default_library_root(), temp.join("default_library"));
         assert_eq!(
-            (first.state.clone(), first.root_setting),
-            (RootStatus::Ok, Some(RootSettingKind::Default))
+            first.mounts.first(),
+            Some(&MountRow {
+                name: "default_library".to_owned(),
+                folder: temp.join("default_library"),
+                default: true,
+                builtin: false,
+                state: MountState::Ok,
+            })
+        );
+        assert_eq!(
+            first
+                .mounts
+                .last()
+                .map(|row| (row.name.as_str(), row.builtin)),
+            Some(("engram", true))
         );
         assert_eq!(
             identity["daemon_id"].as_str(),
@@ -1483,8 +1504,8 @@ mod tests {
             "a generation kept from the earlier run is stale"
         );
         assert_eq!(
-            (second.root, second.daemon_id),
-            (first.root, first.daemon_id),
+            (second.mounts.first(), second.daemon_id),
+            (first.mounts.first(), first.daemon_id),
             "the next start reads both back"
         );
     }
@@ -1568,9 +1589,10 @@ mod tests {
     /// ★The production manager launches through the very library service the wiring keeps★ (the Noop kits, or a
     /// second service, would pass every other non-ignored test): a claude agent with a library preset whose mount is
     /// not registered (a corrupt `library.json` leaves the mounts unknown) is not refused by the library — the preset
-    /// is skipped (ADR-0387 · ADR-0400 decision 19) and the launch gets as far as the spawn, which fails on the working folder; once the kept service moves to a
-    /// root whose copy of that preset is broken, the manager's refusal is the library's row for it. A cwd that does
-    /// not exist — no process is spawned.
+    /// is skipped (ADR-0387 · ADR-0400 decision 19) and the launch gets as far as the spawn, which fails on the working
+    /// folder; once the kept service registers the mounts `team` and then `library` (`addMount`), a preset in
+    /// `library` nesting a broken preset in `team` is refused with the library's row for that file — the
+    /// manager resolves across the two mounts of the kept service. A cwd that does not exist — no process is spawned.
     #[test]
     fn the_production_manager_launches_through_the_kept_library_service() {
         use engram_dashboard_agent::launch::BlockReason;
@@ -1582,10 +1604,17 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
         let layout = DataLayout::new(&temp);
         let library_root = temp.join("library");
+        let team_root = std::env::temp_dir().join(format!("engram-team-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&library_root).unwrap();
+        std::fs::create_dir_all(&team_root).unwrap();
         std::fs::create_dir_all(layout.daemon_state_dir()).unwrap();
         std::fs::write(layout.daemon_state_dir().join("library.json"), "not json").unwrap();
-        std::fs::write(library_root.join("P.yaml"), "kind: preset\nversion: [\n").unwrap();
+        std::fs::write(
+            library_root.join("P.yaml"),
+            "kind: preset\nversion: 1\npresets:\n  - team/bad.yaml\n",
+        )
+        .unwrap();
+        std::fs::write(team_root.join("bad.yaml"), "kind: preset\nversion: [\n").unwrap();
         let wiring = production_wiring(&layout);
         let profile = || {
             let mut profile = AgentProfile::new(
@@ -1604,14 +1633,15 @@ mod tests {
             profile
         };
 
-        let without_root = wiring
+        let without_mounts = wiring
             .manager
             .create_and_activate(&profile(), NoticeDelivery::Withheld)
             .expect_err("the spawn fails on the working folder");
-        let moved = wiring
-            .library
-            .as_ref()
-            .map(|l| l.change_root(library_root.clone()));
+        let added = wiring.library.as_ref().map(|l| {
+            l.add_mount("team", &team_root, false)
+                .and_then(|_| l.add_mount("library", &library_root, false))
+                .map(|added| added.status.mounts.len())
+        });
         let refused = wiring
             .manager
             .create_and_activate(&profile(), NoticeDelivery::Withheld)
@@ -1619,39 +1649,40 @@ mod tests {
         let listed = wiring.manager.list_agents().len();
         wiring.manager.shutdown_all();
         let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&team_root);
 
         // The spawn is the first step that needs the working folder (Windows answers `ERROR_DIRECTORY`, os error 267).
         assert!(
             matches!(
-                without_root.error,
+                without_mounts.error,
                 engram_dashboard_agent::types::PtyError::SpawnFailed(_)
             ),
             "a preset in no known mount does not block (its items are skipped); the spawn fails on the missing working folder: {:?}",
-            without_root.error
+            without_mounts.error
         );
         assert_eq!(listed, 0, "no process was spawned");
         assert!(
-            matches!(moved, Some(Ok(_))),
-            "the kept service did not move: {moved:?}"
+            matches!(added, Some(Ok(3))),
+            "the kept service did not take both mounts (two plus the built-in): {added:?}"
         );
         assert!(!refused.created, "the refused launch was added");
-        let with_root = match refused.error {
+        let with_mounts = match refused.error {
             engram_dashboard_agent::types::PtyError::LaunchBlocked(blocked) => blocked.reasons,
             other => panic!("not the library's block: {other:?}"),
         };
         assert!(
-            with_root.iter().any(|reason| matches!(
+            with_mounts.iter().any(|reason| matches!(
                 reason,
                 BlockReason::Broken { item, reason, .. }
-                    if item == "library/P.yaml" && reason.code == "yaml-syntax"
+                    if item == "team/bad.yaml" && reason.code == "yaml-syntax"
             )),
-            "{with_root:?}"
+            "{with_mounts:?}"
         );
         assert!(
-            !with_root
+            !with_mounts
                 .iter()
                 .any(|reason| matches!(reason, BlockReason::LibraryUnavailable { .. })),
-            "the manager does not see the kept service's root: {with_root:?}"
+            "the manager does not see the kept service's mounts: {with_mounts:?}"
         );
     }
 }

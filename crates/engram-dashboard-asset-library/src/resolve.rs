@@ -1082,7 +1082,7 @@ mod tests {
         let team_name = MountName::parse("team").unwrap();
         let mounts = Mounts::new(vec![
             Mount {
-                name: MountName::first(),
+                name: MountName::library(),
                 folder: PathBuf::from("/lib"),
             },
             Mount {
@@ -1093,7 +1093,7 @@ mod tests {
         .unwrap();
         let mut states = MountStates::new(&mounts, absent_items);
         if let Some(state) = library {
-            states.set(&MountName::first(), state);
+            states.set(&MountName::library(), state);
         }
         if let Some(state) = team {
             states.set(&team_name, state);

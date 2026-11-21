@@ -3,6 +3,6 @@ import type { LibraryNewFileKind } from "./LibraryNewFileKind";
 
 export type LibraryNewFileArgs = { folder?: string | null, name: string, kind: LibraryNewFileKind, 
 /**
- * The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+ * The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
  */
 root_generation?: bigint | null, };

@@ -2,6 +2,6 @@
 
 export type PresetSetBackendArgs = { path: string, items: Array<string>, backend?: string | null, 
 /**
- * The value `library.status` answered — refuses if the root changed since. Unspecified = the current root.
+ * The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
  */
 root_generation?: bigint | null, };

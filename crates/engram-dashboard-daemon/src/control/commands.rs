@@ -13,10 +13,10 @@ use std::sync::Arc;
 use crate::conn_port::ConnId;
 use engram_dashboard_agent::commands::{
     make_table, resolve_in, AgentBackend, AgentCommandHost, AgentOutputFormat, AgentRosterRow,
-    LibraryCommandHost, LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind,
-    LibraryRefreshOk, LibraryRelinkOk, LibraryStatusOk, PresetAddOk, PresetCheckOk,
-    PresetPreviewFolderOk, PresetSection, PresetSetBackendOk, PresetView, RefreshErrorRow,
-    RosterChanged, UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
+    LibraryAddMountOk, LibraryCommandHost, LibraryFoldersOk, LibraryKind, LibraryListOk,
+    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryStatusOk,
+    PresetAddOk, PresetCheckOk, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk,
+    PresetView, RefreshErrorRow, RosterChanged, UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
 };
 use engram_dashboard_agent::launch::{escape_controls, Reason};
 use engram_dashboard_agent::library_commands::{
@@ -163,7 +163,23 @@ impl LibraryCommandHost for NoLibrary {
     fn status(&self) -> Result<LibraryStatusOk, PortRefusal> {
         Self::refused()
     }
-    fn set_root(&self, _path: &str, _create: bool) -> Result<LibraryStatusOk, PortRefusal> {
+    fn add_mount(
+        &self,
+        _name: &str,
+        _path: &str,
+        _create: bool,
+    ) -> Result<LibraryAddMountOk, PortRefusal> {
+        Self::refused()
+    }
+    fn remove_mount(&self, _mount: &str) -> Result<LibraryRemoveMountOk, PortRefusal> {
+        Self::refused()
+    }
+    fn relocate_mount(
+        &self,
+        _mount: &str,
+        _path: &str,
+        _create: bool,
+    ) -> Result<LibraryStatusOk, PortRefusal> {
         Self::refused()
     }
     fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
@@ -612,7 +628,7 @@ mod tests {
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 29] = [
+        const BUS_ONLY: [&str; 31] = [
             "agent.attachPreset",
             "agent.cancelQueuedInput",
             "agent.detachPreset",
@@ -623,6 +639,7 @@ mod tests {
             "agent.reorderPresets",
             "agent.resolve",
             "agent.setWorkspace",
+            "library.addMount",
             "library.folders",
             "library.list",
             "library.newFile",
@@ -630,7 +647,8 @@ mod tests {
             "library.read",
             "library.refresh",
             "library.relink",
-            "library.setRoot",
+            "library.relocateMount",
+            "library.removeMount",
             "library.status",
             "preset.add",
             "preset.check",
@@ -1401,7 +1419,15 @@ mod tests {
         );
         let refusing = [
             ("library.status", json!({})),
-            ("library.setRoot", json!({ "path": "C:/lib" })),
+            (
+                "library.addMount",
+                json!({ "name": "team", "path": "C:/lib" }),
+            ),
+            ("library.removeMount", json!({ "mount": "team" })),
+            (
+                "library.relocateMount",
+                json!({ "mount": "team", "path": "C:/lib" }),
+            ),
             ("library.folders", json!({})),
             ("library.list", json!({})),
             ("library.read", json!({ "path": "a.md" })),
@@ -1425,7 +1451,7 @@ mod tests {
             ),
             (
                 "preset.reorder",
-                json!({ "path": "p.yaml", "section": "Skills", "order": [], "base_rev": "r" }),
+                json!({ "path": "p.yaml", "section": "skills", "order": [], "base_rev": "r" }),
             ),
             (
                 "preset.setBackend",

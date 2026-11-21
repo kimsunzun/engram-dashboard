@@ -33,7 +33,7 @@
 // ADR-0379
 // ADR-0380
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use engram_dashboard_agent::launch::{backend_word, BlockReason, Notice, Reason};
@@ -42,7 +42,6 @@ use engram_dashboard_agent::profile_edit::{
     Attachments, ProfileEditError, ProfileEditPort, WorkspaceLock,
 };
 use engram_dashboard_agent::types::AgentId;
-use engram_dashboard_platform::fs::{path_key, PathKey};
 use serde_json::json;
 
 use crate::catalog::Catalog;
@@ -50,7 +49,6 @@ use crate::config::ConfigHealth;
 use crate::edit::{
     list_of, parse_ref, skip, Skipped, ALREADY_PRESENT, REORDER_ORDER_MISMATCH, REV_MISMATCH,
 };
-use crate::folder::FolderStatus;
 use crate::format::read::WRONG_KIND;
 use crate::format::ListName;
 use crate::gate::NOT_FOUND;
@@ -62,8 +60,9 @@ use crate::resolve::{
     ResolvedFolder, TagRule, Target,
 };
 use crate::{
-    output_format, reached_mounts, read_states, refuse_unusable_now, stale_root_generation,
-    LibraryRefusal, LibraryService, MountSeen, MountsNow, RefusalClass,
+    mount_key, output_format, reached_mounts, read_states, refuse_unusable_now,
+    stale_root_generation, LibraryRefusal, LibraryService, MountSeen, MountsNow, ReadStats,
+    RefusalClass,
 };
 
 /// The code of a `detach` of `engram/default` without `yes` while the agent's Default slot is on (`args` =
@@ -136,8 +135,8 @@ struct PendingAgentView {
 struct RootSeen {
     joined: Result<(), String>,
     /// The folder of each mount the agent's attachments or the request reach, as stat'ed and judged with its first-scan
-    /// answer (`LibraryService::stat_reached`), by path key — taken the first scan failed or not.
-    seen: HashMap<PathKey, FolderStatus>,
+    /// answer (`LibraryService::stat_reached`), by [`crate::mount_key`] — taken the first scan failed or not.
+    seen: ReadStats,
 }
 
 impl RootSeen {
@@ -167,7 +166,7 @@ impl RootSeen {
         let refs: Vec<(TagRule, &AssetRef)> = refs.iter().map(|r| (rule, r)).collect();
         reached_mounts(catalog, mounts, &refs)
             .into_iter()
-            .filter(|mount| !self.seen.contains_key(&path_key(&mount.folder)))
+            .filter(|mount| !self.seen.contains_key(&mount_key(mount)))
             .collect()
     }
 }
@@ -361,12 +360,21 @@ impl LibraryService {
         })
     }
 
-    /// While `library.json` could not be read (corrupt, newer or unreadable) the run does not know its mounts, so a
-    /// named library preset cannot be judged: `Unavailable` · `library-unavailable`, nothing applied. A valid file with
-    /// no mount knows its mounts (none), and its presets are judged — and skipped as `not-found`.
+    /// While `library.json` could not be read (corrupt, newer or unreadable), or was missing and the first start has not
+    /// published the default mount (not run yet, or failed), the run does not know its mounts, so a named library preset
+    /// cannot be judged: `Unavailable` · `library-unavailable`, nothing applied. A valid file with no mount knows its
+    /// mounts (none), and its presets are judged — and skipped as `not-found`.
     // ADR-0386 decision 5
     // ADR-0400
     fn refuse_unknown_mounts(&self) -> Result<(), LibraryRefusal> {
+        // ADR-0386 decision 5: a missing library.json whose first start has not published the default mount (not run
+        //   yet, or failed) has no mount list either — what it would hold is not established.
+        if self.config.first_start_due() {
+            return Err(LibraryRefusal::unavailable(
+                "the library mounts are not established: the first start has not published the default mount"
+                    .to_owned(),
+            ));
+        }
         let (mounts, health) = self.config.view();
         if mounts.is_some() {
             return Ok(());
@@ -832,6 +840,7 @@ fn agent_not_found(agent: AgentId) -> LibraryRefusal {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::sync::{mpsc, Arc, Mutex, OnceLock, Weak};
     use std::thread;
@@ -852,8 +861,8 @@ mod tests {
     use crate::backends::AgentBackends;
     use crate::config::{LibraryConfig, MountPlace, MountSetting};
     use crate::folder::{
-        BoundedIo, FolderListing, FolderOps, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT,
-        LIST_CAP, TIMEOUT,
+        BoundedIo, FolderListing, FolderOps, FolderStatus, LaunchWaits, StdFolderOps, ThreadSpawn,
+        IO_LIMIT, LIST_CAP, TIMEOUT,
     };
     use crate::format::read::ITEM_PATH_INVALID;
     use crate::mounts::MountName;
@@ -1031,6 +1040,18 @@ mod tests {
             )
         }
 
+        /// A world whose `library.json` holds a valid empty mount list — no mount registered, the mounts known.
+        fn with_no_mount(profiles: Vec<AgentProfile>) -> World {
+            World::make_with(
+                profiles,
+                |_, state| LibraryConfig::mounted(state, Vec::new()),
+                true,
+                true,
+                Arc::new(StdFolderOps),
+                IO_LIMIT,
+            )
+        }
+
         /// [`World::make`] with the config built from the temp folder and the state folder, the folder ops and the
         /// read budget given.
         fn make_with(
@@ -1053,7 +1074,6 @@ mod tests {
                 backends: Arc::new(AgentBackends),
                 config,
                 default_root: base.join("default-library"),
-                data_root: base.join("data"),
                 daemon_id: "test-daemon".to_owned(),
                 root_generation_base: 7,
                 builtin_dir: None,
@@ -1198,6 +1218,14 @@ mod tests {
 
     /// Mounts `team` at `<base>\team` (slow to stat: past the 300 ms read budget) and then `library` at `<base>\lib`.
     fn slow_team_world(profiles: Vec<AgentProfile>) -> World {
+        slow_team_world_counted(profiles).0
+    }
+
+    /// The stat calls each folder got, by folder.
+    type StatCounts = Arc<Mutex<HashMap<PathBuf, usize>>>;
+
+    /// [`slow_team_world`] and the stat calls its folder ops got.
+    fn slow_team_world_counted(profiles: Vec<AgentProfile>) -> (World, StatCounts) {
         let slow = Arc::new(std::sync::OnceLock::<PathBuf>::new());
         let config = {
             let slow = Arc::clone(&slow);
@@ -1215,22 +1243,25 @@ mod tests {
                 )
             }
         };
-        let ops = Arc::new(LateSlow(Arc::clone(&slow)));
-        World::make_with(
+        let counts = StatCounts::default();
+        let ops = Arc::new(LateSlow(Arc::clone(&slow), Arc::clone(&counts)));
+        let world = World::make_with(
             profiles,
             config,
             true,
             true,
             ops,
             Duration::from_millis(300),
-        )
+        );
+        (world, counts)
     }
 
-    /// [`SlowStat`] over a folder named after the world is made.
-    struct LateSlow(Arc<std::sync::OnceLock<PathBuf>>);
+    /// [`SlowStat`] over a folder named after the world is made, counting every stat call by folder.
+    struct LateSlow(Arc<std::sync::OnceLock<PathBuf>>, StatCounts);
 
     impl FolderOps for LateSlow {
         fn stat(&self, p: &Path) -> FolderStatus {
+            *lock(&self.1).entry(p.to_path_buf()).or_default() += 1;
             let slow = SlowStat {
                 slow: self.0.get().cloned().unwrap_or_default(),
                 delay: Duration::from_secs(2),
@@ -1284,13 +1315,39 @@ mod tests {
     fn an_agent_edit_stats_only_the_mounts_its_view_names_and_answers_as_agent_presets() {
         let profile = claude(&["library/P.yaml"], false);
         let agent = profile.id;
-        let w = slow_team_world(vec![profile]);
+        let (w, counts) = slow_team_world_counted(vec![profile]);
         w.library();
+        // The first scan stats every mount; the edit itself must stat only the ones its view names.
+        w.svc.first_scan_join().unwrap();
+        // A required ask joins a stat worker still in flight, so the first scan's slow `team` stat worker must be gone
+        //   — then an edit that stat'ed `team` would start a worker of its own and be counted.
+        let team = w.base.join("team");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while w.svc.io.stat_in_flight(&team) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first scan's team stat worker never finished"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        lock(&counts).clear();
         let began = std::time::Instant::now();
         let edited = w
             .svc
             .attach_preset(agent, &strings(&["library/Q.yaml"]), None, None)
             .unwrap();
+        let stats = |folder: &str| {
+            lock(&counts)
+                .get(&w.base.join(folder))
+                .copied()
+                .unwrap_or(0)
+        };
+        assert_eq!(
+            stats("team"),
+            0,
+            "the mount no attachment names was stat'ed"
+        );
+        assert!(stats("lib") > 0, "the named mount was stat'ed");
         assert!(
             began.elapsed() < Duration::from_millis(1_500),
             "the slow mount was not stat'ed: {:?}",
@@ -1445,7 +1502,7 @@ mod tests {
                     let svc = self.svc.get().and_then(Weak::upgrade).expect("the service");
                     let team = svc.with_read(|state| state.mounts.get("team").cloned().unwrap());
                     svc.gate.observe(vec![team], &|mounts| {
-                        vec![FolderStatus::Missing; mounts.len()]
+                        vec![Some(FolderStatus::Missing); mounts.len()]
                     });
                     self.team_gone.store(true, SeqCst);
                 }
@@ -2288,9 +2345,18 @@ mod tests {
     fn with_no_mount_an_attach_skips_a_library_preset_as_not_found_and_the_other_edits_work() {
         let profile = claude(&["library/P.yaml", "library/Q.yaml"], false);
         let agent = profile.id;
-        let w = World::make(vec![profile], false, true, true);
+        let w = World::with_no_mount(vec![profile]);
         w.library();
-        assert_eq!(w.svc.status().root, None);
+        let status = w.svc.status();
+        assert_eq!(
+            status
+                .mounts
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["engram"],
+            "a valid empty mount list"
+        );
 
         let library = w
             .svc
@@ -2508,11 +2574,75 @@ mod tests {
         );
     }
 
-    /// With no mount registered, a library preset names no mount — absent, skipped `not-found` (ADR-0400 decision 4) —
-    /// while `engram/default` alone is judged without the library.
+    // ADR-0386 decision 5 (user O3): a missing library.json whose first start has not published the default mount —
+    //   not run yet, or failed — has no mount list; a library preset cannot be judged, so the whole call refuses.
+    #[test]
+    fn before_or_after_a_failed_first_start_an_attach_or_new_naming_a_library_preset_refuses_library_unavailable(
+    ) {
+        let profile = claude(&[], false);
+        let agent = profile.id;
+        let w = World::make(vec![profile], false, true, true);
+        fs::write(
+            w.base.join("default-library"),
+            "a file in the default place",
+        )
+        .unwrap();
+        for when in ["before the first start", "after a failed first start"] {
+            if when.starts_with("after") {
+                assert!(
+                    matches!(w.svc.first_start(), crate::FirstStart::Failed(_)),
+                    "{when}"
+                );
+            }
+            let (class, reason) =
+                refused(
+                    w.svc
+                        .attach_preset(agent, &strings(&["library/X.yaml"]), None, None),
+                );
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE),
+                "{when}: not skipped as not-found"
+            );
+            assert!(
+                reason.args["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not established"),
+                "{when}: {reason:?}"
+            );
+            let (class, reason) = refused(w.svc.judge_new_presets(
+                &claude(&[], true),
+                &strings(&["library/X.yaml"]),
+                None,
+            ));
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE),
+                "{when}: agent.new"
+            );
+            assert_eq!(
+                w.attachments(agent),
+                attached(false, &[]),
+                "{when}: nothing applied"
+            );
+        }
+        let default = w
+            .svc
+            .attach_preset(agent, &strings(&["engram/default"]), None, None)
+            .unwrap();
+        assert_eq!(
+            default.applied,
+            strings(&["engram/default"]),
+            "the built-in needs no mount"
+        );
+    }
+
+    /// With a valid empty mount list, a library preset names no mount — absent, skipped `not-found` (ADR-0400 decision
+    /// 4) — while `engram/default` alone is judged without the library.
     #[test]
     fn the_new_agent_judgement_with_no_mount_skips_a_library_preset_and_judges_the_default_alone() {
-        let w = World::make(Vec::new(), false, true, true);
+        let w = World::with_no_mount(Vec::new());
         let new = claude(&[], true);
 
         let library = w
