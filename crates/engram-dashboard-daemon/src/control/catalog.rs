@@ -24,7 +24,8 @@ use engram_dashboard_protocol::CommandListEntry;
 
 use super::agent::{preview, preview_within, CommandArgs};
 use super::ingress::ControlQueryResult;
-use crate::command_delivery::LocalCommands;
+use super::registry::BoundIdentity;
+use crate::command_delivery::{Caller, LocalCommands};
 
 /// The merge rule of the discovery list — this rule lives here only.
 ///
@@ -254,6 +255,7 @@ pub fn handle_call(
     locals: &dyn LocalCommands,
     registered: &dyn OwnerLookupSource,
     req: CallRequest,
+    caller: BoundIdentity,
 ) -> CallOutcome {
     let CallRequest {
         name,
@@ -278,27 +280,29 @@ pub fn handle_call(
             OwnerLookup::Unknown => CallOutcome::Answered(unknown_name(&name)),
         };
     }
-    // No connection, so the caller is `None` = not an input lease holder (ADR-0231).
-    CallOutcome::Answered(match locals.run(&name, &mut args, "cli", None) {
-        Some(Ok(payload)) => ControlQueryResult::Ok(payload),
-        Some(Err(e)) => refused(e),
-        // A contract violation does not flow to the next stage: `claim` said mine, so relaying would be refused again by the bus (a meaningless round
-        //   trip). Delivery exposes the same mismatch with the same code (`fold_local` in `command_delivery`).
-        None => {
-            tracing::error!(
-                entrance = "cli",
-                command = %crate::connection_core::sanitize_for_log(&name),
-                "the stage-1 table claimed the name as its own and came up empty-handed — the routing authority (`claim`) and execution diverged"
-            );
-            refused(CommandError::of(
-                ErrorCode::Internal,
-                format!(
-                    "this daemon claims '{}' but its own table produced no answer for it",
-                    preview(&name)
-                ),
-            ))
-        }
-    })
+    // An agent's token, no connection — not an input lease holder (ADR-0231), never the human path (ADR-0394).
+    CallOutcome::Answered(
+        match locals.run(&name, &mut args, "cli", Caller::Agent(caller)) {
+            Some(Ok(payload)) => ControlQueryResult::Ok(payload),
+            Some(Err(e)) => refused(e),
+            // A contract violation does not flow to the next stage: `claim` said mine, so relaying would be refused again by the bus (a meaningless round
+            //   trip). Delivery exposes the same mismatch with the same code (`fold_local` in `command_delivery`).
+            None => {
+                tracing::error!(
+                    entrance = "cli",
+                    command = %crate::connection_core::sanitize_for_log(&name),
+                    "the stage-1 table claimed the name as its own and came up empty-handed — the routing authority (`claim`) and execution diverged"
+                );
+                refused(CommandError::of(
+                    ErrorCode::Internal,
+                    format!(
+                        "this daemon claims '{}' but its own table produced no answer for it",
+                        preview(&name)
+                    ),
+                ))
+            }
+        },
+    )
 }
 
 /// The outcome delivery returned → wire envelope.
@@ -384,11 +388,18 @@ pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
 
 #[cfg(test)]
 mod tests {
-    use crate::conn_port::ConnId;
     use engram_dashboard_command::{Effect, OwnerToken, RequestId};
 
     use super::*;
     use crate::command_delivery::NoLocalCommands;
+
+    /// The caller of the full-name route — an agent's token identity.
+    fn test_agent() -> BoundIdentity {
+        BoundIdentity {
+            agent_id: uuid::Uuid::nil(),
+            epoch: 0,
+        }
+    }
 
     /// A stage-1 table answering one name as its own — imitates only the real one's property (`commands::DaemonLocalCommands`): `claim` and `run` look at the same list.
     ///
@@ -406,7 +417,7 @@ mod tests {
             name: &str,
             _args: &mut serde_json::Value,
             _entrance: &'static str,
-            _caller: Option<ConnId>,
+            _caller: Caller,
         ) -> Option<Result<serde_json::Value, CommandError>> {
             (name == self.0).then(|| Ok(serde_json::json!({ "ran": name })))
         }
@@ -503,7 +514,7 @@ mod tests {
             assert_eq!(row["callable"], true, "{json}");
             // `agent.list` is not in this empty table so it falls to the roster: this loop measures the roster-side half; the table-side half is the integration test with a real table.
             let known = !matches!(
-                handle_call(&table, &registered, call_of(name)),
+                handle_call(&table, &registered, call_of(name), test_agent()),
                 CallOutcome::Answered(ControlQueryResult::Error { code, .. }) if code == "UNKNOWN_COMMAND"
             );
             assert!(
@@ -514,7 +525,7 @@ mod tests {
 
         assert!(
             matches!(
-                handle_call(&table, &registered, call_of("nobody.declares.this")),
+                handle_call(&table, &registered, call_of("nobody.declares.this"), test_agent()),
                 CallOutcome::Answered(ControlQueryResult::Error { ref code, .. }) if code == &"UNKNOWN_COMMAND"
             ),
             "negative control — a name not in the list must be an unknown command"
@@ -542,7 +553,7 @@ mod tests {
             request_id: Some(mine.to_string()),
             ..CallRequest::default()
         };
-        match handle_call(&table, &registered, req) {
+        match handle_call(&table, &registered, req, test_agent()) {
             CallOutcome::Relay { request_id, .. } => {
                 assert_eq!(
                     request_id, mine,
@@ -553,7 +564,7 @@ mod tests {
         }
 
         // If not sent, the daemon issues one — backward compatible (on that path no duplicate prevention triggers).
-        match handle_call(&table, &registered, call_of("tab.create")) {
+        match handle_call(&table, &registered, call_of("tab.create"), test_agent()) {
             CallOutcome::Relay { .. } => {}
             other => panic!("a request without a number must be accepted too: {other:?}"),
         }
@@ -565,7 +576,7 @@ mod tests {
                 request_id: Some(bad.to_string()),
                 ..CallRequest::default()
             };
-            match handle_call(&table, &registered, req) {
+            match handle_call(&table, &registered, req, test_agent()) {
                 CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
                     assert_eq!(code, "INVALID_ARGUMENT", "{hint}");
                     assert!(
@@ -594,7 +605,12 @@ mod tests {
             request_id: Some("nope".to_string()),
             ..CallRequest::default()
         };
-        match handle_call(&Holds("agent.list"), &Registered("tab.create"), req) {
+        match handle_call(
+            &Holds("agent.list"),
+            &Registered("tab.create"),
+            req,
+            test_agent(),
+        ) {
             CallOutcome::Answered(ControlQueryResult::Error { code, .. }) => {
                 assert_eq!(code, "INVALID_ARGUMENT")
             }
@@ -618,7 +634,7 @@ mod tests {
                 _name: &str,
                 _args: &mut serde_json::Value,
                 _entrance: &'static str,
-                _caller: Option<ConnId>,
+                _caller: Caller,
             ) -> Option<Result<serde_json::Value, CommandError>> {
                 None
             }
@@ -635,6 +651,7 @@ mod tests {
             &ClaimsButAnswersNothing,
             &Registered("tab.create"),
             call_of("tab.create"),
+            test_agent(),
         ) {
             CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
                 assert_eq!(code, "INTERNAL", "{hint}");
@@ -731,7 +748,7 @@ mod tests {
         let table = NoLocalCommands;
         let registered = Registered("tab.create");
 
-        match handle_call(&table, &registered, call_of("tab.create")) {
+        match handle_call(&table, &registered, call_of("tab.create"), test_agent()) {
             CallOutcome::Relay { name, args, .. } => {
                 assert_eq!(name, "tab.create");
                 assert!(args.is_object(), "arguments are passed on as is: {args}");
@@ -741,7 +758,7 @@ mod tests {
             }
         }
 
-        match handle_call(&table, &registered, call_of("nope.nope")) {
+        match handle_call(&table, &registered, call_of("nope.nope"), test_agent()) {
             CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
                 assert_eq!(code, "UNKNOWN_COMMAND");
                 assert!(hint.contains("nope.nope"), "{hint}");

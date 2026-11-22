@@ -141,6 +141,7 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         | AgentCommand::Subscribe { .. }
         | AgentCommand::Unsubscribe { .. }
         | AgentCommand::UsageSubscribe { .. }
+        | AgentCommand::SetUiLanguage { .. }
         // `CommandOutcome` is a reply I send, so `None`: its correlation key belongs to a request the daemon gave me, not my pending table — `Some` would create an empty pending slot at send that stays until the connection drops.
         | AgentCommand::CommandOutcome { .. } => None,
     }

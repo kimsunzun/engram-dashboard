@@ -31,6 +31,9 @@ pub(crate) const RELEASE_DEFAULT_PORT: u16 = 47_120;
 pub(crate) const DEV_DEFAULT_PORT: u16 = 47_121;
 /// Longest PC name, in bytes (the remote agent-name bound).
 pub(crate) const MAX_NAME_BYTES: usize = 256;
+/// Longest DNS host name and label, in characters.
+const MAX_HOST_LEN: usize = 253;
+const MAX_LABEL_LEN: usize = 63;
 /// Longest helper-server URL, in bytes.
 const MAX_URL_BYTES: usize = 2048;
 
@@ -137,6 +140,78 @@ impl NetworkSettings {
     }
 }
 
+/// The network fields a change names — `None` leaves that field as the settings have it when the change is applied. The store merges
+///   it with the settings of that moment under its lock ([`super::store::PeerStore::patch_network`]), so two changes to different
+///   fields never undo each other.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct NetworkPatch {
+    /// `Some(None)` = back to the build's default port.
+    pub(crate) port: Option<Option<u16>>,
+    pub(crate) relay: Option<Helper>,
+    pub(crate) address_lookup: Option<Helper>,
+    pub(crate) mdns: Option<bool>,
+}
+
+impl NetworkPatch {
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `base` with the named fields replaced.
+    pub(crate) fn applied_to(&self, base: &NetworkSettings) -> NetworkSettings {
+        let mut network = base.clone();
+        if let Some(port) = self.port {
+            network.port = port;
+        }
+        if let Some(relay) = &self.relay {
+            network.relay = relay.clone();
+        }
+        if let Some(lookup) = &self.address_lookup {
+            network.address_lookup = lookup.clone();
+        }
+        if let Some(mdns) = self.mdns {
+            network.mdns = mdns;
+        }
+        network
+    }
+
+    /// The fields this patch names.
+    pub(crate) fn named(&self) -> Vec<&'static str> {
+        let mut named = Vec::new();
+        if self.port.is_some() {
+            named.push("port");
+        }
+        if self.relay.is_some() {
+            named.push("relay");
+        }
+        if self.address_lookup.is_some() {
+            named.push("address_lookup");
+        }
+        if self.mdns.is_some() {
+            named.push("mdns");
+        }
+        named
+    }
+
+    /// The named fields whose value in `now` differs from `then` — what changed under a patch between two moments.
+    pub(crate) fn moved(&self, then: &NetworkSettings, now: &NetworkSettings) -> Vec<&'static str> {
+        let mut moved = Vec::new();
+        if self.port.is_some() && then.port != now.port {
+            moved.push("port");
+        }
+        if self.relay.is_some() && then.relay != now.relay {
+            moved.push("relay");
+        }
+        if self.address_lookup.is_some() && then.address_lookup != now.address_lookup {
+            moved.push("address_lookup");
+        }
+        if self.mdns.is_some() && then.mdns != now.mdns {
+            moved.push("mdns");
+        }
+        moved
+    }
+}
+
 /// A helper server choice (relay or address lookup), stored as `"default"` | `"none"` | a URL.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -187,9 +262,12 @@ fn authority_ok(authority: &str) -> bool {
             Some(i) => (&authority[..i], &authority[i..]),
             None => (authority, ""),
         };
+        // DNS limits: 253 characters in all, 63 per label (RFC 1035) — a longer host is no real host and would only swell a question.
         let labels_ok = !host.is_empty()
+            && host.len() <= MAX_HOST_LEN
             && host.split('.').all(|label| {
                 !label.is_empty()
+                    && label.len() <= MAX_LABEL_LEN
                     && !label.starts_with('-')
                     && !label.ends_with('-')
                     && label
@@ -264,7 +342,7 @@ pub(crate) fn check_name(name: &str) -> Result<(), String> {
 ///   Default_Ignorable_Code_Point property (variation selectors, Hangul fillers, Mongolian free variation selectors …). Two names that
 ///   look the same could otherwise pass the uniqueness check. Ranges merged from Unicode 16.0 (`DerivedCoreProperties.txt` and Python
 ///   `unicodedata` 16.0).
-fn is_invisible(c: char) -> bool {
+pub(crate) fn is_invisible(c: char) -> bool {
     const INVISIBLE: &[(u32, u32)] = &[
         (0x00AD, 0x00AD),
         (0x034F, 0x034F),
@@ -510,6 +588,23 @@ mod tests {
         list.peers.pop();
         list.peers.push(peer(1, "laptop"));
         assert!(check_entries(&list).is_err());
+    }
+
+    #[test]
+    fn a_helper_host_keeps_to_the_dns_length_limits() {
+        let label63 = "a".repeat(63);
+        assert!(Helper::parse(&format!("https://{label63}.example")).is_ok());
+        assert!(
+            Helper::parse(&format!("https://{label63}a.example")).is_err(),
+            "a 64-char label"
+        );
+        let host253 = format!("{0}.{0}.{0}.{1}", label63, "b".repeat(61));
+        assert_eq!(host253.len(), 253);
+        assert!(Helper::parse(&format!("https://{host253}")).is_ok());
+        assert!(
+            Helper::parse(&format!("https://{host253}c")).is_err(),
+            "254 characters"
+        );
     }
 
     #[test]

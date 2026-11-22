@@ -13,8 +13,8 @@
 
 mod auth;
 mod handshake;
-// The daemon starts and stops the peer link; its trust operations, snapshot and the wire's mail and directory frames wait for their callers
-//   (the `peer.*` commands, mail and the directory — the next pieces).
+// The daemon starts and stops the peer link and the `peer.*` commands drive its trust operations; the wire's mail and directory frames
+//   wait for their callers (mail and the directory — the next pieces).
 #[allow(dead_code)]
 pub(crate) mod peer;
 pub(crate) mod server;

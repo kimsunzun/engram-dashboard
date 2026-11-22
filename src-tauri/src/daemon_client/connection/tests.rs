@@ -1766,6 +1766,7 @@ fn label(cmd: &AgentCommand) -> String {
         AgentCommand::RefreshUsageLimits { vendor, .. } => format!("refresh:{vendor:?}"),
         AgentCommand::Unsubscribe { agent_id } => format!("unsubscribe:{agent_id}"),
         AgentCommand::ListAgents { .. } => "list".to_owned(),
+        AgentCommand::SetUiLanguage { language } => format!("language:{language}"),
         other => format!("{other:?}"),
     }
 }
@@ -2033,6 +2034,24 @@ async fn a_command_sent_as_soon_as_the_peer_is_live_goes_out_after_the_registrat
         Ok(AgentEvent::Ack { request_id }) if request_id == rid
     ));
     joined("connect", connect).await.expect("connected");
+}
+
+// ADR-0372: the user's UI language goes out on every connection the client opens and again on each change.
+#[tokio::test]
+async fn the_ui_language_goes_out_on_every_connection_and_on_change() {
+    let h = Harness::new(live());
+    h.client.set_ui_language("ko");
+    let endpoint = h.connected().await;
+    assert_eq!(label(&h.command(&endpoint).await), "language:ko");
+    h.client.set_ui_language("en");
+    assert_eq!(label(&h.command(&endpoint).await), "language:en");
+
+    let endpoint = h.reconnected(&endpoint).await;
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        "language:en",
+        "the last value goes to the new connection"
+    );
 }
 
 // TRD §6-2
@@ -3416,6 +3435,7 @@ fn kinds(cmds: &[DriverCmd]) -> Vec<&'static str> {
             DriverCmd::Unsubscribe { .. } => "Unsubscribe",
             DriverCmd::RequestReplay { .. } => "RequestReplay",
             DriverCmd::UsageNudge => "UsageNudge",
+            DriverCmd::UiLanguage(_) => "UiLanguage",
             DriverCmd::HoldForBootStart => "HoldForBootStart",
             DriverCmd::BoundBootStart { .. } => "BoundBootStart",
             DriverCmd::EndBootStartHold { .. } => "EndBootStartHold",

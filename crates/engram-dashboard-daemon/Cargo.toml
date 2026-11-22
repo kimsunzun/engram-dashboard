@@ -100,9 +100,18 @@ engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
 #   helper-URL checks (`iroh::check_relay_url` / `check_lookup_url`); the endpoint is built from plain values and no iroh type enters
 #   this crate.
 engram-dashboard-transport = { path = "../engram-dashboard-transport", features = ["ws", "iroh"] }
-# ADR-0155: command bus tools (envelope · error · declaration macro · table · routing). This crate uses the tools **only for table assembly** —
-#   it does not declare its own commands, so `ts-rs` is not added (only the declaring crate emits bindings).
+# ADR-0155: command bus tools (envelope · error · declaration macro · table · routing). This crate assembles the `agent.*` table and
+#   declares its own `peer.*` table beside its producer (`src/link/peer/commands.rs`, ADR-0394).
 engram-dashboard-command = { path = "../engram-dashboard-command" }
+# The declaration macro puts the TS derive on the `peer.*` argument / answer types (no bindings are exported from this crate yet). Already in
+#   the graph through agent and protocol (same 10.x), so `Cargo.lock` gains no package.
+ts-rs = "10"
+# ADR-0389: "my address" in `peer.list` — the addresses of this PC's network interfaces (`src/link/peer/interfaces.rs`). The same 0.45
+#   line the link adapter's network watcher already builds (iroh → netwatch), so `Cargo.lock` gains no package.
+netdev = "0.45"
+# ADR-0394: approval questions keep each user-perceived character of a string from outside to a base and two marks
+#   (`src/link/peer/approvals/text.rs`). Already in the graph (1.x), so `Cargo.lock` gains no package.
+unicode-segmentation = "1"
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 # ★ADR-0129 slice 1 — `tokio-tungstenite` was moved down to [dev-dependencies]★: its use in this crate's production code

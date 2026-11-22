@@ -1,5 +1,6 @@
-//! The native approval dialog — one question, three choices (approve / deny / deny and stop asking), deny the default — shown with
-//!   [`ask_approval`], closable from another thread through a [`DialogCloser`]. All text comes from the caller; this module only shows it.
+//! The native approval dialog — one question, three choices (approve / deny / deny and stop asking), deny the default, approve and the
+//!   third choice enabled only a second after the dialog appears (it shows topmost without the focus, so a click aimed beneath must not
+//!   act) — shown with [`ask_approval`], closable from another thread through a [`DialogCloser`]. All text comes from the caller; this module only shows it.
 //!
 //! Windows = a Task Dialog (`TaskDialogIndirect`). ★It is loaded at run time from comctl32 v6 under an activation context★ — the
 //!   function exists only in comctl32 v6, which a process gets only through a manifest; the daemon and the test executables carry none, and
@@ -22,11 +23,13 @@ use windows::Win32::Foundation::{HWND, LPARAM, S_OK, WPARAM};
 #[cfg(windows)]
 use windows::Win32::UI::Controls::{
     TASKDIALOGCONFIG, TASKDIALOG_BUTTON, TASKDIALOG_NOTIFICATIONS, TDF_ALLOW_DIALOG_CANCELLATION,
-    TDF_NO_SET_FOREGROUND, TDN_CREATED, TDN_DESTROYED,
+    TDF_CALLBACK_TIMER, TDF_NO_SET_FOREGROUND, TDM_ENABLE_BUTTON, TDN_CREATED, TDN_DESTROYED,
+    TDN_TIMER,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    PostMessageW, SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WM_CLOSE,
+    PostMessageW, SendMessageW, SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    WM_CLOSE,
 };
 
 #[cfg(windows)]
@@ -76,6 +79,8 @@ struct CloserState {
     /// The open dialog's window (`HWND` as an integer); 0 while none is open.
     window: isize,
     dismissed: bool,
+    /// The acting buttons (Approve, the third choice) were enabled after [`APPROVE_ARM_MS`].
+    approve_armed: bool,
 }
 
 impl DialogCloser {
@@ -131,6 +136,10 @@ pub fn ask_approval(
 const APPROVE_ID: i32 = 100;
 const DENY_ID: i32 = 101;
 const DENY_AND_STOP_ID: i32 = 102;
+/// Approve and the third choice stay disabled this long after the dialog appears — it shows topmost without taking the focus, so a
+///   click meant for the window beneath must not land on a button that acts (Deny, the default, is enabled at once).
+#[cfg_attr(not(windows), allow(dead_code))]
+const APPROVE_ARM_MS: usize = 1000;
 /// What the dialog returns when it is cancelled — Esc, the close box, Alt+F4, or the close message [`DialogCloser::dismiss`] sends
 ///   (Win32 `IDCANCEL`).
 const CANCEL_ID: i32 = 2;
@@ -210,7 +219,7 @@ impl Prepared {
     ) -> TASKDIALOGCONFIG {
         TASKDIALOGCONFIG {
             cbSize: std::mem::size_of::<TASKDIALOGCONFIG>() as u32,
-            dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | TDF_NO_SET_FOREGROUND,
+            dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | TDF_NO_SET_FOREGROUND | TDF_CALLBACK_TIMER,
             pszWindowTitle: PCWSTR(self.title.as_ptr()),
             pszMainInstruction: PCWSTR(self.heading.as_ptr()),
             pszContent: PCWSTR(self.body.as_ptr()),
@@ -274,14 +283,15 @@ fn show(prepared: &Prepared, closer: &DialogCloser) -> io::Result<i32> {
     outcome.map(|()| button)
 }
 
-/// Raises the window topmost without activating it once it exists, and records it for [`DialogCloser::dismiss`] — closing it at once if
+/// Keeps Approve and the third choice disabled for [`APPROVE_ARM_MS`] (the dialog's timer enables them), raises the window topmost without activating it once
+///   it exists, and records it for [`DialogCloser::dismiss`] — closing it at once if
 ///   the dismissal came first. ★It runs on the dialog's thread inside the OS's message loop★, so it neither panics nor returns errors; a
 ///   failed raise or close is only logged (header rule 4: no way to return it).
 #[cfg(windows)]
 unsafe extern "system" fn callback(
     window: HWND,
     notification: TASKDIALOG_NOTIFICATIONS,
-    _wparam: WPARAM,
+    wparam: WPARAM,
     _lparam: LPARAM,
     data: isize,
 ) -> HRESULT {
@@ -293,6 +303,9 @@ unsafe extern "system" fn callback(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     };
     if notification == TDN_CREATED {
+        // Every button but the default Deny starts disabled — Approve and the third choice may act (an asker can make the third
+        //   one "start fresh"); the timer below enables them after `APPROVE_ARM_MS`.
+        enable_acting_buttons(window, false);
         // Outside the lock: a window call can wait on other windows, and `dismiss` must not wait behind it.
         // SAFETY: the dialog's own live window.
         if let Err(e) = unsafe {
@@ -320,10 +333,35 @@ unsafe extern "system" fn callback(
         if let Some(e) = failed_close {
             tracing::warn!(error = %e, "could not close the dismissed approval dialog");
         }
+    } else if notification == TDN_TIMER {
+        // `wparam` = milliseconds since the dialog was created (or the timer last reset — never here).
+        let arm = wparam.0 >= APPROVE_ARM_MS && {
+            let mut state = lock();
+            !std::mem::replace(&mut state.approve_armed, true)
+        };
+        if arm {
+            enable_acting_buttons(window, true);
+        }
     } else if notification == TDN_DESTROYED {
         lock().window = 0;
     }
     S_OK
+}
+
+/// Enables or disables the two buttons that may act (Approve and the third choice); Deny, the default, is always enabled.
+#[cfg(windows)]
+fn enable_acting_buttons(window: HWND, enable: bool) {
+    for id in [APPROVE_ID, DENY_AND_STOP_ID] {
+        // SAFETY: the dialog's own live window (called from its callback); the message is the Task Dialog's own.
+        unsafe {
+            SendMessageW(
+                window,
+                TDM_ENABLE_BUTTON.0 as u32,
+                WPARAM(id as usize),
+                LPARAM(isize::from(enable)),
+            )
+        };
+    }
 }
 
 /// Asks the dialog to close — the close message cancels it like Alt+F4. Called with the closer's lock held, so the window cannot be

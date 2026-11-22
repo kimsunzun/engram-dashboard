@@ -83,4 +83,7 @@ pub use secret::Secret;
 ///   and it takes its "not ready yet" path until its discovery times out.
 ///
 /// Measured against this criterion and **not bumped**: [`StructuredEvent::TurnEnd`] — the analysis lives in that variant's doc.
+/// [`AgentCommand::SetUiLanguage`] — fire-and-forget, so nothing waits on it: an old daemon cannot decode it and answers an uncorrelated
+/// `Error` the shell only logs, and an old daemon has no dialogs for the language to reach; a new daemon behind an old shell is never told
+/// and shows its dialogs in English, the documented default.
 pub const PROTOCOL_VERSION: u32 = 8;

@@ -5,7 +5,7 @@
 편집 규칙 — 하나라도 어기면 화면이 깨진다:
 
 - 구획은 레벨 2 제목으로 연다(`## <section-id>`). 줄 전체가 그 꼴이어야 하고, id 는 소문자·점·밑줄만 쓴다. 구획은 그 줄 다음 바이트부터 다음 구획 제목 앞 줄까지이고, 공백도 빈 줄도 그대로 실린다. 이 머리글(첫 구획 위)은 버려지고, 여기 제목이 레벨 1 인 것도 그래서다.
-- 필수 구획은 다섯이고 화면과 일대일이다 — `root` · `mail` · `agent` · `window` · `settings`. 하나라도 빠뜨리면 이 파일이 통째로 거부되고 help 가 반려로 답한다 — 사본은 없다. 모르는 구획은 무시한다 — 새 파일을 옛 바이너리가 읽는 것은 정상이기 때문이다.
+- The required sections are six, one per screen — `root` · `mail` · `agent` · `window` · `settings` · `peer`. If one is missing the whole file is refused and help answers with a refusal — there is no copy. Unknown sections are ignored, because an old binary reading a new file is normal.
 - 구획을 더하는 것은 괜찮다. 이름을 바꿀 때는 옛 이름의 구획을 짧게 남긴다 — 빠지면 이 파일을 직접 읽던 2-3 전 engram.exe 가 새 파일을 거부하고 자기 내장 사본(옛 내용)을 낸다. 맨 끝 `theme` 이 그 자리이고, 새 바이너리는 그 구획을 내지 않는다(`help theme` 은 settings 화면이다).
 - 실행파일 이름을 적지 말고 `{tool}` 이라고 쓴다. 렌더 시점에 치환된다 — 손으로 적은 이름은 실행파일이 개명되는 날 낡고, 에이전트는 배운 대로 쳐서 빗나간다.
 - 터미널에 그대로 찍히는 글이다. 마크다운 강조(별표)를 쓰지 않는다 — 별표가 리터럴로 보인다.
@@ -19,6 +19,7 @@
   {tool} help agent     에이전트. 만들고 띄우고 재배치한다
   {tool} help window    창 · 탭 · 분할, 그 자리에 에이전트 배치 · 탭 옮기기 · 배치 읽기(layout.get), 사용량 한도(usage.*), 비정상 종료 뒤 화면 복원(restore.*)
   {tool} help settings  설정. 테마 · 챗 화면 스타일(settings.*) · 창별 테마(window.setTheme)
+  {tool} help peer      Other PCs of this user: pair them, their link state, requests waiting for the user (peer.*)
 
 명령 실행 = `{tool} <name> --flag 값`. 이름 전부는 `{tool} commands`, 한 명령의 인자와 반환은 `{tool} commands <name>`.
 ## mail
@@ -243,6 +244,25 @@ key 는 정확한 키(theme.default)이거나 점으로 끝나는 접두(chat.st
 창 테마는 화면 상태에 그 창과 함께 저장돼 재시작을 넘기고(restore.status 의 saves 가 false 인 실행은 저장하지 않는다), 창을 닫으면 함께 사라진다. 대시보드 창이 떠 있지 않으면 두 명령은 UNKNOWN_COMMAND 이고, 없는 창은 CONFLICT 다. window.setTheme 이 INTERNAL 이고 문구가 정했지만 그 창에 못 보냈다고 하면 값은 남아 있다(window.getTheme 이 새 값을 답한다). 모든 창을 한꺼번에 바꾸려면 settings.set theme.default 다.
 
 data_dir 은 env 에 ENGRAM_DATA_DIR 가 비어 있지 않으면 그 경로다. 아니면 {tool} 실행파일(에이전트라면 env 의 ENGRAM_CLI_EXE)이 있는 폴더에서 정해진다 — 배포본(릴리스 빌드)은 그 폴더 아래 data/, 디버그 빌드(target\debug 등)는 거기서 위로 올라가 처음 나오는 저장소 루트(.git 이 있거나 Cargo.toml 에 [workspace] 가 있는 폴더)의 .engram-dev 이고, 루트가 없으면 그 폴더의 .engram-dev 다.
+## peer
+{tool} peer — this user's daemons on other PCs: pair them, see their link state, and the requests that wait for the user. A trusted PC may only send mail to the agents here (name@pc).
+
+  {tool} peer.list [--name <pc> | --id <ID>]
+      Everything in one answer. state (ready, or why peer links are off) and reason · id (this PC's ID — the other PC adds it) · addresses (this PC's direct ip:port) · network · endpoint (off|up|error) · pcs (id, name, address, online, warning) · knocks (PCs not on the list that tried to link) · requests (waiting for the user) · actions (what a human must do next). --name or --id narrows pcs and knocks to one PC.
+      online is online · offline · refused (the other PC has not added this one) · version_mismatch · duplicate_identity · endpoint_error.
+
+  {tool} peer.add --id <ID> --name <pc> [--address <ip:port>]
+  {tool} peer.edit (--name <pc> | --id <ID>) [--new_name <pc>] [--address <ip:port|none>]
+  {tool} peer.remove (--name <pc> | --id <ID>)
+  {tool} peer.setNetwork [--port <n|default>] [--relay <default|none|URL>] [--address_lookup <default|none|URL>] [--mdns <true|false>]
+  {tool} peer.regenerateKey
+      A PC is named by exactly one of --name and --id. Both PCs must add each other before they link. setNetwork changes only the fields given. regenerateKey gives this PC a new ID — every other PC must remove the old one and pair again.
+
+Trust changes need the user. Your peer.add, peer.setNetwork, peer.regenerateKey and a peer.edit with --new_name do not apply: they record a request and answer at once with outcome requested and a request id. Do not call again or wait in a loop — tell the user a request waits (the Engram app or a dialog shows it); peer.list shows it under requests until the user answers. peer.approve and peer.deny are the user's — an agent's call is refused. After the user denies, the same kind of request from you is refused for 10 minutes; "deny and stop asking" refuses your requests until the daemon restarts. At most 8 requests wait at once.
+
+Open to you: peer.list, peer.remove and peer.edit with only --address. peer.remove bites at once; saved false means the file still lists the PC, so it comes back after a restart unless a later save succeeds.
+
+Renaming a PC changes its mail address: name@<old name> stops resolving.
 ## theme
 {tool} theme — 옛 낱말이다. 지금 화면은 {tool} help settings 이고, 그 화면이 없다고 하면 {tool} commands settings.set 이 인자를 준다.
 

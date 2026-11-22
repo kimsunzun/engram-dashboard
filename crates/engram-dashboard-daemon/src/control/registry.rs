@@ -60,6 +60,11 @@ pub struct ControlRegistry {
     // ADR-0103
     // ADR-0096
     envelope_format: AtomicU8,
+    /// ★The user's UI language (`ui.language`, a shell setting) as the shell last told it★ (`AgentCommand::SetUiLanguage`) — the language
+    ///   of the daemon's own user-facing text, its approval dialogs ([`crate::ask_user`]). Same reason to live here as the envelope format:
+    ///   the WS dispatch already holds this object. 0 = English (the default while no app has said otherwise) · 1 = Korean. Memory only.
+    // ADR-0372
+    ui_language: AtomicU8,
     /// RwLock: installs are rare (test setup), lookups on every relay are short.
     delivery_observer: RwLock<Option<Arc<dyn DeliveryObserver>>>,
     /// ★Mid-send yield-seam hook (ADR-0088 Stage 1 — test-harness only)★: fires at the latest point of the resolve↔write gap in `handle_send` (just before injecting the recipient), to deterministically reproduce a mid-flight epoch race — if the hook swaps the same AgentId in as a new-epoch incarnation, resolve saw the old incarnation but write lands on the new one. ★ADR-0086 §F5 marks that race design-accepted★ (mail targets the logical agent); this seam observes that behavior, not pins the epoch.
@@ -276,6 +281,25 @@ impl ControlRegistry {
         }
     }
 
+    /// The UI language the shell last sent — English until one does.
+    pub(crate) fn ui_language(&self) -> crate::ask_user::Lang {
+        match self.ui_language.load(Ordering::Acquire) {
+            1 => crate::ask_user::Lang::Ko,
+            _ => crate::ask_user::Lang::En,
+        }
+    }
+
+    /// Records the shell's `ui.language` word; a word this daemon does not know is English.
+    pub(crate) fn set_ui_language(&self, code: &str) {
+        let lang = crate::ask_user::Lang::from_code(code).unwrap_or_default();
+        let v = match lang {
+            crate::ask_user::Lang::En => 0u8,
+            crate::ask_user::Lang::Ko => 1u8,
+        };
+        self.ui_language.store(v, Ordering::Release);
+        tracing::debug!(language = lang.code(), "the shell set the UI language");
+    }
+
     pub fn set_envelope_format(&self, format: EnvelopeFormat) {
         let v = match format {
             EnvelopeFormat::Xml => 0u8,
@@ -305,6 +329,14 @@ impl ControlRegistry {
         if let Some(hook) = hook {
             hook();
         }
+    }
+}
+
+/// The dialogs' language source — the language the shell last sent.
+// ADR-0372
+impl crate::ask_user::LanguageSource for ControlRegistry {
+    fn language(&self) -> crate::ask_user::Lang {
+        self.ui_language()
     }
 }
 
@@ -602,6 +634,16 @@ mod tests {
     }
 
     // ── ADR-0096·0103: envelope format global state ────────────────────────────────────────────
+    #[test]
+    fn the_ui_language_is_english_until_the_shell_sets_it_and_unknown_words_are_english() {
+        let reg = ControlRegistry::new();
+        assert_eq!(reg.ui_language(), crate::ask_user::Lang::En);
+        reg.set_ui_language("ko");
+        assert_eq!(reg.ui_language(), crate::ask_user::Lang::Ko);
+        reg.set_ui_language("fr");
+        assert_eq!(reg.ui_language(), crate::ask_user::Lang::En);
+    }
+
     #[test]
     fn envelope_format_defaults_to_xml_and_toggles() {
         let reg = ControlRegistry::new();

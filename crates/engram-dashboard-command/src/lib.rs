@@ -2,7 +2,7 @@
 //!
 //! Holds only the envelope · error vocabulary · declaration macro · table · routing. Commands themselves are declared **next to the
 //!   producer module**
-//! (`agent` = `agent.*`, `daemon` = `mail.*`, `src-tauri` = `window/tab/slot`).
+//! (`agent` = `agent.*`, `daemon` = `peer.*`, `src-tauri` = `window/tab/slot`).
 //!
 //! ## Three invariants (break them and this crate loses its reason to exist)
 //!

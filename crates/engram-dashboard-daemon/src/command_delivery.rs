@@ -1027,6 +1027,32 @@ fn settled_later(
     })
 }
 
+/// Who calls a command of the daemon's own table — ★typed, never an argument and never the `entrance` label★ (a log label; tests pass
+///   `"test"`). The approval gate decides human vs agent from this alone (`peer.*`), and the input lease reads the connection from it.
+///
+/// - [`Caller::Shell`] = a socket-delivered call from a live shell connection (`ConnRegistry` numbers count up from 1) — the human path.
+///   Only the socket entrance makes it ([`deliver`]). [`CommandBus::invoke`] delivers as the agent whose token asked ([`deliver_as`]),
+///   so its synthetic relay connection number (counting down from `u64::MAX`) is never typed human — and it refuses the daemon's own
+///   names before delivering anyway.
+/// - [`Caller::Agent`] = a control-route call carrying an agent token (`/control/call`, `/control/agent` — the agent-injected
+///   `ENGRAM_TOKEN`): the token's identity, so a request names the agent.
+// ADR-0394
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caller {
+    Shell(ConnId),
+    Agent(crate::control::registry::BoundIdentity),
+}
+
+impl Caller {
+    /// The connection the input lease is checked against — `None` for a connectionless caller, not a lease holder (ADR-0231).
+    pub fn lease_holder(&self) -> Option<ConnId> {
+        match self {
+            Self::Shell(conn) => Some(*conn),
+            Self::Agent(_) => None,
+        }
+    }
+}
+
 /// **Stage 1** of the 3-stage delivery — commands this daemon answers by itself (`agent.*`).
 /// ★Why injected (ADR-0012)★: the real thing is a table holding `AgentManager` so real processes · disk come with it. The harness measuring the delivery rules cannot drag that in so it is cut by a port — so this file's tests measure the stage 1 branch without a table
 /// (or with a fake table).
@@ -1051,13 +1077,14 @@ pub trait LocalCommands: Send + Sync {
     /// ★The `Ok` payload is **put in the log**★ (completion after the deadline — [`log_late_local`]). So do not put secrets such as credentials · tokens in a success payload leaving through this port. ★Today's real ones (`agent.*`·`usage.*`) are not
     /// only id · name · status★ — the payload of `agent.listQueuedInputs` carries text the user typed and the rows of `usage.*` carry the upstream raw text (`upstream`). The former does not sit in the log because that record carries a payload only for the **success of a held Write**
     /// (a read leaves only the event — [`log_late_local`]), and the latter is a held Write (`usage.refresh`) so it is carried, but before that record carries it **it walks every key named `upstream` all the way down regardless of the command** ([`strip_upstream`]).
-    /// `caller` = the calling connection (material for the input lease decision — ADR-0231). `None` = an entrance with no connection (`/control/call`) and it is not counted as a lease holder.
+    /// `caller` = who calls ([`Caller`]): the input lease decision reads its connection (ADR-0231), the approval gate reads human vs agent
+    ///   from it (ADR-0394).
     fn run(
         &self,
         name: &str,
         args: &mut serde_json::Value,
         entrance: &'static str,
-        caller: Option<ConnId>,
+        caller: Caller,
     ) -> Option<Result<serde_json::Value, CommandError>>;
 
     /// Every name this daemon answers by itself — discovery (`ListCommands`) emits it **merged** with the roster.
@@ -1085,7 +1112,7 @@ impl LocalCommands for NoLocalCommands {
         _name: &str,
         _args: &mut serde_json::Value,
         _entrance: &'static str,
-        _caller: Option<ConnId>,
+        _caller: Caller,
     ) -> Option<Result<serde_json::Value, CommandError>> {
         None
     }
@@ -1225,6 +1252,7 @@ fn spawn_local(
     locals: Arc<dyn LocalCommands>,
     roster: CommandRoster,
     origin: ConnId,
+    caller: Caller,
     envelope: CommandEnvelope,
     entrance: &'static str,
 ) -> tokio::task::JoinHandle<(
@@ -1246,7 +1274,8 @@ fn spawn_local(
                 Some(Err(no_retry(ErrorCode::Conflict, CALLER_ALREADY_GONE))),
             );
         }
-        let outcome = locals.run(&envelope.name, &mut envelope.args, entrance, Some(origin));
+        // ADR-0394: the caller the entrance named — the socket's shell connection, or the agent behind a relay.
+        let outcome = locals.run(&envelope.name, &mut envelope.args, entrance, caller);
         (envelope, outcome)
     })
 }
@@ -1412,6 +1441,30 @@ pub async fn deliver(
     deliveries: CommandDeliveries,
     locals: Arc<dyn LocalCommands>,
     origin: ConnId,
+    envelope: CommandEnvelope,
+    entrance: &'static str,
+) {
+    deliver_as(
+        roster,
+        deliveries,
+        locals,
+        origin,
+        Caller::Shell(origin),
+        envelope,
+        entrance,
+    )
+    .await
+}
+
+/// [`deliver`] with the caller named — the relay door ([`CommandBus::invoke`]) delivers as the agent whose token asked, never as the
+///   shell. `origin` stays the connection number the seat and the reply are keyed by.
+// ADR-0394
+pub(crate) async fn deliver_as(
+    roster: CommandRoster,
+    deliveries: CommandDeliveries,
+    locals: Arc<dyn LocalCommands>,
+    origin: ConnId,
+    caller: Caller,
     envelope: CommandEnvelope,
     entrance: &'static str,
 ) {
@@ -1582,6 +1635,7 @@ pub async fn deliver(
             Arc::clone(&locals),
             roster.clone(),
             origin,
+            caller,
             envelope,
             entrance,
         );
@@ -1959,11 +2013,13 @@ impl CommandBus {
     /// so that causality is absent. Rather, spawning here would need yet another place to take the reply.
     ///
     /// ★A deadline overrun comes as a `TIMEOUT` reply — what makes it is the sweeper★ ([`CommandDeliveries::expire`]). That sweeper is brought out together by [`CommandBus::new`].
+    /// `asker` = the agent whose token called the control route — the round trip's typed caller (ADR-0394).
     pub async fn invoke(
         &self,
         request_id: RequestId,
         name: String,
         args: serde_json::Value,
+        asker: crate::control::registry::BoundIdentity,
     ) -> CommandReply {
         // ★**The daemon's own names do not come through this door — that contract is enforced here**★
         //   The decision part runs its own table first (`control::catalog::handle_call`) so today this branch does not come. ★For that "first" to stand it must be **the same table**, and today what carries that is the type★: the decision part takes the stage 1 table as `&dyn LocalCommands`
@@ -2017,11 +2073,12 @@ impl CommandBus {
             catcher,
         );
 
-        deliver(
+        deliver_as(
             self.roster.clone(),
             self.deliveries.clone(),
             Arc::clone(&self.locals),
             caller,
+            Caller::Agent(asker),
             CommandEnvelope {
                 name,
                 request_id,
@@ -2316,6 +2373,13 @@ pub(crate) mod tests {
 
     use crate::log_capture::capture_loud_async as capture_loud;
 
+    /// The agent behind a control-route relay in these tests.
+    const TEST_ASKER: crate::control::registry::BoundIdentity =
+        crate::control::registry::BoundIdentity {
+            agent_id: uuid::Uuid::nil(),
+            epoch: 0,
+        };
+
     fn envelope(name: &str, owner: &OwnerToken) -> CommandEnvelope {
         CommandEnvelope {
             name: name.to_string(),
@@ -2393,7 +2457,7 @@ pub(crate) mod tests {
         /// The **entrance label** the body received — the means to measure that delivery passes its own entrance as is.
         saw_entrance: Mutex<Option<&'static str>>,
         /// The caller the body received — to see whether delivery passes the connection that sent the envelope as material for the lease decision.
-        saw_caller: Mutex<Option<Option<ConnId>>>,
+        saw_caller: Mutex<Option<Caller>>,
         /// **How many times** the body ran — the means to observe "the same Write verb is not applied twice".
         runs: std::sync::atomic::AtomicUsize,
         /// A signal that the body has entered — lets a test aim deterministically at "while the body runs".
@@ -2438,7 +2502,7 @@ pub(crate) mod tests {
             *self.saw_entrance.lock().expect("fake local poisoned")
         }
 
-        fn caller(&self) -> Option<Option<ConnId>> {
+        fn caller(&self) -> Option<Caller> {
             *self.saw_caller.lock().expect("fake local poisoned")
         }
     }
@@ -2490,7 +2554,7 @@ pub(crate) mod tests {
             _name: &str,
             args: &mut serde_json::Value,
             entrance: &'static str,
-            caller: Option<ConnId>,
+            caller: Caller,
         ) -> Option<Result<serde_json::Value, CommandError>> {
             *self.saw_entrance.lock().expect("fake local poisoned") = Some(entrance);
             *self.saw_caller.lock().expect("fake local poisoned") = Some(caller);
@@ -3297,7 +3361,7 @@ pub(crate) mod tests {
             _name: &str,
             _args: &mut serde_json::Value,
             _entrance: &'static str,
-            _caller: Option<ConnId>,
+            _caller: Caller,
         ) -> Option<Result<serde_json::Value, CommandError>> {
             panic!("the table blew up while coercing arguments")
         }
@@ -3761,7 +3825,7 @@ pub(crate) mod tests {
             _name: &str,
             _args: &mut serde_json::Value,
             _entrance: &'static str,
-            _caller: Option<ConnId>,
+            _caller: Caller,
         ) -> Option<Result<serde_json::Value, CommandError>> {
             None
         }
@@ -5360,7 +5424,7 @@ pub(crate) mod tests {
         let bus = bus.clone();
         let name = name.to_string();
         tokio::spawn(async move {
-            bus.invoke(request_id, name, json!({ "window": "main" }))
+            bus.invoke(request_id, name, json!({ "window": "main" }), TEST_ASKER)
                 .await
         })
     }
@@ -5448,6 +5512,7 @@ pub(crate) mod tests {
                     request_id,
                     "slot.focus".to_string(),
                     json!({ "slot_of": "lead", "window": "main" }),
+                    TEST_ASKER,
                 )
                 .await
             })
@@ -5594,8 +5659,8 @@ pub(crate) mod tests {
         // ADR-0231: the connection that sent the envelope arrives as the caller of the lease decision — with `None` a holder's bus cancel would be refused.
         assert_eq!(
             local.caller(),
-            Some(Some(9)),
-            "delivery passes the connection that called"
+            Some(Caller::Shell(9)),
+            "delivery passes the connection that called, typed as the shell (human) path"
         );
         assert_eq!(local.runs(), 1, "premise: the socket door rode stage 1");
 

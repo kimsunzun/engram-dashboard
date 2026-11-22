@@ -53,3 +53,4 @@ Rules to follow when you create or change a command that an LLM calls through th
 - Do the candidates go into the ambiguous · missing error (§1-3)?
 - Does the response carry what the next call needs (a new id · the changed layout) (§1-4)?
 - Did you write the usage in `prompts/engram-help.md` — the usage instructions the LLM reads are there.
+- Does it widen trust (who may reach this PC, how it is reached, its identity)? Then an agent's call only records a pending request and is answered at once ("requested" + the request id — never a wait for the human), a human's call applies, and answering the request is human-only — the gate reads the typed caller, never an argument or the entrance label; the app's action for it is `humanOnly`, has no `help` and stays out of the shell command table (ADR-0394; precedent `peer.*` — `crates/engram-dashboard-daemon/src/link/peer/commands.rs`).

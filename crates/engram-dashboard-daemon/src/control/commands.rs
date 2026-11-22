@@ -4,7 +4,9 @@
 //! (`/control/agent`, `agent.rs`) · the full-name route (`/control/call`, `catalog.rs`) · command bus delivery stage 1 (`command_delivery`).
 //! If the table is not plugged into the slot, the two routes are 503 and delivery is a stage-1 miss.
 //! Declarations are not here: the contracts of `agent.*`·`usage.*` belong to agent (ADR-0155 decision 1); this file plugs the daemon's real
-//! things (manager · roster notification fanout · usage service) into them. Daemon-own commands (`mail.*`) would add their declaration block here.
+//! things (manager · roster notification fanout · usage service) into them. The daemon's own `peer.*` table is declared beside its producer
+//! (`link::peer::commands`) and joined here ([`DaemonTable::with_peer`]); its approval gate runs inside [`call_daemon_command`], from the
+//! typed [`Caller`] (ADR-0394).
 // ADR-0155
 
 use std::sync::Arc;
@@ -21,8 +23,9 @@ use engram_dashboard_command::{
 };
 use futures_util::FutureExt as _;
 
-use crate::command_delivery::LocalCommands;
+use crate::command_delivery::{Caller, LocalCommands};
 use crate::connection_core::INPUT_LOCKED_REFUSAL;
+use crate::link::peer::commands::{PeerCall, PeerCaller, PeerCommands, Requester};
 
 use super::mcp_server::{CommandTableSlot, RosterBroadcastSlot};
 
@@ -54,29 +57,62 @@ pub fn make_daemon_table(
         ),
         roster: manager,
         lease,
+        peer: None,
     }
 }
 
-/// The daemon command table — the `agent.*` table plus the material for checking input-affecting commands ([`INPUT_AFFECTING`]) (roster · lease port) as one value.
+/// The daemon command table — the `agent.*` table plus the material for checking input-affecting commands ([`INPUT_AFFECTING`]) (roster · lease port) as one value,
+/// and the daemon's own `peer.*` table with its approval gate when the assembly runs the peer link ([`DaemonTable::with_peer`]).
 ///
 /// One value, since separate plugging would allow a table with an empty lease port, skipping the lease without a signal; all three enter the slot together.
-/// No door takes out the inner [`CommandTable`]: a second entrance skipping [`call_daemon_command`] would drop both checks (ADR-0157 arguments · ADR-0231 lease).
+/// No door takes out an inner [`CommandTable`]: a second entrance skipping [`call_daemon_command`] would drop the checks (ADR-0157 arguments · ADR-0231 lease ·
+/// ADR-0394 approval gate).
 // ADR-0231
 pub struct DaemonTable {
     table: CommandTable,
     /// The roster that resolves target tokens — the host the verb bodies use, so the checked agent = the executing agent.
     roster: Arc<dyn AgentCommandHost>,
     lease: Arc<dyn InputLease>,
+    /// `peer.*` — absent in assemblies without the peer link (smoke bins · harnesses), where those names are not this daemon's.
+    peer: Option<PeerCommands>,
 }
 
 impl DaemonTable {
+    /// Joins the `peer.*` table (production: `lib.rs` `run`). Its names never collide with `agent.*`·`usage.*` (another family).
+    pub(crate) fn with_peer(mut self, peer: PeerCommands) -> Self {
+        self.peer = Some(peer);
+        self
+    }
+
     pub fn specs(&self) -> impl Iterator<Item = &'static CommandSpec> + '_ {
-        self.table.specs()
+        self.table
+            .specs()
+            .chain(self.peer.iter().flat_map(|peer| peer.specs()))
     }
 
     pub fn decls(&self) -> Vec<CommandDecl> {
-        self.table.decls()
+        let mut decls = self.table.decls();
+        if let Some(peer) = &self.peer {
+            decls.extend(peer.decls());
+        }
+        decls
     }
+
+    /// The inner table that holds `name` — `None` = not this daemon's name.
+    fn holder(&self, name: &str) -> Option<Holder<'_>> {
+        if self.table.contains(name) {
+            return Some(Holder::Agent(&self.table));
+        }
+        self.peer
+            .as_ref()
+            .filter(|peer| peer.contains(name))
+            .map(Holder::Peer)
+    }
+}
+
+enum Holder<'a> {
+    Agent(&'a CommandTable),
+    Peer(&'a PeerCommands),
 }
 
 /// The input lease port — may a command that moves a live agent's input reach that agent.
@@ -132,31 +168,65 @@ impl UsageCommandHost for NoUsageLimits {
 /// `OUTCOME_UNKNOWN` · `command_delivery::fold_local`), and do not split by declared effect (`usage.get` is `Read` yet changes the shared usage book).
 /// `entrance` is a log label: a contract violation below (an async handler) shows as one error reply, so the log must say which surface.
 /// The input lease check is this one too (ADR-0231): [`INPUT_AFFECTING`] commands go through `admit_input` after the argument check; placing it
-/// elsewhere (`DaemonLocalCommands::run`) would skip `/control/agent`. `caller` = the calling connection (bus `Some(origin)`, CLI routes `None`).
+/// elsewhere (`DaemonLocalCommands::run`) would skip `/control/agent`. `caller` = who calls ([`Caller`]): the bus a live shell connection, the
+/// two CLI routes the agent token's identity.
+/// The approval gate of `peer.*` is this one too (ADR-0394): after the argument check, the peer table's gate decides from the typed caller
+/// whether the call runs, becomes a pending request answered at once, or is refused (agents never answer an approval). Placed anywhere
+/// else, one entrance would apply trust changes for agents.
 // ADR-0155
 // ADR-0157
 // ADR-0231
 // ADR-0293
+// ADR-0394
 pub fn call_daemon_command(
     table: &DaemonTable,
     name: &str,
     args: &mut serde_json::Value,
     entrance: &'static str,
-    caller: Option<ConnId>,
+    caller: Caller,
 ) -> Option<Result<serde_json::Value, CommandError>> {
     // Names not in the table are split off before the check: `check_args` lets unknown names through, so reversing the order would pass someone else's name as "no argument problem" all the way down.
-    if !table.table.contains(name) {
-        return None;
-    }
-    if let Err(rejection) = table.table.check_args(name, args) {
-        return Some(Err(rejection));
-    }
-    if let Err(refusal) = admit_input(table, name, args, caller) {
-        return Some(Err(refusal));
-    }
-    // Passed `contains` above and the table is immutable during this call, so `None` is not reached.
-    let future = table.table.call(name, args)?;
+    let future = match table.holder(name)? {
+        Holder::Agent(inner) => {
+            if let Err(rejection) = inner.check_args(name, args) {
+                return Some(Err(rejection));
+            }
+            if let Err(refusal) = admit_input(table, name, args, caller.lease_holder()) {
+                return Some(Err(refusal));
+            }
+            // Passed `holder` above and the table is immutable during this call, so `None` is not reached.
+            inner.call(name, args)?
+        }
+        // The peer table runs its own gate before any handler; it holds no input-affecting name, so there is no lease to check.
+        Holder::Peer(peer) => {
+            if let Err(rejection) = peer.check_args(name, args) {
+                return Some(Err(rejection));
+            }
+            match peer.call(name, args, &peer_caller(table, caller)) {
+                Ok(PeerCall::Run(future)) => future,
+                Ok(PeerCall::Answered(answer)) => return Some(Ok(answer)),
+                Err(refusal) => return Some(Err(refusal)),
+            }
+        }
+    };
     Some(drive_to_completion(future, name, entrance))
+}
+
+/// The typed caller as the peer gate sees it — the agent named by its token's id, with its current roster name for the question text.
+// ADR-0394
+fn peer_caller(table: &DaemonTable, caller: Caller) -> PeerCaller {
+    match caller {
+        Caller::Shell(_) => PeerCaller::Human,
+        Caller::Agent(identity) => PeerCaller::Agent(Requester {
+            name: table
+                .roster
+                .roster()
+                .into_iter()
+                .find(|row| row.id == identity.agent_id)
+                .map(|row| row.canonical_name),
+            id: identity.agent_id.to_string(),
+        }),
+    }
 }
 
 /// The lease check of input-affecting commands — on pass, replaces `args.target` with the resolved id.
@@ -254,14 +324,15 @@ impl LocalCommands for DaemonLocalCommands {
     }
 
     /// The entrance label and caller are received and passed on, not made up: two entrances call this adapter — socket dispatch (`bus`, the calling
-    /// connection) and `/control/call` (`cli`, no connection — `catalog::handle_call`). A hardcoded label would merge their accidents under one tag, and a
-    /// hardcoded caller would make the lease decision entrance-independent (test: `the_entrance_label_is_forwarded_not_hardcoded`).
+    /// shell connection) and `/control/call` (`cli`, the agent token's identity — `catalog::handle_call`). A hardcoded label would merge their accidents
+    /// under one tag, and a hardcoded caller would make the lease decision and the approval gate entrance-independent (test:
+    /// `the_entrance_label_is_forwarded_not_hardcoded`).
     fn run(
         &self,
         name: &str,
         args: &mut serde_json::Value,
         entrance: &'static str,
-        caller: Option<ConnId>,
+        caller: Caller,
     ) -> Option<Result<serde_json::Value, CommandError>> {
         call_daemon_command(self.0.get()?, name, args, entrance, caller)
     }
@@ -311,7 +382,18 @@ mod tests {
     use serde_json::json;
 
     use super::super::agent::RosterBroadcast;
+    use super::super::registry::BoundIdentity;
     use super::*;
+
+    /// An agent on a control route — the caller of the two CLI routes.
+    const AGENT: BoundIdentity = BoundIdentity {
+        agent_id: uuid::Uuid::nil(),
+        epoch: 0,
+    };
+
+    fn agent() -> Caller {
+        Caller::Agent(AGENT)
+    }
     use crate::usage_service::clock::OsUsageClock;
     use crate::usage_service::fakes::{self, ProbeGate};
 
@@ -381,7 +463,7 @@ mod tests {
         name: &str,
         mut args: serde_json::Value,
     ) -> Result<serde_json::Value, CommandError> {
-        call_daemon_command(table, name, &mut args, "test", None).expect("a name in the table")
+        call_daemon_command(table, name, &mut args, "test", agent()).expect("a name in the table")
     }
 
     /// A verb that adds one roster entry — the cheapest place to hang a notification (no launch, no backend).
@@ -471,11 +553,11 @@ mod tests {
         let table = slot.get().expect("table").clone();
         let typo = json!({ "cwdd": "C:/work/x" });
 
-        let direct = call_daemon_command(&table, "agent.new", &mut typo.clone(), "cli", None)
+        let direct = call_daemon_command(&table, "agent.new", &mut typo.clone(), "cli", agent())
             .expect("a name of this table")
             .expect_err("an unknown field is bounced");
         let over_bus = bus
-            .run("agent.new", &mut typo.clone(), "bus", Some(2))
+            .run("agent.new", &mut typo.clone(), "bus", Caller::Shell(2))
             .expect("a name of this table")
             .expect_err("an unknown field is bounced");
 
@@ -496,7 +578,9 @@ mod tests {
         let mut args = json!({ "window": "main", "unknown": 1 });
 
         assert!(bus.claim("tab.create").is_none());
-        assert!(bus.run("tab.create", &mut args, "bus", Some(2)).is_none());
+        assert!(bus
+            .run("tab.create", &mut args, "bus", Caller::Shell(2))
+            .is_none());
         assert_eq!(args, json!({ "window": "main", "unknown": 1 }));
     }
 
@@ -507,7 +591,7 @@ mod tests {
 
         assert!(bus.claim("agent.list").is_none());
         assert!(bus
-            .run("agent.list", &mut json!({}), "bus", Some(2))
+            .run("agent.list", &mut json!({}), "bus", Caller::Shell(2))
             .is_none());
         assert!(bus.decls().is_empty());
         assert!(
@@ -591,6 +675,7 @@ mod tests {
             table,
             roster: manager(),
             lease: Arc::new(NoInputLeases),
+            peer: None,
         }));
         slot
     }
@@ -606,7 +691,7 @@ mod tests {
             let (code, lines) = crate::log_capture::capture_loud(|| {
                 let adapter = DaemonLocalCommands::new(pending_table_slot());
                 adapter
-                    .run(PENDING_SPEC.name, &mut json!({}), entrance, None)
+                    .run(PENDING_SPEC.name, &mut json!({}), entrance, agent())
                     .expect("a name of this table")
                     .expect_err("if the first poll does not finish, it does not make up an outcome")
                     .code()
@@ -731,6 +816,7 @@ mod tests {
             table,
             roster: manager,
             lease,
+            peer: None,
         }));
         (slot, seen)
     }
@@ -763,7 +849,12 @@ mod tests {
     ) -> Vec<(String, String)> {
         let bus = DaemonLocalCommands::new(slot.clone());
         let over_bus = match bus
-            .run(CANCEL, &mut cancel_args(target), "bus", Some(bus_caller))
+            .run(
+                CANCEL,
+                &mut cancel_args(target),
+                "bus",
+                Caller::Shell(bus_caller),
+            )
             .expect("a name of this table")
         {
             Ok(payload) => ("OK".to_string(), payload.to_string()),
@@ -777,6 +868,7 @@ mod tests {
                 args: command_args(cancel_args(target)),
                 request_id: None,
             },
+            AGENT,
         ) {
             super::super::catalog::CallOutcome::Answered(result) => flatten(result),
             super::super::catalog::CallOutcome::Relay { .. } => {
@@ -789,6 +881,7 @@ mod tests {
                 verb: "cancelQueuedInput".to_string(),
                 args: command_args(cancel_args(target)),
             },
+            AGENT,
         ));
         vec![over_bus, over_call, over_agent]
     }
@@ -841,7 +934,7 @@ mod tests {
             "nobody holds this agent's lease: {answers:?}"
         );
         let by_holder = DaemonLocalCommands::new(slot.clone())
-            .run(CANCEL, &mut cancel_args("beta"), "bus", Some(7))
+            .run(CANCEL, &mut cancel_args("beta"), "bus", Caller::Shell(7))
             .expect("a name of this table");
         assert!(by_holder.is_ok(), "the holder passes: {by_holder:?}");
 
@@ -874,7 +967,7 @@ mod tests {
         let (slot, seen) = gated_slot(manager, lease.clone());
 
         let err = DaemonLocalCommands::new(slot)
-            .run(CANCEL, &mut cancel_args("ghost"), "bus", Some(2))
+            .run(CANCEL, &mut cancel_args("ghost"), "bus", Caller::Shell(2))
             .expect("a name of this table")
             .expect_err("missing agent");
 
@@ -901,7 +994,7 @@ mod tests {
                 CANCEL,
                 &mut json!({ "target": target, "input_id": "q1" }),
                 "bus",
-                Some(2),
+                Caller::Shell(2),
             )
             .expect("a name of this table")
             .expect_err("bounce");
@@ -935,7 +1028,7 @@ mod tests {
             "agent.listQueuedInputs",
             &mut json!({ "target": "alpha" }),
             "cli",
-            None,
+            agent(),
         )
         .expect("a name of this table")
         .expect_err("a sleeping agent holds no list");
@@ -945,7 +1038,7 @@ mod tests {
             "agent.rename",
             &mut json!({ "target": "alpha", "name": "gamma" }),
             "cli",
-            None,
+            agent(),
         )
         .expect("a name of this table")
         .expect("roster verbs are unrelated to the lease");
@@ -973,7 +1066,7 @@ mod tests {
                 "agent.resolve",
                 &mut json!({ "targets": ["beta", ids[0].to_string()] }),
                 "bus",
-                Some(2),
+                Caller::Shell(2),
             )
             .expect("a name of this table")
             .expect("both resolve");
@@ -1060,8 +1153,9 @@ mod tests {
         // Imitates a blocking pool thread — the entrance is called from a thread outside the runtime.
         let worker = std::thread::spawn(move || {
             let mut args = json!({ "backend": "Claude" });
-            let outcome = call_daemon_command(&caller, "usage.get", &mut args, "bus", Some(1))
-                .expect("a name of this table");
+            let outcome =
+                call_daemon_command(&caller, "usage.get", &mut args, "bus", Caller::Shell(1))
+                    .expect("a name of this table");
             let _ = answered.send(outcome);
         });
 
@@ -1138,6 +1232,7 @@ mod tests {
             table,
             roster: manager(),
             lease: Arc::new(NoInputLeases),
+            peer: None,
         };
 
         for (name, mut args) in [
@@ -1145,14 +1240,14 @@ mod tests {
             ("usage.get", json!({ "backend": "Claude" })),
             ("agent.rename", json!({ "target": "alpha", "name": "beta" })),
         ] {
-            let contained = call_daemon_command(&table, name, &mut args, "test", None)
+            let contained = call_daemon_command(&table, name, &mut args, "test", agent())
                 .expect("a name of this table")
                 .expect("the body's answer");
             assert_eq!(contained, json!(false), "{name}");
         }
 
         let err = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
-            call_daemon_command(&table, "agent.list", &mut json!({}), "test", None)
+            call_daemon_command(&table, "agent.list", &mut json!({}), "test", agent())
                 .expect("a name of this table")
                 .expect_err("body panic")
         });
@@ -1161,5 +1256,190 @@ mod tests {
             err.message(),
             "command handler panicked: body panic · marked false"
         );
+    }
+
+    // ── the `peer.*` table and its approval gate (ADR-0394) ──────────────────────────────────────────────
+
+    /// A daemon table with the `peer.*` table over fake trust operations; the app shows the slot, so no dialog opens.
+    fn peer_table(
+        manager: Arc<AgentManager>,
+    ) -> (
+        Arc<CommandTableSlot>,
+        Arc<crate::link::peer::testing::FakeOps>,
+    ) {
+        use crate::ask_user::fakes::{FakeApp, FakeDialogs};
+        use crate::link::peer::approvals::Approvals;
+        use crate::link::peer::testing::{source, FakeOps};
+
+        let ops = Arc::new(FakeOps::default());
+        let (dialogs, _shown) = FakeDialogs::new();
+        let app = Arc::new(FakeApp::default());
+        app.set_shows(true);
+        let approvals = Approvals::start(
+            source(ops.clone()),
+            dialogs,
+            app,
+            Arc::new(crate::ask_user::fakes::FakeLanguage::default()),
+            Arc::new(engram_dashboard_base::time::ManualClock::new()),
+        );
+        let slot = Arc::new(CommandTableSlot::new());
+        slot.set(Arc::new(
+            make_daemon_table(
+                manager,
+                Arc::new(RosterBroadcastSlot::new()),
+                Arc::new(NoInputLeases),
+                Arc::new(NoUsageLimits),
+            )
+            .with_peer(PeerCommands::new(approvals)),
+        ));
+        (slot, ops)
+    }
+
+    fn add_args(byte: u8, name: &str) -> serde_json::Value {
+        json!({ "id": crate::link::peer::testing::pc(byte).to_text(), "name": name })
+    }
+
+    /// ADR-0394 d2: human vs agent comes from the typed caller of each entrance — the bus's live shell connection applies, the full-name
+    ///   route's agent token only requests, and the entrance label decides nothing (a `"test"` label with an agent caller is an agent).
+    #[test]
+    fn the_peer_gate_reads_the_typed_caller_of_each_entrance() {
+        let (slot, ops) = peer_table(manager());
+        let bus = DaemonLocalCommands::new(slot.clone());
+
+        let over_bus = bus
+            .run(
+                "peer.add",
+                &mut add_args(0x11, "office"),
+                "bus",
+                Caller::Shell(3),
+            )
+            .expect("a name of this table")
+            .expect("a human's add applies");
+        assert_eq!(over_bus["outcome"], "applied");
+
+        let over_call = match super::super::catalog::handle_call(
+            &bus,
+            &crate::command_roster::CommandRoster::new(),
+            super::super::catalog::CallRequest {
+                name: "peer.add".to_string(),
+                args: command_args(add_args(0x22, "laptop")),
+                request_id: None,
+            },
+            AGENT,
+        ) {
+            super::super::catalog::CallOutcome::Answered(result) => flatten(result),
+            super::super::catalog::CallOutcome::Relay { .. } => {
+                panic!("the daemon's own names are not relayed")
+            }
+        };
+        assert_eq!(over_call.0, "OK", "{over_call:?}");
+        assert!(
+            over_call.1.contains("\"outcome\":\"requested\""),
+            "{over_call:?}"
+        );
+
+        let table = slot.get().expect("table").clone();
+        let labelled_test = call_daemon_command(
+            &table,
+            "peer.regenerateKey",
+            &mut json!({}),
+            "test",
+            agent(),
+        )
+        .expect("a name of this table")
+        .expect("an agent's gated call is answered");
+        assert_eq!(labelled_test["outcome"], "requested");
+
+        let request = labelled_test["request"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        let refused = call_daemon_command(
+            &table,
+            "peer.approve",
+            &mut json!({ "request": request }),
+            "bus",
+            agent(),
+        )
+        .expect("a name of this table")
+        .expect_err("agents cannot approve");
+        assert_eq!(refused.code(), ErrorCode::Conflict);
+        let approved = call_daemon_command(
+            &table,
+            "peer.approve",
+            &mut json!({ "request": request }),
+            "test",
+            Caller::Shell(3),
+        )
+        .expect("a name of this table")
+        .expect("a human approves");
+        assert_eq!(approved["outcome"], "applied");
+        assert_eq!(ops.calls(), ["add office", "regenerate"]);
+    }
+
+    /// The `peer.*` names are the daemon's own: discovery lists them, delivery claims them (with their declared effect), and the entrance
+    ///   check bounces an unknown field before the gate.
+    #[test]
+    fn the_peer_table_joins_the_daemon_table() {
+        let (slot, ops) = peer_table(manager());
+        let bus = DaemonLocalCommands::new(slot.clone());
+        assert_eq!(bus.claim("peer.list"), Some(Effect::Read));
+        assert_eq!(bus.claim("peer.add"), Some(Effect::Write));
+        assert!(bus
+            .decls()
+            .iter()
+            .any(|decl| decl.name == "peer.setNetwork"));
+        assert_eq!(bus.claim("agent.list"), Some(Effect::Read), "agent.* stays");
+
+        let table = slot.get().expect("table").clone();
+        let typo = call_daemon_command(
+            &table,
+            "peer.add",
+            &mut json!({ "id": "x", "nmae": "x" }),
+            "cli",
+            agent(),
+        )
+        .expect("a name of this table")
+        .expect_err("an unknown field is bounced");
+        assert_eq!(typo.code(), ErrorCode::InvalidArgument);
+        assert!(ops.calls().is_empty());
+
+        let without_peer = make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+        );
+        assert!(
+            call_daemon_command(&without_peer, "peer.list", &mut json!({}), "cli", agent())
+                .is_none(),
+            "an assembly without the peer link does not hold peer.*"
+        );
+    }
+
+    /// A request names the agent from its token — the roster name comes along for the question text.
+    #[test]
+    fn a_request_names_the_calling_agent() {
+        let (manager, ids) = manager_with(&["alpha"]);
+        let (slot, _ops) = peer_table(manager);
+        let table = slot.get().expect("table").clone();
+        let alpha = Caller::Agent(BoundIdentity {
+            agent_id: ids[0],
+            epoch: 0,
+        });
+        call_daemon_command(
+            &table,
+            "peer.add",
+            &mut add_args(0x11, "office"),
+            "cli",
+            alpha,
+        )
+        .expect("a name of this table")
+        .expect("requested");
+        let listed = call_daemon_command(&table, "peer.list", &mut json!({}), "cli", alpha)
+            .expect("a name of this table")
+            .expect("listed");
+        assert_eq!(listed["requests"][0]["agent_id"], ids[0].to_string());
+        assert_eq!(listed["requests"][0]["agent_name"], "alpha");
     }
 }

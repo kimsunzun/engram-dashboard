@@ -513,6 +513,12 @@ impl DaemonClient {
         self.link.unsubscribe(agent_id);
     }
 
+    /// The user's `ui.language` changed (or the app started) — the daemon's own dialogs follow it (ADR-0372). Never blocks; the
+    ///   value is kept and sent on every connection the client opens.
+    pub fn set_ui_language(&self, code: &str) {
+        self.link.set_ui_language(code);
+    }
+
     /// A command without a reply (Resize …); `agent_resize` uses it. Never blocks; with no connection it is dropped (ADR-0195) and the frontend re-issues a lost Resize. Contract: `LinkClient::send_fire_and_forget`.
     pub fn send_fire_and_forget(&self, cmd: AgentCommand) {
         self.link.send_fire_and_forget(cmd);

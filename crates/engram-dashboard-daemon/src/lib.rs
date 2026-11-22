@@ -15,9 +15,16 @@
 //! loading this account's identity and trusted list (disk, DPAPI, the identity lock) never holds up the accept loop — and stops first at
 //! shutdown, within its own deadline. It runs its endpoint only while a PC is listed; a failure to start it leaves the daemon running
 //! without it.
+//!
+//! Trust changes need a human (ADR-0394): the daemon's own `peer.*` table joins the command table behind its one entrance
+//! (`control::commands::call_daemon_command`), which takes a typed caller — a live shell connection is a human, an agent token an agent —
+//! and an agent's trust change becomes a pending request (`link::peer::approvals`). A human answers in the app or in the native dialog
+//! of the shared "ask the user" seam (`ask_user`), whose thread the approvals own; questions the peer state raises (accept a changed
+//! trusted list, adopt an identity) go the same way.
 
 mod account_gate;
 pub mod agent_conn;
+mod ask_user;
 pub mod command_delivery;
 pub mod command_roster;
 pub mod conn_port;
@@ -625,12 +632,29 @@ pub async fn run() -> Result<(), i32> {
     //   the order relative to the fanout set above: the table holds the slot, read at notification time (`control::commands::make_daemon_table`).
     // The lease port is that `multiview` passed to the accept loop below (ADR-0231): `clone()` is a handle on the same shared state. A new
     //   `MultiViewState::new()` is wrong — an empty table would make bus · CLI cancels silently ignore the viewer's input lease.
-    command_table_slot.set(Arc::new(control::commands::make_daemon_table(
-        manager.clone(),
-        roster_broadcast_slot.clone(),
-        Arc::new(multiview.clone()),
-        wiring.usage.clone(),
-    )));
+    // The peer link (8.5) starts after this table, so the `peer.*` table reads it from `peer_slot` at call time; until it lands those
+    //   commands answer that it is not running. Approvals own the "ask the user" seam's dialog thread (no app route until the app has a PC
+    //   list slot).
+    // ADR-0394
+    let peer_slot: Arc<std::sync::OnceLock<link::peer::runtime::PeerLink>> =
+        Arc::new(std::sync::OnceLock::new());
+    let approvals = link::peer::approvals::Approvals::start(
+        peer_slot.clone(),
+        Arc::new(ask_user::OsDialogs),
+        Arc::new(ask_user::NoAppRoute),
+        // ADR-0372: the dialogs speak the `ui.language` the shell last sent (`AgentCommand::SetUiLanguage`).
+        control_registry.clone(),
+        Arc::new(engram_dashboard_base::time::SystemClock),
+    );
+    command_table_slot.set(Arc::new(
+        control::commands::make_daemon_table(
+            manager.clone(),
+            roster_broadcast_slot.clone(),
+            Arc::new(multiview.clone()),
+            wiring.usage.clone(),
+        )
+        .with_peer(link::peer::commands::PeerCommands::new(approvals.clone())),
+    ));
 
     // 6.4) idle gate assembly — turn observation is loaded directly by the core from the output pump, so nothing to wire here.
     let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
@@ -715,12 +739,12 @@ pub async fn run() -> Result<(), i32> {
 
     // 8.5) The peer link (daemon ↔ daemon): this account's identity and trusted list, loaded on the blocking pool; the endpoint comes up only
     //   while a PC is listed and the identity allows it. Started on its own task so a slow load (disk, DPAPI) never holds up the accept loop;
-    //   the started link lands in `peer_slot`. Its failure does not stop the daemon — this PC then has no links to other PCs.
+    //   the started link lands in `peer_slot`. Its failure does not stop the daemon — this PC then has no links to other PCs. The same task
+    //   then keeps the approvals in step with the peer state (the questions it raises, request expiry) until shutdown aborts it.
     // ADR-0389
-    let peer_slot: Arc<std::sync::OnceLock<link::peer::runtime::PeerLink>> =
-        Arc::new(std::sync::OnceLock::new());
     let peer_start = {
         let slot = peer_slot.clone();
+        let approvals = approvals.clone();
         let state_dir = layout.daemon_state_dir();
         tokio::spawn(async move {
             match link::peer::runtime::PeerLink::start(
@@ -730,7 +754,8 @@ pub async fn run() -> Result<(), i32> {
             .await
             {
                 Ok(peer_link) => {
-                    let _ = slot.set(peer_link);
+                    let _ = slot.set(peer_link.clone());
+                    link::peer::approvals::follow(peer_link, approvals).await;
                 }
                 Err(e) => tracing::error!(
                     "the peer link could not start — this PC runs without links to other PCs: {e}"
@@ -772,6 +797,14 @@ pub async fn run() -> Result<(), i32> {
     //   process exit, which the shell's graceful window bounds); a started link stops within its own deadline (`PeerLink::stop`).
     peer_start.abort();
     let _ = peer_start.await;
+    // No new answer or request gets through from here on. `Approvals::stop` waits at most 3 s for an answer being applied, then at most
+    //   3 s for the dialog thread to end (`AskUser::stop`) — about 6 s in the worst case; the wait runs off the async workers.
+    {
+        let approvals = approvals.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || approvals.stop()).await {
+            tracing::warn!("stopping the approval dialogs failed: {e}");
+        }
+    }
     if let Some(peer_link) = peer_slot.get() {
         peer_link.stop().await;
     }

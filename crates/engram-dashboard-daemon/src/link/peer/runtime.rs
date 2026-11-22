@@ -51,7 +51,7 @@ use super::handshake::{HandshakeNotes, PeerHandshake, Role};
 use super::id::PeerId;
 use super::identity::Secret;
 use super::store::{PeerEdit, PeerError, PeerStatus, PeerStore, Regenerated, Removal};
-use super::trusted::{Helper, ListRefusal, NetworkSettings, Permission, TrustedPeer};
+use super::trusted::{Helper, ListRefusal, NetworkPatch, NetworkSettings, Permission, TrustedPeer};
 use super::wire::{Instance, PeerMsg, PeerWire, ALPN, MAX_FRAME_BYTES, PEER_WIRE_VERSION};
 
 /// A bind that failed is tried again after this.
@@ -270,6 +270,9 @@ struct Core {
     changes: watch::Sender<u64>,
     /// The actor task — aborted when a stop runs past [`STOP_DEADLINE`].
     actor: Mutex<Option<JoinHandle<()>>>,
+    /// [`PeerLink::stop`] began — trust operations are refused from then on, so nothing (a late dialog answer, a command still on the
+    ///   blocking pool) changes the files of a daemon that is shutting down.
+    stopped: std::sync::atomic::AtomicBool,
     /// Tests: endpoints brought up so far.
     #[cfg(test)]
     bring_ups: std::sync::atomic::AtomicU64,
@@ -395,6 +398,7 @@ impl PeerLink {
             tx,
             changes,
             actor: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             bring_ups: std::sync::atomic::AtomicU64::new(0),
         });
@@ -407,14 +411,18 @@ impl PeerLink {
             quick_binds: 0,
             retry: None,
         };
+        log_start(&core.published());
         *lock(&core.actor) = Some(tokio::spawn(actor.run()));
         Ok(Self { core })
     }
 
     /// Closes every link (letting each send what it holds, within a short deadline) and the endpoint, and ends the runtime — within
     ///   [`STOP_DEADLINE`]: past it the runtime is cut off (the endpoint then closes without telling the other PCs; they notice at their
-    ///   idle-out). Later trust operations still change the files but bring nothing up.
+    ///   idle-out). Trust operations are refused from the moment it is called (a store operation already running finishes).
     pub(crate) async fn stop(&self) {
+        self.core
+            .stopped
+            .store(true, std::sync::atomic::Ordering::Release);
         let (done, wait) = oneshot::channel();
         if self.core.tx.send(Msg::Stop(done)).is_err() {
             return;
@@ -434,6 +442,7 @@ impl PeerLink {
             }
             self.core.set_endpoint(EndpointView::Off);
         }
+        tracing::info!("peer link stopped");
     }
 
     /// What `peer.list` shows.
@@ -499,6 +508,7 @@ impl PeerLink {
     /// Removes a PC: revoked and its links closed first, then the list is saved — a refused save is in [`Removal::saved`] and the
     ///   revocation stays for this run.
     pub(crate) fn remove(&self, id: &PeerId) -> Result<Removal, PeerError> {
+        self.refuse_if_stopped()?;
         let mut store = lock(&self.core.store);
         self.core.revoke(id);
         let removed = store.remove(id);
@@ -509,6 +519,12 @@ impl PeerLink {
     /// Replaces the network settings; a running endpoint restarts with them.
     pub(crate) fn set_network(&self, network: NetworkSettings) -> Result<(), PeerError> {
         self.change(|store| store.set_network(network))
+    }
+
+    /// Applies a network patch to the settings of this moment under the store lock; a running endpoint restarts with the result.
+    ///   Returns the settings it found.
+    pub(crate) fn patch_network(&self, patch: &NetworkPatch) -> Result<NetworkSettings, PeerError> {
+        self.change(|store| store.patch_network(patch))
     }
 
     pub(crate) fn regenerate(&self) -> Result<Regenerated, PeerError> {
@@ -527,12 +543,43 @@ impl PeerLink {
         self.change(PeerStore::start_fresh)
     }
 
-    fn change<T>(&self, op: impl FnOnce(&mut PeerStore) -> T) -> T {
+    fn change<T>(
+        &self,
+        op: impl FnOnce(&mut PeerStore) -> Result<T, PeerError>,
+    ) -> Result<T, PeerError> {
+        self.refuse_if_stopped()?;
         let mut store = lock(&self.core.store);
         let out = op(&mut store);
         self.core.publish(&store);
         out
     }
+
+    fn refuse_if_stopped(&self) -> Result<(), PeerError> {
+        if self.core.stopped.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(PeerError::Blocked(
+                "the peer link has stopped (the daemon is shutting down) — nothing was changed"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One line at start: whether the endpoint comes up, and if not, why — an endpoint that stays off logs nothing else.
+fn log_start(published: &Published) {
+    let pcs = published.peers.len();
+    if published.want().is_some() {
+        tracing::info!(pcs, "peer link started — endpoint starting");
+        return;
+    }
+    let why = if published.status != PeerStatus::Ready {
+        published.status.to_string()
+    } else if pcs == 0 {
+        "no trusted PCs".to_string()
+    } else {
+        "no identity key".to_string()
+    };
+    tracing::info!(pcs, "peer link started — endpoint off: {why}");
 }
 
 /// Clears the key and list temp files a crashed write left and logs what happened.

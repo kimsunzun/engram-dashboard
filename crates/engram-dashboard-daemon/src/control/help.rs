@@ -43,12 +43,14 @@ const ENV_HELP_FILE: &str = "ENGRAM_HELP_FILE";
 /// A markdown heading, not an HTML comment, on purpose: viewers hide the comment form entirely, so the editor saw no section boundary (7KB read as undivided prose). The header title is level 1 (`# `) and does not match this level-2 pattern.
 const SECTION_OPEN: &str = "## ";
 
-/// The section id of the top-level screen; the other four are the family words as is ([`HelpTopic::section_id`]).
+/// The section id of the top-level screen; the others are the family words as is ([`HelpTopic::section_id`]).
 const SECTION_ROOT: &str = "root";
 
 /// The words of the two screens with no family constant (`CLI_GROUP_*`): window and settings are called only by full name (`window.list` · `settings.get`) with no `<family> <verb>` entrance, so family constants would create families the CLI parser does not accept.
 const HELP_TOPIC_WINDOW: &str = "window";
 const HELP_TOPIC_SETTINGS: &str = "settings";
+/// The peer screen (`peer.*` — the links to this user's other PCs, ADR-0394): called by full name only, like window and settings.
+const HELP_TOPIC_PEER: &str = "peer";
 
 /// Old screen word → current screen. Accepted only as a request word, not carried in the bounce wording.
 ///
@@ -64,6 +66,7 @@ enum HelpTopic {
     Agent,
     Window,
     Settings,
+    Peer,
 }
 
 impl HelpTopic {
@@ -74,6 +77,7 @@ impl HelpTopic {
         HelpTopic::Agent,
         HelpTopic::Window,
         HelpTopic::Settings,
+        HelpTopic::Peer,
     ];
 
     fn section_id(self) -> &'static str {
@@ -83,6 +87,7 @@ impl HelpTopic {
             HelpTopic::Agent => CLI_GROUP_AGENT,
             HelpTopic::Window => HELP_TOPIC_WINDOW,
             HelpTopic::Settings => HELP_TOPIC_SETTINGS,
+            HelpTopic::Peer => HELP_TOPIC_PEER,
         }
     }
 
@@ -707,7 +712,7 @@ mod tests {
         }
     }
 
-    /// The four family words each reach their own screen — a word wired to another screen still shows a success envelope, so it checks they differ from each other and the head is its own family.
+    /// The five family words each reach their own screen — a word wired to another screen still shows a success envelope, so it checks they differ from each other and the head is its own family.
     #[test]
     fn each_group_word_renders_its_own_screen() {
         let _env = env_guard();
@@ -724,7 +729,7 @@ mod tests {
             );
             seen.push((word, screen));
         }
-        assert_eq!(seen.len(), 4, "the family words are four: {seen:?}");
+        assert_eq!(seen.len(), 5, "the family words are five: {seen:?}");
         let root = screen_of(&source, None);
         for (word, screen) in &seen {
             assert_ne!(*screen, root, "{word} is the same as the top-level screen");

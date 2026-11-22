@@ -172,5 +172,12 @@ impl SettingsEvents for TauriSettingsEvents {
             &TauriEvents { app: &self.app },
             &TauriTrayText(&self.app),
         );
+        // ADR-0372: the daemon's dialogs follow too. No client (its runtime failed) = no daemon to tell.
+        if let Some(client) = self
+            .app
+            .try_state::<Arc<crate::daemon_client::DaemonClient>>()
+        {
+            client.set_ui_language(crate::ui_text::Lang::from_settings(&settings).code());
+        }
     }
 }

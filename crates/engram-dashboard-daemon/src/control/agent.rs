@@ -22,9 +22,11 @@
 use engram_dashboard_agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
 use engram_dashboard_command::{CommandError, ErrorCode};
 
+use crate::command_delivery::Caller;
 use crate::connection_core::INPUT_LOCKED_REFUSAL;
 
 use super::ingress::ControlQueryResult;
+use super::registry::BoundIdentity;
 
 /// The outlet (port) that tells every attached client the roster changed.
 ///
@@ -123,14 +125,25 @@ impl<'de> serde::Deserialize<'de> for CommandArgs {
 /// Blocking (caller contract): `agent.*` handlers poll ~3 s for an early exit in resume mode, and rename/hierarchy moves save to disk under the profile lock (agent `make_table` doc);
 /// call on the blocking pool (the adapter `mcp_server::control_agent_handler` uses `spawn_blocking`).
 /// Roster notification is not done here — the port plugged in at table assembly calls it per verb ([`RosterBroadcast`]).
-pub fn handle_agent(table: &super::commands::DaemonTable, req: AgentRequest) -> ControlQueryResult {
+/// `caller` = the identity of the token that called (the route's middleware derives it) — the typed caller of [`super::commands::call_daemon_command`].
+pub fn handle_agent(
+    table: &super::commands::DaemonTable,
+    req: AgentRequest,
+    caller: BoundIdentity,
+) -> ControlQueryResult {
     // The CLI surface and the catalog name differ by one dot↔space (TRD §2-1), so no hand-kept per-verb table.
     let name = format!("{CLI_GROUP_AGENT}.{}", req.verb);
     let mut args = req.args.into_value();
 
     // Checking and execution go through the neighboring `commands` common entrance: calling the table directly would give a different check than bus delivery, keeping ADR-0157 on only one entrance.
-    // No connection, so the caller is `None` = not an input lease holder (ADR-0231).
-    match super::commands::call_daemon_command(table, &name, &mut args, "cli", None) {
+    // An agent's token, no connection — not an input lease holder (ADR-0231), never the human path (ADR-0394).
+    match super::commands::call_daemon_command(
+        table,
+        &name,
+        &mut args,
+        "cli",
+        Caller::Agent(caller),
+    ) {
         None => unknown_verb(&req.verb),
         Some(Ok(payload)) => ControlQueryResult::Ok(payload),
         Some(Err(e)) => refused(e),

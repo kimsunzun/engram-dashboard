@@ -394,6 +394,13 @@ pub enum AgentCommand {
         vendor: AgentBackendKind,
         request_id: RequestId,
     },
+
+    // ── UI language (ADR-0372 · ADR-0394) ──────────────────────────────────────────────────────
+    /// The user's `ui.language` (a shell setting — `"en"` | `"ko"`), so the daemon's own user-facing text (its native approval
+    /// dialogs) follows it. The shell sends it on every connection it opens and again when the setting changes; the last one wins.
+    /// No answer (no `request_id`). A word the daemon does not know means English — the field is a plain string so a later language
+    /// does not make an older daemon refuse the frame. ★The daemon does not read the shell's settings file★ — this is the only way it learns the language.
+    SetUiLanguage { language: String },
 }
 
 /// One row of the daemon registry's **client projection** (an element of [`AgentEvent::CommandList`]).
@@ -2416,6 +2423,19 @@ mod tests {
             };
             assert_eq!(carried.get(), reply, "the raw field crosses byte for byte");
         }
+    }
+
+    // ── UI language ──
+
+    #[test]
+    fn set_ui_language_json_golden_and_roundtrip() {
+        let cmd = AgentCommand::SetUiLanguage {
+            language: "ko".to_owned(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"SetUiLanguage":{"language":"ko"}}"#);
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, AgentCommand::SetUiLanguage { language } if language == "ko"));
     }
 
     // ── Usage limits ──

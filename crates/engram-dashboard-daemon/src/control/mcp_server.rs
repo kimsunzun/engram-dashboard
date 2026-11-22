@@ -884,7 +884,7 @@ async fn control_messages_handler(
 
 /// `/control/agent` route State — only one command-table slot (ADR-0155).
 ///
-/// It does not hold the manager or fan-out slots: the table holds both (`commands::make_daemon_table`); holding them again would create a second path to the same object and break per-verb notification counts (wake-up 0 · change 1) if notifications go out from two places. No registry or messaging either — control verbs use identity only for authorization (no sender derivation).
+/// It does not hold the manager or fan-out slots: the table holds both (`commands::make_daemon_table`); holding them again would create a second path to the same object and break per-verb notification counts (wake-up 0 · change 1) if notifications go out from two places. No registry or messaging either — control verbs use the identity only as the typed caller (an agent, never the human path — ADR-0394), not as a sender.
 #[derive(Clone)]
 struct ControlAgentState {
     commands: Arc<CommandTableSlot>,
@@ -892,16 +892,16 @@ struct ControlAgentState {
 
 /// Always 200 + JSON body (success and bounce alike) — the same contract as `/control/messages`, so the CLI's query decider applies as is.
 ///
-/// Identity is used only for authorization ("me" does not appear in control verbs), but its existence is required — a call without a token must not reach here (defensive 401).
+/// The identity is the typed caller of the table ("me" does not appear in control verbs; it makes the call an agent's — ADR-0394), and its existence is required — a call without a token must not reach here (defensive 401).
 /// Blocking boundary: `handle_agent` is blocking (resume polling ~3 s + profile disk save); calling it from an async handler would tie up a tokio worker and block other requests on that thread (same reason send moved the child stdin write to the blocking pool).
 async fn control_agent_handler(
     axum::extract::State(state): axum::extract::State<ControlAgentState>,
     identity: Option<axum::Extension<BoundIdentity>>,
     body: axum::body::Bytes,
 ) -> Response {
-    if identity.is_none() {
+    let Some(axum::Extension(caller)) = identity else {
         return unauthorized();
-    }
+    };
     // Why not the `Json<…>` extractor: on deserialization failure it returns an empty 400 (mistyped values, duplicate keys, non-object bodies, broken JSON), and the caller (an LLM) retries without knowing what to fix. Deserializing directly lets serde's reason ride in the envelope; the route returns an empty body only for auth failure and size overrun.
     let req: super::agent::AgentRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -922,7 +922,7 @@ async fn control_agent_handler(
     };
     let table = table.clone();
     let Ok(result) =
-        tokio::task::spawn_blocking(move || super::agent::handle_agent(&table, req)).await
+        tokio::task::spawn_blocking(move || super::agent::handle_agent(&table, req, caller)).await
     else {
         // JoinError = blocking task panic: no answer at all, outside "always 200 + JSON" → 500 so the CLI does not misread it as success (as the send route). That this holds only in hook-less test builds is canonical in the `internal_error` comment.
         tracing::error!(entrance = "cli", "control verb task failed (panic)");
@@ -1024,7 +1024,7 @@ async fn control_call_handler(
     let locals = Arc::clone(bus.locals());
     let registered = bus.roster().clone();
     let Ok(outcome) = tokio::task::spawn_blocking(move || {
-        super::catalog::handle_call(locals.as_ref(), &registered, req)
+        super::catalog::handle_call(locals.as_ref(), &registered, req, caller)
     })
     .await
     else {
@@ -1057,7 +1057,7 @@ async fn control_call_handler(
                 %request_id,
                 "an agent called someone else's command — this daemon accepted it addressed to that owner"
             );
-            let reply = bus.invoke(request_id, name, args).await;
+            let reply = bus.invoke(request_id, name, args, caller).await;
             super::catalog::relayed(reply)
         }
     };

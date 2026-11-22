@@ -5,21 +5,22 @@ What each module does, who it talks to and over what, and the runtime invariants
 ## Connection diagram
 
 ```text
-[앱 프로세스 engram-dashboard.exe]
-  프론트(React, 창마다 한 벌)
+[app process engram-dashboard.exe]
+  frontend (React, one per window)
     │  Tauri invoke · event · Channel
     ▼
-  셸(src-tauri)
-    │  WS 127.0.0.1 — 연결 1개, daemon.json 으로 찾는다
-    │  (데몬 띄우기 = WMI 로 Job 밖에서 · 끄기 = StopDaemon 프레임)
+  shell (src-tauri)
+    │  WS 127.0.0.1 — one connection, found through daemon.json
+    │  (start the daemon = through WMI, outside the Job · stop = a StopDaemon frame)
     ▼
-[데몬 프로세스 engram-dashboard-daemon.exe]
-  link(WS 행 — transport 위) · agent(런타임) · 명령 버스 · messaging(우편) · 제어 평면(HTTP)
-    │  PTY(터미널 모드) · stdio(JSON 모드)
-    ▼
-[에이전트 N — claude · codex · 셸]
-    │  engram.exe(CLI) · MCP 툴 → HTTP /control/* · /mcp (Bearer 토큰)
-    └──▶ 데몬 제어 평면
+[daemon process engram-dashboard-daemon.exe]
+  link (WS row — on transport) · agent (runtime) · command bus (+ peer.* and their approvals)
+  · messaging (mail) · control plane (HTTP) · ask_user (app, else the OS approval dialog)
+    │  PTY (terminal mode) · stdio (JSON mode)            ║  peer link (link/peer — transport iroh,
+    ▼                                                     ║  UDP / QUIC, node keys, trusted PCs only)
+[agents N — claude · codex · shell]                       ║
+    │  engram.exe (CLI) · MCP tools → HTTP /control/* · /mcp (Bearer token)
+    └──▶ daemon control plane                             ╚══▶ [the same user's daemons on other PCs]
 ```
 
 Crate dependencies (arrow = depends on, the production graph):
@@ -38,18 +39,18 @@ base · platform · command · messaging · transport · protocol ─▶ 워크�
 
 - **Frontend (`src/`)** — only renders the screen. Communication with agents and the daemon goes through the shell over a single `agentClient` (`ProtocolClient` + `TauriTransport`) — commands = invoke (`forward_daemon_command` and others), output = Tauri Channel, broadcast = Tauri event. For state the shell owns (layout · window · settings · restore), the frontend invokes shell commands directly. The control surface = the `window.__engramCmd` registry (`src/commands/`), and a bus command comes down from the shell to the webview and rides the same `registry.run`.
 - **Shell (`src-tauri`)** — the daemon's resident client. It holds the window · tray · layout (the authority for windows · tabs · slots) · shell settings · screen state persistence · finding/launching/shutting down the daemon (`discovery`). It does not own agents. It talks to the daemon over one WS connection (`daemon_client` — one however many windows there are) and relays output frames to a Channel per window (`output_router`). It is registered on the daemon command bus as the owner of the layout commands (`window/tab/slot`). The only window is main, and pop-outs are created at run time.
-- **daemon** — the agent host that owns `AgentManager`, and the assembly room. It accepts shell connections on the transport (`link` — the WS accept loop and the connection port `conn_port` its upper layers see), runs the command bus registry and delivery (`command_roster` · `command_delivery`), and plugs the real adapters into the messaging kernel (`messaging_host`). The control plane (`control`) = one HTTP server carrying MCP (`/mcp`) and the CLI route (`/control/*`) — an agent's identity comes only from the Bearer token. Data folder layout (`data_dir`) · single-instance guard (`instance`) · `daemon.json` (`portfile` — no token; the shell token is an owner-only per-account file, and both listeners refuse a client of another OS account — ADR-0395) · usage query (`usage_service`) are here too.
+- **daemon** — the agent host that owns `AgentManager`, and the assembly room. It accepts shell connections on the transport (`link` — the WS accept loop and the connection port `conn_port` its upper layers see), runs the command bus registry and delivery (`command_roster` · `command_delivery`), and plugs the real adapters into the messaging kernel (`messaging_host`). The control plane (`control`) = one HTTP server carrying MCP (`/mcp`) and the CLI route (`/control/*`) — an agent's identity comes only from the Bearer token. Its own command table (`control::commands::call_daemon_command` — the one entrance) joins `agent.*`·`usage.*` with the daemon-declared `peer.*`; every call carries a typed caller (`command_delivery::Caller` — a live shell connection = a human, an agent token = an agent), and an agent's trust change becomes a pending request a human approves (ADR-0394) through the shared "ask the user" seam (`ask_user` — the app while it shows the PC list slot, else the platform's native approval dialog, in the user's `ui.language`, which the shell sends on every connection and change — `AgentCommand::SetUiLanguage`). Data folder layout (`data_dir`) · single-instance guard (`instance`) · `daemon.json` (`portfile` — no token; the shell token is an owner-only per-account file, and both listeners refuse a client of another OS account — ADR-0395) · usage query (`usage_service`) are here too.
   - Shell ↔ daemon link (daemon side) = `docs/reference/structure/daemon-link.md`.
   - Daemon ↔ daemon peer link (identity, trusted list, PeerWire, the links to this user's daemons on other PCs over transport `iroh` — `link/peer/`, started and stopped by `lib.rs` `run`) = `docs/reference/structure/peer-link.md`.
 - **agent** — the agent runtime (Tauri import 0). Session lifetime · output pump · `transport` (PTY · stdio) · `backend` (claude · codex · shell · a gemini stub — backend-specific knowledge lives only here) · turn observation · waiting input · profile persistence · `agent.*` command declarations. Output and state go out only through the `OutputSink`/`StatusSink` traits.
 - **cli** — `engram.exe`. A spawned agent attaches to the daemon control route over HTTP with `ENGRAM_TOKEN` · `ENGRAM_CONTROL_URL`. It only authenticates and delivers, and the daemon also produces the help screen. bin name = agent `CLI_EXE_NAME`.
 - **protocol** — the shell ↔ daemon wire contract (messages · output binary frame codec · ts-rs bindings). No domain logic.
-- **command** — command bus tooling (envelope · error · declaration macro · table · routing). There are zero commands here, and a command is declared next to its producer (`agent.*` = agent, `mail.*` = daemon, `window/tab/slot` = shell, webview commands = frontend).
+- **command** — command bus tooling (envelope · error · declaration macro · table · routing). There are zero commands here, and a command is declared next to its producer (`agent.*` = agent, `peer.*` = daemon `link/peer/commands.rs`, `window/tab/slot` = shell, webview commands = frontend).
   - Command bus structure = `docs/reference/structure/command-bus.md`.
 - **messaging** — the mail kernel between agents (delivery · parking · bounced · ledger), including mail to and from agents on the user's other PCs: it resolves addresses across PCs from the directory copies in its one snapshot (`name@pc`, bare names, cross-PC ambiguity), records remote rows and tracks their verdicts, answers and overdue reports in a bounded store, and resolves inbound mail on local agents only (no forwarding). It owns no link, wire format or directory sync — a PC is an opaque `NodeRef`. Zero workspace dependencies; the only seam is the port traits the kernel owns (`RemoteDeliveryPort` for other PCs), and the daemon holds the real adapters.
   - Messaging kernel and daemon host = `docs/reference/structure/messaging.md`.
 - **base** — the bottom foundation leaf crate. General-purpose helpers with zero domain knowledge (data file read decision · atomic write · logging · clock seam · panic containment and so on). The canonical entry condition = the header of its `lib.rs`.
-- **platform** — the OS layer leaf crate. Operational code that varies by OS (process · Job Object · launching · window · input · file lock · owner-only files and whether a folder's volume stores file ACLs) is placed only here.
+- **platform** — the OS layer leaf crate. Operational code that varies by OS (process · Job Object · launching · window · input · file lock · owner-only files and whether a folder's volume stores file ACLs · sealing a secret for the OS account · the native approval dialog the daemon's ask-the-user seam shows) is placed only here.
 - **transport** — reusable transport lib (ADR-0177). The shell depends on it (`ws` feature) for its daemon link `daemon_client/link/` (stage 3 3-2 · ADR-0310); the shell's daemon connection runs on it in every build (driver = `daemon_client/connection.rs`). The daemon's accepting side runs on it too (`daemon/src/link/` — stage 3 3-3), and so does the daemon's peer link to its daemons on other PCs (`iroh` feature — `daemon/src/link/peer/`, ADR-0388).
   - Transport crate structure = `docs/reference/structure/transport.md`.
 

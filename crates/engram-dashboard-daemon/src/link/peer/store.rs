@@ -41,7 +41,7 @@ use super::identity::{
 use super::mac;
 use super::os::{LockAttempt, OsPeer, PeerOs};
 use super::trusted::{
-    body_of, check_entries, file_text, read_list, write_list, ListFile, ListRefusal,
+    body_of, check_entries, file_text, read_list, write_list, ListFile, ListRefusal, NetworkPatch,
     NetworkSettings, TrustedList, TrustedPeer, WriteError, SPEC,
 };
 use crate::file_hooks::OS_HOOKS;
@@ -137,7 +137,7 @@ impl fmt::Display for PeerError {
 impl std::error::Error for PeerError {}
 
 /// A change to one listed PC — `None` leaves that field as it is.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PeerEdit {
     pub(crate) name: Option<String>,
     /// `Some(None)` clears the direct address.
@@ -440,6 +440,23 @@ impl PeerStore {
             list.network = network;
             Ok(())
         })
+    }
+
+    /// Applies `patch` to the settings of this moment — merged, checked and saved in this one call (the caller holds the store lock), so
+    ///   a concurrent change to a field the patch does not name is kept. Returns the settings it found. Creates the key on first need.
+    pub(crate) fn patch_network(
+        &mut self,
+        patch: &NetworkPatch,
+    ) -> Result<NetworkSettings, PeerError> {
+        self.ensure_identity()?;
+        self.require_ready()?;
+        let mut before = NetworkSettings::default();
+        self.change(|list| {
+            before = list.network.clone();
+            list.network = patch.applied_to(&list.network);
+            Ok(())
+        })?;
+        Ok(before)
     }
 
     /// Makes a new key on a human's OK: the current key file is kept as a timestamped backup, the ID changes, and the trusted list is

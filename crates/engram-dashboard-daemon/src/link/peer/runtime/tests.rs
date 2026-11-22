@@ -262,6 +262,43 @@ async fn the_endpoint_runs_only_while_a_pc_is_listed() {
     a.stop().await;
 }
 
+/// A fresh folder starts without an identity; the first need makes one (the `peer.*` commands call it on their first use).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_pc_has_no_identity_until_it_is_first_needed() {
+    let dir = TempDir::new();
+    let link = start(dir.path()).await;
+    assert_eq!(link.snapshot().status, PeerStatus::NoIdentityYet);
+    assert_eq!(link.snapshot().id, None);
+    let id = link.ensure_identity().unwrap();
+    assert_eq!(link.snapshot().id, Some(id));
+    assert_eq!(link.snapshot().status, PeerStatus::Ready);
+    link.stop().await;
+}
+
+/// After `stop` every trust operation is refused and leaves the files alone — a late dialog answer cannot change a stopping daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trust_operations_are_refused_after_stop() {
+    let dir = TempDir::new();
+    let (a, _, _) = pc(&dir).await;
+    a.stop().await;
+    let list_before = std::fs::read(dir.list_file()).unwrap();
+    assert!(matches!(a.add(bystander(7)), Err(PeerError::Blocked(_))));
+    assert!(matches!(
+        a.remove(&PeerId::from_bytes([7; 32])),
+        Err(PeerError::Blocked(_))
+    ));
+    assert!(matches!(a.regenerate(), Err(PeerError::Blocked(_))));
+    assert!(matches!(
+        a.set_network(quiet(free_port())),
+        Err(PeerError::Blocked(_))
+    ));
+    assert_eq!(
+        std::fs::read(dir.list_file()).unwrap(),
+        list_before,
+        "the file is untouched"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_pcs_exchange_hellos_and_link_once() {
     let (da, db) = (TempDir::new(), TempDir::new());

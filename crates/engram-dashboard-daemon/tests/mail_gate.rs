@@ -82,7 +82,7 @@ impl Drop for Fixture {
     }
 }
 
-/// The help body the fixture injects — all five sections, so the source accepts it (the header before the first section is discarded).
+/// The help body the fixture injects — every required section, so the source accepts it (the header before the first section is discarded).
 ///
 /// ★The repository body file is not used★: expected values would change with every screen-text edit. With a known body, 「whichever credential, it gets this screen verbatim」 can be asserted directly.
 const KNOWN_HELP: &str = "# test header — discarded\n\
@@ -90,7 +90,8 @@ const KNOWN_HELP: &str = "# test header — discarded\n\
 ## mail\n{tool} mail screen\n\
 ## agent\n{tool} agent screen\n\
 ## window\n{tool} window screen\n\
-## settings\n{tool} settings screen\n";
+## settings\n{tool} settings screen\n\
+## peer\n{tool} peer screen\n";
 
 /// A folder with [`KNOWN_HELP`] in the release shape (`<folder>\prompts\engram-help.md`).
 fn known_help_dir(tag: &str) -> std::path::PathBuf {

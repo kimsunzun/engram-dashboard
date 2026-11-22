@@ -244,6 +244,8 @@ impl UsageNudger {
 }
 
 enum DriverCmd {
+    /// The user's `ui.language` — kept and written on the open connection and every later one.
+    UiLanguage(String),
     IsLive {
         reply: oneshot::Sender<bool>,
     },
@@ -392,6 +394,7 @@ impl LinkClient {
             usage,
             gate,
             opened_tx,
+            ui_language: None,
         };
         (client, driver, cmd_rx, routable_rx)
     }
@@ -628,6 +631,12 @@ impl LinkClient {
         let _ = self.cmd_tx.send(DriverCmd::UsageNudge);
     }
 
+    /// The user's `ui.language` (ADR-0372): the actor keeps the last value, writes it on the open connection now and on every
+    ///   connection it opens. Never blocks.
+    pub(crate) fn set_ui_language(&self, code: &str) {
+        let _ = self.cmd_tx.send(DriverCmd::UiLanguage(code.to_owned()));
+    }
+
     pub(crate) fn usage_nudger(&self) -> UsageNudger {
         UsageNudger(self.cmd_tx.downgrade())
     }
@@ -766,6 +775,8 @@ struct Driver {
     /// Shared with the callers (module doc): its opened connection is set at the end of a `LinkUp` step and cleared by that connection's `LinkDown`, its drop and a close.
     gate: Arc<Mutex<Gate>>,
     opened_tx: watch::Sender<()>,
+    /// The user's `ui.language` as last set — sent on every connection opened, so the daemon's own dialogs follow it (ADR-0372).
+    ui_language: Option<String>,
 }
 
 impl Driver {
@@ -812,6 +823,7 @@ impl Driver {
                         let _ = reply.send(self.request_replay(agent_id));
                     }
                     Some(DriverCmd::UsageNudge) => self.nudge_usage(),
+                    Some(DriverCmd::UiLanguage(code)) => self.set_ui_language(code),
                     Some(DriverCmd::HoldForBootStart) => self.hold_for_boot_start(),
                     Some(DriverCmd::BoundBootStart { search }) => self.bound_boot_start(search),
                     Some(DriverCmd::EndBootStartHold { why }) => self.end_boot_start_hold(why),
@@ -1392,6 +1404,14 @@ impl Driver {
         }
     }
 
+    /// Keeps the user's language and writes it on the open connection (a later connection gets it when it opens).
+    fn set_ui_language(&mut self, code: String) {
+        if let Some((peer, generation)) = self.open_peer() {
+            write_ui_language(&peer, generation, &code, "change");
+        }
+        self.ui_language = Some(code);
+    }
+
     /// No connection is opened any more — callers wait or fail; pending fire-and-forgets stay for a later connection.
     fn close_gate(&self) {
         lock_gate(&self.gate).opened = None;
@@ -1414,6 +1434,9 @@ impl Driver {
             return;
         };
         self.register_commands(&peer, generation);
+        if let Some(code) = &self.ui_language {
+            write_ui_language(&peer, generation, code, "open");
+        }
         let (mut failed, mut dropped) = (Vec::new(), 0usize);
         // ★The drain and the publish stay one critical section, before the signal★ — a caller's round trip writes
         // only after it saw `opened` under the gate, so its own pending fire-and-forgets are already on the peer
@@ -1629,6 +1652,28 @@ enum FireOutcome {
     Pending,
     Closed,
     Full,
+}
+
+/// Queues the user's language on connection `generation` — no answer is awaited; a failure is only logged (the next connection sends it
+///   again).
+fn write_ui_language(
+    peer: &Peer<ShellWire>,
+    generation: Generation,
+    code: &str,
+    why: &'static str,
+) {
+    let cmd = AgentCommand::SetUiLanguage {
+        language: code.to_owned(),
+    };
+    if let Err(e) = peer.notify_in(generation, cmd) {
+        tracing::debug!(
+            peer = %peer.id(),
+            generation = generation.0,
+            why,
+            error = %e,
+            "the UI language was not queued"
+        );
+    }
 }
 
 fn usage_subscribe(vendors: BTreeSet<AgentBackendKind>) -> AgentCommand {

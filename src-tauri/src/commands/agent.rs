@@ -169,6 +169,8 @@ pub(crate) async fn forward_to_daemon(
         engram_dashboard_protocol::AgentCommand::Subscribe { .. }
             | engram_dashboard_protocol::AgentCommand::Unsubscribe { .. }
             | engram_dashboard_protocol::AgentCommand::UsageSubscribe { .. }
+            // The UI language is the shell's setting, sent by the shell itself (ADR-0372).
+            | engram_dashboard_protocol::AgentCommand::SetUiLanguage { .. }
     ) {
         tracing::debug!(
             cmd = ?agent_cmd,

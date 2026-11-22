@@ -241,6 +241,9 @@ pub fn run() {
                             "LayoutState not registered — could not plug in the layout command table (commands the daemon delivers will fail)"
                         ),
                     }
+                    // ADR-0372: the daemon's own dialogs speak the user's language — sent on every connection, again on each change
+                    //   (`ui_language_changed`).
+                    client.set_ui_language(crate::ui_text::Lang::from_settings(&settings).code());
                     app.manage(client);
                 }
                 Err(e) => {

@@ -225,6 +225,7 @@ pub(crate) fn command_request_id(
         | AgentCommand::Subscribe { .. }
         | AgentCommand::Unsubscribe { .. }
         | AgentCommand::UsageSubscribe { .. }
+        | AgentCommand::SetUiLanguage { .. }
         // The sender's reply: the key inside belongs to a request this daemon issued, so the sender has no wait slot.
         | AgentCommand::CommandOutcome { .. } => None,
     }
@@ -295,7 +296,9 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         // ADR-0231: a cancel belongs to ① — overtaking an earlier `WriteStdin` of the same connection, the roster would not yet know that text.
         | AgentCommand::CancelQueuedInput { .. }
         // A usage subscription is a full replacement: of two in a row the last must win. No await, so it does not hold the lane.
-        | AgentCommand::UsageSubscribe { .. } => DispatchOrder::InOrder,
+        | AgentCommand::UsageSubscribe { .. }
+        // The last language sent wins — in the lane so two in a row keep their order. No await.
+        | AgentCommand::SetUiLanguage { .. } => DispatchOrder::InOrder,
     }
 }
 
@@ -2194,6 +2197,11 @@ impl ConnectionCore {
             AgentCommand::UsageSubscribe { vendors } => {
                 let vendors = vendors.into_iter().filter_map(usage_vendor_key).collect();
                 self.usage.replace_subscription(conn_id, vendors);
+            }
+
+            // ADR-0372: the language of the daemon's own dialogs. No answer — the shell does not wait on it.
+            AgentCommand::SetUiLanguage { language } => {
+                self.control_registry.set_ui_language(&language);
             }
 
             // ★No entry is an `Error`, not an `Ack`★: a quiet `Ack` would be read by the shell as "looked up" and it would wait forever for a value.
@@ -5372,6 +5380,27 @@ mod tests {
             first.owner_token(),
             "the connection attached first remains the owner"
         );
+    }
+
+    // ── ADR-0372: SetUiLanguage ──────────────────────────────────────────────────
+    /// The shell's language lands where the dialogs read it; nothing is answered (the shell does not wait on it).
+    #[tokio::test]
+    async fn set_ui_language_records_the_language_without_an_answer() {
+        let (core, control_registry) = test_core_with_control_registry();
+        assert_eq!(control_registry.ui_language(), crate::ask_user::Lang::En);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        core.dispatch(
+            AgentCommand::SetUiLanguage {
+                language: "ko".to_string(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        assert!(mock.events().is_empty(), "no answer: {:?}", mock.events());
+        assert_eq!(control_registry.ui_language(), crate::ask_user::Lang::Ko);
     }
 
     // ── ADR-0096: SetEnvelopeFormat ──────────────────────────────────────────────
