@@ -1,53 +1,56 @@
-# Handoff: multi-daemon (S37) — U2 pieces B (other accounts, FAT refusal) and C1 (peer identity + trusted list storage) committed; next = C2 (PeerWire + peer link over iroh)
+# Handoff: S37 — U2 (C2, C3) and U3a committed + pushed; U3b and U4 in fix round 3 (uncommitted); two user decisions pending
 
 ## Know first
-- Mode: autonomous. The user is a game programmer; big picture first, short, plain words.
-- **Never use coined labels in user-facing text** — no "piece C1", "trusted list", "U2", "T49", work numbers. Use real file / command names or describe what happens. The user was angry about this repeatedly (2026-11-21, recorded in `~/.claude/references/global-feedback.md`). Before asking a decision, check every noun is a word the user used, a real file/command name, or a general term.
-- Do not stop for minor races / display-only issues; decide and report (user 2026-11-21 「멈출정도는 아니지 않나?」). Small scope / order choices are Claude's.
-- Agent cap: at most 5 subagents running at the same time (global-rules, changed 2026-11-21).
-- Untracked `.claude/explain/` is old research HTML — leave it. `.claude/review-tmp/` (git-excluded) holds this session's briefs, diffs and TRD extracts (`trd-U2C-extract.md` is reusable for C2/C3).
-- Company PC: Engram is a personal project; the user asked about using the peer link between the company PC (Cato Client) and home — Claude said it cannot judge company policy; check with security. Do not decide it.
+- Mode: autonomous (user: 「자율모드는 그대로 유지하고 상한은 초기화해」, later approved a 4th C3 round past the cap). The user went to sleep; they test two PCs at home themselves (U5) — leave it.
+- Never use coined labels in user-facing text (no "U3b", "C3", "piece"); describe what happens. Korean, short, big picture first.
+- Agent cap: 5 at once. Parallel coders must put temp files under their own scratchpad subfolder (`u3b/`, `u4/`) — they collided once.
+- **Two user decisions are pending (each blocks a commit, `hold`):**
+  1. App: what "the PC list slot is visible" means for routing approval questions. TRD says "active tab of a non-minimized window"; the main's U4 brief made it stricter: active tab of the **focused** window, plus a 30 s fallback to the OS dialog while visible, plus a 1 s delay before reporting "no longer seen". Options: keep the stricter rule (record it in ADR-0394 / TRD) or go back to the TRD rule.
+  2. Remote mail: a size cap on directory copies / in-progress multi-part snapshots from a trusted but hostile PC (unbounded today; ADR-0391 rejected an entry cap, ADR-0390 says survive a broken peer). Suggested narrow fix: bound only the in-progress partial (parts / bytes → drop + DirResync).
+- Ask both, one at a time, with what changes visibly (rules in user-facing-rules).
 
 ## One-line state · next first action
-S37 U2: platform OS functions, other-accounts measures (`632e1678`), FAT/exFAT refusal (same commit), identity + trusted list + local identity lock (`6cfc5618`) are done. U2 still needs **C2 = PeerWire + peer link over iroh** (§3-2, §3-3, §4-1, §4-2: accept gate, dial, tie-break, re-arm, duplicate detection, state, lifecycle, endpoint only while ≥1 trusted PC) and **C3 = approvals / ask-the-user seam + `peer.*` commands + typed caller** (§4-8, T18 · T19 · T29 · T32 · T38 · T41–T43), then U3a/U3b (remote mail), U4 (app UI), U5 (two-PC check).
-**Next first action:** run `/engram-implement` for C2 with `.claude/review-tmp/trd-U2C-extract.md` (or regenerate from the TRD). Carry into the C2 brief: call `PeerStore` operations off the async workers; wire `identity::sweep_temps` at daemon start (ADR-0291 R12); run `NetworkSettings::check_for_endpoint` at endpoint build — a refused stored helper URL is an endpoint error, never a fallback to n0 defaults; a `set_network` that changes only the port is refused while a stored helper URL fails the adapter check.
+Committed and pushed on `v0.5.0/feat/multi-daemon`: C2 peer links (`4f99b2f7`), U3a messaging remote branch (`e289c93b`), C3 approvals + `peer.*` + typed caller (`1e1d308e`), ADR-0403 / 0404 / 0406, TRD U2 Implemented (`ce0c7d91`). In progress (uncommitted): **U3b** (remote mail wiring + agent directory, main tree) and **U4** (PC list slot + peer-state broadcast + app route + protocol v9, worktree `.claude/worktrees/agent-aa9b381c25983f83e`). Both coders were cut off by the usage limit during **fix round 3** — their partial edits are on disk.
+**Next first action:** resume both coders with SendMessage ("continue round 3 from where you stopped; report as before") — U3b coder agent id in this session `a269f52b52d1d17cc`, U4 coder `aa9b381c25983f83e` (if a new session cannot reach them, spawn a fresh coder with the round-3 request below + "finish or redo round 3 on the current tree; report"). Round-3 requests: U3b G1–G7 and U4 H1–H4 — the exact text is in this session's SendMessage; the gist is in `.claude/review-tmp/fix-U3b-r2.md` / `fix-U4-r2.md` follow-ups (see Findings below). Then re-review (lead + codex; the risk-axis lens has used its 2 rounds for both), QA, then integrate U4 onto the branch, then commit, push.
 
-## Repo state (measured 2026-11-21 21:15)
-- Branch `v0.5.0/feat/multi-daemon` @ `6cfc5618`, in sync with origin (0/0). Against origin/master: 78 ahead, **4 behind** (master moved; merge origin/master before integration or when a binding seems missing).
-- Untracked: `.claude/explain/` only. This handoff commit comes after these numbers.
+## Repo state (measured 2026-11-23 05:02)
+- Branch `v0.5.0/feat/multi-daemon` @ `ce0c7d91`, 0/0 with origin (this handoff commit comes after).
+- Main tree uncommitted: U3b (26 status lines; snapshot of round 2 = tree `0eaddab0…`; round-3 edits partly applied, unreviewed).
+- U4 worktree `.claude/worktrees/agent-aa9b381c25983f83e` (branch `worktree-agent-aa9b381c25983f83e`, base `ce0c7d91`), uncommitted; round-2 snapshot tree `1b103c10…`; round-3 edits partly applied.
+- Untracked `.claude/explain/` (old, leave). Other old worktrees under `.claude/worktrees/` belong to other sessions — leave them.
 
 ## Verification state
-- B (`632e1678`): review B1 deep 3 rounds PASS, B2 full 4 rounds PASS; QA full regression + shell real-daemon lane (incl. v0.3.2 cross-version stop) + claude/codex lanes + mutation 2/2 + GUI (connect, token file DACL, codex `engram` CLI and claude MCP pass the account check, +~1 ms per control request, graceful stop) — PARTIAL items (tray click, volume band in GUI) moved to `docs/unverified-tests.md`.
-- C1 (`6cfc5618`): review deep 4 rounds + corrupt-list delta PASS; QA full regression (backend 5731, gates 32/32, frontend 2948), claude lane, mutation 2/2; real measurement n/a (module unwired).
-- Re-run: `cargo test -p engram-dashboard-daemon -- --test-threads=4`, `cargo test -p engram-dashboard-platform -- --test-threads=4`, `node scripts/gen-third-party-licenses.mjs "$TEMP/tpl.txt"` (through `scripts/run-detached.ps1` per the qa binding).
-- Not verified (all listed in `docs/unverified-tests.md`): tray Stop click; real exFAT drive; mixed elevation; a second Windows account; the identity lock across sessions / accounts / elevation; two PCs on one router (mDNS); two networks (user will use phone tethering, or a non-corporate VPN).
+- Committed pieces: each passed deep review + QA (details in their commit messages). C3 QA PARTIAL items in `docs/unverified-tests.md`.
+- U3b: review round 2 → lead PASS, codex FIX (4 must → G1–G4); last full tests at round 2: daemon lib 945, messaging 328, gates 30/30. **Round-3 code: not built, not reviewed — do not trust it.**
+- U4: review round 2 → lead FIX (G1), codex FIX (3 must) → H1–H4; last tests at round 2: daemon lib 905, npm 3020, gates 31/31. **Round-3 code: not built, not reviewed.** GUI check not done (focus path, ResizeObserver timing, wrap in Radix ScrollArea).
+- Re-run: `cargo test -p engram-dashboard-daemon -- --test-threads=4`, `cargo test -p engram-dashboard-messaging -- --test-threads=4`, `npm test`, CI gates static steps (`.github/workflows/ci.yml` gates job) — via `scripts/run-detached.ps1`.
+
+## Findings carried into round 3 (what the coders were asked)
+- U4: H1 click-time guard (`lastChange` ref bumped in the ResizeObserver callback, on hold-key change and on viewport scroll; yes-buttons / ConfirmBtn refuse a press within HOLD_MS) + hold keyed by a revision counter (A→B→A); H2 Strict Mode — new watched set per observer; H3 GhostCard words the translated heading, not the English summary; H4 fixed buttons `maxWidth: 100%`.
+- U3b: G1 resync worker vs latest reply target (completion must not erase a newer request); G2 clear overdue queues on revoke / stop, check trust + stopped per job; G3 re-check local ids on an assembled multi-part snapshot at commit; G4 reject resync insertion from a retired epoch; G5 keep chosen key on the copies side so directory application does not hold the link book; G6 recheck copies only when the local id set changed, off the async task; G7 assert the flush trigger is wired (gate never spans inline injection). Record only: inbound Mail trust-check-then-commit window is an accepted residual.
+
+## Integration notes (main)
+- U4 merges onto the branch after U3b commits: expected conflicts in `link/peer/{commands,runtime,testing}.rs`, peer catalog version, `prompts/engram-help.md`; `the_app_state_serializes_like_the_peer_list_answer` must absorb U3b's agent rows. Protocol is v9 in U4 (ADR-0383's legacy-marker removal done there).
+- Record at commit: R7 rule (first 64 rows to one PC go, the rest fail REMOTE_LIMIT with a split hint) in TRD §7 U3b / ADR; U4 visibility rule after the user decides; U3b differences (adapters in messaging_host.rs because of daemon gate 1, `reply_by_raw` optional — codex downgraded to a note, PeerWire unreleased).
+- QA lanes: claude lane needed for both (control/** and messaging/src/** touched).
 
 ## Do-not / lessons
-- License gate: any change that makes a shipped crate pull new deps must run `node scripts/gen-third-party-licenses.mjs` early; iroh needed CDLA-Permissive-2.0 (user-approved) and upstream MIT texts for 8 crates.
-- Do not put Korean in code/config comments (the Hangul gate fails) — quote user approvals in English.
-- Before QA, any new per-test `#[cfg(windows)]` outside `platform` must be added to `OS_CFG_FILES` in `.github/workflows/ci.yml`.
-- The auto-mode classifier once blocked a SendMessage to a coder right after the user's angry interrupt; resending after the user said 「진행 해」 worked.
+- Codex re-asks with facts work (two protocol-bump findings: one withdrawn, one kept → v9). Use the fixed re-ask format.
+- A one-shot coder brief must list the CI gates static steps (feedback recorded in engram-implement).
+- The Codex default model once failed ("gpt-6.1-sol not supported with a ChatGPT account"); the user refilled and it worked — if it recurs, ask the user.
 
 ## Resume command
-`git -C I:/Engram/apps/engram-dashboard log --oneline -6 && git -C I:/Engram/apps/engram-dashboard status -sb | head -3`
+`git -C I:/Engram/apps/engram-dashboard log --oneline -4 && git -C I:/Engram/apps/engram-dashboard status -sb | head -5 && git -C I:/Engram/apps/engram-dashboard/.claude/worktrees/agent-aa9b381c25983f83e status -sb | head -3`
 
 ## Decisions (this session)
 User-decided:
-- FAT/exFAT policy · 상황: token / control files cannot be owner-only there, FAT rare, opt-in design was reviewed · 선택지 opt-in setting / refuse with no opt-in ★ · 고른 것 「ㅇㅇ 일단 거부로 하고 나중에 필요하면 넣자. 구지 필요없을것같아 요즘 fat 쓰는데가 어딨다고」 · 같음 (Claude had recommended refusal after the precedent check) · 근거: FAT rare → ADR-0399, opt-in parked T-125.
-- Setting location (while the opt-in existed) · 선택지 data folder ★ / AppData · 고른 것 「ㅇㅇ A로 가. 어차피 파일 접근할 수 있는권한 있으면 뭔들 못할까」 · 같음 (moot after the opt-in was dropped).
-- Settings screen · (묻지 않음) · 「설정화면은 나중에 하고 일단 파일에서 수정」.
-- Prove the listener is the Engram daemon (PID match) · 선택지 add ★ / document · 고른 것 「리서치 간단하게 한다음에 다른데도 하면 하고 아니면 말고」 → precedent check found no tool doing it → not added, accepted risk recorded (TRD remaining risks, daemon-link.md) · 갈림 (outcome differs from Claude's first recommendation, by the research).
-- PARTIAL QA items · 고른 것 「함수로만 확인하면 일단은 되지. Fat 관련해서는 그냥 놔둬」 → recorded in a new `docs/unverified-tests.md` (name chosen with the user: 「ㅇㅇ 그렇게해」).
-- CDLA-Permissive-2.0 · 상황: webpki-roots, not optional in iroh 1.x · 선택지 accept / fork / wait · 고른 것 「이게 뭔지 보고 허용목로에 추가해」 · — .
-- Corrupt `peers.<account>.<machine>.json` · 선택지 reset to defaults / feature off until accepted ★ · user did not pick explicitly; Claude took ★ and the user said 「진행 해」 · 같음 → TRD §8 P-J.
-- Two-PC test approach · 「테더링으로 할게 나중에 내가 한다고 할때 하면되니깐 나중확인으로 남겨두면 될듯」.
-- TRD first-explanation format · 「S37-multi-daemon/trd.html 적당히 괜찮아 보이는데 … 밑에는 … 펼쳐볼 수 있도록 핵심 내용들 추가해도됨. trd 최초 기본? 으로 일단 피드백 올려」 → recorded in engram-explain feedback.
-Claude-decided: shell pre-check + typed band cause for FAT; start answers ordered by attempt (latest-started wins); account check: access denied on opening the process = other account; vanished listener retryable (3 in a row → refusal); no kill after an account-refused stop; `scripts/engram.mjs` PowerShell probe (SID + start time vs socket creation, whole seconds); identity lock = private namespace (ADR-0401); create-without-replace via `MoveFileExW`; daemon enables `iroh` early; gate 4d stays `ws`; default ports 47120/47121; no short fingerprint; adapter URL check only on writes; PC names refuse Cf ∪ Default_Ignorable; exceeded the 3-round fix cap once (B2 round 4, a one-line move — reported, feedback recorded).
-Open: none blocking. Later: T-125 (FAT opt-in) on trigger.
+- Continue autonomously, push at the end, two-PC test at home · (묻지 않음) · 「이어서 진행해. 실제 외부 테스트는 내가 별도로 집에서 할테니 놔두고 나머지 다 하면될듯」.
+- Reset the fix-round cap · (묻지 않음) · 「자율모드는 그대로 유지하고 상한은 초기화해」.
+- C3 4th fix round past the cap · 선택지 4th round ★ / stop and record · 고른 것 「4번째 수정 진행 (Recommended)」 · 같음.
+- Next session: lighten subagent base load · (묻지 않음) · 「다음에는 토큰 경량화좀 확인해보자. 서브에이전트한테 기본 도구가 너무 무거워」 → recorded in global-feedback.
+- Continue in this session overnight vs hand off · 선택지 continue ★ / hand off now · 고른 것 「ㅇㅇ 쭉 진행해.」 · 같음.
+Claude-decided: dialog text en + ko with the shell telling the daemon (ADR-0406, by the CLAUDE.md language rule; user may still choose English-only); protocol bump to v9 in U4 (codex kept it as must); U3a / U4 in worktrees, U3b and C2 / C3 in the main tree; PARTIAL QA items recorded in unverified-tests per the earlier user rule.
+Open: the two holds above.
 
-## References
-- `docs/process/S37-multi-daemon/trd.md` (§4-9 T47–T49, §7 U2 status line with C1 differences, §8 P-I · P-J, remaining risks), `prd.md` (R15 · R21 · AC17 · AC18).
-- ADRs 0395, 0399, 0401 (and 0389 amended by 0401).
-- Code: daemon `src/account_gate.rs`, `src/link/peer/{id,identity,mac,os,store,trusted}.rs`; shell `src-tauri/src/daemon_client/link/{account,route}.rs`, `src-tauri/src/discovery/mod.rs` (`pre_spawn_checks`); platform `src/{account,account_lock,owner_only,fs}.rs`; `scripts/engram-account.mjs`.
-- Reference docs: `docs/reference/structure/{daemon-link,peer-link,transport}.md`; `docs/unverified-tests.md`.
-- Feedback recorded this session: engram-review (same-class rule stopped autonomous work), engram-qa (fingerprint/untracked, artefact count, env to detached runs), engram-implement (fix-round cap), engram-explain (TRD first-explanation format), global (coined names).
+## Feedback recorded this session
+global (count per-spawn fixed load; trim subagent base load next), engram-implement (coders run CI static gates). Not yet recorded: parallel coders' scratchpad collision (engram-implement flow §2 already says "own prefix" — the main did not copy it into the briefs).
