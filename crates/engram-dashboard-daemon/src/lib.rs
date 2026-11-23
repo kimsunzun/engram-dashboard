@@ -23,7 +23,9 @@
 //! (`control::commands::call_daemon_command`), which takes a typed caller — a live shell connection is a human, an agent token an agent —
 //! and an agent's trust change becomes a pending request (`link::peer::approvals`). A human answers in the app or in the native dialog
 //! of the shared "ask the user" seam (`ask_user`), whose thread the approvals own; questions the peer state raises (accept a changed
-//! trusted list, adopt an identity) go the same way.
+//! trusted list, adopt an identity) go the same way. The app's side of that seam is `peer_state`: the shell says per connection whether it
+//! has a PC list slot open; the subscribed connections get the peer state on every change, and the questions go to the app while any
+//! connection has one open, on screen or not (ADR-0410).
 
 mod account_gate;
 pub mod agent_conn;
@@ -44,6 +46,7 @@ mod log_capture;
 pub mod messaging_host;
 #[cfg(test)]
 mod panic_hook_tests;
+pub mod peer_state;
 pub mod portfile;
 pub mod status_fanout;
 #[cfg(test)]
@@ -176,6 +179,9 @@ struct DaemonWiring {
     registry: ConnRegistry,
     /// The service the `manager`'s status sink chain feeds — the connection layer subscribes and ⟳s on the same one.
     usage: Arc<UsageService>,
+    /// The peer-state subscriptions — the connection layer records them, `run()` plugs the approvals in as their source and as the
+    ///   app route of the "ask the user" seam (ADR-0394).
+    peer_state: Arc<peer_state::PeerStateHub>,
 }
 
 impl DaemonWiring {
@@ -300,6 +306,7 @@ fn build_daemon_wiring_with_store(
         manager,
         registry,
         usage,
+        peer_state: peer_state::PeerStateHub::new(),
     }
 }
 
@@ -376,6 +383,7 @@ async fn run_accept_loop(
         manager,
         registry,
         usage,
+        peer_state,
     } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
     let handlers: Arc<dyn crate::conn_port::ConnectionHandlerFactory> =
@@ -389,6 +397,7 @@ async fn run_accept_loop(
             bus.deliveries().clone(),
             Arc::clone(bus.locals()),
             usage,
+            peer_state,
             shutdown_tx,
         ));
     let server = link::server::Server::new(
@@ -674,15 +683,16 @@ pub async fn run() -> Result<(), i32> {
     // The lease port is that `multiview` passed to the accept loop below (ADR-0231): `clone()` is a handle on the same shared state. A new
     //   `MultiViewState::new()` is wrong — an empty table would make bus · CLI cancels silently ignore the viewer's input lease.
     // The peer link (8.5) starts after this table, so the `peer.*` table reads it from `peer_slot` at call time; until it lands those
-    //   commands answer that it is not running. Approvals own the "ask the user" seam's dialog thread (no app route until the app has a PC
-    //   list slot).
+    //   commands answer that it is not running. Approvals own the "ask the user" seam's dialog thread; its app route is the connection
+    //   layer's peer-state hub (a PC list slot open in the app — ADR-0410), which then gets the approvals as its state source.
     // ADR-0394
     let peer_slot: Arc<std::sync::OnceLock<link::peer::runtime::PeerLink>> =
         Arc::new(std::sync::OnceLock::new());
+    let peer_hub = wiring.peer_state.clone();
     let approvals = link::peer::approvals::Approvals::start(
         peer_slot.clone(),
         Arc::new(ask_user::OsDialogs),
-        Arc::new(ask_user::NoAppRoute),
+        peer_hub.clone(),
         // ADR-0372: the dialogs speak the `ui.language` the shell last sent (`AgentCommand::SetUiLanguage`).
         control_registry.clone(),
         Arc::new(engram_dashboard_base::time::SystemClock),
@@ -696,6 +706,15 @@ pub async fn run() -> Result<(), i32> {
         )
         .with_peer(link::peer::commands::PeerCommands::new(approvals.clone())),
     ));
+    // The app's view of the peer area: built from the same answer as `peer.list`, sent on every change of the requests here and of the
+    //   peer link once it runs (8.5). Both tasks are aborted at shutdown.
+    peer_hub.bind(Arc::new(link::peer::commands::AppPeerState::new(
+        approvals.clone(),
+    )));
+    let peer_state_tasks = [
+        tokio::spawn(peer_hub.clone().run()),
+        tokio::spawn(peer_state::forward(peer_hub.clone(), approvals.changes())),
+    ];
 
     // 6.4) idle gate assembly — turn observation is loaded directly by the core from the output pump, so nothing to wire here.
     let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
@@ -791,6 +810,7 @@ pub async fn run() -> Result<(), i32> {
     let peer_start = {
         let slot = peer_slot.clone();
         let approvals = approvals.clone();
+        let peer_hub = peer_hub.clone();
         let state_dir = layout.daemon_state_dir();
         let host = link::peer::runtime::Host {
             mail: peer_mail,
@@ -806,7 +826,14 @@ pub async fn run() -> Result<(), i32> {
             {
                 Ok(peer_link) => {
                     let _ = slot.set(peer_link.clone());
-                    link::peer::approvals::follow(peer_link, approvals).await;
+                    // A shell that subscribed while the link was still loading saw "not started" — it gets the started state now (the
+                    //   link's own change counter may have ticked before anyone listened).
+                    peer_hub.nudge();
+                    let changes = peer_link.changes();
+                    tokio::join!(
+                        link::peer::approvals::follow(peer_link, approvals),
+                        peer_state::forward(peer_hub, changes),
+                    );
                 }
                 Err(e) => tracing::error!(
                     "the peer link could not start — this PC runs without links to other PCs: {e}"
@@ -848,6 +875,9 @@ pub async fn run() -> Result<(), i32> {
     //   process exit, which the shell's graceful window bounds); a started link stops within its own deadline (`PeerLink::stop`).
     peer_start.abort();
     let _ = peer_start.await;
+    for task in peer_state_tasks {
+        task.abort();
+    }
     // No new answer or request gets through from here on. `Approvals::stop` waits at most 3 s for an answer being applied, then at most
     //   3 s for the dialog thread to end (`AskUser::stop`) — about 6 s in the worst case; the wait runs off the async workers.
     {

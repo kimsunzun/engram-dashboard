@@ -144,6 +144,10 @@ impl DaemonEvents for RecordingEvents {
             labels.join(",")
         ));
     }
+
+    fn peer_state_updated(&self, state: &engram_dashboard_protocol::PeerState) {
+        self.record(format!("peers:{}:{}", state.state, state.pcs.len()));
+    }
 }
 
 // The name-ledger port is written into the same one-line record — the order against frontend notifications is measured in one list.

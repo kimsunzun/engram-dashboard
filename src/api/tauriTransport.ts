@@ -263,6 +263,15 @@ export class TauriTransport implements Transport {
           })
         }),
       )
+      // ADR-0394: the peer state for the PC list slot — the protocol `PeerState` as is, to every window (one without the slot ignores it).
+      registered.push(
+        await listen<unknown>('peer-state-updated', (e) => {
+          this.messageCb?.({
+            kind: 'control',
+            event: { PeerStateUpdated: { state: e.payload } },
+          })
+        }),
+      )
       // ★Connection state sync (single source of truth)★: the Rust connection task emits this on a transition (connected/reconnecting/down); the frontend changes state only through it.
       //
       // ★Output Channel registration = this single transition path (Fix-C ④)★: on a non-connected → connected transition it calls registerOutputChannel — the first connection and

@@ -50,8 +50,8 @@ export interface Command {
    *
    * ★Check before writing — this field is an exception to §5, and an exception needs a reason★: 「a UI the LLM cannot get past is in the way」 is **not** a reason (a defect to fix). A legitimate reason is 「a **policy decision** that a human must be there, whose canonical source lives elsewhere」.
    *
-   * ★Today **no command** uses this field★ — its only users, the two codex creation doors, lifted the gate (reason = the head comment of `agentCommands` · canonical source = `commands::LLM_BACKEND_POLICY` in `engram-dashboard-agent`).
-   * ★Even so do not remove this field★: it is the means to close on the day a policy decision recurs. The gate's behavior is still measured by `registry.test.ts` with a synthetic command.
+   * ★Today's users = the PC list slot's trust actions (`peers.*` in `peerCommands.ts`)★ — canonical source = ADR-0394 (humans approve trust changes): those commands call the daemon's `peer.*` on the shell's own connection, which the daemon types as the human, so a relayed run would turn an agent's call into a human one. (The two codex creation doors once used it and lifted the gate — reason = the head comment of `agentCommands`.)
+   * The gate's behavior is measured by `registry.test.ts` with a synthetic command and by `peerCommands.test.ts`.
    *
    * ★On a different axis from `help`★ — no `help` = **not advertised** on the daemon registry, and that does not block execution (the bus bridge's `settle` calls `run` as long as there is a name). Removing the advertisement is not closing it.
    */
@@ -97,7 +97,7 @@ export function run(id: string, args?: CommandArgs): unknown {
 }
 
 /**
- * ★The entry point of the human path★ — only clicks · keybindings call it (`dispatch.fireAndForget` is the only caller, and that file is the copy template); not passing the `humanOnly` gate is why it exists.
+ * ★The entry point of the human path★ — only clicks · keybindings call it (`dispatch.fireAndForget`, the copy template, and the PC list slot's buttons, which await the answer to show it — `components/slot/PeersSlot.tsx`); not passing the `humanOnly` gate is why it exists.
  * ★Do not expose this to `__engramCmd` (`store/eventBus.ts`) or the bus bridge (`commands/viewCommandBridge.ts`)★ — exposing it gives the gate of [`run`] a bypass. ★No gate measures that prohibition (call-site discipline)★ — `commands/registry.test.ts` only shows the two entry points behave differently.
  */
 export function runAsHuman(id: string, args?: CommandArgs): unknown {

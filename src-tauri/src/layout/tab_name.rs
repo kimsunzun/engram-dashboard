@@ -59,6 +59,7 @@ pub fn slot_label<'n>(
             show_claude: _,
             show_codex: _,
         } => tab_word(lang, TabWord::Usage).to_owned(),
+        SlotContent::Peers => tab_word(lang, TabWord::Peers).to_owned(),
     }
 }
 

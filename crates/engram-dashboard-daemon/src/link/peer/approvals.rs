@@ -42,7 +42,9 @@ use super::runtime::{PeerLink, PeerSnapshot};
 use super::store::{PeerEdit, PeerError, PeerStatus, Regenerated, Removal};
 pub(crate) use super::trusted::NetworkPatch;
 use super::trusted::{NetworkSettings, TrustedPeer};
-use crate::ask_user::{Answer, AppRoute, AskUser, Dialogs, LanguageSource, Question, QuestionId};
+use crate::ask_user::{
+    Answer, AppRoute, AskUser, Dialogs, LanguageSource, Question, QuestionId, QuestionText,
+};
 
 pub(crate) mod text;
 
@@ -275,6 +277,8 @@ pub(crate) struct PendingRow {
     pub(crate) asked_at: SystemTime,
     /// `None` = stands while the state needs it.
     pub(crate) expires_in: Option<Duration>,
+    /// The question exactly as the dialog shows it, in the user's UI language now (ADR-0406) — the app shows the same content.
+    pub(crate) text: QuestionText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -315,6 +319,8 @@ impl SystemKey {
 struct Request {
     id: String,
     question: QuestionId,
+    /// The text the seam was given for this question (every language).
+    text: Question,
     asked: Asked,
     summary: String,
     at: Instant,
@@ -363,6 +369,8 @@ pub(crate) struct Approvals {
     ask: AskUser,
     ops: Arc<dyn TrustSource>,
     clock: Arc<dyn Clock>,
+    /// The user's UI language — the app's copy of a question ([`PendingRow::text`]) is in it, like the dialog.
+    language: Arc<dyn LanguageSource>,
     changes: watch::Sender<u64>,
 }
 
@@ -380,7 +388,7 @@ impl Approvals {
             let ask = AskUser::start(
                 dialogs,
                 app,
-                language,
+                language.clone(),
                 clock.clone(),
                 Box::new(move |question, answer| {
                     if let Some(approvals) = me.upgrade() {
@@ -395,6 +403,7 @@ impl Approvals {
                 ask,
                 ops,
                 clock,
+                language,
                 changes: watch::channel(0).0,
             }
         })
@@ -527,6 +536,7 @@ impl Approvals {
         inner.pending.push(Request {
             id: id.clone(),
             question,
+            text: text.clone(),
             asked: Asked::Change {
                 change,
                 agent,
@@ -709,6 +719,8 @@ impl Approvals {
     /// The pending requests, oldest first (expired ones dropped).
     pub(crate) fn pending(&self) -> Vec<PendingRow> {
         let now = self.clock.now();
+        // Read before this module's lock — the source takes its own.
+        let lang = self.language.language();
         let mut inner = lock(&self.inner);
         self.expire_locked(&mut inner, now);
         inner
@@ -738,6 +750,7 @@ impl Approvals {
                     origin,
                     asked_at: r.at_wall,
                     expires_in,
+                    text: r.text.text(lang).clone(),
                 }
             })
             .collect()
@@ -833,6 +846,7 @@ impl Approvals {
             inner.pending.push(Request {
                 id,
                 question,
+                text: text.clone(),
                 asked: Asked::System(key),
                 summary,
                 at: now,
@@ -904,12 +918,13 @@ fn request_id(inner: &Inner) -> String {
 /// One line for `peer.list`.
 fn change_summary(change: &Change) -> String {
     match change {
-        Change::Add(peer) => format!("add PC {} ({})", quote(&peer.name), peer.id),
+        // The ID grouped as the dialog shows it — an unbroken 64-digit run would also overflow a narrow card.
+        Change::Add(peer) => format!("add PC {} ({})", quote(&peer.name), peer.id.grouped()),
         Change::SetNetwork(_) => "change the network settings".to_string(),
         Change::RegenerateKey => "make a new identity key for this PC".to_string(),
         Change::Edit { id, edit } => match &edit.name {
-            Some(name) => format!("rename PC {id} to {}", quote(name)),
-            None => format!("change PC {id}"),
+            Some(name) => format!("rename PC {} to {}", id.grouped(), quote(name)),
+            None => format!("change PC {}", id.grouped()),
         },
     }
 }

@@ -95,6 +95,8 @@ pub enum TabWord {
     AgentTree,
     Presets,
     Usage,
+    /// The PC list slot (ADR-0394).
+    Peers,
     /// A slot holding content this build does not know — not a `SlotContent` variant (the in-memory content is `Empty`, the
     /// raw value sits in a side table).
     Foreign,
@@ -102,12 +104,13 @@ pub enum TabWord {
 
 impl TabWord {
     // Add a new variant here too — a word missing from this list passes `tab_name::is_word` and is seeded as an agent name.
-    pub const ALL: [TabWord; 6] = [
+    pub const ALL: [TabWord; 7] = [
         TabWord::EmptySlot,
         TabWord::AgentUnknown,
         TabWord::AgentTree,
         TabWord::Presets,
         TabWord::Usage,
+        TabWord::Peers,
         TabWord::Foreign,
     ];
 }
@@ -121,12 +124,14 @@ pub const fn tab_word(lang: Lang, word: TabWord) -> &'static str {
         (Lang::En, TabWord::AgentTree) => "Agent tree",
         (Lang::En, TabWord::Presets) => "Presets",
         (Lang::En, TabWord::Usage) => "Usage",
+        (Lang::En, TabWord::Peers) => "PCs",
         (Lang::En, TabWord::Foreign) => "Unknown content",
         (Lang::Ko, TabWord::EmptySlot) => "빈 칸",
         (Lang::Ko, TabWord::AgentUnknown) => "에이전트",
         (Lang::Ko, TabWord::AgentTree) => "에이전트 트리",
         (Lang::Ko, TabWord::Presets) => "프리셋",
         (Lang::Ko, TabWord::Usage) => "사용량",
+        (Lang::Ko, TabWord::Peers) => "PC 목록",
         (Lang::Ko, TabWord::Foreign) => "알 수 없는 내용",
     }
 }

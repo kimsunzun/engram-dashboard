@@ -24,13 +24,16 @@ import type {
   OutputSubscription,
   QueuedInputListing,
   ReplayLiveInfo,
+  PeerCommandName,
   UsageSnapshotPull,
   ViewOutputState,
   ViewPhase,
   ViewResetFn,
 } from './agentClient'
+import { DaemonCommandError } from './agentClient'
 import type { QueuedInputRow } from '../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
+import type { PeerState } from '../../crates/engram-dashboard-protocol/bindings/PeerState'
 import type { InboundMessage, Transport } from './transport'
 import type {
   AgentBackendKind,
@@ -144,6 +147,7 @@ export class ProtocolClient implements AgentClient {
   private profileListCbs = new Set<(profiles: AgentProfile[]) => void>()
   private presetListCbs = new Set<(presets: Preset[]) => void>()
   private usageCbs = new Set<(snapshot: UsageLimitSnapshot, socketEpoch: number) => void>()
+  private peerStateCbs = new Set<(state: PeerState) => void>()
 
   private offMessage: (() => void) | null = null
   private offState: (() => void) | null = null
@@ -693,6 +697,27 @@ export class ProtocolClient implements AgentClient {
       for (const cb of this.usageCbs) cb(u.snapshot, socketEpoch)
       return
     }
+    if ('PeerStateUpdated' in msg) {
+      const p = msg.PeerStateUpdated as { state: PeerState }
+      for (const cb of this.peerStateCbs) cb(p.state)
+      return
+    }
+    // The dedicated reply of a daemon command this window sent (`peerCommand`) — the key is inside `reply` (protocol `AgentEvent::CommandReply`).
+    //   ★Without this branch such a call never settles★: the invoke ended in success, so nothing else rejects it.
+    if ('CommandReply' in msg) {
+      const r = (msg.CommandReply as { reply?: { request_id?: unknown; outcome?: unknown } }).reply
+      if (!r || typeof r.request_id !== 'string') {
+        console.warn('[ProtocolClient] a command reply without a request id — dropped')
+        return
+      }
+      const outcome = r.outcome as { Ok?: unknown; Err?: { code?: string | null; message?: string | null } } | undefined
+      if (outcome && 'Ok' in outcome) this.resolvePending(r.request_id, outcome.Ok)
+      else {
+        const err = outcome?.Err
+        this.rejectPending(r.request_id, new DaemonCommandError(err?.code ?? 'INTERNAL', err?.message ?? 'the command failed'))
+      }
+      return
+    }
     if ('Snapshot' in msg) {
       const s = msg.Snapshot as { request_id: string; agent_id: string; chunks: unknown[] }
       this.resolvePending(s.request_id, s.chunks)
@@ -1003,6 +1028,15 @@ export class ProtocolClient implements AgentClient {
     return this.transport.getUsageSnapshot()
   }
 
+  // ── peer (ADR-0394) ─────────────────────────────────────────────────────────────
+  // The envelope's `owner` is the destination token; the daemon answers its own table by name, so any token reaches it (`command_delivery`).
+  peerCommand(name: PeerCommandName, args: Record<string, unknown>): Promise<unknown> {
+    if (!name.startsWith('peer.')) return Promise.reject(new Error(`[ProtocolClient] not a peer command: ${name}`))
+    return this.sendCommand<unknown>((request_id) => ({
+      Command: { envelope: { name, request_id, owner: 'daemon', proto_ver: 1, args } },
+    }))
+  }
+
   // ── status/list/restore/profile events — registry registration + remove disposer ──────────────────
   onAgentListUpdated(cb: (agents: AgentInfo[]) => void): () => void {
     this.agentListCbs.add(cb)
@@ -1038,6 +1072,12 @@ export class ProtocolClient implements AgentClient {
     this.usageCbs.add(cb)
     return () => {
       this.usageCbs.delete(cb)
+    }
+  }
+  onPeerStateUpdated(cb: (state: PeerState) => void): () => void {
+    this.peerStateCbs.add(cb)
+    return () => {
+      this.peerStateCbs.delete(cb)
     }
   }
 

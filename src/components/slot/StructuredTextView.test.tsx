@@ -12,7 +12,7 @@ import {
   type ToolCategory,
   type ToolItem,
 } from './structuredAccumulator'
-import { LEGACY_PLACEHOLDER_ERROR_MESSAGE, PLACEHOLDER_ERROR_MESSAGE } from '../../api/wsFrame'
+import { PLACEHOLDER_ERROR_MESSAGE } from '../../api/wsFrame'
 import { setLanguage, t } from '../../i18n'
 import { useToolGroupStore } from '../../store/toolGroupStore'
 
@@ -1022,12 +1022,10 @@ describe('error row — the dropped-output placeholder', () => {
     })
   })
 
-  // ADR-0383: the pre-S38 Korean marker (an old daemon still running) is recognised too. Its text equals `ko` `chat.droppedOutput`,
-  // so only the `en` assertions tell "marker recognised" from "raw text shown".
-  it.each([
-    ['the current marker', PLACEHOLDER_ERROR_MESSAGE],
-    ['the legacy marker', LEGACY_PLACEHOLDER_ERROR_MESSAGE],
-  ])('shows chat.droppedOutput instead of %s, and follows a language switch', (_label, marker) => {
+  // ADR-0383: only the current marker is recognised — the pre-S38 Korean one went with the PROTOCOL_VERSION 9 bump (a daemon that
+  // sends it is refused). The `en` assertions tell "marker recognised" from "raw text shown".
+  it('shows chat.droppedOutput instead of the marker, and follows a language switch', () => {
+    const marker = PLACEHOLDER_ERROR_MESSAGE
     const items: StructuredItem[] = [{ kind: 'error', message: marker, itemId: 0 }]
     const { rerender } = render(<StructuredTextView items={items} />)
     expect(screen.getByText(t('chat.droppedOutput'))).toBeTruthy()
@@ -1049,5 +1047,9 @@ describe('error row — the dropped-output placeholder', () => {
     })
     render(<StructuredTextView items={[{ kind: 'error', message: '이 출력 사건을 싣지 못했습니다!', itemId: 0 }]} />)
     expect(screen.getByText('이 출력 사건을 싣지 못했습니다!')).toBeTruthy()
+    cleanup()
+    // The pre-S38 Korean marker is no longer special (ADR-0383, removed with PROTOCOL_VERSION 9): it shows as it came.
+    render(<StructuredTextView items={[{ kind: 'error', message: '이 출력 사건을 싣지 못했습니다', itemId: 1 }]} />)
+    expect(screen.getByText('이 출력 사건을 싣지 못했습니다')).toBeTruthy()
   })
 })

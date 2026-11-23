@@ -770,7 +770,8 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     // Rises with any declaration change (answer shape, vocabulary, error declarations), not only when the name count grows.
     // ADR-0219 · ADR-0227 · ADR-0276 · ADR-0225 · ADR-0291 · ADR-0308
     // TRD S21 usage-limit-slot §1-7 · TRD S21-storage §5-4 · §5-6 · §5-7 · §6-5 · §6-7 · TRD S26-window-chrome §3-2 · §4-5 · §5-3 · §6-1 · §6-6 · TRD S28 §4 · §7
-    assert_eq!(CATALOG_VERSION, 21);
+    // 22: the `Peers` content kind (ADR-0394 — the PC list slot) in `layout.setSlotContent` and the `layout.get` rows.
+    assert_eq!(CATALOG_VERSION, 22);
     assert_eq!(COMMAND_SPECS.len(), 36);
     for since in [
         TabMoveArgs::SPEC.since,

@@ -101,6 +101,10 @@ describe('core content (slotContentCommands) routing', () => {
     run('slot.fill.usage', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'usage', show_claude: true, show_codex: true })
   })
+  it('slot.fill.peers → setSlotContent(…,{type:peers}) — opening the PC list is not a trust change, so it stays on the LLM surface', () => {
+    run('slot.fill.peers', CTX)
+    expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'peers' })
+  })
 
   it('slot.createAgentHere: cwd picked in the dialog → spawnAgent → assignAgent(viewId, slotId, id)', async () => {
     dialogMock.open.mockResolvedValue('C:/picked')
@@ -141,6 +145,7 @@ describe('core content (slotContentCommands) routing', () => {
       'slot.fill.agentList',
       'slot.fill.presetPalette',
       'slot.fill.usage',
+      'slot.fill.peers',
     ])
     expect(items[1].children?.map(c => c.id)).not.toContain('slot.createAgentHere')
     expect(items.map(i => i.id)).not.toContain('slot.empty')
@@ -182,7 +187,7 @@ describe('language switch — slot menu and list() titles', () => {
     expect(ids(after)).toEqual(ids(before))
     const container = after.find(i => i.id === 'container:slot.newContent')!
     expect(container.title).toBe('New content')
-    expect(container.children!.map(c => c.title)).toEqual(['Open agent tree', 'Open preset palette', 'Open usage limits'])
+    expect(container.children!.map(c => c.title)).toEqual(['Open agent tree', 'Open preset palette', 'Open usage limits', 'Open PC list'])
     expect(after.find(i => i.id === 'slot.split.topBottom')!.title).toBe('Split horizontally')
     expect(before.find(i => i.id === 'container:slot.newContent')!.title).toBe('새 콘텐츠')
   })

@@ -66,7 +66,7 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 // ADR-0276
 // ADR-0219 (TRD §6; TRD S21-storage §10 F7; TRD S28 §4 · §7; TRD S26-window-chrome §6-1 · §6-6; TRD S21-storage §6-5; TRD S21-storage §6-5 · §6-7; TRD S21-storage §6-7; TRD S21-storage §5-4; TRD S21 usage-limit-slot §1-7; TRD S26-window-chrome §3-2 · §4-5 · §5-3; TRD S21-storage §5-6 · §5-7)
 declare_commands! {
-    catalog_version: 21;
+    catalog_version: 22;
 
     /// One tab bar entry — `name` = the visible name · `named` = whether the name was set (if false, `name` changes following the focused area's content).
     struct TabRow {
@@ -85,13 +85,15 @@ declare_commands! {
         TopBottom,
     }
 
-    /// What the slot holds — only `Agent` also takes `agent_id`, and only `Usage` takes `show_claude` · `show_codex`.
+    /// What the slot holds — only `Agent` also takes `agent_id`, and only `Usage` takes `show_claude` · `show_codex`. `Peers` = the PC
+    /// list (this user's other PCs; it shows the daemon's `peer.list` and is where the user answers trust requests).
     enum SlotContentKind {
         Empty,
         Agent,
         AgentList,
         PresetPalette,
         Usage,
+        Peers,
     }
 
     /// The outcome of a ratio write — `Applied` = changed · `Unchanged` = the clamped value equals the current value (no change) ·
@@ -167,6 +169,7 @@ declare_commands! {
         AgentList,
         PresetPalette,
         Usage,
+        Peers,
         Unknown,
     }
 
@@ -864,7 +867,7 @@ declare_commands! {
     /// numbers are not accepted) only that window, with agent (name or id) only the areas holding that agent (an empty list if in no area).
     /// Row = window · window_number · tab_index (position in that window's tab bar · from 0 — (window, tab_index) is the key grouping rows of the same
     /// tab) · tab_name · tab_active (the tab visible in that window) · content (Empty · Agent · AgentList · PresetPalette · Usage ·
-    /// Unknown) · agent (display name — omitted if unknown) · focused (the focused area within that tab — not the window · OS focus) · x · y · w ·
+    /// Peers · Unknown) · agent (display name — omitted if unknown) · focused (the focused area within that tab — not the window · OS focus) · x · y · w ·
     /// h (normalized coordinates within the tab 0~1 — top-left is 0,0).
     /// ids = true also includes window_id · tab (the tab id other commands call view_id) · slot_id · agent_id (omitted by default —
     /// areas are called by agent name · spatial word). NOT_FOUND if no agent has that name · CONFLICT if the name matches two or more (candidates at the end of the
@@ -2726,6 +2729,7 @@ fn row_of(row: rows::LayoutRow, ids: bool) -> LayoutRow {
             rows::SlotKind::AgentList => SlotKind::AgentList,
             rows::SlotKind::PresetPalette => SlotKind::PresetPalette,
             rows::SlotKind::Usage => SlotKind::Usage,
+            rows::SlotKind::Peers => SlotKind::Peers,
             rows::SlotKind::Unknown => SlotKind::Unknown,
         },
         agent: row.agent,
@@ -2867,6 +2871,7 @@ fn slot_content(
         (SlotContentKind::PresetPalette, None) => {
             SlotContentWrite::Replace(SlotContent::PresetPalette)
         }
+        (SlotContentKind::Peers, None) => SlotContentWrite::Replace(SlotContent::Peers),
     };
     if shows {
         return Err(CommandError::invalid_argument(
@@ -2880,6 +2885,19 @@ fn slot_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0394: the PC list slot's trust actions are the webview's human-only commands — the shell table, which every agent
+    ///   can relay into, declares none of them (and no daemon `peer.*` name either).
+    #[test]
+    fn the_shell_table_declares_no_peer_command() {
+        for spec in COMMAND_SPECS {
+            assert!(
+                !spec.name.starts_with("peer"),
+                "{} must not be relayable through the shell table",
+                spec.name
+            );
+        }
+    }
 
     // Even if the outcome rows have no result tab (the net for when the apply service contract breaks), an already moved docking answers success — only that field is omitted.
     #[test]

@@ -305,6 +305,7 @@ describe('eventBus — broadcast hookup first, pull later', () => {
       onRestoreResult: off,
       onProfileListUpdated: off,
       onPresetListUpdated: off,
+      onPeerStateUpdated: off,
       onConnectionStateChange: (cb: (s: ConnectionState) => void) => {
         cb('connected')
         return () => {}

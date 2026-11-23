@@ -1767,6 +1767,7 @@ fn label(cmd: &AgentCommand) -> String {
         AgentCommand::Unsubscribe { agent_id } => format!("unsubscribe:{agent_id}"),
         AgentCommand::ListAgents { .. } => "list".to_owned(),
         AgentCommand::SetUiLanguage { language } => format!("language:{language}"),
+        AgentCommand::PeerSubscribe { subscribed } => format!("peer:{subscribed}"),
         other => format!("{other:?}"),
     }
 }
@@ -2051,6 +2052,56 @@ async fn the_ui_language_goes_out_on_every_connection_and_on_change() {
         label(&h.command(&endpoint).await),
         "language:en",
         "the last value goes to the new connection"
+    );
+}
+
+// ADR-0394: what the daemon is told about the PC list slot goes out on change and again on every connection opened.
+#[tokio::test]
+async fn the_peer_want_goes_out_on_change_and_on_every_connection() {
+    use crate::daemon_client::peer_watch::PeerWant;
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    h.client.link.set_peer_want(PeerWant { subscribed: true });
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        "peer:true",
+        "a change goes out on the open connection"
+    );
+    let endpoint = h.reconnected(&endpoint).await;
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        "peer:true",
+        "the last want goes to the new connection"
+    );
+}
+
+// ADR-0394: the daemon's peer-state broadcast is relayed to the frontend once, as is.
+#[tokio::test]
+async fn a_peer_state_broadcast_is_relayed_once() {
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    endpoint.push(text(&AgentEvent::PeerStateUpdated {
+        state: engram_dashboard_protocol::PeerState {
+            state: "ready".into(),
+            reason: None,
+            id: Some("me".into()),
+            addresses: vec![],
+            network: None,
+            endpoint: "off".into(),
+            endpoint_error: None,
+            pcs: vec![],
+            knocks: vec![],
+            requests: vec![],
+            actions: vec![],
+        },
+    }));
+    wait_for("the peer notice", || h.events.seen().len() >= 2).await;
+    assert_eq!(
+        h.events.seen(),
+        [
+            "status:connected:none".to_owned(),
+            "peers:ready:0".to_owned()
+        ]
     );
 }
 
@@ -3166,6 +3217,26 @@ async fn forward_drops_a_webview_usage_subscribe() {
     );
 }
 
+// ADR-0394
+// The PC list slot's subscription is the shell's reading of the layout — a webview copy is dropped, so a page cannot keep the OS
+// dialog away from the questions.
+#[tokio::test]
+async fn forward_drops_a_webview_peer_subscribe() {
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    let cmd = serde_json::to_value(AgentCommand::PeerSubscribe { subscribed: true }).unwrap();
+    assert_eq!(
+        crate::commands::agent::forward_to_daemon(&h.client, cmd).await,
+        Ok(None)
+    );
+    let m = marker(&h.client);
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        m,
+        "the webview's peer subscription does not go out on the socket"
+    );
+}
+
 // A broken command slot from the webview (envelope · reply) fails the invoke and never reaches the link. The slots are
 // raw, so the packet parse passes — unstopped, an envelope would go out as a fire-and-forget without an id (the
 // frontend's pending never rejects) and a reply would be refused by the daemon without an id (the frontend never learns
@@ -3436,6 +3507,7 @@ fn kinds(cmds: &[DriverCmd]) -> Vec<&'static str> {
             DriverCmd::RequestReplay { .. } => "RequestReplay",
             DriverCmd::UsageNudge => "UsageNudge",
             DriverCmd::UiLanguage(_) => "UiLanguage",
+            DriverCmd::PeerWant(_) => "PeerWant",
             DriverCmd::HoldForBootStart => "HoldForBootStart",
             DriverCmd::BoundBootStart { .. } => "BoundBootStart",
             DriverCmd::EndBootStartHold { .. } => "EndBootStartHold",
@@ -3672,6 +3744,93 @@ async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_hel
         nudges(&mut rx),
         1,
         "the hidden mark remained and that window was counted as hidden"
+    );
+}
+
+// ── ADR-0410: closing the popout that holds the last PC list slot tells the daemon at once (its questions go to the OS dialog) ──
+// The popout close request drops a whole window outside the layout-command path, so it recomputes the peer want itself
+// (`drop_window_in_model`); `close_tab` / `close_window` go through the layout commands, which recompute it on every write.
+/// The peer wants waiting for the actor, in order (other commands are skipped).
+fn peer_wants(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DriverCmd>,
+) -> Vec<crate::daemon_client::peer_watch::PeerWant> {
+    let mut out = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        if let DriverCmd::PeerWant(want) = cmd {
+            out.push(want);
+        }
+    }
+    out
+}
+
+/// Puts a PC list slot in the active tab of `window` through the apply service (its resync tells the peer watch).
+fn place_peers(state: &LayoutState, client: &DaemonClient, window: &str) {
+    let (view, slot) = active_slot(state, window);
+    apply::set_slot_content(
+        state,
+        &RouterSubs {
+            router: &client.router,
+            client,
+        },
+        &NoLayoutEvents,
+        view,
+        slot,
+        crate::layout::SlotContent::Peers,
+    )
+    .expect("the PC list slot is placed");
+}
+
+#[tokio::test]
+async fn closing_the_popout_with_the_last_peers_slot_sends_peer_false() {
+    use crate::daemon_client::peer_watch::PeerWant;
+
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let state = LayoutState::new();
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    place_peers(&state, &client, POPUP);
+    assert_eq!(peer_wants(&mut rx), [PeerWant { subscribed: true }]);
+
+    close_requested_popup_window(POPUP, &state, &client.router, &client);
+    assert_eq!(
+        peer_wants(&mut rx),
+        [PeerWant { subscribed: false }],
+        "the last slot went with its window"
+    );
+    assert_eq!(
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
+        Some(0)
+    );
+    assert!(
+        peer_wants(&mut rx).is_empty(),
+        "the destroy cleanup has nothing more to say"
+    );
+}
+
+// Another window still holding a PC list slot keeps the questions in the app — closing one popout says nothing.
+#[tokio::test]
+async fn closing_a_popout_while_another_peers_slot_stays_sends_nothing() {
+    use crate::daemon_client::peer_watch::PeerWant;
+
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let state = LayoutState::new();
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    place_peers(&state, &client, MAIN_WINDOW_LABEL);
+    place_peers(&state, &client, POPUP);
+    close_requested_popup_window(POPUP, &state, &client.router, &client);
+    assert_eq!(
+        peer_wants(&mut rx),
+        [PeerWant { subscribed: true }],
+        "only the first slot was told"
     );
 }
 

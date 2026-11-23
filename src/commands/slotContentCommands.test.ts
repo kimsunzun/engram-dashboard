@@ -61,11 +61,11 @@ describe('slot menu contributions — visibility hideOn (ADR-0067)', () => {
 })
 
 describe('spawn cleanup — "Create" removal regression (ADR-0067)', () => {
-  it('the empty "New content" submenu has only tree · palette · usage (Create removed)', () => {
+  it('the empty "New content" submenu has only tree · palette · usage · PC list (Create removed)', () => {
     const container = buildSlotMenu('empty').find(i => i.id === 'container:slot.newContent')
     expect(container).toBeDefined()
     const childIds = container!.children!.map(c => c.id)
-    expect(childIds).toEqual(['slot.fill.agentList', 'slot.fill.presetPalette', 'slot.fill.usage'])
+    expect(childIds).toEqual(['slot.fill.agentList', 'slot.fill.presetPalette', 'slot.fill.usage', 'slot.fill.peers'])
     expect(childIds).not.toContain('slot.createAgentHere')
   })
 })

@@ -3,6 +3,7 @@
 import { agentClient } from '../api/clientFactory'
 import { list as cmdList, run as cmdRun } from '../commands/registry'
 import { useAgentStore } from './agentStore'
+import { usePeerStore } from './peerStore'
 import { useUsageStore } from './usageStore'
 import { initMainWindowFromBackend, subscribeViewEvents } from './viewStore'
 
@@ -141,6 +142,13 @@ export function initEventBus(): Promise<void> {
         }),
       )
       void useUsageStore.getState().pull()
+
+      // ADR-0394: the PC list slot's peer state — the slot reads `peer.list` itself on mount, so no pull here.
+      unlistenFns.push(
+        agentClient.onPeerStateUpdated(state => {
+          usePeerStore.getState().receive(state)
+        }),
+      )
 
       // Reconnect resync (Q2) + re-attach trigger for output views (see resyncAfterReconnect): without it the agent tree and profile list go stale on spawn/kill/profile broadcasts missed while disconnected. ★The first connected is skipped★ to avoid duplicating the App.tsx boot load. Same lastState guard as ProtocolClient (prev!=='connected' && cur==='connected'); the initial value is the current state so a first connected notification is not a re-transition.
       let lastConn = agentClient.connectionState

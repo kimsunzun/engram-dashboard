@@ -60,6 +60,17 @@ register({
   },
 })
 
+// ADR-0394: the PC list. Opening it is not a trust change — its actions are the human-only `peers.*` (peerCommands.ts).
+register({
+  id: 'slot.fill.peers',
+  title: () => t('slot.fillPeers'),
+  category: 'slot',
+  run: args => {
+    const { viewId, slotId } = requireCoords(args, 'slot.fill.peers')
+    return useViewStore.getState().setSlotContent(viewId, slotId, { type: 'peers' })
+  },
+})
+
 register({
   id: 'slot.createAgentHere',
   title: () => t('agent.create'),
@@ -113,12 +124,13 @@ registerSlotMenu('empty', [
       { commandId: 'slot.fill.agentList', group: 'content', order: 10 },
       { commandId: 'slot.fill.presetPalette', group: 'content', order: 20 },
       { commandId: 'slot.fill.usage', group: 'content', order: 30 },
+      { commandId: 'slot.fill.peers', group: 'content', order: 40 },
     ],
   },
 ])
 
 // ADR-0067: "Monitor agent" contribution — shown on empty·agent slots (assigns a running agent to the right-clicked slot).
-//   ★hideOn = ['agent_list','preset_palette','usage']★: on source slots (tree · palette) and the usage slot, "monitor an agent
+//   ★hideOn = ['agent_list','preset_palette','usage','peers']★: on source slots (tree · palette), the usage slot and the PC list, "monitor an agent
 //   here" is meaningless (the content of those slots is itself UI). The universal '*' registration covers empty·agent together and only these types
 //   are taken out by subtraction (ADR-0065 hideOn — not an allowlist, keeps the common single source).
 registerSlotMenu('*', [
@@ -126,7 +138,7 @@ registerSlotMenu('*', [
     commandId: 'slot.assignRunningAgent',
     group: 'content',
     order: 5,
-    hideOn: ['agent_list', 'preset_palette', 'usage'],
+    hideOn: ['agent_list', 'preset_palette', 'usage', 'peers'],
   },
 ])
 

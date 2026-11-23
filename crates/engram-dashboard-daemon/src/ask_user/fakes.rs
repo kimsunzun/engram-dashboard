@@ -1,5 +1,5 @@
-//! Test doubles for the "ask the user" seam: a dialog the test answers (or that finds no desktop) and an app route the test shows or
-//!   hides. Waits are "a message or a cap"; nothing passes by sleeping.
+//! Test doubles for the "ask the user" seam: a dialog the test answers (or that finds no desktop) and an app route the test turns on
+//!   or off. Waits are "a message or a cap"; nothing passes by sleeping.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -133,21 +133,21 @@ impl Dialogs for FakeDialogs {
     }
 }
 
-/// The app's route, shown or hidden by the test.
+/// The app's route — a PC list slot open or not, as the test sets it.
 #[derive(Default)]
 pub(crate) struct FakeApp {
-    shows: AtomicBool,
+    present: AtomicBool,
 }
 
 impl FakeApp {
-    pub(crate) fn set_shows(&self, shows: bool) {
-        self.shows.store(shows, Ordering::SeqCst);
+    pub(crate) fn set_present(&self, present: bool) {
+        self.present.store(present, Ordering::SeqCst);
     }
 }
 
 impl AppRoute for FakeApp {
-    fn shows_questions(&self) -> bool {
-        self.shows.load(Ordering::SeqCst)
+    fn takes_questions(&self) -> bool {
+        self.present.load(Ordering::SeqCst)
     }
 }
 

@@ -288,6 +288,8 @@ impl ConnectionHandler for AgentConnection {
             self.core
                 .usage()
                 .attach(conn_id, ConnUsageOutlet::new(frames.clone()));
+            // The peer-state entry likewise: nothing goes out before the connection subscribes (ADR-0394).
+            self.core.peer_state().attach(conn_id, frames.clone());
         })
     }
 
@@ -432,6 +434,8 @@ impl ConnectionHandler for AgentConnection {
         //   briefly while the outlet sends one frame may outlive this call — harmless (a single `try_send`). Nothing revives a cell, so a late
         //   subscription swap overlapping this cleanup is dropped (`UsageWatch::replace`).
         self.core.usage().detach(conn_id);
+        // The peer-state entry with its frame outlet; questions this connection showed go to the dialog (ADR-0394).
+        self.core.peer_state().detach(conn_id);
 
         // ── reap the command round trips this connection issued (ADR-0154) ───────────────────────
         // After the roster cleanup: reversed, a released round trip replying while this connection is still in the roster writes a frame to a dead outlet (harmless, causality blurs).
@@ -508,6 +512,7 @@ pub struct AgentConnections {
     // ADR-0155
     locals: Arc<dyn LocalCommands>,
     usage: Arc<UsageService>,
+    peer_state: Arc<crate::peer_state::PeerStateHub>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -523,6 +528,7 @@ impl AgentConnections {
         deliveries: CommandDeliveries,
         locals: Arc<dyn LocalCommands>,
         usage: Arc<UsageService>,
+        peer_state: Arc<crate::peer_state::PeerStateHub>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -535,6 +541,7 @@ impl AgentConnections {
             deliveries,
             locals,
             usage,
+            peer_state,
             shutdown_tx,
         }
     }
@@ -554,6 +561,7 @@ impl AgentConnections {
             self.deliveries.clone(),
             Arc::clone(&self.locals),
             Arc::clone(&self.usage),
+            Arc::clone(&self.peer_state),
             self.shutdown_tx.clone(),
         ));
         Arc::new(AgentConnection {
@@ -849,6 +857,22 @@ mod tests {
         deliveries: CommandDeliveries,
         usage: Arc<UsageService>,
     ) -> AgentConnections {
+        test_factory_with_peers(
+            fanout,
+            commands,
+            deliveries,
+            usage,
+            crate::peer_state::PeerStateHub::new(),
+        )
+    }
+
+    fn test_factory_with_peers(
+        fanout: Arc<dyn FrameFanout>,
+        commands: CommandRoster,
+        deliveries: CommandDeliveries,
+        usage: Arc<UsageService>,
+        peer_state: Arc<crate::peer_state::PeerStateHub>,
+    ) -> AgentConnections {
         use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
         use engram_dashboard_agent::profile::{
             AgentProfile, ProfileRegistry, ProfileStore, StoreError,
@@ -894,8 +918,118 @@ mod tests {
             // An assembly with no commands of its own — what this harness looks at is the roster and cleanup order.
             Arc::new(crate::command_delivery::NoLocalCommands),
             usage,
+            peer_state,
             shutdown_tx,
         )
+    }
+
+    // ── peer state (ADR-0394): the subscription arrives over the connection and the state comes back on it ──
+
+    struct OneState;
+
+    impl crate::peer_state::PeerStateSource for OneState {
+        fn state(&self) -> engram_dashboard_protocol::PeerState {
+            engram_dashboard_protocol::PeerState {
+                state: "ready".into(),
+                reason: None,
+                id: Some("me".into()),
+                addresses: vec![],
+                network: None,
+                endpoint: "off".into(),
+                endpoint_error: None,
+                pcs: vec![],
+                knocks: vec![],
+                requests: vec![],
+                actions: vec![],
+            }
+        }
+        fn route_changed(&self) {}
+    }
+
+    /// The `PeerSubscribe` arm passes its flag, the connection is attached on connect and detached on disconnect, and
+    ///   the state comes back on the same connection.
+    #[tokio::test]
+    async fn a_peer_subscription_over_the_connection_gets_the_state_and_routes_the_questions() {
+        use crate::ask_user::AppRoute;
+
+        let hub = crate::peer_state::PeerStateHub::new();
+        hub.bind(Arc::new(OneState));
+        let task = tokio::spawn(hub.clone().run());
+        let factory = test_factory_with_peers(
+            Arc::new(crate::test_doubles::RecordingFanout::new()),
+            CommandRoster::new(),
+            CommandDeliveries::new(),
+            crate::usage_service::fakes::idle_service(),
+            hub.clone(),
+        );
+        let conn = factory.handler_for(1);
+        let (tx, mut rx) = mpsc::channel::<Frame>(8);
+        let frames = frame_sink(tx);
+        conn.on_connect(1, &frames).await;
+        for _ in 0..2 {
+            let _ = next_event(&mut rx).await;
+        }
+
+        // Subscribed: the state comes, and the questions go to the app (ADR-0410).
+        assert!(!hub.takes_questions());
+        let subscribe = command_json(&AgentCommand::PeerSubscribe { subscribed: true });
+        conn.on_text(1, &subscribe, &frames).await;
+        match next_event(&mut rx).await {
+            AgentEvent::PeerStateUpdated { state } => assert_eq!(state.id.as_deref(), Some("me")),
+            other => panic!("expected the peer state: {other:?}"),
+        }
+        assert!(
+            hub.takes_questions(),
+            "a PC list slot is open — questions go to the app"
+        );
+
+        conn.on_disconnect(1);
+        assert!(
+            !hub.takes_questions(),
+            "a dropped connection takes its slot with it"
+        );
+        task.abort();
+    }
+
+    /// A language switch rebuilds the app's peer state — its request cards carry the question in the UI language (ADR-0394, ADR-0406).
+    #[tokio::test]
+    async fn a_language_switch_re_sends_the_peer_state() {
+        let hub = crate::peer_state::PeerStateHub::new();
+        hub.bind(Arc::new(OneState));
+        let task = tokio::spawn(hub.clone().run());
+        let factory = test_factory_with_peers(
+            Arc::new(crate::test_doubles::RecordingFanout::new()),
+            CommandRoster::new(),
+            CommandDeliveries::new(),
+            crate::usage_service::fakes::idle_service(),
+            hub.clone(),
+        );
+        let conn = factory.handler_for(1);
+        let (tx, mut rx) = mpsc::channel::<Frame>(8);
+        let frames = frame_sink(tx);
+        conn.on_connect(1, &frames).await;
+        for _ in 0..2 {
+            let _ = next_event(&mut rx).await;
+        }
+        let subscribe = command_json(&AgentCommand::PeerSubscribe { subscribed: true });
+        conn.on_text(1, &subscribe, &frames).await;
+        assert!(matches!(
+            next_event(&mut rx).await,
+            AgentEvent::PeerStateUpdated { .. }
+        ));
+
+        let language = command_json(&AgentCommand::SetUiLanguage {
+            language: "ko".to_string(),
+        });
+        conn.on_text(1, &language, &frames).await;
+        assert!(
+            matches!(
+                next_event(&mut rx).await,
+                AgentEvent::PeerStateUpdated { .. }
+            ),
+            "the switch re-sends the state"
+        );
+        task.abort();
     }
 
     fn command_json(cmd: &AgentCommand) -> String {

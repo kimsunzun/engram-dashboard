@@ -1260,7 +1260,7 @@ mod tests {
 
     // ── the `peer.*` table and its approval gate (ADR-0394) ──────────────────────────────────────────────
 
-    /// A daemon table with the `peer.*` table over fake trust operations; the app shows the slot, so no dialog opens.
+    /// A daemon table with the `peer.*` table over fake trust operations; the app has a PC list slot open, so no dialog opens.
     fn peer_table(
         manager: Arc<AgentManager>,
     ) -> (
@@ -1274,7 +1274,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (dialogs, _shown) = FakeDialogs::new();
         let app = Arc::new(FakeApp::default());
-        app.set_shows(true);
+        app.set_present(true);
         let approvals = Approvals::start(
             source(ops.clone()),
             dialogs,
@@ -1440,6 +1440,7 @@ mod tests {
             .expect("a name of this table")
             .expect("listed");
         assert_eq!(listed["requests"][0]["agent_id"], ids[0].to_string());
-        assert_eq!(listed["requests"][0]["agent_name"], "alpha");
+        // Quoted as the dialog quotes it (ADR-0394 d6).
+        assert_eq!(listed["requests"][0]["agent_name"], "\"alpha\"");
     }
 }

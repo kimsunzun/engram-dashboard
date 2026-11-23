@@ -14,6 +14,7 @@ import './agentCommands'
 import './scrollCommands'
 import './chatCommands'
 import './usageCommands'
+import './peerCommands'
 import './connectionCommands'
 
 import { validateSlotMenuContributions } from './slotMenu'

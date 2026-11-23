@@ -1791,6 +1791,49 @@ describe('usage — broadcast branch · ⟳ · shell cache pull', () => {
   })
 })
 
+// ── peer (ADR-0394) ───────────────────────────────────────────────────────────────────
+describe('peer state and peer commands', () => {
+  it('PeerStateUpdated → onPeerStateUpdated(state) · nothing after off', () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const seen: unknown[] = []
+    const off = c.onPeerStateUpdated(s => seen.push(s))
+    t.control({ PeerStateUpdated: { state: { state: 'ready' } } })
+    expect(seen).toEqual([{ state: 'ready' }])
+    off()
+    t.control({ PeerStateUpdated: { state: { state: 'ready' } } })
+    expect(seen).toHaveLength(1)
+  })
+
+  it('peerCommand → one Command envelope; the CommandReply with its request_id resolves it with the Ok value', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.peerCommand('peer.approve', { request: 'r1' })
+    await Promise.resolve()
+    expect(t.sent).toEqual([
+      { Command: { envelope: { name: 'peer.approve', request_id: 'req-1', owner: 'daemon', proto_ver: 1, args: { request: 'r1' } } } },
+    ])
+    t.control({ CommandReply: { reply: { request_id: 'req-1', outcome: { Ok: { outcome: 'applied' } } } } })
+    await expect(p).resolves.toEqual({ outcome: 'applied' })
+  })
+
+  it('an Err reply rejects with the code and message', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.peerCommand('peer.deny', { request: 'gone' })
+    await Promise.resolve()
+    t.control({ CommandReply: { reply: { request_id: 'req-1', outcome: { Err: { code: 'NOT_FOUND', message: 'no such request' } } } } })
+    await expect(p).rejects.toMatchObject({ name: 'DaemonCommandError', code: 'NOT_FOUND', message: 'no such request' })
+  })
+
+  it('a name outside peer.* is refused before anything is sent', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    await expect(c.peerCommand('agent.list' as `peer.${string}`, {})).rejects.toThrow(/not a peer command/)
+    expect(t.sent).toEqual([])
+  })
+})
+
 // ── close ───────────────────────────────────────────────────────────────────────────
 describe('close', () => {
   it('close() → pending reject + transport.close called + timers cleaned up', async () => {

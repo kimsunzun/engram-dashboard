@@ -142,6 +142,8 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         | AgentCommand::Unsubscribe { .. }
         | AgentCommand::UsageSubscribe { .. }
         | AgentCommand::SetUiLanguage { .. }
+        // ADR-0394: a full replacement with no answer.
+        | AgentCommand::PeerSubscribe { .. }
         // `CommandOutcome` is a reply I send, so `None`: its correlation key belongs to a request the daemon gave me, not my pending table — `Some` would create an empty pending slot at send that stays until the connection drops.
         | AgentCommand::CommandOutcome { .. } => None,
     }
@@ -183,6 +185,8 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         // ADR-0061
         | AgentEvent::PresetListUpdated { .. }
         | AgentEvent::UsageLimitsUpdated { .. }
+        // ADR-0394: a broadcast to subscribed connections.
+        | AgentEvent::PeerStateUpdated { .. }
         // `CommandRequest` is an incoming request, so `None` (load-bearing): its envelope's request_id is the daemon's key, not mine — `Some` makes the receiving side read it as the reply it was waiting for and swallow the envelope, so the command is not executed and the sender hangs until the deadline.
         | AgentEvent::CommandRequest { .. } => None,
     }

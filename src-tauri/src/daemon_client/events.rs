@@ -5,14 +5,15 @@
 // ADR-0012
 
 use engram_dashboard_protocol::{
-    AgentId, AgentInfo, AgentProfile, AgentStatus, Preset, RestoreReport, UsageLimitSnapshot,
+    AgentId, AgentInfo, AgentProfile, AgentStatus, PeerState, Preset, RestoreReport,
+    UsageLimitSnapshot,
 };
 use tauri::Emitter;
 
 use super::ConnectionStatus;
 
 /// Notification port from the daemon connection to the frontend. Called only while no lock is held (ADR-0006). The implementation swallows failures: a window that does not exist yet or a closed channel is no reason to roll back the connection; the frontend recovers on the next broadcast or re-query (same contract as `crate::layout::LayoutEvents`).
-/// These seven are all the emits the connection task makes — do not widen it: the port would stop being "what the connection task tells the frontend" and become an "AppHandle stand-in", dragging in things that cannot be set up without a window. The seventh ([`Self::usage_limits_updated`]) escapes that warning: same kind (a 1:1 relay of one daemon broadcast), and the added `labels` · `socket_epoch` are only what the call site hands over — a pure module's result and its own socket marker; matching and re-sending live outside the port (the call site and `super::usage_interest`), the port receives only computed values (TRD S21 usage-limit-slot §6 #23).
+/// These eight are all the emits the connection task makes — do not widen it: the port would stop being "what the connection task tells the frontend" and become an "AppHandle stand-in", dragging in things that cannot be set up without a window. The seventh ([`Self::usage_limits_updated`]) escapes that warning: same kind (a 1:1 relay of one daemon broadcast), and the added `labels` · `socket_epoch` are only what the call site hands over — a pure module's result and its own socket marker; matching and re-sending live outside the port (the call site and `super::usage_interest`), the port receives only computed values (TRD S21 usage-limit-slot §6 #23). The eighth ([`Self::peer_state_updated`], ADR-0394) is the same kind: a 1:1 relay of one daemon broadcast, nothing added.
 pub(crate) trait DaemonEvents: Send + Sync {
     /// The link's connection status changed — `(state, band)`, either part. The payload is the frontend contract: the serialized [`ConnectionStatus`] (`src/api/tauriTransport.ts` parses it; the `daemon_connection_state` pull returns the same value).
     fn connection_status(&self, status: &ConnectionStatus);
@@ -37,6 +38,9 @@ pub(crate) trait DaemonEvents: Send + Sync {
         labels: &[String],
         socket_epoch: u64,
     );
+
+    /// The peer state for the PC list slot — once per daemon broadcast, to every webview (a window without the slot ignores it).
+    fn peer_state_updated(&self, state: &PeerState);
 }
 
 /// Payload of `"usage-limits-updated"` — the field names are the contract with the webview (`{labels, socket_epoch, snapshot}` of TRD S21 usage-limit-slot §1-8); change the receiving side together.
@@ -102,6 +106,11 @@ impl DaemonEvents for TauriEmitter {
             },
         );
     }
+
+    // The payload is the protocol `PeerState` as is — `src/api/tauriTransport.ts` reads it under the same event name.
+    fn peer_state_updated(&self, state: &PeerState) {
+        let _ = self.0.emit("peer-state-updated", state);
+    }
 }
 
 /// Assembly that drops notifications — harness only. Dropping is the contract: a harness plugged with this does not measure emit content (to measure firing pass a recording fake through `super::DaemonClient::new_on_link`); losing notifications touches no invariant of connection, reconnection or command round trip — frontend notifications are one-way and the connection task does not read their success (the real adapter swallows `Err` too).
@@ -124,6 +133,7 @@ impl DaemonEvents for NoDaemonEvents {
         _socket_epoch: u64,
     ) {
     }
+    fn peer_state_updated(&self, _state: &PeerState) {}
 }
 
 #[cfg(test)]

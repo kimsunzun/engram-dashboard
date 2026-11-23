@@ -23,9 +23,9 @@ struct Rig {
 fn rig() -> Rig {
     let ops = Arc::new(FakeOps::default());
     let (dialogs, shown) = FakeDialogs::new();
-    // The app shows the slot, so no dialog opens — these tests answer by command.
+    // The app has a PC list slot open, so no dialog opens — these tests answer by command.
     let app = Arc::new(FakeApp::default());
-    app.set_shows(true);
+    app.set_present(true);
     let approvals = Approvals::start(
         source(ops.clone()),
         dialogs,
@@ -151,7 +151,8 @@ fn an_agents_gated_calls_only_request_and_return_at_once() {
         .map(|row| row["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["add", "setNetwork", "regenerateKey", "rename"]);
-    assert_eq!(listed["requests"][0]["agent_name"], "lead");
+    // Quoted as the dialog quotes it (ADR-0394 d6).
+    assert_eq!(listed["requests"][0]["agent_name"], "\"lead\"");
 }
 
 /// ADR-0394 d1: an address edit and a removal are open to agents.
@@ -850,4 +851,210 @@ fn peer_list_shows_each_pcs_agents_and_leaves_them_out_on_request() {
     let one = run(&rig, LIST, json!({ "name": "office" }), &agent()).unwrap();
     assert_eq!(one["pcs"].as_array().unwrap().len(), 1);
     assert_eq!(one["pcs"][0]["agents"].as_array().unwrap().len(), 2);
+}
+
+/// The app's copy of the peer area is `peer.list`'s answer field for field — the slot reads one shape from both (ADR-0394): the
+///   mapping carries every field, and the copy the hub sends is what `peer.list --agents false` answers.
+#[test]
+fn the_app_state_serializes_like_the_peer_list_answer() {
+    let ok = PeerListOk {
+        state: "ready".to_string(),
+        reason: Some("r".to_string()),
+        id: Some("id".to_string()),
+        addresses: vec!["10.0.0.2:47120".to_string()],
+        network: Some(PeerNetworkRow {
+            port: Some(1),
+            listen_port: 2,
+            relay: "default".to_string(),
+            address_lookup: "none".to_string(),
+            mdns: false,
+        }),
+        endpoint: "up".to_string(),
+        endpoint_error: Some("e".to_string()),
+        pcs: vec![PeerPcRow {
+            id: "p".to_string(),
+            name: "office".to_string(),
+            address: Some("10.0.0.3:47120".to_string()),
+            online: "refused".to_string(),
+            warning: Some("w".to_string()),
+            directory: "connected".to_string(),
+            agents: vec![PeerAgentRow {
+                name: "alice".to_string(),
+                id: "id-a".to_string(),
+                state: "live".to_string(),
+            }],
+        }],
+        knocks: vec![PeerKnockRow {
+            id: "k".to_string(),
+            count: 3,
+            last_at_ms: 4,
+        }],
+        requests: vec![PeerRequestRow {
+            request: "q".to_string(),
+            kind: "add".to_string(),
+            summary: "s".to_string(),
+            agent_id: Some("a".to_string()),
+            agent_name: Some("n".to_string()),
+            origin: Some("o".to_string()),
+            asked_at_ms: 5,
+            expires_in_s: Some(6),
+            title: "t".to_string(),
+            heading: "h".to_string(),
+            lines: vec!["l1".to_string(), String::new(), "l2".to_string()],
+        }],
+        actions: vec!["x".to_string()],
+    };
+    assert_eq!(
+        serde_json::to_value(app_state(ok.clone())).unwrap(),
+        serde_json::to_value(ok).unwrap()
+    );
+
+    use crate::peer_state::PeerStateSource as _;
+    let rig = rig();
+    office(&rig);
+    with_agents(&rig, 0x11, 2);
+    run(&rig, REGENERATE_KEY, json!({}), &agent()).unwrap();
+    let app = AppPeerState::new(rig.commands.approvals.clone()).state();
+    assert_eq!(
+        serde_json::to_value(app).unwrap(),
+        run(&rig, LIST, json!({ "agents": false }), &human()).unwrap()
+    );
+}
+
+/// Puts `count` agent rows in the directory copy of PC `byte` and marks it online.
+fn with_agents(rig: &Rig, byte: u8, count: usize) {
+    use crate::link::peer::book::Online;
+    use crate::link::peer::wire::{AgentState, DirAgent};
+    rig.ops.with(|state| {
+        state.online.insert(pc(byte), Online::Online);
+        state.agents.insert(
+            pc(byte),
+            (0..count)
+                .map(|n| DirAgent {
+                    id: format!("id-{n:04}"),
+                    name: format!("agent-{n:04}"),
+                    state: AgentState::Live,
+                })
+                .collect(),
+        );
+    });
+}
+
+/// The app's copy leaves every agent row out, however many a PC lists — the slot does not show them, and they must not grow one push
+///   past the shell's message cap. The directory word stays.
+#[test]
+fn the_app_copy_carries_no_agent_rows() {
+    use crate::peer_state::PeerStateSource as _;
+    let rig = rig();
+    office(&rig);
+    with_agents(&rig, 0x11, 500);
+    let listed = run(&rig, LIST, json!({}), &human()).unwrap();
+    assert_eq!(listed["pcs"][0]["agents"].as_array().unwrap().len(), 500);
+    let app = AppPeerState::new(rig.commands.approvals.clone()).state();
+    assert_eq!(app.pcs.len(), 1);
+    assert_eq!(app.pcs[0].agents.len(), 0);
+    assert_eq!(app.pcs[0].directory, "connected");
+}
+
+/// `peer.approve` names the network fields an approved request replaced although they had moved — the app shows them (ADR-0394).
+#[test]
+fn an_approve_answer_names_the_network_fields_that_moved() {
+    assert_eq!(
+        moved_fields(&Applied::NetworkMoved(vec!["relay", "mdns"])),
+        vec!["relay".to_string(), "mdns".to_string()]
+    );
+    assert!(moved_fields(&Applied::Done).is_empty());
+}
+
+/// A request row carries the question as the dialog shows it (ADR-0394 d6): every value a request would write, the grouped
+///   IDs, the flags the dialog raises and what approving allows — so the app's card shows no less than the dialog.
+#[test]
+fn a_request_row_carries_the_question_the_dialog_shows() {
+    let rig = rig();
+    office(&rig);
+    run(
+        &rig,
+        ADD,
+        json!({ "id": id_text(0x44), "name": "home" }),
+        &human(),
+    )
+    .unwrap();
+    // A first request lets the approvals see "office" held by 0x11; then the human removes it and an agent asks for the name again.
+    run(
+        &rig,
+        ADD,
+        json!({ "id": id_text(0x22), "name": "laptop" }),
+        &agent(),
+    )
+    .unwrap();
+    run(&rig, REMOVE, json!({ "name": "office" }), &human()).unwrap();
+    for (name, args) in [
+        (ADD, json!({ "id": id_text(0x33), "name": "office" })),
+        (SET_NETWORK, json!({ "relay": "none" })),
+        (REGENERATE_KEY, json!({})),
+        (EDIT, json!({ "name": "home", "new_name": "house" })),
+    ] {
+        run(&rig, name, args, &agent()).unwrap();
+    }
+    let list = run(&rig, LIST, json!({}), &human()).unwrap();
+    let text_of = |kind: &str, needle: &str| -> String {
+        let row = list["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == kind && row["lines"].to_string().contains(needle))
+            .unwrap_or_else(|| panic!("no {kind} request mentioning {needle}: {list}"));
+        assert!(!row["title"].as_str().unwrap().is_empty());
+        assert!(!row["heading"].as_str().unwrap().is_empty());
+        row["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line.as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let add = text_of("add", &pc(0x33).grouped());
+    assert!(
+        add.contains(&format!(
+            "belonged to another PC (ID {})",
+            pc(0x11).grouped()
+        )),
+        "{add}"
+    );
+    assert!(add.contains("Approving adds it"), "{add}");
+    let network = text_of("setNetwork", "Relay server");
+    assert!(network.contains("→ none"), "{network}");
+    let regenerate = text_of("regenerateKey", "new ID");
+    assert!(
+        regenerate.contains("every other PC must remove the old ID"),
+        "{regenerate}"
+    );
+    let rename = text_of("rename", "house");
+    assert!(rename.contains("\"home\" → \"house\""), "{rename}");
+    assert!(rename.contains(&pc(0x44).grouped()), "{rename}");
+    // The agent's id comes before its name, and its name is made visible.
+    assert!(
+        add.contains("(id 6f1c2a90…) asks. Its name: \"lead\""),
+        "{add}"
+    );
+}
+
+/// Outside strings in a request row are made visible and bounded before they leave the daemon (ADR-0394 d6).
+#[test]
+fn a_request_rows_agent_name_is_made_visible_and_capped() {
+    let rig = rig();
+    let hostile = PeerCaller::Agent(Requester {
+        id: "6f1c2a90-0000-4000-8000-000000000002".to_string(),
+        name: Some(format!("a\u{202E}b{}", "x".repeat(200))),
+    });
+    run(&rig, REGENERATE_KEY, json!({}), &hostile).unwrap();
+    let list = run(&rig, LIST, json!({}), &human()).unwrap();
+    let name = list["requests"][0]["agent_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!name.contains('\u{202E}'), "{name:?}");
+    assert!(name.contains('\u{FFFD}'), "{name:?}");
+    assert!(name.starts_with('"') && name.ends_with("…\""), "{name:?}");
 }

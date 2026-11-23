@@ -2,17 +2,18 @@
 //!   later kinds. ★It knows nothing of what is asked★: the asker writes every word of the question, in each UI language, and applies the
 //!   answer; this module only routes and shows.
 //!
-//! Route, in order: the app while it shows the place for these questions (the PC list slot — [`AppRoute`], plugged in by the app's
-//!   route; [`NoAppRoute`] until then) → the OS's native approval dialog (platform `approval`, behind [`Dialogs`]) → otherwise the
+//! Route, in order: the app while it is attached with a PC list slot open, on screen or not ([`AppRoute`], production = the connection
+//!   layer's `peer_state::PeerStateHub`; ADR-0410) → the OS's native approval dialog (platform `approval`, behind [`Dialogs`]) → otherwise the
 //!   question waits until the app answers it or the asker withdraws it (expiry). The app does not answer through this module: it answers
 //!   through the asker's commands, and the asker then [`AskUser::withdraw`]s the question.
 //!
 //! Rules (who guarantees what):
 //! - One dialog at a time, on this module's own thread — never on the daemon's async tasks (the platform call blocks until the user ends
 //!   it). The asker's answer callback runs on that thread, outside this module's lock — never after [`AskUser::stop`] began.
-//! - While the app shows the slot no new dialog opens; a dialog already open stays — whichever answer comes first wins, because the
-//!   asker consumes its question atomically. When the app stops showing it (the app calls [`AskUser::route_changed`], which goes through
-//!   this module's lock so the wake-up cannot fall between the dialog thread's check and its wait), open questions go to the dialog.
+//! - While the app takes the questions no new dialog opens, however long a question waits there (ADR-0410 — one buried behind other
+//!   windows is the user's to find); a dialog already open stays — whichever answer comes first wins, because the asker consumes its
+//!   question atomically. When the app stops taking them (the app calls [`AskUser::route_changed`], which goes through this module's
+//!   lock so the wake-up cannot fall between the dialog thread's check and its wait), open questions go to the dialog.
 //! - At most one new dialog per question kind per [`DIALOG_RATE`]; the rest queue. A dialog shows the oldest question it may show and says
 //!   how many others wait; its answer applies to the question shown only.
 //! - A dialog whose question is withdrawn (answered in the app, expired, no longer asked) is dismissed; where the platform cannot close
@@ -23,7 +24,7 @@
 //! - The language is read when a dialog is about to show ([`LanguageSource`] — the user's `ui.language` as the shell last told the
 //!   daemon; English until it does), so a change applies to the next dialog.
 
-// ADR-0394, ADR-0372
+// ADR-0394, ADR-0372, ADR-0410
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -112,17 +113,20 @@ pub(crate) enum Answer {
     DenyAndStop,
 }
 
-/// The app's route: whether the app shows the place for these questions right now (the PC list slot in the active tab of a
-///   non-minimized window). ★Called under this module's lock — answer from a value at hand, never block or call back into the asker★.
+/// The app's route: whether the app takes these questions right now (attached with a PC list slot open — ADR-0410). ★Called under this
+///   module's lock — answer from a value at hand, never block or call back into the asker★.
 pub(crate) trait AppRoute: Send + Sync {
-    fn shows_questions(&self) -> bool;
+    fn takes_questions(&self) -> bool;
 }
 
-/// No app route — every question goes to the dialog (or waits where there is no desktop).
+/// No app route — every question goes to the dialog (or waits where there is no desktop). Tests only; production plugs in the
+///   connection layer's peer-state hub (`peer_state`).
+#[cfg(test)]
 pub(crate) struct NoAppRoute;
 
+#[cfg(test)]
 impl AppRoute for NoAppRoute {
-    fn shows_questions(&self) -> bool {
+    fn takes_questions(&self) -> bool {
         false
     }
 }
@@ -245,7 +249,9 @@ impl AskUser {
 
     /// Opens a question. Re-asking an open id replaces its text (a dialog already showing it keeps the old text).
     pub(crate) fn ask(&self, id: QuestionId, question: Question) {
-        lock(&self.shared.state).open.insert(id, question);
+        let mut state = lock(&self.shared.state);
+        state.open.insert(id, question);
+        drop(state);
         self.shared.wake.notify_all();
     }
 
@@ -268,8 +274,8 @@ impl AskUser {
         self.shared.wake.notify_all();
     }
 
-    /// The app started or stopped showing the place for questions — routes the open questions again (to the dialog when it stopped).
-    ///   Recorded under the lock, so the dialog thread cannot read the old visibility and then miss this wake-up.
+    /// The app started or stopped taking the questions — routes the open questions again (to the dialog when it stopped). Recorded
+    ///   under the lock, so the dialog thread cannot read the old route and then miss this wake-up.
     pub(crate) fn route_changed(&self) {
         let state = lock(&self.shared.state);
         self.shared.wake.notify_all();
@@ -410,23 +416,23 @@ impl Shared {
 
     /// What the dialog thread does next — decided under the lock (the app route is read here too).
     fn next(&self, state: &mut State) -> Next {
-        if state.shown.is_some()
-            || state.no_desktop
-            || state.open.is_empty()
-            || self.app.shows_questions()
-        {
+        if state.shown.is_some() || state.no_desktop || state.open.is_empty() {
+            return Next::Idle;
+        }
+        // `route_changed` wakes this thread on every change of the app's answer.
+        if self.app.takes_questions() {
             return Next::Idle;
         }
         let now = self.clock.now();
         let mut earliest: Option<Instant> = None;
+        let mut later = |at: Instant| earliest = Some(earliest.map_or(at, |e: Instant| e.min(at)));
         let pick =
             state
                 .open
                 .iter()
                 .find(|(_, question)| match state.last_dialog.get(question.kind) {
                     Some(last) if *last + DIALOG_RATE > now => {
-                        let at = *last + DIALOG_RATE;
-                        earliest = Some(earliest.map_or(at, |e| e.min(at)));
+                        later(*last + DIALOG_RATE);
                         false
                     }
                     _ => true,

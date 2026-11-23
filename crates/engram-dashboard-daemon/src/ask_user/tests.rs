@@ -125,11 +125,11 @@ fn closing_the_dialog_without_a_choice_is_a_deny() {
 #[test]
 fn while_the_app_shows_the_slot_no_dialog_opens_and_hiding_it_reroutes_to_the_dialog() {
     let rig = rig();
-    rig.app.set_shows(true);
+    rig.app.set_present(true);
     rig.ask.ask(1, question("a", "q1"));
     no_dialog(&rig.shown);
 
-    rig.app.set_shows(false);
+    rig.app.set_present(false);
     rig.ask.route_changed();
     let shown = next_dialog(&rig.shown);
     assert_eq!(shown.heading, "q1", "the open question moved to the dialog");
@@ -193,11 +193,11 @@ fn one_dialog_at_a_time_counts_the_others_and_answers_only_the_one_shown() {
 #[test]
 fn the_waiting_count_reads_in_the_plural() {
     let rig = rig();
-    rig.app.set_shows(true);
+    rig.app.set_present(true);
     for id in 1..=3 {
         rig.ask.ask(id, question("a", &format!("q{id}")));
     }
-    rig.app.set_shows(false);
+    rig.app.set_present(false);
     rig.ask.route_changed();
     let shown = next_dialog(&rig.shown);
     assert!(
@@ -282,10 +282,10 @@ fn stopping_dismisses_the_open_dialog() {
 fn a_dialog_speaks_the_language_the_shell_set() {
     let rig = rig();
     rig.language.set(Lang::Ko);
-    rig.app.set_shows(true);
+    rig.app.set_present(true);
     rig.ask.ask(1, question("a", "q1"));
     rig.ask.ask(2, question("b", "q2"));
-    rig.app.set_shows(false);
+    rig.app.set_present(false);
     rig.ask.route_changed();
     let shown = next_dialog(&rig.shown);
     assert!(shown.body.starts_with("body of q1 (ko)"), "{}", shown.body);
@@ -308,10 +308,10 @@ fn hiding_the_slot_always_reaches_the_dialog() {
     for round in 0..50u64 {
         // Each round's dialog is a new one of the same kind — let the rate limit pass.
         clock.advance(DIALOG_RATE);
-        rig.app.set_shows(true);
+        rig.app.set_present(true);
         rig.ask.ask(round, question("a", &format!("q{round}")));
         rig.ask.route_changed();
-        rig.app.set_shows(false);
+        rig.app.set_present(false);
         rig.ask.route_changed();
         let shown = next_dialog(&rig.shown);
         assert_eq!(shown.heading, format!("q{round}"));
@@ -373,4 +373,23 @@ fn a_dialog_that_keeps_failing_is_retried_and_warned_once() {
         !rig.ask.is_failing(),
         "a dialog showed — the next failure warns again"
     );
+}
+
+/// ADR-0410: no backstop — while the app takes the questions, one nobody answers there still never opens a dialog; closing the
+///   last slot sends it to the dialog.
+#[test]
+fn a_question_left_unanswered_in_the_app_waits_there() {
+    let clock = Arc::new(ManualClock::new());
+    let rig = rig_with(clock.clone());
+    rig.app.set_present(true);
+    rig.ask.ask(1, question("a", "q1"));
+    no_dialog(&rig.shown);
+
+    clock.advance(DIALOG_RATE * 10);
+    rig.ask.route_changed();
+    no_dialog(&rig.shown);
+
+    rig.app.set_present(false);
+    rig.ask.route_changed();
+    assert_eq!(next_dialog(&rig.shown).heading, "q1");
 }

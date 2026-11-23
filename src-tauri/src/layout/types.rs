@@ -48,6 +48,10 @@ pub enum SlotContent {
         #[serde(default = "enabled")]
         show_codex: bool,
     },
+    /// The PC list (this user's daemons on other PCs — ADR-0394). A unit with no fields: the peer state is the daemon's, relayed
+    /// to the webview; the shell only reads whether this slot is open somewhere to tell the daemon, which then routes the approval
+    /// questions to the app (`daemon_client::peer_watch`). Older `state.json` files never hold it, so they load unchanged.
+    Peers,
 }
 
 fn enabled() -> bool {
@@ -65,7 +69,8 @@ impl SlotContent {
             SlotContent::Empty
             | SlotContent::AgentList
             | SlotContent::PresetPalette
-            | SlotContent::Usage { .. } => None,
+            | SlotContent::Usage { .. }
+            | SlotContent::Peers => None,
         }
     }
 }
@@ -249,6 +254,37 @@ impl LayoutNode {
 #[cfg(test)]
 mod tests {
     use super::SlotContent;
+
+    /// The PC list slot (ADR-0394) is a bare tag on the wire and round-trips; the variants older files hold still read as before.
+    #[test]
+    fn the_peers_slot_round_trips_and_older_variants_still_read() {
+        let peers = serde_json::to_value(SlotContent::Peers).unwrap();
+        assert_eq!(peers, serde_json::json!({ "type": "peers" }));
+        assert_eq!(
+            serde_json::from_value::<SlotContent>(peers).unwrap(),
+            SlotContent::Peers
+        );
+        for (old, want) in [
+            (r#"{"type":"empty"}"#, SlotContent::Empty),
+            (r#"{"type":"agent_list"}"#, SlotContent::AgentList),
+            (r#"{"type":"preset_palette"}"#, SlotContent::PresetPalette),
+            (
+                r#"{"type":"agent","agent_id":"a"}"#,
+                SlotContent::Agent {
+                    agent_id: "a".to_string(),
+                },
+            ),
+            (
+                r#"{"type":"usage"}"#,
+                SlotContent::Usage {
+                    show_claude: true,
+                    show_codex: true,
+                },
+            ),
+        ] {
+            assert_eq!(serde_json::from_str::<SlotContent>(old).unwrap(), want);
+        }
+    }
 
     #[test]
     fn a_usage_slot_reads_missing_flags_as_on() {

@@ -27,6 +27,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use engram_dashboard_protocol::{
+    PeerState, PeerStateAgent, PeerStateKnock, PeerStateNetwork, PeerStatePc, PeerStateRequest,
+};
+
 use engram_dashboard_command::{
     blocking_handler, declare_commands, CommandDecl, CommandError, CommandFuture, CommandSpec,
     CommandTable, ErrorCode,
@@ -46,8 +50,10 @@ use super::trusted::{check_name, Helper, Permission, TrustedPeer};
 use super::wire::{AgentState, DuplicateKind};
 
 declare_commands! {
-    // v1: the first daemon-declared table (ADR-0394).
-    catalog_version: 1;
+    // v1: the first daemon-declared table (ADR-0394). v2: `peer.list` rows carry each trusted PC's agent directory (`directory`,
+    //   `agents`, `--agents` — ADR-0391); and for the app's PC list slot `peer.approve` answers `moved`, a request row carries the
+    //   question as the dialog shows it (`title` · `heading` · `lines`), and its agent name and origin are made visible.
+    catalog_version: 2;
 
     /// This PC's network settings.
     struct PeerNetworkRow {
@@ -99,11 +105,17 @@ declare_commands! {
         summary: String,
         /// The requesting agent — absent for a question the peer state raised.
         agent_id: Option<String>,
+        /// Agent-supplied: quoted, escaped, one line, capped — as the dialog shows it.
         agent_name: Option<String>,
-        /// The PC whose mail most recently reached that agent (a hint).
+        /// The PC whose mail most recently reached that agent (a hint) — quoted, escaped, one line, capped.
         origin: Option<String>,
         asked_at_ms: i64,
         expires_in_s: Option<u64>,
+        /// The question as the approval dialog shows it, in the user's UI language: title, heading, and the body's lines (an empty
+        /// line separates paragraphs) — what is asked, every value it would write, and what approving allows.
+        title: String,
+        heading: String,
+        lines: Vec<String>,
     }
 
     /// The peer area in one query — this PC's ID and direct addresses, the network settings, the endpoint, every trusted PC with its
@@ -218,6 +230,8 @@ declare_commands! {
         message: String,
         /// This PC's ID when the approved change made a new one.
         id: Option<String>,
+        /// The network fields an approved network request replaced although they had changed since it was asked (empty otherwise).
+        moved: Vec<String>,
     } errors [NOT_FOUND, CONFLICT];
 
     /// Denies a waiting request — a human only. `--stop_asking true` also refuses that agent's requests until the daemon restarts.
@@ -410,6 +424,7 @@ impl PeerCommands {
                             outcome: "applied".to_string(),
                             message: applied_message(&applied),
                             id: new_id(&applied),
+                            moved: moved_fields(&applied),
                         }),
                         Ok(Answered::Failed(e)) => {
                             let mut error = refused(e);
@@ -684,6 +699,13 @@ fn applied_message(applied: &Applied) -> String {
             "applied — note: {} changed after the request was made, and the request's values replaced them; peer.list shows the settings now",
             fields.join(", ")
         ),
+    }
+}
+
+fn moved_fields(applied: &Applied) -> Vec<String> {
+    match applied {
+        Applied::NetworkMoved(fields) => fields.iter().map(|f| f.to_string()).collect(),
+        Applied::Done | Applied::Regenerated(_) | Applied::Fresh(_) => Vec::new(),
     }
 }
 
@@ -1003,16 +1025,140 @@ fn agent_rows(row: &PeerRow) -> Vec<PeerAgentRow> {
         .collect()
 }
 
+/// The app's view of the peer area (ADR-0394): `peer.list --agents false` without a filter, as the protocol's [`PeerState`] the shell
+///   relays to the PC list slot — the same words and fields, so the slot reads one shape from both. Also the seam's listener for the
+///   app route. ★No agent rows★ (each PC's `directory` word stays): the slot does not show them, and every PC's rows in every push
+///   could grow one frame past the shell's message cap — then the peer state and the approvals would stop reaching the app.
+// ADR-0394
+pub(crate) struct AppPeerState {
+    approvals: Arc<Approvals>,
+}
+
+impl AppPeerState {
+    pub(crate) fn new(approvals: Arc<Approvals>) -> Self {
+        Self { approvals }
+    }
+}
+
+impl crate::peer_state::PeerStateSource for AppPeerState {
+    fn state(&self) -> PeerState {
+        match list(
+            &self.approvals,
+            PeerListArgs {
+                name: None,
+                id: None,
+                agents: Some(false),
+            },
+        ) {
+            Ok(ok) => app_state(ok),
+            // Unreachable without a filter; still a state the slot can show, never a silent gap.
+            Err(e) => PeerState {
+                state: "unavailable".to_string(),
+                reason: Some(e.to_string()),
+                id: None,
+                addresses: Vec::new(),
+                network: None,
+                endpoint: "off".to_string(),
+                endpoint_error: None,
+                pcs: Vec::new(),
+                knocks: Vec::new(),
+                requests: Vec::new(),
+                actions: Vec::new(),
+            },
+        }
+    }
+
+    fn route_changed(&self) {
+        self.approvals.route_changed();
+    }
+}
+
+/// `peer.list`'s answer as the protocol type — field for field (a test holds the two serializations equal).
+fn app_state(ok: PeerListOk) -> PeerState {
+    PeerState {
+        state: ok.state,
+        reason: ok.reason,
+        id: ok.id,
+        addresses: ok.addresses,
+        network: ok.network.map(|n| PeerStateNetwork {
+            port: n.port,
+            listen_port: n.listen_port,
+            relay: n.relay,
+            address_lookup: n.address_lookup,
+            mdns: n.mdns,
+        }),
+        endpoint: ok.endpoint,
+        endpoint_error: ok.endpoint_error,
+        pcs: ok
+            .pcs
+            .into_iter()
+            .map(|pc| PeerStatePc {
+                id: pc.id,
+                name: pc.name,
+                address: pc.address,
+                online: pc.online,
+                warning: pc.warning,
+                directory: pc.directory,
+                agents: pc
+                    .agents
+                    .into_iter()
+                    .map(|agent| PeerStateAgent {
+                        name: agent.name,
+                        id: agent.id,
+                        state: agent.state,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        knocks: ok
+            .knocks
+            .into_iter()
+            .map(|k| PeerStateKnock {
+                id: k.id,
+                count: k.count,
+                last_at_ms: k.last_at_ms,
+            })
+            .collect(),
+        requests: ok
+            .requests
+            .into_iter()
+            .map(|r| PeerStateRequest {
+                request: r.request,
+                kind: r.kind,
+                summary: r.summary,
+                agent_id: r.agent_id,
+                agent_name: r.agent_name,
+                origin: r.origin,
+                asked_at_ms: r.asked_at_ms,
+                expires_in_s: r.expires_in_s,
+                title: r.title,
+                heading: r.heading,
+                lines: r.lines,
+            })
+            .collect(),
+        actions: ok.actions,
+    }
+}
+
 fn request_row(row: &PendingRow) -> PeerRequestRow {
     PeerRequestRow {
         request: row.id.clone(),
         kind: row.kind.word().to_string(),
         summary: row.summary.clone(),
         agent_id: row.agent.as_ref().map(|agent| agent.id.clone()),
-        agent_name: row.agent.as_ref().and_then(|agent| agent.name.clone()),
-        origin: row.origin.clone(),
+        // ADR-0394 d6: outside strings leave the daemon quoted, visible and bounded, as the dialog shows them — a name cannot read as a
+        //   sentence of Engram's own.
+        agent_name: row
+            .agent
+            .as_ref()
+            .and_then(|agent| agent.name.as_deref())
+            .map(quote),
+        origin: row.origin.as_deref().map(quote),
         asked_at_ms: epoch_ms(row.asked_at),
         expires_in_s: row.expires_in.map(|left| left.as_secs()),
+        title: row.text.title.clone(),
+        heading: row.text.heading.clone(),
+        lines: row.text.body.split('\n').map(str::to_string).collect(),
     }
 }
 

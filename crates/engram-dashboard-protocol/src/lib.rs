@@ -28,6 +28,8 @@ mod domain;
 pub mod handshake;
 mod ids;
 mod messages;
+// ADR-0394: the peer state the app's PC list slot shows.
+mod peer;
 // ADR-0231: placeholder for the seq of an output event that could not be carried — the daemon sink and the shell relay share one set.
 mod placeholder;
 mod secret;
@@ -50,6 +52,9 @@ pub use messages::{
     AgentCommand, AgentEvent, CommandListEntry, DeliveredCopy, DropCause, OutputChunk,
     QueuedInputCancel, QueuedInputEvent, QueuedInputRow, StructuredEvent, SubscribeAction,
     ToolCategory, ToolOutcome, TurnOutcome,
+};
+pub use peer::{
+    PeerState, PeerStateAgent, PeerStateKnock, PeerStateNetwork, PeerStatePc, PeerStateRequest,
 };
 pub use placeholder::{placeholder_error_frame, PLACEHOLDER_ERROR_MESSAGE};
 pub use secret::Secret;
@@ -81,9 +86,15 @@ pub use secret::Secret;
 ///   the version-mismatch path instead (the old record still parses: the new type ignores its `token`). The other direction is not
 ///   covered by the bump: an old shell's `DaemonInfo` requires `token` (no `#[serde(default)]`), so a new record does not parse for it
 ///   and it takes its "not ready yet" path until its discovery times out.
+/// - v9: the app's PC list slot (ADR-0394) — `AgentCommand::PeerSubscribe` + `AgentEvent::PeerStateUpdated`. Development axis:
+///   a daemon built before them meets a rebuilt shell routinely, answers the subscribe with an uncorrelated `Error` the shell only
+///   logs, and never broadcasts — the slot would stay silently stale after its one `peer.list` read on mount. The bump sends that pair
+///   down the version-mismatch path instead. Not a reason: the additive question fields of `PeerStateRequest` and the directory fields of `PeerStatePc` (`#[serde(default)]`).
+///   Pulled in: the pre-S38 Korean placeholder marker the frontend still accepted (`LEGACY_PLACEHOLDER_ERROR_MESSAGE`) is gone — a
+///   daemon old enough to send it is refused by this version (ADR-0383 consequence).
 ///
 /// Measured against this criterion and **not bumped**: [`StructuredEvent::TurnEnd`] — the analysis lives in that variant's doc.
 /// [`AgentCommand::SetUiLanguage`] — fire-and-forget, so nothing waits on it: an old daemon cannot decode it and answers an uncorrelated
 /// `Error` the shell only logs, and an old daemon has no dialogs for the language to reach; a new daemon behind an old shell is never told
 /// and shows its dialogs in English, the documented default.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;

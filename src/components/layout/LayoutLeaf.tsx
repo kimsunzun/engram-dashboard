@@ -13,6 +13,7 @@ import RichSlot from '../slot/RichSlot'
 import DomSlot from '../slot/DomSlot'
 import PresetPalette from '../slot/PresetPalette'
 import UsageSlot from '../slot/UsageSlot'
+import PeersSlot from '../slot/PeersSlot'
 import AgentList from '../agent/AgentList'
 import { isContentSlot } from '../agent/selectOpenTarget'
 import { agentPresence } from '../agent/mergeTreeNodes'
@@ -205,7 +206,8 @@ const SlotBody = memo(function SlotBody({
   const isPresetPalette = node.content.type === 'preset_palette'
   const isAgentList = node.content.type === 'agent_list'
   const isUsage = node.content.type === 'usage'
-  const hasContent = agentSlot === 'view' || isPresetPalette || isAgentList || isUsage
+  const isPeers = node.content.type === 'peers'
+  const hasContent = agentSlot === 'view' || isPresetPalette || isAgentList || isUsage || isPeers
   return (
     <div
       ref={borderRef}
@@ -273,6 +275,9 @@ const SlotBody = memo(function SlotBody({
         ) : node.content.type === 'usage' ? (
           // The value is read only from the usageStore mirror — the shell computes query demand from this slot's content (show_*) (TRD §1-7).
           <UsageSlot content={node.content} viewId={targetViewId} slotId={node.id} />
+        ) : node.content.type === 'peers' ? (
+          // ADR-0394: shows the daemon's peer state; its actions run only on the human path (`commands/peerCommands.ts`).
+          <PeersSlot viewId={targetViewId} slotId={node.id} />
         ) : isForeign ? (
           // TRD S21-storage §6-2: only the shell holds the original — the menu is the empty-slot menu as is, and placing content there erases the original.
           // ADR-0280

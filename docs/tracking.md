@@ -10,6 +10,8 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-130 | Decision pending: a row cap on another PC's agent directory copy (deltas can grow it without bound from a broken trusted PC) | Main | Waiting for the user (S37 U3b review hold, 2026-11-23) |
+| T-129 | Decision pending: does a main window closed to the tray count as "app absent" for approval questions (then the OS dialog shows) | Main | Waiting for the user (S37 U4 review hold, 2026-11-23) |
 | T-127 | Client → daemon over iroh for remote / mobile access (local stays WS) | Main | Not started — opens with the remote / mobile client stage (user 2026-11-23) |
 | T-126 | Tray launcher process — controls daemon and client separately; taskbar flash for approvals (merges T-81 · T-15) | Main | Not started — its own topic after S37 (user 2026-11-23) |
 | T-125 | Opt-in to run on a drive without file permissions (FAT / exFAT) | Main | Trigger wait — a user who needs it (user 2026-11-21) |
@@ -85,6 +87,15 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-130. Row cap on another PC's agent directory copy
+- **Status:** waiting for the user — S37 U3b review hold (lead, round 3), 2026-11-23.
+- **Fact:** a snapshot is bounded by the 4 MiB frame (ADR-0411), but `Copies::delta` keeps adding new ids from consecutive `rev` + 1 deltas, so a broken trusted PC can grow a copy without bound. The app copy no longer carries agent rows (S37 U4 merge), so the impact is daemon memory and `peer.list` size only. ADR-0391 rejected an entry cap because copies must stay complete; ADR-0411 already accepts incomplete copies past the cap.
+- **Options:** cap a copy (for example a few times a snapshot's capacity, extra rows dropped with a warning) / record the unbounded copy as accepted.
+
+### T-129. Main window closed to the tray — "app absent" for approval questions?
+- **Status:** waiting for the user — S37 U4 review hold (lead F2), 2026-11-23. Current code (ADR-0410): any PC list slot in the layout counts, so a main window closed to the tray (all windows hidden) still takes the questions and no OS dialog shows; the planned taskbar flash (T-126) cannot reach a tray-only app.
+- **Options:** (a, Claude's recommendation) count only windows without the hidden mark (the usage interest already tracks per-window hidden marks); showing a window subscribes again and gets the state at once / (b) keep as is.
 
 ### T-127. Client → daemon over iroh for remote and mobile access (local stays WS)
 - **Status:** not started — a direction only; opens with the remote / mobile client stage (user 2026-11-23: 「어 항목으로 적고」, after agreeing the local link stays WS).

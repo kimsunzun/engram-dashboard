@@ -172,6 +172,7 @@ fn persisted_content(
             show_claude: *show_claude,
             show_codex: *show_codex,
         },
+        SlotContent::Peers => SlotContent::Peers,
     })
 }
 
@@ -701,6 +702,7 @@ fn known_content(content: SlotContent) -> SlotContent {
             show_claude,
             show_codex,
         },
+        SlotContent::Peers => SlotContent::Peers,
     }
 }
 

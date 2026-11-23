@@ -171,6 +171,9 @@ pub(crate) async fn forward_to_daemon(
             | engram_dashboard_protocol::AgentCommand::UsageSubscribe { .. }
             // The UI language is the shell's setting, sent by the shell itself (ADR-0372).
             | engram_dashboard_protocol::AgentCommand::SetUiLanguage { .. }
+            // ADR-0394: the PC list slot's subscription is the shell's reading of the layout and the window focus: a page sending its own
+            //   would keep the OS dialog away from questions nobody sees.
+            | engram_dashboard_protocol::AgentCommand::PeerSubscribe { .. }
     ) {
         tracing::debug!(
             cmd = ?agent_cmd,

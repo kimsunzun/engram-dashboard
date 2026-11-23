@@ -56,6 +56,7 @@ use super::link::route::{
 };
 use super::link::wire::{ShellIn, ShellWire};
 use super::link::{DaemonKey, HandleToken};
+use super::peer_watch::PeerWant;
 use super::protocol_state::{self, CommandFailure, SubState};
 use super::refusal::{RefusalAlerts, RefusalSite};
 use super::replay_events::{
@@ -246,6 +247,8 @@ impl UsageNudger {
 enum DriverCmd {
     /// The user's `ui.language` — kept and written on the open connection and every later one.
     UiLanguage(String),
+    /// What the daemon is told about the PC list slot — kept and written on the open connection and every later one.
+    PeerWant(PeerWant),
     IsLive {
         reply: oneshot::Sender<bool>,
     },
@@ -395,6 +398,7 @@ impl LinkClient {
             gate,
             opened_tx,
             ui_language: None,
+            peer_want: PeerWant::default(),
         };
         (client, driver, cmd_rx, routable_rx)
     }
@@ -637,6 +641,12 @@ impl LinkClient {
         let _ = self.cmd_tx.send(DriverCmd::UiLanguage(code.to_owned()));
     }
 
+    /// What the daemon is told about the PC list slot (ADR-0394): the actor keeps the last want, writes it on the open connection now and
+    ///   on every connection it opens. Never blocks.
+    pub(crate) fn set_peer_want(&self, want: PeerWant) {
+        let _ = self.cmd_tx.send(DriverCmd::PeerWant(want));
+    }
+
     pub(crate) fn usage_nudger(&self) -> UsageNudger {
         UsageNudger(self.cmd_tx.downgrade())
     }
@@ -777,6 +787,8 @@ struct Driver {
     opened_tx: watch::Sender<()>,
     /// The user's `ui.language` as last set — sent on every connection opened, so the daemon's own dialogs follow it (ADR-0372).
     ui_language: Option<String>,
+    /// What the daemon was last told about the PC list slot — sent again on every connection opened (ADR-0394).
+    peer_want: PeerWant,
 }
 
 impl Driver {
@@ -824,6 +836,7 @@ impl Driver {
                     }
                     Some(DriverCmd::UsageNudge) => self.nudge_usage(),
                     Some(DriverCmd::UiLanguage(code)) => self.set_ui_language(code),
+                    Some(DriverCmd::PeerWant(want)) => self.set_peer_want(want),
                     Some(DriverCmd::HoldForBootStart) => self.hold_for_boot_start(),
                     Some(DriverCmd::BoundBootStart { search }) => self.bound_boot_start(search),
                     Some(DriverCmd::EndBootStartHold { why }) => self.end_boot_start_hold(why),
@@ -1412,6 +1425,14 @@ impl Driver {
         self.ui_language = Some(code);
     }
 
+    /// Keeps the peer want and writes it on the open connection (a later connection gets it when it opens).
+    fn set_peer_want(&mut self, want: PeerWant) {
+        if let Some((peer, generation)) = self.open_peer() {
+            write_peer_want(&peer, generation, want, "change");
+        }
+        self.peer_want = want;
+    }
+
     /// No connection is opened any more — callers wait or fail; pending fire-and-forgets stay for a later connection.
     fn close_gate(&self) {
         lock_gate(&self.gate).opened = None;
@@ -1436,6 +1457,10 @@ impl Driver {
         self.register_commands(&peer, generation);
         if let Some(code) = &self.ui_language {
             write_ui_language(&peer, generation, code, "open");
+        }
+        // A new daemon connection starts unsubscribed; nothing to say while the app has no PC list slot.
+        if self.peer_want != PeerWant::default() {
+            write_peer_want(&peer, generation, self.peer_want, "open");
         }
         let (mut failed, mut dropped) = (Vec::new(), 0usize);
         // ★The drain and the publish stay one critical section, before the signal★ — a caller's round trip writes
@@ -1672,6 +1697,27 @@ fn write_ui_language(
             why,
             error = %e,
             "the UI language was not queued"
+        );
+    }
+}
+
+/// Queues the peer want on connection `generation` — no answer is awaited; a failure is only logged (the next connection sends it again).
+fn write_peer_want(
+    peer: &Peer<ShellWire>,
+    generation: Generation,
+    want: PeerWant,
+    why: &'static str,
+) {
+    let cmd = AgentCommand::PeerSubscribe {
+        subscribed: want.subscribed,
+    };
+    if let Err(e) = peer.notify_in(generation, cmd) {
+        tracing::debug!(
+            peer = %peer.id(),
+            generation = generation.0,
+            why,
+            error = %e,
+            "the peer subscription was not queued"
         );
     }
 }

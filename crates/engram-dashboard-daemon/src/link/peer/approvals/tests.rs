@@ -293,11 +293,11 @@ fn a_dialog_answer_applies_only_to_the_request_shown() {
     assert_eq!(left, [second.id]);
 }
 
-/// The question stays in the app while it shows the slot; there the human answers by id.
+/// The question stays in the app while it has a PC list slot open; there the human answers by id.
 #[test]
 fn with_the_app_showing_the_slot_the_request_waits_there() {
     let app = Arc::new(FakeApp::default());
-    app.set_shows(true);
+    app.set_present(true);
     let rig = rig_with_app(app.clone());
     let requested = rig.approvals.request(add(1, "pc1"), agent("a1")).unwrap();
     no_dialog(&rig.shown);
@@ -305,7 +305,7 @@ fn with_the_app_showing_the_slot_the_request_waits_there() {
         rig.approvals.answer(&requested.id, Decision::Approve),
         Ok(Answered::Applied(Applied::Done))
     );
-    app.set_shows(false);
+    app.set_present(false);
     rig.approvals.route_changed();
     no_dialog(&rig.shown);
 }
@@ -1045,4 +1045,34 @@ fn stop_waits_its_own_bound_for_an_answer_applied_off_the_dialog_thread() {
     release.send(()).unwrap();
     assert!(answering.join().unwrap().is_ok());
     assert_eq!(rig.ops.calls(), ["add pc1"]);
+}
+
+/// The app's copy of a question follows the language the shell set (ADR-0406), read anew on each `pending()` — a switch re-words
+///   the cards on the next broadcast.
+#[test]
+fn a_pending_rows_question_is_in_the_language_the_shell_set() {
+    let ops = Arc::new(FakeOps::default());
+    let (dialogs, _shown) = FakeDialogs::new();
+    let language = Arc::new(FakeLanguage::default());
+    // The app has a PC list slot open, so no dialog takes the question.
+    let app = Arc::new(FakeApp::default());
+    app.set_present(true);
+    let approvals = Approvals::start(
+        source(ops.clone()),
+        dialogs,
+        app,
+        language.clone(),
+        Arc::new(ManualClock::new()),
+    );
+    approvals.request(add(0x22, "laptop"), agent("a1")).unwrap();
+    let (en, ko) = {
+        let inner = lock(&approvals.inner);
+        let asked = &inner.pending[0].text;
+        (asked.en.clone(), asked.ko.clone())
+    };
+    assert_ne!(en, ko);
+    assert_eq!(approvals.pending()[0].text, en);
+    language.set(crate::ask_user::Lang::Ko);
+    assert_eq!(approvals.pending()[0].text, ko);
+    approvals.stop();
 }

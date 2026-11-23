@@ -30,8 +30,6 @@ const MARKER_FLAG_CONTINUES = 0x04
  */
 // ADR-0231
 export const PLACEHOLDER_ERROR_MESSAGE = 'This output event could not be delivered'
-// The pre-S38 Korean marker a still-running old daemon sends — accepted until the next `PROTOCOL_VERSION` bump (ADR-0383).
-export const LEGACY_PLACEHOLDER_ERROR_MESSAGE = '이 출력 사건을 싣지 못했습니다' // hangul-ok
 
 /**
  * The placeholder tag1 payload — the JSON of `StructuredEvent::Error { message: PLACEHOLDER_ERROR_MESSAGE }`, byte-identical to the payload the daemon

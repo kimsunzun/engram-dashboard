@@ -70,6 +70,7 @@ use crate::command_delivery::{CommandDeliveries, LocalCommands, OutcomeLanding};
 use crate::command_roster::CommandRoster;
 use crate::conn_port::{ConnId, FrameFanout};
 use crate::control::registry::ControlRegistry;
+use crate::peer_state::PeerStateHub;
 use crate::usage_service::book::RequestKind;
 use crate::usage_service::UsageService;
 use engram_dashboard_command::{
@@ -226,6 +227,7 @@ pub(crate) fn command_request_id(
         | AgentCommand::Unsubscribe { .. }
         | AgentCommand::UsageSubscribe { .. }
         | AgentCommand::SetUiLanguage { .. }
+        | AgentCommand::PeerSubscribe { .. }
         // The sender's reply: the key inside belongs to a request this daemon issued, so the sender has no wait slot.
         | AgentCommand::CommandOutcome { .. } => None,
     }
@@ -298,7 +300,9 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         // A usage subscription is a full replacement: of two in a row the last must win. No await, so it does not hold the lane.
         | AgentCommand::UsageSubscribe { .. }
         // The last language sent wins — in the lane so two in a row keep their order. No await.
-        | AgentCommand::SetUiLanguage { .. } => DispatchOrder::InOrder,
+        | AgentCommand::SetUiLanguage { .. }
+        // A peer subscription is a full replacement too: the last must win. No await.
+        | AgentCommand::PeerSubscribe { .. } => DispatchOrder::InOrder,
     }
 }
 
@@ -1165,6 +1169,8 @@ pub struct ConnectionCore {
     // ADR-0155
     locals: Arc<dyn LocalCommands>,
     usage: Arc<UsageService>,
+    /// The peer-state subscriptions and the app route for questions (ADR-0394).
+    peer_state: Arc<PeerStateHub>,
     shutdown_tx: watch::Sender<bool>,
     /// Set by the first `StopDaemon`; a later `StopDaemon` joins instead of running `shutdown_all` again.
     stopping: AtomicBool,
@@ -1189,6 +1195,7 @@ impl ConnectionCore {
         deliveries: CommandDeliveries,
         locals: Arc<dyn LocalCommands>,
         usage: Arc<UsageService>,
+        peer_state: Arc<PeerStateHub>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -1201,6 +1208,7 @@ impl ConnectionCore {
             deliveries,
             locals,
             usage,
+            peer_state,
             shutdown_tx,
             stopping: AtomicBool::new(false),
             #[cfg(test)]
@@ -1217,6 +1225,10 @@ impl ConnectionCore {
 
     pub fn usage(&self) -> &UsageService {
         &self.usage
+    }
+
+    pub fn peer_state(&self) -> &PeerStateHub {
+        &self.peer_state
     }
 
     pub fn multiview(&self) -> &MultiViewState {
@@ -2202,6 +2214,14 @@ impl ConnectionCore {
             // ADR-0372: the language of the daemon's own dialogs. No answer — the shell does not wait on it.
             AgentCommand::SetUiLanguage { language } => {
                 self.control_registry.set_ui_language(&language);
+                // The app's request cards carry the question in this language too (ADR-0394) — rebuild them now.
+                self.peer_state.nudge();
+            }
+
+            // ADR-0394, ADR-0410: the PC list slot's subscription, which also routes the questions to the app. No answer — the state
+            //   goes out by broadcast.
+            AgentCommand::PeerSubscribe { subscribed } => {
+                self.peer_state.replace(conn_id, subscribed);
             }
 
             // ★No entry is an `Error`, not an `Ack`★: a quiet `Ack` would be read by the shell as "looked up" and it would wait forever for a value.
@@ -2974,6 +2994,7 @@ mod tests {
             deliveries,
             locals,
             crate::usage_service::fakes::idle_service(),
+            PeerStateHub::new(),
             shutdown_tx,
         );
         (core, shutdown_rx, recording)

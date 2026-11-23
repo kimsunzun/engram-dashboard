@@ -79,6 +79,7 @@ impl SubscriptionSync for RouterSubs<'_> {
     fn resync(&self, mgr: &ViewManager) {
         send_subscription_delta(self.client, self.router.rebuild(mgr));
         self.client.usage_layout_changed(mgr);
+        self.client.peer_layout_changed(mgr);
     }
 }
 

@@ -506,6 +506,8 @@ pub(crate) fn drop_window_in_model(
     }
     // Do not distinguish by whether the model held this window (TRD S21 usage-limit-slot §1-7 「window destruction」): the hidden mark stands apart from the model — a slot moved to a new window opens the OS window first and adds the model window later, so a window hidden and closed in that gap keeps its mark though not in the model. The label is not reused (`PopupCounter`), so unerased it leaks.
     client.usage_window_destroyed(label, &mgr);
+    // A gone window's PC list slot no longer counts (ADR-0394, ADR-0410).
+    client.peer_layout_changed(&mgr);
     Some(dropped_views)
 }
 

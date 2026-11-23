@@ -5,6 +5,7 @@
 
 import type { QueuedInputRow } from '../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
+import type { PeerState } from '../../crates/engram-dashboard-protocol/bindings/PeerState'
 import type { Band } from '../../src-tauri/bindings/Band'
 import type {
   AgentBackendKind,
@@ -37,6 +38,22 @@ export interface QueuedInputListing {
 export const INPUT_LOCKED_REFUSAL = 'input locked by another viewer; acquire first'
 
 export type ConnectionState = 'connected' | 'reconnecting' | 'down'
+
+/** A daemon `peer.*` command name — the PC list slot's only daemon commands (ADR-0394). */
+export type PeerCommandName = `peer.${string}`
+
+/**
+ * A daemon command refused — `code` = the command bus error code (`NOT_FOUND` · `CONFLICT` · `INVALID_ARGUMENT` …), `message` = the daemon's
+ * English text (for a log or a detail line, not a translated sentence).
+ */
+export class DaemonCommandError extends Error {
+  readonly code: string
+  constructor(code: string, message: string) {
+    super(message)
+    this.name = 'DaemonCommandError'
+    this.code = code
+  }
+}
 
 /**
  * One copy of the shell usage cache (TRD S21 usage-limit-slot §1-8) — one highest revision per vendor received on the current socket, relative time fields moved by the time elapsed since receipt.
@@ -188,6 +205,24 @@ export interface AgentClient {
    * An old copy of the same vendor can come late (no ordering guarantee vs the pull) — telling them apart is the receiver's job.
    */
   onUsageLimitsUpdated(cb: (snapshot: UsageLimitSnapshot, socketEpoch: number) => void): () => void
+  /**
+   * Peer-state broadcast for the PC list slot (ADR-0394) — the daemon sends it while the shell reports a PC list slot in some window, on every
+   * change; the copies of one connection come in order, so the last one is the current state. Same shape as the `peer.list` answer.
+   */
+  onPeerStateUpdated(cb: (state: PeerState) => void): () => void
+
+  // ── peer (ADR-0394) ─────────────────────────────────────────────────────────
+  /**
+   * Runs a daemon `peer.*` command on this app's own daemon connection — the daemon types that caller as the human (ADR-0394). resolve = the
+   * command's answer object; reject = [`DaemonCommandError`] (the daemon refused) or a connection error.
+   * ★Callers are the PC list slot's human-only commands (`commands/peerCommands.ts`) and its reads★: `peers.read` (open on the LLM
+   * surface) calls only `peer.list`, which answers the same whoever asks; every write goes through a `humanOnly` command, which the
+   * relayable paths (`__engramCmd.run`, the bus bridge) refuse — a relayed agent call must never reach the daemon as the human.
+   * Accepted bypass: this client object is also on `window.__ENGRAM_AGENT__` (the cdp surface — `clientFactory.ts`), so a process of
+   * this OS account driving the WebView debugging port can call it directly; same-account processes are inside the trust boundary
+   * (ADR-0395), and such a process could click the DOM anyway.
+   */
+  peerCommand(name: PeerCommandName, args: Record<string, unknown>): Promise<unknown>
 
   // ── usage ────────────────────────────────────────────────────────────────
   /**

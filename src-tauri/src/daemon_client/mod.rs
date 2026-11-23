@@ -23,6 +23,8 @@ pub mod replay_events;
 pub mod replay_flight;
 // ADR-0343: the one stop path (single flight · identity-checked kill) — TRD S21 trd-3-2-u5 §3-3.
 pub mod shutdown;
+// ADR-0394, ADR-0410: what the daemon is told about the PC list slot — whether one is open (pure).
+pub mod peer_watch;
 // Usage interest (layout → daemon subscription set) + subscription reconciliation · cache state machine (pure — TRD S21 usage-limit-slot §1-7).
 pub mod usage_interest;
 
@@ -45,6 +47,7 @@ use events::NoDaemonEvents;
 use inbound::InboundSlot;
 use link::endpoint::LocalEndpointSource;
 use link::DaemonKey;
+use peer_watch::PeerWatch;
 use refusal::{RefusalAlerts, TauriRefusalBox};
 use shutdown::{StopPorts, Stopper};
 // The assembly that discards the box is also harness-only (`refusal::NoRefusalNotice` doc).
@@ -205,6 +208,9 @@ pub struct DaemonClient {
     inbound: Arc<InboundSlot>,
     /// The usage interest — outlives every connection (it comes from the layout, not the socket). Shared with the driver.
     usage: SharedUsageInterest,
+    /// The peer watch — what the daemon is told about the PC list slot; the layout changes it. Lock order `ViewManager → this`; the
+    ///   want is queued to the driver inside this lock, so the queue order is the order of the wants.
+    peer: Arc<Mutex<PeerWatch>>,
     /// The driver on the transport crate (`connection`): connect, ensure, close, command round trips, fire-and-forget sends, unsubscribe, replay requests and usage nudges go there; `status_rx` is its watch.
     link: connection::LinkClient,
     stopper: Arc<Stopper>,
@@ -343,6 +349,7 @@ impl DaemonClient {
             inbound,
             refusals,
             usage,
+            peer: Arc::new(Mutex::new(PeerWatch::new())),
             link,
             stopper,
         }
@@ -549,6 +556,16 @@ impl DaemonClient {
             .lock()
             .set_visible(label, visible, mgr, Instant::now());
         self.run_usage_action(action);
+    }
+
+    /// The layout changed — what the daemon is told about the PC list slot may change too (ADR-0394, ADR-0410). Called inside the
+    ///   ViewManager lock next to [`Self::usage_layout_changed`]; never blocks. The want is queued under the peer-watch lock, so two wants
+    ///   reach the driver in the order they were decided.
+    pub fn peer_layout_changed(&self, mgr: &ViewManager) {
+        let mut watch = sync::lock(&self.peer);
+        if let Some(want) = watch.layout_changed(mgr) {
+            self.link.set_peer_want(want);
+        }
     }
 
     // The single place that handles the recompute result — the usage-interest lock is already released (a nudge carries no set, so order does not interleave outside the lock — [`Self::nudge_usage_interest`]).

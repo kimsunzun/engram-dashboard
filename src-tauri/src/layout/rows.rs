@@ -18,6 +18,7 @@ pub enum SlotKind {
     AgentList,
     PresetPalette,
     Usage,
+    Peers,
     Unknown,
 }
 
@@ -119,6 +120,7 @@ fn kind(content: &SlotContent) -> SlotKind {
         SlotContent::AgentList => SlotKind::AgentList,
         SlotContent::PresetPalette => SlotKind::PresetPalette,
         SlotContent::Usage { .. } => SlotKind::Usage,
+        SlotContent::Peers => SlotKind::Peers,
     }
 }
 

@@ -9,6 +9,7 @@ use crate::domain::{
     EnvelopeFormat, Preset, RestoreReport, SnapshotChunk, UsageLimitSnapshot,
 };
 use crate::ids::{AgentId, OwnerToken, PresetId, ProfileId, RequestId};
+use crate::peer::PeerState;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -401,6 +402,17 @@ pub enum AgentCommand {
     /// No answer (no `request_id`). A word the daemon does not know means English — the field is a plain string so a later language
     /// does not make an older daemon refuse the frame. ★The daemon does not read the shell's settings file★ — this is the only way it learns the language.
     SetUiLanguage { language: String },
+
+    // ── Peer state (ADR-0394) ───────────────────────────────────────────────────────
+    /// This connection's peer-state subscription, replaced whole — the last one wins; when the connection drops it is
+    /// `{subscribed: false}`. No answer (no `request_id`).
+    /// `subscribed` = the app has a PC list slot open in some tab of some window (active or not, the window focused, behind others
+    ///   or minimized): the daemon sends [`AgentEvent::PeerStateUpdated`] to this connection now and whenever the peer state or the
+    ///   waiting requests change, and its "ask the user" seam routes questions to the app instead of the OS dialog while any
+    ///   connection holds it (ADR-0410 — a question buried behind other windows is the user's to find).
+    /// ★The shell sends it, never the webview★ — it is computed from the layout (the shell's `forward_daemon_command` drops a
+    ///   webview copy), so one page cannot keep the OS dialog away.
+    PeerSubscribe { subscribed: bool },
 }
 
 /// One row of the daemon registry's **client projection** (an element of [`AgentEvent::CommandList`]).
@@ -653,31 +665,18 @@ pub enum AgentEvent {
     /// `reply` is the same raw JSON field as [`AgentCommand::CommandOutcome`], and the basis for the tolerance the TS field advertises (three error fields
     /// may be omitted · `null` allowed, fields outside the contract pass through) is written there too — same field, same tolerance (ADR-0272).
     ///
-    /// ★A producer exists now★ — the daemon finds the owner in its own registry, delivers, and returns the outcome with this reply
-    /// (`engram_dashboard_daemon::command_delivery` · ADR-0154). ★Still, **it does not reach the frontend**★ —
-    /// the two pieces below are still empty, and the two must be added **in the same change** (last paragraph).
+    /// ★A producer exists★ — the daemon finds the owner in its own registry, delivers, and returns the outcome with this reply
+    /// (`engram_dashboard_daemon::command_delivery` · ADR-0154).
     ///
     /// The shell correlates: the shell's pairing (`daemon_client::protocol_state`'s `command_request_id`)
     /// gives `Some` to [`AgentCommand::Command`], so `forward_daemon_command` (`src-tauri/src/commands/agent.rs`)
-    /// takes the **wait for reply** branch (that function has no variant allowlist — it blocks only `Subscribe`/`Unsubscribe`, and the rest
-    /// split on this one `Some`/`None`). When the reply comes, `src-tauri/src/daemon_client/connection.rs` wakes the pending with the same module's
-    /// `event_reply_request_id` and returns that event **as is**.
-    /// The carrier passes it too: `TauriTransport.send` (`src/api/tauriTransport.ts`) lifts that invoke return into a
-    /// control message and puts it into `ProtocolClient.handleEvent`. ★The filter that rebuilds only a few named broadcasts
-    /// exists **only in the push direction** — the reply direction passes unfiltered★.
+    /// takes the **wait for reply** branch. When the reply comes, `src-tauri/src/daemon_client/connection.rs` wakes the pending with the same
+    /// module's `event_reply_request_id` and returns that event **as is**. The carrier passes it too: `TauriTransport.send`
+    /// (`src/api/tauriTransport.ts`) lifts that invoke return into a control message and puts it into `ProtocolClient.handleEvent`.
     ///
-    /// ★But `handleEvent` (`src/api/protocolClient.ts`) has **no** branch for this variant★ — it passes the last `if`
-    /// and ends with nothing done (a silent discard with no else, no warn, no throw).
-    /// ★Then that call's promise **never resolves**★: the frontend `sendCommand` sets no timer, and
-    /// `invoke` ended in **success**, so `send().catch` is not called either. The only escape hatches left are a connection state transition or
-    /// the bulk reject of `close()`. The shell's 30-second reply cap is a device against **the case where no reply comes**, so
-    /// it does not reach here (the case where the reply came and was discarded).
-    ///
-    /// ★So the change that adds **the screen-side producer** (the spot where the webview emits [`AgentCommand::Command`] — 0 cases in `src/` today)
-    /// must add the `handleEvent` branch **in the same change** too★ — the same requirement as the shell's two correlation functions holding
-    /// only as a pair repeats one layer down. While that producer does not exist, this hole is **unreachable**:
-    /// envelopes the daemon delivers are executed by the shell from its own table (`daemon_client::inbound`) and the replies are also
-    /// received by the shell, so they do not pass through the webview's pending.
+    /// ★The screen-side producer and its `handleEvent` branch came together (ADR-0394)★: the PC list slot calls the daemon's `peer.*`
+    /// through `ProtocolClient.peerCommand`, and `handleEvent` resolves or rejects that call by the `request_id` inside `reply`.
+    /// Removing that branch would leave such a call hanging — `invoke` ends in success, so nothing rejects it.
     CommandReply {
         #[ts(
             type = "{ request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }"
@@ -722,6 +721,13 @@ pub enum AgentEvent {
     UsageLimitsUpdated {
         snapshot: UsageLimitSnapshot,
         subscribed: Vec<AgentBackendKind>,
+    },
+
+    // ADR-0394
+    /// The peer state — goes only to connections subscribed by [`AgentCommand::PeerSubscribe`]. Not an answer to a request. Sent on
+    /// subscribing and on every change; a connection's copies go out in order, so the last one is the current state.
+    PeerStateUpdated {
+        state: PeerState,
     },
 
     /// With request_id, a specific command failed.
@@ -2474,6 +2480,34 @@ mod tests {
             r#"{"RefreshUsageLimits":{"vendor":"claude"}}"#
         )
         .is_err());
+    }
+
+    // ── Peer state (ADR-0394) ──
+
+    #[test]
+    fn peer_subscribe_json_golden_and_roundtrip() {
+        let cmd = AgentCommand::PeerSubscribe { subscribed: true };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"PeerSubscribe":{"subscribed":true}}"#);
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+        // The field is required — an empty frame must not fold into a default.
+        assert!(serde_json::from_str::<AgentCommand>(r#"{"PeerSubscribe":{}}"#).is_err());
+    }
+
+    /// The canonical state shape is the golden in `peer` — this measures the event envelope.
+    #[test]
+    fn peer_state_updated_json_golden_and_roundtrip() {
+        let ev = AgentEvent::PeerStateUpdated {
+            state: crate::peer::tests::sample(),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "PeerStateUpdated": { "state": serde_json::to_value(crate::peer::tests::sample()).unwrap() } })
+        );
+        let back: AgentEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
     }
 
     /// The canonical full snapshot shape is the golden in `domain` — this measures the event envelope and `subscribed`.

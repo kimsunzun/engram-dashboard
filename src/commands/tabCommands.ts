@@ -223,7 +223,7 @@ function optionalUuidArg(v: unknown, name: string): string | null {
 }
 
 // SlotContent union tag whitelist (set_slot_content validation — ADR-0060/0063). ★Order = declared spelling★: whatever letter case the caller uses, the tag sent to the backend folds to an element of this array (CLI and this surface must agree).
-const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'preset_palette', 'usage'] as const
+const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'preset_palette', 'usage', 'peers'] as const
 
 const USAGE_SHOW_FIELDS = ['show_claude', 'show_codex'] as const
 
@@ -260,6 +260,7 @@ function validateSlotContent(content: { type: string } & Record<string, unknown>
     case 'empty':
     case 'agent_list':
     case 'preset_palette':
+    case 'peers':
       // Unit variant with no extra fields — passes when the tag matches (extra fields are ignored by the backend).
       break
     case 'usage':

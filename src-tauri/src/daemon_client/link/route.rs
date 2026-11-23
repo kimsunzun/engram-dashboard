@@ -868,6 +868,10 @@ pub(crate) fn emit_broadcast(
         AgentEvent::PresetListUpdated { presets } => {
             events.preset_list_updated(presets);
         }
+        // ADR-0394: the PC list slot's peer state — a 1:1 relay; the slot keeps the last one (copies of one connection come in order).
+        AgentEvent::PeerStateUpdated { state } => {
+            events.peer_state_updated(state);
+        }
         // A failure outside every round trip — a reply-tagged `Error` never gets here (the reply path takes it first),
         //   so `request_id` is always `None`. Not emitted: no field says which view it belongs to.
         AgentEvent::Error {
@@ -2109,6 +2113,9 @@ mod tests {
             _socket_epoch: u64,
         ) {
             self.push("usage".into());
+        }
+        fn peer_state_updated(&self, _state: &engram_dashboard_protocol::PeerState) {
+            self.push("peers".into());
         }
     }
 

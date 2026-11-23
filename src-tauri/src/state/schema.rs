@@ -189,6 +189,7 @@ mod tests {
                         show_claude: _,
                         show_codex: _,
                     } => "usage",
+                    SlotContent::Peers => "peers",
                 });
             }
             LayoutNode::Split {
@@ -241,7 +242,11 @@ mod tests {
             View {
                 id: Uuid::new_v4(),
                 name: TabName::Named("Tab two".to_string()),
-                layout: slot(SlotContent::Empty),
+                layout: split(
+                    SplitDir::LeftRight,
+                    slot(SlotContent::Empty),
+                    slot(SlotContent::Peers),
+                ),
                 focused_slot_id: None,
             },
         ];
@@ -272,6 +277,7 @@ mod tests {
                 "agent_list",
                 "preset_palette",
                 "usage",
+                "peers",
                 "left_right",
                 "top_bottom",
             ])
