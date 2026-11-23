@@ -1,7 +1,7 @@
 # ADR-0320: Delete = move to a bundle folder in our hidden `.trash` inside the library root
 
-- 상태: 제안 (2026-10-31, basis: user decisions B8 / F9-confirmed (2026-10-19 「ㅇㅇ 우리 trash 폴더로해」) · G31 (2026-10-30 「휴지통 경로 … 시스템에서 알아서 보내는게 맞는것같은데 고정경로로하고 나중에 변경경로로」) · G44 (2026-10-31) + main M22 · M46 · M52 · M53 (reported) · research `docs/research/trash-unavailable-delete-practice-2026-10-19.md`) · 부분 폐기 by ADR-0400 (decisions 1, 2 and 4 trash inside the root)
-- 관련: ADR-0312 · ADR-0335 · ADR-0322 · ADR-0324 (trash lock) · PRD R18 · TRD §1-1 · §1-4 `store.rs` · §6-5 1 · §7 20 · Amended by ADR-0400 (decisions 1, 2 and 4 trash inside the root)
+- 상태: 제안 (2026-10-31, basis: user decisions B8 / F9-confirmed (2026-10-19 「ㅇㅇ 우리 trash 폴더로해」) · G31 (2026-10-30 「휴지통 경로 … 시스템에서 알아서 보내는게 맞는것같은데 고정경로로하고 나중에 변경경로로」) · G44 (2026-10-31) + main M22 · M46 · M52 · M53 (reported) · research `docs/research/trash-unavailable-delete-practice-2026-10-19.md`) · 부분 폐기 by ADR-0400 (decisions 1, 2 and 4 trash inside the root) · 부분 폐기 by ADR-0409 (decisions 3 and 4 the exclude line and the bundle contents)
+- 관련: ADR-0312 · ADR-0335 · ADR-0322 · ADR-0324 (trash lock) · PRD R18 · TRD §1-1 · §1-4 `store.rs` · §6-5 1 · §7 20 · Amended by ADR-0400 (decisions 1, 2 and 4 trash inside the root) · Amended by ADR-0409 (decisions 3 and 4 the exclude line and the bundle contents)
 
 ## 맥락
 Where do we send a library entry when it is deleted? Humans, the LLM and the CLI all delete.
