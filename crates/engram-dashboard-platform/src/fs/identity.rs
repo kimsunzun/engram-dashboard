@@ -38,9 +38,16 @@ pub fn file_identity(path: &Path) -> io::Result<FileIdentity> {
         .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
         .open(path)?;
-    match wide_identity(&file) {
+    opened_identity(&file)
+}
+
+/// The identity of what `file` holds open — [`file_identity`]'s answer (and its `Unsupported`) for that handle, with no
+/// name looked up again.
+#[cfg(windows)]
+pub fn opened_identity(file: &std::fs::File) -> io::Result<FileIdentity> {
+    match wide_identity(file) {
         Ok(id) if !is_sentinel_id(id.file) => Ok(id),
-        _ => match narrow_identity(&file)? {
+        _ => match narrow_identity(file)? {
             id if is_sentinel_id(id.file) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "this volume does not give each file a unique id",
@@ -59,8 +66,15 @@ fn is_sentinel_id(file: u128) -> bool {
 }
 #[cfg(unix)]
 pub fn file_identity(path: &Path) -> io::Result<FileIdentity> {
+    identity_of(&std::fs::metadata(path)?)
+}
+#[cfg(unix)]
+pub fn opened_identity(file: &std::fs::File) -> io::Result<FileIdentity> {
+    identity_of(&file.metadata()?)
+}
+#[cfg(unix)]
+fn identity_of(meta: &std::fs::Metadata) -> io::Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(path)?;
     Ok(FileIdentity {
         volume: meta.dev(),
         file: u128::from(meta.ino()),
@@ -178,6 +192,19 @@ mod tests {
         ] {
             assert!(!is_sentinel_id(real), "{real:#x}");
         }
+    }
+
+    #[test]
+    fn an_opened_file_has_the_identity_of_its_path() {
+        let scratch = Scratch::new("identity");
+        let file = scratch.0.join("opened.md");
+        std::fs::write(&file, b"o").expect("file");
+
+        let opened = std::fs::File::open(&file).expect("open");
+        assert_eq!(
+            opened_identity(&opened).expect("identity of the handle"),
+            file_identity(&file).expect("identity of the path")
+        );
     }
 
     #[test]

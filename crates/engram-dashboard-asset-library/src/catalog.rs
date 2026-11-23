@@ -4,9 +4,9 @@
 //!
 //! - **Class A — no whole-catalog swap** (TRD S25 step-7 §6): every write goes through the per-item primitives
 //!   ([`Catalog::apply_items`] · [`Catalog::apply_scan`] · [`Catalog::remove`] · [`Catalog::remove_range`] ·
-//!   [`Catalog::insert_folder`]); per item
-//!   the later `read_seq` wins, and nothing outside a scan's range is touched. [`Catalog::drop_range`] exists for a
-//!   mount change only, and [`Catalog::rekey_range`] for a mount rename and a same-volume move only.
+//!   [`Catalog::insert_folder`]); per item the later `read_seq` wins, and nothing outside a scan's range is touched.
+//!   [`Catalog::drop_range`] exists for a mount change only, and [`Catalog::rekey_range`] for a mount rename and a move
+//!   (same volume, or a verified cross-volume move) only.
 //! - **Every removal is sequenced**: an item goes only when an absence observed later than its read says so — a
 //!   listing that lacks it (`listed_at` of its nearest listed folder) or a range observed absent. A failed read
 //!   (`kept`) removes nothing.
@@ -692,11 +692,11 @@ impl Catalog {
         inside
     }
 
-    /// A mount rename (ADR-0400 decision 12) or a same-volume move (ADR-0409 M3) only: every item and folder within
-    /// `range` (the old mount's top, or the moved entry) moves to the path `to` maps it to, keeping its content, tag,
-    /// `read_seq` and racy mark — kinds, skill names and `Skill.folder` included, so a move re-classifies and re-reads
-    /// after it; the references items hold are not changed (the caller's walk rewrites the files). Called only in that
-    /// operation's write lock. Returns the touched keys — the old and the new.
+    /// A mount rename (ADR-0400 decision 12) or a move — same volume or verified across volumes (ADR-0409 M3) — only:
+    /// every item and folder within `range` (the old mount's top, or the moved entry) moves to the path `to` maps it
+    /// to, keeping its content, tag, `read_seq` and racy mark — kinds, skill names and `Skill.folder` included, so a
+    /// move re-classifies and re-reads after it; the references items hold are not changed (the caller's walk rewrites
+    /// the files). Called only in that operation's write lock. Returns the touched keys — the old and the new.
     pub fn rekey_range(
         &mut self,
         range: &LibPath,
@@ -849,7 +849,7 @@ pub(crate) fn within(path: &LibPath, range: Option<&LibPath>) -> bool {
     range.is_none_or(|range| path.replace_prefix(range, range).is_some())
 }
 
-fn is_racy(tag: &ContentTag, read_at: SystemTime) -> bool {
+pub(crate) fn is_racy(tag: &ContentTag, read_at: SystemTime) -> bool {
     read_at
         .checked_sub(RACY_WINDOW)
         .is_none_or(|edge| tag.modified >= edge)

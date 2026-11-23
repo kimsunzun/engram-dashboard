@@ -3,7 +3,9 @@
 //! links (`link`) · path keys and path comparison (`path_key`) · folder-path normalization and the Win32
 //! reserved-device-name test (`normalize`) · file identity (`identity`) · the network share a path is on
 //! (`share_root`) · a rename that never replaces (`rename` — `rename_no_replace`) · clearing the read-only attribute
-//! below a folder without following links (`removable` — `make_removable`). The opens in this file use std only —
+//! below a folder without following links (`removable` — `make_removable`) · a folder's modified time (`times` —
+//! `set_folder_modified`) · opening a file for reading without following its last name (`open_read_no_follow`). The
+//! opens in this file use std only —
 //! `OpenOptionsExt::share_mode` goes down as is to `CreateFileW`'s share mode, so the same kernel behaviour comes
 //! without unsafe.
 
@@ -20,13 +22,15 @@ mod normalize;
 mod path_key;
 mod removable;
 mod rename;
+mod times;
 
-pub use identity::{file_identity, FileIdentity};
+pub use identity::{file_identity, opened_identity, FileIdentity};
 pub use link::{link_dir, unlink_dir};
 pub use normalize::{is_reserved_device_name, normalize_folder, NotAbsolute};
 pub use path_key::{path_key, same_path, PathKey};
 pub use removable::make_removable;
 pub use rename::rename_no_replace;
+pub use times::set_folder_modified;
 
 const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_SHARING_VIOLATION: i32 = 32;
@@ -56,6 +60,61 @@ pub fn open_deny_write(path: &Path) -> io::Result<File> {
 #[cfg(not(windows))]
 pub fn open_deny_write(_path: &Path) -> io::Result<File> {
     Err(io::ErrorKind::Unsupported.into())
+}
+
+/// Opens the file at `path` for reading without following its last name — the folders above it resolve as usual. The
+/// caller checks what it opened on the handle (`File::metadata`, [`opened_identity`]) before it reads.
+///
+/// - Windows: opened first as itself (`FILE_FLAG_OPEN_REPARSE_POINT` with `FILE_FLAG_BACKUP_SEMANTICS`, so a folder
+///   opens too). A link there (a name-surrogate reparse point, a junction included) is answered as so opened — the
+///   handle's metadata says link. Any other reparse point (a cloud placeholder, a deduplicated file — data a file-system
+///   filter supplies, which a handle opened as itself would read raw) is opened again by its path, followed (it is no
+///   link), and that handle is answered only when it has the identity of the first; otherwise an error, nothing read.
+///   (A `compact /exe` WOF file reads the same either way here: the filter hides its reparse point — measured
+///   2026-11-24.)
+/// - Other OSes: `O_NOFOLLOW` — a link there is refused (`ELOOP`); a folder opens.
+// ADR-0365
+#[cfg(windows)]
+pub fn open_read_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{FileAttributeTagInfo, FILE_ATTRIBUTE_TAG_INFO};
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let open = |flags: u32| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(flags)
+            .open(path)
+    };
+    let itself = open(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)?;
+    let tag: FILE_ATTRIBUTE_TAG_INFO = file_info(&itself, FileAttributeTagInfo)?;
+    if !filtered_reparse_point(tag.FileAttributes, tag.ReparseTag) {
+        return Ok(itself);
+    }
+    let followed = open(FILE_FLAG_BACKUP_SEMANTICS)?;
+    match (opened_identity(&itself), opened_identity(&followed)) {
+        (Ok(first), Ok(second)) if first == second => Ok(followed),
+        _ => Err(io::Error::other(
+            "a reparse point opened again is not provably the entry opened first",
+        )),
+    }
+}
+
+/// Whether attributes and a reparse tag (`FILE_ATTRIBUTE_TAG_INFO`) are of a reparse point that is no link — one a
+/// file-system filter answers for, whose data a handle opened as itself may not show.
+#[cfg(windows)]
+fn filtered_reparse_point(attributes: u32, reparse_tag: u32) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    const NAME_SURROGATE: u32 = 0x2000_0000;
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && reparse_tag & NAME_SURROGATE == 0
+}
+#[cfg(unix)]
+pub fn open_read_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
 }
 
 /// Was it blocked by the sharing restriction of a handle someone else holds (Windows `ERROR_SHARING_VIOLATION`); once that handle closes
@@ -342,6 +401,72 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ADR-0365: a file opens and reads; a link at the name is never opened through — opened as itself (its metadata says
+    //   link) or refused.
+    #[test]
+    fn a_no_follow_open_reads_a_file_and_never_opens_through_a_link() {
+        let scratch = Scratch::new("no-follow");
+        let file = scratch.0.join("a.md");
+        std::fs::write(&file, b"alpha").unwrap();
+        let mut read = String::new();
+        std::io::Read::read_to_string(&mut open_read_no_follow(&file).unwrap(), &mut read).unwrap();
+        assert_eq!(read, "alpha");
+
+        let target = scratch.0.join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("inside.md"), b"i").unwrap();
+        let link = scratch.0.join("link");
+        link_dir(&target, &link).unwrap();
+        let opened = open_read_no_follow(&link).map(|file| file.metadata().unwrap().file_type());
+        unlink_dir(&link).unwrap();
+        if let Ok(kind) = opened {
+            assert!(
+                kind.is_symlink(),
+                "opened as itself, not as its target: {kind:?}"
+            );
+        }
+        let folder = open_read_no_follow(&target).unwrap();
+        assert!(folder.metadata().unwrap().is_dir(), "a folder opens as one");
+    }
+
+    // A reparse point that is no link (WOF `0x80000017`, a cloud placeholder `0x9000101A`, dedup `0x80000013`) is opened
+    //   again followed; a name surrogate (a junction `0xA0000003`, a symbolic link `0xA000000C`) and a plain file never.
+    #[cfg(windows)]
+    #[test]
+    fn only_a_reparse_point_that_is_no_link_is_opened_again() {
+        const REPARSE: u32 = 0x400;
+        for tag in [0x8000_0017, 0x9000_101A, 0x8000_0013] {
+            assert!(filtered_reparse_point(REPARSE | 0x20, tag), "{tag:#x}");
+        }
+        for tag in [0xA000_0003, 0xA000_000C] {
+            assert!(!filtered_reparse_point(REPARSE, tag), "{tag:#x}");
+        }
+        assert!(!filtered_reparse_point(0x20, 0), "a plain file");
+    }
+
+    // A file compressed by `compact /exe` (a WOF reparse point under its filter) reads the same bytes through the
+    //   no-follow open as through a plain open. Skipped where `compact` is not there or does not compress.
+    #[cfg(windows)]
+    #[test]
+    fn a_wof_compressed_file_reads_its_own_bytes_through_the_no_follow_open() {
+        let scratch = Scratch::new("wof");
+        let file = scratch.0.join("w.txt");
+        let bytes: Vec<u8> = (0..200_000u32).map(|n| (n % 251) as u8).collect();
+        std::fs::write(&file, &bytes).unwrap();
+        let compressed = std::process::Command::new("compact")
+            .args(["/c", "/exe:xpress4k"])
+            .arg(&file)
+            .output()
+            .is_ok_and(|done| done.status.success());
+        if !compressed {
+            eprintln!("compact unavailable: skipped");
+            return;
+        }
+        let mut read = Vec::new();
+        std::io::Read::read_to_end(&mut open_read_no_follow(&file).unwrap(), &mut read).unwrap();
+        assert_eq!(read, bytes);
+    }
 
     #[test]
     fn raw_codes_are_classified_only_on_windows() {

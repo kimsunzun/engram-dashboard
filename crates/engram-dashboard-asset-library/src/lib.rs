@@ -135,10 +135,11 @@
 //! The store's renames never replace (`store.rs`). The rules are in its header. `ops.rs` holds the file operations on top
 //! of it — delete (each item into its own mount's `.trash`, with `yes` / `detachRefs` and the plan digest judged again
 //! inside the hold, the folder it left re-classified in the same hold), restore (back to the same path, never
-//! overwriting), and move and rename on one volume (no-replace renames, merge, an overwrite's displaced entry into the
-//! trash, the range re-keyed and re-classified in the same hold, the references rewritten in every readable mount and
-//! the agents without a plan confirmation) — each one `change_held_at` hold, with the trash lock when it may touch
-//! `.trash`. The rules are in its header.
+//! overwriting), and move and rename (no-replace renames, merge, an overwrite's displaced entry into the trash, the range
+//! re-keyed and re-classified in the same hold, the references rewritten in every readable mount and the agents without
+//! a plan confirmation; across volumes — found by a volume probe — a staged copy made before the ticket and checked
+//! again in the hold, the original then into its own mount's trash) — each one `change_held_at` hold, with the trash
+//! lock when it may touch `.trash`. The rules are in its header.
 //!
 //! ## Refusals
 //!
@@ -379,7 +380,7 @@ impl LibraryRefusal {
 
 /// The refusal of a root generation that is not the current one — `Conflict` · [`ROOT_GENERATION_STALE`].
 // ADR-0377
-fn stale_root_generation(given: Option<u64>, current: u64) -> LibraryRefusal {
+pub(crate) fn stale_root_generation(given: Option<u64>, current: u64) -> LibraryRefusal {
     LibraryRefusal::new(
         RefusalClass::Conflict,
         ROOT_GENERATION_STALE,

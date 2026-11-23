@@ -15,7 +15,7 @@
 //! others' writes, classifying that failure, verdict and retry for a brief-holder failure, folder sync, creating and walking directory
 //!   links — Windows junction, path keys and path comparison, folder-path normalization, the Win32 reserved-device-name test, file
 //!   identity, the network share a path is on, a rename that never replaces, clearing read-only below a folder without following
-//!   links) · [`spawn`] (windowless spawn,
+//!   links, a folder's modified time, opening a file for reading without following its last name) · [`spawn`] (windowless spawn,
 //!   tree-root spawn with a kill handle — Windows = suspended, put in the group, resume;
 //! "program not found" verdict; spawning outside this process's Job — WMI) · [`shell`] (interactive default shell, wrapping a CLI in a
 //!   console shell) · [`env`] (home dir, executable name/sibling path, env var name
@@ -50,7 +50,8 @@
 //!   existed when moved (an empty answer, a `bash`/`HOME` one-liner) are just gathered. Exception = `fs`'s directory links (symbolic
 //!   link), file identity (device number · inode) and path key (as is), whose behaviour on other OSes the design fixes — std only
 //!    (TRD S25 §1-6 · ADR-0325 · ADR-0336) — and `fs`'s no-replace rename (Linux `renameat2`, Apple `renamex_np`, through `libc` —
-//!    ADR-0409); `fs::make_removable` doing nothing outside Windows is the design too (ADR-0409 decision 11).
+//!    ADR-0409) and no-follow read open (`O_NOFOLLOW` through `libc` — ADR-0365); `fs::make_removable` doing nothing
+//!    outside Windows is the design too (ADR-0409 decision 11).
 //!    ★`#[cfg]`-split branches get no compile verification here★ (development and CI are Windows only — ADR-0230). `cfg!(windows)`
 //!   branches (`env::env_key_eq`, the three `fs` failure classifications) are type-checked on
 //!    both sides but never run on another OS.
@@ -68,7 +69,8 @@
 //!   outside this rule. `windows` turns on the
 //!   union of binding features and is not split per cargo feature (ADR-0275 decision 13). `junction` only for `fs`'s junction
 //!   creation; it is an OS crate (inside gate ⑤'s list — its `windows-sys` is not a direct dependency, so the gate does not count
-//!   it). `libc` only for `fs`'s no-replace rename; an OS crate (inside gate ⑤'s list). `tracing` only for rule 4 paths.
+//!   it). `libc` only for `fs`'s no-replace rename and no-follow read open; an OS crate (inside gate ⑤'s list).
+//!   `tracing` only for rule 4 paths.
 //!   `raw-window-handle` only as the argument trait (`HasWindowHandle`); a no-dependency leaf, not an OS
 //!   crate (outside gate ⑤'s list).
 //! - ★**No async runtime (`tokio` etc.)**★ — sync crates (agent, now) call this layer too, and a runtime here would silently spread to

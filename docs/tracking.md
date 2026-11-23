@@ -10,6 +10,9 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-129 | S25 step 9b U4a review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
+| T-128 | S25 step 9b U4a — copying times and permissions is strict (a share refusing them fails every cross-volume move) | Main | Decision pending (user) — current: strict |
+| T-127 | S25 step 9b U4a — a merge across volumes is refused (`crosses-volumes`) instead of merging entry by entry | Main | Decision pending (user) — current: refused |
 | T-126 | S25 step 9b U3 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-125 | S25 step 9b U3 — a keep-both merge of a referenced skill that empties the source folder asks nothing | Main | Decision pending (user) — current: no ask |
 | T-122 | Step-21 U4b — a stopped rename: tokens confirmed before the stop still pass when the plan of what is left is the confirmed one | Main | Closed 2026-11-23 — user: keep as is (ADR-0407) |
@@ -114,6 +117,20 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-129. S25 step 9b U4a review recommendations left unfixed (rare cases)
+- **Status:** recorded 2026-11-24 at the U4a commit — minor items. Decisions of the unit: ADR-0416.
+- **Items:** (1) every no-follow open queries `FileAttributeTagInfo`; a redirector refusing that query fails every copy from it (query only when the attributes show a reparse point); (2) `detach-refs-invalid` can hide a crossing item's own answer (wider than T-126 (3)); (3) `not_copied` names an entry whose bytes were copied when only its metadata pass failed; (4) a Unix FIFO in the source blocks the copy's open (no `O_NONBLOCK`); (5) `stage` maps a vanished destination folder to `not-found` of the source; (6) the probe fails where the user may remove but not create folders; (7) the staging is not re-listed in the hold, and no folder sync precedes trashing the original; (8) a volume whose file ids change between reads makes every attempt `source-changed`; (9) a mount change during the copy keeps the staging without a client `root_generation` but trashes it with one; (10) a fallback trash row of a staging no longer carries its intended name.
+
+### T-128. S25 step 9b U4a — copying times and permissions is strict
+- **Status:** decision pending (user) — raised by the U4a review (lead, hold); committed as strict ("decision pending" in the U4a commit).
+- **Case:** a cross-volume move keeps modified times and the read-only attribute / mode (TRD M13). Any failure of setting them fails the item (the staging goes to the trash; nothing is lost). Volumes that refuse chmod or folder times (exFAT / vfat on Linux, CIFS without unix extensions, some NAS) would fail every cross-volume move. On Windows the whole attribute word is copied (hidden, system, offline, sparse …), not only read-only.
+- **Options:** best-effort — copy the content, try the metadata, log a failure and go on (main's recommendation: Windows Explorer copies onto FAT without failing on attributes; rsync reports a partial transfer but keeps the files) · keep strict.
+
+### T-127. S25 step 9b U4a — a merge across volumes is refused
+- **Status:** decision pending (user) — raised by the U4a review (lead, risk, Codex: hold); committed as refused ("decision pending" in the U4a commit).
+- **Case:** moving `a/skills/` from one mount onto a same-name folder `b/skills/` in a mount on another volume answers `crosses-volumes` for every `onConflict`; nothing moves. TRD §3.5 says a same-name folder merges entry by entry by the same rules, and Windows Explorer merges across volumes. Likely in normal use when two mounts share a folder layout.
+- **Options:** merge entry by entry (each entry its own staged copy, compare and placement — more code and one staging per entry; Explorer's behaviour) · keep refused (safe; the user moves the contents instead).
 
 ### T-126. S25 step 9b U3 review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-24 at the U3 commit — minor items, fixed when their code is touched or they show up in use. Decisions of the unit: ADR-0415.

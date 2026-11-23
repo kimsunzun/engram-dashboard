@@ -10,10 +10,11 @@
 //!   is a link or lies below one walks nothing ([`LibraryStore::first_link`] — the one component test for a path below
 //!   the folder).
 //! - **Names**: [`admits`] is the name rule every way into the catalog shares — no name starting with `.` (so a mount's
-//!   `.trash` is never walked) and no base temp name. Nothing here deletes or rewrites a leftover temp file
-//!   (ADR-0335); the only temp files touched are base `write_atomic`'s own, whose base naming could truncate a
-//!   leftover only in the rare case of the same pid and counter (base behaviour, not this module's — T-124), and the
-//!   bundle record's temps in `.trash`, which `trash.rs` makes, publishes and prunes through this store.
+//!   `.trash` is never walked) and no base temp name. Nothing here deletes or rewrites a leftover temp file (ADR-0335);
+//!   the only temp files touched are base `write_atomic`'s own, whose base naming could truncate a leftover only in the
+//!   rare case of the same pid and counter (base behaviour, not this module's — T-124), the bundle record's temps in
+//!   `.trash`, which `trash.rs` makes, publishes and prunes through this store, and a move's own volume probe and
+//!   staging folders (`ops.rs` — made create-new, removed or trashed only by the call that made them).
 //! - **Per-folder listing sequence**: a scan draws `seq()` before every step of the walk; the number drawn
 //!   before the step that yields folder D precedes every read of D's entries and is `listed_at[D]` (ADR-0324 decision
 //!   5 · TRD S25 step-7 premise 47). A file of a scanned folder that the listing lacks was observed absent at that
@@ -28,6 +29,17 @@
 //! - **Absence is a `NotFound`** ([`LibraryStore::stat`]): the trash steps judge a path absent only from a no-follow
 //!   stat that says `NotFound`; [`LibraryStore::check_names`] checks every name from the mount folder down without
 //!   following, and the trash's own folder steps (`list`, `remove_dir`, `remove_file`) never act through a link.
+//! - **Tree copies never replace and never follow** (ADR-0409 decision 12 · M13): [`LibraryStore::copy_tree`] lists the
+//!   source without following ([`LibraryStore::list_tree`] — a file's tag before its bytes; every name from the mount
+//!   folder down to each folder listed and each file tagged stat'ed again first) and refuses one holding a link before
+//!   making anything (ADR-0365); then each file is read only through a handle checked to be the file listed — every
+//!   name between the mount folder and it stat'ed again without following, the file opened without following its last
+//!   name (a reparse point that is no link opened again, followed, only as the same entry — platform
+//!   `open_read_no_follow`), the handle's kind, size, modified time and identity equal to the listed tag — and a file
+//!   that is not stops the copy there; [`LibraryStore::content_hash`] reads the same way. A folder swapped for a link
+//!   between that stat and the open is caught by the identity, where the volume gives one (otherwise only size and time
+//!   — the check-then-call race ADR-0409 accepts). Every entry is made create-new, each file hashed while copied,
+//!   modified times and permissions kept; a copy that fails part-way leaves what it made to its caller.
 // ADR-0324
 // ADR-0335
 // ADR-0365
@@ -38,7 +50,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -46,8 +58,10 @@ use engram_dashboard_base::file::{
     copy_atomic, is_temp_name, read_capped_bytes, write_atomic, OsHooks, BUSY_PAUSE, BUSY_RETRIES,
 };
 use engram_dashboard_platform::fs::{
-    file_identity, rename_no_replace, retry_busy, sync_dir, FileIdentity, Retry,
+    file_identity, open_read_no_follow, opened_identity, rename_no_replace, retry_busy,
+    set_folder_modified, sync_dir, FileIdentity, Retry,
 };
+use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::mounts::MountPath;
@@ -61,6 +75,9 @@ pub const TRASH_DIR: &str = ".trash";
 /// it fails, and nothing retries it with an overwriting rename.
 // ADR-0409 decision 10
 pub const NO_REPLACE_UNSUPPORTED: &str = "no-replace-unsupported";
+
+/// The bytes read at a time by a tree copy and a content hash.
+const COPY_PIECE: usize = 64 * 1024;
 
 /// Every disk access to the library. Paths are disk paths; `root` is one mount's folder.
 pub trait LibraryStore: Send + Sync {
@@ -235,6 +252,93 @@ pub trait LibraryStore: Send + Sync {
         }
         unreachable!("a library path has at least one name")
     }
+    /// Every entry of the tree at `top` (below the mount folder `root`) without following a link, in walk order —
+    /// `top` itself first (`rel` empty), each folder before what it holds and a folder's entries by name — with its
+    /// kind and a file's tag. A link is listed as a link and not entered; a file at `top` is the tree alone. Before
+    /// `top` is stat'ed, before each folder is listed and before each file's tag is taken, every name between `root`
+    /// and it is stat'ed again without following ([`way_holds`]): one that is no longer a real folder answers
+    /// `NotADirectory`, so no listing reaches past a link put above the tree or inside it meanwhile. A stat, listing
+    /// or tag failure is the answer.
+    // ADR-0365
+    fn list_tree(&self, root: &Path, top: &Path) -> io::Result<Vec<TreeEntry>> {
+        let held = |path: &Path| match way_holds(self, root, path)? {
+            true => Ok(()),
+            false => Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "a name on the way to the tree is no longer a real folder",
+            )),
+        };
+        let entry = |rel: PathBuf, kind: EntryKind| -> io::Result<TreeEntry> {
+            let tag = match kind {
+                EntryKind::File => {
+                    let path = tree_path(top, &rel);
+                    held(&path)?;
+                    Some(self.tag(&path)?)
+                }
+                EntryKind::Folder | EntryKind::Link => None,
+            };
+            Ok(TreeEntry { rel, kind, tag })
+        };
+        held(top)?;
+        let mut entries = vec![entry(PathBuf::new(), self.stat(top)?)?];
+        let mut next = 0;
+        while next < entries.len() {
+            let (kind, folder) = (entries[next].kind, entries[next].rel.clone());
+            next += 1;
+            if kind != EntryKind::Folder {
+                continue;
+            }
+            let path = tree_path(top, &folder);
+            held(&path)?;
+            let mut names = self.list(&path)?;
+            names.sort_by(|a, b| a.0.cmp(&b.0));
+            for (name, kind) in names {
+                entries.push(entry(folder.join(name), kind)?);
+            }
+        }
+        Ok(entries)
+    }
+    /// Copies the tree at `from` (below the mount folder `root`) to `to` (ADR-0409 decision 12): every entry — dot names and names no library takes
+    /// included — made create-new, never replacing (`to` itself taken = `AlreadyExists` with nothing made). The tree
+    /// is listed first ([`LibraryStore::list_tree`], so each file's tag is taken before its bytes are read); a link
+    /// anywhere in it is [`CopyFailure::Links`] with nothing made (ADR-0365). Each file is read only while it is the
+    /// file listed (the module header's check — a file that is not fails the copy there), its bytes hashed while they
+    /// are copied, then synced, then its listed modified time and its permissions (Unix mode bits, the Windows
+    /// read-only attribute) are set in that order; each folder gets its modified time and permissions after what it
+    /// holds (ADR-0409 M13), read from a no-follow stat that must still say folder. A failure after `to` was made
+    /// leaves what was copied ([`CopyFailure::Failed`] `made`) — the caller owns it. Default: the disk, through std
+    /// and platform `open_read_no_follow` and `set_folder_modified`.
+    // ADR-0365
+    // ADR-0409 decision 12 and M13
+    fn copy_tree(&self, root: &Path, from: &Path, to: &Path) -> Result<TreeCopy, CopyFailure> {
+        copy_on_disk(self, root, from, to)
+    }
+    /// The SHA-256 of the bytes of the file `rel` of the tree at `top` (below the mount folder `root`), read in pieces with no cap — the hash
+    /// [`LibraryStore::copy_tree`] takes while copying —, read only while it is the file `listed` saw (the module
+    /// header's check). `Ok(None)` = it is not (a folder on the way or the name a link, a folder now, another tag):
+    /// nothing was read. Default: the disk.
+    // ADR-0365
+    fn content_hash(
+        &self,
+        root: &Path,
+        top: &Path,
+        rel: &Path,
+        listed: &ContentTag,
+    ) -> io::Result<Option<ContentHash>> {
+        let Some(mut file) = open_as_listed(self, root, &tree_path(top, rel), listed)? else {
+            return Ok(None);
+        };
+        let mut hasher = Sha256::new();
+        let mut piece = vec![0u8; COPY_PIECE];
+        loop {
+            match file.read(&mut piece) {
+                Ok(0) => return Ok(Some(digest(hasher))),
+                Ok(read) => hasher.update(&piece[..read]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
 
 /// What one entry is, seen without following a link.
@@ -301,6 +405,60 @@ pub struct ContentTag {
     /// `None` = the volume gives no per-file identity (platform `file_identity` answered `Unsupported`) — not a
     /// failure.
     pub identity: Option<FileIdentity>,
+}
+
+/// One entry of a tree as [`LibraryStore::list_tree`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeEntry {
+    /// Its path below the tree's top; empty = the top itself.
+    pub rel: PathBuf,
+    pub kind: EntryKind,
+    /// A file's tag; `None` for a folder or a link.
+    pub tag: Option<ContentTag>,
+}
+
+/// A SHA-256 of a file's bytes.
+pub type ContentHash = [u8; 32];
+
+/// One entry a tree copy made: the source entry as listed (a file's tag taken before its bytes) and a file's hash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopiedEntry {
+    pub entry: TreeEntry,
+    /// The hash of the bytes copied; `None` for a folder.
+    pub hash: Option<ContentHash>,
+}
+
+/// What [`LibraryStore::copy_tree`] copied.
+#[derive(Clone, Debug)]
+pub struct TreeCopy {
+    /// Taken before the source was listed — the racy rule's reference for every tag below.
+    pub read_at: SystemTime,
+    /// In [`LibraryStore::list_tree`]'s order.
+    pub entries: Vec<CopiedEntry>,
+}
+
+/// Why a tree copy did not finish.
+#[derive(Debug)]
+pub enum CopyFailure {
+    /// Links in the source, by their paths below its top (empty = the top itself) — nothing was made (ADR-0365).
+    Links(Vec<PathBuf>),
+    /// `made` = the copy's top had been made: it holds what was copied before the failure. `at` = the entry the copy
+    /// stopped at, below the source's top (empty = the top itself): it and the entries after it in listing order were
+    /// not copied — or, for a folder, everything in it was and its own time and permissions were not kept.
+    Failed {
+        error: io::Error,
+        made: bool,
+        at: PathBuf,
+    },
+}
+
+/// The disk path of the tree entry `rel` below `top` (`top` itself for an empty `rel` — a path joined with an empty
+/// name gains a separator, which names no file).
+pub(crate) fn tree_path(top: &Path, rel: &Path) -> PathBuf {
+    match rel.as_os_str().is_empty() {
+        true => top.to_path_buf(),
+        false => top.join(rel),
+    }
 }
 
 /// The bundle folder name under `.trash` — one plain name to the store; its form is `trash::BundleId`'s.
@@ -772,6 +930,196 @@ fn trash_path(root: &Path, path: &Path, bundle: &TrashBundle) -> io::Result<Path
     Ok(rel.to_path(&root.join(TRASH_DIR).join(&bundle.0)))
 }
 
+/// [`LibraryStore::copy_tree`] on the disk (its doc): `store` lists the source, std and platform make the copy.
+// ADR-0409 decision 12 and M13
+fn copy_on_disk<S: LibraryStore + ?Sized>(
+    store: &S,
+    root: &Path,
+    from: &Path,
+    to: &Path,
+) -> Result<TreeCopy, CopyFailure> {
+    let read_at = SystemTime::now();
+    let failed = |error, made, at: &Path| CopyFailure::Failed {
+        error,
+        made,
+        at: at.to_path_buf(),
+    };
+    let listing = store
+        .list_tree(root, from)
+        .map_err(|error| failed(error, false, Path::new("")))?;
+    refuse_links(&listing)?;
+    let mut made = false;
+    let mut entries = Vec::with_capacity(listing.len());
+    let mut folders = Vec::new();
+    for entry in listing {
+        let copy = tree_path(to, &entry.rel);
+        let hash = match &entry.tag {
+            None => {
+                fs::create_dir(&copy).map_err(|error| failed(error, made, &entry.rel))?;
+                made = true;
+                folders.push(entry.rel.clone());
+                None
+            }
+            Some(tag) => {
+                let source = tree_path(from, &entry.rel);
+                let copied = copy_file(store, root, &source, &copy, tag, &mut made);
+                Some(copied.map_err(|error| failed(error, made, &entry.rel))?)
+            }
+        };
+        entries.push(CopiedEntry { entry, hash });
+    }
+    // ADR-0409 M13: a folder's own time and permissions after what it holds — making an entry inside changes them.
+    for rel in folders.iter().rev() {
+        let copy = tree_path(to, rel);
+        let source = tree_path(from, rel);
+        let kept = way_holds(store, root, &source).and_then(|held| {
+            // ADR-0365: a name on the way that is no longer a real folder stops here — nothing is read through it.
+            if !held {
+                return Err(not_as_listed());
+            }
+            let meta = fs::symlink_metadata(&source)?;
+            if !meta.is_dir() {
+                return Err(not_as_listed());
+            }
+            set_folder_modified(&copy, meta.modified()?)?;
+            fs::set_permissions(&copy, meta.permissions())
+        });
+        kept.map_err(|error| failed(error, made, rel))?;
+    }
+    Ok(TreeCopy { read_at, entries })
+}
+
+/// The file at `from` (below the mount folder `root`), opened as `listed` saw it ([`open_as_listed`] — one that is
+/// not fails here, nothing read), made create-new at `to` (`made` set once it is), its bytes copied and hashed,
+/// synced, then the listed modified time and the opened file's permissions set — read-only last (ADR-0409 M13).
+fn copy_file<S: LibraryStore + ?Sized>(
+    store: &S,
+    root: &Path,
+    from: &Path,
+    to: &Path,
+    listed: &ContentTag,
+    made: &mut bool,
+) -> io::Result<ContentHash> {
+    let Some(mut source) = open_as_listed(store, root, from, listed)? else {
+        return Err(not_as_listed());
+    };
+    let permissions = source.metadata()?.permissions();
+    let mut copy = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    *made = true;
+    let mut hasher = Sha256::new();
+    let mut piece = vec![0u8; COPY_PIECE];
+    loop {
+        let read = match source.read(&mut piece) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        hasher.update(&piece[..read]);
+        copy.write_all(&piece[..read])?;
+    }
+    copy.sync_all()?;
+    copy.set_times(fs::FileTimes::new().set_modified(listed.modified))?;
+    copy.set_permissions(permissions)?;
+    Ok(digest(hasher))
+}
+
+/// The file at `path` (below the mount folder `root`) opened for reading only while it is the file `listed` saw
+/// (ADR-0365 · ADR-0409 decision 12): every name between `root` and it stat'ed again without following
+/// ([`way_holds`]), the file opened without following its last name (platform `open_read_no_follow`), and the
+/// handle's kind, size, modified time and identity compared with `listed` — all before a byte is read. `Ok(None)` = it
+/// is not. Retried while the OS says busy (an antivirus or indexer holding it), each try checking again.
+// ADR-0365
+fn open_as_listed<S: LibraryStore + ?Sized>(
+    store: &S,
+    root: &Path,
+    path: &Path,
+    listed: &ContentTag,
+) -> io::Result<Option<fs::File>> {
+    let mut opened = None;
+    (OS_HOOKS.retry)(&mut || {
+        opened = None;
+        if !way_holds(store, root, path)? {
+            return Ok(());
+        }
+        let file = match open_read_no_follow(path) {
+            Ok(file) => file,
+            // Outside Windows a link at the name is refused (`O_NOFOLLOW`) rather than opened as itself.
+            Err(e) => {
+                return match store.stat(path) {
+                    Ok(EntryKind::Link) => Ok(()),
+                    _ => Err(e),
+                }
+            }
+        };
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Ok(());
+        }
+        let tag = content_tag(meta.modified()?, meta.len(), opened_identity(&file))?;
+        if tag == *listed {
+            opened = Some(file);
+        }
+        Ok(())
+    })?;
+    Ok(opened)
+}
+
+/// Whether every name between the mount folder `root` and `path` — neither of them included — is still a real
+/// folder, each stat'ed without following, from `root` down (one gone = no). `root` itself is not checked: only a
+/// mount's folder may be a link (ADR-0365). `InvalidInput` = `path` does not lie below `root`.
+// ADR-0365
+fn way_holds<S: LibraryStore + ?Sized>(store: &S, root: &Path, path: &Path) -> io::Result<bool> {
+    let below = path.strip_prefix(root).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a tree path that is not below its mount folder",
+        )
+    })?;
+    let mut names = below.components().peekable();
+    let mut folder = root.to_path_buf();
+    while let Some(name) = names.next() {
+        if names.peek().is_none() {
+            break;
+        }
+        folder.push(name);
+        match store.stat(&folder) {
+            Ok(EntryKind::Folder) => {}
+            Ok(EntryKind::File | EntryKind::Link) => return Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// A tree copy's source entry that is no longer what the copy listed.
+fn not_as_listed() -> io::Error {
+    io::Error::other("no longer the entry the copy listed")
+}
+
+/// A tree listing's links as [`CopyFailure::Links`]; `Ok` = none (ADR-0365).
+fn refuse_links(listing: &[TreeEntry]) -> Result<(), CopyFailure> {
+    let links: Vec<PathBuf> = listing
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Link)
+        .map(|entry| entry.rel.clone())
+        .collect();
+    match links.is_empty() {
+        true => Ok(()),
+        false => Err(CopyFailure::Links(links)),
+    }
+}
+
+fn digest(hasher: Sha256) -> ContentHash {
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hasher.finalize());
+    hash
+}
+
 /// The in-memory store for tests: folders, files and links under one root, with failure injection. Its scan keeps
 /// the [`LibraryStore`] rules (links, names, a `seq()` draw before every step, errors as entries) without the store
 /// lock held while `seq` runs, so a test's `seq` may change the store between steps.
@@ -785,8 +1133,12 @@ pub(crate) mod mem {
 
     use std::ffi::OsString;
 
-    use super::{admits, ContentTag, EntryKind, LibraryStore, ScanEntry, ScanListing};
+    use super::{
+        admits, digest, refuse_links, tree_path, ContentHash, ContentTag, CopiedEntry, CopyFailure,
+        EntryKind, LibraryStore, ScanEntry, ScanListing, TreeCopy,
+    };
     use crate::mounts::MountPath;
+    use sha2::{Digest, Sha256};
 
     #[derive(Clone, Debug)]
     enum Node {
@@ -1303,6 +1655,88 @@ pub(crate) mod mem {
                 None => Err(not_found()),
             }
         }
+
+        /// As the disk's (the trait doc): a file keeps its bytes and modified time; a failing read of a file fails
+        /// the copy there.
+        fn copy_tree(&self, root: &Path, from: &Path, to: &Path) -> Result<TreeCopy, CopyFailure> {
+            let read_at = SystemTime::now();
+            let listing = self
+                .list_tree(root, from)
+                .map_err(|error| CopyFailure::Failed {
+                    error,
+                    made: false,
+                    at: PathBuf::new(),
+                })?;
+            refuse_links(&listing)?;
+            let mut state = self.state.lock().unwrap();
+            let mut made = false;
+            let mut entries = Vec::with_capacity(listing.len());
+            for entry in listing {
+                let (source, copy) = (tree_path(from, &entry.rel), tree_path(to, &entry.rel));
+                let refused = if state.nodes.contains_key(&copy) {
+                    Some(io::Error::from(io::ErrorKind::AlreadyExists))
+                } else if !matches!(
+                    copy.parent().and_then(|p| state.nodes.get(p)),
+                    Some(Node::Dir)
+                ) {
+                    Some(not_found())
+                } else if state.read_failures.contains(&source) {
+                    Some(io::Error::other("injected read failure"))
+                } else {
+                    None
+                };
+                let node = match (refused, state.nodes.get(&source).cloned()) {
+                    (None, Some(node)) => node,
+                    (refused, _) => {
+                        return Err(CopyFailure::Failed {
+                            error: refused.unwrap_or_else(not_found),
+                            made,
+                            at: entry.rel,
+                        })
+                    }
+                };
+                let hash = match &node {
+                    Node::File { bytes, .. } => Some(digest(Sha256::new_with_prefix(bytes))),
+                    Node::Dir | Node::Link => None,
+                };
+                state.nodes.insert(copy, node);
+                made = true;
+                entries.push(CopiedEntry { entry, hash });
+            }
+            Ok(TreeCopy { read_at, entries })
+        }
+
+        /// As the disk's (the trait doc): a file whose tag is not `listed`, a link or a folder at its name, or a link
+        /// or file among the folders between `root` and it is no longer the file listed.
+        fn content_hash(
+            &self,
+            root: &Path,
+            top: &Path,
+            rel: &Path,
+            listed: &ContentTag,
+        ) -> io::Result<Option<ContentHash>> {
+            let path = tree_path(top, rel);
+            let state = self.state.lock().unwrap();
+            if state.read_failures.contains(&path) {
+                return Err(io::Error::other("injected read failure"));
+            }
+            let folders_hold = path
+                .ancestors()
+                .skip(1)
+                .take_while(|folder| folder.starts_with(root) && *folder != root)
+                .all(|folder| matches!(state.nodes.get(folder), Some(Node::Dir)));
+            match state.nodes.get(&path) {
+                Some(Node::File { bytes, modified })
+                    if folders_hold
+                        && *modified == listed.modified
+                        && bytes.len() as u64 == listed.size =>
+                {
+                    Ok(Some(digest(Sha256::new_with_prefix(bytes))))
+                }
+                Some(_) => Ok(None),
+                None => Err(not_found()),
+            }
+        }
     }
 
     fn open_folder(state: &State, path: &Path, rel: Option<MountPath>) -> Open {
@@ -1327,12 +1761,498 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashSet;
 
+    use std::time::Duration;
+
     use engram_dashboard_platform::fs::link_dir;
 
     use super::*;
 
     fn lib(text: &str) -> MountPath {
         MountPath::parse(text).unwrap()
+    }
+
+    fn modified(path: &Path) -> SystemTime {
+        fs::symlink_metadata(path).unwrap().modified().unwrap()
+    }
+
+    fn set_read_only(path: &Path, read_only: bool) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(read_only);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn rels(copy: &TreeCopy) -> Vec<String> {
+        copy.entries
+            .iter()
+            .map(|copied| copied.entry.rel.to_string_lossy().replace('\\', "/"))
+            .collect()
+    }
+
+    // ADR-0409 decision 12 · M13: every entry — dot names and names no library takes included — is made, a folder
+    //   before what it holds; each file's bytes are hashed while copied; a file's modified time and read-only attribute
+    //   and a folder's modified time are kept.
+    #[test]
+    fn a_tree_copy_makes_every_entry_keeping_modified_times_and_read_only_and_hashes_the_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        let a = write(&from, "a.md", "alpha");
+        write(&from, "sub/.hidden", "h");
+        let b = write(&from, "sub/deep/b.txt", "bee");
+        let then = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let later = then + Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&a)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(then))
+            .unwrap();
+        set_read_only(&b, true);
+        set_folder_modified(&from.join("sub").join("deep"), later).unwrap();
+        let to = dir.path().join("to");
+
+        let copy = FsStore.copy_tree(dir.path(), &from, &to).unwrap();
+
+        assert_eq!(
+            rels(&copy),
+            [
+                "",
+                "a.md",
+                "sub",
+                "sub/.hidden",
+                "sub/deep",
+                "sub/deep/b.txt"
+            ]
+        );
+        let copied_b = to.join("sub").join("deep").join("b.txt");
+        assert_eq!(fs::read_to_string(&copied_b).unwrap(), "bee");
+        assert_eq!(
+            fs::read_to_string(to.join("sub").join(".hidden")).unwrap(),
+            "h"
+        );
+        assert_eq!(modified(&to.join("a.md")), then);
+        assert!(fs::metadata(&copied_b).unwrap().permissions().readonly());
+        assert_eq!(modified(&to.join("sub").join("deep")), later);
+        let hash = copy.entries[1].hash.expect("a file's hash");
+        assert_eq!(hash, digest(Sha256::new_with_prefix(b"alpha")));
+        let tag = FsStore.tag(&to.join("a.md")).unwrap();
+        let rehash = FsStore
+            .content_hash(dir.path(), &to, Path::new("a.md"), &tag)
+            .unwrap();
+        assert_eq!(rehash, Some(hash));
+        assert_eq!(copy.entries[1].entry.tag, Some(FsStore.tag(&a).unwrap()));
+        assert_eq!(copy.entries[2].hash, None, "a folder has no hash");
+        set_read_only(&b, false);
+        set_read_only(&copied_b, false);
+    }
+
+    // ADR-0409 decision 12: a copy is create-new — a taken destination, folder or file, is `AlreadyExists` with
+    //   nothing made and the entry there untouched.
+    #[test]
+    fn a_tree_copy_never_replaces_what_is_at_its_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        let a = write(&from, "a.md", "new");
+        let taken = write(dir.path(), "taken/a.md", "old");
+
+        for (source, onto) in [(&from, taken.parent().unwrap()), (&a, taken.as_path())] {
+            match FsStore.copy_tree(dir.path(), source, onto) {
+                Err(CopyFailure::Failed {
+                    error, made: false, ..
+                }) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                other => panic!("not refused as taken: {other:?}"),
+            }
+        }
+        assert_eq!(fs::read_to_string(&taken).unwrap(), "old");
+        assert_eq!(fs::read_dir(taken.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    // ADR-0365: a link anywhere in the source refuses the copy, naming it, before anything is made.
+    #[test]
+    fn a_tree_copy_refuses_a_source_holding_a_link_and_makes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        write(&outside, "keep.md", "k");
+        let from = dir.path().join("from");
+        write(&from, "sub/a.md", "a");
+        link_dir(&outside, &from.join("sub").join("linked")).unwrap();
+        let to = dir.path().join("to");
+
+        match FsStore.copy_tree(dir.path(), &from, &to) {
+            Err(CopyFailure::Links(links)) => {
+                assert_eq!(links, [Path::new("sub").join("linked")])
+            }
+            other => panic!("not refused for its link: {other:?}"),
+        }
+        assert!(fs::symlink_metadata(&to).is_err(), "nothing made");
+    }
+
+    // The memory store's copy keeps bytes and modified times, and one that fails part-way says it made its top.
+    #[test]
+    fn mem_store_copies_a_tree_and_a_failing_read_stops_it_part_way() {
+        let store = mem::MemStore::new(Path::new("/m"));
+        store.file_version("d/a.md", "a", 5);
+        store.file("d/e/b.md", "b");
+        let copy = store
+            .copy_tree(Path::new("/m"), Path::new("/m/d"), Path::new("/m/c"))
+            .unwrap();
+        assert_eq!(rels(&copy), ["", "a.md", "e", "e/b.md"]);
+        assert_eq!(
+            store.tag(Path::new("/m/c/a.md")).unwrap(),
+            store.tag(Path::new("/m/d/a.md")).unwrap()
+        );
+        store.fail_read("d/e/b.md");
+        match store.copy_tree(Path::new("/m"), Path::new("/m/d"), Path::new("/m/f")) {
+            Err(CopyFailure::Failed { made: true, at, .. }) => {
+                assert_eq!(at, Path::new("e").join("b.md"), "where it stopped")
+            }
+            other => panic!("not a part-way failure: {other:?}"),
+        }
+        assert!(store.exists(Path::new("/m/f/a.md")));
+    }
+
+    /// [`FsStore`] whose stat or listing of `at` runs `hook` once first, after `passes` such calls went by — a change
+    /// landing in the middle of a tree listing or copy (the copy stats each file's folders again just before opening
+    /// the file).
+    struct Swapping {
+        at: PathBuf,
+        passes: std::sync::Mutex<usize>,
+        hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl Swapping {
+        fn touch(&self, path: &Path) {
+            if path != self.at {
+                return;
+            }
+            let mut passes = self.passes.lock().unwrap();
+            if *passes > 0 {
+                *passes -= 1;
+                return;
+            }
+            drop(passes);
+            if let Some(hook) = self.hook.lock().unwrap().take() {
+                hook();
+            }
+        }
+    }
+
+    impl LibraryStore for Swapping {
+        fn scan(
+            &self,
+            root: &Path,
+            under: Option<&MountPath>,
+            seq: &dyn Fn() -> u64,
+        ) -> io::Result<ScanListing> {
+            FsStore.scan(root, under, seq)
+        }
+        fn first_link(&self, root: &Path, rel: &MountPath) -> io::Result<Option<MountPath>> {
+            FsStore.first_link(root, rel)
+        }
+        fn read(&self, path: &Path, cap: u64) -> io::Result<Vec<u8>> {
+            FsStore.read(path, cap)
+        }
+        fn tag(&self, path: &Path) -> io::Result<ContentTag> {
+            FsStore.tag(path)
+        }
+        fn write_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            FsStore.write_atomic(path, bytes)
+        }
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            FsStore.create_new(path, bytes)
+        }
+        fn create_dir(&self, path: &Path) -> io::Result<()> {
+            FsStore.create_dir(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            FsStore.rename(from, to)
+        }
+        fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
+            FsStore.copy(from, to)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            FsStore.exists(path)
+        }
+        fn stat(&self, path: &Path) -> io::Result<EntryKind> {
+            self.touch(path);
+            FsStore.stat(path)
+        }
+        fn list(&self, path: &Path) -> io::Result<Vec<(OsString, EntryKind)>> {
+            self.touch(path);
+            FsStore.list(path)
+        }
+        fn remove_dir(&self, path: &Path) -> io::Result<()> {
+            FsStore.remove_dir(path)
+        }
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            FsStore.remove_file(path)
+        }
+    }
+
+    fn swapping(at: PathBuf, hook: impl FnOnce() + Send + 'static) -> Swapping {
+        swapping_after(at, 0, hook)
+    }
+
+    fn swapping_after(
+        at: PathBuf,
+        passes: usize,
+        hook: impl FnOnce() + Send + 'static,
+    ) -> Swapping {
+        Swapping {
+            at,
+            passes: std::sync::Mutex::new(passes),
+            hook: std::sync::Mutex::new(Some(Box::new(hook))),
+        }
+    }
+
+    /// The part-way failure of a tree copy: where it stopped.
+    fn stopped_at(copied: Result<TreeCopy, CopyFailure>) -> PathBuf {
+        match copied {
+            Err(CopyFailure::Failed { made: true, at, .. }) => at,
+            other => panic!("not a part-way failure: {other:?}"),
+        }
+    }
+
+    // ADR-0365: a folder of the source swapped for a link after the listing — here, after the first file was copied —
+    //   is not read through: the copy stops there and nothing of the link's target is copied.
+    #[test]
+    fn a_tree_copy_reads_nothing_through_a_folder_swapped_for_a_link_during_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        write(&from, "a.md", "a");
+        write(&from, "sub/b.md", "b");
+        write(dir.path(), "outside/b.md", "secret");
+        let (sub, outside) = (from.join("sub"), dir.path().join("outside"));
+        let link = sub.clone();
+        // The listing lists `sub` and stats it on the way to `sub/b.md`'s tag; the third touch is the copy's.
+        let store = swapping_after(sub.clone(), 2, move || {
+            fs::rename(&link, link.with_file_name("moved")).unwrap();
+            link_dir(&outside, &link).unwrap();
+        });
+        let to = dir.path().join("to");
+
+        let at = stopped_at(store.copy_tree(dir.path(), &from, &to));
+
+        assert_eq!(at, Path::new("sub").join("b.md"));
+        assert_eq!(fs::read_to_string(to.join("a.md")).unwrap(), "a");
+        assert!(
+            !to.join("sub").join("b.md").exists(),
+            "nothing read through the link"
+        );
+        engram_dashboard_platform::fs::unlink_dir(&sub).unwrap();
+    }
+
+    // ADR-0409 decision 12: a file replaced after the listing by another one of the same size and modified time is
+    //   told apart on the opened handle (its identity) — nothing of it is copied; a link at a file's name is not read.
+    #[test]
+    fn a_tree_copy_stops_at_a_file_that_is_no_longer_the_one_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        write(&from, "a.md", "a");
+        let b = write(&from, "sub/b.md", "bbbb");
+        let other = write(dir.path(), "other.md", "cccc");
+        let then = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        for file in [&b, &other] {
+            let opened = fs::File::options().write(true).open(file).unwrap();
+            opened
+                .set_times(fs::FileTimes::new().set_modified(then))
+                .unwrap();
+        }
+        let replaced = b.clone();
+        // The listing lists `sub` and stats it on the way to `sub/b.md`'s tag; the third touch is the copy's.
+        let store = swapping_after(from.join("sub"), 2, move || {
+            fs::rename(&other, &replaced).unwrap()
+        });
+        let to = dir.path().join("to");
+
+        assert_eq!(
+            stopped_at(store.copy_tree(dir.path(), &from, &to)),
+            Path::new("sub").join("b.md")
+        );
+        assert!(
+            !to.join("sub").join("b.md").exists(),
+            "nothing of it copied"
+        );
+
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let store = swapping_after(from.join("sub"), 2, move || {
+            fs::remove_file(&b).unwrap();
+            link_dir(&target, &b).unwrap();
+        });
+        let at = stopped_at(store.copy_tree(dir.path(), &from, &dir.path().join("to2")));
+        assert_eq!(at, Path::new("sub").join("b.md"));
+        engram_dashboard_platform::fs::unlink_dir(&from.join("sub").join("b.md")).unwrap();
+    }
+
+    // ADR-0365 · ADR-0409 decision 12: a re-hash reads only the file listed — another tag, a link at its name or a
+    //   folder on the way swapped for a link answers `None` with nothing read.
+    #[test]
+    fn a_content_hash_reads_only_the_file_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("top");
+        let a = write(&top, "sub/a.md", "a");
+        write(dir.path(), "outside/a.md", "a");
+        let rel = Path::new("sub").join("a.md");
+        let listed = FsStore.tag(&a).unwrap();
+        let hash = FsStore
+            .content_hash(dir.path(), &top, &rel, &listed)
+            .unwrap();
+        assert_eq!(hash, Some(digest(Sha256::new_with_prefix(b"a"))));
+
+        fs::write(&a, "a longer body").unwrap();
+        assert_eq!(
+            FsStore
+                .content_hash(dir.path(), &top, &rel, &listed)
+                .unwrap(),
+            None,
+            "another tag"
+        );
+
+        let (sub, outside) = (top.join("sub"), dir.path().join("outside"));
+        fs::rename(&sub, top.join("moved")).unwrap();
+        link_dir(&outside, &sub).unwrap();
+        let through = FsStore.content_hash(
+            dir.path(),
+            &top,
+            &rel,
+            &FsStore.tag(&outside.join("a.md")).unwrap(),
+        );
+        engram_dashboard_platform::fs::unlink_dir(&sub).unwrap();
+        assert_eq!(through.unwrap(), None, "a folder on the way is a link");
+    }
+
+    /// A mount folder `dir/mount` holding the item `parent/tree/sub/b.md`, and outside it the same names with other
+    /// bytes, the same size and modified time — what a link put in place of `parent` would show.
+    fn above_the_item(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let root = dir.join("mount");
+        let b = write(&root, "parent/tree/sub/b.md", "real");
+        let secret = write(dir, "outside/tree/sub/b.md", "XXXX");
+        let then = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        for file in [&b, &secret] {
+            let opened = fs::File::options().write(true).open(file).unwrap();
+            opened
+                .set_times(fs::FileTimes::new().set_modified(then))
+                .unwrap();
+        }
+        (root.clone(), root.join("parent"), dir.join("outside"))
+    }
+
+    // ADR-0365: a folder ABOVE the copied item swapped for a link while the tree is listed — the listing stops there
+    //   (it checks every name from the mount folder down), nothing is made and nothing of the link's target read.
+    #[test]
+    fn a_tree_listing_stops_at_a_folder_above_the_item_swapped_for_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, parent, outside) = above_the_item(dir.path());
+        let from = parent.join("tree");
+        let link = parent.clone();
+        let store = swapping(from.join("sub"), move || {
+            fs::rename(&link, link.with_file_name("moved")).unwrap();
+            link_dir(&outside, &link).unwrap();
+        });
+        let to = dir.path().join("to");
+
+        let copied = store.copy_tree(&root, &from, &to);
+
+        engram_dashboard_platform::fs::unlink_dir(&parent).unwrap();
+        match copied {
+            Err(CopyFailure::Failed {
+                error, made: false, ..
+            }) => assert_eq!(error.kind(), io::ErrorKind::NotADirectory, "{error}"),
+            other => panic!("not refused at the listing: {other:?}"),
+        }
+        assert!(fs::symlink_metadata(&to).is_err(), "nothing made");
+    }
+
+    // ADR-0365: a folder ABOVE the copied item swapped for a link during the copy, after the listing — the file is not
+    //   read through it: the copy stops there.
+    #[test]
+    fn a_tree_copy_stops_at_a_folder_above_the_item_swapped_for_a_link_during_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, parent, outside) = above_the_item(dir.path());
+        let from = parent.join("tree");
+        let link = parent.clone();
+        // The listing lists `sub` and stats it on the way to `sub/b.md`'s tag; the third touch is the copy's.
+        let store = swapping_after(from.join("sub"), 2, move || {
+            fs::rename(&link, link.with_file_name("moved")).unwrap();
+            link_dir(&outside, &link).unwrap();
+        });
+        let to = dir.path().join("to");
+
+        let at = stopped_at(store.copy_tree(&root, &from, &to));
+
+        engram_dashboard_platform::fs::unlink_dir(&parent).unwrap();
+        assert_eq!(at, Path::new("sub").join("b.md"));
+        assert!(
+            !to.join("sub").join("b.md").exists(),
+            "nothing read through the link"
+        );
+    }
+
+    // ADR-0365: a folder of the source swapped for a link after the files were copied, before the folders' times are
+    //   kept — the folder pass stops at the check, before any metadata read through the link. The link's target is gone,
+    //   so a read through it would answer `NotFound`; the copy fails as `not as listed` instead.
+    #[test]
+    fn the_folder_pass_reads_no_metadata_through_a_folder_swapped_for_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        write(&from, "sub/deep/b.md", "b");
+        let (sub, target) = (from.join("sub"), dir.path().join("target"));
+        let link = sub.clone();
+        // `sub` is touched three times by the listing and once by the copy of `sub/deep/b.md`; the fifth touch is the
+        //   folder pass's check on the way to `sub/deep`.
+        let store = swapping_after(sub.clone(), 4, move || {
+            fs::rename(&link, link.with_file_name("moved")).unwrap();
+            fs::create_dir(&target).unwrap();
+            link_dir(&target, &link).unwrap();
+            fs::remove_dir(&target).unwrap();
+        });
+        let to = dir.path().join("to");
+
+        let copied = store.copy_tree(dir.path(), &from, &to);
+
+        engram_dashboard_platform::fs::unlink_dir(&sub).unwrap();
+        match copied {
+            Err(CopyFailure::Failed {
+                error,
+                made: true,
+                at,
+            }) => {
+                assert_eq!(at, Path::new("sub").join("deep"));
+                assert_eq!(error.to_string(), not_as_listed().to_string(), "{error:?}");
+            }
+            other => panic!("not stopped at the folder pass: {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(to.join("sub").join("deep").join("b.md")).unwrap(),
+            "b"
+        );
+    }
+
+    // A file a file-system filter answers for (`compact /exe` — WOF) is copied with its own bytes. Skipped where
+    //   `compact` is not there or does not compress.
+    #[test]
+    fn a_tree_copy_of_a_compressed_file_copies_its_own_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        let bytes: String = (0..200_000u32)
+            .map(|n| char::from(b'a' + (n % 26) as u8))
+            .collect();
+        let file = write(&from, "w.txt", &bytes);
+        let compressed = std::process::Command::new("compact")
+            .args(["/c", "/exe:xpress4k"])
+            .arg(&file)
+            .output()
+            .is_ok_and(|done| done.status.success());
+        if !compressed {
+            eprintln!("compact unavailable: skipped");
+            return;
+        }
+        let to = dir.path().join("to");
+
+        FsStore.copy_tree(dir.path(), &from, &to).unwrap();
+
+        assert_eq!(fs::read_to_string(to.join("w.txt")).unwrap(), bytes);
     }
 
     fn write(root: &Path, rel: &str, text: &str) -> PathBuf {
