@@ -18,4 +18,5 @@ Agent presets: a library folder of instructions, skills, settings and preset fil
 | `trd-old-priming-removal.md` | remove the old priming path and the settings fragment (closes `trd.md` §2-4 item 2 — ADR-0370) | Implemented |
 | `trd-launch-skip-missing.md` | T-112 — a launch skips what is absent and blocks on what exists but cannot be read (ADR-0374 · ADR-0387) | Implemented |
 | `trd-library-mounts.md` | step 21 — one virtual root of named mounts (ADR-0396 · ADR-0398) | Implemented |
+| `trd-file-operations.md` | step 9b — file operations, per-mount trash, emptying by direct removal (ADR-0408 · ADR-0409) | reviewed |
 | `briefing.html` · `trd-asset-library.html` | Korean explainers (made on request; the md files are canonical) | — |
