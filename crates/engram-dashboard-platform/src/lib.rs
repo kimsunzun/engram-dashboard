@@ -14,7 +14,8 @@
 //!   (processes holding a file open — Restart Manager) · [`fs`] (opening while denying
 //! others' writes, classifying that failure, verdict and retry for a brief-holder failure, folder sync, creating and walking directory
 //!   links — Windows junction, path keys and path comparison, folder-path normalization, the Win32 reserved-device-name test, file
-//!   identity, the network share a path is on) · [`spawn`] (windowless spawn,
+//!   identity, the network share a path is on, a rename that never replaces, clearing read-only below a folder without following
+//!   links) · [`spawn`] (windowless spawn,
 //!   tree-root spawn with a kill handle — Windows = suspended, put in the group, resume;
 //! "program not found" verdict; spawning outside this process's Job — WMI) · [`shell`] (interactive default shell, wrapping a CLI in a
 //!   console shell) · [`env`] (home dir, executable name/sibling path, env var name
@@ -48,7 +49,8 @@
 //! 3. **Branches outside Windows are placeholders** (ADR-0266 decision 7): no new implementations for other OSes — the branches that
 //!   existed when moved (an empty answer, a `bash`/`HOME` one-liner) are just gathered. Exception = `fs`'s directory links (symbolic
 //!   link), file identity (device number · inode) and path key (as is), whose behaviour on other OSes the design fixes — std only
-//!   (TRD S25 §1-6 · ADR-0325 · ADR-0336).
+//!    (TRD S25 §1-6 · ADR-0325 · ADR-0336) — and `fs`'s no-replace rename (Linux `renameat2`, Apple `renamex_np`, through `libc` —
+//!    ADR-0409); `fs::make_removable` doing nothing outside Windows is the design too (ADR-0409 decision 11).
 //!    ★`#[cfg]`-split branches get no compile verification here★ (development and CI are Windows only — ADR-0230). `cfg!(windows)`
 //!   branches (`env::env_key_eq`, the three `fs` failure classifications) are type-checked on
 //!    both sides but never run on another OS.
@@ -61,11 +63,12 @@
 //!
 //! - **0 workspace crate dependencies — not even base** (ADR-0266 「Rejected alternatives」 second, ADR-0268). Gate ① is that wall; the
 //!   compiler does not enforce the leaf property.
-//! - **Production third parties: `windows` · `junction` (both Windows targets only), the `tracing` facade, `raw-window-handle`** (TRD
-//!   1-3 §0 ①, TRD S21-slot-docking 6.3 §8 · B10 · 7 §5-1 · ADR-0336); dev dependencies are outside this rule. `windows` turns on the
+//! - **Production third parties: `windows` · `junction` (both Windows targets only), `libc` (Unix targets only), the `tracing` facade,
+//!   `raw-window-handle`** (TRD 1-3 §0 ①, TRD S21-slot-docking 6.3 §8 · B10 · 7 §5-1 · ADR-0336 · ADR-0409); dev dependencies are
+//!   outside this rule. `windows` turns on the
 //!   union of binding features and is not split per cargo feature (ADR-0275 decision 13). `junction` only for `fs`'s junction
 //!   creation; it is an OS crate (inside gate ⑤'s list — its `windows-sys` is not a direct dependency, so the gate does not count
-//!   it). `tracing` only for rule 4 paths.
+//!   it). `libc` only for `fs`'s no-replace rename; an OS crate (inside gate ⑤'s list). `tracing` only for rule 4 paths.
 //!   `raw-window-handle` only as the argument trait (`HasWindowHandle`); a no-dependency leaf, not an OS
 //!   crate (outside gate ⑤'s list).
 //! - ★**No async runtime (`tokio` etc.)**★ — sync crates (agent, now) call this layer too, and a runtime here would silently spread to
@@ -132,7 +135,7 @@
 //!   already printed as another member's dependency folds into `(*)` at its root and shows none of its own (measured — down to this
 //!   crate's `windows`).
 //! - **dev dependencies are not counted** (tests, `examples/`; agent's `windows` dev = `examples/spike*.rs`).
-//! - **Pair** — this crate must have 1+ (`windows` · `junction` now); a broken list regex or `cargo tree` output shape (including dropping
+//! - **Pair** — this crate must have 1+ (`windows` · `junction` · `libc` now); a broken list regex or `cargo tree` output shape (including dropping
 //!   `--no-dedupe`) would read as "0 violations".
 //! - ★**Limits**★ — only direct dependencies: a third party wrapping OS APIs (outside the list) or an unlisted OS crate (`-sys` siblings,
 //!   `windows-core`) taken in by another member is unseen; widen the list when such a crate appears.

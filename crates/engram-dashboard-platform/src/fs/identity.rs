@@ -69,22 +69,8 @@ pub fn file_identity(path: &Path) -> io::Result<FileIdentity> {
 
 #[cfg(windows)]
 fn wide_identity(file: &std::fs::File) -> io::Result<FileIdentity> {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{
-        FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
-    };
-    let mut info = FILE_ID_INFO::default();
-    // SAFETY: `file` is a handle open for this call, and the buffer is a `FILE_ID_INFO` of exactly the size passed.
-    unsafe {
-        GetFileInformationByHandleEx(
-            HANDLE(file.as_raw_handle()),
-            FileIdInfo,
-            (&mut info as *mut FILE_ID_INFO).cast(),
-            std::mem::size_of::<FILE_ID_INFO>() as u32,
-        )
-    }
-    .map_err(super::win32_io_error)?;
+    use windows::Win32::Storage::FileSystem::{FileIdInfo, FILE_ID_INFO};
+    let info: FILE_ID_INFO = super::file_info(file, FileIdInfo)?;
     Ok(FileIdentity {
         volume: info.VolumeSerialNumber,
         file: u128::from_le_bytes(info.FileId.Identifier),
@@ -111,31 +97,11 @@ fn narrow_identity(file: &std::fs::File) -> io::Result<FileIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "engram-platform-identity-{}-{}",
-                std::process::id(),
-                uuid::Uuid::new_v4()
-            ));
-            std::fs::create_dir(&dir).expect("test folder");
-            Self(dir)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::fs::Scratch;
 
     #[test]
     fn two_files_differ_and_a_rename_keeps_the_identity() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("identity");
         let first = scratch.0.join("first.md");
         let second = scratch.0.join("second.md");
         std::fs::write(&first, b"1").expect("first file");
@@ -151,7 +117,7 @@ mod tests {
 
     #[test]
     fn a_directory_has_its_own_stable_identity() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("identity");
         let inner = scratch.0.join("inner.md");
         std::fs::write(&inner, b"i").expect("inner file");
 
@@ -162,7 +128,7 @@ mod tests {
 
     #[test]
     fn another_spelling_of_the_same_path_has_the_same_identity() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("identity");
         let file = scratch.0.join("Note.md");
         std::fs::write(&file, b"n").expect("file");
         let id = file_identity(&file).expect("identity");
@@ -184,7 +150,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_128_bit_answer_is_used_where_the_volume_gives_it() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("identity");
         let file = scratch.0.join("wide.md");
         std::fs::write(&file, b"w").expect("file");
         let opened = std::fs::File::open(&file).expect("open");
@@ -216,7 +182,7 @@ mod tests {
 
     #[test]
     fn a_missing_path_is_not_found() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("identity");
         let e = file_identity(&scratch.0.join("missing")).expect_err("missing path");
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }

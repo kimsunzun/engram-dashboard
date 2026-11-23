@@ -168,26 +168,13 @@ fn open_reparse_point(path: &Path, access: u32, share: u32) -> io::Result<std::f
 
 #[cfg(windows)]
 fn is_junction(file: &std::fs::File) -> io::Result<bool> {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_ATTRIBUTE_TAG_INFO,
+        FileAttributeTagInfo, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     };
     // Not turning on `Win32_System_SystemServices` for this one constant.
     const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
 
-    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
-    // SAFETY: `file` is a handle open for this call, and the buffer is a `FILE_ATTRIBUTE_TAG_INFO` of exactly the size passed.
-    unsafe {
-        GetFileInformationByHandleEx(
-            HANDLE(file.as_raw_handle()),
-            FileAttributeTagInfo,
-            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
-            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
-        )
-    }
-    .map_err(super::win32_io_error)?;
+    let info: FILE_ATTRIBUTE_TAG_INFO = super::file_info(file, FileAttributeTagInfo)?;
     Ok(info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
         && info.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
 }
@@ -238,7 +225,7 @@ fn posix_delete_on_close(file: &std::fs::File) -> io::Result<()> {
                 | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE.0,
         ),
     };
-    set_disposition(file, FileDispositionInfoEx, &info)
+    super::set_file_info(file, FileDispositionInfoEx, &info)
 }
 
 #[cfg(windows)]
@@ -248,62 +235,21 @@ fn classic_delete_on_close(file: &std::fs::File) -> io::Result<()> {
     let info = FILE_DISPOSITION_INFO {
         DeleteFile: BOOLEAN(1),
     };
-    set_disposition(file, FileDispositionInfo, &info)
-}
-
-#[cfg(windows)]
-fn set_disposition<T>(
-    file: &std::fs::File,
-    class: windows::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS,
-    info: &T,
-) -> io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::SetFileInformationByHandle;
-    // SAFETY: `file` is a handle open for this call, and `info` is the struct of that info class with exactly the size passed (both
-    //   callers pass the class and struct as a pair).
-    unsafe {
-        SetFileInformationByHandle(
-            HANDLE(file.as_raw_handle()),
-            class,
-            (info as *const T).cast(),
-            std::mem::size_of::<T>() as u32,
-        )
-    }
-    .map_err(super::win32_io_error)
+    super::set_file_info(file, FileDispositionInfo, &info)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::file_identity;
+    use crate::fs::{file_identity, Scratch};
     use std::path::PathBuf;
 
-    struct Scratch(PathBuf);
-
     impl Scratch {
-        fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "engram-platform-link-{}-{}",
-                std::process::id(),
-                uuid::Uuid::new_v4()
-            ));
-            std::fs::create_dir(&dir).expect("test folder");
-            Self(dir)
-        }
-
         fn target_with_file(&self) -> PathBuf {
             let target = self.0.join("target");
             std::fs::create_dir(&target).expect("target folder");
             std::fs::write(target.join("inner.txt"), b"kept").expect("file inside target");
             target
-        }
-    }
-
-    // Cleans up even if an assertion fails midway. std `remove_dir_all` does not follow links.
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
@@ -313,7 +259,7 @@ mod tests {
 
     #[test]
     fn a_link_reads_through_to_the_target_and_unlinking_leaves_the_target_intact() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let target = scratch.target_with_file();
         let link = scratch.0.join("link");
 
@@ -339,7 +285,7 @@ mod tests {
 
     #[test]
     fn unlink_refuses_a_real_directory_and_a_file() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let real = scratch.target_with_file();
         let empty = scratch.0.join("empty");
         std::fs::create_dir(&empty).expect("empty folder");
@@ -361,7 +307,7 @@ mod tests {
 
     #[test]
     fn a_broken_link_is_still_unlinked() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let target = scratch.target_with_file();
         let link = scratch.0.join("link");
         link_dir(&target, &link).expect("make link");
@@ -373,14 +319,14 @@ mod tests {
 
     #[test]
     fn unlinking_a_missing_path_is_not_found() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let e = unlink_dir(&scratch.0.join("missing")).expect_err("missing path");
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
     fn a_relative_target_is_refused_and_nothing_is_made() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let link = scratch.0.join("link");
         let e = link_dir(Path::new("relative/target"), &link).expect_err("relative path refused");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
@@ -389,7 +335,7 @@ mod tests {
 
     #[test]
     fn an_occupied_link_path_is_left_alone() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let target = scratch.target_with_file();
         let occupied = scratch.0.join("occupied");
         std::fs::create_dir(&occupied).expect("existing folder");
@@ -418,7 +364,7 @@ mod tests {
 
     #[test]
     fn a_target_with_nul_is_refused_and_nothing_is_made() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let link = scratch.0.join("link");
         let e = link_dir(&scratch.0.join("tar\0get"), &link).expect_err("NUL refused");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
@@ -427,7 +373,7 @@ mod tests {
 
     #[test]
     fn unlinking_keeps_everything_under_the_target() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let target = scratch.target_with_file();
         let nested = target.join("nested");
         std::fs::create_dir(&nested).expect("inner folder");
@@ -473,7 +419,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_too_long_target_fails_and_deletes_nothing() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let sibling = scratch.target_with_file();
         let too_long = scratch.0.join("x".repeat(5000));
         let link = scratch.0.join("link");
@@ -502,7 +448,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_classic_disposition_also_removes_only_the_link() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let target = scratch.target_with_file();
         let link = scratch.0.join("link");
         link_dir(&target, &link).expect("make link");
@@ -542,7 +488,7 @@ mod tests {
         use windows::Win32::Storage::FileSystem::{
             FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         };
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let target = scratch.target_with_file();
         let parent = scratch.0.join("parent");
         std::fs::create_dir(&parent).expect("parent folder");
@@ -576,7 +522,7 @@ mod tests {
     #[test]
     fn unlink_is_a_sharing_violation_while_someone_holds_the_junction_without_delete_sharing() {
         use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let target = scratch.target_with_file();
         let link = scratch.0.join("link");
         link_dir(&target, &link).expect("make link");
@@ -596,7 +542,7 @@ mod tests {
         use windows::Win32::Storage::FileSystem::{
             FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         };
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let target = scratch.target_with_file();
         let link = scratch.0.join("link");
         link_dir(&target, &link).expect("make link");
@@ -621,7 +567,7 @@ mod tests {
         use windows::Win32::Storage::FileSystem::{
             DELETE, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
         };
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let real = scratch.target_with_file();
         let held = hold(&real, false, (FILE_SHARE_READ | FILE_SHARE_WRITE).0);
         let blocked =
@@ -642,7 +588,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_directory_symlink_is_not_taken_for_a_junction() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("link");
         let target = scratch.target_with_file();
         let symlink = scratch.0.join("symlink");
         if let Err(e) = std::os::windows::fs::symlink_dir(&target, &symlink) {

@@ -2,7 +2,8 @@
 //! and retry for a failure caused by someone holding the file briefly · folder sync · creating and walking directory
 //! links (`link`) · path keys and path comparison (`path_key`) · folder-path normalization and the Win32
 //! reserved-device-name test (`normalize`) · file identity (`identity`) · the network share a path is on
-//! (`share_root`). The opens in this file use std only —
+//! (`share_root`) · a rename that never replaces (`rename` — `rename_no_replace`) · clearing the read-only attribute
+//! below a folder without following links (`removable` — `make_removable`). The opens in this file use std only —
 //! `OpenOptionsExt::share_mode` goes down as is to `CreateFileW`'s share mode, so the same kernel behaviour comes
 //! without unsafe.
 
@@ -17,11 +18,15 @@ mod identity;
 mod link;
 mod normalize;
 mod path_key;
+mod removable;
+mod rename;
 
 pub use identity::{file_identity, FileIdentity};
 pub use link::{link_dir, unlink_dir};
 pub use normalize::{is_reserved_device_name, normalize_folder, NotAbsolute};
 pub use path_key::{path_key, same_path, PathKey};
+pub use removable::make_removable;
+pub use rename::rename_no_replace;
 
 const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_SHARING_VIOLATION: i32 = 32;
@@ -246,6 +251,53 @@ fn wide_nul(text: &str) -> Vec<u16> {
         .collect()
 }
 
+/// One `GetFileInformationByHandleEx` query of `file` — `class` is the info class whose struct is `T`.
+#[cfg(windows)]
+fn file_info<T: Default>(
+    file: &File,
+    class: windows::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS,
+) -> io::Result<T> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
+    let mut info = T::default();
+    // SAFETY: `file` is a handle open for this call, and the buffer is a `T` of exactly the size passed — every caller
+    //   passes the info class and its struct as a pair.
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(file.as_raw_handle()),
+            class,
+            (&mut info as *mut T).cast(),
+            std::mem::size_of::<T>() as u32,
+        )
+    }
+    .map_err(win32_io_error)?;
+    Ok(info)
+}
+
+/// One `SetFileInformationByHandle` call on `file` — `class` is the info class whose struct is `T`.
+#[cfg(windows)]
+fn set_file_info<T>(
+    file: &File,
+    class: windows::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS,
+    info: &T,
+) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::SetFileInformationByHandle;
+    // SAFETY: `file` is a handle open for this call, and `info` is a `T` of exactly the size passed — every caller
+    //   passes the info class and its struct as a pair.
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            class,
+            (info as *const T).cast(),
+            std::mem::size_of::<T>() as u32,
+        )
+    }
+    .map_err(win32_io_error)
+}
+
 // A FACILITY_WIN32 HRESULT (`0x8007xxxx`) turns back into the original Win32 code in its low 16 bits — carrying the HRESULT as the
 //   OS code would make `kind()` `Uncategorized`, unreadable to the classifiers above.
 #[cfg(windows)]
@@ -255,6 +307,35 @@ fn win32_io_error(e: windows::core::Error) -> io::Error {
         io::Error::from_raw_os_error((hresult & 0xFFFF) as i32)
     } else {
         io::Error::other(e)
+    }
+}
+
+/// A fresh folder for one test (`engram-platform-<tag>-<pid>-<uuid>`), removed with all it holds when dropped — also
+/// when an assertion fails midway; best effort (a removal error is ignored). std `remove_dir_all` does not follow links.
+#[cfg(test)]
+struct Scratch(std::path::PathBuf);
+
+#[cfg(test)]
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        Self::at(&std::env::temp_dir(), tag)
+    }
+
+    fn at(parent: &Path, tag: &str) -> Self {
+        let dir = parent.join(format!(
+            "engram-platform-{tag}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&dir).expect("test folder");
+        Self(dir)
+    }
+}
+
+#[cfg(test)]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

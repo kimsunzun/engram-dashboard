@@ -62,7 +62,8 @@ raw-window-handle = "0.6"
 #   moves screen coordinates to workspace coordinates) and `window::top_level_at`'s window shape (`GetWindowRgn` · `PtInRegion`).
 # `Win32_Storage_FileSystem` = `fs`'s file identity (`GetFileInformationByHandleEx` `FileIdInfo` · the fallback's
 #   `GetFileInformationByHandle`) and junction walking (`FileAttributeTagInfo` — non-following reparse tag · the delete mark
-#   on the same handle via `SetFileInformationByHandle`) and `fs::share_root`'s drive type (`GetDriveTypeW`). ADR-0325
+#   on the same handle via `SetFileInformationByHandle`) and `fs::share_root`'s drive type (`GetDriveTypeW`) and `fs::rename_no_replace`
+#   (`MoveFileExW` · `GetFullPathNameW`) and `fs::make_removable` (`FileStandardInfo` · `FileBasicInfo` on the checked handle). ADR-0325
 # `Win32_Globalization` = `fs::path_key`'s OS uppercase mapping (`LCMapStringEx` invariant `LCMAP_UPPERCASE`).
 #   ★Do not switch to `RtlUpcaseUnicodeChar`★ — it is documented for kernel mode only and its binding feature
 #   (`Wdk_System_SystemServices`) is twice this module (the measurement that both answer the same is in `src/fs/path_key.rs`).
@@ -97,6 +98,12 @@ windows = { version = "0.58", features = [
     "Win32_Globalization",
     "Win32_NetworkManagement_WNet",
 ] }
+
+# `fs::rename_no_replace` on Unix — `renameat2(RENAME_NOREPLACE)` through `syscall` (Linux, Android) and `renamex_np(RENAME_EXCL)`
+#   (Apple); std has no no-replace rename (ADR-0409). An OS crate inside gate ⑤'s list. The version `Cargo.lock` already holds
+#   (other packages pull it in), so no new package.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.186"
 
 # The `file_holders` · `fs` tests draw temp file names that do not collide — not in the production graph.
 [dev-dependencies]
