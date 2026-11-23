@@ -232,6 +232,30 @@ impl Mounts {
             None => false,
         }
     }
+
+    /// Renames the mount named `from` (by path key) to `to`, keeping its folder and its place in the list (ADR-0400
+    /// decision 12); `to` may differ from `from` only in case. `false` = `from` is not registered, or another mount's
+    /// name equals `to` by path key — nothing changed.
+    pub(crate) fn rename(&mut self, from: &MountName, to: MountName) -> bool {
+        let taken = self
+            .0
+            .iter()
+            .any(|mount| mount.name.key() == to.key() && mount.name.key() != from.key());
+        if taken {
+            return false;
+        }
+        match self
+            .0
+            .iter_mut()
+            .find(|mount| mount.name.key() == from.key())
+        {
+            Some(mount) => {
+                mount.name = to;
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// A path inside one mount's folder, relative to it — the store's path type, with the `LibPath` name rules. Made from a
@@ -297,6 +321,27 @@ pub fn admits_inside(path: &LibPath) -> bool {
     path.as_str()
         .split_once('/')
         .map_or(true, |(_, rest)| admits(rest))
+}
+
+/// `path` moved from the mount `from` to the mount `to` — the same names after its first, the first spelled as `to` —
+/// when its first name is `from` by path key (the mount lookup's rule); `None` = it lies in another mount, or at the
+/// virtual root's other names. The one converter a mount rename re-points references and catalog paths with.
+// ADR-0400 decision 12
+pub fn moved_to(path: &LibPath, from: &MountName, to: &MountName) -> Option<LibPath> {
+    let (first, rest) = match path.as_str().split_once('/') {
+        Some((first, rest)) => (first, Some(rest)),
+        None => (path.as_str(), None),
+    };
+    if name_key(first) != from.key() {
+        return None;
+    }
+    let rest = rest.map(|rest| {
+        MountPath(
+            LibPath::parse(rest)
+                .expect("the names after the first of a valid path are a valid path"),
+        )
+    });
+    Some(virtual_path(to, rest.as_ref()))
 }
 
 /// The virtual path of `rest` inside the mount `name`, or of the mount itself when `rest` is `None`.

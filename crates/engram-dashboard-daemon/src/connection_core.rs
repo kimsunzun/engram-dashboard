@@ -4825,6 +4825,7 @@ mod tests {
                         "library.relink",
                         "library.relocateMount",
                         "library.removeMount",
+                        "library.renameMount",
                         "library.status",
                         "preset.add",
                         "preset.check",

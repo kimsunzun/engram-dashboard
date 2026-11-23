@@ -1307,6 +1307,7 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
             "library.relink",
             "library.relocateMount",
             "library.removeMount",
+            "library.renameMount",
             "library.status",
             "preset.add",
             "preset.check",

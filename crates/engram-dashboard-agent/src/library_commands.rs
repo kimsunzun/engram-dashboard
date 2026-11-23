@@ -1,7 +1,9 @@
 //! `library.*`, `preset.*` and agent-preset handlers — the port asset-library implements ([`LibraryCommandHost`]) and
 //! the one mapping of a port refusal onto a command error ([`refusal_error`]). The declarations are in the one
 //! `declare_commands!` block of `commands.rs` (one block per module); `agent.new` judges its `presets` through the
-//! same port ([`LibraryCommandHost::judge_new_presets`]).
+//! same port ([`LibraryCommandHost::judge_new_presets`]) and inserts the agent only while
+//! [`LibraryCommandHost::change_number`] still answers the number that judgement was made at, judging again
+//! otherwise (ADR-0400 decision 18).
 //!
 //! ## Rules (invariants)
 //!
@@ -38,11 +40,12 @@ use crate::commands::{
     LibraryNewFileOk, LibraryNewFolderArgs, LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk,
     LibraryRefreshArgs, LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk,
     LibraryRelocateMountArgs, LibraryRelocateMountOk, LibraryRemoveMountArgs, LibraryRemoveMountOk,
-    LibraryStatusArgs, LibraryStatusOk, ListRow, PointingRow, PresetAddArgs, PresetAddOk,
-    PresetCheckArgs, PresetCheckOk, PresetEntryArg, PresetGetArgs, PresetGetOk,
-    PresetPreviewFolderArgs, PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk,
-    PresetReorderArgs, PresetReorderOk, PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs,
-    PresetSetBackendOk, PresetView, ProblemItemRow, ProblemRow, RelinkStopRow, SkippedRow,
+    LibraryRenameMountArgs, LibraryRenameMountOk, LibraryStatusArgs, LibraryStatusOk, ListRow,
+    PathReasonRow, PointingRow, PresetAddArgs, PresetAddOk, PresetCheckArgs, PresetCheckOk,
+    PresetEntryArg, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs, PresetPreviewFolderOk,
+    PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk, PresetSaveArgs,
+    PresetSaveOk, PresetSetBackendArgs, PresetSetBackendOk, PresetView, ProblemItemRow, ProblemRow,
+    RelinkPairRow, RelinkStopRow, SkippedRow,
 };
 use crate::launch::{escape_controls, put_reason, BlockReason, Reason};
 use crate::persistence::PROFILES_FILE;
@@ -169,6 +172,10 @@ pub struct AgentAttachPortAnswer {
 pub struct NewAgentPresets {
     pub attachments: Attachments,
     pub skipped: Vec<SkippedRow>,
+    /// The library's change number the judgement was made at, when it looked a library preset up — `agent.new`
+    /// inserts only while [`LibraryCommandHost::change_number`] still answers it, and judges again otherwise
+    /// (ADR-0400 decision 18); `None` = nothing to re-check.
+    pub change: Option<u64>,
 }
 
 /// A section of a preset file — `preset.reorder`'s `section`, a lowercase word checked here (the preset file's own
@@ -247,6 +254,24 @@ pub trait LibraryCommandHost: Send + Sync {
         path: &str,
         create: bool,
     ) -> Result<LibraryStatusOk, PortRefusal>;
+    /// Renames the mount `mount` to `to` and re-points the references to it (`yes` confirms the plan,
+    /// `root_generation` and `plan_digest` the ones it answered); answers the status after the rename and what it did
+    /// (a stopped answer carries no plan digest — the repeat plans what is left and, when that plan needs
+    /// confirmation, answers it to confirm, ADR-0407).
+    // ADR-0400 decision 12
+    fn rename_mount(
+        &self,
+        mount: &str,
+        to: &str,
+        yes: bool,
+        root_generation: Option<u64>,
+        plan_digest: Option<&str>,
+    ) -> Result<LibraryRenameMountOk, PortRefusal>;
+    /// The library's change number now (`Numbers.change` — raised by every library change, a mount rename before
+    /// its agents pass). `agent.new {presets}` asks it inside the registry's insert, so an implementation takes no lock
+    /// but a leaf (the library's turn mutex) and never the library lock (ADR-0400 decision 18). `None` = no library
+    /// runs.
+    fn change_number(&self) -> Option<u64>;
     fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal>;
     /// Refuses only a `folder` that is not a library path — a failed scan is the report.
     fn refresh(&self, folder: Option<&str>) -> Result<LibraryRefreshOk, PortRefusal>;
@@ -410,6 +435,40 @@ impl LibraryAddMountOk {
             config_why,
             suggested_new,
             root_generation,
+            already_pointing,
+        }
+    }
+}
+
+impl LibraryRenameMountOk {
+    /// The status after the rename and what it did (see [`LibraryRelocateMountOk`]'s `From`).
+    pub fn of(
+        status: LibraryStatusOk,
+        fixed: Vec<RelinkPairRow>,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        stopped: Option<RelinkStopRow>,
+        already_pointing: PointingRow,
+    ) -> Self {
+        let LibraryStatusOk {
+            daemon_id,
+            mounts,
+            config,
+            config_why,
+            suggested_new,
+            root_generation,
+        } = status;
+        Self {
+            daemon_id,
+            mounts,
+            config,
+            config_why,
+            suggested_new,
+            root_generation,
+            fixed,
+            written,
+            skipped,
+            stopped,
             already_pointing,
         }
     }
@@ -639,6 +698,15 @@ pub(crate) fn insert(
             }),
         )
         .expect("could not plug library.relocateMount into the table");
+    let rename_mount = Arc::clone(&library);
+    table
+        .insert(
+            "library.renameMount",
+            blocking_handler(move |args: LibraryRenameMountArgs| {
+                verb_rename_mount(rename_mount.as_ref(), args)
+            }),
+        )
+        .expect("could not plug library.renameMount into the table");
     let folders = Arc::clone(&library);
     table
         .insert(
@@ -848,6 +916,25 @@ fn verb_relocate_mount(
         )
         .map(LibraryRelocateMountOk::from)
         .map_err(|refusal| refusal_error("library.relocateMount", refusal))
+}
+
+fn verb_rename_mount(
+    library: &dyn LibraryCommandHost,
+    args: LibraryRenameMountArgs,
+) -> Result<LibraryRenameMountOk, CommandError> {
+    reject_blanks(&[
+        ("mount", Some(args.mount.as_str()), Blank::NeedsValue),
+        ("to", Some(args.to.as_str()), Blank::NeedsValue),
+    ])?;
+    library
+        .rename_mount(
+            &args.mount,
+            &args.to,
+            args.yes.unwrap_or(false),
+            args.root_generation,
+            args.plan_digest.as_deref(),
+        )
+        .map_err(|refusal| refusal_error("library.renameMount", refusal))
 }
 
 fn verb_folders(library: &dyn LibraryCommandHost) -> Result<LibraryFoldersOk, CommandError> {
@@ -1329,6 +1416,10 @@ pub(crate) mod fake {
         pub(crate) calls: Mutex<Vec<Call>>,
         /// The next answer of any method — `Ok(value)` is deserialized into that method's answer type.
         pub(crate) next: Mutex<Option<Result<Value, PortRefusal>>>,
+        /// The answers after `next`, in order.
+        pub(crate) then: Mutex<std::collections::VecDeque<Result<Value, PortRefusal>>>,
+        /// What `change_number` answers, one per call in order; empty = `None`.
+        pub(crate) change_numbers: Mutex<std::collections::VecDeque<u64>>,
     }
 
     impl FakeLibrary {
@@ -1353,7 +1444,9 @@ pub(crate) mod fake {
             args: Value,
         ) -> Result<T, PortRefusal> {
             self.calls.lock().unwrap().push((method, args));
-            match self.next.lock().unwrap().take() {
+            let next = self.next.lock().unwrap().take();
+            let next = next.or_else(|| self.then.lock().unwrap().pop_front());
+            match next {
                 Some(Ok(value)) => {
                     Ok(serde_json::from_value(value).expect("scripted answer shape"))
                 }
@@ -1376,6 +1469,8 @@ pub(crate) mod fake {
         default_preset: bool,
         presets: Vec<String>,
         skipped: Vec<crate::commands::SkippedRow>,
+        #[serde(default)]
+        change: Option<u64>,
     }
 
     /// A read view as JSON — [`LibraryReadView`] is not a wire type, so the fake builds it from fields.
@@ -1419,6 +1514,30 @@ pub(crate) mod fake {
                 "relocate_mount",
                 serde_json::json!({ "mount": mount, "path": path, "create": create }),
             )
+        }
+        fn rename_mount(
+            &self,
+            mount: &str,
+            to: &str,
+            yes: bool,
+            root_generation: Option<u64>,
+            plan_digest: Option<&str>,
+        ) -> Result<LibraryRenameMountOk, PortRefusal> {
+            self.answer(
+                "rename_mount",
+                serde_json::json!({
+                    "mount": mount, "to": to, "yes": yes, "root_generation": root_generation,
+                    "plan_digest": plan_digest,
+                }),
+            )
+        }
+        fn change_number(&self) -> Option<u64> {
+            let answer = self.change_numbers.lock().unwrap().pop_front();
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("change_number", serde_json::json!(answer)));
+            answer
         }
         fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
             self.answer("folders", Value::Null)
@@ -1662,6 +1781,7 @@ pub(crate) mod fake {
                         .collect(),
                 },
                 skipped: wire.skipped,
+                change: wire.change,
             })
         }
     }
@@ -1722,6 +1842,13 @@ mod tests {
             unreachable!("not a library call")
         }
         fn create_agent(&self, _: AgentProfile) -> Result<AgentProfile, PtyError> {
+            unreachable!("not a library call")
+        }
+        fn create_agent_if(
+            &self,
+            _: AgentProfile,
+            _: &dyn Fn() -> bool,
+        ) -> Result<Option<AgentProfile>, PtyError> {
             unreachable!("not a library call")
         }
         fn activate_profile(
@@ -1877,6 +2004,34 @@ mod tests {
                 status_row(),
                 "relocate_mount",
                 json!({ "mount": "team", "path": "C:/lib", "create": true }),
+            ),
+            (
+                "library.renameMount",
+                json!({ "mount": "team", "to": "shared" }),
+                status_with(json!({
+                    "fixed": [], "written": [], "skipped": [], "stopped": null,
+                    "already_pointing": { "presets": 1, "agents": 0 },
+                })),
+                "rename_mount",
+                json!({
+                    "mount": "team", "to": "shared", "yes": false, "root_generation": null,
+                    "plan_digest": null,
+                }),
+            ),
+            (
+                "library.renameMount",
+                json!({
+                    "mount": "team", "to": "Team", "yes": true, "root_generation": 7, "plan_digest": "d1",
+                }),
+                status_with(json!({
+                    "fixed": [{ "from": "team/p.yaml", "to": "Team/p.yaml" }],
+                    "written": ["shared/q.yaml"], "skipped": [], "stopped": null,
+                    "already_pointing": { "presets": 0, "agents": 0 },
+                })),
+                "rename_mount",
+                json!({
+                    "mount": "team", "to": "Team", "yes": true, "root_generation": 7, "plan_digest": "d1",
+                }),
             ),
             (
                 "library.folders",
@@ -2273,6 +2428,11 @@ mod tests {
             (
                 "library.relocateMount",
                 json!({ "mount": " ", "path": "C:/lib" }),
+            ),
+            ("library.renameMount", json!({ "mount": "team", "to": "" })),
+            (
+                "library.renameMount",
+                json!({ "mount": " ", "to": "shared" }),
             ),
             ("library.refresh", json!({ "folder": "" })),
             ("library.list", json!({ "query": "  " })),

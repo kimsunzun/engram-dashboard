@@ -5,7 +5,7 @@
 //! - **Class A — no whole-catalog swap** (TRD S25 step-7 §6): every write goes through the per-item primitives
 //!   ([`Catalog::apply_items`] · [`Catalog::apply_scan`] · [`Catalog::remove`] · [`Catalog::insert_folder`]); per item
 //!   the later `read_seq` wins, and nothing outside a scan's range is touched. [`Catalog::drop_range`] exists for a
-//!   mount relocation only.
+//!   mount change only, and [`Catalog::rekey_range`] for a mount rename only.
 //! - **Every removal is sequenced**: an item goes only when an absence observed later than its read says so — a
 //!   listing that lacks it (`listed_at` of its nearest listed folder) or a range observed absent. A failed read
 //!   (`kept`) removes nothing.
@@ -655,6 +655,55 @@ impl Catalog {
         self.folders
             .retain(|_, folder| !within(folder, Some(range)));
         inside
+    }
+
+    /// A mount rename only (ADR-0400 decision 12): every item and folder within `range` (the old mount's top) moves to
+    /// the path `to` maps it to (the new mount's spelling), keeping its content, tag, `read_seq` and racy mark; the
+    /// references items hold are not changed (the rename's walk rewrote the files first). Called only in the rename's
+    /// write lock. Returns the touched keys — the old and the new.
+    pub fn rekey_range(
+        &mut self,
+        range: &LibPath,
+        to: impl Fn(&LibPath) -> LibPath,
+    ) -> Vec<PathKey> {
+        let inside: Vec<PathKey> = self
+            .items
+            .iter()
+            .filter(|(_, item)| within(&item.path, Some(range)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut moved = Vec::new();
+        for k in &inside {
+            let racy = self.racy.contains(k);
+            if let Some(item) = self.items.get(k).cloned() {
+                moved.push((item, racy));
+            }
+            self.replace(k, None);
+        }
+        let mut touched = inside;
+        for (item, racy) in moved {
+            let mut item = Item::clone(&item);
+            item.path = to(&item.path);
+            let k = key(&item.path);
+            self.replace(&k, Some(Arc::new(item)));
+            if racy {
+                self.racy.insert(k.clone());
+            }
+            touched.push(k);
+        }
+        let folders: Vec<LibPath> = self
+            .folders
+            .values()
+            .filter(|folder| within(folder, Some(range)))
+            .cloned()
+            .collect();
+        self.folders
+            .retain(|_, folder| !within(folder, Some(range)));
+        for folder in folders {
+            let folder = to(&folder);
+            self.folders.insert(key(&folder), folder);
+        }
+        touched
     }
 
     /// `read_at` = the racy rule's reference; `None` = unknown, the item is marked racy.
@@ -1736,6 +1785,88 @@ mod tests {
             lib.catalog.racy,
             HashSet::from([key(&lp("other/x.md"))]),
             "the dropped items' racy marks go"
+        );
+    }
+
+    // ADR-0400 decision 12: a mount rename moves every item and folder of the old mount's range to the new spelling,
+    //   each with its content, tag, read number and racy mark; another mount's items stay as they are.
+    #[test]
+    fn rekey_range_moves_its_items_and_folders_keeping_content_tag_read_number_and_racy_mark() {
+        let mut lib = Lib::new();
+        lib.store.file_at("rules/racy.md", "r", now());
+        lib.store.file(
+            "p.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/rules/racy.md\n",
+        );
+        lib.scan(None);
+        let mut other = lib.item("library/rules/racy.md").unwrap().clone();
+        other.path = lp("other/x.md");
+        lib.catalog.apply_items(vec![other], true);
+        let before: Vec<(String, ContentTag, u64, String)> =
+            ["library/p.yaml", "library/rules/racy.md"]
+                .iter()
+                .map(|rel| {
+                    let item = lib.item(rel).unwrap();
+                    (
+                        rel.replacen("library", "team", 1),
+                        item.tag,
+                        item.read_seq,
+                        format!("{:?}", item.content),
+                    )
+                })
+                .collect();
+        assert!(lib
+            .catalog
+            .racy
+            .contains(&key(&lp("library/rules/racy.md"))));
+
+        let mut touched = lib.catalog.rekey_range(&lp("library"), |path| {
+            lp(&path.as_str().replacen("library", "team", 1))
+        });
+
+        touched.sort();
+        let mut want: Vec<PathKey> = [
+            "library/p.yaml",
+            "library/rules/racy.md",
+            "team/p.yaml",
+            "team/rules/racy.md",
+        ]
+        .iter()
+        .map(|rel| key(&lp(rel)))
+        .collect();
+        want.sort();
+        assert_eq!(touched, want, "the old keys and the new");
+        lib.catalog.recompute_derived(&touched);
+        let after: Vec<(String, ContentTag, u64, String)> = before
+            .iter()
+            .map(|(rel, ..)| {
+                let item = lib.item(rel).unwrap_or_else(|| panic!("{rel} moved"));
+                assert_eq!(item.path.as_str(), rel);
+                (
+                    rel.clone(),
+                    item.tag,
+                    item.read_seq,
+                    format!("{:?}", item.content),
+                )
+            })
+            .collect();
+        assert_eq!(after, before);
+        assert!(lib.catalog.tags(Some(&lp("library"))).is_empty());
+        assert!(
+            lib.item("other/x.md").is_some(),
+            "the other mount's item stays"
+        );
+        assert_eq!(
+            lib.catalog.racy,
+            HashSet::from([key(&lp("team/rules/racy.md")), key(&lp("other/x.md"))]),
+            "the racy mark moves with its item"
+        );
+        let mut folders: Vec<&str> = lib.catalog.folders().map(LibPath::as_str).collect();
+        folders.sort_unstable();
+        assert_eq!(
+            folders,
+            ["team", "team/rules"],
+            "the top and the folders below it move"
         );
     }
 }

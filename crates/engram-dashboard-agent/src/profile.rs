@@ -475,6 +475,9 @@ fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
 pub struct ProfileRegistry {
     profiles: Mutex<Profiles>,
     store: Arc<dyn ProfileStore>,
+    /// How many takes of the registry lock found it held — tests observe a waiter.
+    #[cfg(test)]
+    lock_blocked: std::sync::atomic::AtomicUsize,
 }
 
 type ProfileMap = HashMap<AgentId, AgentProfile>;
@@ -497,11 +500,27 @@ impl ProfileRegistry {
         Self {
             profiles: Mutex::new(Profiles { map, dirty: false }),
             store,
+            #[cfg(test)]
+            lock_blocked: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Profiles> {
+        #[cfg(test)]
+        if matches!(
+            self.profiles.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            self.lock_blocked
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         self.profiles.lock().expect("profiles poisoned")
+    }
+
+    /// How many takes of the registry lock found it held so far.
+    #[cfg(test)]
+    pub(crate) fn lock_blocked(&self) -> usize {
+        self.lock_blocked.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The common path of changes without a caller — the closure commit and save are one critical section, and it commits regardless of
@@ -625,6 +644,24 @@ impl ProfileRegistry {
     pub fn try_upsert(&self, profile: AgentProfile) -> Result<(), StoreError> {
         self.try_mutate(|m| {
             m.insert(profile.id, profile);
+        })
+    }
+
+    /// [`ProfileRegistry::try_upsert`] only when `still` answers `true`, asked inside the registry lock just before the
+    /// insert — `Ok(false)` = nothing inserted (nothing saved for this request). `still` must take no lock but a leaf
+    /// (the library's turn mutex — ADR-0400 decision 18) and must not call back into the registry.
+    // ADR-0400 decision 18
+    pub fn try_upsert_if(
+        &self,
+        profile: AgentProfile,
+        still: impl FnOnce() -> bool,
+    ) -> Result<bool, StoreError> {
+        self.try_mutate_if(|m| {
+            if !still() {
+                return false;
+            }
+            m.insert(profile.id, profile);
+            true
         })
     }
 

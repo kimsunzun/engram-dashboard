@@ -10,7 +10,8 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
-| T-121 | Step-21 U4a review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
+| T-122 | Step-21 U4b — a stopped rename: tokens confirmed before the stop still pass when the plan of what is left is the confirmed one | Main | Decision pending (user) — current code kept provisionally |
+| T-121 | Step-21 U4a / U4b review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-120 | T-112 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched (user 2026-11-20: minor items need not be shown) |
 | T-105 | Launch folder wait as an advanced setting (once file-based settings loading exists) | Main | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
 | T-110 | Launch waiting cue — ADR-0181 decision 5 never built; launch waits grow to 88 s in S25 step 8 | Main | Deferred by the user to the UI work (2026-11-15) |
@@ -110,7 +111,12 @@ Full text before the simplification (investigation records · reverted attempts 
 
 ## Main
 
-### T-121. Step-21 U4a review recommendations left unfixed (rare cases)
+### T-122. Step-21 U4b — tokens confirmed before a stop pass when the plan of what is left is the confirmed one
+- **Status:** decision pending (user), raised 2026-11-23 by U4b review round 6 (hold). The code is kept as is provisionally; ADR-0407 decision 2, the `rename.rs` header and the `library.renameMount` doc already describe it.
+- **Case:** a confirmed rename stops at a file failure (the generation is not raised). If every file it wrote is edited to refer to the old mount name again and nothing else changes, the plan of what is left equals the confirmed plan (the digest pins paths, not content), so the old tokens rewrite those files again without a fresh confirmation. Only files in the confirmed set are touched, so ADR-0405 decision 1 holds.
+- **Options:** accept it (reviewer and main lean this way — content was never pinned, even without a stop) · or raise the generation when a stop has written files (changes what the generation means).
+
+### T-121. Step-21 U4a / U4b review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-22 at the U4a commit — minor items, fixed when their code is touched or they show up in use. Decisions of the unit: ADR-0402.
 - **Items** (TRD `docs/process/S25-preset-library/trd-library-mounts.md`, asset-library):
   - A launch blocked by a needed dead mount also lists later healthy mounts as "not checked" (it stopped before checking them).
@@ -120,7 +126,12 @@ Full text before the simplification (investigation records · reverted attempts 
   - Right after start, a row's `why` says "not checked (budget spent)" while the load-time check is still running; an add / relocate whose budget the check ate refuses `library-root-unusable` about the new folder instead of naming the dead mount.
   - No test for a short-budget waiter timing out on the load judgement or for recovery after a panicked judgement (exactly one replacement runner).
   - Every mount stat locks the judgement state mutex to read a flag; an `AtomicBool` / `OnceLock` fast path would avoid it (negligible today).
-  - The test `a_first_scan_starved_by_the_load_judgement_records_nothing_and_walks_the_healthy_mount_on_a_fresh_budget` no longer exercises a starved scan (name over-promises); no gate-level test pins that a `None` stat records nothing in `seen` (a mutant recording it survives). Handed to the U4b coder.
+  - The test `a_first_scan_starved_by_the_load_judgement_records_nothing_and_walks_the_healthy_mount_on_a_fresh_budget` no longer exercises a starved scan (name over-promises); no gate-level test pins that a `None` stat records nothing in `seen` (a mutant recording it survives). Done in U4b (test renamed, gate test added).
+- **U4b additions** (recorded 2026-11-23 at the U4b commit; decisions of the unit: ADR-0405, ADR-0407):
+  - A held mount's `why` keeps the other mount's old name after that mount is renamed.
+  - A file deleted outside Engram is stat'ed once per rename until the next scan.
+  - A rename touching a dead share can take longer than the CLI wait; U5 help should say to read `library.status` after a timeout.
+  - Two held mounts on one folder can pass the rename-repeat folder check.
 ### T-120. T-112 review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-20 at the T-112 freeze — the user does not need minor review items shown (「사소한거? 는 내가 알 필요없지?」); fix one when its code is touched or it shows up in use.
 - **Items** (TRD `docs/process/S25-preset-library/trd-launch-skip-missing.md`, code at `7ea7441d`):

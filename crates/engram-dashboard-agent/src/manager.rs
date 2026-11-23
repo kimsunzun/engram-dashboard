@@ -964,7 +964,22 @@ impl AgentManager {
     /// override is the stored spot that prevents both.
     /// ★A change with a caller★ — `Err` = roster cap · suffix space exhausted · save refusal/failure ([`PtyError::Store`]); no registration then.
     // ADR-0291 R17 (E4)
-    pub fn try_create_agent(&self, mut profile: AgentProfile) -> Result<AgentProfile, PtyError> {
+    pub fn try_create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
+        let created = self.try_create_agent_if(profile, || true)?;
+        Ok(created.expect("an unconditional create always inserts"))
+    }
+
+    /// [`AgentManager::try_create_agent`] whose insert also asks `still` inside the registry lock, just before it —
+    /// `Ok(None)` = `still` answered `false`: nothing registered, and the name-allocation gate and the registry lock
+    /// are released on return, so the caller may judge again (`agent.new {presets}` compares the library's change
+    /// number there — ADR-0400 decision 18). `still` takes no lock but a leaf and never calls back into the manager.
+    // ADR-0291 R17 (E4)
+    // ADR-0400 decision 18
+    pub fn try_create_agent_if(
+        &self,
+        mut profile: AgentProfile,
+        still: impl FnOnce() -> bool,
+    ) -> Result<Option<AgentProfile>, PtyError> {
         profile.display_name = normalize_display_name(profile.display_name.take());
         // ★The derivation is also inside the gate★: a read outside would open a window **between derivation and observation** (someone commits the same name in between, both see it free).
         let _gate = self.lock_name_allocation();
@@ -974,10 +989,11 @@ impl AgentManager {
         check_roster_capacity(&roster)?;
         let desired = profile.canonical_name_when_live();
         profile.display_name = Some(self.assign_new_name(&roster, profile.id, desired)?);
-        self.profiles
-            .try_upsert(profile.clone())
+        let inserted = self
+            .profiles
+            .try_upsert_if(profile.clone(), still)
             .map_err(PtyError::Store)?;
-        Ok(profile)
+        Ok(inserted.then_some(profile))
     }
 
     /// The name of a new registration — `desired` if free, the next free number of the family if someone holds it. ★The returned name is
@@ -7008,6 +7024,96 @@ mod tests {
         ));
         let manager = AgentManager::new(Arc::new(NoopStatus), profiles, tracker);
         (manager, store)
+    }
+
+    // ── `agent.new {presets}`'s conditional insert against a library change's agents pass (ADR-0400 decision 18) ──
+
+    /// A library change raises its change number, then rewrites agents through the profile-edit port, which takes the
+    /// registry lock. An insert asks its comparison inside that same lock: one that compared before the raise lands
+    /// before the pass and is rewritten by it; one that compares after the raise inserts nothing. The seam parks the
+    /// insert inside the registry lock while the change raises and calls its pass — either way no agent keeps the old
+    /// path.
+    #[test]
+    fn a_conditional_insert_is_rewritten_by_the_agents_pass_or_inserts_nothing() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::mpsc;
+        use std::thread;
+
+        use crate::profile::AttachedPreset;
+        use crate::profile_edit::{PresetPathRename, ProfileEditPort};
+
+        for compared_before_the_raise in [true, false] {
+            let (manager, _store) = scripted_manager();
+            let manager = Arc::new(manager);
+            let number = Arc::new(AtomicU64::new(0));
+            let (parked_tx, parked) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel::<()>();
+            let mut profile = agent_profile("C:/work/new", Some("new"));
+            profile.presets = vec![AttachedPreset {
+                path: "old/P.yaml".to_owned(),
+            }];
+            let id = profile.id;
+            let insert = {
+                let (manager, number) = (Arc::clone(&manager), Arc::clone(&number));
+                thread::spawn(move || {
+                    let still = || {
+                        let before = number.load(Ordering::SeqCst) == 0;
+                        parked_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(20)).unwrap();
+                        let after = number.load(Ordering::SeqCst) == 0;
+                        match compared_before_the_raise {
+                            true => before,
+                            false => after,
+                        }
+                    };
+                    manager.try_create_agent_if(profile, still)
+                })
+            };
+            parked.recv_timeout(Duration::from_secs(10)).unwrap();
+            // The change: the raise, then the agents pass — which waits for the registry lock the insert holds.
+            number.fetch_add(1, Ordering::SeqCst);
+            let blocked = manager.profiles.lock_blocked();
+            let pass = {
+                let manager = Arc::clone(&manager);
+                thread::spawn(move || {
+                    manager.rewrite_preset_paths(&[PresetPathRename {
+                        from: "old/P.yaml".to_owned(),
+                        to: "new/P.yaml".to_owned(),
+                    }])
+                })
+            };
+            // The pass is parked at the registry lock before the insert's comparison returns.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while manager.profiles.lock_blocked() == blocked {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the agents pass never waited on the registry lock"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            release.send(()).unwrap();
+            let inserted = insert.join().unwrap().unwrap();
+            let changed = pass.join().unwrap().unwrap();
+            match compared_before_the_raise {
+                true => {
+                    assert!(inserted.is_some(), "inserted before the pass");
+                    assert_eq!(changed, vec![id], "and rewritten by it");
+                    let stored: Vec<String> = manager
+                        .agent_snapshot(id)
+                        .unwrap()
+                        .presets
+                        .into_iter()
+                        .map(|attached| attached.path)
+                        .collect();
+                    assert_eq!(stored, ["new/P.yaml"]);
+                }
+                false => {
+                    assert!(inserted.is_none(), "the raised number inserts nothing");
+                    assert!(changed.is_empty());
+                    assert!(manager.agent_snapshot(id).is_none());
+                }
+            }
+        }
     }
 
     // E4 — the five versions with a caller: save `Err` → `PtyError::Store` · in-memory roster unchanged · dirty not set.

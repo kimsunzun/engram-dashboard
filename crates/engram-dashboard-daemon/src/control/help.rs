@@ -763,8 +763,8 @@ mod tests {
             .collect();
         assert_eq!(
             names.len(),
-            23,
-            "11 library, 8 preset and 4 agent-preset commands are declared: {names:?}"
+            24,
+            "12 library, 8 preset and 4 agent-preset commands are declared: {names:?}"
         );
         for name in names {
             // A whole word — `agent.presets` must not pass on the strength of `agent.presetsX`.

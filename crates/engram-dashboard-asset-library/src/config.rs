@@ -305,13 +305,28 @@ impl ConfigFile {
     /// and the list the file last held still names `name` (by path key) — so the removal is live but not saved.
     // ADR-0400 decision 14
     pub(crate) fn unsaved_removal(&self, name: &MountName) -> bool {
+        self.unsaved_saved_place(name).is_some()
+    }
+
+    /// For a `renameMount` of `from`, not registered now: the place the list the file last held gives `from` (by path
+    /// key) while the setting is `unsaved`; `None` = no failed save names it. A rename keeps its folder, so the caller
+    /// takes the call as the repeat of that rename only when this place is the live new name's folder.
+    // ADR-0400 decision 14
+    pub(crate) fn unsaved_rename(&self, from: &MountName) -> Option<MountPlace> {
+        self.unsaved_saved_place(from)
+    }
+
+    fn unsaved_saved_place(&self, name: &MountName) -> Option<MountPlace> {
         let state = lock(&self.state);
-        matches!(state.health, ConfigHealth::Unsaved { .. })
-            && state
-                .saved
-                .iter()
-                .flatten()
-                .any(|saved| saved.name.key() == name.key())
+        if !matches!(state.health, ConfigHealth::Unsaved { .. }) {
+            return None;
+        }
+        state
+            .saved
+            .iter()
+            .flatten()
+            .find(|saved| saved.name.key() == name.key())
+            .map(|saved| saved.place.clone())
     }
 
     /// Records `mounts`, the setting of the mounts just published: judges the current file (base `judge` rules — a

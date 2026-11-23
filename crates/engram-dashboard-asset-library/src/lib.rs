@@ -56,11 +56,14 @@
 //! resolution's own tag rule (`resolve::TagRule`). The mount list is persisted in `library.json` (`config.rs` — ADR-0375 ·
 //! ADR-0376), read by the daemon before [`LibraryService::new`]; `new` does no disk work beyond the built-ins. The
 //! mount commands ([`LibraryService::add_mount`] · [`LibraryService::remove_mount`] ·
-//! [`LibraryService::relocate_mount`]) and [`LibraryService::first_start`] are the only writers of the setting. Add and
+//! [`LibraryService::relocate_mount`] · [`LibraryService::rename_mount`]) and [`LibraryService::first_start`] are the
+//! only writers of the setting. Add and
 //! relocate judge the folder's overlap with the other mounts — only mounts — and stat it on one read budget
 //! (`mounts::overlap` — fail closed; a folder `create` makes is made only after the judgement passed), then walk it and
 //! publish it under a `Root` ticket (`gate.rs` `Gate::change_mount`); remove drops the mount and its range, touching no
-//! file; each raises the one root generation (ADR-0400 decisions 9–16). The first start stats the default place and
+//! file; rename re-points every reference to the mount in the preset files and the agents, re-keys its range and
+//! renames it, all in one `Root`-ticket write-lock hold (`rename.rs` · `Gate::rename_mount` — ADR-0400 decision 12);
+//! each raises the one root generation (ADR-0400 decisions 9–16). The first start stats the default place and
 //! publishes it as the mount `default_library` without a walk (ADR-0382). Each writes `library.json` — every published
 //! mount, one at the default place as `"default"` — only after its publish succeeded (ADR-0381): a refused publish
 //! writes nothing, and a write that fails leaves the new mounts live and the setting `unsaved` — nothing is undone, and
@@ -68,7 +71,12 @@
 //! One mount-change mutex serializes them across the publish and the write; under it they take the gate's locks, the
 //! leaf mutexes (the config's state, the held overlaps, the load judgement's state — each held for no IO), the
 //! registry's read lock under the library read lock for the reference counts, and do bounded folder IO (the new
-//! folder's checks, the final status). A read-only `library.json` refuses every mount command first.
+//! folder's checks, a rename plan's `.git` stats, the final status); a rename also writes preset files, stats the
+//! folder of a mount whose file read as not found, and calls the profile-edit port inside its hold. A read-only
+//! `library.json` refuses every mount command first. `agent.new
+//! {presets}` re-checks the change number its judgement was made at inside the registry's insert
+//! ([`LibraryService::change_number`] — a leaf read), so a rename's agents pass either rewrites the new agent or the
+//! insert judges again (ADR-0400 decision 18).
 //!
 //! The daemon never walks the library before it is reachable (ADR-0382): on every start, after the first-start step,
 //! it calls [`LibraryService::start_boot_scan`], which runs the first scan on a background job and returns at once.
@@ -153,6 +161,7 @@ pub mod mounts;
 pub mod path;
 pub mod refs;
 pub mod relink;
+pub mod rename;
 pub mod resolve;
 pub mod store;
 pub mod validate;
@@ -266,9 +275,9 @@ pub const LIBRARY_CONFIG_WRITE_FAILED: &str = "library-config-write-failed";
 // ADR-0400 decision 2
 pub const MOUNT_NAME_INVALID: &str = "mount-name-invalid";
 
-/// The code of an `addMount` whose name is registered at another folder (`args` = `{name}` — the registered
-/// spelling).
-// ADR-0400 decision 7
+/// The code of an `addMount` whose name is registered at another folder, or a `renameMount` whose new name is another
+/// mount's (`args` = `{name}` — the registered spelling).
+// ADR-0400 decisions 7 and 12
 pub const MOUNT_NAME_TAKEN: &str = "mount-name-taken";
 
 /// The code of an `addMount` or `relocateMount` whose folder is another mount's, holds one or lies inside one (`args` =
@@ -279,6 +288,19 @@ pub const MOUNT_OVERLAPS: &str = "mount-overlaps";
 /// The code of a mount command naming a mount that is not registered (`args` = `{mount}`).
 // ADR-0400 decision 7
 pub const MOUNT_NOT_FOUND: &str = "mount-not-found";
+
+/// The code of a `renameMount` whose mount cannot be read — absent, unreadable, held as overlapping another, or not
+/// walked — so its own references could not be rewritten (`args` = `{mount, state, why}`, `state` = `missing` |
+/// `unreadable`); nothing applied.
+// ADR-0400 decision 12
+pub const MOUNT_UNUSABLE: &str = "mount-unusable";
+
+/// The code of a `renameMount` that would rewrite files or leave references unread (a referencing file in a mount that
+/// cannot be read, or a mount never walked) and was not confirmed — no `yes`, `yes` without the `root_generation` or
+/// the `plan_digest` the plan answered, or the plan is no longer the one that digest names (`args` = `{plan,
+/// root_generation, plan_digest}` — the plan now); nothing applied.
+// ADR-0400 decision 12
+pub const MOUNT_RENAME_UNCONFIRMED: &str = "mount-rename-unconfirmed";
 
 const MERGE_JOB: &str = "library-merge";
 const BOOT_SCAN_JOB: &str = "library-boot-scan";
@@ -923,7 +945,8 @@ impl LibraryService {
     /// ([`LibraryService::judge_at_load`]), a mount held as overlapping another answering `Unreadable` with that `why`
     /// where its folder stats `Ok` — the one stat every read entrance, launch and `status` takes of a mount (a scan's
     /// is [`LibraryService::scan_stats`]), so a held mount is never walked or read (ADR-0400 decision 10). A new caller
-    /// that stats a mount's folder goes through one of the two.
+    /// that stats a mount's folder goes through one of the two — except a rename's in-hold stat of a mount whose file
+    /// read as not found (`rename.rs` `mount_gone`), which runs after the judgement on a mount known not held.
     pub(crate) fn stat_mount_list(&self, io: &LaunchIo, mounts: &[Mount]) -> Vec<FolderStatus> {
         self.stat_held(io, mounts, |status| status)
     }
@@ -1282,6 +1305,16 @@ impl LibraryService {
         self.gate.numbers()
     }
 
+    /// The change number now (`Numbers.change`) — read under the turn mutex alone, a leaf: what `agent.new {presets}`
+    /// compares inside the registry's insert with the number its judgement was made at ([`NewPresets::change`] —
+    /// ADR-0400 decision 18). It takes no library lock, so it may be asked holding the registry lock.
+    ///
+    /// [`NewPresets::change`]: crate::agent_edit::NewPresets::change
+    // ADR-0400 decision 18
+    pub fn change_number(&self) -> u64 {
+        self.gate.numbers().change
+    }
+
     /// The conditional late merge (ADR-0324 decision 5) — `f(catalog, may_insert)` under the write lock unless a
     /// generation moved since `noted`; `may_insert` is false when a scan was applied in between. `f` applies per item
     /// (`Catalog::apply_items`) and returns the touched keys. Positive observations only — a late merge never removes.
@@ -1562,7 +1595,7 @@ impl LibraryService {
         Ok(self.status())
     }
 
-    /// The mount name a remove or relocate names: the built-in `engram` refuses `Conflict` · [`MOUNT_READ_ONLY`]
+    /// The mount name a remove, relocate or rename names: the built-in `engram` refuses `Conflict` · [`MOUNT_READ_ONLY`]
     /// (ADR-0400 decision 20), another name the rules refuse `InvalidArgument` · [`MOUNT_NAME_INVALID`].
     fn named_mount(&self, text: &str) -> Result<MountName, LibraryRefusal> {
         if is_builtin(text) {
@@ -2845,7 +2878,15 @@ mod tests {
         touched: Mutex<Vec<PathBuf>>,
         hold: Mutex<Hold>,
         moved: Condvar,
+        /// The next read of this path parks: it tells the sender, then waits for the receiver ([`TestStore::door_read`]).
+        read_door: Mutex<Option<ReadDoor>>,
     }
+
+    type ReadDoor = (
+        PathBuf,
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    );
 
     impl TestStore {
         fn new(roots: &[&str]) -> Arc<Self> {
@@ -2862,7 +2903,36 @@ mod tests {
                 touched: Mutex::default(),
                 hold: Mutex::default(),
                 moved: Condvar::new(),
+                read_door: Mutex::default(),
             })
+        }
+
+        /// Arms a door on the next read of `path`: that read tells the returned receiver when it starts, then waits
+        /// (at most 20 s) until the returned sender sends.
+        fn door_read(
+            &self,
+            path: PathBuf,
+        ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            let (entered_tx, entered) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            *lock(&self.read_door) = Some((path, entered_tx, release_rx));
+            (entered, release)
+        }
+
+        fn pass_read_door(&self, path: &Path) {
+            let door = {
+                let mut door = lock(&self.read_door);
+                match door.as_ref() {
+                    Some((at, _, _)) if at == path => door.take(),
+                    _ => None,
+                }
+            };
+            if let Some((_, entered, release)) = door {
+                entered.send(()).unwrap();
+                release
+                    .recv_timeout(Duration::from_secs(20))
+                    .expect("the test opens the read door");
+            }
         }
 
         fn mem(&self, root: &str) -> &MemStore {
@@ -2988,6 +3058,7 @@ mod tests {
         fn read(&self, path: &Path, cap: u64) -> io::Result<Vec<u8>> {
             lock(&self.read_caps).push(cap);
             self.note(path);
+            self.pass_read_door(path);
             self.holding(path).read(path, cap)
         }
 
@@ -5991,6 +6062,21 @@ claude: {changed: true}
             profiles: Vec<AgentProfile>,
             limit: Duration,
         ) -> Arc<LibraryService> {
+            let registry = Arc::new(ProfileRegistry::new(Arc::new(Fixed(profiles))));
+            self.start_over(base, registry, limit)
+        }
+
+        /// [`OnDisk::start`] over the registry `registry`.
+        fn start_registry(&self, registry: Arc<ProfileRegistry>) -> Arc<LibraryService> {
+            self.start_over(ROOT_BASE, registry, IO_LIMIT)
+        }
+
+        fn start_over(
+            &self,
+            base: u64,
+            registry: Arc<ProfileRegistry>,
+            limit: Duration,
+        ) -> Arc<LibraryService> {
             let io = BoundedIo::new(
                 limit,
                 LaunchWaits::LAUNCH,
@@ -5999,7 +6085,7 @@ claude: {changed: true}
                 Arc::new(ThreadSpawn),
             );
             let values = LibraryValues {
-                registry: Arc::new(ProfileRegistry::new(Arc::new(Fixed(profiles)))),
+                registry,
                 backends: Arc::new(AgentBackends),
                 config: config::load(&self.state()),
                 default_root: self.default_root.clone(),
@@ -7126,8 +7212,7 @@ claude: {changed: true}
     //   whole budget, stats its mounts on a fresh budget the judgement charged nothing to, so the healthy mount is
     //   walked and readable and only the dead one — which gave no answer to its own ask — is recorded unreadable.
     #[test]
-    fn a_first_scan_starved_by_the_load_judgement_records_nothing_and_walks_the_healthy_mount_on_a_fresh_budget(
-    ) {
+    fn a_first_scan_that_runs_the_load_judgement_against_a_dead_share_stats_on_a_fresh_budget() {
         let limit = Duration::from_millis(800);
         let ops = DeadShare {
             dead: PathBuf::from("/team"),
@@ -8153,5 +8238,2020 @@ claude: {changed: true}
             (RefusalClass::NotFound, NOT_FOUND)
         );
         assert_eq!(reason.args, json!({ "path": "library/missing.md" }));
+    }
+
+    // ── mount rename (ADR-0400 decisions 12, 14 and 18) ─────────────────────────────────────────────────
+
+    mod rename_mount {
+        use std::sync::{mpsc, Weak};
+
+        use engram_dashboard_agent::profile::{Refusal, StoreStatus};
+        use engram_dashboard_agent::profile_edit::{
+            Attachments, PresetPathRename, ProfileEditError, ProfileEditPort, WorkspaceLock,
+        };
+
+        use super::*;
+        use crate::edit::{AddEntries, NewItem};
+
+        fn preset(body: &str) -> String {
+            format!("kind: preset\nversion: 1\n{body}")
+        }
+
+        /// A profile-edit port over the service's registry: attachments and path rewrites go through the registry's
+        /// public update. `fail` = the next rewrite refuses with it; `entered` is told when a rewrite starts, and a
+        /// rewrite then waits for `release` (when set).
+        struct RegistryPort {
+            registry: Arc<ProfileRegistry>,
+            fail: Mutex<Option<ProfileEditError>>,
+            rewrites: Mutex<Vec<Vec<PresetPathRename>>>,
+            entered: Mutex<Option<mpsc::Sender<()>>>,
+            release: Mutex<Option<mpsc::Receiver<()>>>,
+        }
+
+        impl ProfileEditPort for RegistryPort {
+            fn set_attachments(
+                &self,
+                id: AgentId,
+                next: Attachments,
+            ) -> Result<(), ProfileEditError> {
+                let present = self.registry.try_update_with(id, |profile| {
+                    profile.default_preset = next.default_preset;
+                    profile.presets = next.presets;
+                })?;
+                match present {
+                    true => Ok(()),
+                    false => Err(ProfileEditError::NotFound(id)),
+                }
+            }
+
+            fn rewrite_preset_paths(
+                &self,
+                renames: &[PresetPathRename],
+            ) -> Result<Vec<AgentId>, ProfileEditError> {
+                if let Some(entered) = lock(&self.entered).take() {
+                    entered.send(()).unwrap();
+                }
+                if let Some(release) = lock(&self.release).take() {
+                    release
+                        .recv_timeout(Duration::from_secs(20))
+                        .expect("the test releases the agents pass");
+                }
+                lock(&self.rewrites).push(renames.to_vec());
+                if let Some(failure) = lock(&self.fail).take() {
+                    return Err(failure);
+                }
+                let mut changed = Vec::new();
+                for profile in self.registry.list() {
+                    let next: Vec<AttachedPreset> = profile
+                        .presets
+                        .iter()
+                        .map(|attached| {
+                            match renames.iter().find(|rename| {
+                                same_path(Path::new(&rename.from), Path::new(&attached.path))
+                            }) {
+                                Some(rename) => AttachedPreset {
+                                    path: rename.to.clone(),
+                                },
+                                None => attached.clone(),
+                            }
+                        })
+                        .collect();
+                    if next != profile.presets {
+                        self.registry
+                            .try_update_with(profile.id, |stored| stored.presets = next)?;
+                        changed.push(profile.id);
+                    }
+                }
+                Ok(changed)
+            }
+
+            fn remove_preset_paths(&self, _: &[String]) -> Result<Vec<AgentId>, ProfileEditError> {
+                unreachable!("not a rename's call")
+            }
+
+            fn workspace_lock(
+                &self,
+                _: AgentId,
+            ) -> Result<Option<WorkspaceLock>, ProfileEditError> {
+                Ok(None)
+            }
+        }
+
+        /// A registry port plugged into `svc`; keep it alive for the test.
+        fn plugged(svc: &LibraryService) -> Arc<RegistryPort> {
+            let port = Arc::new(RegistryPort {
+                registry: Arc::clone(&svc.values.registry),
+                fail: Mutex::new(None),
+                rewrites: Mutex::new(Vec::new()),
+                entered: Mutex::new(None),
+                release: Mutex::new(None),
+            });
+            let dyn_port: Arc<dyn ProfileEditPort> = Arc::clone(&port) as Arc<dyn ProfileEditPort>;
+            let weak: Weak<dyn ProfileEditPort> = Arc::downgrade(&dyn_port);
+            svc.plug_profile_edit(weak);
+            port
+        }
+
+        /// A store whose `agents.json` is newer than this build — read-only (ADR-0291).
+        struct NewerAgents(Vec<AgentProfile>);
+
+        impl ProfileStore for NewerAgents {
+            fn save(&self, _: &[AgentProfile]) -> Result<(), StoreError> {
+                Err(StoreError::Refused(Refusal::Newer { found: 9 }))
+            }
+            fn load(&self) -> Vec<AgentProfile> {
+                self.0.clone()
+            }
+            fn status(&self) -> StoreStatus {
+                StoreStatus::ReadOnly(Refusal::Newer { found: 9 })
+            }
+        }
+
+        /// Two mounts — `library` at the default place (`lib`, holding `b.md`) and `team` at `lib2` (holding `a.md`).
+        fn two_mounts() -> OnDisk {
+            let disk = OnDisk::new(&["lib", "lib2"], "lib", None);
+            std::fs::write(
+                disk.config_path(),
+                disk.mounts_doc(&[("library", "default"), ("team", "lib2")]),
+            )
+            .unwrap();
+            disk.mem("lib").file("b.md", "b");
+            disk.mem("lib2").file("a.md", "a");
+            disk
+        }
+
+        /// [`two_mounts`] with `library/P.yaml` and `team/Q.yaml` listing `team/a.md`.
+        fn referencing() -> OnDisk {
+            let disk = two_mounts();
+            disk.mem("lib")
+                .file("P.yaml", &preset("instructions:\n- team/a.md\n"));
+            disk.mem("lib2").file(
+                "Q.yaml",
+                &preset("instructions:\n- team/a.md\n- library/b.md\n"),
+            );
+            disk
+        }
+
+        fn started(svc: Arc<LibraryService>) -> Arc<LibraryService> {
+            svc.first_scan_join().unwrap();
+            svc
+        }
+
+        /// The text of the file `rel` in the test folder `folder`.
+        fn text(disk: &OnDisk, folder: &str, rel: &str) -> String {
+            let bytes = disk
+                .store
+                .read(&disk.at(folder).join(rel), LIBRARY_READ_CAP)
+                .unwrap();
+            String::from_utf8(bytes).unwrap()
+        }
+
+        fn presets_of(svc: &LibraryService, id: AgentId) -> Vec<String> {
+            svc.values
+                .registry
+                .get(id)
+                .unwrap()
+                .presets
+                .into_iter()
+                .map(|attached| attached.path)
+                .collect()
+        }
+
+        fn code_of(refusal: LibraryRefusal) -> (RefusalClass, String, serde_json::Value) {
+            let (class, reason) = refused(refusal);
+            (class, reason.code, reason.args)
+        }
+
+        /// The `plan_digest` of the plan of renaming `mount` to `to` as the library stands now — what a caller that
+        /// read that plan confirms with.
+        fn digest(svc: &LibraryService, mount: &str, to: &str) -> String {
+            svc.rename_plan(
+                &svc.io.begin_read(),
+                &MountName::parse(mount).unwrap(),
+                &MountName::parse(to).unwrap(),
+            )
+            .digest()
+        }
+
+        // ADR-0400 decision 12: with no file to rewrite no confirmation is asked — the mount takes the name, its items
+        //   move to it in the catalog with their state, both numbers move once and library.json names it.
+        #[test]
+        fn a_rename_with_no_file_to_rewrite_renames_rekeys_and_saves_without_yes() {
+            let disk = two_mounts();
+            let svc = started(disk.start());
+            let (root, change) = (svc.numbers().root, svc.change_number());
+
+            let answer = svc
+                .rename_mount("team", "shared", false, None, None)
+                .unwrap();
+
+            assert_eq!(row_names(&answer.status), ["library", "shared", "engram"]);
+            assert_eq!(answer.status.root_generation, root + 1);
+            assert_eq!(svc.change_number(), change + 1);
+            assert!(answer.written.is_empty() && answer.stopped.is_none());
+            assert!(has(&svc, "shared/a.md") && !has(&svc, "team/a.md"));
+            let shared = MountName::parse("shared").unwrap();
+            assert!(svc.with_read(|state| state.seen(&shared)).usable());
+            assert_eq!(
+                stored(&disk),
+                [
+                    ("library".to_owned(), "default".to_owned()),
+                    ("shared".to_owned(), disk.at("lib2").display().to_string()),
+                ]
+            );
+        }
+
+        // ADR-0400 decision 12: a rename that rewrites files applies nothing until `yes` comes with the plan's root
+        //   generation — without it the plan, a stale one the plan again — and then rewrites every referencing file,
+        //   the renamed mount's own included, whole, and the agents attached in it. The plan names those agents and,
+        //   as the answer, what already pointed at the new name.
+        #[test]
+        fn a_rename_that_rewrites_files_needs_yes_and_the_plans_root_generation() {
+            let disk = referencing();
+            // Already pointing at `shared`: one reference in another mount's preset and one agent.
+            disk.mem("lib")
+                .file("R.yaml", &preset("instructions:\n- shared/a.md\n"));
+            let (attached, pointing) = (agent(&["team/Q.yaml"]), agent(&["shared/X.yaml"]));
+            let attached_id = attached.id;
+            let svc = started(disk.start_with(ROOT_BASE, vec![attached, pointing]));
+            let _port = plugged(&svc);
+            let attached_name = svc
+                .values
+                .registry
+                .get(attached_id)
+                .unwrap()
+                .canonical_name_when_live();
+            let root = svc.numbers().root;
+
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            assert_eq!(args["root_generation"], json!(root));
+            let files: Vec<(String, serde_json::Value)> = args["plan"]["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|mount| {
+                    (
+                        mount["mount"].as_str().unwrap().to_owned(),
+                        mount["paths"].clone(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                files,
+                [
+                    ("library".to_owned(), json!(["library/P.yaml"])),
+                    ("team".to_owned(), json!(["team/Q.yaml"])),
+                ]
+            );
+            assert_eq!(args["plan"]["whole_files"], json!(true));
+            assert_eq!(
+                args["plan"]["agents"],
+                json!([{ "id": attached_id.to_string(), "name": attached_name }])
+            );
+            assert_eq!(
+                args["plan"]["already_pointing"],
+                json!({ "presets": 1, "agents": 1 })
+            );
+            let (_, code, _) = code_of(
+                svc.rename_mount("team", "shared", true, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                code, MOUNT_RENAME_UNCONFIRMED,
+                "yes without the root generation"
+            );
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", true, Some(root + 5), None)
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, ROOT_GENERATION_STALE)
+            );
+            assert_eq!(args["current"], json!(root));
+            assert!(args["plan"]["files"].is_array(), "a fresh plan: {args}");
+            assert_eq!(svc.numbers().root, root, "nothing applied");
+            assert!(text(&disk, "lib", "P.yaml").contains("team/a.md"));
+
+            let answer = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+                .unwrap();
+
+            assert_eq!(answer.written, ["library/P.yaml", "shared/Q.yaml"]);
+            assert_eq!(
+                answer.fixed,
+                [
+                    ("team/a.md".to_owned(), "shared/a.md".to_owned()),
+                    ("team/Q.yaml".to_owned(), "shared/Q.yaml".to_owned()),
+                ]
+            );
+            assert!(answer.stopped.is_none());
+            assert_eq!(
+                answer.already_pointing,
+                Pointing {
+                    presets: 1,
+                    agents: 1
+                }
+            );
+            assert_eq!(presets_of(&svc, attached_id), ["shared/Q.yaml"]);
+            assert_eq!(
+                text(&disk, "lib", "P.yaml"),
+                preset("instructions:\n- shared/a.md\n")
+            );
+            let q = text(&disk, "lib2", "Q.yaml");
+            assert!(
+                q.contains("- shared/a.md") && q.contains("- library/b.md") && !q.contains("team/"),
+                "{q}"
+            );
+            assert!(has(&svc, "shared/Q.yaml") && has(&svc, "shared/a.md"));
+            assert_eq!(row_names(&answer.status), ["library", "shared", "engram"]);
+        }
+
+        // ADR-0400 decisions 12 and 24: the plan names, per mount with files to rewrite, whether its folder is
+        //   in a git working tree — a `.git` folder or file in it, or in a parent (a mount in a repository's subfolder)
+        //   — and the mounts that cannot be read; a mount never walked is a skipped row at its top.
+        #[test]
+        fn the_plan_names_git_working_trees_and_the_mounts_it_could_not_read() {
+            let disk = OnDisk::new(&["lib", "lib2", "repo/sub"], "lib", None);
+            std::fs::write(
+                disk.config_path(),
+                disk.mounts_doc(&[
+                    ("library", "default"),
+                    ("team", "lib2"),
+                    ("sub", "repo/sub"),
+                    ("dead", "gone"),
+                ]),
+            )
+            .unwrap();
+            {
+                let mut table = lock(&disk.ops.0);
+                for folder in ["lib", "lib2", "repo/sub"] {
+                    for dir in disk.at(folder).ancestors() {
+                        table.insert(dir.join(".git"), FolderStatus::Missing);
+                    }
+                }
+                table.insert(disk.at("lib2").join(".git"), FolderStatus::NotADirectory);
+                table.insert(disk.at("repo").join(".git"), FolderStatus::Ok);
+                table.insert(
+                    disk.at("gone"),
+                    FolderStatus::Unreadable("access is denied".to_owned()),
+                );
+            }
+            disk.mem("lib2").file("a.md", "a");
+            for folder in ["lib", "lib2", "repo/sub"] {
+                disk.mem(folder)
+                    .file("P.yaml", &preset("instructions:\n- team/a.md\n"));
+            }
+            let svc = started(disk.start());
+
+            let (_, code, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, MOUNT_RENAME_UNCONFIRMED);
+            let git: Vec<(String, serde_json::Value)> = args["plan"]["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|mount| {
+                    (
+                        mount["mount"].as_str().unwrap().to_owned(),
+                        mount["git"].clone(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                git,
+                [
+                    ("library".to_owned(), json!(false)),
+                    ("team".to_owned(), json!(true)),
+                    ("sub".to_owned(), json!(true)),
+                ]
+            );
+            assert_eq!(
+                args["plan"]["unread"],
+                json!([{
+                    "mount": "dead", "state": "unreadable", "why": "access is denied", "paths": null,
+                }])
+            );
+
+            let root = args["root_generation"].as_u64().unwrap();
+            let answer = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+                .unwrap();
+            assert_eq!(answer.written.len(), 3);
+            let skipped: Vec<(&str, &str)> = answer
+                .skipped
+                .iter()
+                .map(|skip| (skip.path.as_str(), skip.reason.code.as_str()))
+                .collect();
+            assert_eq!(skipped, [("dead", LIBRARY_UNAVAILABLE)]);
+        }
+
+        // ADR-0400 decisions 2, 7, 12 and 20: the names are judged before anything, and a mount that cannot be read —
+        //   absent, or held as overlapping another — is refused `mount-unusable`, nothing applied.
+        #[test]
+        fn a_rename_refuses_bad_names_and_a_mount_it_cannot_read() {
+            let disk = two_mounts();
+            let svc = started(disk.start());
+            let root = svc.numbers().root;
+            let cases = [
+                ("engram", "x", RefusalClass::Conflict, MOUNT_READ_ONLY),
+                (
+                    "team",
+                    "engram",
+                    RefusalClass::InvalidArgument,
+                    MOUNT_NAME_INVALID,
+                ),
+                (
+                    "team",
+                    ".x",
+                    RefusalClass::InvalidArgument,
+                    MOUNT_NAME_INVALID,
+                ),
+                ("team", "library", RefusalClass::Conflict, MOUNT_NAME_TAKEN),
+                ("nope", "x", RefusalClass::NotFound, MOUNT_NOT_FOUND),
+            ];
+            for (mount, to, class, code) in cases {
+                let (got_class, got_code, _) =
+                    code_of(svc.rename_mount(mount, to, true, None, None).unwrap_err());
+                assert_eq!(
+                    (got_class, got_code.as_str()),
+                    (class, code),
+                    "{mount} → {to}"
+                );
+            }
+            lock(&disk.ops.0).insert(disk.at("lib2"), FolderStatus::Missing);
+            let (class, code, args) =
+                code_of(svc.rename_mount("team", "x", true, None, None).unwrap_err());
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_UNUSABLE)
+            );
+            assert_eq!(args["mount"], json!("team"));
+            assert_eq!(args["state"], json!("missing"));
+            assert_eq!(svc.numbers().root, root, "nothing applied");
+
+            let overlapping = overlapping_disk();
+            let svc = overlapping.start();
+            assert!(is_held(&mount_row(&svc.status(), "inner").state));
+            let (class, code, args) = code_of(
+                svc.rename_mount("inner", "x", true, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_UNUSABLE)
+            );
+            assert!(args["why"].as_str().unwrap().contains("overlaps"), "{args}");
+        }
+
+        // ADR-0400 decision 12: a case-only rename is allowed — the references are respelled, and nothing counts as
+        //   already pointing at the new spelling.
+        #[test]
+        fn a_case_only_rename_respells_the_mount_and_its_references() {
+            let disk = referencing();
+            let svc = started(disk.start());
+            let (_, _, args) = code_of(
+                svc.rename_mount("team", "Team", false, None, None)
+                    .unwrap_err(),
+            );
+            // Nothing newly points at it: `library/P.yaml`'s `team/a.md` is not counted where keys ignore case.
+            assert_eq!(
+                args["plan"]["already_pointing"],
+                json!({ "presets": 0, "agents": 0 })
+            );
+            let root = args["root_generation"].as_u64().unwrap();
+            let answer = svc
+                .rename_mount(
+                    "team",
+                    "Team",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "Team").as_str()),
+                )
+                .unwrap();
+            assert_eq!(answer.already_pointing, Pointing::default());
+            assert_eq!(row_names(&answer.status), ["library", "Team", "engram"]);
+            assert_eq!(
+                text(&disk, "lib", "P.yaml"),
+                preset("instructions:\n- Team/a.md\n")
+            );
+            assert_eq!(stored(&disk)[1].0, "Team");
+        }
+
+        // ADR-0291 · ADR-0379 · ADR-0400 decision 12: agents to change while the agent store is read-only refuse with
+        //   the store's refusal before any file is written.
+        #[test]
+        fn a_read_only_agent_store_refuses_the_rename_before_any_file_is_written() {
+            let disk = referencing();
+            let registry = Arc::new(ProfileRegistry::new(Arc::new(NewerAgents(vec![agent(&[
+                "team/a.md",
+            ])]))));
+            let svc = started(disk.start_registry(registry));
+            let _port = plugged(&svc);
+            let root = svc.numbers().root;
+            let refusal = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(
+                    refusal,
+                    LibraryRefusal::Store(StoreError::Refused(Refusal::Newer { .. }))
+                ),
+                "{refusal:?}"
+            );
+            assert_eq!(
+                text(&disk, "lib", "P.yaml"),
+                preset("instructions:\n- team/a.md\n")
+            );
+            assert_eq!(row_names(&svc.status()), ["library", "team", "engram"]);
+            assert_eq!(svc.numbers().root, root);
+        }
+
+        // ADR-0400 decision 12 · ADR-0407: a store refusal at the agents step comes after the raise — the answer carries
+        //   `stopped` and the new root generation, the old name stays. The repeat is the ordinary call: with the tokens
+        //   confirmed before the stop it answers the plan of what is left (no file — all were written — and no
+        //   reference left unread, so it needs no confirmation and the supplied digest — no longer this plan's — is
+        //   answered `mount-rename-unconfirmed`), and that plan's own tokens finish it.
+        #[test]
+        fn a_store_refusal_at_the_agents_step_answers_the_raised_generation_and_the_repeat_finishes(
+        ) {
+            let disk = referencing();
+            let svc = started(disk.start_with(ROOT_BASE, vec![agent(&["team/a.md"])]));
+            let id = svc.values.registry.list()[0].id;
+            let port = plugged(&svc);
+            *lock(&port.fail) = Some(ProfileEditError::Store(StoreError::Refused(
+                Refusal::Unreadable,
+            )));
+            let root = svc.numbers().root;
+            let confirmed = digest(&svc, "team", "shared");
+
+            let stopped = svc
+                .rename_mount("team", "shared", true, Some(root), Some(&confirmed))
+                .unwrap();
+
+            let stop = stopped.stopped.as_ref().expect("stopped at the agents");
+            assert_eq!(stop.path, None);
+            assert!(matches!(stop.refusal, LibraryRefusal::Store(_)), "{stop:?}");
+            assert_eq!(stopped.written, ["library/P.yaml", "team/Q.yaml"]);
+            assert_eq!(
+                stopped.status.root_generation,
+                root + 1,
+                "raised before the agents"
+            );
+            assert_eq!(row_names(&stopped.status), ["library", "team", "engram"]);
+            assert_eq!(presets_of(&svc, id), ["team/a.md"]);
+
+            // The repeat with the tokens confirmed before the stop: the plan of what is left, nothing applied.
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", true, Some(root), Some(&confirmed))
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            assert_eq!(
+                args["plan"]["files"],
+                json!([]),
+                "the files written left the plan"
+            );
+            assert_eq!(args["plan"]["unread"], json!([]));
+            assert_eq!(args["plan"]["agents"].as_array().unwrap().len(), 1);
+            assert_eq!(args["root_generation"], json!(root + 1));
+            assert_eq!(row_names(&svc.status()), ["library", "team", "engram"]);
+            assert_eq!(presets_of(&svc, id), ["team/a.md"]);
+
+            // That plan confirmed with its own tokens finishes the rename.
+            let done = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    args["root_generation"].as_u64(),
+                    args["plan_digest"].as_str(),
+                )
+                .unwrap();
+            assert!(done.stopped.is_none());
+            assert!(done.written.is_empty());
+            assert_eq!(row_names(&done.status), ["library", "shared", "engram"]);
+            assert_eq!(presets_of(&svc, id), ["shared/a.md"]);
+            assert!(has(&svc, "shared/Q.yaml"));
+            assert_eq!(stored(&disk)[1].0, "shared", "saved");
+        }
+
+        // ADR-0405 decision 2 · ADR-0407: after a stop at the agents step, a plan of what is left that still needs
+        //   confirmation — a reference left unread — answers the tokens confirmed before the stop
+        //   `root-generation-stale` (the generation moved) with that plan; its own tokens finish the rename.
+        #[test]
+        fn a_repeat_after_an_agents_step_stop_with_references_left_unread_is_stale_with_the_plan_of_what_is_left(
+        ) {
+            let (disk, svc) = zed_walked_then_unreadable(true);
+            let new = agent(&["team/a.md"]);
+            let id = new.id;
+            assert!(svc.values.registry.try_upsert_if(new, || true).unwrap());
+            let port = plugged(&svc);
+            *lock(&port.fail) = Some(ProfileEditError::Store(StoreError::Refused(
+                Refusal::Unreadable,
+            )));
+            let (_, _, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            let root = args["root_generation"].as_u64().unwrap();
+            let confirmed = args["plan_digest"].as_str().unwrap().to_owned();
+            let stopped = svc
+                .rename_mount("team", "shared", true, Some(root), Some(&confirmed))
+                .unwrap();
+            assert!(stopped.stopped.is_some());
+            assert_eq!(stopped.written, ["library/P.yaml"]);
+            assert_eq!(stopped.status.root_generation, root + 1);
+
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", true, Some(root), Some(&confirmed))
+                    .unwrap_err(),
+            );
+
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, ROOT_GENERATION_STALE)
+            );
+            assert_eq!(args["current"], json!(root + 1));
+            assert_eq!(args["plan"]["files"], json!([]));
+            assert_eq!(args["plan"]["unread"][0]["paths"], json!(["zed/Z.yaml"]));
+            assert_eq!(presets_of(&svc, id), ["team/a.md"]);
+            let done = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    args["current"].as_u64(),
+                    args["plan_digest"].as_str(),
+                )
+                .unwrap();
+            assert!(done.stopped.is_none());
+            assert_eq!(skipped_rows(&done), [("zed/Z.yaml", LIBRARY_UNAVAILABLE)]);
+            assert_eq!(
+                row_names(&done.status),
+                ["library", "shared", "zed", "engram"]
+            );
+            assert_eq!(presets_of(&svc, id), ["shared/a.md"]);
+            assert_eq!(
+                text(&disk, "lib3", "Z.yaml"),
+                preset("instructions:\n- team/a.md\n")
+            );
+        }
+
+        // ADR-0335 · ADR-0400 decision 12 · ADR-0407: a read or write failure stops the walk before the agents and the
+        //   registration; the files written point at the new name. A stop before any write answers its own refusal. The
+        //   repeat with the tokens confirmed before the stop rewrites nothing and answers the plan of what is left; that
+        //   plan, confirmed, finishes the rename and saves it.
+        #[test]
+        fn a_file_failure_stops_before_the_agents_and_the_registration_and_the_repeat_answers_what_is_left(
+        ) {
+            let disk = referencing();
+            let svc = started(disk.start_with(ROOT_BASE, vec![agent(&["team/a.md"])]));
+            let id = svc.values.registry.list()[0].id;
+            let port = plugged(&svc);
+            let (_, _, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            let root = args["root_generation"].as_u64().unwrap();
+            let answered = args["plan_digest"].as_str().unwrap().to_owned();
+            disk.mem("lib").fail_read("P.yaml");
+            let (class, code, _) = code_of(
+                svc.rename_mount("team", "shared", true, Some(root), Some(&answered))
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Unavailable, launch::LIBRARY_READ_FAILED)
+            );
+            disk.mem("lib").heal_read("P.yaml");
+            disk.mem("lib2").fail_read("Q.yaml");
+
+            // The same call: nothing was written, so the confirmed plan still holds.
+            let stopped = svc
+                .rename_mount("team", "shared", true, Some(root), Some(&answered))
+                .unwrap();
+
+            let stop = stopped.stopped.as_ref().expect("stopped at the file");
+            assert_eq!(stop.path.as_deref(), Some("team/Q.yaml"));
+            assert_eq!(stopped.written, ["library/P.yaml"]);
+            assert_eq!(
+                text(&disk, "lib", "P.yaml"),
+                preset("instructions:\n- shared/a.md\n")
+            );
+            assert_eq!(row_names(&stopped.status), ["library", "team", "engram"]);
+            assert_eq!(stopped.status.root_generation, root, "not raised");
+            assert!(
+                lock(&port.rewrites).is_empty(),
+                "the agents were not rewritten"
+            );
+            assert_eq!(presets_of(&svc, id), ["team/a.md"]);
+
+            // The repeat with the tokens confirmed before the stop, once the cause is cleared: nothing rewritten, the
+            //   plan of what is left answered.
+            disk.mem("lib2").heal_read("Q.yaml");
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", true, Some(root), Some(&answered))
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            assert_eq!(plan_paths(&args), [json!("team/Q.yaml")]);
+            assert_eq!(args["root_generation"], json!(root));
+            assert_ne!(
+                args["plan_digest"],
+                json!(answered),
+                "`library/P.yaml` left the plan"
+            );
+            assert_eq!(
+                text(&disk, "lib2", "Q.yaml"),
+                preset("instructions:\n- team/a.md\n- library/b.md\n"),
+                "nothing rewritten"
+            );
+            assert_eq!(row_names(&svc.status()), ["library", "team", "engram"]);
+
+            // That plan confirmed with its own tokens: the rename finishes and is saved.
+            let done = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    args["root_generation"].as_u64(),
+                    args["plan_digest"].as_str(),
+                )
+                .unwrap();
+            assert!(done.stopped.is_none());
+            assert_eq!(done.written, ["shared/Q.yaml"]);
+            assert_eq!(row_names(&done.status), ["library", "shared", "engram"]);
+            assert_eq!(presets_of(&svc, id), ["shared/a.md"]);
+            assert_eq!(done.status.config, ConfigHealth::Ok);
+            assert_eq!(stored(&disk)[1].0, "shared", "saved");
+        }
+
+        // ADR-0381 · ADR-0400 decision 14: after a failed save the rename is live and `unsaved`; repeating it — judged
+        //   before any generation comparison — only saves when no file holds the old name, answers the plan when files
+        //   do, and then walks and saves; once saved, the old name is not found.
+        #[test]
+        fn a_repeated_rename_after_a_failed_save_saves_or_answers_the_plan() {
+            let disk = two_mounts();
+            let svc = started(disk.start());
+            let old_root = svc.numbers().root;
+            svc.config.fail_writes(Some("disk full"));
+            let (_, code, _) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, LIBRARY_CONFIG_WRITE_FAILED);
+            let status = svc.status();
+            assert_eq!(row_names(&status), ["library", "shared", "engram"], "live");
+            assert!(matches!(status.config, ConfigHealth::Unsaved { .. }));
+            let (_, code, _) = code_of(
+                svc.rename_mount("teem", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, MOUNT_NOT_FOUND, "a mistyped name is still refused");
+            svc.config.fail_writes(None);
+
+            let repeated = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(old_root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+                .unwrap();
+            assert_eq!(
+                repeated.status.config,
+                ConfigHealth::Ok,
+                "saved, the old generation not compared"
+            );
+            assert_eq!(repeated.status.root_generation, old_root + 1);
+            assert_eq!(stored(&disk)[1].0, "shared");
+            let (_, code, _) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, MOUNT_NOT_FOUND, "once saved");
+
+            // With a file still holding the old name.
+            svc.config.fail_writes(Some("disk full"));
+            let (_, code, _) = code_of(
+                svc.rename_mount("shared", "crew", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, LIBRARY_CONFIG_WRITE_FAILED);
+            disk.mem("lib")
+                .file("P.yaml", &preset("instructions:\n- shared/a.md\n"));
+            let _ = svc.refresh(Some(&lp("library")));
+            svc.config.fail_writes(None);
+            let (_, code, args) = code_of(
+                svc.rename_mount("shared", "crew", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, MOUNT_RENAME_UNCONFIRMED);
+            let root = args["root_generation"].as_u64().unwrap();
+            assert_eq!(root, svc.numbers().root, "the current generation");
+            let walked = svc
+                .rename_mount(
+                    "shared",
+                    "crew",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "shared", "crew").as_str()),
+                )
+                .unwrap();
+            assert_eq!(walked.written, ["library/P.yaml"]);
+            assert_eq!(
+                text(&disk, "lib", "P.yaml"),
+                preset("instructions:\n- crew/a.md\n")
+            );
+            assert_eq!(walked.status.config, ConfigHealth::Ok);
+            assert_eq!(stored(&disk)[1].0, "crew");
+        }
+
+        // ADR-0400 decisions 12 and 16: edits queued behind a rename's `Root` ticket meet the new name or a stale
+        //   generation — none writes `team/…` after the rename.
+        #[test]
+        fn edits_queued_during_a_rename_meet_the_new_name_or_a_stale_generation() {
+            let disk = referencing();
+            let svc = started(disk.start_with(ROOT_BASE, vec![agent(&["team/a.md"]), agent(&[])]));
+            let ids: Vec<AgentId> = {
+                let mut profiles = svc.values.registry.list();
+                profiles.sort_by_key(|profile| profile.presets.is_empty());
+                profiles.iter().map(|profile| profile.id).collect()
+            };
+            let (attached, other) = (ids[0], ids[1]);
+            let port = plugged(&svc);
+            let (entered_tx, entered) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            *lock(&port.entered) = Some(entered_tx);
+            *lock(&port.release) = Some(release_rx);
+            let root = svc.numbers().root;
+            let rename = on_thread(&svc, move |svc| {
+                svc.rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+            });
+            entered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the rename reached its agents pass");
+            let blocked = svc.gate.read_blocked();
+            let stale_attach = on_thread(&svc, move |svc| {
+                svc.attach_preset(other, &["team/a.md".to_owned()], None, Some(root))
+            });
+            let stale_add = on_thread(&svc, move |svc| {
+                let entries = AddEntries::Items(vec![NewItem {
+                    path: "team/a.md".to_owned(),
+                    backend: None,
+                }]);
+                svc.preset_add(&lp("library/P.yaml"), &entries, None, Some(root))
+            });
+            let plain_attach = on_thread(&svc, move |svc| {
+                svc.attach_preset(other, &["team/a.md".to_owned()], None, None)
+            });
+            // All three wait behind the rename's write lock (each reads the library before drawing its ticket).
+            wait_read_blocked(&svc, blocked + 3);
+            release.send(()).unwrap();
+            let renamed = join(rename).unwrap();
+            assert_eq!(row_names(&renamed.status), ["library", "shared", "engram"]);
+            for (what, refusal) in [
+                ("attach", join(stale_attach).err()),
+                ("add", join(stale_add).err()),
+            ] {
+                let (_, code, _) = code_of(refusal.unwrap_or_else(|| panic!("{what} not refused")));
+                assert_eq!(code, ROOT_GENERATION_STALE, "{what}");
+            }
+            let plain = join(plain_attach).unwrap();
+            assert_eq!(plain.skipped.len(), 1);
+            assert_eq!(
+                plain.skipped[0].reason.code, NOT_FOUND,
+                "the old name reads absent"
+            );
+            assert_eq!(presets_of(&svc, attached), ["shared/a.md"]);
+            assert!(presets_of(&svc, other).is_empty());
+            assert!(!text(&disk, "lib", "P.yaml").contains("team/"));
+        }
+
+        /// What `agent.new {presets}` does (agent `verb_new`): judge, insert only while the change number is the one
+        /// judged at, judge again otherwise — the registry insert taking the comparison inside its lock.
+        fn create(svc: &LibraryService, presets: &[&str]) -> (AgentId, Vec<String>) {
+            let presets: Vec<String> = presets.iter().map(|path| (*path).to_owned()).collect();
+            loop {
+                let judged = svc.judge_new_presets(&agent(&[]), &presets, None).unwrap();
+                let mut profile = agent(&[]);
+                profile.default_preset = judged.attachments.default_preset;
+                profile.presets = judged.attachments.presets;
+                let at = judged.change.expect("a library preset was named");
+                let id = profile.id;
+                if svc
+                    .values
+                    .registry
+                    .try_upsert_if(profile, || svc.change_number() == at)
+                    .unwrap()
+                {
+                    let skipped = judged
+                        .skipped
+                        .into_iter()
+                        .map(|skip| format!("{} {}", skip.item, skip.reason.code))
+                        .collect();
+                    return (id, skipped);
+                }
+            }
+        }
+
+        // ADR-0400 decision 18: an `agent.new` judged before a rename whose insert lands before the agents pass is
+        //   rewritten by it; one whose insert lands after the raise finds the number moved, judges again and reports
+        //   `team/…` as `not-found` — no agent stores the old name.
+        #[test]
+        fn an_agent_new_judged_before_a_rename_is_rewritten_by_it_or_judges_again() {
+            let disk = two_mounts();
+            disk.mem("lib2").file("S.yaml", &preset(""));
+            let svc = started(disk.start());
+            let port = plugged(&svc);
+            let presets = ["team/S.yaml".to_owned()];
+
+            // Inserted before the rename's agents pass: the pass rewrites it.
+            let judged = svc.judge_new_presets(&agent(&[]), &presets, None).unwrap();
+            let mut early = agent(&[]);
+            early.presets = judged.attachments.presets.clone();
+            let early_id = early.id;
+            let at = judged.change.unwrap();
+            assert!(svc
+                .values
+                .registry
+                .try_upsert_if(early, || svc.change_number() == at)
+                .unwrap());
+            svc.rename_mount("team", "shared", false, None, None)
+                .unwrap();
+            assert_eq!(presets_of(&svc, early_id), ["shared/S.yaml"]);
+
+            // Judged before the next rename, inserted while its agents pass runs (after the raise): refused, judged
+            //   again once the rename is done.
+            let judged = svc
+                .judge_new_presets(&agent(&[]), &["shared/S.yaml".to_owned()], None)
+                .unwrap();
+            let at = judged.change.unwrap();
+            let (entered_tx, entered) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            *lock(&port.entered) = Some(entered_tx);
+            *lock(&port.release) = Some(release_rx);
+            let rename = on_thread(&svc, |svc| {
+                svc.rename_mount("shared", "crew", false, None, None)
+            });
+            entered.recv_timeout(Duration::from_secs(10)).unwrap();
+            let mut late = agent(&[]);
+            late.presets = judged.attachments.presets;
+            let late_id = late.id;
+            assert!(
+                !svc.values
+                    .registry
+                    .try_upsert_if(late, || svc.change_number() == at)
+                    .unwrap(),
+                "the raised number refuses the insert"
+            );
+            release.send(()).unwrap();
+            join(rename).unwrap();
+            assert!(svc.values.registry.get(late_id).is_none());
+            let (id, skipped) = create(&svc, &["shared/S.yaml"]);
+            assert_eq!(skipped, [format!("shared/S.yaml {NOT_FOUND}")]);
+            assert!(presets_of(&svc, id).is_empty());
+            assert_eq!(presets_of(&svc, early_id), ["crew/S.yaml"]);
+        }
+
+        /// Waits (at most 10 s) until `n` reads of the library lock in all have found it held for writing.
+        fn wait_read_blocked(svc: &LibraryService, n: usize) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while svc.gate.read_blocked() < n {
+                assert!(
+                    Instant::now() < deadline,
+                    "fewer than {n} reads waited on the library lock"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        /// An agent store whose `status` parks once armed: it tells the sender, then waits for the receiver — a rename
+        /// asks it between its plan and its ticket when the plan names an agent.
+        struct ParkedStatus {
+            agents: Vec<AgentProfile>,
+            door: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+        }
+
+        impl ProfileStore for ParkedStatus {
+            fn save(&self, _: &[AgentProfile]) -> Result<(), StoreError> {
+                Ok(())
+            }
+            fn load(&self) -> Vec<AgentProfile> {
+                self.agents.clone()
+            }
+            fn status(&self) -> StoreStatus {
+                let door = lock(&self.door).take();
+                if let Some((entered, release)) = door {
+                    entered.send(()).unwrap();
+                    release
+                        .recv_timeout(Duration::from_secs(20))
+                        .expect("the test releases the store status");
+                }
+                StoreStatus::Writable
+            }
+        }
+
+        /// Three mounts — [`two_mounts`] plus `zed` at `lib3`.
+        fn three_mounts() -> OnDisk {
+            let disk = OnDisk::new(&["lib", "lib2", "lib3"], "lib", None);
+            std::fs::write(
+                disk.config_path(),
+                disk.mounts_doc(&[("library", "default"), ("team", "lib2"), ("zed", "lib3")]),
+            )
+            .unwrap();
+            disk.mem("lib").file("b.md", "b");
+            disk.mem("lib2").file("a.md", "a");
+            disk
+        }
+
+        fn skipped_rows(answer: &crate::rename::RenameAnswer) -> Vec<(&str, &str)> {
+            answer
+                .skipped
+                .iter()
+                .map(|skip| (skip.path.as_str(), skip.reason.code.as_str()))
+                .collect()
+        }
+
+        // ADR-0381 · ADR-0400 decision 14: a case-only rename whose save failed, repeated, answers success and saves —
+        //   where path keys ignore case the old spelling finds the live mount ("already so named"), elsewhere it is the
+        //   repeat; either way library.json ends up with the new spelling.
+        #[test]
+        fn a_case_only_rename_repeated_after_a_failed_save_saves_it() {
+            let disk = two_mounts();
+            let svc = started(disk.start());
+            svc.config.fail_writes(Some("disk full"));
+            let (_, code, _) = code_of(
+                svc.rename_mount("team", "Team", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, LIBRARY_CONFIG_WRITE_FAILED);
+            let status = svc.status();
+            assert_eq!(row_names(&status), ["library", "Team", "engram"], "live");
+            assert!(matches!(status.config, ConfigHealth::Unsaved { .. }));
+            assert_eq!(stored(&disk)[1].0, "team", "not saved");
+            svc.config.fail_writes(None);
+
+            let repeated = svc.rename_mount("team", "Team", false, None, None).unwrap();
+
+            assert_eq!(repeated.status.config, ConfigHealth::Ok, "saved");
+            assert_eq!(stored(&disk)[1].0, "Team");
+            assert_eq!(row_names(&repeated.status), ["library", "Team", "engram"]);
+            assert_eq!(repeated.already_pointing, Pointing::default());
+        }
+
+        // ADR-0335 · ADR-0400 decisions 12 and 17: a mount whose folder is lost while the rename's hold walks it (its
+        //   file reads not found and the folder no longer stats) stops the walk before the agents and the registration,
+        //   and is recorded so: the repeat, the mount still gone, names it unread and asks for confirmation (ADR-0407),
+        //   and confirmed it finishes, skipping its file. A file deleted outside Engram from a folder that is there is
+        //   skipped as not found.
+        #[test]
+        fn a_mount_lost_during_the_hold_stops_the_rename_and_a_file_deleted_outside_is_skipped() {
+            let disk = three_mounts();
+            for (folder, rel) in [("lib", "P.yaml"), ("lib2", "Q.yaml"), ("lib3", "Z.yaml")] {
+                disk.mem(folder)
+                    .file(rel, &preset("instructions:\n- team/a.md\n"));
+            }
+            let svc = started(disk.start());
+            let root = svc.numbers().root;
+            let confirmed = digest(&svc, "team", "shared");
+            let (entered, release) = disk.store.door_read(disk.at("lib").join("P.yaml"));
+            let tokens = confirmed.clone();
+            let rename = on_thread(&svc, move |svc| {
+                svc.rename_mount("team", "shared", true, Some(root), Some(&tokens))
+            });
+            entered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the rename's walk reads library/P.yaml");
+            // Lost inside the hold, after every stat the call took before it.
+            disk.mem("lib3").remove("Z.yaml");
+            lock(&disk.ops.0).insert(disk.at("lib3"), FolderStatus::Missing);
+            release.send(()).unwrap();
+
+            let stopped = join(rename).unwrap();
+
+            assert_eq!(stopped.written, ["library/P.yaml", "team/Q.yaml"]);
+            assert_eq!(
+                row_names(&stopped.status),
+                ["library", "team", "zed", "engram"]
+            );
+            assert_eq!(stopped.status.root_generation, root, "not raised");
+            let stop = stopped.stopped.expect("stopped at the lost mount");
+            assert_eq!(stop.path.as_deref(), Some("zed/Z.yaml"));
+            let (class, code, args) = code_of(stop.refusal);
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE)
+            );
+            assert_eq!(args["mount"], json!("zed"));
+            let zed = MountName::parse("zed").unwrap();
+            assert!(
+                matches!(
+                    svc.with_read(|state| state.seen(&zed)).state,
+                    MountState::Missing { .. }
+                ),
+                "recorded gone"
+            );
+
+            // ADR-0405 decisions 2 and 3 · ADR-0407: the repeat with the tokens confirmed before the stop does not
+            //   finish silently — its plan names the lost mount under `unread` and asks for confirmation.
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", true, Some(root), Some(&confirmed))
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            assert_eq!(args["plan"]["files"], json!([]));
+            let unread: Vec<serde_json::Value> = args["plan"]["unread"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|mount| json!([mount["mount"], mount["state"], mount["paths"]]))
+                .collect();
+            assert_eq!(unread, [json!(["zed", "missing", ["zed/Z.yaml"]])]);
+            assert_eq!(
+                row_names(&svc.status()),
+                ["library", "team", "zed", "engram"]
+            );
+
+            let done = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    args["root_generation"].as_u64(),
+                    args["plan_digest"].as_str(),
+                )
+                .unwrap();
+
+            assert!(done.stopped.is_none());
+            assert_eq!(skipped_rows(&done), [("zed/Z.yaml", LIBRARY_UNAVAILABLE)]);
+            assert_eq!(
+                row_names(&done.status),
+                ["library", "shared", "zed", "engram"]
+            );
+
+            // Deleted outside Engram, its folder there: skipped as not found, the rename finishes.
+            let disk = three_mounts();
+            for (folder, rel) in [("lib", "P.yaml"), ("lib3", "Z.yaml")] {
+                disk.mem(folder)
+                    .file(rel, &preset("instructions:\n- team/a.md\n"));
+            }
+            let svc = started(disk.start());
+            disk.mem("lib3").remove("Z.yaml");
+            let root = svc.numbers().root;
+            let done = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+                .unwrap();
+            assert!(done.stopped.is_none());
+            assert_eq!(done.written, ["library/P.yaml"]);
+            assert_eq!(skipped_rows(&done), [("zed/Z.yaml", NOT_FOUND)]);
+            assert_eq!(
+                row_names(&done.status),
+                ["library", "shared", "zed", "engram"]
+            );
+        }
+
+        // ADR-0400 decisions 12 and 17: a mount recorded readable whose folder is gone since its last walk (no scan
+        //   since) is stat'ed before the plan and recorded so — the plan names it under `unread`, leaves its files out,
+        //   and the confirmed call finishes, skipping them `library-unavailable`.
+        #[test]
+        fn a_mount_lost_before_the_rename_is_named_unread_and_its_files_are_skipped() {
+            let disk = three_mounts();
+            for (folder, rel) in [("lib", "P.yaml"), ("lib2", "Q.yaml"), ("lib3", "Z.yaml")] {
+                disk.mem(folder)
+                    .file(rel, &preset("instructions:\n- team/a.md\n"));
+            }
+            let svc = started(disk.start());
+            disk.mem("lib3").remove("Z.yaml");
+            lock(&disk.ops.0).insert(disk.at("lib3"), FolderStatus::Missing);
+
+            let (_, code, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+
+            assert_eq!(code, MOUNT_RENAME_UNCONFIRMED);
+            let files: Vec<serde_json::Value> = args["plan"]["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|mount| json!([mount["mount"], mount["paths"]]))
+                .collect();
+            assert_eq!(
+                files,
+                [
+                    json!(["library", ["library/P.yaml"]]),
+                    json!(["team", ["team/Q.yaml"]]),
+                ]
+            );
+            let unread: Vec<(&str, &str)> = args["plan"]["unread"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|mount| {
+                    (
+                        mount["mount"].as_str().unwrap(),
+                        mount["state"].as_str().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(unread, [("zed", "missing")]);
+            let root = args["root_generation"].as_u64().unwrap();
+            let done = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+                .unwrap();
+            assert!(done.stopped.is_none());
+            assert_eq!(done.written, ["library/P.yaml", "shared/Q.yaml"]);
+            assert_eq!(skipped_rows(&done), [("zed/Z.yaml", LIBRARY_UNAVAILABLE)]);
+            assert_eq!(
+                row_names(&done.status),
+                ["library", "shared", "zed", "engram"]
+            );
+        }
+
+        // ADR-0335 · ADR-0400 decision 12: the renamed mount itself lost while the hold walks it stops the rename with
+        //   `library-unavailable` naming it, nothing written and the old name registered; the repeat, the mount still
+        //   gone, is refused `mount-unusable` before anything.
+        #[test]
+        fn the_renamed_mount_lost_during_the_hold_stops_the_rename_and_its_repeat_is_refused_unusable(
+        ) {
+            let disk = two_mounts();
+            disk.mem("lib2")
+                .file("Q.yaml", &preset("instructions:\n- team/a.md\n"));
+            let svc = started(disk.start());
+            let root = svc.numbers().root;
+            let (entered, release) = disk.store.door_read(disk.at("lib2").join("Q.yaml"));
+            let rename = on_thread(&svc, move |svc| {
+                svc.rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+            });
+            entered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the rename's walk reads team/Q.yaml");
+            disk.mem("lib2").remove("Q.yaml");
+            lock(&disk.ops.0).insert(disk.at("lib2"), FolderStatus::Missing);
+            release.send(()).unwrap();
+
+            let (class, code, args) = code_of(join(rename).unwrap_err());
+
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE)
+            );
+            assert_eq!(args["mount"], json!("team"));
+            assert_eq!(row_names(&svc.status()), ["library", "team", "engram"]);
+            assert_eq!(svc.numbers().root, root, "nothing raised");
+            let (class, code, args) = code_of(
+                svc.rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+                .unwrap_err(),
+            );
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_UNUSABLE)
+            );
+            assert_eq!(args["state"], json!("missing"));
+        }
+
+        /// [`three_mounts`] with `zed/Z.yaml` listing `team/a.md` (and `library/P.yaml` too when `also_readable`),
+        /// walked, and then `zed` unreadable.
+        fn zed_walked_then_unreadable(also_readable: bool) -> (OnDisk, Arc<LibraryService>) {
+            let disk = three_mounts();
+            disk.mem("lib3")
+                .file("Z.yaml", &preset("instructions:\n- team/a.md\n"));
+            if also_readable {
+                disk.mem("lib")
+                    .file("P.yaml", &preset("instructions:\n- team/a.md\n"));
+            }
+            let svc = started(disk.start());
+            lock(&disk.ops.0).insert(
+                disk.at("lib3"),
+                FolderStatus::Unreadable("access is denied".to_owned()),
+            );
+            let _ = svc.refresh(Some(&lp("zed")));
+            let zed = MountName::parse("zed").unwrap();
+            let seen = svc.with_read(|state| state.seen(&zed));
+            assert!(seen.walked && !seen.usable(), "{seen:?}");
+            (disk, svc)
+        }
+
+        // ADR-0405 decision 2: a mount walked earlier that cannot be read now is named
+        //   under the plan's `unread` with its referencing files, left out of `files`. Files left so ask the same
+        //   confirmation as files to rewrite, even with nothing readable to rewrite; confirmed, the rename skips them
+        //   with `library-unavailable`, untouched.
+        #[test]
+        fn a_file_in_a_mount_that_cannot_be_read_is_left_out_of_the_plan_and_skipped() {
+            // Only the unreadable mount's file refers to `team`: asked first, nothing applied.
+            let (disk, svc) = zed_walked_then_unreadable(false);
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            assert_eq!(args["plan"]["files"], json!([]));
+            assert_eq!(
+                args["plan"]["unread"],
+                json!([{
+                    "mount": "zed", "state": "unreadable", "why": "access is denied",
+                    "paths": ["zed/Z.yaml"],
+                }])
+            );
+            assert_eq!(
+                row_names(&svc.status()),
+                ["library", "team", "zed", "engram"]
+            );
+            let root = args["root_generation"].as_u64().unwrap();
+            let answered = args["plan_digest"].as_str().unwrap().to_owned();
+            let answer = svc
+                .rename_mount("team", "shared", true, Some(root), Some(&answered))
+                .unwrap();
+            assert!(answer.stopped.is_none() && answer.written.is_empty());
+            assert_eq!(skipped_rows(&answer), [("zed/Z.yaml", LIBRARY_UNAVAILABLE)]);
+            assert_eq!(
+                row_names(&answer.status),
+                ["library", "shared", "zed", "engram"]
+            );
+            assert_eq!(
+                text(&disk, "lib3", "Z.yaml"),
+                preset("instructions:\n- team/a.md\n")
+            );
+
+            // With a readable file too: the plan lists only it and names `zed` under `unread`.
+            let (disk, svc) = zed_walked_then_unreadable(true);
+            let (_, code, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, MOUNT_RENAME_UNCONFIRMED);
+            let files: Vec<serde_json::Value> = args["plan"]["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|mount| json!([mount["mount"], mount["paths"]]))
+                .collect();
+            assert_eq!(files, [json!(["library", ["library/P.yaml"]])]);
+            assert_eq!(
+                args["plan"]["unread"],
+                json!([{
+                    "mount": "zed", "state": "unreadable", "why": "access is denied",
+                    "paths": ["zed/Z.yaml"],
+                }])
+            );
+            let root = args["root_generation"].as_u64().unwrap();
+            let answer = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+                .unwrap();
+            assert_eq!(answer.written, ["library/P.yaml"]);
+            assert_eq!(skipped_rows(&answer), [("zed/Z.yaml", LIBRARY_UNAVAILABLE)]);
+            assert_eq!(
+                text(&disk, "lib3", "Z.yaml"),
+                preset("instructions:\n- team/a.md\n")
+            );
+        }
+
+        // ADR-0400 decision 12 (decisions A and B): the digest pins the unread side too — a mount that comes back
+        //   between the answered plan and the confirming call moves its file to the side rewritten, so the call
+        //   applies nothing and answers the fresh plan, whose tokens then rewrite it; a never-walked mount that comes
+        //   back holding no reference changes the plan as well.
+        #[test]
+        fn a_mount_that_comes_back_after_the_plan_is_asked_again() {
+            let (disk, svc) = zed_walked_then_unreadable(false);
+            let (_, _, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            let root = args["root_generation"].as_u64().unwrap();
+            let answered = args["plan_digest"].as_str().unwrap().to_owned();
+            lock(&disk.ops.0).remove(&disk.at("lib3"));
+
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", true, Some(root), Some(&answered))
+                    .unwrap_err(),
+            );
+
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            assert_eq!(plan_paths(&args), [json!("zed/Z.yaml")]);
+            assert_eq!(args["plan"]["unread"], json!([]));
+            let fresh = args["plan_digest"].as_str().unwrap().to_owned();
+            assert_ne!(fresh, answered);
+            assert!(text(&disk, "lib3", "Z.yaml").contains("- team/a.md"));
+            let done = svc
+                .rename_mount("team", "shared", true, Some(root), Some(&fresh))
+                .unwrap();
+            assert_eq!(done.written, ["zed/Z.yaml"]);
+
+            // A mount never walked (its references unknown) that comes back holding none: the plan the caller
+            //   confirmed is no longer the one the call would carry out.
+            let disk = three_mounts();
+            disk.mem("lib")
+                .file("P.yaml", &preset("instructions:\n- team/a.md\n"));
+            lock(&disk.ops.0).insert(
+                disk.at("lib3"),
+                FolderStatus::Unreadable("access is denied".to_owned()),
+            );
+            let svc = started(disk.start());
+            let (_, _, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(args["plan"]["unread"][0]["paths"], json!(null));
+            let root = args["root_generation"].as_u64().unwrap();
+            let answered = args["plan_digest"].as_str().unwrap().to_owned();
+            lock(&disk.ops.0).remove(&disk.at("lib3"));
+            let (_, code, args) = code_of(
+                svc.rename_mount("team", "shared", true, Some(root), Some(&answered))
+                    .unwrap_err(),
+            );
+            assert_eq!(code, MOUNT_RENAME_UNCONFIRMED);
+            assert_eq!(plan_paths(&args), [json!("library/P.yaml")]);
+            assert_eq!(args["plan"]["unread"], json!([]));
+            assert!(text(&disk, "lib", "P.yaml").contains("- team/a.md"));
+        }
+
+        // ADR-0405 decision 2: a mount never walked this run leaves unknown references — it alone asks
+        //   the confirmation; a rename with nothing to rewrite and nothing left unread — an unreadable mount holding no
+        //   reference to the renamed one — runs without `yes`.
+        #[test]
+        fn a_mount_never_walked_asks_first_and_nothing_left_unread_asks_nothing() {
+            let disk = three_mounts();
+            lock(&disk.ops.0).insert(
+                disk.at("lib3"),
+                FolderStatus::Unreadable("access is denied".to_owned()),
+            );
+            let svc = started(disk.start());
+            let (_, code, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, MOUNT_RENAME_UNCONFIRMED);
+            assert_eq!(args["plan"]["unread"][0]["mount"], json!("zed"));
+            assert_eq!(args["plan"]["unread"][0]["paths"], json!(null), "unknown");
+            let root = args["root_generation"].as_u64().unwrap();
+            let answered = args["plan_digest"].as_str().unwrap().to_owned();
+            let done = svc
+                .rename_mount("team", "shared", true, Some(root), Some(&answered))
+                .unwrap();
+            assert_eq!(skipped_rows(&done), [("zed", LIBRARY_UNAVAILABLE)]);
+            assert_eq!(
+                row_names(&done.status),
+                ["library", "shared", "zed", "engram"]
+            );
+
+            // Walked, then unreadable, holding no reference to `team`: nothing is left unread.
+            let disk = three_mounts();
+            disk.mem("lib3")
+                .file("Z.yaml", &preset("instructions:\n- library/b.md\n"));
+            let svc = started(disk.start());
+            lock(&disk.ops.0).insert(
+                disk.at("lib3"),
+                FolderStatus::Unreadable("access is denied".to_owned()),
+            );
+            let _ = svc.refresh(Some(&lp("zed")));
+            let done = svc
+                .rename_mount("team", "shared", false, None, None)
+                .unwrap();
+            assert!(done.skipped.is_empty() && done.written.is_empty());
+            assert_eq!(
+                row_names(&done.status),
+                ["library", "shared", "zed", "engram"]
+            );
+        }
+
+        // ADR-0400 decision 14: the repeat needs the failed save to have been this rename — the last saved list names
+        //   the old name at the live new name's folder. A failed removal of `team`, or a failed rename of `team` to a
+        //   third name, then a rename of `team` to another mount answers `mount-not-found`, nothing rewritten or saved.
+        #[test]
+        fn a_failed_save_that_was_not_this_rename_does_not_make_it_a_repeat() {
+            // A failed removal, then a rename onto another mount that would re-point `team/…` at `zed/…`.
+            let disk = three_mounts();
+            disk.mem("lib")
+                .file("P.yaml", &preset("instructions:\n- team/a.md\n"));
+            let svc = started(disk.start());
+            svc.config.fail_writes(Some("disk full"));
+            let (_, code, _) = code_of(svc.remove_mount("team").err().expect("the save fails"));
+            assert_eq!(code, LIBRARY_CONFIG_WRITE_FAILED);
+            svc.config.fail_writes(None);
+            let root = svc.numbers().root;
+            for (yes, given) in [(false, None), (true, Some(root))] {
+                let (class, code, _) = code_of(
+                    svc.rename_mount("team", "zed", yes, given, None)
+                        .unwrap_err(),
+                );
+                assert_eq!(
+                    (class, code.as_str()),
+                    (RefusalClass::NotFound, MOUNT_NOT_FOUND)
+                );
+            }
+            assert_eq!(
+                text(&disk, "lib", "P.yaml"),
+                preset("instructions:\n- team/a.md\n")
+            );
+            assert!(matches!(svc.status().config, ConfigHealth::Unsaved { .. }));
+
+            // A failed rename to `shared`, then a rename of `team` to `zed`.
+            let disk = three_mounts();
+            let svc = started(disk.start());
+            svc.config.fail_writes(Some("disk full"));
+            let (_, code, _) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, LIBRARY_CONFIG_WRITE_FAILED);
+            svc.config.fail_writes(None);
+            let (class, code, _) = code_of(
+                svc.rename_mount("team", "zed", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::NotFound, MOUNT_NOT_FOUND)
+            );
+            let status = svc.status();
+            assert!(
+                matches!(status.config, ConfigHealth::Unsaved { .. }),
+                "not saved"
+            );
+            assert_eq!(stored(&disk)[1].0, "team");
+        }
+
+        // ADR-0400 decision 12: the confirmation is judged again inside the hold — a plan that rewrote no file, then
+        //   a change ahead of the rename's ticket that makes a preset refer to the mount, answers
+        //   `mount-rename-unconfirmed` with a fresh plan naming that file; nothing is rewritten or renamed.
+        #[test]
+        fn a_file_that_comes_to_refer_to_the_mount_after_a_plan_with_none_asks_again() {
+            let disk = two_mounts();
+            disk.mem("lib")
+                .file("P.yaml", &preset("instructions:\n- library/b.md\n"));
+            let store = Arc::new(ParkedStatus {
+                agents: vec![agent(&["team/a.md"])],
+                door: Mutex::new(None),
+            });
+            let registry = Arc::new(ProfileRegistry::new(
+                Arc::clone(&store) as Arc<dyn ProfileStore>
+            ));
+            let svc = started(disk.start_registry(registry));
+            let id = svc.values.registry.list()[0].id;
+            let _port = plugged(&svc);
+            let root = svc.numbers().root;
+            let (entered_tx, entered) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            *lock(&store.door) = Some((entered_tx, release_rx));
+            let rename = on_thread(&svc, |svc| {
+                svc.rename_mount("team", "shared", false, None, None)
+            });
+            entered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the rename built its plan and asked the agent store");
+            // Ahead of the rename's ticket: `library/P.yaml` comes to list `team/a.md`.
+            let entries = AddEntries::Items(vec![NewItem {
+                path: "team/a.md".to_owned(),
+                backend: None,
+            }]);
+            assert!(svc
+                .preset_add(&lp("library/P.yaml"), &entries, None, None)
+                .is_ok());
+            release.send(()).unwrap();
+
+            let (class, code, args) = code_of(join(rename).unwrap_err());
+
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            let paths: Vec<serde_json::Value> = args["plan"]["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|mount| mount["paths"].clone())
+                .collect();
+            assert_eq!(paths, [json!(["library/P.yaml"])], "a fresh plan");
+            assert_eq!(args["root_generation"], json!(root));
+            assert_eq!(svc.numbers().root, root, "nothing raised");
+            assert!(text(&disk, "lib", "P.yaml").contains("- team/a.md"));
+            assert_eq!(row_names(&svc.status()), ["library", "team", "engram"]);
+            assert_eq!(presets_of(&svc, id), ["team/a.md"]);
+        }
+
+        // ADR-0400 decision 18: the agents pass reads the registry after the raise — an `agent.new` judged before the
+        //   rename whose insert lands while the hold walks the preset files (before the raise) is rewritten by it.
+        #[test]
+        fn an_agent_new_inserted_while_the_walk_runs_is_rewritten_by_the_agents_pass() {
+            let disk = two_mounts();
+            disk.mem("lib2").file("S.yaml", &preset(""));
+            disk.mem("lib")
+                .file("P.yaml", &preset("instructions:\n- team/a.md\n"));
+            let svc = started(disk.start());
+            let _port = plugged(&svc);
+            let judged = svc
+                .judge_new_presets(&agent(&[]), &["team/S.yaml".to_owned()], None)
+                .unwrap();
+            let at = judged.change.expect("a library preset was named");
+            let mut new = agent(&[]);
+            new.presets = judged.attachments.presets;
+            let id = new.id;
+            let root = svc.numbers().root;
+            let (entered, release) = disk.store.door_read(disk.at("lib").join("P.yaml"));
+            let rename = on_thread(&svc, move |svc| {
+                svc.rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    Some(root),
+                    Some(digest(&svc, "team", "shared").as_str()),
+                )
+            });
+            entered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the rename's walk reads library/P.yaml");
+            assert!(
+                svc.values
+                    .registry
+                    .try_upsert_if(new, || svc.change_number() == at)
+                    .unwrap(),
+                "inserted before the raise"
+            );
+            release.send(()).unwrap();
+
+            let renamed = join(rename).unwrap();
+
+            assert!(renamed.stopped.is_none());
+            assert_eq!(presets_of(&svc, id), ["shared/S.yaml"]);
+            assert!(renamed
+                .fixed
+                .contains(&("team/S.yaml".to_owned(), "shared/S.yaml".to_owned())));
+        }
+
+        /// [`two_mounts`] with `library/P.yaml` listing `team/a.md` and `library/R.yaml` listing only `library/b.md`.
+        fn one_referencing() -> OnDisk {
+            let disk = two_mounts();
+            disk.mem("lib")
+                .file("P.yaml", &preset("instructions:\n- team/a.md\n"));
+            disk.mem("lib")
+                .file("R.yaml", &preset("instructions:\n- library/b.md\n"));
+            disk
+        }
+
+        /// `library/R.yaml` comes to list `team/a.md`, through the edit pipeline.
+        fn r_refers_to_team(svc: &LibraryService) {
+            let entries = AddEntries::Items(vec![NewItem {
+                path: "team/a.md".to_owned(),
+                backend: None,
+            }]);
+            assert!(svc
+                .preset_add(&lp("library/R.yaml"), &entries, None, None)
+                .is_ok());
+        }
+
+        fn plan_paths(args: &serde_json::Value) -> Vec<serde_json::Value> {
+            args["plan"]["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|mount| mount["paths"].as_array().unwrap().clone())
+                .collect()
+        }
+
+        // ADR-0405 decision 1: `yes` pins the files the caller saw — without the
+        //   answered `plan_digest`, or with another one, nothing is applied and the plan is answered again; with it
+        //   the rename runs.
+        #[test]
+        fn a_confirmation_needs_the_plans_digest() {
+            let disk = one_referencing();
+            let svc = started(disk.start());
+            let (_, code, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(code, MOUNT_RENAME_UNCONFIRMED);
+            let root = args["root_generation"].as_u64().unwrap();
+            let answered = args["plan_digest"].as_str().unwrap().to_owned();
+            assert_eq!(answered, digest(&svc, "team", "shared"));
+
+            for given in [None, Some("not the plan's")] {
+                let (class, code, args) = code_of(
+                    svc.rename_mount("team", "shared", true, Some(root), given)
+                        .unwrap_err(),
+                );
+                assert_eq!(
+                    (class, code.as_str()),
+                    (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED),
+                    "{given:?}"
+                );
+                assert_eq!(args["plan_digest"], json!(answered), "the plan again");
+            }
+            assert_eq!(
+                text(&disk, "lib", "P.yaml"),
+                preset("instructions:\n- team/a.md\n"),
+                "nothing applied"
+            );
+            assert_eq!(svc.numbers().root, root);
+
+            let done = svc
+                .rename_mount("team", "shared", true, Some(root), Some(&answered))
+                .unwrap();
+            assert_eq!(done.written, ["library/P.yaml"]);
+            assert_eq!(row_names(&done.status), ["library", "shared", "engram"]);
+        }
+
+        // ADR-0405 decision 1: a file that comes to refer to the mount between the answered plan and
+        //   the confirming call is not covered by that confirmation — the call applies nothing and answers the fresh
+        //   plan naming it, whose digest then runs the rename over both files.
+        #[test]
+        fn a_file_that_comes_to_refer_to_the_mount_after_the_answered_plan_is_asked_again() {
+            let disk = one_referencing();
+            let svc = started(disk.start());
+            let (_, _, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(plan_paths(&args), [json!("library/P.yaml")]);
+            let root = args["root_generation"].as_u64().unwrap();
+            let answered = args["plan_digest"].as_str().unwrap().to_owned();
+            r_refers_to_team(&svc);
+
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", true, Some(root), Some(&answered))
+                    .unwrap_err(),
+            );
+
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            assert_eq!(
+                plan_paths(&args),
+                [json!("library/P.yaml"), json!("library/R.yaml")]
+            );
+            let fresh = args["plan_digest"].as_str().unwrap().to_owned();
+            assert_ne!(fresh, answered);
+            assert!(text(&disk, "lib", "P.yaml").contains("- team/a.md"));
+            assert!(text(&disk, "lib", "R.yaml").contains("- team/a.md"));
+            assert_eq!(row_names(&svc.status()), ["library", "team", "engram"]);
+
+            let done = svc
+                .rename_mount("team", "shared", true, Some(root), Some(&fresh))
+                .unwrap();
+            assert_eq!(done.written, ["library/P.yaml", "library/R.yaml"]);
+        }
+
+        // ADR-0405 decision 1: the same inside the hold window — a confirmed call whose plan had a file,
+        //   then a change ahead of its ticket that makes another preset refer to the mount: the hold's files are not
+        //   the confirmed ones, so nothing is rewritten or raised and the fresh plan names both.
+        #[test]
+        fn a_file_that_comes_to_refer_to_the_mount_before_the_hold_is_asked_again() {
+            let disk = one_referencing();
+            let store = Arc::new(ParkedStatus {
+                agents: vec![agent(&["team/a.md"])],
+                door: Mutex::new(None),
+            });
+            let registry = Arc::new(ProfileRegistry::new(
+                Arc::clone(&store) as Arc<dyn ProfileStore>
+            ));
+            let svc = started(disk.start_registry(registry));
+            let id = svc.values.registry.list()[0].id;
+            let _port = plugged(&svc);
+            let root = svc.numbers().root;
+            let answered = digest(&svc, "team", "shared");
+            let (entered_tx, entered) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            *lock(&store.door) = Some((entered_tx, release_rx));
+            let rename = on_thread(&svc, move |svc| {
+                svc.rename_mount("team", "shared", true, Some(root), Some(&answered))
+            });
+            entered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the rename built its plan and asked the agent store");
+            r_refers_to_team(&svc);
+            release.send(()).unwrap();
+
+            let (class, code, args) = code_of(join(rename).unwrap_err());
+
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            assert_eq!(
+                plan_paths(&args),
+                [json!("library/P.yaml"), json!("library/R.yaml")],
+                "a fresh plan"
+            );
+            assert_eq!(svc.numbers().root, root, "nothing raised");
+            assert_eq!(
+                text(&disk, "lib", "P.yaml"),
+                preset("instructions:\n- team/a.md\n"),
+                "nothing rewritten"
+            );
+            assert_eq!(row_names(&svc.status()), ["library", "team", "engram"]);
+            assert_eq!(presets_of(&svc, id), ["team/a.md"]);
+        }
+
+        // ADR-0405 decision 1: a supplied `plan_digest` is compared even when the plan now needs no
+        //   confirmation — the last referencing file stopped referring after the answered plan, so the confirming call
+        //   applies nothing and answers the fresh, empty plan; the next call, with no tokens, runs.
+        #[test]
+        fn a_confirmation_of_a_plan_that_became_empty_is_answered_again() {
+            let disk = one_referencing();
+            let svc = started(disk.start());
+            let (_, _, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            let root = args["root_generation"].as_u64().unwrap();
+            let answered = args["plan_digest"].as_str().unwrap().to_owned();
+            disk.mem("lib")
+                .file("P.yaml", &preset("instructions:\n- library/b.md\n"));
+            let _ = svc.refresh(Some(&lp("library")));
+
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", true, Some(root), Some(&answered))
+                    .unwrap_err(),
+            );
+
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            assert_eq!(args["plan"]["files"], json!([]));
+            assert_eq!(args["plan"]["unread"], json!([]));
+            assert_eq!(row_names(&svc.status()), ["library", "team", "engram"]);
+            let done = svc
+                .rename_mount("team", "shared", false, None, None)
+                .unwrap();
+            assert_eq!(row_names(&done.status), ["library", "shared", "engram"]);
+        }
+
+        // ADR-0405 decision 1 · ADR-0407 (review round 5): a preset that comes to refer to the mount after a stop — here
+        //   right after the stopped call's hold is released, before it answers — is never rewritten under a
+        //   confirmation the caller holds: the repeat with those tokens answers the plan of what is left naming it, and
+        //   only that plan's own tokens rewrite it. Read at the wire, so a stopped answer carrying a token again would
+        //   be the one the caller repeats with.
+        #[test]
+        fn a_file_that_comes_to_refer_to_the_mount_after_a_stop_is_never_rewritten_under_the_old_confirmation(
+        ) {
+            use engram_dashboard_agent::library_commands::LibraryCommandHost;
+
+            let disk = referencing();
+            disk.mem("lib")
+                .file("R.yaml", &preset("instructions:\n- library/b.md\n"));
+            let svc = started(disk.start());
+            let (_, _, args) = code_of(
+                svc.rename_mount("team", "shared", false, None, None)
+                    .unwrap_err(),
+            );
+            assert_eq!(
+                plan_paths(&args),
+                [json!("library/P.yaml"), json!("team/Q.yaml")]
+            );
+            let root = args["root_generation"].as_u64().unwrap();
+            let confirmed = args["plan_digest"].as_str().unwrap().to_owned();
+            disk.mem("lib2").fail_read("Q.yaml");
+            let editor = Arc::clone(&svc);
+            crate::rename::AFTER_HOLD.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || r_refers_to_team(&editor)));
+            });
+
+            let stopped = LibraryCommandHost::rename_mount(
+                &*svc,
+                "team",
+                "shared",
+                true,
+                Some(root),
+                Some(&confirmed),
+            )
+            .map_err(|refusal| format!("{refusal:?}"))
+            .unwrap();
+
+            let stopped = serde_json::to_value(stopped).unwrap();
+            assert_eq!(stopped["stopped"]["path"], json!("team/Q.yaml"));
+            assert_eq!(stopped["written"], json!(["library/P.yaml"]));
+            assert!(
+                text(&disk, "lib", "R.yaml").contains("- team/a.md"),
+                "the edit landed after the hold"
+            );
+            disk.mem("lib2").heal_read("Q.yaml");
+            // The tokens the caller holds after the stop: the stopped answer's, should it carry any, else the ones it
+            //   confirmed (a guard against the round-4 token coming back — it reads that field by its old name only).
+            let held_generation = stopped["root_generation"].as_u64();
+            let held_digest = stopped
+                .get("plan_digest")
+                .and_then(|digest| digest.as_str())
+                .unwrap_or(&confirmed)
+                .to_owned();
+
+            let (class, code, args) = code_of(
+                svc.rename_mount("team", "shared", true, held_generation, Some(&held_digest))
+                    .unwrap_err(),
+            );
+
+            assert_eq!(
+                (class, code.as_str()),
+                (RefusalClass::Conflict, MOUNT_RENAME_UNCONFIRMED)
+            );
+            assert_eq!(
+                plan_paths(&args),
+                [json!("library/R.yaml"), json!("team/Q.yaml")],
+                "the plan of what is left names the new file"
+            );
+            assert!(
+                text(&disk, "lib", "R.yaml").contains("- team/a.md"),
+                "not rewritten"
+            );
+            assert!(
+                text(&disk, "lib2", "Q.yaml").contains("- team/a.md"),
+                "not rewritten"
+            );
+            assert_eq!(row_names(&svc.status()), ["library", "team", "engram"]);
+
+            let done = svc
+                .rename_mount(
+                    "team",
+                    "shared",
+                    true,
+                    args["root_generation"].as_u64(),
+                    args["plan_digest"].as_str(),
+                )
+                .unwrap();
+            assert!(done.stopped.is_none());
+            assert_eq!(done.written, ["library/R.yaml", "shared/Q.yaml"]);
+            assert_eq!(row_names(&done.status), ["library", "shared", "engram"]);
+        }
     }
 }

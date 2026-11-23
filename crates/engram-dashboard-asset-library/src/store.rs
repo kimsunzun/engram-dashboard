@@ -698,6 +698,12 @@ pub(crate) mod mem {
             self.state.lock().unwrap().read_failures.insert(path);
         }
 
+        /// Ends a [`MemStore::fail_read`] of `rel`.
+        pub(crate) fn heal_read(&self, rel: &str) {
+            let path = self.at(rel);
+            self.state.lock().unwrap().read_failures.remove(&path);
+        }
+
         /// A read closure for `ScanResult::build` over this store.
         pub(crate) fn reader(&self) -> impl Fn(&Path) -> io::Result<Vec<u8>> + '_ {
             |path| self.read(path, u64::MAX)

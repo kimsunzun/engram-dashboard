@@ -117,6 +117,10 @@ pub struct AgentAttach {
 pub struct NewPresets {
     pub attachments: Attachments,
     pub skipped: Vec<Skipped>,
+    /// The change number (`Numbers.change`) read in the read lock that judged, when a library preset was named — the
+    /// registry insert compares it ([`LibraryService::change_number`]) and the caller judges again on a change
+    /// (ADR-0400 decision 18); `None` = no library preset named, nothing a library change could alter.
+    pub change: Option<u64>,
 }
 
 /// The answer view as built inside the change; the folder stats and link probes are still to run.
@@ -353,9 +357,12 @@ impl LibraryService {
                 builtins: &self.builtins,
             };
             let (attachments, (_, skipped)) = attach(profile, &lookup, presets, None);
+            // ADR-0400 decision 18: read in the lock that judged, so a change landing after it moves the number.
+            let change = names_library(presets).then(|| self.gate.numbers().change);
             Ok(NewPresets {
                 attachments,
                 skipped,
+                change,
             })
         })
     }
@@ -644,6 +651,7 @@ pub fn judge_new_presets_without_library(
     Ok(NewPresets {
         attachments,
         skipped,
+        change: None,
     })
 }
 

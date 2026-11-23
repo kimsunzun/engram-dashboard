@@ -14,9 +14,9 @@ use engram_dashboard_agent::backend;
 use engram_dashboard_agent::commands::{
     make_table, AgentBackend, AgentCommandHost, AgentOutputFormat as DeclaredOutputFormat,
     LibraryAddMountOk, LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind,
-    LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryStatusOk, PresetAddOk,
-    PresetCheckOk, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk, PresetView,
-    RosterChanged, UsageCommandHost, UsageVendorRow,
+    LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryRenameMountOk, LibraryStatusOk,
+    PresetAddOk, PresetCheckOk, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk,
+    PresetView, RosterChanged, UsageCommandHost, UsageVendorRow,
 };
 use engram_dashboard_agent::failure::AgentFailureKind;
 use engram_dashboard_agent::launch::{
@@ -1547,6 +1547,19 @@ impl LibraryCommandHost for NoLibrary {
     }
     fn relocate_mount(&self, _: &str, _: &str, _: bool) -> Result<LibraryStatusOk, PortRefusal> {
         Self::refused()
+    }
+    fn rename_mount(
+        &self,
+        _: &str,
+        _: &str,
+        _: bool,
+        _: Option<u64>,
+        _: Option<&str>,
+    ) -> Result<LibraryRenameMountOk, PortRefusal> {
+        Self::refused()
+    }
+    fn change_number(&self) -> Option<u64> {
+        None
     }
     fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
         Self::refused()

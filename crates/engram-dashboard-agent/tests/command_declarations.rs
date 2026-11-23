@@ -6,10 +6,10 @@ use engram_dashboard_agent::commands::{
     AgentPresetsArgs, AgentRenameArgs, AgentReorderPresetsArgs, AgentResolveArgs,
     AgentSetWorkspaceArgs, AgentSpawnArgs, LibraryAddMountArgs, LibraryFoldersArgs,
     LibraryListArgs, LibraryNewFileArgs, LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs,
-    LibraryRelinkArgs, LibraryRelocateMountArgs, LibraryRemoveMountArgs, LibraryStatusArgs,
-    PresetAddArgs, PresetCheckArgs, PresetGetArgs, PresetPreviewFolderArgs, PresetRemoveArgs,
-    PresetReorderArgs, PresetSaveArgs, PresetSetBackendArgs, UsageGetArgs, UsageRefreshArgs,
-    COMMAND_SPECS, INPUT_AFFECTING,
+    LibraryRelinkArgs, LibraryRelocateMountArgs, LibraryRemoveMountArgs, LibraryRenameMountArgs,
+    LibraryStatusArgs, PresetAddArgs, PresetCheckArgs, PresetGetArgs, PresetPreviewFolderArgs,
+    PresetRemoveArgs, PresetReorderArgs, PresetSaveArgs, PresetSetBackendArgs, UsageGetArgs,
+    UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
 };
 use engram_dashboard_command::DeadlineClass;
 use engram_dashboard_command::{
@@ -50,6 +50,7 @@ fn declared_names_are_the_cli_verbs() {
             "library.relink",
             "library.relocateMount",
             "library.removeMount",
+            "library.renameMount",
             "library.status",
             "preset.add",
             "preset.check",
@@ -75,7 +76,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 23 // two were added in v6 — `agent.interrupt` · `usage.refresh`; sixteen in v9 — `library.addMount` · `removeMount` · `relocateMount` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`, `agent.setWorkspace` · `duplicate`
+            == 24 // two were added in v6 — `agent.interrupt` · `usage.refresh`; seventeen in v9 — `library.addMount` · `removeMount` · `relocateMount` · `renameMount` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`, `agent.setWorkspace` · `duplicate`
     );
 }
 
@@ -115,8 +116,8 @@ fn the_resolve_verb_is_a_read_declared_in_generation_8() {
     assert_eq!(resolve.since, 8);
 }
 
-/// The eleven library commands (ADR-0386 · ADR-0400 decision 7) — all in catalog 9 and ordinary (no launch deadline);
-/// the six that change the library or `library.json` are `Write`. ★`library.refresh` is `Read`★: it changes only the in-memory catalog and a
+/// The twelve library commands (ADR-0386 · ADR-0400 decision 7) — all in catalog 9 and ordinary (no launch deadline);
+/// the seven that change the library or `library.json` are `Write`. ★`library.refresh` is `Read`★: it changes only the in-memory catalog and a
 /// rerun is harmless, while a `Write` would make a same-id retry answer `ALREADY_APPLIED` with no report.
 #[test]
 fn the_library_verbs_are_declared_in_generation_9_with_their_effect() {
@@ -125,6 +126,7 @@ fn the_library_verbs_are_declared_in_generation_9_with_their_effect() {
         ("library.addMount", Effect::Write),
         ("library.removeMount", Effect::Write),
         ("library.relocateMount", Effect::Write),
+        ("library.renameMount", Effect::Write),
         ("library.folders", Effect::Read),
         ("library.refresh", Effect::Read),
         ("library.list", Effect::Read),
@@ -298,8 +300,13 @@ fn error_sets_are_golden() {
     ] {
         assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
     }
-    // ADR-0400 decision 7: removing or relocating a mount that is not registered is NOT_FOUND `mount-not-found`.
-    for name in ["library.removeMount", "library.relocateMount"] {
+    // ADR-0400 decision 7: removing, relocating or renaming a mount that is not registered is NOT_FOUND
+    //   `mount-not-found`.
+    for name in [
+        "library.removeMount",
+        "library.relocateMount",
+        "library.renameMount",
+    ] {
         assert_eq!(
             declared(name),
             vec![ErrorCode::NotFound, ErrorCode::Conflict],
@@ -474,6 +481,11 @@ fn required_matches_what_deserialization_actually_demands() {
             "library.relocateMount",
             parses::<LibraryRelocateMountArgs>,
             json!({ "mount": "team", "path": "C:/lib", "create": true }),
+        ),
+        (
+            "library.renameMount",
+            parses::<LibraryRenameMountArgs>,
+            json!({ "mount": "team", "to": "shared", "yes": true, "root_generation": 7 }),
         ),
         ("library.folders", parses::<LibraryFoldersArgs>, json!({})),
         (

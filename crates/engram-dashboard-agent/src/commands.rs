@@ -60,7 +60,7 @@ declare_commands! {
     //   and the preset edits' answers) gains `notices`. Then the mount commands: `library.status` answers `mounts` (its
     //   `root`, `root_setting`, `state` and `state_why` left), `library.addMount` · `removeMount` · `relocateMount` are
     //   added and `library.setRoot` is removed (ADR-0400 decision 7), and `preset.reorder`'s `section` became a
-    //   lowercase word (ADR-0400 decision 22).
+    //   lowercase word (ADR-0400 decision 22). `library.renameMount` is added in it too (ADR-0400 decision 12).
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -994,6 +994,63 @@ declare_commands! {
         root_generation: u64,
     } errors [NOT_FOUND, CONFLICT];
 
+    /// Renames the mount `mount` to `to` and re-points every reference to `mount/…` (in the preset files of every
+    /// mount that can be read, then in agents) at `to/…`; a case-only rename is allowed; saves library.json. When
+    /// files would be rewritten, or references would stay as they are because their mount cannot be read, the first
+    /// call applies nothing and answers CONFLICT `mount-rename-unconfirmed` with `plan` (`files` per mount with `git`
+    /// — the mount is in a git working tree —, `unread` mounts with `paths` — their files that refer to `mount/…` and
+    /// stay as they are; null: never walked, what in it refers is unknown —, `agents`, `whole_files` — rewritten
+    /// whole, comments and quoting not kept —,
+    /// `already_pointing`), `root_generation` and `plan_digest` (over the files in `plan` and its never-walked mounts); repeat with `yes` and that
+    /// `root_generation` and `plan_digest` — both required whenever the plan needs confirmation: files to rewrite or
+    /// references left unread (either missing: the same refusal; stale: `root-generation-stale` with a fresh `plan` and
+    /// `plan_digest`). To have the unread files rewritten too, wait for their mount and call again
+    /// instead of confirming. A confirmed call whose plan is no longer the one confirmed — a preset came to refer to
+    /// `mount/…` or stopped, a mount came back or became unreadable — applies nothing and answers
+    /// `mount-rename-unconfirmed` with the fresh `plan`; read it and confirm again. Answers the status, the pairs `fixed`, the files
+    /// `written` and `skipped` with why, `stopped` when an IO failure or the agents' save stopped it part-way (the old
+    /// name stays and the answer carries no `plan_digest` — call again: the repeat plans what is left, and a plan that
+    /// needs confirmation is answered as above to confirm with its own tokens, while the tokens confirmed before the stop
+    /// answer `mount-rename-unconfirmed` or `root-generation-stale` with that plan unless it is the confirmed one
+    /// again — every written file came to refer to `mount/…` again), and `already_pointing` — references
+    /// that already named `to` (0 for a case-only rename where names ignore case). A `skipped` row whose path is a mount
+    /// name: that mount was never walked, so what in it refers to `mount/…` is unknown. `git` is null when it could not
+    /// be told. NOT_FOUND `mount-not-found`; CONFLICT `mount-unusable` (`{mount, state, why}` — the
+    /// mount cannot be read, so its own references could not be rewritten) · `mount-name-taken` · `mount-read-only`
+    /// (`engram`) · `library-config-read-only` · `library-unavailable` (as `library.addMount`; also when no first scan
+    /// of the library could be applied, or a mount's folder — `mount` itself included — was lost during the rename:
+    /// the old name stays, repeat after `library.status`) ·
+    /// `library-config-write-failed`, or the agent store's refusal when it is read-only and agents would change;
+    /// INVALID_ARGUMENT `mount-name-invalid`.
+    #[effect(Write)]
+    #[since(9)]
+    "library.renameMount" => args LibraryRenameMountArgs {
+        mount: String,
+        to: String,
+        /// Confirms the plan. Unspecified = false.
+        yes: Option<bool>,
+        /// The value the plan answered — required with `yes` whenever the plan needs confirmation (files to rewrite or
+        /// references left unread).
+        root_generation: Option<u64>,
+        /// The `plan_digest` the plan answered — required with `yes` whenever the plan needs confirmation (files to
+        /// rewrite or references left unread).
+        plan_digest: Option<String>,
+    } -> ok LibraryRenameMountOk {
+        // ★The status fields must not differ by a character from `LibraryStatusOk`★ — the pairing destructures it
+        //   (`library_commands.rs`); field meanings: `library.status`.
+        daemon_id: String,
+        mounts: Vec<MountStatusRow>,
+        config: String,
+        config_why: Option<String>,
+        suggested_new: String,
+        root_generation: u64,
+        fixed: Vec<RelinkPairRow>,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        stopped: Option<RelinkStopRow>,
+        already_pointing: PointingRow,
+    } errors [NOT_FOUND, CONFLICT];
+
     /// Every folder of the library, flat, by path; a skill folder is marked `skill`; each mount (a top folder) carries
     /// its `state`. The folders of a mount that cannot be read are left out and the mount is named in `unavailable`
     /// (the built-in mount `engram` too when its folder cannot be read, though its rows stay as stand-ins and a launch
@@ -1508,6 +1565,16 @@ pub trait AgentCommandHost: Send + Sync {
     ///   manager's `try_` variants · ADR-0291 R17). `create_and_activate` is partial: a refused add gives `created:
     ///   false`; a failure after the add gives `created: true` and the row stays.
     fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError>;
+    /// [`AgentCommandHost::create_agent`] whose registry insert first asks `still`, inside the registry's lock —
+    /// `Ok(None)` = it answered `false` and nothing was registered; every lock is released on return
+    /// ([`AgentManager::try_create_agent_if`]). `agent.new {presets}` passes the library change-number comparison
+    /// (ADR-0400 decision 18). No default: an implementation that asks `still` outside the lock its insert takes
+    /// would let a library change land between the answer and the insert.
+    fn create_agent_if(
+        &self,
+        profile: AgentProfile,
+        still: &dyn Fn() -> bool,
+    ) -> Result<Option<AgentProfile>, PtyError>;
     /// The handler puts the returned notices on its success reply, so the activation counts as delivering them
     /// ([`crate::manager::NoticeDelivery::Delivered`] — a start marks the set as shown for this agent).
     fn activate_profile(
@@ -1647,6 +1714,15 @@ impl AgentCommandHost for AgentManager {
     // ADR-0291 R17
     fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
         AgentManager::try_create_agent(self, profile)
+    }
+
+    // ADR-0400 decision 18
+    fn create_agent_if(
+        &self,
+        profile: AgentProfile,
+        still: &dyn Fn() -> bool,
+    ) -> Result<Option<AgentProfile>, PtyError> {
+        AgentManager::try_create_agent_if(self, profile, still)
     }
 
     fn activate_profile(
@@ -2439,7 +2515,7 @@ fn verb_new(
     if let Some(reason) = llm_creation_refusal(&word) {
         return Err(policy_refusal(&word, reason));
     }
-    let mut profile = new_profile(
+    let profile = new_profile(
         cwd,
         name.map(str::to_string),
         backend_command(backend, output_format(args.output_format)),
@@ -2448,18 +2524,31 @@ fn verb_new(
     //   name-allocation gate; the profile is created with the accepted list in one registry write — no profile-edit
     //   port step after it, so no failure can follow the create. Without `presets` nothing is judged and
     //   `root_generation` is not read.
-    let skipped = match &args.presets {
-        None => Vec::new(),
-        Some(presets) => {
-            let judged = library
-                .judge_new_presets(&profile, presets, args.root_generation)
-                .map_err(|refusal| refusal_error("agent.new", refusal))?;
-            profile.default_preset = judged.attachments.default_preset;
-            profile.presets = judged.attachments.presets;
-            judged.skipped
+    // ADR-0400 decision 18: the registry insert inserts only while the library's change number is still the one the
+    //   judgement was made at; on a change nothing is inserted, every lock is released, and the request — its paths
+    //   as given — is judged again. It ends once no library change lands between a judgement and its insert.
+    let (stored, skipped) = loop {
+        let Some(presets) = &args.presets else {
+            break (register(host, profile)?, Vec::new());
+        };
+        let judged = library
+            .judge_new_presets(&profile, presets, args.root_generation)
+            .map_err(|refusal| refusal_error("agent.new", refusal))?;
+        let mut judged_profile = profile.clone();
+        judged_profile.default_preset = judged.attachments.default_preset;
+        judged_profile.presets = judged.attachments.presets;
+        let Some(at) = judged.change else {
+            break (register(host, judged_profile)?, judged.skipped);
+        };
+        let still = || library.change_number() == Some(at);
+        match register_if(host, judged_profile, &still)? {
+            Some(stored) => break (stored, judged.skipped),
+            None => tracing::debug!(
+                judged_at = at,
+                "agent.new: the library changed between the judgement and the insert; judging again"
+            ),
         }
     };
-    let stored = register(host, profile)?;
     notify.roster_changed();
     Ok(AgentNewOk {
         agent_id: stored.id.to_string(),
@@ -2478,6 +2567,19 @@ fn register(
 ) -> Result<AgentProfile, CommandError> {
     let cwd = profile.cwd.to_string_lossy().into_owned();
     host.create_agent(profile)
+        .map_err(|e| create_error(e, &cwd))
+}
+
+/// [`register`] whose insert inserts only while `still` answers `true` ([`AgentCommandHost::create_agent_if`]);
+/// `Ok(None)` = nothing registered.
+// ADR-0400 decision 18
+fn register_if(
+    host: &dyn AgentCommandHost,
+    profile: AgentProfile,
+    still: &dyn Fn() -> bool,
+) -> Result<Option<AgentProfile>, CommandError> {
+    let cwd = profile.cwd.to_string_lossy().into_owned();
+    host.create_agent_if(profile, still)
         .map_err(|e| create_error(e, &cwd))
 }
 
@@ -3398,6 +3500,19 @@ mod tests {
         }
     }
 
+    /// A fake's conditional create: the fakes hold no registry lock, so `still` is asked right before the create —
+    /// enough for a handler test on one thread.
+    fn ask_then_create(
+        host: &dyn AgentCommandHost,
+        profile: AgentProfile,
+        still: &dyn Fn() -> bool,
+    ) -> Result<Option<AgentProfile>, PtyError> {
+        if !still() {
+            return Ok(None);
+        }
+        host.create_agent(profile).map(Some)
+    }
+
     impl AgentCommandHost for FakeHost {
         fn roster(&self) -> Vec<AgentRosterRow> {
             self.rows
@@ -3438,6 +3553,14 @@ mod tests {
                 live: None,
             });
             Ok(profile)
+        }
+
+        fn create_agent_if(
+            &self,
+            profile: AgentProfile,
+            still: &dyn Fn() -> bool,
+        ) -> Result<Option<AgentProfile>, PtyError> {
+            ask_then_create(self, profile, still)
         }
 
         fn activate_profile(
@@ -3699,6 +3822,7 @@ mod tests {
                 "library.relink",
                 "library.relocateMount",
                 "library.removeMount",
+                "library.renameMount",
                 "library.status",
                 "preset.add",
                 "preset.check",
@@ -4720,6 +4844,13 @@ mod tests {
             fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
                 self.0.create_agent(profile)
             }
+            fn create_agent_if(
+                &self,
+                profile: AgentProfile,
+                still: &dyn Fn() -> bool,
+            ) -> Result<Option<AgentProfile>, PtyError> {
+                ask_then_create(self, profile, still)
+            }
             fn activate_profile(
                 &self,
                 profile: &AgentProfile,
@@ -4979,6 +5110,54 @@ mod tests {
         );
         assert_eq!(out["skipped"], skipped);
         assert_eq!(out["state"], "sleeping");
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    /// ADR-0400 decision 18: the insert compares the library's change number with the one the judgement was made at;
+    /// a library change in between inserts nothing and the request — its paths as given — is judged again, and the
+    /// agent is created with the second judgement's list and answers its skips.
+    #[test]
+    fn new_with_presets_judges_again_when_the_library_changed_before_the_insert() {
+        let host = FakeHost::new();
+        let library = crate::library_commands::fake::FakeLibrary::answering(Ok(json!({
+            "default_preset": true, "presets": ["team/P.yaml"], "skipped": [], "change": 5,
+        })));
+        let skipped = json!([{ "item": "team/P.yaml", "code": "not-found", "args": { "path": "team/P.yaml" }, "line": null }]);
+        library.then.lock().unwrap().push_back(Ok(json!({
+            "default_preset": true, "presets": [], "skipped": skipped, "change": 6,
+        })));
+        library.change_numbers.lock().unwrap().extend([6, 6]);
+        let (table, notify) =
+            wiring_with_library(&host, Arc::clone(&library) as Arc<dyn LibraryCommandHost>);
+
+        let out = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/delta", "backend": "Claude", "presets": ["team/P.yaml"] }),
+        )
+        .expect("register");
+
+        let methods: Vec<&str> = library.calls().iter().map(|(method, _)| *method).collect();
+        assert_eq!(
+            methods,
+            [
+                "judge_new_presets",
+                "change_number",
+                "judge_new_presets",
+                "change_number"
+            ],
+            "judged, compared (moved), judged again, compared (equal)"
+        );
+        let calls = library.calls();
+        assert_eq!(
+            calls[0].1, calls[2].1,
+            "judged again with the paths as given"
+        );
+        let id = AgentId::parse_str(out["agent_id"].as_str().expect("an id")).expect("a uuid");
+        let created = host.profiles.lock().unwrap()[&id].clone();
+        assert!(created.presets.is_empty(), "the second judgement's list");
+        assert_eq!(out["skipped"], skipped);
+        assert_eq!(host.profiles.lock().unwrap().len(), 1, "created once");
         assert_eq!(*notify.calls.lock().unwrap(), 1);
     }
 
@@ -5526,6 +5705,13 @@ mod tests {
                 let stored = self.0.create_agent(profile)?;
                 *self.0.store_refuses.lock().unwrap() = true;
                 Ok(stored)
+            }
+            fn create_agent_if(
+                &self,
+                profile: AgentProfile,
+                still: &dyn Fn() -> bool,
+            ) -> Result<Option<AgentProfile>, PtyError> {
+                ask_then_create(self, profile, still)
             }
             fn activate_profile(
                 &self,

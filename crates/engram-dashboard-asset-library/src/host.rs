@@ -28,11 +28,12 @@ use engram_dashboard_agent::backend::settings_check::{
 use engram_dashboard_agent::commands::{
     self as declared, launch_notice_row, AgentFolderRow, AgentOutputFormat, FolderLoadKindWord,
     FolderRow, LibraryAddMountOk, LibraryFolderRow, LibraryFoldersOk, LibraryKind, LibraryListOk,
-    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryStatusOk,
-    ListFolderRow, MountStatusRow, PathReasonRow, PointingRow, PresetAddOk, PresetCheckOk,
-    PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk,
-    PreviewItemRow, PreviewLoadRow, PreviewRefusalRow, PreviewSetRow, PreviewSkillNameRow,
-    PreviewUnsureRow, ReasonRow, RefreshErrorRow, RelinkPairRow, SkippedRow, UnavailableMountRow,
+    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk,
+    LibraryRenameMountOk, LibraryStatusOk, ListFolderRow, MountStatusRow, PathReasonRow,
+    PointingRow, PresetAddOk, PresetCheckOk, PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk,
+    PresetSection, PresetSetBackendOk, PreviewItemRow, PreviewLoadRow, PreviewRefusalRow,
+    PreviewSetRow, PreviewSkillNameRow, PreviewUnsureRow, ReasonRow, RefreshErrorRow,
+    RelinkPairRow, SkippedRow, UnavailableMountRow,
 };
 use engram_dashboard_agent::launch::Reason;
 use engram_dashboard_agent::library_commands::{
@@ -54,6 +55,7 @@ use crate::edit::{
 use crate::folder::{slash_path, FolderStatus};
 use crate::format::ListName;
 use crate::relink::RelinkAnswer;
+use crate::rename::RenameAnswer;
 use crate::resolve::ResolvedFolder;
 use crate::{
     FoldersAnswer, LibraryRefusal, LibraryService, LibraryStatus, ListAnswer, ListFilter, ListRow,
@@ -103,6 +105,24 @@ impl LibraryCommandHost for LibraryService {
         LibraryService::relocate_mount(self, mount, Path::new(path), create)
             .map(status_ok)
             .map_err(port)
+    }
+
+    fn rename_mount(
+        &self,
+        mount: &str,
+        to: &str,
+        yes: bool,
+        root_generation: Option<u64>,
+        plan_digest: Option<&str>,
+    ) -> Result<LibraryRenameMountOk, PortRefusal> {
+        LibraryService::rename_mount(self, mount, to, yes, root_generation, plan_digest)
+            .map(rename_ok)
+            .map_err(port)
+    }
+
+    // ADR-0400 decision 18
+    fn change_number(&self) -> Option<u64> {
+        Some(LibraryService::change_number(self))
     }
 
     fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
@@ -484,11 +504,13 @@ fn folders_ok(answer: FoldersAnswer) -> LibraryFoldersOk {
 /// mount's row.
 // ADR-0400 decision 4
 fn mount_state_words(state: Option<MountState>) -> (Option<String>, Option<String>) {
+    let Some(state) = state else {
+        return (None, None);
+    };
+    let word = Some(state.word().to_owned());
     match state {
-        None => (None, None),
-        Some(MountState::Ok) => (Some("ok".to_owned()), None),
-        Some(MountState::Missing { why }) => (Some("missing".to_owned()), Some(why)),
-        Some(MountState::Unreadable { why }) => (Some("unreadable".to_owned()), Some(why)),
+        MountState::Ok => (word, None),
+        MountState::Missing { why } | MountState::Unreadable { why } => (word, Some(why)),
     }
 }
 
@@ -586,6 +608,27 @@ fn relink_ok(answer: RelinkAnswer) -> LibraryRelinkOk {
             .stopped
             .map(|stop| relink_stop_row(stop.path, port(stop.refusal))),
     }
+}
+
+fn rename_ok(answer: RenameAnswer) -> LibraryRenameMountOk {
+    LibraryRenameMountOk::of(
+        status_ok(answer.status),
+        answer
+            .fixed
+            .into_iter()
+            .map(|(from, to)| RelinkPairRow { from, to })
+            .collect(),
+        answer.written,
+        answer
+            .skipped
+            .into_iter()
+            .map(|skip| path_reason(skip.path, skip.reason))
+            .collect(),
+        answer
+            .stopped
+            .map(|stop| relink_stop_row(stop.path, port(stop.refusal))),
+        pointing_row(answer.already_pointing),
+    )
 }
 
 fn preset_view(view: crate::edit::PresetView) -> declared::PresetView {
@@ -703,6 +746,7 @@ fn new_presets(judged: NewPresets) -> NewAgentPresets {
     NewAgentPresets {
         attachments: judged.attachments,
         skipped: judged.skipped.into_iter().map(skipped_row).collect(),
+        change: judged.change,
     }
 }
 
@@ -2913,6 +2957,7 @@ mod tests {
                         line: None,
                     },
                 ],
+                change: Some(w.svc.change_number()),
             }
         );
         let (class, reason) = refused(w.port().judge_new_presets(

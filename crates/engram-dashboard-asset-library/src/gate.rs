@@ -17,7 +17,8 @@
 //!   merge's `Catalog::apply_items`, a change's own per-item primitives. The one exception is a mount change
 //!   ([`Gate::change_mount`]): an added or relocated mount's fresh walk, applied after `Catalog::drop_range` of that
 //!   mount in the write lock that publishes it, and a removed mount's range dropped; other mounts' items stay (ADR-0366
-//!   as ADR-0400 decision 16 amends it).
+//!   as ADR-0400 decision 16 amends it). A mount rename ([`Gate::rename_mount`]) moves its mount's range to the new
+//!   name with `Catalog::rekey_range`, after its per-item rewrites, in the one write lock it holds throughout.
 //! - **Scans walk per mount**: one scan walks each mount its range touches (every mount for the whole library), one
 //!   after the other under its one ticket, and applies them all in one write lock. A range in no registered mount
 //!   walks nothing and answers why. With no mount registered a whole scan applies nothing and still raises the first
@@ -49,13 +50,22 @@
 //!   change and late merge. A scan matches its stats to the mounts it walks by that view, so a writer that bypassed it
 //!   would send a reader round its first scan forever. The mount commands go through it too ([`Gate::change_mount`]): a
 //!   mount added, removed or relocated has its `seen` and `stamps` entries cleared (as
-//!   [`Gate::publish_mount_unwalked`] does) in that same call — an added or relocated one then recorded walked.
+//!   [`Gate::publish_mount_unwalked`] does) in that same call — an added or relocated one then recorded walked; a
+//!   renamed one ([`Gate::rename_mount`]) has them moved to its new name.
+//! - **A rename is one hold**: under its `Root` ticket a mount rename takes the write lock once and, inside it,
+//!   rewrites the preset files (a bounded stat of a mount's folder when one of its files reads as not found), raises
+//!   the root generation and the change number, rewrites the agents through the profile-edit port, re-keys the
+//!   catalog and renames the registration (ADR-0400 decisions 12 and 16). It cannot be a
+//!   change: a change never enters behind a held `Root` ticket. So an edit queued behind it meets the new name and a
+//!   raised root generation, and an `agent.new` whose registry insert compares the change number meets the raised
+//!   one or is rewritten by the agents pass (decision 18).
 //! - **A change judges its mount again under the write lock**: a write's entrance walks an unusable mount again and
 //!   refuses before the ticket, but a scan queued ahead of the change may record the mount gone after that; a change
 //!   gets the recorded states ([`MountsNow`]) and judges its target's mount there, before any disk IO — no IO and no
 //!   walk inside the lock (ADR-0400 decision 6).
 //! - **Numbers**: a scan's apply raises the swap-in count, a change the change generation, a mount change the root
-//!   generation and the change generation — each inside its write lock. A change refused inside its body that applied
+//!   generation and the change generation — each inside its write lock (a rename before its agents pass; a rename
+//!   stopped by its file walk raises only the change generation, and only when it applied an item). A change refused inside its body that applied
 //!   no catalog item raises nothing (its refusal applied nothing, so a walk or a late merge has nothing to miss). A
 //!   scan applies only if the change generation has not moved since its walk started (else it walks again). A late
 //!   merge applies only if neither generation moved since the caller noted them before its disk read; if only the
@@ -88,7 +98,7 @@ use serde_json::json;
 
 use crate::catalog::{key, preset_refs, within, Catalog, Item, ItemContent, ScanItem, ScanResult};
 use crate::folder::FolderStatus;
-use crate::mounts::{virtual_path, Mount, MountName, MountPath, Mounts};
+use crate::mounts::{moved_to, virtual_path, Mount, MountName, MountPath, Mounts};
 use crate::path::LibPath;
 use crate::store::ContentTag;
 use crate::RefreshReport;
@@ -201,6 +211,15 @@ impl MountState {
         }
     }
 
+    /// The state in one word: `ok`, `missing` or `unreadable` (the wire's mount `state`).
+    pub fn word(&self) -> &'static str {
+        match self {
+            MountState::Ok => "ok",
+            MountState::Missing { .. } => "missing",
+            MountState::Unreadable { .. } => "unreadable",
+        }
+    }
+
     /// `ok`, or the reason it is not.
     pub fn why(&self) -> &str {
         match self {
@@ -284,6 +303,15 @@ impl ChangeAnswer for () {
     fn refused(&self) -> bool {
         false
     }
+}
+
+/// Whether a mount rename goes on after its body ([`Gate::rename_mount`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RenameEnd {
+    /// The references were rewritten: re-key the catalog and rename the registration.
+    Finish,
+    /// The walk or the agents' rewrite stopped (or the body refused): the old name stays registered.
+    Stop,
 }
 
 /// What one mount change does ([`Gate::change_mount`] — ADR-0400 decisions 9, 11 and 13).
@@ -422,6 +450,9 @@ pub(crate) struct Gate {
     turns: Mutex<Turns>,
     moved: Condvar,
     seq: AtomicU64,
+    /// How many [`Gate::with_read`] calls found the library lock held for writing — tests observe a waiter.
+    #[cfg(test)]
+    read_blocked: std::sync::atomic::AtomicUsize,
 }
 
 struct Turns {
@@ -536,6 +567,8 @@ impl Gate {
             }),
             moved: Condvar::new(),
             seq: AtomicU64::new(0),
+            #[cfg(test)]
+            read_blocked: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -549,6 +582,13 @@ impl Gate {
     }
 
     pub(crate) fn with_read<R>(&self, f: impl FnOnce(&State) -> R) -> R {
+        #[cfg(test)]
+        if matches!(
+            self.lib.try_read(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            self.read_blocked.fetch_add(1, Ordering::SeqCst);
+        }
         f(&read(&self.lib))
     }
 
@@ -702,21 +742,30 @@ impl Gate {
                 None => {}
             }
         }
-        if !gone.is_empty() {
-            let mut state = write(&self.lib);
-            let seen: Vec<Observed> = gone
-                .into_iter()
-                .filter(|(mount, _)| {
-                    state
-                        .mounts
-                        .get(mount.name.as_str())
-                        .is_some_and(|registered| same_path(&registered.folder, &mount.folder))
-                })
-                .map(|(mount, status)| (mount.name, MountState::of(&status), false, at))
-                .collect();
-            self.write_mounts(&mut state, |state| record_seen(state, seen));
-        }
+        self.record_unusable(gone, at);
         back
+    }
+
+    /// Records each of `gone` — a mount whose folder stat, drawn at sequence `at` before it was asked, was not `Ok` —
+    /// as its last known state under a brief write lock, without a ticket. A mount removed or moved since is not
+    /// recorded, and an older observation never replaces a newer state.
+    // ADR-0400 decision 17
+    pub(crate) fn record_unusable(&self, gone: Vec<(Mount, FolderStatus)>, at: u64) {
+        if gone.is_empty() {
+            return;
+        }
+        let mut state = write(&self.lib);
+        let seen: Vec<Observed> = gone
+            .into_iter()
+            .filter(|(mount, _)| {
+                state
+                    .mounts
+                    .get(mount.name.as_str())
+                    .is_some_and(|registered| same_path(&registered.folder, &mount.folder))
+            })
+            .map(|(mount, status)| (mount.name, MountState::of(&status), false, at))
+            .collect();
+        self.write_mounts(&mut state, |state| record_seen(state, seen));
     }
 
     /// The one way to write the mounts or what the scans know of them (`seen`, `stamps`): `f` under the caller's write
@@ -860,6 +909,103 @@ impl Gate {
         self.moved.notify_all();
         drop(turns);
         Ok(report.share(None))
+    }
+
+    /// A mount rename (ADR-0400 decisions 12 and 16): a `Root` ticket, exclusive behind every earlier ticket and until
+    /// its end, and one write lock across the whole of it — `given` compared with the root generation first (`Err(current)`
+    /// = stale: `f` is not called and no number moves), then `f` with the catalog, the mounts as recorded, the sequence
+    /// and `raise`. `f` rewrites the preset files (per item, as a change does), calls `raise` — the root generation and
+    /// the change number raised once, the new root generation answered — before its agents pass, so an `agent.new`
+    /// judged before it judges again (decision 18), and answers whether the rename goes on. On [`RenameEnd::Finish`]
+    /// the numbers are raised (if `f` did not) and, when `register`, the catalog range of `from` is re-keyed to `to`
+    /// and the registration renamed ([`Gate::write_mounts`] — its `seen` and `stamps` move with it); on
+    /// [`RenameEnd::Stop`] the old name stays registered and, when `f` touched an item without raising, only the change
+    /// number moves. `register` = `false`: the repeat of a rename whose save failed (`from` already gone, `to` live) —
+    /// only the references are rewritten. The caller judged under the mount-change mutex that `from` is registered and
+    /// `to` free (or the repeat's case); the mount-change mutex keeps that true through the hold (a rename the mounts
+    /// no longer fit would fail a debug assertion in `write_mounts`, after the re-key).
+    // ADR-0400 decision 12
+    // ADR-0400 decision 16
+    pub(crate) fn rename_mount<R>(
+        &self,
+        from: &MountName,
+        to: &MountName,
+        register: bool,
+        given: Option<u64>,
+        f: impl FnOnce(
+            &mut Catalog,
+            &MountsNow,
+            &dyn Fn() -> u64,
+            &dyn Fn() -> u64,
+        ) -> (R, Vec<PathKey>, RenameEnd),
+    ) -> Result<R, u64> {
+        let _turn = self.take_turn(Kind::Root);
+        let mut state = write(&self.lib);
+        let current = lock(&self.turns).numbers.root;
+        if let Some(given) = given.filter(|&given| given != current) {
+            drop(state);
+            tracing::debug!(
+                given,
+                current,
+                "library mount rename: root generation stale; refused"
+            );
+            return Err(current);
+        }
+        let raised = std::cell::Cell::new(false);
+        // Library lock → turn mutex: the allowed order; the turn mutex is held for the raise only.
+        let raise = || {
+            let mut turns = lock(&self.turns);
+            if !raised.replace(true) {
+                turns.numbers.root += 1;
+                turns.numbers.change += 1;
+            }
+            turns.numbers.root
+        };
+        let (answer, end) = {
+            let State {
+                catalog,
+                mounts,
+                seen,
+                ..
+            } = &mut *state;
+            let catalog = Arc::make_mut(catalog);
+            let now = MountsNow { mounts, seen };
+            let (answer, mut touched, end) = f(catalog, &now, &|| self.next_seq(), &raise);
+            if end == RenameEnd::Finish {
+                raise();
+                if register {
+                    let top = virtual_path(from, None);
+                    touched.extend(catalog.rekey_range(&top, |path| {
+                        moved_to(path, from, to).expect("a path within the old mount's range moves")
+                    }));
+                }
+            }
+            catalog.recompute_derived(&touched);
+            if !raised.get() && !touched.is_empty() {
+                lock(&self.turns).numbers.change += 1;
+            }
+            (answer, end)
+        };
+        if end == RenameEnd::Finish && register {
+            self.write_mounts(&mut state, |state| {
+                let renamed = state.mounts.rename(from, to.clone());
+                debug_assert!(
+                    renamed,
+                    "the caller judged the rename under the mount-change mutex"
+                );
+                if let Some(seen) = state.seen.remove(&from.key()) {
+                    state.seen.insert(to.key(), seen);
+                }
+                if let Some(at) = state.stamps.remove(&from.key()) {
+                    state.stamps.insert(to.key(), at);
+                }
+            });
+        }
+        if raised.get() {
+            self.moved.notify_all();
+        }
+        self.debug_check_view(&state);
+        Ok(answer)
     }
 
     /// Publishes `mount` as the only mount without walking it: a Root ticket, exclusive behind every earlier ticket;
@@ -1361,6 +1507,11 @@ impl Gate {
     /// The library lock itself — a test holds it or checks that nobody does.
     pub(crate) fn lib(&self) -> &RwLock<State> {
         &self.lib
+    }
+
+    /// How many [`Gate::with_read`] calls so far found the library lock held for writing.
+    pub(crate) fn read_blocked(&self) -> usize {
+        self.read_blocked.load(Ordering::SeqCst)
     }
 
     /// Raises the change generation inside the write lock without a ticket, after `f` edits the catalog — a change the
@@ -2215,6 +2366,64 @@ mod tests {
             },
         ])
         .unwrap()
+    }
+
+    // ADR-0402 decision 5: a mount the stat left unstated (`None`) is not walked, records nothing — no state, no
+    //   stamp — and keeps a whole scan from raising the first scan, its error row saying why; `observe` neither
+    //   records nor answers it. The stated mounts are walked and recorded as usual.
+    #[test]
+    fn an_unstated_mount_is_not_walked_records_nothing_and_does_not_raise_the_first_scan() {
+        let gate = Gate::new(three_mounts(), BASE);
+        let walks = Log::default();
+        let stat = |mounts: &[Mount]| -> Vec<Option<FolderStatus>> {
+            mounts
+                .iter()
+                .map(|mount| match mount.name.as_str() {
+                    "team" => None,
+                    _ => Some(FolderStatus::Ok),
+                })
+                .collect()
+        };
+        let build =
+            |mount: &Mount, under: Option<&MountPath>, _: &Tags| -> io::Result<ScanResult> {
+                walks.push(mount.name.as_str());
+                Ok(walked(mount, under))
+            };
+        let report = gate.refresh(None, &stat, &build).unwrap();
+        assert_eq!(
+            walks.take(),
+            ["library", "ops"],
+            "the unstated mount is not walked"
+        );
+        assert_eq!(
+            report.share(None).errors,
+            [(Some(lp("team")), STAT_STARVED.to_owned())]
+        );
+        let team = MountName::parse("team").unwrap();
+        let (seen, stamped) = gate.with_read(|state| {
+            (
+                state.seen.get(&team.key()).cloned(),
+                state.stamps.contains_key(&team.key()),
+            )
+        });
+        assert_eq!((seen, stamped), (None, false), "nothing recorded for it");
+        assert!(
+            gate.with_read(|state| state.seen(&MountName::parse("ops").unwrap()).usable()),
+            "the stated mounts are recorded"
+        );
+        assert!(
+            !lock(&gate.turns).first.raised,
+            "the first scan is not raised on it"
+        );
+
+        let team_mount = gate.with_read(|state| state.mounts.get("team").cloned().unwrap());
+        let unstated = |mounts: &[Mount]| -> Vec<Option<FolderStatus>> { vec![None; mounts.len()] };
+        assert!(
+            gate.observe(vec![team_mount], &unstated).is_empty(),
+            "not answered"
+        );
+        let seen = gate.with_read(|state| state.seen.get(&team.key()).cloned());
+        assert_eq!(seen, None, "observe records nothing for it");
     }
 
     // ADR-0400 decision 17: a whole scan walks the mounts that stat `Ok`; one that does not, or whose walk fails, is

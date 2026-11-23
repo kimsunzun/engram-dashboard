@@ -14,9 +14,10 @@ use crate::conn_port::ConnId;
 use engram_dashboard_agent::commands::{
     make_table, resolve_in, AgentBackend, AgentCommandHost, AgentOutputFormat, AgentRosterRow,
     LibraryAddMountOk, LibraryCommandHost, LibraryFoldersOk, LibraryKind, LibraryListOk,
-    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryStatusOk,
-    PresetAddOk, PresetCheckOk, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk,
-    PresetView, RefreshErrorRow, RosterChanged, UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
+    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk,
+    LibraryRenameMountOk, LibraryStatusOk, PresetAddOk, PresetCheckOk, PresetPreviewFolderOk,
+    PresetSection, PresetSetBackendOk, PresetView, RefreshErrorRow, RosterChanged,
+    UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
 };
 use engram_dashboard_agent::launch::{escape_controls, Reason};
 use engram_dashboard_agent::library_commands::{
@@ -181,6 +182,20 @@ impl LibraryCommandHost for NoLibrary {
         _create: bool,
     ) -> Result<LibraryStatusOk, PortRefusal> {
         Self::refused()
+    }
+    fn rename_mount(
+        &self,
+        _mount: &str,
+        _to: &str,
+        _yes: bool,
+        _root_generation: Option<u64>,
+        _plan_digest: Option<&str>,
+    ) -> Result<LibraryRenameMountOk, PortRefusal> {
+        Self::refused()
+    }
+    // ADR-0400 decision 18: no library, nothing to re-check.
+    fn change_number(&self) -> Option<u64> {
+        None
     }
     fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
         Self::refused()
@@ -628,7 +643,7 @@ mod tests {
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 31] = [
+        const BUS_ONLY: [&str; 32] = [
             "agent.attachPreset",
             "agent.cancelQueuedInput",
             "agent.detachPreset",
@@ -649,6 +664,7 @@ mod tests {
             "library.relink",
             "library.relocateMount",
             "library.removeMount",
+            "library.renameMount",
             "library.status",
             "preset.add",
             "preset.check",
@@ -1427,6 +1443,10 @@ mod tests {
             (
                 "library.relocateMount",
                 json!({ "mount": "team", "path": "C:/lib" }),
+            ),
+            (
+                "library.renameMount",
+                json!({ "mount": "team", "to": "shared" }),
             ),
             ("library.folders", json!({})),
             ("library.list", json!({})),

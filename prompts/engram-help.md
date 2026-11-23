@@ -295,6 +295,8 @@ Where <path> appears below, give a library path; <list> is a JSON array of strin
       Unregisters a mount; no file is touched. Replies like library.status plus now_absent and outcome
   {tool} library.relocateMount --mount <mount name> --path <absolute folder> [--create true]
       Points a mount at another folder under the same name. Replies like library.status
+  {tool} library.renameMount --mount <mount name> --to <new name> [--yes true --root_generation <n> --plan_digest <digest>]
+      Renames a mount and re-points every reference to it. When files would be rewritten, or left as they are because their mount cannot be read, it first answers mount-rename-unconfirmed with the plan; repeat with --yes true and that root_generation and plan_digest
   {tool} library.folders
       Every folder, flat. A skill folder is marked skill
   {tool} library.list [--folder <path>] [--query <text>] [--kinds <JSON array of Instruction|Skill|SkillFile|Settings|Preset>]
