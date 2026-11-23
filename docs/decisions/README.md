@@ -446,3 +446,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0414](0414-step-9b-u2b-a-detach-writes-only-the-confirmed-agents.md) | Step 9b U2b: a detach writes only the confirmed agents; restore reads the trash inside its hold; the delete digest covers the items; spelling and kind judged in the hold | 확정 |
 | [0415](0415-step-9b-u3-one-volume-move-merge-pairs-and-skillmd-leaves.md) | Step 9b U3: one-volume move - merge pairs and SKILL.md leaves, ordered mapping, the shared trash path | 확정 |
 | [0416](0416-step-9b-u4a-cross-volume-move-staged-copy-read-only-as.md) | Step 9b U4a: cross-volume move - staged copy read only as listed, stagings kept or trashed and always named | 확정 |
+| [0417](0417-step-9b-u4b-copy-staged-like-a-move-across-volumes-own.md) | Step 9b U4b: copy - staged like a move across volumes, own folder judged once with a safe default, no merge | 확정 |
