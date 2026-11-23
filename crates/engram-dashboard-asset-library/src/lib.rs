@@ -138,8 +138,11 @@
 //! overwriting), and move and rename (no-replace renames, merge, an overwrite's displaced entry into the trash, the range
 //! re-keyed and re-classified in the same hold, the references rewritten in every readable mount and the agents without
 //! a plan confirmation; across volumes — found by a volume probe — a staged copy made before the ticket and checked
-//! again in the hold, the original then into its own mount's trash) — each one `change_held_at` hold, with the trash
-//! lock when it may touch `.trash`. The rules are in its header.
+//! again in the hold, the original then into its own mount's trash), and copy (every copy, one inside a mount too, staged
+//! before the ticket the same way and placed in the hold by the no-replace rename — into its own folder as ` - Copy` —,
+//! a staging that does not take its place into the trash, the copy walked into the catalog after the hold; from the
+//! built-in mount its items) — each one `change_held_at` hold, with the trash lock when it may touch `.trash`. The rules
+//! are in its header.
 //!
 //! ## Refusals
 //!
@@ -2491,24 +2494,34 @@ impl LibraryService {
         }
     }
 
+    /// The built-in folder when the built-in mount can be read ([`LibraryService::builtin_mount_state`]) — what a read
+    /// or a copy of a built-in reads; else `Unavailable` · [`LIBRARY_UNAVAILABLE`] `{mount, message}`.
+    // ADR-0400 decision 20
+    pub(crate) fn builtin_folder(&self) -> Result<&PathBuf, LibraryRefusal> {
+        let state = self.builtin_mount_state();
+        match (&state, &self.values.builtin_dir) {
+            (MountState::Ok, Some(dir)) => Ok(dir),
+            _ => {
+                let why = state.why();
+                Err(LibraryRefusal::new(
+                    RefusalClass::Unavailable,
+                    LIBRARY_UNAVAILABLE,
+                    json!({
+                        "mount": BUILTIN_MOUNT,
+                        "message": format!("the library mount {BUILTIN_MOUNT} cannot be read: {why}"),
+                    }),
+                ))
+            }
+        }
+    }
+
     /// `library.read` of the built-in `id`: its row, its file in the built-in folder (`<builtin>\presets\default.yaml`
     /// — where it was read from, or would have been for a stand-in), the agents whose Default slot is on for the
     /// built-in preset, the priming's excerpt and the settings' raw-field names. A built-in mount that cannot be read
     /// ([`LibraryService::builtin_mount_state`]) refuses `Unavailable` · [`LIBRARY_UNAVAILABLE`] `{mount, message}`.
     // ADR-0400 decision 20
     fn read_builtin(&self, id: BuiltinId) -> Result<ReadAnswer, LibraryRefusal> {
-        let state = self.builtin_mount_state();
-        let (MountState::Ok, Some(dir)) = (&state, &self.values.builtin_dir) else {
-            let why = state.why();
-            return Err(LibraryRefusal::new(
-                RefusalClass::Unavailable,
-                LIBRARY_UNAVAILABLE,
-                json!({
-                    "mount": BUILTIN_MOUNT,
-                    "message": format!("the library mount {BUILTIN_MOUNT} cannot be read: {why}"),
-                }),
-            ));
-        };
+        let dir = self.builtin_folder()?;
         let view = self.builtins.view(id);
         let mut agents_direct: Vec<AgentId> = match id {
             BuiltinId::DefaultPreset => self

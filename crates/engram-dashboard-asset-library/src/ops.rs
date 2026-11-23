@@ -1,7 +1,7 @@
 //! Step-9b file operations — inherent [`LibraryService`] methods answering crate types: delete (into the item's own mount's
 //! `.trash`), restore (back out of it), and move and rename — on one volume a no-replace rename, across volumes a copy
-//! whose original then goes into its trash. Copy joins them later. Each runs plan → execute → fix references (ADR-0335)
-//! under one `Change` hold (ADR-0409 M1).
+//! whose original then goes into its trash —, and copy (a staged copy placed in the hold, no reference fix). Each runs
+//! plan → execute → fix references (ADR-0335) under one `Change` hold (ADR-0409 M1).
 //!
 //! ## Rules (invariants)
 //!
@@ -13,12 +13,12 @@
 //!   that cannot be read `library-unavailable` (walked again first — ADR-0400 decision 6). Inside the hold, before any
 //!   disk step: the mount judged again from the recorded state, the link admission (ADR-0365 — `path-through-link`), and
 //!   a no-follow stat (absent `not-found`).
-//! - **The wait before the ticket** (ADR-0409 decision 14): delete and restore always may touch `.trash`, a move with
-//!   `overwrite` or with an item crossing volumes; those run through [`LibraryService::change_held_at`] with the
-//!   waiting count — raised just before the ticket (after a move's probes and copies), lowered after the hold or on any
-//!   earlier exit — and take the trash lock once (a delete at its first item, a restore before its per-mount loop, a
-//!   move at its first displaced entry, original or staging), holding it to the end of their trash moves only (it is
-//!   released before any preset file or agent is touched).
+//! - **The wait before the ticket** (ADR-0409 decision 14): delete, restore and copy always may touch `.trash`, a move
+//!   with `overwrite` or with an item crossing volumes; those run through [`LibraryService::change_held_at`] with the
+//!   waiting count — raised just before the ticket (after a move's probes and a move's or a copy's copies), lowered after
+//!   the hold or on any earlier exit — and take the trash lock once (a delete at its first item, a restore before its
+//!   per-mount loop, a move or a copy at its first displaced entry, original or staging), holding it to the end of their
+//!   trash moves only (it is released before any preset file or agent is touched).
 //! - **Delete** (ADR-0409 decisions 5–8): the plan names who refers to what goes — the preset files listing a deleted path
 //!   (a folder: anything inside it; a lone `SKILL.md` — a file the catalog holds as a skill's, never a folder of that
 //!   name: its skill folder or itself — ADR-0339) that are not deleted themselves, and the agents attaching a deleted path
@@ -104,6 +104,31 @@
 //!   leaves its copy in place: no pair, the copy walked into the catalog after the hold, both paths answered (`copy`).
 //!   An item on one volume whose rename in the hold answers another volume (the probe went stale) fails
 //!   [`TARGET_MOUNT_CHANGED`].
+//! - **Copy** (ADR-0409 decisions 3, 12 and 14, M3, M14 · ADR-0416): every copy — one inside a mount too — goes the way
+//!   of a move across volumes, without a volume probe, a source compare or a reference fix. Before the ticket, per
+//!   item: the entrance rules above for the destination; the item a library path below a mount's top (a mount's top and
+//!   `engram` itself `virtual-root-read-only`) or, from the built-in mount, one of its items (`builtin::file_of` — the
+//!   copy takes that file's name) or its virtual folder `engram/settings` (copied as a folder holding its item's file),
+//!   each file reached from the built-in folder down without following (a link `path-through-link`), anything else
+//!   there `not-found` and a built-in mount that cannot be read `library-unavailable`; the destination folder a real
+//!   folder (missing or a file `not-found` naming the folder, a link `path-through-link`); a destination inside the
+//!   item [`INTO_ITSELF`] (as a move judges it); the destination mount's `.trash` usable (`trash-unusable` — a staging
+//!   that does not take its place goes there); a taken destination name answered as a move across volumes answers it,
+//!   except that a same-name folder is not merged [`COPY_MERGE_REFUSED`]. A copy into its item's own folder (by path
+//!   key, else the folders' identities, else their canonical paths, else — nothing answering — taken as its own folder;
+//!   judged once here after the generation the hold compares was read) takes the copy name instead (` - Copy`, then ` -
+//!   Copy (2)` … — [`copy_name`], whatever `onConflict` says). A stale `root_generation` refuses before anything is
+//!   copied. Then the staging copy as a move across volumes makes it ([`LINKS_INSIDE`], `not_copied`), the waiting
+//!   count and the ticket. In the hold: the root generation (the whole call, as a move's: every staging trashed or kept
+//!   and named in `stagings`), each item's root generation since its copy ([`TARGET_MOUNT_CHANGED`], kept), a failed
+//!   copy (a staging row), the destination checked as a move's and its `.trash` judged again; then the no-replace
+//!   rename of the staging onto its name — `onConflict` as a move across volumes, an overwrite's entry into its mount's
+//!   `.trash` first — or onto the first free copy name; a staging that does not take its place goes into the
+//!   destination mount's `.trash` as a staging row (skipped: [`Skip::TakenDuringCopy`]). The folder a copy landed in is
+//!   re-classified in the hold and an overwrite's displaced range leaves the catalog; the copy itself enters the
+//!   catalog by a folder-scoped walk after the hold, before the answer (ADR-0409 M3). Nothing refers to a copy and the
+//!   original stays, so no reference or agent moves; the change number is raised as by every hold that applies
+//!   something (`Gate::change_held_at`).
 //! - **Stop rules** (ADR-0335, relink's): a per-file refusal skips the file; a read or write failure stops before the
 //!   agents (the answer carries it); a file in a mount that cannot be read is skipped `library-unavailable`, a mount
 //!   never walked this run is one skipped row at its top. Nothing is journaled: an interrupted detach leaves kept
@@ -131,6 +156,7 @@
 // ADR-0405
 // ADR-0409
 // ADR-0414
+// ADR-0416
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -148,26 +174,27 @@ use engram_dashboard_platform::fs::{path_key, same_path, PathKey};
 use serde_json::{json, Value};
 
 use crate::agent_edit::port_refused;
+use crate::builtin::file_of;
 use crate::catalog::{
     is_racy, key, makes_skill, preset_refs, skill_file_name, within, Catalog, ItemContent,
     ItemKind, ScanItem, ScanResult,
 };
 use crate::create::NAME_EXISTS;
-use crate::edit::{as_read, lib_path, list_mut, ITEM_LISTS, LIBRARY_WRITE_FAILED};
+use crate::edit::{as_read, lib_path, list_mut, read_path, ITEM_LISTS, LIBRARY_WRITE_FAILED};
 use crate::format::read::ITEM_PATH_INVALID;
 use crate::gate::NOT_FOUND;
 use crate::launch::LIBRARY_READ_FAILED;
 use crate::mounts::{
-    admits_inside, in_builtin, is_builtin, lies_within, virtual_path, DiskProbe, Mount, MountName,
-    MountPath,
+    admits_inside, builtin_rest, in_builtin, is_builtin, lies_within, virtual_path, DiskProbe,
+    FolderProbe, Mount, MountName, MountPath, BUILTIN_MOUNT,
 };
-use crate::path::{AssetRef, LibPath};
+use crate::path::{AssetRef, BuiltinId, LibPath};
 use crate::relink::{RelinkSkip, RelinkStop};
 use crate::rename::{lines_digest, GitTree};
 use crate::resolve::ref_key;
 use crate::store::{
-    CopyFailure, EntryKind, LibraryStore, NameWalk, ScanEntry, ScanListing, TreeCopy,
-    NO_REPLACE_UNSUPPORTED,
+    tree_path, CopiedEntry, CopyFailure, EntryKind, LibraryStore, NameWalk, ScanEntry, ScanListing,
+    TreeCopy, TreeEntry, NO_REPLACE_UNSUPPORTED,
 };
 use crate::trash::{
     below, check_trash_folder, ensure_trash_folder, fallback_rows, make_bundle, prune_shell,
@@ -224,8 +251,8 @@ pub const DETACH_REFS_INVALID: &str = "detach-refs-invalid";
 // ADR-0409 decision 12
 pub const CROSSES_VOLUMES: &str = "crosses-volumes";
 
-/// The code of a move across volumes whose item holds links (`args` = `{path, links}` — their virtual paths): nothing
-/// copied or moved.
+/// The code of a move across volumes or a copy whose item holds links (`args` = `{path, links}` — their virtual
+/// paths): nothing copied or moved.
 // ADR-0365
 pub const LINKS_INSIDE: &str = "links-inside";
 
@@ -234,12 +261,18 @@ pub const LINKS_INSIDE: &str = "links-inside";
 // ADR-0409 decision 12
 pub const SOURCE_CHANGED: &str = "source-changed";
 
-/// The code of a move whose mounts changed under it (`args` = `{path, to}`): a move across volumes whose hold finds the
-/// mount registrations changed since its copy (the root generation moved — the copy is kept, `staging` names it), or a
-/// rename in the hold answering that its destination lies on another volume although the volume probe found one volume.
+/// The code of a move or a copy whose mounts changed under it (`args` = `{path, to}`): a move across volumes or a copy
+/// whose hold finds the mount registrations changed since its copy (the root generation moved — the copy is kept,
+/// `staging` names it), or a rename in the hold answering that its destination lies on another volume although the
+/// volume probe found one volume.
 // ADR-0377
 // ADR-0409 decision 13
 pub const TARGET_MOUNT_CHANGED: &str = "target-mount-changed";
+
+/// The code of a copy onto a same-name folder (`args` = `{path, to}`) under any `onConflict` — that item's conflict,
+/// nothing copied: a copy is not merged into a folder (as a move across volumes is not — ADR-0416 decision 5).
+// ADR-0416
+pub const COPY_MERGE_REFUSED: &str = "copy-merge-refused";
 
 /// How many base temp names a volume probe or a staging copy draws before giving up on taken names.
 const TEMP_DRAWS: usize = 16;
@@ -249,7 +282,8 @@ const TEMP_DRAWS: usize = 16;
 const PROBE_BASE: &str = "engram-probe";
 const STAGING_BASE: &str = "engram-staging";
 
-/// How many keep-both names (`name (2)` …) a restore or a move tries before it answers the conflict.
+/// How many keep-both names (`name (2)` …) a restore, a move or a copy tries before it answers the conflict, and how many
+/// copy names (` - Copy` …) a copy into its item's own folder tries.
 const KEEP_BOTH_TRIES: u32 = 1_000;
 
 /// What one item or row of an operation came to.
@@ -272,8 +306,8 @@ pub enum Skip {
     InPlace,
     /// Something is at this destination path and `onConflict` said skip.
     Taken(String),
-    /// Something came to this destination path during a move's copy across volumes and `onConflict` said skip: the
-    /// copy's staging, named as a failed item names it (`staging_row`, or `staging` · `staging_disk` · `staging_kept`).
+    /// Something came to this destination path during a staging copy (a move across volumes, or a copy) and `onConflict`
+    /// said skip: the copy's staging, named as a failed item names it (`staging_row`, or `staging` · `staging_disk` · `staging_kept`).
     TakenDuringCopy { path: String, staging: Value },
 }
 
@@ -355,7 +389,8 @@ pub struct RestoreAnswer {
     pub items: Vec<RestoreItem>,
 }
 
-/// How a move answers a name taken at its destination — Explorer's three choices; none = that item's conflict.
+/// How a move or a copy answers a name taken at its destination — Explorer's three choices; none = that item's
+/// conflict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OnConflict {
     /// The entry there goes to its mount's `.trash`, then the item takes its name (ADR-0339 decision 1).
@@ -415,6 +450,29 @@ pub struct MoveAnswer {
     pub stopped: Option<RelinkStop>,
 }
 
+/// What a copied item came to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Copied {
+    /// The virtual path the copy is at.
+    pub to: String,
+    /// The entry an overwrite moved into the trash of its mount.
+    pub trashed: Option<TrashAddress>,
+}
+
+/// One given path of a copy and what came of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CopyItem {
+    pub path: String,
+    pub outcome: Outcome<Copied>,
+}
+
+/// The answer of [`LibraryService::copy_items`].
+#[derive(Debug)]
+pub struct CopyAnswer {
+    /// In the order given.
+    pub items: Vec<CopyItem>,
+}
+
 #[cfg(test)]
 thread_local! {
     /// The bundle id the next delete on this thread wants — a test makes it taken in one mount.
@@ -434,6 +492,22 @@ thread_local! {
     /// The next move on this thread runs its hold without the trash waiting count — a test makes its trash step
     /// unexpected.
     pub(crate) static UNRESERVED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Run once on the operating thread right after a copy's judgements before its ticket — a test lands a mount change
+    /// there.
+    pub(crate) static AFTER_JUDGEMENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// [`AFTER_JUDGEMENT`]'s seam; nothing outside tests.
+fn after_judgement() {
+    #[cfg(test)]
+    if let Some(hook) = AFTER_JUDGEMENT.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
 }
 
 /// [`BEFORE_HOLD`]'s seam; nothing outside tests.
@@ -598,7 +672,7 @@ struct Deleted {
     bundled: Vec<PathBuf>,
 }
 
-/// One item of a move or rename: where it was given, where it is and where it goes; a lone `SKILL.md` leaving its skill
+/// One item of a move, rename or copy: where it was given, where it is and where it goes; a lone `SKILL.md` leaving its skill
 /// folder carries that folder (from the catalog — ADR-0339 M110), a folder merging into one of its name the `SKILL.md`
 /// of each skill folder the merge would leave without it ([`LibraryService::plan_leaves`]).
 #[derive(Clone, Debug)]
@@ -608,8 +682,12 @@ struct Request {
     dest: LibPath,
     skill_folder: Option<LibPath>,
     leaves: Vec<LibPath>,
-    /// Its destination folder lies on another volume (the volume probe): it is copied before the ticket, never merged.
-    crosses: bool,
+    /// It is copied into a staging before the ticket and never merged: a move whose destination folder lies on another
+    /// volume (the volume probe), or a copy.
+    stages: bool,
+    /// A copy into its item's own folder ([`LibraryService::into_own_folder`], judged before the ticket): it takes a copy
+    /// name.
+    own_folder: bool,
 }
 
 impl Request {
@@ -679,7 +757,7 @@ struct Placed {
     kind: EntryKind,
 }
 
-/// A move across volumes copied before its ticket: its staging (a base temp name in the destination folder — its mount,
+/// An item copied before its ticket — a move's across volumes, or a copy's: its staging (a base temp name in the destination folder — its mount,
 /// path and disk path), the path in that mount it is meant for, the root generation the copy was made under, and what
 /// the copy saw — or the failure that stopped it after the staging was made, with the entry it stopped at below the
 /// item ([`CopyFailure::Failed`]'s `at`).
@@ -705,6 +783,18 @@ impl Staged {
             disk: self.disk.clone(),
         }
     }
+}
+
+/// Where a staging copy reads its item ([`LibraryService::copy_source`]).
+enum Source {
+    /// The tree at `disk` below `root` — the item's mount folder, or the built-in folder for a built-in item.
+    Tree { root: PathBuf, disk: PathBuf },
+    /// A built-in virtual folder (`engram/settings`): copied as a folder holding the files of its built-ins (below the
+    /// built-in folder `root`), each `(disk path, file name, the built-in's last name)`.
+    Folder {
+        root: PathBuf,
+        files: Vec<(PathBuf, String, String)>,
+    },
 }
 
 /// What placing one entry came to.
@@ -753,8 +843,8 @@ struct Moves {
     pairs: Vec<Pair>,
     /// The destination entries an overwrite put in the trash — their catalog range goes.
     displaced: Vec<LibPath>,
-    /// The folders whose direct children changed: both sides of a merge, and the parent a kept cross-volume copy
-    /// landed in.
+    /// The folders whose direct children changed: both sides of a merge, and the parent a copy or a kept cross-volume
+    /// copy landed in.
     folders: Vec<LibPath>,
     /// The source folders a merge emptied and removed — what the catalog still holds there goes.
     emptied: Vec<LibPath>,
@@ -951,7 +1041,7 @@ impl<'h, 'a> Trashing<'h, 'a> {
             Ok(false) => {}
             Err(e) => tracing::debug!(
                 bundle = id.as_str(),
-                "library move: bundle shell left after a put-back: {e}"
+                "library: bundle shell left after a put-back: {e}"
             ),
         }
         Ok(())
@@ -992,7 +1082,7 @@ impl<'h, 'a> Trashing<'h, 'a> {
     }
 }
 
-/// A move's disk step as it goes.
+/// A move's or a copy's disk step as it goes.
 struct Step<'h, 'a> {
     trashing: Trashing<'h, 'a>,
     moves: Moves,
@@ -1001,8 +1091,8 @@ struct Step<'h, 'a> {
     /// The current item's merge: the entries left, and those an overwrite displaced.
     left: Vec<(String, Reason)>,
     trashed: Vec<TrashAddress>,
-    /// The copies a move across volumes put in place without trashing their originals — walked into the catalog after
-    /// the hold (ADR-0409 M3).
+    /// The copies a move across volumes put in place without trashing their originals, and every copy a copy put in
+    /// place — walked into the catalog after the hold (ADR-0409 M3).
     walks: Vec<LibPath>,
 }
 
@@ -1016,6 +1106,14 @@ struct Relocated {
     agents: Vec<AgentId>,
     stopped: Option<RelinkStop>,
     bundled: Vec<PathBuf>,
+    walks: Vec<LibPath>,
+}
+
+/// What a copy's hold did.
+struct Copies {
+    items: Vec<(usize, Outcome<Copied>)>,
+    bundled: Vec<PathBuf>,
+    /// The copies put in place — walked into the catalog after the hold (ADR-0409 M3).
     walks: Vec<LibPath>,
 }
 
@@ -2090,7 +2188,8 @@ impl LibraryService {
                         dest,
                         skill_folder: None,
                         leaves: Vec::new(),
-                        crosses: false,
+                        stages: false,
+                        own_folder: false,
                     });
                 }
                 Err(reason) => outcomes[at] = Some(Outcome::Failed(reason)),
@@ -2138,7 +2237,8 @@ impl LibraryService {
                     path: from,
                     skill_folder: None,
                     leaves: Vec::new(),
-                    crosses: false,
+                    stages: false,
+                    own_folder: false,
                 });
             }
             Err(reason) => outcomes[0] = Some(Outcome::Failed(reason)),
@@ -2152,6 +2252,430 @@ impl LibraryService {
             (yes, detach_refs, plan_digest),
             root_generation,
         )
+    }
+
+    /// Copies `paths` into the folder `to` (module header): each keeps its name — a built-in item takes its file's —
+    /// or, copied into its own folder, takes the copy name (` - Copy` …); a name taken there follows `on_conflict` (none =
+    /// that item's conflict; a same-name folder is never merged). Answers per item.
+    ///
+    /// Refusals of the whole call, nothing applied: `to` no library path, or a dot or temp name in it `InvalidArgument` ·
+    /// `item-path-invalid`; `to` in the built-in `Conflict` · `mount-read-only`; no first scan applied `Unavailable` ·
+    /// `library-unavailable`; a stale `root_generation` `Conflict` · `root-generation-stale` — met inside the hold, it
+    /// also names the stagings (`stagings` — module header).
+    // ADR-0409 decisions 3 and 12
+    pub fn copy_items(
+        &self,
+        paths: &[&str],
+        to: &str,
+        on_conflict: Option<OnConflict>,
+        root_generation: Option<u64>,
+    ) -> Result<CopyAnswer, LibraryRefusal> {
+        let to = lib_path(to)?;
+        // ADR-0400 decision 20
+        if in_builtin(&to) {
+            return Err(mount_read_only(to.as_str()));
+        }
+        if !admits_inside(&to) {
+            return Err(LibraryRefusal::new(
+                RefusalClass::InvalidArgument,
+                ITEM_PATH_INVALID,
+                json!({ "path": to.as_str(), "why": "a dot or temp name" }),
+            ));
+        }
+        let mut outcomes: Vec<Option<Outcome<Copied>>> = vec![None; paths.len()];
+        let mut requests = Vec::new();
+        for (at, given) in paths.iter().enumerate() {
+            match copyable(given) {
+                Ok((path, name)) => {
+                    let dest = LibPath::parse(&format!("{}/{name}", to.as_str())).expect(
+                        "an item's name or a built-in's file name is a valid name in a folder",
+                    );
+                    requests.push(Request {
+                        at,
+                        path,
+                        dest,
+                        skill_folder: None,
+                        leaves: Vec::new(),
+                        stages: true,
+                        own_folder: false,
+                    });
+                }
+                Err(why) => outcomes[at] = Some(Outcome::Failed(why)),
+            }
+        }
+        let inside = {
+            let paths: Vec<(usize, &LibPath)> = requests
+                .iter()
+                .map(|request| (request.at, &request.path))
+                .collect();
+            nested(&paths)
+        };
+        for (at, folder) in inside {
+            outcomes[at] = Some(Outcome::Skipped(Skip::Inside(folder)));
+        }
+        // A copy into its own folder takes a copy name (UD3); one into itself or below it is refused.
+        requests.retain(|request| {
+            let into = key(&request.dest) != key(&request.path)
+                && within(&request.dest, Some(&request.path));
+            if into {
+                outcomes[request.at] = Some(Outcome::Failed(into_itself(request)));
+            }
+            outcomes[request.at].is_none()
+        });
+        if !requests.is_empty() {
+            self.first_scan_join()
+                .map_err(LibraryRefusal::unavailable)?;
+        }
+        // ADR-0400 decision 6: nothing is copied out of or into a mount that cannot be read.
+        requests.retain(|request| {
+            let usable = self
+                .refuse_unusable_mount(&request.path)
+                .and_then(|()| self.refuse_unusable_mount(&request.dest));
+            match usable {
+                Ok(()) => true,
+                Err(refusal) => {
+                    outcomes[request.at] = Some(Outcome::Failed(reason_of(refusal)));
+                    false
+                }
+            }
+        });
+        // ADR-0377: the generation the hold compares is taken before the mounts the judgements below read, so a mount
+        //   change after it — which may make a spelling the item's own folder — stops the item in the hold.
+        let generation = self.gate.numbers().root;
+        self.refuse_into_itself(&mut requests, &mut outcomes);
+        self.refuse_copying(&mut requests, &mut outcomes, on_conflict);
+        after_judgement();
+        let mut copied = None;
+        if !requests.is_empty() {
+            // ADR-0377: a stale generation refuses before anything is copied.
+            if let Some(given) = root_generation.filter(|&given| given != generation) {
+                return Err(stale_root_generation(Some(given), generation));
+            }
+            let staged = self.stage(&mut requests, &mut outcomes, generation);
+            // ADR-0409 decision 14: every copy may put its staging into a trash — raised after the copies, just before
+            //   the ticket. ADR-0377: every item that reaches the hold was copied, so its body compares the generation.
+            let trash = reserved();
+            before_hold();
+            let done = match requests.is_empty() {
+                true => Ok(Ok(None)),
+                false => self.change_held_at(None, trash, |catalog, mounts, hold| {
+                    let mut touched = Vec::new();
+                    let answer = self.copy_in(
+                        &requests,
+                        &staged,
+                        root_generation,
+                        on_conflict,
+                        catalog,
+                        mounts,
+                        hold,
+                        &mut touched,
+                    );
+                    (answer.map(Some), touched)
+                }),
+            };
+            copied = done?.map_err(|(refusal, bundled)| {
+                for folder in bundled {
+                    self.exclude_trash(folder);
+                }
+                refusal
+            })?;
+        }
+        let mut walks: Vec<LibPath> = Vec::new();
+        if let Some(done) = copied {
+            for folder in done.bundled {
+                self.exclude_trash(folder);
+            }
+            walks = done.walks;
+            for (at, outcome) in done.items {
+                outcomes[at] = Some(outcome);
+            }
+        }
+        self.walk_copies(&walks);
+        let items: Vec<CopyItem> = paths
+            .iter()
+            .zip(outcomes)
+            .map(|(path, outcome)| CopyItem {
+                path: (*path).to_owned(),
+                outcome: outcome.expect("every item answered"),
+            })
+            .collect();
+        let done = items
+            .iter()
+            .filter(|item| matches!(item.outcome, Outcome::Done(_)))
+            .count();
+        tracing::info!(items = items.len(), done, "library copy");
+        Ok(CopyAnswer { items })
+    }
+
+    /// Whether `request` copies its item into the item's own folder — the copy then takes a copy name (UD3), never the
+    /// item's own name. The same path key; else (another spelling — a case or short-name alias) whether the destination
+    /// folder is the item's folder: by file identity, or where the volume gives none by canonical path (as
+    /// `mounts::lies_within` places folders) — both asked through the bounded IO on the admitted spellings (ADR-0365:
+    /// these asks follow links). When neither answers it counts as the item's own folder: a copy name never destroys
+    /// anything, an overwrite of the item itself would. Asked before the ticket, holding no lock; the hold reads the answer
+    /// (`Request.own_folder`).
+    // ADR-0409 decision 3
+    fn into_own_folder(&self, mounts: &crate::mounts::Mounts, request: &Request) -> bool {
+        if key(&request.dest) == key(&request.path) {
+            return true;
+        }
+        if in_builtin(&request.path) {
+            return false;
+        }
+        let (Ok(item), Ok(dest)) = (
+            self.admit(mounts, &request.path),
+            self.admit(mounts, &request.dest),
+        ) else {
+            return true;
+        };
+        let folders: Vec<PathBuf> = [item, dest]
+            .iter()
+            .map(|path| {
+                path.parent()
+                    .expect("an admitted path lies in a folder")
+                    .to_path_buf()
+            })
+            .collect();
+        let read = self.io.begin_read();
+        let probe = DiskProbe {
+            io: &self.io,
+            read: &read,
+        };
+        if let [Ok(Some(a)), Ok(Some(b))] = probe.identity_all(&folders).as_slice() {
+            return a == b;
+        }
+        match probe.canonical_all(&folders).as_slice() {
+            [Ok(a), Ok(b)] => path_key(a) == path_key(b),
+            _ => true,
+        }
+    }
+
+    /// Before any copy, per item (module header): the destination mount's `.trash` checked without following (a
+    /// staging that does not take its place goes there — unusable `trash-unusable`, nothing copied), the destination
+    /// folder ([`LibraryService::destination_folder`] — a missing folder, a file or a link fails the item naming the
+    /// folder), the item's source ([`LibraryService::copy_source`] — its refusal fails the item), then, unless the copy
+    /// goes into its item's own folder ([`LibraryService::into_own_folder`] — it takes a free copy name), its destination
+    /// name stat'ed without following: a taken name answers as the
+    /// hold would ([`taken_answer`] — a same-name folder [`COPY_MERGE_REFUSED`]). A stat or admission that does not
+    /// answer is left to the copy and the hold.
+    // ADR-0409 decision 5
+    fn refuse_copying(
+        &self,
+        requests: &mut Vec<Request>,
+        outcomes: &mut [Option<Outcome<Copied>>],
+        on_conflict: Option<OnConflict>,
+    ) {
+        let mounts = self.gate.with_read(|state| state.mounts.clone());
+        requests.retain_mut(|request| {
+            // `Ok(own folder)` = the copy goes on (a stat or admission that does not answer is left to it).
+            let judged = || -> Result<bool, Outcome<Copied>> {
+                let Some((to_mount, _)) = mounts.locate(&request.dest) else {
+                    return Ok(false);
+                };
+                if let Some(unusable) = self.unusable_trash(to_mount) {
+                    return Err(Outcome::Failed(unusable));
+                }
+                self.destination_folder(&mounts, request)
+                    .map_err(Outcome::Failed)?;
+                let source = self
+                    .copy_source(&mounts, &request.path)
+                    .map_err(Outcome::Failed)?;
+                if self.into_own_folder(&mounts, request) {
+                    return Ok(true);
+                }
+                let kind = match source {
+                    Source::Folder { .. } => EntryKind::Folder,
+                    Source::Tree { disk, .. } => match self.store.stat(&disk) {
+                        Ok(kind) => kind,
+                        Err(_) => return Ok(false),
+                    },
+                };
+                let there = self
+                    .admit(&mounts, &request.dest)
+                    .ok()
+                    .and_then(|disk| self.store.stat(&disk).ok());
+                let Some(there) = there else {
+                    return Ok(false);
+                };
+                match taken_answer(request, kind, there, on_conflict, COPY_MERGE_REFUSED) {
+                    Some(outcome) => Err(outcome),
+                    None => Ok(false),
+                }
+            };
+            match judged() {
+                Ok(own_folder) => {
+                    request.own_folder = own_folder;
+                    true
+                }
+                Err(outcome) => {
+                    outcomes[request.at] = Some(outcome);
+                    false
+                }
+            }
+        });
+    }
+
+    /// The body of a copy's hold (module header): the root generation, each staged item's checks — all before the
+    /// call's first rename —, then each staging placed, the trash records and the catalog.
+    #[allow(clippy::too_many_arguments)]
+    fn copy_in(
+        &self,
+        requests: &[Request],
+        staged: &HashMap<usize, Staged>,
+        root_generation: Option<u64>,
+        on_conflict: Option<OnConflict>,
+        catalog: &mut Catalog,
+        mounts: &MountsNow,
+        hold: &Hold,
+        touched: &mut Vec<PathKey>,
+    ) -> Result<Copies, (LibraryRefusal, Vec<PathBuf>)> {
+        // ADR-0377: the gate let the call in unchecked — the generation is judged here, before any disk step.
+        let current = self.gate.numbers().root;
+        if let Some(given) = root_generation.filter(|&given| given != current) {
+            let stale = stale_root_generation(Some(given), current);
+            return Err(self.refuse_staged(stale, requests, staged, mounts, hold));
+        }
+        let mut items: Vec<(usize, Outcome<Copied>)> = Vec::new();
+        let mut step = Step {
+            trashing: Trashing::new(hold),
+            moves: Moves::default(),
+            leaves: Vec::new(),
+            left: Vec::new(),
+            trashed: Vec::new(),
+            walks: Vec::new(),
+        };
+        // ADR-0409 decision 5: the destination mount's `.trash` judged again with each destination.
+        let mut checked: Vec<(&Request, &Staged, Side)> = Vec::new();
+        for request in requests {
+            let staging = staged
+                .get(&request.at)
+                .expect("every copy that reaches its hold was staged");
+            if let Some(why) = self.unready(request, staging, &mut step.trashing) {
+                items.push((request.at, Outcome::Failed(why)));
+                continue;
+            }
+            let to = refuse_unusable_now(mounts, &request.dest)
+                .map_err(reason_of)
+                .and_then(|()| self.destination(request, catalog, mounts))
+                .and_then(|to| match self.unusable_trash(&to.mount) {
+                    Some(why) => Err(why),
+                    None => Ok(to),
+                });
+            match to {
+                Ok(to) => checked.push((request, staging, to)),
+                Err(why) => {
+                    let why = self.discard_staging(staging, &mut step.trashing, why);
+                    items.push((request.at, Outcome::Failed(why)));
+                }
+            }
+        }
+        for (request, staging, to) in checked {
+            let outcome = self.copy_staged(
+                request,
+                staging,
+                &to,
+                on_conflict,
+                catalog,
+                mounts,
+                &mut step,
+            );
+            items.push((request.at, outcome));
+        }
+        let Step {
+            trashing,
+            moves,
+            walks,
+            ..
+        } = step;
+        let bundled = trashing.finish(&*self.store);
+        self.follow_moves(catalog, mounts, hold, &moves, touched);
+        Ok(Copies {
+            items,
+            bundled,
+            walks,
+        })
+    }
+
+    /// Places one checked copy (module header): its staging renamed onto `to` by the no-replace rename — into its
+    /// item's own folder onto the first free copy name ([`LibraryService::place_copy_named`]), else as
+    /// [`LibraryService::place_copy`] places a staging, a same-name folder [`COPY_MERGE_REFUSED`] —; a staging that does
+    /// not take its place goes into the destination mount's trash ([`LibraryService::settle_staging`]). A placed copy's
+    /// folder is re-classified in the hold and its range walked into the catalog after it (ADR-0409 M3).
+    #[allow(clippy::too_many_arguments)]
+    fn copy_staged(
+        &self,
+        request: &Request,
+        staging: &Staged,
+        to: &Side,
+        on_conflict: Option<OnConflict>,
+        catalog: &Catalog,
+        mounts: &MountsNow,
+        step: &mut Step<'_, '_>,
+    ) -> Outcome<Copied> {
+        let given = request.path.as_str();
+        let kind = match self.store.stat(&staging.disk) {
+            Ok(kind) => kind,
+            Err(e) => {
+                let why = reason(
+                    LIBRARY_READ_FAILED,
+                    json!({ "path": given, "why": e.to_string() }),
+                );
+                return Outcome::Failed(self.discard_staging(staging, &mut step.trashing, why));
+            }
+        };
+        let side = staging.side();
+        let placed = match request.own_folder {
+            true => self.place_copy_named(&side, to, kind),
+            false => {
+                let refused = COPY_MERGE_REFUSED;
+                self.place_copy(&side, to, kind, on_conflict, refused, catalog, mounts, step)
+            }
+        };
+        match self.settle_staging(placed, staging, given, &mut step.trashing) {
+            Ok((to, trashed)) => {
+                step.walks.push(to.lib());
+                step.moves.folders.extend(to.lib().parent());
+                Outcome::Done(Copied {
+                    to: to.lib().as_str().to_owned(),
+                    trashed,
+                })
+            }
+            Err(outcome) => outcome,
+        }
+    }
+
+    /// Places `staging` (of `kind`) at the first free copy name of `to` — its item's own path, copied into its own
+    /// folder: ` - Copy`, then ` - Copy (2)` … ([`copy_name`]) — by the no-replace rename (ADR-0409 decisions 3 and 10).
+    fn place_copy_named(&self, staging: &Side, to: &Side, kind: EntryKind) -> Placement {
+        for n in 1..=KEEP_BOTH_TRIES {
+            let next = to.at(copy_name(&to.rest, n, kind != EntryKind::Folder));
+            match self.store.rename(&staging.disk, &next.disk) {
+                Ok(()) => {
+                    return Placement::Moved {
+                        to: next,
+                        trashed: None,
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Placement::Failed(rename_failed(&staging.lib(), &next.lib(), &e)),
+            }
+        }
+        Placement::Conflict(name_taken(&to.lib()))
+    }
+
+    /// Walks each range in `walks` — copies put in place by the hold — into the catalog, as a scan classifies it
+    /// (ADR-0409 M3), before the answer.
+    fn walk_copies(&self, walks: &[LibPath]) {
+        for path in walks {
+            let report = self.refresh(Some(path));
+            if !report.errors.is_empty() {
+                tracing::warn!(
+                    path = path.as_str(),
+                    errors = report.errors.len(),
+                    "library: the walk of a copied range reported errors"
+                );
+            }
+        }
     }
 
     /// The steps a move and a rename share (module header): `requests` passed the per-item entrance of `given`;
@@ -2272,7 +2796,7 @@ impl LibraryService {
             };
             // ADR-0377: a stale generation refuses before anything is copied.
             if let Some(given) = root_generation.filter(|&given| given != generation) {
-                if requests.iter().any(|request| request.crosses) {
+                if requests.iter().any(|request| request.stages) {
                     return Err(stale_root_generation(Some(given), generation));
                 }
             }
@@ -2360,16 +2884,7 @@ impl LibraryService {
             answer.trees = self.working_trees(&files);
         }
         // ADR-0409 M3: a copy whose original could not be trashed enters the catalog by a walk, as a scan classifies it.
-        for path in &walks {
-            let report = self.refresh(Some(path));
-            if !report.errors.is_empty() {
-                tracing::warn!(
-                    path = path.as_str(),
-                    errors = report.errors.len(),
-                    "library move: the walk of a copied range reported errors"
-                );
-            }
-        }
+        self.walk_copies(&walks);
         answer.items = given
             .iter()
             .zip(outcomes)
@@ -2425,7 +2940,7 @@ impl LibraryService {
         for request in requests.iter_mut() {
             request.leaves.clear();
             // A move across volumes never merges.
-            let Some(choice) = on_conflict.filter(|_| !request.crosses) else {
+            let Some(choice) = on_conflict.filter(|_| !request.stages) else {
                 continue;
             };
             if !skills
@@ -2514,10 +3029,10 @@ impl LibraryService {
     /// destination folder passed the no-follow link admission (a mount's top may be a link); otherwise the item is left
     /// to the hold, which refuses it (`path-through-link` — ADR-0365 · ADR-0414 decision 5). An ask that gave no answer
     /// fails the item `library-read-failed`.
-    fn refuse_into_itself(
+    fn refuse_into_itself<T>(
         &self,
         requests: &mut Vec<Request>,
-        outcomes: &mut [Option<Outcome<Moved>>],
+        outcomes: &mut [Option<Outcome<T>>],
     ) {
         let (mounts, folders): (_, Vec<bool>) = self.gate.with_read(|state| {
             let folders = requests
@@ -2617,7 +3132,7 @@ impl LibraryService {
                 });
             match verdict {
                 Ok(crosses) => {
-                    request.crosses = *crosses;
+                    request.stages = *crosses;
                     true
                 }
                 Err((kind, why)) => {
@@ -2691,7 +3206,7 @@ impl LibraryService {
     ) {
         let mounts = self.gate.with_read(|state| state.mounts.clone());
         requests.retain(|request| {
-            if !request.crosses {
+            if !request.stages {
                 return true;
             }
             let refused = || -> Option<Outcome<Moved>> {
@@ -2711,21 +3226,7 @@ impl LibraryService {
                     .store
                     .stat(&self.admit(&mounts, &request.path).ok()?)
                     .ok()?;
-                let (folder, onto_folder) = (kind == EntryKind::Folder, there == EntryKind::Folder);
-                let args = json!({ "path": request.path.as_str(), "to": request.dest.as_str() });
-                Some(match on_conflict {
-                    None => Outcome::Conflict(name_taken(&request.dest)),
-                    Some(_) if folder && onto_folder => {
-                        Outcome::Conflict(reason(CROSSES_VOLUMES, args))
-                    }
-                    Some(OnConflict::Skip) => {
-                        Outcome::Skipped(Skip::Taken(request.dest.as_str().to_owned()))
-                    }
-                    Some(OnConflict::Overwrite) if folder != onto_folder => {
-                        Outcome::Conflict(reason(KIND_MISMATCH, args))
-                    }
-                    Some(OnConflict::Overwrite | OnConflict::KeepBoth) => return None,
-                })
+                taken_answer(request, kind, there, on_conflict, CROSSES_VOLUMES)
             };
             match refused() {
                 Some(outcome) => {
@@ -2737,23 +3238,23 @@ impl LibraryService {
         });
     }
 
-    /// The copies of the items crossing volumes (ADR-0409 decision 12), before the ticket and holding no lock: each into
-    /// a staging under a fresh base temp name of [`STAGING_BASE`] in the destination folder
-    /// ([`LibraryStore::copy_tree`] — create-new, links refused, tags before bytes, files read only as listed, hashes,
-    /// modified times and permissions kept); a taken temp name draws another. Links fail the item [`LINKS_INSIDE`] and a
-    /// copy that failed before making anything fails it with its code (`not_copied` = the item) — nothing to clean; a
-    /// copy that failed after is carried to the hold, whose trash step takes its staging. Answers each staged item's
-    /// [`Staged`], by where it was given.
-    fn stage(
+    /// The copies of the items that stage — a move's crossing volumes, every copy's (ADR-0409 decision 12) —, before the
+    /// ticket and holding no lock: each into a staging under a fresh base temp name of [`STAGING_BASE`] in the
+    /// destination folder ([`LibraryService::copy_from`] — create-new, links refused, tags before bytes, files read only
+    /// as listed, hashes, modified times and permissions kept); a taken temp name draws another. Links fail the item
+    /// [`LINKS_INSIDE`] and a copy that failed before making anything fails it with its code (`not_copied` = the item) —
+    /// nothing to clean; a copy that failed after is carried to the hold, whose trash step takes its staging. Answers
+    /// each staged item's [`Staged`], by where it was given.
+    fn stage<T>(
         &self,
         requests: &mut Vec<Request>,
-        outcomes: &mut [Option<Outcome<Moved>>],
+        outcomes: &mut [Option<Outcome<T>>],
         generation: u64,
     ) -> HashMap<usize, Staged> {
         let mounts = self.gate.with_read(|state| state.mounts.clone());
         let mut staged = HashMap::new();
         requests.retain(|request| {
-            if !request.crosses {
+            if !request.stages {
                 return true;
             }
             let failed = |e: &io::Error| {
@@ -2769,17 +3270,14 @@ impl LibraryService {
                 }
             };
             let made = || -> Result<Staged, Reason> {
-                let from = self.admit(&mounts, &request.path).map_err(reason_of)?;
+                let source = self.copy_source(&mounts, &request.path)?;
                 let to = self.admit(&mounts, &request.dest).map_err(reason_of)?;
-                let Some((from_mount, _)) = mounts.locate(&request.path) else {
-                    return Err(not_found_reason(request.path.as_str()));
-                };
                 let Some((mount, Some(intended))) = mounts.locate(&request.dest) else {
                     return Err(not_found_reason(request.dest.as_str()));
                 };
                 for _ in 0..TEMP_DRAWS {
                     let disk = temp_path(&to.with_file_name(STAGING_BASE)).map_err(|e| failed(&e))?;
-                    let copy = match self.store.copy_tree(&from_mount.folder, &from, &disk) {
+                    let copy = match self.copy_from(&source, &disk) {
                         Ok(copy) => Ok(copy),
                         Err(CopyFailure::Links(links)) => {
                             let links: Vec<String> = links
@@ -2787,7 +3285,20 @@ impl LibraryService {
                                 .map(|rel| below_item(&request.path, rel))
                                 .collect();
                             let args = json!({ "path": request.path.as_str(), "links": links });
-                            return Err(reason(LINKS_INSIDE, args));
+                            let why = reason(LINKS_INSIDE, args);
+                            // A staging the copy made and could not remove again (a built-in virtual folder's) stays,
+                            //   named as every kept staging is.
+                            let gone = matches!(
+                                self.store.stat(&disk),
+                                Err(e) if e.kind() == io::ErrorKind::NotFound
+                            );
+                            if gone {
+                                return Err(why);
+                            }
+                            let rest = MountPath::from_disk(&mount.folder, &disk)
+                                .expect("a temp name in a folder of the mount is a path in it");
+                            let lib = virtual_path(&mount.name, Some(&rest));
+                            return Err(named_staging(why, &lib, &disk));
                         }
                         Err(CopyFailure::Failed {
                             error, made: false, ..
@@ -2811,7 +3322,7 @@ impl LibraryService {
                             tracing::warn!(
                                 path = request.path.as_str(),
                                 at = below_item(&request.path, &at),
-                                "library move: copy across volumes failed part-way: {error}"
+                                "library staging copy failed part-way: {error}"
                             );
                             Err((error, at))
                         }
@@ -2845,6 +3356,139 @@ impl LibraryService {
             }
         });
         staged
+    }
+
+    /// Where a staging copy of `path` reads it (module header): a library item admitted (ADR-0365) below its mount's
+    /// folder; a built-in item, its file in the built-in folder (`builtin::file_of`); the built-in virtual folder
+    /// (`engram/settings`), the files of the built-ins directly in it — each built-in file reached without following
+    /// ([`LibraryService::admit_builtin`]). Another path in the built-in mount `not-found`;
+    /// a built-in mount that cannot be read `library-unavailable`.
+    // ADR-0400 decision 20
+    fn copy_source(
+        &self,
+        mounts: &crate::mounts::Mounts,
+        path: &LibPath,
+    ) -> Result<Source, Reason> {
+        let Some(inside) = builtin_rest(path) else {
+            let disk = self.admit(mounts, path).map_err(reason_of)?;
+            let (mount, _) = mounts
+                .locate(path)
+                .expect("an admitted path lies in a registered mount");
+            return Ok(Source::Tree {
+                root: mount.folder.clone(),
+                disk,
+            });
+        };
+        let root = self.builtin_folder().map_err(reason_of)?.clone();
+        if let Ok(AssetRef::BuiltIn(id)) = AssetRef::parse(path.as_str()) {
+            let disk = self.admit_builtin(&root, id, path)?;
+            return Ok(Source::Tree { root, disk });
+        }
+        let mut files: Vec<(PathBuf, String, String)> = Vec::new();
+        for id in builtins_in(inside) {
+            let last = id.path().file_name().to_owned();
+            let disk = self.admit_builtin(&root, id, path)?;
+            files.push((disk, builtin_file_name(id).to_owned(), last));
+        }
+        match files.is_empty() {
+            true => Err(not_found_reason(path.as_str())),
+            false => Ok(Source::Folder { root, files }),
+        }
+    }
+
+    /// The file of the built-in `id` below the built-in folder `root`, reached without following (ADR-0365, as
+    /// [`LibraryService::admit`] reaches a library path — `LibraryStore::first_link` from `root` down, its own name
+    /// included): a link on the way or at it `path-through-link` (`path` = the item), a probe that fails
+    /// `library-read-failed`; a name missing passes (the copy answers it).
+    fn admit_builtin(&self, root: &Path, id: BuiltinId, path: &LibPath) -> Result<PathBuf, Reason> {
+        let rel =
+            MountPath::parse(file_of(id)).expect("a built-in's file is a path below its folder");
+        match self.store.first_link(root, &rel) {
+            Ok(None) => Ok(rel.to_path(root)),
+            Ok(Some(_)) => Err(reason(PATH_THROUGH_LINK, json!({ "path": path.as_str() }))),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(rel.to_path(root))
+            }
+            Err(e) => Err(reason(
+                LIBRARY_READ_FAILED,
+                json!({ "path": path.as_str(), "why": e.to_string() }),
+            )),
+        }
+    }
+
+    /// Copies `source` to the staging `to` ([`LibraryStore::copy_tree`]). A built-in virtual folder: `to` made
+    /// create-new, then each of its files copied into it under its file name — the copy's entries spelled from `to`, a
+    /// link or a failure named below the folder by the built-in's last name. A file whose copy made nothing (links, or a
+    /// failure before its file was made) removes the folder again, empty-only: removed, nothing was made (a folder that
+    /// held earlier files, or cannot be removed, stays — carried to the hold as made, or after links named by
+    /// [`LibraryService::stage`]'s refusal).
+    fn copy_from(&self, source: &Source, to: &Path) -> Result<TreeCopy, CopyFailure> {
+        let (root, files) = match source {
+            Source::Tree { root, disk } => return self.store.copy_tree(root, disk, to),
+            Source::Folder { root, files } => (root, files),
+        };
+        let read_at = SystemTime::now();
+        self.store
+            .create_dir(to)
+            .map_err(|error| CopyFailure::Failed {
+                error,
+                made: false,
+                at: PathBuf::new(),
+            })?;
+        let top = TreeEntry {
+            rel: PathBuf::new(),
+            kind: EntryKind::Folder,
+            tag: None,
+        };
+        let mut entries = vec![CopiedEntry {
+            entry: top,
+            hash: None,
+        }];
+        for (disk, file_name, last) in files {
+            let failure = match self.store.copy_tree(root, disk, &to.join(file_name)) {
+                Ok(copy) => {
+                    entries.extend(copy.entries.into_iter().map(|mut copied| {
+                        copied.entry.rel = tree_path(Path::new(file_name), &copied.entry.rel);
+                        copied
+                    }));
+                    continue;
+                }
+                Err(failure) => failure,
+            };
+            // ADR-0409: only what Engram made — the staging folder is this call's; emptied, nothing was made.
+            let empty = match &failure {
+                CopyFailure::Links(_) | CopyFailure::Failed { made: false, .. } => {
+                    match self.store.remove_dir(to) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %escape_controls(&to.to_string_lossy()),
+                                "library copy: staging folder not removed: {e}"
+                            );
+                            false
+                        }
+                    }
+                }
+                CopyFailure::Failed { made: true, .. } => false,
+            };
+            let below = |rel: &Path| tree_path(Path::new(last), rel);
+            return Err(match failure {
+                CopyFailure::Links(links) => {
+                    CopyFailure::Links(links.iter().map(|rel| below(rel)).collect())
+                }
+                CopyFailure::Failed { error, at, .. } => CopyFailure::Failed {
+                    error,
+                    made: !empty,
+                    at: below(&at),
+                },
+            });
+        }
+        Ok(TreeCopy { read_at, entries })
     }
 
     /// The body of a move's hold (module header): the `SKILL.md` judgement again, each item's checks, the disk step
@@ -2903,29 +3547,11 @@ impl LibraryService {
         let mut placed: Vec<Placed> = Vec::new();
         for request in &requests {
             let staging = staged.get(&request.at);
-            if let Some(staging) = staging {
-                // ADR-0377: the copy was made where the mounts were — after a mount change it stays where it is.
-                if self.gate.numbers().root != staging.generation {
-                    let args =
-                        json!({ "path": request.path.as_str(), "to": request.dest.as_str() });
-                    let why = kept(reason(TARGET_MOUNT_CHANGED, args), staging);
-                    items.push((request.at, Outcome::Failed(why)));
-                    continue;
-                }
-                // ADR-0409 M14 · ADR-0400 decision 25: a copy that failed part-way goes to the destination mount's
-                //   trash; the answer names the entry it stopped at — it and what follows were not copied.
-                if let Err((e, at)) = &staging.copy {
-                    let args = json!({
-                        "path": request.path.as_str(),
-                        "to": request.dest.as_str(),
-                        "why": e.to_string(),
-                        "not_copied": below_item(&request.path, at),
-                    });
-                    let why = reason(LIBRARY_WRITE_FAILED, args);
-                    let why = self.discard_staging(staging, &mut step.trashing, why);
-                    items.push((request.at, Outcome::Failed(why)));
-                    continue;
-                }
+            let unready =
+                staging.and_then(|staging| self.unready(request, staging, &mut step.trashing));
+            if let Some(why) = unready {
+                items.push((request.at, Outcome::Failed(why)));
+                continue;
             }
             match self.place_request(request, catalog, mounts) {
                 Ok(item) => placed.push(item),
@@ -3038,6 +3664,32 @@ impl LibraryService {
         Ok(relocated)
     }
 
+    /// Why a staged item cannot be placed in its hold, before its checks (`None` = it can): the mount registrations
+    /// changed since its copy (ADR-0377 — the copy was made where the mounts were: [`TARGET_MOUNT_CHANGED`], it stays
+    /// where it is, named), or its copy failed part-way (ADR-0409 M14 · ADR-0400 decision 25 — into the destination
+    /// mount's trash, the answer naming the entry it stopped at: it and what follows were not copied).
+    fn unready(
+        &self,
+        request: &Request,
+        staging: &Staged,
+        trashing: &mut Trashing<'_, '_>,
+    ) -> Option<Reason> {
+        if self.gate.numbers().root != staging.generation {
+            let args = json!({ "path": request.path.as_str(), "to": request.dest.as_str() });
+            return Some(kept(reason(TARGET_MOUNT_CHANGED, args), staging));
+        }
+        let Err((e, at)) = &staging.copy else {
+            return None;
+        };
+        let args = json!({
+            "path": request.path.as_str(),
+            "to": request.dest.as_str(),
+            "why": e.to_string(),
+            "not_copied": below_item(&request.path, at),
+        });
+        Some(self.discard_staging(staging, trashing, reason(LIBRARY_WRITE_FAILED, args)))
+    }
+
     /// The hold's checks of one item before any disk step (module header): both mounts from the recorded state, the
     /// link admission of the item and of its destination, a no-follow stat of the item (absent `not-found`), the
     /// destination folder a real folder (absent or a file `not-found`, a link `path-through-link`). The item and the
@@ -3073,36 +3725,35 @@ impl LibraryService {
                 ))
             }
         };
-        self.admit(mounts, &request.dest).map_err(reason_of)?;
+        let to = self.destination(request, catalog, mounts)?;
+        Ok(Placed {
+            request: request.clone(),
+            from: Side {
+                mount: mount.clone(),
+                rest,
+                disk,
+            },
+            to,
+            kind,
+        })
+    }
+
+    /// The hold's checks of an item's destination (as [`LibraryService::place_request`] makes them for a move): its
+    /// folder checked ([`LibraryService::destination_folder`]) and spelled as the catalog spells it when that is the
+    /// same disk entry; the new name stays as given. Answers the destination side.
+    fn destination(
+        &self,
+        request: &Request,
+        catalog: &Catalog,
+        mounts: &MountsNow,
+    ) -> Result<Side, Reason> {
         let folder = request
             .dest
             .parent()
             .expect("a destination lies in a folder");
-        let Some((to_mount, folder_rest)) = mounts.locate(&folder) else {
-            return Err(not_found_reason(folder.as_str()));
-        };
-        let folder = match folder_rest {
-            // A mount's top: its folder is there (the mount is usable).
+        let folder = match self.destination_folder(mounts, request)? {
             None => folder,
-            Some(folder_rest) => {
-                match self.store.check_names(&to_mount.folder, &folder_rest) {
-                    Ok(NameWalk::Present(EntryKind::Folder)) => {}
-                    Ok(NameWalk::Present(EntryKind::Link) | NameWalk::Link(_)) => {
-                        return Err(reason(
-                            PATH_THROUGH_LINK,
-                            json!({ "path": folder.as_str() }),
-                        ))
-                    }
-                    // ADR-0335 decision 7: a folder that is not there is not made.
-                    Ok(_) => return Err(not_found_reason(folder.as_str())),
-                    Err(e) => {
-                        return Err(reason(
-                            LIBRARY_READ_FAILED,
-                            json!({ "path": folder.as_str(), "why": e.to_string() }),
-                        ))
-                    }
-                }
-                let folder_disk = folder_rest.to_path(&to_mount.folder);
+            Some(folder_disk) => {
                 let respelled = catalog_spelling(catalog, &folder);
                 self.same_entry_spelling(mounts, &folder, folder_disk, respelled)
                     .0
@@ -3113,20 +3764,48 @@ impl LibraryService {
         let Some((to_mount, Some(to_rest))) = mounts.locate(&dest) else {
             return Err(not_found_reason(request.dest.as_str()));
         };
-        Ok(Placed {
-            request: request.clone(),
-            from: Side {
-                mount: mount.clone(),
-                rest,
-                disk,
-            },
-            to: Side {
-                disk: to_rest.to_path(&to_mount.folder),
-                mount: to_mount.clone(),
-                rest: to_rest,
-            },
-            kind,
+        Ok(Side {
+            disk: to_rest.to_path(&to_mount.folder),
+            mount: to_mount.clone(),
+            rest: to_rest,
         })
+    }
+
+    /// The link admission of `request`'s destination (ADR-0365) and its folder a real folder, checked name by name
+    /// without following — absent or a file `not-found` (`{path}` = the folder), a link `path-through-link`, never made
+    /// (ADR-0335 decision 7). Answers the folder's disk path below its mount's top (`None` = the mount's top, whose folder
+    /// is there: the mount is usable).
+    fn destination_folder(
+        &self,
+        mounts: &crate::mounts::Mounts,
+        request: &Request,
+    ) -> Result<Option<PathBuf>, Reason> {
+        // ADR-0335 decision 7: a destination folder that is not there is not made.
+        self.admit(mounts, &request.dest).map_err(reason_of)?;
+        let folder = request
+            .dest
+            .parent()
+            .expect("a destination lies in a folder");
+        let Some((to_mount, folder_rest)) = mounts.locate(&folder) else {
+            return Err(not_found_reason(folder.as_str()));
+        };
+        let Some(folder_rest) = folder_rest else {
+            return Ok(None);
+        };
+        match self.store.check_names(&to_mount.folder, &folder_rest) {
+            Ok(NameWalk::Present(EntryKind::Folder)) => {
+                Ok(Some(folder_rest.to_path(&to_mount.folder)))
+            }
+            Ok(NameWalk::Present(EntryKind::Link) | NameWalk::Link(_)) => Err(reason(
+                PATH_THROUGH_LINK,
+                json!({ "path": folder.as_str() }),
+            )),
+            Ok(_) => Err(not_found_reason(folder.as_str())),
+            Err(e) => Err(reason(
+                LIBRARY_READ_FAILED,
+                json!({ "path": folder.as_str(), "why": e.to_string() }),
+            )),
+        }
     }
 
     /// Moves one checked item ([`LibraryService::place`]) and answers it: a merge carries the entries it left and
@@ -3199,11 +3878,12 @@ impl LibraryService {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Placement::Failed(rename_failed(&from.lib(), &to.lib(), &e)),
         }
-        self.collide(from, to, kind, on_conflict, true, catalog, mounts, step)
+        self.collide(from, to, kind, on_conflict, None, catalog, mounts, step)
     }
 
-    /// A move's staging placed at `to` (of `kind`) as [`LibraryService::place`] places an entry — no pair, the
-    /// staging's name is no library path —, except that a same-name folder there is not merged: [`CROSSES_VOLUMES`].
+    /// A staging placed at `to` (of `kind`) as [`LibraryService::place`] places an entry — no pair, the staging's
+    /// name is no library path —, except that a same-name folder there is not merged: the conflict `merge_refused`
+    /// ([`CROSSES_VOLUMES`] for a move, [`COPY_MERGE_REFUSED`] for a copy).
     #[allow(clippy::too_many_arguments)]
     fn place_copy(
         &self,
@@ -3211,6 +3891,7 @@ impl LibraryService {
         to: &Side,
         kind: EntryKind,
         on_conflict: Option<OnConflict>,
+        merge_refused: &str,
         catalog: &Catalog,
         mounts: &MountsNow,
         step: &mut Step<'_, '_>,
@@ -3225,11 +3906,21 @@ impl LibraryService {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Placement::Failed(rename_failed(&staging.lib(), &to.lib(), &e)),
         }
-        self.collide(staging, to, kind, on_conflict, false, catalog, mounts, step)
+        let refused = Some(merge_refused);
+        self.collide(
+            staging,
+            to,
+            kind,
+            on_conflict,
+            refused,
+            catalog,
+            mounts,
+            step,
+        )
     }
 
-    /// What [`LibraryService::place`] does when `to` is taken (its doc); `merges` = a same-name folder there is merged
-    /// into, else it is the conflict [`CROSSES_VOLUMES`].
+    /// What [`LibraryService::place`] does when `to` is taken (its doc); `merge_refused` = `None`: a same-name folder
+    /// there is merged into, else it is that conflict.
     #[allow(clippy::too_many_arguments)]
     fn collide(
         &self,
@@ -3237,7 +3928,7 @@ impl LibraryService {
         to: &Side,
         kind: EntryKind,
         on_conflict: Option<OnConflict>,
-        merges: bool,
+        merge_refused: Option<&str>,
         catalog: &Catalog,
         mounts: &MountsNow,
         step: &mut Step<'_, '_>,
@@ -3256,13 +3947,13 @@ impl LibraryService {
         };
         let (folder, onto_folder) = (kind == EntryKind::Folder, there == EntryKind::Folder);
         match choice {
-            _ if folder && onto_folder && merges => {
-                self.merge(from, to, choice, catalog, mounts, step)
-            }
-            _ if folder && onto_folder => Placement::Conflict(reason(
-                CROSSES_VOLUMES,
-                json!({ "path": from.lib().as_str(), "to": to.lib().as_str() }),
-            )),
+            _ if folder && onto_folder => match merge_refused {
+                None => self.merge(from, to, choice, catalog, mounts, step),
+                Some(code) => Placement::Conflict(reason(
+                    code,
+                    json!({ "path": from.lib().as_str(), "to": to.lib().as_str() }),
+                )),
+            },
             OnConflict::Skip => Placement::Skipped(to.lib()),
             OnConflict::KeepBoth => self.keep_both(from, to, kind, step),
             OnConflict::Overwrite if folder != onto_folder => Placement::Conflict(reason(
@@ -3340,7 +4031,7 @@ impl LibraryService {
                 tracing::warn!(
                     path = to.lib().as_str(),
                     bundle = id.as_str(),
-                    "library move: an overwritten entry stays in the trash: {back}"
+                    "library: an overwritten entry stays in the trash: {back}"
                 );
                 let mut args = failed.args.clone();
                 args["trashed"] = json!({
@@ -3383,49 +4074,19 @@ impl LibraryService {
         if let Err(why) = self.verify(&item.from, copy) {
             return Outcome::Failed(kept(why, staged));
         }
-        let staging = staged.side();
-        // A refusal about the staging names the item as given.
-        let named = |mut why: Reason| {
-            if why.args["path"] == json!(staging.lib().as_str()) {
-                why.args["path"] = json!(given);
-            }
-            why
-        };
         let placed = self.place_copy(
-            &staging,
+            &staged.side(),
             &item.to,
             item.kind,
             on_conflict,
+            CROSSES_VOLUMES,
             catalog,
             mounts,
             step,
         );
-        let (to, trashed) = match placed {
-            Placement::Moved { to, trashed } => (to, trashed),
-            Placement::Skipped(at) => {
-                let why = self.discard_staging(staged, &mut step.trashing, name_taken(&at));
-                let mut staging = why.args;
-                if let Some(args) = staging.as_object_mut() {
-                    args.remove("path");
-                }
-                return Outcome::Skipped(Skip::TakenDuringCopy {
-                    path: at.as_str().to_owned(),
-                    staging,
-                });
-            }
-            Placement::Conflict(why) => {
-                let why = named(why);
-                return Outcome::Conflict(self.discard_staging(staged, &mut step.trashing, why));
-            }
-            // `overwrite`: the displaced entry stays in the trash — the staging stays too, both named.
-            Placement::Failed(why) if why.args.get("put_back").is_some() => {
-                return Outcome::Failed(kept(named(why), staged))
-            }
-            Placement::Failed(why) => {
-                let why = named(why);
-                return Outcome::Failed(self.discard_staging(staged, &mut step.trashing, why));
-            }
-            Placement::Merged { .. } => unreachable!("a staging is never merged"),
+        let (to, trashed) = match self.settle_staging(placed, staged, given, &mut step.trashing) {
+            Ok(placed) => placed,
+            Err(outcome) => return outcome,
         };
         let from = &item.from;
         // ADR-0400 decision 25: the original goes into its own mount's trash.
@@ -3462,6 +4123,50 @@ impl LibraryService {
                 Outcome::Failed(why)
             }
         }
+    }
+
+    /// A staging's placement as its item's answer: placed — the side it took and an overwrite's trash row —, or the
+    /// item's outcome, the staging going into its destination mount's trash ([`LibraryService::discard_staging`];
+    /// skipped: [`Skip::TakenDuringCopy`] names it), except when an overwrite could not put its displaced entry back:
+    /// then the staging stays and both are named. A refusal about the staging names the item as `given`.
+    fn settle_staging<T>(
+        &self,
+        placed: Placement,
+        staged: &Staged,
+        given: &str,
+        trashing: &mut Trashing<'_, '_>,
+    ) -> Result<(Side, Option<TrashAddress>), Outcome<T>> {
+        let named = |mut why: Reason| {
+            if why.args["path"] == json!(staged.lib().as_str()) {
+                why.args["path"] = json!(given);
+            }
+            why
+        };
+        Err(match placed {
+            Placement::Moved { to, trashed } => return Ok((to, trashed)),
+            Placement::Skipped(at) => {
+                let why = self.discard_staging(staged, trashing, name_taken(&at));
+                let mut staging = why.args;
+                if let Some(args) = staging.as_object_mut() {
+                    args.remove("path");
+                }
+                Outcome::Skipped(Skip::TakenDuringCopy {
+                    path: at.as_str().to_owned(),
+                    staging,
+                })
+            }
+            Placement::Conflict(why) => {
+                Outcome::Conflict(self.discard_staging(staged, trashing, named(why)))
+            }
+            // `overwrite`: the displaced entry stays in the trash — the staging stays too, both named.
+            Placement::Failed(why) if why.args.get("put_back").is_some() => {
+                Outcome::Failed(kept(named(why), staged))
+            }
+            Placement::Failed(why) => {
+                Outcome::Failed(self.discard_staging(staged, trashing, named(why)))
+            }
+            Placement::Merged { .. } => unreachable!("a staging is never merged"),
+        })
     }
 
     /// Whether the item at `from` is still what `copy` copied (ADR-0409 decision 12): listed again without following
@@ -3508,8 +4213,8 @@ impl LibraryService {
         Ok(())
     }
 
-    /// Puts the staging of a move across volumes that does not take its place into its destination mount's trash as a
-    /// staging row (ADR-0409 M14 — [`Trashing::put_staging`]) and names the row in `why` (`staging_row`); one that
+    /// Puts a staging (a move's across volumes, or a copy's) that does not take its place into its destination mount's
+    /// trash as a staging row (ADR-0409 M14 — [`Trashing::put_staging`]) and names the row in `why` (`staging_row`); one that
     /// cannot go there (`trash-unusable`, `trash-not-reserved` …) stays, and `why` names it ([`kept`]) and the trash
     /// step's refusal (`staging_kept`).
     fn discard_staging(
@@ -3526,7 +4231,7 @@ impl LibraryService {
             Err(refused) => {
                 tracing::warn!(
                     path = staged.lib().as_str(),
-                    "library move: staging kept: {}",
+                    "library staging kept: {}",
                     refused.code
                 );
                 let mut why = kept(why, staged);
@@ -3536,13 +4241,13 @@ impl LibraryService {
         }
     }
 
-    /// A whole-call refusal of a move's hold with items copied across volumes (module header): every staging goes into
-    /// its destination mount's `.trash` as a staging row ([`LibraryService::discard_staging`]) while that mount is still
-    /// registered at the folder it was copied into — else it stays where it was made ([`kept`]) —, except a complete
-    /// copy whose item is gone (a no-follow stat says `NotFound`), which stays too: it may be all that is left of it
-    /// (ADR-0409 decision 12). `stagings` in the refusal's `args` names each, per item (`path` with `staging_row`, or
-    /// `staging` · `staging_disk` · `staging_kept`). Answers the refusal and the mount folders whose `.trash` was made
-    /// usable.
+    /// A whole-call refusal of a hold with items copied before it — a move's across volumes, a copy's (module header):
+    /// every staging goes into its destination mount's `.trash` as a staging row ([`LibraryService::discard_staging`])
+    /// while that mount is still registered at the folder it was copied into — else it stays where it was made
+    /// ([`kept`]) —, except a complete copy whose item is gone (a no-follow stat says `NotFound`), which stays too: it
+    /// may be all that is left of it (ADR-0409 decision 12). `stagings` in the refusal's `args` names each, per item
+    /// (`path` with `staging_row`, or `staging` · `staging_disk` · `staging_kept`). Answers the refusal and the mount
+    /// folders whose `.trash` was made usable.
     // ADR-0409 M14
     fn refuse_staged(
         &self,
@@ -3814,7 +4519,7 @@ impl LibraryService {
                 Ok(keys) => touched.extend(keys),
                 Err(e) => tracing::warn!(
                     path = file.as_str(),
-                    "library move: file not re-read; the next scan does it: {e}"
+                    "library: file not re-read; the next scan does it: {e}"
                 ),
             }
         }
@@ -3833,7 +4538,7 @@ impl LibraryService {
                 Ok(keys) => touched.extend(keys),
                 Err(e) => tracing::warn!(
                     folder = folder.as_str(),
-                    "library move: folder not re-classified; the next scan does it: {e}"
+                    "library: folder not re-classified; the next scan does it: {e}"
                 ),
             }
         }
@@ -4022,6 +4727,55 @@ fn deletable(given: &str) -> Result<LibPath, Reason> {
     Ok(path)
 }
 
+/// The path a copy may take and the name its copy takes (module header): a library path below a mount's top with no dot
+/// or temp name — its own name —, or in the built-in mount one of its items — its file's name (`builtin::file_of`) — or
+/// a virtual folder of it — its name; another path in the built-in mount `not-found` — or why not.
+fn copyable(given: &str) -> Result<(LibPath, String), Reason> {
+    // A copy reads its item: a built-in's spelling is one.
+    let path = read_path(given).map_err(reason_of)?;
+    // ADR-0400 decision 5: a mount's top, the built-in's included.
+    if path.parent().is_none() {
+        return Err(reason_of(virtual_root_read_only(Some(&path))));
+    }
+    // ADR-0400 decision 20: a copy takes items of the built-in mount, never a path it does not hold. The mount's name
+    //   is matched in any case on every OS: re-spelled `engram`, so items given together nest alike everywhere.
+    if let Some(inside) = builtin_rest(&path) {
+        let path = LibPath::parse(&format!("{BUILTIN_MOUNT}/{inside}"))
+            .expect("the built-in mount's name and a path inside it are a library path");
+        let name = match AssetRef::parse(path.as_str()) {
+            Ok(AssetRef::BuiltIn(id)) => builtin_file_name(id).to_owned(),
+            _ if !builtins_in(inside).is_empty() => path.file_name().to_owned(),
+            _ => return Err(not_found_reason(path.as_str())),
+        };
+        return Ok((path, name));
+    }
+    // ADR-0320: a path under `.trash` is a dot name.
+    if !admits_inside(&path) {
+        return Err(reason(
+            ITEM_PATH_INVALID,
+            json!({ "path": path.as_str(), "why": "a dot or temp name" }),
+        ));
+    }
+    let name = path.file_name().to_owned();
+    Ok((path, name))
+}
+
+/// The built-ins directly in the built-in mount's virtual folder `inside` (its path inside the mount, matched exactly);
+/// none = no such folder.
+// ADR-0400 decision 20
+fn builtins_in(inside: &str) -> Vec<BuiltinId> {
+    BuiltinId::ALL
+        .into_iter()
+        .filter(|id| id.id().rsplit_once('/').map(|(folder, _)| folder) == Some(inside))
+        .collect()
+}
+
+/// The name of the built-in `id`'s file (`builtin::file_of`'s last name) — what its copy is named.
+fn builtin_file_name(id: BuiltinId) -> &'static str {
+    let file = file_of(id);
+    file.rsplit_once('/').map_or(file, |(_, name)| name)
+}
+
 /// Sets each target's lone-`SKILL.md` folder from `catalog` (ADR-0339: a file the scan took as a skill's, never a folder
 /// of that name) — at the call for its plan and again in the hold for its judgement.
 fn classify(catalog: &Catalog, targets: &mut [Target]) {
@@ -4115,19 +4869,25 @@ fn restorable(
 /// `path` with its last name numbered `n` the keep-both way: `a (2).md` for a file (before its last extension), `a (2)`
 /// for a folder or a name without one.
 fn numbered(path: &MountPath, n: u32, file: bool) -> MountPath {
+    suffixed(path, &format!(" ({n})"), file)
+}
+
+/// `path` with `suffix` added to its last name — before its last extension for a file, at the end for a folder or a
+/// name without one.
+fn suffixed(path: &MountPath, suffix: &str, file: bool) -> MountPath {
     let name = path.file_name();
     let renamed = match name
         .rsplit_once('.')
         .filter(|(stem, _)| file && !stem.is_empty())
     {
-        Some((stem, extension)) => format!("{stem} ({n}).{extension}"),
-        None => format!("{name} ({n})"),
+        Some((stem, extension)) => format!("{stem}{suffix}.{extension}"),
+        None => format!("{name}{suffix}"),
     };
     let spelled = match path.parent() {
         Some(parent) => format!("{}/{renamed}", parent.as_str()),
         None => renamed,
     };
-    MountPath::parse(&spelled).expect("a numbered name of a valid name is valid")
+    MountPath::parse(&spelled).expect("a suffixed name of a valid name is valid")
 }
 
 /// Sets each request's leaving skill folder from `catalog` ([`leaves_skill`]) — at the call for its plan and again in
@@ -4274,11 +5034,45 @@ fn kept_name(path: &MountPath, n: u32, file: bool) -> MountPath {
     numbered(path, n, file)
 }
 
+/// The copy name `n` (1, 2 …) of an item copied into its own folder — `review - Copy.md`, then `review - Copy (2).md`
+/// … — the one place a copy's naming is decided: English Explorer's, whatever the UI language (UD3).
+// ADR-0409 decision 3
+fn copy_name(path: &MountPath, n: u32, file: bool) -> MountPath {
+    match n {
+        1 => suffixed(path, " - Copy", file),
+        n => suffixed(path, &format!(" - Copy ({n})"), file),
+    }
+}
+
 fn into_itself(request: &Request) -> Reason {
     reason(
         INTO_ITSELF,
         json!({ "path": request.path.as_str(), "to": request.dest.as_str() }),
     )
+}
+
+/// What an item that is copied before its ticket answers, before any copy, when an entry of kind `there` is at its
+/// destination (the item of kind `kind`) — as the hold would answer it: no `on_conflict` `name-exists`, a same-name
+/// folder `merge_refused` (nothing is merged into one), skip skipped, a file onto a folder or the reverse under
+/// overwrite [`KIND_MISMATCH`]; `None` = keep-both, or an overwrite of one kind: the copy and the hold go on.
+fn taken_answer<T>(
+    request: &Request,
+    kind: EntryKind,
+    there: EntryKind,
+    on_conflict: Option<OnConflict>,
+    merge_refused: &str,
+) -> Option<Outcome<T>> {
+    let (folder, onto_folder) = (kind == EntryKind::Folder, there == EntryKind::Folder);
+    let args = json!({ "path": request.path.as_str(), "to": request.dest.as_str() });
+    Some(match on_conflict {
+        None => Outcome::Conflict(name_taken(&request.dest)),
+        Some(_) if folder && onto_folder => Outcome::Conflict(reason(merge_refused, args)),
+        Some(OnConflict::Skip) => Outcome::Skipped(Skip::Taken(request.dest.as_str().to_owned())),
+        Some(OnConflict::Overwrite) if folder != onto_folder => {
+            Outcome::Conflict(reason(KIND_MISMATCH, args))
+        }
+        Some(OnConflict::Overwrite | OnConflict::KeepBoth) => return None,
+    })
 }
 
 /// `name-exists` naming what is at `to`.
@@ -4299,12 +5093,16 @@ fn rename_failed(from: &LibPath, to: &LibPath, e: &io::Error) -> Reason {
     }
 }
 
-/// `why` naming the staging of a move across volumes that stays where it was made: `staging` — its virtual path as
-/// made, which after a mount change may name another place or none — and `staging_disk`, its disk path, which no mount
-/// change moves.
-fn kept(mut why: Reason, staged: &Staged) -> Reason {
-    why.args["staging"] = json!(staged.lib().as_str());
-    why.args["staging_disk"] = json!(escape_controls(&staged.disk.to_string_lossy()).to_string());
+/// `why` naming a staging (a move's across volumes, or a copy's) that stays where it was made ([`named_staging`]).
+fn kept(why: Reason, staged: &Staged) -> Reason {
+    named_staging(why, &staged.lib(), &staged.disk)
+}
+
+/// `why` naming a staging that stays where it was made: `staging` — its virtual path `lib` as made, which after a
+/// mount change may name another place or none — and `staging_disk`, its disk path, which no mount change moves.
+fn named_staging(mut why: Reason, lib: &LibPath, disk: &Path) -> Reason {
+    why.args["staging"] = json!(lib.as_str());
+    why.args["staging_disk"] = json!(escape_controls(&disk.to_string_lossy()).to_string());
     why
 }
 
@@ -4327,7 +5125,7 @@ fn below_item(path: &LibPath, rel: &Path) -> String {
     escape_controls(&spelled).to_string()
 }
 
-/// Whether a move's hold takes the trash waiting count when it may touch `.trash` — always, outside tests
+/// Whether a move's or a copy's hold takes the trash waiting count when it may touch `.trash` — always, outside tests
 /// ([`UNRESERVED`]).
 fn reserved() -> bool {
     #[cfg(test)]
@@ -4438,7 +5236,8 @@ mod tests {
     /// as)` answers the identity of `as` for `at`; a rename into or out of the `volume` folder answers
     /// `CrossesDevices`, a rename from a base temp name fails as `fail_temp_rename` says after its passes,
     /// a rename of a base temp name out of the `cross_from` folder (a volume probe) answers `CrossesDevices`,
-    /// `after_copy` runs once right after a tree copy, a tree copy answers a part-way failure while `fail_copy` is set,
+    /// `after_copy` runs once right after a tree copy, a tree copy answers a part-way failure while `fail_copy` is set and
+    /// links while `links_copy` is, a `remove_dir` of a folder it made fails while `fail_remove_made` is set,
     /// hashing `fail_hash`'s path fails, `before_hash` runs once right before hashing its path; `identities` counts the
     /// identity probes, `lists` logs the folders listed, `made` the folders made, `copies` counts the tree copies,
     /// `hashes` logs the files hashed.
@@ -4473,6 +5272,10 @@ mod tests {
         fail_hash: Mutex<Option<PathBuf>>,
         /// Runs once right before the file `.0` is hashed.
         before_hash: Mutex<Option<AfterRename>>,
+        /// A tree copy answers links (its top) with nothing made.
+        links_copy: AtomicBool,
+        /// A `remove_dir` of a folder this store made (`made`) fails.
+        fail_remove_made: AtomicBool,
     }
 
     impl LibraryStore for Disk {
@@ -4592,6 +5395,11 @@ mod tests {
             {
                 return Err(io::Error::other("injected remove failure"));
             }
+            if self.fail_remove_made.load(Ordering::SeqCst)
+                && lock(&self.made).iter().any(|made| made == path)
+            {
+                return Err(io::Error::other("injected remove failure"));
+            }
             FsStore.remove_dir(path)
         }
         fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -4606,6 +5414,9 @@ mod tests {
         }
         fn copy_tree(&self, root: &Path, from: &Path, to: &Path) -> Result<TreeCopy, CopyFailure> {
             self.copies.fetch_add(1, Ordering::SeqCst);
+            if self.links_copy.load(Ordering::SeqCst) {
+                return Err(CopyFailure::Links(vec![PathBuf::new()]));
+            }
             let copy = FsStore.copy_tree(root, from, to)?;
             let after = lock(&self.after_copy).take();
             if let Some(hook) = after {
@@ -4648,10 +5459,17 @@ mod tests {
         }
     }
 
-    /// [`StdFolderOps`] that logs every path whose canonical path is asked — the overlap probes.
+    /// [`StdFolderOps`] that logs every path whose canonical path is asked — the overlap probes; `canonical_as` `(at,
+    /// as)` answers the canonical path of `as` for `at` (an alias the spelling does not show), `no_identity` answers no
+    /// identity and `fail_canonical` fails every canonical path.
     #[derive(Default)]
     struct Probes {
         canonical: Mutex<Vec<PathBuf>>,
+        canonical_as: Mutex<Option<(PathBuf, PathBuf)>>,
+        /// No file identity (a volume that gives none): every identity answers `Unsupported`.
+        no_identity: AtomicBool,
+        /// Every canonical path fails.
+        fail_canonical: AtomicBool,
     }
 
     impl FolderOps for Probes {
@@ -4663,9 +5481,18 @@ mod tests {
         }
         fn canonical(&self, p: &Path) -> io::Result<PathBuf> {
             lock(&self.canonical).push(p.to_path_buf());
-            StdFolderOps.canonical(p)
+            if self.fail_canonical.load(Ordering::SeqCst) {
+                return Err(io::Error::other("injected canonical failure"));
+            }
+            match lock(&self.canonical_as).as_ref() {
+                Some((at, alias)) if at == p => StdFolderOps.canonical(alias),
+                _ => StdFolderOps.canonical(p),
+            }
         }
         fn identity(&self, p: &Path) -> io::Result<engram_dashboard_platform::fs::FileIdentity> {
+            if self.no_identity.load(Ordering::SeqCst) {
+                return Err(io::Error::from(io::ErrorKind::Unsupported));
+            }
             StdFolderOps.identity(p)
         }
         fn read(&self, p: &Path, cap: u64) -> io::Result<String> {
@@ -4829,17 +5656,27 @@ mod tests {
         }
 
         fn make(profiles: Vec<AgentProfile>, limit: Duration) -> World {
-            World::make_with(profiles, limit, None)
+            World::make_with(profiles, limit, None, None)
+        }
+
+        /// As [`World::new`], with the built-in folder `builtin`.
+        fn with_builtin(builtin: &Path) -> World {
+            World::make_with(Vec::new(), IO_LIMIT, None, Some(builtin))
         }
 
         /// As [`World::new`], with `team`'s folder in a fresh temp folder inside `elsewhere` (another volume) and `lib2`
         /// a link to it.
         fn across(elsewhere: &Path) -> World {
             let team = tempfile::tempdir_in(elsewhere).unwrap();
-            World::make_with(Vec::new(), IO_LIMIT, Some(team))
+            World::make_with(Vec::new(), IO_LIMIT, Some(team), None)
         }
 
-        fn make_with(profiles: Vec<AgentProfile>, limit: Duration, team: Option<TempDir>) -> World {
+        fn make_with(
+            profiles: Vec<AgentProfile>,
+            limit: Duration,
+            team: Option<TempDir>,
+            builtin: Option<&Path>,
+        ) -> World {
             let temp = tempfile::tempdir().unwrap();
             let base = dunce::canonicalize(temp.path()).unwrap();
             for dir in ["lib", "state", "keep"] {
@@ -4878,7 +5715,7 @@ mod tests {
                 default_root: base.join("default-library"),
                 daemon_id: "test-daemon".to_owned(),
                 root_generation_base: 7,
-                builtin_dir: None,
+                builtin_dir: builtin.map(Path::to_path_buf),
                 launch_root: base.join("launch"),
                 home: None,
                 env: Arc::new(|_| None),
@@ -4993,6 +5830,10 @@ mod tests {
         ) -> Result<MoveAnswer, LibraryRefusal> {
             self.svc
                 .move_items(paths, to, None, false, false, None, Some(generation))
+        }
+
+        fn cp(&self, paths: &[&str], to: &str, on_conflict: Option<OnConflict>) -> CopyAnswer {
+            self.svc.copy_items(paths, to, on_conflict, None).unwrap()
         }
 
         fn rename(&self, path: &str, name: &str) -> MoveAnswer {
@@ -8969,5 +9810,728 @@ mod tests {
         assert!(!world.there("lib/d"));
         assert!(world.kind("team/d/a.md").is_some());
         assert!(world.temps("lib").is_empty() && world.temps("lib2").is_empty());
+    }
+
+    // ── copy ──
+
+    // ADR-0409 decision 12 · M3: a copy — across mounts and inside one — stages every entry (dot entries and names no
+    //   library takes included, modified times kept), places it, and the catalog has it right after the call; the
+    //   original stays and no reference, agent or trash is touched.
+    #[test]
+    fn a_copy_stages_every_entry_places_it_and_walks_it_in_following_no_reference() {
+        let world = World::new();
+        world.put("lib/d/a.md", "alpha");
+        world.put("lib/d/.dot", "x");
+        world.put("lib/d/e/notes.bin", "data");
+        let listing = preset("instructions:\n- library/d/a.md\n");
+        world.put("lib2/P.yaml", &listing);
+        world.touch("lib/d/a.md", long_ago());
+        world.scan();
+        let change = world.svc.gate.numbers().change;
+
+        let answer = world.cp(&["library/d"], "team", None);
+
+        let copied = done(&answer.items[0].outcome);
+        assert!(
+            world.svc.gate.numbers().change > change,
+            "the hold raised the change number"
+        );
+        assert_eq!((copied.to.as_str(), copied.trashed), ("team/d", None));
+        assert_eq!(world.text("lib2/d/a.md"), "alpha");
+        assert_eq!(world.text("lib2/d/.dot"), "x");
+        assert_eq!(world.text("lib2/d/e/notes.bin"), "data");
+        assert_eq!(world.modified("lib2/d/a.md"), long_ago());
+        assert_eq!(world.text("lib/d/a.md"), "alpha", "the original stays");
+        assert!(
+            world.kind("team/d/a.md").is_some(),
+            "walked in before the answer"
+        );
+        assert!(world.kind("library/d/a.md").is_some());
+        assert_eq!(world.text("lib2/P.yaml"), listing, "no reference follows");
+        assert!(lock(&world.port.renamed).is_empty(), "no agent step");
+        assert!(!world.there("lib2/.trash") && !world.there("lib/.trash"));
+        assert!(world.temps("lib").is_empty() && world.temps("lib2").is_empty());
+
+        let answer = world.cp(&["library/d/a.md"], "library", None);
+
+        assert_eq!(done(&answer.items[0].outcome).to, "library/a.md");
+        assert_eq!(world.text("lib/a.md"), "alpha");
+        assert!(world.kind("library/a.md").is_some());
+        assert!(world.temps("lib").is_empty() && world.temps("lib/d").is_empty());
+    }
+
+    // ADR-0409 decision 3 (UD3): a copy into its item's own folder is named ` - Copy`, then ` - Copy (2)` — before a
+    //   file's extension, after a folder's name — whatever `onConflict` says; the item itself is never replaced.
+    #[test]
+    fn a_copy_into_its_own_folder_is_named_copy_then_copy_2_whatever_on_conflict_says() {
+        let world = World::new();
+        world.put("lib/r.md", "r");
+        world.put("lib/d/x.md", "x");
+        world.scan();
+
+        let first = world.cp(&["library/r.md"], "library", None);
+        let second = world.cp(&["library/r.md"], "library", Some(OnConflict::Overwrite));
+        let folder = world.cp(&["library/d"], "library", Some(OnConflict::KeepBoth));
+
+        assert_eq!(done(&first.items[0].outcome).to, "library/r - Copy.md");
+        assert_eq!(done(&second.items[0].outcome).to, "library/r - Copy (2).md");
+        assert_eq!(done(&folder.items[0].outcome).to, "library/d - Copy");
+        assert_eq!(world.text("lib/r.md"), "r");
+        assert_eq!(world.text("lib/r - Copy.md"), "r");
+        assert_eq!(world.text("lib/r - Copy (2).md"), "r");
+        assert_eq!(world.text("lib/d - Copy/x.md"), "x");
+        assert!(world.kind("library/r - Copy (2).md").is_some());
+        assert!(world.kind("library/d - Copy/x.md").is_some());
+        assert!(!world.there("lib/.trash"), "nothing overwritten");
+        assert!(world.temps("lib").is_empty());
+    }
+
+    // ADR-0409: a copy into its item itself or into a folder below it is refused `into-itself` before anything is
+    //   copied.
+    #[test]
+    fn a_copy_into_its_own_descendant_is_refused_into_itself_and_copies_nothing() {
+        let world = World::new();
+        world.put("lib/d/e/x.md", "x");
+        world.scan();
+
+        let into = world.cp(&["library/d"], "library/d", None);
+        let below = world.cp(&["library/d"], "library/d/e", Some(OnConflict::KeepBoth));
+
+        for answer in [&into, &below] {
+            let why = failure(&answer.items[0].outcome);
+            assert_eq!(why.code, INTO_ITSELF, "{why:?}");
+        }
+        assert_eq!(world.disk.copies.load(Ordering::SeqCst), 0);
+        assert!(world.temps("lib/d").is_empty() && world.temps("lib/d/e").is_empty());
+        assert!(!world.there("lib/d/d") && !world.there("lib/d/e/d"));
+    }
+
+    // ADR-0409 decision 10: a copy never replaces a taken name unless told to overwrite — a taken name answers before
+    //   any copy (conflict, skip, a kind mismatch, a same-name folder never merged), keep-both takes the next name.
+    #[test]
+    fn a_copy_never_overwrites_and_answers_a_taken_name_before_copying() {
+        let world = World::new();
+        world.put("lib/a.md", "new");
+        world.put("lib2/a.md", "old");
+        world.put("lib/d/x.md", "x");
+        world.put("lib2/d/y.md", "y");
+        world.put("lib/k.md", "k");
+        world.put("lib2/k.md/inner.md", "folder");
+        world.scan();
+
+        let none = world.cp(&["library/a.md"], "team", None);
+        let skip = world.cp(&["library/a.md"], "team", Some(OnConflict::Skip));
+        let merge = world.cp(&["library/d"], "team", Some(OnConflict::Overwrite));
+        let mixed = world.cp(&["library/k.md"], "team", Some(OnConflict::Overwrite));
+
+        assert_eq!(conflict(&none.items[0].outcome).code, NAME_EXISTS);
+        assert_eq!(
+            skip.items[0].outcome,
+            Outcome::Skipped(Skip::Taken("team/a.md".to_owned()))
+        );
+        assert_eq!(conflict(&merge.items[0].outcome).code, COPY_MERGE_REFUSED);
+        assert_eq!(conflict(&mixed.items[0].outcome).code, KIND_MISMATCH);
+        assert_eq!(
+            world.disk.copies.load(Ordering::SeqCst),
+            0,
+            "nothing copied"
+        );
+        assert_eq!(world.text("lib2/a.md"), "old");
+        assert!(!world.there("lib2/d/x.md"), "never merged");
+
+        let kept = world.cp(&["library/a.md"], "team", Some(OnConflict::KeepBoth));
+
+        assert_eq!(done(&kept.items[0].outcome).to, "team/a (2).md");
+        assert_eq!(world.text("lib2/a (2).md"), "new");
+        assert_eq!(world.text("lib2/a.md"), "old");
+        assert!(world.temps("lib2").is_empty() && !world.there("lib2/.trash"));
+    }
+
+    // ADR-0339 decision 1: an overwriting copy puts the entry there into its mount's trash, then takes its name; the
+    //   original stays.
+    #[test]
+    fn an_overwriting_copy_puts_the_entry_there_into_its_trash_and_takes_its_name() {
+        let world = World::new();
+        world.put("lib/a.md", "new");
+        world.put("lib2/a.md", "old");
+        world.scan();
+
+        let answer = world.cp(&["library/a.md"], "team", Some(OnConflict::Overwrite));
+
+        let copied = done(&answer.items[0].outcome);
+        assert_eq!(copied.to, "team/a.md");
+        let row = copied.trashed.expect("the displaced entry's row");
+        assert_eq!((row.mount.as_str(), row.path.as_str()), ("team", "a.md"));
+        assert_eq!(
+            world.text(&format!("lib2/.trash/{}/a.md", row.bundle)),
+            "old"
+        );
+        assert_eq!(world.text("lib2/a.md"), "new");
+        assert_eq!(world.text("lib/a.md"), "new");
+        assert!(world.kind("team/a.md").is_some());
+        assert!(world.temps("lib2").is_empty());
+    }
+
+    // ADR-0409 decision 10 · M14: a name that appears at the destination during the copy is never replaced — the item's
+    //   conflict, its staging into the destination mount's trash; under skip it is skipped naming the staging.
+    #[test]
+    fn a_name_taken_during_a_copy_is_never_replaced_and_the_staging_goes_into_the_trash() {
+        let world = World::new();
+        world.put("lib/a.md", "a");
+        world.scan();
+        let there = world.at("lib2/a.md");
+        *lock(&world.disk.after_copy) = Some(Box::new(move || fs::write(there, "other").unwrap()));
+
+        let answer = world.cp(&["library/a.md"], "team", None);
+
+        let why = conflict(&answer.items[0].outcome);
+        assert_eq!(why.code, NAME_EXISTS);
+        assert_eq!(why.args["path"], "team/a.md");
+        assert!(why.args["staging_row"].is_object(), "{}", why.args);
+        assert_eq!(world.text("lib2/a.md"), "other");
+
+        world.put("lib/b.md", "b");
+        let there = world.at("lib2/b.md");
+        *lock(&world.disk.after_copy) = Some(Box::new(move || fs::write(there, "other").unwrap()));
+        let answer = world.cp(&["library/b.md"], "team", Some(OnConflict::Skip));
+
+        match &answer.items[0].outcome {
+            Outcome::Skipped(Skip::TakenDuringCopy { path, staging }) => {
+                assert_eq!(path, "team/b.md");
+                assert!(staging["staging_row"].is_object(), "{staging}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(world.text("lib2/b.md"), "other");
+        assert_eq!(world.text("lib/a.md"), "a");
+        assert!(world.temps("lib2").is_empty());
+    }
+
+    // ADR-0409 decision 12: a copy compares nothing with its source — an edit after the copy leaves the copy as made,
+    //   and nothing is hashed again in the hold.
+    #[test]
+    fn a_copy_places_what_it_copied_without_comparing_the_source_again() {
+        let world = World::new();
+        world.put("lib/a.md", "a");
+        world.scan();
+        let source = world.at("lib/a.md");
+        *lock(&world.disk.after_copy) = Some(Box::new(move || {
+            fs::write(source, "changed later").unwrap()
+        }));
+
+        let answer = world.cp(&["library/a.md"], "team", None);
+
+        assert_eq!(done(&answer.items[0].outcome).to, "team/a.md");
+        assert_eq!(world.text("lib2/a.md"), "a");
+        assert_eq!(world.text("lib/a.md"), "changed later");
+        assert!(lock(&world.disk.hashes).is_empty(), "no source compare");
+    }
+
+    // ADR-0400 decision 20: from the built-in mount a copy takes its items — each its file's name — and `engram/settings`
+    //   as a folder holding its item's file (the mount's name in any case); `engram` itself is a mount's top, another
+    //   path there is not found, nothing is copied into it, and a built-in mount that cannot be read refuses.
+    #[test]
+    fn a_copy_from_the_builtin_takes_its_items_files_and_the_settings_folder() {
+        let builtin = crate::builtin::tests::full();
+        let world = World::with_builtin(builtin.path());
+        world.scan();
+
+        let answer = world.cp(
+            &[
+                "engram/default",
+                "engram/priming",
+                "engram/settings",
+                "Engram/settings/default",
+            ],
+            "library",
+            None,
+        );
+
+        let to: Vec<String> = answer.items[..3]
+            .iter()
+            .map(|item| done(&item.outcome).to)
+            .collect();
+        assert_eq!(
+            to,
+            [
+                "library/default.yaml",
+                "library/priming.md",
+                "library/settings"
+            ]
+        );
+        assert_eq!(
+            answer.items[3].outcome,
+            Outcome::Skipped(Skip::Inside("engram/settings".to_owned()))
+        );
+        assert_eq!(
+            world.text("lib/default.yaml"),
+            crate::builtin::tests::DEFAULT_PRESET
+        );
+        assert_eq!(world.text("lib/priming.md"), crate::builtin::tests::PRIMING);
+        assert_eq!(
+            world.text("lib/settings/default.yaml"),
+            crate::builtin::tests::DEFAULT_SETTINGS
+        );
+        let answer = world.cp(&["Engram/settings/default"], "team", None);
+        assert_eq!(done(&answer.items[0].outcome).to, "team/default.yaml");
+        assert_eq!(
+            world.text("lib2/default.yaml"),
+            crate::builtin::tests::DEFAULT_SETTINGS
+        );
+        assert_eq!(world.kind("library/default.yaml"), Some(ItemKind::Preset));
+        assert_eq!(
+            world.kind("library/settings/default.yaml"),
+            Some(ItemKind::Settings)
+        );
+        assert!(world.temps("lib").is_empty() && world.temps("lib/settings").is_empty());
+
+        let answer = world.cp(
+            &["engram", "engram/nope", "engram/settings/nope"],
+            "team",
+            None,
+        );
+
+        let codes: Vec<String> = answer
+            .items
+            .iter()
+            .map(|item| failed_code(&item.outcome))
+            .collect();
+        assert_eq!(codes, [VIRTUAL_ROOT_READ_ONLY, NOT_FOUND, NOT_FOUND]);
+        for to in ["engram", "engram/settings"] {
+            let (code, _) = refused(
+                world
+                    .svc
+                    .copy_items(&["library/priming.md"], to, None, None),
+            );
+            assert_eq!(code, MOUNT_READ_ONLY);
+        }
+
+        let without = World::new();
+        without.scan();
+        let answer = without.cp(&["engram/default"], "library", None);
+        assert_eq!(failed_code(&answer.items[0].outcome), LIBRARY_UNAVAILABLE);
+        assert!(!without.there("lib/default.yaml"));
+    }
+
+    // ADR-0409 decision 14: every copy — on one volume and across volumes — raises the trash waiting count after its copy,
+    //   just before its ticket, and lowers it after the hold; a copy refused before its ticket never raises it.
+    #[test]
+    fn every_copy_raises_the_waiting_count_after_its_copy_just_before_its_ticket() {
+        let world = World::new();
+        world.put("lib/a.md", "a");
+        world.put("lib/x/keep.md", "k");
+        world.scan();
+        world.cross();
+        let trash = || world.svc.gate.trash();
+        for (to, folder) in [("library/x", "lib/x"), ("team", "lib2")] {
+            let (at_hook, reached) = mpsc::channel::<(usize, usize)>();
+            let (go, proceed) = mpsc::channel::<()>();
+            let (svc, into) = (Arc::clone(&world.svc), world.at(folder));
+            let worker = on_thread(&world.svc, move |on| {
+                BEFORE_HOLD.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        let staged = fs::read_dir(&into)
+                            .unwrap()
+                            .filter(|entry| {
+                                is_temp_name(&entry.as_ref().unwrap().file_name().to_string_lossy())
+                            })
+                            .count();
+                        at_hook.send((svc.gate.trash().waiting(), staged)).unwrap();
+                        proceed.recv_timeout(Duration::from_secs(20)).unwrap();
+                    }));
+                });
+                on.copy_items(&["library/a.md"], to, None, None).unwrap()
+            });
+
+            let (before, staged) = reached.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert_eq!(before, 0, "{to}: not raised before the ticket");
+            assert_eq!(staged, 1, "{to}: copied before the count");
+            let guard = world.svc.gate.lib().write().unwrap();
+            go.send(()).unwrap();
+            trash().wait_until("the copy waits at its write lock", |view| view.waiting == 1);
+            assert!(!worker.is_finished());
+            drop(guard);
+            let answer = worker.join().unwrap();
+            done(&answer.items[0].outcome);
+            assert_eq!(trash().waiting(), 0, "{to}: lowered after the hold");
+        }
+
+        world.put("lib/d/b.md", "b");
+        world.put("keep/k.md", "k");
+        world.link("keep", "lib/d/linked");
+        let answer = world.cp(&["library/d", "library/a.md"], "library/x", None);
+        assert_eq!(failed_code(&answer.items[0].outcome), LINKS_INSIDE);
+        assert_eq!(conflict(&answer.items[1].outcome).code, NAME_EXISTS);
+        assert_eq!(trash().waiting(), 0, "never raised");
+    }
+
+    // ADR-0409 M14 · ADR-0400 decision 25: a copy that fails part-way goes into the destination mount's trash as a
+    //   staging row meant for its name, naming where it stopped; nothing is placed.
+    #[test]
+    fn a_failed_copy_goes_into_the_destination_mounts_trash_as_a_staging_row_meant_for_its_name() {
+        let world = World::new();
+        world.put("lib/a.md", "a");
+        world.scan();
+        world.disk.fail_copy.store(true, Ordering::SeqCst);
+
+        let answer = world.cp(&["library/a.md"], "team", None);
+
+        let why = failure(&answer.items[0].outcome);
+        assert_eq!(why.code, LIBRARY_WRITE_FAILED);
+        assert_eq!(why.args["not_copied"], "library/a.md");
+        let row = &why.args["staging_row"];
+        assert_eq!(row["mount"], "team");
+        let (bundle, path) = (
+            row["bundle"].as_str().unwrap(),
+            row["path"].as_str().unwrap(),
+        );
+        assert_eq!(world.text(&format!("lib2/.trash/{bundle}/{path}")), "a");
+        match read_record(
+            &FsStore,
+            &world.at("lib2"),
+            &BundleId::parse(bundle).unwrap(),
+        ) {
+            RecordRead::Roots(roots) => {
+                let intended = roots[0].root.staging.as_ref().map(MountPath::as_str);
+                assert_eq!(intended, Some("a.md"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!world.there("lib2/a.md"));
+        assert!(world.temps("lib2").is_empty());
+        assert_eq!(world.text("lib/a.md"), "a");
+    }
+
+    // ADR-0365 · ADR-0409 decision 5: a copy is refused per item by the entrance rules, an item holding links (named) and
+    //   a destination trash that cannot be used — before anything is copied; a parent and its child given together copy
+    //   the parent only.
+    #[test]
+    fn a_copy_refuses_per_item_by_the_entrance_links_and_an_unusable_trash_copying_nothing() {
+        let world = World::new();
+        world.put("lib/d/x.md", "x");
+        world.put("lib/l/a.md", "a");
+        world.put("keep/k.md", "k");
+        world.link("keep", "lib/l/linked");
+        world.put("lib2/.trash", "not a folder");
+        world.scan();
+
+        let answer = world.cp(
+            &[
+                "library",
+                "library/.trash/x.md",
+                "library/none.md",
+                "library/l",
+            ],
+            "library/d",
+            None,
+        );
+
+        let codes: Vec<String> = answer
+            .items
+            .iter()
+            .map(|item| failed_code(&item.outcome))
+            .collect();
+        assert_eq!(
+            codes,
+            [
+                VIRTUAL_ROOT_READ_ONLY,
+                ITEM_PATH_INVALID,
+                NOT_FOUND,
+                LINKS_INSIDE
+            ]
+        );
+        assert_eq!(
+            failure(&answer.items[3].outcome).args["links"],
+            json!(["library/l/linked"])
+        );
+        let copies = world.disk.copies.load(Ordering::SeqCst);
+        let unusable = world.cp(&["library/d/x.md"], "team", None);
+        assert_eq!(failed_code(&unusable.items[0].outcome), TRASH_UNUSABLE);
+        assert_eq!(
+            world.disk.copies.load(Ordering::SeqCst),
+            copies,
+            "nothing copied"
+        );
+        assert!(world.temps("lib/d").is_empty() && world.temps("lib2").is_empty());
+
+        let nested = world.cp(&["library/d", "library/d/x.md"], "library/l", None);
+        assert_eq!(done(&nested.items[0].outcome).to, "library/l/d");
+        assert_eq!(
+            nested.items[1].outcome,
+            Outcome::Skipped(Skip::Inside("library/d".to_owned()))
+        );
+    }
+
+    // ADR-0377 · ADR-0409 M14: a stale root generation refuses a copy before anything is copied; one gone stale during
+    //   the copy refuses in the hold, naming the staging it put into the destination mount's trash.
+    #[test]
+    fn a_stale_root_generation_refuses_a_copy_before_copying_or_in_its_hold_naming_the_staging() {
+        let world = World::new();
+        world.put("lib/a.md", "a");
+        world.scan();
+        let now = world.svc.gate.numbers().root;
+
+        let (code, _) = refused(world.svc.copy_items(
+            &["library/a.md"],
+            "team",
+            None,
+            Some(now + 1),
+        ));
+        assert_eq!(code, ROOT_GENERATION_STALE);
+        assert_eq!(world.disk.copies.load(Ordering::SeqCst), 0);
+
+        let (svc, other) = (Arc::clone(&world.svc), world.at("lib3"));
+        *lock(&world.disk.after_copy) = Some(Box::new(move || {
+            svc.add_mount("other", &other, true).unwrap();
+        }));
+        let (code, args) = refused(world.svc.copy_items(
+            &["library/a.md"],
+            "team",
+            None,
+            Some(now),
+        ));
+
+        assert_eq!(code, ROOT_GENERATION_STALE);
+        let row = &args["stagings"][0]["staging_row"];
+        assert_eq!(row["mount"], "team", "{args}");
+        let (bundle, path) = (
+            row["bundle"].as_str().unwrap(),
+            row["path"].as_str().unwrap(),
+        );
+        assert_eq!(world.text(&format!("lib2/.trash/{bundle}/{path}")), "a");
+        assert!(!world.there("lib2/a.md"));
+        assert!(world.temps("lib2").is_empty());
+    }
+
+    // ADR-0365: a built-in's file is reached from the built-in folder down without following — a folder on the way that
+    //   is a link refuses the item `path-through-link` before anything is stat'ed or copied through it.
+    #[test]
+    fn a_builtin_reached_through_a_link_is_refused_and_nothing_is_copied_through_it() {
+        let builtin = crate::builtin::tests::full();
+        let world = World::with_builtin(builtin.path());
+        world.put("keep/settings/default.yaml", "kind: settings\nversion: 1\n");
+        let settings = builtin.path().join("settings");
+        fs::remove_dir_all(&settings).unwrap();
+        link_dir(&world.at("keep/settings"), &settings).unwrap();
+        lock(&world.links).push(settings);
+        world.scan();
+
+        let item = world.cp(&["engram/settings/default"], "team", None);
+        let folder = world.cp(&["engram/settings"], "team", None);
+        let other = world.cp(&["engram/default"], "team", None);
+
+        assert_eq!(failed_code(&item.items[0].outcome), PATH_THROUGH_LINK);
+        assert_eq!(failed_code(&folder.items[0].outcome), PATH_THROUGH_LINK);
+        assert_eq!(
+            world.disk.copies.load(Ordering::SeqCst),
+            1,
+            "only engram/default copied"
+        );
+        assert_eq!(done(&other.items[0].outcome).to, "team/default.yaml");
+        assert!(!world.there("lib2/settings"));
+        assert!(world.temps("lib2").is_empty());
+    }
+
+    // ADR-0335 decision 7: a destination folder that is missing, a file or a link is answered before anything is copied,
+    //   naming the folder — never as the item.
+    #[test]
+    fn a_copy_into_a_missing_file_or_linked_folder_is_refused_naming_it_before_copying() {
+        let world = World::new();
+        world.put("lib/a.md", "a");
+        world.put("lib/f.md", "f");
+        world.put("keep/k.md", "k");
+        world.link("keep", "lib/j");
+        world.scan();
+
+        let missing = world.cp(&["library/a.md"], "library/none", None);
+        let file = world.cp(&["library/a.md"], "library/f.md", None);
+        let linked = world.cp(&["library/a.md"], "library/j", None);
+
+        let why = failure(&missing.items[0].outcome);
+        assert_eq!(
+            (why.code.as_str(), &why.args["path"]),
+            (NOT_FOUND, &json!("library/none"))
+        );
+        let why = failure(&file.items[0].outcome);
+        assert_eq!(
+            (why.code.as_str(), &why.args["path"]),
+            (NOT_FOUND, &json!("library/f.md"))
+        );
+        assert_eq!(failed_code(&linked.items[0].outcome), PATH_THROUGH_LINK);
+        assert_eq!(world.disk.copies.load(Ordering::SeqCst), 0);
+        assert!(!world.there("keep/a.md"));
+        assert!(world.temps("lib").is_empty());
+    }
+
+    // ADR-0409: a staging a built-in folder's copy made and could not remove after meeting a link stays, named by its
+    //   virtual and its disk path; one it removed is not named.
+    #[test]
+    fn a_builtin_folder_staging_left_after_links_is_named() {
+        let builtin = crate::builtin::tests::full();
+        let world = World::with_builtin(builtin.path());
+        world.scan();
+        world.disk.links_copy.store(true, Ordering::SeqCst);
+
+        let removed = world.cp(&["engram/settings"], "library", None);
+
+        let why = failure(&removed.items[0].outcome);
+        assert_eq!(why.code, LINKS_INSIDE);
+        assert_eq!(why.args["links"], json!(["engram/settings/default"]));
+        assert!(why.args.get("staging").is_none(), "{}", why.args);
+        assert!(world.temps("lib").is_empty());
+
+        world.disk.fail_remove_made.store(true, Ordering::SeqCst);
+        let left = world.cp(&["engram/settings"], "library", None);
+
+        let why = failure(&left.items[0].outcome);
+        assert_eq!(why.code, LINKS_INSIDE);
+        let disk = PathBuf::from(why.args["staging_disk"].as_str().expect("named"));
+        assert!(disk.is_dir(), "{}", why.args);
+        let name = disk.file_name().unwrap().to_str().unwrap().to_owned();
+        assert_eq!(why.args["staging"], json!(format!("library/{name}")));
+        assert_eq!(world.temps("lib"), [name]);
+    }
+
+    // ADR-0409 decision 3: a copy into its own folder spelled another way — an alias of the folder that is the same
+    //   disk entry (a short name, where the volume makes one) — still takes a copy name, never overwriting the item.
+    #[test]
+    fn a_copy_into_an_alias_of_its_own_folder_takes_a_copy_name() {
+        let world = World::new();
+        world.put("lib/longfoldername/x.md", "x");
+        world.scan();
+        let alias = world.at("lib/LONGFO~1");
+        let same = matches!(
+            (FsStore.identity(&alias), FsStore.identity(&world.at("lib/longfoldername"))),
+            (Ok(a), Ok(b)) if a == b
+        );
+        if !same {
+            eprintln!("no short-name alias on this volume; the alias case is not exercised");
+            return;
+        }
+
+        let answer = world.cp(
+            &["library/longfoldername/x.md"],
+            "library/LONGFO~1",
+            Some(OnConflict::Overwrite),
+        );
+
+        assert!(done(&answer.items[0].outcome).to.ends_with("/x - Copy.md"));
+        let none = world.cp(&["library/longfoldername/x.md"], "library/LONGFO~1", None);
+        assert!(
+            done(&none.items[0].outcome)
+                .to
+                .ends_with("/x - Copy (2).md"),
+            "never name-exists"
+        );
+        world.probes.no_identity.store(true, Ordering::SeqCst);
+        let unidentified = world.cp(
+            &["library/longfoldername/x.md"],
+            "library/LONGFO~1",
+            Some(OnConflict::Overwrite),
+        );
+        assert!(done(&unidentified.items[0].outcome)
+            .to
+            .ends_with("/x - Copy (3).md"));
+        assert_eq!(world.text("lib/longfoldername/x.md"), "x");
+        assert_eq!(world.text("lib/longfoldername/x - Copy.md"), "x");
+        assert!(!world.there("lib/.trash"), "the item was not overwritten");
+    }
+
+    // ADR-0409: the canonical into-itself probe runs for a copy too — a destination folder that is the item's own
+    //   descendant under another spelling (an alias neither spelling shows) is refused with nothing copied.
+    #[test]
+    fn a_copy_into_an_alias_of_its_own_descendant_is_refused_by_the_canonical_probe() {
+        let world = World::new();
+        world.put("lib/d/e/x.md", "x");
+        world.put("lib/f/y.md", "y");
+        world.scan();
+        *lock(&world.probes.canonical_as) = Some((world.at("lib/f"), world.at("lib/d/e")));
+
+        let answer = world.cp(&["library/d"], "library/f", None);
+
+        assert_eq!(failed_code(&answer.items[0].outcome), INTO_ITSELF);
+        assert_eq!(world.disk.copies.load(Ordering::SeqCst), 0);
+        assert!(!world.there("lib/f/d"));
+    }
+
+    // ADR-0409 decision 3: whether a copy goes into its item's own folder under another spelling is judged by identity,
+    //   where the volume gives none by canonical path, and when neither answers it counts as its own folder — the copy
+    //   takes a copy name and nothing is overwritten; a folder the canonical path tells apart is overwritten as asked.
+    #[test]
+    fn without_a_file_identity_the_own_folder_is_judged_by_canonical_path_or_kept_safe() {
+        let world = World::new();
+        world.put("lib/d/x.md", "item");
+        world.put("lib/f/x.md", "there");
+        world.scan();
+        world.probes.no_identity.store(true, Ordering::SeqCst);
+
+        // `lib/f` an alias of `lib/d` that neither spelling shows: its own folder.
+        *lock(&world.probes.canonical_as) = Some((world.at("lib/f"), world.at("lib/d")));
+        let alias = world.cp(
+            &["library/d/x.md"],
+            "library/f",
+            Some(OnConflict::Overwrite),
+        );
+        assert_eq!(done(&alias.items[0].outcome).to, "library/f/x - Copy.md");
+        assert_eq!(world.text("lib/f/x.md"), "there");
+
+        // Nothing answers: kept safe as its own folder.
+        *lock(&world.probes.canonical_as) = None;
+        world.probes.fail_canonical.store(true, Ordering::SeqCst);
+        let unknown = world.cp(
+            &["library/d/x.md"],
+            "library/f",
+            Some(OnConflict::Overwrite),
+        );
+        assert_eq!(
+            done(&unknown.items[0].outcome).to,
+            "library/f/x - Copy (2).md"
+        );
+        assert_eq!(world.text("lib/f/x.md"), "there");
+        assert!(!world.there("lib/.trash"));
+
+        // The canonical path tells the folders apart: the overwrite goes as asked.
+        world.probes.fail_canonical.store(false, Ordering::SeqCst);
+        let other = world.cp(
+            &["library/d/x.md"],
+            "library/f",
+            Some(OnConflict::Overwrite),
+        );
+        let copied = done(&other.items[0].outcome);
+        assert_eq!(copied.to, "library/f/x.md");
+        assert!(copied.trashed.is_some());
+        assert_eq!(world.text("lib/f/x.md"), "item");
+        assert_eq!(world.text("lib/d/x.md"), "item");
+    }
+
+    // ADR-0377: the generation a copy's hold compares is taken before its judgements — a mount relocated right after
+    //   them (where a spelling might alias the item's own folder) stops the item in the hold: nothing is overwritten
+    //   or placed, the staging kept and named.
+    #[test]
+    fn a_mount_changed_after_a_copys_judgements_stops_it_in_the_hold() {
+        let world = World::new();
+        world.put("lib/a.md", "new");
+        world.put("lib2/a.md", "old");
+        world.scan();
+        let (svc, elsewhere) = (Arc::clone(&world.svc), world.at("lib4"));
+        let worker = on_thread(&world.svc, move |on| {
+            AFTER_JUDGEMENT.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    svc.relocate_mount("team", &elsewhere, true).unwrap();
+                }));
+            });
+            on.copy_items(&["library/a.md"], "team", Some(OnConflict::Overwrite), None)
+                .unwrap()
+        });
+
+        let answer = worker.join().unwrap();
+
+        let why = failure(&answer.items[0].outcome);
+        assert_eq!(why.code, TARGET_MOUNT_CHANGED, "{why:?}");
+        assert!(why.args["staging_disk"].is_string(), "{}", why.args);
+        assert_eq!(world.text("lib/a.md"), "new");
+        assert_eq!(world.text("lib2/a.md"), "old");
+        assert!(!world.there("lib4/a.md"), "nothing placed after the change");
+        assert!(!world.there("lib2/.trash") && !world.there("lib4/.trash"));
     }
 }
