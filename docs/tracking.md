@@ -40,6 +40,7 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-11 | Per-child permission scope (R7) | Main | Deferred — remote stage |
 | T-9 | claude process pooling | Main | Deferred |
 | T-6 | cwd workspace validation | Main | Deferred — operations stage |
+| T-124 | base `write_atomic` opens its temp with `File::create` — a link planted at the temp name is followed and its target truncated | Bug | Not started · pre-existing · found by the S25 step 9b U2a review |
 | T-123 | `LibraryService::rewrite_in` does not re-check the file before its write — an outside edit between its read and write is lost | Bug | Not started · pre-existing · found by the S25 step 9b TRD (R11) |
 | T-114 | Platform test `escape_reads_up_when_nobody_holds_it` reads the live Esc key state | Bug | Kept as is (user decision) — fails only while Esc is held; rerun it |
 | T-113 | Agent tree rename input may remount on every keystroke (suspected, pre-existing) | Bug | Open — not reproduced; found by S35 review |
@@ -325,6 +326,11 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Reintroduction:** In the operation stage, decide the allowed cwd policy (e.g. only under the Engram workspace) and then validate in manager.spawn_agent or the command layer.
 
 ## Bug
+
+### T-124. base `write_atomic` opens its temp with `File::create`
+- **Status:** not started — pre-existing; found by the S25 step 9b U2a review (Codex). 9b's exclude-line write uses its own create-new temp instead.
+- **Case:** `write_atomic` / `copy_atomic` (base `file.rs`) write to `<name>.tmp<pid>.<n>` opened with `File::create`, which follows a link already standing at that name and truncates its target. The temp name is predictable; whoever can write the folder can plant the link first.
+- **Next:** open the temp with `create_new` and draw another temp name on `AlreadyExists`.
 
 ### T-123. `LibraryService::rewrite_in` does not re-check the file before its write
 - **Status:** not started — pre-existing; recorded from the S25 step 9b TRD risk R11 (`docs/process/S25-preset-library/trd-file-operations.md` §10).
