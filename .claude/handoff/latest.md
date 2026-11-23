@@ -1,29 +1,39 @@
-# Handoff: S25 step 9b — U1, U2a committed; U2b reviewed (PASS), QA running; U3 next (Explorer probe done)
+# Handoff: S25 step 9b — U1, U2a, U2b committed; U3 fixed after review round 1 (uncommitted) — next: U3 re-review
 
 ## Know first
-- Autonomous mode (user: 「쭉 진행해. 자율로. 나 퇴근」). Session stopped at the usage limit.
-- Main's notes for this step: `.review-s25-d9/s9b-code/agents.md` (agent ids, snapshots, round files). Briefs/rounds in the same folder.
-- Codex relay moves to background after 180 s; recover from the run's output file (works). Replace a coder past ~500k.
+- **Codex is called through the CLI now, not the plugin** (user 2026-11-24 「ㅇㅇ 지시서를 cli 로 되돌리면 되긴하는데 skill-factory 에 내용 전달하고 너는 하던거 계속하면 될듯」). The instruction files still say plugin until skill-factory changes them (intake Engram `0dce62c`, `agents/skill-factory/doc/insights/2026-11-24-codex-cli-return-intake.md` — commands there). First review = `codex exec --sandbox read-only --skip-git-repo-check -c model_reasoning_effort="xhigh" "<brief>" < /dev/null`; re-reviews = `codex exec resume -c model_reasoning_effort="xhigh" -c sandbox_mode="read-only" --skip-git-repo-check <session id> "<brief>" < /dev/null` (session id from the output's `session id:` line). Run it from REPL `$` with a short `.timeout()` so it goes to the background; a completion notification arrives. A plugin-made thread cannot be resumed by the CLI (`already has an active writer`) — U3's round-1 Codex review ran through the plugin, so the U3 re-review is a fresh CLI thread; resume from round 3 on.
+- The user wants Codex re-reviews continued in one thread, not a new one each round (user 「토큰폭팔」, 「몇번째 얘기하는데」). A handoff note must not override that.
+- Ask with a concrete example first; never point the user at "above" — restate the question in full (user 2026-11-24 「내가 위에라고 하면 다 뒤져서 찾아야됨?」).
+- Main's step notes: `.review-s25-d9/s9b-code/agents.md`; briefs, round files, diffs in the same folder. Replace a coder past ~500k (two U3 coders so far). Code mode (REPL).
+- Not ours: `src-tauri/bindings/*.ts` line-ending noise, `.claude/explain/`.
 
 ## One-line state · next first action
-U1 `f5a8c4fc`, U2a `c4e0f5b8` committed (deep review + QA PASS each). ADR-0412 (U2a), ADR-0414 (U2b) written. U2b (delete/view/restore) is **uncommitted, review PASS (4 rounds), QA was running** (agent a`aee48ded239585700`, snapshot tree `48f287c504ab05a7b9b452c56fd522e813373f16`).
-**Next:** read the U2b QA result (SendMessage the QA agent or rerun QA from `.review-s25-d9/s9b-code/u2b-qa-brief.md`); if PASS, stage exactly the files in that brief and commit U2b (commit message pattern = U2a's, `.review-s25-d9/s9b-code/u2a-commit-msg.txt`). Then U3 — first settle keep-both naming (probe: `.review-s25-d9/s9b-code/u3-explorer-probe-result.md`).
+9b: U1 `f5a8c4fc`, U2a `c4e0f5b8`, U2b `5d71e2bf` committed and pushed (deep review + QA PASS each; ADR-0412, ADR-0414). U3 (one-volume move / rename) built, deep-reviewed (round 1: all three FIX), and fixed by a fresh coder (13 items incl. the user's item 13) — **uncommitted, re-review not done**.
+**Next:** U3 round-2 re-review on snapshot `71a96023c3670fd00c0f2b6c1205f81fdf925543` (incremental diff `.review-s25-d9/s9b-code/u3-r2.diff` from `6bcc407e`; fix list `u3-round1.md` items 1–13; coder report summarized in `handover-u3.md` 「Round 1」): lead (`ab466ac38068ab4ca`) checks 1,2,3,6,9,11,12 and the shared-code refactor (delete must stay identical); risk (`aff5ef38093ebb76d`) checks 3,4,5,7,8,13 (last lens round); Codex (fresh CLI thread) checks 1,2,6,7,10. Then batched wording (ops.rs anchor ~:5064, `asset-library.md` 「Folder IO is bounded」), ADR for U3 decisions (below), QA (both lanes — asset-library path), commit. Then U4 (cross-volume move, copy), U5 (emptying), U6 (texts). After 9b: 10b commands → 22 hook components → server-stage stop → client UI.
 
-## Repo state
-- Branch v0.5.0/feat/preset-library, HEAD `58a9faec` (+ this handoff commit), ahead of origin (not pushed this session). Uncommitted: U2b files (ops.rs new, catalog/folder/lib/rename/store/trash.rs, agent profile_edit.rs doc, asset-library.md). Not ours: src-tauri/bindings noise, .claude/explain/.
+## Repo state (measured at save)
+- Branch v0.5.0/feat/preset-library, HEAD `5d71e2bf`, 0 ahead / 0 behind origin (this handoff commit makes it 1 ahead).
+- Uncommitted (U3): `crates/engram-dashboard-asset-library/src/{catalog,lib,mounts,ops,rename}.rs`, `docs/reference/structure/asset-library.md`.
 
 ## Verification state
-- U1/U2a: full regression + lanes (U2a) + mutation PASS — see commit messages.
-- U2b: review PASS; QA **not confirmed** (gate not passed) — do not commit before QA PASS. Two asset-library timing tests flaked once in a coder run (launch::tests::a_mount_only_another_backends_entry_reaches_is_not_stat_ed_by_a_launch, tests::a_first_scan_whose_wait_for_the_load_judgement_runs_out_records_nothing_and_goes_round).
+- U3: **gate not passed** (round-2 re-review and QA not run) — do not trust or commit this diff yet. Coder ran: asset-library 793 passed / 1 ignored (+13, 0 lost), agent and daemon green, workspace build, fmt clean; spot mutations on items 1, 2, 5, 7, 13.
+- Coder notes for the re-review: `reclassify` lists its folder without a link check (shared with delete, unchanged); a destination whose last name is a link answers `path-through-link` instead of `onConflict`; a keep-both merge that renames `SKILL.md` to `SKILL (2).md` and then empties the folder removes the skill without asking (outside item 13 as written); delete now publishes records after all trash moves and retries a failed bundle per item; log wording changed.
+- Rerun: `cargo test -p engram-dashboard-asset-library` · agent / daemon `-- --test-threads=4` · full QA per `.claude/skill-bindings/qa.md`.
+
+## Failed approaches (do-not)
+- Codex plugin `--resume` cannot pick a thread by id (upstream #230/#700, PRs #475/#719 open); `codex exec resume <id>` on a plugin thread fails: `thread-store conflict: thread … already has an active writer`.
+- Codex retried right at its reset time still answered `You've hit your usage limit … try again at 12:40 AM` — wait a few minutes past the reset.
+- QA's `cargo test --workspace` stops at the first failing binary; add a `--no-fail-fast` run when it stops early (U2b QA did).
 
 ## Decisions
-User: (묻지 않음) 진행 방식 · 「쭉 진행해. 자율로. 나 퇴근」.
-Main: U2 split U2a/U2b; T-123 (rewrite_in recheck), T-124 (write_atomic temp) recorded; ADR-0412 (exclude std-fs job, record name, one trash take); ADR-0414 (detach writes only confirmed presets/agents via set_attachments — amends ADR-0339 M101; restore reads in hold — amends ADR-0409 M15; digest covers items; spelling/kind judged in hold).
-Open (ask user): U1 unfixed 권장 (folder write-open denial skips link re-check); keep-both naming "(2)" vs " - Copy" (probe D1).
+User:
+- 둘 다 유지 이름 · 상황: TRD R17 「(2)」, 이 PC 탐색기 엔진 플래그는 " - Copy" · (2) ★ / - Copy · 「ㅇㅇ (2)로해」 · 같음.
+- Codex 호출 방식 · 상황: 플러그인은 ID resume 불가(#230), CLI resume 실측 성공, 2026-09-16 플러그인 전환 이유(가시성·알림)는 REPL에서 해소 · CLI로 되돌림 ★ / 플러그인 유지 · 「ㅇㅇ 지시서를 cli 로 되돌리면 되긴하는데 skill-factory 에 내용 전달하고 너는 하던거 계속하면 될듯」 · 같음 · 조건: 지시서 수정은 skill-factory.
+- 합치기 뒤 스킬 폴더가 SKILL.md를 잃는 경우 · 상황: 참조가 「찾을 수 없음」이 됨, SKILL.md 단독 이동은 이미 확인함(ADR-0339 M110) · 확인 받기(A) ★ / 그대로(B) / 막기(C) · 「그냥 넣어. 근데 llm이 인자 없이 호출하지는 않을것 같은데 어쨋든 ㄱㄱ」 · 같음.
+- (묻지 않음) 핸드오프 시점 · 「핸드오프 지점 됐는데 적당할때 핸드오프 진행하자.」
+Main: U2 split; T-123, T-124; ADR-0412, ADR-0414 (detach writes only confirmed presets/agents; restore reads in hold; digest covers items; spelling/kind in hold); U3 keep-both naming in one function; U3 fixes as in `u3-round1.md`. **ADR to write at the U3 commit:** item 13 (merge → skill-unconfirmed), merge pair rules (exact S→D only when S's SKILL.md became D's), skill re-read narrowed to the pair's own path (TRD §3.4 difference), second displacement → second bundle, `Trashing` / `walk_refs` shared by delete and move.
+Open (ask the user): U1 unfixed 권장 — a folder write-open denial in `make_removable` skips the link re-check (rare; few lines to fix).
 
-## Resume command
-`git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -5 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v bindings/`
-
-## Update after save (U2b QA result)
-- U2b QA: everything U2b touches PASS (workspace 6783 with --no-fail-fast, asset-library 764, gates 34/34, frontend 2884, codex lane 19/19, mutation 4/4). **Not committed**: claude lane PARTIAL — launch_kits_live claude_ 0/4 hit the claude 5-hour limit (resets 23:50 KST); `control_send` `c2_live_mid_turn_send_parks_and_delivers_after_turn_end` FAIL(pre-existing, same at base c4e0f5b8, no tracking record — may also be the usage limit).
-- Next: after the reset, rerun `cargo test -p engram-dashboard-daemon --test launch_kits_live -- --ignored --test-threads=1 --nocapture claude_` and the c2_live test; if green (or c2_live confirmed pre-existing → record in tracking, ask user), commit U2b with exactly the 9 files of `.review-s25-d9/s9b-code/u2b-qa-brief.md` (snapshot 48f287c5).
+## References
+- TRD `docs/process/S25-preset-library/trd-file-operations.md` (§3.5, §3.6 for U4, §3.8 for U5, §8, §9); ADR-0409, 0412, 0414, 0339, 0335, 0400 d23–25.
+- `.review-s25-d9/s9b-code/`: `coder-brief.md`, `u3-unit.md`, `u3-round1.md`, `u3-{lead,risk,codex}-r1.md`, `handover-u1/u2a/u2b/u3.md`, `u3-explorer-probe-result.md`, commit messages `u2a-/u2b-commit-msg.txt` (pattern).
