@@ -10,7 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
-| T-122 | Step-21 U4b — a stopped rename: tokens confirmed before the stop still pass when the plan of what is left is the confirmed one | Main | Decision pending (user) — current code kept provisionally |
+| T-122 | Step-21 U4b — a stopped rename: tokens confirmed before the stop still pass when the plan of what is left is the confirmed one | Main | Closed 2026-11-23 — user: keep as is (ADR-0407) |
 | T-121 | Step-21 U4a / U4b review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-120 | T-112 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched (user 2026-11-20: minor items need not be shown) |
 | T-105 | Launch folder wait as an advanced setting (once file-based settings loading exists) | Main | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
@@ -112,7 +112,7 @@ Full text before the simplification (investigation records · reverted attempts 
 ## Main
 
 ### T-122. Step-21 U4b — tokens confirmed before a stop pass when the plan of what is left is the confirmed one
-- **Status:** decision pending (user), raised 2026-11-23 by U4b review round 6 (hold). The code is kept as is provisionally; ADR-0407 decision 2, the `rename.rs` header and the `library.renameMount` doc already describe it.
+- **Status:** closed 2026-11-23 — user 「그대로 둬.」: kept as is (ADR-0407, rejected alternative). Raised by U4b review round 6 (hold); ADR-0407 decision 2, the `rename.rs` header and the `library.renameMount` doc already describe it.
 - **Case:** a confirmed rename stops at a file failure (the generation is not raised). If every file it wrote is edited to refer to the old mount name again and nothing else changes, the plan of what is left equals the confirmed plan (the digest pins paths, not content), so the old tokens rewrite those files again without a fresh confirmation. Only files in the confirmed set are touched, so ADR-0405 decision 1 holds.
 - **Options:** accept it (reviewer and main lean this way — content was never pinned, even without a stop) · or raise the generation when a stop has written files (changes what the generation means).
 

@@ -1,6 +1,6 @@
 # ADR-0407: Stopped mount rename after step-21 U4b round 5: no plan digest in the stop answer, the repeat re-plans what is left and is confirmed again (amends ADR-0400)
 
-- 상태: 확정 (2026-11-23, 근거: user 2026-11-23 「ㅇㅇ 어쨋든 old new 폴더 바뀌는게 최종이니깐 아직 안된게 가시적으로 보이고 중지됐으면 다시 실행 가능하다는거잖아. 그거 자체가 히스토리니깐. 진행 ㄱㄱ」 after a light convention check (Terraform 「Saved plan is stale」 after a partial apply, VS Code and IntelliJ re-trigger the rename) · step-21 U4b code review round 5 (lead and Codex, must))
+- 상태: 확정 (2026-11-23, 근거: user 2026-11-23 「ㅇㅇ 어쨋든 old new 폴더 바뀌는게 최종이니깐 아직 안된게 가시적으로 보이고 중지됐으면 다시 실행 가능하다는거잖아. 그거 자체가 히스토리니깐. 진행 ㄱㄱ」 after a light convention check (Terraform 「Saved plan is stale」 after a partial apply, VS Code and IntelliJ re-trigger the rename) · step-21 U4b code review round 5 (lead and Codex, must) · user 2026-11-23 「그대로 둬.」 on the review round-6 hold (old tokens pass when the plan of what is left is the confirmed one — T-122))
 - 관련: Amends ADR-0400 (decision 12 the same call finishes a stopped rename) · ADR-0405 (decision 1 yes pins what the caller saw; decisions 2 and 3 unread references and a lost mount) · ADR-0335 (relink stop rule, no progress record) · step-21 TRD `docs/process/S25-preset-library/trd-library-mounts.md` · Amends ADR-0405 (decision 3 the repeat after a lost-mount stop asks before it finishes)
 
 ## 맥락
@@ -14,6 +14,7 @@ ADR-0400 decision 12 said a stopped rename is finished by "the same call", and a
 ## 거부한 대안
 - **Stop answer carries the digest of what is left, computed after the hold (round-4 fix as built)** — admits a file edited between the hold and the digest into a confirmation the caller never saw. Basis: review round 5 (lead and Codex, must).
 - **Compute that digest inside the hold** — keeps one-call finishing, but a mount lost during the rename then needs its own rule (the repeat could finish leaving that mount's files unread without the caller seeing a plan listing them, ADR-0405 decisions 2 and 3); one more exception for a rare path. 약함 — 사용자 직접 기각 (after the convention check: no surveyed tool carries a resume token across a failure).
+- **Raise the root generation when a stop has written files, so tokens confirmed before a stop never pass again** — the generation would also mean "a rename stopped part-way", and the case it closes (every written file edited back to the old name, nothing else changed) touches only files the caller confirmed. 사용자 직접 기각 (review round-6 hold, T-122).
 - **A separate repair or resume command** — there is no progress record to repair (ADR-0335); the same rename re-plans from the files. Flyway's `repair` exists because it keeps a failed-migration history table. 약함 — 사용자에게 설명, 사용자 수용.
 
 ## 근거
