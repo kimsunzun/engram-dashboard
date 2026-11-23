@@ -2170,12 +2170,29 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
         },
     )
     .to_json();
-    assert_eq!(
-        v1["results"][0]["status"], "delivered",
-        "an immediate injection to an idle recipient: {v1}"
-    );
+    // An idle recipient gets the letter at once. ★Two outcomes are correct★ (ADR-0125 decision 1, tracking T-128): the send injects it
+    //   itself (`delivered`), or the appearance flush of the just-spawned agent takes the parked letter first and injects it, and the
+    //   send backs off with `pending` + the "at the same time" hint. In the second case the letter must still be observed delivered.
+    let id1 = v1["id"].as_str().expect("msg id").to_string();
+    match v1["results"][0]["status"].as_str() {
+        Some("delivered") => {}
+        Some("pending")
+            if v1["results"][0]["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("at the same time")) =>
+        {
+            assert!(
+                wait_until(Duration::from_secs(10), || seen.lock().unwrap().iter().any(
+                    |o: &engram_dashboard_messaging::envelope::DeliveryObservation| o.msg_id == id1
+                        && o.is_delivered()
+                )),
+                "the send backed off for a concurrent flush, so that flush must have delivered the letter: {v1}"
+            );
+        }
+        _ => panic!("an immediate injection to an idle recipient: {v1}"),
+    }
     assert!(
-        busy.is_busy(info.id, info.epoch),
+        wait_until(Duration::from_secs(5), || busy.is_busy(info.id, info.epoch)),
         "injection = turn start — the input-time user echo (Structured) must enter the table through the real emit path"
     );
 

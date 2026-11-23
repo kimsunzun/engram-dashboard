@@ -41,7 +41,6 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-11 | Per-child permission scope (R7) | Main | Deferred — remote stage |
 | T-9 | claude process pooling | Main | Deferred |
 | T-6 | cwd workspace validation | Main | Deferred — operations stage |
-| T-128 | Immediate send to an idle recipient can answer `pending` ("draining at the same time") when a flush takes the sender's own letter; flakes `c2_live_mid_turn_send_parks_and_delivers_after_turn_end` | Bug | Found in S37 U3b QA 2026-11-23; pre-existing; fix pending user decision |
 | T-114 | Platform test `escape_reads_up_when_nobody_holds_it` reads the live Esc key state | Bug | Kept as is (user decision) — fails only while Esc is held; rerun it |
 | T-113 | Agent tree rename input may remount on every keystroke (suspected, pre-existing) | Bug | Open — not reproduced; found by S35 review |
 | T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | Bug | Open — user decision on the default |
@@ -282,12 +281,6 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Reintroduction:** In the operation stage, decide the allowed cwd policy (e.g. only under the Engram workspace) and then validate in manager.spawn_agent or the command layer.
 
 ## Bug
-
-### T-128. Immediate send to an idle recipient can answer `pending` when a flush takes the sender's own letter
-- **Status:** found in S37 U3b QA (2026-11-23); pre-existing (the code path is unchanged since `2b5d8c13`; the failing test's assembly runs none of U3b's paths). Fix not decided — the main asks the user (test change now vs kernel change later).
-- **Observed (QA, claude lane):** `control_send::c2_live_mid_turn_send_parks_and_delivers_after_turn_end` failed once at `crates/engram-dashboard-daemon/tests/control_send.rs:2173` ("an immediate injection to an idle recipient", left `pending`, right `delivered`, hint "Another send to 'c2-live-recv' was draining that mailbox at the same time, so this call could not confirm delivery — it was NOT lost"); it passed in the workspace run on the same tree, at the base point, and in 3 more real runs.
-- **Cause (coder trace + a deterministic kernel reproduction, temporary test, not kept):** `handle_send` parks the letter, releases the messaging lock, then drains in a second lock span (`crates/engram-dashboard-messaging/src/service.rs` `drop(st)` → `drain_queue`). The appearance flush queued when the new agent was listed can take the sender's own letter in that gap and inject it; the send backs off and answers `pending` with the hint — the conservative answer spec §6 ㉯ / ADR-0125 intends. Delivery is correct; only the answer is pessimistic.
-- **Options:** (a) test only — the first send accepts `delivered`, or `pending` with the overlap hint plus a later observed delivery of that message (both allowed by spec §6 ㉯); (b) kernel — a sender that backed off because another drain holds its own letter waits, bounded, for that batch to settle and reports the real outcome (changes ADR-0125 behaviour).
 
 ### T-114. Platform test `escape_reads_up_when_nobody_holds_it` reads the live Esc key state
 - **Status:** kept as is (user decision, 2026-11-18) — found in S38 QA; predates S38.
