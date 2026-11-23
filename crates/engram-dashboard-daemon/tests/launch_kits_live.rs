@@ -1,19 +1,18 @@
 //! Real launch materials, live — the library service as the manager's launch-kit source, over the repo `builtin\`,
-//! with real claude and codex (scenes L1–L5).
+//! with real claude and codex (scenes L1–L6).
 //!
-//! ★Every scene is `#[ignore]`★ — the claude and codex lanes run them (`.claude/skill-bindings/qa.md`). L1, L2, L4 and
-//!   claude L5 spend **one real claude turn each** (claude L5 also spawns claude a second time, with no turn); L3 and
-//!   codex L5 each spawn codex twice (JSON and terminal) and spend **one real model turn** on the JSON one. Auth
-//!   needed.
+//! ★Every scene is `#[ignore]`★ — the claude and codex lanes run them (`.claude/skill-bindings/qa.md`). L1, L2, L4,
+//!   claude L5 and claude L6 spend **one real claude turn each** (claude L5 also spawns claude a second time, with no
+//!   turn); L3 and codex L5 each spawn codex twice (JSON and terminal) and spend **one real model turn** on the JSON
+//!   one; codex L6 spawns codex JSON once and spends one real model turn. Auth needed.
 //! ★The service is built here, not through the daemon assembly★ — the same values as production (the repo built-in
 //!   folder, the production folder waits), but a temporary launch root, home and profile store under one scene root
 //!   (removed on drop), so the launch writes nothing outside it and codex's own skill roots under the home are empty.
-//!   L4 and L5 add a temporary library root. A real MCP server and control channel stand behind the agents, so claude's
-//!   engram tools are really attached.
+//!   L4 and L5 register one temporary library mount, L6 two. A real MCP server and control channel stand behind the
+//!   agents, so claude's engram tools are really attached.
 //! ★The CLIs still keep their own records outside it★ — each claude turn leaves a session transcript under the real
-//!   `~/.claude/projects/`, and each codex JSON turn (L3, codex L5) leaves one thread in the real `~/.codex` (its id
-//!   is printed). Removing
-//!   them is the user's call.
+//!   `~/.claude/projects/`, and each codex JSON turn (L3, codex L5, codex L6) leaves one thread in the real `~/.codex`
+//!   (its id is printed). Removing them is the user's call.
 //!
 //! Run: `cargo test -p engram-dashboard-daemon --test launch_kits_live -- --ignored --test-threads=1 --nocapture`
 //!   (`claude_` / `codex_` select one lane).
@@ -241,8 +240,9 @@ fn merged_priming() -> String {
     merge_instructions(Some(&priming), &[])
 }
 
-/// One scene's manager: the library service (production values over the scene root; `library` = its library root)
-/// plugged in as the launch-kit source, a real MCP server and control channel, a profile store in the scene root.
+/// One scene's manager: the library service (production values over the scene root; its mounts as [`live_mounts`]
+/// registers them) plugged in as the launch-kit source, a real MCP server and control channel, a profile store in the
+/// scene root.
 struct Live {
     manager: Arc<AgentManager>,
     profiles: Arc<ProfileRegistry>,
@@ -250,7 +250,18 @@ struct Live {
     mcp: McpServerHandle,
 }
 
+/// [`live_mounts`] with `library` as the one mount `library`, or with no mount.
 async fn live(root: &Path, library: Option<PathBuf>) -> Live {
+    match library {
+        Some(library) => live_mounts(root, &[("library", library.as_path())]).await,
+        None => live_mounts(root, &[]).await,
+    }
+}
+
+/// A scene's manager whose library registers `mounts` (name, folder) in that order, as production reads them:
+/// `library.json` in the scene's state folder. No mount writes no file, and with no first start the library then has
+/// no mount.
+async fn live_mounts(root: &Path, mounts: &[(&str, &Path)]) -> Live {
     let control_registry = Arc::new(ControlRegistry::new());
     let manager_slot = Arc::new(ManagerSlot::new());
     let (relay_bus, relay_sweeper) =
@@ -275,15 +286,14 @@ async fn live(root: &Path, library: Option<PathBuf>) -> Live {
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         root.join("store"),
     ))));
-    // The library root as production reads it: `library.json` in the scene's state folder, naming `library`; no file
-    //   (and no first start) leaves the root unset.
     let state = root.join("state");
-    if let Some(library) = &library {
+    if !mounts.is_empty() {
         std::fs::create_dir_all(&state).expect("create the state folder");
-        let config = serde_json::json!({
-            "schema_version": 2,
-            "mounts": [{ "name": "library", "path": library.to_str().unwrap() }],
-        });
+        let mounts: Vec<serde_json::Value> = mounts
+            .iter()
+            .map(|(name, folder)| serde_json::json!({ "name": name, "path": folder.to_str().unwrap() }))
+            .collect();
+        let config = serde_json::json!({ "schema_version": 2, "mounts": mounts });
         std::fs::write(state.join("library.json"), config.to_string()).expect("write library.json");
     }
     let library = Arc::new(LibraryService::new(
@@ -802,6 +812,88 @@ async fn claude_l5_missing_items_are_skipped_and_the_agent_is_told() {
     );
 }
 
+// ── L6 — a preset in one mount reaches a skill in another ─────────────────────────────────────
+
+/// Two user mounts under `root`: `team-a` holds the preset `P.yaml`, which lists the skill
+/// `team-b/skills/live-mount-<token>` of the mount `team-b` — the two mount folders and the skill's name (lowercase,
+/// so codex JSON accepts it). The scene token keeps a leftover from another run from answering.
+fn two_mounts_library(root: &Path) -> (PathBuf, PathBuf, String) {
+    let n = Uuid::new_v4().simple().to_string()[..8].to_string();
+    let skill = format!("live-mount-{n}");
+    let a = root.join("mount-a");
+    let b = root.join("mount-b");
+    put(
+        &b.join("skills").join(&skill).join("SKILL.md"),
+        &format!("---\nname: {skill}\ndescription: A live-test skill named {skill}. It does nothing.\n---\n\nThis skill does nothing.\n"),
+    );
+    put(
+        &a.join("P.yaml"),
+        &format!("kind: preset\nversion: 1\nskills:\n  - team-b/skills/{skill}\n"),
+    );
+    (a, b, skill)
+}
+
+/// The launch reached the skill in mount B: the start told of nothing left out, and the volatile folder links
+/// `engram/skills/<skill>` to that skill's folder in mount B.
+fn assert_skill_linked_from(vol: &Path, b: &Path, skill: &str, notices: &[Notice], scene: &str) {
+    assert!(
+        notices.is_empty(),
+        "{scene}: the start left something out: {notices:?}"
+    );
+    let link = vol.join("engram").join("skills").join(skill);
+    assert!(
+        listing(vol).contains(&format!("engram/skills/{skill} (link)")),
+        "{scene}: the volatile folder: {:?}",
+        listing(vol)
+    );
+    assert_eq!(
+        dunce::canonicalize(&link).expect("resolve the skill link"),
+        dunce::canonicalize(b.join("skills").join(skill)).expect("canonicalize the skill folder"),
+        "{scene}: the skill link does not lead into mount B"
+    );
+}
+
+/// Claude L6 — mounts `team-a` and `team-b` ([`two_mounts_library`]); the agent attaches `team-a/P.yaml`, whose skill
+///   lives in `team-b` (ADR-0396 decision 3): the start leaves nothing out, the volatile folder links the skill from
+///   mount B, the command line carries the plugin folder, and one turn lists the skill.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real claude — 1 model turn"]
+async fn claude_l6_a_preset_in_one_mount_loads_a_skill_from_another() {
+    let root = scene_root("claude-mounts");
+    let (a, b, skill) = two_mounts_library(&root);
+    let live = live_mounts(&root, &[("team-a", a.as_path()), ("team-b", b.as_path())]).await;
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut profile = agent("live-claude-mounts", claude(), &work);
+    profile.presets = vec![AttachedPreset {
+        path: "team-a/P.yaml".to_string(),
+    }];
+    let id = profile.id;
+    let (info, notices, events) = live.start_reporting(&profile);
+    let vol = root.join("launch").join(format!("{id}-{}", info.epoch));
+    assert_skill_linked_from(&vol, &b, &skill, &notices, "L6");
+    #[cfg(windows)]
+    {
+        let line = command_line_holding(&vol).expect("L6: the claude command line was not found");
+        println!("L6 command line: {line}");
+        assert!(line.contains("--plugin-dir "), "L6: {line}");
+    }
+    let from = live.one_turn(
+        id,
+        &events,
+        "Without using a tool: list the names of the skills whose names contain live-, and nothing else.",
+    );
+    let answer = events.text_after(from);
+    println!("L6 answer: {answer}");
+    live.kill_and_reap(id);
+    live.end().await;
+
+    assert!(
+        answer.contains(&skill),
+        "L6: the skill of mount B: {answer}"
+    );
+}
+
 // ── L3 — codex JSON and terminal ──────────────────────────────────────────────────────────────
 
 /// L3 — codex JSON and codex terminal, one fresh launch each with real kits and no library root: each comes up (a
@@ -975,4 +1067,53 @@ async fn codex_l5_missing_items_reach_codex_as_a_launch_note() {
         );
     }
     live.end().await;
+}
+
+/// Codex L6 — the claude L6 mounts on codex JSON, one fresh launch: the start leaves nothing out, the volatile folder
+///   links the skill from mount B, and codex received it — the skills list of the thread's rollout developer
+///   messages ([`rollout_developer_texts`]) names it (one model turn: codex writes the rollout from the first turn on).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real codex — 1 model turn, one thread left in ~/.codex"]
+async fn codex_l6_a_preset_in_one_mount_reaches_codex_with_a_skill_from_another() {
+    let root = scene_root("codex-mounts");
+    let (a, b, skill) = two_mounts_library(&root);
+    let live = live_mounts(&root, &[("team-a", a.as_path()), ("team-b", b.as_path())]).await;
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut profile = agent(
+        "live-codex-mounts",
+        codex(AgentOutputFormat::StreamJson),
+        &work,
+    );
+    profile.presets = vec![AttachedPreset {
+        path: "team-a/P.yaml".to_string(),
+    }];
+    let id = profile.id;
+    let (info, notices, events) = live.start_reporting(&profile);
+    let vol = root.join("launch").join(format!("{id}-{}", info.epoch));
+    assert_skill_linked_from(&vol, &b, &skill, &notices, "L6 codex");
+    let from = live.one_turn(
+        id,
+        &events,
+        "Without using a tool: list the names of the skills whose names contain live-, and nothing else.",
+    );
+    println!("L6 codex answer: {}", events.text_after(from));
+    let thread = live
+        .profiles
+        .get(id)
+        .and_then(|p| p.backend_session_id)
+        .expect("L6 codex: the codex thread id was not recorded");
+    println!("L6 codex created codex thread {thread} in ~/.codex — removing it is the user's call");
+    live.kill_and_reap(id);
+    live.end().await;
+
+    let developer = rollout_developer_texts(&thread.to_string());
+    assert!(
+        developer.iter().any(|text| text.contains(&skill)),
+        "L6 codex: codex did not list the skill of mount B — the developer texts begin: {:?}",
+        developer
+            .iter()
+            .map(|text| text.chars().take(120).collect::<String>())
+            .collect::<Vec<_>>()
+    );
 }

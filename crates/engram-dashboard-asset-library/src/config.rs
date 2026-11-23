@@ -16,7 +16,8 @@
 //!   calls [`ConfigFile::save`]; nothing is ever undone. A save that fails leaves the file as it was and the state
 //!   `unsaved` — the live mounts' setting, not the file's — until a later save succeeds; the next start follows the
 //!   file that is left. The list the file last held (as loaded, or as last saved) is kept, so a mount command repeated
-//!   after a failed save can tell a repeat from a mistake ([`ConfigFile::unsaved_removal`] — ADR-0400 decision 14).
+//!   after a failed save can tell a repeat from a mistake ([`ConfigFile::unsaved_removal`] ·
+//!   [`ConfigFile::unsaved_rename`] — ADR-0400 decision 14).
 //! - **The caller serializes saves** — `LibraryService` holds its mount-change mutex across the mount change and
 //!   [`ConfigFile::save`]. The state lock here is a leaf taken under that mutex only to read or set the state, never
 //!   across IO.

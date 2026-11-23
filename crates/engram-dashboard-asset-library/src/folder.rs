@@ -1,6 +1,6 @@
 //! Bounded, concurrent folder IO on a per-launch budget. Every stat, listing, canonicalize, file identity and file read
-//! on a folder outside the library (folder entries, native skill roots, the working folder, the library root, a mount
-//! folder and its ancestors) goes through [`BoundedIo`]; library files inside the root are read with the store.
+//! on a folder outside the library (folder entries, native skill roots, the working folder, a mount folder and its
+//! ancestors) goes through [`BoundedIo`]; library files inside a mount folder are read with the store.
 //!
 //! ## Rules
 //!

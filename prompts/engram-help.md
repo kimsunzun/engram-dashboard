@@ -19,7 +19,7 @@ Editing rules — break any one and the screen breaks:
   {tool} help agent     Agents. Create, start and rearrange them
   {tool} help window    Windows · tabs · splits, placing agents in them · moving tabs · reading the layout (layout.get), usage limits (usage.*), restoring the screen after a crash (restore.*)
   {tool} help settings  Settings. Theme · chat screen style (settings.*) · per-window theme (window.setTheme)
-  {tool} help library   Library. Instruction · skill · settings · preset files and attaching presets to agents
+  {tool} help library   Library. Mounts · instruction · skill · settings · preset files and attaching presets to agents
 
 Run a command = `{tool} <name> --flag value`. All names: `{tool} commands`; one command's arguments and return: `{tool} commands <name>`.
 ## mail
@@ -61,7 +61,7 @@ A <notice> with no from was sent by the broker daemon, not a teammate, so do not
       After a timeout or an unknown outcome, check agent.list before calling again — a second call creates a second agent.
 
   {tool} agent.spawn --target <name|id>
-      Starts it — fresh the first time, or resuming the previous session if there is one. If the launch is blocked, nothing starts: it returns CONFLICT and args.reasons carries the reasons — fix the listed items and start it again. A preset item that is not found, or a library folder that is not set or not there, does not stop the start: it is left out and named in notices. notices in a success reply name what the start left out — on purpose, or because it was not found (the same bundle comes only once per agent).
+      Starts it — fresh the first time, or resuming the previous session if there is one. If the launch is blocked, nothing starts: it returns CONFLICT and args.reasons carries the reasons — fix the listed items and start it again. A preset item that is not found, or one in a library mount that is not registered or not there, does not stop the start: it is left out and named in notices. notices in a success reply name what the start left out — on purpose, or because it was not found (the same bundle comes only once per agent).
 
   {tool} agent.rename --target <name|id> --name <new name>
       If the same name exists, a number is appended, and the name actually assigned comes back with outcome.
@@ -255,9 +255,9 @@ A window theme is saved with that window in the screen state and survives restar
 
 data_dir is the ENGRAM_DATA_DIR path if that env var is non-empty. Otherwise it is decided from the folder holding the {tool} executable (for an agent, ENGRAM_CLI_EXE in env) — a distribution (release build) uses data/ under that folder; a debug build (target\debug etc.) uses .engram-dev in the first repo root found going up from there (a folder that has .git, or has [workspace] in Cargo.toml), and if there is no root, .engram-dev in that folder.
 ## library
-{tool} library — the library: instruction, skill, settings and preset files under the library root folder, and the presets attached to agents. When an agent starts, it gets what its attached presets list.
+{tool} library — the library: instruction, skill, settings and preset files in the library's mounts, and the presets attached to agents. When an agent starts, it gets what its attached presets list.
 
-An item is named by its path from the library root, with / (rules/style.md · skills/review · team/web.yaml). The built-ins are engram:/default (the Default preset — the priming and the default settings, on for every new agent) · engram:/priming · engram:/settings/default; they cannot be edited.
+The library is one tree of mounts: a mount is a folder registered under a name (the first start registers default_library). An item is named by its path from the top, starting with its mount's name, with / (default_library/rules/style.md · team/skills/review · default_library/web.yaml); a preset may list items of any mount. The top holds only the mounts — nothing is created there (virtual-root-read-only). The built-in read-only mount engram holds engram/default (the Default preset — the priming and the default settings, on for every new agent) · engram/priming · engram/settings/default; they cannot be edited, and the old spelling engram:/… is refused.
 
   instruction   a .md file. Its text goes into the agent instructions
   skill         a folder holding SKILL.md
@@ -268,50 +268,62 @@ An item is named by its path from the library root, with / (rules/style.md · sk
   version: 1
   description: Rules and review skill for the web team
   presets:
-    - team/base.yaml
+    - default_library/base.yaml
   instructions:
-    - rules/style.md
-    - {path: rules/codex-only.md, backend: codex}
+    - default_library/rules/style.md
+    - {path: default_library/rules/codex-only.md, backend: codex}
   skills:
-    - skills/review
+    - team/skills/review
   settings:
-    - settings/quiet.yaml
+    - default_library/settings/quiet.yaml
   folders:
     - D:\work\shared-skills
 
-An entry with backend goes only to that backend (instructions and skills only). folders lists absolute folder paths, inside or outside the library folder — a folder entry is not a library item and is not named by a library path; preset.previewFolder shows what each backend loads from one.
+An entry with backend goes only to that backend (instructions and skills only). folders lists absolute folder paths, inside or outside a mount — a folder entry is not a library item and is not named by a library path; preset.previewFolder shows what each backend loads from one.
 
 Write a one-line description when you create or edit a settings or preset file.
 
 An edit through Engram rewrites the whole preset file — hand-written comments and layout are not kept.
 
-Where <path> appears below, give a library path; <list> is a JSON array of strings (["rules/style.md"]). One command's arguments and reply: {tool} commands <name>.
+Where <path> appears below, give a library path; <list> is a JSON array of strings (["default_library/rules/style.md"]). One command's arguments and reply: {tool} commands <name>.
 
   {tool} library.status
-      The library's mounts now (name · path · state each, the built-in engram last), config and root_generation. A mount's state is ok · missing (not there, or not a folder) · unreadable (there but could not be read, did not answer, or overlaps another mount); state_why says why
+      The library's mounts now (name · path · state each, the built-in engram last), config and root_generation. A mount's state is ok · missing (not there, or not a folder) · unreadable (there but could not be read, did not answer, or overlaps another mount); state_why says why. config unsaved = a mount change is live but library.json is not saved
   {tool} library.addMount --name <mount name> --path <absolute folder> [--create true]
-      Registers that folder as a mount (create makes the folder first); nothing is copied or moved. Replies like library.status plus already_pointing
+      Registers that folder as a mount (create makes the folder first); nothing is copied or moved. A mount name is one path segment: no / \ :, no leading ., at most 64 characters, not engram. Replies like library.status plus already_pointing (references that already named it and now resolve into it)
   {tool} library.removeMount --mount <mount name>
-      Unregisters a mount; no file is touched. Replies like library.status plus now_absent and outcome
+      Unregisters a mount; no file is touched. References to it read as absent (library-unavailable, not registered) until it is added back. Replies like library.status plus now_absent and outcome
   {tool} library.relocateMount --mount <mount name> --path <absolute folder> [--create true]
-      Points a mount at another folder under the same name. Replies like library.status
+      Points a mount at another folder under the same name; references do not change. Replies like library.status
   {tool} library.renameMount --mount <mount name> --to <new name> [--yes true --root_generation <n> --plan_digest <digest>]
-      Renames a mount and re-points every reference to it. When files would be rewritten, or left as they are because their mount cannot be read, it first answers mount-rename-unconfirmed with the plan; repeat with --yes true and that root_generation and plan_digest
+      Renames a mount and re-points every reference to it — in the preset files of every mount, then in agents. Two calls when files change or references stay unread (below)
   {tool} library.folders
-      Every folder, flat. A skill folder is marked skill
+      Every folder, flat. A skill folder is marked skill; a mount carries its state. The folders of a mount that cannot be read are left out, and the mount is named in unavailable — except the built-in engram, whose folders stay even when it is named there
   {tool} library.list [--folder <path>] [--query <text>] [--kinds <JSON array of Instruction|Skill|SkillFile|Settings|Preset>]
-      The items in that folder (the root if omitted) and its subfolders, or with query the items below it whose name or description matches. Per row path · kind · name · description · state (why the file is broken, null if it reads)
+      The items in that folder and its subfolders (folder omitted = the top: the mounts, each with its state), or with query the items below it whose name or description matches — over the whole library it skips the mounts that cannot be read and names them in unavailable (the built-in engram's rows still come, as stand-ins, even when it is named there). Per row path · kind · name · description · state (why the file is broken, null if it reads)
   {tool} library.read --path <path>
       One item: its file on disk, the presets and agents that reach it, an excerpt
   {tool} library.refresh [--folder <path>]
       Reads the files again — use it after changing library files outside Engram
-  {tool} library.newFolder --name <name> [--parent <path>]
-  {tool} library.newFile --name <name> --kind <Markdown|Settings|Preset> [--folder <path>]
-      Creates an empty folder, or a file from a template, and replies its path. A taken name is CONFLICT name-exists, nothing replaced
+  {tool} library.newFolder --name <name> --parent <path>
+  {tool} library.newFile --name <name> --kind <Markdown|Settings|Preset> --folder <path>
+      Creates an empty folder, or a file from a template, inside a mount and replies its path. A taken name is CONFLICT name-exists, nothing replaced
   {tool} library.relink --from <path> --to <path>
       Points every preset and agent that names from at to — the fix after an item was moved or renamed outside Engram (when from is missing, the other missing items of its folder found by name in the folder of to are fixed too; more counts them). If stopped comes back, clear its cause and run the same relink again
 
-  {tool} preset.get --path <path|engram:/default>
+Mount commands: after a refusal the mount list is unchanged — but with --create true a folder already made may stay — except library-config-write-failed: the change is live but not saved, and repeating the same call saves it (a rename repeat that answers a plan instead: confirm that plan). After a timeout, read library.status before repeating; a rename that meets a mount on a share that does not answer can take longer than {tool} waits.
+
+renameMount: when preset files would be rewritten, or references would stay as they are because their mount cannot be read, the first call applies nothing and answers CONFLICT mount-rename-unconfirmed; args.args carries plan, root_generation and plan_digest. Read the plan, then repeat the call with --yes true --root_generation <that root_generation> --plan_digest <that plan_digest>. A rename with no file to rewrite and nothing left unread runs at once (agents are re-pointed without asking).
+
+  plan.files              per mount, the preset files to rewrite (paths); git true = that mount is in a git working tree (null = could not be told)
+  plan.unread             the mounts that cannot be read (mount · state · why) and their files that refer to the old name (paths) — those stay as they are; paths null = never read, so what in it refers is unknown
+  plan.agents             the agents whose presets are re-pointed (id · name)
+  plan.whole_files        true — each file is rewritten whole: comments and quoting are not kept
+  plan.already_pointing   references that already name the new name (presets · agents); they will resolve into the renamed mount
+
+To have unread files rewritten too, wait until their mount reads ok (library.status) and call again instead of confirming. If the plan changed before the confirming call (a file came to refer to the mount, a mount came back or went away), nothing is applied and the reply is mount-rename-unconfirmed — or root-generation-stale when a mount changed — with the fresh plan; confirm that one with its own values (root-generation-stale: its root_generation is args.args.current). The reply is like library.status plus fixed (old → new pairs), written, skipped (files with why; a row naming a mount = that mount was never read) and already_pointing. If stopped is not null, a file or the agents could not be written and the old name stays: clear its cause and call again — the reply is the plan of what is left, to confirm with its own root_generation and plan_digest (when nothing is left to confirm, call again without --yes and it finishes). CONFLICT mount-unusable (args.args mount · state · why) = the mount itself cannot be read, so nothing was done — make it readable first (library.status).
+
+  {tool} preset.get --path <path|engram/default>
       The lists, each entry with its state, folders, conflicts, problems, rev and how many agents attach it
   {tool} preset.add --path <path> (--items <list> [--backend <claude|codex>] | --folders <list>) [--after <entry>]
       Adds after that entry (at the end if omitted). Adds what it can: each item it could not add is in skipped with its code and args. One bad folder refuses the whole call
@@ -319,7 +331,7 @@ Where <path> appears below, give a library path; <list> is a JSON array of strin
   {tool} preset.setBackend --path <path> --items <list> [--backend <claude|codex>]
       backend omitted = every backend
   {tool} preset.reorder --path <path> --section <presets|instructions|skills|settings|folders> --order <list> --base_rev <rev>
-      order = every entry preset.get shows in that section, each once
+      order = every entry preset.get shows in that section, each once. The section words are lowercase, as the preset file spells its keys
   {tool} preset.save --path <path> --presets <entries> --instructions <entries> --skills <entries> --settings <entries> [--folders <list>] [--base_rev <rev>]
       Replaces the lists, all or nothing. <entries> = a JSON array of {"path": "…", "backend": "…"} (backend may be left out). folders omitted = they stay
   {tool} preset.check --path <path> --presets <entries> --instructions <entries> --skills <entries> --settings <entries> [--folders <list>]
@@ -328,21 +340,21 @@ Where <path> appears below, give a library path; <list> is a JSON array of strin
       What each backend would load from that folder. Reads only
 
   {tool} agent.presets --target <name|id>
-      The agent's presets: default_preset (the Default slot), presets in call order, base_rev, and the folders, conflicts, problems and notices a start would meet. A start leaves out the items that are not found; a folder entry or a library folder it cannot read stops it
+      The agent's presets: default_preset (the Default slot), presets in call order, base_rev, and the folders, conflicts, problems and notices a start would meet. A start leaves out the items that are not found; a folder entry or a mount it cannot read stops it
   {tool} agent.attachPreset --target <name|id> --presets <list> [--after <preset>]
-      Attaches what it can; each one it could not attach is in skipped. engram:/default turns the Default slot on
+      Attaches what it can; each one it could not attach is in skipped. engram/default turns the Default slot on
   {tool} agent.detachPreset --target <name|id> --presets <list> [--yes true]
-      engram:/default turns the Default slot off, only with yes
+      engram/default turns the Default slot off, only with yes
   {tool} agent.reorderPresets --target <name|id> --order <list> --base_rev <base_rev>
       order = every preset agent.presets shows, each once
   {tool} agent.new --backend <claude|codex> --cwd <folder> --presets <list>
       Creates the agent with the presets that can be attached; the rest are in skipped ({tool} help agent)
 
-root_generation (optional; every edit above except the mount commands takes it) = the value library.status replied; the edit refuses with CONFLICT root-generation-stale if a mount changed since, and applies nothing.
+root_generation (optional; every edit above takes it except addMount, removeMount and relocateMount — renameMount takes the plan's) = the value library.status replied; the edit refuses with CONFLICT root-generation-stale if a mount changed since, and applies nothing.
 
 base_rev = the rev preset.get replied, or the base_rev agent.presets replied; CONFLICT rev-mismatch means it changed since — read it again and redo the change.
 
-A missing or broken item shows as a row in problems (kind missing · broken · library_unavailable), and items that clash as a row in conflicts (kind conflict), each with code and args. A start leaves a missing item out and names it in notices; it does the same with library_unavailable when its mount is not registered or not there (library.status mount state missing). A folder entry that exists but cannot be read is broken (folder-unreadable); it stops a start like every other broken row, every conflict and a mount that cannot be read (mount state unreadable). Fix it with a preset edit, or with library.relink when it was moved.
+A missing or broken item shows as a row in problems (kind missing · broken · library_unavailable), and items that clash as a row in conflicts (kind conflict), each with code and args. A start leaves a missing item out and names it in notices; it does the same with library_unavailable when its mount is not registered or not there (library.status mount state missing) — one notice per mount, naming it in mount. A folder entry that exists but cannot be read is broken (folder-unreadable); it stops a start like every other broken row, every conflict and a mount that cannot be read (mount state unreadable). Fix it with a preset edit, or with library.relink when it was moved.
 
 A refusal's code is CONFLICT · NOT_FOUND · INVALID_ARGUMENT · INTERNAL, and args carries the reason: args.code (for example root-generation-stale), args.args (that reason's details) and args.line (the line in the file, when there is one). A refusal of the arguments themselves (a blank value, items and folders both or neither), a target that names no agent or several, and a refusal by the agents store carry no args ({tool} help agent). If the message ends with "clear the cause, then repeat the same call", fix what it names (the folder reachable again, a lock released, a mount command) and repeat the call unchanged. Without that clause, repeating the same call does not clear it by itself — change the call, or first do the step the reason names (for example create the missing folder).
 

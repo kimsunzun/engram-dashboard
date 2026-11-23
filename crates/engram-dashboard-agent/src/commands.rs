@@ -1129,9 +1129,9 @@ declare_commands! {
         settings_fields: Vec<String>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Creates folder `name` in `parent` (unspecified or a mount's name alone: INVALID_ARGUMENT
-    /// `virtual-root-read-only` — nothing is created at the library's top); answers its path. CONFLICT `name-exists` (nothing
-    /// replaced) · `library-unavailable` (with `mount` when the parent's mount cannot be read — nothing is written into
+    /// Creates folder `name` in `parent` (unspecified: INVALID_ARGUMENT `virtual-root-read-only` — nothing is created
+    /// at the library's top; a mount's name alone is a parent like any folder); answers its path. CONFLICT
+    /// `name-exists` (nothing replaced) · `library-unavailable` (with `mount` when the parent's mount cannot be read — nothing is written into
     /// it) · `mount-read-only` (`{mount, path}` — the parent is in the built-in mount `engram`) ·
     /// `root-generation-stale` · `library-write-failed` (a retry after it may answer `name-exists` — the partial file
     /// or folder stays); NOT_FOUND `not-found` = the parent is missing.

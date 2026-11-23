@@ -40,7 +40,8 @@
 //! there). Library files in a mount's folder are read with the store directly (local by assumption). Every stat, list,
 //! canonicalize, file identity or read of a folder outside the library — folder entries, native skill roots, the working
 //! folder, a mount's folder itself and its ancestors (`mounts::overlap`) — goes through
-//! [`folder::BoundedIo`], never under the library lock. The built-ins
+//! [`folder::BoundedIo`], never under the library lock — except a rename's one bounded stat of a mount folder whose file
+//! reads as not found inside its hold (`rename::LibraryService::mount_gone`, ADR-0405 decision 3). The built-ins
 //! (`Builtins::new`), the launch folder (`prepare_in`, the sweep, `release`), `library.json` (`config.rs`) and the
 //! folder a mount command's `create` or the first start creates use std `fs`.
 //!

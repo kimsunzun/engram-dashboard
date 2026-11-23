@@ -820,6 +820,80 @@ mod tests {
         }
     }
 
+    /// The library screen teaches the mounts as a caller needs them: paths start with a mount name, the built-in is
+    /// `engram/…` (never the refused `engram:/…` as a usable spelling), the top holds only the mounts, and
+    /// `library.status` and the four mount commands by name. For a rename it teaches the two calls — the first answers
+    /// `mount-rename-unconfirmed` with the plan in `args.args`, the repeat carries `--yes true`, `root_generation`
+    /// and `plan_digest` —, what the plan keys mean (`git`, `unread` with `paths` null, `agents`, whole-file
+    /// rewrite, `already_pointing`), that a stopped rename is called again and answers the plan of what is left
+    /// (ADR-0407), `mount-unusable`, the repeat that saves after `library-config-write-failed`, and reading
+    /// `library.status` after a timeout. The `--section` words are the lowercase preset-file keys (ADR-0400 decision
+    /// 22).
+    // ADR-0400
+    // ADR-0405
+    // ADR-0407
+    #[test]
+    fn the_library_screen_teaches_the_mounts_and_the_two_step_rename() {
+        let _env = env_guard();
+        let library = screen_of(&HelpSource::new(repo_root()), Some(HELP_TOPIC_LIBRARY));
+        for name in [
+            "library.status",
+            "library.addMount",
+            "library.removeMount",
+            "library.relocateMount",
+            "library.renameMount",
+        ] {
+            let line = format!("{CLI_EXE_NAME} {name}");
+            assert!(
+                library.contains(&format!("{line} ")) || library.contains(&format!("{line}\n")),
+                "the library screen names {name}: {library}"
+            );
+        }
+        for taught in [
+            "starting with its mount's name",
+            "The top holds only the mounts",
+            "virtual-root-read-only",
+            "engram/default",
+            "engram/priming",
+            "engram/settings/default",
+            "the old spelling engram:/… is refused",
+            "mount-rename-unconfirmed",
+            "args.args carries plan, root_generation and plan_digest",
+            "--yes true --root_generation <that root_generation> --plan_digest <that plan_digest>",
+            "plan.files",
+            "git true = that mount is in a git working tree",
+            "plan.unread",
+            "paths null = never read",
+            "plan.agents",
+            "rewritten whole: comments and quoting are not kept",
+            "plan.already_pointing",
+            "If stopped is not null",
+            "the reply is the plan of what is left",
+            "mount-unusable",
+            "library-config-write-failed",
+            "repeating the same call saves it",
+            "After a timeout, read library.status before repeating",
+            "--section <presets|instructions|skills|settings|folders>",
+        ] {
+            assert!(
+                library.contains(taught),
+                "the library screen teaches `{taught}`: {library}"
+            );
+        }
+        // `engram:/` appears only in the sentence that says it is refused — never as a spelling to type.
+        assert_eq!(
+            library.matches("engram:/").count(),
+            1,
+            "the refused built-in spelling is taught as usable: {library}"
+        );
+        for (at, lead) in library.match_indices("--section <") {
+            assert!(
+                library[at + lead.len()..].starts_with(|c: char| c.is_ascii_lowercase()),
+                "a capitalized --section word is taught: {library}"
+            );
+        }
+    }
+
     /// Every `--flag` on a command line of the library screen (`  engram <name> …`) is a declared argument of that
     /// command — a flag the LLM learns here and the declaration does not take is refused by the CLI before it is sent.
     // ADR-0386

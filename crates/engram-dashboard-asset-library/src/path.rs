@@ -52,8 +52,8 @@ pub enum PathError {
     NotUtf8,
 }
 
-/// A library reference: the path of an asset from the library root, `/`-separated. Valid by construction — UTF-8, at
-/// least one name, no leading or trailing `/`, no empty name, no `.` or `..` name, no name ending in `.` or a space,
+/// A library reference: the path of an asset from the virtual root (its first name a mount), `/`-separated. Valid
+/// by construction — UTF-8, at least one name, no leading or trailing `/`, no empty name, no `.` or `..` name, no name ending in `.` or a space,
 /// no Win32 reserved device name, no `\`, `:` or control character.
 ///
 /// The trailing `.` / space rule and the reserved-name rule hold on every OS. Win32 trims a trailing `.` or space, so
@@ -99,7 +99,7 @@ impl LibPath {
         self.0.as_str()
     }
 
-    /// The folder holding this asset; `None` = it sits directly under the root.
+    /// The folder holding this asset; `None` = a one-name path (a mount, at the top of the virtual root).
     pub fn parent(&self) -> Option<LibPath> {
         self.as_str()
             .rsplit_once('/')

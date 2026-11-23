@@ -132,6 +132,12 @@ Full text before the simplification (investigation records · reverted attempts 
   - A file deleted outside Engram is stat'ed once per rename until the next scan.
   - A rename touching a dead share can take longer than the CLI wait; U5 help should say to read `library.status` after a timeout.
   - Two held mounts on one folder can pass the rename-repeat folder check.
+- **U5 additions** (recorded 2026-11-23 at the U5 commit):
+  - `path.rs` `NotUnderRoot` error text still says "library root" (raised by `MountPath::from_disk` — "mount folder" is right).
+  - `help.rs` mount-names loop in the new help test repeats the count-pin loop (harmless).
+  - Live scenes L4–L6: an assert failing before `kill_and_reap` leaves the child running (same pattern in all three).
+  - `codex_l6_…` expects codex's skills list in a rollout developer message (measured on codex-cli 0.163 — research M2); a codex change there fails it for a version reason.
+  - With an unreachable share registered, `library.status` / `library.refresh` take about the 5 s stat limit (other commands unaffected — TRD R3).
 ### T-120. T-112 review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-20 at the T-112 freeze — the user does not need minor review items shown (「사소한거? 는 내가 알 필요없지?」); fix one when its code is touched or it shows up in use.
 - **Items** (TRD `docs/process/S25-preset-library/trd-launch-skip-missing.md`, code at `7ea7441d`):
