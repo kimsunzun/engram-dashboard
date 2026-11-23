@@ -40,6 +40,7 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-11 | Per-child permission scope (R7) | Main | Deferred — remote stage |
 | T-9 | claude process pooling | Main | Deferred |
 | T-6 | cwd workspace validation | Main | Deferred — operations stage |
+| T-123 | `LibraryService::rewrite_in` does not re-check the file before its write — an outside edit between its read and write is lost | Bug | Not started · pre-existing · found by the S25 step 9b TRD (R11) |
 | T-114 | Platform test `escape_reads_up_when_nobody_holds_it` reads the live Esc key state | Bug | Kept as is (user decision) — fails only while Esc is held; rerun it |
 | T-113 | Agent tree rename input may remount on every keystroke (suspected, pre-existing) | Bug | Open — not reproduced; found by S35 review |
 | T-115 | codex `backend_contract` Q10 counts a pre-existing process as a survivor when its dead parent's PID was reused | Bug | Open — flaky, environmental · found by S25 step 9a U1b QA (2026-11-18) |
@@ -324,6 +325,11 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Reintroduction:** In the operation stage, decide the allowed cwd policy (e.g. only under the Engram workspace) and then validate in manager.spawn_agent or the command layer.
 
 ## Bug
+
+### T-123. `LibraryService::rewrite_in` does not re-check the file before its write
+- **Status:** not started — pre-existing; recorded from the S25 step 9b TRD risk R11 (`docs/process/S25-preset-library/trd-file-operations.md` §10).
+- **Case:** `rewrite_in` (asset-library) takes a preset file's tag and bytes, rewrites the references, then writes. It does not compare the file's tag again right before the write, so an edit made outside Engram between the read and the write is overwritten. Every reference walk uses it (relink, mount rename, and the 9b delete-detach / move / rename walks).
+- **Next:** compare the tag again just before the write (inside the same hold) and answer the item as changed if it differs.
 
 ### T-115. codex `backend_contract` Q10 counts a pre-existing process as a survivor (stale parent PID)
 - **Status:** open — flaky, environmental; 「넘어감(잠정)」 in the S25 step 9a U1b QA (2026-11-18), user not asked yet.
