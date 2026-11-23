@@ -533,6 +533,25 @@ pub fn overlapping<P: FolderProbe>(mounts: &Mounts, probe: &P) -> Vec<(MountName
     found
 }
 
+/// Whether `folder` is `of` or lies inside it, judged as [`overlap`] judges folders: canonical paths by path key,
+/// name by name, and `of`'s identity among `folder`'s and its ancestors' — one canonical and one identity batch on the
+/// probe's budget. A canonical path the OS refuses (a folder not there) is judged on its spelling; `Err(why)` = an ask
+/// gave no answer.
+// ADR-0409
+pub fn lies_within<P: FolderProbe>(folder: &Path, of: &Path, probe: &P) -> Result<bool, String> {
+    let mut placed = places(&[folder.to_path_buf(), of.to_path_buf()], probe).into_iter();
+    let mut next = |path: &Path, side: &str| {
+        known(
+            placed.next().expect("one place per folder asked"),
+            path,
+            side,
+        )
+    };
+    let inner = next(folder, "the destination")?;
+    let outer = next(of, "the item")?;
+    Ok(inner.within(&outer))
+}
+
 /// Why a folder could not be placed whole for a comparison.
 enum Unplaced<I> {
     /// Its canonical path failed with an OS error (`why` says so).
@@ -974,6 +993,31 @@ mod tests {
             folds_case().then_some(name("team")),
             "compared by the platform path key"
         );
+    }
+
+    // ADR-0409: `into-itself` is judged as overlap judges folders — through a link by its canonical path, and fail closed
+    //   when an ask gives no answer.
+    #[test]
+    fn a_folder_lies_within_another_by_canonical_path_and_an_unanswered_ask_is_no_judgement() {
+        let fake = Fake {
+            links: vec![(PathBuf::from("/j"), PathBuf::from("/m/item"))],
+            ..Fake::default()
+        };
+        let within = |folder: &str, of: &str| lies_within(Path::new(folder), Path::new(of), &fake);
+        assert_eq!(within("/m/item/sub", "/m/item"), Ok(true));
+        assert_eq!(within("/m/item", "/m/item"), Ok(true));
+        assert_eq!(within("/j/sub", "/m/item"), Ok(true), "through a link");
+        assert_eq!(within("/m/other", "/m/item"), Ok(false));
+        assert_eq!(
+            within("/m", "/m/item"),
+            Ok(false),
+            "holding is not lying within"
+        );
+        let silent = Fake {
+            gone: vec![PathBuf::from("/m/item")],
+            ..Fake::default()
+        };
+        assert!(lies_within(Path::new("/m/item/sub"), Path::new("/m/item"), &silent).is_err());
     }
 
     #[test]

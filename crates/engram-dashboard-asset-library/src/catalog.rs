@@ -6,7 +6,7 @@
 //!   ([`Catalog::apply_items`] · [`Catalog::apply_scan`] · [`Catalog::remove`] · [`Catalog::remove_range`] ·
 //!   [`Catalog::insert_folder`]); per item
 //!   the later `read_seq` wins, and nothing outside a scan's range is touched. [`Catalog::drop_range`] exists for a
-//!   mount change only, and [`Catalog::rekey_range`] for a mount rename only.
+//!   mount change only, and [`Catalog::rekey_range`] for a mount rename and a same-volume move only.
 //! - **Every removal is sequenced**: an item goes only when an absence observed later than its read says so — a
 //!   listing that lacks it (`listed_at` of its nearest listed folder) or a range observed absent. A failed read
 //!   (`kept`) removes nothing.
@@ -314,6 +314,12 @@ pub(crate) fn makes_skill(name: &str, folder: &LibPath) -> bool {
     )
 }
 
+/// Whether `name` is a skill's `SKILL.md` name by the OS rule (platform `same_path` — on Windows `skill.md` is one),
+/// wherever the file lies.
+pub(crate) fn skill_file_name(name: &str) -> bool {
+    same_path(Path::new(name), Path::new(SKILL_FILE))
+}
+
 /// Whether `path` names a `.yaml` / `.yml` file — the only files that can hold a preset (or settings) item.
 pub(crate) fn yaml_file(path: &LibPath) -> bool {
     matches!(FileKind::of(path.file_name(), None), Some(FileKind::Yaml))
@@ -333,7 +339,7 @@ impl FileKind {
     // Names compare by the OS rule (platform `same_path` — on Windows `skill.md` is a `SKILL.md`). A `SKILL.md`
     //   directly in a mount's folder has no skill folder (a mount's top is not an item), so it is an instruction.
     fn of(name: &str, folder: Option<LibPath>) -> Option<FileKind> {
-        if same_path(Path::new(name), Path::new(SKILL_FILE)) {
+        if skill_file_name(name) {
             if let Some(folder) = folder {
                 return Some(FileKind::SkillFile(folder));
             }
@@ -686,10 +692,11 @@ impl Catalog {
         inside
     }
 
-    /// A mount rename only (ADR-0400 decision 12): every item and folder within `range` (the old mount's top) moves to
-    /// the path `to` maps it to (the new mount's spelling), keeping its content, tag, `read_seq` and racy mark; the
-    /// references items hold are not changed (the rename's walk rewrote the files first). Called only in the rename's
-    /// write lock. Returns the touched keys — the old and the new.
+    /// A mount rename (ADR-0400 decision 12) or a same-volume move (ADR-0409 M3) only: every item and folder within
+    /// `range` (the old mount's top, or the moved entry) moves to the path `to` maps it to, keeping its content, tag,
+    /// `read_seq` and racy mark — kinds, skill names and `Skill.folder` included, so a move re-classifies and re-reads
+    /// after it; the references items hold are not changed (the caller's walk rewrites the files). Called only in that
+    /// operation's write lock. Returns the touched keys — the old and the new.
     pub fn rekey_range(
         &mut self,
         range: &LibPath,

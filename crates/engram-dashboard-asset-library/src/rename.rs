@@ -811,39 +811,62 @@ impl LibraryService {
         }
     }
 
-    /// Whether each of `folders` lies in a git working tree: the nearest `.git` entry from the folder up through its
-    /// parents — a folder, or a file (a worktree or submodule) — decides `true`; none found `false`; a stat that gave
-    /// no answer before a `.git` was found `None` (ADR-0400 decision 24). One bounded batch on `read`.
+    /// Whether each of `folders` lies in a git working tree ([`LibraryService::git_tops`]): `Some(true)` in one,
+    /// `Some(false)` in none, `None` = could not be told.
     fn git_trees(&self, read: &LaunchIo, folders: &[PathBuf]) -> Vec<Option<bool>> {
-        let candidates: Vec<Vec<PathBuf>> = folders
-            .iter()
-            .map(|folder| folder.ancestors().map(|dir| dir.join(".git")).collect())
-            .collect();
+        self.git_tops(read, folders)
+            .into_iter()
+            .map(|tree| match tree {
+                GitTree::At(_) => Some(true),
+                GitTree::Outside => Some(false),
+                GitTree::Unknown => None,
+            })
+            .collect()
+    }
+
+    /// The git working tree each of `folders` lies in: the nearest `.git` entry from the folder up through its parents
+    /// — a folder, or a file (a worktree or submodule) — names it; none found `Outside`; a stat that gave no answer
+    /// before a `.git` was found `Unknown` (ADR-0400 decision 24). One bounded batch on `read`.
+    pub(crate) fn git_tops(&self, read: &LaunchIo, folders: &[PathBuf]) -> Vec<GitTree> {
         let mut asks: Vec<(PathBuf, Need)> = Vec::new();
         let mut asked: HashSet<PathKey> = HashSet::new();
-        for path in candidates.iter().flatten() {
-            if asked.insert(path_key(path)) {
-                asks.push((path.clone(), Need::Required));
+        for dir in folders.iter().flat_map(|folder| folder.ancestors()) {
+            let path = dir.join(".git");
+            if asked.insert(path_key(&path)) {
+                asks.push((path, Need::Required));
             }
         }
         if asks.is_empty() {
             return Vec::new();
         }
         let statuses = self.io.stat_all(read, &asks);
-        candidates
+        folders
             .iter()
-            .map(|paths| {
-                for path in paths {
-                    match statuses.get(&path_key(path)) {
-                        Some(FolderStatus::Ok | FolderStatus::NotADirectory) => return Some(true),
+            .map(|folder| {
+                for dir in folder.ancestors() {
+                    match statuses.get(&path_key(&dir.join(".git"))) {
+                        Some(FolderStatus::Ok | FolderStatus::NotADirectory) => {
+                            return GitTree::At(dir.to_path_buf())
+                        }
                         Some(FolderStatus::Missing) => continue,
-                        _ => return None,
+                        _ => return GitTree::Unknown,
                     }
                 }
-                Some(false)
+                GitTree::Outside
             })
             .collect()
     }
+}
+
+/// The git working tree a folder lies in ([`LibraryService::git_tops`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitTree {
+    /// The folder holding the nearest `.git` (a folder, or a file — a worktree or submodule).
+    At(PathBuf),
+    /// No `.git` from the folder up.
+    Outside,
+    /// A stat gave no answer before a `.git` was found.
+    Unknown,
 }
 
 /// The preset files of the catalog that list a reference the rename respells — its first name is `from` (by path

@@ -134,8 +134,11 @@
 //! a mount held as overlapping another is named, never read.
 //! The store's renames never replace (`store.rs`). The rules are in its header. `ops.rs` holds the file operations on top
 //! of it — delete (each item into its own mount's `.trash`, with `yes` / `detachRefs` and the plan digest judged again
-//! inside the hold, the folder it left re-classified in the same hold) and restore (back to the same path, never
-//! overwriting) — each one `change_held_at` hold with the trash lock. The rules are in its header.
+//! inside the hold, the folder it left re-classified in the same hold), restore (back to the same path, never
+//! overwriting), and move and rename on one volume (no-replace renames, merge, an overwrite's displaced entry into the
+//! trash, the range re-keyed and re-classified in the same hold, the references rewritten in every readable mount and
+//! the agents without a plan confirmation) — each one `change_held_at` hold, with the trash lock when it may touch
+//! `.trash`. The rules are in its header.
 //!
 //! ## Refusals
 //!
