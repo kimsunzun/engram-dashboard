@@ -25,3 +25,4 @@ ADR-0394 decision 5 routes an "ask the user" question to the app while it shows 
 ## 영향 / 불변식
 - U4 drops the focus / visibility tracking, the 30 s fallback and the 1 s delay; the frontend reports PC list slot presence only.
 - A question can sit unseen in a hidden or minimized app; that is accepted. The taskbar flash (T-126) is the planned remedy.
+- With the 30 s backstop gone, an agent that opens a PC list slot through relayable layout commands (in an inactive tab or a hidden window) keeps every question — other agents' requests and the daemon's adopt and accept-list questions included — off the OS dialog for as long as the slot stays open. This fails safe: an unanswered question changes no trust and requests expire (ADR-0394 decision 4).
