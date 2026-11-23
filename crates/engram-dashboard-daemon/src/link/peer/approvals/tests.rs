@@ -1018,3 +1018,31 @@ fn a_network_request_is_written_from_the_state_the_caller_checked() {
         "no known settings — refused"
     );
 }
+
+/// C3 QA: the stop gate's own deadline — an answer applied through `answer` on a thread of its own (not the dialog thread), held past the
+///   bound: `stop` waits for it `STOP_WAIT` and not much longer. The dialog thread is idle here, so its own stop wait cannot stand in.
+#[test]
+fn stop_waits_its_own_bound_for_an_answer_applied_off_the_dialog_thread() {
+    let rig = rig();
+    let (release, hold) = std::sync::mpsc::channel();
+    *rig.ops.hold_add.lock().unwrap() = Some(hold);
+    let request = rig.approvals.request(add(1, "pc1"), agent("a1")).unwrap();
+    let approvals = rig.approvals.clone();
+    let answering = std::thread::spawn(move || approvals.answer(&request.id, Decision::Approve));
+    eventually("the approval is being applied", || {
+        rig.ops
+            .add_entered
+            .load(std::sync::atomic::Ordering::SeqCst)
+    });
+    let started = std::time::Instant::now();
+    rig.approvals.stop();
+    let waited = started.elapsed();
+    assert!(waited >= STOP_WAIT, "it waited its bound: {waited:?}");
+    assert!(
+        waited < STOP_WAIT + Duration::from_secs(2),
+        "and returned soon after it: {waited:?}"
+    );
+    release.send(()).unwrap();
+    assert!(answering.join().unwrap().is_ok());
+    assert_eq!(rig.ops.calls(), ["add pc1"]);
+}

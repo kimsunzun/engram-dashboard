@@ -40,10 +40,10 @@ pub(crate) use super::approvals::{PeerCaller, Requester};
 use super::book::{Online, Warning};
 use super::id::PeerId;
 use super::interfaces::{cached_interface_ips, my_addresses};
-use super::runtime::{EndpointError, EndpointView, LinkSettings, PeerSnapshot};
+use super::runtime::{EndpointError, EndpointView, LinkSettings, PeerRow, PeerSnapshot};
 use super::store::{PeerEdit, PeerError, PeerStatus};
 use super::trusted::{check_name, Helper, Permission, TrustedPeer};
-use super::wire::DuplicateKind;
+use super::wire::{AgentState, DuplicateKind};
 
 declare_commands! {
     // v1: the first daemon-declared table (ADR-0394).
@@ -61,6 +61,14 @@ declare_commands! {
         mdns: bool,
     }
 
+    /// An agent on a trusted PC, as that PC's directory lists it.
+    struct PeerAgentRow {
+        name: String,
+        id: String,
+        /// live | sleeping.
+        state: String,
+    }
+
     /// One trusted PC.
     struct PeerPcRow {
         id: String,
@@ -69,6 +77,11 @@ declare_commands! {
         /// online | offline | refused | version_mismatch | duplicate_identity | endpoint_error.
         online: String,
         warning: Option<String>,
+        /// Its agent list here: connected (up to date) | disconnected (as of the link's end) | unknown (not linked since this daemon
+        /// started — bare names do not reach it; write `name@pc`).
+        directory: String,
+        /// Its agents, sorted by name — reach one as `name@pc` (or by bare name when no other PC has it). Empty with `--agents false`.
+        agents: Vec<PeerAgentRow>,
     }
 
     /// A PC refused at the accept gate this run (not on the trusted list).
@@ -94,13 +107,14 @@ declare_commands! {
     }
 
     /// The peer area in one query — this PC's ID and direct addresses, the network settings, the endpoint, every trusted PC with its
-    /// link state and warnings, refused PCs, requests waiting for a human, and the actions a human must take. `--name` / `--id` narrow it
-    /// to one PC.
+    /// link state, warnings and agents, refused PCs, requests waiting for a human, and the actions a human must take. `--name` / `--id`
+    /// narrow it to one PC; `--agents false` leaves the agent rows out.
     #[effect(Read)]
     #[since(1)]
     "peer.list" => args PeerListArgs {
         name: Option<String>,
         id: Option<String>,
+        agents: Option<bool>,
     } -> ok PeerListOk {
         /// ready | not_started | no_identity | key_unreadable | key_transient | adopt_or_fresh | identity_in_use | list_refused |
         /// list_changed_outside | list_corrupt | unavailable.
@@ -904,6 +918,7 @@ fn list(approvals: &Approvals, args: PeerListArgs) -> Result<PeerListOk, Command
         }
     };
     let actions = actions(&snapshot, &pending);
+    let with_agents = args.agents.unwrap_or(true);
     let pcs = snapshot
         .peers
         .iter()
@@ -914,6 +929,12 @@ fn list(approvals: &Approvals, args: PeerListArgs) -> Result<PeerListOk, Command
             address: row.peer.address.map(|a| a.to_string()),
             online: online_word(row.online).to_string(),
             warning: row.warning.map(warning_text),
+            directory: directory_word(row).to_string(),
+            agents: if with_agents {
+                agent_rows(row)
+            } else {
+                Vec::new()
+            },
         })
         .collect();
     let knocks = snapshot
@@ -954,6 +975,32 @@ fn list(approvals: &Approvals, args: PeerListArgs) -> Result<PeerListOk, Command
         requests,
         actions,
     })
+}
+
+/// ADR-0391: a copy is kept while its PC is offline (`disconnected`); no copy this run = `unknown`.
+fn directory_word(row: &PeerRow) -> &'static str {
+    match (&row.agents, row.online) {
+        (None, _) => "unknown",
+        (Some(_), Online::Online) => "connected",
+        (Some(_), _) => "disconnected",
+    }
+}
+
+/// The PC's agents sorted by name (the copy keeps that order).
+fn agent_rows(row: &PeerRow) -> Vec<PeerAgentRow> {
+    row.agents
+        .iter()
+        .flatten()
+        .map(|agent| PeerAgentRow {
+            name: agent.name.clone(),
+            id: agent.id.clone(),
+            state: match agent.state {
+                AgentState::Live => "live",
+                AgentState::Sleeping => "sleeping",
+            }
+            .to_string(),
+        })
+        .collect()
 }
 
 fn request_row(row: &PendingRow) -> PeerRequestRow {

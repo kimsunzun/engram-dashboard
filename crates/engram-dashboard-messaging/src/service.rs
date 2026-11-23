@@ -842,6 +842,16 @@ impl MessagingService {
                             })
                         })
                         .or_else(|| {
+                            // ADR-0390: the other PC refuses a mail of more than `MAX_REMOTE_ROWS` rows whole — the rows past it fail here.
+                            let planned = outbound
+                                .iter()
+                                .find(|m| m.node == node)
+                                .map_or(0, |m| m.rows.len());
+                            (planned >= MAX_REMOTE_ROWS).then(|| {
+                                (FailCode::RemoteLimit, remote_rows_hint(&r.display, pc_name))
+                            })
+                        })
+                        .or_else(|| {
                             self.remote.is_none().then(|| {
                                 (
                                     FailCode::PeerOffline,
@@ -3707,6 +3717,13 @@ fn name_too_long_hint(display: &str) -> String {
 fn remote_token_too_long_hint(display: &str, pc: &str) -> String {
     format!(
         "No agent on PC '{pc}' can be addressed as '{display}' (over {REMOTE_NAME_MAX_BYTES} bytes) — nothing was sent for it."
+    )
+}
+
+/// A row past the first `MAX_REMOTE_ROWS` to one PC in one send — the others to that PC still go.
+fn remote_rows_hint(display: &str, pc: &str) -> String {
+    format!(
+        "At most {MAX_REMOTE_ROWS} agents of one PC per send — nothing was sent to '{display}' on PC '{pc}'. Send to it again in a separate send (split the list)."
     )
 }
 
@@ -12256,6 +12273,46 @@ mod tests {
         );
         let work = sent.iter().find(|m| m.node == node(2)).unwrap();
         assert_eq!(work.rows[0].tag, 1);
+    }
+
+    /// ADR-0390: the receiver refuses a mail of more than 64 rows whole, so the rows past the first 64 to one PC fail here with their own
+    ///   wording (split the send), and the first 64 still go.
+    #[test]
+    fn rows_past_sixty_four_to_one_pc_fail_remote_limit_and_the_rest_go() {
+        let (svc, port, remote) = svc_remote();
+        let alice = with_alice(&port, vec![]);
+        port.set_pcs(vec![
+            pc(1, "home", PcLink::Connected, Some(&[])),
+            pc(2, "work", PcLink::Connected, Some(&[])),
+        ]);
+        let mut names: Vec<String> = (0..=MAX_REMOTE_ROWS)
+            .map(|n| format!("a{n}@home"))
+            .collect();
+        names.push("w@work".to_string());
+        let to: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        let rows = send_as(&svc, alice, "alice", "m-1", &to, &SendMeta::default());
+
+        let sent = remote.sent();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].rows.len(), MAX_REMOTE_ROWS);
+        assert_eq!(
+            sent[1].rows.len(),
+            1,
+            "another PC is not counted against it"
+        );
+        let over = &rows[MAX_REMOTE_ROWS];
+        assert_eq!(over.status, SendStatus::Failed);
+        assert_eq!(over.code, Some(FailCode::RemoteLimit));
+        assert!(
+            over.hint
+                .as_deref()
+                .is_some_and(|h| h.contains("separate send")),
+            "{over:?}"
+        );
+        assert!(rows[..MAX_REMOTE_ROWS]
+            .iter()
+            .all(|r| r.status == SendStatus::Pending));
     }
 
     #[test]

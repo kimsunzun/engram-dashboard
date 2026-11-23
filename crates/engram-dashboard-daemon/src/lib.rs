@@ -14,7 +14,10 @@
 //! The peer link to this user's daemons on other PCs (`link::peer`, ADR-0389) starts on its own task after `daemon.json` is published —
 //! loading this account's identity and trusted list (disk, DPAPI, the identity lock) never holds up the accept loop — and stops first at
 //! shutdown, within its own deadline. It runs its endpoint only while a PC is listed; a failure to start it leaves the daemon running
-//! without it.
+//! without it. Mail between agents on different PCs and the agent directory ride on it: the messaging kernel is assembled with the
+//! remote side (`messaging_host::messaging_with_peers` — addresses resolve across the listed PCs, read from `peer_slot` at send time)
+//! and the same adapter is the link's mail host; the profile store and the status chain ring the directory bell the link's publisher
+//! listens to (ADR-0390, ADR-0391).
 //!
 //! Trust changes need a human (ADR-0394): the daemon's own `peer.*` table joins the command table behind its one entrance
 //! (`control::commands::call_daemon_command`), which takes a typed caller — a live shell connection is a human, an agent token an agent —
@@ -192,9 +195,13 @@ fn build_daemon_wiring(
     control: Arc<dyn engram_dashboard_agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
+    directory: link::peer::directory::DirectoryBell,
 ) -> DaemonWiring {
     let state_dir = layout.daemon_state_dir();
-    let profile_store = Arc::new(FileProfileStore::new(state_dir.clone()));
+    let profile_store = Arc::new(DirectoryRingingStore {
+        inner: FileProfileStore::new(state_dir.clone()),
+        bell: directory.clone(),
+    });
     let preset_store = Arc::new(FilePresetStore::new(state_dir));
     let scratch_root = layout.usage_probe_dir();
     // The safety of this sweep depends on timing: after taking the instance lock (no other daemon can be querying in the folder) and before any
@@ -212,7 +219,35 @@ fn build_daemon_wiring(
         control,
         flush_tx,
         idle_coalescer,
+        directory,
     )
+}
+
+/// Rings the peer directory's bell on every save of the profile list — the one point every roster-composition change (create, delete,
+///   rename) passes, from the command path and the shell's profile messages alike.
+// ADR-0391
+struct DirectoryRingingStore {
+    inner: FileProfileStore,
+    bell: link::peer::directory::DirectoryBell,
+}
+
+impl ProfileStore for DirectoryRingingStore {
+    fn save(
+        &self,
+        profiles: &[engram_dashboard_agent::profile::AgentProfile],
+    ) -> Result<(), engram_dashboard_agent::profile::StoreError> {
+        let saved = self.inner.save(profiles);
+        self.bell.ring();
+        saved
+    }
+
+    fn load(&self) -> Vec<engram_dashboard_agent::profile::AgentProfile> {
+        self.inner.load()
+    }
+
+    fn status(&self) -> engram_dashboard_agent::profile::StoreStatus {
+        self.inner.status()
+    }
 }
 
 /// The parts the usage service receives from outside the assembly — production has the real ones ([`build_daemon_wiring`]), the test server 0 probers.
@@ -231,18 +266,16 @@ fn build_daemon_wiring_with_store(
     control: Arc<dyn engram_dashboard_agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
+    directory: link::peer::directory::DirectoryBell,
 ) -> DaemonWiring {
     // ADR-0129: the only place in the production assembly that makes the connection registry and its fanout face — a concrete `ConnRegistry`
     //   used to make a pair mismatch impossible by type, so creation is gathered in one place to keep that guarantee (ADR-0129 decision 3).
     let registry = ConnRegistry::new();
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
     let usage = build_usage_service(usage_inputs);
-    let status_sink = Arc::new(status_chain(
-        fanout,
-        usage.clone(),
-        flush_tx,
-        idle_coalescer,
-    ));
+    let status_sink = Arc::new(
+        status_chain(fanout, usage.clone(), flush_tx, idle_coalescer).with_directory(directory),
+    );
     let profiles = Arc::new(ProfileRegistry::new(store));
     let presets = Arc::new(PresetRegistry::new(preset_store));
 
@@ -620,8 +653,16 @@ pub async fn run() -> Result<(), i32> {
         }
     };
 
-    // 6) AgentManager wiring.
-    let wiring = build_daemon_wiring(&layout, control, flush_tx.clone(), idle_coalescer.clone());
+    // 6) AgentManager wiring. The directory bell is rung by the profile store and the status chain whenever this PC's agent directory may
+    //   have changed; the peer link's publisher (8.5) listens to it (ADR-0391).
+    let directory_bell = link::peer::directory::DirectoryBell::new();
+    let wiring = build_daemon_wiring(
+        &layout,
+        control,
+        flush_tx.clone(),
+        idle_coalescer.clone(),
+        directory_bell.clone(),
+    );
     // `wiring` keeps holding the registry and hands it to the accept loop together — untying it would allow a mismatched pair (ADR-0129 `DaemonWiring`).
     let manager = wiring.manager.clone();
     manager_slot.set(manager.clone());
@@ -666,14 +707,17 @@ pub async fn run() -> Result<(), i32> {
         idle_notifier.clone(),
     ));
 
-    // 6.5) MessagingService assembly.
-    let messaging = Arc::new(
-        messaging_host::messaging_for_manager_gated(
-            manager.clone(),
-            control_registry.clone(),
-            busy.clone(),
-        )
-        .with_flush_trigger(idle_notifier.clone()),
+    // 6.5) MessagingService assembly — with mail to and from other PCs: addresses resolve across the listed PCs (read from `peer_slot`
+    //   at send time — before the link lands, every PC is unknown and remote rows fail `PEER_OFFLINE`), and the same adapter is the
+    //   peer link's mail host (8.5).
+    // ADR-0390
+    let (messaging, peer_mail) = messaging_host::messaging_with_peers(
+        manager.clone(),
+        control_registry.clone(),
+        busy.clone(),
+        idle_notifier.clone(),
+        peer_slot.clone(),
+        approvals.clone(),
     );
     messaging_slot.set(messaging.clone());
 
@@ -682,6 +726,8 @@ pub async fn run() -> Result<(), i32> {
     //    An async task without `spawn_blocking`: neither sweep does a blocking write to child stdin (injection is the flush lane's job — service.rs
     //    `deliver_notice` comment), so abort takes effect at once.
     //    Coupling: the overdue decision's resolution is this period — ingress's `MIN_REPLY_BY_SECS` (1 minute) pairs with it; change both together.
+    //    It is also the receiving side's overdue sweep for other PCs' requests, which the kernel's overdue grace counts as 60 s
+    //    (`RECEIVER_SWEEP_PERIOD`, ADR-0404 d2) — keep them equal.
     const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
     let sweep_messaging = messaging.clone();
     let sweep_busy = busy.clone();
@@ -746,10 +792,15 @@ pub async fn run() -> Result<(), i32> {
         let slot = peer_slot.clone();
         let approvals = approvals.clone();
         let state_dir = layout.daemon_state_dir();
+        let host = link::peer::runtime::Host {
+            mail: peer_mail,
+            bell: directory_bell,
+        };
         tokio::spawn(async move {
             match link::peer::runtime::PeerLink::start(
                 state_dir,
                 link::peer::runtime::LinkSettings::daemon(),
+                Some(host),
             )
             .await
             {
@@ -943,6 +994,8 @@ async fn start_test_server_inner(
         control,
         flush_tx.clone(),
         idle_coalescer.clone(),
+        // No peer link on this server — nothing listens to the bell.
+        link::peer::directory::DirectoryBell::new(),
     );
     let manager = wiring.manager.clone();
     // Plug the real entrance of control verbs in the same place as production (ADR-0155): this table is stage 1 of bus delivery and the discovery
@@ -1072,6 +1125,27 @@ impl PresetStore for MemPresetStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0391: every profile-list save — the one point create, delete and rename pass — rings the directory bell, and the save's
+    ///   answer is the store's.
+    #[tokio::test]
+    async fn a_profile_list_save_rings_the_directory_bell() {
+        let dir = std::env::temp_dir().join(format!("engram-ring-{}", uuid::Uuid::new_v4()));
+        let bell = link::peer::directory::DirectoryBell::new();
+        let store = DirectoryRingingStore {
+            inner: FileProfileStore::new(dir.clone()),
+            bell: bell.clone(),
+        };
+        assert!(store.save(&[]).is_ok());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), bell.rung())
+                .await
+                .is_ok(),
+            "the save rang"
+        );
+        assert!(store.load().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// All three links are in the production status sink chain — usage observations go as far as the service and the subscribed connections (not
     /// all connections), state events as far as the fanout. Link order is tied by type in the constructors (`MessagingFlushSink::new` takes a `UsageObserveSink`).

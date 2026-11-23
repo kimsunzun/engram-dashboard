@@ -5,22 +5,20 @@
 //! Not here (two real PCs — U5): NAT traversal, relay and lookup servers, mDNS, the firewall prompt, the 30 s QUIC idle-out of a frozen
 //!   peer (measured in the adapter's own suite).
 
-use std::collections::HashSet;
-use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime};
-
-use engram_dashboard_platform::secret::UnsealError;
+use std::time::Duration;
 
 use super::*;
 use crate::link::peer::mac;
-use crate::link::peer::os::{LockAttempt, PeerOs};
+use crate::link::peer::testing::{
+    entry, free_port, quiet, start_test_link, test_pc, Locks, TempDir, ACCOUNT, MACHINE,
+};
 use crate::link::peer::wire::DuplicateKind;
 
-const ACCOUNT: &str = "S-1-5-21-10-20-30-1001";
-const MACHINE: &str = "aaaa-1111";
+mod mail;
+
 const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A relay on this machine that is not there — a network setting that differs without contacting anything outside.
@@ -29,147 +27,16 @@ const LOCAL_RELAY: &str = "http://127.0.0.1:1";
 /// A URL whose form the trusted list accepts but the link adapter refuses (invalid punycode).
 const ADAPTER_REFUSES: &str = "https://xn--a.example";
 
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("engram-peer-link-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-
-    fn key_file(&self) -> PathBuf {
-        self.0.join(format!("peer-key.{ACCOUNT}.{MACHINE}"))
-    }
-
-    fn list_file(&self) -> PathBuf {
-        self.0.join(format!("peers.{ACCOUNT}.{MACHINE}.json"))
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-type Locks = Arc<Mutex<HashSet<String>>>;
-
-/// The OS fake: a sealed blob is `T` + the secret; unsealing can be made to fail transiently.
-struct FakeOs {
-    locks: Locks,
-    transient: Arc<AtomicBool>,
-}
-
-struct Release {
-    name: String,
-    locks: Locks,
-}
-
-impl Drop for Release {
-    fn drop(&mut self) {
-        self.locks.lock().unwrap().remove(&self.name);
-    }
-}
-
-impl PeerOs for FakeOs {
-    fn seal(&self, secret: &[u8]) -> io::Result<Vec<u8>> {
-        let mut blob = vec![b'T'];
-        blob.extend_from_slice(secret);
-        Ok(blob)
-    }
-
-    fn unseal(&self, blob: &[u8]) -> Result<Vec<u8>, UnsealError> {
-        if self.transient.load(Ordering::Acquire) {
-            return Err(UnsealError::Transient(io::Error::other(
-                "master key not ready",
-            )));
-        }
-        match blob {
-            [b'T', rest @ ..] if rest.len() == 32 => Ok(rest.to_vec()),
-            _ => Err(UnsealError::Unreadable(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bad data",
-            ))),
-        }
-    }
-
-    fn lock(&self, name: &str) -> LockAttempt {
-        let mut locks = self.locks.lock().unwrap();
-        if !locks.insert(name.to_string()) {
-            return LockAttempt::HeldByThisAccount;
-        }
-        LockAttempt::Held(Box::new(Release {
-            name: name.to_string(),
-            locks: self.locks.clone(),
-        }))
-    }
-
-    fn now(&self) -> SystemTime {
-        SystemTime::now()
-    }
-}
-
 async fn start_with(dir: &Path, locks: &Locks, transient: &Arc<AtomicBool>) -> PeerLink {
-    let dir = dir.to_path_buf();
-    let os = Arc::new(FakeOs {
-        locks: locks.clone(),
-        transient: transient.clone(),
-    });
-    PeerLink::start_loading(
-        move || PeerStore::load(dir, Ok(ACCOUNT.to_string()), Ok(MACHINE.to_string()), os),
-        LinkSettings {
-            dev: true,
-            loopback_only: true,
-        },
-        Arc::new(SystemClock),
-    )
-    .await
-    .unwrap()
+    start_test_link(dir, locks, transient, None).await
 }
 
 async fn start(dir: &Path) -> PeerLink {
     start_with(dir, &Locks::default(), &Arc::default()).await
 }
 
-fn free_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-/// Network settings that contact nothing but the typed addresses.
-fn quiet(port: u16) -> NetworkSettings {
-    NetworkSettings {
-        port: Some(port),
-        relay: Helper::None,
-        address_lookup: Helper::None,
-        mdns: false,
-    }
-}
-
-/// A started PC with its key made and its helpers off — its ID and the address it will listen on.
 async fn pc(dir: &TempDir) -> (PeerLink, PeerId, SocketAddr) {
-    let link = start(dir.path()).await;
-    let port = free_port();
-    link.set_network(quiet(port)).unwrap();
-    let id = link.ensure_identity().unwrap();
-    (link, id, SocketAddr::from(([127, 0, 0, 1], port)))
-}
-
-fn entry(id: PeerId, name: &str, address: Option<SocketAddr>) -> TrustedPeer {
-    TrustedPeer {
-        id,
-        name: name.to_string(),
-        address,
-        permission: Permission::Mail,
-    }
+    test_pc(dir, None).await
 }
 
 /// A listed PC that never answers — keeps an endpoint up.
@@ -828,13 +695,13 @@ async fn every_frame_is_checked_against_the_list_and_stray_answers_are_dropped()
 
     assert_eq!(
         route(core, &listed, 1000, probe()),
-        Route::Reply(PeerMsg::ProbeAck { nonce: 5 })
+        Routed::Reply(PeerMsg::ProbeAck { nonce: 5 })
     );
-    assert_eq!(route(core, &stranger, 1000, probe()), Route::NotTrusted);
+    assert_eq!(route(core, &stranger, 1000, probe()), Routed::NotTrusted);
     // A ProbeAck nobody asked for stays out of the actor's queue; one for the probe open on that link goes through.
     assert_eq!(
         route(core, &listed, 1000, PeerMsg::ProbeAck { nonce: 5 }),
-        Route::Drop
+        Routed::Drop
     );
     let nonce = {
         let mut book = lock(&core.book);
@@ -877,27 +744,27 @@ async fn every_frame_is_checked_against_the_list_and_stray_answers_are_dropped()
                 nonce: nonce.wrapping_add(1)
             }
         ),
-        Route::Drop
+        Routed::Drop
     );
     assert_eq!(
         route(core, &listed, 1001, PeerMsg::ProbeAck { nonce }),
-        Route::Drop
+        Routed::Drop
     );
     assert_eq!(
         route(core, &listed, 1000, PeerMsg::ProbeAck { nonce }),
-        Route::Forward(LinkEvent::ProbeAck(nonce))
+        Routed::Forward(LinkEvent::ProbeAck(nonce))
     );
     for _ in 0..3 {
         assert_eq!(
             route(core, &listed, 1000, PeerMsg::ProbeAck { nonce }),
-            Route::Drop
+            Routed::Drop
         );
     }
     // A Duplicate warning is taken once; repeats change nothing.
     let duplicate = || PeerMsg::Duplicate {
         kind: DuplicateKind::Duplicate,
     };
-    assert_eq!(route(core, &listed, 1000, duplicate()), Route::Drop);
+    assert_eq!(route(core, &listed, 1000, duplicate()), Routed::Drop);
     assert_eq!(
         lock(&core.book).warning(&listed),
         Some(Warning {
@@ -908,6 +775,6 @@ async fn every_frame_is_checked_against_the_list_and_stray_answers_are_dropped()
     assert!(!lock(&core.book).duplicate_reported(&listed, DuplicateKind::Duplicate));
     // Revoked: the very next frame from it is refused.
     core.revoke(&listed);
-    assert_eq!(route(core, &listed, 1000, probe()), Route::NotTrusted);
+    assert_eq!(route(core, &listed, 1000, probe()), Routed::NotTrusted);
     a.stop().await;
 }

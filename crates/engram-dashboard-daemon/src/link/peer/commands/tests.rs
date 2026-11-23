@@ -783,3 +783,71 @@ fn a_network_request_is_refused_while_the_settings_are_unknown() {
         .is_empty());
     assert!(rig.ops.calls().is_empty());
 }
+
+/// ADR-0391: each PC's agents from its directory copy, sorted by name, with the copy's state; `--agents false` leaves them out.
+#[test]
+fn peer_list_shows_each_pcs_agents_and_leaves_them_out_on_request() {
+    use crate::link::peer::book::Online;
+    use crate::link::peer::wire::{AgentState, DirAgent};
+    let rig = rig();
+    office(&rig);
+    for (byte, name) in [(0x22, "laptop"), (0x33, "nas")] {
+        run(
+            &rig,
+            ADD,
+            json!({ "id": id_text(byte), "name": name }),
+            &human(),
+        )
+        .unwrap();
+    }
+    let row = |id: &str, name: &str, state| DirAgent {
+        id: id.to_string(),
+        name: name.to_string(),
+        state,
+    };
+    rig.ops.with(|state| {
+        state.online.insert(pc(0x11), Online::Online);
+        state.agents.insert(
+            pc(0x11),
+            vec![
+                row("id-a", "alice", AgentState::Live),
+                row("id-b", "bob", AgentState::Sleeping),
+            ],
+        );
+        state
+            .agents
+            .insert(pc(0x22), vec![row("id-c", "carol", AgentState::Live)]);
+    });
+
+    let listed = run(&rig, LIST, json!({}), &agent()).unwrap();
+    let pcs = listed["pcs"].as_array().unwrap();
+    assert_eq!(pcs[0]["directory"], "connected");
+    assert_eq!(
+        pcs[0]["agents"],
+        json!([
+            { "name": "alice", "id": "id-a", "state": "live" },
+            { "name": "bob", "id": "id-b", "state": "sleeping" },
+        ])
+    );
+    assert_eq!(
+        pcs[1]["directory"], "disconnected",
+        "a copy kept while its PC is offline"
+    );
+    assert_eq!(pcs[1]["agents"][0]["name"], "carol");
+    assert_eq!(pcs[2]["directory"], "unknown", "no copy this run");
+    assert_eq!(pcs[2]["agents"], json!([]));
+
+    let bare = run(&rig, LIST, json!({ "agents": false }), &agent()).unwrap();
+    assert!(bare["pcs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|pc| pc["agents"] == json!([])));
+    assert_eq!(
+        bare["pcs"][0]["directory"], "connected",
+        "the state stays without the rows"
+    );
+    let one = run(&rig, LIST, json!({ "name": "office" }), &agent()).unwrap();
+    assert_eq!(one["pcs"].as_array().unwrap().len(), 1);
+    assert_eq!(one["pcs"][0]["agents"].as_array().unwrap().len(), 2);
+}

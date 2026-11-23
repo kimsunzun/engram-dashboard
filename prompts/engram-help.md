@@ -49,6 +49,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
 
   {tool} agent.list
       살아 있는 것과 잠든 것 전부. id, name, state(live|sleeping), cwd, parent.
+      This PC only — agents on the user's other PCs are in peer.list (pcs[].agents).
       그 name 이 곧 팀원을 지목하는 이름이고, eg_send 의 to 에 그대로 적는다.
       store 는 명부 파일 둘(agents = agents.json · presets = presets.json)의 상태다. 각각 state 가 Writable(쓸 수 있다) · ReadOnly(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가 비어 있고 이 실행 내내 못 바꾼다) · Refusing(마지막 저장이 거절됐다 — 다음 변경이 다시 보고, 받아들이면 풀린다)이고, 받지 않는 까닭 reason 은 Newer(이 데몬보다 새 판이 쓴 파일 — file_version 이 그 판) · Unreadable(파일을 못 읽음)이다.
 
@@ -247,9 +248,10 @@ data_dir 은 env 에 ENGRAM_DATA_DIR 가 비어 있지 않으면 그 경로다. 
 ## peer
 {tool} peer — this user's daemons on other PCs: pair them, see their link state, and the requests that wait for the user. A trusted PC may only send mail to the agents here (name@pc).
 
-  {tool} peer.list [--name <pc> | --id <ID>]
-      Everything in one answer. state (ready, or why peer links are off) and reason · id (this PC's ID — the other PC adds it) · addresses (this PC's direct ip:port) · network · endpoint (off|up|error) · pcs (id, name, address, online, warning) · knocks (PCs not on the list that tried to link) · requests (waiting for the user) · actions (what a human must do next). --name or --id narrows pcs and knocks to one PC.
+  {tool} peer.list [--name <pc> | --id <ID>] [--agents false]
+      Everything in one answer. state (ready, or why peer links are off) and reason · id (this PC's ID — the other PC adds it) · addresses (this PC's direct ip:port) · network · endpoint (off|up|error) · pcs (id, name, address, online, warning, directory, agents) · knocks (PCs not on the list that tried to link) · requests (waiting for the user) · actions (what a human must do next). --name or --id narrows pcs and knocks to one PC; --agents false leaves the agent rows out.
       online is online · offline · refused (the other PC has not added this one) · version_mismatch · duplicate_identity · endpoint_error.
+      agents are that PC's agents (name, id, state live|sleeping), sorted by name — mail one as name@pc. directory says how current they are: connected · disconnected (as of when the link ended; mail to that PC fails PEER_OFFLINE until it is back) · unknown (not linked since this daemon started — a bare name does not reach that PC; write name@pc).
 
   {tool} peer.add --id <ID> --name <pc> [--address <ip:port>]
   {tool} peer.edit (--name <pc> | --id <ID>) [--new_name <pc>] [--address <ip:port|none>]
@@ -261,6 +263,8 @@ data_dir 은 env 에 ENGRAM_DATA_DIR 가 비어 있지 않으면 그 경로다. 
 Trust changes need the user. Your peer.add, peer.setNetwork, peer.regenerateKey and a peer.edit with --new_name do not apply: they record a request and answer at once with outcome requested and a request id. Do not call again or wait in a loop — tell the user a request waits (the Engram app or a dialog shows it); peer.list shows it under requests until the user answers. peer.approve and peer.deny are the user's — an agent's call is refused. After the user denies, the same kind of request from you is refused for 10 minutes; "deny and stop asking" refuses your requests until the daemon restarts. At most 8 requests wait at once.
 
 Open to you: peer.list, peer.remove and peer.edit with only --address. peer.remove bites at once; saved false means the file still lists the PC, so it comes back after a restart unless a later save succeeds.
+
+Mail to another PC: a bare name reaches an agent there when no agent on this PC has that name and exactly one PC lists it; the same name on several PCs is refused as RECIPIENT_AMBIGUOUS with the name@pc candidates — resend to one. name@pc always goes to that PC (its own answer decides; an agent it does not have is RECIPIENT_NOT_FOUND). @here and @all stay on this PC.
 
 Renaming a PC changes its mail address: name@<old name> stops resolving.
 ## theme

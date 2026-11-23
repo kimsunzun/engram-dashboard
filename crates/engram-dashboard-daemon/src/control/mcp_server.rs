@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use engram_dashboard_messaging::envelope::Entrance; // ADR-0110: the entrance label is owned by the kernel crate.
 
-use super::ingress::{handle_messages, handle_send, ControlCommand, SendContract};
+use super::ingress::{handle_messages, handle_send_at, ControlCommand, SendContract};
 use super::registry::{BoundIdentity, ControlRegistry};
 use crate::account_gate::AccountGate;
 // Caller strings going into log fields pass through this function, not `agent::preview`: the split is canonical in the [`super::agent::preview`] and [`sanitize_for_log`] docs.
@@ -423,8 +423,10 @@ impl EngramMcpHandler {
         //   Future: accept a sender-chosen idempotency key (same value on retry) and fold duplicates in the ledger; `msg_id` is daemon-generated and cannot play that role.
         let (manager, registry, messaging) =
             (manager.clone(), self.registry.clone(), messaging.clone());
+        // ADR-0393: the wait for other PCs' outcomes counts from here.
+        let arrival = std::time::Instant::now();
         let result = tokio::task::spawn_blocking(move || {
-            handle_send(&manager, &registry, &messaging, Entrance::Mcp, cmd)
+            handle_send_at(&manager, &registry, &messaging, Entrance::Mcp, cmd, arrival)
         })
         .await
         .map_err(|e| {
@@ -837,8 +839,10 @@ async fn control_send_handler(
     };
     let (manager, registry, messaging) =
         (manager.clone(), state.registry.clone(), messaging.clone());
+    // ADR-0393: the wait for other PCs' outcomes counts from here.
+    let arrival = std::time::Instant::now();
     let Ok(result) = tokio::task::spawn_blocking(move || {
-        handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd)
+        handle_send_at(&manager, &registry, &messaging, Entrance::Cli, cmd, arrival)
     })
     .await
     else {

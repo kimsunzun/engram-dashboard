@@ -9,6 +9,7 @@
 //!   - All syntax validation of send arguments is owned here; it finishes before delegating to the service.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_messaging::envelope::{new_msg_id, Entrance, EnvelopeFormat};
@@ -110,7 +111,7 @@ pub(crate) fn parse_reply_by(s: &str) -> Result<std::time::Duration, String> {
 }
 
 /// Argument consistency validation — bounces at the first violation; every code is `INVALID_SEND_ARGS` (the caller attaches it).
-fn validate_contract(
+pub(crate) fn validate_contract(
     c: &SendContract,
 ) -> Result<engram_dashboard_messaging::service::SendMeta, String> {
     if c.request && c.reply_to.is_some() {
@@ -166,7 +167,7 @@ fn reply_to_has_single_recipient(recipients: &[String]) -> bool {
 /// the recipient never sees the id to reply with, the ledger demands strict matching (spec §2), and after the deadline a "no reply" notice always fires (a guaranteed false timeout); a reply
 /// also loses `in-reply-to`.
 /// Env is read here because the template is a global switch `wrap_message` checks first; the decision and the render must look at the same input.
-fn contract_unsupported_by_envelope(
+pub(crate) fn contract_unsupported_by_envelope(
     meta: &engram_dashboard_messaging::service::SendMeta,
     format: EnvelopeFormat,
 ) -> Option<String> {
@@ -240,7 +241,7 @@ impl ControlResult {
     }
 }
 
-/// The dual-entrance common handler — the only entry point the two adapters (MCP tool · HTTP route) call.
+/// The dual-entrance common handler — what the two adapters (MCP tool · HTTP route) call, through [`handle_send_at`] with their arrival instant.
 ///
 /// Check order (send-level bounce at the first failure):
 ///   0. Reply-contract argument consistency → `INVALID_SEND_ARGS`, before addresses: a pure syntax error must answer the same regardless of roster state.
@@ -260,6 +261,22 @@ pub fn handle_send(
     messaging: &Arc<engram_dashboard_messaging::service::MessagingService>,
     entrance: Entrance,
     cmd: ControlCommand,
+) -> ControlResult {
+    handle_send_at(manager, registry, messaging, entrance, cmd, Instant::now())
+}
+
+/// [`handle_send`] for a request that arrived at `arrival` — rows for agents on other PCs wait for their outcome until
+///   `arrival + CommandDeliveries::DEFAULT_DEADLINE` (the deadline itself, not a copy, so the caller's silence window still binds it), then
+///   what has no outcome yet is answered unconfirmed (`MessagingService::await_remote_answer`). Blocking — the entrances call it on the
+///   blocking pool with the instant their request came in.
+// ADR-0393
+pub fn handle_send_at(
+    manager: &Arc<AgentManager>,
+    registry: &Arc<ControlRegistry>,
+    messaging: &Arc<engram_dashboard_messaging::service::MessagingService>,
+    entrance: Entrance,
+    cmd: ControlCommand,
+    arrival: Instant,
 ) -> ControlResult {
     use engram_dashboard_messaging::service::{SendReject, SendStatus};
 
@@ -355,6 +372,14 @@ pub fn handle_send(
             &cmd.body,
             entrance,
             &meta,
+        );
+    }
+
+    if let Ok(rows) = &mut outcome {
+        messaging.await_remote_answer(
+            &msg_id,
+            rows,
+            arrival + crate::command_delivery::CommandDeliveries::DEFAULT_DEADLINE,
         );
     }
 

@@ -3,7 +3,8 @@
 //!   ([`handshake`]), the per-PC link book — tie-break, re-arm, duplicate identity ([`book`]) — the refused-knock list ([`gate`]) and the
 //!   running link ([`runtime::PeerLink`]: trust operations, endpoint lifecycle, accept gate, registry), the approvals — pending requests
 //!   and the questions the peer state raises, asked through the daemon's `ask_user` seam ([`approvals`]) — and the `peer.*` command table
-//!   with its approval gate ([`commands`]). Mail and the directory build on [`runtime::PeerLink`].
+//!   with its approval gate ([`commands`]). Mail ([`mail`]) and the agent directory ([`directory`]) ride on [`runtime::PeerLink`] in
+//!   PeerWire terms only; what they mean to the agents is the daemon's mail host behind [`mail::MailInbox`].
 //!
 //! ★Link adapter types never come here★ — the key scheme is reached only through transport's raw-bytes `iroh` functions and the endpoint
 //!   is built from plain values, so a replaced adapter keeps every stored ID.
@@ -13,12 +14,14 @@
 pub(crate) mod approvals;
 pub(crate) mod book;
 pub(crate) mod commands;
+pub(crate) mod directory;
 pub(crate) mod gate;
 pub(crate) mod handshake;
 pub(crate) mod id;
 pub(crate) mod identity;
 pub(crate) mod interfaces;
 pub(crate) mod mac;
+pub(crate) mod mail;
 pub(crate) mod os;
 pub(crate) mod runtime;
 pub(crate) mod store;

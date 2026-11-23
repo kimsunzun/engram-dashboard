@@ -692,6 +692,19 @@ impl LinkBook {
         self.nodes.get(node).and_then(|n| n.chosen)
     }
 
+    /// The run of `node`'s chosen link — the run mail and directory frames on it reach.
+    pub(crate) fn chosen_run(&self, node: &PeerId) -> Option<Instance> {
+        self.nodes
+            .get(node)
+            .and_then(Node::chosen_link)
+            .map(|l| l.instance)
+    }
+
+    /// The run of `node`'s latest chosen link, also after its links ended — `None` once the PC is no longer tracked.
+    pub(crate) fn last_run(&self, node: &PeerId) -> Option<Instance> {
+        self.nodes.get(node).and_then(|n| n.last_instance)
+    }
+
     pub(crate) fn online(&self, node: &PeerId) -> Online {
         let Some(n) = self.nodes.get(node) else {
             return Online::Offline;

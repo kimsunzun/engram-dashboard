@@ -31,7 +31,8 @@ use engram_dashboard_transport::{
 
 const ALPN: &[u8] = b"engram/peer/1";
 
-/// The PeerWire frame cap (512 KiB: a 64 KiB body under worst-case JSON escaping, plus headroom) — the value the peer link will use.
+/// A 512 KiB frame cap for these suites (a 64 KiB body under worst-case JSON escaping, plus headroom); the peer link itself uses 4 MiB
+/// (`MAX_FRAME_BYTES`, ADR-0411).
 const MAX_PAYLOAD: usize = 512 << 10;
 
 /// A stream-accept window no test reaches — for suites that do not measure it.

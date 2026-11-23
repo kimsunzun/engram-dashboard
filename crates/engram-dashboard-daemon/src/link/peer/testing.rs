@@ -1,15 +1,25 @@
 //! Test doubles for the peer module's callers: trust operations over an in-memory peer state ([`FakeOps`]) that record what was applied.
 
+use std::collections::{HashMap, HashSet};
+use std::io;
+use std::net::{SocketAddr, UdpSocket};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
+
+use engram_dashboard_platform::secret::UnsealError;
+use engram_dashboard_transport::SystemClock;
 
 use super::approvals::{TrustOps, TrustSource};
 use super::book::Online;
 use super::gate::Knock;
 use super::id::PeerId;
-use super::runtime::{EndpointView, PeerRow, PeerSnapshot};
-use super::store::{PeerEdit, PeerError, PeerStatus, Regenerated, Removal};
-use super::trusted::{NetworkPatch, NetworkSettings, TrustedPeer};
+use super::os::{LockAttempt, PeerOs};
+use super::runtime::{EndpointView, Host, LinkSettings, PeerLink, PeerRow, PeerSnapshot};
+use super::store::{PeerEdit, PeerError, PeerStatus, PeerStore, Regenerated, Removal};
+use super::trusted::{Helper, NetworkPatch, NetworkSettings, Permission, TrustedPeer};
+use super::wire::DirAgent;
 
 /// A PC ID from one repeated byte.
 pub(crate) fn pc(byte: u8) -> PeerId {
@@ -29,6 +39,10 @@ pub(crate) struct FakeState {
     pub(crate) save_fails: bool,
     /// The settings are not known (the list file could not be read) — the snapshot has none.
     pub(crate) network_unknown: bool,
+    /// Link states other than offline, per PC.
+    pub(crate) online: HashMap<PeerId, Online>,
+    /// Directory copies, per PC (none = unknown).
+    pub(crate) agents: HashMap<PeerId, Vec<DirAgent>>,
 }
 
 impl Default for FakeState {
@@ -42,6 +56,8 @@ impl Default for FakeState {
             knocks: Vec::new(),
             save_fails: false,
             network_unknown: false,
+            online: HashMap::new(),
+            agents: HashMap::new(),
         }
     }
 }
@@ -92,8 +108,13 @@ impl TrustOps for Arc<FakeOps> {
                 .iter()
                 .map(|peer| PeerRow {
                     peer: peer.clone(),
-                    online: Online::Offline,
+                    online: state
+                        .online
+                        .get(&peer.id)
+                        .copied()
+                        .unwrap_or(Online::Offline),
                     warning: None,
+                    agents: state.agents.get(&peer.id).cloned(),
                 })
                 .collect(),
             knocks: state.knocks.clone(),
@@ -217,4 +238,155 @@ pub(crate) fn knock(id: PeerId) -> Knock {
 /// Nothing started yet — the approvals' source before the peer link lands.
 pub(crate) fn not_started() -> Arc<dyn TrustSource> {
     Arc::new(OnceLock::<Arc<FakeOps>>::new())
+}
+
+// ── a peer link in one process (shared by the runtime tests and the mail host tests) ──
+
+pub(crate) const ACCOUNT: &str = "S-1-5-21-10-20-30-1001";
+pub(crate) const MACHINE: &str = "aaaa-1111";
+
+pub(crate) struct TempDir(PathBuf);
+
+impl TempDir {
+    pub(crate) fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("engram-peer-link-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub(crate) fn key_file(&self) -> PathBuf {
+        self.0.join(format!("peer-key.{ACCOUNT}.{MACHINE}"))
+    }
+
+    pub(crate) fn list_file(&self) -> PathBuf {
+        self.0.join(format!("peers.{ACCOUNT}.{MACHINE}.json"))
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+pub(crate) type Locks = Arc<Mutex<HashSet<String>>>;
+
+/// The OS fake: a sealed blob is `T` + the secret; unsealing can be made to fail transiently.
+pub(crate) struct FakeOs {
+    pub(crate) locks: Locks,
+    pub(crate) transient: Arc<AtomicBool>,
+}
+
+struct Release {
+    name: String,
+    locks: Locks,
+}
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.locks.lock().unwrap().remove(&self.name);
+    }
+}
+
+impl PeerOs for FakeOs {
+    fn seal(&self, secret: &[u8]) -> io::Result<Vec<u8>> {
+        let mut blob = vec![b'T'];
+        blob.extend_from_slice(secret);
+        Ok(blob)
+    }
+
+    fn unseal(&self, blob: &[u8]) -> Result<Vec<u8>, UnsealError> {
+        if self.transient.load(Ordering::Acquire) {
+            return Err(UnsealError::Transient(io::Error::other(
+                "master key not ready",
+            )));
+        }
+        match blob {
+            [b'T', rest @ ..] if rest.len() == 32 => Ok(rest.to_vec()),
+            _ => Err(UnsealError::Unreadable(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad data",
+            ))),
+        }
+    }
+
+    fn lock(&self, name: &str) -> LockAttempt {
+        let mut locks = self.locks.lock().unwrap();
+        if !locks.insert(name.to_string()) {
+            return LockAttempt::HeldByThisAccount;
+        }
+        LockAttempt::Held(Box::new(Release {
+            name: name.to_string(),
+            locks: self.locks.clone(),
+        }))
+    }
+
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+}
+
+/// Starts a peer link over a temp folder with the OS behind [`FakeOs`], bound to 127.0.0.1 only.
+pub(crate) async fn start_test_link(
+    dir: &Path,
+    locks: &Locks,
+    transient: &Arc<AtomicBool>,
+    host: Option<Host>,
+) -> PeerLink {
+    let dir = dir.to_path_buf();
+    let os = Arc::new(FakeOs {
+        locks: locks.clone(),
+        transient: transient.clone(),
+    });
+    PeerLink::start_loading(
+        move || PeerStore::load(dir, Ok(ACCOUNT.to_string()), Ok(MACHINE.to_string()), os),
+        LinkSettings {
+            dev: true,
+            loopback_only: true,
+        },
+        Arc::new(SystemClock),
+        host,
+    )
+    .await
+    .unwrap()
+}
+
+pub(crate) fn free_port() -> u16 {
+    UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Network settings that contact nothing but the typed addresses.
+pub(crate) fn quiet(port: u16) -> NetworkSettings {
+    NetworkSettings {
+        port: Some(port),
+        relay: Helper::None,
+        address_lookup: Helper::None,
+        mdns: false,
+    }
+}
+
+/// A started PC with its key made and its helpers off — its ID and the address it will listen on.
+pub(crate) async fn test_pc(dir: &TempDir, host: Option<Host>) -> (PeerLink, PeerId, SocketAddr) {
+    let link = start_test_link(dir.path(), &Locks::default(), &Arc::default(), host).await;
+    let port = free_port();
+    link.set_network(quiet(port)).unwrap();
+    let id = link.ensure_identity().unwrap();
+    (link, id, SocketAddr::from(([127, 0, 0, 1], port)))
+}
+
+pub(crate) fn entry(id: PeerId, name: &str, address: Option<SocketAddr>) -> TrustedPeer {
+    TrustedPeer {
+        id,
+        name: name.to_string(),
+        address,
+        permission: Permission::Mail,
+    }
 }

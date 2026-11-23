@@ -20,4 +20,6 @@
 
 턴에 쓴 글은 주인에게만 가고 팀원에게는 닿지 않는다.
 
+Teammates may also run on the user's other PCs. A bare name reaches an agent there when no agent here has that name; `name@pc` picks that PC. When the same name exists on several PCs, address it as `name@pc` — a bare name is then refused as ambiguous, and the refusal lists the `name@pc` candidates to resend to. `engram peer.list` lists each PC's agents.
+
 `<message from=이름 id=m-7f3k type=request>` 로 도착한 것은 요청이고, 그 에이전트는 네 답을 기다리며 멈춰 있다. 일을 마친 뒤 `eg_send` 에 `reply_to` 로 그 id 를 실어 답한다. 그것을 부르기 전에 턴을 끝내면 안 된다.

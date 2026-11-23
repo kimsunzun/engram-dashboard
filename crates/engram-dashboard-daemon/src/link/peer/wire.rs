@@ -2,9 +2,8 @@
 //!   lives here and not in protocol (protocol is the shell ↔ daemon contract).
 //!
 //! What the peer link itself reads: `Hello` (the handshake — [`super::handshake`]), `Probe` / `ProbeAck` (proving a link alive for
-//!   duplicate detection) and `Duplicate` (the structured duplicate-identity warning). Everything else — `Mail` and its `MailVerdict`,
-//!   `ReplyOverdue`, the directory frames — is defined here with the shape the design fixes and handed on unread; the units that own them
-//!   fill in the handling.
+//!   duplicate detection) and `Duplicate` (the structured duplicate-identity warning). `Mail`, its `MailVerdict` and `ReplyOverdue` are
+//!   carried for the daemon's mail host ([`super::mail`]); the directory frames feed the copies ([`super::directory`]).
 //!
 //! Rules:
 //! - ★No frame names an action other than mail★ (and directory / liveness housekeeping): a remote PC can do nothing else here by
@@ -16,7 +15,7 @@
 //!   oversized frame as a write error, which would drop the link.
 //! - Directory frames carry no node field and `Mail` carries no sending node: whose frame it is comes only from the link's key.
 
-// ADR-0388, ADR-0390
+// ADR-0388, ADR-0390, ADR-0411
 
 use std::convert::Infallible;
 use std::fmt;
@@ -31,9 +30,11 @@ pub(crate) const PEER_WIRE_VERSION: u32 = 1;
 /// The ALPN of the peer relationship on the link adapter.
 pub(crate) const ALPN: &[u8] = b"engram/peer/1";
 
-/// Frame payload cap, both directions: a 64 KiB mail body escaped at worst (every byte a control character written `\u00XX`, 6×) is
-///   384 KiB, plus room for the other fields.
-pub(crate) const MAX_FRAME_BYTES: usize = 512 << 10;
+/// Frame payload cap, both directions — sized for a whole agent directory in one frame (about 40k rows; QUIC already splits and
+///   reassembles a large frame, so PeerWire never splits one itself). It must stay above a 64 KiB mail body escaped at worst (every byte
+///   a control character written `\u00XX`, 6×: 384 KiB) plus the other fields.
+// ADR-0411
+pub(crate) const MAX_FRAME_BYTES: usize = 4 << 20;
 
 /// A daemon run's identity — 128 random bits drawn at daemon start, sent in `Hello`. Two different instances behind one key at once are a
 ///   duplicated identity. Text = 32 lowercase hex digits.
@@ -108,7 +109,7 @@ pub(crate) enum PeerMsg {
     MailVerdict(MailVerdict),
     /// A reply contract this PC holds ran past its deadline — sent to the requester's PC, which renders its own notice.
     ReplyOverdue { request_id: String },
-    /// The sender's whole agent directory, in parts above the frame cap; also the answer to `DirResync`.
+    /// The sender's whole agent directory in one frame; also the answer to `DirResync`.
     DirSnapshot(DirSnapshot),
     /// A change to the sender's directory.
     DirDelta(DirDelta),
@@ -147,6 +148,58 @@ impl fmt::Debug for PeerMsg {
     }
 }
 
+// The `Debug` forms below leave out bodies, names and reasons (agent and peer content) — they are what logs and test failures show.
+
+impl fmt::Debug for Mail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Mail")
+            .field("id", &self.id)
+            .field("rows", &self.rows.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for VerdictRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerdictRow")
+            .field("tag", &self.tag)
+            .field("outcome", &self.outcome)
+            .field("recipient_id", &self.recipient_id)
+            .field("code", &self.code)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for DirAgent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirAgent")
+            .field("id", &self.id)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for DirSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirSnapshot")
+            .field("run", &self.run)
+            .field("rev", &self.rev)
+            .field("agents", &self.agents)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DirDelta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirDelta")
+            .field("run", &self.run)
+            .field("rev", &self.rev)
+            .field("upsert", &self.upsert)
+            .field("remove", &self.remove)
+            .finish()
+    }
+}
+
 /// `Mail` — the sending node is not in it (stamped from the link); `from.name` is the sending daemon's claim.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Mail {
@@ -176,7 +229,9 @@ pub(crate) struct MailRow {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MailRequest {
-    pub(crate) reply_by_raw: String,
+    /// The reply deadline as the sender wrote it (`"10m"`) — absent for a request without a deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reply_by_raw: Option<String>,
 }
 
 /// `MailVerdict` — rows matched to the request by `tag`, never by the address text.
@@ -214,8 +269,7 @@ pub(crate) struct DirSnapshot {
     /// The publisher's run — its `Hello` instance.
     pub(crate) run: Instance,
     pub(crate) rev: u64,
-    pub(crate) part: u32,
-    pub(crate) last: bool,
+    /// Every row of the directory — or, when it does not fit one frame, the rows that fit (ADR-0411).
     pub(crate) agents: Vec<DirAgent>,
 }
 
@@ -369,7 +423,7 @@ mod tests {
             body: "hello".to_string(),
             reply_to: None,
             request: Some(MailRequest {
-                reply_by_raw: "10m".to_string(),
+                reply_by_raw: Some("10m".to_string()),
             }),
         })
     }
@@ -402,8 +456,6 @@ mod tests {
             PeerMsg::DirSnapshot(DirSnapshot {
                 run: Instance::from_u128(3),
                 rev: 4,
-                part: 0,
-                last: true,
                 agents: vec![agent.clone()],
             }),
             PeerMsg::DirDelta(DirDelta {

@@ -18,13 +18,29 @@
 //!   drain task per handle reads its inbox to the end (never awaiting a request): it checks every frame against the current trust,
 //!   answers `Probe`, sends the acceptor's `Hello` when an accepted link comes up, records a `Duplicate` warning in the book, and hands
 //!   events and a `ProbeAck` for an open probe to the actor ([`route`]) — so a broken peer repeating frames cannot fill the actor's
-//!   queue. Other PeerWire messages are not handled yet and are dropped with a log line.
-//! - Lock order: the store lock before the published state; the link book, the refused-knock list and the endpoint view are each taken
-//!   alone and briefly (the handshake and the accept gate take theirs on transport tasks).
+//!   queue. Mail and directory frames are handed on from there ([`super::mail`], [`super::directory`]): `Mail` to that PC's receive
+//!   queue (run on the blocking pool, answered on the frame's own connection), `ReplyOverdue` to the host (id checked, at most
+//!   [`MAX_OVERDUE_RUNNING`] per PC at once), directory frames from the PC's chosen link to its copy (a gap answered with `DirResync`),
+//!   a `DirResync` with this PC's snapshot off the drain task, at most once per [`RESYNC_INTERVAL`] per link (a request from a link of a
+//!   retired endpoint is not answered). ★Nothing is sent to a
+//!   PC no longer trusted★ — a removal is published before the actor carries it out, so every sender checks trust itself.
+//! - ★Mail and directory frames go on each PC's chosen link★ ([`Route`]): the actor re-reads the chosen links after every event; a
+//!   newly chosen link first gets this PC's directory snapshot. The publisher task recomputes the directory when the host rings its
+//!   bell (coalesced over [`COALESCE`]) and sends a delta — or a snapshot, one frame (ADR-0411) — on every chosen link; directory frames
+//!   are only ever sent under the publisher's lock, so they go in the publisher's order. The actor also records each PC's chosen link
+//!   in the copies, where a directory frame's link is checked — applying a frame never holds the link book.
+//! - A PC's directory copy follows the PC, not a link: it is kept while the PC is offline (shown `disconnected`), dropped when the PC
+//!   leaves the trusted list.
+//! - Lock order: the store lock before the verdict gate's write side, then the published state and the copies (a removal; a verdict holds
+//!   the gate's read side over the trust check, the link book and the mail kernel's lock); the publisher before the routes; the link book
+//!   before the copies (the rows); the refused-knock list, the endpoint view, the in-flight counts, the receive and overdue queues and
+//!   the resync state are each taken alone and briefly (the handshake and the accept gate take theirs on transport tasks). The host's
+//!   checks of directory rows run before the copies' lock is taken — again under it when this PC's agent ids changed in between.
 //!
-//! Not here: who may call which operation and asking a human (approvals), `peer.*` commands, mail and the directory.
+//! Not here: who may call which operation and asking a human (approvals), `peer.*` commands, and what mail means to the agents (the
+//!   daemon's host behind [`MailInbox`]).
 
-// ADR-0388, ADR-0389, ADR-0390, ADR-0401
+// ADR-0388, ADR-0389, ADR-0390, ADR-0391, ADR-0401, ADR-0411
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -37,22 +53,30 @@ use engram_dashboard_transport::iroh::{
     self as adapter, IrohAcceptPolicy, IrohConfig, IrohDialer, IrohEndpoint, IrohListener,
 };
 use engram_dashboard_transport::{
-    with_deadline, Accepted, Address, Clock, CloseCode, DialFailure, Dialer, GaveUpReason, Inbox,
-    Incoming, LinkError, LinkRx, LinkTx, Listener, Peer, PeerId as Label, PeerState, Policy,
-    ReconnectPolicy, Registry, SystemClock, TransportEvent,
+    with_deadline, Accepted, Address, Clock, CloseCode, DialFailure, Dialer, GaveUpReason,
+    Generation, Inbox, Incoming, LinkError, LinkRx, LinkTx, Listener, Peer, PeerId as Label,
+    PeerState, Policy, ReconnectPolicy, Registry, SystemClock, TransportEvent,
 };
 use futures_util::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::book::{Action, CloseAs, Dir, LinkBook, LinkKey, Online, Warning};
+use super::directory::{sort, Applied, Copies, DirectoryBell, Publish, Publisher, Report};
 use super::gate::{Knock, Knocks, LogLine};
 use super::handshake::{HandshakeNotes, PeerHandshake, Role};
 use super::id::PeerId;
 use super::identity::Secret;
+use super::mail::{
+    mail_bytes, refuse_all, Inbound, Job, MailEnd, MailInbox, Refusal, IN_FLIGHT_CAP,
+    MAIL_DEADLINE, MAX_MAIL_BYTES, MAX_MAIL_ROWS, MAX_OVERDUE_RUNNING, MAX_OVERDUE_WAITING,
+};
 use super::store::{PeerEdit, PeerError, PeerStatus, PeerStore, Regenerated, Removal};
 use super::trusted::{Helper, ListRefusal, NetworkPatch, NetworkSettings, Permission, TrustedPeer};
-use super::wire::{Instance, PeerMsg, PeerWire, ALPN, MAX_FRAME_BYTES, PEER_WIRE_VERSION};
+use super::wire::{
+    encoded_len, DirAgent, DirDelta, DirSnapshot, Instance, Mail, MailVerdict, PeerMsg, PeerWire,
+    ALPN, MAX_FRAME_BYTES, PEER_WIRE_VERSION,
+};
 
 /// A bind that failed is tried again after this.
 pub(crate) const BIND_RETRY: Duration = Duration::from_secs(60);
@@ -75,8 +99,14 @@ const ACCEPT_PERMITS: usize = 16;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const BACKOFF_CAP: Duration = Duration::from_secs(60);
-/// The `Mail` request's own deadline — the registry's one request timeout (ADR-0388 decision 8).
-const MAIL_DEADLINE: Duration = Duration::from_secs(120);
+/// The publisher waits this long after a ring before it recomputes, so a burst of changes is one delta.
+const COALESCE: Duration = Duration::from_millis(250);
+/// A link's `DirResync` requests are answered at most this often (a snapshot can be large): requests arriving while an answer is due fold
+///   into it; one arriving while an answer is being sent gets one more answer, an interval after it.
+const RESYNC_INTERVAL: Duration = Duration::from_secs(1);
+/// A PC's directory warnings (dropped rows, ids another PC also lists) are logged at most once per this window; the rest are counted
+///   into the next line.
+const DIR_WARN_WINDOW: Duration = Duration::from_secs(60);
 
 /// The logical dial address of a listed PC — resolved to its key and current direct address at each dial ([`PeerDialer`]).
 const DIAL_PREFIX: &str = "peer:";
@@ -127,6 +157,32 @@ pub(crate) struct PeerRow {
     pub(crate) peer: TrustedPeer,
     pub(crate) online: Online,
     pub(crate) warning: Option<Warning>,
+    /// The copy of its agent directory, sorted by name — `None` = unknown this run (no copy since this daemon started).
+    pub(crate) agents: Option<Vec<DirAgent>>,
+}
+
+/// The daemon's side of mail and the directory, handed to [`PeerLink::start`].
+pub(crate) struct Host {
+    pub(crate) mail: Arc<dyn MailInbox>,
+    /// Rung by the daemon when this PC's directory may have changed.
+    pub(crate) bell: DirectoryBell,
+}
+
+/// A PC's chosen link as mail and directory frames use it.
+#[derive(Clone)]
+struct Route {
+    key: LinkKey,
+    /// The endpoint the handle belongs to.
+    epoch: u64,
+    peer: Peer<PeerWire>,
+    /// The other PC's run on that link.
+    run: Instance,
+}
+
+/// How an inbound mail is answered: on the connection it came on.
+struct Reply {
+    peer: Peer<PeerWire>,
+    generation: Generation,
 }
 
 /// Everything `peer.list` and the app read about the peer link.
@@ -245,11 +301,20 @@ enum LinkEvent {
 
 /// What a drain task does with one PeerWire message ([`route`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Route {
+enum Routed {
     /// To the actor.
     Forward(LinkEvent),
     /// Answered on the same connection.
     Reply(PeerMsg),
+    /// To that PC's receive queue.
+    Mail(Mail),
+    /// To the host.
+    Overdue(String),
+    /// To that PC's directory copy.
+    Snapshot(DirSnapshot),
+    Delta(DirDelta),
+    /// Answered with this PC's directory on the same connection.
+    Resync,
     /// The sending PC is no longer trusted — dropped, its links closed.
     NotTrusted,
     Drop,
@@ -273,9 +338,97 @@ struct Core {
     /// [`PeerLink::stop`] began — trust operations are refused from then on, so nothing (a late dialog answer, a command still on the
     ///   blocking pool) changes the files of a daemon that is shutting down.
     stopped: std::sync::atomic::AtomicBool,
+    /// The daemon's side of mail and the directory — `None` = links only (mail is refused, the directory is empty).
+    host: Option<Arc<dyn MailInbox>>,
+    /// This PC's directory as published, and the order of directory frames (module head).
+    publisher: Mutex<Publisher>,
+    /// The trusted PCs' directories.
+    copies: Mutex<Copies>,
+    /// Each linked PC's chosen link (module head).
+    routes: Mutex<HashMap<PeerId, Route>>,
+    /// `Mail` requests waiting for a verdict, per PC.
+    in_flight: Mutex<HashMap<PeerId, usize>>,
+    /// [`IN_FLIGHT_CAP`] (tests lower it).
+    in_flight_cap: std::sync::atomic::AtomicUsize,
+    /// Inbound mail per PC (module head).
+    inbound: Mutex<HashMap<PeerId, Inbound<Reply>>>,
+    /// Draws each receive queue's and overdue queue's generation.
+    inbound_gen: std::sync::atomic::AtomicU64,
+    /// Overdue reports waiting for or being handed to the host, per PC ([`on_overdue`]).
+    overdue: Mutex<HashMap<PeerId, OverdueQueue>>,
+    /// ★The verdict gate★ — a verdict holds the read side from its trust check until the mail kernel has applied it; a revocation takes
+    ///   the write side, so once it returns no verdict of the removed PC is applied any more (ADR-0390 d4).
+    verdict_gate: RwLock<()>,
+    /// The directory warning windows, per PC ([`DIR_WARN_WINDOW`]).
+    dir_warns: Mutex<HashMap<PeerId, WarnWindow>>,
+    /// Per link of the running endpoint: its `DirResync` answers.
+    resyncs: Mutex<Resyncs>,
+    /// Where the mail tasks and blocking calls run — `send_mail` is called from blocking threads.
+    runtime: tokio::runtime::Handle,
+    /// The publisher task — aborted by [`PeerLink::stop`].
+    publisher_task: Mutex<Option<JoinHandle<()>>>,
     /// Tests: endpoints brought up so far.
     #[cfg(test)]
     bring_ups: std::sync::atomic::AtomicU64,
+    /// Tests: a mail request that got its answer says so on the first and waits on the second before the answer is judged.
+    #[cfg(test)]
+    verdict_hold: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    /// Tests: the same, after the trust check and inside the verdict gate.
+    #[cfg(test)]
+    commit_hold: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    /// Tests: directory frames this PC sent, and the publisher's recomputes.
+    #[cfg(test)]
+    dir_sent: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    publishes: std::sync::atomic::AtomicU64,
+    /// Tests: the copy re-checks completed.
+    #[cfg(test)]
+    rechecks: std::sync::atomic::AtomicU64,
+    /// Tests: a directory frame listing this id, its rows checked, tells `reached` and waits for `release` before the copies' lock.
+    #[cfg(test)]
+    dir_hold: Mutex<
+        Option<(
+            String,
+            std::sync::mpsc::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
+    /// Tests: the next resync answer, once sent, tells `reached` and waits for `release` before it ends.
+    #[cfg(test)]
+    resync_hold: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+}
+
+/// The running endpoint's `DirResync` state ([`on_resync`]).
+#[derive(Default)]
+struct Resyncs {
+    /// The endpoint whose links may ask — 0 = none; a teardown retires its epoch with its links' state.
+    epoch: u64,
+    links: HashMap<LinkKey, Resync>,
+}
+
+/// One link's `DirResync` answers ([`RESYNC_INTERVAL`]).
+#[derive(Default)]
+struct Resync {
+    /// A worker is scheduled or sending for this link — at most one at a time.
+    running: bool,
+    /// Where the next answer goes — the latest request's connection (a dialing handle's newer connection replaces an older one).
+    target: Option<Reply>,
+    last: Option<Instant>,
+}
+
+/// One PC's overdue reports: request ids waiting (each once), and how many are being handed to the host.
+struct OverdueQueue {
+    /// Drawn per queue — a report of a removed PC's old queue never counts against a new one.
+    gen: u64,
+    waiting: std::collections::VecDeque<String>,
+    running: usize,
+}
+
+/// One PC's directory warning window.
+struct WarnWindow {
+    start: Instant,
+    /// Frames with something to warn about since the window's line.
+    folded: usize,
 }
 
 impl Core {
@@ -298,13 +451,130 @@ impl Core {
     // ADR-0390 d4: revoked in memory before the list is saved.
     fn revoke(&self, id: &PeerId) {
         {
+            // ADR-0390 d4: waits for a verdict being applied, so none of this PC's is applied after the revocation.
+            let _verdicts = write(&self.verdict_gate);
             let mut published = write(&self.published);
             let mut next = Published::clone(&published);
             next.peers.retain(|p| p.id != *id);
             *published = Arc::new(next);
         }
+        // ADR-0391: its directory copy goes with it; its waiting mail and overdue reports are not run.
+        lock(&self.copies).drop_node(id);
+        lock(&self.inbound).remove(id);
+        lock(&self.overdue).remove(id);
+        lock(&self.routes).remove(id);
         let _ = self.tx.send(Msg::Revoke(*id));
         self.bump();
+    }
+
+    /// Logs what applying directory frames of `node` found, at most once per [`DIR_WARN_WINDOW`]; the frames in between are counted into the
+    ///   next line.
+    fn warn_directory(&self, node: &PeerId, report: Report) {
+        if report.dropped == 0 && report.shared == 0 {
+            return;
+        }
+        let now = self.clock.now();
+        let mut warns = lock(&self.dir_warns);
+        match warns.get_mut(node) {
+            Some(window) if now.saturating_duration_since(window.start) < DIR_WARN_WINDOW => {
+                window.folded += 1;
+            }
+            other => {
+                let folded = other.map_or(0, |w| w.folded);
+                tracing::warn!(pc = %node, dropped = report.dropped, first = report.first, shared = report.shared, folded, "directory rows from that PC were dropped (a local agent's id, a bad name, not an agent id), or its agent ids are also listed by another PC (copied data folder? — a send to such an id is refused as ambiguous); `folded` frames had the same since the last line");
+                warns.insert(
+                    *node,
+                    WarnWindow {
+                        start: now,
+                        folded: 0,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Drops copy rows that name one of this PC's own agents now — run on the blocking pool after a directory read that changed the host's
+    ///   local ids (rows may have come in before an agent of this PC took their id). ★Scans and drops under the copies' lock★: a frame
+    ///   whose rows were checked before the change either commits before this scan or sees the change and checks again ([`on_directory`]).
+    // ADR-0391
+    fn recheck_copies(&self) {
+        let Some(host) = &self.host else {
+            return;
+        };
+        let dropped = lock(&self.copies).drop_refused(&|rows| host.row_problems(rows));
+        // Counted once the scan is done, so a test that waits on it knows the scan ran before what it does next.
+        #[cfg(test)]
+        self.rechecks
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        for (node, dropped) in &dropped {
+            tracing::warn!(pc = %node, dropped, "rows of that PC's directory copy now name an agent of this PC (or fail the row checks) — dropped");
+        }
+        if !dropped.is_empty() {
+            self.bump();
+        }
+    }
+
+    /// The host's local-id version (0 without a host) — see [`MailInbox::local_ids_version`].
+    fn local_ids_version(&self) -> u64 {
+        self.host
+            .as_ref()
+            .map_or(0, |host| host.local_ids_version())
+    }
+
+    /// The other PC is still trusted and still the run a mail went to — read when its verdict comes back.
+    // ADR-0390 d4
+    fn still_trusted(&self, node: &PeerId, run: Instance) -> bool {
+        self.is_trusted(node) && lock(&self.book).last_run(node) == Some(run)
+    }
+
+    /// The rows of the listed PCs: link state, warning, directory copy.
+    fn rows(&self, published: &Published, endpoint: &EndpointView) -> Vec<PeerRow> {
+        let book = lock(&self.book);
+        let copies = lock(&self.copies);
+        published
+            .peers
+            .iter()
+            .map(|peer| PeerRow {
+                peer: peer.clone(),
+                online: match endpoint {
+                    EndpointView::Error(_) => Online::EndpointError,
+                    EndpointView::Off => Online::Offline,
+                    EndpointView::Up { .. } => book.online(&peer.id),
+                },
+                warning: book.warning(&peer.id),
+                agents: copies.get(&peer.id).map(|copy| copy.agents.clone()),
+            })
+            .collect()
+    }
+
+    /// Sends this PC's directory snapshot on `peer`'s connection `generation` (`None` = its current one) — under the publisher's lock,
+    ///   held by the caller (which took `snapshot` from it).
+    fn send_snapshot(
+        &self,
+        snapshot: &DirSnapshot,
+        node: &PeerId,
+        peer: &Peer<PeerWire>,
+        generation: Option<Generation>,
+    ) {
+        let msg = PeerMsg::DirSnapshot(snapshot.clone());
+        #[cfg(test)]
+        self.dir_sent
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let sent = match generation {
+            Some(generation) => peer.notify_in(generation, msg),
+            None => peer.notify(msg),
+        };
+        if let Err(e) = sent {
+            tracing::debug!(pc = %node, "the directory snapshot was not sent: {e}");
+        }
+    }
+
+    /// The host's check of the rows of one arriving directory frame.
+    fn row_problems(&self, rows: &[&DirAgent]) -> Vec<Option<&'static str>> {
+        match &self.host {
+            Some(host) => host.row_problems(rows),
+            None => vec![Some("this PC takes no directories (no mail host)"); rows.len()],
+        }
     }
 
     fn set_endpoint(&self, view: EndpointView) {
@@ -359,11 +629,17 @@ pub(crate) struct PeerLink {
 impl PeerLink {
     /// Daemon start: loads this account's peer state from the daemon state folder, clears temp files a crash left, and starts the
     ///   runtime, which brings the endpoint up if the state allows. Loading runs on the blocking pool.
-    pub(crate) async fn start(state_dir: PathBuf, settings: LinkSettings) -> Result<Self, String> {
+    ///   With a `host`, the link carries mail and the agent directory.
+    pub(crate) async fn start(
+        state_dir: PathBuf,
+        settings: LinkSettings,
+        host: Option<Host>,
+    ) -> Result<Self, String> {
         Self::start_loading(
             move || PeerStore::open(state_dir),
             settings,
             Arc::new(SystemClock),
+            host,
         )
         .await
     }
@@ -373,6 +649,7 @@ impl PeerLink {
         load: impl FnOnce() -> PeerStore + Send + 'static,
         settings: LinkSettings,
         clock: Arc<dyn Clock>,
+        host: Option<Host>,
     ) -> Result<Self, String> {
         let store = tokio::task::spawn_blocking(move || {
             let store = load();
@@ -399,8 +676,36 @@ impl PeerLink {
             changes,
             actor: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
+            host: host.as_ref().map(|host| host.mail.clone()),
+            publisher: Mutex::new(Publisher::new(instance, MAX_FRAME_BYTES)),
+            copies: Mutex::new(Copies::default()),
+            routes: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(HashMap::new()),
+            in_flight_cap: std::sync::atomic::AtomicUsize::new(IN_FLIGHT_CAP),
+            inbound: Mutex::new(HashMap::new()),
+            inbound_gen: std::sync::atomic::AtomicU64::new(0),
+            overdue: Mutex::new(HashMap::new()),
+            verdict_gate: RwLock::new(()),
+            dir_warns: Mutex::new(HashMap::new()),
+            resyncs: Mutex::new(Resyncs::default()),
+            runtime: tokio::runtime::Handle::current(),
+            publisher_task: Mutex::new(None),
             #[cfg(test)]
             bring_ups: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            verdict_hold: Mutex::new(None),
+            #[cfg(test)]
+            commit_hold: Mutex::new(None),
+            #[cfg(test)]
+            dir_sent: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            publishes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            rechecks: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            dir_hold: Mutex::new(None),
+            #[cfg(test)]
+            resync_hold: Mutex::new(None),
         });
         let actor = Actor {
             core: core.clone(),
@@ -413,6 +718,11 @@ impl PeerLink {
         };
         log_start(&core.published());
         *lock(&core.actor) = Some(tokio::spawn(actor.run()));
+        if let Some(host) = host {
+            // The first directory is computed at once.
+            host.bell.ring();
+            *lock(&core.publisher_task) = Some(tokio::spawn(publish_loop(core.clone(), host)));
+        }
         Ok(Self { core })
     }
 
@@ -423,6 +733,11 @@ impl PeerLink {
         self.core
             .stopped
             .store(true, std::sync::atomic::Ordering::Release);
+        // Overdue reports still waiting are not handed on; one being handed on finishes (each job checks `stopped` as it starts).
+        lock(&self.core.overdue).clear();
+        if let Some(publisher) = lock(&self.core.publisher_task).take() {
+            publisher.abort();
+        }
         let (done, wait) = oneshot::channel();
         if self.core.tx.send(Msg::Stop(done)).is_err() {
             return;
@@ -449,22 +764,7 @@ impl PeerLink {
     pub(crate) fn snapshot(&self) -> PeerSnapshot {
         let published = self.core.published();
         let endpoint = lock(&self.core.endpoint).clone();
-        let rows = {
-            let book = lock(&self.core.book);
-            published
-                .peers
-                .iter()
-                .map(|peer| PeerRow {
-                    peer: peer.clone(),
-                    online: match &endpoint {
-                        EndpointView::Error(_) => Online::EndpointError,
-                        EndpointView::Off => Online::Offline,
-                        EndpointView::Up { .. } => book.online(&peer.id),
-                    },
-                    warning: book.warning(&peer.id),
-                })
-                .collect()
-        };
+        let rows = self.core.rows(&published, &endpoint);
         PeerSnapshot {
             status: published.status.clone(),
             id: published.id,
@@ -474,6 +774,132 @@ impl PeerLink {
             peers: rows,
             knocks: lock(&self.core.knocks).list(),
         }
+    }
+
+    /// The listed PCs with their link state and directory copy — what mail addressing reads (lighter than [`PeerLink::snapshot`]).
+    pub(crate) fn rows(&self) -> Vec<PeerRow> {
+        let endpoint = lock(&self.core.endpoint).clone();
+        self.core.rows(&self.core.published(), &endpoint)
+    }
+
+    // ── mail (non-blocking — callable from any thread) ──
+
+    /// Sends one mail to `node` on its chosen link (module head of [`super::mail`]). ★`done` is called exactly once★, on a blocking-pool
+    ///   thread, with how the mail ended.
+    pub(crate) fn send_mail(
+        &self,
+        node: PeerId,
+        mail: Mail,
+        done: Box<dyn FnOnce(MailEnd) + Send>,
+    ) {
+        let runtime = self.core.runtime.clone();
+        let finish = move |done: Box<dyn FnOnce(MailEnd) + Send>, end: MailEnd| {
+            runtime.spawn_blocking(move || done(end));
+        };
+        let msg = PeerMsg::Mail(mail);
+        // ADR-0390: the sender checks the encoded size, so its own oversized frame never closes the link.
+        if !encoded_len(&msg).is_ok_and(|n| n <= MAX_FRAME_BYTES) {
+            return finish(done, MailEnd::TooLarge);
+        }
+        let route = lock(&self.core.routes).get(&node).cloned();
+        let Some(route) = route.filter(|_| self.core.is_trusted(&node)) else {
+            return finish(done, MailEnd::Offline);
+        };
+        {
+            let cap = self
+                .core
+                .in_flight_cap
+                .load(std::sync::atomic::Ordering::Acquire);
+            let mut in_flight = lock(&self.core.in_flight);
+            let count = in_flight.entry(node).or_insert(0);
+            if *count >= cap {
+                tracing::warn!(pc = %node, cap, "too many mails waiting for a verdict from that PC — not sent");
+                return finish(done, MailEnd::Limit);
+            }
+            *count += 1;
+        }
+        let core = self.core.clone();
+        self.core.runtime.spawn(async move {
+            let result = route.peer.request(msg).await;
+            {
+                let mut in_flight = lock(&core.in_flight);
+                if let Some(count) = in_flight.get_mut(&node) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        in_flight.remove(&node);
+                    }
+                }
+            }
+            #[cfg(test)]
+            let hold = lock(&core.verdict_hold).take();
+            // ADR-0390 d4: trust is judged on the thread that hands the end on, right before it — a removal while the answer waited for
+            //   that thread still stops it.
+            let runtime = core.runtime.clone();
+            runtime.spawn_blocking(move || {
+                #[cfg(test)]
+                if let Some((reached, release)) = hold {
+                    let _ = reached.send(());
+                    let _ = release.blocking_recv();
+                }
+                // ADR-0390 d4: from the trust check until the kernel has applied the end — a revocation waits for it (the kernel only
+                //   parks notices and rings the flush doorbell here, so the gate is never held across an injection).
+                let _verdict = read(&core.verdict_gate);
+                let end = MailEnd::of(result, || core.still_trusted(&node, route.run));
+                #[cfg(test)]
+                {
+                    let hold = lock(&core.commit_hold).take();
+                    if let Some((reached, release)) = hold {
+                        let _ = reached.send(());
+                        let _ = release.blocking_recv();
+                    }
+                }
+                done(end);
+            });
+        });
+    }
+
+    /// Tells `node` that its request `request_id` is overdue here — best-effort, lost when that PC has no live link.
+    pub(crate) fn send_reply_overdue(&self, node: PeerId, request_id: &str) {
+        let route = lock(&self.core.routes).get(&node).cloned();
+        // ADR-0390 d4: nothing goes to a PC once it is removed, even before the actor has dropped its route.
+        let Some(route) = route.filter(|_| self.core.is_trusted(&node)) else {
+            tracing::debug!(pc = %node, "an overdue report was not sent — that PC is not linked");
+            return;
+        };
+        let msg = PeerMsg::ReplyOverdue {
+            request_id: request_id.to_string(),
+        };
+        if let Err(e) = route.peer.notify(msg) {
+            tracing::debug!(pc = %node, "an overdue report was not sent: {e}");
+        }
+    }
+
+    /// Tests: the next mail request that gets its answer tells `reached` and waits for `release` before the answer is judged.
+    #[cfg(test)]
+    pub(crate) fn hold_next_verdict(
+        &self,
+        reached: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    ) {
+        *lock(&self.core.verdict_hold) = Some((reached, release));
+    }
+
+    /// Tests: the next mail end, once judged trusted or not, tells `reached` and waits for `release` inside the verdict gate.
+    #[cfg(test)]
+    pub(crate) fn hold_next_commit(
+        &self,
+        reached: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    ) {
+        *lock(&self.core.commit_hold) = Some((reached, release));
+    }
+
+    /// Tests: lowers the in-flight cap.
+    #[cfg(test)]
+    pub(crate) fn set_in_flight_cap(&self, cap: usize) {
+        self.core
+            .in_flight_cap
+            .store(cap, std::sync::atomic::Ordering::Release);
     }
 
     /// Ticks on every change of what [`PeerLink::snapshot`] shows — refused knocks fold into one tick per refusal-log window, so a new knock
@@ -738,6 +1164,7 @@ impl Actor {
     async fn run(mut self) {
         self.reconcile().await;
         loop {
+            self.refresh_routes();
             let deadline = self.next_deadline();
             let msg = match deadline {
                 Some(at) => {
@@ -790,6 +1217,62 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// Re-reads each PC's chosen link; a newly chosen one first gets this PC's directory snapshot (module head).
+    fn refresh_routes(&self) {
+        let mut next: HashMap<PeerId, Route> = HashMap::new();
+        if let Some(running) = &self.running {
+            let book = lock(&self.core.book);
+            for node in book.nodes() {
+                // ADR-0390 d4: a PC just removed is still in the book until the actor handles its revocation — never routed to.
+                if !self.core.is_trusted(node) {
+                    continue;
+                }
+                let (Some(key), Some(run)) = (book.chosen(node), book.chosen_run(node)) else {
+                    continue;
+                };
+                if let Some(handle) = running.handles.get(&key) {
+                    next.insert(
+                        *node,
+                        Route {
+                            key,
+                            epoch: running.epoch,
+                            peer: handle.peer.clone(),
+                            run,
+                        },
+                    );
+                }
+            }
+        }
+        // ADR-0391: a directory frame counts only from the PC's chosen link — checked against this record, under the copies' lock alone.
+        lock(&self.core.copies).set_chosen(
+            next.iter()
+                .map(|(node, route)| (*node, route.key))
+                .collect(),
+        );
+        let mut publisher = lock(&self.core.publisher);
+        let mut routes = lock(&self.core.routes);
+        if self.core.host.is_some() {
+            for (node, route) in &next {
+                let old = routes.get(node);
+                let fresh = old.map_or(true, |old| {
+                    (old.key, old.epoch, old.run) != (route.key, route.epoch, route.run)
+                });
+                if fresh {
+                    let snapshot = publisher.snapshot();
+                    self.core.send_snapshot(&snapshot, node, &route.peer, None);
+                }
+                // ADR-0391: directory frames count only from the chosen link, so what the other PC sent on this link before it was
+                //   chosen here was dropped — ask for its snapshot (again).
+                if fresh {
+                    if let Err(e) = route.peer.notify(PeerMsg::DirResync) {
+                        tracing::debug!(pc = %node, "a directory resync request was not sent: {e}");
+                    }
+                }
+            }
+        }
+        *routes = next;
     }
 
     fn next_deadline(&self) -> Option<Instant> {
@@ -945,6 +1428,7 @@ impl Actor {
             self.core.clock.clone(),
             policy(),
         );
+        lock(&self.core.resyncs).epoch = self.epoch;
         let accept_task = tokio::spawn(accept_loop(listener, self.core.tx.clone(), self.epoch));
         let addrs = endpoint.bound_addrs();
         tracing::info!(addrs = ?addrs, pc = %want.id, "peer link endpoint up");
@@ -981,6 +1465,13 @@ impl Actor {
         }
         running.endpoint.close().await;
         running.closed = true;
+        // Its links are gone; their resync state with them (link keys are never reused, so this only frees memory). Its drains may still
+        //   read a request until `Running`'s drop cuts them — the retired epoch keeps such a request from adding state back (`on_resync`).
+        {
+            let mut resyncs = lock(&self.core.resyncs);
+            resyncs.epoch = 0;
+            resyncs.links.clear();
+        }
         // Its drop cuts whatever did not finish within the flush (`Running`'s `Drop`).
         drop(running);
         tracing::info!("peer link endpoint down");
@@ -1011,6 +1502,8 @@ impl Actor {
         for id in gone {
             close_node(running, &id);
             running.addresses.remove(&id);
+            lock(&self.core.copies).drop_node(&id);
+            lock(&self.core.inbound).remove(&id);
         }
         for peer in &published.peers {
             let before = running.addresses.insert(peer.id, peer.address);
@@ -1195,6 +1688,7 @@ impl Actor {
             return;
         };
         running.handles.remove(&key);
+        lock(&self.core.resyncs).links.remove(&key);
         let actions = lock(&self.core.book).handle_ended(key, self.core.clock.now());
         self.execute(actions);
         self.core.bump();
@@ -1276,18 +1770,18 @@ async fn accept_loop(mut listener: IrohListener, tx: mpsc::UnboundedSender<Msg>,
 /// What to do with one message from `node` on the handle `key`. ★Every frame is checked against the list as it is now★ (ADR-0390 d4).
 ///   Only the first `ProbeAck` with the nonce of the probe open on that link reaches the actor, and a `Duplicate` warning is logged only when it changes the PC's
 ///   warning — a broken peer repeating either cannot fill the actor's queue or the log.
-fn route(core: &Core, node: &PeerId, key: LinkKey, msg: PeerMsg) -> Route {
+fn route(core: &Core, node: &PeerId, key: LinkKey, msg: PeerMsg) -> Routed {
     if !core.is_trusted(node) {
-        return Route::NotTrusted;
+        return Routed::NotTrusted;
     }
     match msg {
-        PeerMsg::Probe { nonce } => Route::Reply(PeerMsg::ProbeAck { nonce }),
+        PeerMsg::Probe { nonce } => Routed::Reply(PeerMsg::ProbeAck { nonce }),
         PeerMsg::ProbeAck { nonce } => {
             if lock(&core.book).claim_probe_answer(key, nonce) {
-                Route::Forward(LinkEvent::ProbeAck(nonce))
+                Routed::Forward(LinkEvent::ProbeAck(nonce))
             } else {
                 tracing::debug!(pc = %node, "a ProbeAck that answers no open probe on this link (or not first) — dropped");
-                Route::Drop
+                Routed::Drop
             }
         }
         PeerMsg::Duplicate { kind } => {
@@ -1295,16 +1789,534 @@ fn route(core: &Core, node: &PeerId, key: LinkKey, msg: PeerMsg) -> Route {
                 tracing::warn!(pc = %node, ?kind, "that PC reports this PC's identity in use by another running copy — look for a second running copy; a new key re-pairs every PC");
                 core.bump();
             }
-            Route::Drop
+            Routed::Drop
         }
         PeerMsg::Hello { .. } => {
             tracing::debug!(pc = %node, "a Hello after the handshake — ignored");
-            Route::Drop
+            Routed::Drop
         }
-        other => {
-            tracing::debug!(pc = %node, kind = other.kind(), "a PeerWire message this build does not handle yet — dropped");
-            Route::Drop
+        PeerMsg::Mail(mail) => Routed::Mail(mail),
+        PeerMsg::ReplyOverdue { request_id } => Routed::Overdue(request_id),
+        PeerMsg::DirSnapshot(snapshot) => Routed::Snapshot(snapshot),
+        PeerMsg::DirDelta(delta) => Routed::Delta(delta),
+        PeerMsg::DirResync => Routed::Resync,
+        PeerMsg::MailVerdict(_) => {
+            // Verdicts are matched to their request in the transport; one that reaches the inbox answers no waiting request (late).
+            tracing::debug!(pc = %node, "a mail verdict no request waits for (past its deadline) — dropped");
+            Routed::Drop
         }
+    }
+}
+
+/// Queues an inbound mail and starts what may run ([`super::mail`] module head).
+fn on_mail(core: &Arc<Core>, node: PeerId, mail: Mail, reply: Reply) {
+    if core.host.is_none() {
+        let refusal = Refusal {
+            code: "REMOTE_REFUSED",
+            reason: "remote mail is not enabled on this PC".to_string(),
+        };
+        answer(&node, &reply, &mail.id, refuse_all(&mail, &refusal));
+        return;
+    }
+    if mail.rows.len() > MAX_MAIL_ROWS {
+        tracing::warn!(pc = %node, rows = mail.rows.len(), "a mail from that PC names more agents than one mail may — refused");
+        let refusal = Refusal {
+            code: "REMOTE_REFUSED",
+            reason: format!("more than {MAX_MAIL_ROWS} recipients in one mail"),
+        };
+        answer(&node, &reply, &mail.id, refuse_all(&mail, &refusal));
+        return;
+    }
+    // ADR-0411: the frame cap is sized for directories — a mail is bounded on its own before it is held in the queue.
+    let bytes = mail_bytes(&mail);
+    if bytes > MAX_MAIL_BYTES {
+        tracing::warn!(pc = %node, bytes, "a mail from that PC is larger than one mail may be — refused");
+        let refusal = Refusal {
+            code: "REMOTE_REFUSED",
+            reason: format!("the mail is over {} KiB", MAX_MAIL_BYTES >> 10),
+        };
+        answer(&node, &reply, &mail.id, refuse_all(&mail, &refusal));
+        return;
+    }
+    let arrived = core.clock.now();
+    let pushed = lock(&core.inbound)
+        .entry(node)
+        .or_insert_with(|| {
+            Inbound::new(
+                core.inbound_gen
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel),
+            )
+        })
+        .push(mail, arrived, reply);
+    if let Err(job) = pushed {
+        tracing::warn!(pc = %node, "a mail from that PC was refused — its receive queue is full");
+        let refusal = Refusal {
+            code: "REMOTE_LIMIT",
+            reason: "receiver busy — too many mails from this PC are waiting".to_string(),
+        };
+        answer(
+            &node,
+            &job.reply,
+            &job.mail.id,
+            refuse_all(&job.mail, &refusal),
+        );
+        return;
+    }
+    run_inbound(core, node);
+}
+
+/// Starts the frames of `node`'s receive queue that may run now, each on the blocking pool; drops the expired ones.
+fn run_inbound(core: &Arc<Core>, node: PeerId) {
+    let now = core.clock.now();
+    let started = match lock(&core.inbound).get_mut(&node) {
+        Some(queue) => queue.start(now),
+        None => return,
+    };
+    for job in started.expired {
+        // ADR-0404 d5: the sender has reported it unconfirmed by now; running it late would break the overdue grace.
+        tracing::warn!(pc = %node, waited_s = now.saturating_duration_since(job.arrived).as_secs(), "a mail from that PC waited past its transport deadline — dropped");
+    }
+    for job in started.run {
+        let core_for_job = core.clone();
+        core.runtime
+            .spawn_blocking(move || run_job(core_for_job, node, job));
+    }
+}
+
+/// Runs one inbound frame on the blocking pool. Its queue slot is given back on every exit, a panic included ([`Finished`]).
+fn run_job(core: Arc<Core>, node: PeerId, job: Job<Reply>) {
+    let _finished = Finished {
+        core: core.clone(),
+        node,
+        gen: job.gen,
+        tokens: job.tokens().to_vec(),
+    };
+    // ADR-0404 d5: the job may have waited for a blocking thread — past the deadline since arrival it is dropped, not run late.
+    let waited = core.clock.now().saturating_duration_since(job.arrived);
+    if waited > MAIL_DEADLINE {
+        tracing::warn!(pc = %node, waited_s = waited.as_secs(), "a mail from that PC waited past its transport deadline — dropped");
+        return;
+    }
+    let pc = core.published().trusted(&node).map(|p| p.name.clone());
+    match (pc, &core.host) {
+        (Some(pc), Some(host)) => {
+            let rows = host
+                .mail(node, &pc, &job.mail, job.arrived)
+                .unwrap_or_else(|refusal| refuse_all(&job.mail, &refusal));
+            answer(&node, &job.reply, &job.mail.id, rows);
+        }
+        _ => {
+            tracing::debug!(pc = %node, "a mail from a PC no longer trusted — dropped");
+        }
+    }
+}
+
+/// Gives a running frame's slot and tokens back to the queue it started from (not to a newer queue of the same PC) and starts what may
+///   run next — on drop, so a panic in the host does not leak the slot.
+struct Finished {
+    core: Arc<Core>,
+    node: PeerId,
+    gen: u64,
+    tokens: Vec<String>,
+}
+
+impl Drop for Finished {
+    fn drop(&mut self) {
+        {
+            let mut inbound = lock(&self.core.inbound);
+            if let Some(queue) = inbound
+                .get_mut(&self.node)
+                .filter(|queue| queue.gen() == self.gen)
+            {
+                queue.finish(&self.tokens);
+                if queue.is_idle() {
+                    inbound.remove(&self.node);
+                }
+            }
+        }
+        run_inbound(&self.core, self.node);
+    }
+}
+
+/// Sends a verdict on the connection the mail came on — after a reconnect it is not sent (the sender reports that mail unconfirmed).
+fn answer(node: &PeerId, reply: &Reply, id: &str, mut rows: Vec<super::wire::VerdictRow>) {
+    // ADR-0390: an answer over the frame cap would end this PC's own link — rows are left out until it fits (the sender settles them
+    //   unconfirmed).
+    let mut verdict = PeerMsg::MailVerdict(MailVerdict {
+        id: id.to_string(),
+        rows: Vec::new(),
+    });
+    loop {
+        if let PeerMsg::MailVerdict(v) = &mut verdict {
+            v.rows = std::mem::take(&mut rows);
+        }
+        if encoded_len(&verdict).is_ok_and(|n| n <= MAX_FRAME_BYTES) {
+            break;
+        }
+        if let PeerMsg::MailVerdict(v) = &mut verdict {
+            rows = std::mem::take(&mut v.rows);
+        }
+        if rows.pop().is_none() {
+            break;
+        }
+        tracing::warn!(pc = %node, "a mail verdict over the frame cap — a row left out");
+    }
+    if let Err(e) = reply.peer.notify_in(reply.generation, verdict) {
+        tracing::debug!(pc = %node, "a mail verdict was not sent — the link it came on is gone: {e}");
+    }
+}
+
+/// Applies a directory frame from `node`'s link `key` to its copy; a frame that does not follow the copy asks for a fresh snapshot on the
+///   same connection.
+fn on_directory(core: &Core, node: PeerId, key: LinkKey, reply: &Reply, mut frame: Routed) {
+    // One spelling per agent id, so the same agent written two ways is one row (dedup, shared-id checks).
+    let canonical = |id: &mut String| {
+        if let Ok(uuid) = uuid::Uuid::parse_str(id) {
+            *id = uuid.to_string();
+        }
+    };
+    match &mut frame {
+        Routed::Snapshot(snapshot) => {
+            snapshot
+                .agents
+                .iter_mut()
+                .for_each(|a| canonical(&mut a.id));
+            // Sorted here, off the copies' lock — the sort under it then finds the rows in order.
+            sort(&mut snapshot.agents);
+        }
+        Routed::Delta(delta) => {
+            delta.upsert.iter_mut().for_each(|a| canonical(&mut a.id));
+            delta.remove.iter_mut().for_each(canonical);
+        }
+        _ => return,
+    }
+    let problems_of = |frame: &Routed| -> HashMap<String, &'static str> {
+        let rows: Vec<&DirAgent> = match frame {
+            Routed::Snapshot(snapshot) => snapshot.agents.iter().collect(),
+            Routed::Delta(delta) => delta.upsert.iter().collect(),
+            _ => Vec::new(),
+        };
+        rows.iter()
+            .zip(core.row_problems(&rows))
+            .filter_map(|(row, why)| why.map(|why| (row.id.clone(), why)))
+            .collect()
+    };
+    // The host's checks run before the copies' lock is taken; the version is read first, so a change it does not show is one the
+    //   re-check of the copies (`Core::recheck_copies`, after the change) will see.
+    let version = core.local_ids_version();
+    let mut problems = problems_of(&frame);
+    #[cfg(test)]
+    hold_directory(core, &frame);
+    let (applied, report) = {
+        let mut copies = lock(&core.copies);
+        // ADR-0391: only the PC's chosen link writes its copy. A frame on any other link, or before the actor has chosen one, is
+        //   dropped; every newly chosen link asks for the snapshot (`Actor::refresh_routes`).
+        if !copies.is_chosen(&node, key) {
+            tracing::debug!(pc = %node, "a directory frame on a link that is not that PC's chosen one — dropped");
+            return;
+        }
+        // ADR-0390 d4: a removal between the frame's trust check and here has dropped the copy — it must not come back.
+        if !core.is_trusted(&node) {
+            return;
+        }
+        // ADR-0391: this PC's agent ids changed since the rows were checked, and the copies' re-check may already have run — check
+        //   again here, so a row naming a new local agent is not committed past it.
+        if core.local_ids_version() != version {
+            problems = problems_of(&frame);
+        }
+        let check = |row: &DirAgent| problems.get(&row.id).copied();
+        let applied = match frame {
+            Routed::Snapshot(snapshot) => copies.snapshot(node, snapshot, &check),
+            Routed::Delta(delta) => copies.delta(node, delta, &check),
+            _ => return,
+        };
+        (applied, copies.take_report())
+    };
+    core.warn_directory(&node, report);
+    match applied {
+        Applied::Updated => core.bump(),
+        Applied::Resync => {
+            if let Err(e) = reply.peer.notify_in(reply.generation, PeerMsg::DirResync) {
+                tracing::debug!(pc = %node, "a directory resync request was not sent: {e}");
+            }
+        }
+        Applied::Ignored => {}
+    }
+}
+
+/// Tests: waits at the directory hold when `frame` lists its id.
+#[cfg(test)]
+fn hold_directory(core: &Core, frame: &Routed) {
+    let mut slot = lock(&core.dir_hold);
+    let lists = |id: &str| match frame {
+        Routed::Snapshot(snapshot) => snapshot.agents.iter().any(|a| a.id == id),
+        Routed::Delta(delta) => delta.upsert.iter().any(|a| a.id == id),
+        _ => false,
+    };
+    if !slot.as_ref().is_some_and(|(id, _, _)| lists(id)) {
+        return;
+    }
+    let Some((_, reached, release)) = slot.take() else {
+        return;
+    };
+    drop(slot);
+    let _ = reached.send(());
+    // On the drain task — a std channel, as `oneshot::Receiver::blocking_recv` refuses to run inside the runtime.
+    let _ = release.recv();
+}
+
+/// Recomputes this PC's directory each time the host rings, coalesced, and sends the change on every chosen link (module head).
+async fn publish_loop(core: Arc<Core>, host: Host) {
+    // The host's local-id version the copies were last re-checked against.
+    let mut checked: Option<u64> = None;
+    loop {
+        host.bell.rung().await;
+        core.clock.sleep(COALESCE).await;
+        let mail = host.mail.clone();
+        let rechecking = core.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            let directory = mail.directory();
+            // ADR-0391: the host refreshed its local ids with this read — when they changed, rows admitted before an agent of this PC
+            //   took one of them go now.
+            let version = mail.local_ids_version();
+            if checked != Some(version) {
+                rechecking.recheck_copies();
+            }
+            (directory, version)
+        })
+        .await;
+        let directory = match read {
+            Ok((directory, version)) => {
+                checked = Some(version);
+                directory
+            }
+            Err(e) => {
+                tracing::warn!("this PC's agent directory could not be read: {e}");
+                continue;
+            }
+        };
+        let mut publisher = lock(&core.publisher);
+        let Some(publish) = publisher.update(directory) else {
+            #[cfg(test)]
+            core.publishes
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            continue;
+        };
+        let routes: Vec<(PeerId, Route)> = lock(&core.routes)
+            .iter()
+            .map(|(node, route)| (*node, route.clone()))
+            .collect();
+        for (node, route) in routes {
+            // ADR-0390 d4: a PC removed since its route was taken gets nothing.
+            if !core.is_trusted(&node) {
+                continue;
+            }
+            match &publish {
+                Publish::Delta(delta) => {
+                    #[cfg(test)]
+                    core.dir_sent
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    if let Err(e) = route.peer.notify(PeerMsg::DirDelta(delta.clone())) {
+                        tracing::debug!(pc = %node, "a directory change was not sent: {e}");
+                    }
+                }
+                Publish::Snapshot(snapshot) => {
+                    core.send_snapshot(snapshot, &node, &route.peer, None)
+                }
+            }
+        }
+        drop(publisher);
+        #[cfg(test)]
+        core.publishes
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Answers a `DirResync` on its connection — off the drain task, at most once per [`RESYNC_INTERVAL`] per link, by one worker at a time:
+///   requests arriving before the worker takes its target fold into it (the answer goes to the latest one's connection); one arriving
+///   while it sends gets one more answer, scheduled by the worker as it ends. A request read by a drain of a retired endpoint (`epoch`)
+///   is dropped.
+fn on_resync(core: &Arc<Core>, epoch: u64, node: PeerId, key: LinkKey, reply: Reply) {
+    if core.host.is_none() {
+        return;
+    }
+    let now = core.clock.now();
+    let wait = {
+        let mut resyncs = lock(&core.resyncs);
+        // The epoch is checked with the insert, under one lock: a teardown that cleared this state is never undone by its own drains.
+        if resyncs.epoch != epoch {
+            tracing::debug!(pc = %node, "a directory resync request on a link of a retired endpoint — dropped");
+            return;
+        }
+        let resync = resyncs.links.entry(key).or_default();
+        resync.target = Some(reply);
+        if resync.running {
+            tracing::debug!(pc = %node, "a directory resync request while one is due — folded into it");
+            return;
+        }
+        resync.running = true;
+        resync.last.map_or(Duration::ZERO, |last| {
+            (last + RESYNC_INTERVAL).saturating_duration_since(now)
+        })
+    };
+    schedule_resync(core.clone(), node, key, wait);
+}
+
+/// Runs a link's resync worker after `wait`: takes the latest target and sends this PC's snapshot to it.
+fn schedule_resync(core: Arc<Core>, node: PeerId, key: LinkKey, wait: Duration) {
+    let sleep = core.clock.sleep(wait);
+    core.runtime.clone().spawn(async move {
+        sleep.await;
+        let runtime = core.runtime.clone();
+        let _ = runtime
+            .spawn_blocking(move || {
+                let _answered = ResyncDone {
+                    core: core.clone(),
+                    node,
+                    key,
+                };
+                let reply = lock(&core.resyncs)
+                    .links
+                    .get_mut(&key)
+                    .and_then(|resync| resync.target.take());
+                if let Some(reply) = reply.filter(|_| core.is_trusted(&node)) {
+                    let mut publisher = lock(&core.publisher);
+                    let snapshot = publisher.snapshot();
+                    core.send_snapshot(&snapshot, &node, &reply.peer, Some(reply.generation));
+                }
+                #[cfg(test)]
+                {
+                    let hold = lock(&core.resync_hold).take();
+                    if let Some((reached, release)) = hold {
+                        let _ = reached.send(());
+                        let _ = release.blocking_recv();
+                    }
+                }
+            })
+            .await;
+    });
+}
+
+/// Ends a link's resync worker on every exit, a panic included: a target that arrived meanwhile gets one more answer an interval later;
+///   otherwise the link is idle again. Nothing is left for a link that ended or an endpoint that was torn down meanwhile.
+struct ResyncDone {
+    core: Arc<Core>,
+    node: PeerId,
+    key: LinkKey,
+}
+
+impl Drop for ResyncDone {
+    fn drop(&mut self) {
+        let again = {
+            let mut resyncs = lock(&self.core.resyncs);
+            let Some(resync) = resyncs.links.get_mut(&self.key) else {
+                return;
+            };
+            resync.last = Some(self.core.clock.now());
+            resync.running = resync.target.is_some();
+            resync.running
+        };
+        if again {
+            schedule_resync(self.core.clone(), self.node, self.key, RESYNC_INTERVAL);
+        }
+    }
+}
+
+/// Queues an overdue report for the host: a request id another PC may not use is dropped; the others wait in that PC's queue (each id
+///   once, at most [`MAX_OVERDUE_WAITING`] — past it the report is dropped with a warning) and are handed to the host on the blocking
+///   pool, at most [`MAX_OVERDUE_RUNNING`] at once. A sweep on the other PC sends one report per overdue contract back to back, never
+///   again, so a burst must be kept, not dropped. A removal drops the PC's queue and a stop drops every queue; each report checks trust
+///   and the stop again as its job starts.
+// ADR-0393
+fn on_overdue(core: &Arc<Core>, node: PeerId, request_id: String) {
+    let Some(host) = core.host.as_ref() else {
+        return;
+    };
+    if !host.mail_id_ok(&request_id) {
+        tracing::debug!(pc = %node, "an overdue report with a malformed request id — dropped");
+        return;
+    }
+    if core.stopped.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    {
+        let mut overdue = lock(&core.overdue);
+        let queue = overdue.entry(node).or_insert_with(|| OverdueQueue {
+            gen: core
+                .inbound_gen
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel),
+            waiting: std::collections::VecDeque::new(),
+            running: 0,
+        });
+        if queue.waiting.contains(&request_id) {
+            return;
+        }
+        if queue.waiting.len() >= MAX_OVERDUE_WAITING {
+            tracing::warn!(pc = %node, waiting = queue.waiting.len(), "too many overdue reports from that PC are waiting — this one is dropped");
+            return;
+        }
+        queue.waiting.push_back(request_id);
+    }
+    run_overdue(core, node);
+}
+
+/// Starts waiting overdue reports of `node` while fewer than [`MAX_OVERDUE_RUNNING`] run.
+fn run_overdue(core: &Arc<Core>, node: PeerId) {
+    let Some(host) = core.host.clone() else {
+        return;
+    };
+    loop {
+        let (gen, request_id) = {
+            let mut overdue = lock(&core.overdue);
+            let Some(queue) = overdue.get_mut(&node) else {
+                return;
+            };
+            if queue.running >= MAX_OVERDUE_RUNNING {
+                return;
+            }
+            let Some(request_id) = queue.waiting.pop_front() else {
+                if queue.running == 0 {
+                    overdue.remove(&node);
+                }
+                return;
+            };
+            queue.running += 1;
+            (queue.gen, request_id)
+        };
+        let core = core.clone();
+        let host = host.clone();
+        core.runtime.clone().spawn_blocking(move || {
+            let _done = OverdueDone {
+                core: core.clone(),
+                node,
+                gen,
+            };
+            // ADR-0390 d4: a PC removed, or a daemon stopping, since the report was queued — nothing more is handed on.
+            if core.stopped.load(std::sync::atomic::Ordering::Acquire) || !core.is_trusted(&node) {
+                return;
+            }
+            host.reply_overdue(node, &request_id);
+        });
+    }
+}
+
+/// Gives an overdue slot back on every exit (a panic included) and starts the next waiting report.
+struct OverdueDone {
+    core: Arc<Core>,
+    node: PeerId,
+    /// The queue the report was started from.
+    gen: u64,
+}
+
+impl Drop for OverdueDone {
+    fn drop(&mut self) {
+        if let Some(queue) = lock(&self.core.overdue)
+            .get_mut(&self.node)
+            .filter(|queue| queue.gen == self.gen)
+        {
+            queue.running = queue.running.saturating_sub(1);
+        }
+        run_overdue(&self.core, self.node);
     }
 }
 
@@ -1322,14 +2334,42 @@ async fn drain(
     while let Some(item) = inbox.recv().await {
         let event = match item {
             Incoming::Message(arrival) => match route(&core, &node, key, arrival.msg) {
-                Route::Forward(event) => event,
-                Route::Reply(msg) => {
+                Routed::Forward(event) => event,
+                Routed::Reply(msg) => {
                     if let Err(e) = peer.notify_in(arrival.generation, msg) {
                         tracing::debug!(pc = %node, "a probe answer was not sent: {e}");
                     }
                     continue;
                 }
-                Route::NotTrusted => {
+                Routed::Mail(mail) => {
+                    let reply = Reply {
+                        peer: peer.clone(),
+                        generation: arrival.generation,
+                    };
+                    on_mail(&core, node, mail, reply);
+                    continue;
+                }
+                Routed::Overdue(request_id) => {
+                    on_overdue(&core, node, request_id);
+                    continue;
+                }
+                frame @ (Routed::Snapshot(_) | Routed::Delta(_)) => {
+                    let reply = Reply {
+                        peer: peer.clone(),
+                        generation: arrival.generation,
+                    };
+                    on_directory(&core, node, key, &reply, frame);
+                    continue;
+                }
+                Routed::Resync => {
+                    let reply = Reply {
+                        peer: peer.clone(),
+                        generation: arrival.generation,
+                    };
+                    on_resync(&core, epoch, node, key, reply);
+                    continue;
+                }
+                Routed::NotTrusted => {
                     if !cut {
                         cut = true;
                         tracing::info!(pc = %node, "a frame from a PC no longer trusted — dropped, its links closed");
@@ -1341,7 +2381,7 @@ async fn drain(
                     }
                     continue;
                 }
-                Route::Drop => continue,
+                Routed::Drop => continue,
             },
             Incoming::Event(event) => match event {
                 TransportEvent::Connected { generation, .. } => {

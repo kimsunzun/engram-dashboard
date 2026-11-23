@@ -5,7 +5,11 @@
 //!
 //! Seam ledger — every resident of this file (the admission check of invariant 2). Form: `type/function` — kernel port/seam →
 //! daemon object. Private translation helpers used by one entry (`to_live_agent`, `receipt`, `sort_key`, ...) belong to that entry.
-//!   - `ManagerDeliveryPort` — `DeliveryPort` (inject · roster · name) → `AgentManager`.
+//!   - `ManagerDeliveryPort` — `DeliveryPort` (inject · roster · name) → `AgentManager`, and the listed PCs with their directory copies
+//!     → the peer link (`PeerLink::rows`).
+//!   - `PeerMail` — `RemoteDeliveryPort` → the peer link (`send_mail`, `send_reply_overdue`), and the peer link's `MailInbox` → the
+//!     kernel's remote entrance, verdict entry and overdue entry (`MessagingService`) after this PC's ingress contract checks, plus this
+//!     PC's published directory (the `DeliveryPort`'s local sources); `messaging_with_peers` assembles it with the service.
 //!   - `is_live` — roster predicate (adapter over core `AgentStatus::is_live`); listed because it spans the port above and `RosterDiff`.
 //!   - `ManagerTurnFacts` — `TurnFacts` → the core's pending-list table + turn observation table (ADR-0113 decision 1 · ADR-0231).
 //!   - the `ControlPlanePort` implementation of `ControlRegistry` — envelope format lookup + delivery observation recording.
@@ -13,7 +17,8 @@
 //!     seam → manager + control registry wiring.
 //!   - `ChannelIdleNotifier` — `IdleNotifier` · `FlushTrigger` → the sending end of the flush channel (`IdleCoalescer` is its internal state).
 //!   - `MessagingFlushSink` — no kernel port; binds to the core `StatusSink` (decorator), diffs appearance/incarnation changes
-//!     (`RosterDiff`) and triggers a flush on the same channel.
+//!     (`RosterDiff`) and triggers a flush on the same channel; on the same callbacks it rings the peer link's directory bell (a
+//!     session started or ended changes this PC's published directory — ADR-0391).
 //!   - `spawn_flush_worker`/`run_flush_worker`/`run_flush_lane`/`FlushWorkerHandles`/`FlushWiring` — the consuming end of that channel →
 //!     `flush_for` of `MessagingSlot` (the late-injected `MessagingService`); the delivery lane internals (`DeliveryLanes`,
 //!     `flush_recipient`, `spawn_delivery`, `advance_lane`, `DeliveryDone`) count as belonging here.
@@ -31,8 +36,8 @@
 // ADR-0110
 // ADR-0129
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_agent::inputs_pending::InputsPendingTable;
@@ -45,14 +50,25 @@ use engram_dashboard_agent::types::{
 use engram_dashboard_messaging::busy::{BusyGate, BusyPolicy, IdleNotifier, TurnFact, TurnFacts};
 use engram_dashboard_messaging::envelope::{DeliveryObservation, EnvelopeFormat};
 use engram_dashboard_messaging::service::{
-    AddressingSources, ControlPlanePort, DeliveryPort, DormantAgent, InjectReceipt, LiveAgent,
-    MessagingService,
+    remote_msg_id_ok, remote_name_ok, AddressingSources, ControlPlanePort, DeliveryPort,
+    DirectoryEntry, DormantAgent, FailCode, InboundMail, InboundOutcome, InboundRow, InjectReceipt,
+    LiveAgent, MessagingService, OutboundMail, PcLink, RemoteDeliveryPort, RemoteLimits,
+    RemoteOutcome, RemotePc, RemoteRowVerdict, REMOTE_REASON_MAX_BYTES,
 };
-use engram_dashboard_messaging::PeerId;
+use engram_dashboard_messaging::{NodeRef, PeerId};
 
 use tokio::sync::mpsc;
 
 use crate::control::registry::ControlRegistry;
+use crate::link::peer::approvals::Approvals;
+use crate::link::peer::book::Online;
+use crate::link::peer::directory::DirectoryBell;
+use crate::link::peer::id::PeerId as PcId;
+use crate::link::peer::mail::{MailEnd, MailInbox, Refusal};
+use crate::link::peer::runtime::PeerLink;
+use crate::link::peer::wire::{
+    AgentState, DirAgent, Mail, MailFrom, MailRequest, MailRow, Outcome, VerdictRow,
+};
 use crate::usage_service::observe::UsageObserveSink;
 
 // ── delivery adapter ────────────────────────────────────────────────────────────────────────────
@@ -61,12 +77,58 @@ use crate::usage_service::observe::UsageObserveSink;
 ///   sessions lock internally and releases it at once).
 pub struct ManagerDeliveryPort {
     manager: Arc<AgentManager>,
+    /// The peer link, once it runs — the listed PCs and their directory copies in `addressing_sources`.
+    peer: Option<Arc<OnceLock<PeerLink>>>,
 }
 
 impl ManagerDeliveryPort {
     pub fn new(manager: Arc<AgentManager>) -> Self {
-        Self { manager }
+        Self {
+            manager,
+            peer: None,
+        }
     }
+
+    /// With the listed PCs read from the peer link in every snapshot (ADR-0391).
+    pub(crate) fn with_peers(manager: Arc<AgentManager>, peer: Arc<OnceLock<PeerLink>>) -> Self {
+        Self {
+            manager,
+            peer: Some(peer),
+        }
+    }
+}
+
+/// The listed PCs as the kernel sees them — read under the peer link's own locks, never under the messaging lock.
+// ADR-0391
+fn remote_pcs(link: &PeerLink) -> Vec<RemotePc> {
+    link.rows()
+        .into_iter()
+        .map(|row| RemotePc {
+            node: NodeRef::from_bytes(*row.peer.id.as_bytes()),
+            name: row.peer.name,
+            link: match row.online {
+                Online::Online => PcLink::Connected,
+                Online::Refused => PcLink::Refused,
+                Online::VersionMismatch => PcLink::VersionMismatch,
+                Online::Offline | Online::DuplicateIdentity | Online::EndpointError => {
+                    PcLink::Offline
+                }
+            },
+            // The copy's rows were checked on arrival (`PeerMail::row_problems`): every id parses.
+            directory: row.agents.map(|agents| {
+                agents
+                    .into_iter()
+                    .filter_map(|agent| {
+                        let id = uuid::Uuid::parse_str(&agent.id).ok()?;
+                        Some(DirectoryEntry {
+                            id,
+                            name: agent.name,
+                        })
+                    })
+                    .collect()
+            }),
+        })
+        .collect()
 }
 
 /// Roster predicate — the only membership condition in this file (load-bearing).
@@ -148,6 +210,31 @@ impl DeliveryPort for ManagerDeliveryPort {
     // ADR-0119 (single entry of the roster — this function is a forwarder)
     // ADR-0309 (decision 3 — the dormant side is an (id, name) pair)
     fn addressing_sources(&self) -> AddressingSources {
+        // ADR-0391: a third physical lookup beside the session snapshot and the profile list — the peer link's PCs and copies.
+        let pcs = self
+            .peer
+            .as_ref()
+            .and_then(|slot| slot.get())
+            .map(remote_pcs)
+            .unwrap_or_default();
+        AddressingSources {
+            pcs,
+            ..self.local_sources()
+        }
+    }
+
+    fn is_agent_live(&self, id: PeerId) -> bool {
+        self.manager
+            .list_agents()
+            .into_iter()
+            .any(|a| a.id == id && is_live(&a))
+    }
+}
+
+impl ManagerDeliveryPort {
+    /// The two local layers of `addressing_sources` (contract on that function), without the other PCs — also this PC's published
+    ///   directory (ADR-0391).
+    pub(crate) fn local_sources(&self) -> AddressingSources {
         let mut roster: Vec<LiveAgent> = Vec::new();
         let mut dormant: Vec<DormantAgent> = Vec::new();
         for entry in self.manager.roster() {
@@ -166,19 +253,11 @@ impl DeliveryPort for ManagerDeliveryPort {
         }
         roster.sort_by(sort_key);
         dormant.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
-        // ADR-0391: no other PC in the snapshot yet — the peer module does not feed messaging, so every address resolves locally.
         AddressingSources {
             roster,
             dormant,
             pcs: Vec::new(),
         }
-    }
-
-    fn is_agent_live(&self, id: PeerId) -> bool {
-        self.manager
-            .list_agents()
-            .into_iter()
-            .any(|a| a.id == id && is_live(&a))
     }
 }
 
@@ -288,6 +367,418 @@ pub fn messaging_for_manager_gated(
     busy: Arc<dyn BusyGate>,
 ) -> MessagingService {
     MessagingService::new_gated(Arc::new(ManagerDeliveryPort::new(manager)), registry, busy)
+}
+
+/// The daemon's assembly with mail to and from other PCs: the service reads the listed PCs from `peer` and hands remote mail to the
+///   returned adapter, which the peer link takes as its mail host (`PeerLink::start`). `origins` records which PC's mail reached an
+///   agent (a hint on that agent's later trust-change requests).
+// ADR-0390
+pub(crate) fn messaging_with_peers(
+    manager: Arc<AgentManager>,
+    registry: Arc<ControlRegistry>,
+    busy: Arc<dyn BusyGate>,
+    trigger: Arc<ChannelIdleNotifier>,
+    peer: Arc<OnceLock<PeerLink>>,
+    origins: Arc<Approvals>,
+) -> (Arc<MessagingService>, Arc<PeerMail>) {
+    let port: Arc<ManagerDeliveryPort> = Arc::new(ManagerDeliveryPort::with_peers(
+        manager.clone(),
+        peer.clone(),
+    ));
+    let local_ids = move || -> HashSet<PeerId> {
+        let mut ids: HashSet<PeerId> = manager.list_agents().into_iter().map(|a| a.id).collect();
+        ids.extend(manager.roster().into_iter().map(|e| e.id));
+        ids
+    };
+    let local = port.clone();
+    let mail = Arc::new(PeerMail::new(
+        peer,
+        Arc::new(move || local.local_sources()),
+        Arc::new(local_ids),
+        registry.clone(),
+        Some(origins),
+    ));
+    // The flush trigger is load-bearing for the peer link's verdict gate: a mail verdict is applied inside it, and with the trigger the
+    //   kernel only parks notices and rings the doorbell there — without one it would inject inline, holding a removal of that PC
+    //   behind an agent's stdin. Hence a required argument here.
+    let messaging = Arc::new(
+        MessagingService::new_gated(port, registry, busy)
+            .with_flush_trigger(trigger)
+            .with_remote(mail.clone(), REMOTE_LIMITS),
+    );
+    mail.attach(&messaging);
+    // ADR-0391: the row check has this PC's ids from the first directory frame on (the peer link starts after this).
+    mail.refresh_known_ids();
+    (messaging, mail)
+}
+
+/// The inbound limits (ADR-0390 decision 5): the per-PC backstop and the body re-check — the same 64 KiB as this PC's own entrance.
+const REMOTE_LIMITS: RemoteLimits = RemoteLimits {
+    mails_per_minute: 600,
+    max_body_bytes: 64 * 1024,
+};
+
+// ── peer mail adapter (mail to and from agents on other PCs) ──────────────────────────────────────
+
+/// The kernel's `RemoteDeliveryPort` and the peer link's `MailInbox` (seam ledger).
+///
+/// Sending: one `Mail` per (send, PC) through the peer link; ★exactly one final verdict call per mail★ — the link ends every mail once
+///   ([`MailEnd`]) and [`verdict_rows`] maps it (ADR-0393): a verdict row by row, not sent (`PEER_OFFLINE` · `REMOTE_LIMIT` ·
+///   `BODY_TOO_LARGE`), or unconfirmed. The verdict call runs on a blocking thread, never under the messaging lock.
+/// The directory rows other PCs send are checked against this PC's agent ids as read at assembly and at the last directory read
+///   ([`MailInbox::directory`], on the blocking pool, at every bell) — the check runs on the link's drain task, which must not read the agent manager (its profile
+///   lock is held across disk writes).
+/// Receiving: this PC's ingress contract checks run before the kernel's remote entrance (which re-checks the pure rules, ADR-0404 d6).
+// ADR-0390, ADR-0393, ADR-0404
+pub(crate) struct PeerMail {
+    peer: Arc<OnceLock<PeerLink>>,
+    /// Set right after the service is built (it owns this adapter, so the link back is weak).
+    messaging: OnceLock<Weak<MessagingService>>,
+    /// This PC's two local layers as local resolution sees them (no other PCs) — the published directory.
+    local: Arc<dyn Fn() -> AddressingSources + Send + Sync>,
+    /// The ids of every profile and live session, shells included — not the mail-eligible set.
+    local_ids: Arc<dyn Fn() -> HashSet<PeerId> + Send + Sync>,
+    /// `local_ids` as of the last directory read — what the drain-side row check reads.
+    known_ids: RwLock<Arc<HashSet<PeerId>>>,
+    /// Bumped each time `known_ids` changes ([`MailInbox::local_ids_version`]).
+    known_version: std::sync::atomic::AtomicU64,
+    control: Arc<dyn ControlPlanePort>,
+    origins: Option<Arc<Approvals>>,
+}
+
+impl PeerMail {
+    pub(crate) fn new(
+        peer: Arc<OnceLock<PeerLink>>,
+        local: Arc<dyn Fn() -> AddressingSources + Send + Sync>,
+        local_ids: Arc<dyn Fn() -> HashSet<PeerId> + Send + Sync>,
+        control: Arc<dyn ControlPlanePort>,
+        origins: Option<Arc<Approvals>>,
+    ) -> Self {
+        Self {
+            peer,
+            messaging: OnceLock::new(),
+            local,
+            local_ids,
+            known_ids: RwLock::new(Arc::default()),
+            known_version: std::sync::atomic::AtomicU64::new(0),
+            control,
+            origins,
+        }
+    }
+
+    pub(crate) fn attach(&self, messaging: &Arc<MessagingService>) {
+        let _ = self.messaging.set(Arc::downgrade(messaging));
+    }
+
+    /// Reads this PC's agent ids into the cache the directory row check uses — at assembly, before the peer link starts, and at every
+    ///   directory read; a changed set bumps the version after it is in place. Reads the agent manager: call it off the async workers
+    ///   once the daemon runs.
+    pub(crate) fn refresh_known_ids(&self) {
+        let ids = (self.local_ids)();
+        let mut known = self.known_ids.write().unwrap_or_else(|e| e.into_inner());
+        if **known != ids {
+            *known = Arc::new(ids);
+            self.known_version
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    fn messaging(&self) -> Option<Arc<MessagingService>> {
+        self.messaging.get().and_then(Weak::upgrade)
+    }
+
+    /// Settles every row of `mail` with one outcome — the one final verdict call for it.
+    fn settle_all(&self, mail: &OutboundMail, outcome: RemoteOutcome) {
+        let rows: Vec<RemoteRowVerdict> = mail
+            .rows
+            .iter()
+            .map(|row| RemoteRowVerdict {
+                tag: row.tag,
+                outcome: outcome.clone(),
+            })
+            .collect();
+        if let Some(messaging) = self.messaging() {
+            messaging.handle_remote_verdict(&mail.id, mail.node, &rows);
+        }
+    }
+}
+
+fn pc_of(node: NodeRef) -> PcId {
+    PcId::from_bytes(*node.as_bytes())
+}
+
+fn node_of(pc: PcId) -> NodeRef {
+    NodeRef::from_bytes(*pc.as_bytes())
+}
+
+/// The wire form of one mail to one PC (the node is the link's, never in the frame).
+fn wire_mail(mail: &OutboundMail) -> Mail {
+    Mail {
+        id: mail.id.clone(),
+        from: MailFrom {
+            agent_id: mail.from.peer_id.to_string(),
+            name: mail.sender_name.clone(),
+        },
+        rows: mail
+            .rows
+            .iter()
+            .map(|row| MailRow {
+                tag: row.tag,
+                to: row.to.clone(),
+            })
+            .collect(),
+        body: mail.body.clone(),
+        reply_to: mail.meta.reply_to.clone(),
+        request: mail.meta.request.then(|| MailRequest {
+            reply_by_raw: mail.meta.reply_by_raw.clone(),
+        }),
+    }
+}
+
+/// The one final verdict call for a mail handed to the link — `id` to `node` with `tags` (ADR-0393).
+fn verdict_call(
+    messaging: Option<Weak<MessagingService>>,
+    id: String,
+    node: NodeRef,
+    tags: Vec<u32>,
+) -> Box<dyn FnOnce(MailEnd) + Send> {
+    Box::new(move |end| {
+        let rows = verdict_rows(&tags, end);
+        if let Some(messaging) = messaging.and_then(|weak| weak.upgrade()) {
+            messaging.handle_remote_verdict(&id, node, &rows);
+        }
+    })
+}
+
+/// How a mail ended, row by row (ADR-0393).
+fn verdict_rows(tags: &[u32], end: MailEnd) -> Vec<RemoteRowVerdict> {
+    let all = |outcome: RemoteOutcome| -> Vec<RemoteRowVerdict> {
+        tags.iter()
+            .map(|tag| RemoteRowVerdict {
+                tag: *tag,
+                outcome: outcome.clone(),
+            })
+            .collect()
+    };
+    match end {
+        MailEnd::Verdict(rows) => rows
+            .into_iter()
+            .map(|row| {
+                let id = row
+                    .recipient_id
+                    .as_deref()
+                    .and_then(|id| uuid::Uuid::parse_str(id).ok());
+                let outcome = match (row.outcome, id) {
+                    (Outcome::Delivered, Some(recipient_id)) => {
+                        RemoteOutcome::Delivered { recipient_id }
+                    }
+                    (Outcome::Held, Some(recipient_id)) => RemoteOutcome::Held { recipient_id },
+                    // Delivered or held without a usable recipient id — the other PC's answer cannot be trusted either way.
+                    (Outcome::Delivered | Outcome::Held, None) => RemoteOutcome::Unconfirmed,
+                    (Outcome::Refused, _) => RemoteOutcome::Refused {
+                        code: row.code,
+                        reason: row.reason,
+                    },
+                    (Outcome::UnknownRecipient, _) => RemoteOutcome::UnknownRecipient,
+                };
+                RemoteRowVerdict {
+                    tag: row.tag,
+                    outcome,
+                }
+            })
+            .collect(),
+        MailEnd::Offline => all(RemoteOutcome::NotSent(FailCode::PeerOffline)),
+        MailEnd::Limit => all(RemoteOutcome::NotSent(FailCode::RemoteLimit)),
+        MailEnd::TooLarge => all(RemoteOutcome::NotSent(FailCode::BodyTooLarge)),
+        MailEnd::Unconfirmed => all(RemoteOutcome::Unconfirmed),
+    }
+}
+
+impl RemoteDeliveryPort for PeerMail {
+    fn enqueue(&self, mail: OutboundMail) {
+        let Some(link) = self.peer.get() else {
+            return self.settle_all(&mail, RemoteOutcome::NotSent(FailCode::PeerOffline));
+        };
+        // The kernel sends at most `MAX_REMOTE_ROWS` rows to one PC per send (the rows past it fail there with their own hint).
+        let tags: Vec<u32> = mail.rows.iter().map(|row| row.tag).collect();
+        let done = verdict_call(
+            self.messaging.get().cloned(),
+            mail.id.clone(),
+            mail.node,
+            tags,
+        );
+        link.send_mail(pc_of(mail.node), wire_mail(&mail), done);
+    }
+
+    fn send_reply_overdue(&self, node: NodeRef, request_id: &str) {
+        if let Some(link) = self.peer.get() {
+            link.send_reply_overdue(pc_of(node), request_id);
+        }
+    }
+
+    fn is_local_agent_id(&self, id: PeerId) -> bool {
+        (self.local_ids)().contains(&id)
+    }
+}
+
+/// A whole-frame refusal with this PC's reason, capped to the wire's reason size.
+fn refused(code: FailCode, reason: &str) -> Refusal {
+    let mut end = reason.len().min(REMOTE_REASON_MAX_BYTES);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    Refusal {
+        code: code.as_str(),
+        reason: reason[..end].to_string(),
+    }
+}
+
+impl MailInbox for PeerMail {
+    fn mail(
+        &self,
+        from: PcId,
+        pc_name: &str,
+        mail: &Mail,
+        arrived: Instant,
+    ) -> Result<Vec<VerdictRow>, Refusal> {
+        let Some(messaging) = self.messaging() else {
+            return Err(refused(
+                FailCode::RemoteRefused,
+                "remote mail is not running on this PC",
+            ));
+        };
+        let from_agent_id = uuid::Uuid::parse_str(&mail.from.agent_id)
+            .map_err(|_| refused(FailCode::RemoteRefused, "the sender id is not an agent id"))?;
+        // ADR-0404 d6: this PC's own entrance checks first — the reply_by notation and range, and whether the envelope in effect can
+        //   carry a contract — then the kernel's pure re-check inside `handle_remote_mail`.
+        let contract = crate::control::ingress::SendContract {
+            request: mail.request.is_some(),
+            reply_by: mail.request.as_ref().and_then(|r| r.reply_by_raw.clone()),
+            reply_to: mail.reply_to.clone(),
+        };
+        let meta = crate::control::ingress::validate_contract(&contract)
+            .map_err(|why| refused(FailCode::RemoteRefused, &why))?;
+        if let Some(why) = crate::control::ingress::contract_unsupported_by_envelope(
+            &meta,
+            self.control.envelope_format(),
+        ) {
+            return Err(refused(FailCode::RemoteRefused, &why));
+        }
+        let inbound = InboundMail {
+            id: mail.id.clone(),
+            from_agent_id,
+            from_name: mail.from.name.clone(),
+            rows: mail
+                .rows
+                .iter()
+                .map(|row| InboundRow {
+                    tag: row.tag,
+                    to: row.to.clone(),
+                })
+                .collect(),
+            body: mail.body.clone(),
+        };
+        let results = messaging
+            .handle_remote_mail(node_of(from), pc_name, &inbound, &meta, arrived)
+            .map_err(|refusal| refused(refusal.code, &refusal.reason))?;
+        Ok(results
+            .into_iter()
+            .map(|row| {
+                let (outcome, recipient_id, code) = match row.outcome {
+                    InboundOutcome::Delivered { recipient_id } => {
+                        (Outcome::Delivered, Some(recipient_id), None)
+                    }
+                    InboundOutcome::Held { recipient_id } => {
+                        (Outcome::Held, Some(recipient_id), None)
+                    }
+                    InboundOutcome::Refused(code) => (Outcome::Refused, None, Some(code)),
+                    InboundOutcome::UnknownRecipient => (Outcome::UnknownRecipient, None, None),
+                };
+                if let (Some(origins), Some(agent)) = (&self.origins, recipient_id) {
+                    // ADR-0394: the hint a later trust-change request of that agent shows.
+                    origins.note_mail_from(&agent.to_string(), pc_name);
+                }
+                VerdictRow {
+                    tag: row.tag,
+                    outcome,
+                    recipient_id: recipient_id.map(|id| id.to_string()),
+                    code: code.map(|c| c.as_str().to_string()),
+                    reason: None,
+                }
+            })
+            .collect())
+    }
+
+    fn mail_id_ok(&self, id: &str) -> bool {
+        remote_msg_id_ok(id)
+    }
+
+    fn reply_overdue(&self, from: PcId, request_id: &str) {
+        if let Some(messaging) = self.messaging() {
+            messaging.handle_reply_overdue(node_of(from), request_id, Instant::now());
+        }
+    }
+
+    /// The same set local name resolution sees (`addressing_sources`' local layers): live agents that read mail and every dormant
+    ///   profile; a name another PC would refuse is left out (logged). Also refreshes the agent ids the row check reads.
+    // ADR-0391
+    fn directory(&self) -> Vec<DirAgent> {
+        self.refresh_known_ids();
+        let sources = (self.local)();
+        let live = sources
+            .roster
+            .into_iter()
+            .map(|a| (a.id, a.name, AgentState::Live));
+        let asleep = sources
+            .dormant
+            .into_iter()
+            .map(|a| (a.id, a.name, AgentState::Sleeping));
+        let mut omitted = 0usize;
+        let agents = live
+            .chain(asleep)
+            .filter(|(_, name, _)| {
+                let ok = remote_name_ok(name);
+                omitted += usize::from(!ok);
+                ok
+            })
+            .map(|(id, name, state)| DirAgent {
+                id: id.to_string(),
+                name,
+                state,
+            })
+            .collect();
+        if omitted > 0 {
+            tracing::warn!(omitted, "agents whose names other PCs would refuse (empty, over 256 bytes, control characters) are left out of the directory other PCs see — rename them to reach them from there");
+        }
+        agents
+    }
+
+    fn row_problems(&self, rows: &[&DirAgent]) -> Vec<Option<&'static str>> {
+        let local = self
+            .known_ids
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        rows.iter()
+            .map(|row| {
+                let Ok(id) = uuid::Uuid::parse_str(&row.id) else {
+                    return Some("not an agent id");
+                };
+                if local.contains(&id) {
+                    return Some("the id of an agent on this PC (copied data folder?)");
+                }
+                if !remote_name_ok(&row.name) {
+                    return Some("a name that breaks the remote name rule");
+                }
+                None
+            })
+            .collect()
+    }
+
+    fn local_ids_version(&self) -> u64 {
+        self.known_version
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 pub fn busy_gate_for_manager(
@@ -406,6 +897,8 @@ pub struct MessagingFlushSink {
     diff: RosterDiff,
     /// The outlet moving the turn-end push (core `StatusSink::turn_ended`) to the doorbell — shares the coalescer with the notifying side.
     idle: ChannelIdleNotifier,
+    /// Rung on every status and list change — live ↔ asleep changes this PC's directory other PCs see (non-blocking).
+    directory: Option<DirectoryBell>,
 }
 
 /// Roster diff sequencing state — keeps the previous snapshot under a lock and finishes the channel enqueue while holding it.
@@ -488,6 +981,20 @@ impl MessagingFlushSink {
             inner,
             flush_tx,
             diff: RosterDiff::new(),
+            directory: None,
+        }
+    }
+
+    /// Also rings `bell` on every status and list change.
+    // ADR-0391
+    pub(crate) fn with_directory(mut self, bell: DirectoryBell) -> Self {
+        self.directory = Some(bell);
+        self
+    }
+
+    fn ring_directory(&self) {
+        if let Some(bell) = &self.directory {
+            bell.ring();
         }
     }
 }
@@ -767,11 +1274,13 @@ pub struct FlushWiring {
 
 impl StatusSink for MessagingFlushSink {
     fn status_changed(&self, id: AgentId, status: CoreStatus, epoch: u32) {
+        self.ring_directory();
         self.inner.status_changed(id, status, epoch);
     }
 
     fn agent_list_updated(&self, agents: Vec<CoreAgentInfo>) {
         self.diff.dispatch(&agents, &self.flush_tx);
+        self.ring_directory();
         self.inner.agent_list_updated(agents);
     }
 
@@ -805,6 +1314,9 @@ impl StatusSink for MessagingFlushSink {
         self.inner.inputs_drained(id, epoch);
     }
 }
+
+#[cfg(test)]
+mod peer_mail_tests;
 
 #[cfg(test)]
 mod tests {
