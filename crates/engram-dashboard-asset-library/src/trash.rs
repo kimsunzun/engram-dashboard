@@ -1,6 +1,7 @@
 //! What a mount's `.trash` holds and how Engram touches it (ADR-0409 — ADR-0400 decision 23, ADR-0320 as amended): the
-//! trash lock and its waiting count, the trash-folder check, bundle ids, the bundle record, the bundle shell and the
-//! `.git/info/exclude` line. The file operations and emptying stand on these; nothing here takes the library lock.
+//! trash lock and its waiting count, the trash-folder check, bundle ids, the bundle record, the bundle shell, the view and
+//! the `.git/info/exclude` line. The file operations (`ops.rs`) and emptying stand on these; nothing here takes the
+//! library lock (the view reads the mount list in one brief read lock).
 //!
 //! ## Rules (invariants)
 //!
@@ -30,6 +31,13 @@
 //! - **The shell** ([`prune_shell`]): when a root goes, the folders between it and the bundle that are now empty go,
 //!   bottom-up; the record (with any record temp left by a crash) and then the bundle folder go only when nothing else is
 //!   left in the bundle. Surviving content is never removed.
+//! - **The view** ([`view_mount`] · [`LibraryService::trash_view`], ADR-0409 M15 · UD1): per mount, the bundles by id
+//!   and their rows — a record's existing roots plus its `other` rows (found walking only the bundle top and the folders
+//!   above roots), or a bundle's files when its record is missing or unreadable — read without following and with no
+//!   lock; each mount on a bounded job of the service's `BoundedIo` on one read budget, so a mount that does not answer,
+//!   or whose trash is unusable, is named instead of failing the view; a mount held as overlapping another (ADR-0400
+//!   decision 10) is named and never read. A bundle whose check fails other than by absence is listed with no rows and
+//!   the error, never left out.
 //! - **The exclude line** ([`exclude_trash`], ADR-0400 decision 24 · ADR-0409 M12): an anchored, escaped
 //!   `/<mount path>/.trash/` line appended to the repository's `info/exclude` when absent, under one leaf mutex, through a
 //!   create-new temp; skipped with a reason, never a failure of the step. `.git` and its `gitdir:` / `commondir` targets
@@ -43,22 +51,28 @@
 // ADR-0409
 
 use std::collections::hash_map::RandomState;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use engram_dashboard_agent::launch::escape_controls;
+use engram_dashboard_agent::launch::{escape_controls, Reason};
 use engram_dashboard_base::file::{is_temp_name, temp_path, temp_target};
 use engram_dashboard_base::sync::lock;
+use engram_dashboard_platform::fs::{path_key, PathKey};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
-use crate::mounts::MountPath;
+use crate::folder::NOT_CHECKED;
+use crate::mounts::{virtual_path, Mount, MountName, MountPath};
+use crate::path::LibPath;
 use crate::store::{EntryKind, LibraryStore, NameWalk, TrashBundle, OS_HOOKS, TRASH_DIR};
+use crate::{LibraryService, LIBRARY_UNAVAILABLE};
 
 /// The code of a trash step in a mount whose `.trash` is a link or not a folder (`args` = `{mount}`): the item stays.
 // ADR-0409 decision 5
@@ -582,6 +596,9 @@ pub enum RecordRead {
     /// `.trash` or the bundle folder is missing, a link or not a folder: nothing was read through it (a foreign or
     /// unusable place — ADR-0409 decisions 5 and 6).
     NotABundle { why: String },
+    /// A stat on the way to the bundle folder failed other than `NotFound`: whether it is a bundle is not known — never
+    /// read as absent.
+    Failed { why: String },
 }
 
 /// One root of a readable record that is still there (or whose presence cannot be told).
@@ -609,7 +626,13 @@ pub enum RootState {
 // ADR-0409 decisions 6 and 8
 pub fn read_record(store: &dyn LibraryStore, folder: &Path, id: &BundleId) -> RecordRead {
     if let Err(e) = check_bundle(store, folder, id) {
-        return RecordRead::NotABundle { why: e.to_string() };
+        let why = e.to_string();
+        return match e.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {
+                RecordRead::NotABundle { why }
+            }
+            _ => RecordRead::Failed { why },
+        };
     }
     let record = bundle_path(id).to_path(folder).join(RECORD_NAME);
     match store.stat(&record) {
@@ -701,19 +724,7 @@ pub fn fallback_rows(
             if at.is_none() && is_record_name(&name) {
                 continue;
             }
-            let spelled = match &at {
-                None => name.to_str().map(str::to_owned),
-                Some(at) => name.to_str().map(|name| format!("{}/{name}", at.as_str())),
-            };
-            let Some(path) = spelled
-                .as_deref()
-                .and_then(|text| MountPath::parse(text).ok())
-            else {
-                tracing::warn!(
-                    ?name,
-                    bundle = id.as_str(),
-                    "trash: left out a name that cannot be a library path"
-                );
+            let Some(path) = child_path(at.as_ref(), &name, id) else {
                 continue;
             };
             match kind {
@@ -786,6 +797,364 @@ pub fn prune_shell(
     }
     store.remove_dir(&top)?;
     Ok(true)
+}
+
+// ── the view ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// What one row of a bundle is in the view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowKind {
+    /// A root the bundle's record names — a deleted item (a folder is one row).
+    Root,
+    /// A file or link found walking a bundle whose record is missing or unreadable.
+    Found,
+    /// Something left in a bundle with a readable record that is no root (OS litter, a folder left above a gone root) —
+    /// never restorable.
+    Other,
+}
+
+/// One row of the trash view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrashRow {
+    /// Where it sits inside the bundle — the item's path in its mount.
+    pub path: MountPath,
+    pub kind: RowKind,
+    /// What is there, seen without following; a row behind a link, or whose stat on the way failed, says so.
+    pub state: RootState,
+    /// A staging row (a failed or partial copy, or a found name in base's temp shape): shown, never restorable.
+    pub staging: bool,
+    /// The path a staging root was meant for, when its record names it.
+    pub intended: Option<MountPath>,
+}
+
+/// How a bundle's rows were found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowSource {
+    /// Its record (roots that still exist, plus `other` rows).
+    Record,
+    /// No record: the files found.
+    NoRecord,
+    /// A record that cannot be read ([`RECORD_UNREADABLE`]): the files found.
+    Unreadable { why: String },
+    /// The bundle folder could not be checked (a stat on the way failed other than `NotFound`): no rows; `trouble` says
+    /// why.
+    Unchecked,
+}
+
+/// One bundle of a mount's trash in the view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleView {
+    /// Its id — the deleted time is [`BundleId::deleted_at`].
+    pub id: BundleId,
+    pub source: RowSource,
+    /// By path.
+    pub rows: Vec<TrashRow>,
+    /// Why some rows may be missing — a listing inside the bundle failed; the rows found are kept.
+    pub trouble: Option<String>,
+}
+
+/// Why a mount's trash could not be viewed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewFailure {
+    /// `.trash` is a link or not a folder ([`TRASH_UNUSABLE`]).
+    Unusable(TrashUnusable),
+    /// The mount folder or `.trash` could not be read.
+    Unreadable(String),
+}
+
+/// The bundles in the `.trash` of the mount at `folder`, by id, read without following and holding no lock: only direct
+/// children of `.trash` that are real folders and parse as [`BundleId`] (anything else is foreign and left out); per
+/// bundle the existing roots of its record and its `other` rows, or — record missing or unreadable — its files
+/// ([`fallback_rows`]). An absent `.trash` is an empty trash; a missing mount folder is [`ViewFailure::Unreadable`]. A
+/// bundle that went between the listing and its read is left out; one whose check fails other than by absence is listed
+/// with no rows ([`RowSource::Unchecked`]).
+// ADR-0409 decisions 5, 6 and 8
+pub fn view_mount(store: &dyn LibraryStore, folder: &Path) -> Result<Vec<BundleView>, ViewFailure> {
+    let unreadable = |why: String| Err(ViewFailure::Unreadable(why));
+    match store.stat(folder) {
+        // The mount folder itself may be a link (ADR-0365).
+        Ok(EntryKind::Folder | EntryKind::Link) => {}
+        Ok(EntryKind::File) => return unreadable("the mount folder is not a folder".to_owned()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return unreadable("the mount folder is missing".to_owned())
+        }
+        Err(e) => return unreadable(e.to_string()),
+    }
+    if !check_trash_folder(store, folder).map_err(ViewFailure::Unusable)? {
+        return Ok(Vec::new());
+    }
+    let listed = match store.list(&folder.join(TRASH_DIR)) {
+        Ok(listed) => listed,
+        Err(e) => return unreadable(e.to_string()),
+    };
+    let mut ids: Vec<BundleId> = listed
+        .into_iter()
+        .filter(|(_, kind)| *kind == EntryKind::Folder)
+        .filter_map(|(name, _)| name.to_str().and_then(BundleId::parse))
+        .collect();
+    ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    Ok(ids
+        .into_iter()
+        .filter_map(|id| view_bundle(store, folder, id))
+        .collect())
+}
+
+/// One bundle's view; `None` = it is no longer a bundle (it went or was replaced since the listing).
+fn view_bundle(store: &dyn LibraryStore, folder: &Path, id: BundleId) -> Option<BundleView> {
+    let source = match read_record(store, folder, &id) {
+        RecordRead::NotABundle { why } => {
+            tracing::debug!(bundle = id.as_str(), "trash view: left out a bundle: {why}");
+            return None;
+        }
+        RecordRead::Failed { why } => {
+            return Some(BundleView {
+                id,
+                source: RowSource::Unchecked,
+                rows: Vec::new(),
+                trouble: Some(why),
+            })
+        }
+        RecordRead::Roots(roots) => {
+            let mut rows: Vec<TrashRow> = roots
+                .iter()
+                .map(|root| TrashRow {
+                    path: root.root.path.clone(),
+                    kind: RowKind::Root,
+                    state: root.state.clone(),
+                    staging: root.root.staging.is_some(),
+                    intended: root.root.staging.clone(),
+                })
+                .collect();
+            let trouble = match other_rows(store, folder, &id, &roots) {
+                Ok(other) => {
+                    rows.extend(other);
+                    None
+                }
+                Err(e) => Some(e.to_string()),
+            };
+            rows.sort_by(|a, b| a.path.cmp(&b.path));
+            return Some(BundleView {
+                id,
+                source: RowSource::Record,
+                rows,
+                trouble,
+            });
+        }
+        RecordRead::Missing => RowSource::NoRecord,
+        RecordRead::Unreadable { why } => RowSource::Unreadable { why },
+    };
+    let (rows, trouble) = match fallback_rows(store, folder, &id) {
+        Ok(rows) => (rows, None),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return None
+        }
+        Err(e) => (Vec::new(), Some(e.to_string())),
+    };
+    Some(BundleView {
+        id,
+        source,
+        rows: rows
+            .into_iter()
+            .map(|row| TrashRow {
+                path: row.path,
+                kind: RowKind::Found,
+                state: RootState::Present(row.kind),
+                staging: row.staging,
+                intended: None,
+            })
+            .collect(),
+        trouble,
+    })
+}
+
+/// The `other` rows of bundle `id` whose record names `roots`: walking only the bundle top and the folders above a
+/// root, every entry that is no root, no folder above one and (at the top) no record name — a folder of litter is one
+/// row, a link is a row and never entered.
+// ADR-0409 decision 8
+fn other_rows(
+    store: &dyn LibraryStore,
+    folder: &Path,
+    id: &BundleId,
+    roots: &[RootRow],
+) -> io::Result<Vec<TrashRow>> {
+    let root_keys: HashSet<PathKey> = roots
+        .iter()
+        .map(|root| path_key(Path::new(root.root.path.as_str())))
+        .collect();
+    let mut rows = Vec::new();
+    let mut folders: Vec<Option<MountPath>> = vec![None];
+    while let Some(at) = folders.pop() {
+        let disk = match &at {
+            None => bundle_path(id).to_path(folder),
+            Some(at) => row_path(id, at).to_path(folder),
+        };
+        for (name, kind) in store.list(&disk)? {
+            if at.is_none() && is_record_name(&name) {
+                continue;
+            }
+            let Some(path) = child_path(at.as_ref(), &name, id) else {
+                continue;
+            };
+            if root_keys.contains(&path_key(Path::new(path.as_str()))) {
+                continue;
+            }
+            if kind == EntryKind::Folder && roots.iter().any(|root| below(&root.root.path, &path)) {
+                folders.push(Some(path));
+                continue;
+            }
+            rows.push(TrashRow {
+                path,
+                kind: RowKind::Other,
+                state: RootState::Present(kind),
+                staging: false,
+                intended: None,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// `name` in the bundle folder `at` (`None` = the bundle top) as a path inside the mount; `None` = it cannot be one
+/// (logged).
+fn child_path(at: Option<&MountPath>, name: &OsStr, id: &BundleId) -> Option<MountPath> {
+    let spelled = match at {
+        None => name.to_str().map(str::to_owned),
+        Some(at) => name.to_str().map(|name| format!("{}/{name}", at.as_str())),
+    };
+    let path = spelled
+        .as_deref()
+        .and_then(|text| MountPath::parse(text).ok());
+    if path.is_none() {
+        tracing::warn!(
+            ?name,
+            bundle = id.as_str(),
+            "trash: left out a name that cannot be a library path"
+        );
+    }
+    path
+}
+
+/// Whether `path` lies strictly below `folder`, name by name by the platform path key.
+pub(crate) fn below(path: &MountPath, folder: &MountPath) -> bool {
+    let names: Vec<&str> = path.as_str().split('/').collect();
+    let above: Vec<&str> = folder.as_str().split('/').collect();
+    names.len() > above.len()
+        && above
+            .iter()
+            .zip(&names)
+            .all(|(a, b)| path_key(Path::new(a)) == path_key(Path::new(b)))
+}
+
+/// The whole trash view: every registered mount in list order, with its bundles or why its trash could not be read.
+#[derive(Debug)]
+pub struct TrashListing {
+    pub mounts: Vec<MountTrash>,
+}
+
+/// One mount's part of the trash view.
+#[derive(Debug)]
+pub struct MountTrash {
+    pub mount: MountName,
+    /// Its bundles by id; `Err` = the mount is named, not failed: its trash is unusable ([`TRASH_UNUSABLE`] `{mount,
+    /// why}`), or it could not be read in time or is held as overlapping another mount
+    /// ([`crate::LIBRARY_UNAVAILABLE`] `{mount, message}`).
+    pub view: Result<Vec<BundleView>, Reason>,
+}
+
+impl MountTrash {
+    /// The original virtual path of `row` — where a restore puts it back.
+    pub fn original(&self, row: &TrashRow) -> LibPath {
+        virtual_path(&self.mount, Some(&row.path))
+    }
+}
+
+impl LibraryService {
+    /// The trash view (`library.trash` material — ADR-0409 M15): every registered mount's bundles, read from disk with
+    /// no library lock and no ticket. The mount list is read once in a brief read lock; each mount's `.trash` is read
+    /// by [`view_mount`] on a bounded job ([`BoundedIo::run_all`]) on one read budget ([`crate::folder::IO_LIMIT`]),
+    /// so a mount that does not answer is named, not waited for. A mount held as overlapping another (ADR-0400 decision
+    /// 10 — delete and restore refuse it) is named and never read; so is every mount while the load-time overlap check
+    /// is still running when the budget is spent. A view can see a bundle whose trash step is still running.
+    ///
+    /// [`BoundedIo::run_all`]: crate::folder::BoundedIo::run_all
+    // ADR-0409 M15
+    pub fn trash_view(&self) -> TrashListing {
+        let read = self.io.begin_read();
+        let judged = self.judge_at_load(&read);
+        let mounts: Vec<Mount> = self
+            .gate
+            .with_read(|state| state.mounts.iter().cloned().collect());
+        // ADR-0400 decision 10: a held mount (or every mount, before the judgement) is never read.
+        let held: Vec<Option<String>> = mounts
+            .iter()
+            .map(|mount| match judged {
+                true => self.held_overlap(mount),
+                false => Some(NOT_CHECKED.to_owned()),
+            })
+            .collect();
+        let jobs: Vec<Box<dyn FnOnce() -> Result<Vec<BundleView>, ViewFailure> + Send>> = mounts
+            .iter()
+            .zip(&held)
+            .filter(|(_, held)| held.is_none())
+            .map(|(mount, _)| {
+                let store = Arc::clone(&self.store);
+                let folder = mount.folder.clone();
+                Box::new(move || view_mount(&*store, &folder))
+                    as Box<dyn FnOnce() -> Result<Vec<BundleView>, ViewFailure> + Send>
+            })
+            .collect();
+        let mut answers = self.io.run_all(&read, jobs).into_iter();
+        let mounts = mounts
+            .into_iter()
+            .zip(held)
+            .map(|(mount, held)| {
+                let view = match held {
+                    Some(why) => Err(trash_unread(&mount.name, &why)),
+                    None => match answers.next().expect("one answer per job") {
+                        Ok(Ok(bundles)) => Ok(bundles),
+                        Ok(Err(ViewFailure::Unusable(unusable))) => {
+                            Err(trash_unusable(&mount.name, &unusable))
+                        }
+                        Ok(Err(ViewFailure::Unreadable(why))) => {
+                            Err(trash_unread(&mount.name, &why))
+                        }
+                        Err(status) => Err(trash_unread(&mount.name, &status.why())),
+                    },
+                };
+                MountTrash {
+                    mount: mount.name,
+                    view,
+                }
+            })
+            .collect();
+        TrashListing { mounts }
+    }
+}
+
+/// [`TRASH_UNUSABLE`] `{mount, why}`.
+pub(crate) fn trash_unusable(mount: &MountName, unusable: &TrashUnusable) -> Reason {
+    Reason {
+        code: TRASH_UNUSABLE.to_owned(),
+        args: json!({ "mount": mount.as_str(), "why": escape_controls(&unusable.why) }),
+        line: None,
+    }
+}
+
+/// [`crate::LIBRARY_UNAVAILABLE`] `{mount, message}` for a mount whose trash could not be read.
+fn trash_unread(mount: &MountName, why: &str) -> Reason {
+    Reason {
+        code: LIBRARY_UNAVAILABLE.to_owned(),
+        args: json!({
+            "mount": mount.as_str(),
+            "message": format!("the trash of the library mount {} cannot be read: {}", mount.as_str(), escape_controls(why)),
+        }),
+        line: None,
+    }
 }
 
 // ── the exclude line ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -928,7 +1297,11 @@ fn replace_file(file: &Path, bytes: &[u8]) -> io::Result<()> {
 fn find_repository(folder: &Path) -> Result<Option<(PathBuf, PathBuf)>, String> {
     for dir in folder.ancestors() {
         let dot_git = dir.join(".git");
-        match fs::metadata(&dot_git) {
+        // ADR-0412 decision 3: checked without following — a linked `.git` (folder or file) is skipped, never read.
+        match fs::symlink_metadata(&dot_git) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!("{} is a link", dot_git.display()))
+            }
             Ok(meta) if meta.is_dir() => return Ok(Some((dir.to_path_buf(), dot_git))),
             Ok(_) => {
                 let text = fs::read_to_string(&dot_git)
@@ -1772,5 +2145,250 @@ mod tests {
         let broken = dir.path().join("broken");
         write(&broken, ".git", "no gitdir here");
         skipped_for(exclude(&broken), "names no gitdir");
+    }
+
+    // ADR-0412 decision 3: a `.git` that is a link is skipped before anything is read through it — here a junction to a
+    //   folder whose `commondir` names another repository, which would get the line if the link were followed. (A file
+    //   link as `.git` takes the same check; no platform-neutral helper makes one in a test.)
+    #[test]
+    fn a_linked_dot_git_is_skipped_and_nothing_is_read_or_written_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let other_git = repo(&dir.path().join("other"));
+        let holder = dir.path().join("holder");
+        write(&holder, "commondir", &format!("{}\n", other_git.display()));
+        let mount = dir.path().join("mount");
+        fs::create_dir_all(&mount).unwrap();
+        link_dir(&holder, &mount.join(".git")).unwrap();
+
+        skipped_for(exclude(&mount), "is a link");
+        assert!(
+            !other_git.join("info").exists(),
+            "the other repository is untouched"
+        );
+    }
+
+    // ── the view ──
+
+    fn second() -> BundleId {
+        BundleId::parse("20261124T000000Z-000001").unwrap()
+    }
+
+    /// The rows of `bundle` as `(path, kind, staging)`.
+    fn rows(bundle: &BundleView) -> Vec<(&str, RowKind, bool)> {
+        bundle
+            .rows
+            .iter()
+            .map(|row| (row.path.as_str(), row.kind, row.staging))
+            .collect()
+    }
+
+    fn record(store: &MemStore, id: &BundleId, roots: &[(&str, Option<&str>)]) {
+        let trash = TrashLock::default();
+        let held = trash.take_for_emptying();
+        let roots: Vec<RecordRoot> = roots
+            .iter()
+            .map(|(path, staging)| RecordRoot {
+                path: mp(path),
+                staging: staging.map(mp),
+            })
+            .collect();
+        publish_record(store, root(), id, &roots, &held).unwrap();
+    }
+
+    // ADR-0409 decisions 1, 6 and 8 · UD1: a deleted folder is one row; a bundle without a record shows its files, a temp
+    //   name among them as staging; nothing in `.trash` that is no bundle is listed.
+    #[test]
+    fn the_view_lists_bundles_by_id_a_folder_root_as_one_row_and_no_foreign_content() {
+        let store = bundled();
+        store.file(&inside("dir/a.md"), "a");
+        store.file(&inside("dir/b.md"), "b");
+        store.file(&inside("x.md"), "x");
+        record(&store, &id(), &[("dir", None), ("x.md", None)]);
+        let late = format!(".trash/{}", second().as_str());
+        store.file(&format!("{late}/y.md"), "y");
+        store.file(&format!("{late}/sub/c.md.tmp123.4"), "partial");
+        store.file(".trash/notes.txt", "another app's");
+        store.file(".trash/Obsidian/page.md", "another app's");
+        store.link(".trash/20261125T000000Z-000002");
+        store.file(
+            ".trash/20261399T000000Z-000003/z.md",
+            "a badly named folder",
+        );
+
+        let view = view_mount(&store, root()).unwrap();
+
+        let ids: Vec<&str> = view.iter().map(|bundle| bundle.id.as_str()).collect();
+        assert_eq!(ids, [id().as_str(), second().as_str()]);
+        assert_eq!(view[0].source, RowSource::Record);
+        assert_eq!(
+            rows(&view[0]),
+            [
+                ("dir", RowKind::Root, false),
+                ("x.md", RowKind::Root, false)
+            ]
+        );
+        assert_eq!(view[0].rows[0].state, RootState::Present(EntryKind::Folder));
+        assert_eq!(view[1].source, RowSource::NoRecord);
+        assert_eq!(
+            rows(&view[1]),
+            [
+                ("sub/c.md.tmp123.4", RowKind::Found, true),
+                ("y.md", RowKind::Found, false)
+            ]
+        );
+        assert!(view.iter().all(|bundle| bundle.trouble.is_none()));
+    }
+
+    // ADR-0409 decision 8: roots are read filtered by a stat that says `NotFound`; any other stat error keeps the row.
+    #[test]
+    fn a_restored_root_drops_out_of_the_view_and_one_whose_stat_fails_stays() {
+        let store = bundled();
+        for name in ["a.md", "b.md", "c.md"] {
+            store.file(&inside(name), name);
+        }
+        record(
+            &store,
+            &id(),
+            &[("a.md", None), ("b.md", None), ("c.md", None)],
+        );
+        store.remove(&inside("b.md"));
+        store.fail_stat(&inside("c.md"));
+
+        let view = view_mount(&store, root()).unwrap();
+
+        assert_eq!(
+            rows(&view[0]),
+            [
+                ("a.md", RowKind::Root, false),
+                ("c.md", RowKind::Root, false)
+            ]
+        );
+        assert!(matches!(view[0].rows[1].state, RootState::Failed(_)));
+    }
+
+    #[test]
+    fn a_staging_root_is_shown_with_the_path_it_was_meant_for() {
+        let store = bundled();
+        store.file(&inside("rules/a.md.tmp9.1/x.md"), "partial copy");
+        record(&store, &id(), &[("rules/a.md.tmp9.1", Some("rules/a.md"))]);
+
+        let view = view_mount(&store, root()).unwrap();
+
+        let row = &view[0].rows[0];
+        assert_eq!(
+            (row.path.as_str(), row.kind, row.staging),
+            ("rules/a.md.tmp9.1", RowKind::Root, true)
+        );
+        assert_eq!(row.intended, Some(mp("rules/a.md")));
+    }
+
+    // ADR-0409 decision 8: a record that does not parse, or names no library path, is `record-unreadable` and the bundle
+    //   shows its files; the record and its temps at the top are no rows.
+    #[test]
+    fn an_unreadable_record_shows_the_files_found_and_says_so() {
+        let store = bundled();
+        store.file(&inside("a.md"), "a");
+        store.file(&inside(RECORD_NAME), "{ not json");
+        store.file(
+            &inside(".engram-bundle.json.tmp7.1"),
+            "a crashed record temp",
+        );
+        let other = format!(".trash/{}", second().as_str());
+        store.file(&format!("{other}/b.md"), "b");
+        store.file(
+            &format!("{other}/{RECORD_NAME}"),
+            r#"{"roots":[{"path":".hidden"}]}"#,
+        );
+
+        let view = view_mount(&store, root()).unwrap();
+
+        for (bundle, row) in [(&view[0], "a.md"), (&view[1], "b.md")] {
+            assert!(
+                matches!(&bundle.source, RowSource::Unreadable { .. }),
+                "{:?}",
+                bundle.source
+            );
+            assert_eq!(rows(bundle), [(row, RowKind::Found, false)]);
+        }
+    }
+
+    // ADR-0409 decision 8: `other` rows are found walking only the bundle top and the folders above roots — never inside a
+    //   root; a folder of litter is one row.
+    #[test]
+    fn other_rows_are_what_a_bundle_holds_besides_its_roots_above_them_only() {
+        let store = bundled();
+        store.file(&inside("a/b.md"), "root");
+        store.file(&inside("r/x.md"), "a folder root");
+        store.file(&inside("r/.DS_Store"), "inside a root: part of it");
+        store.file(&inside("Thumbs.db"), "litter");
+        store.file(&inside("a/.DS_Store"), "litter above a root");
+        store.file(&inside("junk/one.txt"), "litter");
+        store.file(&inside("junk/two.txt"), "litter");
+        store.file(
+            &inside(".engram-bundle.json.tmp7.1"),
+            "a crashed record temp",
+        );
+        record(&store, &id(), &[("a/b.md", None), ("r", None)]);
+
+        let view = view_mount(&store, root()).unwrap();
+
+        assert_eq!(
+            rows(&view[0]),
+            [
+                ("Thumbs.db", RowKind::Other, false),
+                ("a/.DS_Store", RowKind::Other, false),
+                ("a/b.md", RowKind::Root, false),
+                ("junk", RowKind::Other, false),
+                ("r", RowKind::Root, false),
+            ]
+        );
+    }
+
+    // ADR-0409 decision 8: a bundle whose check fails with an IO error is named with the error, never left out as absent.
+    #[test]
+    fn a_bundle_whose_check_fails_is_named_with_the_error() {
+        let store = bundled();
+        store.file(&inside("a.md"), "a");
+        store.fail_stat(&format!(".trash/{}", id().as_str()));
+
+        let view = view_mount(&store, root()).unwrap();
+
+        assert_eq!(view.len(), 1);
+        assert_eq!(view[0].source, RowSource::Unchecked);
+        assert!(view[0].rows.is_empty() && view[0].trouble.is_some());
+        assert!(matches!(
+            read_record(&store, root(), &id()),
+            RecordRead::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_mount_without_a_trash_views_empty_and_an_unusable_trash_or_a_missing_folder_is_named() {
+        let empty = MemStore::new(root());
+        assert_eq!(view_mount(&empty, root()), Ok(Vec::new()));
+
+        let link = MemStore::new(root());
+        link.link(".trash");
+        assert!(matches!(
+            view_mount(&link, root()),
+            Err(ViewFailure::Unusable(_))
+        ));
+        let file = MemStore::new(root());
+        file.file(".trash", "not a folder");
+        assert!(matches!(
+            view_mount(&file, root()),
+            Err(ViewFailure::Unusable(_))
+        ));
+
+        assert!(matches!(
+            view_mount(&empty, &root().join("gone")),
+            Err(ViewFailure::Unreadable(_))
+        ));
+        let unlisted = bundled();
+        unlisted.fail_listing(".trash", crate::store::mem::ListFailure::Open);
+        assert!(matches!(
+            view_mount(&unlisted, root()),
+            Err(ViewFailure::Unreadable(_))
+        ));
     }
 }

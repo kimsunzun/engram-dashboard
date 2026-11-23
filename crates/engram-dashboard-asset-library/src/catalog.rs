@@ -3,7 +3,8 @@
 //! ## Invariants
 //!
 //! - **Class A — no whole-catalog swap** (TRD S25 step-7 §6): every write goes through the per-item primitives
-//!   ([`Catalog::apply_items`] · [`Catalog::apply_scan`] · [`Catalog::remove`] · [`Catalog::insert_folder`]); per item
+//!   ([`Catalog::apply_items`] · [`Catalog::apply_scan`] · [`Catalog::remove`] · [`Catalog::remove_range`] ·
+//!   [`Catalog::insert_folder`]); per item
 //!   the later `read_seq` wins, and nothing outside a scan's range is touched. [`Catalog::drop_range`] exists for a
 //!   mount change only, and [`Catalog::rekey_range`] for a mount rename only.
 //! - **Every removal is sequenced**: an item goes only when an absence observed later than its read says so — a
@@ -302,6 +303,15 @@ impl ScanResult {
             scanned_at: now,
         }
     }
+}
+
+/// Whether a file named `name` directly in `folder` (a virtual path below a mount's top) makes `folder` a skill — the
+/// scan's classifier.
+pub(crate) fn makes_skill(name: &str, folder: &LibPath) -> bool {
+    matches!(
+        FileKind::of(name, Some(folder.clone())),
+        Some(FileKind::SkillFile(_))
+    )
 }
 
 /// Whether `path` names a `.yaml` / `.yml` file — the only files that can hold a preset (or settings) item.
@@ -614,6 +624,25 @@ impl Catalog {
             }
             _ => false,
         }
+    }
+
+    /// A delete's range (ADR-0409): every item within `range` removed as [`Catalog::remove`] removes it — only when
+    /// `absent_at` is later than its `read_seq` — and every folder within it. Call it after the range left the mount's
+    /// folder, with a number drawn after that. Returns the removed keys; pass them to [`Catalog::recompute_derived`].
+    pub fn remove_range(&mut self, range: &LibPath, absent_at: u64) -> Vec<PathKey> {
+        let inside: Vec<PathKey> = self
+            .items
+            .iter()
+            .filter(|(_, item)| within(&item.path, Some(range)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let removed = inside
+            .into_iter()
+            .filter(|k| self.remove(k, absent_at))
+            .collect();
+        self.folders
+            .retain(|_, folder| !within(folder, Some(range)));
+        removed
     }
 
     /// Recomputes `used_by` for every touched preset and every preset that reaches a touched key (found upward through
@@ -998,6 +1027,34 @@ mod tests {
             .iter()
             .filter(|entry| matches!(entry, ScanItem::Unchanged(..)))
             .count()
+    }
+
+    // ADR-0409: a delete's range leaves the catalog by a sequenced removal — an item read after the number stays.
+    #[test]
+    fn remove_range_takes_what_was_read_before_its_number_and_every_folder_inside() {
+        let mut lib = Lib::new();
+        lib.store.file("d/a.md", "a");
+        lib.store.file("d/e/b.md", "b");
+        lib.store.file("keep.md", "k");
+        lib.scan(None);
+        let at = lib.seq();
+        lib.check_reads("d/a.md");
+
+        let removed = lib.catalog.remove_range(&lp("library/d"), at);
+
+        assert_eq!(removed, vec![key(&lp("library/d/e/b.md"))]);
+        assert!(
+            lib.item("library/d/a.md").is_some(),
+            "read after the number"
+        );
+        assert!(lib.item("library/keep.md").is_some());
+        let folders: Vec<&str> = lib.catalog.folders().map(LibPath::as_str).collect();
+        assert!(
+            folders
+                .iter()
+                .all(|folder| !folder.starts_with("library/d")),
+            "{folders:?}"
+        );
     }
 
     // ── the kind decision ─────────────────────────────────────────────────────────────────────────────────

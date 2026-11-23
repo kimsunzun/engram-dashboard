@@ -34,6 +34,9 @@
 //!   asking on one `LaunchIo` at once could each wait up to the same `left`.
 //! - **Leaf locks**: the in-flight mutex, each pending call's answer mutex and a `LaunchIo`'s mutexes are never held
 //!   while taking another lock, running an op or waiting.
+//! - **Bounded jobs** ([`BoundedIo::run_all`]): store calls a caller must bound as a whole — a mount's `.trash` read
+//!   for the trash view (ADR-0409 M15) — run each on a worker of its own against the required allowance, never joined
+//!   and never stored; a job that does not answer in time runs on and its answer is dropped.
 //! - No OS branch here: OS behaviour comes from std, `dunce` and platform (the busy-file retry, the share a path is on).
 // ADR-0341
 // ADR-0360
@@ -547,6 +550,74 @@ impl BoundedIo {
         }
     }
 
+    /// Runs each of `jobs` on a worker of its own and waits for all of them against `io`'s required allowance, which is
+    /// charged by the time waited (module rules). Per job, in order: its answer, or `Unreadable` with [`TIMEOUT`] (no
+    /// answer in time), [`NOT_CHECKED`] (the allowance was already spent — nothing started), "spawn failed" or "worker
+    /// panicked".
+    // ADR-0409 M15
+    pub(crate) fn run_all<T: Send + 'static>(
+        &self,
+        io: &LaunchIo,
+        jobs: Vec<Box<dyn FnOnce() -> T + Send>>,
+    ) -> Vec<Result<T, FolderStatus>> {
+        let allowance = io.budget.allowance(Need::Required);
+        if lock(allowance).is_zero() {
+            return jobs
+                .iter()
+                .map(|_| Err(FolderStatus::Unreadable(NOT_CHECKED.to_owned())))
+                .collect();
+        }
+        let slots = Arc::new(Slots {
+            answers: Mutex::new((0..jobs.len()).map(|_| None).collect()),
+            done: Condvar::new(),
+        });
+        for (at, job) in jobs.into_iter().enumerate() {
+            let guard = JobGuard {
+                slots: Arc::clone(&slots),
+                at,
+                answer: None,
+                ran: false,
+            };
+            let run = Box::new(move || {
+                let mut guard = guard;
+                guard.ran = true;
+                guard.answer = Some(job());
+            });
+            if let Err(e) = self.spawn.spawn(WORKER_NAME, run) {
+                tracing::warn!(
+                    "folder-io spawn failed; a bounded job answers unanswered(SPAWN_FAILED): {e}"
+                );
+            }
+        }
+        let left = *lock(allowance);
+        let began = Instant::now();
+        let deadline = began + left;
+        let mut answers = lock(&slots.answers);
+        while answers.iter().any(Option::is_none) {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            answers = slots
+                .done
+                .wait_timeout(answers, deadline - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        let out = answers
+            .iter_mut()
+            .map(|slot| {
+                slot.take()
+                    .unwrap_or_else(|| Err(FolderStatus::Unreadable(TIMEOUT.to_owned())))
+            })
+            .collect();
+        drop(answers);
+        let waited = began.elapsed().min(left);
+        let mut allowance = lock(allowance);
+        *allowance = allowance.saturating_sub(waited);
+        out
+    }
+
     fn ask(
         &self,
         io: &LaunchIo,
@@ -697,6 +768,37 @@ impl BoundedIo {
                 "folder-io spawn failed; answering unanswered(SPAWN_FAILED): {e}"
             );
         }
+    }
+}
+
+/// The answers of one [`BoundedIo::run_all`] call, filled by the workers.
+struct Slots<T> {
+    answers: Mutex<Vec<Option<Result<T, FolderStatus>>>>,
+    done: Condvar,
+}
+
+/// A bounded job's completion guard: it fills the job's slot on every exit — an answer, a panic, or a spawn that dropped
+/// the job unrun.
+struct JobGuard<T> {
+    slots: Arc<Slots<T>>,
+    at: usize,
+    answer: Option<T>,
+    ran: bool,
+}
+
+impl<T> Drop for JobGuard<T> {
+    fn drop(&mut self) {
+        let answer = self.answer.take().ok_or_else(|| {
+            let reason = if self.ran {
+                WORKER_PANICKED
+            } else {
+                SPAWN_FAILED
+            };
+            FolderStatus::Unreadable(reason.to_owned())
+        });
+        let mut answers = lock(&self.slots.answers);
+        answers[self.at] = Some(answer);
+        self.slots.done.notify_all();
     }
 }
 
@@ -2421,5 +2523,79 @@ mod tests {
         let answers = io.canonical_all(&launch, &[(gone.clone(), Need::Advisory)]);
         assert_eq!(answers[&path_key(&gone)], Err(FolderStatus::Missing));
         assert_inflight_empty(&io);
+    }
+
+    // ── bounded jobs ──
+
+    struct NoSpawn;
+
+    impl Spawn for NoSpawn {
+        fn spawn(&self, _: &str, _: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+            Err(io::Error::other("no thread"))
+        }
+    }
+
+    // ADR-0409 M15: each job answers in order; one that does not answer in time is a timeout charged to the budget, a
+    //   panic and a job that could not start say so, and a spent budget starts nothing.
+    #[test]
+    fn bounded_jobs_answer_in_order_within_the_required_budget() {
+        within(|| {
+            let bounded = BoundedIo::new(
+                ms(300),
+                LaunchWaits::LAUNCH,
+                LIST_CAP,
+                Arc::new(FakeOps::default()),
+                Arc::new(ThreadSpawn),
+            );
+            let io = bounded.begin_read();
+            let (hold, held) = mpsc::channel::<()>();
+            let jobs: Vec<Box<dyn FnOnce() -> u32 + Send>> = vec![
+                Box::new(|| 1),
+                Box::new(move || {
+                    let _ = held.recv();
+                    2
+                }),
+                Box::new(|| panic!("a job that panics")),
+                Box::new(|| 4),
+            ];
+            let answers = bounded.run_all(&io, jobs);
+            assert_eq!(
+                answers,
+                vec![
+                    Ok(1),
+                    Err(unreadable(TIMEOUT)),
+                    Err(unreadable(WORKER_PANICKED)),
+                    Ok(4)
+                ]
+            );
+            assert!(left(&io) < ms(300), "the wait is charged");
+            drop(hold);
+
+            let spent = bounded.begin_read_within(Duration::ZERO);
+            let started = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&started);
+            let jobs: Vec<Box<dyn FnOnce() -> u32 + Send>> = vec![Box::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                1
+            })];
+            assert_eq!(
+                bounded.run_all(&spent, jobs),
+                vec![Err(unreadable(NOT_CHECKED))]
+            );
+            assert_eq!(started.load(Ordering::SeqCst), 0, "nothing started");
+
+            let unstarted = BoundedIo::new(
+                ms(300),
+                LaunchWaits::LAUNCH,
+                LIST_CAP,
+                Arc::new(FakeOps::default()),
+                Arc::new(NoSpawn),
+            );
+            let jobs: Vec<Box<dyn FnOnce() -> u32 + Send>> = vec![Box::new(|| 1)];
+            assert_eq!(
+                unstarted.run_all(&unstarted.begin_read(), jobs),
+                vec![Err(unreadable(SPAWN_FAILED))]
+            );
+        });
     }
 }

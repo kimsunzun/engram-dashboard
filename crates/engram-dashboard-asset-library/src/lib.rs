@@ -129,8 +129,13 @@
 //! lock — one for every mount, after the library lock and before the turn mutex — and its waiting count, which a step
 //! that may touch `.trash` raises before its ticket ([`LibraryService::change_held_at`], a `Change` hold whose body
 //! raises the change number before its agents pass — ADR-0409 M1); the trash-folder check, bundle ids, the bundle record and the
-//! bundle-shell pruning; the `.git/info/exclude` line. The store's renames never replace (`store.rs`). The rules are in
-//! its header.
+//! bundle-shell pruning; the `.git/info/exclude` line; and the trash view (`LibraryService::trash_view`), which reads each
+//! mount's `.trash` through the store on a bounded job (`BoundedIo::run_all`, ADR-0409 M15), holding no library lock —
+//! a mount held as overlapping another is named, never read.
+//! The store's renames never replace (`store.rs`). The rules are in its header. `ops.rs` holds the file operations on top
+//! of it — delete (each item into its own mount's `.trash`, with `yes` / `detachRefs` and the plan digest judged again
+//! inside the hold, the folder it left re-classified in the same hold) and restore (back to the same path, never
+//! overwriting) — each one `change_held_at` hold with the trash lock. The rules are in its header.
 //!
 //! ## Refusals
 //!
@@ -170,6 +175,7 @@ mod gate;
 pub mod host;
 pub mod launch;
 pub mod mounts;
+pub mod ops;
 pub mod path;
 pub mod refs;
 pub mod relink;
@@ -7619,6 +7625,35 @@ claude: {changed: true}
         );
         let inner = MountName::parse("inner").unwrap();
         assert!(is_held(&svc.with_read(|state| state.seen(&inner).shown())));
+    }
+
+    // ADR-0400 decision 10 · ADR-0409 M15: the trash view names a mount held as overlapping another — delete and restore
+    //   refuse it — and never reads it; the other mount is viewed.
+    #[test]
+    fn the_trash_view_names_a_held_mount_and_never_reads_its_trash() {
+        let disk = overlapping_disk();
+        disk.mem("lib/sub")
+            .file(".trash/20261123T081500Z-a1b2c3/a.md", "a");
+        let svc = disk.start();
+
+        let view = svc.trash_view();
+
+        let of = |name: &str| {
+            &view
+                .mounts
+                .iter()
+                .find(|mount| mount.mount.as_str() == name)
+                .unwrap()
+                .view
+        };
+        assert_eq!(of("library").as_ref().unwrap(), &Vec::new());
+        let held = of("inner").as_ref().unwrap_err();
+        assert_eq!(held.code, LIBRARY_UNAVAILABLE);
+        assert!(
+            held.args["message"].as_str().unwrap().contains("overlaps"),
+            "{}",
+            held.args
+        );
     }
 
     // ADR-0400 decision 10: two mounts on one folder keep their own stat in a read computation — the held one

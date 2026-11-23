@@ -202,6 +202,11 @@ pub trait LibraryStore: Send + Sync {
     fn remove_dir(&self, path: &Path) -> io::Result<()>;
     /// Removes the file at `path`; a folder or a link there is `InvalidInput` and stays.
     fn remove_file(&self, path: &Path) -> io::Result<()>;
+    /// The identity of the entry at `path` (platform `file_identity` — a link is followed): whether two spellings name
+    /// one entry. A store without disk identities answers an error.
+    fn identity(&self, path: &Path) -> io::Result<FileIdentity> {
+        file_identity(path)
+    }
     /// Every name of `rel` from `root` down, each [`LibraryStore::stat`]ed in turn without following: the first name
     /// above the last that is not a folder, or the last name's kind. The root itself is not checked (only a mount's
     /// folder may be a link — ADR-0365). A stat error other than `NotFound` is answered as is.
@@ -964,6 +969,13 @@ pub(crate) mod mem {
     }
 
     impl LibraryStore for MemStore {
+        fn identity(&self, _: &Path) -> io::Result<super::FileIdentity> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the memory store has no identities",
+            ))
+        }
+
         fn scan(
             &self,
             root: &Path,

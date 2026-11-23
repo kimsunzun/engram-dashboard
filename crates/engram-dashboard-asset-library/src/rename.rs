@@ -872,11 +872,18 @@ pub(crate) fn confirmation_digest<'a>(
     unread: impl Iterator<Item = &'a str>,
     unknown: impl Iterator<Item = &'a str>,
 ) -> String {
-    let mut lines: Vec<String> = rewrite
-        .map(|path| format!("rewrite\t{path}"))
-        .chain(unread.map(|path| format!("unread\t{path}")))
-        .chain(unknown.map(|mount| format!("unknown\t{mount}")))
-        .collect();
+    lines_digest(
+        rewrite
+            .map(|path| format!("rewrite\t{path}"))
+            .chain(unread.map(|path| format!("unread\t{path}")))
+            .chain(unknown.map(|mount| format!("unknown\t{mount}")))
+            .collect(),
+    )
+}
+
+/// The digest of a confirmation's `lines` (each `<side>\t<entry>`, a tab never in a name): sorted, each followed by a
+/// newline, then SHA-256 (hex) — the same whatever order they come in.
+pub(crate) fn lines_digest(mut lines: Vec<String>) -> String {
     lines.sort_unstable();
     let mut text = String::new();
     for line in lines {

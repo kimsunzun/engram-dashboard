@@ -85,8 +85,9 @@ pub trait ProfileEditPort: Send + Sync + 'static {
 
     /// Removes, across the **current** roster, attached paths equal by `same_path` to any of `paths` — within one hold of the roster
     /// lock. Returns = agents whose list shrank (id order). Why no agent list is taken = as [`Self::rewrite_preset_paths`]. The order
-    /// of the remaining items and the 「Default」 field stay. Matches whole paths only (no prefix match — a folder delete is expanded per
-    /// attached item by the caller).
+    /// of the remaining items and the 「Default」 field stay. Matches whole paths only (no prefix match). No production caller since
+    /// step-9b U2b: a library delete writes only the agents its confirmation judged, through [`Self::set_attachments`]
+    /// (ADR-0414).
     // ADR-0325
     // ADR-0339
     fn remove_preset_paths(&self, paths: &[String]) -> Result<Vec<AgentId>, ProfileEditError>;
