@@ -23,3 +23,7 @@ Open (ask user): U1 unfixed 권장 (folder write-open denial skips link re-check
 
 ## Resume command
 `git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -5 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v bindings/`
+
+## Update after save (U2b QA result)
+- U2b QA: everything U2b touches PASS (workspace 6783 with --no-fail-fast, asset-library 764, gates 34/34, frontend 2884, codex lane 19/19, mutation 4/4). **Not committed**: claude lane PARTIAL — launch_kits_live claude_ 0/4 hit the claude 5-hour limit (resets 23:50 KST); `control_send` `c2_live_mid_turn_send_parks_and_delivers_after_turn_end` FAIL(pre-existing, same at base c4e0f5b8, no tracking record — may also be the usage limit).
+- Next: after the reset, rerun `cargo test -p engram-dashboard-daemon --test launch_kits_live -- --ignored --test-threads=1 --nocapture claude_` and the c2_live test; if green (or c2_live confirmed pre-existing → record in tracking, ask user), commit U2b with exactly the 9 files of `.review-s25-d9/s9b-code/u2b-qa-brief.md` (snapshot 48f287c5).
