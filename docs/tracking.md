@@ -10,6 +10,8 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-127 | Client → daemon over iroh for remote / mobile access (local stays WS) | Main | Not started — opens with the remote / mobile client stage (user 2026-11-23) |
+| T-126 | Tray launcher process — controls daemon and client separately; taskbar flash for approvals (merges T-81 · T-15) | Main | Not started — its own topic after S37 (user 2026-11-23) |
 | T-125 | Opt-in to run on a drive without file permissions (FAT / exFAT) | Main | Trigger wait — a user who needs it (user 2026-11-21) |
 | T-124 | CI: a Linux compile-check job for the core crates | Main | Not started — separate topic (user 2026-11-20) |
 | T-123 | Agent-id duplicates when a data folder is copied to another PC | Main | Not started — after S37 (S37 review 2026-11-20) |
@@ -24,7 +26,6 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | Main | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
 | T-85 | A new window starts a daemon the user stopped (boot start in every window) | Main | Deferred to the multi-daemon topic (user 2026-11-10) |
 | T-84 | Update system — replace a version-mismatched daemon | Main | Not started — deferred by the user (ADR-0356) |
-| T-81 | Split the tray out of the app (client) process | Main | Not started — idea/refactor; keep as is for now (user 2026-11-09) |
 | T-77 | LLM control — remaining gaps (moved from todo) | Main | Waiting for trigger — close each gap when its feature is touched |
 | T-66 | Window chrome · name (Chrome-style title bar · window number reuse · window title) | Main | In progress — `v0.5.0/feat/window-chrome` (S26) · U1–U9 implemented · U10 docs landed (2026-10-26) · manual GUI check by a person 2026-10-26 (S13 · S14 passed) · remaining = push · CI · master merge |
 | T-65 | Slot docking LLM commands (`tab.dock` · `layout.get`) | Main | In progress — S28 `v0.5.0/feat/llm-layout-commands` · U1–U3 implemented · pushed (`2710e14f` CI running) · `/qa standard` PASS · remaining = U4 docs commit · GUI measurement · master merge · the seven TRD §11 decisions need user confirmation |
@@ -33,7 +34,6 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-44 | In-chat approval (codex) | Main | Deferred — next task |
 | T-42 | Shortcut key system | Main | Deferred |
 | T-36 | Shared handling of re-input before echo | Main | Follow-up topic |
-| T-15 | Process topology · multiple daemons | Main | Deferred — no trigger |
 | T-14 | Data storage/memory | Main | Research done · deferred |
 | T-13 | Message system full mailbox | Main | MVP landed · full version deferred |
 | T-12 | JSON live status display | Main | Deferred — waiting for an option decision |
@@ -84,6 +84,25 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-127. Client → daemon over iroh for remote and mobile access (local stays WS)
+- **Status:** not started — a direction only; opens with the remote / mobile client stage (user 2026-11-23: 「어 항목으로 적고」, after agreeing the local link stays WS).
+- **Direction:** the app ↔ local daemon link stays WS — iroh's encryption, NAT traversal and key identity add nothing on one PC. For a client that reaches a PC's daemon from outside (mobile, an app on another PC), add iroh as a second carrier behind the transport seam instead of ADR-0029's WSS plan: WSS needs certificates plus port forwarding or a tunnel, while iroh brings hole punching, relays and key identity, and could reuse the PC trust of the peer link (ADR-0390 · ADR-0394). The transport crate already runs WS and an iroh adapter (ADR-0020 · ADR-0029); the work size is not measured.
+- **Open:** whether iroh runs on iOS / Android today (not checked); auth and permission scope for a remote client (T-11); how other local-daemon + remote-client products do it — `docs/research/remote-client-carrier-2026-11-23.md` (zedra: phone ↔ desktop daemon over iroh with QR pairing; Happy: own E2E relay).
+- **Rationale:** ADR-0029 · ADR-0020 · S37 peer link (`crates/engram-dashboard-daemon/src/link/peer/`).
+
+### T-126. Tray launcher — a small tray-only process that starts and controls the daemon and the client separately (merges T-81 · T-15)
+- **Status:** not started — its own topic after S37. User 2026-11-23: 「작은 전용 트레이 프로세스를 가진다니깐. 이건 나중 주제로」 · 「합쳐서 위로 올리던지」 (merged T-81 and T-15 into this item).
+- **Direction (user 2026-11-23):** a small dedicated tray process comes up at first launch and controls the daemon and the client (app) each on its own. Today the tray lives in the client process (ADR-0029), so restarting the client takes the tray with it. Precedents Claude named from memory, not re-checked: Ollama (`ollama app.exe` tray + `ollama.exe` server) · Tailscale (`tailscale-ipn.exe` + `tailscaled`). This answers old T-15 choice (ga) and rejects (na) — the daemon must not own the tray (it must run with no display; whether a WMI-launched daemon can show UI at all is measured in S37 U5).
+- **Also in scope — taskbar flash for approval questions:** an approval question goes to the app whenever the app is connected, else to the OS dialog (user 2026-11-23, S37 — no "is it visible" check). When the app gets one, it flashes its taskbar button instead of restoring the window (Windows foreground lock; messengers such as Slack and Discord flash). Agreed as the direction, deferred to this topic (user 2026-11-23: 「일단 작업표시줄 깜박임으로 한다고 치고 당장은 하지마」). The flash stays in the client — it is the window's own button. Tauri `request_user_attention` — not checked in this repo.
+- **From T-81:** decide how the tray's stop path relates to the shell's single stop path (ADR-0350).
+- **From T-15 (user proposals 2026-08-07 · 2026-08-17, registration only):**
+  - **Problem:** Two user directions — the launcher first starts and controls the UI·daemon (each a separate process) · the UI starts independently and chooses the daemon to attach to. The reading splits and both collide with the active ADR-0026 (tray + main window = one process): (ga) launcher + UI + daemon as 3 processes = formally rejected by ADR-0026 · (na) the daemon owns the tray = head-on conflict with ADR-0026 + winit main thread ↔ tokio conflict (a technical fact in the discarded ADR-0023 — still valid).
+  - **Current state (measured):** The tray menu (daemon on/off/auto start/full exit) and the daemon liveness observer already exist. The frontend starting the daemon at boot is not a gap but a confirmed decision of ADR-0025 (the first spawn call = `daemon_start`). Daemons with different folders already coexist (ADR-0134/0135 — lock = `<데이터 폴더>/daemon.json` · canonical source is the header of `crates/engram-dashboard-daemon/src/instance.rs`). The remaining barrier is on the client side — app single instance is keyed on the identifier and `tauri-plugin-single-instance` has no name override (ADR-0137).
+  - **Next:** When starting, first ask the user which of (ga)/(na) it is · how many app instances to allow (if several, remove the plugin and build a new channel for 「두 번째 실행이 기존 창을 꺼내는」 (the second launch brings up the existing window)). Not researched = external precedents for telling apart · discovering · switching among multiple instances. Trigger = when local multiple daemons become an actual requirement · when the boot·startup owner is moved.
+  - **Pitfall:** ① the `{identifier}+hash(작업폴더)` key of ADR-0027 is for embedded (app in-process) mode, not for the daemon — it was once misread as 「예전 데몬 설계」 in a real session ② the `TODO(T6/connect)` in app setup is only the Rust-side automatic connect being unwired and is separate from the boot trigger `daemon_start` ③ 「1:N」 in step-log 2026-06-19 is a layout where one client attaches to several (including remote) daemons, not local multiple startup.
+  - **Rationale:** ADR-0026 · ADR-0025 · ADR-0134/0135
+- **Related, kept separate for now:** T-85 (which component starts a daemon) · T-86 (tray 「데몬 켜기」 leaves slots on the daemon-down icon) — both were parked for "the multi-daemon topic with the tray work" and likely move here when this topic starts.
 
 ### T-125. Opt-in for drives without file permissions
 - **Status:** trigger wait — a user who needs to run Engram from a FAT / exFAT drive. User 2026-11-21: 「일단 거부로 하고 나중에 필요하면 넣자. 구지 필요없을것같아 요즘 fat 쓰는데가 어딨다고」.
@@ -160,11 +179,6 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Fact:** on a version mismatch the app and the daemon do not talk; the band only informs and offers 「다시 연결」 (ADR-0356). The user stops the daemon themselves (tray 「데몬 끄기」 for an older daemon; a newer one from the newer app or the OS).
 - **Next:** design how the app moves to a matching daemon — stop the old one and start the new one, never downgrade a newer daemon from an older app.
 
-### T-81. Split the tray out of the app (client) process
-- **Status:** not started — idea/refactor. Keep the current shape for now (user 2026-11-09: 「트레이는 지금 클라에 종속되어있는데 분리해야되긴함. 일단은 이대로」).
-- **Fact:** the tray is part of the app process today, so it lives and dies with the client. The user wants it split from the client later.
-- **Next:** when picked up, decide where the tray lives (its own process or with the daemon) and how its stop path relates to the shell's single stop path (ADR-0350).
-
 ### T-77. LLM control — operations the formal surfaces do not reach yet
 - **Status:** waiting for trigger — close each gap when work touches that feature. Moved from `docs/todo/llm-control-gaps.md` on 2026-11-03 (`docs/README.md`: new items go here, not to `todo.md`). Principle = CLAUDE.md 「LLM-우선 제어」. Formal surfaces = daemon bus · front `__engramCmd`.
 - **Tree selection state** — no command changes the agent-tree selection. The only read is the row's `data-selected` attribute (`src/components/agent/AgentList.tsx`).
@@ -224,14 +238,6 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Status:** Follow-up topic (user decision 2026-09-30: the usage slot branch stays as is, the shared handling is a follow-up).
 - **Source:** Usage slot popup checkbox review (ADR-0258 · `docs/process/S21-usage-limit-slot/trd.md` §3 #102 ⑤).
 - **Content:** How to handle input that arrives again before the echo across the whole app — not only re-clicking the same-area checkbox but also duplicate effects (tab `+` twice · splitting the same slot twice · agent exit·creation · duplicate creation from simultaneous LLM `spawn_into` calls) and relative operations computed from an old value (Ctrl+Tab twice = one area) — state · precedents · options = `docs/research/pre-echo-reinput-2026-09-30.md`.
-
-### T-15. Process topology — the direction 「실행자가 UI·데몬을 켜고 제어」 (the launcher starts and controls the UI·daemon) + local multiple daemons
-- **Status:** Deferred (no trigger to start). User proposals 2026-08-07 · 2026-08-17 — both are 「등록만」 (registration only) and not decisions.
-- **Problem:** Two user directions — the launcher first starts and controls the UI·daemon (each a separate process) · the UI starts independently and chooses the daemon to attach to. The reading splits and both collide with the active ADR-0026 (tray + main window = one process): (ga) launcher + UI + daemon as 3 processes = formally rejected by ADR-0026 · (na) the daemon owns the tray = head-on conflict with ADR-0026 + winit main thread ↔ tokio conflict (a technical fact in the discarded ADR-0023 — still valid).
-- **Current state (measured):** The tray menu (daemon on/off/auto start/full exit) and the daemon liveness observer already exist. The frontend starting the daemon at boot is not a gap but a confirmed decision of ADR-0025 (the first spawn call = `daemon_start`). Daemons with different folders already coexist (ADR-0134/0135 — lock = `<데이터 폴더>/daemon.json` · canonical source is the header of `crates/engram-dashboard-daemon/src/instance.rs`). The remaining barrier is on the client side — app single instance is keyed on the identifier and `tauri-plugin-single-instance` has no name override (ADR-0137).
-- **Next:** When starting, first ask the user which of (ga)/(na) it is · how many app instances to allow (if several, remove the plugin and build a new channel for 「두 번째 실행이 기존 창을 꺼내는」 (the second launch brings up the existing window)). Not researched = external precedents for telling apart · discovering · switching among multiple instances. Trigger = when local multiple daemons become an actual requirement · when the boot·startup owner is moved.
-- **Pitfall:** ① the `{identifier}+hash(작업폴더)` key of ADR-0027 is for embedded (app in-process) mode, not for the daemon — it was once misread as 「예전 데몬 설계」 in a real session ② the `TODO(T6/connect)` in app setup is only the Rust-side automatic connect being unwired and is separate from the boot trigger `daemon_start` ③ 「1:N」 in step-log 2026-06-19 is a layout where one client attaches to several (including remote) daemons, not local multiple startup.
-- **Rationale:** ADR-0026 · ADR-0025 · ADR-0134/0135
 
 ### T-14. Data storage/memory system — greenfield prior research done, start deferred (2026-07-19)
 - **Status:** Only research done (no decision). Trigger = when a step that makes agent data persisted·remembered actually comes (adjacent to T-11 「더 큰 그림」 · T-13 full mailbox).
