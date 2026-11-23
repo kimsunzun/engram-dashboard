@@ -1,7 +1,7 @@
 # ADR-0394: Humans approve trust changes — agents only request, human vs agent is a typed caller, one shared ask-the-user seam with a native OS dialog
 
-- 상태: 확정 (2026-11-20, basis: user decision P-C 2026-11-20 (「사람이 승인 하는게 맞다고 생각하는데」) + S37 PRD+TRD review PASS, 4 rounds, 2026-11-20)
-- 관련: ADR-0389 (the trusted-list accept question, regenerate) · ADR-0390 (what a trusted PC may do) · ADR-0395 (the OS account as the trust boundary) · ADR-0266 (OS code in platform) · ADR-0157 (`call_daemon_command` checkpoint) · ADR-0310 (decision 8: named policy entrances) · ADR-0055 · ADR-0307 (LLM command surface) · `docs/process/S37-multi-daemon/trd.md` (§4-8 · T18 · T32 · T38 · T41 · T42 · T43) · PRD R14 · R19 · AC14
+- 상태: 확정 (2026-11-20, basis: user decision P-C 2026-11-20 (「사람이 승인 하는게 맞다고 생각하는데」) + S37 PRD+TRD review PASS, 4 rounds, 2026-11-20) · 부분 폐기 by ADR-0410 (decision 5 app route rule)
+- 관련: ADR-0389 (the trusted-list accept question, regenerate) · ADR-0390 (what a trusted PC may do) · ADR-0395 (the OS account as the trust boundary) · ADR-0266 (OS code in platform) · ADR-0157 (`call_daemon_command` checkpoint) · ADR-0310 (decision 8: named policy entrances) · ADR-0055 · ADR-0307 (LLM command surface) · `docs/process/S37-multi-daemon/trd.md` (§4-8 · T18 · T32 · T38 · T41 · T42 · T43) · PRD R14 · R19 · AC14 · Amended by ADR-0410 (decision 5 app route rule)
 
 ## 맥락
 S37's `peer.*` commands change who this PC trusts. Agents can call commands, and remote mail now reaches agents, so mail from another PC could talk an agent into widening trust (adding a PC, changing network settings, a new identity key, renaming a PC — labels drive `name@pc` routing, and three renames could swap two PCs). The user decided that trust changes need a human (P-C). The daemon also needs one place to ask the user that works with the app open, with the app closed, and on a machine without a display.
