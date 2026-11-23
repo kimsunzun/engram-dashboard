@@ -259,7 +259,8 @@ impl Mounts {
 }
 
 /// A path inside one mount's folder, relative to it — the store's path type, with the `LibPath` name rules. Made from a
-/// virtual path only by [`Mounts::locate`], and from disk by [`MountPath::from_disk`].
+/// virtual path only by [`Mounts::locate`], from disk by [`MountPath::from_disk`], and from a spelling inside the mount by
+/// [`MountPath::parse`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MountPath(LibPath);
 
@@ -306,8 +307,8 @@ impl MountPath {
         self.0.file_name()
     }
 
-    /// A path inside a mount spelled as a test writes it.
-    #[cfg(test)]
+    /// A path inside a mount from its `/` spelling, by the [`LibPath`] name rules — the trash's own paths (`.trash/…`) and
+    /// a bundle record's roots (`trash.rs`), and tests.
     pub(crate) fn parse(text: &str) -> Result<Self, PathError> {
         LibPath::parse(text).map(Self)
     }

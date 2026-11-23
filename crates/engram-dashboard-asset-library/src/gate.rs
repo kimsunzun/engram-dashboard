@@ -80,9 +80,17 @@
 //!   first scan of that mount is a real walk — the daemon's boot scan or a reader (ADR-0382).
 //! - **Refresh merging**: a refresh joins a covering scan generation that is queued and not yet walking; a covering
 //!   walk already in progress does not count — the caller may have changed files before calling (PRD R41).
+//! - **A step-9b hold** ([`Gate::change_held`] — ADR-0409 M1): a `Change` ticket and one write-lock hold whose body gets
+//!   a `raise` of the change number (not the root generation) to call before its agents pass, the root generation
+//!   compared inside the write lock first (ADR-0377). A step that may touch `.trash` raises the trash waiting count before
+//!   its ticket and takes the trash lock inside the hold through [`Hold::take_trash`]; a hold without that reservation
+//!   never waits on it. The trash lock (`trash.rs` [`TrashLock`]) comes after the library lock and before the turn
+//!   mutex — library lock → trash lock → turn mutex, never the reverse — and the waiting count keeps emptying out of it
+//!   while a step waits (ADR-0409 decisions 14 and 15).
 // ADR-0324
 // ADR-0382
 // ADR-0400
+// ADR-0409
 // TRD S25 step-7 §6
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -101,6 +109,7 @@ use crate::folder::FolderStatus;
 use crate::mounts::{moved_to, virtual_path, Mount, MountName, MountPath, Mounts};
 use crate::path::LibPath;
 use crate::store::ContentTag;
+use crate::trash::{TrashHeld, TrashLock, TrashReservation, TrashUnavailable};
 use crate::RefreshReport;
 
 /// The code of a preset reference whose target is not in the catalog (`args` = `{path}` — the target as the preset
@@ -305,6 +314,41 @@ impl ChangeAnswer for () {
     }
 }
 
+/// What a hold's body gets besides the catalog and the mounts ([`Gate::change_held`]).
+pub struct Hold<'a> {
+    seq: &'a dyn Fn() -> u64,
+    raise: &'a dyn Fn(),
+    trash: Option<&'a TrashReservation<'a>>,
+}
+
+impl Hold<'_> {
+    /// The next number of the sequence (a removal draws its number here, so it is later than every read noted before).
+    pub fn seq(&self) -> u64 {
+        (self.seq)()
+    }
+
+    /// Raises the change number — once; later calls do nothing. A body that rewrites agents calls it before they pass,
+    /// so an `agent.new` judged before the hold judges again (ADR-0400 decision 18). The root generation keeps its
+    /// meaning: it does not move (ADR-0377).
+    // ADR-0400 decision 18
+    pub fn raise(&self) {
+        (self.raise)()
+    }
+
+    /// The trash lock, for a hold whose step raised the waiting count before its ticket — taken once per hold for all
+    /// its trash moves; it is released when the answer drops, before the write lock. `Err(NotReserved)` = the step did
+    /// not raise the count: it never waits on the lock and leaves the entry or staging where it is
+    /// (`trash::TRASH_NOT_RESERVED`). `Err(AlreadyHeld)` = this hold holds it already (a second take would wait on
+    /// itself).
+    // ADR-0409 decision 14
+    pub fn take_trash(&self) -> Result<TrashHeld<'_>, TrashUnavailable> {
+        match self.trash {
+            Some(reservation) => reservation.take(),
+            None => Err(TrashUnavailable::NotReserved),
+        }
+    }
+}
+
 /// Whether a mount rename goes on after its body ([`Gate::rename_mount`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RenameEnd {
@@ -450,6 +494,9 @@ pub(crate) struct Gate {
     turns: Mutex<Turns>,
     moved: Condvar,
     seq: AtomicU64,
+    /// The one trash lock over every mount's `.trash` — after the library lock, before the turn mutex (ADR-0409 decision
+    /// 15).
+    trash: TrashLock,
     /// How many [`Gate::with_read`] calls found the library lock held for writing — tests observe a waiter.
     #[cfg(test)]
     read_blocked: std::sync::atomic::AtomicUsize,
@@ -567,6 +614,7 @@ impl Gate {
             }),
             moved: Condvar::new(),
             seq: AtomicU64::new(0),
+            trash: TrashLock::default(),
             #[cfg(test)]
             read_blocked: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -824,6 +872,39 @@ impl Gate {
         f: impl FnOnce(&mut Catalog, &MountsNow, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
         refused: impl FnOnce(&R) -> bool,
     ) -> Result<R, u64> {
+        self.held_in(
+            given,
+            None,
+            |catalog, mounts, hold| f(catalog, mounts, hold.seq),
+            refused,
+        )
+    }
+
+    /// A step-9b hold (ADR-0409 M1): [`Gate::change_checked`] whose body gets a [`Hold`] — the sequence, a `raise` of the
+    /// change number to call before its agents pass, and, when `trash`, the trash lock. A `Change` ticket: no mount
+    /// registration moves. A body that did not raise has the number raised after it unless it refused and touched no
+    /// key. `trash` = the step may touch `.trash`: the trash waiting count is raised before the ticket and the call waits,
+    /// holding no lock, until no bundle is being emptied; the count is lowered once the ticket and the write lock are
+    /// released — on a stale generation, a refusal or a panic too (ADR-0409 decision 14).
+    // ADR-0377
+    // ADR-0409 decision 14
+    pub(crate) fn change_held<R: ChangeAnswer>(
+        &self,
+        given: Option<u64>,
+        trash: bool,
+        f: impl FnOnce(&mut Catalog, &MountsNow, &Hold) -> (R, Vec<PathKey>),
+    ) -> Result<R, u64> {
+        let reservation = trash.then(|| self.trash.reserve());
+        self.held_in(given, reservation.as_ref(), f, R::refused)
+    }
+
+    fn held_in<R>(
+        &self,
+        given: Option<u64>,
+        trash: Option<&TrashReservation<'_>>,
+        f: impl FnOnce(&mut Catalog, &MountsNow, &Hold) -> (R, Vec<PathKey>),
+        refused: impl FnOnce(&R) -> bool,
+    ) -> Result<R, u64> {
         let _turn = self.take_turn(Kind::Change);
         let mut state = write(&self.lib);
         let current = lock(&self.turns).numbers.root;
@@ -844,11 +925,23 @@ impl Gate {
         } = &mut *state;
         let catalog = Arc::make_mut(catalog);
         let now = MountsNow { mounts, seen };
-        let (answer, touched) = f(catalog, &now, &|| self.next_seq());
+        let raised = std::cell::Cell::new(false);
+        // Library lock → turn mutex: the allowed order; the turn mutex is held for the raise only.
+        let raise = || {
+            if !raised.replace(true) {
+                lock(&self.turns).numbers.change += 1;
+            }
+        };
+        let hold = Hold {
+            seq: &|| self.next_seq(),
+            raise: &raise,
+            trash,
+        };
+        let (answer, touched) = f(catalog, &now, &hold);
         catalog.recompute_derived(&touched);
         // A refusal applied nothing: a scan walking meanwhile need not walk again, nor a late merge be dropped.
         if !refused(&answer) || !touched.is_empty() {
-            lock(&self.turns).numbers.change += 1;
+            raise();
         }
         self.debug_check_view(&state);
         Ok(answer)
@@ -1502,6 +1595,11 @@ impl Gate {
             );
             turns = engram_dashboard_base::sync::wait_timeout(&self.moved, turns, deadline - now).0;
         }
+    }
+
+    /// The trash lock and its waiting count (`trash.rs`).
+    pub(crate) fn trash(&self) -> &TrashLock {
+        &self.trash
     }
 
     /// The library lock itself — a test holds it or checks that nobody does.
@@ -2964,5 +3062,193 @@ mod tests {
         assert!(covers(Some(&lp("a")), Some(&lp("a"))));
         assert!(!covers(Some(&lp("a")), Some(&lp("ab"))));
         assert!(!covers(Some(&lp("a")), None));
+    }
+
+    // ── the step-9b hold and the trash lock (ADR-0409 M1 · decision 14) ──────────────────────────────────────────
+
+    #[test]
+    fn a_held_change_raises_the_change_number_once_before_its_agents_pass_and_not_the_root() {
+        let gate = gate();
+        let before = gate.numbers();
+        let seen = gate
+            .change_held(None, false, |_, _, hold| {
+                let at_start = gate.numbers().change;
+                hold.raise();
+                // What an `agent.new` judged before the hold compares inside its insert.
+                let before_agents = gate.numbers().change;
+                hold.raise();
+                (Ok::<_, ()>((at_start, before_agents)), Vec::new())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            seen,
+            (before.change, before.change + 1),
+            "raised inside the hold"
+        );
+        let after = gate.numbers();
+        assert_eq!(after.change, before.change + 1, "raised once");
+        assert_eq!(
+            after.root, before.root,
+            "the root generation keeps its meaning"
+        );
+
+        gate.change_held(None, false, |_, _, _| ((), Vec::new()))
+            .unwrap();
+        assert_eq!(
+            gate.numbers().change,
+            before.change + 2,
+            "a body that did not raise is raised after"
+        );
+        let refused: Result<(), ()> = gate
+            .change_held(None, false, |_, _, _| (Err(()), Vec::new()))
+            .unwrap();
+        assert!(refused.is_err());
+        assert_eq!(
+            gate.numbers().change,
+            before.change + 2,
+            "a refusal that touched nothing raises nothing"
+        );
+    }
+
+    #[test]
+    fn a_held_change_with_a_stale_root_generation_runs_nothing_and_releases_the_trash_count() {
+        let gate = gate();
+        let called = std::cell::Cell::new(false);
+        let answer = gate.change_held(Some(BASE + 1), true, |_, _, _| {
+            called.set(true);
+            ((), Vec::new())
+        });
+        assert_eq!(answer.unwrap_err(), BASE);
+        assert!(!called.get());
+        assert_eq!(gate.trash().waiting(), 0, "the refusal released the count");
+        // An emptying is not held back by a count left raised.
+        drop(gate.trash().take_for_emptying());
+        assert!(gate
+            .change_held(Some(BASE), false, |_, _, _| ((), Vec::new()))
+            .is_ok());
+    }
+
+    // ADR-0409 decision 14 (gate part).
+    #[test]
+    fn a_trash_step_raises_the_count_before_its_ticket_and_waits_out_the_bundle_being_emptied() {
+        let gate = gate();
+        let log = Arc::new(Log::default());
+        // A fake removal: one bundle of an emptying holds the trash lock.
+        let bundle = gate.trash().take_for_emptying();
+        let step = {
+            let (gate, log) = (Arc::clone(&gate), Arc::clone(&log));
+            thread::spawn(move || {
+                gate.change_held(None, true, |_, _, hold| {
+                    let held = hold.take_trash().expect("the step reserved");
+                    log.push("step holds the trash lock");
+                    drop(held);
+                    ((), Vec::new())
+                })
+                .unwrap();
+            })
+        };
+        gate.trash()
+            .wait_until("the step raised the count", |view| {
+                view.waiting == 1 && view.emptying
+            });
+        gate.wait_for("the waiting step holds no ticket", |line, _| {
+            line.is_empty()
+        });
+        assert!(
+            gate.lib().try_write().is_ok(),
+            "the waiting step holds no library lock"
+        );
+        // The emptying's next bundle waits for the count to reach 0: the step goes first.
+        let next_bundle = {
+            let (gate, log) = (Arc::clone(&gate), Arc::clone(&log));
+            thread::spawn(move || {
+                let held = gate.trash().take_for_emptying();
+                log.push("next bundle");
+                drop(held);
+            })
+        };
+        drop(bundle);
+        join(step);
+        join(next_bundle);
+        // The reservation drops when `change_held` returns: "next bundle" comes after the step's hold.
+        assert_eq!(log.take(), ["step holds the trash lock", "next bundle"]);
+        assert_eq!(gate.trash().waiting(), 0);
+    }
+
+    #[test]
+    fn emptying_starts_no_bundle_while_a_step_waits_before_its_ticket() {
+        let gate = gate();
+        let log = Arc::new(Log::default());
+        let reserved = gate.trash().reserve();
+        let emptying = {
+            let (gate, log) = (Arc::clone(&gate), Arc::clone(&log));
+            thread::spawn(move || {
+                let held = gate.trash().take_for_emptying();
+                log.push("bundle");
+                drop(held);
+            })
+        };
+        gate.trash()
+            .wait_until("the emptying waits for the count", |view| {
+                view.emptiers == 1
+            });
+        log.push("step");
+        drop(reserved);
+        join(emptying);
+        assert_eq!(log.take(), ["step", "bundle"]);
+    }
+
+    #[test]
+    fn panic_unwinding_releases_the_trash_count_the_trash_lock_and_the_ticket() {
+        let gate = gate();
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            gate.change_held::<()>(None, true, |_, _, hold| {
+                let _held = hold.take_trash().expect("the step reserved");
+                panic!("a step panics holding the trash lock");
+            })
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(gate.trash().waiting(), 0);
+        drop(gate.trash().take_for_emptying());
+        gate.wait_for("the ticket was released", |line, _| line.is_empty());
+        assert!(gate
+            .change_held(None, false, |_, _, _| ((), Vec::new()))
+            .is_ok());
+
+        let early = catch_unwind(AssertUnwindSafe(|| {
+            let _reserved = gate.trash().reserve();
+            panic!("a step fails before its ticket");
+        }));
+        assert!(early.is_err());
+        assert_eq!(gate.trash().waiting(), 0, "dropped on the earlier exit too");
+    }
+
+    #[test]
+    fn a_second_take_of_the_trash_lock_in_one_hold_is_refused_not_a_self_wait() {
+        let gate = gate();
+        let second = gate
+            .change_held(None, true, |_, _, hold| {
+                let _held = hold.take_trash().expect("the step reserved");
+                (Ok::<_, ()>(hold.take_trash().map(drop)), Vec::new())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(second, Err(TrashUnavailable::AlreadyHeld));
+        drop(gate.trash().take_for_emptying());
+    }
+
+    #[test]
+    fn a_hold_that_raised_no_count_never_waits_on_the_trash_lock() {
+        let gate = gate();
+        let before = gate.numbers().change;
+        let _bundle = gate.trash().take_for_emptying();
+        let answer = gate
+            .change_held(None, false, |_, _, hold| {
+                (hold.take_trash().map(drop), Vec::new())
+            })
+            .unwrap();
+        assert_eq!(answer, Err(TrashUnavailable::NotReserved));
+        assert_eq!(gate.numbers().change, before, "a refusal raises nothing");
     }
 }

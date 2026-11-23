@@ -12,7 +12,8 @@
 //! - **Names**: [`admits`] is the name rule every way into the catalog shares — no name starting with `.` (so a mount's
 //!   `.trash` is never walked) and no base temp name. Nothing here deletes or rewrites a leftover temp file
 //!   (ADR-0335); the only temp files touched are base `write_atomic`'s own, whose base naming could truncate a
-//!   leftover only in the rare case of the same pid and counter (base behaviour, not this module's).
+//!   leftover only in the rare case of the same pid and counter (base behaviour, not this module's — T-124), and the
+//!   bundle record's temps in `.trash`, which `trash.rs` makes, publishes and prunes through this store.
 //! - **Per-folder listing sequence**: a scan draws `seq()` before every step of the walk; the number drawn
 //!   before the step that yields folder D precedes every read of D's entries and is `listed_at[D]` (ADR-0324 decision
 //!   5 · TRD S25 step-7 premise 47). A file of a scanned folder that the listing lacks was observed absent at that
@@ -21,13 +22,21 @@
 //!   fails are reported in [`ScanListing::errors`]; the catalog keeps what it knew of them.
 //! - **No OS branch here** — link tests use std's `symlink_metadata().file_type().is_symlink()` (on Windows: every
 //!   name-surrogate reparse point, junctions included) and identity comes from platform `file_identity`.
+//! - **No rename replaces** (ADR-0409 decision 10): [`LibraryStore::rename`] and [`LibraryStore::trash`] go through
+//!   platform `rename_no_replace` — a taken name is `AlreadyExists` with nothing moved, a volume that refuses the flag is
+//!   `Unsupported`, and nothing falls back to an overwriting rename.
+//! - **Absence is a `NotFound`** ([`LibraryStore::stat`]): the trash steps judge a path absent only from a no-follow
+//!   stat that says `NotFound`; [`LibraryStore::check_names`] checks every name from the mount folder down without
+//!   following, and the trash's own folder steps (`list`, `remove_dir`, `remove_file`) never act through a link.
 // ADR-0324
 // ADR-0335
 // ADR-0365
 // ADR-0400
+// ADR-0409
 // TRD S25 step-7 §3-5
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -36,7 +45,9 @@ use std::time::SystemTime;
 use engram_dashboard_base::file::{
     copy_atomic, is_temp_name, read_capped_bytes, write_atomic, OsHooks, BUSY_PAUSE, BUSY_RETRIES,
 };
-use engram_dashboard_platform::fs::{file_identity, retry_busy, sync_dir, FileIdentity, Retry};
+use engram_dashboard_platform::fs::{
+    file_identity, rename_no_replace, retry_busy, sync_dir, FileIdentity, Retry,
+};
 use walkdir::WalkDir;
 
 use crate::mounts::MountPath;
@@ -45,6 +56,11 @@ use crate::path::LibPath;
 /// A mount's Engram trash folder — a fixed name in the mount's folder, never walked ([`admits`] refuses dot names).
 // TRD S25 B8 · G31
 pub const TRASH_DIR: &str = ".trash";
+
+/// The code of an item whose no-replace rename the volume refused ([`LibraryStore::rename`] answered `Unsupported`) —
+/// it fails, and nothing retries it with an overwriting rename.
+// ADR-0409 decision 10
+pub const NO_REPLACE_UNSUPPORTED: &str = "no-replace-unsupported";
 
 /// Every disk access to the library. Paths are disk paths; `root` is one mount's folder.
 pub trait LibraryStore: Send + Sync {
@@ -77,18 +93,167 @@ pub trait LibraryStore: Send + Sync {
     /// may have put its own file there since. A crash during the write can likewise leave a partial file at `path`.
     fn create_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     fn create_dir(&self, path: &Path) -> io::Result<()>;
+    /// Renames `from` to `to` (a file or a folder, a link as a link) without ever replacing: platform
+    /// `rename_no_replace`, retried while the OS says busy. `AlreadyExists` = something is at `to`, nothing moved;
+    /// `Unsupported` = the volume refuses the no-replace flag ([`NO_REPLACE_UNSUPPORTED`] — never retried with an
+    /// overwriting rename); `CrossesDevices` = `to` is on another volume, nothing moved. A case-only rename goes through
+    /// it too.
+    // ADR-0409 decision 10
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
-    /// Atomic copy (base `copy_atomic`).
+    /// Atomic copy (base `copy_atomic`) — it replaces an existing `to` and drops permissions, so step 9b does not use it
+    /// (ADR-0400 decision 25).
     fn copy(&self, from: &Path, to: &Path) -> io::Result<()>;
-    /// Moves `path` (a file or folder under `root`) into `<root>/.trash/<bundle>/<its path from the root>` by one
-    /// same-root rename, creating the folders inside the trash first. Answers the new path. `InvalidInput` = `path`
-    /// is not a library path below the root (the root itself, outside it, through `..`), or the bundle is not one
-    /// plain name. `AlreadyExists` = something is already at the destination (a rename would replace a file there).
-    /// A destination that appears between that check and the rename is not guarded.
-    fn trash(&self, root: &Path, path: &Path, bundle: &TrashBundle) -> io::Result<PathBuf>;
+    /// Moves `path` (a file or folder under `root`, a link as a link) into `<root>/.trash/<bundle>/<its path from the
+    /// root>` by one [`LibraryStore::rename`] — never replacing. Answers the new path. The bundle folder must already be
+    /// there (the trash step makes it under the trash lock); every name from the root down to the destination's folder,
+    /// and to the item's own folder, is checked without following ([`LibraryStore::check_names`]) and a missing folder
+    /// below the bundle is made with `create_dir`, one name at a time; when the move then fails, the folders this call
+    /// made are removed again, deepest first, empty-only. `InvalidInput` = `path` is not a library path below the root
+    /// (the root itself, outside it, through `..`), or the bundle is not one plain name; `NotFound` = `.trash`, the
+    /// bundle folder or a folder of the item's path is missing; `NotADirectory` = a link or a file among those names
+    /// (nothing is made or moved through it); `AlreadyExists` = something is at the destination, nothing moved. A name swapped for a link between its check and
+    /// the rename is not caught (local write access is trusted — ADR-0409).
+    // ADR-0365
+    // ADR-0409 decisions 9 and 10
+    fn trash(&self, root: &Path, path: &Path, bundle: &TrashBundle) -> io::Result<PathBuf> {
+        let to = trash_path(root, path, bundle)?;
+        let not_a_folder = |at: &MountPath, way: &str| {
+            io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("{} is not a folder on the way {way}", at.as_str()),
+            )
+        };
+        // A rename does not stop at a link among the source's folders: they are checked from the root down too.
+        let from = MountPath::from_disk(root, path)
+            .expect("trash_path took it as a path inside the mount");
+        if let Some(parent) = from.parent() {
+            match self.check_names(root, &parent)? {
+                NameWalk::Present(EntryKind::Folder) => {}
+                NameWalk::Missing(at) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("{} is missing", at.as_str()),
+                    ))
+                }
+                NameWalk::Present(_) | NameWalk::Link(_) | NameWalk::NotAFolder(_) => {
+                    return Err(not_a_folder(&parent, "to the item"))
+                }
+            }
+        }
+        let folder = MountPath::from_disk(root, to.parent().expect("a trash path has a parent"))
+            .expect("a trash path is a path inside the mount");
+        // `.trash` and the bundle are the first two names; only a folder below them is made here.
+        let below_bundle = |at: &MountPath| at.as_str().split('/').count() > 2;
+        let mut made: Vec<PathBuf> = Vec::new();
+        let mut walk = || {
+            // Each pass makes one missing folder (or finds it made meanwhile), so one pass per name ends the walk.
+            for _ in 0..=folder.as_str().split('/').count() {
+                match self.check_names(root, &folder)? {
+                    NameWalk::Present(EntryKind::Folder) => return self.rename(path, &to),
+                    NameWalk::Missing(at) if below_bundle(&at) => {
+                        match self.create_dir(&at.to_path(root)) {
+                            Ok(()) => made.push(at.to_path(root)),
+                            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    NameWalk::Missing(at) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("{} is missing", at.as_str()),
+                        ))
+                    }
+                    NameWalk::Present(_) | NameWalk::Link(_) | NameWalk::NotAFolder(_) => {
+                        return Err(not_a_folder(&folder, "into the trash"))
+                    }
+                }
+            }
+            Err(io::Error::other(format!(
+                "{} kept reading as missing after it was made",
+                folder.as_str()
+            )))
+        };
+        match walk() {
+            Ok(()) => Ok(to),
+            Err(e) => {
+                // The folders this call made go again, deepest first and empty-only, so a failed item leaves no shell
+                //   inside a bundle whose other items go on.
+                for dir in made.iter().rev() {
+                    if self.remove_dir(dir).is_err() {
+                        break;
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
     /// Whether anything is at `path` (a link counts — it is not followed): only a stat that answers says so, and a stat
     /// error of any kind answers `false`. A fast path only — `create_new` and `create_dir` decide a collision.
     fn exists(&self, path: &Path) -> bool;
+    /// What is at `path`, without following a link. `NotFound` = nothing is there; any other error says nothing about
+    /// whether something is (ADR-0409: absence is a stat that says `NotFound`, never an error read as absence).
+    // ADR-0409
+    fn stat(&self, path: &Path) -> io::Result<EntryKind>;
+    /// The entries of the folder `path` with their kinds, nothing followed (a link to a folder is a link), in no set
+    /// order. `NotADirectory` = `path` is a file or a link.
+    fn list(&self, path: &Path) -> io::Result<Vec<(OsString, EntryKind)>>;
+    /// Removes the folder `path` only when it is empty, never through a link: a link or a file at `path` is
+    /// `NotADirectory` and stays; a folder with anything in it stays (an error, `DirectoryNotEmpty` or the OS's own).
+    fn remove_dir(&self, path: &Path) -> io::Result<()>;
+    /// Removes the file at `path`; a folder or a link there is `InvalidInput` and stays.
+    fn remove_file(&self, path: &Path) -> io::Result<()>;
+    /// Every name of `rel` from `root` down, each [`LibraryStore::stat`]ed in turn without following: the first name
+    /// above the last that is not a folder, or the last name's kind. The root itself is not checked (only a mount's
+    /// folder may be a link — ADR-0365). A stat error other than `NotFound` is answered as is.
+    // ADR-0365
+    // ADR-0409 decision 9
+    fn check_names(&self, root: &Path, rel: &MountPath) -> io::Result<NameWalk> {
+        let names: Vec<&str> = rel.as_str().split('/').collect();
+        let mut path = root.to_path_buf();
+        for (at, name) in names.iter().enumerate() {
+            path.push(name);
+            let last = at + 1 == names.len();
+            let here = || {
+                MountPath::from_disk(root, &path)
+                    .expect("a leading run of names of a path inside a mount is one")
+            };
+            match self.stat(&path) {
+                Ok(kind) if last => return Ok(NameWalk::Present(kind)),
+                Ok(EntryKind::Folder) => {}
+                Ok(EntryKind::Link) => return Ok(NameWalk::Link(here())),
+                Ok(EntryKind::File) => return Ok(NameWalk::NotAFolder(here())),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Ok(NameWalk::Missing(here()))
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("a library path has at least one name")
+    }
+}
+
+/// What one entry is, seen without following a link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A real folder (not a link to one).
+    Folder,
+    /// Anything else that is not a link: a file (or another non-folder entry).
+    File,
+    /// A link of any kind (on Windows every name-surrogate reparse point, junctions included), never followed.
+    Link,
+}
+
+/// What [`LibraryStore::check_names`] found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NameWalk {
+    /// Every name is there and every name above the last is a folder; the last name's kind.
+    Present(EntryKind),
+    /// This name is absent; the names above it are folders.
+    Missing(MountPath),
+    /// This name, above the last, is a link.
+    Link(MountPath),
+    /// This name, above the last, is a file.
+    NotAFolder(MountPath),
 }
 
 /// What one scan saw.
@@ -133,7 +298,7 @@ pub struct ContentTag {
     pub identity: Option<FileIdentity>,
 }
 
-/// The bundle folder name under `.trash` — its naming is step 9b's; this crate only passes it through.
+/// The bundle folder name under `.trash` — one plain name to the store; its form is `trash::BundleId`'s.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrashBundle(pub String);
 
@@ -368,24 +533,68 @@ impl LibraryStore for FsStore {
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        (OS_HOOKS.retry)(&mut || fs::rename(from, to))
+        (OS_HOOKS.retry)(&mut || rename_no_replace(from, to))
     }
 
     fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
         copy_atomic(from, to, OS_HOOKS)
     }
 
-    fn trash(&self, root: &Path, path: &Path, bundle: &TrashBundle) -> io::Result<PathBuf> {
-        let to = trash_path(root, path, bundle)?;
-        destination_free(&to, fs::symlink_metadata(&to).map(drop))?;
-        fs::create_dir_all(to.parent().expect("a trash path has a parent"))?;
-        self.rename(path, &to)?;
-        Ok(to)
-    }
-
     fn exists(&self, path: &Path) -> bool {
         present(&fs::symlink_metadata(path))
     }
+
+    fn stat(&self, path: &Path) -> io::Result<EntryKind> {
+        Ok(entry_kind(fs::symlink_metadata(path)?.file_type()))
+    }
+
+    fn list(&self, path: &Path) -> io::Result<Vec<(OsString, EntryKind)>> {
+        if self.stat(path)? != EntryKind::Folder {
+            return Err(not_a_folder(path));
+        }
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            // `DirEntry::file_type` does not follow a link.
+            entries.push((entry.file_name(), entry_kind(entry.file_type()?)));
+        }
+        Ok(entries)
+    }
+
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        // A junction is a folder to `fs::remove_dir` on Windows: only a real folder is handed to it.
+        if self.stat(path)? != EntryKind::Folder {
+            return Err(not_a_folder(path));
+        }
+        (OS_HOOKS.retry)(&mut || fs::remove_dir(path))
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        if self.stat(path)? != EntryKind::File {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a file", path.display()),
+            ));
+        }
+        (OS_HOOKS.retry)(&mut || fs::remove_file(path))
+    }
+}
+
+fn entry_kind(file_type: fs::FileType) -> EntryKind {
+    if file_type.is_symlink() {
+        EntryKind::Link
+    } else if file_type.is_dir() {
+        EntryKind::Folder
+    } else {
+        EntryKind::File
+    }
+}
+
+fn not_a_folder(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotADirectory,
+        format!("{} is not a folder", path.display()),
+    )
 }
 
 /// [`FsStore`]'s `create_new`, with `write` filling the file just made.
@@ -522,24 +731,6 @@ fn place_error(
     }
 }
 
-/// Whether the trash destination `to` is free, from the answer of a lookup of it: only `NotFound` is free; something
-/// there is `AlreadyExists`; any other lookup failure is returned as is (it does not show the place is empty, and a
-/// rename would replace a file there).
-fn destination_free(to: &Path, lookup: io::Result<()>) -> io::Result<()> {
-    match lookup {
-        Ok(()) => Err(already_in_trash(to)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-fn already_in_trash(to: &Path) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!("{} is already in the trash", to.display()),
-    )
-}
-
 /// A tag from the metadata and the identity answer: `Unsupported` identity = `None` (TRD S25 step-7 premise 20).
 fn content_tag(
     modified: SystemTime,
@@ -587,9 +778,9 @@ pub(crate) mod mem {
     use std::sync::Mutex;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use super::{
-        admits, trash_path, ContentTag, LibraryStore, ScanEntry, ScanListing, TrashBundle,
-    };
+    use std::ffi::OsString;
+
+    use super::{admits, ContentTag, EntryKind, LibraryStore, ScanEntry, ScanListing};
     use crate::mounts::MountPath;
 
     #[derive(Clone, Debug)]
@@ -617,6 +808,9 @@ pub(crate) mod mem {
         list_failures: HashMap<PathBuf, ListFailure>,
         tag_failures: HashSet<PathBuf>,
         read_failures: HashSet<PathBuf>,
+        stat_failures: HashSet<PathBuf>,
+        /// Renames whose destination is one of these fail.
+        rename_failures: HashSet<PathBuf>,
     }
 
     pub(crate) struct MemStore {
@@ -657,6 +851,26 @@ pub(crate) mod mem {
             make_parents(&mut state, &self.root, &path);
             let bytes = text.as_bytes().to_vec();
             state.nodes.insert(path, Node::File { bytes, modified });
+        }
+
+        /// An empty folder at `rel` (folders above it are made).
+        pub(crate) fn dir(&self, rel: &str) {
+            let path = self.at(rel);
+            let mut state = self.state.lock().unwrap();
+            make_parents(&mut state, &self.root, &path);
+            state.nodes.insert(path, Node::Dir);
+        }
+
+        /// A stat of `rel` fails (other than `NotFound`) from now on.
+        pub(crate) fn fail_stat(&self, rel: &str) {
+            let path = self.at(rel);
+            self.state.lock().unwrap().stat_failures.insert(path);
+        }
+
+        /// A rename onto `rel` fails from now on.
+        pub(crate) fn fail_rename_to(&self, rel: &str) {
+            let path = self.at(rel);
+            self.state.lock().unwrap().rename_failures.insert(path);
         }
 
         /// A link at `rel` — the store models it as an opaque entry a walk does not enter.
@@ -958,8 +1172,18 @@ pub(crate) mod mem {
 
         fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
             let mut state = self.state.lock().unwrap();
+            if state.rename_failures.contains(to) {
+                return Err(io::Error::other("injected rename failure"));
+            }
             if !state.nodes.contains_key(from) {
                 return Err(not_found());
+            }
+            // As FsStore's no-replace rename.
+            if state.nodes.contains_key(to) {
+                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+            }
+            if to.starts_with(from) {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
             }
             match to.parent().and_then(|parent| state.nodes.get(parent)) {
                 Some(Node::Dir) => {}
@@ -996,21 +1220,76 @@ pub(crate) mod mem {
             Ok(())
         }
 
-        fn trash(&self, root: &Path, path: &Path, bundle: &TrashBundle) -> io::Result<PathBuf> {
-            let to = trash_path(root, path, bundle)?;
-            {
-                let mut state = self.state.lock().unwrap();
-                if state.nodes.contains_key(&to) {
-                    return Err(super::already_in_trash(&to));
-                }
-                make_parents(&mut state, root, &to);
-            }
-            self.rename(path, &to)?;
-            Ok(to)
-        }
-
         fn exists(&self, path: &Path) -> bool {
             self.state.lock().unwrap().nodes.contains_key(path)
+        }
+
+        fn stat(&self, path: &Path) -> io::Result<EntryKind> {
+            let state = self.state.lock().unwrap();
+            if state.stat_failures.contains(path) {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            match state.nodes.get(path) {
+                Some(Node::Dir) => Ok(EntryKind::Folder),
+                Some(Node::File { .. }) => Ok(EntryKind::File),
+                Some(Node::Link) => Ok(EntryKind::Link),
+                None => Err(not_found()),
+            }
+        }
+
+        fn list(&self, path: &Path) -> io::Result<Vec<(OsString, EntryKind)>> {
+            let state = self.state.lock().unwrap();
+            match state.nodes.get(path) {
+                Some(Node::Dir) => {}
+                Some(_) => return Err(io::Error::from(io::ErrorKind::NotADirectory)),
+                None => return Err(not_found()),
+            }
+            match state.list_failures.get(path) {
+                Some(ListFailure::Open) => {
+                    return Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                }
+                Some(ListFailure::PartWay { .. }) => {
+                    return Err(io::Error::other("injected enumeration failure"))
+                }
+                None => {}
+            }
+            Ok(MemStore::children(&state, path)
+                .into_iter()
+                .map(|child| {
+                    let kind = match state.nodes[&child] {
+                        Node::Dir => EntryKind::Folder,
+                        Node::File { .. } => EntryKind::File,
+                        Node::Link => EntryKind::Link,
+                    };
+                    (child.file_name().unwrap().to_owned(), kind)
+                })
+                .collect())
+        }
+
+        fn remove_dir(&self, path: &Path) -> io::Result<()> {
+            let mut state = self.state.lock().unwrap();
+            match state.nodes.get(path) {
+                Some(Node::Dir) => {}
+                Some(_) => return Err(io::Error::from(io::ErrorKind::NotADirectory)),
+                None => return Err(not_found()),
+            }
+            if !MemStore::children(&state, path).is_empty() {
+                return Err(io::Error::from(io::ErrorKind::DirectoryNotEmpty));
+            }
+            state.nodes.remove(path);
+            Ok(())
+        }
+
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            let mut state = self.state.lock().unwrap();
+            match state.nodes.get(path) {
+                Some(Node::File { .. }) => {
+                    state.nodes.remove(path);
+                    Ok(())
+                }
+                Some(_) => Err(io::Error::from(io::ErrorKind::InvalidInput)),
+                None => Err(not_found()),
+            }
         }
     }
 
@@ -1171,6 +1450,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let file = write(root, "rules/a.md", "body");
+        fs::create_dir_all(root.join(TRASH_DIR).join("b1")).unwrap();
         let before = file_identity(&file).ok();
         let moved = FsStore
             .trash(root, &file, &TrashBundle("b1".to_owned()))
@@ -1534,6 +1814,7 @@ mod tests {
         let root = dir.path();
         let bundle = TrashBundle("b1".to_owned());
         let file = write(root, "rules/a.md", "first");
+        fs::create_dir_all(root.join(TRASH_DIR).join("b1")).unwrap();
         let moved = FsStore.trash(root, &file, &bundle).unwrap();
         write(root, "rules/a.md", "second");
         let error = FsStore.trash(root, &file, &bundle).unwrap_err();
@@ -1552,6 +1833,7 @@ mod tests {
         let mem_root = Path::new("/lib");
         let store = mem::MemStore::new(mem_root);
         store.file("rules/a.md", "first");
+        store.dir(".trash/b1");
         let path = lib("rules/a.md").to_path(mem_root);
         let moved = store.trash(mem_root, &path, &bundle).unwrap();
         store.file("rules/a.md", "second");
@@ -1561,18 +1843,237 @@ mod tests {
         assert_eq!(store.read(&path, u64::MAX).unwrap(), b"second");
     }
 
+    // ADR-0409 decision 10 — there is no check before the rename, so only the
+    //   rename itself can refuse the taken name here.
     #[test]
-    fn the_trash_destination_is_free_only_on_not_found() {
-        let to = Path::new("/lib/.trash/b1/a.md");
-        assert!(destination_free(to, Err(io::ErrorKind::NotFound.into())).is_ok());
-        let taken = destination_free(to, Ok(())).unwrap_err();
-        assert_eq!(taken.kind(), io::ErrorKind::AlreadyExists);
-        let failed = destination_free(to, Err(io::ErrorKind::PermissionDenied.into())).unwrap_err();
+    fn trash_never_replaces_a_file_at_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = write(root, "rules/a.md", "moving");
+        let there = write(root, ".trash/b1/rules/a.md", "already there");
+        let bundle = TrashBundle("b1".to_owned());
+
+        let error = FsStore.trash(root, &file, &bundle).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error:?}");
+        assert_eq!(fs::read_to_string(&there).unwrap(), "already there");
         assert_eq!(
-            failed.kind(),
-            io::ErrorKind::PermissionDenied,
-            "a failed lookup is not free"
+            fs::read_to_string(&file).unwrap(),
+            "moving",
+            "nothing moved"
         );
+
+        let other = write(root, "rules/b.md", "other");
+        let error = FsStore.rename(&other, &file).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error:?}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "moving");
+
+        let mem_root = Path::new("/lib");
+        let store = mem::MemStore::new(mem_root);
+        store.file("rules/a.md", "moving");
+        store.file(".trash/b1/rules/a.md", "already there");
+        let path = lib("rules/a.md").to_path(mem_root);
+        let error = store.trash(mem_root, &path, &bundle).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        let kept = lib(".trash/b1/rules/a.md").to_path(mem_root);
+        assert_eq!(store.read(&kept, u64::MAX).unwrap(), b"already there");
+        assert_eq!(store.read(&path, u64::MAX).unwrap(), b"moving");
+    }
+
+    #[test]
+    fn trash_needs_its_bundle_and_makes_the_folders_below_it_never_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let file = write(&root, "rules/deep/a.md", "x");
+        let bundle = TrashBundle("b1".to_owned());
+
+        let error = FsStore.trash(&root, &file, &bundle).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error:?}");
+        assert!(
+            !root.join(TRASH_DIR).exists(),
+            "the trash step makes .trash and the bundle"
+        );
+
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(root.join(TRASH_DIR).join("b1")).unwrap();
+        link_dir(&outside, &root.join(TRASH_DIR).join("b1").join("rules")).unwrap();
+        let error = FsStore.trash(&root, &file, &bundle).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory, "{error:?}");
+        assert!(file.exists(), "nothing moved");
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing made through the link"
+        );
+
+        let other = TrashBundle("b2".to_owned());
+        fs::create_dir_all(root.join(TRASH_DIR).join("b2")).unwrap();
+        let moved = FsStore.trash(&root, &file, &other).unwrap();
+        assert_eq!(moved, lib(".trash/b2/rules/deep/a.md").to_path(&root));
+        assert_eq!(fs::read_to_string(&moved).unwrap(), "x");
+    }
+
+    #[test]
+    fn trash_never_moves_an_item_through_a_link_among_its_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let outside = dir.path().join("outside");
+        let kept = write(&outside, "x.md", "keep");
+        fs::create_dir_all(root.join(TRASH_DIR).join("b1")).unwrap();
+        link_dir(&outside, &root.join("linked")).unwrap();
+        let through = root.join("linked").join("x.md");
+
+        let error = FsStore
+            .trash(&root, &through, &TrashBundle("b1".to_owned()))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory, "{error:?}");
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "keep");
+        assert_eq!(
+            fs::read_dir(root.join(TRASH_DIR).join("b1"))
+                .unwrap()
+                .count(),
+            0,
+            "nothing made or moved"
+        );
+    }
+
+    #[test]
+    fn trash_of_an_item_whose_folder_is_gone_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        fs::create_dir_all(root.join(TRASH_DIR).join("b1")).unwrap();
+        let gone = root.join("gone").join("x.md");
+
+        let error = FsStore
+            .trash(&root, &gone, &TrashBundle("b1".to_owned()))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error:?}");
+        assert_eq!(
+            fs::read_dir(root.join(TRASH_DIR).join("b1"))
+                .unwrap()
+                .count(),
+            0,
+            "nothing made"
+        );
+    }
+
+    #[test]
+    fn check_names_answers_the_first_name_that_is_a_link_a_file_or_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        write(&root, "a/b/c.md", "x");
+        let outside = dir.path().join("outside");
+        write(&outside, "d/e.md", "behind the link");
+        link_dir(&outside, &root.join("a").join("link")).unwrap();
+        let twin = mem_twin();
+        let stores: [(&dyn LibraryStore, &Path); 2] =
+            [(&FsStore, &root), (&twin, Path::new("/lib"))];
+        for (store, root) in stores {
+            let walk = |rel: &str| store.check_names(root, &lib(rel)).unwrap();
+            assert_eq!(walk("a/b/c.md"), NameWalk::Present(EntryKind::File));
+            assert_eq!(walk("a/b"), NameWalk::Present(EntryKind::Folder));
+            assert_eq!(walk("a/link"), NameWalk::Present(EntryKind::Link));
+            assert_eq!(walk("a/link/d/e.md"), NameWalk::Link(lib("a/link")));
+            assert_eq!(walk("a/b/c.md/x"), NameWalk::NotAFolder(lib("a/b/c.md")));
+            assert_eq!(walk("a/gone/x.md"), NameWalk::Missing(lib("a/gone")));
+        }
+    }
+
+    /// A [`mem::MemStore`] at `/lib` holding what [`check_names_answers_the_first_name_that_is_a_link_a_file_or_missing`]
+    /// puts on disk.
+    fn mem_twin() -> mem::MemStore {
+        let store = mem::MemStore::new(Path::new("/lib"));
+        store.file("a/b/c.md", "x");
+        store.link("a/link");
+        store
+    }
+
+    #[test]
+    fn stat_tells_not_found_from_other_errors_and_never_follows() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = write(root, "a.md", "x");
+        link_dir(root, &root.join("link")).unwrap();
+        assert_eq!(FsStore.stat(&file).unwrap(), EntryKind::File);
+        assert_eq!(FsStore.stat(&root.join("link")).unwrap(), EntryKind::Link);
+        assert_eq!(FsStore.stat(root).unwrap(), EntryKind::Folder);
+        let gone = FsStore.stat(&root.join("gone.md")).unwrap_err();
+        assert_eq!(gone.kind(), io::ErrorKind::NotFound);
+
+        let store = mem::MemStore::new(Path::new("/lib"));
+        store.file("a.md", "x");
+        store.fail_stat("a.md");
+        let failed = store
+            .stat(&lib("a.md").to_path(Path::new("/lib")))
+            .unwrap_err();
+        assert_ne!(
+            failed.kind(),
+            io::ErrorKind::NotFound,
+            "a failed stat is not an absence"
+        );
+        assert!(store.check_names(Path::new("/lib"), &lib("a.md")).is_err());
+    }
+
+    #[test]
+    fn list_and_the_removals_never_act_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let outside = dir.path().join("outside");
+        let kept = write(&outside, "x.md", "keep");
+        let empty_target = dir.path().join("empty");
+        fs::create_dir_all(&empty_target).unwrap();
+        write(&root, "full/a.md", "a");
+        fs::create_dir_all(root.join("empty")).unwrap();
+        link_dir(&outside, &root.join("link")).unwrap();
+        link_dir(&empty_target, &root.join("empty-link")).unwrap();
+
+        let mut names: Vec<(String, EntryKind)> = FsStore
+            .list(&root)
+            .unwrap()
+            .into_iter()
+            .map(|(name, kind)| (name.into_string().unwrap(), kind))
+            .collect();
+        names.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            names,
+            [
+                ("empty".to_owned(), EntryKind::Folder),
+                ("empty-link".to_owned(), EntryKind::Link),
+                ("full".to_owned(), EntryKind::Folder),
+                ("link".to_owned(), EntryKind::Link),
+            ]
+        );
+        let error = FsStore.list(&root.join("link")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+
+        for link in ["link", "empty-link"] {
+            let error = FsStore.remove_dir(&root.join(link)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotADirectory, "{link}");
+            assert!(
+                fs::symlink_metadata(root.join(link)).is_ok(),
+                "{link} stays"
+            );
+        }
+        assert!(FsStore.remove_dir(&root.join("full")).is_err());
+        assert!(
+            root.join("full").join("a.md").exists(),
+            "content is never removed"
+        );
+        FsStore.remove_dir(&root.join("empty")).unwrap();
+        assert!(!root.join("empty").exists());
+
+        let error = FsStore.remove_file(&root.join("link")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let error = FsStore.remove_file(&root.join("full")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        FsStore
+            .remove_file(&root.join("full").join("a.md"))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "keep");
+        assert!(empty_target.exists());
     }
 
     // ── the walk's edges ──────────────────────────────────────────────────────────────────────────────────

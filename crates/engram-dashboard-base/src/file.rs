@@ -1,11 +1,11 @@
 //! Shared rules for data files — read decisions ([`parse`] · [`classify`] · [`load`]) · write decisions ([`Loaded::write_policy`] ·
 //! [`judge`] · [`check_cap`]) · capped reads ([`read_capped`] · [`read_capped_bytes`] · [`read_file_capped`]) · atomic writes ([`write_atomic`] ·
-//! [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp files ([`sweep_temps`]) and the
-//! temp-name test ([`is_temp_name`]).
+//! [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp files ([`sweep_temps`]) · the
+//! temp-name maker ([`temp_path`]) and readers ([`is_temp_name`] · [`temp_target`]).
 //!
 //! It knows no file names · locations · schemas · version key names — each owner (store) owns those and hands the read-rule part over as a
 //!   [`Spec`]. The only names decided here sit next to the target: the temp file `<name>.tmp<pid>.<n>`
-//! and the set-aside copy `<name>.corrupt`. ★The code that makes that shape (`temp_path` · [`copy_aside`]) and the code that reads it
+//! and the set-aside copy `<name>.corrupt`. ★The code that makes that shape ([`temp_path`] · [`copy_aside`]) and the code that reads it
 //!   (`split_temp_name`) live only here★ — change all three together (tests read back the names they made).
 //!
 //! ★"May we overwrite?" is decided again for every write, right before it, from the current file★ — one [`Loaded::write_policy`] table;
@@ -524,8 +524,10 @@ const ASIDE_SUFFIX: &str = ".corrupt";
 
 /// The temp name next to `path`, `<name>.tmp<pid>.<n>` — the pid tells apart other processes looking at the same folder, and the number
 ///   (one more each time it is
-/// called within the process) tells apart other calls of the same process.
-fn temp_path(path: &Path) -> io::Result<PathBuf> {
+/// called within the process) tells apart other calls of the same process. Public so a caller staging its own file or folder under
+///   this shape (a name [`is_temp_name`] recognises and a library scan skips) need not copy it; it only names — creating at that name
+///   without replacing, and drawing a new name on a collision, is the caller's.
+pub fn temp_path(path: &Path) -> io::Result<PathBuf> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     sibling(path, &format!("{TEMP_MARK}{}.{n}", std::process::id()))
@@ -548,6 +550,13 @@ fn temp_owner(file_name: &str, target: &str) -> Option<u32> {
 /// (that is [`sweep_temps`]).
 pub fn is_temp_name(file_name: &str) -> bool {
     split_temp_name(file_name).is_some()
+}
+
+/// The `<name>` of `file_name` when it has the temp-name shape `temp_path` writes, `<name>.tmp<pid>.<n>` (the pid · number
+/// rule is [`is_temp_name`]'s), else `None` — so a caller tells its own target's temps from another name's whose
+/// spelling merely starts with it (`x.tmpA.tmp1.2` is a temp of `x.tmpA`, not of `x`). It reads the name only.
+pub fn temp_target(file_name: &str) -> Option<&str> {
+    split_temp_name(file_name).map(|(name, _)| name)
 }
 
 /// `<name>.tmp<pid>.<n>` → (`<name>`, pid). The number has no `.`, so the last `.` ends `<pid>`; the pid has no `.tmp`,
@@ -1028,6 +1037,18 @@ mod tests {
         ] {
             assert_eq!(temp_owner(name, "state.json"), None, "{name}");
         }
+    }
+
+    #[test]
+    fn the_target_of_a_temp_name_is_its_whole_name_before_the_last_mark() {
+        for target in ["state.json", ".rec.json", "x.tmp1.2", ".rec.json.tmpX"] {
+            let temp = temp_path(&Path::new("dir").join(target)).unwrap();
+            let name = temp.file_name().unwrap().to_str().unwrap();
+            assert_eq!(temp_target(name), Some(target), "{name}");
+        }
+        assert_eq!(temp_target(".rec.json.tmpX.tmp1.2"), Some(".rec.json.tmpX"));
+        assert_eq!(temp_target(".rec.json.tmp1"), None);
+        assert_eq!(temp_target(".rec.json"), None);
     }
 
     #[test]

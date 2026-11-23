@@ -42,8 +42,9 @@
 //! folder, a mount's folder itself and its ancestors (`mounts::overlap`) — goes through
 //! [`folder::BoundedIo`], never under the library lock — except a rename's one bounded stat of a mount folder whose file
 //! reads as not found inside its hold (`rename::LibraryService::mount_gone`, ADR-0405 decision 3). The built-ins
-//! (`Builtins::new`), the launch folder (`prepare_in`, the sweep, `release`), `library.json` (`config.rs`) and the
-//! folder a mount command's `create` or the first start creates use std `fs`.
+//! (`Builtins::new`), the launch folder (`prepare_in`, the sweep, `release`), `library.json` (`config.rs`), the
+//! folder a mount command's `create` or the first start creates, and the `.git/info/exclude` line of a mount's `.trash`
+//! ([`LibraryService::exclude_trash`] — a job of the service's spawner, holding no library lock) use std `fs`.
 //!
 //! ## The mounts
 //!
@@ -122,6 +123,15 @@
 //! entered into the catalog.
 //! The rules are in each file's header.
 //!
+//! ## The trash
+//!
+//! `trash.rs` holds what a mount's `.trash` holds and how it is touched without following a link (ADR-0409): the trash
+//! lock — one for every mount, after the library lock and before the turn mutex — and its waiting count, which a step
+//! that may touch `.trash` raises before its ticket ([`LibraryService::change_held_at`], a `Change` hold whose body
+//! raises the change number before its agents pass — ADR-0409 M1); the trash-folder check, bundle ids, the bundle record and the
+//! bundle-shell pruning; the `.git/info/exclude` line. The store's renames never replace (`store.rs`). The rules are in
+//! its header.
+//!
 //! ## Refusals
 //!
 //! A body refuses with [`LibraryRefusal`]: a [`RefusalClass`] plus an agent `launch::Reason`, or the profile store's
@@ -144,6 +154,7 @@
 // ADR-0381
 // ADR-0382
 // ADR-0386
+// ADR-0409
 
 pub mod agent_edit;
 pub mod backends;
@@ -165,6 +176,7 @@ pub mod relink;
 pub mod rename;
 pub mod resolve;
 pub mod store;
+pub mod trash;
 pub mod validate;
 
 use std::io;
@@ -193,7 +205,9 @@ use crate::catalog::{
 use crate::config::{ConfigFile, ConfigHealth, LibraryConfig, MountPlace, MountSetting};
 use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need, NOT_CHECKED, SPAWN_FAILED};
 use crate::format::read::ITEM_PATH_INVALID;
-pub use crate::gate::{ChangeAnswer, MountSeen, MountState, MountsNow, Numbers, State, NOT_FOUND};
+pub use crate::gate::{
+    ChangeAnswer, Hold, MountSeen, MountState, MountsNow, Numbers, State, NOT_FOUND,
+};
 use crate::gate::{Gate, MountChange, Tags};
 use crate::mounts::{
     builtin_rest, in_builtin, is_builtin, overlap, overlapping, virtual_path, DiskProbe, Mount,
@@ -305,6 +319,7 @@ pub const MOUNT_RENAME_UNCONFIRMED: &str = "mount-rename-unconfirmed";
 
 const MERGE_JOB: &str = "library-merge";
 const BOOT_SCAN_JOB: &str = "library-boot-scan";
+const EXCLUDE_JOB: &str = "library-trash-exclude";
 
 /// The class of a [`LibraryRefusal`] — the command layer maps it onto the bus code: `Unavailable` onto `CONFLICT`,
 /// the others onto their namesakes (ADR-0379 decision 3).
@@ -409,6 +424,10 @@ pub struct LibraryService {
     /// manager, which holds this service as its launch-kit source, makes no cycle.
     // ADR-0380
     profile_edit: OnceLock<Weak<dyn ProfileEditPort>>,
+    /// Serializes the `.git/info/exclude` writes (`trash::exclude_trash`) — a leaf, taken by the exclude job alone, holding
+    /// no other lock.
+    // ADR-0409 M12
+    exclude: Arc<Mutex<()>>,
     /// How many mount-change takes found it held — tests observe a waiter.
     #[cfg(test)]
     mount_change_blocked: std::sync::atomic::AtomicUsize,
@@ -709,6 +728,7 @@ impl LibraryService {
             load_judgement: Mutex::new(Judgement::NotStarted),
             load_judged: Condvar::new(),
             profile_edit: OnceLock::new(),
+            exclude: Arc::new(Mutex::new(())),
             #[cfg(test)]
             mount_change_blocked: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -1375,6 +1395,52 @@ impl LibraryService {
         self.gate
             .change_checked(root_generation, f)
             .map_err(|current| stale_root_generation(root_generation, current))
+    }
+
+    /// A step-9b hold (ADR-0409 M1): [`LibraryService::change_at`] whose body gets a [`Hold`] — the sequence, a `raise` of
+    /// the change number to call before its agents pass (ADR-0400 decisions 18 and 25), and, when `trash`, the trash
+    /// lock. `trash` = the step may touch `.trash` (every delete, restore and copy, an overwriting move, a cross-volume
+    /// move): the trash waiting count is raised just before the ticket — so call this after any volume probe or copy
+    /// — and the call first waits, holding no lock, until no bundle is being emptied; the count is lowered when
+    /// this returns, a refusal or a panic included (ADR-0409 decision 14). Without `trash` the body's
+    /// [`Hold::take_trash`] answers `Err` at once ([`trash::TRASH_NOT_RESERVED`]); with it the body takes the lock once.
+    // ADR-0377
+    // ADR-0409 decision 14
+    pub fn change_held_at<R: ChangeAnswer>(
+        &self,
+        root_generation: Option<u64>,
+        trash: bool,
+        f: impl FnOnce(&mut Catalog, &MountsNow, &Hold) -> (R, Vec<PathKey>),
+    ) -> Result<R, LibraryRefusal> {
+        self.gate
+            .change_held(root_generation, trash, f)
+            .map_err(|current| stale_root_generation(root_generation, current))
+    }
+
+    /// Hands the `.git/info/exclude` line for the `.trash` of the mount at `mount_folder` (`trash::exclude_trash`) to a
+    /// short-lived job, so the step that created a `.trash` never waits on that disk — call it after the hold, holding no
+    /// lock. A skip is logged; nothing fails. A job that cannot be started is logged and the line is not written this
+    /// time (the next bundle made there checks it again).
+    // ADR-0400 decision 24
+    pub fn exclude_trash(&self, mount_folder: PathBuf) {
+        let serial = Arc::clone(&self.exclude);
+        let job = Box::new(move || match trash::exclude_trash(&mount_folder, &serial) {
+            trash::Excluded::Added { file } => {
+                tracing::info!(
+                    file = %escape_controls(&file.to_string_lossy()),
+                    "library trash: exclude line added"
+                );
+            }
+            trash::Excluded::Present { .. } | trash::Excluded::NoRepository => {}
+            trash::Excluded::Skipped { why } => tracing::warn!(
+                folder = %escape_controls(&mount_folder.to_string_lossy()),
+                "library trash: exclude line skipped: {}",
+                escape_controls(&why)
+            ),
+        });
+        if let Err(e) = self.io.spawner().spawn(EXCLUDE_JOB, job) {
+            tracing::warn!("library-trash-exclude spawn failed; exclude line not written: {e}");
+        }
     }
 
     /// Every mount now — the registered ones in list order, then the built-in `engram` — with `library.json`'s state
@@ -3102,6 +3168,29 @@ mod tests {
         fn exists(&self, path: &Path) -> bool {
             self.note(path);
             self.holding(path).exists(path)
+        }
+
+        fn stat(&self, path: &Path) -> io::Result<crate::store::EntryKind> {
+            self.note(path);
+            self.holding(path).stat(path)
+        }
+
+        fn list(
+            &self,
+            path: &Path,
+        ) -> io::Result<Vec<(std::ffi::OsString, crate::store::EntryKind)>> {
+            self.note(path);
+            self.holding(path).list(path)
+        }
+
+        fn remove_dir(&self, path: &Path) -> io::Result<()> {
+            self.note(path);
+            self.holding(path).remove_dir(path)
+        }
+
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            self.note(path);
+            self.holding(path).remove_file(path)
         }
     }
 

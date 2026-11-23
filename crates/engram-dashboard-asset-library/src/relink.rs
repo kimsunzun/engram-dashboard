@@ -644,6 +644,21 @@ mod tests {
         fn exists(&self, path: &Path) -> bool {
             FsStore.exists(path)
         }
+        fn stat(&self, path: &Path) -> io::Result<crate::store::EntryKind> {
+            FsStore.stat(path)
+        }
+        fn list(
+            &self,
+            path: &Path,
+        ) -> io::Result<Vec<(std::ffi::OsString, crate::store::EntryKind)>> {
+            FsStore.list(path)
+        }
+        fn remove_dir(&self, path: &Path) -> io::Result<()> {
+            FsStore.remove_dir(path)
+        }
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            FsStore.remove_file(path)
+        }
     }
 
     /// A profile-edit port that logs each agent rewrite (and its renames) and fails the next one when a test sets it.
