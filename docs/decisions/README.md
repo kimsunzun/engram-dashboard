@@ -386,3 +386,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0406](0406-the-daemon-keeps-its-own-english-and-korean-table-for-its-os.md) | The daemon keeps its own English and Korean table for its OS approval dialogs and is told ui.language by the shell | 확정 |
 | [0410](0410-approval-questions-go-to-the-app-while-it-is-attached-with-a.md) | Approval questions go to the app while it is attached with a PC list slot open, else the OS dialog; no visibility or focus test | 확정 |
 | [0411](0411-peerwire-frames-are-capped-at-4-mib-and-a-directory-snapshot.md) | PeerWire frames are capped at 4 MiB and a directory snapshot goes as one frame; no multi-part split or assembly | 확정 |
+| [0413](0413-remote-mail-wiring-limits-from-s37-u3b-64-rows-per-pc-per.md) | Remote mail wiring limits from S37 U3b — 64 rows per PC per send, 512 KiB mail text refused before queueing, overdue reports kept across endpoint restarts | 확정 |
