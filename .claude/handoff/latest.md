@@ -1,68 +1,53 @@
-# Handoff: S25 step 21 U4b (renameMount) — uncommitted, review FIX; stopped at the re-fix cap on the "stop answer digest" class — user decision needed
+# Handoff: S25 step 21 done (U4b, U5, CI green); step 9b TRD reviewed + ADR-0408/0409 written — next: 9b coding from U1
 
 ## Know first
-- **U4b is uncommitted and NOT gate-passed** (review round 5 = FIX, must 1 from both lead and Codex). Do not commit it as is. The tree is the working tree of wt1 on top of `e82d54d4`.
-- **Why stopped:** U4b hit the re-fix cap (3 fix rounds: R1, R2, R4-fix) and the same finding class came back two rounds in a row (implement flow §3 cap + review flow §4 「same class two rounds → raise the class to the user」). The question below must be put to the user before any more fixing.
-- The user wants: short answers, plain words, every noun either the user's own word, a real file/command name in backticks (said what it is at first use), or a generic term — never design-doc labels (the user corrected this many times; feedback rows `e5fd629`, `ba21698`, `5fadb82`). Big picture first; one question at a time; progress as a numbered list of the work by name.
-- Subagent cap = 5 running at once, all families combined. Replace a worker past ~500k context (handover memo first).
-- Unshipped data gets no migration (ADR-0398). `src-tauri/bindings/*.ts` line-ending noise and untracked `.claude/explain/` are not ours — never stage.
-- Real-claude tests (CI skip list) and the claude / codex lanes are deferred to the end of step 21 (user agreement), before the freeze.
-- Machine note: `core.hooksPath` points into another worktree, so QA mutation always runs in an isolated copy (cold build). Bash moves foreground waits to the background at ~180 s.
+- The user wants short, plain answers: big picture first, the flow only, one question at a time, concrete examples (what triggers → what is left → what a retry / restart does) before options. No design-doc labels; say what happens. Feedback rows this session: Engram `77eff59` (failure-path questions need a concrete scenario), `ee34332` (engram-adr template/script fixed to Korean tokens).
+- The session ran in code mode (REPL). Subagent cap = 5 running at once. Replace a worker past ~500k context.
+- Codex relay calls move to the background after 180 s; the result is recovered from the run's output file (works). A Codex re-check via the same thread is unreliable — start a new Codex task with the earlier findings in the prompt.
+- `src-tauri/bindings/*.ts` line-ending noise and untracked `.claude/explain/` are not ours — never stage.
+- `core.hooksPath` points into another worktree, so QA mutation runs in an isolated copy (cold build).
 
 ## One-line state · next first action
-Server stage 16 = library mounts (step 21), 5 pieces: 1–3 done; **4 = mount commands: U4a (add / remove / relocate, status per mount) committed `64897a7b`, CI green; U4b (rename + `agent.new` re-check) coded, reviewed through round 5, uncommitted, blocked**; 5 = help texts / reference / live scenes not started. Then 17 file move/copy/trash, 18 their commands.
-**Next first action: ask the user the stop-answer question (below), then send the chosen fix to a fresh coder (handover `handover-u4b.md` + this file), re-review (lead `a021c296…` context ~390k — prefer fresh), full QA, commit U4b, then U5.**
-
-## The question for the user (put it in plain words)
-Situation: a confirmed rename (`library.renameMount` with `yes` + `root_generation` + `plan_digest`) stops part-way (a file write fails, or the agents' save is refused). Round-4 fix made the stop answer carry the `plan_digest` of "what is left", so repeating with the answered tokens finishes in one call. Round 5 (lead must + Codex must): that digest is computed after the rename's lock is released, so a preset edit that slips in between can add a new `from/…` file into the digest — the repeat would then rewrite a file the caller never saw (breaks ADR-0405 decision 1).
-- **(a) ★ recommended — no digest in a stop answer.** After a stop, the repeat answers the remaining plan and needs a fresh `yes` (one extra round trip, only after a rare stop). The caller always sees what will be rewritten; the whole "stop digest" surface disappears. Docs/tests change to "repeat → confirm the remaining plan"; ADR-0405 needs a line (ADR-0400 d12 / ADR-0335 "the same call finishes it" no longer literal for confirmed renames).
-- **(b) compute the stop digest inside the lock** (lead's fix: `Sides::of` on the catalog at the stop point, lost-mount files moved to the unread side). Keeps one-call finishing, but also needs a call on ADR-0405 d2 vs d3 for a mount lost during the rename (lead hold: post-stop digest lets the repeat finish leaving that mount's files unread without the caller ever seeing a plan listing them).
-User's general preference seen this session: simpler, fewer exceptions, "confirm what you saw" (chose A with Terraform / force-with-lease conventions).
+Server stage: step 21 (library mounts) is **Implemented** and pushed (U4b `013eec57`, U5 + freeze `25e10274`, CI green on both). Step 9b (file operations, per-mount trash, emptying by direct removal) has a **reviewed TRD** (`docs/process/S25-preset-library/trd-file-operations.md`, draft 7, deep PASS) and its ADRs (ADR-0408 emptying = std::fs removal, no OS Recycle Bin; ADR-0409 the 9b rules). No 9b code yet.
+**Next first action:** run `/engram-implement` for step 9b starting at U1 (platform `fs::rename_no_replace` + `fs::make_removable`, TRD §9 / §3.10). Write a fresh 9b coder brief (model on `.review-s25-d9/s21-code/coder-brief.md`; the TRD + ADR-0400 d23–25, 0405, 0408, 0409 are the design). Units are sequential: U1 → U2 (trash core, delete, restore, view, exclude, trash lock, Change hold with raise) → U3 (one-volume move/rename) → U4 (cross-volume move, copy) → U5 (emptying, permanent delete) → U6 (texts, references). Review strength: deep (data loss / file system). Before U3: a short manual comparison of the Explorer conflict rules on this Windows (TRD R6).
+Then 10b (commands), then **22 hook components** (new parent-TRD item, user decision), then the server-stage acceptance stop.
 
 ## Repo state (branch v0.5.0/feat/preset-library · worktree wt1)
-- HEAD `e82d54d4`, 0 ahead / 0 behind origin at save time (this handoff commit will be ahead until pushed). origin/master is 4 commits ahead of the branch base (not merged in).
-- This session's commits: ADR-0402 `dc9800cd` + body `97bb650e` + fixes `1b9bc021` `307b854a`; U4a `64897a7b`; ADR-0405 `a5d3d9ac` + body `e82d54d4`.
-- **Uncommitted (U4b, gate NOT passed):** asset-library `src/rename.rs` (new), `gate.rs`, `catalog.rs`, `mounts.rs`, `config.rs`, `lib.rs`, `host.rs`, `agent_edit.rs`, `store.rs`; agent `commands.rs`, `library_commands.rs`, `manager.rs`, `profile.rs`, tests `activation.rs`, `command_declarations.rs`, `ts_export.rs`, bindings `commands.schema.json` + new `LibraryRenameMount{Args,Ok}.ts`; daemon `connection_core.rs`, `control/commands.rs`, `control/help.rs`, `tests/control_agent.rs`; `prompts/engram-help.md`; `docs/reference/structure/asset-library.md`. Last snapshot tree `e362a8fd`.
-- Engram core repo (`I:/Engram/core`, same repo as `I:/Engram`): feedback rows `e5fd629`, `ba21698`, `5fadb82`, `57cef08` (implement: user-visible name collision), `daf758d` (heredoc trap). Not pushed by main.
+- HEAD `864fd26f`, 0 ahead / 0 behind origin at save time (this handoff commit will be 1 ahead until pushed).
+- Working tree clean except `.claude/explain/` (not ours) and the `src-tauri/bindings` noise.
+- This session's commits: ADR-0407 (`01a281cb`…`abc3e8d1`), link 0405→0407 `07bb2475`, U4b `013eec57`, T-122 closed `be81cbaf`, U5 + step-21 freeze `25e10274`, ADR-0408 (`a07528ac`, `93f6a596`, `0fdb4318`), 9b TRD drafts 3–7 (`87e59d66`…`f94540e1`), ADR-0409 (`34776fc6`, `afa6511d`), TRD link `864fd26f`.
+- Engram core repo (`I:/Engram`): feedback `77eff59` (global-feedback) and `ee34332` (engram-adr feedback). Not pushed by main.
 
 ## Verification state
-- U4a: committed after deep review (5 rounds) + QA full regression PASS (workspace 6649, frontend 2884, gates 34/34, mutation 2/2); CI green on `64897a7b`.
-- U4b: review rounds 1–3 PASS (lead, user-data-integrity axis, Codex); QA full regression PASS on tree `50ce7fc8` (round-3 tree: workspace 6672, frontend 2884, gates 34/34, bindings no drift, mutation 2/2). **After that, decisions A and B + round-4 fixes changed the code; the current tree `e362a8fd` was tested only by the coder (asset-library 680, agent 1895, daemon 933, ts_export) — no QA run, and review round 5 = FIX.**
-- Rerun: `cargo test -p engram-dashboard-asset-library` · `cargo test -p engram-dashboard-agent -- --test-threads=4` · `cargo test -p engram-dashboard-daemon -- --test-threads=4` · full QA per `.claude/skill-bindings/qa.md` (briefs to copy: `.review-s25-d9/s21-code/u4b-qa-brief.md`).
+- Step 21 U4b: review deep rounds 1–6 (round 6 PASS, lead fresh) · QA full regression PASS on tree 5503d9d7 (workspace 6680, frontend 2884, gates 34/34, mutation 2/2) · CI green.
+- Step 21 U5: review full (lead PASS, Codex FIX on help wording → fixed, main diff-checked) · QA PASS on tree 00c80aed: workspace 6681, frontend 2884, gates 34/34, claude lane 14/14 and codex lane 19/19 (incl. the new L6 scenes — the step-21 lanes deferred by user agreement), live scenes over the daemon bus (not the `engram` CLI layer — covered by cli tests only), GUI start from a non-default mount · CI green. Mutation n/a (no production line changed).
+- Step 9b: documents only — nothing built or tested. TRD review deep (lead, data-loss axis, Codex) 4 rounds → PASS on `9cad4164` (draft 6) + lead batched in draft 7.
+- Rerun: `cargo test -p engram-dashboard-asset-library` · `cargo test -p engram-dashboard-agent -- --test-threads=4` · `cargo test -p engram-dashboard-daemon -- --test-threads=4` · full QA per `.claude/skill-bindings/qa.md`.
 
 ## Failed approaches (do-not)
-- A stop answer digest computed after the hold (round 4 option a as built) — admits files edited after the lock (round 5 must).
-- Codex re-reviews via "resume the same thread" return `WRONG THREAD` — always start a new Codex task with the earlier findings in the prompt.
-- Inline Python / heredoc with Windows paths or regex in the main session mangles backslashes (`\a` → bell char) — write scripts with the Write tool and run the file.
-- After editing a command doc comment in agent `commands.rs`, always rerun `cargo test -p engram-dashboard-agent --test ts_export` (QA caught a stale `commands.schema.json` once).
+- A stop answer carrying a digest of "what is left" (computed after the hold) — admits files edited after the lock (U4b round 5); replaced by ADR-0407.
+- `edit()` with an anchor that matches twice fails atomically (nothing written) — pass `{all: true}` or a longer anchor.
+- An interrupted `git commit` leaves `…/.git/worktrees/engram-dashboard-wt1/index.lock`: check no `git.exe` runs, then `bash ~/.claude/references/recycle.sh <lock>`.
+- The ADR lint reads "amended by ADR-NNNN" anywhere in the 관련 line as a link — avoid that phrase in free text there.
 
 ## Resume command
 `git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -3 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v bindings/ && gh run list --branch v0.5.0/feat/preset-library --limit 1`
 
 ## Decisions
 User:
-- library.json 잘못된 줄 처리 · 상황: 손으로 고친 마운트 한 줄이 규칙 위반일 때, 되돌릴 수 있음 · 목록 전체 손상(A) ★ / 그 줄만 제외(B) · 「A가 좀더 구현이 간단한가? 이건 그냥 구현 간단한걸로해.」 · 같음 → ADR-0402 d7.
-- U4a 리뷰 잔여 처리 · 상황: 커밋 메시지에 남은 권장 10건 · 1,3,4,8,9,10 U4에 포함 ★ · (묻지 않음) 요지: 사용자가 「피드백 올려 대면 답변 고쳐야될것같아」 후 시작 지시 · 미상.
-- 앱 시작 직후 정상 마운트 "사용 불가" 기록 · 상황: 응답 없는 드라이브가 첫 확인 시간을 다 씀 · 고침 ★ / 안 함 · 「ㅇㅇ 그렇게 고쳐.」 · 같음 · 조건: 「하나 한다음에 시간제한 실패하면 그냥 다음거 넘기고 쿨타임 다시 주는게 좋을듯」 (설명 후 동시 확인 방식 유지로 정리).
-- 시작 검사가 시간 없이 끝나는 문제(옛 3번) · 상황: 0초 남은 첫 명령이 검사 → 철자 판정 · 고침 ★ / 기록만 · 「저런것까지 우리가 검사해야됨?」 → 설명 후 기록만 · 갈림 → T-121.
-- Engram 자기 폴더 겹침 제한 · 상황: 데이터·실행·내장 폴더, 실행 폴더는 부팅마다 비워짐 · 실행 폴더만 막음 ★ / 전부 허용 · 「그냥 전부 허용해. 예외처리 시팔 계속 추가할래?」 · 갈림 → ADR-0402 d2.
-- "사용 불가" 해제 조건 · 상황: 겹친 쪽을 지워도 유지 · 지금대로 ★ / 자동 해제 · 「음? 뭔소리야 껏다 키면 되는거 아님?」 · 같음 → ADR-0402 d6.
-- 거절된 추가의 빈 폴더 · 순서 바꿈(검사 먼저) ★ / 그대로 · 「순서 바꿔.」 · 같음 → ADR-0402 d3.
-- 첫 시작 저장 실패 뒤 삭제 재시도 · 특별 처리 ★(처음) → 그대로(바꾼 추천) · 「그대로 두는게 좋을것같아」 · 같음 → ADR-0402 d7.
-- 기본 마운트 이름 · 상황: `library`가 제품 용어와 겹침 · `user` ★ / `default_library` / `local` · 「그냥 디폴트 라이브러리로해.」 · 갈림 · 조건: 「폴더 이름도 바꾸고」 → ADR-0402 d1.
-- 이름 변경 확인 목록 밖 파일(A/B) · A(목록 다르면 거절) ★ / B · 「ㅇㅇ A로 해.」 · 같음 · 근거: 관례(Terraform, force-with-lease, LSP) → ADR-0405 d1.
-- 멈춘 이름 변경의 `to` 예약 · 그대로 ★ / 예약 · 「그대로둬.」 · 같음 → ADR-0405 d5.
-- 건너뛸(읽을 수 없는) 파일 확인 · B(먼저 묻기) ★ / A · 「ㅇㅇ 쭉 진행해」 · 같음 → ADR-0405 d2.
-- 자율 진행 · (묻지 않음) · 「그거 끝나면 계속 이어서 자율모드로 진행해.」 · 「ㅇㅇ 잘게」 · —.
-Main (reported): U4a split into U4a/U4b; load-time overlap judgement on the first caller's budget (ADR-0402 d4); a starved scan records nothing (d5); a held / never-walked mount makes every rename ask (B interpretation — tell the user); stop for a lost mount + record it (ADR-0405 d3); repeat must be the same rename (d4); one classifier `Sides::of`; empty-plan supplied-digest compare.
-Open: the stop-answer question above (blocking U4b).
-
-## Pending records (do at the U4b commit)
-- T-121 additions (U4b): a held mount's `why` keeps the other mount's old name after it is renamed; a file deleted outside Engram is stat'ed once per rename until a scan; a rename touching a dead share can exceed the CLI wait (U5 help: read `library.status` after a timeout); duplicate held mounts on one folder can pass the repeat folder check.
-- Main's doc pass still owed: `commands.rs` `library.renameMount` arg docs (`root_generation` / `plan_digest` also required when references are left unread); declaration line for whatever the stop-answer decision is.
-- Re-anchor test comments citing "decision A / B, user 2026-11-23" to ADR-0405.
+- 멈춘 이름 변경의 다시 실행 · 상황: 확인된 renameMount가 파일 쓰기 실패로 중간에 멈춤, 멈춘 응답의 남은-목록 지문이 잠금 밖에서 계산돼 안 본 파일을 고칠 수 있음(리뷰 5라운드 must) · (a) 멈춘 응답에 지문 없음, 다시 실행은 남은 목록을 다시 확인 ★ / (b) 지문을 잠금 안에서 계산 · 「ㅇㅇ 어쨋든 old new 폴더 바뀌는게 최종이니깐 아직 안된게 가시적으로 보이고 중지됐으면 다시 실행 가능하다는거잖아. 그거 자체가 히스토리니깐. 진행 ㄱㄱ」 · 같음 · 근거: 관례(Terraform stale plan, VS Code·IntelliJ 재실행) → ADR-0407.
+- 멈춘 뒤 옛 토큰이 통과하는 드문 경우(T-122) · 상황: 쓴 파일을 전부 old로 되돌리면 남은 목록이 승인한 목록과 같아짐, 승인 범위 밖은 안 건드림 · 그대로 ★ / 멈추면 확인 번호 올림 · 「그대로 둬.」 · 같음 → ADR-0407 거부한 대안, T-122 closed.
+- U5 리뷰가 남긴 작은 것들 · 상황: 기록만 한 4건 · 고칠지 물음 · 요지: 「고칠거 이해가 안가긴하는데」 → 기록만(T-121) · 미상.
+- 다음 순서 · 상황: 남은 서버 = 9b·10b, 훅은 계획 밖 · 9b 먼저 ★ / 훅 먼저 · 「ㅇㅇ 그럼 9b 먼저해.」 · 같음.
+- (묻지 않음) 훅 컴포넌트 추가 · 상황: 지금 claude 훅은 설정 원문 안에만, 스크립트는 라이브러리 밖 · 없음 · 「없는것보다는 있는게 좋겠지? 유저가 하드코딩하기 딱 좋은게 훅인데」 · — · 조건: 「기존 인프라에 그대로 끼고 우리쪽은 거치고 클로드 코덱스쪽으로 에러를 넘기는거라서 많이 수정은 안한다고 생각되는데 어쨋든 쭉 진행하면 될듯」 → parent TRD item 22 (after 10b).
+- 휴지통 모델 · 상황: 사용자가 "이중 휴지통" 느낌, 관례는 한 겹(VS Code·Obsidian·Joplin·JetBrains), LLM 되살리기·공유 폴더 때문에 자기 휴지통 필요 · (b) 우리 .trash 한 겹, 비우기 = 진짜 삭제 ★ / (a) 두 겹 / (c) OS 휴지통만 · 「…그냥 자기 휴지통 아님? 어차피 os로 간게 뭐 특별히 하는게 아니고 휴지통 버리기잖아.」 then 「그냥 표준함수 한줄로 지우기해.」 · 같음 → ADR-0408.
+- 9b UD1–UD3 · 상황: TRD 초안 사용자 결정 3건 · 추천대로(지운 단위 한 줄+기록 파일 / detachRefs만 지문 / " - Copy") ★ · 「ㅇㅇ 넘어가.」 · 같음 → ADR-0409.
+- 9b UD4 옮길 때 참조 고침 확인 · 상황: 다른 마운트·저장소 프리셋을 통째로 다시 씀(주석 손실 — 모든 프리셋 편집에서 이미 받아들임, ADR-0358) · (a) 확인 없음 ★ / (b) renameMount처럼 확인 · 「ㅇㅇ 그냥 주석 없애. 애초에 주석을 쓰질 말든가. 사람이 쓸일은 없으니.」 · 같음 → ADR-0409.
+- ADR 한글 칸 이름 · 상황: 스킬 템플릿·스크립트가 한국어 토큰 고정, 옛 파일명 338개 한글 · 앞으로 영어 / 그대로 · 「일단 그대로 두고 해당 영문은 피드백으로 올려.」 · — → engram-adr feedback `ee34332`; 옛 파일명은 그대로(추천).
+Main (reported): re-review by the raiser only (a finding both raised → Claude only); U4b round-6 wording fixed by main; U5 help musts fixed by the coder and closed by main's diff check; 9b TRD fixes by the drafter, hash verification = hash while copying + racy-only re-hash in the hold (synthesis of Codex r2 and lead r3); T-121 U4b/U5 additions recorded; CLAUDE.md module line updated to mounts.
+Open: none blocking.
 
 ## References
-- Step TRD `docs/process/S25-preset-library/trd-library-mounts.md` (§3.2 rename, §9, §10 U4/U5); ADR-0396, ADR-0398, ADR-0400, ADR-0402, ADR-0405.
-- Briefs and handovers (git-excluded): `.review-s25-d9/s21-code/` — `coder-brief.md`, `u4b-unit.md`, `handover-u4a.md`, `handover-u4a-2.md`, `handover-u4b.md`, review briefs `u4b-review-brief.md`, `u4b-r2..r4-brief.md`, findings `u4b-round1.md`, QA brief `u4b-qa-brief.md`, diffs `u4b*.diff`.
-- Code: asset-library `rename.rs` (`rename_mount`, `rename_plan`, `rename_in`, `Sides::of`, `RenameAnswer.plan_digest`, `mount_gone`), `gate.rs` `Gate::rename_mount` / `record_unusable`; reference `docs/reference/structure/asset-library.md`; `docs/tracking.md` T-121.
+- 9b: `docs/process/S25-preset-library/trd-file-operations.md` (§3 rules, §8 tests, §9 units, §11 ADR list), ADR-0408, ADR-0409, ADR-0400 d23–25, step-21 TRD §3.6; parent TRD items 9b / 10b / 22.
+- Briefs (git-excluded): `.review-s25-d9/s9b/` (TRD draft brief, review brief, round diffs, ADR draft), `.review-s25-d9/s21-code/` (step-21 coder brief, handovers, QA briefs).
+- `docs/tracking.md` T-121 (step-21 recorded items), T-122 (closed).
