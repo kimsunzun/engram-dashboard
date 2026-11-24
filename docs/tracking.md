@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-133 | S25 step 10b — a writing library command repeated after the CLI's long wait ran out can overlap the first (extra staging) | Main | Recorded — closing it is outside 10b |
 | T-132 | S25 step 9b U5 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-131 | S25 step 9b U5 — read-only entries emptying cannot remove (Unix 0555 folder in a row; a read-only empty-folder row) | Main | Decision pending (user) — junction part resolved 2026-11-24 |
 | T-130 | S25 step 9b U4b review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
@@ -120,6 +121,11 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-133. S25 step 10b — a repeated writing command can overlap the first after the CLI's wait runs out
+- **Status:** recorded 2026-11-24 from the step-10b TRD review (risk, lead, Codex) — outside 10b; the help tells the agent not to repeat.
+- **Case:** on `/control/call` the daemon's own commands run on the spot with no delivery seat, no reply bound and no request-id guard. Under the Launch class the CLI waits 94 s, then prints `CONNECT_FAILED` "read failed" while the command keeps running. A move / copy repeated in that window makes a second staging copy; the repeated move then finds the source gone (`source-changed`) and keeps a temp-named staging only the user can remove; a repeated copy trashes its staging or, under keepBoth, places a second copy.
+- **Options:** a seat (request-id guard) for the daemon's own writing commands on the control route · a service refusal of an operation overlapping a running one on the same paths · keep (help line only).
 
 ### T-132. S25 step 9b U5 review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-24 at the U5 commit — minor items. Rules of the unit: ADR-0408, ADR-0409.
