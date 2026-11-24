@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-134 | Agent backends as external modules others can add | Main | Idea — waiting for trigger (after S25) |
 | T-133 | S25 step 10b — a writing library command repeated after the CLI's long wait ran out can overlap the first (extra staging) | Main | Recorded — closing it is outside 10b |
 | T-132 | S25 step 9b U5 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-131 | S25 step 9b U5 — read-only entries emptying cannot remove (Unix 0555 folder in a row; a read-only empty-folder row) | Main | Decision pending (user) — junction part resolved 2026-11-24 |
@@ -121,6 +122,11 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-134. Agent backends as external modules others can add
+- **Status:** idea, recorded 2026-11-24 during the step-22 design. User: 「나중에는 백엔드만 모듈로 빼서 다른사람도 확장할 수 있게 지원해주면 좋을듯?」
+- **Today:** per-backend knowledge lives only in agent `backend/claude` and `backend/codex` behind ports (ADR-0004, ADR-0334, ADR-0367 — adding a backend needs no asset-library change), but backends are compiled into Engram, so adding one means editing Engram's source.
+- **Open:** the module form (separate executable + protocol, or loaded plugin), what the port contract becomes as a public API, versioning. Related: T-109 (the library screen as a plugin-shaped extension).
 
 ### T-133. S25 step 10b — a repeated writing command can overlap the first after the CLI's wait runs out
 - **Status:** recorded 2026-11-24 from the step-10b TRD review (risk, lead, Codex) — outside 10b; the help tells the agent not to repeat.
