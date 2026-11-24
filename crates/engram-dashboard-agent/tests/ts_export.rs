@@ -16,17 +16,18 @@ use engram_dashboard_agent::commands::{
     AgentReorderPresetsArgs, AgentReorderPresetsOk, AgentResolveArgs, AgentResolveOk,
     AgentSetWorkspaceArgs, AgentSetWorkspaceOk, AgentSpawnArgs, AgentSpawnOk, LibraryAddMountArgs,
     LibraryAddMountOk, LibraryCopyArgs, LibraryCopyOk, LibraryDeleteArgs, LibraryDeleteOk,
-    LibraryFoldersArgs, LibraryFoldersOk, LibraryListArgs, LibraryListOk, LibraryListTrashArgs,
-    LibraryListTrashOk, LibraryMoveArgs, LibraryMoveOk, LibraryNewFileArgs, LibraryNewFileOk,
-    LibraryNewFolderArgs, LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs,
-    LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk, LibraryRelocateMountArgs,
-    LibraryRelocateMountOk, LibraryRemoveMountArgs, LibraryRemoveMountOk, LibraryRenameArgs,
-    LibraryRenameMountArgs, LibraryRenameMountOk, LibraryRenameOk, LibraryRestoreArgs,
-    LibraryRestoreOk, LibraryStatusArgs, LibraryStatusOk, PresetAddArgs, PresetAddOk,
-    PresetCheckArgs, PresetCheckOk, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs,
-    PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk,
-    PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs, PresetSetBackendOk, UsageGetArgs,
-    UsageRefreshArgs, UsageRefreshOk, UsageVendorRow, CATALOG_VERSION,
+    LibraryEmptyTrashArgs, LibraryEmptyTrashOk, LibraryFoldersArgs, LibraryFoldersOk,
+    LibraryListArgs, LibraryListOk, LibraryListTrashArgs, LibraryListTrashOk, LibraryMoveArgs,
+    LibraryMoveOk, LibraryNewFileArgs, LibraryNewFileOk, LibraryNewFolderArgs, LibraryNewFolderOk,
+    LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk, LibraryRelinkArgs,
+    LibraryRelinkOk, LibraryRelocateMountArgs, LibraryRelocateMountOk, LibraryRemoveMountArgs,
+    LibraryRemoveMountOk, LibraryRenameArgs, LibraryRenameMountArgs, LibraryRenameMountOk,
+    LibraryRenameOk, LibraryRestoreArgs, LibraryRestoreOk, LibraryStatusArgs, LibraryStatusOk,
+    PresetAddArgs, PresetAddOk, PresetCheckArgs, PresetCheckOk, PresetGetArgs, PresetGetOk,
+    PresetPreviewFolderArgs, PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk,
+    PresetReorderArgs, PresetReorderOk, PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs,
+    PresetSetBackendOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk, UsageVendorRow,
+    CATALOG_VERSION,
 };
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
 use ts_rs::TS;
@@ -176,6 +177,10 @@ fn export_typescript_bindings() {
     LibraryRestoreArgs::export_all_to(out)
         .expect("failed to export the LibraryRestoreArgs bindings");
     LibraryRestoreOk::export_all_to(out).expect("failed to export the LibraryRestoreOk bindings");
+    LibraryEmptyTrashArgs::export_all_to(out)
+        .expect("failed to export the LibraryEmptyTrashArgs bindings");
+    LibraryEmptyTrashOk::export_all_to(out)
+        .expect("failed to export the LibraryEmptyTrashOk bindings");
 
     let produced: Vec<String> = std::fs::read_dir(out)
         .expect("read bindings/")

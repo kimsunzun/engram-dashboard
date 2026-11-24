@@ -62,7 +62,8 @@ declare_commands! {
     //   added and `library.setRoot` is removed (ADR-0400 decision 7), and `preset.reorder`'s `section` became a
     //   lowercase word (ADR-0400 decision 22). `library.renameMount` is added in it too (ADR-0400 decision 12). So are
     //   the file and trash commands `library.move` · `rename` · `copy` · `delete` · `listTrash` · `restore`, the five
-    //   writes with the launch deadline class (ADR-0419).
+    //   writes with the launch deadline class (ADR-0419), and `library.emptyTrash`, shell only (`SHELL_ONLY`) and with
+    //   the launch deadline class too.
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -483,8 +484,7 @@ declare_commands! {
         args: Json,
     }
 
-    /// Why a mount's trash could not be listed: `trash-unusable` `{mount, why}` (its `.trash` is a link or not a
-    /// folder) or `library-unavailable` `{mount, message}` (not read in time, or held as overlapping another mount).
+    /// Why part of a mount's trash was not listed or not touched — a reason code and its arguments.
     struct TrashProblemRow {
         code: String,
         /// The code's arguments (keys depend on `code`).
@@ -535,10 +535,50 @@ declare_commands! {
     /// One mount's trash.
     struct MountTrashRow {
         mount: String,
-        /// Why its trash could not be listed (`bundles` is then empty); `null` = listed.
+        /// Why its trash could not be listed (`bundles` is then empty): `trash-unusable` `{mount, why}` (its `.trash`
+        /// is a link or not a folder) or `library-unavailable` `{mount, message}` (not read in time, or held as
+        /// overlapping another mount); `null` = listed.
         problem: Option<TrashProblemRow>,
         /// By id (oldest first).
         bundles: Vec<TrashBundleRow>,
+    }
+
+    /// An empty-all address: one bundle of the trash view with the rows the view listed for it — a row it did not list
+    /// stays.
+    struct ListedBundleArg {
+        mount: String,
+        bundle: String,
+        /// The rows' paths inside the bundle, as the view listed them.
+        rows: Vec<String>,
+    }
+
+    /// One addressed trash row of an emptying.
+    struct EmptiedRow {
+        mount: String,
+        bundle: String,
+        path: String,
+        /// `gone` (it was there and is no longer) | `remaining` (it is still there — a folder row may be partly
+        /// emptied) | `not_found` (it was not there, or it is no row: a foreign bundle, a mount not registered, a path
+        /// that is no row of the bundle).
+        outcome: String,
+        /// Not `gone`: why — `remaining`: `library-write-failed` (the OS error code in `args.os_error`),
+        /// `path-through-link`, `inside-root`, `library-read-failed`, or why its bundle was not touched; `not_found`:
+        /// `not-found`. `gone`: `null`.
+        code: Option<String>,
+        /// The code's arguments (keys depend on `code`); `null` when `gone`.
+        args: Json,
+    }
+
+    /// One addressed bundle of an emptying.
+    struct EmptiedBundleRow {
+        mount: String,
+        bundle: String,
+        /// `gone` (its folder no longer exists) | `remaining` (its folder stays: rows that stayed, roots the view did not
+        /// list, the record) | `not_found` (it was no bundle).
+        outcome: String,
+        /// Why nothing of it was touched: `library-unavailable` (its mount did not answer or went), `trash-unusable` or
+        /// `library-read-failed`; `null` = it was handled.
+        untouched: Option<TrashProblemRow>,
     }
 
     // ── Preset (`preset.*` — ADR-0386) ────────────────────────────────────────────────────────────────
@@ -1524,6 +1564,31 @@ declare_commands! {
         items: Vec<RestoreItemRow>,
     } errors [CONFLICT];
 
+    // ADR-0322 decision 1
+    // ADR-0408
+    // ADR-0419: shell only — named in `SHELL_ONLY`, so the daemon refuses it from every control route and leaves it out
+    //   of the control route's list; the library screen sends it once the user has confirmed.
+
+    /// Removes trash rows for good — nothing goes to an OS Recycle Bin: `bundles` empties each bundle of exactly the rows
+    /// the trash view listed for it (what it did not list stays, with the record), `rows` deletes single rows for good.
+    /// Answers every addressed row (the bundles' rows in the order given, then `rows`) and every addressed bundle with
+    /// its outcome; one that is not gone carries why. INVALID_ARGUMENT `nothing-to-empty` (neither `bundles` nor
+    /// `rows`); CONFLICT `library-unavailable` only from a daemon that runs no library; UNSUPPORTED `shell-only` from
+    /// any caller but the Engram app. Can take long; after an answer that never came, read the trash view again rather
+    /// than resend.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.emptyTrash" => args LibraryEmptyTrashArgs {
+        /// Empty-all: bundles, each with the rows the view listed for it.
+        bundles: Option<Vec<ListedBundleArg>>,
+        /// Permanent delete: single trash rows.
+        rows: Option<Vec<TrashAddressRow>>,
+    } -> ok LibraryEmptyTrashOk {
+        rows: Vec<EmptiedRow>,
+        bundles: Vec<EmptiedBundleRow>,
+    } errors [CONFLICT, UNSUPPORTED];
+
     // ADR-0358
     // ADR-0384
     // ADR-0386
@@ -1856,6 +1921,16 @@ declare_commands! {
 // ADR-0231
 // ADR-0237
 pub const INPUT_AFFECTING: &[&str] = &["agent.cancelQueuedInput", "agent.interrupt"];
+
+/// Commands only the shell runs — the daemon's one entrance refuses them from a caller with no connection (every control
+/// route) and the control route's command list omits them; WS `ListCommands`, the bindings and the schema keep them (the
+/// shell finds them there).
+///
+/// ★Kept here rather than as a declaration-macro field★, as [`INPUT_AFFECTING`]. Every name must be a `Write` declaration
+/// of this block outside the `agent` family (`/control/agent` builds only `agent.<verb>` names; a test measures both).
+// ADR-0322 decision 1
+// ADR-0419
+pub const SHELL_ONLY: &[&str] = &["library.emptyTrash"];
 
 /// One roster row — only what this table sees from the manager. `live` = `Some(status)` means a session is attached (liveness = [`AgentStatus::is_live`] alone, ADR-0116).
 pub struct AgentRosterRow {
@@ -4154,6 +4229,7 @@ mod tests {
                 "library.addMount",
                 "library.copy",
                 "library.delete",
+                "library.emptyTrash",
                 "library.folders",
                 "library.list",
                 "library.listTrash",
@@ -4184,9 +4260,9 @@ mod tests {
         assert_eq!(names.len(), COMMAND_SPECS.len());
     }
 
-    /// ADR-0369 · ADR-0419: `agent.spawn` launches and the five library file writes can outlast the ordinary wait (a
-    /// copy across volumes), so a shell-socket seat takes the launch bound and the CLI waits by the launch budget;
-    /// every other verb here — `library.listTrash` among them — keeps the shared waits.
+    /// ADR-0369 · ADR-0419: `agent.spawn` launches and the six library file writes can outlast the ordinary wait (a
+    /// copy across volumes, emptying a large trash), so a shell-socket seat takes the launch bound and the CLI waits by
+    /// the launch budget; every other verb here — `library.listTrash` among them — keeps the shared waits.
     #[test]
     fn only_agent_spawn_and_the_library_file_writes_are_declared_with_the_launch_deadline() {
         let mut launches: Vec<&str> = COMMAND_SPECS
@@ -4201,6 +4277,7 @@ mod tests {
                 "agent.spawn",
                 "library.copy",
                 "library.delete",
+                "library.emptyTrash",
                 "library.move",
                 "library.rename",
                 "library.restore"

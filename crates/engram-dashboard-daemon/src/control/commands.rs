@@ -2,6 +2,7 @@
 //!
 //! Three surfaces call this table through the one [`call_daemon_command`], so none skips the entrance check (ADR-0157): the family route
 //! (`/control/agent`, `agent.rs`) · the full-name route (`/control/call`, `catalog.rs`) · command bus delivery stage 1 (`command_delivery`).
+//! The same entrance refuses the shell-only commands ([`SHELL_ONLY`]) to the two routes, which carry no connection (ADR-0419).
 //! If the table is not plugged into the slot, the two routes are 503 and delivery is a stage-1 miss.
 //! Declarations are not here: the contracts of `agent.*`·`usage.*`·`library.*`·`preset.*` belong to agent (ADR-0155 decision 1); this file plugs the
 //! daemon's real things (manager · roster notification fanout · usage service · library service) into them. Daemon-own commands (`mail.*`)
@@ -13,12 +14,12 @@ use std::sync::Arc;
 use crate::conn_port::ConnId;
 use engram_dashboard_agent::commands::{
     make_table, resolve_in, AgentBackend, AgentCommandHost, AgentOutputFormat, AgentRosterRow,
-    LibraryAddMountOk, LibraryCommandHost, LibraryCopyOk, LibraryFoldersOk, LibraryKind,
-    LibraryListOk, LibraryListTrashOk, LibraryNewFileKind, LibraryOnConflict, LibraryRefreshOk,
-    LibraryRelinkOk, LibraryRemoveMountOk, LibraryRenameMountOk, LibraryRestoreOk, LibraryStatusOk,
-    PresetAddOk, PresetCheckOk, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk,
-    PresetView, RefreshErrorRow, RosterChanged, TrashAddressRow, UsageCommandHost, UsageVendorRow,
-    INPUT_AFFECTING,
+    LibraryAddMountOk, LibraryCommandHost, LibraryCopyOk, LibraryEmptyTrashOk, LibraryFoldersOk,
+    LibraryKind, LibraryListOk, LibraryListTrashOk, LibraryNewFileKind, LibraryOnConflict,
+    LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryRenameMountOk,
+    LibraryRestoreOk, LibraryStatusOk, ListedBundleArg, PresetAddOk, PresetCheckOk,
+    PresetPreviewFolderOk, PresetSection, PresetSetBackendOk, PresetView, RefreshErrorRow,
+    RosterChanged, TrashAddressRow, UsageCommandHost, UsageVendorRow, INPUT_AFFECTING, SHELL_ONLY,
 };
 use engram_dashboard_agent::launch::{escape_controls, Reason};
 use engram_dashboard_agent::library_commands::{
@@ -418,6 +419,13 @@ impl LibraryCommandHost for NoLibrary {
     ) -> Result<LibraryRestoreOk, PortRefusal> {
         Self::refused()
     }
+    fn empty_trash(
+        &self,
+        _bundles: &[ListedBundleArg],
+        _rows: &[TrashAddressRow],
+    ) -> Result<LibraryEmptyTrashOk, PortRefusal> {
+        Self::refused()
+    }
 }
 
 /// The only place that calls this table — the three surfaces come in here.
@@ -440,10 +448,13 @@ impl LibraryCommandHost for NoLibrary {
 /// `entrance` is a log label: a contract violation below (an async handler) shows as one error reply, so the log must say which surface.
 /// The input lease check is this one too (ADR-0231): [`INPUT_AFFECTING`] commands go through `admit_input` after the argument check; placing it
 /// elsewhere (`DaemonLocalCommands::run`) would skip `/control/agent`. `caller` = the calling connection (bus `Some(origin)`, CLI routes `None`).
+/// So is the shell-only gate (ADR-0419): a [`SHELL_ONLY`] name with no calling connection is refused before the argument check and the
+/// host is never called ([`shell_only_refusal`]).
 // ADR-0155
 // ADR-0157
 // ADR-0231
 // ADR-0293
+// ADR-0419
 pub fn call_daemon_command(
     table: &DaemonTable,
     name: &str,
@@ -454,6 +465,14 @@ pub fn call_daemon_command(
     // Names not in the table are split off before the check: `check_args` lets unknown names through, so reversing the order would pass someone else's name as "no argument problem" all the way down.
     if !table.table.contains(name) {
         return None;
+    }
+    // ADR-0419: `caller == None` is what marks a non-shell caller. `/control/call` (`catalog::handle_call`) and `/control/agent` pass
+    //   `None`; socket stage 1 passes the sending connection, and only the shell connects there with the daemon token. `CommandBus::invoke`
+    //   makes a synthetic `ConnId` for a connectionless caller but refuses the daemon's own names before stage 1. A new door that passes a
+    //   connection number for a non-shell caller (a seat for these commands on the control route — tracking T-133) opens this gate: keep it
+    //   shut there on purpose. Each door has a test.
+    if caller.is_none() && SHELL_ONLY.contains(&name) {
+        return Some(Err(shell_only_refusal(name)));
     }
     if let Err(rejection) = table.table.check_args(name, args) {
         return Some(Err(rejection));
@@ -502,6 +521,30 @@ fn admit_input(
     }
     args["target"] = serde_json::Value::String(agent.id.to_string());
     Ok(())
+}
+
+/// The code a [`SHELL_ONLY`] command answers off the socket (`args` = `{}`).
+// ADR-0419
+const SHELL_ONLY_CODE: &str = "shell-only";
+
+/// The refusal of a [`SHELL_ONLY`] command from a caller with no connection — `UNSUPPORTED` (retry never), `args` = `{code, args}` as a
+/// library refusal spells it (ADR-0379), `code` [`SHELL_ONLY_CODE`].
+/// Its words are about the trash: `library.emptyTrash` is the one shell-only name, so a second one needs its own. Nothing is kept for a
+/// retry: the refusal happens only where there is no seat. `catalog::refused` adds the catalog hint only to `INVALID_ARGUMENT` and
+/// `UNKNOWN_COMMAND`, so none follows these words — the catalog does not list the name.
+// ADR-0419
+fn shell_only_refusal(name: &str) -> CommandError {
+    let args = serde_json::Map::from_iter([
+        ("code".to_owned(), serde_json::json!(SHELL_ONLY_CODE)),
+        ("args".to_owned(), serde_json::json!({})),
+    ]);
+    CommandError::of(
+        ErrorCode::Unsupported,
+        format!(
+            "{name}: emptying the trash and deleting for good are done by the user in the library screen — an agent or the CLI cannot run this command"
+        ),
+    )
+    .with_args(args)
 }
 
 /// The lease refusal tail of connectionless entrances (the two CLI routes): WS's "acquire first" needs a connection, so this says who holds it and what to wait for.
@@ -698,7 +741,7 @@ mod tests {
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 38] = [
+        const BUS_ONLY: [&str; 39] = [
             "agent.attachPreset",
             "agent.cancelQueuedInput",
             "agent.detachPreset",
@@ -712,6 +755,7 @@ mod tests {
             "library.addMount",
             "library.copy",
             "library.delete",
+            "library.emptyTrash",
             "library.folders",
             "library.list",
             "library.listTrash",
@@ -1790,6 +1834,397 @@ mod tests {
             unavailable
         );
         assert_eq!(code(library.list_trash()), unavailable);
-        assert_eq!(code(library.restore(&[row], false, None)), unavailable);
+        assert_eq!(
+            code(library.restore(&[row.clone()], false, None)),
+            unavailable
+        );
+        assert_eq!(code(library.empty_trash(&[], &[row])), unavailable);
+    }
+
+    // ── the shell-only gate (ADR-0419) ───────────────────────────────────────────────────────────────────────────
+
+    /// The library host of the gate tests: `NoLibrary`'s answers, and how many times `empty_trash` was called — the
+    /// proof that a refused shell-only call never reaches the host.
+    #[derive(Default)]
+    struct CountingLibrary {
+        emptied: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingLibrary {
+        fn emptied(&self) -> usize {
+            self.emptied.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl LibraryCommandHost for CountingLibrary {
+        fn status(&self) -> Result<LibraryStatusOk, PortRefusal> {
+            NoLibrary.status()
+        }
+        fn add_mount(
+            &self,
+            name: &str,
+            path: &str,
+            create: bool,
+        ) -> Result<LibraryAddMountOk, PortRefusal> {
+            NoLibrary.add_mount(name, path, create)
+        }
+        fn remove_mount(&self, mount: &str) -> Result<LibraryRemoveMountOk, PortRefusal> {
+            NoLibrary.remove_mount(mount)
+        }
+        fn relocate_mount(
+            &self,
+            mount: &str,
+            path: &str,
+            create: bool,
+        ) -> Result<LibraryStatusOk, PortRefusal> {
+            NoLibrary.relocate_mount(mount, path, create)
+        }
+        fn rename_mount(
+            &self,
+            mount: &str,
+            to: &str,
+            yes: bool,
+            root_generation: Option<u64>,
+            plan_digest: Option<&str>,
+        ) -> Result<LibraryRenameMountOk, PortRefusal> {
+            NoLibrary.rename_mount(mount, to, yes, root_generation, plan_digest)
+        }
+        fn change_number(&self) -> Option<u64> {
+            NoLibrary.change_number()
+        }
+        fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
+            NoLibrary.folders()
+        }
+        fn refresh(&self, folder: Option<&str>) -> Result<LibraryRefreshOk, PortRefusal> {
+            NoLibrary.refresh(folder)
+        }
+        fn list(
+            &self,
+            folder: Option<&str>,
+            query: Option<&str>,
+            kinds: &[LibraryKind],
+        ) -> Result<LibraryListOk, PortRefusal> {
+            NoLibrary.list(folder, query, kinds)
+        }
+        fn read(&self, path: &str) -> Result<LibraryReadView, PortRefusal> {
+            NoLibrary.read(path)
+        }
+        fn new_folder(
+            &self,
+            parent: Option<&str>,
+            name: &str,
+            root_generation: Option<u64>,
+        ) -> Result<String, PortRefusal> {
+            NoLibrary.new_folder(parent, name, root_generation)
+        }
+        fn new_file(
+            &self,
+            folder: Option<&str>,
+            name: &str,
+            kind: LibraryNewFileKind,
+            root_generation: Option<u64>,
+        ) -> Result<String, PortRefusal> {
+            NoLibrary.new_file(folder, name, kind, root_generation)
+        }
+        fn relink(
+            &self,
+            from: &str,
+            to: &str,
+            root_generation: Option<u64>,
+        ) -> Result<LibraryRelinkOk, PortRefusal> {
+            NoLibrary.relink(from, to, root_generation)
+        }
+        fn preset_get(&self, path: &str) -> Result<PresetView, PortRefusal> {
+            NoLibrary.preset_get(path)
+        }
+        fn preset_check(
+            &self,
+            path: &str,
+            draft: &PresetDraftInput,
+        ) -> Result<PresetCheckOk, PortRefusal> {
+            NoLibrary.preset_check(path, draft)
+        }
+        fn preset_add(
+            &self,
+            path: &str,
+            entries: &PresetEntries,
+            backend: Option<&str>,
+            after: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<PresetAddOk, PortRefusal> {
+            NoLibrary.preset_add(path, entries, backend, after, root_generation)
+        }
+        fn preset_remove(
+            &self,
+            path: &str,
+            entries: &PresetEntries,
+            root_generation: Option<u64>,
+        ) -> Result<PresetView, PortRefusal> {
+            NoLibrary.preset_remove(path, entries, root_generation)
+        }
+        fn preset_reorder(
+            &self,
+            path: &str,
+            section: PresetSection,
+            order: &[String],
+            base_rev: &str,
+            root_generation: Option<u64>,
+        ) -> Result<PresetView, PortRefusal> {
+            NoLibrary.preset_reorder(path, section, order, base_rev, root_generation)
+        }
+        fn preset_set_backend(
+            &self,
+            path: &str,
+            items: &[String],
+            backend: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<PresetSetBackendOk, PortRefusal> {
+            NoLibrary.preset_set_backend(path, items, backend, root_generation)
+        }
+        fn preset_save(
+            &self,
+            path: &str,
+            draft: &PresetDraftInput,
+            base_rev: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<PresetView, PortRefusal> {
+            NoLibrary.preset_save(path, draft, base_rev, root_generation)
+        }
+        fn preview_folder(
+            &self,
+            folder: &str,
+            backend: Option<&str>,
+            mode: Option<AgentOutputFormat>,
+        ) -> Result<PresetPreviewFolderOk, PortRefusal> {
+            NoLibrary.preview_folder(folder, backend, mode)
+        }
+        fn agent_presets(&self, agent: AgentId) -> Result<AgentPresetsPortView, PortRefusal> {
+            NoLibrary.agent_presets(agent)
+        }
+        fn attach_preset(
+            &self,
+            agent: AgentId,
+            presets: &[String],
+            after: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<AgentAttachPortAnswer, PortRefusal> {
+            NoLibrary.attach_preset(agent, presets, after, root_generation)
+        }
+        fn detach_preset(
+            &self,
+            agent: AgentId,
+            presets: &[String],
+            yes: bool,
+            root_generation: Option<u64>,
+        ) -> Result<AgentPresetsPortView, PortRefusal> {
+            NoLibrary.detach_preset(agent, presets, yes, root_generation)
+        }
+        fn reorder_presets(
+            &self,
+            agent: AgentId,
+            order: &[String],
+            base_rev: &str,
+            root_generation: Option<u64>,
+        ) -> Result<AgentPresetsPortView, PortRefusal> {
+            NoLibrary.reorder_presets(agent, order, base_rev, root_generation)
+        }
+        fn judge_new_presets(
+            &self,
+            profile: &AgentProfile,
+            presets: &[String],
+            root_generation: Option<u64>,
+        ) -> Result<NewAgentPresets, PortRefusal> {
+            NoLibrary.judge_new_presets(profile, presets, root_generation)
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn move_items(
+            &self,
+            paths: &[String],
+            to_folder: &str,
+            on_conflict: Option<LibraryOnConflict>,
+            yes: bool,
+            detach_refs: bool,
+            plan_digest: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<MovePortAnswer, PortRefusal> {
+            NoLibrary.move_items(
+                paths,
+                to_folder,
+                on_conflict,
+                yes,
+                detach_refs,
+                plan_digest,
+                root_generation,
+            )
+        }
+        fn rename(
+            &self,
+            path: &str,
+            name: &str,
+            yes: bool,
+            detach_refs: bool,
+            plan_digest: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<MovePortAnswer, PortRefusal> {
+            NoLibrary.rename(path, name, yes, detach_refs, plan_digest, root_generation)
+        }
+        fn copy_items(
+            &self,
+            paths: &[String],
+            to_folder: &str,
+            on_conflict: Option<LibraryOnConflict>,
+            root_generation: Option<u64>,
+        ) -> Result<LibraryCopyOk, PortRefusal> {
+            NoLibrary.copy_items(paths, to_folder, on_conflict, root_generation)
+        }
+        fn delete(
+            &self,
+            paths: &[String],
+            yes: bool,
+            detach_refs: bool,
+            plan_digest: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<DeletePortAnswer, PortRefusal> {
+            NoLibrary.delete(paths, yes, detach_refs, plan_digest, root_generation)
+        }
+        fn list_trash(&self) -> Result<LibraryListTrashOk, PortRefusal> {
+            NoLibrary.list_trash()
+        }
+        fn restore(
+            &self,
+            rows: &[TrashAddressRow],
+            keep_both: bool,
+            root_generation: Option<u64>,
+        ) -> Result<LibraryRestoreOk, PortRefusal> {
+            NoLibrary.restore(rows, keep_both, root_generation)
+        }
+        fn empty_trash(
+            &self,
+            bundles: &[ListedBundleArg],
+            rows: &[TrashAddressRow],
+        ) -> Result<LibraryEmptyTrashOk, PortRefusal> {
+            self.emptied
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            NoLibrary.empty_trash(bundles, rows)
+        }
+    }
+
+    /// A daemon table over a [`CountingLibrary`], in its slot.
+    fn counting_slot() -> (Arc<CommandTableSlot>, Arc<CountingLibrary>) {
+        let library = Arc::new(CountingLibrary::default());
+        let slot = Arc::new(CommandTableSlot::new());
+        slot.set(Arc::new(make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::clone(&library) as Arc<dyn LibraryCommandHost>,
+        )));
+        (slot, library)
+    }
+
+    /// With no calling connection a shell-only name is refused `UNSUPPORTED` `shell-only` with the screen sentence,
+    /// before the argument check (an unknown field does not change the answer), and the host is never called — on the
+    /// unit entrance, on `/control/call` (`catalog::handle_call`) and on `/control/agent` (which cannot even name it);
+    /// with a connection (socket stage 1) the same call reaches the host once.
+    // ADR-0419
+    #[test]
+    fn a_shell_only_command_never_reaches_the_host_without_a_connection_and_does_with_one() {
+        let (slot, library) = counting_slot();
+        let table = slot.get().expect("table").clone();
+        for args in [json!({ "rows": [] }), json!({ "nope": 1 })] {
+            let err =
+                call_daemon_command(&table, "library.emptyTrash", &mut args.clone(), "cli", None)
+                    .expect("a name of this table")
+                    .expect_err("refused");
+            assert_eq!(err.code(), ErrorCode::Unsupported, "{args}");
+            assert_eq!(err.retry(), engram_dashboard_command::RetryMode::Never);
+            assert_eq!(
+                err.args(),
+                Some(&serde_json::Map::from_iter([
+                    ("code".to_owned(), json!("shell-only")),
+                    ("args".to_owned(), json!({})),
+                ])),
+                "{args}"
+            );
+            assert!(
+                err.message()
+                    .contains("done by the user in the library screen"),
+                "{}",
+                err.message()
+            );
+        }
+        assert_eq!(library.emptied(), 0, "the unit entrance called the host");
+
+        let socket = DaemonLocalCommands::new(Arc::clone(&slot));
+        let request: super::super::catalog::CallRequest =
+            serde_json::from_value(json!({ "name": "library.emptyTrash", "args": { "rows": [] } }))
+                .expect("a call body");
+        let outcome = super::super::catalog::handle_call(
+            &socket,
+            &crate::command_roster::CommandRoster::new(),
+            request,
+        );
+        assert!(
+            matches!(
+                &outcome,
+                super::super::catalog::CallOutcome::Answered(
+                    super::super::ingress::ControlQueryResult::Error { code, .. }
+                ) if *code == "UNSUPPORTED"
+            ),
+            "{outcome:?}"
+        );
+        let request: super::super::agent::AgentRequest =
+            serde_json::from_value(json!({ "verb": "library.emptyTrash", "rows": [] }))
+                .expect("a verb body");
+        let answer = super::super::agent::handle_agent(&table, request);
+        assert!(
+            matches!(
+                &answer,
+                super::super::ingress::ControlQueryResult::Error { code, .. } if *code == "UNKNOWN_COMMAND"
+            ),
+            "{answer:?}"
+        );
+        assert_eq!(library.emptied(), 0, "a control route called the host");
+
+        socket
+            .run(
+                "library.emptyTrash",
+                &mut json!({ "rows": [] }),
+                "bus",
+                Some(2),
+            )
+            .expect("a name of this table")
+            .expect_err("NoLibrary answers no library");
+        assert_eq!(library.emptied(), 1, "the socket reaches the host");
+    }
+
+    /// The other door that holds a connection number for a connectionless caller — `CommandBus::invoke`, whose fake
+    /// caller would make `caller` `Some` — refuses the daemon's own names before stage 1, so it never runs a shell-only
+    /// command. If it ever runs them, the gate must stay shut there.
+    // ADR-0419
+    #[tokio::test]
+    async fn the_relay_door_never_runs_a_shell_only_command() {
+        let (bus, _sweeper) = crate::command_delivery::CommandBus::new(
+            crate::command_roster::CommandRoster::new(),
+            crate::command_delivery::CommandDeliveries::new(),
+            Arc::new(DaemonLocalCommands::new(table_slot())),
+        );
+        for name in SHELL_ONLY {
+            let reply = bus
+                .invoke(
+                    engram_dashboard_command::RequestId::new(),
+                    name.to_string(),
+                    json!({ "rows": [] }),
+                )
+                .await;
+            let err = reply.outcome.expect_err("refused");
+            assert_eq!(err.code(), ErrorCode::Internal, "{name}");
+            assert!(
+                err.message().contains("nothing was run"),
+                "{name}: {}",
+                err.message()
+            );
+        }
     }
 }

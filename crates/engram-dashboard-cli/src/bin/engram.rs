@@ -1645,19 +1645,26 @@ fn run_catalog(base: &str, token: &str, request: &ParsedCatalog) -> i32 {
 ///
 /// ★Even with `callable:false` it is called as is★: the daemon is the source of truth for reachability; cutting it here would leave that
 ///   refusal unobserved.
+/// ★So is a name the list does not hold★ (ADR-0419): it is posted with no schema (values as strings, the ordinary silence window) and the
+///   daemon answers — its unknown-name refusal for a typo, its `shell-only` refusal for a command the list omits on purpose; a local
+///   refusal would keep that answer from the caller. Except when the list read dropped rows: the name may be one of them, so it stays
+///   a local refusal rather than a call with unscreened flags. After the daemon's `UNKNOWN_COMMAND` one stderr line names
+///   `engram commands` — the daemon's words name only its route.
+// ADR-0419
 fn run_invoke(base: &str, token: &str, invoke: ParsedInvoke) -> i32 {
     let read = match fetch_catalog(base, token, Some(&invoke.name)) {
         Ok(r) => r,
         Err(code) => return code,
     };
-    let Some(entry) = read.entries.iter().find(|e| e.name == invoke.name) else {
+    let entry = read.entries.iter().find(|e| e.name == invoke.name);
+    if entry.is_none() && read.skipped > 0 {
         print_error(
             ERR_UNKNOWN_COMMAND,
             &unknown_command_hint(&invoke.name, read.skipped),
         );
         return EXIT_FAILED;
-    };
-    let blob = parse_help_blob(&entry.help);
+    }
+    let blob = entry.and_then(|entry| parse_help_blob(&entry.help));
     let declared = blob.as_ref().and_then(declared_args_of);
     let args = match bind_invoke_args(&invoke.name, declared.as_deref(), &invoke.tokens) {
         Ok(a) => a,
@@ -1688,6 +1695,13 @@ fn run_invoke(base: &str, token: &str, invoke: ParsedInvoke) -> i32 {
     ) {
         Ok(resp) => {
             println!("{}", resp.body);
+            if serde_json::from_str::<serde_json::Value>(&resp.body)
+                .is_ok_and(|v| v.get("code").and_then(|c| c.as_str()) == Some(ERR_UNKNOWN_COMMAND))
+            {
+                eprintln!(
+                    "{CLI_EXE_NAME}: run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS}` for every name the daemon lists"
+                );
+            }
             // ★Measure by the declared return — the material came in the same round trip★: the lenient query decider would give
             //   `agent.new` exit 0 on `{"status":"ok"}` while **the old family gives exit 2 for the same command and response**;
             //   opposite verdicts by entrance would make the caller record something that did not happen as fact (the symptom ADR-0132

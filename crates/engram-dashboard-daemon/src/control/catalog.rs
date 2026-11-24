@@ -74,7 +74,13 @@ pub fn merge(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Vec<Comman
 ///
 /// Arguments are values, not slots, so this rides the same [`merge`] as WS; the read time is the caller's. Half lists are emitted too (an empty
 /// table slot gives empty `mine`) — the same answer WS gives in that state; the assembled servers plug the table in before accepting connections.
-pub fn handle_list(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> ControlQueryResult {
+/// `omitted` = names this list leaves out after the merge, whichever source holds them (the daemon's shell-only names —
+/// ADR-0419); dropping them from `mine` before the merge instead would let a client row of the same name through.
+pub fn handle_list(
+    mine: Vec<CommandDecl>,
+    registered: Vec<RosterEntry>,
+    omitted: &[&str],
+) -> ControlQueryResult {
     // Only names are taken — `help` is not copied (not needed for this decision, and that blob is the largest thing in this list).
     let callable: BTreeSet<String> = mine
         .iter()
@@ -86,6 +92,7 @@ pub fn handle_list(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Cont
     //   panic is a daemon exit — hook · ADR-0292).
     let commands: Vec<serde_json::Value> = merge(mine, registered)
         .into_iter()
+        .filter(|entry| !omitted.contains(&entry.name.as_str()))
         .map(|entry| {
             let callable = callable.contains(&entry.name);
             let mut row = serde_json::Map::with_capacity(3);
@@ -479,11 +486,36 @@ mod tests {
     #[test]
     fn the_listing_carries_the_help_bytes_untouched() {
         let opaque = "not json at all — arbitrary bytes {[(";
-        let result = handle_list(vec![decl("agent.list", opaque)], vec![]);
+        let result = handle_list(vec![decl("agent.list", opaque)], vec![], &[]);
 
         let json = result.to_json();
         assert_eq!(json["commands"][0]["name"], "agent.list");
         assert_eq!(json["commands"][0]["help"], opaque);
+    }
+
+    /// An omitted name leaves the list whichever source holds it — the daemon's own row and a client row registered under
+    /// the same name (the daemon table plugged in late, so registration did not refuse it); the other rows stay (ADR-0419).
+    #[test]
+    fn an_omitted_name_leaves_the_list_from_both_sources() {
+        let json = handle_list(
+            vec![
+                decl("library.emptyTrash", "mine"),
+                decl("agent.list", "mine"),
+            ],
+            vec![
+                entry("library.emptyTrash", "stolen"),
+                entry("tab.create", "theirs"),
+            ],
+            &["library.emptyTrash"],
+        )
+        .to_json();
+        let names: Vec<&str> = json["commands"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|row| row["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, ["agent.list", "tab.create"], "{json}");
     }
 
     /// [`handle_call`] recognizes every name the list taught and does not know names outside it.
@@ -496,6 +528,7 @@ mod tests {
         let json = handle_list(
             vec![decl("agent.list", "mine")],
             vec![entry("tab.create", "theirs")],
+            &[],
         )
         .to_json();
         let rows = json["commands"].as_array().expect("array");

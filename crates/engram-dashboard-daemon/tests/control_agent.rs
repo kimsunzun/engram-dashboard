@@ -1266,6 +1266,7 @@ async fn the_catalog_routes_refuse_calls_without_a_valid_token() {
 /// The list merges two sources — the daemon's own table and names put on by an attached client; if either is missing, an LLM asking learns something present is absent.
 ///
 /// `help` must be byte for byte — also checks the daemon does not open a non-JSON value that was put on.
+/// The shell-only `library.emptyTrash` is the one declared name it leaves out, and no row's `help` names it (ADR-0419).
 #[tokio::test]
 async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
     let f = fixture("catalog-list").await;
@@ -1329,6 +1330,22 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
         ],
         "the two sources merge into one list in name order: {body}"
     );
+    // ADR-0419: the text guard — no command help an agent can read names the shell-only command.
+    for row in &rows {
+        assert!(
+            !row["help"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("emptyTrash"),
+            "{} names the shell-only command in its help: {}",
+            row["name"],
+            row["help"]
+        );
+    }
+    assert!(
+        !names.contains(&"library.emptyTrash"),
+        "the control list omits the shell-only command: {body}"
+    );
     let client_row = rows
         .iter()
         .find(|r| r["name"] == "tab.create")
@@ -1350,6 +1367,37 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
     );
     // Discovery is read-only — a screen refresh on pulling the list would make one poll keep shaking the tree.
     assert_eq!(f.broadcast.count(), 0, "discovery changes nothing");
+}
+
+/// The shell-only gate on both control routes (ADR-0419): `/control/call` answers `library.emptyTrash` `UNSUPPORTED`
+/// `shell-only` with the screen sentence and no catalog hint (the catalog does not list it), and `/control/agent`
+/// cannot even name it — it builds only `agent.<verb>` names.
+#[tokio::test]
+async fn both_control_routes_refuse_the_shell_only_command() {
+    let f = fixture("catalog-shell-only").await;
+    let (status, answer) = f
+        .call(serde_json::json!({ "name": "library.emptyTrash", "args": { "rows": [] } }))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{answer}");
+    assert_eq!(answer["code"], "UNSUPPORTED", "{answer}");
+    assert_eq!(answer["args"]["code"], "shell-only", "{answer}");
+    let hint = answer["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains(
+            "emptying the trash and deleting for good are done by the user in the library screen"
+        ),
+        "{hint}"
+    );
+    assert!(
+        !hint.contains("/control/commands") && !hint.contains("catalog"),
+        "no catalog hint for a name the catalog does not list: {hint}"
+    );
+
+    let (status, answer) = f
+        .post(serde_json::json!({ "verb": "library.emptyTrash", "rows": [] }))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{answer}");
+    assert_eq!(answer["code"], "UNKNOWN_COMMAND", "{answer}");
 }
 
 /// The list's reachability field cannot diverge from what the call route does — call every listed name as is and compare; a "callable" field with an unreachable answer (`UNSUPPORTED`) turns this red.

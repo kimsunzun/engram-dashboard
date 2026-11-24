@@ -4742,7 +4742,7 @@ mod tests {
 
     /// The discovery list merges two sources — attached owners' roster and the daemon's own table. Leaving out the own table would deliver
     /// `agent.*` yet hide it, so an LLM trusting the list never calls that family. On overlap the daemon's wins (delivery order own table → roster,
-    /// `command_delivery::deliver`).
+    /// `command_delivery::deliver`). The shell-only `library.emptyTrash` is listed here — this list is the shell's (ADR-0419).
     #[tokio::test]
     async fn list_commands_merges_the_daemons_own_names_and_wins_on_a_clash() {
         // Does not occur in an assembled server — this measures the port contract with an assembly plugging the table in late (production fills
@@ -4818,6 +4818,7 @@ mod tests {
                         "library.addMount",
                         "library.copy",
                         "library.delete",
+                        "library.emptyTrash",
                         "library.folders",
                         "library.list",
                         "library.listTrash",

@@ -454,6 +454,7 @@ impl<'de> serde::Deserialize<'de> for HelpRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engram_dashboard_agent::commands::SHELL_ONLY;
     use engram_dashboard_agent::types::{CLI_AGENT_FLAGS, CLI_AGENT_VERBS};
     use std::sync::{Mutex, MutexGuard};
 
@@ -680,6 +681,34 @@ mod tests {
         }
     }
 
+    /// The text guard (ADR-0419): no rendered help screen, not the raw help file and not the priming names `emptyTrash` — an agent learns the
+    /// shell-only command from none of them (the library screen says emptying is the user's, without the name).
+    // ADR-0419
+    #[test]
+    fn no_help_screen_and_not_the_priming_names_the_shell_only_command() {
+        let _env = env_guard();
+        let source = HelpSource::new(repo_root());
+        let priming = std::fs::read_to_string(repo_root().join("builtin/instructions/priming.md"))
+            .expect("the priming file exists");
+        let screens = HelpTopic::ALL
+            .iter()
+            .map(|topic| screen_of(&source, topic.group_word()));
+        let verbs: Vec<&str> = SHELL_ONLY
+            .iter()
+            .map(|name| name.rsplit('.').next().unwrap_or(name))
+            .collect();
+        assert!(verbs.contains(&"emptyTrash"), "{verbs:?}");
+        // The raw body too: a section no screen renders (the old `theme` pointer) must not carry the name either.
+        for text in [priming, shipped_file()].into_iter().chain(screens) {
+            for verb in &verbs {
+                assert!(
+                    !text.contains(verb),
+                    "the shell-only {verb} is named: {text}"
+                );
+            }
+        }
+    }
+
     // ── word → screen ─────────────────────────────────────────────────────────────────
 
     /// The family list screen and the agent screen teach the surface as is — a nonexistent verb makes the LLM try a nonexistent command (the unresolved part of ADR-0122).
@@ -729,11 +758,13 @@ mod tests {
     /// words. It says a start leaves a missing item out and stops on a folder entry it cannot read (`folder-unreadable`),
     /// and never says a missing item blocks a launch — a launch skips missing items (ADR-0374, ADR-0387). The agent
     /// screen names the two new verbs and `--presets`, points at this screen, and says a start leaves a missing item
-    /// out and names it in `notices`. A command added to the library port without a line here turns this red.
+    /// out and names it in `notices`. A command added to the library port without a line here turns this red — except a
+    /// shell-only one, which must not be on the screen at all (ADR-0419).
     // ADR-0358
     // ADR-0374
     // ADR-0386
     // ADR-0387
+    // ADR-0419
     #[test]
     fn the_library_screen_teaches_every_library_command_and_the_edit_rules() {
         let _env = env_guard();
@@ -760,12 +791,19 @@ mod tests {
                     || name.starts_with("preset.")
                     || agent_presets.contains(name)
             })
+            .filter(|name| !SHELL_ONLY.contains(name))
             .collect();
         assert_eq!(
             names.len(),
             30,
-            "18 library, 8 preset and 4 agent-preset commands are declared: {names:?}"
+            "18 library, 8 preset and 4 agent-preset commands an agent can call are declared: {names:?}"
         );
+        for name in SHELL_ONLY {
+            assert!(
+                !library.contains(name),
+                "the shell-only {name} is on the library screen: {library}"
+            );
+        }
         for name in names {
             // A whole word — `agent.presets` must not pass on the strength of `agent.presetsX`.
             let line = format!("{CLI_EXE_NAME} {name}");

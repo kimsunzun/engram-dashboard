@@ -1383,19 +1383,73 @@ fn a_call_for_a_name_whose_row_was_dropped_does_not_claim_the_name_is_absent() {
     );
     assert!(hint.contains("unreadable"), "must state the facts: {hint}");
 
-    // Control group — without dropped rows it asserts absence as is (proof that the wording above does not always come out).
-    let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog()]);
+    // Control group — without dropped rows the name is not refused here: it is posted and the daemon's answer printed
+    //   (ADR-0419), so the wording above comes out only when rows were dropped.
+    let unknown = ok_response(
+        r#"{"status":"error","code":"UNKNOWN_COMMAND","hint":"unknown command 'nope.nope' — the daemon's words"}"#,
+    );
+    let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog(), unknown]);
     let url = format!("http://{host}:{port}");
     let (stdout, code) = run_cli(&url, &["nope.nope", "--x", "1"], None);
-    let _ = stub.join().expect("stub join");
+    let requests = stub.join().expect("stub join");
     assert_eq!(code, 1);
+    assert_eq!(requests.len(), 2, "the call goes out: {requests:?}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert!(
         v["hint"]
             .as_str()
             .unwrap_or_default()
-            .contains("does not list"),
+            .contains("the daemon's words"),
         "{stdout}"
+    );
+}
+
+/// ★O. A name the catalog does not list is posted, and the daemon's answer is the one printed★ (ADR-0419): the daemon decides
+///   what is reachable — a command it lists on no route (`library.emptyTrash`, shell only) answers its own `shell-only`
+///   refusal, which a local `UNKNOWN_COMMAND` would have hidden. With no schema the values go as strings. After the daemon's
+///   `UNKNOWN_COMMAND` (a typo) the CLI adds one stderr line naming `engram commands`; after any other answer it adds none.
+#[test]
+fn a_name_the_catalog_does_not_list_is_posted_and_the_daemons_answer_printed() {
+    let shell_only = r#"{"status":"error","code":"UNSUPPORTED","hint":"library.emptyTrash: emptying the trash and deleting for good are done by the user in the library screen","args":{"code":"shell-only","args":{}}}"#;
+    let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog(), ok_response(shell_only)]);
+    let url = format!("http://{host}:{port}");
+    let (stdout, stderr, code) = run_cli_streams(&url, &["library.emptyTrash", "--rows", "x"]);
+    let requests = stub.join().expect("stub join");
+
+    assert_eq!(code, 1, "a refusal → exit 1: {stdout}");
+    assert_eq!(requests.len(), 2, "list, then the call: {requests:?}");
+    assert!(
+        requests[1].starts_with("POST /control/call HTTP/1.1"),
+        "{}",
+        requests[1]
+    );
+    let sent = request_body(&requests[1]);
+    assert_eq!(sent["name"], "library.emptyTrash", "{sent}");
+    assert_eq!(
+        sent["args"],
+        serde_json::json!({ "rows": "x" }),
+        "no schema, so the value goes as typed: {sent}"
+    );
+    assert_eq!(stdout.trim(), shell_only, "the daemon's answer as is");
+    let catalog_line = format!("{CLI_EXE_NAME} commands");
+    assert!(
+        !stderr.contains(&catalog_line),
+        "no catalog line after a refusal that is not an unknown name: {stderr}"
+    );
+
+    let unknown = ok_response(
+        r#"{"status":"error","code":"UNKNOWN_COMMAND","hint":"unknown command 'nope.nope'"}"#,
+    );
+    let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog(), unknown]);
+    let url = format!("http://{host}:{port}");
+    let (stdout, stderr, code) = run_cli_streams(&url, &["nope.nope"]);
+    let requests = stub.join().expect("stub join");
+    assert_eq!(code, 1, "{stdout}");
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(stdout.contains("UNKNOWN_COMMAND"), "{stdout}");
+    assert!(
+        stderr.contains(&catalog_line),
+        "the CLI names its own catalog verb: {stderr}"
     );
 }
 

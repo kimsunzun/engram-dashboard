@@ -14,6 +14,7 @@ use axum::extract::State;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use engram_dashboard_agent::commands::SHELL_ONLY;
 use engram_dashboard_agent::manager::AgentManager;
 use http::{Method, Request, StatusCode};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -927,7 +928,9 @@ async fn control_commands_handler(
             .map(|table| table.decls())
             .unwrap_or_default();
         let registered = state.bus.roster().entries();
-        super::catalog::handle_list(mine, registered)
+        // ADR-0419: the control list omits the shell-only names, which the control routes refuse (`commands::call_daemon_command`);
+        //   WS `ListCommands` keeps them — the shell finds them there.
+        super::catalog::handle_list(mine, registered, SHELL_ONLY)
     })
     .await
     else {

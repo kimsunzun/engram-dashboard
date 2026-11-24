@@ -5,12 +5,13 @@ use engram_dashboard_agent::commands::{
     AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs, AgentMoveArgs, AgentNewArgs,
     AgentPresetsArgs, AgentRenameArgs, AgentReorderPresetsArgs, AgentResolveArgs,
     AgentSetWorkspaceArgs, AgentSpawnArgs, LibraryAddMountArgs, LibraryCopyArgs, LibraryDeleteArgs,
-    LibraryFoldersArgs, LibraryListArgs, LibraryListTrashArgs, LibraryMoveArgs, LibraryNewFileArgs,
-    LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs, LibraryRelinkArgs,
-    LibraryRelocateMountArgs, LibraryRemoveMountArgs, LibraryRenameArgs, LibraryRenameMountArgs,
-    LibraryRestoreArgs, LibraryStatusArgs, PresetAddArgs, PresetCheckArgs, PresetGetArgs,
-    PresetPreviewFolderArgs, PresetRemoveArgs, PresetReorderArgs, PresetSaveArgs,
+    LibraryEmptyTrashArgs, LibraryFoldersArgs, LibraryListArgs, LibraryListTrashArgs,
+    LibraryMoveArgs, LibraryNewFileArgs, LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs,
+    LibraryRelinkArgs, LibraryRelocateMountArgs, LibraryRemoveMountArgs, LibraryRenameArgs,
+    LibraryRenameMountArgs, LibraryRestoreArgs, LibraryStatusArgs, PresetAddArgs, PresetCheckArgs,
+    PresetGetArgs, PresetPreviewFolderArgs, PresetRemoveArgs, PresetReorderArgs, PresetSaveArgs,
     PresetSetBackendArgs, UsageGetArgs, UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
+    SHELL_ONLY,
 };
 use engram_dashboard_command::DeadlineClass;
 use engram_dashboard_command::{
@@ -44,6 +45,7 @@ fn declared_names_are_the_cli_verbs() {
             "library.addMount",
             "library.copy",
             "library.delete",
+            "library.emptyTrash",
             "library.folders",
             "library.list",
             "library.listTrash",
@@ -83,7 +85,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 29 // two were added in v6 — `agent.interrupt` · `usage.refresh`; twenty-two in v9 — `library.addMount` · `removeMount` · `relocateMount` · `renameMount` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`, `agent.setWorkspace` · `duplicate`, `library.move` · `rename` · `copy` · `delete` · `restore`
+            == 30 // two were added in v6 — `agent.interrupt` · `usage.refresh`; twenty-three in v9 — `library.addMount` · `removeMount` · `relocateMount` · `renameMount` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`, `agent.setWorkspace` · `duplicate`, `library.move` · `rename` · `copy` · `delete` · `restore` · `emptyTrash`
     );
 }
 
@@ -150,9 +152,10 @@ fn the_library_verbs_are_declared_in_generation_9_with_their_effect() {
     }
 }
 
-/// The six file and trash commands (ADR-0419) — all in catalog 9; the trash view is `Read` and ordinary (its reads are
-/// bounded by the read budget), the five that move, copy, delete or restore files are `Write` with the launch deadline
-/// class (a copy across volumes can outlast the ordinary wait). `on_conflict` advertises its three words.
+/// The seven file and trash commands (ADR-0419) — all in catalog 9; the trash view is `Read` and ordinary (its reads are
+/// bounded by the read budget), the six that move, copy, delete, restore or empty are `Write` with the launch deadline
+/// class (a copy across volumes or a large emptying can outlast the ordinary wait). `on_conflict` advertises its three
+/// words.
 #[test]
 fn the_file_verbs_are_declared_in_generation_9_with_their_effect_and_deadline() {
     let cases = [
@@ -162,6 +165,7 @@ fn the_file_verbs_are_declared_in_generation_9_with_their_effect_and_deadline() 
         ("library.delete", Effect::Write, DeadlineClass::Launch),
         ("library.listTrash", Effect::Read, DeadlineClass::Ordinary),
         ("library.restore", Effect::Write, DeadlineClass::Launch),
+        ("library.emptyTrash", Effect::Write, DeadlineClass::Launch),
     ];
     for (name, effect, deadline) in cases {
         let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
@@ -284,6 +288,22 @@ fn every_input_affecting_name_is_a_declared_write_verb() {
     assert!(!INPUT_AFFECTING.contains(&"agent.listQueuedInputs"));
 }
 
+/// ★The shell-only list holds only this crate's `Write` declarations outside the `agent` family★ (ADR-0419) — a name the
+/// table does not declare would leave the gate guarding nothing, and an `agent.<verb>` name would be the one name
+/// `/control/agent` can also build.
+#[test]
+fn every_shell_only_name_is_a_declared_write_verb_outside_the_agent_family() {
+    assert_eq!(SHELL_ONLY, ["library.emptyTrash"]);
+    for name in SHELL_ONLY {
+        let spec = COMMAND_SPECS
+            .iter()
+            .find(|s| s.name == *name)
+            .unwrap_or_else(|| panic!("{name} must be a declaration of this block"));
+        assert_eq!(spec.effect, Effect::Write, "{name}");
+        assert!(!name.starts_with("agent."), "{name}");
+    }
+}
+
 #[test]
 fn error_sets_are_golden() {
     let declared = |name: &str| {
@@ -384,6 +404,12 @@ fn error_sets_are_golden() {
     ] {
         assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
     }
+    // ADR-0419: emptying refuses only `nothing-to-empty` itself (INVALID_ARGUMENT, from the table's set); CONFLICT from a
+    //   daemon that runs no library, UNSUPPORTED `shell-only` from the daemon's gate off the socket.
+    assert_eq!(
+        declared("library.emptyTrash"),
+        vec![ErrorCode::Conflict, ErrorCode::Unsupported]
+    );
     // The agent-preset commands resolve `target` (absent = NOT_FOUND · same name = CONFLICT); their refusals are
     //   NOT_FOUND (the agent deleted meanwhile) and CONFLICT.
     for name in [
@@ -661,6 +687,14 @@ fn required_matches_what_deserialization_actually_demands() {
             json!({
                 "rows": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "a.md" }],
                 "keep_both": true, "root_generation": 3,
+            }),
+        ),
+        (
+            "library.emptyTrash",
+            parses::<LibraryEmptyTrashArgs>,
+            json!({
+                "bundles": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "rows": ["a.md"] }],
+                "rows": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "b.md" }],
             }),
         ),
         (

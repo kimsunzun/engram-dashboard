@@ -13,11 +13,12 @@ use uuid::Uuid;
 use engram_dashboard_agent::backend;
 use engram_dashboard_agent::commands::{
     make_table, AgentBackend, AgentCommandHost, AgentOutputFormat as DeclaredOutputFormat,
-    LibraryAddMountOk, LibraryCopyOk, LibraryFoldersOk, LibraryKind, LibraryListOk,
-    LibraryListTrashOk, LibraryNewFileKind, LibraryOnConflict, LibraryRefreshOk, LibraryRelinkOk,
-    LibraryRemoveMountOk, LibraryRenameMountOk, LibraryRestoreOk, LibraryStatusOk, PresetAddOk,
-    PresetCheckOk, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk, PresetView,
-    RosterChanged, TrashAddressRow, UsageCommandHost, UsageVendorRow,
+    LibraryAddMountOk, LibraryCopyOk, LibraryEmptyTrashOk, LibraryFoldersOk, LibraryKind,
+    LibraryListOk, LibraryListTrashOk, LibraryNewFileKind, LibraryOnConflict, LibraryRefreshOk,
+    LibraryRelinkOk, LibraryRemoveMountOk, LibraryRenameMountOk, LibraryRestoreOk, LibraryStatusOk,
+    ListedBundleArg, PresetAddOk, PresetCheckOk, PresetPreviewFolderOk, PresetSection,
+    PresetSetBackendOk, PresetView, RosterChanged, TrashAddressRow, UsageCommandHost,
+    UsageVendorRow,
 };
 use engram_dashboard_agent::failure::AgentFailureKind;
 use engram_dashboard_agent::launch::{
@@ -1745,6 +1746,13 @@ impl LibraryCommandHost for NoLibrary {
         _: bool,
         _: Option<u64>,
     ) -> Result<LibraryRestoreOk, PortRefusal> {
+        Self::refused()
+    }
+    fn empty_trash(
+        &self,
+        _: &[ListedBundleArg],
+        _: &[TrashAddressRow],
+    ) -> Result<LibraryEmptyTrashOk, PortRefusal> {
         Self::refused()
     }
 }

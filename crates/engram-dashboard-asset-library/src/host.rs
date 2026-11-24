@@ -19,6 +19,7 @@
 //! - **A file operation answers one flat row per item** (`library.move` … `library.restore`): the service's outcome
 //!   becomes `status` plus the done fields, or the reason's `code` and `args` as built — only a skip's reason is made
 //!   here, its code per [`Skip`] variant. The trash view's `restorable` is restore's own admission of a row (ADR-0419).
+//!   Emptying answers every addressed row and bundle with its outcome word, a row's reason as built (ADR-0408).
 // ADR-0311
 // ADR-0379
 // ADR-0384
@@ -33,10 +34,11 @@ use engram_dashboard_agent::backend::settings_check::{
 };
 use engram_dashboard_agent::commands::{
     self as declared, launch_notice_row, AgentFolderRow, AgentOutputFormat, CopyItemRow,
-    DeleteItemRow, FolderLoadKindWord, FolderRow, GitTreeRow, LibraryAddMountOk, LibraryCopyOk,
-    LibraryFolderRow, LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryListTrashOk,
-    LibraryNewFileKind, LibraryOnConflict, LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk,
-    LibraryRenameMountOk, LibraryRestoreOk, LibraryStatusOk, ListFolderRow, MountStatusRow,
+    DeleteItemRow, EmptiedBundleRow, EmptiedRow, FolderLoadKindWord, FolderRow, GitTreeRow,
+    LibraryAddMountOk, LibraryCopyOk, LibraryEmptyTrashOk, LibraryFolderRow, LibraryFoldersOk,
+    LibraryKind, LibraryListOk, LibraryListTrashOk, LibraryNewFileKind, LibraryOnConflict,
+    LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryRenameMountOk,
+    LibraryRestoreOk, LibraryStatusOk, ListFolderRow, ListedBundleArg, MountStatusRow,
     MountTrashRow, MoveItemRow, MovePairRow, PathReasonRow, PointingRow, PresetAddOk,
     PresetCheckOk, PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk, PresetSection,
     PresetSetBackendOk, PreviewItemRow, PreviewLoadRow, PreviewRefusalRow, PreviewSetRow,
@@ -72,7 +74,10 @@ use crate::relink::RelinkAnswer;
 use crate::rename::{GitTree, RenameAnswer};
 use crate::resolve::ResolvedFolder;
 use crate::store::EntryKind;
-use crate::trash::{BundleView, MountTrash, RootState, RowKind, RowSource, TrashListing, TrashRow};
+use crate::trash::{
+    BundleOutcome, BundleView, Emptied, EmptiedBundle, EmptyAnswer, ListedBundle, MountTrash,
+    RootState, RowKind, RowSource, TrashListing, TrashRow,
+};
 use crate::{
     FoldersAnswer, LibraryRefusal, LibraryService, LibraryStatus, ListAnswer, ListFilter, ListRow,
     MountState, Pointing, ReadAnswer, RefreshReport, RefusalClass, Removal, UnavailableMount,
@@ -511,6 +516,25 @@ impl LibraryCommandHost for LibraryService {
         let rows: Vec<TrashAddress> = rows.iter().map(trash_address).collect();
         LibraryService::restore(self, &rows, keep_both, root_generation)
             .map(restore_ok)
+            .map_err(port)
+    }
+
+    fn empty_trash(
+        &self,
+        bundles: &[ListedBundleArg],
+        rows: &[TrashAddressRow],
+    ) -> Result<LibraryEmptyTrashOk, PortRefusal> {
+        let bundles: Vec<ListedBundle> = bundles
+            .iter()
+            .map(|listed| ListedBundle {
+                mount: listed.mount.clone(),
+                bundle: listed.bundle.clone(),
+                rows: listed.rows.clone(),
+            })
+            .collect();
+        let rows: Vec<TrashAddress> = rows.iter().map(trash_address).collect();
+        LibraryService::empty_trash(self, &bundles, &rows)
+            .map(emptied_ok)
             .map_err(port)
     }
 }
@@ -953,6 +977,61 @@ fn restore_ok(answer: RestoreAnswer) -> LibraryRestoreOk {
                     args,
                 }
             })
+            .collect(),
+    }
+}
+
+/// An emptying's answer as declared: each row's and bundle's outcome as its word; a row that is not gone carries its
+/// reason's code and args as built (no `line` — a per-row reason has none), a bundle left untouched its reason.
+// ADR-0408 decision 2
+// ADR-0419
+fn emptied_ok(answer: EmptyAnswer) -> LibraryEmptyTrashOk {
+    let bundle_word = |outcome: BundleOutcome| match outcome {
+        BundleOutcome::Gone => "gone",
+        BundleOutcome::Remaining => "remaining",
+        BundleOutcome::NotFound => "not_found",
+    };
+    LibraryEmptyTrashOk {
+        rows: answer
+            .rows
+            .into_iter()
+            .map(|crate::trash::EmptiedRow { row, outcome }| {
+                let (outcome, why) = match outcome {
+                    Emptied::Gone => ("gone", None),
+                    Emptied::Remaining(why) => ("remaining", Some(why)),
+                    Emptied::NotFound(why) => ("not_found", Some(why)),
+                };
+                let (code, args) =
+                    why.map_or((None, Value::Null), |why| (Some(why.code), why.args));
+                EmptiedRow {
+                    mount: row.mount,
+                    bundle: row.bundle,
+                    path: row.path,
+                    outcome: outcome.to_owned(),
+                    code,
+                    args,
+                }
+            })
+            .collect(),
+        bundles: answer
+            .bundles
+            .into_iter()
+            .map(
+                |EmptiedBundle {
+                     mount,
+                     bundle,
+                     outcome,
+                     untouched,
+                 }| EmptiedBundleRow {
+                    mount,
+                    bundle,
+                    outcome: bundle_word(outcome).to_owned(),
+                    untouched: untouched.map(|why| TrashProblemRow {
+                        code: why.code,
+                        args: why.args,
+                    }),
+                },
+            )
             .collect(),
     }
 }
@@ -3949,6 +4028,209 @@ mod tests {
             (crate::trash::TRASH_UNUSABLE, &json!("library"))
         );
         assert!(library.bundles.is_empty());
+    }
+
+    /// Through the port on a real library: emptying a bundle of only the rows given removes those for good, a path that
+    /// is no row answers `not_found` with its reason, and the bundle stays (`remaining`) while a row of it is left; the
+    /// left row then goes on its own and the bundle with it (`gone`). Emptying nothing refuses `nothing-to-empty`.
+    // ADR-0408
+    // ADR-0419
+    #[test]
+    fn an_emptying_through_the_port_answers_each_row_and_bundle() {
+        let w = World::new(Vec::new());
+        w.put("rules/a.md", "A");
+        w.put("rules/b.md", "B");
+        let deleted = w
+            .port()
+            .delete(
+                &strings(&["library/rules/a.md", "library/rules/b.md"]),
+                false,
+                false,
+                None,
+                None,
+            )
+            .expect("delete");
+        let bundle = deleted.items[0]
+            .trashed
+            .clone()
+            .expect("a trash row")
+            .bundle;
+        let row = |path: &str| TrashAddressRow {
+            mount: "library".to_owned(),
+            bundle: bundle.clone(),
+            path: path.to_owned(),
+        };
+
+        let emptied = w
+            .port()
+            .empty_trash(
+                &[ListedBundleArg {
+                    mount: "library".to_owned(),
+                    bundle: bundle.clone(),
+                    rows: strings(&["rules/a.md"]),
+                }],
+                &[row("rules/nope.md")],
+            )
+            .expect("emptied");
+        assert_eq!(
+            emptied.rows[0],
+            EmptiedRow {
+                mount: "library".to_owned(),
+                bundle: bundle.clone(),
+                path: "rules/a.md".to_owned(),
+                outcome: "gone".to_owned(),
+                code: None,
+                args: Value::Null,
+            }
+        );
+        let missing = &emptied.rows[1];
+        assert_eq!(
+            (
+                missing.path.as_str(),
+                missing.outcome.as_str(),
+                missing.code.as_deref()
+            ),
+            ("rules/nope.md", "not_found", Some(crate::NOT_FOUND))
+        );
+        assert_eq!(emptied.rows.len(), 2);
+        assert_eq!(
+            emptied.bundles,
+            [EmptiedBundleRow {
+                mount: "library".to_owned(),
+                bundle: bundle.clone(),
+                outcome: "remaining".to_owned(),
+                untouched: None,
+            }]
+        );
+        let view = w.port().list_trash().expect("view");
+        let library = view
+            .mounts
+            .iter()
+            .find(|mount| mount.mount == "library")
+            .expect("the library mount");
+        let left: Vec<&str> = library.bundles[0]
+            .rows
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect();
+        assert_eq!(left, ["rules/b.md"]);
+
+        let emptied = w
+            .port()
+            .empty_trash(&[], &[row("rules/b.md")])
+            .expect("emptied");
+        assert_eq!(emptied.rows[0].outcome, "gone");
+        assert_eq!(emptied.bundles[0].outcome, "gone");
+        assert!(!w.base.join("lib/.trash").join(&bundle).exists());
+
+        let (class, why) = refused(w.port().empty_trash(&[], &[]));
+        assert_eq!(
+            (class, why.code.as_str()),
+            (PortClass::InvalidArgument, crate::trash::NOTHING_TO_EMPTY)
+        );
+    }
+
+    /// A row left standing carries its reason as built — the OS error code inside `args` —, a row that is no row its
+    /// `not-found`, and a bundle left untouched its reason as `untouched`; every outcome lands as its word.
+    // ADR-0408 decision 2
+    #[test]
+    fn every_emptying_outcome_lands_as_its_word_with_its_reason() {
+        let failed = json!({ "path": "library/d/x.md", "os_error": 5 });
+        let unread = json!({ "mount": "team", "message": "m" });
+        let answer = emptied_ok(EmptyAnswer {
+            rows: vec![
+                crate::trash::EmptiedRow {
+                    row: address("b1", "a.md"),
+                    outcome: Emptied::Gone,
+                },
+                crate::trash::EmptiedRow {
+                    row: address("b1", "d"),
+                    outcome: Emptied::Remaining(why("library-write-failed", failed.clone())),
+                },
+                crate::trash::EmptiedRow {
+                    row: address("b2", "z.md"),
+                    outcome: Emptied::NotFound(why("not-found", json!({ "path": "z.md" }))),
+                },
+            ],
+            bundles: vec![
+                EmptiedBundle {
+                    mount: "library".to_owned(),
+                    bundle: "b1".to_owned(),
+                    outcome: BundleOutcome::Remaining,
+                    untouched: None,
+                },
+                EmptiedBundle {
+                    mount: "library".to_owned(),
+                    bundle: "b2".to_owned(),
+                    outcome: BundleOutcome::NotFound,
+                    untouched: None,
+                },
+                EmptiedBundle {
+                    mount: "team".to_owned(),
+                    bundle: "b3".to_owned(),
+                    outcome: BundleOutcome::Remaining,
+                    untouched: Some(why("library-unavailable", unread.clone())),
+                },
+                EmptiedBundle {
+                    mount: "library".to_owned(),
+                    bundle: "b4".to_owned(),
+                    outcome: BundleOutcome::Gone,
+                    untouched: None,
+                },
+            ],
+        });
+        let rows: Vec<(&str, &str, Option<&str>, &Value)> = answer
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.path.as_str(),
+                    row.outcome.as_str(),
+                    row.code.as_deref(),
+                    &row.args,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("a.md", "gone", None, &Value::Null),
+                ("d", "remaining", Some("library-write-failed"), &failed),
+                (
+                    "z.md",
+                    "not_found",
+                    Some("not-found"),
+                    &json!({ "path": "z.md" })
+                ),
+            ]
+        );
+        assert_eq!(answer.rows[1].bundle, "b1");
+        assert_eq!(answer.rows[1].mount, "library");
+        let bundles: Vec<(&str, &str, Option<&TrashProblemRow>)> = answer
+            .bundles
+            .iter()
+            .map(|bundle| {
+                (
+                    bundle.bundle.as_str(),
+                    bundle.outcome.as_str(),
+                    bundle.untouched.as_ref(),
+                )
+            })
+            .collect();
+        let untouched = TrashProblemRow {
+            code: "library-unavailable".to_owned(),
+            args: unread,
+        };
+        assert_eq!(
+            bundles,
+            [
+                ("b1", "remaining", None),
+                ("b2", "not_found", None),
+                ("b3", "remaining", Some(&untouched)),
+                ("b4", "gone", None),
+            ]
+        );
+        assert_eq!(answer.bundles[2].mount, "team");
     }
 
     /// Through the port on a real library: a move answers its rows and the mapping its references followed — the

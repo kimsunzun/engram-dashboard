@@ -37,14 +37,15 @@ use crate::commands::{
     AgentDetachPresetOk, AgentFolderRow, AgentOutputFormat, AgentPresetsArgs, AgentPresetsOk,
     AgentPresetsView, AgentRefRow, AgentReorderPresetsArgs, AgentReorderPresetsOk, AgentRosterRow,
     Blank, DeleteItemRow, GitTreeRow, LaunchNoticeRow, LibraryAddMountArgs, LibraryAddMountOk,
-    LibraryCopyArgs, LibraryCopyOk, LibraryDeleteArgs, LibraryDeleteOk, LibraryFoldersArgs,
-    LibraryFoldersOk, LibraryKind, LibraryListArgs, LibraryListOk, LibraryListTrashArgs,
-    LibraryListTrashOk, LibraryMoveArgs, LibraryMoveOk, LibraryNewFileArgs, LibraryNewFileKind,
-    LibraryNewFileOk, LibraryNewFolderArgs, LibraryNewFolderOk, LibraryOnConflict, LibraryReadArgs,
-    LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk,
-    LibraryRelocateMountArgs, LibraryRelocateMountOk, LibraryRemoveMountArgs, LibraryRemoveMountOk,
-    LibraryRenameArgs, LibraryRenameMountArgs, LibraryRenameMountOk, LibraryRenameOk,
-    LibraryRestoreArgs, LibraryRestoreOk, LibraryStatusArgs, LibraryStatusOk, ListRow, MoveItemRow,
+    LibraryCopyArgs, LibraryCopyOk, LibraryDeleteArgs, LibraryDeleteOk, LibraryEmptyTrashArgs,
+    LibraryEmptyTrashOk, LibraryFoldersArgs, LibraryFoldersOk, LibraryKind, LibraryListArgs,
+    LibraryListOk, LibraryListTrashArgs, LibraryListTrashOk, LibraryMoveArgs, LibraryMoveOk,
+    LibraryNewFileArgs, LibraryNewFileKind, LibraryNewFileOk, LibraryNewFolderArgs,
+    LibraryNewFolderOk, LibraryOnConflict, LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs,
+    LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk, LibraryRelocateMountArgs,
+    LibraryRelocateMountOk, LibraryRemoveMountArgs, LibraryRemoveMountOk, LibraryRenameArgs,
+    LibraryRenameMountArgs, LibraryRenameMountOk, LibraryRenameOk, LibraryRestoreArgs,
+    LibraryRestoreOk, LibraryStatusArgs, LibraryStatusOk, ListRow, ListedBundleArg, MoveItemRow,
     MovePairRow, PathReasonRow, PointingRow, PresetAddArgs, PresetAddOk, PresetCheckArgs,
     PresetCheckOk, PresetEntryArg, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs,
     PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk,
@@ -478,6 +479,15 @@ pub trait LibraryCommandHost: Send + Sync {
         keep_both: bool,
         root_generation: Option<u64>,
     ) -> Result<LibraryRestoreOk, PortRefusal>;
+    /// Removes for good the rows each of `bundles` lists (empty-all) and the rows `rows` (permanent delete); neither
+    /// given refuses `InvalidArgument` `nothing-to-empty`. Who may call is the daemon's gate, not the port's.
+    // ADR-0408
+    // ADR-0419
+    fn empty_trash(
+        &self,
+        bundles: &[ListedBundleArg],
+        rows: &[TrashAddressRow],
+    ) -> Result<LibraryEmptyTrashOk, PortRefusal>;
 }
 
 /// The answers of the mount commands carry [`LibraryStatusOk`]'s fields. ★Moved by destructuring (without `..`)★ — if
@@ -1018,13 +1028,22 @@ pub(crate) fn insert(
             blocking_handler(move |_: LibraryListTrashArgs| verb_list_trash(list_trash.as_ref())),
         )
         .expect("could not plug library.listTrash into the table");
-    let restore = library;
+    let restore = Arc::clone(&library);
     table
         .insert(
             "library.restore",
             blocking_handler(move |args: LibraryRestoreArgs| verb_restore(restore.as_ref(), args)),
         )
         .expect("could not plug library.restore into the table");
+    let empty_trash = library;
+    table
+        .insert(
+            "library.emptyTrash",
+            blocking_handler(move |args: LibraryEmptyTrashArgs| {
+                verb_empty_trash(empty_trash.as_ref(), args)
+            }),
+        )
+        .expect("could not plug library.emptyTrash into the table");
 }
 
 fn verb_status(library: &dyn LibraryCommandHost) -> Result<LibraryStatusOk, CommandError> {
@@ -1536,6 +1555,18 @@ fn verb_restore(
             args.root_generation,
         )
         .map_err(|refusal| refusal_error("library.restore", refusal))
+}
+
+fn verb_empty_trash(
+    library: &dyn LibraryCommandHost,
+    args: LibraryEmptyTrashArgs,
+) -> Result<LibraryEmptyTrashOk, CommandError> {
+    library
+        .empty_trash(
+            args.bundles.as_deref().unwrap_or_default(),
+            args.rows.as_deref().unwrap_or_default(),
+        )
+        .map_err(|refusal| refusal_error("library.emptyTrash", refusal))
 }
 
 /// A move's port answer with its agents named. ★Destructured (without `..`)★ — a field added to the port answer stops
@@ -2182,6 +2213,16 @@ pub(crate) mod fake {
                 serde_json::json!({
                     "rows": rows, "keep_both": keep_both, "root_generation": root_generation,
                 }),
+            )
+        }
+        fn empty_trash(
+            &self,
+            bundles: &[ListedBundleArg],
+            rows: &[TrashAddressRow],
+        ) -> Result<LibraryEmptyTrashOk, PortRefusal> {
+            self.answer(
+                "empty_trash",
+                serde_json::json!({ "bundles": bundles, "rows": rows }),
             )
         }
     }
@@ -3979,7 +4020,34 @@ mod tests {
                 json!({ "rows": [row.clone()], "keep_both": true, "root_generation": 2 }),
                 json!({ "items": [] }),
                 "restore",
-                json!({ "rows": [row], "keep_both": true, "root_generation": 2 }),
+                json!({ "rows": [row.clone()], "keep_both": true, "root_generation": 2 }),
+            ),
+            (
+                "library.emptyTrash",
+                json!({ "rows": [row.clone()] }),
+                json!({ "rows": [], "bundles": [] }),
+                "empty_trash",
+                json!({ "bundles": [], "rows": [row.clone()] }),
+            ),
+            (
+                "library.emptyTrash",
+                json!({
+                    "bundles": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "rows": ["rules/a.md", "d"] }],
+                }),
+                json!({ "rows": [], "bundles": [] }),
+                "empty_trash",
+                json!({
+                    "bundles": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "rows": ["rules/a.md", "d"] }],
+                    "rows": [],
+                }),
+            ),
+            // Neither given reaches the port as two empty lists — `nothing-to-empty` is the service's to refuse.
+            (
+                "library.emptyTrash",
+                json!({}),
+                json!({ "rows": [], "bundles": [] }),
+                "empty_trash",
+                json!({ "bundles": [], "rows": [] }),
             ),
         ];
         for (name, args, answer, method, expected) in cases {
@@ -3991,7 +4059,8 @@ mod tests {
     }
 
     /// ADR-0419: a move, a rename and a delete answer the port's rows unchanged, with the agents named from one roster
-    /// read and an id the roster no longer holds dropped; a copy, the trash view and a restore are carried as built.
+    /// read and an id the roster no longer holds dropped; a copy, the trash view, a restore and an emptying are carried as
+    /// built.
     #[test]
     fn file_answers_are_carried_with_the_agents_named_from_the_roster() {
         let (bob, ann, gone) = (AgentId::new_v4(), AgentId::new_v4(), AgentId::new_v4());
@@ -4048,6 +4117,22 @@ mod tests {
             "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "a.md", "status": "conflict",
             "to": null, "code": "name-exists", "args": { "path": "library/a.md" },
         }] });
+        let emptied = json!({
+            "rows": [
+                { "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "a.md", "outcome": "gone", "code": null, "args": null },
+                {
+                    "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "d", "outcome": "remaining",
+                    "code": "library-write-failed", "args": { "path": "d/x.md", "os_error": 5 },
+                },
+            ],
+            "bundles": [
+                { "mount": "library", "bundle": "20261123T081500Z-abc123", "outcome": "remaining", "untouched": null },
+                {
+                    "mount": "team", "bundle": "20261123T081500Z-def456", "outcome": "remaining",
+                    "untouched": { "code": "library-unavailable", "args": { "mount": "team", "message": "m" } },
+                },
+            ],
+        });
         for (name, args, answer) in [
             (
                 "library.copy",
@@ -4060,6 +4145,11 @@ mod tests {
                 json!({ "rows": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "a.md" }] }),
                 restored,
             ),
+            (
+                "library.emptyTrash",
+                json!({ "rows": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "a.md" }] }),
+                emptied,
+            ),
         ] {
             let library = FakeLibrary::answering(Ok(answer.clone()));
             let out = call(&table(roster(), library), name, args).expect("answer");
@@ -4069,7 +4159,7 @@ mod tests {
 
     /// ADR-0419: a file verb's refusal maps as every library refusal does — the plan, its digest and the forms of a
     /// `delete-unconfirmed` or `skill-unconfirmed`, and the stagings a refusal met after copying names, reach the caller
-    /// untouched in `args.args`, the message naming the command.
+    /// untouched in `args.args`, the message naming the command; an emptying of nothing is INVALID_ARGUMENT.
     #[test]
     fn a_file_refusal_carries_its_plan_forms_and_stagings_untouched() {
         let plan = json!({
@@ -4139,6 +4229,28 @@ mod tests {
             (
                 "library.listTrash",
                 json!({}),
+                refused(
+                    PortClass::Unavailable,
+                    "library-unavailable",
+                    json!({ "message": "m" }),
+                    None,
+                ),
+                ErrorCode::Conflict,
+            ),
+            (
+                "library.emptyTrash",
+                json!({}),
+                refused(
+                    PortClass::InvalidArgument,
+                    "nothing-to-empty",
+                    json!({}),
+                    None,
+                ),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                "library.emptyTrash",
+                json!({ "rows": [] }),
                 refused(
                     PortClass::Unavailable,
                     "library-unavailable",

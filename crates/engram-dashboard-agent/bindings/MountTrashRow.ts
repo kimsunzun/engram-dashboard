@@ -7,7 +7,9 @@ import type { TrashProblemRow } from "./TrashProblemRow";
  */
 export type MountTrashRow = { mount: string, 
 /**
- * Why its trash could not be listed (`bundles` is then empty); `null` = listed.
+ * Why its trash could not be listed (`bundles` is then empty): `trash-unusable` `{mount, why}` (its `.trash`
+ * is a link or not a folder) or `library-unavailable` `{mount, message}` (not read in time, or held as
+ * overlapping another mount); `null` = listed.
  */
 problem?: TrashProblemRow | null, 
 /**
