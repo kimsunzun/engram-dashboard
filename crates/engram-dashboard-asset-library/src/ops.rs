@@ -209,7 +209,7 @@ use crate::{
 
 /// The code of a delete whose items are referenced, refused for the whole call (`Conflict`; `args` = `{plan,
 /// plan_digest, forms}` — the referencing preset files and agents, and the two ways to go on: `yes` keeps the
-/// references, `yes` + `detachRefs` + that `plan_digest` removes them).
+/// references, `yes` + `detach_refs` + that `plan_digest` removes them).
 // ADR-0339
 // ADR-0409 decision 2
 pub const DELETE_UNCONFIRMED: &str = "delete-unconfirmed";
@@ -351,12 +351,14 @@ pub struct DeletePlan {
     pub presets: Vec<String>,
     /// The agents attaching a deleted preset, `(id, name)` in id order.
     pub agents: Vec<(AgentId, String)>,
-    /// What `yes` + `detachRefs` must carry.
+    /// What `yes` + `detach_refs` must carry.
     pub plan_digest: String,
 }
 
 impl DeletePlan {
-    /// The refusal's `args`.
+    /// The refusal's `args` — its `forms` are the arguments to add to the same call, spelled as the commands declare
+    /// them, so a caller can send them back as they are.
+    // ADR-0419
     pub fn to_json(&self) -> Value {
         json!({
             "plan": {
@@ -369,7 +371,7 @@ impl DeletePlan {
             "plan_digest": self.plan_digest,
             "forms": {
                 "keep": { "yes": true },
-                "detach": { "yes": true, "detachRefs": true, "plan_digest": self.plan_digest },
+                "detach": { "yes": true, "detach_refs": true, "plan_digest": self.plan_digest },
             },
         })
     }

@@ -70,7 +70,8 @@
 ///
 /// ## Deadline class — `#[deadline(Launch)]` (ADR-0369)
 ///
-/// Written after `#[since(...)]` on a command that creates and starts an agent or starts / resumes one:
+/// Written after `#[since(...)]` on a command that creates and starts an agent or starts / resumes one, or on a library
+/// file command that can outlast the ordinary wait (ADR-0419):
 ///
 /// ```ignore
 ///     #[effect(Write)]

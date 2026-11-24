@@ -13,16 +13,17 @@ use std::sync::Arc;
 use crate::conn_port::ConnId;
 use engram_dashboard_agent::commands::{
     make_table, resolve_in, AgentBackend, AgentCommandHost, AgentOutputFormat, AgentRosterRow,
-    LibraryAddMountOk, LibraryCommandHost, LibraryFoldersOk, LibraryKind, LibraryListOk,
-    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk,
-    LibraryRenameMountOk, LibraryStatusOk, PresetAddOk, PresetCheckOk, PresetPreviewFolderOk,
-    PresetSection, PresetSetBackendOk, PresetView, RefreshErrorRow, RosterChanged,
-    UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
+    LibraryAddMountOk, LibraryCommandHost, LibraryCopyOk, LibraryFoldersOk, LibraryKind,
+    LibraryListOk, LibraryListTrashOk, LibraryNewFileKind, LibraryOnConflict, LibraryRefreshOk,
+    LibraryRelinkOk, LibraryRemoveMountOk, LibraryRenameMountOk, LibraryRestoreOk, LibraryStatusOk,
+    PresetAddOk, PresetCheckOk, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk,
+    PresetView, RefreshErrorRow, RosterChanged, TrashAddressRow, UsageCommandHost, UsageVendorRow,
+    INPUT_AFFECTING,
 };
 use engram_dashboard_agent::launch::{escape_controls, Reason};
 use engram_dashboard_agent::library_commands::{
-    AgentAttachPortAnswer, AgentPresetsPortView, LibraryReadView, NewAgentPresets, PortClass,
-    PortRefusal, PresetDraftInput, PresetEntries,
+    AgentAttachPortAnswer, AgentPresetsPortView, DeletePortAnswer, LibraryReadView, MovePortAnswer,
+    NewAgentPresets, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
 };
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::profile::AgentProfile;
@@ -363,6 +364,60 @@ impl LibraryCommandHost for NoLibrary {
     ) -> Result<NewAgentPresets, PortRefusal> {
         judge_new_presets_with_no_library(profile, presets, NO_LIBRARY)
     }
+    #[allow(clippy::too_many_arguments)]
+    fn move_items(
+        &self,
+        _paths: &[String],
+        _to_folder: &str,
+        _on_conflict: Option<LibraryOnConflict>,
+        _yes: bool,
+        _detach_refs: bool,
+        _plan_digest: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<MovePortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn rename(
+        &self,
+        _path: &str,
+        _name: &str,
+        _yes: bool,
+        _detach_refs: bool,
+        _plan_digest: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<MovePortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn copy_items(
+        &self,
+        _paths: &[String],
+        _to_folder: &str,
+        _on_conflict: Option<LibraryOnConflict>,
+        _root_generation: Option<u64>,
+    ) -> Result<LibraryCopyOk, PortRefusal> {
+        Self::refused()
+    }
+    fn delete(
+        &self,
+        _paths: &[String],
+        _yes: bool,
+        _detach_refs: bool,
+        _plan_digest: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<DeletePortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn list_trash(&self) -> Result<LibraryListTrashOk, PortRefusal> {
+        Self::refused()
+    }
+    fn restore(
+        &self,
+        _rows: &[TrashAddressRow],
+        _keep_both: bool,
+        _root_generation: Option<u64>,
+    ) -> Result<LibraryRestoreOk, PortRefusal> {
+        Self::refused()
+    }
 }
 
 /// The only place that calls this table — the three surfaces come in here.
@@ -643,7 +698,7 @@ mod tests {
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 32] = [
+        const BUS_ONLY: [&str; 38] = [
             "agent.attachPreset",
             "agent.cancelQueuedInput",
             "agent.detachPreset",
@@ -655,8 +710,12 @@ mod tests {
             "agent.resolve",
             "agent.setWorkspace",
             "library.addMount",
+            "library.copy",
+            "library.delete",
             "library.folders",
             "library.list",
+            "library.listTrash",
+            "library.move",
             "library.newFile",
             "library.newFolder",
             "library.read",
@@ -664,7 +723,9 @@ mod tests {
             "library.relink",
             "library.relocateMount",
             "library.removeMount",
+            "library.rename",
             "library.renameMount",
+            "library.restore",
             "library.status",
             "preset.add",
             "preset.check",
@@ -1692,5 +1753,43 @@ mod tests {
             err.message(),
             "command handler panicked: body panic · marked false"
         );
+    }
+
+    /// ADR-0419: with no library service every file and trash command answers `library-unavailable` (`Unavailable` —
+    /// CONFLICT on the bus), as the other library commands do.
+    #[test]
+    fn no_library_answers_every_file_command_library_unavailable() {
+        fn code<T: std::fmt::Debug>(answer: Result<T, PortRefusal>) -> (PortClass, String) {
+            match answer {
+                Err(PortRefusal::Refused { class, reason }) => (class, reason.code),
+                other => panic!("expected a refusal: {other:?}"),
+            }
+        }
+        let paths = ["library/a.md".to_owned()];
+        let row = TrashAddressRow {
+            mount: "library".to_owned(),
+            bundle: "20261123T081500Z-abc123".to_owned(),
+            path: "a.md".to_owned(),
+        };
+        let unavailable = (PortClass::Unavailable, LIBRARY_UNAVAILABLE.to_owned());
+        let library = NoLibrary;
+        assert_eq!(
+            code(library.move_items(&paths, "library/b", None, false, false, None, None)),
+            unavailable
+        );
+        assert_eq!(
+            code(library.rename("library/a.md", "b.md", false, false, None, None)),
+            unavailable
+        );
+        assert_eq!(
+            code(library.copy_items(&paths, "library/b", None, None)),
+            unavailable
+        );
+        assert_eq!(
+            code(library.delete(&paths, false, false, None, None)),
+            unavailable
+        );
+        assert_eq!(code(library.list_trash()), unavailable);
+        assert_eq!(code(library.restore(&[row], false, None)), unavailable);
     }
 }

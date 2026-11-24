@@ -13,10 +13,11 @@ use uuid::Uuid;
 use engram_dashboard_agent::backend;
 use engram_dashboard_agent::commands::{
     make_table, AgentBackend, AgentCommandHost, AgentOutputFormat as DeclaredOutputFormat,
-    LibraryAddMountOk, LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryNewFileKind,
-    LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryRenameMountOk, LibraryStatusOk,
-    PresetAddOk, PresetCheckOk, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk,
-    PresetView, RosterChanged, UsageCommandHost, UsageVendorRow,
+    LibraryAddMountOk, LibraryCopyOk, LibraryFoldersOk, LibraryKind, LibraryListOk,
+    LibraryListTrashOk, LibraryNewFileKind, LibraryOnConflict, LibraryRefreshOk, LibraryRelinkOk,
+    LibraryRemoveMountOk, LibraryRenameMountOk, LibraryRestoreOk, LibraryStatusOk, PresetAddOk,
+    PresetCheckOk, PresetPreviewFolderOk, PresetSection, PresetSetBackendOk, PresetView,
+    RosterChanged, TrashAddressRow, UsageCommandHost, UsageVendorRow,
 };
 use engram_dashboard_agent::failure::AgentFailureKind;
 use engram_dashboard_agent::launch::{
@@ -24,8 +25,9 @@ use engram_dashboard_agent::launch::{
     LaunchKitSource, LaunchPlan, LaunchPorts, NoopLaunchKits, Notice, PrepareError, Reason,
 };
 use engram_dashboard_agent::library_commands::{
-    AgentAttachPortAnswer, AgentPresetsPortView, LibraryCommandHost, LibraryReadView,
-    NewAgentPresets, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
+    AgentAttachPortAnswer, AgentPresetsPortView, DeletePortAnswer, LibraryCommandHost,
+    LibraryReadView, MovePortAnswer, NewAgentPresets, PortClass, PortRefusal, PresetDraftInput,
+    PresetEntries,
 };
 use engram_dashboard_agent::manager::{Activated, AgentManager, NoticeDelivery};
 use engram_dashboard_agent::persistence::FileProfileStore;
@@ -1689,6 +1691,60 @@ impl LibraryCommandHost for NoLibrary {
         _: &[String],
         _: Option<u64>,
     ) -> Result<NewAgentPresets, PortRefusal> {
+        Self::refused()
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn move_items(
+        &self,
+        _: &[String],
+        _: &str,
+        _: Option<LibraryOnConflict>,
+        _: bool,
+        _: bool,
+        _: Option<&str>,
+        _: Option<u64>,
+    ) -> Result<MovePortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn rename(
+        &self,
+        _: &str,
+        _: &str,
+        _: bool,
+        _: bool,
+        _: Option<&str>,
+        _: Option<u64>,
+    ) -> Result<MovePortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn copy_items(
+        &self,
+        _: &[String],
+        _: &str,
+        _: Option<LibraryOnConflict>,
+        _: Option<u64>,
+    ) -> Result<LibraryCopyOk, PortRefusal> {
+        Self::refused()
+    }
+    fn delete(
+        &self,
+        _: &[String],
+        _: bool,
+        _: bool,
+        _: Option<&str>,
+        _: Option<u64>,
+    ) -> Result<DeletePortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn list_trash(&self) -> Result<LibraryListTrashOk, PortRefusal> {
+        Self::refused()
+    }
+    fn restore(
+        &self,
+        _: &[TrashAddressRow],
+        _: bool,
+        _: Option<u64>,
+    ) -> Result<LibraryRestoreOk, PortRefusal> {
         Self::refused()
     }
 }

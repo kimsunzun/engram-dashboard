@@ -343,23 +343,31 @@ impl BundleId {
         UNIX_EPOCH + Duration::from_secs(self.secs)
     }
 
+    /// [`BundleId::deleted_at`] as RFC 3339 UTC (`2026-11-23T08:15:00Z`) — the trash view's `deleted_at`.
+    // ADR-0419
+    pub fn deleted_at_rfc3339(&self) -> String {
+        let (year, month, day, hour, minute, second) = civil_time(self.secs);
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    }
+
     /// The store's name for this bundle folder.
     pub fn bundle(&self) -> TrashBundle {
         TrashBundle(self.text.clone())
     }
 
     fn at(secs: u64, short: &str) -> Self {
-        let days = i64::try_from(secs / 86_400).expect("a u64 of days fits");
-        let (year, month, day) = civil_from_days(days);
-        let rest = secs % 86_400;
-        let text = format!(
-            "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z-{short}",
-            rest / 3_600,
-            rest / 60 % 60,
-            rest % 60
-        );
+        let (year, month, day, hour, minute, second) = civil_time(secs);
+        let text = format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z-{short}");
         BundleId { text, secs }
     }
+}
+
+/// `secs` since 1970 as the UTC date and time of day: year, month, day, hour, minute, second.
+fn civil_time(secs: u64) -> (i64, u32, u32, u64, u64, u64) {
+    let days = i64::try_from(secs / 86_400).expect("a u64 of days fits");
+    let (year, month, day) = civil_from_days(days);
+    let rest = secs % 86_400;
+    (year, month, day, rest / 3_600, rest / 60 % 60, rest % 60)
 }
 
 /// 24 random bits: std's per-process random hasher keys over a counter and the clock.

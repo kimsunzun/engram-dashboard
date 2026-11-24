@@ -763,8 +763,8 @@ mod tests {
             .collect();
         assert_eq!(
             names.len(),
-            24,
-            "12 library, 8 preset and 4 agent-preset commands are declared: {names:?}"
+            30,
+            "18 library, 8 preset and 4 agent-preset commands are declared: {names:?}"
         );
         for name in names {
             // A whole word — `agent.presets` must not pass on the strength of `agent.presetsX`.
@@ -792,6 +792,11 @@ mod tests {
             "ok · missing (not there, or not a folder) · unreadable (there but could not be read, did not answer, or overlaps",
             "A start leaves a missing item out and names it in notices",
             "folder-unreadable",
+            // ADR-0419: the file commands' rows, their confirmation, an answer that never came, and where emptying is.
+            "status done · skipped · conflict · failed",
+            "--yes true --detach_refs true --plan_digest",
+            "the outcome is unknown and the command may still be running — do not repeat it",
+            "Emptying the trash and deleting for good are done by the user in the library screen.",
         ] {
             assert!(
                 library.contains(taught),

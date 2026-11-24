@@ -14,7 +14,11 @@
 //!   same store error); agent picks the bus code (ADR-0379). `list`'s bare reason (`library-unavailable`) gets class
 //!   `Unavailable`.
 //! - **Agents cross by id.** The agent-preset views carry the agent's id and no name — agent names it from its own
-//!   resolution of `target` (ADR-0386 decision 3).
+//!   resolution of `target` (ADR-0386 decision 3); so do a move's, rename's and delete's answers, named from agent's
+//!   roster read.
+//! - **A file operation answers one flat row per item** (`library.move` … `library.restore`): the service's outcome
+//!   becomes `status` plus the done fields, or the reason's `code` and `args` as built — only a skip's reason is made
+//!   here, its code per [`Skip`] variant. The trash view's `restorable` is restore's own admission of a row (ADR-0419).
 // ADR-0311
 // ADR-0379
 // ADR-0384
@@ -22,24 +26,29 @@
 
 use std::path::Path;
 
+use serde_json::{json, Value};
+
 use engram_dashboard_agent::backend::settings_check::{
     FolderLoad, FolderLoadKind, FolderLoadSet, FolderUnsure, UnsureWhy,
 };
 use engram_dashboard_agent::commands::{
-    self as declared, launch_notice_row, AgentFolderRow, AgentOutputFormat, FolderLoadKindWord,
-    FolderRow, LibraryAddMountOk, LibraryFolderRow, LibraryFoldersOk, LibraryKind, LibraryListOk,
-    LibraryNewFileKind, LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk,
-    LibraryRenameMountOk, LibraryStatusOk, ListFolderRow, MountStatusRow, PathReasonRow,
-    PointingRow, PresetAddOk, PresetCheckOk, PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk,
-    PresetSection, PresetSetBackendOk, PreviewItemRow, PreviewLoadRow, PreviewRefusalRow,
-    PreviewSetRow, PreviewSkillNameRow, PreviewUnsureRow, ReasonRow, RefreshErrorRow,
-    RelinkPairRow, SkippedRow, UnavailableMountRow,
+    self as declared, launch_notice_row, AgentFolderRow, AgentOutputFormat, CopyItemRow,
+    DeleteItemRow, FolderLoadKindWord, FolderRow, GitTreeRow, LibraryAddMountOk, LibraryCopyOk,
+    LibraryFolderRow, LibraryFoldersOk, LibraryKind, LibraryListOk, LibraryListTrashOk,
+    LibraryNewFileKind, LibraryOnConflict, LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk,
+    LibraryRenameMountOk, LibraryRestoreOk, LibraryStatusOk, ListFolderRow, MountStatusRow,
+    MountTrashRow, MoveItemRow, MovePairRow, PathReasonRow, PointingRow, PresetAddOk,
+    PresetCheckOk, PresetEntryArg, PresetEntryRow, PresetPreviewFolderOk, PresetSection,
+    PresetSetBackendOk, PreviewItemRow, PreviewLoadRow, PreviewRefusalRow, PreviewSetRow,
+    PreviewSkillNameRow, PreviewUnsureRow, ReasonRow, RefreshErrorRow, RelinkPairRow,
+    RestoreItemRow, SkippedRow, TrashAddressRow, TrashBundleRow, TrashProblemRow, TrashViewRow,
+    UnavailableMountRow,
 };
 use engram_dashboard_agent::launch::Reason;
 use engram_dashboard_agent::library_commands::{
-    problem_row, relink_stop_row, AgentAttachPortAnswer, AgentPresetsPortView, LibraryCommandHost,
-    LibraryReadView, NewAgentPresets, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
-    REMOVE_OUTCOME_REMOVED, REMOVE_OUTCOME_SAVED_ONLY,
+    problem_row, relink_stop_row, AgentAttachPortAnswer, AgentPresetsPortView, DeletePortAnswer,
+    LibraryCommandHost, LibraryReadView, MovePortAnswer, NewAgentPresets, PortClass, PortRefusal,
+    PresetDraftInput, PresetEntries, REMOVE_OUTCOME_REMOVED, REMOVE_OUTCOME_SAVED_ONLY,
 };
 use engram_dashboard_agent::profile::{AgentOutputFormat as CoreOutputFormat, AgentProfile};
 use engram_dashboard_agent::types::AgentId;
@@ -47,16 +56,23 @@ use engram_dashboard_agent::types::AgentId;
 use crate::agent_edit::{judge_new_presets_without_library, AgentPresetsView, NewPresets};
 use crate::catalog::ItemKind;
 use crate::config::ConfigHealth;
-use crate::create::NewFileKind;
+use crate::create::{NewFileKind, NAME_EXISTS};
 use crate::edit::{
     lib_path, parse_ref, read_path, AddEntries, CheckAnswer, FolderPreview, NewItem, PartialEdit,
     PresetDraft, PresetFolder, PresetRow, RemoveEntries, Skipped,
 };
 use crate::folder::{slash_path, FolderStatus};
 use crate::format::ListName;
+use crate::mounts::{admits_inside, virtual_path};
+use crate::ops::{
+    reason, Copied, CopyAnswer, CopyItem, DeleteAnswer, DeleteItem, MoveAnswer, MoveItem, Moved,
+    OnConflict, Outcome, RestoreAnswer, RestoreItem, Skip, TrashAddress,
+};
 use crate::relink::RelinkAnswer;
-use crate::rename::RenameAnswer;
+use crate::rename::{GitTree, RenameAnswer};
 use crate::resolve::ResolvedFolder;
+use crate::store::EntryKind;
+use crate::trash::{BundleView, MountTrash, RootState, RowKind, RowSource, TrashListing, TrashRow};
 use crate::{
     FoldersAnswer, LibraryRefusal, LibraryService, LibraryStatus, ListAnswer, ListFilter, ListRow,
     MountState, Pointing, ReadAnswer, RefreshReport, RefusalClass, Removal, UnavailableMount,
@@ -400,7 +416,117 @@ impl LibraryCommandHost for LibraryService {
             .map(new_presets)
             .map_err(port)
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn move_items(
+        &self,
+        paths: &[String],
+        to_folder: &str,
+        on_conflict: Option<LibraryOnConflict>,
+        yes: bool,
+        detach_refs: bool,
+        plan_digest: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<MovePortAnswer, PortRefusal> {
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        LibraryService::move_items(
+            self,
+            &paths,
+            to_folder,
+            on_conflict.map(on_conflict_of),
+            yes,
+            detach_refs,
+            plan_digest,
+            root_generation,
+        )
+        .map(|answer| move_answer("library.move", answer))
+        .map_err(port)
+    }
+
+    fn rename(
+        &self,
+        path: &str,
+        name: &str,
+        yes: bool,
+        detach_refs: bool,
+        plan_digest: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<MovePortAnswer, PortRefusal> {
+        LibraryService::rename(
+            self,
+            path,
+            name,
+            yes,
+            detach_refs,
+            plan_digest,
+            root_generation,
+        )
+        .map(|answer| move_answer("library.rename", answer))
+        .map_err(port)
+    }
+
+    fn copy_items(
+        &self,
+        paths: &[String],
+        to_folder: &str,
+        on_conflict: Option<LibraryOnConflict>,
+        root_generation: Option<u64>,
+    ) -> Result<LibraryCopyOk, PortRefusal> {
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        LibraryService::copy_items(
+            self,
+            &paths,
+            to_folder,
+            on_conflict.map(on_conflict_of),
+            root_generation,
+        )
+        .map(copy_ok)
+        .map_err(port)
+    }
+
+    fn delete(
+        &self,
+        paths: &[String],
+        yes: bool,
+        detach_refs: bool,
+        plan_digest: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<DeletePortAnswer, PortRefusal> {
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        LibraryService::delete(self, &paths, yes, detach_refs, plan_digest, root_generation)
+            .map(delete_answer)
+            .map_err(port)
+    }
+
+    fn list_trash(&self) -> Result<LibraryListTrashOk, PortRefusal> {
+        Ok(trash_ok(LibraryService::trash_view(self)))
+    }
+
+    fn restore(
+        &self,
+        rows: &[TrashAddressRow],
+        keep_both: bool,
+        root_generation: Option<u64>,
+    ) -> Result<LibraryRestoreOk, PortRefusal> {
+        let rows: Vec<TrashAddress> = rows.iter().map(trash_address).collect();
+        LibraryService::restore(self, &rows, keep_both, root_generation)
+            .map(restore_ok)
+            .map_err(port)
+    }
 }
+
+/// The skip code of a path given with a folder above it in the same call — only the folder counts (`args` =
+/// `{folder}`).
+// ADR-0419
+const INSIDE_GIVEN_FOLDER: &str = "inside-given-folder";
+/// The skip code of a move into the folder the item is in, or a rename to its own spelling (`args` = `{}`).
+// ADR-0419
+const IN_PLACE: &str = "in-place";
+/// The skip code of a name taken at the destination during a staging copy under `on_conflict` `Skip` (`args` = `{path}`
+/// plus the staging's keys — `staging_row`, or `staging` · `staging_disk` · `staging_kept`).
+// ADR-0416
+// ADR-0419
+const NAME_TAKEN_DURING_COPY: &str = "name-taken-during-copy";
 
 /// The `agent.new {presets}` judgement of an assembly that runs no library service (the daemon's `NoLibrary`): the
 /// attach rule with no catalog — a library preset refuses the whole call `Unavailable` · `library-unavailable`
@@ -606,7 +732,7 @@ fn relink_ok(answer: RelinkAnswer) -> LibraryRelinkOk {
             .collect(),
         stopped: answer
             .stopped
-            .map(|stop| relink_stop_row(stop.path, port(stop.refusal))),
+            .map(|stop| relink_stop_row("library.relink", stop.path, port(stop.refusal))),
     }
 }
 
@@ -626,9 +752,298 @@ fn rename_ok(answer: RenameAnswer) -> LibraryRenameMountOk {
             .collect(),
         answer
             .stopped
-            .map(|stop| relink_stop_row(stop.path, port(stop.refusal))),
+            .map(|stop| relink_stop_row("library.relink", stop.path, port(stop.refusal))),
         pointing_row(answer.already_pointing),
     )
+}
+
+fn on_conflict_of(word: LibraryOnConflict) -> OnConflict {
+    match word {
+        LibraryOnConflict::Overwrite => OnConflict::Overwrite,
+        LibraryOnConflict::Skip => OnConflict::Skip,
+        LibraryOnConflict::KeepBoth => OnConflict::KeepBoth,
+    }
+}
+
+fn address_row(row: TrashAddress) -> TrashAddressRow {
+    TrashAddressRow {
+        mount: row.mount,
+        bundle: row.bundle,
+        path: row.path,
+    }
+}
+
+fn trash_address(row: &TrashAddressRow) -> TrashAddress {
+    TrashAddress {
+        mount: row.mount.clone(),
+        bundle: row.bundle.clone(),
+        path: row.path.clone(),
+    }
+}
+
+/// One item's outcome as a flat row's `status`, `code` and `args`, and what a `done` item came to. A non-`done` row
+/// carries its reason's code and args as built — a skip's reason is made here (its code per [`Skip`] variant); a
+/// per-item reason never has a `line`, so none is carried.
+// ADR-0419
+fn outcome_parts<T>(outcome: Outcome<T>) -> (String, Option<String>, Value, Option<T>) {
+    let (status, why, done) = match outcome {
+        Outcome::Done(done) => ("done", None, Some(done)),
+        Outcome::Skipped(skip) => ("skipped", Some(skip_reason(skip)), None),
+        Outcome::Conflict(why) => ("conflict", Some(why), None),
+        Outcome::Failed(why) => ("failed", Some(why), None),
+    };
+    let (code, args) = match why {
+        Some(Reason { code, args, .. }) => (Some(code), args),
+        None => (None, Value::Null),
+    };
+    (status.to_owned(), code, args, done)
+}
+
+/// Why an item was skipped, as a reason: [`INSIDE_GIVEN_FOLDER`] `{folder}` · [`IN_PLACE`] `{}` · `name-exists`
+/// `{path}` · [`NAME_TAKEN_DURING_COPY`] `{path, …staging}`.
+// ADR-0419
+fn skip_reason(skip: Skip) -> Reason {
+    match skip {
+        Skip::Inside(folder) => reason(INSIDE_GIVEN_FOLDER, json!({ "folder": folder })),
+        Skip::InPlace => reason(IN_PLACE, json!({})),
+        Skip::Taken(path) => reason(NAME_EXISTS, json!({ "path": path })),
+        Skip::TakenDuringCopy { path, mut staging } => {
+            staging["path"] = json!(path);
+            reason(NAME_TAKEN_DURING_COPY, staging)
+        }
+    }
+}
+
+/// A move's or rename's answer in declared rows, the agents by id; `command` names a `stopped` row's message.
+// ADR-0419
+fn move_answer(command: &str, answer: MoveAnswer) -> MovePortAnswer {
+    MovePortAnswer {
+        items: answer
+            .items
+            .into_iter()
+            .map(|MoveItem { path, outcome }| {
+                let (status, code, args, done) = outcome_parts(outcome);
+                let (to, trashed, original, left) = match done {
+                    Some(Moved {
+                        to,
+                        trashed,
+                        original,
+                        left,
+                    }) => (
+                        Some(to),
+                        trashed.into_iter().map(address_row).collect(),
+                        original.map(address_row),
+                        left.into_iter()
+                            .map(|(path, why)| path_reason(path, why))
+                            .collect(),
+                    ),
+                    None => (None, Vec::new(), None, Vec::new()),
+                };
+                MoveItemRow {
+                    path,
+                    status,
+                    to,
+                    trashed,
+                    original,
+                    left,
+                    code,
+                    args,
+                }
+            })
+            .collect(),
+        mapping: answer
+            .mapping
+            .into_iter()
+            .map(|(from, to, exact)| MovePairRow { from, to, exact })
+            .collect(),
+        detached: answer.detached,
+        written: answer.written,
+        skipped: answer
+            .skipped
+            .into_iter()
+            .map(|skip| path_reason(skip.path, skip.reason))
+            .collect(),
+        trees: answer.trees.into_iter().map(git_tree_row).collect(),
+        agents: answer.agents,
+        stopped: answer
+            .stopped
+            .map(|stop| relink_stop_row(command, stop.path, port(stop.refusal))),
+    }
+}
+
+fn git_tree_row((mount, tree): (String, GitTree)) -> GitTreeRow {
+    let (git, top) = match tree {
+        GitTree::At(top) => (Some(true), Some(top.display().to_string())),
+        GitTree::Outside => (Some(false), None),
+        GitTree::Unknown => (None, None),
+    };
+    GitTreeRow { mount, git, top }
+}
+
+fn copy_ok(answer: CopyAnswer) -> LibraryCopyOk {
+    LibraryCopyOk {
+        items: answer
+            .items
+            .into_iter()
+            .map(|CopyItem { path, outcome }| {
+                let (status, code, args, done) = outcome_parts(outcome);
+                let (to, trashed) = match done {
+                    Some(Copied { to, trashed }) => {
+                        (Some(to), trashed.into_iter().map(address_row).collect())
+                    }
+                    None => (None, Vec::new()),
+                };
+                CopyItemRow {
+                    path,
+                    status,
+                    to,
+                    trashed,
+                    code,
+                    args,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn delete_answer(answer: DeleteAnswer) -> DeletePortAnswer {
+    DeletePortAnswer {
+        items: answer
+            .items
+            .into_iter()
+            .map(|DeleteItem { path, outcome }| {
+                let (status, code, args, done) = outcome_parts(outcome);
+                DeleteItemRow {
+                    path,
+                    status,
+                    trashed: done.map(address_row),
+                    code,
+                    args,
+                }
+            })
+            .collect(),
+        detached: answer.detached,
+        written: answer.written,
+        skipped: answer
+            .skipped
+            .into_iter()
+            .map(|skip| path_reason(skip.path, skip.reason))
+            .collect(),
+        agents: answer.agents,
+        stopped: answer
+            .stopped
+            .map(|stop| relink_stop_row("library.delete", stop.path, port(stop.refusal))),
+    }
+}
+
+fn restore_ok(answer: RestoreAnswer) -> LibraryRestoreOk {
+    LibraryRestoreOk {
+        items: answer
+            .items
+            .into_iter()
+            .map(|RestoreItem { row, outcome }| {
+                let (status, code, args, to) = outcome_parts(outcome);
+                RestoreItemRow {
+                    mount: row.mount,
+                    bundle: row.bundle,
+                    path: row.path,
+                    status,
+                    to,
+                    code,
+                    args,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn trash_ok(listing: TrashListing) -> LibraryListTrashOk {
+    LibraryListTrashOk {
+        mounts: listing.mounts.iter().map(mount_trash_row).collect(),
+    }
+}
+
+fn mount_trash_row(trash: &MountTrash) -> MountTrashRow {
+    let (problem, bundles) = match &trash.view {
+        Ok(bundles) => (
+            None,
+            bundles
+                .iter()
+                .map(|bundle| bundle_row(trash, bundle))
+                .collect(),
+        ),
+        Err(why) => (
+            Some(TrashProblemRow {
+                code: why.code.clone(),
+                args: why.args.clone(),
+            }),
+            Vec::new(),
+        ),
+    };
+    MountTrashRow {
+        mount: trash.mount.as_str().to_owned(),
+        problem,
+        bundles,
+    }
+}
+
+fn bundle_row(trash: &MountTrash, bundle: &BundleView) -> TrashBundleRow {
+    let (source, why) = match &bundle.source {
+        RowSource::Record => ("record", None),
+        RowSource::NoRecord => ("no_record", None),
+        RowSource::Unreadable { why } => ("record_unreadable", Some(why.clone())),
+        RowSource::Unchecked => ("unchecked", None),
+    };
+    TrashBundleRow {
+        bundle: bundle.id.as_str().to_owned(),
+        deleted_at: bundle.id.deleted_at_rfc3339(),
+        source: source.to_owned(),
+        why,
+        trouble: bundle.trouble.clone(),
+        rows: bundle.rows.iter().map(|row| view_row(trash, row)).collect(),
+    }
+}
+
+/// A trash row as declared — `restorable` as `library.restore` admits a row before anything else: a root or found row,
+/// no staging, present, and an original that holds no dot or temp name (ops `restorable`).
+// ADR-0419
+fn view_row(trash: &MountTrash, row: &TrashRow) -> TrashViewRow {
+    let original = trash.original(row);
+    let (state, entry, why) = match &row.state {
+        RootState::Present(kind) => {
+            let entry = match kind {
+                EntryKind::File => "file",
+                EntryKind::Folder => "folder",
+                EntryKind::Link => "link",
+            };
+            ("present", Some(entry.to_owned()), None)
+        }
+        RootState::ThroughLink => ("through_link", None, None),
+        RootState::Failed(why) => ("failed", None, Some(why.clone())),
+    };
+    let kind = match row.kind {
+        RowKind::Root => "root",
+        RowKind::Found => "found",
+        RowKind::Other => "other",
+    };
+    let restorable = row.kind != RowKind::Other
+        && !row.staging
+        && matches!(row.state, RootState::Present(_))
+        && admits_inside(&original);
+    TrashViewRow {
+        path: row.path.as_str().to_owned(),
+        original: original.as_str().to_owned(),
+        kind: kind.to_owned(),
+        state: state.to_owned(),
+        entry,
+        why,
+        staging: row.staging,
+        intended: row
+            .intended
+            .as_ref()
+            .map(|path| virtual_path(&trash.mount, Some(path)).as_str().to_owned()),
+        restorable,
+    }
 }
 
 fn preset_view(view: crate::edit::PresetView) -> declared::PresetView {
@@ -2996,5 +3411,697 @@ mod tests {
         assert_eq!(judged.attachments.presets, Vec::new());
         assert_eq!(judged.skipped.len(), 1);
         assert_eq!(judged.skipped[0].code, crate::edit::ALREADY_PRESENT);
+    }
+
+    // ── files and trash (ADR-0419) ───────────────────────────────────────────────────────────────────────────────
+
+    fn address(bundle: &str, path: &str) -> TrashAddress {
+        TrashAddress {
+            mount: "library".to_owned(),
+            bundle: bundle.to_owned(),
+            path: path.to_owned(),
+        }
+    }
+
+    fn address_json(bundle: &str, path: &str) -> Value {
+        json!({ "mount": "library", "bundle": bundle, "path": path })
+    }
+
+    fn why(code: &str, args: Value) -> Reason {
+        Reason {
+            code: code.to_owned(),
+            args,
+            line: None,
+        }
+    }
+
+    /// Every outcome lands on its flat row and every skip on its code: `done` fills the result fields and leaves
+    /// `code` / `args` null; a skip's reason is made here (`inside-given-folder` `{folder}` · `in-place` `{}` ·
+    /// `name-exists` `{path}` · `name-taken-during-copy` `{path, …staging}`); a conflict and a failure carry their
+    /// reason as built, a staging's fields inside `args`. The mapping, the git trees, the skipped files and a stop
+    /// naming the command are carried field by field, the agents by id.
+    #[test]
+    fn a_move_answer_lands_every_outcome_and_skip_on_its_row() {
+        let staged = json!({
+            "path": "library/b.md", "staging": "team/~tmp", "staging_disk": "D:/team/~tmp",
+            "staging_kept": "trash-not-reserved", "not_copied": "x",
+        });
+        let agent_id = AgentId::new_v4();
+        let answer = MoveAnswer {
+            items: vec![
+                MoveItem {
+                    path: "library/a".to_owned(),
+                    outcome: Outcome::Done(Moved {
+                        to: "team/a".to_owned(),
+                        trashed: vec![address("b1", "a/x.md")],
+                        original: Some(address("b2", "a")),
+                        left: vec![(
+                            "library/a/y.md".to_owned(),
+                            why(NAME_EXISTS, json!({ "path": "team/a/y.md" })),
+                        )],
+                    }),
+                },
+                MoveItem {
+                    path: "library/d/e.md".to_owned(),
+                    outcome: Outcome::Skipped(Skip::Inside("library/d".to_owned())),
+                },
+                MoveItem {
+                    path: "library/f.md".to_owned(),
+                    outcome: Outcome::Skipped(Skip::InPlace),
+                },
+                MoveItem {
+                    path: "library/g.md".to_owned(),
+                    outcome: Outcome::Skipped(Skip::Taken("team/g.md".to_owned())),
+                },
+                MoveItem {
+                    path: "library/h.md".to_owned(),
+                    outcome: Outcome::Skipped(Skip::TakenDuringCopy {
+                        path: "team/h.md".to_owned(),
+                        staging: json!({ "staging_row": address_json("b3", "~tmp") }),
+                    }),
+                },
+                MoveItem {
+                    path: "library/i.md".to_owned(),
+                    outcome: Outcome::Conflict(why(NAME_EXISTS, json!({ "path": "team/i.md" }))),
+                },
+                MoveItem {
+                    path: "library/b.md".to_owned(),
+                    outcome: Outcome::Failed(why(crate::ops::SOURCE_CHANGED, staged.clone())),
+                },
+            ],
+            mapping: vec![
+                ("library/a".to_owned(), "team/a".to_owned(), false),
+                ("library/s".to_owned(), "team/s".to_owned(), true),
+            ],
+            detached: vec!["library/s".to_owned()],
+            written: vec!["library/p.yaml".to_owned()],
+            skipped: vec![RelinkSkip {
+                path: "other".to_owned(),
+                reason: why(LIBRARY_UNAVAILABLE, json!({ "mount": "other" })),
+            }],
+            trees: vec![
+                ("library".to_owned(), GitTree::At(PathBuf::from("C:/lib"))),
+                ("team".to_owned(), GitTree::Outside),
+                ("other".to_owned(), GitTree::Unknown),
+            ],
+            agents: vec![agent_id],
+            stopped: Some(RelinkStop {
+                path: Some("library/q.yaml".to_owned()),
+                refusal: LibraryRefusal::Refused {
+                    class: RefusalClass::Unavailable,
+                    reason: why(
+                        crate::edit::LIBRARY_WRITE_FAILED,
+                        json!({ "path": "library/q.yaml" }),
+                    ),
+                },
+            }),
+        };
+        let out = move_answer("library.move", answer);
+        let row = |path: &str, status: &str, code: &str, args: Value| MoveItemRow {
+            path: path.to_owned(),
+            status: status.to_owned(),
+            to: None,
+            trashed: Vec::new(),
+            original: None,
+            left: Vec::new(),
+            code: Some(code.to_owned()),
+            args,
+        };
+        let mut taken_during_copy = json!({ "staging_row": address_json("b3", "~tmp") });
+        taken_during_copy["path"] = json!("team/h.md");
+        assert_eq!(
+            out.items,
+            [
+                MoveItemRow {
+                    path: "library/a".to_owned(),
+                    status: "done".to_owned(),
+                    to: Some("team/a".to_owned()),
+                    trashed: vec![address_row(address("b1", "a/x.md"))],
+                    original: Some(address_row(address("b2", "a"))),
+                    left: vec![PathReasonRow {
+                        path: "library/a/y.md".to_owned(),
+                        code: NAME_EXISTS.to_owned(),
+                        args: json!({ "path": "team/a/y.md" }),
+                        line: None,
+                    }],
+                    code: None,
+                    args: Value::Null,
+                },
+                row(
+                    "library/d/e.md",
+                    "skipped",
+                    INSIDE_GIVEN_FOLDER,
+                    json!({ "folder": "library/d" })
+                ),
+                row("library/f.md", "skipped", IN_PLACE, json!({})),
+                row(
+                    "library/g.md",
+                    "skipped",
+                    NAME_EXISTS,
+                    json!({ "path": "team/g.md" })
+                ),
+                row(
+                    "library/h.md",
+                    "skipped",
+                    NAME_TAKEN_DURING_COPY,
+                    taken_during_copy
+                ),
+                row(
+                    "library/i.md",
+                    "conflict",
+                    NAME_EXISTS,
+                    json!({ "path": "team/i.md" })
+                ),
+                row("library/b.md", "failed", crate::ops::SOURCE_CHANGED, staged),
+            ]
+        );
+        assert_eq!(
+            out.mapping,
+            [
+                MovePairRow {
+                    from: "library/a".to_owned(),
+                    to: "team/a".to_owned(),
+                    exact: false,
+                },
+                MovePairRow {
+                    from: "library/s".to_owned(),
+                    to: "team/s".to_owned(),
+                    exact: true,
+                },
+            ]
+        );
+        assert_eq!(
+            (out.detached.as_slice(), out.written.as_slice()),
+            (
+                ["library/s".to_owned()].as_slice(),
+                ["library/p.yaml".to_owned()].as_slice()
+            )
+        );
+        assert_eq!(
+            out.skipped,
+            [PathReasonRow {
+                path: "other".to_owned(),
+                code: LIBRARY_UNAVAILABLE.to_owned(),
+                args: json!({ "mount": "other" }),
+                line: None,
+            }]
+        );
+        assert_eq!(
+            out.trees,
+            [
+                GitTreeRow {
+                    mount: "library".to_owned(),
+                    git: Some(true),
+                    top: Some(PathBuf::from("C:/lib").display().to_string()),
+                },
+                GitTreeRow {
+                    mount: "team".to_owned(),
+                    git: Some(false),
+                    top: None,
+                },
+                GitTreeRow {
+                    mount: "other".to_owned(),
+                    git: None,
+                    top: None,
+                },
+            ]
+        );
+        assert_eq!(out.agents, [agent_id]);
+        let stop = out.stopped.expect("stopped");
+        assert_eq!(
+            (stop.path.as_deref(), stop.code.as_str()),
+            (Some("library/q.yaml"), crate::edit::LIBRARY_WRITE_FAILED)
+        );
+        assert!(
+            stop.message.starts_with("library.move: "),
+            "{}",
+            stop.message
+        );
+    }
+
+    /// A copy, a delete and a restore map their outcomes as a move's: a copy's displaced entry as a list of none or one,
+    /// a delete's trash row, a restore row keyed by its address with the path it is back at; a delete's reference fix
+    /// and stop are carried, the stop naming `library.delete`.
+    #[test]
+    fn copy_delete_and_restore_answers_land_on_their_rows() {
+        let copied = copy_ok(CopyAnswer {
+            items: vec![
+                CopyItem {
+                    path: "library/a.md".to_owned(),
+                    outcome: Outcome::Done(Copied {
+                        to: "library/a - Copy.md".to_owned(),
+                        trashed: None,
+                    }),
+                },
+                CopyItem {
+                    path: "library/b.md".to_owned(),
+                    outcome: Outcome::Done(Copied {
+                        to: "team/b.md".to_owned(),
+                        trashed: Some(address("b1", "b.md")),
+                    }),
+                },
+                CopyItem {
+                    path: "library/c".to_owned(),
+                    outcome: Outcome::Conflict(why(
+                        crate::ops::COPY_MERGE_REFUSED,
+                        json!({ "path": "library/c", "to": "team/c" }),
+                    )),
+                },
+            ],
+        });
+        assert_eq!(
+            copied.items,
+            [
+                CopyItemRow {
+                    path: "library/a.md".to_owned(),
+                    status: "done".to_owned(),
+                    to: Some("library/a - Copy.md".to_owned()),
+                    trashed: Vec::new(),
+                    code: None,
+                    args: Value::Null,
+                },
+                CopyItemRow {
+                    path: "library/b.md".to_owned(),
+                    status: "done".to_owned(),
+                    to: Some("team/b.md".to_owned()),
+                    trashed: vec![address_row(address("b1", "b.md"))],
+                    code: None,
+                    args: Value::Null,
+                },
+                CopyItemRow {
+                    path: "library/c".to_owned(),
+                    status: "conflict".to_owned(),
+                    to: None,
+                    trashed: Vec::new(),
+                    code: Some(crate::ops::COPY_MERGE_REFUSED.to_owned()),
+                    args: json!({ "path": "library/c", "to": "team/c" }),
+                },
+            ]
+        );
+
+        let agent_id = AgentId::new_v4();
+        let deleted = delete_answer(DeleteAnswer {
+            items: vec![
+                DeleteItem {
+                    path: "library/a.md".to_owned(),
+                    outcome: Outcome::Done(address("b1", "a.md")),
+                },
+                DeleteItem {
+                    path: "library/x".to_owned(),
+                    outcome: Outcome::Failed(why(
+                        crate::gate::NOT_FOUND,
+                        json!({ "path": "library/x" }),
+                    )),
+                },
+            ],
+            detached: vec!["library/a.md".to_owned()],
+            written: vec!["library/p.yaml".to_owned()],
+            skipped: Vec::new(),
+            agents: vec![agent_id],
+            stopped: Some(RelinkStop {
+                path: None,
+                refusal: LibraryRefusal::Store(StoreError::Refused(Refusal::Unreadable)),
+            }),
+        });
+        assert_eq!(
+            deleted.items,
+            [
+                DeleteItemRow {
+                    path: "library/a.md".to_owned(),
+                    status: "done".to_owned(),
+                    trashed: Some(address_row(address("b1", "a.md"))),
+                    code: None,
+                    args: Value::Null,
+                },
+                DeleteItemRow {
+                    path: "library/x".to_owned(),
+                    status: "failed".to_owned(),
+                    trashed: None,
+                    code: Some(crate::gate::NOT_FOUND.to_owned()),
+                    args: json!({ "path": "library/x" }),
+                },
+            ]
+        );
+        assert_eq!(
+            (
+                deleted.detached.as_slice(),
+                deleted.written.as_slice(),
+                deleted.agents.as_slice()
+            ),
+            (
+                ["library/a.md".to_owned()].as_slice(),
+                ["library/p.yaml".to_owned()].as_slice(),
+                [agent_id].as_slice()
+            )
+        );
+        let stop = deleted.stopped.expect("stopped");
+        assert_eq!(
+            stop.code,
+            engram_dashboard_agent::library_commands::PROFILE_STORE_REFUSED
+        );
+        assert!(
+            stop.message.starts_with("library.delete: "),
+            "{}",
+            stop.message
+        );
+
+        let restored = restore_ok(RestoreAnswer {
+            items: vec![
+                crate::ops::RestoreItem {
+                    row: address("b1", "a.md"),
+                    outcome: Outcome::Done("library/a (2).md".to_owned()),
+                },
+                crate::ops::RestoreItem {
+                    row: address("b1", "b.md"),
+                    outcome: Outcome::Conflict(why(NAME_EXISTS, json!({ "path": "library/b.md" }))),
+                },
+            ],
+        });
+        assert_eq!(
+            restored.items,
+            [
+                RestoreItemRow {
+                    mount: "library".to_owned(),
+                    bundle: "b1".to_owned(),
+                    path: "a.md".to_owned(),
+                    status: "done".to_owned(),
+                    to: Some("library/a (2).md".to_owned()),
+                    code: None,
+                    args: Value::Null,
+                },
+                RestoreItemRow {
+                    mount: "library".to_owned(),
+                    bundle: "b1".to_owned(),
+                    path: "b.md".to_owned(),
+                    status: "conflict".to_owned(),
+                    to: None,
+                    code: Some(NAME_EXISTS.to_owned()),
+                    args: json!({ "path": "library/b.md" }),
+                },
+            ]
+        );
+    }
+
+    /// Through the port on a real library: a delete answers the trash row it made, the trash view lists that bundle
+    /// (its id, `deleted_at` from the id, the row with its `original`, restorable), and a restore of that row puts the
+    /// file back and answers where — each one body call mapped as built.
+    #[test]
+    fn a_delete_lists_in_the_trash_view_and_restores_through_the_port() {
+        let w = World::new(Vec::new());
+        w.put("rules/a.md", "A");
+        let deleted = w
+            .port()
+            .delete(&strings(&["library/rules/a.md"]), false, false, None, None)
+            .expect("delete");
+        assert_eq!(deleted.items.len(), 1);
+        let item = &deleted.items[0];
+        assert_eq!(
+            (item.path.as_str(), item.status.as_str(), &item.code),
+            ("library/rules/a.md", "done", &None)
+        );
+        let trashed = item.trashed.clone().expect("a trash row");
+        assert_eq!(
+            (trashed.mount.as_str(), trashed.path.as_str()),
+            ("library", "rules/a.md")
+        );
+        assert!(!w.base.join("lib/rules/a.md").exists());
+
+        let view = w.port().list_trash().expect("view");
+        let library = view
+            .mounts
+            .iter()
+            .find(|mount| mount.mount == "library")
+            .expect("the library mount");
+        assert_eq!(library.problem, None);
+        let id = crate::trash::BundleId::parse(&trashed.bundle).expect("a bundle id");
+        assert_eq!(
+            library.bundles,
+            [TrashBundleRow {
+                bundle: trashed.bundle.clone(),
+                deleted_at: id.deleted_at_rfc3339(),
+                source: "record".to_owned(),
+                why: None,
+                trouble: None,
+                rows: vec![TrashViewRow {
+                    path: "rules/a.md".to_owned(),
+                    original: "library/rules/a.md".to_owned(),
+                    kind: "root".to_owned(),
+                    state: "present".to_owned(),
+                    entry: Some("file".to_owned()),
+                    why: None,
+                    staging: false,
+                    intended: None,
+                    restorable: true,
+                }],
+            }]
+        );
+
+        let restored = w
+            .port()
+            .restore(&[trashed.clone()], false, None)
+            .expect("restore");
+        assert_eq!(
+            restored.items,
+            [RestoreItemRow {
+                mount: trashed.mount,
+                bundle: trashed.bundle,
+                path: trashed.path,
+                status: "done".to_owned(),
+                to: Some("library/rules/a.md".to_owned()),
+                code: None,
+                args: Value::Null,
+            }]
+        );
+        assert_eq!(
+            fs::read_to_string(w.base.join("lib/rules/a.md")).unwrap(),
+            "A"
+        );
+    }
+
+    /// `deleted_at` is the bundle id's time as RFC 3339 UTC.
+    #[test]
+    fn deleted_at_is_the_bundle_time_in_rfc_3339() {
+        let id = crate::trash::BundleId::parse("20261123T081500Z-abc123").expect("an id");
+        assert_eq!(id.deleted_at_rfc3339(), "2026-11-23T08:15:00Z");
+    }
+
+    /// A bundle with no record lists its files and empty folders as `found` rows; a row whose original holds a dot name
+    /// — a `.DS_Store`, a file under `.hidden/` — is not restorable, as restore itself would refuse it; a plain file is.
+    #[test]
+    fn a_recordless_row_under_a_dot_name_is_not_restorable() {
+        let w = World::new(Vec::new());
+        let bundle = "20261123T081500Z-abc123";
+        w.put(&format!(".trash/{bundle}/.DS_Store"), "x");
+        w.put(&format!(".trash/{bundle}/.hidden/file.md"), "x");
+        w.put(&format!(".trash/{bundle}/plain.md"), "x");
+        let view = w.port().list_trash().expect("view");
+        let library = view
+            .mounts
+            .iter()
+            .find(|mount| mount.mount == "library")
+            .expect("the library mount");
+        assert_eq!(library.bundles.len(), 1, "{:?}", library.bundles);
+        let found = &library.bundles[0];
+        assert_eq!(
+            (
+                found.bundle.as_str(),
+                found.deleted_at.as_str(),
+                found.source.as_str()
+            ),
+            (bundle, "2026-11-23T08:15:00Z", "no_record")
+        );
+        let rows: Vec<(&str, &str, &str, bool)> = found
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.path.as_str(),
+                    row.original.as_str(),
+                    row.kind.as_str(),
+                    row.restorable,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (".DS_Store", "library/.DS_Store", "found", false),
+                (".hidden/file.md", "library/.hidden/file.md", "found", false),
+                ("plain.md", "library/plain.md", "found", true),
+            ]
+        );
+    }
+
+    /// A mount whose `.trash` is not a folder is named with its problem and no bundles, not failed.
+    #[test]
+    fn an_unusable_trash_is_named_with_its_problem() {
+        let w = World::new(Vec::new());
+        w.put(".trash", "not a folder");
+        let view = w.port().list_trash().expect("view");
+        let library = view
+            .mounts
+            .iter()
+            .find(|mount| mount.mount == "library")
+            .expect("the library mount");
+        let problem = library.problem.as_ref().expect("a problem");
+        assert_eq!(
+            (problem.code.as_str(), &problem.args["mount"]),
+            (crate::trash::TRASH_UNUSABLE, &json!("library"))
+        );
+        assert!(library.bundles.is_empty());
+    }
+
+    /// Through the port on a real library: a move answers its rows and the mapping its references followed — the
+    /// preset that named the item is rewritten (`written`); a move into the item's own folder is skipped `in-place`;
+    /// a taken name under `Skip` is skipped `name-exists`; a rename and a copy into the item's own folder answer as
+    /// built.
+    #[test]
+    fn move_rename_and_copy_answer_through_the_port() {
+        let w = World::new(Vec::new());
+        w.put("rules/a.md", "A");
+        w.put("rules/b.md", "B");
+        w.put("other/b.md", "taken");
+        w.put(
+            "p.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/rules/a.md\n",
+        );
+        let moved = w
+            .port()
+            .move_items(
+                &strings(&[
+                    "library/rules/a.md",
+                    "library/rules/b.md",
+                    "library/other/b.md",
+                ]),
+                "library/other",
+                Some(LibraryOnConflict::Skip),
+                false,
+                false,
+                None,
+                None,
+            )
+            .expect("move");
+        let rows: Vec<(&str, &str, Option<&str>, Option<&str>)> = moved
+            .items
+            .iter()
+            .map(|row| {
+                (
+                    row.path.as_str(),
+                    row.status.as_str(),
+                    row.to.as_deref(),
+                    row.code.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "library/rules/a.md",
+                    "done",
+                    Some("library/other/a.md"),
+                    None
+                ),
+                ("library/rules/b.md", "skipped", None, Some(NAME_EXISTS)),
+                ("library/other/b.md", "skipped", None, Some(IN_PLACE)),
+            ]
+        );
+        assert_eq!(moved.items[1].args, json!({ "path": "library/other/b.md" }));
+        assert_eq!(
+            moved.mapping,
+            [MovePairRow {
+                from: "library/rules/a.md".to_owned(),
+                to: "library/other/a.md".to_owned(),
+                exact: false,
+            }]
+        );
+        assert_eq!(moved.written, ["library/p.yaml"]);
+        assert!(fs::read_to_string(w.base.join("lib/p.yaml"))
+            .unwrap()
+            .contains("library/other/a.md"));
+
+        let renamed = w
+            .port()
+            .rename("library/other/a.md", "c.md", false, false, None, None)
+            .expect("rename");
+        assert_eq!(
+            (
+                renamed.items[0].status.as_str(),
+                renamed.items[0].to.as_deref()
+            ),
+            ("done", Some("library/other/c.md"))
+        );
+
+        let copied = w
+            .port()
+            .copy_items(
+                &strings(&["library/rules/b.md"]),
+                "library/rules",
+                None,
+                None,
+            )
+            .expect("copy");
+        assert_eq!(
+            (
+                copied.items[0].status.as_str(),
+                copied.items[0].to.as_deref()
+            ),
+            ("done", Some("library/rules/b - Copy.md"))
+        );
+    }
+
+    /// The `delete-unconfirmed` forms spell the wire's argument names: `forms.detach` added to the same call passes
+    /// the declared entrance check and deserializes as the command's arguments, and sent back through the port it
+    /// deletes and drops the reference.
+    #[test]
+    fn the_detach_form_fed_back_as_arguments_passes_the_entrance_check() {
+        use engram_dashboard_agent::commands::{LibraryDeleteArgs, LibraryDeleteOk, COMMAND_SPECS};
+        use engram_dashboard_command::{blocking_handler, CommandError, CommandTable};
+
+        let w = World::new(Vec::new());
+        w.put("rules/a.md", "A");
+        w.put(
+            "p.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - library/rules/a.md\n",
+        );
+        let paths = strings(&["library/rules/a.md"]);
+        let (class, reason) = refused(w.port().delete(&paths, false, false, None, None));
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (PortClass::Conflict, crate::ops::DELETE_UNCONFIRMED)
+        );
+        let mut args = reason.args["forms"]["detach"].clone();
+        args["paths"] = json!(paths);
+
+        let mut table = CommandTable::new(COMMAND_SPECS);
+        table
+            .insert(
+                "library.delete",
+                blocking_handler(
+                    |_: LibraryDeleteArgs| -> Result<LibraryDeleteOk, CommandError> {
+                        unreachable!("only the entrance check runs")
+                    },
+                ),
+            )
+            .unwrap();
+        table
+            .check_args("library.delete", &args)
+            .expect("the detach form passes the entrance check");
+        let parsed: LibraryDeleteArgs =
+            serde_json::from_value(args).expect("the detach form deserializes");
+
+        let deleted = w
+            .port()
+            .delete(
+                &parsed.paths,
+                parsed.yes.unwrap_or(false),
+                parsed.detach_refs.unwrap_or(false),
+                parsed.plan_digest.as_deref(),
+                None,
+            )
+            .expect("confirmed");
+        assert_eq!(deleted.items[0].status, "done");
+        assert_eq!(deleted.detached, ["library/rules/a.md"]);
+        assert_eq!(deleted.written, ["library/p.yaml"]);
     }
 }

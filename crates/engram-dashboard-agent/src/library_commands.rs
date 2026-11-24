@@ -10,8 +10,9 @@
 //! - **The port speaks this crate's types.** Its methods take the spellings the caller typed and answer the declared
 //!   rows or a [`PortRefusal`]; asset-library parses the spellings (a path that is not a library path refuses there,
 //!   `item-path-invalid`) and converts its own refusal 1:1. Bus codes are chosen here, never there.
-//! - **The port answers agents by id only.** `library.read` names them from one roster read and drops an id the
-//!   roster no longer holds; the agent-preset commands name the agent from the `target` resolution (an agent-preset
+//! - **The port answers agents by id only.** `library.read`, `library.move` / `rename` and `library.delete` name them
+//!   from one roster read and drop an id the roster no longer holds (a `CONFLICT` plan's agents carry the names the
+//!   library judged them by and pass through); the agent-preset commands name the agent from the `target` resolution (an agent-preset
 //!   edit never renames).
 //! - **Answers are mapped as the bodies built them** — nothing here calls a second body or reads back (ADR-0384).
 //! - **A refusal applied nothing** — except `library-config-write-failed`, which leaves the mount change live and
@@ -34,18 +35,21 @@ use crate::commands::{
     reject_blanks, resolve, store_command_error, store_error, store_error_reason,
     AgentAttachPresetArgs, AgentAttachPresetOk, AgentCommandHost, AgentDetachPresetArgs,
     AgentDetachPresetOk, AgentFolderRow, AgentOutputFormat, AgentPresetsArgs, AgentPresetsOk,
-    AgentPresetsView, AgentRefRow, AgentReorderPresetsArgs, AgentReorderPresetsOk, Blank,
-    LaunchNoticeRow, LibraryAddMountArgs, LibraryAddMountOk, LibraryFoldersArgs, LibraryFoldersOk,
-    LibraryKind, LibraryListArgs, LibraryListOk, LibraryNewFileArgs, LibraryNewFileKind,
-    LibraryNewFileOk, LibraryNewFolderArgs, LibraryNewFolderOk, LibraryReadArgs, LibraryReadOk,
-    LibraryRefreshArgs, LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk,
+    AgentPresetsView, AgentRefRow, AgentReorderPresetsArgs, AgentReorderPresetsOk, AgentRosterRow,
+    Blank, DeleteItemRow, GitTreeRow, LaunchNoticeRow, LibraryAddMountArgs, LibraryAddMountOk,
+    LibraryCopyArgs, LibraryCopyOk, LibraryDeleteArgs, LibraryDeleteOk, LibraryFoldersArgs,
+    LibraryFoldersOk, LibraryKind, LibraryListArgs, LibraryListOk, LibraryListTrashArgs,
+    LibraryListTrashOk, LibraryMoveArgs, LibraryMoveOk, LibraryNewFileArgs, LibraryNewFileKind,
+    LibraryNewFileOk, LibraryNewFolderArgs, LibraryNewFolderOk, LibraryOnConflict, LibraryReadArgs,
+    LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk, LibraryRelinkArgs, LibraryRelinkOk,
     LibraryRelocateMountArgs, LibraryRelocateMountOk, LibraryRemoveMountArgs, LibraryRemoveMountOk,
-    LibraryRenameMountArgs, LibraryRenameMountOk, LibraryStatusArgs, LibraryStatusOk, ListRow,
-    PathReasonRow, PointingRow, PresetAddArgs, PresetAddOk, PresetCheckArgs, PresetCheckOk,
-    PresetEntryArg, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs, PresetPreviewFolderOk,
-    PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk, PresetSaveArgs,
-    PresetSaveOk, PresetSetBackendArgs, PresetSetBackendOk, PresetView, ProblemItemRow, ProblemRow,
-    RelinkPairRow, RelinkStopRow, SkippedRow,
+    LibraryRenameArgs, LibraryRenameMountArgs, LibraryRenameMountOk, LibraryRenameOk,
+    LibraryRestoreArgs, LibraryRestoreOk, LibraryStatusArgs, LibraryStatusOk, ListRow, MoveItemRow,
+    MovePairRow, PathReasonRow, PointingRow, PresetAddArgs, PresetAddOk, PresetCheckArgs,
+    PresetCheckOk, PresetEntryArg, PresetGetArgs, PresetGetOk, PresetPreviewFolderArgs,
+    PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk, PresetReorderArgs, PresetReorderOk,
+    PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs, PresetSetBackendOk, PresetView,
+    ProblemItemRow, ProblemRow, RelinkPairRow, RelinkStopRow, SkippedRow, TrashAddressRow,
 };
 use crate::launch::{escape_controls, put_reason, BlockReason, Reason};
 use crate::persistence::PROFILES_FILE;
@@ -176,6 +180,36 @@ pub struct NewAgentPresets {
     /// inserts only while [`LibraryCommandHost::change_number`] still answers it, and judges again otherwise
     /// (ADR-0400 decision 18); `None` = nothing to re-check.
     pub change: Option<u64>,
+}
+
+/// A move's or rename's answer as the port answers it — [`LibraryMoveOk`] with the agents by id.
+// ADR-0419
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+pub struct MovePortAnswer {
+    pub items: Vec<MoveItemRow>,
+    pub mapping: Vec<MovePairRow>,
+    pub detached: Vec<String>,
+    pub written: Vec<String>,
+    pub skipped: Vec<PathReasonRow>,
+    pub trees: Vec<GitTreeRow>,
+    /// The agents re-pointed, in id order.
+    pub agents: Vec<AgentId>,
+    pub stopped: Option<RelinkStopRow>,
+}
+
+/// A delete's answer as the port answers it — [`LibraryDeleteOk`] with the agents by id.
+// ADR-0419
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+pub struct DeletePortAnswer {
+    pub items: Vec<DeleteItemRow>,
+    pub detached: Vec<String>,
+    pub written: Vec<String>,
+    pub skipped: Vec<PathReasonRow>,
+    /// The agents whose attachments lost a deleted preset, in id order.
+    pub agents: Vec<AgentId>,
+    pub stopped: Option<RelinkStopRow>,
 }
 
 /// A section of a preset file — `preset.reorder`'s `section`, a lowercase word checked here (the preset file's own
@@ -391,6 +425,59 @@ pub trait LibraryCommandHost: Send + Sync {
         presets: &[String],
         root_generation: Option<u64>,
     ) -> Result<NewAgentPresets, PortRefusal>;
+    /// Moves `paths` into `to_folder` (`on_conflict` `None` = a taken name is that item's conflict); `yes` /
+    /// `detach_refs` / `plan_digest` answer a `skill-unconfirmed` plan. Answers per item and the reference fix.
+    // ADR-0419
+    #[allow(clippy::too_many_arguments)]
+    fn move_items(
+        &self,
+        paths: &[String],
+        to_folder: &str,
+        on_conflict: Option<LibraryOnConflict>,
+        yes: bool,
+        detach_refs: bool,
+        plan_digest: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<MovePortAnswer, PortRefusal>;
+    /// Renames `path` to `name` in its folder — a move answered as [`LibraryCommandHost::move_items`] answers.
+    // ADR-0419
+    fn rename(
+        &self,
+        path: &str,
+        name: &str,
+        yes: bool,
+        detach_refs: bool,
+        plan_digest: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<MovePortAnswer, PortRefusal>;
+    // ADR-0419
+    fn copy_items(
+        &self,
+        paths: &[String],
+        to_folder: &str,
+        on_conflict: Option<LibraryOnConflict>,
+        root_generation: Option<u64>,
+    ) -> Result<LibraryCopyOk, PortRefusal>;
+    /// `yes` / `detach_refs` / `plan_digest` answer a `delete-unconfirmed` plan.
+    // ADR-0419
+    fn delete(
+        &self,
+        paths: &[String],
+        yes: bool,
+        detach_refs: bool,
+        plan_digest: Option<&str>,
+        root_generation: Option<u64>,
+    ) -> Result<DeletePortAnswer, PortRefusal>;
+    // ADR-0419
+    fn list_trash(&self) -> Result<LibraryListTrashOk, PortRefusal>;
+    /// `keep_both` = a taken name restores under the next free keep-both name instead of answering the row's conflict.
+    // ADR-0419
+    fn restore(
+        &self,
+        rows: &[TrashAddressRow],
+        keep_both: bool,
+        root_generation: Option<u64>,
+    ) -> Result<LibraryRestoreOk, PortRefusal>;
 }
 
 /// The answers of the mount commands carry [`LibraryStatusOk`]'s fields. ★Moved by destructuring (without `..`)★ — if
@@ -585,6 +672,34 @@ macro_rules! from_agent_presets_view {
 }
 
 from_agent_presets_view!(AgentPresetsOk, AgentDetachPresetOk, AgentReorderPresetsOk);
+
+/// `library.rename` answers as `library.move` does. ★Moved by destructuring (without `..`)★ — if either side gains a
+/// field, compilation stops here.
+// ADR-0419
+impl From<LibraryMoveOk> for LibraryRenameOk {
+    fn from(moved: LibraryMoveOk) -> Self {
+        let LibraryMoveOk {
+            items,
+            mapping,
+            detached,
+            written,
+            skipped,
+            trees,
+            agents,
+            stopped,
+        } = moved;
+        Self {
+            items,
+            mapping,
+            detached,
+            written,
+            skipped,
+            trees,
+            agents,
+            stopped,
+        }
+    }
+}
 
 /// The port's view named — `name` = the agent's name from the `target` resolution (an agent-preset edit never
 /// renames; a rename by another caller in between shows the name as resolved). ★Destructured (without `..`)★ — a field added to the port view stops compilation here.
@@ -853,7 +968,7 @@ pub(crate) fn insert(
             }),
         )
         .expect("could not plug agent.detachPreset into the table");
-    let reorder_presets = (Arc::clone(host), library);
+    let reorder_presets = (Arc::clone(host), Arc::clone(&library));
     table
         .insert(
             "agent.reorderPresets",
@@ -862,6 +977,54 @@ pub(crate) fn insert(
             }),
         )
         .expect("could not plug agent.reorderPresets into the table");
+    let move_items = (Arc::clone(host), Arc::clone(&library));
+    table
+        .insert(
+            "library.move",
+            blocking_handler(move |args: LibraryMoveArgs| {
+                verb_move(move_items.0.as_ref(), move_items.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug library.move into the table");
+    let rename = (Arc::clone(host), Arc::clone(&library));
+    table
+        .insert(
+            "library.rename",
+            blocking_handler(move |args: LibraryRenameArgs| {
+                verb_rename(rename.0.as_ref(), rename.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug library.rename into the table");
+    let copy = Arc::clone(&library);
+    table
+        .insert(
+            "library.copy",
+            blocking_handler(move |args: LibraryCopyArgs| verb_copy(copy.as_ref(), args)),
+        )
+        .expect("could not plug library.copy into the table");
+    let delete = (Arc::clone(host), Arc::clone(&library));
+    table
+        .insert(
+            "library.delete",
+            blocking_handler(move |args: LibraryDeleteArgs| {
+                verb_delete(delete.0.as_ref(), delete.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug library.delete into the table");
+    let list_trash = Arc::clone(&library);
+    table
+        .insert(
+            "library.listTrash",
+            blocking_handler(move |_: LibraryListTrashArgs| verb_list_trash(list_trash.as_ref())),
+        )
+        .expect("could not plug library.listTrash into the table");
+    let restore = library;
+    table
+        .insert(
+            "library.restore",
+            blocking_handler(move |args: LibraryRestoreArgs| verb_restore(restore.as_ref(), args)),
+        )
+        .expect("could not plug library.restore into the table");
 }
 
 fn verb_status(library: &dyn LibraryCommandHost) -> Result<LibraryStatusOk, CommandError> {
@@ -979,26 +1142,13 @@ fn verb_read(
         .map_err(|refusal| refusal_error("library.read", refusal))?;
     // One roster read names both lists, so one agent never shows under two names in one answer.
     let roster = host.roster();
-    let named = |ids: Vec<AgentId>| -> Vec<AgentRefRow> {
-        ids.into_iter()
-            .filter_map(|id| {
-                roster
-                    .iter()
-                    .find(|row| row.id == id)
-                    .map(|row| AgentRefRow {
-                        id: id.to_string(),
-                        name: row.canonical_name.clone(),
-                    })
-            })
-            .collect()
-    };
     Ok(LibraryReadOk {
         row: view.row,
         absolute: view.absolute,
         presets_direct: view.presets_direct,
         presets_indirect: view.presets_indirect,
-        agents_direct: named(view.agents_direct),
-        agents_indirect: named(view.agents_indirect),
+        agents_direct: agent_refs(&roster, view.agents_direct),
+        agents_indirect: agent_refs(&roster, view.agents_indirect),
         excerpt: view.excerpt,
         settings_fields: view.settings_fields,
     })
@@ -1265,6 +1415,172 @@ fn verb_reorder_presets(
         .map_err(|refusal| refusal_error("agent.reorderPresets", refusal))
 }
 
+fn verb_move(
+    host: &dyn AgentCommandHost,
+    library: &dyn LibraryCommandHost,
+    args: LibraryMoveArgs,
+) -> Result<LibraryMoveOk, CommandError> {
+    let plan_digest = args.plan_digest.as_deref();
+    reject_blanks(&[
+        (
+            "to_folder",
+            Some(args.to_folder.as_str()),
+            Blank::NeedsValue,
+        ),
+        ("plan_digest", plan_digest, Blank::OrOmit),
+    ])?;
+    let answer = library
+        .move_items(
+            &args.paths,
+            &args.to_folder,
+            args.on_conflict,
+            args.yes.unwrap_or(false),
+            args.detach_refs.unwrap_or(false),
+            plan_digest,
+            args.root_generation,
+        )
+        .map_err(|refusal| refusal_error("library.move", refusal))?;
+    Ok(named_move(host, answer))
+}
+
+fn verb_rename(
+    host: &dyn AgentCommandHost,
+    library: &dyn LibraryCommandHost,
+    args: LibraryRenameArgs,
+) -> Result<LibraryRenameOk, CommandError> {
+    let plan_digest = args.plan_digest.as_deref();
+    reject_blanks(&[
+        ("path", Some(args.path.as_str()), Blank::NeedsValue),
+        ("name", Some(args.name.as_str()), Blank::NeedsValue),
+        ("plan_digest", plan_digest, Blank::OrOmit),
+    ])?;
+    let answer = library
+        .rename(
+            &args.path,
+            &args.name,
+            args.yes.unwrap_or(false),
+            args.detach_refs.unwrap_or(false),
+            plan_digest,
+            args.root_generation,
+        )
+        .map_err(|refusal| refusal_error("library.rename", refusal))?;
+    Ok(named_move(host, answer).into())
+}
+
+fn verb_copy(
+    library: &dyn LibraryCommandHost,
+    args: LibraryCopyArgs,
+) -> Result<LibraryCopyOk, CommandError> {
+    reject_blanks(&[(
+        "to_folder",
+        Some(args.to_folder.as_str()),
+        Blank::NeedsValue,
+    )])?;
+    library
+        .copy_items(
+            &args.paths,
+            &args.to_folder,
+            args.on_conflict,
+            args.root_generation,
+        )
+        .map_err(|refusal| refusal_error("library.copy", refusal))
+}
+
+fn verb_delete(
+    host: &dyn AgentCommandHost,
+    library: &dyn LibraryCommandHost,
+    args: LibraryDeleteArgs,
+) -> Result<LibraryDeleteOk, CommandError> {
+    let plan_digest = args.plan_digest.as_deref();
+    reject_blanks(&[("plan_digest", plan_digest, Blank::OrOmit)])?;
+    let DeletePortAnswer {
+        items,
+        detached,
+        written,
+        skipped,
+        agents,
+        stopped,
+    } = library
+        .delete(
+            &args.paths,
+            args.yes.unwrap_or(false),
+            args.detach_refs.unwrap_or(false),
+            plan_digest,
+            args.root_generation,
+        )
+        .map_err(|refusal| refusal_error("library.delete", refusal))?;
+    Ok(LibraryDeleteOk {
+        items,
+        detached,
+        written,
+        skipped,
+        agents: agent_refs(&host.roster(), agents),
+        stopped,
+    })
+}
+
+fn verb_list_trash(library: &dyn LibraryCommandHost) -> Result<LibraryListTrashOk, CommandError> {
+    library
+        .list_trash()
+        .map_err(|refusal| refusal_error("library.listTrash", refusal))
+}
+
+fn verb_restore(
+    library: &dyn LibraryCommandHost,
+    args: LibraryRestoreArgs,
+) -> Result<LibraryRestoreOk, CommandError> {
+    library
+        .restore(
+            &args.rows,
+            args.keep_both.unwrap_or(false),
+            args.root_generation,
+        )
+        .map_err(|refusal| refusal_error("library.restore", refusal))
+}
+
+/// A move's port answer with its agents named. ★Destructured (without `..`)★ — a field added to the port answer stops
+/// compilation here.
+// ADR-0419
+fn named_move(host: &dyn AgentCommandHost, answer: MovePortAnswer) -> LibraryMoveOk {
+    let MovePortAnswer {
+        items,
+        mapping,
+        detached,
+        written,
+        skipped,
+        trees,
+        agents,
+        stopped,
+    } = answer;
+    LibraryMoveOk {
+        items,
+        mapping,
+        detached,
+        written,
+        skipped,
+        trees,
+        agents: agent_refs(&host.roster(), agents),
+        stopped,
+    }
+}
+
+/// `ids` named from `roster` (one read), in their order — an id the roster no longer holds is dropped: there is no name
+/// to give it.
+// ADR-0386
+fn agent_refs(roster: &[AgentRosterRow], ids: Vec<AgentId>) -> Vec<AgentRefRow> {
+    ids.into_iter()
+        .filter_map(|id| {
+            roster
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| AgentRefRow {
+                    id: id.to_string(),
+                    name: row.canonical_name.clone(),
+                })
+        })
+        .collect()
+}
+
 /// Folder spellings with one layer of quotes off and nothing else, as `library.addMount` takes its path — an absolute
 /// folder pasted from a shell often comes quoted, and a quoted spelling would match no listed folder (a remove would
 /// answer success with the folder still listed). Library item spellings are never unquoted.
@@ -1353,11 +1669,12 @@ pub(crate) fn coded_error(
     error.with_args(args)
 }
 
-/// A relink `stopped` row: the refusal it met, carried as a refusal would carry it — a store error as
-/// [`PROFILE_STORE_REFUSED`].
+/// A `stopped` row of a reference fix (a relink's, or a mount rename's, move's or delete's): the refusal it met, carried
+/// as a refusal would carry it — a store error as [`PROFILE_STORE_REFUSED`] —, its message naming `command`.
 // ADR-0384
 // ADR-0386
-pub fn relink_stop_row(path: Option<String>, refusal: PortRefusal) -> RelinkStopRow {
+// ADR-0419
+pub fn relink_stop_row(command: &str, path: Option<String>, refusal: PortRefusal) -> RelinkStopRow {
     let reason = match refusal {
         PortRefusal::Refused { reason, .. } => reason,
         PortRefusal::Store(error) => Reason {
@@ -1368,7 +1685,7 @@ pub fn relink_stop_row(path: Option<String>, refusal: PortRefusal) -> RelinkStop
     };
     RelinkStopRow {
         path,
-        message: refusal_message("library.relink", &reason),
+        message: refusal_message(command, &reason),
         code: reason.code,
         args: reason.args,
     }
@@ -1783,6 +2100,89 @@ pub(crate) mod fake {
                 skipped: wire.skipped,
                 change: wire.change,
             })
+        }
+        fn move_items(
+            &self,
+            paths: &[String],
+            to_folder: &str,
+            on_conflict: Option<LibraryOnConflict>,
+            yes: bool,
+            detach_refs: bool,
+            plan_digest: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<MovePortAnswer, PortRefusal> {
+            self.answer(
+                "move_items",
+                serde_json::json!({
+                    "paths": paths, "to_folder": to_folder, "on_conflict": on_conflict, "yes": yes,
+                    "detach_refs": detach_refs, "plan_digest": plan_digest,
+                    "root_generation": root_generation,
+                }),
+            )
+        }
+        fn rename(
+            &self,
+            path: &str,
+            name: &str,
+            yes: bool,
+            detach_refs: bool,
+            plan_digest: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<MovePortAnswer, PortRefusal> {
+            self.answer(
+                "rename",
+                serde_json::json!({
+                    "path": path, "name": name, "yes": yes, "detach_refs": detach_refs,
+                    "plan_digest": plan_digest, "root_generation": root_generation,
+                }),
+            )
+        }
+        fn copy_items(
+            &self,
+            paths: &[String],
+            to_folder: &str,
+            on_conflict: Option<LibraryOnConflict>,
+            root_generation: Option<u64>,
+        ) -> Result<LibraryCopyOk, PortRefusal> {
+            self.answer(
+                "copy_items",
+                serde_json::json!({
+                    "paths": paths, "to_folder": to_folder, "on_conflict": on_conflict,
+                    "root_generation": root_generation,
+                }),
+            )
+        }
+        fn delete(
+            &self,
+            paths: &[String],
+            yes: bool,
+            detach_refs: bool,
+            plan_digest: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<DeletePortAnswer, PortRefusal> {
+            self.answer(
+                "delete",
+                serde_json::json!({
+                    "paths": paths, "yes": yes, "detach_refs": detach_refs, "plan_digest": plan_digest,
+                    "root_generation": root_generation,
+                }),
+            )
+        }
+        fn list_trash(&self) -> Result<LibraryListTrashOk, PortRefusal> {
+            self.answer("list_trash", Value::Null)
+        }
+        fn restore(
+            &self,
+            rows: &[TrashAddressRow],
+            keep_both: bool,
+            root_generation: Option<u64>,
+        ) -> Result<LibraryRestoreOk, PortRefusal> {
+            self.answer(
+                "restore",
+                serde_json::json!({
+                    "rows": rows, "keep_both": keep_both, "root_generation": root_generation,
+                }),
+            )
         }
     }
 
@@ -2466,6 +2866,7 @@ mod tests {
     #[test]
     fn a_relink_stop_carries_the_refusal_it_met() {
         let stop = relink_stop_row(
+            "library.relink",
             Some("r.yaml".to_owned()),
             refused(
                 PortClass::Unavailable,
@@ -2487,7 +2888,7 @@ mod tests {
 
         let error = StoreError::Refused(Refusal::Unreadable);
         let why = store_error_reason(PROFILES_FILE, &error);
-        let stop = relink_stop_row(None, PortRefusal::Store(error));
+        let stop = relink_stop_row("library.relink", None, PortRefusal::Store(error));
         assert_eq!(stop.path, None);
         assert_eq!(stop.code, PROFILE_STORE_REFUSED);
         assert_eq!(stop.args, json!({ "why": why }));
@@ -3416,5 +3817,390 @@ mod tests {
         .expect_err("refused");
         assert_eq!(err.code(), ErrorCode::Internal);
         assert!(err.args().is_none());
+    }
+
+    fn move_answer(agents: Vec<AgentId>) -> Value {
+        json!({
+            "items": [
+                {
+                    "path": "a.md", "status": "done", "to": "rules/a.md",
+                    "trashed": [{ "mount": "library", "bundle": "b1", "path": "rules/a.md" }],
+                    "original": null,
+                    "left": [{ "path": "rules/x", "code": "name-exists", "args": { "path": "rules/x" }, "line": null }],
+                    "code": null, "args": null,
+                },
+                {
+                    "path": "c.md", "status": "skipped", "to": null, "trashed": [], "original": null, "left": [],
+                    "code": "in-place", "args": {},
+                },
+            ],
+            "mapping": [{ "from": "library/a.md", "to": "library/rules/a.md", "exact": false }],
+            "detached": ["library/s"],
+            "written": ["library/p.yaml"],
+            "skipped": [{ "path": "library/q.yaml", "code": "yaml-syntax", "args": {}, "line": 2 }],
+            "trees": [{ "mount": "library", "git": true, "top": "C:/lib" }],
+            "agents": agents,
+            "stopped": null,
+        })
+    }
+
+    fn delete_answer(agents: Vec<AgentId>) -> Value {
+        json!({
+            "items": [{
+                "path": "a.md", "status": "done",
+                "trashed": { "mount": "library", "bundle": "b1", "path": "a.md" },
+                "code": null, "args": null,
+            }],
+            "detached": ["library/a.md"],
+            "written": ["library/p.yaml"],
+            "skipped": [],
+            "agents": agents,
+            "stopped": {
+                "path": null, "code": "profile-store-refused", "args": { "why": "w" }, "message": "m",
+            },
+        })
+    }
+
+    /// ADR-0419: every file verb hands the port exactly the values the caller typed — library paths and trash rows
+    /// untouched, omitted options as their stated defaults, an `on_conflict` word typed in another case as the declared
+    /// spelling.
+    #[test]
+    fn each_file_verb_hands_the_port_the_values_the_caller_typed() {
+        let row = json!({ "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "rules/a.md" });
+        let cases: Vec<(&str, Value, Value, &str, Value)> = vec![
+            (
+                "library.move",
+                json!({ "paths": ["a.md", "\"b c.md\""], "to_folder": "library/rules" }),
+                move_answer(Vec::new()),
+                "move_items",
+                json!({
+                    "paths": ["a.md", "\"b c.md\""], "to_folder": "library/rules", "on_conflict": null,
+                    "yes": false, "detach_refs": false, "plan_digest": null, "root_generation": null,
+                }),
+            ),
+            (
+                "library.move",
+                json!({
+                    "paths": ["a.md"], "to_folder": "library/rules", "on_conflict": "keepboth", "yes": true,
+                    "detach_refs": true, "plan_digest": "d1", "root_generation": 7,
+                }),
+                move_answer(Vec::new()),
+                "move_items",
+                json!({
+                    "paths": ["a.md"], "to_folder": "library/rules", "on_conflict": "KeepBoth",
+                    "yes": true, "detach_refs": true, "plan_digest": "d1", "root_generation": 7,
+                }),
+            ),
+            (
+                "library.rename",
+                json!({ "path": "library/a.md", "name": "b.md" }),
+                move_answer(Vec::new()),
+                "rename",
+                json!({
+                    "path": "library/a.md", "name": "b.md", "yes": false, "detach_refs": false,
+                    "plan_digest": null, "root_generation": null,
+                }),
+            ),
+            (
+                "library.rename",
+                json!({
+                    "path": "library/s/SKILL.md", "name": "notes.md", "yes": true, "detach_refs": true,
+                    "plan_digest": "d2", "root_generation": 3,
+                }),
+                move_answer(Vec::new()),
+                "rename",
+                json!({
+                    "path": "library/s/SKILL.md", "name": "notes.md", "yes": true, "detach_refs": true,
+                    "plan_digest": "d2", "root_generation": 3,
+                }),
+            ),
+            (
+                "library.copy",
+                json!({ "paths": ["engram/default"], "to_folder": "library" }),
+                json!({ "items": [] }),
+                "copy_items",
+                json!({
+                    "paths": ["engram/default"], "to_folder": "library", "on_conflict": null,
+                    "root_generation": null,
+                }),
+            ),
+            (
+                "library.copy",
+                json!({
+                    "paths": ["library/a.md"], "to_folder": "library/b", "on_conflict": "Overwrite",
+                    "root_generation": 4,
+                }),
+                json!({ "items": [] }),
+                "copy_items",
+                json!({
+                    "paths": ["library/a.md"], "to_folder": "library/b", "on_conflict": "Overwrite",
+                    "root_generation": 4,
+                }),
+            ),
+            (
+                "library.delete",
+                json!({ "paths": ["library/a.md"] }),
+                delete_answer(Vec::new()),
+                "delete",
+                json!({
+                    "paths": ["library/a.md"], "yes": false, "detach_refs": false, "plan_digest": null,
+                    "root_generation": null,
+                }),
+            ),
+            (
+                "library.delete",
+                json!({
+                    "paths": ["library/a.md", "library/d"], "yes": true, "detach_refs": true,
+                    "plan_digest": "d3", "root_generation": 9,
+                }),
+                delete_answer(Vec::new()),
+                "delete",
+                json!({
+                    "paths": ["library/a.md", "library/d"], "yes": true, "detach_refs": true,
+                    "plan_digest": "d3", "root_generation": 9,
+                }),
+            ),
+            (
+                "library.listTrash",
+                json!({}),
+                json!({ "mounts": [] }),
+                "list_trash",
+                Value::Null,
+            ),
+            (
+                "library.restore",
+                json!({ "rows": [row.clone()] }),
+                json!({ "items": [] }),
+                "restore",
+                json!({ "rows": [row.clone()], "keep_both": false, "root_generation": null }),
+            ),
+            (
+                "library.restore",
+                json!({ "rows": [row.clone()], "keep_both": true, "root_generation": 2 }),
+                json!({ "items": [] }),
+                "restore",
+                json!({ "rows": [row], "keep_both": true, "root_generation": 2 }),
+            ),
+        ];
+        for (name, args, answer, method, expected) in cases {
+            let library = FakeLibrary::answering(Ok(answer));
+            call(&table(Vec::new(), Arc::clone(&library)), name, args.clone())
+                .unwrap_or_else(|e| panic!("{name} {args}: {e:?}"));
+            assert_eq!(library.calls(), [(method, expected)], "{name} {args}");
+        }
+    }
+
+    /// ADR-0419: a move, a rename and a delete answer the port's rows unchanged, with the agents named from one roster
+    /// read and an id the roster no longer holds dropped; a copy, the trash view and a restore are carried as built.
+    #[test]
+    fn file_answers_are_carried_with_the_agents_named_from_the_roster() {
+        let (bob, ann, gone) = (AgentId::new_v4(), AgentId::new_v4(), AgentId::new_v4());
+        let roster = || vec![(bob, "bob"), (ann, "ann")];
+        let named = json!([
+            { "id": ann.to_string(), "name": "ann" },
+            { "id": bob.to_string(), "name": "bob" },
+        ]);
+        for (name, args) in [
+            (
+                "library.move",
+                json!({ "paths": ["a.md"], "to_folder": "library/rules" }),
+            ),
+            (
+                "library.rename",
+                json!({ "path": "library/a.md", "name": "b.md" }),
+            ),
+        ] {
+            let library = FakeLibrary::answering(Ok(move_answer(vec![ann, gone, bob])));
+            let out = call(&table(roster(), library), name, args).expect("answer");
+            let mut expected = move_answer(Vec::new());
+            expected["agents"] = named.clone();
+            assert_eq!(out, expected, "{name}");
+        }
+
+        let library = FakeLibrary::answering(Ok(delete_answer(vec![gone, ann, bob])));
+        let out = call(
+            &table(roster(), library),
+            "library.delete",
+            json!({ "paths": ["library/a.md"] }),
+        )
+        .expect("delete");
+        let mut expected = delete_answer(Vec::new());
+        expected["agents"] = named;
+        assert_eq!(out, expected);
+
+        let copied = json!({ "items": [{
+            "path": "a.md", "status": "skipped", "to": null, "trashed": [],
+            "code": "name-taken-during-copy",
+            "args": { "path": "library/b/a.md", "staging_row": { "mount": "library", "bundle": "b", "path": "x" } },
+        }] });
+        let trash = json!({ "mounts": [
+            { "mount": "team", "problem": { "code": "trash-unusable", "args": { "mount": "team", "why": "w" } }, "bundles": [] },
+            { "mount": "library", "problem": null, "bundles": [{
+                "bundle": "20261123T081500Z-abc123", "deleted_at": "2026-11-23T08:15:00Z", "source": "record",
+                "why": null, "trouble": null,
+                "rows": [{
+                    "path": "a.md", "original": "library/a.md", "kind": "root", "state": "present",
+                    "entry": "file", "why": null, "staging": false, "intended": null, "restorable": true,
+                }],
+            }] },
+        ] });
+        let restored = json!({ "items": [{
+            "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "a.md", "status": "conflict",
+            "to": null, "code": "name-exists", "args": { "path": "library/a.md" },
+        }] });
+        for (name, args, answer) in [
+            (
+                "library.copy",
+                json!({ "paths": ["library/a.md"], "to_folder": "library/b" }),
+                copied,
+            ),
+            ("library.listTrash", json!({}), trash),
+            (
+                "library.restore",
+                json!({ "rows": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "a.md" }] }),
+                restored,
+            ),
+        ] {
+            let library = FakeLibrary::answering(Ok(answer.clone()));
+            let out = call(&table(roster(), library), name, args).expect("answer");
+            assert_eq!(out, answer, "{name}");
+        }
+    }
+
+    /// ADR-0419: a file verb's refusal maps as every library refusal does — the plan, its digest and the forms of a
+    /// `delete-unconfirmed` or `skill-unconfirmed`, and the stagings a refusal met after copying names, reach the caller
+    /// untouched in `args.args`, the message naming the command.
+    #[test]
+    fn a_file_refusal_carries_its_plan_forms_and_stagings_untouched() {
+        let plan = json!({
+            "plan": { "presets": ["library/p.yaml"], "agents": [{ "id": "x", "name": "bob" }] },
+            "plan_digest": "d",
+            "forms": {
+                "keep": { "yes": true },
+                "detach": { "yes": true, "detach_refs": true, "plan_digest": "d" },
+            },
+        });
+        let stagings = json!({
+            "current": 8,
+            "stagings": [{ "staging_row": { "mount": "library", "bundle": "b", "path": "x" } }],
+        });
+        let cases = [
+            (
+                "library.delete",
+                json!({ "paths": ["library/a.md"] }),
+                refused(
+                    PortClass::Conflict,
+                    "delete-unconfirmed",
+                    plan.clone(),
+                    None,
+                ),
+                ErrorCode::Conflict,
+            ),
+            (
+                "library.move",
+                json!({ "paths": ["library/s/SKILL.md"], "to_folder": "library" }),
+                refused(PortClass::Conflict, "skill-unconfirmed", plan.clone(), None),
+                ErrorCode::Conflict,
+            ),
+            (
+                "library.rename",
+                json!({ "path": "library/s/SKILL.md", "name": "x.md" }),
+                refused(PortClass::Conflict, "skill-unconfirmed", plan, None),
+                ErrorCode::Conflict,
+            ),
+            (
+                "library.copy",
+                json!({ "paths": ["library/a.md"], "to_folder": "team" }),
+                refused(PortClass::Conflict, "root-generation-stale", stagings, None),
+                ErrorCode::Conflict,
+            ),
+            (
+                "library.move",
+                json!({ "paths": ["library/a.md"], "to_folder": "library/.x" }),
+                refused(
+                    PortClass::InvalidArgument,
+                    "item-path-invalid",
+                    json!({ "path": "library/.x", "why": "a dot or temp name" }),
+                    None,
+                ),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                "library.restore",
+                json!({ "rows": [] }),
+                refused(
+                    PortClass::Unavailable,
+                    "library-unavailable",
+                    json!({ "message": "m" }),
+                    None,
+                ),
+                ErrorCode::Conflict,
+            ),
+            (
+                "library.listTrash",
+                json!({}),
+                refused(
+                    PortClass::Unavailable,
+                    "library-unavailable",
+                    json!({ "message": "m" }),
+                    None,
+                ),
+                ErrorCode::Conflict,
+            ),
+        ];
+        for (name, args, refusal, code) in cases {
+            let PortRefusal::Refused { reason, .. } = &refusal else {
+                unreachable!("built refused")
+            };
+            let mut expected = Map::new();
+            put_reason(&mut expected, reason);
+            let library = FakeLibrary::answering(Err(refusal));
+            let err = call(&table(Vec::new(), library), name, args).expect_err("refused");
+            assert_eq!(err.code(), code, "{name}");
+            assert_eq!(err.args(), Some(&expected), "{name}");
+            assert!(err.message().starts_with(&format!("{name}: ")), "{name}");
+        }
+    }
+
+    /// ADR-0419: a blank `to_folder`, `path`, `name` or `plan_digest` is refused before the port is called.
+    #[test]
+    fn blank_file_values_are_refused_before_the_port_is_called() {
+        let cases = [
+            (
+                "library.move",
+                json!({ "paths": ["a.md"], "to_folder": " " }),
+            ),
+            (
+                "library.move",
+                json!({ "paths": ["a.md"], "to_folder": "library", "plan_digest": "" }),
+            ),
+            ("library.rename", json!({ "path": "", "name": "b.md" })),
+            (
+                "library.rename",
+                json!({ "path": "library/a.md", "name": " " }),
+            ),
+            (
+                "library.rename",
+                json!({ "path": "library/a.md", "name": "b.md", "plan_digest": " " }),
+            ),
+            (
+                "library.copy",
+                json!({ "paths": ["a.md"], "to_folder": "" }),
+            ),
+            (
+                "library.delete",
+                json!({ "paths": ["library/a.md"], "plan_digest": "" }),
+            ),
+        ];
+        for (name, args) in cases {
+            let library = Arc::new(FakeLibrary::default());
+            let err = call(&table(Vec::new(), Arc::clone(&library)), name, args.clone())
+                .expect_err("blank refused");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{name} {args}");
+            assert!(
+                library.calls().is_empty(),
+                "{name} {args}: the port was called"
+            );
+        }
     }
 }

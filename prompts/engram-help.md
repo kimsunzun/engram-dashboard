@@ -323,6 +323,27 @@ renameMount: when preset files would be rewritten, or references would stay as t
 
 To have unread files rewritten too, wait until their mount reads ok (library.status) and call again instead of confirming. If the plan changed before the confirming call (a file came to refer to the mount, a mount came back or went away), nothing is applied and the reply is mount-rename-unconfirmed — or root-generation-stale when a mount changed — with the fresh plan; confirm that one with its own values (root-generation-stale: its root_generation is args.args.current). The reply is like library.status plus fixed (old → new pairs), written, skipped (files with why; a row naming a mount = that mount was never read) and already_pointing. If stopped is not null, a file or the agents could not be written and the old name stays: clear its cause and call again — the reply is the plan of what is left, to confirm with its own root_generation and plan_digest (when nothing is left to confirm, call again without --yes and it finishes). CONFLICT mount-unusable (args.args mount · state · why) = the mount itself cannot be read, so nothing was done — make it readable first (library.status).
 
+  {tool} library.move --paths <list> --to_folder <path> [--on_conflict <Overwrite|Skip|KeepBoth>]
+      Moves the items into that folder, keeping their names; every preset file and agent that names them follows (mapping = old → new pairs in order, written, trees = the git working trees of the rewritten files). A taken name is that item's conflict name-exists unless on_conflict says: Overwrite (the entry there goes into its mount's trash) · Skip · KeepBoth (name (2), name (3) …). Same-name folders merge on one volume and are refused across volumes (crosses-volumes)
+  {tool} library.rename --path <path> --name <new name>
+      Renames it in its folder (a case-only rename too) and replies like library.move. A taken name is conflict name-exists, nothing replaced
+  {tool} library.copy --paths <list> --to_folder <path> [--on_conflict <Overwrite|Skip|KeepBoth>]
+      Copies the items there (an engram item too); a copy into its own folder is named a - Copy.md, then a - Copy (2).md … Nothing refers to a copy, so no reference changes
+  {tool} library.delete --paths <list>
+      Moves the items into their mount's trash; when presets or agents refer to them it asks first (below)
+  {tool} library.listTrash
+      Every mount's trash: bundles (one per delete) with deleted_at and rows; per row original (where a restore puts it back) and restorable
+  {tool} library.restore --rows <JSON array of {"mount": "…", "bundle": "…", "path": "…"}> [--keep_both true]
+      Puts trash rows back where they were, as listTrash lists them; nothing is overwritten — a taken name is that row's conflict name-exists, and with keep_both it comes back as name (2) …
+
+move, rename, copy, delete and restore reply one row per given path or trash row (items), in the order given, each with status done · skipped · conflict · failed. A done row says what came of it (to, trashed, original, left); every other row carries code and args, the reason — skipped is inside-given-folder (a folder above it was given too, only the folder counts) · in-place (already there) · name-exists (on_conflict Skip) · name-taken-during-copy. A row that failed does not undo the rows done. A copy or a move across volumes that did not finish names its staging in args: staging_row (it went into the trash), or staging · staging_disk · staging_kept (a temp-named copy left in the destination folder that only the user can remove).
+
+delete — and a move or rename that takes a skill's SKILL.md out of its skill folder — first answers CONFLICT delete-unconfirmed (skill-unconfirmed) when preset files or agents refer to what goes, and applies nothing; args.args carries plan (presets · agents), plan_digest and forms. Read the plan, then repeat the same call with --yes true (references kept — they read as not found until a restore) or --yes true --detach_refs true --plan_digest <that plan_digest> (references removed). If the plan changed meanwhile, the reply is the same CONFLICT with the fresh plan — confirm that one.
+
+A file command can take long (a copy across volumes). If {tool} prints CONNECT_FAILED read failed after a move, rename, copy, delete or restore, the outcome is unknown and the command may still be running — do not repeat it. After a pause read the destination (library.list, library.listTrash) — library.list leaves temp names out and listTrash shows only stagings already trashed, so tell the user the outcome is uncertain and that a kept staging (a temp-named file or folder only the user can remove) may sit in the destination folder.
+
+Emptying the trash and deleting for good are done by the user in the library screen.
+
   {tool} preset.get --path <path|engram/default>
       The lists, each entry with its state, folders, conflicts, problems, rev and how many agents attach it
   {tool} preset.add --path <path> (--items <list> [--backend <claude|codex>] | --folders <list>) [--after <entry>]

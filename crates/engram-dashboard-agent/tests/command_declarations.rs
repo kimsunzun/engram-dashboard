@@ -4,12 +4,13 @@ use engram_dashboard_agent::commands::{
     AgentAttachPresetArgs, AgentCancelQueuedInputArgs, AgentDetachPresetArgs, AgentDuplicateArgs,
     AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs, AgentMoveArgs, AgentNewArgs,
     AgentPresetsArgs, AgentRenameArgs, AgentReorderPresetsArgs, AgentResolveArgs,
-    AgentSetWorkspaceArgs, AgentSpawnArgs, LibraryAddMountArgs, LibraryFoldersArgs,
-    LibraryListArgs, LibraryNewFileArgs, LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs,
-    LibraryRelinkArgs, LibraryRelocateMountArgs, LibraryRemoveMountArgs, LibraryRenameMountArgs,
-    LibraryStatusArgs, PresetAddArgs, PresetCheckArgs, PresetGetArgs, PresetPreviewFolderArgs,
-    PresetRemoveArgs, PresetReorderArgs, PresetSaveArgs, PresetSetBackendArgs, UsageGetArgs,
-    UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
+    AgentSetWorkspaceArgs, AgentSpawnArgs, LibraryAddMountArgs, LibraryCopyArgs, LibraryDeleteArgs,
+    LibraryFoldersArgs, LibraryListArgs, LibraryListTrashArgs, LibraryMoveArgs, LibraryNewFileArgs,
+    LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs, LibraryRelinkArgs,
+    LibraryRelocateMountArgs, LibraryRemoveMountArgs, LibraryRenameArgs, LibraryRenameMountArgs,
+    LibraryRestoreArgs, LibraryStatusArgs, PresetAddArgs, PresetCheckArgs, PresetGetArgs,
+    PresetPreviewFolderArgs, PresetRemoveArgs, PresetReorderArgs, PresetSaveArgs,
+    PresetSetBackendArgs, UsageGetArgs, UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
 };
 use engram_dashboard_command::DeadlineClass;
 use engram_dashboard_command::{
@@ -41,8 +42,12 @@ fn declared_names_are_the_cli_verbs() {
             "agent.setWorkspace",
             "agent.spawn",
             "library.addMount",
+            "library.copy",
+            "library.delete",
             "library.folders",
             "library.list",
+            "library.listTrash",
+            "library.move",
             "library.newFile",
             "library.newFolder",
             "library.read",
@@ -50,7 +55,9 @@ fn declared_names_are_the_cli_verbs() {
             "library.relink",
             "library.relocateMount",
             "library.removeMount",
+            "library.rename",
             "library.renameMount",
+            "library.restore",
             "library.status",
             "preset.add",
             "preset.check",
@@ -76,7 +83,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 24 // two were added in v6 — `agent.interrupt` · `usage.refresh`; seventeen in v9 — `library.addMount` · `removeMount` · `relocateMount` · `renameMount` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`, `agent.setWorkspace` · `duplicate`
+            == 29 // two were added in v6 — `agent.interrupt` · `usage.refresh`; twenty-two in v9 — `library.addMount` · `removeMount` · `relocateMount` · `renameMount` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`, `agent.setWorkspace` · `duplicate`, `library.move` · `rename` · `copy` · `delete` · `restore`
     );
 }
 
@@ -140,6 +147,37 @@ fn the_library_verbs_are_declared_in_generation_9_with_their_effect() {
         assert_eq!(spec.effect, effect, "{name}");
         assert_eq!(spec.since, 9, "{name}");
         assert_eq!(spec.deadline, DeadlineClass::Ordinary, "{name}");
+    }
+}
+
+/// The six file and trash commands (ADR-0419) — all in catalog 9; the trash view is `Read` and ordinary (its reads are
+/// bounded by the read budget), the five that move, copy, delete or restore files are `Write` with the launch deadline
+/// class (a copy across volumes can outlast the ordinary wait). `on_conflict` advertises its three words.
+#[test]
+fn the_file_verbs_are_declared_in_generation_9_with_their_effect_and_deadline() {
+    let cases = [
+        ("library.move", Effect::Write, DeadlineClass::Launch),
+        ("library.rename", Effect::Write, DeadlineClass::Launch),
+        ("library.copy", Effect::Write, DeadlineClass::Launch),
+        ("library.delete", Effect::Write, DeadlineClass::Launch),
+        ("library.listTrash", Effect::Read, DeadlineClass::Ordinary),
+        ("library.restore", Effect::Write, DeadlineClass::Launch),
+    ];
+    for (name, effect, deadline) in cases {
+        let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
+        assert_eq!(spec.effect, effect, "{name}");
+        assert_eq!(spec.since, 9, "{name}");
+        assert_eq!(spec.deadline, deadline, "{name}");
+    }
+    for name in ["library.move", "library.copy"] {
+        let schema: serde_json::Value =
+            serde_json::from_str(spec_of(name).expect("declaration").args_schema)
+                .expect("args schema");
+        assert_eq!(
+            schema["properties"]["on_conflict"]["anyOf"][0]["enum"],
+            json!(["Overwrite", "Skip", "KeepBoth"]),
+            "{name}: {schema}"
+        );
     }
 }
 
@@ -331,6 +369,19 @@ fn error_sets_are_golden() {
         );
     }
     for name in ["preset.check", "preset.previewFolder"] {
+        assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
+    }
+    // ADR-0419: a file command answers per item — a missing item is its row, not the call's NOT_FOUND; the whole call
+    //   refuses CONFLICT (no library, a stale root generation, an unconfirmed plan, the built-in mount); the trash view
+    //   only from a daemon that runs no library.
+    for name in [
+        "library.move",
+        "library.rename",
+        "library.copy",
+        "library.delete",
+        "library.listTrash",
+        "library.restore",
+    ] {
         assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
     }
     // The agent-preset commands resolve `target` (absent = NOT_FOUND · same name = CONFLICT); their refusals are
@@ -569,6 +620,48 @@ fn required_matches_what_deserialization_actually_demands() {
             "preset.previewFolder",
             parses::<PresetPreviewFolderArgs>,
             json!({ "folder": "C:/f", "backend": "codex", "mode": "Terminal" }),
+        ),
+        (
+            "library.move",
+            parses::<LibraryMoveArgs>,
+            json!({
+                "paths": ["a.md"], "to_folder": "rules", "on_conflict": "KeepBoth", "yes": true,
+                "detach_refs": true, "plan_digest": "d", "root_generation": 3,
+            }),
+        ),
+        (
+            "library.rename",
+            parses::<LibraryRenameArgs>,
+            json!({
+                "path": "a.md", "name": "b.md", "yes": true, "detach_refs": true, "plan_digest": "d",
+                "root_generation": 3,
+            }),
+        ),
+        (
+            "library.copy",
+            parses::<LibraryCopyArgs>,
+            json!({ "paths": ["a.md"], "to_folder": "rules", "on_conflict": "Skip", "root_generation": 3 }),
+        ),
+        (
+            "library.delete",
+            parses::<LibraryDeleteArgs>,
+            json!({
+                "paths": ["a.md"], "yes": true, "detach_refs": true, "plan_digest": "d",
+                "root_generation": 3,
+            }),
+        ),
+        (
+            "library.listTrash",
+            parses::<LibraryListTrashArgs>,
+            json!({}),
+        ),
+        (
+            "library.restore",
+            parses::<LibraryRestoreArgs>,
+            json!({
+                "rows": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "a.md" }],
+                "keep_both": true, "root_generation": 3,
+            }),
         ),
         (
             "agent.presets",

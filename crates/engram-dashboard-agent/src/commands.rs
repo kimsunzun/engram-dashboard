@@ -60,7 +60,9 @@ declare_commands! {
     //   and the preset edits' answers) gains `notices`. Then the mount commands: `library.status` answers `mounts` (its
     //   `root`, `root_setting`, `state` and `state_why` left), `library.addMount` · `removeMount` · `relocateMount` are
     //   added and `library.setRoot` is removed (ADR-0400 decision 7), and `preset.reorder`'s `section` became a
-    //   lowercase word (ADR-0400 decision 22). `library.renameMount` is added in it too (ADR-0400 decision 12).
+    //   lowercase word (ADR-0400 decision 22). `library.renameMount` is added in it too (ADR-0400 decision 12). So are
+    //   the file and trash commands `library.move` · `rename` · `copy` · `delete` · `listTrash` · `restore`, the five
+    //   writes with the launch deadline class (ADR-0419).
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -372,6 +374,171 @@ declare_commands! {
         args: Json,
         /// The refusal as one readable line.
         message: String,
+    }
+
+    // ── Files and trash (`library.move` … `library.restore` — ADR-0419) ──────────────────────────────────────
+    // ADR-0409
+    // ADR-0419
+    // One flat row per given path or trash row, in the order given: `status` = `done` | `skipped` | `conflict` |
+    //   `failed`. `done` fills the row's result fields; every other status fills `code` and `args` — the reason as the
+    //   service built it (a skip's code from `host.rs`), so a staging a copy left is named inside `args`.
+
+    /// How a move or copy answers a name taken at its destination — the entry there goes into its mount's trash and the
+    /// item takes the name | the item stays where it is | the item takes the next free `name (2)`, `name (3)` … name.
+    enum LibraryOnConflict {
+        Overwrite,
+        Skip,
+        KeepBoth,
+    }
+
+    /// A row of a mount's trash: its mount, its bundle, and its path inside the mount (as `library.listTrash` lists it).
+    struct TrashAddressRow {
+        mount: String,
+        bundle: String,
+        path: String,
+    }
+
+    /// One given path of a move or rename.
+    struct MoveItemRow {
+        /// As given.
+        path: String,
+        /// `done` | `skipped` | `conflict` | `failed`.
+        status: String,
+        /// `done`: the library path it is at now (a merged folder: the folder it merged into); else `null`.
+        to: Option<String>,
+        /// `done`: the entries an overwrite moved into their mount's trash, in move order; else empty.
+        trashed: Vec<TrashAddressRow>,
+        /// `done` across volumes: the trash row its original went to, in its own mount's trash; else `null`.
+        original: Option<TrashAddressRow>,
+        /// `done`, a merge: the entries left where they were, each with why; else empty.
+        left: Vec<PathReasonRow>,
+        /// Not `done`: the reason's code (a skip: `inside-given-folder` · `in-place` · `name-exists` ·
+        /// `name-taken-during-copy`); `done`: `null`.
+        code: Option<String>,
+        /// The code's arguments (keys depend on `code`); `null` when `done`.
+        args: Json,
+    }
+
+    /// One old → new pair a move's references followed. Apply the pairs in order: each maps what the pairs before it
+    /// made of a path.
+    struct MovePairRow {
+        from: String,
+        to: String,
+        /// Only `from` itself maps, nothing below it (a merge's emptied source folder).
+        exact: bool,
+    }
+
+    /// A git working tree the written or skipped preset files lie in, once per mount and tree.
+    struct GitTreeRow {
+        mount: String,
+        /// `true` = in a git working tree · `false` = in none · `null` = could not be told.
+        git: Option<bool>,
+        /// The folder holding its `.git` when `git` is `true`; else `null`.
+        top: Option<String>,
+    }
+
+    /// One given path of a copy.
+    struct CopyItemRow {
+        /// As given.
+        path: String,
+        /// `done` | `skipped` | `conflict` | `failed`.
+        status: String,
+        /// `done`: the library path of the copy; else `null`.
+        to: Option<String>,
+        /// `done`: the entry an overwrite moved into its mount's trash (none or one); else empty.
+        trashed: Vec<TrashAddressRow>,
+        /// Not `done`: the reason's code (a skip: `inside-given-folder` · `name-exists` · `name-taken-during-copy`);
+        /// `done`: `null`.
+        code: Option<String>,
+        /// The code's arguments (keys depend on `code`); `null` when `done`.
+        args: Json,
+    }
+
+    /// One given path of a delete.
+    struct DeleteItemRow {
+        /// As given.
+        path: String,
+        /// `done` | `skipped` | `failed`.
+        status: String,
+        /// `done`: the trash row it went to; else `null`.
+        trashed: Option<TrashAddressRow>,
+        /// Not `done`: the reason's code (a skip: `inside-given-folder`); `done`: `null`.
+        code: Option<String>,
+        /// The code's arguments (keys depend on `code`); `null` when `done`.
+        args: Json,
+    }
+
+    /// One given trash row of a restore.
+    struct RestoreItemRow {
+        mount: String,
+        bundle: String,
+        path: String,
+        /// `done` | `conflict` | `failed`.
+        status: String,
+        /// `done`: the library path it is back at (with `keep_both`, maybe `name (2)` …); else `null`.
+        to: Option<String>,
+        /// Not `done`: the reason's code; `done`: `null`.
+        code: Option<String>,
+        /// The code's arguments (keys depend on `code`); `null` when `done`.
+        args: Json,
+    }
+
+    /// Why a mount's trash could not be listed: `trash-unusable` `{mount, why}` (its `.trash` is a link or not a
+    /// folder) or `library-unavailable` `{mount, message}` (not read in time, or held as overlapping another mount).
+    struct TrashProblemRow {
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+    }
+
+    /// One row of a trash bundle.
+    struct TrashViewRow {
+        /// Its path inside the bundle — the item's path in its mount.
+        path: String,
+        /// The library path a restore puts it back at.
+        original: String,
+        /// `root` (a deleted item the bundle's record names — a folder is one row) | `found` (a file, link or empty
+        /// folder of a bundle with no readable record) | `other` (something else left in a bundle with a record).
+        kind: String,
+        /// `present` | `through_link` (a link lies on the way — left untouched) | `failed` (a check on the way
+        /// failed — `why`).
+        state: String,
+        /// `present`: `file` | `folder` | `link`; else `null`.
+        entry: Option<String>,
+        /// `failed`: why; else `null`.
+        why: Option<String>,
+        /// A staging a failed or partial copy left (or a found temp name) — shown, never restorable.
+        staging: bool,
+        /// The library path a staging was meant for, when the record names it; else `null`.
+        intended: Option<String>,
+        /// `library.restore` can take it: not `other`, not a staging, `present`, and `original` holds no dot or
+        /// temp name.
+        restorable: bool,
+    }
+
+    /// One bundle of a mount's trash — what one operation deleted there.
+    struct TrashBundleRow {
+        bundle: String,
+        /// When it was deleted, RFC 3339 UTC (`2026-11-23T08:15:00Z`).
+        deleted_at: String,
+        /// How its rows were found: `record` | `no_record` (its files and empty folders) | `record_unreadable` (the
+        /// same; `why`) | `unchecked` (the bundle could not be checked — no rows; `trouble`).
+        source: String,
+        /// `record_unreadable`: why; else `null`.
+        why: Option<String>,
+        /// Why some rows may be missing (a listing inside the bundle failed), or why an `unchecked` bundle has none.
+        trouble: Option<String>,
+        /// By path.
+        rows: Vec<TrashViewRow>,
+    }
+
+    /// One mount's trash.
+    struct MountTrashRow {
+        mount: String,
+        /// Why its trash could not be listed (`bundles` is then empty); `null` = listed.
+        problem: Option<TrashProblemRow>,
+        /// By id (oldest first).
+        bundles: Vec<TrashBundleRow>,
     }
 
     // ── Preset (`preset.*` — ADR-0386) ────────────────────────────────────────────────────────────────
@@ -1184,6 +1351,178 @@ declare_commands! {
         skipped: Vec<PathReasonRow>,
         stopped: Option<RelinkStopRow>,
     } errors [NOT_FOUND, CONFLICT];
+
+    // ADR-0369
+    // ADR-0409
+    // ADR-0419: the five file writes take the launch deadline class — a copy across volumes can outlast the ordinary
+    //   wait; `library.listTrash` is bounded by the read budget and stays ordinary.
+
+    /// Moves `paths` into the folder `to_folder`, each keeping its name — on one volume a rename that never replaces,
+    /// across volumes a copy whose original then goes into its own mount's trash. A taken name follows `on_conflict`
+    /// (unspecified: that item's `conflict` `name-exists`); on one volume same-name folders merge entry by entry, across
+    /// volumes they are refused (`crosses-volumes`). Every preset file that names a moved path is rewritten whole, then
+    /// the agents are re-pointed — no confirmation, except when a skill's lone `SKILL.md` leaves its skill folder (or a
+    /// merge would leave a referenced skill folder without it): then nothing is applied and the answer is CONFLICT
+    /// `skill-unconfirmed` with `plan` (`presets`, `agents`), `plan_digest` and `forms` — repeat with `yes`
+    /// (references kept) or `yes` + `detach_refs` + that `plan_digest` (references removed). Answers one row per path in
+    /// the order given (`items`), the old → new `mapping` the references followed (apply in order), the preset files
+    /// `written` and `skipped` with why, the git working `trees` they lie in, the `agents` re-pointed, `detached`
+    /// skill folders, and `stopped` when the reference fix stopped part-way (the items stay moved; `library.relink` the
+    /// old path once it is cleared). INVALID_ARGUMENT `item-path-invalid` (`to_folder` is no library path or holds a dot
+    /// or temp name) · `detach-refs-invalid` (`detach_refs` with no such skill); CONFLICT `mount-read-only`
+    /// (`to_folder` in the built-in mount `engram`) · `library-unavailable` · `skill-unconfirmed` ·
+    /// `root-generation-stale` (either met after copies across volumes also names them in `args.args.stagings`), or the
+    /// agent store's refusal when it is read-only and agents would change. Can take long (a copy across volumes); after
+    /// an answer that never came the outcome is unknown — do not repeat; read the destination after a pause.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.move" => args LibraryMoveArgs {
+        /// Library paths of the items to move (a file, or a folder with everything in it).
+        paths: Vec<String>,
+        /// The library path of the folder they go into (it must exist).
+        to_folder: String,
+        /// Unspecified = a taken name is that item's conflict.
+        on_conflict: Option<LibraryOnConflict>,
+        /// Confirms a `skill-unconfirmed` plan. Unspecified = false.
+        yes: Option<bool>,
+        /// With `yes` and `plan_digest`: removes the references the plan named. Unspecified = false.
+        detach_refs: Option<bool>,
+        /// The `plan_digest` the plan answered — required with `detach_refs`.
+        plan_digest: Option<String>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryMoveOk {
+        items: Vec<MoveItemRow>,
+        mapping: Vec<MovePairRow>,
+        detached: Vec<String>,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        trees: Vec<GitTreeRow>,
+        agents: Vec<AgentRefRow>,
+        stopped: Option<RelinkStopRow>,
+    } errors [CONFLICT];
+
+    /// Renames the item `path` to `name` in its folder (a case-only rename too) — a move to a new name, answered as
+    /// `library.move` answers (one row): a taken name is the row's `conflict` `name-exists` (nothing replaced), its own
+    /// spelling is `skipped` `in-place`; references follow, and a skill's `SKILL.md` renamed so its folder is no skill
+    /// asks first (`skill-unconfirmed`, as `library.move`). Refusals as `library.move`, with `name` — not one valid
+    /// name, or a dot or temp name: INVALID_ARGUMENT `item-path-invalid` — in place of `to_folder`.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.rename" => args LibraryRenameArgs {
+        /// The library path of the item.
+        path: String,
+        /// Its new name (one name, no folder).
+        name: String,
+        /// Confirms a `skill-unconfirmed` plan. Unspecified = false.
+        yes: Option<bool>,
+        /// With `yes` and `plan_digest`: removes the references the plan named. Unspecified = false.
+        detach_refs: Option<bool>,
+        /// The `plan_digest` the plan answered — required with `detach_refs`.
+        plan_digest: Option<String>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryRenameOk {
+        // ★The fields must not differ by a character from `LibraryMoveOk`★ — the pairing destructures it
+        //   (`library_commands.rs`); field meanings: `library.move`.
+        items: Vec<MoveItemRow>,
+        mapping: Vec<MovePairRow>,
+        detached: Vec<String>,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        trees: Vec<GitTreeRow>,
+        agents: Vec<AgentRefRow>,
+        stopped: Option<RelinkStopRow>,
+    } errors [CONFLICT];
+
+    /// Copies `paths` into the folder `to_folder` — each keeps its name (a built-in item from `engram` takes its file's
+    /// name); copied into its own folder it takes the copy name (`a - Copy.md`, then `a - Copy (2).md` …, whatever
+    /// `on_conflict` says). A taken name follows `on_conflict` (unspecified: that item's `conflict` `name-exists`); a
+    /// same-name folder is never merged (`copy-merge-refused`). Each copy is made aside under a temp name and then put
+    /// in place; nothing refers to a copy, so no reference changes. Answers one row per path in the order given; a copy
+    /// that failed part-way names its staging in `args` (`staging_row` — it went into the trash —, or `staging` ·
+    /// `staging_disk` · `staging_kept` when it stayed). INVALID_ARGUMENT `item-path-invalid` (as `library.move`);
+    /// CONFLICT `mount-read-only` · `library-unavailable` · `root-generation-stale` (met after copying:
+    /// `args.args.stagings`). Can take long; after an answer that never came the outcome is unknown — do not repeat;
+    /// read the destination after a pause.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.copy" => args LibraryCopyArgs {
+        /// Library paths of the items to copy, or built-in items (`engram/…`).
+        paths: Vec<String>,
+        /// The library path of the folder the copies go into (it must exist).
+        to_folder: String,
+        /// Unspecified = a taken name is that item's conflict.
+        on_conflict: Option<LibraryOnConflict>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryCopyOk {
+        items: Vec<CopyItemRow>,
+    } errors [CONFLICT];
+
+    /// Deletes `paths` into each one's own mount's trash (`.trash`, one bundle per mount per call — `library.listTrash`
+    /// shows it, `library.restore` brings rows back). When preset files or agents refer to what goes, the first call
+    /// applies nothing and answers CONFLICT `delete-unconfirmed` with `plan` (`presets` — the preset files listing a
+    /// deleted path —, `agents`), `plan_digest` and `forms`: repeat with `yes` (references kept — they read as not
+    /// found until a restore) or `yes` + `detach_refs` + that `plan_digest` (their lines and attachments removed). A plan
+    /// that changed before the repeat answers the same CONFLICT with the fresh plan, nothing applied. Answers one row per
+    /// path in the order given (`items`), and with `detach_refs` the paths `detached`, the preset files `written` and
+    /// `skipped` with why, the `agents` changed and `stopped` when that fix stopped part-way (the items stay deleted).
+    /// CONFLICT `library-unavailable` · `delete-unconfirmed` · `root-generation-stale`, or the agent store's refusal
+    /// when it is read-only and agents would change. Emptying the trash is not a command of this list.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.delete" => args LibraryDeleteArgs {
+        /// Library paths of the items to delete (a file, or a folder with everything in it).
+        paths: Vec<String>,
+        /// Confirms a `delete-unconfirmed` plan. Unspecified = false.
+        yes: Option<bool>,
+        /// With `yes` and `plan_digest`: removes the references the plan named. Unspecified = false.
+        detach_refs: Option<bool>,
+        /// The `plan_digest` the plan answered — required with `detach_refs`.
+        plan_digest: Option<String>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryDeleteOk {
+        items: Vec<DeleteItemRow>,
+        detached: Vec<String>,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        agents: Vec<AgentRefRow>,
+        stopped: Option<RelinkStopRow>,
+    } errors [CONFLICT];
+
+    /// The trash of every registered mount, in mount order: its bundles by id (one per delete per mount), each with
+    /// when it was deleted and its rows — `original` is where `library.restore` puts a row back and `restorable` says
+    /// whether it can. A mount whose trash cannot be read is named with its `problem`, not waited for. Reads only.
+    /// CONFLICT `library-unavailable` only from a daemon that runs no library.
+    #[effect(Read)]
+    #[since(9)]
+    "library.listTrash" => args LibraryListTrashArgs {} -> ok LibraryListTrashOk {
+        mounts: Vec<MountTrashRow>,
+    } errors [CONFLICT];
+
+    /// Restores trash `rows` (as `library.listTrash` lists them) to the same paths in the same mounts, making missing
+    /// parent folders; nothing is ever overwritten — a taken name is that row's `conflict` `name-exists`, and with
+    /// `keep_both` the row comes back as `name (2)`, `name (3)` … instead. Answers one row per given row in the order
+    /// given. CONFLICT `library-unavailable` · `root-generation-stale`.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.restore" => args LibraryRestoreArgs {
+        /// The trash rows to restore.
+        rows: Vec<TrashAddressRow>,
+        /// A taken name restores under the next free keep-both name. Unspecified = false.
+        keep_both: Option<bool>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryRestoreOk {
+        items: Vec<RestoreItemRow>,
+    } errors [CONFLICT];
 
     // ADR-0358
     // ADR-0384
@@ -3813,8 +4152,12 @@ mod tests {
                 "agent.setWorkspace",
                 "agent.spawn",
                 "library.addMount",
+                "library.copy",
+                "library.delete",
                 "library.folders",
                 "library.list",
+                "library.listTrash",
+                "library.move",
                 "library.newFile",
                 "library.newFolder",
                 "library.read",
@@ -3822,7 +4165,9 @@ mod tests {
                 "library.relink",
                 "library.relocateMount",
                 "library.removeMount",
+                "library.rename",
                 "library.renameMount",
+                "library.restore",
                 "library.status",
                 "preset.add",
                 "preset.check",
@@ -3839,16 +4184,28 @@ mod tests {
         assert_eq!(names.len(), COMMAND_SPECS.len());
     }
 
-    /// ADR-0369: `agent.spawn` launches, so the daemon seats it and the CLI waits for it by the launch budget; every
-    /// other verb here keeps the shared waits.
+    /// ADR-0369 · ADR-0419: `agent.spawn` launches and the five library file writes can outlast the ordinary wait (a
+    /// copy across volumes), so a shell-socket seat takes the launch bound and the CLI waits by the launch budget;
+    /// every other verb here — `library.listTrash` among them — keeps the shared waits.
     #[test]
-    fn only_agent_spawn_is_declared_with_the_launch_deadline() {
-        let launches: Vec<&str> = COMMAND_SPECS
+    fn only_agent_spawn_and_the_library_file_writes_are_declared_with_the_launch_deadline() {
+        let mut launches: Vec<&str> = COMMAND_SPECS
             .iter()
             .filter(|spec| spec.deadline == engram_dashboard_command::DeadlineClass::Launch)
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(launches, ["agent.spawn"]);
+        launches.sort_unstable();
+        assert_eq!(
+            launches,
+            [
+                "agent.spawn",
+                "library.copy",
+                "library.delete",
+                "library.move",
+                "library.rename",
+                "library.restore"
+            ]
+        );
     }
 
     #[test]
