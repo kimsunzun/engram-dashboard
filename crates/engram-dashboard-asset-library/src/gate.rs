@@ -898,6 +898,12 @@ impl Gate {
         self.held_in(given, reservation.as_ref(), f, R::refused)
     }
 
+    /// The trash lock and its waiting count (`trash.rs`) — emptying takes it per bundle, holding no library lock.
+    // ADR-0409 decision 15
+    pub(crate) fn trash(&self) -> &TrashLock {
+        &self.trash
+    }
+
     fn held_in<R>(
         &self,
         given: Option<u64>,
@@ -1595,11 +1601,6 @@ impl Gate {
             );
             turns = engram_dashboard_base::sync::wait_timeout(&self.moved, turns, deadline - now).0;
         }
-    }
-
-    /// The trash lock and its waiting count (`trash.rs`).
-    pub(crate) fn trash(&self) -> &TrashLock {
-        &self.trash
     }
 
     /// The library lock itself — a test holds it or checks that nobody does.

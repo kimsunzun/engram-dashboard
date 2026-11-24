@@ -129,9 +129,12 @@
 //! lock — one for every mount, after the library lock and before the turn mutex — and its waiting count, which a step
 //! that may touch `.trash` raises before its ticket ([`LibraryService::change_held_at`], a `Change` hold whose body
 //! raises the change number before its agents pass — ADR-0409 M1); the trash-folder check, bundle ids, the bundle record and the
-//! bundle-shell pruning; the `.git/info/exclude` line; and the trash view (`LibraryService::trash_view`), which reads each
+//! bundle-shell pruning; the `.git/info/exclude` line; the trash view (`LibraryService::trash_view`), which reads each
 //! mount's `.trash` through the store on a bounded job (`BoundedIo::run_all`, ADR-0409 M15), holding no library lock —
-//! a mount held as overlapping another is named, never read.
+//! a mount held as overlapping another is named, never read; and emptying and permanent delete
+//! (`LibraryService::empty_trash` — ADR-0408), which remove the rows a caller names for good through the store
+//! (`LibraryStore::remove_tree`, a link removed as a link), per bundle under the trash lock, holding no library lock and
+//! no ticket.
 //! The store's renames never replace (`store.rs`). The rules are in its header. `ops.rs` holds the file operations on top
 //! of it — delete (each item into its own mount's `.trash`, with `yes` / `detachRefs` and the plan digest judged again
 //! inside the hold, the folder it left re-classified in the same hold), restore (back to the same path, never
@@ -2970,6 +2973,10 @@ mod tests {
         moved: Condvar,
         /// The next read of this path parks: it tells the sender, then waits for the receiver ([`TestStore::door_read`]).
         read_door: Mutex<Option<ReadDoor>>,
+        /// The next stat of this path parks the same way ([`TestStore::door_stat`]).
+        stat_door: Mutex<Option<ReadDoor>>,
+        /// The next listing of this path parks the same way ([`TestStore::door_list`]).
+        list_door: Mutex<Option<ReadDoor>>,
     }
 
     type ReadDoor = (
@@ -2994,6 +3001,8 @@ mod tests {
                 hold: Mutex::default(),
                 moved: Condvar::new(),
                 read_door: Mutex::default(),
+                stat_door: Mutex::default(),
+                list_door: Mutex::default(),
             })
         }
 
@@ -3003,15 +3012,42 @@ mod tests {
             &self,
             path: PathBuf,
         ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            Self::arm(&self.read_door, path)
+        }
+
+        /// As [`TestStore::door_read`], on the next stat of `path`.
+        fn door_stat(
+            &self,
+            path: PathBuf,
+        ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            Self::arm(&self.stat_door, path)
+        }
+
+        /// As [`TestStore::door_read`], on the next listing of `path`.
+        fn door_list(
+            &self,
+            path: PathBuf,
+        ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            Self::arm(&self.list_door, path)
+        }
+
+        fn arm(
+            slot: &Mutex<Option<ReadDoor>>,
+            path: PathBuf,
+        ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
             let (entered_tx, entered) = std::sync::mpsc::channel();
             let (release, release_rx) = std::sync::mpsc::channel();
-            *lock(&self.read_door) = Some((path, entered_tx, release_rx));
+            *lock(slot) = Some((path, entered_tx, release_rx));
             (entered, release)
         }
 
         fn pass_read_door(&self, path: &Path) {
+            Self::pass(&self.read_door, path);
+        }
+
+        fn pass(slot: &Mutex<Option<ReadDoor>>, path: &Path) {
             let door = {
-                let mut door = lock(&self.read_door);
+                let mut door = lock(slot);
                 match door.as_ref() {
                     Some((at, _, _)) if at == path => door.take(),
                     _ => None,
@@ -3195,6 +3231,7 @@ mod tests {
 
         fn stat(&self, path: &Path) -> io::Result<crate::store::EntryKind> {
             self.note(path);
+            Self::pass(&self.stat_door, path);
             self.holding(path).stat(path)
         }
 
@@ -3203,6 +3240,7 @@ mod tests {
             path: &Path,
         ) -> io::Result<Vec<(std::ffi::OsString, crate::store::EntryKind)>> {
             self.note(path);
+            Self::pass(&self.list_door, path);
             self.holding(path).list(path)
         }
 
@@ -3214,6 +3252,11 @@ mod tests {
         fn remove_file(&self, path: &Path) -> io::Result<()> {
             self.note(path);
             self.holding(path).remove_file(path)
+        }
+
+        fn remove_tree(&self, root: &Path, path: &Path) -> io::Result<()> {
+            self.note(path);
+            self.holding(path).remove_tree(root, path)
         }
     }
 
@@ -7670,6 +7713,645 @@ claude: {changed: true}
             held.args["message"].as_str().unwrap().contains("overlaps"),
             "{}",
             held.args
+        );
+    }
+
+    // ── emptying (ADR-0408 · ADR-0409 decisions 11 and 15) ──────────────────────────────────────────────────
+
+    const BUNDLE: &str = "20261123T081500Z-a1b2c3";
+    const LATER: &str = "20261123T081600Z-d4e5f6";
+
+    /// `.trash/<bundle>/<rel>` inside a mount folder.
+    fn trashed(bundle: &str, rel: &str) -> String {
+        format!(".trash/{bundle}/{rel}")
+    }
+
+    /// The record of `bundle` in `mem` naming `roots`.
+    fn record_of(mem: &MemStore, bundle: &str, roots: &[&str]) {
+        let roots: Vec<serde_json::Value> =
+            roots.iter().map(|path| json!({ "path": path })).collect();
+        mem.file(
+            &trashed(bundle, crate::trash::RECORD_NAME),
+            &json!({ "roots": roots }).to_string(),
+        );
+    }
+
+    fn listed(mount: &str, bundle: &str, rows: &[&str]) -> crate::trash::ListedBundle {
+        crate::trash::ListedBundle {
+            mount: mount.to_owned(),
+            bundle: bundle.to_owned(),
+            rows: rows.iter().map(|row| (*row).to_owned()).collect(),
+        }
+    }
+
+    fn trash_row(mount: &str, bundle: &str, path: &str) -> crate::ops::TrashAddress {
+        crate::ops::TrashAddress {
+            mount: mount.to_owned(),
+            bundle: bundle.to_owned(),
+            path: path.to_owned(),
+        }
+    }
+
+    /// Each row's path and what came of it: `gone`, `not-found` or the code it remains with.
+    fn emptied(answer: &crate::trash::EmptyAnswer) -> Vec<(String, String)> {
+        use crate::trash::Emptied;
+        answer
+            .rows
+            .iter()
+            .map(|row| {
+                let said = match &row.outcome {
+                    Emptied::Gone => "gone".to_owned(),
+                    Emptied::Remaining(why) => why.code.clone(),
+                    Emptied::NotFound(why) => {
+                        assert_eq!(why.code, NOT_FOUND, "{why:?}");
+                        "not-found".to_owned()
+                    }
+                };
+                (row.row.path.clone(), said)
+            })
+            .collect()
+    }
+
+    fn pairs(rows: &[(&str, &str)]) -> Vec<(String, String)> {
+        rows.iter()
+            .map(|(path, said)| ((*path).to_owned(), (*said).to_owned()))
+            .collect()
+    }
+
+    fn in_trash(mem: &MemStore, bundle: &str, rel: &str) -> bool {
+        mem.exists(
+            &MountPath::parse(&trashed(bundle, rel))
+                .unwrap()
+                .to_path(Path::new("/lib")),
+        )
+    }
+
+    // ADR-0409 decisions 8 and 11 · ADR-0408 decision 2: empty-all removes the rows the view listed one by one — a
+    //   root, a nested root (its emptied folder pruned), a folder root with what it holds, an `other` row — then the
+    //   record and the bundle folder; a listed path that is no row is `not-found`, a crash bundle listed with no rows
+    //   goes, and a foreign bundle name is never touched.
+    #[test]
+    fn empty_all_removes_the_listed_rows_then_the_record_and_the_bundle_folder() {
+        let (svc, store) = two_mounts();
+        let lib = store.mem("/lib");
+        lib.file(&trashed(BUNDLE, "a.md"), "a");
+        lib.file(&trashed(BUNDLE, "d/x.md"), "x");
+        lib.file(&trashed(BUNDLE, "d/y/z.md"), "z");
+        lib.file(&trashed(BUNDLE, "n/m.md"), "m");
+        lib.file(&trashed(BUNDLE, "Thumbs.db"), "litter");
+        record_of(lib, BUNDLE, &["a.md", "n/m.md", "d"]);
+        lib.dir(&format!(".trash/{LATER}"));
+        lib.file(".trash/not-a-bundle/a.md", "foreign");
+
+        let answer = svc
+            .empty_trash(
+                &[
+                    listed(
+                        "library",
+                        BUNDLE,
+                        &["a.md", "n/m.md", "d", "Thumbs.db", "nope.md"],
+                    ),
+                    listed("library", LATER, &[]),
+                    listed("library", "not-a-bundle", &["a.md"]),
+                ],
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(
+            emptied(&answer),
+            pairs(&[
+                ("a.md", "gone"),
+                ("n/m.md", "gone"),
+                ("d", "gone"),
+                ("Thumbs.db", "gone"),
+                ("nope.md", "not-found"),
+                ("a.md", "not-found"),
+            ])
+        );
+        use crate::trash::BundleOutcome;
+        let outcomes: Vec<BundleOutcome> =
+            answer.bundles.iter().map(|bundle| bundle.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [
+                BundleOutcome::Gone,
+                BundleOutcome::Gone,
+                BundleOutcome::NotFound
+            ]
+        );
+        assert!(!in_trash(lib, BUNDLE, crate::trash::RECORD_NAME));
+        assert!(!lib.exists(
+            &MountPath::parse(&format!(".trash/{BUNDLE}"))
+                .unwrap()
+                .to_path(Path::new("/lib"))
+        ));
+        assert!(
+            lib.exists(Path::new("/lib/.trash/not-a-bundle/a.md")),
+            "foreign content stays"
+        );
+        assert!(lib.exists(Path::new("/lib/.trash")), ".trash itself stays");
+    }
+
+    // ADR-0409 M10 · ADR-0408 decision 2: a row whose removal fails part-way remains with its code and keeps the record
+    //   and its row in a fresh view; the other rows go; a row absent before the call is `not-found`.
+    #[test]
+    fn a_row_that_cannot_be_removed_remains_and_a_fresh_view_still_lists_it() {
+        let (svc, store) = two_mounts();
+        let lib = store.mem("/lib");
+        lib.file(&trashed(BUNDLE, "a.md"), "a");
+        lib.file(&trashed(BUNDLE, "d/x.md"), "x");
+        lib.file(&trashed(BUNDLE, "d/held.md"), "held");
+        record_of(lib, BUNDLE, &["a.md", "d"]);
+        lib.fail_removal(&trashed(BUNDLE, "d/held.md"));
+
+        let answer = svc
+            .empty_trash(&[listed("library", BUNDLE, &["a.md", "d"])], &[])
+            .unwrap();
+
+        assert_eq!(
+            emptied(&answer),
+            pairs(&[("a.md", "gone"), ("d", crate::edit::LIBRARY_WRITE_FAILED)])
+        );
+        assert_eq!(
+            answer.bundles[0].outcome,
+            crate::trash::BundleOutcome::Remaining
+        );
+        assert!(!in_trash(lib, BUNDLE, "d/x.md"), "partly emptied");
+        assert!(
+            in_trash(lib, BUNDLE, crate::trash::RECORD_NAME),
+            "the record stays"
+        );
+        let view = svc.trash_view();
+        let bundles = view.mounts[0].view.as_ref().unwrap();
+        let rows: Vec<&str> = bundles[0]
+            .rows
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect();
+        assert_eq!(rows, ["d"], "the surviving folder row is still listed");
+        assert_eq!(bundles[0].rows[0].kind, crate::trash::RowKind::Root);
+
+        let again = svc
+            .empty_trash(&[], &[trash_row("library", BUNDLE, "a.md")])
+            .unwrap();
+        assert_eq!(emptied(&again), pairs(&[("a.md", "not-found")]));
+    }
+
+    // ADR-0326 decision 6 (M86): neither bundles nor rows is refused, nothing removed.
+    #[test]
+    fn an_emptying_that_names_nothing_is_refused() {
+        let (svc, store) = two_mounts();
+        store.mem("/lib").file(&trashed(BUNDLE, "a.md"), "a");
+        match svc.empty_trash(&[], &[]) {
+            Err(LibraryRefusal::Refused { class, reason }) => {
+                assert_eq!(class, RefusalClass::InvalidArgument);
+                assert_eq!(reason.code, crate::trash::NOTHING_TO_EMPTY);
+            }
+            other => panic!("not refused: {other:?}"),
+        }
+        assert!(in_trash(store.mem("/lib"), BUNDLE, "a.md"));
+    }
+
+    // ADR-0322 decision 7 · ADR-0409 decision 15: a mount whose folder does not answer leaves its bundles untouched,
+    //   `library-unavailable`; another mount's bundle is emptied.
+    #[test]
+    fn a_mount_that_does_not_answer_leaves_its_bundles_untouched() {
+        let ops = Arc::new(StatOps::default());
+        lock(&ops.0).insert(
+            PathBuf::from("/team"),
+            FolderStatus::Unreadable(crate::folder::TIMEOUT.to_owned()),
+        );
+        let (svc, store) = mounted_with(&[("library", "/lib"), ("team", "/team")], ops);
+        store.mem("/lib").file(&trashed(BUNDLE, "a.md"), "a");
+        store.mem("/team").file(&trashed(BUNDLE, "b.md"), "b");
+
+        let answer = svc
+            .empty_trash(
+                &[
+                    listed("team", BUNDLE, &["b.md"]),
+                    listed("library", BUNDLE, &["a.md"]),
+                ],
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(
+            emptied(&answer),
+            pairs(&[("b.md", LIBRARY_UNAVAILABLE), ("a.md", "gone")])
+        );
+        assert_eq!(
+            answer.bundles[0].outcome,
+            crate::trash::BundleOutcome::Remaining
+        );
+        assert_eq!(
+            answer.bundles[0]
+                .untouched
+                .as_ref()
+                .map(|why| why.code.as_str()),
+            Some(LIBRARY_UNAVAILABLE)
+        );
+        assert!(store
+            .mem("/team")
+            .exists(Path::new("/team/.trash/20261123T081500Z-a1b2c3/b.md")));
+        assert!(
+            store.touched_under("/team/.trash").is_empty(),
+            "nothing of its trash was read"
+        );
+    }
+
+    // ADR-0324 decision 9 · ADR-0409 decisions 14 and 15: while a removal is held, reads and a write finish (no library
+    //   lock); a step that may touch the trash waits before its ticket holding no library lock either, gets the trash
+    //   lock after that bundle, and the next bundle waits for it.
+    #[test]
+    fn emptying_holds_no_library_lock_and_hands_the_trash_lock_over_per_bundle() {
+        let (svc, store) = two_mounts();
+        svc.first_scan_join().unwrap();
+        let lib = store.mem("/lib");
+        lib.file(&trashed(BUNDLE, "a.md"), "a");
+        record_of(lib, BUNDLE, &["a.md"]);
+        lib.file(&trashed(LATER, "b.md"), "b");
+        record_of(lib, LATER, &["b.md"]);
+        let (entered, release) = lib.door_removal(&trashed(BUNDLE, "a.md"));
+        let emptying = on_thread(&svc, |svc| {
+            svc.empty_trash(
+                &[
+                    listed("library", BUNDLE, &["a.md"]),
+                    listed("library", LATER, &["b.md"]),
+                ],
+                &[],
+            )
+            .unwrap()
+        });
+        entered
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the removal is held");
+
+        svc.with_read(|_| ());
+        svc.list(Some(&lp("library"))).unwrap();
+        svc.change(|_, _, _| ((), Vec::new()));
+
+        let (inside_tx, inside) = std::sync::mpsc::channel();
+        let (go_tx, go) = std::sync::mpsc::channel::<()>();
+        let step = on_thread(&svc, move |svc| {
+            svc.change_held_at(None, true, |_, _, hold| {
+                let _held = hold.take_trash().expect("the step reserved");
+                inside_tx.send(()).unwrap();
+                go.recv_timeout(Duration::from_secs(20)).unwrap();
+                (Ok::<(), ()>(()), Vec::new())
+            })
+        });
+        svc.gate
+            .trash()
+            .wait_until("a step waits before its ticket", |view| {
+                view.waiting == 1 && view.emptying
+            });
+        svc.change(|_, _, _| ((), Vec::new()));
+
+        release.send(()).unwrap();
+        inside
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the step gets the trash lock after the first bundle");
+        svc.gate
+            .trash()
+            .wait_until("the next bundle waits for the step", |view| {
+                view.emptiers == 1
+            });
+        assert!(
+            in_trash(lib, LATER, "b.md"),
+            "the next bundle is not started"
+        );
+        go_tx.send(()).unwrap();
+        join(step).unwrap().unwrap();
+
+        let answer = join(emptying);
+        assert_eq!(
+            emptied(&answer),
+            pairs(&[("a.md", "gone"), ("b.md", "gone")])
+        );
+        assert_eq!(svc.gate.trash().waiting(), 0);
+    }
+
+    // ADR-0326 decision 6 · ADR-0409 decision 15: a view taken while a two-item trash step is held between its items
+    //   lists the first item only; empty-all with those rows after the step finished leaves the late row and the record.
+    #[test]
+    fn empty_all_takes_only_the_rows_the_view_listed_and_a_late_row_and_the_record_stay() {
+        let (svc, store) = two_mounts();
+        let lib = store.mem("/lib");
+        lib.file("a.md", "a");
+        lib.file("b.md", "b");
+        let (view_entered, view_go) = store.door_stat(PathBuf::from("/lib"));
+        let view = on_thread(&svc, |svc| svc.trash_view());
+        view_entered
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the view reads the mount");
+
+        let (between_tx, between) = std::sync::mpsc::channel();
+        let (go_tx, go) = std::sync::mpsc::channel::<()>();
+        let step = on_thread(&svc, move |svc| {
+            svc.change_held_at(None, true, |_, mounts, hold| {
+                use crate::trash::{ensure_trash_folder, make_bundle, publish_record, RecordRoot};
+                let held = hold.take_trash().expect("the step reserved");
+                let folder = mounts.get("library").unwrap().folder.clone();
+                let store = &*svc.store;
+                ensure_trash_folder(store, &folder, &held).unwrap();
+                let id = make_bundle(
+                    store,
+                    &folder,
+                    &crate::trash::BundleId::parse(BUNDLE).unwrap(),
+                    &held,
+                )
+                .unwrap();
+                store
+                    .trash(&folder, &folder.join("a.md"), &id.bundle())
+                    .unwrap();
+                between_tx.send(()).unwrap();
+                go.recv_timeout(Duration::from_secs(20)).unwrap();
+                store
+                    .trash(&folder, &folder.join("b.md"), &id.bundle())
+                    .unwrap();
+                let roots: Vec<RecordRoot> = ["a.md", "b.md"]
+                    .iter()
+                    .map(|path| RecordRoot {
+                        path: MountPath::parse(path).unwrap(),
+                        staging: None,
+                    })
+                    .collect();
+                publish_record(store, &folder, &id, &roots, &held).unwrap();
+                (Ok::<(), ()>(()), Vec::new())
+            })
+        });
+        between
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the step holds between its items");
+        view_go.send(()).unwrap();
+        let view = join(view);
+        let bundles = view.mounts[0].view.as_ref().unwrap();
+        let rows: Vec<&str> = bundles[0]
+            .rows
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect();
+        assert_eq!(rows, ["a.md"], "the view saw the first item only");
+        go_tx.send(()).unwrap();
+        join(step).unwrap().unwrap();
+
+        let answer = svc
+            .empty_trash(&[listed("library", BUNDLE, &rows)], &[])
+            .unwrap();
+
+        assert_eq!(emptied(&answer), pairs(&[("a.md", "gone")]));
+        assert_eq!(
+            answer.bundles[0].outcome,
+            crate::trash::BundleOutcome::Remaining
+        );
+        assert!(in_trash(lib, BUNDLE, "b.md"), "the late row stays");
+        assert!(
+            in_trash(lib, BUNDLE, crate::trash::RECORD_NAME),
+            "so does the record"
+        );
+    }
+
+    fn disk_of(rel: &str) -> PathBuf {
+        MountPath::parse(rel).unwrap().to_path(Path::new("/lib"))
+    }
+
+    // ADR-0409 decisions 6 and 8 (round 1): a bundle without a readable record whose walk meets a sub-folder turned into
+    //   a link answers the rows it was asked `library-read-failed` — never `not-found` while they are there.
+    #[test]
+    fn a_recordless_bundle_whose_walk_fails_leaves_its_rows_remaining_not_absent() {
+        let (svc, store) = two_mounts();
+        let lib = store.mem("/lib");
+        lib.file(&trashed(BUNDLE, "a.md"), "a");
+        lib.file(&trashed(BUNDLE, "d/x.md"), "x");
+        let (entered, release) = store.door_list(disk_of(&trashed(BUNDLE, "d")));
+        let emptying = on_thread(&svc, |svc| {
+            svc.empty_trash(&[listed("library", BUNDLE, &["a.md", "d/x.md"])], &[])
+                .unwrap()
+        });
+        entered
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the walk lists d");
+        store.mem("/lib").link(&trashed(BUNDLE, "d"));
+        release.send(()).unwrap();
+        let answer = join(emptying);
+
+        assert_eq!(
+            emptied(&answer),
+            pairs(&[
+                ("a.md", crate::launch::LIBRARY_READ_FAILED),
+                ("d/x.md", crate::launch::LIBRARY_READ_FAILED)
+            ])
+        );
+        assert_eq!(
+            answer.bundles[0].outcome,
+            crate::trash::BundleOutcome::Remaining
+        );
+        assert!(in_trash(lib, BUNDLE, "a.md"));
+    }
+
+    // ADR-0409 decision 8 (round 1): a folder root the view listed by the record, while the record reads as unreadable at
+    //   the emptying, is none of the bundle's files — it stays `library-read-failed`, never `not-found`.
+    #[test]
+    fn a_folder_root_whose_record_became_unreadable_stays_and_is_not_absent() {
+        let (svc, store) = two_mounts();
+        let lib = store.mem("/lib");
+        lib.file(&trashed(BUNDLE, "d/x.md"), "x");
+        record_of(lib, BUNDLE, &["d"]);
+        lib.fail_read(&trashed(BUNDLE, crate::trash::RECORD_NAME));
+
+        let answer = svc
+            .empty_trash(&[listed("library", BUNDLE, &["d"])], &[])
+            .unwrap();
+
+        assert_eq!(
+            emptied(&answer),
+            pairs(&[("d", crate::launch::LIBRARY_READ_FAILED)])
+        );
+        assert!(in_trash(lib, BUNDLE, "d/x.md"));
+    }
+
+    // ADR-0409 decision 15 (round 1): a mount folder that goes after its bounded stat (a pulled volume) is no empty trash
+    //   — the row being removed and the later bundles stay `library-unavailable`, never `gone` or `not-found`.
+    #[test]
+    fn a_mount_folder_that_goes_while_emptying_is_unavailable_not_an_empty_trash() {
+        let (svc, store) = two_mounts();
+        let lib = store.mem("/lib");
+        lib.file(&trashed(BUNDLE, "a.md"), "a");
+        record_of(lib, BUNDLE, &["a.md"]);
+        lib.file(&trashed(LATER, "b.md"), "b");
+        record_of(lib, LATER, &["b.md"]);
+        let (entered, release) = lib.door_removal(&trashed(BUNDLE, "a.md"));
+        let emptying = on_thread(&svc, |svc| {
+            svc.empty_trash(
+                &[
+                    listed("library", BUNDLE, &["a.md"]),
+                    listed("library", LATER, &["b.md"]),
+                ],
+                &[],
+            )
+            .unwrap()
+        });
+        entered
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the removal is held");
+        store.mem("/lib").vanish();
+        release.send(()).unwrap();
+        let answer = join(emptying);
+
+        assert_eq!(
+            emptied(&answer),
+            pairs(&[("a.md", LIBRARY_UNAVAILABLE), ("b.md", LIBRARY_UNAVAILABLE)])
+        );
+        use crate::trash::BundleOutcome;
+        let outcomes: Vec<BundleOutcome> =
+            answer.bundles.iter().map(|bundle| bundle.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [BundleOutcome::Remaining, BundleOutcome::Remaining]
+        );
+    }
+
+    // ADR-0409 decision 8: a staging row is removable — a staging root of a record, and a temp-named file of a bundle
+    //   without a record.
+    #[test]
+    fn staging_rows_are_emptied_by_record_and_without_one() {
+        let (svc, store) = two_mounts();
+        let lib = store.mem("/lib");
+        let staging = "engram-staging.tmp1.1";
+        lib.file(&trashed(BUNDLE, &format!("{staging}/x.md")), "x");
+        lib.file(
+            &trashed(BUNDLE, crate::trash::RECORD_NAME),
+            &json!({ "roots": [{ "path": staging, "staging": { "intended": "x" } }] }).to_string(),
+        );
+        lib.file(&trashed(LATER, "y.md.tmp1.2"), "y");
+
+        let view = svc.trash_view();
+        let bundles = view.mounts[0].view.as_ref().unwrap();
+        assert!(bundles
+            .iter()
+            .all(|bundle| bundle.rows.iter().all(|row| row.staging)));
+        let answer = svc
+            .empty_trash(
+                &[
+                    listed("library", BUNDLE, &[staging]),
+                    listed("library", LATER, &["y.md.tmp1.2"]),
+                ],
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(
+            emptied(&answer),
+            pairs(&[(staging, "gone"), ("y.md.tmp1.2", "gone")])
+        );
+        use crate::trash::BundleOutcome;
+        let outcomes: Vec<BundleOutcome> =
+            answer.bundles.iter().map(|bundle| bundle.outcome).collect();
+        assert_eq!(outcomes, [BundleOutcome::Gone, BundleOutcome::Gone]);
+    }
+
+    // ADR-0409 decision 8: a path inside a root is no row of its own — the root is never emptied in part
+    //   (`inside-root`); named with its root, it goes with it.
+    #[test]
+    fn a_path_inside_a_root_stays_unless_its_root_goes_with_it() {
+        let (svc, store) = two_mounts();
+        let lib = store.mem("/lib");
+        lib.file(&trashed(BUNDLE, "d/x.md"), "x");
+        record_of(lib, BUNDLE, &["d"]);
+
+        let alone = svc
+            .empty_trash(&[], &[trash_row("library", BUNDLE, "d/x.md")])
+            .unwrap();
+        assert_eq!(
+            emptied(&alone),
+            pairs(&[("d/x.md", crate::ops::INSIDE_ROOT)])
+        );
+        assert!(in_trash(lib, BUNDLE, "d/x.md"));
+
+        let both = svc
+            .empty_trash(&[listed("library", BUNDLE, &["d/x.md", "d"])], &[])
+            .unwrap();
+        assert_eq!(emptied(&both), pairs(&[("d/x.md", "gone"), ("d", "gone")]));
+        assert_eq!(both.bundles[0].outcome, crate::trash::BundleOutcome::Gone);
+    }
+
+    // ADR-0409 decisions 6 and 8: a bundle whose check fails other than by absence is left untouched,
+    //   `library-read-failed`.
+    #[test]
+    fn a_bundle_whose_check_fails_is_left_untouched() {
+        let (svc, store) = two_mounts();
+        let lib = store.mem("/lib");
+        lib.file(&trashed(BUNDLE, "a.md"), "a");
+        lib.fail_stat(&format!(".trash/{BUNDLE}"));
+
+        let answer = svc
+            .empty_trash(&[listed("library", BUNDLE, &["a.md"])], &[])
+            .unwrap();
+
+        assert_eq!(
+            emptied(&answer),
+            pairs(&[("a.md", crate::launch::LIBRARY_READ_FAILED)])
+        );
+        assert_eq!(
+            answer.bundles[0]
+                .untouched
+                .as_ref()
+                .map(|why| why.code.as_str()),
+            Some(crate::launch::LIBRARY_READ_FAILED)
+        );
+        assert!(in_trash(lib, BUNDLE, "a.md"));
+    }
+
+    // ADR-0400 decision 10: a mount held as overlapping another is never emptied — its rows stay
+    //   `library-unavailable`, untouched.
+    #[test]
+    fn a_held_mount_is_never_emptied() {
+        let disk = overlapping_disk();
+        disk.mem("lib/sub").file(&trashed(BUNDLE, "a.md"), "a");
+        let svc = disk.start();
+
+        let answer = svc
+            .empty_trash(&[listed("inner", BUNDLE, &["a.md"])], &[])
+            .unwrap();
+
+        assert_eq!(emptied(&answer), pairs(&[("a.md", LIBRARY_UNAVAILABLE)]));
+        assert!(disk.mem("lib/sub").exists(
+            &MountPath::parse(&trashed(BUNDLE, "a.md"))
+                .unwrap()
+                .to_path(&disk.at("lib/sub"))
+        ));
+    }
+
+    // ADR-0409 decision 8 (round 2): an empty folder of a bundle without a record is removed only while it is empty —
+    //   something written into it after the bundle was judged stays, and so does the row.
+    #[test]
+    fn an_empty_folder_row_that_gained_content_is_not_removed() {
+        let (svc, store) = two_mounts();
+        let lib = store.mem("/lib");
+        lib.file(&trashed(BUNDLE, "d/y.md"), "y");
+        lib.dir(&trashed(BUNDLE, "d/e"));
+        let (entered, release) = store.door_stat(disk_of(&trashed(BUNDLE, "d/e")));
+        let emptying = on_thread(&svc, |svc| {
+            svc.empty_trash(&[listed("library", BUNDLE, &["d/e"])], &[])
+                .unwrap()
+        });
+        entered
+            .recv_timeout(Duration::from_secs(20))
+            .expect("d/e's turn");
+        store
+            .mem("/lib")
+            .file(&trashed(BUNDLE, "d/e/new.md"), "new");
+        release.send(()).unwrap();
+        let answer = join(emptying);
+
+        assert_eq!(
+            emptied(&answer),
+            pairs(&[("d/e", crate::edit::LIBRARY_WRITE_FAILED)])
+        );
+        assert!(
+            in_trash(lib, BUNDLE, "d/e/new.md"),
+            "what came meanwhile stays"
         );
     }
 

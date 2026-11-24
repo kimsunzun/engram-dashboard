@@ -10,6 +10,8 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-132 | S25 step 9b U5 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
+| T-131 | S25 step 9b U5 — read-only entries emptying cannot remove (Unix 0555 folder in a row; a read-only empty-folder row) | Main | Decision pending (user) — junction part resolved 2026-11-24 |
 | T-130 | S25 step 9b U4b review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-129 | S25 step 9b U4a review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-128 | S25 step 9b U4a — copying times and permissions is strict (a share refusing them fails every cross-volume move) | Main | Decision pending (user) — current: strict |
@@ -118,6 +120,15 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-132. S25 step 9b U5 review recommendations left unfixed (rare cases)
+- **Status:** recorded 2026-11-24 at the U5 commit — minor items. Rules of the unit: ADR-0408, ADR-0409.
+- **Items:** (1) the bundle-id form is checked on the address, not on the name on disk — on a case-insensitive volume a crafted address reaches a foreign folder of another spelling (no view produces it; restore the same); (2) restoring an empty-folder fallback row has no test; (3) the read-only junction test makes its link with Windows `attrib` (an OS-specific step in a platform-neutral crate; returns early where the command does not exist); (4) an address through a link answers `not-found` on the record path for a non-root and on the fallback path, where TRD §3.2 says `remaining {path-through-link}`; (5) `judge_in_files`'s message says the record "cannot be read" when it is missing; (6) no per-row log for a remaining row; (7) the view-vs-empty-all test parks the view under the 5 s `IO_LIMIT` (a slow runner could flake).
+
+### T-131. S25 step 9b U5 — read-only entries emptying cannot remove
+- **Status:** decision pending (user) for what is left. Raised by the U5 coder (measured) and the lead review. **Resolved 2026-11-24 (main, within the user's decision of that day):** a read-only junction row is now removed — a refused folder link goes through std `remove_dir_all`, measured to remove the link itself with its target and attributes intact (no attribute changed, so ADR-0409 decision 11 holds).
+- **Left:** on Unix a folder with mode 0555 inside a row cannot have its entries removed (`make_removable` does nothing on Unix; copies keep mode bits, so stagings can carry such folders); an empty-folder row of a bundle without a record is removed with `remove_dir`, which Windows refuses for a read-only folder, and that path runs no `make_removable` (unmeasured). The user's decision of 2026-11-24 (「읽기전용 따지지 말고 그냥 지워」 — read-only entries are removed without asking) points at removing them.
+- **Options:** on Unix add write permission to a folder inside a row before removing its entries, and run `make_removable` + one retry on a refused empty-folder row · keep as is.
 
 ### T-130. S25 step 9b U4b review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-24 at the U4b commit — minor items. Decisions of the unit: ADR-0417.

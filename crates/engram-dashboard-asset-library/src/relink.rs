@@ -659,6 +659,9 @@ mod tests {
         fn remove_file(&self, path: &Path) -> io::Result<()> {
             FsStore.remove_file(path)
         }
+        fn remove_tree(&self, root: &Path, path: &Path) -> io::Result<()> {
+            FsStore.remove_tree(root, path)
+        }
     }
 
     /// A profile-edit port that logs each agent rewrite (and its renames) and fails the next one when a test sets it.

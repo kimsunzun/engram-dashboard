@@ -40,10 +40,18 @@
 //!   between that stat and the open is caught by the identity, where the volume gives one (otherwise only size and time
 //!   — the check-then-call race ADR-0409 accepts). Every entry is made create-new, each file hashed while copied,
 //!   modified times and permissions kept; a copy that fails part-way leaves what it made to its caller.
+//! - **Removal never follows** (ADR-0408 · ADR-0409 decision 11): [`LibraryStore::remove_tree`] removes a file, a link
+//!   of any kind as the link itself, or a folder with everything in it — every link inside removed as a link (std
+//!   `remove_dir_all`) — and nothing goes to an OS Recycle Bin. A first attempt that is refused gets platform
+//!   `make_removable` (read-only cleared below the entry, links neither entered nor changed) and one more attempt inside
+//!   the busy retry. The names above the entry are its caller's to check without following before the call; after a
+//!   refused first attempt they are stat'ed again from the mount folder down before `make_removable` and before each
+//!   retry, and one that is no longer a real folder stops the removal.
 // ADR-0324
 // ADR-0335
 // ADR-0365
 // ADR-0400
+// ADR-0408
 // ADR-0409
 // TRD S25 step-7 §3-5
 
@@ -54,12 +62,13 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use engram_dashboard_agent::launch::escape_controls;
 use engram_dashboard_base::file::{
     copy_atomic, is_temp_name, read_capped_bytes, write_atomic, OsHooks, BUSY_PAUSE, BUSY_RETRIES,
 };
 use engram_dashboard_platform::fs::{
-    file_identity, open_read_no_follow, opened_identity, rename_no_replace, retry_busy,
-    set_folder_modified, sync_dir, FileIdentity, Retry,
+    file_identity, is_busy, make_removable, open_read_no_follow, opened_identity,
+    rename_no_replace, retry_busy, set_folder_modified, sync_dir, FileIdentity, Retry,
 };
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -219,6 +228,20 @@ pub trait LibraryStore: Send + Sync {
     fn remove_dir(&self, path: &Path) -> io::Result<()>;
     /// Removes the file at `path`; a folder or a link there is `InvalidInput` and stays.
     fn remove_file(&self, path: &Path) -> io::Result<()>;
+    /// Removes the entry at `path` for good: a file; a link of any kind — to a file or a folder, a junction included —
+    /// as the link itself, never entered; a folder with everything in it, each link inside removed as a link (std
+    /// `remove_dir_all`, which follows no link — nor one swapped in at `path`). Nothing goes to an OS Recycle Bin. When
+    /// the first attempt is refused (access denied, or the OS says busy), platform `make_removable` clears the read-only
+    /// attribute below `path` without following links and the removal is tried once more, inside the busy retry; what
+    /// `make_removable` left is only logged. A folder that fails part-way stays partly removed and the error is answered;
+    /// `NotFound` = nothing is at `path`. The caller checks every name between the mount folder `root` and `path`
+    /// without following first ([`LibraryStore::check_names`]); after a refused first attempt they are stat'ed again
+    /// before `make_removable` and before each retry, and one that is no longer a real folder stops the removal
+    /// (`NotADirectory`). A name swapped for a link between a check and the call is not caught (ADR-0409).
+    // ADR-0365
+    // ADR-0408
+    // ADR-0409 decision 11
+    fn remove_tree(&self, root: &Path, path: &Path) -> io::Result<()>;
     /// The identity of the entry at `path` (platform `file_identity` — a link is followed): whether two spellings name
     /// one entry. A store without disk identities answers an error.
     fn identity(&self, path: &Path) -> io::Result<FileIdentity> {
@@ -741,6 +764,10 @@ impl LibraryStore for FsStore {
         }
         (OS_HOOKS.retry)(&mut || fs::remove_file(path))
     }
+
+    fn remove_tree(&self, root: &Path, path: &Path) -> io::Result<()> {
+        remove_on_disk(self, root, path)
+    }
 }
 
 fn entry_kind(file_type: fs::FileType) -> EntryKind {
@@ -758,6 +785,108 @@ fn not_a_folder(path: &Path) -> io::Error {
         io::ErrorKind::NotADirectory,
         format!("{} is not a folder", path.display()),
     )
+}
+
+#[cfg(test)]
+thread_local! {
+    /// While set, the first attempt of every disk removal on this thread answers access denied, so
+    /// [`LibraryStore::remove_tree`]'s `make_removable` and its retry run.
+    pub(crate) static DENY_FIRST_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Runs once right after a first attempt the seam refused, before the way is checked again.
+    pub(crate) static AFTER_DENIED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Runs once right after `make_removable`, before the retries.
+    pub(crate) static AFTER_REMOVABLE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Each `make_removable` a disk removal on this thread ran: the path and what it answered (`Err` as its text).
+    pub(crate) static REMOVABLE_ANSWERS: std::cell::RefCell<Vec<(PathBuf, Result<Vec<PathBuf>, String>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// [`LibraryStore::remove_tree`] on the disk, the names between `root` and `path` stat'ed through `store`.
+// ADR-0409 decision 11
+fn remove_on_disk<S: LibraryStore + ?Sized>(store: &S, root: &Path, path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    let first = match DENY_FIRST_REMOVAL.with(std::cell::Cell::get) {
+        true => {
+            if let Some(hook) = AFTER_DENIED.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        }
+        false => remove_entry(path),
+    };
+    #[cfg(not(test))]
+    let first = remove_entry(path);
+    // Measured (Windows, rustc 1.95, 2026-11-24): std already removes read-only files and folders, and a read-only
+    //   link to a folder goes by `remove_entry`'s `remove_dir_all` step — `make_removable` leaves links as they are.
+    let Err(e) = first else {
+        return Ok(());
+    };
+    if !is_busy(&e) {
+        return Err(e);
+    }
+    // ADR-0365: the caller checked the way before the first attempt; nothing after it runs through a name that
+    //   became a link meanwhile.
+    let way_held = || match way_holds(store, root, path)? {
+        true => Ok(()),
+        false => Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "a name on the way to the entry is no longer a real folder",
+        )),
+    };
+    way_held()?;
+    let answer = make_removable(path);
+    match &answer {
+        Ok(left) if !left.is_empty() => tracing::debug!(
+            path = %escape_controls(&path.to_string_lossy()),
+            left = left.len(),
+            "remove: entries left read-only"
+        ),
+        Ok(_) => {}
+        Err(made) => tracing::debug!(
+            path = %escape_controls(&path.to_string_lossy()),
+            "remove: read-only not cleared: {}",
+            escape_controls(&made.to_string())
+        ),
+    }
+    #[cfg(test)]
+    REMOVABLE_ANSWERS.with(|answers| {
+        let seen = answer.map_err(|e| e.to_string());
+        answers.borrow_mut().push((path.to_path_buf(), seen));
+    });
+    #[cfg(test)]
+    if let Some(hook) = AFTER_REMOVABLE.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    (OS_HOOKS.retry)(&mut || {
+        way_held()?;
+        remove_entry(path)
+    })
+}
+
+/// One removal of the entry at `path`, by its kind read without following.
+fn remove_entry(path: &Path) -> io::Result<()> {
+    match entry_kind(fs::symlink_metadata(path)?.file_type()) {
+        EntryKind::File => fs::remove_file(path),
+        EntryKind::Folder => fs::remove_dir_all(path),
+        // Windows: std's `remove_file` refuses a link to a folder (a junction, a folder symlink) and `remove_dir`
+        //   (`RemoveDirectoryW`) removes that link itself, never what it points at. Every other link goes by `remove_file`.
+        EntryKind::Link => fs::remove_file(path).or_else(|refused| {
+            match entry_kind(fs::symlink_metadata(path)?.file_type()) {
+                EntryKind::Link => fs::remove_dir(path).or_else(|refused| {
+                    // Measured (Windows, rustc 1.95, 2026-11-24): a read-only link to a folder refuses `remove_file` and
+                    //   `remove_dir` (os error 5); std's `remove_dir_all` removes that link itself, its target untouched
+                    //   and no attribute changed (ADR-0409 decision 11). Only while the path still reads as a link.
+                    match entry_kind(fs::symlink_metadata(path)?.file_type()) {
+                        EntryKind::Link => fs::remove_dir_all(path).map_err(|_| refused),
+                        EntryKind::File | EntryKind::Folder => Err(refused),
+                    }
+                }),
+                EntryKind::File | EntryKind::Folder => Err(refused),
+            }
+        }),
+    }
 }
 
 /// [`FsStore`]'s `create_new`, with `write` filling the file just made.
@@ -1128,6 +1257,7 @@ pub(crate) mod mem {
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::io;
     use std::path::{Path, PathBuf};
+    use std::sync::mpsc::{self, Receiver, Sender};
     use std::sync::Mutex;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1168,11 +1298,17 @@ pub(crate) mod mem {
         stat_failures: HashSet<PathBuf>,
         /// Renames whose destination is one of these fail.
         rename_failures: HashSet<PathBuf>,
+        /// A removal reaching one of these fails there, as access denied.
+        removal_failures: HashSet<PathBuf>,
     }
+
+    /// A removal that parks: it tells the sender, then waits for the receiver.
+    type RemovalDoor = (PathBuf, Sender<()>, Receiver<()>);
 
     pub(crate) struct MemStore {
         root: PathBuf,
         state: Mutex<State>,
+        removal_door: Mutex<Option<RemovalDoor>>,
     }
 
     /// A modification time far from any test's `now`, so a file is not racy unless a test says so.
@@ -1185,6 +1321,7 @@ pub(crate) mod mem {
             Self {
                 root: root.to_path_buf(),
                 state: Mutex::new(state),
+                removal_door: Mutex::new(None),
             }
         }
 
@@ -1230,6 +1367,39 @@ pub(crate) mod mem {
             self.state.lock().unwrap().rename_failures.insert(path);
         }
 
+        /// A removal reaching `rel` (the entry itself or a folder above it) fails there from now on, as access denied:
+        /// what else is below the removed path goes, `rel` and the folders above it stay — as std's `remove_dir_all`
+        /// stops at an entry it cannot remove.
+        pub(crate) fn fail_removal(&self, rel: &str) {
+            let path = self.at(rel);
+            self.state.lock().unwrap().removal_failures.insert(path);
+        }
+
+        /// Arms a door on the next removal of `rel`: it tells the returned receiver when it starts, then waits (at
+        /// most 20 s) until the returned sender sends.
+        pub(crate) fn door_removal(&self, rel: &str) -> (Receiver<()>, Sender<()>) {
+            let (entered_tx, entered) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            *self.removal_door.lock().unwrap() = Some((self.at(rel), entered_tx, release_rx));
+            (entered, release)
+        }
+
+        fn pass_removal_door(&self, path: &Path) {
+            let door = {
+                let mut door = self.removal_door.lock().unwrap();
+                match door.as_ref() {
+                    Some((at, _, _)) if at == path => door.take(),
+                    _ => None,
+                }
+            };
+            if let Some((_, entered, release)) = door {
+                entered.send(()).unwrap();
+                release
+                    .recv_timeout(Duration::from_secs(20))
+                    .expect("the test opens the removal door");
+            }
+        }
+
         /// A link at `rel` — the store models it as an opaque entry a walk does not enter.
         pub(crate) fn link(&self, rel: &str) {
             let path = self.at(rel);
@@ -1237,6 +1407,11 @@ pub(crate) mod mem {
             make_parents(&mut state, &self.root, &path);
             remove_tree(&mut state, &path);
             state.nodes.insert(path, Node::Link);
+        }
+
+        /// Removes everything, the root folder included — a mount folder gone (a pulled volume).
+        pub(crate) fn vanish(&self) {
+            self.state.lock().unwrap().nodes.clear();
         }
 
         /// Removes `rel` and everything below it.
@@ -1656,6 +1831,42 @@ pub(crate) mod mem {
             }
         }
 
+        /// As the disk's (the trait doc): a link is one entry, never entered; a name between `root` and `path` that is
+        /// not a folder is `NotADirectory`; a removal reaching a failing entry ([`MemStore::fail_removal`]) removes
+        /// everything else below `path` and answers access denied.
+        fn remove_tree(&self, root: &Path, path: &Path) -> io::Result<()> {
+            self.pass_removal_door(path);
+            let mut state = self.state.lock().unwrap();
+            if !state.nodes.contains_key(path) {
+                return Err(not_found());
+            }
+            let way_holds = path
+                .ancestors()
+                .skip(1)
+                .take_while(|folder| folder.starts_with(root) && *folder != root)
+                .all(|folder| matches!(state.nodes.get(folder), Some(Node::Dir)));
+            if !way_holds {
+                return Err(io::Error::from(io::ErrorKind::NotADirectory));
+            }
+            let failing: Vec<PathBuf> = state
+                .removal_failures
+                .iter()
+                .filter(|failing| failing.starts_with(path))
+                .cloned()
+                .collect();
+            if failing.is_empty() {
+                remove_tree(&mut state, path);
+                return Ok(());
+            }
+            state.nodes.retain(|at, _| {
+                !at.starts_with(path) || failing.iter().any(|failing| failing.starts_with(at))
+            });
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected removal failure",
+            ))
+        }
+
         /// As the disk's (the trait doc): a file keeps its bytes and modified time; a failing read of a file fails
         /// the copy there.
         fn copy_tree(&self, root: &Path, from: &Path, to: &Path) -> Result<TreeCopy, CopyFailure> {
@@ -1986,6 +2197,9 @@ mod tests {
         }
         fn remove_file(&self, path: &Path) -> io::Result<()> {
             FsStore.remove_file(path)
+        }
+        fn remove_tree(&self, root: &Path, path: &Path) -> io::Result<()> {
+            FsStore.remove_tree(root, path)
         }
     }
 
@@ -3006,6 +3220,199 @@ mod tests {
             .unwrap();
         assert_eq!(fs::read_to_string(&kept).unwrap(), "keep");
         assert!(empty_target.exists());
+    }
+
+    // ADR-0408 · ADR-0409 decision 11 · ADR-0365: a removal takes a file, a link as the link itself (a junction on
+    //   Windows, a symbolic link elsewhere — never entered) and a folder with what it holds, read-only entries included and
+    //   its links removed as links; nothing behind a link is touched.
+    #[test]
+    fn a_removal_takes_a_file_a_link_as_a_link_and_a_folder_with_its_links_inside_as_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let keep = dir.path().join("keep");
+        let kept = write(&keep, "x.md", "keep");
+        let kept_below = write(&keep, "e/f.md", "keep");
+        let file = write(&root, "a.md", "a");
+        set_read_only(&file, true);
+        link_dir(&keep, &root.join("link")).unwrap();
+        let inside = write(&root, "d/e/f.md", "f");
+        set_read_only(&inside, true);
+        link_dir(&keep, &root.join("d").join("e").join("inner")).unwrap();
+
+        for removed in [file.clone(), root.join("link"), root.join("d")] {
+            FsStore.remove_tree(&root, &removed).unwrap();
+            assert!(fs::symlink_metadata(&removed).is_err(), "{removed:?} gone");
+        }
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "keep");
+        assert_eq!(fs::read_to_string(&kept_below).unwrap(), "keep");
+        let error = FsStore.remove_tree(&root, &file).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    // ADR-0409 decision 11: a first attempt refused (the seam answers access denied) runs `make_removable` once on the
+    //   row and the removal once more — the row's read-only entries go, and a read-only file behind a link inside the
+    //   row keeps its attribute (`make_removable` follows no link and leaves nothing here).
+    #[test]
+    fn a_refused_removal_clears_read_only_without_following_a_link_and_tries_once_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let keep = dir.path().join("keep");
+        let kept = write(&keep, "x.md", "keep");
+        set_read_only(&kept, true);
+        let inside = write(&root, "row/ro.md", "read-only");
+        set_read_only(&inside, true);
+        link_dir(&keep, &root.join("row").join("link")).unwrap();
+
+        DENY_FIRST_REMOVAL.with(|deny| deny.set(true));
+        REMOVABLE_ANSWERS.with(|answers| answers.borrow_mut().clear());
+        let removed = FsStore.remove_tree(&root, &root.join("row"));
+        DENY_FIRST_REMOVAL.with(|deny| deny.set(false));
+        let answers = REMOVABLE_ANSWERS.with(|answers| answers.take());
+        let kept_read_only = fs::metadata(&kept).unwrap().permissions().readonly();
+        set_read_only(&kept, false);
+
+        removed.unwrap();
+        assert_eq!(
+            answers,
+            [(root.join("row"), Ok(Vec::new()))],
+            "make_removable ran once on the row"
+        );
+        assert!(fs::symlink_metadata(root.join("row")).is_err());
+        assert!(kept_read_only, "the attribute behind the link is unchanged");
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "keep");
+    }
+
+    // ADR-0365 · ADR-0409 decision 11: after a refused first attempt the way to the row is checked again — a folder
+    //   above the row swapped for a link meanwhile stops the removal before `make_removable` and any retry, and
+    //   nothing behind the link goes.
+    #[test]
+    fn a_refused_removal_whose_way_became_a_link_stops_before_anything_runs_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let keep = dir.path().join("keep");
+        let kept = write(&keep, "row/x.md", "keep");
+        write(&root, "a/row/x.md", "row");
+        let (a, moved) = (root.join("a"), root.join("moved"));
+        let (link_to, link_at) = (keep.clone(), a.clone());
+        AFTER_DENIED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&link_at, &moved).unwrap();
+                link_dir(&link_to, &link_at).unwrap();
+            }))
+        });
+        DENY_FIRST_REMOVAL.with(|deny| deny.set(true));
+        REMOVABLE_ANSWERS.with(|answers| answers.borrow_mut().clear());
+        let removed = FsStore.remove_tree(&root, &a.join("row"));
+        DENY_FIRST_REMOVAL.with(|deny| deny.set(false));
+
+        assert_eq!(removed.unwrap_err().kind(), io::ErrorKind::NotADirectory);
+        assert!(
+            REMOVABLE_ANSWERS.with(|answers| answers.borrow().is_empty()),
+            "no make_removable through the link"
+        );
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "keep");
+        engram_dashboard_platform::fs::unlink_dir(&a).unwrap();
+    }
+
+    // ADR-0409 decision 11: a read-only link to a folder as a row goes as the link itself — its target, the read-only
+    //   file in it and their attributes unchanged. Making a link's own attribute read-only takes `attrib /L`; where
+    //   no such command, the test says so and returns; a command that runs and makes none fails it.
+    #[test]
+    fn a_read_only_link_to_a_folder_goes_as_the_link_and_its_target_keeps_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let keep = dir.path().join("keep");
+        let kept = write(&keep, "x.md", "keep");
+        set_read_only(&kept, true);
+        fs::create_dir_all(&root).unwrap();
+        let row = root.join("row");
+        link_dir(&keep, &row).unwrap();
+        let status = match std::process::Command::new("attrib")
+            .arg("+R")
+            .arg(&row)
+            .arg("/L")
+            .status()
+        {
+            Ok(status) => status,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                eprintln!("no attrib command here; nothing to test");
+                set_read_only(&kept, false);
+                engram_dashboard_platform::fs::unlink_dir(&row).unwrap();
+                return;
+            }
+            Err(e) => panic!("attrib did not run: {e}"),
+        };
+        assert!(status.success(), "attrib +R /L failed: {status}");
+        assert!(
+            fs::symlink_metadata(&row).unwrap().permissions().readonly(),
+            "the link itself is read-only"
+        );
+
+        let removed = FsStore.remove_tree(&root, &row);
+        let kept_read_only = fs::metadata(&kept).unwrap().permissions().readonly();
+        let keep_read_only = fs::metadata(&keep).unwrap().permissions().readonly();
+        set_read_only(&kept, false);
+
+        removed.unwrap();
+        assert!(fs::symlink_metadata(&row).is_err(), "the link went");
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "keep");
+        assert!(kept_read_only, "the file behind the link stays read-only");
+        assert!(!keep_read_only, "the target folder's attribute unchanged");
+    }
+
+    // ADR-0365 · ADR-0409 decision 11: each retry checks the way again — a folder above the row swapped for a link
+    //   after `make_removable` stops the retries, and nothing behind the link goes.
+    #[test]
+    fn a_way_that_becomes_a_link_after_make_removable_stops_the_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let keep = dir.path().join("keep");
+        let kept = write(&keep, "row/x.md", "keep");
+        write(&root, "a/row/x.md", "row");
+        let (a, moved) = (root.join("a"), root.join("moved"));
+        let (link_to, link_at) = (keep.clone(), a.clone());
+        AFTER_REMOVABLE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&link_at, &moved).unwrap();
+                link_dir(&link_to, &link_at).unwrap();
+            }))
+        });
+        DENY_FIRST_REMOVAL.with(|deny| deny.set(true));
+        REMOVABLE_ANSWERS.with(|answers| answers.borrow_mut().clear());
+        let removed = FsStore.remove_tree(&root, &a.join("row"));
+        DENY_FIRST_REMOVAL.with(|deny| deny.set(false));
+
+        assert_eq!(removed.unwrap_err().kind(), io::ErrorKind::NotADirectory);
+        assert_eq!(REMOVABLE_ANSWERS.with(|answers| answers.borrow().len()), 1);
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "keep");
+        engram_dashboard_platform::fs::unlink_dir(&a).unwrap();
+    }
+
+    #[test]
+    fn mem_store_removes_a_tree_and_a_failing_entry_stops_it_part_way() {
+        let root = Path::new("/lib");
+        let store = mem::MemStore::new(root);
+        store.file("d/a.md", "a");
+        store.file("d/e/b.md", "b");
+        store.link("d/l");
+        store.fail_removal("d/e/b.md");
+        let error = store
+            .remove_tree(root, &lib("d").to_path(root))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            store.exists(&lib("d/e/b.md").to_path(root)),
+            "the failing entry stays"
+        );
+        assert!(!store.exists(&lib("d/a.md").to_path(root)));
+        assert!(!store.exists(&lib("d/l").to_path(root)));
+
+        store.file("x.md", "x");
+        store.remove_tree(root, &lib("x.md").to_path(root)).unwrap();
+        let error = store
+            .remove_tree(root, &lib("x.md").to_path(root))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     // ── the walk's edges ──────────────────────────────────────────────────────────────────────────────────

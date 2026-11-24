@@ -2000,6 +2000,9 @@ mod tests {
         fn remove_file(&self, path: &Path) -> io::Result<()> {
             FsStore.remove_file(path)
         }
+        fn remove_tree(&self, root: &Path, path: &Path) -> io::Result<()> {
+            FsStore.remove_tree(root, path)
+        }
     }
 
     struct NoProfiles;

@@ -1,53 +1,68 @@
 //! What a mount's `.trash` holds and how Engram touches it (ADR-0409 — ADR-0400 decision 23, ADR-0320 as amended): the
-//! trash lock and its waiting count, the trash-folder check, bundle ids, the bundle record, the bundle shell, the view and
-//! the `.git/info/exclude` line. The file operations (`ops.rs`) and emptying stand on these; nothing here takes the
-//! library lock (the view reads the mount list in one brief read lock).
+//! trash lock and its waiting count, the trash-folder check, bundle ids, the bundle record, the bundle shell, the view
+//! and the `.git/info/exclude` line, and emptying and permanent delete. The file operations (`ops.rs`) stand on these;
+//! nothing here takes the library lock (the view and emptying read the mount list in one brief read lock).
 //!
 //! ## Rules (invariants)
 //!
-//! - **Never through a link** (ADR-0365 · ADR-0409 decisions 5, 6 and 9): `.trash` is checked from the mount folder down
-//!   without following ([`check_trash_folder`]) — a link or a non-folder there makes that mount's trash unusable
+//! - **Never through a link** (ADR-0365 · ADR-0409 decisions 5, 6 and 9): `.trash` is checked from the mount folder
+//!   down without following ([`check_trash_folder`]) — a link or a non-folder there makes that mount's trash unusable
 //!   ([`TRASH_UNUSABLE`]); every name from the bundle down to a row is checked without following
-//!   ([`LibraryStore::check_names`]); folders are made with `create_dir`, never `create_dir_all`; pruning removes only empty
-//!   real folders and never walks into a link. A name swapped for a link between a check and the call is not caught
-//!   (local write access is trusted — ADR-0409).
+//!   ([`LibraryStore::check_names`]); folders are made with `create_dir`, never `create_dir_all`; pruning removes only
+//!   empty real folders and never walks into a link. A name swapped for a link between a check and the call is not
+//!   caught (local write access is trusted — ADR-0409).
 //! - **The trash lock** (ADR-0324 decision 9 as ADR-0409 decisions 14 and 15 amend it): one [`TrashLock`] for every
-//!   mount's `.trash`, taken after the library lock and before the turn mutex. A step that may touch `.trash` raises the waiting count just
-//!   before its ticket and waits, holding nothing, until no bundle is being emptied ([`TrashLock::reserve`]); only that
-//!   reservation takes the lock inside the hold ([`TrashReservation::take`]), so a hold without one never waits on it —
-//!   it answers [`TRASH_NOT_RESERVED`]. Emptying takes the lock per bundle only while the count is 0
-//!   ([`TrashLock::take_for_emptying`]), so it starts no bundle while a step waits and a step finds the lock free. The
-//!   reservation lowers the count when dropped — after the hold or on any earlier exit, panic unwinding included; a held
-//!   lock cannot outlive its reservation.
+//!   mount's `.trash`, taken after the library lock and before the turn mutex. A step that may touch `.trash` raises
+//!   the waiting count just before its ticket and waits, holding nothing, until no bundle is being emptied
+//!   ([`TrashLock::reserve`]); only that reservation takes the lock inside the hold ([`TrashReservation::take`]), so a
+//!   hold without one never waits on it — it answers [`TRASH_NOT_RESERVED`]. Emptying takes the lock per bundle only
+//!   while the count is 0 ([`TrashLock::take_for_emptying`]), so it starts no bundle while a step waits and a step
+//!   finds the lock free. The reservation lowers the count when dropped — after the hold or on any earlier exit, panic
+//!   unwinding included; a held lock cannot outlive its reservation.
 //! - **What writes inside `.trash` takes a [`TrashHeld`]**: [`ensure_trash_folder`], [`make_bundle`],
 //!   [`publish_record`] and [`prune_shell`] run only under the trash lock, and so do the trash step's
-//!   [`LibraryStore::trash`] moves and a restore's rename out of a bundle.
+//!   [`LibraryStore::trash`] moves, a restore's rename out of a bundle and emptying's removals.
 //! - **A bundle** is a direct child of `.trash` that is a real folder and whose name parses exactly as [`BundleId`];
 //!   anything else there is foreign and never touched. One id per operation; a taken id draws a new one.
-//! - **The record** ([`RECORD_NAME`], ADR-0409 decision 8): one dot-named JSON file per bundle naming its roots, written
-//!   create-new to a base temp name and published by a no-replace rename, never rewritten. Roots are read filtered by
-//!   existence — absent only when a no-follow check says a name on its path is missing or not a folder; a record that does not parse, or names a root that is
-//!   no valid library path, is [`RECORD_UNREADABLE`] and the bundle's files are its rows ([`fallback_rows`]).
+//! - **The record** ([`RECORD_NAME`], ADR-0409 decision 8): one dot-named JSON file per bundle naming its roots,
+//!   written create-new to a base temp name and published by a no-replace rename, never rewritten. Roots are read
+//!   filtered by existence — absent only when a no-follow check says a name on its path is missing or not a folder; a
+//!   record that does not parse, or names a root that is no valid library path, is [`RECORD_UNREADABLE`] and the
+//!   bundle's files and empty folders are its rows ([`fallback_rows`]).
 //! - **The shell** ([`prune_shell`]): when a root goes, the folders between it and the bundle that are now empty go,
-//!   bottom-up; the record (with any record temp left by a crash) and then the bundle folder go only when nothing else is
-//!   left in the bundle. Surviving content is never removed.
+//!   bottom-up; the record (with any record temp left by a crash) and then the bundle folder go only when nothing else
+//!   is left in the bundle. Surviving content is never removed.
 //! - **The view** ([`view_mount`] · [`LibraryService::trash_view`], ADR-0409 M15 · UD1): per mount, the bundles by id
-//!   and their rows — a record's existing roots plus its `other` rows (found walking only the bundle top and the folders
-//!   above roots), or a bundle's files when its record is missing or unreadable — read without following and with no
-//!   lock; each mount on a bounded job of the service's `BoundedIo` on one read budget, so a mount that does not answer,
-//!   or whose trash is unusable, is named instead of failing the view; a mount held as overlapping another (ADR-0400
-//!   decision 10) is named and never read. A bundle whose check fails other than by absence is listed with no rows and
-//!   the error, never left out.
-//! - **The exclude line** ([`exclude_trash`], ADR-0400 decision 24 · ADR-0409 M12): an anchored, escaped
-//!   `/<mount path>/.trash/` line appended to the repository's `info/exclude` when absent, under one leaf mutex, through a
-//!   create-new temp; skipped with a reason, never a failure of the step. `.git` and its `gitdir:` / `commondir` targets
-//!   must be real folders (a linked `.git` is skipped); `info` and `exclude` are checked without following. It runs
-//!   with std `fs` on a job of the service's spawner, not through `BoundedIo`: a share that stops answering holds that
-//!   job and the exclude mutex (later exclude jobs queue behind it), never a library lock or the step.
+//!   and their rows — a record's existing roots plus its `other` rows (found walking only the bundle top and the
+//!   folders above roots), or a bundle's files and empty folders when its record is missing or unreadable — read
+//!   without following and with no lock; each mount on a bounded job of the service's `BoundedIo` on one read budget,
+//!   so a mount that does not answer, or whose trash is unusable, is named instead of failing the view; a mount held as
+//!   overlapping another (ADR-0400 decision 10) is named and never read. A bundle whose check fails other than by
+//!   absence is listed with no rows and the error, never left out.
+//! - **Emptying and permanent delete** ([`LibraryService::empty_trash`], ADR-0408 · ADR-0409 decisions 11 and 15 ·
+//!   ADR-0326 decision 6): only the rows the caller names are removed — empty-all names per bundle the rows the view
+//!   listed, permanent delete names rows —, never a whole bundle, and a root not named survives with the record. No
+//!   library lock and no ticket: the mount folders are read once; each mount is stat'ed through the bounded IO before
+//!   its bundles; per bundle, under the trash lock taken only while no step waits for it, every address is checked
+//!   again (the id form, `.trash` and the bundle without following, the row among the record's existing roots and
+//!   `other` rows or, without a readable record, its files and empty folders), each row is removed by
+//!   [`LibraryStore::remove_tree`] (an empty-folder row empty-only) once its names were checked without following (a
+//!   link on the way leaves it untouched; after a refusal the way is checked again before `make_removable` and each
+//!   retry) and the shell is pruned after it. A check that reads an absence stats the mount folder (by its target when
+//!   it is a link) first: a mount gone mid-call answers `library-unavailable`, never gone. Each row answers gone,
+//!   remaining (with a code) or not found, judged by its existence before and after (rows answered before the removals
+//!   are judged again after them). A name swapped for a link between a check and the call is not caught (ADR-0409).
+//! - **The exclude line** ([`exclude_trash`], ADR-0400 decision 24 · ADR-0409 M12): an anchored, escaped `/<mount
+//!   path>/.trash/` line appended to the repository's `info/exclude` when absent, under one leaf mutex, through a
+//!   create-new temp; skipped with a reason, never a failure of the step. `.git` and its `gitdir:` / `commondir`
+//!   targets must be real folders (a linked `.git` is skipped); `info` and `exclude` are checked without following. It
+//!   runs with std `fs` on a job of the service's spawner, not through `BoundedIo`: a share that stops answering holds
+//!   that job and the exclude mutex (later exclude jobs queue behind it), never a library lock or the step.
 // ADR-0320
 // ADR-0324
 // ADR-0365
 // ADR-0400 decisions 23 and 24
+// ADR-0408
 // ADR-0409
 
 use std::collections::hash_map::RandomState;
@@ -66,13 +81,20 @@ use engram_dashboard_base::file::{is_temp_name, temp_path, temp_target};
 use engram_dashboard_base::sync::lock;
 use engram_dashboard_platform::fs::{path_key, PathKey};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
-use crate::folder::NOT_CHECKED;
-use crate::mounts::{virtual_path, Mount, MountName, MountPath};
+use crate::edit::LIBRARY_WRITE_FAILED;
+use crate::folder::{FolderStatus, NOT_CHECKED};
+use crate::gate::NOT_FOUND;
+use crate::launch::LIBRARY_READ_FAILED;
+use crate::mounts::{is_builtin, virtual_path, Mount, MountName, MountPath, Mounts};
+use crate::ops::{address_json, reason, TrashAddress, INSIDE_ROOT};
 use crate::path::LibPath;
 use crate::store::{EntryKind, LibraryStore, NameWalk, TrashBundle, OS_HOOKS, TRASH_DIR};
-use crate::{LibraryService, LIBRARY_UNAVAILABLE};
+use crate::{
+    LibraryRefusal, LibraryService, RefusalClass, LIBRARY_UNAVAILABLE, PATH_THROUGH_LINK,
+    STAT_UNANSWERED,
+};
 
 /// The code of a trash step in a mount whose `.trash` is a link or not a folder (`args` = `{mount}`): the item stays.
 // ADR-0409 decision 5
@@ -260,8 +282,8 @@ impl TrashLock {
 
 // ── bundle ids ───────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// A bundle id: `<UTC basic time, to the second>-<6 lowercase hex>`, e.g. `20261123T081500Z-a1b2c3` — the parse rule of a
-/// bundle (ADR-0409 decision 6); the time is when the operation deleted.
+/// A bundle id: `<UTC basic time, to the second>-<6 lowercase hex>`, e.g. `20261123T081500Z-a1b2c3` — the parse rule of
+/// a bundle (ADR-0409 decision 6); the time is when the operation deleted.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BundleId {
     text: String,
@@ -448,7 +470,8 @@ pub fn ensure_trash_folder(
 }
 
 /// Makes the bundle folder `.trash/<wanted>` with `create_dir` and answers its id; when that name is taken, another id
-/// is drawn at the same time (the operation keeps `wanted` for its other mounts). `.trash` must be there ([`ensure_trash_folder`]).
+/// is drawn at the same time (the operation keeps `wanted` for its other mounts). `.trash` must be there
+/// ([`ensure_trash_folder`]).
 // ADR-0409 decision 7
 pub fn make_bundle(
     store: &dyn LibraryStore,
@@ -503,8 +526,8 @@ struct StagingLine {
 /// Writes the record of bundle `id` naming `roots`: create-new at a fresh base temp name in the bundle (a taken temp
 /// name draws another), then published at [`RECORD_NAME`] by the store's no-replace rename — never a partial record
 /// under the real name, never a rewrite. When the publication (the rename) fails the temp is removed and the error
-/// answered; a write failing after the temp was made leaves it (the store removes no temp), and the shell prunes it. The
-/// bundle's files then read as fallback rows. Call it inside the hold, after that mount's moves of the operation.
+/// answered; a write failing after the temp was made leaves it (the store removes no temp), and the shell prunes it.
+/// The bundle's files then read as fallback rows. Call it inside the hold, after that mount's moves of the operation.
 // ADR-0409 decision 8
 pub fn publish_record(
     store: &dyn LibraryStore,
@@ -585,8 +608,8 @@ fn check_bundle(store: &dyn LibraryStore, folder: &Path, id: &BundleId) -> io::R
 /// What a bundle's record says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecordRead {
-    /// No record (a crash between the moves and the publication, or a failed publication): the bundle's files are its
-    /// rows ([`fallback_rows`]).
+    /// No record (a crash between the moves and the publication, or a failed publication): the bundle's files and empty
+    /// folders are its rows ([`fallback_rows`]).
     Missing,
     /// It exists but cannot be read, does not parse or names a root that is no valid library path
     /// ([`RECORD_UNREADABLE`]): the bundle's files are its rows too.
@@ -703,9 +726,11 @@ pub struct FallbackRow {
 }
 
 /// The rows of bundle `id` when its record is missing or unreadable: every file and link found walking the bundle
-/// without following (a link is a row, never entered), skipping the record and its temps at the bundle top; sorted by
-/// path. A name that cannot be a library path is left out (logged). `.trash` and the bundle folder are checked without
-/// following first: a missing one is `NotFound`, a link or a file `NotADirectory` — nothing listed through it.
+/// without following (a link is a row, never entered), and every empty folder below the bundle top (what is left of a
+/// deleted folder — so it can be restored or emptied and never keeps the bundle unseen), skipping the record and its
+/// temps at the bundle top; sorted by path. A name that cannot be a library path is left out (logged). `.trash` and the
+/// bundle folder are checked without following first: a missing one is `NotFound`, a link or a file `NotADirectory` —
+/// nothing listed through it.
 // ADR-0409 decisions 6 and 8
 pub fn fallback_rows(
     store: &dyn LibraryStore,
@@ -720,7 +745,15 @@ pub fn fallback_rows(
             None => bundle_path(id).to_path(folder),
             Some(at) => row_path(id, at).to_path(folder),
         };
-        for (name, kind) in store.list(&disk)? {
+        let listed = store.list(&disk)?;
+        if let (Some(at), true) = (&at, listed.is_empty()) {
+            rows.push(FallbackRow {
+                staging: at.as_str().split('/').any(is_temp_name),
+                path: at.clone(),
+                kind: EntryKind::Folder,
+            });
+        }
+        for (name, kind) in listed {
             if at.is_none() && is_record_name(&name) {
                 continue;
             }
@@ -806,7 +839,7 @@ pub fn prune_shell(
 pub enum RowKind {
     /// A root the bundle's record names — a deleted item (a folder is one row).
     Root,
-    /// A file or link found walking a bundle whose record is missing or unreadable.
+    /// A file, link or empty folder found walking a bundle whose record is missing or unreadable.
     Found,
     /// Something left in a bundle with a readable record that is no root (OS litter, a folder left above a gone root) —
     /// never restorable.
@@ -832,9 +865,9 @@ pub struct TrashRow {
 pub enum RowSource {
     /// Its record (roots that still exist, plus `other` rows).
     Record,
-    /// No record: the files found.
+    /// No record: the files and empty folders found.
     NoRecord,
-    /// A record that cannot be read ([`RECORD_UNREADABLE`]): the files found.
+    /// A record that cannot be read ([`RECORD_UNREADABLE`]): the files and empty folders found.
     Unreadable { why: String },
     /// The bundle folder could not be checked (a stat on the way failed other than `NotFound`): no rows; `trouble` says
     /// why.
@@ -864,10 +897,10 @@ pub enum ViewFailure {
 
 /// The bundles in the `.trash` of the mount at `folder`, by id, read without following and holding no lock: only direct
 /// children of `.trash` that are real folders and parse as [`BundleId`] (anything else is foreign and left out); per
-/// bundle the existing roots of its record and its `other` rows, or — record missing or unreadable — its files
-/// ([`fallback_rows`]). An absent `.trash` is an empty trash; a missing mount folder is [`ViewFailure::Unreadable`]. A
-/// bundle that went between the listing and its read is left out; one whose check fails other than by absence is listed
-/// with no rows ([`RowSource::Unchecked`]).
+/// bundle the existing roots of its record and its `other` rows, or — record missing or unreadable — its files and
+/// empty folders ([`fallback_rows`]). An absent `.trash` is an empty trash; a missing mount folder is
+/// [`ViewFailure::Unreadable`]. A bundle that went between the listing and its read is left out; one whose check fails
+/// other than by absence is listed with no rows ([`RowSource::Unchecked`]).
 // ADR-0409 decisions 5, 6 and 8
 pub fn view_mount(store: &dyn LibraryStore, folder: &Path) -> Result<Vec<BundleView>, ViewFailure> {
     let unreadable = |why: String| Err(ViewFailure::Unreadable(why));
@@ -1157,6 +1190,577 @@ fn trash_unread(mount: &MountName, why: &str) -> Reason {
     }
 }
 
+// ── emptying and permanent delete ────────────────────────────────────────────────────────────────────────────────
+
+/// The code of an emptying that names neither a bundle nor a row: refused, nothing removed (`args` = `{}`). Removing
+/// only what a view listed is the caller's contract; the service removes only the rows it is given.
+// ADR-0326 decision 6
+pub const NOTHING_TO_EMPTY: &str = "nothing-to-empty";
+
+/// An empty-all address: one bundle of the view with the rows the view listed for it — what the view did not list
+/// stays.
+// ADR-0326 decision 6
+// ADR-0409 M5
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedBundle {
+    pub mount: String,
+    pub bundle: String,
+    /// Paths inside the bundle, as the view listed its rows.
+    pub rows: Vec<String>,
+}
+
+/// What came of one addressed row, judged by its existence before and after.
+// ADR-0408 decision 2
+#[derive(Clone, Debug, PartialEq)]
+pub enum Emptied {
+    /// It was there and is no longer.
+    Gone,
+    /// It is still there and keeps its row (a folder row may be partly emptied): its removal's failure
+    /// (`library-write-failed`, the OS error code in `os_error`), a link on its way (`path-through-link`), a row now
+    /// inside a root (`inside-root`), a present path the bundle's files do not hold or a walk that failed
+    /// (`library-read-failed`), or why its bundle was not touched (`library-unavailable` — its mount did not answer or
+    /// went —, `trash-unusable`, `library-read-failed`).
+    Remaining(Reason),
+    /// It was not there before the call, or it is no row: a foreign bundle name, a mount not registered, an absent path
+    /// that is no root or `other` row of the bundle (`not-found`).
+    NotFound(Reason),
+}
+
+/// One addressed row and what came of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmptiedRow {
+    pub row: TrashAddress,
+    pub outcome: Emptied,
+}
+
+/// What came of one addressed bundle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BundleOutcome {
+    /// Its folder no longer exists.
+    Gone,
+    /// Its folder is still there (rows that stayed, roots the view did not list, the record).
+    Remaining,
+    /// It was no bundle before the call (absent, or a foreign name or entry).
+    NotFound,
+}
+
+/// One addressed bundle and what came of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmptiedBundle {
+    pub mount: String,
+    pub bundle: String,
+    pub outcome: BundleOutcome,
+    /// Why nothing of it was touched — its mount did not answer, its trash is unusable or its check failed.
+    pub untouched: Option<Reason>,
+}
+
+/// The answer of [`LibraryService::empty_trash`].
+#[derive(Debug)]
+pub struct EmptyAnswer {
+    /// Every addressed row: the empty-all bundles' rows in the order given, then the permanent-delete rows.
+    pub rows: Vec<EmptiedRow>,
+    /// Every addressed bundle, in the order first addressed.
+    pub bundles: Vec<EmptiedBundle>,
+}
+
+/// One bundle of an emptying: its address and the indices of its rows among the call's rows.
+struct Addressed {
+    mount: String,
+    bundle: String,
+    rows: Vec<usize>,
+}
+
+/// What a row of a bundle is under the trash lock, before anything is removed.
+enum Judged {
+    /// A row there: its path spelled as the bundle holds it.
+    Remove(MountPath),
+    /// An empty folder of a bundle without a record: removed only while it is empty, so nothing written into it since
+    /// goes with it.
+    RemoveEmpty(MountPath),
+    Answered(Emptied),
+}
+
+impl LibraryService {
+    /// Emptying and permanent delete — human only: the shell-only route reaches it (ADR-0322 decision 1). Removes for
+    /// good the rows of `bundles` (empty-all: each bundle with the rows the view listed) and the rows `rows` (permanent
+    /// delete); a root of a bundle that is not addressed survives with the record. Neither given refuses
+    /// `InvalidArgument` · [`NOTHING_TO_EMPTY`] — the only refusal; everything else answers per row and per bundle.
+    ///
+    /// No library lock and no ticket: the mount list is read once in a brief read lock and its folders are used to the
+    /// end, even when a mount is relocated or removed meanwhile. Per mount, in the order first addressed: its folder is
+    /// stat'ed through the bounded IO (a mount that does not stat `Ok`, or is held as overlapping another, leaves its
+    /// bundles untouched, `library-unavailable`); then per bundle: the trash lock once no step waits for it
+    /// ([`TrashLock::take_for_emptying`]), the address checked again — the bundle id form, `.trash` and the bundle
+    /// folder without following, the row among the record's existing roots or its `other` rows, or, without a readable
+    /// record, its files and empty folders —, each row removed by [`LibraryStore::remove_tree`] (a link as a link; an
+    /// empty-folder row empty-only) after its names were checked without following (a link on the way: untouched,
+    /// `path-through-link`; a mount folder gone meanwhile: `library-unavailable`) and followed by the shell pruning
+    /// ([`prune_shell`] — the record and the bundle folder go once nothing else is left), then the lock released. A
+    /// bundle where nothing was removed is pruned once too, so an empty crash bundle goes.
+    // ADR-0322 decision 7
+    // ADR-0324 decision 9
+    // ADR-0408
+    // ADR-0409 decisions 6, 8, 9, 11 and 15
+    pub fn empty_trash(
+        &self,
+        bundles: &[ListedBundle],
+        rows: &[TrashAddress],
+    ) -> Result<EmptyAnswer, LibraryRefusal> {
+        if bundles.is_empty() && rows.is_empty() {
+            return Err(LibraryRefusal::new(
+                RefusalClass::InvalidArgument,
+                NOTHING_TO_EMPTY,
+                json!({}),
+            ));
+        }
+        let mut addresses: Vec<TrashAddress> = Vec::new();
+        let mut groups: Vec<Addressed> = Vec::new();
+        let mut group_of = |mount: &str, bundle: &str| -> usize {
+            let key = path_key(Path::new(mount));
+            match groups.iter().position(|group| {
+                group.bundle == bundle && path_key(Path::new(&group.mount)) == key
+            }) {
+                Some(at) => at,
+                None => {
+                    groups.push(Addressed {
+                        mount: mount.to_owned(),
+                        bundle: bundle.to_owned(),
+                        rows: Vec::new(),
+                    });
+                    groups.len() - 1
+                }
+            }
+        };
+        let mut wanted: Vec<(usize, TrashAddress)> = Vec::new();
+        for listed in bundles {
+            let at = group_of(&listed.mount, &listed.bundle);
+            for path in &listed.rows {
+                wanted.push((
+                    at,
+                    TrashAddress {
+                        mount: listed.mount.clone(),
+                        bundle: listed.bundle.clone(),
+                        path: path.clone(),
+                    },
+                ));
+            }
+        }
+        for row in rows {
+            wanted.push((group_of(&row.mount, &row.bundle), row.clone()));
+        }
+        for (at, row) in wanted {
+            groups[at].rows.push(addresses.len());
+            addresses.push(row);
+        }
+        let mounts: Mounts = self.gate.with_read(|state| state.mounts.clone());
+        let mut outcomes: Vec<Option<Emptied>> = vec![None; addresses.len()];
+        let mut answers: Vec<Option<(BundleOutcome, Option<Reason>)>> = vec![None; groups.len()];
+        let mut done_mounts: Vec<PathKey> = Vec::new();
+        for first in 0..groups.len() {
+            let key = path_key(Path::new(&groups[first].mount));
+            if done_mounts.contains(&key) {
+                continue;
+            }
+            done_mounts.push(key.clone());
+            let ours: Vec<usize> = (first..groups.len())
+                .filter(|&at| path_key(Path::new(&groups[at].mount)) == key)
+                .collect();
+            let mount = MountName::parse(&groups[first].mount)
+                .ok()
+                .filter(|name| !is_builtin(name.as_str()))
+                .and_then(|name| mounts.get(name.as_str()).cloned());
+            let untouched = match &mount {
+                None => None,
+                Some(mount) => match self
+                    .stat_mount_list(&self.io.begin_read(), std::slice::from_ref(mount))
+                    .pop()
+                {
+                    Some(FolderStatus::Ok) => None,
+                    other => Some(trash_unread(
+                        &mount.name,
+                        &other.map_or_else(|| STAT_UNANSWERED.to_owned(), |status| status.why()),
+                    )),
+                },
+            };
+            for at in ours {
+                let group = &groups[at];
+                let rows: Vec<(usize, &TrashAddress)> = group
+                    .rows
+                    .iter()
+                    .map(|&row| (row, &addresses[row]))
+                    .collect();
+                let (judged, outcome, why) = match (&mount, &untouched) {
+                    (None, _) => (
+                        rows.iter()
+                            .map(|(row, address)| (*row, not_found(address)))
+                            .collect(),
+                        BundleOutcome::NotFound,
+                        None,
+                    ),
+                    (Some(_), Some(why)) => (
+                        rows.iter()
+                            .map(|(row, _)| (*row, Emptied::Remaining(why.clone())))
+                            .collect(),
+                        BundleOutcome::Remaining,
+                        Some(why.clone()),
+                    ),
+                    (Some(mount), None) => self.empty_bundle(mount, &group.bundle, &rows),
+                };
+                for (row, emptied) in judged {
+                    outcomes[row] = Some(emptied);
+                }
+                answers[at] = Some((outcome, why));
+            }
+        }
+        let rows: Vec<EmptiedRow> = addresses
+            .into_iter()
+            .zip(outcomes)
+            .map(|(row, outcome)| EmptiedRow {
+                row,
+                outcome: outcome.expect("every row answered"),
+            })
+            .collect();
+        let count =
+            |which: fn(&Emptied) -> bool| rows.iter().filter(|row| which(&row.outcome)).count();
+        tracing::info!(
+            rows = rows.len(),
+            gone = count(|outcome| matches!(outcome, Emptied::Gone)),
+            remaining = count(|outcome| matches!(outcome, Emptied::Remaining(_))),
+            not_found = count(|outcome| matches!(outcome, Emptied::NotFound(_))),
+            "library trash emptied"
+        );
+        Ok(EmptyAnswer {
+            rows,
+            bundles: groups
+                .into_iter()
+                .zip(answers)
+                .map(|(group, answer)| {
+                    let (outcome, untouched) = answer.expect("every bundle answered");
+                    EmptiedBundle {
+                        mount: group.mount,
+                        bundle: group.bundle,
+                        outcome,
+                        untouched,
+                    }
+                })
+                .collect(),
+        })
+    }
+
+    /// One bundle of [`LibraryService::empty_trash`] in `mount`, under the trash lock taken here and released at the
+    /// end: each of `rows` (its index among the call's rows, its address) judged first, then each row there removed
+    /// and the shell pruned (module rules). Answers the rows, the bundle and why it was not touched.
+    // ADR-0409 decisions 6, 8, 9 and 11
+    fn empty_bundle(
+        &self,
+        mount: &Mount,
+        bundle: &str,
+        rows: &[(usize, &TrashAddress)],
+    ) -> (Vec<(usize, Emptied)>, BundleOutcome, Option<Reason>) {
+        let store = &*self.store;
+        let folder = &mount.folder;
+        let every = |outcome: &dyn Fn(&TrashAddress) -> Emptied| -> Vec<(usize, Emptied)> {
+            rows.iter()
+                .map(|(row, address)| (*row, outcome(address)))
+                .collect()
+        };
+        let untouched = |why: Reason| {
+            let rows = every(&|_: &TrashAddress| Emptied::Remaining(why.clone()));
+            (rows, BundleOutcome::Remaining, Some(why))
+        };
+        // ADR-0409 decision 6: a name that is not a bundle id is foreign.
+        let Some(id) = BundleId::parse(bundle) else {
+            return (every(&not_found), BundleOutcome::NotFound, None);
+        };
+        let held = self.gate.trash().take_for_emptying();
+        // Absent — unless the mount folder itself went (a pulled volume), which is no answer about the bundle.
+        let absent = || match mount_gone(store, mount) {
+            Some(why) => untouched(why),
+            None => (every(&not_found), BundleOutcome::NotFound, None),
+        };
+        match check_trash_folder(store, folder) {
+            Ok(true) => {}
+            Ok(false) => return absent(),
+            Err(unusable) => return untouched(trash_unusable(&mount.name, &unusable)),
+        }
+        let bundle_unread = |why: &str| {
+            reason(
+                LIBRARY_READ_FAILED,
+                json!({ "mount": mount.name.as_str(), "bundle": bundle, "why": why }),
+            )
+        };
+        let judged: Vec<(usize, &TrashAddress, Judged)> = match read_record(store, folder, &id) {
+            RecordRead::NotABundle { .. } => return absent(),
+            RecordRead::Failed { why } => return untouched(bundle_unread(&why)),
+            RecordRead::Roots(roots) => {
+                let mut others: Option<io::Result<Vec<TrashRow>>> = None;
+                rows.iter()
+                    .map(|(row, address)| {
+                        let judged =
+                            judge_in_record(store, folder, &id, &roots, &mut others, address);
+                        (*row, *address, judged)
+                    })
+                    .collect()
+            }
+            RecordRead::Missing | RecordRead::Unreadable { .. } => {
+                match fallback_rows(store, folder, &id) {
+                    Ok(found) => rows
+                        .iter()
+                        .map(|(row, address)| {
+                            let judged = judge_in_files(store, mount, &id, &found, address);
+                            (*row, *address, judged)
+                        })
+                        .collect(),
+                    // The walk failed: only the bundle's own check tells it gone from a walk that met a change.
+                    Err(e) => match check_bundle(store, folder, &id) {
+                        Err(gone)
+                            if matches!(
+                                gone.kind(),
+                                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                            ) =>
+                        {
+                            return absent()
+                        }
+                        _ => return untouched(bundle_unread(&e.to_string())),
+                    },
+                }
+            }
+        };
+        let mut removed = false;
+        let mut answered = Vec::with_capacity(judged.len());
+        for (row, address, judged) in judged {
+            let emptied = match judged {
+                Judged::Answered(emptied) => emptied,
+                Judged::Remove(path) => {
+                    removed = true;
+                    self.remove_row(mount, &id, &path, address, false, &held)
+                }
+                Judged::RemoveEmpty(path) => {
+                    removed = true;
+                    self.remove_row(mount, &id, &path, address, true, &held)
+                }
+            };
+            answered.push((row, address, emptied));
+        }
+        if !removed {
+            if let Err(e) = prune_shell(store, folder, &id, None, &held) {
+                tracing::warn!(
+                    bundle = id.as_str(),
+                    "library trash: bundle shell not pruned: {}",
+                    escape_controls(&e.to_string())
+                );
+            }
+        }
+        // A row behind a link or inside a root was answered before the removals; one that a later removal of this
+        //   call took (its link, its root) is judged again by its existence after.
+        let answered = answered
+            .into_iter()
+            .map(|(row, address, emptied)| {
+                let again = removed
+                    && matches!(&emptied, Emptied::Remaining(why)
+                        if why.code == PATH_THROUGH_LINK || why.code == INSIDE_ROOT);
+                let gone = again
+                    && MountPath::parse(&address.path).is_ok_and(|path| {
+                        matches!(
+                            store.check_names(folder, &row_path(&id, &path)),
+                            Ok(NameWalk::Missing(_) | NameWalk::NotAFolder(_))
+                        )
+                    })
+                    && mount_gone(store, mount).is_none();
+                (row, if gone { Emptied::Gone } else { emptied })
+            })
+            .collect();
+        let outcome = match store.check_names(folder, &bundle_path(&id)) {
+            Ok(NameWalk::Missing(_)) if mount_gone(store, mount).is_none() => BundleOutcome::Gone,
+            _ => BundleOutcome::Remaining,
+        };
+        drop(held);
+        (answered, outcome, None)
+    }
+
+    /// Removes row `path` of bundle `id` in `mount` (addressed as `row`) once its names were checked without following
+    /// — `empty_only`: an empty folder, only while it is still empty ([`LibraryStore::remove_dir`]) — then prunes the
+    /// shell above it; judged by its existence after.
+    // ADR-0409 decisions 8, 9 and 11
+    fn remove_row(
+        &self,
+        mount: &Mount,
+        id: &BundleId,
+        path: &MountPath,
+        row: &TrashAddress,
+        empty_only: bool,
+        held: &TrashHeld<'_>,
+    ) -> Emptied {
+        let store = &*self.store;
+        let rel = row_path(id, path);
+        let unread = |e: io::Error| {
+            Emptied::Remaining(row_reason(
+                LIBRARY_READ_FAILED,
+                row,
+                json!({ "why": e.to_string() }),
+            ))
+        };
+        // The mount folder itself gone (a pulled volume) is no answer about the row.
+        let missing = || match mount_gone(store, mount) {
+            Some(why) => Emptied::Remaining(why),
+            None => Emptied::Gone,
+        };
+        let emptied = match store.check_names(&mount.folder, &rel) {
+            Ok(NameWalk::Present(_)) => {
+                let disk = rel.to_path(&mount.folder);
+                let removed = match empty_only {
+                    true => store.remove_dir(&disk),
+                    false => store.remove_tree(&mount.folder, &disk),
+                };
+                match (store.check_names(&mount.folder, &rel), removed) {
+                    (Ok(NameWalk::Missing(_) | NameWalk::NotAFolder(_)), Ok(())) => Emptied::Gone,
+                    (Ok(NameWalk::Missing(_) | NameWalk::NotAFolder(_)), Err(_)) => missing(),
+                    // ADR-0365: a name on the way became a link — the removal stopped there.
+                    (Ok(NameWalk::Link(_)), _) => {
+                        Emptied::Remaining(row_reason(PATH_THROUGH_LINK, row, json!({})))
+                    }
+                    (Ok(NameWalk::Present(_)), removed) => {
+                        let failure = match removed {
+                            Err(e) => json!({ "why": e.to_string(), "os_error": e.raw_os_error() }),
+                            Ok(()) => json!({ "why": "still there after its removal" }),
+                        };
+                        Emptied::Remaining(row_reason(LIBRARY_WRITE_FAILED, row, failure))
+                    }
+                    (Err(e), _) => unread(e),
+                }
+            }
+            // ADR-0409 decision 9: a link between the bundle and the row — the row is left untouched.
+            Ok(NameWalk::Link(_)) => {
+                Emptied::Remaining(row_reason(PATH_THROUGH_LINK, row, json!({})))
+            }
+            // There when the bundle was judged, gone at its turn.
+            Ok(NameWalk::Missing(_) | NameWalk::NotAFolder(_)) => missing(),
+            Err(e) => unread(e),
+        };
+        if let Err(e) = prune_shell(store, &mount.folder, id, Some(path), held) {
+            tracing::warn!(
+                bundle = id.as_str(),
+                "library trash: bundle shell not pruned: {}",
+                escape_controls(&e.to_string())
+            );
+        }
+        emptied
+    }
+}
+
+/// Row `row` of bundle `id` whose record names `roots`, before anything is removed: a root there is removed, one
+/// behind a link or whose check failed stays; a path inside a root stays (`inside-root` — the root is not emptied in
+/// part); else an `other` row (`others`, walked once per bundle) is removed; anything else is no row.
+// ADR-0409 decisions 8 and 9
+fn judge_in_record(
+    store: &dyn LibraryStore,
+    folder: &Path,
+    id: &BundleId,
+    roots: &[RootRow],
+    others: &mut Option<io::Result<Vec<TrashRow>>>,
+    row: &TrashAddress,
+) -> Judged {
+    let remaining =
+        |code: &str, more: Value| Judged::Answered(Emptied::Remaining(row_reason(code, row, more)));
+    let Ok(path) = MountPath::parse(&row.path) else {
+        return Judged::Answered(not_found(row));
+    };
+    if let Some(root) = roots.iter().find(|root| same_key(&root.root.path, &path)) {
+        return match &root.state {
+            RootState::Present(_) => Judged::Remove(root.root.path.clone()),
+            RootState::ThroughLink => remaining(PATH_THROUGH_LINK, json!({})),
+            RootState::Failed(why) => remaining(LIBRARY_READ_FAILED, json!({ "why": why })),
+        };
+    }
+    if let Some(root) = roots.iter().find(|root| below(&path, &root.root.path)) {
+        return remaining(INSIDE_ROOT, json!({ "root": root.root.path.as_str() }));
+    }
+    match others.get_or_insert_with(|| other_rows(store, folder, id, roots)) {
+        Ok(others) => match others.iter().find(|other| same_key(&other.path, &path)) {
+            Some(other) => Judged::Remove(other.path.clone()),
+            None => Judged::Answered(not_found(row)),
+        },
+        Err(e) => remaining(LIBRARY_READ_FAILED, json!({ "why": e.to_string() })),
+    }
+}
+
+/// Row `row` of bundle `id` read without its record (`found` = its files, links and empty folders), before anything is
+/// removed: one of `found` is removed (an empty folder only while it is still empty); a path still there that is none
+/// of them (a folder root a view listed while the record could be read) stays, `library-read-failed` — or
+/// `path-through-link` behind a link; anything else is no row.
+// ADR-0409 decisions 8 and 9
+fn judge_in_files(
+    store: &dyn LibraryStore,
+    mount: &Mount,
+    id: &BundleId,
+    found: &[FallbackRow],
+    row: &TrashAddress,
+) -> Judged {
+    let remaining =
+        |code: &str, more: Value| Judged::Answered(Emptied::Remaining(row_reason(code, row, more)));
+    let Ok(path) = MountPath::parse(&row.path) else {
+        return Judged::Answered(not_found(row));
+    };
+    if let Some(found) = found.iter().find(|found| same_key(&found.path, &path)) {
+        return match found.kind {
+            EntryKind::Folder => Judged::RemoveEmpty(found.path.clone()),
+            EntryKind::File | EntryKind::Link => Judged::Remove(found.path.clone()),
+        };
+    }
+    match store.check_names(&mount.folder, &row_path(id, &path)) {
+        Ok(NameWalk::Present(_)) => remaining(
+            LIBRARY_READ_FAILED,
+            json!({ "why": "the bundle's record cannot be read, and this is none of its files" }),
+        ),
+        Ok(NameWalk::Link(_)) => remaining(PATH_THROUGH_LINK, json!({})),
+        Ok(NameWalk::Missing(_) | NameWalk::NotAFolder(_)) => match mount_gone(store, mount) {
+            Some(why) => Judged::Answered(Emptied::Remaining(why)),
+            None => Judged::Answered(not_found(row)),
+        },
+        Err(e) => remaining(LIBRARY_READ_FAILED, json!({ "why": e.to_string() })),
+    }
+}
+
+/// Why the mount folder of `mount` reads as gone or unusable — a pulled volume after its bounded stat — as
+/// `library-unavailable` (what [`view_mount`] judges); `None` = it is there. A mount folder that is a link — the
+/// one place a link is allowed (ADR-0365) — is judged by what it points at, through its identity: a target that went,
+/// or one whose identity cannot be read (a volume that gives none), is no answer about the trash either.
+fn mount_gone(store: &dyn LibraryStore, mount: &Mount) -> Option<Reason> {
+    let why = match store.stat(&mount.folder) {
+        Ok(EntryKind::Folder) => return None,
+        Ok(EntryKind::Link) => match store.identity(&mount.folder) {
+            Ok(_) => return None,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                "the folder the mount folder links to is missing".to_owned()
+            }
+            Err(e) => format!("the folder the mount folder links to cannot be judged: {e}"),
+        },
+        Ok(EntryKind::File) => "the mount folder is not a folder".to_owned(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => "the mount folder is missing".to_owned(),
+        Err(e) => e.to_string(),
+    };
+    Some(trash_unread(&mount.name, &why))
+}
+
+/// `not-found` for the trash row `row`.
+fn not_found(row: &TrashAddress) -> Emptied {
+    Emptied::NotFound(reason(NOT_FOUND, address_json(row)))
+}
+
+/// `code` for the trash row `row`, its address and `more` as `args`.
+fn row_reason(code: &str, row: &TrashAddress, more: Value) -> Reason {
+    let mut args = address_json(row);
+    if let (Some(args), Value::Object(more)) = (args.as_object_mut(), more) {
+        args.extend(more);
+    }
+    reason(code, args)
+}
+
+/// Whether two paths inside a mount name one entry by the platform path key.
+fn same_key(a: &MountPath, b: &MountPath) -> bool {
+    path_key(Path::new(a.as_str())) == path_key(Path::new(b.as_str()))
+}
+
 // ── the exclude line ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// What [`exclude_trash`] did.
@@ -1168,19 +1772,21 @@ pub enum Excluded {
     Present { file: PathBuf },
     /// No `.git` folder or file above the mount folder.
     NoRepository,
-    /// Nothing written, and why (a link, a read failure other than `NotFound`, an unusable `.git` file, a failed write).
+    /// Nothing written, and why (a link, a read failure other than `NotFound`, an unusable `.git` file, a failed
+    /// write).
     Skipped { why: String },
 }
 
 /// Makes git ignore the mount's `.trash` (ADR-0400 decision 24 · ADR-0409 M12): walks up from `mount_folder` to the
 /// nearest `.git` folder or file (a `gitdir:` file — a worktree or a submodule — leads to its git folder, and a
-/// `commondir` there to the common one), then appends `/<mount path from the repository top>/.trash/`, anchored and with
-/// gitignore's metacharacters escaped, to `info/exclude` when no line equals it — the file's bytes kept, a newline
+/// `commondir` there to the common one), then appends `/<mount path from the repository top>/.trash/`, anchored and
+/// with gitignore's metacharacters escaped, to `info/exclude` when no line equals it — the file's bytes kept, a newline
 /// added first when it does not end with one, the file replaced through a create-new temp beside it. `serial` (a leaf
 /// mutex, taken holding no other lock) is held from the read to the write. Skipped when the common git folder is not a
 /// real folder holding `HEAD` (a stale `gitdir:`), when the mount path below the repository top holds a control
-/// character, when `.git` or the common git folder is a link, when `info` or the exclude file is a link, or when a read fails other than `NotFound`; only `info` itself
-/// is made (one level). Never an error: call it after the hold, holding no library lock, and log a skip.
+/// character, when `.git` or the common git folder is a link, when `info` or the exclude file is a link, or when a read
+/// fails other than `NotFound`; only `info` itself is made (one level). Never an error: call it after the hold, holding
+/// no library lock, and log a skip.
 // ADR-0400 decision 24
 pub fn exclude_trash(mount_folder: &Path, serial: &Mutex<()>) -> Excluded {
     let skip = |why: String| Excluded::Skipped { why };

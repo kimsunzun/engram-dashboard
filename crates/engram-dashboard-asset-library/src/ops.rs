@@ -134,19 +134,19 @@
 //!   never walked this run is one skipped row at its top. Nothing is journaled: an interrupted detach leaves kept
 //!   references, an interrupted move lines that read as not found until one relink of the old path fixes them (for a
 //!   merge's exact folder pair a relink re-points by prefix, so entries left under the old folder follow too — rare).
-//! - **Restore** (ADR-0409 decisions 5, 6 and 9): per row `{mount, bundle, path}` — a bundle name that does not parse as an id
-//!   is foreign (`not-found`); the trash folder and the bundle are checked without following (a check that fails other
-//!   than by absence `library-read-failed`); the row is found in the record's existing roots (a staging root
-//!   `not-restorable`, a path inside a root `inside-root`, an `other` row `not-restorable`, a root behind a link
-//!   `path-through-link`) or, without a readable record, among its files (a temp name `not-restorable`; a bundle's files
-//!   are walked once per call). The destination — the same path in the same mount, spelled as the bundle holds it — is
-//!   checked name by name without following before anything is made (a link on the way `path-through-link`), missing
-//!   parents are made with `create_dir` one name at a time (removed again, empty-only, when the move fails), and the row
-//!   is moved back by the no-replace rename: a taken
-//!   name is that row's conflict — with keep-both it goes back as `name (2)`, `name (3)`… — and nothing is ever
-//!   overwritten. The bundle shell is pruned after each row. The catalog gains each restored range by a folder-scoped
-//!   walk after the hold — from the topmost folder the restore made, so those folders are listed too (a scan classifies
-//!   it — a restored `SKILL.md` makes its folder a skill), before the answer.
+//! - **Restore** (ADR-0409 decisions 5, 6 and 9): per row `{mount, bundle, path}` — a bundle name that does not parse
+//!   as an id is foreign (`not-found`); the trash folder and the bundle are checked without following (a check that
+//!   fails other than by absence `library-read-failed`); the row is found in the record's existing roots (a staging
+//!   root `not-restorable`, a path inside a root `inside-root`, an `other` row `not-restorable`, a root behind a link
+//!   `path-through-link`) or, without a readable record, among its files and empty folders (a temp name
+//!   `not-restorable`; a bundle's files are walked once per call). The destination — the same path in the same mount,
+//!   spelled as the bundle holds it — is checked name by name without following before anything is made (a link on the
+//!   way `path-through-link`), missing parents are made with `create_dir` one name at a time (removed again,
+//!   empty-only, when the move fails), and the row is moved back by the no-replace rename: a taken name is that row's
+//!   conflict — with keep-both it goes back as `name (2)`, `name (3)`… — and nothing is ever overwritten. The bundle
+//!   shell is pruned after each row. The catalog gains each restored range by a folder-scoped walk after the hold —
+//!   from the topmost folder the restore made, so those folders are listed too (a scan classifies it — a restored
+//!   `SKILL.md` makes its folder a skill), before the answer.
 // ADR-0335
 // ADR-0339
 // ADR-0358
@@ -5107,7 +5107,7 @@ fn named_staging(mut why: Reason, lib: &LibPath, disk: &Path) -> Reason {
 }
 
 /// A trash row as an answer's `args` value.
-fn address_json(row: &TrashAddress) -> Value {
+pub(crate) fn address_json(row: &TrashAddress) -> Value {
     json!({ "mount": row.mount, "bundle": row.bundle, "path": row.path })
 }
 
@@ -5169,7 +5169,7 @@ fn unconfirmed(plan: &DeletePlan) -> LibraryRefusal {
     LibraryRefusal::new(RefusalClass::Conflict, DELETE_UNCONFIRMED, plan.to_json())
 }
 
-fn reason(code: &str, args: Value) -> Reason {
+pub(crate) fn reason(code: &str, args: Value) -> Reason {
     Reason {
         code: code.to_owned(),
         args,
@@ -5217,7 +5217,11 @@ mod tests {
         IO_LIMIT, LIST_CAP,
     };
     use crate::store::{ContentTag, FsStore, LibraryStore, ScanListing};
-    use crate::trash::{RowKind, RowSource, TrashListing, RECORD_NAME, TRASH_UNUSABLE};
+    use crate::store::{DENY_FIRST_REMOVAL, REMOVABLE_ANSWERS};
+    use crate::trash::{
+        BundleOutcome, Emptied, EmptyAnswer, ListedBundle, RootState, RowKind, RowSource,
+        TrashListing, RECORD_NAME, TRASH_UNUSABLE,
+    };
     use crate::{
         LibraryValues, LIBRARY_UNAVAILABLE, MOUNT_READ_ONLY, ROOT_GENERATION_STALE,
         VIRTUAL_ROOT_READ_ONLY,
@@ -5238,7 +5242,8 @@ mod tests {
     /// a rename of a base temp name out of the `cross_from` folder (a volume probe) answers `CrossesDevices`,
     /// `after_copy` runs once right after a tree copy, a tree copy answers a part-way failure while `fail_copy` is set and
     /// links while `links_copy` is, a `remove_dir` of a folder it made fails while `fail_remove_made` is set,
-    /// hashing `fail_hash`'s path fails, `before_hash` runs once right before hashing its path; `identities` counts the
+    /// hashing `fail_hash`'s path fails, `before_hash` runs once right before hashing its path, the next removal of the
+    /// `remove_door`'s path parks; `identities` counts the
     /// identity probes, `lists` logs the folders listed, `made` the folders made, `copies` counts the tree copies,
     /// `hashes` logs the files hashed.
     #[derive(Default)]
@@ -5276,6 +5281,8 @@ mod tests {
         links_copy: AtomicBool,
         /// A `remove_dir` of a folder this store made (`made`) fails.
         fail_remove_made: AtomicBool,
+        /// The next removal (`remove_tree`) of this path parks.
+        remove_door: Mutex<Option<Door>>,
     }
 
     impl LibraryStore for Disk {
@@ -5404,6 +5411,20 @@ mod tests {
         }
         fn remove_file(&self, path: &Path) -> io::Result<()> {
             FsStore.remove_file(path)
+        }
+        fn remove_tree(&self, root: &Path, path: &Path) -> io::Result<()> {
+            let door = {
+                let mut door = lock(&self.remove_door);
+                match door.as_ref() {
+                    Some((at, _, _)) if at == path => door.take(),
+                    _ => None,
+                }
+            };
+            if let Some((_, entered, release)) = door {
+                entered.send(()).unwrap();
+                let _ = release.recv_timeout(Duration::from_secs(20));
+            }
+            FsStore.remove_tree(root, path)
         }
         fn identity(&self, path: &Path) -> io::Result<engram_dashboard_platform::fs::FileIdentity> {
             self.identities.fetch_add(1, Ordering::SeqCst);
@@ -10533,5 +10554,551 @@ mod tests {
         assert_eq!(world.text("lib2/a.md"), "old");
         assert!(!world.there("lib4/a.md"), "nothing placed after the change");
         assert!(!world.there("lib2/.trash") && !world.there("lib4/.trash"));
+    }
+
+    // ── emptying and permanent delete on a real disk (ADR-0365 · ADR-0408 · ADR-0409 decisions 5, 6, 9 and 11) ──
+
+    const BUNDLE: &str = "20261123T081500Z-a1b2c3";
+    const SECOND: &str = "20261123T081600Z-d4e5f6";
+    const THIRD: &str = "20261123T081700Z-0a0b0c";
+
+    impl World {
+        /// The record of the bundle `.trash/<bundle>` in the mount folder `mount` (`lib` · `lib2`) naming `roots`.
+        fn record(&self, mount: &str, bundle: &str, roots: &[&str]) {
+            let roots: Vec<Value> = roots.iter().map(|path| json!({ "path": path })).collect();
+            self.put(
+                &format!("{mount}/.trash/{bundle}/{RECORD_NAME}"),
+                &json!({ "roots": roots }).to_string(),
+            );
+        }
+
+        fn read_only(&self, rel: &str, on: bool) {
+            let path = self.at(rel);
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(on);
+            fs::set_permissions(&path, permissions).unwrap();
+        }
+
+        /// Every entry below `keep` without following — its path, whether it is a folder, its read-only attribute
+        /// and a file's text — by path.
+        fn keep(&self) -> Vec<(String, bool, bool, String)> {
+            let mut entries = Vec::new();
+            let mut folders = vec![self.at("keep")];
+            while let Some(folder) = folders.pop() {
+                for entry in fs::read_dir(&folder).unwrap() {
+                    let path = entry.unwrap().path();
+                    let meta = fs::symlink_metadata(&path).unwrap();
+                    let rel = path
+                        .strip_prefix(self.at("keep"))
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let text = match meta.is_file() {
+                        true => fs::read_to_string(&path).unwrap(),
+                        false => String::new(),
+                    };
+                    if meta.is_dir() {
+                        folders.push(path.clone());
+                    }
+                    entries.push((rel, meta.is_dir(), meta.permissions().readonly(), text));
+                }
+            }
+            entries.sort();
+            entries
+        }
+
+        fn empty_all(&self, mount: &str, bundle: &str, rows: &[&str]) -> EmptyAnswer {
+            let listed = ListedBundle {
+                mount: mount.to_owned(),
+                bundle: bundle.to_owned(),
+                rows: rows.iter().map(|row| (*row).to_owned()).collect(),
+            };
+            self.svc.empty_trash(&[listed], &[]).unwrap()
+        }
+
+        fn delete_for_good(&self, mount: &str, bundle: &str, path: &str) -> EmptyAnswer {
+            self.svc
+                .empty_trash(&[], &[address(mount, bundle, path)])
+                .unwrap()
+        }
+
+        fn restore_row(&self, mount: &str, bundle: &str, path: &str) -> Outcome<String> {
+            let answer = self
+                .svc
+                .restore(&[address(mount, bundle, path)], false, None)
+                .unwrap();
+            answer.items[0].outcome.clone()
+        }
+
+        /// The rows the view lists for `bundle` of the mount `mount`, each with its state.
+        fn listed(&self, mount: &str, bundle: &str) -> Option<Vec<(String, RootState)>> {
+            let view = self.view();
+            let mount = view
+                .mounts
+                .iter()
+                .find(|row| row.mount.as_str() == mount)
+                .unwrap();
+            let bundles = mount.view.as_ref().ok()?;
+            bundles
+                .iter()
+                .find(|row| row.id.as_str() == bundle)
+                .map(|bundle| {
+                    bundle
+                        .rows
+                        .iter()
+                        .map(|row| (row.path.as_str().to_owned(), row.state.clone()))
+                        .collect()
+                })
+        }
+    }
+
+    fn address(mount: &str, bundle: &str, path: &str) -> TrashAddress {
+        TrashAddress {
+            mount: mount.to_owned(),
+            bundle: bundle.to_owned(),
+            path: path.to_owned(),
+        }
+    }
+
+    /// What came of the answer's one row: `gone`, `not-found` or the code it remains with.
+    fn said(answer: &EmptyAnswer) -> String {
+        assert_eq!(answer.rows.len(), 1, "{answer:?}");
+        match &answer.rows[0].outcome {
+            Emptied::Gone => "gone".to_owned(),
+            Emptied::Remaining(why) => why.code.clone(),
+            Emptied::NotFound(why) => why.code.clone(),
+        }
+    }
+
+    // Link safety (1): a row that is a link is removed (empty-all, permanent delete) or moved (restore) as a link —
+    //   `keep`, which it points at, keeps every entry.
+    #[test]
+    fn a_row_that_is_a_link_is_removed_or_restored_as_a_link_and_nothing_behind_it_goes() {
+        let world = World::new();
+        world.put("keep/x.md", "keep");
+        world.put("keep/link/x.md", "keep");
+        for bundle in [BUNDLE, SECOND, THIRD] {
+            fs::create_dir_all(world.at(&format!("lib/.trash/{bundle}"))).unwrap();
+            world.link("keep", &format!("lib/.trash/{bundle}/link"));
+            world.record("lib", bundle, &["link"]);
+        }
+        let before = world.keep();
+
+        assert_eq!(
+            world.listed("library", BUNDLE),
+            Some(vec![(
+                "link".to_owned(),
+                RootState::Present(EntryKind::Link)
+            )])
+        );
+        assert_eq!(said(&world.empty_all("library", BUNDLE, &["link"])), "gone");
+        assert_eq!(
+            said(&world.delete_for_good("library", SECOND, "link")),
+            "gone"
+        );
+        assert_eq!(
+            world.restore_row("library", THIRD, "link"),
+            Outcome::Done("library/link".to_owned())
+        );
+        lock(&world.links).push(world.at("lib/link"));
+
+        assert!(
+            !world.there(&format!("lib/.trash/{BUNDLE}")),
+            "the bundle went with its only row"
+        );
+        assert!(!world.there(&format!("lib/.trash/{SECOND}")));
+        assert_eq!(
+            FsStore.stat(&world.at("lib/link")).unwrap(),
+            EntryKind::Link,
+            "restored as a link"
+        );
+        assert_eq!(world.keep(), before, "nothing behind the link changed");
+    }
+
+    // Link safety (2) · ADR-0409 decision 11: a folder row with a link two folders down and read-only entries is
+    //   removed whole — the first attempt refused (the seam), `make_removable` runs with the link inside the row — and
+    //   `keep`, behind the link, keeps every entry and its read-only attribute; permanent delete does the same.
+    #[test]
+    fn a_folder_row_with_a_link_inside_and_read_only_entries_goes_and_nothing_behind_the_link_changes(
+    ) {
+        let world = World::new();
+        world.put("keep/x.md", "keep");
+        world.put("keep/e/b.md", "keep");
+        world.read_only("keep/x.md", true);
+        for bundle in [BUNDLE, SECOND] {
+            world.put(&format!("lib/.trash/{bundle}/d/a.md"), "a");
+            world.put(&format!("lib/.trash/{bundle}/d/e/b.md"), "b");
+            world.put(&format!("lib/.trash/{bundle}/d/ro.md"), "read-only");
+            world.read_only(&format!("lib/.trash/{bundle}/d/ro.md"), true);
+            world.link("keep", &format!("lib/.trash/{bundle}/d/e/l"));
+            world.record("lib", bundle, &["d"]);
+        }
+        let before = world.keep();
+
+        DENY_FIRST_REMOVAL.with(|deny| deny.set(true));
+        REMOVABLE_ANSWERS.with(|answers| answers.borrow_mut().clear());
+        let emptied = world.empty_all("library", BUNDLE, &["d"]);
+        DENY_FIRST_REMOVAL.with(|deny| deny.set(false));
+        let answers = REMOVABLE_ANSWERS.with(|answers| answers.take());
+        let permanent = world.delete_for_good("library", SECOND, "d");
+        let after = world.keep();
+        world.read_only("keep/x.md", false);
+
+        assert_eq!(said(&emptied), "gone");
+        assert_eq!(
+            answers,
+            [(world.at(&format!("lib/.trash/{BUNDLE}/d")), Ok(Vec::new()))],
+            "the refused first attempt ran make_removable on the row, which left nothing"
+        );
+        assert_eq!(said(&permanent), "gone");
+        assert!(!world.there(&format!("lib/.trash/{BUNDLE}")));
+        assert!(!world.there(&format!("lib/.trash/{SECOND}")));
+        assert_eq!(
+            after, before,
+            "every entry of keep and its read-only attribute unchanged"
+        );
+        assert!(before
+            .iter()
+            .any(|(rel, _, read_only, _)| rel == "x.md" && *read_only));
+    }
+
+    // Link safety (3) · ADR-0409 decision 6: a bundle folder that is a link to `keep` is foreign — absent from the
+    //   view, `not-found` by address for empty-all, permanent delete and restore — and nothing behind it goes.
+    #[test]
+    fn a_bundle_folder_that_is_a_link_is_foreign_and_nothing_behind_it_goes() {
+        let world = World::new();
+        world.put(
+            &format!("keep/{RECORD_NAME}"),
+            r#"{"roots":[{"path":"x.md"}]}"#,
+        );
+        world.put("keep/x.md", "keep");
+        fs::create_dir_all(world.at("lib/.trash")).unwrap();
+        world.link("keep", &format!("lib/.trash/{BUNDLE}"));
+        let before = world.keep();
+
+        assert_eq!(world.listed("library", BUNDLE), None, "not in the view");
+        let emptied = world.empty_all("library", BUNDLE, &["x.md"]);
+        assert_eq!(said(&emptied), NOT_FOUND);
+        assert_eq!(emptied.bundles[0].outcome, BundleOutcome::NotFound);
+        assert_eq!(
+            said(&world.delete_for_good("library", BUNDLE, "x.md")),
+            NOT_FOUND
+        );
+        assert_eq!(
+            failed_code(&world.restore_row("library", BUNDLE, "x.md")),
+            NOT_FOUND
+        );
+        assert_eq!(
+            FsStore
+                .stat(&world.at(&format!("lib/.trash/{BUNDLE}")))
+                .unwrap(),
+            EntryKind::Link
+        );
+        assert_eq!(world.keep(), before);
+    }
+
+    // Link safety (4) · ADR-0409 decision 5: a `.trash` that is a link to `keep` makes that mount's trash unusable — a
+    //   delete refuses, the view names the mount, nothing is restored, emptied or permanently deleted.
+    #[test]
+    fn a_trash_folder_that_is_a_link_is_unusable_and_nothing_behind_it_goes() {
+        let world = World::new();
+        world.put(
+            &format!("keep/{BUNDLE}/{RECORD_NAME}"),
+            r#"{"roots":[{"path":"x.md"}]}"#,
+        );
+        world.put(&format!("keep/{BUNDLE}/x.md"), "keep");
+        world.put("lib2/item.md", "item");
+        world.link("keep", "lib2/.trash");
+        world.scan();
+        let before = world.keep();
+
+        let deleted = world.delete(&["team/item.md"]);
+        assert_eq!(failed_code(&deleted.items[0].outcome), TRASH_UNUSABLE);
+        assert_eq!(world.text("lib2/item.md"), "item");
+        let view = world.view();
+        let team = view
+            .mounts
+            .iter()
+            .find(|row| row.mount.as_str() == "team")
+            .unwrap();
+        assert_eq!(team.view.as_ref().unwrap_err().code, TRASH_UNUSABLE);
+        let emptied = world.empty_all("team", BUNDLE, &["x.md"]);
+        assert_eq!(said(&emptied), TRASH_UNUSABLE);
+        assert_eq!(emptied.bundles[0].outcome, BundleOutcome::Remaining);
+        assert_eq!(
+            said(&world.delete_for_good("team", BUNDLE, "x.md")),
+            TRASH_UNUSABLE
+        );
+        assert_eq!(
+            failed_code(&world.restore_row("team", BUNDLE, "x.md")),
+            TRASH_UNUSABLE
+        );
+        assert_eq!(world.keep(), before);
+    }
+
+    // Link safety (5) · ADR-0409 decision 9: a link between the bundle and a row (`bundle/a` → `keep`, `keep/b/x.md`
+    //   behind the row `a/b/x.md`) leaves the row untouched, `path-through-link`, for empty-all, permanent delete and
+    //   restore; the view says so and `keep` keeps every entry. The link itself is an `other` row: removed, it goes as
+    //   a link, and the bundle with it.
+    #[test]
+    fn a_link_between_the_bundle_and_a_row_leaves_the_row_and_everything_behind_it() {
+        let world = World::new();
+        world.put("keep/b/x.md", "keep");
+        fs::create_dir_all(world.at(&format!("lib/.trash/{BUNDLE}"))).unwrap();
+        world.link("keep", &format!("lib/.trash/{BUNDLE}/a"));
+        world.record("lib", BUNDLE, &["a/b/x.md"]);
+        let before = world.keep();
+
+        assert_eq!(
+            world.listed("library", BUNDLE),
+            Some(vec![
+                ("a".to_owned(), RootState::Present(EntryKind::Link)),
+                ("a/b/x.md".to_owned(), RootState::ThroughLink),
+            ])
+        );
+        let emptied = world.empty_all("library", BUNDLE, &["a/b/x.md"]);
+        assert_eq!(said(&emptied), PATH_THROUGH_LINK);
+        assert_eq!(emptied.bundles[0].outcome, BundleOutcome::Remaining);
+        assert_eq!(
+            said(&world.delete_for_good("library", BUNDLE, "a/b/x.md")),
+            PATH_THROUGH_LINK
+        );
+        assert_eq!(
+            failed_code(&world.restore_row("library", BUNDLE, "a/b/x.md")),
+            PATH_THROUGH_LINK
+        );
+        assert!(
+            world.there(&format!("lib/.trash/{BUNDLE}/{RECORD_NAME}")),
+            "the record stays"
+        );
+        assert_eq!(world.keep(), before);
+
+        assert_eq!(said(&world.delete_for_good("library", BUNDLE, "a")), "gone");
+        assert!(
+            !world.there(&format!("lib/.trash/{BUNDLE}")),
+            "no root left: the bundle went"
+        );
+        assert_eq!(world.keep(), before);
+    }
+
+    // ADR-0322 decision 7 · ADR-0409 decision 15: the mount folders are read once — a mount relocated while one of its
+    //   bundles is being emptied is emptied on at the folder read first; the bundle of that name in its new folder stays.
+    #[test]
+    fn a_mount_relocated_while_emptying_is_emptied_on_at_the_folder_read_first() {
+        let world = World::new();
+        world.put(&format!("lib2/.trash/{BUNDLE}/x.md"), "x");
+        world.record("lib2", BUNDLE, &["x.md"]);
+        world.put(&format!("lib2/.trash/{SECOND}/y.md"), "y");
+        world.record("lib2", SECOND, &["y.md"]);
+        world.put(&format!("lib3/.trash/{SECOND}/y.md"), "elsewhere");
+        world.record("lib3", SECOND, &["y.md"]);
+        let (entered, release) = (mpsc::channel(), mpsc::channel());
+        *lock(&world.disk.remove_door) = Some((
+            world.at(&format!("lib2/.trash/{BUNDLE}/x.md")),
+            entered.0,
+            release.1,
+        ));
+        let worker = on_thread(&world.svc, |on| {
+            let listed = |bundle: &str, row: &str| ListedBundle {
+                mount: "team".to_owned(),
+                bundle: bundle.to_owned(),
+                rows: vec![row.to_owned()],
+            };
+            on.empty_trash(&[listed(BUNDLE, "x.md"), listed(SECOND, "y.md")], &[])
+                .unwrap()
+        });
+        entered
+            .1
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the removal is held");
+
+        world
+            .svc
+            .relocate_mount("team", &world.at("lib3"), false)
+            .unwrap();
+        release.0.send(()).unwrap();
+        let answer = worker.join().unwrap();
+
+        let rows: Vec<bool> = answer
+            .rows
+            .iter()
+            .map(|row| row.outcome == Emptied::Gone)
+            .collect();
+        assert_eq!(rows, [true, true], "{answer:?}");
+        assert!(
+            !world.there(&format!("lib2/.trash/{SECOND}")),
+            "emptied at the folder read first"
+        );
+        assert_eq!(
+            world.text(&format!("lib3/.trash/{SECOND}/y.md")),
+            "elsewhere"
+        );
+    }
+
+    // Link safety · ADR-0409 decision 9 (round 1): each row's names are checked again right before its removal — a
+    //   folder between the bundle and a row swapped for a link to `keep` while an earlier row was being removed leaves
+    //   the row `path-through-link`, and nothing behind the link goes.
+    #[test]
+    fn a_folder_swapped_for_a_link_before_a_rows_turn_leaves_the_row_and_everything_behind_it() {
+        let world = World::new();
+        world.put("keep/b/x.md", "keep");
+        world.put(&format!("lib/.trash/{BUNDLE}/z.md"), "z");
+        world.put(&format!("lib/.trash/{BUNDLE}/a/b/x.md"), "x");
+        world.record("lib", BUNDLE, &["z.md", "a/b/x.md"]);
+        let before = world.keep();
+        let (entered, release) = (mpsc::channel(), mpsc::channel());
+        *lock(&world.disk.remove_door) = Some((
+            world.at(&format!("lib/.trash/{BUNDLE}/z.md")),
+            entered.0,
+            release.1,
+        ));
+        let worker = on_thread(&world.svc, |on| {
+            let listed = ListedBundle {
+                mount: "library".to_owned(),
+                bundle: BUNDLE.to_owned(),
+                rows: vec!["z.md".to_owned(), "a/b/x.md".to_owned()],
+            };
+            on.empty_trash(&[listed], &[]).unwrap()
+        });
+        entered
+            .1
+            .recv_timeout(Duration::from_secs(20))
+            .expect("z.md's removal is held");
+        fs::rename(
+            world.at(&format!("lib/.trash/{BUNDLE}/a")),
+            world.at("lib/a-moved"),
+        )
+        .unwrap();
+        world.link("keep", &format!("lib/.trash/{BUNDLE}/a"));
+        release.0.send(()).unwrap();
+        let answer = worker.join().unwrap();
+
+        let said: Vec<String> = answer
+            .rows
+            .iter()
+            .map(|row| match &row.outcome {
+                Emptied::Gone => "gone".to_owned(),
+                Emptied::Remaining(why) | Emptied::NotFound(why) => why.code.clone(),
+            })
+            .collect();
+        assert_eq!(said, ["gone", PATH_THROUGH_LINK]);
+        assert_eq!(world.keep(), before);
+        assert_eq!(world.text("lib/a-moved/b/x.md"), "x");
+    }
+
+    // Link safety (5) · round 1: named together with the link above it, a row behind the link is judged again after the
+    //   link went — gone, the bundle with it — and `keep` keeps every entry.
+    #[test]
+    fn a_row_behind_a_link_named_with_the_link_goes_with_it() {
+        let world = World::new();
+        world.put("keep/b/x.md", "keep");
+        fs::create_dir_all(world.at(&format!("lib/.trash/{BUNDLE}"))).unwrap();
+        world.link("keep", &format!("lib/.trash/{BUNDLE}/a"));
+        world.record("lib", BUNDLE, &["a/b/x.md"]);
+        let before = world.keep();
+
+        let answer = world.empty_all("library", BUNDLE, &["a/b/x.md", "a"]);
+
+        let gone: Vec<bool> = answer
+            .rows
+            .iter()
+            .map(|row| row.outcome == Emptied::Gone)
+            .collect();
+        assert_eq!(gone, [true, true], "{answer:?}");
+        assert_eq!(answer.bundles[0].outcome, BundleOutcome::Gone);
+        assert_eq!(world.keep(), before);
+    }
+
+    // ADR-0409 decision 8 (round 1): a deleted folder whose record failed leaves its empty sub-folder as a row of its
+    //   own — listed, emptied, and the bundle goes.
+    #[test]
+    fn an_empty_folder_of_a_recordless_bundle_is_a_row_and_the_bundle_can_be_emptied() {
+        let world = World::new();
+        world.put("lib/d/y.md", "y");
+        fs::create_dir_all(world.at("lib/d/e")).unwrap();
+        world.scan();
+        world.disk.fail_record.store(true, Ordering::SeqCst);
+        let deleted = world.delete(&["library/d"]);
+        world.disk.fail_record.store(false, Ordering::SeqCst);
+        let bundle = done(&deleted.items[0].outcome).bundle;
+
+        assert_eq!(
+            world.listed("library", &bundle),
+            Some(vec![
+                ("d/e".to_owned(), RootState::Present(EntryKind::Folder)),
+                ("d/y.md".to_owned(), RootState::Present(EntryKind::File)),
+            ])
+        );
+        let answer = world.empty_all("library", &bundle, &["d/e", "d/y.md"]);
+
+        let gone: Vec<bool> = answer
+            .rows
+            .iter()
+            .map(|row| row.outcome == Emptied::Gone)
+            .collect();
+        assert_eq!(gone, [true, true], "{answer:?}");
+        assert_eq!(answer.bundles[0].outcome, BundleOutcome::Gone);
+    }
+
+    // ADR-0365 · ADR-0409 decision 15 (round 2): a mount folder that is a link is judged by what it points at — its target
+    //   gone while emptying (a pulled volume) leaves the row being removed and the later bundle `library-unavailable`,
+    //   never gone or not-found.
+    #[test]
+    fn a_linked_mount_whose_target_goes_while_emptying_is_unavailable() {
+        let world = World::new();
+        world.put(&format!("target/.trash/{BUNDLE}/x.md"), "x");
+        world.record("target", BUNDLE, &["x.md"]);
+        world.put(&format!("target/.trash/{SECOND}/y.md"), "y");
+        world.record("target", SECOND, &["y.md"]);
+        world.link("target", "linked");
+        world
+            .svc
+            .relocate_mount("team", &world.at("linked"), false)
+            .unwrap();
+        let folder = world
+            .svc
+            .with_read(|state| state.mounts.get("team").unwrap().folder.clone());
+        assert_eq!(
+            FsStore.stat(&folder).unwrap(),
+            EntryKind::Link,
+            "the mount folder is the link"
+        );
+        let (entered, release) = (mpsc::channel(), mpsc::channel());
+        *lock(&world.disk.remove_door) = Some((
+            folder.join(".trash").join(BUNDLE).join("x.md"),
+            entered.0,
+            release.1,
+        ));
+        let worker = on_thread(&world.svc, |on| {
+            let listed = |bundle: &str, row: &str| ListedBundle {
+                mount: "team".to_owned(),
+                bundle: bundle.to_owned(),
+                rows: vec![row.to_owned()],
+            };
+            on.empty_trash(&[listed(BUNDLE, "x.md"), listed(SECOND, "y.md")], &[])
+                .unwrap()
+        });
+        entered
+            .1
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the removal is held");
+        fs::rename(world.at("target"), world.at("target-gone")).unwrap();
+        release.0.send(()).unwrap();
+        let answer = worker.join().unwrap();
+
+        let said: Vec<String> = answer
+            .rows
+            .iter()
+            .map(|row| match &row.outcome {
+                Emptied::Gone => "gone".to_owned(),
+                Emptied::Remaining(why) | Emptied::NotFound(why) => why.code.clone(),
+            })
+            .collect();
+        assert_eq!(said, [LIBRARY_UNAVAILABLE, LIBRARY_UNAVAILABLE]);
+        assert_eq!(
+            world.text(&format!("target-gone/.trash/{BUNDLE}/x.md")),
+            "x"
+        );
     }
 }
