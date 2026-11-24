@@ -1,39 +1,44 @@
-# Handoff: S25 step 9b — U1, U2a, U2b committed; U3 fixed after review round 1 (uncommitted) — next: U3 re-review
+# Handoff: S25 — step 9b done; step 10b U1 + U2 committed — next: 10b U3 (docs / headers), then the server-stage end
 
 ## Know first
-- **Codex is called through the CLI now, not the plugin** (user 2026-11-24 「ㅇㅇ 지시서를 cli 로 되돌리면 되긴하는데 skill-factory 에 내용 전달하고 너는 하던거 계속하면 될듯」). The instruction files still say plugin until skill-factory changes them (intake Engram `0dce62c`, `agents/skill-factory/doc/insights/2026-11-24-codex-cli-return-intake.md` — commands there). First review = `codex exec --sandbox read-only --skip-git-repo-check -c model_reasoning_effort="xhigh" "<brief>" < /dev/null`; re-reviews = `codex exec resume -c model_reasoning_effort="xhigh" -c sandbox_mode="read-only" --skip-git-repo-check <session id> "<brief>" < /dev/null` (session id from the output's `session id:` line). Run it from REPL `$` with a short `.timeout()` so it goes to the background; a completion notification arrives. A plugin-made thread cannot be resumed by the CLI (`already has an active writer`) — U3's round-1 Codex review ran through the plugin, so the U3 re-review is a fresh CLI thread; resume from round 3 on.
-- The user wants Codex re-reviews continued in one thread, not a new one each round (user 「토큰폭팔」, 「몇번째 얘기하는데」). A handoff note must not override that.
-- Ask with a concrete example first; never point the user at "above" — restate the question in full (user 2026-11-24 「내가 위에라고 하면 다 뒤져서 찾아야됨?」).
-- Main's step notes: `.review-s25-d9/s9b-code/agents.md`; briefs, round files, diffs in the same folder. Replace a coder past ~500k (two U3 coders so far). Code mode (REPL).
+- **Autonomous run on the user's word** (2026-11-24 「ㅇㅇ 쭉쭉 진행해. 자율모드로. UI 전까지하고 막히면 어쩔 수 없고.」 then 「ㅇㅇ 리뷰 구현 QA 까지 쭉 진행해.」 for 10b). Rule change asked by the user (「자율모드에서는 사용자 승인없이 진행 가능한걸로 변경해야될듯? 피드백 올려」) is filed as engram-implement feedback (Engram `24ce00c`), NOT applied to the rules yet — until it is, TRD approval and *Stop* points still require the user; this session had explicit go-ahead for 10b only.
+- Codex via CLI (not the plugin): first review `codex exec --sandbox read-only --skip-git-repo-check -c model_reasoning_effort="xhigh" "<brief>" < /dev/null`; re-reviews `codex exec resume -c model_reasoning_effort="xhigh" -c sandbox_mode="read-only" --skip-git-repo-check <session id> "<brief>" < /dev/null` (id from the output's `session id:`), run from REPL `$` with a short `.timeout()`.
+- **Claude reviewer / coder agent ids do not survive a session** (SendMessage → "No transcript found"); a new session spawns fresh workers and hands them the previous round's findings files. Codex threads DO resume by id.
+- Step notes and briefs: 9b `.review-s25-d9/s9b-code/` (agents.md, unit briefs, round files, commit messages); 10b `.review-s25-10b/` (agents.md, u1/u2/u3-unit.md, review and QA briefs, results). Both folders are in `.git/info/exclude`.
+- QA briefs: build from `.review-s25-d9/s9b-code/u3-qa-brief.md` pattern, BUT check the TRD §8 per-unit GUI on/off — the 10b U2 brief wrongly said GUI off and shell scene C2 had to be run as a supplement. **U3's TRD row runs CLI scene C1** on the qa 「GUI 실측」 isolated daemon (needs U1–U3).
 - Not ours: `src-tauri/bindings/*.ts` line-ending noise, `.claude/explain/`.
 
 ## One-line state · next first action
-9b: U1 `f5a8c4fc`, U2a `c4e0f5b8`, U2b `5d71e2bf` committed and pushed (deep review + QA PASS each; ADR-0412, ADR-0414). U3 (one-volume move / rename) built, deep-reviewed (round 1: all three FIX), and fixed by a fresh coder (13 items incl. the user's item 13) — **uncommitted, re-review not done**.
-**Next:** U3 round-2 re-review on snapshot `71a96023c3670fd00c0f2b6c1205f81fdf925543` (incremental diff `.review-s25-d9/s9b-code/u3-r2.diff` from `6bcc407e`; fix list `u3-round1.md` items 1–13; coder report summarized in `handover-u3.md` 「Round 1」): lead (`ab466ac38068ab4ca`) checks 1,2,3,6,9,11,12 and the shared-code refactor (delete must stay identical); risk (`aff5ef38093ebb76d`) checks 3,4,5,7,8,13 (last lens round); Codex (fresh CLI thread) checks 1,2,6,7,10. Then batched wording (ops.rs anchor ~:5064, `asset-library.md` 「Folder IO is bounded」), ADR for U3 decisions (below), QA (both lanes — asset-library path), commit. Then U4 (cross-volume move, copy), U5 (emptying), U6 (texts). After 9b: 10b commands → 22 hook components → server-stage stop → client UI.
+9b (file operations) is **Implemented** (U3, U4a, U4b, U5 committed; TRD `trd-file-operations.md` marked; ADR-0415 – ADR-0418). 10b (commands) TRD reviewed deep PASS (`trd-file-commands.md`, ADR-0419); **U1** (six LLM commands) and **U2** (shell-only `library.emptyTrash`, gate, CLI change) committed and pushed after review + QA PASS.
+**Next:** 10b **U3** — brief ready at `.review-s25-10b/u3-unit.md` (root help line, priming pointer, headers, reference files of the TRD's 「Reference files to fix」 row, the U1/U2 batched doc items, and the one-word `library.renameMount` stop-prefix fix in asset-library `host.rs` `rename_ok`). Spawn a fresh worker-senior coder with it (base HEAD `00ca7336`); review light/full (docs + one fix); QA with **CLI scene C1** (TRD §8). Then mark 10b TRD `Implemented` + parent `trd.md` item 10b status, then step 22 (hook components) needs its TRD — and the end-of-server-stage CLI pass with the user (parent TRD §5-3).
 
 ## Repo state (measured at save)
-- Branch v0.5.0/feat/preset-library, HEAD `5d71e2bf`, 0 ahead / 0 behind origin (this handoff commit makes it 1 ahead).
-- Uncommitted (U3): `crates/engram-dashboard-asset-library/src/{catalog,lib,mounts,ops,rename}.rs`, `docs/reference/structure/asset-library.md`.
+- Branch `v0.5.0/feat/preset-library`, HEAD `00ca7336`, 0 ahead / 0 behind origin (this handoff commit makes it 1 ahead).
+- Uncommitted: none of ours (only `.claude/explain/` untracked and the bindings line-ending noise).
 
 ## Verification state
-- U3: **gate not passed** (round-2 re-review and QA not run) — do not trust or commit this diff yet. Coder ran: asset-library 793 passed / 1 ignored (+13, 0 lost), agent and daemon green, workspace build, fmt clean; spot mutations on items 1, 2, 5, 7, 13.
-- Coder notes for the re-review: `reclassify` lists its folder without a link check (shared with delete, unchanged); a destination whose last name is a link answers `path-through-link` instead of `onConflict`; a keep-both merge that renames `SKILL.md` to `SKILL (2).md` and then empties the folder removes the skill without asking (outside item 13 as written); delete now publishes records after all trash moves and retries a failed bundle per item; log wording changed.
-- Rerun: `cargo test -p engram-dashboard-asset-library` · agent / daemon `-- --test-threads=4` · full QA per `.claude/skill-bindings/qa.md`.
+- Committed and gated: 9b U3 `ad6dbe00`, U4a `7468d90b`, U4b `b093beb6`, U5 `9f166061` (9b Implemented); 10b U1 (commit after `003c75fb`), U2 `00ca7336`. Each: code review (deep / full) PASS, QA full regression + claude/codex lanes + mutation PASS; U4a ran the two-volume test (C: ↔ I:); 10b U2 ran shell scene C2 on an isolated daemon + app.
+- Not run yet: 10b CLI scene C1 (U3's QA), the server-stage end CLI pass. Clippy is not installed for the pinned toolchain (never run).
+- Rerun: `cargo test --workspace -- --test-threads=4` · full QA per `.claude/skill-bindings/qa.md`.
 
 ## Failed approaches (do-not)
-- Codex plugin `--resume` cannot pick a thread by id (upstream #230/#700, PRs #475/#719 open); `codex exec resume <id>` on a plugin thread fails: `thread-store conflict: thread … already has an active writer`.
-- Codex retried right at its reset time still answered `You've hit your usage limit … try again at 12:40 AM` — wait a few minutes past the reset.
-- QA's `cargo test --workspace` stops at the first failing binary; add a `--no-fail-fast` run when it stops early (U2b QA did).
+- SendMessage to a previous session's agent id → `No transcript found for agent ID` — spawn fresh.
+- A QA brief copied without checking the TRD's GUI line skipped a required live scene (10b U2 C2).
+- Telling a coder a helper "already exists" without checking (10b/U4a no-follow open) — the coder had to add one; verify such premises first.
 
 ## Decisions
 User:
-- 둘 다 유지 이름 · 상황: TRD R17 「(2)」, 이 PC 탐색기 엔진 플래그는 " - Copy" · (2) ★ / - Copy · 「ㅇㅇ (2)로해」 · 같음.
-- Codex 호출 방식 · 상황: 플러그인은 ID resume 불가(#230), CLI resume 실측 성공, 2026-09-16 플러그인 전환 이유(가시성·알림)는 REPL에서 해소 · CLI로 되돌림 ★ / 플러그인 유지 · 「ㅇㅇ 지시서를 cli 로 되돌리면 되긴하는데 skill-factory 에 내용 전달하고 너는 하던거 계속하면 될듯」 · 같음 · 조건: 지시서 수정은 skill-factory.
-- 합치기 뒤 스킬 폴더가 SKILL.md를 잃는 경우 · 상황: 참조가 「찾을 수 없음」이 됨, SKILL.md 단독 이동은 이미 확인함(ADR-0339 M110) · 확인 받기(A) ★ / 그대로(B) / 막기(C) · 「그냥 넣어. 근데 llm이 인자 없이 호출하지는 않을것 같은데 어쨋든 ㄱㄱ」 · 같음.
-- (묻지 않음) 핸드오프 시점 · 「핸드오프 지점 됐는데 적당할때 핸드오프 진행하자.」
-Main: U2 split; T-123, T-124; ADR-0412, ADR-0414 (detach writes only confirmed presets/agents; restore reads in hold; digest covers items; spelling/kind in hold); U3 keep-both naming in one function; U3 fixes as in `u3-round1.md`. **ADR to write at the U3 commit:** item 13 (merge → skill-unconfirmed), merge pair rules (exact S→D only when S's SKILL.md became D's), skill re-read narrowed to the pair's own path (TRD §3.4 difference), second displacement → second bundle, `Trashing` / `walk_refs` shared by delete and move.
-Open (ask the user): U1 unfixed 권장 — a folder write-open denial in `make_removable` skips the link re-check (rare; few lines to fix).
+- 둘 다 유지 이름 · 상황: TRD R17 「(2)」 · (2) ★ / - Copy · 「ㅇㅇ (2)로해」 · 같음.
+- 합치기 뒤 스킬 폴더가 SKILL.md를 잃는 경우 · 상황: 참조가 「찾을 수 없음」 · 확인 받기 ★ / 그대로 / 막기 · 「그냥 넣어. 근데 llm이 인자 없이 호출하지는 않을것 같은데 어쨋든 ㄱㄱ」 · 같음 (ADR-0415 decision 2).
+- U1 미결 권장(읽기 전용 폴더 쓰기 열기 거부 시 링크 재확인 생략) · 상황: 휴지통 비우기 때만, 드묾 · 그대로 ★ / 고치기 · 「ㅇㅇ 읽기전용 따지지 말고 그냥 지워」 · 같음 · 근거: read-only entries are removed without asking (main applied it also to read-only junctions — ADR-0418 decision 5).
+- 10b TRD를 추천안으로 리뷰→구현→QA 진행 · 상황: 프로젝트 규칙상 TRD 승인 필요 · D7 (b) 거절하며 안내 ★ / (a) 숨김; D8 (b) 긴 대기 ★ / (a) 기본 대기 · 「ㅇㅇ 리뷰 구현 QA 까지 쭉 진행해.」 · 같음.
+- (묻지 않음) 자율 모드 승인 규칙 · 「자율모드에서는 사용자 승인없이 진행 가능한걸로 변경해야될듯? 피드백 올려」 → filed, not applied.
+- (묻지 않음) 핸드오프 시점 · 「아 그리고 다 끝나고 끊을 수 있는 시점 오면 핸드오프하자.」 · 「현재 어디까지 진행됐음? 끊기 좋은 타이밍에 핸드오프 하면 도리듯」.
+Main: U4 split into U4a / U4b; U6 texts folded into the units' doc passes; read-only junction removed via std `remove_dir_all` (no attribute change); D7 kept by making the CLI post unlisted names (not re-asked — the user's choice unchanged); shell-side long wait handed to the client stage; ADR-0415 – ADR-0419.
+Open (ask the user — all committed with the current behaviour as "decision pending", see `docs/tracking.md`): **T-125** keep-both merge that empties a referenced skill asks nothing (asked once, no answer); **T-127** merge across volumes / copy onto a same-name folder refused (Explorer merges); **T-128** strict time/permission copy (recommend best-effort); **T-131** Unix 0555 folder in a row and a read-only empty-folder row cannot be emptied. Recorded rare items: T-126, T-129, T-130, T-132, T-133 (overlapping repeat after the CLI's wait).
+- Idea raised by the user (not filed): an operator / external-terminal token so a plain terminal Claude can drive the daemon via `engram` (today the CLI needs an engram-spawned agent's `ENGRAM_TOKEN`).
 
 ## References
-- TRD `docs/process/S25-preset-library/trd-file-operations.md` (§3.5, §3.6 for U4, §3.8 for U5, §8, §9); ADR-0409, 0412, 0414, 0339, 0335, 0400 d23–25.
-- `.review-s25-d9/s9b-code/`: `coder-brief.md`, `u3-unit.md`, `u3-round1.md`, `u3-{lead,risk,codex}-r1.md`, `handover-u1/u2a/u2b/u3.md`, `u3-explorer-probe-result.md`, commit messages `u2a-/u2b-commit-msg.txt` (pattern).
+- TRDs: `docs/process/S25-preset-library/trd-file-operations.md` (Implemented), `trd-file-commands.md` (reviewed; §8 C1, §9 U3, 「Reference files to fix」); parent `trd.md` §5-3 (10b item has 「Re-review needed」 — satisfied by the child TRD review; update its status at the U3 commit), item 22, server-stage end.
+- ADR-0415 – ADR-0419; `docs/tracking.md` T-125 – T-133.
+- Feedback filed this session (Engram): `4aa84f2` (workers across sessions), `680c4b4` (qa lanes.tsv / env-var test), `24ce00c` (autonomous approval rule).
