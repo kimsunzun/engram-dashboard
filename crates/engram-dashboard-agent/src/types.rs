@@ -497,8 +497,9 @@ pub const MCP_SERVER_NAME: &str = "engram";
 // ADR-0132
 pub const CLI_GROUP_MAIL: &str = "mail";
 
-/// The CLI's **silence window** on a control route (seconds) for every call that is not a launch — the upper bound of the
-/// daemon's ordinary seat deadline. A launch waits [`LAUNCH_RELAY_CALLER_WAIT_SECS`] instead (ADR-0360, ADR-0369).
+/// The CLI's **silence window** on a control route (seconds) for every call that is not launch-class — the upper bound of
+/// the daemon's ordinary seat deadline. A launch-class call (agent launches and the long library file commands — ADR-0419)
+/// waits [`LAUNCH_RELAY_CALLER_WAIT_SECS`] instead (ADR-0360, ADR-0369).
 ///
 /// ★Not 「a total budget」★: consumers put it into `set_read_timeout` (+`set_write_timeout`), so it fires when, after the request is sent,
 ///   **one read** receives not a byte within this time — a **continuous no-response interval**, not the whole round trip. Today the
@@ -567,7 +568,7 @@ pub const LAUNCH_CALLER_WAIT_SECS: u64 = LAUNCH_REPLY_BOUND_SECS + LAUNCH_MARGIN
 // ADR-0369
 pub const LAUNCH_RELAY_SEAT_SECS: u64 = LAUNCH_CALLER_WAIT_SECS + LAUNCH_MARGIN_SECS;
 
-/// The CLI's wait for every launch verb: [`LAUNCH_RELAY_SEAT_SECS`] + [`LAUNCH_MARGIN_SECS`] = 94 — one value whether
+/// The CLI's wait for every launch-class verb (agent launches and the long library file commands — ADR-0419): [`LAUNCH_RELAY_SEAT_SECS`] + [`LAUNCH_MARGIN_SECS`] = 94 — one value whether
 /// the daemon answers the launch itself or relays it.
 // ADR-0369
 pub const LAUNCH_RELAY_CALLER_WAIT_SECS: u64 = LAUNCH_RELAY_SEAT_SECS + LAUNCH_MARGIN_SECS;

@@ -136,7 +136,7 @@
 //! (`LibraryStore::remove_tree`, a link removed as a link), per bundle under the trash lock, holding no library lock and
 //! no ticket.
 //! The store's renames never replace (`store.rs`). The rules are in its header. `ops.rs` holds the file operations on top
-//! of it — delete (each item into its own mount's `.trash`, with `yes` / `detachRefs` and the plan digest judged again
+//! of it — delete (each item into its own mount's `.trash`, with `yes` / `detach_refs` and the plan digest judged again
 //! inside the hold, the folder it left re-classified in the same hold), restore (back to the same path, never
 //! overwriting), and move and rename (no-replace renames, merge, an overwrite's displaced entry into the trash, the range
 //! re-keyed and re-classified in the same hold, the references rewritten in every readable mount and the agents without
@@ -160,7 +160,9 @@
 //! parses the spellings with the bodies' own path rules, calls one body per command and converts the answer into
 //! agent's declared rows, with no second body call and no read-back (ADR-0384). Bus codes stay in agent. The port
 //! carries the `library.*`, `preset.*` and agent-preset commands and the `agent.new {presets}` judgement; the daemon
-//! plugs this service into the command table.
+//! plugs this service into the command table. Among them the file and trash commands (`library.move` …
+//! `library.restore`, ADR-0419) and the shell-only `library.emptyTrash`: the daemon's entrance refuses it to every control
+//! route, so only the Engram app reaches `LibraryService::empty_trash` through the port.
 // ADR-0311
 // ADR-0324
 // ADR-0378
@@ -170,6 +172,7 @@
 // ADR-0382
 // ADR-0386
 // ADR-0409
+// ADR-0419
 
 pub mod agent_edit;
 pub mod backends;

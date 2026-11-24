@@ -776,7 +776,7 @@ fn rename_ok(answer: RenameAnswer) -> LibraryRenameMountOk {
             .collect(),
         answer
             .stopped
-            .map(|stop| relink_stop_row("library.relink", stop.path, port(stop.refusal))),
+            .map(|stop| relink_stop_row("library.renameMount", stop.path, port(stop.refusal))),
         pointing_row(answer.already_pointing),
     )
 }
@@ -2217,6 +2217,37 @@ mod tests {
             engram_dashboard_agent::library_commands::PROFILE_STORE_REFUSED
         );
     }
+
+    /// A mount rename's stop names the command that stopped, `library.renameMount`, not the relink whose reference fix it
+    /// shares (ADR-0419 — `relink_stop_row` takes the command).
+    #[test]
+    fn a_mount_rename_stop_names_library_rename_mount() {
+        let answer = RenameAnswer {
+            status: LibraryStatus {
+                daemon_id: "d".to_owned(),
+                mounts: Vec::new(),
+                config: ConfigHealth::Ok,
+                suggested_new: PathBuf::from("C:/data/library"),
+                root_generation: 1,
+            },
+            fixed: Vec::new(),
+            written: Vec::new(),
+            skipped: Vec::new(),
+            stopped: Some(RelinkStop {
+                path: Some("a/p.yaml".to_owned()),
+                refusal: LibraryRefusal::Store(StoreError::Refused(Refusal::Unreadable)),
+            }),
+            already_pointing: Pointing::default(),
+        };
+        let stop = rename_ok(answer).stopped.expect("stopped");
+        assert!(
+            stop.message.starts_with("library.renameMount: "),
+            "{}",
+            stop.message
+        );
+        assert_eq!(stop.path.as_deref(), Some("a/p.yaml"));
+    }
+
     /// Each refusal the caller can clear and then repeat is in agent's `AfterCondition` list, under the code this
     /// crate answers — a renamed const would fall out of the directive silently.
     #[test]

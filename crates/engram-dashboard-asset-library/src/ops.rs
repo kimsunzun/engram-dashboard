@@ -6,7 +6,7 @@
 //! ## Rules (invariants)
 //!
 //! - **Per item** (ADR-0409): every given path answers on its own ([`Outcome`]) — done, skipped ([`Skip`]: a path given
-//!   with a folder above it — only the folder counts —, a move into the folder it is in, a taken name with `onConflict`
+//!   with a folder above it — only the folder counts —, a move into the folder it is in, a taken name with `on_conflict`
 //!   skip), a conflict, or failed with a code — and what finished stays finished. Refused
 //!   per item before the hold: a spelling that is no library path or holds a dot or temp name (a path under `.trash`
 //!   included) `item-path-invalid`, a mount's top `virtual-root-read-only`, the built-in mount `mount-read-only`, a mount
@@ -24,8 +24,8 @@
 //!   name: its skill folder or itself — ADR-0339) that are not deleted themselves, and the agents attaching a deleted path
 //!   (never for a `SKILL.md`); its digest pins those and the items. Referenced and no `yes` → one
 //!   [`DELETE_UNCONFIRMED`] for the call with the references and the two forms; `yes` keeps them (they read as not
-//!   found until restored); `yes` + `detachRefs` must carry the plan's digest; `detachRefs` without `yes` is no `yes`
-//!   (ADR-0339 M108 — every delete item is of a detachable shape, so a delete never refuses `detachRefs`). The same
+//!   found until restored); `yes` + `detach_refs` must carry the plan's digest; `detach_refs` without `yes` is no `yes`
+//!   (ADR-0339 M108 — every delete item is of a detachable shape, so a delete never refuses `detach_refs`). The same
 //!   judgement runs again inside the hold before any disk step: a plan that changed answers the conflict again with the
 //!   fresh plan, nothing written (ADR-0405 decision 1 · ADR-0409 decision 2). In the hold, per mount: `.trash` checked and
 //!   made without following once (unusable → every item there `trash-unusable`), one bundle id per operation (a taken id
@@ -34,7 +34,7 @@
 //!   published after the trash moves (a failed publication leaves the moves standing — the bundle reads by its files), a
 //!   bundle that received no root pruned. Then the
 //!   catalog range leaves and the parent folder is re-classified from disk ([`LibraryService::reclassify`] — a folder
-//!   that lost its `SKILL.md` is no skill at once). With `detachRefs`, kept to the confirmed plan (the hold's
+//!   that lost its `SKILL.md` is no skill at once). With `detach_refs`, kept to the confirmed plan (the hold's
 //!   judgement): its preset files that still list a path that went drop those lines (a preset inside an item that did
 //!   not go, or trashed with the operation, is not rewritten), then the change number is raised, then its agents that
 //!   still attach a deleted preset path are written without it (`ProfileEditPort::set_attachments`, one by one under the
@@ -50,19 +50,19 @@
 //!   `.trash` checked without following (unusable `trash-unusable`, nothing of the item moved — judged again in the
 //!   hold before the first rename). A lone `SKILL.md` (the catalog's `SkillFile`) that the move takes from directly
 //!   under its skill folder — into another folder, its own subfolder included, or to a name that is no `SKILL.md` —
-//!   follows the delete's `yes` / `detachRefs` / digest rule with [`SKILL_UNCONFIRMED`], judged at the call and again
+//!   follows the delete's `yes` / `detach_refs` / digest rule with [`SKILL_UNCONFIRMED`], judged at the call and again
 //!   in the hold; so does a skill folder a merge would leave without its `SKILL.md` (the file moved, an entry left
 //!   behind — planned from no-follow listings and stats at the call and again in the hold, only for an item holding a
 //!   skill, and detached only when the folder is no skill after the disk step and did not merge away whole); a merge
 //!   moves a skill's `SKILL.md` last and keeps it (left `skill-unconfirmed`) when an entry stayed behind that the
-//!   hold's plan did not name, unless it would stay anyway (it then answers its own reason); `detachRefs` on a call
+//!   hold's plan did not name, unless it would stay anyway (it then answers its own reason); `detach_refs` on a call
 //!   with none of these is [`DETACH_REFS_INVALID`] (ADR-0339 M108 · M110). In the hold, per item: both mounts judged
 //!   from the recorded state, the item and the destination admitted (ADR-0365), the item stat'ed without following, the
 //!   destination folder a real folder (never made — ADR-0335 decision 7), then one no-replace rename — an item whose
 //!   source an earlier item of the call displaced or moved another entry onto fails `not-found`. A taken name without
-//!   `onConflict` is the item's conflict `name-exists` (a rename never has one); same-name folders merge entry by entry
+//!   `on_conflict` is the item's conflict `name-exists` (a rename never has one); same-name folders merge entry by entry
 //!   by the same rules and a source folder emptied so is removed empty-only (one left holding anything stays; one whose
-//!   removal fails is named in `left`); `skip` leaves the entry; `keepBoth` takes `name (2)`, `name (3)` …; `overwrite`
+//!   removal fails is named in `left`); `Skip` leaves the entry; `KeepBoth` takes `name (2)`, `name (3)` …; `Overwrite`
 //!   moves the entry there into its mount's `.trash` (bundle, record — a path displaced twice goes into a second
 //!   bundle; a file onto a folder or the reverse [`KIND_MISMATCH`]) and renames the item onto the name, renaming the
 //!   displaced entry back when that fails. The catalog follows in the same hold: the displaced ranges leave, each moved
@@ -72,7 +72,7 @@
 //!   gained or lost at once). Then the references, without a plan confirmation (ADR-0409 decision 4): every preset file
 //!   of every readable mount that names a moved path is rewritten whole with the old → new mapping, its pairs applied
 //!   in move order (a touched list keeps the first place of each path — ADR-0339; a merge's emptied source folder maps
-//!   only itself, and only when its `SKILL.md` became the destination's), with `detachRefs` the confirmed plan's files
+//!   only itself, and only when its `SKILL.md` became the destination's), with `detach_refs` the confirmed plan's files
 //!   also drop the lines naming the gone skill (no agent step); then the change number is raised and the agents are
 //!   re-pointed once through `ProfileEditPort::rewrite_preset_paths` over the current roster. The answer carries the
 //!   mapping (each row marked whole-range or exact, to apply in order), the files written and skipped and the git
@@ -82,7 +82,7 @@
 //!   items cross (an empty folder made under a base temp name beside the item, renamed without replacing into the
 //!   destination folder, removed empty-only; `CrossesDevices` = another volume, any other failure fails the item). For
 //!   such an item both mounts' `.trash` must be usable (`trash-unusable`), and a taken destination name is answered
-//!   before any copy — no `onConflict` `name-exists`, skip skipped, a kind mismatch under overwrite, and a same-name
+//!   before any copy — no `on_conflict` `name-exists`, skip skipped, a kind mismatch under overwrite, and a same-name
 //!   folder, which is never merged across volumes, [`CROSSES_VOLUMES`]. After the plan, outside every lock, the item is
 //!   copied into a staging under a base temp name in the destination folder (`LibraryStore::copy_tree`: create-new,
 //!   every entry, a link inside refuses [`LINKS_INSIDE`] with nothing copied, tags before bytes, each file read only
@@ -91,7 +91,7 @@
 //!   ([`TARGET_MOUNT_CHANGED`]), both `.trash` judged again, the item listed again and compared entry by entry and its
 //!   racy files hashed again ([`SOURCE_CHANGED`], the item gone included) — a change keeps both, the staging named by
 //!   its virtual path as made (`staging`) and its disk path (`staging_disk`), and so does a hash that cannot be read —;
-//!   the staging placed by the no-replace rename and `onConflict` as an item on one volume (overwrite: the entry there
+//!   the staging placed by the no-replace rename and `on_conflict` as an item on one volume (overwrite: the entry there
 //!   into its trash first, renamed back when the staging cannot take its name); then the original into its own mount's
 //!   `.trash` (the answer's `original`), and the pair followed by the catalog and the references as on one volume. A
 //!   copy that failed part-way (the answer naming the entry it stopped at — `not_copied`), or a staging that does not
@@ -117,12 +117,12 @@
 //!   except that a same-name folder is not merged [`COPY_MERGE_REFUSED`]. A copy into its item's own folder (by path
 //!   key, else the folders' identities, else their canonical paths, else — nothing answering — taken as its own folder;
 //!   judged once here after the generation the hold compares was read) takes the copy name instead (` - Copy`, then ` -
-//!   Copy (2)` … — [`copy_name`], whatever `onConflict` says). A stale `root_generation` refuses before anything is
+//!   Copy (2)` … — [`copy_name`], whatever `on_conflict` says). A stale `root_generation` refuses before anything is
 //!   copied. Then the staging copy as a move across volumes makes it ([`LINKS_INSIDE`], `not_copied`), the waiting
 //!   count and the ticket. In the hold: the root generation (the whole call, as a move's: every staging trashed or kept
 //!   and named in `stagings`), each item's root generation since its copy ([`TARGET_MOUNT_CHANGED`], kept), a failed
 //!   copy (a staging row), the destination checked as a move's and its `.trash` judged again; then the no-replace
-//!   rename of the staging onto its name — `onConflict` as a move across volumes, an overwrite's entry into its mount's
+//!   rename of the staging onto its name — `on_conflict` as a move across volumes, an overwrite's entry into its mount's
 //!   `.trash` first — or onto the first free copy name; a staging that does not take its place goes into the
 //!   destination mount's `.trash` as a staging row (skipped: [`Skip::TakenDuringCopy`]). The folder a copy landed in is
 //!   re-classified in the hold and an overwrite's displaced range leaves the catalog; the copy itself enters the
@@ -241,7 +241,7 @@ pub const KIND_MISMATCH: &str = "kind-mismatch";
 // ADR-0409 decision 2
 pub const SKILL_UNCONFIRMED: &str = "skill-unconfirmed";
 
-/// The code of `detachRefs` on a move or rename with no item of a detachable shape — no lone `SKILL.md` leaving its
+/// The code of `detach_refs` on a move or rename with no item of a detachable shape — no lone `SKILL.md` leaving its
 /// skill folder and no merge leaving a skill folder without its `SKILL.md` (`InvalidArgument`, `args` = `{}`).
 // ADR-0339 M108
 pub const DETACH_REFS_INVALID: &str = "detach-refs-invalid";
@@ -269,7 +269,7 @@ pub const SOURCE_CHANGED: &str = "source-changed";
 // ADR-0409 decision 13
 pub const TARGET_MOUNT_CHANGED: &str = "target-mount-changed";
 
-/// The code of a copy onto a same-name folder (`args` = `{path, to}`) under any `onConflict` — that item's conflict,
+/// The code of a copy onto a same-name folder (`args` = `{path, to}`) under any `on_conflict` — that item's conflict,
 /// nothing copied: a copy is not merged into a folder (as a move across volumes is not — ADR-0416 decision 5).
 // ADR-0416
 pub const COPY_MERGE_REFUSED: &str = "copy-merge-refused";
@@ -304,9 +304,9 @@ pub enum Skip {
     Inside(String),
     /// A move into the folder it is already in, or a rename to its own spelling (P5).
     InPlace,
-    /// Something is at this destination path and `onConflict` said skip.
+    /// Something is at this destination path and `on_conflict` said skip.
     Taken(String),
-    /// Something came to this destination path during a staging copy (a move across volumes, or a copy) and `onConflict`
+    /// Something came to this destination path during a staging copy (a move across volumes, or a copy) and `on_conflict`
     /// said skip: the copy's staging, named as a failed item names it (`staging_row`, or `staging` · `staging_disk` · `staging_kept`).
     TakenDuringCopy { path: String, staging: Value },
 }
@@ -331,7 +331,7 @@ pub struct DeleteItem {
 pub struct DeleteAnswer {
     /// In the order given.
     pub items: Vec<DeleteItem>,
-    /// With `detachRefs`: the deleted paths whose references were removed (the items that went).
+    /// With `detach_refs`: the deleted paths whose references were removed (the items that went).
     pub detached: Vec<String>,
     /// The preset files written (lines dropped), in walk (path) order.
     pub written: Vec<String>,
@@ -437,7 +437,7 @@ pub struct MoveAnswer {
     /// destination's. `(old, new, exact)`: `exact` =
     /// only `old` itself maps, nothing below it (such an emptied folder).
     pub mapping: Vec<(String, String, bool)>,
-    /// With `detachRefs`: the skill folders whose references were removed.
+    /// With `detach_refs`: the skill folders whose references were removed.
     pub detached: Vec<String>,
     /// The preset files written, in walk (path) order.
     pub written: Vec<String>,
@@ -615,7 +615,7 @@ impl Referrers {
         )
     }
 
-    /// Whether the delete may go on: nothing referenced, plain `yes`, or `yes` + `detachRefs` carrying this digest
+    /// Whether the delete may go on: nothing referenced, plain `yes`, or `yes` + `detach_refs` carrying this digest
     /// (`detach` without `yes` is no `yes` — ADR-0339 M108).
     fn confirmed(&self, yes: bool, detach: bool, plan_digest: Option<&str>) -> bool {
         !self.referenced()
@@ -810,7 +810,7 @@ enum Placement {
     Merged {
         emptied: bool,
     },
-    /// Taken, and `onConflict` said skip: what is at this path.
+    /// Taken, and `on_conflict` said skip: what is at this path.
     Skipped(LibPath),
     Conflict(Reason),
     Failed(Reason),
@@ -1591,7 +1591,7 @@ impl LibraryService {
         Ok(touched)
     }
 
-    /// The reference fix of a delete with `detachRefs` (module header) over the targets that went, kept to what the
+    /// The reference fix of a delete with `detach_refs` (module header) over the targets that went, kept to what the
     /// hold's judgement (`judged`, the confirmed plan) named: of its preset files those that still list a path that went,
     /// of its agents those that still attach a deleted preset path.
     #[allow(clippy::too_many_arguments)]
@@ -2209,7 +2209,7 @@ impl LibraryService {
     }
 
     /// Renames the item `path` to `name` in its folder (module header) — a move to a new name: a taken name is the
-    /// item's conflict `name-exists` (no `onConflict`); a case-only rename goes through the no-replace rename like any
+    /// item's conflict `name-exists` (no `on_conflict`); a case-only rename goes through the no-replace rename like any
     /// other. `yes` / `detach_refs` / `plan_digest` as [`LibraryService::move_items`]'s, for a skill's `SKILL.md`
     /// renamed to a name that no longer makes its folder a skill.
     ///
@@ -2926,7 +2926,7 @@ impl LibraryService {
     }
 
     /// Sets each request's `leaves` (ADR-0339 M110 — a merge that takes a skill's `SKILL.md` and leaves its folder
-    /// behind is a `SKILL.md` moved out): with `onConflict`, a folder item whose destination is a folder of its name
+    /// behind is a `SKILL.md` moved out): with `on_conflict`, a folder item whose destination is a folder of its name
     /// merges, and each skill folder in it (`skills`: folder key → (folder path, `SKILL.md` name)) whose `SKILL.md` the merge would
     /// move while the folder keeps an entry is named by that file — judged from no-follow listings and stats as
     /// [`LibraryService::merge`] places entries ([`LibraryService::plan_merge`]). An item with no skill of `skills` at
@@ -6149,7 +6149,10 @@ mod tests {
             Some(&digest_of(&args)),
             None,
         ));
-        assert_eq!(code, DELETE_UNCONFIRMED, "detachRefs without yes is no yes");
+        assert_eq!(
+            code, DELETE_UNCONFIRMED,
+            "detach_refs without yes is no yes"
+        );
 
         let before = world.text("lib/P.yaml");
         let answer = world
@@ -6177,7 +6180,7 @@ mod tests {
         );
     }
 
-    // ADR-0339 M105 · ADR-0409: detachRefs drops the lines of every deleted path (a folder: everything inside), leaves a
+    // ADR-0339 M105 · ADR-0409: detach_refs drops the lines of every deleted path (a folder: everything inside), leaves a
     //   preset trashed in the same operation as it is, and hands only the deleted preset paths to the port.
     #[test]
     fn a_delete_with_detach_refs_drops_every_deleted_path_and_hands_only_preset_paths_to_the_port()
@@ -7308,7 +7311,7 @@ mod tests {
         assert_eq!(world.kind("library/up/t"), None);
     }
 
-    // ADR-0409 (P5): a taken name without onConflict is that item's conflict and nothing is replaced; a child given
+    // ADR-0409 (P5): a taken name without on_conflict is that item's conflict and nothing is replaced; a child given
     //   with its folder is skipped; a move into the folder it is in is skipped; into itself is refused.
     #[test]
     fn a_move_answers_per_item_by_the_explorer_rules() {
@@ -7738,7 +7741,7 @@ mod tests {
     }
 
     // ADR-0339 M110 · ADR-0409 decision 2: a referenced skill's SKILL.md moved out of it — into its own subfolder too —
-    //   asks first with the plan; detachRefs without yes is no yes; plain yes keeps the references; yes + detachRefs +
+    //   asks first with the plan; detach_refs without yes is no yes; plain yes keeps the references; yes + detach_refs +
     //   the digest moves it and drops the preset lines naming the folder, no agent step.
     #[test]
     fn a_skill_md_leaving_its_referenced_skill_asks_first_and_detaches_only_with_the_digest() {
@@ -7772,7 +7775,7 @@ mod tests {
             Some(&digest_of(&args)),
             None,
         ));
-        assert_eq!(code, SKILL_UNCONFIRMED, "detachRefs without yes is no yes");
+        assert_eq!(code, SKILL_UNCONFIRMED, "detach_refs without yes is no yes");
         for digest in [None, Some("not-the-plans-digest")] {
             let (code, _) = refused(world.svc.move_items(
                 &["library/s/SKILL.md"],
@@ -7785,7 +7788,7 @@ mod tests {
             ));
             assert_eq!(
                 code, SKILL_UNCONFIRMED,
-                "detachRefs needs the plan's digest: {digest:?}"
+                "detach_refs needs the plan's digest: {digest:?}"
             );
         }
         assert!(world.there("lib/s/SKILL.md"));
@@ -7844,7 +7847,7 @@ mod tests {
         );
     }
 
-    // ADR-0339 M108: detachRefs on a move with no lone SKILL.md leaving its skill is refused whole, nothing moved.
+    // ADR-0339 M108: detach_refs on a move with no lone SKILL.md leaving its skill is refused whole, nothing moved.
     #[test]
     fn detach_refs_on_a_move_without_a_skill_md_leaving_its_skill_is_invalid() {
         let world = World::new();
@@ -8336,7 +8339,7 @@ mod tests {
 
     // ADR-0339 M110 · ADR-0409 decision 2: a merge that takes a referenced skill's SKILL.md and leaves its folder behind
     //   (an entry skipped) asks like a SKILL.md moved out — the conflict with the plan, nothing moved; plain yes moves
-    //   and keeps the reference; yes + detachRefs + the digest moves and drops the line.
+    //   and keeps the reference; yes + detach_refs + the digest moves and drops the line.
     #[test]
     fn a_merge_leaving_a_referenced_skill_without_its_skill_md_asks_first() {
         let setup = || {
@@ -9276,7 +9279,7 @@ mod tests {
     }
 
     // ADR-0409 decision 12: a same-name folder on another volume is not merged into — that item's conflict, nothing
-    //   copied; a taken name without onConflict is answered before any copy too.
+    //   copied; a taken name without on_conflict is answered before any copy too.
     #[test]
     fn a_move_across_volumes_onto_a_taken_name_answers_before_any_copy_and_never_merges() {
         let world = World::new();
@@ -9884,7 +9887,7 @@ mod tests {
     }
 
     // ADR-0409 decision 3 (UD3): a copy into its item's own folder is named ` - Copy`, then ` - Copy (2)` — before a
-    //   file's extension, after a folder's name — whatever `onConflict` says; the item itself is never replaced.
+    //   file's extension, after a folder's name — whatever `on_conflict` says; the item itself is never replaced.
     #[test]
     fn a_copy_into_its_own_folder_is_named_copy_then_copy_2_whatever_on_conflict_says() {
         let world = World::new();

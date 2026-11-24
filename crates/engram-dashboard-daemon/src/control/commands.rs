@@ -1,8 +1,9 @@
 //! The table of commands the daemon can execute directly — the only place real dependencies come in (rule T-1).
 //!
-//! Three surfaces call this table through the one [`call_daemon_command`], so none skips the entrance check (ADR-0157): the family route
+//! Three surfaces call this table through the one [`call_daemon_command`], so none skips its checks: the family route
 //! (`/control/agent`, `agent.rs`) · the full-name route (`/control/call`, `catalog.rs`) · command bus delivery stage 1 (`command_delivery`).
-//! The same entrance refuses the shell-only commands ([`SHELL_ONLY`]) to the two routes, which carry no connection (ADR-0419).
+//! The entrance makes three checks — the arguments (ADR-0157), the input lease of [`INPUT_AFFECTING`] commands (ADR-0231), and the
+//! shell-only gate: a [`SHELL_ONLY`] command is refused to the two routes, which carry no connection (ADR-0419).
 //! If the table is not plugged into the slot, the two routes are 503 and delivery is a stage-1 miss.
 //! Declarations are not here: the contracts of `agent.*`·`usage.*`·`library.*`·`preset.*` belong to agent (ADR-0155 decision 1); this file plugs the
 //! daemon's real things (manager · roster notification fanout · usage service · library service) into them. Daemon-own commands (`mail.*`)
@@ -83,7 +84,7 @@ pub fn make_daemon_table(
 /// The daemon command table — the `agent.*` table plus the material for checking input-affecting commands ([`INPUT_AFFECTING`]) (roster · lease port) as one value.
 ///
 /// One value, since separate plugging would allow a table with an empty lease port, skipping the lease without a signal; all three enter the slot together.
-/// No door takes out the inner [`CommandTable`]: a second entrance skipping [`call_daemon_command`] would drop both checks (ADR-0157 arguments · ADR-0231 lease).
+/// No door takes out the inner [`CommandTable`]: a second entrance skipping [`call_daemon_command`] would drop all three checks (ADR-0157 arguments · ADR-0231 lease · ADR-0419 shell-only gate).
 // ADR-0231
 pub struct DaemonTable {
     table: CommandTable,
@@ -737,7 +738,8 @@ mod tests {
     /// multi-word resolution (`agent.resolve` — ADR-0307) are outside `CLI_AGENT_VERBS`, called via the bus and generic calls (`engram <name> …`). A
     /// table name not in the list grew without deciding on a CLI verb, so this stops. `usage.*`, `library.*` and `preset.*` are not the `agent`
     /// family and never reach `/control/agent`; they, the four agent-preset commands, `agent.setWorkspace` and
-    /// `agent.duplicate` are reached by full name (ADR-0386).
+    /// `agent.duplicate` are reached by full name (ADR-0386) — except the shell-only `library.emptyTrash`, which only the
+    /// socket runs (ADR-0419).
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {

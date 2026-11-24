@@ -913,7 +913,7 @@ struct ControlCatalogState {
 ///   - Fixed = executor hazard. `CommandRoster::entries` takes a blocking mutex, which parks an async worker instead of yielding; the blocking pool now bears the wait, matching the sibling (`control_agent_handler`).
 ///   - Not fixed = lock hold time. `entries` still clones the whole registry (cap 4096 × help 4 KiB) while holding the mutex shared with command delivery (`OwnerLookupSource::lookup`) and connection cleanup, so this route still contends with delivery — what changed is who waits.
 ///     The cloning discipline is the registry module's (the "known cost" in the `command_roster` header).
-/// `decls()` rebuilds `help` on every call (tools crate `CommandTable::decls`) — leave it: the own table has 5 entries, the cost is dominated by the registry side, and memoization belongs to that crate; if the table grows, measure there.
+/// `decls()` rebuilds `help` on every call (tools crate `CommandTable::decls`) — leave it: the own table holds only the daemon's declared commands (a few dozen), the cost is dominated by the registry side, and memoization belongs to that crate; if the table grows, measure there.
 async fn control_commands_handler(
     axum::extract::State(state): axum::extract::State<ControlCatalogState>,
     identity: Option<axum::Extension<BoundIdentity>>,

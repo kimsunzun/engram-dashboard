@@ -24,7 +24,8 @@ impl Effect {
 /// the registration ([`CommandDecl::deadline`]) and in the schema entry ([`spec_item_json`]).
 ///
 /// `Ordinary` = the shared waits (the daemon's default seat · the CLI's default wait). `Launch` = the command creates
-/// and starts an agent or starts / resumes one: the daemon's seat and the CLI's wait are derived from the launch budget
+/// and starts an agent or starts / resumes one, or is a library file command that can outlast the ordinary wait
+/// (ADR-0419): the daemon's seat and the CLI's wait are derived from the launch budget
 /// (agent `types.rs`). The shell does not classify a socket envelope — its wait for a launch-class `Command{envelope}`
 /// stays the shared one until a sender needs it (ADR-0369). The daemon sizes the seat by this class, never by the name;
 /// a client reads it from the schema entry.

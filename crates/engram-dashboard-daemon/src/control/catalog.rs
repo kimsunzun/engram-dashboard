@@ -7,6 +7,8 @@
 //! `help` is not opened (hard constraint): merge and list carry it byte for byte — no parsing, validation or branching (ADR-0156).
 //!
 //! The list's `callable` and the outcome of [`handle_call`] must come from the same fact (the only machine-branchable field); that fact is in [`handle_list`].
+//! The one exception is the shell-only names the list omits (its `omitted` — ADR-0419): [`handle_call`] still runs them into the
+//! entrance, which answers `UNSUPPORTED` `shell-only`, not `UNKNOWN_COMMAND`.
 //!
 //! Someone else's names go to the bus (ADR-0160): a name not in the daemon's own table with an owner attached becomes [`CallOutcome::Relay`]
 //! for the caller to deliver — this file is blocking, the round trip is async.
@@ -352,9 +354,11 @@ const MESSAGE_PREVIEW_CHARS: usize = 2048;
 
 /// The only recovery path this entrance knows — only the discovery list knows callable names and their fields.
 ///
-/// No made-up CLI verbs: the daemon owns the route, not CLI spelling, and no CLI verb renders this list yet.
-/// Do not revert to `engram help`: that screen is static (`control/help.rs`), gives two family names and no field, so names outside `agent.*`
-/// cannot appear — it would send exactly the cases this guidance exists for (unknown name · wrong field) somewhere that cannot answer.
+/// No CLI spelling: the daemon owns the route, not the CLI's spelling — `engram commands` renders this list, and the CLI adds its own
+/// line naming it after an `UNKNOWN_COMMAND` (ADR-0419).
+/// Do not revert to `engram help`: those screens are hand-written text (`control/help.rs`) — they cover only the names written into
+/// them (no client-registered name) and are not the schema, while this list holds every callable name with its fields. Pointing there
+/// would send exactly the cases this guidance exists for (unknown name · wrong field) somewhere that cannot fully answer.
 /// ADR-0132 decision 4 (discovery only through help) is not the basis here: it chose a static family screen instead of listing commands, the opposite of this runtime list.
 /// The path string must not diverge from the route constant (the test below checks).
 // ADR-0156 (what carries the fields is the opaque `help` blob, and the surface that hands that blob down is this list)

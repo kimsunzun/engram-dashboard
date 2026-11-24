@@ -1,9 +1,9 @@
 //! `agent.*` commands — live next to the code that works with **declaration and body as one set** (`AgentManager`) (ADR-0155).
 //!
-//! ★This table is the real entry of the control verbs — **two** surfaces★: the CLI's `/control/agent` route (finds `{verb}` as
-//!   `agent.<verb>`) and the envelope the client issues on the command bus. Both pass through the daemon's one common entry
-//!   (daemon `control/commands.rs`), so this file's return shapes, error codes and notification counts are exactly the response of `engram
-//!   agent …` and the answer the LLM receives on the bus.
+//! ★This table is the real entry of the control verbs — **three** surfaces★: the CLI's `/control/agent` route (finds `{verb}` as
+//!   `agent.<verb>`), its full-name route `/control/call` (`engram <name> …`) and the envelope the client issues on the command bus.
+//!   All pass through the daemon's one common entry (daemon `control/commands.rs`), so this file's return shapes, error codes and
+//!   notification counts are exactly the response of `engram agent …` / `engram <name> …` and the answer the LLM receives on the bus.
 //! ★Hosted by the daemon, declared by the core★ (ADR-0029 + TRD §2-3).
 //!
 //! ★`usage.*` (the two usage-limit verbs) are declared here too — their bodies are not★: this crate produces the vocabulary
@@ -13,7 +13,9 @@
 //! ★`library.*`, `preset.*` and the agent-preset commands are declared here too — their bodies are asset-library's★: this
 //!   crate owns the command vocabulary (ADR-0155 decision 1 · ADR-0311); the handlers and the third port,
 //!   [`LibraryCommandHost`], are in `library_commands.rs` (one `declare_commands!` block per module, so the
-//!   declarations stay in this block). `agent.new`'s `presets` are judged through that port too.
+//!   declarations stay in this block). `agent.new`'s `presets` are judged through that port too. `library.emptyTrash` is
+//!   declared in the same block but is shell only ([`SHELL_ONLY`]): the daemon's entrance refuses it to every control route
+//!   and the control route's list omits it (ADR-0419).
 //!
 //! Entry points: [`make_table`](fn.make_table.html) (assembly) · [`AgentCommandHost`](trait.AgentCommandHost.html) (injection seam) ·
 //!   [`UsageCommandHost`](trait.UsageCommandHost.html) (usage port) · [`LibraryCommandHost`] (library port).
@@ -1565,9 +1567,12 @@ declare_commands! {
     } errors [CONFLICT];
 
     // ADR-0322 decision 1
+    // ADR-0326 decision 4
     // ADR-0408
     // ADR-0419: shell only — named in `SHELL_ONLY`, so the daemon refuses it from every control route and leaves it out
-    //   of the control route's list; the library screen sends it once the user has confirmed.
+    //   of the control route's list. Only the library screen may send it, from the user's gesture after the permanent-delete
+    //   modal; no shell or webview command may wrap it — an agent reaches shell commands through `/control/call` relaying
+    //   (ADR-0160).
 
     /// Removes trash rows for good — nothing goes to an OS Recycle Bin: `bundles` empties each bundle of exactly the rows
     /// the trash view listed for it (what it did not list stays, with the record), `rows` deletes single rows for good.

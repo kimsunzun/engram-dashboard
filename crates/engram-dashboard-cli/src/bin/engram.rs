@@ -60,6 +60,9 @@
 //!   a string if the slot is a string. The call path first fetches the discovery list, reads that command's
 //!   schema, and moves values only by the declared type (`bind_invoke_args`). An unknown flag is rejected **without a round trip**,
 //!   listing all declared slots.
+//! ★A name the list does not hold is still called★ (ADR-0419): it goes out with no schema (every value a string) and the daemon
+//!   answers — its unknown-name refusal for a typo, its `shell-only` refusal for a name it leaves out of the list on purpose. Only
+//!   when the list read dropped rows does the CLI refuse the name itself (the name may be one of those rows).
 //! ★The `help` blob is opaque (ADR-0156)★: a client-registered entry **may be arbitrary text, not JSON**; one unreadable blob does not
 //!   sink the list — that line keeps only its name.
 
@@ -71,8 +74,9 @@
 //!   Order = shape parsing → credentials → (if `--body-stdin`) stdin → request.
 //! ★stdout is not guaranteed to be JSON★: a non-2xx body also passes through as is (a 401 gives an empty line; a proxy can produce HTML)
 //!   **on purpose** — a rejection body may carry correction JSON the sending agent parses to self-correct.
-//!   Only rejections this CLI emits **itself** (BAD_ARGS·NO_TOKEN·UNKNOWN_COMMAND·transport failure·PROTOCOL_MISMATCH) are always envelope
-//!   JSON, and the help and `commands` screens are plain text. Decide on the **exit code**, not the stdout shape.
+//!   Only rejections this CLI emits **itself** (BAD_ARGS·NO_TOKEN·transport failure·PROTOCOL_MISMATCH, and UNKNOWN_COMMAND for
+//!   `commands <name>` of an unlisted name or a call whose list read dropped rows) are always envelope JSON, and the help
+//!   and `commands` screens are plain text. Decide on the **exit code**, not the stdout shape.
 //! ★A failure to reach the daemon takes one path whatever the command (`fail_unreached`)★: connect · write · read · silence limit ·
 //!   truncation and the 404 for an unknown route print the same envelope + exit 1. The 404 is `PROTOCOL_MISMATCH`:
 //!   the daemon returns a 404 only for a path outside its list, with an empty body, so the daemon is a different build from this CLI.
@@ -1814,6 +1818,8 @@ fn required_keys(schema: &serde_json::Value) -> Vec<String> {
 /// If rows were dropped, one of them **may have been the name being looked for** (a registration missing `callable`, like
 ///   `{"name":"slot.assign","help":"x"}`, is enough). Asserting "there is no such name" would make the caller (LLM) give up for good
 /// a command that exists — all the more as this wording goes in a machine-read envelope. We say only what we know.
+/// Its callers: `commands <name>`, and a call only when the list read dropped rows — any other unlisted name is posted and the
+/// daemon answers it ([`run_invoke`]).
 fn unknown_command_hint(name: &str, skipped: usize) -> String {
     if skipped > 0 {
         return format!(

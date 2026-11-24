@@ -19,7 +19,7 @@ Editing rules — break any one and the screen breaks:
   {tool} help agent     Agents. Create, start and rearrange them
   {tool} help window    Windows · tabs · splits, placing agents in them · moving tabs · reading the layout (layout.get), usage limits (usage.*), restoring the screen after a crash (restore.*)
   {tool} help settings  Settings. Theme · chat screen style (settings.*) · per-window theme (window.setTheme)
-  {tool} help library   Library. Mounts · instruction · skill · settings · preset files and attaching presets to agents
+  {tool} help library   Library. Mounts · instruction · skill · settings · preset files (move · copy · delete · restore) and attaching presets to agents
 
 Run a command = `{tool} <name> --flag value`. All names: `{tool} commands`; one command's arguments and return: `{tool} commands <name>`.
 ## mail

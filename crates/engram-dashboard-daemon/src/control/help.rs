@@ -681,8 +681,9 @@ mod tests {
         }
     }
 
-    /// The text guard (ADR-0419): no rendered help screen, not the raw help file and not the priming names `emptyTrash` — an agent learns the
-    /// shell-only command from none of them (the library screen says emptying is the user's, without the name).
+    /// The text guard (ADR-0419): no rendered help screen, not the raw help file and not the priming names
+    /// `emptyTrash` — an agent learns the shell-only command from none of them (the library screen says emptying is
+    /// the user's, without the name).
     // ADR-0419
     #[test]
     fn no_help_screen_and_not_the_priming_names_the_shell_only_command() {
@@ -705,6 +706,27 @@ mod tests {
                     !text.contains(verb),
                     "the shell-only {verb} is named: {text}"
                 );
+            }
+        }
+    }
+
+    /// The root screen's library line and the priming's pointer line name the file operations (move · copy · delete ·
+    /// restore), so an agent asked to move or delete a library file finds the library screen from either (ADR-0419).
+    // ADR-0419
+    #[test]
+    fn the_root_line_and_the_priming_pointer_name_the_library_file_operations() {
+        let _env = env_guard();
+        let root = screen_of(&HelpSource::new(repo_root()), None);
+        let priming = std::fs::read_to_string(repo_root().join("builtin/instructions/priming.md"))
+            .expect("the priming file exists");
+        let entry = format!("{CLI_EXE_NAME} help {HELP_TOPIC_LIBRARY} ");
+        for text in [&root, &priming] {
+            let line = text
+                .lines()
+                .find(|line| line.contains(&entry))
+                .unwrap_or_else(|| panic!("no `{entry}` line: {text}"));
+            for word in ["move", "copy", "delete", "restore"] {
+                assert!(line.contains(word), "{word} on the library line: {line}");
             }
         }
     }

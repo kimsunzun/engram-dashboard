@@ -50,7 +50,7 @@ Rules to follow when you create or change a command that an LLM calls through th
 - Is there an argument left that takes only an id · does each kind of word have its own argument (§1-2)?
 - Does it resolve an agent name with the daemon resolver's semantics (§1-2)?
 - Mark an argument that takes an agent with `#[agent_ref]` — the daemon converts it to an id before relaying (ADR-0308). For a marked command, list `NOT_FOUND` · `CONFLICT` in `errors` (if the daemon cannot resolve it, it answers with those codes — `lint_spec` catches this).
-- Does it launch an agent (create and start · start · resume)? Declare it `#[deadline(Launch)]` — the daemon seat and the CLI wait then follow the launch budget instead of the shared 7 s / 10 s (ADR-0369). Only Rust declarations carry the class; a webview command is always ordinary.
+- Does it launch an agent (create and start · start · resume), or is it a library file operation that can run long (a move, rename, copy, delete or restore, or emptying the trash)? Declare it `#[deadline(Launch)]` — the daemon seat and the CLI wait then follow the launch budget instead of the shared 7 s / 10 s (ADR-0369 · ADR-0419). Only Rust declarations carry the class; a webview command is always ordinary.
 - Do the candidates go into the ambiguous · missing error (§1-3)?
 - Does the response carry what the next call needs (a new id · the changed layout) (§1-4)?
 - Did you write the usage in `prompts/engram-help.md` — the usage instructions the LLM reads are there.

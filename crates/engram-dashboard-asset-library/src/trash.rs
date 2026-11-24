@@ -1115,7 +1115,7 @@ impl MountTrash {
 }
 
 impl LibraryService {
-    /// The trash view (`library.trash` material — ADR-0409 M15): every registered mount's bundles, read from disk with
+    /// The trash view (`library.listTrash` material — ADR-0409 M15): every registered mount's bundles, read from disk with
     /// no library lock and no ticket. The mount list is read once in a brief read lock; each mount's `.trash` is read
     /// by [`view_mount`] on a bounded job ([`BoundedIo::run_all`]) on one read budget ([`crate::folder::IO_LIMIT`]),
     /// so a mount that does not answer is named, not waited for. A mount held as overlapping another (ADR-0400 decision
