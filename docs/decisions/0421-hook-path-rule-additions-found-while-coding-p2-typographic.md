@@ -1,7 +1,7 @@
 # ADR-0421: Hook path rule additions found while coding P2: typographic double quotes, a dollar ending the hook folder name, non-UTF-8 folders; cmd percent left to P3
 
-- 상태: 확정 (2026-11-25, 근거: main decisions during step 22 P2 coding, after the P2 code review (risk axis and lead) · measurements in PowerShell 7.5.5 and Git Bash 5.2 on the exact strings the rewrite writes)
-- 관련: Amends ADR-0420 (decision 3 path rule) · ADR-0359 (Engram checks only what its own assembly breaks) · TRD `docs/process/S25-preset-library/trd-hook-components.md` §2.4 · `docs/research/hook-loading-claude-codex-2026-11-24.md` (which shell each CLI runs hooks in)
+- 상태: 확정 (2026-11-25, 근거: main decisions during step 22 P2 coding, after the P2 code review (risk axis and lead) · measurements in PowerShell 7.5.5 and Git Bash 5.2 on the exact strings the rewrite writes) · 부분 폐기 by ADR-0422 (decision 4 cmd percent)
+- 관련: Amends ADR-0420 (decision 3 path rule) · ADR-0359 (Engram checks only what its own assembly breaks) · TRD `docs/process/S25-preset-library/trd-hook-components.md` §2.4 · `docs/research/hook-loading-claude-codex-2026-11-24.md` (which shell each CLI runs hooks in) · Amended by ADR-0422 (decision 4 cmd percent)
 
 ## 맥락
 ADR-0420 decision 3 lists the characters a hook folder path may not hold when a definition uses the `${CLAUDE_PLUGIN_ROOT}` placeholder: a backtick anywhere, a `$` that is not the last character of a path component, and off Windows also `"`, `\` or a control character (`hook-path-unsafe`). Its premise, written out in TRD §2.4, is that `$(`, `${`, `$name`, backticks and the special parameters are the only ways to run code inside double quotes in Git Bash and PowerShell 7, and that the forward-slash path works in Git Bash, PowerShell and cmd.
