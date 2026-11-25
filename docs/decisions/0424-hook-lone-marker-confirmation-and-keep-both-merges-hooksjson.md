@@ -1,6 +1,6 @@
 # ADR-0424: Hook lone-marker confirmation and keep-both merges: hooks.json asks like SKILL.md, a referenced marker is never numbered, one code per call, the detach filter judges where the pairs put a folder
 
-- 상태: 확정 (2026-11-26, 근거: user decision 2026-11-26 on tracking T-125 (「어쨋든 이대로 진행하던지」) · main decisions during step-22 P4 coding and review (ADR-0420 decision 14, TRD O4) · P4 code review (lead PASS, risk axis FIX, cross-family Codex FIX) on `3211b40d..7788c880` · fix round 1 (all ten items fixed, none rejected; re-review in progress when this was written))
+- 상태: 확정 (2026-11-26, 근거: user decision 2026-11-26 on tracking T-125 (「어쨋든 이대로 진행하던지」) · main decisions during step-22 P4 coding and review (ADR-0420 decision 14, TRD O4) · P4 code review (lead PASS, risk axis FIX, cross-family Codex FIX) on `3211b40d..7788c880` · fix rounds 1–3 re-reviewed (lead PASS, risk PASS, Codex PASS after round 3) · QA PASS 2026-11-26)
 - 관련: Amends ADR-0420 (decisions 1 and 14 lone-marker scope) · Amends ADR-0415 (decisions 2 and 3 merge leaves) · Amends ADR-0339 (decision 2 lone marker shapes) · ADR-0374 (a missing item is skipped with a notice) · ADR-0409 (decision 2 the plan digest) · ADR-0425 (same unit: read-only leftovers) · TRD `docs/process/S25-preset-library/trd-hook-components.md` §2.1, §6 P4 and §9.3 O4 · tracking T-125
 
 ## 맥락
