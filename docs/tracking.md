@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-135 | S25 client stage — a structure view of the whole reference graph (agents → presets → items), beside the existing screens | Main | Idea — for the screen discussion |
 | T-134 | Agent backends as external modules others can add | Main | Idea — waiting for trigger (after S25) |
 | T-133 | S25 step 10b — a writing library command repeated after the CLI's long wait ran out can overlap the first (extra staging) | Main | Recorded — closing it is outside 10b |
 | T-132 | S25 step 9b U5 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
@@ -122,6 +123,11 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-135. S25 client stage — a structure view of the whole reference graph
+- **Status:** idea, recorded 2026-11-26 for the client-stage screen discussion. User: 「언리얼 위젯 리플랙션? 같이 연결되있는 트리구조를 따로 볼 수 있게 하는게 좋을것같은데」 · 「추가적으로 하는거임. 기존은 그대로 있고. … 전체적인 구조가 보이도록」.
+- **What:** an additional view (existing screens unchanged) showing agents → attached presets → nested presets → instructions / skills / hooks / settings / folder entries, both directions (what uses this item), with the launch-problem overlay (skipped, blocking, tag-filtered). Analogues: Unreal Reference Viewer (node graph), Widget Reflector (hierarchy tree).
+- **Main's proposal (not decided):** tree first, "view as graph" second. Candidates (no graph library in package.json today): React Flow `@xyflow/react` + ELK.js layout · Cytoscape.js · a tree list (e.g. react-arborist). The server already walks references (asset-library `refs.rs` closure, `used_by`, `ListRow.references`) but no command returns the whole graph — a `library.graph`-style LLM command would come with the view (CLAUDE.md 「LLM-우선 제어」). Convention check (how other apps do such views) at the screen discussion.
 
 ### T-134. Agent backends as external modules others can add
 - **Status:** idea, recorded 2026-11-24 during the step-22 design. User: 「나중에는 백엔드만 모듈로 빼서 다른사람도 확장할 수 있게 지원해주면 좋을듯?」
