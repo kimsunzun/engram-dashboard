@@ -40,7 +40,8 @@ const ADDED_DIRS_CLAUDE_MD_ENV: (&str, &str) =
 /// in plan order + the folder env pair (only with ≥ 1 folder entry). A real kit with none of these writes nothing and
 /// needs no volatile folder.
 ///
-/// `Err` (nothing written) when the kit needs the volatile folder and has none, when two skills land on the same
+/// `Err` (nothing written) when the plan carries hook components (claude loads none yet — ADR-0420), when the kit
+/// needs the volatile folder and has none, when two skills land on the same
 /// link name, or when a path the argv carries (instructions file · settings file · plugin folder · folder entry) fails
 /// [`path_is_cli_safe`]. `Err` after a partial write when a write fails — the settings file first, then the links; the
 /// caller's release removes the volatile folder.
@@ -48,6 +49,14 @@ pub(super) fn materialize(kit: &LaunchKit, fs: &dyn LaunchFs) -> Result<LaunchAr
     let plan = &kit.plan;
     if !plan.real {
         return Ok(LaunchArtifacts::default());
+    }
+    // ADR-0420: `ModeLoads::hooks` is `false`, so the check names them instead — a plan carrying one is refused, never
+    //   dropped unnamed.
+    if !plan.hooks.is_empty() {
+        return Err(format!(
+            "a real claude plan carries {} hook component(s) — claude does not load hooks yet",
+            plan.hooks.len()
+        ));
     }
     let volatile = || {
         kit.volatile_dir.as_deref().ok_or_else(|| {
@@ -161,6 +170,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::{ClaudeBackend, CLAUDE_PROGRAM};
+    use crate::backend::hooks::HookRef;
     use crate::backend::AgentBackend;
     use crate::launch::{LaunchKitSource, MemLaunchFs, NoopLaunchKits, RawSetting};
     use crate::profile::{AgentCommand, AgentOutputFormat, AgentProfile, SpawnMode};
@@ -227,6 +237,8 @@ mod tests {
         kit.plan.raw_settings = vec![
             RawSetting {
                 preset: "builtin".to_string(),
+                source: "builtin".to_string(),
+                line: None,
                 value: json!({
                     "env": {"DISABLE_AUTOUPDATER": "1"},
                     "allowedMcpServers": [{"serverName": "engram"}],
@@ -234,6 +246,8 @@ mod tests {
             },
             RawSetting {
                 preset: "later".to_string(),
+                source: "later".to_string(),
+                line: None,
                 value: json!({
                     "allowedMcpServers": [],
                     "env": {"FOO": "x"},
@@ -373,6 +387,23 @@ mod tests {
             assert!(result.is_err(), "{:?}", kit.plan.raw_settings);
             assert!(fs.paths().is_empty());
         }
+    }
+
+    /// A plan carrying a hook component fails before any write — claude loads no hooks yet, and none is dropped
+    /// unnamed.
+    // ADR-0420
+    #[test]
+    fn a_plan_with_a_hook_component_fails_before_any_write() {
+        let mut kit = real_kit();
+        kit.plan.hooks = vec![HookRef {
+            path: "team/hooks/notify".to_string(),
+            dir: library("notify"),
+            definition: serde_json::Map::new(),
+        }];
+        let (result, fs) = materialized(&kit);
+        let error = result.unwrap_err();
+        assert!(error.contains("hook"), "{error}");
+        assert!(fs.paths().is_empty());
     }
 
     /// Two skill names that become the same link name → `Err` before any write.

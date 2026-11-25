@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use engram_dashboard_platform::fs::same_path;
 
 use super::{cmdline, CODEX_SETTINGS_CHECK};
-use crate::backend::settings_check::{CommandLine, SettingsCheck};
+use crate::backend::settings_check::{CommandLine, ConfigOrigin, SettingsCheck};
 use crate::launch::{
     LaunchArtifacts, LaunchFs, LaunchKit, Reason, SkillRef, SKILL_LINKS_DIR, SKILL_LINKS_PARENT,
 };
@@ -43,7 +43,8 @@ use crate::profile::{AgentCommand, AgentOutputFormat};
 /// - JSON: `instructions_text` (only when non-blank), `instructions_changed`, and `skill_roots` = the junction root
 ///   (only with ≥ 1 skill, then one link per skill) followed by the plan's extra skill roots.
 ///
-/// `Err`, nothing written: a raw setting `-c` guard refusal; an instructions file that cannot be read as UTF-8 text;
+/// `Err`, nothing written: a plan carrying hook components (codex loads none yet — ADR-0420); a raw setting `-c`
+/// guard refusal; an instructions file that cannot be read as UTF-8 text;
 /// terminal — a plan with instruction sources, a working folder [`cmdline::cwd_reaches_codex_unchanged`] refuses (it
 /// goes on the line as `--cd`), a priming the line cannot carry; JSON — a skill root that is not absolute or not
 /// UTF-8, skills without a volatile folder, a skill name codex JSON refuses, two skills on one link; both — a command
@@ -66,17 +67,34 @@ pub(super) fn materialize(
     else {
         unreachable!("CodexBackend handles only the Codex variant — a dispatch bug");
     };
-    let config_args = preset_config_args(kit)?;
+    // ADR-0420: `ModeLoads::hooks` is `false`, so the check names them instead — a plan carrying one is refused, never
+    //   dropped unnamed.
+    if !kit.plan.hooks.is_empty() {
+        return Err(format!(
+            "a real codex plan carries {} hook component(s) — codex does not load hooks yet",
+            kit.plan.hooks.len()
+        ));
+    }
+    let config = preset_config_args(kit)?;
     let text = instructions_text(kit, read)?;
     match output_format {
-        AgentOutputFormat::Terminal => terminal(kit, cwd, extra_args, config_args, text),
-        AgentOutputFormat::StreamJson => json(kit, cwd, extra_args, config_args, text, fs),
+        AgentOutputFormat::Terminal => terminal(kit, cwd, extra_args, config, text),
+        AgentOutputFormat::StreamJson => json(kit, cwd, extra_args, config, text, fs),
     }
 }
 
-/// The `-c` arguments of every raw setting, in plan order.
-fn preset_config_args(kit: &LaunchKit) -> Result<Vec<String>, String> {
-    let mut args = Vec::new();
+/// The `-c` arguments of every raw setting, in plan order, with the origin of each argument at the same index.
+// ADR-0420
+struct PresetConfig {
+    args: Vec<String>,
+    origins: Vec<ConfigOrigin>,
+}
+
+fn preset_config_args(kit: &LaunchKit) -> Result<PresetConfig, String> {
+    let mut config = PresetConfig {
+        args: Vec::new(),
+        origins: Vec::new(),
+    };
     for raw in &kit.plan.raw_settings {
         let lines = cmdline::config_args(&raw.value).map_err(|reason| {
             format!(
@@ -85,9 +103,16 @@ fn preset_config_args(kit: &LaunchKit) -> Result<Vec<String>, String> {
                 described(&reason)
             )
         })?;
-        args.extend(lines);
+        let origin = ConfigOrigin {
+            source: raw.source.clone(),
+            line: raw.line,
+        };
+        config
+            .origins
+            .extend(std::iter::repeat_n(origin, lines.len()));
+        config.args.extend(lines);
     }
-    Ok(args)
+    Ok(config)
 }
 
 /// The merged instructions text — `None` without a file or when the text is blank. A read failure (including text
@@ -111,7 +136,7 @@ fn terminal(
     kit: &LaunchKit,
     cwd: &Path,
     extra_args: &[String],
-    config_args: Vec<String>,
+    config: PresetConfig,
     text: Option<String>,
 ) -> Result<LaunchArtifacts, String> {
     if !kit.plan.instructions.is_empty() {
@@ -139,12 +164,14 @@ fn terminal(
         mode: AgentOutputFormat::Terminal,
         cwd,
         extra_args,
-        config_args: &config_args,
+        config_args: &config.args,
+        config_origins: &config.origins,
+        hooks: &kit.plan.hooks,
         instructions: text.as_deref(),
     })?;
     Ok(LaunchArtifacts {
         real: true,
-        config_args,
+        config_args: config.args,
         instructions_override,
         ..LaunchArtifacts::default()
     })
@@ -154,7 +181,7 @@ fn json(
     kit: &LaunchKit,
     cwd: &Path,
     extra_args: &[String],
-    config_args: Vec<String>,
+    config: PresetConfig,
     text: Option<String>,
     fs: &dyn LaunchFs,
 ) -> Result<LaunchArtifacts, String> {
@@ -180,7 +207,9 @@ fn json(
         mode: AgentOutputFormat::StreamJson,
         cwd,
         extra_args,
-        config_args: &config_args,
+        config_args: &config.args,
+        config_origins: &config.origins,
+        hooks: &kit.plan.hooks,
         instructions: None,
     })?;
 
@@ -191,7 +220,7 @@ fn json(
     Ok(LaunchArtifacts {
         real: true,
         skill_roots: roots,
-        config_args,
+        config_args: config.args,
         instructions_text: text,
         instructions_changed,
         ..LaunchArtifacts::default()
@@ -252,6 +281,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::{CodexBackend, CODEX_PROGRAM};
+    use crate::backend::hooks::HookRef;
     use crate::backend::AgentBackend;
     use crate::launch::{LaunchKitSource, MemLaunchFs, NoopLaunchKits, RawSetting, SourceRef};
     use crate::profile::{AgentProfile, SpawnMode};
@@ -332,10 +362,14 @@ mod tests {
         kit.plan.raw_settings = vec![
             RawSetting {
                 preset: "builtin".to_string(),
+                source: "builtin".to_string(),
+                line: None,
                 value: json!(["model_reasoning_effort=\"low\""]),
             },
             RawSetting {
                 preset: "team.yaml".to_string(),
+                source: "team.yaml".to_string(),
+                line: None,
                 value: json!(["model=\"o3\"", "features.web_search=true"]),
             },
         ];
@@ -661,6 +695,25 @@ mod tests {
         let mut kit = real_kit();
         kit.skills[1].name = "a".repeat(64);
         assert!(materialized(AgentOutputFormat::StreamJson, &kit).0.is_ok());
+    }
+
+    /// A plan carrying a hook component fails before any write in both modes — codex loads no hooks yet, and none is
+    /// dropped unnamed.
+    // ADR-0420
+    #[test]
+    fn a_plan_with_a_hook_component_fails_before_any_write() {
+        let mut kit = real_kit();
+        kit.plan.hooks = vec![HookRef {
+            path: "team/hooks/notify".to_string(),
+            dir: library("notify"),
+            definition: serde_json::Map::new(),
+        }];
+        for mode in [AgentOutputFormat::Terminal, AgentOutputFormat::StreamJson] {
+            let (result, fs) = materialized(mode, &kit);
+            let error = result.unwrap_err();
+            assert!(error.contains("hook"), "{mode:?}: {error}");
+            assert!(fs.paths().is_empty(), "{mode:?}");
+        }
     }
 
     /// Two skills on one link fail before any write.
@@ -1029,6 +1082,8 @@ mod tests {
         let mut kit = real_kit();
         kit.plan.raw_settings = vec![RawSetting {
             preset: "team.yaml".to_string(),
+            source: "team.yaml".to_string(),
+            line: None,
             value: json!([
                 "developer_instructions='theirs'",
                 "mcp_servers.engram.url='http://example.invalid/mcp'",

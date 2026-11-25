@@ -87,14 +87,15 @@ pub struct PresetDoc {
     pub presets: Vec<PresetItem>,
     pub instructions: Vec<PresetItem>,
     pub skills: Vec<PresetItem>,
+    /// Hook folders (ADR-0420).
+    pub hooks: Vec<PresetItem>,
     /// `backend` always `None`, as in `presets`.
     pub settings: Vec<PresetItem>,
     /// Every string entry, also one whose path is not absolute (that one is a line problem too).
     pub folders: Vec<FolderRef>,
     /// List entries the reader could not model — each is also a line problem. The writer keeps them.
     pub unmodeled: Vec<Unmodeled>,
-    /// Per-entry breakage that does not stop the read, in file order of the lists (`presets` · `instructions` ·
-    /// `skills` · `settings` · `folders`), entry order inside each.
+    /// Per-entry breakage that does not stop the read, in the order of [`ListName::ALL`], entry order inside each.
     pub line_problems: Vec<Reason>,
 }
 
@@ -107,22 +108,25 @@ pub struct Unmodeled {
     pub line: u32,
 }
 
-/// The five lists of a preset.
+/// The six lists of a preset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ListName {
     Presets,
     Instructions,
     Skills,
+    // ADR-0420
+    Hooks,
     Settings,
     Folders,
 }
 
 impl ListName {
     /// File order of the lists when the writer adds a missing key.
-    pub const ALL: [ListName; 5] = [
+    pub const ALL: [ListName; 6] = [
         ListName::Presets,
         ListName::Instructions,
         ListName::Skills,
+        ListName::Hooks,
         ListName::Settings,
         ListName::Folders,
     ];
@@ -133,13 +137,17 @@ impl ListName {
             ListName::Presets => "presets",
             ListName::Instructions => "instructions",
             ListName::Skills => "skills",
+            ListName::Hooks => "hooks",
             ListName::Settings => "settings",
             ListName::Folders => "folders",
         }
     }
 
     pub(crate) fn takes_tags(self) -> bool {
-        matches!(self, ListName::Instructions | ListName::Skills)
+        matches!(
+            self,
+            ListName::Instructions | ListName::Skills | ListName::Hooks
+        )
     }
 }
 
@@ -222,11 +230,12 @@ pub fn parse_preset(text: &str, backends: &dyn Backends) -> Result<PresetDoc, Pa
 
     let mut unmodeled = Vec::new();
     let mut line_problems = Vec::new();
-    let mut item_lists: [Vec<PresetItem>; 4] = Default::default();
+    let mut item_lists: [Vec<PresetItem>; 5] = Default::default();
     let item_names = [
         ListName::Presets,
         ListName::Instructions,
         ListName::Skills,
+        ListName::Hooks,
         ListName::Settings,
     ];
     for (items, list) in item_lists.iter_mut().zip(item_names) {
@@ -256,13 +265,14 @@ pub fn parse_preset(text: &str, backends: &dyn Backends) -> Result<PresetDoc, Pa
             }),
         }
     }
-    let [presets, instructions, skills, settings] = item_lists;
+    let [presets, instructions, skills, hooks, settings] = item_lists;
     Ok(PresetDoc {
         version,
         description,
         presets,
         instructions,
         skills,
+        hooks,
         settings,
         folders,
         unmodeled,
@@ -945,6 +955,36 @@ mod tests {
         let doc = parse_preset(&text, &three).unwrap();
         assert_eq!(doc.skills[1], item("b", Some("fakebe"), 5, 1));
         assert!(doc.unmodeled.is_empty() && doc.line_problems.is_empty());
+    }
+
+    // ADR-0420
+    #[test]
+    fn a_hooks_list_reads_after_skills_and_takes_backend_tags() {
+        let text = preset(
+            "hooks:\n- team/hooks/a\n- {path: team/hooks/b, backend: codex}\n- {path: c, backend: fakebe}\nskills:\n- s\n",
+        );
+        let doc = parse_preset(&text, &two()).unwrap();
+        assert_eq!(
+            doc.hooks,
+            vec![
+                item("team/hooks/a", None, 4, 0),
+                item("team/hooks/b", Some("codex"), 5, 1)
+            ]
+        );
+        assert_eq!(doc.skills, vec![item("s", None, 8, 0)]);
+        assert_eq!(codes(&doc), vec![("backend-tag-unknown", Some(6))]);
+        assert_eq!(
+            doc.line_problems[0].args,
+            json!({ "list": "hooks", "index": 2, "backend": "fakebe" })
+        );
+        assert_eq!(
+            doc.unmodeled,
+            vec![Unmodeled {
+                list: ListName::Hooks,
+                index: 2,
+                line: 6
+            }]
+        );
     }
 
     #[test]

@@ -117,11 +117,12 @@ pub const FOLDER_LISTING_UNANSWERED: &str = "folder-listing-unanswered";
 /// `{expected}` — that section).
 pub const REORDER_ORDER_MISMATCH: &str = "reorder-order-mismatch";
 
-/// The four item lists, in file order.
-pub(crate) const ITEM_LISTS: [ListName; 4] = [
+/// The five item lists, in file order.
+pub(crate) const ITEM_LISTS: [ListName; 5] = [
     ListName::Presets,
     ListName::Instructions,
     ListName::Skills,
+    ListName::Hooks,
     ListName::Settings,
 ];
 
@@ -157,6 +158,9 @@ pub struct PresetDraft {
     pub presets: Vec<NewItem>,
     pub instructions: Vec<NewItem>,
     pub skills: Vec<NewItem>,
+    /// `None` = the hook list is left as it is — a caller that knows no hooks cannot wipe them.
+    // ADR-0420
+    pub hooks: Option<Vec<NewItem>>,
     pub settings: Vec<NewItem>,
     /// `None` = the folder list is left as it is.
     pub folders: Option<Vec<String>>,
@@ -174,6 +178,7 @@ pub struct PresetView {
     pub presets: Vec<PresetRow>,
     pub instructions: Vec<PresetRow>,
     pub skills: Vec<PresetRow>,
+    pub hooks: Vec<PresetRow>,
     pub settings: Vec<PresetRow>,
     /// The preset's own folder entries, normalized and deduplicated (first place kept).
     pub folders: Vec<PresetFolder>,
@@ -196,9 +201,9 @@ pub struct PresetRow {
     /// Its line in the file.
     pub line: u32,
     /// The entry's own state: `not-found` (an absent or unregistered mount's item included), [`LIBRARY_UNAVAILABLE`]
-    /// `{mount, message}` (its mount cannot be read — not looked up), [`PATH_THROUGH_LINK`], the item's broken reason
-    /// or a settings asset's first refusal, `wrong-kind`, `builtin-in-library-preset`, `preset-cycle` (it lists
-    /// itself); `None` = it reads. What an inner preset reaches is in the view's problem rows.
+    /// `{mount, message}` (its mount cannot be read — not looked up), [`PATH_THROUGH_LINK`], the item's broken reason,
+    /// a settings asset's first refusal or a hook's `hook-shape-invalid`, `wrong-kind`, `builtin-in-library-preset`,
+    /// `preset-cycle` (it lists itself); `None` = it reads. What an inner preset reaches is in the view's problem rows.
     pub state: Option<Reason>,
 }
 
@@ -466,6 +471,7 @@ impl LibraryService {
                 presets: rows(ListName::Presets),
                 instructions: rows(ListName::Instructions),
                 skills: rows(ListName::Skills),
+                hooks: rows(ListName::Hooks),
                 settings: rows(ListName::Settings),
                 folders,
                 conflicts: Vec::new(),
@@ -683,8 +689,8 @@ impl LibraryService {
     }
 
     /// Sets the backend tag of each item in `preset` (`None` = common), every entry with the item's key in
-    /// `instructions` and `skills` (partial apply): an item the preset does not list is skipped `not-found`, one only
-    /// in `presets` / `settings` `backend-tag-not-allowed`, a spelling that is not a reference `item-path-invalid`. A
+    /// `instructions`, `skills` and `hooks` (partial apply): an item the preset does not list is skipped `not-found`,
+    /// one only in `presets` / `settings` `backend-tag-not-allowed`, a spelling that is not a reference `item-path-invalid`. A
     /// `backend` word the registry does not know refuses the whole call `InvalidArgument` · `backend-tag-unknown` before
     /// the change. A tag that is already set writes nothing. Plus the refusals every edit can answer (module
     /// header).
@@ -721,15 +727,15 @@ impl LibraryService {
         })
     }
 
-    /// Replaces the four lists of `preset` (and its folders, when the draft carries them) with `draft`, all or nothing:
-    /// any mismatch refuses the whole save `InvalidArgument` · [`PRESET_SAVE_REFUSED`] listing every one — not a
-    /// reference, an unknown or unallowed tag, a built-in in `presets`, one target twice in a list ([`ITEM_DUPLICATE`]),
-    /// an item of another kind, a preset that would close a cycle, a relative folder, two folders equal after
-    /// normalization. A missing item or folder and a cmd-unsafe folder are legal. Each list the save supplies is
-    /// replaced whole — the entries the reader could not model go too; an omitted `folders` stays as it is. A kept
-    /// item keeps its entry (its other keys survive a respelling); folders are stored normalized; keys outside the
-    /// lists are never touched. A `base_rev` other than the `rev` of the bytes read inside the change refuses
-    /// `Conflict` · [`REV_MISMATCH`]. Plus the refusals every edit can answer (module header).
+    /// Replaces the item lists of `preset` (its hooks and its folders only when the draft carries them) with `draft`,
+    /// all or nothing: any mismatch refuses the whole save `InvalidArgument` · [`PRESET_SAVE_REFUSED`] listing every
+    /// one — not a reference, an unknown or unallowed tag, a built-in in `presets`, one target twice in a list
+    /// ([`ITEM_DUPLICATE`]), an item of another kind, a preset that would close a cycle, a relative folder, two folders
+    /// equal after normalization. A missing item or folder and a cmd-unsafe folder are legal. Each list the save
+    /// supplies is replaced whole — the entries the reader could not model go too; an omitted `hooks` or `folders`
+    /// stays as it is (ADR-0420). A kept item keeps its entry (its other keys survive a respelling); folders are stored
+    /// normalized; keys outside the lists are never touched. A `base_rev` other than the `rev` of the bytes read inside
+    /// the change refuses `Conflict` · [`REV_MISMATCH`]. Plus the refusals every edit can answer (module header).
     pub fn preset_save(
         &self,
         preset: &LibPath,
@@ -763,7 +769,9 @@ impl LibraryService {
     /// resolution's, then one `Broken` row per mismatch (`args` = `{path, list}`). A draft item has no file line, so its
     /// rows carry none. A draft listing a library item passes the first-scan entrance (its failure `Unavailable` ·
     /// `library-unavailable`); a built-in-only draft answers whatever the library is, after waiting out a pending first
-    /// scan when it keeps the file's folders. A preset whose mount cannot be read refuses `Unavailable` ·
+    /// scan when it keeps the file's folders or hooks. The file's hooks a draft keeps count as listed: one naming a
+    /// library item makes the resolution judge the mounts it reaches (a mount that cannot be read is its
+    /// `library-unavailable` row — ADR-0420). A preset whose mount cannot be read refuses `Unavailable` ·
     /// `library-unavailable` `{mount, message}` (walked again first), as `preset.get` does — its current lists would come
     /// from a stale catalog (ADR-0400 decision 6).
     pub fn preset_check(
@@ -771,28 +779,31 @@ impl LibraryService {
         preset: &LibPath,
         draft: &PresetDraft,
     ) -> Result<CheckAnswer, LibraryRefusal> {
-        let library = [
+        let drafted = [
             &draft.presets,
             &draft.instructions,
             &draft.skills,
             &draft.settings,
         ]
         .into_iter()
+        .chain(&draft.hooks)
         .flatten()
         .any(|item| matches!(AssetRef::parse(&item.path), Ok(AssetRef::Library(_))));
-        if library {
+        if drafted {
             self.first_scan_join()
                 .map_err(LibraryRefusal::unavailable)?;
-        } else if draft.folders.is_none() {
-            // The file's folder list is read from the catalog: wait out a pending first scan. Its failure is not this
-            //   draft's answer — a built-in-only draft answers without the library (the list is then empty).
+        } else if draft.folders.is_none() || draft.hooks.is_none() {
+            // The file's folder or hook list is read from the catalog: wait out a pending first scan. Its failure is
+            //   not this draft's answer — a built-in-only draft answers without the library (the kept lists are then
+            //   empty). Redundant today: `refuse_unusable_mount` below walks a mount not yet seen again, which joins
+            //   the first scan — a change there must keep a real wait here.
             if let Err(why) = self.first_scan_join() {
-                tracing::debug!("preset check: first scan not applied; folders unknown: {why}");
+                tracing::debug!("preset check: first scan not applied; kept lists unknown: {why}");
             }
         }
         // ADR-0400 decision 6
         self.refuse_unusable_mount(preset)?;
-        let (overlay, refused, mut folders, folder_keys) = self.gate.with_read(|state| {
+        let (overlay, refused, mut folders, folder_keys, kept_lib) = self.gate.with_read(|state| {
             let lookup = CatalogLookup {
                 catalog: &state.catalog,
                 mounts: &state.mounts,
@@ -803,9 +814,15 @@ impl LibraryService {
                 _ => None,
             };
             let (lists, refused) = self.draft_lists(draft, current, preset, &lookup);
+            // ADR-0420: the file's hooks the draft keeps are listed library items too.
+            let kept_lib = draft.hooks.is_none()
+                && lists
+                    .hooks
+                    .iter()
+                    .any(|item| matches!(item.target, AssetRef::Library(_)));
             // ADR-0358: the save writes a kept entry from its original node, so what the reader found wrong in that node
             //   stays (a tag in `presets` / `settings` is kept as written) — the check shows the same line problems: those
-            //   of each kept entry, and the whole folder list's when the draft leaves it as it is.
+            //   of each kept entry, and the whole folder or hook list's when the draft leaves it as it is (ADR-0420).
             let kept: HashSet<(&str, u64)> = ITEM_LISTS
                 .into_iter()
                 .flat_map(|list| {
@@ -826,7 +843,9 @@ impl LibraryService {
                         .iter()
                         .filter(|problem| {
                             let list = problem.args["list"].as_str().unwrap_or_default();
-                            let whole = list == ListName::Folders.key() && draft.folders.is_none();
+                            let whole = (list == ListName::Folders.key()
+                                && draft.folders.is_none())
+                                || (list == ListName::Hooks.key() && draft.hooks.is_none());
                             whole
                                 || problem.args["index"]
                                     .as_u64()
@@ -851,6 +870,7 @@ impl LibraryService {
                 presets: lists.presets,
                 instructions: lists.instructions,
                 skills: lists.skills,
+                hooks: lists.hooks,
                 settings: lists.settings,
                 folders,
                 unmodeled: Vec::new(),
@@ -867,8 +887,9 @@ impl LibraryService {
                 kind: ItemKind::Preset,
                 content,
             };
-            (overlay, refused, folders, folder_keys)
+            (overlay, refused, folders, folder_keys, kept_lib)
         });
+        let library = drafted || kept_lib;
         let want = Want {
             backend: None,
             mode: None,
@@ -1382,8 +1403,8 @@ impl LibraryService {
 
     /// The lists `draft` makes over `doc` (the file as read; `None` = none known) and every mismatch, the mismatched
     /// entries left out. A kept item takes the origin of the first unused entry of its list with its key; a folder the
-    /// origin of the first unused entry with its normalized key, and is written normalized. Draft folders omitted =
-    /// `doc`'s folders as they are.
+    /// origin of the first unused entry with its normalized key, and is written normalized. Draft hooks or folders
+    /// omitted = `doc`'s hooks or folders as they are, unmodeled entries included (ADR-0420).
     fn draft_lists(
         &self,
         draft: &PresetDraft,
@@ -1398,6 +1419,13 @@ impl LibraryService {
                 ListName::Presets => &draft.presets,
                 ListName::Instructions => &draft.instructions,
                 ListName::Skills => &draft.skills,
+                ListName::Hooks => match &draft.hooks {
+                    Some(hooks) => hooks,
+                    None => {
+                        lists.hooks = doc.map(|doc| doc.hooks.clone()).unwrap_or_default();
+                        continue;
+                    }
+                },
                 _ => &draft.settings,
             };
             let original: &[PresetItem] = doc.map_or(&[], |doc| doc_list(doc, list));
@@ -1446,7 +1474,11 @@ impl LibraryService {
             .map(|doc| {
                 doc.unmodeled
                     .iter()
-                    .filter(|entry| entry.list != ListName::Folders || draft.folders.is_some())
+                    .filter(|entry| match entry.list {
+                        ListName::Folders => draft.folders.is_some(),
+                        ListName::Hooks => draft.hooks.is_some(),
+                        _ => true,
+                    })
                     .map(|entry| (entry.list, entry.index))
                     .collect()
             })
@@ -1792,7 +1824,7 @@ fn set_backend(
             }
         };
         let mut found = false;
-        for list in [ListName::Instructions, ListName::Skills] {
+        for list in ITEM_LISTS.into_iter().filter(|list| list.takes_tags()) {
             for entry in list_mut(&mut lists, list) {
                 if ref_key(&entry.target) != wanted {
                     continue;
@@ -1812,8 +1844,9 @@ fn set_backend(
             applied.push(item.clone());
             continue;
         }
-        let elsewhere = [ListName::Presets, ListName::Settings]
+        let elsewhere = ITEM_LISTS
             .into_iter()
+            .filter(|list| !list.takes_tags())
             .any(|list| {
                 doc_list(doc, list)
                     .iter()
@@ -1835,6 +1868,7 @@ pub(crate) fn as_read(doc: &PresetDoc) -> PresetLists {
         presets: doc.presets.clone(),
         instructions: doc.instructions.clone(),
         skills: doc.skills.clone(),
+        hooks: doc.hooks.clone(),
         settings: doc.settings.clone(),
         folders: doc
             .folders
@@ -1869,6 +1903,7 @@ pub(crate) fn doc_list(doc: &PresetDoc, list: ListName) -> &[PresetItem] {
         ListName::Presets => &doc.presets,
         ListName::Instructions => &doc.instructions,
         ListName::Skills => &doc.skills,
+        ListName::Hooks => &doc.hooks,
         ListName::Settings => &doc.settings,
         ListName::Folders => &[],
     }
@@ -1879,6 +1914,7 @@ fn lists_ref(lists: &PresetLists, list: ListName) -> &[PresetItem] {
         ListName::Presets => &lists.presets,
         ListName::Instructions => &lists.instructions,
         ListName::Skills => &lists.skills,
+        ListName::Hooks => &lists.hooks,
         ListName::Settings => &lists.settings,
         ListName::Folders => &[],
     }
@@ -1890,6 +1926,7 @@ pub(crate) fn list_mut(lists: &mut PresetLists, list: ListName) -> &mut Vec<Pres
         ListName::Presets => &mut lists.presets,
         ListName::Instructions => &mut lists.instructions,
         ListName::Skills => &mut lists.skills,
+        ListName::Hooks => &mut lists.hooks,
         ListName::Settings => &mut lists.settings,
         ListName::Folders => unreachable!("the folders list holds no items"),
     }
@@ -1900,11 +1937,12 @@ fn rows_mut(view: &mut PresetView) -> impl Iterator<Item = &mut PresetRow> {
         .iter_mut()
         .chain(view.instructions.iter_mut())
         .chain(view.skills.iter_mut())
+        .chain(view.hooks.iter_mut())
         .chain(view.settings.iter_mut())
 }
 
 /// The list an item of `kind` goes into; a broken file goes where its claimed kind goes. `None` = it can be listed
-/// nowhere (a `SKILL.md`, or a broken file with no known kind).
+/// nowhere (a `SKILL.md`, a `hooks.json`, or a broken file with no known kind).
 pub(crate) fn list_of(kind: &ItemKind) -> Option<ListName> {
     match kind {
         ItemKind::Preset
@@ -1917,7 +1955,8 @@ pub(crate) fn list_of(kind: &ItemKind) -> Option<ListName> {
         } => Some(ListName::Settings),
         ItemKind::Instruction => Some(ListName::Instructions),
         ItemKind::Skill => Some(ListName::Skills),
-        ItemKind::SkillFile | ItemKind::Broken { .. } => None,
+        ItemKind::Hook => Some(ListName::Hooks),
+        ItemKind::SkillFile | ItemKind::HookFile | ItemKind::Broken { .. } => None,
     }
 }
 
@@ -1998,6 +2037,8 @@ fn row_state(
             ItemContent::Settings { verdict, .. } => {
                 verdict.problems.first().map(|(_, refusal)| refusal.clone())
             }
+            // ADR-0420
+            ItemContent::Hook { definition, .. } => definition.as_ref().err().cloned(),
             _ => None,
         },
     }
@@ -2951,6 +2992,36 @@ mod tests {
         assert_eq!(w.writes(), writes);
     }
 
+    // ADR-0420: an `add` puts a hook folder into `hooks`, the list of its kind, and `setBackend` tags it there.
+    #[test]
+    fn add_puts_a_hook_into_hooks_and_set_backend_tags_it() {
+        let w = World::new();
+        library(&w, "");
+        w.put("hooks/h/hooks.json", r#"{"hooks": {}}"#);
+        let p = lp("library/P.yaml");
+        let item = NewItem {
+            path: "library/hooks/h".to_owned(),
+            backend: None,
+        };
+        let added = w
+            .svc
+            .preset_add(&p, &AddEntries::Items(vec![item]), None, None)
+            .unwrap();
+        assert_eq!(added.applied, ["library/hooks/h"]);
+        assert_eq!(paths(&added.view.hooks), ["library/hooks/h"]);
+        let set = w
+            .svc
+            .preset_set_backend(&p, &strings(&["library/hooks/h"]), Some("claude"), None)
+            .unwrap();
+        assert_eq!(set.applied, ["library/hooks/h"]);
+        assert_eq!(set.view.hooks[0].backend.as_deref(), Some("claude"));
+        let text = w.text("P.yaml");
+        assert!(
+            text.contains("hooks:\n- path: library/hooks/h\n  backend: claude\n"),
+            "{text}"
+        );
+    }
+
     // ── save ────────────────────────────────────────────────────────────────────────────────────────────────
 
     #[test]
@@ -2974,6 +3045,7 @@ mod tests {
                 tagged("library/rules/b.md", "nobody"),
             ],
             skills: vec![item("library/rules/a.md")],
+            hooks: Some(vec![item("library/rules/a.md")]),
             settings: Vec::new(),
             folders: Some(vec!["rel/x".to_owned(), f1.clone(), format!("{f1}{sep}")]),
         };
@@ -3004,6 +3076,7 @@ mod tests {
                 ("instructions", ITEM_DUPLICATE),
                 ("instructions", BACKEND_TAG_UNKNOWN),
                 ("skills", WRONG_KIND),
+                ("hooks", WRONG_KIND),
                 ("folders", FOLDER_PATH_RELATIVE),
                 ("folders", ITEM_DUPLICATE),
             ]
@@ -3809,6 +3882,86 @@ mod tests {
             .collect();
         assert_eq!(shown, [f1.as_str()]);
         assert_eq!(checked.folders[0].status, Some(FolderStatus::Ok));
+    }
+
+    // ADR-0420: a built-in-only check that gives its folders but keeps the file's hooks judges the hooks it keeps —
+    //   read after the first scan.
+    #[test]
+    fn a_builtin_only_check_that_gives_its_folders_judges_the_hooks_it_keeps() {
+        let w = World::new();
+        w.put("h/hooks.json", r#"{"hooks": []}"#);
+        w.put("P.yaml", &preset("hooks:\n- library/h\n"));
+        let draft = PresetDraft {
+            instructions: vec![item("engram/priming")],
+            folders: Some(Vec::new()),
+            ..PresetDraft::default()
+        };
+        let checked = w.svc.preset_check(&lp("library/P.yaml"), &draft).unwrap();
+        let broken: Vec<(&str, &str)> = checked
+            .problems
+            .iter()
+            .filter_map(|problem| match problem {
+                BlockReason::Broken { item, reason, .. } => {
+                    Some((item.as_str(), reason.code.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            broken,
+            [("library/h", crate::format::hooks::HOOK_SHAPE_INVALID)],
+            "{:?}",
+            checked.problems
+        );
+    }
+
+    // ADR-0420 · ADR-0338: a hook entry the reader could not model (an unknown backend tag) stays through a save that
+    //   omits the hooks, and a check that omits them shows its line problem; a save that gives hooks replaces it.
+    #[test]
+    fn an_unmodeled_hook_entry_stays_through_a_save_that_omits_the_hooks_and_shows_in_its_check() {
+        let w = World::new();
+        library(
+            &w,
+            "hooks:\n- library/h\n- path: library/h\n  backend: fakebe\n",
+        );
+        w.put("h/hooks.json", r#"{"hooks": {}}"#);
+        let omitted = PresetDraft {
+            instructions: vec![item("library/rules/a.md")],
+            ..PresetDraft::default()
+        };
+        let checked = w.svc.preset_check(&lp("library/P.yaml"), &omitted).unwrap();
+        let unknown_tag: Vec<&Value> = checked
+            .problems
+            .iter()
+            .filter_map(|problem| match problem {
+                BlockReason::Missing { reason, .. }
+                | BlockReason::Broken { reason, .. }
+                | BlockReason::Conflict { reason, .. }
+                | BlockReason::LibraryUnavailable { reason } => Some(reason),
+            })
+            .filter(|reason| reason.code == BACKEND_TAG_UNKNOWN)
+            .map(|reason| &reason.args)
+            .collect();
+        assert_eq!(unknown_tag.len(), 1, "{:?}", checked.problems);
+        assert_eq!(unknown_tag[0]["list"], "hooks");
+        assert_eq!(unknown_tag[0]["index"], 1);
+
+        w.svc
+            .preset_save(&lp("library/P.yaml"), &omitted, None, None)
+            .unwrap();
+        let text = w.text("P.yaml");
+        assert!(text.contains("backend: fakebe"), "{text}");
+        assert!(text.contains("library/rules/a.md"), "{text}");
+
+        let given = PresetDraft {
+            hooks: Some(vec![item("library/h")]),
+            ..omitted
+        };
+        w.svc
+            .preset_save(&lp("library/P.yaml"), &given, None, None)
+            .unwrap();
+        let text = w.text("P.yaml");
+        assert!(!text.contains("fakebe"), "{text}");
     }
 
     #[test]

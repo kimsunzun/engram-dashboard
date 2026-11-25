@@ -187,6 +187,7 @@ impl LibraryService {
             Some(text) => {
                 let tag = self.tag_after_write(path, &disk, text.len());
                 let items = self.items_of(mount, &rest, text, tag, made_seq);
+                // ADR-0420: a `SKILL.md` made in a hook folder makes it a skill — the apply drops its `hooks.json`.
                 touched.extend(catalog.apply_items(items, true));
                 tracing::info!(path = path.as_str(), "library file created");
             }

@@ -13,6 +13,7 @@
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod hooks;
 pub mod settings_check;
 pub mod shell;
 
@@ -1166,6 +1167,28 @@ mod tests {
                 "`{}` has a settings check, so its agents get the built-in priming, but it lacks MCP or mail",
                 check.backend()
             );
+        }
+    }
+
+    /// ★Tripwire — a mode that does not load hook components names them★: every backend · mode whose
+    /// `loads().hooks` is `false` has a non-empty `hooks_omitted` code, so the launch check can name the hooks it
+    /// leaves out. `NoticeCodes` derives `Default`, so a backend built with `..NoticeCodes::default()` would
+    /// otherwise get `None` without anyone choosing it.
+    // ADR-0420
+    #[test]
+    fn every_mode_that_loads_no_hooks_names_them() {
+        for check in settings_checks() {
+            for mode in [AgentOutputFormat::Terminal, AgentOutputFormat::StreamJson] {
+                if check.loads(mode).hooks {
+                    continue;
+                }
+                let code = check.notice_codes(mode).hooks_omitted;
+                assert!(
+                    code.is_some_and(|code| !code.is_empty()),
+                    "`{}` {mode:?} loads no hooks but names no hooks_omitted code: {code:?}",
+                    check.backend()
+                );
+            }
         }
     }
 

@@ -65,7 +65,9 @@ declare_commands! {
     //   lowercase word (ADR-0400 decision 22). `library.renameMount` is added in it too (ADR-0400 decision 12). So are
     //   the file and trash commands `library.move` · `rename` · `copy` · `delete` · `listTrash` · `restore`, the five
     //   writes with the launch deadline class (ADR-0419), and `library.emptyTrash`, shell only (`SHELL_ONLY`) and with
-    //   the launch deadline class too.
+    //   the launch deadline class too. Hook components (ADR-0420) land in it as well: `LibraryKind` gains `Hook` ·
+    //   `HookFile`, `library.folders` rows gain `hook`, every preset view gains `hooks`, `preset.save` /
+    //   `preset.check` take an optional `hooks` and `preset.reorder` the section word `hooks`.
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -262,11 +264,16 @@ declare_commands! {
     //   reached through `library_commands::LibraryCommandHost`.
 
     /// The kind of a library item — `SkillFile` is a skill folder's `SKILL.md`: it stands in for its skill, is listed
-    /// inside the skill folder, and `kinds` matches it only by `SkillFile`, never by `Skill`.
+    /// inside the skill folder, and `kinds` matches it only by `SkillFile`, never by `Skill`. `Hook` is a folder
+    /// holding a `hooks.json` (and no `SKILL.md`); `HookFile` is that `hooks.json`, matched only by `HookFile` in
+    /// the same way.
+    // ADR-0420
     enum LibraryKind {
         Instruction,
         Skill,
         SkillFile,
+        Hook,
+        HookFile,
         Settings,
         Preset,
     }
@@ -288,12 +295,12 @@ declare_commands! {
 
     /// One library item.
     struct ListRow {
-        /// Library path, starting with its mount's name (a skill: its folder; a built-in: `engram/…`).
+        /// Library path, starting with its mount's name (a skill or a hook: its folder; a built-in: `engram/…`).
         path: String,
         /// `null` = a broken file that claims no preset or settings kind (its reason is in `state`), or the one row of
         /// a folder behind a link.
         kind: Option<LibraryKind>,
-        /// A skill's name; a built-in's id; every other item's file name.
+        /// A skill's name; a hook's folder name; a built-in's id; every other item's file name.
         name: String,
         /// Why it does not read — a broken file, a settings field refusal, a path through a link, a built-in whose
         /// files are missing (`builtin-unavailable`). `null` = it reads.
@@ -301,7 +308,8 @@ declare_commands! {
         /// Presets that reach it plus agents that attach it. A built-in counts only the Default slot: the agents whose
         /// Default slot is on for `engram/default`, 0 for every other built-in.
         references: u32,
-        /// An instruction's excerpt, a skill's description, a preset's or settings file's `description`; else empty.
+        /// An instruction's excerpt, a skill's description, the `description` of a hook's `hooks.json` or of a preset
+        /// or settings file; else empty.
         description: String,
     }
 
@@ -323,6 +331,9 @@ declare_commands! {
         name: String,
         /// A skill folder (it holds a `SKILL.md`).
         skill: bool,
+        /// A hook folder (it holds a `hooks.json` and no `SKILL.md`).
+        // ADR-0420
+        hook: bool,
         /// A mount (a top folder): `ok` | `missing` | `unreadable`, as last seen (no fresh check); `null` = a folder
         /// inside a mount. The built-in mount `engram` is `unreadable` when its folder cannot be read, yet its rows
         /// stay as stand-ins and a launch goes on with `builtin-unavailable`.
@@ -589,7 +600,7 @@ declare_commands! {
     struct PresetEntryArg {
         /// A library path or a built-in (`engram/…`).
         path: String,
-        /// The backend word the entry is for (instructions and skills only); `null` = every backend.
+        /// The backend word the entry is for (instructions, skills and hooks only); `null` = every backend.
         backend: Option<String>,
     }
 
@@ -602,9 +613,9 @@ declare_commands! {
         line: u32,
         /// Why the entry does not read — `not-found` (also for an item in a mount that is not there),
         /// `library-unavailable` `{mount, message}` (its mount cannot be read — the item was not looked up),
-        /// `path-through-link`, the item's broken reason or a settings file's first refusal, `wrong-kind`,
-        /// `builtin-in-library-preset`, `preset-cycle`; `null` = it reads. What an inner preset reaches is in
-        /// `problems`.
+        /// `path-through-link`, the item's broken reason, a settings file's first refusal or a hook's
+        /// `hook-shape-invalid`, `wrong-kind`, `builtin-in-library-preset`, `preset-cycle`; `null` = it reads. What an
+        /// inner preset reaches is in `problems`.
         state: Option<ReasonRow>,
     }
 
@@ -658,6 +669,9 @@ declare_commands! {
         presets: Vec<PresetEntryRow>,
         instructions: Vec<PresetEntryRow>,
         skills: Vec<PresetEntryRow>,
+        /// The hook components, in file order.
+        // ADR-0420
+        hooks: Vec<PresetEntryRow>,
         settings: Vec<PresetEntryRow>,
         /// The folder entries, normalized and deduplicated (first place kept).
         folders: Vec<FolderRow>,
@@ -1260,8 +1274,8 @@ declare_commands! {
         already_pointing: PointingRow,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Every folder of the library, flat, by path; a skill folder is marked `skill`; each mount (a top folder) carries
-    /// its `state`. The folders of a mount that cannot be read are left out and the mount is named in `unavailable`
+    /// Every folder of the library, flat, by path; a skill folder is marked `skill`, a hook folder `hook`; each mount (a
+    /// top folder) carries its `state`. The folders of a mount that cannot be read are left out and the mount is named in `unavailable`
     /// (the built-in mount `engram` too when its folder cannot be read, though its rows stay as stand-ins and a launch
     /// goes on with `builtin-unavailable`). CONFLICT `library-unavailable` when no scan of the library could be applied.
     #[effect(Read)]
@@ -1295,8 +1309,9 @@ declare_commands! {
     /// subfolders. `query` searches name and
     /// description (case-insensitive) in every item below `folder` and answers matching rows only (no
     /// `folders`). `kinds` keeps only those kinds (unspecified or empty = all; a broken file counts as the kind it
-    /// claims; a skill's `SKILL.md` matches only `SkillFile`). A `folder` at or below a link answers one
-    /// `path-through-link` row, which the filters do not apply to. Unspecified `folder` lists the mounts, each with
+    /// claims; a skill's `SKILL.md` matches only `SkillFile`, a hook's `hooks.json` only `HookFile`). A `folder` at or
+    /// below a link answers one `path-through-link` row, which the filters do not apply to. Unspecified `folder` lists
+    /// the mounts, each with
     /// its `state` — the built-in read-only mount `engram` among them (`engram/default`, `engram/priming`, folder
     /// `engram/settings`); a `query` without `folder` searches the mounts that can be read and names the others in
     /// `unavailable` (the built-in mount `engram` too when its folder cannot be read, though its rows stay as
@@ -1620,6 +1635,7 @@ declare_commands! {
         presets: Vec<PresetEntryRow>,
         instructions: Vec<PresetEntryRow>,
         skills: Vec<PresetEntryRow>,
+        hooks: Vec<PresetEntryRow>,
         settings: Vec<PresetEntryRow>,
         folders: Vec<FolderRow>,
         conflicts: Vec<ProblemRow>,
@@ -1630,7 +1646,8 @@ declare_commands! {
 
     /// Judges a draft of the preset's lists as `preset.save` would, without writing: the folders it would list, the
     /// conflicts and problems a launch of it would meet, and `save_refuses` = a save of this draft would be refused
-    /// (each mismatch is a `broken` problem with `args` `{path, list}`). `folders` omitted = the file's folders stay.
+    /// (each mismatch is a `broken` problem with `args` `{path, list}`). `folders` or `hooks` omitted = the file's
+    /// folders or hooks stay, judged as they are.
     /// CONFLICT `library-unavailable` (with `mount` when the preset's mount cannot be read) · `mount-read-only` (a
     /// path in the built-in mount `engram`).
     #[effect(Read)]
@@ -1640,6 +1657,9 @@ declare_commands! {
         presets: Vec<PresetEntryArg>,
         instructions: Vec<PresetEntryArg>,
         skills: Vec<PresetEntryArg>,
+        /// Omitted = the file's hooks stay.
+        // ADR-0420
+        hooks: Option<Vec<PresetEntryArg>>,
         settings: Vec<PresetEntryArg>,
         folders: Option<Vec<String>>,
     } -> ok PresetCheckOk {
@@ -1692,6 +1712,7 @@ declare_commands! {
         presets: Vec<PresetEntryRow>,
         instructions: Vec<PresetEntryRow>,
         skills: Vec<PresetEntryRow>,
+        hooks: Vec<PresetEntryRow>,
         settings: Vec<PresetEntryRow>,
         folders: Vec<FolderRow>,
         conflicts: Vec<ProblemRow>,
@@ -1700,7 +1721,7 @@ declare_commands! {
         agents: u32,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Puts one `section` (`presets` | `instructions` | `skills` | `settings` | `folders` — another word is
+    /// Puts one `section` (`presets` | `instructions` | `skills` | `hooks` | `settings` | `folders` — another word is
     /// INVALID_ARGUMENT) in `order` — every entry `preset.get` shows in it, each once (a duplicate as often as it is
     /// listed), else INVALID_ARGUMENT `reorder-order-mismatch` with the expected order in `args`. `base_rev` = the `rev` you
     /// read; CONFLICT `rev-mismatch` = the file changed since (read it again). NOT_FOUND `not-found`; CONFLICT
@@ -1709,8 +1730,8 @@ declare_commands! {
     #[since(9)]
     "preset.reorder" => args PresetReorderArgs {
         path: String,
-        /// `presets` | `instructions` | `skills` | `settings` | `folders` — the preset file's own keys; another word is
-        /// INVALID_ARGUMENT.
+        /// `presets` | `instructions` | `skills` | `hooks` | `settings` | `folders` — the preset file's own keys;
+        /// another word is INVALID_ARGUMENT.
         section: String,
         order: Vec<String>,
         base_rev: String,
@@ -1724,6 +1745,7 @@ declare_commands! {
         presets: Vec<PresetEntryRow>,
         instructions: Vec<PresetEntryRow>,
         skills: Vec<PresetEntryRow>,
+        hooks: Vec<PresetEntryRow>,
         settings: Vec<PresetEntryRow>,
         folders: Vec<FolderRow>,
         conflicts: Vec<ProblemRow>,
@@ -1732,9 +1754,9 @@ declare_commands! {
         agents: u32,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Sets the backend of `items` in instructions and skills (`backend` unspecified = every backend). Applies what it
-    /// can: an item the preset does not list, or lists only in presets or settings, is in `skipped`. An unknown backend
-    /// word refuses the whole call, INVALID_ARGUMENT `backend-tag-unknown`. NOT_FOUND `not-found`; CONFLICT
+    /// Sets the backend of `items` in instructions, skills and hooks (`backend` unspecified = every backend). Applies
+    /// what it can: an item the preset does not list, or lists only in presets or settings, is in `skipped`. An unknown
+    /// backend word refuses the whole call, INVALID_ARGUMENT `backend-tag-unknown`. NOT_FOUND `not-found`; CONFLICT
     /// `library-unavailable` · `mount-read-only` · `root-generation-stale` · `library-write-failed`.
     #[effect(Write)]
     #[since(9)]
@@ -1750,8 +1772,8 @@ declare_commands! {
         view: PresetView,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Replaces the four lists (and `folders`, when given — omitted = they stay) with the draft, all or nothing: any
-    /// mismatch (not a path, an unknown backend word, one item twice in a list, an item of another kind, a cycle, a
+    /// Replaces the four lists (and `hooks` and `folders`, when given — omitted = they stay) with the draft, all or
+    /// nothing: any mismatch (not a path, an unknown backend word, one item twice in a list, an item of another kind, a cycle, a
     /// relative folder …) refuses the whole save, INVALID_ARGUMENT `preset-save-refused` listing each. A missing item
     /// is allowed. `base_rev` (optional) = the `rev` you read; CONFLICT `rev-mismatch` = the file changed since.
     /// NOT_FOUND `not-found`; CONFLICT `library-unavailable` · `mount-read-only` · `root-generation-stale` ·
@@ -1763,6 +1785,9 @@ declare_commands! {
         presets: Vec<PresetEntryArg>,
         instructions: Vec<PresetEntryArg>,
         skills: Vec<PresetEntryArg>,
+        /// Omitted = the file's hooks stay.
+        // ADR-0420
+        hooks: Option<Vec<PresetEntryArg>>,
         settings: Vec<PresetEntryArg>,
         folders: Option<Vec<String>>,
         base_rev: Option<String>,
@@ -1776,6 +1801,7 @@ declare_commands! {
         presets: Vec<PresetEntryRow>,
         instructions: Vec<PresetEntryRow>,
         skills: Vec<PresetEntryRow>,
+        hooks: Vec<PresetEntryRow>,
         settings: Vec<PresetEntryRow>,
         folders: Vec<FolderRow>,
         conflicts: Vec<ProblemRow>,

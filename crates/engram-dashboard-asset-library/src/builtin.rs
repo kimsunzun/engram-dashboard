@@ -198,6 +198,7 @@ fn stand_in(id: BuiltinId, why: String, unread: bool) -> Entry {
                     presets: Vec::new(),
                     instructions: Vec::new(),
                     skills: Vec::new(),
+                    hooks: Vec::new(),
                     settings: Vec::new(),
                     folders: Vec::new(),
                     unmodeled: Vec::new(),
@@ -397,9 +398,11 @@ pub(crate) mod tests {
             cwd: Path::new(r"C:\Users\someone\work\project"),
             extra_args: &[],
             config_args: &[],
+            config_origins: &[],
+            hooks: &[],
             instructions: Some(&merged),
         };
-        assert_eq!(check.command_line_fits(&line), Ok(()));
+        assert_eq!(check.command_line_fits(&line), Ok(vec![]));
         // ADR-0387: the count form of the launch note fits after the shipped priming, so a codex terminal agent is
         //   told how many items were left out even when no name can go on its line.
         for n in [1, 10_000] {
@@ -408,7 +411,7 @@ pub(crate) mod tests {
                 instructions: Some(&noted),
                 ..line
             };
-            assert_eq!(check.command_line_fits(&line), Ok(()), "{n}");
+            assert_eq!(check.command_line_fits(&line), Ok(vec![]), "{n}");
         }
     }
 

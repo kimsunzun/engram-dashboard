@@ -16,7 +16,7 @@ use crate::backend::settings_check::{
     FolderUnsure, FrontMatterError, FrontMatterParser, InstructionLoad, ModeLoads, NativePlaces,
     NativeSkillRoots, NoticeCodes, SettingsCheck, SkillFormat, SubagentFrontMatter, UnsureWhy,
 };
-use crate::launch::Reason;
+use crate::launch::{Notice, Reason, CLAUDE_HOOKS_OMITTED};
 use crate::profile::AgentOutputFormat;
 
 /// Characters whose NFKC form contains `:` (Unicode 16.0) — claude refuses a subagent `name` that contains `:` after
@@ -32,10 +32,13 @@ impl SettingsCheck for ClaudeSettingsCheck {
         "claude"
     }
 
+    /// Hook components are not loaded yet in either mode — they are named in the omission notice.
+    // ADR-0420
     fn loads(&self, _mode: AgentOutputFormat) -> ModeLoads {
         ModeLoads {
             instructions: InstructionLoad::All,
             skills: true,
+            hooks: false,
         }
     }
 
@@ -56,9 +59,14 @@ impl SettingsCheck for ClaudeSettingsCheck {
         None
     }
 
-    /// claude loads every material in both modes and reads its folder entries itself — nothing to tell.
+    /// claude loads every material but hook components in both modes and reads its folder entries itself — only the
+    /// hook omission to tell.
+    // ADR-0420
     fn notice_codes(&self, _mode: AgentOutputFormat) -> NoticeCodes {
-        NoticeCodes::default()
+        NoticeCodes {
+            hooks_omitted: Some(CLAUDE_HOOKS_OMITTED),
+            ..NoticeCodes::default()
+        }
     }
 
     /// claude gets each folder entry as `--add-dir` and reads it itself.
@@ -157,9 +165,9 @@ impl SettingsCheck for ClaudeSettingsCheck {
         Ok(vec![])
     }
 
-    /// No claude command-line budget is claimed.
-    fn command_line_fits(&self, _line: &CommandLine<'_>) -> Result<(), Reason> {
-        Ok(())
+    /// No claude command-line budget is claimed, and the line raises no notice.
+    fn command_line_fits(&self, _line: &CommandLine<'_>) -> Result<Vec<Notice>, Reason> {
+        Ok(vec![])
     }
 
     /// No same-name notice for claude.
@@ -719,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_has_no_working_folder_block_no_notice_codes_and_lists_no_folder_at_launch() {
+    fn claude_has_no_working_folder_block_and_lists_no_folder_at_launch() {
         for mode in MODES {
             for cwd in [r"C:\Work\R&D", r"C:\%A%\b", r"D:\plain"] {
                 assert_eq!(
@@ -728,11 +736,6 @@ mod tests {
                     "{cwd} {mode:?}"
                 );
             }
-            assert_eq!(
-                CLAUDE_SETTINGS_CHECK.notice_codes(mode),
-                NoticeCodes::default(),
-                "{mode:?}"
-            );
             assert!(
                 !CLAUDE_SETTINGS_CHECK.folder_listing_at_launch(mode),
                 "{mode:?}"
@@ -749,13 +752,32 @@ mod tests {
     }
 
     #[test]
-    fn claude_loads_all_instructions_and_skills_in_both_modes() {
+    fn claude_loads_all_instructions_and_skills_but_no_hooks_yet_in_both_modes() {
         for mode in MODES {
             assert_eq!(
                 CLAUDE_SETTINGS_CHECK.loads(mode),
                 ModeLoads {
                     instructions: InstructionLoad::All,
                     skills: true,
+                    hooks: false,
+                },
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// The hooks claude does not load yet are named, never left out unnamed; no other claude notice exists.
+    // ADR-0420
+    #[test]
+    fn claude_names_only_the_hook_omission_in_both_modes() {
+        for mode in MODES {
+            assert_eq!(
+                CLAUDE_SETTINGS_CHECK.notice_codes(mode),
+                NoticeCodes {
+                    omitted: None,
+                    folder_omitted: None,
+                    same_name: None,
+                    hooks_omitted: Some("claude-hooks-omitted"),
                 },
                 "{mode:?}"
             );

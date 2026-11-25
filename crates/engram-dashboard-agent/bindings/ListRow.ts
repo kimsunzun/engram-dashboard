@@ -7,7 +7,7 @@ import type { ReasonRow } from "./ReasonRow";
  */
 export type ListRow = { 
 /**
- * Library path, starting with its mount's name (a skill: its folder; a built-in: `engram/…`).
+ * Library path, starting with its mount's name (a skill or a hook: its folder; a built-in: `engram/…`).
  */
 path: string, 
 /**
@@ -16,7 +16,7 @@ path: string,
  */
 kind?: LibraryKind | null, 
 /**
- * A skill's name; a built-in's id; every other item's file name.
+ * A skill's name; a hook's folder name; a built-in's id; every other item's file name.
  */
 name: string, 
 /**
@@ -30,6 +30,7 @@ state?: ReasonRow | null,
  */
 references: number, 
 /**
- * An instruction's excerpt, a skill's description, a preset's or settings file's `description`; else empty.
+ * An instruction's excerpt, a skill's description, the `description` of a hook's `hooks.json` or of a preset
+ * or settings file; else empty.
  */
 description: string, };

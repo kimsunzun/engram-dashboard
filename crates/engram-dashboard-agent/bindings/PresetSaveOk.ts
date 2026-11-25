@@ -4,4 +4,4 @@ import type { LaunchNoticeRow } from "./LaunchNoticeRow";
 import type { PresetEntryRow } from "./PresetEntryRow";
 import type { ProblemRow } from "./ProblemRow";
 
-export type PresetSaveOk = { path: string, rev: string, description?: string | null, presets: Array<PresetEntryRow>, instructions: Array<PresetEntryRow>, skills: Array<PresetEntryRow>, settings: Array<PresetEntryRow>, folders: Array<FolderRow>, conflicts: Array<ProblemRow>, problems: Array<ProblemRow>, notices: Array<LaunchNoticeRow>, agents: number, };
+export type PresetSaveOk = { path: string, rev: string, description?: string | null, presets: Array<PresetEntryRow>, instructions: Array<PresetEntryRow>, skills: Array<PresetEntryRow>, hooks: Array<PresetEntryRow>, settings: Array<PresetEntryRow>, folders: Array<FolderRow>, conflicts: Array<ProblemRow>, problems: Array<ProblemRow>, notices: Array<LaunchNoticeRow>, agents: number, };

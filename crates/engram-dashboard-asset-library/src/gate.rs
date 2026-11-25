@@ -1557,9 +1557,14 @@ fn item_problems(item: &Item) -> Vec<Reason> {
             .iter()
             .map(|(_, reason)| reason.clone())
             .collect(),
-        ItemContent::Instruction { .. } | ItemContent::Skill { .. } | ItemContent::SkillFile => {
-            Vec::new()
+        // ADR-0420: a hook whose `hooks.json` fails the shape check.
+        ItemContent::Hook { definition, .. } => {
+            definition.as_ref().err().cloned().into_iter().collect()
         }
+        ItemContent::Instruction { .. }
+        | ItemContent::Skill { .. }
+        | ItemContent::SkillFile
+        | ItemContent::HookFile => Vec::new(),
     }
 }
 

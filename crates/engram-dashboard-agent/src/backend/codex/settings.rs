@@ -23,7 +23,8 @@ use crate::backend::settings_check::{
     NativePlaces, NativeSkillRoots, NoticeCodes, SettingsCheck, SkillFormat, UnsureWhy,
 };
 use crate::launch::{
-    Reason, CODEX_SAME_NAME_SKILLS, CODEX_TERMINAL_FOLDER_OMITTED, CODEX_TERMINAL_OMITTED,
+    Notice, Reason, CODEX_HOOKS_OMITTED, CODEX_SAME_NAME_SKILLS, CODEX_TERMINAL_FOLDER_OMITTED,
+    CODEX_TERMINAL_OMITTED,
 };
 use crate::profile::AgentOutputFormat;
 
@@ -66,16 +67,20 @@ impl SettingsCheck for CodexSettingsCheck {
         "codex"
     }
 
+    /// Hook components are not loaded yet in either mode — they are named in the omission notice.
     // ADR-0337
+    // ADR-0420
     fn loads(&self, mode: AgentOutputFormat) -> ModeLoads {
         match mode {
             AgentOutputFormat::StreamJson => ModeLoads {
                 instructions: InstructionLoad::All,
                 skills: true,
+                hooks: false,
             },
             AgentOutputFormat::Terminal => ModeLoads {
                 instructions: InstructionLoad::BuiltinPrimingOnly,
                 skills: false,
+                hooks: false,
             },
         }
     }
@@ -118,19 +123,22 @@ impl SettingsCheck for CodexSettingsCheck {
     }
 
     /// The terminal mode loads neither library instructions and skills nor folder entries; JSON loads skills from
-    /// several roots, where one name can select none of them.
+    /// several roots, where one name can select none of them. Neither mode loads hook components yet.
     // ADR-0337
     // ADR-0341
     // ADR-0355
+    // ADR-0420
     fn notice_codes(&self, mode: AgentOutputFormat) -> NoticeCodes {
         match mode {
             AgentOutputFormat::Terminal => NoticeCodes {
                 omitted: Some(CODEX_TERMINAL_OMITTED),
                 folder_omitted: Some(CODEX_TERMINAL_FOLDER_OMITTED),
                 same_name: None,
+                hooks_omitted: Some(CODEX_HOOKS_OMITTED),
             },
             AgentOutputFormat::StreamJson => NoticeCodes {
                 same_name: Some(CODEX_SAME_NAME_SKILLS),
+                hooks_omitted: Some(CODEX_HOOKS_OMITTED),
                 ..NoticeCodes::default()
             },
         }
@@ -211,8 +219,9 @@ impl SettingsCheck for CodexSettingsCheck {
         cmdline::config_args(raw)
     }
 
-    fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<(), Reason> {
-        cmdline::fits(line)
+    /// The line raises no notice yet.
+    fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<Vec<Notice>, Reason> {
+        cmdline::fits(line).map(|()| Vec::new())
     }
 
     /// codex JSON reads `$CODEX_HOME/skills` (default `<home>/.codex/skills`), `<home>/.agents/skills`, and
@@ -720,12 +729,13 @@ mod tests {
     // ── simple answers ───────────────────────────────────────────────────────────
 
     #[test]
-    fn codex_json_loads_everything_and_the_terminal_only_the_builtin_priming() {
+    fn codex_json_loads_everything_but_hooks_and_the_terminal_only_the_builtin_priming() {
         assert_eq!(
             CODEX_SETTINGS_CHECK.loads(JSON),
             ModeLoads {
                 instructions: InstructionLoad::All,
                 skills: true,
+                hooks: false,
             }
         );
         assert_eq!(
@@ -733,6 +743,7 @@ mod tests {
             ModeLoads {
                 instructions: InstructionLoad::BuiltinPrimingOnly,
                 skills: false,
+                hooks: false,
             }
         );
     }
@@ -841,6 +852,7 @@ mod tests {
                 omitted: Some("codex-terminal-omitted"),
                 folder_omitted: Some("codex-terminal-folder-omitted"),
                 same_name: None,
+                hooks_omitted: Some("codex-hooks-omitted"),
             }
         );
         assert_eq!(
@@ -849,6 +861,7 @@ mod tests {
                 omitted: None,
                 folder_omitted: None,
                 same_name: Some("codex-same-name-skills"),
+                hooks_omitted: Some("codex-hooks-omitted"),
             }
         );
     }
@@ -1868,9 +1881,11 @@ mod tests {
                 cwd: Path::new("C:/w"),
                 extra_args: &[],
                 config_args: &[],
+                config_origins: &[],
+                hooks: &[],
                 instructions: None,
             };
-            assert_eq!(CODEX_SETTINGS_CHECK.command_line_fits(&line), Ok(()));
+            assert_eq!(CODEX_SETTINGS_CHECK.command_line_fits(&line), Ok(vec![]));
         }
         let too_long = ["-c".to_owned(), "x".repeat(8191)];
         let line = CommandLine {
@@ -1878,6 +1893,8 @@ mod tests {
             cwd: Path::new("C:/w"),
             extra_args: &[],
             config_args: &too_long,
+            config_origins: &[],
+            hooks: &[],
             instructions: Some("don't"),
         };
         assert_eq!(

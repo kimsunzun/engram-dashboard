@@ -11,7 +11,11 @@ export type PresetView = { path: string,
 /**
  * The preset file's edition — pass it as `base_rev` to `preset.reorder` / `preset.save`.
  */
-rev: string, description?: string | null, presets: Array<PresetEntryRow>, instructions: Array<PresetEntryRow>, skills: Array<PresetEntryRow>, settings: Array<PresetEntryRow>, 
+rev: string, description?: string | null, presets: Array<PresetEntryRow>, instructions: Array<PresetEntryRow>, skills: Array<PresetEntryRow>, 
+/**
+ * The hook components, in file order.
+ */
+hooks: Array<PresetEntryRow>, settings: Array<PresetEntryRow>, 
 /**
  * The folder entries, normalized and deduplicated (first place kept).
  */

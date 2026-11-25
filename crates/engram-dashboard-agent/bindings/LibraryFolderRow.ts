@@ -9,6 +9,10 @@ export type LibraryFolderRow = { path: string, name: string,
  */
 skill: boolean, 
 /**
+ * A hook folder (it holds a `hooks.json` and no `SKILL.md`).
+ */
+hook: boolean, 
+/**
  * A mount (a top folder): `ok` | `missing` | `unreadable`, as last seen (no fresh check); `null` = a folder
  * inside a mount. The built-in mount `engram` is `unreadable` when its folder cannot be read, yet its rows
  * stay as stand-ins and a launch goes on with `builtin-unavailable`.

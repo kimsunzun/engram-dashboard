@@ -138,6 +138,9 @@ pub struct PresetDraftInput {
     pub presets: Vec<PresetEntryArg>,
     pub instructions: Vec<PresetEntryArg>,
     pub skills: Vec<PresetEntryArg>,
+    /// `None` = the file's hook list stays as it is.
+    // ADR-0420
+    pub hooks: Option<Vec<PresetEntryArg>>,
     pub settings: Vec<PresetEntryArg>,
     /// `None` = the file's folder list stays as it is.
     pub folders: Option<Vec<String>>,
@@ -222,16 +225,19 @@ pub enum PresetSection {
     Presets,
     Instructions,
     Skills,
+    // ADR-0420
+    Hooks,
     Settings,
     Folders,
 }
 
 impl PresetSection {
     /// Every section, in the order the words are listed.
-    pub const ALL: [PresetSection; 5] = [
+    pub const ALL: [PresetSection; 6] = [
         PresetSection::Presets,
         PresetSection::Instructions,
         PresetSection::Skills,
+        PresetSection::Hooks,
         PresetSection::Settings,
         PresetSection::Folders,
     ];
@@ -242,6 +248,7 @@ impl PresetSection {
             PresetSection::Presets => "presets",
             PresetSection::Instructions => "instructions",
             PresetSection::Skills => "skills",
+            PresetSection::Hooks => "hooks",
             PresetSection::Settings => "settings",
             PresetSection::Folders => "folders",
         }
@@ -609,6 +616,7 @@ macro_rules! from_preset_view {
                     presets,
                     instructions,
                     skills,
+                    hooks,
                     settings,
                     folders,
                     conflicts,
@@ -623,6 +631,7 @@ macro_rules! from_preset_view {
                     presets,
                     instructions,
                     skills,
+                    hooks,
                     settings,
                     folders,
                     conflicts,
@@ -1236,6 +1245,7 @@ fn verb_preset_check(
         presets: args.presets,
         instructions: args.instructions,
         skills: args.skills,
+        hooks: args.hooks,
         settings: args.settings,
         folders: args.folders.map(unquoted),
     };
@@ -1343,6 +1353,7 @@ fn verb_preset_save(
         presets: args.presets,
         instructions: args.instructions,
         skills: args.skills,
+        hooks: args.hooks,
         settings: args.settings,
         folders: args.folders.map(unquoted),
     };
@@ -2231,7 +2242,7 @@ pub(crate) mod fake {
     fn draft_json(draft: &PresetDraftInput) -> Value {
         serde_json::json!({
             "presets": draft.presets, "instructions": draft.instructions, "skills": draft.skills,
-            "settings": draft.settings, "folders": draft.folders,
+            "hooks": draft.hooks, "settings": draft.settings, "folders": draft.folders,
         })
     }
 
@@ -2613,10 +2624,10 @@ mod tests {
         assert_eq!(out, status_row());
     }
 
-    /// `preset.reorder` takes the five lowercase section words only — another spelling (a capitalized one included) is
+    /// `preset.reorder` takes the six lowercase section words only — another spelling (a capitalized one included) is
     /// INVALID_ARGUMENT before the port is called (ADR-0400 decision 22).
     #[test]
-    fn a_section_word_outside_the_five_is_refused_before_the_port_is_called() {
+    fn a_section_word_outside_the_six_is_refused_before_the_port_is_called() {
         for word in ["Presets", "skill", "", "folders "] {
             let library = Arc::new(FakeLibrary::default());
             let err = call(
@@ -2628,7 +2639,7 @@ mod tests {
             assert_eq!(err.code(), ErrorCode::InvalidArgument, "{word:?}");
             assert!(
                 err.message()
-                    .contains("presets, instructions, skills, settings, folders"),
+                    .contains("presets, instructions, skills, hooks, settings, folders"),
                 "{word:?}"
             );
             assert!(library.calls().is_empty(), "{word:?}: the port was called");
@@ -2968,6 +2979,7 @@ mod tests {
                 "state": { "code": "not-found", "args": { "path": "a.md" }, "line": 5 },
             }],
             "skills": [entry("s1", 7)],
+            "hooks": [entry("team/hooks/h", 8)],
             "settings": [entry("s.yaml", 9)],
             "folders": [{ "path": "C:\\f", "line": 11, "status": "unreadable", "status_why": "timed out" }],
             "conflicts": [{
@@ -3003,8 +3015,10 @@ mod tests {
     fn each_preset_verb_hands_the_port_the_values_the_caller_typed() {
         let entry = json!({ "path": "a.md", "backend": "codex" });
         let draft = json!({
-            "presets": [], "instructions": [entry.clone()], "skills": [], "settings": [], "folders": null,
+            "presets": [], "instructions": [entry.clone()], "skills": [], "hooks": null, "settings": [],
+            "folders": null,
         });
+        let hook = json!({ "path": "team/hooks/h", "backend": "claude" });
         let check =
             json!({ "save_refuses": false, "folders": [], "conflicts": [], "problems": [] });
         let preview = json!({
@@ -3031,13 +3045,14 @@ mod tests {
             (
                 "preset.check",
                 json!({
-                    "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [],
-                    "folders": ["C:/f"],
+                    "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "hooks": [hook.clone()],
+                    "settings": [], "folders": ["C:/f"],
                 }),
                 check,
                 "preset_check",
                 json!({ "path": "p.yaml", "draft": {
-                    "presets": [], "instructions": [], "skills": [], "settings": [], "folders": ["C:/f"],
+                    "presets": [], "instructions": [], "skills": [], "hooks": [hook], "settings": [],
+                    "folders": ["C:/f"],
                 } }),
             ),
             (
@@ -3085,6 +3100,16 @@ mod tests {
                 }),
             ),
             (
+                "preset.reorder",
+                json!({ "path": "p.yaml", "section": "hooks", "order": ["h"], "base_rev": "r1" }),
+                preset_view(),
+                "preset_reorder",
+                json!({
+                    "path": "p.yaml", "section": "hooks", "order": ["h"], "base_rev": "r1",
+                    "root_generation": null,
+                }),
+            ),
+            (
                 "preset.setBackend",
                 json!({ "path": "p.yaml", "items": ["a.md"] }),
                 partial_answer(),
@@ -3110,7 +3135,7 @@ mod tests {
                     "path": "p.yaml",
                     "draft": {
                         "presets": [], "instructions": [{ "path": "a.md", "backend": "codex" }],
-                        "skills": [], "settings": [], "folders": null,
+                        "skills": [], "hooks": null, "settings": [], "folders": null,
                     },
                     "base_rev": "r1", "root_generation": 4,
                 }),
@@ -3147,12 +3172,14 @@ mod tests {
         let lists = |folders: Value| {
             json!({
                 "path": "p.yaml", "presets": [], "instructions": [{ "path": "\"a.md\"", "backend": null }],
-                "skills": [], "settings": [], "folders": folders,
+                "skills": [], "hooks": [{ "path": "\"h\"", "backend": null }], "settings": [],
+                "folders": folders,
             })
         };
         let draft = json!({
             "presets": [], "instructions": [{ "path": "\"a.md\"", "backend": null }], "skills": [],
-            "settings": [], "folders": ["C:\\docs", "'D:\\x y'"],
+            "hooks": [{ "path": "\"h\"", "backend": null }], "settings": [],
+            "folders": ["C:\\docs", "'D:\\x y'"],
         });
         let check =
             json!({ "save_refuses": false, "folders": [], "conflicts": [], "problems": [] });

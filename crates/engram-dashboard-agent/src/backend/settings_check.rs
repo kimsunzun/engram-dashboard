@@ -1,6 +1,7 @@
 //! Backend settings-check port — the settings knowledge that differs per backend (what a mode loads · folder-entry
 //! path guard · working-folder guard · launch notice codes · folder load set · skill format · command-line guard and
-//! budget · whether its instructions append or replace · the backend's own skill folders), in one trait. The
+//! budget, with the notices of the line and the subject of a refusal · whether its instructions append or replace ·
+//! the backend's own skill folders), in one trait. The
 //! registry is [`super::settings_checks`] / [`super::settings_check_for`].
 //!
 //! ★No schema check★: a settings value is handed to the CLI as it is and the CLI judges it by its own rules — the
@@ -24,7 +25,8 @@ use engram_dashboard_platform::fs::same_path;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::launch::Reason;
+use crate::backend::hooks::HookRef;
+use crate::launch::{Notice, Reason};
 use crate::profile::AgentOutputFormat;
 
 /// One backend's settings knowledge. Implementations are stateless singletons.
@@ -94,8 +96,11 @@ pub trait SettingsCheck: Send + Sync {
 
     /// Whether the launch command line holds all of `line`, counting the pieces only the launch knows (the control
     /// channel, a resume id) at their upper-bound length. `Err` = over the budget, or an instructions text the
-    /// command line cannot carry (problem ②). A backend with no command-line budget answers `Ok(())`.
-    fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<(), Reason>;
+    /// command line cannot carry (problem ②) — carried where [`RefusalSubject::of`] says. `Ok` = the launch
+    /// notices this line raises, which the caller adds to the plan's notices without reading them. A backend with no
+    /// command-line budget and no such notices answers `Ok(vec![])`.
+    // ADR-0420
+    fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<Vec<Notice>, Reason>;
 
     /// Whether the merged instructions this backend gets in `mode` are added to what the CLI loads by itself (`true`)
     /// or replace a value the user set in the CLI's own config (`false`). The default is `false`, the safe answer: a
@@ -135,6 +140,9 @@ pub struct NoticeCodes {
     pub folder_omitted: Option<&'static str>,
     /// Skills of one name in several skill roots the backend reads.
     pub same_name: Option<&'static str>,
+    /// Hook components this mode does not load ([`ModeLoads::hooks`] `false`) — never left out unnamed.
+    // ADR-0420
+    pub hooks_omitted: Option<&'static str>,
 }
 
 /// Where a backend's own skill folders are looked for ([`SettingsCheck::native_skill_roots`]).
@@ -176,11 +184,65 @@ pub struct CommandLine<'a> {
     /// The agent's pass-through arguments (`command.extra_args`).
     pub extra_args: &'a [String],
     /// What [`SettingsCheck::command_line_args`] returned for the attached raw values, concatenated in attach
-    /// order — the exact arguments (flags included) that go on the line.
+    /// order — every argument (flags included) those values give, as returned.
     pub config_args: &'a [String],
+    /// The origin of each argument of `config_args`, at the same index — built in the same loop, so the two have the
+    /// same length.
+    // ADR-0420
+    pub config_origins: &'a [ConfigOrigin],
+    /// The plan's hook components ([`crate::launch::LaunchPlan::hooks`]), in plan order.
+    // ADR-0420
+    pub hooks: &'a [HookRef],
     /// The instructions text this mode puts on the command line (codex terminal: the merged instructions file,
     /// which holds only the built-in priming). `None` = none.
     pub instructions: Option<&'a str>,
+}
+
+/// Where one argument of [`CommandLine::config_args`] came from: the settings asset (its library path or built-in
+/// spelling) and the line of its raw field in that file (`None` = no line).
+// ADR-0420
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigOrigin {
+    pub source: String,
+    pub line: Option<u32>,
+}
+
+/// The `args` key of a [`SettingsCheck::command_line_fits`] refusal or notice that names a hook component (its
+/// library path).
+// ADR-0420
+pub const SUBJECT_HOOK_ARG: &str = "hook";
+
+/// The `args` key of a [`SettingsCheck::command_line_fits`] refusal or notice that names a settings asset (a
+/// [`ConfigOrigin::source`]); the reason's `line` is the field's line.
+// ADR-0420
+pub const SUBJECT_SOURCE_ARG: &str = "source";
+
+/// What a [`SettingsCheck::command_line_fits`] refusal is about — the entry the caller carries it on, read from its
+/// `args` only.
+// ADR-0420
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalSubject<'a> {
+    /// A hook component — the library path [`SUBJECT_HOOK_ARG`] names.
+    Hook(&'a str),
+    /// A settings asset at the reason's `line` — the path [`SUBJECT_SOURCE_ARG`] names.
+    Source(&'a str),
+    /// The command line as a whole (the budget, an argument of the agent's own) — neither key is a string.
+    CommandLine,
+}
+
+impl<'a> RefusalSubject<'a> {
+    /// The subject of `reason`: a string [`SUBJECT_HOOK_ARG`] first, else a string [`SUBJECT_SOURCE_ARG`], else the
+    /// command line.
+    pub fn of(reason: &'a Reason) -> Self {
+        let named = |key: &str| reason.args.get(key).and_then(Value::as_str);
+        if let Some(hook) = named(SUBJECT_HOOK_ARG) {
+            RefusalSubject::Hook(hook)
+        } else if let Some(source) = named(SUBJECT_SOURCE_ARG) {
+            RefusalSubject::Source(source)
+        } else {
+            RefusalSubject::CommandLine
+        }
+    }
 }
 
 /// What one backend · mode loads from the launch materials.
@@ -188,6 +250,9 @@ pub struct CommandLine<'a> {
 pub struct ModeLoads {
     pub instructions: InstructionLoad,
     pub skills: bool,
+    /// Hook components ([`crate::launch::LaunchPlan::hooks`]).
+    // ADR-0420
+    pub hooks: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,6 +459,41 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// A refusal is carried on the hook its `hook` names, else on the settings asset its `source` names, else on the
+    /// command line — a non-string value names nothing.
+    // ADR-0420
+    #[test]
+    fn a_refusal_subject_is_its_hook_then_its_source_then_the_command_line() {
+        let refusal = |args: Value| Reason {
+            code: "x".to_owned(),
+            args,
+            line: Some(4),
+        };
+        for (args, subject) in [
+            (
+                json!({"hook": "team/hooks/a", "source": "team/s.yaml"}),
+                RefusalSubject::Hook("team/hooks/a"),
+            ),
+            (
+                json!({"source": "team/s.yaml", "why": "y"}),
+                RefusalSubject::Source("team/s.yaml"),
+            ),
+            (
+                json!({"hook": 1, "source": "team/s.yaml"}),
+                RefusalSubject::Source("team/s.yaml"),
+            ),
+            (
+                json!({"hook": null, "source": ["s"]}),
+                RefusalSubject::CommandLine,
+            ),
+            (json!({"needed": 9000}), RefusalSubject::CommandLine),
+            (json!("hook"), RefusalSubject::CommandLine),
+        ] {
+            let reason = refusal(args.clone());
+            assert_eq!(RefusalSubject::of(&reason), subject, "{args}");
+        }
+    }
 
     #[test]
     fn paths_front_matter_reads_paths_and_takes_null_as_absent() {

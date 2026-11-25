@@ -42,11 +42,12 @@ pub(crate) mod fake {
     use std::path::Path;
 
     use engram_dashboard_agent::backend::settings_check::{
-        CommandLine, FolderEntry, FolderLoad, FolderLoadKind, FolderLoadSet, FrontMatterParser,
-        InstructionLoad, ModeLoads, NativePlaces, NativeSkillRoots, NoticeCodes, SkillFormat,
+        CommandLine, ConfigOrigin, FolderEntry, FolderLoad, FolderLoadKind, FolderLoadSet,
+        FrontMatterParser, InstructionLoad, ModeLoads, NativePlaces, NativeSkillRoots, NoticeCodes,
+        SkillFormat,
     };
     use engram_dashboard_agent::backend::SettingsCheck;
-    use engram_dashboard_agent::launch::Reason;
+    use engram_dashboard_agent::launch::{Notice, Reason};
     use engram_dashboard_agent::profile::AgentOutputFormat;
     use serde_json::Value;
 
@@ -122,7 +123,7 @@ pub(crate) mod fake {
         fn command_line_args(&self, _: &Value) -> Result<Vec<String>, Reason> {
             unimplemented!("word-only fake")
         }
-        fn command_line_fits(&self, _: &CommandLine<'_>) -> Result<(), Reason> {
+        fn command_line_fits(&self, _: &CommandLine<'_>) -> Result<Vec<Notice>, Reason> {
             unimplemented!("word-only fake")
         }
         fn native_skill_roots(
@@ -176,18 +177,23 @@ pub(crate) mod fake {
     ///
     /// - `command_line_args`: an object holding the key `unsafe` is refused (`<word>-line-unsafe`), carrying the line
     ///   that key's value names when it is a number (a line the port cannot know — the check must replace it), else
-    ///   no line; anything else is `Ok([])`.
+    ///   no line; an object whose `args` is a list gives its string items; anything else is `Ok([])`.
     /// - `skill_format`: `Invalid(<word>-skill-refused)` when the text holds `refuse`, else `Valid` named after the
     ///   folder.
-    /// - `loads`: `StreamJson` every instruction and skill; `Terminal` only the built-in priming and no skill.
+    /// - `loads`: `StreamJson` every instruction, skill and hook; `Terminal` only the built-in priming, no skill and
+    ///   no hook.
     /// - `accepts_skill_name`: a name not holding `bad`. `folder_entry_blocks`: a path holding `blocked`.
-    /// - `notice_codes`: `Terminal` → `omitted` = `<word>-omitted`, `folder_omitted` = `<word>-folder-omitted`;
-    ///   `StreamJson` → `same_name` = `<word>-same-name`.
+    /// - `notice_codes`: `Terminal` → `omitted` = `<word>-omitted`, `folder_omitted` = `<word>-folder-omitted`,
+    ///   `hooks_omitted` = [`Scripted::hooks_omitted`] (`<word>-hooks-omitted` by default); `StreamJson` → `same_name` =
+    ///   `<word>-same-name`.
     /// - `folder_listing_at_launch`: always. `folder_load_set`: a top-level `RULES.md` that reads is an instruction row
     ///   — `StreamJson` loads and carries it, `Terminal` omits it; nothing else.
     /// - `working_folder_blocks`: never. `command_line_fits`: fits unless the line's `instructions` hold
-    ///   [`Scripted::refuse_holding`] (`<word>-line-too-long`), and records every line's `instructions` in
-    ///   [`Scripted::lines`]. No native skill roots; `root_skills` finds nothing.
+    ///   [`Scripted::refuse_holding`] (`<word>-line-too-long` with [`Scripted::refusal_args`]), and records every
+    ///   line's `instructions` in [`Scripted::lines`], its `config_args` with their `config_origins` in
+    ///   [`Scripted::config`] and its hooks' paths in [`Scripted::hook_paths`]; a line that fits answers one notice of
+    ///   code [`Scripted::fit_notice`] whose `args` = `{instructions}` (that line's text, or `null`), none when it is
+    ///   `None`. No native skill roots; `root_skills` finds nothing.
     /// - `instructions_append`: [`Scripted::append`] — `false` by default, the trait default (instructions replace the
     ///   user's own).
     pub(crate) struct Scripted {
@@ -195,10 +201,20 @@ pub(crate) mod fake {
         omitted: &'static str,
         folder_omitted: &'static str,
         same_name: &'static str,
+        /// The `Terminal` `hooks_omitted` code — `None` stands for a backend that names no such notice.
+        pub hooks_omitted: Option<&'static str>,
         /// The `instructions` of every line `command_line_fits` was asked about, in order.
         pub lines: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
         /// A text whose presence in the instructions makes `command_line_fits` refuse the line.
         pub refuse_holding: Option<&'static str>,
+        /// The `args` of that refusal (`{}` by default — the command line as a whole).
+        pub refusal_args: Value,
+        /// The `config_args` and `config_origins` of every line `command_line_fits` was asked about, in order.
+        pub config: std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, Vec<ConfigOrigin>)>>>,
+        /// The library paths of the `hooks` of every line `command_line_fits` was asked about, in order.
+        pub hook_paths: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+        /// The code of the notice `command_line_fits` answers for a line that fits — `None` (the default) = none.
+        pub fit_notice: Option<&'static str>,
         pub append: bool,
     }
 
@@ -212,8 +228,13 @@ pub(crate) mod fake {
                 omitted: code("omitted"),
                 folder_omitted: code("folder-omitted"),
                 same_name: code("same-name"),
+                hooks_omitted: Some(code("hooks-omitted")),
                 lines: Default::default(),
                 refuse_holding: None,
+                refusal_args: serde_json::json!({}),
+                config: Default::default(),
+                hook_paths: Default::default(),
+                fit_notice: None,
                 append: false,
             }
         }
@@ -236,10 +257,12 @@ pub(crate) mod fake {
                 AgentOutputFormat::StreamJson => ModeLoads {
                     instructions: InstructionLoad::All,
                     skills: true,
+                    hooks: true,
                 },
                 AgentOutputFormat::Terminal => ModeLoads {
                     instructions: InstructionLoad::BuiltinPrimingOnly,
                     skills: false,
+                    hooks: false,
                 },
             }
         }
@@ -258,6 +281,7 @@ pub(crate) mod fake {
                     omitted: Some(self.omitted),
                     folder_omitted: Some(self.folder_omitted),
                     same_name: None,
+                    hooks_omitted: self.hooks_omitted,
                 },
                 AgentOutputFormat::StreamJson => NoticeCodes {
                     same_name: Some(self.same_name),
@@ -322,17 +346,39 @@ pub(crate) mod fake {
                     let line = at.as_u64().and_then(|n| u32::try_from(n).ok());
                     Err(self.reason("line-unsafe", line))
                 }
-                None => Ok(vec![]),
+                None => Ok(raw
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|args| {
+                        args.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default()),
             }
         }
-        fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<(), Reason> {
+        fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<Vec<Notice>, Reason> {
             let instructions = line.instructions.map(str::to_owned);
             engram_dashboard_base::sync::lock(&self.lines).push(instructions);
+            engram_dashboard_base::sync::lock(&self.config)
+                .push((line.config_args.to_vec(), line.config_origins.to_vec()));
+            engram_dashboard_base::sync::lock(&self.hook_paths)
+                .push(line.hooks.iter().map(|hook| hook.path.clone()).collect());
             match (line.instructions, self.refuse_holding) {
-                (Some(text), Some(refused)) if text.contains(refused) => {
-                    Err(self.reason("line-too-long", None))
-                }
-                _ => Ok(()),
+                (Some(text), Some(refused)) if text.contains(refused) => Err(Reason {
+                    args: self.refusal_args.clone(),
+                    ..self.reason("line-too-long", None)
+                }),
+                _ => Ok(self
+                    .fit_notice
+                    .map(|code| Notice {
+                        code: code.to_owned(),
+                        args: serde_json::json!({ "instructions": line.instructions }),
+                        line: None,
+                    })
+                    .into_iter()
+                    .collect()),
             }
         }
         fn instructions_append(&self, _: AgentOutputFormat) -> bool {

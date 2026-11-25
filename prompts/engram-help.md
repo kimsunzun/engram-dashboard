@@ -261,6 +261,7 @@ The library is one tree of mounts: a mount is a folder registered under a name (
 
   instruction   a .md file. Its text goes into the agent instructions
   skill         a folder holding SKILL.md
+  hook          a folder holding hooks.json (and no SKILL.md)
   settings      a .yaml file with kind: settings, version: 1, description: and one key per backend (claude · codex) holding that backend's own settings
   preset        a .yaml file with kind: preset — lists of the items above and of other presets
 
@@ -279,7 +280,7 @@ The library is one tree of mounts: a mount is a folder registered under a name (
   folders:
     - D:\work\shared-skills
 
-An entry with backend goes only to that backend (instructions and skills only). folders lists absolute folder paths, inside or outside a mount — a folder entry is not a library item and is not named by a library path; preset.previewFolder shows what each backend loads from one.
+An entry with backend goes only to that backend (instructions, skills and hooks only). folders lists absolute folder paths, inside or outside a mount — a folder entry is not a library item and is not named by a library path; preset.previewFolder shows what each backend loads from one.
 
 Write a one-line description when you create or edit a settings or preset file.
 
@@ -298,8 +299,8 @@ Where <path> appears below, give a library path; <list> is a JSON array of strin
   {tool} library.renameMount --mount <mount name> --to <new name> [--yes true --root_generation <n> --plan_digest <digest>]
       Renames a mount and re-points every reference to it — in the preset files of every mount, then in agents. Two calls when files change or references stay unread (below)
   {tool} library.folders
-      Every folder, flat. A skill folder is marked skill; a mount carries its state. The folders of a mount that cannot be read are left out, and the mount is named in unavailable — except the built-in engram, whose folders stay even when it is named there
-  {tool} library.list [--folder <path>] [--query <text>] [--kinds <JSON array of Instruction|Skill|SkillFile|Settings|Preset>]
+      Every folder, flat. A skill folder is marked skill, a hook folder hook; a mount carries its state. The folders of a mount that cannot be read are left out, and the mount is named in unavailable — except the built-in engram, whose folders stay even when it is named there
+  {tool} library.list [--folder <path>] [--query <text>] [--kinds <JSON array of Instruction|Skill|SkillFile|Hook|HookFile|Settings|Preset>]
       The items in that folder and its subfolders (folder omitted = the top: the mounts, each with its state), or with query the items below it whose name or description matches — over the whole library it skips the mounts that cannot be read and names them in unavailable (the built-in engram's rows still come, as stand-ins, even when it is named there). Per row path · kind · name · description · state (why the file is broken, null if it reads)
   {tool} library.read --path <path>
       One item: its file on disk, the presets and agents that reach it, an excerpt
@@ -351,12 +352,12 @@ Emptying the trash and deleting for good are done by the user in the library scr
   {tool} preset.remove --path <path> (--items <list> | --folders <list>)
   {tool} preset.setBackend --path <path> --items <list> [--backend <claude|codex>]
       backend omitted = every backend
-  {tool} preset.reorder --path <path> --section <presets|instructions|skills|settings|folders> --order <list> --base_rev <rev>
+  {tool} preset.reorder --path <path> --section <presets|instructions|skills|hooks|settings|folders> --order <list> --base_rev <rev>
       order = every entry preset.get shows in that section, each once. The section words are lowercase, as the preset file spells its keys
-  {tool} preset.save --path <path> --presets <entries> --instructions <entries> --skills <entries> --settings <entries> [--folders <list>] [--base_rev <rev>]
-      Replaces the lists, all or nothing. <entries> = a JSON array of {"path": "…", "backend": "…"} (backend may be left out). folders omitted = they stay
-  {tool} preset.check --path <path> --presets <entries> --instructions <entries> --skills <entries> --settings <entries> [--folders <list>]
-      Judges that draft as preset.save would, without writing
+  {tool} preset.save --path <path> --presets <entries> --instructions <entries> --skills <entries> [--hooks <entries>] --settings <entries> [--folders <list>] [--base_rev <rev>]
+      Replaces the lists, all or nothing. <entries> = a JSON array of {"path": "…", "backend": "…"} (backend may be left out). hooks or folders omitted = they stay
+  {tool} preset.check --path <path> --presets <entries> --instructions <entries> --skills <entries> [--hooks <entries>] --settings <entries> [--folders <list>]
+      Judges that draft as preset.save would, without writing; hooks or folders omitted = the file's, judged as they are
   {tool} preset.previewFolder --folder <absolute folder> [--backend <claude|codex>]
       What each backend would load from that folder. Reads only
 

@@ -228,7 +228,7 @@ fn the_agent_preset_verbs_are_declared_in_generation_9_with_their_effect() {
 }
 
 /// `preset.reorder`'s `section` is a plain string — the handler checks the word (ADR-0400 decision 22) — so the
-/// command's summary lists the five lowercase words; `preset.previewFolder` advertises the two modes.
+/// command's summary lists the six lowercase words; `preset.previewFolder` advertises the two modes.
 #[test]
 fn the_preset_section_words_are_documented_and_the_preview_mode_is_a_closed_vocabulary() {
     let schema = |name: &str| -> serde_json::Value {
@@ -238,7 +238,14 @@ fn the_preset_section_words_are_documented_and_the_preview_mode_is_a_closed_voca
     assert_eq!(section["type"], json!("string"), "{section}");
     assert!(section.get("enum").is_none(), "{section}");
     let summary = spec_of("preset.reorder").expect("declaration").summary;
-    for word in ["presets", "instructions", "skills", "settings", "folders"] {
+    for word in [
+        "presets",
+        "instructions",
+        "skills",
+        "hooks",
+        "settings",
+        "folders",
+    ] {
         assert!(
             summary.contains(&format!("`{word}`")),
             "{word} missing from: {summary}"
@@ -250,16 +257,25 @@ fn the_preset_section_words_are_documented_and_the_preview_mode_is_a_closed_voca
     );
 }
 
-/// The library list filter advertises the closed kind vocabulary — `SkillFile` is its own word beside `Skill`.
+/// The library list filter advertises the closed kind vocabulary — `SkillFile` is its own word beside `Skill`, and
+/// `HookFile` beside `Hook` (ADR-0420).
 #[test]
-fn the_library_list_advertises_the_five_kinds() {
+fn the_library_list_advertises_the_seven_kinds() {
     let schema: serde_json::Value =
         serde_json::from_str(spec_of("library.list").expect("declaration").args_schema)
             .expect("args schema");
     let kinds = &schema["properties"]["kinds"]["anyOf"][0]["items"]["enum"];
     assert_eq!(
         kinds,
-        &json!(["Instruction", "Skill", "SkillFile", "Settings", "Preset"]),
+        &json!([
+            "Instruction",
+            "Skill",
+            "SkillFile",
+            "Hook",
+            "HookFile",
+            "Settings",
+            "Preset"
+        ]),
         "{schema}"
     );
 }

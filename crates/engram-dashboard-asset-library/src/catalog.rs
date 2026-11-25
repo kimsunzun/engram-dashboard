@@ -36,6 +36,7 @@ use serde::Deserialize;
 
 use crate::backends::Backends;
 use crate::excerpt::excerpt;
+use crate::format::hooks::read_hooks;
 use crate::format::{
     library_skill_name, options, parse_preset, parse_settings, sniff_kind, split_front_matter,
     ParseError, PresetDoc, SettingsDoc, Sniff, YAML_SYNTAX,
@@ -43,7 +44,7 @@ use crate::format::{
 use crate::launch::sha256_hex;
 use crate::mounts::{virtual_path, MountName, MountPath};
 use crate::path::{AssetRef, LibPath};
-use crate::store::{ContentTag, ScanListing};
+use crate::store::{ContentTag, EntryKind, ScanListing};
 use crate::validate::{check_settings, SettingsVerdict};
 
 /// A file whose modification time is this close to (or after) the time it was read may change again within the
@@ -52,6 +53,10 @@ use crate::validate::{check_settings, SettingsVerdict};
 pub const RACY_WINDOW: Duration = Duration::from_secs(2);
 
 const SKILL_FILE: &str = "SKILL.md";
+
+/// The marker and definition file of a hook folder.
+// ADR-0420
+const HOOK_FILE: &str = "hooks.json";
 
 /// The catalog key of a library path (module header): the platform path key of its virtual spelling. Every [`Catalog`]
 /// lookup takes this key.
@@ -62,10 +67,10 @@ pub fn key(path: &LibPath) -> PathKey {
 /// One library item.
 #[derive(Clone, Debug)]
 pub struct Item {
-    /// A skill's path is its folder; every other item's is its file.
+    /// A skill's or a hook's path is its folder; every other item's is its file.
     pub path: LibPath,
     pub kind: ItemKind,
-    /// The tag of the file read (a skill: its `SKILL.md`).
+    /// The tag of the file read (a skill: its `SKILL.md`; a hook: its `hooks.json`).
     pub tag: ContentTag,
     /// The sequence number noted before the read this item was made from.
     pub read_seq: u64,
@@ -79,6 +84,11 @@ pub enum ItemKind {
     Skill,
     /// The `SKILL.md` of a skill folder — stands in for the skill, is not an instruction.
     SkillFile,
+    /// A folder holding a `hooks.json` directly and no `SKILL.md` (a folder holding both is a skill — [`folder_marker`]).
+    // ADR-0420
+    Hook,
+    /// The `hooks.json` of a hook folder — stands in for the hook.
+    HookFile,
     Preset,
     Settings,
     /// A `.yaml` / `.yml` that claims a kind but does not read; `claimed` = what [`sniff_kind`] found.
@@ -89,7 +99,8 @@ pub enum ItemKind {
 
 impl ItemKind {
     /// The kind a `library.list` row shows and its `kinds` filter matches: a broken file as the preset or settings
-    /// kind it claims, `None` when it claims neither; every other kind as itself (`SkillFile` stays `SkillFile`).
+    /// kind it claims, `None` when it claims neither; every other kind as itself (`SkillFile` stays `SkillFile`,
+    /// `HookFile` stays `HookFile`).
     // ADR-0386
     pub fn listed(&self) -> Option<ItemKind> {
         match self {
@@ -121,6 +132,16 @@ pub enum ItemContent {
         text: Arc<str>,
     },
     SkillFile,
+    Hook {
+        /// `hooks.json`'s top-level `description`, trimmed; empty when there is none (display only).
+        description: String,
+        /// The `hooks.json` name as on disk.
+        file_name: String,
+        /// The `hooks` object as read, or why the file fails the shape check (`hook-shape-invalid` — an item problem).
+        // ADR-0420
+        definition: Result<serde_json::Map<String, serde_json::Value>, Reason>,
+    },
+    HookFile,
     Preset {
         doc: PresetDoc,
         /// The lowercase-hex SHA-256 of the exact bytes the item was made from, BOM included — the preset's `rev`
@@ -194,6 +215,7 @@ impl ScanResult {
             absent_ranges,
             skipped_links,
             errors,
+            folder_files,
         } = listing;
         let at = |rel: &MountPath| virtual_path(mount, Some(rel));
         // A place of the listing: `None` = the mount's folder, its top in the virtual tree.
@@ -206,7 +228,7 @@ impl ScanResult {
         if listed_at.contains_key(&None) {
             folders.push(virtual_path(mount, None));
         }
-        let listed_at = listed_at
+        let listed_at: HashMap<Option<LibPath>, u64> = listed_at
             .into_iter()
             .map(|(rel, seq)| (place(rel), seq))
             .collect();
@@ -218,6 +240,44 @@ impl ScanResult {
         let mut kept: Vec<Option<LibPath>> = errors.iter().map(|(at, _)| at.clone()).collect();
         let mut entries = Vec::new();
         let mut no_kind = Vec::new();
+        // ADR-0420: a folder's kind comes from every file directly in it, so each folder's marker is found before any
+        //   file is classified — from this listing for a folder it walked, from `folder_files` for one it did not.
+        // ADR-0366: a folder whose listing failed, or one holding a file whose metadata failed, may lack a `SKILL.md`
+        //   among its names — it is not known, and what the catalog holds of it is kept.
+        let failed: HashSet<PathKey> = errors
+            .iter()
+            .filter_map(|(place, _)| place.as_ref())
+            .filter_map(|place| match listed_at.contains_key(&Some(place.clone())) {
+                true => Some(key(place)),
+                false => place.parent().map(|folder| key(&folder)),
+            })
+            .collect();
+        let known: HashSet<PathKey> = listed_at
+            .keys()
+            .flatten()
+            .map(key)
+            .chain(folder_files.keys().map(|folder| key(&at(folder))))
+            .filter(|folder| !failed.contains(folder))
+            .collect();
+        let mut names: HashMap<PathKey, Vec<&str>> = HashMap::new();
+        for file in &files {
+            if let Some(folder) = file.rel.parent() {
+                names
+                    .entry(key(&at(&folder)))
+                    .or_default()
+                    .push(file.rel.file_name());
+            }
+        }
+        for (folder, files) in &folder_files {
+            names
+                .entry(key(&at(folder)))
+                .or_default()
+                .extend(files.iter().map(String::as_str));
+        }
+        let markers: HashMap<PathKey, String> = names
+            .into_iter()
+            .filter_map(|(folder, names)| Some((folder, folder_marker(names)?.1.to_owned())))
+            .collect();
         for file in files {
             let folder = file.rel.parent().map(|folder| at(&folder));
             let Some(kind) = FileKind::of(file.rel.file_name(), folder) else {
@@ -225,18 +285,32 @@ impl ScanResult {
             };
             let path = at(&file.rel);
             let file_key = key(&path);
-            let skill_folder = match &kind {
-                FileKind::SkillFile(folder) => Some(folder.clone()),
+            let marker_folder = match &kind {
+                FileKind::SkillFile(folder) | FileKind::HookFile(folder) => Some(folder.clone()),
                 _ => None,
             };
+            // A marker file that is not its folder's marker (a `hooks.json` beside a `SKILL.md`) is an ordinary file. A
+            //   `hooks.json` decides its folder only when every name in it is known (a failed one: the folder is kept);
+            //   a `SKILL.md` wins whatever else is there.
+            if let Some(folder) = &marker_folder {
+                if markers.get(&key(folder)).map(String::as_str) != Some(file.rel.file_name()) {
+                    continue;
+                }
+                if matches!(kind, FileKind::HookFile(_)) && !known.contains(&key(folder)) {
+                    if failed.contains(&key(folder)) {
+                        kept.push(Some(folder.clone()));
+                    }
+                    continue;
+                }
+            }
             let unchanged = |k: &PathKey| {
                 tags.get(k)
                     .is_some_and(|(tag, racy)| *tag == file.tag && !racy)
             };
-            let folder_unchanged = skill_folder.as_ref().is_none_or(|f| unchanged(&key(f)));
+            let folder_unchanged = marker_folder.as_ref().is_none_or(|f| unchanged(&key(f)));
             if unchanged(&file_key) && folder_unchanged {
                 entries.push(ScanItem::Unchanged(file_key, file.tag));
-                if let Some(folder) = &skill_folder {
+                if let Some(folder) = &marker_folder {
                     entries.push(ScanItem::Unchanged(key(folder), file.tag));
                 }
                 continue;
@@ -282,6 +356,20 @@ impl ScanResult {
                         ItemContent::SkillFile,
                     )));
                 }
+                FileKind::HookFile(folder) => {
+                    let doc = read_hooks(&bytes, folder.as_str());
+                    let content = ItemContent::Hook {
+                        description: doc.description,
+                        file_name: file.rel.file_name().to_owned(),
+                        definition: doc.definition,
+                    };
+                    entries.push(ScanItem::Fresh(item(folder, ItemKind::Hook, content)));
+                    entries.push(ScanItem::Fresh(item(
+                        path,
+                        ItemKind::HookFile,
+                        ItemContent::HookFile,
+                    )));
+                }
                 FileKind::Yaml => match yaml_item(&bytes, backends) {
                     None => no_kind.push(path),
                     Some((kind, content)) => {
@@ -320,16 +408,82 @@ pub(crate) fn skill_file_name(name: &str) -> bool {
     same_path(Path::new(name), Path::new(SKILL_FILE))
 }
 
+/// Whether `name` is a hook's `hooks.json` name by the OS rule, wherever the file lies.
+// ADR-0420
+pub(crate) fn hook_file_name(name: &str) -> bool {
+    same_path(Path::new(name), Path::new(HOOK_FILE))
+}
+
+/// The folder-level kind rule — the one place a folder below a mount's top is judged from the names of the files directly
+/// in it (the scan, `ops.rs` `reclassify` and `reread_file` all ask it): a `SKILL.md` makes it a skill, else a
+/// `hooks.json` a hook, else it is no item. Answers the folder item's kind and the marker file's name as given.
+// ADR-0420
+pub(crate) fn folder_marker<'n>(
+    names: impl IntoIterator<Item = &'n str>,
+) -> Option<(ItemKind, &'n str)> {
+    let mut hook = None;
+    for name in names {
+        if skill_file_name(name) {
+            return Some((ItemKind::Skill, name));
+        }
+        if hook.is_none() && hook_file_name(name) {
+            hook = Some((ItemKind::Hook, name));
+        }
+    }
+    hook
+}
+
+/// Completes `listing` for [`ScanResult::build`]: a listed `hooks.json` whose folder the walk did not list (a one-file
+/// range) decides that folder's kind only with every name in it ([`folder_marker`] — a `SKILL.md` beside it wins), so
+/// each such folder is listed through `list` (a disk path → its entries) into [`ScanListing::folder_files`]. A listing
+/// that fails is an error of the file: the scan keeps what the catalog holds for it and makes nothing from it.
+// ADR-0420
+pub(crate) fn list_marker_folders(
+    listing: &mut ScanListing,
+    list: &dyn Fn(&Path) -> io::Result<Vec<(std::ffi::OsString, EntryKind)>>,
+) {
+    let unlisted: Vec<(MountPath, MountPath)> = listing
+        .files
+        .iter()
+        .filter(|file| hook_file_name(file.rel.file_name()))
+        .filter_map(|file| Some((file.rel.parent()?, file.rel.clone())))
+        .filter(|(folder, _)| !listing.listed_at.contains_key(&Some(folder.clone())))
+        .collect();
+    for (folder, file) in unlisted {
+        if listing.folder_files.contains_key(&folder) {
+            continue;
+        }
+        match list(&folder.to_path(&listing.root)) {
+            Ok(entries) => {
+                let names = entries
+                    .into_iter()
+                    .filter(|(_, kind)| *kind == EntryKind::File)
+                    .filter_map(|(name, _)| name.into_string().ok())
+                    .collect();
+                listing.folder_files.insert(folder, names);
+            }
+            Err(e) => listing.errors.push((
+                Some(file),
+                format!("its folder {} could not be listed: {e}", folder.as_str()),
+            )),
+        }
+    }
+}
+
 /// Whether `path` names a `.yaml` / `.yml` file — the only files that can hold a preset (or settings) item.
 pub(crate) fn yaml_file(path: &LibPath) -> bool {
     matches!(FileKind::of(path.file_name(), None), Some(FileKind::Yaml))
 }
 
-/// The kind decision by name (TRD S25 §1-2 table); content decides only between the `.yaml` kinds.
+/// The kind decision by name (TRD S25 §1-2 table); content decides only between the `.yaml` kinds. A marker name
+/// decides alone only for its own file — whether it makes its folder an item is [`folder_marker`]'s.
 enum FileKind {
     Instruction,
     /// A `SKILL.md` directly in a folder below a mount's folder; carries that folder (the skill's path).
     SkillFile(LibPath),
+    /// A `hooks.json` directly in a folder below a mount's folder; carries that folder (the hook's path).
+    // ADR-0420
+    HookFile(LibPath),
     Yaml,
 }
 
@@ -337,11 +491,15 @@ impl FileKind {
     /// The kind of the file named `name`, in the folder `folder` (its virtual path; `None` = the mount's folder
     /// itself).
     // Names compare by the OS rule (platform `same_path` — on Windows `skill.md` is a `SKILL.md`). A `SKILL.md`
-    //   directly in a mount's folder has no skill folder (a mount's top is not an item), so it is an instruction.
+    //   directly in a mount's folder has no skill folder (a mount's top is not an item), so it is an instruction; a
+    //   `hooks.json` there is no item at all (`.json` has no kind).
     fn of(name: &str, folder: Option<LibPath>) -> Option<FileKind> {
-        if skill_file_name(name) {
-            if let Some(folder) = folder {
+        if let Some(folder) = folder {
+            if skill_file_name(name) {
                 return Some(FileKind::SkillFile(folder));
+            }
+            if hook_file_name(name) {
+                return Some(FileKind::HookFile(folder));
             }
         }
         let (_, extension) = name.rsplit_once('.')?;
@@ -524,22 +682,24 @@ impl Catalog {
     /// The one write primitive for observations (class A): per item, an item with a later `read_seq` than the
     /// current one replaces it; an item at a path not in the catalog is inserted only when `may_insert` (ADR-0324
     /// decision 5). Every item applied here is marked racy, so the next scan re-reads it: when the read happened is
-    /// not known here, and a merge can land long after it (behind the write lock). Returns the touched keys — pass
-    /// them to [`Catalog::recompute_derived`].
+    /// not known here, and a merge can land long after it (behind the write lock). A folder item that replaces one of
+    /// the other kind takes that one's marker item with it (ADR-0420). Returns the touched keys — pass them to
+    /// [`Catalog::recompute_derived`].
     // ADR-0366
     pub fn apply_items(&mut self, items: Vec<Item>, may_insert: bool) -> Vec<PathKey> {
-        items
-            .into_iter()
-            .filter_map(|item| self.apply_one(item, may_insert, None))
-            .collect()
+        let mut touched = Vec::new();
+        for item in items {
+            self.apply_one(item, may_insert, None, &HashSet::new(), &mut touched);
+        }
+        touched
     }
 
     /// A scan's apply: `Fresh` entries per item as [`Catalog::apply_items`] does, except that the racy mark is judged
-    /// against the scan's time instead of being set on every item; an
-    /// `Unchanged` entry writes nothing. An item of the range the listing lacks is removed only when the `listed_at` of
-    /// its nearest listed folder (for a skill: its own folder first) is later than its `read_seq`, and not when that
-    /// folder or the file is in `kept`; an item inside an absent range is removed when the range's number is later.
-    /// Items outside the range are untouched. Returns the touched keys (removed ones included).
+    /// against the scan's time instead of being set on every item; an `Unchanged` entry writes nothing. An item of the
+    /// range the listing lacks is removed only when the `listed_at` of its nearest listed folder (for a skill or a
+    /// hook: its own folder first) is later than its `read_seq`, and not when that folder or the file (a skill's or a
+    /// hook's: its marker file) is in `kept`; an item inside an absent range is removed when the range's number is
+    /// later. Items outside the range are untouched. Returns the touched keys (removed ones included).
     // ADR-0366
     pub fn apply_scan(&mut self, result: ScanResult) -> Vec<PathKey> {
         let ScanResult {
@@ -553,13 +713,14 @@ impl Catalog {
             ..
         } = result;
         self.scanned_at = scanned_at;
+        let kept: HashSet<Option<PathKey>> = kept.iter().map(|at| at.as_ref().map(key)).collect();
         let mut touched = Vec::new();
         let mut seen: HashSet<PathKey> = HashSet::new();
         for entry in entries {
             match entry {
                 ScanItem::Fresh(item) => {
                     seen.insert(key(&item.path));
-                    touched.extend(self.apply_one(item, true, Some(scanned_at)));
+                    self.apply_one(item, true, Some(scanned_at), &kept, &mut touched);
                 }
                 ScanItem::Unchanged(k, _) => {
                     seen.insert(k);
@@ -569,7 +730,6 @@ impl Catalog {
         for folder in folders {
             self.folders.insert(key(&folder), folder);
         }
-        let kept: HashSet<Option<PathKey>> = kept.iter().map(|at| at.as_ref().map(key)).collect();
         let listed: HashMap<Option<PathKey>, u64> = listed_at
             .iter()
             .map(|(at, seq)| (at.as_ref().map(key), *seq))
@@ -579,11 +739,12 @@ impl Catalog {
             .iter()
             .filter(|(k, item)| within(&item.path, range.as_ref()) && !seen.contains(*k))
             .filter(|(k, item)| {
-                !kept.contains(&Some((*k).clone())) && !kept.contains(&skill_file_key(item))
+                !kept.contains(&Some((*k).clone())) && !kept.contains(&marker_file_key(item))
             })
             .filter_map(|(k, item)| {
+                // ADR-0420
                 let anchor = match item.kind {
-                    ItemKind::Skill => Some(item.path.clone()),
+                    ItemKind::Skill | ItemKind::Hook => Some(item.path.clone()),
                     _ => item.path.parent(),
                 };
                 absence_number(anchor, &listed, &kept).map(|at| (k.clone(), at))
@@ -630,6 +791,25 @@ impl Catalog {
             }
             _ => false,
         }
+    }
+
+    /// Before the folder item `new` is applied over the catalog's item at its key: when that item is the other folder
+    /// kind (a hook folder that gained a `SKILL.md`, a skill folder that became a hook), its marker file item is
+    /// removed at `absent_at` as [`Catalog::remove`] removes — that file is an ordinary file now, or gone — unless the
+    /// scan keeps it (`kept`: its read failed — ADR-0366). Answers the removed key.
+    // ADR-0420
+    fn drop_replaced_marker(
+        &mut self,
+        new: &Item,
+        absent_at: u64,
+        kept: &HashSet<Option<PathKey>>,
+    ) -> Option<PathKey> {
+        let old = self
+            .get(&key(&new.path))
+            .filter(|old| old.kind != new.kind)
+            .and_then(marker_file_key)
+            .filter(|old| !kept.contains(&Some(old.clone())))?;
+        self.remove(&old, absent_at).then_some(old)
     }
 
     /// A delete's range (ADR-0409): every item within `range` removed as [`Catalog::remove`] removes it — only when
@@ -695,8 +875,9 @@ impl Catalog {
     /// A mount rename (ADR-0400 decision 12) or a move — same volume or verified across volumes (ADR-0409 M3) — only:
     /// every item and folder within `range` (the old mount's top, or the moved entry) moves to the path `to` maps it
     /// to, keeping its content, tag, `read_seq` and racy mark — kinds, skill names and `Skill.folder` included, so a
-    /// move re-classifies and re-reads after it; the references items hold are not changed (the caller's walk rewrites
-    /// the files). Called only in that operation's write lock. Returns the touched keys — the old and the new.
+    /// move re-classifies and re-reads after it; only a hook's shape refusal takes the new path (it names its folder);
+    /// the references items hold are not changed (the caller's walk rewrites the files). Called only in that
+    /// operation's write lock. Returns the touched keys — the old and the new.
     pub fn rekey_range(
         &mut self,
         range: &LibPath,
@@ -720,6 +901,14 @@ impl Catalog {
         for (item, racy) in moved {
             let mut item = Item::clone(&item);
             item.path = to(&item.path);
+            // ADR-0420: a hook's shape refusal names its folder — the path it is at now (it is not re-read).
+            if let ItemContent::Hook {
+                definition: Err(reason),
+                ..
+            } = &mut item.content
+            {
+                reason.args["path"] = serde_json::Value::from(item.path.as_str());
+            }
             let k = key(&item.path);
             self.replace(&k, Some(Arc::new(item)));
             if racy {
@@ -742,26 +931,31 @@ impl Catalog {
         touched
     }
 
-    /// `read_at` = the racy rule's reference; `None` = unknown, the item is marked racy.
+    /// `read_at` = the racy rule's reference; `None` = unknown, the item is marked racy. `kept` = a scan's kept paths.
+    /// Pushes the keys it touched.
     fn apply_one(
         &mut self,
         item: Item,
         may_insert: bool,
         read_at: Option<SystemTime>,
-    ) -> Option<PathKey> {
+        kept: &HashSet<Option<PathKey>>,
+        touched: &mut Vec<PathKey>,
+    ) {
         let k = key(&item.path);
         match self.items.get(&k) {
-            Some(current) if item.read_seq <= current.read_seq => return None,
-            None if !may_insert => return None,
+            Some(current) if item.read_seq <= current.read_seq => return,
+            None if !may_insert => return,
             _ => {}
         }
+        // ADR-0420: on every apply path — a one-file scan or read sees no other file of the folder.
+        touched.extend(self.drop_replaced_marker(&item, item.read_seq, kept));
         if read_at.is_none_or(|at| is_racy(&item.tag, at)) {
             self.racy.insert(k.clone());
         } else {
             self.racy.remove(&k);
         }
         self.replace(&k, Some(Arc::new(item)));
-        Some(k)
+        touched.push(k);
     }
 
     /// Puts `new` at `k` (or removes it) and moves `k`'s direct-reference edges in `refs_to` from the old item's
@@ -818,13 +1012,19 @@ impl Catalog {
 /// The library references a preset item lists directly — built-ins and folder entries are not library references
 /// (ADR-0341).
 pub(crate) fn preset_refs(doc: &PresetDoc) -> impl Iterator<Item = &LibPath> {
-    [&doc.presets, &doc.instructions, &doc.skills, &doc.settings]
-        .into_iter()
-        .flatten()
-        .filter_map(|item| match &item.target {
-            AssetRef::Library(path) => Some(path),
-            AssetRef::BuiltIn(_) => None,
-        })
+    [
+        &doc.presets,
+        &doc.instructions,
+        &doc.skills,
+        &doc.hooks,
+        &doc.settings,
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|item| match &item.target {
+        AssetRef::Library(path) => Some(path),
+        AssetRef::BuiltIn(_) => None,
+    })
 }
 
 fn direct_refs(item: &Item) -> BTreeSet<PathKey> {
@@ -834,9 +1034,13 @@ fn direct_refs(item: &Item) -> BTreeSet<PathKey> {
     }
 }
 
-/// For a skill item, the key of the `SKILL.md` it was read from (a failed read of that file keeps the skill too).
-fn skill_file_key(item: &Item) -> Option<PathKey> {
-    let ItemContent::Skill { file_name, .. } = &item.content else {
+/// For a skill or a hook item, the key of the marker file it was read from (a failed read of that file keeps the folder
+/// item too).
+// ADR-0420
+pub(crate) fn marker_file_key(item: &Item) -> Option<PathKey> {
+    let (ItemContent::Skill { file_name, .. } | ItemContent::Hook { file_name, .. }) =
+        &item.content
+    else {
         return None;
     };
     LibPath::parse(&format!("{}/{file_name}", item.path.as_str()))
@@ -932,10 +1136,11 @@ pub(crate) mod harness {
         /// Walk + read + parse of `under` (`None` = the whole mount), nothing applied.
         pub(crate) fn build(&self, under: Option<&str>) -> ScanResult {
             let under = under.map(mp);
-            let listing = self
+            let mut listing = self
                 .store
                 .scan(&self.root, under.as_ref(), &|| self.seq())
                 .unwrap();
+            list_marker_folders(&mut listing, &|path| self.store.list(path));
             let tags = self
                 .catalog
                 .tags(Some(&virtual_path(&self.mount, under.as_ref())));
@@ -1205,6 +1410,250 @@ mod tests {
                 ItemKind::Instruction
             );
         }
+    }
+
+    // ── hook folders (ADR-0420) ───────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_hooks_json_directly_in_a_folder_below_a_mounts_top_makes_a_hook_and_its_hook_file() {
+        let mut lib = Lib::new();
+        lib.store.file(
+            "hooks/notify/hooks.json",
+            r#"{"description": " Notifies ", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]}}"#,
+        );
+        lib.store.file("hooks/notify/notify.js", "js");
+        lib.store.file("hooks.json", r#"{"hooks": {}}"#);
+        lib.scan(None);
+
+        let kind = |rel: &str| lib.item(rel).map(|item| item.kind.clone());
+        assert_eq!(kind("library/hooks/notify"), Some(ItemKind::Hook));
+        assert_eq!(
+            kind("library/hooks/notify/hooks.json"),
+            Some(ItemKind::HookFile)
+        );
+        assert_eq!(kind("library/hooks/notify/notify.js"), None);
+        assert_eq!(
+            kind("library/hooks.json"),
+            None,
+            "a mount's top makes no hook"
+        );
+        let ItemContent::Hook {
+            description,
+            file_name,
+            definition,
+        } = &lib.item("library/hooks/notify").unwrap().content
+        else {
+            panic!("not a hook");
+        };
+        assert_eq!(
+            (description.as_str(), file_name.as_str()),
+            ("Notifies", "hooks.json")
+        );
+        assert_eq!(
+            serde_json::Value::Object(definition.clone().unwrap()),
+            serde_json::json!({"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]})
+        );
+    }
+
+    #[test]
+    fn the_hook_file_name_follows_the_os_rule() {
+        let mut lib = Lib::new();
+        lib.store.file("hooks/x/HOOKS.JSON", r#"{"hooks": {}}"#);
+        lib.scan(None);
+        if same_path(Path::new("HOOKS.JSON"), Path::new("hooks.json")) {
+            assert_eq!(lib.item("library/hooks/x").unwrap().kind, ItemKind::Hook);
+            assert_eq!(
+                lib.item("library/hooks/x/HOOKS.JSON").unwrap().kind,
+                ItemKind::HookFile
+            );
+        } else {
+            assert!(lib.item("library/hooks/x").is_none());
+            assert!(lib.item("library/hooks/x/HOOKS.JSON").is_none());
+        }
+    }
+
+    /// The folder-level rule: a folder holding both markers is a skill and its `hooks.json` is no item; the
+    /// `SKILL.md` going makes it a hook, coming back a skill again — each by a scan.
+    #[test]
+    fn a_folder_holding_both_markers_is_a_skill_whose_hooks_json_is_no_item() {
+        let mut lib = Lib::new();
+        lib.store.file("both/SKILL.md", "---\nname: both\n---\n");
+        lib.store.file("both/hooks.json", r#"{"hooks": {}}"#);
+        lib.scan(None);
+        let kind = |lib: &Lib, rel: &str| lib.item(rel).map(|item| item.kind.clone());
+        assert_eq!(kind(&lib, "library/both"), Some(ItemKind::Skill));
+        assert_eq!(
+            kind(&lib, "library/both/SKILL.md"),
+            Some(ItemKind::SkillFile)
+        );
+        assert_eq!(kind(&lib, "library/both/hooks.json"), None);
+
+        lib.store.remove("both/SKILL.md");
+        lib.scan(None);
+        assert_eq!(kind(&lib, "library/both"), Some(ItemKind::Hook));
+        assert_eq!(
+            kind(&lib, "library/both/hooks.json"),
+            Some(ItemKind::HookFile)
+        );
+        assert_eq!(kind(&lib, "library/both/SKILL.md"), None);
+
+        lib.store.file("both/SKILL.md", "---\nname: both\n---\n");
+        lib.scan(None);
+        assert_eq!(kind(&lib, "library/both"), Some(ItemKind::Skill));
+        assert_eq!(kind(&lib, "library/both/hooks.json"), None);
+    }
+
+    /// A range of one `hooks.json` decides its folder only with every name in it: listed through `list_marker_folders`,
+    /// a `SKILL.md` beside it makes it no item and a lone one makes a hook; not listed (or the listing fails — an error
+    /// of the file, kept), it makes nothing. A `SKILL.md` decides alone.
+    // ADR-0420
+    #[test]
+    fn a_hooks_json_scanned_alone_decides_its_folder_only_with_every_name_in_it() {
+        let lib = Lib::new();
+        lib.store.file("both/SKILL.md", "---\nname: both\n---\n");
+        lib.store.file("both/hooks.json", r#"{"hooks": {}}"#);
+        lib.store.file("h/hooks.json", r#"{"hooks": {}}"#);
+        let fresh = |result: &ScanResult| -> Vec<(String, ItemKind)> {
+            result
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    ScanItem::Fresh(item) => {
+                        Some((item.path.as_str().to_owned(), item.kind.clone()))
+                    }
+                    ScanItem::Unchanged(..) => None,
+                })
+                .collect()
+        };
+        let made = |pairs: &[(&str, ItemKind)]| -> Vec<(String, ItemKind)> {
+            pairs
+                .iter()
+                .map(|(path, kind)| ((*path).to_owned(), kind.clone()))
+                .collect()
+        };
+        assert!(fresh(&lib.build(Some("both/hooks.json"))).is_empty());
+        assert_eq!(
+            fresh(&lib.build(Some("h/hooks.json"))),
+            made(&[
+                ("library/h", ItemKind::Hook),
+                ("library/h/hooks.json", ItemKind::HookFile)
+            ])
+        );
+
+        let alone = |rel: &str, list: Option<&dyn Fn(&Path) -> io::Result<_>>| {
+            let mut listing = lib
+                .store
+                .scan(&lib.root, Some(&mp(rel)), &|| lib.seq())
+                .unwrap();
+            if let Some(list) = list {
+                list_marker_folders(&mut listing, list);
+            }
+            let reader = lib.store.reader();
+            let tags = HashMap::new();
+            ScanResult::build(
+                listing,
+                &lib.mount,
+                Some(&mp(rel)),
+                &tags,
+                &reader,
+                &lib.backends,
+                now(),
+            )
+        };
+        assert!(fresh(&alone("h/hooks.json", None)).is_empty());
+        let failing = |_: &Path| Err(io::Error::other("denied"));
+        let failed = alone("h/hooks.json", Some(&failing));
+        assert!(fresh(&failed).is_empty());
+        assert_eq!(
+            failed.kept,
+            [Some(lp("library/h/hooks.json")), Some(lp("library/h"))],
+            "the file and its folder"
+        );
+        assert_eq!(failed.errors.len(), 1, "{:?}", failed.errors);
+        assert_eq!(
+            fresh(&alone("both/SKILL.md", None)),
+            made(&[
+                ("library/both", ItemKind::Skill),
+                ("library/both/SKILL.md", ItemKind::SkillFile)
+            ])
+        );
+    }
+
+    /// A scan that could not read a `SKILL.md`'s metadata beside a `hooks.json` leaves the skill a skill with its
+    /// `SKILL.md` item, and a hook folder holding a file that failed keeps its hook: a failed read keeps (ADR-0366).
+    // ADR-0420
+    #[test]
+    fn a_failed_entry_beside_a_hooks_json_keeps_what_the_catalog_holds_of_its_folder() {
+        let mut lib = Lib::new();
+        lib.store.file("both/SKILL.md", "---\nname: both\n---\n");
+        lib.store.file("both/hooks.json", r#"{"hooks": {}}"#);
+        lib.store.file("h/hooks.json", r#"{"hooks": {}}"#);
+        lib.store.file("h/x.md", "x");
+        lib.scan(None);
+        let mut listing = lib.store.scan(&lib.root, None, &|| lib.seq()).unwrap();
+        listing
+            .files
+            .retain(|file| !matches!(file.rel.as_str(), "both/SKILL.md" | "h/x.md"));
+        for failed in ["both/SKILL.md", "h/x.md"] {
+            listing
+                .errors
+                .push((Some(mp(failed)), "injected".to_owned()));
+        }
+        // No tags: every file listed is read again.
+        let result = {
+            let reader = lib.store.reader();
+            let tags = HashMap::new();
+            ScanResult::build(
+                listing,
+                &lib.mount,
+                None,
+                &tags,
+                &reader,
+                &lib.backends,
+                now(),
+            )
+        };
+        lib.apply(result);
+        let kind = |lib: &Lib, rel: &str| lib.item(rel).map(|item| item.kind.clone());
+        assert_eq!(kind(&lib, "library/both"), Some(ItemKind::Skill));
+        assert_eq!(
+            kind(&lib, "library/both/SKILL.md"),
+            Some(ItemKind::SkillFile)
+        );
+        assert_eq!(kind(&lib, "library/both/hooks.json"), None);
+        assert_eq!(kind(&lib, "library/h"), Some(ItemKind::Hook));
+        assert_eq!(kind(&lib, "library/h/hooks.json"), Some(ItemKind::HookFile));
+        assert_eq!(kind(&lib, "library/h/x.md"), Some(ItemKind::Instruction));
+    }
+
+    #[test]
+    fn a_hooks_json_that_fails_the_shape_check_is_a_hook_carrying_its_problem() {
+        let mut lib = Lib::new();
+        lib.store.file("hooks/bad/hooks.json", r#"{"hooks": []}"#);
+        lib.scan(None);
+        let item = lib.item("library/hooks/bad").unwrap();
+        assert_eq!(item.kind, ItemKind::Hook);
+        let ItemContent::Hook { definition, .. } = &item.content else {
+            panic!("not a hook");
+        };
+        let reason = definition.as_ref().unwrap_err();
+        assert_eq!(reason.code, crate::format::hooks::HOOK_SHAPE_INVALID);
+        assert_eq!(reason.args["path"], "library/hooks/bad");
+    }
+
+    /// A rescan with the `hooks.json` unchanged writes nothing for the hook or its file.
+    #[test]
+    fn an_unchanged_hook_is_seen_unchanged() {
+        let mut lib = Lib::new();
+        lib.store.file("hooks/h/hooks.json", r#"{"hooks": {}}"#);
+        lib.scan(None);
+        let result = lib.build(None);
+        assert!(
+            fresh_paths(&result).is_empty(),
+            "{:?}",
+            fresh_paths(&result)
+        );
+        assert_eq!(unchanged_count(&result), 2);
     }
 
     #[test]

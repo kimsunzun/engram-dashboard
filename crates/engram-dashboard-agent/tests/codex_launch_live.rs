@@ -120,8 +120,11 @@ impl LaunchKitSource for LiveKits {
             skills: scene.skills,
             raw_settings: vec![RawSetting {
                 preset: "live.yaml".to_string(),
+                source: "live.yaml".to_string(),
+                line: None,
                 value: json!(scene.raw_lines),
             }],
+            hooks: Vec::new(),
             include_priming: true,
             notices: Vec::new(),
             real: true,

@@ -408,6 +408,11 @@ pub struct ScanListing {
     /// Where the walk failed: a folder whose listing failed at open or part-way (`None` = the root), or a file whose
     /// metadata failed; with the error text.
     pub errors: Vec<(Option<MountPath>, String)>,
+    /// Folders the walk did not list whose kind a listed file needs (a `hooks.json` of a one-file range), each with
+    /// the names of the files directly in it — filled from a listing of its own by `catalog::list_marker_folders`,
+    /// never by [`LibraryStore::scan`].
+    // ADR-0420
+    pub folder_files: HashMap<MountPath, Vec<String>>,
 }
 
 /// One admitted file of a scan.

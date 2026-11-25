@@ -55,28 +55,30 @@
 //!   behind — planned from no-follow listings and stats at the call and again in the hold, only for an item holding a
 //!   skill, and detached only when the folder is no skill after the disk step and did not merge away whole); a merge
 //!   moves a skill's `SKILL.md` last and keeps it (left `skill-unconfirmed`) when an entry stayed behind that the
-//!   hold's plan did not name, unless it would stay anyway (it then answers its own reason); `detach_refs` on a call
-//!   with none of these is [`DETACH_REFS_INVALID`] (ADR-0339 M108 · M110). In the hold, per item: both mounts judged
-//!   from the recorded state, the item and the destination admitted (ADR-0365), the item stat'ed without following, the
-//!   destination folder a real folder (never made — ADR-0335 decision 7), then one no-replace rename — an item whose
-//!   source an earlier item of the call displaced or moved another entry onto fails `not-found`. A taken name without
-//!   `on_conflict` is the item's conflict `name-exists` (a rename never has one); same-name folders merge entry by entry
-//!   by the same rules and a source folder emptied so is removed empty-only (one left holding anything stays; one whose
-//!   removal fails is named in `left`); `Skip` leaves the entry; `KeepBoth` takes `name (2)`, `name (3)` …; `Overwrite`
-//!   moves the entry there into its mount's `.trash` (bundle, record — a path displaced twice goes into a second
-//!   bundle; a file onto a folder or the reverse [`KIND_MISMATCH`]) and renames the item onto the name, renaming the
-//!   displaced entry back when that fails. The catalog follows in the same hold: the displaced ranges leave, each moved
-//!   range is re-keyed by the path-key prefix mapper, what the catalog still holds in a merge's emptied source folder
-//!   leaves, the moved files whose kind may have changed and the `SKILL.md` of a skill at a moved folder's new path are
-//!   re-read (through no link — ADR-0365), and every folder whose direct children changed is re-classified (a skill
-//!   gained or lost at once). Then the references, without a plan confirmation (ADR-0409 decision 4): every preset file
-//!   of every readable mount that names a moved path is rewritten whole with the old → new mapping, its pairs applied
-//!   in move order (a touched list keeps the first place of each path — ADR-0339; a merge's emptied source folder maps
-//!   only itself, and only when its `SKILL.md` became the destination's), with `detach_refs` the confirmed plan's files
-//!   also drop the lines naming the gone skill (no agent step); then the change number is raised and the agents are
-//!   re-pointed once through `ProfileEditPort::rewrite_preset_paths` over the current roster. The answer carries the
-//!   mapping (each row marked whole-range or exact, to apply in order), the files written and skipped and the git
-//!   working trees their folders lie in (a folder behind a link: none).
+//!   hold's plan did not name, unless it would stay anyway (it then answers its own reason) — a hook's `hooks.json` the
+//!   same whenever an entry stayed (left `hook-unconfirmed`, ADR-0420: no plan names a hook's leave); `detach_refs` on
+//!   a call with none of these is [`DETACH_REFS_INVALID`] (ADR-0339 M108 · M110). In the hold, per item: both mounts
+//!   judged from the recorded state, the item and the destination admitted (ADR-0365), the item stat'ed without
+//!   following, the destination folder a real folder (never made — ADR-0335 decision 7), then one no-replace rename —
+//!   an item whose source an earlier item of the call displaced or moved another entry onto fails `not-found`. A taken
+//!   name without `on_conflict` is the item's conflict `name-exists` (a rename never has one); same-name folders merge
+//!   entry by entry by the same rules and a source folder emptied so is removed empty-only (one left holding anything
+//!   stays; one whose removal fails is named in `left`); `Skip` leaves the entry; `KeepBoth` takes `name (2)`,
+//!   `name (3)` …; `Overwrite` moves the entry there into its mount's `.trash` (bundle, record — a path displaced twice
+//!   goes into a second bundle; a file onto a folder or the reverse [`KIND_MISMATCH`]) and renames the item onto the
+//!   name, renaming the displaced entry back when that fails. The catalog follows in the same hold: the displaced
+//!   ranges leave, each moved range is re-keyed by the path-key prefix mapper, what the catalog still holds in a
+//!   merge's emptied source folder leaves, the moved files whose kind may have changed and the marker (`SKILL.md`, a
+//!   hook's `hooks.json` — ADR-0420) of a folder item at a moved folder's new path are re-read (through no link —
+//!   ADR-0365), and every folder whose direct children changed is re-classified (a skill or hook gained or lost at
+//!   once). Then the references, without a plan confirmation (ADR-0409 decision 4): every preset file of every readable
+//!   mount that names a moved path is rewritten whole with the old → new mapping, its pairs applied in move order (a
+//!   touched list keeps the first place of each path — ADR-0339; a merge's emptied source folder maps only itself, and
+//!   only when its `SKILL.md` became the destination's), with `detach_refs` the confirmed plan's files also drop the
+//!   lines naming the gone skill (no agent step); then the change number is raised and the agents are re-pointed once
+//!   through `ProfileEditPort::rewrite_preset_paths` over the current roster. The answer carries the mapping (each row
+//!   marked whole-range or exact, to apply in order), the files written and skipped and the git working trees their
+//!   folders lie in (a folder behind a link: none).
 //! - **Move across volumes** (ADR-0409 decisions 5 and 12–14, M13, M14 · ADR-0400 decision 25): before the plan, a
 //!   volume probe per (item's folder, destination folder) pair — none for a rename in its own folder — tells which
 //!   items cross (an empty folder made under a base temp name beside the item, renamed without replacing into the
@@ -176,8 +178,8 @@ use serde_json::{json, Value};
 use crate::agent_edit::port_refused;
 use crate::builtin::file_of;
 use crate::catalog::{
-    is_racy, key, makes_skill, preset_refs, skill_file_name, within, Catalog, ItemContent,
-    ItemKind, ScanItem, ScanResult,
+    folder_marker, hook_file_name, is_racy, key, list_marker_folders, makes_skill, preset_refs,
+    skill_file_name, within, Catalog, ItemContent, ItemKind, ScanItem, ScanResult,
 };
 use crate::create::NAME_EXISTS;
 use crate::edit::{as_read, lib_path, list_mut, read_path, ITEM_LISTS, LIBRARY_WRITE_FAILED};
@@ -240,6 +242,11 @@ pub const KIND_MISMATCH: &str = "kind-mismatch";
 // ADR-0339 M110
 // ADR-0409 decision 2
 pub const SKILL_UNCONFIRMED: &str = "skill-unconfirmed";
+
+/// A merge's `left` reason (`args` = `{path}`) for a hook's `hooks.json` kept in place because an entry of its hook
+/// folder stayed behind — no plan names a hook's leave yet, so the hook stays where its references are.
+// ADR-0420
+pub const HOOK_UNCONFIRMED: &str = "hook-unconfirmed";
 
 /// The code of `detach_refs` on a move or rename with no item of a detachable shape — no lone `SKILL.md` leaving its
 /// skill folder and no merge leaving a skill folder without its `SKILL.md` (`InvalidArgument`, `args` = `{}`).
@@ -414,8 +421,9 @@ pub struct Moved {
     pub original: Option<TrashAddress>,
     /// A merge: the entries left where they were, each with why (`name-exists` — skipped or colliding —,
     /// `kind-mismatch`, [`SKILL_UNCONFIRMED`] — a skill's `SKILL.md` kept because an entry stayed behind that the
-    /// judgement had not planned —, a failure's code); the folders holding them stay, and so does a source folder whose
-    /// removal failed (named here too).
+    /// judgement had not planned —, [`HOOK_UNCONFIRMED`] — a hook's `hooks.json` kept because an entry stayed behind —,
+    /// a failure's code); the folders holding them stay, and so does a source folder whose removal failed (named here
+    /// too).
     pub left: Vec<(String, Reason)>,
 }
 
@@ -1482,10 +1490,12 @@ impl LibraryService {
     }
 
     /// Re-classifies `folder` (`rest` in `mount`) from one no-follow listing after its direct children changed
-    /// (ADR-0409 M3): a skill whose folder no longer holds a file the scan's classifier takes for its `SKILL.md` is no
-    /// skill — its item goes at a number drawn from `seq`; a folder that holds one and is no skill in the catalog becomes
-    /// one (that file read as a scan reads it — [`LibraryService::reread_file`]). A folder gone meanwhile has nothing to
-    /// classify. Answers the keys touched; `Err` = the listing or the read failed and the catalog keeps what it knew.
+    /// (ADR-0409 M3), by the folder-level rule ([`folder_marker`] — a `SKILL.md` makes a skill, else a `hooks.json` a
+    /// hook — ADR-0420): a skill or hook whose folder no longer holds its marker is no folder item — its item goes at a
+    /// number drawn from `seq`; a folder whose marker makes another kind than the catalog holds becomes that kind (the
+    /// marker read as a scan reads it — [`LibraryService::reread_file`], which drops the old kind's marker item). A folder
+    /// gone meanwhile has nothing to classify. Answers the keys touched; `Err` = the listing or the read failed and the
+    /// catalog keeps what it knew.
     fn reclassify(
         &self,
         catalog: &mut Catalog,
@@ -1494,36 +1504,39 @@ impl LibraryService {
         seq: &dyn Fn() -> u64,
     ) -> io::Result<Vec<PathKey>> {
         let folder = virtual_path(&mount.name, Some(rest));
-        let skill = catalog
+        let held = catalog
             .get(&key(&folder))
-            .is_some_and(|item| item.kind == ItemKind::Skill);
+            .map(|item| item.kind.clone())
+            .filter(|kind| matches!(kind, ItemKind::Skill | ItemKind::Hook));
         let listed = match self.store.list(&rest.to_path(&mount.folder)) {
             Ok(listed) => listed,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
-        let file = listed
-            .iter()
-            .filter(|(_, kind)| *kind == EntryKind::File)
-            .filter_map(|(name, _)| name.to_str())
-            .find(|name| makes_skill(name, &folder))
-            .map(str::to_owned);
-        match (skill, file) {
-            (true, None) => {
+        let found = folder_marker(
+            listed
+                .iter()
+                .filter(|(_, kind)| *kind == EntryKind::File)
+                .filter_map(|(name, _)| name.to_str()),
+        )
+        .map(|(kind, name)| (kind, name.to_owned()));
+        match (held, found) {
+            (Some(held), None) => {
                 if !catalog.remove(&key(&folder), seq()) {
                     return Ok(Vec::new());
                 }
                 tracing::info!(
                     folder = folder.as_str(),
-                    "library folder is no skill any more"
+                    kind = ?held,
+                    "library folder is no folder item any more"
                 );
                 Ok(vec![key(&folder)])
             }
-            (false, Some(name)) => {
+            (held, Some((kind, name))) if held.as_ref() != Some(&kind) => {
                 let file = MountPath::parse(&format!("{}/{name}", rest.as_str()))
-                    .expect("a listed name the classifier takes for a SKILL.md is a valid name");
+                    .expect("a listed marker name is a valid name");
                 let touched = self.reread_file(catalog, mount, &file, seq)?;
-                tracing::info!(folder = folder.as_str(), "library folder became a skill");
+                tracing::info!(folder = folder.as_str(), kind = ?kind, "library folder changed kind");
                 Ok(touched)
             }
             _ => Ok(Vec::new()),
@@ -1533,8 +1546,10 @@ impl LibraryService {
     /// Re-reads the file `rest` in `mount` as a scan reads it (`ScanResult::build` over a one-file listing) and puts
     /// what it makes in place of what the catalog holds at its key: a kind changes with the name or the folder (`x.md`
     /// ↔ `SKILL.md`, a `SKILL.md` at a mount's top), and a skill's name and `folder` come from its `SKILL.md` and its
-    /// folder's name (ADR-0409 M3). A `SKILL.md` makes its folder's skill item too. Answers the keys touched; `Err` =
-    /// the file could not be read, or a name from the mount's folder down to it is a link (ADR-0365), and the catalog
+    /// folder's name (ADR-0409 M3). A `SKILL.md` makes its folder's skill item too, a `hooks.json` its hook item —
+    /// unless the folder's listing holds a `SKILL.md` ([`list_marker_folders`]), when it makes nothing; a folder item
+    /// of the other kind loses its marker item (ADR-0420). Answers the keys touched; `Err` = the file or the folder's
+    /// listing could not be read, or a name from the mount's folder down to it is a link (ADR-0365), and the catalog
     /// keeps what it had.
     fn reread_file(
         &self,
@@ -1552,7 +1567,7 @@ impl LibraryService {
         }
         let read_seq = seq();
         let tag = self.store.tag(&rest.to_path(&mount.folder))?;
-        let listing = ScanListing {
+        let mut listing = ScanListing {
             root: mount.folder.clone(),
             files: vec![ScanEntry {
                 rel: rest.clone(),
@@ -1561,6 +1576,7 @@ impl LibraryService {
             }],
             ..ScanListing::default()
         };
+        list_marker_folders(&mut listing, &|path| self.store.list(path));
         let read = |path: &Path| self.store.read(path, LIBRARY_READ_CAP);
         let result = ScanResult::build(
             listing,
@@ -1579,7 +1595,7 @@ impl LibraryService {
         if catalog.remove(&at, read_seq) {
             touched.push(at);
         }
-        let items = result
+        let items: Vec<_> = result
             .entries
             .into_iter()
             .filter_map(|entry| match entry {
@@ -3041,11 +3057,11 @@ impl LibraryService {
                 .iter()
                 .map(|request| {
                     let at = key(&request.path);
+                    // ADR-0420: a hook folder is a folder item too.
                     state.catalog.folders().any(|folder| key(folder) == at)
-                        || state
-                            .catalog
-                            .get(&at)
-                            .is_some_and(|item| item.kind == ItemKind::Skill)
+                        || state.catalog.get(&at).is_some_and(|item| {
+                            matches!(item.kind, ItemKind::Skill | ItemKind::Hook)
+                        })
                 })
                 .collect();
             (state.mounts.clone(), folders)
@@ -4319,12 +4335,13 @@ impl LibraryService {
     /// Merges the folder `from` into the same-name folder `to`: each entry placed by the same rules
     /// ([`LibraryService::place`], `choice` for each collision), then `from` removed empty-only (ADR-0409 M7) — a
     /// folder left holding a skipped or failed entry stays, one whose removal fails is named in `left`. A name that is
-    /// no library name stays where it is. A skill folder's `SKILL.md` goes last, and stays (left
-    /// [`SKILL_UNCONFIRMED`]) when an entry stayed behind, the file would move (its name free at `to`, or keep-both,
-    /// or an overwrite of its kind) and the judgement did not confirm that leave (`Step.leaves`); one that would stay
-    /// anyway is placed and answers its own reason. A folder whose entries all moved maps to `to` only when its
-    /// `SKILL.md` became `to`'s — also when its removal fails; what the catalog still holds in it leaves only when it
-    /// was removed.
+    /// no library name stays where it is. A skill folder's `SKILL.md` goes last, and stays (left [`SKILL_UNCONFIRMED`])
+    /// when an entry stayed behind, the file would move (its name free at `to`, or keep-both, or an overwrite of its
+    /// kind) and the judgement did not confirm that leave (`Step.leaves`); one that would stay anyway is placed and
+    /// answers its own reason. A hook folder's `hooks.json` the same, left [`HOOK_UNCONFIRMED`] whenever an entry
+    /// stayed (ADR-0420 — no plan names a hook's leave). A folder whose entries all moved maps to `to` only when its
+    /// marker became `to`'s — also when its removal fails; what the catalog still holds in it leaves only when it was
+    /// removed.
     fn merge(
         &self,
         from: &Side,
@@ -4352,20 +4369,29 @@ impl LibraryService {
         };
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         // ADR-0339: a reference to the folder itself names its skill — it follows only where that skill's `SKILL.md`
-        //   went (under keep-both, or left behind, the destination is another skill or none).
-        let skill_file = match catalog.get(&key(&from.lib())).map(|item| &item.content) {
-            Some(ItemContent::Skill { file_name, .. }) => Some(file_name.as_str()),
+        //   went (under keep-both, or left behind, the destination is another skill or none). ADR-0420: a hook's the
+        //   same, where its `hooks.json` went.
+        let marker = match catalog.get(&key(&from.lib())).map(|item| &item.content) {
+            Some(ItemContent::Skill { file_name, .. }) => {
+                Some((ItemKind::Skill, file_name.as_str()))
+            }
+            Some(ItemContent::Hook { file_name, .. }) => Some((ItemKind::Hook, file_name.as_str())),
             _ => None,
         };
-        // ADR-0339 M110: the `SKILL.md` goes last, so whether anything stays behind is known before it leaves.
+        let marker_file = marker.as_ref().map(|(_, name)| *name);
+        let skill_file = marker
+            .as_ref()
+            .filter(|(kind, _)| *kind == ItemKind::Skill)
+            .map(|(_, name)| *name);
+        // ADR-0339 M110: the marker goes last, so whether anything stays behind is known before it leaves.
         if let Some(at) = entries
             .iter()
-            .position(|(name, _)| skill_file.is_some() && name.to_str() == skill_file)
+            .position(|(name, _)| marker_file.is_some() && name.to_str() == marker_file)
         {
             let last = entries.remove(at);
             entries.push(last);
         }
-        let mut skill_moved = false;
+        let mut marker_moved = false;
         let mut stays = false;
         for (name, kind) in entries {
             let sides = name
@@ -4387,16 +4413,23 @@ impl LibraryService {
                 continue;
             };
             let is_skill_file = skill_file.is_some() && name.to_str() == skill_file;
+            let is_marker_file = marker_file.is_some() && name.to_str() == marker_file;
             // ADR-0339 M110 · ADR-0409 decision 2: a skill left behind that the judgement did not plan (an earlier item
             //   of the call or a failed entry changed what stays) keeps its `SKILL.md` — nothing unasked leaves it. A
             //   `SKILL.md` that stays anyway (taken under skip, a folder there under overwrite) keeps its own reason.
-            if is_skill_file
-                && stays
-                && !step.leaves.contains(&key(&inner.lib()))
-                && !self.stays_anyway(&into, kind, choice)
+            //   ADR-0420: a hook's `hooks.json` the same, and no plan names a hook's leave yet — so whenever one stays.
+            let unconfirmed = if is_skill_file {
+                Some(SKILL_UNCONFIRMED).filter(|_| !step.leaves.contains(&key(&inner.lib())))
+            } else if is_marker_file {
+                Some(HOOK_UNCONFIRMED)
+            } else {
+                None
+            };
+            if let Some(code) =
+                unconfirmed.filter(|_| stays && !self.stays_anyway(&into, kind, choice))
             {
                 let at = inner.lib().as_str().to_owned();
-                let why = reason(SKILL_UNCONFIRMED, json!({ "path": at }));
+                let why = reason(code, json!({ "path": at }));
                 step.left.push((at, why));
                 continue;
             }
@@ -4405,7 +4438,10 @@ impl LibraryService {
                     to: placed,
                     trashed,
                 } => {
-                    skill_moved |= is_skill_file && makes_skill(placed.rest.file_name(), &to.lib());
+                    // Still its marker by name — keep-both may have numbered it.
+                    marker_moved |= is_marker_file
+                        && folder_marker([placed.rest.file_name()]).map(|(kind, _)| kind)
+                            == marker.as_ref().map(|(kind, _)| kind.clone());
                     step.trashed.extend(trashed);
                 }
                 Placement::Merged { emptied } => stays |= !emptied,
@@ -4435,9 +4471,20 @@ impl LibraryService {
         if emptied {
             step.moves.emptied.push(from.lib());
         }
+        // ADR-0420: a hook's `hooks.json` makes `to` a hook only when `to` holds no `SKILL.md` (a listing that fails:
+        //   not known to be one — its references stay).
+        if marker_moved && matches!(marker, Some((ItemKind::Hook, _))) {
+            marker_moved = self.store.list(&to.disk).is_ok_and(|listed| {
+                let names = listed
+                    .iter()
+                    .filter(|(_, kind)| *kind == EntryKind::File)
+                    .filter_map(|(name, _)| name.to_str());
+                matches!(folder_marker(names), Some((ItemKind::Hook, _)))
+            });
+        }
         // ADR-0339: everything moved and the skill's `SKILL.md` became `to`'s — the skill is `to` now, whether or
-        //   not the empty folder could be removed (one left is re-classified as no skill).
-        if !stays && skill_moved {
+        //   not the empty folder could be removed (one left is re-classified as no skill). The same for a hook.
+        if !stays && marker_moved {
             step.moves.moved(from, to, EntryKind::Folder, true);
         }
         Placement::Merged { emptied }
@@ -4461,8 +4508,9 @@ impl LibraryService {
 
     /// The catalog after a move's disk step (ADR-0409 M3): the displaced ranges leave, each pair's range is re-keyed
     /// by the path-key prefix mapper (`LibPath::replace_prefix`) and what the catalog still holds in a merge's emptied
-    /// source folder leaves; each moved file whose kind may have changed — a new name, or a `SKILL.md` name at either
-    /// end — and the `SKILL.md` of a skill at a moved folder's new path are re-read ([`LibraryService::reread_file`]),
+    /// source folder leaves; each moved file whose kind may have changed — a new name, or a `SKILL.md` or `hooks.json`
+    /// name at either end — and the marker of a skill or hook at a moved folder's new path are re-read
+    /// ([`LibraryService::reread_file`] — ADR-0420),
     /// then every folder whose direct children changed is re-classified ([`LibraryService::reclassify`]). A read or
     /// listing that fails leaves what the catalog had; the next scan does it.
     fn follow_moves(
@@ -4493,16 +4541,21 @@ impl LibraryService {
             match pair.kind {
                 EntryKind::File
                     if pair.old.file_name() != pair.new.file_name()
-                        || skill_file_name(pair.old.file_name())
-                        || skill_file_name(pair.new.file_name()) =>
+                        || [&pair.old, &pair.new].into_iter().any(|path| {
+                            skill_file_name(path.file_name()) || hook_file_name(path.file_name())
+                        }) =>
                 {
                     reread.push(pair.new.clone());
                 }
                 // ADR-0409 M3: a skill's name and folder come from its `SKILL.md` and its own folder's name — one below a
-                //   moved folder keeps both, so only the skill at the pair's new path is re-read.
+                //   moved folder keeps both, so only the folder item at the pair's new path re-reads its marker (a hook's
+                //   too — ADR-0420).
                 EntryKind::Folder => {
-                    let skill = catalog.get(&key(&pair.new)).map(|item| &item.content);
-                    if let Some(ItemContent::Skill { file_name, .. }) = skill {
+                    let held = catalog.get(&key(&pair.new)).map(|item| &item.content);
+                    if let Some(
+                        ItemContent::Skill { file_name, .. } | ItemContent::Hook { file_name, .. },
+                    ) = held
+                    {
                         reread.extend(
                             LibPath::parse(&format!("{}/{file_name}", pair.new.as_str())).ok(),
                         );
@@ -5218,6 +5271,7 @@ mod tests {
         BoundedIo, FolderListing, FolderOps, FolderStatus, LaunchWaits, StdFolderOps, ThreadSpawn,
         IO_LIMIT, LIST_CAP,
     };
+    use crate::format::hooks::HOOK_SHAPE_INVALID;
     use crate::store::{ContentTag, FsStore, LibraryStore, ScanListing};
     use crate::store::{DENY_FIRST_REMOVAL, REMOVABLE_ANSWERS};
     use crate::trash::{
@@ -7274,6 +7328,285 @@ mod tests {
         assert_eq!(world.kind("library/f"), None);
         assert_eq!(world.kind("library/SKILL.md"), Some(ItemKind::Instruction));
         assert_eq!(world.kind("library/f/keep.md"), Some(ItemKind::Instruction));
+    }
+
+    // ── hook folders (ADR-0420) ──
+
+    const HOOK: &str = r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]}}"#;
+
+    // ADR-0420: a rename to hooks.json makes the folder a hook and the file its hooks.json at once; the rename back
+    //   makes it a plain folder again — no refresh in between.
+    #[test]
+    fn a_rename_to_hooks_json_and_back_changes_the_kinds_without_a_refresh() {
+        let world = World::new();
+        world.put("lib/h/x.json", HOOK);
+        world.scan();
+        assert_eq!(world.kind("library/h"), None);
+
+        done(&world.rename("library/h/x.json", "hooks.json").items[0].outcome);
+
+        assert_eq!(world.kind("library/h"), Some(ItemKind::Hook));
+        assert_eq!(world.kind("library/h/hooks.json"), Some(ItemKind::HookFile));
+
+        done(&world.rename("library/h/hooks.json", "x.json").items[0].outcome);
+
+        assert_eq!(world.kind("library/h"), None);
+        assert_eq!(world.kind("library/h/hooks.json"), None);
+        assert_eq!(world.kind("library/h/x.json"), None);
+    }
+
+    // ADR-0420: the folder-level rule without a refresh — a SKILL.md arriving in a hook folder makes it a skill (its
+    //   hooks.json no item), leaving it gives the hook back; the hooks.json deleted leaves no folder item.
+    #[test]
+    fn a_skill_md_in_a_hook_folder_takes_precedence_and_its_leaving_gives_the_hook_back() {
+        let world = World::new();
+        world.put("lib/h/hooks.json", HOOK);
+        world.put("lib/h/x.md", "---\nname: h\ndescription: d\n---\n");
+        world.scan();
+        assert_eq!(world.kind("library/h"), Some(ItemKind::Hook));
+
+        done(&world.rename("library/h/x.md", "SKILL.md").items[0].outcome);
+
+        assert_eq!(world.kind("library/h"), Some(ItemKind::Skill));
+        assert_eq!(world.kind("library/h/SKILL.md"), Some(ItemKind::SkillFile));
+        assert_eq!(world.kind("library/h/hooks.json"), None);
+
+        done(&world.rename("library/h/SKILL.md", "x.md").items[0].outcome);
+
+        assert_eq!(world.kind("library/h"), Some(ItemKind::Hook));
+        assert_eq!(world.kind("library/h/hooks.json"), Some(ItemKind::HookFile));
+        assert_eq!(world.kind("library/h/x.md"), Some(ItemKind::Instruction));
+
+        done(&world.delete(&["library/h/hooks.json"]).items[0].outcome);
+
+        assert_eq!(world.kind("library/h"), None, "no hook any more");
+        assert_eq!(world.kind("library/h/x.md"), Some(ItemKind::Instruction));
+    }
+
+    // ADR-0420: a referenced hook folder renamed keeps its kind and its hooks.json, and the preset lists the new path;
+    //   a move into itself is refused; deleted and restored, it is a hook again.
+    #[test]
+    fn a_referenced_hook_folder_renamed_keeps_its_kind_and_its_reference_follows() {
+        let world = World::new();
+        world.put("lib/hooks/h/hooks.json", HOOK);
+        world.put("lib/hooks/h/sub/run.js", "js");
+        world.put("lib/P.yaml", &preset("hooks:\n- library/hooks/h\n"));
+        world.scan();
+
+        let answer = world.rename("library/hooks/h", "g");
+
+        assert_eq!(pairs(&answer), [("library/hooks/h", "library/hooks/g")]);
+        assert_eq!(world.kind("library/hooks/g"), Some(ItemKind::Hook));
+        assert_eq!(
+            world.kind("library/hooks/g/hooks.json"),
+            Some(ItemKind::HookFile)
+        );
+        assert_eq!(world.kind("library/hooks/h"), None);
+        let p = world.text("lib/P.yaml");
+        assert!(p.lines().any(|line| line == "- library/hooks/g"), "{p}");
+        assert_eq!(world.listing("library/hooks/g"), ["library/P.yaml"]);
+
+        let answer = world.mv(&["library/hooks/g"], "library/hooks/g/sub", None);
+        assert_eq!(failed_code(&answer.items[0].outcome), INTO_ITSELF);
+        assert!(world.there("lib/hooks/g/hooks.json"));
+
+        world.put("lib/x/H/hooks.json", HOOK);
+        world.scan();
+        let address = done(&world.delete(&["library/x/H"]).items[0].outcome);
+        assert_eq!(world.kind("library/x/H"), None);
+        let answer = world.svc.restore(&[address], false, None).unwrap();
+        done(&answer.items[0].outcome);
+        assert_eq!(world.kind("library/x/H"), Some(ItemKind::Hook));
+    }
+
+    // ADR-0420: a merge that takes a hook's hooks.json along makes the destination the hook, so its references follow
+    //   the exact pair; merged into a folder holding a SKILL.md the destination is a skill, and the references stay.
+    #[test]
+    fn a_merged_hook_folder_takes_its_references_where_its_hooks_json_made_a_hook() {
+        let world = World::new();
+        world.put("lib/a/H/hooks.json", HOOK);
+        world.put("lib/a/H/run.js", "a");
+        world.put("lib/t/H/other.md", "o");
+        world.put("lib/b/H/hooks.json", HOOK);
+        world.put("lib/s/H/SKILL.md", "---\nname: H\ndescription: d\n---\n");
+        world.put(
+            "lib/P.yaml",
+            &preset("hooks:\n- library/a/H\n- library/b/H\n"),
+        );
+        world.scan();
+
+        let answer = world.mv(&["library/a/H"], "library/t", Some(OnConflict::Skip));
+
+        done(&answer.items[0].outcome);
+        assert_eq!(world.kind("library/t/H"), Some(ItemKind::Hook));
+        assert_eq!(world.kind("library/a/H"), None);
+        let p = world.text("lib/P.yaml");
+        assert!(p.lines().any(|line| line == "- library/t/H"), "{p}");
+
+        let answer = world.mv(&["library/b/H"], "library/s", Some(OnConflict::Skip));
+
+        done(&answer.items[0].outcome);
+        assert_eq!(world.kind("library/s/H"), Some(ItemKind::Skill));
+        assert_eq!(world.kind("library/s/H/hooks.json"), None);
+        let p = world.text("lib/P.yaml");
+        assert!(p.lines().any(|line| line == "- library/b/H"), "{p}");
+    }
+
+    // ADR-0420: a hooks.json that arrives in a skill folder one file at a time — copied, restored, read by a list or a
+    //   refresh of that one path — leaves the folder a skill: the folder's own listing holds a SKILL.md, so the file is
+    //   no item. Alone in its folder, restored or listed, it makes the hook.
+    #[test]
+    fn a_hooks_json_copied_restored_or_listed_into_a_skill_folder_leaves_it_a_skill() {
+        let world = World::new();
+        let skill = "---\nname: s\ndescription: d\n---\n";
+        world.put("lib/s/SKILL.md", skill);
+        world.put("lib/hooks/h/hooks.json", HOOK);
+        world.put("lib/r/SKILL.md", skill);
+        world.put("lib/r/hooks.json", HOOK);
+        world.put("lib/l/SKILL.md", skill);
+        world.scan();
+        let skill_only = |folder: &str| {
+            assert_eq!(world.kind(folder), Some(ItemKind::Skill), "{folder}");
+            let file = |name: &str| world.kind(&format!("{folder}/{name}"));
+            assert_eq!(file("SKILL.md"), Some(ItemKind::SkillFile), "{folder}");
+            assert_eq!(file("hooks.json"), None, "{folder}");
+        };
+
+        world.cp(&["library/hooks/h/hooks.json"], "library/s", None);
+        assert!(world.there("lib/s/hooks.json"));
+        skill_only("library/s");
+
+        let address = done(&world.delete(&["library/r/hooks.json"]).items[0].outcome);
+        let answer = world.svc.restore(&[address], false, None).unwrap();
+        done(&answer.items[0].outcome);
+        assert!(world.there("lib/r/hooks.json"));
+        skill_only("library/r");
+
+        world.put("lib/l/hooks.json", HOOK);
+        let _ = world.svc.list(Some(&lp("library/l/hooks.json")));
+        skill_only("library/l");
+        let report = world.svc.refresh(Some(&lp("library/l/hooks.json")));
+        assert!(report.errors.is_empty(), "{report:?}");
+        skill_only("library/l");
+
+        world.put("lib/p/hooks.json", HOOK);
+        world.svc.refresh(Some(&lp("library/p")));
+        let address = done(&world.delete(&["library/p/hooks.json"]).items[0].outcome);
+        assert_eq!(world.kind("library/p"), None);
+        let answer = world.svc.restore(&[address], false, None).unwrap();
+        done(&answer.items[0].outcome);
+        assert_eq!(world.kind("library/p"), Some(ItemKind::Hook));
+        assert_eq!(world.kind("library/p/hooks.json"), Some(ItemKind::HookFile));
+        world.put("lib/n/hooks.json", HOOK);
+        let _ = world.svc.list(Some(&lp("library/n/hooks.json")));
+        assert_eq!(world.kind("library/n"), Some(ItemKind::Hook));
+        assert_eq!(world.kind("library/n/hooks.json"), Some(ItemKind::HookFile));
+    }
+
+    // ADR-0420: a SKILL.md that arrives in a hook folder one file at a time — copied, restored, read by a list of that
+    //   one path — makes the folder a skill, and the hooks.json item goes with the hook.
+    #[test]
+    fn a_skill_md_copied_restored_or_listed_into_a_hook_folder_makes_a_skill_without_its_hook_file()
+    {
+        let world = World::new();
+        let skill = "---\nname: s\ndescription: d\n---\n";
+        world.put("lib/c/hooks.json", HOOK);
+        world.put("lib/skills/x/SKILL.md", skill);
+        world.put("lib/r/hooks.json", HOOK);
+        world.put("lib/r/SKILL.md", skill);
+        world.put("lib/l/hooks.json", HOOK);
+        world.scan();
+        let skill_only = |folder: &str| {
+            assert_eq!(world.kind(folder), Some(ItemKind::Skill), "{folder}");
+            let file = |name: &str| world.kind(&format!("{folder}/{name}"));
+            assert_eq!(file("SKILL.md"), Some(ItemKind::SkillFile), "{folder}");
+            assert_eq!(file("hooks.json"), None, "{folder}");
+        };
+
+        world.cp(&["library/skills/x/SKILL.md"], "library/c", None);
+        assert!(world.there("lib/c/SKILL.md"));
+        skill_only("library/c");
+
+        let address = done(&world.delete(&["library/r/SKILL.md"]).items[0].outcome);
+        assert_eq!(world.kind("library/r"), Some(ItemKind::Hook));
+        assert_eq!(world.kind("library/r/hooks.json"), Some(ItemKind::HookFile));
+        let answer = world.svc.restore(&[address], false, None).unwrap();
+        done(&answer.items[0].outcome);
+        skill_only("library/r");
+
+        world.put("lib/l/SKILL.md", skill);
+        let _ = world.svc.list(Some(&lp("library/l/SKILL.md")));
+        skill_only("library/l");
+    }
+
+    // ADR-0420: a misshapen hook keeps its refusal through a rename or a move of a folder above it, naming the path it
+    //   is at now (it is re-keyed, not re-read).
+    #[test]
+    fn a_misshapen_hook_moved_with_a_folder_above_it_names_its_new_path() {
+        let world = World::new();
+        world.put("lib/a/h/hooks.json", r#"{"hooks": []}"#);
+        world.put("lib/t/keep.md", "k");
+        world.scan();
+        let refusal = |folder: &str| {
+            let rows = world.svc.list(Some(&lp(folder))).unwrap().rows;
+            let row = rows
+                .iter()
+                .find(|row| row.kind == ItemKind::Hook)
+                .expect("the hook");
+            let reason = row.state.clone().expect("refused");
+            assert_eq!(reason.code, HOOK_SHAPE_INVALID);
+            (row.path.clone(), reason.args["path"].clone())
+        };
+        assert_eq!(
+            refusal("library/a"),
+            ("library/a/h".to_owned(), json!("library/a/h"))
+        );
+
+        done(&world.rename("library/a", "b").items[0].outcome);
+        assert_eq!(
+            refusal("library/b"),
+            ("library/b/h".to_owned(), json!("library/b/h"))
+        );
+
+        done(&world.mv(&["library/b"], "library/t", None).items[0].outcome);
+        assert_eq!(
+            refusal("library/t/b"),
+            ("library/t/b/h".to_owned(), json!("library/t/b/h"))
+        );
+    }
+
+    // ADR-0420 (until a hook's leave is planned — P4): a merge that leaves an entry of a hook folder behind keeps its
+    //   hooks.json there too, left hook-unconfirmed, so the hook and its references stay where they were.
+    #[test]
+    fn a_merge_that_leaves_an_entry_of_a_hook_folder_behind_keeps_its_hooks_json() {
+        let world = World::new();
+        world.put("lib/a/H/hooks.json", HOOK);
+        world.put("lib/a/H/run.js", "mine");
+        world.put("lib/t/H/run.js", "theirs");
+        world.put("lib/P.yaml", &preset("hooks:\n- library/a/H\n"));
+        world.scan();
+
+        let answer = world.mv(&["library/a/H"], "library/t", Some(OnConflict::Skip));
+
+        let moved = done(&answer.items[0].outcome);
+        let left: Vec<(&str, &str)> = moved
+            .left
+            .iter()
+            .map(|(at, why)| (at.as_str(), why.code.as_str()))
+            .collect();
+        assert_eq!(
+            left,
+            [
+                ("library/a/H/run.js", NAME_EXISTS),
+                ("library/a/H/hooks.json", HOOK_UNCONFIRMED)
+            ]
+        );
+        assert!(world.there("lib/a/H/hooks.json"));
+        assert!(!world.there("lib/t/H/hooks.json"));
+        assert_eq!(world.kind("library/a/H"), Some(ItemKind::Hook));
+        assert_eq!(world.kind("library/t/H"), None);
+        let p = world.text("lib/P.yaml");
+        assert!(p.lines().any(|line| line == "- library/a/H"), "{p}");
     }
 
     // ADR-0409 M3: a skill without `name:` takes its folder's name — re-keying alone would keep the old one; its

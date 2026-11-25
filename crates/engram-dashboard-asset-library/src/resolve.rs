@@ -7,10 +7,11 @@
 //!   overlay); folder entries are only collected here, and their disk status arrives later through
 //!   [`Resolution::attach_folder_status`] (phase 2 — the caller stats [`Resolution::folder_paths`] outside every lock).
 //! - **Expansion** — for an agent, `engram/default` (when attached) and then the attached presets in order; one preset =
-//!   its nested `presets` first, depth first (D1), then its own instructions · settings · skills, each list's common
-//!   items followed by the items tagged for the agent's backend (per preset — G51). An item reached a second time stays
+//!   its nested `presets` first, depth first (D1), then its own instructions · settings · skills · hooks, each list's
+//!   common items followed by the items tagged for the agent's backend (per preset — G51). An item reached a second time stays
 //!   at its first place; a preset reached again while it is being expanded is a cycle.
-//! - **Backend knowledge comes only from port answers** (TRD S25 step-7 §1-1): what a mode loads (`loads`), which skill
+//! - **Backend knowledge comes only from port answers** (TRD S25 step-7 §1-1): what a mode loads (`loads` — hooks
+//!   included: a mode that loads none names them in its `hooks_omitted` notice, ADR-0420), which skill
 //!   names and formats it refuses (`accepts_skill_name` · `skill_format`), which folder paths its command line cannot
 //!   carry (`folder_entry_blocks`) and its notice codes (`notice_codes`). Tags and raw-field names match a backend
 //!   through [`Backends::for_word`]; nothing here names a backend.
@@ -41,7 +42,7 @@ use engram_dashboard_agent::launch::{
 };
 use engram_dashboard_agent::profile::AgentOutputFormat;
 use engram_dashboard_platform::fs::{path_key, PathKey};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::backends::Backends;
 use crate::builtin::Builtins;
@@ -67,6 +68,11 @@ pub const BUILTIN_IN_LIBRARY_PRESET: &str = "builtin-in-library-preset";
 /// The code of a loaded skill whose name the agent's backend refuses (`args` = `{name}`).
 // TRD S25 step-7 B8
 pub const SKILL_NAME_INVALID: &str = "skill-name-invalid";
+
+/// The code of a hook an agent's mode does not load while its backend names no omission notice for it (`args` =
+/// `{path}`) — a ② row: an attached hook is never left out unnamed.
+// ADR-0420
+pub const HOOKS_NOT_LOADED: &str = "hooks-not-loaded";
 
 /// The code of a conflict: loaded skills with one collision key (`args` = `{name}` — the key).
 // TRD S25 step-7 B8
@@ -235,6 +241,10 @@ pub struct Resolution {
     pub instructions: Vec<(String, PathBuf)>,
     /// (name, skill folder on disk, via) of each skill loaded, in expansion order.
     pub skills: Vec<(String, PathBuf, Vec<String>)>,
+    /// Each hook loaded, in expansion order, once — an agent whose mode loads no hooks gets none (they are named in its
+    /// `hooks_omitted` notice).
+    // ADR-0420
+    pub hooks: Vec<ResolvedHook>,
     pub raw_settings: Vec<ResolvedSettings>,
     /// Folder entries in expansion order, each once by its normalized path's key.
     pub folders: Vec<ResolvedFolder>,
@@ -251,6 +261,18 @@ pub struct Resolution {
     pub absent_mounts: Vec<(String, String)>,
 }
 
+/// One hook loaded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedHook {
+    /// The reference as the preset spells it.
+    pub path: String,
+    /// The hook folder on disk.
+    pub dir: PathBuf,
+    /// The `hooks` object of its `hooks.json`, as read.
+    pub definition: Map<String, Value>,
+    pub via: Vec<String>,
+}
+
 /// One settings value loaded.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedSettings {
@@ -260,6 +282,9 @@ pub struct ResolvedSettings {
     /// For an agent, the value of one raw field named by its backend; for one preset on its own, an object of every
     /// raw field by name.
     pub value: Value,
+    /// For an agent, the line of that raw field in the settings file; `None` for one preset on its own.
+    // ADR-0420
+    pub line: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -389,6 +414,7 @@ pub fn resolve(target: &Target, lookup: &dyn Lookup, backends: &dyn Backends) ->
         loaded: Vec::new(),
         omitted_instructions: Vec::new(),
         omitted_skills: Vec::new(),
+        omitted_hooks: Vec::new(),
         out: Resolution::default(),
     };
     let default = AssetRef::BuiltIn(BuiltinId::DefaultPreset);
@@ -477,13 +503,14 @@ impl<'l> TagRule<'l> {
 
     /// The library references of `doc` a resolution under this rule follows, in [`crate::catalog::preset_refs`] order: every
     /// `presets` and `settings` entry (a tag in `settings` is a line problem — the item reads as common), and each
-    /// `instructions` and `skills` entry that is common or carries a tag this rule takes.
+    /// `instructions`, `skills` and `hooks` entry that is common or carries a tag this rule takes.
     pub(crate) fn refs<'d>(&self, doc: &'d PresetDoc) -> Vec<&'d LibPath> {
         let taken = |item: &&PresetItem| item.backend.as_deref().is_none_or(|tag| self.takes(tag));
         doc.presets
             .iter()
             .chain(doc.instructions.iter().filter(taken))
             .chain(doc.skills.iter().filter(taken))
+            .chain(doc.hooks.iter().filter(taken))
             .chain(&doc.settings)
             .filter_map(|item| match &item.target {
                 AssetRef::Library(path) => Some(path),
@@ -564,6 +591,8 @@ struct Walk<'l> {
     omitted_instructions: Vec<String>,
     /// Names of skills this mode does not load.
     omitted_skills: Vec<String>,
+    /// Hooks this mode does not load, as spelled.
+    omitted_hooks: Vec<String>,
     out: Resolution,
 }
 
@@ -743,6 +772,9 @@ impl<'l> Walk<'l> {
         for entry in self.in_tag_order(&doc.skills) {
             self.skill(entry, &frame.via);
         }
+        for entry in self.in_tag_order(&doc.hooks) {
+            self.hook(entry, &frame.via);
+        }
         for folder in &doc.folders {
             self.folder(folder, &frame.via);
         }
@@ -800,18 +832,21 @@ impl<'l> Walk<'l> {
         };
         // One preset on its own shows every field; an agent loads only its backend's, and only a refusal in that
         //   field blocks it (a refusal in another backend's field shows on the asset's own row).
-        let values: Vec<Value> = match self.agent {
-            None => vec![Value::Object(
-                doc.raw
-                    .iter()
-                    .map(|field| (field.name.clone(), field.value.clone()))
-                    .collect(),
+        let values: Vec<(Value, Option<u32>)> = match self.agent {
+            None => vec![(
+                Value::Object(
+                    doc.raw
+                        .iter()
+                        .map(|field| (field.name.clone(), field.value.clone()))
+                        .collect(),
+                ),
+                None,
             )],
             Some(_) => doc
                 .raw
                 .iter()
                 .filter(|field| self.takes_backend(&field.name))
-                .map(|field| field.value.clone())
+                .map(|field| (field.value.clone(), Some(field.line)))
                 .collect(),
         };
         let refusals: Vec<Reason> = verdict
@@ -820,11 +855,12 @@ impl<'l> Walk<'l> {
             .filter(|(field, _)| self.takes_backend(field))
             .map(|(_, refusal)| refusal.clone())
             .collect();
-        for value in values {
+        for (value, line) in values {
             self.out.raw_settings.push(ResolvedSettings {
                 asset: entry.target.clone(),
                 via: via.to_vec(),
                 value,
+                line,
             });
         }
         for refusal in refusals {
@@ -885,6 +921,43 @@ impl<'l> Walk<'l> {
             file,
             via: via.to_vec(),
             tags: BTreeSet::from([tag]),
+        });
+    }
+
+    /// A hook entry: a missing hook is a ① row (a launch skips it with a notice — ADR-0374), a broken one (its
+    /// `hooks.json` failed the shape check) a ② row; an agent whose mode loads no hooks gets it named in the
+    /// `hooks_omitted` notice, or — the backend naming no such notice — a ② [`HOOKS_NOT_LOADED`] row, never a silent drop.
+    // ADR-0420
+    fn hook(&mut self, entry: &PresetItem, via: &[String]) {
+        let line = Some(entry.line);
+        let Some((spelling, view)) = self.look(ListName::Hooks, &entry.target, line, via) else {
+            return;
+        };
+        let ItemContent::Hook { definition, .. } = view.content else {
+            return self.wrong_kind(spelling, via, ListName::Hooks, line);
+        };
+        let definition = match definition {
+            Ok(definition) => definition,
+            Err(why) => return self.broken(spelling, via, why.clone()),
+        };
+        let Some(dir) = view.file else {
+            return;
+        };
+        if let Some(agent) = self.agent.filter(|agent| !agent.loads.hooks) {
+            match agent.check.notice_codes(agent.mode).hooks_omitted {
+                Some(_) => self.omitted_hooks.push(spelling),
+                None => {
+                    let args = json!({ "path": spelling });
+                    self.broken(spelling, via, reason(HOOKS_NOT_LOADED, args, line));
+                }
+            }
+            return;
+        }
+        self.out.hooks.push(ResolvedHook {
+            path: spelling,
+            dir,
+            definition: definition.clone(),
+            via: via.to_vec(),
         });
     }
 
@@ -969,19 +1042,23 @@ impl<'l> Walk<'l> {
     }
 
     /// The agent's `omitted` notice, when its mode leaves out instructions or skills it would otherwise load and the
-    /// backend gives a code for it (`args` = `{instructions: [paths], skills: [names]}`).
+    /// backend gives a code for it (`args` = `{instructions: [paths], skills: [names]}`); then its `hooks_omitted` notice
+    /// for the hooks its mode leaves out (`args` = `{hooks: [paths]}` — ADR-0420).
     fn omitted_notice(&mut self) {
         let Some(agent) = self.agent else {
             return;
         };
-        if self.omitted_instructions.is_empty() && self.omitted_skills.is_empty() {
-            return;
-        }
-        if let Some(code) = agent.check.notice_codes(agent.mode).omitted {
+        let codes = agent.check.notice_codes(agent.mode);
+        let left_out = !self.omitted_instructions.is_empty() || !self.omitted_skills.is_empty();
+        if let (Some(code), true) = (codes.omitted, left_out) {
             let args = json!({
                 "instructions": self.omitted_instructions,
                 "skills": self.omitted_skills,
             });
+            self.out.notices.push(reason(code, args, None));
+        }
+        if let (Some(code), false) = (codes.hooks_omitted, self.omitted_hooks.is_empty()) {
+            let args = json!({ "hooks": self.omitted_hooks });
             self.out.notices.push(reason(code, args, None));
         }
     }
@@ -1027,6 +1104,7 @@ pub(crate) fn folder_item(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::fake::{Registry, Scripted};
     use crate::builtin::tests::full;
     use crate::catalog::harness::Lib;
     use crate::mounts::{Mount, MountName};
@@ -1411,6 +1489,7 @@ mod tests {
                 asset: AssetRef::BuiltIn(BuiltinId::DefaultSettings),
                 via: via(&["engram/default"]),
                 value: json!({ "env": { "DISABLE_AUTOUPDATER": "1" } }),
+                line: Some(3),
             }]
         );
         target.backend = Some("codex".to_owned());
@@ -1651,6 +1730,7 @@ mod tests {
                 asset: AssetRef::parse("library/s.yaml").unwrap(),
                 via: via(&["library/P.yaml"]),
                 value: json!({ "model": "m" }),
+                line: Some(3),
             }]
         );
         assert!(
@@ -2306,5 +2386,120 @@ mod tests {
         );
         assert!(json_mode.notices.is_empty());
         assert!(run(&lib, &alone("library/P.yaml")).problems.is_empty());
+    }
+
+    // ── hooks (ADR-0420) ─────────────────────────────────────────────────────────────────────────────────────────
+
+    const HOOK: &str = r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]}}"#;
+
+    fn hook_paths(resolution: &Resolution) -> Vec<&str> {
+        resolution
+            .hooks
+            .iter()
+            .map(|hook| hook.path.as_str())
+            .collect()
+    }
+
+    /// Hooks load in expansion order — nested presets first, then the preset's common entries, then those tagged for
+    /// the agent's backend — each once; a missing one is a `not-found` row, a misshapen one a `hook-shape-invalid` row,
+    /// an item of another kind `wrong-kind`.
+    #[test]
+    fn hooks_load_in_expansion_order_once_with_tags_and_their_problems() {
+        let lib = library(&[
+            (
+                "P.yaml",
+                &preset(
+                    "presets:\n  - library/N.yaml\nhooks:\n  - {path: library/h2, backend: gamma}\n  - library/h1\n  - library/h4\n  - {path: library/h3, backend: codex}\n  - library/bad\n  - library/gone\n  - library/a.md\n",
+                ),
+            ),
+            ("N.yaml", &preset("hooks:\n  - library/h4\n")),
+            ("h1/hooks.json", HOOK),
+            ("h2/hooks.json", HOOK),
+            ("h3/hooks.json", HOOK),
+            ("h4/hooks.json", HOOK),
+            ("bad/hooks.json", r#"{"hooks": {"Stop": [1]}}"#),
+            ("a.md", "a"),
+        ]);
+        let resolution = run(&lib, &agent("gamma", J, &["library/P.yaml"]));
+        assert_eq!(
+            hook_paths(&resolution),
+            ["library/h4", "library/h1", "library/h2"]
+        );
+        let h4 = &resolution.hooks[0];
+        assert_eq!(h4.dir, lib.root.join("h4"));
+        assert_eq!(h4.via, via(&["library/P.yaml", "library/N.yaml"]));
+        assert_eq!(
+            Value::Object(h4.definition.clone()),
+            json!({"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]})
+        );
+        assert_eq!(
+            problems(&resolution.problems),
+            [
+                row("library/bad", "hook-shape-invalid"),
+                row("library/gone", NOT_FOUND),
+                row("library/a.md", WRONG_KIND),
+            ]
+        );
+        assert!(resolution.notices.is_empty(), "{:?}", resolution.notices);
+
+        // One preset on its own takes every tag.
+        let shown = run(&lib, &alone("library/P.yaml"));
+        assert_eq!(
+            hook_paths(&shown),
+            ["library/h4", "library/h1", "library/h2", "library/h3"]
+        );
+    }
+
+    /// A mode that loads no hooks carries none and names each in its backend's `hooks_omitted` notice — the fake's
+    /// terminal mode and today's real backends alike.
+    #[test]
+    fn a_mode_that_loads_no_hooks_names_them_in_its_hooks_omitted_notice() {
+        let lib = library(&[
+            (
+                "P.yaml",
+                &preset("hooks:\n  - library/h1\n  - library/h2\n"),
+            ),
+            ("h1/hooks.json", HOOK),
+            ("h2/hooks.json", HOOK),
+        ]);
+        for (word, mode, code) in [
+            ("gamma", T, "gamma-hooks-omitted"),
+            ("claude", T, "claude-hooks-omitted"),
+            ("claude", J, "claude-hooks-omitted"),
+            ("codex", T, "codex-hooks-omitted"),
+            ("codex", J, "codex-hooks-omitted"),
+        ] {
+            let resolution = run(&lib, &agent(word, mode, &["library/P.yaml"]));
+            assert!(resolution.hooks.is_empty(), "{word} {mode:?}");
+            assert!(resolution.problems.is_empty(), "{word} {mode:?}");
+            assert_eq!(
+                resolution.notices,
+                [reason(
+                    code,
+                    json!({ "hooks": ["library/h1", "library/h2"] }),
+                    None
+                )],
+                "{word} {mode:?}"
+            );
+        }
+    }
+
+    /// A mode that loads no hooks while its backend names no omission notice blocks on each hook — never a silent drop.
+    #[test]
+    fn a_mode_that_loads_no_hooks_and_names_no_notice_blocks_on_each_hook() {
+        let mut lib = library(&[
+            ("P.yaml", &preset("hooks:\n  - library/h1\n")),
+            ("h1/hooks.json", HOOK),
+        ]);
+        let mut gamma = Scripted::new("gamma");
+        gamma.hooks_omitted = None;
+        lib.backends = Registry::real_and(vec![gamma]);
+        let resolution = run(&lib, &agent("gamma", T, &["library/P.yaml"]));
+        assert!(resolution.hooks.is_empty());
+        assert_eq!(
+            problems(&resolution.problems),
+            [row("library/h1", HOOKS_NOT_LOADED)]
+        );
+        assert!(resolution.notices.is_empty(), "{:?}", resolution.notices);
     }
 }

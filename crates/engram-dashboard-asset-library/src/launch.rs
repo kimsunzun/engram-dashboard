@@ -53,8 +53,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use engram_dashboard_agent::backend::hooks::HookRef;
 use engram_dashboard_agent::backend::settings_check::{
-    CommandLine, FolderLoadKind, FolderLoadSet, NativePlaces, UnsureWhy,
+    CommandLine, ConfigOrigin, FolderLoadKind, FolderLoadSet, NativePlaces, RefusalSubject,
+    UnsureWhy,
 };
 use engram_dashboard_agent::backend::SettingsCheck;
 use engram_dashboard_agent::launch::{
@@ -737,6 +739,13 @@ impl LibraryService {
                     .iter()
                     .filter_map(|(_, dir, _)| overlay.read_of(dir)),
             )
+            // ADR-0420: a hook's `hooks.json`, read as a skill's `SKILL.md` is.
+            .chain(
+                resolution
+                    .hooks
+                    .iter()
+                    .filter_map(|hook| overlay.read_of(&hook.dir)),
+            )
             .map(StampEntry::library)
             .collect();
         let mut extra_skill_roots = Vec::new();
@@ -786,13 +795,20 @@ impl LibraryService {
             }
         }
 
-        let config_args: Vec<String> = resolution
-            .raw_settings
-            .iter()
+        // ADR-0420: each argument's origin is pushed beside it, so the two lists cannot drift.
+        let (mut config_args, mut config_origins) = (Vec::new(), Vec::new());
+        for settings in &resolution.raw_settings {
             // A refusal is the settings asset's ② row already: its verdict ran this call on the same value.
-            .filter_map(|settings| check.command_line_args(&settings.value).ok())
-            .flatten()
-            .collect();
+            let Ok(args) = check.command_line_args(&settings.value) else {
+                continue;
+            };
+            let origin = ConfigOrigin {
+                source: settings.asset.spelling(),
+                line: settings.line,
+            };
+            config_origins.extend(std::iter::repeat_n(origin, args.len()));
+            config_args.extend(args);
+        }
         let priming = resolution
             .include_priming
             .then(|| self.builtins.priming_text());
@@ -802,12 +818,24 @@ impl LibraryService {
             .collect();
         let merged = merge_instructions(priming, &pairs);
         let extra = extra_args(&profile.command);
+        // ADR-0420: empty for a mode that loads no hooks — resolve named them in the `hooks_omitted` notice instead.
+        let hooks: Vec<HookRef> = resolution
+            .hooks
+            .iter()
+            .map(|hook| HookRef {
+                path: hook.path.clone(),
+                dir: hook.dir.clone(),
+                definition: hook.definition.clone(),
+            })
+            .collect();
         let fits = |text: &str| {
             check.command_line_fits(&CommandLine {
                 mode,
                 cwd: &cwd,
                 extra_args: &extra,
                 config_args: &config_args,
+                config_origins: &config_origins,
+                hooks: &hooks,
                 instructions: (!text.is_empty()).then_some(text),
             })
         };
@@ -824,11 +852,13 @@ impl LibraryService {
                 .flatten()
                 .collect()
         };
-        let (mut note, mut refused) = (None, None);
+        // ADR-0420: only the notices of the call whose result is kept join the plan.
+        let (mut note, mut refused, mut line_notices) = (None, None, Vec::new());
         for form in forms {
             match fits(&with_note(&merged, &form)) {
-                Ok(()) => {
+                Ok(found) => {
                     note = Some(form);
+                    line_notices = found;
                     break;
                 }
                 Err(reason) => {
@@ -840,12 +870,14 @@ impl LibraryService {
         if note.is_none() {
             // ADR-0361
             match fits(&merged) {
-                Err(reason) => resolution.problems.push(BlockReason::Broken {
-                    item: format!("command-line:{word}"),
-                    via: Vec::new(),
-                    reason,
-                }),
-                Ok(()) => dropped_note = refused,
+                Err(reason) => {
+                    let refused = refusal_row(&resolution, &word, reason);
+                    resolution.problems.push(refused);
+                }
+                Ok(found) => {
+                    dropped_note = refused;
+                    line_notices = found;
+                }
             }
         }
         // ADR-0353: the backend's translation applies the same rule to the folder the spawn gets.
@@ -864,6 +896,8 @@ impl LibraryService {
         }
         // ADR-0387: skip notices first, then the resolution's, then the folder and same-name notices.
         notices.splice(0..0, skips.notices().into_iter().chain(resolution.notices));
+        // ADR-0420: then the command line's own.
+        notices.extend(line_notices);
         // ADR-0387: a folder entry that is not there is left out of the plan; a folder with no status stays.
         let skipped_folders: Vec<String> = skips
             .rows
@@ -894,9 +928,12 @@ impl LibraryService {
                         .last()
                         .cloned()
                         .unwrap_or_else(|| settings.asset.spelling()),
+                    source: settings.asset.spelling(),
+                    line: settings.line,
                     value: settings.value,
                 })
                 .collect(),
+            hooks,
             include_priming: resolution.include_priming,
             notices,
             real: true,
@@ -1031,7 +1068,9 @@ impl LibraryService {
                 continue;
             };
             let file = match &item.content {
-                ItemContent::Skill { file_name, .. } => disk.join(file_name),
+                ItemContent::Skill { file_name, .. } | ItemContent::Hook { file_name, .. } => {
+                    disk.join(file_name)
+                }
                 _ => disk.clone(),
             };
             if let Some(read) = bytes.get(&path_key(&file)) {
@@ -1408,6 +1447,33 @@ fn listing_notices(folder: &Path, listing: &FolderListing, unreadable: &[String]
         notices.push(notice(FOLDER_LISTING_PARTIAL, json!({ "folder": folder })));
     }
     notices
+}
+
+/// The ② row of a command-line refusal, carried where [`RefusalSubject::of`] says: on the hook entry it names, on the
+/// settings asset it names (at the reason's own line), else on `command-line:<word>`. A named entry the plan does not
+/// hold keeps the name with no chain.
+// ADR-0420
+fn refusal_row(resolution: &Resolution, word: &str, reason: Reason) -> BlockReason {
+    let (item, via) = match RefusalSubject::of(&reason) {
+        RefusalSubject::Hook(path) => {
+            let via = resolution
+                .hooks
+                .iter()
+                .find(|hook| hook.path == path)
+                .map(|hook| hook.via.clone());
+            (path.to_owned(), via.unwrap_or_default())
+        }
+        RefusalSubject::Source(path) => {
+            let via = resolution
+                .raw_settings
+                .iter()
+                .find(|settings| settings.asset.spelling() == path)
+                .map(|settings| settings.via.clone());
+            (path.to_owned(), via.unwrap_or_default())
+        }
+        RefusalSubject::CommandLine => (format!("command-line:{word}"), Vec::new()),
+    };
+    BlockReason::Broken { item, via, reason }
 }
 
 fn notice(code: &str, args: Value) -> Notice {
@@ -3190,6 +3256,345 @@ mod tests {
             )))
             .unwrap_err();
         assert_eq!(codes(&blocked), [("broken", "codex-line-too-long")]);
+    }
+
+    /// The line's own notices join the plan once, after every other notice — those of the one call whose result is
+    /// kept: the named-note form when it fits, else (both note forms refused) the call without a note. The fake's
+    /// notice echoes the line it answered, so the kept call is told apart from the others.
+    // ADR-0420
+    #[test]
+    fn the_kept_lines_notices_join_the_plan_after_the_others() {
+        for (refuse, calls) in [(None, 1), (Some("Engram launch note"), 3)] {
+            let mut fake = Scripted::new("codex");
+            fake.refuse_holding = refuse;
+            fake.fit_notice = Some("codex-line-notice");
+            let lines = Arc::clone(&fake.lines);
+            let leaked: &'static Scripted = Box::leak(Box::new(fake));
+            let w = World::with(Setup {
+                backends: Arc::new(Registry(vec![leaked as &'static dyn SettingsCheck])),
+                ..Setup::default()
+            });
+            w.put(
+                "lib/P.yaml",
+                &preset(&["library/rules/gone.md"], &[], &[], &[]),
+            );
+            let profile = with_default(agent(codex(JSON), &["library/P.yaml"], &w.at("work")));
+            let plan = w.svc.check(&profile).unwrap();
+            let asked = lock(&lines).clone();
+            assert_eq!(asked.len(), calls, "{refuse:?}: {asked:?}");
+            let kept = asked
+                .last()
+                .unwrap()
+                .clone()
+                .expect("the priming is on the line");
+            assert_eq!(
+                kept.contains("Engram launch note"),
+                refuse.is_none(),
+                "{refuse:?}: the kept call is the named form, else the one without a note: {kept}"
+            );
+            if refuse.is_none() {
+                assert!(kept.contains("library/rules/gone.md"), "{kept}");
+            }
+            assert_eq!(
+                plan.notices,
+                [
+                    skipped_item("library/rules/gone.md", &["library/P.yaml"], Some(4)),
+                    Notice {
+                        code: "codex-line-notice".to_owned(),
+                        args: json!({ "instructions": kept }),
+                        line: None,
+                    }
+                ],
+                "{refuse:?}"
+            );
+        }
+    }
+
+    // ── hooks (ADR-0420) ─────────────────────────────────────────────────────────────────────────────────────────
+
+    fn hook_json(command: &str) -> String {
+        format!(
+            r#"{{"hooks": {{"Stop": [{{"hooks": [{{"type": "command", "command": "{command}"}}]}}]}}}}"#
+        )
+    }
+
+    /// A world whose registry is two fakes named `codex` and `claude` (JSON loads hooks, terminal names them in
+    /// `<word>-hooks-omitted`); answers the codex fake too.
+    fn hook_world(codex: Scripted) -> (World, &'static Scripted) {
+        let codex: &'static Scripted = Box::leak(Box::new(codex));
+        let claude: &'static Scripted = Box::leak(Box::new(Scripted::new("claude")));
+        let w = World::with(Setup {
+            backends: Arc::new(Registry(vec![
+                codex as &'static dyn SettingsCheck,
+                claude as &'static dyn SettingsCheck,
+            ])),
+            ..Setup::default()
+        });
+        (w, codex)
+    }
+
+    /// A preset's `hooks:` written by hand, as a launch with the real backends meets it today: neither claude nor codex
+    /// loads hook components yet, so every mode leaves the hook out of the plan and names it in its own omission
+    /// notice — never a silent drop.
+    #[test]
+    fn a_hand_written_hooks_section_is_named_in_the_omission_notice_of_every_real_backend_mode() {
+        let w = World::new();
+        w.put("lib/hooks/notify/hooks.json", &hook_json("node x.js"));
+        w.put(
+            "lib/P.yaml",
+            "kind: preset\nversion: 1\nhooks:\n  - library/hooks/notify\n",
+        );
+        for (command, code) in [
+            (claude(JSON), "claude-hooks-omitted"),
+            (claude(TERMINAL), "claude-hooks-omitted"),
+            (codex(JSON), "codex-hooks-omitted"),
+            (codex(TERMINAL), "codex-hooks-omitted"),
+        ] {
+            let what = format!("{command:?}");
+            let plan = w
+                .svc
+                .check(&agent(command, &["library/P.yaml"], &w.at("work")))
+                .unwrap();
+            assert!(plan.hooks.is_empty(), "{what}");
+            assert_eq!(
+                plan.notices,
+                [notice(code, json!({ "hooks": ["library/hooks/notify"] }))],
+                "{what}"
+            );
+        }
+    }
+
+    /// Where the mode loads hooks, the plan carries each hook the preset reaches once, in expansion order (nested
+    /// presets first, then the preset's common entries, then those tagged for the agent's backend), with its folder and
+    /// its `hooks` object as read; the line check gets the same hooks and the stamp covers each `hooks.json` — a change
+    /// before `prepare` is `Stale`. Where the mode loads none, the plan carries none and the notice names them.
+    #[test]
+    fn the_plan_carries_the_hooks_a_mode_loads_in_preset_order_and_stamps_their_files() {
+        let fake = Scripted::new("codex");
+        let asked = Arc::clone(&fake.hook_paths);
+        let (w, _) = hook_world(fake);
+        for name in ["a", "b", "c", "n"] {
+            w.put(&format!("lib/hooks/{name}/hooks.json"), &hook_json(name));
+        }
+        w.put(
+            "lib/N.yaml",
+            "kind: preset\nversion: 1\nhooks:\n  - library/hooks/n\n",
+        );
+        w.put(
+            "lib/P.yaml",
+            "kind: preset\nversion: 1\npresets:\n  - library/N.yaml\nhooks:\n  - {path: library/hooks/b, backend: codex}\n  - library/hooks/a\n  - library/hooks/n\n  - {path: library/hooks/c, backend: claude}\n",
+        );
+        let expected = ["library/hooks/n", "library/hooks/a", "library/hooks/b"];
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
+        let plan = w.svc.check(&profile).unwrap();
+        let carried: Vec<&str> = plan.hooks.iter().map(|hook| hook.path.as_str()).collect();
+        assert_eq!(carried, expected);
+        assert_eq!(plan.hooks[0].dir, w.at("lib/hooks/n"));
+        assert_eq!(
+            serde_json::Value::Object(plan.hooks[0].definition.clone()),
+            json!({"Stop": [{"hooks": [{"type": "command", "command": "n"}]}]})
+        );
+        assert!(plan.notices.is_empty(), "{:?}", plan.notices);
+        let asked = lock(&asked).clone();
+        assert!(!asked.is_empty());
+        assert!(asked.iter().all(|paths| paths == &expected), "{asked:?}");
+        let stamped = stamp_files(&plan);
+        for name in ["a", "b", "n"] {
+            let file = lossy(&w.at(&format!("lib/hooks/{name}/hooks.json")));
+            assert!(stamped.contains(&file), "{file}: {stamped:?}");
+        }
+        assert!(!stamped.contains(&lossy(&w.at("lib/hooks/c/hooks.json"))));
+
+        w.put("lib/hooks/a/hooks.json", &hook_json("changed"));
+        assert!(matches!(
+            w.svc.prepare(plan, profile.id, 1),
+            Err(PrepareError::Stale(_))
+        ));
+
+        let plan = w
+            .svc
+            .check(&agent(codex(TERMINAL), &["library/P.yaml"], &w.at("work")))
+            .unwrap();
+        assert!(plan.hooks.is_empty());
+        assert_eq!(
+            plan.notices,
+            [notice("codex-hooks-omitted", json!({ "hooks": expected }))]
+        );
+    }
+
+    /// A hook entry whose folder holds no `hooks.json` is left out and named in the missing-item notice (ADR-0374); one
+    /// whose `hooks.json` fails the shape check blocks the launch on that entry.
+    #[test]
+    fn a_missing_hook_is_skipped_with_a_notice_and_a_misshapen_one_blocks() {
+        let (w, _) = hook_world(Scripted::new("codex"));
+        w.put("lib/hooks/gone/notes.md", "no hooks.json here");
+        w.put("lib/hooks/bad/hooks.json", r#"{"hooks": []}"#);
+        let profile = agent(codex(JSON), &["library/P.yaml"], &w.at("work"));
+        w.put(
+            "lib/P.yaml",
+            "kind: preset\nversion: 1\nhooks:\n  - library/hooks/gone\n",
+        );
+        let plan = w.svc.check(&profile).unwrap();
+        assert!(plan.hooks.is_empty());
+        assert_eq!(
+            plan.notices,
+            [skipped_item(
+                "library/hooks/gone",
+                &["library/P.yaml"],
+                Some(4)
+            )]
+        );
+
+        w.put(
+            "lib/P.yaml",
+            "kind: preset\nversion: 1\nhooks:\n  - library/hooks/bad\n",
+        );
+        let blocked = w.svc.check(&profile).unwrap_err();
+        assert_eq!(codes(&blocked), [("broken", "hook-shape-invalid")]);
+        let BlockReason::Broken { item, via, .. } = &blocked.reasons[0] else {
+            panic!("{blocked:?}");
+        };
+        assert_eq!(
+            (item.as_str(), via.as_slice()),
+            ("library/hooks/bad", &["library/P.yaml".to_owned()][..])
+        );
+    }
+
+    /// A command-line refusal is carried where its `args` say: on the hook entry it names (with that hook's chain), on
+    /// the settings asset it names, else — a named entry the plan does not hold too — on `command-line:<word>`'s row or
+    /// that name with no chain.
+    #[test]
+    fn a_command_line_refusal_lands_on_the_hook_or_settings_asset_it_names() {
+        let cases = [
+            (
+                json!({ "hook": "library/hooks/a" }),
+                "library/hooks/a",
+                vec!["library/P.yaml", "library/N.yaml"],
+            ),
+            (
+                json!({ "hook": 3, "source": "library/s.yaml" }),
+                "library/s.yaml",
+                vec!["library/P.yaml"],
+            ),
+            (
+                json!({ "hook": "library/hooks/zzz" }),
+                "library/hooks/zzz",
+                vec![],
+            ),
+            (json!({ "needed": 9000 }), "command-line:codex", vec![]),
+        ];
+        for (args, item, via) in cases {
+            let mut fake = Scripted::new("codex");
+            fake.refuse_holding = Some("REFUSE ME");
+            fake.refusal_args = args.clone();
+            let (w, _) = hook_world(fake);
+            w.put("lib/hooks/a/hooks.json", &hook_json("a"));
+            w.put("lib/rules/r.md", "REFUSE ME");
+            w.put(
+                "lib/s.yaml",
+                "kind: settings\nversion: 1\ncodex:\n  args: [-x]\n",
+            );
+            w.put(
+                "lib/N.yaml",
+                "kind: preset\nversion: 1\nhooks:\n  - library/hooks/a\n",
+            );
+            w.put(
+                "lib/P.yaml",
+                "kind: preset\nversion: 1\npresets:\n  - library/N.yaml\ninstructions:\n  - library/rules/r.md\nsettings:\n  - library/s.yaml\n",
+            );
+            let blocked = w
+                .svc
+                .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
+                .unwrap_err();
+            let via: Vec<String> = via.iter().map(|preset| (*preset).to_owned()).collect();
+            assert_eq!(
+                blocked.reasons,
+                [BlockReason::Broken {
+                    item: item.to_owned(),
+                    via,
+                    reason: Reason {
+                        code: "codex-line-too-long".to_owned(),
+                        args,
+                        line: None,
+                    },
+                }]
+            );
+        }
+    }
+
+    /// Each raw argument reaches the line with its origin at the same index — the settings asset and its field's line —
+    /// and a refused value between two good ones adds neither an argument nor an origin (it blocks the launch as its
+    /// asset's own problem). The plan's raw settings carry the same origin.
+    // ADR-0420
+    #[test]
+    fn each_config_argument_carries_its_settings_asset_and_field_line() {
+        let origin = |source: &str, line: u32| ConfigOrigin {
+            source: source.to_owned(),
+            line: Some(line),
+        };
+        let expected = [
+            origin("library/s1.yaml", 3),
+            origin("library/s1.yaml", 3),
+            origin("library/s2.yaml", 4),
+        ];
+        let world = |settings: &[&str]| {
+            let fake = Scripted::new("codex");
+            let config = Arc::clone(&fake.config);
+            let leaked: &'static Scripted = Box::leak(Box::new(fake));
+            let w = World::with(Setup {
+                backends: Arc::new(Registry(vec![leaked as &'static dyn SettingsCheck])),
+                ..Setup::default()
+            });
+            w.put(
+                "lib/s1.yaml",
+                "kind: settings\nversion: 1\ncodex:\n  args: [-x, '1']\n",
+            );
+            w.put(
+                "lib/bad.yaml",
+                "kind: settings\nversion: 1\ncodex:\n  args: [-z]\n  unsafe: true\n",
+            );
+            w.put(
+                "lib/s2.yaml",
+                "kind: settings\nversion: 1\ndescription: d\ncodex:\n  args: [-y]\n",
+            );
+            w.put("lib/P.yaml", &preset(&[], &[], settings, &[]));
+            (w, config)
+        };
+        let seen_lines = |config: &Arc<Mutex<Vec<(Vec<String>, Vec<ConfigOrigin>)>>>| {
+            let seen = lock(config).clone();
+            assert!(!seen.is_empty());
+            for (args, origins) in seen {
+                assert_eq!(args, ["-x", "1", "-y"]);
+                assert_eq!(origins, expected);
+            }
+        };
+
+        let (w, config) = world(&["library/s1.yaml", "library/bad.yaml", "library/s2.yaml"]);
+        let blocked = w
+            .svc
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
+            .unwrap_err();
+        assert_eq!(codes(&blocked), [("broken", "codex-line-unsafe")]);
+        seen_lines(&config);
+
+        let (w, config) = world(&["library/s1.yaml", "library/s2.yaml"]);
+        let plan = w
+            .svc
+            .check(&agent(codex(JSON), &["library/P.yaml"], &w.at("work")))
+            .unwrap();
+        seen_lines(&config);
+        let raw: Vec<(&str, &str, Option<u32>)> = plan
+            .raw_settings
+            .iter()
+            .map(|raw| (raw.preset.as_str(), raw.source.as_str(), raw.line))
+            .collect();
+        assert_eq!(
+            raw,
+            [
+                ("library/P.yaml", "library/s1.yaml", Some(3)),
+                ("library/P.yaml", "library/s2.yaml", Some(4))
+            ]
+        );
     }
 
     #[test]

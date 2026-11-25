@@ -1,8 +1,8 @@
-//! The whole-file preset writer (ADR-0358): parse the file into a [`Node`] tree, replace the five list nodes, serialize
+//! The whole-file preset writer (ADR-0358): parse the file into a [`Node`] tree, replace the six list nodes, serialize
 //! the tree with serde-saphyr, restore the line ending and BOM, and check that the returned text reads back to the same
 //! tree.
 //!
-//! What a rewrite keeps: every key other than the five lists, known or not, with its value and position; inside a list,
+//! What a rewrite keeps: every key other than the six lists, known or not, with its value and position; inside a list,
 //! each item's own node (unknown keys of an item map included) and every entry the reader could not model. What it
 //! loses, by decision: comments, blank lines, quoting and flow style, key spacing, anchors and merge keys (expanded —
 //! values equal), explicit tags (a `!!binary` value stays its base64 text), the sign of a NaN; indentation becomes two
@@ -43,7 +43,7 @@ use super::{options, source_of, ParseError};
 use crate::backends::Backends;
 use crate::path::{ItemOrigin, PresetItem};
 
-/// The new content of the five lists.
+/// The new content of the six lists.
 ///
 /// Caller contract: the lists and `drop_unmodeled` come from [`parse_preset`] on the same text passed to
 /// [`rewrite_lists`], list by list; an item the caller keeps carries the `origin` it was read with. An item without an
@@ -54,6 +54,7 @@ pub struct PresetLists {
     pub presets: Vec<PresetItem>,
     pub instructions: Vec<PresetItem>,
     pub skills: Vec<PresetItem>,
+    pub hooks: Vec<PresetItem>,
     pub settings: Vec<PresetItem>,
     pub folders: Vec<FolderItem>,
     /// Unmodeled entries ([`super::read::Unmodeled`]) the caller removes on purpose, as `(list, index)`; every other
@@ -137,7 +138,7 @@ impl WriteError {
     }
 }
 
-/// `text` with its five lists replaced by `lists` (see the caller contract on [`PresetLists`]), or why it cannot be
+/// `text` with its six lists replaced by `lists` (see the caller contract on [`PresetLists`]), or why it cannot be
 /// written. `backends` decides, as for [`parse_preset`], which original entries are modeled (an entry with a tag word
 /// no backend knows is not). Pure.
 ///
@@ -444,7 +445,7 @@ impl<'de> Visitor<'de> for ScanVisitor {
     }
 }
 
-/// Replaces the five list nodes of the top-level map `entries` (see [`rewrite_lists`] for absent and `null` keys).
+/// Replaces the six list nodes of the top-level map `entries` (see [`rewrite_lists`] for absent and `null` keys).
 fn replace_lists(entries: &mut Vec<(Node, Node)>, doc: &PresetDoc, lists: &PresetLists) {
     let dropped: HashSet<(ListName, u32)> = lists.drop_unmodeled.iter().copied().collect();
     let kept = |list: ListName| -> Vec<u32> {
@@ -474,6 +475,7 @@ fn replace_lists(entries: &mut Vec<(Node, Node)>, doc: &PresetDoc, lists: &Prese
             &lists.instructions,
         ),
         (ListName::Skills, &doc.skills, &lists.skills),
+        (ListName::Hooks, &doc.hooks, &lists.hooks),
         (ListName::Settings, &doc.settings, &lists.settings),
     ];
     let mut new_lists: Vec<(ListName, Vec<Node>)> = item_lists
@@ -706,6 +708,7 @@ mod tests {
             presets: doc.presets,
             instructions: doc.instructions,
             skills: doc.skills,
+            hooks: doc.hooks,
             settings: doc.settings,
             folders: doc
                 .folders
@@ -1015,7 +1018,7 @@ mod tests {
         );
     }
 
-    // ── each operation on each of the five lists ───────────────────────────────
+    // ── each operation on each of the six lists ───────────────────────────────
 
     fn entry(list: ListName, n: u32) -> String {
         match list {
@@ -1071,6 +1074,7 @@ mod tests {
             ListName::Presets => change(&mut lists.presets),
             ListName::Instructions => change(&mut lists.instructions),
             ListName::Skills => change(&mut lists.skills),
+            ListName::Hooks => change(&mut lists.hooks),
             ListName::Settings => change(&mut lists.settings),
             ListName::Folders => folders(&mut lists.folders),
         }

@@ -252,6 +252,8 @@ mod tests {
             cwd: Path::new("C:/w"),
             extra_args,
             config_args,
+            config_origins: &[],
+            hooks: &[],
             instructions,
         }
     }
@@ -632,6 +634,8 @@ mod tests {
             cwd: Path::new(cwd),
             extra_args: extra,
             config_args: config,
+            config_origins: &[],
+            hooks: &[],
             instructions: None,
         };
         (counted_args(&line), needed(&line).unwrap() - wrapper_cost())

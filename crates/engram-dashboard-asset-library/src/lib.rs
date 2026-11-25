@@ -1,6 +1,6 @@
 //! # engram-dashboard-asset-library — the preset library
 //!
-//! The library holds instruction, skill, settings and preset files in the folders of its mounts. This crate reads,
+//! The library holds instruction, skill, hook, settings and preset files in the folders of its mounts. This crate reads,
 //! checks and resolves them and makes the launch materials; the daemon creates the service, plugs its ports in, passes
 //! it values and calls the first start and the boot scan (ADR-0311 · ADR-0382).
 //!
@@ -219,7 +219,8 @@ use crate::backends::Backends;
 use crate::builtin::file_of;
 use crate::builtin::Builtins;
 use crate::catalog::{
-    key, preset_refs, within, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult,
+    key, list_marker_folders, preset_refs, within, Catalog, Item, ItemContent, ItemKind, ScanItem,
+    ScanResult,
 };
 use crate::config::{ConfigFile, ConfigHealth, LibraryConfig, MountPlace, MountSetting};
 use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need, NOT_CHECKED, SPAWN_FAILED};
@@ -574,7 +575,7 @@ pub enum FirstStart {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FoldersAnswer {
     /// Every mount's top (the built-in `engram` included), then every folder of the mounts that can be read and the
-    /// built-in's virtual folders, by path; a skill folder is marked.
+    /// built-in's virtual folders, by path; a skill folder and a hook folder are marked.
     pub folders: Vec<FolderNode>,
     /// The mounts that cannot be read: a library mount's folders were left out; the built-in mount keeps its virtual
     /// folders.
@@ -587,6 +588,8 @@ pub struct FolderNode {
     pub path: String,
     pub name: String,
     pub skill: bool,
+    /// A hook folder (ADR-0420).
+    pub hook: bool,
     /// A mount's top: its last known state (no fresh stat); `None` = a folder inside a mount.
     // ADR-0400 decision 4
     pub mount_state: Option<MountState>,
@@ -2077,8 +2080,8 @@ impl LibraryService {
     }
 
     /// The whole folder tree, by path: each registered mount's top with its last known state (no fresh stat) and the
-    /// built-in mount `engram` (always `Ok`), every folder the catalog holds plus every skill folder of the mounts that
-    /// can be read, and the built-in's virtual folders; a skill folder is marked.
+    /// built-in mount `engram` (always `Ok`), every folder the catalog holds plus every skill and hook folder of the mounts
+    /// that can be read, and the built-in's virtual folders; a skill folder and a hook folder are marked.
     /// The mounts that cannot be read are named in `unavailable` and their folders left out — the answer is partial,
     /// never a refusal for them (ADR-0400 decision 6). After the first-scan entrance (its failure `Unavailable` ·
     /// [`LIBRARY_UNAVAILABLE`]), under one read lock; with no mount registered the tree is empty.
@@ -2101,26 +2104,28 @@ impl LibraryService {
                         path: top.as_str().to_owned(),
                         name: top.file_name().to_owned(),
                         skill: false,
+                        hook: false,
                         mount_state: Some(mount.shown()),
                     }
                 })
                 .collect();
-            let skills = catalog
+            // ADR-0420: a hook folder is a folder item too.
+            let folder_items = catalog
                 .items()
-                .filter(|item| item.kind == ItemKind::Skill)
+                .filter(|item| matches!(item.kind, ItemKind::Skill | ItemKind::Hook))
                 .map(|item| &item.path);
+            let kind_of = |folder: &LibPath| catalog.get(&key(folder)).map(|item| &item.kind);
             folders.extend(
                 catalog
                     .folders()
-                    .chain(skills)
+                    .chain(folder_items)
                     .filter(|folder| readable(folder))
                     .filter(|folder| seen.insert(key(folder)))
                     .map(|folder| FolderNode {
                         path: folder.as_str().to_owned(),
                         name: folder.file_name().to_owned(),
-                        skill: catalog
-                            .get(&key(folder))
-                            .is_some_and(|item| item.kind == ItemKind::Skill),
+                        skill: kind_of(folder) == Some(&ItemKind::Skill),
+                        hook: kind_of(folder) == Some(&ItemKind::Hook),
                         mount_state: None,
                     }),
             );
@@ -2129,12 +2134,14 @@ impl LibraryService {
                 path: BUILTIN_MOUNT.to_owned(),
                 name: BUILTIN_MOUNT.to_owned(),
                 skill: false,
+                hook: false,
                 mount_state: Some(self.builtin_mount_state()),
             });
             folders.extend(builtin_folders().into_iter().map(|folder| FolderNode {
                 path: folder.as_str().to_owned(),
                 name: folder.file_name().to_owned(),
                 skill: false,
+                hook: false,
                 mount_state: None,
             }));
             folders.sort_by(|a, b| a.path.cmp(&b.path));
@@ -2245,9 +2252,11 @@ impl LibraryService {
     ) -> io::Result<ScanResult> {
         // The racy rule's reference — taken before the walk (`ScanResult::build`).
         let now = SystemTime::now();
-        let listing = self
+        let mut listing = self
             .store
             .scan(&mount.folder, under, &|| self.gate.next_seq())?;
+        // ADR-0420: a one-file range of a `hooks.json` lists its folder too.
+        list_marker_folders(&mut listing, &|path| self.store.list(path));
         Ok(ScanResult::build(
             listing,
             &mount.name,
@@ -2851,6 +2860,17 @@ fn row(item: &Item, references: usize) -> ListRow {
             name, description, ..
         } => (name.clone(), description.clone(), None),
         ItemContent::SkillFile => (file_name(), String::new(), None),
+        // ADR-0420: a hook is named by its folder; its row shows the shape check's refusal.
+        ItemContent::Hook {
+            description,
+            definition,
+            ..
+        } => (
+            file_name(),
+            description.clone(),
+            definition.as_ref().err().cloned(),
+        ),
+        ItemContent::HookFile => (file_name(), String::new(), None),
         ItemContent::Preset { doc, .. } => (
             file_name(),
             doc.description.clone().unwrap_or_default(),
@@ -4013,6 +4033,32 @@ mod tests {
     fn class_code_mount(refusal: LibraryRefusal) -> (RefusalClass, String, serde_json::Value) {
         let (class, reason) = refused(refusal);
         (class, reason.code, reason.args["mount"].clone())
+    }
+
+    // ADR-0420: a check that keeps the file's hooks judges the mounts they reach — a hook in a mount that cannot be
+    //   read now is that mount's library-unavailable row, not its cached item.
+    #[test]
+    fn a_check_that_keeps_the_files_hooks_judges_the_mounts_they_reach() {
+        let ops = Arc::new(StatOps::default());
+        let (svc, store) = mounted_with(
+            &[("library", "/lib"), ("team", "/team")],
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+        );
+        store
+            .mem("/lib")
+            .file("P.yaml", "kind: preset\nversion: 1\nhooks:\n  - team/h\n");
+        store.mem("/team").file("h/hooks.json", r#"{"hooks": {}}"#);
+        svc.first_scan_join().unwrap();
+        let draft = edit::PresetDraft::default();
+        let up = svc.preset_check(&lp("library/P.yaml"), &draft).unwrap();
+        assert!(up.problems.is_empty(), "{:?}", up.problems);
+
+        lock(&ops.0).insert(
+            PathBuf::from("/team"),
+            FolderStatus::Unreadable("down".to_owned()),
+        );
+        let down = svc.preset_check(&lp("library/P.yaml"), &draft).unwrap();
+        assert_eq!(down.problems, [library_unavailable("team", "down")]);
     }
 
     // ADR-0400 decision 6: a write into a mount that cannot be read, and `preset.get` of one of its presets, refuse

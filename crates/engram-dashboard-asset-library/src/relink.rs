@@ -1497,6 +1497,29 @@ mod tests {
         assert_eq!(w.text("P.yaml"), lists_x);
     }
 
+    // ADR-0420: a hook reference is re-pointed in the hooks list, where a hook goes.
+    #[test]
+    fn a_relink_re_points_a_hook_reference() {
+        let w = World::new();
+        w.put("new/h/hooks.json", r#"{"hooks": {}}"#);
+        w.put(
+            "P.yaml",
+            &preset("hooks:\n- library/old/h\n- {path: library/old/g, backend: codex}\n"),
+        );
+        w.scan();
+
+        let answer = w.relink("library/old/h", "library/new/h").unwrap();
+
+        assert_eq!(fixed(&answer), [("library/old/h", "library/new/h")]);
+        assert_eq!(
+            w.listed("P.yaml", ListName::Hooks),
+            [
+                entry("library/new/h"),
+                ("library/old/g".to_owned(), Some("codex".to_owned()))
+            ]
+        );
+    }
+
     #[test]
     fn part_b_skips_a_candidate_at_or_below_a_link() {
         let skill = "---\nname: s\ndescription: d\n---\n";

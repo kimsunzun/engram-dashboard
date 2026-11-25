@@ -12163,6 +12163,7 @@ mod tests {
                 instructions: Vec::new(),
                 skills: Vec::new(),
                 raw_settings: Vec::new(),
+                hooks: Vec::new(),
                 include_priming: false,
                 notices: Vec::new(),
                 real: true,

@@ -9,6 +9,6 @@ export type PresetEntryArg = {
  */
 path: string, 
 /**
- * The backend word the entry is for (instructions and skills only); `null` = every backend.
+ * The backend word the entry is for (instructions, skills and hooks only); `null` = every backend.
  */
 backend?: string | null, };

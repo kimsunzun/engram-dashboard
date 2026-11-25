@@ -162,9 +162,10 @@ impl LibraryCommandHost for LibraryService {
         kinds: &[LibraryKind],
     ) -> Result<LibraryListOk, PortRefusal> {
         let folder = folder.map(read_path).transpose().map_err(port)?;
+        let kinds = kinds.iter().map(item_kind).collect();
         let filter = ListFilter {
             query: query.map(str::to_owned),
-            kinds: kinds.iter().map(item_kind).collect(),
+            kinds,
         };
         self.list_with(folder.as_ref(), &filter)
             .map(list_ok)
@@ -303,6 +304,7 @@ impl LibraryCommandHost for LibraryService {
             PresetSection::Presets => ListName::Presets,
             PresetSection::Instructions => ListName::Instructions,
             PresetSection::Skills => ListName::Skills,
+            PresetSection::Hooks => ListName::Hooks,
             PresetSection::Settings => ListName::Settings,
             PresetSection::Folders => ListName::Folders,
         };
@@ -637,6 +639,7 @@ fn folders_ok(answer: FoldersAnswer) -> LibraryFoldersOk {
                     path: folder.path,
                     name: folder.name,
                     skill: folder.skill,
+                    hook: folder.hook,
                     state,
                     state_why,
                 }
@@ -1134,6 +1137,7 @@ fn preset_view(view: crate::edit::PresetView) -> declared::PresetView {
         presets: entries(view.presets),
         instructions: entries(view.instructions),
         skills: entries(view.skills),
+        hooks: entries(view.hooks),
         settings: entries(view.settings),
         folders: view.folders.into_iter().map(folder_row).collect(),
         conflicts: view.conflicts.into_iter().map(problem_row).collect(),
@@ -1274,6 +1278,7 @@ fn preset_draft(draft: &PresetDraftInput) -> PresetDraft {
         presets: items(&draft.presets),
         instructions: items(&draft.instructions),
         skills: items(&draft.skills),
+        hooks: draft.hooks.as_deref().map(items),
         settings: items(&draft.settings),
         folders: draft.folders.clone(),
     }
@@ -1402,17 +1407,22 @@ fn library_kind(kind: &ItemKind) -> Option<LibraryKind> {
         ItemKind::Instruction => Some(LibraryKind::Instruction),
         ItemKind::Skill => Some(LibraryKind::Skill),
         ItemKind::SkillFile => Some(LibraryKind::SkillFile),
+        ItemKind::Hook => Some(LibraryKind::Hook),
+        ItemKind::HookFile => Some(LibraryKind::HookFile),
         ItemKind::Settings => Some(LibraryKind::Settings),
         ItemKind::Preset => Some(LibraryKind::Preset),
         ItemKind::Broken { .. } => None,
     }
 }
 
+/// The catalog kind a declared word filters by.
 fn item_kind(kind: &LibraryKind) -> ItemKind {
     match kind {
         LibraryKind::Instruction => ItemKind::Instruction,
         LibraryKind::Skill => ItemKind::Skill,
         LibraryKind::SkillFile => ItemKind::SkillFile,
+        LibraryKind::Hook => ItemKind::Hook,
+        LibraryKind::HookFile => ItemKind::HookFile,
         LibraryKind::Settings => ItemKind::Settings,
         LibraryKind::Preset => ItemKind::Preset,
     }
@@ -1830,6 +1840,7 @@ mod tests {
                 path: "library".to_owned(),
                 name: "library".to_owned(),
                 skill: false,
+                hook: false,
                 state: Some("missing".to_owned()),
                 state_why: Some("missing".to_owned()),
             })
@@ -1938,6 +1949,74 @@ mod tests {
         assert_eq!(paths(&by_file.rows), ["library/skills/s1/SKILL.md"]);
         let by_skill = w.list(Some("library/skills/s1"), None, &[LibraryKind::Skill]);
         assert!(by_skill.rows.is_empty(), "{by_skill:?}");
+    }
+
+    /// A hook folder lists as `Hook` — named by its folder, described by its `hooks.json`'s `description`, a shape
+    /// failure as its state; its `hooks.json` lists inside it as `HookFile`, matched only by `HookFile`; and
+    /// `library.folders` marks the folder `hook`. A folder holding a `SKILL.md` too is a skill, not a hook.
+    // ADR-0420
+    #[test]
+    fn a_hook_folder_lists_as_hook_and_is_marked_in_the_folder_rows() {
+        let w = World::new(Vec::new());
+        w.put(
+            "hooks/notify/hooks.json",
+            r#"{"description": "Notifies", "hooks": {}}"#,
+        );
+        w.put("hooks/bad/hooks.json", r#"{"hooks": []}"#);
+        w.put("hooks/both/hooks.json", r#"{"hooks": {}}"#);
+        w.put("hooks/both/SKILL.md", SKILL);
+
+        let parent = w.list(Some("library/hooks"), None, &[LibraryKind::Hook]);
+        assert_eq!(
+            paths(&parent.rows),
+            ["library/hooks/bad", "library/hooks/notify"]
+        );
+        let shown: Vec<(Option<LibraryKind>, &str, &str, Option<&str>)> = parent
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.kind.clone(),
+                    row.name.as_str(),
+                    row.description.as_str(),
+                    row.state.as_ref().map(|state| state.code.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    Some(LibraryKind::Hook),
+                    "bad",
+                    "",
+                    Some("hook-shape-invalid")
+                ),
+                (Some(LibraryKind::Hook), "notify", "Notifies", None),
+            ]
+        );
+
+        let inside = w.list(Some("library/hooks/notify"), None, &[]);
+        assert_eq!(paths(&inside.rows), ["library/hooks/notify/hooks.json"]);
+        assert_eq!(inside.rows[0].kind, Some(LibraryKind::HookFile));
+        let by_file = w.list(Some("library/hooks/notify"), None, &[LibraryKind::HookFile]);
+        assert_eq!(paths(&by_file.rows), ["library/hooks/notify/hooks.json"]);
+        let by_hook = w.list(Some("library/hooks/notify"), None, &[LibraryKind::Hook]);
+        assert!(by_hook.rows.is_empty(), "{by_hook:?}");
+
+        let folders = w.port().folders().expect("folders");
+        let marks = |path: &str| {
+            let row = folders
+                .folders
+                .iter()
+                .find(|row| row.path == path)
+                .unwrap_or_else(|| panic!("{path}: {folders:?}"));
+            (row.skill, row.hook)
+        };
+        assert_eq!(marks("library/hooks/notify"), (false, true));
+        assert_eq!(marks("library/hooks/bad"), (false, true));
+        assert_eq!(marks("library/hooks/both"), (true, false));
+        assert_eq!(marks("library/hooks"), (false, false));
     }
 
     /// A query searches name and description, case-insensitively, in every item below the folder (not the folder
@@ -2428,6 +2507,7 @@ mod tests {
             presets: Vec::new(),
             instructions: Vec::new(),
             skills: Vec::new(),
+            hooks: None,
             settings: Vec::new(),
             folders: None,
         }
@@ -2862,6 +2942,99 @@ mod tests {
         assert_eq!(fs::read(w.base.join("lib").join("p.yaml")).unwrap(), before);
     }
 
+    /// A hand-written `hooks:` section shows in `preset.get` — each row with its tag and state; `preset.check` and
+    /// `preset.save` without `hooks` judge and keep the section as written; with `hooks` both take the draft's list.
+    // ADR-0420
+    #[test]
+    fn a_hand_written_hooks_section_shows_and_an_omitted_draft_list_keeps_it() {
+        let w = World::new(Vec::new());
+        w.put("hooks/a/hooks.json", r#"{"hooks": {}}"#);
+        w.put("hooks/b/hooks.json", r#"{"hooks": {}}"#);
+        w.put("rules/r.md", "r");
+        w.put(
+            "p.yaml",
+            "kind: preset\nversion: 1\nhooks:\n  - library/hooks/a\n  - {path: library/hooks/b, backend: codex}\n  - library/hooks/gone\n  - library/rules/r.md\n",
+        );
+        let rows = |view: &declared::PresetView| -> Vec<(String, Option<String>, Option<String>)> {
+            view.hooks
+                .iter()
+                .map(|row| {
+                    let state = row.state.as_ref().map(|state| state.code.clone());
+                    (row.path.clone(), row.backend.clone(), state)
+                })
+                .collect()
+        };
+        let written = |path: &str, backend: Option<&str>, state: Option<&str>| {
+            (
+                path.to_owned(),
+                backend.map(str::to_owned),
+                state.map(str::to_owned),
+            )
+        };
+        let as_written = [
+            written("library/hooks/a", None, None),
+            written("library/hooks/b", Some("codex"), None),
+            written("library/hooks/gone", None, Some("not-found")),
+            written("library/rules/r.md", None, Some("wrong-kind")),
+        ];
+        let view = w.port().preset_get("library/p.yaml").expect("view");
+        assert_eq!(rows(&view), as_written);
+
+        let mut omitted = empty_draft();
+        omitted.instructions = vec![arg("library/rules/r.md")];
+        let out = w
+            .port()
+            .preset_check("library/p.yaml", &omitted)
+            .expect("check");
+        assert!(!out.save_refuses);
+        let found: Vec<(&str, Option<&str>, &str)> = out
+            .problems
+            .iter()
+            .map(|problem| {
+                (
+                    problem.kind.as_str(),
+                    problem.item.as_deref(),
+                    problem.code.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("missing", Some("library/hooks/gone"), "not-found"),
+                ("broken", Some("library/rules/r.md"), "wrong-kind"),
+            ]
+        );
+        let view = w
+            .port()
+            .preset_save("library/p.yaml", &omitted, Some(&view.rev), None)
+            .expect("save");
+        assert_eq!(rows(&view), as_written);
+        assert_eq!(entry_paths(&view.instructions), ["library/rules/r.md"]);
+
+        let mut wrong = empty_draft();
+        wrong.hooks = Some(vec![arg("library/rules/r.md")]);
+        let out = w
+            .port()
+            .preset_check("library/p.yaml", &wrong)
+            .expect("check");
+        assert!(out.save_refuses);
+        assert!(out
+            .problems
+            .iter()
+            .any(|problem| problem.code == "wrong-kind"
+                && problem.args == json!({ "path": "library/rules/r.md", "list": "hooks" })));
+
+        let mut given = empty_draft();
+        given.hooks = Some(vec![arg("library/hooks/b")]);
+        let view = w
+            .port()
+            .preset_save("library/p.yaml", &given, None, None)
+            .expect("save");
+        assert_eq!(rows(&view), [written("library/hooks/b", None, None)]);
+        assert!(view.instructions.is_empty());
+    }
+
     /// `preset.previewFolder` answers the add verdict and, per backend and mode asked, the load set as typed rows.
     #[test]
     fn preview_folder_answers_the_verdict_and_typed_load_rows() {
@@ -2948,6 +3121,8 @@ mod tests {
             "skills/s2/SKILL.md",
             "---\nname: s2\ndescription: two\n---\n",
         );
+        w.put("hooks/h1/hooks.json", r#"{"hooks": {}}"#);
+        w.put("hooks/h2/hooks.json", r#"{"hooks": {}}"#);
         w.put("s1.yaml", "kind: settings\nversion: 1\n");
         w.put("s2.yaml", "kind: settings\nversion: 1\n");
         w.put("q.yaml", "kind: preset\nversion: 1\n");
@@ -2955,7 +3130,7 @@ mod tests {
         w.put(
             "p.yaml",
             &format!(
-                "kind: preset\nversion: 1\npresets:\n  - library/q.yaml\n  - library/r.yaml\ninstructions:\n  - library/rules/a.md\n  - library/rules/b.md\nskills:\n  - library/skills/s1\n  - library/skills/s2\nsettings:\n  - library/s1.yaml\n  - library/s2.yaml\nfolders:\n  - {f1}\n  - {f2}\n"
+                "kind: preset\nversion: 1\npresets:\n  - library/q.yaml\n  - library/r.yaml\ninstructions:\n  - library/rules/a.md\n  - library/rules/b.md\nskills:\n  - library/skills/s1\n  - library/skills/s2\nhooks:\n  - library/hooks/h1\n  - library/hooks/h2\nsettings:\n  - library/s1.yaml\n  - library/s2.yaml\nfolders:\n  - {f1}\n  - {f2}\n"
             ),
         );
         let lists = |view: &declared::PresetView| -> Vec<Vec<String>> {
@@ -2965,18 +3140,13 @@ mod tests {
                 entries(&view.presets),
                 entries(&view.instructions),
                 entries(&view.skills),
+                entries(&view.hooks),
                 entries(&view.settings),
                 view.folders.iter().map(|row| row.path.clone()).collect(),
             ]
         };
-        let sections = [
-            PresetSection::Presets,
-            PresetSection::Instructions,
-            PresetSection::Skills,
-            PresetSection::Settings,
-            PresetSection::Folders,
-        ];
-        for (index, section) in sections.into_iter().enumerate() {
+        // In `PresetSection::ALL` order, so a section word added later fails here until it is listed.
+        for (index, section) in PresetSection::ALL.into_iter().enumerate() {
             let before = w.port().preset_get("library/p.yaml").expect("view");
             let mut expected = lists(&before);
             expected[index].reverse();

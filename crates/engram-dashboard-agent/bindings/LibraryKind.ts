@@ -2,6 +2,8 @@
 
 /**
  * The kind of a library item — `SkillFile` is a skill folder's `SKILL.md`: it stands in for its skill, is listed
- * inside the skill folder, and `kinds` matches it only by `SkillFile`, never by `Skill`.
+ * inside the skill folder, and `kinds` matches it only by `SkillFile`, never by `Skill`. `Hook` is a folder
+ * holding a `hooks.json` (and no `SKILL.md`); `HookFile` is that `hooks.json`, matched only by `HookFile` in
+ * the same way.
  */
-export type LibraryKind = "Instruction" | "Skill" | "SkillFile" | "Settings" | "Preset";
+export type LibraryKind = "Instruction" | "Skill" | "SkillFile" | "Hook" | "HookFile" | "Settings" | "Preset";

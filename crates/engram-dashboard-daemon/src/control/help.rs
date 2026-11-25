@@ -893,10 +893,12 @@ mod tests {
     /// rewrite, `already_pointing`), that a stopped rename is called again and answers the plan of what is left
     /// (ADR-0407), `mount-unusable`, the repeat that saves after `library-config-write-failed`, and reading
     /// `library.status` after a timeout. The `--section` words are the lowercase preset-file keys (ADR-0400 decision
-    /// 22).
+    /// 22), `hooks` among them, and so are the `--kinds` words with `Hook` · `HookFile` and the save rule that omitted
+    /// hooks stay (ADR-0420).
     // ADR-0400
     // ADR-0405
     // ADR-0407
+    // ADR-0420
     #[test]
     fn the_library_screen_teaches_the_mounts_and_the_two_step_rename() {
         let _env = env_guard();
@@ -938,7 +940,9 @@ mod tests {
             "library-config-write-failed",
             "repeating the same call saves it",
             "After a timeout, read library.status before repeating",
-            "--section <presets|instructions|skills|settings|folders>",
+            "--section <presets|instructions|skills|hooks|settings|folders>",
+            "Instruction|Skill|SkillFile|Hook|HookFile|Settings|Preset",
+            "hooks or folders omitted = they stay",
         ] {
             assert!(
                 library.contains(taught),

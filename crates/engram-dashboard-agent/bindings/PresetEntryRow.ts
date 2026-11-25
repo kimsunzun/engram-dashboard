@@ -16,8 +16,8 @@ line: number,
 /**
  * Why the entry does not read — `not-found` (also for an item in a mount that is not there),
  * `library-unavailable` `{mount, message}` (its mount cannot be read — the item was not looked up),
- * `path-through-link`, the item's broken reason or a settings file's first refusal, `wrong-kind`,
- * `builtin-in-library-preset`, `preset-cycle`; `null` = it reads. What an inner preset reaches is in
- * `problems`.
+ * `path-through-link`, the item's broken reason, a settings file's first refusal or a hook's
+ * `hook-shape-invalid`, `wrong-kind`, `builtin-in-library-preset`, `preset-cycle`; `null` = it reads. What an
+ * inner preset reaches is in `problems`.
  */
 state?: ReasonRow | null, };

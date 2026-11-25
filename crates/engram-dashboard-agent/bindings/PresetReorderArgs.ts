@@ -2,8 +2,8 @@
 
 export type PresetReorderArgs = { path: string, 
 /**
- * `presets` | `instructions` | `skills` | `settings` | `folders` — the preset file's own keys; another word is
- * INVALID_ARGUMENT.
+ * `presets` | `instructions` | `skills` | `hooks` | `settings` | `folders` — the preset file's own keys;
+ * another word is INVALID_ARGUMENT.
  */
 section: string, order: Array<string>, base_rev: string, 
 /**

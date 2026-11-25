@@ -22,7 +22,7 @@ use crate::format::PresetDoc;
 use crate::path::{AssetRef, LibPath};
 
 /// Every library reference `preset` reaches, each once (by catalog key) as the first referencing preset spells it:
-/// its lists in order (presets, instructions, skills, settings), each nested preset the catalog holds followed at once
+/// its lists in order (presets, instructions, skills, hooks, settings), each nested preset the catalog holds followed at once
 /// by what it reaches (depth first). `preset` itself is not in it; a reference to a missing item is, but is not walked
 /// into. Empty when `preset` is not a preset in the catalog.
 // An explicit stack, not recursion: a long chain of nested presets would overflow the thread's stack, which aborts the
@@ -249,6 +249,7 @@ mod tests {
                         presets,
                         instructions,
                         skills: vec![],
+                        hooks: vec![],
                         settings: vec![],
                         folders: vec![],
                         unmodeled: vec![],

@@ -1,6 +1,7 @@
 //! The only YAML in the crate: reading preset and settings files ([`read`]), the library's front-matter split and the
 //! real [`FrontMatterParser`](engram_dashboard_agent::backend::settings_check::FrontMatterParser) ([`frontmatter`]),
-//! and the whole-file preset writer over an order-keeping document tree ([`tree`] · [`write`]).
+//! and the whole-file preset writer over an order-keeping document tree ([`tree`] · [`write`]). One JSON reader sits
+//! beside them: a hook folder's `hooks.json` ([`hooks`] — ADR-0420).
 //!
 //! Every parse here goes through [`options()`], so the reader, the writer's tree, its round-trip check and the
 //! front-matter parser read the same text the same way. Pure: no disk IO.
@@ -9,6 +10,7 @@
 // TRD S25 step-7 §3-4
 
 pub mod frontmatter;
+pub mod hooks;
 pub mod read;
 pub mod tree;
 pub mod write;
