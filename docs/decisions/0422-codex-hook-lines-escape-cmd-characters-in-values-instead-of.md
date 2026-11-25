@@ -1,20 +1,39 @@
 # ADR-0422: Codex hook lines escape cmd characters in values instead of refusing them; the cmd percent decision covers both modes
 
-- 상태: 확정 (2026-11-26, 근거: TODO)
-- 관련: Amends ADR-0420 (decision 5 codex assembly) · Amends ADR-0421 (decision 4 cmd percent) · TODO 나머지 관련
+- 상태: 확정 (2026-11-26, 근거: main decisions at the step-22 P3a code review, recommended by all three reviewers (risk axis, lead, cross-family Codex) · fix round 1 delta re-review, risk axis, PASS at tree `6f6652dc` · codex source at `rust-v0.171.0`)
+- 관련: Amends ADR-0420 (decision 5 codex assembly) · Amends ADR-0421 (decision 4 cmd percent) · ADR-0353 (fail closed) · ADR-0359 (Engram checks only what its own assembly breaks) · TRD `docs/process/S25-preset-library/trd-hook-components.md` §2.6 and scene H1 · `docs/research/codex-hook-trust-per-run-2026-11-24.md` (measure-2: the escaped trust key through `cmd.exe /c codex`)
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+The codex terminal launch goes through `cmd.exe`, and the command-line guard (`text_is_cli_safe` plus an even `"` count) refuses `% & ^ | < >` in a line. ADR-0420 decision 5 and TRD §2.6 refused a hook whose line held one of them (`codex-hook-line-refused`, `why: unsafe-char`). So the common claude matcher `Edit|Write`, a regex matcher anchored with `^`, or a command with `| tee`, `> out` or `a && b` made every codex terminal launch of that preset fail. Backend tags are per backend, not per mode, so a user could not keep such a hook for codex JSON while leaving codex terminal out.
+
+The trust keys already wrote `<` and `>` as TOML `\u003c` / `\u003e`, and that was measured through `cmd.exe /c codex` (measure-2). The writer applied the escape to keys only, on the premise that a key never reaches a shell; values were left raw and met the guard.
+
+ADR-0421 decision 4 left a `%` refusal for codex's cmd fallback to P3. Part of the reasoning so far was that terminal mode already refused any `%` on a hook line; with the escape that stops being true.
 
 ## 결정
-TODO — 무엇으로 정했나.
+1. **String values in Engram's codex hook TOML write the cmd characters as TOML escapes, like the keys.** The seven characters `% & ^ | < > !` are written as `\u00XX` escapes in basic strings, in keys and string values alike (one escape rule in the writer). A string holding one of them, a `'` or a control character is written as a basic string; `"`, `\` and control characters stay escaped as before. `!` is added for cmd hosts with DelayedExpansion turned on.
+2. **The trust hash still matches.** codex parses each `-c` value as TOML before it normalizes and hashes the handler, and Engram hashes the value before encoding it, so both sides hash the decoded string. A test parses every terminal line the way codex does and checks that the result equals the JSON-mode thread config.
+3. **The cmd guard stays as a backstop on the final text.** From input, only an odd double-quote count is refused; any other guard refusal now means a writer regression and fails closed.
+4. **The percent decision of ADR-0421 decision 4 now covers both modes.** `%` reaches codex in terminal and JSON mode. A hook folder path holding two `%` expands only under codex's cmd fallback (`COMSPEC`, used only when codex knows no session shell). This is documented in help, not refused. The launch line itself stays safe, because the escape keeps `%` from cmd.
+5. **Open items, recorded and not decided:**
+   - A group whose matcher is an invalid regex is written and trusted by Engram but skipped by codex. Its index is still consumed, so the other keys stay aligned; in JSON mode the post-open check reports the key as not listed.
+   - A float or date anywhere in a raw settings hooks line makes the line unreadable and refuses the launch, including a member Engram would leave off anyway and a carried state entry.
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+- **Keep refusing the six characters** — blocks the most common claude matchers (`Edit|Write`; `|` is codex's own matcher alternation) and common commands in every codex terminal launch of the preset, and refuses a raw settings line the author had already escaped (`Edit\u007cWrite`), which passes the cmd guard: the assembly decoded it and wrote the literal `|` back, so a settings asset that launched before P3b would have been refused after it. Evidence: 코드 (traced in `hook_assembly.rs` and codex `matcher.rs` by the P3a reviewers).
+- **Escape only in keys** — values hit the same cmd guard; no TOML text reaches any shell, and cmd sees the line before TOML decoding, for keys and values alike. Evidence: 코드 (the guard checks the whole written line).
+- **Pass the raw characters and rely on cmd quoting** — cmd quoting differs per character, and that is what caused the guard in the first place. Evidence: 약함 (judgement; not put to the user).
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+- **P3a code review (tree `eec394b0` against HEAD `29520a90`), all three reviewers recommended escaping values instead of refusing them:**
+  - Risk axis (FIX, the one must was this item): a TOML basic-string `\uXXXX` stands for the exact scalar value; codex 0.171 uses toml 0.9.11 (spec 1.1); codex hashes the deserialized `MatcherGroup` / `HookHandlerConfig` (`discovery.rs` → `fingerprint.rs` `version_for_toml`), that is the decoded string; the escaped text adds only a backslash, `u` and hex digits, which `text_is_cli_safe` accepts; the budget counts the escaped text, so the check and `materialize` stay identical; JSON mode is unchanged (serde_json over stdio). It also found that on Windows codex runs only `commandWindows` while the guard checked the whole group, so a bash `command` such as `cat x | jq` refused a handler codex would not run that way. It raised `!` under DelayedExpansion as a reference item.
+  - Lead (PASS, graded 권장): codex reads each `-c` value with `parse_toml_value` (`_x_ = <trimmed value>`, `config_override.rs`); the existing golden for `Edit|Write` is already the hash codex computes for the escaped line; codex runs hooks with the session shell and falls back to `COMSPEC` only when it knows none (`command_runner.rs`); a codex-only `%` rule would need a port answer, because asset-library calls the neutral path rule. It raised the invalid-regex matcher and the float or date in a raw line as holds.
+  - Codex (PASS, recommended): the same change, citing `config_override.rs` (TOML parsed first) and `discovery.rs` (the parsed handler normalized and hashed).
+- **Fix round 1 delta re-review, risk axis (PASS):** `CMD_ESCAPED` = `% & ^ | < > !`; no input escape survives decode and re-encode as something read differently (a raw `\u007c` decodes to `|` and is written back as `\u007c`; a literal backslash-u text gets its backslash escaped, so it never decodes to `|`); the encoding is injective; the test `codex_reads_the_terminal_lines_as_the_json_thread_config` reads `hook_args` as codex does (split at the first `=`, key trimmed and split on `.`, `_x_ = <trimmed value>`, later path wins) over three input sets covering the seven characters, `'`, `"`, TAB, `commandWindows`, an escaped raw line and a carried state entry, and asserts equality with JSON mode's `hook_config` and equal `expected` keys across the modes.
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+- **TRD `trd-hook-components.md` §2.6 Guard and scene H1** were amended in the same session to this decision.
+- **Help (P5)** says that hooks with `|`, `&` or `>` run in codex terminal mode, and names the cmd fallback's `%` expansion.
+- **P3b raw hooks lines** — raw settings hooks lines may be exempted from `codex-config-unsafe-char` in `cmdline::config_args` only through the same check that removes them from the line (`split_hooks_lines`), so no line can skip the guard and still reach cmd raw. An unreadable raw hooks line keeps being refused (fail closed), never passed through verbatim.
+- **One writer, one escape rule** — keys and values go through the same basic-string escape; the budget counts the escaped text, so the check and `materialize` stay the same count.
+- **The rest of ADR-0420 decision 5 and of ADR-0421 stands**; `codex-hook-line-refused` stays in ADR-0420's fail-closed list for an odd `"` count and for the backstop.
