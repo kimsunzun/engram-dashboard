@@ -221,6 +221,11 @@ pub(crate) mod method {
     /// ★The twin `thread/turns/list` is not used★ — we draw items, not turns, and that one wraps the same item in one more turn envelope.
     pub(crate) const THREAD_ITEMS_LIST: &str = "thread/items/list";
 
+    /// List the hooks codex loaded — with `threadId`, a loaded thread's hooks, its thread config's included (measured
+    /// 0.171.0; not experimental). The post-open check reads it once after the thread opens.
+    // ADR-0420
+    pub(crate) const HOOKS_LIST: &str = "hooks/list";
+
     /// Us → server notification. ★The only notification a client can send, and it has no params field★ (`ClientNotification.json`).
     /// ★Sending it is not a duty★ (measured 0.154.0: `thread/start` succeeded either way); it is harmless, so we match the handshake shape.
     pub(crate) const INITIALIZED: &str = "initialized";
@@ -421,6 +426,12 @@ pub(crate) struct ThreadStartParams {
     // ADR-0215
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) developer_instructions: Option<String>,
+    /// Config overrides for this thread — Engram sends only `{"hooks": …}` (the hook assembly's thread config). Absent
+    /// = no config at all (byte-identical to a launch without hooks); never an empty `hooks`, which would wipe the
+    /// app-server line's `hooks` table (measured 0.171.0 — measure-2 M1). Not experimental (measure-4 M-A).
+    // ADR-0420
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) config: Option<Value>,
 }
 
 // ADR-0215
@@ -449,9 +460,56 @@ pub(crate) struct ThreadResumeParams {
     // ADR-0354
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) developer_instructions: Option<String>,
+    /// The same thread config as [`ThreadStartParams::config`], on every resume: codex does not save it with the
+    /// thread, so a resume without it has no hooks (measured 0.171.0 — measure-3 M2).
+    // ADR-0420
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) config: Option<Value>,
 }
 
-/// The **second request** of the handshake — open a new thread, or resume a saved one.
+/// `hooks/list` request for one loaded thread (`cwds` omitted — that mode is not used).
+// ADR-0420
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HooksListParams {
+    pub(crate) thread_id: String,
+}
+
+/// `hooks/list` response — one entry per working folder; with a `threadId` request, the thread's.
+///
+/// ★Read leniently★ — only the four fields the check reads, each defaulted, so a codex that adds or drops another field
+///   changes nothing; a field the check needs going missing reads as `untrusted` / not enabled (a verdict, never a
+///   handshake failure).
+// ADR-0420
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct HooksListResponse {
+    #[serde(default)]
+    pub(crate) data: Vec<HooksListEntry>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct HooksListEntry {
+    #[serde(default)]
+    pub(crate) hooks: Vec<HookListed>,
+}
+
+/// One listed hook (`HookMetadata`, 0.171.0), the fields the check reads.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HookListed {
+    #[serde(default)]
+    pub(crate) key: String,
+    /// `sessionFlags` for the thread config's (and the app-server line's) hooks; `user`, `project`, … otherwise.
+    #[serde(default)]
+    pub(crate) source: String,
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// `trusted` · `untrusted` · `modified` · `managed`.
+    #[serde(default)]
+    pub(crate) trust_status: String,
+}
+
+/// The second request of the handshake — open a new thread, or resume a saved one.
 ///
 /// ★The one place that chooses is [`crate::backend::AgentBackend::open_spawn`] in `backend/codex/mod.rs`★ — the path emits what it
 ///   received; a path deciding again from its own state would make
@@ -1272,8 +1330,13 @@ mod tests {
             approval_policy: Some(AskForApproval::Never),
             sandbox: Some(SandboxMode::WorkspaceWrite),
             developer_instructions: Some("be brief".to_string()),
+            config: Some(serde_json::json!({"hooks": {"Stop": []}})),
         })
         .unwrap();
+        assert_eq!(
+            field(&v, "config"),
+            &serde_json::json!({"hooks": {"Stop": []}})
+        );
         assert_eq!(field(&v, "cwd"), "C:/w");
         assert_eq!(field(&v, "approvalPolicy"), "never");
         assert_eq!(field(&v, "sandbox"), "workspace-write");
@@ -1311,9 +1374,11 @@ mod tests {
             sandbox: None,
             exclude_turns: Some(true),
             developer_instructions: None,
+            config: None,
         })
         .unwrap();
         assert_eq!(field(&v, "threadId"), "t-1");
+        assert!(v.get("config").is_none());
         assert_eq!(field(&v, "excludeTurns"), true);
         assert!(v.get("cwd").is_none());
         assert!(v.get("approvalPolicy").is_none());
@@ -1332,9 +1397,60 @@ mod tests {
             sandbox: None,
             exclude_turns: Some(true),
             developer_instructions: Some("be brief\n".to_string()),
+            config: Some(serde_json::json!({"hooks": {"state": {}}})),
         })
         .unwrap();
         assert_eq!(field(&v, "developerInstructions"), "be brief\n");
+        assert_eq!(
+            field(&v, "config"),
+            &serde_json::json!({"hooks": {"state": {}}})
+        );
+    }
+
+    /// `hooks/list` goes out as `{threadId}`; its answer is read leniently — a missing field defaults, an unknown one
+    /// is ignored (codex 0.171.0 `HooksListResponse` / `HookMetadata` spellings).
+    // ADR-0420
+    #[test]
+    fn hooks_list_goes_out_by_thread_and_its_answer_is_read_leniently() {
+        assert_eq!(method::HOOKS_LIST, "hooks/list");
+        assert_eq!(
+            serde_json::to_value(HooksListParams {
+                thread_id: "t-1".to_string()
+            })
+            .unwrap(),
+            serde_json::json!({"threadId": "t-1"})
+        );
+        let answer: HooksListResponse = serde_json::from_value(serde_json::json!({"data": [{
+            "cwd": "C:/w",
+            "hooks": [
+                {"key": "k1", "eventName": "stop", "handlerType": "command", "command": "x",
+                 "source": "sessionFlags", "enabled": true, "trustStatus": "trusted", "currentHash": "sha256:00"},
+                {"key": "k2"}
+            ],
+            "warnings": [], "errors": []
+        }]}))
+        .unwrap();
+        let hooks = &answer.data[0].hooks;
+        assert_eq!(
+            (
+                hooks[0].key.as_str(),
+                hooks[0].source.as_str(),
+                hooks[0].enabled,
+                hooks[0].trust_status.as_str()
+            ),
+            ("k1", "sessionFlags", true, "trusted")
+        );
+        assert_eq!(
+            (
+                hooks[1].key.as_str(),
+                hooks[1].source.as_str(),
+                hooks[1].enabled,
+                hooks[1].trust_status.as_str()
+            ),
+            ("k2", "", false, "")
+        );
+        let empty: HooksListResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.data.is_empty());
     }
 
     #[test]

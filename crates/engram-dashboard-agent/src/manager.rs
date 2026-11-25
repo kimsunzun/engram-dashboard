@@ -130,8 +130,12 @@ pub enum NoticeDelivery {
 #[derive(Debug, Clone)]
 pub struct Activated {
     pub info: AgentInfo,
-    /// Empty when this call launched nothing (the agent was already running), when the plan had no notices, or when
-    /// the agent was already shown this set ([`AgentProfile::notice_fingerprint`]). Otherwise the plan's full list.
+    /// The plan's notices — empty when this call launched nothing (the agent was already running), when the plan had
+    /// no notices, or when the agent was already shown this set ([`AgentProfile::notice_fingerprint`]); otherwise the
+    /// plan's full list — followed by the run notices the link raised while setting up (codex: the post-open hook
+    /// check), which are given on every launch they occur, whatever the fingerprint.
+    // ADR-0341
+    // ADR-0420
     pub notices: Vec<Notice>,
 }
 
@@ -153,7 +157,8 @@ struct LaunchNotices {
     /// The incarnation this launch started — the record lands only while it is current.
     epoch: u32,
     fingerprint: String,
-    /// For the reply — empty when the stored fingerprint already equals `fingerprint`.
+    /// For the reply — empty when the stored fingerprint already equals `fingerprint` — then the link's run notices
+    /// ([`AgentManager::with_run_notices`]), which the fingerprint does not cover.
     notices: Vec<Notice>,
     /// The stored fingerprint `prelaunch` compared against — the record's compare-and-set baseline.
     baseline: Option<String>,
@@ -185,8 +190,9 @@ enum EarlyVerdict {
     Alive,
     /// The agent **signaled it is ready to take input** = activation holds. Split from `Alive` because ① this is a positive signal (codex
     /// handshake completion) with nothing to wait for, and ② this optimistic success **does not clear** the last-failure record (the clearing
-    /// rule is in `AgentManager::resume_no_fallback`).
-    Ready,
+    /// rule is in `AgentManager::resume_no_fallback`). `notices` = the link's run notices ([`LinkResolution::Ready`]).
+    // ADR-0420
+    Ready { notices: Vec<Notice> },
     /// The link **could not set up the connection** — the process may be alive. Split from `Terminal` (died): same failure disposition but a
     /// different reason sentence and classification input, and **no corpse** — console and diagnostic tails are empty, the only evidence is `reason`.
     LinkFailed { reason: String },
@@ -1891,6 +1897,31 @@ impl AgentManager {
         launched.notices
     }
 
+    /// `launched` with the link's run notices appended — each logged first (at `info`, like every launch notice, so a
+    /// boot restore, which answers no caller, only logs them — ADR-0420). They are not part of the
+    /// fingerprint: [`AgentManager::deliver_notices`] records the plan's fingerprint as is, so they reach the reply on
+    /// every launch they occur.
+    // ADR-0341
+    // ADR-0420
+    fn with_run_notices(
+        id: AgentId,
+        launched: Option<LaunchNotices>,
+        notices: Vec<Notice>,
+    ) -> Option<LaunchNotices> {
+        for notice in &notices {
+            tracing::info!(
+                agent = %id,
+                code = %notice.code,
+                args = %notice.args,
+                "launch run notice"
+            );
+        }
+        launched.map(|mut launched| {
+            launched.notices.extend(notices);
+            launched
+        })
+    }
+
     /// ★**The only point** writing 「the last failure」 (ADR-0172 decision 4 — amended)★. `None` = the activation held → clear. `Some(kind)` = record now.
     ///
     /// ★The clearing condition is 「activation success」, not 「a conversation round trip held」 — do not revert★: a round trip is observed only by the turn-end
@@ -2029,14 +2060,17 @@ impl AgentManager {
             //   outcome it is stale by up to the backstop, and a child dying meanwhile would be reported alive (WS `Spawned` carries the status; **mail then goes to a
             //   corpse**). ★A lookup failure only lowers the state★ (observation 「collected in between」), the activation held so no `Err`; code unknown (`None`) — the
             //   same discipline as `activate_profile`'s sibling branch (canonical there).
-            EarlyVerdict::Ready => match self.agent_info_by_id(profile.id) {
-                Ok(fresh) => Ok((SpawnOutcome::Started(fresh), launched)),
-                Err(_) => {
-                    let mut gone = info.clone();
-                    gone.status = AgentStatus::Exited { code: None };
-                    Ok((SpawnOutcome::Started(gone), launched))
+            EarlyVerdict::Ready { notices } => {
+                let launched = Self::with_run_notices(profile.id, launched, notices);
+                match self.agent_info_by_id(profile.id) {
+                    Ok(fresh) => Ok((SpawnOutcome::Started(fresh), launched)),
+                    Err(_) => {
+                        let mut gone = info.clone();
+                        gone.status = AgentStatus::Exited { code: None };
+                        Ok((SpawnOutcome::Started(gone), launched))
+                    }
                 }
-            },
+            }
             // ★Cleanup **first**, record later★ — as `resume_no_fallback`: the record takes the profile mutex, and the reversed order **never kills the child** when it is held (the backstop exists for that stall).
             EarlyVerdict::LinkFailed { reason } => {
                 self.tear_down_failed_activation(profile.id, incarnation);
@@ -2487,8 +2521,9 @@ impl AgentManager {
             //   (`set_last_failure(Some(..))`) or **the profile disappearing** invalidates it. ★Cost★: a stale failure may sit next to a live agent — drawn with
             //   「running wins」 (ADR-0173); the opposite error (evidence loss) is irreversible.
             // ★claude does not come here★ (no connection axis → `Alive` below); do not widen the clearing rule to it.
-            EarlyVerdict::Ready => {
+            EarlyVerdict::Ready { notices } => {
                 // A request without a handle already fell out to a new conversation at the head above, so what comes here is only resumes.
+                let launched = Self::with_run_notices(profile.id, launched, notices);
                 (RestoreOutcome::Resumed, Some(spawned), launched)
             }
             EarlyVerdict::Alive => {
@@ -2658,7 +2693,7 @@ impl AgentManager {
                 return None;
             }
             Some(match v.resolution {
-                LinkResolution::Ready => EarlyVerdict::Ready,
+                LinkResolution::Ready { notices } => EarlyVerdict::Ready { notices },
                 LinkResolution::Failed { reason } => EarlyVerdict::LinkFailed { reason },
             })
         }
@@ -3883,6 +3918,62 @@ mod tests {
         (id, kills)
     }
 
+    /// ★The link's run notices ride the verdict and then the reply, whatever the fingerprint★ — a `Ready` carrying the
+    /// codex post-open notice becomes `EarlyVerdict::Ready` with it; appended after the plan's notices, it reaches the
+    /// reply also when the plan's set was already shown (empty plan notices, unchanged fingerprint), and the fingerprint
+    /// recorded stays the plan's. A launch that started nothing carries none (ADR-0341 decision 5 as amended).
+    // ADR-0341
+    // ADR-0420
+    #[test]
+    fn the_links_run_notices_ride_the_verdict_and_the_reply_whatever_the_fingerprint() {
+        let manager = bare_manager();
+        let (id, _kills) = link_epoch_fixture(&manager, 4);
+        let run = vec![Notice {
+            code: crate::launch::CODEX_HOOKS_UNTRUSTED.to_string(),
+            args: serde_json::json!({ "why": "untrusted", "hooks": ["team/hooks/a"] }),
+            line: None,
+        }];
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(LinkVerdict {
+            epoch: 4,
+            resolution: LinkResolution::Ready {
+                notices: run.clone(),
+            },
+        })
+        .expect("deliver");
+        let EarlyVerdict::Ready { notices } =
+            manager.link_activation_verdict(id, 4, &rx, Duration::from_secs(6))
+        else {
+            panic!("the delivered ready signal was not read as success");
+        };
+        assert_eq!(notices, run);
+
+        let plan_notice = Notice {
+            code: "plan-notice".to_string(),
+            args: serde_json::json!({}),
+            line: None,
+        };
+        for (shown, expected) in [
+            (Vec::new(), run.clone()),
+            (vec![plan_notice.clone()], vec![plan_notice, run[0].clone()]),
+        ] {
+            let launched = LaunchNotices {
+                epoch: 4,
+                fingerprint: "plan".to_string(),
+                notices: shown,
+                baseline: Some("plan".to_string()),
+            };
+            let launched = AgentManager::with_run_notices(id, Some(launched), run.clone())
+                .expect("a launch that started a process");
+            assert_eq!(launched.fingerprint, "plan");
+            assert_eq!(
+                manager.deliver_notices(id, Some(launched), NoticeDelivery::Delivered),
+                expected
+            );
+        }
+        assert!(AgentManager::with_run_notices(id, None, run).is_none());
+    }
+
     /// ★A delivered `Ready` finishes the decision **on the spot**★ — no window wait. A large backstop is given and the elapsed time measured; a decision that waits for time again is caught here.
     #[test]
     fn a_delivered_ready_ends_the_verdict_at_once() {
@@ -3891,7 +3982,9 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(LinkVerdict {
             epoch: 7,
-            resolution: LinkResolution::Ready,
+            resolution: LinkResolution::Ready {
+                notices: Vec::new(),
+            },
         })
         .expect("deliver");
 
@@ -3900,7 +3993,7 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert!(
-            matches!(verdict, EarlyVerdict::Ready),
+            matches!(verdict, EarlyVerdict::Ready { .. }),
             "the delivered ready signal was not read as success — got {verdict:?}"
         );
         assert!(
@@ -3944,7 +4037,9 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(LinkVerdict {
             epoch: 10,
-            resolution: LinkResolution::Ready,
+            resolution: LinkResolution::Ready {
+                notices: Vec::new(),
+            },
         })
         .expect("deliver");
 
@@ -3964,13 +4059,15 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(LinkVerdict {
             epoch: 5,
-            resolution: LinkResolution::Ready,
+            resolution: LinkResolution::Ready {
+                notices: Vec::new(),
+            },
         })
         .expect("deliver");
 
         let verdict = manager.link_activation_verdict(id, 5, &rx, Duration::ZERO);
         assert!(
-            matches!(verdict, EarlyVerdict::Ready),
+            matches!(verdict, EarlyVerdict::Ready { .. }),
             "the time limit beat the delivery — a connection that just held is recorded as a failure and dies: got {verdict:?}"
         );
     }
@@ -4065,7 +4162,9 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(LinkVerdict {
             epoch: 21,
-            resolution: LinkResolution::Ready,
+            resolution: LinkResolution::Ready {
+                notices: Vec::new(),
+            },
         })
         .expect("deliver");
         // The user interrupts **after** the delivery stood in the queue.
@@ -4124,7 +4223,10 @@ mod tests {
     /// (WS `Spawned`) and **mail would go to a corpse**. The Resume sibling does the same in `activate_profile`. ★Measured in the source★: running needs a real codex handshake.
     #[test]
     fn a_fresh_success_reports_the_state_after_the_wait_not_the_spawn_snapshot() {
-        let ready = fresh_arm("EarlyVerdict::Ready =>", "EarlyVerdict::LinkFailed");
+        let ready = fresh_arm(
+            "EarlyVerdict::Ready { notices } =>",
+            "EarlyVerdict::LinkFailed",
+        );
         assert!(
             ready.contains("self.agent_info_by_id(profile.id)"),
             "the success branch returns the spawn-time snapshot as is — a `Running` stale by the backstop goes to the caller: {ready}"
@@ -4704,10 +4806,39 @@ mod tests {
     /// ★Fresh's optimistic success does not clear 「the last failure」 either★ (ADR-0202) — as the Resume sibling; Fresh used to read launch as success and clear the earlier record.
     #[test]
     fn a_fresh_success_does_not_clear_the_failure_record() {
-        let ready = fresh_arm("EarlyVerdict::Ready =>", "EarlyVerdict::LinkFailed");
+        let ready = fresh_arm(
+            "EarlyVerdict::Ready { notices } =>",
+            "EarlyVerdict::LinkFailed",
+        );
         assert!(
             !ready.contains("note_activation_result"),
             "the Fresh success branch touches the last failure — this decision observes only up to being ready to take input, so erasing old failure evidence with it is an irreversible loss: {ready}"
+        );
+    }
+
+    /// ★Both `Ready` arms hand the link's run notices to the reply★ (ADR-0420) — `spawn_fresh_settled` and
+    /// `resume_no_fallback` each call `with_run_notices` with the verdict's `notices`. ★Measured in the source★: running
+    /// it needs a real codex behind the activation entrance; deleting either call leaves `notices` unused (only a
+    /// warning), so the post-open notice would silently stop reaching the reply on that entrance.
+    #[test]
+    fn both_ready_arms_hand_the_run_notices_to_the_reply() {
+        let squash = |s: String| s.split_whitespace().collect::<String>();
+        let call = "Self::with_run_notices(profile.id,launched,notices)";
+        let fresh = squash(fresh_arm(
+            "EarlyVerdict::Ready { notices } =>",
+            "EarlyVerdict::LinkFailed",
+        ));
+        assert!(
+            fresh.contains(call),
+            "the Fresh `Ready` arm does not pass the run notices on: {fresh}"
+        );
+        let resume = squash(resume_arm(
+            "EarlyVerdict::Ready { notices } => {",
+            "EarlyVerdict::Alive => {",
+        ));
+        assert!(
+            resume.contains(call),
+            "the resume `Ready` arm does not pass the run notices on: {resume}"
         );
     }
 
@@ -4745,7 +4876,7 @@ mod tests {
     #[test]
     fn a_post_start_failure_drops_the_launch_notices_in_source() {
         assert!(
-            fresh_arm("EarlyVerdict::Ready =>", "EarlyVerdict::LinkFailed").contains("launched"),
+            fresh_arm("EarlyVerdict::Ready { notices } =>", "EarlyVerdict::LinkFailed").contains("launched"),
             "the fresh success no longer carries the notices — the premise of the checks below is stale"
         );
         for (start, end) in [
@@ -4775,7 +4906,7 @@ mod tests {
             ),
             (
                 "EarlyVerdict::LinkFailed { reason } => {",
-                "EarlyVerdict::Ready => {",
+                "EarlyVerdict::Ready { notices } => {",
             ),
         ] {
             let arm = resume_arm(start, end);
@@ -4784,9 +4915,11 @@ mod tests {
                 "a failed resume arm hands the notices on: {arm}"
             );
         }
-        assert!(
-            resume_arm("EarlyVerdict::Ready => {", "EarlyVerdict::Alive => {").contains("launched")
-        );
+        assert!(resume_arm(
+            "EarlyVerdict::Ready { notices } => {",
+            "EarlyVerdict::Alive => {"
+        )
+        .contains("launched"));
 
         let src = include_str!("manager.rs");
         let production = src.split("mod tests {").next().expect("production section");
@@ -4827,7 +4960,10 @@ mod tests {
     /// resume; a regression is **silent evidence loss**. ★The `Alive` branch must **keep** that call★ (claude's path, out of scope) — measuring both also catches overstepping.
     #[test]
     fn an_optimistic_success_does_not_clear_the_failure_record() {
-        let ready = resume_arm("EarlyVerdict::Ready => {", "EarlyVerdict::Alive => {");
+        let ready = resume_arm(
+            "EarlyVerdict::Ready { notices } => {",
+            "EarlyVerdict::Alive => {",
+        );
         assert!(
             !ready.contains("note_activation_result"),
             "the optimistic success branch touches the last failure — this decision observes only up to being ready to take input, so erasing old failure evidence with it is an irreversible loss: {ready}"
@@ -4854,7 +4990,7 @@ mod tests {
     fn the_failed_activation_arm_tears_down_before_it_records() {
         let arm = resume_arm(
             "EarlyVerdict::LinkFailed { reason } => {",
-            "EarlyVerdict::Ready => {",
+            "EarlyVerdict::Ready { notices } => {",
         );
         let teardown = arm
             .find("tear_down_failed_activation")
@@ -4961,7 +5097,7 @@ mod tests {
                     "Alive (the old decision waiting only for death = regression)".into(),
                 EarlyVerdict::Terminal { ref status, .. } => format!("Terminal({status:?})"),
                 EarlyVerdict::LinkFailed { ref reason } => format!("LinkFailed({reason})"),
-                EarlyVerdict::Ready => "Ready".into(),
+                EarlyVerdict::Ready { .. } => "Ready".into(),
             }
         );
         assert!(
@@ -4998,7 +5134,7 @@ mod tests {
                 EarlyVerdict::Alive => "Alive".into(),
                 EarlyVerdict::Terminal { ref status, .. } => format!("Terminal({status:?})"),
                 EarlyVerdict::LinkFailed { ref reason } => format!("LinkFailed({reason})"),
-                EarlyVerdict::Ready => "Ready".into(),
+                EarlyVerdict::Ready { .. } => "Ready".into(),
             }
         );
     }
@@ -5029,7 +5165,7 @@ mod tests {
                     EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
                     EarlyVerdict::Alive => "Alive".into(),
                     EarlyVerdict::LinkFailed { reason } => format!("LinkFailed({reason})"),
-                    EarlyVerdict::Ready => "Ready".into(),
+                    EarlyVerdict::Ready { .. } => "Ready".into(),
                     EarlyVerdict::Terminal { .. } => unreachable!(),
                 }
             ),

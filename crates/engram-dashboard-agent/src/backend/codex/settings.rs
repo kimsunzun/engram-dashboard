@@ -23,8 +23,7 @@ use crate::backend::settings_check::{
     NativePlaces, NativeSkillRoots, NoticeCodes, SettingsCheck, SkillFormat, UnsureWhy,
 };
 use crate::launch::{
-    Notice, Reason, CODEX_HOOKS_OMITTED, CODEX_SAME_NAME_SKILLS, CODEX_TERMINAL_FOLDER_OMITTED,
-    CODEX_TERMINAL_OMITTED,
+    Notice, Reason, CODEX_SAME_NAME_SKILLS, CODEX_TERMINAL_FOLDER_OMITTED, CODEX_TERMINAL_OMITTED,
 };
 use crate::profile::AgentOutputFormat;
 
@@ -67,7 +66,8 @@ impl SettingsCheck for CodexSettingsCheck {
         "codex"
     }
 
-    /// Hook components are not loaded yet in either mode — they are named in the omission notice.
+    /// Both modes load hook components — the hook assembly writes them as terminal lines or as the JSON thread config
+    /// (`hook_assembly.rs`).
     // ADR-0337
     // ADR-0420
     fn loads(&self, mode: AgentOutputFormat) -> ModeLoads {
@@ -75,12 +75,12 @@ impl SettingsCheck for CodexSettingsCheck {
             AgentOutputFormat::StreamJson => ModeLoads {
                 instructions: InstructionLoad::All,
                 skills: true,
-                hooks: false,
+                hooks: true,
             },
             AgentOutputFormat::Terminal => ModeLoads {
                 instructions: InstructionLoad::BuiltinPrimingOnly,
                 skills: false,
-                hooks: false,
+                hooks: true,
             },
         }
     }
@@ -123,7 +123,8 @@ impl SettingsCheck for CodexSettingsCheck {
     }
 
     /// The terminal mode loads neither library instructions and skills nor folder entries; JSON loads skills from
-    /// several roots, where one name can select none of them. Neither mode loads hook components yet.
+    /// several roots, where one name can select none of them. Both modes load hook components, so neither names an
+    /// omission code for them.
     // ADR-0337
     // ADR-0341
     // ADR-0355
@@ -134,11 +135,10 @@ impl SettingsCheck for CodexSettingsCheck {
                 omitted: Some(CODEX_TERMINAL_OMITTED),
                 folder_omitted: Some(CODEX_TERMINAL_FOLDER_OMITTED),
                 same_name: None,
-                hooks_omitted: Some(CODEX_HOOKS_OMITTED),
+                hooks_omitted: None,
             },
             AgentOutputFormat::StreamJson => NoticeCodes {
                 same_name: Some(CODEX_SAME_NAME_SKILLS),
-                hooks_omitted: Some(CODEX_HOOKS_OMITTED),
                 ..NoticeCodes::default()
             },
         }
@@ -219,9 +219,11 @@ impl SettingsCheck for CodexSettingsCheck {
         cmdline::config_args(raw)
     }
 
-    /// The line raises no notice yet.
+    /// The hook assembly's notices (`codex-hooks-left-off`, `codex-raw-hooks-trusted`) when its line fits — the same
+    /// [`cmdline::assembled`] `materialize` calls, so the check counts what goes on the line.
+    // ADR-0420
     fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<Vec<Notice>, Reason> {
-        cmdline::fits(line).map(|()| Vec::new())
+        cmdline::assembled(line).map(|assembly| assembly.notices)
     }
 
     /// codex JSON reads `$CODEX_HOME/skills` (default `<home>/.codex/skills`), `<home>/.agents/skills`, and
@@ -729,13 +731,13 @@ mod tests {
     // ── simple answers ───────────────────────────────────────────────────────────
 
     #[test]
-    fn codex_json_loads_everything_but_hooks_and_the_terminal_only_the_builtin_priming() {
+    fn codex_json_loads_everything_and_the_terminal_the_builtin_priming_and_hooks() {
         assert_eq!(
             CODEX_SETTINGS_CHECK.loads(JSON),
             ModeLoads {
                 instructions: InstructionLoad::All,
                 skills: true,
-                hooks: false,
+                hooks: true,
             }
         );
         assert_eq!(
@@ -743,7 +745,7 @@ mod tests {
             ModeLoads {
                 instructions: InstructionLoad::BuiltinPrimingOnly,
                 skills: false,
-                hooks: false,
+                hooks: true,
             }
         );
     }
@@ -852,7 +854,7 @@ mod tests {
                 omitted: Some("codex-terminal-omitted"),
                 folder_omitted: Some("codex-terminal-folder-omitted"),
                 same_name: None,
-                hooks_omitted: Some("codex-hooks-omitted"),
+                hooks_omitted: None,
             }
         );
         assert_eq!(
@@ -861,7 +863,7 @@ mod tests {
                 omitted: None,
                 folder_omitted: None,
                 same_name: Some("codex-same-name-skills"),
-                hooks_omitted: Some("codex-hooks-omitted"),
+                hooks_omitted: None,
             }
         );
     }
@@ -1921,5 +1923,113 @@ mod tests {
             CODEX_SETTINGS_CHECK.command_line_args(&json!([r#"model="o3"#])),
             Err(Reason { code, .. }) if code == "codex-config-unsafe-char"
         ));
+    }
+
+    /// ★The check answers the hook assembly's notices★ — a component handler of an event codex does not know is left
+    /// off and named, and a raw settings hooks line Engram trusts is named with its settings asset (ADR-0420); a line
+    /// without hook inputs answers none.
+    // ADR-0420
+    #[test]
+    fn the_check_answers_the_hook_assemblys_notices() {
+        use crate::backend::hooks::HookRef;
+        use crate::backend::settings_check::ConfigOrigin;
+
+        let Value::Object(definition) = json!({
+            "Notification": [{"hooks": [{"type": "command", "command": "node n.js"}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": "node s.js"}]}],
+        }) else {
+            unreachable!()
+        };
+        let hooks = [HookRef {
+            path: "team/hooks/notify".to_owned(),
+            dir: Path::new("D:/Library/hooks/notify").to_path_buf(),
+            definition,
+        }];
+        let config_args = [
+            "-c".to_owned(),
+            "hooks.Stop=[{hooks=[{type='command',command='node raw.js'}]}]".to_owned(),
+        ];
+        let origin = ConfigOrigin {
+            source: "team/codex.yaml".to_owned(),
+            line: Some(4),
+        };
+        let config_origins = [origin.clone(), origin];
+        for mode in MODES {
+            let line = CommandLine {
+                mode,
+                cwd: Path::new("C:/w"),
+                extra_args: &[],
+                config_args: &config_args,
+                config_origins: &config_origins,
+                hooks: &hooks,
+                instructions: None,
+            };
+            let notices = CODEX_SETTINGS_CHECK.command_line_fits(&line).unwrap();
+            let codes: Vec<&str> = notices.iter().map(|n| n.code.as_str()).collect();
+            assert_eq!(
+                codes,
+                ["codex-hooks-left-off", "codex-raw-hooks-trusted"],
+                "{mode:?}: {notices:?}"
+            );
+            assert_eq!(
+                notices[0].args,
+                json!({"hook": "team/hooks/notify", "event": "Notification", "why": "event"}),
+                "{mode:?}"
+            );
+            assert_eq!(
+                notices[1].args["settings"][0]["source"], "team/codex.yaml",
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// ★A raw hooks line skips the line guard only when the assembly can read it★ — an odd `"` count passes in a hooks
+    /// line the assembly folds (it is rewritten, never put on the line as written), still refuses any other line, and
+    /// a hooks line the assembly cannot fold is `codex-hooks-unreadable` at its index.
+    // ADR-0420
+    #[test]
+    fn a_readable_raw_hooks_line_skips_the_line_guard_and_an_unreadable_one_is_refused() {
+        let odd = r#"hooks.Stop=[{hooks=[{type='command',command='echo "'}]}]"#;
+        assert_eq!(
+            CODEX_SETTINGS_CHECK.command_line_args(&json!(["model=o3", odd])),
+            Ok(vec![
+                "-c".to_owned(),
+                "model=o3".to_owned(),
+                "-c".to_owned(),
+                odd.to_owned()
+            ])
+        );
+        let cmd_chars =
+            "hooks.Stop=[{matcher='Edit|Write',hooks=[{type='command',command='a > out & b'}]}]";
+        assert!(CODEX_SETTINGS_CHECK
+            .command_line_args(&json!([cmd_chars]))
+            .is_ok());
+        // ★One recognizer★ — keys that only look like `hooks` (a longer word, quoted, another case, a space inside the
+        //   segment) are not hooks lines for codex either, so they stay guarded.
+        for line in [
+            r#"other.x='echo "'"#,
+            r#"hooksX.y='echo "'"#,
+            r#""hooks".Stop='echo "'"#,
+            r#"Hooks.Stop='echo "'"#,
+            r#"hooks .Stop='echo "'"#,
+            r#"xhooks='echo "'"#,
+        ] {
+            assert!(
+                matches!(
+                    CODEX_SETTINGS_CHECK.command_line_args(&json!([line])),
+                    Err(Reason { ref code, .. }) if code == "codex-config-unsafe-char"
+                ),
+                "{line}"
+            );
+        }
+        let deeper = "hooks.Stop.matcher='x'";
+        assert_eq!(
+            CODEX_SETTINGS_CHECK.command_line_args(&json!(["model=o3", deeper])),
+            Err(reason(
+                "codex-hooks-unreadable",
+                json!({ "index": 1, "line": deeper }),
+                None
+            ))
+        );
     }
 }

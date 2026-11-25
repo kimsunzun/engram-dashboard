@@ -3333,18 +3333,18 @@ mod tests {
         (w, codex)
     }
 
-    /// A preset's `hooks:` written by hand, as a launch with the real backends meets it today: claude loads hook
-    /// components in both modes, so its plan carries the hook with no notice; codex does not load them yet, so each
-    /// codex mode leaves the hook out of the plan and names it in its omission notice — never a silent drop.
+    /// A preset's `hooks:` written by hand, as a launch with the real backends meets it: claude and codex load hook
+    /// components in both modes, so each plan carries the hook with no notice (a plain command handler on a codex
+    /// event — the codex assembly leaves nothing off).
     #[test]
-    fn a_hand_written_hooks_section_reaches_claude_and_is_named_in_every_codex_omission_notice() {
+    fn a_hand_written_hooks_section_reaches_claude_and_codex_in_every_mode() {
         let w = World::new();
         w.put("lib/hooks/notify/hooks.json", &hook_json("node x.js"));
         w.put(
             "lib/P.yaml",
             "kind: preset\nversion: 1\nhooks:\n  - library/hooks/notify\n",
         );
-        for command in [claude(JSON), claude(TERMINAL)] {
+        for command in [claude(JSON), claude(TERMINAL), codex(JSON), codex(TERMINAL)] {
             let what = format!("{command:?}");
             let plan = w
                 .svc
@@ -3354,22 +3354,6 @@ mod tests {
             assert_eq!(carried, ["library/hooks/notify"], "{what}");
             assert_eq!(plan.hooks[0].dir, w.at("lib/hooks/notify"), "{what}");
             assert!(plan.notices.is_empty(), "{what}: {:?}", plan.notices);
-        }
-        for command in [codex(JSON), codex(TERMINAL)] {
-            let what = format!("{command:?}");
-            let plan = w
-                .svc
-                .check(&agent(command, &["library/P.yaml"], &w.at("work")))
-                .unwrap();
-            assert!(plan.hooks.is_empty(), "{what}");
-            assert_eq!(
-                plan.notices,
-                [notice(
-                    "codex-hooks-omitted",
-                    json!({ "hooks": ["library/hooks/notify"] })
-                )],
-                "{what}"
-            );
         }
     }
 

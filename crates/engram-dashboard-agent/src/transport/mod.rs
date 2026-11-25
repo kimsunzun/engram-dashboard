@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::launch::Notice;
 use crate::output_core::OutputCore;
 use crate::types::{InputEvent, OutputEvent, PtyError, TransportCaps, TurnInput, Withdraw};
 
@@ -160,7 +161,11 @@ pub type LinkSink = Arc<dyn Fn(LinkResolution) + Send + Sync>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkResolution {
     /// The peer **signaled that it is ready to receive input** = activation established (user decision).
-    Ready,
+    /// `notices` = run notices the link raised while setting up (codex: the post-open hook check) — the manager appends
+    ///   them to the launch's notices, outside the notice fingerprint, so they are given on every launch they occur
+    ///   (ADR-0341 decision 5 as amended by ADR-0420). Empty for most links and launches.
+    // ADR-0420
+    Ready { notices: Vec<Notice> },
     /// The connection could not be established. `reason` = human-readable and the input to backend classification — this path's failure
     ///   text is a JSON-RPC error on stdout, in neither the console tail nor the stderr diagnostic tail.
     Failed { reason: String },

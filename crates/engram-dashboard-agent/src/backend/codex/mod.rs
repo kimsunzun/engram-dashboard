@@ -33,6 +33,10 @@
 
 mod cmdline;
 pub(crate) mod decoder;
+// ADR-0420
+mod hook_assembly;
+// ADR-0420
+mod hook_check;
 mod launch;
 pub(crate) mod protocol;
 mod settings;
@@ -104,14 +108,18 @@ fn is_app_server(command: &AgentCommand) -> bool {
 /// ★The value goes **unmodified**★ — a JSON body has no command-line limit, no `%` expansion and no line-break cut.
 ///   Bringing the terminal branch's conversion ([`cmdline::priming_value`]) here would guard against nothing and only
 ///   damage the document the agent reads.
+/// ★`config` goes on **both** branches too★ — the hook assembly's thread config (`{"hooks": …}`) is not saved with the
+///   thread, so a resume without it has no hooks (measure-3 M2). `None` = the field is absent.
 // ADR-0185
 // ADR-0215
 // ADR-0337
 // ADR-0354
+// ADR-0420
 fn thread_open(
     spec: &CommandSpec,
     resume_session_id: Option<Uuid>,
     developer_instructions: Option<String>,
+    config: Option<serde_json::Value>,
 ) -> ThreadOpen {
     let cwd = Some(spec.cwd.to_string_lossy().into_owned());
     let approval_policy = Some(AskForApproval::OnRequest);
@@ -124,12 +132,14 @@ fn thread_open(
             sandbox,
             exclude_turns: Some(true),
             developer_instructions,
+            config,
         }),
         None => ThreadOpen::Start(ThreadStartParams {
             cwd,
             approval_policy,
             sandbox,
             developer_instructions,
+            config,
         }),
     }
 }
@@ -137,12 +147,15 @@ fn thread_open(
 /// What an app-server spawn opens with — the tests pin it through this function (the Noop handshake regression · TRD
 /// S25 §5-2 4).
 ///
-/// - Noop (`!artifacts.real`): no instructions, no roots, no context.
-/// - Real: the merged instructions text ([`LaunchArtifacts::instructions_text`]); the skill roots; and the
+/// - Noop (`!artifacts.real`): no instructions, no roots, no context, no thread config, no hook check.
+/// - Real: the merged instructions text ([`LaunchArtifacts::instructions_text`]); the skill roots; the thread config
+///   `{"hooks": …}` when the hook assembly wrote one ([`LaunchArtifacts::hook_config`], on start and resume alike);
+///   the expected trust entries for the post-open check whenever there is a thread config; and the
 ///   instructions-change context only on a resume whose instructions changed. A Fresh spawn never carries it, even with `instructions_changed`: a new
 ///   thread receives the full text through `developerInstructions` at `thread/start`.
 // ADR-0337
 // ADR-0370
+// ADR-0420
 fn app_server_open(
     spec: &CommandSpec,
     resume_session_id: Option<Uuid>,
@@ -150,9 +163,10 @@ fn app_server_open(
 ) -> Result<AppServerOpen, PtyError> {
     if !artifacts.real {
         return Ok(AppServerOpen {
-            thread: thread_open(spec, resume_session_id, None),
+            thread: thread_open(spec, resume_session_id, None, None),
             extra_roots: Vec::new(),
             first_turn_context: None,
+            expected_hooks: None,
         });
     }
     let extra_roots = artifacts
@@ -173,12 +187,28 @@ fn app_server_open(
         }
         _ => None,
     };
+    let config = artifacts
+        .hook_config
+        .clone()
+        .map(|hooks| serde_json::json!({ HOOKS_CONFIG_KEY: hooks }));
+    let expected_hooks = config.is_some().then(|| artifacts.hook_trust.clone());
     Ok(AppServerOpen {
-        thread: thread_open(spec, resume_session_id, artifacts.instructions_text.clone()),
+        thread: thread_open(
+            spec,
+            resume_session_id,
+            artifacts.instructions_text.clone(),
+            config,
+        ),
         extra_roots,
         first_turn_context,
+        expected_hooks,
     })
 }
+
+/// The one key of the JSON thread config Engram sends — the whole `hooks` table (events and `state`), never a dotted
+/// `"hooks.…"` key beside it (codex applies request keys in hash-map order — ADR-0420).
+// ADR-0420
+const HOOKS_CONFIG_KEY: &str = "hooks";
 
 /// The line in front of the full instructions text in the instructions-change context (main's decision #3).
 // ADR-0337
@@ -279,7 +309,7 @@ const NEWLINE_REPLACEMENT: &str = "\\n";
 /// The total command-line length `cmd.exe` accepts (UTF-16 code units).
 ///
 /// ★The budget is not our value's alone★ — the policy flags, the pass-through and the overrides share one line, so
-///   the check counts the whole assembled line ([`cmdline::fits`]).
+///   the check counts the whole assembled line ([`cmdline::assembled`]).
 // ADR-0215
 const CMD_LINE_LIMIT_UTF16: usize = 8191;
 
@@ -655,6 +685,10 @@ impl AgentBackend for CodexBackend {
                 //   pass-through and before our overrides, so ours still come last and win. Empty for Noop materials.
                 // ADR-0337
                 args.extend(artifacts.config_args.iter().cloned());
+                // The codex terminal hook lines go right after the preset lines they were folded from — still before
+                //   our overrides. Empty in JSON mode (the thread config carries the hooks) and for Noop materials.
+                // ADR-0420
+                args.extend(artifacts.hook_args.iter().cloned());
 
                 // ★The overrides are all **after** the pass-through — this place is the source of truth for that discipline★★ (sibling blocks point here). Measured (0.155.0): passing the same config key twice with `-c`,
                 //   **the last one wins** — no merge, no duplicate-key error. In front, one line of user arguments would erase our value with no signal. ★Do not move these blocks back into the terminal branch
@@ -1045,7 +1079,9 @@ mod tests {
         }
     }
 
-    /// ★This value must **always be `None`** — the hook registration and its builder were removed (ADR-0216)★; the test only measures that it has not come back.
+    /// The `hooks.SessionStart` line of an argv. ★With no hook output written it must **always be `None`** — Engram's own
+    /// session-id hook stays removed (ADR-0216, U3)★; a hook component's line is the user's (ADR-0420), and
+    /// [`tests::a_hook_components_session_start_line_carries_only_the_users_command`] measures that it holds nothing of ours.
     /// ★The key is a literal on purpose★ — production code must hold none of this string, and a revived constant would blur that.
     /// ★Do not count by the **existence** of `-c`★ — two things carry it today (MCP attachment · the brief); a flag-only count turned false-positive with each new one.
     fn hook_override_value(argv: &[String]) -> Option<String> {
@@ -1587,8 +1623,12 @@ mod tests {
     // ── ADR-0216: the hook registration was removed ───────────────────────────────────────────────
     //
     // ★The order · conflict-warning axis is measured on the living overrides★ — `the_instructions_override_follows_the_passthrough` and `a_conflicting_mcp_passthrough_loses_to_ours_and_is_not_filtered`.
+    // ★Scope since ADR-0420★: these three assert a spawn **with no hook output written** carries no hook — Engram's own
+    //   session-id hook stays removed (ADR-0216, U3). Hook components and codex settings hooks lines come back as the
+    //   user's own hooks, trusted per run; their line carries only the user's command (the test after these three).
 
-    /// ★Terminal spawns no longer carry the hook★ — this one line nails down ADR-0216's replacement of the recovery path.
+    /// ★Terminal spawns with no hook output written carry no hook★ — Engram's own session-id hook stays removed
+    /// (ADR-0216, U3); this one line nails down ADR-0216's replacement of the recovery path.
     /// If carried, codex's trust review screen comes back and **the agent does not come up until approval.**
     #[test]
     fn the_terminal_spawn_no_longer_registers_the_session_start_hook() {
@@ -1600,8 +1640,9 @@ mod tests {
         );
     }
 
-    /// The same for app-server mode. ★These two once split — back then the hook was terminal-only★ (app-server
-    /// received the id directly in the `thread/start` response). Today neither mode sets it.
+    /// The same for app-server mode with no hook output written. ★These two once split — back then the hook was
+    /// terminal-only★ (app-server received the id directly in the `thread/start` response). Today neither mode sets it
+    /// (ADR-0216, U3).
     #[test]
     fn the_app_server_spawn_registers_no_hook() {
         let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
@@ -1624,6 +1665,74 @@ mod tests {
             argv.iter().filter(|a| *a == CONFIG_OVERRIDE_FLAG).count(),
             0,
             "`-c` was carried although the endpoint is absent: {argv:?}"
+        );
+    }
+
+    /// ★A hook component's `SessionStart` line carries only the user's command★ (ADR-0420 on ADR-0216) — a real terminal
+    /// kit with one component: the line is the assembly's (`hooks.SessionStart=[…]`, followed by the state line), its
+    /// command is the component's as written (placeholder rewritten), and nothing of Engram's own past hook (the
+    /// `hook session-start` subcommand, an Engram executable path) rides it.
+    // ADR-0216
+    // ADR-0420
+    #[test]
+    fn a_hook_components_session_start_line_carries_only_the_users_command() {
+        use crate::backend::hooks::HookRef;
+        use crate::launch::{LaunchKitSource, MemLaunchFs, NoopLaunchKits};
+        use crate::profile::AgentProfile;
+
+        let work = std::path::absolute("/fake-root/codex-0216/work").unwrap();
+        let folder = std::path::absolute("/fake-root/codex-0216/library/notify").unwrap();
+        let profile = AgentProfile::new(
+            "adr-0216".to_string(),
+            codex(vec![]),
+            work.clone(),
+            Vec::new(),
+            false,
+        );
+        let plan = NoopLaunchKits.check(&profile).unwrap();
+        let mut kit = NoopLaunchKits.prepare(plan, profile.id, 1).unwrap();
+        kit.plan.real = true;
+        let serde_json::Value::Object(definition) = serde_json::json!({"SessionStart": [{"hooks": [
+            {"type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/notify.js\" start"}
+        ]}]}) else {
+            unreachable!()
+        };
+        kit.plan.hooks = vec![HookRef {
+            path: "team/hooks/notify".to_string(),
+            dir: folder.clone(),
+            definition,
+        }];
+        let artifacts =
+            crate::backend::materialize(&codex(vec![]), &kit, &work, &MemLaunchFs::default())
+                .expect("materialize");
+        let argv = codex_argv(&CodexBackend.build_spec(
+            &codex(vec![]),
+            SpawnMode::Fresh,
+            None,
+            None,
+            work,
+            vec![],
+            Some(endpoint()),
+            &artifacts,
+        ));
+        let line = hook_override_value(&argv).expect("the component's SessionStart line");
+        assert_eq!(Some(&line), artifacts.hook_args.get(1), "{argv:?}");
+        let folder = engram_dashboard_platform::fs::forward_slash_text(&folder);
+        assert!(
+            line.contains(&format!("node \"{folder}/notify.js\" start")),
+            "{line}"
+        );
+        assert!(!line.contains("hook session-start"), "{line}");
+        assert!(
+            !line.contains("engram"),
+            "an Engram path rode the line: {line}"
+        );
+        assert_eq!(
+            argv.iter()
+                .filter(|a| a.starts_with("hooks.SessionStart"))
+                .count(),
+            1,
+            "{argv:?}"
         );
     }
 
@@ -2143,6 +2252,7 @@ mod tests {
         /// The `initialize` `userAgent`. The default `engram-fake/0` carries no version the transport can read.
         pub(super) user_agent: &'static str,
         pub(super) extra_roots: FakeExtraRoots,
+        pub(super) hooks_list: FakeHooksList,
     }
 
     #[cfg(windows)]
@@ -2151,9 +2261,28 @@ mod tests {
             FakeOptions {
                 user_agent: "engram-fake/0",
                 extra_roots: FakeExtraRoots::Answers,
+                hooks_list: FakeHooksList::Rejects,
             }
         }
     }
+
+    /// How the fake answers `hooks/list`.
+    // ADR-0420
+    #[cfg(windows)]
+    #[derive(Clone, Copy)]
+    pub(super) enum FakeHooksList {
+        /// `-32601` — what a codex without the method would answer.
+        Rejects,
+        /// `{"result": <this JSON>}` — no `'` inside (it goes into a powershell single-quoted string).
+        Answers(&'static str),
+        /// No answer at all — a codex that accepts the request and never replies (the cap
+        /// `transport::HOOKS_LIST_CAP` ends the wait).
+        Silent,
+    }
+
+    /// [`FakeHooksList::Rejects`]'s message.
+    #[cfg(windows)]
+    const FAKE_HOOKS_LIST_REJECTION: &str = "method not found: hooks/list";
 
     /// How the fake answers `skills/extraRoots/set`.
     #[cfg(windows)]
@@ -2182,6 +2311,14 @@ mod tests {
                 format!(r#"'"error":{{"code":-32601,"message":"{FAKE_EXTRA_ROOTS_REJECTION}"}}'"#)
             }
         };
+        let send = |reply: String| format!(r#"Send ('{{"id":' + $rid + ',' + {reply} + '}}')"#);
+        let hooks_list_answer = match options.hooks_list {
+            FakeHooksList::Rejects => send(format!(
+                r#"'"error":{{"code":-32601,"message":"{FAKE_HOOKS_LIST_REJECTION}"}}'"#
+            )),
+            FakeHooksList::Answers(result) => send(format!(r#"'"result":{result}'"#)),
+            FakeHooksList::Silent => "# no answer (FakeHooksList::Silent)".to_string(),
+        };
         let resume_reply = match resume {
             FakeResume::EchoesTheThreadId => {
                 r#"'"result":{"thread":{"id":"resumed-' + $tid + '","cliVersion":"0.0.0-fake"}}'"#
@@ -2195,6 +2332,7 @@ mod tests {
             .replace("THREAD_ID_PLACEHOLDER", start_thread_id)
             .replace("RESUME_REPLY_PLACEHOLDER", &resume_reply)
             .replace("EXTRA_ROOTS_REPLY_PLACEHOLDER", &extra_roots_reply)
+            .replace("HOOKS_LIST_ANSWER_PLACEHOLDER", &hooks_list_answer)
             .replace("USER_AGENT_PLACEHOLDER", options.user_agent)
             .replace("READY_ENV_PLACEHOLDER", FAKE_READY_ENV)
             .replace("LOG_ENV_PLACEHOLDER", FAKE_LOG_ENV);
@@ -2282,7 +2420,7 @@ mod tests {
         }
         let resolution = delivered.lock().unwrap().first().cloned();
         match resolution {
-            Some(crate::transport::LinkResolution::Ready) => panic!(
+            Some(crate::transport::LinkResolution::Ready { .. }) => panic!(
                 "the connection stood without the record verb ever being called — the wiring is broken: the record port did not reach the link"
             ),
             Some(crate::transport::LinkResolution::Failed { reason }) => panic!(
@@ -2296,7 +2434,8 @@ mod tests {
     }
 
     /// A minimal app-server: it answers the handshake requests (`initialize` with [`FakeOptions::user_agent`],
-    /// `skills/extraRoots/set` per [`FakeExtraRoots`], `thread/start`, `thread/resume`) and `turn/start` (then echoes a
+    /// `skills/extraRoots/set` per [`FakeExtraRoots`], `thread/start`, `thread/resume`, `hooks/list` per
+    /// [`FakeHooksList`]) and `turn/start` (then echoes a
     /// user message on the thread it opened), and appends every line it receives to its log, in order
     /// ([`FakeAppServer::received`]). ★Not the real codex★ — what the tests measure is our side of the wire (the thread
     /// id reaching the verb handed to [`AgentBackend::open_spawn`], what the handshake sends and in which order); the real
@@ -2337,6 +2476,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       if ($line -match '"threadId":"([^"]+)"') { $tid = $Matches[1] }
       $current = 'resumed-' + $tid
       Send ('{"id":' + $rid + ',' + RESUME_REPLY_PLACEHOLDER + '}')
+    } elseif ($line -match '"method":"hooks/list"') {
+      HOOKS_LIST_ANSWER_PLACEHOLDER
     } elseif ($line -match '"method":"turn/start"') {
       Send ('{"id":' + $rid + ',"result":{"turn":{"id":"fake-turn"}}}')
       Send ('{"method":"item/started","params":{"threadId":"' + $current + '","turnId":"fake-turn","item":{"type":"userMessage","id":"fake-user-item","content":[{"type":"text","text":"echo"}]}}}')
@@ -2880,7 +3021,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
         let ready = matches!(
             delivered.lock().unwrap().first(),
-            Some(crate::transport::LinkResolution::Ready)
+            Some(crate::transport::LinkResolution::Ready { .. })
         );
         let before_any_turn = first_turns.load(Ordering::SeqCst);
 
@@ -3261,12 +3402,52 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
     }
 
+    /// ★The terminal hook lines come right after the preset lines★ — after the pass-through, before the MCP attachment
+    /// and the priming, so our overrides still come last.
+    // ADR-0420
+    #[test]
+    fn the_terminal_hook_lines_follow_the_preset_lines_and_precede_our_overrides() {
+        let artifacts = LaunchArtifacts {
+            real: true,
+            config_args: vec![CONFIG_OVERRIDE_FLAG.to_string(), "model='o3'".to_string()],
+            hook_args: vec![
+                CONFIG_OVERRIDE_FLAG.to_string(),
+                "hooks.Stop=[]".to_string(),
+                CONFIG_OVERRIDE_FLAG.to_string(),
+                "hooks.state={}".to_string(),
+            ],
+            instructions_override: Some("developer_instructions='p'".to_string()),
+            ..LaunchArtifacts::default()
+        };
+        let s = CodexBackend.build_spec(
+            &codex(vec![CONFIG_OVERRIDE_FLAG, "theirs=1"]),
+            SpawnMode::Fresh,
+            None,
+            None,
+            PathBuf::from("C:/workspace"),
+            vec![],
+            Some(endpoint()),
+            &artifacts,
+        );
+        let values = config_override_values(&codex_argv(&s));
+        assert_eq!(
+            values[..4],
+            ["theirs=1", "model='o3'", "hooks.Stop=[]", "hooks.state={}"]
+        );
+        assert!(
+            values[4].starts_with(MCP_SERVER_OVERRIDE_PREFIX),
+            "{values:?}"
+        );
+        assert_eq!(values[5], "developer_instructions='p'");
+        assert_eq!(values.len(), 6, "{values:?}");
+    }
+
     /// ★The app-server branch does not touch the value★ — it uses none of the command line, so neither newlines nor the `'` · `%` the terminal branch cuts can break the JSON body; moving that conversion here would only break the document the agent reads.
     #[test]
     fn the_app_server_handshake_carries_the_document_unmodified() {
         let text = "line one\nyou can't skip 50% of it\n";
         let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
-        let params = match thread_open(&s, None, Some(text.to_string())) {
+        let params = match thread_open(&s, None, Some(text.to_string()), None) {
             ThreadOpen::Start(p) => p,
             ThreadOpen::Resume(_) => panic!("resume was picked although it is not a resume"),
         };
@@ -3286,7 +3467,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     fn a_resuming_app_server_handshake_carries_the_instructions_field() {
         let text = "teach the reply contract\nyou can't skip 50% of it\n";
         let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
-        let params = match thread_open(&s, Some(Uuid::new_v4()), Some(text.to_string())) {
+        let params = match thread_open(&s, Some(Uuid::new_v4()), Some(text.to_string()), None) {
             ThreadOpen::Resume(p) => p,
             ThreadOpen::Start(_) => panic!("start was picked although it is a resume"),
         };
@@ -3436,6 +3617,84 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
     }
 
+    fn hook_trust(key: &str, from: &str) -> crate::launch::HookTrust {
+        crate::launch::HookTrust {
+            key: key.to_string(),
+            hash: format!("sha256:{key}"),
+            from: from.to_string(),
+        }
+    }
+
+    fn params_value(plan: &AppServerOpen) -> serde_json::Value {
+        match &plan.thread {
+            ThreadOpen::Start(p) => serde_json::to_value(p),
+            ThreadOpen::Resume(p) => serde_json::to_value(p),
+        }
+        .expect("serialize")
+    }
+
+    /// ★The thread config rides start and resume alike★ — `config: {"hooks": …}` exactly as the assembly wrote it, and
+    /// the expected trust entries for the post-open check; with no hook output there is no `config` field at all and no
+    /// check (a Noop kit neither).
+    // ADR-0420
+    #[test]
+    fn the_open_plan_carries_the_hook_config_on_start_and_resume_and_expects_its_trust_entries() {
+        let hooks = serde_json::json!({
+            "Stop": [{"hooks": [{"command": "node s.js", "type": "command"}]}],
+            "state": {"k0": {"enabled": true, "trusted_hash": "sha256:k0"}},
+        });
+        for resume in [None, Some(Uuid::new_v4())] {
+            let at = format!("resume={}", resume.is_some());
+            let mut artifacts = real_json_artifacts(Some(MERGED), false);
+            artifacts.hook_config = Some(hooks.clone());
+            artifacts.hook_trust = vec![hook_trust("k0", "team/hooks/a")];
+            let plan = open_plan(resume, &artifacts);
+            assert_eq!(
+                params_value(&plan)["config"],
+                serde_json::json!({ "hooks": hooks }),
+                "{at}"
+            );
+            assert_eq!(
+                plan.expected_hooks,
+                Some(artifacts.hook_trust.clone()),
+                "{at}"
+            );
+
+            let plain = real_json_artifacts(Some(MERGED), false);
+            let plan = open_plan(resume, &plain);
+            assert!(params_value(&plan).get("config").is_none(), "{at}");
+            assert_eq!(plan.expected_hooks, None, "{at}");
+
+            let noop = LaunchArtifacts {
+                real: false,
+                ..artifacts
+            };
+            let plan = open_plan(resume, &noop);
+            assert!(params_value(&plan).get("config").is_none(), "{at}");
+            assert_eq!(plan.expected_hooks, None, "{at}");
+        }
+    }
+
+    /// The check follows the thread config: one with no trust entry (only carried other-source state) still runs it
+    /// (it watches for a foreign trusted session-flags hook); trust entries without a thread config (terminal mode's
+    /// record) do not.
+    // ADR-0420
+    #[test]
+    fn the_check_runs_exactly_when_a_thread_config_is_sent() {
+        let mut carried_only = real_json_artifacts(None, false);
+        carried_only.hook_config = Some(serde_json::json!({"state": {"u": {"enabled": true}}}));
+        assert_eq!(
+            open_plan(None, &carried_only).expected_hooks,
+            Some(Vec::new())
+        );
+
+        let mut entries_only = real_json_artifacts(None, false);
+        entries_only.hook_trust = vec![hook_trust("k0", "team/hooks/a")];
+        let plan = open_plan(None, &entries_only);
+        assert!(params_value(&plan).get("config").is_none());
+        assert_eq!(plan.expected_hooks, None);
+    }
+
     /// What one run against the fake app-server saw.
     #[cfg(windows)]
     struct FakeRun {
@@ -3444,6 +3703,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         link: Vec<crate::transport::LinkResolution>,
         /// The first-turn reports (`FirstTurnSink` arguments), in order.
         reports: Vec<bool>,
+        /// From the transport's start to the link resolution's delivery.
+        resolved_after: std::time::Duration,
     }
 
     /// Opens a transport on `fake` with `plan`, waits for the link, sends one turn when the link is `Ready` and
@@ -3471,6 +3732,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 .expect("open");
         let t = t.with_first_turn(Some(first_turn));
         wait_for_the_fake_to_listen(&fake);
+        let started = std::time::Instant::now();
         t.start(Arc::new(OutputCore::new(
             Uuid::new_v4(),
             1,
@@ -3481,9 +3743,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             || !delivered.lock().unwrap().is_empty(),
             "the link resolution is delivered",
         );
+        let resolved_after = started.elapsed();
         let ready = matches!(
             delivered.lock().unwrap().first(),
-            Some(crate::transport::LinkResolution::Ready)
+            Some(crate::transport::LinkResolution::Ready { .. })
         );
         if ready && send_turn {
             t.send_turn(TurnInput {
@@ -3503,6 +3766,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             received: fake.received(),
             link: delivered.lock().unwrap().clone(),
             reports: reports.lock().unwrap().clone(),
+            resolved_after,
         };
         let leftover = fake.remove();
         assert!(
@@ -3510,6 +3774,165 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             "could not remove the fake app-server files: {leftover:?}"
         );
         run
+    }
+
+    /// ★The post-open check★ — with expected hooks, `hooks/list {threadId}` goes out right after the thread opens (start
+    /// and resume, with the id the peer answered), before the link is `Ready`, and the verdicts ride `Ready`: a key
+    /// listed untrusted is named; a trusted, enabled one is not. The thread request carries the config.
+    // ADR-0420
+    #[cfg(windows)]
+    #[test]
+    fn the_post_open_check_asks_hooks_list_after_the_thread_opens_and_its_verdicts_ride_ready() {
+        const LISTED: &str = r#"{"data":[{"cwd":"C:/workspace","hooks":[{"key":"k0","source":"sessionFlags","enabled":true,"trustStatus":"trusted","currentHash":"sha256:k0"},{"key":"k1","source":"sessionFlags","enabled":true,"trustStatus":"modified","currentHash":"sha256:other"}],"warnings":[],"errors":[]}]}"#;
+        let hooks = serde_json::json!({"Stop": [{"hooks": [{"command": "a", "type": "command"}, {"command": "b", "type": "command"}]}]});
+        for resume in [false, true] {
+            let at = format!("resume={resume}");
+            let fake = bake_fake_app_server_with(
+                "T-start",
+                FakeResume::EchoesTheThreadId,
+                FakeOptions {
+                    hooks_list: FakeHooksList::Answers(LISTED),
+                    ..FakeOptions::default()
+                },
+            );
+            let s = spec(&codex_app_server(vec![]), "C:/workspace");
+            let sent = Uuid::new_v4();
+            let plan = AppServerOpen {
+                thread: thread_open(
+                    &s,
+                    resume.then_some(sent),
+                    None,
+                    Some(serde_json::json!({ "hooks": hooks })),
+                ),
+                extra_roots: Vec::new(),
+                first_turn_context: None,
+                expected_hooks: Some(vec![
+                    hook_trust("k0", "team/hooks/a"),
+                    hook_trust("k1", "team/hooks/b"),
+                ]),
+            };
+            let run = run_on_fake(fake, plan, false);
+            let opened = if resume {
+                method::THREAD_RESUME
+            } else {
+                method::THREAD_START
+            };
+            assert_eq!(
+                run.methods,
+                ["initialize", "initialized", opened, method::HOOKS_LIST],
+                "{at}"
+            );
+            assert_eq!(
+                params_of(&run, opened)["config"],
+                serde_json::json!({ "hooks": hooks }),
+                "{at}"
+            );
+            let thread_id = if resume {
+                format!("resumed-{sent}")
+            } else {
+                "T-start".to_string()
+            };
+            assert_eq!(
+                params_of(&run, method::HOOKS_LIST),
+                serde_json::json!({ "threadId": thread_id }),
+                "{at}"
+            );
+            assert_eq!(
+                run.link,
+                [crate::transport::LinkResolution::Ready {
+                    notices: vec![crate::launch::Reason {
+                        code: crate::launch::CODEX_HOOKS_UNTRUSTED.to_string(),
+                        args: serde_json::json!({ "why": "untrusted", "hooks": ["team/hooks/b"] }),
+                        line: None,
+                    }],
+                }],
+                "{at}"
+            );
+        }
+    }
+
+    /// ★A failed `hooks/list` keeps `Ready`★ — an older codex without the method answers `-32601`; the link still
+    /// stands, with the `unchecked` run notice naming the hooks.
+    // ADR-0420
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_hooks_list_keeps_ready_with_an_unchecked_notice() {
+        let fake = bake_fake_app_server_with(
+            "T-start",
+            FakeResume::EchoesTheThreadId,
+            FakeOptions::default(),
+        );
+        let s = spec(&codex_app_server(vec![]), "C:/workspace");
+        let plan = AppServerOpen {
+            thread: thread_open(&s, None, None, Some(serde_json::json!({"hooks": {}}))),
+            extra_roots: Vec::new(),
+            first_turn_context: None,
+            expected_hooks: Some(vec![hook_trust("k0", "team/hooks/a")]),
+        };
+        let run = run_on_fake(fake, plan, false);
+        let [crate::transport::LinkResolution::Ready { notices }] = run.link.as_slice() else {
+            panic!("the link did not stand: {:?}", run.link);
+        };
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].code, crate::launch::CODEX_HOOKS_UNTRUSTED);
+        assert_eq!(notices[0].args["why"], "unchecked");
+        assert_eq!(
+            notices[0].args["hooks"],
+            serde_json::json!(["team/hooks/a"])
+        );
+        assert!(
+            notices[0].args["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("hooks/list")),
+            "{notices:?}"
+        );
+    }
+
+    /// ★A silent `hooks/list` cannot eat the handshake budget★ — a codex that accepts the request and never answers
+    /// holds the link for at most [`transport::HOOKS_LIST_CAP`] (plus one 500 ms sweep), not the rest of the 10 s
+    /// handshake budget a resumed agent's history paging shares; `Ready` still comes, with the `unchecked` notice whose
+    /// error states the wait in milliseconds.
+    // ADR-0420
+    #[cfg(windows)]
+    #[test]
+    fn a_silent_hooks_list_keeps_ready_within_its_cap() {
+        let fake = bake_fake_app_server_with(
+            "T-start",
+            FakeResume::EchoesTheThreadId,
+            FakeOptions {
+                hooks_list: FakeHooksList::Silent,
+                ..FakeOptions::default()
+            },
+        );
+        let s = spec(&codex_app_server(vec![]), "C:/workspace");
+        let plan = AppServerOpen {
+            thread: thread_open(&s, None, None, Some(serde_json::json!({"hooks": {}}))),
+            extra_roots: Vec::new(),
+            first_turn_context: None,
+            expected_hooks: Some(vec![hook_trust("k0", "team/hooks/a")]),
+        };
+        let run = run_on_fake(fake, plan, false);
+        let [crate::transport::LinkResolution::Ready { notices }] = run.link.as_slice() else {
+            panic!("the link did not stand: {:?}", run.link);
+        };
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].args["why"], "unchecked", "{notices:?}");
+        let error = notices[0].args["error"].as_str().unwrap_or_default();
+        let waited: u128 = error
+            .strip_prefix("hooks/list: no answer within ")
+            .and_then(|rest| rest.strip_suffix(" ms"))
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or_else(|| panic!("the error does not state the wait in ms: {error}"));
+        assert!(
+            waited > 0 && waited <= transport::HOOKS_LIST_CAP.as_millis(),
+            "{error}"
+        );
+        // Without the cap the wait is the rest of the 10 s budget; with it, the cap plus one sweep and the round trips.
+        assert!(
+            run.resolved_after < transport::HOOKS_LIST_CAP + std::time::Duration::from_secs(3),
+            "Ready came after {:?}",
+            run.resolved_after
+        );
     }
 
     #[cfg(windows)]
@@ -3558,15 +3981,17 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                             &s,
                             resume.then(Uuid::new_v4),
                             Some("dev text".to_string()),
+                            None,
                         ),
                         extra_roots: extra_roots.clone(),
                         first_turn_context: context.then(|| "ctx text".to_string()),
+                        expected_hooks: None,
                     };
                     let run = run_on_fake(fake, plan, context);
                     assert!(
                         matches!(
                             run.link.first(),
-                            Some(crate::transport::LinkResolution::Ready)
+                            Some(crate::transport::LinkResolution::Ready { .. })
                         ),
                         "{at}: {:?}",
                         run.link
@@ -3645,9 +4070,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             );
             let s = spec(&codex_app_server(vec![]), "C:/workspace");
             let plan = AppServerOpen {
-                thread: thread_open(&s, Some(Uuid::new_v4()), Some("dev text".to_string())),
+                thread: thread_open(&s, Some(Uuid::new_v4()), Some("dev text".to_string()), None),
                 extra_roots: Vec::new(),
                 first_turn_context: None,
+                expected_hooks: None,
             };
             let run = run_on_fake(fake, plan, false);
             let resumed = params_of(&run, method::THREAD_RESUME);
@@ -3671,13 +4097,15 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 FakeOptions {
                     user_agent: FAKE_CODEX_0_163,
                     extra_roots: FakeExtraRoots::Rejects,
+                    ..FakeOptions::default()
                 },
             );
             let s = spec(&codex_app_server(vec![]), "C:/workspace");
             let plan = AppServerOpen {
-                thread: thread_open(&s, resume.then(Uuid::new_v4), None),
+                thread: thread_open(&s, resume.then(Uuid::new_v4), None, None),
                 extra_roots: vec!["C:/vol/engram/skills".into()],
                 first_turn_context: None,
+                expected_hooks: None,
             };
             let run = run_on_fake(fake, plan, false);
             match run.link.first() {

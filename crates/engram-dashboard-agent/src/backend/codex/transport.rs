@@ -74,15 +74,17 @@ use super::decoder::{
     history_turn_boundary, is_tool_item, is_user_message, user_bubble, CodexAppServerDecoder,
     MAX_ID_BYTES,
 };
+use super::hook_check;
 use super::protocol::{
-    self, method, AdditionalContext, ClientInfo, Inbound, InitializeCapabilities, InitializeParams,
-    InitializeResponse, RequestId, SkillsExtraRootsSetParams, SortDirection, Thread,
-    ThreadItemsListParams, ThreadItemsListResponse, ThreadOpen, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartResponse, TurnInterruptParams, TurnStartParams,
-    TurnStartResponse, TurnSteerParams, UserInput, CLIENT_NAME, INSTRUCTIONS_CONTEXT_KEY,
-    METHOD_NOT_FOUND,
+    self, method, AdditionalContext, ClientInfo, HooksListParams, HooksListResponse, Inbound,
+    InitializeCapabilities, InitializeParams, InitializeResponse, RequestId,
+    SkillsExtraRootsSetParams, SortDirection, Thread, ThreadItemsListParams,
+    ThreadItemsListResponse, ThreadOpen, ThreadResumeParams, ThreadResumeResponse,
+    ThreadStartResponse, TurnInterruptParams, TurnStartParams, TurnStartResponse, TurnSteerParams,
+    UserInput, CLIENT_NAME, INSTRUCTIONS_CONTEXT_KEY, METHOD_NOT_FOUND,
 };
 use crate::backend::{FirstTurnSink, SessionIdSink};
+use crate::launch::{HookTrust, Notice};
 use crate::output_core::{estimate_cost_bytes, OutputCore, REPLAY_MAX_BYTES, REPLAY_MAX_EVENTS};
 use crate::transport::spawn::{drain_stderr, spawn_piped, PipedChild};
 use crate::transport::{AgentTransport, LinkResolution, LinkSink, OutputDecoder};
@@ -103,8 +105,8 @@ use crate::types::{
 /// launches MCP children. Unrelated to turn length — the `turn/start` response comes when the turn opens.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The cap on **the whole thing until the connection stands** — two round trips + the record call + history paging; ★one section, not one
-/// request★.
+/// The cap on **the whole thing until the connection stands** — `initialize`, `skills/extraRoots/set`, the thread open, the post-open
+/// `hooks/list` (at most [`HOOKS_LIST_CAP`]), the record call and history paging; ★one section, not one request★.
 ///
 /// ★History paging runs **inside** this budget (ADR-0203)★: a separate one could delay `Ready` by two budgets past the backstop and decide a
 /// successful resume a failure (started once in [`writer_loop`]; [`tests::the_handshake_and_the_history_share_one_budget`]). A slow
@@ -114,6 +116,13 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 /// ★It bounds waiting for a response, not writes★: a blocked `write_all` ([`write_line`]) is never evaluated against it; the backstop and
 /// teardown cut that. Turn requests use [`REQUEST_DEADLINE`].
 const HANDSHAKE_BUDGET: Duration = Duration::from_secs(10);
+
+/// The cap on the post-open `hooks/list` request — it waits `min(what is left of [`HANDSHAKE_BUDGET`], this)`, so a
+/// codex that stays silent on it spends at most the cap (plus one [`SWEEP_INTERVAL`]) of the history paging budget of a
+/// resumed agent ([`check_hooks`]); the check then reports `unchecked` and the link still stands. An answering codex
+/// reads an in-memory list (codex source; not measured).
+// ADR-0420
+pub(super) const HOOKS_LIST_CAP: Duration = Duration::from_secs(2);
 
 /// The period at which the writer **looks around**: the deadline sweep, and sending control lines **one at a time** while the handshake
 /// waits ([`request_blocking`]). A blocking write can still hang (module header). 1/60 of [`REQUEST_DEADLINE`].
@@ -1228,6 +1237,12 @@ pub(crate) struct AppServerOpen {
     ///   ([`State::first_turn_context`]). `Some` also turns on `experimentalApi` at `initialize`. `None` = no
     ///   context, and `initialize` is byte-identical to a spawn without one.
     pub(crate) first_turn_context: Option<String>,
+    /// The trust entries the hook assembly wrote — `Some` runs the post-open check: after the thread opens,
+    ///   `hooks/list {threadId}` is asked once and its verdicts ride `LinkResolution::Ready` as run notices
+    ///   ([`hook_check`]). `None` = no hook output, no request (the handshake is byte-identical to a spawn without
+    ///   hooks). A failed `hooks/list` never fails the handshake.
+    // ADR-0420
+    pub(crate) expected_hooks: Option<Vec<HookTrust>>,
 }
 
 pub(crate) struct CodexAppServerTransport {
@@ -1409,7 +1424,9 @@ fn drain_one_control_line(stdin: &Mutex<Option<ChildStdin>>, state: &SharedState
 /// the deadline (ADR-0192). [unverified — whether 0.154.0 puts `thread/start` after an approval request].
 /// ★Order is the contract — **measure the deadline first, then write one line**★: the write blocks, so writing first leaves the deadline
 /// unevaluated while one write hangs. One blocking write can still hang forever (module header).
-/// `budget` = this request's deadline (production: [`REQUEST_DEADLINE`]); an argument as a seam for tests ([`Pending::register_at`], ADR-0012).
+/// `budget` = this request's deadline (the handshake passes what is left of [`HANDSHAKE_BUDGET`], `hooks/list` at most
+/// [`HOOKS_LIST_CAP`]); an argument as a seam for tests ([`Pending::register_at`], ADR-0012). The timeout text names this budget in
+/// ms, not the time waited (up to one [`SWEEP_INTERVAL`] longer).
 fn request_blocking<P: Serialize, R: DeserializeOwned>(
     stdin: &Mutex<Option<ChildStdin>>,
     state: &SharedState,
@@ -1458,8 +1475,8 @@ fn request_blocking<P: Serialize, R: DeserializeOwned>(
                 if Instant::now() >= deadline {
                     pending.forget(id);
                     return Err(format!(
-                        "{method_name}: no answer within {} seconds",
-                        budget.as_secs()
+                        "{method_name}: no answer within {} ms",
+                        budget.as_millis()
                     ));
                 }
                 drain_one_control_line(stdin, state);
@@ -1471,7 +1488,9 @@ fn request_blocking<P: Serialize, R: DeserializeOwned>(
 /// The handshake. The order is the contract — `initialize` (with `experimentalApi` only when the open plan holds a
 /// first-turn context) → (`initialized`) → `skills/extraRoots/set` when there are roots (before the thread opens, so the
 /// thread sees them — M4) → **the second request the plan chose** (`thread/start` or `thread/resume`; a resume's
-/// `developerInstructions` only for a codex known to reach [`RESUME_INSTRUCTIONS_FLOOR`]).
+/// `developerInstructions` only for a codex known to reach [`RESUME_INSTRUCTIONS_FLOOR`]) → `hooks/list {threadId}`
+/// when the plan expects hooks ([`AppServerOpen::expected_hooks`] — the post-open check, before the link reports ready
+/// and so before the first `turn/start`, where `SessionStart` fires; its failure is a verdict, not an `Err`).
 ///
 /// ★`initialize` works only once (measured 0.154.0)★, so this runs once per incarnation, never again even on failure (ADR-0192).
 /// ★A refused second request is `Err` as is — no fallback to a new thread (ADR-0082)★: `-32600` is not specific to "unknown thread"
@@ -1587,6 +1606,19 @@ fn handshake(
             (resumed.thread, resumed.items_backwards_cursor)
         }
     };
+    // ADR-0420: the post-open check — inside the same deadline, before `Ready`.
+    let hook_notices = match &open.expected_hooks {
+        Some(expected) => check_hooks(
+            stdin,
+            state,
+            pending,
+            next_id,
+            &thread.id,
+            expected,
+            remaining().min(HOOKS_LIST_CAP),
+        ),
+        None => Vec::new(),
+    };
     let floor = floor_verdict(thread.cli_version.as_deref(), &init.user_agent);
     tracing::info!(
         cli_version = ?thread.cli_version.as_deref().map(|v| sanitize(v, LOG_STRING_LIMIT)),
@@ -1611,7 +1643,68 @@ fn handshake(
         thread_id: thread.id,
         items_backwards_cursor,
         floor,
+        hook_notices,
     })
+}
+
+/// The post-open check: `hooks/list {threadId}` once, judged against `expected` ([`hook_check::verdicts`]); a failed
+/// request (an older codex without the method, no answer within `budget`) is [`hook_check::unchecked`]. Logs counts
+/// and, on a failure, the masked and clipped failure text — never a key, a path or a command on its own.
+// ADR-0420
+fn check_hooks(
+    stdin: &Mutex<Option<ChildStdin>>,
+    state: &SharedState,
+    pending: &Pending,
+    next_id: &AtomicI64,
+    thread_id: &str,
+    expected: &[HookTrust],
+    budget: Duration,
+) -> Vec<Notice> {
+    let answer: Result<HooksListResponse, String> = request_blocking(
+        stdin,
+        state,
+        pending,
+        next_id,
+        method::HOOKS_LIST,
+        &HooksListParams {
+            thread_id: thread_id.to_owned(),
+        },
+        budget,
+    );
+    match answer {
+        Ok(answer) => {
+            let listed: Vec<_> = answer
+                .data
+                .into_iter()
+                .flat_map(|entry| entry.hooks)
+                .collect();
+            let notices = hook_check::verdicts(expected, &listed);
+            tracing::info!(
+                expected = expected.len(),
+                listed = listed.len(),
+                verdicts = notices.len(),
+                "codex hooks checked"
+            );
+            notices
+        }
+        Err(reason) => {
+            let reason = sanitize(&reason, LOG_STRING_LIMIT);
+            // Nothing expected (a config that only carries other-source state) = nothing left unchecked — info, so a
+            //   codex without the method does not warn on every launch.
+            if expected.is_empty() {
+                tracing::info!(
+                    expected = 0,
+                    "codex hooks/list failed — nothing Engram wrote is left unchecked: {reason}"
+                );
+            } else {
+                tracing::warn!(
+                    expected = expected.len(),
+                    "codex hooks/list failed — the hooks are not checked for this run: {reason}"
+                );
+            }
+            hook_check::unchecked(expected, &reason)
+        }
+    }
 }
 
 /// What the handshake set up — the thread this incarnation talks in, and the door into its past screen.
@@ -1624,6 +1717,9 @@ struct Opened {
     /// The floor decision — applied after the session id record returns ([`settle_floor`]).
     // ADR-0231
     floor: Floor,
+    /// The post-open check's run notices — carried on `LinkResolution::Ready`.
+    // ADR-0420
+    hook_notices: Vec<Notice>,
 }
 
 /// Fetches the resumed thread's past screen **from the end** and carries it into neutral events (ADR-0203).
@@ -2386,7 +2482,13 @@ fn writer_loop(
             //   deliver something dead as a successful activation ([`open_gate`]).
             match open_gate(&state, opened.thread_id) {
                 // ★Delivered **right after** opening the gate, not under the lock★ (ADR-0006) — this port calls assembly point code that touches channels.
-                Ok(()) => deliver_link(&shutdown, &link_sink, LinkResolution::Ready),
+                Ok(()) => deliver_link(
+                    &shutdown,
+                    &link_sink,
+                    LinkResolution::Ready {
+                        notices: opened.hook_notices,
+                    },
+                ),
                 Err(reason) => {
                     // ★No error · boundary is added to the screen here★ — the stream ending means the pump will soon emit the end transition
                     //   (ADR-0005 sole actor), which already closes the screen; a user kill makes `deliver_link` suppress this.
@@ -4047,6 +4149,7 @@ mod tests {
             thread: ThreadOpen::Start(ThreadStartParams::default()),
             extra_roots: Vec::new(),
             first_turn_context: None,
+            expected_hooks: None,
         }
     }
 
@@ -6780,6 +6883,7 @@ mod tests {
                 thread_id: "th".to_string(),
                 items_backwards_cursor: None,
                 floor: Floor::Below,
+                hook_notices: Vec::new(),
             },
             far_deadline(),
         );
@@ -6856,7 +6960,13 @@ mod tests {
         };
 
         let quiet = AtomicBool::new(false);
-        deliver_link(&quiet, &sink, LinkResolution::Ready);
+        deliver_link(
+            &quiet,
+            &sink,
+            LinkResolution::Ready {
+                notices: Vec::new(),
+            },
+        );
         assert_eq!(
             seen.lock().expect("seen poisoned").len(),
             1,
@@ -12350,6 +12460,7 @@ mod tests {
                 sandbox: None,
                 exclude_turns: Some(true),
                 developer_instructions: instructions.map(str::to_string),
+                config: None,
             })
         };
         let rows = [
@@ -12359,6 +12470,7 @@ mod tests {
                     thread: resume(Some("dev text")),
                     extra_roots: vec!["C:/a/skills".into(), "C:/b/skills".into()],
                     first_turn_context: Some("ctx".into()),
+                    expected_hooks: None,
                 },
                 ["on", "2", "true", "true"],
             ),
@@ -12368,6 +12480,7 @@ mod tests {
                     thread: resume(Some("dev text")),
                     extra_roots: Vec::new(),
                     first_turn_context: None,
+                    expected_hooks: None,
                 },
                 ["off", "0", "false", "false"],
             ),

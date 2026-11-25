@@ -1,12 +1,13 @@
 //! The codex command-line guard and budget — what a codex launch command line can carry and whether it fits in
 //! cmd's 8191 UTF-16 units. Shared by the settings-check port (`settings.rs`) and the launch translation, so the
-//! check and the launch count the same line the same way.
+//! check and the launch count the same line the same way: both call [`assembled`], which counts the line the hook
+//! assembly gives (`hook_assembly.rs`) — the raw settings without their hooks lines, then the terminal hook lines.
 //!
 //! ★The count is an upper bound, never the real length★ — it does not copy either quoting rule (std `append_arg` in
 //!   JSON mode, portable-pty `append_quoted` in terminal mode) but bounds both: per argument its UTF-16 length, plus
 //!   1 for every `"` and every `\` (a `"` gets a `\` before it; backslashes before a `"` or the closing quote are
 //!   doubled), plus 3 (two wrapping quotes and the separator). The priming value's backslashes are not doubled (see
-//!   `needed`). Pieces only the launch knows (the program path, the resume id, the control URL) are counted at a
+//!   `needed_with`). Pieces only the launch knows (the program path, the resume id, the control URL) are counted at a
 //!   fixed bound.
 // ADR-0337
 
@@ -16,6 +17,9 @@ use engram_dashboard_platform::shell::text_is_cli_safe;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use super::hook_assembly::{
+    hook_assembly, hooks_line_readable, is_hooks_line, HookAssembly, TERMINAL_HOOK_BUDGET_ADVICE,
+};
 use super::settings::{config_lines, reason, split_config_line};
 use super::{
     mcp_override_value, APPROVAL_FLAG, APPROVAL_ON_REQUEST, APP_SERVER_STDIO_FLAG,
@@ -54,8 +58,14 @@ pub(super) struct PrimingRefusal {
 }
 
 /// The arguments one raw codex value adds — `-c`, `key=value`, `-c`, `key=value`, … (flag and value alternating),
-/// each line exactly as written. Each line first passes the `-c` split rule (`codex-config-line-invalid`), then the
-/// guard: a line [`text_is_cli_safe`] refuses, or one with an odd number of `"`, is `codex-config-unsafe-char`.
+/// each line exactly as written. Each line first passes the `-c` split rule (`codex-config-line-invalid`), then
+/// either:
+/// - a hooks line ([`is_hooks_line`] — the predicate the hook assembly splits by): the assembly must be able to fold
+///   it ([`hooks_line_readable`], `codex-hooks-unreadable` otherwise), and the guard below is skipped — the assembly
+///   consumes every hooks line and writes what it keeps through its own writer and guard, so the line never reaches
+///   the command line as written (ADR-0420, ADR-0422);
+/// - any other line: the guard — a line [`text_is_cli_safe`] refuses, or one with an odd number of `"`, is
+///   `codex-config-unsafe-char`.
 ///
 /// ★Why an odd `"` count is refused★ — a `"` survives `cmd.exe /c` but flips cmd's quote state for every later
 ///   argument (M5); the priming argument that follows the preset lines holds `<` and `>`, safe only while that
@@ -63,11 +73,14 @@ pub(super) struct PrimingRefusal {
 ///   every `"` (`^` is refused, so no quote is caret-escaped), and both quoting rules add 0 or 2 wrapping `"` and
 ///   otherwise only backslashes. Any `'` is fine.
 // ADR-0337
+// ADR-0420
 pub(super) fn config_args(raw: &Value) -> Result<Vec<String>, Reason> {
     let mut args = Vec::new();
     for (index, line) in config_lines(raw)?.into_iter().enumerate() {
         split_config_line(index, line)?;
-        if !text_is_cli_safe(line) || line.matches('"').count() % 2 == 1 {
+        hooks_line_readable(index, line)?;
+        let guarded = !is_hooks_line(line);
+        if guarded && (!text_is_cli_safe(line) || line.matches('"').count() % 2 == 1) {
             return Err(reason(
                 "codex-config-unsafe-char",
                 json!({ "index": index, "line": line }),
@@ -139,25 +152,53 @@ pub(super) fn cwd_reaches_codex_unchanged(cwd: &Path) -> bool {
         && (quoted_on_the_line || !text.contains(['&', '^', '|', '<', '>']))
 }
 
-/// Whether the whole launch command line of `line` fits in [`CMD_LINE_LIMIT_UTF16`], counted as an upper bound
-/// (see the module doc). Pieces, after the wrapper (the program token at [`PROGRAM_TOKEN_BOUND`], `/c`, `codex`,
-/// [`SHIM_MARGIN`]):
+/// [`fits_with`] of `line` as it is — every raw line counted, no hook line: the line before the hook assembly.
+#[cfg(test)]
+pub(super) fn fits(line: &CommandLine<'_>) -> Result<(), Reason> {
+    fits_with(line, line.config_args, &[])
+}
+
+/// The hook assembly of `line` ([`hook_assembly`]) when the command line it gives fits ([`fits_with`] over the
+/// assembly's non-hook `config_args` and, in terminal mode, its `hook_args` right after them — JSON mode counts no
+/// hook line, the thread config carries the hooks). The one entry point of the check (its notices) and
+/// `materialize` (its lines), so both count the same line.
+///
+/// `Err` = the assembly's refusal, or [`fits_with`]'s.
+// ADR-0337
+// ADR-0420
+pub(super) fn assembled(line: &CommandLine<'_>) -> Result<HookAssembly, Reason> {
+    let assembly = hook_assembly(line)?;
+    fits_with(line, &assembly.config_args, &assembly.hook_args)?;
+    Ok(assembly)
+}
+
+/// Whether the whole launch command line of `line` — with `config_args` and `hook_args` in place of
+/// `line.config_args` — fits in [`CMD_LINE_LIMIT_UTF16`], counted as an upper bound (see the module doc). Pieces,
+/// after the wrapper (the program token at [`PROGRAM_TOKEN_BOUND`], `/c`, `codex`, [`SHIM_MARGIN`]):
 /// - terminal = `resume <uuid>` (always counted) + `--cd <cwd> -s workspace-write -a on-request` + `extra_args` +
-///   `config_args` + the MCP attachment at its bound + the priming value of `instructions`;
-/// - JSON = `app-server --stdio` + `extra_args` + `config_args` + the MCP attachment at its bound. `instructions` is
-///   ignored there — neither counted nor checked — because the JSON mode sends them in the protocol, not on the line.
+///   `config_args` + `hook_args` + the MCP attachment at its bound + the priming value of `instructions`;
+/// - JSON = `app-server --stdio` + `extra_args` + `config_args` + the MCP attachment at its bound (`hook_args` is
+///   empty there). `instructions` is ignored there — neither counted nor checked — because the JSON mode sends them
+///   in the protocol, not on the line.
 ///
 /// `Err` = `codex-priming-unsafe-char` (terminal: `instructions` holds a character [`priming_value`] refuses) or
-/// `command-line-too-long` (`{needed, limit}`).
+/// `command-line-too-long` (`{needed, limit}`; with hook lines on the line also `hooks_counted: true` and `advice`,
+/// the terminal hook budget text).
 // ADR-0337
-pub(super) fn fits(line: &CommandLine<'_>) -> Result<(), Reason> {
-    let needed = needed(line)?;
+// ADR-0420
+fn fits_with(
+    line: &CommandLine<'_>,
+    config_args: &[String],
+    hook_args: &[String],
+) -> Result<(), Reason> {
+    let needed = needed_with(line, config_args, hook_args)?;
     if needed > CMD_LINE_LIMIT_UTF16 {
-        return Err(reason(
-            "command-line-too-long",
-            json!({ "needed": needed, "limit": CMD_LINE_LIMIT_UTF16 }),
-            None,
-        ));
+        let mut args = json!({ "needed": needed, "limit": CMD_LINE_LIMIT_UTF16 });
+        if !hook_args.is_empty() {
+            args["hooks_counted"] = json!(true);
+            args["advice"] = json!(TERMINAL_HOOK_BUDGET_ADVICE);
+        }
+        return Err(reason("command-line-too-long", args, None));
     }
     Ok(())
 }
@@ -178,8 +219,20 @@ fn wrapper_cost() -> usize {
     PROGRAM_TOKEN_BOUND + 1 + CMD_RUN_SWITCH.len() + 1 + CODEX_PROGRAM.len() + SHIM_MARGIN
 }
 
-/// The count [`fits`] compares with the limit.
+/// [`needed_with`] of `line` as it is — no hook line.
+#[cfg(test)]
 fn needed(line: &CommandLine<'_>) -> Result<usize, Reason> {
+    needed_with(line, line.config_args, &[])
+}
+
+/// The count [`fits_with`] compares with the limit: the wrapper, every argument of [`counted_args_with`] at its
+/// upper-bound cost, and the priming value of `line.instructions` (terminal only), with `config_args` and
+/// `hook_args` in place of `line.config_args`. `Err` = `codex-priming-unsafe-char`.
+fn needed_with(
+    line: &CommandLine<'_>,
+    config_args: &[String],
+    hook_args: &[String],
+) -> Result<usize, Reason> {
     let on_the_line = match line.mode {
         AgentOutputFormat::Terminal => line.instructions,
         AgentOutputFormat::StreamJson => None,
@@ -201,16 +254,27 @@ fn needed(line: &CommandLine<'_>) -> Result<usize, Reason> {
         arg_cost(CONFIG_OVERRIDE_FLAG) + value.encode_utf16().count() + 3
     });
     Ok(wrapper_cost()
-        + counted_args(line)
+        + counted_args_with(line, config_args, hook_args)
             .iter()
             .map(|arg| arg_cost(arg))
             .sum::<usize>()
         + priming_cost)
 }
 
-/// The arguments after `codex`, in launch order, with the bounded pieces at their bound — everything [`needed`]
-/// counts except the priming value.
+/// [`counted_args_with`] of `line` as it is — no hook line.
+#[cfg(test)]
 fn counted_args(line: &CommandLine<'_>) -> Vec<String> {
+    counted_args_with(line, line.config_args, &[])
+}
+
+/// The arguments after `codex`, in launch order, with the bounded pieces at their bound — everything
+/// [`needed_with`] counts except the priming value: the mode's fixed arguments, `extra_args`, `config_args`, then
+/// `hook_args` (where `build_spec` puts them), then the MCP attachment.
+fn counted_args_with(
+    line: &CommandLine<'_>,
+    config_args: &[String],
+    hook_args: &[String],
+) -> Vec<String> {
     let mut args: Vec<String> = match line.mode {
         AgentOutputFormat::Terminal => vec![
             RESUME_SUBCOMMAND.to_owned(),
@@ -228,7 +292,8 @@ fn counted_args(line: &CommandLine<'_>) -> Vec<String> {
         ],
     };
     args.extend(line.extra_args.iter().cloned());
-    args.extend(line.config_args.iter().cloned());
+    args.extend(config_args.iter().cloned());
+    args.extend(hook_args.iter().cloned());
     args.push(CONFIG_OVERRIDE_FLAG.to_owned());
     // A URL of `MCP_URL_BUDGET` plain characters costs exactly the bound a real URL is held to.
     args.push(mcp_override_value(&"u".repeat(MCP_URL_BUDGET)));
@@ -240,6 +305,11 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::backend::hooks::HookRef;
+
+    const PINNED_BARE: usize = 940;
+    const PINNED_FIRST: usize = 324;
+    const PINNED_EACH_MORE: usize = 261;
 
     fn line<'a>(
         mode: AgentOutputFormat,
@@ -735,5 +805,141 @@ mod tests {
         }
         let _ = std::fs::remove_file(&script);
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    // ── the hook assembly on the line ──
+
+    fn hook_line<'a>(
+        mode: AgentOutputFormat,
+        config_args: &'a [String],
+        hooks: &'a [HookRef],
+    ) -> CommandLine<'a> {
+        CommandLine {
+            mode,
+            cwd: Path::new(r"C:\Users\someone\work\project"),
+            extra_args: &[],
+            config_args,
+            config_origins: &[],
+            hooks,
+            instructions: None,
+        }
+    }
+
+    /// A hook component with `count` plain handlers on one event, each `node "D:/Library/hooks/notify/notify-<n>.js"`.
+    fn plain_hooks(event: &str, count: usize) -> HookRef {
+        let handlers: Vec<Value> = (0..count)
+            .map(|n| json!({ "type": "command", "command": format!(r#"node "D:/Library/hooks/notify/notify-{n}.js""#) }))
+            .collect();
+        let Value::Object(definition) = json!({ event: [{ "hooks": handlers }] }) else {
+            unreachable!();
+        };
+        HookRef {
+            path: "team/hooks/notify".to_owned(),
+            dir: std::path::absolute("/library/team/hooks/notify").unwrap(),
+            definition,
+        }
+    }
+
+    /// ★Without hook inputs the assembled line is the line [`fits`] counts★ — so P3b's switch to [`assembled`] changes
+    /// no count today.
+    // ADR-0420
+    #[test]
+    fn without_hook_inputs_the_assembled_count_is_the_plain_count() {
+        let config = ["-c".to_owned(), "model='o3'".to_owned()];
+        for mode in MODES {
+            let line = hook_line(mode, &config, &[]);
+            let assembly = assembled(&line).unwrap();
+            assert_eq!(assembly.config_args, config.to_vec());
+            assert_eq!(
+                needed_with(&line, &assembly.config_args, &assembly.hook_args),
+                needed(&line)
+            );
+        }
+    }
+
+    /// ★Terminal counts the hook lines after the non-hook lines; JSON counts no hook line★ — and a raw hooks line
+    /// leaves the count in both modes, because it leaves the line.
+    // ADR-0420
+    #[test]
+    fn terminal_counts_the_hook_lines_and_json_counts_none() {
+        let hooks = [plain_hooks("SessionStart", 1)];
+        let raw_hook = [
+            "-c".to_owned(),
+            "hooks.Stop=[{hooks=[{type='command',command='node raw.js'}]}]".to_owned(),
+        ];
+        let bare = needed(&hook_line(AgentOutputFormat::Terminal, &[], &[])).unwrap();
+        let line = hook_line(AgentOutputFormat::Terminal, &raw_hook, &hooks);
+        let assembly = assembled(&line).unwrap();
+        assert_eq!(assembly.config_args, Vec::<String>::new());
+        assert_eq!(assembly.hook_args.len(), 6, "{:?}", assembly.hook_args);
+        assert_eq!(
+            needed_with(&line, &assembly.config_args, &assembly.hook_args).unwrap(),
+            bare + assembly
+                .hook_args
+                .iter()
+                .map(|a| arg_cost(a))
+                .sum::<usize>()
+        );
+
+        let line = hook_line(AgentOutputFormat::StreamJson, &raw_hook, &hooks);
+        let assembly = assembled(&line).unwrap();
+        assert!(assembly.hook_config.is_some());
+        assert_eq!(
+            needed_with(&line, &assembly.config_args, &assembly.hook_args),
+            needed(&hook_line(AgentOutputFormat::StreamJson, &[], &[]))
+        );
+    }
+
+    /// ★The pinned Rust cost of hooks on the terminal line★ (a plain handler `node "D:/Library/hooks/notify/notify-<n>.js"`
+    /// on one event, with its state entry): the first and each further one. The line without hooks is pinned too
+    /// (no priming, the `cwd` of the shipped-priming test); P5 adds the priming.
+    // ADR-0420
+    #[test]
+    fn the_terminal_hook_cost_is_pinned() {
+        let cost = |count: usize| {
+            let hooks = [plain_hooks("SessionStart", count)];
+            let line = hook_line(AgentOutputFormat::Terminal, &[], &hooks);
+            let assembly = assembled(&line).unwrap();
+            needed_with(&line, &assembly.config_args, &assembly.hook_args).unwrap()
+        };
+        let bare = needed(&hook_line(AgentOutputFormat::Terminal, &[], &[])).unwrap();
+        assert_eq!(bare, PINNED_BARE, "the terminal line without hooks");
+        assert_eq!(cost(1) - bare, PINNED_FIRST, "the first hook");
+        assert_eq!(
+            cost(2) - cost(1),
+            PINNED_EACH_MORE,
+            "each further hook on the same event"
+        );
+        assert_eq!(
+            cost(3) - cost(2),
+            PINNED_EACH_MORE,
+            "each further hook on the same event"
+        );
+    }
+
+    /// ★Over the budget with hook lines, the refusal says so★ — `hooks_counted` and the advice; without hook lines the
+    /// refusal is today's.
+    // ADR-0420
+    #[test]
+    fn over_the_budget_with_hook_lines_the_refusal_names_the_hooks() {
+        let hooks = [plain_hooks("SessionStart", 40)];
+        let refusal = assembled(&hook_line(AgentOutputFormat::Terminal, &[], &hooks)).unwrap_err();
+        assert_eq!(refusal.code, "command-line-too-long");
+        assert_eq!(refusal.args["hooks_counted"], json!(true));
+        assert_eq!(
+            refusal.args["advice"],
+            json!("codex terminal command line limit exceeded — reduce hooks or use JSON mode")
+        );
+        // The same hooks fit in JSON mode: the thread config has no length limit.
+        assert!(assembled(&hook_line(AgentOutputFormat::StreamJson, &[], &hooks)).is_ok());
+
+        let long = ["-c".to_owned(), format!("a={}", "x".repeat(8000))];
+        let refusal = assembled(&hook_line(AgentOutputFormat::Terminal, &long, &[])).unwrap_err();
+        assert_eq!(
+            refusal.args.as_object().unwrap().len(),
+            2,
+            "{}",
+            refusal.args
+        );
     }
 }

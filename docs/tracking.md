@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-136 | S25 step 22 O7 — the post-open hook verdict of a boot-restored codex JSON agent (and of a Withheld caller) is only logged, at info | Main | Decision pending (user) — current: info |
 | T-135 | S25 client stage — a structure view of the whole reference graph (agents → presets → items), beside the existing screens | Main | Decided direction — first client-stage slot, read-only, plugin-shaped (T-109) |
 | T-134 | Agent backends as external modules others can add | Main | Idea — waiting for trigger (after S25) |
 | T-133 | S25 step 10b — a writing library command repeated after the CLI's long wait ran out can overlap the first (extra staging) | Main | Recorded — closing it is outside 10b |
@@ -17,8 +18,6 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-131 | S25 step 9b U5 — read-only entries emptying cannot remove (Unix 0555 folder in a row; a read-only empty-folder row) | Main | Decided 2026-11-26 — user: remove them too 「그냥 지우면 될듯」 — fix pending |
 | T-130 | S25 step 9b U4b review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-129 | S25 step 9b U4a review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
-| T-128 | S25 step 9b U4a — copying times and permissions is strict (a share refusing them fails every cross-volume move) | Main | Closed 2026-11-26 — user: keep strict (「뭔가 복잡하면 그냥 다 막아.」) |
-| T-127 | S25 step 9b U4a / U4b — a merge across volumes, and every copy onto a same-name folder, is refused instead of merging entry by entry | Main | Closed 2026-11-26 — user: keep refused (「뭔가 복잡하면 그냥 다 막아.」) |
 | T-126 | S25 step 9b U3 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-125 | S25 step 9b U3 — a keep-both merge of a referenced skill that empties the source folder asks nothing | Main | Decided 2026-11-26 — user: ask (as ADR-0415 decision 2) 「어쨋든 이대로 진행하던지」 — fix pending |
 | T-122 | Step-21 U4b — a stopped rename: tokens confirmed before the stop still pass when the plan of what is left is the confirmed one | Main | Closed 2026-11-23 — user: keep as is (ADR-0407) |
@@ -124,6 +123,11 @@ Full text before the simplification (investigation records · reverted attempts 
 
 ## Main
 
+### T-136. S25 step 22 O7 — the post-open hook verdict is only logged, at info
+- **Status:** decision pending (user) — TRD trd-hook-components.md §9.3 O7; held by the P3 reviewers (lead, risk) 2026-11-26; committed with run notices logged at info (ADR-0420 amendment of 2026-11-26).
+- **Case:** after a codex JSON thread opens, Engram checks `hooks/list` and raises `codex-hooks-untrusted` run notices (not-listed, untrusted, disabled, foreign, unchecked). A launch with a caller gets them in its reply; a boot restore and a Withheld caller (WS Spawn / SpawnProfile) only log them, at info — below the release default (warn), so nothing is written. The `foreign` verdict is the only run-time sign of a hook riding Engram's trust. `restore_all` has no production caller today, so the boot path is dormant.
+- **Options:** log run notices at warn (cheap; main's recommendation — matches logging-conventions for an anomaly) · surface them in the restore status / problem list · keep info.
+
 ### T-135. S25 client stage — a structure view of the whole reference graph
 - **Status:** idea, recorded 2026-11-26 for the client-stage screen discussion. User: 「언리얼 위젯 리플랙션? 같이 연결되있는 트리구조를 따로 볼 수 있게 하는게 좋을것같은데」 · 「추가적으로 하는거임. 기존은 그대로 있고. … 전체적인 구조가 보이도록」.
 - **What:** an additional view (existing screens unchanged) showing agents → attached presets → nested presets → instructions / skills / hooks / settings / folder entries, both directions (what uses this item), with the launch-problem overlay (skipped, blocking, tag-filtered). Analogues: Unreal Reference Viewer (node graph), Widget Reflector (hierarchy tree).
@@ -155,16 +159,6 @@ Full text before the simplification (investigation records · reverted attempts 
 ### T-129. S25 step 9b U4a review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-24 at the U4a commit — minor items. Decisions of the unit: ADR-0416.
 - **Items:** (1) every no-follow open queries `FileAttributeTagInfo`; a redirector refusing that query fails every copy from it (query only when the attributes show a reparse point); (2) `detach-refs-invalid` can hide a crossing item's own answer (wider than T-126 (3)); (3) `not_copied` names an entry whose bytes were copied when only its metadata pass failed; (4) a Unix FIFO in the source blocks the copy's open (no `O_NONBLOCK`); (5) `stage` maps a vanished destination folder to `not-found` of the source; (6) the probe fails where the user may remove but not create folders; (7) the staging is not re-listed in the hold, and no folder sync precedes trashing the original; (8) a volume whose file ids change between reads makes every attempt `source-changed`; (9) a mount change during the copy keeps the staging without a client `root_generation` but trashes it with one; (10) a fallback trash row of a staging no longer carries its intended name; (11) no test breaks the destination `.trash` between the copy and the hold for a staged item that is not an overwrite (QA mutation survived at the in-hold re-check's destination half).
-
-### T-128. S25 step 9b U4a — copying times and permissions is strict
-- **Status:** closed 2026-11-26 — user: keep strict (「뭔가 복잡하면 그냥 다 막아.」). Raised by the U4a review (lead, hold); committed as strict in the U4a commit.
-- **Case:** a cross-volume move keeps modified times and the read-only attribute / mode (TRD M13). Any failure of setting them fails the item (the staging goes to the trash; nothing is lost). Volumes that refuse chmod or folder times (exFAT / vfat on Linux, CIFS without unix extensions, some NAS) would fail every cross-volume move. On Windows the whole attribute word is copied (hidden, system, offline, sparse …), not only read-only.
-- **Options:** best-effort — copy the content, try the metadata, log a failure and go on (main's recommendation: Windows Explorer copies onto FAT without failing on attributes; rsync reports a partial transfer but keeps the files) · keep strict.
-
-### T-127. S25 step 9b U4a / U4b — a merge across volumes, and a copy onto a same-name folder, is refused
-- **Status:** closed 2026-11-26 — user: keep refused (「뭔가 복잡하면 그냥 다 막아.」). Raised by the U4a review (lead, risk, Codex: hold); committed as refused in the U4a commit.
-- **Case:** moving `a/skills/` from one mount onto a same-name folder `b/skills/` in a mount on another volume answers `crosses-volumes` for every `onConflict`; nothing moves. TRD §3.5 says a same-name folder merges entry by entry by the same rules, and Windows Explorer merges across volumes. Likely in normal use when two mounts share a folder layout. U4b (copy) follows the same rule on every volume: copying a folder onto a same-name folder answers `copy-merge-refused` (TRD §3.1 says copies merge too; Explorer merges).
-- **Options:** merge entry by entry (each entry its own staged copy, compare and placement — more code and one staging per entry; Explorer's behaviour) · keep refused (safe; the user moves the contents instead).
 
 ### T-126. S25 step 9b U3 review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-24 at the U3 commit — minor items, fixed when their code is touched or they show up in use. Decisions of the unit: ADR-0415.

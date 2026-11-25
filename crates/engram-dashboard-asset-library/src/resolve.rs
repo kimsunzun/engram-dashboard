@@ -2458,10 +2458,10 @@ mod tests {
         );
     }
 
-    /// A mode that loads no hooks carries none and names each in its backend's `hooks_omitted` notice — the fake's
-    /// terminal mode and today's real codex alike.
+    /// codex loads hooks in both modes, so it carries them with no notice; a mode that loads no hooks (the fake's
+    /// terminal mode) carries none and names each in its backend's `hooks_omitted` notice.
     #[test]
-    fn a_mode_that_loads_no_hooks_names_them_in_its_hooks_omitted_notice() {
+    fn codex_carries_hooks_in_both_modes_and_a_mode_without_hooks_names_them_in_its_notice() {
         let lib = library(&[
             (
                 "P.yaml",
@@ -2470,24 +2470,27 @@ mod tests {
             ("h1/hooks.json", HOOK),
             ("h2/hooks.json", HOOK),
         ]);
-        for (word, mode, code) in [
-            ("gamma", T, "gamma-hooks-omitted"),
-            ("codex", T, "codex-hooks-omitted"),
-            ("codex", J, "codex-hooks-omitted"),
-        ] {
-            let resolution = run(&lib, &agent(word, mode, &["library/P.yaml"]));
-            assert!(resolution.hooks.is_empty(), "{word} {mode:?}");
-            assert!(resolution.problems.is_empty(), "{word} {mode:?}");
+        for mode in [T, J] {
+            let resolution = run(&lib, &agent("codex", mode, &["library/P.yaml"]));
             assert_eq!(
-                resolution.notices,
-                [reason(
-                    code,
-                    json!({ "hooks": ["library/h1", "library/h2"] }),
-                    None
-                )],
-                "{word} {mode:?}"
+                hook_paths(&resolution),
+                ["library/h1", "library/h2"],
+                "{mode:?}"
             );
+            assert!(resolution.problems.is_empty(), "{mode:?}");
+            assert!(resolution.notices.is_empty(), "{mode:?}");
         }
+        let resolution = run(&lib, &agent("gamma", T, &["library/P.yaml"]));
+        assert!(resolution.hooks.is_empty());
+        assert!(resolution.problems.is_empty());
+        assert_eq!(
+            resolution.notices,
+            [reason(
+                "gamma-hooks-omitted",
+                json!({ "hooks": ["library/h1", "library/h2"] }),
+                None
+            )]
+        );
     }
 
     /// A hook whose definition uses the placeholder and whose folder path holds a `$` that does not end a component is a

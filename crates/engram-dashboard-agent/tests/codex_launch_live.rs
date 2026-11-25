@@ -1,4 +1,5 @@
-//! codex launch materials, live — real codex, real JSON turns (TRD S25 step 6 §7-3, scenes L1–L5).
+//! codex launch materials, live — real codex, real JSON turns (TRD S25 step 6 §7-3, scenes L1–L5), and the hook
+//! components lane (ADR-0420, scenes H-a – H-d — no tokens, temporary `CODEX_HOME`s).
 //!
 //! ★Every item is `#[ignore]`★ — the codex lane runs it (`.claude/skill-bindings/qa.md`). L1 and L2 spend **2 real
 //!   model turns** and create one thread in the user's real `~/.codex` (auth needed); the test prints its id and leaves
@@ -11,9 +12,16 @@
 //! ★The stored instructions hash is the manager's own record★ — the first echo of a delivered turn records the kit's
 //!   hash; L2 and L3 read it before each resume instead of writing it.
 //!
+//! ★The hook scenes★ (ADR-0420) — Engram's own hook output against codex's `hooks/list`: H-a/H-d through the manager,
+//!   Engram's transport and `AppServerOpen` (the post-open check's verdicts, start and resume, `experimentalApi` off);
+//!   H-b Engram's terminal lines on an app-server line; H-c a user-layer state fixture beside Engram's thread config.
+//!   Every hook scene uses its own temporary `CODEX_HOME` with a provider that points at a closed local port, so a turn
+//!   reaches no model.
+//!
 //! Run: `cargo test -p engram-dashboard-agent --test codex_launch_live -- --ignored --test-threads=1 --nocapture`
 //!   (`--nocapture` shows the codex thread id L1 leaves in `~/.codex`).
 // ADR-0337
+// ADR-0420
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -23,12 +31,14 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use engram_dashboard_agent::backend;
+use engram_dashboard_agent::backend::hooks::HookRef;
 use engram_dashboard_agent::launch::LaunchBlocked;
 use engram_dashboard_agent::launch::{
-    backend_word, LaunchKit, LaunchKitSource, LaunchPlan, LaunchPorts, PrepareError, RawSetting,
-    SkillRef,
+    backend_word, HookTrust, LaunchArtifacts, LaunchKit, LaunchKitSource, LaunchPlan, LaunchPorts,
+    PrepareError, RawSetting, SkillRef, StdLaunchFs, CODEX_HOOKS_UNTRUSTED,
 };
-use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::manager::{AgentManager, NoticeDelivery};
 use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
@@ -40,6 +50,7 @@ use engram_dashboard_agent::types::{
     SinkId, StatusSink, ToolGrant, TurnOutcome, MCP_SERVER_NAME,
 };
 use engram_dashboard_base::testing::wait_until;
+use engram_dashboard_platform::spawn::{prepare_tree_root, TreeRoot};
 
 /// The `-c` line every scene's kit carries (TRD §7-3 — the raw `-c` path is exercised too).
 const EFFORT_LINE: &str = "model_reasoning_effort=\"low\"";
@@ -96,6 +107,8 @@ struct Scene {
     folders: Vec<PathBuf>,
     /// The `key=value` lines of the kit's one raw codex preset, in order.
     raw_lines: Vec<&'static str>,
+    /// The plan's hook components.
+    hooks: Vec<HookRef>,
 }
 
 /// A real kit writer: `prepare` writes the merged instructions file into `<root>/vol-<id>-<epoch>` and hands out the
@@ -124,7 +137,7 @@ impl LaunchKitSource for LiveKits {
                 line: None,
                 value: json!(scene.raw_lines),
             }],
-            hooks: Vec::new(),
+            hooks: scene.hooks,
             include_priming: true,
             notices: Vec::new(),
             real: true,
@@ -261,6 +274,13 @@ fn applied_lines() -> &'static Mutex<Vec<std::collections::BTreeMap<String, Stri
     LINES.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// The fields of every "codex hooks checked" line (the post-open check's counts), process-wide.
+fn hooks_checked_lines() -> &'static Mutex<Vec<std::collections::BTreeMap<String, String>>> {
+    static LINES: OnceLock<Mutex<Vec<std::collections::BTreeMap<String, String>>>> =
+        OnceLock::new();
+    LINES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 /// Installs the process-wide subscriber that keeps the §4-7 log line — the line is written on the transport's writer
 /// thread, so a thread-local subscriber would not see it.
 fn capture_applied_lines() {
@@ -301,6 +321,11 @@ impl tracing::Subscriber for AppliedCapture {
             .is_some_and(|m| m.contains("codex launch materials applied"))
         {
             applied_lines().lock().unwrap().push(fields);
+        } else if fields
+            .get("message")
+            .is_some_and(|m| m.contains("codex hooks checked"))
+        {
+            hooks_checked_lines().lock().unwrap().push(fields);
         }
     }
     fn enter(&self, _: &tracing::span::Id) {}
@@ -325,13 +350,39 @@ fn applied(
 fn last_applied() -> (String, String, String, String) {
     let lines = applied_lines().lock().unwrap();
     let last = lines.last().expect("no §4-7 log line was written");
-    let field = |name: &str| last.get(name).cloned().unwrap_or_default();
+    applied_fields(last)
+}
+
+/// One §4-7 line as (experimental_api, extra_roots, resume_instructions, first_turn_context).
+fn applied_fields(
+    line: &std::collections::BTreeMap<String, String>,
+) -> (String, String, String, String) {
+    let field = |name: &str| line.get(name).cloned().unwrap_or_default();
     (
         field("experimental_api"),
         field("extra_roots"),
         field("resume_instructions"),
         field("first_turn_context"),
     )
+}
+
+/// The one line of `lines` written after `mark` (its length before an activation) — panics unless exactly one was
+/// written, so an activation that skipped the step cannot pass on an earlier activation's line.
+fn one_line_since(
+    lines: &Mutex<Vec<std::collections::BTreeMap<String, String>>>,
+    what: &str,
+    scene: &str,
+    mark: usize,
+) -> std::collections::BTreeMap<String, String> {
+    let lines = lines.lock().unwrap();
+    let new = &lines[mark.min(lines.len())..];
+    assert_eq!(
+        new.len(),
+        1,
+        "{scene}: {} \"{what}\" lines since the activation began, not one: {new:?}",
+        new.len()
+    );
+    new[0].clone()
 }
 
 /// A temporary root for one scene, outside this repository — everything the scene writes (the profile store too)
@@ -531,6 +582,7 @@ fn l1_l2_l3_codex_json_fresh_then_changed_then_unchanged_resume() {
             extra_skill_roots: vec![folder_root.clone()],
             folders: vec![folder.clone()],
             raw_lines: vec![EFFORT_LINE],
+            hooks: Vec::new(),
         }),
     });
     let (manager, profiles) = manager_with(kits.clone());
@@ -705,6 +757,7 @@ fn l4_codex_terminal_real_kit_comes_up() {
             extra_skill_roots: Vec::new(),
             folders: Vec::new(),
             raw_lines: vec![EFFORT_LINE, UPDATE_CHECK_OFF_LINE],
+            hooks: Vec::new(),
         }),
     });
     let (manager, profiles) = manager_with(kits.clone());
@@ -842,15 +895,15 @@ fn session_flags(cwd: &Path, home: &Path, args: &[&str]) -> Option<Value> {
         line.push(' ');
         line.push_str(&pty_quoted(arg));
     }
-    let mut child = Command::new("cmd.exe")
+    let mut command = Command::new("cmd.exe");
+    command
         .raw_arg(&line)
         .current_dir(cwd)
         .env("CODEX_HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn cmd.exe");
+        .stderr(Stdio::null());
+    let (mut child, tree) = spawn_tree(&mut command, "cmd.exe /c codex app-server");
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
     let (tx, rx) = std::sync::mpsc::channel();
@@ -887,8 +940,8 @@ fn session_flags(cwd: &Path, home: &Path, args: &[&str]) -> Option<Value> {
             break;
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(stdin);
+    end_tree(&tree, &mut child, "cmd.exe /c codex app-server");
     result
 }
 
@@ -990,4 +1043,521 @@ impl WideLen for std::ffi::OsStr {
         use std::os::windows::ffi::OsStrExt;
         self.encode_wide().count()
     }
+}
+
+// ── H-a … H-d — hook components against codex's hooks/list (no tokens) ───────────────────────────
+
+/// A temporary `CODEX_HOME`'s `config.toml` head: a provider at a closed local port, so a turn reaches no model.
+const DEAD_PROVIDER: &str = "model_provider = \"engram-dead\"\n\n[model_providers.engram-dead]\nname = \"engram-dead\"\nbase_url = \"http://127.0.0.1:9/v1\"\nwire_api = \"responses\"\n";
+
+/// A raw codex settings hooks line the scenes fold beside the component (a `PermissionRequest` group).
+const RAW_HOOKS_LINE: &str =
+    "hooks.PermissionRequest=[{matcher='Bash',hooks=[{type='command',command='echo engram-live-raw'}]}]";
+
+/// A hook component whose handlers cover every hash rule of ADR-0420: the `command_windows` alias and
+/// `commandWindows`, `timeout: 0` → 1, the `SessionEnd` clamp and the `Interrupt` default, an async `SessionEnd` hashed
+/// as configured, the matcher dropped for `UserPromptSubmit` / `Stop`, `additionalContextLimit` kept per event, dropped
+/// on another and at its default, an unknown field, a `statusMessage`, and the placeholder. Every command only echoes.
+fn hash_rule_hook(dir: &Path) -> HookRef {
+    let Value::Object(definition) = json!({
+        "SessionStart": [{"matcher": "startup", "hooks": [
+            {"type": "command", "command": "echo engram-live-start ${CLAUDE_PLUGIN_ROOT}", "timeout": 0, "statusMessage": "starting"}
+        ]}],
+        "PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "echo engram-live-pre", "commandWindows": "echo engram-live-pre-win", "additionalContextLimit": 100, "unknownField": 1}
+        ]}],
+        "PostToolUse": [{"hooks": [
+            {"type": "command", "command": "echo engram-live-post", "additionalContextLimit": 2500}
+        ]}],
+        "UserPromptSubmit": [{"matcher": "dropped", "hooks": [
+            {"type": "command", "command": "echo engram-live-prompt", "async": true}
+        ]}],
+        "Stop": [{"matcher": "dropped", "hooks": [
+            {"type": "command", "command": "echo engram-live-stop", "additionalContextLimit": 7}
+        ]}],
+        "SessionEnd": [{"hooks": [
+            {"type": "command", "command": "echo engram-live-end", "async": true, "timeout": 9}
+        ]}],
+        "Interrupt": [{"hooks": [{"type": "command", "command": "echo engram-live-interrupt"}]}],
+        "SubagentStart": [{"hooks": [
+            {"type": "command", "command": "echo engram-live-sub", "command_windows": "echo engram-live-sub-win"}
+        ]}],
+    }) else {
+        unreachable!()
+    };
+    std::fs::create_dir_all(dir).expect("create the hook folder");
+    HookRef {
+        path: "live/hooks/rules".to_string(),
+        dir: dir.to_path_buf(),
+        definition,
+    }
+}
+
+/// A real kit for `backend::materialize` — the hook component and the raw lines, nothing else (no instructions file,
+/// no skills, so nothing is read or written).
+fn hook_kit(command: &AgentCommand, hooks: Vec<HookRef>, raw_lines: &[&str]) -> LaunchKit {
+    LaunchKit {
+        plan: LaunchPlan {
+            backend: backend_word(command),
+            instructions: Vec::new(),
+            skills: Vec::new(),
+            raw_settings: vec![RawSetting {
+                preset: "live.yaml".to_string(),
+                source: "live.yaml".to_string(),
+                line: None,
+                value: json!(raw_lines),
+            }],
+            hooks,
+            include_priming: false,
+            notices: Vec::new(),
+            real: true,
+            folders: Vec::new(),
+            extra_skill_roots: Vec::new(),
+            stamp: None,
+        },
+        volatile_dir: None,
+        instructions_file: None,
+        skills: Vec::new(),
+        instructions_hash: None,
+        last_applied_instructions_hash: None,
+    }
+}
+
+/// Engram's artifacts for `kit` in `output_format`, through the public dispatch.
+fn hook_artifacts(
+    output_format: AgentOutputFormat,
+    kit: &LaunchKit,
+    work: &Path,
+) -> LaunchArtifacts {
+    backend::materialize(&codex(output_format), kit, work, &StdLaunchFs).expect("materialize")
+}
+
+/// A raw JSON-RPC client on `codex app-server --stdio <args>`, spawned the way Engram wraps the CLI
+/// (`console_command`), under `home` as `CODEX_HOME`. ★Its whole process tree ends on drop★ ([`end_tree`]) — the
+/// wrapper's codex descendants would otherwise outlive it and race the scene root's removal.
+struct RawAppServer {
+    child: std::process::Child,
+    tree: TreeRoot,
+    stdin: std::process::ChildStdin,
+    lines: std::sync::mpsc::Receiver<String>,
+    next_id: i64,
+}
+
+impl RawAppServer {
+    fn spawn(cwd: &Path, home: &Path, args: &[String]) -> Self {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        let mut all = vec!["app-server".to_string(), "--stdio".to_string()];
+        all.extend(args.iter().cloned());
+        let (program, args) = engram_dashboard_platform::shell::console_command("codex", all);
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .env("CODEX_HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let (mut child, tree) = spawn_tree(&mut command, "codex app-server");
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = child.stdout.take().expect("stdout");
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        let mut server = RawAppServer {
+            child,
+            tree,
+            stdin,
+            lines,
+            next_id: 1,
+        };
+        server.request(
+            "initialize",
+            json!({"clientInfo": {"name": "engram-dashboard", "version": "0"}}),
+        );
+        server.notify("initialized");
+        server
+    }
+
+    fn notify(&mut self, method: &str) {
+        use std::io::Write;
+        writeln!(self.stdin, "{}", json!({ "method": method })).expect("write");
+        self.stdin.flush().expect("flush");
+    }
+
+    /// The `result` of one request — panics on an error answer or no answer in 60 s.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        use std::io::Write;
+        let id = self.next_id;
+        self.next_id += 1;
+        writeln!(
+            self.stdin,
+            "{}",
+            json!({ "id": id, "method": method, "params": params })
+        )
+        .expect("write");
+        self.stdin.flush().expect("flush");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let text = self
+                .lines
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("{method}: no answer within 60 s"));
+            let Ok(message) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            if message["id"] == id {
+                if let Some(error) = message.get("error") {
+                    panic!("{method}: {error}");
+                }
+                return message["result"].clone();
+            }
+        }
+    }
+
+    /// Every hook `hooks/list` lists for `params`, flattened over its entries.
+    fn hooks(&mut self, params: Value) -> Vec<Value> {
+        let answer = self.request("hooks/list", params);
+        answer["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|entry| entry["hooks"].as_array().cloned().unwrap_or_default())
+            .collect()
+    }
+}
+
+impl Drop for RawAppServer {
+    fn drop(&mut self) {
+        end_tree(&self.tree, &mut self.child, "codex app-server");
+    }
+}
+
+/// Spawns `command` as the root of a process tree (`platform::spawn`) and wakes it — a failure cuts what started
+/// and panics.
+fn spawn_tree(command: &mut std::process::Command, what: &str) -> (std::process::Child, TreeRoot) {
+    prepare_tree_root(command);
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {what}: {e}"));
+    let tree = match TreeRoot::attach(&child) {
+        Ok(tree) => tree,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("tie {what} to a process tree: {e}");
+        }
+    };
+    if let Err(e) = tree.start(&child) {
+        end_tree(&tree, &mut child, what);
+        panic!("wake {what}: {e}");
+    }
+    (child, tree)
+}
+
+/// Cuts `tree` and waits until the child and every member have exited, so the scene root's removal does not race a
+/// codex descendant. A tree still alive after 10 s panics (only prints while already panicking).
+fn end_tree(tree: &TreeRoot, child: &mut std::process::Child, what: &str) {
+    let _ = tree.kill(child);
+    let _ = child.wait();
+    if !wait_until(Duration::from_secs(10), || tree.members_gone()) {
+        let message = format!("{what}: its process tree outlived the kill for 10 s");
+        if std::thread::panicking() {
+            eprintln!("{message}");
+        } else {
+            panic!("{message}");
+        }
+    }
+}
+
+/// The listed hook of `key`, or a panic naming what was listed.
+fn listed<'a>(hooks: &'a [Value], key: &str) -> &'a Value {
+    hooks
+        .iter()
+        .find(|hook| hook["key"] == key)
+        .unwrap_or_else(|| panic!("{key} is not listed: {hooks:#?}"))
+}
+
+/// ★Engram's hash is codex's★ — every trust entry is listed under its key with `currentHash` = Engram's, trusted and
+/// enabled.
+fn assert_trusted_as_written(scene: &str, expected: &[HookTrust], hooks: &[Value]) {
+    assert!(!expected.is_empty(), "{scene}: nothing was written");
+    for entry in expected {
+        let hook = listed(hooks, &entry.key);
+        assert_eq!(hook["currentHash"], entry.hash.as_str(), "{scene}: {hook}");
+        assert_eq!(hook["trustStatus"], "trusted", "{scene}: {hook}");
+        assert_eq!(hook["enabled"], true, "{scene}: {hook}");
+        assert_eq!(hook["source"], "sessionFlags", "{scene}: {hook}");
+    }
+}
+
+/// No post-open verdict among an activation's notices.
+fn assert_no_hook_verdict(scene: &str, notices: &[engram_dashboard_agent::launch::Notice]) {
+    let verdicts: Vec<_> = notices
+        .iter()
+        .filter(|n| n.code == CODEX_HOOKS_UNTRUSTED)
+        .collect();
+    assert!(verdicts.is_empty(), "{scene}: {verdicts:?}");
+}
+
+/// The marks one activation's own log lines are read after — (hooks checked, materials applied) lines so far.
+fn log_marks() -> (usize, usize) {
+    (
+        hooks_checked_lines().lock().unwrap().len(),
+        applied_lines().lock().unwrap().len(),
+    )
+}
+
+/// The one "codex hooks checked" line written since `marks` as (expected, verdicts).
+fn hooks_checked_since(scene: &str, marks: (usize, usize)) -> (String, String) {
+    let line = one_line_since(hooks_checked_lines(), "codex hooks checked", scene, marks.0);
+    let field = |name: &str| line.get(name).cloned().unwrap_or_default();
+    (field("expected"), field("verdicts"))
+}
+
+/// The one §4-7 line written since `marks` ([`applied_fields`]).
+fn applied_since(scene: &str, marks: (usize, usize)) -> (String, String, String, String) {
+    applied_fields(&one_line_since(
+        applied_lines(),
+        "codex launch materials applied",
+        scene,
+        marks.1,
+    ))
+}
+
+/// H-a + H-d — a codex JSON agent with the hash-rule component and a raw hooks line, through the manager, Engram's
+/// transport and `AppServerOpen`: on start the post-open check (`hooks/list {threadId}`) finds every handler Engram
+/// wrote trusted and enabled — no verdict notice, the check's line counts every handler and no verdict — and the
+/// handshake runs without `experimentalApi` (H-d); one turn (to a closed port) records the thread; the resume sends the
+/// same config and the check passes again.
+#[test]
+#[ignore = "real codex — no tokens, temporary CODEX_HOME"]
+fn h_a_codex_json_hooks_are_trusted_as_written_on_start_and_resume() {
+    capture_applied_lines();
+    let root = scene_root("hooks-json");
+    let work = root.join("work");
+    let home = root.join("home");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), DEAD_PROVIDER).unwrap();
+    let hook = hash_rule_hook(&root.join("library").join("rules"));
+    let written = hook_artifacts(
+        AgentOutputFormat::StreamJson,
+        &hook_kit(
+            &codex(AgentOutputFormat::StreamJson),
+            vec![hook.clone()],
+            &[RAW_HOOKS_LINE],
+        ),
+        &work,
+    )
+    .hook_trust
+    .len();
+
+    let kits = Arc::new(LiveKits {
+        root: root.to_path_buf(),
+        scene: Mutex::new(Scene {
+            instructions: "You are a test agent.\n".to_string(),
+            hash: "h-a".to_string(),
+            skills: Vec::new(),
+            extra_skill_roots: Vec::new(),
+            folders: Vec::new(),
+            raw_lines: vec![RAW_HOOKS_LINE],
+            hooks: vec![hook],
+        }),
+    });
+    let (manager, profiles) = manager_with(kits);
+    let profile = AgentProfile::new(
+        format!("live-hooks-{}", Uuid::new_v4().simple()),
+        codex(AgentOutputFormat::StreamJson),
+        work.clone(),
+        vec![(
+            "CODEX_HOME".to_string(),
+            home.to_string_lossy().into_owned(),
+        )],
+        false,
+    );
+    let id = profile.id;
+    profiles
+        .try_upsert(profile.clone())
+        .expect("save the profile");
+
+    let marks = log_marks();
+    let started = manager
+        .activate_profile_reporting(&profile, SpawnMode::Fresh, NoticeDelivery::Delivered)
+        .expect("H-a start");
+    assert_no_hook_verdict("H-a start", &started.notices);
+    assert_eq!(
+        hooks_checked_since("H-a start", marks),
+        (written.to_string(), "0".to_string()),
+        "H-a start: the check's line"
+    );
+    assert_eq!(
+        applied_since("H-d start", marks).0,
+        "off",
+        "H-d: experimentalApi"
+    );
+
+    let events = Events::new();
+    manager
+        .subscribe(id, Arc::new(events.clone()))
+        .expect("subscribe");
+    manager
+        .write_stdin(id, b"hello", InputOrigin::User)
+        .expect("the turn is accepted");
+    assert!(
+        wait_until(Duration::from_secs(90), || {
+            profiles
+                .get(id)
+                .and_then(|p| p.backend_session_id)
+                .is_some()
+        }),
+        "H-a: the thread id was not recorded: {}",
+        events.debug_after(0)
+    );
+    kill_and_reap(&manager, id);
+
+    let stored = profiles.get(id).expect("profile");
+    let marks = log_marks();
+    let resumed = manager
+        .activate_profile_reporting(&stored, SpawnMode::Resume, NoticeDelivery::Delivered)
+        .expect("H-a resume");
+    assert_no_hook_verdict("H-a resume", &resumed.notices);
+    assert_eq!(
+        hooks_checked_since("H-a resume", marks),
+        (written.to_string(), "0".to_string()),
+        "H-a resume: the check's line"
+    );
+    assert_eq!(
+        applied_since("H-d resume", marks).0,
+        "off",
+        "H-d: experimentalApi on resume"
+    );
+    kill_and_reap(&manager, id);
+    manager.shutdown_all();
+}
+
+/// H-b — Engram's codex terminal lines (the hash-rule component and a raw hooks line) on an app-server line, through
+/// the same wrapper Engram launches codex with: `hooks/list {cwds}` lists every handler under Engram's key with
+/// Engram's hash, trusted and enabled — the terminal route reads as written.
+#[test]
+#[ignore = "real codex — no tokens, temporary CODEX_HOME"]
+fn h_b_codex_terminal_hook_lines_are_trusted_as_written() {
+    let root = scene_root("hooks-terminal");
+    let work = root.join("work");
+    let home = root.join("home");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), DEAD_PROVIDER).unwrap();
+    let hook = hash_rule_hook(&root.join("library").join("rules"));
+    let artifacts = hook_artifacts(
+        AgentOutputFormat::Terminal,
+        &hook_kit(
+            &codex(AgentOutputFormat::Terminal),
+            vec![hook],
+            &[RAW_HOOKS_LINE],
+        ),
+        &work,
+    );
+    assert!(!artifacts.hook_args.is_empty());
+    let mut server = RawAppServer::spawn(&root, &home, &artifacts.hook_args);
+    let hooks = server.hooks(json!({ "cwds": [work] }));
+    assert_trusted_as_written("H-b", &artifacts.hook_trust, &hooks);
+}
+
+/// H-c — a user-layer state fixture beside Engram's thread config (F1, measure-4 M-B): three user hooks trusted in the
+/// user layer — H1 enabled, H2 and H3 `enabled = false` — and a codex settings asset carrying `{<H3> = {enabled = true}}`.
+/// With Engram's config on `thread/start`: H1 stays trusted and enabled, H2 stays off, H3 is on (the carried entry keeps
+/// its effect), and Engram's own handlers are trusted as written.
+#[test]
+#[ignore = "real codex — no tokens, temporary CODEX_HOME"]
+fn h_c_a_user_layer_state_keeps_its_effect_beside_engrams_hooks() {
+    let root = scene_root("hooks-user-layer");
+    let work = root.join("work");
+    let home = root.join("home");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let user_hooks = "\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"echo engram-live-user-1\"\n\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"echo engram-live-user-2\"\n\n[[hooks.PreCompact]]\n[[hooks.PreCompact.hooks]]\ntype = \"command\"\ncommand = \"echo engram-live-user-3\"\n";
+    let config = home.join("config.toml");
+    std::fs::write(&config, format!("{DEAD_PROVIDER}{user_hooks}")).unwrap();
+
+    // The user hooks' keys and hashes, as codex lists them before any state.
+    let (h1, h2, h3) = {
+        let mut server = RawAppServer::spawn(&root, &home, &[]);
+        let hooks = server.hooks(json!({ "cwds": [work] }));
+        let user = |event: &str| -> (String, String) {
+            let hook = hooks
+                .iter()
+                .find(|h| {
+                    h["source"] == "user" && h["key"].as_str().is_some_and(|k| k.contains(event))
+                })
+                .unwrap_or_else(|| panic!("no user {event} hook: {hooks:#?}"));
+            (
+                hook["key"].as_str().unwrap().to_string(),
+                hook["currentHash"].as_str().unwrap().to_string(),
+            )
+        };
+        (
+            user(":session_start:"),
+            user(":stop:"),
+            user(":pre_compact:"),
+        )
+    };
+    let mut state = String::new();
+    for ((key, hash), enabled) in [(&h1, None), (&h2, Some(false)), (&h3, Some(false))] {
+        state.push_str(&format!(
+            "\n[hooks.state.'{key}']\ntrusted_hash = \"{hash}\"\n"
+        ));
+        if let Some(enabled) = enabled {
+            state.push_str(&format!("enabled = {enabled}\n"));
+        }
+    }
+    std::fs::write(&config, format!("{DEAD_PROVIDER}{user_hooks}{state}")).unwrap();
+
+    let carried = format!("hooks.state={{'{}'={{enabled=true}}}}", h3.0);
+    let hook = hash_rule_hook(&root.join("library").join("rules"));
+    let artifacts = hook_artifacts(
+        AgentOutputFormat::StreamJson,
+        &hook_kit(
+            &codex(AgentOutputFormat::StreamJson),
+            vec![hook],
+            &[&carried],
+        ),
+        &work,
+    );
+    let hook_config = artifacts.hook_config.clone().expect("a thread config");
+    assert_eq!(
+        hook_config["state"][&h3.0],
+        json!({ "enabled": true }),
+        "the carried entry"
+    );
+
+    let mut server = RawAppServer::spawn(&root, &home, &[]);
+    let opened = server.request(
+        "thread/start",
+        json!({
+            "cwd": work,
+            "approvalPolicy": "never",
+            "sandbox": "read-only",
+            "ephemeral": true,
+            "config": { "hooks": hook_config },
+        }),
+    );
+    let thread = opened["thread"]["id"]
+        .as_str()
+        .expect("a thread id")
+        .to_string();
+    let hooks = server.hooks(json!({ "threadId": thread }));
+    for (key, enabled) in [(&h1.0, true), (&h2.0, false), (&h3.0, true)] {
+        let hook = listed(&hooks, key);
+        assert_eq!(hook["trustStatus"], "trusted", "H-c {key}: {hook}");
+        assert_eq!(hook["enabled"], enabled, "H-c {key}: {hook}");
+    }
+    assert_trusted_as_written("H-c", &artifacts.hook_trust, &hooks);
 }

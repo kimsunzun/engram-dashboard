@@ -402,10 +402,32 @@ pub const CODEX_TERMINAL_FOLDER_OMITTED: &str = "codex-terminal-folder-omitted";
 // ADR-0355
 pub const CODEX_SAME_NAME_SKILLS: &str = "codex-same-name-skills";
 
-/// Notice code: codex does not load hook components yet, so the launch left them out. `args` = `{hooks: [library
-/// paths]}`. Removed when codex loads hooks.
+/// Notice code: the codex hook assembly left a handler (or a whole group) off — codex would not run it or Engram
+/// cannot trust it. `args` = `{hook | source, event, why}` — `hook` = a hook component's library path, `source` = a
+/// settings asset (the notice's `line` = its field's line); `why` = `event` (not one of codex's 14) · `type` (not a
+/// `command` handler) · `field` (a field codex reads has the wrong type, or the command is blank) · `matcher` (not a
+/// string).
 // ADR-0420
-pub const CODEX_HOOKS_OMITTED: &str = "codex-hooks-omitted";
+pub const CODEX_HOOKS_LEFT_OFF: &str = "codex-hooks-left-off";
+
+/// Notice code: the codex hook assembly trusted hooks a settings asset's raw lines hold. `args` = `{settings:
+/// [{source, digest}]}` — one row per settings asset with a written group; `digest` changes when its trusted groups
+/// change.
+// ADR-0420
+pub const CODEX_RAW_HOOKS_TRUSTED: &str = "codex-raw-hooks-trusted";
+
+/// Run notice code: after a codex JSON thread opened, `hooks/list {threadId}` did not show Engram's hooks as written —
+/// raised by the codex transport's post-open check, delivered on every launch it occurs (outside the notice
+/// fingerprint — ADR-0341 decision 5 as amended by ADR-0420). One notice per `why`. `args` = `{why, hooks}`:
+/// - `not-listed` — a written handler's key is not listed (codex skipped it, e.g. a matcher that is not a valid
+///   regex, or numbers what it received differently); `untrusted` — listed, but its trust status is not `trusted`
+///   (the hash codex computes differs from Engram's); `disabled` — listed with `enabled: false`. `hooks` = the hook
+///   components' library paths and settings assets the handlers came from, each once.
+/// - `foreign` — a `sessionFlags` hook listed trusted and enabled that Engram did not write; `hooks` = its keys.
+/// - `unchecked` — `hooks/list` failed (an older codex without the method, a timeout); `hooks` as for `untrusted`,
+///   plus `error` (the failure text).
+// ADR-0420
+pub const CODEX_HOOKS_UNTRUSTED: &str = "codex-hooks-untrusted";
 
 /// Notice code: a folder entry's listing stopped at [`FOLDER_LISTING_CAP`] entries, so only part of the folder was
 /// looked at. `args` = `{folder}`.
@@ -462,8 +484,9 @@ pub fn reports_launch_skip(code: &str) -> bool {
 ///   in the two terminal codes an empty list leaves its part out.
 /// - [`FOLDER_LISTING_PARTIAL`], [`FOLDER_LISTING_SKIPPED`] — name no backend; the folder (and the skipped paths, the
 ///   first three named and the rest counted).
-/// - [`CODEX_HOOKS_OMITTED`] — codex does not load hook components yet, and the hooks left out; an empty list ends
-///   after the first sentence.
+/// - [`CODEX_HOOKS_LEFT_OFF`] — the event, the reason by `why`, and the hook (or the settings asset and its line).
+/// - [`CODEX_RAW_HOOKS_TRUSTED`] — the settings assets whose hooks codex runs trusted.
+/// - [`CODEX_HOOKS_UNTRUSTED`] — the sentence of its `why` and the hooks (and the error of `unchecked`).
 /// - [`BUILTIN_UNAVAILABLE`] — the built-in and why.
 /// - [`MISSING_ITEM_SKIPPED`] — the item (a `folder:` item as its path, worded as a folder) and where it is listed:
 ///   the last preset of `via` and the line when there is one, or "attached to this agent" for an empty `via`.
@@ -520,13 +543,83 @@ fn own_wording(notice: &Notice) -> Option<String> {
             })
         }
         // ADR-0420
-        CODEX_HOOKS_OMITTED => {
+        CODEX_HOOKS_LEFT_OFF => {
+            let event = escape_controls(args.get("event")?.as_str()?);
+            // What was left off differs by `why`: the whole event, whole groups, handlers, or any of these (`field`).
+            //   One notice stands for every such case of its subject and event, so the counts stay open.
+            let (what, why) = match args.get("why")?.as_str()? {
+                "event" => (
+                    format!("the {event} hooks were"),
+                    "codex has no such hook event",
+                ),
+                "type" => (
+                    format!("one or more {event} hook handlers were"),
+                    "codex runs only command handlers from Engram",
+                ),
+                "field" => (
+                    format!("some {event} hooks were"),
+                    "a field codex reads has the wrong type, or the command is blank",
+                ),
+                "matcher" => (
+                    format!("one or more {event} hook groups were"),
+                    "a group's matcher is not a string",
+                ),
+                _ => return None,
+            };
+            let from = match (args.get("hook"), args.get("source")) {
+                (Some(hook), None) => escape_controls(hook.as_str()?),
+                (None, Some(source)) => {
+                    let source = escape_controls(source.as_str()?);
+                    match notice.line {
+                        Some(line) => format!("{source}, line {line}"),
+                        None => source,
+                    }
+                }
+                _ => return None,
+            };
+            Some(format!("Notice: {what} left off for codex ({why}): {from}"))
+        }
+        // ADR-0420
+        CODEX_RAW_HOOKS_TRUSTED => {
+            let Value::Array(rows) = args.get("settings")? else {
+                return None;
+            };
+            let sources = rows
+                .iter()
+                .map(|row| row.get("source")?.as_str().map(escape_controls))
+                .collect::<Option<Vec<_>>>()?;
+            if sources.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "Notice: codex runs the hooks these codex settings hold, trusted for this run: {}",
+                sources.join(", ")
+            ))
+        }
+        // ADR-0420
+        CODEX_HOOKS_UNTRUSTED => {
             let hooks = text_list(args, "hooks")?;
-            let head = "Notice: codex does not load hook components yet.".to_string();
-            Some(if hooks.is_empty() {
-                head
-            } else {
-                format!("{head} Not applied: {}", hooks.join(", "))
+            let names = hooks.join(", ");
+            Some(match args.get("why")?.as_str()? {
+                "not-listed" => {
+                    format!("Notice: codex did not load these hooks for this run, so they do not run: {names}")
+                }
+                "untrusted" => {
+                    format!("Notice: codex does not trust these hooks for this run, so they may not run: {names}")
+                }
+                "disabled" => {
+                    format!("Notice: codex lists these hooks as turned off, so they do not run: {names}")
+                }
+                "foreign" => format!(
+                    "Notice: codex trusts session hooks Engram did not write; they can run in this agent: {names}"
+                ),
+                "unchecked" => {
+                    let error = escape_controls(args.get("error")?.as_str()?);
+                    format!(
+                        "Notice: could not ask codex which hooks it trusts for this run ({error}); these hooks may not run: {names}"
+                    )
+                }
+                _ => return None,
             })
         }
         CODEX_TERMINAL_FOLDER_OMITTED => {
@@ -1234,10 +1327,25 @@ pub struct LaunchArtifacts {
     /// meant to be applied after the profile env so they override a profile value for the same key.
     // ADR-0341
     pub env: Vec<(String, String)>,
-    /// codex: the arguments the preset raw settings add (`-c`, `key=value`, …), in plan order, exactly as placed on
-    /// the line — after the pass-through, before the MCP attachment. Both modes.
+    /// codex: the arguments the preset raw settings add (`-c`, `key=value`, …) minus their hooks lines (each leaves
+    /// with its `-c` — the hook assembly consumes every one, written or not), in plan order, exactly as placed on the
+    /// line — after the pass-through, before the MCP attachment. Both modes.
     // ADR-0337
+    // ADR-0420
     pub config_args: Vec<String>,
+    /// codex terminal: the hook lines (`-c`, `hooks.<Event>=[…]`, …, `-c`, `hooks.state={…}`), placed right after
+    /// [`LaunchArtifacts::config_args`]. Empty = no hook output on the line (and always in JSON mode).
+    // ADR-0420
+    pub hook_args: Vec<String>,
+    /// codex JSON: the thread config's `hooks` object (events and `state`), sent as `config: {"hooks": …}` on
+    /// `thread/start` and on every `thread/resume`. `None` = no hook output (and always in terminal mode) — then no
+    /// `config` is sent at all, never an empty `hooks`.
+    // ADR-0420
+    pub hook_config: Option<Value>,
+    /// codex: one trust entry per handler the hook assembly wrote, in write order (both modes). JSON mode's post-open
+    /// check expects each listed trusted and enabled; terminal mode carries them only for the record (it has no RPC).
+    // ADR-0420
+    pub hook_trust: Vec<HookTrust>,
     /// codex terminal: the `developer_instructions='…'` value built from the merged instructions file, placed last.
     /// `None` = no priming on the line.
     // ADR-0337
@@ -1252,6 +1360,19 @@ pub struct LaunchArtifacts {
     /// conversation the instructions changed. Never `true` without text.
     // ADR-0337
     pub instructions_changed: bool,
+}
+
+/// One trust entry the codex hook assembly wrote ([`LaunchArtifacts::hook_trust`]).
+// ADR-0420
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookTrust {
+    /// `<session-flags source>:<event label>:<group index>:<handler index>`, as codex lists it.
+    pub key: String,
+    /// `sha256:<hex>` — codex's hash of the handler as written.
+    pub hash: String,
+    /// What the handler came from — a hook component's library path or a settings asset's path; empty when the
+    /// caller gave no origin. What a post-open verdict names.
+    pub from: String,
 }
 
 // ── guard · bundle ───────────────────────────────────────────────────────────────
@@ -2647,7 +2768,9 @@ mod tests {
             CODEX_TERMINAL_OMITTED,
             CODEX_TERMINAL_FOLDER_OMITTED,
             CODEX_SAME_NAME_SKILLS,
-            CODEX_HOOKS_OMITTED,
+            CODEX_HOOKS_LEFT_OFF,
+            CODEX_RAW_HOOKS_TRUSTED,
+            CODEX_HOOKS_UNTRUSTED,
             FOLDER_LISTING_PARTIAL,
             FOLDER_LISTING_SKIPPED,
             BUILTIN_UNAVAILABLE,
@@ -2658,32 +2781,110 @@ mod tests {
         }
     }
 
-    /// The interim codex hook omission code states the fact — codex does not load hook components yet, and the hooks
-    /// left out (names escaped); an empty list ends after the first sentence; `args` of another shape fall back to the
-    /// generic wording.
+    /// The codex hook left-off code names the event, the reason by `why` and the hook — or the settings asset and its
+    /// line; `args` of another shape (an unknown `why`, both or neither subject) fall back to the generic wording.
     // ADR-0420
     #[test]
-    fn the_codex_hook_omission_code_names_the_hooks_not_applied() {
+    fn the_codex_hook_left_off_code_names_the_event_the_reason_and_the_subject() {
         assert_eq!(
             notice_text(&reason(
-                CODEX_HOOKS_OMITTED,
-                json!({ "hooks": ["team/hooks/notify", "team/hooks/gu\nard"] }),
+                CODEX_HOOKS_LEFT_OFF,
+                json!({ "hook": "team/hooks/gu\nard", "event": "Notification", "why": "event" }),
                 None
             )),
-            "Notice: codex does not load hook components yet. Not applied: team/hooks/notify, team/hooks/gu\\nard"
-        );
-        assert_eq!(
-            notice_text(&reason(CODEX_HOOKS_OMITTED, json!({ "hooks": [] }), None)),
-            "Notice: codex does not load hook components yet."
+            "Notice: the Notification hooks were left off for codex (codex has no such hook event): team/hooks/gu\\nard"
         );
         assert_eq!(
             notice_text(&reason(
-                CODEX_HOOKS_OMITTED,
-                json!({ "hooks": "team/hooks/notify" }),
+                CODEX_HOOKS_LEFT_OFF,
+                json!({ "source": "team/codex.yaml", "event": "Stop", "why": "type" }),
+                Some(4)
+            )),
+            "Notice: one or more Stop hook handlers were left off for codex (codex runs only command handlers from Engram): team/codex.yaml, line 4"
+        );
+        for (why, text) in [
+            (
+                "field",
+                "Notice: some Stop hooks were left off for codex (a field codex reads has the wrong type, or the command is blank): h",
+            ),
+            (
+                "matcher",
+                "Notice: one or more Stop hook groups were left off for codex (a group's matcher is not a string): h",
+            ),
+        ] {
+            assert_eq!(
+                notice_text(&reason(
+                    CODEX_HOOKS_LEFT_OFF,
+                    json!({ "hook": "h", "event": "Stop", "why": why }),
+                    None
+                )),
+                text
+            );
+        }
+        for args in [
+            json!({ "hook": "h", "event": "Stop", "why": "other" }),
+            json!({ "hook": "h", "source": "s", "event": "Stop", "why": "type" }),
+            json!({ "event": "Stop", "why": "type" }),
+        ] {
+            assert!(
+                notice_text(&reason(CODEX_HOOKS_LEFT_OFF, args.clone(), None))
+                    .starts_with("Notice (codex-hooks-left-off): intended behavior."),
+                "{args}"
+            );
+        }
+    }
+
+    /// The raw-hooks-trusted code names each settings asset; an empty or misshapen list falls back.
+    // ADR-0420
+    #[test]
+    fn the_codex_raw_hooks_trusted_code_names_the_settings_assets() {
+        assert_eq!(
+            notice_text(&reason(
+                CODEX_RAW_HOOKS_TRUSTED,
+                json!({ "settings": [
+                    { "source": "team/a.yaml", "digest": "0123456789abcdef" },
+                    { "source": "team/b.yaml", "digest": "fedcba9876543210" },
+                ] }),
                 None
             )),
-            "Notice (codex-hooks-omitted): intended behavior. Target — team/hooks/notify"
+            "Notice: codex runs the hooks these codex settings hold, trusted for this run: team/a.yaml, team/b.yaml"
         );
+        for args in [
+            json!({ "settings": [] }),
+            json!({ "settings": ["team/a.yaml"] }),
+        ] {
+            assert!(
+                notice_text(&reason(CODEX_RAW_HOOKS_TRUSTED, args.clone(), None))
+                    .starts_with("Notice (codex-raw-hooks-trusted): intended behavior."),
+                "{args}"
+            );
+        }
+    }
+
+    /// The post-open run notice has one sentence per `why`; `unchecked` carries the error; another `why` falls back.
+    // ADR-0420
+    #[test]
+    fn the_codex_hooks_untrusted_code_has_a_sentence_per_why() {
+        let text = |args: Value| notice_text(&reason(CODEX_HOOKS_UNTRUSTED, args, None));
+        for (why, head) in [
+            ("not-listed", "Notice: codex did not load these hooks for this run, so they do not run: "),
+            ("untrusted", "Notice: codex does not trust these hooks for this run, so they may not run: "),
+            ("disabled", "Notice: codex lists these hooks as turned off, so they do not run: "),
+            ("foreign", "Notice: codex trusts session hooks Engram did not write; they can run in this agent: "),
+        ] {
+            assert_eq!(
+                text(json!({ "why": why, "hooks": ["team/hooks/a", "team/codex.yaml"] })),
+                format!("{head}team/hooks/a, team/codex.yaml")
+            );
+        }
+        assert_eq!(
+            text(json!({ "why": "unchecked", "hooks": ["team/hooks/a"], "error": "method not found" })),
+            "Notice: could not ask codex which hooks it trusts for this run (method not found); these hooks may not run: team/hooks/a"
+        );
+        assert!(text(json!({ "why": "unchecked", "hooks": ["a"] }))
+            .starts_with("Notice (codex-hooks-untrusted): intended behavior."));
+        assert!(text(json!({ "why": "other", "hooks": ["a"] }))
+            .starts_with("Notice (codex-hooks-untrusted): intended behavior."));
     }
 
     /// No settings code has its own sentence: the codes a settings schema check would emit take the generic wording

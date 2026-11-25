@@ -1,12 +1,15 @@
 //! codex launch-material translation — turns a real [`LaunchKit`] into the [`LaunchArtifacts`] that `build_spec` and
 //! `open_spawn` load. A Noop kit translates to nothing, so the argv stays byte-for-byte today's.
 //!
-//! - Terminal: the preset `-c` lines and the priming value built from the merged instructions file (which holds only
-//!   the built-in priming in this mode). Nothing is written; skills, extra skill roots and folder entries are not
-//!   loaded in this mode.
-//! - JSON: the preset `-c` lines, the merged instructions text, whether it differs from what the conversation last
-//!   received, and the extra skill roots — `engram/skills/<name>` in the volatile folder is a directory link (Windows:
-//!   a junction) to each skill folder, passed as one root, followed by the plan's extra roots.
+//! - Both modes: the preset `-c` lines through the hook assembly ([`cmdline::assembled`] — the same call the check
+//!   makes): the raw settings minus their hooks lines, and the hook output the plan's hook components and the raw
+//!   hooks lines give, with a trust entry per handler written.
+//! - Terminal: the hook lines and the priming value built from the merged instructions file (which holds only the
+//!   built-in priming in this mode). Nothing is written; skills, extra skill roots and folder entries are not loaded
+//!   in this mode.
+//! - JSON: the thread config's `hooks` object, the merged instructions text, whether it differs from what the
+//!   conversation last received, and the extra skill roots — `engram/skills/<name>` in the volatile folder is a
+//!   directory link (Windows: a junction) to each skill folder, passed as one root, followed by the plan's extra roots.
 //!
 //! ★Every refusal comes before the first write, and every refusal is `Err` (a failed spawn)★ — real materials have
 //!   no warn-and-launch path: a priming the terminal line cannot carry blocks the launch. Most refusals repeat a rule
@@ -22,33 +25,42 @@
 // ADR-0341
 // ADR-0351
 // ADR-0353
+// ADR-0420
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use engram_dashboard_platform::fs::same_path;
 
+use super::hook_assembly::{HookAssembly, Subject, TrustEntry};
 use super::{cmdline, CODEX_SETTINGS_CHECK};
 use crate::backend::settings_check::{CommandLine, ConfigOrigin, SettingsCheck};
 use crate::launch::{
-    LaunchArtifacts, LaunchFs, LaunchKit, Reason, SkillRef, SKILL_LINKS_DIR, SKILL_LINKS_PARENT,
+    HookTrust, LaunchArtifacts, LaunchFs, LaunchKit, Reason, SkillRef, SKILL_LINKS_DIR,
+    SKILL_LINKS_PARENT,
 };
 use crate::profile::{AgentCommand, AgentOutputFormat};
 
 /// The codex [`crate::backend::AgentBackend::materialize`]. `read` reads the merged instructions file (a seam for
 /// tests — the [`LaunchFs`] port is write-only).
 ///
-/// A kit that is not real → [`LaunchArtifacts::default`]. A real kit → `real` + `config_args` (both modes) +, by mode:
-/// - terminal: `instructions_override` (only with a non-blank instructions file);
-/// - JSON: `instructions_text` (only when non-blank), `instructions_changed`, and `skill_roots` = the junction root
-///   (only with ≥ 1 skill, then one link per skill) followed by the plan's extra skill roots.
+/// A kit that is not real → [`LaunchArtifacts::default`]. A real kit → `real` + from the hook assembly (both modes)
+/// `config_args` (the raw lines minus their hooks lines) and `hook_trust` +, by mode:
+/// - terminal: `hook_args` (the hook lines, empty when nothing is written) and `instructions_override` (only with a
+///   non-blank instructions file);
+/// - JSON: `hook_config` (`None` when nothing is written), `instructions_text` (only when non-blank),
+///   `instructions_changed`, and `skill_roots` = the junction root (only with ≥ 1 skill, then one link per skill)
+///   followed by the plan's extra skill roots.
 ///
-/// `Err`, nothing written: a plan carrying hook components (codex loads none yet — ADR-0420); a raw setting `-c`
-/// guard refusal; an instructions file that cannot be read as UTF-8 text;
-/// terminal — a plan with instruction sources, a working folder [`cmdline::cwd_reaches_codex_unchanged`] refuses (it
-/// goes on the line as `--cd`), a priming the line cannot carry; JSON — a skill root that is not absolute or not
-/// UTF-8, skills without a volatile folder, a skill name codex JSON refuses, two skills on one link; both — a command
-/// line over the budget.
+/// `Err`, nothing written: a raw setting `-c` refusal (the line guard, `codex-hooks-unreadable`); an instructions
+/// file that cannot be read as UTF-8 text; a hook assembly refusal (`codex-passthrough-hooks`,
+/// `codex-hooks-unreadable`, `hook-path-unsafe`, terminal `codex-hook-line-refused`); terminal — a plan with
+/// instruction sources, a working folder [`cmdline::cwd_reaches_codex_unchanged`] refuses (it goes on the line as
+/// `--cd`), a priming the line cannot carry; JSON — a skill root that is not absolute or not UTF-8, skills without a
+/// volatile folder, a skill name codex JSON refuses, two skills on one link; both — a command line over the budget
+/// (with hook lines, the terminal hook budget text).
+/// A raw `hooks.state` entry naming a session-flags hook is dropped by the assembly and logged here at `warn`, once
+/// per launch (the check's calls do not log it).
 /// `Err` after a partial write when a link fails; the caller's release removes the volatile folder.
 pub(super) fn materialize(
     command: &AgentCommand,
@@ -67,14 +79,6 @@ pub(super) fn materialize(
     else {
         unreachable!("CodexBackend handles only the Codex variant — a dispatch bug");
     };
-    // ADR-0420: `ModeLoads::hooks` is `false`, so the check names them instead — a plan carrying one is refused, never
-    //   dropped unnamed.
-    if !kit.plan.hooks.is_empty() {
-        return Err(format!(
-            "a real codex plan carries {} hook component(s) — codex does not load hooks yet",
-            kit.plan.hooks.len()
-        ));
-    }
     let config = preset_config_args(kit)?;
     let text = instructions_text(kit, read)?;
     match output_format {
@@ -160,7 +164,7 @@ fn terminal(
                 refusal.bad
             )
         })?;
-    fits(&CommandLine {
+    let assembly = assembled(&CommandLine {
         mode: AgentOutputFormat::Terminal,
         cwd,
         extra_args,
@@ -171,7 +175,9 @@ fn terminal(
     })?;
     Ok(LaunchArtifacts {
         real: true,
-        config_args: config.args,
+        config_args: assembly.config_args,
+        hook_args: assembly.hook_args,
+        hook_trust: hook_trust(assembly.expected),
         instructions_override,
         ..LaunchArtifacts::default()
     })
@@ -203,7 +209,7 @@ fn json(
             "a codex skill root is not an absolute UTF-8 path: {root:?}"
         ));
     }
-    fits(&CommandLine {
+    let assembly = assembled(&CommandLine {
         mode: AgentOutputFormat::StreamJson,
         cwd,
         extra_args,
@@ -220,7 +226,9 @@ fn json(
     Ok(LaunchArtifacts {
         real: true,
         skill_roots: roots,
-        config_args: config.args,
+        config_args: assembly.config_args,
+        hook_config: assembly.hook_config,
+        hook_trust: hook_trust(assembly.expected),
         instructions_text: text,
         instructions_changed,
         ..LaunchArtifacts::default()
@@ -255,15 +263,40 @@ fn skill_links(kit: &LaunchKit) -> Result<(Option<PathBuf>, Vec<(PathBuf, &Path)
     Ok((Some(root), links))
 }
 
-/// [`cmdline::fits`] as a launch error.
+/// [`cmdline::assembled`] as a launch error, logging the raw session-flags state entries the assembly dropped — here,
+/// once per launch, rather than in the assembly the check calls up to three times.
 // ADR-0337
-fn fits(line: &CommandLine<'_>) -> Result<(), String> {
-    cmdline::fits(line).map_err(|reason| {
+// ADR-0420
+fn assembled(line: &CommandLine<'_>) -> Result<HookAssembly, String> {
+    let assembly = cmdline::assembled(line).map_err(|reason| {
         format!(
-            "the codex launch command line does not fit: {}",
+            "the codex launch command line was refused: {}",
             described(&reason)
         )
-    })
+    })?;
+    for key in &assembly.dropped_state_keys {
+        tracing::warn!(
+            "a codex settings hooks.state entry names a session-flags hook ({key:?}) — dropped: Engram writes every session-flags entry itself"
+        );
+    }
+    Ok(assembly)
+}
+
+/// The assembly's trust entries as launch artifacts — each named by its hook component or settings asset.
+// ADR-0420
+fn hook_trust(expected: Vec<TrustEntry>) -> Vec<HookTrust> {
+    expected
+        .into_iter()
+        .map(|entry| HookTrust {
+            key: entry.key,
+            hash: entry.hash,
+            from: match entry.subject {
+                Subject::Hook(path) => path,
+                Subject::Source(origin) => origin.source,
+                Subject::Unnamed => String::new(),
+            },
+        })
+        .collect()
 }
 
 fn described(reason: &Reason) -> String {
@@ -697,23 +730,228 @@ mod tests {
         assert!(materialized(AgentOutputFormat::StreamJson, &kit).0.is_ok());
     }
 
-    /// A plan carrying a hook component fails before any write in both modes — codex loads no hooks yet, and none is
-    /// dropped unnamed.
-    // ADR-0420
-    #[test]
-    fn a_plan_with_a_hook_component_fails_before_any_write() {
-        let mut kit = real_kit();
-        kit.plan.hooks = vec![HookRef {
+    fn notify_hook() -> HookRef {
+        let serde_json::Value::Object(definition) =
+            json!({"Stop": [{"hooks": [{"type": "command", "command": "node notify.js"}]}]})
+        else {
+            unreachable!()
+        };
+        HookRef {
             path: "team/hooks/notify".to_string(),
             dir: library("notify"),
-            definition: serde_json::Map::new(),
-        }];
-        for mode in [AgentOutputFormat::Terminal, AgentOutputFormat::StreamJson] {
-            let (result, fs) = materialized(mode, &kit);
-            let error = result.unwrap_err();
-            assert!(error.contains("hook"), "{mode:?}: {error}");
-            assert!(fs.paths().is_empty(), "{mode:?}");
+            definition,
         }
+    }
+
+    const RAW_STOP: &str = "hooks.Stop=[{hooks=[{type='command',command='node raw.js'}]}]";
+
+    /// ★The hook assembly's output reaches the artifacts★ — a hook component and a raw settings hooks line: terminal
+    /// carries the hook lines (one per event, then one state line) and JSON the thread config's `hooks` object (events
+    /// and `state`), never both; the raw hooks line leaves `config_args` in both modes; both modes carry the same trust
+    /// entries, the raw group's first (index rule), each named by its origin. Nothing is written to disk.
+    // ADR-0420
+    #[test]
+    fn a_hook_component_and_a_raw_hooks_line_reach_the_lines_or_the_thread_config() {
+        let mut kit = real_kit();
+        kit.plan.hooks = vec![notify_hook()];
+        kit.plan.raw_settings[1].value =
+            json!(["model=\"o3\"", RAW_STOP, "features.web_search=true"]);
+
+        let (terminal, fs) = materialized(AgentOutputFormat::Terminal, &kit);
+        let terminal = terminal.unwrap();
+        assert!(fs.paths().is_empty());
+        assert_eq!(terminal.config_args, preset_args());
+        assert_eq!(terminal.hook_config, None);
+        assert_eq!(terminal.hook_args.len(), 4, "{:?}", terminal.hook_args);
+        assert_eq!(terminal.hook_args[0], "-c");
+        assert!(
+            terminal.hook_args[1].starts_with("hooks.Stop=["),
+            "{:?}",
+            terminal.hook_args
+        );
+        assert!(
+            terminal.hook_args[1].contains("raw.js") && terminal.hook_args[1].contains("notify.js")
+        );
+        assert!(
+            terminal.hook_args[3].starts_with("hooks.state={"),
+            "{:?}",
+            terminal.hook_args
+        );
+
+        let (json_mode, _) = materialized(AgentOutputFormat::StreamJson, &kit);
+        let json_mode = json_mode.unwrap();
+        assert_eq!(json_mode.config_args, preset_args());
+        assert!(json_mode.hook_args.is_empty());
+        let config = json_mode.hook_config.clone().expect("a thread config");
+        assert_eq!(config["Stop"].as_array().map(Vec::len), Some(2), "{config}");
+        assert_eq!(
+            config["state"].as_object().map(|s| s.len()),
+            Some(2),
+            "{config}"
+        );
+
+        assert_eq!(terminal.hook_trust, json_mode.hook_trust);
+        let from: Vec<&str> = json_mode
+            .hook_trust
+            .iter()
+            .map(|t| t.from.as_str())
+            .collect();
+        assert_eq!(from, ["team.yaml", "team/hooks/notify"]);
+        assert!(
+            json_mode.hook_trust[0].key.ends_with(":stop:0:0"),
+            "{:?}",
+            json_mode.hook_trust
+        );
+        assert!(
+            json_mode.hook_trust[1].key.ends_with(":stop:1:0"),
+            "{:?}",
+            json_mode.hook_trust
+        );
+        for entry in &json_mode.hook_trust {
+            assert!(entry.hash.starts_with("sha256:"), "{entry:?}");
+            assert_eq!(
+                config["state"][&entry.key]["trusted_hash"],
+                entry.hash.as_str()
+            );
+        }
+    }
+
+    /// ★What the check counts is what `materialize` puts on the line★ — fed the same inputs, the port answers the same
+    /// budget refusal (`needed` included) as the launch, with hook lines counted in terminal mode, and both pass in JSON
+    /// mode, where the hooks leave the line.
+    // ADR-0420
+    #[test]
+    fn the_check_and_materialize_count_the_same_assembled_line() {
+        let mut kit = real_kit();
+        let handlers: Vec<serde_json::Value> = (0..40)
+            .map(|n| json!({"type": "command", "command": format!("node \"D:/Library/hooks/notify/notify-{n}.js\"")}))
+            .collect();
+        let serde_json::Value::Object(definition) = json!({"Stop": [{"hooks": handlers}]}) else {
+            unreachable!()
+        };
+        kit.plan.hooks = vec![HookRef {
+            definition,
+            ..notify_hook()
+        }];
+        let config = preset_config_args(&kit).unwrap();
+        for mode in MODES {
+            let line = CommandLine {
+                mode: mode.clone(),
+                cwd: &work(),
+                extra_args: &["--search".to_string()],
+                config_args: &config.args,
+                config_origins: &config.origins,
+                hooks: &kit.plan.hooks,
+                instructions: match mode {
+                    AgentOutputFormat::Terminal => Some(PRIMING),
+                    AgentOutputFormat::StreamJson => None,
+                },
+            };
+            let port = CODEX_SETTINGS_CHECK.command_line_fits(&line);
+            let (launch, fs) = materialized(mode.clone(), &kit);
+            assert!(fs.paths().is_empty() || mode == AgentOutputFormat::StreamJson);
+            match mode {
+                AgentOutputFormat::Terminal => {
+                    let reason = port.unwrap_err();
+                    assert_eq!(reason.code, "command-line-too-long");
+                    assert_eq!(reason.args["hooks_counted"], true);
+                    let error = launch.unwrap_err();
+                    assert!(error.contains(&described(&reason)), "{error} vs {reason:?}");
+                }
+                AgentOutputFormat::StreamJson => {
+                    assert_eq!(port, Ok(Vec::new()));
+                    assert_eq!(launch.unwrap().hook_trust.len(), 40);
+                }
+            }
+        }
+    }
+
+    /// ★U5★ — with a hook component attached, a pass-through `-c hooks…` argument fails the launch before any write in
+    /// both modes; without hook inputs it passes untouched.
+    // ADR-0420
+    #[test]
+    fn a_passthrough_hooks_argument_with_hook_inputs_fails_before_any_write() {
+        let passthrough = AgentCommand::Codex {
+            extra_args: vec!["-c".to_string(), "hooks.Stop=[]".to_string()],
+            output_format: AgentOutputFormat::Terminal,
+        };
+        for output_format in MODES {
+            let command = match &passthrough {
+                AgentCommand::Codex { extra_args, .. } => AgentCommand::Codex {
+                    extra_args: extra_args.clone(),
+                    output_format: output_format.clone(),
+                },
+                _ => unreachable!(),
+            };
+            let mut kit = real_kit();
+            kit.plan.hooks = vec![notify_hook()];
+            let fs = MemLaunchFs::default();
+            let error = materialize(&command, &kit, &work(), &fs, &|p| {
+                Reader::of(PRIMING).read(p)
+            })
+            .unwrap_err();
+            assert!(
+                error.contains("codex-passthrough-hooks"),
+                "{output_format:?}: {error}"
+            );
+            assert!(fs.paths().is_empty(), "{output_format:?}");
+
+            kit.plan.hooks.clear();
+            let fs = MemLaunchFs::default();
+            let artifacts = materialize(&command, &kit, &work(), &fs, &|p| {
+                Reader::of(PRIMING).read(p)
+            })
+            .unwrap();
+            assert!(artifacts.hook_args.is_empty() && artifacts.hook_config.is_none());
+        }
+    }
+
+    /// ★A dropped raw session-flags state entry is logged once per launch★ — by `materialize`, at `warn`; the check's
+    /// assembly (called up to three times by the launch check) logs nothing.
+    // ADR-0420
+    #[test]
+    fn a_dropped_session_flags_state_entry_is_logged_once_by_materialize_only() {
+        use crate::log_capture::Capture;
+        use std::sync::{Arc, Mutex};
+
+        let key = if engram_dashboard_platform::os::windows_paths() {
+            r"C:\<session-flags>\config.toml:stop:0:0"
+        } else {
+            "/<session-flags>/config.toml:stop:0:0"
+        };
+        let mut kit = real_kit();
+        kit.plan.raw_settings[1].value =
+            json!([format!("hooks.state={{'{key}'={{enabled=true}}}}")]);
+        let config = preset_config_args(&kit).unwrap();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(Capture(Arc::clone(&lines)), || {
+            let line = CommandLine {
+                mode: AgentOutputFormat::StreamJson,
+                cwd: &work(),
+                extra_args: &[],
+                config_args: &config.args,
+                config_origins: &config.origins,
+                hooks: &[],
+                instructions: None,
+            };
+            for _ in 0..3 {
+                assert_eq!(
+                    CODEX_SETTINGS_CHECK.command_line_fits(&line),
+                    Ok(Vec::new())
+                );
+            }
+            assert!(
+                lines.lock().unwrap().is_empty(),
+                "{:?}",
+                lines.lock().unwrap()
+            );
+            let (artifacts, _) = materialized(AgentOutputFormat::StreamJson, &kit);
+            assert_eq!(artifacts.unwrap().hook_config, None);
+        });
+        let lines = lines.lock().unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].0, tracing::Level::WARN);
+        assert!(lines[0].1["message"].contains("session-flags"), "{lines:?}");
     }
 
     /// Two skills on one link fail before any write.

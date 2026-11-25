@@ -50,6 +50,13 @@ ts-rs = "10"   # the declaration macro puts the TS derive on argument/return str
 #   RFC 3339 parsing stands without features, and the clock and time zone database (`clock`) are not needed. It is a version already in the lock file
 #   (the daemon already links it through `rmcp`) — no new package is pulled in.
 chrono = { version = "0.4", default-features = false }
+# The codex hook trust hash (`backend/codex/hook_assembly.rs` — codex hashes each hook handler with sha256). A version
+#   already in the lock file (asset-library links it) — no new package (ADR-0420).
+sha2 = "0.10"
+# Parse-only reading of a codex settings asset's raw `-c hooks…` values (`backend/codex/hook_assembly.rs`, the codex
+#   backend only). No writer, no schema check: the line writer is Engram's own (ADR-0359, amended by ADR-0420). A
+#   version already in the lock file — no new package.
+toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
 
 # Turns on the harness-only executor (`engram_dashboard_command::testing::block_on`) only in test builds —
 #   the feature request is only in the dev graph, so it is not unified into production binaries.

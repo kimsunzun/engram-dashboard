@@ -95,8 +95,10 @@ pub trait SettingsCheck: Send + Sync {
     fn command_line_args(&self, raw: &Value) -> Result<Vec<String>, Reason>;
 
     /// Whether the launch command line holds all of `line`, counting the pieces only the launch knows (the control
-    /// channel, a resume id) at their upper-bound length. `Err` = over the budget, or an instructions text the
-    /// command line cannot carry (problem ②) — carried where [`RefusalSubject::of`] says. `Ok` = the launch
+    /// channel, a resume id) at their upper-bound length. `Err` = over the budget, an instructions text the command
+    /// line cannot carry, or a refusal of the backend's hook assembly (codex: a pass-through hooks argument, a raw
+    /// hooks line it cannot fold, an unsafe hook folder path, a terminal hook line the guard refuses) (problem ②) —
+    /// carried where [`RefusalSubject::of`] says. `Ok` = the launch
     /// notices this line raises, which the caller adds to the plan's notices without reading them. A backend with no
     /// command-line budget and no such notices answers `Ok(vec![])`.
     // ADR-0420

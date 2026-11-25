@@ -2,9 +2,9 @@
 //! of its definition ([`rewrite`]) and the path rule that guards it ([`path_rule`]), which the launch check calls
 //! too, so a hook the rewrite would refuse is refused on its entry before any launch.
 //!
-//! Only claude calls [`rewrite`] today (one layer of its merged settings per hook component). codex does not load hook
-//! components yet: it answers [`crate::backend::settings_check::ModeLoads::hooks`] `false`, and its `materialize`
-//! refuses a plan that carries one.
+//! claude calls [`rewrite`] for one layer of its merged settings per hook component; the codex hook assembly
+//! (`backend/codex/hook_assembly.rs`) calls it before it writes or hashes a component. Both backends answer
+//! [`crate::backend::settings_check::ModeLoads::hooks`] `true` in both modes.
 // ADR-0420
 
 use std::ops::Range;
