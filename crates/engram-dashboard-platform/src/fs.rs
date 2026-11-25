@@ -2,8 +2,9 @@
 //! and retry for a failure caused by someone holding the file briefly · folder sync · creating and walking directory
 //! links (`link`) · path keys and path comparison (`path_key`) · folder-path normalization and the Win32
 //! reserved-device-name test (`normalize`) · file identity (`identity`) · the network share a path is on
-//! (`share_root`) · a rename that never replaces (`rename` — `rename_no_replace`) · clearing the read-only attribute
-//! below a folder without following links (`removable` — `make_removable`) · a folder's modified time (`times` —
+//! (`share_root`) · a rename that never replaces (`rename` — `rename_no_replace`) · making what is below a folder
+//! removable without following links (`removable` — `make_removable` · `make_entry_removable` ·
+//! `make_entries_removable`) · a folder's modified time (`times` —
 //! `set_folder_modified`) · opening a file for reading without following its last name (`open_read_no_follow`) · a
 //! path as forward-slash text (`forward_slash_text`). The opens in this file use std only —
 //! `OpenOptionsExt::share_mode` goes down as is to `CreateFileW`'s share mode, so the same kernel behaviour comes
@@ -28,7 +29,7 @@ pub use identity::{file_identity, opened_identity, FileIdentity};
 pub use link::{link_dir, unlink_dir};
 pub use normalize::{is_reserved_device_name, normalize_folder, NotAbsolute};
 pub use path_key::{path_key, same_path, PathKey};
-pub use removable::make_removable;
+pub use removable::{make_entries_removable, make_entry_removable, make_removable};
 pub use rename::rename_no_replace;
 pub use times::set_folder_modified;
 

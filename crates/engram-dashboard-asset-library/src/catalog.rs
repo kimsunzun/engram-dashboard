@@ -393,15 +393,6 @@ impl ScanResult {
     }
 }
 
-/// Whether a file named `name` directly in `folder` (a virtual path below a mount's top) makes `folder` a skill — the
-/// scan's classifier.
-pub(crate) fn makes_skill(name: &str, folder: &LibPath) -> bool {
-    matches!(
-        FileKind::of(name, Some(folder.clone())),
-        Some(FileKind::SkillFile(_))
-    )
-}
-
 /// Whether `name` is a skill's `SKILL.md` name by the OS rule (platform `same_path` — on Windows `skill.md` is one),
 /// wherever the file lies.
 pub(crate) fn skill_file_name(name: &str) -> bool {

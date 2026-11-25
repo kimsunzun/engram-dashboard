@@ -52,8 +52,10 @@
 //!   existed when moved (an empty answer, a `bash`/`HOME` one-liner) are just gathered. Exception = `fs`'s directory links (symbolic
 //!   link), file identity (device number · inode) and path key (as is), whose behaviour on other OSes the design fixes — std only
 //!    (TRD S25 §1-6 · ADR-0325 · ADR-0336) — and `fs`'s no-replace rename (Linux `renameat2`, Apple `renamex_np`, through `libc` —
-//!    ADR-0409) and no-follow read open (`O_NOFOLLOW` through `libc` — ADR-0365); `fs::make_removable` doing nothing
-//!    outside Windows is the design too (ADR-0409 decision 11).
+//!    ADR-0409) and no-follow read open (`O_NOFOLLOW` through `libc` — ADR-0365), and the Unix branches of
+//!    `fs::make_removable` · `make_entries_removable` (a folder's owner bits added through a no-follow handle, or on
+//!    Linux through an `O_PATH` handle and `/proc/self/fd` when it cannot be opened, `libc` — T-131; other OSes do
+//!    nothing, ADR-0409 decision 11).
 //!    ★`#[cfg]`-split branches get no compile verification here★ (development and CI are Windows only — ADR-0230). `cfg!(windows)`
 //!   branches (`env::env_key_eq`, the three `fs` failure classifications) are type-checked on
 //!    both sides but never run on another OS.

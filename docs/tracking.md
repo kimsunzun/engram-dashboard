@@ -10,16 +10,15 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-137 | S25 step 22 P4 — a lone `hooks.json` delete now asks; a `SKILL.md` arriving in a referenced hook folder asks nothing | Main | Decision pending (user) — current: delete asks, arrival does not |
 | T-136 | S25 step 22 O7 — the post-open hook verdict of a boot-restored codex JSON agent (and of a Withheld caller) is only logged, at info | Main | Decision pending (user) — current: info |
 | T-135 | S25 client stage — a structure view of the whole reference graph (agents → presets → items), beside the existing screens | Main | Decided direction — first client-stage slot, read-only, plugin-shaped (T-109) |
 | T-134 | Agent backends as external modules others can add | Main | Idea — waiting for trigger (after S25) |
 | T-133 | S25 step 10b — a writing library command repeated after the CLI's long wait ran out can overlap the first (extra staging) | Main | Recorded — closing it is outside 10b |
 | T-132 | S25 step 9b U5 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
-| T-131 | S25 step 9b U5 — read-only entries emptying cannot remove (Unix 0555 folder in a row; a read-only empty-folder row) | Main | Decided 2026-11-26 — user: remove them too 「그냥 지우면 될듯」 — fix pending |
 | T-130 | S25 step 9b U4b review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-129 | S25 step 9b U4a review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-126 | S25 step 9b U3 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
-| T-125 | S25 step 9b U3 — a keep-both merge of a referenced skill that empties the source folder asks nothing | Main | Decided 2026-11-26 — user: ask (as ADR-0415 decision 2) 「어쨋든 이대로 진행하던지」 — fix pending |
 | T-122 | Step-21 U4b — a stopped rename: tokens confirmed before the stop still pass when the plan of what is left is the confirmed one | Main | Closed 2026-11-23 — user: keep as is (ADR-0407) |
 | T-121 | Step-21 U4a / U4b review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
 | T-120 | T-112 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched (user 2026-11-20: minor items need not be shown) |
@@ -123,6 +122,11 @@ Full text before the simplification (investigation records · reverted attempts 
 
 ## Main
 
+### T-137. S25 step 22 P4 — lone hooks.json delete asks; a SKILL.md arriving in a referenced hook folder asks nothing
+- **Status:** decision pending (user) — held by the P4 reviewers (lead, risk, Codex) 2026-11-26; committed with the current behaviour (ADR-0424 decision 5).
+- **Case 1:** deleting a lone `hooks.json` of a referenced hook folder (the hook then vanishes) now answers `delete-unconfirmed` with the plan, as a lone `SKILL.md` does (ADR-0339) — beyond ADR-0420 decision 14 (rename / move / merge). Options: keep asking (main's recommendation — the same reason as SKILL.md) · let a delete go without asking.
+- **Case 2:** a `SKILL.md` moved or merged into a referenced hook folder turns it into a skill; the hook's references then read not found and nothing asks. Options: ask (same refusal shape) · keep as is (rare; main's recommendation — record only).
+
 ### T-136. S25 step 22 O7 — the post-open hook verdict is only logged, at info
 - **Status:** decision pending (user) — TRD trd-hook-components.md §9.3 O7; held by the P3 reviewers (lead, risk) 2026-11-26; committed with run notices logged at info (ADR-0420 amendment of 2026-11-26).
 - **Case:** after a codex JSON thread opens, Engram checks `hooks/list` and raises `codex-hooks-untrusted` run notices (not-listed, untrusted, disabled, foreign, unchecked). A launch with a caller gets them in its reply; a boot restore and a Withheld caller (WS Spawn / SpawnProfile) only log them, at info — below the release default (warn), so nothing is written. The `foreign` verdict is the only run-time sign of a hook riding Engram's trust. `restore_all` has no production caller today, so the boot path is dormant.
@@ -147,11 +151,6 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Status:** recorded 2026-11-24 at the U5 commit — minor items. Rules of the unit: ADR-0408, ADR-0409.
 - **Items:** (1) the bundle-id form is checked on the address, not on the name on disk — on a case-insensitive volume a crafted address reaches a foreign folder of another spelling (no view produces it; restore the same); (2) restoring an empty-folder fallback row has no test; (3) the read-only junction test makes its link with Windows `attrib` (an OS-specific step in a platform-neutral crate; returns early where the command does not exist); (4) an address through a link answers `not-found` on the record path for a non-root and on the fallback path, where TRD §3.2 says `remaining {path-through-link}`; (5) `judge_in_files`'s message says the record "cannot be read" when it is missing; (6) no per-row log for a remaining row; (7) the view-vs-empty-all test parks the view under the 5 s `IO_LIMIT` (a slow runner could flake).
 
-### T-131. S25 step 9b U5 — read-only entries emptying cannot remove
-- **Status:** decided 2026-11-26 for what is left — user: remove them, read-only does not matter 「그냥 지우면 될듯」 (first option below); fix pending. Raised by the U5 coder (measured) and the lead review. **Resolved 2026-11-24 (main, within the user's decision of that day):** a read-only junction row is now removed — a refused folder link goes through std `remove_dir_all`, measured to remove the link itself with its target and attributes intact (no attribute changed, so ADR-0409 decision 11 holds).
-- **Left:** on Unix a folder with mode 0555 inside a row cannot have its entries removed (`make_removable` does nothing on Unix; copies keep mode bits, so stagings can carry such folders); an empty-folder row of a bundle without a record is removed with `remove_dir`, which Windows refuses for a read-only folder, and that path runs no `make_removable` (unmeasured). The user's decision of 2026-11-24 (「읽기전용 따지지 말고 그냥 지워」 — read-only entries are removed without asking) points at removing them.
-- **Options:** on Unix add write permission to a folder inside a row before removing its entries, and run `make_removable` + one retry on a refused empty-folder row · keep as is.
-
 ### T-130. S25 step 9b U4b review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-24 at the U4b commit — minor items. Decisions of the unit: ADR-0417.
 - **Items:** (1) `stage`'s links-inside branch names any entry existing at the generated temp path as this call's staging (ownership from a stat, not from creation — a temp-name collision could name someone's leftover); (2) the "nothing answers → own folder" fallback also applies under `skip` / none (could refuse instead); (3) no test for the equal-identity branch on volumes without 8.3 names, nor that the hold no longer probes the source; (4) a destination folder removed between the check and the staging answers `not-found` of the item; (5) answer args use the canonical `engram` spelling while `CopyItem.path` keeps the given one; (6) `Copied.trashed` is an `Option`, `Moved.trashed` a `Vec`; (7) in one call an overwrite can trash an earlier item's fresh copy; (8) a copy name follows the client's spelling; (9) a read-only installed built-in gives a read-only copy; (10) a copy into an alias spelling is keyed under the alias until the next scan (moves the same); (11) no test turns red when only the spelling into-itself check of `copy_items` is broken (the disk check also refuses the plain descendant case — QA mutation survived).
@@ -163,11 +162,6 @@ Full text before the simplification (investigation records · reverted attempts 
 ### T-126. S25 step 9b U3 review recommendations left unfixed (rare cases)
 - **Status:** recorded 2026-11-24 at the U3 commit — minor items, fixed when their code is touched or they show up in use. Decisions of the unit: ADR-0415.
 - **Items:** (1) no test pins that S's leftover catalog range stays when the empty-only removal of S fails (the next scan restores it anyway); (2) a merge that moved nothing answers done; (3) `detach-refs-invalid` replaces the per-item answers of the whole call; (4) an overwrite's newcomer takes the displaced entry's spelling, and a merge into a different-case folder rewrites D's catalog spelling (cosmetic); (5) 8.3 short names and case-insensitive Unix aliases are not folded (library-wide).
-
-### T-125. S25 step 9b U3 — a keep-both merge of a referenced skill that empties the source folder asks nothing
-- **Status:** decided 2026-11-26 — user: ask, the same `skill-unconfirmed` refusal as ADR-0415 decision 2 「어쨋든 이대로 진행하던지」; fix pending (asset-library `ops.rs` merge plan + the pinning test). Raised by the U3 review (lead and risk, hold); committed with the old behaviour in the U3 commit.
-- **Case:** move referenced skill `a/review/` into `b/` where skill `b/review/` exists, `onConflict` keepBoth. `a/review/SKILL.md` becomes `b/review/SKILL (2).md`, every other entry moves, `a/review/` is removed empty. No pair is made (D's `SKILL.md` did not change), so references to `a/review` read "not found"; a reference naming `a/review/SKILL.md` is re-pointed to `b/review/SKILL (2).md`, a plain file. `detachRefs` is refused `detach-refs-invalid`. Test `a_skill_merged_into_a_skill_under_keep_both_keeps_its_references` pins it. The user's decision of 2026-11-24 (ask when a merge leaves a referenced skill folder without its `SKILL.md`, ADR-0415 decision 2) covered only a folder that keeps an entry.
-- **Options:** ask (reviewers' and main's recommendation — the same `skill-unconfirmed` refusal; `plan_merge` also names the file when it moves under a keep-both collision, the post-step check already treats the absent folder as no skill) · keep as is.
 
 ### T-122. Step-21 U4b — tokens confirmed before a stop pass when the plan of what is left is the confirmed one
 - **Status:** closed 2026-11-23 — user 「그대로 둬.」: kept as is (ADR-0407, rejected alternative). Raised by U4b review round 6 (hold); ADR-0407 decision 2, the `rename.rs` header and the `library.renameMount` doc already describe it.

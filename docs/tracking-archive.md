@@ -2,6 +2,8 @@
 
 Of the items resolved or closed in tracking.md, only those that other docs or code point to by number are kept here, one line each. Full text = git history (before the simplification = `git show 8671e5c:docs/tracking.md`).
 
+- **T-131** Read-only entries that emptying could not remove (Unix 0555 folders in a row, a read-only empty-folder row) — resolved 2026-11-26: removed whatever their read-only flag (user 「그냥 지우면 될듯」) · ADR-0425 · `trd.md` and code comments point to this number
+- **T-125** A keep-both merge of a referenced skill that empties the source folder asked nothing — resolved 2026-11-26: it asks (`skill-unconfirmed` / `hook-unconfirmed`), user decision · ADR-0424 · `trd.md` and `ops.rs` point to this number
 - **T-128** Copying times and permissions on a cross-volume move is strict (a volume refusing them fails every such move) — closed 2026-11-26: kept strict, user 「뭔가 복잡하면 그냥 다 막아.」 · `trd-file-commands.md` points to this number
 - **T-127** A merge across volumes, and a copy onto a same-name folder, is refused (`crosses-volumes` / `copy-merge-refused`) instead of merging entry by entry — closed 2026-11-26: kept refused, user 「뭔가 복잡하면 그냥 다 막아.」 · ADR-0417, `trd-file-commands.md`, `trd.md` point to this number
 - **T-112** Launch skips missing items and an unusable library root with a notice — resolved 2026-11-20 (`d0c251ee` · `ada48af7` · `7ea7441d`): absent → skipped with a notice, exists but unreadable → blocks, for preset items, folder entries and the library root (ADR-0387, narrowing ADR-0374); TRD `docs/process/S25-preset-library/trd-launch-skip-missing.md`

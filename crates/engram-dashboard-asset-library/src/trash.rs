@@ -46,9 +46,13 @@
 //!   its bundles; per bundle, under the trash lock taken only while no step waits for it, every address is checked
 //!   again (the id form, `.trash` and the bundle without following, the row among the record's existing roots and
 //!   `other` rows or, without a readable record, its files and empty folders), each row is removed by
-//!   [`LibraryStore::remove_tree`] (an empty-folder row empty-only) once its names were checked without following (a
-//!   link on the way leaves it untouched; after a refusal the way is checked again before `make_removable` and each
-//!   retry) and the shell is pruned after it. A check that reads an absence stats the mount folder (by its target when
+//!   [`LibraryStore::remove_tree`] (an empty-folder row empty-only, [`LibraryStore::remove_empty`]) once its names were
+//!   checked without following (a link on the way leaves it untouched; after a refusal the way is checked again before
+//!   `make_removable` and each retry — read-only entries of the row go too, T-131; a row of a bundle without a readable
+//!   record refused for permission also gets the folders between the bundle and it made to let their entries go — Unix:
+//!   owner bits — and one more try) and the shell is pruned after it, a read-only empty folder too (in such a bundle
+//!   the folder above each opened first). A check that reads an absence
+//!   stats the mount folder (by its target when
 //!   it is a link) first: a mount gone mid-call answers `library-unavailable`, never gone. Each row answers gone,
 //!   remaining (with a code) or not found, judged by its existence before and after (rows answered before the removals
 //!   are judged again after them). A name swapped for a link between a check and the call is not caught (ADR-0409).
@@ -79,7 +83,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use engram_dashboard_agent::launch::{escape_controls, Reason};
 use engram_dashboard_base::file::{is_temp_name, temp_path, temp_target};
 use engram_dashboard_base::sync::lock;
-use engram_dashboard_platform::fs::{path_key, PathKey};
+use engram_dashboard_platform::fs::{is_busy, path_key, PathKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -796,6 +800,21 @@ pub fn prune_shell(
     folder: &Path,
     id: &BundleId,
     gone: Option<&MountPath>,
+    held: &TrashHeld<'_>,
+) -> io::Result<bool> {
+    prune_shell_with(store, folder, id, gone, false, held)
+}
+
+/// [`prune_shell`]; `open_above` (a bundle without a readable record — T-131): before each empty folder is removed,
+/// the folder above it, when that lies inside the bundle, is made to let its entries go
+/// ([`LibraryStore::make_entries_removable`] — Unix: a 0555 folder a copy kept), so a folder under such a folder goes
+/// in one pass. Never the bundle or anything above it.
+fn prune_shell_with(
+    store: &dyn LibraryStore,
+    folder: &Path,
+    id: &BundleId,
+    gone: Option<&MountPath>,
+    open_above: bool,
     _held: &TrashHeld<'_>,
 ) -> io::Result<bool> {
     match store.check_names(folder, &bundle_path(id))? {
@@ -820,7 +839,18 @@ pub fn prune_shell(
         if !store.list(&disk)?.is_empty() {
             return Ok(false);
         }
-        store.remove_dir(&disk)?;
+        if let Some(above) = dir.parent().filter(|_| open_above) {
+            let above = row_path(id, &above).to_path(folder);
+            if let Err(e) = store.make_entries_removable(folder, &above) {
+                tracing::debug!(
+                    bundle = id.as_str(),
+                    "library trash: a folder above a shell not made writable: {}",
+                    escape_controls(&e.to_string())
+                );
+            }
+        }
+        // T-131: a read-only empty folder (Windows refuses `remove_dir`) goes too.
+        store.remove_empty(folder, &disk)?;
         at = dir.parent();
     }
     let top = bundle_path(id).to_path(folder);
@@ -1497,7 +1527,9 @@ impl LibraryService {
                 json!({ "mount": mount.name.as_str(), "bundle": bundle, "why": why }),
             )
         };
-        let judged: Vec<(usize, &TrashAddress, Judged)> = match read_record(store, folder, &id) {
+        let record = read_record(store, folder, &id);
+        let record_less = matches!(record, RecordRead::Missing | RecordRead::Unreadable { .. });
+        let judged: Vec<(usize, &TrashAddress, Judged)> = match record {
             RecordRead::NotABundle { .. } => return absent(),
             RecordRead::Failed { why } => return untouched(bundle_unread(&why)),
             RecordRead::Roots(roots) => {
@@ -1541,11 +1573,19 @@ impl LibraryService {
                 Judged::Answered(emptied) => emptied,
                 Judged::Remove(path) => {
                     removed = true;
-                    self.remove_row(mount, &id, &path, address, false, &held)
+                    let how = Removal {
+                        empty_only: false,
+                        shells: record_less,
+                    };
+                    self.remove_row(mount, &id, &path, address, how, &held)
                 }
                 Judged::RemoveEmpty(path) => {
                     removed = true;
-                    self.remove_row(mount, &id, &path, address, true, &held)
+                    let how = Removal {
+                        empty_only: true,
+                        shells: record_less,
+                    };
+                    self.remove_row(mount, &id, &path, address, how, &held)
                 }
             };
             answered.push((row, address, emptied));
@@ -1586,9 +1626,8 @@ impl LibraryService {
         (answered, outcome, None)
     }
 
-    /// Removes row `path` of bundle `id` in `mount` (addressed as `row`) once its names were checked without following
-    /// — `empty_only`: an empty folder, only while it is still empty ([`LibraryStore::remove_dir`]) — then prunes the
-    /// shell above it; judged by its existence after.
+    /// Removes row `path` of bundle `id` in `mount` (addressed as `row`) once its names were checked without following,
+    /// as `how` says, then prunes the shell above it; judged by its existence after.
     // ADR-0409 decisions 8, 9 and 11
     fn remove_row(
         &self,
@@ -1596,7 +1635,7 @@ impl LibraryService {
         id: &BundleId,
         path: &MountPath,
         row: &TrashAddress,
-        empty_only: bool,
+        how: Removal,
         held: &TrashHeld<'_>,
     ) -> Emptied {
         let store = &*self.store;
@@ -1616,10 +1655,16 @@ impl LibraryService {
         let emptied = match store.check_names(&mount.folder, &rel) {
             Ok(NameWalk::Present(_)) => {
                 let disk = rel.to_path(&mount.folder);
-                let removed = match empty_only {
-                    true => store.remove_dir(&disk),
+                let remove = || match how.empty_only {
+                    true => store.remove_empty(&mount.folder, &disk),
                     false => store.remove_tree(&mount.folder, &disk),
                 };
+                let mut removed = remove();
+                // Only a permission refusal (the class `remove_on_disk` retries) — never a row gone or no longer empty.
+                let refused = matches!(&removed, Err(e) if is_busy(e));
+                if refused && how.shells && open_shells(store, &mount.folder, id, path) {
+                    removed = remove();
+                }
                 match (store.check_names(&mount.folder, &rel), removed) {
                     (Ok(NameWalk::Missing(_) | NameWalk::NotAFolder(_)), Ok(())) => Emptied::Gone,
                     (Ok(NameWalk::Missing(_) | NameWalk::NotAFolder(_)), Err(_)) => missing(),
@@ -1645,7 +1690,7 @@ impl LibraryService {
             Ok(NameWalk::Missing(_) | NameWalk::NotAFolder(_)) => missing(),
             Err(e) => unread(e),
         };
-        if let Err(e) = prune_shell(store, &mount.folder, id, Some(path), held) {
+        if let Err(e) = prune_shell_with(store, &mount.folder, id, Some(path), how.shells, held) {
             tracing::warn!(
                 bundle = id.as_str(),
                 "library trash: bundle shell not pruned: {}",
@@ -1654,6 +1699,44 @@ impl LibraryService {
         }
         emptied
     }
+}
+
+/// How [`LibraryService::remove_row`] removes a row.
+#[derive(Clone, Copy)]
+struct Removal {
+    /// An empty folder, only while it is still empty ([`LibraryStore::remove_empty`]); else the entry with everything
+    /// in it ([`LibraryStore::remove_tree`]).
+    empty_only: bool,
+    /// A row of a bundle without a readable record: a removal refused for permission makes the folders between the
+    /// bundle and the row let their entries go ([`open_shells`]) and tries once more, and the shell is pruned opening
+    /// the folder above each ([`prune_shell_with`]).
+    shells: bool,
+}
+
+/// T-131: makes each folder between bundle `id` and its row `path` let its entries go, outermost first — on Unix a
+/// folder of a deleted folder that a copy left with mode 0555 keeps the record-less rows inside it otherwise
+/// ([`LibraryStore::make_entries_removable`]; elsewhere nothing changes). Only folders inside the bundle, never the
+/// bundle or anything above it; one that stays (its other rows not removed) keeps the mode. Answers whether any
+/// folder changed; a failure is logged and ends the walk.
+fn open_shells(store: &dyn LibraryStore, folder: &Path, id: &BundleId, path: &MountPath) -> bool {
+    let mut shells: Vec<MountPath> =
+        std::iter::successors(path.parent(), MountPath::parent).collect();
+    shells.reverse();
+    let mut changed = false;
+    for shell in shells {
+        match store.make_entries_removable(folder, &row_path(id, &shell).to_path(folder)) {
+            Ok(done) => changed |= done,
+            Err(e) => {
+                tracing::debug!(
+                    bundle = id.as_str(),
+                    "library trash: a folder above a row not made writable: {}",
+                    escape_controls(&e.to_string())
+                );
+                break;
+            }
+        }
+    }
+    changed
 }
 
 /// Row `row` of bundle `id` whose record names `roots`, before anything is removed: a root there is removed, one

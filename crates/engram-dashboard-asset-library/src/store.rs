@@ -43,10 +43,14 @@
 //! - **Removal never follows** (ADR-0408 · ADR-0409 decision 11): [`LibraryStore::remove_tree`] removes a file, a link
 //!   of any kind as the link itself, or a folder with everything in it — every link inside removed as a link (std
 //!   `remove_dir_all`) — and nothing goes to an OS Recycle Bin. A first attempt that is refused gets platform
-//!   `make_removable` (read-only cleared below the entry, links neither entered nor changed) and one more attempt inside
-//!   the busy retry. The names above the entry are its caller's to check without following before the call; after a
-//!   refused first attempt they are stat'ed again from the mount folder down before `make_removable` and before each
-//!   retry, and one that is no longer a real folder stops the removal.
+//!   `make_removable` (read-only cleared below the entry and, on Unix, a folder's owner bits added — links neither
+//!   entered nor changed) and one more attempt inside the busy retry; [`LibraryStore::remove_empty`] (an empty-folder
+//!   trash row) the same, empty-only, the folder alone made removable and only while it is still empty
+//!   (`make_entry_removable` — Windows; on Unix an empty folder's own mode never matters). The names above the entry
+//!   are its caller's to check without following before the call; after a refused first attempt they are stat'ed again from the mount folder down before `make_removable` and
+//!   before each retry, and one that is no longer a real folder stops the removal.
+//!   [`LibraryStore::make_entries_removable`] makes a folder above a trash row let its entries go (Unix: its owner bits
+//!   — T-131).
 // ADR-0324
 // ADR-0335
 // ADR-0365
@@ -67,8 +71,9 @@ use engram_dashboard_base::file::{
     copy_atomic, is_temp_name, read_capped_bytes, write_atomic, OsHooks, BUSY_PAUSE, BUSY_RETRIES,
 };
 use engram_dashboard_platform::fs::{
-    file_identity, is_busy, make_removable, open_read_no_follow, opened_identity,
-    rename_no_replace, retry_busy, set_folder_modified, sync_dir, FileIdentity, Retry,
+    file_identity, is_busy, make_entries_removable, make_entry_removable, make_removable,
+    open_read_no_follow, opened_identity, rename_no_replace, retry_busy, set_folder_modified,
+    sync_dir, FileIdentity, Retry,
 };
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -231,8 +236,9 @@ pub trait LibraryStore: Send + Sync {
     /// Removes the entry at `path` for good: a file; a link of any kind — to a file or a folder, a junction included —
     /// as the link itself, never entered; a folder with everything in it, each link inside removed as a link (std
     /// `remove_dir_all`, which follows no link — nor one swapped in at `path`). Nothing goes to an OS Recycle Bin. When
-    /// the first attempt is refused (access denied, or the OS says busy), platform `make_removable` clears the read-only
-    /// attribute below `path` without following links and the removal is tried once more, inside the busy retry; what
+    /// the first attempt is refused (access denied, or the OS says busy), platform `make_removable` makes what is below
+    /// `path` removable without following links (Windows: the read-only attribute cleared; Unix: each folder's owner
+    /// read, write and search bits added) and the removal is tried once more, inside the busy retry; what
     /// `make_removable` left is only logged. A folder that fails part-way stays partly removed and the error is answered;
     /// `NotFound` = nothing is at `path`. The caller checks every name between the mount folder `root` and `path`
     /// without following first ([`LibraryStore::check_names`]); after a refused first attempt they are stat'ed again
@@ -242,6 +248,25 @@ pub trait LibraryStore: Send + Sync {
     // ADR-0408
     // ADR-0409 decision 11
     fn remove_tree(&self, root: &Path, path: &Path) -> io::Result<()>;
+    /// Removes the folder `path` only while it is empty, never through a link, as [`LibraryStore::remove_dir`] — an
+    /// empty-folder trash row. A first attempt that is refused gets platform `make_entry_removable` on the folder alone
+    /// (Windows: its read-only attribute; Unix: nothing) — only while a listing still finds it empty: one that gained
+    /// entries meanwhile is left untouched, and so are they (ADR-0409 decision 11) — and one more attempt inside the busy retry, the names between the mount folder
+    /// `root` and `path` stat'ed again first, as [`LibraryStore::remove_tree`]'s. Default:
+    /// [`LibraryStore::remove_dir`] alone (a store without a disk).
+    // ADR-0409 decision 11
+    // T-131: measured (Windows, 2026-11-26) — `fs::remove_dir` refuses a read-only empty folder.
+    fn remove_empty(&self, _root: &Path, path: &Path) -> io::Result<()> {
+        self.remove_dir(path)
+    }
+    /// Makes the folder `path` (below the mount folder `root`) let its entries be removed — platform
+    /// `make_entries_removable`: on Unix its owner read, write and search bits added without following, elsewhere
+    /// nothing. The names between `root` and `path` are stat'ed first; one that is no real folder (or `path` not a
+    /// real folder) changes nothing. Answers whether the folder changed. Default: nothing (a store without a disk).
+    // T-131
+    fn make_entries_removable(&self, _root: &Path, _path: &Path) -> io::Result<bool> {
+        Ok(false)
+    }
     /// The identity of the entry at `path` (platform `file_identity` — a link is followed): whether two spellings name
     /// one entry. A store without disk identities answers an error.
     fn identity(&self, path: &Path) -> io::Result<FileIdentity> {
@@ -771,7 +796,35 @@ impl LibraryStore for FsStore {
     }
 
     fn remove_tree(&self, root: &Path, path: &Path) -> io::Result<()> {
-        remove_on_disk(self, root, path)
+        remove_on_disk(self, root, path, &remove_entry, &make_removable)
+    }
+
+    fn remove_empty(&self, root: &Path, path: &Path) -> io::Result<()> {
+        // Each attempt bare: `remove_on_disk` holds the busy retry.
+        let attempt = |path: &Path| {
+            if self.stat(path)? != EntryKind::Folder {
+                return Err(not_a_folder(path));
+            }
+            fs::remove_dir(path)
+        };
+        // ADR-0409 decision 11: never what a folder that gained entries holds, nor that folder.
+        let make = |path: &Path| {
+            if !self.list(path)?.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::DirectoryNotEmpty,
+                    "the folder is no longer empty",
+                ));
+            }
+            make_entry_removable(path)
+        };
+        remove_on_disk(self, root, path, &attempt, &make)
+    }
+
+    fn make_entries_removable(&self, root: &Path, path: &Path) -> io::Result<bool> {
+        if !way_holds(self, root, path)? || self.stat(path)? != EntryKind::Folder {
+            return Ok(false);
+        }
+        make_entries_removable(path)
     }
 }
 
@@ -803,14 +856,23 @@ thread_local! {
     /// Runs once right after `make_removable`, before the retries.
     pub(crate) static AFTER_REMOVABLE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
-    /// Each `make_removable` a disk removal on this thread ran: the path and what it answered (`Err` as its text).
+    /// Each make step a disk removal on this thread ran (`make_removable`, or `remove_empty`'s): the path and what it
+    /// answered (`Err` as its text).
     pub(crate) static REMOVABLE_ANSWERS: std::cell::RefCell<Vec<(PathBuf, Result<Vec<PathBuf>, String>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// [`LibraryStore::remove_tree`] on the disk, the names between `root` and `path` stat'ed through `store`.
+/// [`LibraryStore::remove_tree`] and [`LibraryStore::remove_empty`] on the disk, each try of the entry at `path` by
+/// `attempt`, what a refused first try makes removable by `make`, the names between `root` and `path` stat'ed
+/// through `store`.
 // ADR-0409 decision 11
-fn remove_on_disk<S: LibraryStore + ?Sized>(store: &S, root: &Path, path: &Path) -> io::Result<()> {
+fn remove_on_disk<S: LibraryStore + ?Sized>(
+    store: &S,
+    root: &Path,
+    path: &Path,
+    attempt: &dyn Fn(&Path) -> io::Result<()>,
+    make: &dyn Fn(&Path) -> io::Result<Vec<PathBuf>>,
+) -> io::Result<()> {
     #[cfg(test)]
     let first = match DENY_FIRST_REMOVAL.with(std::cell::Cell::get) {
         true => {
@@ -819,10 +881,10 @@ fn remove_on_disk<S: LibraryStore + ?Sized>(store: &S, root: &Path, path: &Path)
             }
             Err(io::Error::from(io::ErrorKind::PermissionDenied))
         }
-        false => remove_entry(path),
+        false => attempt(path),
     };
     #[cfg(not(test))]
-    let first = remove_entry(path);
+    let first = attempt(path);
     // Measured (Windows, rustc 1.95, 2026-11-24): std already removes read-only files and folders, and a read-only
     //   link to a folder goes by `remove_entry`'s `remove_dir_all` step — `make_removable` leaves links as they are.
     let Err(e) = first else {
@@ -841,17 +903,17 @@ fn remove_on_disk<S: LibraryStore + ?Sized>(store: &S, root: &Path, path: &Path)
         )),
     };
     way_held()?;
-    let answer = make_removable(path);
+    let answer = make(path);
     match &answer {
         Ok(left) if !left.is_empty() => tracing::debug!(
             path = %escape_controls(&path.to_string_lossy()),
             left = left.len(),
-            "remove: entries left read-only"
+            "remove: entries not made removable"
         ),
         Ok(_) => {}
         Err(made) => tracing::debug!(
             path = %escape_controls(&path.to_string_lossy()),
-            "remove: read-only not cleared: {}",
+            "remove: not made removable: {}",
             escape_controls(&made.to_string())
         ),
     }
@@ -866,7 +928,7 @@ fn remove_on_disk<S: LibraryStore + ?Sized>(store: &S, root: &Path, path: &Path)
     }
     (OS_HOOKS.retry)(&mut || {
         way_held()?;
-        remove_entry(path)
+        attempt(path)
     })
 }
 
@@ -3285,6 +3347,48 @@ mod tests {
         assert!(fs::symlink_metadata(root.join("row")).is_err());
         assert!(kept_read_only, "the attribute behind the link is unchanged");
         assert_eq!(fs::read_to_string(&kept).unwrap(), "keep");
+    }
+
+    // ADR-0409 decision 11: a refused empty-only removal makes the folder removable only while it is still empty — a
+    //   child that arrived after the first refusal keeps its attributes, and so does the folder; the removal fails.
+    #[test]
+    fn a_child_arriving_after_a_refused_empty_removal_keeps_its_attributes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        let row = root.join("row");
+        fs::create_dir_all(&row).unwrap();
+        set_read_only(&row, true);
+        let (child, inner) = (row.join("x.md"), row.join("sub"));
+        let (arriving, folder) = (child.clone(), inner.clone());
+        AFTER_DENIED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                set_read_only(folder.parent().unwrap(), false);
+                fs::create_dir(&folder).unwrap();
+                fs::write(&arriving, "x").unwrap();
+                set_read_only(&arriving, true);
+                set_read_only(&folder, true);
+                set_read_only(folder.parent().unwrap(), true);
+            }));
+        });
+
+        DENY_FIRST_REMOVAL.with(|deny| deny.set(true));
+        REMOVABLE_ANSWERS.with(|answers| answers.borrow_mut().clear());
+        let removed = FsStore.remove_empty(&root, &row);
+        DENY_FIRST_REMOVAL.with(|deny| deny.set(false));
+        let answers = REMOVABLE_ANSWERS.with(|answers| answers.take());
+        let read_only = |path: &Path| fs::metadata(path).unwrap().permissions().readonly();
+        let kept = [read_only(&row), read_only(&child), read_only(&inner)];
+        for path in [&row, &inner, &child] {
+            set_read_only(path, false);
+        }
+
+        assert!(removed.is_err(), "{removed:?}");
+        assert_eq!(kept, [true; 3], "the folder, the file and the subfolder");
+        assert!(
+            matches!(answers.as_slice(), [(at, Err(_))] if *at == row),
+            "nothing made removable: {answers:?}"
+        );
+        assert!(row.join("x.md").exists());
     }
 
     // ADR-0365 · ADR-0409 decision 11: after a refused first attempt the way to the row is checked again — a folder
