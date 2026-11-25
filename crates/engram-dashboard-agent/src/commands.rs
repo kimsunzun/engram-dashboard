@@ -1418,17 +1418,20 @@ declare_commands! {
     /// across volumes a copy whose original then goes into its own mount's trash. A taken name follows `on_conflict`
     /// (unspecified: that item's `conflict` `name-exists`); on one volume same-name folders merge entry by entry, across
     /// volumes they are refused (`crosses-volumes`). Every preset file that names a moved path is rewritten whole, then
-    /// the agents are re-pointed — no confirmation, except when a skill's lone `SKILL.md` leaves its skill folder (or a
-    /// merge would leave a referenced skill folder without it): then nothing is applied and the answer is CONFLICT
-    /// `skill-unconfirmed` with `plan` (`presets`, `agents`), `plan_digest` and `forms` — repeat with `yes`
+    /// the agents are re-pointed — no confirmation, except when a referenced folder's lone marker (a skill's
+    /// `SKILL.md`, a hook's `hooks.json`) leaves it, or a merge would leave a referenced skill or hook folder without it (an entry
+    /// stays behind, the marker would take a keep-both name, or a `hooks.json` would land beside a `SKILL.md`): then
+    /// nothing is applied and the answer is CONFLICT `hook-unconfirmed` when every folder referred to is a hook, else
+    /// `skill-unconfirmed`, with `plan` (`presets`, `agents`), `plan_digest` and `forms` — repeat with `yes`
     /// (references kept) or `yes` + `detach_refs` + that `plan_digest` (references removed). Answers one row per path in
     /// the order given (`items`), the old → new `mapping` the references followed (apply in order), the preset files
     /// `written` and `skipped` with why, the git working `trees` they lie in, the `agents` re-pointed, `detached`
-    /// skill folders, and `stopped` when the reference fix stopped part-way (the items stay moved; `library.relink` the
-    /// old path once it is cleared). INVALID_ARGUMENT `item-path-invalid` (`to_folder` is no library path or holds a dot
-    /// or temp name) · `detach-refs-invalid` (`detach_refs` with no such skill); CONFLICT `mount-read-only`
-    /// (`to_folder` in the built-in mount `engram`) · `library-unavailable` · `skill-unconfirmed` ·
-    /// `root-generation-stale` (either met after copies across volumes also names them in `args.args.stagings`), or the
+    /// skill and hook folders, and `stopped` when the reference fix stopped part-way (the items stay moved;
+    /// `library.relink` the old path once it is cleared). INVALID_ARGUMENT `item-path-invalid` (`to_folder` is no
+    /// library path or holds a dot or temp name) · `detach-refs-invalid` (`detach_refs` with no such marker or merge);
+    /// CONFLICT `mount-read-only` (`to_folder` in the built-in mount `engram`) · `library-unavailable` ·
+    /// `skill-unconfirmed` · `hook-unconfirmed` · `root-generation-stale` (an unconfirmed or stale refusal met after
+    /// copies across volumes also names them in `args.args.stagings`), or the
     /// agent store's refusal when it is read-only and agents would change. Can take long (a copy across volumes); after
     /// an answer that never came the outcome is unknown — do not repeat; read the destination after a pause.
     #[effect(Write)]
@@ -1441,7 +1444,7 @@ declare_commands! {
         to_folder: String,
         /// Unspecified = a taken name is that item's conflict.
         on_conflict: Option<LibraryOnConflict>,
-        /// Confirms a `skill-unconfirmed` plan. Unspecified = false.
+        /// Confirms a `skill-unconfirmed` or `hook-unconfirmed` plan. Unspecified = false.
         yes: Option<bool>,
         /// With `yes` and `plan_digest`: removes the references the plan named. Unspecified = false.
         detach_refs: Option<bool>,
@@ -1462,9 +1465,10 @@ declare_commands! {
 
     /// Renames the item `path` to `name` in its folder (a case-only rename too) — a move to a new name, answered as
     /// `library.move` answers (one row): a taken name is the row's `conflict` `name-exists` (nothing replaced), its own
-    /// spelling is `skipped` `in-place`; references follow, and a skill's `SKILL.md` renamed so its folder is no skill
-    /// asks first (`skill-unconfirmed`, as `library.move`). Refusals as `library.move`, with `name` — not one valid
-    /// name, or a dot or temp name: INVALID_ARGUMENT `item-path-invalid` — in place of `to_folder`.
+    /// spelling is `skipped` `in-place`; references follow, and a referenced skill's `SKILL.md` or hook's `hooks.json`
+    /// renamed so its folder is no skill or hook asks first (`skill-unconfirmed` or `hook-unconfirmed`, as
+    /// `library.move`). Refusals as `library.move`, with `name` — not one valid name, or a dot or temp name:
+    /// INVALID_ARGUMENT `item-path-invalid` — in place of `to_folder`.
     #[effect(Write)]
     #[since(9)]
     #[deadline(Launch)]
@@ -1473,7 +1477,7 @@ declare_commands! {
         path: String,
         /// Its new name (one name, no folder).
         name: String,
-        /// Confirms a `skill-unconfirmed` plan. Unspecified = false.
+        /// Confirms a `skill-unconfirmed` or `hook-unconfirmed` plan. Unspecified = false.
         yes: Option<bool>,
         /// With `yes` and `plan_digest`: removes the references the plan named. Unspecified = false.
         detach_refs: Option<bool>,

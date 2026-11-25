@@ -310,6 +310,8 @@ mod tests {
     const PINNED_BARE: usize = 940;
     const PINNED_FIRST: usize = 324;
     const PINNED_EACH_MORE: usize = 261;
+    const PINNED_WITH_PRIMING: usize = 2549;
+    const PINNED_HOOKS_THAT_FIT: usize = 21;
 
     fn line<'a>(
         mode: AgentOutputFormat,
@@ -892,7 +894,7 @@ mod tests {
 
     /// ★The pinned Rust cost of hooks on the terminal line★ (a plain handler `node "D:/Library/hooks/notify/notify-<n>.js"`
     /// on one event, with its state entry): the first and each further one. The line without hooks is pinned too
-    /// (no priming, the `cwd` of the shipped-priming test); P5 adds the priming.
+    /// (no priming, the `cwd` of the shipped-priming test); the total with the priming is pinned by the next test.
     // ADR-0420
     #[test]
     fn the_terminal_hook_cost_is_pinned() {
@@ -914,6 +916,47 @@ mod tests {
             cost(3) - cost(2),
             PINNED_EACH_MORE,
             "each further hook on the same event"
+        );
+    }
+
+    /// ★The pinned Rust total of the codex terminal line with the shipped priming★ — what a plain agent's line costs
+    /// (`builtin/instructions/priming.md` merged alone, as asset-library `merge_instructions` merges it: the BOM and
+    /// the trailing line breaks dropped, one line break added; the `cwd` of the test above), and how many plain hooks
+    /// of the test above fit after it on one event — help's terminal-mode limit says 「about 20 short hooks」
+    /// (`prompts/engram-help.md` `## library`). A priming edit moves the total: update the pin, and the help line
+    /// when the count moves far.
+    // ADR-0420
+    #[test]
+    fn the_terminal_total_with_the_shipped_priming_is_pinned() {
+        fn primed<'a>(merged: &'a str, hooks: &'a [HookRef]) -> CommandLine<'a> {
+            CommandLine {
+                instructions: Some(merged),
+                ..hook_line(AgentOutputFormat::Terminal, &[], hooks)
+            }
+        }
+        let shipped = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../builtin/instructions/priming.md"
+        ))
+        .expect("read builtin/instructions/priming.md");
+        let merged = format!(
+            "{}\n",
+            shipped
+                .trim_start_matches('\u{feff}')
+                .trim_end_matches(['\r', '\n'])
+        );
+        assert_eq!(
+            needed(&primed(&merged, &[])),
+            Ok(PINNED_WITH_PRIMING),
+            "the terminal line with the shipped priming and no hooks"
+        );
+        let fits = |count: usize| {
+            assembled(&primed(&merged, &[plain_hooks("SessionStart", count)])).is_ok()
+        };
+        let most = (1..).take_while(|&count| fits(count)).last().unwrap_or(0);
+        assert_eq!(
+            most, PINNED_HOOKS_THAT_FIT,
+            "plain hooks that fit after the shipped priming"
         );
     }
 

@@ -15,7 +15,7 @@ to_folder: string,
  */
 on_conflict?: LibraryOnConflict | null, 
 /**
- * Confirms a `skill-unconfirmed` plan. Unspecified = false.
+ * Confirms a `skill-unconfirmed` or `hook-unconfirmed` plan. Unspecified = false.
  */
 yes?: boolean | null, 
 /**

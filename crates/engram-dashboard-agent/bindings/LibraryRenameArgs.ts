@@ -10,7 +10,7 @@ path: string,
  */
 name: string, 
 /**
- * Confirms a `skill-unconfirmed` plan. Unspecified = false.
+ * Confirms a `skill-unconfirmed` or `hook-unconfirmed` plan. Unspecified = false.
  */
 yes?: boolean | null, 
 /**

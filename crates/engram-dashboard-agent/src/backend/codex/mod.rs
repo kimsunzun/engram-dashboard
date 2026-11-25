@@ -399,6 +399,7 @@ const APP_SERVER_STDIO_FLAG: &str = "--stdio";
 /// ★Catches one shape only: the **next slot** after `-c` starts with `key`★ (`-c developer_instructions=…`).
 /// ★Known holes★: `-c` with the value joined in one word · the long-name flag · a higher key overriding a whole table (`-c tui=…` · `-c mcp_servers=…`) · another key that only starts with that key.
 ///   Do not grow the list toward 「certain」 — it becomes a reimplementation of codex's override syntax that goes stale. A miss loses **only the warning**; that ours wins is guaranteed by the order in `build_spec`.
+/// ★Not the pass-through hooks refusal★ — a refusal must not miss, so `hook_assembly` reads every spelling clap reads (`codex-passthrough-hooks`, ADR-0420 U5).
 /// Taking the key as an argument is intended: several overrides exist (MCP attachment · the brief) and per-key duplication leaves the warning half-fixed.
 fn passthrough_overrides_key(extra_args: &[String], key: &str) -> bool {
     extra_args
@@ -725,6 +726,7 @@ impl AgentBackend for CodexBackend {
                 // ★Do not revive the `SessionStart` hook here (ADR-0216/ADR-0218)★ — recovery is the writer-lock name this child holds ([`thread_lock`]) and the hook machinery was removed. Not because the hook was broken
                 //   (it ran, 0.155.0): codex hashes the hook **command string** and requires human approval, and that string embeds our exe's absolute path, which changes every release (folder named after the tag),
                 //   so the approval screen returns every release and **while it is up, terminal codex does not come up at all.**
+                //   Hook components (ADR-0420) are the user's own hooks, trusted per run in the hook lines above; they do not bring this one back (U3).
 
                 // ★Priming injection — only terminal mode is assembled here★: app-server carries the same content in the handshake JSON (`developerInstructions` of `thread/start`, [`AgentBackend::open_spawn`]) —
                 //   same value, different means per mode, like resume.

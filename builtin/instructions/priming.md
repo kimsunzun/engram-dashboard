@@ -10,7 +10,7 @@ When you need one of the below, run the command on its line in a shell (Bash · 
   engram help agent     Agents. Creating · starting · renaming · moving under another agent
   engram help window    Opening windows · making tabs · moving tabs · splitting the screen · placing an agent there · reading the layout
   engram help settings  Settings (settings.*) and per-window theme (window.setTheme). Theme (dark · light · e-ink) · chat screen style
-  engram help library   Library. Instruction · skill · settings · preset files (move · copy · delete · restore) and attaching presets to agents
+  engram help library   Library. Instruction · skill · hook · settings · preset files (move · copy · delete · restore) and attaching presets to agents
 
 A command runs as `engram <name> --flag value`, and `engram commands` knows every name.
 

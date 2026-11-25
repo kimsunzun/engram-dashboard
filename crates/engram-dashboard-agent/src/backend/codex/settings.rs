@@ -6,6 +6,8 @@
 //!   (`codex-rs/ext/skills/src/loader/discovery.rs` over the exec-server `walk`) and codex's own skill roots
 //!   (`codex-rs/ext/skills/src/host_roots.rs`). Codex updates itself; a drift shows as a valid skill blocked or a
 //!   bad one passed. The real-YAML golden of the skill format runs with the caller's parser, not here.
+//! ★The command-line check runs the hook assembly★ ([`SettingsCheck::command_line_fits`] → `cmdline::assembled`): its
+//!   hash, trust-key and event rules are copied from codex `rust-v0.171.0` — `hook_assembly.rs` header (ADR-0420).
 // ADR-0334
 // ADR-0337
 // ADR-0341

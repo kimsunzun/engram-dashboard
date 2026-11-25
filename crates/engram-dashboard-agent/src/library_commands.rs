@@ -434,7 +434,8 @@ pub trait LibraryCommandHost: Send + Sync {
         root_generation: Option<u64>,
     ) -> Result<NewAgentPresets, PortRefusal>;
     /// Moves `paths` into `to_folder` (`on_conflict` `None` = a taken name is that item's conflict); `yes` /
-    /// `detach_refs` / `plan_digest` answer a `skill-unconfirmed` plan. Answers per item and the reference fix.
+    /// `detach_refs` / `plan_digest` answer a `skill-unconfirmed` or `hook-unconfirmed` plan. Answers per item and the
+    /// reference fix.
     // ADR-0419
     #[allow(clippy::too_many_arguments)]
     fn move_items(
@@ -4185,7 +4186,7 @@ mod tests {
     }
 
     /// ADR-0419: a file verb's refusal maps as every library refusal does — the plan, its digest and the forms of a
-    /// `delete-unconfirmed` or `skill-unconfirmed`, and the stagings a refusal met after copying names, reach the caller
+    /// `delete-unconfirmed`, `skill-unconfirmed` or `hook-unconfirmed`, and the stagings a refusal met after copying names, reach the caller
     /// untouched in `args.args`, the message naming the command; an emptying of nothing is INVALID_ARGUMENT.
     #[test]
     fn a_file_refusal_carries_its_plan_forms_and_stagings_untouched() {
