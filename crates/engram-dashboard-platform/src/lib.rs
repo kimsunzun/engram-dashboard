@@ -15,19 +15,21 @@
 //! others' writes, classifying that failure, verdict and retry for a brief-holder failure, folder sync, creating and walking directory
 //!   links — Windows junction, path keys and path comparison, folder-path normalization, the Win32 reserved-device-name test, file
 //!   identity, the network share a path is on, a rename that never replaces, clearing read-only below a folder without following
-//!   links, a folder's modified time, opening a file for reading without following its last name) · [`spawn`] (windowless spawn,
+//!   links, a folder's modified time, opening a file for reading without following its last name, a path as
+//!   forward-slash text) · [`spawn`] (windowless spawn,
 //!   tree-root spawn with a kill handle — Windows = suspended, put in the group, resume;
 //! "program not found" verdict; spawning outside this process's Job — WMI) · [`shell`] (interactive default shell, wrapping a CLI in a
 //!   console shell) · [`env`] (home dir, executable name/sibling path, env var name
 //! comparison) · [`window`] (identity, placement and z-order, restoring placement, topmost window under the cursor, diagnostics,
 //!   foreground checks, title bar chrome, snap overlay behind feature `snap-overlay`) ·
-//! [`input`] (cursor position, primary button, Esc state) · [`pty`] (whether closing a pseudo-terminal waits for its output to be read).
+//! [`input`] (cursor position, primary button, Esc state) · [`os`] (whether the host uses Windows path rules) · [`pty`]
+//!   (whether closing a pseudo-terminal waits for its output to be read).
 //!   Module headers and public docs are the source of truth.
 //!
 //! Functions that take a window accept `raw-window-handle`'s `HasWindowHandle`; variant matching happens here too (TRD S21-slot-docking
 //!   revision 6.3 §8, B10, revision 7 §5-1).
 //!
-//! ★`testing` (real-process helpers), `group::GroupRef::gone` and `spawn::wmi_create_raw` (diagnostic) are behind cargo feature
+//! ★`testing` (real-process helpers and a non-Unicode path), `group::GroupRef::gone` and `spawn::wmi_create_raw` (diagnostic) are behind cargo feature
 //!   `test-support`★ (TRD 1-3 §3-8; same name as base's ADR-0275 decision 5): declared
 //! `#[cfg(any(test, feature = "test-support"))]`. CI gate ③ (a 1-or-more-lines expectation paired with a 0-lines expectation) measures
 //!   that the feature is not in the daemon/shell/CLI production graph; commands and
@@ -218,6 +220,7 @@ pub mod file_holders;
 pub mod fs;
 pub mod group;
 pub mod input;
+pub mod os;
 pub mod process;
 pub mod pty;
 pub mod shell;

@@ -34,6 +34,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use engram_dashboard_agent::backend::hooks::path_rule;
 use engram_dashboard_agent::backend::settings_check::{InstructionLoad, ModeLoads, SkillFormat};
 use engram_dashboard_agent::backend::SettingsCheck;
 use engram_dashboard_agent::launch::{
@@ -927,6 +928,8 @@ impl<'l> Walk<'l> {
     /// A hook entry: a missing hook is a ① row (a launch skips it with a notice — ADR-0374), a broken one (its
     /// `hooks.json` failed the shape check) a ② row; an agent whose mode loads no hooks gets it named in the
     /// `hooks_omitted` notice, or — the backend naming no such notice — a ② [`HOOKS_NOT_LOADED`] row, never a silent drop.
+    /// A hook that loads (or one preset judged alone) and whose folder path the placeholder rewrite would refuse is a ②
+    /// row of agent's neutral path rule (`hook-path-unsafe {hook, path}`, at the entry's line).
     // ADR-0420
     fn hook(&mut self, entry: &PresetItem, via: &[String]) {
         let line = Some(entry.line);
@@ -952,6 +955,11 @@ impl<'l> Walk<'l> {
                 }
             }
             return;
+        }
+        // ADR-0420: the same rule the backends' rewrite applies, so a launch never reaches a refused rewrite.
+        if let Err(refused) = path_rule(&spelling, &dir, definition) {
+            let why = Reason { line, ..refused };
+            return self.broken(spelling, via, why);
         }
         self.out.hooks.push(ResolvedHook {
             path: spelling,
@@ -2451,7 +2459,7 @@ mod tests {
     }
 
     /// A mode that loads no hooks carries none and names each in its backend's `hooks_omitted` notice — the fake's
-    /// terminal mode and today's real backends alike.
+    /// terminal mode and today's real codex alike.
     #[test]
     fn a_mode_that_loads_no_hooks_names_them_in_its_hooks_omitted_notice() {
         let lib = library(&[
@@ -2464,8 +2472,6 @@ mod tests {
         ]);
         for (word, mode, code) in [
             ("gamma", T, "gamma-hooks-omitted"),
-            ("claude", T, "claude-hooks-omitted"),
-            ("claude", J, "claude-hooks-omitted"),
             ("codex", T, "codex-hooks-omitted"),
             ("codex", J, "codex-hooks-omitted"),
         ] {
@@ -2482,6 +2488,57 @@ mod tests {
                 "{word} {mode:?}"
             );
         }
+    }
+
+    /// A hook whose definition uses the placeholder and whose folder path holds a `$` that does not end a component is a
+    /// `hook-path-unsafe` row at its entry's line — for an agent whose mode loads hooks and for one preset alone; a `$`
+    /// ending a component passes, and so does any folder of a hook without the placeholder. A mode that loads no hooks
+    /// names the hook in its omission notice instead (nothing is rewritten for it).
+    #[test]
+    fn a_hook_folder_the_placeholder_rewrite_would_refuse_blocks_on_its_entry() {
+        const USES: &str = r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/x.js\""}]}]}}"#;
+        let lib = library(&[
+            (
+                "P.yaml",
+                &preset(
+                    "hooks:\n  - library/te$am/h1\n  - library/team$/h2\n  - library/te$am/h3\n",
+                ),
+            ),
+            ("te$am/h1/hooks.json", USES),
+            ("team$/h2/hooks.json", USES),
+            ("te$am/h3/hooks.json", HOOK),
+        ]);
+        let unsafe_row = Reason {
+            code: "hook-path-unsafe".to_owned(),
+            args: json!({ "hook": "library/te$am/h1", "path": "/lib/te$am/h1" }),
+            line: Some(4),
+        };
+        for target in [
+            agent("gamma", J, &["library/P.yaml"]),
+            alone("library/P.yaml"),
+        ] {
+            let resolution = run(&lib, &target);
+            assert_eq!(
+                hook_paths(&resolution),
+                ["library/team$/h2", "library/te$am/h3"]
+            );
+            let [BlockReason::Broken {
+                item,
+                via: chain,
+                reason,
+            }] = &resolution.problems[..]
+            else {
+                panic!("{:?}", resolution.problems);
+            };
+            assert_eq!(
+                (item.as_str(), chain, reason),
+                ("library/te$am/h1", &via(&["library/P.yaml"]), &unsafe_row)
+            );
+        }
+
+        let omitted = run(&lib, &agent("gamma", T, &["library/P.yaml"]));
+        assert!(omitted.problems.is_empty(), "{:?}", omitted.problems);
+        assert!(omitted.hooks.is_empty());
     }
 
     /// A mode that loads no hooks while its backend names no omission notice blocks on each hook — never a silent drop.

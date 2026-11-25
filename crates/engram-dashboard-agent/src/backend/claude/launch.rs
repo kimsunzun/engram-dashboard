@@ -3,7 +3,8 @@
 //! today's.
 //!
 //! Volatile layout, written only through the confined [`LaunchFs`] (nothing in the working folder):
-//! - `settings.json` = the raw claude settings merged in attach order → one `--settings`;
+//! - `settings.json` = the raw claude settings merged in attach order, then one `{"hooks": …}` layer per hook component
+//!   in plan order (its placeholder rewritten — `backend/hooks.rs`) → one `--settings`;
 //! - `engram/skills/<name>` = a directory link (Windows: a junction) to each skill folder → `--plugin-dir <vol>/engram`,
 //!   under which claude names the skill `engram:<name>`.
 //!
@@ -14,14 +15,16 @@
 // ADR-0328
 // ADR-0334
 // ADR-0341
+// ADR-0420
 
 use std::path::{Path, PathBuf};
 
 use engram_dashboard_platform::fs::same_path;
 use engram_dashboard_platform::shell::path_is_cli_safe;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::settings::merge;
+use crate::backend::hooks;
 use crate::launch::{
     LaunchArtifacts, LaunchFs, LaunchKit, SkillRef, SKILL_LINKS_DIR, SKILL_LINKS_PARENT,
 };
@@ -36,13 +39,15 @@ const ADDED_DIRS_CLAUDE_MD_ENV: (&str, &str) =
 /// The claude [`crate::backend::AgentBackend::materialize`].
 ///
 /// A kit that is not real → [`LaunchArtifacts::default`]. A real kit → `real` + the instructions file as prepared +
-/// the plugin folder (only with ≥ 1 skill) + the merged settings file (only with ≥ 1 raw setting) + the folder entries
-/// in plan order + the folder env pair (only with ≥ 1 folder entry). A real kit with none of these writes nothing and
-/// needs no volatile folder.
+/// the plugin folder (only with ≥ 1 skill) + the merged settings file (only with ≥ 1 raw setting or hook component —
+/// the raw settings in attach order, then each hook's `{"hooks": <rewritten definition>}` in plan order, by the
+/// ADR-0328 merge, so a settings preset's own hook groups come first in each event and identical groups once) + the
+/// folder entries in plan order + the folder env pair (only with ≥ 1 folder entry). A real kit with none of these
+/// writes nothing and needs no volatile folder.
 ///
-/// `Err` (nothing written) when the plan carries hook components (claude loads none yet — ADR-0420), when the kit
-/// needs the volatile folder and has none, when two skills land on the same
-/// link name, or when a path the argv carries (instructions file · settings file · plugin folder · folder entry) fails
+/// `Err` (nothing written) when a hook's placeholder rewrite refuses its folder path (the launch check refuses it
+/// first), when the kit needs the volatile folder and has none, when two skills land on the same link name, or when a
+/// path the argv carries (instructions file · settings file · plugin folder · folder entry) fails
 /// [`path_is_cli_safe`]. `Err` after a partial write when a write fails — the settings file first, then the links; the
 /// caller's release removes the volatile folder.
 pub(super) fn materialize(kit: &LaunchKit, fs: &dyn LaunchFs) -> Result<LaunchArtifacts, String> {
@@ -50,23 +55,30 @@ pub(super) fn materialize(kit: &LaunchKit, fs: &dyn LaunchFs) -> Result<LaunchAr
     if !plan.real {
         return Ok(LaunchArtifacts::default());
     }
-    // ADR-0420: `ModeLoads::hooks` is `false`, so the check names them instead — a plan carrying one is refused, never
-    //   dropped unnamed.
-    if !plan.hooks.is_empty() {
-        return Err(format!(
-            "a real claude plan carries {} hook component(s) — claude does not load hooks yet",
-            plan.hooks.len()
-        ));
+    let mut hook_layers = Vec::with_capacity(plan.hooks.len());
+    for hook in &plan.hooks {
+        let definition = hooks::rewrite(hook).map_err(|refused| {
+            format!(
+                "the claude hook component {:?} cannot be carried ({}): {}",
+                hook.path, refused.code, refused.args
+            )
+        })?;
+        hook_layers.push(json!({ "hooks": definition }));
     }
     let volatile = || {
         kit.volatile_dir.as_deref().ok_or_else(|| {
             "real claude launch materials need a volatile folder, and the kit has none".to_string()
         })
     };
-    let settings = if plan.raw_settings.is_empty() {
+    let settings = if plan.raw_settings.is_empty() && hook_layers.is_empty() {
         None
     } else {
-        let layers: Vec<&Value> = plan.raw_settings.iter().map(|raw| &raw.value).collect();
+        let layers: Vec<&Value> = plan
+            .raw_settings
+            .iter()
+            .map(|raw| &raw.value)
+            .chain(&hook_layers)
+            .collect();
         Some((volatile()?.join(SETTINGS_FILE), merge(&layers)))
     };
     let plugin_dir = if kit.skills.is_empty() {
@@ -382,28 +394,140 @@ mod tests {
         let mut settings_only = empty_real_kit();
         settings_only.volatile_dir = None;
         settings_only.plan.raw_settings = real_kit().plan.raw_settings;
-        for kit in [skills_only, settings_only] {
+        let mut hooks_only = empty_real_kit();
+        hooks_only.volatile_dir = None;
+        hooks_only.plan.hooks = vec![hook("notify", json!({"Stop": []}))];
+        for kit in [skills_only, settings_only, hooks_only] {
             let (result, fs) = materialized(&kit);
             assert!(result.is_err(), "{:?}", kit.plan.raw_settings);
             assert!(fs.paths().is_empty());
         }
     }
 
-    /// A plan carrying a hook component fails before any write — claude loads no hooks yet, and none is dropped
-    /// unnamed.
+    /// A hook component in the library folder `name` whose definition is `definition` (a JSON object).
+    fn hook(name: &str, definition: Value) -> HookRef {
+        let Value::Object(definition) = definition else {
+            panic!("not an object: {definition}");
+        };
+        HookRef {
+            path: format!("team/hooks/{name}"),
+            dir: library(name),
+            definition,
+        }
+    }
+
+    /// The library folder `name` as the placeholder rewrite spells it — `/` separators.
+    fn slashed(name: &str) -> String {
+        library(name).to_string_lossy().replace('\\', "/")
+    }
+
+    /// ★Golden merged settings★ — the raw settings first (their own `hooks` group first in its event), then one layer
+    /// per hook component in plan order with the placeholder rewritten to the hook folder; a component group identical
+    /// to one already there is written once.
+    // ADR-0328
     // ADR-0420
     #[test]
-    fn a_plan_with_a_hook_component_fails_before_any_write() {
+    fn hook_components_join_the_merged_settings_after_the_raw_settings() {
+        let raw_group =
+            json!({"matcher": "Bash", "hooks": [{"type": "command", "command": "echo raw"}]});
         let mut kit = real_kit();
-        kit.plan.hooks = vec![HookRef {
-            path: "team/hooks/notify".to_string(),
-            dir: library("notify"),
-            definition: serde_json::Map::new(),
-        }];
+        kit.plan.raw_settings[0].value["hooks"] = json!({ "PreToolUse": [raw_group.clone()] });
+        kit.plan.hooks = vec![
+            hook(
+                "notify",
+                json!({
+                    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/guard.js\"", "timeout": 30}]}],
+                    "SessionStart": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PLUGIN_ROOT/notify.js\" start"}]}],
+                }),
+            ),
+            hook(
+                "format",
+                json!({ "PreToolUse": [
+                    raw_group.clone(),
+                    {"matcher": "Edit", "hooks": [{"type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/fmt.js\""}]},
+                ] }),
+            ),
+        ];
+        let (result, fs) = materialized(&kit);
+        let artifacts = result.unwrap();
+
+        let settings = vol().join("settings.json");
+        assert_eq!(artifacts.settings_file, Some(settings.clone()));
+        let notify = slashed("notify");
+        let format = slashed("format");
+        let merged = json!({
+            "env": {"DISABLE_AUTOUPDATER": "1", "FOO": "x"},
+            "allowedMcpServers": [{"serverName": "engram"}],
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [
+                    raw_group,
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": format!("node \"{notify}/guard.js\""), "timeout": 30}]},
+                    {"matcher": "Edit", "hooks": [{"type": "command", "command": format!("node \"{format}/fmt.js\"")}]},
+                ],
+                "SessionStart": [{"hooks": [{"type": "command", "command": format!("node \"{notify}/notify.js\" start")}]}],
+            },
+        });
+        assert_eq!(
+            String::from_utf8(fs.file(&settings).unwrap()).unwrap(),
+            format!("{merged:#}")
+        );
+    }
+
+    /// Hook components alone write the merged settings file — one `--settings` — with no raw setting.
+    // ADR-0420
+    #[test]
+    fn hook_components_alone_write_the_settings_file() {
+        let mut kit = empty_real_kit();
+        kit.plan.hooks = vec![hook(
+            "notify",
+            json!({"Stop": [{"hooks": [{"type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/x.js"}]}]}),
+        )];
+        let (result, fs) = materialized(&kit);
+        let settings = vol().join("settings.json");
+        assert_eq!(
+            result,
+            Ok(LaunchArtifacts {
+                real: true,
+                settings_file: Some(settings.clone()),
+                ..LaunchArtifacts::default()
+            })
+        );
+        assert_eq!(fs.paths(), vec![settings.clone()]);
+        let written = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": format!("node {}/x.js", slashed("notify"))}]}]}});
+        assert_eq!(
+            String::from_utf8(fs.file(&settings).unwrap()).unwrap(),
+            format!("{written:#}")
+        );
+
+        let spec = real_spec(
+            AgentOutputFormat::Terminal,
+            SpawnMode::Fresh,
+            None,
+            &kit,
+            Vec::new(),
+        );
+        let (_, args) = console_command(
+            CLAUDE_PROGRAM,
+            argv("--permission-mode bypassPermissions --session-id {SID} --system-prompt-snapshot off --settings {SETTINGS} stray"),
+        );
+        assert_eq!(spec.args, args);
+    }
+
+    /// A hook whose folder path the placeholder rewrite refuses fails the placement before any write.
+    // ADR-0420
+    #[test]
+    fn a_hook_the_placeholder_rewrite_refuses_fails_before_any_write() {
+        let mut kit = real_kit();
+        kit.plan.hooks = vec![hook(
+            "notify$$",
+            json!({"Stop": [{"hooks": [{"type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/x.js\""}]}]}),
+        )];
         let (result, fs) = materialized(&kit);
         let error = result.unwrap_err();
-        assert!(error.contains("hook"), "{error}");
-        assert!(fs.paths().is_empty());
+        assert!(error.contains("hook-path-unsafe"), "{error}");
+        assert!(error.contains("team/hooks/notify$$"), "{error}");
+        assert!(fs.paths().is_empty(), "{:?}", fs.paths());
     }
 
     /// Two skill names that become the same link name → `Err` before any write.

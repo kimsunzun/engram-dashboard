@@ -3333,23 +3333,29 @@ mod tests {
         (w, codex)
     }
 
-    /// A preset's `hooks:` written by hand, as a launch with the real backends meets it today: neither claude nor codex
-    /// loads hook components yet, so every mode leaves the hook out of the plan and names it in its own omission
-    /// notice — never a silent drop.
+    /// A preset's `hooks:` written by hand, as a launch with the real backends meets it today: claude loads hook
+    /// components in both modes, so its plan carries the hook with no notice; codex does not load them yet, so each
+    /// codex mode leaves the hook out of the plan and names it in its omission notice — never a silent drop.
     #[test]
-    fn a_hand_written_hooks_section_is_named_in_the_omission_notice_of_every_real_backend_mode() {
+    fn a_hand_written_hooks_section_reaches_claude_and_is_named_in_every_codex_omission_notice() {
         let w = World::new();
         w.put("lib/hooks/notify/hooks.json", &hook_json("node x.js"));
         w.put(
             "lib/P.yaml",
             "kind: preset\nversion: 1\nhooks:\n  - library/hooks/notify\n",
         );
-        for (command, code) in [
-            (claude(JSON), "claude-hooks-omitted"),
-            (claude(TERMINAL), "claude-hooks-omitted"),
-            (codex(JSON), "codex-hooks-omitted"),
-            (codex(TERMINAL), "codex-hooks-omitted"),
-        ] {
+        for command in [claude(JSON), claude(TERMINAL)] {
+            let what = format!("{command:?}");
+            let plan = w
+                .svc
+                .check(&agent(command, &["library/P.yaml"], &w.at("work")))
+                .unwrap();
+            let carried: Vec<&str> = plan.hooks.iter().map(|hook| hook.path.as_str()).collect();
+            assert_eq!(carried, ["library/hooks/notify"], "{what}");
+            assert_eq!(plan.hooks[0].dir, w.at("lib/hooks/notify"), "{what}");
+            assert!(plan.notices.is_empty(), "{what}: {:?}", plan.notices);
+        }
+        for command in [codex(JSON), codex(TERMINAL)] {
             let what = format!("{command:?}");
             let plan = w
                 .svc
@@ -3358,7 +3364,10 @@ mod tests {
             assert!(plan.hooks.is_empty(), "{what}");
             assert_eq!(
                 plan.notices,
-                [notice(code, json!({ "hooks": ["library/hooks/notify"] }))],
+                [notice(
+                    "codex-hooks-omitted",
+                    json!({ "hooks": ["library/hooks/notify"] })
+                )],
                 "{what}"
             );
         }
@@ -3458,6 +3467,31 @@ mod tests {
             (item.as_str(), via.as_slice()),
             ("library/hooks/bad", &["library/P.yaml".to_owned()][..])
         );
+    }
+
+    /// A real claude launch whose hook uses the placeholder in a folder whose path holds a `$` that does not end a
+    /// component is blocked on that entry — the check refuses what the claude rewrite would refuse.
+    // ADR-0420
+    #[test]
+    fn a_real_claude_launch_blocks_on_a_hook_whose_folder_the_rewrite_would_refuse() {
+        let w = World::new();
+        w.put(
+            "lib/hooks/no$tify/hooks.json",
+            &hook_json("node ${CLAUDE_PLUGIN_ROOT}/x.js"),
+        );
+        w.put(
+            "lib/P.yaml",
+            "kind: preset\nversion: 1\nhooks:\n  - library/hooks/no$tify\n",
+        );
+        let profile = agent(claude(JSON), &["library/P.yaml"], &w.at("work"));
+        let blocked = w.svc.check(&profile).unwrap_err();
+        assert_eq!(codes(&blocked), [("broken", "hook-path-unsafe")]);
+        let BlockReason::Broken { item, reason, .. } = &blocked.reasons[0] else {
+            panic!("{blocked:?}");
+        };
+        assert_eq!(item, "library/hooks/no$tify");
+        assert_eq!(reason.args["hook"], "library/hooks/no$tify");
+        assert_eq!(reason.line, Some(4));
     }
 
     /// A command-line refusal is carried where its `args` say: on the hook entry it names (with that hook's chain), on

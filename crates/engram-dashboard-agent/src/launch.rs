@@ -402,11 +402,6 @@ pub const CODEX_TERMINAL_FOLDER_OMITTED: &str = "codex-terminal-folder-omitted";
 // ADR-0355
 pub const CODEX_SAME_NAME_SKILLS: &str = "codex-same-name-skills";
 
-/// Notice code: claude does not load hook components yet, so the launch left them out. `args` = `{hooks: [library
-/// paths]}`. Removed when claude loads hooks.
-// ADR-0420
-pub const CLAUDE_HOOKS_OMITTED: &str = "claude-hooks-omitted";
-
 /// Notice code: codex does not load hook components yet, so the launch left them out. `args` = `{hooks: [library
 /// paths]}`. Removed when codex loads hooks.
 // ADR-0420
@@ -467,8 +462,8 @@ pub fn reports_launch_skip(code: &str) -> bool {
 ///   in the two terminal codes an empty list leaves its part out.
 /// - [`FOLDER_LISTING_PARTIAL`], [`FOLDER_LISTING_SKIPPED`] — name no backend; the folder (and the skipped paths, the
 ///   first three named and the rest counted).
-/// - [`CLAUDE_HOOKS_OMITTED`], [`CODEX_HOOKS_OMITTED`] — the backend that does not load hook components yet and the
-///   hooks left out; an empty list ends after the first sentence.
+/// - [`CODEX_HOOKS_OMITTED`] — codex does not load hook components yet, and the hooks left out; an empty list ends
+///   after the first sentence.
 /// - [`BUILTIN_UNAVAILABLE`] — the built-in and why.
 /// - [`MISSING_ITEM_SKIPPED`] — the item (a `folder:` item as its path, worded as a folder) and where it is listed:
 ///   the last preset of `via` and the line when there is one, or "attached to this agent" for an empty `via`.
@@ -525,14 +520,9 @@ fn own_wording(notice: &Notice) -> Option<String> {
             })
         }
         // ADR-0420
-        CLAUDE_HOOKS_OMITTED | CODEX_HOOKS_OMITTED => {
-            let backend = if notice.code == CLAUDE_HOOKS_OMITTED {
-                "claude"
-            } else {
-                "codex"
-            };
+        CODEX_HOOKS_OMITTED => {
             let hooks = text_list(args, "hooks")?;
-            let head = format!("Notice: {backend} does not load hook components yet.");
+            let head = "Notice: codex does not load hook components yet.".to_string();
             Some(if hooks.is_empty() {
                 head
             } else {
@@ -1232,8 +1222,10 @@ pub struct LaunchArtifacts {
     /// order — the junction root inside the volatile folder (only with ≥ 1 skill), then the plan's
     /// [`LaunchPlan::extra_skill_roots`] (outside it).
     pub skill_roots: Vec<PathBuf>,
-    /// The merged backend settings file (inside the volatile folder). `None` = no raw settings to load.
+    /// The merged backend settings file (inside the volatile folder). `None` = no raw settings and no hook component to
+    /// load.
     // ADR-0328
+    // ADR-0420
     pub settings_file: Option<PathBuf>,
     /// Folders the CLI is given access to, in [`LaunchPlan::folders`] order.
     // ADR-0341
@@ -2655,7 +2647,6 @@ mod tests {
             CODEX_TERMINAL_OMITTED,
             CODEX_TERMINAL_FOLDER_OMITTED,
             CODEX_SAME_NAME_SKILLS,
-            CLAUDE_HOOKS_OMITTED,
             CODEX_HOOKS_OMITTED,
             FOLDER_LISTING_PARTIAL,
             FOLDER_LISTING_SKIPPED,
@@ -2667,35 +2658,32 @@ mod tests {
         }
     }
 
-    /// The interim hook omission codes state the fact — which backend does not load hook components yet and the hooks
+    /// The interim codex hook omission code states the fact — codex does not load hook components yet, and the hooks
     /// left out (names escaped); an empty list ends after the first sentence; `args` of another shape fall back to the
     /// generic wording.
     // ADR-0420
     #[test]
-    fn the_hook_omission_codes_name_the_backend_and_the_hooks_not_applied() {
-        for (code, backend) in [
-            (CLAUDE_HOOKS_OMITTED, "claude"),
-            (CODEX_HOOKS_OMITTED, "codex"),
-        ] {
-            assert_eq!(
-                notice_text(&reason(
-                    code,
-                    json!({ "hooks": ["team/hooks/notify", "team/hooks/gu\nard"] }),
-                    None
-                )),
-                format!(
-                    "Notice: {backend} does not load hook components yet. Not applied: team/hooks/notify, team/hooks/gu\\nard"
-                )
-            );
-            assert_eq!(
-                notice_text(&reason(code, json!({ "hooks": [] }), None)),
-                format!("Notice: {backend} does not load hook components yet.")
-            );
-            assert_eq!(
-                notice_text(&reason(code, json!({ "hooks": "team/hooks/notify" }), None)),
-                format!("Notice ({code}): intended behavior. Target — team/hooks/notify")
-            );
-        }
+    fn the_codex_hook_omission_code_names_the_hooks_not_applied() {
+        assert_eq!(
+            notice_text(&reason(
+                CODEX_HOOKS_OMITTED,
+                json!({ "hooks": ["team/hooks/notify", "team/hooks/gu\nard"] }),
+                None
+            )),
+            "Notice: codex does not load hook components yet. Not applied: team/hooks/notify, team/hooks/gu\\nard"
+        );
+        assert_eq!(
+            notice_text(&reason(CODEX_HOOKS_OMITTED, json!({ "hooks": [] }), None)),
+            "Notice: codex does not load hook components yet."
+        );
+        assert_eq!(
+            notice_text(&reason(
+                CODEX_HOOKS_OMITTED,
+                json!({ "hooks": "team/hooks/notify" }),
+                None
+            )),
+            "Notice (codex-hooks-omitted): intended behavior. Target — team/hooks/notify"
+        );
     }
 
     /// No settings code has its own sentence: the codes a settings schema check would emit take the generic wording

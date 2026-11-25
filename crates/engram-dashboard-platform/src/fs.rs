@@ -4,8 +4,8 @@
 //! reserved-device-name test (`normalize`) · file identity (`identity`) · the network share a path is on
 //! (`share_root`) · a rename that never replaces (`rename` — `rename_no_replace`) · clearing the read-only attribute
 //! below a folder without following links (`removable` — `make_removable`) · a folder's modified time (`times` —
-//! `set_folder_modified`) · opening a file for reading without following its last name (`open_read_no_follow`). The
-//! opens in this file use std only —
+//! `set_folder_modified`) · opening a file for reading without following its last name (`open_read_no_follow`) · a
+//! path as forward-slash text (`forward_slash_text`). The opens in this file use std only —
 //! `OpenOptionsExt::share_mode` goes down as is to `CreateFileW`'s share mode, so the same kernel behaviour comes
 //! without unsafe.
 
@@ -217,6 +217,19 @@ pub fn share_root(_path: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
+/// `path` as text with `/` as its separator: on Windows each `\` becomes `/` (`D:\Library\hooks` →
+/// `D:/Library/hooks`, `\\srv\team$\x` → `//srv/team$/x`); other systems keep it as spelled. A path that is not
+/// UTF-8 comes back lossy (`U+FFFD` for what cannot be read). No I/O.
+// ADR-0420
+pub fn forward_slash_text(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
+
 /// [`share_root`] with the drive-letter question (`network(letter, "X:\")` — whether that drive is a network drive)
 /// passed in, so the path rules are tested without a mapped drive.
 #[cfg(windows)]
@@ -401,6 +414,26 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ADR-0420
+    #[test]
+    fn forward_slash_text_turns_windows_separators_and_keeps_other_spellings() {
+        let spelled = r"D:\Library\hooks\notify";
+        let expected = if cfg!(windows) {
+            "D:/Library/hooks/notify"
+        } else {
+            spelled
+        };
+        assert_eq!(forward_slash_text(Path::new(spelled)), expected);
+        let share = r"\\srv\team$\x";
+        let expected = if cfg!(windows) {
+            "//srv/team$/x"
+        } else {
+            share
+        };
+        assert_eq!(forward_slash_text(Path::new(share)), expected);
+        assert_eq!(forward_slash_text(Path::new("/srv/a b/x")), "/srv/a b/x");
+    }
 
     // ADR-0365: a file opens and reads; a link at the name is never opened through — opened as itself (its metadata says
     //   link) or refused.

@@ -1,10 +1,12 @@
-//! Real-process test helpers — shared by this crate's tests and the calling crates' tests that turn on the `test-support` feature as a dev
+//! Test helpers — the real-process ones and a path that is not Unicode ([`non_utf8_path`]) — shared by this crate's tests and the calling crates' tests that turn on the `test-support` feature as a dev
 //!   dependency (TRD 1-3 §3-8 — `docs/process/S21-crate-boundaries/trd-1-3-platform-crate.md`). They exchange only
 //! OS-level values (`Child`, PID, start time, probe). No helper builds a group handle — the calling crate's tests use that crate's adapter
 //!   type; the group itself is built with [`crate::group::GroupOwner`].
 // ADR-0275
 
+use std::ffi::OsString;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::Child;
 use std::time::{Duration, Instant};
 
@@ -47,6 +49,27 @@ pub fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     }
 }
 
+/// `text` followed by one unit that is not Unicode — Windows: a lone UTF-16 surrogate (`0xD800`); elsewhere: the byte
+///   `0xFF` — so a caller's tests can reach the branch for a path that is not UTF-8 without an OS branch of their own.
+// ADR-0420
+pub fn non_utf8_path(text: &str) -> PathBuf {
+    #[cfg(windows)]
+    let raw = {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        wide.push(0xD800);
+        OsString::from_wide(&wide)
+    };
+    #[cfg(unix)]
+    let raw = {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(0xFF);
+        OsString::from_vec(bytes)
+    };
+    PathBuf::from(raw)
+}
+
 /// Is the executable of that number `ping.exe`. `false` if it cannot be opened.
 #[cfg(windows)]
 pub fn is_ping(pid: u32) -> bool {
@@ -62,4 +85,16 @@ pub fn is_ping(pid: u32) -> bool {
         let _ = CloseHandle(handle);
     }
     image.is_some_and(|p| p.to_ascii_lowercase().ends_with("\\ping.exe"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_utf8_path_keeps_the_text_and_is_not_utf8() {
+        let path = non_utf8_path("/lib/x");
+        assert_eq!(path.to_str(), None);
+        assert!(path.to_string_lossy().starts_with("/lib/x"));
+    }
 }

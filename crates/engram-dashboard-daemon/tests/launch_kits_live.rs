@@ -1,14 +1,14 @@
 //! Real launch materials, live — the library service as the manager's launch-kit source, over the repo `builtin\`,
-//! with real claude and codex (scenes L1–L6).
+//! with real claude and codex (scenes L1–L7).
 //!
 //! ★Every scene is `#[ignore]`★ — the claude and codex lanes run them (`.claude/skill-bindings/qa.md`). L1, L2, L4,
-//!   claude L5 and claude L6 spend **one real claude turn each** (claude L5 also spawns claude a second time, with no
+//!   claude L5, claude L6 and L7 spend **one real claude turn each** (claude L5 also spawns claude a second time, with no
 //!   turn); L3 and codex L5 each spawn codex twice (JSON and terminal) and spend **one real model turn** on the JSON
 //!   one; codex L6 spawns codex JSON once and spends one real model turn. Auth needed.
 //! ★The service is built here, not through the daemon assembly★ — the same values as production (the repo built-in
 //!   folder, the production folder waits), but a temporary launch root, home and profile store under one scene root
 //!   (removed on drop), so the launch writes nothing outside it and codex's own skill roots under the home are empty.
-//!   L4 and L5 register one temporary library mount, L6 two. A real MCP server and control channel stand behind the
+//!   L4, L5 and L7 register one temporary library mount, L6 two. A real MCP server and control channel stand behind the
 //!   agents, so claude's engram tools are really attached.
 //! ★The CLIs still keep their own records outside it★ — each claude turn leaves a session transcript under the real
 //!   `~/.claude/projects/`, and each codex JSON turn (L3, codex L5, codex L6) leaves one thread in the real `~/.codex`
@@ -23,6 +23,7 @@
 // ADR-0337
 // ADR-0341
 // ADR-0387
+// ADR-0420
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -892,6 +893,79 @@ async fn claude_l6_a_preset_in_one_mount_loads_a_skill_from_another() {
         answer.contains(&skill),
         "L6: the skill of mount B: {answer}"
     );
+}
+
+// ── L7 — claude: a hook component ─────────────────────────────────────────────────────────────
+
+/// L7 — a library hook component (`library/hooks/marker`: `SessionStart` and `UserPromptSubmit`, each running
+///   `node "${CLAUDE_PLUGIN_ROOT}/mark.js" <event>`, which appends the event to a marker file in the scene root)
+///   attached through a preset: the start leaves nothing out, the merged `settings.json` carries both groups with the
+///   placeholder rewritten to the hook folder (forward slashes), and one turn writes both markers — claude ran the
+///   hook from the library folder. Needs `node` on the PATH.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real claude — 1 model turn"]
+async fn claude_l7_a_hook_component_writes_its_markers() {
+    let root = scene_root("claude-hooks");
+    let lib = root.join("lib");
+    let hook = lib.join("hooks").join("marker");
+    let markers = root.join("markers.txt");
+    let markers_literal = serde_json::to_string(markers.to_str().unwrap()).unwrap();
+    put(
+        &hook.join("mark.js"),
+        &format!("require('fs').appendFileSync({markers_literal}, process.argv[2] + '\\n');\n"),
+    );
+    let group = |folder: &str, event: &str| serde_json::json!({ "hooks": [{ "type": "command", "command": format!("node \"{folder}/mark.js\" {event}") }] });
+    let definition = serde_json::json!({ "hooks": {
+        "SessionStart": [group("${CLAUDE_PLUGIN_ROOT}", "session-start")],
+        "UserPromptSubmit": [group("${CLAUDE_PLUGIN_ROOT}", "prompt")],
+    } });
+    put(&hook.join("hooks.json"), &definition.to_string());
+    put(
+        &lib.join("P.yaml"),
+        "kind: preset\nversion: 1\nhooks:\n  - library/hooks/marker\n",
+    );
+    let live = live(&root, Some(lib)).await;
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut profile = agent("live-claude-hooks", claude(), &work);
+    profile.presets = vec![AttachedPreset {
+        path: "library/P.yaml".to_string(),
+    }];
+    let id = profile.id;
+    let (info, notices, events) = live.start_reporting(&profile);
+    assert!(
+        notices.is_empty(),
+        "L7: the start left something out: {notices:?}"
+    );
+    let vol = root.join("launch").join(format!("{id}-{}", info.epoch));
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(vol.join("settings.json")).unwrap()).unwrap();
+    let folder = hook.to_string_lossy().replace('\\', "/");
+    for (event, marker) in [
+        ("SessionStart", "session-start"),
+        ("UserPromptSubmit", "prompt"),
+    ] {
+        let groups = settings["hooks"][event]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            groups.contains(&group(&folder, marker)),
+            "L7: {event} in the merged settings: {settings}"
+        );
+    }
+    let from = live.one_turn(id, &events, "Reply with the single word OK.");
+    println!("L7 answer: {}", events.text_after(from));
+    let seen = || std::fs::read_to_string(&markers).unwrap_or_default();
+    let both = wait_until(Duration::from_secs(30), || {
+        let text = seen();
+        text.lines().any(|line| line == "session-start")
+            && text.lines().any(|line| line == "prompt")
+    });
+    live.kill_and_reap(id);
+    live.end().await;
+
+    assert!(both, "L7: the hook markers: {:?}", seen());
 }
 
 // ── L3 — codex JSON and terminal ──────────────────────────────────────────────────────────────
