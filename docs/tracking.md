@@ -10,7 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
-| T-135 | S25 client stage — a structure view of the whole reference graph (agents → presets → items), beside the existing screens | Main | Idea — for the screen discussion |
+| T-135 | S25 client stage — a structure view of the whole reference graph (agents → presets → items), beside the existing screens | Main | Decided direction — first client-stage slot, read-only, plugin-shaped (T-109) |
 | T-134 | Agent backends as external modules others can add | Main | Idea — waiting for trigger (after S25) |
 | T-133 | S25 step 10b — a writing library command repeated after the CLI's long wait ran out can overlap the first (extra staging) | Main | Recorded — closing it is outside 10b |
 | T-132 | S25 step 9b U5 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
@@ -223,6 +223,7 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Already decided:** the daemon's library features are always on and the screen is a package that can be turned off (parent TRD `docs/process/S25-preset-library/trd.md` §1-7 — user 2026-10-29 「데몬은 디폴트로 제공하는거고 UI는 그냥 패키지? 형식으로 온오프」); every feature is LLM-controllable on the daemon bus / `__engramCmd` (CLAUDE.md 「LLM-우선 제어」).
 - **Proposal discussed (main, not decided):** build the library screen only on public surfaces (daemon bus commands, `__engramCmd`, slot registration) — no screen-only shortcuts — so it is a plugin in shape; extract a plugin API from that boundary later. Not now: install / isolation / permissions / distribution / API versioning of third-party plugins (one consumer is too few to design the API). Missing axes for a general plugin system noted: event subscription (hooks), declarative contributions (menus · keys · settings), server-side extension (backends / daemon commands without rebuild), isolation and permissions, API stability. Content-level extension (presets · skills) already covers much of what users would want (main's judgment).
 - **Next:** when the client-stage TRD is written, decide how far to go; check whether the steps 11–13 design already uses only public surfaces.
+- **User 2026-11-26 (direction):** before the full screens, a read-only structure viewer slot (T-135) comes first — main edits through `engram` commands, the user watches in the viewer. From now on slots are plugins in shape so users can contribute and share later (「계속 내가 지원할게 아니라서 유저들이 참여해서 공유할 수 있게」): frontend = add slots, backend = register models / commands (T-134). The plugin system itself is a separate topic; until then every new slot is built only on public surfaces (daemon bus commands, `__engramCmd`, slot registration), its code in one folder, the app runs with it off. In-app slot, not a standalone page.
 
 ### T-105. Launch folder wait as an advanced setting
 - **Status:** deferred — user 2026-11-11 「어 나중에 한다고 치고」 (ADR-0360 decision 6 · Rejected alternatives "User settings for the waits now").
