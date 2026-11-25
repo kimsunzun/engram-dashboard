@@ -1,7 +1,7 @@
 # ADR-0415: Step 9b U3: one-volume move - merge pairs and SKILL.md leaves, ordered mapping, the shared trash path
 
-- 상태: 확정 (2026-11-24, 근거: user decision 2026-11-24 (decision 2) · main decisions during step-9b U3 coding · code review deep (lead, risk axis, Codex) PASS 2026-11-24)
-- 관련: ADR-0409 (decisions 2, 4 and 10, M3, M7, M8) · ADR-0339 (decision 1, M108, M110) · ADR-0414 (decisions 1, 4 and 5) · ADR-0365 · ADR-0335 · ADR-0358 · step-9b TRD `docs/process/S25-preset-library/trd-file-operations.md` §3.4 · §3.5
+- 상태: 확정 (2026-11-24, 근거: user decision 2026-11-24 (decision 2) · main decisions during step-9b U3 coding · code review deep (lead, risk axis, Codex) PASS 2026-11-24) · 부분 폐기 by ADR-0424 (decisions 2 and 3 merge leaves)
+- 관련: ADR-0409 (decisions 2, 4 and 10, M3, M7, M8) · ADR-0339 (decision 1, M108, M110) · ADR-0414 (decisions 1, 4 and 5) · ADR-0365 · ADR-0335 · ADR-0358 · step-9b TRD `docs/process/S25-preset-library/trd-file-operations.md` §3.4 · §3.5 · Amended by ADR-0424 (decisions 2 and 3 merge leaves)
 
 ## 맥락
 Step-9b U3 built move and rename on one volume (`move_items` · `rename`): one no-replace rename per item, same-name folders merging entry by entry, `onConflict`, an overwrite's displaced entry into the trash, the catalog and the references following in the same hold. The TRD left open what a merge's emptied source folder maps to, how a merge that takes a skill's `SKILL.md` is judged, and how several items of one call compose. The deep review (four rounds) found that a prefix mapping of an emptied folder re-points references to entries that never moved, that a plan made before the disk step can be outrun by earlier items of the same call, and that two displacements of one path collide on one trash row.
