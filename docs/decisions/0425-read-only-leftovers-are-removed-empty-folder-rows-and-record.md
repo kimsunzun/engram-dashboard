@@ -1,20 +1,44 @@
 # ADR-0425: Read-only leftovers are removed: empty-folder rows and record-less shells are made removable, and on Unix make_removable adds owner rwx to folders being removed without following links
 
-- 상태: 확정 (2026-11-26, 근거: TODO)
-- 관련: Amends ADR-0409 (decision 11 read-only removal) · Amends ADR-0266 (decision 7 other-OS implementations) · TODO 나머지 관련
+- 상태: 확정 (2026-11-26, 근거: user decision 2026-11-26 on tracking T-131 (「ㅇㅇ 읽기전용하고 관계없지. 그냥 지우면 될듯.」) · measurement on Windows 2026-11-26 (`fs::remove_dir` refuses a read-only empty folder) · main decisions during step-22 P4 coding and review · P4 code review (lead PASS, risk axis FIX, cross-family Codex FIX) on `3211b40d..7788c880` · fix round 1 (all ten items fixed, none rejected; re-review in progress when this was written))
+- 관련: Amends ADR-0409 (decision 11 read-only removal) · Amends ADR-0266 (decision 7 other-OS implementations) · ADR-0408 (direct removal for emptying) · ADR-0418 (rows of a bundle without a readable record) · ADR-0365 (no link is followed) · ADR-0230 (CI is Windows only) · ADR-0424 (same unit: hook lone-marker confirmation) · tracking T-131
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+Emptying the trash and permanent delete remove the listed rows one by one (ADR-0409 decision 11, ADR-0408). When std refused a read-only entry, platform `fs::make_removable` ran once and the removal was retried; on Windows that cleared the read-only attribute through a no-follow walk, and on Unix it did nothing, as ADR-0266 decision 7 had it ("no implementation for another OS arises from this separation").
+
+Step-9b U5 left two cases recorded as T-131. On Unix, removability is the parent folder's write bit, so a folder copied with mode 0555 inside a row keeps its children and the row stays. On Windows, an empty-folder row went through a bare `remove_dir`, which refuses a read-only empty folder (measured 2026-11-26). The user decided that read-only has nothing to do with it: Engram removes what it is removing.
 
 ## 결정
-TODO — 무엇으로 정했나.
+1. **Entries Engram is removing are removed whatever their read-only flag or mode** (user 2026-11-26, T-131). This covers every row of emptying and permanent delete; a refused first attempt gets one make-removable step and one more attempt, as before.
+2. **An empty-folder row is made removable only by itself, and only while it is still empty.** The new `LibraryStore::remove_empty` stats the path (no link), runs a bare `remove_dir`, and on a refusal lists the folder: still empty, platform `make_entry_removable` changes the folder alone (not recursive) and the removal is retried; no longer empty, it answers `DirectoryNotEmpty` and changes nothing, so a folder that gained entries meanwhile stays untouched, and so do they. `remove_row` and `prune_shell` remove empty folders through it.
+3. **On Unix, `make_removable` adds the owner's read, write and search bits to each folder being removed, without following links.**
+   - Each entry is stat'ed without following. A folder is opened `O_NOFOLLOW | O_DIRECTORY` and its mode read and written through that handle (`fstat` · `fchmod`), so the folder changed is the folder checked.
+   - A folder the process cannot open for reading (owner read missing: 0o000, 0o100, 0o300) gets its mode by name with `fchmodat(AT_FDCWD, path, mode | 0o700, AT_SYMLINK_NOFOLLOW)`, then is opened again without following before it is listed, so a name that became a link is never listed.
+   - Links and files are never changed (a file's own mode does not matter to its removal). A folder this process may not change (`EPERM` / `EACCES`), or a name that is no folder now or cannot be changed without following (`ELOOP`, `EOPNOTSUPP`, `ENOTSUP`, as on glibc before 2.32), is left and answered.
+   - On both OSes, a folder that cannot be listed (access denied) is left and the walk goes on.
+   - `make_entry_removable` (the entry alone) and `make_entries_removable` (a folder made to let its entries go; nothing on Windows, where a folder's read-only attribute never keeps its entries) are the same per-folder step.
+4. **Shells inside a record-less bundle being emptied are made writable so their rows can go** (main). For a bundle without a readable record (rows = the files and empty folders inside a trashed folder, ADR-0418), a refused row gets `open_shells`: each folder strictly between the bundle and the row, outermost first, never the bundle or anything above it, goes through `LibraryStore::make_entries_removable` (the way checked and the path a real folder first), then the row is tried once more if any folder changed. A single-row permanent delete may leave such a shell with owner bits added (main, accepted); the code does not check that every row under the shell is named in the call.
+5. **The Unix branches are compile-checked only.** They were checked by hand for `x86_64-unknown-linux-gnu` (`cargo check -p engram-dashboard-platform --tests --target x86_64-unknown-linux-gnu`); macOS was not compiled. CI is Windows only (ADR-0230), so nothing builds or runs them there, and the Unix-only tests (`an_owned_folder_without_its_read_bit_still_gets_owner_rwx`, the Unix half of `a_read_only_folder_above_rows_without_a_record_lets_them_go_and_is_pruned`) have never run.
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+- **Leave read-only leftovers in place (ADR-0409 decision 11 and ADR-0266 decision 7 as written)** — the Unix 0555 folder keeps its row, and the read-only empty-folder row stays on Windows, every time. Evidence: 실측 (Windows `remove_dir` refuses a read-only empty folder; mutation: reverting `trash.rs` fails `a_read_only_empty_folder_row_is_removed`). 사용자 직접 기각 (T-131).
+- **The recursive `make_removable` for an empty-folder row (the first P4 cut)** — an outside writer that adds entries between the listing and the removal gets them changed (read-only cleared, or owner bits added) when the OS answers access denied before not-empty, and the retry then fails not-empty, against "never change what stays". Evidence: 리뷰 + 코드 (lead 5, risk R1, Codex must; test `a_child_arriving_after_a_refused_empty_removal_keeps_its_attributes` fails without the emptiness check).
+- **Change a Unix folder's mode only through a handle opened for reading** — an owned folder without its read bit never reaches `fchmod`: below the path it is left, as the path itself the walk errors, and the row stays. Evidence: 리뷰 + 코드 (Codex must, risk R3, lead 6a; the test is Unix only and has not run).
+- **Never change a shell's mode, since a shell may stay** — on Unix the record-less rows under a 0555 shell fail `library-write-failed` every time. Evidence: 리뷰 + 코드 (risk R4, lead hold 5; test `a_read_only_folder_above_rows_without_a_record_lets_them_go_and_is_pruned`, which on Windows fails with the bare `remove_dir` restored in `prune_shell`).
+- **List each folder from its checked handle (`openat` / `fdopendir`) to close the swap race** — the walk lists by path after the check, as on Windows; the race is the check-then-call one ADR-0409 accepts. Evidence: 약함 (judgement; offered by lead 6c, not taken up in fix round 1).
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+- **User decision 2026-11-26 (tracking T-131):** 「ㅇㅇ 읽기전용하고 관계없지. 그냥 지우면 될듯.」
+- **Measurement (Windows, 2026-11-26):** `fs::remove_dir` refuses a read-only empty folder; std `remove_dir_all` already removes read-only folders (noted in `store.rs`), which is why the nested-folder test passes on Windows without T-131.
+- **P4 code review on `3211b40d..7788c880`:** lead PASS (hold 2: the Unix branch contradicts ADR-0409 decision 11 and ADR-0266 decision 7 until amended; hold 5: shells); risk axis FIX (R1, R3, R4, R5, H2); cross-family Codex FIX (two musts: the recursive make on an empty-folder row, and the 0100 folder).
+- **Fix round 1:** items 1 (entry-alone make while still empty), 2 (`fchmodat` fallback; a folder whose listing is denied is left), 8 (`a_read_only_folder_inside_a_row_has_its_entries_removed` sets `DENY_FIRST_REMOVAL`, so the make-and-retry path runs on Windows), 9 (`prune_shell` through `remove_empty`), 10 (`make_entries_removable`, `Removal { empty_only, shells }`, `open_shells`). Windows test `a_folder_that_cannot_be_listed_is_left_and_the_walk_goes_on` (icacls deny) fails without the change.
+- **Code:** platform `fs/removable.rs` (`make_removable`, `make_entry_removable`, `make_entries_removable`, `add_owner_rwx`, `chmod_no_follow`), platform `lib.rs` invariant 3; asset-library `store.rs` (`remove_empty`, `make_entries_removable`, `remove_on_disk`), `trash.rs` (`remove_row`, `Removal`, `open_shells`, `prune_shell`).
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+- **Link safety stands** (ADR-0409 영향, ADR-0365) — no mode or attribute is written through a link; a folder is changed through a no-follow handle, or by name with `AT_SYMLINK_NOFOLLOW`. Accepted: a folder swapped for another folder between the stat and `fchmodat`, or for a link between a folder's check and its listing, is the check-then-call race ADR-0409 accepts (written in the `removable.rs` doc).
+- **Empty-only means untouched when not empty** — the empty-folder path never changes a folder that gained entries, nor its entries; the recursive walk is for rows removed with everything in them.
+- **Shells** — only folders inside the bundle being emptied, never the bundle or above; one that stays keeps the owner bits added.
+- **ADR-0409 decision 11** — "on Unix it does nothing" is replaced by decision 3 here; the rest (rows one by one, then the shell pruned; no whole-bundle removal; one make step and one retry) stands.
+- **ADR-0266 decision 7** — the Unix branches of `make_removable`, `make_entry_removable` and `make_entries_removable` are an implementation for another OS; platform `lib.rs` invariant 3 lists them as an exception beside the no-replace rename and the no-follow open. Other OSes still do nothing.
+- **Unverified on Unix** — until a Unix runner exists, these branches rest on reading and one Linux cross-check; a change to them needs the same `cargo check --target x86_64-unknown-linux-gnu` at least.
+- **Docs** — `docs/reference/structure/asset-library.md` (emptying paragraph) and the headers of `store.rs`, `trash.rs`, `removable.rs` and `fs.rs` follow this decision (main's). The log lines in `store.rs` that say "read-only" mean, on Unix, folders whose owner bits were not added.
