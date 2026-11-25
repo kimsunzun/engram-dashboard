@@ -1,46 +1,51 @@
-# Handoff: S25 step 22 (hook components) — P1, P2 committed; P3a coded + reviewed (uncommitted); next P3b
+# Handoff: S25 step 22 (hook components) — P3, P4 (+T-125, T-131), P5 committed locally; only the GUI check and integration remain
 
 ## Know first
-- **P3a code is uncommitted and has not passed QA** (gate not passed — review + one fix round passed, QA runs together with P3b). Files: `Cargo.lock`, `crates/engram-dashboard-agent/Cargo.toml` (sha2 0.10, toml 1.1 — no new package), agent `backend/codex/hook_assembly.rs` (new, untracked), `backend/codex/cmdline.rs`, `backend/codex/mod.rs`, `backend/hooks.rs`, `backend/claude/launch.rs`, `launch.rs`. Snapshot ref: `refs/s25/p3a-wip` = `c4a0d6b3` (tree `60a0df35`, parent `e1ed09fa`) — restore with `git checkout refs/s25/p3a-wip -- Cargo.lock crates/engram-dashboard-agent` if the working tree is lost. Reviewed tree (code) = `6f6652dc`. `docs/reference/structure/agent-backend.md`'s P3a line was committed early in `e1ed09fa`.
-- **Codex rules changed by the user (global, 2026-11-25):** review effort by strength (deep = xhigh, full/light = high; Claude high reviewer = `worker-reviewer-high`); resume a codex thread only for re-reviews of the SAME target; new call when the thread's last `tokens used` > 200k; never change effort while resuming. Codex weekly limit was at 31% left (2026-11-25) — keep codex calls lean.
-- Step notes: `.review-s25-22/` (git-excluded): `agents.md` (all agent ids / trees / verdicts), unit briefs (`p1a-unit.md` … `p3a-unit.md`, `p3a-fix-r1.md`), `coder-brief.md` (standing coder rules), handovers `handover-p1a.md`, `handover-p1b.md`, `handover-p2.md`, `handover-p3a.md` (P3b entry points + open holds), review / QA results.
+- **Nothing pushed.** Branch is 13 commits ahead of origin (14 with this handoff). P3 (`3211b40d`), P4 (`1e52e5f2`), P5 (`2f383f4a`) are committed locally with "GUI check pending" in their messages — the user asked to run autonomously "until GUI" (「GUI 전까지는 자율모드로 쭉 진행해」) and to test everything together after P4/P5 (「p4 p5 끝나고 다 테스트해보고 정리하면 될듯」).
+- **GUI check is the next gate** (P3 = codex transport row; scene H1 in TRD §5). The QA executor can run GUI 실측 itself (qa binding 「GUI 실측」 / qa-verify recipes) — the user does not have to watch; ask the user whether to run it now.
+- TRD `trd-hook-components.md` is **not** marked Implemented yet (held until the GUI check passes); parent `trd.md` item 22 likewise.
+- Base is behind origin/master (8 commits at last fetch) — merge master at integration (handbook `docs/handbook/branch-commit.md`).
 - Not ours: `src-tauri/bindings/*.ts` line-ending noise, `.claude/explain/`.
-- QA binding quirk: `core.hooksPath` is an absolute path to the main checkout, so mutation runs in an isolated copy (cold build ~3 min) — filed as feedback (2nd).
+- Codex weekly limit: unknown now; this session used ~8 codex review calls (xhigh/high).
 
 ## One-line state · next first action
-Step 22: TRD `trd-hook-components.md` (draft 7, reviewed deep PASS) · ADR-0420 (+ ADR-0421 path rule, ADR-0422 value escaping). **P1** (library kind + agent contract) `78b80e06` and **P2** (placeholder rewrite, path rule, claude route — claude hooks measured running) `17cb4829` committed + pushed after review + QA PASS. **P3a** (codex hook assembly: hash / key / TOML writer / escaping / raw folding / state carry / budget / U5 — NOT wired, codex still loads no hooks) coded, deep review PASS after one fix round.
-**Next:** spawn a fresh worker-senior coder for **P3b** with a brief built from TRD P3 row + `handover-p3a.md` "Entry points P3b must call" + its Fix-round notes: wire `cmdline::assembled` into codex `command_line_fits` / `materialize`, `hooks_line_readable` in `config_args`, exempt raw hooks lines from `codex-config-unsafe-char` only through the same `split_hooks_lines` check (unreadable still refused — risk reviewer condition), `hook_config` on thread/start AND thread/resume, AppServerOpen expected entries, post-open `hooks/list {threadId}` check → `LinkResolution::Ready` notices → `deliver_notices`, codex `loads().hooks = true` both modes, remove the codex interim refusal + `allow(dead_code)`, notice wordings, log the dropped-state warning once, ADR-0216 test docs, codex lane tests (`codex_launch_live`: trust + hash vs `hooks/list` through Engram's own transport). Then review (deep → xhigh; new reviewers — new target), QA (full + both lanes + **GUI** — codex transport row), commit P3a+P3b together. Then P4 (lone `hooks.json` confirmation; `hook-unconfirmed` already exists as a merge `left` reason), P5 (help paragraph incl. refused path chars / two-% note / `library.list` direct-items wording, priming root line, reference files, scene H1 all four backend·mode pairs), mark TRD Implemented + parent item 22, then the end-of-server-stage CLI pass with the user, then the client stage (first slot = read-only structure viewer).
+Step 22 code is complete and gated except GUI: P3 (codex assembly + wiring, deep review + fix round, QA PASS minus GUI), P4 + T-125 + T-131 (deep review, 3 fix rounds, QA PASS — no GUI needed), P5 (help/docs, full review, QA PASS minus GUI). **Next:** report to the user (morning), ask the open items one at a time (list below), then run the GUI check (P3 transport + scene H1) via `/engram-qa`; on PASS: mark TRD Implemented (+ parent item 22, README), merge master, push, CI green, `--no-ff` integration per the handbook; then the end-of-server-stage CLI pass with the user; then the client stage (first slot = read-only structure viewer, T-135).
 
 ## Repo state (measured at save)
-- Branch `v0.5.0/feat/preset-library`, HEAD `e1ed09fa`, 0 ahead / 0 behind origin (this handoff commit makes it 1 ahead). Base is behind origin/master (8+ commits at last check) — merge master at integration.
-- Uncommitted: P3a code (above, gate not passed). Untracked: `hook_assembly.rs` (ours), `.claude/explain/` (not ours).
+- Branch `v0.5.0/feat/preset-library`, HEAD `2f383f4a`, 13 ahead / 0 behind origin (this handoff commit makes 14). Uncommitted: none of ours (only the bindings noise and `.claude/explain/`).
+- Commits this session: tracking decisions `8fb58025` `f0afd41c` `8d0d8651`; ADR-0423 `0390e559` `a86d6e39`; P3 `3211b40d`; ADR-0424/0425 `4597fd45` `173a1a9d` `bf0c981b` `78471fe7`; P4 `1e52e5f2`; P5 `2f383f4a`.
+- Snapshot ref `refs/s25/p3b-wip` (old P3 WIP) can be deleted (`git update-ref -d refs/s25/p3b-wip`).
 
 ## Verification state
-- Committed and gated: P1 `78b80e06` (QA: workspace 6990, gates 34/34, frontend 2884, claude 14/14, codex 19/19, mutation 5/5, GUI scene PASS); P2 `17cb4829` (QA: workspace 7005, gates 34/34, frontend 2884, claude 15/15 incl. L7 hook markers, codex 19/19, mutation 3/3; probe: an unknown hook event key in --settings is skipped alone).
-- P3a: coder suites green (agent lib 1852, asset-library 946, daemon lib 727, cli 116+47), fmt clean, bindings no drift; hash goldens verified by hand (16) by the lead reviewer. **QA not run.**
-- Rerun: `cargo test --workspace -- --test-threads=4` · full QA per `.claude/skill-bindings/qa.md`.
+- P3: review deep (lead, risk = protocol/handshake, codex) → fix round 1 → all PASS. QA: workspace 7076, gates 34/34, frontend 2884, bindings no drift, codex lane incl. H-a..H-d PASS (0.171.0), claude lane PASS (2.1.330), mutation 3/3. **GUI not run.**
+- P4/T-125/T-131: review deep (lead, risk = data integrity, codex) → 3 fix rounds → lead/risk PASS, codex PASS after a one-line test gate (closed by main diff check). QA PASS: workspace 7094, gates 34/34, both lanes, mutation 3 caught. **Unix branches compile-checked only (x86_64-unknown-linux-gnu), never run** (CI is Windows-only).
+- P5: review full (lead PASS, codex FIX doc → fixed). QA: workspace 7095, both lanes, help/commands read literally, pin mutation caught. **GUI (scene H1) not run.**
+- Rerun: `cargo test --workspace -- --test-threads=4`; full QA per `.claude/skill-bindings/qa.md`. Results: `.review-s25-22/p3-qa-result.md`, `p4-qa-result.md`, `p5-qa-result.md`.
+
+## Open items for the user (ask one at a time, scene first, no jargon)
+1. GUI check now? (QA runs it; codex transport + scene H1.)
+2. T-136 (O7): codex hook verdicts of boot-restored agents are only logged at info (nothing written in release). Recommend warn.
+3. T-137: (a) deleting a lone hooks.json now asks (recommend keep); (b) a SKILL.md arriving in a referenced hook folder turns it into a skill without asking (recommend record only).
+4. Unfixed recommendations: P3 — silent hooks/list test wall-clock bound (cap + 3 s) may be tight on slow CI; handshake timeouts say "ms" vs turn timeouts "seconds"; lane H-a waits for roster removal not process exit (os error 32 seen once). P4 — keep-both clause in merge (~ops.rs 4534) has no guarding test; empty fresh plan answers skill-unconfirmed for a hook-only call (rare race); markers matched by exact name after a case-only rename (pre-existing); Unix code never run (suggest a Linux CI job for platform + asset-library).
+5. ADR rejected alternatives marked 약함, never shown to the user: ADR-0421 (×2), ADR-0422 (×1), ADR-0423 ("ask hooks/list after history paging"), ADR-0424 ("a code per marker kind"), ADR-0425 ("list folders from the checked handle").
+6. Records left by lanes (user's call to delete): codex threads in ~/.codex (ids in the QA result files), claude session records under ~/.claude/projects/.
+- Still waiting from before: TRD O8 (detect codex review screen), T-109/T-134/T-135 direction items.
 
 ## Failed approaches (do-not)
-- REPL scripts that contain a literal backslash followed by u and four hex digits, or backticks / dollar-brace inside template literals, are refused by auto mode or the parser — build such text with `String.fromCharCode(92)` or plain strings.
-- Resuming one codex review thread across units / many rounds cost 300k–480k tokens per short re-check (now forbidden by the new global rule).
-- `git write-tree` fingerprint after a docs commit landed mid-QA differs by that docs file only — verify with `git diff --stat <qa-tree> <new-tree>` before committing.
+- REPL: rg patterns containing backticks inside `$` templates get refused by the rm guard ("unterminated quote") — search file text in JS instead.
+- Resuming a codex thread past 200k tokens is forbidden by the global rule — new call with previous findings + incremental diff (did so for P3 r2, P4 r3).
+- `edit()` with leading-space-sensitive markdown list lines: ADR bodies use 3-space indents — copy exact text.
 
 ## Decisions
 User:
-- codex 훅 승인 처리 · 상황: codex는 미승인 훅을 조용히 건너뜀, JSON 모드엔 승인 화면 없음 · A 자동 승인 ★ / B 우회 플래그 / C 그대로 / D 사용자 한 번 승인 · 「우리건데?」 · 같음 · 근거: 프리셋에 붙인 것이 승인.
-- 승인 기록 자리 · 상황: 세션 키가 위치 기반이라 조합이 바뀌면 덮어씀 · 매번 -c ★ / config.toml(관례) · 「-c 가 그럼 더 좋다는거아냐? 유동적이고」 · 같음.
-- 설정 부품 안의 codex 훅 줄 · 상황: 같은 -c 키는 나중 것만 남음 · 실행 거부 ★ / 합치기 / 우리 것이 이김 · 「합치기가 맞고」 · 갈림.
-- U5 프로필 추가 실행 인자의 hooks 줄 · 상황: 표기 여러 가지, 리뷰마다 구멍 · A 거부+안내 ★ / B 다 읽어 합치기 · 「A로 해서 코딩 들어가.」 · 같음.
-- (묻지 않음) 옛 세션-id 훅 부활 · 「ㅇㅇ 그대로가」.
-- (묻지 않음) UI 첫 작업 = 읽기 전용 구조 뷰어 슬롯, 앱 안 · 「앱안에 슬롯으로 만들긴 하는데 … 슬롯이 전부 플러그인이되서 나중에 유저가 참여할 수 있게」 · 조건: 「별도의 주제니깐 그렇다고 가정하고 구조 유지해서」 → tracking T-109 / T-135.
-- (묻지 않음) 기본 플러그인 팩 · 「디폴트 플러그인 팩 같은 느낌으로 한곳에 모을거거든? 사용량 같은것도 거기에 있어야겠지.」 → T-109.
-- (묻지 않음) 백엔드를 모듈로 · 「나중에는 백엔드만 모듈로 빼서 다른사람도 확장할 수 있게」 → T-134.
-- (묻지 않음) 뷰어 동작 · 「전체 연결도 볼 수 있고 클릭하면 해당것만 포커싱」 → T-135 (mockup shown, throwaway).
-- (묻지 않음) codex 사용 규칙 — 사용자가 전역 규칙을 직접 고침(위 Know first).
-Main: P1 split P1a/P1b, P3 split P3a/P3b; O4 include (ADR-0420 d14); LibraryFolderRow (not FolderRow) and one origin per config argument; path rule additions (ADR-0421); value escaping instead of refusal (ADR-0422, all three reviewers recommended); cmd `%` documented not refused; hooks-not-loaded code; merge keeps hooks.json when an entry stays behind (hook-unconfirmed in left).
-Open: ADR-0421 has two rejected alternatives and ADR-0422 one marked 「약함 (not put to the user)」 (flow §1-2 says show them to the user); holds in `handover-p3a.md` (invalid-regex matcher group trusted but skipped; float/date in a raw hooks line refuses); TRD O7 (boot-restored agents only log the post-open verdict), O8 (detect codex review screen in the terminal pump); tracking T-125 / T-127 / T-128 / T-131 still waiting for the user.
+- 다른 드라이브 이동 시 속성 복사·같은 이름 폴더 합치기(T-128, T-127) · 상황: USB·NAS로 옮기면 속성 설정 거부로 매번 실패, 원본은 남음 · A 내용만 옮기고 로그 ★ / B 지금처럼 실패 · 고른 것 「음? 뭔가 복잡하면 그냥 다 막아.」 · 갈림 · → kept strict/refused, archived.
+- 둘 다 유지 합치기로 참조 스킬이 사라질 때(T-125) · 상황: SKILL.md가 SKILL (2).md가 되어 프리셋 참조가 깨짐, 묻지 않음 · 묻기 ★ / 그대로 · 「어쨋든 이대로 진행하던지」 · 같음 · → ADR-0424.
+- 읽기전용 남은 항목 삭제(T-131) · 상황: Unix 쓰기금지 폴더·Windows 읽기전용 빈 폴더를 못 지움 · 지우게 고침 ★ / 그대로 · 「ㅇㅇ 읽기전용하고 관계없지. 그냥 지우면 될듯.」 · 같음 · → ADR-0425.
+- (묻지 않음) 진행 방식 · 「그럼 GUI 전까지는 자율모드로 쭉 진행해.」 · 조건: 「p4 p5 끝나고 다 테스트해보고 정리하면 될듯.」 · 「다 끝나면 핸드오프해. 막히면 그냥 이세션에서 하는게 좋겠지?」
+Main: P3b brief scope; hooks/list own 2 s cap (lead hold → main, ADR-0423); foreign = trusted AND enabled; one notice per why; P4+T-125+T-131 in one coder (shared ops.rs); lone hooks.json delete asks (held → T-137); "skill-unconfirmed wins" one code per call; detach filter judges where pairs put a folder; Unix chmod of unreadable folders via O_PATH + /proc on Linux, none elsewhere; shells in record-less bundles opened (single-row residue accepted); local commits with "GUI pending" instead of waiting (user's go-ahead); TRD Implemented held until GUI.
+Open: list above.
 
 ## References
-- TRD `docs/process/S25-preset-library/trd-hook-components.md`; ADR-0420, ADR-0421, ADR-0422; research `docs/research/*-2026-11-24.md`.
-- Codex source clone (rust-v0.171.0): previous session scratchpad `C:/Users/kimsunzun/AppData/Local/Temp/claude/5e8357076cb62dd9/ac276d0d-d059-40f0-9ac0-521d8901bf10/scratchpad/codex` — may be cleared; re-clone tag `rust-v0.171.0` if missing.
-- Feedback filed this session: Engram `79c5a87` (qa: hooksPath 2nd, vite nohup), `1514a63` (global: codex resume cost).
+- TRD `docs/process/S25-preset-library/trd-hook-components.md`; ADR-0420…0425; tracking T-136, T-137.
+- Step notes `.review-s25-22/` (git-excluded): `agents.md` (all agents, trees, verdicts), unit/fix briefs, handovers `handover-p3a/p3b/p4/p5.md`, review and QA results.
+- Feedback filed this session: Engram `ad32101` (global: tracking items relayed in record terms), `92ae544` (engram-implement: tracking close rule).
