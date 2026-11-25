@@ -1,20 +1,39 @@
 # ADR-0423: Codex post-open hook check: hooks list waits at most 2 s inside the handshake budget, a foreign hook counts only when trusted and enabled, one notice per why
 
-- 상태: 확정 (2026-11-26, 근거: TODO)
-- 관련: Amends ADR-0420 (decision 7 post-open check) · TODO 나머지 관련
+- 상태: 확정 (2026-11-26, 근거: main decisions during step-22 P3b coding and review · P3b code review (lead and risk axis, PASS) on `6f6652dc..210c9b27` · fix round 1 re-review (lead and risk axis, PASS) on `210c9b27..ddca0e3f` · codex source at `rust-v0.171.0`)
+- 관련: Amends ADR-0420 (decision 7 post-open check) · ADR-0341 (decision 5 once per agent notices; run notices stay outside the fingerprint) · ADR-0337 (log counts and flags, never a path or the text) · TRD `docs/process/S25-preset-library/trd-hook-components.md` §3.3 (the post-open check) and §9.3 O7 · `docs/research/hook-trust-layers-2026-11-24.md` (measure-4: `hooks/list {threadId}` without `experimentalApi`)
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+ADR-0420 decision 7 has the codex JSON transport ask `hooks/list {threadId}` after the thread opens and before the link reports ready, and raise `codex-hooks-untrusted` as a run notice for an expected key not listed trusted and enabled, or a foreign trusted session-flags hook. P3b wired it: the transport's `handshake` calls `check_hooks` (verdicts in the pure `backend/codex/hook_check.rs`), `LinkResolution::Ready` and `EarlyVerdict::Ready` carry the notices, and `AgentManager::with_run_notices` logs them and appends them to the launch reply. Codex now loads hooks in both modes.
+
+The P3b code review found three gaps in decision 7 as written. `hooks/list` shared the 10 s `HANDSHAKE_BUDGET` with nothing of its own, and it runs before a resumed agent's history paging, so a codex that accepts the request but answers late or never would spend the whole remaining budget and open the resumed screen empty. A foreign session-flags hook was named whenever it was trusted, even when turned off. And the shape of the notice (one per what, which cases, when the check runs) and the artifacts that carry the expected entries were left to the code.
 
 ## 결정
-TODO — 무엇으로 정했나.
+1. **The post-open `hooks/list {threadId}` waits at most 2 s (`HOOKS_LIST_CAP`) inside the shared handshake budget.** The check waits `min(what is left of HANDSHAKE_BUDGET, HOOKS_LIST_CAP)`; no new clock. A silent codex therefore spends at most the cap (plus one 500 ms sweep) of a resumed agent's history paging budget. On no answer the link still reports Ready, with the `unchecked` notice. The timeout text of every handshake request reads `<method>: no answer within <N> ms`.
+2. **A foreign session-flags hook is reported only when it is trusted and enabled.** A `sessionFlags` hook listed with `trustStatus: "trusted"` and `enabled: true` whose key Engram did not write is `foreign`; a trusted but disabled one cannot run and is not named.
+3. **`codex-hooks-untrusted` is one notice per `why`, and the check runs whenever a thread config is sent.**
+   - The `why` values, in this order: `not-listed`, `untrusted`, `disabled`, `foreign`; a failed `hooks/list` (an older codex without the method, no answer within the cap) is one `unchecked` notice carrying `error`. Each notice names every origin (or foreign key) once; an `unchecked` with nothing expected raises no notice.
+   - The check runs exactly when a thread config is sent on `thread/start` or `thread/resume`, including a config that only carries other-source state; then nothing is expected and the check only watches for a foreign hook. Terminal artifacts send no thread config and never run it.
+4. **`LaunchArtifacts.hook_trust` carries the expected entries in both modes.** Each `HookTrust` is `key`, `hash` and `from` (a String: the hook component's library path or the settings asset's path, empty for an unnamed origin); `AppServerOpen.expected_hooks` takes them when a thread config is sent. The interim `CODEX_HOOKS_OMITTED` code (`codex-hooks-omitted`) was removed with codex loading hooks; nothing raises it.
+5. **Open, not decided: how boot-restored agents surface run notices (TRD O7, held for the user).** Run notices are logged at `info` (`launch run notice`), like every launch notice. A boot restore answers no caller, so for a restored codex JSON agent the notice is only logged, and `info` is below the release default level. Whether boot restore logs them at `warn` or surfaces them in the restore status is the user's call.
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+- **Let `hooks/list` use the remaining handshake budget alone** — a codex that accepts the request and stays silent spends the rest of the 10 s, `collect_history` then sees a zero budget, and a resumed agent opens with an empty past screen plus an `unchecked` notice on every such launch. Evidence: 코드 + 리뷰 (risk axis finding 1 traced `check_hooks(.., remaining())` → `hydrate_history(.., link_deadline)` → `collect_history`; lead hold 7; the test `a_silent_hooks_list_keeps_ready_within_its_cap` fails without `.min(HOOKS_LIST_CAP)` with "no answer within 9960 ms").
+- **Ask `hooks/list` after history paging, still before the gate opens** — it reorders the handshake, so the verdict no longer sits beside the thread open it judges. Evidence: 약함 (judgement; the risk review offered it as an option).
+- **Name a foreign session-flags hook when it is trusted alone** — a persisted entry with `trusted_hash` and `enabled = false` would raise a `foreign` notice saying the hook can run while codex never registers it. Evidence: 코드 + 리뷰 (lead finding 5; codex `discovery.rs` registers a handler only when `enabled`, confirmed by the risk axis re-review).
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+- **P3b code review (`6f6652dc..210c9b27`), both PASS with no must:**
+  - Risk axis, finding 1 (권장): `hooks/list` had no budget of its own and runs before history paging; options named were a cap at `min(remaining, ~2 s)` or asking after `hydrate_history`. It cannot happen on 0.171.0, where `hooks/list {threadId}` is an in-memory `thread.list_hooks()` behind `global_shared_read("config")` and Engram sends no config writer. Finding 2 (hold): run notices at `info` leave no line in a release log on boot restore (O7).
+  - Lead, finding 5 (권장): `hook_check` counted a trusted foreign session-flags hook whatever `enabled` said; hold 6 (O7 at info) and hold 7 (the shared deadline), each a direction for main.
+- **Fix round 1 re-review (`210c9b27..ddca0e3f`), lead and risk axis, both PASS:** `HOOKS_LIST_CAP = 2 s` and `remaining().min(HOOKS_LIST_CAP)` leave about 7 s of the budget for history paging after a silent codex; a late answer after the cap is forgotten and dropped at debug, so no pending request leaks; the 2 s cap does not cut off a healthy codex (a cached list, milliseconds, read from the codex source and not measured); `foreign` needs `trusted && enabled`, pinned by `a_foreign_trusted_but_disabled_session_hook_is_not_named`; O7 unchanged, as held.
+- **Code:** `transport.rs` `HOOKS_LIST_CAP` and `check_hooks`; `hook_check.rs` `verdicts` and `unchecked`; codex `mod.rs` `expected_hooks = config.is_some().then(hook_trust)`; `launch.rs` `HookTrust`; `manager.rs` `with_run_notices`.
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+- **One clock** — the cap is a bound inside `HANDSHAKE_BUDGET`, never a second deadline; a second clock could exceed `LINK_RESOLUTION_BACKSTOP`.
+- **A failed `hooks/list` never fails the handshake** (decision 7 of ADR-0420 stands); it logs `warn` when keys were expected and `info` when nothing was.
+- **The check rides the thread config** — whoever sends `config` on a thread open hands `hook_trust` as `expected_hooks`; dropping the config on resume shows as every key `not-listed`.
+- **Run notices stay outside the notice fingerprint** (ADR-0341 decision 5) and reach the reply on every launch they occur, through both `EarlyVerdict::Ready` arms (source-text pin `both_ready_arms_hand_the_run_notices_to_the_reply`).
+- **ADR-0420 영향 "own wording for the hook notice codes"** — `codex-hooks-omitted` is gone; `codex-hooks-untrusted` takes one sentence per `why` (`untrusted` says the hooks "may not run", since codex's `bypass_hook_trust` runs enabled untrusted hooks).
+- **Docs** — `docs/reference/structure/agent-backend.md` (codex app-server row) and the `HANDSHAKE_BUDGET` / `check_hooks` docs follow this decision (main's).
+- **The rest of ADR-0420 decision 7 stands**; terminal mode still has no run-time check.
