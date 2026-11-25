@@ -1,44 +1,46 @@
-# Handoff: S25 — step 9b done; step 10b U1 + U2 committed — next: 10b U3 (docs / headers), then the server-stage end
+# Handoff: S25 step 22 (hook components) — P1, P2 committed; P3a coded + reviewed (uncommitted); next P3b
 
 ## Know first
-- **Autonomous run on the user's word** (2026-11-24 「ㅇㅇ 쭉쭉 진행해. 자율모드로. UI 전까지하고 막히면 어쩔 수 없고.」 then 「ㅇㅇ 리뷰 구현 QA 까지 쭉 진행해.」 for 10b). Rule change asked by the user (「자율모드에서는 사용자 승인없이 진행 가능한걸로 변경해야될듯? 피드백 올려」) is filed as engram-implement feedback (Engram `24ce00c`), NOT applied to the rules yet — until it is, TRD approval and *Stop* points still require the user; this session had explicit go-ahead for 10b only.
-- Codex via CLI (not the plugin): first review `codex exec --sandbox read-only --skip-git-repo-check -c model_reasoning_effort="xhigh" "<brief>" < /dev/null`; re-reviews `codex exec resume -c model_reasoning_effort="xhigh" -c sandbox_mode="read-only" --skip-git-repo-check <session id> "<brief>" < /dev/null` (id from the output's `session id:`), run from REPL `$` with a short `.timeout()`.
-- **Claude reviewer / coder agent ids do not survive a session** (SendMessage → "No transcript found"); a new session spawns fresh workers and hands them the previous round's findings files. Codex threads DO resume by id.
-- Step notes and briefs: 9b `.review-s25-d9/s9b-code/` (agents.md, unit briefs, round files, commit messages); 10b `.review-s25-10b/` (agents.md, u1/u2/u3-unit.md, review and QA briefs, results). Both folders are in `.git/info/exclude`.
-- QA briefs: build from `.review-s25-d9/s9b-code/u3-qa-brief.md` pattern, BUT check the TRD §8 per-unit GUI on/off — the 10b U2 brief wrongly said GUI off and shell scene C2 had to be run as a supplement. **U3's TRD row runs CLI scene C1** on the qa 「GUI 실측」 isolated daemon (needs U1–U3).
+- **P3a code is uncommitted and has not passed QA** (gate not passed — review + one fix round passed, QA runs together with P3b). Files: `Cargo.lock`, `crates/engram-dashboard-agent/Cargo.toml` (sha2 0.10, toml 1.1 — no new package), agent `backend/codex/hook_assembly.rs` (new, untracked), `backend/codex/cmdline.rs`, `backend/codex/mod.rs`, `backend/hooks.rs`, `backend/claude/launch.rs`, `launch.rs`. Snapshot ref: `refs/s25/p3a-wip` = `c4a0d6b3` (tree `60a0df35`, parent `e1ed09fa`) — restore with `git checkout refs/s25/p3a-wip -- Cargo.lock crates/engram-dashboard-agent` if the working tree is lost. Reviewed tree (code) = `6f6652dc`. `docs/reference/structure/agent-backend.md`'s P3a line was committed early in `e1ed09fa`.
+- **Codex rules changed by the user (global, 2026-11-25):** review effort by strength (deep = xhigh, full/light = high; Claude high reviewer = `worker-reviewer-high`); resume a codex thread only for re-reviews of the SAME target; new call when the thread's last `tokens used` > 200k; never change effort while resuming. Codex weekly limit was at 31% left (2026-11-25) — keep codex calls lean.
+- Step notes: `.review-s25-22/` (git-excluded): `agents.md` (all agent ids / trees / verdicts), unit briefs (`p1a-unit.md` … `p3a-unit.md`, `p3a-fix-r1.md`), `coder-brief.md` (standing coder rules), handovers `handover-p1a.md`, `handover-p1b.md`, `handover-p2.md`, `handover-p3a.md` (P3b entry points + open holds), review / QA results.
 - Not ours: `src-tauri/bindings/*.ts` line-ending noise, `.claude/explain/`.
+- QA binding quirk: `core.hooksPath` is an absolute path to the main checkout, so mutation runs in an isolated copy (cold build ~3 min) — filed as feedback (2nd).
 
 ## One-line state · next first action
-9b (file operations) is **Implemented** (U3, U4a, U4b, U5 committed; TRD `trd-file-operations.md` marked; ADR-0415 – ADR-0418). 10b (commands) TRD reviewed deep PASS (`trd-file-commands.md`, ADR-0419); **U1** (six LLM commands) and **U2** (shell-only `library.emptyTrash`, gate, CLI change) committed and pushed after review + QA PASS.
-**Next:** 10b **U3** — brief ready at `.review-s25-10b/u3-unit.md` (root help line, priming pointer, headers, reference files of the TRD's 「Reference files to fix」 row, the U1/U2 batched doc items, and the one-word `library.renameMount` stop-prefix fix in asset-library `host.rs` `rename_ok`). Spawn a fresh worker-senior coder with it (base HEAD `00ca7336`); review light/full (docs + one fix); QA with **CLI scene C1** (TRD §8). Then mark 10b TRD `Implemented` + parent `trd.md` item 10b status, then step 22 (hook components) needs its TRD — and the end-of-server-stage CLI pass with the user (parent TRD §5-3).
+Step 22: TRD `trd-hook-components.md` (draft 7, reviewed deep PASS) · ADR-0420 (+ ADR-0421 path rule, ADR-0422 value escaping). **P1** (library kind + agent contract) `78b80e06` and **P2** (placeholder rewrite, path rule, claude route — claude hooks measured running) `17cb4829` committed + pushed after review + QA PASS. **P3a** (codex hook assembly: hash / key / TOML writer / escaping / raw folding / state carry / budget / U5 — NOT wired, codex still loads no hooks) coded, deep review PASS after one fix round.
+**Next:** spawn a fresh worker-senior coder for **P3b** with a brief built from TRD P3 row + `handover-p3a.md` "Entry points P3b must call" + its Fix-round notes: wire `cmdline::assembled` into codex `command_line_fits` / `materialize`, `hooks_line_readable` in `config_args`, exempt raw hooks lines from `codex-config-unsafe-char` only through the same `split_hooks_lines` check (unreadable still refused — risk reviewer condition), `hook_config` on thread/start AND thread/resume, AppServerOpen expected entries, post-open `hooks/list {threadId}` check → `LinkResolution::Ready` notices → `deliver_notices`, codex `loads().hooks = true` both modes, remove the codex interim refusal + `allow(dead_code)`, notice wordings, log the dropped-state warning once, ADR-0216 test docs, codex lane tests (`codex_launch_live`: trust + hash vs `hooks/list` through Engram's own transport). Then review (deep → xhigh; new reviewers — new target), QA (full + both lanes + **GUI** — codex transport row), commit P3a+P3b together. Then P4 (lone `hooks.json` confirmation; `hook-unconfirmed` already exists as a merge `left` reason), P5 (help paragraph incl. refused path chars / two-% note / `library.list` direct-items wording, priming root line, reference files, scene H1 all four backend·mode pairs), mark TRD Implemented + parent item 22, then the end-of-server-stage CLI pass with the user, then the client stage (first slot = read-only structure viewer).
 
 ## Repo state (measured at save)
-- Branch `v0.5.0/feat/preset-library`, HEAD `00ca7336`, 0 ahead / 0 behind origin (this handoff commit makes it 1 ahead).
-- Uncommitted: none of ours (only `.claude/explain/` untracked and the bindings line-ending noise).
+- Branch `v0.5.0/feat/preset-library`, HEAD `e1ed09fa`, 0 ahead / 0 behind origin (this handoff commit makes it 1 ahead). Base is behind origin/master (8+ commits at last check) — merge master at integration.
+- Uncommitted: P3a code (above, gate not passed). Untracked: `hook_assembly.rs` (ours), `.claude/explain/` (not ours).
 
 ## Verification state
-- Committed and gated: 9b U3 `ad6dbe00`, U4a `7468d90b`, U4b `b093beb6`, U5 `9f166061` (9b Implemented); 10b U1 (commit after `003c75fb`), U2 `00ca7336`. Each: code review (deep / full) PASS, QA full regression + claude/codex lanes + mutation PASS; U4a ran the two-volume test (C: ↔ I:); 10b U2 ran shell scene C2 on an isolated daemon + app.
-- Not run yet: 10b CLI scene C1 (U3's QA), the server-stage end CLI pass. Clippy is not installed for the pinned toolchain (never run).
+- Committed and gated: P1 `78b80e06` (QA: workspace 6990, gates 34/34, frontend 2884, claude 14/14, codex 19/19, mutation 5/5, GUI scene PASS); P2 `17cb4829` (QA: workspace 7005, gates 34/34, frontend 2884, claude 15/15 incl. L7 hook markers, codex 19/19, mutation 3/3; probe: an unknown hook event key in --settings is skipped alone).
+- P3a: coder suites green (agent lib 1852, asset-library 946, daemon lib 727, cli 116+47), fmt clean, bindings no drift; hash goldens verified by hand (16) by the lead reviewer. **QA not run.**
 - Rerun: `cargo test --workspace -- --test-threads=4` · full QA per `.claude/skill-bindings/qa.md`.
 
 ## Failed approaches (do-not)
-- SendMessage to a previous session's agent id → `No transcript found for agent ID` — spawn fresh.
-- A QA brief copied without checking the TRD's GUI line skipped a required live scene (10b U2 C2).
-- Telling a coder a helper "already exists" without checking (10b/U4a no-follow open) — the coder had to add one; verify such premises first.
+- REPL scripts that contain a literal backslash followed by u and four hex digits, or backticks / dollar-brace inside template literals, are refused by auto mode or the parser — build such text with `String.fromCharCode(92)` or plain strings.
+- Resuming one codex review thread across units / many rounds cost 300k–480k tokens per short re-check (now forbidden by the new global rule).
+- `git write-tree` fingerprint after a docs commit landed mid-QA differs by that docs file only — verify with `git diff --stat <qa-tree> <new-tree>` before committing.
 
 ## Decisions
 User:
-- 둘 다 유지 이름 · 상황: TRD R17 「(2)」 · (2) ★ / - Copy · 「ㅇㅇ (2)로해」 · 같음.
-- 합치기 뒤 스킬 폴더가 SKILL.md를 잃는 경우 · 상황: 참조가 「찾을 수 없음」 · 확인 받기 ★ / 그대로 / 막기 · 「그냥 넣어. 근데 llm이 인자 없이 호출하지는 않을것 같은데 어쨋든 ㄱㄱ」 · 같음 (ADR-0415 decision 2).
-- U1 미결 권장(읽기 전용 폴더 쓰기 열기 거부 시 링크 재확인 생략) · 상황: 휴지통 비우기 때만, 드묾 · 그대로 ★ / 고치기 · 「ㅇㅇ 읽기전용 따지지 말고 그냥 지워」 · 같음 · 근거: read-only entries are removed without asking (main applied it also to read-only junctions — ADR-0418 decision 5).
-- 10b TRD를 추천안으로 리뷰→구현→QA 진행 · 상황: 프로젝트 규칙상 TRD 승인 필요 · D7 (b) 거절하며 안내 ★ / (a) 숨김; D8 (b) 긴 대기 ★ / (a) 기본 대기 · 「ㅇㅇ 리뷰 구현 QA 까지 쭉 진행해.」 · 같음.
-- (묻지 않음) 자율 모드 승인 규칙 · 「자율모드에서는 사용자 승인없이 진행 가능한걸로 변경해야될듯? 피드백 올려」 → filed, not applied.
-- (묻지 않음) 핸드오프 시점 · 「아 그리고 다 끝나고 끊을 수 있는 시점 오면 핸드오프하자.」 · 「현재 어디까지 진행됐음? 끊기 좋은 타이밍에 핸드오프 하면 도리듯」.
-Main: U4 split into U4a / U4b; U6 texts folded into the units' doc passes; read-only junction removed via std `remove_dir_all` (no attribute change); D7 kept by making the CLI post unlisted names (not re-asked — the user's choice unchanged); shell-side long wait handed to the client stage; ADR-0415 – ADR-0419.
-Open (ask the user — all committed with the current behaviour as "decision pending", see `docs/tracking.md`): **T-125** keep-both merge that empties a referenced skill asks nothing (asked once, no answer); **T-127** merge across volumes / copy onto a same-name folder refused (Explorer merges); **T-128** strict time/permission copy (recommend best-effort); **T-131** Unix 0555 folder in a row and a read-only empty-folder row cannot be emptied. Recorded rare items: T-126, T-129, T-130, T-132, T-133 (overlapping repeat after the CLI's wait).
-- Idea raised by the user (not filed): an operator / external-terminal token so a plain terminal Claude can drive the daemon via `engram` (today the CLI needs an engram-spawned agent's `ENGRAM_TOKEN`).
+- codex 훅 승인 처리 · 상황: codex는 미승인 훅을 조용히 건너뜀, JSON 모드엔 승인 화면 없음 · A 자동 승인 ★ / B 우회 플래그 / C 그대로 / D 사용자 한 번 승인 · 「우리건데?」 · 같음 · 근거: 프리셋에 붙인 것이 승인.
+- 승인 기록 자리 · 상황: 세션 키가 위치 기반이라 조합이 바뀌면 덮어씀 · 매번 -c ★ / config.toml(관례) · 「-c 가 그럼 더 좋다는거아냐? 유동적이고」 · 같음.
+- 설정 부품 안의 codex 훅 줄 · 상황: 같은 -c 키는 나중 것만 남음 · 실행 거부 ★ / 합치기 / 우리 것이 이김 · 「합치기가 맞고」 · 갈림.
+- U5 프로필 추가 실행 인자의 hooks 줄 · 상황: 표기 여러 가지, 리뷰마다 구멍 · A 거부+안내 ★ / B 다 읽어 합치기 · 「A로 해서 코딩 들어가.」 · 같음.
+- (묻지 않음) 옛 세션-id 훅 부활 · 「ㅇㅇ 그대로가」.
+- (묻지 않음) UI 첫 작업 = 읽기 전용 구조 뷰어 슬롯, 앱 안 · 「앱안에 슬롯으로 만들긴 하는데 … 슬롯이 전부 플러그인이되서 나중에 유저가 참여할 수 있게」 · 조건: 「별도의 주제니깐 그렇다고 가정하고 구조 유지해서」 → tracking T-109 / T-135.
+- (묻지 않음) 기본 플러그인 팩 · 「디폴트 플러그인 팩 같은 느낌으로 한곳에 모을거거든? 사용량 같은것도 거기에 있어야겠지.」 → T-109.
+- (묻지 않음) 백엔드를 모듈로 · 「나중에는 백엔드만 모듈로 빼서 다른사람도 확장할 수 있게」 → T-134.
+- (묻지 않음) 뷰어 동작 · 「전체 연결도 볼 수 있고 클릭하면 해당것만 포커싱」 → T-135 (mockup shown, throwaway).
+- (묻지 않음) codex 사용 규칙 — 사용자가 전역 규칙을 직접 고침(위 Know first).
+Main: P1 split P1a/P1b, P3 split P3a/P3b; O4 include (ADR-0420 d14); LibraryFolderRow (not FolderRow) and one origin per config argument; path rule additions (ADR-0421); value escaping instead of refusal (ADR-0422, all three reviewers recommended); cmd `%` documented not refused; hooks-not-loaded code; merge keeps hooks.json when an entry stays behind (hook-unconfirmed in left).
+Open: ADR-0421 has two rejected alternatives and ADR-0422 one marked 「약함 (not put to the user)」 (flow §1-2 says show them to the user); holds in `handover-p3a.md` (invalid-regex matcher group trusted but skipped; float/date in a raw hooks line refuses); TRD O7 (boot-restored agents only log the post-open verdict), O8 (detect codex review screen in the terminal pump); tracking T-125 / T-127 / T-128 / T-131 still waiting for the user.
 
 ## References
-- TRDs: `docs/process/S25-preset-library/trd-file-operations.md` (Implemented), `trd-file-commands.md` (reviewed; §8 C1, §9 U3, 「Reference files to fix」); parent `trd.md` §5-3 (10b item has 「Re-review needed」 — satisfied by the child TRD review; update its status at the U3 commit), item 22, server-stage end.
-- ADR-0415 – ADR-0419; `docs/tracking.md` T-125 – T-133.
-- Feedback filed this session (Engram): `4aa84f2` (workers across sessions), `680c4b4` (qa lanes.tsv / env-var test), `24ce00c` (autonomous approval rule).
+- TRD `docs/process/S25-preset-library/trd-hook-components.md`; ADR-0420, ADR-0421, ADR-0422; research `docs/research/*-2026-11-24.md`.
+- Codex source clone (rust-v0.171.0): previous session scratchpad `C:/Users/kimsunzun/AppData/Local/Temp/claude/5e8357076cb62dd9/ac276d0d-d059-40f0-9ac0-521d8901bf10/scratchpad/codex` — may be cleared; re-clone tag `rust-v0.171.0` if missing.
+- Feedback filed this session: Engram `79c5a87` (qa: hooksPath 2nd, vite nohup), `1514a63` (global: codex resume cost).
