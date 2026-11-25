@@ -54,6 +54,7 @@ What this changes in earlier ADRs: ADR-0216 (codex hooks come back, as user comp
 - **Review:** TRD draft 7 reviewed deep (lead, risk axis: trust and execution boundary, cross-family Codex) — PASS 2026-11-25 at `56c6a273`.
 
 ## 영향 / 불변식
+- **Own wording for the hook notice codes** — the interim omission codes `claude-hooks-omitted` / `codex-hooks-omitted` (until each backend loads hooks) and the hook notice codes the TRD lists take facts-only wording of their own, joining the ADR-0357 / ADR-0364 list of codes that do not use the generic text.
 - **asset-library stays backend-blind** — it sees hooks only as neutral `HookRef`s, neutral agent functions and port answers; every claude/codex hook rule lives in `backend/claude` / `backend/codex` (the ADR-0367 gate re-runs in every unit touching asset-library).
 - **One counting seam** — the check and `materialize` call the same codex hook assembly; a second path that builds hook lines would let the check count differ from the line. JSON counts no hook lines.
 - **`~/.codex/config.toml` and `~/.claude` are never written** (QA compares the file byte for byte). Every hook on the codex terminal line has its trust entry on the same line, or codex's TUI picker would write the user's file.
