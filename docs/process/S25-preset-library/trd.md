@@ -989,6 +989,8 @@ Each step is not 「자료구조를 먼저 갈아엎고 호출부를 나중에�
 
 22\. `S25: feat(asset-library,agent): hook components` — (inserted 2026-11-23, user decision) a hook becomes a library component like a skill: a folder holding the backend's hook definition and its scripts, attached to presets and handed to claude / codex the way each loads hooks. Engram passes it through and leaves the checks to the backends (ADR-0359). User 2026-11-23: 「없는것보다는 있는게 좋겠지? 유저가 하드코딩하기 딱 좋은게 훅인데」 · 「기존 인프라에 그대로 끼고 우리쪽은 거치고 클로드 코덱스쪽으로 에러를 넘기는거라서 많이 수정은 안한다고 생각되는데 어쨋든 쭉 진행하면 될듯」. Runs after 10b, before the end of the server stage. Its TRD settles: the claude route (the merged `--settings` with rewritten script paths, or a plugin folder `hooks/hooks.json` through `--plugin-dir` — unmeasured), codex hook trust (stored per definition hash, or `--dangerously-bypass-hook-trust`, which warns on every run — measure), the preset section and its screen. A light convention check comes first (CLAUDE.md). Today a claude hook already passes through a settings preset's raw text (ADR-0328), its script outside the library.
 
+   *Child TRD (2026-11-25)* — design of this step: [`trd-hook-components.md`](trd-hook-components.md) (draft 7, reviewed deep, PASS; rules = ADR-0420). In progress.
+
 **End of server stage — stop (user confirmation)** — run the 「서버 단계 수용」 line of §4 (one CLI pass with `engram` against a real daemon), show it to the user, and record the server stage in the step-log (G20). After confirmation, go on to the client stage.
 
 ### 5-4. Client stage
