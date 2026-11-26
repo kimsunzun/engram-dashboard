@@ -2,6 +2,7 @@
 
 Of the items resolved or closed in tracking.md, only those that other docs or code point to by number are kept here, one line each. Full text = git history (before the simplification = `git show 8671e5c:docs/tracking.md`).
 
+- **T-138** An asset-library test counted a folder stat that a new ask had skipped by joining a just-finished in-flight call (3 vs 4 under load) — resolved 2026-11-26: tests that count folder ops or change a fake between asks run bounded-IO workers inline (test-only `SettledSpawn`); production unchanged · T-139 points to this number
 - **T-131** Read-only entries that emptying could not remove (Unix 0555 folders in a row, a read-only empty-folder row) — resolved 2026-11-26: removed whatever their read-only flag (user 「그냥 지우면 될듯」) · ADR-0425 · `trd.md` and code comments point to this number
 - **T-125** A keep-both merge of a referenced skill that empties the source folder asked nothing — resolved 2026-11-26: it asks (`skill-unconfirmed` / `hook-unconfirmed`), user decision · ADR-0424 · `trd.md` and `ops.rs` point to this number
 - **T-128** Copying times and permissions on a cross-volume move is strict (a volume refusing them fails every such move) — closed 2026-11-26: kept strict, user 「뭔가 복잡하면 그냥 다 막아.」 · `trd-file-commands.md` points to this number
