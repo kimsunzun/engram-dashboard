@@ -158,7 +158,8 @@ pub trait FolderOps: Send + Sync {
 }
 
 /// Starts a worker. The job must run on another thread — run inline, it would run on the caller unbounded and
-/// uncharged. `Err` = it was not started, and `job` has been dropped unrun. Production = [`ThreadSpawn`].
+/// uncharged. `Err` = it was not started, and `job` has been dropped unrun. Production = [`ThreadSpawn`]; the one
+/// exception, for tests only, is `SettledSpawn`.
 pub trait Spawn: Send + Sync {
     fn spawn(&self, name: &str, job: Box<dyn FnOnce() + Send>) -> io::Result<()>;
 }
@@ -907,6 +908,30 @@ impl Spawn for ThreadSpawn {
             .name(name.to_owned())
             .spawn(job)
             .map(drop)
+    }
+}
+
+/// [`ThreadSpawn`], except that a bounded-IO worker runs on the asking thread before `spawn` returns (tests only). The
+/// worker has answered and left the in-flight map before its ask waits, so a later ask from the same thread never joins
+/// a call that already answered (module rules, entry lifetime): each such ask with no stored answer runs its own op —
+/// op counts are exact, and a status a fake changes between two asks reaches the second. Only for asks made one after
+/// another on one thread: an ask from another thread (the boot scan, a test's `on_thread` caller) can still join a
+/// worker running inline on the first.
+///
+/// What changes against a thread: no timeout can occur — the asker waits for the op whole, so it is not for an op a
+/// test holds or slows; an op that panics panics the asking test thread instead of answering "worker panicked"; and a
+/// fake that calls back into the service runs on the asker's thread, under whatever locks the asker holds.
+#[cfg(test)]
+pub(crate) struct SettledSpawn;
+
+#[cfg(test)]
+impl Spawn for SettledSpawn {
+    fn spawn(&self, name: &str, job: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+        if name == WORKER_NAME {
+            job();
+            return Ok(());
+        }
+        ThreadSpawn.spawn(name, job)
     }
 }
 

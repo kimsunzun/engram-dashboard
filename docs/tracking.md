@@ -10,7 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
-| T-138 | asset-library test `a_library_preset_without_a_usable_root_is_block_four_and_the_root_is_stat_ed_only_for_one` failed once under full workspace load (stat count 3, expected 4) | Bug | Not started · seen in local QA 2026-11-26 · passed on rerun and at the base |
+| T-139 | asset-library in-flight folder calls: remove the entry before filling the answer, so a new ask never reuses a finished call | Bug | Idea — reviewers split; tests use SettledSpawn meanwhile |
 | T-137 | S25 step 22 P4 — a lone `hooks.json` delete now asks; a `SKILL.md` arriving in a referenced hook folder asks nothing | Main | Decision pending (user) — current: delete asks, arrival does not |
 | T-136 | S25 step 22 O7 — the post-open hook verdict of a boot-restored codex JSON agent (and of a Withheld caller) is only logged, at info | Main | Decision pending (user) — current: info |
 | T-135 | S25 client stage — a structure view of the whole reference graph (agents → presets → items), beside the existing screens | Main | Decided direction — first client-stage slot, read-only, plugin-shaped (T-109) |
@@ -380,11 +380,10 @@ Full text before the simplification (investigation records · reverted attempts 
 
 ## Bug
 
-### T-138. asset-library test counts a stat that may not have happened yet
-- **Status:** not started — seen once in the local QA of the step-22 CI fix (2026-11-26, full `cargo test --workspace`); passed in two reruns on the same tree and once at the base `f7cbdac2`. Not caused by that fix (its change is in the platform crate's test module).
-- **Case:** `tests::a_library_preset_without_a_usable_root_is_block_four_and_the_root_is_stat_ed_only_for_one` (asset-library `src/lib.rs`) asserts `ops.stats_of("/lib") == 4`; got 3: `panicked at crates\engram-dashboard-asset-library\src\lib.rs:5991:9: assertion left == right failed, left: 3, right: 4`. The stats run through `BoundedIo` on spawned threads (`ThreadSpawn`), so the count can be read before one of them has counted — timing-dependent (inferred from the test's own comment and setup, not traced). ADR-0038.
-- **Repro:** `cargo test -p engram-dashboard-asset-library -- --exact tests::a_library_preset_without_a_usable_root_is_block_four_and_the_root_is_stat_ed_only_for_one` — fails only sometimes, under load.
-- **Next:** make the test wait for the walk's stat threads (or count only what the resolve path awaits) instead of reading the counter at once.
+### T-139. asset-library in-flight folder calls — remove the entry before filling the answer?
+- **Status:** idea, raised by the T-138 fix (2026-11-26); not decided. Tests that count folder ops or change a fake between asks run on the test-only `SettledSpawn` meanwhile.
+- **Case:** `Completion::drop` (asset-library `folder.rs`) fills the answer and wakes waiters before it removes the in-flight entry, so for an instant a new ask joins the finished call and reuses its answer (the module rules' entry-lifetime bullet; ADR-0360). Real folders give the same answer, so production is unaffected; exact-count tests are not.
+- **Options:** (a) remove the entry first, then fill — closes the window; at most one duplicate stat; the 34 settled tests could go back to real threads. The T-138 lead reviewer leaned towards it. (b) keep as is — the codex reviewer warned that waiters would then depend on taking the in-flight mutex and could time out after the IO finished, and that it contradicts the invariant tested near `folder.rs` 2098. Needs a contract review and an ADR-0360 note either way.
 
 ### T-124. base `write_atomic` opens its temp with `File::create`
 - **Status:** not started — pre-existing; found by the S25 step 9b U2a review (Codex). 9b's exclude-line write uses its own create-new temp instead.

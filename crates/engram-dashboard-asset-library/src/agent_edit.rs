@@ -869,8 +869,8 @@ mod tests {
     use crate::backends::AgentBackends;
     use crate::config::{LibraryConfig, MountPlace, MountSetting};
     use crate::folder::{
-        BoundedIo, FolderListing, FolderOps, FolderStatus, LaunchWaits, StdFolderOps, ThreadSpawn,
-        IO_LIMIT, LIST_CAP, TIMEOUT,
+        BoundedIo, FolderListing, FolderOps, FolderStatus, LaunchWaits, SettledSpawn, Spawn,
+        StdFolderOps, ThreadSpawn, IO_LIMIT, LIST_CAP, TIMEOUT,
     };
     use crate::format::read::ITEM_PATH_INVALID;
     use crate::mounts::MountName;
@@ -1063,6 +1063,21 @@ mod tests {
                 applies,
                 Arc::new(StdFolderOps),
                 IO_LIMIT,
+                Arc::new(ThreadSpawn),
+            )
+        }
+
+        /// [`World::new`] whose bounded IO workers are settled ([`SettledSpawn`]) — for a test that changes a folder
+        /// between two asks of it.
+        fn settled(profiles: Vec<AgentProfile>) -> World {
+            World::make_with(
+                profiles,
+                |base, state| LibraryConfig::usable(state, MountPlace::Explicit(base.join("lib"))),
+                true,
+                true,
+                Arc::new(StdFolderOps),
+                IO_LIMIT,
+                Arc::new(SettledSpawn),
             )
         }
 
@@ -1075,11 +1090,12 @@ mod tests {
                 true,
                 Arc::new(StdFolderOps),
                 IO_LIMIT,
+                Arc::new(ThreadSpawn),
             )
         }
 
-        /// [`World::make`] with the config built from the temp folder and the state folder, the folder ops and the
-        /// read budget given.
+        /// [`World::make`] with the config built from the temp folder and the state folder, the folder ops, the read
+        /// budget and the worker spawner given.
         fn make_with(
             profiles: Vec<AgentProfile>,
             config: impl FnOnce(&Path, &Path) -> LibraryConfig,
@@ -1087,6 +1103,7 @@ mod tests {
             applies: bool,
             ops: Arc<dyn FolderOps>,
             limit: Duration,
+            spawn: Arc<dyn Spawn>,
         ) -> World {
             let temp = tempfile::tempdir().unwrap();
             let base = dunce::canonicalize(temp.path()).unwrap();
@@ -1107,13 +1124,7 @@ mod tests {
                 home: None,
                 env: Arc::new(|_| None),
             };
-            let io = BoundedIo::new(
-                limit,
-                LaunchWaits::LAUNCH,
-                LIST_CAP,
-                ops,
-                Arc::new(ThreadSpawn),
-            );
+            let io = BoundedIo::new(limit, LaunchWaits::LAUNCH, LIST_CAP, ops, spawn);
             let store = Arc::new(Held::default());
             let svc = Arc::new(LibraryService::new(
                 values,
@@ -1278,6 +1289,7 @@ mod tests {
             true,
             ops,
             Duration::from_millis(300),
+            Arc::new(ThreadSpawn),
         );
         (world, counts)
     }
@@ -1345,16 +1357,18 @@ mod tests {
         w.library();
         // The first scan stats every mount; the edit itself must stat only the ones its view names.
         w.svc.first_scan_join().unwrap();
-        // A required ask joins a stat worker still in flight, so the first scan's slow `team` stat worker must be gone
-        //   — then an edit that stat'ed `team` would start a worker of its own and be counted.
-        let team = w.base.join("team");
+        // A required ask joins a stat worker still in flight, so the first scan's stat workers must be gone — the slow
+        //   `team` one, and `lib`'s, which can stay in the map for an instant after it answered — then each stat of
+        //   the edit starts a worker of its own and is counted.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while w.svc.io.stat_in_flight(&team) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the first scan's team stat worker never finished"
-            );
-            thread::sleep(Duration::from_millis(10));
+        for folder in [w.base.join("team"), w.base.join("lib")] {
+            while w.svc.io.stat_in_flight(&folder) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the first scan's stat worker of {folder:?} never finished"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
         }
         lock(&counts).clear();
         let began = std::time::Instant::now();
@@ -1462,6 +1476,7 @@ mod tests {
             true,
             Arc::clone(&ops) as Arc<dyn FolderOps>,
             IO_LIMIT,
+            Arc::new(SettledSpawn),
         );
         w.library();
         w.svc.first_scan_join().unwrap();
@@ -1586,6 +1601,7 @@ mod tests {
                 true,
                 Arc::clone(&ops) as Arc<dyn FolderOps>,
                 IO_LIMIT,
+                Arc::new(SettledSpawn),
             );
             let _ = ops.svc.set(Arc::downgrade(&w.svc));
             // The first scan walks `team` only; `library` waits for its next reader.
@@ -1633,6 +1649,7 @@ mod tests {
             true,
             Arc::new(StdFolderOps),
             IO_LIMIT,
+            Arc::new(ThreadSpawn),
         )
     }
 
@@ -1740,6 +1757,7 @@ mod tests {
             true,
             Arc::new(StdFolderOps),
             IO_LIMIT,
+            Arc::new(SettledSpawn),
         );
         w.library();
         let named = strings(&["library/P.yaml", "team/T.yaml"]);
@@ -2440,7 +2458,7 @@ mod tests {
     fn a_root_that_became_unusable_answers_the_same_block_in_the_edit_and_the_read() {
         let profile = claude(&["library/P.yaml"], true);
         let agent = profile.id;
-        let w = World::new(vec![profile]);
+        let w = World::settled(vec![profile]);
         w.library();
         assert!(w.svc.agent_presets(agent).unwrap().problems.is_empty());
         fs::remove_dir_all(w.base.join("lib")).unwrap();
@@ -2471,7 +2489,7 @@ mod tests {
     fn the_edit_and_the_read_judge_a_root_whose_first_scan_failed_by_one_rule() {
         let profile = claude(&["library/P.yaml"], false);
         let agent = profile.id;
-        let w = World::new(vec![profile]);
+        let w = World::settled(vec![profile]);
         w.store
             .fail_scans
             .store(true, std::sync::atomic::Ordering::SeqCst);

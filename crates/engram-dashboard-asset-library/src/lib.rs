@@ -2953,7 +2953,7 @@ mod tests {
     use crate::backends::AgentBackends;
     use crate::excerpt::excerpt;
     use crate::folder::{
-        FolderListing, FolderOps, LaunchWaits, Spawn, ThreadSpawn, IO_LIMIT, LIST_CAP,
+        FolderListing, FolderOps, LaunchWaits, SettledSpawn, Spawn, ThreadSpawn, IO_LIMIT, LIST_CAP,
     };
     use crate::path::BuiltinId;
     use crate::store::mem::{ListFailure, MemStore, OLD};
@@ -3504,6 +3504,15 @@ mod tests {
         mounted_spawn(mounts, ops, profiles, Arc::new(ThreadSpawn))
     }
 
+    /// [`mounted_with`] whose bounded IO workers are settled ([`SettledSpawn`]) — for a test that counts folder ops or
+    /// changes a folder's status between two asks of it.
+    fn mounted_settled(
+        mounts: &[(&str, &str)],
+        ops: Arc<dyn FolderOps>,
+    ) -> (Arc<LibraryService>, Arc<TestStore>) {
+        mounted_spawn(mounts, ops, Vec::new(), Arc::new(SettledSpawn))
+    }
+
     /// [`mounted_agents`] whose jobs and bounded IO workers are spawned by `spawn`.
     fn mounted_spawn(
         mounts: &[(&str, &str)],
@@ -3886,7 +3895,7 @@ mod tests {
     fn a_mount_that_is_not_there_is_left_out_named_and_walked_again_by_its_next_reader_once_back() {
         let ops = Arc::new(StatOps::default());
         lock(&ops.0).insert(PathBuf::from("/team"), FolderStatus::Missing);
-        let (svc, store) = mounted_with(
+        let (svc, store) = mounted_settled(
             &[("library", "/lib"), ("team", "/team")],
             Arc::clone(&ops) as Arc<dyn FolderOps>,
         );
@@ -3994,7 +4003,7 @@ mod tests {
             PathBuf::from("/team"),
             FolderStatus::Unreadable("down".to_owned()),
         );
-        let (svc, store) = mounted_with(
+        let (svc, store) = mounted_settled(
             &[("library", "/lib"), ("team", "/team")],
             Arc::clone(&ops) as Arc<dyn FolderOps>,
         );
@@ -4040,7 +4049,7 @@ mod tests {
     #[test]
     fn a_check_that_keeps_the_files_hooks_judges_the_mounts_they_reach() {
         let ops = Arc::new(StatOps::default());
-        let (svc, store) = mounted_with(
+        let (svc, store) = mounted_settled(
             &[("library", "/lib"), ("team", "/team")],
             Arc::clone(&ops) as Arc<dyn FolderOps>,
         );
@@ -4121,7 +4130,7 @@ mod tests {
     #[test]
     fn a_relink_skips_the_files_of_a_mount_that_cannot_be_read_and_refuses_a_target_in_one() {
         let ops = Arc::new(StatOps::default());
-        let (svc, store) = mounted_with(
+        let (svc, store) = mounted_settled(
             &[("library", "/lib"), ("team", "/team")],
             Arc::clone(&ops) as Arc<dyn FolderOps>,
         );
@@ -4196,7 +4205,7 @@ mod tests {
     #[test]
     fn a_read_entrance_blocks_on_a_mount_whose_walk_again_failed_though_it_was_walked_before() {
         let ops = Arc::new(StatOps::default());
-        let (svc, store) = mounted_with(
+        let (svc, store) = mounted_settled(
             &[("library", "/lib"), ("team", "/team")],
             Arc::clone(&ops) as Arc<dyn FolderOps>,
         );
@@ -4234,7 +4243,7 @@ mod tests {
     #[test]
     fn a_read_entrance_skips_a_mount_found_gone_when_walked_again() {
         let ops = Arc::new(CountOps::default());
-        let (svc, store) = mounted_with(
+        let (svc, store) = mounted_settled(
             &[("library", "/lib"), ("team", "/team")],
             Arc::clone(&ops) as Arc<dyn FolderOps>,
         );
@@ -4274,7 +4283,7 @@ mod tests {
             (FolderStatus::Missing, false),
         ] {
             let ops = Arc::new(CountOps::default());
-            let (svc, store) = mounted_with(
+            let (svc, store) = mounted_settled(
                 &[("library", "/lib"), ("team", "/team")],
                 Arc::clone(&ops) as Arc<dyn FolderOps>,
             );
@@ -4318,10 +4327,11 @@ mod tests {
         let ops = Arc::new(CountOps::default());
         let team = PathBuf::from("/team");
         lock(&ops.later).insert(team.clone(), FolderStatus::Unreadable("down".to_owned()));
-        let (svc, store) = mounted_agents(
+        let (svc, store) = mounted_spawn(
             &[("library", "/lib"), ("team", "/team")],
             Arc::clone(&ops) as Arc<dyn FolderOps>,
             vec![codex.clone()],
+            Arc::new(SettledSpawn),
         );
         store.mem("/lib").file(
             "P.yaml",
@@ -4361,7 +4371,7 @@ mod tests {
             (FolderStatus::Missing, json!({ "code": NOT_FOUND })),
         ] {
             let ops = Arc::new(StatOps::default());
-            let (svc, store) = mounted_with(
+            let (svc, store) = mounted_settled(
                 &[("library", "/lib"), ("team", "/team")],
                 Arc::clone(&ops) as Arc<dyn FolderOps>,
             );
@@ -5663,7 +5673,7 @@ mod tests {
             LaunchWaits::LAUNCH,
             LIST_CAP,
             Arc::clone(&ops) as Arc<dyn FolderOps>,
-            Arc::new(ThreadSpawn),
+            Arc::new(SettledSpawn),
         );
         let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
         let (spelled, folder) = folder_at("work");
@@ -5889,7 +5899,7 @@ claude: {changed: true}
             LaunchWaits::LAUNCH,
             LIST_CAP,
             Arc::clone(&ops) as Arc<dyn FolderOps>,
-            Arc::new(ThreadSpawn),
+            Arc::new(SettledSpawn),
         );
         let library = claude_json(&["library/P.yaml"]);
         let builtin_only = claude_json(&[]);
@@ -5973,7 +5983,7 @@ claude: {changed: true}
             LaunchWaits::LAUNCH,
             LIST_CAP,
             Arc::clone(&ops) as Arc<dyn FolderOps>,
-            Arc::new(ThreadSpawn),
+            Arc::new(SettledSpawn),
         );
         let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
         *lock(&store.fail_every_scan) = true;
@@ -6001,7 +6011,7 @@ claude: {changed: true}
             LaunchWaits::LAUNCH,
             LIST_CAP,
             Arc::clone(&ops) as Arc<dyn FolderOps>,
-            Arc::new(ThreadSpawn),
+            Arc::new(SettledSpawn),
         );
         let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
         *lock(&store.fail_next_scan) = true;
@@ -6177,6 +6187,8 @@ claude: {changed: true}
         store: Arc<TestStore>,
         ops: Arc<StatOps>,
         default_root: PathBuf,
+        /// The services' bounded IO workers are settled ([`SettledSpawn`]); else threads.
+        settled: bool,
     }
 
     impl OnDisk {
@@ -6196,11 +6208,26 @@ claude: {changed: true}
                 store: TestStore::new(&names),
                 ops: Arc::new(StatOps::default()),
                 temp,
+                settled: false,
             };
             if let Some(text) = config {
                 std::fs::write(disk.config_path(), text).unwrap();
             }
             disk
+        }
+
+        /// The same disk whose services' bounded IO workers are settled — for a test that changes a folder's status
+        /// between two asks of it.
+        fn settled(mut self) -> OnDisk {
+            self.settled = true;
+            self
+        }
+
+        fn spawn(&self) -> Arc<dyn Spawn> {
+            match self.settled {
+                true => Arc::new(SettledSpawn),
+                false => Arc::new(ThreadSpawn),
+            }
         }
 
         fn at(&self, name: &str) -> PathBuf {
@@ -6287,7 +6314,7 @@ claude: {changed: true}
                 LaunchWaits::LAUNCH,
                 LIST_CAP,
                 Arc::clone(&self.ops) as Arc<dyn FolderOps>,
-                Arc::new(ThreadSpawn),
+                self.spawn(),
             );
             let values = LibraryValues {
                 registry,
@@ -6359,23 +6386,10 @@ claude: {changed: true}
         }
     }
 
-    /// `svc.status()` asked until the row of `name` is no longer in `from` — a stat worker of an earlier status may
-    /// still be in flight, and a required ask joins it (`folder.rs` — one worker per key).
-    fn settled(svc: &LibraryService, name: &str, from: &MountState) -> MountState {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let state = mount_row(&svc.status(), name).state.clone();
-            if state != *from || Instant::now() > deadline {
-                break state;
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-    }
-
     // ADR-0400 decision 7
     #[test]
     fn a_status_answers_every_mount_in_order_then_the_builtin_with_its_place_and_a_fresh_state() {
-        let disk = OnDisk::new(&["library", "lib"], "library", None);
+        let disk = OnDisk::new(&["library", "lib"], "library", None).settled();
         let svc = disk.start();
         let base = svc.numbers().root;
         assert_eq!(base, ROOT_BASE, "the run starts at the base it was given");
@@ -6425,11 +6439,8 @@ claude: {changed: true}
             disk.at("lib"),
             FolderStatus::Unreadable("denied".to_owned()),
         );
-        let missing = MountState::Missing {
-            why: "not a folder".to_owned(),
-        };
         assert_eq!(
-            settled(&svc, "team", &missing),
+            mount_row(&svc.status(), "team").state,
             MountState::Unreadable {
                 why: "denied".to_owned()
             },
@@ -8644,7 +8655,7 @@ claude: {changed: true}
     #[test]
     fn a_walk_that_fails_after_a_published_first_start_leaves_library_json_written_and_readers_unavailable_until_a_scan_succeeds(
     ) {
-        let disk = OnDisk::new(&["default_library"], "default_library", None);
+        let disk = OnDisk::new(&["default_library"], "default_library", None).settled();
         disk.mem("default_library").file("a.md", "a");
         let root = disk.at("default_library");
         let svc = disk.start();
@@ -8699,7 +8710,7 @@ claude: {changed: true}
         );
         lock(&disk.ops.0).insert(root.clone(), FolderStatus::Missing);
         assert_eq!(
-            settled(&svc, "default_library", &MountState::Ok),
+            mount_row(&svc.status(), "default_library").state,
             MountState::Missing {
                 why: "missing".to_owned()
             }
@@ -9242,7 +9253,7 @@ claude: {changed: true}
 
         /// Two mounts — `library` at the default place (`lib`, holding `b.md`) and `team` at `lib2` (holding `a.md`).
         fn two_mounts() -> OnDisk {
-            let disk = OnDisk::new(&["lib", "lib2"], "lib", None);
+            let disk = OnDisk::new(&["lib", "lib2"], "lib", None).settled();
             std::fs::write(
                 disk.config_path(),
                 disk.mounts_doc(&[("library", "default"), ("team", "lib2")]),
@@ -10168,7 +10179,7 @@ claude: {changed: true}
 
         /// Three mounts — [`two_mounts`] plus `zed` at `lib3`.
         fn three_mounts() -> OnDisk {
-            let disk = OnDisk::new(&["lib", "lib2", "lib3"], "lib", None);
+            let disk = OnDisk::new(&["lib", "lib2", "lib3"], "lib", None).settled();
             std::fs::write(
                 disk.config_path(),
                 disk.mounts_doc(&[("library", "default"), ("team", "lib2"), ("zed", "lib3")]),
