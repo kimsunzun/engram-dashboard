@@ -595,10 +595,12 @@ mod tests {
     }
 
     // A folder the walk may not list (an ACL denying everyone `FILE_LIST_DIRECTORY`) is left and answered; the walk
-    //   goes on to the rest. The premise is checked through the listing the walk uses.
+    //   goes on to the rest. The premise is checked through the listing the walk uses, on a thread without the
+    //   privileges that pass the deny.
     #[cfg(windows)]
     #[test]
     fn a_folder_that_cannot_be_listed_is_left_and_the_walk_goes_on() {
+        let _unprivileged = without_backup_privileges();
         let scratch = Scratch::new("removable");
         let row = scratch.0.join("row");
         let (shut, other) = (row.join("shut"), row.join("other.md"));
@@ -775,10 +777,11 @@ mod tests {
     // An ACL denying everyone `FILE_WRITE_ATTRIBUTES` (`icacls`): a read-only entry so denied is left and answered; one
     //   that needs no change is not refused; the walk goes on to the rest. A name pending deletion (held open by a handle
     //   with the classic delete mark) cannot even be opened for its attributes: left and answered too. The premise is
-    //   checked through the opens the walk uses — a process holding the backup privilege passes the deny.
+    //   checked through the opens the walk uses, on a thread without the privileges that pass the deny.
     #[cfg(windows)]
     #[test]
     fn an_entry_whose_attributes_cannot_be_written_is_left_and_the_walk_goes_on() {
+        let _unprivileged = without_backup_privileges();
         let scratch = Scratch::new("removable");
         let row = scratch.0.join("row");
         std::fs::create_dir(&row).expect("row folder");
@@ -979,6 +982,77 @@ mod tests {
             "icacls {} {args:?}: {status}",
             path.display()
         );
+    }
+
+    /// Holds the current thread, until dropped, on a copy of the process token with the backup and restore privileges
+    /// removed. With them enabled a process passes the deny ACEs `icacls` sets: the walk's opens ask backup semantics.
+    /// That they were enabled on the elevated GitHub Windows runner is inferred from its CI failures (std's listing
+    /// passed the deny there too), not measured. The copy is this thread's alone —
+    /// the other tests run on other threads of this process and keep the process token; `icacls`, a child process,
+    /// starts from the process token too.
+    #[cfg(windows)]
+    struct WithoutBackupPrivileges;
+
+    #[cfg(windows)]
+    fn without_backup_privileges() -> WithoutBackupPrivileges {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows::Win32::Foundation::{BOOL, HANDLE, LUID};
+        use windows::Win32::Security::{
+            AdjustTokenPrivileges, ImpersonateSelf, LookupPrivilegeValueW, SecurityImpersonation,
+            LUID_AND_ATTRIBUTES, SE_BACKUP_NAME, SE_PRIVILEGE_REMOVED, SE_RESTORE_NAME,
+            TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+        };
+        use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+        // SAFETY: takes the level only; the guard below reverts the thread on every path out.
+        unsafe { ImpersonateSelf(SecurityImpersonation) }.expect("impersonate self");
+        let guard = WithoutBackupPrivileges;
+        let mut raw = HANDLE::default();
+        // SAFETY: `raw` is a valid out-pointer for the call.
+        unsafe {
+            OpenThreadToken(
+                GetCurrentThread(),
+                TOKEN_ADJUST_PRIVILEGES,
+                BOOL::from(true),
+                &mut raw,
+            )
+        }
+        .expect("open the thread token");
+        // SAFETY: `raw` is a token handle just opened for this function; `OwnedHandle` takes it over and closes it.
+        let token = unsafe { OwnedHandle::from_raw_handle(raw.0) };
+        for name in [SE_BACKUP_NAME, SE_RESTORE_NAME] {
+            let mut luid = LUID::default();
+            // SAFETY: `name` is a static NUL-terminated string; `luid` is a valid out-pointer.
+            unsafe { LookupPrivilegeValueW(None, name, &mut luid) }.expect("privilege id");
+            let removed = TOKEN_PRIVILEGES {
+                PrivilegeCount: 1,
+                Privileges: [LUID_AND_ATTRIBUTES {
+                    Luid: luid,
+                    Attributes: SE_PRIVILEGE_REMOVED,
+                }],
+            };
+            // A privilege the token does not hold succeeds as well (`ERROR_NOT_ALL_ASSIGNED`): nothing to pass with.
+            // SAFETY: `token` stays open across the call; `removed` outlives it, and no previous state is asked.
+            unsafe {
+                AdjustTokenPrivileges(
+                    HANDLE(token.as_raw_handle()),
+                    BOOL::from(false),
+                    Some(&removed),
+                    0,
+                    None,
+                    None,
+                )
+            }
+            .expect("remove the privilege");
+        }
+        guard
+    }
+
+    #[cfg(windows)]
+    impl Drop for WithoutBackupPrivileges {
+        fn drop(&mut self) {
+            // SAFETY: the thread impersonates since `without_backup_privileges`; no arguments.
+            unsafe { windows::Win32::Security::RevertToSelf() }.expect("revert to self");
+        }
     }
 
     // `two.md` is another name of `one.md` and lies outside the folder: clearing `one.md` would clear `two.md` too.
