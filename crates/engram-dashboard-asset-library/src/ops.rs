@@ -5411,8 +5411,8 @@ mod tests {
     use crate::config::{LibraryConfig, MountPlace, MountSetting};
     use crate::edit::{AddEntries, NewItem};
     use crate::folder::{
-        BoundedIo, FolderListing, FolderOps, FolderStatus, LaunchWaits, StdFolderOps, ThreadSpawn,
-        IO_LIMIT, LIST_CAP,
+        BoundedIo, FolderListing, FolderOps, FolderStatus, LaunchWaits, SettledSpawn, Spawn,
+        StdFolderOps, ThreadSpawn, IO_LIMIT, LIST_CAP,
     };
     use crate::format::hooks::HOOK_SHAPE_INVALID;
     use crate::store::{ContentTag, FsStore, LibraryStore, ScanListing};
@@ -5901,19 +5901,37 @@ mod tests {
         }
 
         fn make(profiles: Vec<AgentProfile>, limit: Duration) -> World {
-            World::make_with(profiles, limit, None, None)
+            World::make_with(profiles, limit, None, None, Arc::new(ThreadSpawn))
+        }
+
+        /// As [`World::new`], its bounded IO workers settled ([`SettledSpawn`]) — for a test that changes what a probe
+        /// answers between two asks of one folder.
+        fn settled() -> World {
+            World::make_with(Vec::new(), IO_LIMIT, None, None, Arc::new(SettledSpawn))
         }
 
         /// As [`World::new`], with the built-in folder `builtin`.
         fn with_builtin(builtin: &Path) -> World {
-            World::make_with(Vec::new(), IO_LIMIT, None, Some(builtin))
+            World::make_with(
+                Vec::new(),
+                IO_LIMIT,
+                None,
+                Some(builtin),
+                Arc::new(ThreadSpawn),
+            )
         }
 
         /// As [`World::new`], with `team`'s folder in a fresh temp folder inside `elsewhere` (another volume) and `lib2`
         /// a link to it.
         fn across(elsewhere: &Path) -> World {
             let team = tempfile::tempdir_in(elsewhere).unwrap();
-            World::make_with(Vec::new(), IO_LIMIT, Some(team), None)
+            World::make_with(
+                Vec::new(),
+                IO_LIMIT,
+                Some(team),
+                None,
+                Arc::new(ThreadSpawn),
+            )
         }
 
         fn make_with(
@@ -5921,6 +5939,7 @@ mod tests {
             limit: Duration,
             team: Option<TempDir>,
             builtin: Option<&Path>,
+            spawn: Arc<dyn Spawn>,
         ) -> World {
             let temp = tempfile::tempdir().unwrap();
             let base = dunce::canonicalize(temp.path()).unwrap();
@@ -5971,7 +5990,7 @@ mod tests {
                 LaunchWaits::LAUNCH,
                 LIST_CAP,
                 Arc::clone(&probes) as Arc<dyn FolderOps>,
-                Arc::new(ThreadSpawn),
+                spawn,
             );
             let disk = Arc::new(Disk::default());
             let svc = Arc::new(LibraryService::new(
@@ -11515,7 +11534,7 @@ mod tests {
     //   disk entry (a short name, where the volume makes one) — still takes a copy name, never overwriting the item.
     #[test]
     fn a_copy_into_an_alias_of_its_own_folder_takes_a_copy_name() {
-        let world = World::new();
+        let world = World::settled();
         world.put("lib/longfoldername/x.md", "x");
         world.scan();
         let alias = world.at("lib/LONGFO~1");
@@ -11578,7 +11597,7 @@ mod tests {
     //   takes a copy name and nothing is overwritten; a folder the canonical path tells apart is overwritten as asked.
     #[test]
     fn without_a_file_identity_the_own_folder_is_judged_by_canonical_path_or_kept_safe() {
-        let world = World::new();
+        let world = World::settled();
         world.put("lib/d/x.md", "item");
         world.put("lib/f/x.md", "there");
         world.scan();

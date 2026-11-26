@@ -2157,8 +2157,8 @@ mod tests {
     use crate::backends::AgentBackends;
     use crate::config::{LibraryConfig, MountPlace};
     use crate::folder::{
-        BoundedIo, FolderListing, FolderOps, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT,
-        LIST_CAP,
+        BoundedIo, FolderListing, FolderOps, LaunchWaits, SettledSpawn, Spawn, StdFolderOps,
+        ThreadSpawn, IO_LIMIT, LIST_CAP,
     };
     use crate::mounts::MountPath;
     use crate::store::{FsStore, LibraryStore, ScanListing, TrashBundle};
@@ -2366,6 +2366,8 @@ mod tests {
         profiles: Vec<AgentProfile>,
         root: bool,
         builtin: bool,
+        /// The services' bounded IO workers are settled ([`SettledSpawn`]); else threads.
+        settled: bool,
         svc: Arc<LibraryService>,
     }
 
@@ -2374,16 +2376,27 @@ mod tests {
             World::with(Vec::new(), true)
         }
 
+        /// [`World::new`] whose bounded IO workers are settled — for a test that counts folder ops or acts at a stat
+        /// that follows another stat of the same folder.
+        fn settled() -> World {
+            World::make(Vec::new(), true, None, true)
+        }
+
         fn with(profiles: Vec<AgentProfile>, root: bool) -> World {
-            World::make(profiles, root, None)
+            World::make(profiles, root, None, false)
         }
 
         /// A world whose built-in folder holds `engram/default` as `default_preset` (the other built-ins stand in).
         fn with_default(default_preset: &str) -> World {
-            World::make(Vec::new(), true, Some(default_preset))
+            World::make(Vec::new(), true, Some(default_preset), false)
         }
 
-        fn make(profiles: Vec<AgentProfile>, root: bool, default_preset: Option<&str>) -> World {
+        fn make(
+            profiles: Vec<AgentProfile>,
+            root: bool,
+            default_preset: Option<&str>,
+            settled: bool,
+        ) -> World {
             let temp = tempfile::tempdir().unwrap();
             let base = dunce::canonicalize(temp.path()).unwrap();
             fs::create_dir_all(base.join("lib")).unwrap();
@@ -2396,7 +2409,7 @@ mod tests {
             let disk = Arc::new(Disk::default());
             let ops = Arc::new(Ops::default());
             let builtin = default_preset.is_some();
-            let svc = build(&base, &disk, &ops, &profiles, root, builtin);
+            let svc = build(&base, &disk, &ops, &profiles, root, builtin, settled);
             World {
                 _temp: temp,
                 base,
@@ -2405,6 +2418,7 @@ mod tests {
                 profiles,
                 root,
                 builtin,
+                settled,
                 svc,
             }
         }
@@ -2418,6 +2432,7 @@ mod tests {
                 &self.profiles,
                 self.root,
                 self.builtin,
+                self.settled,
             )
         }
 
@@ -2493,6 +2508,7 @@ mod tests {
         profiles: &[AgentProfile],
         root: bool,
         builtin: bool,
+        settled: bool,
     ) -> Arc<LibraryService> {
         let state = base.join("state");
         let config = match root {
@@ -2516,7 +2532,10 @@ mod tests {
             LaunchWaits::LAUNCH,
             LIST_CAP,
             Arc::clone(ops) as Arc<dyn FolderOps>,
-            Arc::new(ThreadSpawn),
+            match settled {
+                true => Arc::new(SettledSpawn) as Arc<dyn Spawn>,
+                false => Arc::new(ThreadSpawn),
+            },
         );
         let svc = Arc::new(LibraryService::new(
             values,
@@ -3551,7 +3570,7 @@ mod tests {
 
     #[test]
     fn folder_stats_of_an_add_run_outside_the_library_lock() {
-        let w = World::new();
+        let w = World::settled();
         library(&w, "");
         let f1 = w.folder("f1");
         w.view("library/P.yaml");
@@ -3686,7 +3705,7 @@ mod tests {
 
     #[test]
     fn an_edit_answers_the_committed_state_even_when_the_catalog_moves_after_its_change() {
-        let w = World::new();
+        let w = World::settled();
         let f = w.folder("f");
         library(
             &w,

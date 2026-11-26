@@ -1741,7 +1741,7 @@ mod tests {
     use crate::backends::{AgentBackends, Backends};
     use crate::folder::LIST_CAP;
     use crate::folder::{
-        BoundedIo, FolderOps, LaunchWaits, Spawn, StdFolderOps, IO_LIMIT, TIMEOUT,
+        BoundedIo, FolderOps, LaunchWaits, SettledSpawn, Spawn, StdFolderOps, IO_LIMIT, TIMEOUT,
     };
     use crate::store::{ContentTag, FsStore, LibraryStore, ScanListing, TrashBundle};
     use crate::{LibraryValues, MERGE_JOB, PATH_THROUGH_LINK};
@@ -1891,7 +1891,8 @@ mod tests {
         }
     }
 
-    /// What the spawner does with the service's merge jobs; folder workers always get a thread.
+    /// What the spawner does with the service's merge jobs; folder workers get a thread, or run inline before `spawn`
+    /// returns when `settled_io` is set (`SettledSpawn`).
     #[derive(Clone, Copy, PartialEq)]
     enum Merges {
         Run,
@@ -1905,6 +1906,8 @@ mod tests {
 
     struct TestSpawn {
         merges: Merges,
+        /// Bounded IO workers are settled ([`SettledSpawn`]); else threads.
+        settled: bool,
         running: Mutex<Vec<JoinHandle<()>>>,
         deferred: Mutex<Vec<Job>>,
     }
@@ -1921,6 +1924,7 @@ mod tests {
                     lock(&self.deferred).push(job);
                     return Ok(());
                 }
+                (false, _) if self.settled => return SettledSpawn.spawn(name, job),
                 _ => {}
             }
             let handle = thread::Builder::new().name(name.to_owned()).spawn(job)?;
@@ -2095,6 +2099,9 @@ mod tests {
         mount: &'static str,
         /// Whether `team\` is mounted too, as `team` (with `root`).
         team: bool,
+        /// Whether the bounded IO workers are settled ([`SettledSpawn`]) — for a test that counts folder ops across two
+        /// asks of one folder.
+        settled_io: bool,
     }
 
     impl Default for Setup {
@@ -2108,6 +2115,7 @@ mod tests {
                 root: true,
                 mount: "library",
                 team: false,
+                settled_io: false,
             }
         }
     }
@@ -2153,6 +2161,7 @@ mod tests {
             let store = Arc::new(LoggedStore::default());
             let spawn = Arc::new(TestSpawn {
                 merges: setup.merges,
+                settled: setup.settled_io,
                 running: Mutex::default(),
                 deferred: Mutex::default(),
             });
@@ -2606,7 +2615,11 @@ mod tests {
     /// skill is canonicalized.
     #[test]
     fn the_same_name_check_places_a_skill_in_its_own_mounts_folder() {
-        let w = two_mounts();
+        let w = World::with(Setup {
+            team: true,
+            settled_io: true,
+            ..Setup::default()
+        });
         fs::create_dir_all(w.at("proj/.git")).unwrap();
         w.put("proj/.agents/skills/gamma/SKILL.md", &skill("gamma"));
         let cwd = w.folder("proj/sub", &[]);
